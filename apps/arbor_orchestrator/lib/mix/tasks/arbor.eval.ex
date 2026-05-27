@@ -69,7 +69,10 @@ defmodule Mix.Tasks.Arbor.Eval do
     "arbor_coding" => "apps/arbor_orchestrator/priv/eval_datasets/arbor_coding.jsonl",
     "heartbeat" => "apps/arbor_orchestrator/priv/eval_datasets/heartbeat_json.jsonl",
     "chat" => "apps/arbor_orchestrator/priv/eval_datasets/chat_quality.jsonl",
-    "dot_compilation" => "apps/arbor_orchestrator/priv/eval_datasets/dot_compilation.jsonl"
+    "dot_compilation" => "apps/arbor_orchestrator/priv/eval_datasets/dot_compilation.jsonl",
+    "preprocessor_tool_retrieval" => "apps/arbor_orchestrator/priv/eval_datasets/preprocessor_tool_retrieval/corpus.jsonl",
+    "preprocessor_tool_retrieval_llm" => "apps/arbor_orchestrator/priv/eval_datasets/preprocessor_tool_retrieval/corpus.jsonl",
+    "preprocessor_tool_retrieval_hybrid" => "apps/arbor_orchestrator/priv/eval_datasets/preprocessor_tool_retrieval/corpus.jsonl"
   }
 
   @domain_graders %{
@@ -77,7 +80,16 @@ defmodule Mix.Tasks.Arbor.Eval do
     "arbor_coding" => ["compile_check", "functional_test"],
     "heartbeat" => ["json_valid"],
     "chat" => ["contains"],
-    "dot_compilation" => ["dot_diff"]
+    "dot_compilation" => ["dot_diff"],
+    "preprocessor_tool_retrieval" => ["precision_at_1", "precision_at_5", "recall_at_5"],
+    "preprocessor_tool_retrieval_llm" => ["precision_at_1", "precision_at_5", "recall_at_5"],
+    "preprocessor_tool_retrieval_hybrid" => ["precision_at_1", "precision_at_5", "recall_at_5"]
+  }
+
+  @domain_subjects %{
+    "preprocessor_tool_retrieval" => Arbor.Orchestrator.Eval.Subjects.EmbeddingRetrieval,
+    "preprocessor_tool_retrieval_llm" => Arbor.Orchestrator.Eval.Subjects.LLMRouter,
+    "preprocessor_tool_retrieval_hybrid" => Arbor.Orchestrator.Eval.Subjects.HybridRetrieval
   }
 
   @impl true
@@ -221,6 +233,7 @@ defmodule Mix.Tasks.Arbor.Eval do
           subject_opts = [
             provider: provider,
             model: model,
+            domain: domain,
             timeout: timeout,
             stream: use_stream,
             domain_system_prompt: domain_system_prompt(domain)
@@ -479,7 +492,8 @@ defmodule Mix.Tasks.Arbor.Eval do
   defp fmt(val), do: inspect(val)
 
   defp run_samples(samples, grader_names, subject_opts) do
-    subject = Subjects.LLM
+    domain = Keyword.get(subject_opts, :domain)
+    subject = Map.get(@domain_subjects, domain, Subjects.LLM)
     graders = Enum.map(grader_names, &Eval.grader/1) |> Enum.reject(&is_nil/1)
     domain_system = Keyword.get(subject_opts, :domain_system_prompt)
 

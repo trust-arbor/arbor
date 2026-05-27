@@ -34,7 +34,10 @@ defmodule Arbor.Orchestrator.Eval do
     "functional_test" => Graders.FunctionalTest,
     "code_quality" => Graders.CodeQuality,
     "embedding_similarity" => Graders.EmbeddingSimilarity,
-    "intent_conformance" => Graders.IntentConformance
+    "intent_conformance" => Graders.IntentConformance,
+    "precision_at_1" => Graders.PrecisionAt1,
+    "precision_at_5" => Graders.PrecisionAt5,
+    "recall_at_5" => Graders.RecallAt5
   }
 
   @doc "Returns the grader module for a given name."
