@@ -96,3 +96,9 @@ venv/
 
 # Generated eval data (large, not committed)
 apps/arbor_agent/priv/eval_data/padding_corpus.jsonl
+
+# Per-user custom integrations — each system keeps its own custom integration code
+# here (GoHighLevel, email, CRM, etc.). The umbrella auto-discovers apps/*, so this
+# compiles and runs locally but stays out of the shared repo. Custom integrations
+# should depend on Arbor's public facades, not internals.
+apps/arbor_integrations/
