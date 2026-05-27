@@ -124,7 +124,7 @@ The Context purity work is considered complete. See the updated `CRC-AUDIT.md` a
 
 **Remaining (lower priority / incremental)**
 - Audit and wrap any remaining intra-handler composition calls if desired for consistency.
-- Add `@impl Handler` annotations across the full set of 33 handlers (can be done in small batches).
-- Strengthen error handling inside `Handler.execute_three_phase` itself so bad returns from `apply_result` are turned into clean `{:error, ...}` instead of crashing the `with`.
+- ~~Add `@impl Handler` annotations across the full set of handlers~~ **Done** — all 28 `*_handler.ex` modules declare `@behaviour`.
+- ~~Strengthen error handling inside `Handler.execute_three_phase` itself so bad returns are turned into a clean failure instead of crashing the `with`.~~ **Done (2026-05-26)** — a catch-all `else` clause converts any non-`{:ok, _}`/non-`{:error, _}` callback return into a fail `Outcome` whose reason names the invalid return (was raising `WithClauseError`). Regression-tested in `behaviour_helpers_test.exs`.
 
 The core safety goal of the proposal is achieved.

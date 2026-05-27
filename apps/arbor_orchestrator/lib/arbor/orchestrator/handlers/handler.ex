@@ -66,7 +66,10 @@ defmodule Arbor.Orchestrator.Handlers.Handler do
   @doc """
   Execute a handler using the three-phase protocol.
 
-  Returns an Outcome. If any phase fails, returns a fail Outcome with the error reason.
+  Always returns an Outcome. A phase returning `{:error, reason}` yields a fail
+  Outcome carrying that reason. A phase returning any other non-`{:ok, _}` value is
+  a contract violation — it also yields a fail Outcome (whose reason names the
+  invalid return) rather than crashing the `with`.
   """
   @spec execute_three_phase(module(), Node.t(), Context.t(), Graph.t(), keyword()) :: Outcome.t()
   def execute_three_phase(handler_module, node, context, _graph, opts) do
@@ -79,6 +82,18 @@ defmodule Arbor.Orchestrator.Handlers.Handler do
         %Outcome{
           status: :fail,
           failure_reason: format_error(reason)
+        }
+
+      other ->
+        # A three-phase callback returned a value that is neither {:ok, _} nor
+        # {:error, _} — a contract violation. Surface it as a clean fail Outcome
+        # (visible in the failure reason) instead of letting the `with` raise a
+        # WithClauseError and crash the run.
+        %Outcome{
+          status: :fail,
+          failure_reason:
+            "three-phase handler #{inspect(handler_module)} returned an invalid value " <>
+              "(expected {:ok, _} or {:error, _}): #{inspect(other)}"
         }
     end
   end
