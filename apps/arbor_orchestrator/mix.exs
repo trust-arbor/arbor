@@ -34,9 +34,11 @@ defmodule Arbor.Orchestrator.MixProject do
     [
       {:jason, "~> 1.4"},
       {:req, "~> 0.5"},
+      {:telemetry, "~> 1.0"},
       {:arbor_common, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
+      {:benchee, "~> 1.3", only: :dev, runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]

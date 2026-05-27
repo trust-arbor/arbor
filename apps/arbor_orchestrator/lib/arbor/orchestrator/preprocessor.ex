@@ -84,7 +84,19 @@ defmodule Arbor.Orchestrator.Preprocessor do
   @spec run(String.t(), keyword()) :: {:ok, map()}
   def run(prompt, _opts \\ []) when is_binary(prompt) do
     if Config.preprocessor_enabled?() do
-      {:ok, do_run(prompt)}
+      # Telemetry span: emits [:arbor, :preprocessor, :run, :start | :stop | :exception]
+      # with :duration. Per-stage timings come from [:arbor, :preprocessor, :stage].
+      # Attach a handler (see Arbor.Signals.Telemetry) to profile turns.
+      :telemetry.span([:arbor, :preprocessor, :run], %{}, fn ->
+        result = do_run(prompt)
+
+        {{:ok, result},
+         %{
+           tier: result["tier"],
+           needs_tools: result["needs_tools"],
+           retrieved_count: length(result["retrieved_tools"] || [])
+         }}
+      end)
     else
       {:ok, %{}}
     end
@@ -97,8 +109,8 @@ defmodule Arbor.Orchestrator.Preprocessor do
   defp do_run(prompt) do
     cfg = Config.preprocessor()
 
-    sensitivity = safe(fn -> sensitivity(prompt, cfg) end, nil)
-    nt = safe(fn -> needs_tools(prompt, cfg) end, true)
+    sensitivity = timed_stage(:sensitivity, fn -> sensitivity(prompt, cfg) end, nil)
+    nt = timed_stage(:needs_tools, fn -> needs_tools(prompt, cfg) end, true)
 
     base = %{
       "enabled" => true,
@@ -113,14 +125,14 @@ defmodule Arbor.Orchestrator.Preprocessor do
       # actionable-turn cost is the slowest stage (intent ~2.2s), not their sum.
       await = (cfg[:timeout_ms] || 30_000) + 5_000
 
-      c_task = Task.async(fn -> safe(fn -> complexity(prompt, cfg) end, "SIMPLE") end)
-      r_task = Task.async(fn -> safe(fn -> retrieve_tool_names(prompt, cfg) end, []) end)
+      c_task = Task.async(fn -> timed_stage(:complexity, fn -> complexity(prompt, cfg) end, "SIMPLE") end)
+      r_task = Task.async(fn -> timed_stage(:retrieval, fn -> retrieve_tool_names(prompt, cfg) end, []) end)
 
       # intent (goal/risk_level) is the slowest stage (~2-4s) and is currently
       # UNCONSUMED downstream — gated off by default. Enable it once something reads it.
       i_task =
         if Keyword.get(cfg[:intent] || [], :enabled, false) do
-          Task.async(fn -> safe(fn -> intent(prompt, sensitivity, cfg) end, nil) end)
+          Task.async(fn -> timed_stage(:intent, fn -> intent(prompt, sensitivity, cfg) end, nil) end)
         else
           nil
         end
@@ -478,5 +490,14 @@ defmodule Arbor.Orchestrator.Preprocessor do
       default
   catch
     :exit, _ -> default
+  end
+
+  # Run a stage (fail-open) and emit its duration:
+  # [:arbor, :preprocessor, :stage] with %{duration: native} and %{stage: name}.
+  defp timed_stage(name, fun, default) do
+    start = System.monotonic_time()
+    result = safe(fun, default)
+    :telemetry.execute([:arbor, :preprocessor, :stage], %{duration: System.monotonic_time() - start}, %{stage: name})
+    result
   end
 end

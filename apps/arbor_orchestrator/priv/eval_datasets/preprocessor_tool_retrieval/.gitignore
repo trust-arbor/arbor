@@ -1,0 +1,5 @@
+# Generated retrieval index (~5MB of embeddings for multiple models).
+# Not committed — regenerate with: mix run scripts/build_action_index.exs
+# Required only when the preprocessor's retrieval stage is enabled
+# (config :arbor_orchestrator, :preprocessor, retrieval: [enabled: true]).
+action_index.json
