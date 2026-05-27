@@ -227,7 +227,7 @@ defmodule Arbor.Cartographer.Hardware do
         {:unix, :linux} -> detect_linux_memory_gb()
         {:unix, :darwin} -> detect_macos_memory_gb()
         {:win32, _} -> detect_windows_memory_gb()
-        _ -> beam_memory_gb()
+        _ -> system_memory_gb_fallback()
       end
     end
   end
@@ -241,11 +241,11 @@ defmodule Arbor.Cartographer.Hardware do
             kb / 1024 / 1024
 
           _ ->
-            beam_memory_gb()
+            system_memory_gb_fallback()
         end
 
       {:error, _} ->
-        beam_memory_gb()
+        system_memory_gb_fallback()
     end
   end
 
@@ -254,14 +254,14 @@ defmodule Arbor.Cartographer.Hardware do
       {output, 0} ->
         case Integer.parse(String.trim(output)) do
           {bytes, _} -> bytes / (1024 * 1024 * 1024)
-          :error -> beam_memory_gb()
+          :error -> system_memory_gb_fallback()
         end
 
       _ ->
-        beam_memory_gb()
+        system_memory_gb_fallback()
     end
   rescue
-    _ -> beam_memory_gb()
+    _ -> system_memory_gb_fallback()
   end
 
   defp detect_windows_memory_gb do
@@ -274,18 +274,41 @@ defmodule Arbor.Cartographer.Hardware do
       {output, 0} ->
         case Integer.parse(String.trim(output)) do
           {bytes, _} -> bytes / (1024 * 1024 * 1024)
-          :error -> beam_memory_gb()
+          :error -> system_memory_gb_fallback()
         end
 
       _ ->
-        beam_memory_gb()
+        system_memory_gb_fallback()
     end
   rescue
-    _ -> beam_memory_gb()
+    _ -> system_memory_gb_fallback()
   end
 
-  defp beam_memory_gb do
-    :erlang.memory(:total) / (1024 * 1024 * 1024)
+  # Cross-platform SYSTEM memory fallback via OTP os_mon (:memsup). Always
+  # available, reports the machine's total RAM (not the BEAM VM's heap). Used when
+  # osquery and the OS-specific probes are unavailable — e.g. an unrecognized OS,
+  # an unreadable /proc, or a container without the usual tools.
+  #
+  # NOTE: never fall back to `:erlang.memory(:total)` for system RAM — that's the
+  # VM's own heap usage (hundreds of MB), which silently mis-tags big machines as
+  # low-memory. That bug is exactly what this function replaces.
+  defp system_memory_gb_fallback do
+    _ = Application.ensure_all_started(:os_mon)
+    # apply/3 + variable indirection keeps :memsup (os_mon, not a compile dep here)
+    # out of static analysis.
+    memsup = :memsup
+    data = apply(memsup, :get_system_memory_data, [])
+    bytes = Keyword.get(data, :system_total_memory) || Keyword.get(data, :total_memory)
+
+    if is_integer(bytes) and bytes > 0 do
+      bytes / (1024 * 1024 * 1024)
+    else
+      0.0
+    end
+  rescue
+    _ -> 0.0
+  catch
+    :exit, _ -> 0.0
   end
 
   # ==========================================================================
@@ -633,7 +656,7 @@ defmodule Arbor.Cartographer.Hardware do
     # Try /proc/meminfo first (works on Android)
     case detect_linux_memory_gb() do
       gb when gb > 0.1 -> gb
-      _ -> beam_memory_gb()
+      _ -> system_memory_gb_fallback()
     end
   end
 
