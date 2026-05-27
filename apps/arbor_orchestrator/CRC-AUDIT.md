@@ -86,7 +86,7 @@ The `arbor_orchestrator` implementation shows **strong overall adherence** to CR
 | Priority | Change | Effort | Benefit | CRC Alignment |
 |----------|--------|--------|---------|---------------|
 | High | Pass `now` / timestamp into `Context.set/4` and `apply_updates/3` | Low | High testability | Stronger purity | **Completed 2026-05** (dual-clock `LineageEntry` + `pipeline_started_at`) |
-| High | Define `Arbor.Orchestrator.Handler` behaviour + validation wrapper | Medium | High extensibility & safety | Matches Ash pattern | **Largely complete** (2026-05) — helpers exist, main paths protected, tests in place. Remaining: `@impl` annotations + three-phase error hardening. |
+| High | Define `Arbor.Orchestrator.Handler` behaviour + validation wrapper | Medium | High extensibility & safety | Matches Ash pattern | **Complete** (2026-05) — helpers exist, main paths protected, all 28 handlers declare `@behaviour`, three-phase error hardening done (malformed callback returns → fail `Outcome` instead of `WithClauseError`, regression-tested). |
 | Medium | Extract `RunState.Boundary` module for ETS sync | Medium | Cleaner Engine | Clearer shell/core split |
 | Medium | Add CRC moduledoc sections to all engine/* modules | Low | Consistency | Documentation |
 | Low | Create `Result.Core` for pure aggregation logic | Medium | Testability | Better separation |
