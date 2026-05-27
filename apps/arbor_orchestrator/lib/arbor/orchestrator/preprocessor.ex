@@ -109,8 +109,25 @@ defmodule Arbor.Orchestrator.Preprocessor do
     if nt == false do
       Map.put(base, "tier", "DIRECT")
     else
-      complexity = safe(fn -> complexity(prompt, cfg) end, "SIMPLE")
-      intent = safe(fn -> intent(prompt, sensitivity, cfg) end, nil)
+      # complexity, intent, and retrieval are independent — run concurrently so the
+      # actionable-turn cost is the slowest stage (intent ~2.2s), not their sum.
+      await = (cfg[:timeout_ms] || 30_000) + 5_000
+
+      c_task = Task.async(fn -> safe(fn -> complexity(prompt, cfg) end, "SIMPLE") end)
+      r_task = Task.async(fn -> safe(fn -> retrieve_tool_names(prompt, cfg) end, []) end)
+
+      # intent (goal/risk_level) is the slowest stage (~2-4s) and is currently
+      # UNCONSUMED downstream — gated off by default. Enable it once something reads it.
+      i_task =
+        if Keyword.get(cfg[:intent] || [], :enabled, false) do
+          Task.async(fn -> safe(fn -> intent(prompt, sensitivity, cfg) end, nil) end)
+        else
+          nil
+        end
+
+      complexity = task_await(c_task, await, "SIMPLE")
+      retrieved = task_await(r_task, await, [])
+      intent = if i_task, do: task_await(i_task, await, nil), else: nil
 
       enriched =
         base
@@ -118,11 +135,17 @@ defmodule Arbor.Orchestrator.Preprocessor do
         |> Map.put("tier", derive_tier(true, complexity))
         |> Map.put("intent", intent)
 
-      # JIT tool injection (config-gated, default off). Only for actionable turns.
-      case safe(fn -> retrieve_tool_names(prompt, cfg) end, []) do
+      case retrieved do
         [] -> enriched
         names -> Map.put(enriched, "retrieved_tools", names)
       end
+    end
+  end
+
+  defp task_await(task, timeout, default) do
+    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      _ -> default
     end
   end
 
