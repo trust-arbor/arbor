@@ -646,11 +646,30 @@ The context is an immutable struct passed through the pipeline. Each handler can
 %Context{
   values: %{String.t() => term()},
   logs: [%{node_id: String.t(), message: String.t(), timestamp: String.t()}],
-  lineage: %{String.t() => %{node_id: String.t(), timestamp: String.t(), operation: atom()}}
+  lineage: %{String.t() => LineageEntry.t()},
+  pipeline_started_at: DateTime.t() | nil
+}
+
+# LineageEntry (Arbor extension)
+%Arbor.Orchestrator.Engine.Context.LineageEntry{
+  node_id: String.t(),
+  step_timestamp: DateTime.t(),           # logical time of the node execution step
+  pipeline_timestamp: DateTime.t() | nil, # when the overall pipeline run began
+  operation: :set | :merge
 }
 ```
 
-**Lineage tracking (Arbor extension).** Every context key records which node last set it, when, and what operation was performed. This enables tracing data provenance through the pipeline.
+**Lineage tracking (Arbor extension).** Every context key records a rich `LineageEntry` containing:
+- Which node last wrote it (`node_id`)
+- The precise step time when that node was executing (`step_timestamp`)
+- The pipeline run start time (`pipeline_timestamp`), enabling provenance queries even across resumes and restarts.
+- The operation (`:set` or `:merge`)
+
+The `pipeline_started_at` field on `Context` itself is the source of truth for the run-level clock and is automatically propagated into new lineage entries.
+
+This dual-clock model supports powerful debugging, audit, and reflection use cases (e.g., "what changed in this specific node execution?" vs "what was introduced during this entire agent run?").
+
+Legacy persisted lineage entries (bare strings or old plain maps with a single `timestamp` field) are tolerated at read time for backward compatibility with old checkpoints.
 
 ### 7.3 Checkpoint and Resume
 
@@ -664,7 +683,8 @@ After each node completes, the engine can save a checkpoint:
   "node_retries": {"generate": 1},
   "context_values": { ... },
   "node_outcomes": { ... },
-  "context_lineage": { ... },
+  "context_lineage": { ... },   # now contains LineageEntry records (or legacy shapes for old checkpoints)
+  "pipeline_started_at": "2026-05-21T09:00:00Z",  # optional; restored on resume for dual-clock lineage
   "content_hashes": { ... },
   "__hmac": "a1b2c3..."
 }

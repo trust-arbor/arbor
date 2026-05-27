@@ -24,7 +24,12 @@ defmodule Arbor.Orchestrator.EvalTest do
       names = Eval.grader_names()
       assert "exact_match" in names
       assert "dot_diff" in names
-      assert length(names) == 11
+      # retrieval graders added for the preprocessor tool-retrieval eval
+      assert "precision_at_1" in names
+      assert "precision_at_5" in names
+      assert "recall_at_5" in names
+      assert names == Enum.uniq(names)
+      assert length(names) == 14
     end
   end
 

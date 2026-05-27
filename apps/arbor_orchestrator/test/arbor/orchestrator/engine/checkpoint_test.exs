@@ -70,6 +70,49 @@ defmodule Arbor.Orchestrator.Engine.CheckpointTest do
     end
   end
 
+  describe "pipeline_started_at and rich lineage round-trip" do
+    test "preserves pipeline_started_at and modern LineageEntry through file round-trip", %{
+      tmp: tmp
+    } do
+      pipeline_start = ~U[2026-05-21 09:00:00Z]
+      step_time = ~U[2026-05-21 09:05:12Z]
+
+      ctx =
+        Context.new(%{"goal" => "test"}, pipeline_started_at: pipeline_start)
+        |> Context.set("goal", "test", "planner", step_time)
+        |> Context.apply_updates(%{"status" => "ready"}, "planner", step_time)
+
+      cp =
+        Checkpoint.from_state(
+          "planner",
+          ["start", "planner"],
+          %{},
+          ctx,
+          %{},
+          run_id: "run_dual_clock",
+          pipeline_started_at: pipeline_start
+        )
+
+      assert cp.pipeline_started_at == pipeline_start
+
+      assert :ok = Checkpoint.write(cp, tmp)
+      {:ok, loaded} = Checkpoint.load(Path.join(tmp, "checkpoint.json"))
+
+      assert loaded.pipeline_started_at == pipeline_start
+
+      # Reconstruct context the same way the Engine does on resume
+      restored_ctx =
+        Context.new(loaded.context_values, pipeline_started_at: loaded.pipeline_started_at)
+        |> then(fn c -> %{c | lineage: loaded.context_lineage} end)
+
+      assert Context.pipeline_started_at(restored_ctx) == pipeline_start
+
+      goal_entry = Context.lineage_entry(restored_ctx, "goal")
+      assert Context.step_timestamp(goal_entry) == step_time
+      assert Context.pipeline_timestamp(goal_entry) == pipeline_start
+    end
+  end
+
   describe "HMAC signing with expanded AAD" do
     test "sign and verify with AAD succeeds", %{tmp: tmp} do
       ctx = Context.new(%{"data" => "sensitive"})

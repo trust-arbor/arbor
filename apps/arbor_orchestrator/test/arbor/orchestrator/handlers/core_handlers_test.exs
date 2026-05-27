@@ -29,6 +29,14 @@ defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
       assert outcome.status == :success
     end
 
+    test "evaluates branch node via BehaviourHelpers wrapper" do
+      alias Arbor.Orchestrator.Handlers.BehaviourHelpers
+
+      node = make_node("branch_1", %{"type" => "branch"})
+      outcome = BehaviourHelpers.execute(BranchHandler, node, make_context(), make_graph(), [])
+      assert outcome.status == :success
+    end
+
     test "idempotency is :idempotent" do
       assert BranchHandler.idempotency() == :idempotent
     end

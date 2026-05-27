@@ -159,6 +159,29 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
       assert not Enum.any?(not_stale, fn e -> e.run_id == "run_stale_1" end)
     end
 
+    test "list_stale_heartbeats/2 accepts explicit now for deterministic staleness" do
+      fixed_now = ~U[2026-05-21 12:00:00Z]
+
+      # Entry with a heartbeat from well before fixed_now
+      insert_entry("run_explicit_stale", %{
+        last_heartbeat: ~U[2026-05-21 11:00:00Z],
+        status: :running
+      })
+
+      # Using a cutoff of 30 minutes with our fixed_now → should be stale
+      stale = JobRegistry.list_stale_heartbeats(30 * 60 * 1000, fixed_now)
+      assert Enum.any?(stale, fn e -> e.run_id == "run_explicit_stale" end)
+
+      # Using a very large cutoff with the same fixed_now → should not be stale
+      not_stale = JobRegistry.list_stale_heartbeats(999_999_999, fixed_now)
+      assert not Enum.any?(not_stale, fn e -> e.run_id == "run_explicit_stale" end)
+
+      # Prove that changing `now` changes the result (determinism)
+      future_now = ~U[2026-05-22 12:00:00Z]
+      still_stale_in_future = JobRegistry.list_stale_heartbeats(30 * 60 * 1000, future_now)
+      assert Enum.any?(still_stale_in_future, fn e -> e.run_id == "run_explicit_stale" end)
+    end
+
     test "list_by_owner finds pipelines owned by a specific node" do
       insert_entry("run_owner_1", %{owner_node: node()})
 

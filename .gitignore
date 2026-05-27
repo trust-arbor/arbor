@@ -83,6 +83,7 @@ venv/
 # Claude session data (may contain PII)
 .claude/HANDOFF.md
 .claude/worktrees/
+.claude/brand-voice-guidelines.md
 
 # SDLC Hand session artifacts (debug logs, session transcripts, todos)
 .claude-sdlc/debug/

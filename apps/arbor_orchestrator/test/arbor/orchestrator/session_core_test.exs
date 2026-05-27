@@ -55,7 +55,8 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
 
   describe "append_user_message/3" do
     test "appends user message to list" do
-      messages = SessionCore.append_user_message([], "hello")
+      now = ~U[2026-05-21 12:00:00Z]
+      messages = SessionCore.append_user_message([], "hello", now)
       assert length(messages) == 1
       msg = List.last(messages)
       assert msg["role"] == "user"
@@ -64,16 +65,18 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
 
     test "preserves existing messages" do
       existing = [%{"role" => "system", "content" => "You are helpful."}]
-      messages = SessionCore.append_user_message(existing, "hello")
+      now = ~U[2026-05-21 12:00:00Z]
+      messages = SessionCore.append_user_message(existing, "hello", now)
       assert length(messages) == 2
       assert hd(messages)["role"] == "system"
     end
 
     test "is pipeable" do
+      now = ~U[2026-05-21 12:00:00Z]
       result =
         []
-        |> SessionCore.append_user_message("hello")
-        |> SessionCore.append_user_message("again")
+        |> SessionCore.append_user_message("hello", now)
+        |> SessionCore.append_user_message("again", now)
 
       assert length(result) == 2
     end
@@ -81,28 +84,32 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
 
   describe "apply_llm_response/3" do
     test "appends assistant message" do
+      now = ~U[2026-05-21 12:00:00Z]
       messages = [%{"role" => "user", "content" => "hi"}]
-      updated = SessionCore.apply_llm_response(messages, "hello back")
+      updated = SessionCore.apply_llm_response(messages, "hello back", now)
       assert length(updated) == 2
       assert List.last(updated)["role"] == "assistant"
     end
 
     test "skips empty response" do
+      now = ~U[2026-05-21 12:00:00Z]
       messages = [%{"role" => "user", "content" => "hi"}]
-      updated = SessionCore.apply_llm_response(messages, "")
+      updated = SessionCore.apply_llm_response(messages, "", now)
       assert length(updated) == 1
     end
 
     test "skips nil response" do
+      now = ~U[2026-05-21 12:00:00Z]
       messages = [%{"role" => "user", "content" => "hi"}]
-      assert SessionCore.apply_llm_response(messages, nil) == messages
+      assert SessionCore.apply_llm_response(messages, nil, now) == messages
     end
 
     test "is pipeable end-to-end" do
+      now = ~U[2026-05-21 12:00:00Z]
       result =
         []
-        |> SessionCore.append_user_message("hello")
-        |> SessionCore.apply_llm_response("hi there")
+        |> SessionCore.append_user_message("hello", now)
+        |> SessionCore.apply_llm_response("hi there", now)
 
       assert length(result) == 2
       assert hd(result)["role"] == "user"
@@ -262,10 +269,12 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
 
   describe "pipeline" do
     test "compose reduce → convert" do
+      now = ~U[2026-05-21 12:00:00Z]
+
       messages =
         []
-        |> SessionCore.append_user_message("hello")
-        |> SessionCore.apply_llm_response("hi back")
+        |> SessionCore.append_user_message("hello", now)
+        |> SessionCore.apply_llm_response("hi back", now)
 
       llm = SessionCore.for_llm(messages)
       assert length(llm) == 2

@@ -125,14 +125,23 @@ defmodule Arbor.Orchestrator.Preprocessor do
       # actionable-turn cost is the slowest stage (intent ~2.2s), not their sum.
       await = (cfg[:timeout_ms] || 30_000) + 5_000
 
-      c_task = Task.async(fn -> timed_stage(:complexity, fn -> complexity(prompt, cfg) end, "SIMPLE") end)
-      r_task = Task.async(fn -> timed_stage(:retrieval, fn -> retrieve_tool_names(prompt, cfg) end, []) end)
+      c_task =
+        Task.async(fn ->
+          timed_stage(:complexity, fn -> complexity(prompt, cfg) end, "SIMPLE")
+        end)
+
+      r_task =
+        Task.async(fn ->
+          timed_stage(:retrieval, fn -> retrieve_tool_names(prompt, cfg) end, [])
+        end)
 
       # intent (goal/risk_level) is the slowest stage (~2-4s) and is currently
       # UNCONSUMED downstream — gated off by default. Enable it once something reads it.
       i_task =
         if Keyword.get(cfg[:intent] || [], :enabled, false) do
-          Task.async(fn -> timed_stage(:intent, fn -> intent(prompt, sensitivity, cfg) end, nil) end)
+          Task.async(fn ->
+            timed_stage(:intent, fn -> intent(prompt, sensitivity, cfg) end, nil)
+          end)
         else
           nil
         end
@@ -210,6 +219,7 @@ defmodule Arbor.Orchestrator.Preprocessor do
 
     if loaded?(mod, :classify, 1) do
       c = mod.classify(prompt)
+
       %{
         "level" => to_string(c.overall_sensitivity),
         "routing" => to_string(c.routing_recommendation)
@@ -290,7 +300,11 @@ defmodule Arbor.Orchestrator.Preprocessor do
     stage = cfg[:intent]
 
     if loaded?(mod, :extract, 2) do
-      opts = [provider: stage[:provider], model: stage[:model], timeout: cfg[:timeout_ms] || 30_000]
+      opts = [
+        provider: stage[:provider],
+        model: stage[:model],
+        timeout: cfg[:timeout_ms] || 30_000
+      ]
 
       case mod.extract(prompt, opts) do
         {:ok, intent} ->
@@ -343,7 +357,10 @@ defmodule Arbor.Orchestrator.Preprocessor do
   end
 
   defp default_index_path do
-    Path.join(:code.priv_dir(:arbor_orchestrator), "eval_datasets/preprocessor_tool_retrieval/action_index.json")
+    Path.join(
+      :code.priv_dir(:arbor_orchestrator),
+      "eval_datasets/preprocessor_tool_retrieval/action_index.json"
+    )
   rescue
     _ -> nil
   end
@@ -370,7 +387,10 @@ defmodule Arbor.Orchestrator.Preprocessor do
     base = stage[:base_url] || "http://localhost:11434"
     model = stage[:embed_model] || "mxbai-embed-large"
 
-    case Req.post(base <> "/api/embeddings", json: %{model: model, prompt: prompt}, receive_timeout: timeout) do
+    case Req.post(base <> "/api/embeddings",
+           json: %{model: model, prompt: prompt},
+           receive_timeout: timeout
+         ) do
       {:ok, %{status: 200, body: %{"embedding" => v}}} when is_list(v) -> {:ok, v}
       _ -> :error
     end
@@ -395,7 +415,9 @@ defmodule Arbor.Orchestrator.Preprocessor do
   defp cosine(a, b) when length(a) == length(b) do
     {dot, na, nb} =
       Enum.zip(a, b)
-      |> Enum.reduce({0.0, 0.0, 0.0}, fn {x, y}, {d, ax, bx} -> {d + x * y, ax + x * x, bx + y * y} end)
+      |> Enum.reduce({0.0, 0.0, 0.0}, fn {x, y}, {d, ax, bx} ->
+        {d + x * y, ax + x * x, bx + y * y}
+      end)
 
     denom = :math.sqrt(na) * :math.sqrt(nb)
     if denom == 0.0, do: 0.0, else: dot / denom
@@ -425,9 +447,18 @@ defmodule Arbor.Orchestrator.Preprocessor do
 
     case :persistent_term.get(key, :miss) do
       :miss ->
-        pairs = build_action_name_pairs()
-        :persistent_term.put(key, pairs)
-        pairs
+        case build_action_name_pairs() do
+          # Don't cache an empty result. Arbor.Actions may simply not be loaded
+          # yet (early startup, or running from an app that doesn't depend on it).
+          # Caching [] here would fail-silent — retrieval would return no tools
+          # for the entire VM lifetime even after the registry becomes available.
+          [] ->
+            []
+
+          pairs ->
+            :persistent_term.put(key, pairs)
+            pairs
+        end
 
       pairs ->
         pairs
@@ -497,7 +528,13 @@ defmodule Arbor.Orchestrator.Preprocessor do
   defp timed_stage(name, fun, default) do
     start = System.monotonic_time()
     result = safe(fun, default)
-    :telemetry.execute([:arbor, :preprocessor, :stage], %{duration: System.monotonic_time() - start}, %{stage: name})
+
+    :telemetry.execute(
+      [:arbor, :preprocessor, :stage],
+      %{duration: System.monotonic_time() - start},
+      %{stage: name}
+    )
+
     result
   end
 end

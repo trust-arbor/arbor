@@ -71,17 +71,27 @@ defmodule Arbor.Orchestrator.PreprocessorTest do
   describe "expand_modules (retrieval module → action-name mapping)" do
     test "a retrieved index module fans out to all its action names (dot-form)" do
       names = Preprocessor.expand_modules(["Arbor.Actions.File"])
-      # dot-form names that LlmHandler.resolve_tools/definitions accepts
-      assert "file.read" in names
-      assert "file.write" in names
-      # all File.* actions, nothing from other modules
-      assert Enum.all?(names, &String.starts_with?(&1, "file."))
+
+      if Code.ensure_loaded?(Arbor.Actions) do
+        # dot-form names that LlmHandler.resolve_tools/definitions accepts
+        assert "file.read" in names
+        assert "file.write" in names
+        # all File.* actions, nothing from other modules
+        assert Enum.all?(names, &String.starts_with?(&1, "file."))
+      else
+        # arbor_actions isn't on the code path (e.g. running from inside the
+        # orchestrator app, which doesn't depend on it) — the runtime registry is
+        # unavailable, so the mapping correctly resolves to []. The real-registry
+        # assertion runs from the umbrella root / CI.
+        assert names == []
+      end
     end
 
     test "multiple modules union and dedup" do
       names = Preprocessor.expand_modules(["Arbor.Actions.Git", "Arbor.Actions.Git"])
-      assert "git.commit" in names
+      # dedup holds regardless of registry availability ([] is its own uniq)
       assert names == Enum.uniq(names)
+      if Code.ensure_loaded?(Arbor.Actions), do: assert("git.commit" in names)
     end
 
     test "an unknown module maps to nothing (no crash)" do
@@ -97,9 +107,7 @@ defmodule Arbor.Orchestrator.PreprocessorTest do
     test "partial override merges over defaults without dropping other keys" do
       original = Application.get_env(@app, :preprocessor)
 
-      Application.put_env(@app, :preprocessor,
-        needs_tools: [model: "some-other-model@q4"]
-      )
+      Application.put_env(@app, :preprocessor, needs_tools: [model: "some-other-model@q4"])
 
       cfg = Config.preprocessor()
       ns = Keyword.get(cfg, :needs_tools)

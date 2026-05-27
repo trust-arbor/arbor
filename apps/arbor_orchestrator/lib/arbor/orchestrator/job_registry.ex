@@ -123,9 +123,16 @@ defmodule Arbor.Orchestrator.JobRegistry do
   @doc """
   Returns pipelines whose heartbeat has gone stale (older than `max_age_ms`).
   Used by RecoveryCoordinator to detect hung pipelines.
+
+  Accepts an optional `now` for deterministic testing / purity.
+  The public 1-arity version captures time at the boundary.
   """
   def list_stale_heartbeats(max_age_ms \\ 90_000) do
-    cutoff = DateTime.add(DateTime.utc_now(), -max_age_ms, :millisecond)
+    list_stale_heartbeats(max_age_ms, DateTime.utc_now())
+  end
+
+  def list_stale_heartbeats(max_age_ms, now) do
+    cutoff = DateTime.add(now, -max_age_ms, :millisecond)
 
     store_list()
     |> Enum.filter(fn entry ->

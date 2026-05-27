@@ -1,6 +1,6 @@
 # Arbor Features
 
-*Everything Arbor can do today — the complete feature set.*
+*Everything Arbor can actually do today.* This doc is scoped to **working features**. For active development see [INPROGRESS.md](INPROGRESS.md). For committed-but-not-yet-started work see [PLANNED.md](PLANNED.md).
 
 ---
 
@@ -25,7 +25,7 @@
 - SigningKeyStore with AES-256-GCM encrypted key storage
 - Identity lifecycle (active/suspended/revoked states)
 - Session tokens (HMAC-SHA256 for human identity verification)
-- OIDC authentication (Zitadel, Google, GitHub providers)
+- OIDC authentication (generic provider-agnostic; Google integration documented)
 - Identity aliases (map secondary OIDC identities to primary Arbor identity)
 
 ### Trust Profiles
@@ -77,7 +77,7 @@
 - Context compaction (4-step progressive forgetting pipeline)
 - Model-aware context windows (ModelProfile, 29+ models)
 - SessionConfig — single shared builder for session init
-- Per-user supervisors with quota enforcement
+- Per-user supervisors (principal_id routing)
 - Chat history persistence
 
 ---
@@ -247,10 +247,10 @@
 
 ## Multi-User (`arbor_security`, `arbor_dashboard`)
 
-- OIDC authentication (provider-agnostic, tested with Zitadel)
+- OIDC authentication (provider-agnostic)
 - TenantContext (workspace scoping per user)
 - Identity aliases (map external identities to Arbor identity)
-- Per-user DynamicSupervisors with quota enforcement
+- Per-user DynamicSupervisors with principal_id routing
 - Session tokens for human identity in signal subscriptions
 - Agent scoping by principal_id
 
@@ -269,7 +269,7 @@
 - Execute commands with command-specific URI authorization
 - Direct execution (bypasses shell parsing)
 - Async execution with result streaming
-- Sandbox modes: none, basic, strict, container
+- Sandbox modes: none, basic, strict (container mode planned, see PLANNED.md)
 
 **Code**
 - HotLoad — dynamic module loading with authorization
@@ -299,7 +299,6 @@
 - Spawn ephemeral workers with intersection trust
 - Delegate tasks via intent-based routing
 - Profile operations (set display name, preferences)
-- Identity endorsements and web-of-trust signing
 
 **Governance**
 - Submit proposals, vote
@@ -353,8 +352,7 @@
 - ARBOR_NODE_HOST env var for cluster configuration
 
 ### Sandbox
-- Four execution modes: pure, limited, full, container
-- Docker-based container isolation (optional)
+- Three execution modes: pure, limited, full (container mode planned)
 - SafeAtom/SafePath for untrusted input
 
 ### Shell (`arbor_shell`)
@@ -363,13 +361,12 @@
 - ExecutionRegistry — tracking of shell executions
 - execute_direct/3 — structured command execution bypassing shell parsing
 - execute_async/2 — asynchronous command execution with streaming
-- Sandbox modes: none, basic, strict, container (future)
+- Sandbox modes: none, basic, strict (container mode planned)
 - Shell commands NEVER auto-approve (security invariant)
 
 ### Sandbox (`arbor_sandbox`)
-- Four execution modes: pure, limited, full, container
-- Docker-based container isolation (optional)
-- Resource limits and timeout enforcement
+- Three execution modes: pure, limited, full (container mode planned)
+- Timeout enforcement
 
 ### ExMCP Integration
 - Full MCP protocol support (4 protocol versions: 2024-11-05 through 2025-11-25)
@@ -507,11 +504,10 @@
 
 ## By the Numbers
 
-- **22 umbrella apps** with strict dependency hierarchy
-- **73+ action modules** across 15+ categories
-- **39+ CLI commands** for every aspect of the system
-- **8,600+ fast tests** across all apps, 0 failures
-- **377 feature commits** since January 2026
+- **23 umbrella apps** with strict dependency hierarchy
+- **73 action modules** across 15+ categories
+- **56 CLI commands** (mix arbor.* tasks) for every aspect of the system
+- **8,600+ fast tests** across all apps
 - **304/304 MCP conformance checks** (core + extensions + backcompat)
 - **13 advisory council perspectives** with research backing
 - **10 provider adapters** for LLM integration
@@ -521,4 +517,4 @@
 - **8-step middleware chain** in DOT pipeline engine
 - **4 protocol versions** supported with backwards compatibility
 
-*Last updated: 2026-03-20*
+*Last updated: 2026-05-17*
