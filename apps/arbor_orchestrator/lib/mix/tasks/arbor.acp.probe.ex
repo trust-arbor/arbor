@@ -36,13 +36,17 @@ defmodule Mix.Tasks.Arbor.Acp.Probe do
   end
 
   defp probe(agent_str, timeout) do
-    Mix.shell().info("── #{agent_str} " <> String.duplicate("─", max(0, 40 - String.length(agent_str))))
+    Mix.shell().info(
+      "── #{agent_str} " <> String.duplicate("─", max(0, 40 - String.length(agent_str)))
+    )
 
     with {:ok, agent} <- to_provider_atom(agent_str),
          {:ok, conf} <- resolve(agent) do
       cond do
         adapter = get(conf, :adapter) ->
-          Mix.shell().info("  adapter-handled by #{inspect(adapter)} — ACP via adapter, no raw handshake needed.\n")
+          Mix.shell().info(
+            "  adapter-handled by #{inspect(adapter)} — ACP via adapter, no raw handshake needed.\n"
+          )
 
         command = get(conf, :command) ->
           handshake(command, timeout)
@@ -52,7 +56,9 @@ defmodule Mix.Tasks.Arbor.Acp.Probe do
       end
     else
       {:error, :unknown_atom} ->
-        Mix.shell().info("  not a known provider (atom doesn't exist) — add it to :acp_providers first.\n")
+        Mix.shell().info(
+          "  not a known provider (atom doesn't exist) — add it to :acp_providers first.\n"
+        )
 
       {:error, reason} ->
         Mix.shell().info("  not configured: #{inspect(reason)}\n")
@@ -141,11 +147,14 @@ defmodule Mix.Tasks.Arbor.Acp.Probe do
 
   defp classify({:response, %{"result" => result}, _raw}) do
     cond do
-      is_map(result) and (Map.has_key?(result, "protocolVersion") or Map.has_key?(result, "agentCapabilities")) ->
+      is_map(result) and
+          (Map.has_key?(result, "protocolVersion") or Map.has_key?(result, "agentCapabilities")) ->
         Mix.shell().info("  ✅ SPEAKS ACP — initialize result: #{inspect(result, limit: 8)}\n")
 
       true ->
-        Mix.shell().info("  ⚠️  JSON-RPC result, but not an ACP initialize shape: #{inspect(result, limit: 8)}\n")
+        Mix.shell().info(
+          "  ⚠️  JSON-RPC result, but not an ACP initialize shape: #{inspect(result, limit: 8)}\n"
+        )
     end
   end
 

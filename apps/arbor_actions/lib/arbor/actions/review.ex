@@ -119,7 +119,10 @@ defmodule Arbor.Actions.Review do
       [
         "# Review Council — #{length(merged)} distinct findings from #{reviewer_count} reviewer(s)\n",
         section("Grounded (evidence provided)", Enum.filter(merged, &(&1.status == :grounded))),
-        section("Needs follow-up (no evidence — verify before trusting)", Enum.filter(merged, &(&1.status == :needs_followup))),
+        section(
+          "Needs follow-up (no evidence — verify before trusting)",
+          Enum.filter(merged, &(&1.status == :needs_followup))
+        ),
         unparsed_note(unparsed)
       ]
       |> Enum.reject(&(&1 == ""))
@@ -144,6 +147,7 @@ defmodule Arbor.Actions.Review do
 
     defp unparsed_note(unparsed) do
       who = unparsed |> Enum.map(& &1.reviewer) |> Enum.uniq() |> Enum.join(", ")
+
       "## Unparsed responses\n#{length(unparsed)} reviewer response(s) were not valid JSON findings (#{who}). " <>
         "If running in simulate mode this is expected; otherwise tighten the reviewer prompt.\n"
     end

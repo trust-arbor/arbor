@@ -73,6 +73,7 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
 
     test "is pipeable" do
       now = ~U[2026-05-21 12:00:00Z]
+
       result =
         []
         |> SessionCore.append_user_message("hello", now)
@@ -106,6 +107,7 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
 
     test "is pipeable end-to-end" do
       now = ~U[2026-05-21 12:00:00Z]
+
       result =
         []
         |> SessionCore.append_user_message("hello", now)

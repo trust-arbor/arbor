@@ -81,7 +81,16 @@ defmodule Arbor.Orchestrator.Eval.Subjects.HybridRetrieval do
            recall_stage(input, embed_model, candidate_k, index_path, base_url, timeout),
          {:ok, descriptions} <- load_descriptions(index_path, candidates),
          {:ok, llm_picks} <-
-           rerank_stage(prompt, candidates, descriptions, rerank_model, base_url, timeout, max_desc_chars, top_k) do
+           rerank_stage(
+             prompt,
+             candidates,
+             descriptions,
+             rerank_model,
+             base_url,
+             timeout,
+             max_desc_chars,
+             top_k
+           ) do
       duration_ms = System.monotonic_time(:millisecond) - start
       final = fuse(llm_picks, candidates, top_k)
 
@@ -100,7 +109,8 @@ defmodule Arbor.Orchestrator.Eval.Subjects.HybridRetrieval do
   defp extract_prompt(prompt) when is_binary(prompt), do: prompt
 
   defp extract_prompt(input),
-    do: raise("HybridRetrieval expects %{\"prompt\" => binary} or a binary; got: #{inspect(input)}")
+    do:
+      raise("HybridRetrieval expects %{\"prompt\" => binary} or a binary; got: #{inspect(input)}")
 
   defp recall_stage(input, embed_model, candidate_k, index_path, base_url, timeout) do
     embed_opts = [
@@ -138,7 +148,16 @@ defmodule Arbor.Orchestrator.Eval.Subjects.HybridRetrieval do
     end
   end
 
-  defp rerank_stage(prompt, candidates, descriptions, model, base_url, timeout, max_desc_chars, top_k) do
+  defp rerank_stage(
+         prompt,
+         candidates,
+         descriptions,
+         model,
+         base_url,
+         timeout,
+         max_desc_chars,
+         top_k
+       ) do
     system_prompt = build_rerank_prompt(candidates, descriptions, max_desc_chars, top_k)
     known = MapSet.new(candidates, & &1.module)
 

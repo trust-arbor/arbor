@@ -47,7 +47,9 @@ defmodule Arbor.Orchestrator.Eval.Graders.RecallAtK do
         score = hits / length(matches)
         passed = score >= pass_threshold
 
-        detail = "recall@#{k} = #{Float.round(score, 3)} (#{hits}/#{length(matches)} matches found in top-#{k})"
+        detail =
+          "recall@#{k} = #{Float.round(score, 3)} (#{hits}/#{length(matches)} matches found in top-#{k})"
+
         %{score: score, passed: passed, detail: detail}
     end
   end
@@ -62,6 +64,8 @@ defmodule Arbor.Orchestrator.Eval.Graders.RecallAtK do
   defp parse_actual(actual) when is_list(actual), do: Enum.map(actual, &to_string/1)
   defp parse_actual(_), do: []
 
-  defp parse_matches(%{"matches" => matches}) when is_list(matches), do: Enum.map(matches, &to_string/1)
+  defp parse_matches(%{"matches" => matches}) when is_list(matches),
+    do: Enum.map(matches, &to_string/1)
+
   defp parse_matches(_), do: []
 end
