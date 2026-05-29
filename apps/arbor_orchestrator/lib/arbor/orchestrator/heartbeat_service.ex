@@ -55,7 +55,6 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   require Logger
 
   @default_interval 30_000
-  @orchestrator_resource "arbor://orchestrator/execute"
 
   # ===========================================================================
   # Public API
@@ -326,27 +325,11 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   end
 
   # ===========================================================================
-  # Authorization
+  # Authorization (delegates to centralized fail-closed gate)
   # ===========================================================================
 
   defp authorize_orchestrator(state) do
-    if Code.ensure_loaded?(Arbor.Security) and
-         function_exported?(Arbor.Security, :authorize, 4) and
-         Process.whereis(Arbor.Security.CapabilityStore) != nil do
-      opts = if state.signer, do: [signer: state.signer], else: []
-
-      case Arbor.Security.authorize(state.agent_id, @orchestrator_resource, :execute, opts) do
-        {:ok, :authorized} -> :ok
-        {:error, reason} -> {:error, reason}
-        _ -> :ok
-      end
-    else
-      :ok
-    end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
+    Arbor.Orchestrator.Authorization.check_orchestrator_access(state.agent_id, state.signer)
   end
 
   # ===========================================================================

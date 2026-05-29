@@ -94,4 +94,77 @@ defmodule Arbor.Orchestrator.Config do
       if Keyword.keyword?(d) and Keyword.keyword?(o), do: Keyword.merge(d, o), else: o
     end)
   end
+
+  # ===========================================================================
+  # Security / Authorization policy (fail-closed by default)
+  # ===========================================================================
+
+  @doc """
+  Whether the orchestrator requires the security subsystem to be available for
+  `arbor://orchestrator/execute` gate checks (once-per-turn and per-node).
+
+  When true (default): if Arbor.Security or CapabilityStore is unavailable,
+  authorization gates return `{:error, :security_unavailable}` (fail-closed).
+
+  Set to false ONLY for intentional standalone deployments without
+  arbor_security. Not recommended for production agents.
+  """
+  @spec security_required?() :: boolean()
+  def security_required? do
+    Application.get_env(@app, :security_required, true)
+  end
+
+  @doc """
+  Test-only override for security availability detection.
+
+  When set to a boolean, bypasses the real Code.ensure_loaded?/whereis check.
+  Used by security regression tests to simulate CapabilityStore or security
+  app being down, without mutating global processes/ETS.
+
+  Default: nil (use real detection).
+  """
+  @spec security_available_override() :: boolean() | nil
+  def security_available_override do
+    Application.get_env(@app, :security_available_override, nil)
+  end
+
+  @doc """
+  Runtime check: is the security subsystem (module + CapabilityStore) available
+  right now? Respects `security_available_override/0` for tests.
+  """
+  @spec security_available?() :: boolean()
+  def security_available? do
+    case security_available_override() do
+      nil ->
+        Code.ensure_loaded?(Arbor.Security) and
+          function_exported?(Arbor.Security, :authorize, 4) and
+          Process.whereis(Arbor.Security.CapabilityStore) != nil
+
+      bool when is_boolean(bool) ->
+        bool
+    end
+  end
+
+  # ===========================================================================
+  # Timeouts (prevent indefinite hangs)
+  # ===========================================================================
+
+  @default_turn_timeout_ms 300_000
+
+  @doc """
+  Timeout (ms) for the GenServer.call inside Session.send_message/2 and
+  related entry points.
+
+  Replaces previous :infinity (which allowed callers to hang forever if the
+  engine or LLM stalled). Default 5 minutes is generous for LLM+tool turns;
+  configure higher only for specialized long-running workloads.
+
+  On timeout the caller receives a timeout exit from GenServer.call, but
+  Session monitors the caller and clears in-flight state so subsequent turns
+  are not blocked.
+  """
+  @spec turn_timeout_ms() :: pos_integer()
+  def turn_timeout_ms do
+    Application.get_env(@app, :turn_timeout_ms, @default_turn_timeout_ms)
+  end
 end
