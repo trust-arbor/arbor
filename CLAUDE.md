@@ -139,3 +139,5 @@ Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` 
 ## Applied Learning
 
 **Always search for all occurrences before using `replace_all: true`.** The string may appear in alias declarations, comments, or other contexts where replacement breaks things.
+
+**Pin BOTH Erlang and Elixir with `mise exec`.** `mise exec elixir@1.18.4-otp-27 -- mix ...` does NOT pin Erlang — it falls through to the system Erlang (OTP-29), which produces spurious "type" failures (`@type record` rejected as a built-in; a type-checker crash compiling `Arbor.Monitor.Diagnostics.top_processes_by/2`). Those are OTP-29 artifacts, not Elixir-version issues, and vanish on the intended OTP. Always pin both, e.g. `mise exec erlang@27.2 elixir@1.18.4-otp-27 -- mix ...` (working combo: erts-15.2.7.2 + Elixir 1.18.4 + hex-2.4.0-otp-27). The full umbrella also compiles 100% clean under `erlang@28.4.1 elixir@1.19.5-otp-28` with zero type-checker findings (verified 2026-05-29).
