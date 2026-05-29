@@ -129,6 +129,29 @@ config :arbor_signals,
   authorizer: Arbor.Signals.Adapters.CapabilityAuthorizer,
   restricted_topics: [:security, :identity]
 
+# ACP CLI agents for the multi-model review council (subscription-based, no per-token cost).
+# Built-in defaults (Arbor.AI.AcpSession.Config) already cover codex/opencode/hermes/gemini/etc.
+# Overrides REPLACE the per-provider default (not deep-merge), so claude's full config is repeated.
+config :arbor_ai, :acp_providers, %{
+  # claude → run Opus (built-in default is sonnet)
+  claude: %{
+    transport_mod: ExMCP.ACP.AdapterTransport,
+    adapter: ExMCP.ACP.Adapters.Claude,
+    adapter_opts: [model: "opus"]
+  },
+
+  # grok (Grok 4.3) — VERIFIED native ACP via `mix arbor.acp.probe grok`: `grok agent stdio`
+  # returns a proper ACP initialize result (agentVersion 0.2.8). CLI exposes model "grok-build".
+  grok: %{command: ["grok", "agent", "stdio"]}
+
+  # agy (Antigravity CLI, intended for Gemini 3.5 Flash) — NO native ACP. Verified via
+  # `mix arbor.acp.probe agy` + manual probing: agy exposes only --print / --prompt-interactive
+  # and subcommands (changelog/install/plugin/update); `--experimental-acp`, `--acp`, `acp`, and
+  # `serve` are all rejected or treated as prompts. To use it, write an ExMCP.ACP adapter wrapping
+  # `agy --print`. Interim: the built-in `gemini` provider (native ACP via `--experimental-acp`)
+  # still works for Flash until antigravity ships ACP. Omitted here to avoid a known-broken command.
+}
+
 # AI routing defaults
 config :arbor_ai,
   # Default provider/model for API calls (via OpenRouter)

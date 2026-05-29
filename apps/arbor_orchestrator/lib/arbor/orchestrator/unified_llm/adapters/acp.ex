@@ -50,6 +50,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
       |> Keyword.put(:timeout, timeout)
       |> maybe_add(:workspace, extract_option(request, "workspace"))
       |> maybe_add(:agent_id, extract_option(request, "agent_id") || opts[:agent_id])
+      |> maybe_add(:capabilities, extract_option(request, "capabilities"))
 
     case pool_checkout(agent, checkout_opts) do
       {:ok, session} ->

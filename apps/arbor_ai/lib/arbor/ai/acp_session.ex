@@ -185,6 +185,8 @@ defmodule Arbor.AI.AcpSession do
               agent_id: Keyword.get(opts, :agent_id),
               cwd: cwd
             )
+            |> maybe_put_kw(:capabilities, Keyword.get(opts, :capabilities))
+            |> inject_os_cwd(cwd)
 
           case start_acp_client(client_opts) do
             {:ok, client} ->
@@ -301,23 +303,9 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_call({:send_message, content, opts}, _from, state) do
-    # Reset accumulated text before each prompt — streaming chunks arrive during prompt/4
-    state = %{state | status: :busy, accumulated_text: ""}
-
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    case apply(@acp_client, :prompt, [state.client, state.session_id, content, opts]) do
-      {:ok, result} ->
-        # Merge streaming text into result if agent didn't include it
-        result = merge_accumulated_text(result, state.accumulated_text)
-        new_state = %{state | status: :ready} |> accumulate_usage(result)
-        maybe_report_usage(new_state, result)
-        emit_signal(:acp_session_completed, new_state, %{result: summarize_result(result)})
-        {:reply, {:ok, result}, new_state}
-
-      {:error, reason} = error ->
-        new_state = %{state | status: :error}
-        emit_signal(:acp_session_error, new_state, %{error: reason, phase: :prompt})
-        {:reply, error, new_state}
+    case ensure_session(state, opts) do
+      {:ok, state} -> do_send_message(content, opts, state)
+      {:error, reason} -> {:reply, {:error, reason}, %{state | status: :error}}
     end
   end
 
@@ -648,6 +636,97 @@ defmodule Arbor.AI.AcpSession do
       nil ->
         nil
     end
+  end
+
+  # Lazily establish the ACP session before the first prompt. The pool/adapter
+  # path checks a session out and prompts without an explicit create_session, so
+  # session_id would be nil and the agent receives "sessionId": null. cwd is
+  # derived from the workspace (as in init/1), not state.opts[:cwd], which is
+  # absent in the pool flow.
+  defp do_send_message(content, opts, state) do
+    # Reset accumulated text before each prompt — streaming chunks arrive during prompt/4
+    state = %{state | status: :busy, accumulated_text: ""}
+
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    case apply(@acp_client, :prompt, [state.client, state.session_id, content, opts]) do
+      {:ok, result} ->
+        # Merge streaming text into result if agent didn't include it
+        result = merge_accumulated_text(result, state.accumulated_text)
+        new_state = %{state | status: :ready} |> accumulate_usage(result)
+        maybe_report_usage(new_state, result)
+        emit_signal(:acp_session_completed, new_state, %{result: summarize_result(result)})
+        {:reply, {:ok, result}, new_state}
+
+      {:error, reason} = error ->
+        new_state = %{state | status: :error}
+        emit_signal(:acp_session_error, new_state, %{error: reason, phase: :prompt})
+        {:reply, error, new_state}
+    end
+  end
+
+  defp ensure_session(%{session_id: sid} = state, _opts) when is_binary(sid), do: {:ok, state}
+
+  defp ensure_session(state, opts) do
+    cwd = Keyword.get(opts, :cwd) || workspace_cwd(state.workspace, state.opts)
+
+    new_opts =
+      case state.mcp_servers do
+        servers when is_list(servers) and servers != [] -> Keyword.put_new(opts, :mcp_servers, servers)
+        _ -> opts
+      end
+
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    case apply(@acp_client, :new_session, [state.client, cwd, new_opts]) do
+      {:ok, info} ->
+        sid = Map.get(info, "sessionId") || Map.get(info, :session_id)
+        maybe_select_model(state.client, sid, state.model)
+        {:ok, %{state | session_id: sid, last_session_id: sid}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Best-effort model selection for router agents (e.g. opencode) that expose a
+  # "model" config option via session/set_config_option. Agents that pick their
+  # model another way reject this, which we ignore. Without it, opencode runs on
+  # an unselected default and returns an empty turn.
+  defp maybe_put_kw(kw, _key, nil), do: kw
+  defp maybe_put_kw(kw, key, value), do: Keyword.put(kw, key, value)
+
+  # Thread the workspace path to the spawned CLI's OS process cwd so native-fs
+  # agents resolve relative writes inside the workspace, not the directory the
+  # BEAM runs from. Without this, the ACP session/new cwd is set but the OS cwd
+  # is inherited (the repo root) and native writes escape the sandbox.
+  # Native agents (Stdio transport) read :cd; adapted agents (adapter_bridge)
+  # read :cwd from adapter_opts.
+  defp inject_os_cwd(client_opts, nil), do: client_opts
+
+  defp inject_os_cwd(client_opts, cwd) do
+    client_opts
+    |> Keyword.put_new(:cd, cwd)
+    |> put_adapter_cwd(cwd)
+  end
+
+  defp put_adapter_cwd(client_opts, cwd) do
+    case Keyword.get(client_opts, :adapter_opts) do
+      ao when is_list(ao) ->
+        Keyword.put(client_opts, :adapter_opts, Keyword.put_new(ao, :cwd, cwd))
+
+      _ ->
+        client_opts
+    end
+  end
+
+  defp maybe_select_model(_client, _sid, model) when model in [nil, ""], do: :ok
+
+  defp maybe_select_model(client, sid, model) do
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    apply(@acp_client, :set_config_option, [client, sid, "model", model])
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp workspace_cwd({:worktree, path, _branch}, _opts), do: path
