@@ -1,0 +1,51 @@
+// Synthesize — merge N labeled inputs into one report via an LLM/agent.
+//
+// Reusable building block: given several independent inputs (reviews, perspectives,
+// research notes, votes) it produces a single merged result. The merge LOGIC is
+// caller-supplied (synthesize.instructions), and the synthesizer agent/model is
+// caller-supplied too — so the same pipeline serves code-review councils, research
+// aggregation, multi-perspective decisions, etc.
+//
+// Context in (pass via graph.invoke `pass_context`):
+//   synthesize.input         — the combined, labeled inputs to merge (a string)
+//   synthesize.instructions  — the merge rules / system prompt for this domain
+//   session.llm_provider     — e.g. "acp" (LLM node falls back to this when no node attr)
+//   session.llm_model        — e.g. "grok-build" / "opus"
+//   session.acp_agent        — e.g. "grok" / "claude"  (which ACP CLI, when provider=acp)
+// Context out:
+//   last_response            — the synthesized report
+//   (caller reads it as `subgraph.<invoke_node_id>.last_response`)
+//
+// Example caller (review-council): set the five keys above, then
+//   merge [type="graph.invoke"
+//          graph_file="apps/arbor_orchestrator/specs/pipelines/stdlib/synthesize.dot"
+//          pass_context="synthesize.input,synthesize.instructions,session.llm_provider,session.llm_model,session.acp_agent"]
+// (or graph_name="..." if registered in the GraphRegistry). Result is read from
+// the invoke node's "subgraph.<node_id>.last_response".
+
+digraph synthesize {
+  graph [
+    goal="Merge multiple labeled inputs into one report per the given instructions",
+    label="Synthesize"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Single LLM/agent call: provider/model/agent resolve from context (session.*),
+  // the user prompt is the combined inputs, the system prompt is the merge rules.
+  // No tools — synthesis is a pure merge over text already provided in the prompt.
+  synthesize [
+    type="codergen",
+    simulate="false",
+    use_tools="false",
+    prompt_context_key="synthesize.input",
+    system_prompt_context_key="synthesize.instructions",
+    max_tokens="8192",
+    temperature="0.2"
+  ]
+
+  done [shape=Msquare]
+
+  start -> synthesize
+  synthesize -> done
+}

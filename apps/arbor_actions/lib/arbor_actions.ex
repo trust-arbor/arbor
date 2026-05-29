@@ -287,6 +287,9 @@ defmodule Arbor.Actions do
         Arbor.Actions.Consensus.Check,
         Arbor.Actions.Consensus.Decide
       ],
+      review: [
+        Arbor.Actions.Review.Synthesize
+      ],
       memory: [
         Arbor.Actions.Memory.Remember,
         Arbor.Actions.Memory.Recall,
