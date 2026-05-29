@@ -1,0 +1,86 @@
+// Review Council — multi-model grounded code review via parallel ACP agents.
+//
+// Each reviewer is a subscription CLI agent (no per-token cost) with tool access,
+// so it greps/reads the target to GROUND its own claims before reporting. Findings
+// are merged and classified by verification status (evidence present vs. absent) —
+// NOT by vote count — via the review.synthesize action. Solitary findings are kept.
+//
+// See .arbor/roadmap/1-brainstorming/multi-model-review-council.md
+//
+// Prototype default is simulate="true" (runs with stubbed reviewers, no ACP needed).
+// For a real run: set simulate="false" on the reviewer nodes (requires the ACP pool
+// running and the claude/grok/gemini CLIs authenticated), e.g. via runtime attr merge.
+//
+// Usage:
+//   {:ok, g} = Arbor.Orchestrator.parse(File.read!("apps/arbor_orchestrator/specs/pipelines/review-council.dot"))
+//   {:ok, result} = Arbor.Orchestrator.Engine.run(g, authorization: false)
+//   IO.puts(result.context["exec.synthesize.report"])
+
+digraph review_council {
+  goal="Review the Elixir/OTP code in apps/arbor_orchestrator for correctness and security bugs."
+  mode="review"
+
+  start [type="start" shape="Mdiamond"]
+
+  // --- Phase 1: independent blind fan-out to heterogeneous models ---
+  fanout [type="parallel" join_policy="wait_all" error_policy="continue" max_parallel="3"]
+
+  review_claude [
+    type="codergen"
+    simulate="true"
+    use_tools="true"
+    llm_provider="acp"
+    agent="claude"
+    llm_model="opus"
+    max_tokens="8192"
+    temperature="0.2"
+    system_prompt="You are a meticulous Elixir/OTP security reviewer. Ground every claim in code you actually read. If you cannot confirm a claim with a tool, leave its evidence empty rather than guessing."
+    prompt="$goal You have shell and file tools — USE them to confirm each claim against the real code before reporting. Return ONLY a JSON array of objects, each with fields: title, file, line, claim, severity (one of low, med, high), evidence (what you ran or read to confirm). Review blind: do not assume any prior findings."
+  ]
+
+  review_grok [
+    type="codergen"
+    simulate="true"
+    use_tools="true"
+    llm_provider="acp"
+    agent="grok"
+    max_tokens="8192"
+    temperature="0.2"
+    system_prompt="You are a meticulous Elixir/OTP security reviewer. Ground every claim in code you actually read. If you cannot confirm a claim with a tool, leave its evidence empty rather than guessing."
+    prompt="$goal You have shell and file tools — USE them to confirm each claim against the real code before reporting. Return ONLY a JSON array of objects, each with fields: title, file, line, claim, severity (one of low, med, high), evidence (what you ran or read to confirm). Review blind: do not assume any prior findings."
+  ]
+
+  // gemini = interim Flash reviewer (Antigravity/agy lacks native ACP — see config.exs)
+  review_gemini [
+    type="codergen"
+    simulate="true"
+    use_tools="true"
+    llm_provider="acp"
+    agent="gemini"
+    max_tokens="8192"
+    temperature="0.2"
+    system_prompt="You are a meticulous Elixir/OTP security reviewer. Ground every claim in code you actually read. If you cannot confirm a claim with a tool, leave its evidence empty rather than guessing."
+    prompt="$goal You have shell and file tools — USE them to confirm each claim against the real code before reporting. Return ONLY a JSON array of objects, each with fields: title, file, line, claim, severity (one of low, med, high), evidence (what you ran or read to confirm). Review blind: do not assume any prior findings."
+  ]
+
+  collect [type="parallel.fan_in"]
+
+  // --- Phase 5: synthesize — merge/dedup, classify by verification status ---
+  // (Phase 2 cross-verification grounding node is the next iteration; for now
+  //  reviewers self-ground via their tools and synthesize flags evidence-less findings.)
+  synthesize [
+    type="exec"
+    target="action"
+    action="review.synthesize"
+    context_keys="parallel.results"
+    output_prefix="review"
+  ]
+
+  done [type="exit" shape="Msquare"]
+
+  start -> fanout
+  fanout -> review_claude -> collect
+  fanout -> review_grok   -> collect
+  fanout -> review_gemini -> collect
+  collect -> synthesize -> done
+}
