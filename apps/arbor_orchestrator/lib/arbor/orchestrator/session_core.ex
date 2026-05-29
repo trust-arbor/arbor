@@ -406,7 +406,8 @@ defmodule Arbor.Orchestrator.SessionCore do
   defp parse_timestamp(iso) when is_binary(iso) do
     case DateTime.from_iso8601(iso) do
       {:ok, dt, _} -> dt
-      _ -> nil   # Caller should provide a fallback if a real timestamp is required
+      # Caller should provide a fallback if a real timestamp is required
+      _ -> nil
     end
   end
 

@@ -90,7 +90,12 @@ defmodule Arbor.Orchestrator.Eval.Subjects.EmbeddingRetrieval do
 
   defp extract_prompt(%{"prompt" => prompt}) when is_binary(prompt), do: prompt
   defp extract_prompt(prompt) when is_binary(prompt), do: prompt
-  defp extract_prompt(input), do: raise("EmbeddingRetrieval expects %{\"prompt\" => binary} or a binary; got: #{inspect(input)}")
+
+  defp extract_prompt(input),
+    do:
+      raise(
+        "EmbeddingRetrieval expects %{\"prompt\" => binary} or a binary; got: #{inspect(input)}"
+      )
 
   # Load the index once into :persistent_term keyed by absolute path.
   # Subsequent calls are O(1).

@@ -70,9 +70,12 @@ defmodule Mix.Tasks.Arbor.Eval do
     "heartbeat" => "apps/arbor_orchestrator/priv/eval_datasets/heartbeat_json.jsonl",
     "chat" => "apps/arbor_orchestrator/priv/eval_datasets/chat_quality.jsonl",
     "dot_compilation" => "apps/arbor_orchestrator/priv/eval_datasets/dot_compilation.jsonl",
-    "preprocessor_tool_retrieval" => "apps/arbor_orchestrator/priv/eval_datasets/preprocessor_tool_retrieval/corpus.jsonl",
-    "preprocessor_tool_retrieval_llm" => "apps/arbor_orchestrator/priv/eval_datasets/preprocessor_tool_retrieval/corpus.jsonl",
-    "preprocessor_tool_retrieval_hybrid" => "apps/arbor_orchestrator/priv/eval_datasets/preprocessor_tool_retrieval/corpus.jsonl"
+    "preprocessor_tool_retrieval" =>
+      "apps/arbor_orchestrator/priv/eval_datasets/preprocessor_tool_retrieval/corpus.jsonl",
+    "preprocessor_tool_retrieval_llm" =>
+      "apps/arbor_orchestrator/priv/eval_datasets/preprocessor_tool_retrieval/corpus.jsonl",
+    "preprocessor_tool_retrieval_hybrid" =>
+      "apps/arbor_orchestrator/priv/eval_datasets/preprocessor_tool_retrieval/corpus.jsonl"
   }
 
   @domain_graders %{

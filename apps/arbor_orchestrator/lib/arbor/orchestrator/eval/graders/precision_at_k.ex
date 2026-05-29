@@ -58,7 +58,8 @@ defmodule Arbor.Orchestrator.Eval.Graders.PrecisionAtK do
   defp parse_actual(actual) when is_list(actual), do: Enum.map(actual, &to_string/1)
   defp parse_actual(_), do: []
 
-  defp parse_expected(%{"primary" => primary, "matches" => matches}) when is_binary(primary) and is_list(matches) do
+  defp parse_expected(%{"primary" => primary, "matches" => matches})
+       when is_binary(primary) and is_list(matches) do
     {to_string(primary), Enum.map(matches, &to_string/1)}
   end
 

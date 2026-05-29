@@ -148,7 +148,8 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLMRouter do
     }
 
     case Req.post(url, json: body, receive_timeout: timeout) do
-      {:ok, %{status: 200, body: %{"message" => %{"content" => content}}}} when is_binary(content) ->
+      {:ok, %{status: 200, body: %{"message" => %{"content" => content}}}}
+      when is_binary(content) ->
         {:ok, content}
 
       {:ok, %{status: status, body: body}} ->

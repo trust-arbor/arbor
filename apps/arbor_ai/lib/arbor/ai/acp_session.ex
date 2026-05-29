@@ -671,8 +671,11 @@ defmodule Arbor.AI.AcpSession do
 
     new_opts =
       case state.mcp_servers do
-        servers when is_list(servers) and servers != [] -> Keyword.put_new(opts, :mcp_servers, servers)
-        _ -> opts
+        servers when is_list(servers) and servers != [] ->
+          Keyword.put_new(opts, :mcp_servers, servers)
+
+        _ ->
+          opts
       end
 
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
