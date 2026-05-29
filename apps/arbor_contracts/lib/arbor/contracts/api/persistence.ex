@@ -49,7 +49,7 @@ defmodule Arbor.Contracts.API.Persistence do
   @type filter :: map()
 
   @typedoc "A structured record returned by QueryableStore operations."
-  @type record :: map()
+  @type record_t :: map()
 
   @typedoc "An immutable event log entry."
   @type event :: map()
@@ -144,7 +144,7 @@ defmodule Arbor.Contracts.API.Persistence do
               backend(),
               filter(),
               opts()
-            ) :: {:ok, [record()]} | {:error, term()}
+            ) :: {:ok, [record_t()]} | {:error, term()}
 
   @doc """
   Count records matching a filter using the specified backend.
