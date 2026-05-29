@@ -370,8 +370,42 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
            messages: messages,
            max_tokens: parse_int(Map.get(node.attrs, "max_tokens"), 4096),
            temperature: parse_float(Map.get(node.attrs, "temperature"), 0.7),
-           provider_options: Map.get(node.attrs, "provider_options", %{})
+           provider_options:
+             node.attrs
+             |> build_provider_options(Context.get(context, "session.acp_agent"))
+             |> maybe_put_workspace(Context.get(context, "session.acp_workspace"))
          }}
+    end
+  end
+
+  # ACP agents (e.g. grok) require a non-null cwd for session/new even when the call
+  # only synthesizes text. Callers set `session.acp_workspace` (a `{:directory, path}`
+  # or `{:worktree, ...}` term) so sub-pipelines can supply a workspace via context.
+  defp maybe_put_workspace(po, nil), do: po
+  defp maybe_put_workspace(po, workspace), do: Map.put(po, "workspace", workspace)
+
+  # Flat `agent` attr (or `session.acp_agent` context fallback, mirroring provider/model)
+  # + JSON `provider_options` string → map; `agent` picks the ACP CLI (else provider="acp"
+  # defaults to :claude). Context fallback lets sub-pipelines parameterize the agent.
+  defp build_provider_options(attrs, agent_override) do
+    base =
+      case Map.get(attrs, "provider_options") do
+        m when is_map(m) ->
+          m
+
+        s when is_binary(s) ->
+          case Jason.decode(s) do
+            {:ok, m} when is_map(m) -> m
+            _ -> %{}
+          end
+
+        _ ->
+          %{}
+      end
+
+    case Map.get(attrs, "agent") || agent_override do
+      nil -> base
+      agent -> Map.put(base, "agent", agent)
     end
   end
 
