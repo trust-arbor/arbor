@@ -23,6 +23,7 @@ defmodule Arbor.Orchestrator.Stdlib.StdlibDotTest do
     "llm-with-tools.dot",
     "llm-validate.dot",
     "llm-chain.dot",
+    "synthesize.dot",
     # Agent patterns
     "goal-decompose.dot",
     "observe-decide-act.dot",
@@ -50,12 +51,12 @@ defmodule Arbor.Orchestrator.Stdlib.StdlibDotTest do
   end
 
   describe "all stdlib DOTs exist" do
-    test "stdlib directory contains exactly 12 DOT files" do
+    test "stdlib directory and @stdlib_files stay in sync" do
       dir = resolve_stdlib_dir()
       files = dir |> File.ls!() |> Enum.filter(&String.ends_with?(&1, ".dot")) |> Enum.sort()
 
-      assert length(files) == 12,
-             "Expected 12 stdlib DOTs, got #{length(files)}: #{inspect(files)}"
+      assert length(files) == length(@stdlib_files),
+             "stdlib dir has #{length(files)} DOTs but @stdlib_files lists #{length(@stdlib_files)} — keep them in sync. Dir: #{inspect(files)}"
     end
 
     test "all expected files are present" do

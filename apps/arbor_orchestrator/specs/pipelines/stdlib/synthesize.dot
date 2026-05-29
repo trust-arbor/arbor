@@ -35,7 +35,8 @@ digraph synthesize {
   // the user prompt is the combined inputs, the system prompt is the merge rules.
   // No tools — synthesis is a pure merge over text already provided in the prompt.
   synthesize [
-    type="codergen",
+    type="compute",
+    purpose="llm",
     simulate="false",
     use_tools="false",
     prompt_context_key="synthesize.input",
