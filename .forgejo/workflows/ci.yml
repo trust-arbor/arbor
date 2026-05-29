@@ -24,6 +24,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install toolchain pinned in .tool-versions
+        run: mise install
+
       - name: Cache deps
         uses: actions/cache@v4
         with:
@@ -55,3 +58,57 @@ jobs:
 
       - name: Run full test suite
         run: mix test --include llm --include integration --include slow --include database --timeout 120000
+
+  # ── Experimental tracking lane (allowed to fail) ────────────────────────────
+  # Does Arbor build & test on the NEXT Erlang/Elixir generation? This lane
+  # reports its real status but never blocks the workflow (continue-on-error).
+  # It exists so we can SEE when OTP-29 goes green — not to gate merges.
+  #
+  # Reality check (2026-05-29): OTP-29 has no stable Elixir yet. The only Elixir
+  # built for OTP-29 is the 1.20.0-rc line (there is no 1.19.x-otp-29 build), so
+  # this necessarily tracks the OTP-29 + Elixir-1.20-rc combo. Expected reds
+  # until the frontier matures:
+  #   - memento's `@type record` (deps/memento) collides with OTP-29
+  #   - an Elixir-on-OTP-29 type-checker crash
+  #   - Elixir 1.20 changes / pre-release version-match quirks
+  # Bump OTP_VERSION / ELIXIR_VERSION as newer (eventually stable) builds ship.
+  test-otp29:
+    name: Test Suite (OTP-29 + Elixir 1.20-rc, experimental)
+    runs-on: native
+    continue-on-error: true
+    env:
+      MIX_ENV: test
+      ARBOR_COOKIE: ci_test_cookie_not_a_secret
+      OTP_VERSION: "29.0.1"
+      ELIXIR_VERSION: "1.20.0-rc.6-otp-29"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache deps + build (separate key from the primary lane)
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build/test
+          key: mix-otp29-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('mix.lock') }}
+
+      # First run builds Erlang from source via mise; the native runner persists
+      # the install, so subsequent runs are a no-op.
+      - name: Install OTP-29 toolchain via mise
+        run: mise install "erlang@${OTP_VERSION}" "elixir@${ELIXIR_VERSION}"
+
+      - name: Install dependencies
+        run: mise exec "erlang@${OTP_VERSION}" "elixir@${ELIXIR_VERSION}" -- mix deps.get
+
+      # The known OTP-29 blockers (memento @type record, type-checker crash)
+      # surface here. No --warnings-as-errors: we want to see how far it gets.
+      - name: Compile
+        run: mise exec "erlang@${OTP_VERSION}" "elixir@${ELIXIR_VERSION}" -- mix compile
+
+      - name: Run hermetic test subset
+        run: >-
+          mise exec "erlang@${OTP_VERSION}" "elixir@${ELIXIR_VERSION}" --
+          mix test --exclude llm --exclude llm_local --exclude external
+          --exclude database --exclude distributed --timeout 120000
