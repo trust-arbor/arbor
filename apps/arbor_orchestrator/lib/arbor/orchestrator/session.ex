@@ -114,6 +114,9 @@ defmodule Arbor.Orchestrator.Session do
     turn_in_flight: false,
     turn_from: nil,
     turn_task_ref: nil,
+    # Monitor ref for the GenServer.call caller (so we can clean in_flight state
+    # if the caller times out or dies, preventing permanent :turn_in_progress lock)
+    turn_caller_ref: nil,
     # Monotonic start time of the in-flight turn (native units), for the
     # [:arbor, :session, :turn] telemetry event emitted on completion.
     turn_started_at: nil,
@@ -151,6 +154,7 @@ defmodule Arbor.Orchestrator.Session do
           turn_in_flight: boolean(),
           turn_from: GenServer.from() | nil,
           turn_task_ref: reference() | nil,
+          turn_caller_ref: reference() | nil,
           turn_started_at: integer() | nil,
           compactor: struct() | nil,
           session_config: struct() | nil,
@@ -208,7 +212,7 @@ defmodule Arbor.Orchestrator.Session do
           {:ok, %{text: String.t(), tool_history: [map()], tool_rounds: non_neg_integer()}}
           | {:error, term()}
   def send_message(session, message) do
-    GenServer.call(session, {:send_message, message}, :infinity)
+    GenServer.call(session, {:send_message, message}, Arbor.Orchestrator.Config.turn_timeout_ms())
   end
 
   @doc """
@@ -472,11 +476,15 @@ defmodule Arbor.Orchestrator.Session do
         {pid, ref}
       end
 
+    caller_pid = elem(from, 0)
+    caller_ref = Process.monitor(caller_pid)
+
     new_state = %{
       state
       | turn_in_flight: true,
         turn_from: from,
         turn_task_ref: task_ref,
+        turn_caller_ref: caller_ref,
         turn_started_at: System.monotonic_time()
     }
 
@@ -588,6 +596,7 @@ defmodule Arbor.Orchestrator.Session do
     safe_reply(state.turn_from, reply)
 
     if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
 
     {:noreply,
      %{
@@ -595,6 +604,7 @@ defmodule Arbor.Orchestrator.Session do
        | turn_in_flight: false,
          turn_from: nil,
          turn_task_ref: nil,
+         turn_caller_ref: nil,
          turn_started_at: nil
      }}
   end
@@ -608,6 +618,7 @@ defmodule Arbor.Orchestrator.Session do
     safe_reply(state.turn_from, {:error, reason})
 
     if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
 
     {:noreply,
      %{
@@ -615,6 +626,7 @@ defmodule Arbor.Orchestrator.Session do
        | turn_in_flight: false,
          turn_from: nil,
          turn_task_ref: nil,
+         turn_caller_ref: nil,
          turn_started_at: nil
      }}
   end
@@ -629,22 +641,50 @@ defmodule Arbor.Orchestrator.Session do
     end
   end
 
+  # Non-normal :DOWN — either the turn task crashed, or the send_message caller
+  # died/timed out (finite timeout). Both must clear in-flight state so the
+  # session accepts future turns. Single clause because both match the same
+  # {:DOWN, ...} pattern — a separate clause would be unreachable.
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
-    if ref == state.turn_task_ref do
-      # Turn task crashed — reply to caller and reset
-      new_state = transition_phase(state, :processing, :complete, :idle)
-      safe_reply(state.turn_from, {:error, {:turn_task_crashed, reason}})
+    cond do
+      ref == state.turn_task_ref ->
+        # Turn task crashed — reply to caller and reset.
+        new_state = transition_phase(state, :processing, :complete, :idle)
+        safe_reply(state.turn_from, {:error, {:turn_task_crashed, reason}})
+        if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
 
-      {:noreply,
-       %{
-         new_state
-         | turn_in_flight: false,
-           turn_from: nil,
-           turn_task_ref: nil,
-           turn_started_at: nil
-       }}
-    else
-      {:noreply, state}
+        {:noreply,
+         %{
+           new_state
+           | turn_in_flight: false,
+             turn_from: nil,
+             turn_task_ref: nil,
+             turn_caller_ref: nil,
+             turn_started_at: nil
+         }}
+
+      not is_nil(state.turn_caller_ref) and ref == state.turn_caller_ref ->
+        # Caller died/timed out. Clear in-flight so future turns are accepted;
+        # the background task (if any) completes and hits safe_reply (noop).
+        Logger.info(
+          "[Session] send_message caller died (timeout or crash) for #{state.agent_id}; clearing in-flight state to unblock future turns"
+        )
+
+        if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+        new_state = transition_phase(state, :processing, :complete, :idle)
+
+        {:noreply,
+         %{
+           new_state
+           | turn_in_flight: false,
+             turn_from: nil,
+             turn_task_ref: nil,
+             turn_caller_ref: nil,
+             turn_started_at: nil
+         }}
+
+      true ->
+        {:noreply, state}
     end
   end
 
@@ -718,51 +758,13 @@ defmodule Arbor.Orchestrator.Session do
 
   # ── Gate-level orchestrator authorization ────────────────────────────
   #
-  # Checks arbor://orchestrator/execute once per turn rather than
-  # per-node. Council decision 2026-02-20: gate auth + action-level auth
-  # provides defense-in-depth without O(N) per-node overhead.
-
-  @orchestrator_resource "arbor://orchestrator/execute"
+  # Checks arbor://orchestrator/execute once per turn (defense-in-depth with
+  # the per-node CapabilityCheck middleware). Uses the centralized
+  # Authorization module which is fail-closed by default (see Config).
 
   defp authorize_orchestrator(state) do
-    if Code.ensure_loaded?(Arbor.Security) and
-         function_exported?(Arbor.Security, :authorize, 4) and
-         Process.whereis(Arbor.Security.CapabilityStore) != nil do
-      # Sign the orchestrator resource if a signer is available
-      auth_opts = sign_gate_request(state.signer, @orchestrator_resource)
-
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      case apply(Arbor.Security, :authorize, [
-             state.agent_id,
-             @orchestrator_resource,
-             :execute,
-             auth_opts
-           ]) do
-        {:ok, :authorized} -> :ok
-        {:error, _reason} -> {:error, :orchestrator_not_authorized}
-      end
-    else
-      # Security module not available (standalone orchestrator without security app).
-      # In test env, CapabilityStore is started by test_helper.exs, so tests
-      # always take the authorize path above.
-      :ok
-    end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
+    Arbor.Orchestrator.Authorization.check_orchestrator_access(state.agent_id, state.signer)
   end
-
-  defp sign_gate_request(nil, _resource), do: []
-
-  defp sign_gate_request(signer, resource) when is_function(signer, 1) do
-    case signer.(resource) do
-      {:ok, signed_request} -> [signed_request: signed_request]
-      {:error, _} -> []
-    end
-  end
-
-  defp sign_gate_request(_, _), do: []
 
   # ── Contract-aware state mutation ───────────────────────────────────
 

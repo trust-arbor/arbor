@@ -9,8 +9,8 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
   ALL listed capabilities are checked. Falls back to a single type-based URI
   for uncompiled graphs.
 
-  Skipped when `opts[:authorization] == false` or when Arbor.Security is
-  not loaded (standalone orchestrator usage).
+  When the security subsystem is unavailable, behavior follows
+  `Arbor.Orchestrator.Config.security_required?()` (fail-closed by default).
 
   ## Token Assigns
 
@@ -31,8 +31,19 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
       Map.get(token.assigns, :authorization) == false ->
         token
 
-      not security_available?() ->
-        token
+      not Arbor.Orchestrator.Config.security_available?() ->
+        if Arbor.Orchestrator.Config.security_required?() do
+          Token.halt(
+            token,
+            "orchestrator security unavailable",
+            %Outcome{
+              status: :fail,
+              failure_reason: "Security subsystem unavailable (fail-closed)"
+            }
+          )
+        else
+          token
+        end
 
       true ->
         check_capabilities(token)
@@ -101,9 +112,25 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
         )
     end
   rescue
-    _ -> token
+    error ->
+      Token.halt(
+        token,
+        "capability check error for #{resource}",
+        %Outcome{
+          status: :fail,
+          failure_reason: "Capability check error (#{inspect(error)}) — failing closed"
+        }
+      )
   catch
-    :exit, _ -> token
+    :exit, reason ->
+      Token.halt(
+        token,
+        "capability check exit for #{resource}",
+        %Outcome{
+          status: :fail,
+          failure_reason: "Capability check exit (#{inspect(reason)}) — failing closed"
+        }
+      )
   end
 
   defp build_auth_opts(token, resource) do
@@ -117,10 +144,5 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
       _ ->
         []
     end
-  end
-
-  defp security_available? do
-    Code.ensure_loaded?(Arbor.Security) and
-      function_exported?(Arbor.Security, :authorize, 4)
   end
 end

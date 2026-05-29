@@ -150,7 +150,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
       # per check so nonce/timestamp are unique.
       security_mod = Module.concat([:Arbor, :Security])
 
-      if Code.ensure_loaded?(security_mod) do
+      if Arbor.Orchestrator.Config.security_available?() do
         auth_opts =
           case signer do
             f when is_function(f, 1) ->
@@ -180,8 +180,11 @@ defmodule Arbor.Orchestrator.Session.Builders do
           {:error, reason} -> {:error, reason}
         end
       else
-        # Security module not available — allow (permissive fallback)
-        :ok
+        # Security unavailable — fail closed unless explicitly configured permissive
+        # (standalone orchestrator without arbor_security).
+        if Arbor.Orchestrator.Config.security_required?(),
+          do: {:error, :security_unavailable},
+          else: :ok
       end
     end
   end
