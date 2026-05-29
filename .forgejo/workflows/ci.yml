@@ -24,8 +24,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install toolchain pinned in .tool-versions
-        run: mise install
+      - name: Set up toolchain (mise → .tool-versions)
+        run: |
+          mise install
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
 
       - name: Cache deps
         uses: actions/cache@v4
@@ -33,7 +35,7 @@ jobs:
           path: |
             deps
             _build/test
-          key: mix-test-${{ hashFiles('mix.lock') }}
+          key: mix-test-${{ hashFiles('.tool-versions', 'mix.lock') }}
 
       - name: Install dependencies
         run: mix deps.get
