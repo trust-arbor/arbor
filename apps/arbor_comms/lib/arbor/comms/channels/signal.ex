@@ -100,19 +100,51 @@ defmodule Arbor.Comms.Channels.Signal do
     signal_cli = config(:signal_cli_path) || find_signal_cli()
     command = Enum.map_join([signal_cli | args], " ", &ShellEscape.escape_arg/1)
 
-    case Arbor.Shell.execute(command, timeout: 30_000, sandbox: :none) do
-      {:ok, %{exit_code: 0, stdout: output}} ->
-        {:ok, output}
+    with_isolated_tmpdir(fn tmpdir ->
+      # signal-cli is a JVM tool; on every invocation libsignal-client extracts
+      # its ~24 MB native library (libsignal_jni_*.dylib) to java.io.tmpdir and
+      # never cleans it up, leaking tens of GB of stale `libsignal*` dirs into the
+      # shared $TMPDIR. Point each run at a dedicated temp dir (TMPDIR drives the
+      # JVM's java.io.tmpdir, with an explicit -D as a belt) so we can delete the
+      # extraction when the command returns and it can never accumulate.
+      env = %{
+        "TMPDIR" => tmpdir,
+        "JAVA_OPTS" => "-Djava.io.tmpdir=#{tmpdir}"
+      }
 
-      {:ok, %{exit_code: code, stdout: output}} ->
-        {:error, {:signal_cli_error, code, output}}
+      case Arbor.Shell.execute(command, timeout: 30_000, sandbox: :none, env: env) do
+        {:ok, %{exit_code: 0, stdout: output}} ->
+          {:ok, output}
 
-      {:error, reason} ->
-        {:error, reason}
-    end
+        {:ok, %{exit_code: code, stdout: output}} ->
+          {:error, {:signal_cli_error, code, output}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end)
   catch
     :exit, {:noproc, _} ->
       {:error, {:shell_unavailable, "Shell.ExecutionRegistry not running"}}
+  end
+
+  # Runs `fun` with a private temp directory that is always removed afterward,
+  # even if the command fails. This keeps signal-cli's per-invocation native
+  # library extraction from leaking into the shared $TMPDIR.
+  defp with_isolated_tmpdir(fun) do
+    tmpdir =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-signal-cli-#{System.system_time(:nanosecond)}-#{:erlang.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(tmpdir)
+
+    try do
+      fun.(tmpdir)
+    after
+      File.rm_rf(tmpdir)
+    end
   end
 
   defp find_signal_cli do
