@@ -9,6 +9,7 @@ defmodule Arbor.Security.Kernel do
 
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.CapabilityStore
+  alias Arbor.Security.SystemAuthority
 
   @doc """
   Grant a capability using keyword options.
@@ -35,19 +36,17 @@ defmodule Arbor.Security.Kernel do
     metadata = Keyword.get(opts, :metadata, %{})
     expires_at = Keyword.get(opts, :expires_at)
 
-    case Capability.new(
-           resource_uri: resource_uri,
-           principal_id: principal_id,
-           constraints: constraints,
-           expires_at: expires_at,
-           metadata: metadata
-         ) do
-      {:ok, cap} ->
-        {:ok, :stored} = CapabilityStore.put(cap)
-        {:ok, cap}
-
-      error ->
-        error
+    with {:ok, cap} <-
+           Capability.new(
+             resource_uri: resource_uri,
+             principal_id: principal_id,
+             constraints: constraints,
+             expires_at: expires_at,
+             metadata: metadata
+           ),
+         {:ok, signed_cap} <- SystemAuthority.sign_capability(cap),
+         {:ok, :stored} <- CapabilityStore.put(signed_cap) do
+      {:ok, signed_cap}
     end
   end
 
