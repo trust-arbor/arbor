@@ -236,11 +236,7 @@ defmodule Arbor.Dashboard.OidcAuth do
           Logger.warning("[OidcAuth] Role assignment failed: #{inspect(reason)}")
       end
 
-      # Grant dashboard-specific capabilities for signal subscriptions and approvals
-      for resource <- [
-            "arbor://signals/subscribe/security",
-            "arbor://consensus/admin"
-          ] do
+      for resource <- login_grant_resources() do
         apply(Arbor.Security, :grant, [
           [principal: agent_id, resource: resource, metadata: %{source: :oidc_login}]
         ])
@@ -294,6 +290,27 @@ defmodule Arbor.Dashboard.OidcAuth do
   end
 
   defp require_auth?, do: Application.get_env(:arbor_dashboard, :require_auth, false)
+
+  @doc """
+  Capabilities granted on every OIDC login.
+
+  This list is the OIDC login policy: any resource here is granted to *every*
+  user who completes the OIDC flow, regardless of role. It must remain
+  least-privilege — only capabilities that genuinely apply to all authenticated
+  users (e.g. ambient signal subscriptions) belong here. Administrative
+  capabilities must come from explicit role-to-capability mapping via
+  `Arbor.Security.assign_role/2`, not from the act of logging in.
+
+  Exposed as a public function so the H11 regression test can inspect the
+  policy directly without needing the full `Arbor.Security` runtime in
+  dashboard tests.
+  """
+  @spec login_grant_resources() :: [String.t()]
+  def login_grant_resources do
+    [
+      "arbor://signals/subscribe/security"
+    ]
+  end
 
   defp callback_uri(conn) do
     scheme = if conn.scheme == :https, do: "https", else: "http"
