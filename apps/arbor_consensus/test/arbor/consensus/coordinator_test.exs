@@ -248,6 +248,7 @@ defmodule Arbor.Consensus.CoordinatorTest do
 
     test "returns not_found for unknown", %{coordinator: coord} do
       result = Coordinator.force_approve("nope", "admin", coord)
+
       assert result in [
                {:error, :not_found},
                {:error, {:unauthorized, :security_unavailable}},
@@ -273,7 +274,12 @@ defmodule Arbor.Consensus.CoordinatorTest do
 
       result = Coordinator.force_reject(id, "admin_1", coord)
       # Without full security infrastructure running, force ops may be denied
-      assert result in [:ok, {:error, {:unauthorized, :security_unavailable}}, {:error, {:unauthorized, :pending_approval}}, {:error, {:unauthorized, :escalation_disabled}}]
+      assert result in [
+               :ok,
+               {:error, {:unauthorized, :security_unavailable}},
+               {:error, {:unauthorized, :pending_approval}},
+               {:error, {:unauthorized, :escalation_disabled}}
+             ]
     end
   end
 
@@ -715,9 +721,7 @@ defmodule Arbor.Consensus.CoordinatorTest do
       Process.register(self(), :test_event_sink_receiver)
 
       {_pid, coord} =
-        TestHelpers.start_test_coordinator(
-          event_sink: TestHelpers.TestEventSink
-        )
+        TestHelpers.start_test_coordinator(event_sink: TestHelpers.TestEventSink)
 
       {:ok, id} =
         Coordinator.submit(
@@ -817,7 +821,8 @@ defmodule Arbor.Consensus.CoordinatorTest do
           # Should receive execution message (covers maybe_authorize_execution(nil, _, nil) path)
           assert_receive :executed, 5_000
 
-        {:error, {:unauthorized, reason}} when reason in [:security_unavailable, :pending_approval, :escalation_disabled] ->
+        {:error, {:unauthorized, reason}}
+        when reason in [:security_unavailable, :pending_approval, :escalation_disabled] ->
           # Security infrastructure not fully running — force ops denied (fail-closed)
           :ok
       end
@@ -849,7 +854,8 @@ defmodule Arbor.Consensus.CoordinatorTest do
           {:ok, status} = Coordinator.get_status(id, coord)
           assert status == :approved
 
-        {:error, {:unauthorized, reason}} when reason in [:security_unavailable, :pending_approval, :escalation_disabled] ->
+        {:error, {:unauthorized, reason}}
+        when reason in [:security_unavailable, :pending_approval, :escalation_disabled] ->
           # Security infrastructure not fully running — force ops denied (fail-closed)
           :ok
       end
@@ -1250,4 +1256,38 @@ defmodule Arbor.Consensus.CoordinatorTest do
 
   defp restore_config(key, nil), do: Application.delete_env(:arbor_consensus, key)
   defp restore_config(key, value), do: Application.put_env(:arbor_consensus, key, value)
+
+  describe "evaluate_force_authorization/2 (H12 regression)" do
+    test "security regression (H12): human_ actors do NOT bypass :requires_approval" do
+      # H12: the Coordinator previously contained a hardcoded bypass that returned
+      # :ok when actor_id started with "human_" and the AuthDecision result was
+      # :requires_approval. Combined with H11 (auto-grant of arbor://consensus/admin
+      # to every OIDC user), this let any authenticated dashboard user force-approve
+      # or force-reject any proposal regardless of trust gating.
+      fake_decision = {:requires_approval, %{id: "cap_fake"}}
+
+      result = Coordinator.evaluate_force_authorization(fake_decision, "human_attacker_123")
+
+      assert {:error, {:unauthorized, :pending_approval}} = result,
+             "H12 regression: human_ actors must not bypass the :requires_approval gate"
+    end
+
+    test "agent_ actors are denied on :requires_approval (parity with humans)" do
+      fake_decision = {:requires_approval, %{id: "cap_fake"}}
+
+      result = Coordinator.evaluate_force_authorization(fake_decision, "agent_bob")
+
+      assert {:error, {:unauthorized, :pending_approval}} = result
+    end
+
+    test ":authorized passes through for any actor" do
+      assert :ok = Coordinator.evaluate_force_authorization(:authorized, "human_alice")
+      assert :ok = Coordinator.evaluate_force_authorization(:authorized, "agent_carol")
+    end
+
+    test ":error denies with consensus_admin_required" do
+      result = Coordinator.evaluate_force_authorization({:error, :no_capability}, "human_dave")
+      assert {:error, {:unauthorized, :consensus_admin_required}} = result
+    end
+  end
 end

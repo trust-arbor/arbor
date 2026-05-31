@@ -341,14 +341,19 @@ defmodule Arbor.Consensus.Coordinator do
         {:reply, {:ok, proposal.id}, state}
       else
         # Get council configuration from TopicRegistry
-        {resolved_evaluators, resolved_quorum} = TopicRouting.resolve_council_config(proposal, state.config)
+        {resolved_evaluators, resolved_quorum} =
+          TopicRouting.resolve_council_config(proposal, state.config)
 
         # Allow override via opts (for testing), otherwise use resolved evaluators
         # Priority: opts[:evaluators] > opts[:evaluator_backend] > state.evaluator_backend > resolved
         evaluators =
           case {Keyword.get(opts, :evaluators), Keyword.get(opts, :evaluator_backend)} do
-            {override, _} when override != nil -> override
-            {nil, backend} when backend != nil -> [backend]
+            {override, _} when override != nil ->
+              override
+
+            {nil, backend} when backend != nil ->
+              [backend]
+
             {nil, nil} ->
               # Use state.evaluator_backend if different from default, otherwise use resolved
               if state.evaluator_backend != Arbor.Consensus.Evaluator.RuleBased do
@@ -746,30 +751,8 @@ defmodule Arbor.Consensus.Coordinator do
     # GenServer.call boundaries. (2026-04-07: this is what was breaking the
     # in-chat Approve button on chat_live.)
     if Code.ensure_loaded?(auth_decision) do
-      case auth_decision.check(actor_id, "arbor://consensus/admin", :force,
-             verify_identity: false
-           ) do
-        :authorized ->
-          :ok
-
-        {:requires_approval, _cap} ->
-          # For consensus admin, requires_approval means "has the capability but
-          # it's gated." Since this IS the approval system, just authorize it —
-          # the human is already authenticated via OIDC session.
-          if String.starts_with?(actor_id, "human_") do
-            :ok
-          else
-            Logger.warning("Force operation by #{actor_id} requires approval")
-            {:error, {:unauthorized, :pending_approval}}
-          end
-
-        {:error, reason} ->
-          Logger.warning(
-            "Unauthorized force operation attempted by #{actor_id}: #{inspect(reason)}"
-          )
-
-          {:error, {:unauthorized, :consensus_admin_required}}
-      end
+      auth_decision.check(actor_id, "arbor://consensus/admin", :force, verify_identity: false)
+      |> evaluate_force_authorization(actor_id)
     else
       # AuthDecision not available — fail closed
       {:error, {:unauthorized, :security_unavailable}}
@@ -780,6 +763,28 @@ defmodule Arbor.Consensus.Coordinator do
   catch
     :exit, _ ->
       {:error, {:unauthorized, :security_unavailable}}
+  end
+
+  # Map an AuthDecision.check/4 result for arbor://consensus/admin into a
+  # force-operation outcome. Public for testability (H12 regression) — kept
+  # out of the public docs via @doc false.
+  @doc false
+  @spec evaluate_force_authorization(term(), String.t()) :: :ok | {:error, term()}
+  def evaluate_force_authorization(:authorized, _actor_id), do: :ok
+
+  def evaluate_force_authorization({:requires_approval, _cap}, actor_id) do
+    # H12: this branch previously returned :ok when actor_id started with "human_",
+    # letting any OIDC-authenticated user bypass the approval gate on
+    # arbor://consensus/admin and force_approve/force_reject any proposal.
+    # The bypass is removed: all principals (human or agent) must pass through
+    # the explicit approval flow.
+    Logger.warning("Force operation by #{actor_id} requires approval")
+    {:error, {:unauthorized, :pending_approval}}
+  end
+
+  def evaluate_force_authorization({:error, reason}, actor_id) do
+    Logger.warning("Unauthorized force operation attempted by #{actor_id}: #{inspect(reason)}")
+    {:error, {:unauthorized, :consensus_admin_required}}
   end
 
   defp maybe_authorize(nil, _proposal), do: :ok
