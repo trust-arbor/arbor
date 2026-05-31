@@ -132,6 +132,34 @@ defmodule Arbor.Agent.SpecTest do
       {:ok, spec} = Spec.from_profile(profile)
       assert spec.trust_tier == :untrusted
     end
+
+    test "security regression (H9): unknown provider strings do not create new atoms" do
+      # H9: an attacker who can influence agent specs (via LLM output or
+      # restored persistence) used to be able to inject arbitrary provider
+      # strings, which the old rescue→String.to_atom path would convert into
+      # new atoms, exhausting the BEAM atom table.
+      # The fix routes through SafeAtom.to_existing/1 and falls back to nil.
+      unique_unknown =
+        "h9_provider_#{:erlang.unique_integer([:positive])}_#{:erlang.unique_integer([:positive])}"
+
+      profile = %Profile{
+        agent_id: "agent_h9_test",
+        display_name: "test",
+        character: Character.new(name: "test"),
+        metadata: %{}
+      }
+
+      model_config = %{"llm_provider" => unique_unknown}
+
+      {:ok, spec} = Spec.from_profile(profile, model_config)
+
+      assert is_nil(spec.provider),
+             "Unknown provider string must resolve to nil — H9 regression. " <>
+               "Got: #{inspect(spec.provider)}"
+
+      # The specific unknown string must NOT have been added to the atom table.
+      assert_raise ArgumentError, fn -> String.to_existing_atom(unique_unknown) end
+    end
   end
 
   describe "to_profile/3" do

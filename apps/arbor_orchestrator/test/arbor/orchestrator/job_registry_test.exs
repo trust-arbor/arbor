@@ -226,4 +226,43 @@ defmodule Arbor.Orchestrator.JobRegistryTest do
       assert {:error, :not_found} = JobRegistry.claim_for_recovery("nonexistent_run")
     end
   end
+
+  describe "parse_node_name atom safety (H9 regression)" do
+    test "security regression (H9): unknown owner_node strings do not create new atoms" do
+      # H9: an attacker who can write to the persistence backend used to be able
+      # to inject arbitrary owner_node strings, which the old rescue→String.to_atom
+      # path would convert into new atoms, exhausting the BEAM atom table.
+      # The fix routes through SafeAtom.to_existing/1 and falls back to nil.
+      unique_unknown =
+        "h9_node_#{:erlang.unique_integer([:positive])}@nope_#{:erlang.unique_integer([:positive])}"
+
+      raw_map = %{
+        "pipeline_id" => "h9_run_1",
+        "run_id" => "h9_run_1",
+        "graph_id" => "h9_graph",
+        "status" => "interrupted",
+        "owner_node" => unique_unknown,
+        "started_at" => DateTime.to_iso8601(DateTime.utc_now()),
+        "last_heartbeat" => DateTime.to_iso8601(DateTime.utc_now()),
+        "total_nodes" => 1,
+        "completed_count" => 0,
+        "node_durations" => %{},
+        "origin_trust_zone" => 0
+      }
+
+      Arbor.Persistence.BufferedStore.put("h9_run_1", raw_map, name: @store_name)
+      entry = JobRegistry.get("h9_run_1")
+
+      assert %Entry{} = entry
+
+      assert is_nil(entry.owner_node),
+             "Unknown owner_node string must resolve to nil — H9 regression. " <>
+               "Got: #{inspect(entry.owner_node)}"
+
+      # The specific unknown string must NOT have been added to the atom table.
+      # If String.to_existing_atom succeeds, the fix is bypassed and the bug
+      # would let an attacker exhaust the atom table via persisted records.
+      assert_raise ArgumentError, fn -> String.to_existing_atom(unique_unknown) end
+    end
+  end
 end
