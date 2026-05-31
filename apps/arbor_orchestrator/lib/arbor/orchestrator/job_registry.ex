@@ -379,9 +379,15 @@ defmodule Arbor.Orchestrator.JobRegistry do
   defp parse_node_name(n) when is_atom(n), do: n
 
   defp parse_node_name(n) when is_binary(n) do
-    String.to_existing_atom(n)
-  rescue
-    ArgumentError -> String.to_atom(n)
+    # H9: Use SafeAtom to prevent atom-table exhaustion via persisted job records.
+    # An attacker who can inject or persist job metadata could otherwise feed
+    # arbitrary owner_node strings that get converted via String.to_atom and
+    # exhaust the BEAM atom table. Unknown node names resolve to nil — the entry
+    # just won't be claimable on the (unknown) node, which is correct behavior.
+    case Arbor.Common.SafeAtom.to_existing(n) do
+      {:ok, atom} -> atom
+      {:error, _} -> nil
+    end
   end
 
   defp parse_status(s) when is_atom(s), do: s

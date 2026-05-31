@@ -391,10 +391,15 @@ defmodule Arbor.Agent.Spec do
   defp safe_to_atom(a) when is_atom(a), do: a
 
   defp safe_to_atom(s) when is_binary(s) do
-    try do
-      String.to_existing_atom(s)
-    rescue
-      ArgumentError -> String.to_atom(s)
+    # H9: Use SafeAtom to prevent atom-table exhaustion via untrusted agent specs.
+    # Specs may originate from LLM output or restored persistence records — an
+    # attacker who can influence either could otherwise feed arbitrary provider
+    # strings that get converted via String.to_atom and exhaust the BEAM atom
+    # table. Unknown providers resolve to nil; callers that need a default
+    # provider should compose with `|| spec.provider` (see line 350).
+    case Arbor.Common.SafeAtom.to_existing(s) do
+      {:ok, atom} -> atom
+      {:error, _} -> nil
     end
   end
 end
