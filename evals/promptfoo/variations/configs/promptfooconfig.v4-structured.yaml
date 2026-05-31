@@ -1,0 +1,69 @@
+# Standalone config for Variation 4: Structured Design + Deterministic Serialization
+# Model outputs a structured spec (JSON). DotSerializer produces the DOT.
+# Then the normal validate + judge pipeline runs on the generated DOT.
+
+prompts:
+  - file://../../prompts/variations/v4-structured-design.js
+
+providers:
+  - id: openai:chat:kimi-k2.6:cloud
+    label: kimi-k2.6:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 32768
+      timeout: 300000
+
+  - id: openai:chat:nemotron-3-super:cloud
+    label: nemotron-3-super:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 32768
+      timeout: 300000
+
+tests: file://../../tests/skill-to-dot-tests.yaml
+
+defaultTest:
+  options:
+    temperature: 0
+  assert:
+    # 1. Pull the final JSON object out of the model's output
+    - type: javascript
+      value: file://../../assertions/extract-json.js
+
+    # 2. Feed the extracted spec to DotSerializer (real Elixir) → produces DOT
+    #    Then store the resulting DOT so the rest of the pipeline can treat it
+    #    exactly like the free-form DOT arms.
+    - type: javascript
+      value: file://../../assertions/serialize-with-arbor.js
+
+    # From here on, the pipeline is identical to the other arms:
+    # validate the generated DOT + strict state-machine translation fidelity LLM judge.
+    # (Structural scoring is omitted for the structured arm because it currently compares
+    # the raw JSON model output against expected DOT; the meaningful signal for this arm
+    # is validate-rate + judge fidelity.)
+    - type: javascript
+      value: file://../../assertions/validate-with-arbor.js
+
+    - type: llm-rubric
+      weight: 5
+      value: |
+        You are evaluating how accurately a model has translated the content of a SKILL.md file into a state machine expressed as a DOT graph.
+
+        The SKILL.md contains the natural-language description of the skill's intent, behaviors, decisions, constraints, knowledge, and logical flow. The DOT graph is a state machine in which nodes represent states or phases (with prompts encoding the work to be done in that state) and edges represent transitions and control flow.
+
+        Judge only the quality of this translation:
+
+        - Completeness of mapping: Are all the important activities, decision points, guidance, constraints, and pieces of knowledge from the SKILL.md represented somewhere in the graph (as node responsibilities or flow structure)?
+        - Accuracy of encoding: Do the node prompts and the overall topology faithfully reflect the skill's described logic without major omissions, distortions, or additions that change the meaning?
+        - State machine fidelity: Does the resulting graph function as a coherent, executable state machine that captures what it means to perform this skill?
+
+        Do not score on:
+        - Optimal node granularity or handler selection (we will tune structural concerns separately and can automate much of this later).
+        - Robustness features or error handling (unless the SKILL.md itself explicitly describes them).
+        - Whether an autonomous agent would ultimately prefer this graph over the raw SKILL.md.
+
+        Score 0.0–1.0 strictly on translation accuracy from the SKILL.md into state-machine form. Output only the numeric score followed by 2-4 bullets on the largest translation gaps or successes.

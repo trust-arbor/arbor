@@ -1,0 +1,383 @@
+# promptfooconfig.yaml
+# Pilot promptfoo eval for Arbor SKILL.md → DOT pipeline compilation quality.
+#
+# Primary goal: Determine whether any local models loaded in LM Studio are
+# "sufficient" for production use in arbor_orchestrator's JIT skill compilation
+# (used by heartbeat cycles, sessions, and the skill library).
+#
+# Current scoring focus (as of 2026-05-29): accurate translation of SKILL.md
+# intent into a state-machine DOT graph. Structural similarity and robustness
+# dimensions are de-emphasized (low weight, no hard thresholds) because we can
+# adjust/automate much of that later. The LLM judge (heavily weighted) is the
+# primary signal. See variations/configs/ for the active standalone setups.
+#
+# Run (after starting LM Studio server + loading a model):
+#   npx promptfoo@latest eval \
+#     -c evals/promptfoo/dot-compilation/promptfooconfig.yaml \
+#     --no-cache \
+#     -o .arbor/evals/promptfoo-runs/$(date +%Y-%m-%d)-report.html
+#
+# To target a specific model in your LM Studio:
+#   promptfoo eval ... -D model="llama-3.2-3b-instruct" -D base_url="http://localhost:1234/v1"
+#
+# See README.md in this directory for full instructions, sufficiency criteria,
+# and how to add new real .arbor/skills/ test cases.
+
+# ------------------------------------------------------------------
+# PROMPTS
+#
+# Main path: Uses the dumped system prompt from the Elixir CompilationPrompt.
+#
+# For prompt experimentation, you can override via environment variable:
+#   PROMPTFOO_SYSTEM_PROMPT=../prompts/variations/v2-staged-internal.md
+#
+# Or point directly at one of the stage files or variation files.
+# ------------------------------------------------------------------
+prompts:
+  - file://../prompts/skill-to-dot-prompt.js     # Baseline: authoritative prompt from CompilationPrompt (via dump)
+
+# ------------------------------------------------------------------
+# PROVIDERS
+#
+# For local LM Studio models: see the hardcoded list below or use providers.current.yaml
+# For Ollama Cloud models (the :cloud tagged ones): 
+#   --providers evals/promptfoo/dot-compilation/providers.ollama-cloud.yaml
+# For other hosted models (Kimi, GLM, etc. direct): 
+#   --providers evals/promptfoo/dot-compilation/providers.cloud.yaml
+# ------------------------------------------------------------------
+providers:
+  # === Ollama Cloud models (the ones you have pulled with :cloud tag) ===
+  # Accessed via local Ollama's OpenAI-compatible API at :11434
+  # These are the strong hosted baselines for understanding prompt quality ceiling.
+
+  - id: openai:chat:kimi-k2.6:cloud
+    label: kimi-k2.6:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 32768   # Significantly increased for quality exploration phase (can handle very long, high-quality outputs)
+      timeout: 300000   # 5 minutes per call to allow high-quality, long outputs
+
+  - id: openai:chat:glm-5.1:cloud
+    label: glm-5.1:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 16384   # Increased for quality exploration phase
+      timeout: 180000
+
+  - id: openai:chat:minimax-m2.7:cloud
+    label: minimax-m2.7:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 16384   # Increased for quality exploration phase
+      timeout: 180000
+
+  - id: openai:chat:nemotron-3-super:cloud
+    label: nemotron-3-super:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 32768   # Significantly increased for quality exploration phase (can handle very long, high-quality outputs)
+      timeout: 300000   # 5 minutes per call to allow high-quality, long outputs
+
+  - id: openai:chat:deepseek-v4-pro:cloud
+    label: deepseek-v4-pro:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 16384   # Increased for quality exploration phase
+      timeout: 180000
+
+  - id: openai:chat:deepseek-v4-flash:cloud
+    label: deepseek-v4-flash:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 16384   # Increased for quality exploration phase
+      timeout: 180000
+
+# ------------------------------------------------------------------
+# DEFAULT VARS
+# ------------------------------------------------------------------
+defaultTest:
+  options:
+    temperature: 0
+  vars:
+    # hardware: "M4 Max 128GB"  # optional, surfaced in reports
+
+
+# ------------------------------------------------------------------
+# TESTS / DATASET
+# Seed from the original Arbor dot_compilation.jsonl + real .arbor/skills/
+#
+# For each test we supply:
+#   - skill_name, skill_body (the natural language the compiler sees)
+#   - expected_dot (ground truth for structural scorer)
+#   - category (for filtering / reporting)
+#
+# The assertions will:
+#   1. Extract clean DOT from model output (strip fences + thinking traces)
+#   2. Run `mix arbor.pipeline.validate` (hard syntactic + lint gate using real Arbor parser)
+#   3. Compute structural similarity (ported DotDiff logic: node/edge counts, handler distribution, keyword coverage)
+#   4. Strong LLM-as-judge rubric focused on *semantic fidelity* — does the DOT accurately and completely represent the SKILL.md intent?
+# ------------------------------------------------------------------
+tests:
+  # ----------------------------------------------------------------
+  # 1. Reference / minimal skill (from original dataset)
+  #    Expected: exactly 3 nodes, 2 edges, category=reference
+  # ----------------------------------------------------------------
+  - description: "docker-expert — reference skill (minimal 3-node)"
+    vars:
+      skill_name: "docker-expert"
+      skill_body: |
+        ---
+        name: docker-expert
+        description: Docker and container orchestration expert. Provides best practices for Dockerfiles, compose files, networking, security, and CI/CD integration.
+        ---
+
+        # Docker Expert
+
+        You are a Docker and container orchestration expert.
+
+        ## Best Practices
+        - Use multi-stage builds to minimize image size
+        - Pin base image versions (avoid :latest in production)
+        - Use .dockerignore to exclude unnecessary files
+        - Run containers as non-root users
+        - Use health checks for all services
+        - Leverage layer caching by ordering Dockerfile instructions
+
+        ## Security
+        - Scan images for vulnerabilities (Trivy, Snyk)
+        - Use secrets management (Docker secrets, Vault)
+        - Limit container capabilities
+        - Use read-only root filesystems where possible
+
+        ## Compose
+        - Use named volumes for persistent data
+        - Define proper network isolation
+        - Set resource limits (CPU, memory)
+        - Use depends_on with health conditions
+
+        ## CI/CD
+        - Build images in CI, push to registry
+        - Use build args for dynamic configuration
+        - Tag images with git SHA for traceability
+      expected_dot: |
+        digraph docker_reference {
+          // Category: reference
+          start [label="start" type="start"]
+          reference [label="Docker Reference" type="llm"
+            prompt="Load Docker best practices, security guidelines, compose patterns, and CI/CD recommendations as context for the agent."]
+          done [label="done" type="exit"]
+
+          start -> reference
+          reference -> done
+        }
+      category: "reference"
+    assert:
+      # These will be implemented in ../assertions/
+      - type: javascript
+        value: file://../assertions/extract-dot.js
+      - type: javascript
+        value: file://../assertions/validate-with-arbor.js
+        config:
+          # If the validate script fails, we still want the detailed reason
+          pass_on_error: false
+      - type: javascript
+        value: file://../assertions/score-structural-similarity.js
+        threshold: 0.85   # strict for the tiny reference case
+        config:
+          expected: "{{expected_dot}}"
+      - type: contains
+        value: "// Category:"
+      - type: llm-rubric
+        value: >
+          You are a strict judge of SKILL.md → DOT compilation quality. Your job is to decide whether the generated DOT pipeline is high enough quality that a competent autonomous agent should prefer running it over simply being given the original SKILL.md.
+
+          Score on a 0.0–1.0 scale. Be ruthless.
+
+          Evaluation dimensions (weight them roughly equally):
+
+          1. **Intent Fidelity / Completeness** (most important)
+             - Does every meaningful behavior, step, decision, constraint, and piece of knowledge from the SKILL.md have a corresponding place in the pipeline?
+             - Would an agent following this DOT be able to perform the skill at roughly the same level of quality as someone who had read the full SKILL.md?
+
+          2. **Actionability of Node Prompts**
+             - Are the prompts inside nodes crisp, specific, and executable by an agent that does *not* have the original SKILL.md in context?
+             - Or are they vague summaries that still require the reader to go back to the skill?
+
+          3. **Appropriate Structure & Granularity**
+             - Is the decomposition into nodes reasonable (neither massively over-fragmented nor lazily collapsed)?
+             - Are handler types (llm / codergen / shell / exec / etc.) chosen sensibly?
+             - For reference/guideline skills, is it appropriately minimal?
+
+          4. **Robustness & Real-World Usability**
+             - Where the original skill implies fallibility, ambiguity, or the need for iteration/error recovery, does the pipeline account for it (retries, max_iterations, alternative paths, human checkpoints, etc.)?
+
+          5. **Overall Preference**
+             - If you were building an autonomous agent, would you rather give it this DOT pipeline or the original SKILL.md text to follow?
+             - Subtract points heavily for anything that would cause the agent to do the skill noticeably worse than someone who had the SKILL.md.
+
+          Output only the numeric score followed by 2-4 bullet points explaining the biggest strengths and weaknesses.
+
+  # ----------------------------------------------------------------
+  # 2. Heartbeat cognitive mode (real .arbor/skills/ entry)
+  #    These are "reference" per the CompilationPrompt rules.
+  #    We hand-author a minimal expected for the eval.
+  # ----------------------------------------------------------------
+  - description: "cognitive-goal-pursuit — real heartbeat reference skill"
+    vars:
+      skill_name: "cognitive-goal-pursuit"
+      skill_body: |
+        ---
+        name: cognitive-goal-pursuit
+        description: Cognitive mode prompt for goal pursuit — directs the agent to make concrete progress on active goals.
+        tags: [heartbeat, cognitive, goal-pursuit]
+        category: heartbeat
+        version: 1.0.0
+        ---
+
+        ## Current Mode: Goal Pursuit
+
+        You have active goals to work on. This is your time to make progress.
+
+        - Review your active goals below and pick the highest priority one
+        - Identify the single most impactful action you can take right now
+        - Use available tools to make concrete progress (read files, run commands, analyze code)
+        - Report progress via goal_updates with the goal_id and new progress value
+        - If blocked on a goal, note what's blocking you and try a different approach
+
+        Be proactive. Take action. Goals don't advance through reflection alone.
+      expected_dot: |
+        digraph cognitive_goal_pursuit {
+          // Category: reference
+          start [label="start" type="start"]
+          reference [label="Goal Pursuit Mode" type="llm"
+            prompt="You have active goals. Review them, pick the highest priority, take the single most impactful concrete action using tools, and report progress via goal_updates. Be proactive."]
+          done [label="done" type="exit"]
+
+          start -> reference
+          reference -> done
+        }
+      category: "reference"
+    assert:
+      - type: javascript
+        value: file://../assertions/extract-dot.js
+      - type: javascript
+        value: file://../assertions/validate-with-arbor.js
+      - type: javascript
+        value: file://../assertions/score-structural-similarity.js
+        threshold: 0.70
+        config:
+          expected: "{{expected_dot}}"
+      - type: contains
+        value: "// Category:"
+      - type: llm-rubric
+        value: >
+          Evaluate semantic fidelity: Does the generated DOT faithfully capture the *entire* intent and content of the provided SKILL.md?
+          - All key sections, principles, or steps described in the skill must be reflected in node prompts or structure.
+          - For reference/guideline skills (like this heartbeat cognitive mode), a single high-quality "reference" node is usually correct.
+          - The output must be clean DOT with the proper // Category comment and no leftover thinking traces.
+          - Be strict on completeness — if important behavioral instructions from the skill are missing or distorted, score low.
+
+  # ----------------------------------------------------------------
+  # 3. A richer workflow example (from original dataset, shortened here for config size)
+  #    In a real run you would import the full expected from the jsonl or a sidecar file.
+  # ----------------------------------------------------------------
+  - description: "seo-audit — decision/audit workflow (representative complex case)"
+    vars:
+      skill_name: "seo-audit"
+      skill_body: |
+        ---
+        name: seo-audit
+        description: Perform a comprehensive SEO audit analyzing crawlability, technical SEO, on-page optimization, content quality, and authority.
+        ---
+
+        # SEO Audit
+
+        Perform a comprehensive website SEO audit.
+
+        ## Context Gathering
+        Ask about: site type, business goals, priority keywords, known issues, scope of audit.
+
+        ## Audit Areas (in priority order)
+        1. **Crawlability**: robots.txt, XML sitemap, site architecture, crawl budget.
+        2. **Technical SEO**: indexation, canonicalization, Core Web Vitals, mobile, HTTPS, URLs.
+        3. **On-Page SEO**: titles, meta descriptions, headings, content, images, internal links.
+        4. **Content Quality**: E-E-A-T signals, content depth, user engagement.
+        5. **Authority & Links**: backlink profile, domain authority, citations.
+
+        ## Report
+        Compile an executive summary + prioritized action plan by category.
+      expected_dot: |
+        digraph seo_audit {
+          // Category: decision_tree
+          start [label="start" type="start"]
+
+          gather_context [label="Gather Context" type="llm"
+            prompt="Ask: site type, business goal, priority keywords, known issues, scope."]
+
+          crawlability [label="Crawlability Audit" type="llm"
+            prompt="Check: robots.txt, XML sitemap, site architecture, crawl budget."]
+          technical [label="Technical SEO" type="llm"
+            prompt="Check: indexation, canonicalization, Core Web Vitals, mobile, HTTPS, URLs."]
+          on_page [label="On-Page SEO" type="llm"
+            prompt="Check: titles, meta descriptions, headings, content, images, internal links."]
+          content [label="Content Quality" type="llm"
+            prompt="Assess: E-E-A-T signals, content depth, user engagement."]
+          authority [label="Authority & Links" type="llm"
+            prompt="Assess: backlink profile, domain authority, citations."]
+
+          compile_report [label="Compile Audit Report" type="llm"
+            prompt="Write executive summary, findings by category, prioritized action plan."]
+
+          done [label="done" type="exit"]
+
+          start -> gather_context
+          gather_context -> crawlability
+          crawlability -> technical
+          technical -> on_page
+          on_page -> content
+          content -> authority
+          authority -> compile_report
+          compile_report -> done
+        }
+      category: "workflow"
+    assert:
+      - type: javascript
+        value: file://../assertions/extract-dot.js
+      - type: javascript
+        value: file://../assertions/validate-with-arbor.js
+      - type: javascript
+        value: file://../assertions/score-structural-similarity.js
+        threshold: 0.60   # lower threshold for complex workflows (historical Haiku was ~0.92 on this one)
+        config:
+          expected: "{{expected_dot}}"
+      - type: contains
+        value: "// Category:"
+      - type: llm-rubric
+        value: >
+          The generated DOT is a faithful, executable representation of the SEO audit workflow.
+          It has a context-gathering step, covers the major audit areas (without hallucinating extra ones),
+          ends with a report compilation step, and uses appropriate llm nodes. Minor label/prompt wording differences are acceptable
+          as long as the overall structure and intent match.
+
+# ------------------------------------------------------------------
+# Global options
+# ------------------------------------------------------------------
+options:
+  # Show detailed reasons in CI / HTML reports
+  showPrompts: true
+  showPassing: false   # keep output manageable; failures are what we care about for model selection
+
+  # If you want to run only reference tests for a quick smoke:
+  # filter: "category=reference"

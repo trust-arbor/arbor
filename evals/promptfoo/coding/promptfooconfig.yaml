@@ -1,0 +1,12 @@
+# Placeholder for future Elixir coding / Arbor-specific codegen evals.
+# See the main dot-compilation eval and the heartbeat-contract example for patterns.
+
+# This can later pull from the existing elixir_coding.jsonl or arbor_coding.jsonl
+# and use a mix of:
+# - javascript assertions that try to compile snippets in a temp dir
+# - llm-rubric for "Elixir-idiomatic and safe"
+# - exec calls to mix format --check-formatted on extracted code
+
+prompts: []
+providers: []
+tests: []

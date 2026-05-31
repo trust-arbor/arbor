@@ -1,0 +1,63 @@
+# Ollama Cloud providers (accessed via local Ollama OpenAI-compatible API)
+#
+# These models are tagged with :cloud and accessed through your local
+# `ollama` server (http://localhost:11434/v1), which handles the cloud
+# routing and your OLLAMA_API_KEY.
+#
+# This is currently the best way to evaluate strong hosted models
+# against the exact same SKILL.md → DOT test suite as your local models.
+
+providers:
+  - id: openai:chat:kimi-k2.6:cloud
+    label: kimi-k2.6:cloud (ollama)
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 8192
+      timeout: 120000
+
+  - id: openai:chat:glm-5.1:cloud
+    label: glm-5.1:cloud (ollama)
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 8192
+      timeout: 120000
+
+  - id: openai:chat:minimax-m2.7:cloud
+    label: minimax-m2.7:cloud (ollama)
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 8192
+      timeout: 120000
+
+  - id: openai:chat:nemotron-3-super:cloud
+    label: nemotron-3-super:cloud (ollama)
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 8192
+      timeout: 180000
+
+  - id: openai:chat:deepseek-v4-pro:cloud
+    label: deepseek-v4-pro:cloud (ollama)
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 8192
+      timeout: 120000
+
+  - id: openai:chat:deepseek-v4-flash:cloud
+    label: deepseek-v4-flash:cloud (ollama)
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 8192
+      timeout: 120000

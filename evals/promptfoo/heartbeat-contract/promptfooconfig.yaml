@@ -1,0 +1,51 @@
+# Example of a non-DOT promptfoo eval for Arbor.
+#
+# Heartbeat turns are the highest-volume LLM calls in production.
+# They must return strict JSON conforming to a known contract.
+#
+# This is deliberately small — just enough to show the pattern for
+# "different parts of Arbor".
+
+prompts:
+  - |
+    You are in a heartbeat cycle. Return ONLY a single JSON object with these exact keys:
+    - "mode": one of "goal_pursuit" | "reflection" | "plan_execution" | "consolidation"
+    - "reasoning": short string (1-2 sentences)
+    - "actions": array of objects (can be empty)
+
+    User message: {{user_message}}
+
+providers:
+  - id: openai:chat:{{model}}
+    label: lmstudio-heartbeat
+    config:
+      apiBaseUrl: "{{base_url}}"
+      apiKey: "lm-studio"
+      temperature: 0.2
+      max_tokens: 1024
+      response_format: { type: "json_object" }   # many local servers honor this
+
+defaultTest:
+  vars:
+    base_url: "http://localhost:1234/v1"
+    model: "qwen2.5-coder-7b"
+
+tests:
+  - description: "simple goal pursuit turn"
+    vars:
+      user_message: "I have an active goal to improve the DOT compiler. What should I do next?"
+    assert:
+      - type: is-json
+      - type: javascript
+        value: |
+          (output, ctx) => {
+            try {
+              const j = JSON.parse(output);
+              const ok = j.mode && j.reasoning && Array.isArray(j.actions);
+              return { pass: ok, score: ok ? 1 : 0, reason: ok ? 'Has required keys' : 'Missing mode/reasoning/actions' };
+            } catch (e) {
+              return { pass: false, score: 0, reason: 'Not valid JSON: ' + e.message };
+            }
+          }
+      - type: llm-rubric
+        value: The JSON mode is appropriate for the request and the reasoning is coherent.

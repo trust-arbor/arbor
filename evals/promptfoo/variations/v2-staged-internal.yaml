@@ -1,0 +1,62 @@
+# Variation 2: Staged Internal Thinking
+# Explicitly asks the model to do Analyze → Design → Critique internally
+
+extends: ../promptfooconfig.yaml
+
+prompts:
+  - file://../prompts/variations/v2-staged-internal.md
+
+providers:
+  - id: openai:chat:kimi-k2.6:cloud
+    label: kimi-k2.6:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 8192
+      timeout: 120000
+
+  - id: openai:chat:glm-5.1:cloud
+    label: glm-5.1:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 8192
+      timeout: 120000
+
+  - id: openai:chat:minimax-m2.7:cloud
+    label: minimax-m2.7:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 8192
+      timeout: 120000
+
+  - id: openai:chat:nemotron-3-super:cloud
+    label: nemotron-3-super:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 8192
+      timeout: 180000
+
+  - id: openai:chat:deepseek-v4-pro:cloud
+    label: deepseek-v4-pro:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 8192
+      timeout: 120000
+
+  - id: openai:chat:deepseek-v4-flash:cloud
+    label: deepseek-v4-flash:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 8192
+      timeout: 120000

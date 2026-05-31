@@ -266,13 +266,21 @@ defmodule Arbor.Actions.Skill.CompilationPrompt do
     9. Use `llm` type for reasoning/analysis nodes, `codergen` for code/artifact generation.
     10. Conditional edges use `label="condition"` syntax.
     11. **Node granularity**: Each distinct step or bullet point in the skill description becomes its own node. Do NOT merge multiple steps into a single node. If the skill says "Study X", "Load Y", "Review Z" — that's 3 nodes, not 1 "Research" node.
+    12. **Intent fidelity is paramount**: The generated pipeline should allow an agent following it to perform the skill as described, without missing important behaviors, context, or decision points from the original SKILL.md.
 
     #{@few_shot_examples}
 
-    ## Output Format
+    ## Output Format & Reasoning
 
-    Output ONLY the DOT graph, starting with `// Category:` and then `digraph`.
-    Do not include markdown fences, explanations, or commentary outside the DOT.
+    You may (and often should) think step by step internally before producing the final graph.
+    When you are ready, output the complete DOT graph.
+
+    The graph **must**:
+    - Start with a `// Category: ...` comment on its own line.
+    - Contain a single valid `digraph`.
+    - Faithfully capture the full intent, steps, decisions, loops, error handling, and knowledge requirements described in the SKILL.md.
+
+    You do **not** need to suppress all reasoning text in your response. The downstream extractor will pull the final DOT graph. Focus on producing the highest-quality, most faithful pipeline possible rather than worrying about perfect cleanliness of the raw response.
     """
   end
 

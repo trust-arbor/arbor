@@ -87,6 +87,13 @@ venv/
 
 # SDLC Hand session artifacts (debug logs, session transcripts, todos)
 .claude-sdlc/debug/
+
+# Promptfoo LLM evaluation framework (local cache + per-run outputs)
+.promptfoo/
+evals/promptfoo/output/
+evals/promptfoo/*.local*
+evals/promptfoo/**/*.local.*
+evals/promptfoo/.env*
 .claude-sdlc/projects/
 .claude-sdlc/todos/
 .claude-sdlc/.claude.json

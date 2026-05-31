@@ -1,0 +1,47 @@
+# Providers for the models the user currently has loaded (May 2026 session)
+# 3 small + 2 medium, as reported.
+
+- id: openai:chat:granite-4.1-3b
+  label: granite-4.1-3b (small)
+  config:
+    apiBaseUrl: http://localhost:1234/v1
+    apiKey: lm-studio
+    temperature: 0.0
+    max_tokens: 8192     # Increased — many local models need headroom for reasoning + full DOT output
+    timeout: 180000
+
+- id: openai:chat:gemma-4-e4b-it@q4_k_xl
+  label: gemma-4-e4b-q4 (small)
+  config:
+    apiBaseUrl: http://localhost:1234/v1
+    apiKey: lm-studio
+    temperature: 0.0
+    max_tokens: 8192
+    timeout: 180000
+
+- id: openai:chat:nvidia/nemotron-3-nano-4b
+  label: nemotron-nano-4b (small)
+  config:
+    apiBaseUrl: http://localhost:1234/v1
+    apiKey: lm-studio
+    temperature: 0.0
+    max_tokens: 8192
+    timeout: 180000
+
+- id: openai:chat:nemotron-cascade-2-30b-a3b
+  label: nemotron-cascade-30b (medium)
+  config:
+    apiBaseUrl: http://localhost:1234/v1
+    apiKey: lm-studio
+    temperature: 0.0
+    max_tokens: 12288
+    timeout: 300000   # medium models can be slower
+
+- id: openai:chat:qwen3.6-27b-mlx
+  label: qwen3.6-27b-mlx (medium)
+  config:
+    apiBaseUrl: http://localhost:1234/v1
+    apiKey: lm-studio
+    temperature: 0.0
+    max_tokens: 12288
+    timeout: 300000

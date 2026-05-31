@@ -1,0 +1,192 @@
+# Shared test cases (data only) for SKILL.md → DOT prompt experimentation.
+# Assertions (including the LLM judge rubric and structural scorer) are supplied
+# by the calling config via defaultTest.assert. This keeps relative paths reliable
+# and makes it easy to change scoring focus (e.g. current phase: translation fidelity
+# into state-machine form; structural concerns de-emphasized for now).
+#
+# Reference this file as:
+#   tests: file://../../tests/skill-to-dot-tests.yaml
+# from a config in evals/promptfoo/variations/configs/ (or equivalent).
+
+- description: docker-expert — reference skill (minimal 3-node)
+  vars:
+    skill_name: docker-expert
+    skill_body: '---
+
+      name: docker-expert
+
+      description: Docker and container orchestration expert. Provides best practices
+      for Dockerfiles, compose files, networking, security, and CI/CD integration.
+
+      ---
+
+
+      # Docker Expert
+
+
+      You are a Docker and container orchestration expert.
+
+
+      ## Best Practices
+
+      - Use multi-stage builds to minimize image size
+
+      - Pin base image versions (avoid :latest in production)
+
+      - Use .dockerignore to exclude unnecessary files
+
+      - Run containers as non-root users
+
+      - Use health checks for all services
+
+      - Leverage layer caching by ordering Dockerfile instructions
+
+
+      ## Security
+
+      - Scan images for vulnerabilities (Trivy, Snyk)
+
+      - Use secrets management (Docker secrets, Vault)
+
+      - Limit container capabilities
+
+      - Use read-only root filesystems where possible
+
+
+      ## Compose
+
+      - Use named volumes for persistent data
+
+      - Define proper network isolation
+
+      - Set resource limits (CPU, memory)
+
+      - Use depends_on with health conditions
+
+
+      ## CI/CD
+
+      - Build images in CI, push to registry
+
+      - Use build args for dynamic configuration
+
+      - Tag images with git SHA for traceability
+
+      '
+    expected_dot: "digraph docker_reference {\n  // Category: reference\n  start [label=\"\
+      start\" type=\"start\"]\n  reference [label=\"Docker Reference\" type=\"llm\"\
+      \n    prompt=\"Load Docker best practices, security guidelines, compose patterns,\
+      \ and CI/CD recommendations as context for the agent.\"]\n  done [label=\"done\"\
+      \ type=\"exit\"]\n\n  start -> reference\n  reference -> done\n}\n"
+    category: reference
+- description: cognitive-goal-pursuit — real heartbeat reference skill
+  vars:
+    skill_name: cognitive-goal-pursuit
+    skill_body: '---
+
+      name: cognitive-goal-pursuit
+
+      description: Cognitive mode prompt for goal pursuit — directs the agent to make
+      concrete progress on active goals.
+
+      tags: [heartbeat, cognitive, goal-pursuit]
+
+      category: heartbeat
+
+      version: 1.0.0
+
+      ---
+
+
+      ## Current Mode: Goal Pursuit
+
+
+      You have active goals to work on. This is your time to make progress.
+
+
+      - Review your active goals below and pick the highest priority one
+
+      - Identify the single most impactful action you can take right now
+
+      - Use available tools to make concrete progress (read files, run commands, analyze
+      code)
+
+      - Report progress via goal_updates with the goal_id and new progress value
+
+      - If blocked on a goal, note what''s blocking you and try a different approach
+
+
+      Be proactive. Take action. Goals don''t advance through reflection alone.
+
+      '
+    expected_dot: "digraph cognitive_goal_pursuit {\n  // Category: reference\n  start\
+      \ [label=\"start\" type=\"start\"]\n  reference [label=\"Goal Pursuit Mode\"\
+      \ type=\"llm\"\n    prompt=\"You have active goals. Review them, pick the highest\
+      \ priority, take the single most impactful concrete action using tools, and\
+      \ report progress via goal_updates. Be proactive.\"]\n  done [label=\"done\"\
+      \ type=\"exit\"]\n\n  start -> reference\n  reference -> done\n}\n"
+    category: reference
+- description: seo-audit — decision/audit workflow (representative complex case)
+  vars:
+    skill_name: seo-audit
+    skill_body: '---
+
+      name: seo-audit
+
+      description: Perform a comprehensive SEO audit analyzing crawlability, technical
+      SEO, on-page optimization, content quality, and authority.
+
+      ---
+
+
+      # SEO Audit
+
+
+      Perform a comprehensive website SEO audit.
+
+
+      ## Context Gathering
+
+      Ask about: site type, business goals, priority keywords, known issues, scope
+      of audit.
+
+
+      ## Audit Areas (in priority order)
+
+      1. **Crawlability**: robots.txt, XML sitemap, site architecture, crawl budget.
+
+      2. **Technical SEO**: indexation, canonicalization, Core Web Vitals, mobile,
+      HTTPS, URLs.
+
+      3. **On-Page SEO**: titles, meta descriptions, headings, content, images, internal
+      links.
+
+      4. **Content Quality**: E-E-A-T signals, content depth, user engagement.
+
+      5. **Authority & Links**: backlink profile, domain authority, citations.
+
+
+      ## Report
+
+      Compile an executive summary + prioritized action plan by category.
+
+      '
+    expected_dot: "digraph seo_audit {\n  // Category: decision_tree\n  start [label=\"\
+      start\" type=\"start\"]\n\n  gather_context [label=\"Gather Context\" type=\"\
+      llm\"\n    prompt=\"Ask: site type, business goal, priority keywords, known\
+      \ issues, scope.\"]\n\n  crawlability [label=\"Crawlability Audit\" type=\"\
+      llm\"\n    prompt=\"Check: robots.txt, XML sitemap, site architecture, crawl\
+      \ budget.\"]\n  technical [label=\"Technical SEO\" type=\"llm\"\n    prompt=\"\
+      Check: indexation, canonicalization, Core Web Vitals, mobile, HTTPS, URLs.\"\
+      ]\n  on_page [label=\"On-Page SEO\" type=\"llm\"\n    prompt=\"Check: titles,\
+      \ meta descriptions, headings, content, images, internal links.\"]\n  content\
+      \ [label=\"Content Quality\" type=\"llm\"\n    prompt=\"Assess: E-E-A-T signals,\
+      \ content depth, user engagement.\"]\n  authority [label=\"Authority & Links\"\
+      \ type=\"llm\"\n    prompt=\"Assess: backlink profile, domain authority, citations.\"\
+      ]\n\n  compile_report [label=\"Compile Audit Report\" type=\"llm\"\n    prompt=\"\
+      Write executive summary, findings by category, prioritized action plan.\"]\n\
+      \n  done [label=\"done\" type=\"exit\"]\n\n  start -> gather_context\n  gather_context\
+      \ -> crawlability\n  crawlability -> technical\n  technical -> on_page\n  on_page\
+      \ -> content\n  content -> authority\n  authority -> compile_report\n  compile_report\
+      \ -> done\n}\n"
+    category: workflow

@@ -1,0 +1,64 @@
+# Standalone config for Variation 1: Fidelity Plus
+prompts:
+  - file://../../prompts/variations/v1-fidelity-plus.md
+
+providers:
+  - id: openai:chat:kimi-k2.6:cloud
+    label: kimi-k2.6:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 32768  # high for quality exploration (Kimi/Nemotron)
+      timeout: 120000
+
+  - id: openai:chat:glm-5.1:cloud
+    label: glm-5.1:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 32768  # high for quality exploration (Kimi/Nemotron)
+      timeout: 120000
+
+  - id: openai:chat:minimax-m2.7:cloud
+    label: minimax-m2.7:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 32768  # high for quality exploration (Kimi/Nemotron)
+      timeout: 120000
+
+  - id: openai:chat:nemotron-3-super:cloud
+    label: nemotron-3-super:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 32768  # high for quality exploration (Kimi/Nemotron)
+      timeout: 180000
+
+  - id: openai:chat:deepseek-v4-pro:cloud
+    label: deepseek-v4-pro:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 32768  # high for quality exploration (Kimi/Nemotron)
+      timeout: 120000
+
+  - id: openai:chat:deepseek-v4-flash:cloud
+    label: deepseek-v4-flash:cloud
+    config:
+      apiBaseUrl: http://localhost:11434/v1
+      apiKey: ollama
+      temperature: 0.0
+      max_tokens: 32768  # high for quality exploration (Kimi/Nemotron)
+      timeout: 120000
+
+tests: file://../../tests/skill-to-dot-tests.yaml
+
+defaultTest:
+  options:
+    temperature: 0

@@ -636,15 +636,70 @@ defmodule Arbor.Actions.Skill do
     end
 
     defp extract_dot_from_response(response) when is_binary(response) do
-      # Extract DOT graph from markdown fence or raw response
-      case Regex.run(~r/```(?:dot|graphviz)?\s*\n(digraph[\s\S]*?)\n```/m, response) do
+      text = to_string(response)
+
+      # 1. Strip common thinking/reasoning blocks first
+      cleaned =
+        text
+        |> String.replace(~r/<think>[\s\S]*?<\/think>/i, "")
+        |> String.replace(~r/Thinking:[\s\S]*?(?=\n\/\/ Category:|\ndigraph|$)/i, "")
+        |> String.replace(~r/```(?:dot|graphviz)?\s*\n([\s\S]*?)\n```/m, "\\1")
+
+      # 2. Try to find a digraph block (prefer one that starts with the category comment)
+      case Regex.run(~r/(\/\/ Category:.*?\n)?\s*(digraph\s+\w+\s*\{[\s\S]*\})/m, cleaned) do
+        [_, _category, dot] ->
+          String.trim(dot)
+
         [_, dot] ->
           String.trim(dot)
 
         nil ->
-          if String.starts_with?(String.trim(response), "digraph") do
-            String.trim(response)
+          # Fallback: just the first balanced digraph we can find
+          case Regex.run(~r/(digraph\s+\w+\s*\{)/m, cleaned) do
+            [start] ->
+              start_idx = :binary.match(cleaned, start) |> elem(0)
+              rest = binary_part(cleaned, start_idx, byte_size(cleaned) - start_idx)
+              extract_balanced_digraph(rest)
+
+            nil ->
+              nil
           end
+      end
+    end
+
+    defp extract_balanced_digraph(text) do
+      # Simple balanced brace extractor for digraph { ... }
+      case String.split(text, "{", parts: 2) do
+        [_, rest] ->
+          depth = 1
+          acc = "{"
+
+          {final, _} =
+            Enum.reduce_while(String.graphemes(rest), {acc, depth}, fn char, {acc, d} ->
+              new_d =
+                case char do
+                  "{" -> d + 1
+                  "}" -> d - 1
+                  _ -> d
+                end
+
+              new_acc = acc <> char
+
+              if new_d == 0 do
+                {:halt, {new_acc, new_d}}
+              else
+                {:cont, {new_acc, new_d}}
+              end
+            end)
+
+          if String.ends_with?(final, "}") do
+            final
+          else
+            nil
+          end
+
+        _ ->
+          nil
       end
     end
 
