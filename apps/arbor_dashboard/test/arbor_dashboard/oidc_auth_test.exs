@@ -110,6 +110,32 @@ defmodule Arbor.Dashboard.OidcAuthTest do
     end
   end
 
+  describe "login grant policy (H11 regression)" do
+    test "security regression (H11): does NOT auto-grant arbor://consensus/admin" do
+      # H11: previously, every OIDC login auto-granted arbor://consensus/admin,
+      # giving any authenticated user force_approve/force_reject on every proposal.
+      # Admin rights must come from explicit role assignment, not from login.
+      resources = OidcAuth.login_grant_resources()
+
+      refute "arbor://consensus/admin" in resources,
+             "OIDC login must not auto-grant arbor://consensus/admin — H11 regression. " <>
+               "Granting admin to every authenticated user collapses consensus into a " <>
+               "single-operator model."
+    end
+
+    test "security regression (H11): no /admin capability is auto-granted on login" do
+      # Defensive check: catch any future drift where a different /admin resource
+      # gets added to the auto-grant list.
+      resources = OidcAuth.login_grant_resources()
+
+      for resource <- resources do
+        refute String.contains?(resource, "/admin"),
+               "OIDC login auto-grants admin capability #{inspect(resource)} — H11 regression. " <>
+                 "Admin caps must be assigned by role, not by login."
+      end
+    end
+  end
+
   describe "callback_uri construction" do
     test "builds correct callback URI" do
       # We can test this indirectly through the login path
