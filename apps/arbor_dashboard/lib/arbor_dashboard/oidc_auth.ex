@@ -45,8 +45,24 @@ defmodule Arbor.Dashboard.OidcAuth do
   def call(conn, _opts) do
     case oidc_provider() do
       nil ->
-        # OIDC not configured — open access (dev/test)
-        conn
+        if require_auth?() do
+          # P0-1: fail closed when no OIDC provider is configured but auth is required
+          # (production sets require_auth: true). Returning the connection unchanged
+          # here would expose the dashboard with no authentication at all.
+          Logger.error(
+            "[OidcAuth] require_auth is true but no OIDC provider is configured — denying access"
+          )
+
+          conn
+          |> send_resp(
+            503,
+            "Dashboard authentication required but no OIDC provider configured"
+          )
+          |> halt()
+        else
+          # OIDC not configured — open access (dev/test)
+          conn
+        end
 
       _provider ->
         conn = fetch_session(conn)
@@ -276,6 +292,8 @@ defmodule Arbor.Dashboard.OidcAuth do
       _ -> nil
     end
   end
+
+  defp require_auth?, do: Application.get_env(:arbor_dashboard, :require_auth, false)
 
   defp callback_uri(conn) do
     scheme = if conn.scheme == :https, do: "https", else: "http"

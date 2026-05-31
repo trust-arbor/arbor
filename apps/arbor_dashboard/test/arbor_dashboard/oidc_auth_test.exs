@@ -19,14 +19,43 @@ defmodule Arbor.Dashboard.OidcAuthTest do
   end
 
   describe "when OIDC is not configured" do
-    test "passes through all requests (open access)" do
-      # With no OIDC providers configured, all requests pass through
+    test "passes through all requests (open access) when require_auth is false" do
+      # With no OIDC providers configured and require_auth: false (dev/test default),
+      # all requests pass through
       conn =
         conn(:get, "/")
         |> init_test_session(%{})
         |> OidcAuth.call(@opts)
 
       refute conn.halted
+    end
+
+    test "security regression (P0-1): denies access when OIDC missing and require_auth: true" do
+      # Production config sets require_auth: true. Without OIDC, the dashboard must
+      # NOT fall through to open access — that would expose memory, capabilities,
+      # signals, and agent controls to anyone who can reach the endpoint.
+      original = Application.get_env(:arbor_dashboard, :require_auth)
+      Application.put_env(:arbor_dashboard, :require_auth, true)
+
+      on_exit(fn ->
+        if is_nil(original) do
+          Application.delete_env(:arbor_dashboard, :require_auth)
+        else
+          Application.put_env(:arbor_dashboard, :require_auth, original)
+        end
+      end)
+
+      conn =
+        conn(:get, "/")
+        |> init_test_session(%{})
+        |> OidcAuth.call(@opts)
+
+      assert conn.halted,
+             "Dashboard must halt when OIDC absent and require_auth true — P0-1 regression"
+
+      assert conn.status == 503,
+             "Expected 503 Service Unavailable when auth required but unconfigured " <>
+               "(got #{conn.status}) — P0-1 regression"
     end
 
     test "login route returns 404" do
