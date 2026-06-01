@@ -386,4 +386,111 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert {:ok, %{}} = Handler.init([])
     end
   end
+
+  describe "arbor_status access control (M8 regression)" do
+    setup do
+      # Handler reads :arbor_authenticated_agent_id from the request process's
+      # dict (set by SignedRequestAuth). Clear between tests.
+      Process.delete(:arbor_authenticated_agent_id)
+      :ok
+    end
+
+    test "security regression (M8): omitting agent_id no longer defaults to first agent for memory",
+         %{state: state} do
+      # M8: previously, calling arbor_status with component=memory and no
+      # agent_id silently picked the first registered agent and returned
+      # their working memory. Any authenticated MCP client could enumerate
+      # state without naming a target. The fix requires an explicit agent_id.
+      Process.put(:arbor_authenticated_agent_id, "caller_m8_test")
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool("arbor_status", %{"component" => "memory"}, state)
+
+      [%{type: "text", text: text}] = result.content
+
+      assert text =~ "requires an explicit `agent_id`",
+             "Expected the M8 denial message about explicit agent_id, got: #{inspect(text)}"
+
+      refute text =~ ~r/^# Memory for/,
+             "Memory detail leaked despite missing agent_id — M8 regression"
+    end
+
+    test "security regression (M8): omitting agent_id no longer defaults to first agent for capabilities",
+         %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "caller_m8_test")
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool("arbor_status", %{"component" => "capabilities"}, state)
+
+      [%{type: "text", text: text}] = result.content
+      assert text =~ "requires an explicit `agent_id`"
+    end
+
+    test "security regression (M8): omitting agent_id no longer defaults to first agent for goals",
+         %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "caller_m8_test")
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool("arbor_status", %{"component" => "goals"}, state)
+
+      [%{type: "text", text: text}] = result.content
+      assert text =~ "requires an explicit `agent_id`"
+    end
+
+    test "security regression (M8): no authenticated caller denies access", %{state: state} do
+      # No Process.put — simulates a request that reached the handler without
+      # the SignedRequestAuth pipeline running (or one whose auth was stripped).
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_status",
+          %{"component" => "memory", "agent_id" => "any_target"},
+          state
+        )
+
+      [%{type: "text", text: text}] = result.content
+
+      assert text =~ "no authenticated caller",
+             "Expected the M8 unauthenticated-caller denial, got: #{inspect(text)}"
+
+      refute text =~ ~r/^# Memory for/,
+             "Memory detail returned despite missing caller — M8 regression"
+    end
+
+    test "security regression (M8): caller without capability is denied", %{state: state} do
+      # Caller is authenticated but holds no arbor://status/memory/{target} cap.
+      Process.put(:arbor_authenticated_agent_id, "caller_no_cap_m8")
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_status",
+          %{"component" => "memory", "agent_id" => "victim_m8"},
+          state
+        )
+
+      [%{type: "text", text: text}] = result.content
+
+      assert text =~ "not authorized" or text =~ "no_capability",
+             "Expected the M8 unauthorized denial, got: #{inspect(text)}"
+
+      refute text =~ ~r/^# Memory for/,
+             "Memory detail returned without an authorizing capability — M8 regression"
+    end
+
+    test "security regression (M8): overview component does not name any specific agent",
+         %{state: state} do
+      # M8: the "overview" component used to embed get_memory_summary, which
+      # called find_first_agent_id and reported "Agent X: N notes". That
+      # leaked the agent_id and a memory-content count to every caller.
+      # Overview now reports only aggregate counts.
+      Process.put(:arbor_authenticated_agent_id, "caller_overview_m8")
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool("arbor_status", %{"component" => "overview"}, state)
+
+      [%{type: "text", text: text}] = result.content
+
+      refute text =~ ~r/Agent agent_\w+: \d+ notes/,
+             "Overview component leaks a specific agent_id and memory count — M8 regression"
+    end
+  end
 end

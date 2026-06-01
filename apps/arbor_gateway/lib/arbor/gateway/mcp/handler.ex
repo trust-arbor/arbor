@@ -222,6 +222,58 @@ defmodule Arbor.Gateway.MCP.Handler do
     Process.get(:arbor_authenticated_agent_id)
   end
 
+  # M8: gate per-target arbor_status components on (a) an explicit agent_id
+  # argument from the MCP call and (b) the authenticated caller holding
+  # arbor://status/{component}/{target_id}. Returns {:ok, target} or
+  # {:error, human_readable_message}.
+  defp authorize_status_component(component, target_id) do
+    cond do
+      not is_binary(target_id) or byte_size(target_id) == 0 ->
+        {:error,
+         "arbor_status requires an explicit `agent_id` argument for component " <>
+           "\"#{component}\" — M8: defaulting to the first running agent was removed."}
+
+      true ->
+        case authenticated_agent_id() do
+          nil ->
+            {:error,
+             "arbor_status: no authenticated caller — refusing to disclose " <>
+               "#{component} for #{target_id}."}
+
+          caller_id ->
+            authorize_caller_for_component(caller_id, component, target_id)
+        end
+    end
+  end
+
+  defp authorize_caller_for_component(caller_id, component, target_id) do
+    resource = "arbor://status/#{component}/#{target_id}"
+
+    cond do
+      not (Code.ensure_loaded?(Arbor.Security) and
+               function_exported?(Arbor.Security, :authorize, 4)) ->
+        {:error,
+         "arbor_status: security subsystem unavailable — refusing to disclose " <>
+           "#{component} for #{target_id}."}
+
+      true ->
+        case Arbor.Security.authorize(caller_id, resource, :read) do
+          {:ok, :authorized} ->
+            {:ok, target_id}
+
+          {:error, _reason} ->
+            {:error,
+             "arbor_status: caller #{caller_id} is not authorized to view " <>
+               "#{component} for #{target_id} (requires #{resource})."}
+
+          _other ->
+            {:error,
+             "arbor_status: unexpected authorization result — refusing to " <>
+               "disclose #{component} for #{target_id}."}
+        end
+    end
+  end
+
   # ===========================================================================
   # Tool Implementations
   # ===========================================================================
@@ -474,13 +526,20 @@ defmodule Arbor.Gateway.MCP.Handler do
     end
   end
 
+  # M8: each per-target component (memory, capabilities, goals) requires:
+  #   1. An EXPLICIT agent_id argument — no defaulting to find_first_agent_id().
+  #      Defaulting to "the first agent in the registry" silently leaked the
+  #      memory/caps/goals of whichever agent happened to be at the head of
+  #      the list to any caller who omitted the argument.
+  #   2. An authorization check binding the *caller* (from
+  #      authenticated_agent_id/0, populated by SignedRequestAuth) to
+  #      arbor://status/{component}/{target_id}.
+  # Either requirement failing returns a human-readable denial; the secret
+  # data never reaches the MCP response.
   defp get_status("memory", agent_id) do
-    agent_id = agent_id || find_first_agent_id()
-
-    if agent_id do
-      get_memory_detail(agent_id)
-    else
-      "No agent running. Cannot inspect memory without an agent_id."
+    case authorize_status_component("memory", agent_id) do
+      {:ok, target} -> get_memory_detail(target)
+      {:error, msg} -> msg
     end
   end
 
@@ -489,22 +548,16 @@ defmodule Arbor.Gateway.MCP.Handler do
   end
 
   defp get_status("capabilities", agent_id) do
-    agent_id = agent_id || find_first_agent_id()
-
-    if agent_id do
-      get_capabilities(agent_id)
-    else
-      "No agent running. Cannot inspect capabilities without an agent_id."
+    case authorize_status_component("capabilities", agent_id) do
+      {:ok, target} -> get_capabilities(target)
+      {:error, msg} -> msg
     end
   end
 
   defp get_status("goals", agent_id) do
-    agent_id = agent_id || find_first_agent_id()
-
-    if agent_id do
-      get_goals(agent_id)
-    else
-      "No agent running. Cannot inspect goals without an agent_id."
+    case authorize_status_component("goals", agent_id) do
+      {:ok, target} -> get_goals(target)
+      {:error, msg} -> msg
     end
   end
 
@@ -618,20 +671,26 @@ defmodule Arbor.Gateway.MCP.Handler do
     )
   end
 
+  # M8: the "overview" status component used to display the first running
+  # agent's working-memory note count by name, which leaked both *which*
+  # agent was at the head of the registry and a count of their notes to any
+  # MCP caller. The overview is meant to be a non-sensitive cluster summary,
+  # so it now only reports the aggregate (whether memory is reachable and
+  # how many agents exist) — never a specific agent's data.
   defp get_memory_summary do
-    agent_id = find_first_agent_id()
+    case bridge_call(Arbor.Agent.Registry, :list, []) do
+      {:ok, {:ok, agents}} when is_list(agents) ->
+        "Memory subsystem reachable; #{length(agents)} agent(s) registered. " <>
+          "Use `arbor_status` with explicit `component: \"memory\"` and `agent_id:` " <>
+          "to inspect a specific agent (requires arbor://status/memory/{agent_id})."
 
-    if agent_id do
-      case bridge_call(Arbor.Memory, :load_working_memory, [agent_id]) do
-        {:ok, wm} when is_map(wm) ->
-          notes = Map.get(wm, :notes, [])
-          "Agent #{agent_id}: #{length(notes)} notes in working memory"
+      {:ok, agents} when is_list(agents) ->
+        "Memory subsystem reachable; #{length(agents)} agent(s) registered. " <>
+          "Use `arbor_status` with explicit `component: \"memory\"` and `agent_id:` " <>
+          "to inspect a specific agent (requires arbor://status/memory/{agent_id})."
 
-        _ ->
-          "Memory system unavailable."
-      end
-    else
-      "No agent running."
+      _ ->
+        "Memory system unavailable."
     end
   end
 
@@ -843,23 +902,10 @@ defmodule Arbor.Gateway.MCP.Handler do
     end
   end
 
-  defp find_first_agent_id do
-    case bridge_call(Arbor.Agent.Registry, :list, []) do
-      {:ok, {:ok, [first | _]}} ->
-        extract_agent_id(first)
-
-      {:ok, [first | _]} when is_map(first) ->
-        extract_agent_id(first)
-
-      _ ->
-        # Try dashboard AgentManager
-        case bridge_call(Arbor.Agent.Manager, :list_agents, []) do
-          {:ok, [{id, _pid} | _]} -> id
-          _ -> nil
-        end
-    end
-  end
-
+  # M8: find_first_agent_id/0 was the engine of the leak — it picked an
+  # arbitrary agent from the registry whenever a caller omitted agent_id, and
+  # the get_status handlers then disclosed that agent's data. The function is
+  # gone; extract_agent_id/1 stays because format_agent_list/1 still uses it.
   defp extract_agent_id(agent) when is_map(agent) do
     Map.get(agent, :agent_id) || Map.get(agent, :id) || inspect(agent)
   end
