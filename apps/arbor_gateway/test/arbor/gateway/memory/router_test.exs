@@ -63,6 +63,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
       conn =
         conn(:post, "/recall", Jason.encode!(body))
         |> put_req_header("content-type", "application/json")
+        |> assign_caller(agent_id)
         |> Router.call(@opts)
 
       assert conn.status == 200
@@ -77,6 +78,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
       conn =
         conn(:post, "/recall", Jason.encode!(body))
         |> put_req_header("content-type", "application/json")
+        |> assign_caller(agent_id)
         |> Router.call(@opts)
 
       assert conn.status == 404
@@ -91,6 +93,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
       conn =
         conn(:post, "/recall", Jason.encode!(body))
         |> put_req_header("content-type", "application/json")
+        |> assign_caller("test")
         |> Router.call(@opts)
 
       assert conn.status == 400
@@ -112,6 +115,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
       conn =
         conn(:post, "/index", Jason.encode!(body))
         |> put_req_header("content-type", "application/json")
+        |> assign_caller(agent_id)
         |> Router.call(@opts)
 
       assert conn.status == 200
@@ -126,6 +130,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
       conn =
         conn(:post, "/index", Jason.encode!(body))
         |> put_req_header("content-type", "application/json")
+        |> assign_caller(agent_id)
         |> Router.call(@opts)
 
       assert conn.status == 404
@@ -137,6 +142,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
       conn =
         conn(:post, "/index", Jason.encode!(body))
         |> put_req_header("content-type", "application/json")
+        |> assign_caller("test")
         |> Router.call(@opts)
 
       assert conn.status == 400
@@ -155,6 +161,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
 
       conn =
         conn(:get, "/working/#{agent_id}")
+        |> assign_caller(agent_id)
         |> Router.call(@opts)
 
       assert conn.status == 200
@@ -172,6 +179,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
     test "returns 404 if no working memory exists", %{agent_id: agent_id} do
       conn =
         conn(:get, "/working/#{agent_id}")
+        |> assign_caller(agent_id)
         |> Router.call(@opts)
 
       assert conn.status == 404
@@ -193,6 +201,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
       conn =
         conn(:put, "/working/#{agent_id}", Jason.encode!(body))
         |> put_req_header("content-type", "application/json")
+        |> assign_caller(agent_id)
         |> Router.call(@opts)
 
       assert conn.status == 200
@@ -213,6 +222,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
       conn =
         conn(:put, "/working/#{agent_id}", Jason.encode!(%{}))
         |> put_req_header("content-type", "application/json")
+        |> assign_caller(agent_id)
         |> Router.call(@opts)
 
       assert conn.status == 400
@@ -231,6 +241,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
       conn =
         conn(:post, "/summarize", Jason.encode!(body))
         |> put_req_header("content-type", "application/json")
+        |> assign_caller(agent_id)
         |> Router.call(@opts)
 
       # Summarizer falls back to extractive summary when LLM unavailable
@@ -246,6 +257,7 @@ defmodule Arbor.Gateway.Memory.RouterTest do
       conn =
         conn(:post, "/summarize", Jason.encode!(body))
         |> put_req_header("content-type", "application/json")
+        |> assign_caller("test")
         |> Router.call(@opts)
 
       assert conn.status == 400
@@ -256,9 +268,79 @@ defmodule Arbor.Gateway.Memory.RouterTest do
     test "returns 404" do
       conn =
         conn(:get, "/unknown")
+        |> assign_caller("any_caller")
         |> Router.call(@opts)
 
       assert conn.status == 404
     end
   end
+
+  describe "P0-4: cross-agent memory access (regression)" do
+    test "security regression (P0-4): caller A cannot read caller B's memory" do
+      # Two distinct agents. Each is granted memory caps for *its own* memory.
+      # Neither has any cap for the other agent's memory.
+      caller_a = "p0_4_attacker_#{System.unique_integer([:positive])}"
+      target_b = "p0_4_victim_#{System.unique_integer([:positive])}"
+
+      now = DateTime.utc_now()
+
+      for {principal, target, action} <- [
+            {caller_a, caller_a, :read},
+            {caller_a, caller_a, :write},
+            {target_b, target_b, :read},
+            {target_b, target_b, :write}
+          ] do
+        cap = %Arbor.Contracts.Security.Capability{
+          id: "cap_p0_4_#{principal}_#{action}_#{target}",
+          principal_id: principal,
+          resource_uri: "arbor://memory/#{action}/#{target}",
+          granted_at: now,
+          expires_at: DateTime.add(now, 3600, :second)
+        }
+
+        Arbor.Security.CapabilityStore.put(cap)
+      end
+
+      on_exit(fn ->
+        Memory.cleanup_for_agent(caller_a)
+        Memory.cleanup_for_agent(target_b)
+      end)
+
+      # caller_a is the authenticated principal; target_b is the agent whose
+      # memory we're trying to reach via the request body.
+      body = %{agent_id: target_b, query: "any"}
+
+      conn =
+        conn(:post, "/recall", Jason.encode!(body))
+        |> put_req_header("content-type", "application/json")
+        |> assign_caller(caller_a)
+        |> Router.call(@opts)
+
+      assert conn.status == 403,
+             "Cross-agent memory access must be denied — P0-4 regression. " <>
+               "Got status #{conn.status}, body: #{conn.resp_body}"
+
+      response = Jason.decode!(conn.resp_body)
+      assert response["status"] == "error"
+      assert response["reason"] =~ "Unauthorized"
+    end
+
+    test "security regression (P0-4): missing authenticated caller is denied" do
+      # No assign_caller call — simulates a request that bypassed the auth
+      # pipeline (e.g. a misconfigured route). The router must NOT fall through
+      # to authorizing the body's agent_id as the principal.
+      body = %{agent_id: "any_target", query: "x"}
+
+      conn =
+        conn(:post, "/recall", Jason.encode!(body))
+        |> put_req_header("content-type", "application/json")
+        |> Router.call(@opts)
+
+      assert conn.status == 403,
+             "Request without authenticated caller must be denied — P0-4 regression. " <>
+               "Got status #{conn.status}"
+    end
+  end
+
+  defp assign_caller(conn, caller_id), do: assign(conn, :agent_id, caller_id)
 end

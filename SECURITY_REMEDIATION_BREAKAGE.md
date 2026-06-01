@@ -24,6 +24,7 @@ Aggregated from per-entry `Open question:` lines so they don't get lost when the
 | OQ-1 | B-A-1 | Does OidcAuth's `ensure_role/1` (calling `Arbor.Security.assign_role/2` with `default_role: :admin`) currently grant `arbor://consensus/admin` end-to-end? If the `:admin` role's capability map already includes it, B-A-1 is narrower than stated — only operators without a custom `:default_role` config are affected. Worth verifying before designing the dev-bootstrap restoration. |
 | OQ-2 | B-A-2 | If we eventually want "dev mode" where Always Allow is back to one click, the cleanest shape is probably a `:dev_admin` role that bundles `arbor://consensus/admin` + `arbor://trust/auto_promote/**`, behind an explicit config flag (`:arbor_security, :enable_dev_admin_role`). Is that posture acceptable, or do we want Always Allow to always require an explicit per-target grant? |
 | OQ-3 | B-A-4 | Ship a one-time `mix arbor.security.drop_stale_signed_records` task that purges `CapabilityStore` / signed-receipt records whose `issuer_id` no longer matches the live `SystemAuthority.agent_id()` after the P0-5 cutover, or just let them sit as dead weight? Dead weight is fine for now (records are filtered out at verify time anyway), but a purge keeps the store tidy and surfaces the cutover explicitly. |
+| OQ-4 | B-B-1 | Should `POST /api/memory/summarize` require its own resource (`arbor://memory/summarize/{target}`) rather than reusing `arbor://memory/read/{target}`? Separating them lets "X can see summaries of Y but not Y's raw recall" be expressible. Probably overkill for now, but worth pinning before granting broad `read` to any caller. |
 
 When a fix surfaces something that genuinely needs a separate decision — not the restoration shape itself, but a design or policy call — capture it both **inline** in the entry it came from AND **here** as a new OQ-N row. Inline preserves context; the index makes it scannable.
 
@@ -134,6 +135,32 @@ When a fix surfaces something that genuinely needs a separate decision — not t
 **After:** Unknown atoms resolve to `nil`. Owner: entry becomes unclaimable on the unknown node (correct). Provider: spec falls back to the previous provider via `safe_to_atom(p) || spec.provider`.
 
 **Restoration shape:** None needed. If there's stale persisted data with truly unknown atom names that *should* still be valid, the migration is to write them in as proper atoms before they're persisted, not to weaken the parser.
+
+---
+
+---
+
+## Cluster B breaks
+
+### B-B-1. Memory router requires authenticated caller AND a cap for the target's memory
+
+**Closed by:** P0-4 (this commit)
+**Status:** Unaddressed
+
+**Before:** `Arbor.Gateway.Memory.Router.authorize_memory_access/2` authorized the *target* `agent_id` (the value in the URL/body) as the principal. Any authenticated caller could read or mutate any other agent's memory just by supplying the target's id. The function also fell through to `:ok` on every non-explicit-error branch, on `Code.ensure_loaded?` returning false, and on every rescue.
+
+**After:**
+- The caller comes from `conn.assigns.agent_id` (set by the gateway's signed-request / JWT auth pipeline), never from the request body.
+- The target comes from the body/URL but is only used to build the *resource URI* — never as the principal.
+- Only `{:ok, :authorized}` allows. Every other AuthDecision shape — pending approval, `{:error, _}`, security unavailable, missing caller, unexpected — returns `{:error, _}` and the route responds with 403.
+- `POST /summarize`, which previously had no authorization at all, now requires the caller to hold `arbor://memory/read/{target_agent_id}`.
+
+**Restoration shape:**
+- Any client that talked to `/api/memory/*` and relied on the gateway not actually checking caller identity needs to start authenticating. With signed-request or JWT auth already enforced by the upstream `:require_auth_unless_health` plug, this should already be the case in practice — but if a deployment had a workaround route or a test fixture that bypassed auth, it now 403s.
+- For an authenticated agent to access **another** agent's memory, the *caller* needs an explicit grant of `arbor://memory/{read|write}/{target_agent_id}`. There is no broad "memory admin" cap; per-target by design.
+- For a "memory ops" superuser role: a wildcard cap on `arbor://memory/{read|write}/**` is the cleanest shape. Same `:dev_admin` discussion as OQ-2 applies.
+
+**Open question (OQ-4 below):** the post-fix `POST /summarize` now requires `arbor://memory/read/{target}`. Is that the right resource? An argument could be made for a separate `arbor://memory/summarize/{target}` so that "let X see summaries of Y but not raw recall" is expressible. Probably overkill for now, but worth pinning before broadly granting `read`.
 
 ---
 
