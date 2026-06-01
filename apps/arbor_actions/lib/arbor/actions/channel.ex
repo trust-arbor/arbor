@@ -352,6 +352,24 @@ defmodule Arbor.Actions.Channel do
       }
     end
 
+    defp deserialize_sealed(%{"type" => "ecdh"} = data) do
+      {:ok, ciphertext} = Base.decode64(data["ciphertext"])
+      {:ok, iv} = Base.decode64(data["iv"])
+      {:ok, tag} = Base.decode64(data["tag"])
+      {:ok, sender_public} = Base.decode64(data["sender_public"])
+
+      %{
+        ciphertext: ciphertext,
+        iv: iv,
+        tag: tag,
+        sender_public: sender_public
+      }
+    end
+
+    defp format_timestamp(nil), do: nil
+    defp format_timestamp(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+    defp format_timestamp(other), do: to_string(other)
+
     # M9: binary_to_term/2 with [:safe] only blocks atom-table exhaustion —
     # it still allows arbitrary lists, maps, and tuples of existing atoms. A
     # compromised persistence backend or a malicious peer that can publish
@@ -377,24 +395,6 @@ defmodule Arbor.Actions.Channel do
                   "got #{inspect(other)}"
       end
     end
-
-    defp deserialize_sealed(%{"type" => "ecdh"} = data) do
-      {:ok, ciphertext} = Base.decode64(data["ciphertext"])
-      {:ok, iv} = Base.decode64(data["iv"])
-      {:ok, tag} = Base.decode64(data["tag"])
-      {:ok, sender_public} = Base.decode64(data["sender_public"])
-
-      %{
-        ciphertext: ciphertext,
-        iv: iv,
-        tag: tag,
-        sender_public: sender_public
-      }
-    end
-
-    defp format_timestamp(nil), do: nil
-    defp format_timestamp(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
-    defp format_timestamp(other), do: to_string(other)
   end
 
   # ============================================================================
