@@ -1290,4 +1290,63 @@ defmodule Arbor.Consensus.CoordinatorTest do
       assert {:error, {:unauthorized, :consensus_admin_required}} = result
     end
   end
+
+  describe "require_authorizer config (M6 regression)" do
+    test "security regression (M6): submit with nil authorizer denies when require_authorizer is true" do
+      # M6: Coordinator previously treated nil authorizer as "permit every
+      # proposal." Combined with H11/H12 (now closed) that made any OIDC
+      # user a root-equivalent. In strict mode the Coordinator must refuse
+      # to authorize proposals when no authorizer module is wired in.
+      original = Application.get_env(:arbor_consensus, :require_authorizer)
+      Application.put_env(:arbor_consensus, :require_authorizer, true)
+      on_exit(fn -> restore_config(:require_authorizer, original) end)
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.AlwaysApproveBackend,
+          # explicitly omit :authorizer
+          authorizer: nil
+        )
+
+      result =
+        Coordinator.submit(
+          %{
+            proposer: "any_agent",
+            change_type: :code_modification,
+            description: "should be denied"
+          },
+          server: coord
+        )
+
+      assert {:error, :no_authorizer_configured} = result,
+             "M6 regression: nil authorizer in strict mode must deny — got #{inspect(result)}"
+    end
+
+    test "submit with nil authorizer continues to permit when require_authorizer is false" do
+      # Inverse: dev/test default (require_authorizer: false) keeps the
+      # existing permissive shape so test setups that don't wire an
+      # authorizer continue to work.
+      original = Application.get_env(:arbor_consensus, :require_authorizer)
+      Application.put_env(:arbor_consensus, :require_authorizer, false)
+      on_exit(fn -> restore_config(:require_authorizer, original) end)
+
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.AlwaysApproveBackend,
+          authorizer: nil
+        )
+
+      result =
+        Coordinator.submit(
+          %{
+            proposer: "any_agent",
+            change_type: :code_modification,
+            description: "should be permitted"
+          },
+          server: coord
+        )
+
+      assert {:ok, _proposal_id} = result
+    end
+  end
 end

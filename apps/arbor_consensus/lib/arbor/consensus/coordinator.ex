@@ -787,10 +787,31 @@ defmodule Arbor.Consensus.Coordinator do
     {:error, {:unauthorized, :consensus_admin_required}}
   end
 
-  defp maybe_authorize(nil, _proposal), do: :ok
+  # M6: nil authorizer used to mean "allow every proposal." Any agent could
+  # submit any proposal on any topic — combined with H11/H12 (now closed) this
+  # was the third leg of the "any OIDC user is root" chain. In strict mode
+  # (production by default) we now refuse to authorize without an explicit
+  # authorizer module. Dev/test stay permissive so existing test setups that
+  # don't wire an authorizer keep working — flip the
+  # `:arbor_consensus, :require_authorizer` config to force the strict path
+  # in test if you need to exercise the deny branch.
+  defp maybe_authorize(nil, _proposal) do
+    if require_authorizer?() do
+      {:error, :no_authorizer_configured}
+    else
+      :ok
+    end
+  end
 
   defp maybe_authorize(authorizer, proposal) do
     authorizer.authorize_proposal(proposal)
+  end
+
+  # Public (@doc false) for the M6 regression test, which flips the config
+  # and exercises the deny branch without spinning up a prod-mode app.
+  @doc false
+  def require_authorizer? do
+    Application.get_env(:arbor_consensus, :require_authorizer, Mix.env() == :prod)
   end
 
   defp compute_fingerprint(proposal) do
