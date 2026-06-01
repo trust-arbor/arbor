@@ -164,6 +164,29 @@ When a fix surfaces something that genuinely needs a separate decision — not t
 
 ---
 
+### B-B-2. `arbor_status` MCP tool requires explicit `agent_id` AND a caller cap per component
+
+**Closed by:** M8 (this commit)
+**Status:** Unaddressed
+
+**Before:**
+- `arbor_status` with `component: "memory"|"capabilities"|"goals"` and no `agent_id` silently called `find_first_agent_id/0` and returned that agent's memory/caps/goals. Any authenticated MCP client could enumerate state without naming a target.
+- None of the components actually checked the authenticated caller's capabilities — the `authenticated_agent_id/0` helper existed but was never consulted.
+- The `"overview"` component embedded `get_memory_summary/0`, which had the same first-agent default *and* leaked the chosen agent's id + note count to every caller.
+
+**After:**
+- Each of `"memory"`, `"capabilities"`, `"goals"` requires an explicit, non-empty `agent_id`. Omission returns "arbor_status requires an explicit `agent_id`…" instead of leaking the first agent's data.
+- An authorization check binds the caller (`authenticated_agent_id/0`) to `arbor://status/{component}/{target_id}`. Missing caller → denial. Security subsystem unreachable → denial. No-cap → denial.
+- The `"overview"` component reports only the aggregate ("Memory subsystem reachable; N agent(s) registered…") — no specific agent named.
+- `find_first_agent_id/0` is deleted as dead code.
+
+**Restoration shape:**
+- Any MCP client that previously relied on the implicit-first-agent default must now name the target explicitly. The denial messages are written to be self-explanatory in the MCP response stream so this surfaces immediately.
+- For a single authenticated caller to inspect any other agent's status, they need `arbor://status/{memory|capabilities|goals}/{target_id}` per target. The `:dev_admin` shape from OQ-2 should probably bundle a `arbor://status/**` wildcard for the dev case — same restoration pattern.
+- No restoration for the overview leak — the aggregate is the right shape.
+
+---
+
 ## Cross-cutting consequences
 
 ### Operator restoration cheat-sheet (sketch)
