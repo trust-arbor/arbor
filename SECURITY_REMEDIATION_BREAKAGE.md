@@ -165,6 +165,29 @@ When a fix surfaces something that genuinely needs a separate decision — not t
 
 ---
 
+### B-B-5. AuthDecision honors registry status for humans; rescue/catch paths fail closed in strict mode
+
+**Closed by:** H5 (this commit)
+**Status:** Mostly accepted; one knob worth flipping in prod
+
+**Before:**
+- `check_identity/1` short-circuited `String.starts_with?(pid, "human_")` to `{:ok, auth}` — suspended or revoked humans kept authorizing for as long as their capabilities existed.
+- `check_identity_status/2`'s `rescue` clause returned `{:ok, auth}` unconditionally — any exception during a registry lookup silently authorized.
+- `find_matching_capability/2`'s `rescue` and `:exit` clauses fell through to `try_preloaded_capabilities/2`, which uses `AuthContext.capabilities` (caller-supplied or replay-derived, not re-signature-verified) when the CapabilityStore is unreachable.
+
+**After:**
+- Humans go through `check_identity_status/2` like agents. Suspended → `{:error, {:unauthorized, :identity_suspended}}`. Revoked → `{:error, {:unauthorized, :identity_revoked}}`.
+- `rescue` and `:exit` in `check_identity_status/2` now consult `strict_identity_mode?` and deny when strict (matching the existing `:exit` behavior).
+- CapabilityStore unavailable now denies in strict mode rather than falling back to preloaded caps. Permissive (dev/test default) preserves the existing fallback for legitimate test paths.
+
+**Restoration shape:**
+- For the human suspension fix: nothing to restore. The audit's prescribed behavior is now the default; revoking a human identity actually does something.
+- For strict-mode CapabilityStore denials: production deployments should set `:arbor_security, :strict_identity_mode, true`. Test setups that wire `AuthContext.capabilities` directly (rather than putting caps in the store) keep working because dev defaults are permissive.
+
+**Open question:** Currently `strict_identity_mode?` doubles as the strict-CapabilityStore-mode knob (one config). Worth splitting if an operator wants strict-identity-but-permissive-store or vice versa — but no concrete need yet.
+
+---
+
 ### B-B-4. Consensus Coordinator refuses to authorize proposals without an authorizer module in strict mode
 
 **Closed by:** M6 (this commit)

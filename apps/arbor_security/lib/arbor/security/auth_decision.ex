@@ -73,8 +73,7 @@ defmodule Arbor.Security.AuthDecision do
          result <- check_approval(auth, cap, resource_uri) do
       case result do
         {:authorized, auth} ->
-          {:ok, :authorized, cap,
-           AuthContext.record_decision(auth, resource_uri, :authorized)}
+          {:ok, :authorized, cap, AuthContext.record_decision(auth, resource_uri, :authorized)}
 
         {:requires_approval, cap, auth} ->
           {:ok, :requires_approval, cap,
@@ -127,55 +126,70 @@ defmodule Arbor.Security.AuthDecision do
     {:ok, auth}
   end
 
+  # H5: every principal — human_ or agent_ — goes through the same registry
+  # status check. The previous "humans are always active" branch let suspended
+  # or revoked OIDC users continue to authorize because their existing
+  # capabilities were never invalidated by the registry status change.
   defp check_identity(%AuthContext{principal_id: pid} = auth) do
-    # Human identities are always considered active
-    if String.starts_with?(pid, "human_") do
-      {:ok, auth}
-    else
-      check_identity_status(auth, pid)
-    end
+    check_identity_status(auth, pid)
   end
 
-  # Match the permissive/strict mode behavior from Security.authorize.
-  # In strict mode: unknown identity → reject. In permissive mode: allow through.
+  # H5: rescue and catch now consult strict_identity_mode? just like the live
+  # registry-failure path. Pre-fix, the rescue clause returned {:ok, auth}
+  # unconditionally — any exception while reading the registry silently
+  # permitted the caller. The catch clause already did the right thing; the
+  # rescue clause is now aligned with it.
   defp check_identity_status(auth, principal_id) do
     registry = Arbor.Security.Identity.Registry
-    config = Arbor.Security.Config
-
-    strict? =
-      Code.ensure_loaded?(config) and function_exported?(config, :strict_identity_mode?, 0) and
-        apply(config, :strict_identity_mode?, [])
 
     if Code.ensure_loaded?(registry) and function_exported?(registry, :identity_status, 1) do
       case apply(registry, :identity_status, [principal_id]) do
-        {:ok, :active} -> {:ok, auth}
-        {:ok, :suspended} -> {:error, {:unauthorized, :identity_suspended}, auth}
-        {:ok, :revoked} -> {:error, {:unauthorized, :identity_revoked}, auth}
+        {:ok, :active} ->
+          {:ok, auth}
+
+        {:ok, :suspended} ->
+          {:error, {:unauthorized, :identity_suspended}, auth}
+
+        {:ok, :revoked} ->
+          {:error, {:unauthorized, :identity_revoked}, auth}
+
         {:error, :not_found} ->
-          if strict?, do: {:error, {:unauthorized, :unknown_identity}, auth}, else: {:ok, auth}
+          if strict_identity_mode?(),
+            do: {:error, {:unauthorized, :unknown_identity}, auth},
+            else: {:ok, auth}
       end
     else
-      # Registry not loaded — permissive by default
-      {:ok, auth}
+      # Registry not loaded — permissive by default outside strict mode
+      if strict_identity_mode?(),
+        do: {:error, {:unauthorized, :identity_registry_unavailable}, auth},
+        else: {:ok, auth}
     end
   rescue
-    _ -> {:ok, auth}
+    _ ->
+      if strict_identity_mode?(),
+        do: {:error, {:unauthorized, :identity_registry_unavailable}, auth},
+        else: {:ok, auth}
   catch
     :exit, _ ->
-      config = Arbor.Security.Config
-
-      if Code.ensure_loaded?(config) and function_exported?(config, :strict_identity_mode?, 0) and
-           apply(config, :strict_identity_mode?, []) do
-        {:error, {:unauthorized, :identity_registry_unavailable}, auth}
-      else
-        {:ok, auth}
-      end
+      if strict_identity_mode?(),
+        do: {:error, {:unauthorized, :identity_registry_unavailable}, auth},
+        else: {:ok, auth}
   end
 
+  defp strict_identity_mode? do
+    config = Arbor.Security.Config
+
+    Code.ensure_loaded?(config) and function_exported?(config, :strict_identity_mode?, 0) and
+      apply(config, :strict_identity_mode?, [])
+  end
+
+  # H5: when CapabilityStore is unavailable or raises, the pre-fix code fell
+  # back to AuthContext.capabilities — caller-supplied (or replay-derived)
+  # records whose issuer_signature was never re-verified. In strict mode the
+  # store outage now denies; in permissive mode the preloaded fallback is
+  # still used (legitimate test paths and replay scenarios rely on it), but
+  # only after a debug log so partial outages are visible.
   defp find_matching_capability(%AuthContext{} = auth, resource_uri) do
-    # Always use CapabilityStore.find_authorizing when available — it verifies
-    # issuer_signature on lookup, catching tampered capabilities. Pre-loaded
-    # capabilities in AuthContext are used as fallback when the store isn't running.
     if Code.ensure_loaded?(CapabilityStore) and
          function_exported?(CapabilityStore, :find_authorizing, 2) do
       case CapabilityStore.find_authorizing(auth.principal_id, resource_uri) do
@@ -191,13 +205,27 @@ defmodule Arbor.Security.AuthDecision do
           end
       end
     else
-      # Store not available — fall back to pre-loaded capabilities
-      try_preloaded_capabilities(auth, resource_uri)
+      capability_store_unavailable_fallback(auth, resource_uri)
     end
   rescue
-    _ -> try_preloaded_capabilities(auth, resource_uri)
+    _ -> capability_store_unavailable_fallback(auth, resource_uri)
   catch
-    :exit, _ -> try_preloaded_capabilities(auth, resource_uri)
+    :exit, _ -> capability_store_unavailable_fallback(auth, resource_uri)
+  end
+
+  defp capability_store_unavailable_fallback(auth, resource_uri) do
+    if strict_capability_store_mode?() do
+      {:error, {:unauthorized, :capability_store_unavailable}, auth}
+    else
+      try_preloaded_capabilities(auth, resource_uri)
+    end
+  end
+
+  defp strict_capability_store_mode? do
+    # Reuse the same strict_identity_mode? config: an operator that wants
+    # strict identity checks almost certainly also wants strict store checks.
+    # If we ever need to split these, introduce a dedicated config key.
+    strict_identity_mode?()
   end
 
   # Fallback: search pre-loaded capabilities (no signature verification)
@@ -243,7 +271,8 @@ defmodule Arbor.Security.AuthDecision do
     verify? =
       case Keyword.get(opts, :verify_identity) do
         nil ->
-          Code.ensure_loaded?(config) and function_exported?(config, :identity_verification_enabled?, 0) and
+          Code.ensure_loaded?(config) and
+            function_exported?(config, :identity_verification_enabled?, 0) and
             apply(config, :identity_verification_enabled?, [])
 
         val ->
@@ -261,7 +290,11 @@ defmodule Arbor.Security.AuthDecision do
     {:error, :missing_signed_request, auth}
   end
 
-  defp do_verify_signed_request(%AuthContext{signed_request: sr, principal_id: pid} = auth, _resource_uri, opts) do
+  defp do_verify_signed_request(
+         %AuthContext{signed_request: sr, principal_id: pid} = auth,
+         _resource_uri,
+         opts
+       ) do
     # Only check resource binding when caller explicitly sets expected_resource.
     # Some signers use a different payload format (e.g., "authorize" string).
     expected = Keyword.get(opts, :expected_resource)
@@ -282,7 +315,9 @@ defmodule Arbor.Security.AuthDecision do
   end
 
   defp check_identity_binding(verified_id, principal_id) do
-    if verified_id == principal_id, do: :ok, else: {:error, {:identity_mismatch, verified_id, principal_id}}
+    if verified_id == principal_id,
+      do: :ok,
+      else: {:error, {:identity_mismatch, verified_id, principal_id}}
   end
 
   defp maybe_check_resource_binding(_sr, nil), do: :ok
@@ -324,10 +359,12 @@ defmodule Arbor.Security.AuthDecision do
     registry = Arbor.Security.Identity.Registry
 
     enabled =
-      Code.ensure_loaded?(config) and function_exported?(config, :delegation_chain_verification_enabled?, 0) and
+      Code.ensure_loaded?(config) and
+        function_exported?(config, :delegation_chain_verification_enabled?, 0) and
         apply(config, :delegation_chain_verification_enabled?, [])
 
-    if enabled and Code.ensure_loaded?(signer) and function_exported?(signer, :verify_delegation_chain, 2) do
+    if enabled and Code.ensure_loaded?(signer) and
+         function_exported?(signer, :verify_delegation_chain, 2) do
       key_lookup_fn = fn agent_id ->
         if Code.ensure_loaded?(registry) and function_exported?(registry, :lookup, 1) do
           apply(registry, :lookup, [agent_id])
@@ -441,18 +478,25 @@ defmodule Arbor.Security.AuthDecision do
   defp uri_matches?(cap_uri, resource_uri) when is_binary(cap_uri) and is_binary(resource_uri) do
     cond do
       # Exact match
-      cap_uri == resource_uri -> true
+      cap_uri == resource_uri ->
+        true
+
       # Explicit wildcards
       String.ends_with?(cap_uri, "/**") ->
         prefix = String.trim_trailing(cap_uri, "/**")
         String.starts_with?(resource_uri, prefix)
+
       String.ends_with?(cap_uri, "/*") ->
         prefix = String.trim_trailing(cap_uri, "/*")
         String.starts_with?(resource_uri, prefix)
+
       # Prefix match: arbor://shell/exec/git matches arbor://shell/exec/git/status
       # (subpath access — matching CapabilityStore.find_authorizing behavior)
-      String.starts_with?(resource_uri, cap_uri <> "/") -> true
-      true -> false
+      String.starts_with?(resource_uri, cap_uri <> "/") ->
+        true
+
+      true ->
+        false
     end
   end
 

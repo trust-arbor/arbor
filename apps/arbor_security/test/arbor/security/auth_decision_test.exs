@@ -10,15 +10,67 @@ defmodule Arbor.Security.AuthDecisionTest do
       assert result == {:error, :unauthorized} or match?({:error, _}, result)
     end
 
-    test "human identities pass identity check" do
+    test "human identities reach the capability check (registry status check passes when active)" do
       result = AuthDecision.check("human_test123", "arbor://nonexistent")
-      # Fails on capability, not identity
+      # Fails on capability, not identity — but it MUST proceed past
+      # check_identity rather than being short-circuited by the (removed)
+      # "humans are always active" branch.
       assert match?({:error, _}, result)
     end
 
     test "never raises" do
       result = AuthDecision.check("agent_test", "arbor://test")
       assert is_atom(result) or is_tuple(result)
+    end
+  end
+
+  describe "human identity registry check (H5 regression)" do
+    alias Arbor.Contracts.Security.Capability
+    alias Arbor.Contracts.Security.Identity
+    alias Arbor.Security.Identity.Registry
+
+    test "security regression (H5): suspended human identity is denied" do
+      # H5: AuthDecision.check_identity/1 previously short-circuited on
+      # principal_id starting with "human_" — every OIDC user was treated as
+      # active regardless of their registry status. Suspending a human in the
+      # registry had no effect on capability authorization. The fix removes
+      # the bypass: humans go through check_identity_status/2 just like
+      # agents do.
+      n = System.unique_integer([:positive])
+
+      {:ok, identity} =
+        Identity.new(
+          public_key: :crypto.strong_rand_bytes(32),
+          name: "h5_suspended_#{n}"
+        )
+
+      # Force the principal_id to start with "human_" — that's the prefix the
+      # removed bypass keyed on.
+      human_id = "human_h5_suspended_#{n}"
+      human_identity = %{identity | agent_id: human_id}
+
+      :ok = Registry.register(human_identity)
+      :ok = Registry.suspend(human_id, "H5 regression test")
+
+      # Grant a matching capability so the only thing standing between the
+      # caller and authorization is the identity status check.
+      now = DateTime.utc_now()
+
+      cap = %Capability{
+        id: "cap_h5_suspended_#{n}",
+        principal_id: human_id,
+        resource_uri: "arbor://test/h5_resource_#{n}",
+        granted_at: now,
+        expires_at: DateTime.add(now, 3600, :second)
+      }
+
+      Arbor.Security.CapabilityStore.put(cap)
+
+      result = AuthDecision.check(human_id, "arbor://test/h5_resource_#{n}")
+
+      assert match?({:error, {:unauthorized, :identity_suspended}}, result),
+             "Suspended human identity must NOT authorize — H5 regression. " <>
+               "Got: #{inspect(result)}"
     end
   end
 
@@ -74,8 +126,10 @@ defmodule Arbor.Security.AuthDecisionTest do
 
       # Even with no capabilities, identity check should pass
       case AuthDecision.evaluate(auth, "arbor://test/something") do
-        {:error, :unauthorized, _} -> :ok  # fails on capability, not identity
-        {:error, {:uri_rejected, _}, _} -> :ok  # fails on URI, not identity
+        # fails on capability, not identity
+        {:error, :unauthorized, _} -> :ok
+        # fails on URI, not identity
+        {:error, {:uri_rejected, _}, _} -> :ok
         _ -> :ok
       end
     end
