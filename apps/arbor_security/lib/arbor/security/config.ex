@@ -244,11 +244,13 @@ defmodule Arbor.Security.Config do
   @doc """
   Default role assigned to human identities after OIDC authentication.
 
-  Default: `:admin`. Override via `config :arbor_security, :default_human_role`.
+  M1: default used to be `:admin` — every OIDC user got root-equivalent
+  capabilities. Now `:viewer` (least privilege). Operators that want a
+  different default opt in via `config :arbor_security, :default_human_role`.
   """
   @spec default_human_role() :: atom()
   def default_human_role do
-    Application.get_env(@app, :default_human_role, :admin)
+    Application.get_env(@app, :default_human_role, :viewer)
   end
 
   # ===========================================================================

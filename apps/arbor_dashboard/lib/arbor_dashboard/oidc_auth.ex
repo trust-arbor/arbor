@@ -226,7 +226,12 @@ defmodule Arbor.Dashboard.OidcAuth do
 
   defp ensure_role(agent_id) do
     if Code.ensure_loaded?(Arbor.Security) do
-      role = Arbor.Security.OIDC.Config.get() |> Keyword.get(:default_role, :admin)
+      # M1: default role used to be :admin — any user who completed the OIDC
+      # flow got assigned :admin unless the operator explicitly configured a
+      # different :default_role. That made every authenticated user a root
+      # principal by default. The fallback is now :viewer (least privilege);
+      # operators who want admin must opt in via the OIDC config.
+      role = Arbor.Security.OIDC.Config.get() |> Keyword.get(:default_role, :viewer)
 
       case apply(Arbor.Security, :assign_role, [agent_id, role]) do
         {:ok, _caps} ->
