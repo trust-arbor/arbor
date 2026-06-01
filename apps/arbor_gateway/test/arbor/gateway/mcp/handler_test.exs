@@ -387,6 +387,45 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     end
   end
 
+  describe "signed_request threading (H1 regression)" do
+    setup do
+      Process.delete(:arbor_authenticated_signed_request)
+      :ok
+    end
+
+    test "security regression (H1): signed_request from process dict reaches action context" do
+      # H1: pre-fix, Arbor.Gateway.SignedRequestAuth stashed only agent_id in
+      # the process dict — the signed_request struct it had just verified was
+      # discarded. The MCP handler then called Arbor.Actions.authorize_and_execute
+      # with no :signed_request in the context, so action-layer
+      # `verify_identity: true` failed with :missing_signed_request even
+      # though the gateway HAD verified the request. The fix stashes the
+      # signed_request alongside agent_id and threads it through.
+      fake_signed_request = %{
+        agent_id: "human_h1",
+        signature: "fake-signature",
+        bound_payload: "fake-payload"
+      }
+
+      Process.put(:arbor_authenticated_signed_request, fake_signed_request)
+
+      result = Handler.maybe_put_signed_request(%{workspace: "/tmp"})
+
+      assert result[:signed_request] == fake_signed_request,
+             "Authenticated signed_request must reach the action context — H1 regression"
+
+      assert result[:workspace] == "/tmp",
+             "Existing context keys must be preserved"
+    end
+
+    test "no signed_request in process dict → context unchanged" do
+      context = %{workspace: "/tmp"}
+
+      assert Handler.maybe_put_signed_request(context) == context,
+             "Without a signed_request the context must pass through unchanged"
+    end
+  end
+
   describe "arbor_status access control (M8 regression)" do
     setup do
       # Handler reads :arbor_authenticated_agent_id from the request process's

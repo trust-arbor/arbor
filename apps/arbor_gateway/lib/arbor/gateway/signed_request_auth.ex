@@ -84,15 +84,24 @@ defmodule Arbor.Gateway.SignedRequestAuth do
          {:ok, agent_id} <- Arbor.Security.verify_request(signed_request) do
       Logger.debug("[SignedRequestAuth] Authenticated agent #{agent_id}")
 
-      # Stash the verified agent_id in the process dictionary so the
-      # downstream MCP tool handler can read it without us having to
-      # patch ExMCP.MessageProcessor to thread Plug.Conn assigns through.
-      # Plug pipelines run synchronously in the request process, so this
-      # is safe within a single request lifecycle.
+      # Stash the verified agent_id AND the signed_request struct in the
+      # process dictionary so the downstream MCP tool handler can read both
+      # without us having to patch ExMCP.MessageProcessor to thread
+      # Plug.Conn assigns through. Plug pipelines run synchronously in the
+      # request process, so this is safe within a single request lifecycle.
+      #
+      # H1: pre-fix, only agent_id was stashed — Arbor.Actions.authorize_and_execute
+      # then ran with no :signed_request in its context, so the action-layer
+      # `verify_identity: true` config produced :missing_signed_request even
+      # though the HTTP request had been authenticated upstream. The fix
+      # forwards the bound signed_request struct so action auth can verify
+      # against the same proof the gateway already verified.
       Process.put(:arbor_authenticated_agent_id, agent_id)
+      Process.put(:arbor_authenticated_signed_request, signed_request)
 
       conn
       |> assign(:agent_id, agent_id)
+      |> assign(:signed_request, signed_request)
       |> assign(:signed_request_authenticated, true)
     else
       {:error, reason} ->

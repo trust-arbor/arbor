@@ -222,6 +222,23 @@ defmodule Arbor.Gateway.MCP.Handler do
     Process.get(:arbor_authenticated_agent_id)
   end
 
+  # H1: read the signed_request struct stashed by Arbor.Gateway.SignedRequestAuth
+  # so the MCP handler can thread it into Arbor.Actions.authorize_and_execute.
+  defp authenticated_signed_request do
+    Process.get(:arbor_authenticated_signed_request)
+  end
+
+  # Public (@doc false) for the H1 regression test, which constructs a fake
+  # signed_request in the process dict and asserts the helper threads it
+  # into the action context.
+  @doc false
+  def maybe_put_signed_request(context) do
+    case authenticated_signed_request() do
+      nil -> context
+      sr -> Map.put(context, :signed_request, sr)
+    end
+  end
+
   # M8: gate per-target arbor_status components on (a) an explicit agent_id
   # argument from the MCP call and (b) the authenticated caller holding
   # arbor://status/{component}/{target_id}. Returns {:ok, target} or
@@ -433,8 +450,15 @@ defmodule Arbor.Gateway.MCP.Handler do
         # Atomize known param keys for the action
         atom_params = atomize_params(params)
 
-        # C2: Always use authorized execution with workspace context for file safety
-        context = %{workspace: default_workspace()}
+        # C2: Always use authorized execution with workspace context for file safety.
+        # H1: forward the verified signed_request struct so action-layer
+        # `verify_identity: true` can succeed instead of denying with
+        # :missing_signed_request. Pre-fix the context was just
+        # `%{workspace: ...}` and the proof was discarded after gateway auth.
+        context =
+          %{workspace: default_workspace()}
+          |> maybe_put_signed_request()
+
         result = call_actions(:authorize_and_execute, [agent_id, mod, atom_params, context])
 
         case result do
