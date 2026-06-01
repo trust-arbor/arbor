@@ -286,8 +286,13 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
           [],
           ["source_key", "item_handler"],
           %{"source_key" => :string, "item_handler" => :string},
-          [],
-          :public,
+          # P0-3: map dispatches to an arbitrary handler N times. The
+          # arbor://orchestrator/map/dispatch cap binds the composition
+          # primitive so a graph can't fan out into expensive or sensitive
+          # work without explicit grant. The per-item handler is still
+          # subject to its own capability requirements via middleware.
+          ["arbor://orchestrator/map/dispatch"],
+          :restricted,
           [port("context", :any, :public)],
           [port("map.results", :any, :public)],
           sensitivity: :public
@@ -521,8 +526,13 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
           [],
           ["source_key", "file", "workdir"],
           %{"source_key" => :string, "file" => :string, "workdir" => :string},
-          [],
-          :public,
+          # P0-3: pipeline.run nests a child DOT graph inside the current
+          # execution context. Pre-fix the schema required no capability,
+          # which let any graph spawn an arbitrary sub-pipeline. The
+          # arbor://pipeline/run cap binds child-graph execution to an
+          # explicit grant.
+          ["arbor://pipeline/run"],
+          :restricted,
           [port("context", :any, :public)],
           [port("pipeline.child_status", :string, :public)],
           sensitivity: :public

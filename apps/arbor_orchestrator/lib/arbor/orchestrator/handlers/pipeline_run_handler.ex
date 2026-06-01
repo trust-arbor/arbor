@@ -94,7 +94,14 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandler do
         Context.get(context, "workdir") ||
         Keyword.get(opts, :workdir)
 
-    child_opts = Keyword.take(opts, [:logs_root, :on_event])
+    # P0-3: thread the authorization context into the child graph run.
+    # The pre-fix Keyword.take dropped :authorization, :authorizer,
+    # :signer, and :auth_context — child pipelines started with no
+    # parent auth context at all.
+    forwarded_keys =
+      [:logs_root, :on_event, :authorization, :authorizer, :signer, :auth_context, :caller_id]
+
+    child_opts = Keyword.take(opts, forwarded_keys)
 
     child_opts =
       if workdir, do: Keyword.put(child_opts, :workdir, workdir), else: child_opts
