@@ -182,4 +182,52 @@ defmodule Arbor.Gateway.AuthTest do
       assert content_type =~ "application/json"
     end
   end
+
+  describe "M4 regression: query-param tokens + constant-time compare" do
+    setup do
+      previous = Application.get_env(:arbor_gateway, :api_key)
+      Application.put_env(:arbor_gateway, :api_key, "secret_m4_value_1234567890")
+      on_exit(fn -> Application.put_env(:arbor_gateway, :api_key, previous) end)
+      :ok
+    end
+
+    test "security regression (M4): ?token=... query parameter is no longer accepted" do
+      # M4: pre-fix, extract_key fell through to conn.query_params["token"]
+      # so secrets landed in access logs, browser history, and Referer
+      # headers. The escape hatch is removed; MCP clients must send the
+      # key in the Authorization or x-api-key header.
+      conn =
+        conn(:get, "/?token=secret_m4_value_1234567890")
+        |> Auth.call(@opts)
+
+      assert conn.halted,
+             "Query-param token must not be accepted — M4 regression"
+
+      assert conn.status == 401,
+             "Expected 401 when query-param token is the only credential — got #{conn.status}"
+    end
+
+    test "security regression (M4): wrong key still rejected (constant-time compare)" do
+      # Smoke test: the Plug.Crypto.secure_compare/2 swap should preserve
+      # the deny-on-mismatch behavior. The constant-time property itself
+      # isn't directly testable in a unit test (timing depends on the
+      # whole stack); this asserts the functional outcome is unchanged.
+      conn =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer wrong_key_close_to_secret_m4")
+        |> Auth.call(@opts)
+
+      assert conn.halted
+      assert conn.status == 401
+    end
+
+    test "correct key still passes (constant-time compare)" do
+      conn =
+        conn(:get, "/")
+        |> put_req_header("authorization", "Bearer secret_m4_value_1234567890")
+        |> Auth.call(@opts)
+
+      refute conn.halted
+    end
+  end
 end

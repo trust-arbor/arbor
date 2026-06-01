@@ -33,11 +33,15 @@ defmodule Arbor.Gateway.Auth do
 
       expected_key ->
         case extract_key(conn) do
-          {:ok, ^expected_key} ->
-            conn
-
-          {:ok, _wrong_key} ->
-            reject(conn, "Invalid API key")
+          {:ok, presented_key} ->
+            # M4: pattern-match on ^expected_key is NOT constant-time and
+            # leaks the key character-by-character through timing analysis.
+            # Plug.Crypto.secure_compare/2 is constant-time (XOR-based).
+            if Plug.Crypto.secure_compare(presented_key, expected_key) do
+              conn
+            else
+              reject(conn, "Invalid API key")
+            end
 
           :error ->
             reject(
@@ -64,13 +68,16 @@ defmodule Arbor.Gateway.Auth do
             {:ok, String.trim(key)}
 
           _ ->
-            # Fallback: query param token for MCP clients that can't send custom headers
-            conn = Plug.Conn.fetch_query_params(conn)
-
-            case conn.query_params do
-              %{"token" => token} when token != "" -> {:ok, token}
-              _ -> :error
-            end
+            # M4: the previous fallback accepted `?token=<key>` query parameters
+            # so the secret would land in:
+            #   * Plug.Logger access logs
+            #   * any reverse-proxy access log
+            #   * the browser history of anyone who pasted a URL
+            #   * the Referer header on outbound requests from rendered pages
+            # The MCP-clients-can't-send-headers concern is now handled at the
+            # MCP client level (the spec requires header support); the
+            # query-param escape hatch is removed.
+            :error
         end
     end
   end
