@@ -270,6 +270,25 @@ When a fix surfaces something that genuinely needs a separate decision — not t
 
 ## Cluster C breaks
 
+### B-C-6. ToolHooks deliver payload via env var, not stdin; hook shell is non-login
+
+**Closed by:** H14 (this commit)
+**Status:** Accepted
+
+**Before:**
+- `Arbor.Orchestrator.ToolHooks.run_command/3` ran the hook command through `/bin/sh -lc`. The `-l` flag makes it a login shell, sourcing `~/.profile`, `~/.bashrc`, etc. — any modification of those files (whether by the user, a misbehaving dependency, or an attacker with prior FS access) ran as part of every hook invocation.
+- The shell wrapper string `printf '%s' "$TOOL_HOOK_PAYLOAD" | (` <> command <> `)` interpolated `command` with no quoting, so any metacharacter in the hook config (`;`, `&&`, backticks, `$()`) was honored — chained with P0-2 (graph-controlled middleware skipping, now closed) this was a second route to arbitrary host execution from DOT input.
+
+**After:**
+- Shell switched to `/bin/sh -c command` (no `-l`, no wrapper).
+- Payload reaches the hook via the `TOOL_HOOK_PAYLOAD` env var. Hook commands now read `$TOOL_HOOK_PAYLOAD` directly instead of `read body` from stdin.
+
+**Restoration shape:**
+- Any hook config that relied on stdin delivery (`read body; ...`) must switch to reading `$TOOL_HOOK_PAYLOAD`. The existing test was updated in the same commit.
+- Any deployment that depended on the login shell sourcing profile files (which would be unusual for an orchestrator hook) needs to invoke those profile scripts explicitly from the hook command.
+
+---
+
 ### B-C-5. Composition primitives (pipeline.run, map) now require explicit capabilities; child graphs inherit parent auth context
 
 **Closed by:** P0-3 (this commit, partial — see OQ-6)
