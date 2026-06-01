@@ -697,12 +697,66 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
       assert Arbor.Orchestrator.Middleware.SecretScan in chain
     end
 
-    test "skip_middleware removes mandatory middleware" do
+    test "security regression (P0-2): skip_middleware CANNOT remove mandatory middleware" do
+      # P0-2: pre-fix, skip_middleware was applied to the entire concatenated
+      # chain — mandatory + engine + graph + node — so a DOT graph could
+      # disable CapabilityCheck, TaintCheck, SafeInput, Budget, SignalEmit,
+      # and Checkpoint just by naming them in skip_middleware. That made
+      # graph input part of the trusted computing base, which directly
+      # contradicts the term "mandatory."
+      #
+      # Post-fix, skip applies only to the optional chain. Mandatory
+      # modules listed in skip are silently kept rather than rejected.
+
       graph = %Graph{nodes: %{}, edges: [], attrs: %{}}
-      node = %Node{id: "test", attrs: %{"skip_middleware" => "capability_check,taint_check"}}
-      chain = Chain.build([CapabilityCheck, TaintCheck], graph, node)
-      refute CapabilityCheck in chain
-      refute TaintCheck in chain
+
+      node = %Node{
+        id: "test",
+        attrs: %{
+          "skip_middleware" =>
+            "capability_check,taint_check,sanitization,safe_input,checkpoint,budget,signal_emit"
+        }
+      }
+
+      chain = Chain.build([], graph, node)
+
+      assert CapabilityCheck in chain,
+             "P0-2 regression: skip_middleware removed mandatory CapabilityCheck"
+
+      assert TaintCheck in chain,
+             "P0-2 regression: skip_middleware removed mandatory TaintCheck"
+
+      assert Sanitization in chain,
+             "P0-2 regression: skip_middleware removed mandatory Sanitization"
+
+      assert SafeInput in chain,
+             "P0-2 regression: skip_middleware removed mandatory SafeInput"
+
+      assert CheckpointMiddleware in chain,
+             "P0-2 regression: skip_middleware removed mandatory CheckpointMiddleware"
+
+      assert Budget in chain,
+             "P0-2 regression: skip_middleware removed mandatory Budget"
+
+      assert SignalEmit in chain,
+             "P0-2 regression: skip_middleware removed mandatory SignalEmit"
+    end
+
+    test "skip_middleware still removes OPTIONAL middleware (regression hygiene)" do
+      # Verify the optional skip path still works. SecretScan is in the
+      # registry but not in the mandatory chain.
+      graph = %Graph{nodes: %{}, edges: [], attrs: %{}}
+
+      node = %Node{
+        id: "test",
+        attrs: %{
+          "middleware" => "secret_scan",
+          "skip_middleware" => "secret_scan"
+        }
+      }
+
+      chain = Chain.build([], graph, node)
+      refute Arbor.Orchestrator.Middleware.SecretScan in chain
     end
   end
 
