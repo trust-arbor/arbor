@@ -22,9 +22,16 @@ defmodule Arbor.Security.Role do
 
   require Logger
 
+  # M1: :viewer is the least-privilege built-in role used as the OIDC login
+  # default. Holds only ambient signal subscription — no write, no admin,
+  # no agent control. Operators that need a richer baseline should define
+  # custom roles via `config :arbor_security, :roles, %{...}`.
   @builtin_roles %{
     admin: [
       "arbor://**"
+    ],
+    viewer: [
+      "arbor://signals/subscribe/security"
     ]
   }
 

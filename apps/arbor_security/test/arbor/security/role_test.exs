@@ -35,8 +35,21 @@ defmodule Arbor.Security.RoleTest do
   end
 
   describe "Role.default_human_role/0" do
-    test "defaults to admin" do
-      assert Role.default_human_role() == :admin
+    test "security regression (M1): defaults to :viewer (least privilege)" do
+      # M1: default used to be :admin — every OIDC user got root-equivalent
+      # caps without opting in. Now defaults to :viewer; operators set the
+      # default explicitly via config if they want a richer baseline.
+      original = Application.get_env(:arbor_security, :default_human_role)
+      Application.delete_env(:arbor_security, :default_human_role)
+
+      try do
+        assert Role.default_human_role() == :viewer,
+               "Default human role must be :viewer (least privilege) — M1 regression"
+      after
+        if original do
+          Application.put_env(:arbor_security, :default_human_role, original)
+        end
+      end
     end
   end
 
@@ -106,8 +119,9 @@ defmodule Arbor.Security.RoleTest do
       })
 
       on_exit(fn ->
-        if prev, do: Application.put_env(:arbor_security, :roles, prev),
-        else: Application.delete_env(:arbor_security, :roles)
+        if prev,
+          do: Application.put_env(:arbor_security, :roles, prev),
+          else: Application.delete_env(:arbor_security, :roles)
       end)
 
       :ok
