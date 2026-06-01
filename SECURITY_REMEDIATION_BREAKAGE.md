@@ -265,6 +265,25 @@ When a fix surfaces something that genuinely needs a separate decision — not t
 
 ---
 
+---
+
+## Cluster C breaks
+
+### B-C-1. DOT graphs cannot disable mandatory middleware via skip_middleware
+
+**Closed by:** P0-2 (this commit)
+**Status:** Accepted
+
+**Before:** `Chain.build/3` applied node-level `skip_middleware` to the *entire* concatenated chain — mandatory + engine + graph + node. A DOT graph could thus disable `CapabilityCheck`, `TaintCheck`, `Sanitization`, `SafeInput`, `Checkpoint`, `Budget`, and `SignalEmit` for any node by listing them in `skip_middleware`. Graph input was part of the trusted computing base.
+
+**After:** `Chain.build/3` filters `skip_middleware` only against the optional chain. Mandatory modules listed in skip are silently kept. The choice to silently keep (rather than raise) prevents a DOS path where an attacker spams pipelines with skip lists naming mandatory modules.
+
+Also: `mandatory_enabled?/0` moved from `Application.compile_env` to `Application.get_env` with a default of `Mix.env() == :prod`. Production always runs the mandatory chain; dev/test default to the existing opt-in behavior via `config :arbor_orchestrator, mandatory_middleware: true` in `config/{config,test}.exs`.
+
+**Restoration shape:** None. The pre-fix "skip mandatory" path was a backdoor. Legitimate use cases that need to opt out of *optional* middleware (e.g. skipping `secret_scan` for a node that handles encrypted blobs) still work.
+
+---
+
 ## Cross-cutting consequences
 
 ### Operator restoration cheat-sheet (sketch)

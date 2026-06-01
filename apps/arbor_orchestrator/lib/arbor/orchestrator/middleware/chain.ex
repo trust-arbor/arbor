@@ -13,8 +13,6 @@ defmodule Arbor.Orchestrator.Middleware.Chain do
   alias Arbor.Orchestrator.Engine.Outcome
   alias Arbor.Orchestrator.Middleware.Token
 
-  @mandatory_enabled Application.compile_env(:arbor_orchestrator, :mandatory_middleware, false)
-
   @mandatory_chain [
     Arbor.Orchestrator.Middleware.CapabilityCheck,
     Arbor.Orchestrator.Middleware.TaintCheck,
@@ -54,9 +52,17 @@ defmodule Arbor.Orchestrator.Middleware.Chain do
   @spec default_mandatory_chain() :: [module()]
   def default_mandatory_chain, do: @mandatory_chain
 
-  @doc "Returns whether mandatory middleware is enabled."
+  @doc """
+  Returns whether mandatory middleware is enabled.
+
+  P0-2: now a runtime config (was `Application.compile_env`) so the
+  regression test can flip it. Defaults to `Mix.env() == :prod` so production
+  always runs the mandatory chain; dev/test stay opt-in.
+  """
   @spec mandatory_enabled?() :: boolean()
-  def mandatory_enabled?, do: @mandatory_enabled
+  def mandatory_enabled? do
+    Application.get_env(:arbor_orchestrator, :mandatory_middleware, Mix.env() == :prod)
+  end
 
   @doc """
   Builds an ordered list of middleware modules for a given node.
@@ -81,16 +87,17 @@ defmodule Arbor.Orchestrator.Middleware.Chain do
         {[], []}
       end
 
-    mandatory =
-      if @mandatory_enabled do
-        @mandatory_chain
-      else
-        []
-      end
+    mandatory = if mandatory_enabled?(), do: @mandatory_chain, else: []
 
-    (mandatory ++ engine_mw ++ graph_mw ++ node_mw)
-    |> Enum.uniq()
-    |> Enum.reject(&(&1 in skip))
+    # P0-2: the optional chain may be filtered by node-level skip_middleware,
+    # but the mandatory chain must NOT be — otherwise a graph attribute is
+    # part of the trusted computing base. Pre-fix, skip was applied to the
+    # entire concatenated list, so a DOT graph could turn off CapabilityCheck,
+    # TaintCheck, SafeInput, Budget, SignalEmit, and Checkpoint just by
+    # naming them in skip_middleware. Mandatory middleware listed in skip
+    # is silently kept rather than rejected.
+    optional = (engine_mw ++ graph_mw ++ node_mw) |> Enum.uniq() |> Enum.reject(&(&1 in skip))
+    (mandatory ++ optional) |> Enum.uniq()
   end
 
   @doc """
