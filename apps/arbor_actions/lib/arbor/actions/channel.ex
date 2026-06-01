@@ -343,11 +343,39 @@ defmodule Arbor.Actions.Channel do
       {:ok, header_bin} = Base.decode64(data["header"])
       {:ok, ciphertext} = Base.decode64(data["ciphertext"])
 
+      header = decode_ratchet_header(header_bin)
+
       %{
         __ratchet__: true,
-        header: :erlang.binary_to_term(header_bin, [:safe]),
+        header: header,
         ciphertext: ciphertext
       }
+    end
+
+    # M9: binary_to_term/2 with [:safe] only blocks atom-table exhaustion —
+    # it still allows arbitrary lists, maps, and tuples of existing atoms. A
+    # compromised persistence backend or a malicious peer that can publish
+    # ratchet payloads could feed structurally-bogus terms into the Double
+    # Ratchet header parser. Validate the term shape against the expected
+    # %{dh_public: binary, n: non_neg_integer, pn: non_neg_integer} contract
+    # before letting it reach DoubleRatchet code.
+    #
+    # Public (@doc false) for the M9 regression test.
+    @doc false
+    def decode_ratchet_header(header_bin) when is_binary(header_bin) do
+      term = :erlang.binary_to_term(header_bin, [:safe])
+
+      case term do
+        %{dh_public: dh, n: n, pn: pn}
+        when is_binary(dh) and is_integer(n) and n >= 0 and is_integer(pn) and pn >= 0 ->
+          term
+
+        other ->
+          raise ArgumentError,
+                "Invalid ratchet header shape (M9): expected " <>
+                  "%{dh_public: binary, n: non_neg_integer, pn: non_neg_integer}, " <>
+                  "got #{inspect(other)}"
+      end
     end
 
     defp deserialize_sealed(%{"type" => "ecdh"} = data) do
