@@ -44,6 +44,28 @@ defmodule Arbor.Dashboard.Live.ConsensusLiveTest do
     end
   end
 
+  describe "ConsensusLive mount grant policy (H11b regression)" do
+    alias Arbor.Dashboard.Live.ConsensusLive
+
+    test "security regression (H11b): mount does NOT auto-grant any /admin capability" do
+      # H11b: previously, mounting /consensus auto-granted arbor://consensus/admin
+      # to the current OIDC user — admin-by-visit. That re-opened the hole H11
+      # closed in the OIDC login flow. Visiting a dashboard route is not a
+      # trust event.
+      resources = ConsensusLive.mount_grant_resources()
+
+      assert resources == [],
+             "ConsensusLive mount must grant no capabilities on visit — H11b regression. " <>
+               "Got: #{inspect(resources)}"
+
+      for resource <- resources do
+        refute String.contains?(resource, "/admin"),
+               "ConsensusLive mount auto-grants admin capability " <>
+                 "#{inspect(resource)} — H11b regression."
+      end
+    end
+  end
+
   describe "always-allow authorization decision (H13 regression)" do
     alias Arbor.Dashboard.Live.ConsensusLive
 

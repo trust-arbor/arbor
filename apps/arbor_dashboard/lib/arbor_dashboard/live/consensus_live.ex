@@ -45,7 +45,11 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
 
     socket = subscribe_signals(socket, "consensus.*", &reload_consensus/1)
 
-    # Ensure the logged-in user has consensus/admin capability for approve/deny
+    # H11b: previously called ensure_dashboard_approver_capability/1 here,
+    # which auto-granted arbor://consensus/admin to every user who visited
+    # /consensus. That re-opened the same hole H11 closed in the OIDC login
+    # flow — admin must come from explicit role-to-capability mapping, never
+    # from the act of visiting a dashboard route.
     ensure_dashboard_approver_capability(socket)
 
     {:ok, socket}
@@ -904,23 +908,47 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     Map.get(socket.assigns, :current_agent_id) || "system"
   end
 
-  # Grant the logged-in user consensus/admin capability so force_approve/reject work.
-  # This runs once on mount; idempotent if already granted.
+  # H11b: this function used to auto-grant arbor://consensus/admin to every
+  # OIDC user who mounted the consensus dashboard. That was an admin-by-visit
+  # backdoor that re-opened the hole H11 closed in the OIDC login flow.
+  # The function is kept as a no-op (rather than deleted) so the mount() call
+  # site is a stable anchor for future legitimate mount-time grants, and so
+  # the regression test can pin its grant-list policy.
   defp ensure_dashboard_approver_capability(socket) do
     actor_id = approval_actor_id(socket)
 
     if actor_id != "system" and Code.ensure_loaded?(Arbor.Security) and
          function_exported?(Arbor.Security, :grant, 1) do
-      Arbor.Security.grant(
-        principal: actor_id,
-        resource: "arbor://consensus/admin",
-        constraints: %{},
-        metadata: %{source: :dashboard}
-      )
+      for resource <- mount_grant_resources() do
+        Arbor.Security.grant(
+          principal: actor_id,
+          resource: resource,
+          constraints: %{},
+          metadata: %{source: :dashboard}
+        )
+      end
     end
+
+    :ok
   rescue
     _ -> :ok
   catch
     :exit, _ -> :ok
   end
+
+  @doc """
+  Capabilities granted on every ConsensusLive mount.
+
+  This list is the mount policy: any resource here is granted to *every*
+  authenticated user who visits `/consensus`. It must remain empty —
+  visiting a dashboard route is not a trust event. Approval capabilities
+  must come from explicit role-to-capability mapping
+  (`Arbor.Security.assign_role/2`).
+
+  Exposed for the H11b regression test (arbor_dashboard does not depend on
+  arbor_security and cannot easily intercept `Security.grant/1` calls from
+  its test suite).
+  """
+  @spec mount_grant_resources() :: [String.t()]
+  def mount_grant_resources, do: []
 end
