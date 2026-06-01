@@ -375,4 +375,61 @@ defmodule Arbor.Signals.ChannelsTest do
       assert is_integer(stats.total_members)
     end
   end
+
+  describe "decrypt_for_member/3 (H4 regression — minimal closure)" do
+    setup do
+      n = System.unique_integer([:positive])
+      creator = "agent_h4_creator_#{n}"
+      stranger = "agent_h4_stranger_#{n}"
+
+      {:ok, channel, key} = Channels.create("h4_test_channel_#{n}", creator)
+
+      # Encrypt a fake plaintext with the channel key — same shape decrypt
+      # expects.
+      plaintext = "hello h4 #{n}"
+      iv = :crypto.strong_rand_bytes(12)
+
+      {ct, tag} =
+        :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, "", 16, true)
+
+      payload = %{ciphertext: ct, iv: iv, tag: tag}
+
+      %{
+        channel_id: channel.id,
+        creator: creator,
+        stranger: stranger,
+        plaintext: plaintext,
+        payload: payload
+      }
+    end
+
+    test "members can decrypt via the server-side path",
+         %{channel_id: channel_id, creator: creator, plaintext: plaintext, payload: payload} do
+      assert {:ok, decrypted} = Channels.decrypt_for_member(channel_id, creator, payload)
+      assert decrypted == plaintext
+    end
+
+    test "security regression (H4): non-members cannot decrypt",
+         %{channel_id: channel_id, stranger: stranger, payload: payload} do
+      # H4: the new server-side decrypt path enforces membership inside the
+      # GenServer. A caller asserting a non-member id gets {:error, :not_a_member}
+      # rather than receiving plaintext or — under the old get_key/2 path —
+      # receiving the raw symmetric key for an unauthorized id.
+      assert {:error, :not_a_member} =
+               Channels.decrypt_for_member(channel_id, stranger, payload),
+             "Non-member must not be able to decrypt — H4 regression"
+    end
+
+    test "garbled payload fails closed",
+         %{channel_id: channel_id, creator: creator} do
+      garbled = %{
+        ciphertext: :crypto.strong_rand_bytes(32),
+        iv: :crypto.strong_rand_bytes(12),
+        tag: :crypto.strong_rand_bytes(16)
+      }
+
+      assert {:error, :decryption_failed} =
+               Channels.decrypt_for_member(channel_id, creator, garbled)
+    end
+  end
 end

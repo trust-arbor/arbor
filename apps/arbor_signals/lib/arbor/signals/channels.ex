@@ -221,11 +221,38 @@ defmodule Arbor.Signals.Channels do
   @doc """
   Get the channel key for a member.
 
-  Returns `{:ok, key}` or `{:error, reason}`.
+  H4: this API trusts the caller's asserted `agent_id`. Anyone who can call
+  `Channels` can request a key by asserting any member id, so the symmetric
+  channel key leaks to any code path that holds a reference to this module.
+  New code should use `decrypt_for_member/3` (server-side decrypt — the key
+  never leaves the GenServer process). `get_key/2` is kept for the existing
+  `Arbor.Signals.Bus` decryption path; that path is itself flagged for
+  follow-up in OQ-7 because it keys decryption on the sender's id rather
+  than the subscriber's. Removing this function entirely is staged behind
+  the bus rework.
   """
+  @doc deprecated: "Use decrypt_for_member/3 — H4 makes raw key retrieval system-internal."
   @spec get_key(channel_id(), agent_id()) :: {:ok, binary()} | {:error, term()}
   def get_key(channel_id, agent_id) when is_binary(channel_id) and is_binary(agent_id) do
     GenServer.call(__MODULE__, {:get_key, channel_id, agent_id})
+  end
+
+  @doc """
+  Decrypt a channel payload for a specific member.
+
+  H4: server-side decryption. The symmetric channel key never leaves the
+  Channels GenServer process; callers receive only the plaintext (or an
+  error). Membership is still asserted by the caller — true authentication
+  of the requesting principal is a layer above this module (the caller's
+  AuthContext must demonstrate they ARE the named member).
+
+  Returns `{:ok, plaintext}` or `{:error, reason}`.
+  """
+  @spec decrypt_for_member(channel_id(), agent_id(), map()) ::
+          {:ok, binary()} | {:error, term()}
+  def decrypt_for_member(channel_id, member_id, encrypted_payload)
+      when is_binary(channel_id) and is_binary(member_id) and is_map(encrypted_payload) do
+    GenServer.call(__MODULE__, {:decrypt_for_member, channel_id, member_id, encrypted_payload})
   end
 
   @doc """
@@ -278,7 +305,10 @@ defmodule Arbor.Signals.Channels do
       key_history: [],
       pending_invitations: %{},
       rotation_timer: nil,
-      authority_keypair: %{public: authority_public, private: encrypt_state_key(authority_private)}
+      authority_keypair: %{
+        public: authority_public,
+        private: encrypt_state_key(authority_private)
+      }
     }
 
     state = put_in(state, [:channels, channel_id], entry)
@@ -571,6 +601,21 @@ defmodule Arbor.Signals.Channels do
   end
 
   @impl true
+  def handle_call({:decrypt_for_member, channel_id, member_id, payload}, _from, state) do
+    # H4: do the decrypt inside the GenServer so the symmetric channel key
+    # never escapes this process. The caller asserts membership (the
+    # authentication of the principal is layered above), and we verify the
+    # asserted member is actually on the channel before doing the decrypt.
+    with {:ok, entry} <- get_channel_entry(state, channel_id),
+         :ok <- verify_member(entry.channel, member_id),
+         {:ok, plaintext} <- decrypt_with_key(payload, entry.key) do
+      {:reply, {:ok, plaintext}, state}
+    else
+      {:error, _reason} = error -> {:reply, error, state}
+    end
+  end
+
+  @impl true
   def handle_call({:list_channels, agent_id}, _from, state) do
     channels =
       state.channels
@@ -632,6 +677,18 @@ defmodule Arbor.Signals.Channels do
       {:error, :not_a_member}
     end
   end
+
+  defp decrypt_with_key(%{ciphertext: ct, iv: iv, tag: tag}, key)
+       when is_binary(ct) and is_binary(iv) and is_binary(tag) and is_binary(key) do
+    case :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, ct, "", tag, false) do
+      :error -> {:error, :decryption_failed}
+      plaintext when is_binary(plaintext) -> {:ok, plaintext}
+    end
+  rescue
+    _ -> {:error, :decryption_failed}
+  end
+
+  defp decrypt_with_key(_, _), do: {:error, :invalid_payload_shape}
 
   defp verify_creator(channel, agent_id) do
     if channel.creator_id == agent_id do
