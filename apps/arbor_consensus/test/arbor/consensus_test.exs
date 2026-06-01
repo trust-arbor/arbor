@@ -124,7 +124,12 @@ defmodule Arbor.ConsensusTest do
 
       result = Consensus.force_approve(id, "admin", coord)
       # Without Identity.Registry, force ops are denied (fail-closed)
-      assert result in [:ok, {:error, {:unauthorized, :security_unavailable}}, {:error, {:unauthorized, :pending_approval}}, {:error, {:unauthorized, :escalation_disabled}}]
+      assert result in [
+               :ok,
+               {:error, {:unauthorized, :security_unavailable}},
+               {:error, {:unauthorized, :pending_approval}},
+               {:error, {:unauthorized, :escalation_disabled}}
+             ]
     end
 
     test "force_reject/3 overrides decision" do
@@ -142,7 +147,12 @@ defmodule Arbor.ConsensusTest do
 
       result = Consensus.force_reject(id, "admin", coord)
       # Without Identity.Registry, force ops are denied (fail-closed)
-      assert result in [:ok, {:error, {:unauthorized, :security_unavailable}}, {:error, {:unauthorized, :pending_approval}}, {:error, {:unauthorized, :escalation_disabled}}]
+      assert result in [
+               :ok,
+               {:error, {:unauthorized, :security_unavailable}},
+               {:error, {:unauthorized, :pending_approval}},
+               {:error, {:unauthorized, :escalation_disabled}}
+             ]
     end
 
     test "stats/1 returns statistics", %{coordinator: coord} do
@@ -355,7 +365,13 @@ defmodule Arbor.ConsensusTest do
 
       result = Consensus.force_approve_proposal_by_authority(id, "admin")
       # Without Identity.Registry running, force ops are denied (fail-closed)
-      assert result in [:ok, {:error, :already_decided}, {:error, {:unauthorized, :security_unavailable}}, {:error, {:unauthorized, :pending_approval}}, {:error, {:unauthorized, :escalation_disabled}}]
+      assert result in [
+               :ok,
+               {:error, :already_decided},
+               {:error, {:unauthorized, :security_unavailable}},
+               {:error, {:unauthorized, :pending_approval}},
+               {:error, {:unauthorized, :escalation_disabled}}
+             ]
     end
 
     test "force_reject_proposal_by_authority/2" do
@@ -367,7 +383,13 @@ defmodule Arbor.ConsensusTest do
 
       result = Consensus.force_reject_proposal_by_authority(id, "admin")
       # Without Identity.Registry running, force ops are denied (fail-closed)
-      assert result in [:ok, {:error, :already_decided}, {:error, {:unauthorized, :security_unavailable}}, {:error, {:unauthorized, :pending_approval}}, {:error, {:unauthorized, :escalation_disabled}}]
+      assert result in [
+               :ok,
+               {:error, :already_decided},
+               {:error, {:unauthorized, :security_unavailable}},
+               {:error, {:unauthorized, :pending_approval}},
+               {:error, {:unauthorized, :escalation_disabled}}
+             ]
     end
 
     test "get_consensus_system_stats/0" do
@@ -389,6 +411,38 @@ defmodule Arbor.ConsensusTest do
     test "get_timeline_for_proposal/1" do
       timeline = Consensus.get_timeline_for_proposal("nonexistent")
       assert is_list(timeline)
+    end
+  end
+
+  describe "Consensus.when_security_unavailable/0 (H6 regression)" do
+    setup do
+      original = Application.get_env(:arbor_consensus, :strict_facade_mode)
+
+      on_exit(fn ->
+        if is_nil(original) do
+          Application.delete_env(:arbor_consensus, :strict_facade_mode)
+        else
+          Application.put_env(:arbor_consensus, :strict_facade_mode, original)
+        end
+      end)
+
+      :ok
+    end
+
+    test "security regression (H6): strict mode denies when Security is unavailable" do
+      # H6: the Consensus facade's internal authorize/2 mirrored the Memory
+      # facade's pre-fix shape — :ok on the "Security unreachable" branch.
+      # In strict mode (production default) this must deny.
+      Application.put_env(:arbor_consensus, :strict_facade_mode, true)
+
+      assert {:error, :security_unavailable} = Arbor.Consensus.when_security_unavailable(),
+             "Strict mode must deny when Security is unavailable — H6 regression"
+    end
+
+    test "permissive mode preserves the existing :ok response" do
+      Application.put_env(:arbor_consensus, :strict_facade_mode, false)
+
+      assert :ok = Arbor.Consensus.when_security_unavailable()
     end
   end
 end

@@ -528,8 +528,28 @@ defmodule Arbor.Consensus do
         {:error, reason} -> {:error, reason}
       end
     else
+      # H6: pre-fix, this branch returned :ok unconditionally — partial
+      # security outages silently became unconditional authorization.
+      when_security_unavailable()
+    end
+  end
+
+  # Public (@doc false) for the H6 regression test. See Memory facade for
+  # rationale; mirroring the shape here so all three Level-2 facades expose
+  # the same testable seam.
+  @doc false
+  @spec when_security_unavailable() :: :ok | {:error, :security_unavailable}
+  def when_security_unavailable do
+    if strict_facade_mode?() do
+      {:error, :security_unavailable}
+    else
       :ok
     end
+  end
+
+  @doc false
+  def strict_facade_mode? do
+    Application.get_env(:arbor_consensus, :strict_facade_mode, Mix.env() == :prod)
   end
 
   defp security_available? do

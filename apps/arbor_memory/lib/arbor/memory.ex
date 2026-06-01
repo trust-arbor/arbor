@@ -534,9 +534,32 @@ defmodule Arbor.Memory do
         {:error, reason} -> {:error, reason}
       end
     else
-      # No security module available or not running — permit
+      # H6: pre-fix, this branch returned :ok unconditionally — any time
+      # Arbor.Security was loaded-but-not-running or healthy? returned false,
+      # the Memory facade silently authorized every call.
+      when_security_unavailable()
+    end
+  end
+
+  # Public (@doc false) for the H6 regression test. Encapsulates the
+  # "Security is unreachable, what now" decision so the test can exercise
+  # it without having to actually stop the Security GenServer mid-process.
+  # Strict mode (production by default) denies; permissive mode (dev/test
+  # default) preserves the existing :ok response so test setups that don't
+  # bring up Arbor.Security still work.
+  @doc false
+  @spec when_security_unavailable() :: :ok | {:error, :security_unavailable}
+  def when_security_unavailable do
+    if strict_facade_mode?() do
+      {:error, :security_unavailable}
+    else
       :ok
     end
+  end
+
+  @doc false
+  def strict_facade_mode? do
+    Application.get_env(:arbor_memory, :strict_facade_mode, Mix.env() == :prod)
   end
 
   defp security_available? do

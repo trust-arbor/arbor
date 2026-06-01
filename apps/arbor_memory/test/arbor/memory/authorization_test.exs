@@ -183,4 +183,41 @@ defmodule Arbor.Memory.AuthorizationTest do
       end
     end
   end
+
+  describe "Memory.when_security_unavailable/0 (H6 regression)" do
+    setup do
+      original = Application.get_env(:arbor_memory, :strict_facade_mode)
+
+      on_exit(fn ->
+        if is_nil(original) do
+          Application.delete_env(:arbor_memory, :strict_facade_mode)
+        else
+          Application.put_env(:arbor_memory, :strict_facade_mode, original)
+        end
+      end)
+
+      :ok
+    end
+
+    test "security regression (H6): strict mode denies when Security is unavailable" do
+      # H6: pre-fix, the Memory facade's internal authorize/3 returned :ok
+      # whenever Code.ensure_loaded?(Arbor.Security) returned false or the
+      # Security GenServer was unreachable. That meant any partial outage of
+      # the security subsystem silently turned every Memory operation into
+      # an unauthenticated success. In strict mode (production by default)
+      # the facade must deny instead.
+      Application.put_env(:arbor_memory, :strict_facade_mode, true)
+
+      assert {:error, :security_unavailable} = Arbor.Memory.when_security_unavailable(),
+             "Strict mode must deny when Security is unavailable — H6 regression"
+    end
+
+    test "permissive mode preserves the existing :ok response" do
+      # Dev/test default. Existing test setups that don't bring up
+      # Arbor.Security should keep working — only production flips strict on.
+      Application.put_env(:arbor_memory, :strict_facade_mode, false)
+
+      assert :ok = Arbor.Memory.when_security_unavailable()
+    end
+  end
 end

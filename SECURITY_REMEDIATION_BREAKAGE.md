@@ -165,6 +165,23 @@ When a fix surfaces something that genuinely needs a separate decision — not t
 
 ---
 
+### B-B-6. Memory + Consensus facades fail closed when Security is unavailable in strict mode
+
+**Closed by:** H6 (this commit)
+**Status:** Documented (needs the config flag flipped in prod)
+
+**Before:** `Arbor.Memory.authorize/3` and `Arbor.Consensus.authorize/2` (the internal helpers behind the public `authorize_*` facade functions) returned `:ok` whenever `Code.ensure_loaded?(Arbor.Security)` was false, `function_exported?` returned false, or `security_available?/0` returned false. Any partial outage of the security subsystem silently turned every facade call into an unauthenticated success.
+
+**After:** Both facades now route the "Security is unreachable" branch through a `when_security_unavailable/0` helper. In strict mode (production by default — `Mix.env() == :prod`) the helper returns `{:error, :security_unavailable}`. In permissive mode (dev/test default — `:strict_facade_mode false`) the helper preserves the existing `:ok` so test fixtures that don't bring up `Arbor.Security` keep working.
+
+**Restoration shape:**
+- Production deployments must set both:
+  - `config :arbor_memory, :strict_facade_mode, true`
+  - `config :arbor_consensus, :strict_facade_mode, true`
+- This pairs with H5's `:arbor_security, :strict_identity_mode, true`. All three are intentionally separate flags so an operator can roll them out one subsystem at a time.
+
+---
+
 ### B-B-5. AuthDecision honors registry status for humans; rescue/catch paths fail closed in strict mode
 
 **Closed by:** H5 (this commit)
