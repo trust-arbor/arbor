@@ -40,7 +40,17 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
     end
 
     test "captures stderr in output" do
-      node = %Node{id: "t1", attrs: %{"tool_command" => "bash -c 'echo error >&2'"}}
+      # H3: bash -c with a quoted command is blocked by the sandbox's
+      # default (:basic) level. This test exercises runtime stderr capture,
+      # not the sandbox check, so opt out explicitly.
+      node = %Node{
+        id: "t1",
+        attrs: %{
+          "tool_command" => "bash -c 'echo error >&2'",
+          "sandbox" => "none"
+        }
+      }
+
       context = Context.new()
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
@@ -127,6 +137,55 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
 
       assert {:ok, result} = Arbor.Orchestrator.run(dot)
       assert result.final_outcome.status == :fail
+    end
+  end
+
+  describe "sandbox enforcement (H3 regression)" do
+    test "security regression (H3): dangerous command is rejected by the sandbox" do
+      # H3: pre-fix, ToolHandler.run_command called System.cmd directly,
+      # bypassing Arbor.Shell.Sandbox entirely. A pipeline node could
+      # execute any command including rm -rf, curl|sh, etc. The fix routes
+      # through Arbor.Shell.Sandbox.check/2 — `rm -rf /` is in the basic
+      # dangerous-commands list and now denies.
+      node = %Node{
+        id: "rm_attempt",
+        attrs: %{
+          "tool_command" => "rm -rf /",
+          "sandbox" => "basic"
+        }
+      }
+
+      context = Context.new()
+      graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
+
+      outcome = ToolHandler.execute(node, context, graph, [])
+
+      assert outcome.status == :fail,
+             "Dangerous command must be rejected by the sandbox — H3 regression. " <>
+               "Got: #{inspect(outcome)}"
+
+      assert outcome.failure_reason =~ "sandbox",
+             "Failure reason should mention sandbox — got #{inspect(outcome.failure_reason)}"
+    end
+
+    test "sandbox=none opts out for legitimate maintenance commands" do
+      # The escape hatch for trusted ops paths that genuinely need
+      # arbitrary commands; tested for parity with the existing test
+      # that uses sandbox=none.
+      node = %Node{
+        id: "ok",
+        attrs: %{
+          "tool_command" => ~s(/bin/echo hello),
+          "sandbox" => "none"
+        }
+      }
+
+      context = Context.new()
+      graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
+
+      outcome = ToolHandler.execute(node, context, graph, [])
+
+      assert outcome.status == :success
     end
   end
 end

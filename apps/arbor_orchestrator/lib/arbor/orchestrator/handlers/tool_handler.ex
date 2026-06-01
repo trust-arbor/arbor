@@ -59,11 +59,64 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
   @impl true
   def idempotency, do: :side_effecting
 
-  defp run_command(command, _node, context, opts) do
+  defp run_command(command, node, context, opts) do
+    # H3: pre-fix, ToolHandler called System.cmd directly — bypassing the
+    # Arbor.Shell.Sandbox filter that the rest of the shell-execution paths
+    # consult. The sandbox isn't OS-level isolation (the full containment
+    # work is bigger than this commit can take), but the allowlist /
+    # denylist / metacharacter check IS the project's documented preflight
+    # gate for shell execution. Routing ToolHandler through it closes the
+    # specific bypass the audit flagged.
+    #
+    # arbor_orchestrator is Standalone in the library hierarchy, so the
+    # Shell.Sandbox dependency is consulted via a runtime bridge (same
+    # pattern other Standalone modules use). If Arbor.Shell.Sandbox isn't
+    # loaded at runtime, the request defaults to the strict "deny unless
+    # explicitly allowed" posture rather than fail-open.
+    sandbox_level = sandbox_level_for(node)
+
+    case sandbox_check(command, sandbox_level) do
+      {:ok, :allowed} ->
+        execute_after_sandbox_check(command, context, opts)
+
+      {:error, reason} ->
+        %Outcome{
+          status: :fail,
+          failure_reason:
+            "Tool command rejected by sandbox (level=#{sandbox_level}, reason=#{inspect(reason)}): " <>
+              String.slice(command, 0, 200)
+        }
+    end
+  end
+
+  defp sandbox_check(command, level) do
+    sandbox_mod = Arbor.Shell.Sandbox
+
+    if Code.ensure_loaded?(sandbox_mod) and function_exported?(sandbox_mod, :check, 2) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(sandbox_mod, :check, [command, level])
+    else
+      # Sandbox module unreachable. Strict-deny: if the operator hasn't set
+      # up the sandbox, an unsanboxed tool execution should not be allowed
+      # through silently.
+      {:error, :sandbox_unavailable}
+    end
+  end
+
+  defp sandbox_level_for(node) do
+    case Map.get(node.attrs, "sandbox") do
+      "none" -> :none
+      "basic" -> :basic
+      "strict" -> :strict
+      "container" -> :container
+      _ -> Application.get_env(:arbor_orchestrator, :default_tool_sandbox_level, :basic)
+    end
+  end
+
+  defp execute_after_sandbox_check(command, context, opts) do
     [executable | args] = OptionParser.split(command)
     cmd_opts = [stderr_to_stdout: true] ++ workdir_opt(context, opts)
 
-    # Tool handler: executes shell commands from pipeline tool_command attr
     # credo:disable-for-next-line Credo.Check.Security.UnsafeSystemCmd
     {output, exit_code} = System.cmd(executable, args, cmd_opts)
 
