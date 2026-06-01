@@ -52,13 +52,26 @@ defmodule Arbor.Orchestrator.Engine do
   """
   @spec run(Graph.t(), keyword()) :: {:ok, run_result()} | {:error, term()}
   def run(%Graph{} = graph, opts \\ []) do
-    if Keyword.get(opts, :validate, false) do
-      case Validator.validate_or_error(graph) do
-        :ok -> do_run(graph, opts)
-        {:error, _} = err -> err
-      end
-    else
-      do_run(graph, opts)
+    # H16: cap subgraph / pipeline.run / graph.compose nesting so an LLM-
+    # generated or malicious DOT pipeline can't recurse without bound and
+    # exhaust CPU, memory, or LLM API budget. SubgraphHandler and
+    # PipelineRunHandler decrement :max_depth before invoking run/2 again.
+    # Default ceiling is 3 levels — empirically deep enough for the
+    # legitimate "user pipeline → stdlib → primitive" pattern, tight enough
+    # to fail fast on runaway compositions.
+    case Keyword.get(opts, :max_depth, 3) do
+      depth when is_integer(depth) and depth < 0 ->
+        {:error, :max_depth_exceeded}
+
+      _ ->
+        if Keyword.get(opts, :validate, false) do
+          case Validator.validate_or_error(graph) do
+            :ok -> do_run(graph, opts)
+            {:error, _} = err -> err
+          end
+        else
+          do_run(graph, opts)
+        end
     end
   end
 

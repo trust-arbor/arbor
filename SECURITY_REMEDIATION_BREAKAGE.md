@@ -269,6 +269,24 @@ When a fix surfaces something that genuinely needs a separate decision — not t
 
 ## Cluster C breaks
 
+### B-C-2. Subgraph / pipeline.run / graph.compose chains terminate after 3 nesting levels by default
+
+**Closed by:** H16 (this commit)
+**Status:** Documented (operators who legitimately need deeper composition should opt up explicitly)
+
+**Before:** Neither `SubgraphHandler.run_child/5` nor `PipelineRunHandler.build_child_opts/3` threaded a depth counter through child `Arbor.Orchestrator.run/2` invocations. Each child got a fresh 500-step engine budget, so a graph with `N` levels of nesting could execute `N × 500` total steps. A `graph.compose` node that reads LLM output as DOT could spin up new graphs forever.
+
+**After:**
+- `Arbor.Orchestrator.run/2` reads `:max_depth` (default `3`) and returns `{:error, :max_depth_exceeded}` immediately if it's below zero.
+- `SubgraphHandler.build_child_opts/2` and `PipelineRunHandler.build_child_opts/3` decrement `:max_depth` before passing it to the child run.
+- A top-level call with default opts can therefore nest three layers (`3 → 2 → 1 → 0`) and the fourth attempt fails fast.
+
+**Restoration shape:**
+- Legitimate pipelines that need deeper composition can pass `Arbor.Orchestrator.run(source, max_depth: 6)` (or higher). The default is the safe ceiling, not a hard maximum.
+- If a deployment routinely needs >3 levels, raise the default via a config knob — but consider whether the architecture genuinely needs that depth before doing so.
+
+---
+
 ### B-C-1. DOT graphs cannot disable mandatory middleware via skip_middleware
 
 **Closed by:** P0-2 (this commit)

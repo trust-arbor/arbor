@@ -96,11 +96,13 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandler do
 
     child_opts = Keyword.take(opts, [:logs_root, :on_event])
 
-    if workdir do
-      Keyword.put(child_opts, :workdir, workdir)
-    else
-      child_opts
-    end
+    child_opts =
+      if workdir, do: Keyword.put(child_opts, :workdir, workdir), else: child_opts
+
+    # H16: decrement the recursion budget so nested pipeline.run calls
+    # eventually hit the engine's max_depth gate.
+    parent_depth = Keyword.get(opts, :max_depth, 3)
+    Keyword.put(child_opts, :max_depth, parent_depth - 1)
   end
 
   # Promote selected child context values into parent context under a namespace
