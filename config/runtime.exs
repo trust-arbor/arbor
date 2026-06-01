@@ -47,6 +47,15 @@ if config_env() == :prod do
 
   config :arbor_dashboard, Arbor.Dashboard.Endpoint, secret_key_base: secret_key_base
 
+  # M2: production defaults to strict taint enforcement. Externally influenced
+  # action parameters (LLM output, persisted records, external HTTP) carry
+  # taint metadata; in :audit_only mode violations log but execute anyway,
+  # which means the audit trail tells you what already happened rather than
+  # blocking it. config.exs keeps :audit_only as the dev default for
+  # observability during migration; runtime.exs flips prod to :strict so the
+  # enforcement actually fires.
+  config :arbor_actions, default_taint_policy: :strict
+
   # M14: Enforce check_origin in production (override dev's check_origin: false)
   dashboard_host = System.get_env("DASHBOARD_HOST") || "localhost"
   dashboard_port = System.get_env("DASHBOARD_PORT") || "4001"

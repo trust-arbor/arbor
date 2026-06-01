@@ -269,6 +269,19 @@ When a fix surfaces something that genuinely needs a separate decision — not t
 
 ## Cluster C breaks
 
+### B-C-3. Production taint enforcement is `:strict` by default
+
+**Closed by:** M2 (this commit)
+**Status:** Accepted
+
+**Before:** `config/config.exs` set `default_taint_policy: :audit_only` for every environment. Production deployments that didn't explicitly override it logged taint violations without blocking — the audit trail told you what had already happened.
+
+**After:** `config/runtime.exs` flips `:arbor_actions, default_taint_policy` to `:strict` inside the `if config_env() == :prod do` block. Dev and test continue with `:audit_only` (config.exs) and `:permissive` (test.exs) respectively for observability and existing test setups.
+
+**Restoration shape:** Production deployments that genuinely need observability without enforcement (migration period, evaluation mode) can override in their deployment-specific `runtime.exs` or set `ARBOR_TAINT_POLICY=audit_only` if we wire it. Add a metric/alarm for taint violations regardless — strict mode shouldn't hide the volume of attempted-but-blocked calls.
+
+---
+
 ### B-C-2. Subgraph / pipeline.run / graph.compose chains terminate after 3 nesting levels by default
 
 **Closed by:** H16 (this commit)
