@@ -826,12 +826,14 @@ defmodule Arbor.Consensus.Coordinator do
     :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
   end
 
-  # Advisory mode skips duplicate check
-  defp check_duplicate_unless_advisory(_state, %{mode: :advisory}), do: :ok
+  # M7: advisory mode used to skip both duplicate detection and per-agent
+  # quota checks. Each advisory proposal triggers 13 LLM calls for council
+  # evaluation, so an agent (or a compromised agent path) could exhaust the
+  # daily LLM API spend by spamming identical advisory queries. Both checks
+  # now run for advisory mode too; if the empirical limits are too tight,
+  # the right answer is to split the configs (decision_max_*, advisory_max_*)
+  # rather than restore the bypass.
   defp check_duplicate_unless_advisory(state, proposal), do: check_duplicate(state, proposal)
-
-  # Advisory mode skips agent quota check
-  defp check_agent_quota_unless_advisory(_state, %{mode: :advisory}), do: :ok
   defp check_agent_quota_unless_advisory(state, proposal), do: check_agent_quota(state, proposal)
 
   defp update_proposal_status(state, proposal_id, status) do

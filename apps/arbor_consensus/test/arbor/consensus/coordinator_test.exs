@@ -1349,4 +1349,34 @@ defmodule Arbor.Consensus.CoordinatorTest do
       assert {:ok, _proposal_id} = result
     end
   end
+
+  describe "advisory dedup + quota (M7 regression)" do
+    test "security regression (M7): advisory proposals are subject to duplicate detection" do
+      # M7: advisory mode used to skip check_duplicate entirely. Each
+      # advisory proposal triggers 13 LLM calls for council evaluation, so
+      # an agent could exhaust the daily LLM API budget by spamming
+      # identical advisory queries. Duplicates must now be rejected just
+      # like decision proposals.
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.AlwaysApproveBackend,
+          config: [evaluation_timeout_ms: 5_000]
+        )
+
+      proposal_attrs = %{
+        proposer: "agent_advisory_m7",
+        topic: :code_modification,
+        description: "advisory M7 duplicate test",
+        context: %{target_module: "Foo", code_diff: "+ bar"},
+        mode: :advisory
+      }
+
+      {:ok, _first_id} = Coordinator.submit(proposal_attrs, server: coord)
+
+      result = Coordinator.submit(proposal_attrs, server: coord)
+
+      assert {:error, :duplicate_proposal} = result,
+             "M7 regression: duplicate advisory proposal must be rejected — got #{inspect(result)}"
+    end
+  end
 end
