@@ -60,7 +60,9 @@ defmodule Arbor.Security.CapabilityStoreTest do
 
     test "returns empty list for unknown principal" do
       assert {:ok, []} =
-               CapabilityStore.list_for_principal("agent_unknown_#{:erlang.unique_integer([:positive])}")
+               CapabilityStore.list_for_principal(
+                 "agent_unknown_#{:erlang.unique_integer([:positive])}"
+               )
     end
 
     test "filters expired by default", %{agent_id: agent_id} do
@@ -108,7 +110,10 @@ defmodule Arbor.Security.CapabilityStoreTest do
       {:ok, :stored} = CapabilityStore.put(cap)
 
       assert {:ok, _} =
-               CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/prefix/subpath/file.ex")
+               CapabilityStore.find_authorizing(
+                 agent_id,
+                 "arbor://fs/read/prefix/subpath/file.ex"
+               )
     end
 
     test "returns not_found for unmatched resource", %{agent_id: agent_id} do
@@ -159,6 +164,27 @@ defmodule Arbor.Security.CapabilityStoreTest do
       # Should NOT match home_config (boundary-aware)
       assert {:error, :not_found} =
                CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/home_config/file.txt")
+    end
+
+    test "security regression (H8): trailing-slash pattern still matches subpaths",
+         %{agent_id: agent_id} do
+      # H8: pre-fix, a capability granted with a trailing slash
+      # ("arbor://fs/read/") produced double-slash in the prefix check:
+      #   starts_with?("arbor://fs/read/home", "arbor://fs/read/" <> "/")
+      #   == starts_with?("arbor://fs/read/home", "arbor://fs/read//")
+      #   == false
+      # so legitimate calls were denied despite an apparently correct
+      # capability. The fix normalizes both pattern and resource by
+      # stripping trailing slashes before matching.
+      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/")
+      {:ok, :stored} = CapabilityStore.put(cap)
+
+      assert {:ok, _} =
+               CapabilityStore.find_authorizing(
+                 agent_id,
+                 "arbor://fs/read/home/file.txt"
+               ),
+             "Trailing-slash pattern must match subpaths — H8 regression"
     end
   end
 
@@ -320,7 +346,9 @@ defmodule Arbor.Security.CapabilityStoreTest do
       Application.put_env(:arbor_security, :quota_enforcement_enabled, false)
 
       # Should succeed even with depth > max
-      {:ok, cap1} = build_capability(agent_id, "arbor://fs/read/test/no_quota/1", delegation_depth: 10)
+      {:ok, cap1} =
+        build_capability(agent_id, "arbor://fs/read/test/no_quota/1", delegation_depth: 10)
+
       assert {:ok, :stored} = CapabilityStore.put(cap1)
 
       # Should succeed even with > max_per_agent
@@ -342,7 +370,9 @@ defmodule Arbor.Security.CapabilityStoreTest do
 
       # At limit
       {:ok, cap3} = build_capability(agent_id, "arbor://fs/read/test/revoke/3")
-      assert {:error, {:quota_exceeded, :per_agent_capability_limit, _}} = CapabilityStore.put(cap3)
+
+      assert {:error, {:quota_exceeded, :per_agent_capability_limit, _}} =
+               CapabilityStore.put(cap3)
 
       # Revoke one
       :ok = CapabilityStore.revoke(cap1.id)

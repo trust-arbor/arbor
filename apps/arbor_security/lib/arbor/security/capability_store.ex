@@ -442,26 +442,32 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   defp authorizes_resource?(cap, resource_uri) do
-    # Check if capability's resource pattern matches the requested resource.
-    # The action is encoded in the URI: arbor://{type}/{action}/{path}
-    #
-    # Glob support: "arbor://fs/read/**" matches "arbor://fs/read" and anything under it
-    # Boundary-aware: "arbor://fs/read/home" does NOT match "arbor://fs/read/home_config"
-    pattern = cap.resource_uri
+    # H8: pre-fix, the prefix branch did
+    #   `starts_with?(resource_uri, pattern <> "/")`
+    # When a capability was granted with a trailing slash (e.g.
+    # "arbor://fs/read/" — produced by some Claude Code bridge defaults),
+    # the comparison became
+    #   `starts_with?("arbor://fs/read/home", "arbor://fs/read//")`
+    # which failed because of the doubled slash. Legitimate calls were
+    # denied despite an apparently correct capability. The fix normalizes
+    # both pattern and resource by stripping trailing slashes before
+    # matching.
+    pattern = String.trim_trailing(cap.resource_uri, "/")
+    resource = String.trim_trailing(resource_uri, "/")
 
     cond do
       # Exact match
-      pattern == resource_uri ->
+      pattern == resource ->
         true
 
       # Glob wildcard: "arbor://foo/**" matches "arbor://foo", "arbor://foo/bar", "arbor://foo/bar/baz"
       String.ends_with?(pattern, "/**") ->
         prefix = String.trim_trailing(pattern, "/**")
-        resource_uri == prefix or String.starts_with?(resource_uri, prefix <> "/")
+        resource == prefix or String.starts_with?(resource, prefix <> "/")
 
       # Prefix + boundary separator
       true ->
-        String.starts_with?(resource_uri, pattern <> "/")
+        String.starts_with?(resource, pattern <> "/")
     end
   end
 
@@ -780,12 +786,17 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp emit_capability_signal(type, cap) do
     if Config.distributed_signals_enabled?() do
-      Signals.emit(:security, type, %{
-        capability_id: cap.id,
-        principal_id: cap.principal_id,
-        resource_uri: cap.resource_uri,
-        origin_node: node()
-      }, scope: :cluster)
+      Signals.emit(
+        :security,
+        type,
+        %{
+          capability_id: cap.id,
+          principal_id: cap.principal_id,
+          resource_uri: cap.resource_uri,
+          origin_node: node()
+        },
+        scope: :cluster
+      )
     end
   catch
     _, _ -> :ok
@@ -793,11 +804,16 @@ defmodule Arbor.Security.CapabilityStore do
 
   defp emit_revocation_signal(type, cap_ids, principal_id) do
     if Config.distributed_signals_enabled?() do
-      Signals.emit(:security, type, %{
-        capability_ids: cap_ids,
-        principal_id: principal_id,
-        origin_node: node()
-      }, scope: :cluster)
+      Signals.emit(
+        :security,
+        type,
+        %{
+          capability_ids: cap_ids,
+          principal_id: principal_id,
+          origin_node: node()
+        },
+        scope: :cluster
+      )
     end
   catch
     _, _ -> :ok
@@ -891,5 +907,4 @@ defmodule Arbor.Security.CapabilityStore do
       Logger.warning("Failed to restore capability entry: #{inspect(e)}")
       state
   end
-
 end
