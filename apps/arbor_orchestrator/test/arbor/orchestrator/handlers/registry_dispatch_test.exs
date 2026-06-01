@@ -260,4 +260,53 @@ defmodule Arbor.Orchestrator.Handlers.RegistryDispatchTest do
       File.rm(Path.join(System.tmp_dir!(), "fallback_read_*.txt"))
     end
   end
+
+  describe "strict unknown handler mode (M3 regression)" do
+    alias Arbor.Orchestrator.Handlers.Registry, as: HandlerRegistry
+    alias Arbor.Orchestrator.Graph.Node, as: GraphNode
+
+    setup do
+      original = Application.get_env(:arbor_orchestrator, :strict_unknown_handlers)
+
+      on_exit(fn ->
+        if is_nil(original) do
+          Application.delete_env(:arbor_orchestrator, :strict_unknown_handlers)
+        else
+          Application.put_env(:arbor_orchestrator, :strict_unknown_handlers, original)
+        end
+      end)
+
+      :ok
+    end
+
+    test "security regression (M3): unknown handler type raises in strict mode" do
+      # M3: pre-fix, Registry.resolve fell through to LlmHandler for any node
+      # whose type wasn't in the core map or HandlerRegistry. That turned every
+      # misspelled type, every typo in a custom handler name, and every
+      # unrecognized type in an untrusted graph into an LLM call with whatever
+      # context the graph was carrying. Strict mode now raises so a malformed
+      # or malicious graph fails fast.
+      Application.put_env(:arbor_orchestrator, :strict_unknown_handlers, true)
+
+      node = %GraphNode{
+        id: "n1",
+        attrs: %{"type" => "definitely_not_a_real_handler_m3_regression"}
+      }
+
+      assert_raise ArgumentError, ~r/Unknown handler type.*strict mode \(M3\)/, fn ->
+        HandlerRegistry.resolve(node)
+      end
+    end
+
+    test "permissive mode falls back to LlmHandler (existing behavior preserved)" do
+      Application.put_env(:arbor_orchestrator, :strict_unknown_handlers, false)
+
+      node = %GraphNode{
+        id: "n2",
+        attrs: %{"type" => "another_unknown_type_m3"}
+      }
+
+      assert Arbor.Orchestrator.Handlers.LlmHandler = HandlerRegistry.resolve(node)
+    end
+  end
 end

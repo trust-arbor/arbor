@@ -200,16 +200,44 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
 
   # --- Private ---
 
-  # Look up a core handler from HandlerRegistry, falling back to compile-time map
+  # Look up a core handler from HandlerRegistry, falling back to compile-time map.
+  #
+  # M3: in strict mode, unknown handler types raise instead of silently
+  # dispatching to LlmHandler. The pre-fix fallback turned every misspelled
+  # node type, every typo in a custom handler name, and every malicious
+  # unrecognized type into an LLM call with whatever context the graph
+  # happened to be carrying. Custom handlers must register via
+  # HandlerRegistry or as a custom handler; that path is unchanged.
   defp lookup_core_handler(type) do
-    if Process.whereis(HandlerRegistry) do
-      case HandlerRegistry.resolve(type) do
-        {:ok, module} -> module
-        _ -> Map.get(@core_handlers, type, LlmHandler)
+    resolved =
+      if Process.whereis(HandlerRegistry) do
+        case HandlerRegistry.resolve(type) do
+          {:ok, module} -> module
+          _ -> Map.get(@core_handlers, type)
+        end
+      else
+        Map.get(@core_handlers, type)
       end
-    else
-      Map.get(@core_handlers, type, LlmHandler)
+
+    case resolved do
+      nil ->
+        if strict_unknown_handlers?() do
+          raise ArgumentError,
+                "Unknown handler type #{inspect(type)} — refusing to fall back to " <>
+                  "LlmHandler in strict mode (M3). Register the handler via " <>
+                  "Arbor.Common.HandlerRegistry or as a custom handler."
+        else
+          LlmHandler
+        end
+
+      module ->
+        module
     end
+  end
+
+  @doc false
+  def strict_unknown_handlers? do
+    Application.get_env(:arbor_orchestrator, :strict_unknown_handlers, Mix.env() == :prod)
   end
 
   defp custom_handlers do
