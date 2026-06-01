@@ -36,11 +36,24 @@ defmodule Arbor.Security.SystemAuthority do
   alias Arbor.Security.Config
   alias Arbor.Security.Crypto
   alias Arbor.Security.Identity.Registry
+  alias Arbor.Security.SigningKeyStore
 
   # Runtime bridge — arbor_persistence is Level 1 peer, no compile-time dep
   @buffered_store Arbor.Persistence.BufferedStore
   @key_store_name :arbor_security_signing_keys
-  @authority_key "system_authority_keypair"
+
+  # The authority's *private* keypair is held in SigningKeyStore under this
+  # logical agent_id (AES-GCM encrypted at rest). The corresponding public
+  # metadata (public keys, agent_id, name, created_at) is held under
+  # @authority_metadata_key in the same BufferedStore — public material is
+  # not encrypted because it's not a secret.
+  @authority_signing_id "system_authority"
+  @authority_metadata_key "system_authority_metadata_v2"
+
+  # P0-5: pre-v2 layout stored the private key as plaintext base64 under this
+  # key. We never read it again; on first boot after upgrade we delete it so
+  # the secret stops sitting on disk.
+  @legacy_plaintext_key "system_authority_keypair"
 
   # Client API
 
@@ -151,6 +164,11 @@ defmodule Arbor.Security.SystemAuthority do
   end
 
   defp init_persistent do
+    # P0-5: any pre-v2 plaintext keypair record is orphan data — delete it
+    # before doing anything else so the plaintext private key stops sitting
+    # on disk. Idempotent: no-op if the legacy record never existed.
+    cleanup_legacy_plaintext_record()
+
     case load_persisted_keypair() do
       {:ok, identity} ->
         Logger.info("[SystemAuthority] Loaded persistent keypair: #{identity.agent_id}")
@@ -166,8 +184,12 @@ defmodule Arbor.Security.SystemAuthority do
         # First boot — generate and persist
         case Identity.generate() do
           {:ok, identity} ->
-            persist_keypair(identity)
-            Logger.info("[SystemAuthority] Generated new persistent keypair: #{identity.agent_id}")
+            :ok = persist_keypair(identity)
+
+            Logger.info(
+              "[SystemAuthority] Generated new persistent keypair: #{identity.agent_id}"
+            )
+
             :ok = Registry.register(Identity.public_only(identity))
             {:ok, %{identity: identity}}
 
@@ -176,19 +198,17 @@ defmodule Arbor.Security.SystemAuthority do
         end
 
       {:error, reason} ->
-        Logger.warning(
-          "[SystemAuthority] Failed to load persisted keypair: #{inspect(reason)}, generating new"
+        # P0-5: load failure is fatal. Silently rotating the trust root on a
+        # transient persistence/decode error would invalidate every signed
+        # capability, receipt, and endorsement in the cluster without any
+        # operator awareness. Stop and require explicit recovery instead.
+        Logger.error(
+          "[SystemAuthority] Failed to load persisted keypair: #{inspect(reason)}. " <>
+            "Refusing to silently rotate the trust root. Investigate the persistence " <>
+            "backend or call SystemAuthority.rotate/0 explicitly to mint a new authority key."
         )
 
-        case Identity.generate() do
-          {:ok, identity} ->
-            persist_keypair(identity)
-            :ok = Registry.register(Identity.public_only(identity))
-            {:ok, %{identity: identity}}
-
-          {:error, gen_reason} ->
-            {:stop, {:failed_to_generate_identity, gen_reason}}
-        end
+        {:stop, {:authority_load_failed, reason}}
     end
   end
 
@@ -303,25 +323,40 @@ defmodule Arbor.Security.SystemAuthority do
 
   # Length-prefixed endorsement payload to prevent field-boundary ambiguity.
   defp endorsement_payload(public_key, agent_id) do
-    <<byte_size(public_key)::32, public_key::binary,
-      byte_size(agent_id)::32, agent_id::binary>>
+    <<byte_size(public_key)::32, public_key::binary, byte_size(agent_id)::32, agent_id::binary>>
   end
 
   # ===========================================================================
   # Persistent Keypair Storage
   # ===========================================================================
+  #
+  # P0-5: the v2 layout splits the authority record into two pieces:
+  #
+  #   1. Private keypair (Ed25519 signing + X25519 encryption) — held under
+  #      @authority_signing_id in SigningKeyStore (AES-GCM at rest, master
+  #      key in ~/.arbor/security/master.key).
+  #   2. Public metadata (agent_id, public_keys, name, created_at) — held
+  #      under @authority_metadata_key in BufferedStore. Public material is
+  #      not encrypted because it isn't a secret.
+  #
+  # The pre-v2 layout serialized the private key as plaintext base64 directly
+  # into BufferedStore — see cleanup_legacy_plaintext_record/0.
 
-  defp load_persisted_keypair do
+  # Public (@doc false) for the P0-5 regression test, which corrupts the
+  # persisted metadata and asserts the load returns {:error, _} rather than
+  # silently regenerating the trust root.
+  @doc false
+  def load_persisted_keypair do
     if Process.whereis(@key_store_name) do
-      case apply(@buffered_store, :get, [@authority_key, [name: @key_store_name]]) do
-        {:ok, %Record{data: data}} ->
-          deserialize_keypair(data)
+      case load_public_metadata() do
+        {:ok, metadata} ->
+          load_private_and_reconstruct(metadata)
 
-        {:error, :not_found} ->
+        :not_found ->
           :not_found
 
         {:error, reason} ->
-          {:error, reason}
+          {:error, {:metadata_load_failed, reason}}
       end
     else
       :not_found
@@ -331,44 +366,133 @@ defmodule Arbor.Security.SystemAuthority do
       {:error, {:store_unavailable, reason}}
   end
 
-  defp persist_keypair(identity) do
-    if Process.whereis(@key_store_name) do
-      data = serialize_keypair(identity)
-      record = Record.new(@authority_key, data)
-      apply(@buffered_store, :put, [@authority_key, record, [name: @key_store_name]])
+  defp load_public_metadata do
+    case apply(@buffered_store, :get, [@authority_metadata_key, [name: @key_store_name]]) do
+      {:ok, %Record{data: data}} when is_map(data) -> {:ok, data}
+      {:error, :not_found} -> :not_found
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :invalid_metadata_format}
     end
-
-    :ok
-  catch
-    _, reason ->
-      Logger.warning("[SystemAuthority] Failed to persist keypair: #{inspect(reason)}")
-      :ok
   end
 
-  defp serialize_keypair(identity) do
-    %{
-      "agent_id" => identity.agent_id,
-      "public_key" => Base.encode64(identity.public_key),
-      "private_key" => Base.encode64(identity.private_key),
-      "name" => identity.name,
-      "created_at" => DateTime.to_iso8601(identity.created_at)
-    }
-  end
-
-  defp deserialize_keypair(data) when is_map(data) do
-    with {:ok, public_key} <- Base.decode64(data["public_key"]),
-         {:ok, private_key} <- Base.decode64(data["private_key"]),
-         {:ok, created_at, _} <- DateTime.from_iso8601(data["created_at"] || "2026-01-01T00:00:00Z") do
+  defp load_private_and_reconstruct(metadata) do
+    with {:ok, public_key} <- decode_b64(metadata["public_key"]),
+         {:ok, enc_public_key} <- decode_b64(metadata["encryption_public_key"]),
+         {:ok, created_at} <- decode_created_at(metadata["created_at"]),
+         {:ok, keypair} <- SigningKeyStore.get_keypair(@authority_signing_id),
+         {:ok, private_key} <- fetch_signing(keypair),
+         {:ok, enc_private_key} <- fetch_encryption(keypair) do
       Identity.new(
         public_key: public_key,
         private_key: private_key,
-        name: data["name"],
+        encryption_public_key: enc_public_key,
+        encryption_private_key: enc_private_key,
+        name: metadata["name"],
         created_at: created_at
       )
     else
-      _ -> {:error, :invalid_persisted_format}
+      {:error, :no_signing_key} ->
+        # Metadata says we have an authority, but the encrypted private key
+        # is gone. That's an inconsistent state, not "first boot" — refuse.
+        {:error, :metadata_without_keypair}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      _ ->
+        {:error, :invalid_persisted_format}
     end
   end
 
-  defp deserialize_keypair(_), do: {:error, :invalid_persisted_format}
+  # Public (@doc false) for the P0-5 regression test, which calls it directly
+  # with a generated identity to verify the persisted record layout. The test
+  # environment uses :ephemeral mode, so the live SystemAuthority never
+  # exercises this path.
+  @doc false
+  def persist_keypair(identity) do
+    with :ok <-
+           SigningKeyStore.put_keypair(
+             @authority_signing_id,
+             identity.private_key,
+             identity.encryption_private_key
+           ),
+         :ok <- persist_public_metadata(identity) do
+      :ok
+    end
+  end
+
+  defp persist_public_metadata(identity) do
+    data = %{
+      "v" => 2,
+      "agent_id" => identity.agent_id,
+      "public_key" => Base.encode64(identity.public_key),
+      "encryption_public_key" => Base.encode64(identity.encryption_public_key || <<>>),
+      "name" => identity.name,
+      "created_at" => DateTime.to_iso8601(identity.created_at)
+    }
+
+    record = Record.new(@authority_metadata_key, data)
+    apply(@buffered_store, :put, [@authority_metadata_key, record, [name: @key_store_name]])
+    :ok
+  catch
+    _, reason ->
+      Logger.error("[SystemAuthority] Failed to persist public metadata: #{inspect(reason)}")
+      {:error, {:metadata_persist_failed, reason}}
+  end
+
+  # Public (@doc false) for the P0-5 regression test.
+  @doc false
+  def cleanup_legacy_plaintext_record do
+    if Process.whereis(@key_store_name) do
+      case apply(@buffered_store, :get, [@legacy_plaintext_key, [name: @key_store_name]]) do
+        {:ok, _} ->
+          apply(@buffered_store, :delete, [@legacy_plaintext_key, [name: @key_store_name]])
+
+          Logger.warning(
+            "[SystemAuthority] Deleted pre-v2 plaintext authority keypair record. " <>
+              "Existing capabilities signed by the old key will not verify under the new authority."
+          )
+
+          :ok
+
+        _ ->
+          :ok
+      end
+    else
+      :ok
+    end
+  catch
+    _, _ -> :ok
+  end
+
+  defp decode_b64(nil), do: {:error, :missing_public_key}
+  defp decode_b64(""), do: {:error, :missing_public_key}
+
+  defp decode_b64(s) when is_binary(s) do
+    case Base.decode64(s) do
+      {:ok, ""} -> {:error, :missing_public_key}
+      {:ok, bin} -> {:ok, bin}
+      :error -> {:error, :invalid_base64}
+    end
+  end
+
+  defp decode_b64(_), do: {:error, :invalid_metadata}
+
+  defp decode_created_at(nil), do: {:ok, DateTime.utc_now()}
+
+  defp decode_created_at(s) when is_binary(s) do
+    case DateTime.from_iso8601(s) do
+      {:ok, dt, _} -> {:ok, dt}
+      _ -> {:error, :invalid_created_at}
+    end
+  end
+
+  defp fetch_signing(%{signing: key}) when is_binary(key) and byte_size(key) > 0, do: {:ok, key}
+  defp fetch_signing(_), do: {:error, :missing_signing_key}
+
+  defp fetch_encryption(%{encryption: key}) when is_binary(key) and byte_size(key) > 0,
+    do: {:ok, key}
+
+  # X25519 key may legitimately be absent in older keypair records.
+  defp fetch_encryption(_), do: {:ok, nil}
 end
