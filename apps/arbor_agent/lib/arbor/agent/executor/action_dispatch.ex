@@ -118,50 +118,64 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
 
   Returns `{:ok, result}` or `{:error, reason}`.
   """
-  @spec dispatch(atom() | term(), map()) :: {:ok, map()} | {:error, term()}
-  def dispatch(action, params)
+  @spec dispatch(atom() | term(), map(), String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def dispatch(action, params, agent_id \\ nil)
 
   # Proposal submission — map to Proposal.Submit action (runtime call to avoid Level 2 cycle)
-  def dispatch(:proposal_submit, params) do
+  def dispatch(:proposal_submit, params, agent_id) do
     proposal = params[:proposal] || params["proposal"] || %{}
     submit_params = build_submit_params(proposal)
 
     action_mod = Module.concat([Arbor, Actions, Proposal, Submit])
-    run_runtime_action(action_mod, submit_params, :proposal_submit_failed, :consensus_unavailable)
+
+    run_runtime_action(
+      action_mod,
+      submit_params,
+      :proposal_submit_failed,
+      :consensus_unavailable,
+      agent_id
+    )
   end
 
   # Code hot-load — map to Code.HotLoad action (runtime call to avoid Level 2 cycle)
-  def dispatch(:code_hot_load, params) do
+  def dispatch(:code_hot_load, params, agent_id) do
     module = params[:module] || params["module"]
     code = params[:code] || params[:source] || params["code"] || params["source"]
-    do_hot_load(module, code, params)
+    do_hot_load(module, code, params, agent_id)
   end
 
   # Proposal status — query the status of a submitted proposal
-  def dispatch(:proposal_status, params) do
+  def dispatch(:proposal_status, params, _agent_id) do
     proposal_id = params[:proposal_id] || params["proposal_id"]
     do_proposal_status(proposal_id)
   end
 
   # Background checks — compound module name doesn't match single-underscore naming convention
-  def dispatch(:background_checks_run, params) do
+  def dispatch(:background_checks_run, params, agent_id) do
     action_mod = Module.concat([Arbor, Actions, BackgroundChecks, Run])
-    run_runtime_action(action_mod, params, :background_checks_failed, :health_checks_unavailable)
+
+    run_runtime_action(
+      action_mod,
+      params,
+      :background_checks_failed,
+      :health_checks_unavailable,
+      agent_id
+    )
   end
 
   # Generic action dispatch — try to find a matching action module
-  def dispatch(action, params) when is_atom(action) do
+  def dispatch(action, params, _agent_id) when is_atom(action) do
     action_module = find_action_module(action)
     run_discovered_action(action_module, action, params)
   end
 
   # String action names from decomposition JSON — convert to atom and re-dispatch
-  def dispatch(action, params) when is_binary(action) do
+  def dispatch(action, params, _agent_id) when is_binary(action) do
     action_module = find_action_module_from_string(action)
     run_discovered_action(action_module, action, params)
   end
 
-  def dispatch(action, params) do
+  def dispatch(action, params, _agent_id) do
     Logger.warning("ActionDispatch: invalid action type #{inspect(action)}")
     {:ok, %{action: action, status: :invalid_action_type, params: params}}
   end
@@ -181,7 +195,49 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
     }
   end
 
-  defp run_runtime_action(action_mod, params, error_tag, unavailable_tag) do
+  # H7: pre-fix, run_runtime_action called `apply(action_mod, :run, [params, %{}])`
+  # directly — proposal_submit, code_hot_load, background_checks_run all
+  # bypassed action-layer taint enforcement, resource binding, invocation
+  # receipts, and facade-level checks. Generic discovered actions DID go
+  # through Arbor.Actions.authorize_and_execute; only the hardcoded compound
+  # actions were exempt.
+  #
+  # The fix routes through authorize_and_execute when an agent_id is
+  # available (the Executor now threads it from the agent's identity). When
+  # nil — e.g. system-internal callers, tests that don't bootstrap Security —
+  # falls back to the direct apply so existing system-level dispatch keeps
+  # working.
+  defp run_runtime_action(action_mod, params, error_tag, unavailable_tag, agent_id) do
+    if is_binary(agent_id) and byte_size(agent_id) > 0 do
+      run_via_authorize_and_execute(action_mod, params, error_tag, unavailable_tag, agent_id)
+    else
+      run_direct(action_mod, params, error_tag, unavailable_tag)
+    end
+  end
+
+  defp run_via_authorize_and_execute(action_mod, params, error_tag, unavailable_tag, agent_id) do
+    actions_mod = Arbor.Actions
+
+    if Code.ensure_loaded?(actions_mod) and
+         function_exported?(actions_mod, :authorize_and_execute, 4) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      case safe_call(fn ->
+             apply(actions_mod, :authorize_and_execute, [agent_id, action_mod, params, %{}])
+           end) do
+        {:ok, {:ok, result}} -> {:ok, result}
+        {:ok, {:error, reason}} -> {:error, {error_tag, reason}}
+        {:error, reason} -> {:error, {error_tag, reason}}
+        nil -> {:error, unavailable_tag}
+      end
+    else
+      # Arbor.Actions facade is not loaded — fall back to direct apply so
+      # the action still runs in environments where the facade isn't part
+      # of the boot set.
+      run_direct(action_mod, params, error_tag, unavailable_tag)
+    end
+  end
+
+  defp run_direct(action_mod, params, error_tag, unavailable_tag) do
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
     case safe_call(fn -> apply(action_mod, :run, [params, %{}]) end) do
       {:ok, result} -> {:ok, result}
@@ -190,11 +246,11 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
     end
   end
 
-  defp do_hot_load(module, code, _params) when is_nil(module) or is_nil(code) do
+  defp do_hot_load(module, code, _params, _agent_id) when is_nil(module) or is_nil(code) do
     {:error, :missing_module_or_code}
   end
 
-  defp do_hot_load(module, code, params) do
+  defp do_hot_load(module, code, params, agent_id) do
     hot_load_params = %{
       module: to_string(module),
       source: code,
@@ -203,7 +259,14 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
     }
 
     action_mod = Module.concat([Arbor, Actions, Code, HotLoad])
-    run_runtime_action(action_mod, hot_load_params, :hot_load_failed, :code_service_unavailable)
+
+    run_runtime_action(
+      action_mod,
+      hot_load_params,
+      :hot_load_failed,
+      :code_service_unavailable,
+      agent_id
+    )
   end
 
   defp do_proposal_status(nil), do: {:error, :missing_proposal_id}

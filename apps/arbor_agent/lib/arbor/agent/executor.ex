@@ -352,12 +352,17 @@ defmodule Arbor.Agent.Executor do
 
   # H5: Enforce sandbox level on action execution. The sandbox_level computed
   # from the agent's trust tier is passed into the action dispatch context.
-  defp do_execute(%Intent{type: :act, action: action, params: params}, sandbox_level, _agent_id) do
+  defp do_execute(%Intent{type: :act, action: action, params: params}, sandbox_level, agent_id) do
     Logger.info("Executor: dispatching action=#{inspect(action)} sandbox=#{sandbox_level}")
 
     # Inject sandbox level into params so actions can respect it
     params_with_sandbox = Map.put(params || %{}, :sandbox, sandbox_level)
-    ActionDispatch.dispatch(action, params_with_sandbox)
+
+    # H7: thread agent_id so ActionDispatch can route hardcoded actions
+    # (proposal_submit, code_hot_load, background_checks_run) through
+    # Arbor.Actions.authorize_and_execute instead of bypassing it with a
+    # direct apply.
+    ActionDispatch.dispatch(action, params_with_sandbox, agent_id)
   end
 
   defp do_execute(%Intent{type: :wait}, _sandbox_level, _agent_id) do
