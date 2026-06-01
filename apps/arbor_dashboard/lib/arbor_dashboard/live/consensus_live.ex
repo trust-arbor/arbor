@@ -139,23 +139,43 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
         %{"id" => proposal_id, "agent" => agent_id, "resource" => resource},
         socket
       ) do
-    # 1. Approve the current proposal
-    case safe_force_approve(proposal_id, socket) do
+    # H13: gate the trust-profile mutation behind an explicit auto-promote
+    # capability. Without this check, any actor that can approve a proposal
+    # could permanently promote the target agent's trust profile to :auto for
+    # any resource — a single-click silent escalation. The mutation only
+    # proceeds when the acting user holds arbor://trust/auto_promote, not just
+    # arbor://consensus/admin.
+    case authorize_auto_promote(socket, agent_id, resource) do
       :ok ->
-        # 2. Update trust profile to always allow this resource
-        update_trust_profile_to_auto(agent_id, resource)
+        case safe_force_approve(proposal_id, socket) do
+          :ok ->
+            update_trust_profile_to_auto(agent_id, resource)
 
-        socket = reload_consensus(socket)
+            socket = reload_consensus(socket)
+
+            {:noreply,
+             put_flash(
+               socket,
+               :info,
+               "Always allowed #{resource} for #{String.slice(agent_id, 0..20)}..."
+             )}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, "Always allow failed: #{inspect(reason)}")}
+        end
+
+      {:error, :unauthorized_auto_promote} ->
+        Logger.warning(
+          "[ConsensusLive] always-allow denied: #{approval_actor_id(socket)} lacks " <>
+            "arbor://trust/auto_promote (target=#{agent_id}, resource=#{resource})"
+        )
 
         {:noreply,
          put_flash(
            socket,
-           :info,
-           "Always allowed #{resource} for #{String.slice(agent_id, 0..20)}..."
+           :error,
+           "Always allow requires arbor://trust/auto_promote capability."
          )}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Always allow failed: #{inspect(reason)}")}
     end
   end
 
@@ -813,6 +833,46 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   catch
     :exit, reason -> {:error, reason}
   end
+
+  # H13: authorize the always-allow flow under arbor://trust/auto_promote.
+  # The resource URI includes the target agent_id so that a future role-mapping
+  # can scope the cap per-target rather than granting auto-promote on every agent.
+  defp authorize_auto_promote(socket, target_agent_id, _resource_uri) do
+    actor_id = approval_actor_id(socket)
+    resource = "arbor://trust/auto_promote/#{target_agent_id}"
+
+    decision =
+      cond do
+        actor_id == "system" ->
+          # Dev/test path with no OIDC session — fail closed; auto-promote is
+          # never appropriate to grant to the implicit "system" caller from a UI.
+          {:error, :no_actor}
+
+        Code.ensure_loaded?(Arbor.Security) and
+            function_exported?(Arbor.Security, :authorize, 3) ->
+          try do
+            apply(Arbor.Security, :authorize, [actor_id, resource, :write])
+          rescue
+            _ -> {:error, :security_unavailable}
+          catch
+            :exit, _ -> {:error, :security_unavailable}
+          end
+
+        true ->
+          {:error, :security_unavailable}
+      end
+
+    authorize_auto_promote_decision(decision)
+  end
+
+  # Pure decision function — public so the H13 regression test can assert the
+  # gate fires on every non-:authorized result without needing the full Security
+  # runtime in arbor_dashboard's test environment.
+  @doc false
+  @spec authorize_auto_promote_decision(term()) :: :ok | {:error, :unauthorized_auto_promote}
+  def authorize_auto_promote_decision({:ok, :authorized}), do: :ok
+  def authorize_auto_promote_decision(:authorized), do: :ok
+  def authorize_auto_promote_decision(_), do: {:error, :unauthorized_auto_promote}
 
   defp update_trust_profile_to_auto(agent_id, resource_uri) do
     store = Arbor.Trust.Store
