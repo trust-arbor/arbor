@@ -164,6 +164,26 @@ When a fix surfaces something that genuinely needs a separate decision — not t
 
 ---
 
+### B-B-3. `IdentityAliases.link/3` and `unlink/2` require `arbor://identity/alias/manage`
+
+**Closed by:** M5 (this commit)
+**Status:** Unaddressed
+
+**Before:** `IdentityAliases.link/2` and `unlink/1` checked only self-aliasing and circular alias chains. Any code path that could call `link` could redirect a victim's future OIDC logins to an attacker-controlled identity — and inherit whatever capabilities had been granted to the victim's primary id.
+
+**After:**
+- Signature changed: `link(caller_id, secondary_id, primary_id)` and `unlink(caller_id, secondary_id)`. The caller_id is required and must hold `arbor://identity/alias/manage`.
+- Both functions audit-log on success (`Logger.info "[IdentityAliases] caller=… linking/unlinking …"`).
+- `resolve/1` and `list_aliases/1` remain ungated (read-only).
+- `link/2` and `unlink/1` no longer exist.
+
+**Restoration shape:**
+- Nothing in the tree called `link/2` or `unlink/1` before this commit, so production code is unaffected. Operator REPL bootstrap or any future admin LiveView wiring needs to use the new arities and pass the operator's identity as `caller_id`.
+- To use the function: grant the operator's `human_*` identity `arbor://identity/alias/manage` first (one-time, same dev-bootstrap shape as B-A-1).
+- The capability is intentionally not auto-granted anywhere — it's an admin-class operation.
+
+---
+
 ### B-B-2. `arbor_status` MCP tool requires explicit `agent_id` AND a caller cap per component
 
 **Closed by:** M8 (this commit)
