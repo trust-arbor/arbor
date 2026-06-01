@@ -116,11 +116,24 @@ defmodule Arbor.Orchestrator.ToolHooks do
           |> base_env()
           |> Map.to_list()
 
-        wrapped =
-          "printf '%s' \"$TOOL_HOOK_PAYLOAD\" | (" <> command <> ")"
-
+        # H14: pre-fix this constructed
+        #   "printf '%s' \"$TOOL_HOOK_PAYLOAD\" | (" <> command <> ")"
+        # and ran it through `/bin/sh -lc`. Two issues:
+        #   1. The `-l` flag makes /bin/sh a *login* shell, sourcing
+        #      ~/.profile / ~/.bashrc / etc. — any malicious modification of
+        #      the user's shell init runs as part of the hook.
+        #   2. The `command` string was concatenated into a shell wrapper
+        #      with no quoting, so any metacharacter in the hook config
+        #      (`;`, `&&`, backticks, command substitution) had double
+        #      interpretation: once as the wrapper command and again when
+        #      the wrapper re-evaluated it.
+        # The fix: drop the `-l` flag (no login shell) and stop wrapping
+        # the command. The hook command is passed as the literal argument
+        # to `sh -c`; the payload reaches the hook via the TOOL_HOOK_PAYLOAD
+        # env variable (already set by base_env) so no shell-level
+        # interpolation is needed.
         {out, code} =
-          System.cmd("/bin/sh", ["-lc", wrapped], env: env, stderr_to_stdout: true)
+          System.cmd("/bin/sh", ["-c", command], env: env, stderr_to_stdout: true)
 
         {:command, out, code}
     end
