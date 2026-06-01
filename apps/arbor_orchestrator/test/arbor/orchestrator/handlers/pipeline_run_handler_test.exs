@@ -187,7 +187,9 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandlerTest do
       }
       """
 
-      assert {:ok, result} = Arbor.Orchestrator.run(dot)
+      # P0-3: pipeline.run now requires arbor://pipeline/run. This test
+      # exercises the runtime path, not the cap check; opt out explicitly.
+      assert {:ok, result} = Arbor.Orchestrator.run(dot, authorization: false)
       assert result.context["pipeline.ran.run_child"] == true
       assert result.context["pipeline.child_status.run_child"] == "success"
       assert result.context["pipeline.child_nodes_completed.run_child"] == 2
@@ -214,7 +216,9 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandlerTest do
       }
       """
 
-      assert {:ok, result} = Arbor.Orchestrator.run(dot)
+      # P0-3: pipeline.run now requires arbor://pipeline/run; opt out
+      # explicitly for this runtime test.
+      assert {:ok, result} = Arbor.Orchestrator.run(dot, authorization: false)
       assert result.context["pipeline.valid.validate"] == true
       assert result.context["pipeline.ran.run_it"] == true
       assert result.context["pipeline.child_status.run_it"] == "success"

@@ -122,4 +122,34 @@ defmodule Arbor.Orchestrator.IR.HandlerSchemaTest do
       assert schema.default_classification == :public
     end
   end
+
+  describe "composition primitive capabilities (P0-3 regression)" do
+    test "security regression (P0-3): pipeline.run requires arbor://pipeline/run capability" do
+      # P0-3: pre-fix the pipeline.run schema declared `capabilities: []`,
+      # meaning a graph could embed an arbitrary child pipeline without any
+      # capability grant. Combined with the composite-handler auth bypass
+      # (auth opts dropped at child_opts time), pipeline.run was an
+      # unrestricted escape hatch into child-graph execution.
+      schema = HandlerSchema.for_type("pipeline.run")
+
+      assert "arbor://pipeline/run" in schema.capabilities,
+             "pipeline.run schema must require arbor://pipeline/run — P0-3 regression. " <>
+               "Got capabilities: #{inspect(schema.capabilities)}"
+
+      assert schema.default_classification == :restricted,
+             "pipeline.run schema must be :restricted by default — P0-3 regression. " <>
+               "Got: #{inspect(schema.default_classification)}"
+    end
+
+    test "security regression (P0-3): map requires arbor://orchestrator/map/dispatch capability" do
+      schema = HandlerSchema.for_type("map")
+
+      assert "arbor://orchestrator/map/dispatch" in schema.capabilities,
+             "map schema must require arbor://orchestrator/map/dispatch — P0-3 regression. " <>
+               "Got capabilities: #{inspect(schema.capabilities)}"
+
+      assert schema.default_classification == :restricted,
+             "map schema must be :restricted by default — P0-3 regression"
+    end
+  end
 end

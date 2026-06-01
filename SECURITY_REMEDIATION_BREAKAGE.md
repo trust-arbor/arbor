@@ -26,6 +26,7 @@ Aggregated from per-entry `Open question:` lines so they don't get lost when the
 | OQ-3 | B-A-4 | Ship a one-time `mix arbor.security.drop_stale_signed_records` task that purges `CapabilityStore` / signed-receipt records whose `issuer_id` no longer matches the live `SystemAuthority.agent_id()` after the P0-5 cutover, or just let them sit as dead weight? Dead weight is fine for now (records are filtered out at verify time anyway), but a purge keeps the store tidy and surfaces the cutover explicitly. |
 | OQ-4 | B-B-1 | Should `POST /api/memory/summarize` require its own resource (`arbor://memory/summarize/{target}`) rather than reusing `arbor://memory/read/{target}`? Separating them lets "X can see summaries of Y but not Y's raw recall" be expressible. Probably overkill for now, but worth pinning before granting broad `read` to any caller. |
 | OQ-5 | B-B-4 | Ship a built-in capability-based `Arbor.Consensus.Authorizer` implementation (checks `arbor://consensus/propose/{topic}` or similar) so production can flip `:require_authorizer` on without forcing every operator to roll their own module. And: should `Arbor.Consensus.propose/2` call `authorize_propose/3` internally so callers can't accidentally bypass the gate by going through the wrong facade? |
+| OQ-6 | B-C-5 | `MapHandler` still calls `handler_module.execute/4` directly for each item. The schema cap and child-opts threading close the worst leakage, but the per-item handlers don't re-enter the middleware chain — so CapabilityCheck, TaintCheck, Budget, etc. don't fire per item. Decide whether to route through `Engine.execute_node/4` (cleanest but larger refactor) or extract a re-usable "run-handler-with-middleware" helper. |
 
 When a fix surfaces something that genuinely needs a separate decision — not the restoration shape itself, but a design or policy call — capture it both **inline** in the entry it came from AND **here** as a new OQ-N row. Inline preserves context; the index makes it scannable.
 
@@ -268,6 +269,30 @@ When a fix surfaces something that genuinely needs a separate decision — not t
 ---
 
 ## Cluster C breaks
+
+### B-C-5. Composition primitives (pipeline.run, map) now require explicit capabilities; child graphs inherit parent auth context
+
+**Closed by:** P0-3 (this commit, partial — see OQ-6)
+**Status:** Documented; full MapHandler middleware re-entry deferred
+
+**Before:**
+- `pipeline.run` and `map` schemas declared `capabilities: []` and default classification `:public`. Any DOT graph could embed a child pipeline or fan out via `map` without any capability grant.
+- `SubgraphHandler.build_child_opts/2` took only `[:on_event]` (plus `:logs_root`). `PipelineRunHandler.build_child_opts/3` took `[:logs_root, :on_event]`. Both stripped `:authorization`, `:authorizer`, `:signer`, and `:auth_context` from the child opts — nested pipelines started with no parent auth context.
+- `MapHandler` resolved each item's handler and called `handler_module.execute/4` directly, bypassing the middleware/authorization re-entry that top-level nodes go through.
+
+**After:**
+- `pipeline.run` schema requires `arbor://pipeline/run` and is marked `:restricted`.
+- `map` schema requires `arbor://orchestrator/map/dispatch` and is marked `:restricted`.
+- Both `build_child_opts` paths now forward `:authorization`, `:authorizer`, `:signer`, `:auth_context`, `:caller_id` in addition to the existing keys.
+- The `MapHandler` direct-dispatch path is **NOT YET fixed** — see OQ-6.
+
+**Restoration shape:**
+- Any DOT pipeline that embeds `pipeline.run` or `map` needs the caller to hold the respective capability. Test code can opt out via `Arbor.Orchestrator.run(dot, authorization: false)` (used in the two affected pipeline_run handler tests).
+- For production use: grant the capability per principal that legitimately needs to spawn child pipelines or fan out via map. Per-target grants by design (e.g., `arbor://pipeline/run/{tenant}`) are a possible future refinement but not done here.
+
+**Open question (OQ-6 below):** `MapHandler.process_single_item/N` still calls `handler_module.execute/4` directly. The full fix is to route through `Engine.execute_node/4` (or a re-usable middleware-chain entry point) so each item-level dispatch goes through CapabilityCheck, TaintCheck, Budget, etc. That's a larger refactor; the schema cap + child-opts threading closes the worst leakage without it.
+
+---
 
 ### B-C-4. Unknown handler types raise in strict mode (no silent LlmHandler fallback)
 

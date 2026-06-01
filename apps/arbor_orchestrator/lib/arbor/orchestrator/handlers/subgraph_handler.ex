@@ -224,7 +224,16 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
   # --- Child opts ---
 
   defp build_child_opts(node, parent_opts) do
-    child_opts = Keyword.take(parent_opts, [:on_event])
+    # P0-3: thread the authorization context through to child graph execution.
+    # Pre-fix, build_child_opts took only :on_event (and optionally :logs_root),
+    # which meant nested pipelines started with NO authorizer, NO signer, and
+    # NO auth_context — the parent's grants and identity were silently
+    # discarded. Auth keys are forwarded explicitly here; per-node checks at
+    # the child level then see the same context the parent saw.
+    forwarded_keys =
+      [:on_event, :authorization, :authorizer, :signer, :auth_context, :caller_id]
+
+    child_opts = Keyword.take(parent_opts, forwarded_keys)
 
     logs_root = Keyword.get(parent_opts, :logs_root)
 
