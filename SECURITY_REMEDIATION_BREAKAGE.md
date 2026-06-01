@@ -15,6 +15,20 @@ Status legend:
 
 ---
 
+## Open Questions Inbox
+
+Aggregated from per-entry `Open question:` lines so they don't get lost when the doc grows. Each links back to the entry that raised it. When a question is answered or no longer relevant, mark it ✅ resolved (link to commit / decision) and leave it here as history.
+
+| # | From | Question |
+|---|---|---|
+| OQ-1 | B-A-1 | Does OidcAuth's `ensure_role/1` (calling `Arbor.Security.assign_role/2` with `default_role: :admin`) currently grant `arbor://consensus/admin` end-to-end? If the `:admin` role's capability map already includes it, B-A-1 is narrower than stated — only operators without a custom `:default_role` config are affected. Worth verifying before designing the dev-bootstrap restoration. |
+| OQ-2 | B-A-2 | If we eventually want "dev mode" where Always Allow is back to one click, the cleanest shape is probably a `:dev_admin` role that bundles `arbor://consensus/admin` + `arbor://trust/auto_promote/**`, behind an explicit config flag (`:arbor_security, :enable_dev_admin_role`). Is that posture acceptable, or do we want Always Allow to always require an explicit per-target grant? |
+| OQ-3 | B-A-4 | Ship a one-time `mix arbor.security.drop_stale_signed_records` task that purges `CapabilityStore` / signed-receipt records whose `issuer_id` no longer matches the live `SystemAuthority.agent_id()` after the P0-5 cutover, or just let them sit as dead weight? Dead weight is fine for now (records are filtered out at verify time anyway), but a purge keeps the store tidy and surfaces the cutover explicitly. |
+
+When a fix surfaces something that genuinely needs a separate decision — not the restoration shape itself, but a design or policy call — capture it both **inline** in the entry it came from AND **here** as a new OQ-N row. Inline preserves context; the index makes it scannable.
+
+---
+
 ## Cluster A breaks
 
 ### B-A-1. Dashboard `/consensus` Approve / Deny buttons require explicit role assignment
@@ -159,11 +173,18 @@ Most regression tests use the public APIs and per-test setup, so they don't depe
 
 Going forward, every fix in this remediation effort should append an entry here as part of the commit, in the same style. That avoids a second sweep at the end and keeps the breakage inventory accurate. After Cluster B+C+D land, this doc becomes the input to the restoration plan: each `Unaddressed` entry gets a concrete restoration action, the `Accepted` entries get marked closed, and the result is the list of follow-up tickets needed before this branch can ship.
 
-Add entries to this file when:
+Add **breakage entries** to this file when:
 - Removing an auto-grant or implicit elevation
 - Tightening a fail-open path so dev/test scenarios that depended on it now fail
 - Choosing a hard cutover over a migration
 - Locking a previously-public-by-default surface behind a capability
+
+Add **open question rows** to the Open Questions Inbox when a fix surfaces a design or policy decision that:
+- Isn't directly the restoration shape (which lives in the entry's `Restoration shape:` block)
+- Needs an answer before the restoration plan can be finalized
+- Came up during the fix but is worth resolving with fresh eyes rather than in-the-moment
+
+Capture open questions both **inline** in the entry that raised them AND as a new row in the Open Questions Inbox table.
 
 **Don't** add entries for:
 - Bug fixes that strictly reduce the attack surface without breaking documented behavior
