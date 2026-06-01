@@ -887,4 +887,57 @@ defmodule Arbor.Orchestrator.EngineTest do
     refute "exit" in result.completed_nodes
     assert_receive {:event, %{type: :loop_restart, reason: :loop_restart_edge}}
   end
+
+  describe "recursion depth limit (H16 regression)" do
+    test "security regression (H16): negative max_depth refuses to run" do
+      # H16: SubgraphHandler and PipelineRunHandler decrement :max_depth on
+      # each child invocation. When it drops below zero the engine must
+      # refuse to start the run rather than burn another N steps. An
+      # LLM-generated graph.compose that recursively spawns more
+      # graph.compose nodes would otherwise consume arbitrary CPU, memory,
+      # and LLM API budget.
+      dot = """
+      digraph H16Test {
+        graph [goal="depth limit test"]
+        start [shape=Mdiamond]
+        done [shape=Msquare]
+        start -> done
+      }
+      """
+
+      assert {:error, :max_depth_exceeded} =
+               Arbor.Orchestrator.run(dot, max_depth: -1)
+    end
+
+    test "graphs at the boundary (max_depth: 0) still run" do
+      # max_depth=0 represents "this is the deepest legitimate frame" — a
+      # leaf graph that shouldn't itself nest further. It should run; only
+      # *children* of a depth-0 frame would fail (because they'd inherit -1).
+      dot = """
+      digraph H16Boundary {
+        graph [goal="depth boundary"]
+        start [shape=Mdiamond]
+        done [shape=Msquare]
+        start -> done
+      }
+      """
+
+      assert {:ok, _result} = Arbor.Orchestrator.run(dot, max_depth: 0)
+    end
+
+    test "default max_depth allows normal nesting depth" do
+      # Default is 3 — deep enough for legitimate
+      # "user pipeline → stdlib → primitive" patterns.
+      dot = """
+      digraph H16Default {
+        graph [goal="default depth"]
+        start [shape=Mdiamond]
+        done [shape=Msquare]
+        start -> done
+      }
+      """
+
+      assert {:ok, _result} = Arbor.Orchestrator.run(dot)
+    end
+  end
 end

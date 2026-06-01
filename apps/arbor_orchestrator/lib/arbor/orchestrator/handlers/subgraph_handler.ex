@@ -237,6 +237,12 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
         child_opts
       end
 
+    # H16: decrement the recursion budget before invoking the child graph.
+    # The engine refuses to run when max_depth < 0, so a runaway nest
+    # terminates with {:error, :max_depth_exceeded}.
+    parent_depth = Keyword.get(parent_opts, :max_depth, 3)
+    child_opts = Keyword.put(child_opts, :max_depth, parent_depth - 1)
+
     {:ok, child_opts}
   end
 
