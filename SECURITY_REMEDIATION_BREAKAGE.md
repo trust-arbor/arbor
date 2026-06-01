@@ -269,6 +269,21 @@ When a fix surfaces something that genuinely needs a separate decision — not t
 
 ## Cluster C breaks
 
+### B-C-4. Unknown handler types raise in strict mode (no silent LlmHandler fallback)
+
+**Closed by:** M3 (this commit)
+**Status:** Documented
+
+**Before:** `Arbor.Orchestrator.Handlers.Registry.lookup_core_handler/1` fell through to `LlmHandler` for any node type not in `@core_handlers` and not registered in `HandlerRegistry`. Misspellings, typos in custom handler names, and malicious unrecognized types all became LLM calls with whatever context the graph was carrying.
+
+**After:** In strict mode (`:arbor_orchestrator, :strict_unknown_handlers`, defaulting to `Mix.env() == :prod`), unknown types raise `ArgumentError`. Permissive mode (dev/test default) keeps the existing LlmHandler fallback for ergonomics during development.
+
+**Restoration shape:**
+- Custom handler authors must register via `Arbor.Common.HandlerRegistry` or as a custom handler — that path is unchanged.
+- Dev/test fixtures that intentionally used unregistered node types as a way to exercise LlmHandler keep working under the permissive default.
+
+---
+
 ### B-C-3. Production taint enforcement is `:strict` by default
 
 **Closed by:** M2 (this commit)
