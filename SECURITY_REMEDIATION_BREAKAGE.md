@@ -25,6 +25,7 @@ Aggregated from per-entry `Open question:` lines so they don't get lost when the
 | OQ-2 | B-A-2 | If we eventually want "dev mode" where Always Allow is back to one click, the cleanest shape is probably a `:dev_admin` role that bundles `arbor://consensus/admin` + `arbor://trust/auto_promote/**`, behind an explicit config flag (`:arbor_security, :enable_dev_admin_role`). Is that posture acceptable, or do we want Always Allow to always require an explicit per-target grant? |
 | OQ-3 | B-A-4 | Ship a one-time `mix arbor.security.drop_stale_signed_records` task that purges `CapabilityStore` / signed-receipt records whose `issuer_id` no longer matches the live `SystemAuthority.agent_id()` after the P0-5 cutover, or just let them sit as dead weight? Dead weight is fine for now (records are filtered out at verify time anyway), but a purge keeps the store tidy and surfaces the cutover explicitly. |
 | OQ-4 | B-B-1 | Should `POST /api/memory/summarize` require its own resource (`arbor://memory/summarize/{target}`) rather than reusing `arbor://memory/read/{target}`? Separating them lets "X can see summaries of Y but not Y's raw recall" be expressible. Probably overkill for now, but worth pinning before granting broad `read` to any caller. |
+| OQ-5 | B-B-4 | Ship a built-in capability-based `Arbor.Consensus.Authorizer` implementation (checks `arbor://consensus/propose/{topic}` or similar) so production can flip `:require_authorizer` on without forcing every operator to roll their own module. And: should `Arbor.Consensus.propose/2` call `authorize_propose/3` internally so callers can't accidentally bypass the gate by going through the wrong facade? |
 
 When a fix surfaces something that genuinely needs a separate decision — not the restoration shape itself, but a design or policy call — capture it both **inline** in the entry it came from AND **here** as a new OQ-N row. Inline preserves context; the index makes it scannable.
 
@@ -161,6 +162,23 @@ When a fix surfaces something that genuinely needs a separate decision — not t
 - For a "memory ops" superuser role: a wildcard cap on `arbor://memory/{read|write}/**` is the cleanest shape. Same `:dev_admin` discussion as OQ-2 applies.
 
 **Open question (OQ-4 below):** the post-fix `POST /summarize` now requires `arbor://memory/read/{target}`. Is that the right resource? An argument could be made for a separate `arbor://memory/summarize/{target}` so that "let X see summaries of Y but not raw recall" is expressible. Probably overkill for now, but worth pinning before broadly granting `read`.
+
+---
+
+### B-B-4. Consensus Coordinator refuses to authorize proposals without an authorizer module in strict mode
+
+**Closed by:** M6 (this commit)
+**Status:** Unaddressed (config flag required to flip on; production should set it)
+
+**Before:** `Coordinator.maybe_authorize(nil, _proposal) -> :ok` — any agent could submit any proposal on any topic. Combined with H11 (auto-grant of consensus/admin — closed) and H12 (human_ bypass — closed), this was the third leg of "every OIDC user is root."
+
+**After:** `maybe_authorize(nil, _)` now checks `:arbor_consensus, :require_authorizer` config (defaults to `Mix.env() == :prod`). When strict, returns `{:error, :no_authorizer_configured}`. Dev/test default to permissive so existing test setups that don't wire an authorizer keep working — tests that need to exercise the deny branch set the config explicitly.
+
+**Restoration shape:**
+- Production deployments need to set `config :arbor_consensus, :require_authorizer, true` AND start the Coordinator with `:authorizer` pointing at an implementation of `Arbor.Consensus.Authorizer`. There is currently no built-in capability-based authorizer — that's worth shipping before recommending the flip in prod.
+- Dev defaults are unchanged; existing scripts and dashboards keep working without wiring an authorizer until the user explicitly opts in.
+
+**Open question (OQ-5 below):** the audit's recommendation also includes "make `propose/2` call `authorize_propose/3` internally rather than requiring callers to opt in." That's a structural change to the public facade. It doesn't close additional surface beyond what M6's strict-mode flag closes (since `authorize_propose/3` consults the same authorizer), so it's left for a separate cleanup pass.
 
 ---
 
