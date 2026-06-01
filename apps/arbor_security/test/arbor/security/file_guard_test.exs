@@ -91,12 +91,16 @@ defmodule Arbor.Security.FileGuardTest do
   describe "authorize/3" do
     test "authorizes when capability matches exactly", %{agent_id: agent_id} do
       {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace/file.ex")
-      assert {:ok, "/workspace/file.ex"} = FileGuard.authorize(agent_id, "/workspace/file.ex", :read)
+
+      assert {:ok, "/workspace/file.ex"} =
+               FileGuard.authorize(agent_id, "/workspace/file.ex", :read)
     end
 
     test "authorizes via parent capability", %{agent_id: agent_id} do
       {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace")
-      assert {:ok, "/workspace/subdir/file.ex"} = FileGuard.authorize(agent_id, "/workspace/subdir/file.ex", :read)
+
+      assert {:ok, "/workspace/subdir/file.ex"} =
+               FileGuard.authorize(agent_id, "/workspace/subdir/file.ex", :read)
     end
 
     test "denies without any capability", %{agent_id: agent_id} do
@@ -105,12 +109,16 @@ defmodule Arbor.Security.FileGuardTest do
 
     test "denies path traversal", %{agent_id: agent_id} do
       {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace")
-      assert {:error, :path_traversal} = FileGuard.authorize(agent_id, "/workspace/../etc/passwd", :read)
+
+      assert {:error, :path_traversal} =
+               FileGuard.authorize(agent_id, "/workspace/../etc/passwd", :read)
     end
 
     test "denies for wrong operation", %{agent_id: agent_id} do
       {:ok, _cap} = grant_fs_capability(agent_id, :read, "/workspace")
-      assert {:error, :no_capability} = FileGuard.authorize(agent_id, "/workspace/file.ex", :write)
+
+      assert {:error, :no_capability} =
+               FileGuard.authorize(agent_id, "/workspace/file.ex", :write)
     end
 
     test "denies for expired capability", %{agent_id: agent_id} do
@@ -159,7 +167,8 @@ defmodule Arbor.Security.FileGuardTest do
           constraints: %{patterns: ["*.ex", "*.exs"]}
         )
 
-      assert {:error, :pattern_mismatch} = FileGuard.authorize(agent_id, "/workspace/file.txt", :read)
+      assert {:error, :pattern_mismatch} =
+               FileGuard.authorize(agent_id, "/workspace/file.txt", :read)
     end
 
     test "denies file matching exclude constraint", %{agent_id: agent_id} do
@@ -169,23 +178,21 @@ defmodule Arbor.Security.FileGuardTest do
         )
 
       assert {:error, :excluded_pattern} = FileGuard.authorize(agent_id, "/workspace/.env", :read)
-      assert {:error, :excluded_pattern} = FileGuard.authorize(agent_id, "/workspace/api.secret", :read)
+
+      assert {:error, :excluded_pattern} =
+               FileGuard.authorize(agent_id, "/workspace/api.secret", :read)
     end
 
     test "allows file not matching exclude constraint", %{agent_id: agent_id} do
       {:ok, _cap} =
-        grant_fs_capability(agent_id, :read, "/workspace",
-          constraints: %{exclude: [".env"]}
-        )
+        grant_fs_capability(agent_id, :read, "/workspace", constraints: %{exclude: [".env"]})
 
       assert {:ok, _} = FileGuard.authorize(agent_id, "/workspace/config.exs", :read)
     end
 
     test "enforces max_depth constraint", %{agent_id: agent_id} do
       {:ok, _cap} =
-        grant_fs_capability(agent_id, :read, "/workspace",
-          constraints: %{max_depth: 2}
-        )
+        grant_fs_capability(agent_id, :read, "/workspace", constraints: %{max_depth: 2})
 
       # Depth 1: allowed
       assert {:ok, _} = FileGuard.authorize(agent_id, "/workspace/file.ex", :read)
@@ -282,6 +289,72 @@ defmodule Arbor.Security.FileGuardTest do
 
       {:ok, fs_caps} = FileGuard.list_fs_capabilities(agent_id)
       assert fs_caps == []
+    end
+  end
+
+  describe "symlink escape (H2 regression)" do
+    setup do
+      # Create a temp workspace with a symlink that points outside it.
+      n = System.unique_integer([:positive])
+      workspace = Path.join(System.tmp_dir!(), "h2_workspace_#{n}")
+      outside = Path.join(System.tmp_dir!(), "h2_outside_#{n}")
+
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(outside)
+
+      target = Path.join(outside, "secret.txt")
+      File.write!(target, "secret_content")
+
+      symlink_in_workspace = Path.join(workspace, "escape_link")
+      File.ln_s!(target, symlink_in_workspace)
+
+      on_exit(fn ->
+        File.rm_rf!(workspace)
+        File.rm_rf!(outside)
+      end)
+
+      agent_id = "h2_test_#{n}"
+
+      now = DateTime.utc_now()
+
+      cap = %Capability{
+        id: "cap_h2_#{n}",
+        principal_id: agent_id,
+        resource_uri: "arbor://fs/read#{workspace}",
+        granted_at: now,
+        expires_at: DateTime.add(now, 3600, :second)
+      }
+
+      CapabilityStore.put(cap)
+
+      %{
+        agent_id: agent_id,
+        workspace: workspace,
+        symlink: symlink_in_workspace
+      }
+    end
+
+    test "security regression (H2): symlink pointing outside the authorized root is rejected",
+         %{agent_id: agent_id, symlink: symlink} do
+      # H2: pre-fix, FileGuard.resolve_and_validate_path called
+      # SafePath.resolve_within (string normalization only — does NOT follow
+      # symlinks) and authorized the symlink as if it were inside the
+      # workspace. The actual I/O against `symlink_in_workspace` would have
+      # then read `outside/secret.txt`. The fix calls SafePath.resolve_real
+      # after normalization and verifies the real path stays within root.
+      result = FileGuard.authorize(agent_id, symlink, :read)
+
+      assert {:error, :symlink_escape} = result,
+             "Symlink pointing outside authorized root must be rejected — H2 regression. " <>
+               "Got: #{inspect(result)}"
+    end
+
+    test "non-symlink files inside the authorized root still authorize",
+         %{agent_id: agent_id, workspace: workspace} do
+      legitimate = Path.join(workspace, "real.txt")
+      File.write!(legitimate, "ok")
+
+      assert {:ok, _resolved} = FileGuard.authorize(agent_id, legitimate, :read)
     end
   end
 end

@@ -275,10 +275,56 @@ defmodule Arbor.Security.FileGuard do
   end
 
   defp resolve_and_validate_path(requested_path, root) do
-    # Use SafePath to resolve and validate the path stays within root
+    # H2: pre-fix, FileGuard relied only on SafePath.resolve_within/2 — string
+    # normalization that does NOT follow symlinks. A symlink inside the
+    # authorized root could point outside the root, and authorization would
+    # pass on the normalized path while the actual I/O happened against the
+    # symlink target. Now we first normalize, then resolve the real path
+    # (or its parent for non-existent targets) and verify it's still within
+    # the authorized root.
+    with {:ok, normalized} <- normalize_or_traversal(requested_path, root),
+         {:ok, real} <- real_path_within(normalized, root) do
+      {:ok, real}
+    end
+  end
+
+  defp normalize_or_traversal(requested_path, root) do
     case SafePath.resolve_within(requested_path, root) do
       {:ok, resolved} -> {:ok, resolved}
       {:error, :path_traversal} -> {:error, :path_traversal}
+      {:error, reason} -> {:error, {:invalid_path, reason}}
+    end
+  end
+
+  defp real_path_within(normalized, root) do
+    case SafePath.resolve_real(normalized) do
+      {:ok, real} ->
+        check_real_within(real, root, normalized)
+
+      {:error, :not_found} ->
+        # Target doesn't exist yet (legitimate for write/create). Resolve the
+        # parent's real path instead and verify it's within root — that
+        # prevents a symlink in the parent chain from pointing the future
+        # file at an outside path.
+        parent = Path.dirname(normalized)
+
+        case SafePath.resolve_real(parent) do
+          {:ok, real_parent} ->
+            check_real_within(real_parent, root, normalized)
+
+          {:error, :not_found} ->
+            # Whole prefix is missing; the normalized path is the best we
+            # can do. Fall back to it (no symlink escape possible if no
+            # symlinks exist on the path).
+            {:ok, normalized}
+        end
+    end
+  end
+
+  defp check_real_within(real, root, fallback) do
+    case SafePath.resolve_within(real, root) do
+      {:ok, _} -> {:ok, fallback}
+      {:error, :path_traversal} -> {:error, :symlink_escape}
       {:error, reason} -> {:error, {:invalid_path, reason}}
     end
   end
@@ -350,7 +396,11 @@ defmodule Arbor.Security.FileGuard do
   defp wildcard_capability?(%Capability{resource_uri: "arbor://fs/**"}), do: true
   defp wildcard_capability?(_), do: false
 
-  defp path_covered_by_capability?(%Capability{resource_uri: "arbor://fs/**"}, _operation, _requested_path) do
+  defp path_covered_by_capability?(
+         %Capability{resource_uri: "arbor://fs/**"},
+         _operation,
+         _requested_path
+       ) do
     # Wildcard capability grants all operations on all paths
     true
   end
