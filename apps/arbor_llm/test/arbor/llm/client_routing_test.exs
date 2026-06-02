@@ -16,16 +16,17 @@ defmodule Arbor.LLM.ClientRoutingTest do
 
   alias Arbor.LLM.Adapter.ReqLLM, as: Generic
   alias Arbor.LLM.Client
+  alias Arbor.LLM.ProviderRegistry
 
-  @api_provider_envs %{
-    "openai" => "OPENAI_API_KEY",
-    "anthropic" => "ANTHROPIC_API_KEY",
-    "gemini" => "GEMINI_API_KEY",
-    "zai" => "ZAI_API_KEY",
-    "zai_coding_plan" => "ZAI_CODING_PLAN_API_KEY",
-    "openrouter" => "OPENROUTER_API_KEY",
-    "xai" => "XAI_API_KEY"
-  }
+  # Source of truth for which env var carries which provider's API key
+  # lives in ProviderRegistry (which reads from req_llm's provider
+  # modules). Tests derive from there so they stay correct when
+  # req_llm renames variables or adds providers.
+  @api_provider_envs for provider <- ProviderRegistry.list_cloud(),
+                         env = ProviderRegistry.default_env_key(provider),
+                         is_binary(env),
+                         into: %{},
+                         do: {provider, env}
 
   setup do
     original_env_values =
@@ -67,11 +68,21 @@ defmodule Arbor.LLM.ClientRoutingTest do
     end
 
     test "absent API key → provider absent from routing table" do
-      # No API keys set in this test's setup, and we explicitly skip
-      # local + ACP discovery — so the adapter map should be empty and
-      # `from_env` raises (no provider configured).
-      assert_raise Arbor.LLM.ConfigurationError, fn ->
-        Client.from_env(discover_local: false, discover_acp: false)
+      # No API keys set in this test's setup. Use empty `adapters`
+      # observation rather than relying on from_env's
+      # ConfigurationError path (which other env state — e.g.
+      # UNIFIED_LLM_DEFAULT_PROVIDER — can also satisfy). This
+      # asserts the actual contract: nothing got auto-registered.
+      adapters =
+        try do
+          Client.from_env(discover_local: false, discover_acp: false).adapters
+        rescue
+          Arbor.LLM.ConfigurationError -> %{}
+        end
+
+      for provider <- Map.keys(@api_provider_envs) do
+        refute Map.has_key?(adapters, provider),
+               "provider #{provider} should not be registered with no API key"
       end
     end
   end

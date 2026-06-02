@@ -58,38 +58,12 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   alias Arbor.LLM.Message
   alias Arbor.LLM.PostProcessors
   alias Arbor.LLM.ProviderError
+  alias Arbor.LLM.ProviderRegistry
   alias Arbor.LLM.Request
   alias Arbor.LLM.RequestTimeoutError
   alias Arbor.LLM.Response
 
   @sentinel_provider "req_llm_generic"
-
-  # Translation from Arbor's provider strings to the names req_llm uses
-  # in its provider registry. Most are identical; the differences are:
-  # `gemini` (Arbor) → `google` (req_llm), plus the local-LM providers
-  # which req_llm doesn't have a dedicated module for — they go through
-  # `openai` with a base_url override (req_llm's openai chat-completions
-  # is OpenAI-spec compliant, which is what Ollama and LM Studio serve).
-  @arbor_to_req_llm_provider %{
-    "openai" => "openai",
-    "anthropic" => "anthropic",
-    "gemini" => "google",
-    "zai" => "zai",
-    "zai_coding_plan" => "zai_coding_plan",
-    "openrouter" => "openrouter",
-    "xai" => "xai",
-    "lm_studio" => "openai",
-    "ollama" => "openai"
-  }
-
-  # Default base_urls for local-LM servers we register under `openai`
-  # provider. Operator can override via Application config (key
-  # `:base_url` under the matching app config entry, same shape the
-  # legacy LM Studio / Ollama adapters used).
-  @local_provider_defaults %{
-    "lm_studio" => {:lm_studio, "http://localhost:1234/v1"},
-    "ollama" => {:ollama, "http://localhost:11434/v1"}
-  }
 
   # ── Behaviour callbacks ─────────────────────────────────────────────
 
@@ -176,11 +150,11 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   end
 
   defp build_embed_model_spec(arbor_provider, model) do
-    if local_provider?(arbor_provider) do
+    if ProviderRegistry.local?(arbor_provider) do
       build_local_model_struct(arbor_provider, model)
     else
-      req_llm_provider = Map.get(@arbor_to_req_llm_provider, arbor_provider, arbor_provider)
-      {:ok, req_llm_provider <> ":" <> model}
+      atom = ProviderRegistry.req_llm_atom(arbor_provider) || String.to_atom(arbor_provider)
+      {:ok, Atom.to_string(atom) <> ":" <> model}
     end
   end
 
@@ -353,26 +327,24 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   def build_model_spec(%Request{provider: provider, model: model})
       when is_binary(provider) and is_binary(model) do
-    if local_provider?(provider) do
+    if ProviderRegistry.local?(provider) do
       build_local_model_struct(provider, model)
     else
-      case Map.fetch(@arbor_to_req_llm_provider, provider) do
-        {:ok, req_llm_provider} ->
-          {:ok, req_llm_provider <> ":" <> model}
-
-        :error ->
+      case ProviderRegistry.req_llm_atom(provider) do
+        nil ->
           # Unknown provider — pass through unchanged so an operator
           # can use a provider req_llm knows about that we haven't
           # mapped explicitly (e.g. amazon_bedrock, azure, groq).
           {:ok, provider <> ":" <> model}
+
+        atom ->
+          {:ok, Atom.to_string(atom) <> ":" <> model}
       end
     end
   end
 
-  defp local_provider?(provider), do: Map.has_key?(@local_provider_defaults, provider)
-
   defp build_local_model_struct(arbor_provider, model) do
-    {:ok, req_llm_provider} = Map.fetch(@arbor_to_req_llm_provider, arbor_provider)
+    atom = ProviderRegistry.req_llm_atom(arbor_provider)
 
     # The schema requires `id`, `model`, and `provider`. Everything
     # else is nullish — that's what we want for local LMs since
@@ -380,7 +352,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     LLMDB.Model.new(%{
       id: model,
       model: model,
-      provider: String.to_atom(req_llm_provider)
+      provider: atom
     })
   end
 
@@ -394,14 +366,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   """
   @spec default_base_url_for(String.t()) :: String.t() | nil
   def default_base_url_for(provider) when is_binary(provider) do
-    case Map.fetch(@local_provider_defaults, provider) do
-      {:ok, {config_key, default}} ->
-        config = Application.get_env(:arbor_orchestrator, config_key, [])
-        Keyword.get(config, :base_url, default)
-
-      :error ->
-        nil
-    end
+    ProviderRegistry.default_base_url(provider)
   end
 
   @doc """

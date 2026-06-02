@@ -2,12 +2,10 @@ defmodule Arbor.LLM.ProviderCatalog do
   @moduledoc """
   Single source of truth for available LLM providers.
 
-  After the Session 6 cutover, traffic for every API + local-LM
-  provider routes through `Arbor.LLM.Adapter.ReqLLM`. The per-provider
-  HTTP modules that used to host `runtime_contract/0` are gone, so the
-  catalog is now driven by a static map carrying the same data the
-  legacy adapters used to declare. ACP still has its own adapter
-  (`Arbor.AI.LLM.Adapter.Acp`) and contributes its contract dynamically.
+  Driven by `Arbor.LLM.ProviderRegistry`, which itself derives provider
+  identity / env keys / base URLs from req_llm and per-provider
+  capabilities from llm_db. The Catalog adds the availability-check +
+  caching layer on top.
 
   ## Usage
 
@@ -23,128 +21,22 @@ defmodule Arbor.LLM.ProviderCatalog do
       ProviderCatalog.refresh()
 
   Results are cached in ETS with a 5-minute TTL. The check phase
-  (env-var / HTTP probe lookups) is what's actually cached;
-  availability can change minute-to-minute as keys are set/unset or
-  servers come up.
+  (env-var lookup / HTTP probe) is what's cached; availability can
+  change minute-to-minute as keys are set/unset or servers come up.
   """
 
   alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+  alias Arbor.LLM.ProviderRegistry
 
   require Logger
 
   @ets_table :arbor_provider_catalog
   @ttl_ms :timer.minutes(5)
 
-  # Provider definitions previously sourced from each per-provider
-  # adapter's `runtime_contract/0`. Lifted verbatim during the
-  # Session 6 cutover so consumers of `available/0`, `all/0`,
-  # `capabilities/1`, and `get_contract/1` see the same shape as
-  # before — only the source-of-truth moved.
-  @cloud_providers [
-    %{
-      provider: "openai",
-      display_name: "OpenAI API",
-      type: :api,
-      env_vars: [%{name: "OPENAI_API_KEY", required: true}],
-      capabilities: [
-        streaming: true,
-        tool_calls: true,
-        thinking: true,
-        vision: true,
-        structured_output: true
-      ]
-    },
-    %{
-      provider: "anthropic",
-      display_name: "Anthropic API",
-      type: :api,
-      env_vars: [%{name: "ANTHROPIC_API_KEY", required: true}],
-      capabilities: [
-        streaming: true,
-        tool_calls: true,
-        thinking: true,
-        extended_thinking: true,
-        vision: true,
-        structured_output: true
-      ]
-    },
-    %{
-      provider: "gemini",
-      display_name: "Google Gemini API",
-      type: :api,
-      env_vars: [%{name: "GEMINI_API_KEY", required: true}],
-      capabilities: [
-        streaming: true,
-        tool_calls: true,
-        thinking: true,
-        vision: true,
-        structured_output: true
-      ]
-    },
-    %{
-      provider: "xai",
-      display_name: "x.ai (Grok)",
-      type: :api,
-      env_vars: [%{name: "XAI_API_KEY", required: true}],
-      capabilities: [streaming: true, tool_calls: true, thinking: true, vision: true]
-    },
-    %{
-      provider: "openrouter",
-      display_name: "OpenRouter",
-      type: :api,
-      env_vars: [%{name: "OPENROUTER_API_KEY", required: true}],
-      capabilities: [
-        streaming: true,
-        tool_calls: true,
-        thinking: true,
-        vision: true,
-        structured_output: true
-      ]
-    },
-    %{
-      provider: "zai",
-      display_name: "Z.ai",
-      type: :api,
-      env_vars: [%{name: "ZAI_API_KEY", required: true}],
-      capabilities: [streaming: true, tool_calls: true, thinking: true, structured_output: true]
-    },
-    %{
-      provider: "zai_coding_plan",
-      display_name: "Z.ai Coding Plan",
-      type: :api,
-      env_vars: [%{name: "ZAI_CODING_PLAN_API_KEY", required: true}],
-      capabilities: [streaming: true, tool_calls: true, thinking: true, structured_output: true]
-    }
-  ]
-
-  # Local-LM providers carry an HTTP probe instead of an env var. The
-  # base_url defaults match `Arbor.LLM.Adapter.ReqLLM`'s
-  # `default_base_url_for/1` so operator overrides via
-  # `config :arbor_orchestrator, <provider>, base_url:` flow through
-  # consistently.
-  @local_providers [
-    %{
-      provider: "ollama",
-      display_name: "Ollama",
-      type: :local,
-      default_base_url: "http://localhost:11434/v1",
-      config_key: :ollama,
-      capabilities: [streaming: true, tool_calls: true, embeddings: true]
-    },
-    %{
-      provider: "lm_studio",
-      display_name: "LM Studio",
-      type: :local,
-      default_base_url: "http://localhost:1234/v1",
-      config_key: :lm_studio,
-      capabilities: [streaming: true, tool_calls: true, structured_output: true]
-    }
-  ]
-
-  # ACP keeps its own adapter (it's a subprocess runtime, not an LLM
-  # transport). We resolve its contract dynamically via runtime
-  # indirection — same Module.concat atom-list pattern Client uses so
-  # arbor_llm doesn't compile-time-depend on arbor_ai.
+  # ACP keeps its own adapter at Arbor.AI.LLM.Adapter.Acp; we resolve
+  # its contract dynamically via runtime indirection (Module.concat
+  # atom-list hides the cross-app reference from compile-time analysis
+  # so arbor_llm doesn't compile-time-depend on arbor_ai).
   @acp_adapter Module.concat([:Arbor, :AI, :LLM, :Adapter, :Acp])
 
   @doc """
@@ -261,57 +153,61 @@ defmodule Arbor.LLM.ProviderCatalog do
   # ── Discovery ──────────────────────────────────────────────────────
 
   defp discover_all do
-    cloud = Enum.map(@cloud_providers, &build_cloud_entry/1)
-    local = Enum.map(@local_providers, &build_local_entry/1)
+    cloud = Enum.map(ProviderRegistry.list_cloud(), &build_cloud_entry/1)
+    local = Enum.map(ProviderRegistry.list_local(), &build_local_entry/1)
     acp = build_acp_entry()
     entries = cloud ++ local ++ List.wrap(acp)
     Map.new(entries, fn entry -> {entry.provider, entry} end)
   end
 
-  defp build_cloud_entry(spec) do
+  defp build_cloud_entry(provider) do
+    env_key = ProviderRegistry.default_env_key(provider)
+    capabilities = ProviderRegistry.capabilities(provider)
+
     {:ok, contract} =
       RuntimeContract.new(
-        provider: spec.provider,
-        display_name: spec.display_name,
-        type: spec.type,
-        env_vars: spec.env_vars,
-        capabilities: Capabilities.new(spec.capabilities)
+        provider: provider,
+        display_name: ProviderRegistry.display_name(provider),
+        type: :api,
+        env_vars: List.wrap(env_key && %{name: env_key, required: true}),
+        capabilities: capabilities
       )
 
     check_result = RuntimeContract.check(contract)
 
     %{
-      provider: spec.provider,
-      display_name: spec.display_name,
-      type: spec.type,
+      provider: provider,
+      display_name: ProviderRegistry.display_name(provider),
+      type: :api,
       available?: match?({:ok, _}, check_result),
-      capabilities: contract.capabilities,
+      capabilities: capabilities,
       contract: contract,
       check_result: check_result,
       adapter_module: Arbor.LLM.Adapter.ReqLLM
     }
   end
 
-  defp build_local_entry(spec) do
-    base_url = configured_base_url(spec)
+  defp build_local_entry(provider) do
+    base_url = ProviderRegistry.default_base_url(provider)
+    capabilities = ProviderRegistry.capabilities(provider)
 
     {:ok, contract} =
       RuntimeContract.new(
-        provider: spec.provider,
-        display_name: spec.display_name,
-        type: spec.type,
+        provider: provider,
+        display_name: ProviderRegistry.display_name(provider),
+        type: :local,
         probes: [%{type: :http, url: base_url <> "/models", timeout_ms: 2_000}],
-        capabilities: Capabilities.new(spec.capabilities)
+        capabilities: capabilities
       )
 
     check_result = RuntimeContract.check(contract)
 
     %{
-      provider: spec.provider,
-      display_name: spec.display_name,
-      type: spec.type,
+      provider: provider,
+      display_name: ProviderRegistry.display_name(provider),
+      type: :local,
       available?: match?({:ok, _}, check_result),
-      capabilities: contract.capabilities,
+      capabilities: capabilities,
       contract: contract,
       check_result: check_result,
       adapter_module: Arbor.LLM.Adapter.ReqLLM
@@ -319,10 +215,6 @@ defmodule Arbor.LLM.ProviderCatalog do
   end
 
   defp build_acp_entry do
-    # Variable indirection hides the module from compile-time analysis
-    # (per arbor's runtime-indirection rule — Code.ensure_loaded? alone
-    # doesn't suppress the warning; we need apply/3 against a variable
-    # target).
     acp_mod = @acp_adapter
     Code.ensure_loaded(acp_mod)
 
@@ -345,10 +237,5 @@ defmodule Arbor.LLM.ProviderCatalog do
     e ->
       Logger.warning("ProviderCatalog: error discovering ACP adapter: #{inspect(e)}")
       nil
-  end
-
-  defp configured_base_url(spec) do
-    config = Application.get_env(:arbor_orchestrator, spec.config_key, [])
-    Keyword.get(config, :base_url, spec.default_base_url)
   end
 end
