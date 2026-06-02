@@ -270,15 +270,239 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
     end
   end
 
-  describe "stream/2 + embed/3 — Session 3 stubs" do
-    test "stream returns :not_implemented" do
-      req = %Request{provider: "openai", model: "gpt-4"}
-      assert {:error, :not_implemented} = Adapter.stream(req, [])
+  describe "translate_tools/1 — Session 4 parity" do
+    test "returns nil for nil or empty" do
+      assert Adapter.translate_tools(nil) == nil
+      assert Adapter.translate_tools([]) == nil
     end
 
-    test "embed returns :not_implemented" do
-      assert {:error, :not_implemented} = Adapter.embed(["text"], "embed-model", [])
+    test "translates a single OpenAI-format tool into %ReqLLM.Tool{}" do
+      tool = %{
+        "type" => "function",
+        "function" => %{
+          "name" => "get_weather",
+          "description" => "Get the current weather",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{"location" => %{"type" => "string"}},
+            "required" => ["location"]
+          }
+        }
+      }
+
+      [translated] = Adapter.translate_tools([tool])
+
+      assert %ReqLLM.Tool{name: "get_weather", description: "Get the current weather"} =
+               translated
+
+      assert is_function(translated.callback, 1)
+      assert translated.parameter_schema == tool["function"]["parameters"]
     end
+
+    test "translates multiple tools in order" do
+      tools = [
+        tool_map("a"),
+        tool_map("b"),
+        tool_map("c")
+      ]
+
+      assert ["a", "b", "c"] = Adapter.translate_tools(tools) |> Enum.map(& &1.name)
+    end
+
+    test "drops malformed tool entries rather than crashing" do
+      tools = [
+        tool_map("good"),
+        %{"type" => "function"},
+        nil
+      ]
+
+      result = Adapter.translate_tools(tools)
+      assert is_list(result)
+      assert Enum.map(result, & &1.name) == ["good"]
+    end
+
+    test "callback is a no-op /1 function (req_llm never auto-invokes it)" do
+      [translated] = Adapter.translate_tools([tool_map("x")])
+      assert translated.callback.(%{}) == {:ok, %{}}
+    end
+  end
+
+  describe "build_req_opts/2 — tools wiring" do
+    test "request.tools end up as :tools opt with %ReqLLM.Tool{} structs" do
+      req = %Request{
+        provider: "anthropic",
+        model: "claude-3-5",
+        tools: [tool_map("search")]
+      }
+
+      opts = Adapter.build_req_opts(req, [])
+      assert [%ReqLLM.Tool{name: "search"}] = opts[:tools]
+    end
+
+    test "request.tool_choice is forwarded when set" do
+      req = %Request{
+        provider: "openai",
+        model: "gpt-4",
+        tools: [tool_map("a")],
+        tool_choice: "auto"
+      }
+
+      opts = Adapter.build_req_opts(req, [])
+      assert opts[:tool_choice] == "auto"
+    end
+
+    test "empty tools list does not add :tools to opts" do
+      req = %Request{provider: "openai", model: "gpt-4", tools: []}
+      opts = Adapter.build_req_opts(req, [])
+      refute Keyword.has_key?(opts, :tools)
+    end
+  end
+
+  describe "translate_response/2 — tool_calls extraction" do
+    test "promotes message.tool_calls into ContentPart.tool_call parts (before text)" do
+      req = %Request{provider: "openai", model: "gpt-4"}
+
+      tool_call = %ReqLLM.ToolCall{
+        id: "call_abc",
+        type: "function",
+        function: %{"name" => "get_weather", "arguments" => %{"location" => "NYC"}}
+      }
+
+      msg = %ReqLLM.Message{
+        role: :assistant,
+        content: [%ReqLLM.Message.ContentPart{type: :text, text: "Let me check."}],
+        tool_calls: [tool_call]
+      }
+
+      req_resp = %ReqLLM.Response{
+        id: "test",
+        model: "gpt-4",
+        context: ReqLLM.Context.new([]),
+        message: msg,
+        stream?: false,
+        stream: nil,
+        usage: %{},
+        finish_reason: :tool_calls,
+        provider_meta: %{},
+        error: nil
+      }
+
+      arbor_resp = Adapter.translate_response(req_resp, req)
+
+      assert arbor_resp.finish_reason == :tool_calls
+
+      [first, second] = arbor_resp.content_parts
+      assert first.kind == :tool_call
+      assert first.id == "call_abc"
+      assert first.name == "get_weather"
+      assert first.arguments == %{"location" => "NYC"}
+      assert second.kind == :text
+      assert second.text == "Let me check."
+    end
+
+    test "no tool_calls field produces text-only content_parts (no regression)" do
+      req = %Request{provider: "openai", model: "gpt-4"}
+
+      msg = %ReqLLM.Message{
+        role: :assistant,
+        content: [%ReqLLM.Message.ContentPart{type: :text, text: "hi"}],
+        tool_calls: nil
+      }
+
+      req_resp = build_req_llm_response_struct(msg)
+      arbor_resp = Adapter.translate_response(req_resp, req)
+      assert arbor_resp.content_parts == [ContentPart.text("hi")]
+    end
+
+    test "empty tool_calls list is treated as no tool calls" do
+      req = %Request{provider: "openai", model: "gpt-4"}
+
+      msg = %ReqLLM.Message{
+        role: :assistant,
+        content: [%ReqLLM.Message.ContentPart{type: :text, text: "hi"}],
+        tool_calls: []
+      }
+
+      req_resp = build_req_llm_response_struct(msg)
+      arbor_resp = Adapter.translate_response(req_resp, req)
+      assert arbor_resp.content_parts == [ContentPart.text("hi")]
+    end
+  end
+
+  describe "translate_stream_chunk/1 — Session 4 streaming" do
+    test "content chunk → :delta event with :text" do
+      chunk = %ReqLLM.StreamChunk{type: :content, text: "hello"}
+
+      assert %Arbor.LLM.StreamEvent{type: :delta, data: %{text: "hello"}} =
+               Adapter.translate_stream_chunk(chunk)
+    end
+
+    test "thinking chunk → :delta with :thinking" do
+      chunk = %ReqLLM.StreamChunk{type: :thinking, text: "let me think"}
+
+      assert %Arbor.LLM.StreamEvent{type: :delta, data: %{thinking: "let me think"}} =
+               Adapter.translate_stream_chunk(chunk)
+    end
+
+    test "tool_call chunk → :tool_call event with name + arguments" do
+      chunk = %ReqLLM.StreamChunk{
+        type: :tool_call,
+        name: "get_weather",
+        arguments: %{"location" => "NYC"}
+      }
+
+      assert %Arbor.LLM.StreamEvent{
+               type: :tool_call,
+               data: %{name: "get_weather", arguments: %{"location" => "NYC"}}
+             } = Adapter.translate_stream_chunk(chunk)
+    end
+
+    test "meta chunk → :step_finish with metadata as data" do
+      chunk = %ReqLLM.StreamChunk{type: :meta, metadata: %{finish_reason: :stop}}
+
+      assert %Arbor.LLM.StreamEvent{type: :step_finish, data: %{finish_reason: :stop}} =
+               Adapter.translate_stream_chunk(chunk)
+    end
+  end
+
+  describe "embed/3 — Session 4 input validation" do
+    test "requires provider in opts (no inference yet)" do
+      assert {:error, {:invalid_request, :missing_provider_for_embedding}} =
+               Adapter.embed(["hello"], "voyage-large-2", [])
+    end
+
+    test "rejects empty text list" do
+      assert {:error, {:invalid_request, :empty_input}} =
+               Adapter.embed([], "voyage-large-2", provider: "voyage")
+    end
+  end
+
+  # ── Helpers ─────────────────────────────────────────────────────────
+
+  defp tool_map(name) do
+    %{
+      "type" => "function",
+      "function" => %{
+        "name" => name,
+        "description" => "test tool",
+        "parameters" => %{"type" => "object", "properties" => %{}}
+      }
+    }
+  end
+
+  defp build_req_llm_response_struct(%ReqLLM.Message{} = msg) do
+    %ReqLLM.Response{
+      id: "test",
+      model: "test-model",
+      context: ReqLLM.Context.new([]),
+      message: msg,
+      stream?: false,
+      stream: nil,
+      usage: %{},
+      finish_reason: :stop,
+      provider_meta: %{},
+      error: nil
+    }
   end
 
   # ── Helpers ─────────────────────────────────────────────────────────
