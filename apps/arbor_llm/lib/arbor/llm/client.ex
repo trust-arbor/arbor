@@ -53,11 +53,21 @@ defmodule Arbor.LLM.Client do
 
   @default_client_key {__MODULE__, :default_client}
 
-  # Local-LM providers carry different atoms in llm_db's catalog
-  # ("lm_studio" → :lmstudio without underscore; "ollama" → :ollama_cloud
-  # because llm_db's :ollama_cloud is the catalog provider for the
-  # cloud Ollama service, distinct from local Ollama). For cloud
-  # providers Arbor's names match req_llm's atoms after the
+  # Local-LM providers map to llm_db catalog atoms that don't follow
+  # the Arbor-name-equals-atom convention:
+  #
+  #   - "lm_studio" → :lmstudio: llm_db drops the underscore.
+  #
+  #   - "ollama" → :ollama_cloud: llm_db has one Ollama atom and chose
+  #     that name. It IS the right catalog for the Arbor `"ollama"`
+  #     provider despite the confusing label — Ollama Inc maintains a
+  #     single official model catalog that covers everything a local
+  #     `ollama serve` daemon can serve, including locally-pulled
+  #     models, cloud-proxy models (the `:cloud`-suffixed ones the
+  #     daemon proxies to Ollama Cloud), and bridge pulls. There's no
+  #     separate `:ollama` (local-only) atom in llm_db.
+  #
+  # For cloud providers Arbor's names match req_llm's atoms after the
   # Session 6.6 rename, so we just round-trip via
   # `String.to_existing_atom/1` rather than maintaining tautological
   # entries.
