@@ -237,7 +237,14 @@ defmodule Arbor.Actions do
         Arbor.Actions.Git.Status,
         Arbor.Actions.Git.Diff,
         Arbor.Actions.Git.Commit,
-        Arbor.Actions.Git.Log
+        Arbor.Actions.Git.Log,
+        Arbor.Actions.Git.Branch,
+        Arbor.Actions.Git.PR
+      ],
+      mix: [
+        Arbor.Actions.Mix.Test,
+        Arbor.Actions.Mix.Quality,
+        Arbor.Actions.Mix.Format
       ],
       comms: [
         Arbor.Actions.Comms.SendMessage,

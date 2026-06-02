@@ -1,0 +1,123 @@
+// Feature Flow — Canonical "Implement a Feature" Pipeline
+// Composes the software-factory primitives into a single end-to-end flow:
+// branch → plan → implement → test loop → quality gate → commit → PR.
+//
+// This is the reference pipeline demonstrating how the new Mix/Git actions
+// and shell-retry / quality-check stdlib DOTs compose. Real feature
+// pipelines will typically embed this as a starting template and override
+// the implementation stage (e.g. with a coding agent specific to the
+// codebase).
+//
+// Context in:
+//   repo_path        — absolute path to the working git repo
+//   feature_name     — short identifier (used for branch name)
+//   feature_spec     — natural-language description of what to implement
+//   base_branch      — branch to PR against (default "main")
+//   max_test_retries — test loop max attempts (default "3")
+//
+// Context out:
+//   feature.branch   — branch name used
+//   feature.commit_hash — commit hash of the implementation
+//   feature.pr_url   — PR URL
+//   feature.passed_tests — true if test loop converged
+//   feature.passed_quality — true if quality gate passed
+//
+// Composed sub-pipelines (via `compose` / `invoke`):
+//   - shell-retry.dot (for the test loop)
+//   - quality-check.dot (for the quality gate)
+//
+// Composed actions:
+//   - git_branch   (Arbor.Actions.Git.Branch)
+//   - mix_test     (Arbor.Actions.Mix.Test)
+//   - mix_quality  (Arbor.Actions.Mix.Quality)
+//   - git_commit   (Arbor.Actions.Git.Commit)
+//   - git_pr       (Arbor.Actions.Git.PR)
+
+digraph FeatureFlow {
+  graph [
+    goal="Implement a feature end-to-end: branch, code, test-loop, quality-gate, commit, PR",
+    label="Feature Flow"
+  ]
+
+  start [shape=Mdiamond]
+
+  // 1. Cut a feature branch from the base.
+  branch [
+    type="exec",
+    target="action",
+    action="git_branch",
+    "param.mode"="create",
+    "param.name"="$feature_name",
+    "context_keys"="repo_path,feature_name"
+  ]
+
+  // 2. Plan the implementation (LLM call producing an edit plan).
+  plan [
+    type="compute",
+    prompt="Read the feature_spec and the relevant repo files. Produce plan.steps as a numbered list of file edits required."
+  ]
+
+  // 3. Implement (typically a coding agent with file-edit tools).
+  // For a real pipeline, replace this node with an agents-as-nodes
+  // compute that has read/edit tools wired in.
+  implement [
+    type="compute",
+    prompt="Execute plan.steps. Read referenced files, apply edits. Write implementation.summary describing what changed."
+  ]
+
+  // 4. Test loop — invoke shell-retry.dot with mix_test as the command.
+  // If tests fail, the loop's fix_prompt routes back into a fix stage
+  // that re-runs the implement agent with the failure output in context.
+  test_loop [
+    type="invoke",
+    "param.pipeline"="stdlib/shell-retry.dot",
+    "param.command_target"="action",
+    "param.command_action"="mix_test",
+    "param.command_args"="{\"path\":\"$repo_path\"}",
+    "param.max_retries"="$max_test_retries",
+    "param.fix_prompt"="Tests failed. Read result.stdout and result.stderr, identify the failure, edit files to fix, and signal ready for re-test."
+  ]
+
+  // 5. Quality gate — invoke quality-check.dot with mix_quality.
+  quality_gate [
+    type="invoke",
+    "param.pipeline"="stdlib/quality-check.dot",
+    "param.gate_target"="action",
+    "param.gate_action"="mix_quality",
+    "param.gate_args"="{\"path\":\"$repo_path\"}"
+  ]
+
+  // 6. Mark feature state on quality result. If quality failed, the
+  // pipeline still commits & PRs but flags the gate failure for human
+  // review. (Alternative: route to a fix stage; left to caller.)
+  record_state [
+    type="transform",
+    prompt="Set feature.passed_tests from test_loop.result.passed?, feature.passed_quality from quality_gate.result.passed?."
+  ]
+
+  // 7. Commit the changes.
+  commit [
+    type="exec",
+    target="action",
+    action="git_commit",
+    "param.path"="$repo_path",
+    "param.message"="$feature_name: $feature_spec",
+    "param.all"="true"
+  ]
+
+  // 8. Open PR.
+  pr [
+    type="exec",
+    target="action",
+    action="git_pr",
+    "param.path"="$repo_path",
+    "param.title"="$feature_name",
+    "param.body"="$feature_spec\n\nImplementation: $implementation.summary",
+    "param.base"="$base_branch"
+  ]
+
+  done [shape=Msquare]
+
+  start -> branch -> plan -> implement -> test_loop -> quality_gate
+  quality_gate -> record_state -> commit -> pr -> done
+}

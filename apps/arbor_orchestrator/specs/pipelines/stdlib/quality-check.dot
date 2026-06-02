@@ -1,0 +1,56 @@
+// Quality Check — Run a Pass/Fail Gate
+// Single-shot gate: run a quality check (mix quality, mix format
+// --check-formatted, mix dialyzer, custom shell command), set
+// result.passed? from the exit code, route to done or fail.
+//
+// This is the no-retry counterpart to shell-retry.dot. Use it as a
+// gate node in larger pipelines where a single failure should halt
+// the pipeline rather than trigger remediation.
+//
+// Context in:
+//   gate_target     — "action" or "shell" (default "action")
+//   gate_action     — action name (when target=action), e.g. "mix_quality"
+//   gate_args       — JSON-encoded params for the action
+//   gate_shell      — full shell string (when target=shell)
+//
+// Context out:
+//   result.passed?  — boolean
+//   result.exit_code — exit code
+//   result.stdout / result.stderr — captured output
+//   gate.failed     — true if check failed (mirror of !passed? for clarity)
+
+digraph QualityCheck {
+  graph [
+    goal="Run a single quality check; pass through or fail the pipeline",
+    label="Quality Check"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Run the check.
+  check [
+    type="exec",
+    prompt="Execute gate_target with gate_action (if action) or gate_shell (if shell). Write result.exit_code, result.passed?, result.stdout, result.stderr."
+  ]
+
+  // Route on pass/fail.
+  decide [
+    type="gate",
+    shape=diamond,
+    predicate="expression",
+    expression="result.passed?"
+  ]
+
+  // Fail path: mark gate.failed for downstream visibility.
+  mark_failed [
+    type="transform",
+    prompt="Set gate.failed=true. result.stdout and result.stderr remain available for whoever consumes this pipeline's output."
+  ]
+
+  done [shape=Msquare]
+
+  start -> check -> decide
+  decide -> done [condition="context.result.passed?=true"]
+  decide -> mark_failed [condition="context.result.passed?!=true"]
+  mark_failed -> done
+}

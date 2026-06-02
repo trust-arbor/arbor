@@ -16,6 +16,8 @@ defmodule Arbor.Actions.Git do
   | `Diff` | Show changes between commits or working tree |
   | `Commit` | Create a new commit |
   | `Log` | Show commit history |
+  | `Branch` | Create / switch / list branches |
+  | `PR` | Open a pull request via the `gh` CLI |
 
   ## Examples
 
@@ -671,6 +673,274 @@ defmodule Arbor.Actions.Git do
 
         _ ->
           nil
+      end
+    end
+  end
+
+  defmodule Branch do
+    @moduledoc """
+    Create, switch, or list branches.
+
+    ## Parameters
+
+    | Name | Type | Required | Description |
+    |------|------|----------|-------------|
+    | `path` | string | yes | Path to the Git repository |
+    | `mode` | atom | yes | `:create`, `:switch`, or `:list` |
+    | `name` | string | conditional | Branch name (required for `:create` / `:switch`) |
+    | `from` | string | no | Base ref for `:create` (default: current HEAD) |
+
+    ## Returns
+
+    - `path` — repository path
+    - `mode` — operation performed
+    - `branch` — branch name (for `:create` / `:switch`)
+    - `branches` — list of branch names (for `:list`)
+    - `current` — current branch name (for `:list`)
+    """
+
+    use Jido.Action,
+      name: "git_branch",
+      description: "Create, switch, or list Git branches",
+      category: "git",
+      tags: ["git", "branch", "vcs"],
+      schema: [
+        path: [type: :string, required: true, doc: "Path to the Git repository"],
+        mode: [
+          type: {:in, [:create, :switch, :list]},
+          required: true,
+          doc: "Operation: :create, :switch, or :list"
+        ],
+        name: [type: :string, doc: "Branch name (for :create / :switch)"],
+        from: [type: :string, doc: "Base ref for :create (default: HEAD)"]
+      ]
+
+    alias Arbor.Actions
+    alias Arbor.Actions.Git
+    alias Arbor.Common.ShellEscape
+
+    def taint_roles do
+      %{
+        path: {:control, requires: [:path_traversal]},
+        mode: :control,
+        name: {:control, requires: [:command_injection]},
+        from: {:control, requires: [:command_injection]}
+      }
+    end
+
+    @impl true
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
+    def run(%{path: path, mode: :list} = params, _context) do
+      Actions.emit_started(__MODULE__, params)
+
+      with {:ok, branches_result} <- git_command(path, ["branch", "--list"]),
+           {:ok, current_result} <- git_command(path, ["branch", "--show-current"]) do
+        branches =
+          branches_result.stdout
+          |> String.split("\n", trim: true)
+          |> Enum.map(&(String.trim_leading(&1, "* ") |> String.trim()))
+          |> Enum.reject(&(&1 == ""))
+
+        result = %{
+          path: path,
+          mode: :list,
+          branches: branches,
+          current: String.trim(current_result.stdout)
+        }
+
+        Actions.emit_completed(__MODULE__, %{path: path, count: length(branches)})
+        {:ok, result}
+      else
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, "Failed to list branches: #{reason}"}
+      end
+    end
+
+    def run(%{path: path, mode: :create, name: name} = params, _context) do
+      Actions.emit_started(__MODULE__, params)
+
+      args = ["checkout", "-b", name]
+      args = if params[:from], do: args ++ [params[:from]], else: args
+
+      case git_command(path, args) do
+        {:ok, _result} ->
+          result = %{path: path, mode: :create, branch: name}
+          Actions.emit_completed(__MODULE__, %{path: path, branch: name})
+          {:ok, result}
+
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, "Failed to create branch '#{name}': #{reason}"}
+      end
+    end
+
+    def run(%{path: path, mode: :switch, name: name} = params, _context) do
+      Actions.emit_started(__MODULE__, params)
+
+      case git_command(path, ["checkout", name]) do
+        {:ok, _result} ->
+          result = %{path: path, mode: :switch, branch: name}
+          Actions.emit_completed(__MODULE__, %{path: path, branch: name})
+          {:ok, result}
+
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, "Failed to switch to branch '#{name}': #{reason}"}
+      end
+    end
+
+    def run(%{mode: mode}, _context) when mode in [:create, :switch] do
+      {:error, "Branch mode :#{mode} requires a 'name' parameter"}
+    end
+
+    defp git_command(path, args) do
+      command =
+        args
+        |> Enum.map(&ShellEscape.escape_arg/1)
+        |> then(&["git" | &1])
+        |> Enum.join(" ")
+
+      case Arbor.Shell.execute(command,
+             cwd: path,
+             timeout: Git.git_timeout(),
+             sandbox: Git.git_sandbox()
+           ) do
+        {:ok, %{exit_code: 0} = result} ->
+          {:ok, result}
+
+        {:ok, %{stderr: stderr, stdout: stdout}} ->
+          error = if stderr != "", do: stderr, else: stdout
+          {:error, String.trim(error)}
+
+        {:error, reason} ->
+          {:error, inspect(reason)}
+      end
+    end
+  end
+
+  defmodule PR do
+    @moduledoc """
+    Open a pull request via the `gh` CLI.
+
+    Requires `gh` (GitHub CLI) to be installed and authenticated. If `gh` is
+    missing or unauthenticated, returns `{:error, reason}` — the Action does
+    not attempt to authenticate or install dependencies on the caller's
+    behalf.
+
+    ## Parameters
+
+    | Name | Type | Required | Description |
+    |------|------|----------|-------------|
+    | `path` | string | yes | Path to the Git repository |
+    | `title` | string | yes | PR title |
+    | `body` | string | no | PR body (markdown supported) |
+    | `base` | string | no | Base branch (default: repository default) |
+    | `draft` | boolean | no | Open as draft (default: false) |
+
+    ## Returns
+
+    - `path` — repository path
+    - `url` — PR URL emitted by `gh`
+    - `title` — PR title
+    - `draft?` — whether the PR was opened as draft
+    """
+
+    use Jido.Action,
+      name: "git_pr",
+      description: "Open a pull request via the `gh` CLI",
+      category: "git",
+      tags: ["git", "pr", "github", "vcs"],
+      schema: [
+        path: [type: :string, required: true, doc: "Path to the Git repository"],
+        title: [type: :string, required: true, doc: "PR title"],
+        body: [type: :string, doc: "PR body (markdown)"],
+        base: [type: :string, doc: "Base branch"],
+        draft: [type: :boolean, default: false, doc: "Open as draft"]
+      ]
+
+    alias Arbor.Actions
+    alias Arbor.Common.ShellEscape
+
+    def taint_roles do
+      %{
+        path: {:control, requires: [:path_traversal]},
+        title: {:control, requires: [:command_injection]},
+        body: {:control, requires: [:command_injection]},
+        base: {:control, requires: [:command_injection]},
+        draft: :control
+      }
+    end
+
+    @impl true
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
+    def run(%{path: path, title: title} = params, _context) do
+      Actions.emit_started(__MODULE__, %{path: path, title: title})
+
+      args = build_args(params)
+
+      case gh_command(path, args) do
+        {:ok, result} ->
+          url = String.trim(result.stdout) |> extract_url()
+
+          output = %{
+            path: path,
+            url: url,
+            title: title,
+            draft?: params[:draft] == true
+          }
+
+          Actions.emit_completed(__MODULE__, %{path: path, url: url})
+          {:ok, output}
+
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, "Failed to open PR: #{reason}"}
+      end
+    end
+
+    defp build_args(params) do
+      args = ["pr", "create", "--title", params.title]
+      args = if params[:body], do: args ++ ["--body", params[:body]], else: args ++ ["--body", ""]
+      args = if params[:base], do: args ++ ["--base", params[:base]], else: args
+      args = if params[:draft], do: args ++ ["--draft"], else: args
+      args
+    end
+
+    defp gh_command(path, args) do
+      command =
+        args
+        |> Enum.map(&ShellEscape.escape_arg/1)
+        |> then(&["gh" | &1])
+        |> Enum.join(" ")
+
+      case Arbor.Shell.execute(command,
+             cwd: path,
+             # gh can prompt for browser auth on long network ops
+             timeout: 60_000,
+             sandbox: :basic
+           ) do
+        {:ok, %{exit_code: 0} = result} ->
+          {:ok, result}
+
+        {:ok, %{stderr: stderr, stdout: stdout}} ->
+          error = if stderr != "", do: stderr, else: stdout
+          {:error, String.trim(error)}
+
+        {:error, reason} ->
+          {:error, inspect(reason)}
+      end
+    end
+
+    # `gh pr create` prints the URL on the last non-empty line. Extract it.
+    defp extract_url(output) do
+      output
+      |> String.split("\n", trim: true)
+      |> Enum.reverse()
+      |> Enum.find(fn line -> String.starts_with?(line, "https://") end)
+      |> case do
+        nil -> output
+        url -> url
       end
     end
   end
