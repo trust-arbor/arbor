@@ -26,10 +26,13 @@ defmodule Arbor.LLM.Pipeline do
   @doc """
   Run `call` through `plugs`, returning the final call.
 
-  Each plug's `call/1` is invoked in order. Plugs that pattern-match
-  on `halted: true` (via `use Arbor.LLM.Plug`) pass through unchanged,
-  which lets a single short-circuit (e.g. `Plugs.Replay` finding a
-  fixture) skip the rest of the pipeline's meaningful work.
+  Each plug's `call/1` is invoked in order — `through/2` does NOT
+  short-circuit on `halted: true`. Halted is a per-plug signal:
+  mutating plugs (Replay, Dispatch, Record) match it and pass
+  through; observability plugs (StalenessWarn, telemetry) ignore
+  it and run. This lets a single pipeline serve both "do the
+  work" and "warn me about how this call resolved" without
+  needing two passes.
   """
   @spec through(Call.t(), [module()]) :: Call.t()
   def through(%Call{} = call, plugs) when is_list(plugs) do

@@ -221,6 +221,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
   defp serialize_usage(other), do: stringify(other)
 
   defp stringify(v) when is_binary(v) or is_number(v) or is_boolean(v) or is_nil(v), do: v
+  defp stringify(v) when is_atom(v), do: Atom.to_string(v)
   defp stringify(v) when is_list(v), do: Enum.map(v, &stringify/1)
   defp stringify(v) when is_map(v) and not is_struct(v), do: serialize_map(v)
   defp stringify(v), do: inspect(v)
@@ -256,7 +257,15 @@ defmodule Arbor.LLM.Plugs.Fixture do
   end
 
   defp deserialize_content_part(part) when is_map(part) do
-    Map.new(part, fn {k, v} -> {safe_atom(k, k), v} end)
+    atomized = Map.new(part, fn {k, v} -> {safe_atom(k, k), v} end)
+
+    # `kind` is the discriminator — downstream code pattern-matches on
+    # the atom (e.g. `case part.kind do :text -> ...`). Atom-ize it on
+    # the way back so replay results match the live shape.
+    case Map.get(atomized, :kind) do
+      kind when is_binary(kind) -> Map.put(atomized, :kind, safe_atom(kind, kind))
+      _ -> atomized
+    end
   end
 
   defp deserialize_stream_event(%{"type" => type, "data" => data}) do

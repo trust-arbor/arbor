@@ -24,6 +24,8 @@ defmodule Arbor.LLM.Plugs.Dispatch do
   alias Arbor.LLM.Call
   alias Arbor.LLM.ProviderError
 
+  def call(%Call{halted: true} = call), do: call
+
   def call(%Call{result: nil, operation: op, request: req} = call) do
     %{call | result: do_dispatch(op, req)}
   end

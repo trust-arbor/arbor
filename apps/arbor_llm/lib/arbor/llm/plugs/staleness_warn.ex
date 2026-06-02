@@ -34,6 +34,10 @@ defmodule Arbor.LLM.Plugs.StalenessWarn do
 
   @default_max_age_days 90
 
+  # NB: no `halted: true` short-circuit — this is an observability
+  # plug. It needs to see replayed (halted) calls; that's the whole
+  # point of staleness warnings.
+
   def call(%Call{metadata: %{replayed_from: path, recorded_at: %DateTime{} = ts}} = call) do
     age_days = DateTime.diff(DateTime.utc_now(), ts, :day)
     max_age = Application.get_env(:arbor_llm, :fixture_max_age_days, @default_max_age_days)

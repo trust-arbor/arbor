@@ -36,20 +36,39 @@ A plug is a module implementing `Arbor.LLM.Plug`:
 }
 ```
 
-Plugs pipe with `|>`. The `use Arbor.LLM.Plug` macro injects a halted-passthrough clause so plugs that don't act on halted calls don't need to think about it:
+Plugs pipe with `|>`. `use Arbor.LLM.Plug` attaches the behaviour — nothing more. Halted handling is the plug author's responsibility (Phoenix Plug took the same route; `defoverridable` doesn't combine cleanly with multi-clause user defs). Two patterns:
+
+**Mutating plug** — should skip halted calls. Add an explicit halted-first clause:
 
 ```elixir
 defmodule Arbor.LLM.Plugs.MyPlug do
   use Arbor.LLM.Plug
   alias Arbor.LLM.Call
 
-  # Runs only when halted: false (the use-injected clause handles halted: true).
+  def call(%Call{halted: true} = call), do: call
+
   def call(%Call{} = call) do
     # ... transform the call ...
     call
   end
 end
 ```
+
+**Observability plug** — should run on halted calls too. No halted clause:
+
+```elixir
+defmodule Arbor.LLM.Plugs.MyTelemetry do
+  use Arbor.LLM.Plug
+  alias Arbor.LLM.Call
+
+  def call(%Call{} = call) do
+    # ... emit telemetry, log, warn, whatever ...
+    call
+  end
+end
+```
+
+`Arbor.LLM.Pipeline.through/2` does NOT short-circuit on halted — it hands every call to every plug and lets each one decide. This is what makes `Plugs.StalenessWarn` work: Replay halts the call, but StalenessWarn still fires to flag the stale fixture.
 
 ## CRC alignment
 
@@ -62,11 +81,12 @@ This is Arbor's [Construct-Reduce-Convert](./functional-core.md) pattern at the 
 ## Adding a new plug
 
 1. Create `apps/arbor_llm/lib/arbor/llm/plugs/<name>.ex`.
-2. `use Arbor.LLM.Plug` to inherit halted-passthrough.
-3. Implement `call/1` for the non-halted case. Pattern-match on what you need from the `Call` struct.
-4. Use `Call.halt/1`, `Call.put_metadata/2`, `Call.assign/3` for the standard transformations.
-5. Override the halted-passthrough clause explicitly if your plug should run on halted calls (telemetry, post-hoc observability).
-6. Add to the application's pipeline config or wire into a test fixture.
+2. `use Arbor.LLM.Plug` to attach the behaviour.
+3. Decide: mutating (skip halted) or observability (run on halted)?
+4. Mutating: add `def call(%Call{halted: true} = call), do: call` as the first clause. Observability: skip that clause.
+5. Implement `call/1` for the main case. Pattern-match on what you need from the `Call` struct.
+6. Use `Call.halt/1`, `Call.put_metadata/2`, `Call.assign/3` for the standard transformations.
+7. Add to the application's pipeline config or wire into a test fixture.
 
 ```elixir
 defmodule Arbor.LLM.Plugs.CostTracker do
@@ -74,6 +94,10 @@ defmodule Arbor.LLM.Plugs.CostTracker do
   Aggregate per-agent LLM spend from `usage.total_cost`.
   Reads `agent_id` from `call.assigns`; expects the caller to have
   assigned it before the pipeline runs.
+
+  Observability plug — runs on halted (replayed) calls too. Replayed
+  responses still have valid usage data, and we want their cost in
+  the aggregate.
   """
   use Arbor.LLM.Plug
   alias Arbor.LLM.Call
