@@ -14,29 +14,14 @@ defmodule Arbor.Consensus.CoordinatorRoutingTest do
   alias Arbor.Consensus.Coordinator
   alias Arbor.Consensus.TestHelpers
 
+  # M7 (commit 2d922394) tightened advisory mode to share dedup + quota
+  # gates with decision mode — preventing daily-LLM-budget exhaustion
+  # from advisory-spam. The pre-M7 tests asserting advisory bypassed
+  # both gates were deleted in this commit; the empirical question of
+  # whether advisory needs its own (cost-aware) gates is tracked at
+  # `.arbor/roadmap/0-inbox/advisory-mode-cost-aware-quotas.md`.
+
   describe "advisory mode handling" do
-    test "advisory mode skips deduplication check" do
-      {_pid, coord} =
-        TestHelpers.start_test_coordinator(
-          evaluator_backend: TestHelpers.SlowBackend,
-          config: [evaluation_timeout_ms: 60_000]
-        )
-
-      # Submit same advisory proposal twice
-      proposal_attrs = %{
-        proposer: "agent_1",
-        topic: :code_modification,
-        mode: :advisory,
-        description: "How should we handle caching?"
-      }
-
-      {:ok, id1} = Coordinator.submit(proposal_attrs, server: coord)
-      {:ok, id2} = Coordinator.submit(proposal_attrs, server: coord)
-
-      # Both should succeed (no duplicate error)
-      assert id1 != id2
-    end
-
     test "decision mode enforces deduplication" do
       {_pid, coord} =
         TestHelpers.start_test_coordinator(
@@ -55,62 +40,6 @@ defmodule Arbor.Consensus.CoordinatorRoutingTest do
       result = Coordinator.submit(proposal_attrs, server: coord)
 
       assert result == {:error, :duplicate_proposal}
-    end
-
-    test "advisory mode skips agent quota check" do
-      Application.put_env(:arbor_consensus, :max_proposals_per_agent, 1)
-      Application.put_env(:arbor_consensus, :proposal_quota_enabled, true)
-
-      on_exit(fn ->
-        Application.delete_env(:arbor_consensus, :max_proposals_per_agent)
-        Application.delete_env(:arbor_consensus, :proposal_quota_enabled)
-      end)
-
-      {_pid, coord} =
-        TestHelpers.start_test_coordinator(
-          evaluator_backend: TestHelpers.SlowBackend,
-          config: [evaluation_timeout_ms: 60_000]
-        )
-
-      agent_id = "quota_test_agent_#{System.unique_integer([:positive])}"
-
-      # First decision mode proposal
-      {:ok, _id1} =
-        Coordinator.submit(
-          %{
-            proposer: agent_id,
-            topic: :code_modification,
-            mode: :decision,
-            description: "Decision proposal 1"
-          },
-          server: coord
-        )
-
-      # Decision mode should hit quota
-      result =
-        Coordinator.submit(
-          %{
-            proposer: agent_id,
-            topic: :code_modification,
-            mode: :decision,
-            description: "Decision proposal 2"
-          },
-          server: coord
-        )
-
-      assert result == {:error, :agent_proposal_quota_exceeded}
-
-      # Advisory mode should bypass quota
-      {:ok, _id2} =
-        Coordinator.submit(
-          %{
-            proposer: agent_id,
-            topic: :code_modification,
-            mode: :advisory,
-            description: "Advisory proposal"
-          },
-          server: coord
-        )
     end
 
     test "advisory mode gets quorum of 0 and completes" do
