@@ -255,4 +255,76 @@ defmodule Arbor.Orchestrator.Handlers.MapHandlerTest do
       assert Arbor.Orchestrator.Handlers.Registry.resolve(node) == MapHandler
     end
   end
+
+  describe "per-item middleware re-entry (OQ-6 regression)" do
+    defmodule CountingMiddleware do
+      @moduledoc false
+      use Arbor.Orchestrator.Middleware
+
+      alias Arbor.Orchestrator.Middleware.Token
+
+      @impl true
+      def before_node(%Token{node: node} = token) do
+        :ets.update_counter(
+          :oq6_test_counter,
+          :calls,
+          {2, 1},
+          {:calls, 0}
+        )
+
+        :ets.insert(:oq6_test_counter, {{:seen, node.id}, true})
+        token
+      end
+    end
+
+    setup do
+      table =
+        case :ets.whereis(:oq6_test_counter) do
+          :undefined -> :ets.new(:oq6_test_counter, [:named_table, :public, :set])
+          ref -> ref
+        end
+
+      :ets.delete_all_objects(:oq6_test_counter)
+
+      on_exit(fn ->
+        try do
+          :ets.delete(table)
+        rescue
+          _ -> :ok
+        end
+      end)
+
+      :ok
+    end
+
+    test "security regression (OQ-6): per-item handler dispatch invokes the middleware chain" do
+      # OQ-6: pre-fix, MapHandler called `handler_module.execute/4` directly
+      # for each item — CapabilityCheck, TaintCheck, Budget, etc. did NOT
+      # fire per item. The fix routes the per-item dispatch through
+      # Engine.Authorization.authorize_and_execute/5, which builds the
+      # middleware chain via Chain.build and runs before_node/after_node
+      # once per item. This test pins the wiring with a counting
+      # middleware: a 3-item collection should yield 3 per-item
+      # invocations (plus any default mandatory middleware that the test
+      # env happens to run — hence the >= rather than ==).
+      node =
+        make_node("m_oq6", %{
+          "source_key" => "items",
+          "handler_type" => "compute"
+        })
+
+      context = Context.new(%{"items" => ["a", "b", "c"]})
+
+      outcome =
+        MapHandler.execute(node, context, @graph, middleware: [CountingMiddleware])
+
+      assert outcome.status == :success
+
+      [{:calls, count}] = :ets.lookup(:oq6_test_counter, :calls)
+
+      assert count >= 3,
+             "Expected the middleware chain to run at least once per item (3 items) — OQ-6 regression. " <>
+               "Got: #{count}"
+    end
+  end
 end
