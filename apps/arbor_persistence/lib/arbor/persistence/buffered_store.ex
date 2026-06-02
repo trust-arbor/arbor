@@ -156,6 +156,31 @@ defmodule Arbor.Persistence.BufferedStore do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
+  @doc """
+  Probe whether the backend is currently reachable.
+
+  Returns `true` when:
+  - The store has no backend configured (`backend: nil` — ETS-only)
+  - The backend's `list/1` returns a successful response (`{:ok, _}` or `{:error, _}`
+    with a non-crashing reason)
+
+  Returns `false` when the backend crashes (raises, exits, or throws) when
+  probed. Mirrors the resilience contract: failures are observed without
+  propagating.
+
+  Useful in tests that want to skip backend-dependent assertions when the
+  Repo / Sandbox / external service isn't reachable, without coupling to
+  the specific backend implementation.
+
+      iex> BufferedStore.backend_healthy?(name: :my_store)
+      true
+  """
+  @spec backend_healthy?(keyword()) :: boolean()
+  def backend_healthy?(opts) do
+    store = store_name!(opts)
+    GenServer.call(store, :backend_healthy?)
+  end
+
   # ===========================================================================
   # GenServer callbacks
   # ===========================================================================
@@ -208,6 +233,11 @@ defmodule Arbor.Persistence.BufferedStore do
   end
 
   @impl true
+  def handle_call(:backend_healthy?, _from, state) do
+    {:reply, do_backend_healthy?(state), state}
+  end
+
+  @impl true
   def handle_info({:signal_received, signal}, state) do
     handle_distributed_signal(signal, state)
   end
@@ -221,9 +251,39 @@ defmodule Arbor.Persistence.BufferedStore do
   # Backend operations
   # ===========================================================================
 
+  # No backend = trivially healthy (ETS-only is always reachable).
+  defp do_backend_healthy?(%{backend: nil}), do: true
+
+  defp do_backend_healthy?(%{
+         backend: backend,
+         backend_opts: backend_opts,
+         collection: collection
+       }) do
+    opts = Keyword.merge(backend_opts, name: collection)
+
+    # A reachable backend returns *some* response from list/1, even an
+    # `{:error, _}`. An unreachable backend raises / exits / throws.
+    # `list/1` is a light query (just key enumeration) and is mandated by
+    # the Store behaviour so every backend supports it.
+    case backend.list(opts) do
+      {:ok, _} -> true
+      {:error, _} -> true
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+    :throw, _ -> false
+  end
+
   defp load_from_backend(%{backend: nil}), do: :ok
 
-  defp load_from_backend(%{backend: backend, backend_opts: backend_opts, collection: collection, table: table}) do
+  defp load_from_backend(%{
+         backend: backend,
+         backend_opts: backend_opts,
+         collection: collection,
+         table: table
+       }) do
     opts = Keyword.merge(backend_opts, name: collection)
 
     case backend.list(opts) do
@@ -244,11 +304,31 @@ defmodule Arbor.Persistence.BufferedStore do
   rescue
     e ->
       Logger.warning("BufferedStore: backend load failed: #{inspect(e)}")
+  catch
+    # Catch :exit and :throw too — without these, an Ecto Repo / Sandbox
+    # not-checked-out failure (which signals via :exit, not via raised
+    # exceptions) crashes init/1 and the BufferedStore process dies.
+    # Logging + continuing matches the moduledoc's stated contract:
+    # "Init: Loads all data from backend into ETS (backend failure → start empty)".
+    :exit, reason ->
+      Logger.warning("BufferedStore: backend load exit: #{inspect(reason)}")
+
+    :throw, value ->
+      Logger.warning("BufferedStore: backend load throw: #{inspect(value)}")
   end
 
   defp backend_put(%{backend: nil}, _key, _value), do: :ok
 
-  defp backend_put(%{backend: backend, backend_opts: backend_opts, collection: collection, write_mode: mode}, key, value) do
+  defp backend_put(
+         %{
+           backend: backend,
+           backend_opts: backend_opts,
+           collection: collection,
+           write_mode: mode
+         },
+         key,
+         value
+       ) do
     opts = Keyword.merge(backend_opts, name: collection)
 
     case mode do
@@ -277,11 +357,27 @@ defmodule Arbor.Persistence.BufferedStore do
     e ->
       Logger.warning("BufferedStore: backend put error for #{key}: #{inspect(e)}")
       :ok
+  catch
+    :exit, reason ->
+      Logger.warning("BufferedStore: backend put exit for #{key}: #{inspect(reason)}")
+      :ok
+
+    :throw, value ->
+      Logger.warning("BufferedStore: backend put throw for #{key}: #{inspect(value)}")
+      :ok
   end
 
   defp backend_delete(%{backend: nil}, _key), do: :ok
 
-  defp backend_delete(%{backend: backend, backend_opts: backend_opts, collection: collection, write_mode: mode}, key) do
+  defp backend_delete(
+         %{
+           backend: backend,
+           backend_opts: backend_opts,
+           collection: collection,
+           write_mode: mode
+         },
+         key
+       ) do
     opts = Keyword.merge(backend_opts, name: collection)
 
     case mode do
@@ -310,6 +406,14 @@ defmodule Arbor.Persistence.BufferedStore do
     e ->
       Logger.warning("BufferedStore: backend delete error for #{key}: #{inspect(e)}")
       :ok
+  catch
+    :exit, reason ->
+      Logger.warning("BufferedStore: backend delete exit for #{key}: #{inspect(reason)}")
+      :ok
+
+    :throw, value ->
+      Logger.warning("BufferedStore: backend delete throw for #{key}: #{inspect(value)}")
+      :ok
   end
 
   # ===========================================================================
@@ -320,11 +424,16 @@ defmodule Arbor.Persistence.BufferedStore do
 
   defp emit_distributed_signal(%{distributed: true, collection: collection}, type, key) do
     if Code.ensure_loaded?(Arbor.Signals) do
-      Arbor.Signals.emit(:persistence, type, %{
-        collection: collection,
-        key: key,
-        origin_node: node()
-      }, scope: :cluster)
+      Arbor.Signals.emit(
+        :persistence,
+        type,
+        %{
+          collection: collection,
+          key: key,
+          origin_node: node()
+        },
+        scope: :cluster
+      )
     end
 
     :ok
@@ -348,11 +457,17 @@ defmodule Arbor.Persistence.BufferedStore do
         :cache_put ->
           # Reload from backend to update local ETS cache
           reload_key_from_backend(state, key)
-          Logger.debug("BufferedStore[#{state.collection}]: reloaded #{key} from remote #{data.origin_node}")
+
+          Logger.debug(
+            "BufferedStore[#{state.collection}]: reloaded #{key} from remote #{data.origin_node}"
+          )
 
         :cache_delete ->
           :ets.delete(state.table, key)
-          Logger.debug("BufferedStore[#{state.collection}]: deleted #{key} from remote #{data.origin_node}")
+
+          Logger.debug(
+            "BufferedStore[#{state.collection}]: deleted #{key} from remote #{data.origin_node}"
+          )
 
         _ ->
           :ok
@@ -371,7 +486,10 @@ defmodule Arbor.Persistence.BufferedStore do
     :ets.delete(table, key)
   end
 
-  defp reload_key_from_backend(%{backend: backend, backend_opts: backend_opts, collection: collection, table: table}, key) do
+  defp reload_key_from_backend(
+         %{backend: backend, backend_opts: backend_opts, collection: collection, table: table},
+         key
+       ) do
     opts = Keyword.merge(backend_opts, name: collection)
 
     case backend.get(key, opts) do
@@ -382,11 +500,19 @@ defmodule Arbor.Persistence.BufferedStore do
         :ets.delete(table, key)
 
       {:error, reason} ->
-        Logger.warning("BufferedStore[#{collection}]: failed to reload #{key}: #{inspect(reason)}")
+        Logger.warning(
+          "BufferedStore[#{collection}]: failed to reload #{key}: #{inspect(reason)}"
+        )
     end
   rescue
     e ->
       Logger.warning("BufferedStore[#{collection}]: reload error for #{key}: #{inspect(e)}")
+  catch
+    :exit, reason ->
+      Logger.warning("BufferedStore[#{collection}]: reload exit for #{key}: #{inspect(reason)}")
+
+    :throw, value ->
+      Logger.warning("BufferedStore[#{collection}]: reload throw for #{key}: #{inspect(value)}")
   end
 
   defp subscribe_to_distributed_signals(collection) do

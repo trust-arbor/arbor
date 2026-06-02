@@ -248,10 +248,7 @@ defmodule Arbor.Persistence.BufferedStoreTest do
       # Start BufferedStore — should load from backend
       start_supervised!(
         {BufferedStore,
-         name: name,
-         backend: MemoryBackend,
-         write_mode: :sync,
-         collection: to_string(name)}
+         name: name, backend: MemoryBackend, write_mode: :sync, collection: to_string(name)}
       )
 
       # Should be available via ETS immediately
@@ -266,9 +263,7 @@ defmodule Arbor.Persistence.BufferedStoreTest do
 
       start_supervised!(
         {BufferedStore,
-         name: name,
-         backend: Arbor.Persistence.TestBackends.FailingStore,
-         write_mode: :sync}
+         name: name, backend: Arbor.Persistence.TestBackends.FailingStore, write_mode: :sync}
       )
 
       # Store works in ETS-only mode
@@ -283,9 +278,7 @@ defmodule Arbor.Persistence.BufferedStoreTest do
 
       start_supervised!(
         {BufferedStore,
-         name: name,
-         backend: Arbor.Persistence.TestBackends.FailingStore,
-         write_mode: :sync}
+         name: name, backend: Arbor.Persistence.TestBackends.FailingStore, write_mode: :sync}
       )
 
       record = Record.new("key1", %{"v" => 1})
@@ -306,10 +299,7 @@ defmodule Arbor.Persistence.BufferedStoreTest do
 
       start_supervised!(
         {BufferedStore,
-         name: name,
-         backend: MemoryBackend,
-         write_mode: :async,
-         collection: to_string(name)}
+         name: name, backend: MemoryBackend, write_mode: :async, collection: to_string(name)}
       )
 
       record = Record.new("key1", %{"v" => 1})
@@ -322,6 +312,165 @@ defmodule Arbor.Persistence.BufferedStoreTest do
       Process.sleep(50)
       backend_data = Agent.get(backend_agent, & &1)
       assert Map.has_key?(backend_data, "key1")
+    end
+  end
+
+  # ────────────────────────────────────────────────────────────────────────
+  # Phase 1 resilience regression: BufferedStore must not crash when the
+  # backend exits, throws, or raises during init / read / write.
+  #
+  # Before this fix, the `rescue` blocks caught Elixir exceptions but not
+  # :exit signals — so when the Ecto Repo wasn't started or the Sandbox
+  # wasn't checked out, BufferedStore init crashed (and any non-database
+  # test using a BufferedStore that happened to be configured for Postgres
+  # would fail with a cascading error). The fix adds matching `catch :exit`
+  # and `catch :throw` clauses so the documented contract
+  # ("backend failure → start empty") actually holds for the failure mode
+  # that bites in practice.
+  #
+  # See: .arbor/roadmap/2-planned/buffered-store-test-infrastructure.md
+  # ────────────────────────────────────────────────────────────────────────
+
+  defmodule CrashingBackend do
+    @moduledoc false
+    # A Store backend that exits on every call. Simulates the Repo-not-started
+    # / Sandbox-not-checked-out failure mode that crashes through `rescue`.
+
+    @behaviour Arbor.Contracts.Persistence.Store
+
+    @impl true
+    def put(_key, _value, _opts), do: exit(:simulated_backend_unavailable)
+
+    @impl true
+    def get(_key, _opts), do: exit(:simulated_backend_unavailable)
+
+    @impl true
+    def delete(_key, _opts), do: exit(:simulated_backend_unavailable)
+
+    @impl true
+    def list(_opts), do: exit(:simulated_backend_unavailable)
+
+    @impl true
+    def exists?(_key, _opts), do: exit(:simulated_backend_unavailable)
+
+    @impl true
+    def query(_filter, _opts), do: exit(:simulated_backend_unavailable)
+
+    @impl true
+    def count(_filter, _opts), do: exit(:simulated_backend_unavailable)
+
+    @impl true
+    def aggregate(_filter, _field, _op, _opts), do: exit(:simulated_backend_unavailable)
+  end
+
+  describe "resilience regression: backend exits/throws don't crash the store" do
+    test "init survives a backend whose list/1 exits" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_crash_init_#{System.unique_integer([:positive])}"
+
+      # Without the fix this start_supervised! call returns {:error, ...}
+      # because BufferedStore init/1 crashes when load_from_backend's
+      # unrescued :exit propagates. With the fix it starts cleanly.
+      assert {:ok, pid} =
+               start_supervised(
+                 {BufferedStore,
+                  name: name, backend: CrashingBackend, collection: to_string(name)},
+                 id: name
+               )
+
+      assert is_pid(pid) and Process.alive?(pid),
+             """
+             RESILIENCE REGRESSION: BufferedStore did not start with a
+             backend whose list/1 exits during init. This is the exact
+             failure mode the planned doc identified — an Ecto Repo
+             that's not started, or a Sandbox not checked out, signals
+             via :exit (not via a raised exception), and without a
+             matching catch clause it crashes init/1.
+
+             See: .arbor/roadmap/2-planned/buffered-store-test-infrastructure.md
+             """
+
+      # ETS is reachable (the moduledoc contract: "start empty").
+      assert {:ok, []} = BufferedStore.list(name: name)
+    end
+
+    test "sync put survives a backend whose put/3 exits" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_crash_put_#{System.unique_integer([:positive])}"
+
+      {:ok, _pid} =
+        start_supervised(
+          {BufferedStore,
+           name: name, backend: CrashingBackend, write_mode: :sync, collection: to_string(name)},
+          id: name
+        )
+
+      record = Record.new("key1", %{"v" => 1})
+
+      # Without the fix, the backend's :exit propagates through the
+      # sync put path and crashes the BufferedStore GenServer (so this
+      # call would either crash the calling test process or never return).
+      assert :ok = BufferedStore.put("key1", record, name: name)
+
+      # ETS got the write even though the backend didn't.
+      assert {:ok, ^record} = BufferedStore.get("key1", name: name)
+    end
+
+    test "sync delete survives a backend whose delete/2 exits" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_crash_delete_#{System.unique_integer([:positive])}"
+
+      {:ok, _pid} =
+        start_supervised(
+          {BufferedStore,
+           name: name, backend: CrashingBackend, write_mode: :sync, collection: to_string(name)},
+          id: name
+        )
+
+      # Pre-seed ETS via the public API — the previous test proves sync
+      # put doesn't crash.
+      :ok = BufferedStore.put("key1", Record.new("key1", %{}), name: name)
+      assert :ok = BufferedStore.delete("key1", name: name)
+      assert {:error, :not_found} = BufferedStore.get("key1", name: name)
+    end
+  end
+
+  describe "backend_healthy?/1" do
+    test "returns true with no backend (ETS-only)" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_health_nil_#{System.unique_integer([:positive])}"
+
+      start_supervised!({BufferedStore, name: name}, id: name)
+
+      assert BufferedStore.backend_healthy?(name: name) == true
+    end
+
+    test "returns true with a reachable backend" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_health_ok_#{System.unique_integer([:positive])}"
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      backend_agent = String.to_atom("memory_backend_#{name}")
+
+      start_supervised!({MemoryBackend, backend_agent})
+
+      start_supervised!(
+        {BufferedStore, name: name, backend: MemoryBackend, collection: to_string(name)},
+        id: name
+      )
+
+      assert BufferedStore.backend_healthy?(name: name) == true
+    end
+
+    test "returns false with a backend whose list/1 exits" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"buffered_health_crash_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {BufferedStore, name: name, backend: CrashingBackend, collection: to_string(name)},
+        id: name
+      )
+
+      assert BufferedStore.backend_healthy?(name: name) == false
     end
   end
 end
