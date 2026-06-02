@@ -35,6 +35,10 @@ defmodule Arbor.LLM.MixProject do
       {:arbor_contracts, in_umbrella: true},
       {:arbor_common, in_umbrella: true},
       {:req, "~> 0.5"},
+      # Session 3: req_llm is the transport layer the generic
+      # Arbor.LLM.Adapter.ReqLLM dispatches to. Provider routing happens
+      # inside req_llm via the model_spec string.
+      {:req_llm, "~> 1.6", override: true},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
