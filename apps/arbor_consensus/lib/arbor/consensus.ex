@@ -165,7 +165,30 @@ defmodule Arbor.Consensus do
     # Ensure topic is set (default :general if missing)
     attrs = Map.put_new(attrs, :topic, :general)
     attrs = Map.put_new(attrs, :mode, :decision)
-    Coordinator.submit(attrs, opts)
+
+    # OQ-5: when strict_propose_caller is true (production default), require an
+    # explicit :caller_id and route through authorize_propose/3 so callers
+    # can't accidentally bypass the gate by going through this facade.
+    # When the flag is false (dev/test default), preserve the existing
+    # no-auth shape — system-internal callers that legitimately need to
+    # submit without an authenticated caller (recovery flows, internal
+    # cleanup) keep working unchanged.
+    case Keyword.fetch(opts, :caller_id) do
+      {:ok, caller_id} when is_binary(caller_id) ->
+        authorize_propose(caller_id, attrs, Keyword.delete(opts, :caller_id))
+
+      _ ->
+        if strict_propose_caller?() do
+          {:error, {:unauthorized, :caller_id_required}}
+        else
+          Coordinator.submit(attrs, opts)
+        end
+    end
+  end
+
+  @doc false
+  def strict_propose_caller? do
+    Application.get_env(:arbor_consensus, :strict_propose_caller, Mix.env() == :prod)
   end
 
   @doc """
