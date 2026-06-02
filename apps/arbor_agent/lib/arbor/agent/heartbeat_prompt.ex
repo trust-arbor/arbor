@@ -39,6 +39,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
     :self_knowledge,
     :conversation,
     :goals,
+    :active_skills,
     :tools,
     :proposals,
     :patterns,
@@ -73,6 +74,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
       {:self_knowledge, :wrap, fn -> self_knowledge_section(state) end},
       {:conversation, :wrap, fn -> conversation_section(state) end},
       {:goals, :wrap, fn -> goals_section(state, mode) end},
+      {:active_skills, :wrap, fn -> active_skills_section(state) end},
       {:tools, :raw, fn -> tools_section(state) end},
       {:proposals, :wrap, fn -> proposals_section(state) end},
       {:patterns, :wrap, fn -> patterns_section(state) end},
@@ -466,6 +468,72 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   defp humanize_age(s) when s < 60, do: "#{s}s ago"
   defp humanize_age(s) when s < 3600, do: "#{div(s, 60)}m ago"
   defp humanize_age(s), do: "#{div(s, 3600)}h ago"
+
+  # Active skills section — renders skills the agent has activated via
+  # `Skill.Activate` into the user prompt. Skills are stored in working
+  # memory by Activate; without this section they never reach the LLM
+  # (write-only from the prompt's perspective). Marked :wrap in
+  # build_prompt so contents land inside the nonce envelope.
+  defp active_skills_section(state) do
+    agent_id = state[:id] || state[:agent_id]
+
+    # Direct override via state[:active_skills] lets callers (tests, custom
+    # builders) inject without round-tripping working memory. Otherwise
+    # fetch via the Memory facade.
+    skills =
+      case state[:active_skills] do
+        list when is_list(list) -> list
+        _ -> fetch_active_skills(agent_id)
+      end
+
+    case skills do
+      [] -> nil
+      nil -> nil
+      list -> render_active_skills(list)
+    end
+  end
+
+  defp fetch_active_skills(nil), do: []
+
+  defp fetch_active_skills(agent_id) do
+    safe_call(fn ->
+      case Arbor.Memory.get_working_memory(agent_id) do
+        %{active_skills: skills} when is_list(skills) -> skills
+        _ -> []
+      end
+    end) || []
+  end
+
+  defp render_active_skills(skills) do
+    body =
+      skills
+      |> Enum.map(&render_active_skill/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join("\n\n")
+
+    if body == "" do
+      nil
+    else
+      """
+      ## Active Skills
+
+      Skills currently activated for this session. Apply them to your work this turn.
+
+      #{body}
+      """
+      |> String.trim_trailing()
+    end
+  end
+
+  defp render_active_skill(skill) do
+    name = Map.get(skill, :name) || "(unnamed)"
+    desc = Map.get(skill, :description, "")
+    skill_body = Map.get(skill, :body, "")
+
+    desc_line = if desc != "", do: desc <> "\n\n", else: ""
+
+    "### #{name}\n#{desc_line}#{skill_body}" |> String.trim_trailing()
+  end
 
   defp tools_section(state) do
     agent_id = state[:id] || state[:agent_id]
