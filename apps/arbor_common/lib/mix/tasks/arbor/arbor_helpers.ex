@@ -15,13 +15,19 @@ defmodule Mix.Tasks.Arbor.Helpers do
   - `node_id` is a persistent 4-hex-char identifier stored in `~/.arbor/node_id`
   - `host` is determined by (in priority order):
     1. `ARBOR_NODE_HOST` env var (explicit override)
-    2. WireGuard VPN IP (auto-detected from wg0/utun interfaces)
-    3. `127.0.0.1` (localhost fallback, no clustering)
+    2. First local IPv4 matching `ARBOR_CLUSTER_SUBNETS` (comma-separated CIDRs)
+    3. WireGuard VPN IP (auto-detected from wg0/utun interfaces)
+    4. `127.0.0.1` (localhost fallback, no clustering)
 
   This means:
   - Zero-config local dev works everywhere (any OS, any network)
-  - WireGuard VPN enables automatic clustering across machines
-  - Node identity is stable across restarts and network changes
+  - `ARBOR_CLUSTER_SUBNETS=10.42.42.0/24,10.42.43.0/24` lets the operator pin
+    the cluster's address ranges; mix tasks pick the right local IP on any
+    interface (en0, wifi, utun) without further input. List order is priority:
+    put LAN before VPN so the direct path wins when both are present.
+  - WireGuard VPN auto-detect remains as a zero-config fallback for the legacy
+    case where the cluster is *only* on wg/utun interfaces.
+  - Node identity is stable across restarts and network changes.
   """
 
   @node_base_name "arbor_dev"
@@ -141,13 +147,17 @@ defmodule Mix.Tasks.Arbor.Helpers do
 
   Priority:
   1. `ARBOR_NODE_HOST` env var (explicit override for known-IP scenarios)
-  2. WireGuard VPN IP (auto-detected, enables clustering)
-  3. `127.0.0.1` (localhost fallback, no clustering)
+  2. First local IPv4 matching one of `ARBOR_CLUSTER_SUBNETS` (in list order)
+  3. WireGuard VPN IP (auto-detected utun/wg* interface; legacy fallback)
+  4. `127.0.0.1` (localhost fallback, no clustering)
   """
   def node_hostname do
     cond do
       host = System.get_env("ARBOR_NODE_HOST") ->
         host
+
+      ip = detect_ip_in_cluster_subnets() ->
+        ip
 
       wg_ip = detect_wireguard_ip() ->
         wg_ip
@@ -360,4 +370,89 @@ defmodule Mix.Tasks.Arbor.Helpers do
       _ -> nil
     end
   end
+
+  # ─── Cluster-subnet IP detection ───────────────────────────────────────────
+  #
+  # Reads ARBOR_CLUSTER_SUBNETS (comma-separated CIDRs), scans local IPv4
+  # addresses via :inet.getifaddrs/0, returns the first IP matching a subnet
+  # in declaration order. Cross-platform — no shelling out to ifconfig.
+
+  @doc """
+  Returns a local IPv4 string in one of the configured cluster subnets, or nil.
+
+  Reads `ARBOR_CLUSTER_SUBNETS` (e.g. `"10.42.42.0/24,10.42.43.0/24"`). Returns
+  nil if the env var is unset or empty, or if no local interface matches.
+  """
+  def detect_ip_in_cluster_subnets do
+    case parse_cluster_subnets() do
+      [] ->
+        nil
+
+      subnets ->
+        ips = local_ipv4_addresses()
+
+        Enum.find_value(subnets, fn subnet ->
+          Enum.find_value(ips, fn ip ->
+            if ip_in_subnet?(ip, subnet), do: format_ipv4(ip)
+          end)
+        end)
+    end
+  end
+
+  defp parse_cluster_subnets do
+    case System.get_env("ARBOR_CLUSTER_SUBNETS") do
+      nil ->
+        []
+
+      raw ->
+        raw
+        |> String.split(",", trim: true)
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.map(&parse_cidr/1)
+        |> Enum.reject(&is_nil/1)
+    end
+  end
+
+  defp parse_cidr(cidr) do
+    with [base, prefix] <- String.split(cidr, "/", parts: 2),
+         {:ok, addr} <- :inet.parse_ipv4_address(String.to_charlist(base)),
+         {prefix_int, ""} <- Integer.parse(prefix),
+         true <- prefix_int in 0..32 do
+      {addr, prefix_int}
+    else
+      _ -> nil
+    end
+  end
+
+  defp local_ipv4_addresses do
+    case :inet.getifaddrs() do
+      {:ok, ifaces} ->
+        for {_iface, props} <- ifaces,
+            {:addr, addr} <- props,
+            tuple_size(addr) == 4,
+            addr != {127, 0, 0, 1},
+            do: addr
+
+      _ ->
+        []
+    end
+  end
+
+  defp ip_in_subnet?({a, b, c, d}, {{ba, bb, bc, bd}, prefix}) do
+    import Bitwise, only: [band: 2, bnot: 1, bsl: 2]
+    ip_int = bsl(a, 24) + bsl(b, 16) + bsl(c, 8) + d
+    base_int = bsl(ba, 24) + bsl(bb, 16) + bsl(bc, 8) + bd
+
+    mask =
+      if prefix == 0 do
+        0
+      else
+        band(bnot(bsl(1, 32 - prefix) - 1), 0xFFFFFFFF)
+      end
+
+    band(ip_int, mask) == band(base_int, mask)
+  end
+
+  defp format_ipv4({a, b, c, d}), do: "#{a}.#{b}.#{c}.#{d}"
 end
