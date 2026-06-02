@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopSigningTest do
+defmodule Arbor.LLM.ToolLoopSigningTest do
   @moduledoc """
   Tests for signer threading through the ToolLoop.
 

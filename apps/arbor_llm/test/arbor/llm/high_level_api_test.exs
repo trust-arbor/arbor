@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
+defmodule Arbor.LLM.HighLevelApiTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 

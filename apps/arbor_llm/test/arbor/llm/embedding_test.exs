@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.EmbeddingTest do
+defmodule Arbor.LLM.EmbeddingTest do
   use ExUnit.Case, async: true
 
   alias Arbor.LLM.Client

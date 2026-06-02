@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
+defmodule Arbor.LLM.ToolLoopTest do
   use ExUnit.Case, async: true
 
   alias Arbor.LLM.Client

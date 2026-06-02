@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.Conformance88Test do
+defmodule Arbor.LLM.Conformance88Test do
   use ExUnit.Case, async: true
   @moduletag :fast
 
