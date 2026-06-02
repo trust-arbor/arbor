@@ -29,6 +29,8 @@ defmodule Arbor.LLM.Plugs.Record do
   alias Arbor.LLM.Call
   alias Arbor.LLM.Plugs.Fixture
 
+  def call(%Call{halted: true} = call), do: call
+
   def call(%Call{result: result, metadata: metadata} = call)
       when not is_nil(result) do
     if Map.has_key?(metadata, :replayed_from) do

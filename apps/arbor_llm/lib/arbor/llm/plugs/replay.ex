@@ -28,6 +28,8 @@ defmodule Arbor.LLM.Plugs.Replay do
   alias Arbor.LLM.Call
   alias Arbor.LLM.Plugs.Fixture
 
+  def call(%Call{halted: true} = call), do: call
+
   def call(%Call{result: nil} = call) do
     case Fixture.load(call) do
       {:ok, response, recorded_at} ->

@@ -21,33 +21,39 @@ defmodule Arbor.LLM.Plug do
 
   ## Defining a plug
 
-  Use `use Arbor.LLM.Plug` to inherit the halted-passthrough clause —
-  any plug that doesn't want to act when an upstream plug has set
-  `halted: true` just doesn't have to think about it:
+  Use `use Arbor.LLM.Plug` to declare the behaviour. If your plug
+  shouldn't run on halted calls (most plugs), pattern-match
+  `halted: true` as the first clause and pass through:
 
       defmodule Arbor.LLM.Plugs.MyPlug do
         use Arbor.LLM.Plug
         alias Arbor.LLM.Call
 
-        # This clause only runs when halted: false (the use-injected
-        # clause matches halted: true first and passes through).
+        def call(%Call{halted: true} = call), do: call
+
         def call(%Call{} = call) do
           # ... transform the call ...
           call
         end
       end
 
-  Plugs that should run even on halted calls (telemetry, logging)
-  can override the halted clause:
+  Plugs that should run regardless of halted state (telemetry,
+  logging, post-call observability) just don't add the halted clause:
 
-      defmodule Arbor.LLM.Plugs.AlwaysRun do
-        @behaviour Arbor.LLM.Plug
+      defmodule Arbor.LLM.Plugs.Telemetry do
+        use Arbor.LLM.Plug
 
         def call(%Arbor.LLM.Call{} = call) do
           # runs regardless of halted state
           call
         end
       end
+
+  Note: `Arbor.LLM.Pipeline.through/2` does NOT short-circuit
+  halted calls — `halted` is a per-plug signal. Mutating plugs
+  match it and pass through; observability plugs ignore it and
+  fire. This lets a single pipeline serve both "do the work" and
+  "warn me about how this call resolved" without two passes.
 
   ## Composing a pipeline
 
@@ -77,14 +83,6 @@ defmodule Arbor.LLM.Plug do
   defmacro __using__(_opts) do
     quote do
       @behaviour Arbor.LLM.Plug
-
-      # Halted calls pass through this plug unchanged. The plug's
-      # actual `call/1` clauses below only see non-halted calls.
-      # Override this clause explicitly if you want to run on halted
-      # calls (e.g. telemetry, post-call observability).
-      def call(%Arbor.LLM.Call{halted: true} = call), do: call
-
-      defoverridable call: 1
     end
   end
 end
