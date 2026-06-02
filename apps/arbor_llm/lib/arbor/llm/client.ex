@@ -53,7 +53,10 @@ defmodule Arbor.LLM.Client do
   # compile-time analysis so arbor_llm doesn't compile-time-depend on
   # arbor_orchestrator (which would cycle).
   @legacy_adapter_prefix [:Arbor, :Orchestrator, :UnifiedLLM, :Adapters]
-  @legacy_adapter_acp Module.concat(@legacy_adapter_prefix ++ [:Acp])
+  # ACP adapter lives in arbor_ai (which depends on arbor_llm) — held
+  # as Module.concat atom-list to hide the cross-app reference from
+  # compile-time analysis.
+  @acp_adapter Module.concat([:Arbor, :AI, :LLM, :Adapter, :Acp])
   @legacy_adapter_anthropic Module.concat(@legacy_adapter_prefix ++ [:Anthropic])
   @legacy_adapter_gemini Module.concat(@legacy_adapter_prefix ++ [:Gemini])
   @legacy_adapter_lm_studio Module.concat(@legacy_adapter_prefix ++ [:LMStudio])
@@ -893,7 +896,7 @@ defmodule Arbor.LLM.Client do
     # ACP runtime is a CLI subprocess, not an LLM transport — req_llm
     # doesn't handle it. Keep the legacy adapter regardless of flag.
     if Keyword.get(opts, :discover_acp, true) do
-      maybe_add_acp(adapters, "acp", @legacy_adapter_acp)
+      maybe_add_acp(adapters, "acp", @acp_adapter)
     else
       adapters
     end

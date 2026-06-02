@@ -149,7 +149,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
   @acp_agent_priority ~w(claude gemini codex goose aider opencode cline)
 
   defp select_best_model(:acp, :acp) do
-    acp_mod = Arbor.Orchestrator.UnifiedLLM.Adapters.Acp
+    acp_mod = Arbor.AI.LLM.Adapter.Acp
 
     agents =
       if Code.ensure_loaded?(acp_mod) and function_exported?(acp_mod, :detected_agents, 0) do
@@ -305,7 +305,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
   end
 
   defp print_acp_agents do
-    acp_mod = Arbor.Orchestrator.UnifiedLLM.Adapters.Acp
+    acp_mod = Arbor.AI.LLM.Adapter.Acp
 
     agents =
       if Code.ensure_loaded?(acp_mod) and function_exported?(acp_mod, :detected_agents, 0) do
