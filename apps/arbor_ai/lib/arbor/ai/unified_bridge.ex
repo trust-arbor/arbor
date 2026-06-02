@@ -22,7 +22,7 @@ defmodule Arbor.AI.UnifiedBridge do
     # API providers
     anthropic: "anthropic",
     openai: "openai",
-    gemini: "gemini",
+    gemini: "google",
     openrouter: "openrouter",
     xai: "xai",
     zai: "zai",

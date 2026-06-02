@@ -48,9 +48,18 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       assert {:ok, "anthropic:claude-3-5-sonnet"} = Adapter.build_model_spec(req)
     end
 
-    test "translates Arbor 'gemini' to req_llm 'google'" do
-      req = %Request{provider: "gemini", model: "gemini-2.0-flash"}
+    test "Arbor uses req_llm names directly — 'google' is the gemini provider" do
+      # Pre-Session-6.6 Arbor mapped historical "gemini" → ":google".
+      # Session 6.6 dropped that aliasing; callers now use the req_llm
+      # name "google" directly. The old historical name is no longer
+      # recognized.
+      req = %Request{provider: "google", model: "gemini-2.0-flash"}
       assert {:ok, "google:gemini-2.0-flash"} = Adapter.build_model_spec(req)
+
+      historical = %Request{provider: "gemini", model: "gemini-2.0-flash"}
+      assert {:ok, "gemini:gemini-2.0-flash"} = Adapter.build_model_spec(historical)
+      # "gemini" passes through as an unknown provider — req_llm will
+      # then return :unknown_provider at dispatch time.
     end
 
     test "local-LM Arbor providers return an LLMDB.Model struct (bypasses catalog lookup)" do

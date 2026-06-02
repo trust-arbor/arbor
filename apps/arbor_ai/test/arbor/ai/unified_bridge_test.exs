@@ -38,7 +38,10 @@ defmodule Arbor.AI.UnifiedBridgeTest do
     test "maps API provider atoms to orchestrator strings" do
       assert UnifiedBridge.resolve_provider(provider: :anthropic) == "anthropic"
       assert UnifiedBridge.resolve_provider(provider: :openai) == "openai"
-      assert UnifiedBridge.resolve_provider(provider: :gemini) == "gemini"
+      # Session 6.6: the gemini backend atom maps to the "google"
+      # provider string (req_llm's transport name) — Arbor no longer
+      # carries its historical "gemini" alias.
+      assert UnifiedBridge.resolve_provider(provider: :gemini) == "google"
       assert UnifiedBridge.resolve_provider(provider: :openrouter) == "openrouter"
       assert UnifiedBridge.resolve_provider(provider: :xai) == "xai"
       assert UnifiedBridge.resolve_provider(provider: :zai) == "zai"

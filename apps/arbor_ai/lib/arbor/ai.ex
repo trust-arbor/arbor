@@ -1042,7 +1042,7 @@ defmodule Arbor.AI do
 
   defp embedding_backend_to_provider(:anthropic), do: "anthropic"
   defp embedding_backend_to_provider(:openai), do: "openai"
-  defp embedding_backend_to_provider(:gemini), do: "gemini"
+  defp embedding_backend_to_provider(:gemini), do: "google"
   defp embedding_backend_to_provider(:lmstudio), do: "lm_studio"
   defp embedding_backend_to_provider(:ollama), do: "ollama"
   defp embedding_backend_to_provider(other), do: Atom.to_string(other)

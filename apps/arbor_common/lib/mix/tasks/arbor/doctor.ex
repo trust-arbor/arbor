@@ -40,7 +40,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
   @provider_priority [
     {"anthropic", :anthropic, :anthropic},
     {"openai", :openai, :openai},
-    {"gemini", :gemini, :google},
+    {"google", :gemini, :google},
     {"xai", :xai, :xai},
     {"open_router", :openrouter, :openrouter},
     {"acp", :acp, :acp},
