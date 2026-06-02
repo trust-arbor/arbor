@@ -13,12 +13,12 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   Azure, OpenRouter, the cloud usuals, and OpenAI-compatible
   endpoints behind `base_url`.
 
-  ## Session 3 status
+  ## Session 4 status
 
-  This module ships as a standalone, fully-tested adapter that
-  implements the `Arbor.LLM.ProviderAdapter` behaviour. **It is NOT
-  yet wired into `Arbor.LLM.Client` routing** — the existing
-  per-provider adapters still handle live traffic. Session 4 will:
+  This module reached capability parity with the per-provider adapters
+  it will replace. **It is NOT yet wired into `Arbor.LLM.Client`
+  routing** — the existing per-provider adapters still handle live
+  traffic. The next session will:
 
     1. Teach `Client.discover_env_adapters/1` to map provider strings
        to this adapter as the default when no per-provider override
@@ -26,7 +26,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     2. Delete the 11 cloud/local adapter modules and
        `openai_compatible.ex` from arbor_orchestrator.
 
-  Until then, you can exercise this adapter directly:
+  Until then, exercise this adapter directly:
 
       iex> req = %Arbor.LLM.Request{provider: "anthropic", model: "claude-3-5-sonnet", messages: [...]}
       iex> Arbor.LLM.Adapter.ReqLLM.complete(req, [])
@@ -39,17 +39,16 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   | HTTP, auth, retry, SSE parsing | req_llm |
   | `base_url:` override (Ollama, LM Studio, vLLM) | passed through `opts` |
   | `provider_options:` passthrough (`num_ctx`, `repeat_penalty`, etc.) | passed through `opts` |
+  | Tool calls (encode + decode) | `translate_tools/1` + `extract_tool_call_parts/1` here |
+  | Streaming (`stream/2`) | `ReqLLM.stream_text/3` + `translate_stream_chunk/1` |
+  | Embeddings (`embed/3`) | `ReqLLM.Embedding.embed/3` |
   | `reasoning_content` field extraction | `Arbor.LLM.PostProcessors` |
   | Wrapped-JSON envelope extraction (gpt-oss-heretic et al) | `Arbor.LLM.PostProcessors` |
   | `Arbor.LLM.Request` ↔ `ReqLLM.Message` translation | `translate_messages/1` here |
   | `ReqLLM.Response` → `Arbor.LLM.Response` translation | `translate_response/2` here |
 
-  ## Streaming and embeddings
-
-  Streaming and embeddings are stubbed `{:error, :not_implemented}`
-  in Session 3 — they land in a follow-up session alongside the
-  per-provider-adapter deletion. The existing per-provider adapters
-  continue to serve streaming and embedding requests until then.
+  Structured output (`Arbor.LLM.generate_object/1`) is built on top of
+  `complete/2` at the facade layer, so it works for free.
   """
 
   @behaviour Arbor.LLM.ProviderAdapter
@@ -72,6 +71,12 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   @impl true
   def runtime_contract do
+    # The generic adapter inherits whatever capabilities req_llm's
+    # provider for the model_spec actually supports. We advertise the
+    # union of what every provider req_llm currently knows about
+    # supports — callers that need provider-specific capability checks
+    # should consult `Arbor.LLM.ProviderCatalog` for the resolved
+    # capability map per provider, not this aggregate.
     {:ok, contract} =
       RuntimeContract.new(
         provider: @sentinel_provider,
@@ -79,10 +84,12 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
         type: :api,
         capabilities:
           Capabilities.new(
-            streaming: false,
-            tool_calls: false,
+            streaming: true,
+            tool_calls: true,
             thinking: true,
-            vision: false
+            vision: true,
+            structured_output: true,
+            embeddings: true
           )
       )
 
@@ -101,10 +108,123 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   end
 
   @impl true
-  def stream(%Request{} = _request, _opts), do: {:error, :not_implemented}
+  @spec stream(Request.t(), keyword()) :: Enumerable.t() | {:error, term()}
+  def stream(%Request{} = request, opts \\ []) do
+    with {:ok, model_spec} <- build_model_spec(request),
+         messages <- translate_messages(request.messages),
+         req_opts <- build_req_opts(request, opts),
+         {:ok, %ReqLLM.StreamResponse{stream: stream}} <-
+           call_req_llm_stream(model_spec, messages, req_opts) do
+      Stream.map(stream, &translate_stream_chunk/1)
+    end
+  end
 
   @impl true
-  def embed(_texts, _model, _opts), do: {:error, :not_implemented}
+  @spec embed(texts :: [String.t()], model :: String.t(), opts :: keyword()) ::
+          {:ok,
+           %{embeddings: [[float()]], model: String.t(), usage: map(), dimensions: pos_integer()}}
+          | {:error, term()}
+  def embed(texts, model, opts) when is_list(texts) and is_binary(model) do
+    provider = Keyword.get(opts, :provider) || infer_provider_for_embedding(model)
+
+    cond do
+      provider == nil ->
+        {:error, {:invalid_request, :missing_provider_for_embedding}}
+
+      texts == [] ->
+        {:error, {:invalid_request, :empty_input}}
+
+      true ->
+        do_embed(provider <> ":" <> model, texts, opts)
+    end
+  end
+
+  defp do_embed(model_spec, texts, opts) do
+    req_opts = build_embed_opts(opts)
+
+    case call_req_llm_embed(model_spec, texts, req_opts) do
+      {:ok, embeddings, usage} when is_list(embeddings) ->
+        {:ok,
+         %{
+           embeddings: embeddings,
+           model: model_spec,
+           usage: usage || %{},
+           dimensions: dimensions_of(embeddings)
+         }}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp build_embed_opts(opts) do
+    []
+    |> maybe_merge(:base_url, Keyword.get(opts, :base_url))
+    |> maybe_merge(:provider_options, Keyword.get(opts, :provider_options))
+    |> maybe_merge(:dimensions, Keyword.get(opts, :dimensions))
+  end
+
+  defp call_req_llm_embed(model_spec, texts, opts) do
+    case ReqLLM.Embedding.embed(model_spec, texts, opts) do
+      {:ok, %{embeddings: embeddings, usage: usage}} -> {:ok, embeddings, usage}
+      {:ok, %{embedding: embedding, usage: usage}} -> {:ok, [embedding], usage}
+      {:ok, list} when is_list(list) -> {:ok, list, %{}}
+      {:error, _} = err -> err
+      other -> {:error, {:unexpected_embed_response, inspect(other)}}
+    end
+  rescue
+    e -> {:error, translate_exception(e)}
+  catch
+    :exit, reason -> {:error, translate_exit(reason)}
+  end
+
+  defp dimensions_of([first | _]) when is_list(first), do: length(first)
+  defp dimensions_of(_), do: 0
+
+  # The embedding endpoint requires a provider, but `Arbor.LLM.Request`
+  # isn't used here (the ProviderAdapter behaviour passes texts + model
+  # directly). For OpenAI-compatible local servers, callers should pass
+  # `provider:` in opts; for cloud providers, the model_id often
+  # encodes the provider (e.g. `voyage-large-2`) — leave that to a
+  # future improvement and require explicit `provider:` for now.
+  defp infer_provider_for_embedding(_model), do: nil
+
+  defp call_req_llm_stream(model_spec, messages, opts) do
+    ReqLLM.stream_text(model_spec, messages, opts)
+  rescue
+    e -> {:error, translate_exception(e)}
+  catch
+    :exit, reason -> {:error, translate_exit(reason)}
+  end
+
+  # ── Streaming translation ──────────────────────────────────────────
+
+  @doc """
+  Translate a single `%ReqLLM.StreamChunk{}` into an
+  `%Arbor.LLM.StreamEvent{}`. Public for testability.
+  """
+  @spec translate_stream_chunk(ReqLLM.StreamChunk.t()) :: Arbor.LLM.StreamEvent.t()
+  def translate_stream_chunk(%ReqLLM.StreamChunk{} = chunk) do
+    case chunk.type do
+      :content ->
+        %Arbor.LLM.StreamEvent{type: :delta, data: %{text: chunk.text || ""}}
+
+      :thinking ->
+        %Arbor.LLM.StreamEvent{type: :delta, data: %{thinking: chunk.text || ""}}
+
+      :tool_call ->
+        %Arbor.LLM.StreamEvent{
+          type: :tool_call,
+          data: %{name: chunk.name, arguments: chunk.arguments || %{}}
+        }
+
+      :meta ->
+        %Arbor.LLM.StreamEvent{type: :step_finish, data: chunk.metadata || %{}}
+
+      _ ->
+        %Arbor.LLM.StreamEvent{type: :delta, data: %{raw: chunk}}
+    end
+  end
 
   # ── Translation: Arbor → ReqLLM ─────────────────────────────────────
 
@@ -175,7 +295,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   @doc """
   Build the keyword opts req_llm accepts.
 
-  We forward the standard generation knobs and any caller-supplied
+  We forward the standard generation knobs (temperature, max_tokens,
+  reasoning_effort), the translated tools list, and any caller-supplied
   `base_url:` / `provider_options:` overrides. Public for testability.
   """
   @spec build_req_opts(Request.t(), keyword()) :: keyword()
@@ -192,11 +313,60 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
       |> maybe_put(:max_tokens, request.max_tokens)
       |> maybe_put(:reasoning_effort, request.reasoning_effort)
       |> maybe_put(:provider_options, request_provider_opts)
+      |> maybe_put(:tools, translate_tools(request.tools))
+      |> maybe_put(:tool_choice, request.tool_choice)
 
     base
     |> maybe_merge(:base_url, Keyword.get(opts, :base_url))
     |> maybe_merge(:provider_options, Keyword.get(opts, :provider_options))
   end
+
+  @doc """
+  Translate Arbor tool maps (OpenAI nested format) into the
+  `%ReqLLM.Tool{}` struct list req_llm expects.
+
+  req_llm's per-provider `prepare_request` calls
+  `ReqLLM.Tool.to_schema/2` to convert each struct to provider-specific
+  shape (Anthropic input_schema, OpenAI function definition, etc.) —
+  passing raw maps bypasses that conversion and breaks tool use for
+  every provider except OpenAI chat-completions.
+
+  Callbacks are stubbed: req_llm never invokes them in the
+  request → response flow (tool execution happens upstream in our
+  `ToolLoop`), so a no-op `fn _ -> {:ok, %{}} end` keeps `Tool.new/1`
+  validation happy without affecting behavior. Public for testability.
+  """
+  @spec translate_tools([map()] | nil) :: [ReqLLM.Tool.t()] | nil
+  def translate_tools(nil), do: nil
+  def translate_tools([]), do: nil
+
+  def translate_tools(tools) when is_list(tools) do
+    tools
+    |> Enum.map(&translate_tool/1)
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> nil
+      list -> list
+    end
+  end
+
+  defp translate_tool(%{"type" => "function", "function" => function}) when is_map(function) do
+    name = function["name"]
+    description = function["description"] || ""
+    params = function["parameters"] || %{"type" => "object", "properties" => %{}}
+
+    case ReqLLM.Tool.new(
+           name: name,
+           description: description,
+           parameter_schema: params,
+           callback: fn _args -> {:ok, %{}} end
+         ) do
+      {:ok, tool} -> tool
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp translate_tool(_), do: nil
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
@@ -219,10 +389,18 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   @doc """
   Translate a successful `ReqLLM.Response` into `Arbor.LLM.Response`.
 
-  Runs `PostProcessors.parse_structured/1` against the assistant
-  message so any provider's response benefits from reasoning_content
-  extraction and wrapped-JSON envelope handling. Public for
-  testability.
+  The `content_parts` field is built in three layers:
+
+    1. **Tool calls** (if any) from `response.message.tool_calls` are
+       promoted to `kind: :tool_call` parts. These flow to the
+       orchestrator's `ToolLoop`, which dispatches them.
+    2. **Text content** runs through `PostProcessors.parse_structured/1`
+       so any provider's response benefits from reasoning_content
+       extraction and wrapped-JSON envelope handling.
+    3. Tool-call parts come first when present (matches how the
+       openai_compatible adapter today orders them); text parts append.
+
+  Public for testability.
   """
   @spec translate_response(ReqLLM.Response.t(), Request.t()) :: Response.t()
   def translate_response(%ReqLLM.Response{} = req_response, %Request{} = _request) do
@@ -235,11 +413,15 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
       "reasoning" => nil
     }
 
-    content_parts =
+    text_parts =
       case PostProcessors.parse_structured(msg_for_post) do
         nil -> [ContentPart.text(text)]
         parts -> parts
       end
+
+    tool_call_parts = extract_tool_call_parts(req_response)
+
+    content_parts = tool_call_parts ++ text_parts
 
     %Response{
       text: text,
@@ -250,6 +432,40 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
       raw: %{req_llm_response: req_response}
     }
   end
+
+  defp extract_tool_call_parts(%ReqLLM.Response{message: nil}), do: []
+
+  defp extract_tool_call_parts(%ReqLLM.Response{message: %ReqLLM.Message{tool_calls: nil}}),
+    do: []
+
+  defp extract_tool_call_parts(%ReqLLM.Response{message: %ReqLLM.Message{tool_calls: []}}), do: []
+
+  defp extract_tool_call_parts(%ReqLLM.Response{
+         message: %ReqLLM.Message{tool_calls: calls}
+       })
+       when is_list(calls) do
+    Enum.map(calls, &translate_tool_call/1)
+  end
+
+  defp translate_tool_call(%ReqLLM.ToolCall{id: id, function: function}) when is_map(function) do
+    name = function["name"] || function[:name] || ""
+    arguments = function["arguments"] || function[:arguments] || %{}
+    ContentPart.tool_call(id, name, arguments)
+  end
+
+  # ReqLLM provider may also emit ToolCall-shaped maps directly for
+  # protocols where the strict struct doesn't fit (e.g. some
+  # OpenAI-compat streaming flows). Handle the loose shape too so a
+  # provider quirk doesn't lose tool calls.
+  defp translate_tool_call(%{} = call) do
+    id = call[:id] || call["id"] || ""
+    function = call[:function] || call["function"] || %{}
+    name = function[:name] || function["name"] || ""
+    arguments = function[:arguments] || function["arguments"] || %{}
+    ContentPart.tool_call(id, name, arguments)
+  end
+
+  defp translate_tool_call(_), do: nil
 
   defp extract_reasoning_text(%ReqLLM.Response{message: nil}), do: nil
 
