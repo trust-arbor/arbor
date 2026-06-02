@@ -371,14 +371,17 @@ defmodule Arbor.Signals.Bus do
     if signal_restricted? do
       # Check if subscriber is authorized for this specific topic
       if MapSet.member?(sub.authorized_topics, signal_topic) do
-        maybe_decrypt_signal(signal)
+        maybe_decrypt_signal(signal, sub)
       else
         # Not authorized - don't deliver encrypted signals
         nil
       end
     else
-      # Not restricted - deliver as-is
-      signal
+      # OQ-7: even non-restricted signals may carry a channel-encrypted
+      # payload (the __channel_encrypted__ envelope). Pass the subscriber
+      # through so the channel branch can use the subscriber's identity
+      # for decryption authorization instead of the sender's.
+      maybe_decrypt_signal(signal, sub)
     end
   end
 
@@ -477,7 +480,7 @@ defmodule Arbor.Signals.Bus do
   end
 
   # Decrypt signal data for authorized subscribers
-  defp maybe_decrypt_signal(%Signal{category: category, data: data} = signal) do
+  defp maybe_decrypt_signal(%Signal{category: category, data: data} = signal, sub) do
     case data do
       %{__encrypted__: true, payload: encrypted_payload} ->
         try do
@@ -498,13 +501,25 @@ defmodule Arbor.Signals.Bus do
         nil
 
       _other ->
-        # Not encrypted, return as-is (could be channel message)
-        maybe_decrypt_channel_signal(signal)
+        # Not topic-encrypted; may be channel-encrypted
+        maybe_decrypt_channel_signal(signal, sub)
     end
   end
 
   # Decrypt channel-encrypted signal data
-  defp maybe_decrypt_channel_signal(%Signal{data: data} = signal) do
+  #
+  # OQ-7: pre-fix this called Channels.get_key(channel_id, signal.source) —
+  # keyed on the SENDER. That meant decryption succeeded based on whether
+  # the sender was a member, not whether the SUBSCRIBER was. Anyone whose
+  # subscription matched the topic received plaintext, regardless of their
+  # own channel membership.
+  #
+  # The fix routes through the H4 Channels.decrypt_for_member/3 API using
+  # the subscriber's principal_id. The symmetric key never leaves the
+  # Channels GenServer, and membership is verified for the subscriber, not
+  # the sender. Subscriptions without a principal_id (system handlers that
+  # don't claim an identity) cannot decrypt channel-encrypted payloads.
+  defp maybe_decrypt_channel_signal(%Signal{data: data} = signal, sub) do
     case data do
       %{
         __channel_encrypted__: true,
@@ -512,56 +527,53 @@ defmodule Arbor.Signals.Bus do
         sender_id: _sender_id,
         payload: payload
       } ->
-        channels_module =
-          Application.get_env(:arbor_signals, :channels_module, Arbor.Signals.Channels)
+        case subscriber_principal(sub) do
+          nil ->
+            # No subscriber identity ⇒ no decryption.
+            %{signal | data: %{__decryption_failed__: true}}
 
-        # Note: The subscriber must be a member of the channel.
-        # For now, we attempt decryption using the channel key from Channels.
-        # In practice, subscribers store the key in their keychain.
-        # This is a simplified implementation - full implementation would
-        # require passing the subscriber's keychain context.
+          subscriber_id ->
+            channels_module =
+              Application.get_env(:arbor_signals, :channels_module, Arbor.Signals.Channels)
 
-        # credo:disable-for-next-line Credo.Check.Refactor.Apply
-        case apply(channels_module, :get_key, [channel_id, signal.source]) do
-          {:ok, key} ->
-            decrypt_channel_payload(signal, payload, key)
+            # credo:disable-for-next-line Credo.Check.Refactor.Apply
+            case apply(channels_module, :decrypt_for_member, [
+                   channel_id,
+                   subscriber_id,
+                   normalize_channel_payload(payload)
+                 ]) do
+              {:ok, plaintext} ->
+                replace_channel_payload(signal, plaintext)
 
-          {:error, _reason} ->
-            # Not a member or channel not found - return signal as-is
-            signal
+              {:error, _reason} ->
+                %{signal | data: %{__decryption_failed__: true}}
+            end
         end
 
-      _other ->
+      _ ->
+        # Not channel-encrypted, return as-is
         signal
     end
   end
 
-  defp decrypt_channel_payload(signal, payload, key) do
-    %{ciphertext: ciphertext, iv: iv, tag: tag, key_version: payload_version} = payload
+  defp subscriber_principal(%{principal_id: pid}) when is_binary(pid) and pid != "", do: pid
+  defp subscriber_principal(_), do: nil
 
-    crypto_module = Application.get_env(:arbor_signals, :crypto_module, Arbor.Security.Crypto)
+  # The channel sender writes %{ciphertext: ..., iv: ..., tag: ...} into the
+  # signal's payload field. Channels.decrypt_for_member/3 expects the same
+  # shape; this normalizer just lifts it from a wrapper if there is one.
+  defp normalize_channel_payload(%{ciphertext: _, iv: _, tag: _} = m), do: m
+  defp normalize_channel_payload(%{payload: inner}), do: normalize_channel_payload(inner)
+  defp normalize_channel_payload(other), do: other
 
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    case apply(crypto_module, :decrypt, [ciphertext, key, iv, tag]) do
-      {:ok, json} ->
-        case Jason.decode(json) do
-          {:ok, decoded_data} ->
-            %{
-              signal
-              | data:
-                  Map.merge(decoded_data, %{
-                    "__channel_id__" => signal.data.channel_id,
-                    "__sender_id__" => signal.data.sender_id,
-                    "__key_version__" => payload_version
-                  })
-            }
-
-          {:error, _reason} ->
-            %{signal | data: %{__channel_decryption_failed__: true}}
-        end
-
-      {:error, _reason} ->
-        %{signal | data: %{__channel_decryption_failed__: true}}
+  defp replace_channel_payload(%Signal{} = signal, plaintext) when is_binary(plaintext) do
+    case Jason.decode(plaintext) do
+      {:ok, decoded} -> %{signal | data: decoded}
+      _ -> %{signal | data: %{__plaintext__: plaintext}}
     end
+  end
+
+  defp replace_channel_payload(signal, _other) do
+    %{signal | data: %{__decryption_failed__: true}}
   end
 end
