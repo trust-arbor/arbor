@@ -1,0 +1,29 @@
+# Concrete providers for local LM Studio runs.
+# Use with: promptfoo eval -c ... --providers evals/promptfoo/dot-compilation/providers.local.yaml
+
+- id: openai:chat:granite-4.1-3b
+  label: granite-4.1-3b-local
+  config:
+    apiBaseUrl: http://localhost:1234/v1
+    apiKey: lm-studio
+    temperature: 0.0
+    max_tokens: 4096
+    timeout: 180000
+
+- id: openai:chat:gemma-4-e4b-it@q4_k_xl
+  label: gemma-4-e4b-q4-local
+  config:
+    apiBaseUrl: http://localhost:1234/v1
+    apiKey: lm-studio
+    temperature: 0.0
+    max_tokens: 4096
+    timeout: 180000
+
+- id: openai:chat:nvidia/nemotron-3-nano-4b
+  label: nemotron-nano-4b-local
+  config:
+    apiBaseUrl: http://localhost:1234/v1
+    apiKey: lm-studio
+    temperature: 0.0
+    max_tokens: 4096
+    timeout: 180000
