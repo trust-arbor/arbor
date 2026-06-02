@@ -57,10 +57,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   alias Arbor.LLM.ContentPart
   alias Arbor.LLM.Message
   alias Arbor.LLM.PostProcessors
-  alias Arbor.LLM.ProviderError
+  alias Arbor.LLM.Call
+  alias Arbor.LLM.Pipeline
   alias Arbor.LLM.ProviderRegistry
   alias Arbor.LLM.Request
-  alias Arbor.LLM.RequestTimeoutError
   alias Arbor.LLM.Response
 
   @sentinel_provider "req_llm_generic"
@@ -190,68 +190,12 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   end
 
   defp call_req_llm_embed(%LLMDB.Model{} = model, texts, opts) do
-    # Local LM path: bypass ReqLLM.Embedding.embed/3's validate_model
-    # gate (which hard-checks llm_db's embedding-capable catalog).
-    # Operator-pulled local models aren't in the catalog, so the gate
-    # would reject them before reaching the network. We call the
-    # provider's prepare_request + Req.request directly instead — the
-    # shape is identical to the openai embeddings API which Ollama
-    # serves at /v1/embeddings.
-    with {:ok, provider_module} <- ReqLLM.provider(model.provider),
-         {:ok, request} <- provider_module.prepare_request(:embedding, model, texts, opts),
-         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 <-
-           Req.request(request) do
-      extract_embeddings(body)
-    else
-      {:ok, %Req.Response{status: status, body: body}} ->
-        {:error,
-         ProviderError.exception(
-           message: "embedding HTTP #{status}",
-           status: status,
-           retryable: retryable_status?(status),
-           details: %{source: :req_llm_direct, body: inspect(body) |> String.slice(0, 500)}
-         )}
-
-      {:error, _} = err ->
-        err
-    end
-  rescue
-    e -> {:error, translate_exception(e)}
-  catch
-    :exit, reason -> {:error, translate_exit(reason)}
+    run_pipeline(:embed_local, {model, texts, opts})
   end
 
   defp call_req_llm_embed(model_spec, texts, opts) when is_binary(model_spec) do
-    # Cloud path: standard ReqLLM.Embedding.embed/3. The validate_model
-    # check passes because cloud embedding models are in llm_db's
-    # catalog with embeddings capability advertised.
-    case ReqLLM.Embedding.embed(model_spec, texts, opts) do
-      {:ok, %{embeddings: embeddings, usage: usage}} -> {:ok, embeddings, usage}
-      {:ok, %{embedding: embedding, usage: usage}} -> {:ok, [embedding], usage}
-      {:ok, list} when is_list(list) -> {:ok, list, %{}}
-      {:error, _} = err -> err
-      other -> {:error, {:unexpected_embed_response, inspect(other)}}
-    end
-  rescue
-    e -> {:error, translate_exception(e)}
-  catch
-    :exit, reason -> {:error, translate_exit(reason)}
+    run_pipeline(:embed_cloud, {model_spec, texts, opts})
   end
-
-  # Extract embeddings from a provider's decoded embedding response.
-  # OpenAI shape: `%{"data" => [%{"embedding" => [...], ...}, ...], "usage" => %{...}}`.
-  # Ollama serves the same shape via its OpenAI-compatible endpoint.
-  defp extract_embeddings(%{"data" => data} = body) when is_list(data) do
-    embeddings =
-      Enum.map(data, fn
-        %{"embedding" => e} -> e
-        e when is_list(e) -> e
-      end)
-
-    {:ok, embeddings, Map.get(body, "usage", %{})}
-  end
-
-  defp extract_embeddings(body), do: {:error, {:unexpected_embed_response, body}}
 
   defp dimensions_of([first | _]) when is_list(first), do: length(first)
   defp dimensions_of(_), do: 0
@@ -265,11 +209,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   defp infer_provider_for_embedding(_model), do: nil
 
   defp call_req_llm_stream(model_spec, messages, opts) do
-    ReqLLM.stream_text(model_spec, messages, opts)
-  rescue
-    e -> {:error, translate_exception(e)}
-  catch
-    :exit, reason -> {:error, translate_exit(reason)}
+    run_pipeline(:stream, {model_spec, messages, opts})
   end
 
   # ── Streaming translation ──────────────────────────────────────────
@@ -541,11 +481,28 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   # ── Dispatch ────────────────────────────────────────────────────────
 
   defp call_req_llm(model_spec, messages, opts) do
-    ReqLLM.generate_text(model_spec, messages, opts)
-  rescue
-    e -> {:error, translate_exception(e)}
-  catch
-    :exit, reason -> {:error, translate_exit(reason)}
+    run_pipeline(:complete, {model_spec, messages, opts})
+  end
+
+  # Single entry point for all four dispatch operations. Each call
+  # threads through the configured pipeline, falling through to
+  # Plugs.Dispatch (which calls the appropriate req_llm function) if
+  # no upstream plug short-circuited. The pipeline is configurable
+  # so tests can swap in record-only, replay-only, or transparent
+  # variants without touching the adapter.
+  defp run_pipeline(operation, request) do
+    operation
+    |> Call.new(request)
+    |> Pipeline.through(pipeline())
+    |> Map.fetch!(:result)
+  end
+
+  defp pipeline do
+    Application.get_env(:arbor_llm, :pipeline, [
+      # Default production pipeline: just call req_llm. Tests override
+      # via app config to insert Replay, Record, StalenessWarn, etc.
+      Arbor.LLM.Plugs.Dispatch
+    ])
   end
 
   # ── Translation: ReqLLM → Arbor ─────────────────────────────────────
@@ -672,40 +629,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     })
   end
 
-  # ── Error translation ──────────────────────────────────────────────
-
-  defp translate_exception(%{__struct__: mod} = e)
-       when mod in [ReqLLM.Error.API.Request, ReqLLM.Error.API.Response] do
-    status = Map.get(e, :status)
-
-    ProviderError.exception(
-      message: Exception.message(e),
-      status: status,
-      retryable: retryable_status?(status),
-      details: %{source: :req_llm, raw: inspect(e)}
-    )
-  end
-
-  defp translate_exception(e) do
-    ProviderError.exception(
-      message: Exception.message(e),
-      retryable: false,
-      details: %{source: :req_llm, raw: inspect(e)}
-    )
-  end
-
-  defp translate_exit({:timeout, _}) do
-    RequestTimeoutError.exception(message: "request timed out")
-  end
-
-  defp translate_exit(reason) do
-    ProviderError.exception(
-      message: "request exited: " <> inspect(reason),
-      retryable: false,
-      details: %{source: :req_llm, raw: inspect(reason)}
-    )
-  end
-
-  defp retryable_status?(status) when status in [408, 429, 500, 502, 503, 504], do: true
-  defp retryable_status?(_), do: false
+  # Error translation moved to `Arbor.LLM.Plugs.Dispatch` (Session 8,
+  # plug pipeline refactor). Adapter no longer catches dispatch
+  # exceptions directly — the Dispatch plug handles them and stamps
+  # `{:error, ProviderError | RequestTimeoutError}` on the call's
+  # result field.
 end
