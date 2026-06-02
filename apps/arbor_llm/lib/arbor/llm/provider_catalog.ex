@@ -2,26 +2,30 @@ defmodule Arbor.LLM.ProviderCatalog do
   @moduledoc """
   Single source of truth for available LLM providers.
 
-  Discovers providers by querying each adapter's `runtime_contract/0` callback,
-  checking whether runtime requirements are met (env vars, CLI tools, HTTP probes),
-  and caching results in ETS with a configurable TTL.
+  After the Session 6 cutover, traffic for every API + local-LM
+  provider routes through `Arbor.LLM.Adapter.ReqLLM`. The per-provider
+  HTTP modules that used to host `runtime_contract/0` are gone, so the
+  catalog is now driven by a static map carrying the same data the
+  legacy adapters used to declare. ACP still has its own adapter
+  (`Arbor.AI.LLM.Adapter.Acp`) and contributes its contract dynamically.
 
   ## Usage
 
-      # All available providers with capabilities
       ProviderCatalog.available()
       # => [{"anthropic", %Capabilities{streaming: true, ...}}, ...]
 
-      # Get a specific provider's contract (for install hints)
-      ProviderCatalog.get_contract("claude_cli")
+      ProviderCatalog.get_contract("ollama")
       # => {:ok, %RuntimeContract{...}}
 
-      # Get capabilities for a provider
       ProviderCatalog.capabilities("anthropic")
       # => {:ok, %Capabilities{streaming: true, thinking: true, ...}}
 
-      # Force refresh the cache
       ProviderCatalog.refresh()
+
+  Results are cached in ETS with a 5-minute TTL. The check phase
+  (env-var / HTTP probe lookups) is what's actually cached;
+  availability can change minute-to-minute as keys are set/unset or
+  servers come up.
   """
 
   alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
@@ -31,32 +35,123 @@ defmodule Arbor.LLM.ProviderCatalog do
   @ets_table :arbor_provider_catalog
   @ttl_ms :timer.minutes(5)
 
-  # Adapter modules currently live at Arbor.Orchestrator.UnifiedLLM.Adapters.*
-  # in arbor_orchestrator — they move to Arbor.LLM.Adapters.* in Session 3.
-  # Built via Module.concat atom-lists so the cross-app compile-time dep
-  # is hidden from static analysis (would otherwise create a cycle since
-  # arbor_orchestrator depends on arbor_llm). When Session 3 lands the
-  # generic ReqLLM adapter, this whole list collapses to one entry.
-  @adapter_prefix [:Arbor, :Orchestrator, :UnifiedLLM, :Adapters]
-
-  @all_adapters [
-    Module.concat(@adapter_prefix ++ [:Anthropic]),
-    Module.concat(@adapter_prefix ++ [:OpenAI]),
-    Module.concat(@adapter_prefix ++ [:Gemini]),
-    Module.concat(@adapter_prefix ++ [:OpenRouter]),
-    Module.concat(@adapter_prefix ++ [:XAI]),
-    Module.concat(@adapter_prefix ++ [:Zai]),
-    Module.concat(@adapter_prefix ++ [:ZaiCodingPlan]),
-    Module.concat(@adapter_prefix ++ [:Acp]),
-    Module.concat(@adapter_prefix ++ [:LMStudio]),
-    Module.concat(@adapter_prefix ++ [:Ollama])
+  # Provider definitions previously sourced from each per-provider
+  # adapter's `runtime_contract/0`. Lifted verbatim during the
+  # Session 6 cutover so consumers of `available/0`, `all/0`,
+  # `capabilities/1`, and `get_contract/1` see the same shape as
+  # before — only the source-of-truth moved.
+  @cloud_providers [
+    %{
+      provider: "openai",
+      display_name: "OpenAI API",
+      type: :api,
+      env_vars: [%{name: "OPENAI_API_KEY", required: true}],
+      capabilities: [
+        streaming: true,
+        tool_calls: true,
+        thinking: true,
+        vision: true,
+        structured_output: true
+      ]
+    },
+    %{
+      provider: "anthropic",
+      display_name: "Anthropic API",
+      type: :api,
+      env_vars: [%{name: "ANTHROPIC_API_KEY", required: true}],
+      capabilities: [
+        streaming: true,
+        tool_calls: true,
+        thinking: true,
+        extended_thinking: true,
+        vision: true,
+        structured_output: true
+      ]
+    },
+    %{
+      provider: "gemini",
+      display_name: "Google Gemini API",
+      type: :api,
+      env_vars: [%{name: "GEMINI_API_KEY", required: true}],
+      capabilities: [
+        streaming: true,
+        tool_calls: true,
+        thinking: true,
+        vision: true,
+        structured_output: true
+      ]
+    },
+    %{
+      provider: "xai",
+      display_name: "x.ai (Grok)",
+      type: :api,
+      env_vars: [%{name: "XAI_API_KEY", required: true}],
+      capabilities: [streaming: true, tool_calls: true, thinking: true, vision: true]
+    },
+    %{
+      provider: "openrouter",
+      display_name: "OpenRouter",
+      type: :api,
+      env_vars: [%{name: "OPENROUTER_API_KEY", required: true}],
+      capabilities: [
+        streaming: true,
+        tool_calls: true,
+        thinking: true,
+        vision: true,
+        structured_output: true
+      ]
+    },
+    %{
+      provider: "zai",
+      display_name: "Z.ai",
+      type: :api,
+      env_vars: [%{name: "ZAI_API_KEY", required: true}],
+      capabilities: [streaming: true, tool_calls: true, thinking: true, structured_output: true]
+    },
+    %{
+      provider: "zai_coding_plan",
+      display_name: "Z.ai Coding Plan",
+      type: :api,
+      env_vars: [%{name: "ZAI_CODING_PLAN_API_KEY", required: true}],
+      capabilities: [streaming: true, tool_calls: true, thinking: true, structured_output: true]
+    }
   ]
+
+  # Local-LM providers carry an HTTP probe instead of an env var. The
+  # base_url defaults match `Arbor.LLM.Adapter.ReqLLM`'s
+  # `default_base_url_for/1` so operator overrides via
+  # `config :arbor_orchestrator, <provider>, base_url:` flow through
+  # consistently.
+  @local_providers [
+    %{
+      provider: "ollama",
+      display_name: "Ollama",
+      type: :local,
+      default_base_url: "http://localhost:11434/v1",
+      config_key: :ollama,
+      capabilities: [streaming: true, tool_calls: true, embeddings: true]
+    },
+    %{
+      provider: "lm_studio",
+      display_name: "LM Studio",
+      type: :local,
+      default_base_url: "http://localhost:1234/v1",
+      config_key: :lm_studio,
+      capabilities: [streaming: true, tool_calls: true, structured_output: true]
+    }
+  ]
+
+  # ACP keeps its own adapter (it's a subprocess runtime, not an LLM
+  # transport). We resolve its contract dynamically via runtime
+  # indirection — same Module.concat atom-list pattern Client uses so
+  # arbor_llm doesn't compile-time-depend on arbor_ai.
+  @acp_adapter Module.concat([:Arbor, :AI, :LLM, :Adapter, :Acp])
 
   @doc """
   Returns all available providers as `{provider_string, %Capabilities{}}` tuples.
 
-  Only includes providers whose runtime requirements are currently satisfied.
-  Results are cached for #{div(@ttl_ms, 60_000)} minutes.
+  Only includes providers whose runtime requirements are currently
+  satisfied. Results are cached for #{div(@ttl_ms, 60_000)} minutes.
   """
   @spec available(keyword()) :: [{String.t(), Capabilities.t()}]
   def available(opts \\ []) do
@@ -93,8 +188,6 @@ defmodule Arbor.LLM.ProviderCatalog do
 
   @doc """
   Get the RuntimeContract for a specific provider.
-
-  Returns the contract regardless of whether the provider is currently available.
   """
   @spec get_contract(String.t()) :: {:ok, RuntimeContract.t()} | {:error, :not_found}
   def get_contract(provider) when is_binary(provider) do
@@ -132,9 +225,7 @@ defmodule Arbor.LLM.ProviderCatalog do
     :ok
   end
 
-  # ============================================================================
-  # Private — Cache Management
-  # ============================================================================
+  # ── Cache ──────────────────────────────────────────────────────────
 
   defp ensure_table do
     if :ets.whereis(@ets_table) == :undefined do
@@ -167,67 +258,97 @@ defmodule Arbor.LLM.ProviderCatalog do
     Task.start(fn -> refresh() end)
   end
 
-  # ============================================================================
-  # Private — Discovery
-  # ============================================================================
+  # ── Discovery ──────────────────────────────────────────────────────
 
   defp discover_all do
-    @all_adapters
-    |> Enum.map(&discover_adapter/1)
-    |> Enum.reject(&is_nil/1)
-    |> Map.new(fn entry -> {entry.provider, entry} end)
+    cloud = Enum.map(@cloud_providers, &build_cloud_entry/1)
+    local = Enum.map(@local_providers, &build_local_entry/1)
+    acp = build_acp_entry()
+    entries = cloud ++ local ++ List.wrap(acp)
+    Map.new(entries, fn entry -> {entry.provider, entry} end)
   end
 
-  defp discover_adapter(adapter_module) do
-    Code.ensure_loaded(adapter_module)
+  defp build_cloud_entry(spec) do
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: spec.provider,
+        display_name: spec.display_name,
+        type: spec.type,
+        env_vars: spec.env_vars,
+        capabilities: Capabilities.new(spec.capabilities)
+      )
 
-    if function_exported?(adapter_module, :runtime_contract, 0) do
-      contract = adapter_module.runtime_contract()
+    check_result = RuntimeContract.check(contract)
+
+    %{
+      provider: spec.provider,
+      display_name: spec.display_name,
+      type: spec.type,
+      available?: match?({:ok, _}, check_result),
+      capabilities: contract.capabilities,
+      contract: contract,
+      check_result: check_result,
+      adapter_module: Arbor.LLM.Adapter.ReqLLM
+    }
+  end
+
+  defp build_local_entry(spec) do
+    base_url = configured_base_url(spec)
+
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: spec.provider,
+        display_name: spec.display_name,
+        type: spec.type,
+        probes: [%{type: :http, url: base_url <> "/models", timeout_ms: 2_000}],
+        capabilities: Capabilities.new(spec.capabilities)
+      )
+
+    check_result = RuntimeContract.check(contract)
+
+    %{
+      provider: spec.provider,
+      display_name: spec.display_name,
+      type: spec.type,
+      available?: match?({:ok, _}, check_result),
+      capabilities: contract.capabilities,
+      contract: contract,
+      check_result: check_result,
+      adapter_module: Arbor.LLM.Adapter.ReqLLM
+    }
+  end
+
+  defp build_acp_entry do
+    # Variable indirection hides the module from compile-time analysis
+    # (per arbor's runtime-indirection rule — Code.ensure_loaded? alone
+    # doesn't suppress the warning; we need apply/3 against a variable
+    # target).
+    acp_mod = @acp_adapter
+    Code.ensure_loaded(acp_mod)
+
+    if function_exported?(acp_mod, :runtime_contract, 0) do
+      contract = apply(acp_mod, :runtime_contract, [])
       check_result = RuntimeContract.check(contract)
-      is_available = match?({:ok, _}, check_result)
 
       %{
         provider: contract.provider,
         display_name: contract.display_name,
         type: contract.type,
-        available?: is_available,
+        available?: match?({:ok, _}, check_result),
         capabilities: contract.capabilities || Capabilities.new(),
         contract: contract,
         check_result: check_result,
-        adapter_module: adapter_module
-      }
-    else
-      # Adapter doesn't declare a contract — build a minimal entry from provider/0
-      provider = adapter_module.provider()
-
-      %{
-        provider: provider,
-        display_name: provider,
-        type: :api,
-        available?: legacy_available?(adapter_module),
-        capabilities: Capabilities.new(),
-        contract: nil,
-        check_result: {:ok, %{env_vars: :skipped, cli_tools: :skipped, probes: :skipped}},
-        adapter_module: adapter_module
+        adapter_module: acp_mod
       }
     end
   rescue
     e ->
-      Logger.warning(
-        "ProviderCatalog: error discovering #{inspect(adapter_module)}: #{inspect(e)}"
-      )
-
+      Logger.warning("ProviderCatalog: error discovering ACP adapter: #{inspect(e)}")
       nil
   end
 
-  defp legacy_available?(adapter_module) do
-    if function_exported?(adapter_module, :available?, 0) do
-      adapter_module.available?()
-    else
-      # API adapters without available?/0 are assumed available if their env key exists
-      true
-    end
-  rescue
-    _ -> false
+  defp configured_base_url(spec) do
+    config = Application.get_env(:arbor_orchestrator, spec.config_key, [])
+    Keyword.get(config, :base_url, spec.default_base_url)
   end
 end
