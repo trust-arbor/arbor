@@ -17,8 +17,8 @@ defmodule Arbor.AI.LLMError do
           provider: atom() | nil
         }
 
-  @provider_error_mod Arbor.Orchestrator.UnifiedLLM.ProviderError
-  @timeout_error_mod Arbor.Orchestrator.UnifiedLLM.RequestTimeoutError
+  @provider_error_mod Arbor.LLM.ProviderError
+  @timeout_error_mod Arbor.LLM.RequestTimeoutError
 
   @doc """
   Classify an error reason into a structured, signal-safe map.

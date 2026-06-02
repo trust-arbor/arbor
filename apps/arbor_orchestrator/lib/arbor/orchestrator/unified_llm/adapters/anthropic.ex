@@ -4,8 +4,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Anthropic do
   @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.ErrorMapper
-  alias Arbor.Orchestrator.UnifiedLLM.{ContentPart, Message, Request, Response}
-
+  alias Arbor.LLM.ContentPart
+  alias Arbor.LLM.Message
+  alias Arbor.LLM.Request
+  alias Arbor.LLM.Response
   @endpoint "https://api.anthropic.com/v1/messages"
   @default_version "2023-06-01"
 
@@ -420,7 +422,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Anthropic do
   end
 
   defp translate_anthropic_event(%{"type" => "message_start"} = raw, acc) do
-    {%Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+    {%Arbor.LLM.StreamEvent{
        type: :start,
        data: %{"provider" => provider(), "warnings" => Map.get(acc, :warnings, []), "raw" => raw}
      }, acc}
@@ -432,13 +434,13 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Anthropic do
 
     cond do
       kind in ["text_delta", "text"] and delta != "" ->
-        {%Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+        {%Arbor.LLM.StreamEvent{
            type: :delta,
            data: %{"text" => delta, "raw" => raw}
          }, acc}
 
       kind in ["input_json_delta", "tool_use"] ->
-        {%Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+        {%Arbor.LLM.StreamEvent{
            type: :tool_call,
            data: %{"arguments_delta" => get_in(raw, ["delta", "partial_json"]), "raw" => raw}
          }, acc}
@@ -452,7 +454,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Anthropic do
     block = Map.get(raw, "content_block", %{})
 
     if Map.get(block, "type") == "tool_use" do
-      {%Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+      {%Arbor.LLM.StreamEvent{
          type: :tool_call,
          data: %{
            "id" => Map.get(block, "id"),
@@ -490,7 +492,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Anthropic do
   end
 
   defp translate_anthropic_event(%{"type" => "message_stop"} = raw, acc) do
-    {%Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+    {%Arbor.LLM.StreamEvent{
        type: :finish,
        data: %{"reason" => acc.finish_reason, "usage" => acc.usage, "raw" => raw}
      }, acc}

@@ -23,9 +23,11 @@ defmodule Arbor.Consensus.LLMBridge do
 
   require Logger
 
+  # Client still lives in arbor_orchestrator (will move to arbor_llm in a
+  # later session). Request and Message moved to arbor_llm in Session 1.
   @client_mod Arbor.Orchestrator.UnifiedLLM.Client
-  @request_mod Arbor.Orchestrator.UnifiedLLM.Request
-  @message_mod Arbor.Orchestrator.UnifiedLLM.Message
+  @request_mod Arbor.LLM.Request
+  @message_mod Arbor.LLM.Message
   @ai_mod Arbor.AI
 
   @doc """
@@ -54,7 +56,8 @@ defmodule Arbor.Consensus.LLMBridge do
     `:api` to force UnifiedLLM API path. Default: auto-detect.
   """
   @spec complete(String.t(), String.t(), keyword()) ::
-          {:ok, %{text: String.t(), duration_ms: non_neg_integer(), usage: map()}} | {:error, term()}
+          {:ok, %{text: String.t(), duration_ms: non_neg_integer(), usage: map()}}
+          | {:error, term()}
   def complete(system_prompt, user_prompt, opts \\ []) do
     backend = Keyword.get(opts, :backend)
     provider = Keyword.get(opts, :provider, "unknown")
@@ -142,13 +145,14 @@ defmodule Arbor.Consensus.LLMBridge do
     user_msg = apply(@message_mod, :new, [:user, user_prompt])
 
     # Build request struct
-    request = struct!(@request_mod, %{
-      provider: provider,
-      model: model,
-      messages: [system_msg, user_msg],
-      max_tokens: max_tokens,
-      temperature: temperature
-    })
+    request =
+      struct!(@request_mod, %{
+        provider: provider,
+        model: model,
+        messages: [system_msg, user_msg],
+        max_tokens: max_tokens,
+        temperature: temperature
+      })
 
     # Get or create default client
     client = apply(@client_mod, :default_client, [])

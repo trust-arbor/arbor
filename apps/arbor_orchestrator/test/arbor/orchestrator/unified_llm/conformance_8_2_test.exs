@@ -3,7 +3,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance82Test do
   @moduletag :fast
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{Anthropic, Gemini, OpenAI}
-  alias Arbor.Orchestrator.UnifiedLLM.{Message, ProviderError, Request, StreamEvent}
+  alias Arbor.LLM.Message
+  alias Arbor.LLM.ProviderError
+  alias Arbor.LLM.Request
+  alias Arbor.LLM.StreamEvent
 
   test "8.2 adapters use native endpoints and auth headers/keys" do
     openai =

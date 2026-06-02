@@ -1,15 +1,17 @@
 defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Orchestrator.UnifiedLLM.{
-    Client,
-    ContentPart,
-    Message,
-    Request,
-    Response,
-    ToolLoop
-  }
+  alias Arbor.Orchestrator.UnifiedLLM.Client
 
+  alias Arbor.LLM.ContentPart
+
+  alias Arbor.LLM.Message
+
+  alias Arbor.LLM.Request
+
+  alias Arbor.LLM.Response
+
+  alias Arbor.Orchestrator.UnifiedLLM.ToolLoop
   @moduletag :fast
 
   # --- Mock tool executor ---

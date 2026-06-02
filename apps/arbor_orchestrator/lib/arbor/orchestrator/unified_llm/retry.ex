@@ -95,7 +95,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Retry do
   end
 
   defp retry_delay(
-         %Arbor.Orchestrator.UnifiedLLM.ProviderError{retry_after_ms: retry_after_ms},
+         %Arbor.LLM.ProviderError{retry_after_ms: retry_after_ms},
          _initial,
          _factor,
          _attempt,
@@ -107,7 +107,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Retry do
   end
 
   defp retry_delay(
-         %Arbor.Orchestrator.UnifiedLLM.ProviderError{retry_after_ms: retry_after_ms},
+         %Arbor.LLM.ProviderError{retry_after_ms: retry_after_ms},
          _initial,
          _factor,
          _attempt,
@@ -122,10 +122,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Retry do
     {:ok, backoff_delay(initial, factor, attempt, max_delay, jitter)}
   end
 
-  defp default_should_retry(%Arbor.Orchestrator.UnifiedLLM.ProviderError{retryable: retryable}),
+  defp default_should_retry(%Arbor.LLM.ProviderError{retryable: retryable}),
     do: retryable
 
-  defp default_should_retry(%Arbor.Orchestrator.UnifiedLLM.RequestTimeoutError{}), do: true
+  defp default_should_retry(%Arbor.LLM.RequestTimeoutError{}), do: true
 
   defp default_should_retry(reason) when is_atom(reason) do
     reason in [:timeout, :rate_limited, :network_error, :transient_error]

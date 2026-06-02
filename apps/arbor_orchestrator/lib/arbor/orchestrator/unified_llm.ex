@@ -1,21 +1,25 @@
 defmodule Arbor.Orchestrator.UnifiedLLM do
   @moduledoc false
 
-  alias Arbor.Orchestrator.UnifiedLLM.{
-    AbortError,
-    Client,
-    Message,
-    NoObjectGeneratedError,
-    Request,
-    RequestTimeoutError,
-    Retry,
-    Tool
-  }
+  alias Arbor.LLM.AbortError
 
+  alias Arbor.Orchestrator.UnifiedLLM.Client
+
+  alias Arbor.LLM.Message
+
+  alias Arbor.LLM.NoObjectGeneratedError
+
+  alias Arbor.LLM.Request
+
+  alias Arbor.LLM.RequestTimeoutError
+
+  alias Arbor.Orchestrator.UnifiedLLM.Retry
+
+  alias Arbor.LLM.Tool
   @type generate_opts :: keyword()
 
   @spec generate(generate_opts()) ::
-          {:ok, Arbor.Orchestrator.UnifiedLLM.Response.t()} | {:error, term()}
+          {:ok, Arbor.LLM.Response.t()} | {:error, term()}
   def generate(opts) when is_list(opts) do
     with :ok <- ensure_not_aborted(opts),
          {:ok, request} <- build_request(opts) do
@@ -129,13 +133,13 @@ defmodule Arbor.Orchestrator.UnifiedLLM do
       %{text: "", last_object: nil},
       fn event, state ->
         case event do
-          %Arbor.Orchestrator.UnifiedLLM.StreamEvent{type: :delta, data: %{"text" => chunk}} ->
+          %Arbor.LLM.StreamEvent{type: :delta, data: %{"text" => chunk}} ->
             emit_partial_object(state, chunk, opts)
 
-          %Arbor.Orchestrator.UnifiedLLM.StreamEvent{type: :delta, data: %{text: chunk}} ->
+          %Arbor.LLM.StreamEvent{type: :delta, data: %{text: chunk}} ->
             emit_partial_object(state, chunk, opts)
 
-          %Arbor.Orchestrator.UnifiedLLM.StreamEvent{type: :finish} ->
+          %Arbor.LLM.StreamEvent{type: :finish} ->
             ensure_final_object!(state, opts)
             {[], state}
 
@@ -512,7 +516,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM do
           {tool_messages, tool_result_events} =
             execute_tool_calls_for_stream(tool_calls, state.tools, state.parallel)
 
-          step_finish_event = %Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+          step_finish_event = %Arbor.LLM.StreamEvent{
             type: :step_finish,
             data: %{
               "step" => state.step_index,
@@ -562,10 +566,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM do
   defp extract_text_from_events(events) do
     events
     |> Enum.reduce([], fn
-      %Arbor.Orchestrator.UnifiedLLM.StreamEvent{type: :delta, data: %{"text" => text}}, acc ->
+      %Arbor.LLM.StreamEvent{type: :delta, data: %{"text" => text}}, acc ->
         [to_string(text) | acc]
 
-      %Arbor.Orchestrator.UnifiedLLM.StreamEvent{type: :delta, data: %{text: text}}, acc ->
+      %Arbor.LLM.StreamEvent{type: :delta, data: %{text: text}}, acc ->
         [to_string(text) | acc]
 
       _, acc ->
@@ -578,7 +582,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM do
   defp extract_tool_calls_from_events(events) do
     events
     |> Enum.flat_map(fn
-      %Arbor.Orchestrator.UnifiedLLM.StreamEvent{type: :tool_call, data: data} ->
+      %Arbor.LLM.StreamEvent{type: :tool_call, data: data} ->
         [normalize_tool_call_data(data)]
 
       _ ->
@@ -665,7 +669,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM do
     tool_message =
       Message.new(:tool, Jason.encode!(output), %{"tool_call_id" => id, "name" => name})
 
-    tool_event = %Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+    tool_event = %Arbor.LLM.StreamEvent{
       type: :tool_result,
       data: %{
         "id" => id,
@@ -712,7 +716,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM do
     message =
       Message.new(:tool, Jason.encode!(output), %{"tool_call_id" => "call", "name" => "unknown"})
 
-    event = %Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+    event = %Arbor.LLM.StreamEvent{
       type: :tool_result,
       data: %{
         "id" => "call",

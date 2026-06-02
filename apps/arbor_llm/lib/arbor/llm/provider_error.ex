@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.ProviderError do
+defmodule Arbor.LLM.ProviderError do
   @moduledoc false
 
   defexception [:message, :provider, :status, :retryable, :retry_after_ms, :code, :details]

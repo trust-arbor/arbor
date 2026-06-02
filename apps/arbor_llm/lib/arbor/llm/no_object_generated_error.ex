@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.AbortError do
+defmodule Arbor.LLM.NoObjectGeneratedError do
   @moduledoc false
 
   defexception [:message, :reason]
@@ -10,8 +10,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.AbortError do
 
   @spec exception(keyword()) :: t()
   def exception(opts) do
-    reason = Keyword.get(opts, :reason, :aborted)
-    message = Keyword.get(opts, :message, "Request aborted")
+    reason = Keyword.get(opts, :reason, :no_object_generated)
+    message = Keyword.get(opts, :message, "No valid object could be generated")
     %__MODULE__{message: message, reason: reason}
   end
 end

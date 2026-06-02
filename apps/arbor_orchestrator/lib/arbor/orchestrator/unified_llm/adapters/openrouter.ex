@@ -32,7 +32,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenRouter do
   @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible
-  alias Arbor.Orchestrator.UnifiedLLM.Request
+  alias Arbor.LLM.Request
 
   @config %{
     provider: "openrouter",

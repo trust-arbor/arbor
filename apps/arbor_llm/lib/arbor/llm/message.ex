@@ -1,7 +1,7 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.Message do
+defmodule Arbor.LLM.Message do
   @moduledoc false
 
-  alias Arbor.Orchestrator.UnifiedLLM.ContentPart
+  alias Arbor.LLM.ContentPart
 
   @type role :: :system | :developer | :user | :assistant | :tool
 

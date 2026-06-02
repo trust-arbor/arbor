@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.ContentPart do
+defmodule Arbor.LLM.ContentPart do
   @moduledoc false
 
   @type part ::

@@ -3,12 +3,15 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   @moduletag :fast
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{Anthropic, Gemini, OpenAI}
-  alias Arbor.Orchestrator.UnifiedLLM.{ContentPart, ProviderError, Request, StreamEvent}
+  alias Arbor.LLM.ContentPart
+  alias Arbor.LLM.ProviderError
+  alias Arbor.LLM.Request
+  alias Arbor.LLM.StreamEvent
 
   test "openai adapter targets responses api and maps successful response" do
     request = %Request{
       model: "gpt-5",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     parent = self()
@@ -34,7 +37,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "openai adapter parses tool-call and reasoning response parts" do
     request = %Request{
       model: "gpt-5",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     http_client = fn _req ->
@@ -74,7 +77,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "openai adapter maps usage including reasoning and cache read tokens" do
     request = %Request{
       model: "gpt-5",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     http_client = fn _req ->
@@ -107,7 +110,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "openai adapter maps responses-style usage keys (input/output tokens)" do
     request = %Request{
       model: "gpt-5",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     http_client = fn _req ->
@@ -140,7 +143,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "anthropic adapter includes beta header when configured" do
     request = %Request{
       model: "claude-sonnet-4-0",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}],
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}],
       provider_options: %{"anthropic" => %{"beta" => ["prompt-caching-2024-07-31"]}}
     }
 
@@ -169,7 +172,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "anthropic adapter accepts beta_headers and merges provider options into body" do
     request = %Request{
       model: "claude-sonnet-4-0",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}],
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}],
       provider_options: %{
         "anthropic" => %{
           "beta_headers" => ["interleaved-thinking-2025-05-14"],
@@ -190,7 +193,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "anthropic adapter parses tool/thinking content blocks" do
     request = %Request{
       model: "claude-sonnet-4-0",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     http_client = fn _req ->
@@ -222,7 +225,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "anthropic adapter maps stop_reason and usage fields" do
     request = %Request{
       model: "claude-sonnet-4-0",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     http_client = fn _req ->
@@ -259,10 +262,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
     request = %Request{
       model: "claude-sonnet-4-0",
       messages: [
-        %Arbor.Orchestrator.UnifiedLLM.Message{role: :system, content: "system rules"},
-        %Arbor.Orchestrator.UnifiedLLM.Message{role: :developer, content: "developer rules"},
-        %Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "user question"},
-        %Arbor.Orchestrator.UnifiedLLM.Message{
+        %Arbor.LLM.Message{role: :system, content: "system rules"},
+        %Arbor.LLM.Message{role: :developer, content: "developer rules"},
+        %Arbor.LLM.Message{role: :user, content: "user question"},
+        %Arbor.LLM.Message{
           role: :tool,
           content: "tool result",
           metadata: %{"name" => "search"}
@@ -283,7 +286,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
     request = %Request{
       model: "claude-sonnet-4-0",
       messages: [
-        %Arbor.Orchestrator.UnifiedLLM.Message{
+        %Arbor.LLM.Message{
           role: :tool,
           content: ~s({"status":"ok","result":{"value":"x"}}),
           metadata: %{"tool_call_id" => "c77", "name" => "lookup"}
@@ -299,7 +302,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   end
 
   test "openai adapter maps text+image parts to native input content" do
-    message = %Arbor.Orchestrator.UnifiedLLM.Message{
+    message = %Arbor.LLM.Message{
       role: :user,
       content: [
         ContentPart.text("look at this"),
@@ -320,9 +323,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
     request = %Request{
       model: "gpt-5",
       messages: [
-        %Arbor.Orchestrator.UnifiedLLM.Message{role: :system, content: "system rules"},
-        %Arbor.Orchestrator.UnifiedLLM.Message{role: :developer, content: "developer rules"},
-        %Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "user question"}
+        %Arbor.LLM.Message{role: :system, content: "system rules"},
+        %Arbor.LLM.Message{role: :developer, content: "developer rules"},
+        %Arbor.LLM.Message{role: :user, content: "user question"}
       ]
     }
 
@@ -337,7 +340,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
     request = %Request{
       model: "gpt-5",
       messages: [
-        %Arbor.Orchestrator.UnifiedLLM.Message{
+        %Arbor.LLM.Message{
           role: :tool,
           content: ~s({"status":"error","error":"boom"}),
           metadata: %{"tool_call_id" => "c88", "name" => "lookup"}
@@ -356,7 +359,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "openai adapter merges provider options into request body" do
     request = %Request{
       model: "gpt-5",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}],
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}],
       provider_options: %{
         "openai" => %{
           "reasoning" => %{"effort" => "high"},
@@ -373,7 +376,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "openai adapter maps reasoning_effort to reasoning.effort" do
     request = %Request{
       model: "gpt-5",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}],
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}],
       reasoning_effort: "medium"
     }
 
@@ -390,7 +393,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
 
     assert :ok = File.write(tmp, <<137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4>>)
 
-    message = %Arbor.Orchestrator.UnifiedLLM.Message{
+    message = %Arbor.LLM.Message{
       role: :user,
       content: [ContentPart.image_file(tmp)]
     }
@@ -409,9 +412,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
     request = %Request{
       model: "gemini-2.5-pro",
       messages: [
-        %Arbor.Orchestrator.UnifiedLLM.Message{role: :system, content: "system rules"},
-        %Arbor.Orchestrator.UnifiedLLM.Message{role: :developer, content: "developer rules"},
-        %Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "user question"}
+        %Arbor.LLM.Message{role: :system, content: "system rules"},
+        %Arbor.LLM.Message{role: :developer, content: "developer rules"},
+        %Arbor.LLM.Message{role: :user, content: "user question"}
       ]
     }
 
@@ -431,7 +434,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
     request = %Request{
       model: "gemini-2.5-pro",
       messages: [
-        %Arbor.Orchestrator.UnifiedLLM.Message{
+        %Arbor.LLM.Message{
           role: :tool,
           content: ~s({"status":"ok","result":{"value":"x"}}),
           metadata: %{"tool_call_id" => "c99", "name" => "lookup"}
@@ -452,7 +455,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "gemini adapter merges provider options into request body" do
     request = %Request{
       model: "gemini-2.5-pro",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}],
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}],
       provider_options: %{
         "gemini" => %{
           "safetySettings" => [
@@ -469,7 +472,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   end
 
   test "adapters gracefully degrade unsupported content kinds to text markers" do
-    message = %Arbor.Orchestrator.UnifiedLLM.Message{
+    message = %Arbor.LLM.Message{
       role: :user,
       content: [ContentPart.audio_base64(<<1, 2, 3, 4>>, "audio/wav")]
     }
@@ -498,7 +501,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   end
 
   test "adapters degrade unsupported document parts to text markers" do
-    message = %Arbor.Orchestrator.UnifiedLLM.Message{
+    message = %Arbor.LLM.Message{
       role: :user,
       content: [ContentPart.document_url("https://example.com/spec.pdf")]
     }
@@ -527,7 +530,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   end
 
   test "adapters return warnings for downgraded unsupported kinds" do
-    message = %Arbor.Orchestrator.UnifiedLLM.Message{
+    message = %Arbor.LLM.Message{
       role: :user,
       content: [ContentPart.audio_base64(<<1, 2, 3, 4>>, "audio/wav")]
     }
@@ -573,7 +576,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "gemini adapter targets native generateContent endpoint" do
     request = %Request{
       model: "gemini-2.5-pro",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     parent = self()
@@ -602,7 +605,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "gemini adapter parses functionCall/functionResponse/thinking parts" do
     request = %Request{
       model: "gemini-2.5-pro",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     http_client = fn _req ->
@@ -649,7 +652,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "gemini adapter preserves functionResponse name on parse and serialize" do
     request = %Request{
       model: "gemini-2.5-pro",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     http_client = fn _req ->
@@ -680,7 +683,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
     tool_result = Enum.find(parsed.content_parts, &(&1.kind == :tool_result))
     assert tool_result.name == "lookup"
 
-    message = %Arbor.Orchestrator.UnifiedLLM.Message{role: :assistant, content: [tool_result]}
+    message = %Arbor.LLM.Message{role: :assistant, content: [tool_result]}
 
     built =
       Gemini.build_request(%Request{model: "gemini-2.5-pro", messages: [message]}, "gk-test", [])
@@ -694,7 +697,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "gemini adapter maps finish reason and usage metadata" do
     request = %Request{
       model: "gemini-2.5-pro",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     http_client = fn _req ->
@@ -730,7 +733,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "gemini adapter maps image-specific finish reasons to content_filter" do
     request = %Request{
       model: "gemini-2.5-pro",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     http_client = fn _req ->
@@ -757,7 +760,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "http errors map retryable and retry-after on provider error" do
     request = %Request{
       model: "gpt-5",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     http_client = fn _req ->
@@ -788,7 +791,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "openai adapter stream maps responses events to stream events" do
     request = %Request{
       model: "gpt-5",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     stream_client = fn _req ->
@@ -828,7 +831,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "anthropic adapter stream maps content deltas and finish" do
     request = %Request{
       model: "claude-sonnet-4-0",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     stream_client = fn _req ->
@@ -865,7 +868,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdaptersTest do
   test "gemini adapter stream maps chunk deltas tool calls and finish" do
     request = %Request{
       model: "gemini-2.5-pro",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     stream_client = fn _req ->

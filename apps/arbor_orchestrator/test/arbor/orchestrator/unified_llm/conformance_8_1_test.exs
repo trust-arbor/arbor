@@ -2,7 +2,13 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance81Test do
   use ExUnit.Case, async: false
   @moduletag :fast
 
-  alias Arbor.Orchestrator.UnifiedLLM.{Client, ConfigurationError, Request, Response}
+  alias Arbor.Orchestrator.UnifiedLLM.Client
+
+  alias Arbor.LLM.ConfigurationError
+
+  alias Arbor.LLM.Request
+
+  alias Arbor.LLM.Response
 
   defmodule Conformance81Adapter do
     @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter

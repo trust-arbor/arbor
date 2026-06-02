@@ -1,7 +1,7 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.ToolCallValidator do
+defmodule Arbor.LLM.ToolCallValidator do
   @moduledoc false
 
-  alias Arbor.Orchestrator.UnifiedLLM.Tool
+  alias Arbor.LLM.Tool
 
   @spec validate(map(), [Tool.t()]) :: :ok | {:error, term()}
   def validate(call, tools) when is_map(call) do

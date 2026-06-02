@@ -3,7 +3,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance83Test do
   @moduletag :fast
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{Anthropic, Gemini, OpenAI}
-  alias Arbor.Orchestrator.UnifiedLLM.{ContentPart, Message, Request}
+  alias Arbor.LLM.ContentPart
+  alias Arbor.LLM.Message
+  alias Arbor.LLM.Request
 
   test "8.3 text-only messages translate for all providers" do
     request = %Request{model: "demo", messages: [Message.new(:user, "hello")]}

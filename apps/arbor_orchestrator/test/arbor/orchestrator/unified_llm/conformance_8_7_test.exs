@@ -2,7 +2,15 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance87Test do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Orchestrator.UnifiedLLM.{Client, Message, Request, Response, Tool}
+  alias Arbor.Orchestrator.UnifiedLLM.Client
+
+  alias Arbor.LLM.Message
+
+  alias Arbor.LLM.Request
+
+  alias Arbor.LLM.Response
+
+  alias Arbor.LLM.Tool
 
   defmodule ToolLoopAdapter do
     @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter

@@ -28,8 +28,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.LMStudio do
   @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible
-  alias Arbor.Orchestrator.UnifiedLLM.{ContentPart, Request}
-
+  alias Arbor.LLM.ContentPart
+  alias Arbor.LLM.Request
   @default_base_url "http://localhost:1234/v1"
 
   @impl true

@@ -1,7 +1,7 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.Response do
+defmodule Arbor.LLM.Response do
   @moduledoc false
 
-  alias Arbor.Orchestrator.UnifiedLLM.ContentPart
+  alias Arbor.LLM.ContentPart
 
   @type finish_reason :: :stop | :length | :tool_calls | :content_filter | :error | :other
 

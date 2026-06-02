@@ -1,7 +1,9 @@
 defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdapter do
   @moduledoc false
 
-  alias Arbor.Orchestrator.UnifiedLLM.{Request, Response}
+  alias Arbor.LLM.Request
+
+  alias Arbor.LLM.Response
 
   @type embed_result :: %{
           embedding: [float()],

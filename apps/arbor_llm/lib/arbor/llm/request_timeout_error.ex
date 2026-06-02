@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.RequestTimeoutError do
+defmodule Arbor.LLM.RequestTimeoutError do
   @moduledoc false
 
   defexception [:message, :timeout_ms]

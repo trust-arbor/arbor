@@ -2,8 +2,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.XAITest do
   use ExUnit.Case, async: true
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.XAI
-  alias Arbor.Orchestrator.UnifiedLLM.{Message, Request, Response}
-
+  alias Arbor.LLM.Message
+  alias Arbor.LLM.Request
+  alias Arbor.LLM.Response
   @moduletag :fast
 
   defp mock_http(response) do

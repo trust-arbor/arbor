@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.StreamEvent do
+defmodule Arbor.LLM.StreamEvent do
   @moduledoc false
 
   @type type :: :start | :delta | :tool_call | :tool_result | :step_finish | :finish | :error
