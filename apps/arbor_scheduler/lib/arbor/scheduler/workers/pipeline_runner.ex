@@ -65,7 +65,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
   # surface this worker targets is subject to refinement as the
   # scheduler matures — start with the simplest viable shape.
   defp run_pipeline(path, context) do
-    engine = Arbor.Orchestrator.Engine
+    orchestrator = Arbor.Orchestrator
 
     cond do
       # Check inputs (cheap, deterministic) before dispatching. A missing
@@ -75,12 +75,14 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
       not File.exists?(path) ->
         {:error, :pipeline_not_found}
 
-      not Code.ensure_loaded?(engine) ->
+      not Code.ensure_loaded?(orchestrator) ->
         {:error, :orchestrator_unavailable}
 
       true ->
+        # Orchestrator.run_file/2 accepts opts including :initial_values
+        # which seeds the pipeline's shared context.
         # credo:disable-for-next-line Credo.Check.Refactor.Apply
-        apply(engine, :run_file, [path, context])
+        apply(orchestrator, :run_file, [path, [initial_values: context]])
     end
   rescue
     e ->

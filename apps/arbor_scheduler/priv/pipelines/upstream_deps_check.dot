@@ -1,0 +1,51 @@
+// Upstream Deps Check Pipeline
+//
+// First reference pipeline for Arbor.Scheduler. Demonstrates the
+// minimum-viable shape: a single shell node that runs a self-contained
+// script which produces a markdown report on disk.
+//
+// Configuration:
+//   - Repos to check come from ~/.arbor/upstream_deps.conf (one per line,
+//     blank lines and `#` comments ignored).
+//   - Report lands at ~/.arbor/reports/upstream-deps/YYYY-MM-DD.md.
+//   - Script writes the report atomically; its stdout is just the path,
+//     which the orchestrator captures under `shell.run_check.output`.
+//
+// Scheduling:
+//   Add to `:arbor_scheduler, Oban` crontab in config to run daily:
+//     {"0 6 * * *", Arbor.Scheduler.Workers.PipelineRunner,
+//       args: %{"pipeline_path" => "apps/arbor_scheduler/priv/pipelines/upstream_deps_check.dot"}}
+//
+// Manual invocation (from a remote shell on a running BEAM):
+//     Arbor.Scheduler.enqueue_pipeline(
+//       "apps/arbor_scheduler/priv/pipelines/upstream_deps_check.dot"
+//     )
+//
+// Future enhancements (not v1):
+//   - LLM categorization of deltas (security / breaking / feature / cosmetic)
+//   - Per-repo "interesting commits" filter
+//   - Aggregate into morning digest meta-pipeline
+//   - Notify via channel when N commits exceed a threshold
+
+digraph UpstreamDepsCheck {
+  graph [
+    goal="Check configured upstream repos for new commits and write a daily report",
+    label="Upstream Deps Check"
+  ]
+
+  start [shape=Mdiamond]
+
+  run_check [
+    type="shell",
+    command="bash apps/arbor_scheduler/priv/scripts/upstream_deps_check.sh",
+    sandbox="none",
+    timeout="120000",
+    on_error="fail",
+    data_class="internal"
+  ]
+
+  done [shape=Msquare]
+
+  start -> run_check
+  run_check -> done
+}
