@@ -1,7 +1,7 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.AcpTest do
+defmodule Arbor.AI.LLM.Adapter.AcpTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Orchestrator.UnifiedLLM.Adapters.Acp
+  alias Arbor.AI.LLM.Adapter.Acp
   alias Arbor.LLM.Message
   alias Arbor.LLM.Request
   @moduletag :fast

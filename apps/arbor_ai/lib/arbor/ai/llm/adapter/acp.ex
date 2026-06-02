@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
+defmodule Arbor.AI.LLM.Adapter.Acp do
   @moduledoc """
   Universal ACP provider adapter for the UnifiedLLM system.
 
