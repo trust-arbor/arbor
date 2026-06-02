@@ -15,7 +15,15 @@ defmodule Arbor.Security.Role do
 
   ## Built-in Roles
 
-  - `:admin` — full access to all resources (default for OIDC-authenticated humans)
+  - `:admin` — full access to all resources (`arbor://**`)
+  - `:viewer` — least-privilege default for OIDC-authenticated humans;
+    only ambient signal subscription
+  - `:dev_admin` — only available when
+    `config :arbor_security, :enable_dev_admin_role, true`. Bundles the
+    capabilities that were previously auto-granted in dev (consensus admin
+    + trust auto-promote wildcard + security signals) into one role so the
+    dev bootstrap is a single `assign_role(human_id, :dev_admin)` call.
+    Never exposed in production unless explicitly enabled.
   """
 
   alias Arbor.Security.Config
@@ -68,6 +76,25 @@ defmodule Arbor.Security.Role do
   # User config overrides built-in definitions for the same name.
   defp all_roles do
     configured = Application.get_env(:arbor_security, :roles, %{})
-    Map.merge(@builtin_roles, configured)
+
+    @builtin_roles
+    |> Map.merge(dev_admin_role())
+    |> Map.merge(configured)
+  end
+
+  # OQ-2: :dev_admin is only registered when the operator explicitly opts in.
+  # Production must not see this role even by accident.
+  defp dev_admin_role do
+    if Application.get_env(:arbor_security, :enable_dev_admin_role, false) do
+      %{
+        dev_admin: [
+          "arbor://consensus/admin",
+          "arbor://trust/auto_promote/**",
+          "arbor://signals/subscribe/security"
+        ]
+      }
+    else
+      %{}
+    end
   end
 end

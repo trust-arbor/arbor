@@ -143,4 +143,42 @@ defmodule Arbor.Security.RoleTest do
       assert length(caps) == 2
     end
   end
+
+  describe ":dev_admin role (OQ-2)" do
+    setup do
+      original = Application.get_env(:arbor_security, :enable_dev_admin_role)
+
+      on_exit(fn ->
+        if is_nil(original) do
+          Application.delete_env(:arbor_security, :enable_dev_admin_role)
+        else
+          Application.put_env(:arbor_security, :enable_dev_admin_role, original)
+        end
+      end)
+
+      :ok
+    end
+
+    test "is unavailable by default (production posture)" do
+      Application.delete_env(:arbor_security, :enable_dev_admin_role)
+      assert {:error, :unknown_role} = Role.get(:dev_admin)
+      refute :dev_admin in Role.list()
+    end
+
+    test "is unavailable when the flag is explicitly false" do
+      Application.put_env(:arbor_security, :enable_dev_admin_role, false)
+      assert {:error, :unknown_role} = Role.get(:dev_admin)
+    end
+
+    test "becomes available with the bundled dev capabilities when the flag is true" do
+      Application.put_env(:arbor_security, :enable_dev_admin_role, true)
+
+      assert {:ok, uris} = Role.get(:dev_admin)
+      assert "arbor://consensus/admin" in uris
+      assert "arbor://trust/auto_promote/**" in uris
+      assert "arbor://signals/subscribe/security" in uris
+
+      assert :dev_admin in Role.list()
+    end
+  end
 end
