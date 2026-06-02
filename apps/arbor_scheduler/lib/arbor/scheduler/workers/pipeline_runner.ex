@@ -30,6 +30,8 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
 
   require Logger
 
+  alias Arbor.Scheduler.Identity
+
   @impl Oban.Worker
   def perform(%Oban.Job{args: %{"pipeline_path" => path} = args}) do
     initial_context = Map.get(args, "args", %{})
@@ -80,9 +82,29 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
 
       true ->
         # Orchestrator.run_file/2 accepts opts including :initial_values
-        # which seeds the pipeline's shared context.
+        # (seeds the pipeline's shared context) and :signer (a function
+        # the CapabilityCheck middleware uses to mint a signed_request
+        # per node). The scheduler is a system actor with its own
+        # cryptographic identity (Arbor.Scheduler.Identity) — see that
+        # module's moduledoc for the provenance + audit story.
+        #
+        # Two values must agree for CapabilityCheck to pass:
+        #   1. assigns.agent_id — sourced from context["session.agent_id"]
+        #   2. assigns.signer   — sourced from opts[:signer]
+        # The signed_request the signer mints carries its own principal;
+        # if it doesn't match assigns.agent_id the middleware rejects
+        # with :identity_mismatch. So we seed both from the same Identity.
+        seeded_context = seed_session_identity(context, Identity.agent_id())
+        signer = Identity.signer()
+
         # credo:disable-for-next-line Credo.Check.Refactor.Apply
-        apply(orchestrator, :run_file, [path, [initial_values: context]])
+        apply(orchestrator, :run_file, [
+          path,
+          [
+            initial_values: seeded_context,
+            signer: signer
+          ]
+        ])
     end
   rescue
     e ->
@@ -96,5 +118,30 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
     :throw, value ->
       Logger.error("[Scheduler] PipelineRunner throw: #{inspect(value)}")
       {:error, {:throw, value}}
+  end
+
+  @doc """
+  Build the initial pipeline context with the scheduler's authoritative
+  `session.agent_id`.
+
+  Public so a security-regression test can hit it directly. Any value
+  the caller (Oban args, operator, attacker) places under
+  `"session.agent_id"` is overwritten by the scheduler's identity —
+  the assigns layer downstream uses that key to derive the principal
+  CapabilityCheck compares against the signer's signed_request.
+  Without this override an attacker who controls the Oban payload
+  could spoof the agent_id.
+
+  When `identity_agent_id` is `nil` (Identity GenServer not running),
+  any pre-seeded `"session.agent_id"` is stripped rather than
+  preserved — fail-closed, no implicit trust of attacker-supplied
+  values when the identity layer is absent.
+  """
+  @spec seed_session_identity(map(), String.t() | nil) :: map()
+  def seed_session_identity(context, identity_agent_id) when is_map(context) do
+    case identity_agent_id do
+      nil -> Map.delete(context, "session.agent_id")
+      id when is_binary(id) -> Map.put(context, "session.agent_id", id)
+    end
   end
 end
