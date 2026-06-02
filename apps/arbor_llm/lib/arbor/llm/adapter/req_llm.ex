@@ -152,22 +152,40 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
            %{embeddings: [[float()]], model: String.t(), usage: map(), dimensions: pos_integer()}}
           | {:error, term()}
   def embed(texts, model, opts) when is_list(texts) and is_binary(model) do
-    provider = Keyword.get(opts, :provider) || infer_provider_for_embedding(model)
+    arbor_provider = Keyword.get(opts, :provider) || infer_provider_for_embedding(model)
 
     cond do
-      provider == nil ->
+      arbor_provider == nil ->
         {:error, {:invalid_request, :missing_provider_for_embedding}}
 
       texts == [] ->
         {:error, {:invalid_request, :empty_input}}
 
       true ->
-        do_embed(provider <> ":" <> model, texts, opts)
+        # Same struct-vs-string split as build_model_spec/1 — local
+        # LMs bypass the catalog because operator-pulled embedding
+        # models like `nomic-embed-text` aren't in llm_db.
+        case build_embed_model_spec(arbor_provider, model) do
+          {:ok, model_spec} ->
+            do_embed(arbor_provider, model_spec, texts, opts)
+
+          {:error, _} = err ->
+            err
+        end
     end
   end
 
-  defp do_embed(model_spec, texts, opts) do
-    req_opts = build_embed_opts(opts)
+  defp build_embed_model_spec(arbor_provider, model) do
+    if local_provider?(arbor_provider) do
+      build_local_model_struct(arbor_provider, model)
+    else
+      req_llm_provider = Map.get(@arbor_to_req_llm_provider, arbor_provider, arbor_provider)
+      {:ok, req_llm_provider <> ":" <> model}
+    end
+  end
+
+  defp do_embed(arbor_provider, model_spec, texts, opts) do
+    req_opts = build_embed_opts(arbor_provider, opts)
 
     case call_req_llm_embed(model_spec, texts, req_opts) do
       {:ok, embeddings, usage} when is_list(embeddings) ->
@@ -184,14 +202,55 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     end
   end
 
-  defp build_embed_opts(opts) do
+  defp build_embed_opts(arbor_provider, opts) do
+    # Same local-LM base_url defaulting as build_req_opts/2 — Ollama
+    # serves embeddings at the OpenAI-compatible /v1/embeddings endpoint
+    # so the openai-via-base_url-override routing applies identically.
+    caller_base_url = Keyword.get(opts, :base_url)
+    inferred_base_url = caller_base_url || default_base_url_for(arbor_provider)
+
     []
-    |> maybe_merge(:base_url, Keyword.get(opts, :base_url))
+    |> maybe_merge(:base_url, inferred_base_url)
     |> maybe_merge(:provider_options, Keyword.get(opts, :provider_options))
     |> maybe_merge(:dimensions, Keyword.get(opts, :dimensions))
   end
 
-  defp call_req_llm_embed(model_spec, texts, opts) do
+  defp call_req_llm_embed(%LLMDB.Model{} = model, texts, opts) do
+    # Local LM path: bypass ReqLLM.Embedding.embed/3's validate_model
+    # gate (which hard-checks llm_db's embedding-capable catalog).
+    # Operator-pulled local models aren't in the catalog, so the gate
+    # would reject them before reaching the network. We call the
+    # provider's prepare_request + Req.request directly instead — the
+    # shape is identical to the openai embeddings API which Ollama
+    # serves at /v1/embeddings.
+    with {:ok, provider_module} <- ReqLLM.provider(model.provider),
+         {:ok, request} <- provider_module.prepare_request(:embedding, model, texts, opts),
+         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 <-
+           Req.request(request) do
+      extract_embeddings(body)
+    else
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error,
+         ProviderError.exception(
+           message: "embedding HTTP #{status}",
+           status: status,
+           retryable: retryable_status?(status),
+           details: %{source: :req_llm_direct, body: inspect(body) |> String.slice(0, 500)}
+         )}
+
+      {:error, _} = err ->
+        err
+    end
+  rescue
+    e -> {:error, translate_exception(e)}
+  catch
+    :exit, reason -> {:error, translate_exit(reason)}
+  end
+
+  defp call_req_llm_embed(model_spec, texts, opts) when is_binary(model_spec) do
+    # Cloud path: standard ReqLLM.Embedding.embed/3. The validate_model
+    # check passes because cloud embedding models are in llm_db's
+    # catalog with embeddings capability advertised.
     case ReqLLM.Embedding.embed(model_spec, texts, opts) do
       {:ok, %{embeddings: embeddings, usage: usage}} -> {:ok, embeddings, usage}
       {:ok, %{embedding: embedding, usage: usage}} -> {:ok, [embedding], usage}
@@ -204,6 +263,21 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   catch
     :exit, reason -> {:error, translate_exit(reason)}
   end
+
+  # Extract embeddings from a provider's decoded embedding response.
+  # OpenAI shape: `%{"data" => [%{"embedding" => [...], ...}, ...], "usage" => %{...}}`.
+  # Ollama serves the same shape via its OpenAI-compatible endpoint.
+  defp extract_embeddings(%{"data" => data} = body) when is_list(data) do
+    embeddings =
+      Enum.map(data, fn
+        %{"embedding" => e} -> e
+        e when is_list(e) -> e
+      end)
+
+    {:ok, embeddings, Map.get(body, "usage", %{})}
+  end
+
+  defp extract_embeddings(body), do: {:error, {:unexpected_embed_response, body}}
 
   defp dimensions_of([first | _]) when is_list(first), do: length(first)
   defp dimensions_of(_), do: 0
@@ -256,14 +330,21 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   # ── Translation: Arbor → ReqLLM ─────────────────────────────────────
 
   @doc """
-  Build the `"provider:model"` string req_llm expects.
+  Build the model_spec req_llm expects.
 
-  Translates Arbor's provider strings (`gemini`, `lm_studio`,
-  `ollama`) to req_llm's provider names (`google`, `openai` with
-  base_url override). See `@arbor_to_req_llm_provider`. Public for
-  testability — production code goes through `complete/2`.
+  For cloud providers we return a `"provider:model"` string, which
+  triggers `ReqLLM.model/1`'s llm_db catalog lookup — that's how
+  pricing and capability metadata get attached to the response. For
+  local-LM Arbor providers (lm_studio, ollama) we construct an
+  `LLMDB.Model` struct directly because llm_db's catalog doesn't know
+  about arbitrary operator-pulled models like `nomic-embed-text` or
+  `llama-3.2-3b`. Without the struct path, `ReqLLM.model("openai:nomic-embed-text")`
+  returns `{:error, :not_found}` and dispatch fails before reaching
+  the network.
+
+  Public for testability — production code goes through `complete/2`.
   """
-  @spec build_model_spec(Request.t()) :: {:ok, String.t()} | {:error, term()}
+  @spec build_model_spec(Request.t()) :: {:ok, String.t() | LLMDB.Model.t()} | {:error, term()}
   def build_model_spec(%Request{provider: nil}),
     do: {:error, {:invalid_request, :missing_provider}}
 
@@ -272,16 +353,35 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   def build_model_spec(%Request{provider: provider, model: model})
       when is_binary(provider) and is_binary(model) do
-    case Map.fetch(@arbor_to_req_llm_provider, provider) do
-      {:ok, req_llm_provider} ->
-        {:ok, req_llm_provider <> ":" <> model}
+    if local_provider?(provider) do
+      build_local_model_struct(provider, model)
+    else
+      case Map.fetch(@arbor_to_req_llm_provider, provider) do
+        {:ok, req_llm_provider} ->
+          {:ok, req_llm_provider <> ":" <> model}
 
-      :error ->
-        # Unknown provider — pass through unchanged so an operator can
-        # use a provider req_llm knows about that we haven't mapped
-        # explicitly (e.g. amazon_bedrock, azure, groq).
-        {:ok, provider <> ":" <> model}
+        :error ->
+          # Unknown provider — pass through unchanged so an operator
+          # can use a provider req_llm knows about that we haven't
+          # mapped explicitly (e.g. amazon_bedrock, azure, groq).
+          {:ok, provider <> ":" <> model}
+      end
     end
+  end
+
+  defp local_provider?(provider), do: Map.has_key?(@local_provider_defaults, provider)
+
+  defp build_local_model_struct(arbor_provider, model) do
+    {:ok, req_llm_provider} = Map.fetch(@arbor_to_req_llm_provider, arbor_provider)
+
+    # The schema requires `id`, `model`, and `provider`. Everything
+    # else is nullish — that's what we want for local LMs since
+    # llm_db has no pricing or capability metadata for them.
+    LLMDB.Model.new(%{
+      id: model,
+      model: model,
+      provider: String.to_atom(req_llm_provider)
+    })
   end
 
   @doc """

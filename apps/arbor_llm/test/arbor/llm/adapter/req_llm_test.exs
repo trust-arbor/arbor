@@ -53,12 +53,17 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       assert {:ok, "google:gemini-2.0-flash"} = Adapter.build_model_spec(req)
     end
 
-    test "translates local-LM Arbor providers to 'openai' (base_url override does the rest)" do
-      assert {:ok, "openai:llama-3.2-3b"} =
+    test "local-LM Arbor providers return an LLMDB.Model struct (bypasses catalog lookup)" do
+      # Operator-pulled local models aren't in llm_db's catalog. Passing
+      # `"openai:nomic-embed-text"` as a string would fail with
+      # `:not_found` before reaching the network. The struct path
+      # constructs a minimal Model that req_llm dispatches against the
+      # configured base_url.
+      assert {:ok, %LLMDB.Model{provider: :openai, id: "llama-3.2-3b", model: "llama-3.2-3b"}} =
                Adapter.build_model_spec(%Request{provider: "lm_studio", model: "llama-3.2-3b"})
 
-      assert {:ok, "openai:qwen2.5-coder"} =
-               Adapter.build_model_spec(%Request{provider: "ollama", model: "qwen2.5-coder"})
+      assert {:ok, %LLMDB.Model{provider: :openai, id: "nomic-embed-text"}} =
+               Adapter.build_model_spec(%Request{provider: "ollama", model: "nomic-embed-text"})
     end
 
     test "unknown provider passes through unchanged (operator escape hatch)" do
