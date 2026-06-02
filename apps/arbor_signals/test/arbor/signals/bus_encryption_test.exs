@@ -188,4 +188,119 @@ defmodule Arbor.Signals.BusEncryptionTest do
       Bus.unsubscribe(sub_id)
     end
   end
+
+  describe "channel-encrypted signals (OQ-7 regression)" do
+    alias Arbor.Signals.Channels
+
+    test "security regression (OQ-7): non-member subscriber cannot decrypt channel-encrypted signal" do
+      # OQ-7: pre-fix, Bus.maybe_decrypt_channel_signal called
+      # Channels.get_key(channel_id, signal.source) — keyed on the SENDER.
+      # Anyone subscribed to the topic received decrypted plaintext as long
+      # as the SENDER was a member, regardless of whether the SUBSCRIBER was.
+      # The fix routes through Channels.decrypt_for_member/3 using the
+      # subscriber's principal_id — non-members get __decryption_failed__,
+      # not plaintext.
+      Bus.reset()
+
+      member = "agent_oq7_member_#{System.unique_integer([:positive])}"
+      non_member = "agent_oq7_outsider_#{System.unique_integer([:positive])}"
+
+      {:ok, channel, key} =
+        Channels.create("oq7_channel_#{System.unique_integer([:positive])}", member)
+
+      plaintext = Jason.encode!(%{"secret" => "oq7_value"})
+      iv = :crypto.strong_rand_bytes(12)
+
+      {ct, tag} =
+        :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, "", 16, true)
+
+      payload = %{ciphertext: ct, iv: iv, tag: tag}
+
+      parent = self()
+      handler = fn signal -> send(parent, {:oq7_signal, signal.data}) end
+
+      Application.put_env(
+        :arbor_signals,
+        :subscription_authorizer_module,
+        Arbor.Signals.BusEncryptionTest.AllowAllAuthorizer
+      )
+
+      {:ok, sub_id} = Bus.subscribe("oq7.*", handler, principal_id: non_member)
+
+      signal_a = %{
+        Signal.new(:oq7, :test, %{
+          __channel_encrypted__: true,
+          channel_id: channel.id,
+          sender_id: member,
+          payload: payload
+        })
+        | source: member
+      }
+
+      Bus.publish(signal_a)
+
+      assert_receive {:oq7_signal, delivered_data}, 1000
+
+      # Pre-fix: get_key(channel_id, signal.source) succeeded because the
+      # SENDER was a member, and the non-member subscriber received the
+      # decrypted plaintext. The fix denies — delivered_data shows
+      # __decryption_failed__, not the cleartext.
+      assert Map.has_key?(delivered_data, :__decryption_failed__) or
+               Map.has_key?(delivered_data, "__decryption_failed__"),
+             "Non-member subscriber must NOT receive plaintext — OQ-7 regression. " <>
+               "Got: #{inspect(delivered_data)}"
+
+      refute Map.has_key?(delivered_data, "secret")
+      refute Map.has_key?(delivered_data, :secret)
+
+      Bus.unsubscribe(sub_id)
+    end
+
+    test "subscriber who IS a member receives decrypted plaintext" do
+      Bus.reset()
+
+      member = "agent_oq7_member2_#{System.unique_integer([:positive])}"
+
+      {:ok, channel, key} =
+        Channels.create("oq7_channel_pos_#{System.unique_integer([:positive])}", member)
+
+      plaintext = Jason.encode!(%{"secret" => "oq7_member_value"})
+      iv = :crypto.strong_rand_bytes(12)
+
+      {ct, tag} =
+        :crypto.crypto_one_time_aead(:aes_256_gcm, key, iv, plaintext, "", 16, true)
+
+      payload = %{ciphertext: ct, iv: iv, tag: tag}
+
+      parent = self()
+      handler = fn signal -> send(parent, {:oq7_signal_pos, signal.data}) end
+
+      Application.put_env(
+        :arbor_signals,
+        :subscription_authorizer_module,
+        Arbor.Signals.BusEncryptionTest.AllowAllAuthorizer
+      )
+
+      {:ok, sub_id} = Bus.subscribe("oq7pos.*", handler, principal_id: member)
+
+      signal_b = %{
+        Signal.new(:oq7pos, :test, %{
+          __channel_encrypted__: true,
+          channel_id: channel.id,
+          sender_id: member,
+          payload: payload
+        })
+        | source: member
+      }
+
+      Bus.publish(signal_b)
+
+      assert_receive {:oq7_signal_pos, delivered_data}, 1000
+
+      assert delivered_data["secret"] == "oq7_member_value",
+             "Member subscriber must receive decrypted plaintext. Got: #{inspect(delivered_data)}"
+
+      Bus.unsubscribe(sub_id)
+    end
+  end
 end
