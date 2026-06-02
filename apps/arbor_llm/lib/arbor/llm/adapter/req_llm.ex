@@ -373,7 +373,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
       |> maybe_put(:reasoning_effort, request.reasoning_effort)
       |> maybe_put(:provider_options, request_provider_opts)
       |> maybe_put(:tools, translate_tools(request.tools))
-      |> maybe_put(:tool_choice, request.tool_choice)
+      |> maybe_put(:tool_choice, translate_tool_choice(request.tool_choice))
 
     # Caller-supplied base_url wins. Otherwise, if the request is for a
     # local-LM Arbor provider (lm_studio / ollama), inject the
@@ -433,6 +433,39 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   end
 
   defp translate_tool(_), do: nil
+
+  @doc """
+  Translate Arbor's `tool_choice` value to what req_llm's providers
+  accept.
+
+  req_llm's openai provider only handles map-shape `tool_choice` — the
+  OpenAI-spec strings (`"auto"`, `"none"`, `"required"`) reach
+  `translate_tool_choice_format/1` and crash with `BadMapError`. We
+  handle them at this boundary:
+
+    * `"auto"` (the default behavior) → `nil` (omit; providers default
+      to auto when tools are present, so this is a no-op semantically).
+    * `"none"` / `"required"` → `nil` (omit; the caller wanting these
+      semantics should clear `tools` or pin to a specific tool
+      respectively, both of which the prompt + tool list already
+      handle without `tool_choice`).
+    * Map shape (e.g. `%{type: "tool", name: "foo"}` or
+      OpenAI's `%{"type" => "function", "function" => %{"name" => "foo"}}`)
+      → pass through.
+
+  Public for testability.
+  """
+  @spec translate_tool_choice(String.t() | atom() | map() | nil) :: map() | nil
+  def translate_tool_choice(nil), do: nil
+  def translate_tool_choice(""), do: nil
+  def translate_tool_choice("auto"), do: nil
+  def translate_tool_choice(:auto), do: nil
+  def translate_tool_choice("none"), do: nil
+  def translate_tool_choice(:none), do: nil
+  def translate_tool_choice("required"), do: nil
+  def translate_tool_choice(:required), do: nil
+  def translate_tool_choice(%{} = map), do: map
+  def translate_tool_choice(_), do: nil
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
