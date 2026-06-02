@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.PreflightTest do
+defmodule Arbor.LLM.PreflightTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 

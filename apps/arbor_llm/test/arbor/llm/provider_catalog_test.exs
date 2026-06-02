@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalogTest do
+defmodule Arbor.LLM.ProviderCatalogTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 

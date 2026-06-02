@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
+defmodule Arbor.LLM.ArborActionsExecutorTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
