@@ -377,24 +377,44 @@ Also: `mandatory_enabled?/0` moved from `Application.compile_env` to `Applicatio
 
 ## Cross-cutting consequences
 
-### Operator restoration cheat-sheet (sketch)
+### Operator restoration cheat-sheet (updated 2026-06-01 with the OQ work)
 
-Once Cluster A merges, the smallest operator action that brings dev back to a fully-functional state is:
+After the full remediation branch merges, dev gets back to a fully-functional state with **one IEx call**. Two paths:
+
+**Path A — full wildcard admin (simplest):**
 
 ```elixir
-# Run in iex after first boot post-merge.
-# Replace agent_id below with your own (see SystemAuthority.agent_id() on the old key —
-# or just find the human_ identity in CapabilityStore after first OIDC login).
+# After first OIDC login. Find your human identity in CapabilityStore or
+# from the OidcAuth log line.
 human_id = "human_..."
 
-# Cluster A breaks restored:
-Arbor.Security.grant(principal: human_id, resource: "arbor://consensus/admin", metadata: %{source: :dev_bootstrap})
-Arbor.Security.grant(principal: human_id, resource: "arbor://trust/auto_promote/**", metadata: %{source: :dev_bootstrap})
-
-# Plus whatever per-agent caps were in CapabilityStore before P0-5's key rotation.
+# :admin role grants arbor://** (wildcard) which matches every cap the
+# remediation work introduced. One call covers consensus/admin,
+# trust/auto_promote, memory/*, status/*, identity/alias/manage, etc.
+Arbor.Security.assign_role(human_id, :admin)
 ```
 
-If this becomes annoying to do by hand, it earns a `mix arbor.security.bootstrap_dev` task.
+**Path B — scoped dev_admin (cleaner; opt in via config):**
+
+```elixir
+# config/dev.exs
+config :arbor_security, :enable_dev_admin_role, true
+```
+
+```elixir
+# After first OIDC login:
+Arbor.Security.assign_role("human_...", :dev_admin)
+# Grants: arbor://consensus/admin, arbor://trust/auto_promote/**,
+#         arbor://signals/subscribe/security
+```
+
+Either path resolves B-A-1, B-A-2, B-B-1, B-B-2, B-B-3 in one call.
+
+**What this DOESN'T cover (and doesn't need to for normal dev use):**
+
+- **B-A-4**: existing caps signed under the pre-P0-5 authority become unverifiable on first persistent boot. After the `assign_role` above you have admin again, so this is moot in practice.
+- **Strict-mode config flags** (B-B-5, B-B-6, B-C-2, B-C-4): all default off in dev. Production deployments deliberately enable them via `runtime.exs` per the per-entry guidance.
+- **B-B-4**: Consensus requires an authorizer module only in strict mode. Dev default is permissive; production wires `Arbor.Consensus.Authorizers.CapabilityAuthorizer` (shipped in OQ-5).
 
 ### Tests vs deploy parity
 
