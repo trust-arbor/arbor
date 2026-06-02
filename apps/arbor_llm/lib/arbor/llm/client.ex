@@ -49,11 +49,7 @@ defmodule Arbor.LLM.Client do
   # compile-time analysis.
   @acp_adapter Module.concat([:Arbor, :AI, :LLM, :Adapter, :Acp])
 
-  # Local-LM HTTP probe URLs — same defaults Arbor.LLM.Adapter.ReqLLM's
-  # `default_base_url_for/1` uses, operator-overridable through
-  # `config :arbor_orchestrator, <provider>, base_url:`.
-  @ollama_default_base_url "http://localhost:11434/v1"
-  @lm_studio_default_base_url "http://localhost:1234/v1"
+  alias Arbor.LLM.ProviderRegistry
 
   @default_client_key {__MODULE__, :default_client}
 
@@ -828,17 +824,15 @@ defmodule Arbor.LLM.Client do
     end
   end
 
+  # Enumerate cloud providers from ProviderRegistry, look up each
+  # provider's env-key via its req_llm module's `default_env_key/0`,
+  # and keep only providers whose key is set. The provider list, env
+  # var names, and value-presence check all flow from req_llm — Arbor
+  # doesn't carry its own hardcoded copy.
   defp env_provider_keys do
-    [
-      {"openai", System.get_env("OPENAI_API_KEY")},
-      {"anthropic", System.get_env("ANTHROPIC_API_KEY")},
-      {"gemini", System.get_env("GEMINI_API_KEY")},
-      {"zai", System.get_env("ZAI_API_KEY")},
-      {"zai_coding_plan", System.get_env("ZAI_CODING_PLAN_API_KEY")},
-      {"openrouter", System.get_env("OPENROUTER_API_KEY")},
-      {"xai", System.get_env("XAI_API_KEY")}
-    ]
-    |> Enum.filter(fn {_provider, value} -> is_binary(value) and value != "" end)
+    for provider <- ProviderRegistry.list_cloud(),
+        ProviderRegistry.env_available?(provider),
+        do: {provider, :present}
   end
 
   defp discover_env_adapters(opts) do
@@ -855,9 +849,9 @@ defmodule Arbor.LLM.Client do
 
     adapters =
       if Keyword.get(opts, :discover_local, default_discover_local) do
-        adapters
-        |> maybe_add_local_provider("lm_studio", :lm_studio, @lm_studio_default_base_url)
-        |> maybe_add_local_provider("ollama", :ollama, @ollama_default_base_url)
+        Enum.reduce(ProviderRegistry.list_local(), adapters, fn provider, acc ->
+          maybe_add_local_provider(acc, provider)
+        end)
       else
         adapters
       end
@@ -969,19 +963,21 @@ defmodule Arbor.LLM.Client do
 
   defp model_to_map(map) when is_map(map), do: map
 
-  # HTTP probe for local-LM availability. We GET <base_url>/models and
-  # register the generic adapter when the server responds 2xx. Replaces
-  # the Session-5 pattern of borrowing the legacy adapter's
-  # `available?/0` (those adapters are gone in Session 6).
-  defp maybe_add_local_provider(adapters, name, config_key, default_base_url) do
-    base_url =
-      Application.get_env(:arbor_orchestrator, config_key, [])
-      |> Keyword.get(:base_url, default_base_url)
+  # HTTP probe for local-LM availability. We GET <base_url>/models
+  # (where base_url comes from ProviderRegistry, honouring operator
+  # config overrides) and register the generic adapter when the
+  # server responds 2xx.
+  defp maybe_add_local_provider(adapters, provider) do
+    case ProviderRegistry.default_base_url(provider) do
+      nil ->
+        adapters
 
-    if probe_local_http(base_url <> "/models") do
-      Map.put(adapters, name, @generic_adapter)
-    else
-      adapters
+      base_url ->
+        if probe_local_http(base_url <> "/models") do
+          Map.put(adapters, provider, @generic_adapter)
+        else
+          adapters
+        end
     end
   end
 

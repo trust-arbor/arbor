@@ -28,7 +28,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance81Test do
         "UNIFIED_LLM_DEFAULT_PROVIDER" => nil,
         "OPENAI_API_KEY" => nil,
         "ANTHROPIC_API_KEY" => nil,
-        "GEMINI_API_KEY" => nil,
+        "GOOGLE_API_KEY" => nil,
         "ZAI_API_KEY" => nil,
         "ZAI_CODING_PLAN_API_KEY" => nil,
         "OPENROUTER_API_KEY" => nil,
