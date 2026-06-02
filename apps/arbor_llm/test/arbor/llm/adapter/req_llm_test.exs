@@ -401,6 +401,38 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
     end
   end
 
+  describe "translate_tool_choice/1" do
+    test "OpenAI-spec strings 'auto'/'none'/'required' are dropped" do
+      assert Adapter.translate_tool_choice("auto") == nil
+      assert Adapter.translate_tool_choice("none") == nil
+      assert Adapter.translate_tool_choice("required") == nil
+    end
+
+    test "atom forms of the same are dropped" do
+      assert Adapter.translate_tool_choice(:auto) == nil
+      assert Adapter.translate_tool_choice(:none) == nil
+      assert Adapter.translate_tool_choice(:required) == nil
+    end
+
+    test "nil / empty string pass through as nil" do
+      assert Adapter.translate_tool_choice(nil) == nil
+      assert Adapter.translate_tool_choice("") == nil
+    end
+
+    test "map-shape pins a specific tool — passed through unchanged" do
+      req_llm_form = %{type: "tool", name: "get_weather"}
+      assert Adapter.translate_tool_choice(req_llm_form) == req_llm_form
+
+      openai_form = %{"type" => "function", "function" => %{"name" => "get_weather"}}
+      assert Adapter.translate_tool_choice(openai_form) == openai_form
+    end
+
+    test "unknown shapes default to nil (don't crash req_llm downstream)" do
+      assert Adapter.translate_tool_choice(123) == nil
+      assert Adapter.translate_tool_choice([]) == nil
+    end
+  end
+
   describe "build_req_opts/2 — tools wiring" do
     test "request.tools end up as :tools opt with %ReqLLM.Tool{} structs" do
       req = %Request{
@@ -413,7 +445,10 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       assert [%ReqLLM.Tool{name: "search"}] = opts[:tools]
     end
 
-    test "request.tool_choice is forwarded when set" do
+    test "tool_choice 'auto' is NOT forwarded — providers default to auto when tools present" do
+      # Live-traffic bug surfaced 2026-06-02: req_llm's openai provider
+      # only handles map-shape tool_choice; the OpenAI-spec string
+      # "auto" crashes with BadMapError. Translation drops it.
       req = %Request{
         provider: "openai",
         model: "gpt-4",
@@ -422,7 +457,19 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       }
 
       opts = Adapter.build_req_opts(req, [])
-      assert opts[:tool_choice] == "auto"
+      refute Keyword.has_key?(opts, :tool_choice)
+    end
+
+    test "map-shape tool_choice (pinning a specific tool) is forwarded" do
+      req = %Request{
+        provider: "openai",
+        model: "gpt-4",
+        tools: [tool_map("a")],
+        tool_choice: %{type: "tool", name: "a"}
+      }
+
+      opts = Adapter.build_req_opts(req, [])
+      assert opts[:tool_choice] == %{type: "tool", name: "a"}
     end
 
     test "empty tools list does not add :tools to opts" do
