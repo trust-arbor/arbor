@@ -358,6 +358,19 @@ config :arbor_dashboard,
     %{id: "GLM-4.7", label: "GLM-4.7 (Z.AI)", provider: :zai_coding_plan}
   ]
 
+# arbor_scheduler — Oban substrate. Repo lives in arbor_persistence;
+# scheduler depends on persistence so this reference is safe.
+# The `:crontab` list is the declarative cron table operators edit to
+# add recurring jobs. Initially empty — populate as reference pipelines
+# (upstream-deps check, morning digest, etc.) land in H1.
+config :arbor_scheduler, Oban,
+  repo: Arbor.Persistence.Repo,
+  queues: [default: 10, pipelines: 5, maintenance: 2],
+  plugins: [
+    Oban.Plugins.Pruner,
+    {Oban.Plugins.Cron, crontab: []}
+  ]
+
 # Dashboard endpoint
 config :arbor_dashboard, Arbor.Dashboard.Endpoint,
   url: [host: "localhost"],
