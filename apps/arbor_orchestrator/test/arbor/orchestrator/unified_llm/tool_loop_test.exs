@@ -1,7 +1,7 @@
 defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Orchestrator.UnifiedLLM.Client
+  alias Arbor.LLM.Client
 
   alias Arbor.LLM.ContentPart
 
@@ -11,7 +11,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
 
   alias Arbor.LLM.Response
 
-  alias Arbor.Orchestrator.UnifiedLLM.ToolLoop
+  alias Arbor.LLM.ToolLoop
   @moduletag :fast
 
   # --- Mock tool executor ---
@@ -46,7 +46,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
   # --- Mock adapter ---
 
   defmodule LoopAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
     def provider, do: "loop_test"
 
     def complete(%Request{} = request, _opts) do
@@ -86,7 +86,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
   end
 
   defmodule MultiToolAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
     def provider, do: "multi_tool_test"
 
     def complete(%Request{} = request, _opts) do
@@ -132,7 +132,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
   end
 
   defmodule MaxTurnsAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
     def provider, do: "max_turns_test"
 
     def complete(_request, _opts) do
@@ -148,7 +148,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopTest do
   end
 
   defmodule NoToolsAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
     def provider, do: "no_tools_test"
 
     def complete(_request, _opts) do

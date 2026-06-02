@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.Preflight do
+defmodule Arbor.LLM.Preflight do
   @moduledoc """
   Preflight check that the model ids the orchestrator is configured to use are
   actually loaded on their (local) providers.
@@ -23,7 +23,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Preflight do
 
   require Logger
 
-  alias Arbor.Orchestrator.Config
+  # Arbor.Orchestrator.Config lives in arbor_orchestrator (which depends
+  # on arbor_llm). Runtime indirection avoids the cycle — see Client's
+  # @tool_hooks_mod for the same pattern.
+  @orchestrator_config_mod Arbor.Orchestrator.Config
 
   @http_timeout 4_000
 
@@ -99,7 +102,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Preflight do
   """
   @spec configured_models() :: [entry()]
   def configured_models do
-    cfg = Config.preprocessor()
+    config_mod = @orchestrator_config_mod
+    cfg = apply(config_mod, :preprocessor, [])
 
     stage_entries =
       for stage <- [:needs_tools, :complexity, :intent, :decompose, :retrieval],

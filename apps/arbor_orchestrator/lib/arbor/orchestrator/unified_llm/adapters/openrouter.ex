@@ -29,7 +29,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenRouter do
         app_title: "Your App"
   """
 
-  @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+  @behaviour Arbor.LLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible
   alias Arbor.LLM.Request

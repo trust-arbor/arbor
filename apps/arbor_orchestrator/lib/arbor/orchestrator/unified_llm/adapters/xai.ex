@@ -27,7 +27,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.XAI do
   - grok-code-fast-1: 256K context, code-focused
   """
 
-  @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+  @behaviour Arbor.LLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible
   alias Arbor.LLM.Request

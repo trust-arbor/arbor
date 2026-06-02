@@ -27,9 +27,14 @@ defmodule Arbor.LLM.MixProject do
 
   defp deps do
     [
-      # Session 1 (pure data extract): zero in-umbrella deps. arbor_common
-      # and req_llm get added in later sessions as the orchestration core
-      # and the generic adapter land.
+      # Session 2 (behavioral core): arbor_contracts for the Pipeline.Response
+      # and AI.RuntimeContract/Capabilities types ToolLoop and ProviderCatalog
+      # reference; arbor_common for PromptSanitizer, AgentTelemetry.Store, and
+      # ActionRegistry ToolLoop + ArborActionsExecutor reference. req_llm
+      # comes in a later session with the generic adapter.
+      {:arbor_contracts, in_umbrella: true},
+      {:arbor_common, in_umbrella: true},
+      {:req, "~> 0.5"},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end

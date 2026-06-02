@@ -1,9 +1,14 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.Client do
+defmodule Arbor.LLM.Client do
   @moduledoc """
   Minimal unified-llm client scaffold with provider routing and middleware.
   """
 
-  alias Arbor.Orchestrator.ToolHooks
+  # ToolHooks lives in arbor_orchestrator (which depends on arbor_llm).
+  # Compile-time alias would create a cycle. We hold it as a module
+  # attribute and dispatch via apply/3 — the variable indirection hides
+  # the module from compile-time analysis so no warning fires (per the
+  # arbor "Cross-library calls use runtime indirection" pattern).
+  @tool_hooks_mod Arbor.Orchestrator.ToolHooks
 
   alias Arbor.LLM.AbortError
 
@@ -19,7 +24,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
 
   alias Arbor.LLM.Response
 
-  alias Arbor.Orchestrator.UnifiedLLM.Retry
+  alias Arbor.LLM.Retry
 
   alias Arbor.LLM.StreamEvent
 
@@ -29,18 +34,22 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
 
   alias Arbor.LLM.ToolError
 
-  alias Arbor.Orchestrator.UnifiedLLM.Adapters.{
-    Acp,
-    Anthropic,
-    Gemini,
-    LMStudio,
-    Ollama,
-    OpenAI,
-    OpenRouter,
-    XAI,
-    Zai,
-    ZaiCodingPlan
-  }
+  # Adapter modules currently live at Arbor.Orchestrator.UnifiedLLM.Adapters.*
+  # in arbor_orchestrator — they move to Arbor.LLM.Adapters.* in Session 3,
+  # at which point this whole list collapses to a single generic adapter.
+  # See ProviderCatalog for the same pattern; this prefix is the temporary
+  # bridge that keeps arbor_llm out of a cycle with arbor_orchestrator.
+  @adapter_prefix [:Arbor, :Orchestrator, :UnifiedLLM, :Adapters]
+  @adapter_acp Module.concat(@adapter_prefix ++ [:Acp])
+  @adapter_anthropic Module.concat(@adapter_prefix ++ [:Anthropic])
+  @adapter_gemini Module.concat(@adapter_prefix ++ [:Gemini])
+  @adapter_lm_studio Module.concat(@adapter_prefix ++ [:LMStudio])
+  @adapter_ollama Module.concat(@adapter_prefix ++ [:Ollama])
+  @adapter_openai Module.concat(@adapter_prefix ++ [:OpenAI])
+  @adapter_openrouter Module.concat(@adapter_prefix ++ [:OpenRouter])
+  @adapter_xai Module.concat(@adapter_prefix ++ [:XAI])
+  @adapter_zai Module.concat(@adapter_prefix ++ [:Zai])
+  @adapter_zai_coding_plan Module.concat(@adapter_prefix ++ [:ZaiCodingPlan])
 
   @default_client_key {__MODULE__, :default_client}
 
@@ -611,7 +620,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
       arguments: arguments
     }
 
-    pre_result = ToolHooks.run(:pre, hook_for(hooks, :pre), pre_payload, opts)
+    hooks_mod = @tool_hooks_mod
+    pre_result = apply(hooks_mod, :run, [:pre, hook_for(hooks, :pre), pre_payload, opts])
     emit_step(on_step, Map.merge(%{type: :tool_hook_pre, tool: name, id: id}, pre_result))
 
     output =
@@ -633,7 +643,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
       result: output
     }
 
-    post_result = ToolHooks.run(:post, hook_for(hooks, :post), post_payload, opts)
+    post_result = apply(hooks_mod, :run, [:post, hook_for(hooks, :post), post_payload, opts])
     emit_step(on_step, Map.merge(%{type: :tool_hook_post, tool: name, id: id}, post_result))
 
     Message.new(:tool, Jason.encode!(output), %{"tool_call_id" => id, "name" => name})
@@ -824,13 +834,13 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
       |> Enum.reduce(%{}, fn {provider, _value}, acc ->
         adapter =
           case provider do
-            "openai" -> OpenAI
-            "anthropic" -> Anthropic
-            "gemini" -> Gemini
-            "zai" -> Zai
-            "zai_coding_plan" -> ZaiCodingPlan
-            "openrouter" -> OpenRouter
-            "xai" -> XAI
+            "openai" -> @adapter_openai
+            "anthropic" -> @adapter_anthropic
+            "gemini" -> @adapter_gemini
+            "zai" -> @adapter_zai
+            "zai_coding_plan" -> @adapter_zai_coding_plan
+            "openrouter" -> @adapter_openrouter
+            "xai" -> @adapter_xai
             _ -> nil
           end
 
@@ -845,15 +855,15 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
     adapters =
       if Keyword.get(opts, :discover_local, default_discover_local) do
         adapters
-        |> maybe_add_local("lm_studio", LMStudio)
-        |> maybe_add_local("ollama", Ollama)
+        |> maybe_add_local("lm_studio", @adapter_lm_studio)
+        |> maybe_add_local("ollama", @adapter_ollama)
       else
         adapters
       end
 
     # ACP adapter — available when the AcpPool is running in arbor_ai
     if Keyword.get(opts, :discover_acp, true) do
-      maybe_add_acp(adapters, "acp", Acp)
+      maybe_add_acp(adapters, "acp", @adapter_acp)
     else
       adapters
     end

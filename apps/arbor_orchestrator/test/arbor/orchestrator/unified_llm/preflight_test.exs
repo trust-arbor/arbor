@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.PreflightTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Orchestrator.UnifiedLLM.Preflight
+  alias Arbor.LLM.Preflight
 
   describe "strip_quant/1" do
     test "strips an LM Studio @quant suffix" do

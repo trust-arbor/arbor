@@ -58,7 +58,7 @@ defmodule Mix.Tasks.Arbor.DoctorTest do
 
   describe "provider catalog dependency" do
     test "ProviderCatalog module exists" do
-      assert Code.ensure_loaded?(Arbor.Orchestrator.UnifiedLLM.ProviderCatalog)
+      assert Code.ensure_loaded?(Arbor.LLM.ProviderCatalog)
     end
   end
 end

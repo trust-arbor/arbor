@@ -19,7 +19,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
   lives in `arbor_ai` — this adapter bridges to it at runtime.
   """
 
-  @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+  @behaviour Arbor.LLM.ProviderAdapter
 
   alias Arbor.LLM.Request
 

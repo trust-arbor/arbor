@@ -174,7 +174,14 @@ defmodule Mix.Tasks.Arbor.Consult do
 
     {results, mode} =
       if server_node do
-        dispatch_via_server(server_node, opts, question, context, eval_opts, provider_model_display)
+        dispatch_via_server(
+          server_node,
+          opts,
+          question,
+          context,
+          eval_opts,
+          provider_model_display
+        )
       else
         dispatch_consultation(opts, question, context, eval_opts, provider_model_display)
       end
@@ -754,7 +761,7 @@ defmodule Mix.Tasks.Arbor.Consult do
 
     # Initialize UnifiedLLM client if available (for provider:model routing)
     # Use apply/3 to avoid compile-time reference to orchestrator module
-    client_mod = Module.concat([:Arbor, :Orchestrator, :UnifiedLLM, :Client])
+    client_mod = Module.concat([:Arbor, :LLM, :Client])
 
     if Code.ensure_loaded?(client_mod) do
       try do
@@ -796,7 +803,9 @@ defmodule Mix.Tasks.Arbor.Consult do
         {rpc_ask_all(node, question, context, eval_opts, provider_model_display), :standard}
       else
         perspective = parse_perspective(opts[:perspective] || "brainstorming")
-        {rpc_ask_one(node, question, perspective, context, eval_opts, provider_model_display), :standard}
+
+        {rpc_ask_one(node, question, perspective, context, eval_opts, provider_model_display),
+         :standard}
       end
     end
   end
@@ -805,7 +814,13 @@ defmodule Mix.Tasks.Arbor.Consult do
     count = length(@perspectives)
     Mix.shell().info("Consulting all #{count} perspectives via server...\n")
 
-    case :rpc.call(node, Consult, :ask, [AdvisoryLLM, question, [context: context] ++ eval_opts], 600_000) do
+    case :rpc.call(
+           node,
+           Consult,
+           :ask,
+           [AdvisoryLLM, question, [context: context] ++ eval_opts],
+           600_000
+         ) do
       {:ok, results} ->
         {successes, failures} =
           Enum.split_with(results, fn
@@ -838,7 +853,13 @@ defmodule Mix.Tasks.Arbor.Consult do
   defp rpc_ask_one(node, question, perspective, context, eval_opts, provider_model_display) do
     Mix.shell().info("Consulting :#{perspective} via server...\n")
 
-    case :rpc.call(node, Consult, :ask_one, [AdvisoryLLM, question, perspective, [context: context] ++ eval_opts], 300_000) do
+    case :rpc.call(
+           node,
+           Consult,
+           :ask_one,
+           [AdvisoryLLM, question, perspective, [context: context] ++ eval_opts],
+           300_000
+         ) do
       {:ok, eval} ->
         print_evaluation(perspective, eval, provider_model_display)
         [{perspective, eval}]
@@ -856,7 +877,13 @@ defmodule Mix.Tasks.Arbor.Consult do
   defp rpc_ask_multi_model(node, question, perspective, context, eval_opts) do
     Mix.shell().info("Consulting :#{perspective} across all unique providers via server...\n")
 
-    case :rpc.call(node, Consult, :ask_multi_model, [AdvisoryLLM, question, perspective, [context: context] ++ eval_opts], 300_000) do
+    case :rpc.call(
+           node,
+           Consult,
+           :ask_multi_model,
+           [AdvisoryLLM, question, perspective, [context: context] ++ eval_opts],
+           300_000
+         ) do
       {:ok, results} ->
         {successes, failures} =
           Enum.split_with(results, fn

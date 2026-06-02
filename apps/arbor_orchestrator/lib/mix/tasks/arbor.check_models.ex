@@ -17,7 +17,7 @@ defmodule Mix.Tasks.Arbor.CheckModels do
 
   use Mix.Task
 
-  alias Arbor.Orchestrator.UnifiedLLM.Preflight
+  alias Arbor.LLM.Preflight
 
   @impl true
   def run(_args) do

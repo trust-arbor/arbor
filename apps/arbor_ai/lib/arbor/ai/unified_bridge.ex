@@ -1,6 +1,6 @@
 defmodule Arbor.AI.UnifiedBridge do
   @moduledoc """
-  Runtime bridge to Arbor.Orchestrator.UnifiedLLM.Client.
+  Runtime bridge to Arbor.LLM.Client.
 
   Provides a thin wrapper that translates between arbor_ai's option format
   and the unified Client's request format. Falls back gracefully when the
@@ -13,8 +13,8 @@ defmodule Arbor.AI.UnifiedBridge do
 
   require Logger
 
-  @client_module Arbor.Orchestrator.UnifiedLLM.Client
-  @base_module Arbor.Orchestrator.UnifiedLLM
+  @client_module Arbor.LLM.Client
+  @base_module Arbor.LLM
 
   # Maps arbor_ai provider atoms to orchestrator provider strings.
   # CLI and API providers are peers — no special treatment.

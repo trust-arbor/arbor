@@ -17,7 +17,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
       ActionsExecutor.execute("file.read", %{"path" => "/tmp/x"}, ".", agent_id: "agent_001")
 
-  For LLM tool integration, see `Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor`
+  For LLM tool integration, see `Arbor.LLM.ArborActionsExecutor`
   which adds OpenAI format conversion.
   """
 

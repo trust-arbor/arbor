@@ -25,7 +25,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.LMStudio do
       }
   """
 
-  @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+  @behaviour Arbor.LLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible
   alias Arbor.LLM.ContentPart

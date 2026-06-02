@@ -1,6 +1,6 @@
 defmodule Arbor.Consensus.LLMBridge do
   @moduledoc """
-  Thin runtime bridge from arbor_consensus to UnifiedLLM.
+  Thin runtime bridge from arbor_consensus to LLM.
 
   Bridges the hierarchy gap: arbor_consensus (Level 1) cannot compile-time
   depend on arbor_orchestrator (Standalone). Uses `Code.ensure_loaded?/1` +
@@ -25,7 +25,7 @@ defmodule Arbor.Consensus.LLMBridge do
 
   # Client still lives in arbor_orchestrator (will move to arbor_llm in a
   # later session). Request and Message moved to arbor_llm in Session 1.
-  @client_mod Arbor.Orchestrator.UnifiedLLM.Client
+  @client_mod Arbor.LLM.Client
   @request_mod Arbor.LLM.Request
   @message_mod Arbor.LLM.Message
   @ai_mod Arbor.AI

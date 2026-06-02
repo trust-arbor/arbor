@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance87Test do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Orchestrator.UnifiedLLM.Client
+  alias Arbor.LLM.Client
 
   alias Arbor.LLM.Message
 
@@ -13,7 +13,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance87Test do
   alias Arbor.LLM.Tool
 
   defmodule ToolLoopAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
     def provider, do: "tool-loop-conformance"
@@ -44,7 +44,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance87Test do
   end
 
   defmodule EndlessToolAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
     def provider, do: "endless-tool-conformance"
@@ -66,7 +66,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance87Test do
   end
 
   defmodule UnknownToolAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
     def provider, do: "unknown-tool-conformance"

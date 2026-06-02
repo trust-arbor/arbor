@@ -11,7 +11,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoopSigningTest do
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.LLM.Message
   alias Arbor.LLM.Request
-  alias Arbor.Orchestrator.UnifiedLLM.ToolLoop
+  alias Arbor.LLM.ToolLoop
   # A mock tool executor that captures the opts passed to it
   defmodule CapturingExecutor do
     def execute(name, _args, _workdir, opts \\ []) do

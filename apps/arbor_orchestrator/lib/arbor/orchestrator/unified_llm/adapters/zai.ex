@@ -13,7 +13,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Zai do
   the reasoning_content response field.
   """
 
-  @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+  @behaviour Arbor.LLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible
   alias Arbor.LLM.ContentPart

@@ -233,10 +233,10 @@ defmodule Arbor.AI do
       end
 
     # Get the UnifiedLLM client and build request
-    client_mod = Module.concat([:Arbor, :Orchestrator, :UnifiedLLM, :Client])
-    request_mod = Module.concat([:Arbor, :Orchestrator, :UnifiedLLM, :Request])
-    message_mod = Module.concat([:Arbor, :Orchestrator, :UnifiedLLM, :Message])
-    tool_loop_mod = Module.concat([:Arbor, :Orchestrator, :UnifiedLLM, :ToolLoop])
+    client_mod = Module.concat([:Arbor, :LLM, :Client])
+    request_mod = Module.concat([:Arbor, :LLM, :Request])
+    message_mod = Module.concat([:Arbor, :LLM, :Message])
+    tool_loop_mod = Module.concat([:Arbor, :LLM, :ToolLoop])
 
     unless Code.ensure_loaded?(client_mod) and Code.ensure_loaded?(tool_loop_mod) do
       Logger.warning("UnifiedLLM not available for tool-calling")
@@ -1027,9 +1027,9 @@ defmodule Arbor.AI do
   defp embedding_backend_available?(backend) do
     provider_str = embedding_backend_to_provider(backend)
 
-    if Code.ensure_loaded?(Arbor.Orchestrator.UnifiedLLM.ProviderCatalog) do
+    if Code.ensure_loaded?(Arbor.LLM.ProviderCatalog) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      catalog = apply(Arbor.Orchestrator.UnifiedLLM.ProviderCatalog, :all, [[]])
+      catalog = apply(Arbor.LLM.ProviderCatalog, :all, [[]])
       Enum.any?(catalog, fn entry -> entry.provider == provider_str and entry.available? end)
     else
       true

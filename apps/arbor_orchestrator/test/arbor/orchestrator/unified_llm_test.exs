@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
-  alias Arbor.Orchestrator.UnifiedLLM.Client
+  alias Arbor.LLM.Client
 
   alias Arbor.LLM.ConfigurationError
 
@@ -21,7 +21,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
   alias Arbor.LLM.Tool
 
   defmodule TestAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
     def provider, do: "test"
@@ -50,7 +50,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
   end
 
   defmodule ToolLoopAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
     def provider, do: "tool-loop"
@@ -81,7 +81,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
   end
 
   defmodule RetryAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
     def provider, do: "retry-adapter"
@@ -109,7 +109,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
   end
 
   defmodule StepTimeoutAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
     def provider, do: "step-timeout-adapter"
@@ -124,7 +124,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
   end
 
   defmodule TimeoutThenSuccessAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
     def provider, do: "timeout-then-success-adapter"

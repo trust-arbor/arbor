@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.ProviderAdapter do
+defmodule Arbor.LLM.ProviderAdapter do
   @moduledoc false
 
   alias Arbor.LLM.Request

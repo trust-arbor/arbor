@@ -10,7 +10,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ZaiCodingPlan do
   but billed against the coding plan subscription.
   """
 
-  @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+  @behaviour Arbor.LLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{OpenAICompatible, Zai}
   alias Arbor.LLM.Request

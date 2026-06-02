@@ -74,7 +74,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
     # Load LLMDB for model lookup
     ensure_llmdb()
 
-    catalog_mod = Arbor.Orchestrator.UnifiedLLM.ProviderCatalog
+    catalog_mod = Arbor.LLM.ProviderCatalog
 
     unless Code.ensure_loaded?(catalog_mod) do
       Mix.shell().error("ProviderCatalog not available. Is arbor_orchestrator compiled?")

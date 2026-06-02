@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalog do
+defmodule Arbor.LLM.ProviderCatalog do
   @moduledoc """
   Single source of truth for available LLM providers.
 
@@ -26,35 +26,30 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalog do
 
   alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
 
-  alias Arbor.Orchestrator.UnifiedLLM.Adapters.{
-    Acp,
-    Anthropic,
-    Gemini,
-    LMStudio,
-    Ollama,
-    OpenAI,
-    OpenRouter,
-    XAI,
-    Zai,
-    ZaiCodingPlan
-  }
-
   require Logger
 
   @ets_table :arbor_provider_catalog
   @ttl_ms :timer.minutes(5)
 
+  # Adapter modules currently live at Arbor.Orchestrator.UnifiedLLM.Adapters.*
+  # in arbor_orchestrator — they move to Arbor.LLM.Adapters.* in Session 3.
+  # Built via Module.concat atom-lists so the cross-app compile-time dep
+  # is hidden from static analysis (would otherwise create a cycle since
+  # arbor_orchestrator depends on arbor_llm). When Session 3 lands the
+  # generic ReqLLM adapter, this whole list collapses to one entry.
+  @adapter_prefix [:Arbor, :Orchestrator, :UnifiedLLM, :Adapters]
+
   @all_adapters [
-    Anthropic,
-    OpenAI,
-    Gemini,
-    OpenRouter,
-    XAI,
-    Zai,
-    ZaiCodingPlan,
-    Acp,
-    LMStudio,
-    Ollama
+    Module.concat(@adapter_prefix ++ [:Anthropic]),
+    Module.concat(@adapter_prefix ++ [:OpenAI]),
+    Module.concat(@adapter_prefix ++ [:Gemini]),
+    Module.concat(@adapter_prefix ++ [:OpenRouter]),
+    Module.concat(@adapter_prefix ++ [:XAI]),
+    Module.concat(@adapter_prefix ++ [:Zai]),
+    Module.concat(@adapter_prefix ++ [:ZaiCodingPlan]),
+    Module.concat(@adapter_prefix ++ [:Acp]),
+    Module.concat(@adapter_prefix ++ [:LMStudio]),
+    Module.concat(@adapter_prefix ++ [:Ollama])
   ]
 
   @doc """

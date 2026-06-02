@@ -28,7 +28,7 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
 
   alias Arbor.LLM.Message
 
-  alias Arbor.Orchestrator.UnifiedLLM.ProviderCatalog
+  alias Arbor.LLM.ProviderCatalog
 
   alias Arbor.LLM.Request
   @impl true
