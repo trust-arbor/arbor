@@ -34,42 +34,26 @@ defmodule Arbor.LLM.Client do
 
   alias Arbor.LLM.ToolError
 
-  # ── Adapter routing — Session 5 cutover ──────────────────────────────
+  # ── Adapter routing ──────────────────────────────────────────────────
   #
-  # As of Session 5, env-discovered providers route through the generic
-  # `Arbor.LLM.Adapter.ReqLLM` (req_llm transport) by default. Set
-  # `config :arbor_orchestrator, use_generic_llm_adapter: false` to
-  # restore per-provider routing — useful as a rollback during the soak
-  # period while we verify behaviour against live traffic.
-  #
-  # The legacy per-provider modules still live at
-  # `Arbor.Orchestrator.UnifiedLLM.Adapters.*` in arbor_orchestrator and
-  # serve as the rollback target. Session 6 will delete them once we've
-  # had a clean soak period on the generic adapter. ACP routes through
-  # the legacy adapter unconditionally — it's a subprocess runtime, not
-  # an LLM transport, and req_llm doesn't handle it.
-  #
-  # Module.concat atom-lists keep these legacy references hidden from
-  # compile-time analysis so arbor_llm doesn't compile-time-depend on
-  # arbor_orchestrator (which would cycle).
-  @legacy_adapter_prefix [:Arbor, :Orchestrator, :UnifiedLLM, :Adapters]
+  # The generic `Arbor.LLM.Adapter.ReqLLM` handles every API + local-LM
+  # provider through req_llm transport. ACP is a separate Claude Code
+  # CLI subprocess runtime, not an LLM transport — it has its own
+  # adapter in arbor_ai. The Session 5 `use_generic_llm_adapter` flag
+  # was removed in Session 6 after the soak verified the cutover; the
+  # rollback path it gated no longer exists.
+  @generic_adapter Arbor.LLM.Adapter.ReqLLM
+
   # ACP adapter lives in arbor_ai (which depends on arbor_llm) — held
   # as Module.concat atom-list to hide the cross-app reference from
   # compile-time analysis.
   @acp_adapter Module.concat([:Arbor, :AI, :LLM, :Adapter, :Acp])
-  @legacy_adapter_anthropic Module.concat(@legacy_adapter_prefix ++ [:Anthropic])
-  @legacy_adapter_gemini Module.concat(@legacy_adapter_prefix ++ [:Gemini])
-  @legacy_adapter_lm_studio Module.concat(@legacy_adapter_prefix ++ [:LMStudio])
-  @legacy_adapter_ollama Module.concat(@legacy_adapter_prefix ++ [:Ollama])
-  @legacy_adapter_openai Module.concat(@legacy_adapter_prefix ++ [:OpenAI])
-  @legacy_adapter_openrouter Module.concat(@legacy_adapter_prefix ++ [:OpenRouter])
-  @legacy_adapter_xai Module.concat(@legacy_adapter_prefix ++ [:XAI])
-  @legacy_adapter_zai Module.concat(@legacy_adapter_prefix ++ [:Zai])
-  @legacy_adapter_zai_coding_plan Module.concat(@legacy_adapter_prefix ++ [:ZaiCodingPlan])
 
-  # Generic adapter that handles every API + local-LM provider through
-  # req_llm. Used when `use_generic_llm_adapter` is true (the default).
-  @generic_adapter Arbor.LLM.Adapter.ReqLLM
+  # Local-LM HTTP probe URLs — same defaults Arbor.LLM.Adapter.ReqLLM's
+  # `default_base_url_for/1` uses, operator-overridable through
+  # `config :arbor_orchestrator, <provider>, base_url:`.
+  @ollama_default_base_url "http://localhost:11434/v1"
+  @lm_studio_default_base_url "http://localhost:1234/v1"
 
   @default_client_key {__MODULE__, :default_client}
 
@@ -858,13 +842,10 @@ defmodule Arbor.LLM.Client do
   end
 
   defp discover_env_adapters(opts) do
-    use_generic = use_generic_adapter?()
-
     api_adapters =
       env_provider_keys()
       |> Enum.reduce(%{}, fn {provider, _value}, acc ->
-        adapter = api_adapter_for(provider, use_generic)
-        if adapter, do: Map.put(acc, provider, adapter), else: acc
+        Map.put(acc, provider, @generic_adapter)
       end)
 
     adapters = api_adapters
@@ -874,67 +855,18 @@ defmodule Arbor.LLM.Client do
 
     adapters =
       if Keyword.get(opts, :discover_local, default_discover_local) do
-        # Probe via the legacy local-LM adapter's available?/0 (HTTP
-        # GET /models) but register the configured target adapter. With
-        # the flag on, the generic adapter handles traffic but we still
-        # gate registration on the legacy adapter's reachability check.
         adapters
-        |> maybe_add_local_with_probe(
-          "lm_studio",
-          local_adapter_for("lm_studio", use_generic),
-          @legacy_adapter_lm_studio
-        )
-        |> maybe_add_local_with_probe(
-          "ollama",
-          local_adapter_for("ollama", use_generic),
-          @legacy_adapter_ollama
-        )
+        |> maybe_add_local_provider("lm_studio", :lm_studio, @lm_studio_default_base_url)
+        |> maybe_add_local_provider("ollama", :ollama, @ollama_default_base_url)
       else
         adapters
       end
 
-    # ACP runtime is a CLI subprocess, not an LLM transport — req_llm
-    # doesn't handle it. Keep the legacy adapter regardless of flag.
     if Keyword.get(opts, :discover_acp, true) do
       maybe_add_acp(adapters, "acp", @acp_adapter)
     else
       adapters
     end
-  end
-
-  # When the flag is on (default), env-discovered API providers route
-  # through the generic ReqLLM adapter. When off, fall back to the
-  # legacy per-provider modules (the rollback path during soak).
-  defp api_adapter_for(provider, true)
-       when provider in [
-              "openai",
-              "anthropic",
-              "gemini",
-              "zai",
-              "zai_coding_plan",
-              "openrouter",
-              "xai"
-            ],
-       do: @generic_adapter
-
-  defp api_adapter_for("openai", false), do: @legacy_adapter_openai
-  defp api_adapter_for("anthropic", false), do: @legacy_adapter_anthropic
-  defp api_adapter_for("gemini", false), do: @legacy_adapter_gemini
-  defp api_adapter_for("zai", false), do: @legacy_adapter_zai
-  defp api_adapter_for("zai_coding_plan", false), do: @legacy_adapter_zai_coding_plan
-  defp api_adapter_for("openrouter", false), do: @legacy_adapter_openrouter
-  defp api_adapter_for("xai", false), do: @legacy_adapter_xai
-  defp api_adapter_for(_, _), do: nil
-
-  defp local_adapter_for("lm_studio", true), do: @generic_adapter
-  defp local_adapter_for("ollama", true), do: @generic_adapter
-  defp local_adapter_for("lm_studio", false), do: @legacy_adapter_lm_studio
-  defp local_adapter_for("ollama", false), do: @legacy_adapter_ollama
-
-  # Operator-level rollback: set this to false to restore per-provider
-  # routing through the legacy adapters during the soak period.
-  defp use_generic_adapter? do
-    Application.get_env(:arbor_orchestrator, :use_generic_llm_adapter, true)
   end
 
   defp maybe_add_acp(adapters, name, mod) do
@@ -1037,18 +969,31 @@ defmodule Arbor.LLM.Client do
 
   defp model_to_map(map) when is_map(map), do: map
 
-  # Probe the legacy adapter's HTTP health check but register the
-  # (possibly different) target adapter. Called by discover_env_adapters
-  # for local LMs; when `target_module == probe_module` the behaviour
-  # matches a simple available?-and-register.
-  defp maybe_add_local_with_probe(adapters, name, target_module, probe_module) do
-    if probe_module.available?() do
-      Map.put(adapters, name, target_module)
+  # HTTP probe for local-LM availability. We GET <base_url>/models and
+  # register the generic adapter when the server responds 2xx. Replaces
+  # the Session-5 pattern of borrowing the legacy adapter's
+  # `available?/0` (those adapters are gone in Session 6).
+  defp maybe_add_local_provider(adapters, name, config_key, default_base_url) do
+    base_url =
+      Application.get_env(:arbor_orchestrator, config_key, [])
+      |> Keyword.get(:base_url, default_base_url)
+
+    if probe_local_http(base_url <> "/models") do
+      Map.put(adapters, name, @generic_adapter)
     else
       adapters
     end
+  end
+
+  defp probe_local_http(url) do
+    case Req.get(url, receive_timeout: 2_000, retry: false) do
+      {:ok, %Req.Response{status: status}} when status in 200..299 -> true
+      _ -> false
+    end
   rescue
-    _ -> adapters
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   defp blank_to_nil(value) when value in [nil, ""], do: nil
