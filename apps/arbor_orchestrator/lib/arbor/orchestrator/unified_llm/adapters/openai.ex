@@ -4,8 +4,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAI do
   @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.ErrorMapper
-  alias Arbor.Orchestrator.UnifiedLLM.{ContentPart, Message, Request, Response}
-
+  alias Arbor.LLM.ContentPart
+  alias Arbor.LLM.Message
+  alias Arbor.LLM.Request
+  alias Arbor.LLM.Response
   @endpoint "https://api.openai.com/v1/responses"
 
   @impl true
@@ -473,7 +475,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAI do
   end
 
   defp translate_openai_event(%{"type" => "response.created"} = raw, acc) do
-    {%Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+    {%Arbor.LLM.StreamEvent{
        type: :start,
        data: %{"provider" => provider(), "warnings" => Map.get(acc, :warnings, []), "raw" => raw}
      }, acc}
@@ -482,7 +484,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAI do
   defp translate_openai_event(%{"type" => "response.output_text.delta"} = raw, acc) do
     delta = Map.get(raw, "delta", "")
 
-    {%Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+    {%Arbor.LLM.StreamEvent{
        type: :delta,
        data: %{"text" => to_string(delta), "raw" => raw}
      }, acc}
@@ -496,7 +498,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAI do
       "raw" => raw
     }
 
-    {%Arbor.Orchestrator.UnifiedLLM.StreamEvent{type: :tool_call, data: data}, acc}
+    {%Arbor.LLM.StreamEvent{type: :tool_call, data: data}, acc}
   end
 
   defp translate_openai_event(%{"type" => "response.output_item.done"} = raw, acc) do
@@ -510,7 +512,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAI do
         "raw" => raw
       }
 
-      {%Arbor.Orchestrator.UnifiedLLM.StreamEvent{type: :tool_call, data: data}, acc}
+      {%Arbor.LLM.StreamEvent{type: :tool_call, data: data}, acc}
     else
       {nil, acc}
     end
@@ -520,7 +522,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAI do
     usage = usage_from_body(%{"usage" => Map.get(raw, "usage", %{})})
     finish_reason = normalize_finish_reason(Map.get(raw, "finish_reason", "stop"))
 
-    {%Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+    {%Arbor.LLM.StreamEvent{
        type: :finish,
        data: %{"reason" => finish_reason, "usage" => usage, "raw" => raw}
      }, acc}

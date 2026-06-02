@@ -4,18 +4,25 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
 
   alias Arbor.Orchestrator.UnifiedLLM
 
-  alias Arbor.Orchestrator.UnifiedLLM.{
-    AbortError,
-    Client,
-    Message,
-    NoObjectGeneratedError,
-    ProviderError,
-    Request,
-    RequestTimeoutError,
-    Response,
-    StreamEvent,
-    Tool
-  }
+  alias Arbor.LLM.AbortError
+
+  alias Arbor.Orchestrator.UnifiedLLM.Client
+
+  alias Arbor.LLM.Message
+
+  alias Arbor.LLM.NoObjectGeneratedError
+
+  alias Arbor.LLM.ProviderError
+
+  alias Arbor.LLM.Request
+
+  alias Arbor.LLM.RequestTimeoutError
+
+  alias Arbor.LLM.Response
+
+  alias Arbor.LLM.StreamEvent
+
+  alias Arbor.LLM.Tool
 
   defmodule Adapter do
     @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter

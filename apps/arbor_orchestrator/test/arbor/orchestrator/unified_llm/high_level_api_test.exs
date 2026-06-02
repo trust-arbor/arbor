@@ -4,17 +4,23 @@ defmodule Arbor.Orchestrator.UnifiedLLM.HighLevelApiTest do
 
   alias Arbor.Orchestrator.UnifiedLLM
 
-  alias Arbor.Orchestrator.UnifiedLLM.{
-    AbortError,
-    Client,
-    Message,
-    NoObjectGeneratedError,
-    Request,
-    RequestTimeoutError,
-    Response,
-    StreamEvent,
-    Tool
-  }
+  alias Arbor.LLM.AbortError
+
+  alias Arbor.Orchestrator.UnifiedLLM.Client
+
+  alias Arbor.LLM.Message
+
+  alias Arbor.LLM.NoObjectGeneratedError
+
+  alias Arbor.LLM.Request
+
+  alias Arbor.LLM.RequestTimeoutError
+
+  alias Arbor.LLM.Response
+
+  alias Arbor.LLM.StreamEvent
+
+  alias Arbor.LLM.Tool
 
   defmodule HighLevelAdapter do
     @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter

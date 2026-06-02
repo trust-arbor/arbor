@@ -10,8 +10,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.LocalModelsLiveTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{LMStudio, Ollama}
-  alias Arbor.Orchestrator.UnifiedLLM.{Message, Request}
-
+  alias Arbor.LLM.Message
+  alias Arbor.LLM.Request
   @moduletag :llm_local
   @moduletag timeout: 120_000
 

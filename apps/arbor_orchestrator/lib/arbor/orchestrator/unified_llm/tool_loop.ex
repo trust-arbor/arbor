@@ -28,14 +28,15 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
 
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
 
-  alias Arbor.Orchestrator.UnifiedLLM.{
-    ArborActionsExecutor,
-    Client,
-    ContentPart,
-    Message,
-    Request
-  }
+  alias Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor
 
+  alias Arbor.Orchestrator.UnifiedLLM.Client
+
+  alias Arbor.LLM.ContentPart
+
+  alias Arbor.LLM.Message
+
+  alias Arbor.LLM.Request
   alias Arbor.Orchestrator.Session.Builders
 
   @prompt_sanitizer Arbor.Common.PromptSanitizer

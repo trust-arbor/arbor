@@ -3,7 +3,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance85Test do
   @moduletag :fast
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{Anthropic, Gemini, OpenAI}
-  alias Arbor.Orchestrator.UnifiedLLM.{Message, Request}
+  alias Arbor.LLM.Message
+  alias Arbor.LLM.Request
 
   test "8.5 openai maps reasoning_tokens and reasoning_effort" do
     request = %Request{

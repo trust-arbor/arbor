@@ -26,7 +26,11 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible do
   require Logger
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.ErrorMapper
-  alias Arbor.Orchestrator.UnifiedLLM.{ContentPart, Message, Request, Response, StreamEvent}
+  alias Arbor.LLM.ContentPart
+  alias Arbor.LLM.Message
+  alias Arbor.LLM.Request
+  alias Arbor.LLM.Response
+  alias Arbor.LLM.StreamEvent
 
   @type config :: %{
           provider: String.t(),

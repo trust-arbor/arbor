@@ -1,7 +1,7 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.Request do
+defmodule Arbor.LLM.Request do
   @moduledoc false
 
-  alias Arbor.Orchestrator.UnifiedLLM.Message
+  alias Arbor.LLM.Message
 
   @type t :: %__MODULE__{
           provider: String.t() | nil,

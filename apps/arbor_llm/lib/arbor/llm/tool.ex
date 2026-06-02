@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.Tool do
+defmodule Arbor.LLM.Tool do
   @moduledoc false
 
   @type execute_fun :: (map() -> map() | {:ok, map()} | {:error, term()})

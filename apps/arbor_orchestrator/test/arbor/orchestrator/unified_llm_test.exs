@@ -2,17 +2,23 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
-  alias Arbor.Orchestrator.UnifiedLLM.{
-    Client,
-    ConfigurationError,
-    Message,
-    ProviderError,
-    Request,
-    RequestTimeoutError,
-    Response,
-    StreamEvent,
-    Tool
-  }
+  alias Arbor.Orchestrator.UnifiedLLM.Client
+
+  alias Arbor.LLM.ConfigurationError
+
+  alias Arbor.LLM.Message
+
+  alias Arbor.LLM.ProviderError
+
+  alias Arbor.LLM.Request
+
+  alias Arbor.LLM.RequestTimeoutError
+
+  alias Arbor.LLM.Response
+
+  alias Arbor.LLM.StreamEvent
+
+  alias Arbor.LLM.Tool
 
   defmodule TestAdapter do
     @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter

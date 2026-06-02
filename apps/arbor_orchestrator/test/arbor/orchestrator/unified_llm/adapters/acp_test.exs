@@ -2,8 +2,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.AcpTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.Acp
-  alias Arbor.Orchestrator.UnifiedLLM.{Message, Request}
-
+  alias Arbor.LLM.Message
+  alias Arbor.LLM.Request
   @moduletag :fast
 
   describe "provider/0" do

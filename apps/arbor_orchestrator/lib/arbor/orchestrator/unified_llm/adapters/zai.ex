@@ -16,7 +16,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Zai do
   @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible
-  alias Arbor.Orchestrator.UnifiedLLM.{ContentPart, Request, StreamEvent}
+  alias Arbor.LLM.ContentPart
+  alias Arbor.LLM.Request
+  alias Arbor.LLM.StreamEvent
 
   @config %{
     provider: "zai",

@@ -29,7 +29,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Ollama do
   @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible
-  alias Arbor.Orchestrator.UnifiedLLM.Request
+  alias Arbor.LLM.Request
 
   @default_base_url "http://localhost:11434/v1"
 

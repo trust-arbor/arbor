@@ -1,7 +1,7 @@
 defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ErrorMapper do
   @moduledoc false
 
-  alias Arbor.Orchestrator.UnifiedLLM.ProviderError
+  alias Arbor.LLM.ProviderError
 
   @spec from_http(String.t(), integer(), term(), [{String.t(), String.t()}] | map()) ::
           ProviderError.t()

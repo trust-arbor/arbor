@@ -2,8 +2,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatibleTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAICompatible
-  alias Arbor.Orchestrator.UnifiedLLM.{ContentPart, Message, Request, Response}
-
+  alias Arbor.LLM.ContentPart
+  alias Arbor.LLM.Message
+  alias Arbor.LLM.Request
+  alias Arbor.LLM.Response
   @moduletag :fast
 
   @test_config %{

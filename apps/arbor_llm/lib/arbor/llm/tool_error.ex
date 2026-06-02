@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.ToolError do
+defmodule Arbor.LLM.ToolError do
   @moduledoc false
 
   defexception [:message, :type, :tool_name, :tool_call_id, :retryable, :details]

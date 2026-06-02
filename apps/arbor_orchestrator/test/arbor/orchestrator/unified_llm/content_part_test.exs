@@ -2,7 +2,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ContentPartTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Orchestrator.UnifiedLLM.{ContentPart, Message}
+  alias Arbor.LLM.ContentPart
+
+  alias Arbor.LLM.Message
 
   test "message text accessor concatenates text parts" do
     msg =

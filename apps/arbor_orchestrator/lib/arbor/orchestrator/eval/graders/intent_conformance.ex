@@ -147,8 +147,9 @@ defmodule Arbor.Orchestrator.Eval.Graders.IntentConformance do
   end
 
   defp call_judge(provider, model, system_prompt, user_prompt, timeout) do
-    alias Arbor.Orchestrator.UnifiedLLM.{Client, Request, Message}
-
+    alias Arbor.Orchestrator.UnifiedLLM.Client
+    alias Arbor.LLM.Request
+    alias Arbor.LLM.Message
     client = Client.default_client()
 
     request = %Request{

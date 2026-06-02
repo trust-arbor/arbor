@@ -21,8 +21,9 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Acp do
 
   @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
 
-  alias Arbor.Orchestrator.UnifiedLLM.{Request, Response}
+  alias Arbor.LLM.Request
 
+  alias Arbor.LLM.Response
   require Logger
 
   @default_agent :claude

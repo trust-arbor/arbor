@@ -4,8 +4,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Gemini do
   @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.ErrorMapper
-  alias Arbor.Orchestrator.UnifiedLLM.{ContentPart, Message, Request, Response}
-
+  alias Arbor.LLM.ContentPart
+  alias Arbor.LLM.Message
+  alias Arbor.LLM.Request
+  alias Arbor.LLM.Response
   @endpoint_base "https://generativelanguage.googleapis.com/v1beta/models"
 
   @impl true
@@ -379,7 +381,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Gemini do
       parts
       |> Enum.filter(&Map.has_key?(&1, "text"))
       |> Enum.map(fn part ->
-        %Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+        %Arbor.LLM.StreamEvent{
           type: :delta,
           data: %{"text" => Map.get(part, "text", ""), "raw" => raw}
         }
@@ -391,7 +393,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Gemini do
       |> Enum.map(fn part ->
         fc = Map.get(part, "functionCall", %{})
 
-        %Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+        %Arbor.LLM.StreamEvent{
           type: :tool_call,
           data: %{
             "id" => Map.get(fc, "id"),
@@ -413,7 +415,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Gemini do
     finish =
       if is_binary(finish_reason) do
         [
-          %Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+          %Arbor.LLM.StreamEvent{
             type: :finish,
             data: %{
               "reason" => normalize_finish_reason(finish_reason),
@@ -431,7 +433,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.Gemini do
         []
       else
         [
-          %Arbor.Orchestrator.UnifiedLLM.StreamEvent{
+          %Arbor.LLM.StreamEvent{
             type: :start,
             data: %{
               "provider" => provider(),

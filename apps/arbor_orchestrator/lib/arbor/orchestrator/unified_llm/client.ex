@@ -5,20 +5,29 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Client do
 
   alias Arbor.Orchestrator.ToolHooks
 
-  alias Arbor.Orchestrator.UnifiedLLM.{
-    AbortError,
-    ConfigurationError,
-    ContentPart,
-    Message,
-    Request,
-    RequestTimeoutError,
-    Response,
-    Retry,
-    StreamEvent,
-    Tool,
-    ToolCallValidator,
-    ToolError
-  }
+  alias Arbor.LLM.AbortError
+
+  alias Arbor.LLM.ConfigurationError
+
+  alias Arbor.LLM.ContentPart
+
+  alias Arbor.LLM.Message
+
+  alias Arbor.LLM.Request
+
+  alias Arbor.LLM.RequestTimeoutError
+
+  alias Arbor.LLM.Response
+
+  alias Arbor.Orchestrator.UnifiedLLM.Retry
+
+  alias Arbor.LLM.StreamEvent
+
+  alias Arbor.LLM.Tool
+
+  alias Arbor.LLM.ToolCallValidator
+
+  alias Arbor.LLM.ToolError
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{
     Acp,

@@ -36,6 +36,7 @@ defmodule Arbor.Orchestrator.MixProject do
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.0"},
       {:arbor_common, in_umbrella: true},
+      {:arbor_llm, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
       {:benchee, "~> 1.3", only: :dev, runtime: false},

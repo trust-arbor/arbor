@@ -3,12 +3,13 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance42Test do
   @moduletag :fast
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{Anthropic, Gemini, OpenAI}
-  alias Arbor.Orchestrator.UnifiedLLM.{Request, StreamEvent}
+  alias Arbor.LLM.Request
+  alias Arbor.LLM.StreamEvent
 
   test "4.2 stream returns enumerable StreamEvent values for all providers" do
     openai_request = %Request{
       model: "gpt-5",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     openai_stream = fn _req ->
@@ -28,7 +29,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance42Test do
 
     anthropic_request = %Request{
       model: "claude-sonnet-4-0",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     anthropic_stream = fn _req ->
@@ -55,7 +56,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance42Test do
 
     gemini_request = %Request{
       model: "gemini-2.5-pro",
-      messages: [%Arbor.Orchestrator.UnifiedLLM.Message{role: :user, content: "hi"}]
+      messages: [%Arbor.LLM.Message{role: :user, content: "hi"}]
     }
 
     gemini_stream = fn _req ->

@@ -13,7 +13,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.ZaiCodingPlan do
   @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.{OpenAICompatible, Zai}
-  alias Arbor.Orchestrator.UnifiedLLM.Request
+  alias Arbor.LLM.Request
 
   @config %{
     provider: "zai_coding_plan",

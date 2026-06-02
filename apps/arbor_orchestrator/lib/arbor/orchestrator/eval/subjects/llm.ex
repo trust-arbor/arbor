@@ -26,8 +26,11 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLM do
 
   require Logger
 
-  alias Arbor.Orchestrator.UnifiedLLM.{Message, ProviderCatalog, Request}
+  alias Arbor.LLM.Message
 
+  alias Arbor.Orchestrator.UnifiedLLM.ProviderCatalog
+
+  alias Arbor.LLM.Request
   @impl true
   def run(input, opts \\ []) do
     {prompt, system} = parse_input(input)
