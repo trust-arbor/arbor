@@ -157,3 +157,14 @@ config :arbor_orchestrator, preflight_models_on_start: false
 
 # Enable mandatory middleware (Phase 5 handler primitives)
 config :arbor_orchestrator, mandatory_middleware: true
+
+# arbor_scheduler — disable real Oban supervision in tests. Tests use
+# Oban.Testing to assert enqueueing without touching the DB or running
+# workers; tests that need a live Oban supervisor start their own.
+config :arbor_scheduler, start_children: false
+
+config :arbor_scheduler, Oban,
+  repo: Arbor.Persistence.Repo,
+  testing: :manual,
+  queues: false,
+  plugins: false
