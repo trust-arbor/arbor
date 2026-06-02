@@ -20,6 +20,18 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
 
   alias Arbor.LLM.Tool
 
+  # Tiny mock adapter that just declares `provider: "xai"` so
+  # Client.list_models / get_model_info / select_model know which
+  # llm_db provider to query. The behaviour callbacks aren't exercised
+  # by the llm_db-integration tests — they only need a module that
+  # implements ProviderAdapter and returns the right provider/0.
+  defmodule XaiMockAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+
+    def provider, do: "xai"
+    def complete(_, _), do: {:error, :not_implemented}
+  end
+
   defmodule TestAdapter do
     @behaviour Arbor.LLM.ProviderAdapter
 
@@ -316,7 +328,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
         # Register an adapter so LLMDB knows which providers to query
         client =
           Client.new()
-          |> Client.register_adapter(Arbor.Orchestrator.UnifiedLLM.Adapters.XAI)
+          |> Client.register_adapter(XaiMockAdapter)
 
         models = Client.list_models(client, provider: "xai")
         assert models != []
@@ -339,7 +351,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
 
         client =
           Client.new()
-          |> Client.register_adapter(Arbor.Orchestrator.UnifiedLLM.Adapters.XAI)
+          |> Client.register_adapter(XaiMockAdapter)
 
         assert {:ok, info} = Client.get_model_info(client, sample_id)
         assert info.id == sample_id
@@ -355,7 +367,7 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
       if ctx.llmdb_available do
         client =
           Client.new()
-          |> Client.register_adapter(Arbor.Orchestrator.UnifiedLLM.Adapters.XAI)
+          |> Client.register_adapter(XaiMockAdapter)
 
         assert {:ok, result} =
                  Client.select_model(client, require: [chat: true], provider: "xai")
