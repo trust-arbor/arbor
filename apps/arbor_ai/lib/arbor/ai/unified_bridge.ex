@@ -25,24 +25,17 @@ defmodule Arbor.AI.UnifiedBridge do
   alias Arbor.LLM.Message
   alias Arbor.LLM.Request
 
-  # Maps arbor_ai backend atoms to arbor_llm provider strings.
-  # arbor_ai's historical conventions (e.g. `:lmstudio` as one word,
-  # `:gemini` as the brand name) don't always match req_llm/arbor_llm
-  # names — this is the boundary translation.
-  @provider_map %{
-    # API providers
-    anthropic: "anthropic",
-    openai: "openai",
+  # Boundary translation between arbor_ai's backend atoms and
+  # arbor_llm's provider strings. Only the entries that actually rename
+  # are listed; everything else (the tautologies — `:openai`,
+  # `:anthropic`, `:ollama`, etc.) falls through to `Atom.to_string/1`
+  # in `resolve_provider/1`. Documented as a deliberate boundary in
+  # `.arbor/roadmap/0-inbox/arbor-ai-backend-atom-rename.md` —
+  # eventually the arbor_ai atoms should be renamed to match (Session 7
+  # follow-up).
+  @provider_overrides %{
     gemini: "google",
-    openrouter: "openrouter",
-    xai: "xai",
-    zai: "zai",
-    zai_coding_plan: "zai_coding_plan",
-    # Local providers
-    lmstudio: "lm_studio",
-    ollama: "ollama",
-    # ACP provider (universal — agent specified via provider_options)
-    acp: "acp"
+    lmstudio: "lm_studio"
   }
 
   @doc """
@@ -294,8 +287,8 @@ defmodule Arbor.AI.UnifiedBridge do
     provider = Keyword.fetch!(opts, :provider)
 
     cond do
-      Map.has_key?(@provider_map, provider) ->
-        Map.fetch!(@provider_map, provider)
+      Map.has_key?(@provider_overrides, provider) ->
+        Map.fetch!(@provider_overrides, provider)
 
       is_binary(provider) ->
         provider
