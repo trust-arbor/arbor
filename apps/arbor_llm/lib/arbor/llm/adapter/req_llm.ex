@@ -64,6 +64,33 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   @sentinel_provider "req_llm_generic"
 
+  # Translation from Arbor's provider strings to the names req_llm uses
+  # in its provider registry. Most are identical; the differences are:
+  # `gemini` (Arbor) → `google` (req_llm), plus the local-LM providers
+  # which req_llm doesn't have a dedicated module for — they go through
+  # `openai` with a base_url override (req_llm's openai chat-completions
+  # is OpenAI-spec compliant, which is what Ollama and LM Studio serve).
+  @arbor_to_req_llm_provider %{
+    "openai" => "openai",
+    "anthropic" => "anthropic",
+    "gemini" => "google",
+    "zai" => "zai",
+    "zai_coding_plan" => "zai_coding_plan",
+    "openrouter" => "openrouter",
+    "xai" => "xai",
+    "lm_studio" => "openai",
+    "ollama" => "openai"
+  }
+
+  # Default base_urls for local-LM servers we register under `openai`
+  # provider. Operator can override via Application config (key
+  # `:base_url` under the matching app config entry, same shape the
+  # legacy LM Studio / Ollama adapters used).
+  @local_provider_defaults %{
+    "lm_studio" => {:lm_studio, "http://localhost:1234/v1"},
+    "ollama" => {:ollama, "http://localhost:11434/v1"}
+  }
+
   # ── Behaviour callbacks ─────────────────────────────────────────────
 
   @impl true
@@ -231,7 +258,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   @doc """
   Build the `"provider:model"` string req_llm expects.
 
-  Public for testability — production code goes through `complete/2`.
+  Translates Arbor's provider strings (`gemini`, `lm_studio`,
+  `ollama`) to req_llm's provider names (`google`, `openai` with
+  base_url override). See `@arbor_to_req_llm_provider`. Public for
+  testability — production code goes through `complete/2`.
   """
   @spec build_model_spec(Request.t()) :: {:ok, String.t()} | {:error, term()}
   def build_model_spec(%Request{provider: nil}),
@@ -242,7 +272,36 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   def build_model_spec(%Request{provider: provider, model: model})
       when is_binary(provider) and is_binary(model) do
-    {:ok, provider <> ":" <> model}
+    case Map.fetch(@arbor_to_req_llm_provider, provider) do
+      {:ok, req_llm_provider} ->
+        {:ok, req_llm_provider <> ":" <> model}
+
+      :error ->
+        # Unknown provider — pass through unchanged so an operator can
+        # use a provider req_llm knows about that we haven't mapped
+        # explicitly (e.g. amazon_bedrock, azure, groq).
+        {:ok, provider <> ":" <> model}
+    end
+  end
+
+  @doc """
+  Look up the default base_url for a local-LM Arbor provider.
+
+  Returns the operator-configured value when set
+  (`config :arbor_orchestrator, <provider>, base_url: ...`), the
+  hardcoded default otherwise, or `nil` if the provider isn't a
+  local-LM server. Public for testability.
+  """
+  @spec default_base_url_for(String.t()) :: String.t() | nil
+  def default_base_url_for(provider) when is_binary(provider) do
+    case Map.fetch(@local_provider_defaults, provider) do
+      {:ok, {config_key, default}} ->
+        config = Application.get_env(:arbor_orchestrator, config_key, [])
+        Keyword.get(config, :base_url, default)
+
+      :error ->
+        nil
+    end
   end
 
   @doc """
@@ -316,8 +375,15 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
       |> maybe_put(:tools, translate_tools(request.tools))
       |> maybe_put(:tool_choice, request.tool_choice)
 
+    # Caller-supplied base_url wins. Otherwise, if the request is for a
+    # local-LM Arbor provider (lm_studio / ollama), inject the
+    # configured default so req_llm's openai provider points at
+    # localhost instead of api.openai.com.
+    caller_base_url = Keyword.get(opts, :base_url)
+    inferred_base_url = caller_base_url || default_base_url_for(request.provider)
+
     base
-    |> maybe_merge(:base_url, Keyword.get(opts, :base_url))
+    |> maybe_merge(:base_url, inferred_base_url)
     |> maybe_merge(:provider_options, Keyword.get(opts, :provider_options))
   end
 
