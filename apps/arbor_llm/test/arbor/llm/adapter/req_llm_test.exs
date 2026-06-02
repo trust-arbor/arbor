@@ -48,6 +48,24 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       assert {:ok, "anthropic:claude-3-5-sonnet"} = Adapter.build_model_spec(req)
     end
 
+    test "translates Arbor 'gemini' to req_llm 'google'" do
+      req = %Request{provider: "gemini", model: "gemini-2.0-flash"}
+      assert {:ok, "google:gemini-2.0-flash"} = Adapter.build_model_spec(req)
+    end
+
+    test "translates local-LM Arbor providers to 'openai' (base_url override does the rest)" do
+      assert {:ok, "openai:llama-3.2-3b"} =
+               Adapter.build_model_spec(%Request{provider: "lm_studio", model: "llama-3.2-3b"})
+
+      assert {:ok, "openai:qwen2.5-coder"} =
+               Adapter.build_model_spec(%Request{provider: "ollama", model: "qwen2.5-coder"})
+    end
+
+    test "unknown provider passes through unchanged (operator escape hatch)" do
+      req = %Request{provider: "amazon_bedrock", model: "claude-via-bedrock"}
+      assert {:ok, "amazon_bedrock:claude-via-bedrock"} = Adapter.build_model_spec(req)
+    end
+
     test "rejects missing provider" do
       req = %Request{provider: nil, model: "foo"}
       assert {:error, {:invalid_request, :missing_provider}} = Adapter.build_model_spec(req)
@@ -56,6 +74,62 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
     test "rejects missing model (empty string is invalid)" do
       req = %Request{provider: "openai", model: nil}
       assert {:error, {:invalid_request, :missing_model}} = Adapter.build_model_spec(req)
+    end
+  end
+
+  describe "default_base_url_for/1 — local LMs" do
+    test "lm_studio default points at localhost:1234" do
+      assert "http://localhost:1234/v1" = Adapter.default_base_url_for("lm_studio")
+    end
+
+    test "ollama default points at localhost:11434" do
+      assert "http://localhost:11434/v1" = Adapter.default_base_url_for("ollama")
+    end
+
+    test "cloud providers return nil (api.openai.com et al stay default)" do
+      assert nil == Adapter.default_base_url_for("openai")
+      assert nil == Adapter.default_base_url_for("anthropic")
+      assert nil == Adapter.default_base_url_for("gemini")
+    end
+
+    test "operator-configured base_url wins over hardcoded default" do
+      original = Application.get_env(:arbor_orchestrator, :lm_studio)
+      Application.put_env(:arbor_orchestrator, :lm_studio, base_url: "http://192.168.1.5:1234/v1")
+
+      try do
+        assert "http://192.168.1.5:1234/v1" = Adapter.default_base_url_for("lm_studio")
+      after
+        case original do
+          nil -> Application.delete_env(:arbor_orchestrator, :lm_studio)
+          v -> Application.put_env(:arbor_orchestrator, :lm_studio, v)
+        end
+      end
+    end
+  end
+
+  describe "build_req_opts/2 — local-LM base_url defaulting" do
+    test "lm_studio request gets localhost base_url injected automatically" do
+      req = %Request{provider: "lm_studio", model: "llama-3.2-3b"}
+      opts = Adapter.build_req_opts(req, [])
+      assert opts[:base_url] == "http://localhost:1234/v1"
+    end
+
+    test "ollama request gets localhost base_url injected automatically" do
+      req = %Request{provider: "ollama", model: "qwen2.5-coder"}
+      opts = Adapter.build_req_opts(req, [])
+      assert opts[:base_url] == "http://localhost:11434/v1"
+    end
+
+    test "caller-supplied base_url wins over the local-LM default" do
+      req = %Request{provider: "ollama", model: "x"}
+      opts = Adapter.build_req_opts(req, base_url: "http://10.0.0.5:11434/v1")
+      assert opts[:base_url] == "http://10.0.0.5:11434/v1"
+    end
+
+    test "cloud provider request gets no base_url injected" do
+      req = %Request{provider: "openai", model: "gpt-4o-mini"}
+      opts = Adapter.build_req_opts(req, [])
+      refute Keyword.has_key?(opts, :base_url)
     end
   end
 
