@@ -1,0 +1,47 @@
+// Morning Digest Pipeline
+//
+// Meta-pipeline that consolidates the day's overnight reports into a
+// single digest. Glob-based: every `~/.arbor/reports/<topic>/YYYY-MM-DD.md`
+// for today's date gets stitched into one markdown file under
+// `~/.arbor/reports/morning-digest/`.
+//
+// Scheduling (in :arbor_scheduler, Oban crontab):
+//   {"30 6 * * *", Arbor.Scheduler.Workers.PipelineRunner,
+//     args: %{"pipeline_path" => "apps/arbor_scheduler/priv/pipelines/morning_digest.dot"}}
+//
+// The :30 minute offset lets all the H1 overnight pipelines (upstream-deps
+// at 06:00, etc.) complete before the digest runs. As more pipelines
+// land, push the digest later or chain it via Oban job dependencies.
+//
+// This MVP is plain concatenation — no LLM synthesis yet. Once arbor_llm
+// lands, a future iteration adds a `summarize` LLM node between the
+// concatenation and the file write to produce "the three things worth
+// caring about" at the top of each digest.
+//
+// Manual invocation:
+//     Arbor.Scheduler.enqueue_pipeline(
+//       "apps/arbor_scheduler/priv/pipelines/morning_digest.dot"
+//     )
+
+digraph MorningDigest {
+  graph [
+    goal="Consolidate today's overnight reports into a single morning digest",
+    label="Morning Digest"
+  ]
+
+  start [shape=Mdiamond]
+
+  build_digest [
+    type="shell",
+    command="bash apps/arbor_scheduler/priv/scripts/morning_digest.sh",
+    sandbox="none",
+    timeout="60000",
+    on_error="fail",
+    data_class="internal"
+  ]
+
+  done [shape=Msquare]
+
+  start -> build_digest
+  build_digest -> done
+}
