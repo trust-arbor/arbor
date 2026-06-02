@@ -1,0 +1,35 @@
+#!/bin/sh
+# Pinned mix wrapper for Arbor.
+#
+# Runs `mix` through the Erlang + Elixir versions pinned in `.tool-versions`
+# via mise. Necessary because mise activation does not run in
+# non-interactive shells, and Arbor's `arbor_orchestrator` + persistence
+# code fails on the system-default OTP. See CLAUDE.md "Applied Learning":
+# both Erlang AND Elixir must be pinned.
+#
+# Usage (from anywhere within the repo — mise searches parent dirs for
+# `.tool-versions`):
+#
+#     ./bin/mix test
+#     ./bin/mix arbor.start
+#     ./bin/mix compile --warnings-as-errors
+#
+# Verify the pinned versions are active:
+#
+#     ./bin/mix run -e 'IO.puts(System.version()); IO.puts(:erlang.system_info(:otp_release))'
+#
+# Bypass mise entirely (run system mix instead): just type `mix` — this
+# wrapper only activates when invoked explicitly as `./bin/mix`.
+
+set -e
+
+if ! command -v mise >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/mise" ]; then
+  echo "bin/mix: mise not found in PATH or ~/.local/bin/" >&2
+  echo "Install: https://mise.jdx.dev/getting-started.html" >&2
+  exit 127
+fi
+
+# Prefer PATH lookup so user-installed mise shadows ~/.local/bin (e.g. brew).
+MISE="$(command -v mise || echo "$HOME/.local/bin/mise")"
+
+exec "$MISE" exec -- mix "$@"
