@@ -1,23 +1,34 @@
 defmodule Arbor.AI.UnifiedBridge do
   @moduledoc """
-  Runtime bridge to Arbor.LLM.Client.
+  Translation layer between arbor_ai's keyword-opts call shape and
+  `Arbor.LLM.Client`'s `Request` struct.
 
-  Provides a thin wrapper that translates between arbor_ai's option format
-  and the unified Client's request format. Falls back gracefully when the
-  orchestrator is not available.
+  arbor_ai's facade has historical option names (`:provider` as a
+  backend atom, `:system_prompt`, `:thinking`) and expects responses
+  shaped for the dashboard's chat UI. This module translates both
+  directions while delegating the actual transport to
+  `Arbor.LLM.Client`.
 
-  This is the single execution path for all LLM generation. API providers
-  and ACP agents are unified — `acp` routes to coding agents (claude,
-  codex, gemini) while API providers handle HTTP requests directly.
+  ## Session 7 — runtime indirection collapsed
+
+  Before Session 7 this module used Module.concat + apply/3 to call
+  into `Arbor.LLM.*` at runtime — a holdover from when arbor_llm
+  didn't exist yet and the bridge had to be defensive about whether
+  the orchestrator was loaded. arbor_ai has had a compile-time
+  dependency on arbor_llm since Session 1, so the indirection bought
+  nothing but ceremony. The calls are now direct.
   """
 
   require Logger
 
-  @client_module Arbor.LLM.Client
-  @base_module Arbor.LLM
+  alias Arbor.LLM.Client
+  alias Arbor.LLM.Message
+  alias Arbor.LLM.Request
 
-  # Maps arbor_ai provider atoms to orchestrator provider strings.
-  # CLI and API providers are peers — no special treatment.
+  # Maps arbor_ai backend atoms to arbor_llm provider strings.
+  # arbor_ai's historical conventions (e.g. `:lmstudio` as one word,
+  # `:gemini` as the brand name) don't always match req_llm/arbor_llm
+  # names — this is the boundary translation.
   @provider_map %{
     # API providers
     anthropic: "anthropic",
@@ -36,17 +47,18 @@ defmodule Arbor.AI.UnifiedBridge do
 
   @doc """
   Check if the unified LLM client is available.
+
+  After Session 7 this is a compile-time tautology — arbor_ai has a
+  direct dep on arbor_llm — but `Code.ensure_loaded?/1` is kept here
+  as a defensive sanity check for releases that ship without
+  `arbor_llm` somehow (release tooling can exclude apps).
   """
   def available? do
-    Code.ensure_loaded?(@client_module)
+    Code.ensure_loaded?(Client)
   end
 
   @doc """
   Generate text using the unified LLM client.
-
-  This is the single execution path for all LLM generation. Provider atoms
-  are mapped to orchestrator adapter strings — CLI and API providers are
-  treated identically.
 
   ## Options (arbor_ai format)
   - :provider - atom like :anthropic, :openai, :acp, :ollama
@@ -58,7 +70,7 @@ defmodule Arbor.AI.UnifiedBridge do
   - :thinking_budget - integer token budget for thinking
   - :backend - legacy option (ignored, kept for backward compat)
 
-  Returns {:ok, response_map} | {:error, reason} | :unavailable
+  Returns `{:ok, response_map}` | `{:error, reason}` | `:unavailable`.
   """
   def generate_text(prompt, opts) do
     if available?() do
@@ -77,7 +89,7 @@ defmodule Arbor.AI.UnifiedBridge do
   - :dimensions - requested dimensions (optional)
   - :timeout - request timeout in ms
 
-  Returns {:ok, embed_result} | {:error, reason} | :unavailable
+  Returns `{:ok, embed_result}` | `{:error, reason}` | `:unavailable`.
   """
   def embed(text, opts) when is_binary(text) do
     if available?() do
@@ -90,7 +102,7 @@ defmodule Arbor.AI.UnifiedBridge do
   @doc """
   Generate embeddings for multiple texts via the unified LLM client.
 
-  Returns {:ok, batch_result} | {:error, reason} | :unavailable
+  Returns `{:ok, batch_result}` | `{:error, reason}` | `:unavailable`.
   """
   def embed_batch(texts, opts) when is_list(texts) do
     if available?() do
@@ -105,7 +117,7 @@ defmodule Arbor.AI.UnifiedBridge do
     model = Keyword.fetch!(opts, :model)
     client = get_client()
 
-    case apply(@client_module, :embed_batch, [client, provider_string, model, texts, opts]) do
+    case Client.embed_batch(client, provider_string, model, texts, opts) do
       {:ok, %{embeddings: embeddings} = result} when mode == :single ->
         embedding = List.first(embeddings, [])
 
@@ -170,53 +182,13 @@ defmodule Arbor.AI.UnifiedBridge do
   end
 
   defp do_generate_stream(prompt, opts) do
-    provider_string = resolve_provider(opts)
-    model = Keyword.fetch!(opts, :model)
-    system_prompt = Keyword.get(opts, :system_prompt)
-    max_tokens = Keyword.get(opts, :max_tokens, 1024)
-    temperature = Keyword.get(opts, :temperature, 0.7)
-    thinking_enabled = Keyword.get(opts, :thinking, false)
+    request = build_request(prompt, opts)
+    client = get_client()
     on_event = Keyword.get(opts, :on_event)
     collect? = Keyword.get(opts, :collect, true)
 
-    client = get_client()
-
-    message_mod = Module.concat(@base_module, Message)
-    request_mod = Module.concat(@base_module, Request)
-
-    messages =
-      if system_prompt do
-        [
-          apply(message_mod, :new, [:system, system_prompt]),
-          apply(message_mod, :new, [:user, prompt])
-        ]
-      else
-        [apply(message_mod, :new, [:user, prompt])]
-      end
-
-    request = %{
-      __struct__: request_mod,
-      provider: provider_string,
-      model: model,
-      messages: messages,
-      tools: [],
-      tool_choice: nil,
-      max_tokens: max_tokens,
-      temperature: temperature,
-      reasoning_effort: nil,
-      provider_options: Keyword.get(opts, :provider_options, %{})
-    }
-
-    request =
-      if thinking_enabled do
-        Map.put(request, :reasoning_effort, "high")
-      else
-        request
-      end
-
-    case apply(@client_module, :stream, [client, request, []]) do
+    case Client.stream(client, request, []) do
       {:ok, events} ->
-        # Wrap with optional callback
         events =
           if on_event do
             Stream.each(events, fn event -> on_event.(event) end)
@@ -225,8 +197,7 @@ defmodule Arbor.AI.UnifiedBridge do
           end
 
         if collect? do
-          # Consume stream and return collected response
-          case apply(@client_module, :collect_stream, [events]) do
+          case Client.collect_stream(events) do
             {:ok, response} -> {:ok, format_response(response, opts)}
             {:error, _} = err -> err
           end
@@ -253,55 +224,10 @@ defmodule Arbor.AI.UnifiedBridge do
   end
 
   defp do_generate(prompt, opts) do
-    provider_string = resolve_provider(opts)
-    model = Keyword.fetch!(opts, :model)
-    system_prompt = Keyword.get(opts, :system_prompt)
-    max_tokens = Keyword.get(opts, :max_tokens, 1024)
-    temperature = Keyword.get(opts, :temperature, 0.7)
-    thinking_enabled = Keyword.get(opts, :thinking, false)
-    _thinking_budget = Keyword.get(opts, :thinking_budget, 4096)
-
-    # Get or create a client instance
+    request = build_request(prompt, opts)
     client = get_client()
 
-    # Build messages using the Message module
-    message_mod = Module.concat(@base_module, Message)
-    request_mod = Module.concat(@base_module, Request)
-
-    messages =
-      if system_prompt do
-        [
-          apply(message_mod, :new, [:system, system_prompt]),
-          apply(message_mod, :new, [:user, prompt])
-        ]
-      else
-        [apply(message_mod, :new, [:user, prompt])]
-      end
-
-    # Build the Request struct
-    request = %{
-      __struct__: request_mod,
-      provider: provider_string,
-      model: model,
-      messages: messages,
-      tools: [],
-      tool_choice: nil,
-      max_tokens: max_tokens,
-      temperature: temperature,
-      reasoning_effort: nil,
-      provider_options: Keyword.get(opts, :provider_options, %{})
-    }
-
-    # Add thinking/reasoning effort if enabled
-    request =
-      if thinking_enabled do
-        Map.put(request, :reasoning_effort, "high")
-      else
-        request
-      end
-
-    # Call Client.complete/3
-    case apply(@client_module, :complete, [client, request, []]) do
+    case Client.complete(client, request, []) do
       {:ok, response} ->
         {:ok, format_response(response, opts)}
 
@@ -323,6 +249,39 @@ defmodule Arbor.AI.UnifiedBridge do
       {:error, error_tuple}
   end
 
+  # Build the arbor_llm Request struct from arbor_ai-style opts.
+  # Extracted in Session 7 — previously the generate_text + stream
+  # paths each open-coded their own struct construction via
+  # Module.concat + map literal. Direct dep on arbor_llm makes the
+  # struct construction trivial.
+  defp build_request(prompt, opts) do
+    provider_string = resolve_provider(opts)
+    model = Keyword.fetch!(opts, :model)
+    system_prompt = Keyword.get(opts, :system_prompt)
+    max_tokens = Keyword.get(opts, :max_tokens, 1024)
+    temperature = Keyword.get(opts, :temperature, 0.7)
+    thinking_enabled = Keyword.get(opts, :thinking, false)
+
+    messages =
+      if system_prompt do
+        [Message.new(:system, system_prompt), Message.new(:user, prompt)]
+      else
+        [Message.new(:user, prompt)]
+      end
+
+    %Request{
+      provider: provider_string,
+      model: model,
+      messages: messages,
+      tools: [],
+      tool_choice: nil,
+      max_tokens: max_tokens,
+      temperature: temperature,
+      reasoning_effort: if(thinking_enabled, do: "high"),
+      provider_options: Keyword.get(opts, :provider_options, %{})
+    }
+  end
+
   @doc """
   Resolve provider atom to orchestrator provider string.
 
@@ -335,15 +294,12 @@ defmodule Arbor.AI.UnifiedBridge do
     provider = Keyword.fetch!(opts, :provider)
 
     cond do
-      # Direct mapping from known provider atoms
       Map.has_key?(@provider_map, provider) ->
         Map.fetch!(@provider_map, provider)
 
-      # String provider — pass through (caller already using orchestrator names)
       is_binary(provider) ->
         provider
 
-      # Unknown atom provider — convert to string, let orchestrator handle it
       is_atom(provider) ->
         Atom.to_string(provider)
     end
@@ -438,12 +394,15 @@ defmodule Arbor.AI.UnifiedBridge do
     :exit, _ -> :ok
   end
 
-  # Get or create a default client using from_env
+  # Get or create a default client using from_env.
+  # persistent_term caches the client across calls; the rescue clause
+  # is a defensive fallback for releases that exclude persistent_term
+  # (none today, but the cost is one extra from_env call on the
+  # exceptional path).
   defp get_client do
-    # Check persistent_term cache first for performance
     case :persistent_term.get({__MODULE__, :client}, nil) do
       nil ->
-        client = apply(@client_module, :from_env, [[]])
+        client = Client.from_env([])
         :persistent_term.put({__MODULE__, :client}, client)
         client
 
@@ -451,6 +410,6 @@ defmodule Arbor.AI.UnifiedBridge do
         client
     end
   rescue
-    _ -> apply(@client_module, :from_env, [[]])
+    _ -> Client.from_env([])
   end
 end
