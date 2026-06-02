@@ -23,23 +23,20 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance81Test do
   end
 
   test "8.1 from_env raises when neither default provider nor provider credentials exist" do
-    with_env(
-      %{
-        "UNIFIED_LLM_DEFAULT_PROVIDER" => nil,
-        "OPENAI_API_KEY" => nil,
-        "ANTHROPIC_API_KEY" => nil,
-        "GOOGLE_API_KEY" => nil,
-        "ZAI_API_KEY" => nil,
-        "ZAI_CODING_PLAN_API_KEY" => nil,
-        "OPENROUTER_API_KEY" => nil,
-        "XAI_API_KEY" => nil
-      },
-      fn ->
-        assert_raise ConfigurationError, fn ->
-          Client.from_env(discover_cli: false, discover_local: false)
-        end
+    # Clear every cloud provider's env key (derived from ProviderRegistry
+    # so the test stays correct as req_llm adds providers — Session 6.6
+    # exposed ~19 cloud providers vs the historical 7).
+    env =
+      Arbor.LLM.ProviderRegistry.list_cloud()
+      |> Enum.map(&Arbor.LLM.ProviderRegistry.default_env_key/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.into(%{"UNIFIED_LLM_DEFAULT_PROVIDER" => nil}, &{&1, nil})
+
+    with_env(env, fn ->
+      assert_raise ConfigurationError, fn ->
+        Client.from_env(discover_cli: false, discover_local: false)
       end
-    )
+    end)
   end
 
   test "8.1 supports default client storage and model catalog inspection" do

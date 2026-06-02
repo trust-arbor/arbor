@@ -197,63 +197,46 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
     assert response.text == "ok:demo"
   end
 
+  # Derive the env-clear list from ProviderRegistry so the test stays
+  # correct as req_llm adds providers. Hardcoded lists drift when
+  # `ReqLLM.Providers.list/0` grows (Session 6.6 exposed ~19
+  # providers vs the historical 7).
+  defp all_cloud_env_keys do
+    Arbor.LLM.ProviderRegistry.list_cloud()
+    |> Enum.map(&Arbor.LLM.ProviderRegistry.default_env_key/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp clear_all_cloud_keys do
+    base = %{"UNIFIED_LLM_DEFAULT_PROVIDER" => nil}
+    Enum.into(all_cloud_env_keys(), base, fn key -> {key, nil} end)
+  end
+
   test "from_env raises when no default provider and no provider keys are configured" do
-    with_env(
-      %{
-        "UNIFIED_LLM_DEFAULT_PROVIDER" => nil,
-        "OPENAI_API_KEY" => nil,
-        "ANTHROPIC_API_KEY" => nil,
-        "GOOGLE_API_KEY" => nil,
-        "ZAI_API_KEY" => nil,
-        "ZAI_CODING_PLAN_API_KEY" => nil,
-        "OPENROUTER_API_KEY" => nil,
-        "XAI_API_KEY" => nil
-      },
-      fn ->
-        assert_raise ConfigurationError, fn ->
-          Client.from_env(discover_cli: false, discover_local: false)
-        end
+    with_env(clear_all_cloud_keys(), fn ->
+      assert_raise ConfigurationError, fn ->
+        Client.from_env(discover_cli: false, discover_local: false)
       end
-    )
+    end)
   end
 
   test "from_env sets default provider from environment" do
-    with_env(
-      %{
-        "UNIFIED_LLM_DEFAULT_PROVIDER" => "test",
-        "OPENAI_API_KEY" => nil,
-        "ANTHROPIC_API_KEY" => nil,
-        "GOOGLE_API_KEY" => nil,
-        "ZAI_API_KEY" => nil,
-        "ZAI_CODING_PLAN_API_KEY" => nil,
-        "OPENROUTER_API_KEY" => nil,
-        "XAI_API_KEY" => nil
-      },
-      fn ->
-        client = Client.from_env(discover_local: false)
-        assert client.default_provider == "test"
-      end
-    )
+    env = Map.put(clear_all_cloud_keys(), "UNIFIED_LLM_DEFAULT_PROVIDER", "test")
+
+    with_env(env, fn ->
+      client = Client.from_env(discover_local: false)
+      assert client.default_provider == "test"
+    end)
   end
 
   test "from_env auto-discovers adapters from provider api keys" do
-    with_env(
-      %{
-        "UNIFIED_LLM_DEFAULT_PROVIDER" => nil,
-        "OPENAI_API_KEY" => "sk-live",
-        "ANTHROPIC_API_KEY" => nil,
-        "GOOGLE_API_KEY" => nil,
-        "ZAI_API_KEY" => nil,
-        "ZAI_CODING_PLAN_API_KEY" => nil,
-        "OPENROUTER_API_KEY" => nil,
-        "XAI_API_KEY" => nil
-      },
-      fn ->
-        client = Client.from_env(discover_cli: false, discover_local: false)
-        assert client.default_provider == "openai"
-        assert Map.has_key?(client.adapters, "openai")
-      end
-    )
+    env = Map.put(clear_all_cloud_keys(), "OPENAI_API_KEY", "sk-live")
+
+    with_env(env, fn ->
+      client = Client.from_env(discover_cli: false, discover_local: false)
+      assert client.default_provider == "openai"
+      assert Map.has_key?(client.adapters, "openai")
+    end)
   end
 
   test "default client can be set and retrieved" do

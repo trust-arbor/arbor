@@ -79,7 +79,10 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalogTest do
     test "returns contract for known provider" do
       assert {:ok, %RuntimeContract{} = contract} = ProviderCatalog.get_contract("anthropic")
       assert contract.provider == "anthropic"
-      assert contract.display_name == "Anthropic API"
+      # Session 6.6 dropped per-provider display_name aliases (was
+      # "Anthropic API"); names now come from a small override table
+      # or get computed by capitalizing the atom string.
+      assert contract.display_name == "Anthropic"
       assert contract.type == :api
     end
 

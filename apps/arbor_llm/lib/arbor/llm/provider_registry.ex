@@ -2,29 +2,35 @@ defmodule Arbor.LLM.ProviderRegistry do
   @moduledoc """
   Single source of truth for which providers Arbor knows about.
 
-  Drives the env-var discovery in `Arbor.LLM.Client`, the model-spec
-  translation in `Arbor.LLM.Adapter.ReqLLM`, and the capability catalog
-  in `Arbor.LLM.ProviderCatalog`. Where information already lives in
-  req_llm or llm_db, we read from there; only Arbor-specific
-  information (historical naming aliases, local-LM probe URLs) lives
-  here as a small map.
+  Cloud providers come from `ReqLLM.Providers.list/0`. Local-LM
+  providers (`lm_studio`, `ollama`) are Arbor-only concepts since
+  req_llm has no dedicated modules for them — they route through
+  `:openai` with a `base_url` override (req_llm's openai
+  chat-completions/embeddings are OpenAI-spec compliant, which is what
+  these local servers serve).
 
   ## What's hardcoded here vs. discovered
 
   | Concern | Source |
   |---|---|
-  | List of cloud Arbor providers | `@aliases` (small alias map: Arbor's names) |
-  | Local-LM providers (lm_studio, ollama) | `@local_providers` (Arbor-only; req_llm has no dedicated providers) |
-  | Display name | `@display_names` (presentation, doesn't belong in req_llm) |
-  | req_llm atom for a given Arbor provider | `@aliases` (the only real translation Arbor needs) |
-  | env_key per cloud provider | req_llm provider module's `default_env_key/0` |
-  | base_url per local-LM | `@local_providers` defaults + operator config override |
+  | List of cloud providers | `ReqLLM.Providers.list/0` |
+  | req_llm atom for a cloud provider | the provider string IS the atom name |
+  | env_key per cloud provider | provider module's `default_env_key/0` |
+  | Local-LM list | `@local_providers` (Arbor-only) |
+  | Local-LM base_url | `@local_providers` defaults + operator config override |
+  | Local-LM routing target | `@local_providers` (all → `:openai`) |
+  | Display name | `@display_overrides` for special-cased names, otherwise computed |
   | Capabilities per provider | aggregated from `LLMDB.models(provider)` |
 
-  The two static maps are the irreducible Arbor surface — they exist
-  because Arbor's external naming has historically been independent
-  of req_llm's (`"gemini"` vs `:google`) and because req_llm doesn't
-  model local-LM servers (we route them through `openai` + `base_url`).
+  ## Naming convention
+
+  Arbor uses req_llm's provider names directly — `"google"` rather
+  than the historical `"gemini"`, etc. The 9-entry alias map that
+  Session 6.5 introduced was dropped in Session 6.6 after the user
+  observed that maintaining duplicate naming creates inevitable drift.
+  Callers that historically used `"gemini"` should switch to
+  `"google"`; the migration touched ~10 files across arbor_ai,
+  arbor_orchestrator, arbor_common, and arbor_agent.
 
   ## Capability aggregation
 
@@ -36,52 +42,52 @@ defmodule Arbor.LLM.ProviderRegistry do
 
   alias Arbor.Contracts.AI.Capabilities
 
-  # Arbor provider name → req_llm provider atom. Only Arbor-side
-  # alias for naming, plus the local-LM redirections.
-  @aliases %{
-    "openai" => :openai,
-    "anthropic" => :anthropic,
-    "gemini" => :google,
-    "xai" => :xai,
-    "openrouter" => :openrouter,
-    "zai" => :zai,
-    "zai_coding_plan" => :zai_coding_plan,
-    "lm_studio" => :openai,
-    "ollama" => :openai
-  }
-
-  # Local-LM defaults — these are Arbor-only providers since req_llm
-  # has no dedicated `:lm_studio` or `:ollama`. Operator-overridable
-  # via `config :arbor_orchestrator, <config_key>, base_url: "..."`.
+  # Local-LM Arbor providers. req_llm has no dedicated modules; we
+  # route through `:openai` with a base_url override.
+  # Operator-overridable via
+  # `config :arbor_orchestrator, <config_key>, base_url: "..."`.
   @local_providers %{
     "lm_studio" => %{config_key: :lm_studio, default_base_url: "http://localhost:1234/v1"},
     "ollama" => %{config_key: :ollama, default_base_url: "http://localhost:11434/v1"}
   }
 
-  # Display names are a UI concern (dashboard's runtime panel,
-  # `mix arbor.doctor` output) — neither req_llm nor llm_db carries
-  # them in the shape we want here.
-  @display_names %{
-    "openai" => "OpenAI API",
-    "anthropic" => "Anthropic API",
-    "gemini" => "Google Gemini API",
+  # Display name overrides for providers where titlecasing the atom
+  # doesn't read well. Anything not listed gets a sensible default
+  # via `compute_display_name/1`.
+  @display_overrides %{
+    "openai" => "OpenAI",
     "xai" => "x.ai (Grok)",
     "openrouter" => "OpenRouter",
+    "lm_studio" => "LM Studio",
+    "google" => "Google Gemini",
+    "google_vertex" => "Google Vertex AI",
+    "amazon_bedrock" => "Amazon Bedrock",
     "zai" => "Z.ai",
     "zai_coding_plan" => "Z.ai Coding Plan",
-    "lm_studio" => "LM Studio",
-    "ollama" => "Ollama"
+    "zai_coder" => "Z.ai Coder"
   }
 
   # ── Listing ─────────────────────────────────────────────────────────
 
   @doc "All Arbor-known provider names, sorted."
   @spec list() :: [String.t()]
-  def list, do: @aliases |> Map.keys() |> Enum.sort()
+  def list, do: (list_cloud() ++ list_local()) |> Enum.sort()
 
-  @doc "Cloud (non-local) Arbor-known provider names, sorted."
+  @doc """
+  Cloud (non-local) provider names, sorted.
+
+  Read from `ReqLLM.Providers.list/0` so any provider req_llm
+  supports — anthropic, openai, google, amazon_bedrock, azure,
+  cerebras, groq, meta, vllm, openrouter, xai, zai, zai_coding_plan,
+  zenmux, etc. — is auto-discovered without us maintaining a separate
+  list. Result is provider strings (Atom.to_string of each atom).
+  """
   @spec list_cloud() :: [String.t()]
-  def list_cloud, do: list() |> Enum.reject(&local?/1)
+  def list_cloud do
+    ReqLLM.Providers.list()
+    |> Enum.map(&Atom.to_string/1)
+    |> Enum.sort()
+  end
 
   @doc "Local-LM Arbor provider names, sorted."
   @spec list_local() :: [String.t()]
@@ -93,34 +99,53 @@ defmodule Arbor.LLM.ProviderRegistry do
   @spec local?(String.t()) :: boolean()
   def local?(provider), do: Map.has_key?(@local_providers, provider)
 
-  @doc "True if `provider` is in the registry."
+  @doc "True if `provider` is in the registry (cloud or local)."
   @spec known?(String.t()) :: boolean()
-  def known?(provider), do: Map.has_key?(@aliases, provider)
+  def known?(provider), do: provider in list_cloud() or local?(provider)
 
   @doc """
   Returns the req_llm provider atom for an Arbor provider.
 
-  For cloud providers, this is the exact name req_llm uses in its
-  registry. For local-LM providers (lm_studio, ollama), it returns
-  `:openai` because that's the req_llm provider module that handles
-  the OpenAI-compatible chat-completions and embeddings endpoints
-  these servers expose.
+  For cloud providers, the Arbor name IS the req_llm name — we just
+  do `String.to_existing_atom/1` (req_llm pre-registers its provider
+  atoms, so the atom always exists). For local-LM providers
+  (lm_studio, ollama), returns `:openai` because that's the req_llm
+  provider module that handles the OpenAI-compatible endpoints these
+  servers expose.
+
+  Returns `nil` for unknown providers.
   """
   @spec req_llm_atom(String.t()) :: atom() | nil
-  def req_llm_atom(provider), do: Map.get(@aliases, provider)
+  def req_llm_atom(provider) when is_binary(provider) do
+    cond do
+      local?(provider) -> :openai
+      provider in list_cloud() -> String.to_existing_atom(provider)
+      true -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
 
   @doc "Human-readable display name for `mix arbor.doctor` etc."
   @spec display_name(String.t()) :: String.t()
-  def display_name(provider), do: Map.get(@display_names, provider, provider)
+  def display_name(provider) when is_binary(provider) do
+    Map.get_lazy(@display_overrides, provider, fn -> compute_display_name(provider) end)
+  end
+
+  defp compute_display_name(provider) do
+    provider
+    |> String.split("_")
+    |> Enum.map_join(" ", &String.capitalize/1)
+  end
 
   # ── Auth / Transport ────────────────────────────────────────────────
 
   @doc """
   The env var name carrying the API key for a cloud provider, or `nil`
-  for local-LM and ACP providers (which don't auth via env keys).
+  for local-LM providers (no auth) and unknown providers.
 
   Read from the req_llm provider module's `default_env_key/0`, set in
-  `use ReqLLM.Provider`. We never hardcode env-var names in Arbor.
+  `use ReqLLM.Provider`. Arbor doesn't hardcode env-var names.
   """
   @spec default_env_key(String.t()) :: String.t() | nil
   def default_env_key(provider) do
@@ -148,9 +173,9 @@ defmodule Arbor.LLM.ProviderRegistry do
   end
 
   @doc """
-  The base URL Arbor uses for a local-LM provider, honouring
-  operator config overrides. Returns `nil` for cloud providers
-  (req_llm's transport uses its own default).
+  The base URL Arbor uses for a local-LM provider, honouring operator
+  config overrides. Returns `nil` for cloud providers (req_llm's
+  transport uses its own default).
   """
   @spec default_base_url(String.t()) :: String.t() | nil
   def default_base_url(provider) do
@@ -167,9 +192,9 @@ defmodule Arbor.LLM.ProviderRegistry do
   # ── Availability ────────────────────────────────────────────────────
 
   @doc """
-  True if a cloud provider's API key env var is set, or false for
-  local-LM providers (whose availability is determined by an HTTP
-  probe, not this function).
+  True if a cloud provider's API key env var is set, false otherwise.
+  Local-LM providers always return false here (their availability is
+  determined by an HTTP probe, not env-var presence).
   """
   @spec env_available?(String.t()) :: boolean()
   def env_available?(provider) do
@@ -260,13 +285,9 @@ defmodule Arbor.LLM.ProviderRegistry do
   defp thinking?(%{reasoning: %{enabled: true}}), do: true
   defp thinking?(_), do: false
 
-  # Models with reasoning enabled support extended thinking semantics
-  # (think-as-output). llm_db may omit token_budget for providers that
-  # don't expose the knob; presence-of-reasoning is the right signal.
   defp extended_thinking?(%{reasoning: %{enabled: true}}), do: true
   defp extended_thinking?(_), do: false
 
-  # llm_db models carry modalities at the top level, not inside caps.
   defp vision?(%LLMDB.Model{modalities: %{input: input}}) when is_list(input),
     do: :image in input
 

@@ -53,21 +53,22 @@ defmodule Arbor.LLM.Client do
 
   @default_client_key {__MODULE__, :default_client}
 
-  # Mapping between our adapter string IDs and LLMDB atom provider IDs.
-  # Only providers where the names differ need entries.
-  @llmdb_provider_map %{
-    "openai" => :openai,
-    "anthropic" => :anthropic,
-    "gemini" => :google,
-    "zai" => :zai,
-    "zai_coding_plan" => :zai_coding_plan,
-    "openrouter" => :openrouter,
-    "xai" => :xai,
+  # Local-LM providers carry different atoms in llm_db's catalog
+  # ("lm_studio" → :lmstudio without underscore; "ollama" → :ollama_cloud
+  # because llm_db's :ollama_cloud is the catalog provider for the
+  # cloud Ollama service, distinct from local Ollama). For cloud
+  # providers Arbor's names match req_llm's atoms after the
+  # Session 6.6 rename, so we just round-trip via
+  # `String.to_existing_atom/1` rather than maintaining tautological
+  # entries.
+  @llmdb_provider_overrides %{
     "lm_studio" => :lmstudio,
     "ollama" => :ollama_cloud
   }
 
-  @llmdb_provider_reverse_map Map.new(@llmdb_provider_map, fn {k, v} -> {v, k} end)
+  @llmdb_provider_reverse_overrides Map.new(@llmdb_provider_overrides, fn {k, v} ->
+                                      {v, k}
+                                    end)
 
   @type complete_middleware ::
           (Request.t(), (Request.t() -> {:ok, Response.t()} | {:error, term()}) ->
@@ -221,7 +222,7 @@ defmodule Arbor.LLM.Client do
 
     llmdb_opts =
       if is_binary(provider_filter) do
-        case Map.get(@llmdb_provider_map, provider_filter) do
+        case arbor_to_llmdb_atom(provider_filter) do
           nil -> Keyword.put(llmdb_opts, :scope, :none)
           llmdb_id -> Keyword.put(llmdb_opts, :scope, llmdb_id)
         end
@@ -231,7 +232,7 @@ defmodule Arbor.LLM.Client do
           client.adapters
           |> Map.keys()
           |> Enum.flat_map(fn name ->
-            case Map.get(@llmdb_provider_map, name) do
+            case arbor_to_llmdb_atom(name) do
               nil -> []
               id -> [id]
             end
@@ -250,8 +251,7 @@ defmodule Arbor.LLM.Client do
       true ->
         case llmdb_select(llmdb_opts) do
           {:ok, {llmdb_provider, model_id}} ->
-            adapter_name =
-              Map.get(@llmdb_provider_reverse_map, llmdb_provider, to_string(llmdb_provider))
+            adapter_name = llmdb_atom_to_arbor(llmdb_provider)
 
             info =
               case llmdb_model(llmdb_provider, model_id) do
@@ -819,7 +819,7 @@ defmodule Arbor.LLM.Client do
     cond do
       String.starts_with?(model, "gpt") -> {:ok, "openai"}
       String.starts_with?(model, "claude") -> {:ok, "anthropic"}
-      String.starts_with?(model, "gemini") -> {:ok, "gemini"}
+      String.starts_with?(model, "gemini") -> {:ok, "google"}
       true -> {:error, :provider_inference_failed}
     end
   end
@@ -898,7 +898,7 @@ defmodule Arbor.LLM.Client do
 
   defp list_models_from_llmdb(provider, _adapter_keys) when is_binary(provider) do
     if llmdb_available?() do
-      case Map.get(@llmdb_provider_map, provider) do
+      case arbor_to_llmdb_atom(provider) do
         nil -> []
         llmdb_id -> llmdb_models(llmdb_id) |> Enum.map(&model_to_map/1)
       end
@@ -911,7 +911,7 @@ defmodule Arbor.LLM.Client do
     if llmdb_available?() do
       adapter_keys
       |> Enum.flat_map(fn name ->
-        case Map.get(@llmdb_provider_map, name) do
+        case arbor_to_llmdb_atom(name) do
           nil -> []
           llmdb_id -> llmdb_models(llmdb_id) |> Enum.map(&model_to_map/1)
         end
@@ -925,7 +925,7 @@ defmodule Arbor.LLM.Client do
     if llmdb_available?() do
       result =
         Enum.find_value(adapter_keys, fn name ->
-          case Map.get(@llmdb_provider_map, name) do
+          case arbor_to_llmdb_atom(name) do
             nil -> nil
             llmdb_id -> lookup_llmdb_model(llmdb_id, model_id)
           end
@@ -934,6 +934,28 @@ defmodule Arbor.LLM.Client do
       result || {:error, :model_not_found}
     else
       {:error, :model_not_found}
+    end
+  end
+
+  # Map an Arbor provider string to the atom llm_db's catalog uses for
+  # that provider. Cloud providers' Arbor names match req_llm's atoms
+  # (after the Session 6.6 rename), and llm_db reuses req_llm's atoms,
+  # so `String.to_existing_atom/1` works for them. Local-LM providers
+  # use Arbor-only names that differ from llm_db's catalog atoms — the
+  # overrides table handles them.
+  defp arbor_to_llmdb_atom(provider) when is_binary(provider) do
+    case Map.fetch(@llmdb_provider_overrides, provider) do
+      {:ok, atom} -> atom
+      :error -> String.to_existing_atom(provider)
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp llmdb_atom_to_arbor(atom) when is_atom(atom) do
+    case Map.fetch(@llmdb_provider_reverse_overrides, atom) do
+      {:ok, name} -> name
+      :error -> Atom.to_string(atom)
     end
   end
 
@@ -949,7 +971,7 @@ defmodule Arbor.LLM.Client do
       id: model.id,
       name: model.name,
       family: model.family || get_in(Map.get(model, :extra, nil) || %{}, [:family]),
-      provider: to_string(Map.get(@llmdb_provider_reverse_map, model.provider, model.provider)),
+      provider: llmdb_atom_to_arbor(model.provider),
       capabilities: model.capabilities,
       modalities: model.modalities,
       cost: model.cost,
