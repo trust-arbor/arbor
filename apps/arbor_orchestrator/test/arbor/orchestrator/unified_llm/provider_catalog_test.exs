@@ -3,7 +3,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ProviderCatalogTest do
   @moduletag :fast
 
   alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
-  alias Arbor.Orchestrator.UnifiedLLM.ProviderCatalog
+  alias Arbor.LLM.ProviderCatalog
 
   # Clean ETS table between tests
   setup do

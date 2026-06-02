@@ -556,9 +556,9 @@ defmodule Arbor.Agent.Eval.CorpusGenerator do
   # ── LLM Call ──────────────────────────────────────────────────
 
   defp call_llm(provider, model, prompt) do
-    client_mod = Module.concat([:Arbor, :Orchestrator, :UnifiedLLM, :Client])
-    request_mod = Module.concat([:Arbor, :Orchestrator, :UnifiedLLM, :Request])
-    message_mod = Module.concat([:Arbor, :Orchestrator, :UnifiedLLM, :Message])
+    client_mod = Module.concat([:Arbor, :LLM, :Client])
+    request_mod = Module.concat([:Arbor, :LLM, :Request])
+    message_mod = Module.concat([:Arbor, :LLM, :Message])
 
     if Code.ensure_loaded?(client_mod) and Code.ensure_loaded?(request_mod) and
          Code.ensure_loaded?(message_mod) do

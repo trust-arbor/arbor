@@ -1,7 +1,7 @@
 defmodule Arbor.Orchestrator.UnifiedLLM.EmbeddingTest do
   use ExUnit.Case, async: true
 
-  alias Arbor.Orchestrator.UnifiedLLM.Client
+  alias Arbor.LLM.Client
 
   @moduletag :fast
 

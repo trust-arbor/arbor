@@ -154,7 +154,7 @@ defmodule Arbor.Actions.Tool do
     end
 
     defp executor_module do
-      Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor
+      Arbor.LLM.ArborActionsExecutor
     end
   end
 end

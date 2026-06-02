@@ -9,15 +9,15 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
-  alias Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor
+  alias Arbor.LLM.ArborActionsExecutor
 
-  alias Arbor.Orchestrator.UnifiedLLM.Client
+  alias Arbor.LLM.Client
 
   alias Arbor.LLM.Message
 
   alias Arbor.LLM.Request
 
-  alias Arbor.Orchestrator.UnifiedLLM.ToolLoop
+  alias Arbor.LLM.ToolLoop
   import Arbor.Orchestrator.Handlers.Helpers
 
   alias Arbor.Orchestrator.Session.Builders

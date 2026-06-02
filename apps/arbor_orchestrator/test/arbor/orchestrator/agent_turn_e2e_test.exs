@@ -30,7 +30,7 @@ defmodule Arbor.Orchestrator.AgentTurnE2ETest do
   use ExUnit.Case, async: false
 
   alias Arbor.Orchestrator.{Preprocessor, Session}
-  alias Arbor.Orchestrator.UnifiedLLM.Client
+  alias Arbor.LLM.Client
 
   @app :arbor_orchestrator
 

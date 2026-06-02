@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
+defmodule Arbor.LLM.ToolLoop do
   @moduledoc """
   Multi-turn tool-use loop for the unified LLM client.
 
@@ -28,16 +28,20 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
 
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
 
-  alias Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor
+  alias Arbor.LLM.ArborActionsExecutor
 
-  alias Arbor.Orchestrator.UnifiedLLM.Client
+  alias Arbor.LLM.Client
 
   alias Arbor.LLM.ContentPart
 
   alias Arbor.LLM.Message
 
   alias Arbor.LLM.Request
-  alias Arbor.Orchestrator.Session.Builders
+
+  # Session.Builders lives in arbor_orchestrator (which depends on
+  # arbor_llm). Runtime indirection avoids the cycle — see Client's
+  # @tool_hooks_mod for the same pattern.
+  @session_builders_mod Arbor.Orchestrator.Session.Builders
 
   @prompt_sanitizer Arbor.Common.PromptSanitizer
 
@@ -559,7 +563,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ToolLoop do
   end
 
   defp emit_tool_loop_signal(event, data) do
-    Builders.emit_signal(:agent, event, data)
+    builders_mod = @session_builders_mod
+    apply(builders_mod, :emit_signal, [:agent, event, data])
   rescue
     _ -> :ok
   end

@@ -5,7 +5,7 @@ defmodule Arbor.Orchestrator.ResearchPipelineTest do
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Handlers.LlmHandler
-  alias Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor
+  alias Arbor.LLM.ArborActionsExecutor
 
   @moduletag :fast
 

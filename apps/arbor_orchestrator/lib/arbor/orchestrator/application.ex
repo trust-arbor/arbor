@@ -60,7 +60,7 @@ defmodule Arbor.Orchestrator.Application do
   # Disabled in :test (see config/test.exs) so tests don't poke local providers.
   defp maybe_preflight_models do
     if Application.get_env(:arbor_orchestrator, :preflight_models_on_start, true) do
-      Task.start(fn -> Arbor.Orchestrator.UnifiedLLM.Preflight.check_and_log() end)
+      Task.start(fn -> Arbor.LLM.Preflight.check_and_log() end)
     end
 
     :ok

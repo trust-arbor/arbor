@@ -1,7 +1,7 @@
 defmodule Arbor.Orchestrator.UnifiedLLM.Adapters.OpenAI do
   @moduledoc false
 
-  @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+  @behaviour Arbor.LLM.ProviderAdapter
 
   alias Arbor.Orchestrator.UnifiedLLM.Adapters.ErrorMapper
   alias Arbor.LLM.ContentPart

@@ -295,7 +295,7 @@ defmodule Arbor.AI.AcpPool do
 
     # Clear the cached UnifiedLLM Client so it re-discovers adapters
     # (including ACP now that the pool is running).
-    client_mod = Arbor.Orchestrator.UnifiedLLM.Client
+    client_mod = Arbor.LLM.Client
 
     if Code.ensure_loaded?(client_mod) and
          function_exported?(client_mod, :clear_default_client, 0) do

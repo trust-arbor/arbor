@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
+defmodule Arbor.LLM.ArborActionsExecutor do
   @moduledoc """
   LLM-facing tool interface for Arbor Actions.
 
@@ -14,7 +14,11 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
   If `tools` is omitted, all available actions are used.
   """
 
-  alias Arbor.Orchestrator.ActionsExecutor
+  # Arbor.Orchestrator.ActionsExecutor lives in arbor_orchestrator (which
+  # depends on arbor_llm). Runtime indirection avoids the cycle — see
+  # Client's @tool_hooks_mod for the same pattern. defdelegate, being a
+  # compile-time directive, must be replaced with apply/3.
+  @actions_executor_mod Arbor.Orchestrator.ActionsExecutor
 
   @actions_mod Module.concat([:Arbor, :Actions])
 
@@ -27,15 +31,22 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
   def definitions(action_names \\ nil)
 
   def definitions(nil) do
-    ActionsExecutor.with_actions_module(fn ->
-      apply(@actions_mod, :all_tools, [])
-      |> Enum.map(&to_openai_format/1)
-    end) || []
+    executor = @actions_executor_mod
+
+    apply(executor, :with_actions_module, [
+      fn ->
+        apply(@actions_mod, :all_tools, [])
+        |> Enum.map(&to_openai_format/1)
+      end
+    ]) || []
   end
 
   def definitions(action_names) when is_list(action_names) do
-    ActionsExecutor.with_actions_module(fn ->
-      registry = Arbor.Common.ActionRegistry
+    executor = @actions_executor_mod
+
+    apply(executor, :with_actions_module, [
+      fn ->
+        registry = Arbor.Common.ActionRegistry
 
       Enum.flat_map(action_names, fn name ->
         name = String.trim(name)
@@ -50,7 +61,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
             []
         end
       end)
-    end) || []
+      end
+    ]) || []
   end
 
   # Resolve via ActionRegistry first, then fall back to build_action_map.
@@ -69,7 +81,8 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
         ok
 
       {:error, :not_found} ->
-        action_map = ActionsExecutor.build_action_map()
+        executor = @actions_executor_mod
+        action_map = apply(executor, :build_action_map, [])
 
         case Map.get(action_map, name) do
           nil -> {:error, :not_found}
@@ -80,10 +93,16 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor do
 
   @doc """
   Execute an action by name. Delegates to `Arbor.Orchestrator.ActionsExecutor.execute/4`.
+
+  `defdelegate` would be a compile-time bind; we go through apply/3 to keep
+  the arbor_orchestrator boundary at runtime — see module-level comment.
   """
   @spec execute(String.t(), map(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, String.t()}
-  defdelegate execute(name, args, workdir, opts \\ []), to: ActionsExecutor
+  def execute(name, args, workdir, opts \\ []) do
+    executor = @actions_executor_mod
+    apply(executor, :execute, [name, args, workdir, opts])
+  end
 
   @doc """
   Convert a Jido tool definition to OpenAI function-calling format.

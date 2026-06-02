@@ -1,4 +1,4 @@
-defmodule Arbor.Orchestrator.UnifiedLLM.Retry do
+defmodule Arbor.LLM.Retry do
   @moduledoc false
 
   @spec execute((-> any()), keyword()) :: {:ok, any()} | {:error, term()}

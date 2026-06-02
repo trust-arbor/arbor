@@ -2,11 +2,11 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Orchestrator.UnifiedLLM
+  alias Arbor.LLM
 
   alias Arbor.LLM.AbortError
 
-  alias Arbor.Orchestrator.UnifiedLLM.Client
+  alias Arbor.LLM.Client
 
   alias Arbor.LLM.Message
 
@@ -25,7 +25,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
   alias Arbor.LLM.Tool
 
   defmodule Adapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
     def provider, do: "conformance-84"
@@ -104,7 +104,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
   end
 
   defmodule ToolLoopAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
     def provider, do: "conformance-84-tool-loop"
@@ -125,7 +125,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
   end
 
   defmodule SlowToolLoopAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
     def provider, do: "conformance-84-slow-tool-loop"
@@ -148,7 +148,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
   end
 
   defmodule StreamToolLoopAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
     def provider, do: "conformance-84-stream-tool-loop"
@@ -181,7 +181,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
   end
 
   defmodule StreamMixedToolLoopAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
     def provider, do: "conformance-84-stream-mixed-tool-loop"
@@ -215,7 +215,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
   end
 
   defmodule RetryStreamAdapter do
-    @behaviour Arbor.Orchestrator.UnifiedLLM.ProviderAdapter
+    @behaviour Arbor.LLM.ProviderAdapter
 
     @impl true
     def provider, do: "conformance-84-retry-stream"
@@ -251,21 +251,21 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     client = Client.new(default_provider: "conformance-84") |> Client.register_adapter(Adapter)
 
     assert {:ok, _} =
-             UnifiedLLM.generate(
+             LLM.generate(
                client: client,
                model: "demo",
                prompt: "hello"
              )
 
     assert {:ok, _} =
-             UnifiedLLM.generate(
+             LLM.generate(
                client: client,
                model: "demo",
                messages: [Message.new(:user, "hello")]
              )
 
     assert {:error, :prompt_and_messages_mutually_exclusive} =
-             UnifiedLLM.generate(
+             LLM.generate(
                client: client,
                model: "demo",
                prompt: "a",
@@ -277,7 +277,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     client = Client.new(default_provider: "conformance-84") |> Client.register_adapter(Adapter)
 
     assert {:ok, stream} =
-             UnifiedLLM.stream(client: client, model: "demo", prompt: "hello")
+             LLM.stream(client: client, model: "demo", prompt: "hello")
 
     assert [%StreamEvent{type: :start}, %StreamEvent{type: :delta}, %StreamEvent{type: :finish}] =
              Enum.to_list(stream)
@@ -287,14 +287,14 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     client = Client.new(default_provider: "conformance-84") |> Client.register_adapter(Adapter)
 
     assert {:ok, %{"ok" => true}} =
-             UnifiedLLM.generate_object(
+             LLM.generate_object(
                client: client,
                model: "json-model",
                prompt: "hello"
              )
 
     assert {:error, %NoObjectGeneratedError{}} =
-             UnifiedLLM.generate_object(
+             LLM.generate_object(
                client: client,
                model: "demo",
                prompt: "hello"
@@ -313,7 +313,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     }
 
     assert {:ok, %{"ok" => true}} =
-             UnifiedLLM.generate_object(
+             LLM.generate_object(
                client: client,
                model: "json-model",
                prompt: "hello",
@@ -321,7 +321,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
              )
 
     assert {:error, %NoObjectGeneratedError{reason: {:schema_property_invalid, "ok", _}}} =
-             UnifiedLLM.generate_object(
+             LLM.generate_object(
                client: client,
                model: "json-model",
                prompt: "hello",
@@ -337,7 +337,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     client = Client.new(default_provider: "conformance-84") |> Client.register_adapter(Adapter)
 
     assert {:ok, object_stream} =
-             UnifiedLLM.stream_object(
+             LLM.stream_object(
                client: client,
                model: "json-stream-model",
                prompt: "hello",
@@ -355,7 +355,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     client = Client.new(default_provider: "conformance-84") |> Client.register_adapter(Adapter)
 
     assert {:ok, object_stream} =
-             UnifiedLLM.stream_object(
+             LLM.stream_object(
                client: client,
                model: "bad-json-stream-model",
                prompt: "hello"
@@ -368,7 +368,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     client = Client.new(default_provider: "conformance-84") |> Client.register_adapter(Adapter)
 
     assert {:error, %RequestTimeoutError{timeout_ms: 5}} =
-             UnifiedLLM.generate(
+             LLM.generate(
                client: client,
                model: "slow-model",
                prompt: "hello",
@@ -376,7 +376,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
              )
 
     assert {:error, %RequestTimeoutError{timeout_ms: 5}} =
-             UnifiedLLM.stream(
+             LLM.stream(
                client: client,
                model: "slow-stream",
                prompt: "hello",
@@ -388,7 +388,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     client = Client.new(default_provider: "conformance-84") |> Client.register_adapter(Adapter)
 
     assert {:ok, stream} =
-             UnifiedLLM.stream(
+             LLM.stream(
                client: client,
                model: "slow-event-stream",
                prompt: "hello",
@@ -402,7 +402,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     client = Client.new(default_provider: "conformance-84") |> Client.register_adapter(Adapter)
 
     assert {:error, %AbortError{}} =
-             UnifiedLLM.generate(
+             LLM.generate(
                client: client,
                model: "demo",
                prompt: "hello",
@@ -410,7 +410,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
              )
 
     assert {:error, %AbortError{}} =
-             UnifiedLLM.stream(
+             LLM.stream(
                client: client,
                model: "demo",
                prompt: "hello",
@@ -424,7 +424,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     :atomics.put(abort_state, 1, 0)
 
     assert {:ok, stream} =
-             UnifiedLLM.stream(
+             LLM.stream(
                client: client,
                model: "slow-event-stream",
                prompt: "hello",
@@ -450,7 +450,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     }
 
     assert {:ok, response} =
-             UnifiedLLM.generate(
+             LLM.generate(
                client: client,
                model: "demo",
                prompt: "hello",
@@ -480,7 +480,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     end
 
     assert {:error, %AbortError{}} =
-             UnifiedLLM.generate(
+             LLM.generate(
                client: client,
                model: "demo",
                prompt: "hello",
@@ -502,7 +502,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     }
 
     assert {:error, %RequestTimeoutError{timeout_ms: 5}} =
-             UnifiedLLM.generate(
+             LLM.generate(
                client: client,
                model: "demo",
                prompt: "hello",
@@ -524,7 +524,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     }
 
     assert {:ok, stream} =
-             UnifiedLLM.stream(
+             LLM.stream(
                client: client,
                model: "demo",
                prompt: "hello",
@@ -562,7 +562,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     }
 
     assert {:ok, stream} =
-             UnifiedLLM.stream(
+             LLM.stream(
                client: client,
                model: "demo",
                prompt: "hello",
@@ -607,7 +607,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     }
 
     assert {:ok, stream} =
-             UnifiedLLM.stream(
+             LLM.stream(
                client: client,
                model: "demo",
                prompt: "hello",
@@ -634,7 +634,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
       |> Client.register_adapter(RetryStreamAdapter)
 
     assert {:ok, stream} =
-             UnifiedLLM.stream(
+             LLM.stream(
                client: client,
                model: "demo",
                prompt: "hello",
@@ -664,7 +664,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.Conformance84Test do
     }
 
     assert {:ok, stream} =
-             UnifiedLLM.stream(
+             LLM.stream(
                client: client,
                model: "demo",
                prompt: "hello",

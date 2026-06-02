@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutorTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Orchestrator.UnifiedLLM.ArborActionsExecutor
+  alias Arbor.LLM.ArborActionsExecutor
 
   # Arbor.Actions is only available when running in the umbrella context.
   # When running standalone (cd apps/arbor_orchestrator && mix test), it's not loaded.
