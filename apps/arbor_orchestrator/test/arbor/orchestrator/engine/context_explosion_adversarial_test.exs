@@ -269,4 +269,101 @@ defmodule Arbor.Orchestrator.Engine.ContextExplosionAdversarialTest do
       assert %LineageEntry{node_id: "writer", operation: :merge} = entry
     end
   end
+
+  # ── Budget warnings (Phase 1: observability) ──────────────────────
+
+  describe "budget warnings fire when limits are exceeded" do
+    # Set a tiny budget for these tests so we don't have to push 100k+
+    # keys to trip the warning. The Application env is process-global,
+    # but `async: true` is OK here because each test uses unique node
+    # ids — the warning identifies which node, not the test process.
+    #
+    # We use Application.put_env in a setup block scoped to this
+    # describe via setup_all.
+
+    setup do
+      prior = Application.get_env(:arbor_orchestrator, :context_budgets)
+
+      Application.put_env(:arbor_orchestrator, :context_budgets, %{
+        max_keys: 10,
+        max_value_bytes: 1_000,
+        max_total_bytes: 100_000
+      })
+
+      on_exit(fn ->
+        if prior do
+          Application.put_env(:arbor_orchestrator, :context_budgets, prior)
+        else
+          Application.delete_env(:arbor_orchestrator, :context_budgets)
+        end
+      end)
+
+      :ok
+    end
+
+    test "max_keys budget fires Logger.warning when key count exceeds limit" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          ctx = Context.new()
+          Context.apply_updates(ctx, build_keys(50), "node_keys")
+        end)
+
+      assert log =~ "[Context]"
+      assert log =~ "node_keys"
+      assert log =~ "max_keys"
+      assert log =~ "50"
+    end
+
+    test "max_value_bytes budget fires when a single value exceeds limit" do
+      big_value = String.duplicate("X", 5_000)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          ctx = Context.new()
+          Context.apply_updates(ctx, %{"big_blob" => big_value}, "node_val")
+        end)
+
+      assert log =~ "[Context]"
+      assert log =~ "node_val"
+      assert log =~ "max_value_bytes"
+      assert log =~ "big_blob"
+    end
+
+    test "value-only writes under budget produce NO warning" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          ctx = Context.new()
+          Context.apply_updates(ctx, build_keys(5), "node_under")
+        end)
+
+      refute log =~ "[Context]"
+    end
+
+    test "warning includes node_id so multi-node pipelines are diagnosable" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          ctx = Context.new()
+          ctx = Context.apply_updates(ctx, build_keys(11), "node_alpha")
+          _ctx = Context.apply_updates(ctx, build_keys(11, "more"), "node_bravo")
+        end)
+
+      assert log =~ "node_alpha" or log =~ "node_bravo",
+             "expected one of the node ids in the budget warning log"
+    end
+  end
+
+  describe "Config.context_budgets defaults are runaway-protection bounds" do
+    test "default max_keys is high enough that no realistic pipeline trips it" do
+      # No env override → defaults from Config.
+      defaults = Arbor.Orchestrator.Config.context_budgets()
+
+      assert defaults.max_keys >= 100_000
+      assert defaults.max_value_bytes >= 10_000_000
+      assert defaults.max_total_bytes >= 100_000_000
+    end
+
+    test "Config.context_budget_enforcement defaults to :warn (Phase 1)" do
+      assert Arbor.Orchestrator.Config.context_budget_enforcement() == :warn
+    end
+  end
 end

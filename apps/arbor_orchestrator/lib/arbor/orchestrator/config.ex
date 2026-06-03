@@ -167,4 +167,49 @@ defmodule Arbor.Orchestrator.Config do
   def turn_timeout_ms do
     Application.get_env(@app, :turn_timeout_ms, @default_turn_timeout_ms)
   end
+
+  # ===========================================================================
+  # Context size budgets (runaway protection, not workload limits)
+  # ===========================================================================
+
+  @default_context_budgets %{
+    # Max distinct keys in a single pipeline's Context. A real pipeline has
+    # dozens to hundreds. This bound catches runaway accumulation (e.g., an
+    # exec action that JSON-spreads a 100k-key result into context).
+    max_keys: 100_000,
+    # Max bytes of a single value (via :erlang.external_size/1).
+    # 10MB covers oversized LLM responses, attached files, large log blobs.
+    max_value_bytes: 10_000_000,
+    # Max total bytes across all context values.
+    max_total_bytes: 100_000_000
+  }
+
+  @doc """
+  Context-size budgets enforced by `Arbor.Orchestrator.Engine.Context`.
+
+  Returns a map with `:max_keys`, `:max_value_bytes`, `:max_total_bytes`.
+  Defaults are runaway-protection bounds, not workload limits — no
+  legitimate pipeline should approach them. Override per-env via
+  `config :arbor_orchestrator, :context_budgets, %{...}`.
+  """
+  @spec context_budgets() :: %{
+          max_keys: pos_integer(),
+          max_value_bytes: pos_integer(),
+          max_total_bytes: pos_integer()
+        }
+  def context_budgets do
+    user = Application.get_env(@app, :context_budgets, %{})
+    Map.merge(@default_context_budgets, user)
+  end
+
+  @doc """
+  How to react when a budget is exceeded: `:warn` (Logger.warning, proceed)
+  or `:error` (return error, fail the write). Default `:warn` — the
+  observability-first phase. Flip to `:error` per-env once operators
+  understand which pipelines are noisy and have pruned them.
+  """
+  @spec context_budget_enforcement() :: :warn | :error
+  def context_budget_enforcement do
+    Application.get_env(@app, :context_budget_enforcement, :warn)
+  end
 end
