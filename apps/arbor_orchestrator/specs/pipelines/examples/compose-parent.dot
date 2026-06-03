@@ -1,0 +1,213 @@
+// Compose Parent — Invoke a Subpipeline Twice with Different Inputs
+//
+// Exercises the engine's `graph.invoke` path that nothing else in the
+// example suite hits: the SubgraphHandler invokes a child .dot file,
+// passes a chosen subset of context, and remaps the child's outputs
+// back into the parent at a node-scoped prefix.
+//
+// The parent reads two names from its spec, invokes the same
+// compose-child.dot subpipeline twice (once per name), and writes
+// two greeting files. Each invocation must be isolated — neither
+// invocation should see the other's context, and their outputs land
+// under DIFFERENT subgraph prefixes (subgraph.invoke_first.* vs
+// subgraph.invoke_second.*).
+//
+// Context in (set via initial_values when calling Orchestrator.run):
+//   spec_path        — filename of the JSON spec file inside workdir
+//   workdir          — absolute path to a scratch directory
+//   session.agent_id — signing principal (for action-layer caps)
+//
+// Spec JSON shape (loaded from <workdir>/<spec_path>):
+//   first_name           — e.g. "Alice"
+//   second_name          — e.g. "Bob"
+//   first_output_path    — absolute path where Alice's greeting lands
+//   second_output_path   — absolute path where Bob's greeting lands
+//   child_dot_path       — absolute path to compose-child.dot (resolved
+//                          by the test rather than hardcoded so the
+//                          example works whether run from the umbrella
+//                          root or another cwd)
+
+digraph ComposeParent {
+  graph [
+    goal="Invoke a subpipeline twice and capture two distinct greetings",
+    label="Compose Parent"
+  ]
+
+  start [shape=Mdiamond]
+
+  // ── Phase 0: Load spec ────────────────────────────────────────────
+
+  read_spec [
+    type="read",
+    source="file",
+    path="spec.json"
+  ]
+
+  extract_first_name [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="first_name",
+    output_key="first_name"
+  ]
+
+  extract_second_name [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="second_name",
+    output_key="second_name"
+  ]
+
+  extract_first_path [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="first_output_path",
+    output_key="first_output_path"
+  ]
+
+  extract_second_path [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="second_output_path",
+    output_key="second_output_path"
+  ]
+
+  // Pull the child pipeline's DOT source out of the spec. The
+  // SubgraphHandler accepts `graph_source_key=<context-key>` so a
+  // parent can invoke an inline child whose path it doesn't have to
+  // hardcode. Tests use this to avoid CWD-relative paths breaking.
+  extract_child_dot [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="child_dot_source",
+    output_key="child_dot_source"
+  ]
+
+  // ── Phase 1: First invocation (Alice) ─────────────────────────────
+
+  // Stage the first name as the `name` key the child reads. The child
+  // will see `name=<first_name value>` in its (otherwise empty) context.
+  stage_first_name [
+    type="transform",
+    transform="identity",
+    source_key="first_name",
+    output_key="name"
+  ]
+
+  // Invoke the child. graph_file is read from context via the engine's
+  // attr-resolution path... wait, it can't (no variable interpolation
+  // in attrs). For this example we work around by setting the child
+  // path inline in the spec and reading it via graph_source_key, which
+  // tells SubgraphHandler to look up the DOT string from context. But
+  // that needs us to load the child's source as a string and place it
+  // in context first. Simpler: the test writes the absolute child path
+  // and we use graph_source_key="child_dot_string" after a `read` node
+  // loads the child.
+  //
+  // For this first cut we use a static graph_file relative to the
+  // working directory and trust that the test runs from the umbrella
+  // root. (Documenting the limitation in the example's heading.)
+  invoke_first [
+    type="graph.invoke",
+    graph_source_key="child_dot_source",
+    pass_context="name"
+  ]
+
+  // After invoke_first, the child's `greeting` lands at
+  // subgraph.invoke_first.greeting. Snapshot it before the next
+  // invocation overwrites the `name` slot.
+  snapshot_first_greeting [
+    type="transform",
+    transform="identity",
+    source_key="subgraph.invoke_first.greeting",
+    output_key="first_greeting"
+  ]
+
+  // ── Phase 2: Second invocation (Bob) ──────────────────────────────
+
+  // Overwrite `name` with the second value. The child reads from its
+  // own context (a fresh snapshot of parent's pass_context at invoke
+  // time), so this update takes effect for invoke_second.
+  stage_second_name [
+    type="transform",
+    transform="identity",
+    source_key="second_name",
+    output_key="name"
+  ]
+
+  invoke_second [
+    type="graph.invoke",
+    graph_source_key="child_dot_source",
+    pass_context="name"
+  ]
+
+  snapshot_second_greeting [
+    type="transform",
+    transform="identity",
+    source_key="subgraph.invoke_second.greeting",
+    output_key="second_greeting"
+  ]
+
+  // ── Phase 3: Write both greetings to disk ─────────────────────────
+
+  prep_first_content [
+    type="transform",
+    transform="identity",
+    source_key="first_greeting",
+    output_key="content"
+  ]
+
+  prep_first_path [
+    type="transform",
+    transform="identity",
+    source_key="first_output_path",
+    output_key="path"
+  ]
+
+  write_first [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
+
+  prep_second_content [
+    type="transform",
+    transform="identity",
+    source_key="second_greeting",
+    output_key="content"
+  ]
+
+  prep_second_path [
+    type="transform",
+    transform="identity",
+    source_key="second_output_path",
+    output_key="path"
+  ]
+
+  write_second [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
+
+  done [shape=Msquare]
+
+  // ── Flow ──────────────────────────────────────────────────────────
+
+  start -> read_spec
+  read_spec -> extract_first_name -> extract_second_name
+  extract_second_name -> extract_first_path -> extract_second_path
+  extract_second_path -> extract_child_dot
+
+  extract_child_dot -> stage_first_name -> invoke_first -> snapshot_first_greeting
+  snapshot_first_greeting -> stage_second_name -> invoke_second -> snapshot_second_greeting
+
+  snapshot_second_greeting -> prep_first_content -> prep_first_path -> write_first
+  write_first -> prep_second_content -> prep_second_path -> write_second -> done
+}

@@ -1,0 +1,32 @@
+// Compose Child — A trivial subpipeline used by compose-parent.dot
+//
+// Demonstrates the simplest subpipeline shape: takes a single context
+// value, runs one transform, returns the result. Pairs with
+// compose-parent.dot to exercise the SubgraphHandler.
+//
+// Context in (passed via parent's pass_context):
+//   name — the name to greet
+//
+// Context out (read by parent as subgraph.<invoke_node_id>.greeting):
+//   greeting — "Hello, <name>!"
+
+digraph ComposeChild {
+  graph [
+    goal="Greet whoever is named in context",
+    label="Compose Child"
+  ]
+
+  start [shape=Mdiamond]
+
+  greet [
+    type="transform",
+    transform="template",
+    source_key="name",
+    expression="Hello, {value}!",
+    output_key="greeting"
+  ]
+
+  done [shape=Msquare]
+
+  start -> greet -> done
+}
