@@ -29,15 +29,23 @@
 // answer." See the test's spec for what "acceptance" looks like.
 //
 // Context in (set via initial_values when calling Orchestrator.run):
-//   module_name        — e.g. "FizzBuzz"
-//   signature          — e.g. "@spec run(integer()) :: String.t()"
-//   description        — prose description of what to implement
-//   max_iterations     — integer hard cap on retries (typically 3-7)
+//   spec_path          — filename of the JSON spec file inside workdir
 //   workdir            — absolute path to a freshly-set-up mix project
-//   test_file_path     — workdir/test/model_test.exs
-//   impl_file_path     — workdir/lib/<module>.ex
-//   test_prompt        — pre-built prompt for gen_test (caller builds from spec)
+//                        (caller scaffolds: mix.exs + lib/ + test/ +
+//                        test_helper.exs; mix project must compile)
+//   iteration          — starting iteration counter (always 0 for a fresh run)
 //   session.agent_id   — signing principal
+//
+// Spec JSON shape (loaded from <workdir>/<spec_path>):
+//   module_name           — e.g. "FizzBuzz"
+//   signature             — "@spec run(integer()) :: String.t()"
+//   description           — prose description of what to implement
+//   test_prompt           — full prompt string for the gen_test stage
+//   acceptance_test_code  — the held-out test module source (string)
+//   test_file_path        — absolute path for the model's own test file
+//   impl_file_path        — absolute path for the impl module
+//   acceptance_file_path  — absolute path for the held-out acceptance test
+//   max_iterations        — integer hard cap on retries (typically 3-7)
 //
 // Context out (read by caller from the final context):
 //   converged          — boolean, true iff acceptance passed
@@ -60,6 +68,114 @@ digraph TDDCycle {
   ]
 
   start [shape=Mdiamond]
+
+  // ── Phase 0: Load spec + write the acceptance oracle ──────────────
+
+  // Read the spec.json from workdir. Content lands at last_response
+  // AND read.read_spec; we'll json_extract from last_response below.
+  read_spec [
+    type="read",
+    source="file",
+    path="spec.json"
+  ]
+
+  // Extract each top-level field into a flat context key so downstream
+  // nodes can pick them up via context_keys=. transform=json_extract
+  // takes source_key (the JSON string) and expression (the dotted path).
+  extract_module_name [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="module_name",
+    output_key="module_name"
+  ]
+
+  extract_signature [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="signature",
+    output_key="signature"
+  ]
+
+  extract_description [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="description",
+    output_key="description"
+  ]
+
+  extract_test_prompt [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="test_prompt",
+    output_key="test_prompt"
+  ]
+
+  extract_max_iterations [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="max_iterations",
+    output_key="max_iterations"
+  ]
+
+  extract_test_file_path [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="test_file_path",
+    output_key="test_file_path"
+  ]
+
+  extract_impl_file_path [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="impl_file_path",
+    output_key="impl_file_path"
+  ]
+
+  extract_acceptance_file_path [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="acceptance_file_path",
+    output_key="acceptance_file_path"
+  ]
+
+  extract_acceptance_code [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="acceptance_test_code",
+    output_key="acceptance_test_code"
+  ]
+
+  // Stage the acceptance file write. file_write's schema is {path, content};
+  // these renames bridge our keys → its schema.
+  prep_acceptance_content [
+    type="transform",
+    transform="identity",
+    source_key="acceptance_test_code",
+    output_key="content"
+  ]
+
+  prep_acceptance_path [
+    type="transform",
+    transform="identity",
+    source_key="acceptance_file_path",
+    output_key="path"
+  ]
+
+  write_acceptance [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
 
   // ── Phase 1: Generate the model's own test (one-shot) ─────────────
 
@@ -274,7 +390,16 @@ digraph TDDCycle {
   // nodes OVERWRITE `last_response` with their action result (a JSON
   // blob), so if the snapshot ran after the write it'd capture the
   // file-write's metadata instead of the LLM-generated code.
-  start -> gen_test -> snapshot_test -> prep_test_content -> prep_test_path -> write_test
+  // Phase 0 flow: load spec → extract fields → write the held-out acceptance
+  start -> read_spec
+  read_spec -> extract_module_name -> extract_signature -> extract_description
+  extract_description -> extract_test_prompt -> extract_max_iterations
+  extract_max_iterations -> extract_test_file_path -> extract_impl_file_path
+  extract_impl_file_path -> extract_acceptance_file_path -> extract_acceptance_code
+  extract_acceptance_code -> prep_acceptance_content -> prep_acceptance_path -> write_acceptance
+
+  // Phase 1+ unchanged: model writes its own test, then the impl loop.
+  write_acceptance -> gen_test -> snapshot_test -> prep_test_content -> prep_test_path -> write_test
   write_test -> build_impl_prompt -> gen_impl -> snapshot_impl
   snapshot_impl -> prep_impl_content -> prep_impl_path -> write_impl
   write_impl -> prep_test_run_path -> run_tests -> check_passed
