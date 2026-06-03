@@ -1,0 +1,80 @@
+// Hello World — Generate a hello-world program in any language
+//
+// Demonstrates the minimum complete code-generation pipeline shape:
+// LLM call → rename for the next node → file write. One DOT works for
+// any language the LLM can produce, by varying the `language` input.
+//
+// Context in (set via initial_values when calling Orchestrator.run):
+//   language — target programming language (e.g., "Python", "Rust", "Elixir")
+//   path     — absolute output path; user supplies extension matching the language
+//
+// Context out (written into the run's final context):
+//   last_response                — raw LLM output (the generated source code)
+//   content                      — same value, renamed for file_write
+//   exec.write.bytes_written     — size of the file that landed on disk
+//
+// Backend: LM Studio at http://localhost:1234/v1 (the adapter's default).
+// To use a different provider/model, set llm_provider= / llm_model= on the
+// generate node, or pass `session.llm_provider` / `session.llm_model` in
+// initial_values.
+//
+// Running this from a CLI is intentionally not a one-liner — the LLM and
+// file_write nodes both require capability grants and a signing identity.
+// The runnable demo lives at:
+//   apps/arbor_orchestrator/test/arbor/orchestrator/hello_world_example_test.exs
+// tagged `:integration_lm_studio`. The test calls Orchestrator.run/2
+// directly with the proper auth context. Production callers (a `Session`,
+// an Agent, etc.) wire the same context through their own caps + signer.
+//
+// Prerequisites:
+//   - LM Studio running with `granite-4.1-3b` loaded (or change llm_model=)
+//   - Output directory exists (set param.create_dirs="true" on the write node if not)
+
+digraph HelloWorld {
+  graph [
+    goal="Generate hello-world source for an arbitrary target language and write it to disk",
+    label="Hello World"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Single LLM call.
+  //   system_prompt sets the "code generator" persona.
+  //   prompt_context_key reads the language name from context.
+  //   The model's full response lands in `last_response`.
+  generate [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    llm_provider="lm_studio",
+    llm_model="granite-4.1-3b",
+    use_tools="false",
+    max_tokens="2048",
+    temperature="0.2",
+    system_prompt="You are a code generator. The user will name a single programming language. Respond with ONLY the source code for a complete, runnable hello-world program in that language. No markdown fences. No prose. No comments unless idiomatic for the language. Just the code.",
+    prompt_context_key="language"
+  ]
+
+  // Rename last_response → content so the file_write action's schema
+  // picks it up (file_write expects `content`, not `last_response`).
+  prepare_content [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="content"
+  ]
+
+  // Persist the code. The agent_id falls through to context's
+  // `session.agent_id` so the caller's identity owns the write —
+  // important for signed-request capability binding.
+  write [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
+
+  done [shape=Msquare]
+
+  start -> generate -> prepare_content -> write -> done
+}
