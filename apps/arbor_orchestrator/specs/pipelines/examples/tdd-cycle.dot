@@ -46,6 +46,14 @@
 //   impl_file_path        — absolute path for the impl module
 //   acceptance_file_path  — absolute path for the held-out acceptance test
 //   max_iterations        — integer hard cap on retries (typically 3-7)
+//   model_provider        — LLM provider (e.g. "lm_studio")
+//   model_id              — model identifier (e.g. "granite-4.1-3b")
+//
+// Model choice lives in the spec because problem difficulty and model
+// capability are correlated — RLE may want a stronger model than
+// FizzBuzz. The DOT extracts model_provider/model_id into
+// session.llm_provider/session.llm_model so LlmHandler picks them up
+// via its existing context-fallback path (no engine change).
 //
 // Context out (read by caller from the final context):
 //   converged          — boolean, true iff acceptance passed
@@ -154,6 +162,26 @@ digraph TDDCycle {
     output_key="acceptance_test_code"
   ]
 
+  // Model choice flows into `session.llm_provider` / `session.llm_model`.
+  // LlmHandler reads these as the context fallback when a compute node's
+  // own llm_provider= / llm_model= attrs are absent — so removing the
+  // hardcoded attrs from gen_test / gen_impl lets the spec drive both.
+  extract_model_provider [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="model_provider",
+    output_key="session.llm_provider"
+  ]
+
+  extract_model_id [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="model_id",
+    output_key="session.llm_model"
+  ]
+
   // Stage the acceptance file write. file_write's schema is {path, content};
   // these renames bridge our keys → its schema.
   prep_acceptance_content [
@@ -186,11 +214,10 @@ digraph TDDCycle {
     type="compute",
     purpose="llm",
     simulate="false",
-    llm_provider="lm_studio",
-    llm_model="granite-4.1-3b",
     use_tools="false",
     max_tokens="1024",
     temperature="0.1",
+    timeout="300000",
     system_prompt="You write complete, compilable ExUnit test modules for Elixir. Output ONLY the test module source, starting with `defmodule`. No markdown fences. No prose. REQUIREMENTS: (1) module name is the target module name with 'Test' appended (e.g. FizzBuzzTest); (2) MUST include `use ExUnit.Case` immediately inside the module; (3) use `test \"description\" do ... assert <expr> == <expected> end` for each case. Example shape: `defmodule FooTest do\\n  use ExUnit.Case\\n  test \"basic\" do\\n    assert Foo.bar(1) == 2\\n  end\\nend`. Never omit `use ExUnit.Case`.",
     prompt_context_key="test_prompt"
   ]
@@ -247,12 +274,11 @@ digraph TDDCycle {
     type="compute",
     purpose="llm",
     simulate="false",
-    llm_provider="lm_studio",
-    llm_model="granite-4.1-3b",
     use_tools="false",
-    max_tokens="2048",
+    max_tokens="8192",
     temperature="0.3",
-    system_prompt="You implement Elixir modules. Output ONLY the module source code, starting with `defmodule`. No markdown fences. No prose. No explanation of your reasoning. Just the code.",
+    timeout="300000",
+    system_prompt="You implement Elixir modules. Output ONLY the module source code, starting with `defmodule`. No markdown fences. No prose. No explanation of your reasoning. Just the code. ELIXIR REMINDERS: (1) Strings are binaries, NOT lists. Use `<<h::binary-size(1), rest::binary>>` to pattern-match the first byte, NEVER `[h | t]` on a string. (2) `hd/1` and `tl/1` work on lists, not binaries; for binaries use binary pattern matching or `String.first/1` / `String.slice/3`. (3) Use binary concatenation `<>` for strings, not `++`. (4) When recursing over a string, the base case is `<<>>` (empty binary), not `[]`.",
     prompt_context_key="impl.prompt"
   ]
 
@@ -396,7 +422,8 @@ digraph TDDCycle {
   extract_description -> extract_test_prompt -> extract_max_iterations
   extract_max_iterations -> extract_test_file_path -> extract_impl_file_path
   extract_impl_file_path -> extract_acceptance_file_path -> extract_acceptance_code
-  extract_acceptance_code -> prep_acceptance_content -> prep_acceptance_path -> write_acceptance
+  extract_acceptance_code -> extract_model_provider -> extract_model_id
+  extract_model_id -> prep_acceptance_content -> prep_acceptance_path -> write_acceptance
 
   // Phase 1+ unchanged: model writes its own test, then the impl loop.
   write_acceptance -> gen_test -> snapshot_test -> prep_test_content -> prep_test_path -> write_test

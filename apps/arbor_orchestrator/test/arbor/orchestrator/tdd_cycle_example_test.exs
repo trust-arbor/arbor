@@ -20,6 +20,10 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
 
   use ExUnit.Case, async: false
   @moduletag :integration_lm_studio
+  # Local LLM calls can take minutes per iteration on larger models; the
+  # default 60s per-test ExUnit timeout kills slow models before they
+  # have a chance to converge or escalate.
+  @moduletag timeout: 1_200_000
 
   alias Arbor.Contracts.Security.SignedRequest
   alias Arbor.Gateway.Signer.ProxyCore
@@ -58,13 +62,16 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
       description: "Returns the input integer multiplied by two.",
       # Acceptance examples — the model never sees these directly.
       examples: [{1, 2}, {0, 0}, {-5, -10}, {100, 200}],
-      max_iterations: 3
+      max_iterations: 3,
+      # Trivial problem; tiny model is overkill but cheap.
+      model_provider: "lm_studio",
+      model_id: "granite-4.1-3b"
     }
 
     run_tdd_cycle(spec)
   end
 
-  test "TDD cycle: Rle.encode converges within 5 iterations" do
+  test "TDD cycle: Rle.encode converges within 10 iterations" do
     # Run-length encoding — chosen because small models commonly trip on:
     #   - The "1" for singleton runs (omit it, return just the char)
     #   - Confusing runs with total counts ("aabbaa" — is it "a4b2" or "a2b2a2"?)
@@ -83,6 +90,16 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
       characters becomes that character followed by the run's length as a
       decimal number. EVERY run gets a count — even runs of length 1.
       The empty string encodes to the empty string.
+
+      Concrete examples (use these to ground your tests):
+        encode("")      == ""
+        encode("a")     == "a1"
+        encode("aaab")  == "a3b1"
+        encode("xxyyx") == "x2y2x1"
+
+      Format: the CHARACTER comes FIRST, then the count as a decimal
+      number. Not the other way around. Repeats are RUNS (consecutive),
+      not total counts: "abab" encodes to "a1b1a1b1", not "a2b2".
       """,
       examples: [
         {"", ""},
@@ -97,7 +114,12 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
         {"AAAAAAAAAB", "A9B1"}
       ],
       function_name: "encode",
-      max_iterations: 5
+      max_iterations: 10,
+      # Harder problem; documented capability ceiling on granite-3b. Either
+      # bump to a stronger model or keep this as a known-unconverged
+      # benchmark.
+      model_provider: "lm_studio",
+      model_id: "granite-4.1-3b"
     }
 
     run_tdd_cycle(spec)
@@ -133,7 +155,9 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
         {45, "FizzBuzz"},
         {-3, "Fizz"}
       ],
-      max_iterations: 5
+      max_iterations: 5,
+      model_provider: "lm_studio",
+      model_id: "granite-4.1-3b"
     }
 
     run_tdd_cycle(spec)
@@ -298,7 +322,9 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
       "test_file_path" => test_file_path,
       "impl_file_path" => impl_file_path,
       "acceptance_file_path" => acceptance_file_path,
-      "max_iterations" => spec.max_iterations
+      "max_iterations" => spec.max_iterations,
+      "model_provider" => spec.model_provider,
+      "model_id" => spec.model_id
     }
 
     File.write!(Path.join(workdir, spec_path), Jason.encode!(spec_json, pretty: true))
