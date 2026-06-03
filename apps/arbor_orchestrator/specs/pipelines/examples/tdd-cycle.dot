@@ -1,0 +1,295 @@
+// TDD Cycle — Spec → Test → Iterate Implementation Until Acceptance Passes
+//
+// Demonstrates the "rigor lets a small model produce quality code"
+// hypothesis: a tiny local LLM generates an Elixir module that has to
+// pass a held-out acceptance test set the model never sees.
+//
+// Pipeline shape:
+//
+//   gen_test (LLM) → write_test
+//     → build_impl_prompt (action) → gen_impl (LLM) → write_impl
+//       → run_tests (mix_test, runs BOTH model_test.exs AND acceptance_test.exs)
+//         → check_passed (gate)
+//             pass → done (success — acceptance criteria met)
+//             fail → record_attempt (action: bump iter, snapshot impl+failure)
+//               → check_exhausted (gate)
+//                   exhausted → done (escalation, did not converge)
+//                   not exhausted → build_impl_prompt (loop)
+//
+// The model never sees the acceptance tests. It only sees:
+//   - The spec (description + signature)
+//   - The test IT generated for the spec
+//   - On feedback iterations: its last attempt + the test runner's output
+//     (which includes ALL failing tests, model's own + acceptance, since
+//     mix_test reports all failures by default)
+//
+// This means the model can deduce SOME information about acceptance
+// from failure messages, but it can't trivially overfit — the failures
+// are encoded as ExUnit assertion errors, not as "here is the expected
+// answer." See the test's spec for what "acceptance" looks like.
+//
+// Context in (set via initial_values when calling Orchestrator.run):
+//   module_name        — e.g. "FizzBuzz"
+//   signature          — e.g. "@spec run(integer()) :: String.t()"
+//   description        — prose description of what to implement
+//   max_iterations     — integer hard cap on retries (typically 3-7)
+//   workdir            — absolute path to a freshly-set-up mix project
+//   test_file_path     — workdir/test/model_test.exs
+//   impl_file_path     — workdir/lib/<module>.ex
+//   test_prompt        — pre-built prompt for gen_test (caller builds from spec)
+//   session.agent_id   — signing principal
+//
+// Context out (read by caller from the final context):
+//   converged          — boolean, true iff acceptance passed
+//   iteration          — number of impl attempts made
+//   last_impl          — final implementation (whether success or failure)
+//   last_failure       — final test runner output (empty if converged)
+//
+// Required capabilities for the signing agent:
+//   arbor://orchestrator/execute/**     — node-type gating
+//   arbor://orchestrator/execute/llm_query — LLM compute nodes
+//   arbor://shell/exec/mix/test         — running the tests
+//   arbor://fs/**                       — writing impl + test files
+//   arbor://action/tdd/build_impl_prompt
+//   arbor://action/tdd/record_attempt
+
+digraph TDDCycle {
+  graph [
+    goal="Generate code that passes spec-defined acceptance tests via TDD iteration",
+    label="TDD Cycle"
+  ]
+
+  start [shape=Mdiamond]
+
+  // ── Phase 1: Generate the model's own test (one-shot) ─────────────
+
+  // Single LLM call to produce the test. Temperature is low because
+  // we want the test to be deterministic and predictable — the model's
+  // test is part of the contract, not part of the variable behavior.
+  gen_test [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    llm_provider="lm_studio",
+    llm_model="granite-4.1-3b",
+    use_tools="false",
+    max_tokens="1024",
+    temperature="0.1",
+    system_prompt="You write complete, compilable ExUnit test modules for Elixir. Output ONLY the test module source, starting with `defmodule`. No markdown fences. No prose. REQUIREMENTS: (1) module name is the target module name with 'Test' appended (e.g. FizzBuzzTest); (2) MUST include `use ExUnit.Case` immediately inside the module; (3) use `test \"description\" do ... assert <expr> == <expected> end` for each case. Example shape: `defmodule FooTest do\\n  use ExUnit.Case\\n  test \"basic\" do\\n    assert Foo.bar(1) == 2\\n  end\\nend`. Never omit `use ExUnit.Case`.",
+    prompt_context_key="test_prompt"
+  ]
+
+  // Rename last_response → content for file_write's schema.
+  prep_test_content [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="content"
+  ]
+
+  // Rename test_file_path → path.
+  prep_test_path [
+    type="transform",
+    transform="identity",
+    source_key="test_file_path",
+    output_key="path"
+  ]
+
+  write_test [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
+
+  // Snapshot the test code into a stable context key so build_impl_prompt
+  // can reference it across iterations. (last_response gets clobbered
+  // by every subsequent compute node.)
+  snapshot_test [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="test_code"
+  ]
+
+  // ── Phase 2: Iterate implementation until acceptance passes ───────
+
+  // Build the user prompt for this iteration's gen_impl. Reads spec
+  // + test + (on iter > 0) previous attempt + previous failure.
+  build_impl_prompt [
+    type="exec",
+    target="action",
+    action="tdd_build_impl_prompt",
+    context_keys="module_name,signature,description,test_code,iteration,last_impl,last_failure",
+    output_prefix="impl"
+  ]
+
+  // The implementation LLM call. Reads the assembled prompt from
+  // context.impl.prompt. Higher temperature than gen_test — we want
+  // some variability so retries explore.
+  gen_impl [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    llm_provider="lm_studio",
+    llm_model="granite-4.1-3b",
+    use_tools="false",
+    max_tokens="2048",
+    temperature="0.3",
+    system_prompt="You implement Elixir modules. Output ONLY the module source code, starting with `defmodule`. No markdown fences. No prose. No explanation of your reasoning. Just the code.",
+    prompt_context_key="impl.prompt"
+  ]
+
+  prep_impl_content [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="content"
+  ]
+
+  prep_impl_path [
+    type="transform",
+    transform="identity",
+    source_key="impl_file_path",
+    output_key="path"
+  ]
+
+  write_impl [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
+
+  // Snapshot the impl into current_impl so RecordAttempt has stable
+  // input (last_response will get clobbered by the test run).
+  snapshot_impl [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="current_impl"
+  ]
+
+  // Rename workdir → path so context_keys can hand it to mix_test
+  // (whose schema is `:path`, not `:workdir`). No `$var` interpolation
+  // in attrs — see dot-pipeline-authoring skill.
+  prep_test_run_path [
+    type="transform",
+    transform="identity",
+    source_key="workdir",
+    output_key="path"
+  ]
+
+  // Run BOTH the model's test AND the acceptance test (acceptance was
+  // pre-written by the caller before pipeline launch). Mix.Test with no
+  // test_paths runs everything under test/.
+  run_tests [
+    type="exec",
+    target="action",
+    action="mix_test",
+    context_keys="path",
+    output_prefix="tests"
+  ]
+
+  // Did everything pass?
+  check_passed [
+    type="gate",
+    shape=diamond,
+    predicate="expression",
+    expression="tests.passed"
+  ]
+
+  // Snapshot the failure output for RecordAttempt + next iteration.
+  snapshot_failure [
+    type="transform",
+    transform="identity",
+    source_key="tests.stdout",
+    output_key="test_output"
+  ]
+
+  // Bump iteration counter + snapshot last_impl/last_failure for the
+  // next pass through build_impl_prompt.
+  record_attempt [
+    type="exec",
+    target="action",
+    action="tdd_record_attempt",
+    context_keys="iteration,max_iterations,current_impl,test_output"
+  ]
+
+  // Did we hit the iteration cap?
+  check_exhausted [
+    type="gate",
+    shape=diamond,
+    predicate="expression",
+    expression="exec.record_attempt.exhausted"
+  ]
+
+  // Hoist the updated state into top-level keys so build_impl_prompt's
+  // context_keys lookup finds them by their bare names. (output_prefix
+  // would do this for free if it supported flat-key mode, but for
+  // record_attempt we want explicit renames.)
+  hoist_iteration [
+    type="transform",
+    transform="identity",
+    source_key="exec.record_attempt.iteration",
+    output_key="iteration"
+  ]
+
+  hoist_last_impl [
+    type="transform",
+    transform="identity",
+    source_key="exec.record_attempt.last_impl",
+    output_key="last_impl"
+  ]
+
+  hoist_last_failure [
+    type="transform",
+    transform="identity",
+    source_key="exec.record_attempt.last_failure",
+    output_key="last_failure"
+  ]
+
+  // Mark final state on the convergence path.
+  mark_converged [
+    type="transform",
+    transform="identity",
+    source_key="tests.stdout",
+    output_key="last_test_output"
+  ]
+
+  // Mark final state on the exhausted path.
+  mark_escalated [
+    type="transform",
+    transform="identity",
+    source_key="iteration",
+    output_key="final_iteration"
+  ]
+
+  done [shape=Msquare]
+
+  // ── Flow ──────────────────────────────────────────────────────────
+
+  // CRITICAL ordering: snapshot_test must fire BEFORE write_test, and
+  // snapshot_impl must fire BEFORE write_impl. exec target=action
+  // nodes OVERWRITE `last_response` with their action result (a JSON
+  // blob), so if the snapshot ran after the write it'd capture the
+  // file-write's metadata instead of the LLM-generated code.
+  start -> gen_test -> snapshot_test -> prep_test_content -> prep_test_path -> write_test
+  write_test -> build_impl_prompt -> gen_impl -> snapshot_impl
+  snapshot_impl -> prep_impl_content -> prep_impl_path -> write_impl
+  write_impl -> prep_test_run_path -> run_tests -> check_passed
+
+  // Convergence path.
+  check_passed -> mark_converged [condition="context.tests.passed=true"]
+  mark_converged -> done
+
+  // Failure path: snapshot, record, check exhaustion, loop or escalate.
+  check_passed -> snapshot_failure [condition="context.tests.passed!=true"]
+  snapshot_failure -> record_attempt -> check_exhausted
+
+  check_exhausted -> mark_escalated [condition="context.exec.record_attempt.exhausted=true"]
+  mark_escalated -> done
+
+  check_exhausted -> hoist_iteration [condition="context.exec.record_attempt.exhausted!=true"]
+  hoist_iteration -> hoist_last_impl -> hoist_last_failure -> build_impl_prompt
+}
