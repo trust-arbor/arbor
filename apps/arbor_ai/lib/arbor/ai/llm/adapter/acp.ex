@@ -31,7 +31,7 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
 
   # Known ACP agent names for safe atom conversion.
   # Prevents atom exhaustion from arbitrary user input.
-  @known_agents ~w(claude gemini codex goose opencode aider cline)
+  @known_agents ~w(claude gemini codex goose opencode aider cline grok)
 
   # Runtime bridge targets (arbor_ai is Standalone)
   @pool_mod Arbor.AI.AcpPool
@@ -140,6 +140,7 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
   def install_hint("codex"), do: "npm i -g @openai/codex"
   def install_hint("goose"), do: "pip install goose-ai"
   def install_hint("aider"), do: "pip install aider-chat"
+  def install_hint("grok"), do: "curl -fsSL https://x.ai/cli/install.sh | bash"
   def install_hint(_), do: "See agent documentation"
 
   # -- Private --
