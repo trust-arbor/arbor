@@ -884,7 +884,7 @@ defmodule Arbor.Security do
   defp normalize_file_guard_result({:ok, _resolved_path}), do: :ok
   defp normalize_file_guard_result({:error, _} = err), do: err
 
-  defp maybe_check_file_guard(principal_id, resource_uri, opts, cap \\ nil) do
+  defp maybe_check_file_guard(principal_id, resource_uri, opts, cap) do
     file_path = Keyword.get(opts, :file_path)
 
     cond do
