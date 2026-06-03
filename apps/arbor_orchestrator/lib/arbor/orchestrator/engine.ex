@@ -87,6 +87,23 @@ defmodule Arbor.Orchestrator.Engine do
     opts = Keyword.put_new(opts, :pipeline_id, run_id)
     opts = Keyword.put(opts, :pipeline_started_at, pipeline_started_at_dt)
 
+    # Derive checkpoint HMAC secret from the operator's identity, if one
+    # was supplied. Standard HKDF (RFC 5869) via Arbor.Security.Crypto
+    # gives us deterministic per-identity key material for signing
+    # checkpoints. The HMAC binds checkpoint integrity to the identity
+    # that started the run — only the same operator can resume.
+    #
+    # If no identity is supplied (e.g. unsigned dev/test runs), no
+    # secret is derived. Checkpoints are written unsigned and resume
+    # accepts them. That's the legacy fail-open path; closing it
+    # fully requires every caller to pass identity, which is a
+    # broader migration. The roadmap doc tracks the follow-up.
+    opts =
+      case derive_checkpoint_hmac_secret(opts) do
+        nil -> opts
+        secret -> Keyword.put(opts, :hmac_secret, secret)
+      end
+
     # Compute graph hash for version checking on resume
     graph_hash = Keyword.get(opts, :graph_hash)
     dot_source_path = Keyword.get(opts, :dot_source_path)
@@ -185,7 +202,10 @@ defmodule Arbor.Orchestrator.Engine do
       checkpoint_path = Keyword.get(opts, :resume_from, Path.join(logs_root, "checkpoint.json"))
 
       with {:ok, checkpoint} <-
-             Checkpoint.load(checkpoint_path, run_id: Keyword.get(opts, :run_id)),
+             Checkpoint.load(checkpoint_path,
+               run_id: Keyword.get(opts, :run_id),
+               hmac_secret: Keyword.get(opts, :hmac_secret)
+             ),
            :ok <- maybe_revalidate_capabilities(graph, opts),
            :ok <- check_indeterminate_intents(checkpoint, graph, opts),
            {:ok, state} <- state_from_checkpoint(graph, checkpoint) do
@@ -396,7 +416,10 @@ defmodule Arbor.Orchestrator.Engine do
           pipeline_started_at: Context.pipeline_started_at(context)
         )
 
-      :ok = Checkpoint.write(checkpoint, state.logs_root)
+      :ok =
+        Checkpoint.write(checkpoint, state.logs_root,
+          hmac_secret: Keyword.get(state.opts, :hmac_secret)
+        )
 
       updated_state = %{state | context: context, completed: completed, tracking: tracking}
 
@@ -548,7 +571,11 @@ defmodule Arbor.Orchestrator.Engine do
           pipeline_started_at: Context.pipeline_started_at(context)
         )
 
-      :ok = Checkpoint.write(checkpoint, state.logs_root)
+      :ok =
+        Checkpoint.write(checkpoint, state.logs_root,
+          hmac_secret: Keyword.get(state.opts, :hmac_secret)
+        )
+
       :ok = write_node_status(node.id, outcome, state.logs_root)
       maybe_store_artifact(state.opts, node.id, outcome)
 
@@ -964,6 +991,31 @@ defmodule Arbor.Orchestrator.Engine do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # Derive the HMAC secret used to sign engine checkpoints.
+  # See the comment at the call site in do_run/2 for the trust model.
+  defp derive_checkpoint_hmac_secret(opts) do
+    case Keyword.get(opts, :identity_private_key) do
+      key when is_binary(key) and byte_size(key) > 0 ->
+        crypto_mod = Module.concat([:Arbor, :Security, :Crypto])
+
+        if Code.ensure_loaded?(crypto_mod) and
+             function_exported?(crypto_mod, :derive_key, 3) do
+          # Standard HKDF with domain-separation string. Audited in
+          # arbor_security against RFC 5869.
+          apply(crypto_mod, :derive_key, [key, "arbor-checkpoint-hmac-v1", 32])
+        else
+          # Runtime fallback when arbor_security isn't loaded — still
+          # deterministic per-key, just a simpler primitive than HKDF.
+          # HMAC-SHA256(key, label) is collision-resistant given the
+          # secret key as the HMAC key.
+          :crypto.mac(:hmac, :sha256, key, "arbor-checkpoint-hmac-v1")
+        end
+
+      _ ->
+        nil
+    end
   end
 
   defp write_manifest(graph, logs_root, run_id \\ nil) do

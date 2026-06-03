@@ -102,68 +102,72 @@ defmodule Arbor.Orchestrator.EngineCheckpointPoisoningTest do
     :ok
   end
 
-  test "poisoned checkpoint adopts attacker's session.agent_id at the engine layer" do
+  test "with identity_private_key, resume REJECTS unsigned poisoned checkpoint (security regression)" do
+    # SECURITY REGRESSION TEST per CLAUDE.md — fails on HEAD~1, passes on HEAD.
+    # When the resumer supplies identity_private_key, the engine derives a
+    # checkpoint HMAC secret via HKDF (Arbor.Security.Crypto.derive_key).
+    # Checkpoint.load then requires the payload's __hmac to match.
+    # An attacker-crafted unsigned checkpoint has no __hmac → verify/3
+    # returns {:error, :tampered} → resume fails closed.
     root = logs_root()
     on_exit(fn -> File.rm_rf(root) end)
     ckpt_path = Path.join(root, "checkpoint.json")
 
-    # The attacker's poison: switch the engine's view of who is
-    # running the pipeline. The legitimate caller will be
-    # "agent_legitimate"; the checkpoint claims "agent_admin".
     write_poisoned_checkpoint(ckpt_path, %{
-      # Resume from start node — engine will run capture next.
       current_node: "start",
       completed: ["start"],
       poison: %{
         "session.agent_id" => "agent_admin",
-        # Also poison a context flag a later node might branch on.
         "trust_tier" => "veteran"
       }
     })
 
-    # Capture closure: read agent_id from context (via opts? No — function
-    # target receives args from parse_attr_args). We use a different
-    # mechanism: the function_handler closure has access to the
-    # context-injected agent_id via the engine's authorization layer.
-    # Simpler approach: use a side-channel — the function captures
-    # whatever it's passed in args and sends to the test process.
-    test_pid = self()
+    private_key = :crypto.strong_rand_bytes(32)
 
-    # Use a function_handler that reads from process dict — except
-    # the engine doesn't give the function access to context directly.
-    # Switch strategy: instead of using function exec, hand-build the
-    # check via Engine.run/2 with resume_from and inspect the resulting
-    # context for the poisoned values.
+    result =
+      Arbor.Orchestrator.run(@capture_dot,
+        logs_root: root,
+        resume_from: ckpt_path,
+        authorization: false,
+        identity_private_key: private_key,
+        function_handler: fn _args -> {:ok, %{ran: true}} end
+      )
+
+    assert {:error, _reason} = result,
+           "Engine accepted an unsigned poisoned checkpoint even with " <>
+             "identity_private_key provided. Got: #{inspect(result)}"
+  end
+
+  test "LEGACY: without identity_private_key, engine still adopts poisoned context (transition gap)" do
+    # Documents the unchanged-by-design legacy path. Callers that don't
+    # pass identity_private_key still get the silent fail-open. Closing
+    # this fully requires every caller to pass identity (a broader
+    # migration tracked in the roadmap follow-up). The fact that this
+    # test STILL passes is the gap; the test above documents what works
+    # when callers opt in.
+    root = logs_root()
+    on_exit(fn -> File.rm_rf(root) end)
+    ckpt_path = Path.join(root, "checkpoint.json")
+
+    write_poisoned_checkpoint(ckpt_path, %{
+      current_node: "start",
+      completed: ["start"],
+      poison: %{
+        "session.agent_id" => "agent_admin",
+        "trust_tier" => "veteran"
+      }
+    })
+
     {:ok, run_result} =
       Arbor.Orchestrator.run(@capture_dot,
         logs_root: root,
         resume_from: ckpt_path,
         authorization: false,
-        # The function_handler is required for target=function but
-        # we mostly care about the resumed context, not what the
-        # function does.
-        function_handler: fn args ->
-          send(test_pid, {:fn_args, args})
-          {:ok, %{ran: true}}
-        end
+        function_handler: fn _args -> {:ok, %{ran: true}} end
       )
 
-    # Pin the escalation: the engine adopted the poisoned agent_id
-    # verbatim. There was no HMAC check, no signature, no comparison
-    # against the legitimate caller's identity.
-    assert run_result.context["session.agent_id"] == "agent_admin",
-           "Engine failed to adopt poisoned agent_id — but this test exists " <>
-             "to PIN the fail-open. If this assertion changes, checkpoint " <>
-             "verification has been added (good!). Update the test accordingly."
-
+    assert run_result.context["session.agent_id"] == "agent_admin"
     assert run_result.context["trust_tier"] == "veteran"
-
-    # The engine-layer adoption is what's pinned. ExecHandler will
-    # later read this as `agent_id`, but the action-layer signed-request
-    # check (`check_identity_binding/2` in AuthDecision) is the
-    # backstop that prevents the swap from becoming a full escalation
-    # IF the resumer's caller passes :signer and identity verification
-    # is enabled. The roadmap doc covers both surfaces.
   end
 
   test "Checkpoint.load accepts ANY JSON shape when no hmac_secret is passed" do
@@ -220,5 +224,73 @@ defmodule Arbor.Orchestrator.EngineCheckpointPoisoningTest do
     assert match?({:error, _}, result),
            "Checkpoint with hmac_secret accepted an unsigned payload — " <>
              "the verification layer itself is broken, not just unwired"
+  end
+
+  test "end-to-end: identity_private_key signs on write, same key verifies on resume" do
+    # Round-trip property: the engine writes signed checkpoints when
+    # identity_private_key is provided, and resume with the same key
+    # accepts them.
+    root = logs_root()
+    on_exit(fn -> File.rm_rf(root) end)
+    ckpt_path = Path.join(root, "checkpoint.json")
+
+    private_key = :crypto.strong_rand_bytes(32)
+
+    # First run — writes a signed checkpoint.
+    {:ok, _} =
+      Arbor.Orchestrator.run(@capture_dot,
+        logs_root: root,
+        authorization: false,
+        identity_private_key: private_key,
+        function_handler: fn _args -> {:ok, %{ran: true}} end
+      )
+
+    assert File.exists?(ckpt_path), "engine should have written checkpoint.json"
+
+    # The checkpoint MUST carry an __hmac field (engine signed it).
+    {:ok, raw_json} = File.read(ckpt_path)
+    {:ok, raw} = Jason.decode(raw_json)
+    assert Map.has_key?(raw, "__hmac"), "engine-written checkpoint missing __hmac"
+
+    # Loading without the secret still succeeds (backward compat).
+    assert {:ok, _} = Checkpoint.load(ckpt_path)
+
+    # Loading WITH the matching derived secret succeeds.
+    secret =
+      Module.concat([:Arbor, :Security, :Crypto]).derive_key(
+        private_key,
+        "arbor-checkpoint-hmac-v1",
+        32
+      )
+
+    assert {:ok, _} = Checkpoint.load(ckpt_path, hmac_secret: secret)
+  end
+
+  test "end-to-end: a DIFFERENT identity's secret rejects a signed checkpoint (tamper / wrong-operator)" do
+    root = logs_root()
+    on_exit(fn -> File.rm_rf(root) end)
+    ckpt_path = Path.join(root, "checkpoint.json")
+
+    key_a = :crypto.strong_rand_bytes(32)
+    key_b = :crypto.strong_rand_bytes(32)
+
+    # Run as identity A — writes signed checkpoint.
+    {:ok, _} =
+      Arbor.Orchestrator.run(@capture_dot,
+        logs_root: root,
+        authorization: false,
+        identity_private_key: key_a,
+        function_handler: fn _args -> {:ok, %{ran: true}} end
+      )
+
+    # Identity B's derived secret should fail to verify A's checkpoint.
+    secret_b =
+      Module.concat([:Arbor, :Security, :Crypto]).derive_key(
+        key_b,
+        "arbor-checkpoint-hmac-v1",
+        32
+      )
+
+    assert {:error, _} = Checkpoint.load(ckpt_path, hmac_secret: secret_b)
   end
 end
