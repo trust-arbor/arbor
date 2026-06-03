@@ -366,8 +366,14 @@ defmodule Arbor.Orchestrator.Engine do
       outcome = Map.get(state.outcomes, node.id, %Outcome{status: :skipped})
       completed = [node.id | state.completed]
 
+      # Re-apply the cached outcome's context updates. Skipping the WORK
+      # must still produce the EFFECT — otherwise a loop that revisits an
+      # idempotent node loses that node's output_key writes if another
+      # node clobbered the slot between visits. Mirrors the apply_updates
+      # call in the normal-execution path.
       context =
         context
+        |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
         |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
         |> Context.set("__completed_nodes__", completed, node.id, step_now)
 
