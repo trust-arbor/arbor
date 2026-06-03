@@ -243,37 +243,46 @@ defmodule Arbor.Security.FileGuard do
   end
 
   # Lighter-weight normalization than resolve_and_validate_path/2.
-  # Difference: we only follow symlinks when the target IS a symlink.
-  # For non-existent files (legitimate at URI-authorize time — the
-  # caller may be about to write the file) we trust the SafePath string
-  # check rather than walking parent directories. Walking parents would
-  # produce a false positive when the URI's path equals the cap's root
-  # (the parent of the root is by definition outside the root).
+  # Differences:
+  #   * For non-existent files (legitimate at URI-authorize time — the
+  #     caller may be about to write the file) we trust the SafePath
+  #     string check rather than walking parent directories. Walking
+  #     parents produces a false positive when the URI's path equals
+  #     the cap's root (the parent of the root is by definition
+  #     outside the root).
+  #   * We don't try to identify whether the target is a symlink before
+  #     resolving. Instead we ALWAYS call resolve_real and check
+  #     containment — that catches POSIX symlinks, Windows NTFS
+  #     symbolic links, NTFS junctions, OneDrive placeholders, and any
+  #     other reparse-point variant uniformly. Avoiding the file-type
+  #     identification step makes the check cross-platform correct,
+  #     since Erlang's File.Stat mapping varies across Windows reparse
+  #     point types but resolve_real follows whatever the OS considers
+  #     a link.
   defp safe_normalize_uri_path(requested_path, root) do
     with {:ok, normalized} <- SafePath.resolve_within(requested_path, root) do
-      case File.lstat(normalized) do
-        {:ok, %{type: :symlink}} ->
-          # Symlink at the requested path — follow it and verify the
-          # real target stays within the cap's root. This is the
-          # symlink-escape defense the URI matcher alone cannot give.
-          case SafePath.resolve_real(normalized) do
-            {:ok, real} ->
-              case SafePath.resolve_within(real, root) do
-                {:ok, _} -> {:ok, normalized}
-                {:error, _} -> {:error, :symlink_escape}
-              end
-
-            {:error, _} ->
-              # Broken symlink — no actual escape is possible because
-              # there's nothing to follow. Authorize the URI; downstream
-              # I/O will fail with :enoent.
-              {:ok, normalized}
+      case SafePath.resolve_real(normalized) do
+        {:ok, real} ->
+          # The OS resolved the path. If the real target stays in the
+          # cap's root, fine. Otherwise it's a link / junction / mount
+          # escaping the cap's scope.
+          case SafePath.resolve_within(real, root) do
+            {:ok, _} -> {:ok, normalized}
+            {:error, _} -> {:error, :symlink_escape}
           end
 
-        _ ->
-          # Regular file, dir, or doesn't exist. The SafePath string
-          # normalization is enough — `..` segments are already caught
-          # at the URI matcher AND in resolve_within.
+        {:error, :not_found} ->
+          # Target doesn't exist yet — no escape possible because
+          # there's nothing to follow. The caller may be about to
+          # create the file; the eventual I/O system call will fail
+          # with :enoent if that's not the case. The string-normalized
+          # path stays within root (resolve_within already verified).
+          {:ok, normalized}
+
+        {:error, _} ->
+          # Other resolution failure (permission, broken link target,
+          # etc.). Trust the string check; downstream I/O will see the
+          # real error.
           {:ok, normalized}
       end
     end
