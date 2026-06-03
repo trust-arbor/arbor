@@ -1,0 +1,190 @@
+// Deployment Decision Gate — HITL Routing Demonstration
+//
+// Exercises the human-in-the-loop path the other example pipelines
+// don't touch: a `wait.human` node with three distinct outgoing
+// edges, each leading to a different downstream branch. The engine
+// must follow the handler's `suggested_next_ids` to pick the right
+// branch based on the human's answer.
+//
+// LLM-free by design — the point is to stress the wait/resume
+// routing semantics and the WaitHumanHandler's outcome shape, not
+// to chain model calls.
+//
+// Context in (set via initial_values when calling Orchestrator.run):
+//   spec_path        — filename of the JSON spec file inside workdir
+//   workdir          — absolute path to a scratch directory
+//   session.agent_id — signing principal
+//
+// Spec JSON shape (loaded from <workdir>/<spec_path>):
+//   proposal             — short prose describing the proposed deploy
+//   approve_output_path  — file path written when human picks Approve
+//   modify_output_path   — file path written when human picks Modify
+//   reject_output_path   — file path written when human picks Reject
+//
+// The pipeline ALSO requires the caller to thread an :interviewer
+// option through `Orchestrator.run/2` — either a function that takes
+// a Question and returns an Answer, or a module implementing the
+// Arbor.Orchestrator.Human.Interviewer behaviour. Without an
+// interviewer the default `AutoApproveInterviewer` fires and always
+// picks the first outgoing edge.
+
+digraph DeploymentDecisionGate {
+  graph [
+    goal="Pause for human decision, then branch to one of three outcomes",
+    label="Deployment Decision Gate"
+  ]
+
+  start [shape=Mdiamond]
+
+  // ── Phase 0: Load spec + extract fields ───────────────────────────
+
+  read_spec [
+    type="read",
+    source="file",
+    path="spec.json"
+  ]
+
+  extract_proposal [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="proposal",
+    output_key="proposal"
+  ]
+
+  extract_approve_path [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="approve_output_path",
+    output_key="approve_output_path"
+  ]
+
+  extract_modify_path [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="modify_output_path",
+    output_key="modify_output_path"
+  ]
+
+  extract_reject_path [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="reject_output_path",
+    output_key="reject_output_path"
+  ]
+
+  // ── Phase 1: Ask the human ────────────────────────────────────────
+
+  // The `wait.human` handler reads outgoing edges as choices. Each
+  // edge's `label` attribute becomes the choice's display label and
+  // also its match key — the handler matches the interviewer's
+  // returned answer against the edge label (case-insensitive). The
+  // outcome's `suggested_next_ids` tells the engine which branch to
+  // follow.
+  // NOTE: WaitHumanHandler also reads `human.default_choice` and
+  // `human.timeout_seconds` attrs, but quoted attribute keys break
+  // Arbor's DOT parser today — `"human.default_choice"="Reject"` causes
+  // the entire bracket block to be dropped (see roadmap item
+  // `dot-parser-quoted-attr-keys`). For this demo the test always
+  // returns a definite answer via CallbackInterviewer, so the
+  // default-choice + timeout paths aren't exercised. When the parser
+  // gains quoted-key support, add them back here.
+  decision [
+    type="wait.human",
+    label="Reviewer: how should we proceed with this deployment?"
+  ]
+
+  // ── Phase 2: Three branches, one per outcome ──────────────────────
+
+  // Approve branch — build a deploy-confirmation message.
+  build_approve_content [
+    type="transform",
+    transform="template",
+    source_key="proposal",
+    expression="APPROVED: {value}",
+    output_key="content"
+  ]
+
+  prep_approve_path [
+    type="transform",
+    transform="identity",
+    source_key="approve_output_path",
+    output_key="path"
+  ]
+
+  write_approve [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
+
+  // Modify branch — record the request to revise.
+  build_modify_content [
+    type="transform",
+    transform="template",
+    source_key="proposal",
+    expression="NEEDS MODIFICATION: {value}",
+    output_key="content"
+  ]
+
+  prep_modify_path [
+    type="transform",
+    transform="identity",
+    source_key="modify_output_path",
+    output_key="path"
+  ]
+
+  write_modify [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
+
+  // Reject branch — record the rejection.
+  build_reject_content [
+    type="transform",
+    transform="template",
+    source_key="proposal",
+    expression="REJECTED: {value}",
+    output_key="content"
+  ]
+
+  prep_reject_path [
+    type="transform",
+    transform="identity",
+    source_key="reject_output_path",
+    output_key="path"
+  ]
+
+  write_reject [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
+
+  done [shape=Msquare]
+
+  // ── Flow ──────────────────────────────────────────────────────────
+
+  start -> read_spec
+  read_spec -> extract_proposal -> extract_approve_path -> extract_modify_path
+  extract_modify_path -> extract_reject_path -> decision
+
+  // Three labeled edges — each becomes a choice the human picks from.
+  // The handler matches the interviewer's answer (string / atom) to
+  // these labels case-insensitively. `suggested_next_ids` then routes
+  // the engine down the matching branch.
+  decision -> build_approve_content [label="Approve"]
+  decision -> build_modify_content [label="Modify"]
+  decision -> build_reject_content [label="Reject"]
+
+  build_approve_content -> prep_approve_path -> write_approve -> done
+  build_modify_content -> prep_modify_path -> write_modify -> done
+  build_reject_content -> prep_reject_path -> write_reject -> done
+}
