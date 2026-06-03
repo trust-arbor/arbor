@@ -121,13 +121,67 @@ The child DOT string is read from `context.generated_dot`. Use this when an upst
 | Reach for raw `Shell.Execute` for a recurring tool (`git`, `mix`) | Wrap as a Jido Action (`Arbor.Actions.Git.*`, `Arbor.Actions.Mix.*`) — capability URIs become precise, taint roles get declared once |
 | Write a whole new handler module | First check whether a stdlib DOT + the 15 canonical types can express it. Handlers are a heavy primitive; most "new node types" are subgraph compositions |
 
+## Common traps (the ones that bit me when wiring real pipelines)
+
+### LLM compute nodes default to simulation
+
+`compute purpose=llm` runs in simulation mode unless you explicitly opt out. Without `simulate="false"` the node returns a deterministic mock string — the pipeline succeeds and produces plausible-looking output that's totally fake. Real call:
+
+```dot
+generate [type="compute", purpose="llm", simulate="false", llm_provider="...", llm_model="...", prompt_context_key="..."]
+```
+
+### Don't hardcode `agent_id="…"` on a single exec node
+
+It looks like a harmless override. But the signer you thread through `Orchestrator.run/2` signs as agent X, and the auth path on this node checks agent Y — capability check fails with `:unauthorized`. Let `agent_id` fall through to `session.agent_id` from context unless you actually mean "this node runs as a different identity than the rest of the pipeline."
+
+### `mix arbor.pipeline.validate` passing ≠ runtime success
+
+Validation is a *syntax* checker — terminal-node, edge-condition syntax, prompt presence on compute nodes. It does NOT catch: missing capabilities, unstarted services (NonceCache, IdentityRegistry, ExecutionRegistry), unregistered identities, missing LLM providers, missing action registrations. Treat validate-pass as "the graph parses," nothing more.
+
+### `arbor://fs/<op>/<root>` — the URI encodes the path scope
+
+Capability URIs aren't just opaque tokens passed to a matcher. For `arbor://fs/*` URIs, **FileGuard parses the URI to extract the allowed root path**. So:
+
+- `arbor://fs/write` alone is malformed for FileGuard's purposes — no root component → no path validation can run.
+- `arbor://fs/write/workspace/project` grants write under `/workspace/project`.
+- `arbor://fs/**` is the explicit wildcard literal — recognized as "all paths."
+
+Generalize the lesson: capability URI granularity is part of the design surface, not just a security knob. Sketch the URIs alongside the DOT, not after.
+
+### `transform=identity` is the canonical "rename a context key"
+
+When the next node's action schema wants `content` but the upstream produced `last_response`, you don't need to modify either — drop in:
+
+```dot
+prepare_content [type="transform", transform="identity", source_key="last_response", output_key="content"]
+```
+
+Pure rename, no LLM call, no side effects. The unstructured `transform` with a freeform `prompt=` is for LLM-driven transformation — different tool.
+
+### No variable interpolation in attrs
+
+`$language` in a node attribute is literal — it does not get substituted. To parameterize a node by runtime context:
+
+- Set the value in `initial_values` when invoking `Orchestrator.run/2`.
+- Reference it via `context_keys="key1,key2"` on the consuming node (which pulls those context values into the action's args).
+- For string-template substitution into a generated prompt, use `transform="template"` with a `{value}` placeholder.
+
+If you find yourself wanting interpolation, you almost always want a transform stage between the source and the consumer.
+
+### Bypasses belong in Elixir, not in CLI flags
+
+`Arbor.Orchestrator.run/2` accepts `authorization: false` to skip the mandatory capability check — useful in tests and operator scripts. **Do not surface this opt as a flag on a public mix task.** A `--no-auth` CLI flag converts mix into a privilege-escalation primitive: any agent capable of invoking shell now can also bypass capability checks on any pipeline. The Elixir-API opt is fine because the calling code is itself the trust boundary; the CLI flag isn't because the shell isn't.
+
+Same principle: keep auth-relaxation primitives behind API surfaces that already require code-edit access.
+
 ## Validating before running
 
 ```bash
 mix arbor.pipeline.validate path/to/pipeline.dot
 ```
 
-Catches: invalid edge condition syntax, multiple terminal nodes, unknown handler types in strict mode, missing prompts on compute/codergen nodes.
+Catches: invalid edge condition syntax, multiple terminal nodes, unknown handler types in strict mode, missing prompts on compute/codergen nodes. Does NOT catch the runtime issues listed above — see "Common traps."
 
 ## See also
 
