@@ -26,6 +26,85 @@ defmodule Arbor.Orchestrator.EngineLoopSkipRegressionTest do
 
   alias Arbor.Orchestrator
 
+  test "transform with changing source_key value re-hashes and re-executes on loop revisit" do
+    # Pre-ContentHash-fix: `transform` wasn't in `@type_context_keys`,
+    # so the hash only included `node.attrs` + `graph.goal/label/workdir`.
+    # `source_key="counter"` is a node attr (constant), and the counter's
+    # value didn't enter the hash. Same hash every iteration → skip after
+    # first execution → output_key stuck on iter-1 value.
+    #
+    # Post-fix: ContentHash extracts each node's `source_key` (or
+    # `context_keys` / `prompt_context_key` / etc.) and includes the
+    # current context value in the hash. Different source value →
+    # different hash → re-execute.
+    #
+    # Pipeline: bump counter on each loop, snapshot it via a transform
+    # whose source_key is the counter. After the loop, the snapshot
+    # MUST equal the final counter value, not iter-1's value.
+
+    dot = """
+    digraph TransformHashRespectsSource {
+      graph [goal="counter snapshot tracks counter on loop revisit"]
+
+      start [shape=Mdiamond]
+
+      init_counter [type="transform", transform="identity", source_key="zero", output_key="counter"]
+      init_done [type="transform", transform="identity", source_key="false_val", output_key="done"]
+
+      bump [type="transform", transform="template", source_key="counter", expression="{value}-bumped", output_key="counter"]
+      snap [type="transform", transform="identity", source_key="counter", output_key="snapshot"]
+
+      check [type="gate", shape=diamond, predicate="expression", expression="done"]
+      mark_done [type="transform", transform="identity", source_key="true_val", output_key="done"]
+
+      exit [shape=Msquare]
+
+      start -> init_counter -> init_done -> bump -> snap -> check
+      check -> exit [condition="context.done=true"]
+      check -> mark_done [condition="context.done!=true"]
+      mark_done -> bump
+    }
+    """
+
+    logs_root =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor_content_hash_source_#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf(logs_root) end)
+
+    initial_values = %{
+      "zero" => "0",
+      "false_val" => false,
+      "true_val" => true
+    }
+
+    assert {:ok, _result} =
+             Orchestrator.run(dot, logs_root: logs_root, initial_values: initial_values)
+
+    final_context =
+      logs_root
+      |> Path.join("checkpoint.json")
+      |> File.read!()
+      |> Jason.decode!()
+      |> Map.fetch!("context_values")
+
+    # Flow:
+    #   iter 1: bump (counter "0" → "0-bumped"), snap (snapshot = "0-bumped"), check → mark_done → bump
+    #   iter 2: bump ("0-bumped" → "0-bumped-bumped"), snap (snapshot = "0-bumped-bumped"), check → exit
+    #
+    # Pre-fix: iter 2's `snap` hash matched iter 1 (source_key= node attr unchanged,
+    # workdir/goal/label unchanged), got skipped, snapshot stayed "0-bumped".
+    # Post-fix: ContentHash includes context["counter"] which differs → re-execute →
+    # snapshot = "0-bumped-bumped".
+    assert final_context["snapshot"] == "0-bumped-bumped",
+           "Expected snapshot to track counter through iter 2. Got " <>
+             "#{inspect(final_context["snapshot"])} — likely ContentHash didn't " <>
+             "include the transform's source_key value, so the second visit got " <>
+             "incorrectly skipped."
+  end
+
   test "skipped idempotent node re-applies its cached context_updates on loop revisit" do
     # Pipeline:
     #
