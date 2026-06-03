@@ -185,60 +185,78 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
     end
   end
 
-  # ── Path traversal — KNOWN GAP ───────────────────────────────────
+  # ── Path traversal — security regression tests ───────────────────
 
-  describe "path traversal in resource_uri (CURRENTLY FAIL-OPEN)" do
-    @tag :security_known_gap
-    test "cap for arbor://fs/read/docs/ silently authorizes docs/../etc/passwd",
+  describe "path traversal in resource_uri (rejected by URI matcher)" do
+    # Security regression: CapabilityStore.authorizes_resource?/2 now
+    # rejects any resource URI containing a `..` path segment, before
+    # the prefix-match logic runs. URI segments are never legitimately
+    # `..` — that vocabulary belongs to filesystem paths, not capability
+    # URIs.
+    #
+    # Pre-fix behavior: the matcher did pure string-prefix matching with
+    # no normalization, so a cap for "arbor://fs/read/docs/" silently
+    # authorized "arbor://fs/read/docs/../etc/passwd". The intended
+    # defense (FileGuard) only fired when callers passed :file_path opt,
+    # and 0 of 54 production call sites did.
+    #
+    # These tests are the committed regression tests required by
+    # CLAUDE.md — they fail on HEAD~1 and pass on HEAD.
+
+    test "cap for arbor://fs/read/docs/ does NOT authorize docs/../etc/passwd (security regression)",
          %{agent_id: agent} do
-      # KNOWN SECURITY GAP — pinned current behavior so the fix is
-      # visible as a flipped assertion when it lands.
-      # See `.arbor/roadmap/0-inbox/security-uri-matcher-path-traversal-fail-open.md`.
-      #
-      # The URI matcher (CapabilityStore.authorizes_resource?/2) does
-      # pure string prefix matching with no `..` normalization. So
-      # `arbor://fs/read/docs/` MATCHES `arbor://fs/read/docs/../etc/passwd`
-      # at the cap layer.
-      #
-      # The intended defense — FileGuard — only runs when the caller
-      # passes `:file_path` in the opts. Survey of the codebase: 54
-      # call sites of `Security.authorize/4`, ZERO pass `:file_path`.
-      # So FileGuard never runs through this path in production code.
-      #
-      # Result: any caller that authorizes against a resource URI
-      # containing `..` segments gets a green light if the cap prefix
-      # matches. This is a fail-open.
       {:ok, _} =
         Security.grant(
           principal: agent,
           resource: "arbor://fs/read/docs/"
         )
 
-      # Pin current behavior: silent grant. When fixed, this assertion
-      # flips to {:error, _}.
-      assert {:ok, :authorized} =
+      assert {:error, _} =
                Security.authorize(agent, "arbor://fs/read/docs/../etc/passwd")
     end
 
-    @tag :security_known_gap
-    test "even the wildcard cap arbor://fs/** fails-open on traversal",
+    test "even arbor://fs/** wildcard does NOT authorize traversal (security regression)",
          %{agent_id: agent} do
-      # The simplest fail-open: an agent with broad fs:** access can
-      # use a `..`-containing URI to authorize against arbitrary paths.
-      # FileGuard isn't invoked, so there's nothing in the chain that
-      # normalizes the path before granting.
       {:ok, _} =
         Security.grant(
           principal: agent,
           resource: "arbor://fs/**"
         )
 
-      # Traversal sneaks through — current behavior.
-      assert {:ok, :authorized} =
+      assert {:error, _} =
                Security.authorize(agent, "arbor://fs/read/safe/../../etc/passwd")
+    end
 
-      # When fixed, the URI matcher should reject the `..` segment
-      # regardless of whether :file_path is in opts.
+    test ".. as a bare segment is rejected; legitimate identifiers containing dots are NOT (security regression)",
+         %{agent_id: agent} do
+      # Confirm the segment check uses path-separator boundaries, not
+      # substring match. `foo..bar` and `..bar` are legitimate
+      # identifiers; only `..` as a complete segment between `/` is
+      # traversal.
+      {:ok, _} =
+        Security.grant(
+          principal: agent,
+          resource: "arbor://fs/read/**"
+        )
+
+      # Legitimate dotted identifiers — must still authorize.
+      assert {:ok, :authorized} =
+               Security.authorize(agent, "arbor://fs/read/my..file")
+
+      assert {:ok, :authorized} =
+               Security.authorize(agent, "arbor://fs/read/..hidden")
+
+      assert {:ok, :authorized} =
+               Security.authorize(agent, "arbor://fs/read/version.1.0")
+
+      # Real traversal — must deny.
+      assert {:error, _} =
+               Security.authorize(agent, "arbor://fs/read/foo/../bar")
+
+      assert {:error, _} =
+               Security.authorize(agent, "arbor://fs/read/..")
+
+      assert {:error, _} = Security.authorize(agent, "arbor://fs/read/a/../b/../c")
     end
   end
 end

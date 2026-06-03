@@ -452,24 +452,57 @@ defmodule Arbor.Security.CapabilityStore do
     # denied despite an apparently correct capability. The fix normalizes
     # both pattern and resource by stripping trailing slashes before
     # matching.
-    pattern = String.trim_trailing(cap.resource_uri, "/")
-    resource = String.trim_trailing(resource_uri, "/")
+    #
+    # H9 (2026-06-03): path traversal fail-open. The previous matcher
+    # did pure string-prefix matching with no normalization, so a cap
+    # for "arbor://fs/read/docs/" silently authorized
+    # "arbor://fs/read/docs/../etc/passwd" — the resource started with
+    # the pattern + "/" and nothing checked what came after. The intended
+    # defense (FileGuard) only fired when callers passed :file_path opt,
+    # which 0 of 54 production call sites did. Refuse any resource_uri
+    # containing a ".." path segment. URI segments are never legitimately
+    # `..` — that vocabulary belongs to filesystem paths, not capability
+    # URIs.
+    if contains_traversal_segment?(resource_uri) do
+      false
+    else
+      pattern = String.trim_trailing(cap.resource_uri, "/")
+      resource = String.trim_trailing(resource_uri, "/")
 
-    cond do
-      # Exact match
-      pattern == resource ->
-        true
+      cond do
+        # Exact match
+        pattern == resource ->
+          true
 
-      # Glob wildcard: "arbor://foo/**" matches "arbor://foo", "arbor://foo/bar", "arbor://foo/bar/baz"
-      String.ends_with?(pattern, "/**") ->
-        prefix = String.trim_trailing(pattern, "/**")
-        resource == prefix or String.starts_with?(resource, prefix <> "/")
+        # Glob wildcard: "arbor://foo/**" matches "arbor://foo", "arbor://foo/bar", "arbor://foo/bar/baz"
+        String.ends_with?(pattern, "/**") ->
+          prefix = String.trim_trailing(pattern, "/**")
+          resource == prefix or String.starts_with?(resource, prefix <> "/")
 
-      # Prefix + boundary separator
-      true ->
-        String.starts_with?(resource, pattern <> "/")
+        # Prefix + boundary separator
+        true ->
+          String.starts_with?(resource, pattern <> "/")
+      end
     end
   end
+
+  # A URI segment is `..` only if it appears between path separators.
+  # We split on "/" and check membership — that catches "../a", "a/..",
+  # "a/../b", and a bare ".." while NOT flagging "foo..bar" or "..bar"
+  # (those are legitimate identifiers, not traversal).
+  defp contains_traversal_segment?(uri) when is_binary(uri) do
+    path =
+      case String.split(uri, "://", parts: 2) do
+        [_scheme, rest] -> rest
+        [single] -> single
+      end
+
+    path
+    |> String.split("/")
+    |> Enum.any?(&(&1 == ".."))
+  end
+
+  defp contains_traversal_segment?(_), do: false
 
   defp delegation_chain_valid?(%{delegation_chain: nil}), do: true
   defp delegation_chain_valid?(%{delegation_chain: []}), do: true
