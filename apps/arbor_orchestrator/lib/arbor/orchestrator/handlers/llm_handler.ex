@@ -371,6 +371,12 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
            messages: messages,
            max_tokens: parse_int(Map.get(node.attrs, "max_tokens"), 4096),
            temperature: parse_float(Map.get(node.attrs, "temperature"), 0.7),
+           # Forwards to req_llm as :receive_timeout (HTTP-layer cutoff).
+           # req_llm defaults to 30s for openai-compatible providers, which
+           # is too short for slower local models or long tool-use turns.
+           # `timeout` node attr also sets Arbor.LLM.Client's outer timeout
+           # (see build_call_opts/2), so both layers stay aligned.
+           receive_timeout: parse_int(Map.get(node.attrs, "timeout"), nil),
            provider_options:
              node.attrs
              |> build_provider_options(Context.get(context, "session.acp_agent"))

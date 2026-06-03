@@ -219,6 +219,13 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       refute Keyword.has_key?(opts, :temperature)
       refute Keyword.has_key?(opts, :max_tokens)
       refute Keyword.has_key?(opts, :reasoning_effort)
+      refute Keyword.has_key?(opts, :receive_timeout)
+    end
+
+    test "receive_timeout forwards to req_llm when set on the Request" do
+      req = %Request{provider: "openai", model: "gpt-4", receive_timeout: 300_000}
+      opts = Adapter.build_req_opts(req, [])
+      assert opts[:receive_timeout] == 300_000
     end
 
     test "request provider_options pass through as keyword list" do
