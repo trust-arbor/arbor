@@ -64,6 +64,45 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
     run_tdd_cycle(spec)
   end
 
+  test "TDD cycle: Rle.encode converges within 5 iterations" do
+    # Run-length encoding — chosen because small models commonly trip on:
+    #   - The "1" for singleton runs (omit it, return just the char)
+    #   - Confusing runs with total counts ("aabbaa" — is it "a4b2" or "a2b2a2"?)
+    #   - Off-by-one on the last group (drop it entirely)
+    #   - Empty-string handling
+    #
+    # If granite-4.1-3b one-shots this, the convergence hypothesis is
+    # underdetermined by these problems. If it fumbles and recovers, the
+    # feedback loop is doing real work.
+    spec = %{
+      module_name: "Rle",
+      file_basename: "rle",
+      signature: "@spec encode(String.t()) :: String.t()",
+      description: """
+      Run-length encode a string. Each MAXIMAL RUN of consecutive identical
+      characters becomes that character followed by the run's length as a
+      decimal number. EVERY run gets a count — even runs of length 1.
+      The empty string encodes to the empty string.
+      """,
+      examples: [
+        {"", ""},
+        {"a", "a1"},
+        {"aaa", "a3"},
+        {"aaabb", "a3b2"},
+        {"abcd", "a1b1c1d1"},
+        {"wwwwxxyz", "w4x2y1z1"},
+        # The classic trap: groups, not total counts.
+        {"aabbaa", "a2b2a2"},
+        # Mixed case + repeats with a single-char tail.
+        {"AAAAAAAAAB", "A9B1"}
+      ],
+      function_name: "encode",
+      max_iterations: 5
+    }
+
+    run_tdd_cycle(spec)
+  end
+
   test "TDD cycle: FizzBuzz.run converges within 5 iterations" do
     # FizzBuzz is a classic small-model trap. Common failure modes:
     #   - Check 3 and 5 before 15 (so 15 returns "Fizz", not "FizzBuzz")
@@ -116,19 +155,16 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
     workdir = setup_tmp_mix_project(spec)
     on_exit(fn -> File.rm_rf(workdir) end)
 
-    test_file_path = Path.join([workdir, "test", "model_test.exs"])
-    impl_file_path = Path.join([workdir, "lib", "#{spec.file_basename}.ex"])
+    # Write the spec file inside workdir. The DOT reads it via a `read`
+    # node, json_extracts each field, and writes the acceptance test from
+    # the spec's `acceptance_test_code` string.
+    spec_path = "spec.json"
+    write_spec_file(workdir, spec_path, spec)
 
     initial_values = %{
-      "module_name" => spec.module_name,
-      "signature" => spec.signature,
-      "description" => spec.description,
-      "max_iterations" => spec.max_iterations,
-      "iteration" => 0,
+      "spec_path" => spec_path,
       "workdir" => workdir,
-      "test_file_path" => test_file_path,
-      "impl_file_path" => impl_file_path,
-      "test_prompt" => build_test_prompt(spec),
+      "iteration" => 0,
       "session.agent_id" => agent_id
     }
 
@@ -229,7 +265,7 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
 
   # ── Tmp mix project setup ─────────────────────────────────────────
 
-  defp setup_tmp_mix_project(spec) do
+  defp setup_tmp_mix_project(_spec) do
     path = Path.join(System.tmp_dir!(), "arbor_tdd_#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(path, "lib"))
     File.mkdir_p!(Path.join(path, "test"))
@@ -243,17 +279,34 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
 
     File.write!(Path.join([path, "test", "test_helper.exs"]), "ExUnit.start()\n")
 
-    # The acceptance test — the held-out oracle. The model never sees
-    # this file or its contents. Each example pair becomes one ExUnit
-    # test case.
-    File.write!(Path.join([path, "test", "acceptance_test.exs"]), build_acceptance_test(spec))
-
-    # Skip the lib/ file — the model will produce it.
-
+    # No lib/ file — the model writes it. No acceptance test either —
+    # the DOT does that from the spec we drop into workdir.
     path
   end
 
+  defp write_spec_file(workdir, spec_path, spec) do
+    test_file_path = Path.join([workdir, "test", "model_test.exs"])
+    impl_file_path = Path.join([workdir, "lib", "#{spec.file_basename}.ex"])
+    acceptance_file_path = Path.join([workdir, "test", "acceptance_test.exs"])
+
+    spec_json = %{
+      "module_name" => spec.module_name,
+      "signature" => spec.signature,
+      "description" => spec.description,
+      "test_prompt" => build_test_prompt(spec),
+      "acceptance_test_code" => build_acceptance_test(spec),
+      "test_file_path" => test_file_path,
+      "impl_file_path" => impl_file_path,
+      "acceptance_file_path" => acceptance_file_path,
+      "max_iterations" => spec.max_iterations
+    }
+
+    File.write!(Path.join(workdir, spec_path), Jason.encode!(spec_json, pretty: true))
+  end
+
   defp build_acceptance_test(spec) do
+    function = Map.get(spec, :function_name, "run")
+
     cases =
       spec.examples
       |> Enum.with_index()
@@ -263,7 +316,7 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
         # string ("\"1\"" → embedded quotes in the test name).
         """
             test "acceptance case #{idx}" do
-              assert #{spec.module_name}.run(#{inspect(input)}) == #{inspect(expected)}
+              assert #{spec.module_name}.#{function}(#{inspect(input)}) == #{inspect(expected)}
             end
         """
       end)
