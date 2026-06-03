@@ -138,13 +138,11 @@ defmodule Arbor.Orchestrator.EngineCheckpointPoisoningTest do
              "identity_private_key provided. Got: #{inspect(result)}"
   end
 
-  test "LEGACY: without identity_private_key, engine still adopts poisoned context (transition gap)" do
-    # Documents the unchanged-by-design legacy path. Callers that don't
-    # pass identity_private_key still get the silent fail-open. Closing
-    # this fully requires every caller to pass identity (a broader
-    # migration tracked in the roadmap follow-up). The fact that this
-    # test STILL passes is the gap; the test above documents what works
-    # when callers opt in.
+  test "resume without identity_private_key is REJECTED (no more legacy fail-open)" do
+    # Security regression: as of the CLI identity migration, the engine's
+    # initial_state/3 refuses to resume without identity. There's no
+    # legacy "accept unsigned" path anymore — closing the fail-open
+    # the original adversarial pass surfaced.
     root = logs_root()
     on_exit(fn -> File.rm_rf(root) end)
     ckpt_path = Path.join(root, "checkpoint.json")
@@ -158,7 +156,7 @@ defmodule Arbor.Orchestrator.EngineCheckpointPoisoningTest do
       }
     })
 
-    {:ok, run_result} =
+    result =
       Arbor.Orchestrator.run(@capture_dot,
         logs_root: root,
         resume_from: ckpt_path,
@@ -166,8 +164,7 @@ defmodule Arbor.Orchestrator.EngineCheckpointPoisoningTest do
         function_handler: fn _args -> {:ok, %{ran: true}} end
       )
 
-    assert run_result.context["session.agent_id"] == "agent_admin"
-    assert run_result.context["trust_tier"] == "veteran"
+    assert {:error, :identity_required_for_resume} = result
   end
 
   test "Checkpoint.load accepts ANY JSON shape when no hmac_secret is passed" do

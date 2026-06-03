@@ -52,14 +52,26 @@ defmodule Arbor.Orchestrator.Conformance53Test do
         "arbor_orchestrator_5_3_resume_#{System.unique_integer([:positive])}"
       )
 
+    # Resume requires identity for checkpoint HMAC integrity (post-2026-06-03
+    # Option D migration). Same key on write + read so HMAC verifies.
+    identity_key = :crypto.strong_rand_bytes(32)
+
     assert {:error, :max_steps_exceeded} =
-             Arbor.Orchestrator.run(dot, logs_root: logs_root, max_steps: 2)
+             Arbor.Orchestrator.run(dot,
+               logs_root: logs_root,
+               max_steps: 2,
+               identity_private_key: identity_key
+             )
 
     checkpoint_path = Path.join(logs_root, "checkpoint.json")
     assert File.exists?(checkpoint_path)
 
     assert {:ok, resumed} =
-             Arbor.Orchestrator.run(dot, logs_root: logs_root, resume_from: checkpoint_path)
+             Arbor.Orchestrator.run(dot,
+               logs_root: logs_root,
+               resume_from: checkpoint_path,
+               identity_private_key: identity_key
+             )
 
     assert "b" in resumed.completed_nodes
     assert "exit" in resumed.completed_nodes

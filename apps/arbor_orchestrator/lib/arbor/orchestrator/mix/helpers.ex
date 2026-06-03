@@ -94,4 +94,101 @@ defmodule Arbor.Orchestrator.Mix.Helpers do
         {:error, reason}
     end
   end
+
+  @doc """
+  Load the operator's identity key for signing CLI-initiated pipelines.
+
+  Tries in order:
+    1. The explicit `--identity-key <path>` opt
+    2. The `ARBOR_KEY` environment variable
+    3. `~/.arbor/identity.key`
+
+  Returns a keyword list suitable for merging into engine run opts:
+  `[signer: signer_fn, identity_private_key: <bytes>, agent_id: <id>]`.
+
+  Halts with a clear error message when no key can be found OR the key
+  file is malformed. This is intentional: as of the checkpoint HMAC
+  migration (Option D), engine resume requires identity, so CLI tasks
+  must surface key-loading failures up front rather than letting them
+  produce confusing downstream errors.
+  """
+  @spec load_identity(keyword()) :: keyword()
+  def load_identity(opts) do
+    case resolve_key_path(opts) do
+      nil ->
+        error("""
+        No Arbor identity key found. Pipeline operations require an identity
+        for checkpoint integrity. Provide one via:
+
+          --identity-key <path>   (CLI flag)
+          ARBOR_KEY=<path>        (environment variable)
+          ~/.arbor/identity.key   (default location)
+
+        Generate a key with: mix arbor.identity new
+        """)
+
+        System.halt(1)
+
+      path ->
+        load_identity_from(path)
+    end
+  end
+
+  defp resolve_key_path(opts) do
+    explicit = Keyword.get(opts, :identity_key)
+    env_var = System.get_env("ARBOR_KEY")
+    default = Path.expand("~/.arbor/identity.key")
+
+    cond do
+      is_binary(explicit) and File.exists?(explicit) -> explicit
+      is_binary(env_var) and File.exists?(env_var) -> env_var
+      File.exists?(default) -> default
+      true -> nil
+    end
+  end
+
+  defp load_identity_from(path) do
+    # Runtime bridges — arbor_orchestrator is Standalone in the library
+    # hierarchy (see CLAUDE.md), so we resolve Gateway + Contracts modules
+    # at runtime instead of via static aliases.
+    proxy_core = Module.concat([:Arbor, :Gateway, :Signer, :ProxyCore])
+    signed_request = Module.concat([:Arbor, :Contracts, :Security, :SignedRequest])
+
+    cond do
+      not Code.ensure_loaded?(proxy_core) ->
+        error(
+          "Arbor.Gateway.Signer.ProxyCore not loaded — arbor_gateway must be " <>
+            "available to parse identity keys."
+        )
+
+        System.halt(1)
+
+      not Code.ensure_loaded?(signed_request) ->
+        error(
+          "Arbor.Contracts.Security.SignedRequest not loaded — arbor_contracts " <>
+            "must be available to sign requests."
+        )
+
+        System.halt(1)
+
+      true ->
+        with {:ok, contents} <- File.read(path),
+             {:ok, %{agent_id: agent_id, private_key: private_key}} <-
+               proxy_core.parse_key_file(contents) do
+          signer = fn resource ->
+            signed_request.sign(resource, agent_id, private_key)
+          end
+
+          [
+            signer: signer,
+            identity_private_key: private_key,
+            agent_id: agent_id
+          ]
+        else
+          {:error, reason} ->
+            error("Failed to load identity key at #{path}: #{inspect(reason)}")
+            System.halt(1)
+        end
+    end
+  end
 end
