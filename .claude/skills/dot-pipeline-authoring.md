@@ -175,6 +175,17 @@ If you find yourself wanting interpolation, you almost always want a transform s
 
 Same principle: keep auth-relaxation primitives behind API surfaces that already require code-edit access.
 
+### `authorization: false` only bypasses the engine — not action-layer caps
+
+Important nuance, surfaced by the HITL example pipeline. `authorization: false` on `Orchestrator.run/2` turns off the **engine-level** per-node capability middleware (the `CapabilityCheck` that runs before each handler — `arbor://orchestrator/execute/<node_type>`). It does NOT turn off the **action-layer** capability check that `Arbor.Actions.authorize_and_execute/4` does for every `exec target=action` invocation.
+
+So a pipeline running with `authorization: false` will still hit `{:error, :unauthorized}` from `file_write`, `mix_test`, `git_commit`, or any other Action whose canonical URI the calling principal hasn't been granted. The two checks are independent layers.
+
+For tests that need to skip BOTH:
+- Use `authorization: false` to silence the engine layer.
+- Grant the action URIs (e.g. `arbor://fs/**`) to your test principal via `CapabilityStore.put/1` to satisfy the action layer.
+- The HITL example test (`deployment_decision_gate_example_test.exs`) shows the canonical pattern.
+
 ## Validating before running
 
 ```bash
