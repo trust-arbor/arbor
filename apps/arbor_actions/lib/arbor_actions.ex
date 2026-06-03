@@ -238,8 +238,10 @@ defmodule Arbor.Actions do
         Arbor.Actions.Git.Diff,
         Arbor.Actions.Git.Commit,
         Arbor.Actions.Git.Log,
-        Arbor.Actions.Git.Branch,
-        Arbor.Actions.Git.PR
+        Arbor.Actions.Git.Branch
+      ],
+      github: [
+        Arbor.Actions.Github.PR
       ],
       mix: [
         Arbor.Actions.Mix.Test,
@@ -711,11 +713,24 @@ defmodule Arbor.Actions do
     Arbor.Actions.Shell.Execute => "arbor://shell/exec",
     Arbor.Actions.Shell.ExecuteScript => "arbor://shell/exec",
 
-    # Git — routes through shell
-    Arbor.Actions.Git.Status => "arbor://shell/exec/git",
-    Arbor.Actions.Git.Diff => "arbor://shell/exec/git",
-    Arbor.Actions.Git.Commit => "arbor://shell/exec/git",
-    Arbor.Actions.Git.Log => "arbor://shell/exec/git",
+    # Git — per-subcommand URIs so operators can grant the precise
+    # surface they want (read vs write, log vs commit, etc.). Grant
+    # `arbor://shell/exec/git/**` for the broad "all git" surface.
+    Arbor.Actions.Git.Status => "arbor://shell/exec/git/status",
+    Arbor.Actions.Git.Diff => "arbor://shell/exec/git/diff",
+    Arbor.Actions.Git.Commit => "arbor://shell/exec/git/commit",
+    Arbor.Actions.Git.Log => "arbor://shell/exec/git/log",
+    Arbor.Actions.Git.Branch => "arbor://shell/exec/git/branch",
+
+    # GitHub via `gh` CLI — distinct binary, distinct URI root.
+    # GitLab / Forgejo / etc. would get their own roots when added.
+    Arbor.Actions.Github.PR => "arbor://shell/exec/gh/pr",
+
+    # Mix — per-task URIs. `arbor://shell/exec/mix/**` grants
+    # everything; `arbor://shell/exec/mix/test` is a test-only grant.
+    Arbor.Actions.Mix.Test => "arbor://shell/exec/mix/test",
+    Arbor.Actions.Mix.Quality => "arbor://shell/exec/mix/quality",
+    Arbor.Actions.Mix.Format => "arbor://shell/exec/mix/format",
 
     # File facade — arbor://fs/{operation}
     Arbor.Actions.File.Read => "arbor://fs/read",

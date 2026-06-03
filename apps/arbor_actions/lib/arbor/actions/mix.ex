@@ -23,10 +23,10 @@ defmodule Arbor.Actions.Mix do
 
       {:ok, result} = Arbor.Actions.Mix.Test.run(%{path: "/path/to/project"}, %{})
       result.exit_code  # => 0
-      result.passed?    # => true
+      result.passed    # => true
 
       {:ok, result} = Arbor.Actions.Mix.Quality.run(%{path: "/path/to/project"}, %{})
-      result.passed?    # => false (format issues found)
+      result.passed    # => false (format issues found)
   """
 
   alias Arbor.Shell
@@ -67,7 +67,9 @@ defmodule Arbor.Actions.Mix do
 
     - `path` — project path
     - `exit_code` — `mix test` exit code (0 = success)
-    - `passed?` — boolean derived from exit_code
+    - `passed` — boolean derived from exit_code (no `?` suffix so this
+      can be used directly in DOT edge conditions like
+      `context.exec.<node>.passed=true`)
     - `stdout` — captured stdout
     - `stderr` — captured stderr
     """
@@ -111,12 +113,12 @@ defmodule Arbor.Actions.Mix do
           output = %{
             path: path,
             exit_code: result.exit_code,
-            passed?: result.exit_code == 0,
+            passed: result.exit_code == 0,
             stdout: result.stdout,
             stderr: result.stderr
           }
 
-          Actions.emit_completed(__MODULE__, %{path: path, passed?: output.passed?})
+          Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
           {:ok, output}
 
         {:error, reason} ->
@@ -150,7 +152,7 @@ defmodule Arbor.Actions.Mix do
 
     - `path` — project path
     - `exit_code` — `mix quality` exit code (0 = passed all checks)
-    - `passed?` — boolean derived from exit_code
+    - `passed` — boolean derived from exit_code
     - `stdout` / `stderr` — captured output
     """
 
@@ -186,12 +188,12 @@ defmodule Arbor.Actions.Mix do
           output = %{
             path: path,
             exit_code: result.exit_code,
-            passed?: result.exit_code == 0,
+            passed: result.exit_code == 0,
             stdout: result.stdout,
             stderr: result.stderr
           }
 
-          Actions.emit_completed(__MODULE__, %{path: path, passed?: output.passed?})
+          Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
           {:ok, output}
 
         {:error, reason} ->
@@ -218,7 +220,7 @@ defmodule Arbor.Actions.Mix do
 
     - `path` — project path
     - `exit_code` — exit code (0 = clean / formatted, non-zero = drift in check_only mode)
-    - `passed?` — boolean (always true in write mode unless mix itself failed)
+    - `passed` — boolean (always true in write mode unless mix itself failed)
     - `stdout` / `stderr` — captured output
     """
 
@@ -256,12 +258,12 @@ defmodule Arbor.Actions.Mix do
           output = %{
             path: path,
             exit_code: result.exit_code,
-            passed?: result.exit_code == 0,
+            passed: result.exit_code == 0,
             stdout: result.stdout,
             stderr: result.stderr
           }
 
-          Actions.emit_completed(__MODULE__, %{path: path, passed?: output.passed?})
+          Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
           {:ok, output}
 
         {:error, reason} ->
