@@ -21,6 +21,8 @@ defmodule Arbor.Orchestrator.Handlers.ExecActionAdversarialTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
+  import ExUnit.CaptureLog
+
   # If arbor_actions isn't compiled into this run, half the tests
   # have no executor target. Guard with module check.
   @actions_available Code.ensure_loaded?(Arbor.Actions)
@@ -186,16 +188,14 @@ defmodule Arbor.Orchestrator.Handlers.ExecActionAdversarialTest do
   # ── Param key mangling ────────────────────────────────────────────
 
   describe "param key mangling (parse_attr_args quirks)" do
-    test "arg.foo.bar (nested dotted) becomes string key 'foo.bar' silently" do
+    test "arg.foo.bar (nested dotted) emits a clear warning identifying the node and attr" do
       unless @actions_available, do: :skip
 
-      # parse_attr_args/1 strips ONLY the first 'arg.' / 'param.'
-      # prefix, leaving 'foo.bar' as the rest of the key. Since
-      # 'foo.bar' isn't a known schema atom, it stays a string and
-      # gets passed to the action as an extra param. Most actions
-      # silently ignore unknown params; the agent_id requirement
-      # still fails this run, but the 'foo.bar' attr is essentially
-      # dead weight with no warning.
+      # parse_attr_args/1 strips only the first 'arg.' / 'param.'
+      # prefix, leaving 'foo.bar' as the rest of the key. Jido schemas
+      # use flat atom keys, so 'foo.bar' is silently dropped by the
+      # action. The handler now warns at this point so the operator
+      # sees the typo / hallucination signal in logs.
       dot = """
       digraph G {
         start [shape=Mdiamond]
@@ -210,19 +210,21 @@ defmodule Arbor.Orchestrator.Handlers.ExecActionAdversarialTest do
       }
       """
 
-      assert {:ok, result} = run_dot(dot)
-      # The arg.foo.bar attr is silently mangled. Pipeline still fails
-      # because agent_id/display_name aren't supplied, but the mangling
-      # itself produces no warning.
-      assert result.final_outcome.status == :fail
+      log = capture_log(fn -> assert {:ok, _result} = run_dot(dot) end)
+
+      assert log =~ "rename"
+      assert log =~ "arg.foo.bar"
+      assert log =~ "foo.bar"
+      assert log =~ "silently dropped" or log =~ "schemas use flat"
     end
 
-    test "context_keys with missing key is silently dropped" do
+    test "context_keys with missing key emits a clear warning identifying the missing key" do
       unless @actions_available, do: :skip
 
-      # context_keys lookup returns nil → `if value != nil` skips the
-      # merge. No warning, no error — the missing key is just absent
-      # from action_args.
+      # context_keys lookup returns nil → `if value != nil` used to
+      # skip the merge silently. The handler now warns so the
+      # operator sees which key was missing instead of debugging a
+      # partial param set downstream.
       dot = """
       digraph G {
         start [shape=Mdiamond]
@@ -238,8 +240,11 @@ defmodule Arbor.Orchestrator.Handlers.ExecActionAdversarialTest do
       }
       """
 
-      assert {:ok, result} = run_dot(dot)
-      assert result.final_outcome.status == :fail
+      log = capture_log(fn -> assert {:ok, _result} = run_dot(dot) end)
+
+      assert log =~ "rename"
+      assert log =~ "nonexistent_context_key"
+      assert log =~ "context_keys"
     end
   end
 
