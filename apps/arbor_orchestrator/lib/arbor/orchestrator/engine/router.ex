@@ -163,7 +163,19 @@ defmodule Arbor.Orchestrator.Engine.Router do
   def collect_fan_out_siblings(node, outcome, _context, graph) do
     fan_out_disabled = Map.get(node.attrs, "fan_out") == "false"
 
-    if fan_out_disabled or outcome.status == :fail do
+    # When a handler explicitly chose a single branch (via preferred_label
+    # or suggested_next_ids), the engine MUST follow only that path —
+    # the other unconditional outgoing edges are alternatives the
+    # handler rejected, not parallel work to schedule. Surfaced by the
+    # wait.human decision-gate example: WaitHumanHandler set
+    # preferred_label="Approve", but pre-fix the engine queued the
+    # Modify and Reject sibling edges as pending and ran their branches
+    # too. Three result files instead of one.
+    handler_chose_branch =
+      outcome.preferred_label not in [nil, ""] or
+        outcome.suggested_next_ids != []
+
+    if fan_out_disabled or outcome.status == :fail or handler_chose_branch do
       []
     else
       edges = Graph.outgoing_edges(graph, node.id)
