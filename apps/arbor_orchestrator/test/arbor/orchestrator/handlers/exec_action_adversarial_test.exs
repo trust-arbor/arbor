@@ -67,11 +67,12 @@ defmodule Arbor.Orchestrator.Handlers.ExecActionAdversarialTest do
       assert reason =~ "action"
     end
 
-    test "empty `action=\"\"` falls through to executor and gets 'Unknown action:'" do
-      # Footgun: `unless ""` is false in Elixir (empty string is truthy),
-      # so the explicit raise in execute_action is bypassed. The empty
-      # string flows to ActionsExecutor.execute/4 and produces a
-      # confusing 'Unknown action: ' error with nothing after the colon.
+    test "empty `action=\"\"` is treated the same as missing (raises the clear error)" do
+      # Fixed: `if action_name in [nil, ""]` now catches the empty-string
+      # case. Before the fix, `unless ""` was false (empty string is
+      # truthy in Elixir), so the explicit raise was bypassed and the
+      # empty string flowed to ActionsExecutor producing a confusing
+      # "Unknown action: " with nothing after the colon.
       dot = """
       digraph G {
         start [shape=Mdiamond]
@@ -85,12 +86,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecActionAdversarialTest do
       assert result.final_outcome.status == :fail
       reason = final_failure_reason(result)
       assert is_binary(reason)
-      # Pinning current behavior: the error mentions "Unknown action: "
-      # with an empty name after the colon. Filed as
-      # `.arbor/roadmap/0-inbox/exec-empty-action-attribute.md` —
-      # ExecHandler should treat "" the same as nil and raise the
-      # clearer "requires 'action' attribute" error.
-      assert reason =~ "Unknown action"
+      assert reason =~ "requires non-empty"
     end
   end
 
