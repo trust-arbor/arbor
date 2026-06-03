@@ -259,4 +259,119 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       assert {:error, _} = Security.authorize(agent, "arbor://fs/read/a/../b/../c")
     end
   end
+
+  # ── Implicit FileGuard normalization (defense-in-depth) ──────────
+
+  describe "implicit FileGuard normalization runs for fs URIs (security regression)" do
+    # Security regression: when a caller invokes Security.authorize/4
+    # with an arbor://fs/<op>/<path> URI but does NOT pass :file_path
+    # opt, the URI matcher's prefix check used to be the only defense.
+    # A symlink inside the authorized root that points outside the root
+    # was undetectable at the security layer — by design (FileGuard
+    # was opt-in via :file_path).
+    #
+    # As of the FileGuard wiring fix, Security.authorize now runs pure
+    # path normalization (SafePath.resolve_within + symlink-escape
+    # detection) for every fs URI via
+    # FileGuard.normalize_uri_path_for_capability/2. Defense-in-depth
+    # against symlink escapes catches a case the URI matcher alone
+    # cannot — the URI itself contains no `..` segment, but the
+    # filesystem object at the URI path is a symlink to outside the
+    # cap's root.
+
+    setup do
+      workdir = Path.join(System.tmp_dir!(), "fg_adv_#{:erlang.unique_integer([:positive])}")
+      safe_dir = Path.join(workdir, "safe")
+      outside_dir = Path.join(workdir, "outside")
+      File.mkdir_p!(safe_dir)
+      File.mkdir_p!(outside_dir)
+
+      outside_file = Path.join(outside_dir, "secret.txt")
+      File.write!(outside_file, "secret contents")
+
+      symlink_path = Path.join(safe_dir, "escape-link")
+      File.ln_s!(outside_file, symlink_path)
+
+      on_exit(fn -> File.rm_rf(workdir) end)
+
+      {:ok,
+       workdir: workdir,
+       safe_dir: safe_dir,
+       outside_file: outside_file,
+       symlink_path: symlink_path}
+    end
+
+    test "symlink inside authorized root pointing OUTSIDE is rejected",
+         %{agent_id: agent, safe_dir: safe_dir} do
+      # Grant a cap rooted at safe_dir.
+      cap_uri = "arbor://fs/read#{safe_dir}/"
+
+      {:ok, _} =
+        Security.grant(
+          principal: agent,
+          resource: cap_uri
+        )
+
+      # The URI for the symlink itself contains no `..`. The URI
+      # matcher accepts. Before the FileGuard wiring, this would
+      # return {:ok, :authorized}. After the wiring, it returns
+      # {:error, :symlink_escape}.
+      symlink_uri = "arbor://fs/read#{safe_dir}/escape-link"
+
+      assert {:error, :symlink_escape} = Security.authorize(agent, symlink_uri)
+    end
+
+    test "regular file inside authorized root still authorizes (no false positive)",
+         %{agent_id: agent, safe_dir: safe_dir} do
+      cap_uri = "arbor://fs/read#{safe_dir}/"
+
+      {:ok, _} =
+        Security.grant(
+          principal: agent,
+          resource: cap_uri
+        )
+
+      legit_file = Path.join(safe_dir, "legit.txt")
+      File.write!(legit_file, "fine")
+
+      legit_uri = "arbor://fs/read#{safe_dir}/legit.txt"
+
+      assert match?({:ok, :authorized, _}, Security.authorize(agent, legit_uri)) or
+               match?({:ok, :authorized}, Security.authorize(agent, legit_uri))
+    end
+
+    test "intermediate-wildcard cap (arbor://fs/read/foo/**) authorizes paths under it",
+         %{agent_id: agent, safe_dir: safe_dir} do
+      # Pre-fix smell: FileGuard's extract_root_from_capability/1
+      # returns "/foo/**" for these caps and breaks. The new
+      # extract_root_for_normalization strips the wildcard suffix.
+      cap_uri = "arbor://fs/read#{safe_dir}/**"
+
+      {:ok, _} =
+        Security.grant(
+          principal: agent,
+          resource: cap_uri
+        )
+
+      legit_file = Path.join(safe_dir, "anywhere.txt")
+      File.write!(legit_file, "fine")
+
+      legit_uri = "arbor://fs/read#{safe_dir}/anywhere.txt"
+
+      assert match?({:ok, :authorized, _}, Security.authorize(agent, legit_uri)) or
+               match?({:ok, :authorized}, Security.authorize(agent, legit_uri))
+    end
+
+    test "non-fs URI is unaffected by the FileGuard wiring",
+         %{agent_id: agent} do
+      # Confirm we didn't introduce a regression for shell / api caps.
+      {:ok, _} =
+        Security.grant(
+          principal: agent,
+          resource: "arbor://shell/exec/git"
+        )
+
+      assert {:ok, :authorized} = Security.authorize(agent, "arbor://shell/exec/git/status")
+    end
+  end
 end
