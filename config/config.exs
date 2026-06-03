@@ -141,7 +141,9 @@ config :arbor_ai, :acp_providers, %{
   },
 
   # grok (Grok 4.3) — VERIFIED native ACP via `mix arbor.acp.probe grok`: `grok agent stdio`
-  # returns a proper ACP initialize result (agentVersion 0.2.8). CLI exposes model "grok-build".
+  # returns a proper ACP initialize result (re-verified on agentVersion 0.2.20, 2026-06-03;
+  # initial verification was on 0.2.8). CLI exposes model "grok-build".
+  # Install: curl -fsSL https://x.ai/cli/install.sh | bash
   grok: %{command: ["grok", "agent", "stdio"]}
 
   # agy (Antigravity CLI, intended for Gemini 3.5 Flash) — NO native ACP. Verified via
