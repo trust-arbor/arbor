@@ -34,7 +34,7 @@ defmodule Arbor.Actions.MixTest do
 
       assert result.path == project_path
       assert result.exit_code == 0
-      assert result.passed? == true
+      assert result.passed == true
       assert result.stdout =~ "test"
     end
 
@@ -44,7 +44,7 @@ defmodule Arbor.Actions.MixTest do
       assert {:ok, result} = MixAction.Test.run(%{path: project_path}, %{})
 
       assert result.exit_code != 0
-      assert result.passed? == false
+      assert result.passed == false
     end
 
     test "respects tag filter via --only", %{project_path: project_path} do
@@ -67,7 +67,7 @@ defmodule Arbor.Actions.MixTest do
                MixAction.Format.run(%{path: project_path, check_only: true}, %{})
 
       assert result.exit_code == 0
-      assert result.passed? == true
+      assert result.passed == true
     end
 
     test "check_only mode fails for unformatted code", %{project_path: project_path} do
@@ -80,7 +80,7 @@ defmodule Arbor.Actions.MixTest do
                MixAction.Format.run(%{path: project_path, check_only: true}, %{})
 
       assert result.exit_code != 0
-      assert result.passed? == false
+      assert result.passed == false
 
       File.write!(lib_path, original)
     end
@@ -90,7 +90,7 @@ defmodule Arbor.Actions.MixTest do
       File.write!(lib_path, "defmodule    Tiny do\ndef hi,do: :hi\nend\n")
 
       assert {:ok, result} = MixAction.Format.run(%{path: project_path}, %{})
-      assert result.passed? == true
+      assert result.passed == true
 
       # File got rewritten.
       formatted = File.read!(lib_path)
