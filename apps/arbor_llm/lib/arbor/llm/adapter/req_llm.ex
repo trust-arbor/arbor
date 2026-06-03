@@ -527,11 +527,12 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   @spec translate_response(ReqLLM.Response.t(), Request.t()) :: Response.t()
   def translate_response(%ReqLLM.Response{} = req_response, %Request{} = _request) do
     text = ReqLLM.Response.text(req_response) || ""
+    reasoning_content = extract_reasoning_text(req_response)
     finish_reason = translate_finish_reason(req_response.finish_reason)
 
     msg_for_post = %{
       "content" => text,
-      "reasoning_content" => extract_reasoning_text(req_response),
+      "reasoning_content" => reasoning_content,
       "reasoning" => nil
     }
 
@@ -547,6 +548,12 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
     %Response{
       text: text,
+      # Expose chain-of-thought content to downstream consumers. Hidden by
+      # default in most rendering paths but available when the UX wants
+      # transparency — and critically, NOT silently dropped, which masks
+      # reasoning-model responses where final-content tokens got cut off
+      # mid-CoT (gemma-4-e4b-it surfaced this on 2026-06-02).
+      reasoning_content: reasoning_content,
       finish_reason: finish_reason,
       content_parts: content_parts,
       usage: translate_usage(req_response.usage),
