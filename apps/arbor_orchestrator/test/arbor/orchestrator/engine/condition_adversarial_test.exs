@@ -218,23 +218,62 @@ defmodule Arbor.Orchestrator.Engine.ConditionAdversarialTest do
 
   # ── Known gaps (current behavior — pin so a fix shows up as a diff) ─
 
-  describe "known gaps" do
-    test "0=0 is FALSE (no literal-vs-literal comparison support)" do
-      # See `.arbor/roadmap/0-inbox/condition-no-literal-vs-literal.md`.
-      # An author writing `[condition="1=1"]` to mean "always-true" gets
-      # silently-false instead. The fix is either to warn/error on
-      # unrecognized field names, or to treat unquoted literals on the
-      # LHS as themselves.
-      assert Condition.eval("0=0", @outcome, @context) == false
-      assert Condition.eval("1=1", @outcome, @context) == false
-      assert Condition.eval("true=true", @outcome, @context) == false
+  describe "LHS literals + typo defense (fixed)" do
+    # Fix: resolve/3 now recognizes numeric and quoted literals on the
+    # LHS, and warns loudly when a bareword falls through to the
+    # catch-all. Validation via `mix arbor.pipeline.validate` rejects
+    # bareword typos at compile time; the runtime warning is the
+    # defense-in-depth for un-validated pipelines.
+
+    test "numeric literal LHS evaluates as itself: 0=0, 1=1, -3=-3 are TRUE" do
+      assert Condition.eval("0=0", @outcome, @context) == true
+      assert Condition.eval("1=1", @outcome, @context) == true
+      assert Condition.eval("-3=-3", @outcome, @context) == true
+      assert Condition.eval("1.5=1.5", @outcome, @context) == true
     end
 
-    test "unrecognized field name silently resolves to empty string" do
-      # `nonexistent_field=anything` → resolve returns "" → "" != "anything" → false
-      # No warning, no error. Typos in field names silently produce
-      # always-false edges.
-      assert Condition.eval("typo_field=anything", @outcome, @context) == false
+    test "numeric literal comparisons across operators work as expected" do
+      assert Condition.eval("3>2", @outcome, @context) == true
+      assert Condition.eval("2>3", @outcome, @context) == false
+      assert Condition.eval("3>=3", @outcome, @context) == true
+      assert Condition.eval("1!=2", @outcome, @context) == true
+    end
+
+    test "quoted literal LHS: \"red\"=\"red\" is TRUE, \"red\"=\"blue\" is FALSE" do
+      assert Condition.eval(~s("red"="red"), @outcome, @context) == true
+      assert Condition.eval(~s("red"="blue"), @outcome, @context) == false
+    end
+
+    test "bareword identifier (typo) still resolves to \"\" but now warns loudly" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Condition.eval("typo_field=x", @outcome, @context)
+        end)
+
+      assert log =~ "[Condition]"
+      assert log =~ "typo_field"
+      assert log =~ "unknown LHS"
+    end
+
+    test "`true=true` bareword on both sides still false (intentional — use quotes for literal strings)" do
+      # `true` and `false` look like field names, not literals. If you
+      # want literal-string comparison use quotes: `"true"="true"`.
+      # The warning fires here too.
+      log =
+        ExUnit.CaptureLog.capture_log(fn -> Condition.eval("true=true", @outcome, @context) end)
+
+      assert log =~ "unknown LHS"
+    end
+
+    test "valid_syntax? accepts numeric and quoted literals on LHS" do
+      assert Condition.valid_syntax?("0=0")
+      assert Condition.valid_syntax?("1.5>0")
+      assert Condition.valid_syntax?(~s("red"="red"))
+    end
+
+    test "valid_syntax? still rejects bareword LHS that isn't a known field (typo defense)" do
+      refute Condition.valid_syntax?("preffered_label=approve")
+      refute Condition.valid_syntax?("typo_field=anything")
     end
   end
 
