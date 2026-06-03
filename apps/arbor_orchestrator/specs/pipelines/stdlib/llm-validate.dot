@@ -21,6 +21,7 @@ digraph LLMValidate {
   // Generate output
   generate [
     type="compute",
+    simulate="false",
     prompt="Generate output using the prompt. If previous validation_errors exist, incorporate them as correction guidance."
   ]
 

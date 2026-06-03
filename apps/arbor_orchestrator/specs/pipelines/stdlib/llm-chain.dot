@@ -15,6 +15,7 @@ digraph LLMChain {
   // Step 1: First prompt
   step_1 [
     type="compute",
+    simulate="false",
     prompt="Execute prompt_1. Store result in chain.step_1_result."
   ]
 
@@ -27,6 +28,7 @@ digraph LLMChain {
   // Step 2: Second prompt with step 1 context
   step_2 [
     type="compute",
+    simulate="false",
     prompt="Execute prompt_2 with the result from step 1 as context. Store result in chain.step_2_result."
   ]
 
@@ -46,6 +48,7 @@ digraph LLMChain {
   // Step 3: Third prompt with accumulated context
   step_3 [
     type="compute",
+    simulate="false",
     prompt="Execute prompt_3 with results from steps 1 and 2 as context. Store result in chain.step_3_result."
   ]
 
