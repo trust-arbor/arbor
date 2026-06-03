@@ -70,14 +70,38 @@ defmodule Arbor.Orchestrator.Dot.Parser do
 
     case parse_digraph(processed, accumulate) do
       {:ok, state} ->
-        if accumulate and state.errors != [] do
-          {:ok, build_graph(state), Enum.reverse(state.errors)}
-        else
-          {:ok, build_graph(state)}
+        # Reject (or warn about) anything after the outer closing `}`.
+        # The parser used to silently drop trailing content, which lets
+        # LLM-generated DOTs hide a partial follow-up, a hallucinated
+        # second graph, or a stray statement — and the operator never
+        # knows the pipeline they meant to run isn't the one that ran.
+        trailing = String.trim(state.rest)
+
+        cond do
+          trailing == "" and accumulate and state.errors != [] ->
+            {:ok, build_graph(state), Enum.reverse(state.errors)}
+
+          trailing == "" ->
+            {:ok, build_graph(state)}
+
+          accumulate ->
+            warning = "trailing content after digraph close: #{trailing_preview(trailing)}"
+            {:ok, build_graph(state), Enum.reverse([warning | state.errors])}
+
+          true ->
+            {:error, "trailing content after digraph close: #{trailing_preview(trailing)}"}
         end
 
       {:error, _} = err ->
         err
+    end
+  end
+
+  defp trailing_preview(text) do
+    if String.length(text) > 100 do
+      String.slice(text, 0, 100) <> "..."
+    else
+      text
     end
   end
 

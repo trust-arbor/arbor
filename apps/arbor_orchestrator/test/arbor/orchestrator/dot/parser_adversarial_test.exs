@@ -255,47 +255,51 @@ defmodule Arbor.Orchestrator.Dot.ParserAdversarialTest do
     end
   end
 
-  describe "known gaps (silent truncation after first closing brace)" do
-    # The parser stops at the first closing `}` for the outer digraph
-    # and silently discards everything after it. This means an LLM
-    # producing a DOT with stray content after the close — or with
-    # multiple digraph statements concatenated — loses the trailing
-    # content without warning. Validators see only the truncated graph
-    # and may pass it ("looks like a valid DOT with one node"), so
-    # the operator never knows half the pipeline was dropped.
+  describe "trailing content after digraph close (rejected as of HEAD)" do
+    # The parser used to stop at the first closing `}` and silently
+    # drop everything after it. That let LLM-generated DOTs hide a
+    # partial follow-up, a hallucinated second graph, or a stray
+    # statement — and operators had no signal that the pipeline they
+    # meant to run wasn't the one that ran. Now:
     #
-    # Filed as a roadmap item; tests here pin current behavior so a
-    # fix is visible as a change in result shape.
+    #   - default mode returns {:error, "trailing content..."}
+    #   - accumulate_errors: true returns {:ok, graph, [warning, ...]}
+    #
+    # These tests pin the new behavior so a future regression is
+    # visible.
 
-    test "content after closing brace is silently dropped (current behavior)" do
-      # The 'b' node and the edge are after the }, so they're lost.
+    test "content after closing brace is now rejected as an error" do
       result =
         parse_within("digraph G { a [shape=Mdiamond] } b [shape=Msquare] start -> a -> b")
 
-      assert {:ok, graph} = result
-      assert Map.keys(graph.nodes) == ["a"]
-      assert graph.edges == []
+      assert {:error, reason} = result
+      assert reason =~ "trailing content"
+      assert reason =~ "b"
     end
 
-    test "second digraph statement is silently dropped (current behavior)" do
-      # The second digraph H is invisible to the parser.
+    test "second digraph statement is now rejected as trailing content" do
       result =
         parse_within("digraph G { a [shape=Mdiamond] } digraph H { b [shape=Msquare] }")
 
-      assert {:ok, graph} = result
-      assert Map.keys(graph.nodes) == ["a"]
+      assert {:error, reason} = result
+      assert reason =~ "trailing content"
+      assert reason =~ "digraph H"
     end
 
-    test "accumulate_errors=true does NOT surface the truncation" do
+    test "accumulate_errors=true surfaces trailing content as a warning" do
       result =
         Parser.parse(
           "digraph G { a [shape=Mdiamond] } b [shape=Msquare] start -> a -> b",
           accumulate_errors: true
         )
 
-      # Today: {:ok, graph} with no warnings shape — trailing content
-      # is dropped silently even in accumulate-errors mode.
-      assert {:ok, _graph} = result
+      assert {:ok, graph, warnings} = result
+      assert Map.keys(graph.nodes) == ["a"]
+
+      assert Enum.any?(warnings, fn w ->
+               is_binary(w) and String.contains?(w, "trailing content")
+             end),
+             "expected a 'trailing content' warning in #{inspect(warnings)}"
     end
   end
 
