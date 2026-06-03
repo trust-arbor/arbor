@@ -265,16 +265,17 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
   # ── String-keyed constraints (the silent-skip footgun) ────────────
 
   describe "constraint key types" do
-    test "STRING-keyed constraints are silently ignored by the enforcer",
+    test "STRING-keyed constraints are atomized at Capability.new — enforcement fires",
          %{agent_id: agent} do
-      # The enforcer reads `constraints[:rate_limit]` (atom). If a caller
-      # grants `constraints: %{"rate_limit" => 1}` (string), the lookup
-      # returns nil and the rate limit is NEVER enforced.
+      # Regression: Capability.new/1 atomizes known constraint keys
+      # (:rate_limit, :time_window, :allowed_paths, :requires_approval,
+      # :taint_policy) so that a cap granted with string keys (e.g.
+      # decoded from JSON, emitted by an LLM, bridged through a gateway)
+      # gets the same enforcement as one granted with atom keys.
       #
-      # This IS a footgun. Production callers all use atom keys today
-      # (verified by grep across the codebase), but an LLM-authored
-      # grant or a JSON-decoded grant from an external source could
-      # easily produce string keys.
+      # Before the fix: the enforcer read `constraints[:rate_limit]`
+      # (atom), the lookup returned nil on string-keyed maps, and the
+      # rate limit was silently disabled.
       resource = "arbor://shell/exec/str_key_#{:erlang.unique_integer([:positive])}"
       RateLimiter.reset(agent, resource)
 
@@ -285,15 +286,10 @@ defmodule Arbor.Security.ConstraintEnforcementAdversarialTest do
           constraints: %{"rate_limit" => 1}
         )
 
-      # Despite "rate_limit" => 1, we expect MORE than 1 authorize to
-      # succeed — because the enforcer never sees the constraint.
+      # String-keyed `"rate_limit" => 1` is now equivalent to atom-keyed
+      # `rate_limit: 1` — first call succeeds, second is rate-limited.
       assert {:ok, :authorized} = Security.authorize(agent, resource)
-      assert {:ok, :authorized} = Security.authorize(agent, resource)
-      assert {:ok, :authorized} = Security.authorize(agent, resource)
-
-      # Pinned current behavior. Filed as
-      # `.arbor/roadmap/0-inbox/security-constraint-string-keys-silently-ignored.md`
-      # if confirmed by this test as a real footgun.
+      assert {:error, _} = Security.authorize(agent, resource)
     end
 
     test "ATOM-keyed constraints ARE enforced (sanity check)", %{agent_id: agent} do
