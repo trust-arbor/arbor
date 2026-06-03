@@ -248,6 +248,10 @@ defmodule Arbor.Actions do
         Arbor.Actions.Mix.Quality,
         Arbor.Actions.Mix.Format
       ],
+      tdd: [
+        Arbor.Actions.TDD.BuildImplPrompt,
+        Arbor.Actions.TDD.RecordAttempt
+      ],
       comms: [
         Arbor.Actions.Comms.SendMessage,
         Arbor.Actions.Comms.PollMessages
@@ -731,6 +735,12 @@ defmodule Arbor.Actions do
     Arbor.Actions.Mix.Test => "arbor://shell/exec/mix/test",
     Arbor.Actions.Mix.Quality => "arbor://shell/exec/mix/quality",
     Arbor.Actions.Mix.Format => "arbor://shell/exec/mix/format",
+
+    # TDD — pure data transforms (build prompt, record attempt). No
+    # side effects, but still routed through the capability layer so
+    # the auth shape is uniform across all Actions.
+    Arbor.Actions.TDD.BuildImplPrompt => "arbor://action/tdd/build_impl_prompt",
+    Arbor.Actions.TDD.RecordAttempt => "arbor://action/tdd/record_attempt",
 
     # File facade — arbor://fs/{operation}
     Arbor.Actions.File.Read => "arbor://fs/read",
