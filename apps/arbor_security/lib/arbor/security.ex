@@ -442,8 +442,10 @@ defmodule Arbor.Security do
   defp handle_authorized(cap, _auth, principal_id, resource_uri, action, opts) do
     # Stateful constraint checks (rate limiting) — cap was already found by AuthDecision
     with :ok <- if(cap, do: maybe_enforce_constraints(cap, principal_id, resource_uri), else: :ok) do
-      # FileGuard for fs:// URIs with file_path
-      case maybe_check_file_guard(principal_id, resource_uri, opts) do
+      # FileGuard for fs:// URIs — runs explicit (caller passed :file_path)
+      # OR implicit (we have a matched cap and the URI's path-part is the
+      # implicit file_path) defense-in-depth normalization.
+      case maybe_check_file_guard(principal_id, resource_uri, opts, cap) do
         :ok ->
           Events.record_authorization_granted(principal_id, resource_uri, opts)
           if cap, do: maybe_check_max_uses(cap)
@@ -473,7 +475,14 @@ defmodule Arbor.Security do
     case Arbor.Security.ApprovalGuard.check(cap, principal_id, resource_uri) do
       :ok ->
         # Graduated — still enforce constraints (rate limits, time windows)
-        with :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri) do
+        # AND run the implicit FileGuard normalization for fs URIs. The
+        # approval-graduated path is structurally just another success
+        # path and needs the same path-normalization defense as
+        # handle_authorized — otherwise an fs cap with requires_approval
+        # silently skips symlink-escape detection.
+        with :ok <- maybe_enforce_constraints(cap, principal_id, resource_uri),
+             fg_result <- maybe_check_file_guard(principal_id, resource_uri, opts, cap),
+             :ok <- normalize_file_guard_result(fg_result) do
           Events.record_authorization_granted(principal_id, resource_uri, opts)
           maybe_check_max_uses(cap)
           maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, opts)
@@ -869,18 +878,42 @@ defmodule Arbor.Security do
   # verify the path via FileGuard. This integrates path-scoped
   # authorization into the main auth chain instead of requiring
   # callers to call FileGuard separately.
-  defp maybe_check_file_guard(principal_id, resource_uri, opts) do
+  # Reduce maybe_check_file_guard's three-shape return to :ok / {:error, _}
+  # for use in `with` chains that just need a pass/fail signal.
+  defp normalize_file_guard_result(:ok), do: :ok
+  defp normalize_file_guard_result({:ok, _resolved_path}), do: :ok
+  defp normalize_file_guard_result({:error, _} = err), do: err
+
+  defp maybe_check_file_guard(principal_id, resource_uri, opts, cap \\ nil) do
     file_path = Keyword.get(opts, :file_path)
 
-    if file_path && String.starts_with?(resource_uri, "arbor://fs/") do
-      if Code.ensure_loaded?(Arbor.Security.FileGuard) do
-        operation = infer_fs_operation(resource_uri)
-        Arbor.Security.FileGuard.authorize(principal_id, file_path, operation)
-      else
+    cond do
+      # Explicit path: caller knows they want path-bound checking. Full
+      # FileGuard.authorize/3 lookup-and-resolve. Same as before.
+      file_path && String.starts_with?(resource_uri, "arbor://fs/") ->
+        if Code.ensure_loaded?(Arbor.Security.FileGuard) do
+          operation = infer_fs_operation(resource_uri)
+          Arbor.Security.FileGuard.authorize(principal_id, file_path, operation)
+        else
+          :ok
+        end
+
+      # Implicit path defense-in-depth: caller didn't pass :file_path, but
+      # the URI itself is an fs:// URI and we have a matched cap. Run pure
+      # path normalization (SafePath + symlink-escape detection) on the
+      # URI's path-part against the cap's root. The URI matcher's prefix
+      # check already accepted; this adds the SafePath layer that callers
+      # used to have to opt into.
+      cap != nil and String.starts_with?(resource_uri, "arbor://fs/") and
+          Code.ensure_loaded?(Arbor.Security.FileGuard) ->
+        case Arbor.Security.FileGuard.normalize_uri_path_for_capability(resource_uri, cap) do
+          {:ok, resolved} -> {:ok, resolved}
+          :not_applicable -> :ok
+          {:error, _reason} = err -> err
+        end
+
+      true ->
         :ok
-      end
-    else
-      :ok
     end
   rescue
     _ -> :ok
@@ -953,5 +986,4 @@ defmodule Arbor.Security do
   # Extract file path from arbor:// resource URIs
   defp extract_path_from_uri("arbor://fs/" <> rest), do: "/" <> rest
   defp extract_path_from_uri(_), do: nil
-
 end

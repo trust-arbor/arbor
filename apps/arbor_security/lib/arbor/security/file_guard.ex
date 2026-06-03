@@ -202,6 +202,107 @@ defmodule Arbor.Security.FileGuard do
   def parse_resource_uri(_), do: {:error, :not_fs_resource}
 
   @doc """
+  Defense-in-depth path normalization for fs:// URIs that have already
+  been authorized by the URI matcher.
+
+  This is the "implicit FileGuard" path: `Arbor.Security.authorize/4`
+  invokes this for every `arbor://fs/<op>/<path>` URI after the
+  capability matcher accepts. The cap re-lookup that the public
+  `authorize/3` does is skipped — we already have the matching
+  capability from the matcher.
+
+  Adds two defenses beyond the URI matcher's prefix check:
+
+    1. **Symlink-escape detection.** `SafePath.resolve_real/1` follows
+       symlinks. A file at the authorized URI path that points outside
+       the cap's root yields `{:error, :symlink_escape}`.
+    2. **Wildcard-aware root extraction.** Caps like
+       `arbor://fs/read/workspace/**` are handled by stripping the
+       wildcard suffix to recover the directory root before the
+       normalization runs.
+
+  Returns `{:ok, resolved_path}` or `{:error, reason}`. Callers that
+  don't care about the resolved path can ignore it.
+
+  Returns `:not_applicable` when the URI isn't an fs URI or the cap
+  has no recoverable root — the caller should fall through to whatever
+  default behavior it had before this check.
+  """
+  @spec normalize_uri_path_for_capability(String.t(), Capability.t()) ::
+          {:ok, String.t()} | {:error, term()} | :not_applicable
+  def normalize_uri_path_for_capability(resource_uri, %Capability{} = cap) do
+    with {:ok, _operation, requested_path} <- parse_resource_uri(resource_uri),
+         {:ok, root} <- extract_root_for_normalization(cap.resource_uri) do
+      safe_normalize_uri_path(requested_path, root)
+    else
+      # Not an fs URI, or the cap doesn't have a recoverable filesystem
+      # root (e.g. wildcard cap with no path part). Skip path
+      # normalization; the URI matcher's check stands.
+      _ -> :not_applicable
+    end
+  end
+
+  # Lighter-weight normalization than resolve_and_validate_path/2.
+  # Difference: we only follow symlinks when the target IS a symlink.
+  # For non-existent files (legitimate at URI-authorize time — the
+  # caller may be about to write the file) we trust the SafePath string
+  # check rather than walking parent directories. Walking parents would
+  # produce a false positive when the URI's path equals the cap's root
+  # (the parent of the root is by definition outside the root).
+  defp safe_normalize_uri_path(requested_path, root) do
+    with {:ok, normalized} <- SafePath.resolve_within(requested_path, root) do
+      case File.lstat(normalized) do
+        {:ok, %{type: :symlink}} ->
+          # Symlink at the requested path — follow it and verify the
+          # real target stays within the cap's root. This is the
+          # symlink-escape defense the URI matcher alone cannot give.
+          case SafePath.resolve_real(normalized) do
+            {:ok, real} ->
+              case SafePath.resolve_within(real, root) do
+                {:ok, _} -> {:ok, normalized}
+                {:error, _} -> {:error, :symlink_escape}
+              end
+
+            {:error, _} ->
+              # Broken symlink — no actual escape is possible because
+              # there's nothing to follow. Authorize the URI; downstream
+              # I/O will fail with :enoent.
+              {:ok, normalized}
+          end
+
+        _ ->
+          # Regular file, dir, or doesn't exist. The SafePath string
+          # normalization is enough — `..` segments are already caught
+          # at the URI matcher AND in resolve_within.
+          {:ok, normalized}
+      end
+    end
+  end
+
+  # Recover a filesystem root from a capability URI for path normalization.
+  # Handles intermediate wildcards (the existing `extract_root_from_capability/1`
+  # doesn't — it would return "/workspace/**" as the root, which SafePath
+  # can't bound-check).
+  defp extract_root_for_normalization("arbor://fs/**"), do: {:ok, "/"}
+
+  defp extract_root_for_normalization(uri) do
+    # Strip trailing wildcards before parsing — "/workspace/**" → "/workspace",
+    # "/data/*" → "/data". The matcher already validated that the URI
+    # structurally covers the request; we just need the directory root for
+    # SafePath to bound-check against.
+    cleaned =
+      uri
+      |> String.trim_trailing("/**")
+      |> String.trim_trailing("/*")
+      |> String.trim_trailing("/")
+
+    case parse_resource_uri(cleaned) do
+      {:ok, _operation, path} when path != "/" -> {:ok, path}
+      _ -> :not_applicable
+    end
+  end
+
+  @doc """
   List all filesystem capabilities for an agent.
 
   Returns capabilities filtered to only fs:// resources.
