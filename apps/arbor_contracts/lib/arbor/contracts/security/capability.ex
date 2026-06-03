@@ -114,7 +114,7 @@ defmodule Arbor.Contracts.Security.Capability do
       session_id: attrs[:session_id],
       task_id: attrs[:task_id],
       principal_scope: attrs[:principal_scope],
-      constraints: attrs[:constraints] || %{},
+      constraints: atomize_known_constraint_keys(attrs[:constraints] || %{}),
       issuer_id: attrs[:issuer_id],
       issuer_signature: attrs[:issuer_signature],
       delegation_chain: attrs[:delegation_chain] || [],
@@ -216,7 +216,11 @@ defmodule Arbor.Contracts.Security.Capability do
           expires_at: new_expires_at,
           not_before: new_not_before,
           parent_capability_id: parent.id,
-          delegation_depth: min(parent.delegation_depth - 1, opts[:delegation_depth] || parent.delegation_depth - 1),
+          delegation_depth:
+            min(
+              parent.delegation_depth - 1,
+              opts[:delegation_depth] || parent.delegation_depth - 1
+            ),
           max_uses: new_max_uses,
           allowed_delegatees: opts[:allowed_delegatees] || parent.allowed_delegatees,
           session_id: session_id,
@@ -280,6 +284,33 @@ defmodule Arbor.Contracts.Security.Capability do
   defp generate_capability_id do
     "cap_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
   end
+
+  # Constraint keys the enforcer recognizes (see Arbor.Security.Constraint).
+  # Constraints crossing a JSON / gateway / LLM boundary may arrive with
+  # string keys; the enforcer reads atom keys, so unrecognized string
+  # variants would silently disable enforcement. Atomize at the data-entry
+  # point to make the cap match the operator's intent regardless of how
+  # the grant was constructed.
+  @known_constraint_keys [
+    :time_window,
+    :allowed_paths,
+    :rate_limit,
+    :requires_approval,
+    :taint_policy
+  ]
+
+  defp atomize_known_constraint_keys(constraints) when is_map(constraints) do
+    Enum.reduce(@known_constraint_keys, constraints, fn key, acc ->
+      string_key = Atom.to_string(key)
+
+      case Map.pop(acc, string_key) do
+        {nil, _} -> acc
+        {value, rest} -> Map.put(rest, key, value)
+      end
+    end)
+  end
+
+  defp atomize_known_constraint_keys(other), do: other
 
   defp validate_capability(%__MODULE__{} = cap) do
     validators = [
