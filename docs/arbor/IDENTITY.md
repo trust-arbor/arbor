@@ -60,7 +60,21 @@ File.chmod!(path, 0o600)
 IO.puts("Wrote identity for #{identity.agent_id} to #{path}")
 ```
 
-The 0600 chmod is important: the key file grants control over signed checkpoints (and, if the same identity is registered with Arbor Security, the agent's capability scope).
+## What the 0600 chmod does and does not defend
+
+The `chmod 0600` makes the file unreadable by **other unix users** on the host. Concretely:
+
+- Defends against: a different unix user on the box (`postgres`, `nobody`, a co-tenant on a shared system) reading the key.
+- Defends against: backup tools / dotfile-sync utilities running under a different UID picking the file up with permissive default perms.
+- Does **not** defend against: code running inside any process owned by the same UID as the file owner — including the Arbor BEAM, any agent running inside that BEAM, any shell command invoked by `arbor://shell/exec/*` capabilities, and any other tool you run from your normal shell.
+
+For the agent-in-BEAM threat — an Arbor agent with shell-exec capabilities calling `cat ~/.arbor/identity.key` — the unix perm bit is irrelevant. The shell process inherits your UID and the OS lets it through. The real defenses against that threat are Arbor's own:
+
+1. **Capability scope** — don't grant agents `arbor://shell/exec/cat` (or `arbor://fs/read/.arbor/**`) unless they need it. The cap shape is the load-bearing line.
+2. **Shell sandbox path constraints** — the shell handler's allowlist + path checks (see `Arbor.Shell.Sandbox`).
+3. **FileGuard wiring through the auth chain** — currently partial; `Security.authorize/4` only invokes FileGuard when callers pass `:file_path`, and most production callers don't. Tracked as a defense-in-depth follow-up.
+
+So: keep the 0600 chmod (it's free hygiene for the scenarios it addresses), but understand that on a single-user dev box it's mostly insurance for future contexts. The threats that matter today are inside Arbor's own trust boundary, and the defense lives in capability shape, not file perms.
 
 ## Installing an existing identity at the default path
 
