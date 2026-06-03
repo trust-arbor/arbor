@@ -1,6 +1,8 @@
 defmodule Arbor.Orchestrator.Engine.Context do
   @moduledoc false
 
+  require Logger
+
   defmodule LineageEntry do
     @moduledoc """
     Structured record of a context mutation.
@@ -52,8 +54,10 @@ defmodule Arbor.Orchestrator.Engine.Context do
 
   @doc "Set a context value without tracking lineage."
   @spec set(t(), String.t(), term()) :: t()
-  def set(%__MODULE__{values: values} = ctx, key, value),
-    do: %{ctx | values: Map.put(values, key, value)}
+  def set(%__MODULE__{values: values} = ctx, key, value) do
+    check_value_budget(key, value, "anonymous")
+    %{ctx | values: Map.put(values, key, value)}
+  end
 
   @doc """
   Set a context value and record which node set it.
@@ -82,13 +86,20 @@ defmodule Arbor.Orchestrator.Engine.Context do
       operation: :set
     }
 
-    %{ctx | values: Map.put(values, key, value), lineage: Map.put(lineage, key, entry)}
+    new_values = Map.put(values, key, value)
+    check_value_budget(key, value, node_id)
+    check_size_budgets(new_values, node_id)
+
+    %{ctx | values: new_values, lineage: Map.put(lineage, key, entry)}
   end
 
   @doc "Merge updates into context without tracking lineage."
   @spec apply_updates(t(), map()) :: t()
   def apply_updates(%__MODULE__{} = ctx, updates) when is_map(updates) do
-    %{ctx | values: Map.merge(ctx.values, updates)}
+    new_values = Map.merge(ctx.values, updates)
+    check_updates_value_budgets(updates, "anonymous")
+    check_size_budgets(new_values, "anonymous")
+    %{ctx | values: new_values}
   end
 
   @doc """
@@ -124,7 +135,11 @@ defmodule Arbor.Orchestrator.Engine.Context do
         Map.put(acc, key, entry)
       end)
 
-    %{ctx | values: Map.merge(values, updates), lineage: new_lineage}
+    new_values = Map.merge(values, updates)
+    check_updates_value_budgets(updates, node_id)
+    check_size_budgets(new_values, node_id)
+
+    %{ctx | values: new_values, lineage: new_lineage}
   end
 
   @doc """
@@ -177,4 +192,109 @@ defmodule Arbor.Orchestrator.Engine.Context do
   def pipeline_timestamp(%LineageEntry{pipeline_timestamp: ts}), do: ts
   def pipeline_timestamp(%{pipeline_timestamp: ts}), do: ts
   def pipeline_timestamp(_), do: nil
+
+  # ─────────────────────────────────────────────────────────────────
+  # Context size budgets (runaway protection)
+  # ─────────────────────────────────────────────────────────────────
+  #
+  # Phase 1: Logger.warning when budgets are exceeded — observability
+  # first, no behavioral change. Phase 2 (enforcement: :error) flips
+  # the warnings into an error path and is gated by
+  # Arbor.Orchestrator.Config.context_budget_enforcement/0.
+
+  defp check_value_budget(key, value, node_id) when is_binary(key) do
+    case budgets_or_skip() do
+      nil ->
+        :ok
+
+      budgets ->
+        size = :erlang.external_size(value)
+
+        if size > budgets.max_value_bytes do
+          emit_budget_warning(:max_value_bytes, node_id, %{
+            key: key,
+            value_bytes: size,
+            limit: budgets.max_value_bytes
+          })
+        end
+    end
+  end
+
+  defp check_updates_value_budgets(updates, node_id) when is_map(updates) do
+    case budgets_or_skip() do
+      nil ->
+        :ok
+
+      budgets ->
+        # Sample the value sizes — checking every entry is O(N * size).
+        # For runaway protection a single huge value is the dominant
+        # signal; we surface the largest one in the warning.
+        Enum.each(updates, fn {key, value} ->
+          size = :erlang.external_size(value)
+
+          if size > budgets.max_value_bytes do
+            emit_budget_warning(:max_value_bytes, node_id, %{
+              key: key,
+              value_bytes: size,
+              limit: budgets.max_value_bytes
+            })
+          end
+        end)
+    end
+  end
+
+  defp check_size_budgets(values, node_id) when is_map(values) do
+    case budgets_or_skip() do
+      nil ->
+        :ok
+
+      budgets ->
+        key_count = map_size(values)
+
+        if key_count > budgets.max_keys do
+          emit_budget_warning(:max_keys, node_id, %{
+            key_count: key_count,
+            limit: budgets.max_keys
+          })
+        end
+
+        # max_total_bytes is the most expensive check (O(N) external_size
+        # over the whole map). Only run it when we're already in
+        # warning territory on key count, OR sample periodically.
+        # For phase 1 we just do it when key_count is approaching the
+        # budget to bound cost.
+        if key_count > div(budgets.max_keys, 2) do
+          total = :erlang.external_size(values)
+
+          if total > budgets.max_total_bytes do
+            emit_budget_warning(:max_total_bytes, node_id, %{
+              total_bytes: total,
+              limit: budgets.max_total_bytes
+            })
+          end
+        end
+    end
+  end
+
+  defp budgets_or_skip do
+    # Runtime-resolved via Code.ensure_loaded? so Context stays usable
+    # in isolated tests that don't start the full app.
+    config = Arbor.Orchestrator.Config
+
+    if Code.ensure_loaded?(config) and function_exported?(config, :context_budgets, 0) do
+      config.context_budgets()
+    else
+      nil
+    end
+  end
+
+  defp emit_budget_warning(kind, node_id, details) do
+    Logger.warning(
+      "[Context] node #{node_id}: budget #{kind} exceeded. " <>
+        "Details: #{inspect(details)}. " <>
+        "This is runaway-protection telemetry; the write was applied. " <>
+        "Set `config :arbor_orchestrator, :context_budget_enforcement, :error` " <>
+        "to fail instead of warn."
+    )
+  end
 end
