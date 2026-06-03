@@ -19,7 +19,13 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilExampleTest do
   """
 
   use ExUnit.Case, async: false
+  # Tagged :llm_local so the default test_helper exclude
+  # (`ExUnit.start(exclude: [:llm, :llm_local])`) skips it. Run manually:
+  #
+  #     mix test apps/arbor_orchestrator/test/arbor/orchestrator/code_review_council_example_test.exs \
+  #       --include llm_local
   @moduletag :integration_lm_studio
+  @moduletag :llm_local
   # Each parallel branch hits LM Studio; total wall-clock = max(branch),
   # but the synthesizer is sequential after. Allow plenty of headroom.
   @moduletag timeout: 1_200_000
@@ -90,12 +96,33 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilExampleTest do
     assert result.final_outcome.status == :success,
            "pipeline failed: #{inspect(result.final_outcome.failure_reason)}"
 
-    # All four reviewers should have run.
+    # The parallel handler executes branches INTERNALLY via
+    # default_branch_executor → do_run_branch (parallel_handler.ex:118).
+    # Branches never enter the engine's top-level completed_nodes — only
+    # the `parallel_review` node itself does. The canonical evidence
+    # each branch ran lives in `parallel.results`.
+    results = result.context["parallel.results"] || []
+
+    assert length(results) == 4,
+           "expected 4 parallel branch results; got #{length(results)}: " <>
+             inspect(results, limit: :infinity)
+
+    branch_ids = Enum.map(results, & &1["id"])
+
     for branch <- ~w(review_security review_correctness review_performance review_idioms) do
-      assert branch in result.completed_nodes,
-             "expected branch #{branch} in completed_nodes; got #{inspect(result.completed_nodes)}"
+      assert branch in branch_ids,
+             "expected branch #{branch} in parallel.results ids; got #{inspect(branch_ids)}"
     end
 
+    # Each branch must have produced a non-empty review.
+    for r <- results do
+      review_text = get_in(r, ["context_updates", "last_response"])
+
+      assert is_binary(review_text) and byte_size(review_text) > 0,
+             "branch #{r["id"]} produced no last_response: #{inspect(r)}"
+    end
+
+    # The top-level engine steps DO appear in completed_nodes.
     assert "parallel_review" in result.completed_nodes
     assert "format_reviews" in result.completed_nodes
     assert "synthesize" in result.completed_nodes
