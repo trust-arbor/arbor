@@ -363,6 +363,56 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
                &(&1.kind == :thinking and &1.text == "Let me work through this.")
              )
     end
+
+    test "reasoning text is also exposed on the top-level :reasoning_content field" do
+      # For reasoning-tuned models (gemma reasoning, deepseek-r1, openai
+      # o-series, etc.), consumers may want direct access to the CoT
+      # without walking content_parts. The Response struct exposes it
+      # via :reasoning_content alongside the rest of the response fields.
+
+      req = %Request{provider: "openai", model: "lm_studio/gemma-4-e4b-it"}
+
+      reasoning_detail = %ReqLLM.Message.ReasoningDetails{
+        text: "Walking through the algorithm step by step...",
+        signature: nil,
+        encrypted?: false,
+        provider: :openai,
+        format: nil,
+        index: 0,
+        provider_data: %{}
+      }
+
+      msg = %ReqLLM.Message{
+        role: :assistant,
+        content: [%ReqLLM.Message.ContentPart{type: :text, text: "result"}],
+        reasoning_details: [reasoning_detail]
+      }
+
+      req_resp = %ReqLLM.Response{
+        id: "test",
+        model: "lm_studio/gemma-4-e4b-it",
+        context: ReqLLM.Context.new([]),
+        message: msg,
+        stream?: false,
+        stream: nil,
+        usage: %{},
+        finish_reason: :stop,
+        provider_meta: %{},
+        error: nil
+      }
+
+      arbor_resp = Adapter.translate_response(req_resp, req)
+
+      assert arbor_resp.reasoning_content =~ "Walking through the algorithm"
+      assert arbor_resp.text == "result"
+    end
+
+    test "reasoning_content is nil when the provider didn't return any" do
+      req = %Request{provider: "anthropic", model: "claude-3-5-sonnet"}
+      req_resp = build_req_llm_response("plain response, no CoT")
+      arbor_resp = Adapter.translate_response(req_resp, req)
+      assert arbor_resp.reasoning_content == nil
+    end
   end
 
   describe "translate_tools/1 — Session 4 parity" do
