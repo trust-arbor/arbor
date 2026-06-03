@@ -37,12 +37,14 @@ digraph FeedbackLoop {
   // Generate or revise the output
   generate [
     type="compute",
+    simulate="false",
     prompt="Generate or revise output based on the prompt. If loop.feedback exists from a previous critique, incorporate it to improve the result. Store output in result."
   ]
 
   // Multi-method critique with optional reference awareness
   critique [
     type="compute",
+    simulate="false",
     prompt="Evaluate the generated output using the scoring method(s). Methods: length_ratio — compare output length to expected range, score 0-1. keyword_coverage — count key terms present; if reference_text available, score overlap. structure — check format compliance (headers, sections, code blocks as expected). combined — weighted average of all applicable methods (weights: keyword 0.4, structure 0.3, length 0.3). Produce loop.score (0.0-1.0) and loop.feedback with specific actionable improvements."
   ]
 

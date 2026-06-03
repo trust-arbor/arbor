@@ -21,6 +21,7 @@ digraph LLMWithTools {
   // Call the LLM
   llm_call [
     type="compute",
+    simulate="false",
     prompt="Call the LLM with the current prompt, tools, and any previous tool results. Use the specified model."
   ]
 

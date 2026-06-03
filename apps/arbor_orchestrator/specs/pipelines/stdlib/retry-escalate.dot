@@ -39,11 +39,18 @@ digraph RetryEscalate {
     expression="retry.score_ok"
   ]
 
-  // Attempt the LLM call with per-model timeout isolation
+  // Attempt the LLM call with per-model timeout isolation.
+  //
+  // Used to carry `timeout="$timeout_ms"` but DOT attrs don't support
+  // variable interpolation — the literal `$timeout_ms` reached the
+  // LlmHandler and was discarded. If a per-attempt HTTP timeout is
+  // needed, set a static value here (e.g. `timeout="60000"`) or
+  // arrange for the invoking compose node to thread it in via
+  // session-level config.
   attempt [
     type="compute",
-    prompt="Execute the prompt using retry.current_model. Store the response in result. Set retry.success=true on valid response.",
-    timeout="$timeout_ms"
+    simulate="false",
+    prompt="Execute the prompt using retry.current_model. Store the response in result. Set retry.success=true on valid response."
   ]
 
   // Record attempt outcome in history

@@ -46,12 +46,14 @@ digraph ABTest {
   // Variant A (supports multi-run via count attribute)
   variant_a [
     type="compute",
+    simulate="false",
     prompt="Execute prompt_a. Store result in result_a. If count > 1, execute count times and collect all results in ab.results_a."
   ]
 
   // Variant B
   variant_b [
     type="compute",
+    simulate="false",
     prompt="Execute prompt_b. Store result in result_b. If count > 1, execute count times and collect all results in ab.results_b."
   ]
 
@@ -64,6 +66,7 @@ digraph ABTest {
   // LLM-as-judge: independent evaluation of both results
   judge [
     type="compute",
+    simulate="false",
     prompt="As an impartial judge, compare result_a and result_b against eval_criteria. For each result, score on: relevance (0-1), quality (0-1), completeness (0-1). Compute overall ab.score_a and ab.score_b as weighted averages. Declare ab.winner (a, b, or tie) with ab.judge_reasoning explaining the decision."
   ]
 

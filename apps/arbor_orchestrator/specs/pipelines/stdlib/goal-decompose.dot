@@ -21,6 +21,7 @@ digraph GoalDecompose {
   // Plan the decomposition
   plan [
     type="compute",
+    simulate="false",
     prompt="Analyze the goal and decompose it into 1-5 concrete, actionable intents. Each intent should have: action_type, parameters, preconditions, and expected_outcome. Order by dependency and priority."
   ]
 

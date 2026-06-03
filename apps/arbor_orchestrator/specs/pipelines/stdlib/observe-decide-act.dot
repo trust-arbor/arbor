@@ -27,6 +27,7 @@ digraph ObserveDecideAct {
   // Decide: choose the next action
   decide [
     type="compute",
+    simulate="false",
     prompt="Based on observations, decide the next action. Consider goals, current state, and available capabilities. Output the chosen action with parameters."
   ]
 

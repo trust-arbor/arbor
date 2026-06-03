@@ -56,6 +56,7 @@ digraph DriftDetect {
   // Multi-dimensional comparison
   compare [
     type="compute",
+    simulate="false",
     prompt="Compare baseline and current data across dimensions: length — character/token count ratio (abs(1 - current_len/baseline_len), capped at 1.0). keywords — extract key terms from both, compute Jaccard similarity (1 - overlap). structure — compare format patterns (headings, sections, code blocks), score structural deviation. format — compare response shape (JSON schema, markdown structure, list vs prose). Calculate per-dimension scores in drift.dimensions map. Compute overall drift_score as weighted average (keywords: 0.35, structure: 0.30, length: 0.20, format: 0.15). Set drift.exceeded=true if drift_score > threshold."
   ]
 
