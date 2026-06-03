@@ -124,7 +124,7 @@ defmodule Arbor.Orchestrator.Mix.Helpers do
           ARBOR_KEY=<path>        (environment variable)
           ~/.arbor/identity.key   (default location)
 
-        Generate a key with: mix arbor.identity new
+        See docs/arbor/IDENTITY.md for how to generate a key file.
         """)
 
         System.halt(1)
