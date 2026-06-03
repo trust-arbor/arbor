@@ -45,12 +45,6 @@ defmodule Arbor.Orchestrator.Engine.ConditionAdversarialTest do
   # ── Length scaling ─────────────────────────────────────────────────
 
   describe "length scaling (linear, not catastrophic)" do
-    # Note: `0=0` is FALSE here, not true. Bare "0" isn't a known field
-    # (only `outcome`, `preferred_label`, `context.*` resolve), so the
-    # LHS becomes "" — which != "0". Filed as
-    # `.arbor/roadmap/0-inbox/condition-no-literal-vs-literal.md`.
-    # For length scaling we use a known-true clause.
-
     test "1000 trivially-true clauses" do
       cond_str = String.duplicate("outcome=success && ", 1000) <> "outcome=success"
 
