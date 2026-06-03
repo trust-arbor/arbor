@@ -1,0 +1,240 @@
+// Code Review Council — Parallel Multi-Lens Review + Synthesis
+//
+// Demonstrates parallel fan-out + synthesis. Four reviewers examine
+// the same code through different lenses (security, correctness,
+// performance, idiomatic Elixir) concurrently, then a synthesizer
+// merges their findings into a single review document on disk.
+//
+// Exercises the engine's `parallel` + concurrent-compute path that
+// nothing else in the example suite hits today: four LLM calls
+// running at the same time, each spawning its own in-call heartbeat
+// ticker (0d725c1b), four concurrent context-update writes from
+// parallel branches, plus serialization back to the parent context
+// for synthesis.
+//
+// Context in (set via initial_values when calling Orchestrator.run):
+//   spec_path        — filename of the JSON spec file inside workdir
+//   workdir          — absolute path to a scratch directory
+//   session.agent_id — signing principal
+//
+// Spec JSON shape (loaded from <workdir>/<spec_path>):
+//   review_brief         — short prose framing what the reviewer is for
+//   code_under_review    — the source code to be reviewed (string)
+//   model_provider       — e.g. "lm_studio"
+//   model_id             — e.g. "granite-4.1-3b"
+//   report_path          — absolute path where the final review lands
+//
+// Context out:
+//   reviews_json     — JSON array of the 4 raw reviewer responses
+//   final_review    — the synthesizer's merged output
+//   exec.write_report.bytes_written — proof the report landed on disk
+
+digraph CodeReviewCouncil {
+  graph [
+    goal="Parallel multi-lens code review followed by synthesis",
+    label="Code Review Council"
+  ]
+
+  start [shape=Mdiamond]
+
+  // ── Phase 0: Load spec + extract fields ───────────────────────────
+
+  read_spec [
+    type="read",
+    source="file",
+    path="spec.json"
+  ]
+
+  extract_review_brief [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="review_brief",
+    output_key="review_brief"
+  ]
+
+  extract_code [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="code_under_review",
+    output_key="code_under_review"
+  ]
+
+  extract_report_path [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="report_path",
+    output_key="report_path"
+  ]
+
+  extract_model_provider [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="model_provider",
+    output_key="session.llm_provider"
+  ]
+
+  extract_model_id [
+    type="transform",
+    transform="json_extract",
+    source_key="last_response",
+    expression="model_id",
+    output_key="session.llm_model"
+  ]
+
+  // ── Phase 1: Four reviewers run in parallel ───────────────────────
+
+  // Engine's parallel handler fans out to every outgoing edge of this
+  // node, runs each branch through to the configured join_target, then
+  // accumulates the per-branch results under `parallel.results`. Each
+  // branch gets its own context snapshot — branches can't clobber each
+  // other's last_response.
+  parallel_review [
+    type="parallel",
+    max_parallel="4",
+    join_policy="wait_all",
+    error_policy="continue",
+    join_target="format_reviews"
+  ]
+
+  // Each reviewer is one LLM call with a lens-specific system prompt.
+  // They share session.llm_provider / session.llm_model (set above) and
+  // pull the code from the same context key.
+  review_security [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    use_tools="false",
+    max_tokens="8192",
+    temperature="0.2",
+    timeout="300000",
+    system_prompt="You are a senior security reviewer reading Elixir code. Identify ONLY security-relevant issues: input validation, injection risk, secret handling, capability misuse, authorization gaps, unsafe deserialization, side-channel data leaks. Ignore style, idiomatic concerns, and pure performance. Output a short markdown list of concrete findings, each tied to a specific line or symbol when possible. If you find no security issues, say so explicitly.",
+    prompt_context_key="code_under_review"
+  ]
+
+  review_correctness [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    use_tools="false",
+    max_tokens="8192",
+    temperature="0.2",
+    timeout="300000",
+    system_prompt="You are a correctness reviewer reading Elixir code. Identify ONLY behavioral bugs and edge cases: off-by-one errors, missing nil handling, race conditions, wrong base cases in recursion, type assumptions that break on edge inputs, error-tuple mishandling, pattern-match exhaustiveness. Ignore style and performance. Output a short markdown list of concrete findings, each tied to a specific line or symbol when possible. If you find no correctness issues, say so explicitly.",
+    prompt_context_key="code_under_review"
+  ]
+
+  review_performance [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    use_tools="false",
+    max_tokens="8192",
+    temperature="0.2",
+    timeout="300000",
+    system_prompt="You are a performance reviewer reading Elixir code. Identify ONLY performance concerns: quadratic-in-list-length operations (Enum.concat in a reduce, repeated ++, etc.), unnecessary copies, accidental list-of-binaries when a binary would do, BEAM-specific patterns that defeat tail-call optimization, hot-path issues. Ignore style and correctness. Output a short markdown list of concrete findings. If you find no performance issues, say so explicitly.",
+    prompt_context_key="code_under_review"
+  ]
+
+  review_idioms [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    use_tools="false",
+    max_tokens="8192",
+    temperature="0.2",
+    timeout="300000",
+    system_prompt="You are an idiomatic-Elixir reviewer. Identify ONLY style and idiom concerns: wrong use of `case` when `with` or pattern matching is clearer, missing typespecs on public functions, naming that doesn't follow community convention, places where a higher-order function would replace explicit recursion, etc. Ignore correctness and performance. Output a short markdown list of concrete findings. If you find no idiomatic issues, say so explicitly.",
+    prompt_context_key="code_under_review"
+  ]
+
+  // ── Phase 2: Synthesize the four reviews into one report ──────────
+
+  // The parallel handler produces parallel.results — a list of maps,
+  // one per branch. Each entry carries the branch's context_updates,
+  // including `last_response` which holds that reviewer's output.
+  // We serialize the whole list to JSON so the synthesizer LLM sees
+  // structured input it can reason about.
+  format_reviews [
+    type="transform",
+    transform="format",
+    source_key="parallel.results",
+    expression="json",
+    output_key="reviews_json"
+  ]
+
+  synthesize [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    use_tools="false",
+    max_tokens="8192",
+    temperature="0.3",
+    timeout="300000",
+    system_prompt="You synthesize the outputs of four independent code reviewers — security, correctness, performance, and idiomatic Elixir. Read the JSON array of reviewer responses (each entry has a `id` identifying the lens and `context_updates.last_response` holding the raw review). Produce a single consolidated markdown document with this structure: (1) a one-paragraph summary; (2) per-lens findings preserved verbatim where the reviewer found something concrete; (3) a final 'overall recommendation' paragraph naming the highest-priority issues to fix first. Do NOT invent findings. Do NOT drop findings. If a reviewer found nothing, say so in their section. Output ONLY the markdown — no fences, no prose preface.",
+    prompt_context_key="reviews_json"
+  ]
+
+  // ── Phase 3: Persist the report ───────────────────────────────────
+
+  prep_report_content [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="content"
+  ]
+
+  prep_report_path [
+    type="transform",
+    transform="identity",
+    source_key="report_path",
+    output_key="path"
+  ]
+
+  write_report [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
+
+  // Capture the final review on a stable key for callers to read.
+  snapshot_final [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="final_review"
+  ]
+
+  done [shape=Msquare]
+
+  // ── Flow ──────────────────────────────────────────────────────────
+
+  start -> read_spec
+  read_spec -> extract_review_brief -> extract_code -> extract_report_path
+  extract_report_path -> extract_model_provider -> extract_model_id
+  extract_model_id -> parallel_review
+
+  // Each reviewer is a branch of the fan-out. The parallel handler
+  // routes each branch to the configured join_target (format_reviews).
+  parallel_review -> review_security
+  parallel_review -> review_correctness
+  parallel_review -> review_performance
+  parallel_review -> review_idioms
+
+  // Branches converge at format_reviews. The parallel handler sets
+  // join_target=format_reviews so the engine routes there once all
+  // four branches complete.
+  review_security -> format_reviews
+  review_correctness -> format_reviews
+  review_performance -> format_reviews
+  review_idioms -> format_reviews
+
+  // Snapshot the synthesizer output BEFORE file_write clobbers
+  // last_response with its action result map.
+  format_reviews -> synthesize -> snapshot_final
+  snapshot_final -> prep_report_content -> prep_report_path -> write_report -> done
+}
