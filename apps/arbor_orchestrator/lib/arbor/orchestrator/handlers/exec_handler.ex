@@ -48,8 +48,8 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   defp execute_action(node, context, opts) do
     action_name = Map.get(node.attrs, "action")
 
-    unless action_name do
-      raise "exec with target=action requires 'action' attribute"
+    if action_name in [nil, ""] do
+      raise "exec with target=action requires non-empty 'action' attribute"
     end
 
     executor = Arbor.Orchestrator.ActionsExecutor
