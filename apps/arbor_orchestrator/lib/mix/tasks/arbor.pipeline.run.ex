@@ -32,7 +32,8 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
           workdir: :string,
           set: :keep,
           resume: :boolean,
-          resume_from: :string
+          resume_from: :string,
+          identity_key: :string
         ]
       )
 
@@ -59,11 +60,15 @@ defmodule Mix.Tasks.Arbor.Pipeline.Run do
 
     initial_values = parse_set_opts(opts)
 
+    # Load operator identity so checkpoints are signed and resumable.
+    identity_opts = load_identity(opts)
+
     run_opts =
       opts
       |> Keyword.take([:logs_root, :workdir])
       |> Keyword.put(:on_event, &print_event/1)
       |> Keyword.put(:on_stream, &print_stream_event/1)
+      |> Keyword.merge(identity_opts)
 
     # Resume support
     run_opts =

@@ -201,7 +201,8 @@ defmodule Arbor.Orchestrator.Engine do
     if Keyword.get(opts, :resume, false) or Keyword.has_key?(opts, :resume_from) do
       checkpoint_path = Keyword.get(opts, :resume_from, Path.join(logs_root, "checkpoint.json"))
 
-      with {:ok, checkpoint} <-
+      with :ok <- require_identity_on_resume(opts),
+           {:ok, checkpoint} <-
              Checkpoint.load(checkpoint_path,
                run_id: Keyword.get(opts, :run_id),
                hmac_secret: Keyword.get(opts, :hmac_secret)
@@ -991,6 +992,19 @@ defmodule Arbor.Orchestrator.Engine do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # Resume requires identity. Without it, we can't verify the
+  # checkpoint's HMAC, which means an attacker who can write the
+  # checkpoint file can substitute a poisoned payload undetected.
+  # The legacy fail-open (accept any unsigned checkpoint) is now
+  # closed — callers must thread :identity_private_key through.
+  defp require_identity_on_resume(opts) do
+    if Keyword.get(opts, :hmac_secret) do
+      :ok
+    else
+      {:error, :identity_required_for_resume}
+    end
   end
 
   # Derive the HMAC secret used to sign engine checkpoints.

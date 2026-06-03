@@ -16,7 +16,15 @@ defmodule Mix.Tasks.Arbor.Pipeline.Resume do
     - `--checkpoint` — path to checkpoint.json (default: `<logs_root>/checkpoint.json`)
     - `--logs-root` — directory for pipeline logs (default: `<tmp>/arbor_orchestrator/<graph_id>`)
     - `--workdir` — working directory for shell handlers
+    - `--identity-key` — path to identity key file (default: ARBOR_KEY env / ~/.arbor/identity.key)
     - `--set key=value` — override context values (repeatable)
+
+  ## Identity & checkpoint integrity
+
+  Resume requires the same operator identity that started the run. The
+  HMAC binding ensures an attacker can't substitute a poisoned
+  checkpoint between write and resume. See
+  `.arbor/roadmap/5-completed/security-checkpoints-unverified-by-default.md`.
   """
 
   use Mix.Task
@@ -31,6 +39,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Resume do
           checkpoint: :string,
           logs_root: :string,
           workdir: :string,
+          identity_key: :string,
           set: :keep
         ]
       )
@@ -90,6 +99,9 @@ defmodule Mix.Tasks.Arbor.Pipeline.Resume do
 
         info(String.duplicate("-", 40))
 
+        # Load operator identity — required for resume integrity check.
+        identity_opts = load_identity(opts)
+
         # Build run opts with resume
         overrides = parse_set_opts(opts)
 
@@ -100,6 +112,7 @@ defmodule Mix.Tasks.Arbor.Pipeline.Resume do
           |> Keyword.put(:resume_from, checkpoint_path)
           |> Keyword.put(:on_event, &print_event/1)
           |> Keyword.put(:on_stream, &print_stream_event/1)
+          |> Keyword.merge(identity_opts)
 
         run_opts =
           if overrides != %{} do
