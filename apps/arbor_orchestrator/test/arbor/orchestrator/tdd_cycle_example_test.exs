@@ -115,11 +115,11 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
       ],
       function_name: "encode",
       max_iterations: 10,
-      # Harder problem; documented capability ceiling on granite-3b. Either
-      # bump to a stronger model or keep this as a known-unconverged
-      # benchmark.
+      # Above granite-4.1-3b's iterative ceiling — confirmed by 10-iteration
+      # non-convergence. Bumping to qwen3.6-27b to see if the harness scales
+      # cleanly to a larger local model.
       model_provider: "lm_studio",
-      model_id: "granite-4.1-3b"
+      model_id: "qwen3.6-27b-mtp"
     }
 
     run_tdd_cycle(spec)
