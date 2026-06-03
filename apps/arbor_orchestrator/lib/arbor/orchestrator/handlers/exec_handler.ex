@@ -22,6 +22,8 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
+  require Logger
+
   alias Arbor.Orchestrator.Engine.{Context, Outcome}
 
   alias Arbor.Orchestrator.Handlers.{
@@ -59,7 +61,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
         Map.get(node.attrs, "agent_id") ||
           Context.get(context, "session.agent_id", "system")
 
-      action_args = build_action_args(node.attrs, context)
+      action_args = build_action_args(node.id, node.attrs, context)
       workdir = Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
 
       output_prefix = Map.get(node.attrs, "output_prefix")
@@ -104,7 +106,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   defp execute_function(node, _context, opts) do
     case Keyword.get(opts, :function_handler) do
       fun when is_function(fun, 1) ->
-        args = parse_attr_args(node.attrs)
+        args = parse_attr_args(node.id, node.attrs)
 
         case fun.(args) do
           {:ok, result} ->
@@ -143,9 +145,9 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   end
 
   # Build action args from both attr-prefixed values AND context keys.
-  defp build_action_args(attrs, context) do
+  defp build_action_args(node_id, attrs, context) do
     # 1. Collect arg.*/param.* prefixed attrs
-    attr_args = parse_attr_args(attrs)
+    attr_args = parse_attr_args(node_id, attrs)
 
     # 2. If context_keys attr is set, merge context values as params
     context_args =
@@ -159,21 +161,50 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
           |> Enum.map(&String.trim/1)
           |> Enum.reject(&(&1 == ""))
           |> Enum.reduce(%{}, fn key, acc ->
-            value = Context.get(context, key)
-            if value != nil, do: Map.put(acc, key, value), else: acc
+            case Context.get(context, key) do
+              nil ->
+                # Silent param loss is the bug: action runs with a
+                # partial param set and the operator gets no signal.
+                # Warn so the missing key is visible in logs even
+                # when the action's eventual error doesn't point here.
+                Logger.warning(
+                  "[ExecHandler] #{node_id}: context_keys references " <>
+                    "\"#{key}\" but no such key in context; param will " <>
+                    "be missing from action call"
+                )
+
+                acc
+
+              value ->
+                Map.put(acc, key, value)
+            end
           end)
       end
 
     Map.merge(attr_args, context_args)
   end
 
-  defp parse_attr_args(attrs) do
+  defp parse_attr_args(node_id, attrs) do
     attrs
     |> Enum.filter(fn {k, _v} ->
       String.starts_with?(k, "arg.") or String.starts_with?(k, "param.")
     end)
     |> Enum.map(fn {k, v} ->
       key = k |> String.replace(~r/^(arg|param)\./, "")
+      # Jido action schemas use flat atom keys. A nested attr like
+      # `arg.foo.bar` produces a string key "foo.bar" that won't
+      # match any schema atom and silently gets ignored by the
+      # action — dead weight with no signal. Warn so the typo
+      # (or hallucinated nested form) surfaces.
+      if String.contains?(key, ".") do
+        Logger.warning(
+          "[ExecHandler] #{node_id}: attr \"#{k}\" produced nested param " <>
+            "key \"#{key}\" — Jido schemas use flat atom keys, so this " <>
+            "param will be silently dropped by the action. Did you mean " <>
+            "to use \"_\" instead of \".\" after the prefix?"
+        )
+      end
+
       {key, v}
     end)
     |> Map.new()
