@@ -64,6 +64,42 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
     run_tdd_cycle(spec)
   end
 
+  test "TDD cycle: FizzBuzz.run converges within 5 iterations" do
+    # FizzBuzz is a classic small-model trap. Common failure modes:
+    #   - Check 3 and 5 before 15 (so 15 returns "Fizz", not "FizzBuzz")
+    #   - Use `or` instead of `and` for the 15 case
+    #   - Return integers for the default case instead of strings
+    #
+    # The held-out acceptance includes the 15-multiple cases that small
+    # models reliably miss on first generation. That's the rigor we're
+    # testing: even when the model gets it wrong, the test runner says
+    # which examples failed (without revealing the expected values),
+    # and the model iterates.
+    spec = %{
+      module_name: "FizzBuzz",
+      file_basename: "fizz_buzz",
+      signature: "@spec run(integer()) :: String.t()",
+      description: """
+      Returns "Fizz" for multiples of 3, "Buzz" for multiples of 5,
+      "FizzBuzz" for multiples of 15 (both 3 AND 5), and the number
+      itself as a string for all other integers.
+      """,
+      examples: [
+        {1, "1"},
+        {3, "Fizz"},
+        {5, "Buzz"},
+        {15, "FizzBuzz"},
+        {30, "FizzBuzz"},
+        {7, "7"},
+        {45, "FizzBuzz"},
+        {-3, "Fizz"}
+      ],
+      max_iterations: 5
+    }
+
+    run_tdd_cycle(spec)
+  end
+
   # ── Pipeline runner ───────────────────────────────────────────────
 
   defp run_tdd_cycle(spec) do
@@ -116,14 +152,32 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
     assert result.final_outcome.status == :success,
            "pipeline failed: #{inspect(result.final_outcome.failure_reason)}"
 
-    assert "mark_converged" in result.completed_nodes,
-           """
-           Pipeline did not reach mark_converged within #{spec.max_iterations} iterations.
-           Completed nodes: #{inspect(result.completed_nodes)}
-           Suggests the model couldn't produce passing code in time. This
-           IS a possible outcome — it tests the convergence claim — but
-           the smoke spec (Double) should be trivially solvable.
-           """
+    converged = "mark_converged" in result.completed_nodes
+
+    if not converged do
+      checkpoint =
+        Path.join(logs_root, "checkpoint.json")
+        |> File.read!()
+        |> Jason.decode!()
+
+      ctx = checkpoint["context_values"]
+
+      IO.puts("""
+
+      ═══════════════════════════════════════════════════════════════
+      Did not converge in #{spec.max_iterations} iterations.
+
+      Last impl produced:
+      #{ctx["last_impl"] || "<nil>"}
+
+      Last test failure:
+      #{ctx["last_failure"] || "<nil>"}
+      ═══════════════════════════════════════════════════════════════
+      """)
+    end
+
+    assert converged,
+           "Pipeline did not reach mark_converged within #{spec.max_iterations} iterations."
 
     refute "mark_escalated" in result.completed_nodes
   end
@@ -148,7 +202,10 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
         name: "tdd-cycle-example-test"
       )
 
-    :ok = Arbor.Security.Identity.Registry.register(identity)
+    case Arbor.Security.Identity.Registry.register(identity) do
+      :ok -> :ok
+      {:error, {:already_registered, _}} -> :ok
+    end
 
     signer = fn resource -> SignedRequest.sign(resource, agent_id, private_key) end
 
@@ -201,8 +258,11 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
       spec.examples
       |> Enum.with_index()
       |> Enum.map(fn {{input, expected}, idx} ->
+        # Test name uses ONLY the index — embedding inspect(expected)
+        # in the description string breaks parsing when expected is a
+        # string ("\"1\"" → embedded quotes in the test name).
         """
-            test "acceptance case #{idx}: #{inspect(input)} → #{inspect(expected)}" do
+            test "acceptance case #{idx}" do
               assert #{spec.module_name}.run(#{inspect(input)}) == #{inspect(expected)}
             end
         """
