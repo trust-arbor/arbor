@@ -215,7 +215,11 @@ digraph TDDCycle {
     purpose="llm",
     simulate="false",
     use_tools="false",
-    max_tokens="1024",
+    // 8192 accommodates reasoning-tuned models: the LM Studio response for
+    // gemma / qwen reasoning variants emits all completion tokens into
+    // `reasoning_content` before producing `content`, so a tight budget
+    // (e.g. 1024) cuts off mid-CoT and we receive an empty answer.
+    max_tokens="8192",
     temperature="0.1",
     timeout="300000",
     system_prompt="You write complete, compilable ExUnit test modules for Elixir. Output ONLY the test module source, starting with `defmodule`. No markdown fences. No prose. REQUIREMENTS: (1) module name is the target module name with 'Test' appended (e.g. FizzBuzzTest); (2) MUST include `use ExUnit.Case` immediately inside the module; (3) use `test \"description\" do ... assert <expr> == <expected> end` for each case. Example shape: `defmodule FooTest do\\n  use ExUnit.Case\\n  test \"basic\" do\\n    assert Foo.bar(1) == 2\\n  end\\nend`. Never omit `use ExUnit.Case`.",

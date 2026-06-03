@@ -175,11 +175,25 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         response_text = response.content
 
         if response_text == "" do
+          # Surface reasoning_content too: for reasoning-tuned models (gemma
+          # e4b, qwen-mtp, deepseek-r1, etc.) an empty text + non-empty
+          # reasoning means max_tokens was exhausted mid-CoT before the
+          # final answer could be produced. The diagnostic field tells
+          # operators "bump max_tokens" rather than "model is broken."
+          reasoning_size =
+            case Map.get(raw_response, :reasoning_content) do
+              nil -> :no_reasoning_key
+              "" -> :empty
+              s when is_binary(s) -> {:chars, byte_size(s)}
+              other -> {:unexpected, inspect(other, limit: 50)}
+            end
+
           Logger.warning(
             "[LlmHandler] Empty response after normalize. " <>
               "raw_type=#{inspect(Map.get(raw_response, :__struct__, :plain_map), limit: 50) |> String.slice(0..80)} " <>
               "raw_content=#{inspect(Map.get(raw_response, :content, :no_content_key), limit: 200)} " <>
               "raw_text=#{inspect(Map.get(raw_response, :text, :no_text_key), limit: 200)} " <>
+              "reasoning=#{inspect(reasoning_size)} " <>
               "tool_rounds=#{inspect(response.tool_rounds)}"
           )
         end

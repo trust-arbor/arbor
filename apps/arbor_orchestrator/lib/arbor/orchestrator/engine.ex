@@ -469,14 +469,24 @@ defmodule Arbor.Orchestrator.Engine do
           context
         end
 
+      # Long-running handlers (notably LlmHandler against reasoning models or
+      # large local LMs) can block for minutes. The engine only refreshes
+      # heartbeats at the top of each loop iteration — between nodes — so a
+      # single multi-minute node would let the heartbeat go stale, and
+      # RecoveryCoordinator would spam warnings every 30s. The ticker below
+      # refreshes BOTH the legacy JobRegistry and the ETS PipelineStatus
+      # entry while the handler runs; it's killed as soon as the call
+      # returns.
       {outcome, retries} =
-        Executor.execute_with_retry(
-          node,
-          handler_context,
-          state.graph,
-          state.retries,
-          handler_opts
-        )
+        with_in_call_heartbeat(Keyword.get(state.opts, :run_id), fn ->
+          Executor.execute_with_retry(
+            node,
+            handler_context,
+            state.graph,
+            state.retries,
+            handler_opts
+          )
+        end)
 
       # auto_status: when enabled and handler didn't produce a success,
       # synthesize SUCCESS so the pipeline continues (spec §4.5)
@@ -875,6 +885,75 @@ defmodule Arbor.Orchestrator.Engine do
   # Non-blocking: if the write fails (ETS table gone, process exit), the Engine
   # continues executing. Dashboard goes stale; agent keeps thinking.
   # This is the "graceful degradation" model the council recommended.
+  @doc false
+  # Test-only thin wrappers around the private heartbeat helpers. Lets
+  # `EngineInCallHeartbeatTest` exercise the refresh mechanics without
+  # standing up the full engine.
+  def touch_in_call_heartbeat_for_test(run_id), do: touch_in_call_heartbeat(run_id)
+  def with_in_call_heartbeat_for_test(run_id, fun), do: with_in_call_heartbeat(run_id, fun)
+
+  # Refresh heartbeat every 30 s while a single handler call is in flight.
+  # Picked to be < the 90 s stale threshold (and < the 30 s check cadence)
+  # so a multi-minute LLM call doesn't trip RecoveryCoordinator's stale-
+  # heartbeat warning.
+  @in_call_heartbeat_interval_ms 30_000
+
+  defp with_in_call_heartbeat(nil, fun), do: fun.()
+
+  defp with_in_call_heartbeat(run_id, fun) when is_binary(run_id) do
+    ticker_pid =
+      spawn(fn ->
+        in_call_heartbeat_loop(run_id, @in_call_heartbeat_interval_ms)
+      end)
+
+    try do
+      fun.()
+    after
+      Process.exit(ticker_pid, :kill)
+    end
+  end
+
+  defp with_in_call_heartbeat(_run_id, fun), do: fun.()
+
+  defp in_call_heartbeat_loop(run_id, interval_ms) do
+    receive do
+    after
+      interval_ms ->
+        touch_in_call_heartbeat(run_id)
+        in_call_heartbeat_loop(run_id, interval_ms)
+    end
+  end
+
+  defp touch_in_call_heartbeat(run_id) do
+    # Legacy JobRegistry path.
+    try do
+      Arbor.Orchestrator.JobRegistry.touch_heartbeat(run_id)
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+
+    # New ETS PipelineStatus path. We read the current entry, stamp a fresh
+    # last_ets_sync, and re-insert. The race vs. an engine write at the
+    # tail of execute_with_retry is small (single-digit ms) and the next
+    # loop iteration's maybe_touch_heartbeat will re-sync regardless.
+    try do
+      case :ets.lookup(:arbor_pipeline_runs, run_id) do
+        [{^run_id, entry}] when is_map(entry) ->
+          refreshed = Map.put(entry, :last_ets_sync, DateTime.utc_now())
+          :ets.insert(:arbor_pipeline_runs, {run_id, refreshed})
+
+        _ ->
+          :ok
+      end
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+  end
+
   defp sync_run_state(run_id, %Arbor.Orchestrator.RunState.Core{} = run_state) do
     now = DateTime.utc_now()
     synced = Arbor.Orchestrator.RunState.Core.mark_synced(run_state, now)
