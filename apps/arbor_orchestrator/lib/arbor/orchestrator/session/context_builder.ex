@@ -61,6 +61,14 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
     base
     |> maybe_put("session.llm_provider", config["llm_provider"] || config[:llm_provider])
     |> maybe_put("session.llm_model", config["llm_model"] || config[:llm_model])
+    # Runtime axis propagation (Phase 2d). Defaults to :arbor if the config
+    # doesn't pin one — matches the Request struct default and the pre-2c
+    # behavior. The LlmHandler reads this and sets request.runtime so the
+    # registered Arbor.AI.Runtime adapter takes over execution.
+    |> Map.put(
+      "session.llm_runtime",
+      config["llm_runtime"] || config[:llm_runtime] || :arbor
+    )
     |> maybe_put("session.system_prompt", config["system_prompt"] || config[:system_prompt])
     |> Map.put("session.tools", resolve_session_tools(state))
     |> maybe_put("session.tenant_context", state.tenant_context)
