@@ -1362,11 +1362,20 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   defp format_action(:clear), do: ":clear"
   defp format_action(:compact), do: ":compact"
   defp format_action({:switch_model, name}), do: "{:switch_model, \"#{name}\"}"
+
+  defp format_action({:switch_model, name, opts}),
+    do: "{:switch_model, \"#{name}\", #{inspect(opts)}}"
+
+  defp format_action({:switch_runtime, runtime}),
+    do: "{:switch_runtime, #{inspect(runtime)}}"
+
   defp format_action(other), do: inspect(other)
 
   defp action_function(:clear), do: "clear"
   defp action_function(:compact), do: "compact"
   defp action_function({:switch_model, _}), do: "set_model"
+  defp action_function({:switch_model, _, _}), do: "set_model"
+  defp action_function({:switch_runtime, _}), do: "set_runtime"
   defp action_function(_), do: "?"
 
   defp stream_insert_command_result(socket, %Result{text: text}) do

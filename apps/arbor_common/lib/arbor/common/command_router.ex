@@ -47,6 +47,7 @@ defmodule Arbor.Common.CommandRouter do
     Arbor.Common.Commands.Help,
     Arbor.Common.Commands.Status,
     Arbor.Common.Commands.Model,
+    Arbor.Common.Commands.Runtime,
     Arbor.Common.Commands.Compact,
     Arbor.Common.Commands.Clear,
     Arbor.Common.Commands.Tools,
