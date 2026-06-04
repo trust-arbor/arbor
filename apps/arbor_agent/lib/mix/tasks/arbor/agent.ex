@@ -23,7 +23,7 @@ defmodule Mix.Tasks.Arbor.Agent do
   ## Options
 
     * `--name` / `-n` — display name (default: template's character name)
-    * `--model` / `-m` — model ID (default: arcee-ai/trinity-large-preview:free)
+    * `--model` / `-m` — model ID (default: openai/gpt-oss-120b:free)
     * `--provider` — provider atom (default: openrouter)
     * `--auto-start` — set auto-start on creation (with start)
     * `--timeout` — response timeout in seconds (default: 60, with chat)

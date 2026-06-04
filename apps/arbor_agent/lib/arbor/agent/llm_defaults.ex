@@ -12,7 +12,7 @@ defmodule Arbor.Agent.LLMDefaults do
   `Code.ensure_loaded?` + `apply/3` at runtime.
   """
 
-  @last_resort_model "arcee-ai/trinity-large-preview:free"
+  @last_resort_model "openai/gpt-oss-120b:free"
   @last_resort_provider :openrouter
 
   @doc """

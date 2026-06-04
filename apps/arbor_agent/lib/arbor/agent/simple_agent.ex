@@ -12,7 +12,7 @@ defmodule Arbor.Agent.SimpleAgent do
 
       {:ok, result} = SimpleAgent.run("Read mix.exs and tell me the app name",
         provider: :openrouter,
-        model: "arcee-ai/trinity-large-preview:free",
+        model: "openai/gpt-oss-120b:free",
         working_dir: "/path/to/project"
       )
 
@@ -87,7 +87,7 @@ defmodule Arbor.Agent.SimpleAgent do
 
   ## Options
 
-    * `:model` - Model ID (default: `"arcee-ai/trinity-large-preview:free"`)
+    * `:model` - Model ID (default: `"openai/gpt-oss-120b:free"`)
     * `:provider` - Provider atom (default: `:openrouter`)
     * `:max_turns` - Maximum LLM round-trips (default: 25)
     * `:tools` - List of action modules (default: 12 coding tools)

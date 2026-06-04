@@ -16,7 +16,7 @@ defmodule Arbor.Agent.APIAgent do
 
       {:ok, agent} = Arbor.Agent.APIAgent.start_link(
         id: "api-agent-1",
-        model: "arcee-ai/trinity-large-preview:free",
+        model: "openai/gpt-oss-120b:free",
         provider: :openrouter
       )
       {:ok, response} = Arbor.Agent.APIAgent.query(agent, "What is 2+2?")
@@ -51,7 +51,7 @@ defmodule Arbor.Agent.APIAgent do
   ## Options
 
   - `:id` - Agent identifier (default: "api-agent")
-  - `:model` - Model string (e.g., "arcee-ai/trinity-large-preview:free")
+  - `:model` - Model string (e.g., "openai/gpt-oss-120b:free")
   - `:provider` - Provider atom (e.g., :openrouter, :zai_coding_plan)
   - `:model_id` - Model ID for tiered config lookup (usually same as :model)
   - `:memory_enabled` - Enable memory system (default: true)

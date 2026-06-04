@@ -117,7 +117,15 @@ defmodule Arbor.Common.ModelProfile do
     },
 
     # ===== OpenRouter Free Models =====
-    "arcee-ai/trinity-large-preview:free" => %{
+    # trinity-large-preview retired April 22 2026 — successors below.
+    # See .arbor/roadmap/0-inbox/aggregator-provider-model-availability.md
+    # for the broader pattern of tracking aggregator-served models.
+    "openai/gpt-oss-120b:free" => %{
+      context_size: 131_072,
+      max_output_tokens: 4_096,
+      family: :openrouter_free
+    },
+    "openai/gpt-oss-20b:free" => %{
       context_size: 131_072,
       max_output_tokens: 4_096,
       family: :openrouter_free

@@ -157,9 +157,11 @@ config :arbor_ai, :acp_providers, %{
 # AI routing defaults
 config :arbor_ai,
   # Default provider/model for API calls (via OpenRouter)
-  # Using Trinity Large Preview (free) — retiring April 22 2026, find replacement before then
+  # gpt-oss-120b:free chosen 2026-06-04 after the previous default
+  # (trinity-large-preview:free) was retired April 22. Verified
+  # available via OpenRouter's /v1/models listing on update.
   default_provider: :openrouter,
-  default_model: "arcee-ai/trinity-large-preview:free",
+  default_model: "openai/gpt-oss-120b:free",
   timeout: 120_000,
   enable_task_routing: true,
   default_backend: :api,
@@ -272,9 +274,11 @@ config :arbor_agent,
   idle_reflection_enabled: true,
   idle_reflection_chance: 0.3,
   # LLM heartbeat think cycle (via OpenRouter API)
-  # NOTE: trinity-large-preview:free retiring April 22 2026 — find replacement
-  heartbeat_model: "arcee-ai/trinity-large-preview:free",
-  idle_heartbeat_model: "arcee-ai/trinity-large-preview:free",
+  # gpt-oss-20b:free chosen 2026-06-04 — smaller/faster than the
+  # default_model since heartbeats are short single-shot calls.
+  # Verified available via OpenRouter's /v1/models listing on update.
+  heartbeat_model: "openai/gpt-oss-20b:free",
+  idle_heartbeat_model: "openai/gpt-oss-20b:free",
   heartbeat_provider: :openrouter,
   # Checkpoint — periodic state persistence
   checkpoint_enabled: true,
@@ -340,8 +344,14 @@ config :arbor_dashboard,
     %{id: "opus", label: "Opus (powerful)", provider: :anthropic, backend: :cli},
     # OpenRouter models — use API backend
     %{
-      id: "arcee-ai/trinity-large-preview:free",
-      label: "Trinity Large Preview (free)",
+      id: "openai/gpt-oss-120b:free",
+      label: "GPT-OSS 120B (free)",
+      provider: :openrouter,
+      backend: :api
+    },
+    %{
+      id: "openai/gpt-oss-20b:free",
+      label: "GPT-OSS 20B (free, fast)",
       provider: :openrouter,
       backend: :api
     },
@@ -352,8 +362,13 @@ config :arbor_dashboard,
   # Heartbeat model choices (API models only — CLI models are too slow)
   heartbeat_models: [
     %{
-      id: "arcee-ai/trinity-large-preview:free",
-      label: "Trinity Large Preview (free)",
+      id: "openai/gpt-oss-20b:free",
+      label: "GPT-OSS 20B (free, fast)",
+      provider: :openrouter
+    },
+    %{
+      id: "openai/gpt-oss-120b:free",
+      label: "GPT-OSS 120B (free)",
       provider: :openrouter
     },
     %{id: "openrouter/pony-alpha", label: "Pony Alpha", provider: :openrouter},

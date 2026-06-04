@@ -13,7 +13,7 @@ defmodule Arbor.Agent.SimpleAgentTest do
       assert result.turns == 0
       assert result.tool_calls == []
       assert result.text == nil
-      assert result.model == "arcee-ai/trinity-large-preview:free"
+      assert result.model == "openai/gpt-oss-120b:free"
     end
 
     test "custom model and provider are used" do

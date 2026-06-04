@@ -35,7 +35,9 @@ defmodule Arbor.Common.ModelProfileTest do
     end
 
     test "openrouter free model" do
-      profile = ModelProfile.get("arcee-ai/trinity-large-preview:free")
+      # gpt-oss-120b:free replaced trinity-large-preview:free which was
+      # retired by OpenRouter on 2026-04-22.
+      profile = ModelProfile.get("openai/gpt-oss-120b:free")
       assert profile.context_size == 131_072
       assert profile.family == :openrouter_free
     end
