@@ -18,6 +18,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   alias Arbor.Agent.{APIAgent, Claude, Lifecycle, Manager}
   alias Arbor.Common.CommandIntake
   alias Arbor.Contracts.Commands.{Context, Result}
+  alias Arbor.Contracts.Comms.Interaction
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
   alias Arbor.Dashboard.ChatState
   alias Arbor.Dashboard.Live.ChatLive.{GroupChat, SignalTracker}
@@ -135,6 +136,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         # Approve in this LiveView. Idempotent — Security.grant returns {:error,
         # :already_exists} on subsequent calls and we don't care.
         _ = ensure_dashboard_approver_capability(socket)
+
+        # HITL router Phase 1a: register dashboard presence for this user so
+        # the InteractionRouter can target browsers, and subscribe to the
+        # per-user dashboard interaction topic. The router broadcasts
+        # {:dashboard_interaction, %Interaction{}} on this topic when an
+        # agent asks for human input and dashboard is the active channel.
+        _ = register_interaction_presence(socket)
+        _ = subscribe_to_dashboard_interactions(socket)
 
         socket
         |> SignalLive.subscribe_raw("agent.*")
@@ -466,6 +475,18 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     end
   end
 
+  # HITL router Phase 1a: dashboard answers an interaction submitted via
+  # InteractionRouter. The router broadcasts the response back on the
+  # per-agent topic and the waiting agent picks it up. Cluster-aware: works
+  # regardless of which node hosts the agent.
+  def handle_event("approve-interaction", %{"id" => request_id}, socket) do
+    respond_to_interaction(socket, request_id, :approved)
+  end
+
+  def handle_event("reject-interaction", %{"id" => request_id}, socket) do
+    respond_to_interaction(socket, request_id, :rejected)
+  end
+
   def handle_event("set-heartbeat-model", %{"heartbeat_model" => ""}, socket) do
     {:noreply, assign(socket, selected_heartbeat_model: nil)}
   end
@@ -548,6 +569,92 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # HITL router Phase 1a helpers
+  # ──────────────────────────────────────────────────────────────────
+  # ChatLive is a per-user dashboard window. Presence tracking lets the
+  # InteractionRouter know this user has at least one dashboard tab open
+  # so it can route there. Subscription to the per-user topic lets the
+  # InteractionAdapter's broadcast reach this LiveView regardless of which
+  # node hosts it (PubSub is cluster-aware).
+
+  defp register_interaction_presence(socket) do
+    user_id = approval_actor_id(socket)
+    tracker = Module.concat([:Arbor, :Comms, :PresenceTracker])
+
+    if Code.ensure_loaded?(tracker) and function_exported?(tracker, :track, 4) do
+      apply(tracker, :track, [self(), user_id, :dashboard, %{liveview_pid: self()}])
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp subscribe_to_dashboard_interactions(socket) do
+    user_id = approval_actor_id(socket)
+    adapter = Module.concat([:Arbor, :Dashboard, :InteractionAdapter])
+
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :topic_for_user, 1) and
+         Code.ensure_loaded?(Phoenix.PubSub) do
+      topic = apply(adapter, :topic_for_user, [user_id])
+
+      if pubsub = interaction_pubsub() do
+        apply(Phoenix.PubSub, :subscribe, [pubsub, topic])
+      end
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp interaction_pubsub do
+    cond do
+      Process.whereis(Arbor.Dashboard.PubSub) -> Arbor.Dashboard.PubSub
+      Process.whereis(Arbor.Web.PubSub) -> Arbor.Web.PubSub
+      Process.whereis(Arbor.Comms.PubSub) -> Arbor.Comms.PubSub
+      true -> nil
+    end
+  end
+
+  defp respond_to_interaction(socket, request_id, response) do
+    router = Module.concat([:Arbor, :Comms, :InteractionRouter])
+    actor_id = approval_actor_id(socket)
+
+    result =
+      if Code.ensure_loaded?(router) and function_exported?(router, :respond, 3) do
+        try do
+          apply(router, :respond, [
+            request_id,
+            response,
+            %{channel: :dashboard, responder: actor_id}
+          ])
+        rescue
+          e -> {:error, Exception.message(e)}
+        catch
+          :exit, reason -> {:error, reason}
+        end
+      else
+        {:error, :router_unavailable}
+      end
+
+    case result do
+      :ok ->
+        {:noreply, drop_approval(socket, request_id)}
+
+      {:error, :not_found} ->
+        # Already resolved by another tab / expired — just drop locally.
+        {:noreply, drop_approval(socket, request_id)}
+
+      {:error, reason} ->
+        Logger.warning(
+          "[ChatLive] respond_to_interaction failed for #{request_id}: #{inspect(reason)}"
+        )
+
+        {:noreply, put_flash(socket, :error, "Failed to record response: #{inspect(reason)}")}
+    end
   end
 
   @impl true
@@ -682,6 +789,38 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       end
     else
       {:noreply, socket}
+    end
+  end
+
+  # HITL router Phase 1a: an agent submitted an interaction targeted at this
+  # user, and dashboard was the active channel. Add it to the approvals
+  # stream alongside any Consensus-routed approvals already there. Dedup on
+  # request_id via known_approval_ids so multiple browser tabs don't double-
+  # render or duplicate when the polling fallback re-fetches.
+  def handle_info({:dashboard_interaction, %Interaction{} = interaction}, socket) do
+    seen = socket.assigns[:known_approval_ids] || MapSet.new()
+
+    if MapSet.member?(seen, interaction.request_id) do
+      {:noreply, socket}
+    else
+      approval = %{
+        id: interaction.request_id,
+        proposer: interaction.agent_id,
+        # Source tag lets the click handlers route back through the right
+        # API — InteractionRouter for HITL items, Consensus for legacy ones.
+        source: :interaction_router,
+        kind: interaction.kind,
+        description: interaction.description,
+        resource_uri: interaction.resource_uri,
+        metadata: interaction.metadata,
+        created_at: interaction.submitted_at
+      }
+
+      {:noreply,
+       socket
+       |> stream_insert(:approvals, approval)
+       |> update(:approvals_count, &(&1 + 1))
+       |> assign(:known_approval_ids, MapSet.put(seen, interaction.request_id))}
     end
   end
 
