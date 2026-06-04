@@ -419,19 +419,38 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       ) do
     actor_id = approval_actor_id(socket)
 
-    case safe_consensus_approve(proposal_id, actor_id) do
+    # H13: gate the trust-profile mutation behind arbor://trust/auto_promote.
+    # Without this check, any actor that can approve a tool call could
+    # permanently set the agent's trust profile to :auto for any resource —
+    # a single-click silent escalation.
+    case Arbor.Dashboard.Cores.AutoPromoteGate.authorize(actor_id, agent_id) do
       :ok ->
-        # Update trust profile to auto-allow
-        store = Arbor.Trust.Store
+        case safe_consensus_approve(proposal_id, actor_id) do
+          :ok ->
+            store = Arbor.Trust.Store
 
-        if Code.ensure_loaded?(store) and function_exported?(store, :always_allow, 2) do
-          apply(store, :always_allow, [agent_id, resource])
+            if Code.ensure_loaded?(store) and function_exported?(store, :always_allow, 2) do
+              apply(store, :always_allow, [agent_id, resource])
+            end
+
+            {:noreply, drop_approval(socket, proposal_id)}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, "Always allow failed: #{inspect(reason)}")}
         end
 
-        {:noreply, drop_approval(socket, proposal_id)}
+      {:error, :unauthorized_auto_promote} ->
+        Logger.warning(
+          "[ChatLive] always-allow denied: #{actor_id} lacks " <>
+            "arbor://trust/auto_promote (target=#{agent_id}, resource=#{resource})"
+        )
 
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Always allow failed: #{inspect(reason)}")}
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Always Allow requires the trust auto-promote capability."
+         )}
     end
   end
 
