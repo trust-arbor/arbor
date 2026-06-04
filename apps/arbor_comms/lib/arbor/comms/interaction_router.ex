@@ -1,0 +1,261 @@
+defmodule Arbor.Comms.InteractionRouter do
+  @moduledoc """
+  Routes agent-to-human interaction requests to whichever channel the
+  human is currently active on, and routes responses back to the
+  waiting agent.
+
+  Multi-node correct from Phase 1:
+
+  - **Outstanding state** lives in `InteractionRegistry` (per-node ETS
+    today, distributed-store later). Channel adapters that receive a
+    response on Node B look up by `request_id` — no PID held across
+    nodes.
+
+  - **Response delivery** broadcasts on the per-agent PubSub topic
+    `"interaction:agent:" <> agent_id`. The agent's session/executor
+    subscribes at startup. PubSub is cluster-aware, so the responding
+    adapter doesn't need to know which node hosts the agent.
+
+  - **Presence** uses `Phoenix.Tracker` for cluster-wide channel
+    availability per user.
+
+  - **Audit** emits Arbor signals for every request/response with the
+    request_id as correlation key.
+
+  ## Phase 1 scope
+
+  Only the dashboard adapter is wired. Signal/Telegram/Discord/voice
+  are additive future channels — no router changes needed when they
+  land.
+  """
+
+  require Logger
+
+  alias Arbor.Comms.InteractionRegistry
+  alias Arbor.Comms.PresenceTracker
+  alias Arbor.Contracts.Comms.Interaction
+
+  @typedoc """
+  Adapter registry: a map of `channel_atom => module`. Phase 1 only
+  populates `:dashboard`; the router falls back to "no adapter, queue
+  for later" when no presence is available or no adapter is
+  registered for the available channel.
+
+  Configured via Application env:
+
+      config :arbor_comms, :interaction_adapters, %{
+        dashboard: Arbor.Dashboard.InteractionAdapter
+      }
+  """
+  @type adapter_map :: %{atom() => module()}
+
+  ## Public API
+
+  @doc """
+  Submit a new interaction request. Non-blocking. Returns immediately
+  with the `request_id`; the response arrives later on
+  `Interaction.response_topic_for_agent(agent_id)`.
+
+  ## Options
+
+  - `:adapter_map` — override the configured adapter map (test-only)
+  """
+  @spec request(map() | Interaction.t(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def request(attrs_or_interaction, opts \\ [])
+
+  def request(%Interaction{} = interaction, opts) do
+    do_request(interaction, opts)
+  end
+
+  def request(attrs, opts) when is_map(attrs) or is_list(attrs) do
+    case Interaction.new(attrs) do
+      {:ok, interaction} -> do_request(interaction, opts)
+      {:error, _} = err -> err
+    end
+  end
+
+  @doc """
+  Submit a response to a previously-requested interaction. Called by
+  channel adapters when they recognize an incoming message as a
+  response.
+
+  Routes the response back to the waiting agent via PubSub on the
+  interaction's `response_topic`. Cluster-aware — works regardless of
+  which node hosts the waiting agent.
+  """
+  @spec respond(String.t(), Interaction.response(), map()) :: :ok | {:error, term()}
+  def respond(request_id, response, metadata \\ %{}) when is_binary(request_id) do
+    case InteractionRegistry.resolve(request_id) do
+      {:ok, interaction} ->
+        broadcast_response(interaction, response, metadata)
+        emit_signal(:resolved, interaction, %{response: response, metadata: metadata})
+        :ok
+
+      :not_found ->
+        Logger.debug(
+          "[InteractionRouter] respond/3: unknown request_id #{request_id} (already resolved or expired?)"
+        )
+
+        {:error, :not_found}
+    end
+  end
+
+  @doc """
+  List pending interactions (delegates to the registry). Useful for
+  dashboard summaries and audit.
+  """
+  @spec pending() :: [Interaction.t()]
+  def pending, do: InteractionRegistry.list_pending()
+
+  ## Private — request flow
+
+  defp do_request(%Interaction{} = interaction, opts) do
+    adapter_map = Keyword.get(opts, :adapter_map, configured_adapters())
+
+    with {:ok, _} <- InteractionRegistry.put(interaction),
+         :ok <- dispatch(interaction, adapter_map) do
+      emit_signal(:requested, interaction, %{})
+      {:ok, interaction.request_id}
+    else
+      :no_channel ->
+        # Already persisted; queue for later when presence becomes
+        # available. Adapters that come online can pick up pending
+        # interactions targeted at their channel via list_pending.
+        emit_signal(:queued, interaction, %{})
+        {:ok, interaction.request_id}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp dispatch(%Interaction{user_id: user_id} = interaction, adapter_map) do
+    case PresenceTracker.primary_channel(user_id) do
+      {:ok, channel, meta} ->
+        case Map.get(adapter_map, channel) do
+          nil ->
+            Logger.info(
+              "[InteractionRouter] no adapter for channel #{inspect(channel)}; queueing #{interaction.request_id}"
+            )
+
+            :no_channel
+
+          adapter when is_atom(adapter) ->
+            case safe_send(adapter, meta, interaction) do
+              :ok ->
+                :ok
+
+              {:error, reason} ->
+                # Adapter failed but the interaction IS persisted.
+                # Treat as queued — log the failure and return :ok so
+                # the caller (agent) gets a non-blocking result.
+                # Future adapter health / retry can pick this up.
+                Logger.warning(
+                  "[InteractionRouter] adapter failed for #{interaction.request_id}: " <>
+                    "#{inspect(reason)} — interaction queued"
+                )
+
+                :no_channel
+            end
+        end
+
+      :no_presence ->
+        Logger.info(
+          "[InteractionRouter] no active presence for user #{user_id}; queueing #{interaction.request_id}"
+        )
+
+        :no_channel
+    end
+  end
+
+  defp safe_send(adapter, channel_meta, interaction) do
+    adapter.send_interaction(channel_meta, interaction)
+  rescue
+    e ->
+      Logger.warning(
+        "[InteractionRouter] adapter #{inspect(adapter)} crashed: #{Exception.message(e)}"
+      )
+
+      {:error, {:adapter_crash, Exception.message(e)}}
+  catch
+    :exit, reason ->
+      Logger.warning("[InteractionRouter] adapter #{inspect(adapter)} exited: #{inspect(reason)}")
+      {:error, {:adapter_exit, reason}}
+  end
+
+  ## Private — response flow
+
+  defp broadcast_response(%Interaction{response_topic: topic} = interaction, response, metadata) do
+    payload =
+      {:interaction_response,
+       %{
+         request_id: interaction.request_id,
+         response: response,
+         metadata: metadata,
+         resolved_at: DateTime.utc_now()
+       }}
+
+    pubsub = current_pubsub()
+
+    if pubsub && Code.ensure_loaded?(Phoenix.PubSub) do
+      try do
+        apply(Phoenix.PubSub, :broadcast, [pubsub, topic, payload])
+      rescue
+        e ->
+          Logger.warning(
+            "[InteractionRouter] broadcast failed for #{interaction.request_id}: #{Exception.message(e)}"
+          )
+      catch
+        :exit, reason ->
+          Logger.warning(
+            "[InteractionRouter] broadcast exited for #{interaction.request_id}: #{inspect(reason)}"
+          )
+      end
+    end
+  end
+
+  defp current_pubsub do
+    cond do
+      Process.whereis(Arbor.Dashboard.PubSub) -> Arbor.Dashboard.PubSub
+      Process.whereis(Arbor.Web.PubSub) -> Arbor.Web.PubSub
+      Process.whereis(Arbor.Comms.PubSub) -> Arbor.Comms.PubSub
+      true -> nil
+    end
+  end
+
+  defp configured_adapters do
+    Application.get_env(:arbor_comms, :interaction_adapters, %{})
+  end
+
+  ## Signal emission for audit
+
+  defp emit_signal(event, %Interaction{} = interaction, extra) do
+    signals = Module.concat([:Arbor, :Signals])
+
+    if Code.ensure_loaded?(signals) and function_exported?(signals, :emit, 3) do
+      try do
+        apply(signals, :emit, [
+          :interaction,
+          event,
+          Map.merge(
+            %{
+              request_id: interaction.request_id,
+              kind: interaction.kind,
+              agent_id: interaction.agent_id,
+              user_id: interaction.user_id,
+              urgency: interaction.urgency
+            },
+            extra
+          )
+        ])
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
+    end
+
+    :ok
+  end
+end

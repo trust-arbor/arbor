@@ -32,6 +32,33 @@ defmodule Arbor.Comms.Supervisor do
     |> maybe_add_handler()
     |> maybe_add_signal()
     |> maybe_add_limitless()
+    |> maybe_add_interaction_router()
+  end
+
+  # HITL router Phase 1: registry for pending interactions + Phoenix.Tracker
+  # for cluster-aware presence. The router itself is stateless. Started
+  # only when a PubSub server is reachable — without one the tracker
+  # can't be initialized.
+  defp maybe_add_interaction_router(children) do
+    if pubsub = interaction_router_pubsub() do
+      children ++
+        [
+          Arbor.Comms.InteractionRegistry,
+          {Arbor.Comms.PresenceTracker, pubsub_server: pubsub}
+        ]
+    else
+      Logger.debug("[Comms.Supervisor] No PubSub server found; InteractionRouter not started")
+      children
+    end
+  end
+
+  defp interaction_router_pubsub do
+    cond do
+      Process.whereis(Arbor.Dashboard.PubSub) -> Arbor.Dashboard.PubSub
+      Process.whereis(Arbor.Web.PubSub) -> Arbor.Web.PubSub
+      Process.whereis(Arbor.Comms.PubSub) -> Arbor.Comms.PubSub
+      true -> nil
+    end
   end
 
   defp maybe_add_channel_restore(children) do
@@ -56,8 +83,12 @@ defmodule Arbor.Comms.Supervisor do
                Arbor.Comms.ChannelSupervisor,
                {Arbor.Comms.Channel, opts}
              ) do
-          {:ok, _pid} -> :ok
-          {:error, {:already_started, _}} -> :ok
+          {:ok, _pid} ->
+            :ok
+
+          {:error, {:already_started, _}} ->
+            :ok
+
           {:error, reason} ->
             Logger.warning("Failed to restore channel #{channel.channel_id}: #{inspect(reason)}")
         end
