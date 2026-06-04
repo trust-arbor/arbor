@@ -13,7 +13,8 @@ defmodule Arbor.LLM.Request do
           temperature: float() | nil,
           reasoning_effort: String.t() | nil,
           receive_timeout: pos_integer() | nil,
-          provider_options: map()
+          provider_options: map(),
+          runtime: atom()
         }
 
   defstruct provider: nil,
@@ -29,5 +30,14 @@ defmodule Arbor.LLM.Request do
             # default cuts off well-formed responses that haven't streamed
             # yet from cold/large quants.
             receive_timeout: nil,
-            provider_options: %{}
+            provider_options: %{},
+            # Runtime axis — :arbor (in-BEAM HTTP via req_llm) or :acp
+            # (subprocess CLI via AcpPool). Arbor.AI.Runtime.Registry
+            # dispatches to the corresponding adapter module. Defaults to
+            # :arbor so existing call sites continue to flow through the
+            # BEAM-native path unchanged. New consumers (Dispatch.dispatch,
+            # the /runtime slash command, ChatLive after the dropdown
+            # removal) set this explicitly. See .arbor/decisions/
+            # 2026-06-04-slash-commands-for-runtime-config.md for context.
+            runtime: :arbor
 end

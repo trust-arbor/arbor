@@ -1,10 +1,25 @@
 defmodule Arbor.AI.LLM.Adapter.Acp do
   @moduledoc """
-  Universal ACP provider adapter for the UnifiedLLM system.
+  **DEPRECATED.** Use `Arbor.AI.Runtime.Acp` via
+  `Arbor.AI.Runtime.Dispatch.dispatch/2` instead.
 
-  Routes requests to any ACP-compatible coding agent (Claude, Gemini, Codex,
-  Goose, OpenCode, etc.) via a single adapter. The target agent is specified
-  in `provider_options`:
+  This adapter is the pre-runtime-axis path — it expects
+  `provider: "acp"` plus `provider_options.agent` to know which CLI to
+  spawn. Phase 2c made `provider` name the model source (`:anthropic`,
+  `:openai`, etc.) and `runtime: :acp` name the execution path, so this
+  adapter's input shape is the legacy form.
+
+  Still functional for callers that hit `Arbor.LLM.Client.complete/3`
+  directly with `provider: "acp"`. The deprecation pass (Phase 2d's
+  AgentSDK sunset window) will migrate the remaining callers, then this
+  module gets removed.
+
+  See `.arbor/decisions/2026-06-04-slash-commands-for-runtime-config.md`
+  and `.arbor/roadmap/2-planned/runtime-provider-axis-split.md` for the
+  Phase 2c context. The replacement is `Arbor.AI.Runtime.Acp` which
+  reads the CLI from `request.provider` instead of `request.provider_options.agent`.
+
+  ## Legacy input shape (still supported here)
 
       %Request{
         provider: "acp",
@@ -12,12 +27,15 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
         provider_options: %{"agent" => "claude"}
       }
 
-  When no agent is specified, defaults to `:claude`.
+  ## New shape (use via `Dispatch.dispatch/2`)
 
-  This adapter manages sessions through `Arbor.AI.AcpPool`, which handles
-  checkout/checkin lifecycle, idle cleanup, and crash recovery. The pool
-  lives in `arbor_ai` — this adapter bridges to it at runtime.
+      %Request{
+        provider: "anthropic",
+        runtime: :acp,
+        model: "claude-opus-4-6"
+      }
   """
+  @deprecated "Use Arbor.AI.Runtime.Acp via Arbor.AI.Runtime.Dispatch.dispatch/2. This adapter ships for backwards-compat with the pre-Phase-2c provider:\"acp\"+agent shape; the Phase 2d AgentSDK sunset removes it."
 
   @behaviour Arbor.LLM.ProviderAdapter
 
