@@ -1,25 +1,34 @@
 defmodule Arbor.AI.LLM.Adapter.Acp do
   @moduledoc """
-  **DEPRECATED.** Use `Arbor.AI.Runtime.Acp` via
-  `Arbor.AI.Runtime.Dispatch.dispatch/2` instead.
+  Provider-adapter integration for ACP CLIs + discovery helpers.
 
-  This adapter is the pre-runtime-axis path — it expects
-  `provider: "acp"` plus `provider_options.agent` to know which CLI to
-  spawn. Phase 2c made `provider` name the model source (`:anthropic`,
-  `:openai`, etc.) and `runtime: :acp` name the execution path, so this
-  adapter's input shape is the legacy form.
+  ## complete/2 — DEPRECATED
+
+  The `complete/2` provider-adapter callback is the pre-runtime-axis
+  execution path: `provider: "acp"` + `provider_options.agent` to pick
+  the CLI. Phase 2c made `provider` name the model source (`:anthropic`,
+  `:openai`, etc.) and `runtime: :acp` name the execution path. The
+  new shape is `Arbor.AI.Runtime.Acp.execute/3`, dispatched through
+  `Arbor.AI.Runtime.Dispatch.dispatch/2`, which reads the CLI from
+  `request.provider` rather than from `provider_options`.
 
   Still functional for callers that hit `Arbor.LLM.Client.complete/3`
-  directly with `provider: "acp"`. The deprecation pass (Phase 2d's
-  AgentSDK sunset window) will migrate the remaining callers, then this
-  module gets removed.
+  directly with `provider: "acp"`. Future cleanup will migrate those
+  callers and remove the callback; the deprecation attribute on
+  `complete/2` flags the migration target.
+
+  ## Discovery helpers — NOT deprecated
+
+  `detected_agents/0`, `available_agents/0`, `install_hint/1`, and
+  `runtime_contract/0` are general-purpose ACP utilities consumed by
+  `mix arbor.doctor`, `Arbor.LLM.ProviderCatalog`, and other operator
+  surfaces. They have no replacement in `Runtime.Acp` and stay here
+  as the canonical discovery surface.
 
   See `.arbor/decisions/2026-06-04-slash-commands-for-runtime-config.md`
-  and `.arbor/roadmap/2-planned/runtime-provider-axis-split.md` for the
-  Phase 2c context. The replacement is `Arbor.AI.Runtime.Acp` which
-  reads the CLI from `request.provider` instead of `request.provider_options.agent`.
+  for the Phase 2c context.
 
-  ## Legacy input shape (still supported here)
+  ## Legacy input shape (still supported by `complete/2`)
 
       %Request{
         provider: "acp",
@@ -35,7 +44,6 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
         model: "claude-opus-4-6"
       }
   """
-  @deprecated "Use Arbor.AI.Runtime.Acp via Arbor.AI.Runtime.Dispatch.dispatch/2. This adapter ships for backwards-compat with the pre-Phase-2c provider:\"acp\"+agent shape; the Phase 2d AgentSDK sunset removes it."
 
   @behaviour Arbor.LLM.ProviderAdapter
 
@@ -58,6 +66,7 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
   @impl true
   def provider, do: "acp"
 
+  @deprecated "Use Arbor.AI.Runtime.Acp via Arbor.AI.Runtime.Dispatch.dispatch/2. This path ships for backwards-compat with the pre-Phase-2c provider:\"acp\"+agent shape."
   @impl true
   def complete(%Request{} = request, opts \\ []) do
     agent = resolve_agent(request)
