@@ -599,10 +599,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     if Code.ensure_loaded?(adapter) and function_exported?(adapter, :topic_for_user, 1) and
          Code.ensure_loaded?(Phoenix.PubSub) do
       topic = apply(adapter, :topic_for_user, [user_id])
-
-      if pubsub = interaction_pubsub() do
-        apply(Phoenix.PubSub, :subscribe, [pubsub, topic])
-      end
+      apply(Phoenix.PubSub, :subscribe, [interaction_pubsub(), topic])
     end
   rescue
     _ -> :ok
@@ -610,14 +607,10 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     :exit, _ -> :ok
   end
 
-  defp interaction_pubsub do
-    cond do
-      Process.whereis(Arbor.Dashboard.PubSub) -> Arbor.Dashboard.PubSub
-      Process.whereis(Arbor.Web.PubSub) -> Arbor.Web.PubSub
-      Process.whereis(Arbor.Comms.PubSub) -> Arbor.Comms.PubSub
-      true -> nil
-    end
-  end
+  # HITL traffic is pinned to Arbor.Comms.PubSub (owned by Arbor.Comms.Application).
+  # Match the InteractionRouter / InteractionAdapter discovery so subscribe and
+  # broadcast land on the same bus regardless of app startup order.
+  defp interaction_pubsub, do: Arbor.Comms.PubSub
 
   defp respond_to_interaction(socket, request_id, response) do
     router = Module.concat([:Arbor, :Comms, :InteractionRouter])

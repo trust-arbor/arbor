@@ -110,6 +110,12 @@ config :arbor_security,
   approval_guard_enabled: true,
   uri_registry_enforcement: true,
   consensus_escalation_enabled: true,
+  # HITL Router Phase 1b validation: route approvals via InteractionRouter
+  # rather than the legacy ConsensusManager.escalate path. The router targets
+  # the dashboard (ChatLive's approvals panel) and falls back to "queued"
+  # when no channel is reachable, so the agent still gets a non-blocking
+  # request_id back.
+  use_interaction_router_for_approval: true,
   session_token_secret: "arbor-dev-session-token-secret-change-in-prod"
 
 # OIDC — Human identity authentication for CLI and orchestration.

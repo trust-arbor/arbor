@@ -32,30 +32,20 @@ defmodule Arbor.Dashboard.InteractionAdapter do
   """
   def send_interaction(_channel_meta, %Interaction{} = interaction) do
     topic = topic_for_user(interaction.user_id)
+    pubsub = pubsub_server()
 
-    case pubsub_server() do
-      nil ->
-        Logger.warning(
-          "[Dashboard.InteractionAdapter] no PubSub server found; can't deliver " <>
-            interaction.request_id
-        )
+    try do
+      Phoenix.PubSub.broadcast(
+        pubsub,
+        topic,
+        {:dashboard_interaction, interaction}
+      )
 
-        {:error, :no_pubsub}
-
-      pubsub ->
-        try do
-          Phoenix.PubSub.broadcast(
-            pubsub,
-            topic,
-            {:dashboard_interaction, interaction}
-          )
-
-          :ok
-        rescue
-          e -> {:error, {:broadcast_failed, Exception.message(e)}}
-        catch
-          :exit, reason -> {:error, {:broadcast_exit, reason}}
-        end
+      :ok
+    rescue
+      e -> {:error, {:broadcast_failed, Exception.message(e)}}
+    catch
+      :exit, reason -> {:error, {:broadcast_exit, reason}}
     end
   end
 
@@ -76,12 +66,8 @@ defmodule Arbor.Dashboard.InteractionAdapter do
     "dashboard:interactions:" <> user_id
   end
 
-  defp pubsub_server do
-    cond do
-      Process.whereis(Arbor.Dashboard.PubSub) -> Arbor.Dashboard.PubSub
-      Process.whereis(Arbor.Web.PubSub) -> Arbor.Web.PubSub
-      Process.whereis(Arbor.Comms.PubSub) -> Arbor.Comms.PubSub
-      true -> nil
-    end
-  end
+  # HITL traffic is pinned to Arbor.Comms.PubSub (owned by Arbor.Comms.Application)
+  # so the adapter, the InteractionRouter, the PresenceTracker, and ChatLive all
+  # broadcast and subscribe on the same bus regardless of which app starts first.
+  defp pubsub_server, do: Arbor.Comms.PubSub
 end
