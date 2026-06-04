@@ -76,8 +76,78 @@ defmodule Arbor.Security.Escalation do
         {:error, :consensus_unavailable}
 
       true ->
-        submit_for_approval(consensus_module, capability, principal_id, resource_uri)
+        # Prefer the non-blocking InteractionRouter path when configured
+        # AND the router is loadable at runtime. Fall back to the legacy
+        # blocking consensus path otherwise.
+        if Config.use_interaction_router_for_approval?() and interaction_router_available?() do
+          submit_via_router(capability, principal_id, resource_uri)
+        else
+          submit_for_approval(consensus_module, capability, principal_id, resource_uri)
+        end
     end
+  end
+
+  @doc """
+  Submit an authorization request via `Arbor.Comms.InteractionRouter`.
+
+  Non-blocking. Returns `{:ok, :pending_approval, request_id}`
+  immediately. The agent's session/executor subscribes to
+  `Arbor.Contracts.Comms.Interaction.response_topic_for_agent(principal_id)`
+  and receives `{:interaction_response, %{...}}` when the human responds.
+
+  Uses runtime bridges so `arbor_security` (Level 1) doesn't get a
+  hierarchy-violating dep on `arbor_comms` (also Level 1).
+  """
+  @spec submit_via_router(map(), String.t(), String.t()) ::
+          {:ok, :pending_approval, String.t()} | {:error, term()}
+  def submit_via_router(capability, principal_id, resource_uri) do
+    router = Module.concat([:Arbor, :Comms, :InteractionRouter])
+    interaction_mod = Module.concat([:Arbor, :Contracts, :Comms, :Interaction])
+
+    if Code.ensure_loaded?(router) and Code.ensure_loaded?(interaction_mod) and
+         function_exported?(router, :request, 2) do
+      # Phase 1: agent identity is used as the user identity for routing.
+      # A future agent-owner lookup may map agent_id → human user_id.
+      attrs = %{
+        kind: :approval,
+        agent_id: principal_id,
+        user_id: principal_id,
+        description: "Authorization request for #{resource_uri}",
+        resource_uri: resource_uri,
+        metadata: %{
+          capability_id: capability.id,
+          constraints: capability.constraints
+        }
+      }
+
+      case apply(router, :request, [attrs, []]) do
+        {:ok, request_id} ->
+          {:ok, :pending_approval, request_id}
+
+        {:error, reason} = err ->
+          Logger.warning(
+            "Escalation: InteractionRouter.request failed for #{resource_uri}: #{inspect(reason)}"
+          )
+
+          err
+      end
+    else
+      {:error, :interaction_router_unavailable}
+    end
+  rescue
+    e ->
+      Logger.warning("Escalation: submit_via_router crashed: #{Exception.message(e)}")
+      {:error, {:interaction_router_crash, Exception.message(e)}}
+  catch
+    :exit, reason ->
+      Logger.warning("Escalation: submit_via_router exited: #{inspect(reason)}")
+      {:error, {:interaction_router_exit, reason}}
+  end
+
+  # Cheap availability check used to gate the new path on each call.
+  defp interaction_router_available? do
+    router = Module.concat([:Arbor, :Comms, :InteractionRouter])
+    Code.ensure_loaded?(router) and function_exported?(router, :request, 2)
   end
 
   @doc """
@@ -121,7 +191,10 @@ defmodule Arbor.Security.Escalation do
       {:error, {:consensus_timeout, resource_uri}}
 
     :exit, reason ->
-      Logger.warning("Escalation: consensus submit exited for #{resource_uri}: #{inspect(reason)}")
+      Logger.warning(
+        "Escalation: consensus submit exited for #{resource_uri}: #{inspect(reason)}"
+      )
+
       {:error, {:consensus_exit, reason}}
   end
 

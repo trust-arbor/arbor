@@ -132,6 +132,23 @@ defmodule Arbor.Security.Config do
     Application.get_env(@app, :consensus_module, Arbor.Consensus)
   end
 
+  @doc """
+  Whether `Escalation.maybe_escalate/3` should route through the
+  `Arbor.Comms.InteractionRouter` (non-blocking) instead of the
+  legacy `Consensus.Coordinator.submit` path (blocking 30s GenServer
+  call).
+
+  Default `false` for backward compatibility. When the InteractionRouter
+  + at least one channel adapter is wired and operators have verified
+  the new approval UX, flip to `true`. Setting to `true` requires
+  `Arbor.Comms.InteractionRouter` to be loaded at runtime; if it isn't
+  the code falls back to the consensus path automatically.
+  """
+  @spec use_interaction_router_for_approval?() :: boolean()
+  def use_interaction_router_for_approval? do
+    Application.get_env(@app, :use_interaction_router_for_approval, false)
+  end
+
   # ===========================================================================
   # Quota Configuration (Phase 7)
   # ===========================================================================

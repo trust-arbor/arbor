@@ -4,6 +4,33 @@ defmodule Arbor.Security.EscalationTest do
 
   alias Arbor.Security.Escalation
 
+  # One-time bootstrap for the InteractionRouter dependencies. Idempotent.
+  # Called from the describe-block setup that needs the router.
+  def __bootstrap_router__ do
+    pubsub = Arbor.Comms.PubSub
+
+    case Supervisor.start_link(
+           [{Phoenix.PubSub, name: pubsub}],
+           strategy: :one_for_one,
+           name: :Escalation_RouterTest_Sup
+         ) do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
+    end
+
+    case Arbor.Comms.InteractionRegistry.start_link([]) do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
+    end
+
+    case Arbor.Comms.PresenceTracker.start_link(pubsub_server: pubsub) do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
+    end
+
+    :ok
+  end
+
   # Mock consensus module for testing
   defmodule MockConsensus do
     def submit(%{} = proposal, _opts \\ []) when is_map_key(proposal, :proposer) do
@@ -100,6 +127,50 @@ defmodule Arbor.Security.EscalationTest do
 
       assert {:error, :consensus_unavailable} =
                Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive")
+    end
+  end
+
+  describe "InteractionRouter path (Phase 1, feature-flagged)" do
+    setup do
+      __MODULE__.__bootstrap_router__()
+      Arbor.Comms.InteractionRegistry.reset()
+      :ok
+    end
+
+    test "with the feature flag on, uses InteractionRouter instead of consensus",
+         %{capability: cap} do
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+      Application.put_env(:arbor_security, :consensus_module, MockConsensus)
+      Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
+
+      on_exit(fn ->
+        Application.delete_env(:arbor_security, :use_interaction_router_for_approval)
+      end)
+
+      assert {:ok, :pending_approval, request_id} =
+               Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive")
+
+      assert String.starts_with?(request_id, "irq_")
+
+      # Verify the interaction landed in the registry rather than
+      # going through the consensus mock.
+      assert {:ok, interaction} = Arbor.Comms.InteractionRegistry.get(request_id)
+      assert interaction.agent_id == "agent_test"
+      assert interaction.resource_uri == "arbor://fs/write/sensitive"
+      assert interaction.kind == :approval
+      assert interaction.metadata.capability_id == cap.id
+    end
+
+    test "with the feature flag off, the consensus path runs (backward compat)",
+         %{capability: cap} do
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+      Application.put_env(:arbor_security, :consensus_module, MockConsensus)
+      Application.put_env(:arbor_security, :use_interaction_router_for_approval, false)
+
+      assert {:ok, :pending_approval, proposal_id} =
+               Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive")
+
+      assert String.starts_with?(proposal_id, "proposal_")
     end
   end
 
