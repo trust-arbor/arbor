@@ -176,172 +176,105 @@ defmodule Arbor.Common.ModelProfile do
     {"trinity", :openrouter_free}
   ]
 
-  # -- ModelEntry registry (Phase 1) --
-  # Exemplar entries migrated to the full `Arbor.Contracts.LLM.ModelEntry`
-  # shape. Unmigrated models still resolve through the legacy short-form
-  # `@profiles` map below — `entry/1` synthesizes a `%ModelEntry{}` from
-  # the short shape so callers can use the new API uniformly during the
-  # migration window. One exemplar per family covers the variation.
+  # -- ModelEntry resolution (Phase 1 of item 9) --
+  #
+  # `entry/1` reads model metadata from llm_db (the source of truth) and
+  # constructs a `%Arbor.Contracts.LLM.ModelEntry{}`. The only Arbor-side
+  # data that gets layered on top is what llm_db doesn't model:
+  #
+  #   * `:acp` runtime support for specific `(provider, model)` pairs —
+  #     Arbor knows it ships a Claude CLI / ACP harness for the Claude
+  #     subscription provider; llm_db doesn't model "this Arbor deployment
+  #     can also reach this provider via a subprocess CLI."
+  #   * `effective_window_pct` overrides — currently universal at 0.75.
+  #   * Arbor-deployment-specific caveats — none today.
+  #
+  # When llm_db has no record for a model (e.g. very new local-LM IDs the
+  # operator hasn't pulled, or OpenRouter free-tier listings that change
+  # weekly), `entry/1` falls back to synthesizing a `%ModelEntry{}` from
+  # the legacy `@profiles` short-form below — same single-provider
+  # `id: :legacy` shape as before. That preserves backwards-compat
+  # without lying about provider/pricing.
 
-  defp model_entries do
+  # Arbor-deployment-specific runtime overlay. Keyed by `{provider, model_id}`
+  # (as llm_db keys models) with a list of extra runtime atoms beyond `:arbor`
+  # (which is always supported via the in-BEAM HTTP path through arbor_llm).
+  #
+  # Only `(provider, model)` pairs Arbor actually ships a non-arbor runtime
+  # adapter for go in here — adding an entry without the corresponding
+  # adapter would mean `Arbor.AI.Runtime.execute/3` raises at dispatch.
+  defp arbor_runtime_overlay do
     %{
-      "claude-opus-4-6" => %{
-        canonical_id: "claude-opus-4-6",
-        family: :claude,
-        context_window: 200_000,
-        max_output_tokens: 32_000,
-        effective_window_pct: 0.75,
-        capabilities: [
-          :tool_use,
-          :vision,
-          :prompt_cache,
-          :extended_thinking,
-          :json_mode,
-          :streaming,
-          :reasoning_content
-        ],
-        caveats: [],
-        providers: [
-          %{
-            id: :anthropic_direct,
-            ref: "claude-opus-4-6",
-            auth: :api_key,
-            runtimes: [:arbor],
-            pricing: %{
-              input_per_mtok: 15.00,
-              output_per_mtok: 75.00,
-              cache_read_per_mtok: 1.50,
-              cache_write_per_mtok: 18.75
-            }
-          },
-          %{
-            id: :openrouter,
-            ref: "anthropic/claude-opus-4-6",
-            auth: :api_key,
-            runtimes: [:arbor]
-          },
-          %{
-            id: :claude_subscription,
-            ref: "opus",
-            auth: :oauth,
-            runtimes: [:arbor, :acp]
-          }
-        ]
-      },
-      "claude-sonnet-4-6" => %{
-        canonical_id: "claude-sonnet-4-6",
-        family: :claude,
-        context_window: 200_000,
-        max_output_tokens: 64_000,
-        effective_window_pct: 0.75,
-        capabilities: [
-          :tool_use,
-          :vision,
-          :prompt_cache,
-          :extended_thinking,
-          :json_mode,
-          :streaming,
-          :reasoning_content
-        ],
-        caveats: [],
-        providers: [
-          %{
-            id: :anthropic_direct,
-            ref: "claude-sonnet-4-6",
-            auth: :api_key,
-            runtimes: [:arbor],
-            pricing: %{
-              input_per_mtok: 3.00,
-              output_per_mtok: 15.00,
-              cache_read_per_mtok: 0.30,
-              cache_write_per_mtok: 3.75
-            }
-          },
-          %{
-            id: :openrouter,
-            ref: "anthropic/claude-sonnet-4-6",
-            auth: :api_key,
-            runtimes: [:arbor]
-          },
-          %{
-            id: :claude_subscription,
-            ref: "sonnet",
-            auth: :oauth,
-            runtimes: [:arbor, :acp]
-          }
-        ]
-      },
-      "gpt-5-nano" => %{
-        canonical_id: "gpt-5-nano",
-        family: :gpt,
-        context_window: 128_000,
-        max_output_tokens: 16_384,
-        effective_window_pct: 0.75,
-        capabilities: [:tool_use, :vision, :json_mode, :streaming],
-        caveats: [],
-        providers: [
-          %{
-            id: :openai,
-            ref: "gpt-5-nano",
-            auth: :api_key,
-            runtimes: [:arbor]
-          },
-          %{
-            id: :openrouter,
-            ref: "openai/gpt-5-nano",
-            auth: :api_key,
-            runtimes: [:arbor]
-          }
-        ]
-      },
-      "gemini-2.0-flash" => %{
-        canonical_id: "gemini-2.0-flash",
-        family: :gemini,
-        context_window: 1_000_000,
-        max_output_tokens: 8_192,
-        effective_window_pct: 0.75,
-        capabilities: [:tool_use, :vision, :json_mode, :streaming],
-        caveats: [],
-        providers: [
-          %{
-            id: :gemini,
-            ref: "gemini-2.0-flash",
-            auth: :api_key,
-            runtimes: [:arbor]
-          },
-          %{
-            id: :vertex,
-            ref: "gemini-2.0-flash-001",
-            auth: :gcp,
-            runtimes: [:arbor]
-          },
-          %{
-            id: :openrouter,
-            ref: "google/gemini-2.0-flash-exp",
-            auth: :api_key,
-            runtimes: [:arbor]
-          }
-        ]
-      },
-      "openai/gpt-oss-120b:free" => %{
-        canonical_id: "openai/gpt-oss-120b:free",
-        family: :openrouter_free,
-        context_window: 131_072,
-        max_output_tokens: 8_192,
-        effective_window_pct: 0.75,
-        capabilities: [:tool_use, :json_mode, :streaming],
-        caveats: ["OpenRouter free tier — rate limits and provider availability vary"],
-        providers: [
-          %{
-            id: :openrouter,
-            ref: "openai/gpt-oss-120b:free",
-            auth: :api_key,
-            runtimes: [:arbor]
-          }
-        ]
-      }
+      # Claude CLI via ACP. arbor_ai's AcpSession + Adapters.Acp ship the
+      # subprocess harness. `claude_subscription` is llm_db's atom for
+      # the OAuth/subscription provider.
+      {:anthropic, "claude-opus-4-6"} => [:acp],
+      {:anthropic, "claude-sonnet-4-6"} => [:acp],
+      {:anthropic, "claude-haiku-4-5-20251001"} => [:acp]
     }
   end
+
+  # Family inference when llm_db's `family` field is nil. Uses the same
+  # patterns as the legacy short-form fallback.
+  defp infer_family(model_id) when is_binary(model_id) do
+    downcased = String.downcase(model_id)
+
+    case Enum.find(@family_patterns, fn {pattern, _family} ->
+           String.contains?(downcased, pattern)
+         end) do
+      {_pattern, family} -> family
+      nil -> :unknown
+    end
+  end
+
+  # Translate llm_db's capability schema to Arbor's atom set. llm_db uses
+  # boolean flags and structured maps (e.g. `tools: %{enabled: true,
+  # streaming: true}`); Arbor consumers want a flat list of atoms.
+  defp arbor_capabilities_from_llmdb(%{} = caps) do
+    [
+      {:chat, :chat},
+      {:tools, :tool_use},
+      {:embeddings, :embedding},
+      {:json, :json_mode},
+      {:streaming, :streaming},
+      {:reasoning, :reasoning_content},
+      {:caching, :prompt_cache}
+    ]
+    |> Enum.flat_map(fn {llmdb_key, arbor_atom} ->
+      if cap_enabled?(Map.get(caps, llmdb_key)), do: [arbor_atom], else: []
+    end)
+  end
+
+  defp arbor_capabilities_from_llmdb(_), do: []
+
+  defp cap_enabled?(true), do: true
+  defp cap_enabled?(%{enabled: true}), do: true
+  defp cap_enabled?(%{} = m) when map_size(m) > 0, do: not Map.get(m, :enabled, true) == false
+  defp cap_enabled?(_), do: false
+
+  # Translate llm_db's `cost` map (per million tokens) to Arbor's
+  # ProviderEntry pricing shape. `cost` keys are `:input`, `:output`,
+  # `:cache_read`, `:cache_write` and values are numbers.
+  defp pricing_from_llmdb(%{} = cost) do
+    [
+      {:input, :input_per_mtok},
+      {:output, :output_per_mtok},
+      {:cache_read, :cache_read_per_mtok},
+      {:cache_write, :cache_write_per_mtok}
+    ]
+    |> Enum.reduce(%{}, fn {llmdb_key, arbor_key}, acc ->
+      case Map.get(cost, llmdb_key) do
+        v when is_number(v) -> Map.put(acc, arbor_key, v * 1.0)
+        _ -> acc
+      end
+    end)
+    |> case do
+      m when map_size(m) == 0 -> nil
+      m -> m
+    end
+  end
+
+  defp pricing_from_llmdb(_), do: nil
 
   # -- Public API --
 
@@ -364,57 +297,142 @@ defmodule Arbor.Common.ModelProfile do
   end
 
   @doc """
-  Return the full `%Arbor.Contracts.LLM.ModelEntry{}` for `model_id`.
+  Return a `%Arbor.Contracts.LLM.ModelEntry{}` for `model_id`.
 
-  Phase 1 (item 9): for the five migrated exemplars, returns the registered
-  entry with full provider list, capabilities, and caveats. For everything
-  else, synthesizes a single-provider entry from the legacy short-form
-  profile so callers can use the new API uniformly during migration.
+  Resolves through llm_db (the canonical model catalog) when available,
+  layering Arbor-deployment-specific data (additional runtime adapters,
+  `effective_window_pct` tunables, Arbor caveats) on top. Falls back to
+  the legacy short-form `@profiles` map only when llm_db has no record
+  for the model.
 
-  Synthesized entries have a synthetic `:legacy` provider with
-  `auth: :api_key, runtimes: [:arbor]` and no pricing — that's the best
-  guess from the legacy short shape. Migrate the entry to the full
-  `ModelEntry` shape above to get accurate provider+pricing info.
+  `model_id` accepts the same formats as `get/1`:
+
+    * `"provider:model"` — e.g. `"anthropic:claude-opus-4-6"`
+    * `"org/model"` — e.g. `"anthropic/claude-opus-4-6"`,
+      `"openai/gpt-oss-120b:free"`
+    * bare model id — e.g. `"claude-opus-4-6"`, `"gpt-5-nano"`
+
+  ## What this is NOT
+
+  Phase 1 returns a single-provider entry: the one matching the queried
+  `model_id`. It does NOT aggregate all providers that serve the same
+  logical model. Multi-provider aggregation belongs to Phase 2's runtime
+  selection chain, which can scan llm_db across providers when it has a
+  reason to.
   """
   @spec entry(model_id()) :: Arbor.Contracts.LLM.ModelEntry.t()
   def entry(model_id) when is_binary(model_id) do
-    case lookup_entry(model_id) do
-      {:ok, %Arbor.Contracts.LLM.ModelEntry{} = e} ->
-        e
+    case llmdb_lookup(model_id) do
+      {:ok, llmdb_model} ->
+        from_llmdb(llmdb_model)
 
-      :not_migrated ->
+      :miss ->
         synthesize_entry(model_id)
     end
   end
 
-  defp lookup_entry(model_id) do
-    case Map.get(model_entries(), model_id) do
-      nil ->
-        case String.split(model_id, ":", parts: 2) do
-          [_provider, stripped] ->
-            case Map.get(model_entries(), stripped) do
-              nil -> :not_migrated
-              attrs -> build_entry(attrs)
-            end
+  # llm_db is a transitive dep via req_llm — not a compile-time dep of
+  # arbor_common, so use apply/3 to keep the compiler quiet. Matches the
+  # pattern in arbor_llm/lib/arbor/llm/client.ex.
+  @llmdb_module LLMDB
 
-          _ ->
-            :not_migrated
+  defp llmdb_available?, do: Code.ensure_loaded?(@llmdb_module)
+
+  # Try llm_db with the model_id verbatim, then with reasonable splits.
+  # `LLMDB.model/1` accepts `"provider:model"` directly; for bare ids we
+  # try to derive the provider from the family pattern. llm_db is loaded
+  # by `:llm_db` at application start; if it's absent (e.g. unit tests
+  # without it), this returns `:miss` and the caller falls back.
+  defp llmdb_lookup(model_id) do
+    cond do
+      not llmdb_available?() ->
+        :miss
+
+      String.contains?(model_id, ":") ->
+        llmdb_try(model_id)
+
+      true ->
+        # Bare id — guess the provider from the family.
+        case infer_family(model_id) do
+          :claude -> llmdb_try("anthropic:" <> model_id)
+          :gpt -> llmdb_try("openai:" <> model_id)
+          :gemini -> llmdb_try("google:" <> model_id)
+          _ -> :miss
         end
-
-      attrs ->
-        build_entry(attrs)
     end
   end
 
-  defp build_entry(attrs) do
-    case Arbor.Contracts.LLM.ModelEntry.new(attrs) do
-      {:ok, e} -> {:ok, e}
-      # If a migrated entry fails validation it's a code bug — surface it
-      # via the synthesized fallback rather than crashing the caller, but
-      # the test suite will catch a malformed registered entry.
-      {:error, _} -> :not_migrated
+  defp llmdb_try(spec) do
+    case apply(@llmdb_module, :model, [spec]) do
+      {:ok, model} -> {:ok, model}
+      {:error, _} -> :miss
     end
+  rescue
+    _ -> :miss
+  catch
+    :exit, _ -> :miss
   end
+
+  # Construct a ModelEntry from a %LLMDB.Model{}.
+  defp from_llmdb(%{__struct__: _} = m) do
+    family =
+      case m.family do
+        f when is_atom(f) and not is_nil(f) -> f
+        f when is_binary(f) and f != "" -> safe_family_atom(f, m.id)
+        _ -> infer_family(m.id)
+      end
+
+    base_runtimes = [:arbor]
+    extra_runtimes = Map.get(arbor_runtime_overlay(), {m.provider, m.id}, [])
+    runtimes = base_runtimes ++ extra_runtimes
+
+    provider_attrs = %{
+      id: m.provider,
+      ref: m.id,
+      auth: auth_for_provider(m.provider),
+      runtimes: runtimes,
+      pricing: pricing_from_llmdb(m.cost)
+    }
+
+    context = get_in(m.limits, [:context]) || @default_context_size
+    output = get_in(m.limits, [:output]) || @default_max_output
+
+    attrs = %{
+      canonical_id: m.id,
+      family: family,
+      context_window: context,
+      max_output_tokens: output,
+      effective_window_pct: @default_effective_window_pct,
+      capabilities: arbor_capabilities_from_llmdb(m.capabilities || %{}),
+      caveats: [],
+      providers: [provider_attrs]
+    }
+
+    {:ok, entry} = Arbor.Contracts.LLM.ModelEntry.new(attrs)
+    entry
+  end
+
+  # Convert llm_db's family string to an atom only if we already recognize
+  # it — otherwise fall back to the family-pattern inference. Avoids
+  # arbitrary atom creation from a downstream-controlled string.
+  defp safe_family_atom(family_str, model_id) do
+    known = [:claude, :gpt, :gemini, :deepseek, :llama, :qwen, :mistral, :mixtral]
+    candidate = String.to_existing_atom(family_str)
+    if candidate in known, do: candidate, else: infer_family(model_id)
+  rescue
+    ArgumentError -> infer_family(model_id)
+  end
+
+  # Default auth method per provider atom. Drawn from llm_db's known
+  # provider list. New providers get :api_key as the safe default; the
+  # runtime adapter checks the actual credential shape.
+  defp auth_for_provider(:bedrock), do: :aws
+  defp auth_for_provider(:vertex), do: :gcp
+  defp auth_for_provider(:claude_subscription), do: :oauth
+  defp auth_for_provider(:lmstudio), do: :none
+  defp auth_for_provider(:ollama), do: :none
+  defp auth_for_provider(:ollama_cloud), do: :none
+  defp auth_for_provider(_), do: :api_key
 
   defp synthesize_entry(model_id) do
     profile = get(model_id)
@@ -428,7 +446,7 @@ defmodule Arbor.Common.ModelProfile do
         effective_window_pct: profile.effective_window_pct,
         capabilities: [],
         caveats: [
-          "Synthesized from legacy ModelProfile — migrate to full ModelEntry for accurate provider/pricing info"
+          "Synthesized from legacy ModelProfile — llm_db has no record for #{model_id}"
         ],
         providers: [
           %{
