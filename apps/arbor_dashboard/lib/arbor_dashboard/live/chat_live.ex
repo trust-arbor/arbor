@@ -1356,31 +1356,91 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       stream_insert_system_note(socket, "/start crashed: #{Exception.message(e)}")
   end
 
-  defp dispatch_command_action({:switch_runtime, runtime}, _context, socket) do
+  defp dispatch_command_action({:switch_runtime, runtime}, context, socket) do
     Logger.info("[ChatLive] /runtime → #{runtime}")
+    session_pid = Map.get(context, :session_pid)
 
-    socket
-    |> assign(:runtime, runtime)
-    |> stream_insert_system_note(
-      "Runtime set to #{runtime}. (Session-level propagation is scheduled follow-up; the new runtime takes effect on the next Dispatch-routed turn.)"
-    )
+    case call_session_safely(session_pid, fn pid ->
+           Arbor.Orchestrator.Session.set_runtime(pid, runtime)
+         end) do
+      {:ok, _} ->
+        socket
+        |> assign(:runtime, runtime)
+        |> stream_insert_system_note("Runtime set to #{runtime} (effective on next turn).")
+
+      {:error, reason} ->
+        stream_insert_system_note(
+          socket,
+          "/runtime failed to apply to Session: #{inspect(reason)}"
+        )
+    end
   end
 
-  defp dispatch_command_action({:switch_model, _name, opts} = action, _context, socket) do
-    # Extract runtime from opts if present and update the status row.
-    # Actual model switching is the same stubbed follow-up as the
-    # 2-tuple form below.
-    Logger.info("[ChatLive] Slash command action requested: #{inspect(action)}")
+  defp dispatch_command_action({:switch_model, name}, context, socket) do
+    Logger.info("[ChatLive] /model → #{name}")
+    session_pid = Map.get(context, :session_pid)
+
+    case call_session_safely(session_pid, fn pid ->
+           Arbor.Orchestrator.Session.set_model(pid, name)
+         end) do
+      {:ok, _} ->
+        stream_insert_system_note(socket, "Model set to #{name} (effective on next turn).")
+
+      {:error, reason} ->
+        stream_insert_system_note(
+          socket,
+          "/model failed to apply to Session: #{inspect(reason)}"
+        )
+    end
+  end
+
+  defp dispatch_command_action({:switch_model, name, opts}, context, socket) do
+    Logger.info("[ChatLive] /model → #{name} opts=#{inspect(opts)}")
+    session_pid = Map.get(context, :session_pid)
+
+    # Model first; runtime second if present. Either failure surfaces; we
+    # still try the second mutation when the first succeeds, since the
+    # operator's intent was both.
+    model_result =
+      call_session_safely(session_pid, fn pid ->
+        Arbor.Orchestrator.Session.set_model(pid, name)
+      end)
+
+    runtime_kw = Keyword.get(opts, :runtime)
+
+    runtime_result =
+      case runtime_kw do
+        nil ->
+          :skip
+
+        runtime ->
+          call_session_safely(session_pid, fn pid ->
+            Arbor.Orchestrator.Session.set_runtime(pid, runtime)
+          end)
+      end
 
     socket =
-      case Keyword.get(opts, :runtime) do
+      case runtime_kw do
         nil -> socket
         runtime -> assign(socket, :runtime, runtime)
       end
 
     note =
-      "(Action #{format_action(action)} acknowledged. " <>
-        "Model switch is scheduled follow-up work; the runtime status row is updated.)"
+      cond do
+        match?({:ok, _}, model_result) and runtime_result == :skip ->
+          "Model set to #{name} (effective on next turn)."
+
+        match?({:ok, _}, model_result) and match?({:ok, _}, runtime_result) ->
+          "Model set to #{name}, runtime set to #{runtime_kw} (effective on next turn)."
+
+        match?({:error, _}, model_result) ->
+          {:error, r} = model_result
+          "/model failed: #{inspect(r)}"
+
+        match?({:error, _}, runtime_result) ->
+          {:error, r} = runtime_result
+          "Model set to #{name}, but runtime change failed: #{inspect(r)}"
+      end
 
     stream_insert_system_note(socket, note)
   end
@@ -1422,6 +1482,23 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     _ -> fallback
   catch
     :exit, _ -> fallback
+  end
+
+  # Phase 2d helper. Invokes `fun.(session_pid)` if the pid is alive,
+  # mapping crash / exit / nil-pid cases to {:error, reason} so the
+  # action dispatcher can render a flash without crashing the LiveView.
+  defp call_session_safely(nil, _fun), do: {:error, :no_session_pid}
+
+  defp call_session_safely(pid, fun) when is_pid(pid) do
+    if Process.alive?(pid) do
+      fun.(pid)
+    else
+      {:error, :session_dead}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp format_action(:clear), do: ":clear"

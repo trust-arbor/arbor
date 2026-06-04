@@ -232,6 +232,52 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   @doc """
+  Update the running session's LLM model. Reflected on the next turn —
+  the DOT pipeline's LlmHandler reads `context["session.llm_model"]` which
+  is sourced from `state.config["llm_model"]`.
+
+  Use this from slash commands (`/model X`) and other operator surfaces.
+  Returns the new model string so callers can echo it back.
+  """
+  @spec set_model(GenServer.server(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def set_model(session, model) when is_binary(model) do
+    GenServer.call(session, {:set_model, model})
+  end
+
+  @doc """
+  Update the running session's LLM provider. Reflected on the next turn —
+  the DOT pipeline's LlmHandler reads `context["session.llm_provider"]`
+  which is sourced from `state.config["llm_provider"]`.
+  """
+  @spec set_provider(GenServer.server(), atom() | String.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def set_provider(session, provider) when is_atom(provider) and not is_nil(provider) do
+    GenServer.call(session, {:set_provider, to_string(provider)})
+  end
+
+  def set_provider(session, provider) when is_binary(provider) do
+    GenServer.call(session, {:set_provider, provider})
+  end
+
+  @doc """
+  Update the running session's runtime axis (`:arbor` or `:acp`).
+  Reflected on the next turn — LlmHandler reads
+  `context["session.llm_runtime"]` and sets `request.runtime` so that
+  `Arbor.AI.Runtime.Registry` dispatches to the right adapter.
+
+  Used by the `/runtime` slash command and by `/model X runtime=Y` when
+  the runtime opt is present.
+  """
+  @spec set_runtime(GenServer.server(), atom()) :: {:ok, atom()} | {:error, term()}
+  def set_runtime(session, runtime) when runtime in [:arbor, :acp] do
+    GenServer.call(session, {:set_runtime, runtime})
+  end
+
+  def set_runtime(_session, runtime) do
+    {:error, {:invalid_runtime, runtime}}
+  end
+
+  @doc """
   Restore session state from a checkpoint map.
 
   The checkpoint map should have string keys matching the session context
@@ -414,6 +460,34 @@ defmodule Arbor.Orchestrator.Session do
 
   def handle_call(:execution_mode, _from, state) do
     {:reply, state.execution_mode, state}
+  end
+
+  # Phase 2d mutator handlers. State.config is the map ContextBuilder
+  # reads when assembling DOT pipeline values, so updating it here
+  # propagates to the next turn without any further wiring.
+
+  def handle_call({:set_model, model}, _from, state) do
+    new_config = Map.put(state.config || %{}, "llm_model", model)
+
+    Logger.info("[Session #{state.agent_id}] /model → #{model} (effective on next turn)")
+
+    {:reply, {:ok, model}, %{state | config: new_config}}
+  end
+
+  def handle_call({:set_provider, provider}, _from, state) do
+    new_config = Map.put(state.config || %{}, "llm_provider", provider)
+
+    Logger.info("[Session #{state.agent_id}] provider → #{provider} (effective on next turn)")
+
+    {:reply, {:ok, provider}, %{state | config: new_config}}
+  end
+
+  def handle_call({:set_runtime, runtime}, _from, state) do
+    new_config = Map.put(state.config || %{}, "llm_runtime", runtime)
+
+    Logger.info("[Session #{state.agent_id}] /runtime → #{runtime} (effective on next turn)")
+
+    {:reply, {:ok, runtime}, %{state | config: new_config}}
   end
 
   def handle_call({:restore_checkpoint, checkpoint}, _from, state) do
