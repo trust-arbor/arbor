@@ -173,6 +173,58 @@ defmodule Arbor.Common.CommandsTest do
     end
   end
 
+  describe "Start" do
+    alias Arbor.Common.Commands.Start
+
+    test "available?/1 is true regardless of agent (always startable)" do
+      assert Start.available?(ctx())
+      assert Start.available?(ctx(agent_id: "agent_test"))
+    end
+
+    test "empty args returns usage error" do
+      assert {:ok, %Result{text: text, type: :error}} = Start.execute("", ctx())
+      assert String.contains?(text, "Usage:")
+      assert String.contains?(text, "/start")
+    end
+
+    test "template only emits start_agent action with no opts" do
+      assert {:ok, %Result{text: text, action: {:start_agent, "fizzbuzz", []}}} =
+               Start.execute("fizzbuzz", ctx())
+
+      assert String.contains?(text, "fizzbuzz")
+    end
+
+    test "template + name= kwarg parses into opts" do
+      assert {:ok, %Result{action: {:start_agent, "fizzbuzz", opts}}} =
+               Start.execute("fizzbuzz name=Foo", ctx())
+
+      assert Keyword.get(opts, :name) == "Foo"
+    end
+
+    test "template + model= and runtime= kwargs both parse" do
+      assert {:ok, %Result{action: {:start_agent, "fizzbuzz", opts}}} =
+               Start.execute("fizzbuzz model=claude-opus-4-6 runtime=acp", ctx())
+
+      assert Keyword.get(opts, :model) == "claude-opus-4-6"
+      assert Keyword.get(opts, :runtime) == :acp
+    end
+
+    test "unknown runtime errors with valid options" do
+      assert {:ok, %Result{text: text, type: :error}} =
+               Start.execute("fizzbuzz runtime=garbage", ctx())
+
+      assert String.contains?(text, "Unknown runtime")
+    end
+
+    test "unrelated kwargs silently skip (future-compat)" do
+      assert {:ok, %Result{action: {:start_agent, "fizzbuzz", opts}}} =
+               Start.execute("fizzbuzz future_arg=42 name=Foo", ctx())
+
+      assert Keyword.get(opts, :name) == "Foo"
+      refute Keyword.has_key?(opts, :future_arg)
+    end
+  end
+
   describe "Compact" do
     alias Arbor.Common.Commands.Compact
 

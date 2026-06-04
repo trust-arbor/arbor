@@ -106,7 +106,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         memories_count: 0,
         llm_interactions_count: 0,
         approvals_count: 0,
-        known_approval_ids: MapSet.new()
+        known_approval_ids: MapSet.new(),
+        # Phase 2c — runtime is :arbor by default; updated when the user
+        # runs /runtime acp or /model X runtime=acp. Session-level
+        # propagation is the scheduled follow-up at line ~1350.
+        runtime: :arbor
       )
       |> assign(GroupChat.init_assigns())
       |> stream(:messages, [])
@@ -202,40 +206,13 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     SignalLive.unsubscribe(socket)
   end
 
+  # Phase 2c removed the "start-agent" form submission (the model
+  # dropdown). Agent startup now flows through the `/start <template>`
+  # slash command, which dispatches via `dispatch_command_action/3`
+  # using `Manager.start_or_resume/3`. See chat_live/components.ex's
+  # chat_controls/1 (no-agent state) for the user-facing surface.
+
   @impl true
-  def handle_event("start-agent", %{"model" => model_id}, socket) do
-    model_config = find_model_config(model_id, socket.assigns.available_models)
-
-    case model_config do
-      nil ->
-        {:noreply, assign(socket, error: "Unknown model: #{model_id}")}
-
-      config ->
-        # Pass tenant_context so agent gets associated with the creating user
-        start_opts =
-          case Map.get(socket.assigns, :tenant_context) do
-            nil -> []
-            ctx -> [tenant_context: ctx]
-          end
-
-        case Manager.start_agent(config, start_opts) do
-          {:ok, agent_id, pid} ->
-            metadata = %{model_config: config, backend: config.backend}
-            socket = reconnect_to_agent(socket, agent_id, pid, metadata)
-            {:noreply, socket}
-
-          {:error, :already_running} ->
-            {:noreply, reconnect_existing_agent(socket)}
-
-          {:error, reason} ->
-            {:noreply, assign(socket, error: "Failed to start agent: #{inspect(reason)}")}
-        end
-    end
-  rescue
-    e ->
-      {:noreply, assign(socket, error: "Error: #{Exception.message(e)}")}
-  end
-
   def handle_event("stop-agent", _params, socket) do
     if socket.assigns[:agent_id] do
       Manager.stop_agent(socket.assigns.agent_id)
@@ -1344,11 +1321,70 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     stream_insert_command_error(socket, "Unexpected command result.")
   end
 
-  # Action dispatch — currently logs the request and tells the user the
-  # action was acknowledged but not yet executed. The Session-level
-  # action handlers (Session.clear/1, Session.compact/1, Session.set_model/2)
-  # are scheduled as a follow-up to this refactor — see slash-commands v2
-  # notes in 5-completed/.
+  # Action dispatch. Most actions still stub (Session.clear, Session.compact,
+  # Session.set_model are scheduled follow-up work); the ones that ARE
+  # wired land below as branches before the catch-all stub. Phase 2c
+  # wires :start_agent (since the dropdown is gone, the slash command is
+  # the only way to start an agent from ChatLive) and :switch_runtime
+  # (updates the socket-level runtime assign that drives the status row).
+
+  defp dispatch_command_action({:start_agent, template, opts}, _context, socket) do
+    Logger.info("[ChatLive] /start invoked: template=#{template} opts=#{inspect(opts)}")
+
+    display_name = Keyword.get(opts, :name, template)
+    model_config = build_start_model_config(opts)
+    start_opts = [template: template, model_config: model_config]
+
+    case Manager.start_or_resume(APIAgent, display_name, start_opts) do
+      {:ok, agent_id, pid} ->
+        metadata = %{template: template, model_config: model_config}
+        socket = reconnect_to_agent(socket, agent_id, pid, metadata)
+        runtime = Keyword.get(opts, :runtime, :arbor)
+
+        socket
+        |> assign(:runtime, runtime)
+        |> stream_insert_system_note(
+          "Started agent from template #{template} as #{display_name} (#{agent_id})."
+        )
+
+      {:error, reason} ->
+        stream_insert_system_note(socket, "/start failed: #{inspect(reason)}")
+    end
+  rescue
+    e ->
+      Logger.warning("[ChatLive] /start crashed: #{Exception.message(e)}")
+      stream_insert_system_note(socket, "/start crashed: #{Exception.message(e)}")
+  end
+
+  defp dispatch_command_action({:switch_runtime, runtime}, _context, socket) do
+    Logger.info("[ChatLive] /runtime → #{runtime}")
+
+    socket
+    |> assign(:runtime, runtime)
+    |> stream_insert_system_note(
+      "Runtime set to #{runtime}. (Session-level propagation is scheduled follow-up; the new runtime takes effect on the next Dispatch-routed turn.)"
+    )
+  end
+
+  defp dispatch_command_action({:switch_model, _name, opts} = action, _context, socket) do
+    # Extract runtime from opts if present and update the status row.
+    # Actual model switching is the same stubbed follow-up as the
+    # 2-tuple form below.
+    Logger.info("[ChatLive] Slash command action requested: #{inspect(action)}")
+
+    socket =
+      case Keyword.get(opts, :runtime) do
+        nil -> socket
+        runtime -> assign(socket, :runtime, runtime)
+      end
+
+    note =
+      "(Action #{format_action(action)} acknowledged. " <>
+        "Model switch is scheduled follow-up work; the runtime status row is updated.)"
+
+    stream_insert_system_note(socket, note)
+  end
+
   defp dispatch_command_action(action, _context, socket) do
     Logger.info("[ChatLive] Slash command action requested: #{inspect(action)}")
 
@@ -1357,6 +1393,35 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         "Side-effect execution is the next batch of work — the architecture is in place but Session.#{action_function(action)}/N isn't built yet.)"
 
     stream_insert_system_note(socket, note)
+  end
+
+  # Build the model_config map that Manager.start_or_resume expects, with
+  # fallbacks to LLMDefaults when /start doesn't pin model/provider.
+  # Mirrors the mix task at apps/arbor_agent/lib/mix/tasks/arbor/agent.ex.
+  defp build_start_model_config(opts) do
+    model_id =
+      Keyword.get(opts, :model) ||
+        safe_default(&Arbor.Agent.LLMDefaults.default_model/0, "claude-sonnet-4-6")
+
+    provider =
+      Keyword.get(opts, :provider) ||
+        safe_default(&Arbor.Agent.LLMDefaults.default_provider/0, :anthropic)
+
+    %{
+      id: model_id,
+      provider: provider,
+      backend: :api,
+      module: APIAgent,
+      start_opts: []
+    }
+  end
+
+  defp safe_default(fun, fallback) do
+    fun.()
+  rescue
+    _ -> fallback
+  catch
+    :exit, _ -> fallback
   end
 
   defp format_action(:clear), do: ":clear"
@@ -1452,17 +1517,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       end
 
     {:api, result}
-  end
-
-  # Agent already exists — just reconnect to the running instance
-  defp reconnect_existing_agent(socket) do
-    case find_agent_for_session(socket) do
-      {:ok, agent_id, pid, metadata} ->
-        reconnect_to_agent(socket, agent_id, pid, metadata)
-
-      :not_found ->
-        assign(socket, error: "Agent reported running but not found")
-    end
   end
 
   # Find agent scoped to current user's tenant context when available.
@@ -1741,9 +1795,11 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   # ── Model Config Helpers ─────────────────────────────────────────────
 
-  defp find_model_config(model_id, models) do
-    Enum.find(models, fn m -> m.id == model_id end)
-  end
+  # `default_models/0` and `:available_models` are kept as assigns even
+  # though Phase 2c removed the model dropdown — they're still consumed
+  # by chat_controls/1 for the heartbeat-model selector and by other
+  # callers (currently none, but the assigns are forward-compat for
+  # operator dashboards that read what's configured).
 
   defp default_models do
     [

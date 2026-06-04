@@ -476,6 +476,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
         heartbeat_models={@heartbeat_models}
         selected_heartbeat_model={@selected_heartbeat_model}
         group_mode={@group_mode}
+        runtime={@runtime}
       />
 
       <%!-- Group participants list --%>
@@ -624,34 +625,61 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   defp chat_controls(assigns) do
     ~H"""
     <div style="padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--aw-border, #333); display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0;">
-      <div :if={@agent_host_pid == nil}>
-        <form phx-submit="start-agent" style="display: flex; gap: 0.5rem;">
-          <select
-            name="model"
-            style="padding: 0.4rem; border-radius: 4px; background: var(--aw-bg, #1a1a1a); border: 1px solid var(--aw-border, #333); color: inherit; font-size: 0.9em;"
-          >
-            <%= for model <- @available_models do %>
-              <option value={model.id}>{model.label}</option>
-            <% end %>
-          </select>
-          <button
-            type="submit"
-            style="padding: 0.4rem 0.75rem; background: var(--aw-accent, #4a9eff); border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 0.9em;"
-          >
-            Start Agent
-          </button>
-        </form>
+      <%!--
+        No-agent state — no UI control for spawning agents here. Per
+        .arbor/decisions/2026-06-04-slash-commands-for-runtime-config.md,
+        the start-agent flow lives in the slash command system + the
+        Agents dashboard. ChatLive is for already-running agents.
+      --%>
+      <div
+        :if={@agent_host_pid == nil}
+        style="color: var(--aw-text-muted, #888); font-size: 0.9em; line-height: 1.5;"
+      >
+        No agent is running here. Start one with
+        <code style="background: var(--aw-bg, #1a1a1a); padding: 0.1rem 0.35rem; border-radius: 3px;">
+          /start &lt;template&gt;
+        </code>
+        — or open the
+        <.link
+          navigate="/agents"
+          style="color: var(--aw-accent, #4a9eff); text-decoration: none;"
+        >
+          Agents dashboard
+        </.link>
+        to pick one. Type
+        <code style="background: var(--aw-bg, #1a1a1a); padding: 0.1rem 0.35rem; border-radius: 3px;">
+          /help
+        </code>
+        for the full command list.
       </div>
+      <%!--
+        Agent-running status row. Replaces the old "Chat with Model
+        (provider)" line with a deliberate status row showing the
+        identifying fields: agent, model, provider. Runtime tracking on
+        the Session is scheduled follow-up work — until then the row
+        defaults to `arbor` since Dispatch defaults there.
+      --%>
       <div
         :if={@agent_host_pid != nil}
         style="display: flex; align-items: center; gap: 0.5rem; width: 100%;"
       >
-        <span style="color: var(--aw-text-muted, #888); font-size: 0.9em;">
-          <%= if @current_model && @current_model[:label] do %>
-            Chat with {@current_model.label} ({@current_model[:provider]})
-          <% else %>
-            Chat with {@display_name || "Agent"}
+        <span
+          style="color: var(--aw-text-muted, #888); font-size: 0.9em; display: flex; gap: 0.5rem; align-items: center;"
+          title="Use /model and /runtime to change these"
+        >
+          <strong style="color: var(--aw-text, #ddd); font-weight: 500;">
+            {@display_name || "Agent"}
+          </strong>
+          <%= if @current_model do %>
+            <span style="opacity: 0.5;">·</span>
+            <span>{@current_model[:label] || @current_model[:id]}</span>
+            <%= if @current_model[:provider] do %>
+              <span style="opacity: 0.5;">·</span>
+              <span>{@current_model[:provider]}</span>
+            <% end %>
           <% end %>
+          <span style="opacity: 0.5;">·</span>
+          <span>{@runtime || :arbor}</span>
         </span>
         <div style="flex: 1;"></div>
         <form

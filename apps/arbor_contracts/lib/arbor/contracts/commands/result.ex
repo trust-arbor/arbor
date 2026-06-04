@@ -39,6 +39,11 @@ defmodule Arbor.Contracts.Commands.Result do
   - `{:switch_runtime, runtime :: atom()}` — caller should switch the
     current agent's runtime without changing the model. Emitted by the
     `/runtime` slash command.
+  - `{:start_agent, template :: String.t(), opts :: keyword()}` — caller
+    should spawn a new agent using the named template and the per-start
+    overrides in `opts` (`name:`, `model:`, `runtime:`). Emitted by the
+    `/start` slash command. Mirrors the `mix arbor.agent start <template>`
+    flow.
 
   Future: `{:spawn_agent, template}`, `{:delete_agent, id}`,
   `{:dispatch_action, fully_qualified, args}`, etc.
@@ -61,6 +66,7 @@ defmodule Arbor.Contracts.Commands.Result do
           | {:switch_model, String.t()}
           | {:switch_model, String.t(), keyword()}
           | {:switch_runtime, atom()}
+          | {:start_agent, String.t(), keyword()}
 
   typedstruct do
     @typedoc "Output of a slash command"

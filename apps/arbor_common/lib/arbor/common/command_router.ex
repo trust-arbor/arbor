@@ -46,6 +46,7 @@ defmodule Arbor.Common.CommandRouter do
   @builtin_commands [
     Arbor.Common.Commands.Help,
     Arbor.Common.Commands.Status,
+    Arbor.Common.Commands.Start,
     Arbor.Common.Commands.Model,
     Arbor.Common.Commands.Runtime,
     Arbor.Common.Commands.Compact,
