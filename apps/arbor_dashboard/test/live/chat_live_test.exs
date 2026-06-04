@@ -158,4 +158,76 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
       assert is_binary(html)
     end
   end
+
+  describe "always-allow-tool security gate (H13 regression)" do
+    alias Arbor.Dashboard.Cores.AutoPromoteGate
+
+    @tag :fast
+    test "security regression (H13): non-:authorized decisions deny the auto-promote" do
+      # H13: ChatLive's "Always Allow" event used to call
+      # Trust.Store.always_allow/2 unconditionally — any user that could click
+      # Approve could permanently promote any agent's trust to :auto for any
+      # resource. The gate now lives in
+      # Arbor.Dashboard.Cores.AutoPromoteGate.decision/1; this test pins every
+      # non-OK Security.authorize/3 result shape to the deny outcome so future
+      # drift in the auth pipeline doesn't silently re-open the hole.
+      for decision <- [
+            {:error, :not_found},
+            {:error, :no_capability},
+            {:error, :security_unavailable},
+            {:error, :no_actor},
+            {:ok, :pending_approval, "cap_123"},
+            {:requires_approval, %{id: "cap_x"}}
+          ] do
+        assert {:error, :unauthorized_auto_promote} =
+                 AutoPromoteGate.decision(decision),
+               "H13 regression: decision #{inspect(decision)} must deny auto-promote"
+      end
+    end
+
+    @tag :fast
+    test ":authorized passes the gate" do
+      assert :ok = AutoPromoteGate.decision(:authorized)
+      assert :ok = AutoPromoteGate.decision({:ok, :authorized})
+    end
+
+    @tag :fast
+    test "authorize/2 denies the implicit 'system' actor" do
+      # The "system" actor is the dev/test fallback when no OIDC session is
+      # bound. Auto-promote is never appropriate to grant from a UI surface
+      # under that identity — fail closed.
+      assert {:error, :unauthorized_auto_promote} =
+               AutoPromoteGate.authorize("system", "agent_target")
+
+      assert {:error, :unauthorized_auto_promote} =
+               AutoPromoteGate.authorize(nil, "agent_target")
+
+      assert {:error, :unauthorized_auto_promote} =
+               AutoPromoteGate.authorize("", "agent_target")
+    end
+
+    @tag :fast
+    test "behavioral: always-allow-tool denies when actor lacks auto_promote cap",
+         %{conn: conn} do
+      # H13 behavioral assertion. ChatLive mount grants the actor
+      # arbor://consensus/admin but NOT arbor://trust/auto_promote/*. So a
+      # naked "always-allow-tool" click from a fresh dashboard session must
+      # produce the deny-flash, never silently call Trust.Store.always_allow/2.
+      #
+      # Pre-H13, this handler unconditionally called the trust mutation; this
+      # test pins the gated behavior so a future refactor that bypasses
+      # AutoPromoteGate.authorize/2 is caught here.
+      {:ok, view, _html} = live(conn, "/chat")
+
+      html =
+        render_click(view, "always-allow-tool", %{
+          "id" => "irq_synthetic_test",
+          "agent" => "agent_target_xyz",
+          "resource" => "arbor://shell/exec/rm"
+        })
+
+      assert html =~ "Always Allow requires the trust auto-promote capability.",
+             "H13 regression (behavioral): always-allow-tool must deny without auto_promote cap"
+    end
+  end
 end

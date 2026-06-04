@@ -67,6 +67,7 @@ defmodule Arbor.Dashboard.Live.ConsensusLiveTest do
   end
 
   describe "always-allow authorization decision (H13 regression)" do
+    alias Arbor.Dashboard.Cores.AutoPromoteGate
     alias Arbor.Dashboard.Live.ConsensusLive
 
     test "security regression (H13): non-:authorized decisions deny the auto-promote" do
@@ -76,6 +77,11 @@ defmodule Arbor.Dashboard.Live.ConsensusLiveTest do
       # The fix gates the mutation behind arbor://trust/auto_promote. The pure
       # decision function below is the gate; this test pins every non-OK
       # AuthDecision / Security.authorize result shape to the deny outcome.
+      #
+      # Canonical home: Arbor.Dashboard.Cores.AutoPromoteGate.decision/1.
+      # ConsensusLive.authorize_auto_promote_decision/1 is a backwards-compat
+      # defdelegate. Both are exercised here so a future refactor that drops
+      # either entry point fails this test rather than silently re-opening H13.
       for decision <- [
             {:error, :not_found},
             {:error, :no_capability},
@@ -85,12 +91,18 @@ defmodule Arbor.Dashboard.Live.ConsensusLiveTest do
             {:requires_approval, %{id: "cap_x"}}
           ] do
         assert {:error, :unauthorized_auto_promote} =
+                 AutoPromoteGate.decision(decision),
+               "H13 regression (canonical): decision #{inspect(decision)} must deny auto-promote"
+
+        assert {:error, :unauthorized_auto_promote} =
                  ConsensusLive.authorize_auto_promote_decision(decision),
-               "H13 regression: decision #{inspect(decision)} must deny auto-promote"
+               "H13 regression (shim): decision #{inspect(decision)} must deny auto-promote"
       end
     end
 
     test ":authorized passes the gate" do
+      assert :ok = AutoPromoteGate.decision(:authorized)
+      assert :ok = AutoPromoteGate.decision({:ok, :authorized})
       assert :ok = ConsensusLive.authorize_auto_promote_decision(:authorized)
       assert :ok = ConsensusLive.authorize_auto_promote_decision({:ok, :authorized})
     end

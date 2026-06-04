@@ -21,7 +21,6 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   def mount(_params, _session, socket) do
     {proposals, decisions, stats, topics} = safe_load_all()
     consultations = safe_consultations()
-    pending_approvals = safe_pending_approvals()
 
     socket =
       socket
@@ -34,22 +33,18 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
         selected_events: [],
         selected_consultation: nil,
         status_filter: :all,
-        tab: :proposals,
-        pending_approval_count: length(pending_approvals)
+        tab: :proposals
       )
       |> stream(:proposals, proposals)
       |> stream_configure(:decisions, dom_id: &decision_dom_id/1)
       |> stream(:decisions, decisions)
       |> stream(:consultations, consultations)
-      |> stream(:pending_approvals, pending_approvals)
 
     socket = subscribe_signals(socket, "consensus.*", &reload_consensus/1)
 
-    # H11b: previously called ensure_dashboard_approver_capability/1 here,
-    # which auto-granted arbor://consensus/admin to every user who visited
-    # /consensus. That re-opened the same hole H11 closed in the OIDC login
-    # flow — admin must come from explicit role-to-capability mapping, never
-    # from the act of visiting a dashboard route.
+    # H11b: this call is a no-op today (mount_grant_resources/0 returns [])
+    # but the call site is kept as a stable anchor for future legitimate
+    # mount-time grants and so the H11b regression test has a target.
     ensure_dashboard_approver_capability(socket)
 
     {:ok, socket}
@@ -58,14 +53,12 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   defp reload_consensus(socket) do
     {proposals, decisions, stats, topics} = safe_load_all()
     consultations = safe_consultations()
-    pending_approvals = safe_pending_approvals()
 
     socket
-    |> assign(stats: stats, topics: topics, pending_approval_count: length(pending_approvals))
+    |> assign(stats: stats, topics: topics)
     |> stream(:proposals, proposals, reset: true)
     |> stream(:decisions, decisions, reset: true)
     |> stream(:consultations, consultations, reset: true)
-    |> stream(:pending_approvals, pending_approvals, reset: true)
   end
 
   @impl true
@@ -127,92 +120,11 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     {:noreply, socket}
   end
 
-  def handle_event("approve-proposal", %{"id" => proposal_id}, socket) do
-    case safe_force_approve(proposal_id, socket) do
-      :ok ->
-        socket = reload_consensus(socket)
-        {:noreply, put_flash(socket, :info, "Proposal approved: #{proposal_id}")}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Approve failed: #{inspect(reason)}")}
-    end
-  end
-
-  def handle_event(
-        "always-allow-proposal",
-        %{"id" => proposal_id, "agent" => agent_id, "resource" => resource},
-        socket
-      ) do
-    # H13: gate the trust-profile mutation behind an explicit auto-promote
-    # capability. Without this check, any actor that can approve a proposal
-    # could permanently promote the target agent's trust profile to :auto for
-    # any resource — a single-click silent escalation. The mutation only
-    # proceeds when the acting user holds arbor://trust/auto_promote, not just
-    # arbor://consensus/admin.
-    case authorize_auto_promote(socket, agent_id, resource) do
-      :ok ->
-        case safe_force_approve(proposal_id, socket) do
-          :ok ->
-            update_trust_profile_to_auto(agent_id, resource)
-
-            socket = reload_consensus(socket)
-
-            {:noreply,
-             put_flash(
-               socket,
-               :info,
-               "Always allowed #{resource} for #{String.slice(agent_id, 0..20)}..."
-             )}
-
-          {:error, reason} ->
-            {:noreply, put_flash(socket, :error, "Always allow failed: #{inspect(reason)}")}
-        end
-
-      {:error, :unauthorized_auto_promote} ->
-        Logger.warning(
-          "[ConsensusLive] always-allow denied: #{approval_actor_id(socket)} lacks " <>
-            "arbor://trust/auto_promote (target=#{agent_id}, resource=#{resource})"
-        )
-
-        {:noreply,
-         put_flash(
-           socket,
-           :error,
-           "Always allow requires arbor://trust/auto_promote capability."
-         )}
-    end
-  end
-
-  def handle_event("deny-proposal", %{"id" => proposal_id}, socket) do
-    case safe_force_reject(proposal_id, socket) do
-      :ok ->
-        socket = reload_consensus(socket)
-        {:noreply, put_flash(socket, :info, "Proposal denied: #{proposal_id}")}
-
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Deny failed: #{inspect(reason)}")}
-    end
-  end
-
   @impl true
   def render(assigns) do
     ~H"""
     <.dashboard_header title="Consensus" subtitle="Council deliberation and decisions">
       <:actions>
-        <button
-          phx-click="select-tab"
-          phx-value-tab="approvals"
-          class={"aw-btn #{if @tab == :approvals, do: "aw-btn-primary", else: "aw-btn-default"}"}
-          style="position: relative;"
-        >
-          Approvals
-          <span
-            :if={@pending_approval_count > 0}
-            style="position: absolute; top: -6px; right: -6px; background: var(--aw-error, #e74c3c); color: white; border-radius: 50%; width: 20px; height: 20px; font-size: 0.75em; display: flex; align-items: center; justify-content: center;"
-          >
-            {@pending_approval_count}
-          </span>
-        </button>
         <button
           phx-click="select-tab"
           phx-value-tab="proposals"
@@ -238,81 +150,11 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     </.dashboard_header>
 
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-top: 1rem;">
-      <.stat_card
-        value={@pending_approval_count}
-        label="Pending approvals"
-        color={if @pending_approval_count > 0, do: :error, else: :gray}
-      />
       <.stat_card value={@stats.total_proposals} label="Total proposals" color={:blue} />
       <.stat_card value={@stats.active_councils} label="Active councils" color={:purple} />
       <.stat_card value={@stats.approved_count} label="Approved" color={:green} />
       <.stat_card value={@stats.rejected_count} label="Rejected" color={:error} />
       <.stat_card value={@stats.consultation_count} label="Consultations" color={:blue} />
-    </div>
-
-    <%!-- Approvals tab — pending authorization requests needing human action --%>
-    <div style={if @tab != :approvals, do: "display: none;"}>
-      <div id="approvals-stream" phx-update="stream" style="margin-top: 1rem;">
-        <div
-          :for={{dom_id, proposal} <- @streams.pending_approvals}
-          id={dom_id}
-          style="border: 1px solid var(--aw-border, #333); border-radius: 6px; padding: 1rem; margin-bottom: 0.75rem; background: var(--aw-bg-card, #1a1a2e);"
-        >
-          <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem;">
-            <div style="flex: 1;">
-              <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
-                <.badge label="pending" color={:gray} />
-                <strong style="font-size: 0.95em;">{approval_resource(proposal)}</strong>
-              </div>
-              <p style="color: var(--aw-text-muted, #888); font-size: 0.85em; margin: 0;">
-                {proposal.description}
-              </p>
-              <div style="display: flex; gap: 1rem; margin-top: 0.5rem; font-size: 0.8em; color: var(--aw-text-muted, #666);">
-                <span>Agent: {proposal.proposer}</span>
-                <span>ID: <code>{String.slice(proposal.id, 0..15)}</code></span>
-                <span>{Helpers.format_relative_time(proposal.created_at)}</span>
-              </div>
-            </div>
-            <div style="display: flex; gap: 0.5rem; flex-shrink: 0;">
-              <button
-                phx-click="approve-proposal"
-                phx-value-id={proposal.id}
-                class="aw-btn"
-                style="background: var(--aw-green, #27ae60); color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600;"
-              >
-                Approve
-              </button>
-              <button
-                phx-click="always-allow-proposal"
-                phx-value-id={proposal.id}
-                phx-value-agent={proposal.proposer}
-                phx-value-resource={approval_resource(proposal)}
-                class="aw-btn"
-                style="background: var(--aw-blue, #3498db); color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600;"
-                title="Approve and permanently auto-allow this action for this agent"
-              >
-                Always Allow
-              </button>
-              <button
-                phx-click="deny-proposal"
-                phx-value-id={proposal.id}
-                class="aw-btn"
-                style="background: var(--aw-error, #e74c3c); color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 600;"
-              >
-                Deny
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div :if={@pending_approval_count == 0} style="margin-top: 1rem;">
-        <.empty_state
-          icon="✅"
-          title="No pending approvals"
-          hint="When agents request tools requiring approval, they'll appear here for review."
-        />
-      </div>
     </div>
 
     <%!-- Use display:none instead of :if for stream containers — streams inside
@@ -683,8 +525,6 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   defp result_concerns(r), do: ConsensusCore.result_concerns(r)
   defp result_recommendations(r), do: ConsensusCore.result_recommendations(r)
 
-  defp approval_resource(proposal), do: ConsensusCore.approval_resource(proposal)
-
   # ── Safe API wrappers ───────────────────────────────────────────────
 
   defp safe_load_all do
@@ -810,93 +650,13 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     :exit, _ -> []
   end
 
-  defp safe_pending_approvals do
-    proposals = safe_proposals()
-
-    Enum.filter(proposals, fn p ->
-      p.status == :pending and
-        (p.topic == :authorization_request or
-           get_in(p.metadata, [:original_topic]) == :authorization_request)
-    end)
-  end
-
-  defp safe_force_approve(proposal_id, socket) do
-    actor_id = approval_actor_id(socket)
-    Arbor.Consensus.Coordinator.force_approve(proposal_id, actor_id)
-  rescue
-    e -> {:error, Exception.message(e)}
-  catch
-    :exit, reason -> {:error, reason}
-  end
-
-  defp safe_force_reject(proposal_id, socket) do
-    actor_id = approval_actor_id(socket)
-    Arbor.Consensus.Coordinator.force_reject(proposal_id, actor_id)
-  rescue
-    e -> {:error, Exception.message(e)}
-  catch
-    :exit, reason -> {:error, reason}
-  end
-
-  # H13: authorize the always-allow flow under arbor://trust/auto_promote.
-  # The resource URI includes the target agent_id so that a future role-mapping
-  # can scope the cap per-target rather than granting auto-promote on every agent.
-  defp authorize_auto_promote(socket, target_agent_id, _resource_uri) do
-    actor_id = approval_actor_id(socket)
-    resource = "arbor://trust/auto_promote/#{target_agent_id}"
-
-    decision =
-      cond do
-        actor_id == "system" ->
-          # Dev/test path with no OIDC session — fail closed; auto-promote is
-          # never appropriate to grant to the implicit "system" caller from a UI.
-          {:error, :no_actor}
-
-        Code.ensure_loaded?(Arbor.Security) and
-            function_exported?(Arbor.Security, :authorize, 3) ->
-          try do
-            apply(Arbor.Security, :authorize, [actor_id, resource, :write])
-          rescue
-            _ -> {:error, :security_unavailable}
-          catch
-            :exit, _ -> {:error, :security_unavailable}
-          end
-
-        true ->
-          {:error, :security_unavailable}
-      end
-
-    authorize_auto_promote_decision(decision)
-  end
-
-  # Pure decision function — public so the H13 regression test can assert the
-  # gate fires on every non-:authorized result without needing the full Security
-  # runtime in arbor_dashboard's test environment.
+  # Backwards-compat shim for the H13 regression test pinned at this module.
+  # The actual gate lives in `Arbor.Dashboard.Cores.AutoPromoteGate.decision/1`.
   @doc false
   @spec authorize_auto_promote_decision(term()) :: :ok | {:error, :unauthorized_auto_promote}
-  def authorize_auto_promote_decision({:ok, :authorized}), do: :ok
-  def authorize_auto_promote_decision(:authorized), do: :ok
-  def authorize_auto_promote_decision(_), do: {:error, :unauthorized_auto_promote}
-
-  defp update_trust_profile_to_auto(agent_id, resource_uri) do
-    store = Arbor.Trust.Store
-
-    if Code.ensure_loaded?(store) and function_exported?(store, :always_allow, 2) do
-      case apply(store, :always_allow, [agent_id, resource_uri]) do
-        {:ok, _profile} ->
-          Logger.info(
-            "[ConsensusLive] Updated trust profile: #{resource_uri} → :auto for #{agent_id}"
-          )
-
-        {:error, reason} ->
-          Logger.warning("[ConsensusLive] Failed to update trust profile: #{inspect(reason)}")
-      end
-    end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
-  end
+  defdelegate authorize_auto_promote_decision(decision),
+    to: Arbor.Dashboard.Cores.AutoPromoteGate,
+    as: :decision
 
   defp decision_dom_id(%{id: id}), do: "decision-#{id}"
   defp decision_dom_id(%{proposal_id: id}), do: "decision-#{id}"
