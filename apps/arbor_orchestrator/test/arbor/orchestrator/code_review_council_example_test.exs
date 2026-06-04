@@ -3,12 +3,15 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilExampleTest do
   Demo runner for `specs/pipelines/examples/code-review-council.dot`.
   Drops a small Elixir module into a scratch workdir, writes a
   review-spec.json alongside it, runs the parallel-fan-out council
-  against LM Studio, and asserts a report landed on disk.
+  against OpenRouter (qwen3-coder:free), and asserts a report landed
+  on disk.
 
-  Tagged `:integration_lm_studio` — skipped by default. Run manually:
+  Tagged `:llm` — skipped by default. Run manually:
 
       mix test apps/arbor_orchestrator/test/arbor/orchestrator/code_review_council_example_test.exs \\
-        --only integration_lm_studio
+        --include llm
+
+  Requires `OPENROUTER_API_KEY` in env or `.env`.
 
   Exercises engine surface area the other example pipelines don't hit:
     * `parallel` handler with 4 concurrent compute branches
@@ -19,14 +22,15 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilExampleTest do
   """
 
   use ExUnit.Case, async: false
-  # Tagged :llm_local so the default test_helper exclude
+  # Tagged :llm so the default test_helper exclude
   # (`ExUnit.start(exclude: [:llm, :llm_local])`) skips it. Run manually:
   #
   #     mix test apps/arbor_orchestrator/test/arbor/orchestrator/code_review_council_example_test.exs \
-  #       --include llm_local
-  @moduletag :integration_lm_studio
-  @moduletag :llm_local
-  # Each parallel branch hits LM Studio; total wall-clock = max(branch),
+  #       --include llm
+  #
+  # Requires OPENROUTER_API_KEY in env or .env.
+  @moduletag :llm
+  # Each parallel branch hits OpenRouter; total wall-clock = max(branch),
   # but the synthesizer is sequential after. Allow plenty of headroom.
   @moduletag timeout: 1_200_000
 
@@ -211,8 +215,20 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilExampleTest do
       """,
       "code_under_review" => sample_code(),
       "report_path" => report_path,
-      "model_provider" => "lm_studio",
-      "model_id" => "granite-4.1-3b"
+      # OpenRouter chosen over LM Studio for this test because the
+      # council fans out to 4 concurrent LLM calls; a local small model
+      # (granite-4.1-3b) gets overwhelmed and returns 500s under that
+      # load. OpenRouter's hosted tier handles concurrency reliably.
+      #
+      # Model choice — openai/gpt-oss-120b:free — validated empirically:
+      #   - qwen/qwen3-coder:free and most other free OpenRouter models
+      #     aren't in llm_db's catalog → :model_not_found before request
+      #   - openai/gpt-oss-20b:free is cataloged but its upstream
+      #     provider rate-limits free-tier concurrent requests (429)
+      #   - openai/gpt-oss-120b:free is cataloged AND tolerates 4-way
+      #     parallel under the free tier (test wall-clock ~55s)
+      "model_provider" => "openrouter",
+      "model_id" => "openai/gpt-oss-120b:free"
     }
 
     File.write!(Path.join(workdir, spec_path), Jason.encode!(spec_json, pretty: true))
