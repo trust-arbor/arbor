@@ -198,31 +198,27 @@ defmodule Arbor.Comms.InteractionRouter do
 
     pubsub = current_pubsub()
 
-    if pubsub && Code.ensure_loaded?(Phoenix.PubSub) do
-      try do
-        apply(Phoenix.PubSub, :broadcast, [pubsub, topic, payload])
-      rescue
-        e ->
-          Logger.warning(
-            "[InteractionRouter] broadcast failed for #{interaction.request_id}: #{Exception.message(e)}"
-          )
-      catch
-        :exit, reason ->
-          Logger.warning(
-            "[InteractionRouter] broadcast exited for #{interaction.request_id}: #{inspect(reason)}"
-          )
-      end
+    try do
+      Phoenix.PubSub.broadcast(pubsub, topic, payload)
+    rescue
+      e ->
+        Logger.warning(
+          "[InteractionRouter] broadcast failed for #{interaction.request_id}: #{Exception.message(e)}"
+        )
+    catch
+      :exit, reason ->
+        Logger.warning(
+          "[InteractionRouter] broadcast exited for #{interaction.request_id}: #{inspect(reason)}"
+        )
     end
   end
 
-  defp current_pubsub do
-    cond do
-      Process.whereis(Arbor.Dashboard.PubSub) -> Arbor.Dashboard.PubSub
-      Process.whereis(Arbor.Web.PubSub) -> Arbor.Web.PubSub
-      Process.whereis(Arbor.Comms.PubSub) -> Arbor.Comms.PubSub
-      true -> nil
-    end
-  end
+  # HITL traffic is pinned to Arbor.Comms.PubSub — started by
+  # Arbor.Comms.Application, always reachable when arbor_comms is up.
+  # See Arbor.Comms.Application for the rationale (the prior discovery
+  # cond returned nil at supervisor-init time because no other PubSub
+  # existed yet).
+  defp current_pubsub, do: Arbor.Comms.PubSub
 
   defp configured_adapters do
     Application.get_env(:arbor_comms, :interaction_adapters, %{})

@@ -36,29 +36,18 @@ defmodule Arbor.Comms.Supervisor do
   end
 
   # HITL router Phase 1: registry for pending interactions + Phoenix.Tracker
-  # for cluster-aware presence. The router itself is stateless. Started
-  # only when a PubSub server is reachable — without one the tracker
-  # can't be initialized.
+  # for cluster-aware presence. The router itself is stateless. Pinned to
+  # Arbor.Comms.PubSub — that bus is started by Arbor.Comms.Application
+  # ahead of this supervisor, so it's always reachable. Earlier versions
+  # tried Dashboard.PubSub / Web.PubSub first, but those weren't started
+  # by the time this supervisor's init ran — the router pieces silently
+  # never started and HITL escalations queued forever.
   defp maybe_add_interaction_router(children) do
-    if pubsub = interaction_router_pubsub() do
-      children ++
-        [
-          Arbor.Comms.InteractionRegistry,
-          {Arbor.Comms.PresenceTracker, pubsub_server: pubsub}
-        ]
-    else
-      Logger.debug("[Comms.Supervisor] No PubSub server found; InteractionRouter not started")
-      children
-    end
-  end
-
-  defp interaction_router_pubsub do
-    cond do
-      Process.whereis(Arbor.Dashboard.PubSub) -> Arbor.Dashboard.PubSub
-      Process.whereis(Arbor.Web.PubSub) -> Arbor.Web.PubSub
-      Process.whereis(Arbor.Comms.PubSub) -> Arbor.Comms.PubSub
-      true -> nil
-    end
+    children ++
+      [
+        Arbor.Comms.InteractionRegistry,
+        {Arbor.Comms.PresenceTracker, pubsub_server: Arbor.Comms.PubSub}
+      ]
   end
 
   defp maybe_add_channel_restore(children) do

@@ -5,7 +5,15 @@ defmodule Arbor.Comms.Application do
 
   @impl true
   def start(_type, _args) do
+    # Arbor.Comms.PubSub is the canonical bus for HITL InteractionRouter
+    # traffic (presence, dashboard adapter broadcasts, per-agent response
+    # topic). Owning it here — at the lowest library that needs it — means
+    # the router infrastructure is reachable regardless of whether higher
+    # libraries (dashboard, gateway) are present in the umbrella. Without
+    # this, Comms.Supervisor.maybe_add_interaction_router ran before any
+    # other PubSub existed and skipped starting the router pieces silently.
     children = [
+      {Phoenix.PubSub, name: Arbor.Comms.PubSub},
       Arbor.Comms.Supervisor
     ]
 
