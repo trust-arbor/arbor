@@ -54,20 +54,59 @@ defmodule Arbor.Common.Commands.Runtime do
 
       true ->
         case parse_runtime(arg) do
-          {:ok, runtime} ->
-            {:ok,
-             Result.action(
-               "Switching runtime to: #{runtime}",
-               {:switch_runtime, runtime}
-             )}
-
-          :error ->
-            {:ok,
-             Result.error(
-               "Unknown runtime '#{String.trim(arg)}'. Valid runtimes: #{Enum.join(@valid_runtimes, ", ")}."
-             )}
+          {:ok, runtime} -> apply_runtime(runtime, ctx)
+          :error -> {:ok, unknown_runtime_error(arg)}
         end
     end
+  end
+
+  # Performs the side effect — Arbor.Orchestrator.Session.set_runtime/2 —
+  # then returns a Result with the outcome text + a [runtime_changed: r]
+  # effect that interfaces can use for their own follow-up (ChatLive
+  # updates its status row; Discord ignores). Uses runtime indirection
+  # because arbor_common is at Level 0.5 and can't compile-time-depend
+  # on arbor_orchestrator (Level 2).
+  defp apply_runtime(runtime, %Context{session_pid: pid}) when is_pid(pid) do
+    session_mod = Module.concat([:Arbor, :Orchestrator, :Session])
+
+    cond do
+      not Code.ensure_loaded?(session_mod) ->
+        {:ok, Result.error("Cannot switch runtime: Session module not loaded.")}
+
+      not Process.alive?(pid) ->
+        {:ok, Result.error("Cannot switch runtime: session process is no longer alive.")}
+
+      true ->
+        case safe_call(session_mod, :set_runtime, [pid, runtime]) do
+          {:ok, _} ->
+            {:ok,
+             Result.ok(
+               "Runtime set to #{runtime} (effective on next turn).",
+               runtime_changed: runtime
+             )}
+
+          {:error, reason} ->
+            {:ok, Result.error("/runtime failed: #{inspect(reason)}")}
+        end
+    end
+  end
+
+  defp apply_runtime(_runtime, _ctx) do
+    {:ok, Result.error("Cannot switch runtime: session pid missing from context.")}
+  end
+
+  defp safe_call(mod, fun, args) do
+    apply(mod, fun, args)
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp unknown_runtime_error(arg) do
+    Result.error(
+      "Unknown runtime '#{String.trim(arg)}'. Valid runtimes: #{Enum.join(@valid_runtimes, ", ")}."
+    )
   end
 
   # `Context` doesn't yet carry a :runtime field as of Phase 2c; future

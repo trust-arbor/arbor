@@ -52,15 +52,114 @@ defmodule Arbor.Common.Commands.Start do
   def execute(args, %Context{}) do
     case parse_args(args) do
       {:ok, template, opts} ->
-        label = build_label(template, opts)
-        {:ok, Result.action(label, {:start_agent, template, opts})}
+        apply_start(template, opts)
 
       {:error, {:unknown_runtime, value}} ->
         {:ok,
          Result.error(
            "Unknown runtime '#{value}'. Valid runtimes: #{Enum.join(@valid_runtimes, ", ")}."
          )}
+
+      {:error, :missing_template} ->
+        {:ok, Result.error("Usage: /start <template> [name=...] [model=...] [runtime=arbor|acp]")}
     end
+  end
+
+  # Side-effecting dispatch — spawns the agent via
+  # Arbor.Agent.Manager.start_or_resume/3 mirroring `mix arbor.agent
+  # start <template>`. Returns an :agent_started effect carrying the
+  # agent_id, pid, and metadata that interfaces use for their own
+  # follow-up (ChatLive reconnects the socket; Discord binds the
+  # channel and subscribes to signals).
+  #
+  # Runtime indirection because arbor_common is at Level 0.5 and can't
+  # compile-time-depend on arbor_agent (Level 2).
+  defp apply_start(template, opts) do
+    manager_mod = Module.concat([:Arbor, :Agent, :Manager])
+    api_agent_mod = Module.concat([:Arbor, :Agent, :APIAgent])
+
+    cond do
+      not Code.ensure_loaded?(manager_mod) ->
+        {:ok, Result.error("Cannot start agent: Manager module not loaded.")}
+
+      not Code.ensure_loaded?(api_agent_mod) ->
+        {:ok, Result.error("Cannot start agent: APIAgent module not loaded.")}
+
+      true ->
+        run_start(manager_mod, api_agent_mod, template, opts)
+    end
+  end
+
+  defp run_start(manager_mod, api_agent_mod, template, opts) do
+    display_name = Keyword.get(opts, :name, template)
+    model_config = build_model_config(api_agent_mod, opts)
+    start_opts = [template: template, model_config: model_config]
+
+    case safe_call(manager_mod, :start_or_resume, [api_agent_mod, display_name, start_opts]) do
+      {:ok, agent_id, pid} ->
+        text =
+          "Started agent from template #{template} as #{display_name} (#{agent_id})."
+
+        effects = [
+          agent_started: %{
+            agent_id: agent_id,
+            pid: pid,
+            metadata: %{template: template, model_config: model_config}
+          }
+        ]
+
+        effects =
+          case Keyword.get(opts, :runtime) do
+            nil -> effects
+            runtime -> effects ++ [runtime_changed: runtime]
+          end
+
+        {:ok, Result.ok(text, effects)}
+
+      {:error, reason} ->
+        {:ok, Result.error("/start failed: #{inspect(reason)}")}
+    end
+  end
+
+  # Mirrors the shape used by mix arbor.agent start <template>. Falls
+  # back to LLMDefaults when /start doesn't pin model/provider.
+  defp build_model_config(api_agent_mod, opts) do
+    defaults_mod = Module.concat([:Arbor, :Agent, :LLMDefaults])
+
+    model_id =
+      Keyword.get(opts, :model) || safe_default(defaults_mod, :default_model, "claude-sonnet-4-6")
+
+    provider =
+      Keyword.get(opts, :provider) ||
+        safe_default(defaults_mod, :default_provider, :anthropic)
+
+    %{
+      id: model_id,
+      provider: provider,
+      backend: :api,
+      module: api_agent_mod,
+      start_opts: []
+    }
+  end
+
+  defp safe_default(mod, fun, fallback) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, fun, 0) do
+      apply(mod, fun, [])
+    else
+      fallback
+    end
+  rescue
+    _ -> fallback
+  catch
+    :exit, _ -> fallback
+  end
+
+  defp safe_call(mod, fun, args) do
+    apply(mod, fun, args)
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp parse_args(args) do
@@ -106,20 +205,4 @@ defmodule Arbor.Common.Commands.Start do
   defp runtime_atom("arbor"), do: {:ok, :arbor}
   defp runtime_atom("acp"), do: {:ok, :acp}
   defp runtime_atom(_), do: :error
-
-  defp build_label(template, opts) do
-    suffix =
-      opts
-      |> Enum.map_join(", ", fn
-        {:name, v} -> "name=#{v}"
-        {:model, v} -> "model=#{v}"
-        {:runtime, v} -> "runtime=#{v}"
-        {k, v} -> "#{k}=#{inspect(v)}"
-      end)
-
-    case suffix do
-      "" -> "Starting agent from template: #{template}"
-      _ -> "Starting agent from template: #{template} (#{suffix})"
-    end
-  end
 end

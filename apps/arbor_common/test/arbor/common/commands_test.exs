@@ -9,6 +9,21 @@ defmodule Arbor.Common.CommandsTest do
     Context.new(Keyword.put_new(attrs, :origin, :test))
   end
 
+  # Note on Session side-effect testing
+  # ─────────────────────────────────────
+  # The /model, /runtime, and /start commands perform side effects via
+  # runtime-bridged Module.concat calls to Arbor.Orchestrator.Session
+  # and Arbor.Agent.Manager. In arbor_common's isolated test env those
+  # modules aren't loaded (arbor_common is Level 0.5 and can't compile-
+  # time-depend on Level 2), so Code.ensure_loaded? returns false and
+  # the commands surface "Cannot switch X: <Mod> module not loaded."
+  #
+  # These tests pin the failure-mode reachability — confirms parsing
+  # succeeded and the command routed to the side-effect attempt.
+  # Happy-path integration verification lives in arbor_dashboard's
+  # chat_live_test.exs and arbor_orchestrator's session_test.exs
+  # where the full module set is loaded.
+
   describe "Help" do
     alias Arbor.Common.Commands.Help
 
@@ -71,11 +86,15 @@ defmodule Arbor.Common.CommandsTest do
       assert String.contains?(text, "not set") or String.contains?(text, "No model")
     end
 
-    test "switch model with agent returns action" do
-      assert {:ok, %Result{text: text, action: {:switch_model, "gpt-4o"}}} =
-               Model.execute("gpt-4o", ctx(agent_id: "agent_test"))
+    test "switch model with session_pid reaches side-effect attempt" do
+      pid = spawn(fn -> :timer.sleep(:infinity) end)
 
-      assert String.contains?(text, "gpt-4o")
+      assert {:ok, %Result{type: :error, text: text}} =
+               Model.execute("gpt-4o", ctx(agent_id: "agent_test", session_pid: pid))
+
+      # Past parse stage; side effect couldn't load Session module.
+      refute String.contains?(text, "Unknown runtime")
+      assert String.contains?(text, "Session module not loaded")
     end
 
     test "switch model without agent explains limitation" do
@@ -83,20 +102,29 @@ defmodule Arbor.Common.CommandsTest do
       assert String.contains?(text, "no current agent") or String.contains?(text, "Cannot")
     end
 
-    test "switch model with runtime= produces 3-tuple action with runtime opt" do
-      assert {:ok, %Result{text: text, action: {:switch_model, "claude-opus-4-6", opts}}} =
-               Model.execute("claude-opus-4-6 runtime=acp", ctx(agent_id: "agent_test"))
+    test "switch model + runtime: both args parse cleanly" do
+      pid = spawn(fn -> :timer.sleep(:infinity) end)
 
-      assert Keyword.get(opts, :runtime) == :acp
-      assert String.contains?(text, "claude-opus-4-6")
-      assert String.contains?(text, "acp")
+      assert {:ok, %Result{type: :error, text: text}} =
+               Model.execute(
+                 "claude-opus-4-6 runtime=acp",
+                 ctx(agent_id: "agent_test", session_pid: pid)
+               )
+
+      refute String.contains?(text, "Unknown runtime")
+      assert String.contains?(text, "Session module not loaded")
     end
 
-    test "switch model with runtime=arbor works (default runtime explicitly)" do
-      assert {:ok, %Result{action: {:switch_model, "claude-opus-4-6", opts}}} =
-               Model.execute("claude-opus-4-6 runtime=arbor", ctx(agent_id: "agent_test"))
+    test "switch model with runtime=arbor parses (explicit default)" do
+      pid = spawn(fn -> :timer.sleep(:infinity) end)
 
-      assert Keyword.get(opts, :runtime) == :arbor
+      assert {:ok, %Result{type: :error, text: text}} =
+               Model.execute(
+                 "claude-opus-4-6 runtime=arbor",
+                 ctx(agent_id: "agent_test", session_pid: pid)
+               )
+
+      refute String.contains?(text, "Unknown runtime")
     end
 
     test "runtime= with no model points the user at /runtime" do
@@ -116,12 +144,23 @@ defmodule Arbor.Common.CommandsTest do
     end
 
     test "unrelated kwargs are silently skipped" do
-      # Future-compat: unknown kwarg tokens don't break parse.
-      assert {:ok, %Result{action: {:switch_model, "claude-opus-4-6", _opts}}} =
+      pid = spawn(fn -> :timer.sleep(:infinity) end)
+
+      assert {:ok, %Result{type: :error, text: text}} =
                Model.execute(
                  "claude-opus-4-6 future_arg=42 runtime=acp",
-                 ctx(agent_id: "agent_test")
+                 ctx(agent_id: "agent_test", session_pid: pid)
                )
+
+      refute String.contains?(text, "Unknown")
+      assert String.contains?(text, "Session module not loaded")
+    end
+
+    test "missing session_pid in context surfaces error (forward-compat)" do
+      assert {:ok, %Result{type: :error, text: text}} =
+               Model.execute("gpt-4o", ctx(agent_id: "agent_test"))
+
+      assert String.contains?(text, "session pid")
     end
   end
 
@@ -140,19 +179,33 @@ defmodule Arbor.Common.CommandsTest do
       assert String.contains?(text, "arbor") and String.contains?(text, "default")
     end
 
-    test "switch to acp returns action" do
-      assert {:ok, %Result{action: {:switch_runtime, :acp}}} =
-               Runtime.execute("acp", ctx(agent_id: "agent_test"))
+    test "switch to acp reaches side-effect attempt" do
+      pid = spawn(fn -> :timer.sleep(:infinity) end)
+
+      assert {:ok, %Result{type: :error, text: text}} =
+               Runtime.execute("acp", ctx(agent_id: "agent_test", session_pid: pid))
+
+      refute String.contains?(text, "Unknown runtime")
+      assert String.contains?(text, "Session module not loaded")
     end
 
-    test "switch to arbor returns action" do
-      assert {:ok, %Result{action: {:switch_runtime, :arbor}}} =
-               Runtime.execute("arbor", ctx(agent_id: "agent_test"))
+    test "switch to arbor reaches side-effect attempt" do
+      pid = spawn(fn -> :timer.sleep(:infinity) end)
+
+      assert {:ok, %Result{type: :error, text: text}} =
+               Runtime.execute("arbor", ctx(agent_id: "agent_test", session_pid: pid))
+
+      refute String.contains?(text, "Unknown runtime")
     end
 
     test "case-insensitive runtime parse" do
-      assert {:ok, %Result{action: {:switch_runtime, :acp}}} =
-               Runtime.execute("ACP", ctx(agent_id: "agent_test"))
+      pid = spawn(fn -> :timer.sleep(:infinity) end)
+
+      assert {:ok, %Result{type: :error, text: text}} =
+               Runtime.execute("ACP", ctx(agent_id: "agent_test", session_pid: pid))
+
+      refute String.contains?(text, "Unknown runtime")
+      assert String.contains?(text, "Session module not loaded")
     end
 
     test "unknown runtime returns error" do
@@ -181,47 +234,53 @@ defmodule Arbor.Common.CommandsTest do
       assert Start.available?(ctx(agent_id: "agent_test"))
     end
 
-    test "empty args returns usage error" do
+    test "empty args returns usage error (parse-stage)" do
       assert {:ok, %Result{text: text, type: :error}} = Start.execute("", ctx())
       assert String.contains?(text, "Usage:")
       assert String.contains?(text, "/start")
     end
 
-    test "template only emits start_agent action with no opts" do
-      assert {:ok, %Result{text: text, action: {:start_agent, "fizzbuzz", []}}} =
-               Start.execute("fizzbuzz", ctx())
-
-      assert String.contains?(text, "fizzbuzz")
-    end
-
-    test "template + name= kwarg parses into opts" do
-      assert {:ok, %Result{action: {:start_agent, "fizzbuzz", opts}}} =
-               Start.execute("fizzbuzz name=Foo", ctx())
-
-      assert Keyword.get(opts, :name) == "Foo"
-    end
-
-    test "template + model= and runtime= kwargs both parse" do
-      assert {:ok, %Result{action: {:start_agent, "fizzbuzz", opts}}} =
-               Start.execute("fizzbuzz model=claude-opus-4-6 runtime=acp", ctx())
-
-      assert Keyword.get(opts, :model) == "claude-opus-4-6"
-      assert Keyword.get(opts, :runtime) == :acp
-    end
-
-    test "unknown runtime errors with valid options" do
+    test "unknown runtime errors at parse stage" do
       assert {:ok, %Result{text: text, type: :error}} =
                Start.execute("fizzbuzz runtime=garbage", ctx())
 
       assert String.contains?(text, "Unknown runtime")
     end
 
-    test "unrelated kwargs silently skip (future-compat)" do
-      assert {:ok, %Result{action: {:start_agent, "fizzbuzz", opts}}} =
+    # The parsing-success path now performs a side effect via
+    # Arbor.Agent.Manager.start_or_resume/3, which requires the agent
+    # supervision tree to be running. Unit tests can't easily spin that
+    # up — these tests pin the failure-mode reachability: parsing
+    # succeeded (no "Usage:" / "Unknown runtime" prefix), but the side
+    # effect surfaces an error from Manager. Integration verification
+    # of the happy path lives alongside the actual agent supervisor
+    # boot.
+
+    test "template + valid args reach the side-effect stage" do
+      assert {:ok, %Result{type: :error, text: text}} =
+               Start.execute("fizzbuzz name=Foo runtime=arbor", ctx())
+
+      refute String.contains?(text, "Usage:")
+      refute String.contains?(text, "Unknown runtime")
+      # Side effect attempted; Manager module not loaded in arbor_common
+      # test env (correct per hierarchy — arbor_common can't depend on
+      # arbor_agent). Either error message proves dispatch reached the
+      # side-effect stage.
+      assert String.contains?(text, "/start failed:") or
+               String.contains?(text, "Manager module not loaded")
+    end
+
+    test "unrelated kwargs silently skip — parse still succeeds" do
+      # Future-compat: unknown kwarg tokens don't break parse. The
+      # side effect still fails (no Manager loaded) but the failure
+      # is past the parse stage.
+      assert {:ok, %Result{type: :error, text: text}} =
                Start.execute("fizzbuzz future_arg=42 name=Foo", ctx())
 
-      assert Keyword.get(opts, :name) == "Foo"
-      refute Keyword.has_key?(opts, :future_arg)
+      refute String.contains?(text, "Unknown")
+
+      assert String.contains?(text, "/start failed:") or
+               String.contains?(text, "Manager module not loaded")
     end
   end
 
