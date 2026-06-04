@@ -220,6 +220,120 @@ defmodule Arbor.Common.ModelProfileTest do
   end
 
   # ===========================================================================
+  # entry/1 — ModelEntry registry (Phase 1 item 9)
+  # ===========================================================================
+
+  describe "entry/1 — migrated exemplars" do
+    alias Arbor.Contracts.LLM.{ModelEntry, ProviderEntry}
+
+    test "claude-opus-4-6 returns full ModelEntry with three providers" do
+      entry = ModelProfile.entry("claude-opus-4-6")
+
+      assert %ModelEntry{canonical_id: "claude-opus-4-6", family: :claude} = entry
+      assert entry.context_window == 200_000
+      assert entry.max_output_tokens == 32_000
+      assert entry.effective_window_pct == 0.75
+      assert :tool_use in entry.capabilities
+      assert :extended_thinking in entry.capabilities
+
+      provider_ids = Enum.map(entry.providers, & &1.id)
+      assert :anthropic_direct in provider_ids
+      assert :openrouter in provider_ids
+      assert :claude_subscription in provider_ids
+
+      anthropic = ModelEntry.provider(entry, :anthropic_direct)
+      assert %ProviderEntry{auth: :api_key, runtimes: [:arbor]} = anthropic
+      assert anthropic.pricing.input_per_mtok == 15.0
+      assert anthropic.pricing.cache_read_per_mtok == 1.50
+
+      sub = ModelEntry.provider(entry, :claude_subscription)
+      assert sub.auth == :oauth
+      assert :acp in sub.runtimes
+      assert :arbor in sub.runtimes
+    end
+
+    test "claude-sonnet-4-6 returns full ModelEntry" do
+      entry = ModelProfile.entry("claude-sonnet-4-6")
+      assert entry.max_output_tokens == 64_000
+      assert :prompt_cache in entry.capabilities
+    end
+
+    test "gpt-5-nano returns full ModelEntry with OpenAI + OpenRouter paths" do
+      entry = ModelProfile.entry("gpt-5-nano")
+      assert entry.family == :gpt
+      assert :tool_use in entry.capabilities
+      assert Enum.map(entry.providers, & &1.id) == [:openai, :openrouter]
+    end
+
+    test "gemini-2.0-flash returns full ModelEntry with Vertex path" do
+      entry = ModelProfile.entry("gemini-2.0-flash")
+      assert entry.context_window == 1_000_000
+      vertex = ModelEntry.provider(entry, :vertex)
+      assert vertex.auth == :gcp
+    end
+
+    test "openai/gpt-oss-120b:free is migrated as an openrouter-free entry" do
+      entry = ModelProfile.entry("openai/gpt-oss-120b:free")
+      assert entry.family == :openrouter_free
+      assert [%ProviderEntry{id: :openrouter}] = entry.providers
+      assert length(entry.caveats) >= 1
+    end
+  end
+
+  describe "entry/1 — synthesis fallback for unmigrated legacy entries" do
+    alias Arbor.Contracts.LLM.{ModelEntry, ProviderEntry}
+
+    test "gpt-4o (legacy short-form) synthesizes a single :legacy provider" do
+      entry = ModelProfile.entry("gpt-4o")
+
+      assert %ModelEntry{canonical_id: "gpt-4o", family: :gpt} = entry
+      # Pulled from legacy short shape:
+      assert entry.context_window == 128_000
+      assert entry.max_output_tokens == 16_384
+      assert entry.effective_window_pct == 0.75
+      # Synthesized:
+      assert [%ProviderEntry{id: :legacy, auth: :api_key, runtimes: [:arbor]}] = entry.providers
+      assert entry.capabilities == []
+      assert Enum.any?(entry.caveats, &String.contains?(&1, "Synthesized"))
+    end
+
+    test "unknown model still synthesizes via family-pattern fallback" do
+      entry = ModelProfile.entry("some-future-claude-variant")
+      assert entry.family == :claude
+      assert entry.context_window == 200_000
+      assert [%ProviderEntry{id: :legacy}] = entry.providers
+    end
+
+    test "completely unknown model falls back to defaults with :legacy provider" do
+      entry = ModelProfile.entry("totally-unknown-thing-9000")
+      assert entry.family == :unknown
+      assert entry.context_window == ModelProfile.default_context_size()
+      assert [%ProviderEntry{id: :legacy}] = entry.providers
+    end
+  end
+
+  describe "entry/1 — backwards-compat with existing API" do
+    test "get/1 still returns the legacy map shape unchanged" do
+      profile = ModelProfile.get("claude-opus-4-6")
+      assert profile.context_size == 200_000
+      assert profile.max_output_tokens == 32_000
+      assert profile.family == :claude
+      assert profile.effective_window_pct == 0.75
+    end
+
+    test "context_size/1, max_output_tokens/1, family/1 unchanged for migrated entries" do
+      assert ModelProfile.context_size("claude-opus-4-6") == 200_000
+      assert ModelProfile.max_output_tokens("claude-opus-4-6") == 32_000
+      assert ModelProfile.family("claude-opus-4-6") == :claude
+    end
+
+    test "context_size/1, max_output_tokens/1 unchanged for unmigrated entries" do
+      assert ModelProfile.context_size("gpt-4o") == 128_000
+      assert ModelProfile.max_output_tokens("gpt-4o") == 16_384
+    end
+  end
+
+  # ===========================================================================
   # Doctests
   # ===========================================================================
 

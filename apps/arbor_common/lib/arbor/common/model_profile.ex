@@ -176,6 +176,173 @@ defmodule Arbor.Common.ModelProfile do
     {"trinity", :openrouter_free}
   ]
 
+  # -- ModelEntry registry (Phase 1) --
+  # Exemplar entries migrated to the full `Arbor.Contracts.LLM.ModelEntry`
+  # shape. Unmigrated models still resolve through the legacy short-form
+  # `@profiles` map below — `entry/1` synthesizes a `%ModelEntry{}` from
+  # the short shape so callers can use the new API uniformly during the
+  # migration window. One exemplar per family covers the variation.
+
+  defp model_entries do
+    %{
+      "claude-opus-4-6" => %{
+        canonical_id: "claude-opus-4-6",
+        family: :claude,
+        context_window: 200_000,
+        max_output_tokens: 32_000,
+        effective_window_pct: 0.75,
+        capabilities: [
+          :tool_use,
+          :vision,
+          :prompt_cache,
+          :extended_thinking,
+          :json_mode,
+          :streaming,
+          :reasoning_content
+        ],
+        caveats: [],
+        providers: [
+          %{
+            id: :anthropic_direct,
+            ref: "claude-opus-4-6",
+            auth: :api_key,
+            runtimes: [:arbor],
+            pricing: %{
+              input_per_mtok: 15.00,
+              output_per_mtok: 75.00,
+              cache_read_per_mtok: 1.50,
+              cache_write_per_mtok: 18.75
+            }
+          },
+          %{
+            id: :openrouter,
+            ref: "anthropic/claude-opus-4-6",
+            auth: :api_key,
+            runtimes: [:arbor]
+          },
+          %{
+            id: :claude_subscription,
+            ref: "opus",
+            auth: :oauth,
+            runtimes: [:arbor, :acp]
+          }
+        ]
+      },
+      "claude-sonnet-4-6" => %{
+        canonical_id: "claude-sonnet-4-6",
+        family: :claude,
+        context_window: 200_000,
+        max_output_tokens: 64_000,
+        effective_window_pct: 0.75,
+        capabilities: [
+          :tool_use,
+          :vision,
+          :prompt_cache,
+          :extended_thinking,
+          :json_mode,
+          :streaming,
+          :reasoning_content
+        ],
+        caveats: [],
+        providers: [
+          %{
+            id: :anthropic_direct,
+            ref: "claude-sonnet-4-6",
+            auth: :api_key,
+            runtimes: [:arbor],
+            pricing: %{
+              input_per_mtok: 3.00,
+              output_per_mtok: 15.00,
+              cache_read_per_mtok: 0.30,
+              cache_write_per_mtok: 3.75
+            }
+          },
+          %{
+            id: :openrouter,
+            ref: "anthropic/claude-sonnet-4-6",
+            auth: :api_key,
+            runtimes: [:arbor]
+          },
+          %{
+            id: :claude_subscription,
+            ref: "sonnet",
+            auth: :oauth,
+            runtimes: [:arbor, :acp]
+          }
+        ]
+      },
+      "gpt-5-nano" => %{
+        canonical_id: "gpt-5-nano",
+        family: :gpt,
+        context_window: 128_000,
+        max_output_tokens: 16_384,
+        effective_window_pct: 0.75,
+        capabilities: [:tool_use, :vision, :json_mode, :streaming],
+        caveats: [],
+        providers: [
+          %{
+            id: :openai,
+            ref: "gpt-5-nano",
+            auth: :api_key,
+            runtimes: [:arbor]
+          },
+          %{
+            id: :openrouter,
+            ref: "openai/gpt-5-nano",
+            auth: :api_key,
+            runtimes: [:arbor]
+          }
+        ]
+      },
+      "gemini-2.0-flash" => %{
+        canonical_id: "gemini-2.0-flash",
+        family: :gemini,
+        context_window: 1_000_000,
+        max_output_tokens: 8_192,
+        effective_window_pct: 0.75,
+        capabilities: [:tool_use, :vision, :json_mode, :streaming],
+        caveats: [],
+        providers: [
+          %{
+            id: :gemini,
+            ref: "gemini-2.0-flash",
+            auth: :api_key,
+            runtimes: [:arbor]
+          },
+          %{
+            id: :vertex,
+            ref: "gemini-2.0-flash-001",
+            auth: :gcp,
+            runtimes: [:arbor]
+          },
+          %{
+            id: :openrouter,
+            ref: "google/gemini-2.0-flash-exp",
+            auth: :api_key,
+            runtimes: [:arbor]
+          }
+        ]
+      },
+      "openai/gpt-oss-120b:free" => %{
+        canonical_id: "openai/gpt-oss-120b:free",
+        family: :openrouter_free,
+        context_window: 131_072,
+        max_output_tokens: 8_192,
+        effective_window_pct: 0.75,
+        capabilities: [:tool_use, :json_mode, :streaming],
+        caveats: ["OpenRouter free tier — rate limits and provider availability vary"],
+        providers: [
+          %{
+            id: :openrouter,
+            ref: "openai/gpt-oss-120b:free",
+            auth: :api_key,
+            runtimes: [:arbor]
+          }
+        ]
+      }
+    }
+  end
+
   # -- Public API --
 
   @doc """
@@ -194,6 +361,86 @@ defmodule Arbor.Common.ModelProfile do
       max_output_tokens: base[:max_output_tokens] || @default_max_output,
       family: base[:family] || :unknown
     }
+  end
+
+  @doc """
+  Return the full `%Arbor.Contracts.LLM.ModelEntry{}` for `model_id`.
+
+  Phase 1 (item 9): for the five migrated exemplars, returns the registered
+  entry with full provider list, capabilities, and caveats. For everything
+  else, synthesizes a single-provider entry from the legacy short-form
+  profile so callers can use the new API uniformly during migration.
+
+  Synthesized entries have a synthetic `:legacy` provider with
+  `auth: :api_key, runtimes: [:arbor]` and no pricing — that's the best
+  guess from the legacy short shape. Migrate the entry to the full
+  `ModelEntry` shape above to get accurate provider+pricing info.
+  """
+  @spec entry(model_id()) :: Arbor.Contracts.LLM.ModelEntry.t()
+  def entry(model_id) when is_binary(model_id) do
+    case lookup_entry(model_id) do
+      {:ok, %Arbor.Contracts.LLM.ModelEntry{} = e} ->
+        e
+
+      :not_migrated ->
+        synthesize_entry(model_id)
+    end
+  end
+
+  defp lookup_entry(model_id) do
+    case Map.get(model_entries(), model_id) do
+      nil ->
+        case String.split(model_id, ":", parts: 2) do
+          [_provider, stripped] ->
+            case Map.get(model_entries(), stripped) do
+              nil -> :not_migrated
+              attrs -> build_entry(attrs)
+            end
+
+          _ ->
+            :not_migrated
+        end
+
+      attrs ->
+        build_entry(attrs)
+    end
+  end
+
+  defp build_entry(attrs) do
+    case Arbor.Contracts.LLM.ModelEntry.new(attrs) do
+      {:ok, e} -> {:ok, e}
+      # If a migrated entry fails validation it's a code bug — surface it
+      # via the synthesized fallback rather than crashing the caller, but
+      # the test suite will catch a malformed registered entry.
+      {:error, _} -> :not_migrated
+    end
+  end
+
+  defp synthesize_entry(model_id) do
+    profile = get(model_id)
+
+    {:ok, entry} =
+      Arbor.Contracts.LLM.ModelEntry.new(%{
+        canonical_id: model_id,
+        family: profile.family,
+        context_window: profile.context_size,
+        max_output_tokens: profile.max_output_tokens,
+        effective_window_pct: profile.effective_window_pct,
+        capabilities: [],
+        caveats: [
+          "Synthesized from legacy ModelProfile — migrate to full ModelEntry for accurate provider/pricing info"
+        ],
+        providers: [
+          %{
+            id: :legacy,
+            ref: model_id,
+            auth: :api_key,
+            runtimes: [:arbor]
+          }
+        ]
+      })
+
+    entry
   end
 
   @doc """
