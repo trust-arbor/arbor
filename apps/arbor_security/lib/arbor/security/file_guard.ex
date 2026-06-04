@@ -272,12 +272,21 @@ defmodule Arbor.Security.FileGuard do
           end
 
         {:error, :not_found} ->
-          # Target doesn't exist yet — no escape possible because
-          # there's nothing to follow. The caller may be about to
-          # create the file; the eventual I/O system call will fail
-          # with :enoent if that's not the case. The string-normalized
-          # path stays within root (resolve_within already verified).
-          {:ok, normalized}
+          # Target doesn't exist yet (legitimate at URI-authorize time
+          # — the caller may be about to write/create the file). But
+          # we still need to catch the case where an INTERMEDIATE
+          # directory on the path is a symlink/junction escaping the
+          # root. Without this, an agent with `arbor://fs/write/safe/`
+          # could authorize `arbor://fs/write/safe/sublink/new.txt`
+          # where `safe/sublink` is a symlink to `/etc`, and the
+          # eventual write lands at `/etc/new.txt`.
+          #
+          # NOTE: we deliberately do NOT check the cap's root itself.
+          # If the operator granted a cap on a directory that they
+          # set up to be a symlink, that's their choice and the cap
+          # grants what it says it grants. We only check directories
+          # BETWEEN the root and the requested path.
+          verify_ancestor_chain(normalized, root, normalized)
 
         {:error, _} ->
           # Other resolution failure (permission, broken link target,
@@ -285,6 +294,62 @@ defmodule Arbor.Security.FileGuard do
           # real error.
           {:ok, normalized}
       end
+    end
+  end
+
+  # Walk upward from the path's parent, checking each existing
+  # ancestor's real path stays within root. Stops at the cap root
+  # itself (we never check root's own symlink resolution; see
+  # safe_normalize_uri_path/2 comment for rationale).
+  #
+  # Returns {:ok, normalized} or {:error, :symlink_escape}.
+  defp verify_ancestor_chain(path, root, normalized) do
+    parent = Path.dirname(path)
+
+    cond do
+      # Reached filesystem root without hitting cap root — shouldn't
+      # happen if SafePath.resolve_within already verified containment,
+      # but trust the string check if we get here.
+      parent == path ->
+        {:ok, normalized}
+
+      # Reached the cap root. By design, we don't check root's symlink
+      # resolution — it's the operator's responsibility what the
+      # logical name points to.
+      parent == root ->
+        {:ok, normalized}
+
+      # Path traversal somehow took us outside root. Belt and
+      # suspenders; resolve_within should have caught this earlier.
+      not String.starts_with?(parent, root <> "/") ->
+        {:ok, normalized}
+
+      # This ancestor doesn't exist either — walk up to find one that
+      # does.
+      not File.exists?(parent) ->
+        verify_ancestor_chain(parent, root, normalized)
+
+      true ->
+        # Ancestor exists. Resolve its real path and confirm it stays
+        # within root.
+        case SafePath.resolve_real(parent) do
+          {:ok, real} ->
+            case SafePath.resolve_within(real, root) do
+              {:ok, _} ->
+                # This ancestor is fine; continue walking up. We can't
+                # short-circuit here because an OUTER ancestor could
+                # still be a symlink escaping root.
+                verify_ancestor_chain(parent, root, normalized)
+
+              {:error, _} ->
+                {:error, :symlink_escape}
+            end
+
+          {:error, _} ->
+            # Resolution failure on existing dir — trust the string
+            # check.
+            {:ok, normalized}
+        end
     end
   end
 
