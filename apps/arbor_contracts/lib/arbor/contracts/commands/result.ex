@@ -33,6 +33,12 @@ defmodule Arbor.Contracts.Commands.Result do
   - `:compact` — caller should compact the current session's messages
   - `{:switch_model, name :: String.t()}` — caller should switch the current
     agent to the named model
+  - `{:switch_model, name :: String.t(), opts :: keyword()}` — extended form
+    that carries per-switch overrides. Currently supports
+    `runtime: atom()` for `(model, runtime)` switches via `/model X runtime=acp`.
+  - `{:switch_runtime, runtime :: atom()}` — caller should switch the
+    current agent's runtime without changing the model. Emitted by the
+    `/runtime` slash command.
 
   Future: `{:spawn_agent, template}`, `{:delete_agent, id}`,
   `{:dispatch_action, fully_qualified, args}`, etc.
@@ -53,6 +59,8 @@ defmodule Arbor.Contracts.Commands.Result do
           | :clear
           | :compact
           | {:switch_model, String.t()}
+          | {:switch_model, String.t(), keyword()}
+          | {:switch_runtime, atom()}
 
   typedstruct do
     @typedoc "Output of a slash command"
