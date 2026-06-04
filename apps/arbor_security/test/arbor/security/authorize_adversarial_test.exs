@@ -362,6 +362,64 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
                match?({:ok, :authorized}, Security.authorize(agent, legit_uri))
     end
 
+    test "non-existent file with intermediate-symlink parent is rejected (write-path defense)",
+         %{agent_id: agent, workdir: workdir} do
+      # SECURITY REGRESSION TEST (per CLAUDE.md) — fails on HEAD~1
+      # (returns :authorized), passes on HEAD (returns :symlink_escape).
+      #
+      # The write-path attack: agent has `arbor://fs/write/<safe>/`,
+      # safe contains a symlink `safe/redirect/` pointing outside.
+      # Agent authorizes `arbor://fs/write/<safe>/redirect/newfile.txt`
+      # where newfile.txt doesn't exist yet. Without the ancestor-chain
+      # check, FileGuard's :not_found branch skips symlink resolution
+      # and authorizes — the eventual write lands outside the cap root.
+      safe_dir = Path.join(workdir, "writescape_safe")
+      outside_dir = Path.join(workdir, "writescape_outside")
+      File.mkdir_p!(safe_dir)
+      File.mkdir_p!(outside_dir)
+
+      # Create the symlinked sub-directory inside safe.
+      redirect_path = Path.join(safe_dir, "redirect")
+      File.ln_s!(outside_dir, redirect_path)
+
+      cap_uri = "arbor://fs/write#{safe_dir}/"
+
+      {:ok, _} =
+        Security.grant(
+          principal: agent,
+          resource: cap_uri
+        )
+
+      # Target doesn't exist (would be created by an eventual write).
+      # The URI itself contains no `..`. The intermediate `redirect`
+      # directory IS a symlink escaping safe_dir.
+      target_uri = "arbor://fs/write#{safe_dir}/redirect/newfile.txt"
+
+      assert {:error, :symlink_escape} = Security.authorize(agent, target_uri)
+    end
+
+    test "non-existent file in a real subdirectory of root still authorizes (no false positive)",
+         %{agent_id: agent, safe_dir: safe_dir} do
+      # Counterpart to the test above — confirms the ancestor walk
+      # doesn't false-positive on legitimate non-symlinked
+      # intermediate directories.
+      sub = Path.join(safe_dir, "real_subdir")
+      File.mkdir_p!(sub)
+
+      cap_uri = "arbor://fs/write#{safe_dir}/"
+
+      {:ok, _} =
+        Security.grant(
+          principal: agent,
+          resource: cap_uri
+        )
+
+      target_uri = "arbor://fs/write#{safe_dir}/real_subdir/will_be_written.txt"
+
+      assert match?({:ok, :authorized, _}, Security.authorize(agent, target_uri)) or
+               match?({:ok, :authorized}, Security.authorize(agent, target_uri))
+    end
+
     test "non-fs URI is unaffected by the FileGuard wiring",
          %{agent_id: agent} do
       # Confirm we didn't introduce a regression for shell / api caps.
