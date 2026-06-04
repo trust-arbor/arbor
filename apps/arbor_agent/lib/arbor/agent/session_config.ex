@@ -21,6 +21,10 @@ defmodule Arbor.Agent.SessionConfig do
   - `:trust_tier` — agent trust tier (default: :established)
   - `:provider` — LLM provider atom
   - `:model` — LLM model string
+  - `:runtime` — LLM runtime atom (`:arbor` | `:acp`, default `:arbor`).
+    Controls which `Arbor.AI.Runtime` adapter executes turns. Plumbed
+    through to the DOT pipeline context as `"session.llm_runtime"` and
+    consumed by `Arbor.Orchestrator.Handlers.LlmHandler`.
   - `:system_prompt` — system prompt for the session
   - `:tools` — list of tool name strings or action modules
   - `:start_heartbeat` — whether to start heartbeat (default: true)
@@ -34,6 +38,7 @@ defmodule Arbor.Agent.SessionConfig do
   def build(agent_id, opts) do
     trust_tier = Keyword.get(opts, :trust_tier, :established)
     provider = Keyword.get(opts, :provider)
+    runtime = Keyword.get(opts, :runtime, :arbor)
 
     tool_names = resolve_tool_names(Keyword.get(opts, :tools))
 
@@ -41,6 +46,7 @@ defmodule Arbor.Agent.SessionConfig do
       %{}
       |> maybe_put("llm_provider", if(provider, do: to_string(provider)))
       |> maybe_put("llm_model", Keyword.get(opts, :model))
+      |> maybe_put("llm_runtime", runtime)
       |> maybe_put("system_prompt", Keyword.get(opts, :system_prompt))
       |> maybe_put("tools", tool_names)
 

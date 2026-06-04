@@ -372,6 +372,16 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         Map.get(node.attrs, "model") ||
         Context.get(context, "session.llm_model")
 
+    # Runtime axis (Phase 2d): per-turn node attr > Session config > :arbor.
+    # Maps directly to request.runtime, which the registered
+    # Arbor.AI.Runtime.<atom> adapter then dispatches against.
+    runtime =
+      case Map.get(node.attrs, "llm_runtime") do
+        nil -> Context.get(context, "session.llm_runtime", :arbor)
+        atom when is_atom(atom) -> atom
+        str when is_binary(str) -> safe_runtime_atom(str)
+      end
+
     # Sensitivity routing: reroute if the current provider can't handle the data
     case maybe_route_by_sensitivity(provider, model, context) do
       {:error, _} = error ->
@@ -382,6 +392,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
          %Request{
            provider: routed_provider,
            model: routed_model,
+           runtime: runtime,
            messages: messages,
            max_tokens: parse_int(Map.get(node.attrs, "max_tokens"), 4096),
            temperature: parse_float(Map.get(node.attrs, "temperature"), 0.7),
@@ -712,6 +723,13 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   end
 
   defp safe_to_atom(_), do: :unknown
+
+  # Restrict runtime atom conversion to the known set. Unknown strings
+  # fall back to :arbor (the safe default) rather than failing the turn
+  # — a typo in `llm_runtime="arbour"` shouldn't break the LLM call.
+  defp safe_runtime_atom("arbor"), do: :arbor
+  defp safe_runtime_atom("acp"), do: :acp
+  defp safe_runtime_atom(_), do: :arbor
 
   defp parse_float(nil, default), do: default
   defp parse_float(value, _default) when is_float(value), do: value
