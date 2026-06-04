@@ -108,13 +108,14 @@ Currently identity-aware:
 - `mix arbor.pipeline.run` — signs checkpoints, fails if no identity
 - `mix arbor.pipeline.resume` — verifies HMAC, fails if no identity OR identity doesn't match
 
-Not yet wired:
+Not wired, by design:
 
-- `mix arbor.orchestrate`
-- `mix arbor.pipeline.benchmark`
-- `mix arbor.pipeline.eval`
+- `mix arbor.pipeline.benchmark` — benchmarking workload. Already has `--no-checkpoint` for overhead measurement. Resume isn't a normal operational mode.
+- `mix arbor.pipeline.eval` — eval runs (accuracy testing, model comparison) are run-to-completion. Eval failures get rerun from scratch with adjusted parameters, not resumed.
 
-These tasks still work but produce unsigned checkpoints that can't be resumed via `arbor.pipeline.resume`. They can be migrated incrementally by adding `:identity_key` to their `OptionParser.parse` strict list and merging `load_identity/1`'s result into their run opts (see how `arbor.pipeline.run.ex` does it).
+Not yet wired, real follow-up:
+
+- `mix arbor.orchestrate` — uses OIDC auth via `Arbor.Security.authenticate_oidc_token` which returns `{agent_id, signer}` without exposing the underlying private key. Wiring `:identity_private_key` here needs a design call: either refactor `authenticate_oidc_token` to also return the key, OR load file-based identity in parallel with OIDC (and pick which identity binds the HMAC). Not mechanical; touches the auth composition between OIDC and file-based identity.
 
 ## Related
 
