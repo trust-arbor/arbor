@@ -33,6 +33,9 @@ defmodule ArborComms.MixProject do
       {:req, "~> 0.5"},
       {:swoosh, "~> 1.17"},
       {:gen_smtp, "~> 1.2"},
+      # Phoenix.Tracker (presence) + Phoenix.PubSub (response routing) —
+      # InteractionRouter Phase 1.
+      {:phoenix_pubsub, "~> 2.1"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
