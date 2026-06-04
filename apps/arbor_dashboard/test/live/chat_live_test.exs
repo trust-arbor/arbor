@@ -121,13 +121,16 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
     end
   end
 
-  describe "ChatLive start-agent with unknown model" do
+  describe "ChatLive no-agent state (Phase 2c)" do
     @tag :fast
-    test "start-agent with unknown model shows error", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/chat")
+    test "renders the slash-command hint pointing at /start and Agents dashboard", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/chat")
 
-      html = render_click(view, "start-agent", %{"model" => "nonexistent-model"})
-      assert html =~ "Unknown model"
+      assert html =~ "/start"
+      assert html =~ "Agents dashboard" or html =~ "/agents"
+      # Negative: the old dropdown form is gone.
+      refute html =~ ~s(phx-submit="start-agent")
+      refute html =~ ~s(<select name="model")
     end
   end
 
