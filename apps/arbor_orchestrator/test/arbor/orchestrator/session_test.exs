@@ -1427,4 +1427,93 @@ defmodule Arbor.Orchestrator.SessionTest do
       end
     end
   end
+
+  describe "Session mutator API (Phase 2d)" do
+    @describetag :fast
+
+    setup do
+      tmp_dir =
+        Path.join(
+          System.tmp_dir!(),
+          "arbor_session_mutator_test_#{:erlang.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(tmp_dir)
+
+      turn_dot = """
+      digraph Turn {
+        graph [goal="Mutator test"]
+        start [shape=Mdiamond]
+        done [shape=Msquare]
+        start -> done
+      }
+      """
+
+      turn_path = Path.join(tmp_dir, "turn.dot")
+      heartbeat_path = Path.join(tmp_dir, "heartbeat.dot")
+      File.write!(turn_path, turn_dot)
+      File.write!(heartbeat_path, turn_dot)
+
+      on_exit(fn -> File.rm_rf(tmp_dir) end)
+
+      {:ok, pid} =
+        Arbor.Orchestrator.Session.start_link(
+          session_id: "mutator-test-#{:erlang.unique_integer([:positive])}",
+          agent_id: "agent_mutator_test",
+          trust_tier: :established,
+          turn_dot: turn_path,
+          heartbeat_dot: heartbeat_path,
+          adapters: %{},
+          start_heartbeat: false,
+          config: %{"llm_model" => "old-model", "llm_provider" => "anthropic"}
+        )
+
+      {:ok, pid: pid}
+    end
+
+    test "set_model/2 updates state.config['llm_model']", %{pid: pid} do
+      alias Arbor.Orchestrator.Session
+      assert {:ok, "new-model"} = Session.set_model(pid, "new-model")
+      assert Session.get_state(pid).config["llm_model"] == "new-model"
+      # Other keys untouched
+      assert Session.get_state(pid).config["llm_provider"] == "anthropic"
+    end
+
+    test "set_provider/2 accepts atom and string", %{pid: pid} do
+      alias Arbor.Orchestrator.Session
+      assert {:ok, "openai"} = Session.set_provider(pid, :openai)
+      assert Session.get_state(pid).config["llm_provider"] == "openai"
+
+      assert {:ok, "google"} = Session.set_provider(pid, "google")
+      assert Session.get_state(pid).config["llm_provider"] == "google"
+    end
+
+    test "set_runtime/2 accepts :arbor and :acp", %{pid: pid} do
+      alias Arbor.Orchestrator.Session
+      assert {:ok, :acp} = Session.set_runtime(pid, :acp)
+      assert Session.get_state(pid).config["llm_runtime"] == :acp
+
+      assert {:ok, :arbor} = Session.set_runtime(pid, :arbor)
+      assert Session.get_state(pid).config["llm_runtime"] == :arbor
+    end
+
+    test "set_runtime/2 rejects unknown atoms without hitting the GenServer", %{pid: pid} do
+      alias Arbor.Orchestrator.Session
+      assert {:error, {:invalid_runtime, :garbage}} = Session.set_runtime(pid, :garbage)
+      # State unchanged.
+      refute Map.has_key?(Session.get_state(pid).config, "llm_runtime")
+    end
+
+    test "mutations persist across multiple calls", %{pid: pid} do
+      alias Arbor.Orchestrator.Session
+      assert {:ok, _} = Session.set_model(pid, "model-a")
+      assert {:ok, _} = Session.set_runtime(pid, :acp)
+      assert {:ok, _} = Session.set_provider(pid, :openai)
+
+      config = Session.get_state(pid).config
+      assert config["llm_model"] == "model-a"
+      assert config["llm_runtime"] == :acp
+      assert config["llm_provider"] == "openai"
+    end
+  end
 end
