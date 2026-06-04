@@ -87,7 +87,7 @@ defmodule Arbor.Agent.Templates.Conversationalist do
       version: "1.0.0",
       category: :conversational,
       context_management: :heuristic,
-      model: "arcee-ai/trinity-large-preview:free",
+      model: "openai/gpt-oss-120b:free",
       provider: :openrouter
     }
   end
