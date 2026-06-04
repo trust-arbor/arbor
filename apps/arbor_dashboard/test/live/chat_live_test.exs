@@ -230,4 +230,87 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
              "H13 regression (behavioral): always-allow-tool must deny without auto_promote cap"
     end
   end
+
+  describe "HITL InteractionRouter integration (Phase 1a)" do
+    alias Arbor.Contracts.Comms.Interaction
+
+    @tag :fast
+    test "renders dashboard_interaction payload in the approvals stream",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/chat")
+
+      {:ok, interaction} =
+        Interaction.new(%{
+          kind: :approval,
+          agent_id: "agent_test_phase1a",
+          user_id: "human_dashboard",
+          description: "Run mix test on the staging branch?",
+          resource_uri: "arbor://shell/exec/mix",
+          metadata: %{}
+        })
+
+      send(view.pid, {:dashboard_interaction, interaction})
+      html = render(view)
+
+      assert html =~ interaction.agent_id,
+             "ChatLive should render the agent_id from a dashboard_interaction"
+    end
+
+    @tag :fast
+    test "duplicate dashboard_interaction with same request_id only inserts once",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/chat")
+
+      {:ok, interaction} =
+        Interaction.new(%{
+          request_id: "irq_phase1a_dedup",
+          kind: :approval,
+          agent_id: "agent_dedup_test",
+          user_id: "human_dashboard",
+          description: "duplicate test"
+        })
+
+      send(view.pid, {:dashboard_interaction, interaction})
+      send(view.pid, {:dashboard_interaction, interaction})
+      html = render(view)
+
+      # The dedup is keyed on request_id via known_approval_ids — two sends
+      # of the same Interaction must not produce two stream entries.
+      occurrences =
+        html
+        |> String.split("agent_dedup_test")
+        |> length()
+        |> Kernel.-(1)
+
+      assert occurrences >= 1, "Dashboard interaction must render at least once"
+      # The exact count depends on how many places the agent_id appears in
+      # an approval card's markup; the dedup invariant is that two sends
+      # don't double the count vs one send. Re-render once after a single
+      # send for the baseline.
+      {:ok, view2, _html} = live(conn, "/chat")
+      send(view2.pid, {:dashboard_interaction, interaction})
+      html_one = render(view2)
+
+      occurrences_one =
+        html_one
+        |> String.split("agent_dedup_test")
+        |> length()
+        |> Kernel.-(1)
+
+      assert occurrences == occurrences_one,
+             "Dedup invariant: 2 sends must match 1 send (got #{occurrences} vs #{occurrences_one})"
+    end
+
+    @tag :fast
+    test "reject-interaction for unknown request_id does not crash",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/chat")
+
+      html =
+        render_click(view, "reject-interaction", %{"id" => "irq_definitely_unknown"})
+
+      assert is_binary(html),
+             "reject-interaction must handle :not_found gracefully (already-resolved case)"
+    end
+  end
 end
