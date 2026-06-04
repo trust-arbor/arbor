@@ -68,12 +68,38 @@ defmodule Arbor.Contracts.Commands.Result do
           | {:switch_runtime, atom()}
           | {:start_agent, String.t(), keyword()}
 
+  @typedoc """
+  Structured outcome data each interface may handle. Keys are atoms
+  identifying the kind of effect; values are interface-relevant data.
+
+  Recognized effects (extend as commands add new ones):
+
+  - `{:runtime_changed, atom()}` — emitted by `/runtime` and `/model X
+    runtime=Y` after a successful Session mutation. ChatLive uses it to
+    update its status row assign; Discord can ignore it.
+  - `{:model_changed, String.t()}` — emitted by `/model` after a
+    successful Session mutation. Same shape as above.
+  - `{:agent_started, %{agent_id: String.t(), pid: pid(),
+    metadata: map()}}` — emitted by `/start` after `Manager.start_or_resume`
+    succeeds. Carries the data each chat interface needs to bind the
+    conversation to the new agent — ChatLive's `reconnect_to_agent`,
+    Discord's `bind_channel_to_agent`, etc. The implementation varies
+    wildly per interface; the data is shared.
+
+  Effects are an OPEN map of interface contracts. Unknown effects are
+  silently ignored by interfaces that don't recognize them — this is
+  the forward-compat shape that lets a new effect land without breaking
+  every existing interface.
+  """
+  @type effects :: keyword()
+
   typedstruct do
     @typedoc "Output of a slash command"
 
     field(:text, String.t(), enforce: true)
     field(:type, result_type(), default: :info)
     field(:action, action(), default: nil)
+    field(:effects, effects(), default: [])
   end
 
   @doc """
@@ -81,7 +107,19 @@ defmodule Arbor.Contracts.Commands.Result do
   """
   @spec ok(String.t()) :: t()
   def ok(text) when is_binary(text) do
-    %__MODULE__{text: text, type: :info, action: nil}
+    %__MODULE__{text: text, type: :info, action: nil, effects: []}
+  end
+
+  @doc """
+  Constructor for an info Result that carries interface-relevant effects.
+
+  Used by commands whose side effects already ran (they're not asking
+  the caller to perform the action — that's `action/2`) but that need
+  to hand structured data back to the calling interface.
+  """
+  @spec ok(String.t(), effects()) :: t()
+  def ok(text, effects) when is_binary(text) and is_list(effects) do
+    %__MODULE__{text: text, type: :info, action: nil, effects: effects}
   end
 
   @doc """

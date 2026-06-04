@@ -70,23 +70,80 @@ defmodule Arbor.Common.Commands.Model do
                "Unknown runtime '#{value}'. Valid runtimes: #{Enum.join(@valid_runtimes, ", ")}."
              )}
 
-          {:ok, model_spec, []} ->
-            {:ok,
-             Result.action(
-               "Switching to model: #{model_spec}",
-               {:switch_model, model_spec}
-             )}
-
           {:ok, model_spec, opts} ->
-            label =
-              case Keyword.get(opts, :runtime) do
-                nil -> "Switching to model: #{model_spec}"
-                runtime -> "Switching to model: #{model_spec} (runtime: #{runtime})"
-              end
-
-            {:ok, Result.action(label, {:switch_model, model_spec, opts})}
+            apply_model(model_spec, opts, ctx)
         end
     end
+  end
+
+  # Side-effecting dispatch — sets model on the Session GenServer and, if
+  # opts include :runtime, sets the runtime too. Returns the outcome
+  # text + effects list for interfaces to act on. Runtime indirection
+  # because arbor_common can't compile-time-depend on arbor_orchestrator.
+  defp apply_model(model_spec, opts, %Context{session_pid: pid}) when is_pid(pid) do
+    session_mod = Module.concat([:Arbor, :Orchestrator, :Session])
+
+    cond do
+      not Code.ensure_loaded?(session_mod) ->
+        {:ok, Result.error("Cannot switch model: Session module not loaded.")}
+
+      not Process.alive?(pid) ->
+        {:ok, Result.error("Cannot switch model: session process is no longer alive.")}
+
+      true ->
+        run_model_switch(session_mod, pid, model_spec, opts)
+    end
+  end
+
+  defp apply_model(_model, _opts, _ctx) do
+    {:ok, Result.error("Cannot switch model: session pid missing from context.")}
+  end
+
+  defp run_model_switch(session_mod, pid, model_spec, opts) do
+    with {:ok, _} <- safe_call(session_mod, :set_model, [pid, model_spec]),
+         {:ok, runtime_effect} <- maybe_set_runtime(session_mod, pid, opts) do
+      effects = [model_changed: model_spec] ++ runtime_effect
+      text = build_success_text(model_spec, opts)
+      {:ok, Result.ok(text, effects)}
+    else
+      {:error, :model, reason} ->
+        {:ok, Result.error("/model failed: #{inspect(reason)}")}
+
+      {:error, :runtime, reason} ->
+        {:ok,
+         Result.error("Model set to #{model_spec}, but runtime change failed: #{inspect(reason)}")}
+
+      {:error, reason} ->
+        {:ok, Result.error("/model failed: #{inspect(reason)}")}
+    end
+  end
+
+  defp maybe_set_runtime(session_mod, pid, opts) do
+    case Keyword.get(opts, :runtime) do
+      nil ->
+        {:ok, []}
+
+      runtime ->
+        case safe_call(session_mod, :set_runtime, [pid, runtime]) do
+          {:ok, _} -> {:ok, [runtime_changed: runtime]}
+          {:error, reason} -> {:error, :runtime, reason}
+        end
+    end
+  end
+
+  defp build_success_text(model_spec, opts) do
+    case Keyword.get(opts, :runtime) do
+      nil -> "Model set to #{model_spec} (effective on next turn)."
+      runtime -> "Model set to #{model_spec}, runtime set to #{runtime} (effective on next turn)."
+    end
+  end
+
+  defp safe_call(mod, fun, args) do
+    apply(mod, fun, args)
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   # Parse "model_spec [runtime=atom]" into {model_spec, opts}. The

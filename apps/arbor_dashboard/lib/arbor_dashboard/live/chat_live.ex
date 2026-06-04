@@ -1301,10 +1301,14 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   # Dispatches the result returned by CommandIntake.handle into the LiveView
-  # message stream + (optionally) a side-effect handler for any action.
+  # message stream, then applies any interface-relevant effects the command
+  # emitted.
   defp handle_intake_result({:command_result, %Result{} = result}, context, socket) do
     socket = stream_insert_command_result(socket, result)
+    socket = apply_effects(result.effects || [], socket)
 
+    # Legacy :action path (clear, compact stubs) — kept until those
+    # commands migrate to the side-effect-direct shape.
     if result.action != nil do
       dispatch_command_action(result.action, context, socket)
     else
@@ -1321,130 +1325,38 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     stream_insert_command_error(socket, "Unexpected command result.")
   end
 
-  # Action dispatch. Most actions still stub (Session.clear, Session.compact,
-  # Session.set_model are scheduled follow-up work); the ones that ARE
-  # wired land below as branches before the catch-all stub. Phase 2c
-  # wires :start_agent (since the dropdown is gone, the slash command is
-  # the only way to start an agent from ChatLive) and :switch_runtime
-  # (updates the socket-level runtime assign that drives the status row).
+  # Apply the effects list a command emitted. ChatLive recognizes the
+  # subset relevant to the LiveView UX:
+  #
+  #   - :runtime_changed — update the status row's :runtime socket assign
+  #   - :model_changed   — no socket assign today; next-turn LlmHandler picks
+  #                        up the change from Session config directly
+  #   - :agent_started   — call reconnect_to_agent/4 to bind the LiveView's
+  #                        socket to the new agent (signal subscription +
+  #                        stream init). Discord's equivalent would do its
+  #                        own per-channel binding instead.
+  #
+  # Unknown effects are silently ignored — this is the forward-compat
+  # shape that lets new effects land without breaking ChatLive's render.
+  defp apply_effects(effects, socket) when is_list(effects) do
+    Enum.reduce(effects, socket, fn
+      {:runtime_changed, runtime}, sock ->
+        assign(sock, :runtime, runtime)
 
-  defp dispatch_command_action({:start_agent, template, opts}, _context, socket) do
-    Logger.info("[ChatLive] /start invoked: template=#{template} opts=#{inspect(opts)}")
+      {:model_changed, _model}, sock ->
+        sock
 
-    display_name = Keyword.get(opts, :name, template)
-    model_config = build_start_model_config(opts)
-    start_opts = [template: template, model_config: model_config]
+      {:agent_started, %{agent_id: agent_id, pid: pid, metadata: metadata}}, sock ->
+        reconnect_to_agent(sock, agent_id, pid, metadata)
 
-    case Manager.start_or_resume(APIAgent, display_name, start_opts) do
-      {:ok, agent_id, pid} ->
-        metadata = %{template: template, model_config: model_config}
-        socket = reconnect_to_agent(socket, agent_id, pid, metadata)
-        runtime = Keyword.get(opts, :runtime, :arbor)
-
-        socket
-        |> assign(:runtime, runtime)
-        |> stream_insert_system_note(
-          "Started agent from template #{template} as #{display_name} (#{agent_id})."
-        )
-
-      {:error, reason} ->
-        stream_insert_system_note(socket, "/start failed: #{inspect(reason)}")
-    end
-  rescue
-    e ->
-      Logger.warning("[ChatLive] /start crashed: #{Exception.message(e)}")
-      stream_insert_system_note(socket, "/start crashed: #{Exception.message(e)}")
+      _other, sock ->
+        sock
+    end)
   end
 
-  defp dispatch_command_action({:switch_runtime, runtime}, context, socket) do
-    Logger.info("[ChatLive] /runtime → #{runtime}")
-    session_pid = Map.get(context, :session_pid)
-
-    case call_session_safely(session_pid, fn pid ->
-           Arbor.Orchestrator.Session.set_runtime(pid, runtime)
-         end) do
-      {:ok, _} ->
-        socket
-        |> assign(:runtime, runtime)
-        |> stream_insert_system_note("Runtime set to #{runtime} (effective on next turn).")
-
-      {:error, reason} ->
-        stream_insert_system_note(
-          socket,
-          "/runtime failed to apply to Session: #{inspect(reason)}"
-        )
-    end
-  end
-
-  defp dispatch_command_action({:switch_model, name}, context, socket) do
-    Logger.info("[ChatLive] /model → #{name}")
-    session_pid = Map.get(context, :session_pid)
-
-    case call_session_safely(session_pid, fn pid ->
-           Arbor.Orchestrator.Session.set_model(pid, name)
-         end) do
-      {:ok, _} ->
-        stream_insert_system_note(socket, "Model set to #{name} (effective on next turn).")
-
-      {:error, reason} ->
-        stream_insert_system_note(
-          socket,
-          "/model failed to apply to Session: #{inspect(reason)}"
-        )
-    end
-  end
-
-  defp dispatch_command_action({:switch_model, name, opts}, context, socket) do
-    Logger.info("[ChatLive] /model → #{name} opts=#{inspect(opts)}")
-    session_pid = Map.get(context, :session_pid)
-
-    # Model first; runtime second if present. Either failure surfaces; we
-    # still try the second mutation when the first succeeds, since the
-    # operator's intent was both.
-    model_result =
-      call_session_safely(session_pid, fn pid ->
-        Arbor.Orchestrator.Session.set_model(pid, name)
-      end)
-
-    runtime_kw = Keyword.get(opts, :runtime)
-
-    runtime_result =
-      case runtime_kw do
-        nil ->
-          :skip
-
-        runtime ->
-          call_session_safely(session_pid, fn pid ->
-            Arbor.Orchestrator.Session.set_runtime(pid, runtime)
-          end)
-      end
-
-    socket =
-      case runtime_kw do
-        nil -> socket
-        runtime -> assign(socket, :runtime, runtime)
-      end
-
-    note =
-      cond do
-        match?({:ok, _}, model_result) and runtime_result == :skip ->
-          "Model set to #{name} (effective on next turn)."
-
-        match?({:ok, _}, model_result) and match?({:ok, _}, runtime_result) ->
-          "Model set to #{name}, runtime set to #{runtime_kw} (effective on next turn)."
-
-        match?({:error, _}, model_result) ->
-          {:error, r} = model_result
-          "/model failed: #{inspect(r)}"
-
-        match?({:error, _}, runtime_result) ->
-          {:error, r} = runtime_result
-          "Model set to #{name}, but runtime change failed: #{inspect(r)}"
-      end
-
-    stream_insert_system_note(socket, note)
-  end
-
+  # Legacy action dispatch — kept for the unmigrated :clear and :compact
+  # commands. The Phase 2d-style commands (runtime, model, start) emit
+  # `effects` instead and don't reach this path.
   defp dispatch_command_action(action, _context, socket) do
     Logger.info("[ChatLive] Slash command action requested: #{inspect(action)}")
 
@@ -1453,52 +1365,6 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         "Side-effect execution is the next batch of work — the architecture is in place but Session.#{action_function(action)}/N isn't built yet.)"
 
     stream_insert_system_note(socket, note)
-  end
-
-  # Build the model_config map that Manager.start_or_resume expects, with
-  # fallbacks to LLMDefaults when /start doesn't pin model/provider.
-  # Mirrors the mix task at apps/arbor_agent/lib/mix/tasks/arbor/agent.ex.
-  defp build_start_model_config(opts) do
-    model_id =
-      Keyword.get(opts, :model) ||
-        safe_default(&Arbor.Agent.LLMDefaults.default_model/0, "claude-sonnet-4-6")
-
-    provider =
-      Keyword.get(opts, :provider) ||
-        safe_default(&Arbor.Agent.LLMDefaults.default_provider/0, :anthropic)
-
-    %{
-      id: model_id,
-      provider: provider,
-      backend: :api,
-      module: APIAgent,
-      start_opts: []
-    }
-  end
-
-  defp safe_default(fun, fallback) do
-    fun.()
-  rescue
-    _ -> fallback
-  catch
-    :exit, _ -> fallback
-  end
-
-  # Phase 2d helper. Invokes `fun.(session_pid)` if the pid is alive,
-  # mapping crash / exit / nil-pid cases to {:error, reason} so the
-  # action dispatcher can render a flash without crashing the LiveView.
-  defp call_session_safely(nil, _fun), do: {:error, :no_session_pid}
-
-  defp call_session_safely(pid, fun) when is_pid(pid) do
-    if Process.alive?(pid) do
-      fun.(pid)
-    else
-      {:error, :session_dead}
-    end
-  rescue
-    e -> {:error, Exception.message(e)}
-  catch
-    :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp format_action(:clear), do: ":clear"
