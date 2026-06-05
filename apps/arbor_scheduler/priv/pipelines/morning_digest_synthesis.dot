@@ -1,0 +1,112 @@
+// Morning Digest Synthesis Pipeline
+//
+// LLM synthesis follow-on for the morning-digest meta-pipeline.
+// Reads today's `~/.arbor/reports/morning-digest/YYYY-MM-DD.md`
+// (which is the concatenated digest of all overnight reports) and
+// asks an LLM to produce "the three things worth caring about" as a
+// short executive summary. Writes the synthesis to a separate file at
+// `~/.arbor/reports/morning-digest-synthesis/YYYY-MM-DD.md`.
+//
+// The synthesis is a SEPARATE FILE rather than rewriting the digest
+// because:
+//   - The raw digest is the source of truth; rewriting it risks losing
+//     content if the LLM truncates or drops sections.
+//   - A separate "what mattered" file is easier to skim — operators
+//     who only want the headlines read this; ones who want detail
+//     fall through to the digest.
+//   - Independent enable/disable — the synthesis is opt-in nightly.
+//
+// Scheduling (in :arbor_scheduler, Oban crontab):
+//   {"45 6 * * *", Arbor.Scheduler.Workers.PipelineRunner,
+//     args: %{"pipeline_path" =>
+//       "apps/arbor_scheduler/priv/pipelines/morning_digest_synthesis.dot"}}
+//
+// The :45 offset sits after morning-digest at 06:30 so the digest is
+// fully assembled before synthesis reads it.
+//
+// Manual invocation:
+//   Arbor.Scheduler.enqueue_pipeline(
+//     "apps/arbor_scheduler/priv/pipelines/morning_digest_synthesis.dot"
+//   )
+
+digraph MorningDigestSynthesis {
+  graph [
+    goal="Produce a 'three things worth caring about' synthesis of today's morning digest",
+    label="Morning Digest Synthesis"
+  ]
+
+  start [shape=Mdiamond]
+
+  build_input_path [
+    type="shell",
+    command="echo $HOME/.arbor/reports/morning-digest/$(date -u +%Y-%m-%d).md",
+    sandbox="none",
+    timeout="5000",
+    on_error="fail",
+    data_class="internal"
+  ]
+
+  prep_input_path [
+    type="transform",
+    transform="identity",
+    source_key="shell.build_input_path.output",
+    output_key="path"
+  ]
+
+  read_digest [
+    type="exec",
+    target="action",
+    action="file_read",
+    context_keys="path"
+  ]
+
+  // The synthesis prompt asks for a short executive summary — the
+  // three highest-signal items. Markdown only, no preamble.
+  synthesize [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    llm_provider="lm_studio",
+    llm_model="gemma-4-31b-it@q4_k_xl",
+    use_tools="false",
+    max_tokens="1024",
+    temperature="0.3",
+    system_prompt="You produce an executive summary of an Arbor morning digest. Read the digest below — it's a concatenation of last night's overnight reports (upstream-deps, optional summaries, etc.). Output ONLY Markdown (no preamble, no code fences around the whole output) in this exact shape:\n\n# Today's Three Things\n\n## 1. <Headline>\n\nOne to three sentences explaining what matters, citing the source topic (e.g. 'from upstream-deps').\n\n## 2. <Headline>\n\nSame.\n\n## 3. <Headline>\n\nSame.\n\n## Also noteworthy (optional)\n\nA short bullet list, 1–5 items max, of secondary items worth a glance. Omit this section if there's nothing.\n\nPick items by importance: security concerns first, then breaking changes / production risk, then signal-bearing trends. Skip cosmetic items entirely. Be terse, cite specifics from the digest, no hedging or filler.",
+    prompt_context_key="exec.read_digest.content"
+  ]
+
+  build_output_path [
+    type="shell",
+    command="mkdir -p $HOME/.arbor/reports/morning-digest-synthesis && echo $HOME/.arbor/reports/morning-digest-synthesis/$(date -u +%Y-%m-%d).md",
+    sandbox="none",
+    timeout="5000",
+    on_error="fail",
+    data_class="internal"
+  ]
+
+  prep_output_path [
+    type="transform",
+    transform="identity",
+    source_key="shell.build_output_path.output",
+    output_key="path"
+  ]
+
+  prep_content [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="content"
+  ]
+
+  write_synthesis [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
+
+  done [shape=Msquare]
+
+  start -> build_input_path -> prep_input_path -> read_digest -> synthesize
+  synthesize -> build_output_path -> prep_output_path -> prep_content -> write_synthesis -> done
+}
