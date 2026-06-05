@@ -1,5 +1,7 @@
 defmodule Arbor.AI.AgentSDK.Transport do
   @moduledoc """
+  **DEPRECATED.** Part of the legacy Claude Agent SDK path. See Arbor.AI.AgentSDK (parent module) for sunset context. Replacement: ```Arbor.AI.Runtime.Acp``` via ```Arbor.AI.Runtime.Dispatch.dispatch/2```.
+
   Persistent Port transport layer for Claude Agent SDK.
 
   Opens a single Claude CLI process per Client session and communicates via

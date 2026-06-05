@@ -168,7 +168,7 @@ defmodule Mix.Tasks.Arbor.Agent do
         model_config = %{
           id: model_id,
           provider: provider,
-          backend: :api,
+          runtime: :arbor,
           module: Arbor.Agent.APIAgent,
           start_opts: []
         }

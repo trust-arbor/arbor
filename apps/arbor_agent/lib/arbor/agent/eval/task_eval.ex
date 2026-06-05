@@ -295,7 +295,7 @@ defmodule Arbor.Agent.Eval.TaskEval do
     model_config = %{
       id: model,
       provider: provider,
-      backend: :api,
+      runtime: :arbor,
       module: Arbor.Agent.APIAgent
     }
 

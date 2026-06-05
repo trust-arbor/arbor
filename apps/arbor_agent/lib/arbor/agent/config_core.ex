@@ -107,7 +107,7 @@ defmodule Arbor.Agent.ConfigCore do
   end
 
   defp extract_generation_params(metadata) do
-    [:temperature, :max_tokens, :top_p, :backend]
+    [:temperature, :max_tokens, :top_p, :runtime]
     |> Enum.reduce(%{}, fn key, acc ->
       case get_field(metadata, key) do
         nil -> acc
@@ -158,7 +158,7 @@ defmodule Arbor.Agent.ConfigCore do
       execution_mode: config.execution_mode,
       temperature: Map.get(params, :temperature),
       max_tokens: Map.get(params, :max_tokens),
-      backend: Map.get(params, :backend)
+      runtime: Map.get(params, :runtime)
     }
   end
 

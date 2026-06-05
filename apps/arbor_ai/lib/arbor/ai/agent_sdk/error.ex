@@ -1,5 +1,7 @@
 defmodule Arbor.AI.AgentSDK.Error do
   @moduledoc """
+  **DEPRECATED.** Part of the legacy Claude Agent SDK path. See Arbor.AI.AgentSDK (parent module) for sunset context. Replacement: ```Arbor.AI.Runtime.Acp``` via ```Arbor.AI.Runtime.Dispatch.dispatch/2```.
+
   Structured error types for the Agent SDK.
 
   Provides specific error types for better error handling, matching the

@@ -202,7 +202,7 @@ defmodule Arbor.Agent.ContextSummarizer do
           model: model,
           provider: provider,
           max_tokens: 2000,
-          backend: :api
+          runtime: :arbor
         )
       rescue
         e -> {:error, {:summarizer_exception, Exception.message(e)}}

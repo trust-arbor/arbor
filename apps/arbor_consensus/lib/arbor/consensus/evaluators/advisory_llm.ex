@@ -161,7 +161,12 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
   def configure_perspective(perspective, provider_model)
       when perspective in @perspectives and is_binary(provider_model) do
     current = Application.get_env(:arbor_consensus, :perspective_models, %{})
-    Application.put_env(:arbor_consensus, :perspective_models, Map.put(current, perspective, provider_model))
+
+    Application.put_env(
+      :arbor_consensus,
+      :perspective_models,
+      Map.put(current, perspective, provider_model)
+    )
   end
 
   @doc """
@@ -259,31 +264,43 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
         start_time = System.monotonic_time(:millisecond)
 
-        task = Task.async(fn ->
-          query_council_agent(agent_id, research_prompt, timeout)
-        end)
+        task =
+          Task.async(fn ->
+            query_council_agent(agent_id, research_prompt, timeout)
+          end)
 
         llm_meta = %{
-          provider: provider, model: model,
-          system_prompt: system_prompt, user_prompt: user_prompt,
-          research: true, agent_id: agent_id
+          provider: provider,
+          model: model,
+          system_prompt: system_prompt,
+          user_prompt: user_prompt,
+          research: true,
+          agent_id: agent_id
         }
 
         case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
           {:ok, {:ok, %{text: response_text, usage: usage}}} ->
             duration_ms = System.monotonic_time(:millisecond) - start_time
             result = build_advisory_evaluation(response_text, proposal, perspective, evaluator_id)
-            llm_meta = Map.merge(llm_meta, %{
-              duration_ms: duration_ms,
-              raw_response: response_text,
-              usage: usage,
-              cost: Map.get(usage, :cost)
-            })
-            with {:ok, eval} <- result, do: log_consultation_result(proposal, perspective, eval, llm_meta, opts)
+
+            llm_meta =
+              Map.merge(llm_meta, %{
+                duration_ms: duration_ms,
+                raw_response: response_text,
+                usage: usage,
+                cost: Map.get(usage, :cost)
+              })
+
+            with {:ok, eval} <- result,
+                 do: log_consultation_result(proposal, perspective, eval, llm_meta, opts)
+
             result
 
           {:ok, {:error, reason}} ->
-            Logger.warning("Council agent #{agent_name} error: #{inspect(reason)}, falling back to one-shot")
+            Logger.warning(
+              "Council agent #{agent_name} error: #{inspect(reason)}, falling back to one-shot"
+            )
+
             do_evaluate_one_shot(proposal, perspective, opts)
 
           nil ->
@@ -292,7 +309,10 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
         end
 
       {:error, reason} ->
-        Logger.warning("Failed to ensure council agent for #{perspective}: #{inspect(reason)}, falling back to one-shot")
+        Logger.warning(
+          "Failed to ensure council agent for #{perspective}: #{inspect(reason)}, falling back to one-shot"
+        )
+
         do_evaluate_one_shot(proposal, perspective, opts)
     end
   end
@@ -334,38 +354,63 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
     task = Task.async(fn -> llm_fn.(system_prompt, user_prompt) end)
 
-    llm_meta = %{provider: provider, model: model, system_prompt: system_prompt, user_prompt: user_prompt}
+    llm_meta = %{
+      provider: provider,
+      model: model,
+      system_prompt: system_prompt,
+      user_prompt: user_prompt
+    }
 
     case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
       {:ok, {:ok, %{text: response_text, duration_ms: duration_ms} = response}} ->
         result = build_advisory_evaluation(response_text, proposal, perspective, evaluator_id)
         usage = Map.get(response, :usage, %{})
-        llm_meta = Map.merge(llm_meta, %{
-          duration_ms: duration_ms,
-          raw_response: response_text,
-          usage: usage,
-          cost: Map.get(usage, :cost)
-        })
-        with {:ok, eval} <- result, do: log_consultation_result(proposal, perspective, eval, llm_meta, opts)
+
+        llm_meta =
+          Map.merge(llm_meta, %{
+            duration_ms: duration_ms,
+            raw_response: response_text,
+            usage: usage,
+            cost: Map.get(usage, :cost)
+          })
+
+        with {:ok, eval} <- result,
+             do: log_consultation_result(proposal, perspective, eval, llm_meta, opts)
+
         result
 
       {:ok, {:ok, response_text}} when is_binary(response_text) ->
         # Backward compat for test llm_fn overrides that return plain text
         result = build_advisory_evaluation(response_text, proposal, perspective, evaluator_id)
         llm_meta = Map.merge(llm_meta, %{duration_ms: 0, raw_response: response_text})
-        with {:ok, eval} <- result, do: log_consultation_result(proposal, perspective, eval, llm_meta, opts)
+
+        with {:ok, eval} <- result,
+             do: log_consultation_result(proposal, perspective, eval, llm_meta, opts)
+
         result
 
       {:ok, {:error, reason}} ->
-        result = error_evaluation(proposal, perspective, evaluator_id, "LLM error: #{inspect(reason)}")
-        error_meta = Map.merge(llm_meta, %{duration_ms: 0, raw_response: "", error: inspect(reason)})
-        with {:ok, eval} <- result, do: log_consultation_result(proposal, perspective, eval, error_meta, opts)
+        result =
+          error_evaluation(proposal, perspective, evaluator_id, "LLM error: #{inspect(reason)}")
+
+        error_meta =
+          Map.merge(llm_meta, %{duration_ms: 0, raw_response: "", error: inspect(reason)})
+
+        with {:ok, eval} <- result,
+             do: log_consultation_result(proposal, perspective, eval, error_meta, opts)
+
         result
 
       nil ->
-        result = error_evaluation(proposal, perspective, evaluator_id, "LLM timeout after #{timeout}ms")
-        error_meta = Map.merge(llm_meta, %{duration_ms: timeout, raw_response: "", error: "timeout"})
-        with {:ok, eval} <- result, do: log_consultation_result(proposal, perspective, eval, error_meta, opts)
+        result =
+          error_evaluation(proposal, perspective, evaluator_id, "LLM timeout after #{timeout}ms")
+
+        error_meta =
+          Map.merge(llm_meta, %{duration_ms: timeout, raw_response: "", error: "timeout"})
+
+        with {:ok, eval} <- result,
+             do: log_consultation_result(proposal, perspective, eval, error_meta, opts)
+
         result
     end
   end
@@ -920,11 +965,16 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
         provider_atom = parse_provider_atom(p)
 
         case find_council_agent(agent_name, provider_atom, m) do
-          {:ok, _} -> :ok
+          {:ok, _} ->
+            :ok
+
           :not_found ->
             case create_council_agent(agent_name, perspective, p, m) do
-              {:ok, _} -> Logger.info("Council agent ready: #{agent_name}")
-              {:error, reason} -> Logger.warning("Failed to prepare #{agent_name}: #{inspect(reason)}")
+              {:ok, _} ->
+                Logger.info("Council agent ready: #{agent_name}")
+
+              {:error, reason} ->
+                Logger.warning("Failed to prepare #{agent_name}: #{inspect(reason)}")
             end
         end
       end)
@@ -1002,7 +1052,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
       model_config: %{
         provider: provider_atom,
         model: model,
-        backend: :api
+        runtime: :arbor
       }
     ]
 

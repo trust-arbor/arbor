@@ -125,12 +125,12 @@ defmodule Arbor.Agent.ManagerTest do
 
     test "metadata includes all registered fields" do
       agent_id = "find-meta-#{System.unique_integer([:positive])}"
-      meta = %{backend: :api, model_config: %{id: "test"}, display_name: "TestBot"}
+      meta = %{runtime: :arbor, model_config: %{id: "test"}, display_name: "TestBot"}
       Registry.register(agent_id, self(), meta)
       on_exit(fn -> Registry.unregister(agent_id) end)
 
       {:ok, _pid, returned_meta} = Manager.find_agent(agent_id)
-      assert returned_meta[:backend] == :api
+      assert returned_meta[:runtime] == :arbor
       assert returned_meta[:display_name] == "TestBot"
     end
   end
@@ -208,25 +208,25 @@ defmodule Arbor.Agent.ManagerTest do
     @describetag :fast
 
     test "spawn_on unreachable node returns error" do
-      config = %{id: "test", provider: :test, backend: :api}
+      config = %{id: "test", provider: :test, runtime: :arbor}
       result = Manager.start_agent(config, spawn_on: :fake@unreachable)
       assert {:error, {:node_unreachable, :fake@unreachable}} = result
     end
 
     test "spawn_on with dotted node returns error" do
-      config = %{id: "test", provider: :test, backend: :api}
+      config = %{id: "test", provider: :test, runtime: :arbor}
       result = Manager.start_agent(config, spawn_on: :"nonexistent@127.0.0.1")
       assert {:error, {:node_unreachable, :"nonexistent@127.0.0.1"}} = result
     end
 
     test "spawn_on with invalid node name returns node_unreachable" do
-      config = %{id: "test", provider: :test, backend: :api}
+      config = %{id: "test", provider: :test, runtime: :arbor}
       result = Manager.start_agent(config, spawn_on: :bad_node)
       assert {:error, {:node_unreachable, :bad_node}} = result
     end
 
     test "spawn_on takes precedence over requirements" do
-      config = %{id: "test", provider: :test, backend: :api}
+      config = %{id: "test", provider: :test, runtime: :arbor}
 
       result =
         Manager.start_agent(config,
@@ -246,7 +246,7 @@ defmodule Arbor.Agent.ManagerTest do
     @describetag :fast
 
     test "requirements route through scheduler" do
-      config = %{id: "test", provider: :test, backend: :api}
+      config = %{id: "test", provider: :test, runtime: :arbor}
 
       result =
         safe_start_agent(config,
@@ -273,8 +273,8 @@ defmodule Arbor.Agent.ManagerTest do
   describe "start_agent/2 — lifecycle create" do
     @describetag :fast
 
-    test "api backend config exercises APIAgent path" do
-      config = %{id: "test-model", provider: :openrouter, backend: :api}
+    test ":arbor runtime config exercises APIAgent path" do
+      config = %{id: "test-model", provider: :openrouter, runtime: :arbor}
       result = safe_start_agent(config)
 
       case result do
@@ -288,8 +288,8 @@ defmodule Arbor.Agent.ManagerTest do
       end
     end
 
-    test "cli backend config exercises Claude path" do
-      config = %{id: :opus, provider: :anthropic, backend: :cli}
+    test ":acp runtime config exercises Claude path" do
+      config = %{id: :opus, provider: :anthropic, runtime: :acp}
       result = safe_start_agent(config)
 
       case result do
@@ -319,7 +319,7 @@ defmodule Arbor.Agent.ManagerTest do
     end
 
     test "config with :name uses name as display_name" do
-      config = %{id: "model-1", provider: :test, backend: :api, name: "My Agent"}
+      config = %{id: "model-1", provider: :test, runtime: :arbor, name: "My Agent"}
       result = safe_start_agent(config)
 
       case result do
@@ -329,7 +329,7 @@ defmodule Arbor.Agent.ManagerTest do
     end
 
     test "config with string :id uses id as display_name" do
-      config = %{id: "some-model-id", provider: :test, backend: :api}
+      config = %{id: "some-model-id", provider: :test, runtime: :arbor}
       result = safe_start_agent(config)
 
       case result do
@@ -339,7 +339,7 @@ defmodule Arbor.Agent.ManagerTest do
     end
 
     test "config with atom :id converts to string display_name" do
-      config = %{id: :haiku, provider: :test, backend: :api}
+      config = %{id: :haiku, provider: :test, runtime: :arbor}
       result = safe_start_agent(config)
 
       case result do
@@ -349,7 +349,7 @@ defmodule Arbor.Agent.ManagerTest do
     end
 
     test "config with no name or id defaults to 'Agent'" do
-      config = %{backend: :api, provider: :test}
+      config = %{runtime: :arbor, provider: :test}
       result = safe_start_agent(config)
 
       case result do
@@ -378,7 +378,7 @@ defmodule Arbor.Agent.ManagerTest do
         make_profile(agent_id,
           display_name: "Resume Test",
           metadata: %{
-            last_model_config: %{id: "test-model", provider: :openrouter, backend: :api}
+            last_model_config: %{id: "test-model", provider: :openrouter, runtime: :arbor}
           }
         )
 
@@ -406,7 +406,7 @@ defmodule Arbor.Agent.ManagerTest do
             "last_model_config" => %{
               "id" => "test-model",
               "provider" => "openrouter",
-              "backend" => "api"
+              "runtime" => "arbor"
             }
           }
         )
@@ -431,7 +431,7 @@ defmodule Arbor.Agent.ManagerTest do
         make_profile(agent_id,
           display_name: "Override Test",
           metadata: %{
-            last_model_config: %{id: "old-model", provider: :openrouter, backend: :api}
+            last_model_config: %{id: "old-model", provider: :openrouter, runtime: :arbor}
           }
         )
 
@@ -439,7 +439,7 @@ defmodule Arbor.Agent.ManagerTest do
 
       result =
         safe_resume_agent(agent_id,
-          model_config: %{id: "new-model", provider: :anthropic, backend: :api}
+          model_config: %{id: "new-model", provider: :anthropic, runtime: :arbor}
         )
 
       case result do
@@ -468,7 +468,7 @@ defmodule Arbor.Agent.ManagerTest do
           FakeAgent,
           name,
           template: "cli_agent",
-          model_config: %{id: "test", provider: :test, backend: :api}
+          model_config: %{id: "test", provider: :test, runtime: :arbor}
         )
 
       case result do
@@ -511,15 +511,15 @@ defmodule Arbor.Agent.ManagerTest do
       assert {:error, :agent_not_found} = result
     end
 
-    test "dispatches to registered agent with :api backend" do
+    test "dispatches to registered agent with ::arbor runtime" do
       agent_id = "chat-api-#{System.unique_integer([:positive])}"
 
       # Start FakeAgent manually and register with host_pid in metadata
       {:ok, pid} = FakeAgent.start_link([])
 
       Registry.register(agent_id, pid, %{
-        backend: :api,
-        model_config: %{backend: :api},
+        runtime: :arbor,
+        model_config: %{runtime: :arbor},
         host_pid: pid,
         module: FakeAgent
       })
@@ -534,7 +534,7 @@ defmodule Arbor.Agent.ManagerTest do
       assert {:ok, "echo: hello"} = result
     end
 
-    test "dispatches to registered agent with nil backend defaults to API query" do
+    test "dispatches to registered agent with nil runtime defaults to APIAgent query" do
       agent_id = "chat-nil-#{System.unique_integer([:positive])}"
 
       {:ok, pid} = FakeAgent.start_link([])
@@ -555,7 +555,7 @@ defmodule Arbor.Agent.ManagerTest do
       assert {:ok, "echo: hello"} = result
     end
 
-    test "infers :api backend for ACP provider" do
+    test "infers ::arbor runtime for ACP provider" do
       agent_id = "chat-acp-#{System.unique_integer([:positive])}"
 
       {:ok, pid} = FakeAgent.start_link([])
@@ -572,7 +572,7 @@ defmodule Arbor.Agent.ManagerTest do
       end)
 
       result = Manager.chat("hello", "User", agent_id: agent_id)
-      # ACP → :api backend, which sends {:query, "hello", []} to FakeAgent
+      # ACP → ::arbor runtime, which sends {:query, "hello", []} to FakeAgent
       assert {:ok, "echo: hello"} = result
     end
 

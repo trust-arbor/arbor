@@ -49,14 +49,18 @@ defmodule Arbor.Consensus.CouncilManager do
     errors = for {:error, p, reason} <- results, do: {p, reason}
 
     if errors != [] do
-      Logger.warning("CouncilManager: #{length(errors)} agents failed to start: #{inspect(errors)}")
+      Logger.warning(
+        "CouncilManager: #{length(errors)} agents failed to start: #{inspect(errors)}"
+      )
     end
 
     started = for {:started, p} <- results, do: p
     already = for {:already_running, p} <- results, do: p
 
     if started != [] do
-      Logger.info("CouncilManager: started #{length(started)} agents, #{length(already)} already running")
+      Logger.info(
+        "CouncilManager: started #{length(started)} agents, #{length(already)} already running"
+      )
     end
 
     :ok
@@ -230,9 +234,10 @@ defmodule Arbor.Consensus.CouncilManager do
       ensure_started()
     end
 
-    # Force API backend — persistent agents don't use CLI agents.
-    # CLI fallback is still available via direct Consult.ask/3 without CouncilManager.
-    opts = Keyword.put_new(opts, :backend, :api)
+    # Force :arbor runtime — persistent agents don't use ACP CLI agents.
+    # ACP fallback is still available via direct Consult.ask/3 without
+    # CouncilManager.
+    opts = Keyword.put_new(opts, :runtime, :arbor)
 
     # Route through Consult.ask/3 for now — it handles parallel evaluation.
     # Phase 4 (deliberation) will change this to mailbox delivery.
@@ -249,7 +254,7 @@ defmodule Arbor.Consensus.CouncilManager do
   @spec consult_one(String.t(), atom(), keyword()) ::
           {:ok, Arbor.Contracts.Consensus.Evaluation.t()} | {:error, term()}
   def consult_one(description, perspective, opts \\ []) do
-    opts = Keyword.put_new(opts, :backend, :api)
+    opts = Keyword.put_new(opts, :runtime, :arbor)
     Consult.ask_one(AdvisoryLLM, description, perspective, opts)
   end
 

@@ -55,7 +55,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         error: nil,
         available_models: available_models,
         current_model: nil,
-        chat_backend: nil,
+        chat_runtime: nil,
         # Panel visibility toggles — only key panels expanded by default
         # to avoid cramming 6+ panels into tiny vertical slivers
         show_thinking: true,
@@ -628,7 +628,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   @impl true
-  def handle_info({:query_result, :cli, {:ok, response}}, socket) do
+  def handle_info({:query_result, :acp, {:ok, response}}, socket) do
     thinking = response.thinking
 
     thinking_label =
@@ -640,7 +640,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       end
 
     Logger.debug(
-      "[ChatLive] CLI response — thinking: #{thinking_label}, text_len: #{String.length(response.text || "")}"
+      "[ChatLive] ACP response — thinking: #{thinking_label}, text_len: #{String.length(response.text || "")}"
     )
 
     socket =
@@ -651,7 +651,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     {:noreply, socket}
   end
 
-  def handle_info({:query_result, :api, {:ok, response}}, socket) do
+  def handle_info({:query_result, :arbor, {:ok, response}}, socket) do
     model_config = socket.assigns.current_model || %{}
 
     normalized = PipelineResponse.normalize(response)
@@ -706,7 +706,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     end
   end
 
-  def handle_info({:query_result, _backend, {:error, reason}}, socket) do
+  def handle_info({:query_result, _runtime, {:error, reason}}, socket) do
     error_msg = ChatHelpers.format_query_error(reason)
     {:noreply, assign(socket, loading: false, error: error_msg)}
   end
@@ -1152,7 +1152,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         |> stream_insert(:messages, user_msg)
         |> assign(input: "", loading: true, error: nil, streaming_text: "")
 
-      dispatch_query(socket.assigns.chat_backend, socket.assigns.agent_host_pid, user_message)
+      dispatch_query(socket.assigns.chat_runtime, socket.assigns.agent_host_pid, user_message)
 
       {:noreply, socket}
     end
@@ -1421,24 +1421,24 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   # ── Agent Lifecycle Helpers ──────────────────────────────────────────
 
-  defp dispatch_query(backend, agent, input) do
+  defp dispatch_query(runtime, agent, input) do
     lv = self()
 
     Task.start(fn ->
-      {tag, result} = run_query(backend, agent, input)
+      {tag, result} = run_query(runtime, agent, input)
       send(lv, {:query_result, tag, result})
     end)
   end
 
-  # CLI backend (Claude SDK) needs the bare-string content. The UserMessage
-  # envelope's `sent_at` is dropped here because the Claude SDK doesn't have
-  # a slot for it — that path doesn't go through Arbor's Session/persistence,
-  # so the timestamp isn't used downstream anyway.
-  defp run_query(:cli, agent, %Arbor.Contracts.Session.UserMessage{} = um) do
-    run_query(:cli, agent, um.content)
+  # :acp runtime (Claude SDK subprocess) needs the bare-string content.
+  # The UserMessage envelope's `sent_at` is dropped here because the Claude
+  # SDK doesn't have a slot for it — that path doesn't go through Arbor's
+  # Session/persistence, so the timestamp isn't used downstream anyway.
+  defp run_query(:acp, agent, %Arbor.Contracts.Session.UserMessage{} = um) do
+    run_query(:acp, agent, um.content)
   end
 
-  defp run_query(:cli, agent, input) when is_binary(input) do
+  defp run_query(:acp, agent, input) when is_binary(input) do
     result =
       try do
         Claude.query(agent, input, timeout: :infinity, permission_mode: :bypass)
@@ -1446,12 +1446,13 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         :exit, reason -> {:error, {:agent_crashed, reason}}
       end
 
-    {:cli, result}
+    {:acp, result}
   end
 
-  # API backend threads the UserMessage envelope (or a bare string) all the way
-  # to Session.send_message via APIAgent.query → handle_session_query → GenServer.call.
-  defp run_query(:api, agent, input) do
+  # :arbor runtime threads the UserMessage envelope (or a bare string) all
+  # the way to Session.send_message via APIAgent.query →
+  # handle_session_query → GenServer.call.
+  defp run_query(:arbor, agent, input) do
     result =
       try do
         APIAgent.query(agent, input)
@@ -1459,8 +1460,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         :exit, reason -> {:error, {:agent_crashed, reason}}
       end
 
-    {:api, result}
+    {:arbor, result}
   end
+
+  # Nil runtime (e.g. agent not yet bound to a runtime) falls through to
+  # :arbor since that's the default.
+  defp run_query(nil, agent, input), do: run_query(:arbor, agent, input)
 
   # Find agent scoped to current user's tenant context when available.
   # Falls back to global find_first_agent for backward compatibility.
@@ -1577,7 +1582,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     Process.monitor(pid)
 
     model_config = metadata[:model_config] || %{}
-    backend = metadata[:backend] || model_config[:backend]
+    runtime = metadata[:runtime] || model_config[:runtime] || :arbor
     display_name = metadata[:display_name]
 
     # Use host_pid as the primary `agent` assign — it's the APIAgent GenServer
@@ -1601,7 +1606,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       error: nil,
       memory_stats: memory_stats,
       current_model: model_config,
-      chat_backend: backend
+      chat_runtime: runtime
     )
     |> assign(
       query_count: 0,
@@ -1731,7 +1736,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       agent_goals: [],
       llm_call_count: 0,
       heartbeat_count: 0,
-      chat_backend: nil,
+      chat_runtime: nil,
       current_model: nil
     )
   end
@@ -1746,9 +1751,9 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   defp default_models do
     [
-      %{id: "haiku", label: "Haiku (fast)", provider: :anthropic, backend: :cli},
-      %{id: "sonnet", label: "Sonnet (balanced)", provider: :anthropic, backend: :cli},
-      %{id: "opus", label: "Opus (powerful)", provider: :anthropic, backend: :cli}
+      %{id: "haiku", label: "Haiku (fast)", provider: :anthropic, runtime: :acp},
+      %{id: "sonnet", label: "Sonnet (balanced)", provider: :anthropic, runtime: :acp},
+      %{id: "opus", label: "Opus (powerful)", provider: :anthropic, runtime: :acp}
     ]
   end
 

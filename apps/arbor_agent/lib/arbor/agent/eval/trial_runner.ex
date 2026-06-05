@@ -180,7 +180,7 @@ defmodule Arbor.Agent.Eval.TrialRunner do
       model: model,
       provider: provider,
       max_tokens: 1500,
-      backend: :api,
+      runtime: :arbor,
       system_prompt: system_prompt
     ]
 

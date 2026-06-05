@@ -100,7 +100,7 @@ defmodule Mix.Tasks.Arbor.Consult do
     d: :docs,
     c: :context,
     k: :skill,
-    b: :backend
+    b: :runtime
   ]
 
   @impl Mix.Task
@@ -675,19 +675,21 @@ defmodule Mix.Tasks.Arbor.Consult do
         eval_opts
       end
 
-    # --backend cli|api forces CLI agents (can read source code) or API providers
-    case opts[:backend] do
+    # --runtime acp|arbor forces ACP CLI agents (can read source code) or
+    # in-BEAM HTTP via arbor_llm. Replaces the legacy --backend cli|api
+    # toggle as of Phase 3 of priorities-2026-06-02 item 9.
+    case opts[:runtime] do
       nil ->
         eval_opts
 
-      "cli" ->
-        Keyword.put(eval_opts, :backend, :cli)
+      "acp" ->
+        Keyword.put(eval_opts, :runtime, :acp)
 
-      "api" ->
-        Keyword.put(eval_opts, :backend, :api)
+      "arbor" ->
+        Keyword.put(eval_opts, :runtime, :arbor)
 
       other ->
-        Mix.shell().error("Unknown backend '#{other}'. Use 'cli' or 'api'.")
+        Mix.shell().error("Unknown runtime '#{other}'. Use 'acp' or 'arbor'.")
         exit({:shutdown, 1})
     end
   end
