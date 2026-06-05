@@ -114,17 +114,10 @@ defmodule Arbor.Common.CommandRouterTest do
                CommandRouter.execute("compact", "", agent_ctx())
     end
 
-    test "/model X returns an action: {:switch_model, name} Result" do
-      assert {:ok, %Result{type: :command_action, action: {:switch_model, "gpt-6"}}} =
-               CommandRouter.execute("model", "gpt-6", agent_ctx())
-    end
-
-    test "/model with no args returns display Result with current model" do
-      assert {:ok, %Result{type: :info, action: nil, text: text}} =
-               CommandRouter.execute("model", "", agent_ctx())
-
-      assert String.contains?(text, "gpt-5")
-    end
+    # /model used to live in arbor_common and emit a 2-tuple action.
+    # As of the 2026-06-04 refactor it moved to arbor_commands (Level 2)
+    # and performs side effects directly. Its behavior tests live in
+    # apps/arbor_commands/test/arbor/commands/model_test.exs.
 
     test "rejects plain map context (Context struct required)" do
       # FunctionClauseError because the function head pattern-matches on
@@ -173,7 +166,9 @@ defmodule Arbor.Common.CommandRouterTest do
       assert "compact" in names
       assert "clear" in names
       assert "status" in names
-      assert "model" in names
+      # /model lives in arbor_commands (Level 2) as of 2026-06-04 — not
+      # visible from arbor_common's isolated test env. Integration tests
+      # in arbor_dashboard cover the full visibility set.
       assert "tools" in names
     end
   end

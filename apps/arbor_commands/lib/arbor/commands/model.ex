@@ -1,4 +1,4 @@
-defmodule Arbor.Common.Commands.Model do
+defmodule Arbor.Commands.Model do
   @moduledoc """
   Show or switch the current LLM model.
 
@@ -13,10 +13,17 @@ defmodule Arbor.Common.Commands.Model do
   When `runtime=<atom>` is the only argument given, the command points
   the user at `/runtime` since the parse otherwise treats `runtime=acp`
   as the model spec.
+
+  ## Why this lives in arbor_commands
+
+  Performs side effects — `Arbor.Orchestrator.Session.set_model/2` and,
+  if `runtime=` is set, `Session.set_runtime/2`. Direct compile-time
+  calls; arbor_commands depends on arbor_orchestrator.
   """
   @behaviour Arbor.Common.Command
 
   alias Arbor.Contracts.Commands.{Context, Result}
+  alias Arbor.Orchestrator.Session
 
   @valid_runtimes [:arbor, :acp]
 
@@ -40,10 +47,6 @@ defmodule Arbor.Common.Commands.Model do
   end
 
   def execute("list", %Context{}) do
-    # Listing available models requires querying providers (network I/O),
-    # which is the caller's job. The command itself stays pure — return
-    # informational text. A future :list_models action could push this
-    # back to the caller for richer output.
     {:ok,
      Result.ok(
        "Model listing isn't yet wired to a backend. " <>
@@ -76,22 +79,13 @@ defmodule Arbor.Common.Commands.Model do
     end
   end
 
-  # Side-effecting dispatch — sets model on the Session GenServer and, if
-  # opts include :runtime, sets the runtime too. Returns the outcome
-  # text + effects list for interfaces to act on. Runtime indirection
-  # because arbor_common can't compile-time-depend on arbor_orchestrator.
   defp apply_model(model_spec, opts, %Context{session_pid: pid}) when is_pid(pid) do
-    session_mod = Module.concat([:Arbor, :Orchestrator, :Session])
-
     cond do
-      not Code.ensure_loaded?(session_mod) ->
-        {:ok, Result.error("Cannot switch model: Session module not loaded.")}
-
       not Process.alive?(pid) ->
         {:ok, Result.error("Cannot switch model: session process is no longer alive.")}
 
       true ->
-        run_model_switch(session_mod, pid, model_spec, opts)
+        run_model_switch(pid, model_spec, opts)
     end
   end
 
@@ -99,16 +93,13 @@ defmodule Arbor.Common.Commands.Model do
     {:ok, Result.error("Cannot switch model: session pid missing from context.")}
   end
 
-  defp run_model_switch(session_mod, pid, model_spec, opts) do
-    with {:ok, _} <- safe_call(session_mod, :set_model, [pid, model_spec]),
-         {:ok, runtime_effect} <- maybe_set_runtime(session_mod, pid, opts) do
+  defp run_model_switch(pid, model_spec, opts) do
+    with {:ok, _} <- safe_call(fn -> Session.set_model(pid, model_spec) end),
+         {:ok, runtime_effect} <- maybe_set_runtime(pid, opts) do
       effects = [model_changed: model_spec] ++ runtime_effect
       text = build_success_text(model_spec, opts)
       {:ok, Result.ok(text, effects)}
     else
-      {:error, :model, reason} ->
-        {:ok, Result.error("/model failed: #{inspect(reason)}")}
-
       {:error, :runtime, reason} ->
         {:ok,
          Result.error("Model set to #{model_spec}, but runtime change failed: #{inspect(reason)}")}
@@ -118,13 +109,13 @@ defmodule Arbor.Common.Commands.Model do
     end
   end
 
-  defp maybe_set_runtime(session_mod, pid, opts) do
+  defp maybe_set_runtime(pid, opts) do
     case Keyword.get(opts, :runtime) do
       nil ->
         {:ok, []}
 
       runtime ->
-        case safe_call(session_mod, :set_runtime, [pid, runtime]) do
+        case safe_call(fn -> Session.set_runtime(pid, runtime) end) do
           {:ok, _} -> {:ok, [runtime_changed: runtime]}
           {:error, reason} -> {:error, :runtime, reason}
         end
@@ -138,20 +129,17 @@ defmodule Arbor.Common.Commands.Model do
     end
   end
 
-  defp safe_call(mod, fun, args) do
-    apply(mod, fun, args)
+  defp safe_call(fun) do
+    fun.()
   rescue
     e -> {:error, Exception.message(e)}
   catch
     :exit, reason -> {:error, {:exit, reason}}
   end
 
-  # Parse "model_spec [runtime=atom]" into {model_spec, opts}. The
-  # runtime= keyword can appear anywhere in the arg string; we strip it
-  # and treat the remaining whitespace-separated token as the model spec.
+  # Parse "model_spec [runtime=atom]" into {model_spec, opts}.
   defp parse_args(args) do
     args = String.trim(args)
-
     tokens = String.split(args, ~r/\s+/, trim: true)
 
     {kv_tokens, model_tokens} =
@@ -159,18 +147,8 @@ defmodule Arbor.Common.Commands.Model do
 
     with {:ok, opts} <- parse_kvs(kv_tokens, []) do
       case model_tokens do
-        [] when opts == [] ->
-          # Shouldn't reach here — empty/list dispatched above.
-          {:error, :runtime_only}
-
-        [] ->
-          # The user gave `runtime=acp` with no model — they wanted
-          # /runtime, point them at it.
-          {:error, :runtime_only}
-
-        _ ->
-          model_spec = Enum.join(model_tokens, " ")
-          {:ok, model_spec, opts}
+        [] -> {:error, :runtime_only}
+        _ -> {:ok, Enum.join(model_tokens, " "), opts}
       end
     end
   end
@@ -178,26 +156,18 @@ defmodule Arbor.Common.Commands.Model do
   defp parse_kvs([], acc), do: {:ok, Enum.reverse(acc)}
 
   defp parse_kvs(["runtime=" <> value | rest], acc) do
-    value = String.trim(value)
-
-    case runtime_atom(value) do
+    case runtime_atom(String.trim(value)) do
       {:ok, runtime} -> parse_kvs(rest, [{:runtime, runtime} | acc])
       :error -> {:error, {:unknown_runtime, value}}
     end
   end
 
   defp parse_kvs([_ignored | rest], acc) do
-    # Unknown kv tokens silently skip — leaves room for future kwargs
-    # without breaking parse. The model command is permissive about
-    # unrecognized switches.
+    # Unknown kv tokens silently skip — leaves room for future kwargs.
     parse_kvs(rest, acc)
   end
 
-  defp runtime_atom(value) when is_binary(value) do
-    case value do
-      "arbor" -> {:ok, :arbor}
-      "acp" -> {:ok, :acp}
-      _ -> :error
-    end
-  end
+  defp runtime_atom("arbor"), do: {:ok, :arbor}
+  defp runtime_atom("acp"), do: {:ok, :acp}
+  defp runtime_atom(_), do: :error
 end

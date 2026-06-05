@@ -43,12 +43,15 @@ defmodule Arbor.Common.CommandRouter do
 
   # Built-in command modules — always included in discovery.
   # Additional modules found via :code.all_loaded() scan.
+  # Pure-read commands shipped by arbor_common itself. Side-effecting
+  # commands (Runtime, Model, Start) live in arbor_commands (Level 2,
+  # depends on arbor_orchestrator + arbor_agent) and are discovered at
+  # runtime via the :code.all_loaded() scan below — they don't need to
+  # appear here because arbor_common can't compile-time-reference them
+  # (hierarchy violation).
   @builtin_commands [
     Arbor.Common.Commands.Help,
     Arbor.Common.Commands.Status,
-    Arbor.Common.Commands.Start,
-    Arbor.Common.Commands.Model,
-    Arbor.Common.Commands.Runtime,
     Arbor.Common.Commands.Compact,
     Arbor.Common.Commands.Clear,
     Arbor.Common.Commands.Tools,
