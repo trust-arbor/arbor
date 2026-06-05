@@ -64,15 +64,29 @@ All Attractor-specified features (goal gates, retry logic, backoff presets, cont
                    [ Parser ]         -- DOT text -> Graph struct
                         |
                  [ Transforms ]       -- Variable expansion, model stylesheet
+                        |              (built-in; run BEFORE compile so the
+                        |               compiler's static analyses see the
+                        |               post-transform graph)
                         |
-                 [ IR Compiler ]      -- Graph -> TypedGraph (static analysis)
+                 [ IR Compiler ]      -- Graph -> TypedGraph (static analysis:
+                        |               handler resolution, capability
+                        |               aggregation, taint profile, schema
+                        |               validation)
                         |
-                  [ Validator ]       -- 10 lint rules
+              [ Validator ] (opt-in) -- 10 lint rules; NOT auto-run by run/2.
+                        |              Callers invoke Arbor.Orchestrator.
+                        |              validate/2 explicitly when they want
+                        |              static lint diagnostics before execution.
                         |
                     [ Engine ]        -- Graph traversal + state machine
                    /    |    \
             Middleware  Handler  Events
 ```
+
+Custom caller-supplied transforms (via `run/2` opts `:transforms`) run
+AFTER `IR Compiler` and cannot influence the compiler's static analyses
+— they exist for downstream mutations of the compiled graph (e.g.
+checkpoint-aware tweaks, run-specific instrumentation).
 
 ---
 

@@ -14,8 +14,12 @@ defmodule Arbor.Orchestrator.DotCache do
   @table :arbor_orchestrator_dot_cache
   @default_max_entries 100
 
-  # Increment when IR format changes to invalidate stale compiled graphs
-  @ir_version 2
+  # Increment when IR format changes to invalidate stale compiled graphs.
+  # v3 (2026-06-05): cached graph is now post-built-in-transform +
+  # post-compile (was post-compile-only). The compiler's static analyses
+  # — capability aggregation, taint profile, schema validation — now read
+  # post-VariableExpansion + post-ModelStylesheet attrs.
+  @ir_version 3
 
   # ── Public API ──
 
