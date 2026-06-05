@@ -39,4 +39,35 @@ defmodule Arbor.Agent.SessionConfigTest do
       assert config["llm_runtime"] == :arbor
     end
   end
+
+  describe "build/2 — fallback chain (Phase 4+ B3)" do
+    test "defaults llm_fallback_chain to [] when no :fallback_chain option" do
+      opts = SessionConfig.build("agent_test", recover_session: false)
+      config = Keyword.fetch!(opts, :config)
+      assert config["llm_fallback_chain"] == []
+    end
+
+    test "passes :fallback_chain through to config" do
+      chain = [%{runtime: :acp}, %{model: "claude-sonnet-4-6"}]
+
+      opts =
+        SessionConfig.build("agent_test", fallback_chain: chain, recover_session: false)
+
+      config = Keyword.fetch!(opts, :config)
+      assert config["llm_fallback_chain"] == chain
+    end
+
+    test "fallback_chain and runtime can both flow through" do
+      opts =
+        SessionConfig.build("agent_test",
+          runtime: :acp,
+          fallback_chain: [%{runtime: :arbor}],
+          recover_session: false
+        )
+
+      config = Keyword.fetch!(opts, :config)
+      assert config["llm_runtime"] == :acp
+      assert config["llm_fallback_chain"] == [%{runtime: :arbor}]
+    end
+  end
 end

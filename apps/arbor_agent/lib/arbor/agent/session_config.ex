@@ -39,6 +39,7 @@ defmodule Arbor.Agent.SessionConfig do
     trust_tier = Keyword.get(opts, :trust_tier, :established)
     provider = Keyword.get(opts, :provider)
     runtime = Keyword.get(opts, :runtime, :arbor)
+    fallback_chain = Keyword.get(opts, :fallback_chain, [])
 
     tool_names = resolve_tool_names(Keyword.get(opts, :tools))
 
@@ -47,6 +48,7 @@ defmodule Arbor.Agent.SessionConfig do
       |> maybe_put("llm_provider", if(provider, do: to_string(provider)))
       |> maybe_put("llm_model", Keyword.get(opts, :model))
       |> maybe_put("llm_runtime", runtime)
+      |> maybe_put("llm_fallback_chain", fallback_chain)
       |> maybe_put("system_prompt", Keyword.get(opts, :system_prompt))
       |> maybe_put("tools", tool_names)
 

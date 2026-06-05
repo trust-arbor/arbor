@@ -303,7 +303,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         if use_tools do
           call_llm_with_tools(client, request, node, context, on_stream, opts)
         else
-          call_llm_direct(client, request, call_opts, on_stream)
+          call_llm_direct(client, request, call_opts, context, on_stream)
         end
 
       {:error, _} = error ->
@@ -525,12 +525,21 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   # for heartbeat + turn LLM calls. Direct Client.complete used to skip
   # all of that (Client.resolve_adapter only reads request.provider, not
   # request.runtime, and there's no selection/fallback layer in Client).
-  defp call_llm_direct(client, request, call_opts, nil) do
-    dispatch_opts = [{:client, client} | call_opts]
+  #
+  # Phase 4+ (B3): policy.fallback_chain comes from the persisted
+  # `session.llm_fallback_chain` context key (seeded by ContextBuilder
+  # from state.config["llm_fallback_chain"], which Lifecycle resolves
+  # from the agent's profile + model_config).
+  defp call_llm_direct(client, request, call_opts, context, nil) do
+    dispatch_opts =
+      call_opts
+      |> Keyword.put(:client, client)
+      |> Keyword.put(:policy, build_dispatch_policy(context))
+
     Dispatcher.dispatch(request, dispatch_opts)
   end
 
-  defp call_llm_direct(client, request, call_opts, on_stream) do
+  defp call_llm_direct(client, request, call_opts, context, on_stream) do
     # Bridge the legacy single-callback on_stream (which receives raw
     # %StreamEvent{}) to Runtime.callbacks shape. Each typed callback
     # synthesizes a StreamEvent the legacy consumer expects. Events that
@@ -543,8 +552,17 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       call_opts
       |> Keyword.put(:client, client)
       |> Keyword.put(:callbacks, callbacks)
+      |> Keyword.put(:policy, build_dispatch_policy(context))
 
     Dispatcher.dispatch(request, dispatch_opts)
+  end
+
+  # Assemble the Selector policy from session context. Currently
+  # carries fallback_chain only; runtime/provider/model overrides flow
+  # via the Request struct itself (Selector reads them as pins). Add
+  # more fields here as additional policy controls land.
+  defp build_dispatch_policy(context) do
+    %{fallback_chain: Context.get(context, "session.llm_fallback_chain", [])}
   end
 
   defp stream_event_callbacks(on_stream) when is_function(on_stream, 1) do

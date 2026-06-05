@@ -67,4 +67,31 @@ defmodule Arbor.Orchestrator.Session.ContextBuilderRuntimeTest do
       assert values["session.llm_runtime"] == :acp
     end
   end
+
+  describe "session_base_values/1 — fallback chain (Phase 4+ B3)" do
+    test "defaults llm_fallback_chain to [] when not set in config" do
+      values = ContextBuilder.session_base_values(minimal_state())
+      assert values["session.llm_fallback_chain"] == []
+    end
+
+    test "propagates llm_fallback_chain from config map string key" do
+      chain = [%{runtime: :acp}, %{model: "claude-sonnet-4-6"}]
+
+      values =
+        ContextBuilder.session_base_values(
+          minimal_state(config: %{"llm_fallback_chain" => chain})
+        )
+
+      assert values["session.llm_fallback_chain"] == chain
+    end
+
+    test "propagates llm_fallback_chain from config map atom key" do
+      chain = [%{provider: :openai}]
+
+      values =
+        ContextBuilder.session_base_values(minimal_state(config: %{llm_fallback_chain: chain}))
+
+      assert values["session.llm_fallback_chain"] == chain
+    end
+  end
 end

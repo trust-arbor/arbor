@@ -376,6 +376,74 @@ defmodule Arbor.Agent.Lifecycle do
       :arbor
   end
 
+  @doc false
+  # Per-agent fallback chain resolution — same pattern as
+  # `resolve_agent_runtime/2`. The chain is an ordered list of override
+  # maps consumed by `Arbor.AI.Runtime.Dispatch.dispatch/2` when the
+  # primary call fails with a fallback-eligible error (Phase 4+ commit
+  # c12bf750). Each entry can override :runtime, :provider, and/or
+  # :model; omitted fields inherit from the original request/policy.
+  #
+  # Persisted entries arrive with string keys when loaded from Postgres
+  # (`%{"runtime" => "acp"}`); this helper normalizes them to atom keys
+  # so Dispatch sees the typed shape regardless of storage origin.
+  # String values for known fields (:runtime, :provider) are atomized via
+  # `String.to_existing_atom/1` so a malicious / typo'd value can't
+  # create arbitrary atoms.
+  @spec resolve_fallback_chain(map(), keyword()) :: [map()]
+  def resolve_fallback_chain(profile, opts) do
+    metadata = Map.get(profile, :metadata) || %{}
+
+    raw =
+      Keyword.get(opts, :fallback_chain) ||
+        get_in(opts, [:model_config, :fallback_chain]) ||
+        get_in(metadata, [:last_model_config, :fallback_chain]) ||
+        get_in(metadata, ["last_model_config", "fallback_chain"]) ||
+        []
+
+    normalize_fallback_chain(raw)
+  end
+
+  defp normalize_fallback_chain(chain) when is_list(chain) do
+    chain
+    |> Enum.map(&normalize_fallback_entry/1)
+    |> Enum.reject(&(&1 == %{}))
+  end
+
+  defp normalize_fallback_chain(_), do: []
+
+  defp normalize_fallback_entry(entry) when is_map(entry) do
+    %{}
+    |> maybe_put_atom(entry, :runtime)
+    |> maybe_put_atom(entry, :provider)
+    |> maybe_put_string(entry, :model)
+  end
+
+  defp normalize_fallback_entry(_), do: %{}
+
+  defp maybe_put_atom(acc, source, key) do
+    case Map.get(source, key) || Map.get(source, to_string(key)) do
+      nil -> acc
+      atom when is_atom(atom) -> Map.put(acc, key, atom)
+      str when is_binary(str) -> safe_put_atom(acc, key, str)
+      _ -> acc
+    end
+  end
+
+  defp safe_put_atom(acc, key, str) do
+    Map.put(acc, key, String.to_existing_atom(str))
+  rescue
+    ArgumentError -> acc
+  end
+
+  defp maybe_put_string(acc, source, key) do
+    case Map.get(source, key) || Map.get(source, to_string(key)) do
+      nil -> acc
+      str when is_binary(str) -> Map.put(acc, key, str)
+      _ -> acc
+    end
+  end
+
   # Build opts for the APIAgent host child
   defp build_host_opts(agent_id, profile, opts) do
     [
@@ -426,7 +494,12 @@ defmodule Arbor.Agent.Lifecycle do
           # ContextBuilder → "session.llm_runtime" → LlmHandler. Without
           # this, heartbeats default to :arbor even for agents configured
           # with :acp at create/resume time.
-          runtime: resolve_agent_runtime(profile, opts)
+          runtime: resolve_agent_runtime(profile, opts),
+          # Per-agent fallback chain flows the same path: SessionConfig →
+          # state.config → ContextBuilder → "session.llm_fallback_chain"
+          # → LlmHandler → policy.fallback_chain on Dispatcher.dispatch.
+          # See `Arbor.AI.Runtime.Dispatch`'s fallback eligibility docs.
+          fallback_chain: resolve_fallback_chain(profile, opts)
         )
 
       session_opts = merge_template_opts(session_opts, template_meta, opts)

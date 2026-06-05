@@ -130,4 +130,51 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerDispatcherTest do
       assert data["text"] == "hello world"
     end
   end
+
+  describe "policy.fallback_chain from session context (Phase 4+ B3)" do
+    test "empty session.llm_fallback_chain → policy.fallback_chain is []" do
+      _outcome = LlmHandler.execute(build_node(%{}), build_context(), build_graph(), [])
+
+      assert [{_request, opts}] = RecordingDispatcher.calls()
+      policy = Keyword.fetch!(opts, :policy)
+      assert policy.fallback_chain == []
+    end
+
+    test "session.llm_fallback_chain populates policy.fallback_chain" do
+      chain = [%{runtime: :acp}, %{model: "claude-sonnet-4-6"}]
+
+      context =
+        Arbor.Orchestrator.Engine.Context.new(%{
+          "session.llm_provider" => "anthropic",
+          "session.llm_model" => "claude-opus-4-6",
+          "session.llm_runtime" => :arbor,
+          "session.llm_fallback_chain" => chain
+        })
+
+      _outcome = LlmHandler.execute(build_node(%{}), context, build_graph(), [])
+
+      assert [{_request, opts}] = RecordingDispatcher.calls()
+      policy = Keyword.fetch!(opts, :policy)
+      assert policy.fallback_chain == chain
+    end
+
+    test "fallback chain flows on the streaming path too" do
+      chain = [%{provider: :openai}]
+
+      context =
+        Arbor.Orchestrator.Engine.Context.new(%{
+          "session.llm_provider" => "anthropic",
+          "session.llm_model" => "claude-opus-4-6",
+          "session.llm_runtime" => :arbor,
+          "session.llm_fallback_chain" => chain
+        })
+
+      _outcome =
+        LlmHandler.execute(build_node(%{}), context, build_graph(), on_stream: fn _ -> :ok end)
+
+      assert [{_request, opts}] = RecordingDispatcher.calls()
+      policy = Keyword.fetch!(opts, :policy)
+      assert policy.fallback_chain == chain
+    end
+  end
 end
