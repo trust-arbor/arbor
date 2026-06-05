@@ -235,7 +235,7 @@ defmodule Arbor.Agent.Manager do
 
       Manager.start_or_resume(DebugAgent, "debug-agent",
         template: Diagnostician,
-        model_config: %{id: "haiku", provider: :anthropic, backend: :api}
+        model_config: %{id: "haiku", provider: :anthropic, runtime: :arbor}
       )
   """
   @spec start_or_resume(module(), String.t(), keyword()) ::
@@ -612,7 +612,7 @@ defmodule Arbor.Agent.Manager do
       id: Arbor.Agent.LLMDefaults.default_model(),
       label: "Default",
       provider: Arbor.Agent.LLMDefaults.default_provider(),
-      backend: :api,
+      runtime: :arbor,
       module: Arbor.Agent.APIAgent,
       start_opts: []
     }
@@ -623,12 +623,15 @@ defmodule Arbor.Agent.Manager do
   defp default_display_name(%{id: id}) when is_atom(id), do: Atom.to_string(id)
   defp default_display_name(_), do: "Agent"
 
-  defp resolve_template(%{backend: :cli}), do: "cli_agent"
-  defp resolve_template(%{backend: :api}), do: "api_agent"
+  # Phase 3 of priorities-2026-06-02 item 9: backend toggle (`:cli`/`:api`)
+  # retired in favor of the runtime axis. :acp runtime → cli_agent template;
+  # :arbor runtime (default) → api_agent template.
+  defp resolve_template(%{runtime: :acp}), do: "cli_agent"
+  defp resolve_template(%{runtime: :arbor}), do: "api_agent"
   defp resolve_template(_), do: "api_agent"
 
   defp atomize_model_config(config) when is_map(config) do
-    known_keys = ~w(id label provider backend module name start_opts)
+    known_keys = ~w(id label provider runtime module name start_opts)
 
     config
     |> Enum.map(fn
@@ -650,7 +653,7 @@ defmodule Arbor.Agent.Manager do
 
   defp atomize_model_config(config), do: config
 
-  defp atomize_value(key, value) when key in [:backend, :provider] and is_binary(value) do
+  defp atomize_value(key, value) when key in [:runtime, :provider] and is_binary(value) do
     String.to_existing_atom(value)
   rescue
     ArgumentError -> value
@@ -725,9 +728,9 @@ defmodule Arbor.Agent.Manager do
     # fall back to direct PID lookup for backward compatibility.
     host_pid = metadata[:host_pid]
 
-    backend =
-      metadata[:backend] || get_in(metadata, [:model_config, :backend]) ||
-        infer_backend(metadata[:model_config])
+    runtime =
+      metadata[:runtime] || get_in(metadata, [:model_config, :runtime]) ||
+        infer_runtime(metadata[:model_config])
 
     query_pid =
       cond do
@@ -747,26 +750,28 @@ defmodule Arbor.Agent.Manager do
       end
 
     if query_pid do
-      result = query_backend(backend, query_pid, input, opts)
+      result = query_runtime(runtime, query_pid, input, opts)
       handle_query_result(result)
     else
       {:error, :agent_host_not_found}
     end
   end
 
-  # ACP provider uses APIAgent, so route to :api backend
-  defp infer_backend(%{provider: :acp}), do: :api
-  defp infer_backend(_), do: :api
+  # Phase 3: runtime axis replaces the :cli/:api backend toggle. The
+  # legacy :acp provider mapping (old shape) goes through APIAgent →
+  # :arbor runtime; new callers should set runtime explicitly.
+  defp infer_runtime(%{provider: :acp}), do: :arbor
+  defp infer_runtime(_), do: :arbor
 
-  defp query_backend(:cli, pid, input, opts) do
+  defp query_runtime(:acp, pid, input, opts) do
     Claude.query(pid, input,
       timeout: Keyword.get(opts, :timeout, :infinity),
       permission_mode: :bypass
     )
   end
 
-  defp query_backend(:api, pid, input, _opts), do: APIAgent.query(pid, input)
-  defp query_backend(_, pid, input, _opts), do: APIAgent.query(pid, input)
+  defp query_runtime(:arbor, pid, input, _opts), do: APIAgent.query(pid, input)
+  defp query_runtime(_, pid, input, _opts), do: APIAgent.query(pid, input)
 
   defp handle_query_result({:ok, response}) do
     text = response[:text] || response.text || ""

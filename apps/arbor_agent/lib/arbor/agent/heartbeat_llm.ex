@@ -37,7 +37,7 @@ defmodule Arbor.Agent.HeartbeatLLM do
       model: model,
       provider: provider,
       max_tokens: 1500,
-      backend: :api,
+      runtime: :arbor,
       system_prompt: system
     ]
 

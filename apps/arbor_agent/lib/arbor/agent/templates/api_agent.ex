@@ -59,7 +59,7 @@ defmodule Arbor.Agent.Templates.ApiAgent do
   @impl true
   def metadata do
     %{
-      backend: :api,
+      runtime: :arbor,
       category: :general
     }
   end

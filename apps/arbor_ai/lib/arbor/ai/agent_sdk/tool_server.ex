@@ -1,5 +1,7 @@
 defmodule Arbor.AI.AgentSDK.ToolServer do
   @moduledoc """
+  **DEPRECATED.** Part of the legacy Claude Agent SDK path. See Arbor.AI.AgentSDK (parent module) for sunset context. Replacement: ```Arbor.AI.Runtime.Acp``` via ```Arbor.AI.Runtime.Dispatch.dispatch/2```.
+
   In-process tool server for SDK-defined tools.
 
   Manages tool registrations and executes tool calls without subprocess overhead.

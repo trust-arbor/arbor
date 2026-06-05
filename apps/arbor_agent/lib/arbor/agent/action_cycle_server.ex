@@ -434,7 +434,7 @@ defmodule Arbor.Agent.ActionCycleServer do
         model: model,
         provider: provider,
         max_tokens: 2000,
-        backend: :api,
+        runtime: :arbor,
         system_prompt: system_prompt
       ]
 

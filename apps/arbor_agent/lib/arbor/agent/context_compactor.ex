@@ -859,7 +859,7 @@ defmodule Arbor.Agent.ContextCompactor do
                provider: config.compaction_provider,
                max_tokens: 500,
                temperature: 0.2,
-               backend: :api
+               runtime: :arbor
              ]
            ]) do
         {:ok, response} ->

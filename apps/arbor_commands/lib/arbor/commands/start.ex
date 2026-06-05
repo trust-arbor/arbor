@@ -107,7 +107,7 @@ defmodule Arbor.Commands.Start do
     %{
       id: model_id,
       provider: provider,
-      backend: :api,
+      runtime: :arbor,
       module: APIAgent,
       start_opts: []
     }

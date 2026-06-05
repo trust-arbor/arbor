@@ -1,5 +1,7 @@
 defmodule Arbor.AI.AgentSDK.Client do
   @moduledoc """
+  **DEPRECATED.** Part of the legacy Claude Agent SDK path. See Arbor.AI.AgentSDK (parent module) for sunset context. Replacement: ```Arbor.AI.Runtime.Acp``` via ```Arbor.AI.Runtime.Dispatch.dispatch/2```.
+
   Claude Agent SDK Client for Elixir.
 
   Provides a high-level interface for building agentic applications with Claude,

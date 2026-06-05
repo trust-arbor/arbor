@@ -472,7 +472,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
         display_name={@display_name}
         available_models={@available_models}
         current_model={@current_model}
-        chat_backend={@chat_backend}
+        chat_runtime={@chat_runtime}
         heartbeat_models={@heartbeat_models}
         selected_heartbeat_model={@selected_heartbeat_model}
         group_mode={@group_mode}
@@ -683,7 +683,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
         </span>
         <div style="flex: 1;"></div>
         <form
-          :if={@chat_backend == :api and @heartbeat_models != []}
+          :if={@chat_runtime == :arbor and @heartbeat_models != []}
           phx-change="set-heartbeat-model"
           style="display: flex; align-items: center; gap: 0.3rem;"
         >

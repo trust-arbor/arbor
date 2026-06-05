@@ -1,5 +1,7 @@
 defmodule Arbor.AI.AgentSDK.Hooks do
   @moduledoc """
+  **DEPRECATED.** Part of the legacy Claude Agent SDK path. See Arbor.AI.AgentSDK (parent module) for sunset context. Replacement: ```Arbor.AI.Runtime.Acp``` via ```Arbor.AI.Runtime.Dispatch.dispatch/2```.
+
   Hook callbacks for intercepting tool calls.
 
   Hooks allow programmatic control over tool execution, replacing shell-based

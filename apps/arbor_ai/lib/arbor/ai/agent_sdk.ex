@@ -1,9 +1,31 @@
 defmodule Arbor.AI.AgentSDK do
   @moduledoc """
-  Claude Agent SDK for Elixir.
+  **DEPRECATED.** Sunset window for the legacy Claude Agent SDK path.
 
-  An Elixir implementation of the Claude Agent SDK, providing programmatic
-  access to Claude's agentic capabilities including:
+  As of Phase 3 of priorities-2026-06-02 item 9 (the runtime taxonomy
+  work), this module + its submodules are entering a sunset window.
+  The replacement is `Arbor.AI.Runtime.Acp` dispatched through
+  `Arbor.AI.Runtime.Dispatch.dispatch/2` — same Claude CLI subprocess
+  underneath, but routed through the runtime-axis abstraction so the
+  same call site can choose between `:arbor` (in-BEAM HTTP) and `:acp`
+  (subprocess) without code changes.
+
+  Phase 3d will migrate the remaining callers (currently
+  `Arbor.Agent.Claude` and `Arbor.Agent.ToolBridge`) to the
+  runtime-routed shape and then delete this module + its submodules.
+  Until then, every public function keeps working — this is a
+  documentation-grade deprecation flagging intent, not an enforced
+  one (no `@deprecated` attributes yet).
+
+  See `.arbor/decisions/2026-06-04-slash-commands-for-runtime-config.md`
+  for the slash-command UX context and
+  `apps/arbor_ai/lib/arbor/ai/runtime/` for the replacement path.
+
+  ## Original surface (still functional)
+
+  Claude Agent SDK for Elixir. An Elixir implementation of the Claude
+  Agent SDK, providing programmatic access to Claude's agentic
+  capabilities including:
 
   - **Extended Thinking**: Access Claude's reasoning process with cryptographic signatures
   - **Tool Use**: Define and use custom tools with Claude

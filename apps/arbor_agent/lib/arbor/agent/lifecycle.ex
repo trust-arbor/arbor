@@ -322,7 +322,7 @@ defmodule Arbor.Agent.Lifecycle do
       supervisor_pid: sup_pid,
       display_name: profile.display_name,
       model_config: extract_model_config(profile, opts),
-      backend: :api,
+      runtime: :arbor,
       started_at: System.system_time(:millisecond)
     }
 

@@ -11,7 +11,7 @@ defmodule Arbor.Consensus.LLMBridge do
   `Client.complete/3`.
 
   When UnifiedLLM is not loaded, falls back to `Arbor.AI.generate_text/2`
-  with `backend: :cli`.
+  with `runtime: :acp`.
 
   ## Usage
 
@@ -52,14 +52,15 @@ defmodule Arbor.Consensus.LLMBridge do
   - `:max_tokens` — max response tokens (default: 4096)
   - `:temperature` — sampling temperature (default: 0.7)
   - `:timeout` — call timeout in ms (not used directly, caller manages)
-  - `:backend` — `:cli` to force CLI backend (agents can read source code),
-    `:api` to force UnifiedLLM API path. Default: auto-detect.
+  - `:runtime` — `:acp` to force CLI subprocess (agents can read source
+    code), `:arbor` to force in-BEAM HTTP via arbor_llm. Default:
+    auto-detect.
   """
   @spec complete(String.t(), String.t(), keyword()) ::
           {:ok, %{text: String.t(), duration_ms: non_neg_integer(), usage: map()}}
           | {:error, term()}
   def complete(system_prompt, user_prompt, opts \\ []) do
-    backend = Keyword.get(opts, :backend)
+    runtime = Keyword.get(opts, :runtime)
     provider = Keyword.get(opts, :provider, "unknown")
     model = Keyword.get(opts, :model, "unknown")
     trace_id = Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)
@@ -74,10 +75,10 @@ defmodule Arbor.Consensus.LLMBridge do
 
     result =
       cond do
-        backend == :cli ->
+        runtime == :acp ->
           complete_via_fallback(system_prompt, user_prompt, opts)
 
-        backend == :api and available?() ->
+        runtime == :arbor and available?() ->
           complete_via_unified(system_prompt, user_prompt, opts)
 
         available?() ->
@@ -190,7 +191,7 @@ defmodule Arbor.Consensus.LLMBridge do
       ai_opts = [
         max_tokens: Keyword.get(opts, :max_tokens, 4096),
         temperature: Keyword.get(opts, :temperature, 0.7),
-        backend: :cli
+        runtime: :acp
       ]
 
       # Only pass provider if it maps to a real CLI backend;

@@ -123,7 +123,7 @@ defmodule Arbor.Agent.ResearchAgent do
 
   defp default_model_config do
     %{
-      backend: :api,
+      runtime: :arbor,
       id: Arbor.Agent.LLMDefaults.default_model(),
       provider: Arbor.Agent.LLMDefaults.default_provider()
     }
