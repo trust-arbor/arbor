@@ -122,17 +122,36 @@ defmodule Arbor.LLM.Retry do
     {:ok, backoff_delay(initial, factor, attempt, max_delay, jitter)}
   end
 
-  defp default_should_retry(%Arbor.LLM.ProviderError{retryable: retryable}),
-    do: retryable
+  defp default_should_retry(reason), do: fallback_eligible?(reason)
 
-  defp default_should_retry(%Arbor.LLM.RequestTimeoutError{}), do: true
+  @doc """
+  Predicate: is `reason` a transient LLM error that's reasonable to
+  retry / fall back from?
 
-  defp default_should_retry(reason) when is_atom(reason) do
+  Covers the same shapes as `Retry.execute/2`'s default `:should_retry`
+  callback: rate-limit, timeout, network error, transient_error atoms;
+  HTTP 429 and 5xx; `%Arbor.LLM.ProviderError{retryable: true}`;
+  `%Arbor.LLM.RequestTimeoutError{}`. Anything else returns false —
+  fail closed so unknown errors don't burn retry budget.
+
+  Exposed as public because `Arbor.AI.Runtime.Dispatch` and
+  `Arbor.Orchestrator.Handlers.LlmHandler` both classify errors for
+  fallback decisions and need the same answer. Dispatch composes this
+  with its own path-failure list (`:no_cli_for_provider`,
+  `:pool_not_available`, etc.) — those don't apply to Client.complete
+  callers that go through this helper directly.
+  """
+  @spec fallback_eligible?(term()) :: boolean()
+  def fallback_eligible?(%Arbor.LLM.ProviderError{retryable: retryable}), do: retryable
+  def fallback_eligible?(%Arbor.LLM.RequestTimeoutError{}), do: true
+
+  def fallback_eligible?(reason) when is_atom(reason) do
     reason in [:timeout, :rate_limited, :network_error, :transient_error]
   end
 
-  defp default_should_retry({:http_status, status}) when is_integer(status),
-    do: status == 429 or status >= 500
+  def fallback_eligible?({:http_status, status}) when is_integer(status) do
+    status == 429 or status >= 500
+  end
 
-  defp default_should_retry(_), do: false
+  def fallback_eligible?(_), do: false
 end

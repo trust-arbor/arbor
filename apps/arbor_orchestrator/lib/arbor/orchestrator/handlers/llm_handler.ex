@@ -502,10 +502,22 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       ]
       |> maybe_add_stream_callback(on_stream)
 
+    # Phase 4+ (B4): wrap ToolLoop in a fallback loop so per-agent
+    # fallback chains apply to tool turns too. ToolLoop itself stays in
+    # arbor_llm and uses Client.complete internally — moving it would
+    # require behaviour-injection through ToolLoop too. For now we accept
+    # that tool-loop fallback only supports provider/model swaps; :runtime
+    # entries are skipped with a warning (they'd require dispatching the
+    # whole loop through a different runtime, which is incoherent for a
+    # multi-turn conversation).
+    chain = Context.get(context, "session.llm_fallback_chain", [])
+    do_call = fn req -> tool_loop_attempt(client, req, tool_loop_opts) end
+    call_with_tool_loop_fallback(do_call, request, chain)
+  end
+
+  defp tool_loop_attempt(client, request, tool_loop_opts) do
     case ToolLoop.run(client, request, tool_loop_opts) do
       {:ok, %PipelineResponse{} = result} ->
-        # Propagate discovered tool names via process dict so call_llm_and_respond
-        # can include them in context_updates for session persistence
         if result.discovered_tools != nil and result.discovered_tools != [] do
           Process.put(:__discovered_tool_names__, result.discovered_tools)
         end
@@ -519,6 +531,100 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         error
     end
   end
+
+  @doc false
+  # Exposed (@doc false) so tests can pin the tool-loop fallback shape
+  # without spinning up a real Client + ToolLoop. Production callers
+  # should not depend on this — it's adapter-internal.
+  def call_with_tool_loop_fallback(do_call, request, []) do
+    do_call.(request)
+  end
+
+  def call_with_tool_loop_fallback(do_call, request, chain) do
+    case do_call.(request) do
+      {:ok, _} = ok ->
+        ok
+
+      {:error, reason} = error ->
+        if Arbor.LLM.Retry.fallback_eligible?(reason) do
+          try_tool_loop_fallbacks(do_call, request, chain, error)
+        else
+          error
+        end
+    end
+  end
+
+  defp try_tool_loop_fallbacks(_do_call, _orig, [], last_error), do: last_error
+
+  defp try_tool_loop_fallbacks(do_call, orig_request, [override | rest], last_error) do
+    override = warn_if_runtime_override(override)
+
+    case apply_tool_loop_override(orig_request, override) do
+      :no_change ->
+        # Entry doesn't change provider or model — nothing to retry
+        # against. Move on rather than spinning on identical attempts.
+        try_tool_loop_fallbacks(do_call, orig_request, rest, last_error)
+
+      {:ok, attempt_request} ->
+        Logger.info("[LlmHandler] tool-loop fallback: applying override #{inspect(override)}")
+
+        case do_call.(attempt_request) do
+          {:ok, _} = ok ->
+            ok
+
+          {:error, reason} = error ->
+            if rest != [] and Arbor.LLM.Retry.fallback_eligible?(reason) do
+              try_tool_loop_fallbacks(do_call, orig_request, rest, error)
+            else
+              error
+            end
+        end
+    end
+  end
+
+  defp warn_if_runtime_override(%{runtime: runtime} = override) do
+    Logger.warning(
+      "[LlmHandler] tool-loop fallback entry has :runtime (#{inspect(runtime)}) but " <>
+        "tool loops go through Client.complete; runtime override has no effect here. " <>
+        "Drop it from the entry to silence this warning."
+    )
+
+    Map.delete(override, :runtime)
+  end
+
+  defp warn_if_runtime_override(override), do: override
+
+  defp apply_tool_loop_override(%Request{} = request, override) do
+    has_provider = Map.has_key?(override, :provider)
+    has_model = Map.has_key?(override, :model)
+
+    if has_provider or has_model do
+      updated =
+        request
+        |> maybe_put_field(:provider, Map.get(override, :provider))
+        |> maybe_put_field(:model, Map.get(override, :model))
+
+      {:ok, updated}
+    else
+      :no_change
+    end
+  end
+
+  defp maybe_put_field(request, _field, nil), do: request
+
+  defp maybe_put_field(request, :provider, provider) when is_atom(provider) do
+    %{request | provider: Atom.to_string(provider)}
+  end
+
+  defp maybe_put_field(request, :provider, provider) when is_binary(provider) do
+    %{request | provider: provider}
+  end
+
+  defp maybe_put_field(request, :model, model) when is_binary(model) do
+    %{request | model: model}
+  end
+
+  defp maybe_put_field(request, _field, _value), do: request
 
   # Phase 4+ (B2): route through Dispatcher.dispatch so the runtime
   # axis selection chain + fallback chain from c12bf750 actually fire
