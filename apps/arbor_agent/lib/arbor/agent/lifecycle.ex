@@ -322,7 +322,7 @@ defmodule Arbor.Agent.Lifecycle do
       supervisor_pid: sup_pid,
       display_name: profile.display_name,
       model_config: extract_model_config(profile, opts),
-      runtime: :arbor,
+      runtime: resolve_agent_runtime(profile, opts),
       started_at: System.system_time(:millisecond)
     }
 
@@ -347,6 +347,33 @@ defmodule Arbor.Agent.Lifecycle do
     Keyword.get(opts, :model_config) ||
       get_in(profile.metadata || %{}, [:last_model_config]) ||
       %{}
+  end
+
+  @doc false
+  # Per-agent runtime resolution for the heartbeat + chat paths. Mirrors
+  # the resolution order used by `Manager.dispatch_query/4` so the value
+  # stored in Agent.Registry metadata matches what the chat-time reader
+  # would pick if it had to re-resolve.
+  #
+  # Order (first non-nil wins):
+  #   1. Explicit `opts[:runtime]` from the caller
+  #   2. `opts[:model_config][:runtime]` — the bundled-config shape
+  #      that Manager.{query_agent,resume_agent} use
+  #   3. Persisted `profile.metadata[:last_model_config][:runtime]`
+  #      for restored/resumed agents
+  #   4. Default `:arbor`
+  #
+  # Exposed under @doc false so unit tests can pin the resolution chain
+  # without spinning up a full BranchSupervisor.
+  @spec resolve_agent_runtime(map(), keyword()) :: atom()
+  def resolve_agent_runtime(profile, opts) do
+    metadata = Map.get(profile, :metadata) || %{}
+
+    Keyword.get(opts, :runtime) ||
+      get_in(opts, [:model_config, :runtime]) ||
+      get_in(metadata, [:last_model_config, :runtime]) ||
+      get_in(metadata, ["last_model_config", "runtime"]) ||
+      :arbor
   end
 
   # Build opts for the APIAgent host child
@@ -394,7 +421,12 @@ defmodule Arbor.Agent.Lifecycle do
           tools: tools,
           system_prompt: system_prompt,
           start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
-          signer: signer
+          signer: signer,
+          # Per-agent runtime flows to SessionConfig → state.config →
+          # ContextBuilder → "session.llm_runtime" → LlmHandler. Without
+          # this, heartbeats default to :arbor even for agents configured
+          # with :acp at create/resume time.
+          runtime: resolve_agent_runtime(profile, opts)
         )
 
       session_opts = merge_template_opts(session_opts, template_meta, opts)
