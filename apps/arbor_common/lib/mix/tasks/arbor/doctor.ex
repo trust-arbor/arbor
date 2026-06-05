@@ -8,6 +8,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
       $ mix arbor.doctor                              # Provider health (default)
       $ mix arbor.doctor --runtimes                   # Registered runtimes + profiles
       $ mix arbor.doctor --model claude-opus-4-6      # Selection preview for a model
+      $ mix arbor.doctor --refresh-models             # Reload the llm_db catalog
       $ mix arbor.doctor --model claude-opus-4-6 \\
           --fallback "runtime=acp" \\
           --fallback "model=claude-haiku-4-5-20251001"
@@ -35,6 +36,11 @@ defmodule Mix.Tasks.Arbor.Doctor do
       with `--model`.
     * `--runtime <atom>` - Set the policy runtime override for the
       preview (defaults to the per-model default).
+    * `--refresh-models` - Reload the llm_db catalog. Reports before/
+      after model counts and duration; emits `[:arbor, :model_registry,
+      :refreshed]` telemetry. Idempotent — repeated calls with no
+      config change are no-ops at the llm_db level. Composes with
+      `--json`.
 
   ## Auto-Configuration
 
@@ -87,7 +93,8 @@ defmodule Mix.Tasks.Arbor.Doctor do
           runtimes: :boolean,
           model: :string,
           fallback: :keep,
-          runtime: :string
+          runtime: :string,
+          refresh_models: :boolean
         ]
       )
 
@@ -100,9 +107,45 @@ defmodule Mix.Tasks.Arbor.Doctor do
     ensure_llmdb()
 
     cond do
+      opts[:refresh_models] -> run_refresh_models(opts)
       opts[:runtimes] -> run_runtimes_view(opts)
       opts[:model] -> run_model_view(opts, args)
       true -> run_provider_health(opts)
+    end
+  end
+
+  # ── Model registry refresh (--refresh-models) ────────────────────────
+
+  defp run_refresh_models(opts) do
+    case Arbor.Common.ModelProfile.refresh() do
+      {:ok, summary} ->
+        if opts[:json] do
+          Mix.shell().info(Jason.encode!(summary, pretty: true))
+        else
+          delta = summary.after - summary.before
+
+          delta_str =
+            cond do
+              delta > 0 -> "+#{delta}"
+              delta < 0 -> "#{delta}"
+              true -> "no change"
+            end
+
+          Mix.shell().info("")
+          Mix.shell().info("  Model registry refreshed.")
+          Mix.shell().info("    Before:   #{summary.before} models")
+          Mix.shell().info("    After:    #{summary.after} models (#{delta_str})")
+          Mix.shell().info("    Duration: #{summary.duration_ms}ms")
+          Mix.shell().info("")
+        end
+
+      {:error, :llm_db_unavailable} ->
+        Mix.shell().error("llm_db is not loaded — cannot refresh the model registry.")
+        System.halt(1)
+
+      {:error, {:llm_db_error, reason}} ->
+        Mix.shell().error("llm_db refresh failed: #{inspect(reason)}")
+        System.halt(1)
     end
   end
 

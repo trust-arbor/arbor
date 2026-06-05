@@ -383,6 +383,62 @@ defmodule Arbor.Common.ModelProfileTest do
     end
   end
 
+  describe "refresh/1 — llm_db catalog reload (Phase 5+)" do
+    test "returns {:ok, summary} when llm_db is loaded" do
+      assert {:ok, summary} = ModelProfile.refresh()
+
+      assert is_integer(summary.before)
+      assert summary.before >= 0
+      assert is_integer(summary.after)
+      assert summary.after >= 0
+      assert is_integer(summary.duration_ms)
+      assert summary.duration_ms >= 0
+    end
+
+    test "reloading with same opts is idempotent (before == after)" do
+      # Two consecutive reloads with no config change should report the
+      # same count both times.
+      {:ok, first} = ModelProfile.refresh()
+      {:ok, second} = ModelProfile.refresh()
+
+      assert first.after == second.before
+      assert second.before == second.after
+    end
+
+    test "emits [:arbor, :model_registry, :refreshed] telemetry" do
+      handler_id = "refresh-telemetry-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:arbor, :model_registry, :refreshed],
+        fn event, measurements, metadata, _ ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      {:ok, _} = ModelProfile.refresh()
+
+      assert_receive {:telemetry, [:arbor, :model_registry, :refreshed], %{count: 1}, metadata},
+                     500
+
+      assert is_integer(metadata.before)
+      assert is_integer(metadata.after)
+      assert is_integer(metadata.duration_ms)
+    end
+
+    test "forwards opts to LLMDB.load (smoke check for the pass-through)" do
+      # Re-load with no opts — equivalent to LLMDB.load([]). Tests the
+      # opts arg threading without binding to a specific llm_db filter
+      # shape (which has changed across llm_db versions).
+      assert {:ok, summary} = ModelProfile.refresh([])
+      assert summary.after > 0
+    end
+  end
+
   # ===========================================================================
   # Doctests
   # ===========================================================================

@@ -331,10 +331,98 @@ defmodule Arbor.Common.ModelProfile do
     end
   end
 
+  # llm_db module reference — declared here so refresh/1 (defined below
+  # in this section) and the lookup helpers (further down) can both use
+  # it. Module attributes have to be in scope at point of use; can't
+  # forward-reference.
+  @llmdb_module LLMDB
+
+  @doc """
+  Reload the llm_db catalog and report what changed.
+
+  `LLMDB.load/1` is idempotent — same opts as the prior load is a
+  no-op — so this is safe to call repeatedly. Returns `{:ok, summary}`
+  with before/after model counts so operators can see if a refresh
+  actually picked up new entries.
+
+  Emits `[:arbor, :model_registry, :refreshed]` telemetry with the
+  same summary plus `:duration_ms`.
+
+  ## Options
+
+  Pass anything `LLMDB.load/1` accepts: `:allow`, `:deny`, `:prefer`,
+  `:custom`. When `opts` is `[]`, the load uses the existing
+  `config :llm_db, ...` settings — i.e. just rebuilds from the
+  packaged snapshot.
+
+  Returns `{:error, :llm_db_unavailable}` if `LLMDB` isn't loaded
+  (unit tests without the dep). Wraps `LLMDB.load/1` errors as
+  `{:error, {:llm_db_error, reason}}` so the failure shape is
+  caller-friendly.
+  """
+  @spec refresh(keyword()) ::
+          {:ok, %{before: non_neg_integer(), after: non_neg_integer(), duration_ms: integer()}}
+          | {:error, term()}
+  def refresh(opts \\ []) do
+    if llmdb_available?() do
+      before_count = safe_model_count()
+      started_at = System.monotonic_time(:millisecond)
+
+      case apply(@llmdb_module, :load, [opts]) do
+        {:ok, _snapshot} ->
+          after_count = safe_model_count()
+          duration_ms = System.monotonic_time(:millisecond) - started_at
+
+          summary = %{
+            before: before_count,
+            after: after_count,
+            duration_ms: duration_ms
+          }
+
+          safe_telemetry([:arbor, :model_registry, :refreshed], %{count: 1}, summary)
+          {:ok, summary}
+
+        {:error, reason} ->
+          {:error, {:llm_db_error, reason}}
+      end
+    else
+      {:error, :llm_db_unavailable}
+    end
+  end
+
+  # `LLMDB.models/0` returns a list when loaded; some test fixtures may
+  # not implement it. Fall back to 0 rather than crashing the refresh
+  # path with metric collection.
+  defp safe_model_count do
+    if function_exported?(@llmdb_module, :models, 0) do
+      try do
+        apply(@llmdb_module, :models, []) |> length()
+      rescue
+        _ -> 0
+      catch
+        :exit, _ -> 0
+      end
+    else
+      0
+    end
+  end
+
+  defp safe_telemetry(event, measurements, metadata) do
+    if Code.ensure_loaded?(:telemetry) and function_exported?(:telemetry, :execute, 3) do
+      apply(:telemetry, :execute, [event, measurements, metadata])
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
   # llm_db is a transitive dep via req_llm — not a compile-time dep of
   # arbor_common, so use apply/3 to keep the compiler quiet. Matches the
-  # pattern in arbor_llm/lib/arbor/llm/client.ex.
-  @llmdb_module LLMDB
+  # pattern in arbor_llm/lib/arbor/llm/client.ex. (@llmdb_module is
+  # declared earlier in the file so refresh/1 above can also use it.)
 
   defp llmdb_available?, do: Code.ensure_loaded?(@llmdb_module)
 
