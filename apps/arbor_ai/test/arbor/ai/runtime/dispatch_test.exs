@@ -111,6 +111,17 @@ defmodule Arbor.AI.Runtime.DispatchTest do
     end
   end
 
+  describe "behaviour conformance — Arbor.LLM.Dispatcher" do
+    test "declares @behaviour Arbor.LLM.Dispatcher" do
+      behaviours = Arbor.AI.Runtime.Dispatch.module_info(:attributes)[:behaviour] || []
+      assert Arbor.LLM.Dispatcher in behaviours
+    end
+
+    test "exports the behaviour's dispatch/2 callback" do
+      assert function_exported?(Arbor.AI.Runtime.Dispatch, :dispatch, 2)
+    end
+  end
+
   describe "fallback_eligible?/1 — classifier" do
     test "transient atoms are eligible" do
       assert Dispatch.fallback_eligible?(:timeout)
