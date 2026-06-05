@@ -1,15 +1,15 @@
 {
-  "version": 1,
-  "issuer_id": "agent_30b455a27f7f4e02ef291fd9f7862677f731a1f8b08c997f5fb8ad430d594b6e",
   "capabilities": [
     {
-      "resource_uri": "arbor://fs/read/Users/azmaveth/.arbor/reports/upstream-deps/**",
-      "constraints": {}
+      "constraints": {},
+      "resource_uri": "arbor://fs/read/Users/azmaveth/.arbor/reports/upstream-deps/**"
     },
     {
-      "resource_uri": "arbor://fs/write/Users/azmaveth/.arbor/reports/upstream-deps-summary/**",
-      "constraints": {}
+      "constraints": {},
+      "resource_uri": "arbor://fs/write/Users/azmaveth/.arbor/reports/upstream-deps-summary/**"
     }
   ],
-  "signature": ""
+  "issuer_id": "agent_30b455a27f7f4e02ef291fd9f7862677f731a1f8b08c997f5fb8ad430d594b6e",
+  "signature": "t0CRKakQG0eToR/5dxDuW17ZuRPH2h3p6v0945rmyPeb0bSiteKH8Sibno5X6R6ufSPon+2hIo0VChCztO/DAw==",
+  "version": 1
 }

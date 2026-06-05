@@ -191,7 +191,14 @@ defmodule Arbor.Scheduler.CapsFile do
 
   defp validate_schema(_), do: {:error, {:invalid_schema, :not_a_map}}
 
-  defp validate_capabilities([]), do: {:error, {:invalid_schema, :empty_capabilities}}
+  # An empty capabilities list is a valid declaration meaning "this
+  # pipeline does not need any granted caps." Shell-only pipelines (no
+  # `exec` action nodes) fit this shape — shell stdout doesn't go through
+  # the action-layer capability check, so no caps are needed for the run
+  # to function. The empty declaration is the explicit, reviewable form
+  # of "this pipeline runs without resource access" — distinct from "no
+  # caps file at all" which Phase 5's PipelineRunner refuses.
+  defp validate_capabilities([]), do: {:ok, []}
 
   defp validate_capabilities(caps) when is_list(caps) do
     caps

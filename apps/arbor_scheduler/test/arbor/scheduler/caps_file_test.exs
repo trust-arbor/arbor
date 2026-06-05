@@ -155,20 +155,20 @@ defmodule Arbor.Scheduler.CapsFileTest do
                CapsFile.load(path)
     end
 
-    test "empty capabilities array rejected", %{
+    test "empty capabilities list is a valid 'no caps needed' declaration", %{
       identity: identity,
       tmp_dir: tmp_dir
     } do
+      # Shell-only pipelines don't go through the action layer's capability
+      # check (shell stdout is its own thing). They still need a .caps.json
+      # sibling under Phase 5's "no caps file → refuse to run" rule, but
+      # the file can declare an empty capabilities list to signal "this
+      # pipeline explicitly requires no granted resource caps." That's
+      # different from a missing file, which is the unreviewed case.
       path = Path.join(tmp_dir, "empty_caps.caps.json")
+      write_signed_caps_file(path, identity, [])
 
-      write_raw_caps_file(path, %{
-        "version" => 1,
-        "issuer_id" => identity.agent_id,
-        "capabilities" => [],
-        "signature" => "AAAA"
-      })
-
-      assert {:error, {:invalid_schema, :empty_capabilities}} = CapsFile.load(path)
+      assert {:ok, []} = CapsFile.load(path)
     end
   end
 
