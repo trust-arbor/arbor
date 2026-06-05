@@ -6,7 +6,7 @@ defmodule Arbor.Agent.Claude do
   signals, executor) lives in `Arbor.Agent.AgentSeed`. Heartbeat is managed
   by the DOT Session. This module provides only Claude-specific functionality:
 
-  - Query execution via `Arbor.AI.AgentSDK`
+  - Query execution via `Arbor.AI.Runtime.Dispatch` on the `:acp` runtime
   - Thinking extraction from session files
   - Checkpoint persistence
 
@@ -23,8 +23,10 @@ defmodule Arbor.Agent.Claude do
 
   alias Arbor.Agent.CheckpointManager
 
-  alias Arbor.AI.AgentSDK
+  alias Arbor.AI.Runtime.Dispatch
   alias Arbor.AI.SessionReader
+  alias Arbor.LLM.Message
+  alias Arbor.LLM.Request
   alias Arbor.Memory
 
   @type option ::
@@ -381,8 +383,17 @@ defmodule Arbor.Agent.Claude do
   end
 
   defp execute_query(prompt, model, capture, state, opts) do
-    case AgentSDK.query(prompt, Keyword.merge(opts, model: model)) do
-      {:ok, response} ->
+    request = build_request(prompt, model, opts)
+
+    case Dispatch.dispatch(request, policy: %{runtime: :acp}) do
+      {:ok, llm_response} ->
+        # Convert the struct response back to the legacy map shape that
+        # downstream callers (handle_query, ChatLive) read via dot access
+        # and extend with `Map.put(response, :recalled_memories, ...)`.
+        # A struct can't take arbitrary keys via Map.put, so we flatten
+        # here at the runtime boundary.
+        response = llm_response_to_legacy_map(llm_response)
+
         raw_count = thinking_count_label(response.thinking)
 
         Logger.debug(
@@ -414,20 +425,75 @@ defmodule Arbor.Agent.Claude do
   defp thinking_count_label(blocks) when is_list(blocks), do: "#{length(blocks)} blocks"
   defp thinking_count_label(other), do: inspect(other)
 
+  # Claude.stream/4 has no production callers (verified Phase 3d). The
+  # AcpSession non-streaming path doesn't surface mid-turn deltas, so
+  # streaming becomes "execute then replay" — text in one chunk, thinking
+  # block-by-block. If a real streaming consumer appears, this is where
+  # to add Runtime.callbacks → callback adapter wiring.
   defp execute_stream(prompt, callback, model, capture, state, opts) do
-    case AgentSDK.stream(prompt, callback, Keyword.merge(opts, model: model)) do
-      {:ok, response} ->
-        {thinking, session_id} = resolve_thinking(response, capture, state)
-        maybe_record_thinking(state.id, thinking)
-        notify_thinking_callback(thinking, callback)
-
-        enhanced_response = %{response | thinking: thinking}
-        new_state = update_state_after_query(state, session_id, thinking)
-        {:ok, enhanced_response, new_state}
+    case execute_query(prompt, model, capture, state, opts) do
+      {:ok, response, new_state} ->
+        if response.text && response.text != "", do: callback.({:text, response.text})
+        notify_thinking_callback(response.thinking, callback)
+        callback.({:complete, response})
+        {:ok, response, new_state}
 
       {:error, _} = error ->
         error
     end
+  end
+
+  # Map AgentSDK's atom model aliases to canonical model ids so the
+  # Dispatch selector can resolve a real ModelEntry. Claude CLI accepts
+  # both forms, so passing the full id all the way through is safe.
+  defp model_id(:opus), do: "claude-opus-4-6"
+  defp model_id(:sonnet), do: "claude-sonnet-4-6"
+  defp model_id(:haiku), do: "claude-haiku-4-5-20251001"
+  defp model_id(model) when is_atom(model), do: Atom.to_string(model)
+  defp model_id(model) when is_binary(model), do: model
+
+  defp build_request(prompt, model, opts) do
+    provider_options =
+      %{}
+      |> maybe_put_provider_option("workspace", Keyword.get(opts, :cwd))
+      |> maybe_put_provider_option("system_prompt", Keyword.get(opts, :system_prompt))
+
+    messages =
+      case Keyword.get(opts, :system_prompt) do
+        nil ->
+          [%Message{role: :user, content: prompt}]
+
+        sys when is_binary(sys) ->
+          [
+            %Message{role: :system, content: sys},
+            %Message{role: :user, content: prompt}
+          ]
+      end
+
+    %Request{
+      provider: "anthropic",
+      runtime: :acp,
+      model: model_id(model),
+      messages: messages,
+      tools: [],
+      tool_choice: nil,
+      max_tokens: Keyword.get(opts, :max_tokens),
+      temperature: Keyword.get(opts, :temperature),
+      provider_options: provider_options
+    }
+  end
+
+  defp maybe_put_provider_option(map, _key, nil), do: map
+  defp maybe_put_provider_option(map, key, value), do: Map.put(map, key, value)
+
+  defp llm_response_to_legacy_map(%Arbor.LLM.Response{} = r) do
+    %{
+      text: r.text,
+      thinking: r.thinking,
+      tool_uses: [],
+      usage: r.usage,
+      session_id: r.session_id
+    }
   end
 
   # Use thinking from the stream response when available.
