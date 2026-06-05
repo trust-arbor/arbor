@@ -274,13 +274,25 @@ defmodule Arbor.Orchestrator do
 
   defp load_graph_for_entry(_), do: {:error, :no_dot_source_path}
 
-  # Already compiled — just apply transforms
-  defp ensure_graph(%Graph{compiled: true} = graph, opts), do: apply_transforms(graph, opts)
+  # Already compiled — just apply caller-supplied custom transforms.
+  # Built-in transforms (VariableExpansion, ModelStylesheet) are assumed to
+  # have already been applied before the caller compiled the graph. Callers
+  # that pass a `compiled: true` graph are responsible for the transform-
+  # before-compile ordering on their end. New code should pass an uncompiled
+  # graph or DOT source and let this module own the order.
+  defp ensure_graph(%Graph{compiled: true} = graph, opts),
+    do: apply_custom_transforms(graph, opts)
 
-  # Uncompiled Graph struct — compile then apply transforms
+  # Uncompiled Graph struct — built-in transforms FIRST, then IR.Compile,
+  # then any caller-supplied custom transforms. The order matters: the
+  # compiler's static analyses (capability aggregation, taint profile,
+  # data-classification, handler-schema validation) read the post-transform
+  # graph so they reflect the values the engine will actually execute. See
+  # `apply_pre_compile_transforms/2` for the ordering rationale.
   defp ensure_graph(%Graph{} = graph, opts) do
-    with {:ok, compiled} <- IR.Compiler.compile(graph) do
-      apply_transforms(compiled, opts)
+    with {:ok, transformed} <- apply_pre_compile_transforms(graph, opts),
+         {:ok, compiled} <- IR.Compiler.compile(transformed) do
+      apply_custom_transforms(compiled, opts)
     end
   end
 
@@ -289,8 +301,9 @@ defmodule Arbor.Orchestrator do
       ensure_graph_cached(source, opts)
     else
       with {:ok, graph} <- Parser.parse(source),
-           {:ok, compiled} <- IR.Compiler.compile(graph) do
-        apply_transforms(compiled, opts)
+           {:ok, transformed} <- apply_pre_compile_transforms(graph, opts),
+           {:ok, compiled} <- IR.Compiler.compile(transformed) do
+        apply_custom_transforms(compiled, opts)
       end
     end
   end
@@ -304,27 +317,50 @@ defmodule Arbor.Orchestrator do
 
     case DotCache.get(cache_key) do
       {:ok, graph} ->
-        apply_transforms(graph, opts)
+        # Cache stores the post-built-in-transform + post-compile graph
+        # (DotCache @ir_version bumped to 3 when this ordering changed).
+        # Custom caller transforms still apply on top per-run.
+        apply_custom_transforms(graph, opts)
 
       miss_or_stale when miss_or_stale in [:miss, :stale] ->
         with {:ok, graph} <- Parser.parse(source),
-             {:ok, compiled} <- IR.Compiler.compile(graph) do
+             {:ok, transformed} <- apply_pre_compile_transforms(graph, opts),
+             {:ok, compiled} <- IR.Compiler.compile(transformed) do
           DotCache.put(cache_key, compiled)
-          apply_transforms(compiled, opts)
+          apply_custom_transforms(compiled, opts)
         end
     end
   rescue
     # Cache unavailable (GenServer not started) — fall back to uncached
     ArgumentError ->
       with {:ok, graph} <- Parser.parse(source),
-           {:ok, compiled} <- IR.Compiler.compile(graph) do
-        apply_transforms(compiled, opts)
+           {:ok, transformed} <- apply_pre_compile_transforms(graph, opts),
+           {:ok, compiled} <- IR.Compiler.compile(transformed) do
+        apply_custom_transforms(compiled, opts)
       end
   end
 
-  defp apply_transforms(graph, opts) do
-    transforms = [VariableExpansion, ModelStylesheet | Keyword.get(opts, :transforms, [])]
+  # Built-in transforms applied BEFORE IR.Compile so the compiler's static
+  # analyses see post-transform values. Both transforms are deterministic
+  # from the DOT source (VariableExpansion reads `graph.attrs`,
+  # ModelStylesheet reads `graph.attrs["model_stylesheet"]`) so cache
+  # invalidation by source hash remains sound.
+  defp apply_pre_compile_transforms(graph, _opts) do
+    run_transforms(graph, [VariableExpansion, ModelStylesheet])
+  end
 
+  # Caller-supplied transforms applied AFTER IR.Compile. These are the
+  # extensibility hook for downstream callers that want to mutate a
+  # compiled graph — they cannot influence the compiler's analyses by
+  # design (would invalidate the cache otherwise).
+  defp apply_custom_transforms(graph, opts) do
+    case Keyword.get(opts, :transforms, []) do
+      [] -> {:ok, graph}
+      custom -> run_transforms(graph, custom)
+    end
+  end
+
+  defp run_transforms(graph, transforms) do
     Enum.reduce_while(transforms, {:ok, graph}, fn transform, {:ok, acc} ->
       case apply_transform(transform, acc) do
         {:ok, next} -> {:cont, {:ok, next}}
