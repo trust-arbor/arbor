@@ -29,7 +29,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
 
       outcome = ShellHandler.execute(node, context, @graph, [])
       assert outcome.status == :success
-      assert String.contains?(outcome.context_updates["last_response"], "hello_world")
+      assert String.contains?(outcome.context_updates["shell.echo_test.output"], "hello_world")
       assert outcome.context_updates["shell.echo_test.exit_code"] == 0
     end
 
@@ -78,7 +78,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       outcome = ShellHandler.execute(node, context, @graph, [])
       assert outcome.status == :success
       # /tmp may resolve to /private/tmp on macOS
-      assert String.contains?(outcome.context_updates["last_response"], "tmp")
+      assert String.contains?(outcome.context_updates["shell.cwd_test.output"], "tmp")
     end
 
     test "respects cwd from context workdir" do
@@ -87,7 +87,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
 
       outcome = ShellHandler.execute(node, context, @graph, [])
       assert outcome.status == :success
-      assert String.contains?(outcome.context_updates["last_response"], "tmp")
+      assert String.contains?(outcome.context_updates["shell.cwd_ctx.output"], "tmp")
     end
 
     test "timeout produces error" do
@@ -106,8 +106,73 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
 
       outcome = ShellHandler.execute(node, context, @graph, [])
       assert outcome.status == :success
-      output = outcome.context_updates["last_response"]
+      output = outcome.context_updates["shell.multi.output"]
       assert String.length(output) > 0
+    end
+
+    test "regression: shell node does not clobber last_response (bug A)" do
+      # Setup: pipeline shape `LLM → shell → use last_response`.
+      # Previously, the shell node wrote `"last_response" => output`
+      # in its context_updates, overwriting whatever the prior compute/
+      # LLM node had produced. Production pipelines relying on the
+      # `last_response` convention (LLM output) silently lost data
+      # whenever a shell node ran downstream of a compute node.
+      #
+      # Fix: ShellHandler.execute/4 emits only `shell.<id>.exit_code`
+      # and `shell.<id>.output`; `last_response` is reserved for
+      # LLM/compute outputs (see handler_schema.ex compute ports).
+      #
+      # Surfaced 2026-06-05 by the upstream-deps-summary pipeline
+      # losing the categorizer's LLM output to a downstream `mkdir &&
+      # printf` shell node.
+      node = make_node("just_a_shell", %{"command" => "echo from_shell"})
+      context = Context.new()
+
+      outcome = ShellHandler.execute(node, context, @graph, [])
+
+      refute Map.has_key?(outcome.context_updates, "last_response"),
+             "ShellHandler must not write last_response — that key is " <>
+               "owned by LLM/compute nodes. Bug A: shell output " <>
+               "clobbered LLM responses in pipelines of the shape " <>
+               "LLM → shell → use last_response."
+    end
+
+    test "regression: captures full stdout from compound commands (bug B)" do
+      # Setup: a compound command like `mkdir -p X && printf '%s' Y`
+      # races on the port: the spawn port sends `:exit_status` and
+      # trailing `{:data, _}` in an unspecified order, and for compound
+      # commands with multiple forks, exit can win — handing the
+      # caller an empty string even though the command produced
+      # output. Bare-printf commands win the race; compound commands
+      # often lose it.
+      #
+      # Fix: after receiving `:exit_status`, drain any remaining
+      # `{:data, _}` messages with a 0-timeout receive before
+      # returning.
+      #
+      # Surfaced 2026-06-05 by the upstream-deps-summary pipeline's
+      # `build_output_path` step (mkdir-then-printf) returning empty
+      # output, breaking the file_write target path.
+      cmd =
+        ~s|mkdir -p /tmp/arbor_shell_regression && printf '%s' "/tmp/arbor_shell_regression/x.md"|
+
+      node = make_node("compound", %{"command" => cmd})
+      context = Context.new()
+
+      # Loop to catch raciness — if the bug is back this often fails
+      # on the first or second iteration.
+      for i <- 1..10 do
+        outcome = ShellHandler.execute(node, context, @graph, [])
+        output = outcome.context_updates["shell.compound.output"]
+
+        assert outcome.status == :success, "iteration #{i}: status was #{inspect(outcome.status)}"
+
+        assert output == "/tmp/arbor_shell_regression/x.md",
+               "iteration #{i}: expected full path but got #{inspect(output)} " <>
+                 "(exit_code=#{outcome.context_updates["shell.compound.exit_code"]}). " <>
+                 "Bug B: collect_output/3 returned on :exit_status without " <>
+                 "draining trailing :data messages."
+      end
     end
   end
 
