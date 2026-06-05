@@ -1062,9 +1062,9 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
     end
 
     @tag :fast
-    test "uses graph default_max_retry when node has none" do
+    test "uses graph default_max_retries when node has none" do
       node = %Node{id: "t", attrs: %{}}
-      graph = %Graph{attrs: %{"default_max_retry" => "2"}}
+      graph = %Graph{attrs: %{"default_max_retries" => "2"}}
       assert Executor.parse_max_attempts(node, graph) == 3
     end
 
@@ -1079,7 +1079,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
     @tag :fast
     test "node max_retries takes precedence over graph default" do
       node = %Node{id: "t", attrs: %{"max_retries" => "5"}}
-      graph = %Graph{attrs: %{"default_max_retry" => "2"}}
+      graph = %Graph{attrs: %{"default_max_retries" => "2"}}
       assert Executor.parse_max_attempts(node, graph) == 6
     end
 

@@ -352,8 +352,8 @@ defmodule Arbor.Orchestrator.Engine.Executor do
       Map.has_key?(node.attrs, "max_retries") ->
         parse_int(Map.get(node.attrs, "max_retries"), 0) + 1
 
-      Map.has_key?(graph.attrs, "default_max_retry") ->
-        parse_int(Map.get(graph.attrs, "default_max_retry"), 0) + 1
+      Map.has_key?(graph.attrs, "default_max_retries") ->
+        parse_int(Map.get(graph.attrs, "default_max_retries"), 0) + 1
 
       true ->
         retry_profile(node, graph).max_attempts
