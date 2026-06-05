@@ -39,7 +39,7 @@ digraph MorningDigestSynthesis {
 
   build_input_path [
     type="shell",
-    command="echo $HOME/.arbor/reports/morning-digest/$(date -u +%Y-%m-%d).md",
+    command="printf '%s' \"$HOME/.arbor/reports/morning-digest/$(date -u +%Y-%m-%d).md\"",
     sandbox="none",
     timeout="5000",
     on_error="fail",
@@ -67,17 +67,22 @@ digraph MorningDigestSynthesis {
     purpose="llm",
     simulate="false",
     llm_provider="lm_studio",
-    llm_model="gemma-4-31b-it@q4_k_xl",
+    llm_model="gemma-4-31b-it",
     use_tools="false",
-    max_tokens="1024",
+    // Reasoning model — give the budget room to finish CoT and emit
+    // the actual synthesis. See upstream_deps_summary.dot for the
+    // diagnosis (also `.arbor/roadmap/0-inbox/llm-empty-response-
+    // from-reasoning-and-mtp-models.md`).
+    max_tokens="32768",
     temperature="0.3",
+    timeout="1800000",
     system_prompt="You produce an executive summary of an Arbor morning digest. Read the digest below — it's a concatenation of last night's overnight reports (upstream-deps, optional summaries, etc.). Output ONLY Markdown (no preamble, no code fences around the whole output) in this exact shape:\n\n# Today's Three Things\n\n## 1. <Headline>\n\nOne to three sentences explaining what matters, citing the source topic (e.g. 'from upstream-deps').\n\n## 2. <Headline>\n\nSame.\n\n## 3. <Headline>\n\nSame.\n\n## Also noteworthy (optional)\n\nA short bullet list, 1–5 items max, of secondary items worth a glance. Omit this section if there's nothing.\n\nPick items by importance: security concerns first, then breaking changes / production risk, then signal-bearing trends. Skip cosmetic items entirely. Be terse, cite specifics from the digest, no hedging or filler.",
     prompt_context_key="exec.read_digest.content"
   ]
 
   build_output_path [
     type="shell",
-    command="mkdir -p $HOME/.arbor/reports/morning-digest-synthesis && echo $HOME/.arbor/reports/morning-digest-synthesis/$(date -u +%Y-%m-%d).md",
+    command="mkdir -p \"$HOME/.arbor/reports/morning-digest-synthesis\" && printf '%s' \"$HOME/.arbor/reports/morning-digest-synthesis/$(date -u +%Y-%m-%d).md\"",
     sandbox="none",
     timeout="5000",
     on_error="fail",

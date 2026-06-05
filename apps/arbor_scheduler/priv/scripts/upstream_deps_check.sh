@@ -133,9 +133,15 @@ while IFS= read -r line || [ -n "${line}" ]; do
         append ""
         append '```'
         # Cap at 50 to keep daily reports readable.
-        git -C "${repo_path}" log --oneline --no-decorate \
-            "HEAD..${upstream}" -n 50 2>/dev/null \
-            | append_lines
+        # NB: process substitution `< <(git …)` rather than `git … |
+        # append_lines`. The pipe form runs append_lines in a subshell,
+        # so the function's `append` calls modify a throwaway $buf and
+        # the commit list never reaches the report. (Caught 2026-06-05
+        # while quality-checking the upstream-deps-summary pipeline.)
+        append_lines < <(
+            git -C "${repo_path}" log --oneline --no-decorate \
+                "HEAD..${upstream}" -n 50 2>/dev/null
+        )
         append '```'
         append ""
     else
