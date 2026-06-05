@@ -176,38 +176,24 @@ defmodule Arbor.AI.Runtime.Dispatch do
   # Errors that justify trying the next entry in the fallback chain.
   # Composes two ideas:
   #
-  #   1. Transient runtime failures (the `Arbor.LLM.Retry` classifier —
-  #      rate-limit, timeout, 5xx, ProviderError with retryable=true).
-  #      Inlined here rather than calling Retry because `Retry`'s
-  #      `default_should_retry/1` is private. If a second caller appears,
-  #      this is the prompt to extract a shared classifier.
+  #   1. Transient runtime failures via `Arbor.LLM.Retry.fallback_eligible?/1`
+  #      — rate-limit, timeout, 5xx, ProviderError with retryable=true.
+  #      Shared with the LlmHandler tools-loop fallback wrapper so both
+  #      paths classify errors identically.
   #
   #   2. Declarative path failures (`:no_cli_for_provider`,
   #      `:no_provider_supports_runtime`, pool/session crashes, selection
   #      failures). Same-path retry wouldn't help, but a *different* path
-  #      legitimately could.
+  #      legitimately could. These are Dispatch-specific (LlmHandler's
+  #      tools loop goes through Client.complete, which never surfaces them).
   #
   # Non-eligible: auth errors, bad-prompt errors, and any ProviderError
   # whose `retryable` is explicitly `false` — these would fail the same
   # way on every path, so fallback would just waste budget.
   @spec fallback_eligible?(term()) :: boolean()
   def fallback_eligible?(reason) do
-    transient_runtime_error?(reason) or path_unavailable_error?(reason)
+    Arbor.LLM.Retry.fallback_eligible?(reason) or path_unavailable_error?(reason)
   end
-
-  defp transient_runtime_error?(%Arbor.LLM.ProviderError{retryable: retryable}), do: retryable
-
-  defp transient_runtime_error?(%mod{}) when mod == Arbor.LLM.RequestTimeoutError, do: true
-
-  defp transient_runtime_error?(reason) when is_atom(reason) do
-    reason in [:timeout, :rate_limited, :network_error, :transient_error]
-  end
-
-  defp transient_runtime_error?({:http_status, status}) when is_integer(status) do
-    status == 429 or status >= 500
-  end
-
-  defp transient_runtime_error?(_), do: false
 
   defp path_unavailable_error?(reason) when is_atom(reason) do
     reason in [:pool_not_available, :pool_exhausted, :session_mod_not_available]
