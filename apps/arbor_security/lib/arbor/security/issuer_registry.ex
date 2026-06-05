@@ -176,14 +176,21 @@ defmodule Arbor.Security.IssuerRegistry do
 
   @impl true
   def init(_opts) do
-    state = %{by_issuer_id: %{}}
-    {:ok, restore_from_store(state)}
+    # No in-memory cache. The BufferedStore ETS table backing
+    # `:arbor_security_issuers` IS our cache. Earlier this module mirrored
+    # state into a Map at init via `restore_from_store/1`, but that
+    # surfaced a real race: at supervisor startup, IssuerRegistry's init
+    # sometimes ran before the BufferedStore's ETS table was populated
+    # from disk — even though both ran sequentially under the same
+    # `one_for_one` supervisor. Reading BufferedStore on every call
+    # eliminates the race entirely (and ETS reads are µs).
+    {:ok, %{}}
   end
 
   @impl true
   def handle_call({:register, issuer_id, envelope_caps, opts}, _from, state) do
     cond do
-      Map.has_key?(state.by_issuer_id, issuer_id) ->
+      already_enrolled?(issuer_id) ->
         {:reply, {:error, :already_enrolled}, state}
 
       envelope_caps == [] ->
@@ -204,16 +211,15 @@ defmodule Arbor.Security.IssuerRegistry do
           status_reason: Keyword.get(opts, :reason)
         }
 
-        new_state = put_in(state, [:by_issuer_id, issuer_id], entry)
         persist_to_store(issuer_id, entry)
-        {:reply, :ok, new_state}
+        {:reply, :ok, state}
     end
   end
 
   @impl true
   def handle_call({:lookup, issuer_id}, _from, state) do
     result =
-      case Map.get(state.by_issuer_id, issuer_id) do
+      case load_entry(issuer_id) do
         nil ->
           {:error, :not_found}
 
@@ -235,7 +241,7 @@ defmodule Arbor.Security.IssuerRegistry do
 
   @impl true
   def handle_call({:revoke, issuer_id, reason}, _from, state) do
-    case Map.get(state.by_issuer_id, issuer_id) do
+    case load_entry(issuer_id) do
       nil ->
         {:reply, {:error, :not_found}, state}
 
@@ -247,19 +253,14 @@ defmodule Arbor.Security.IssuerRegistry do
             status_reason: reason
         }
 
-        new_state = put_in(state, [:by_issuer_id, issuer_id], updated)
         persist_to_store(issuer_id, updated)
-        {:reply, :ok, new_state}
+        {:reply, :ok, state}
     end
   end
 
   @impl true
   def handle_call(:list, _from, state) do
-    entries =
-      Enum.map(state.by_issuer_id, fn {issuer_id, entry} ->
-        Map.put(entry, :issuer_id, issuer_id)
-      end)
-
+    entries = list_all_entries()
     {:reply, entries, state}
   end
 
@@ -272,6 +273,42 @@ defmodule Arbor.Security.IssuerRegistry do
       {:ok, _public_key} -> true
       _ -> false
     end
+  end
+
+  defp already_enrolled?(issuer_id), do: load_entry(issuer_id) != nil
+
+  defp load_entry(issuer_id) do
+    case apply(@buffered_store, :get, [issuer_id, [name: @store]]) do
+      {:ok, %Record{data: data}} ->
+        case deserialize_entry(data) do
+          {:ok, _issuer_id, entry} -> entry
+          {:error, _} -> nil
+        end
+
+      {:error, _} ->
+        nil
+    end
+  catch
+    _, _ -> nil
+  end
+
+  defp list_all_entries do
+    case apply(@buffered_store, :list, [[name: @store]]) do
+      {:ok, keys} ->
+        keys
+        |> Enum.map(fn key ->
+          case load_entry(key) do
+            nil -> nil
+            entry -> Map.put(entry, :issuer_id, key)
+          end
+        end)
+        |> Enum.reject(&is_nil/1)
+
+      {:error, _} ->
+        []
+    end
+  catch
+    _, _ -> []
   end
 
   # ===========================================================================
@@ -290,34 +327,6 @@ defmodule Arbor.Security.IssuerRegistry do
     _, reason ->
       Logger.warning("Failed to persist issuer #{issuer_id}: #{inspect(reason)}")
       :ok
-  end
-
-  defp restore_from_store(state) do
-    if Process.whereis(@store) do
-      case apply(@buffered_store, :list, [[name: @store]]) do
-        {:ok, keys} -> Enum.reduce(keys, state, &restore_key_from_store/2)
-        {:error, _reason} -> state
-      end
-    else
-      state
-    end
-  catch
-    _, reason ->
-      Logger.warning("Failed to restore issuer registry: #{inspect(reason)}")
-      state
-  end
-
-  defp restore_key_from_store(key, acc) do
-    case apply(@buffered_store, :get, [key, [name: @store]]) do
-      {:ok, %Record{data: data}} ->
-        case deserialize_entry(data) do
-          {:ok, issuer_id, entry} -> put_in(acc, [:by_issuer_id, issuer_id], entry)
-          {:error, _} -> acc
-        end
-
-      {:error, _} ->
-        acc
-    end
   end
 
   defp serialize_entry(issuer_id, entry) do

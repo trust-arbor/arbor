@@ -108,7 +108,9 @@ defmodule Mix.Tasks.Arbor.Scheduler.SignCaps do
     end
   end
 
-  defp normalize_capabilities([]), do: {:error, :empty_capabilities}
+  # Empty list is an explicit "this pipeline declares no caps" — valid;
+  # matches CapsFile.load semantics. Shell-only pipelines use this form.
+  defp normalize_capabilities([]), do: {:ok, []}
 
   defp normalize_capabilities(caps) do
     caps
