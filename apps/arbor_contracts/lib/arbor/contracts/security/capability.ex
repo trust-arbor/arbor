@@ -151,6 +151,144 @@ defmodule Arbor.Contracts.Security.Capability do
   end
 
   @doc """
+  Check if URI pattern `child` is a subset of URI pattern `parent`.
+
+  A child URI pattern is a subset of a parent URI pattern when every concrete
+  URI matched by `child` is also matched by `parent`. Supports the same
+  wildcard suffixes as `Arbor.Security.AuthDecision` capability matching:
+  `/**` (any subtree depth) and `/*` (exactly one level).
+
+  Used to enforce that delegated/declared capabilities stay within the bounds
+  of their parent or issuer envelope.
+
+  ## Examples
+
+      iex> alias Arbor.Contracts.Security.Capability
+      iex> Capability.uri_subset?("arbor://fs/write/X", "arbor://fs/write/**")
+      true
+
+      iex> alias Arbor.Contracts.Security.Capability
+      iex> Capability.uri_subset?("arbor://fs/write/X/Y/**", "arbor://fs/write/X/**")
+      true
+
+      iex> alias Arbor.Contracts.Security.Capability
+      iex> Capability.uri_subset?("arbor://fs/write/**", "arbor://fs/write/X/**")
+      false
+
+      iex> alias Arbor.Contracts.Security.Capability
+      iex> Capability.uri_subset?("arbor://fs/write/X", "arbor://fs/read/X")
+      false
+  """
+  @spec uri_subset?(String.t(), String.t()) :: boolean()
+  def uri_subset?(child, parent) when is_binary(child) and is_binary(parent) do
+    child_prefix = strip_uri_wildcards(child)
+    parent_prefix = strip_uri_wildcards(parent)
+
+    uri_prefix_of?(parent_prefix, child_prefix) and
+      parent_wildcard_covers_child?(parent, child)
+  end
+
+  def uri_subset?(_, _), do: false
+
+  defp strip_uri_wildcards(uri) do
+    uri
+    |> String.replace_suffix("/**", "")
+    |> String.replace_suffix("/*", "")
+  end
+
+  defp uri_prefix_of?(a, b), do: a == b or String.starts_with?(b, a <> "/")
+
+  defp parent_wildcard_covers_child?(parent, child) do
+    cond do
+      # Parent allows any subtree — covers any child shape under its prefix
+      String.ends_with?(parent, "/**") -> true
+      # Parent allows exactly one level — child must NOT use /** (would go deeper)
+      String.ends_with?(parent, "/*") -> not String.ends_with?(child, "/**")
+      # Parent is concrete; its prefix rule already covers subtree access
+      true -> true
+    end
+  end
+
+  @doc """
+  Check if `child_constraints` are at-least-as-restrictive as `parent_constraints`.
+
+  For each key present in `child`:
+    - If `parent` lacks the key, parent imposes no limit on it — any child
+      value is more restrictive (subset).
+    - If `parent` has the key with the same value, that's equality (subset).
+    - For integer keys like `:rate_limit` / `:max_uses` / `:max_size`, child
+      must be `<=` parent (tighter limit).
+    - For `:requires_approval`, child=true is always permitted; if parent=true
+      then child must also be true (can't remove approval requirement).
+    - Otherwise, the rule is conservative: NOT subset.
+
+  Returns `true` if child is a valid subset, `false` if it widens any constraint.
+
+  ## Examples
+
+      iex> alias Arbor.Contracts.Security.Capability
+      iex> Capability.constraints_subset?(%{rate_limit: 50}, %{rate_limit: 100})
+      true
+
+      iex> alias Arbor.Contracts.Security.Capability
+      iex> Capability.constraints_subset?(%{rate_limit: 200}, %{rate_limit: 100})
+      false
+
+      iex> alias Arbor.Contracts.Security.Capability
+      iex> Capability.constraints_subset?(%{max_size: 1024}, %{})
+      true
+
+      iex> alias Arbor.Contracts.Security.Capability
+      iex> Capability.constraints_subset?(%{requires_approval: false}, %{requires_approval: true})
+      false
+  """
+  @spec constraints_subset?(map(), map()) :: boolean()
+  def constraints_subset?(child, parent) when is_map(child) and is_map(parent) do
+    Enum.all?(child, fn {key, child_value} ->
+      case Map.fetch(parent, key) do
+        # Parent imposes no limit on this key — child adding a limit is restriction
+        :error -> true
+        {:ok, parent_value} -> constraint_value_subset?(key, child_value, parent_value)
+      end
+    end)
+  end
+
+  def constraints_subset?(_, _), do: false
+
+  defp constraint_value_subset?(:requires_approval, child, parent)
+       when is_boolean(child) and is_boolean(parent) do
+    # parent=true requires approval; child must also require approval (can't remove)
+    # parent=false: child can either require approval (tighter) or skip it (equal)
+    parent == false or child == true
+  end
+
+  defp constraint_value_subset?(_key, child, parent)
+       when is_integer(child) and is_integer(parent) do
+    child <= parent
+  end
+
+  defp constraint_value_subset?(_key, value, value), do: true
+  defp constraint_value_subset?(_key, _child, _parent), do: false
+
+  @doc """
+  Check whether capability `child` is fully contained within capability `parent`.
+
+  Combines `uri_subset?/2` AND `constraints_subset?/2`. Used both for delegation
+  attenuation enforcement (a delegated cap must not widen its parent) and for
+  verifying capabilities declared in a `.caps.json` file fit within their
+  issuer's max-envelope capability.
+
+  Note: this does NOT check `expires_at`, `not_before`, `delegation_depth`,
+  `session_id`, `task_id`, or `principal_scope` — those have their own
+  attenuation rules in `delegate/3` and `scope_matches?/2`.
+  """
+  @spec envelope_subset?(t(), t()) :: boolean()
+  def envelope_subset?(%__MODULE__{} = child, %__MODULE__{} = parent) do
+    uri_subset?(child.resource_uri, parent.resource_uri) and
+      constraints_subset?(child.constraints, parent.constraints)
+  end
+
+  @doc """
   Check if a capability's scope bindings match the given context.
 
   A capability matches if:
@@ -181,6 +319,8 @@ defmodule Arbor.Contracts.Security.Capability do
   """
   @spec delegate(t(), Types.agent_id(), keyword()) :: {:ok, t()} | {:error, term()}
   def delegate(%__MODULE__{} = parent, new_principal_id, opts \\ []) do
+    new_constraints = Map.merge(parent.constraints, opts[:constraints] || %{})
+
     cond do
       parent.delegation_depth <= 0 ->
         {:error, :delegation_depth_exhausted}
@@ -189,8 +329,15 @@ defmodule Arbor.Contracts.Security.Capability do
           new_principal_id not in parent.allowed_delegatees ->
         {:error, {:delegatee_not_allowed, new_principal_id}}
 
+      # Envelope enforcement: the merged constraints must not widen the parent's
+      # constraints. `Map.merge` lets `opts[:constraints]` override parent values,
+      # so without this check a delegator could call delegate/3 with
+      # `constraints: %{rate_limit: 1_000_000}` and silently expand a parent
+      # cap that only allowed 100/sec. Reject construction.
+      not constraints_subset?(new_constraints, parent.constraints) ->
+        {:error, :widens_envelope}
+
       true ->
-        new_constraints = Map.merge(parent.constraints, opts[:constraints] || %{})
         new_expires_at = min_datetime(parent.expires_at, opts[:expires_at])
         new_not_before = opts[:not_before] || parent.not_before
 
