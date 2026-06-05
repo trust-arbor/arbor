@@ -41,10 +41,16 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
 
     case run_command(command, cwd: cwd, timeout: timeout, sandbox: sandbox) do
       {:ok, output, exit_code} ->
+        # Shell stdout is exposed as `shell.<id>.output` only — NOT as
+        # `last_response`. `last_response` is the LLM-output convention
+        # (see handler_schema.ex compute ports). Pipelines of the shape
+        # `LLM → shell → use last_response` previously lost the LLM
+        # response because the shell node clobbered it with its own
+        # stdout (often empty). Downstream nodes that want shell stdout
+        # reference the namespaced key directly.
         base_updates = %{
           "shell.#{node.id}.exit_code" => exit_code,
-          "shell.#{node.id}.output" => output,
-          "last_response" => output
+          "shell.#{node.id}.output" => output
         }
 
         if exit_code == 0 do
@@ -142,10 +148,26 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
     cwd = Keyword.get(opts, :cwd, ".")
     timeout = Keyword.get(opts, :timeout, @default_timeout)
 
+    # IMPORTANT: use `:spawn_executable` with an explicit `/bin/sh -c`,
+    # NOT `{:spawn, command}`. The `:spawn` form tokenizes the command
+    # via shell-like splitting and execs the first token directly —
+    # there is NO real shell, so operators like `&&`, `||`, `|`, `;`,
+    # `$(…)`, and globbing are passed as literal argv tokens. For
+    # example, `mkdir -p X && printf Y` becomes `mkdir` invoked with
+    # `[-p, X, &&, printf, Y]` (mkdir -p happily creates all of these
+    # as directories), `printf` is never executed, and stdout is empty
+    # despite exit code 0. Using `/bin/sh -c "<command>"` gives the
+    # caller the shell semantics they expect.
     port =
       Port.open(
-        {:spawn, command},
-        [:binary, :exit_status, :stderr_to_stdout, {:cd, to_charlist(cwd)}]
+        {:spawn_executable, ~c"/bin/sh"},
+        [
+          :binary,
+          :exit_status,
+          :stderr_to_stdout,
+          {:cd, to_charlist(cwd)},
+          {:args, ["-c", command]}
+        ]
       )
 
     collect_output(port, <<>>, timeout)
@@ -157,11 +179,33 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
         collect_output(port, acc <> data, timeout)
 
       {^port, {:exit_status, code}} ->
-        {:ok, acc, code}
+        # `:exit_status` and trailing `{:data, _}` are not ordered on
+        # the spawn port — for compound commands (e.g. `mkdir && printf`)
+        # the exit signal can race ahead of the final stdout flush,
+        # giving callers an empty string. Drain remaining data with a
+        # 0-timeout receive before returning.
+        {:ok, drain_remaining(port, acc), code}
     after
       timeout ->
         Port.close(port)
         {:error, :timeout}
+    end
+  end
+
+  # Wait briefly for trailing {:data, _} after :exit_status. The spawn
+  # port doesn't guarantee that all stdout has been delivered to the
+  # owner process's mailbox before :exit_status arrives — for compound
+  # commands the final chunk can still be in flight. 50ms is enough to
+  # let normal pipe-buffered output land while keeping the fast path
+  # fast; anything still in flight after that is genuinely stuck and
+  # bounded losses are preferable to hangs.
+  @drain_timeout_ms 50
+
+  defp drain_remaining(port, acc) do
+    receive do
+      {^port, {:data, data}} -> drain_remaining(port, acc <> data)
+    after
+      @drain_timeout_ms -> acc
     end
   end
 
