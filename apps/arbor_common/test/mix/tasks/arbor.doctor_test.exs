@@ -129,5 +129,21 @@ defmodule Mix.Tasks.Arbor.DoctorTest do
       assert opts[:json] == true
       assert [_] = for({:fallback, v} <- opts, do: v)
     end
+
+    test "--refresh-models is a boolean flag" do
+      switches = Keyword.put(@all_switches, :refresh_models, :boolean)
+      {opts, _, _} = OptionParser.parse(["--refresh-models"], switches: switches)
+      assert opts[:refresh_models] == true
+    end
+
+    test "--refresh-models composes with --json" do
+      switches = Keyword.put(@all_switches, :refresh_models, :boolean)
+
+      {opts, _, _} =
+        OptionParser.parse(["--refresh-models", "--json"], switches: switches)
+
+      assert opts[:refresh_models] == true
+      assert opts[:json] == true
+    end
   end
 end
