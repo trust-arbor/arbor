@@ -30,7 +30,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
 
   require Logger
 
-  alias Arbor.Scheduler.Identity
+  alias Arbor.Scheduler.RunIdentity
 
   @impl Oban.Worker
   def perform(%Oban.Job{args: %{"pipeline_path" => path} = args}) do
@@ -46,6 +46,22 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
       {:error, :pipeline_not_found} ->
         Logger.error("[Scheduler] Pipeline file not found: #{path}")
         {:discard, "pipeline file not found: #{path}"}
+
+      {:error, {:caps_file_missing, caps_path}} ->
+        # Default #3 from the privesc design discussion: a pipeline that
+        # silently runs with zero caps is the exact bug shape this work is
+        # trying to prevent. Refuse to start and tell the operator which
+        # sibling file is expected — they can write one, sign it, and
+        # re-run.
+        Logger.error("[Scheduler] Pipeline refused: missing #{caps_path}")
+        {:discard, "missing caps file: #{caps_path}"}
+
+      {:error, {:caps_file_invalid, reason}} ->
+        # CapsFile.load returned a specific failure mode (invalid_signature,
+        # cap_exceeds_envelope, issuer_revoked, etc.). Surface the exact
+        # reason so the operator can fix root cause rather than guess.
+        Logger.error("[Scheduler] Pipeline refused: caps file invalid: #{inspect(reason)}")
+        {:discard, "caps file invalid: #{inspect(reason)}"}
 
       {:error, :orchestrator_unavailable} ->
         Logger.error("[Scheduler] Arbor.Orchestrator unavailable — retry")
@@ -68,6 +84,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
   # scheduler matures — start with the simplest viable shape.
   defp run_pipeline(path, context) do
     orchestrator = Arbor.Orchestrator
+    caps_path = caps_path_for(path)
 
     cond do
       # Check inputs (cheap, deterministic) before dispatching. A missing
@@ -77,34 +94,18 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
       not File.exists?(path) ->
         {:error, :pipeline_not_found}
 
+      not File.exists?(caps_path) ->
+        # Phase 5: pipelines MUST ship a signed .caps.json sibling. The
+        # scheduler-privesc redesign trades "pipelines auto-run with broad
+        # system caps" for "every pipeline declares its caps explicitly,
+        # signed by an enrolled issuer." Fail-closed on missing.
+        {:error, {:caps_file_missing, caps_path}}
+
       not Code.ensure_loaded?(orchestrator) ->
         {:error, :orchestrator_unavailable}
 
       true ->
-        # Orchestrator.run_file/2 accepts opts including :initial_values
-        # (seeds the pipeline's shared context) and :signer (a function
-        # the CapabilityCheck middleware uses to mint a signed_request
-        # per node). The scheduler is a system actor with its own
-        # cryptographic identity (Arbor.Scheduler.Identity) — see that
-        # module's moduledoc for the provenance + audit story.
-        #
-        # Two values must agree for CapabilityCheck to pass:
-        #   1. assigns.agent_id — sourced from context["session.agent_id"]
-        #   2. assigns.signer   — sourced from opts[:signer]
-        # The signed_request the signer mints carries its own principal;
-        # if it doesn't match assigns.agent_id the middleware rejects
-        # with :identity_mismatch. So we seed both from the same Identity.
-        seeded_context = seed_session_identity(context, Identity.agent_id())
-        signer = Identity.signer()
-
-        # credo:disable-for-next-line Credo.Check.Refactor.Apply
-        apply(orchestrator, :run_file, [
-          path,
-          [
-            initial_values: seeded_context,
-            signer: signer
-          ]
-        ])
+        execute_with_caps(orchestrator, path, caps_path, context)
     end
   rescue
     e ->
@@ -118,6 +119,38 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
     :throw, value ->
       Logger.error("[Scheduler] PipelineRunner throw: #{inspect(value)}")
       {:error, {:throw, value}}
+  end
+
+  defp execute_with_caps(orchestrator, pipeline_path, caps_path, context) do
+    case RunIdentity.mint(caps_path) do
+      {:ok, handle} ->
+        # Try/after guarantees caps are revoked even on pipeline crash
+        # (default #2 from the design discussion). Logging the revoke
+        # outcome happens inside RunIdentity.revoke — it is best-effort
+        # by contract and never raises.
+        try do
+          seeded_context = seed_session_identity(context, handle.agent_id)
+
+          # credo:disable-for-next-line Credo.Check.Refactor.Apply
+          apply(orchestrator, :run_file, [
+            pipeline_path,
+            [
+              initial_values: seeded_context,
+              signer: handle.signer
+            ]
+          ])
+        after
+          RunIdentity.revoke(handle)
+        end
+
+      {:error, reason} ->
+        {:error, {:caps_file_invalid, reason}}
+    end
+  end
+
+  defp caps_path_for(pipeline_path) do
+    pipeline_path
+    |> String.replace_suffix(".dot", ".caps.json")
   end
 
   @doc """

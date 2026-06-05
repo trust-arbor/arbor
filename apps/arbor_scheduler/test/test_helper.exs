@@ -33,7 +33,14 @@ end
 
 for child <- [
       {Arbor.Security.Identity.Registry, []},
-      {Arbor.Security.IssuerRegistry, []}
+      {Arbor.Security.IssuerRegistry, []},
+      # Phase 5 needs the full grant/revoke chain (SystemAuthority signs,
+      # CapabilityStore persists, RateLimiter is referenced by constraint
+      # checks). Mirror what arbor_security's own test_helper starts.
+      {Arbor.Security.Identity.NonceCache, []},
+      {Arbor.Security.SystemAuthority, []},
+      {Arbor.Security.Constraint.RateLimiter, []},
+      {Arbor.Security.CapabilityStore, []}
     ] do
   Supervisor.start_child(Arbor.Security.Supervisor, child)
 end

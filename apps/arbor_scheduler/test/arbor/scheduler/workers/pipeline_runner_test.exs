@@ -41,6 +41,24 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
 
       assert {:discard, _reason} = PipelineRunner.perform(job)
     end
+
+    test "regression: pipeline without sibling .caps.json → discard (Phase 5)" do
+      # Phase 5 of the privesc redesign requires every pipeline to ship a
+      # signed `.caps.json` sibling. A pipeline that runs without one would
+      # either inherit broad system caps (the pre-Phase-5 status quo, and
+      # the exact bug shape this work is closing) or run with zero caps and
+      # confusingly fail mid-step. Fail-closed at the front door.
+      tmp_dot =
+        System.tmp_dir!()
+        |> Path.join("phase5_no_caps_#{System.unique_integer([:positive])}.dot")
+
+      File.write!(tmp_dot, "digraph X { start [shape=Mdiamond] }")
+      on_exit(fn -> File.rm(tmp_dot) end)
+
+      job = %Oban.Job{args: %{"pipeline_path" => tmp_dot, "args" => %{}}}
+      assert {:discard, reason} = PipelineRunner.perform(job)
+      assert reason =~ "missing caps file"
+    end
   end
 
   describe "max_attempts default" do
