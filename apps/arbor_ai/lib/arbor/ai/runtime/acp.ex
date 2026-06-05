@@ -223,10 +223,16 @@ defmodule Arbor.AI.Runtime.Acp do
 
   defp extract_text(_), do: ""
 
-  defp format_response(result, cli) when is_map(result) do
+  @doc false
+  # Exposed (under @doc false) so tests can pin the ACP-result → Response
+  # shape conversion without needing a live AcpPool / AcpSession. Public
+  # callers should not depend on this — it's adapter-internal.
+  def format_response(result, cli) when is_map(result) do
     text = Map.get(result, "text") || Map.get(result, :text, "")
     stop_reason = Map.get(result, "stopReason") || Map.get(result, :stop_reason)
     usage = Map.get(result, "usage") || Map.get(result, :usage, %{})
+    session_id = Map.get(result, "sessionId") || Map.get(result, :session_id)
+    thinking = normalize_thinking(Map.get(result, "thinking") || Map.get(result, :thinking))
 
     finish_reason =
       case stop_reason do
@@ -238,6 +244,8 @@ defmodule Arbor.AI.Runtime.Acp do
 
     %Response{
       text: text,
+      thinking: thinking,
+      session_id: session_id,
       finish_reason: finish_reason,
       content_parts: [],
       usage: normalize_usage(usage),
@@ -245,6 +253,24 @@ defmodule Arbor.AI.Runtime.Acp do
       raw: %{cli: to_string(cli), result: result}
     }
   end
+
+  # Convert ex_mcp's `"thinking" => [%{"text" => ..., "signature" => ...}]`
+  # shape into the atom-keyed `thinking_block()` typespec on Response.
+  # Returns nil when the field is absent or empty so consumers can
+  # `is_nil?/1`-check rather than walking an empty list.
+  defp normalize_thinking(nil), do: nil
+  defp normalize_thinking([]), do: nil
+
+  defp normalize_thinking(blocks) when is_list(blocks) do
+    Enum.map(blocks, fn block ->
+      %{
+        text: Map.get(block, "text") || Map.get(block, :text, ""),
+        signature: Map.get(block, "signature") || Map.get(block, :signature)
+      }
+    end)
+  end
+
+  defp normalize_thinking(_), do: nil
 
   defp normalize_usage(usage) when is_map(usage) do
     %{
