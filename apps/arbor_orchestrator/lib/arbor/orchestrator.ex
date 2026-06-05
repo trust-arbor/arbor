@@ -21,15 +21,21 @@ defmodule Arbor.Orchestrator do
 
   ## Architecture
 
-      DOT source → Parser → Graph → IR.Compiler → Compiled Graph
-                                                        ↓
-                                               Engine.run (step loop)
-                                                        ↓
-                                               Handler dispatch per node
+      DOT source → Parser → Graph → Transforms → IR.Compiler → Compiled Graph
+                                                                      ↓
+                                                             Engine.run (step loop)
+                                                                      ↓
+                                                             Handler dispatch per node
 
   The engine walks the graph node-by-node, dispatching each to its typed
   handler. Handlers receive node attributes and return results that flow
   to downstream nodes via edges. Edge conditions gate transitions.
+
+  Built-in transforms (VariableExpansion, ModelStylesheet) run BEFORE
+  IR.Compiler so the compiler's static analyses (capability aggregation,
+  taint profile, schema validation) read post-transform attribute values.
+  Caller-supplied transforms (via `:transforms` opt) run AFTER IR.Compiler
+  and cannot influence the compiler's analyses.
 
   ## Key Subsystems
 
