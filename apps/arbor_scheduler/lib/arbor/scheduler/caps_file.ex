@@ -104,10 +104,10 @@ defmodule Arbor.Scheduler.CapsFile do
     with {:ok, content} <- read_file(path),
          {:ok, raw} <- parse_json(content),
          {:ok, parsed} <- validate_schema(raw),
-         {:ok, %{public_key: pk, max_envelope_cap: envelope}} <-
+         {:ok, %{public_key: pk, max_envelope_caps: envelopes}} <-
            lookup_issuer(parsed.issuer_id),
          :ok <- verify_signature(parsed, pk),
-         :ok <- verify_all_caps_in_envelope(parsed.capabilities, envelope, parsed.issuer_id) do
+         :ok <- verify_all_caps_in_envelope(parsed.capabilities, envelopes, parsed.issuer_id) do
       {:ok, parsed.capabilities}
     end
   end
@@ -290,11 +290,16 @@ defmodule Arbor.Scheduler.CapsFile do
     end
   end
 
-  defp verify_all_caps_in_envelope(capabilities, envelope, issuer_id) do
+  defp verify_all_caps_in_envelope(capabilities, envelopes, issuer_id) do
     Enum.reduce_while(capabilities, :ok, fn descriptor, :ok ->
       case build_transient_cap(descriptor, issuer_id) do
         {:ok, cap} ->
-          if Capability.envelope_subset?(cap, envelope) do
+          # Multi-envelope: a declared cap is acceptable if it fits within
+          # AT LEAST ONE of the issuer's enrolled envelopes. This is how a
+          # single issuer can be authorized for non-overlapping resource
+          # patterns (e.g. read of subtree X, write of subtree Y) without
+          # using a coarse pattern that dilutes the bound.
+          if Enum.any?(envelopes, &Capability.envelope_subset?(cap, &1)) do
             {:cont, :ok}
           else
             {:halt, {:error, {:cap_exceeds_envelope, descriptor.resource_uri}}}

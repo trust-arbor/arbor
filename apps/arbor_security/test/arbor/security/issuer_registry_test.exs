@@ -63,13 +63,13 @@ defmodule Arbor.Security.IssuerRegistryTest do
   end
 
   describe "lookup/1" do
-    test "returns public_key + envelope for active issuer", %{
+    test "returns public_key + envelopes for active issuer", %{
       identity: identity,
       envelope: envelope
     } do
       :ok = IssuerRegistry.register(identity.agent_id, envelope)
 
-      assert {:ok, %{public_key: pk, max_envelope_cap: env}} =
+      assert {:ok, %{public_key: pk, max_envelope_caps: [env]}} =
                IssuerRegistry.lookup(identity.agent_id)
 
       assert pk == identity.public_key
@@ -204,7 +204,7 @@ defmodule Arbor.Security.IssuerRegistryTest do
   end
 
   describe "list/0" do
-    test "returns enrolled entries with issuer_id, envelope, status", %{
+    test "returns enrolled entries with issuer_id, envelopes, status", %{
       identity: identity,
       envelope: envelope
     } do
@@ -215,8 +215,99 @@ defmodule Arbor.Security.IssuerRegistryTest do
 
       refute is_nil(entry)
       assert entry.status == :active
-      assert entry.max_envelope_cap.resource_uri == envelope.resource_uri
+      assert [env] = entry.max_envelope_caps
+      assert env.resource_uri == envelope.resource_uri
       assert entry.status_reason == "primary author"
+    end
+  end
+
+  describe "multi-envelope enrollment" do
+    # The multi-envelope refactor: an issuer can be authorized for several
+    # non-overlapping resource patterns (e.g. fs/read of one subtree AND
+    # fs/write of another) without using a coarser pattern that would
+    # dilute the bound. verify_envelope/2 passes a cap if it fits ANY of
+    # the issuer's envelopes.
+
+    test "accepts a list of envelope caps", %{identity: identity} do
+      {:ok, read_env} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/reports/**",
+          principal_id: identity.agent_id
+        )
+
+      {:ok, write_env} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/summaries/**",
+          principal_id: identity.agent_id
+        )
+
+      assert :ok = IssuerRegistry.register(identity.agent_id, [read_env, write_env])
+
+      assert {:ok, %{max_envelope_caps: [_, _]}} = IssuerRegistry.lookup(identity.agent_id)
+    end
+
+    test "rejects empty envelope list with :empty_envelopes", %{identity: identity} do
+      assert {:error, :empty_envelopes} = IssuerRegistry.register(identity.agent_id, [])
+    end
+
+    test "verify_envelope/2 passes when cap matches at least one envelope", %{
+      identity: identity
+    } do
+      {:ok, read_env} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/reports/**",
+          principal_id: identity.agent_id
+        )
+
+      {:ok, write_env} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/summaries/**",
+          principal_id: identity.agent_id
+        )
+
+      :ok = IssuerRegistry.register(identity.agent_id, [read_env, write_env])
+
+      {:ok, fits_read} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/reports/today.md",
+          principal_id: "agent_runner"
+        )
+
+      {:ok, fits_write} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/summaries/today.md",
+          principal_id: "agent_runner"
+        )
+
+      assert :ok = IssuerRegistry.verify_envelope(identity.agent_id, fits_read)
+      assert :ok = IssuerRegistry.verify_envelope(identity.agent_id, fits_write)
+    end
+
+    test "verify_envelope/2 rejects with :exceeds_envelope when cap matches NONE", %{
+      identity: identity
+    } do
+      {:ok, read_env} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/reports/**",
+          principal_id: identity.agent_id
+        )
+
+      {:ok, write_env} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/summaries/**",
+          principal_id: identity.agent_id
+        )
+
+      :ok = IssuerRegistry.register(identity.agent_id, [read_env, write_env])
+
+      {:ok, escape_cap} =
+        Capability.new(
+          resource_uri: "arbor://shell/exec/rm",
+          principal_id: "agent_runner"
+        )
+
+      assert {:error, :exceeds_envelope} =
+               IssuerRegistry.verify_envelope(identity.agent_id, escape_cap)
     end
   end
 

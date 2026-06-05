@@ -60,49 +60,66 @@ defmodule Arbor.Security.IssuerRegistry do
   end
 
   @doc """
-  Enroll an identity as a capability-signing issuer with a maximum envelope.
+  Enroll an identity as a capability-signing issuer with a set of maximum
+  envelopes.
 
-  The identity must already be registered in `Identity.Registry`. The
-  envelope cap defines the bound on what capabilities this issuer may sign:
-  any signed cap must be a `Capability.envelope_subset?/2` of this envelope.
+  The identity must already be registered in `Identity.Registry`. Each
+  envelope cap in the list defines a bound on what this issuer may sign:
+  any signed capability must be a `Capability.envelope_subset?/2` of AT
+  LEAST ONE envelope cap.
+
+  Multiple envelope caps are how a single issuer is authorized for
+  multiple non-overlapping resource patterns (e.g. read access to one
+  subtree AND write access to another) without resorting to a coarser
+  pattern that would dilute the bound.
 
   ## Options
 
-  - `:reason` — human-readable reason for enrollment, recorded for audit
+    - `:reason` — human-readable reason for enrollment, recorded for audit
 
-  Returns `:ok | {:error, :identity_not_found | :already_enrolled | :invalid_envelope}`.
+  Returns `:ok | {:error, :identity_not_found | :already_enrolled |
+  :empty_envelopes | :invalid_envelope}`.
   """
-  @spec register(String.t(), Capability.t(), keyword()) ::
+  @spec register(String.t(), [Capability.t()], keyword()) ::
           :ok | {:error, atom() | tuple()}
-  def register(issuer_id, %Capability{} = max_envelope_cap, opts \\ [])
-      when is_binary(issuer_id) do
-    GenServer.call(__MODULE__, {:register, issuer_id, max_envelope_cap, opts})
+  def register(issuer_id, envelope_caps, opts \\ [])
+
+  def register(issuer_id, envelope_caps, opts)
+      when is_binary(issuer_id) and is_list(envelope_caps) do
+    GenServer.call(__MODULE__, {:register, issuer_id, envelope_caps, opts})
+  end
+
+  def register(issuer_id, %Capability{} = single, opts) when is_binary(issuer_id) do
+    # Backward-compat shim for callers that still pass a single Capability.
+    # Wraps in a one-element list. New callers should pass a list directly.
+    register(issuer_id, [single], opts)
   end
 
   @doc """
-  Look up an enrolled issuer's public key + max envelope.
+  Look up an enrolled issuer's public key + envelope caps.
 
-  Returns `{:ok, %{public_key: binary, max_envelope_cap: Capability.t()}}` on
-  success. Returns `{:error, reason}` if the issuer is unknown, revoked, or
-  the underlying identity is unavailable (suspended/revoked/missing).
+  Returns `{:ok, %{public_key: binary, max_envelope_caps: [Capability.t()]}}`
+  on success. Returns `{:error, reason}` if the issuer is unknown, revoked,
+  or the underlying identity is unavailable (suspended/revoked/missing).
   """
   @spec lookup(String.t()) ::
-          {:ok, %{public_key: binary(), max_envelope_cap: Capability.t()}}
+          {:ok, %{public_key: binary(), max_envelope_caps: [Capability.t()]}}
           | {:error, :not_found | :revoked | :identity_unavailable | atom()}
   def lookup(issuer_id) when is_binary(issuer_id) do
     GenServer.call(__MODULE__, {:lookup, issuer_id})
   end
 
   @doc """
-  Verify that `cap` fits within `issuer_id`'s enrolled envelope.
+  Verify that `cap` fits within at least one of `issuer_id`'s enrolled
+  envelopes.
 
-  Returns `:ok` if cap is a subset of the issuer's max envelope and the
-  issuer is active. Otherwise returns one of:
+  Returns `:ok` if cap is a subset of any of the issuer's envelope caps
+  and the issuer is active. Otherwise returns one of:
 
-  - `{:error, :not_found}` — issuer not enrolled
-  - `{:error, :revoked}` — issuer was revoked
-  - `{:error, :identity_unavailable}` — underlying identity gone
-  - `{:error, :exceeds_envelope}` — cap is outside issuer's envelope
+    - `{:error, :not_found}` — issuer not enrolled
+    - `{:error, :revoked}` — issuer was revoked
+    - `{:error, :identity_unavailable}` — underlying identity gone
+    - `{:error, :exceeds_envelope}` — cap is outside every envelope
 
   Used by `Arbor.Scheduler.CapsFile` (Phase 3) at load time and by anything
   else verifying that a signed capability declaration is within bounds.
@@ -111,8 +128,8 @@ defmodule Arbor.Security.IssuerRegistry do
           :ok | {:error, :not_found | :revoked | :identity_unavailable | :exceeds_envelope}
   def verify_envelope(issuer_id, %Capability{} = cap) when is_binary(issuer_id) do
     case lookup(issuer_id) do
-      {:ok, %{max_envelope_cap: envelope}} ->
-        if Capability.envelope_subset?(cap, envelope) do
+      {:ok, %{max_envelope_caps: envelopes}} ->
+        if Enum.any?(envelopes, &Capability.envelope_subset?(cap, &1)) do
           :ok
         else
           {:error, :exceeds_envelope}
@@ -142,7 +159,7 @@ defmodule Arbor.Security.IssuerRegistry do
   @spec list() :: [
           %{
             issuer_id: String.t(),
-            max_envelope_cap: Capability.t(),
+            max_envelope_caps: [Capability.t()],
             status: :active | :revoked,
             enrolled_at: DateTime.t(),
             status_changed_at: DateTime.t() | nil,
@@ -164,17 +181,23 @@ defmodule Arbor.Security.IssuerRegistry do
   end
 
   @impl true
-  def handle_call({:register, issuer_id, envelope_cap, opts}, _from, state) do
+  def handle_call({:register, issuer_id, envelope_caps, opts}, _from, state) do
     cond do
       Map.has_key?(state.by_issuer_id, issuer_id) ->
         {:reply, {:error, :already_enrolled}, state}
+
+      envelope_caps == [] ->
+        {:reply, {:error, :empty_envelopes}, state}
+
+      not Enum.all?(envelope_caps, &match?(%Capability{}, &1)) ->
+        {:reply, {:error, :invalid_envelope}, state}
 
       not identity_exists?(issuer_id) ->
         {:reply, {:error, :identity_not_found}, state}
 
       true ->
         entry = %{
-          max_envelope_cap: envelope_cap,
+          max_envelope_caps: envelope_caps,
           status: :active,
           enrolled_at: DateTime.utc_now(),
           status_changed_at: nil,
@@ -197,10 +220,10 @@ defmodule Arbor.Security.IssuerRegistry do
         %{status: :revoked} ->
           {:error, :revoked}
 
-        %{status: :active, max_envelope_cap: envelope} ->
+        %{status: :active, max_envelope_caps: envelopes} ->
           case IdentityRegistry.lookup(issuer_id) do
             {:ok, public_key} ->
-              {:ok, %{public_key: public_key, max_envelope_cap: envelope}}
+              {:ok, %{public_key: public_key, max_envelope_caps: envelopes}}
 
             {:error, _} ->
               {:error, :identity_unavailable}
@@ -300,7 +323,7 @@ defmodule Arbor.Security.IssuerRegistry do
   defp serialize_entry(issuer_id, entry) do
     %{
       "issuer_id" => issuer_id,
-      "max_envelope_cap" => Map.from_struct(entry.max_envelope_cap),
+      "max_envelope_caps" => Enum.map(entry.max_envelope_caps, &Map.from_struct/1),
       "status" => Atom.to_string(entry.status),
       "enrolled_at" => DateTime.to_iso8601(entry.enrolled_at),
       "status_changed_at" =>
@@ -310,7 +333,7 @@ defmodule Arbor.Security.IssuerRegistry do
   end
 
   defp deserialize_entry(%{"issuer_id" => issuer_id} = data) do
-    with {:ok, envelope} <- deserialize_envelope(data["max_envelope_cap"]),
+    with {:ok, envelopes} <- deserialize_envelopes(data["max_envelope_caps"]),
          {:ok, enrolled_at, _} <- DateTime.from_iso8601(data["enrolled_at"]) do
       status_changed_at =
         case data["status_changed_at"] do
@@ -325,7 +348,7 @@ defmodule Arbor.Security.IssuerRegistry do
         end
 
       entry = %{
-        max_envelope_cap: envelope,
+        max_envelope_caps: envelopes,
         status: String.to_existing_atom(data["status"]),
         enrolled_at: enrolled_at,
         status_changed_at: status_changed_at,
@@ -338,9 +361,25 @@ defmodule Arbor.Security.IssuerRegistry do
 
   defp deserialize_entry(_), do: {:error, :invalid_entry_shape}
 
+  defp deserialize_envelopes(list) when is_list(list) do
+    Enum.reduce_while(list, {:ok, []}, fn envelope_map, {:ok, acc} ->
+      case deserialize_envelope(envelope_map) do
+        {:ok, cap} -> {:cont, {:ok, [cap | acc]}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, caps} -> {:ok, Enum.reverse(caps)}
+      err -> err
+    end
+  end
+
+  defp deserialize_envelopes(_), do: {:error, :invalid_envelope_list}
+
   defp deserialize_envelope(map) when is_map(map) do
-    # Map.from_struct lost the struct identity; rebuild Capability via new/1
-    # with the persisted fields. issuer_signature etc. are preserved as-is.
+    # Map.from_struct lost the struct identity; rebuild Capability via
+    # struct! with the persisted fields. issuer_signature etc. are
+    # preserved as-is.
     attrs =
       map
       |> Enum.flat_map(fn
