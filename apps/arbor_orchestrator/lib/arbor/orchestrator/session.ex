@@ -278,6 +278,37 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   @doc """
+  Update the running session's LLM fallback chain. Reflected on the
+  next turn / heartbeat — LlmHandler reads
+  `context["session.llm_fallback_chain"]` and threads it into
+  `policy.fallback_chain` on Dispatcher.dispatch.
+
+  Each entry is an override map with optional `:runtime`, `:provider`,
+  and/or `:model` fields. Used by the `/fallback` slash command and
+  programmatic callers that want to rotate fallback paths per turn.
+
+  Pass an empty list to clear the chain.
+  """
+  @spec set_fallback_chain(GenServer.server(), [map()]) ::
+          {:ok, [map()]} | {:error, term()}
+  def set_fallback_chain(session, chain) when is_list(chain) do
+    GenServer.call(session, {:set_fallback_chain, chain})
+  end
+
+  def set_fallback_chain(_session, chain) do
+    {:error, {:invalid_fallback_chain, chain}}
+  end
+
+  @doc """
+  Return the running session's current fallback chain. Reads from
+  `state.config["llm_fallback_chain"]`. Empty list when unset.
+  """
+  @spec get_fallback_chain(GenServer.server()) :: {:ok, [map()]} | {:error, term()}
+  def get_fallback_chain(session) do
+    GenServer.call(session, :get_fallback_chain)
+  end
+
+  @doc """
   Restore session state from a checkpoint map.
 
   The checkpoint map should have string keys matching the session context
@@ -488,6 +519,27 @@ defmodule Arbor.Orchestrator.Session do
     Logger.info("[Session #{state.agent_id}] /runtime → #{runtime} (effective on next turn)")
 
     {:reply, {:ok, runtime}, %{state | config: new_config}}
+  end
+
+  def handle_call({:set_fallback_chain, chain}, _from, state) do
+    new_config = Map.put(state.config || %{}, "llm_fallback_chain", chain)
+
+    Logger.info(
+      "[Session #{state.agent_id}] /fallback → #{length(chain)} entries (effective on next turn)"
+    )
+
+    {:reply, {:ok, chain}, %{state | config: new_config}}
+  end
+
+  def handle_call(:get_fallback_chain, _from, state) do
+    chain =
+      case state.config || %{} do
+        %{"llm_fallback_chain" => c} when is_list(c) -> c
+        %{llm_fallback_chain: c} when is_list(c) -> c
+        _ -> []
+      end
+
+    {:reply, {:ok, chain}, state}
   end
 
   def handle_call({:restore_checkpoint, checkpoint}, _from, state) do

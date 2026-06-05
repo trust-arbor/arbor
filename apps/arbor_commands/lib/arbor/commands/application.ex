@@ -6,7 +6,8 @@ defmodule Arbor.Commands.Application do
   @command_modules [
     Arbor.Commands.Runtime,
     Arbor.Commands.Model,
-    Arbor.Commands.Start
+    Arbor.Commands.Start,
+    Arbor.Commands.Fallback
   ]
 
   @impl true
