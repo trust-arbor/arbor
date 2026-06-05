@@ -500,9 +500,19 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   defp pipeline do
     Application.get_env(:arbor_llm, :pipeline, [
-      # Default production pipeline: just call req_llm. Tests override
-      # via app config to insert Replay, Record, StalenessWarn, etc.
-      Arbor.LLM.Plugs.Dispatch
+      # Default production pipeline:
+      #   1. Dispatch — call req_llm and stamp the result.
+      #   2. RateLimitBackoff — on HTTP 429 / rate-limit errors, sleep
+      #      for retry-after (or exponential backoff) and re-invoke
+      #      Dispatch up to N times before bubbling up. Composes with
+      #      Dispatch.dispatch/2's fallback chain: backoff handles
+      #      "same path, wait a moment" and fallback handles "this
+      #      path is exhausted, try a different one."
+      #
+      # Tests override via app config to insert Replay, Record,
+      # StalenessWarn, etc.
+      Arbor.LLM.Plugs.Dispatch,
+      Arbor.LLM.Plugs.RateLimitBackoff
     ])
   end
 
