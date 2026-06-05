@@ -141,6 +141,7 @@ defmodule Arbor.AI.AgentSDK do
         permission_mode: :accept_edits
       )
   """
+  @deprecated "Use Arbor.AI.Runtime.Dispatch.dispatch/2 with policy: %{runtime: :acp} instead. Phase 3d migrated all callers; this function is scheduled for removal."
   @spec query(String.t(), query_opts()) :: {:ok, response()} | {:error, term()}
   def query(prompt, opts \\ []) do
     case start_client(opts) do
@@ -178,6 +179,7 @@ defmodule Arbor.AI.AgentSDK do
         end
       end)
   """
+  @deprecated "Use Arbor.AI.Runtime.Dispatch.dispatch/2 with policy: %{runtime: :acp} and the :callbacks option instead. Phase 3d migrated all callers; this function is scheduled for removal."
   @spec stream(String.t(), (term() -> any()), query_opts()) ::
           {:ok, response()} | {:error, term()}
   def stream(prompt, callback, opts \\ []) when is_function(callback, 1) do
