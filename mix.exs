@@ -35,7 +35,11 @@ defmodule Arbor.MixProject do
       # jido_sandbox has no Hex release yet
       {:jido_sandbox,
        git: "https://github.com/agentjido/jido_sandbox.git", branch: "main", override: true},
-      {:ex_mcp, "~> 0.9.2", override: true},
+      # TEMPORARY local path during Phase 3d (item 9 / runtime taxonomy).
+      # The local copy adds `sessionId` to Claude adapter's prompt response
+      # result (and `thinking` is already there). Republish to Hex once the
+      # changes are validated end-to-end, then revert this to `"~> 0.9.X"`.
+      {:ex_mcp, path: System.user_home!() <> "/code/ex_mcp", override: true},
 
       # Dev/test tools
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},

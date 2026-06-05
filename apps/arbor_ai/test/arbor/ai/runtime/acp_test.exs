@@ -68,6 +68,78 @@ defmodule Arbor.AI.Runtime.AcpTest do
     end
   end
 
+  describe "format_response/2 — thinking + session_id surfacing (Phase 3d)" do
+    # format_response/2 is private but exercised here by feeding shaped
+    # AcpSession.send_message results through a helper. Once Phase 3d
+    # migrates Claude.query to use Dispatch, integration tests will
+    # cover the full end-to-end path.
+
+    test "extracts sessionId from string-keyed ACP result" do
+      shaped = %{
+        "text" => "hello",
+        "stopReason" => "end_turn",
+        "usage" => %{"input_tokens" => 100, "output_tokens" => 50},
+        "sessionId" => "sess_001"
+      }
+
+      response = call_format(shaped, :claude)
+      assert response.session_id == "sess_001"
+      assert response.text == "hello"
+    end
+
+    test "extracts thinking blocks from string-keyed ACP result" do
+      shaped = %{
+        "text" => "answer",
+        "stopReason" => "end_turn",
+        "usage" => %{},
+        "thinking" => [
+          %{"text" => "I should consider...", "signature" => "sig_abc"},
+          %{"text" => "Then I'll respond.", "signature" => nil}
+        ]
+      }
+
+      response = call_format(shaped, :claude)
+      assert is_list(response.thinking)
+      assert length(response.thinking) == 2
+      [first, second] = response.thinking
+      assert first.text == "I should consider..."
+      assert first.signature == "sig_abc"
+      assert second.signature == nil
+    end
+
+    test "thinking is nil when ACP result has no thinking field" do
+      shaped = %{"text" => "answer", "stopReason" => "end_turn", "usage" => %{}}
+      response = call_format(shaped, :claude)
+      assert response.thinking == nil
+    end
+
+    test "thinking is nil when empty list" do
+      shaped = %{
+        "text" => "answer",
+        "stopReason" => "end_turn",
+        "usage" => %{},
+        "thinking" => []
+      }
+
+      response = call_format(shaped, :claude)
+      assert response.thinking == nil
+    end
+
+    test "session_id is nil when ACP result omits sessionId" do
+      shaped = %{"text" => "answer", "stopReason" => "end_turn", "usage" => %{}}
+      response = call_format(shaped, :claude)
+      assert response.session_id == nil
+    end
+
+    test "accepts atom-keyed shapes for backwards-compat" do
+      shaped = %{text: "x", stop_reason: "end_turn", usage: %{}, session_id: "atom_session"}
+      response = call_format(shaped, :claude)
+      assert response.session_id == "atom_session"
+    end
+
+    defp call_format(result, cli), do: Arbor.AI.Runtime.Acp.format_response(result, cli)
+  end
+
   describe "execute/3 — pool unavailability" do
     test "returns :pool_not_available when AcpPool isn't running" do
       # AcpPool isn't started in the unit test environment. execute/3
