@@ -35,6 +35,29 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
     end
   end
 
+  # Echoes the context map back in the result so tests can pin what
+  # actually arrived at the action — distinct from TestAction which
+  # ignores context. Used to verify workspace plumbing end-to-end.
+  defmodule ContextEchoAction do
+    @moduledoc false
+
+    def to_tool do
+      %{
+        name: "context_echo",
+        description: "Echoes the run context back",
+        parameters_schema: %{"type" => "object", "properties" => %{}}
+      }
+    end
+
+    def run(_params, context) do
+      {:ok,
+       %{
+         workspace: Map.get(context, :workspace),
+         agent_id: Map.get(context, :agent_id)
+       }}
+    end
+  end
+
   defmodule AnotherAction do
     @moduledoc false
 
@@ -158,6 +181,41 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
     test "returns method not found for unknown methods", %{port: port} do
       {:ok, response} = mcp_request(port, "unknown/method", %{})
       assert response["error"]["code"] == -32601
+    end
+  end
+
+  describe "per-handler context propagation" do
+    test "workspace from start opts arrives in action context" do
+      {:ok, %{port: port, ref: ref}} =
+        ToolServer.start([ContextEchoAction], workspace: "/tmp/agent_workspace_xyz")
+
+      on_exit(fn -> ToolServer.stop(ref) end)
+
+      {:ok, response} =
+        mcp_request(port, "tools/call", %{
+          "name" => "context_echo",
+          "arguments" => %{}
+        })
+
+      result = response["result"]
+      refute result["isError"]
+      [content] = result["content"]
+      decoded = Jason.decode!(content["text"])
+      assert decoded["workspace"] == "/tmp/agent_workspace_xyz"
+    end
+
+    test "absent workspace yields nil in action context" do
+      {:ok, %{port: port, ref: ref}} = ToolServer.start([ContextEchoAction])
+      on_exit(fn -> ToolServer.stop(ref) end)
+
+      {:ok, response} =
+        mcp_request(port, "tools/call", %{
+          "name" => "context_echo",
+          "arguments" => %{}
+        })
+
+      decoded = Jason.decode!(hd(response["result"]["content"])["text"])
+      assert decoded["workspace"] == nil
     end
   end
 

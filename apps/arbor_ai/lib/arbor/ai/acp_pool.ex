@@ -314,18 +314,30 @@ defmodule Arbor.AI.AcpPool do
     profile = SessionProfile.from_opts(provider, opts)
     tool_modules = Keyword.get(opts, :tool_modules, [])
     agent_id = Keyword.get(opts, :agent_id)
+    workspace = Keyword.get(opts, :workspace)
 
     case find_by_affinity(state, profile) do
       {:ok, entry, state} ->
         # Hard affinity match — reattach tools if needed
-        state = reattach_tools_and_checkout(state, entry, caller_pid, tool_modules, agent_id)
+        state =
+          reattach_tools_and_checkout(state, entry, caller_pid, tool_modules, agent_id, workspace)
+
         {:reply, {:ok, entry.pid}, state}
 
       :no_affinity ->
         case find_compatible_session(state, profile) do
           {:ok, entry, state} ->
             # Profile-compatible reuse — reattach tools if needed
-            state = reattach_tools_and_checkout(state, entry, caller_pid, tool_modules, agent_id)
+            state =
+              reattach_tools_and_checkout(
+                state,
+                entry,
+                caller_pid,
+                tool_modules,
+                agent_id,
+                workspace
+              )
+
             {:reply, {:ok, entry.pid}, state}
 
           {:none, state} ->
@@ -558,9 +570,10 @@ defmodule Arbor.AI.AcpPool do
   defp spawn_session(provider, opts) do
     tool_modules = Keyword.get(opts, :tool_modules, [])
     agent_id = Keyword.get(opts, :agent_id)
+    workspace = Keyword.get(opts, :workspace)
 
     # Start a ToolServer if the session needs action tools
-    {tool_server, mcp_servers} = maybe_start_tool_server(tool_modules, agent_id)
+    {tool_server, mcp_servers} = maybe_start_tool_server(tool_modules, agent_id, workspace)
 
     session_opts =
       opts
@@ -595,10 +608,15 @@ defmodule Arbor.AI.AcpPool do
     end
   end
 
-  defp maybe_start_tool_server([], _agent_id), do: {nil, nil}
+  defp maybe_start_tool_server([], _agent_id, _workspace), do: {nil, nil}
 
-  defp maybe_start_tool_server(tool_modules, agent_id) when is_list(tool_modules) do
-    case ToolServer.start(tool_modules, agent_id: agent_id || "anonymous") do
+  defp maybe_start_tool_server(tool_modules, agent_id, workspace)
+       when is_list(tool_modules) do
+    start_opts =
+      [agent_id: agent_id || "anonymous"]
+      |> maybe_put(:workspace, workspace)
+
+    case ToolServer.start(tool_modules, start_opts) do
       {:ok, %{port: port} = info} ->
         {info, ToolServer.mcp_servers_entry(port)}
 
@@ -607,6 +625,9 @@ defmodule Arbor.AI.AcpPool do
         {nil, nil}
     end
   end
+
+  defp maybe_put(kw, _key, nil), do: kw
+  defp maybe_put(kw, key, value), do: Keyword.put(kw, key, value)
 
   defp register_session(state, pid, %SessionProfile{} = profile, caller_pid, tool_server) do
     ref = make_ref()
@@ -650,8 +671,8 @@ defmodule Arbor.AI.AcpPool do
   end
 
   # Start a fresh ToolServer for a reused session if it needs tools
-  defp reattach_tools_and_checkout(state, entry, caller_pid, tool_modules, agent_id) do
-    {tool_server, _mcp_servers} = maybe_start_tool_server(tool_modules, agent_id)
+  defp reattach_tools_and_checkout(state, entry, caller_pid, tool_modules, agent_id, workspace) do
+    {tool_server, _mcp_servers} = maybe_start_tool_server(tool_modules, agent_id, workspace)
     checkout_session(state, entry.ref, caller_pid, tool_server)
   end
 

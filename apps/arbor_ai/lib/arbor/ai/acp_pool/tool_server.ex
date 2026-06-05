@@ -29,12 +29,16 @@ defmodule Arbor.AI.AcpPool.ToolServer do
   ## Options
 
   - `:agent_id` — owning agent ID for authorization context
+  - `:workspace` — directory the agent's session is bound to. Passed in
+    the per-call `context[:workspace]` so file actions can scope path
+    resolution + prevent traversal escapes outside the workspace.
   - `:port` — specific port (default: 0 for OS-assigned)
   - `:bind` — IP to bind to (default: `{127, 0, 0, 1}`; use `{0, 0, 0, 0}` for remote access)
   """
   @spec start([module()], keyword()) :: {:ok, map()} | {:error, term()}
   def start(action_modules, opts \\ []) when is_list(action_modules) do
     agent_id = Keyword.get(opts, :agent_id, "anonymous")
+    workspace = Keyword.get(opts, :workspace)
     port = Keyword.get(opts, :port, 0)
     bind_ip = Keyword.get(opts, :bind, {127, 0, 0, 1})
     # Ranch refs are internal atoms, not user-controlled — safe to create
@@ -43,9 +47,10 @@ defmodule Arbor.AI.AcpPool.ToolServer do
 
     tools = to_mcp_tools(action_modules)
     tool_map = build_tool_map(tools, action_modules)
+    exec_context = build_exec_context(workspace)
 
     handler = fn request ->
-      handle_mcp_request(request, tools, tool_map, agent_id)
+      handle_mcp_request(request, tools, tool_map, agent_id, exec_context)
     end
 
     plug_opts = [
@@ -108,7 +113,13 @@ defmodule Arbor.AI.AcpPool.ToolServer do
 
   # -- MCP Request Handler --
 
-  defp handle_mcp_request(%{"method" => "initialize"} = req, _tools, _tool_map, _agent_id) do
+  defp handle_mcp_request(
+         %{"method" => "initialize"} = req,
+         _tools,
+         _tool_map,
+         _agent_id,
+         _exec_context
+       ) do
     id = Map.get(req, "id")
 
     %{
@@ -126,13 +137,20 @@ defmodule Arbor.AI.AcpPool.ToolServer do
          %{"method" => "notifications/initialized"},
          _tools,
          _tool_map,
-         _agent_id
+         _agent_id,
+         _exec_context
        ) do
     # Notification — no response needed
     {:ok, nil}
   end
 
-  defp handle_mcp_request(%{"method" => "tools/list"} = req, tools, _tool_map, _agent_id) do
+  defp handle_mcp_request(
+         %{"method" => "tools/list"} = req,
+         tools,
+         _tool_map,
+         _agent_id,
+         _exec_context
+       ) do
     id = Map.get(req, "id")
 
     %{
@@ -142,13 +160,19 @@ defmodule Arbor.AI.AcpPool.ToolServer do
     }
   end
 
-  defp handle_mcp_request(%{"method" => "tools/call"} = req, _tools, tool_map, agent_id) do
+  defp handle_mcp_request(
+         %{"method" => "tools/call"} = req,
+         _tools,
+         tool_map,
+         agent_id,
+         exec_context
+       ) do
     id = Map.get(req, "id")
     params = Map.get(req, "params", %{})
     tool_name = Map.get(params, "name")
     arguments = Map.get(params, "arguments", %{})
 
-    mcp_result = execute_tool(tool_name, arguments, tool_map, agent_id)
+    mcp_result = execute_tool(tool_name, arguments, tool_map, agent_id, exec_context)
 
     %{
       "jsonrpc" => "2.0",
@@ -157,12 +181,24 @@ defmodule Arbor.AI.AcpPool.ToolServer do
     }
   end
 
-  defp handle_mcp_request(%{"method" => "ping"} = req, _tools, _tool_map, _agent_id) do
+  defp handle_mcp_request(
+         %{"method" => "ping"} = req,
+         _tools,
+         _tool_map,
+         _agent_id,
+         _exec_context
+       ) do
     id = Map.get(req, "id")
     %{"jsonrpc" => "2.0", "id" => id, "result" => %{}}
   end
 
-  defp handle_mcp_request(%{"method" => method} = req, _tools, _tool_map, _agent_id) do
+  defp handle_mcp_request(
+         %{"method" => method} = req,
+         _tools,
+         _tool_map,
+         _agent_id,
+         _exec_context
+       ) do
     id = Map.get(req, "id")
 
     if id do
@@ -182,7 +218,7 @@ defmodule Arbor.AI.AcpPool.ToolServer do
 
   # -- Tool Execution --
 
-  defp execute_tool(tool_name, arguments, tool_map, agent_id) do
+  defp execute_tool(tool_name, arguments, tool_map, agent_id, exec_context) do
     case Map.get(tool_map, tool_name) do
       nil ->
         %{
@@ -193,7 +229,7 @@ defmodule Arbor.AI.AcpPool.ToolServer do
       action_module ->
         params = atomize_params(arguments)
 
-        case run_action(action_module, params, agent_id) do
+        case run_action(action_module, params, agent_id, exec_context) do
           {:ok, result} ->
             %{
               "content" => [%{"type" => "text", "text" => encode_result(result)}],
@@ -215,25 +251,40 @@ defmodule Arbor.AI.AcpPool.ToolServer do
       }
   end
 
-  defp run_action(action_module, params, agent_id) do
-    # Try authorized execution first, fall back to direct
+  defp run_action(action_module, params, agent_id, exec_context) do
+    # Try authorized execution first, fall back to direct.
+    # exec_context carries workspace + any other per-handler context
+    # built at ToolServer.start/2 (taint policy is auto-injected by
+    # authorize_and_execute from config — not threaded here).
     if authorized_execution_available?() do
-      case apply(Arbor.Actions, :authorize_and_execute, [agent_id, action_module, params, %{}]) do
+      case apply(Arbor.Actions, :authorize_and_execute, [
+             agent_id,
+             action_module,
+             params,
+             exec_context
+           ]) do
         {:error, :unauthorized} ->
           # Fall back when no capability grants exist yet
-          action_module.run(params, %{})
+          action_module.run(params, exec_context)
 
         other ->
           other
       end
     else
-      action_module.run(params, %{})
+      action_module.run(params, exec_context)
     end
   rescue
-    _ -> action_module.run(params, %{})
+    _ -> action_module.run(params, exec_context)
   catch
-    :exit, _ -> action_module.run(params, %{})
+    :exit, _ -> action_module.run(params, exec_context)
   end
+
+  # Per-handler context that flows into each tool call. Workspace scopes
+  # file actions; absence means "no workspace constraint". Add fields
+  # here as more action subsystems need per-session context.
+  defp build_exec_context(nil), do: %{}
+  defp build_exec_context(workspace) when is_binary(workspace), do: %{workspace: workspace}
+  defp build_exec_context(_), do: %{}
 
   # -- Tool Conversion --
 
