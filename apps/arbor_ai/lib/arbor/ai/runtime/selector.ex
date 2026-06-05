@@ -27,12 +27,25 @@ defmodule Arbor.AI.Runtime.Selector do
 
   alias Arbor.Contracts.LLM.{ModelEntry, ProviderEntry}
 
+  @type fallback_entry :: %{
+          optional(:runtime) => atom(),
+          optional(:provider) => atom(),
+          optional(:model) => String.t()
+        }
+
   @type policy :: %{
           optional(:runtime) => atom(),
           optional(:provider) => atom(),
           optional(:model_runtime_pins) => %{String.t() => atom()},
           optional(:provider_runtime_pins) => %{atom() => atom()},
-          optional(:default_runtime) => atom()
+          optional(:default_runtime) => atom(),
+          # Ordered list of overrides to try when the primary attempt
+          # fails with a fallback-eligible error. Each entry is a partial
+          # override: omit a field to inherit it from the original
+          # request/policy. The Selector itself ignores this field —
+          # `Arbor.AI.Runtime.Dispatch.dispatch/2` reads it and drives
+          # the retry loop. See its moduledoc for the eligibility rules.
+          optional(:fallback_chain) => [fallback_entry()]
         }
 
   @type selection :: %{provider: ProviderEntry.t(), runtime: atom()}
