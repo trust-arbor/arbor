@@ -111,6 +111,87 @@ defmodule Arbor.AI.Runtime.DispatchTest do
     end
   end
 
+  describe "enumerate_chain/2 — preview the full attempt ladder" do
+    test "no fallback chain → returns single primary entry" do
+      assert [{:ok, primary}] = Dispatch.enumerate_chain("claude-opus-4-6")
+      assert primary.override == :primary
+      assert primary.model_entry.canonical_id == "claude-opus-4-6"
+    end
+
+    test "fallback chain entries each get resolved" do
+      chain = [%{runtime: :acp}, %{model: "claude-haiku-4-5-20251001"}]
+
+      assert [primary, fb1, fb2] =
+               Dispatch.enumerate_chain("claude-opus-4-6", %{
+                 runtime: :arbor,
+                 fallback_chain: chain
+               })
+
+      # Primary uses the policy runtime
+      assert {:ok, %{override: :primary, selection: %{runtime: :arbor}}} = primary
+
+      # First fallback overrides runtime to :acp
+      assert {:ok, %{override: %{runtime: :acp}, selection: %{runtime: :acp}}} = fb1
+
+      # Second fallback overrides model — still runs through default runtime
+      assert {:ok,
+              %{
+                override: %{model: "claude-haiku-4-5-20251001"},
+                model_entry: %{canonical_id: "claude-haiku-4-5-20251001"}
+              }} = fb2
+    end
+
+    test "failing entries are kept in the result list (not dropped)" do
+      # Synthesized legacy entry supports only :arbor — asking for :acp
+      # fails selection. Result list should include the {:error, ...} row.
+      chain = [%{runtime: :acp}]
+
+      assert [{:ok, _primary}, {:error, reason, %{runtime: :acp}}] =
+               Dispatch.enumerate_chain("totally-unknown-model-9000", %{
+                 fallback_chain: chain
+               })
+
+      assert {:selection_failed, {:no_provider_supports_runtime, :acp}} = reason
+    end
+
+    test "primary failure still includes fallback enumeration" do
+      # Primary failure — fallback chain still gets walked so operators
+      # see whether any fallback would have succeeded.
+      chain = [%{model: "claude-opus-4-6"}]
+
+      assert [{:error, _, :primary}, {:ok, %{override: %{model: "claude-opus-4-6"}}}] =
+               Dispatch.enumerate_chain("totally-unknown-model-9000", %{
+                 runtime: :acp,
+                 fallback_chain: chain
+               })
+    end
+
+    test "request struct variant works the same" do
+      request = build_request("claude-opus-4-6")
+
+      assert [{:ok, primary}] = Dispatch.enumerate_chain(request)
+      assert primary.request.model == "claude-opus-4-6"
+    end
+
+    test "does NOT emit :selected telemetry (preview, not dispatch)" do
+      handler_id = "enumerate-telemetry-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:arbor, :runtime, :selected],
+        fn _, _, _, _ -> send(test_pid, :telemetry_fired) end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Dispatch.enumerate_chain("claude-opus-4-6", %{fallback_chain: [%{runtime: :acp}]})
+
+      refute_receive :telemetry_fired, 100
+    end
+  end
+
   describe "behaviour conformance — Arbor.LLM.Dispatcher" do
     test "declares @behaviour Arbor.LLM.Dispatcher" do
       behaviours = Arbor.AI.Runtime.Dispatch.module_info(:attributes)[:behaviour] || []
