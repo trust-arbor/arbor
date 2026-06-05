@@ -1515,5 +1515,39 @@ defmodule Arbor.Orchestrator.SessionTest do
       assert config["llm_runtime"] == :acp
       assert config["llm_provider"] == "openai"
     end
+
+    test "set_fallback_chain/2 updates state.config['llm_fallback_chain']", %{pid: pid} do
+      alias Arbor.Orchestrator.Session
+      chain = [%{runtime: :acp}, %{model: "claude-sonnet-4-6"}]
+
+      assert {:ok, ^chain} = Session.set_fallback_chain(pid, chain)
+      assert Session.get_state(pid).config["llm_fallback_chain"] == chain
+    end
+
+    test "set_fallback_chain/2 with empty list clears the chain", %{pid: pid} do
+      alias Arbor.Orchestrator.Session
+      assert {:ok, _} = Session.set_fallback_chain(pid, [%{runtime: :acp}])
+      assert {:ok, []} = Session.set_fallback_chain(pid, [])
+      assert Session.get_state(pid).config["llm_fallback_chain"] == []
+    end
+
+    test "set_fallback_chain/2 rejects non-list input", %{pid: _pid} do
+      alias Arbor.Orchestrator.Session
+
+      assert {:error, {:invalid_fallback_chain, :not_a_list}} =
+               Session.set_fallback_chain(self(), :not_a_list)
+    end
+
+    test "get_fallback_chain/1 returns [] when unset", %{pid: pid} do
+      alias Arbor.Orchestrator.Session
+      assert {:ok, []} = Session.get_fallback_chain(pid)
+    end
+
+    test "get_fallback_chain/1 reflects what set_fallback_chain wrote", %{pid: pid} do
+      alias Arbor.Orchestrator.Session
+      chain = [%{runtime: :acp}]
+      assert {:ok, _} = Session.set_fallback_chain(pid, chain)
+      assert {:ok, ^chain} = Session.get_fallback_chain(pid)
+    end
   end
 end
