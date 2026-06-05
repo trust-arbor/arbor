@@ -19,7 +19,8 @@ defmodule Arbor.Agent.ActionCycleServer do
   1. Percept arrives → enqueued
   2. If no cycle in flight → dequeue oldest percept, start cycle
   3. CycleController runs mental loop (unlimited mental actions, one physical)
-  4. Physical intent dispatched to ToolBridge → result becomes new percept
+  4. Physical intent dispatched → result becomes new percept (currently
+     no-op, see `.arbor/roadmap/0-inbox/physical-intent-dispatch-not-implemented.md`)
   5. Repeat until queue empty or throttle limit hit
 
   ## Throttling
@@ -314,7 +315,6 @@ defmodule Arbor.Agent.ActionCycleServer do
   defp dispatch_physical_intent(agent_id, intent) do
     capability = Map.get(intent, :capability, Map.get(intent, "capability"))
     op = Map.get(intent, :op, Map.get(intent, "op"))
-    params = Map.get(intent, :params, Map.get(intent, "params", %{}))
 
     emit_signal(agent_id, :intent_dispatched, %{
       agent_id: agent_id,
@@ -322,42 +322,13 @@ defmodule Arbor.Agent.ActionCycleServer do
       op: op
     })
 
-    tool_bridge = Arbor.Agent.ToolBridge
-
-    if Code.ensure_loaded?(tool_bridge) and
-         function_exported?(tool_bridge, :authorize_and_execute, 4) do
-      start_time = System.monotonic_time(:millisecond)
-
-      try do
-        result = apply(tool_bridge, :authorize_and_execute, [agent_id, capability, op, params])
-        duration = System.monotonic_time(:millisecond) - start_time
-        percept = format_exec_percept(intent, result, duration)
-        {:ok, percept}
-      rescue
-        e -> {:error, Exception.message(e)}
-      catch
-        :exit, reason -> {:error, {:exit, reason}}
-      end
-    else
-      {:error, :tool_bridge_unavailable}
-    end
-  end
-
-  defp format_exec_percept(intent, result, duration_ms) do
-    formatter = Arbor.Agent.PerceptFormatter
-
-    if Code.ensure_loaded?(formatter) and
-         function_exported?(formatter, :from_result, 3) do
-      apply(formatter, :from_result, [intent, result, duration_ms])
-    else
-      # Fallback: simple percept map
-      %{
-        type: :action_result,
-        intent: intent,
-        result: result,
-        duration_ms: duration_ms
-      }
-    end
+    # Physical intents need a real (capability, op) → action_module
+    # resolver before they can run through Arbor.Actions.authorize_and_execute/4.
+    # The original `Arbor.Agent.ToolBridge.authorize_and_execute/4` reference
+    # here never existed — the function was never defined on ToolBridge —
+    # so this path has been silently no-op'd since it was written.
+    # See `.arbor/roadmap/0-inbox/physical-intent-dispatch-not-implemented.md`.
+    {:error, :physical_dispatch_not_implemented}
   end
 
   # ── Drain (Testing) ─────────────────────────────────────────────
