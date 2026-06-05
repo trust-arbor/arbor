@@ -384,15 +384,42 @@ config :arbor_dashboard,
 
 # arbor_scheduler — Oban substrate. Repo lives in arbor_persistence;
 # scheduler depends on persistence so this reference is safe.
-# The `:crontab` list is the declarative cron table operators edit to
-# add recurring jobs. Initially empty — populate as reference pipelines
-# (upstream-deps check, morning digest, etc.) land in H1.
+#
+# Nightly reference-pipeline schedule (UTC):
+#   06:00 — upstream-deps check  (git fetch + diff report, pure shell)
+#   06:15 — upstream-deps summary (LLM categorizes new commits)
+#   06:30 — morning digest       (concatenates all overnight reports)
+#   06:45 — morning digest synth (LLM produces 'three things worth caring about')
+#
+# Each LLM step is offset 15 minutes after its data source so slow
+# models / cold caches don't race the next stage. Operators add their
+# own jobs to the crontab below. Each pipeline is a DOT file under
+# `apps/arbor_scheduler/priv/pipelines/`, executed by
+# `Arbor.Scheduler.Workers.PipelineRunner` via the orchestrator.
 config :arbor_scheduler, Oban,
   repo: Arbor.Persistence.Repo,
   queues: [default: 10, pipelines: 5, maintenance: 2],
   plugins: [
     Oban.Plugins.Pruner,
-    {Oban.Plugins.Cron, crontab: []}
+    {Oban.Plugins.Cron,
+     crontab: [
+       {"0 6 * * *", Arbor.Scheduler.Workers.PipelineRunner,
+        args: %{
+          "pipeline_path" => "apps/arbor_scheduler/priv/pipelines/upstream_deps_check.dot"
+        }},
+       {"15 6 * * *", Arbor.Scheduler.Workers.PipelineRunner,
+        args: %{
+          "pipeline_path" => "apps/arbor_scheduler/priv/pipelines/upstream_deps_summary.dot"
+        }},
+       {"30 6 * * *", Arbor.Scheduler.Workers.PipelineRunner,
+        args: %{
+          "pipeline_path" => "apps/arbor_scheduler/priv/pipelines/morning_digest.dot"
+        }},
+       {"45 6 * * *", Arbor.Scheduler.Workers.PipelineRunner,
+        args: %{
+          "pipeline_path" => "apps/arbor_scheduler/priv/pipelines/morning_digest_synthesis.dot"
+        }}
+     ]}
   ]
 
 # Dashboard endpoint
