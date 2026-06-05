@@ -136,7 +136,11 @@ defmodule Arbor.AI.Runtime.Acp do
     end
   end
 
-  defp build_checkout_opts(%Request{} = request, opts) do
+  @doc false
+  # Exposed (under @doc false) so tests can pin the
+  # provider_options → checkout-opts shape without needing a live
+  # AcpPool. Public callers should not depend on this.
+  def build_checkout_opts(%Request{} = request, opts) do
     opts
     |> Keyword.put(:model, request.model)
     |> Keyword.put(:timeout, Keyword.get(opts, :timeout, @default_timeout))
@@ -146,6 +150,7 @@ defmodule Arbor.AI.Runtime.Acp do
       Map.get(request.provider_options, "agent_id") || opts[:agent_id]
     )
     |> maybe_add(:capabilities, Map.get(request.provider_options, "capabilities"))
+    |> maybe_add(:tool_modules, Map.get(request.provider_options, "tool_modules"))
   end
 
   defp pool_checkout(cli, opts) do

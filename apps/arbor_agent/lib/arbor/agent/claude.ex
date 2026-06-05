@@ -383,7 +383,7 @@ defmodule Arbor.Agent.Claude do
   end
 
   defp execute_query(prompt, model, capture, state, opts) do
-    request = build_request(prompt, model, opts)
+    request = build_request(prompt, model, state, opts)
 
     case Dispatch.dispatch(request, policy: %{runtime: :acp}) do
       {:ok, llm_response} ->
@@ -452,11 +452,26 @@ defmodule Arbor.Agent.Claude do
   defp model_id(model) when is_atom(model), do: Atom.to_string(model)
   defp model_id(model) when is_binary(model), do: model
 
-  defp build_request(prompt, model, opts) do
+  defp build_request(prompt, model, state, opts) do
+    # Capability-derived tool exposure: the CLI subprocess gets an MCP
+    # endpoint listing only actions the agent could actually run, instead
+    # of the full action surface filtered after the fact at execute time.
+    # AcpPool.ToolServer + ex_mcp's mcpServers field wire the rest.
+    tool_modules =
+      case state.id do
+        id when is_binary(id) and id != "" ->
+          Arbor.Actions.tool_modules_for_agent(id)
+
+        _ ->
+          []
+      end
+
     provider_options =
       %{}
       |> maybe_put_provider_option("workspace", Keyword.get(opts, :cwd))
       |> maybe_put_provider_option("system_prompt", Keyword.get(opts, :system_prompt))
+      |> maybe_put_provider_option("agent_id", state.id)
+      |> maybe_put_provider_option("tool_modules", non_empty(tool_modules))
 
     messages =
       case Keyword.get(opts, :system_prompt) do
@@ -485,6 +500,9 @@ defmodule Arbor.Agent.Claude do
 
   defp maybe_put_provider_option(map, _key, nil), do: map
   defp maybe_put_provider_option(map, key, value), do: Map.put(map, key, value)
+
+  defp non_empty([]), do: nil
+  defp non_empty(list) when is_list(list), do: list
 
   defp llm_response_to_legacy_map(%Arbor.LLM.Response{} = r) do
     %{
