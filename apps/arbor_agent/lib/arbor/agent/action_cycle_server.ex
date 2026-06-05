@@ -313,22 +313,51 @@ defmodule Arbor.Agent.ActionCycleServer do
   # ── Physical Intent Dispatch ────────────────────────────────────
 
   defp dispatch_physical_intent(agent_id, intent) do
-    capability = Map.get(intent, :capability, Map.get(intent, "capability"))
-    op = Map.get(intent, :op, Map.get(intent, "op"))
+    normalized = normalize_intent(intent)
 
     emit_signal(agent_id, :intent_dispatched, %{
       agent_id: agent_id,
-      capability: capability,
-      op: op
+      capability: normalized.capability,
+      op: normalized.op,
+      action: normalized.action
     })
 
-    # Physical intents need a real (capability, op) → action_module
-    # resolver before they can run through Arbor.Actions.authorize_and_execute/4.
-    # The original `Arbor.Agent.ToolBridge.authorize_and_execute/4` reference
-    # here never existed — the function was never defined on ToolBridge —
-    # so this path has been silently no-op'd since it was written.
-    # See `.arbor/roadmap/0-inbox/physical-intent-dispatch-not-implemented.md`.
-    {:error, :physical_dispatch_not_implemented}
+    Arbor.Agent.IntentDispatcher.dispatch(agent_id, normalized, dispatcher_opts(agent_id))
+  end
+
+  # Tolerate either a real %Intent{} or a plain map — CycleController
+  # may emit either depending on harness. Convert via `Intent.from_map/1`
+  # when a plain map is received.
+  defp normalize_intent(%Arbor.Contracts.Memory.Intent{} = intent), do: intent
+  defp normalize_intent(map) when is_map(map), do: Arbor.Contracts.Memory.Intent.from_map(map)
+
+  # Workspace lookup is best-effort — we want the dispatcher to thread
+  # `context[:workspace]` into file actions when available, but a
+  # missing/unavailable profile shouldn't block intent execution. The
+  # action will run without workspace bounding in that case.
+  defp dispatcher_opts(agent_id) do
+    case workspace_for_agent(agent_id) do
+      nil -> []
+      ws -> [workspace: ws]
+    end
+  end
+
+  defp workspace_for_agent(agent_id) do
+    if Code.ensure_loaded?(Arbor.Agent.Lifecycle) and
+         function_exported?(Arbor.Agent.Lifecycle, :restore, 1) do
+      case apply(Arbor.Agent.Lifecycle, :restore, [agent_id]) do
+        {:ok, profile} ->
+          get_in(profile.metadata || %{}, [:workspace]) ||
+            get_in(profile.metadata || %{}, ["workspace"])
+
+        _ ->
+          nil
+      end
+    end
+  rescue
+    _ -> nil
+  catch
+    :exit, _ -> nil
   end
 
   # ── Drain (Testing) ─────────────────────────────────────────────
