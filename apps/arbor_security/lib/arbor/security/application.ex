@@ -35,7 +35,16 @@ defmodule Arbor.Security.Application do
              collection: "signing_keys"},
             id: :arbor_security_signing_keys
           ),
+          Supervisor.child_spec(
+            {@buffered_store,
+             name: :arbor_security_issuers,
+             backend: security_backend(),
+             write_mode: :sync,
+             collection: "issuers"},
+            id: :arbor_security_issuers
+          ),
           {Arbor.Security.Identity.Registry, []},
+          {Arbor.Security.IssuerRegistry, []},
           {Arbor.Security.Identity.NonceCache, []},
           {Arbor.Security.SystemAuthority, []},
           {Arbor.Security.Constraint.RateLimiter, []},
