@@ -45,9 +45,12 @@ digraph UpstreamDepsSummary {
 
   // Compute today's input report path. The shell handler captures
   // stdout as `shell.build_input_path.output`.
+  // `printf '%s'` (not `echo`) — the shell handler captures stdout
+  // verbatim, including a trailing newline. file_read would then try
+  // to open `…/file.md\n` (with literal newline) and fail.
   build_input_path [
     type="shell",
-    command="echo $HOME/.arbor/reports/upstream-deps/$(date -u +%Y-%m-%d).md",
+    command="printf '%s' \"$HOME/.arbor/reports/upstream-deps/$(date -u +%Y-%m-%d).md\"",
     sandbox="none",
     timeout="5000",
     on_error="fail",
@@ -82,11 +85,21 @@ digraph UpstreamDepsSummary {
     purpose="llm",
     simulate="false",
     llm_provider="lm_studio",
-    llm_model="gemma-4-31b-it@q4_k_xl",
+    llm_model="gemma-4-31b-it",
     use_tools="false",
-    max_tokens="2048",
+    // Gemma 4 31B is a reasoning model — `reasoning_content` eats
+    // budget before the actual answer is emitted (~2K tokens just to
+    // think). Overnight batch should give the model room to finish
+    // reasoning AND produce a structured answer; 32K covers both
+    // comfortably and the wall-clock cost doesn't matter at 06:15.
+    // See `.arbor/roadmap/0-inbox/llm-empty-response-from-reasoning-
+    // and-mtp-models.md` for the diagnosis.
+    max_tokens="32768",
     temperature="0.2",
-    system_prompt="You categorize git commits from upstream dependency tracking. Read the markdown report below — it lists new upstream commits across several tracked repos. Output ONLY pure Markdown (no preamble, no code fences around the whole output) with these sections in order:\n\n# Upstream Deps Summary\n\n## Categorization\n\nA bullet list giving counts by category: Security, Breaking, Features, Cosmetic, Other.\n\n## Security commits\n\nOne bullet per commit citing repo + short SHA + a one-line rationale. Omit this section entirely if there are zero security commits.\n\n## Breaking changes\n\nOne bullet per commit citing repo + short SHA + a one-line rationale. Omit this section entirely if there are zero breaking commits.\n\nBe terse, factual, no hedging. Cite specific repos and SHAs from the input — do not invent.",
+    // 30-minute timeout — overnight batch can take a while on a 31B
+    // local model and we'd rather wait than ship empty.
+    timeout="1800000",
+    system_prompt="You categorize git commits from upstream dependency tracking. Read the markdown report below — it lists new upstream commits across several tracked repos.\n\nCRITICAL: List EVERY commit that could plausibly be a security fix or breaking change. Over-reporting is acceptable; under-reporting is NOT. If your internal reasoning flags a commit as possibly security or possibly breaking, include it. The reader will triage — your job is to surface candidates, not gate-keep.\n\nSecurity heuristics (include if ANY apply): mentions a CVE / GHSA / RUSTSEC / advisory id; bumps a dep with a security advisory; closes an auth/authz/permission bug; strips/sanitizes secrets, tokens, or sensitive data from logs/env/output; changes a default to fail-closed instead of fail-open; touches signing, encryption, capability checks, sandboxing, prompt-injection defenses, escape sequences, path-traversal protection; addresses a privacy or compliance issue.\n\nBreaking-change heuristics (include if ANY apply): says BREAKING / breaking / breaking change / API removal; removes/renames a public function, flag, or env var; changes default behavior in a way that affects existing callers; deprecates with a removal date; bumps a major version; marks a repo or module unmaintained; drops support for a version, platform, or language.\n\nOutput ONLY pure Markdown (no preamble, no code fences around the whole output) with these sections in this exact order:\n\n# Upstream Deps Summary\n\n## Categorization\n\nA bullet list giving counts: Security, Breaking, Features, Cosmetic, Other. Counts must reflect what's enumerated below — if you list 3 security commits, the count is 3, not 1. Totals add up to commits actually inspected (the report caps at 50 per repo, so a repo with 416 upstream commits shows 50).\n\n## Security commits\n\nOne bullet per security commit cited as `repo short-sha`: rationale. Cite EVERY commit your reasoning flagged. Omit this section entirely only if there are truly zero security commits across the entire input.\n\n## Breaking changes\n\nOne bullet per breaking commit cited as `repo short-sha`: rationale. Cite EVERY commit your reasoning flagged. Omit this section entirely only if there are truly zero breaking commits.\n\nBe terse, factual, no hedging. Cite specific repos and SHAs from the input — do not invent. Match the counts in `## Categorization` to the bullets you actually emit in `## Security commits` and `## Breaking changes`.",
     prompt_context_key="exec.read_report.content"
   ]
 
@@ -95,7 +108,7 @@ digraph UpstreamDepsSummary {
   // `shell.build_output_path.output` (a single line — the path).
   build_output_path [
     type="shell",
-    command="mkdir -p $HOME/.arbor/reports/upstream-deps-summary && echo $HOME/.arbor/reports/upstream-deps-summary/$(date -u +%Y-%m-%d).md",
+    command="mkdir -p \"$HOME/.arbor/reports/upstream-deps-summary\" && printf '%s' \"$HOME/.arbor/reports/upstream-deps-summary/$(date -u +%Y-%m-%d).md\"",
     sandbox="none",
     timeout="5000",
     on_error="fail",
