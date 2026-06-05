@@ -69,6 +69,15 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
       "session.llm_runtime",
       config["llm_runtime"] || config[:llm_runtime] || :arbor
     )
+    # Per-agent fallback chain (Phase 4+ B3). Lifecycle.resolve_fallback_chain
+    # plumbs the persisted/configured chain through SessionConfig → state.config
+    # → here → LlmHandler → policy.fallback_chain on Dispatcher.dispatch. The
+    # entries here are already atomized (Lifecycle normalizes string-keyed
+    # entries from Postgres-restored profiles).
+    |> Map.put(
+      "session.llm_fallback_chain",
+      config["llm_fallback_chain"] || config[:llm_fallback_chain] || []
+    )
     |> maybe_put("session.system_prompt", config["system_prompt"] || config[:system_prompt])
     |> Map.put("session.tools", resolve_session_tools(state))
     |> maybe_put("session.tenant_context", state.tenant_context)
