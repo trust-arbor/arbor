@@ -140,6 +140,53 @@ defmodule Arbor.AI.Runtime.AcpTest do
     defp call_format(result, cli), do: Arbor.AI.Runtime.Acp.format_response(result, cli)
   end
 
+  describe "build_checkout_opts/2 — provider_options plumbing" do
+    test "tool_modules from provider_options flows to checkout opts" do
+      request = %Request{
+        provider: "anthropic",
+        model: "claude-opus-4-6",
+        provider_options: %{
+          "tool_modules" => [Arbor.Actions.File.Read, Arbor.Actions.Shell.Execute]
+        }
+      }
+
+      checkout_opts = RuntimeAcp.build_checkout_opts(request, [])
+
+      assert Keyword.get(checkout_opts, :tool_modules) == [
+               Arbor.Actions.File.Read,
+               Arbor.Actions.Shell.Execute
+             ]
+    end
+
+    test "tool_modules absent from provider_options produces no :tool_modules key" do
+      request = %Request{
+        provider: "anthropic",
+        model: "claude-opus-4-6",
+        provider_options: %{}
+      }
+
+      checkout_opts = RuntimeAcp.build_checkout_opts(request, [])
+      refute Keyword.has_key?(checkout_opts, :tool_modules)
+    end
+
+    test "workspace + agent_id + tool_modules all plumb in one pass" do
+      request = %Request{
+        provider: "anthropic",
+        model: "claude-opus-4-6",
+        provider_options: %{
+          "workspace" => "/tmp/wkspc",
+          "agent_id" => "agent_abc",
+          "tool_modules" => [Arbor.Actions.File.Read]
+        }
+      }
+
+      checkout_opts = RuntimeAcp.build_checkout_opts(request, [])
+      assert Keyword.get(checkout_opts, :workspace) == "/tmp/wkspc"
+      assert Keyword.get(checkout_opts, :agent_id) == "agent_abc"
+      assert Keyword.get(checkout_opts, :tool_modules) == [Arbor.Actions.File.Read]
+    end
+  end
+
   describe "execute/3 — pool unavailability" do
     test "returns :pool_not_available when AcpPool isn't running" do
       # AcpPool isn't started in the unit test environment. execute/3

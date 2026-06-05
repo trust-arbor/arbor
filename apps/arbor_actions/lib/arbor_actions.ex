@@ -487,6 +487,49 @@ defmodule Arbor.Actions do
   end
 
   @doc """
+  Filter `all_actions/0` to the action modules the given agent has
+  capability to execute.
+
+  Used by the ACP runtime's tool exposure path (`Runtime.Acp`'s
+  `tool_modules` checkout opt → `AcpPool.ToolServer`) so the CLI
+  subprocess sees only tools the agent could actually run — avoiding
+  red-herring suggestions and pre-filtering at exposure time instead
+  of relying on `authorize_and_execute/4` to reject every disallowed
+  call after the fact.
+
+  Authorization check uses the canonical base URI for each action
+  (parameterless form, e.g. `"arbor://fs/read"`). Actions whose
+  authorization currently returns `:pending_approval` are *included*
+  — exposing them gives the model the chance to request them and
+  trigger the approval flow. Errors and outright denials exclude
+  the action.
+
+  Returns `[]` for `nil`/empty agent ids.
+  """
+  @spec tool_modules_for_agent(String.t() | nil) :: [module()]
+  def tool_modules_for_agent(nil), do: []
+  def tool_modules_for_agent(""), do: []
+
+  def tool_modules_for_agent(agent_id) when is_binary(agent_id) do
+    Enum.filter(all_actions(), &authorized_for_exposure?(agent_id, &1))
+  end
+
+  defp authorized_for_exposure?(agent_id, action_module) do
+    uri = canonical_uri_for(action_module, %{})
+
+    case Arbor.Security.authorize(agent_id, uri, :execute) do
+      {:ok, :authorized} -> true
+      {:ok, :pending_approval, _proposal_id} -> true
+      {:error, _reason} -> false
+    end
+  rescue
+    # Defensive: if a single action's URI lookup blows up (bad
+    # parameterize_uri input, malformed metadata), skip it rather than
+    # taking down the whole exposure list.
+    _ -> false
+  end
+
+  @doc """
   Resolve an action name string to its module.
 
   Handles both dot-separated names (e.g. `"file.read"`) and underscore-separated
