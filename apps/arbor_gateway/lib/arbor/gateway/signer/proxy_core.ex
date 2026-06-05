@@ -38,57 +38,13 @@ defmodule Arbor.Gateway.Signer.ProxyCore do
   @doc """
   Parse the contents of a `.arbor.key` file.
 
-  The file format is line-oriented `key=value`:
-
-      agent_id=agent_30b455a27f7f4e02ef291fd9f7862677f731a1f8b08c997f5fb8ad430d594b6e
-      private_key_b64=BASE64KEYBYTES==
-
-  Returns `{:ok, key_material}` on success or `{:error, reason}` if the
-  file is missing required fields or the private key isn't valid base64.
+  Delegates to `Arbor.Security.KeyFile.parse/1` — the canonical home for
+  this parsing logic. Kept here as a backward-compat shim because external
+  callers (and `mix arbor.signer`) use this name. New callers should
+  reference `Arbor.Security.KeyFile.parse/1` directly.
   """
   @spec parse_key_file(String.t()) :: {:ok, key_material()} | {:error, atom() | tuple()}
-  def parse_key_file(contents) when is_binary(contents) do
-    fields =
-      contents
-      |> String.split("\n", trim: true)
-      |> Enum.reduce(%{}, fn line, acc ->
-        case String.split(line, "=", parts: 2) do
-          [k, v] -> Map.put(acc, String.trim(k), String.trim(v))
-          _ -> acc
-        end
-      end)
-
-    with {:ok, agent_id} <- fetch_field(fields, "agent_id"),
-         {:ok, private_key_b64} <- fetch_field(fields, "private_key_b64"),
-         {:ok, private_key} <- decode_private_key(private_key_b64),
-         :ok <- validate_agent_id(agent_id) do
-      {:ok, %{agent_id: agent_id, private_key: private_key}}
-    end
-  end
-
-  defp fetch_field(fields, key) do
-    case Map.get(fields, key) do
-      nil -> {:error, {:missing_field, key}}
-      "" -> {:error, {:empty_field, key}}
-      value -> {:ok, value}
-    end
-  end
-
-  defp decode_private_key(b64) do
-    case Base.decode64(b64) do
-      {:ok, bin} when byte_size(bin) in [32, 64] -> {:ok, bin}
-      {:ok, bin} -> {:error, {:invalid_private_key_size, byte_size(bin)}}
-      :error -> {:error, :invalid_private_key_base64}
-    end
-  end
-
-  defp validate_agent_id(agent_id) do
-    if String.starts_with?(agent_id, "agent_") and byte_size(agent_id) > 6 do
-      :ok
-    else
-      {:error, {:invalid_agent_id, agent_id}}
-    end
-  end
+  defdelegate parse_key_file(contents), to: Arbor.Security.KeyFile, as: :parse
 
   # ===========================================================================
   # Reduce: compute canonical bytes the SignedRequestAuth plug expects
