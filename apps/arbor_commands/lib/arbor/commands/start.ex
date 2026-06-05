@@ -1,11 +1,11 @@
-defmodule Arbor.Common.Commands.Start do
+defmodule Arbor.Commands.Start do
   @moduledoc """
   Spawn a new agent from a template.
 
   Mirrors `mix arbor.agent start <template>` for the in-chat surface.
-  Returns the `{:start_agent, template, opts}` action — the entry point
-  (e.g. ChatLive) executes the actual `Arbor.Agent.Manager.start_or_resume/3`
-  call.
+  On success emits an `:agent_started` effect carrying the new agent's
+  `agent_id`, `pid`, and `metadata` — interface modules (ChatLive,
+  Discord, etc.) use this to bind their conversation to the new agent.
 
   ## Usage
 
@@ -15,18 +15,17 @@ defmodule Arbor.Common.Commands.Start do
       /start <template> runtime=acp             # override runtime
       /start <template> model=X runtime=acp     # combine
 
-  ## Why slash-command rather than UI
+  ## Why this lives in arbor_commands
 
-  Per `.arbor/decisions/2026-06-04-slash-commands-for-runtime-config.md`,
-  user-facing config goes through slash commands. The previous ChatLive
-  "Start Agent" dropdown bundled model selection with agent creation
-  and conflated several axes. `/start <template>` keeps the start surface
-  composable — adding skills, fallback chain pins, or other axes is
-  another keyword, not another dropdown.
+  Performs side effects via `Arbor.Agent.Manager.start_or_resume/3`.
+  arbor_commands depends on arbor_agent directly so the call is
+  compile-time-checked. arbor_common can't depend on arbor_agent
+  (Level 0.5 → Level 2 violates the hierarchy).
   """
 
   @behaviour Arbor.Common.Command
 
+  alias Arbor.Agent.{APIAgent, LLMDefaults, Manager}
   alias Arbor.Contracts.Commands.{Context, Result}
 
   @valid_runtimes [:arbor, :acp]
@@ -52,7 +51,7 @@ defmodule Arbor.Common.Commands.Start do
   def execute(args, %Context{}) do
     case parse_args(args) do
       {:ok, template, opts} ->
-        apply_start(template, opts)
+        run_start(template, opts)
 
       {:error, {:unknown_runtime, value}} ->
         {:ok,
@@ -65,37 +64,12 @@ defmodule Arbor.Common.Commands.Start do
     end
   end
 
-  # Side-effecting dispatch — spawns the agent via
-  # Arbor.Agent.Manager.start_or_resume/3 mirroring `mix arbor.agent
-  # start <template>`. Returns an :agent_started effect carrying the
-  # agent_id, pid, and metadata that interfaces use for their own
-  # follow-up (ChatLive reconnects the socket; Discord binds the
-  # channel and subscribes to signals).
-  #
-  # Runtime indirection because arbor_common is at Level 0.5 and can't
-  # compile-time-depend on arbor_agent (Level 2).
-  defp apply_start(template, opts) do
-    manager_mod = Module.concat([:Arbor, :Agent, :Manager])
-    api_agent_mod = Module.concat([:Arbor, :Agent, :APIAgent])
-
-    cond do
-      not Code.ensure_loaded?(manager_mod) ->
-        {:ok, Result.error("Cannot start agent: Manager module not loaded.")}
-
-      not Code.ensure_loaded?(api_agent_mod) ->
-        {:ok, Result.error("Cannot start agent: APIAgent module not loaded.")}
-
-      true ->
-        run_start(manager_mod, api_agent_mod, template, opts)
-    end
-  end
-
-  defp run_start(manager_mod, api_agent_mod, template, opts) do
+  defp run_start(template, opts) do
     display_name = Keyword.get(opts, :name, template)
-    model_config = build_model_config(api_agent_mod, opts)
+    model_config = build_model_config(opts)
     start_opts = [template: template, model_config: model_config]
 
-    case safe_call(manager_mod, :start_or_resume, [api_agent_mod, display_name, start_opts]) do
+    case safe_call(fn -> Manager.start_or_resume(APIAgent, display_name, start_opts) end) do
       {:ok, agent_id, pid} ->
         text =
           "Started agent from template #{template} as #{display_name} (#{agent_id})."
@@ -121,41 +95,34 @@ defmodule Arbor.Common.Commands.Start do
     end
   end
 
-  # Mirrors the shape used by mix arbor.agent start <template>. Falls
-  # back to LLMDefaults when /start doesn't pin model/provider.
-  defp build_model_config(api_agent_mod, opts) do
-    defaults_mod = Module.concat([:Arbor, :Agent, :LLMDefaults])
-
+  # Mirrors `mix arbor.agent start <template>`. Falls back to
+  # `Arbor.Agent.LLMDefaults` when /start doesn't pin model/provider.
+  defp build_model_config(opts) do
     model_id =
-      Keyword.get(opts, :model) || safe_default(defaults_mod, :default_model, "claude-sonnet-4-6")
+      Keyword.get(opts, :model) || safe_default(&LLMDefaults.default_model/0, "claude-sonnet-4-6")
 
     provider =
-      Keyword.get(opts, :provider) ||
-        safe_default(defaults_mod, :default_provider, :anthropic)
+      Keyword.get(opts, :provider) || safe_default(&LLMDefaults.default_provider/0, :anthropic)
 
     %{
       id: model_id,
       provider: provider,
       backend: :api,
-      module: api_agent_mod,
+      module: APIAgent,
       start_opts: []
     }
   end
 
-  defp safe_default(mod, fun, fallback) do
-    if Code.ensure_loaded?(mod) and function_exported?(mod, fun, 0) do
-      apply(mod, fun, [])
-    else
-      fallback
-    end
+  defp safe_default(fun, fallback) do
+    fun.()
   rescue
     _ -> fallback
   catch
     :exit, _ -> fallback
   end
 
-  defp safe_call(mod, fun, args) do
-    apply(mod, fun, args)
+  defp safe_call(fun) do
+    fun.()
   rescue
     e -> {:error, Exception.message(e)}
   catch
@@ -188,17 +155,14 @@ defmodule Arbor.Common.Commands.Start do
   end
 
   defp parse_kvs(["runtime=" <> value | rest], acc) do
-    value = String.trim(value)
-
-    case runtime_atom(value) do
+    case runtime_atom(String.trim(value)) do
       {:ok, runtime} -> parse_kvs(rest, [{:runtime, runtime} | acc])
       :error -> {:error, {:unknown_runtime, value}}
     end
   end
 
   defp parse_kvs([_ignored | rest], acc) do
-    # Unknown kwargs silently skip — future axes (skills=..., chain=...)
-    # can land without breaking parse.
+    # Unknown kwargs silently skip.
     parse_kvs(rest, acc)
   end
 

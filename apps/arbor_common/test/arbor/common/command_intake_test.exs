@@ -89,13 +89,11 @@ defmodule Arbor.Common.CommandIntakeTest do
       assert {:command_result, %Result{action: :compact}} = result
     end
 
-    test "/model X returns a Result with action: {:switch_model, name}" do
-      result =
-        CommandIntake.handle("/model anthropic/claude-opus-4-6", ctx(), fn _ -> :unreachable end)
-
-      assert {:command_result, %Result{action: {:switch_model, "anthropic/claude-opus-4-6"}}} =
-               result
-    end
+    # /model used to live here and emit action: {:switch_model, name}.
+    # As of the 2026-06-04 refactor it moved to arbor_commands (Level 2,
+    # can depend on arbor_orchestrator + arbor_agent) and performs side
+    # effects directly + emits effects: [model_changed: name]. Its
+    # behavior tests live in apps/arbor_commands/test/.
   end
 
   describe "handle/3 — error paths" do
@@ -138,12 +136,16 @@ defmodule Arbor.Common.CommandIntakeTest do
     # dashboard and arbor_comms slash command handling. Both now go through
     # CommandIntake. This test asserts that the SAME input + DIFFERENT origin
     # contexts produce consistent shapes — only the visibility differs.
-    test "agent context: full command list available" do
+    test "agent context: arbor_common-hosted command list available" do
       ctx_dashboard = %{ctx() | origin: :dashboard}
       result = CommandIntake.handle("/help", ctx_dashboard, fn _ -> :unreachable end)
       assert {:command_result, %Result{text: text}} = result
-      # Should list all 9 commands
-      for cmd <- ~w(help status session model trust memory tools clear compact) do
+      # Commands hosted in arbor_common itself — Phase 2c moved /model,
+      # /runtime, /start to arbor_commands (Level 2). The full
+      # multi-app /help output (including arbor_commands' entries) is
+      # asserted by the dashboard's integration tests where the full
+      # umbrella is loaded.
+      for cmd <- ~w(help status session trust memory tools clear compact) do
         assert String.contains?(text, "/#{cmd}"),
                "expected /#{cmd} to appear in dashboard /help output"
       end
@@ -158,7 +160,6 @@ defmodule Arbor.Common.CommandIntakeTest do
       refute String.contains?(text, "/clear")
       refute String.contains?(text, "/compact")
       refute String.contains?(text, "/status")
-      refute String.contains?(text, "/model")
     end
   end
 end

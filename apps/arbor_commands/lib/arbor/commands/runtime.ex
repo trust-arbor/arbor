@@ -1,4 +1,4 @@
-defmodule Arbor.Common.Commands.Runtime do
+defmodule Arbor.Commands.Runtime do
   @moduledoc """
   Show or switch the current agent's runtime without changing the model.
 
@@ -11,19 +11,21 @@ defmodule Arbor.Common.Commands.Runtime do
   Pair with `/model` when you want to change both at once
   (`/model claude-opus-4-6 runtime=acp`).
 
-  ## Why this is a separate command
+  ## Why this lives in arbor_commands
 
-  The slash-command-over-GUI architectural decision (`.arbor/decisions/
-  2026-06-04-slash-commands-for-runtime-config.md`) chose to expose the
-  runtime axis as a first-class command rather than a dropdown. Keeps
-  the surface composable — adding skill catalogs, fallback chain pins,
-  or future axes is another `/<axis>` command, not another dropdown
-  per axis.
+  Performs a side effect — `Arbor.Orchestrator.Session.set_runtime/2`.
+  arbor_commands depends on arbor_orchestrator directly, so the call is
+  compile-time-checked. The pure-read commands (Help, Status, etc.) stay
+  in arbor_common; side-effecting commands like this one live here.
+
+  See `.arbor/decisions/2026-06-04-slash-commands-for-runtime-config.md`
+  for the slash-command-over-GUI design context.
   """
 
   @behaviour Arbor.Common.Command
 
   alias Arbor.Contracts.Commands.{Context, Result}
+  alias Arbor.Orchestrator.Session
 
   @valid_runtimes [:arbor, :acp]
 
@@ -60,24 +62,13 @@ defmodule Arbor.Common.Commands.Runtime do
     end
   end
 
-  # Performs the side effect — Arbor.Orchestrator.Session.set_runtime/2 —
-  # then returns a Result with the outcome text + a [runtime_changed: r]
-  # effect that interfaces can use for their own follow-up (ChatLive
-  # updates its status row; Discord ignores). Uses runtime indirection
-  # because arbor_common is at Level 0.5 and can't compile-time-depend
-  # on arbor_orchestrator (Level 2).
   defp apply_runtime(runtime, %Context{session_pid: pid}) when is_pid(pid) do
-    session_mod = Module.concat([:Arbor, :Orchestrator, :Session])
-
     cond do
-      not Code.ensure_loaded?(session_mod) ->
-        {:ok, Result.error("Cannot switch runtime: Session module not loaded.")}
-
       not Process.alive?(pid) ->
         {:ok, Result.error("Cannot switch runtime: session process is no longer alive.")}
 
       true ->
-        case safe_call(session_mod, :set_runtime, [pid, runtime]) do
+        case safe_call(fn -> Session.set_runtime(pid, runtime) end) do
           {:ok, _} ->
             {:ok,
              Result.ok(
@@ -95,8 +86,8 @@ defmodule Arbor.Common.Commands.Runtime do
     {:ok, Result.error("Cannot switch runtime: session pid missing from context.")}
   end
 
-  defp safe_call(mod, fun, args) do
-    apply(mod, fun, args)
+  defp safe_call(fun) do
+    fun.()
   rescue
     e -> {:error, Exception.message(e)}
   catch
@@ -113,8 +104,7 @@ defmodule Arbor.Common.Commands.Runtime do
   # patches can add it the same way :model and :provider are tracked
   # (see Arbor.Contracts.Commands.Context). Until then, /runtime without
   # arg always shows "arbor (default)" — accurate, since :arbor is the
-  # default and Context can't say otherwise. The setter side (action
-  # tag) still works.
+  # default and Context can't say otherwise.
   defp current_runtime(%Context{} = ctx) do
     Map.get(ctx, :runtime)
   end
