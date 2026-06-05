@@ -1,17 +1,40 @@
 defmodule Mix.Tasks.Arbor.Doctor do
-  @shortdoc "Check LLM provider health and capabilities"
+  @shortdoc "Provider health + runtime axis introspection"
   @moduledoc """
-  Runs health checks on all registered LLM providers and reports their status,
-  capabilities, and install hints for missing providers.
+  Multi-mode triage tool. With no flags, runs the LLM provider health
+  check (the original behavior). Subcommand flags surface specific
+  runtime-axis introspection without making any LLM calls.
 
-      $ mix arbor.doctor
+      $ mix arbor.doctor                              # Provider health (default)
+      $ mix arbor.doctor --runtimes                   # Registered runtimes + profiles
+      $ mix arbor.doctor --model claude-opus-4-6      # Selection preview for a model
+      $ mix arbor.doctor --model claude-opus-4-6 \\
+          --fallback "runtime=acp" \\
+          --fallback "model=claude-haiku-4-5-20251001"
 
   ## Options
+
+  ### Provider-health mode (default)
 
     * `--refresh`   - Force refresh the provider catalog cache
     * `--json`      - Output as JSON instead of table format
     * `--verbose`   - Show detailed check results for each provider
     * `--configure` - Auto-detect best LLM provider and write to .env
+
+  ### Runtime-axis introspection
+
+    * `--runtimes` - Render registered `Arbor.AI.Runtime` modules and
+      their `RuntimeProfile` capabilities (the OpenClaw 8 questions).
+    * `--model <id>` - Resolve a model through the selection chain
+      (`Selector.choose/2` + `RuntimeRegistry.lookup/1`) WITHOUT making
+      an LLM call. Shows which provider + runtime would serve the
+      request and which adapter module backs that runtime.
+    * `--fallback <override>` - Append a fallback chain entry to the
+      preview. Repeatable. Each value is comma-separated `key=value`
+      pairs (e.g. `"runtime=acp,model=claude-sonnet-4-6"`). Only valid
+      with `--model`.
+    * `--runtime <atom>` - Set the policy runtime override for the
+      preview (defaults to the per-model default).
 
   ## Auto-Configuration
 
@@ -23,14 +46,6 @@ defmodule Mix.Tasks.Arbor.Doctor do
   Model selection uses LLMDB to find the best available model for the chosen
   provider (requires chat capability). Falls back to hardcoded defaults if
   LLMDB is unavailable.
-
-  ## Output
-
-  Displays a table of all providers with:
-    - Status (ready/missing)
-    - Type (API/CLI/Local)
-    - Capability flags (streaming, thinking, tools, vision, etc.)
-    - Install hints for missing providers
   """
   use Mix.Task
 
@@ -64,16 +79,36 @@ defmodule Mix.Tasks.Arbor.Doctor do
   def run(args) do
     {opts, _, _} =
       OptionParser.parse(args,
-        switches: [refresh: :boolean, json: :boolean, verbose: :boolean, configure: :boolean]
+        switches: [
+          refresh: :boolean,
+          json: :boolean,
+          verbose: :boolean,
+          configure: :boolean,
+          runtimes: :boolean,
+          model: :string,
+          fallback: :keep,
+          runtime: :string
+        ]
       )
 
     # Start minimal deps for provider discovery
     Application.ensure_all_started(:req)
     Application.ensure_all_started(:req_llm)
+    Application.ensure_all_started(:llm_db)
 
     # Load LLMDB for model lookup
     ensure_llmdb()
 
+    cond do
+      opts[:runtimes] -> run_runtimes_view(opts)
+      opts[:model] -> run_model_view(opts, args)
+      true -> run_provider_health(opts)
+    end
+  end
+
+  # ── Provider Health (default mode, original behavior) ────────────────
+
+  defp run_provider_health(opts) do
     catalog_mod = Arbor.LLM.ProviderCatalog
 
     unless Code.ensure_loaded?(catalog_mod) do
@@ -92,6 +127,261 @@ defmodule Mix.Tasks.Arbor.Doctor do
       recommend_default(entries, opts)
     end
   end
+
+  # ── Runtimes view (--runtimes) ───────────────────────────────────────
+
+  defp run_runtimes_view(opts) do
+    unless Code.ensure_loaded?(Arbor.AI.Runtime.Registry) do
+      Mix.shell().error("Runtime.Registry not available. Is arbor_ai compiled?")
+      System.halt(1)
+    end
+
+    registry = apply(Arbor.AI.Runtime.Registry, :all, [])
+
+    if opts[:json] do
+      print_runtimes_json(registry)
+    else
+      print_runtimes_table(registry)
+    end
+  end
+
+  defp print_runtimes_table(registry) do
+    Mix.shell().info("")
+    Mix.shell().info("  Arbor Runtime Registry")
+    Mix.shell().info("  ======================")
+    Mix.shell().info("")
+
+    Mix.shell().info(
+      "  #{pad("Runtime", 12)} #{pad("Module", 36)} #{pad("Loop", 6)} #{pad("Hist", 6)} #{pad("Jido", 6)} #{pad("Hook", 6)} #{pad("Tool", 6)} #{pad("CtxE", 6)}"
+    )
+
+    Mix.shell().info(
+      "  #{String.duplicate("-", 12)} #{String.duplicate("-", 36)} #{String.duplicate("-", 6)} #{String.duplicate("-", 6)} #{String.duplicate("-", 6)} #{String.duplicate("-", 6)} #{String.duplicate("-", 6)} #{String.duplicate("-", 6)}"
+    )
+
+    for {atom, module} <- Enum.sort_by(registry, fn {a, _} -> Atom.to_string(a) end) do
+      profile = apply(Arbor.AI.Runtime.Registry, :profile, [atom])
+      render_runtime_row(atom, module, profile)
+    end
+
+    Mix.shell().info("")
+
+    Mix.shell().info("""
+      Legend:
+        Loop = owns_model_loop, Hist = owns_thread_history,
+        Jido = supports_jido_actions, Hook = supports_action_hooks,
+        Tool = supports_native_tools, CtxE = runs_context_engine
+    """)
+
+    Mix.shell().info("")
+  end
+
+  defp render_runtime_row(atom, module, :not_loaded) do
+    Mix.shell().info(
+      "  #{pad(":" <> Atom.to_string(atom), 12)} #{pad(inspect(module), 36)} #{pad("?", 6)} #{pad("?", 6)} #{pad("?", 6)} #{pad("?", 6)} #{pad("?", 6)} #{pad("?", 6)}"
+    )
+
+    Mix.shell().info("    (profile not loaded — module may not implement the behaviour)")
+  end
+
+  defp render_runtime_row(atom, module, profile) do
+    Mix.shell().info(
+      "  #{pad(":" <> Atom.to_string(atom), 12)} #{pad(inspect(module), 36)} " <>
+        "#{flag(profile.owns_model_loop, 6)} #{flag(profile.owns_thread_history, 6)} " <>
+        "#{flag(profile.supports_jido_actions, 6)} #{flag(profile.supports_action_hooks, 6)} " <>
+        "#{flag(profile.supports_native_tools, 6)} #{flag(profile.runs_context_engine, 6)}"
+    )
+
+    Mix.shell().info("    #{profile.display_name}")
+
+    if profile.unsupported_features != [] do
+      Mix.shell().info(
+        "    unsupported: #{Enum.map_join(profile.unsupported_features, ", ", &Atom.to_string/1)}"
+      )
+    end
+  end
+
+  defp print_runtimes_json(registry) do
+    data =
+      Enum.map(registry, fn {atom, module} ->
+        case apply(Arbor.AI.Runtime.Registry, :profile, [atom]) do
+          :not_loaded ->
+            %{runtime: atom, module: inspect(module), profile: nil}
+
+          profile ->
+            %{
+              runtime: atom,
+              module: inspect(module),
+              display_name: profile.display_name,
+              owns_model_loop: profile.owns_model_loop,
+              owns_thread_history: profile.owns_thread_history,
+              supports_jido_actions: profile.supports_jido_actions,
+              supports_action_hooks: profile.supports_action_hooks,
+              supports_native_tools: profile.supports_native_tools,
+              runs_context_engine: profile.runs_context_engine,
+              exposes_compaction_data: profile.exposes_compaction_data,
+              unsupported_features: profile.unsupported_features
+            }
+        end
+      end)
+
+    Mix.shell().info(Jason.encode!(data, pretty: true))
+  end
+
+  # ── Model resolution view (--model X [--fallback ...]) ───────────────
+
+  defp run_model_view(opts, _raw_args) do
+    unless Code.ensure_loaded?(Arbor.AI.Runtime.Dispatch) do
+      Mix.shell().error("Runtime.Dispatch not available. Is arbor_ai compiled?")
+      System.halt(1)
+    end
+
+    model = opts[:model]
+    fallback_entries = collect_fallback_overrides(opts)
+    runtime_override = parse_runtime_atom(opts[:runtime])
+
+    policy =
+      %{fallback_chain: fallback_entries}
+      |> maybe_put(:runtime, runtime_override)
+
+    results = apply(Arbor.AI.Runtime.Dispatch, :enumerate_chain, [model, policy])
+
+    if opts[:json] do
+      print_model_json(model, policy, results)
+    else
+      print_model_table(model, policy, results)
+    end
+  end
+
+  defp print_model_table(model, policy, results) do
+    Mix.shell().info("")
+    Mix.shell().info("  Selection chain for #{model}")
+    Mix.shell().info("  #{String.duplicate("=", 24 + String.length(model))}")
+
+    case Map.get(policy, :runtime) do
+      nil -> :ok
+      atom -> Mix.shell().info("  Policy runtime override: :#{atom}")
+    end
+
+    Mix.shell().info("")
+
+    Mix.shell().info(
+      "  #{pad("Step", 6)} #{pad("Override", 50)} #{pad("Model", 28)} #{pad("Provider", 14)} #{pad("Runtime", 9)} Result"
+    )
+
+    Mix.shell().info("  #{String.duplicate("-", 124)}")
+
+    results
+    |> Enum.with_index()
+    |> Enum.each(fn {entry, idx} ->
+      render_chain_row(idx, entry)
+    end)
+
+    Mix.shell().info("")
+  end
+
+  defp render_chain_row(idx, {:ok, attempt}) do
+    Mix.shell().info(
+      "  #{pad(to_string(idx), 6)} #{pad(label_for(attempt.override), 50)} #{pad(attempt.model_entry.canonical_id, 28)} " <>
+        "#{pad(Atom.to_string(attempt.selection.provider.id), 14)} " <>
+        "#{pad(":" <> Atom.to_string(attempt.selection.runtime), 9)} OK"
+    )
+  end
+
+  defp render_chain_row(idx, {:error, reason, marker}) do
+    Mix.shell().info(
+      "  #{pad(to_string(idx), 6)} #{pad(label_for(marker), 50)} #{pad("(not resolved)", 28)} " <>
+        "#{pad("-", 14)} #{pad("-", 9)} ERROR: #{inspect(reason)}"
+    )
+  end
+
+  defp label_for(:primary), do: "primary"
+  defp label_for(override) when is_map(override), do: inspect(override)
+
+  defp print_model_json(model, policy, results) do
+    data = %{
+      model: model,
+      policy: %{
+        runtime: Map.get(policy, :runtime),
+        fallback_chain: Map.get(policy, :fallback_chain, [])
+      },
+      attempts: Enum.map(results, &chain_entry_to_json/1)
+    }
+
+    Mix.shell().info(Jason.encode!(data, pretty: true))
+  end
+
+  defp chain_entry_to_json({:ok, attempt}) do
+    %{
+      status: "ok",
+      override: chain_marker_to_json(attempt.override),
+      model: attempt.model_entry.canonical_id,
+      provider: Atom.to_string(attempt.selection.provider.id),
+      runtime: attempt.selection.runtime
+    }
+  end
+
+  defp chain_entry_to_json({:error, reason, marker}) do
+    %{
+      status: "error",
+      override: chain_marker_to_json(marker),
+      reason: inspect(reason)
+    }
+  end
+
+  defp chain_marker_to_json(:primary), do: "primary"
+  defp chain_marker_to_json(override), do: stringify_override(override)
+
+  defp stringify_override(override) when is_map(override) do
+    Map.new(override, fn {k, v} -> {Atom.to_string(k), inspect(v)} end)
+  end
+
+  # ── Fallback / runtime arg parsing ───────────────────────────────────
+
+  # OptionParser with `switches: [fallback: :keep]` (from run/1) yields
+  # each --fallback value as a separate {:fallback, value} tuple in
+  # opts. Collect them, then parse each comma-separated key=value
+  # string into an override map.
+  defp collect_fallback_overrides(opts) do
+    for {:fallback, value} <- opts do
+      parse_override_string(value)
+    end
+    |> Enum.reject(&(&1 == %{}))
+  end
+
+  # "runtime=acp,model=claude-sonnet-4-6" → %{runtime: :acp, model: "claude-sonnet-4-6"}
+  defp parse_override_string(str) do
+    str
+    |> String.split(",", trim: true)
+    |> Enum.reduce(%{}, fn pair, acc ->
+      case String.split(pair, "=", parts: 2) do
+        [k, v] ->
+          k_atom = String.trim(k) |> safe_existing_atom()
+          v_trimmed = String.trim(v)
+          if k_atom, do: Map.put(acc, k_atom, coerce_override_value(k_atom, v_trimmed)), else: acc
+
+        _ ->
+          acc
+      end
+    end)
+  end
+
+  # Runtime / provider values are atoms in the policy; model stays binary.
+  defp coerce_override_value(:runtime, value), do: safe_existing_atom(value)
+  defp coerce_override_value(:provider, value), do: safe_existing_atom(value)
+  defp coerce_override_value(_, value), do: value
+
+  defp safe_existing_atom(value) when is_binary(value) do
+    String.to_existing_atom(value)
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp parse_runtime_atom(nil), do: nil
+  defp parse_runtime_atom(value) when is_binary(value), do: safe_existing_atom(value)
+
+  defp maybe_put(map, _k, nil), do: map
+  defp maybe_put(map, k, v), do: Map.put(map, k, v)
 
   # ── Default LLM Recommendation ──────────────────────────────────────
 

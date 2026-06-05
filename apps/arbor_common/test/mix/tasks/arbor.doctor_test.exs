@@ -61,4 +61,73 @@ defmodule Mix.Tasks.Arbor.DoctorTest do
       assert Code.ensure_loaded?(Arbor.LLM.ProviderCatalog)
     end
   end
+
+  describe "runtime-axis flags (Phase 4+ arbor.doctor extension)" do
+    @all_switches [
+      refresh: :boolean,
+      json: :boolean,
+      verbose: :boolean,
+      configure: :boolean,
+      runtimes: :boolean,
+      model: :string,
+      fallback: :keep,
+      runtime: :string
+    ]
+
+    test "--runtimes is a boolean flag" do
+      {opts, _, _} = OptionParser.parse(["--runtimes"], switches: @all_switches)
+      assert opts[:runtimes] == true
+    end
+
+    test "--model takes a string argument" do
+      {opts, _, _} =
+        OptionParser.parse(["--model", "claude-opus-4-6"], switches: @all_switches)
+
+      assert opts[:model] == "claude-opus-4-6"
+    end
+
+    test "--fallback can be repeated; each value collected separately" do
+      {opts, _, _} =
+        OptionParser.parse(
+          [
+            "--fallback",
+            "runtime=acp",
+            "--fallback",
+            "model=claude-sonnet-4-6,provider=anthropic"
+          ],
+          switches: @all_switches
+        )
+
+      values = for {:fallback, v} <- opts, do: v
+      assert values == ["runtime=acp", "model=claude-sonnet-4-6,provider=anthropic"]
+    end
+
+    test "--runtime takes a string argument" do
+      {opts, _, _} =
+        OptionParser.parse(["--runtime", "acp"], switches: @all_switches)
+
+      assert opts[:runtime] == "acp"
+    end
+
+    test "all new flags compose with each other" do
+      {opts, _, _} =
+        OptionParser.parse(
+          [
+            "--model",
+            "claude-opus-4-6",
+            "--runtime",
+            "arbor",
+            "--fallback",
+            "runtime=acp",
+            "--json"
+          ],
+          switches: @all_switches
+        )
+
+      assert opts[:model] == "claude-opus-4-6"
+      assert opts[:runtime] == "arbor"
+      assert opts[:json] == true
+      assert [_] = for({:fallback, v} <- opts, do: v)
+    end
+  end
 end

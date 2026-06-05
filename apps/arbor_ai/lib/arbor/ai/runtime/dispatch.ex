@@ -261,6 +261,77 @@ defmodule Arbor.AI.Runtime.Dispatch do
     end
   end
 
+  @doc """
+  Enumerate the full attempt chain (primary + each fallback override)
+  without dispatching any requests.
+
+  Walks `policy.fallback_chain` (if present) and resolves each entry's
+  effective `{model_entry, selection}` against `choose/3` semantics.
+  Returns a list of attempts in execution order — the primary first,
+  then each fallback entry. Each result carries `:override` to indicate
+  which chain entry produced it (`:primary` for the initial attempt).
+
+  Useful for `mix arbor.doctor --model X --fallback ...` and any
+  operator-facing introspection that wants to display the full path
+  ladder. Does NOT emit `[:arbor, :runtime, :selected]` telemetry —
+  enumeration is a preview, not a dispatch, and burning telemetry
+  per row would muddy the per-turn signal.
+
+  Failing entries are still included in the result list (as
+  `{:error, reason, override}`) so callers can render rows like
+  "fallback step 2: selection_failed — no_provider_supports_runtime".
+  """
+  @type chain_entry ::
+          {:ok,
+           %{
+             model_entry: ModelEntry.t(),
+             selection: Selector.selection(),
+             override: map() | :primary,
+             request: Request.t()
+           }}
+          | {:error, term(), map() | :primary}
+
+  @spec enumerate_chain(Request.t() | String.t(), Selector.policy()) :: [chain_entry()]
+  def enumerate_chain(request_or_model_id, policy \\ %{})
+
+  def enumerate_chain(%Request{} = request, policy) do
+    fallback_chain = Map.get(policy, :fallback_chain, [])
+    base_policy = Map.delete(policy, :fallback_chain)
+
+    primary = preview_attempt(request, base_policy, :primary)
+
+    rest =
+      Enum.map(fallback_chain, fn override ->
+        attempt_request = apply_request_override(request, override)
+        attempt_policy = apply_policy_override(base_policy, override)
+        preview_attempt(attempt_request, attempt_policy, override)
+      end)
+
+    [primary | rest]
+  end
+
+  def enumerate_chain(model_id, policy) when is_binary(model_id) do
+    enumerate_chain(%Request{model: model_id, messages: []}, policy)
+  end
+
+  defp preview_attempt(%Request{} = request, policy, marker) do
+    model_entry = ModelProfile.entry(request.model)
+
+    case select(model_entry, policy) do
+      {:ok, selection} ->
+        {:ok,
+         %{
+           model_entry: model_entry,
+           selection: selection,
+           override: marker,
+           request: request
+         }}
+
+      {:error, reason} ->
+        {:error, reason, marker}
+    end
+  end
+
   # ---- internals ----
 
   defp select(%ModelEntry{} = entry, policy) do
