@@ -13,9 +13,13 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   alias Arbor.LLM.Client
 
+  alias Arbor.LLM.Dispatcher
+
   alias Arbor.LLM.Message
 
   alias Arbor.LLM.Request
+
+  alias Arbor.LLM.StreamEvent
 
   alias Arbor.LLM.ToolLoop
   import Arbor.Orchestrator.Handlers.Helpers
@@ -516,28 +520,48 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     end
   end
 
+  # Phase 4+ (B2): route through Dispatcher.dispatch so the runtime
+  # axis selection chain + fallback chain from c12bf750 actually fire
+  # for heartbeat + turn LLM calls. Direct Client.complete used to skip
+  # all of that (Client.resolve_adapter only reads request.provider, not
+  # request.runtime, and there's no selection/fallback layer in Client).
   defp call_llm_direct(client, request, call_opts, nil) do
-    # Return the full response struct (not just text) so the caller can read
-    # `response.usage`. PipelineResponse.normalize/1 accepts both strings and
-    # structs, so downstream code keeps working.
-    Client.complete(client, request, call_opts)
+    dispatch_opts = [{:client, client} | call_opts]
+    Dispatcher.dispatch(request, dispatch_opts)
   end
 
   defp call_llm_direct(client, request, call_opts, on_stream) do
-    case Client.stream(client, request, call_opts) do
-      {:ok, events} ->
-        events =
-          Stream.each(events, fn event -> on_stream.(event) end)
+    # Bridge the legacy single-callback on_stream (which receives raw
+    # %StreamEvent{}) to Runtime.callbacks shape. Each typed callback
+    # synthesizes a StreamEvent the legacy consumer expects. Events that
+    # Runtime.Arbor doesn't dispatch (:step_finish, :tool_result) are
+    # not forwarded — none of our current on_stream consumers depend on
+    # those, and the conversion can extend if a real need surfaces.
+    callbacks = stream_event_callbacks(on_stream)
 
-        Client.collect_stream(events)
+    dispatch_opts =
+      call_opts
+      |> Keyword.put(:client, client)
+      |> Keyword.put(:callbacks, callbacks)
 
-      {:error, {:stream_not_supported, _}} ->
-        # Fall back to non-streaming for providers that don't support it
-        call_llm_direct(client, request, call_opts, nil)
+    Dispatcher.dispatch(request, dispatch_opts)
+  end
 
-      {:error, _} = error ->
-        error
-    end
+  defp stream_event_callbacks(on_stream) when is_function(on_stream, 1) do
+    %{
+      on_text_delta: fn chunk ->
+        on_stream.(%StreamEvent{type: :delta, data: %{"text" => chunk}})
+      end,
+      on_thinking_delta: fn chunk ->
+        on_stream.(%StreamEvent{type: :delta, data: %{"thinking" => chunk}})
+      end,
+      on_tool_call: fn data ->
+        on_stream.(%StreamEvent{type: :tool_call, data: data})
+      end,
+      on_usage: fn usage ->
+        on_stream.(%StreamEvent{type: :finish, data: %{usage: usage}})
+      end
+    }
   end
 
   # Resolve which tools and executor to use based on node attributes.
