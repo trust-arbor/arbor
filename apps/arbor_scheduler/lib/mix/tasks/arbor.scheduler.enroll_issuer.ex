@@ -14,24 +14,27 @@ defmodule Mix.Tasks.Arbor.Scheduler.EnrollIssuer do
 
       mix arbor.scheduler.enroll_issuer \\
         --issuer-id agent_30b455a27f7f4e02ef291fd9f7862677f731a1f8b08c997f5fb8ad430d594b6e \\
-        --envelope-uri "arbor://fs/write/reports/**" \\
+        --envelope-uri "arbor://fs/read/Users/azmaveth/.arbor/reports/**" \\
+        --envelope-uri "arbor://fs/write/Users/azmaveth/.arbor/reports/**" \\
         --reason "primary author for scheduler-internal pipelines"
 
   ## Options
 
     * `--issuer-id <id>` (required) — agent_id of the identity to enroll
-    * `--envelope-uri <uri>` (required) — resource_uri pattern bounding what
-      caps this issuer can sign. Anything outside this envelope will be
-      rejected at `.caps.json` load time.
+    * `--envelope-uri <uri>` (required, repeatable) — resource_uri pattern
+      bounding what caps this issuer can sign. Pass `--envelope-uri`
+      multiple times to authorize the issuer for several non-overlapping
+      patterns (e.g. read + write of distinct subtrees). A signed cap
+      passes verification if it fits within AT LEAST ONE envelope.
     * `--reason <text>` (optional) — human-readable note recorded with the
       enrollment for audit
 
   ## Behavior
 
-  Builds a `Capability` with the supplied envelope_uri (no constraints,
-  no expiry) and registers it in IssuerRegistry. Fails if the identity
-  isn't registered, the envelope_uri is malformed, or the issuer is
-  already enrolled.
+  Builds a `Capability` for each `--envelope-uri` (no constraints, no
+  expiry — the bound is on URI space) and registers them as a set in
+  IssuerRegistry. Fails if the identity isn't registered, no envelope
+  URIs are supplied, or the issuer is already enrolled.
 
   ## Revocation
 
@@ -52,18 +55,21 @@ defmodule Mix.Tasks.Arbor.Scheduler.EnrollIssuer do
 
     {opts, _positional, _} =
       OptionParser.parse(args,
-        strict: [issuer_id: :string, envelope_uri: :string, reason: :string],
+        # `keep` lets `--envelope-uri` appear multiple times, returning
+        # one keyword entry per occurrence
+        strict: [issuer_id: :string, envelope_uri: :keep, reason: :string],
         aliases: [i: :issuer_id, e: :envelope_uri, r: :reason]
       )
 
     with {:ok, issuer_id} <- fetch_required(opts, :issuer_id),
-         {:ok, envelope_uri} <- fetch_required(opts, :envelope_uri),
-         {:ok, envelope} <- build_envelope(issuer_id, envelope_uri),
-         :ok <- enroll(issuer_id, envelope, opts[:reason]) do
+         {:ok, envelope_uris} <- fetch_envelope_uris(opts),
+         {:ok, envelopes} <- build_envelopes(issuer_id, envelope_uris),
+         :ok <- enroll(issuer_id, envelopes, opts[:reason]) do
       Mix.shell().info("Enrolled issuer:")
-      Mix.shell().info("  issuer_id:    #{issuer_id}")
-      Mix.shell().info("  envelope_uri: #{envelope_uri}")
-      Mix.shell().info("  reason:       #{opts[:reason] || "(none)"}")
+      Mix.shell().info("  issuer_id:     #{issuer_id}")
+      Mix.shell().info("  envelopes:")
+      for uri <- envelope_uris, do: Mix.shell().info("    - #{uri}")
+      Mix.shell().info("  reason:        #{opts[:reason] || "(none)"}")
     else
       {:error, reason} -> abort(reason)
     end
@@ -76,17 +82,34 @@ defmodule Mix.Tasks.Arbor.Scheduler.EnrollIssuer do
     end
   end
 
-  defp build_envelope(issuer_id, envelope_uri) do
-    # principal_id on the envelope cap is the issuer themselves —
-    # the envelope is "what this issuer is allowed to sign for."
-    # constraints/expiry are intentionally empty: the bound is on URI
-    # space, not on rate or time.
-    Capability.new(resource_uri: envelope_uri, principal_id: issuer_id)
+  defp fetch_envelope_uris(opts) do
+    case Keyword.get_values(opts, :envelope_uri) do
+      [] -> {:error, {:missing_required_option, :envelope_uri}}
+      uris -> {:ok, uris}
+    end
   end
 
-  defp enroll(issuer_id, envelope, reason) do
+  defp build_envelopes(issuer_id, uris) do
+    uris
+    |> Enum.reduce_while({:ok, []}, fn uri, {:ok, acc} ->
+      # principal_id on the envelope cap is the issuer themselves —
+      # the envelope is "what this issuer is allowed to sign for."
+      # constraints/expiry are intentionally empty: the bound is on URI
+      # space, not on rate or time.
+      case Capability.new(resource_uri: uri, principal_id: issuer_id) do
+        {:ok, cap} -> {:cont, {:ok, [cap | acc]}}
+        {:error, reason} -> {:halt, {:error, {:invalid_envelope_uri, uri, reason}}}
+      end
+    end)
+    |> case do
+      {:ok, caps} -> {:ok, Enum.reverse(caps)}
+      err -> err
+    end
+  end
+
+  defp enroll(issuer_id, envelopes, reason) do
     opts = if reason, do: [reason: reason], else: []
-    IssuerRegistry.register(issuer_id, envelope, opts)
+    IssuerRegistry.register(issuer_id, envelopes, opts)
   end
 
   defp abort(reason) do

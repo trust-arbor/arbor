@@ -54,7 +54,8 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
 
       entries = IssuerRegistry.list()
       entry = Enum.find(entries, &(&1.issuer_id == identity.agent_id))
-      assert entry.max_envelope_cap.resource_uri == @envelope_uri
+      assert [env] = entry.max_envelope_caps
+      assert env.resource_uri == @envelope_uri
       assert entry.status == :active
       assert entry.status_reason == "test enrollment"
     end
@@ -71,6 +72,25 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       assert_received {:mix_shell, :error, [msg]}
       assert msg =~ "missing_required_option"
       assert msg =~ "envelope_uri"
+    end
+
+    test "accepts multiple --envelope-uri flags", %{identity: identity} do
+      Mix.Tasks.Arbor.Scheduler.EnrollIssuer.run([
+        "--issuer-id",
+        identity.agent_id,
+        "--envelope-uri",
+        "arbor://fs/read/reports/upstream-deps/**",
+        "--envelope-uri",
+        "arbor://fs/write/reports/upstream-deps-summary/**"
+      ])
+
+      entries = IssuerRegistry.list()
+      entry = Enum.find(entries, &(&1.issuer_id == identity.agent_id))
+      assert length(entry.max_envelope_caps) == 2
+
+      uris = Enum.map(entry.max_envelope_caps, & &1.resource_uri)
+      assert "arbor://fs/read/reports/upstream-deps/**" in uris
+      assert "arbor://fs/write/reports/upstream-deps-summary/**" in uris
     end
 
     test "fails for unregistered identity" do
