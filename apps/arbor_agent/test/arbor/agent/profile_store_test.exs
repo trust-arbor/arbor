@@ -274,6 +274,76 @@ defmodule Arbor.Agent.ProfileStoreTest do
     end
   end
 
+  describe "put_model_config_value/3" do
+    test "writes a single field under metadata[:last_model_config]" do
+      profile = make_profile("agent_pmcv_1")
+      :ok = ProfileStore.store_profile(profile)
+
+      assert :ok = ProfileStore.put_model_config_value("agent_pmcv_1", :runtime, :acp)
+
+      {:ok, loaded} = ProfileStore.load_profile("agent_pmcv_1")
+      assert get_in(loaded.metadata, [:last_model_config, :runtime]) == :acp
+    end
+
+    test "preserves other fields under metadata[:last_model_config]" do
+      profile =
+        make_profile("agent_pmcv_2",
+          metadata: %{last_model_config: %{model: "original-model", provider: :anthropic}}
+        )
+
+      :ok = ProfileStore.store_profile(profile)
+      assert :ok = ProfileStore.put_model_config_value("agent_pmcv_2", :runtime, :acp)
+
+      {:ok, loaded} = ProfileStore.load_profile("agent_pmcv_2")
+      lmc = loaded.metadata.last_model_config
+      assert lmc.runtime == :acp
+      assert lmc.model == "original-model"
+      assert lmc.provider == :anthropic
+    end
+
+    test "preserves metadata fields outside last_model_config" do
+      profile =
+        make_profile("agent_pmcv_3",
+          metadata: %{some_other_key: "preserved", last_model_config: %{model: "m"}}
+        )
+
+      :ok = ProfileStore.store_profile(profile)
+      assert :ok = ProfileStore.put_model_config_value("agent_pmcv_3", :runtime, :acp)
+
+      {:ok, loaded} = ProfileStore.load_profile("agent_pmcv_3")
+      assert loaded.metadata.some_other_key == "preserved"
+      assert loaded.metadata.last_model_config.runtime == :acp
+      assert loaded.metadata.last_model_config.model == "m"
+    end
+
+    test "creates last_model_config when metadata had no such key" do
+      profile = make_profile("agent_pmcv_4", metadata: %{unrelated: "field"})
+      :ok = ProfileStore.store_profile(profile)
+
+      assert :ok = ProfileStore.put_model_config_value("agent_pmcv_4", :model, "new-model")
+
+      {:ok, loaded} = ProfileStore.load_profile("agent_pmcv_4")
+      assert loaded.metadata.last_model_config == %{model: "new-model"}
+      assert loaded.metadata.unrelated == "field"
+    end
+
+    test "returns {:error, :not_found} for unknown agent" do
+      assert {:error, :not_found} =
+               ProfileStore.put_model_config_value("agent_pmcv_does_not_exist", :model, "x")
+    end
+
+    test "fallback_chain (list) round-trips correctly" do
+      profile = make_profile("agent_pmcv_5")
+      :ok = ProfileStore.store_profile(profile)
+
+      chain = [%{runtime: :acp}, %{model: "claude-sonnet-4-6"}]
+      assert :ok = ProfileStore.put_model_config_value("agent_pmcv_5", :fallback_chain, chain)
+
+      {:ok, loaded} = ProfileStore.load_profile("agent_pmcv_5")
+      assert loaded.metadata.last_model_config.fallback_chain == chain
+    end
+  end
+
   # Helper: load directly from store (no JSON fallback)
   defp load_from_store_only(agent_id) do
     case BufferedStore.get(agent_id, name: @store_name) do

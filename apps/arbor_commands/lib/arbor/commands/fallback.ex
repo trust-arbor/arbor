@@ -51,9 +51,7 @@ defmodule Arbor.Commands.Fallback do
 
   @behaviour Arbor.Common.Command
 
-  require Logger
-
-  alias Arbor.Agent.{Lifecycle, ProfileStore}
+  alias Arbor.Commands.Helpers
   alias Arbor.Contracts.Commands.{Context, Result}
   alias Arbor.Orchestrator.Session
 
@@ -210,36 +208,9 @@ defmodule Arbor.Commands.Fallback do
     end
   end
 
-  # Best-effort persistence. The session edit is the source of truth for
-  # this turn; persistence is for the next restart. If persistence fails
-  # (profile store down, etc.) the session still has the new chain.
-  defp persist_to_profile(%Context{agent_id: agent_id}, chain) when is_binary(agent_id) do
-    case Lifecycle.restore(agent_id) do
-      {:ok, profile} ->
-        last_config = get_in(profile.metadata || %{}, [:last_model_config]) || %{}
-        new_last_config = Map.put(last_config, :fallback_chain, chain)
-        updated_metadata = Map.put(profile.metadata || %{}, :last_model_config, new_last_config)
-        updated_profile = %{profile | metadata: updated_metadata}
-
-        try do
-          ProfileStore.store_profile(updated_profile)
-        rescue
-          e ->
-            Logger.warning(
-              "[Fallback] persist failed for #{agent_id}: #{Exception.message(e)} — " <>
-                "live session updated but chain may not survive restart"
-            )
-        end
-
-      {:error, reason} ->
-        Logger.warning(
-          "[Fallback] profile lookup failed for #{agent_id}: #{inspect(reason)} — " <>
-            "chain not persisted"
-        )
-    end
+  defp persist_to_profile(%Context{agent_id: agent_id}, chain) do
+    Helpers.persist_model_config_field(agent_id, :fallback_chain, chain, "Fallback")
   end
-
-  defp persist_to_profile(_ctx, _chain), do: :ok
 
   # ── Output rendering ────────────────────────────────────────────────
 
