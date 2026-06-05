@@ -51,6 +51,34 @@ defmodule Arbor.Agent.ProfileStore do
   end
 
   @doc """
+  Update a single field under `profile.metadata[:last_model_config]`,
+  preserving the rest of the metadata.
+
+  Used by the `/model`, `/runtime`, and `/fallback` slash commands to
+  persist a per-session edit to the agent's profile so it survives
+  restarts. `Lifecycle.resolve_agent_runtime/2` and
+  `resolve_fallback_chain/2` read from this same `last_model_config`
+  map at create/resume time.
+
+  Returns `:ok` on success, `{:error, reason}` if the profile isn't
+  found or the store is unavailable. Callers typically log warnings on
+  failure rather than failing the user-visible command — the live
+  session edit is the source of truth for the current turn.
+  """
+  @spec put_model_config_value(String.t(), atom(), term()) :: :ok | {:error, term()}
+  def put_model_config_value(agent_id, key, value)
+      when is_binary(agent_id) and is_atom(key) do
+    with {:ok, profile} <- load_profile(agent_id) do
+      metadata = profile.metadata || %{}
+      last_config = Map.get(metadata, :last_model_config) || %{}
+      new_last_config = Map.put(last_config, key, value)
+      updated_metadata = Map.put(metadata, :last_model_config, new_last_config)
+      updated_profile = %{profile | metadata: updated_metadata}
+      store_profile(updated_profile)
+    end
+  end
+
+  @doc """
   Load an agent profile by ID.
 
   Tries the store first, falls back to legacy JSON file. On fallback hit,

@@ -24,6 +24,7 @@ defmodule Arbor.Commands.Runtime do
 
   @behaviour Arbor.Common.Command
 
+  alias Arbor.Commands.Helpers
   alias Arbor.Contracts.Commands.{Context, Result}
   alias Arbor.Orchestrator.Session
 
@@ -62,7 +63,7 @@ defmodule Arbor.Commands.Runtime do
     end
   end
 
-  defp apply_runtime(runtime, %Context{session_pid: pid}) when is_pid(pid) do
+  defp apply_runtime(runtime, %Context{session_pid: pid} = ctx) when is_pid(pid) do
     cond do
       not Process.alive?(pid) ->
         {:ok, Result.error("Cannot switch runtime: session process is no longer alive.")}
@@ -70,6 +71,8 @@ defmodule Arbor.Commands.Runtime do
       true ->
         case safe_call(fn -> Session.set_runtime(pid, runtime) end) do
           {:ok, _} ->
+            Helpers.persist_model_config_field(ctx.agent_id, :runtime, runtime, "Runtime")
+
             {:ok,
              Result.ok(
                "Runtime set to #{runtime} (effective on next turn).",

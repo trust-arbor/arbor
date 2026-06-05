@@ -22,6 +22,7 @@ defmodule Arbor.Commands.Model do
   """
   @behaviour Arbor.Common.Command
 
+  alias Arbor.Commands.Helpers
   alias Arbor.Contracts.Commands.{Context, Result}
   alias Arbor.Orchestrator.Session
 
@@ -79,13 +80,13 @@ defmodule Arbor.Commands.Model do
     end
   end
 
-  defp apply_model(model_spec, opts, %Context{session_pid: pid}) when is_pid(pid) do
+  defp apply_model(model_spec, opts, %Context{session_pid: pid} = ctx) when is_pid(pid) do
     cond do
       not Process.alive?(pid) ->
         {:ok, Result.error("Cannot switch model: session process is no longer alive.")}
 
       true ->
-        run_model_switch(pid, model_spec, opts)
+        run_model_switch(pid, model_spec, opts, ctx)
     end
   end
 
@@ -93,9 +94,11 @@ defmodule Arbor.Commands.Model do
     {:ok, Result.error("Cannot switch model: session pid missing from context.")}
   end
 
-  defp run_model_switch(pid, model_spec, opts) do
+  defp run_model_switch(pid, model_spec, opts, ctx) do
     with {:ok, _} <- safe_call(fn -> Session.set_model(pid, model_spec) end),
-         {:ok, runtime_effect} <- maybe_set_runtime(pid, opts) do
+         {:ok, runtime_effect} <- maybe_set_runtime(pid, opts, ctx) do
+      Helpers.persist_model_config_field(ctx.agent_id, :model, model_spec, "Model")
+
       effects = [model_changed: model_spec] ++ runtime_effect
       text = build_success_text(model_spec, opts)
       {:ok, Result.ok(text, effects)}
@@ -109,15 +112,19 @@ defmodule Arbor.Commands.Model do
     end
   end
 
-  defp maybe_set_runtime(pid, opts) do
+  defp maybe_set_runtime(pid, opts, ctx) do
     case Keyword.get(opts, :runtime) do
       nil ->
         {:ok, []}
 
       runtime ->
         case safe_call(fn -> Session.set_runtime(pid, runtime) end) do
-          {:ok, _} -> {:ok, [runtime_changed: runtime]}
-          {:error, reason} -> {:error, :runtime, reason}
+          {:ok, _} ->
+            Helpers.persist_model_config_field(ctx.agent_id, :runtime, runtime, "Model")
+            {:ok, [runtime_changed: runtime]}
+
+          {:error, reason} ->
+            {:error, :runtime, reason}
         end
     end
   end
