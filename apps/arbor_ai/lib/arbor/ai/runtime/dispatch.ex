@@ -40,6 +40,7 @@ defmodule Arbor.AI.Runtime.Dispatch do
   alias Arbor.Common.ModelProfile
   alias Arbor.Contracts.LLM.ModelEntry
   alias Arbor.LLM.Client
+  alias Arbor.LLM.FallbackLoop
   alias Arbor.LLM.Request
   alias Arbor.LLM.Response
 
@@ -113,16 +114,28 @@ defmodule Arbor.AI.Runtime.Dispatch do
     fallback_chain = Map.get(policy, :fallback_chain, [])
     base_policy = Map.delete(policy, :fallback_chain)
 
-    case do_dispatch_once(request, base_policy, opts) do
-      {:ok, _} = ok ->
-        ok
+    initial_attempt = %{request: request, policy: base_policy, opts: opts}
 
-      {:error, reason} = error ->
-        if fallback_chain != [] and fallback_eligible?(reason) do
-          try_fallbacks(request, base_policy, fallback_chain, opts, error)
-        else
-          error
-        end
+    FallbackLoop.run(initial_attempt, fallback_chain,
+      do_call: &dispatch_attempt/1,
+      apply_override: &apply_dispatch_override/2,
+      eligible?: &fallback_eligible?/1,
+      on_fallback: &emit_fallback/3
+    )
+  end
+
+  defp dispatch_attempt(%{request: request, policy: policy, opts: opts}) do
+    do_dispatch_once(request, policy, opts)
+  end
+
+  defp apply_dispatch_override(%{request: request, policy: policy} = attempt, override) do
+    new_request = apply_request_override(request, override)
+    new_policy = apply_policy_override(policy, override)
+
+    if new_request == request and new_policy == policy do
+      :no_change
+    else
+      {:ok, %{attempt | request: new_request, policy: new_policy}}
     end
   end
 
@@ -143,32 +156,6 @@ defmodule Arbor.AI.Runtime.Dispatch do
       with {:ok, prepared} <- runtime_module.prepare(rewritten, runtime_opts) do
         runtime_module.execute(prepared, callbacks, runtime_opts)
       end
-    end
-  end
-
-  # Walk the fallback chain. Each entry is applied as a request/policy
-  # override on top of the originals (NOT on the previous attempt) — that
-  # keeps each entry's interpretation independent of which earlier entries
-  # ran. Stops at the first success, or on a non-eligible error, or when
-  # the chain is exhausted (returns the most recent error).
-  defp try_fallbacks(_request, _base_policy, [], _opts, last_error), do: last_error
-
-  defp try_fallbacks(request, base_policy, [override | rest], opts, last_error) do
-    emit_fallback(request, last_error, override)
-
-    attempt_request = apply_request_override(request, override)
-    attempt_policy = apply_policy_override(base_policy, override)
-
-    case do_dispatch_once(attempt_request, attempt_policy, opts) do
-      {:ok, _} = ok ->
-        ok
-
-      {:error, reason} = error ->
-        if rest != [] and fallback_eligible?(reason) do
-          try_fallbacks(request, base_policy, rest, opts, error)
-        else
-          error
-        end
     end
   end
 
@@ -225,11 +212,13 @@ defmodule Arbor.AI.Runtime.Dispatch do
   defp maybe_put_policy(policy, _key, nil), do: policy
   defp maybe_put_policy(policy, key, value), do: Map.put(policy, key, value)
 
-  defp emit_fallback(request, from_error, override) do
+  # FallbackLoop's on_fallback signature: (attempt, override, last_error).
+  # For Dispatch, attempt is `%{request: ..., policy: ..., opts: ...}`.
+  defp emit_fallback(%{request: request}, override, last_error) do
     metadata = %{
       original_model: request.model,
       override: override,
-      from_error: inspect_error(from_error)
+      from_error: inspect_error(last_error)
     }
 
     safe_telemetry([:arbor, :runtime, :fallback], %{count: 1}, metadata)

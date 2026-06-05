@@ -15,6 +15,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   alias Arbor.LLM.Dispatcher
 
+  alias Arbor.LLM.FallbackLoop
+
   alias Arbor.LLM.Message
 
   alias Arbor.LLM.Request
@@ -536,50 +538,21 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   # Exposed (@doc false) so tests can pin the tool-loop fallback shape
   # without spinning up a real Client + ToolLoop. Production callers
   # should not depend on this — it's adapter-internal.
-  def call_with_tool_loop_fallback(do_call, request, []) do
-    do_call.(request)
-  end
-
   def call_with_tool_loop_fallback(do_call, request, chain) do
-    case do_call.(request) do
-      {:ok, _} = ok ->
-        ok
-
-      {:error, reason} = error ->
-        if Arbor.LLM.Retry.fallback_eligible?(reason) do
-          try_tool_loop_fallbacks(do_call, request, chain, error)
-        else
-          error
-        end
-    end
+    FallbackLoop.run(request, chain,
+      do_call: do_call,
+      apply_override: &apply_tool_loop_override_with_warning/2,
+      on_fallback: &log_tool_loop_fallback/3
+    )
   end
 
-  defp try_tool_loop_fallbacks(_do_call, _orig, [], last_error), do: last_error
-
-  defp try_tool_loop_fallbacks(do_call, orig_request, [override | rest], last_error) do
+  defp apply_tool_loop_override_with_warning(request, override) do
     override = warn_if_runtime_override(override)
+    apply_tool_loop_override(request, override)
+  end
 
-    case apply_tool_loop_override(orig_request, override) do
-      :no_change ->
-        # Entry doesn't change provider or model — nothing to retry
-        # against. Move on rather than spinning on identical attempts.
-        try_tool_loop_fallbacks(do_call, orig_request, rest, last_error)
-
-      {:ok, attempt_request} ->
-        Logger.info("[LlmHandler] tool-loop fallback: applying override #{inspect(override)}")
-
-        case do_call.(attempt_request) do
-          {:ok, _} = ok ->
-            ok
-
-          {:error, reason} = error ->
-            if rest != [] and Arbor.LLM.Retry.fallback_eligible?(reason) do
-              try_tool_loop_fallbacks(do_call, orig_request, rest, error)
-            else
-              error
-            end
-        end
-    end
+  defp log_tool_loop_fallback(_initial, override, _last_error) do
+    Logger.info("[LlmHandler] tool-loop fallback: applying override #{inspect(override)}")
   end
 
   defp warn_if_runtime_override(%{runtime: runtime} = override) do
