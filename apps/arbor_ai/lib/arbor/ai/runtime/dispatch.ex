@@ -1,4 +1,6 @@
 defmodule Arbor.AI.Runtime.Dispatch do
+  @behaviour Arbor.LLM.Dispatcher
+
   @moduledoc """
   High-level dispatch surface that bridges model resolution → runtime
   selection → LLM call.
@@ -104,6 +106,7 @@ defmodule Arbor.AI.Runtime.Dispatch do
   The `:client` opt is only consulted when the chosen runtime is
   `:arbor` — it's a hint passed through to `Runtime.Arbor`.
   """
+  @impl Arbor.LLM.Dispatcher
   @spec dispatch(Request.t(), dispatch_opts()) :: {:ok, Response.t()} | {:error, term()}
   def dispatch(%Request{} = request, opts \\ []) do
     policy = Keyword.get(opts, :policy, %{})
