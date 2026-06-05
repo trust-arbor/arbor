@@ -162,7 +162,7 @@ Duration parsing converts to milliseconds: `ms` (1x), `s` (1000x), `m` (60000x),
 | `goal`                    | String   | `""`      | Pipeline goal. Exposed as `$goal` in templates, mirrored to context as `graph.goal`. |
 | `label`                   | String   | `""`      | Display name for visualization. |
 | `model_stylesheet`        | String   | `""`      | CSS-like stylesheet for per-node LLM defaults. See Section 11. |
-| `default_max_retry`       | Integer  | `50`      | Global retry ceiling for nodes that omit `max_retries`. |
+| `default_max_retries`     | Integer  | `0`       | Default additional retries for nodes that omit `max_retries`. |
 | `retry_target`            | String   | `""`      | Node to jump to when exit is reached with unsatisfied goal gates. |
 | `fallback_retry_target`   | String   | `""`      | Secondary retry target. |
 | `default_fidelity`        | String   | `""`      | Default context fidelity mode. See Section 7.4. |
@@ -1093,7 +1093,7 @@ When the `SignalEmit` middleware is active, events are also emitted as Arbor sig
 | `goal`                   | String   | `""`     | 2.6     |
 | `label`                  | String   | `""`     | 2.6     |
 | `model_stylesheet`       | String   | `""`     | 11      |
-| `default_max_retry`      | Integer  | `50`     | 3.4     |
+| `default_max_retries`    | Integer  | `0`      | 3.4     |
 | `retry_target`           | String   | `""`     | 3.5     |
 | `fallback_retry_target`  | String   | `""`     | 3.5     |
 | `default_fidelity`       | String   | `""`     | 7.4     |
