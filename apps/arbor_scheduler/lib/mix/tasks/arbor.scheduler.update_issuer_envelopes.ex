@@ -49,11 +49,17 @@ defmodule Mix.Tasks.Arbor.Scheduler.UpdateIssuerEnvelopes do
   ## Errors
 
   Fails closed on:
-    - issuer not enrolled (`:not_found`)
-    - issuer revoked (`:revoked`) — revoked issuers can't be updated;
-      explicit re-enroll required (deliberate friction)
-    - no `--envelope-uri` flags supplied (`:empty_envelopes`)
-    - malformed envelope URI (`:invalid_envelope_uri`)
+    - issuer not enrolled (`:not_found`, from `IssuerRegistry`)
+    - issuer revoked (`:revoked`, from `IssuerRegistry`) — revoked
+      issuers can't be updated; explicit re-enroll required (deliberate
+      friction)
+    - no `--envelope-uri` flags supplied
+      (`{:missing_required_option, :envelope_uri}`, from this task —
+      the CLI flag is missing, distinct from `IssuerRegistry`'s
+      `:empty_envelopes` which fires if the registry receives an empty
+      list at the API layer)
+    - malformed envelope URI (`{:invalid_envelope_uri, uri, reason}`,
+      from this task)
   """
 
   use Mix.Task

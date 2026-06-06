@@ -323,10 +323,15 @@ defmodule Arbor.Security.IssuerRegistry do
             {:reply, {:error, :revoked}, state}
 
           entry ->
+            # Do NOT bump status_changed_at — status remains :active.
+            # That field tracks when STATUS changed (active → revoked,
+            # etc.), not when envelopes were updated. Bumping it here
+            # confuses audit consumers who use it to detect status
+            # transitions. Surfaced by kimi-k2.6:cloud reviewing this
+            # code 2026-06-05.
             updated = %{
               entry
               | max_envelope_caps: envelope_caps,
-                status_changed_at: DateTime.utc_now(),
                 status_reason: Keyword.get(opts, :reason, entry.status_reason)
             }
 

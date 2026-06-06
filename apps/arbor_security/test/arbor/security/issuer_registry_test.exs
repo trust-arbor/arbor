@@ -469,10 +469,14 @@ defmodule Arbor.Security.IssuerRegistryTest do
                IssuerRegistry.update_envelopes(identity.agent_id, [:not_a_cap])
     end
 
-    test "captures reason in status_reason and bumps status_changed_at", %{
+    test "captures reason in status_reason without bumping status_changed_at", %{
       identity: identity,
       envelope: envelope
     } do
+      # `status_changed_at` tracks when STATUS changed (active → revoked,
+      # etc.), not when envelopes were updated. Bumping it on an
+      # envelope-only update would confuse audit consumers using it to
+      # detect status transitions.
       :ok = IssuerRegistry.register(identity.agent_id, envelope, reason: "original enrollment")
 
       original_entry = Enum.find(IssuerRegistry.list(), &(&1.issuer_id == identity.agent_id))
@@ -493,9 +497,13 @@ defmodule Arbor.Security.IssuerRegistryTest do
         )
 
       updated_entry = Enum.find(IssuerRegistry.list(), &(&1.issuer_id == identity.agent_id))
+      # Reason gets refreshed — that's an audit-helpful field tracking
+      # the latest reason for any change.
       assert updated_entry.status_reason == "expanding to cover code reviews"
-      assert %DateTime{} = updated_entry.status_changed_at
-      # Status itself stays :active — this isn't a revoke.
+      # Regression: status_changed_at MUST stay nil since the status
+      # itself didn't change. Locking this in after a kimi-k2.6:cloud
+      # review on 2026-06-05 flagged the original implementation.
+      assert updated_entry.status_changed_at == nil
       assert updated_entry.status == :active
     end
   end
