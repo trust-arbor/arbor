@@ -444,9 +444,20 @@ defmodule Arbor.Security.FileGuard do
 
   defp extract_root_from_capability(%Capability{resource_uri: uri}) do
     case parse_resource_uri(uri) do
-      {:ok, _operation, path} -> {:ok, path}
+      {:ok, _operation, path} -> {:ok, strip_uri_wildcards(path)}
       error -> error
     end
+  end
+
+  # Cap URIs use `/**` and `/*` as wildcard markers on the path-pattern.
+  # The literal markers must NOT appear in the path-root we hand to
+  # SafePath — `/Users/x/.arbor/reports/**` isn't a real directory, so
+  # SafePath would reject every requested path within it as traversal.
+  # Strip the wildcards to recover the actual directory bound.
+  defp strip_uri_wildcards(path) do
+    path
+    |> String.replace_suffix("/**", "")
+    |> String.replace_suffix("/*", "")
   end
 
   defp resolve_and_validate_path(requested_path, root) do

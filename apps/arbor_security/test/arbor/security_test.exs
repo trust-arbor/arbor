@@ -30,6 +30,87 @@ defmodule Arbor.SecurityTest do
       assert {:ok, :authorized} =
                Security.authorize(agent_id, "arbor://fs/read/docs")
     end
+
+    test "regression: bare arbor://fs/<op> URI + :file_path matches a path-scoped cap",
+         %{agent_id: agent_id} do
+      # The 2026-06-06 morning-digest pipeline failure case: file actions
+      # authorize with `Security.authorize(agent, "arbor://fs/read",
+      # :execute, file_path: "/abs/path/file.md")`. Per-run identity
+      # caps are scoped like `arbor://fs/read/abs/path/**`. Pre-fix,
+      # the bare URI didn't trigger the cap's `/**` prefix match in
+      # `uri_matches?/2`, so AuthDecision fell through to PolicyEnforcer
+      # which auto-granted with `requires_approval: true` — the gate
+      # then timed out on no-presence. With the synthesis, the bare
+      # URI + file_path becomes `arbor://fs/read/abs/path/file.md`
+      # which IS matched by the cap's `/**` prefix.
+
+      # macOS symlinks /tmp → /private/tmp; SafePath flags the divergence
+      # as path traversal. Use the canonical real path so the cap URI's
+      # root matches FileGuard's resolved path. `Path.expand` collapses
+      # ".." but doesn't follow symlinks; the symlink path that matters
+      # here is the parent so use the realpath of System.tmp_dir!().
+      tmp_root =
+        case :file.read_link("/tmp") do
+          {:ok, target} -> "/" <> List.to_string(target)
+          _ -> System.tmp_dir!()
+        end
+
+      tmp_dir = Path.join(tmp_root, "auth_uri_synth_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp_dir)
+      file_path = Path.join(tmp_dir, "file.md")
+      File.write!(file_path, "ok")
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+      # Cap URI mirrors what `.caps.json` declares — path-scoped /** form.
+      cap_uri = "arbor://fs/read#{tmp_dir}/**"
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: cap_uri
+        )
+
+      # Pre-fix: bare URI + file_path → fell through to PolicyEnforcer +
+      # approval gate. Post-fix: synthesizes to the full URI, finds the
+      # per-path cap directly, returns :authorized.
+      assert {:ok, :authorized} =
+               Security.authorize(agent_id, "arbor://fs/read", :execute,
+                 file_path: file_path,
+                 verify_identity: false
+               )
+    end
+
+    test "regression: synthesis only fires for bare arbor://fs/<op>; pre-pathed URIs untouched",
+         %{agent_id: agent_id} do
+      # A caller that ALREADY passes the path in the URI should not be
+      # mutated. The synthesis only kicks in for the bare form so we
+      # don't double-append paths.
+      tmp_root =
+        case :file.read_link("/tmp") do
+          {:ok, target} -> "/" <> List.to_string(target)
+          _ -> System.tmp_dir!()
+        end
+
+      tmp_dir = Path.join(tmp_root, "auth_uri_pre_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp_dir)
+      file_path = Path.join(tmp_dir, "file.md")
+      File.write!(file_path, "ok")
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read#{tmp_dir}/**"
+        )
+
+      # Caller passes the full URI directly — the cap matches via
+      # /** without any synthesis. opts[:file_path] is informational.
+      assert {:ok, :authorized} =
+               Security.authorize(agent_id, "arbor://fs/read#{file_path}", :execute,
+                 file_path: file_path,
+                 verify_identity: false
+               )
+    end
   end
 
   describe "authorize/2 boolean-style checks" do
@@ -473,7 +554,10 @@ defmodule Arbor.SecurityTest do
 
       # 3rd should fail
       assert {:error, {:quota_exceeded, :per_agent_capability_limit, context}} =
-               Security.grant(principal: agent_id, resource: "arbor://fs/read/quota_test/#{base}/3")
+               Security.grant(
+                 principal: agent_id,
+                 resource: "arbor://fs/read/quota_test/#{base}/3"
+               )
 
       assert context.agent_id == agent_id
       assert context.current == 2
