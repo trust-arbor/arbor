@@ -311,6 +311,195 @@ defmodule Arbor.Security.IssuerRegistryTest do
     end
   end
 
+  describe "update_envelopes/3" do
+    # The update_envelopes path exists so operators can expand or narrow
+    # an issuer's authority WITHOUT revoke + re-register. Revoke +
+    # re-register would force re-signing every existing .caps.json even
+    # if those files would still fit within the new envelopes — that's
+    # avoidable churn.
+
+    test "replaces the full envelope list for an active issuer", %{identity: identity} do
+      {:ok, original} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/reports/**",
+          principal_id: identity.agent_id
+        )
+
+      :ok = IssuerRegistry.register(identity.agent_id, [original])
+
+      # New, broader set covering both read and write across a different subtree
+      {:ok, new_read} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/code/**",
+          principal_id: identity.agent_id
+        )
+
+      {:ok, new_write} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/artifacts/**",
+          principal_id: identity.agent_id
+        )
+
+      assert :ok = IssuerRegistry.update_envelopes(identity.agent_id, [new_read, new_write])
+
+      # Lookup returns the new list, not the original
+      assert {:ok, %{max_envelope_caps: envelopes}} = IssuerRegistry.lookup(identity.agent_id)
+      assert length(envelopes) == 2
+      uris = Enum.map(envelopes, & &1.resource_uri)
+      assert "arbor://fs/read/code/**" in uris
+      assert "arbor://fs/write/artifacts/**" in uris
+      refute "arbor://fs/write/reports/**" in uris
+    end
+
+    test "regression: a cap that fit the OLD envelope but not the NEW one is rejected", %{
+      identity: identity
+    } do
+      # Original: write access to reports/
+      {:ok, original} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/reports/**",
+          principal_id: identity.agent_id
+        )
+
+      :ok = IssuerRegistry.register(identity.agent_id, [original])
+
+      {:ok, originally_fit_cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/reports/today.md",
+          principal_id: "agent_runner"
+        )
+
+      # Confirm baseline: under the original envelope, this passes
+      assert :ok = IssuerRegistry.verify_envelope(identity.agent_id, originally_fit_cap)
+
+      # Narrow to a non-overlapping envelope
+      {:ok, narrowed} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/elsewhere/**",
+          principal_id: identity.agent_id
+        )
+
+      :ok = IssuerRegistry.update_envelopes(identity.agent_id, [narrowed])
+
+      # The cap that fit the original is now outside the envelope.
+      # If verify_envelope short-circuited on a stale cache or used the
+      # OLD envelope list, this assertion would fail — that's exactly
+      # the property the regression test locks in.
+      assert {:error, :exceeds_envelope} =
+               IssuerRegistry.verify_envelope(identity.agent_id, originally_fit_cap)
+    end
+
+    test "regression: a cap that fits the NEW envelope passes after update", %{
+      identity: identity
+    } do
+      # Original: only writes to reports/
+      {:ok, original} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/reports/**",
+          principal_id: identity.agent_id
+        )
+
+      :ok = IssuerRegistry.register(identity.agent_id, [original])
+
+      {:ok, code_cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/code/file.ex",
+          principal_id: "agent_runner"
+        )
+
+      # Baseline: not in original envelope
+      assert {:error, :exceeds_envelope} =
+               IssuerRegistry.verify_envelope(identity.agent_id, code_cap)
+
+      # Expand to add code/ writes
+      {:ok, expanded} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/code/**",
+          principal_id: identity.agent_id
+        )
+
+      :ok = IssuerRegistry.update_envelopes(identity.agent_id, [original, expanded])
+
+      # Now the cap passes
+      assert :ok = IssuerRegistry.verify_envelope(identity.agent_id, code_cap)
+    end
+
+    test "rejects unknown issuer with :not_found" do
+      {:ok, envelope} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/x",
+          principal_id: "agent_someone"
+        )
+
+      assert {:error, :not_found} =
+               IssuerRegistry.update_envelopes(
+                 "agent_5555555555555555555555555555555555555555555555555555555555555555",
+                 [envelope]
+               )
+    end
+
+    test "rejects revoked issuer with :revoked", %{identity: identity, envelope: envelope} do
+      :ok = IssuerRegistry.register(identity.agent_id, envelope)
+      :ok = IssuerRegistry.revoke(identity.agent_id, "test revocation")
+
+      {:ok, new_env} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/anything",
+          principal_id: identity.agent_id
+        )
+
+      assert {:error, :revoked} =
+               IssuerRegistry.update_envelopes(identity.agent_id, [new_env])
+    end
+
+    test "rejects empty list with :empty_envelopes", %{identity: identity, envelope: envelope} do
+      :ok = IssuerRegistry.register(identity.agent_id, envelope)
+
+      assert {:error, :empty_envelopes} =
+               IssuerRegistry.update_envelopes(identity.agent_id, [])
+    end
+
+    test "rejects non-Capability entries with :invalid_envelope", %{
+      identity: identity,
+      envelope: envelope
+    } do
+      :ok = IssuerRegistry.register(identity.agent_id, envelope)
+
+      assert {:error, :invalid_envelope} =
+               IssuerRegistry.update_envelopes(identity.agent_id, [:not_a_cap])
+    end
+
+    test "captures reason in status_reason and bumps status_changed_at", %{
+      identity: identity,
+      envelope: envelope
+    } do
+      :ok = IssuerRegistry.register(identity.agent_id, envelope, reason: "original enrollment")
+
+      original_entry = Enum.find(IssuerRegistry.list(), &(&1.issuer_id == identity.agent_id))
+      assert original_entry.status_reason == "original enrollment"
+      assert original_entry.status_changed_at == nil
+
+      {:ok, new_env} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/different",
+          principal_id: identity.agent_id
+        )
+
+      :ok =
+        IssuerRegistry.update_envelopes(
+          identity.agent_id,
+          [new_env],
+          reason: "expanding to cover code reviews"
+        )
+
+      updated_entry = Enum.find(IssuerRegistry.list(), &(&1.issuer_id == identity.agent_id))
+      assert updated_entry.status_reason == "expanding to cover code reviews"
+      assert %DateTime{} = updated_entry.status_changed_at
+      # Status itself stays :active — this isn't a revoke.
+      assert updated_entry.status == :active
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------

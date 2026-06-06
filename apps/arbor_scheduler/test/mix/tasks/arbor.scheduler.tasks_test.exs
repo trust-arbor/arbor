@@ -93,6 +93,51 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       assert "arbor://fs/write/reports/upstream-deps-summary/**" in uris
     end
 
+    test "update_issuer_envelopes replaces the envelope list", %{identity: identity} do
+      Mix.Tasks.Arbor.Scheduler.EnrollIssuer.run([
+        "--issuer-id",
+        identity.agent_id,
+        "--envelope-uri",
+        "arbor://fs/write/reports/**"
+      ])
+
+      Mix.Tasks.Arbor.Scheduler.UpdateIssuerEnvelopes.run([
+        "--issuer-id",
+        identity.agent_id,
+        "--envelope-uri",
+        "arbor://fs/read/code/**",
+        "--envelope-uri",
+        "arbor://fs/write/code/**",
+        "--reason",
+        "adding code review support"
+      ])
+
+      entries = IssuerRegistry.list()
+      entry = Enum.find(entries, &(&1.issuer_id == identity.agent_id))
+      uris = Enum.map(entry.max_envelope_caps, & &1.resource_uri)
+      assert length(uris) == 2
+      assert "arbor://fs/read/code/**" in uris
+      assert "arbor://fs/write/code/**" in uris
+      refute "arbor://fs/write/reports/**" in uris
+      assert entry.status_reason == "adding code review support"
+    end
+
+    test "update_issuer_envelopes fails for unenrolled issuer" do
+      bogus = "agent_8888888888888888888888888888888888888888888888888888888888888888"
+
+      assert catch_exit(
+               Mix.Tasks.Arbor.Scheduler.UpdateIssuerEnvelopes.run([
+                 "--issuer-id",
+                 bogus,
+                 "--envelope-uri",
+                 "arbor://fs/read/x"
+               ])
+             ) == {:shutdown, 1}
+
+      assert_received {:mix_shell, :error, [msg]}
+      assert msg =~ "not_found"
+    end
+
     test "fails for unregistered identity" do
       bogus_id = "agent_9999999999999999999999999999999999999999999999999999999999999999"
 
