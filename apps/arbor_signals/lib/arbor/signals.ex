@@ -76,28 +76,30 @@ defmodule Arbor.Signals do
     do: emit_signal_for_category_and_type(category, type, data, opts)
 
   @doc """
-  Emit a durable signal — both signal bus AND Historian EventLog + Postgres.
+  Emit a durable signal — signal bus AND Historian EventLog (ETS hot
+  cache) AND the Ecto-backed durable EventLog (Postgres or SQLite3,
+  per Repo config).
 
   Use this for events that must survive restarts and be queryable later:
   LLM call traces, worker lifecycle, security audit events.
 
   Same API as `emit/4` but additionally writes to the Historian's
-  EventLog (ETS) and Postgres (async). Best-effort: the signal always
-  emits even if persistence fails.
+  EventLog (ETS) and the durable backend (async). Best-effort: the
+  signal always emits even if persistence fails.
   """
   @spec durable_emit(atom(), atom(), map(), keyword()) :: :ok
   def durable_emit(category, type, data, opts \\ []) do
     # Signal bus (real-time)
     emit(category, type, Map.put(data, :permanent, true), opts)
 
-    # EventLog + Postgres (durable)
+    # EventLog (ETS) + durable backend
     stream_id = Keyword.get(opts, :stream_id, "#{category}_events")
     persist_to_historian(stream_id, type, data)
 
     :ok
   end
 
-  # Write to Historian's EventLog (ETS) + Postgres (async).
+  # Write to Historian's EventLog (ETS) + durable backend (async).
   # Uses runtime bridges to avoid dependency cycles.
   defp persist_to_historian(stream_id, type, data) do
     event_mod = Arbor.Persistence.Event
