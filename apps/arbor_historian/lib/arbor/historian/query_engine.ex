@@ -94,9 +94,8 @@ defmodule Arbor.Historian.QueryEngine do
 
   defp maybe_fallthrough(stream_id, opts, from, event_log, ets_result) do
     with {:ok, _events} <- ets_result,
-         {:ok, oldest} when not is_nil(oldest) <-
-           PersistenceETS.oldest_event_number(stream_id, name: event_log),
-         true <- oldest > from + 1,
+         {:ok, oldest} <- PersistenceETS.oldest_event_number(stream_id, name: event_log),
+         true <- cache_misses_range?(oldest, from),
          true <- durable_backend_available?() do
       case PersistenceDurable.read_stream(stream_id, opts) do
         {:ok, durable_events} ->
@@ -113,6 +112,19 @@ defmodule Arbor.Historian.QueryEngine do
       _ -> ets_result
     end
   end
+
+  # The cache misses the requested range when:
+  #   * `oldest` is `nil` — the stream isn't in cache at all. Could be a
+  #     stream whose events all aged past retention (boot scenario after
+  #     2026-06-06: ETS starts empty; durable backend may have events),
+  #     OR a stream that genuinely doesn't exist. Either way the durable
+  #     backend is the authoritative source; an extra DB roundtrip on a
+  #     nonexistent stream is acceptable.
+  #   * `oldest > from + 1` — cache holds events from `oldest` onward,
+  #     but the caller wants events from `from`, so [from..oldest-1] is
+  #     missing from cache.
+  defp cache_misses_range?(nil, _from), do: true
+  defp cache_misses_range?(oldest, from) when is_integer(oldest), do: oldest > from + 1
 
   # The Repo dispatches to whichever Ecto adapter is configured
   # (Postgres or SQLite3 — see `Arbor.Persistence.Repo`). This check

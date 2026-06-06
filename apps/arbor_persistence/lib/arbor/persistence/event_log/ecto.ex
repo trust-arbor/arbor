@@ -317,6 +317,61 @@ defmodule Arbor.Persistence.EventLog.Ecto do
       {:error, {:count_failed, e}}
   end
 
+  @doc """
+  Return a snapshot of the EventLog's bookkeeping state — enough to
+  rehydrate an in-memory cache's `stream_versions` map and
+  `global_position` counter without replaying any events.
+
+  Two aggregate SQL queries:
+
+    1. `SELECT stream_id, max(event_number) FROM events GROUP BY stream_id`
+    2. `SELECT max(global_position) FROM events`
+
+  Used by `Arbor.Historian.Application` at boot to align the ETS
+  cache's bookkeeping with the durable backend so that subsequent
+  appends use correct, non-colliding `event_number` / `global_position`
+  values from t=0, even though the ETS table starts empty (the
+  fallthrough path in `QueryEngine` handles cold reads for historical
+  events).
+
+  Returns `{:ok, %{stream_versions: map, global_position: integer}}`.
+  An empty database returns `{:ok, %{stream_versions: %{}, global_position: 0}}`.
+
+  ## Options
+
+    * `:repo` — Ecto Repo to use (default: `Arbor.Persistence.Repo`)
+  """
+  @spec metadata_snapshot(keyword()) ::
+          {:ok,
+           %{
+             stream_versions: %{String.t() => non_neg_integer()},
+             global_position: non_neg_integer()
+           }}
+          | {:error, term()}
+  def metadata_snapshot(opts \\ []) do
+    repo = Keyword.get(opts, :repo, Repo)
+
+    stream_versions_query =
+      from(e in EventSchema,
+        group_by: e.stream_id,
+        select: {e.stream_id, max(e.event_number)}
+      )
+
+    global_position_query = from(e in EventSchema, select: max(e.global_position))
+
+    stream_versions =
+      stream_versions_query
+      |> repo.all()
+      |> Map.new()
+
+    global_position = repo.one(global_position_query) || 0
+
+    {:ok, %{stream_versions: stream_versions, global_position: global_position}}
+  rescue
+    e ->
+      {:error, {:metadata_snapshot_failed, e}}
+  end
+
   # ===========================================================================
   # Private Helpers
   # ===========================================================================

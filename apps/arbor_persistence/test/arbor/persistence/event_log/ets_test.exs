@@ -360,6 +360,71 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
     end
   end
 
+  describe "rehydrate_metadata/2" do
+    # PR 2 (2026-06-06): boot doesn't replay events anymore. Instead,
+    # the bookkeeping (stream_versions + global_position) is loaded
+    # from the durable backend so subsequent appends use correct,
+    # non-colliding values from t=0. The actual events stay in the
+    # durable backend; reads for old events fall through at query time.
+
+    test "sets stream_versions and global_position without inserting events", %{name: name} do
+      snapshot = %{
+        stream_versions: %{"s1" => 100, "s2" => 50},
+        global_position: 150
+      }
+
+      assert :ok = ETS.rehydrate_metadata(snapshot, name: name)
+
+      assert {:ok, 100} = ETS.stream_version("s1", name: name)
+      assert {:ok, 50} = ETS.stream_version("s2", name: name)
+      assert {:ok, 150} = ETS.event_count(name: name)
+
+      # No events were actually inserted — read returns empty
+      assert {:ok, []} = ETS.read_stream("s1", name: name)
+    end
+
+    test "next append after rehydrate uses the rehydrated counter", %{name: name} do
+      snapshot = %{stream_versions: %{"s1" => 100}, global_position: 100}
+      :ok = ETS.rehydrate_metadata(snapshot, name: name)
+
+      # Next append should be event_number 101, global_position 101
+      assert {:ok, [persisted]} =
+               ETS.append("s1", Event.new("s1", "next", %{}), name: name)
+
+      assert persisted.event_number == 101
+      assert persisted.global_position == 101
+    end
+
+    test "idempotent — merges via max for streams, max for global_position", %{name: name} do
+      first = %{stream_versions: %{"s1" => 100, "s2" => 200}, global_position: 200}
+      second = %{stream_versions: %{"s1" => 50, "s3" => 300}, global_position: 100}
+
+      :ok = ETS.rehydrate_metadata(first, name: name)
+      :ok = ETS.rehydrate_metadata(second, name: name)
+
+      # s1: max(100, 50) = 100
+      assert {:ok, 100} = ETS.stream_version("s1", name: name)
+      # s2: still 200 (not in second)
+      assert {:ok, 200} = ETS.stream_version("s2", name: name)
+      # s3: 300 (new from second)
+      assert {:ok, 300} = ETS.stream_version("s3", name: name)
+      # global_position: max(200, 100) = 200
+      assert {:ok, 200} = ETS.event_count(name: name)
+    end
+
+    test "doesn't clobber existing live appends", %{name: name} do
+      # Write a real event first
+      {:ok, [_]} = ETS.append("s1", Event.new("s1", "live", %{}), name: name)
+      # Now rehydrate with a SMALLER counter (e.g., stale snapshot)
+      snapshot = %{stream_versions: %{"s1" => 0}, global_position: 0}
+      :ok = ETS.rehydrate_metadata(snapshot, name: name)
+
+      # The real event's counter should win
+      assert {:ok, 1} = ETS.stream_version("s1", name: name)
+      assert {:ok, 1} = ETS.event_count(name: name)
+    end
+  end
+
   describe "oldest_event_number/2" do
     test "returns nil for streams with no events in cache", %{name: name} do
       assert {:ok, nil} = ETS.oldest_event_number("never_existed", name: name)
