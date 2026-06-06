@@ -215,6 +215,25 @@ defmodule Arbor.Trust.ProfileResolver do
   `arbor://actions/execute/shell.execute`) which would not match the
   short namespace alone — that mismatch produced a real security
   regression where shell.execute auto-ran without approval.
+
+  ## Two ceiling tiers
+
+  Conceptually the entries split into two tiers (enforced in
+  `Arbor.Security.AuthDecision.check_approval/3`):
+
+    - **Askable** (fs/code writes, file.write/edit, code.compile_and_test):
+      a parameter-bounded capability minted from a verified signed `.caps.json`
+      bypasses the `:ask` gate. The operator's signature on the caps file IS
+      the pre-approval — runtime ask would be redundant friction.
+    - **Always-locked** (shell, governance, code.hot_load): the parameter
+      space is too open for URI-bounded pre-approval to mean anything
+      (`arbor://shell/exec/git` doesn't distinguish `git status` from
+      `git push --force`). These ALWAYS ask, regardless of provenance.
+
+  Both tiers live in this same table because the trust-profile resolution
+  layer doesn't need to distinguish them — the askable/locked split is an
+  exemption rule applied downstream in AuthDecision, not a different
+  default.
   """
   @spec default_security_ceilings() :: rules()
   def default_security_ceilings do

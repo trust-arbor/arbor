@@ -423,16 +423,83 @@ defmodule Arbor.Security.AuthDecision do
     # is exactly the security regression Hysun caught on 2026-04-07: shell ran
     # without approval because the capability didn't carry the constraint flag,
     # and AuthDecision never consulted Trust.Policy. Fix: consult both.
-    needs_approval =
-      has_approval_constraint?(cap) or
-        trust_profile_gates?(auth.principal_id, resource_uri)
+    cap_demands_approval = has_approval_constraint?(cap)
+    trust_demands_approval = trust_profile_gates?(auth.principal_id, resource_uri)
+    needs_approval = cap_demands_approval or trust_demands_approval
 
     cond do
-      not needs_approval -> {:authorized, auth}
-      graduated?(auth.principal_id, resource_uri) -> {:authorized, auth}
-      true -> {:requires_approval, cap, auth}
+      not needs_approval ->
+        {:authorized, auth}
+
+      graduated?(auth.principal_id, resource_uri) ->
+        {:authorized, auth}
+
+      # Pre-approval bypass applies ONLY when the ceiling (trust profile)
+      # is the reason for asking AND the cap doesn't itself opt into
+      # approval. A per-cap `requires_approval: true` is the issuer
+      # explicitly saying "confirm at runtime even though I signed it" —
+      # the bypass must respect that stronger statement.
+      trust_demands_approval and not cap_demands_approval and
+          pre_approved_bypasses_ceiling?(cap, resource_uri) ->
+        {:authorized, auth}
+
+      true ->
+        {:requires_approval, cap, auth}
     end
   end
+
+  # URI classes whose parameter space is fundamentally too open or whose
+  # blast radius is too irrecoverable to be unlocked by a pre-signed caps
+  # file. Shell args, governance state changes, and runtime code injection
+  # can't be meaningfully bound by a URI prefix — the issuer signing a
+  # `.caps.json` declaration of `arbor://shell/exec/git` doesn't constrain
+  # `git push --force` vs `git status`. Always require runtime confirmation.
+  @always_locked_uri_classes [
+    "arbor://shell",
+    "arbor://governance",
+    "arbor://actions/execute/shell.",
+    "arbor://actions/execute/governance.",
+    "arbor://actions/execute/code.hot_load"
+  ]
+
+  # A pre-approved cap bypasses the security ceiling :ask gate when:
+  #   1. The cap carries `metadata.provenance` (only RunIdentity sets this
+  #      after a verified CapsFile.load — see RunIdentity.grant_run_caps),
+  #   2. The cap's resource_uri is parameter-bounded — has at least one
+  #      concrete leaf segment past `arbor://<domain>/<operation>` (a `/**`
+  #      directly at the action level isn't bounded enough to count), AND
+  #   3. The requested URI is NOT in @always_locked_uri_classes.
+  #
+  # Rationale: the operator's signature on the caps file IS the human-in-
+  # loop pre-approval. Forcing a runtime ask for a tightly-bounded write
+  # the operator already authorized adds friction without security gain.
+  # But shell/governance/hot_load can't be parameter-bounded meaningfully,
+  # so they ignore this exemption.
+  defp pre_approved_bypasses_ceiling?(cap, requested_uri) do
+    has_provenance?(cap) and
+      uri_parameter_bounded?(cap.resource_uri) and
+      not always_locked?(requested_uri)
+  end
+
+  defp has_provenance?(cap) do
+    metadata = cap.metadata || %{}
+    not is_nil(Map.get(metadata, :provenance) || Map.get(metadata, "provenance"))
+  end
+
+  defp uri_parameter_bounded?(uri) when is_binary(uri) do
+    case String.split(uri, "/") do
+      ["arbor:", "", _domain, _operation, leaf | _] when leaf not in ["**", "*"] -> true
+      _ -> false
+    end
+  end
+
+  defp uri_parameter_bounded?(_), do: false
+
+  defp always_locked?(uri) when is_binary(uri) do
+    Enum.any?(@always_locked_uri_classes, &String.starts_with?(uri, &1))
+  end
+
+  defp always_locked?(_), do: true
 
   defp has_approval_constraint?(cap) do
     cap.constraints[:requires_approval] == true or

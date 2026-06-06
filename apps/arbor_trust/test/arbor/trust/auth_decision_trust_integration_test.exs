@@ -208,6 +208,148 @@ defmodule Arbor.Trust.AuthDecisionTrustIntegrationTest do
     end
   end
 
+  describe "pre-approved cap bypass (signed caps file exemption)" do
+    # Pre-approved bypass: a cap minted from a verified signed `.caps.json`
+    # carries `metadata.provenance` (set by RunIdentity.grant_run_caps).
+    # AuthDecision.check_approval bypasses the ceiling :ask gate when the
+    # cap's URI is parameter-bounded AND the requested URI is NOT in the
+    # always-locked list (shell/governance/hot_load).
+    #
+    # The morning-reports pipelines hit this in 2026-06-06: caps file
+    # signed by operator pre-approved fs/write to a specific reports
+    # subtree, but the ceiling forced :ask and the ephemeral identity had
+    # no human-presence channel, so writes timed out.
+
+    test "pre-approved bounded fs/write cap bypasses the ceiling", %{agent_id: agent_id} do
+      cap_uri = "arbor://fs/write/Users/azmaveth/.arbor/reports/morning-digest-synthesis/**"
+
+      requested =
+        "arbor://fs/write/Users/azmaveth/.arbor/reports/morning-digest-synthesis/2026-06-06.md"
+
+      cap = grant_preapproved_capability(agent_id, cap_uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
+      assert {:ok, :authorized, ^cap, _} = AuthDecision.evaluate(auth, requested, :execute)
+    end
+
+    test "pre-approved bounded code/write cap bypasses the ceiling", %{agent_id: agent_id} do
+      cap_uri = "arbor://code/write/lib/foo/bar.ex"
+      cap = grant_preapproved_capability(agent_id, cap_uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
+      assert {:ok, :authorized, ^cap, _} = AuthDecision.evaluate(auth, cap_uri, :execute)
+    end
+
+    test "pre-approved bounded file.write action cap bypasses the ceiling",
+         %{agent_id: agent_id} do
+      cap_uri = "arbor://actions/execute/file.write"
+      cap = grant_preapproved_capability(agent_id, cap_uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
+      assert {:ok, :authorized, ^cap, _} = AuthDecision.evaluate(auth, cap_uri, :execute)
+    end
+
+    test "pre-approved shell cap STILL requires approval (always-locked)",
+         %{agent_id: agent_id} do
+      cap_uri = "arbor://shell/exec/git"
+      cap = grant_preapproved_capability(agent_id, cap_uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
+      # Shell parameter space (command args) can't be bound by URI prefix —
+      # an issuer signing "arbor://shell/exec/git" doesn't constrain
+      # `git push --force` vs `git status`. Bypass must NOT apply.
+      assert {:ok, :requires_approval, ^cap, _} =
+               AuthDecision.evaluate(auth, cap_uri, :execute)
+    end
+
+    test "pre-approved governance cap STILL requires approval (always-locked)",
+         %{agent_id: agent_id} do
+      cap_uri = "arbor://governance/update/policy"
+      cap = grant_preapproved_capability(agent_id, cap_uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
+      # Governance changes are self-modifying — an agent that can change
+      # governance can grant itself anything next cycle. No pre-approval
+      # bypass.
+      assert {:ok, :requires_approval, ^cap, _} =
+               AuthDecision.evaluate(auth, cap_uri, :execute)
+    end
+
+    test "pre-approved canonical shell action URI STILL requires approval",
+         %{agent_id: agent_id} do
+      cap_uri = "arbor://actions/execute/shell.execute"
+      cap = grant_preapproved_capability(agent_id, cap_uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
+      assert {:ok, :requires_approval, ^cap, _} =
+               AuthDecision.evaluate(auth, cap_uri, :execute)
+    end
+
+    test "pre-approved code.hot_load STILL requires approval (always-locked)",
+         %{agent_id: agent_id} do
+      cap_uri = "arbor://actions/execute/code.hot_load"
+      cap = grant_preapproved_capability(agent_id, cap_uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
+      # Runtime code injection can backdoor any subsequent cap check.
+      # Pre-approval must never unlock this.
+      assert {:ok, :requires_approval, ^cap, _} =
+               AuthDecision.evaluate(auth, cap_uri, :execute)
+    end
+
+    test "pre-approved cap with parameter-unbounded URI requires approval",
+         %{agent_id: agent_id} do
+      # URI ends in /** right at the action level — operator essentially
+      # said "any fs/write." That's broader than the bypass design accepts:
+      # the cap URI must have a concrete leaf past <domain>/<operation>.
+      cap_uri = "arbor://fs/write/**"
+      cap = grant_preapproved_capability(agent_id, cap_uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
+      assert {:ok, :requires_approval, ^cap, _} =
+               AuthDecision.evaluate(auth, "arbor://fs/write/some/path", :execute)
+    end
+
+    test "non-pre-approved bounded fs/write cap still requires approval",
+         %{agent_id: agent_id} do
+      # Same bounded URI as the bypass-success test, but no provenance ->
+      # falls back to the ceiling :ask gate. Proves provenance is the
+      # actual discriminator (not the URI shape).
+      cap_uri = "arbor://fs/write/Users/azmaveth/.arbor/reports/x.md"
+      cap = grant_unconstrained_capability(agent_id, cap_uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
+      assert {:ok, :requires_approval, ^cap, _} =
+               AuthDecision.evaluate(auth, cap_uri, :execute)
+    end
+
+    test "pre-approved cap with explicit requires_approval constraint STILL gates",
+         %{agent_id: agent_id} do
+      # Per-cap requires_approval=true is a stronger statement than ceiling:
+      # the issuer attested to the cap but ALSO opted into runtime
+      # confirmation. The bypass must respect that.
+      cap_uri = "arbor://fs/write/Users/azmaveth/code/critical.ex"
+
+      cap = %Capability{
+        id: "cap_pp_constrained_#{:erlang.unique_integer([:positive])}",
+        resource_uri: cap_uri,
+        principal_id: agent_id,
+        granted_at: DateTime.utc_now(),
+        expires_at: nil,
+        constraints: %{requires_approval: true},
+        delegation_depth: 0,
+        delegation_chain: [],
+        metadata: %{provenance: %{source: :caps_file, issuer_id: "agent_test_issuer"}}
+      }
+
+      {:ok, :stored} = CapabilityStore.put(cap)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
+      assert {:ok, :requires_approval, ^cap, _} =
+               AuthDecision.evaluate(auth, cap_uri, :execute)
+    end
+  end
+
   # ============================================================================
   # Helpers
   # ============================================================================
@@ -237,6 +379,32 @@ defmodule Arbor.Trust.AuthDecisionTrustIntegrationTest do
       delegation_depth: 0,
       delegation_chain: [],
       metadata: %{regression_test: true}
+    }
+
+    {:ok, :stored} = CapabilityStore.put(cap)
+    cap
+  end
+
+  # Grants a capability with `metadata.provenance` set — mirrors what
+  # `Arbor.Scheduler.RunIdentity.grant_run_caps/2` produces after a
+  # successful `CapsFile.load`. AuthDecision treats this as the pre-
+  # approval marker that lets bounded askable URIs bypass the ceiling.
+  defp grant_preapproved_capability(agent_id, resource_uri) do
+    cap = %Capability{
+      id: "cap_preapproved_#{:erlang.unique_integer([:positive])}",
+      resource_uri: resource_uri,
+      principal_id: agent_id,
+      granted_at: DateTime.utc_now(),
+      expires_at: nil,
+      constraints: %{},
+      delegation_depth: 0,
+      delegation_chain: [],
+      metadata: %{
+        provenance: %{
+          source: :caps_file,
+          issuer_id: "agent_test_issuer_#{:erlang.unique_integer([:positive])}"
+        }
+      }
     }
 
     {:ok, :stored} = CapabilityStore.put(cap)
