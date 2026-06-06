@@ -252,6 +252,9 @@ defmodule Arbor.Actions do
         Arbor.Actions.TDD.BuildImplPrompt,
         Arbor.Actions.TDD.RecordAttempt
       ],
+      code_review: [
+        Arbor.Actions.CodeReview.ApplyChanges
+      ],
       comms: [
         Arbor.Actions.Comms.SendMessage,
         Arbor.Actions.Comms.PollMessages
@@ -784,6 +787,13 @@ defmodule Arbor.Actions do
     # the auth shape is uniform across all Actions.
     Arbor.Actions.TDD.BuildImplPrompt => "arbor://action/tdd/build_impl_prompt",
     Arbor.Actions.TDD.RecordAttempt => "arbor://action/tdd/record_attempt",
+
+    # Code review — apply_changes writes files within a workdir bound.
+    # The action enforces SafePath.resolve_within at runtime; the
+    # capability URI exposes the action-level grant separately from
+    # raw fs/write so the pipeline can hold this cap without holding
+    # write access to arbitrary paths.
+    Arbor.Actions.CodeReview.ApplyChanges => "arbor://action/code_review/apply_changes",
 
     # File facade — arbor://fs/{operation}
     Arbor.Actions.File.Read => "arbor://fs/read",

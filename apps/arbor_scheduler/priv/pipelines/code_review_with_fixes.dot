@@ -1,0 +1,365 @@
+// Code Review With Fixes — Review → Draft Fix → Test → Iterate → PR
+//
+// On-demand code review pipeline that reads a git diff range, asks an
+// LLM to identify issues and draft concrete code fixes, applies the
+// fixes to a new branch, runs the test gate, and iterates if tests fail.
+// Always ends with a PR (passing or failed-iteration-exhausted) so the
+// human reviewer sees the full attempt.
+//
+// Modeled on `apps/arbor_orchestrator/specs/pipelines/examples/tdd-cycle.dot`'s
+// iterate-until-pass shape. Differences:
+//   - input is a git diff range, not a spec
+//   - terminus is a PR open, not a status flag
+//   - failure mode opens a PR with a "manual review needed" status
+//     instead of just returning :exhausted
+//
+// Pipeline shape:
+//
+//   git_diff (shell) → review_diff (LLM) → check_findings (gate)
+//     no findings  → write_review_only_pr → done
+//     has findings → create_branch (action: git_branch)
+//       → draft_fix (LLM) → apply_fix (action: file_write per file)
+//         → run_tests (mix.test) → check_passed (gate)
+//             pass → commit + github_pr → done
+//             fail → record_attempt (bump counter, snapshot failure)
+//               → check_exhausted (gate)
+//                   exhausted → commit + github_pr(with "needs manual review")
+//                              → done
+//                   not exhausted → draft_fix (loop)
+//
+// Context in (set via initial_values when calling Orchestrator.run, or
+// passed as Oban worker args):
+//   diff_range       — git diff range to review (default "HEAD~3..HEAD")
+//   workdir          — repo path (default `pwd`)
+//   max_iterations   — integer cap on fix attempts (default 3)
+//   session.agent_id — signing principal (set by PipelineRunner)
+//
+// Context out (read by caller from the final context):
+//   converged        — boolean, true iff tests passed after fixes
+//   iteration        — number of fix attempts made
+//   pr_url           — URL of the opened PR
+//   last_failure     — final test runner output (empty if converged)
+//
+// Capabilities required (declared in code_review_with_fixes.caps.json):
+//   arbor://shell/exec/git           — git_diff, git_branch, git_commit
+//   arbor://shell/exec/mix/test      — running the test gate
+//   arbor://shell/exec/gh            — github_pr action shells to gh
+//   arbor://fs/read/<repo>/**        — read source for context
+//   arbor://fs/write/<repo>/**       — write fix files
+
+digraph CodeReviewWithFixes {
+  graph [
+    goal="Review a git diff, draft fixes, iterate until tests pass, open a PR",
+    label="Code Review With Fixes",
+    default_max_retries="0"
+  ]
+
+  start [shape=Mdiamond]
+
+  // ── Phase 0: Capture the diff to review ────────────────────────────
+
+  // Default to HEAD~3..HEAD when caller didn't override.
+  // Shell node stdout lands in shell.<id>.output (not last_response —
+  // see the 2026-06-05 ShellHandler clobber fix in commit 308333df).
+  capture_diff [
+    type="shell",
+    command="git diff ${diff_range:-HEAD~3..HEAD}",
+    sandbox="basic",
+    timeout="30000",
+    on_error="fail",
+    data_class="internal"
+  ]
+
+  // Snapshot the diff onto a stable key the reviewer can read.
+  snapshot_diff [
+    type="transform",
+    transform="identity",
+    source_key="shell.capture_diff.output",
+    output_key="diff_content"
+  ]
+
+  // ── Phase 1: Review the diff ───────────────────────────────────────
+
+  // Single reviewer (not council). Fixes need a coherent voice — multi-
+  // model synthesis works for review-only pipelines but fragments when
+  // the same output has to drive concrete code changes.
+  //
+  // Output contract: JSON with `findings` (list of {file, line, issue,
+  // suggested_fix}) and `summary`. The schema is enforced by the
+  // system_prompt; downstream gates read `findings` to decide whether
+  // there's work to do.
+  review_diff [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    use_tools="false",
+    max_tokens="16384",
+    temperature="0.2",
+    timeout="600000",
+    system_prompt="You are a meticulous code reviewer. Read the git diff and identify CONCRETE issues that warrant a code change — bugs, security holes, missing nil handling, race conditions, off-by-one, wrong base cases, broken pattern matches, capability misuse. Skip stylistic preferences unless they cross into correctness. Output ONLY valid JSON with this shape: {\"summary\": \"<one paragraph>\", \"findings\": [{\"file\": \"<path>\", \"line\": <number>, \"issue\": \"<what's wrong>\", \"suggested_fix\": \"<concrete change to make, NOT prose — code or precise edit instructions>\"}]}. If you find no actionable issues, return {\"summary\": \"<paragraph explaining no issues found>\", \"findings\": []}. Cite exact file paths and line numbers from the diff. Do not invent issues that the diff doesn't actually contain.",
+    prompt_context_key="diff_content"
+  ]
+
+  // Snapshot the review onto a stable key before downstream nodes
+  // clobber last_response.
+  snapshot_review [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="review_json"
+  ]
+
+  // Extract findings count to drive the gate. transform=json_extract
+  // applied to a JSON object pulls the named field's length when given
+  // a list expression.
+  extract_findings_count [
+    type="transform",
+    transform="json_extract",
+    source_key="review_json",
+    expression="findings | length",
+    output_key="findings_count"
+  ]
+
+  // ── Phase 2: Gate on whether there's anything to fix ───────────────
+
+  check_findings [
+    shape="diamond",
+    type="gate",
+    condition_key="findings_count"
+  ]
+
+  // ── Phase 3 (no-findings branch): open a review-only PR ────────────
+
+  // Even a clean review gets a PR so the human sees what the agent
+  // looked at and what it concluded. The PR body IS the review summary.
+  // No branch needed because there are no file changes — but we still
+  // want the run logged.
+  prep_review_only_summary [
+    type="transform",
+    transform="json_extract",
+    source_key="review_json",
+    expression="summary",
+    output_key="pr_body"
+  ]
+
+  log_review_only [
+    type="shell",
+    command="echo 'No actionable findings; review summary written to context.'",
+    sandbox="basic",
+    timeout="5000",
+    on_error="continue"
+  ]
+
+  // ── Phase 3 (has-findings branch): create branch + iterate ─────────
+
+  // Branch name embeds a short tag and the current iso8601 timestamp
+  // so concurrent runs don't collide.
+  build_branch_name [
+    type="shell",
+    command="printf 'review-fix-%s' \"$(date -u +%Y%m%d-%H%M%S)\"",
+    sandbox="none",
+    timeout="5000",
+    on_error="fail"
+  ]
+
+  snapshot_branch_name [
+    type="transform",
+    transform="identity",
+    source_key="shell.build_branch_name.output",
+    output_key="branch_name"
+  ]
+
+  create_branch [
+    type="exec",
+    target="action",
+    action="git_branch",
+    context_keys="branch_name"
+  ]
+
+  // ── Phase 4: Draft fix + apply (the iteration loop) ────────────────
+
+  // First entry to the loop. Subsequent entries come from check_passed.
+  draft_fix [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    use_tools="false",
+    max_tokens="16384",
+    temperature="0.2",
+    timeout="600000",
+    system_prompt="You are applying targeted code fixes based on a prior review. Read the review JSON (containing findings with file paths, line numbers, and suggested fixes) and produce CONCRETE file changes. Output ONLY valid JSON with this shape: {\"changes\": [{\"file\": \"<path>\", \"content\": \"<COMPLETE new file content>\"}]}. For each file you change, include the FULL new content — not a diff, not a patch. If a previous attempt failed (see last_failure context), incorporate the failure feedback into your next attempt. Do not change files outside what the findings dictate.",
+    prompt_context_key="review_json"
+  ]
+
+  snapshot_changes [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="changes_json"
+  ]
+
+  // The "apply" step writes each file. For v1 this is a fan-out
+  // exercise — each finding becomes one file_write. We bundle the
+  // logic in a custom action (`apply_changes`) so the DOT stays
+  // readable and the per-file write is one atomic unit.
+  apply_changes [
+    type="exec",
+    target="action",
+    action="apply_changes",
+    context_keys="changes_json,workdir"
+  ]
+
+  // ── Phase 5: Run the test gate ─────────────────────────────────────
+
+  run_tests [
+    type="exec",
+    target="action",
+    action="mix_test",
+    context_keys="workdir"
+  ]
+
+  // mix_test returns context_updates.exec.run_tests.passed (boolean)
+  // and .output (test runner output). The gate routes on `.passed`.
+  check_passed [
+    shape="diamond",
+    type="gate",
+    condition_key="exec.run_tests.passed"
+  ]
+
+  // ── Phase 5a (tests fail): record + check iteration cap ────────────
+
+  record_attempt [
+    type="exec",
+    target="action",
+    action="bump_iteration",
+    context_keys="iteration"
+  ]
+
+  snapshot_failure [
+    type="transform",
+    transform="identity",
+    source_key="exec.run_tests.output",
+    output_key="last_failure"
+  ]
+
+  check_exhausted [
+    shape="diamond",
+    type="gate",
+    condition_key="iteration"
+  ]
+
+  // ── Phase 6 (converged OR exhausted): commit + open PR ─────────────
+
+  // Build a commit message that includes the review summary so the PR
+  // commit history reflects the agent's reasoning.
+  build_commit_message [
+    type="shell",
+    command="printf 'agent-review: apply fixes from automated review\\n\\n%s\\n' \"${pr_body:-Automated code review and fix attempt}\"",
+    sandbox="none",
+    timeout="5000",
+    on_error="continue"
+  ]
+
+  snapshot_commit_message [
+    type="transform",
+    transform="identity",
+    source_key="shell.build_commit_message.output",
+    output_key="commit_message"
+  ]
+
+  git_commit_step [
+    type="exec",
+    target="action",
+    action="git_commit",
+    context_keys="commit_message"
+  ]
+
+  build_pr_title [
+    type="shell",
+    command="printf 'Automated code review: %s' \"${branch_name:-review-fix}\"",
+    sandbox="none",
+    timeout="5000",
+    on_error="continue"
+  ]
+
+  snapshot_pr_title [
+    type="transform",
+    transform="identity",
+    source_key="shell.build_pr_title.output",
+    output_key="pr_title"
+  ]
+
+  // The PR body combines the review summary + iteration status. When
+  // converged, it's "fixes passed N iterations". When exhausted, it
+  // explicitly says "manual review needed — tests still failing".
+  build_pr_body [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    use_tools="false",
+    max_tokens="2048",
+    temperature="0.1",
+    timeout="120000",
+    system_prompt="You write a concise PR body for an automated code review. Inputs in context: review_json (the original review), iteration (attempts made), last_failure (test output if tests still failing, empty if passed). Output markdown only with sections: ## Summary (one paragraph), ## Findings (bulleted list from review_json.findings), ## Iteration status (\"Converged after N attempts; tests passing.\" OR \"Exhausted N attempts; tests still failing — manual review needed.\" with failure excerpt). Keep it short and factual.",
+    prompt_context_key="review_json"
+  ]
+
+  snapshot_pr_body [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="pr_body_final"
+  ]
+
+  open_pr [
+    type="exec",
+    target="action",
+    action="github_pr",
+    context_keys="pr_title,pr_body_final,branch_name"
+  ]
+
+  snapshot_pr_url [
+    type="transform",
+    transform="identity",
+    source_key="exec.open_pr.pr_url",
+    output_key="pr_url"
+  ]
+
+  done [shape=Msquare]
+
+  // ── Flow ───────────────────────────────────────────────────────────
+
+  start -> capture_diff -> snapshot_diff -> review_diff -> snapshot_review
+  snapshot_review -> extract_findings_count -> check_findings
+
+  // No findings → write review-only PR (no branch needed; agent just
+  // surfaces the empty review for the human to acknowledge).
+  check_findings -> prep_review_only_summary [condition="findings_count=0"]
+  prep_review_only_summary -> log_review_only -> done
+
+  // Has findings → enter the iterate loop
+  check_findings -> build_branch_name [condition="findings_count!=0"]
+  build_branch_name -> snapshot_branch_name -> create_branch -> draft_fix
+
+  draft_fix -> snapshot_changes -> apply_changes -> run_tests -> check_passed
+
+  // Tests pass → commit + PR
+  check_passed -> build_commit_message [condition="exec.run_tests.passed=true"]
+
+  // Tests fail → record + check iteration cap
+  check_passed -> record_attempt [condition="exec.run_tests.passed=false"]
+  record_attempt -> snapshot_failure -> check_exhausted
+
+  // Not exhausted → loop back to draft_fix with failure feedback in
+  // context.
+  check_exhausted -> draft_fix [condition="iteration<3"]
+
+  // Exhausted → commit + PR anyway (with "manual review" status in
+  // the body via build_pr_body)
+  check_exhausted -> build_commit_message [condition="iteration>=3"]
+
+  // Final straight line: commit → PR → done
+  build_commit_message -> snapshot_commit_message -> git_commit_step
+  git_commit_step -> build_pr_title -> snapshot_pr_title -> build_pr_body
+  build_pr_body -> snapshot_pr_body -> open_pr -> snapshot_pr_url -> done
+}
