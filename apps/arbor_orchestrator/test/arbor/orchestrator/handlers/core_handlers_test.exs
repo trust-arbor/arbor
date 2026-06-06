@@ -162,6 +162,52 @@ defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
       assert outcome.context_updates["transform.t2"] == "test"
     end
 
+    test "regression: json_extract strips ```json fences from LLM output" do
+      # LLMs routinely wrap JSON in markdown code fences even when the
+      # system prompt explicitly asks for raw JSON. The 2026-06-05
+      # code-review pipeline run hit this — Gemma 4 31B returned 709
+      # chars of valid JSON wrapped in ```json...``` and json_extract
+      # rejected it as "input is not valid JSON". The fence-stripping
+      # in `decode_json_with_fences/1` makes the transform robust here
+      # so every pipeline using json_extract benefits, not just one.
+      fenced =
+        "```json\n" <>
+          Jason.encode!(%{"data" => %{"name" => "test"}}) <>
+          "\n```"
+
+      context = make_context(%{"last_response" => fenced})
+      node = make_node("t_fence", %{"transform" => "json_extract", "expression" => "data.name"})
+      outcome = TransformHandler.execute(node, context, make_graph(), [])
+
+      assert outcome.status == :success
+      assert outcome.context_updates["transform.t_fence"] == "test"
+    end
+
+    test "json_extract strips bare ``` fences (no language tag)" do
+      fenced =
+        "```\n" <>
+          Jason.encode!(%{"x" => 42}) <>
+          "\n```"
+
+      context = make_context(%{"last_response" => fenced})
+      node = make_node("t_bare_fence", %{"transform" => "json_extract", "expression" => "x"})
+      outcome = TransformHandler.execute(node, context, make_graph(), [])
+
+      assert outcome.status == :success
+      assert outcome.context_updates["transform.t_bare_fence"] == 42
+    end
+
+    test "json_extract handles input with extra whitespace around fences" do
+      fenced = "\n\n  ```json\n  " <> Jason.encode!(%{"y" => "ok"}) <> "  \n```\n\n"
+
+      context = make_context(%{"last_response" => fenced})
+      node = make_node("t_ws", %{"transform" => "json_extract", "expression" => "y"})
+      outcome = TransformHandler.execute(node, context, make_graph(), [])
+
+      assert outcome.status == :success
+      assert outcome.context_updates["transform.t_ws"] == "ok"
+    end
+
     test "template replaces {value}" do
       context = make_context(%{"last_response" => "world"})
 

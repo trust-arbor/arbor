@@ -64,7 +64,7 @@ digraph CodeReviewWithFixes {
   capture_diff [
     type="shell",
     command="git diff ${diff_range:-HEAD~3..HEAD}",
-    sandbox="basic",
+    sandbox="none",
     timeout="30000",
     on_error="fail",
     data_class="internal"
@@ -92,11 +92,13 @@ digraph CodeReviewWithFixes {
     type="compute",
     purpose="llm",
     simulate="false",
+    llm_provider="lm_studio",
+    llm_model="gemma-4-31b-it",
     use_tools="false",
     max_tokens="16384",
     temperature="0.2",
     timeout="600000",
-    system_prompt="You are a meticulous code reviewer. Read the git diff and identify CONCRETE issues that warrant a code change — bugs, security holes, missing nil handling, race conditions, off-by-one, wrong base cases, broken pattern matches, capability misuse. Skip stylistic preferences unless they cross into correctness. Output ONLY valid JSON with this shape: {\"summary\": \"<one paragraph>\", \"findings\": [{\"file\": \"<path>\", \"line\": <number>, \"issue\": \"<what's wrong>\", \"suggested_fix\": \"<concrete change to make, NOT prose — code or precise edit instructions>\"}]}. If you find no actionable issues, return {\"summary\": \"<paragraph explaining no issues found>\", \"findings\": []}. Cite exact file paths and line numbers from the diff. Do not invent issues that the diff doesn't actually contain.",
+    system_prompt="You are a meticulous code reviewer. Read the git diff and identify CONCRETE issues that warrant a code change — bugs, security holes, missing nil handling, race conditions, off-by-one, wrong base cases, broken pattern matches, capability misuse. Skip stylistic preferences unless they cross into correctness. Output ONLY valid JSON (no markdown code fences, no preface text) with this shape: {\"summary\": \"<one paragraph>\", \"has_findings\": <true|false>, \"findings\": [{\"file\": \"<path>\", \"line\": <number>, \"issue\": \"<what's wrong>\", \"suggested_fix\": \"<concrete change — code or precise edit instructions>\"}]}. The `has_findings` boolean MUST agree with whether the `findings` array is non-empty. If you find no actionable issues, set `has_findings: false` and `findings: []`. Cite exact file paths and line numbers from the diff. Do not invent issues.",
     prompt_context_key="diff_content"
   ]
 
@@ -109,15 +111,16 @@ digraph CodeReviewWithFixes {
     output_key="review_json"
   ]
 
-  // Extract findings count to drive the gate. transform=json_extract
-  // applied to a JSON object pulls the named field's length when given
-  // a list expression.
-  extract_findings_count [
+  // Extract has_findings (boolean) to drive the gate. The condition
+  // language doesn't support list-length operations, so we route on
+  // the LLM-emitted boolean instead. The system_prompt requires the
+  // model to keep `has_findings` in sync with the `findings` list.
+  extract_has_findings [
     type="transform",
     transform="json_extract",
     source_key="review_json",
-    expression="findings | length",
-    output_key="findings_count"
+    expression="has_findings",
+    output_key="has_findings"
   ]
 
   // ── Phase 2: Gate on whether there's anything to fix ───────────────
@@ -125,7 +128,7 @@ digraph CodeReviewWithFixes {
   check_findings [
     shape="diamond",
     type="gate",
-    condition_key="findings_count"
+    condition_key="has_findings"
   ]
 
   // ── Phase 3 (no-findings branch): open a review-only PR ────────────
@@ -145,7 +148,7 @@ digraph CodeReviewWithFixes {
   log_review_only [
     type="shell",
     command="echo 'No actionable findings; review summary written to context.'",
-    sandbox="basic",
+    sandbox="none",
     timeout="5000",
     on_error="continue"
   ]
@@ -183,6 +186,8 @@ digraph CodeReviewWithFixes {
     type="compute",
     purpose="llm",
     simulate="false",
+    llm_provider="lm_studio",
+    llm_model="gemma-4-31b-it",
     use_tools="false",
     max_tokens="16384",
     temperature="0.2",
@@ -228,11 +233,28 @@ digraph CodeReviewWithFixes {
 
   // ── Phase 5a (tests fail): record + check iteration cap ────────────
 
+  // Rename context keys to match `tdd_record_attempt`'s schema params.
+  // The action wants `current_impl` and `test_output`; we have
+  // `changes_json` and `exec.run_tests.output`.
+  prep_record_attempt_impl [
+    type="transform",
+    transform="identity",
+    source_key="changes_json",
+    output_key="current_impl"
+  ]
+
+  prep_record_attempt_output [
+    type="transform",
+    transform="identity",
+    source_key="exec.run_tests.output",
+    output_key="test_output"
+  ]
+
   record_attempt [
     type="exec",
     target="action",
-    action="bump_iteration",
-    context_keys="iteration"
+    action="tdd_record_attempt",
+    context_keys="iteration,max_iterations,current_impl,test_output"
   ]
 
   snapshot_failure [
@@ -245,7 +267,7 @@ digraph CodeReviewWithFixes {
   check_exhausted [
     shape="diamond",
     type="gate",
-    condition_key="iteration"
+    condition_key="exec.record_attempt.exhausted"
   ]
 
   // ── Phase 6 (converged OR exhausted): commit + open PR ─────────────
@@ -296,6 +318,8 @@ digraph CodeReviewWithFixes {
     type="compute",
     purpose="llm",
     simulate="false",
+    llm_provider="lm_studio",
+    llm_model="gemma-4-31b-it",
     use_tools="false",
     max_tokens="2048",
     temperature="0.1",
@@ -330,33 +354,36 @@ digraph CodeReviewWithFixes {
   // ── Flow ───────────────────────────────────────────────────────────
 
   start -> capture_diff -> snapshot_diff -> review_diff -> snapshot_review
-  snapshot_review -> extract_findings_count -> check_findings
+  snapshot_review -> extract_has_findings -> check_findings
 
   // No findings → write review-only PR (no branch needed; agent just
   // surfaces the empty review for the human to acknowledge).
-  check_findings -> prep_review_only_summary [condition="findings_count=0"]
+  // Condition syntax: `=` and `!=` only; context keys take the
+  // `context.` prefix (see conformance §11.9).
+  check_findings -> prep_review_only_summary [condition="context.has_findings=false"]
   prep_review_only_summary -> log_review_only -> done
 
   // Has findings → enter the iterate loop
-  check_findings -> build_branch_name [condition="findings_count!=0"]
+  check_findings -> build_branch_name [condition="context.has_findings=true"]
   build_branch_name -> snapshot_branch_name -> create_branch -> draft_fix
 
   draft_fix -> snapshot_changes -> apply_changes -> run_tests -> check_passed
 
-  // Tests pass → commit + PR
-  check_passed -> build_commit_message [condition="exec.run_tests.passed=true"]
+  // Tests pass → commit + PR. The mix_test action puts `passed`
+  // (boolean) into context.exec.run_tests.passed; conditions test
+  // that as a string equality.
+  check_passed -> build_commit_message [condition="context.exec.run_tests.passed=true"]
 
-  // Tests fail → record + check iteration cap
-  check_passed -> record_attempt [condition="exec.run_tests.passed=false"]
+  // Tests fail → prep params, record, snapshot, check iteration cap
+  check_passed -> prep_record_attempt_impl [condition="context.exec.run_tests.passed=false"]
+  prep_record_attempt_impl -> prep_record_attempt_output -> record_attempt
   record_attempt -> snapshot_failure -> check_exhausted
 
-  // Not exhausted → loop back to draft_fix with failure feedback in
-  // context.
-  check_exhausted -> draft_fix [condition="iteration<3"]
-
-  // Exhausted → commit + PR anyway (with "manual review" status in
-  // the body via build_pr_body)
-  check_exhausted -> build_commit_message [condition="iteration>=3"]
+  // `tdd_record_attempt` writes `exhausted: boolean` into its result.
+  // Condition expressions can't do numeric comparison (`<`/`>=`) so we
+  // route on the boolean directly.
+  check_exhausted -> draft_fix [condition="context.exec.record_attempt.exhausted=false"]
+  check_exhausted -> build_commit_message [condition="context.exec.record_attempt.exhausted=true"]
 
   // Final straight line: commit → PR → done
   build_commit_message -> snapshot_commit_message -> git_commit_step
