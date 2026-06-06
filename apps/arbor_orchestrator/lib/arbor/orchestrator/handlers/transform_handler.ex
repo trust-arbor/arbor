@@ -64,7 +64,7 @@ defmodule Arbor.Orchestrator.Handlers.TransformHandler do
   end
 
   defp apply_transform("json_extract", input, path) when is_binary(input) do
-    case Jason.decode(input) do
+    case decode_json_with_fences(input) do
       {:ok, parsed} -> json_path(parsed, path)
       {:error, _} -> {:error, "input is not valid JSON"}
     end
@@ -84,7 +84,7 @@ defmodule Arbor.Orchestrator.Handlers.TransformHandler do
   end
 
   defp apply_transform("map", input, expression) when is_binary(input) do
-    case Jason.decode(input) do
+    case decode_json_with_fences(input) do
       {:ok, list} when is_list(list) ->
         apply_map(list, expression)
 
@@ -144,6 +144,39 @@ defmodule Arbor.Orchestrator.Handlers.TransformHandler do
   end
 
   # --- Helpers ---
+
+  # LLMs routinely wrap JSON responses in markdown code fences
+  # (```json ... ``` or ``` ... ```) even when the system prompt
+  # explicitly asks for raw JSON. Stripping the fences here makes
+  # `json_extract` and `map` transforms robust against this without
+  # forcing every pipeline author to tighten their prompt — they'll
+  # tighten it sometimes but the LLM will sometimes ignore it anyway.
+  defp decode_json_with_fences(input) when is_binary(input) do
+    input
+    |> strip_markdown_fences()
+    |> Jason.decode()
+  end
+
+  defp strip_markdown_fences(input) do
+    trimmed = String.trim(input)
+
+    cond do
+      String.starts_with?(trimmed, "```json") ->
+        trimmed
+        |> String.replace_prefix("```json", "")
+        |> String.replace_suffix("```", "")
+        |> String.trim()
+
+      String.starts_with?(trimmed, "```") ->
+        trimmed
+        |> String.replace_prefix("```", "")
+        |> String.replace_suffix("```", "")
+        |> String.trim()
+
+      true ->
+        trimmed
+    end
+  end
 
   defp json_path(data, path) do
     keys = String.split(path, ".", trim: true)
