@@ -3,8 +3,16 @@ defmodule Arbor.Persistence.EventLog.ETS do
   ETS-backed implementation of the EventLog behaviour.
 
   Uses two ETS tables:
-  - Stream table (`:ordered_set`): keyed by `{stream_id, event_number}` for per-stream reads
-  - Global table (`:ordered_set`): keyed by `global_position` for cross-stream reads
+  - Stream table (`:ordered_set`): keyed by `{stream_id, event_number}`,
+    value is the `global_position` integer pointer (NOT the event itself)
+  - Global table (`:ordered_set`): keyed by `global_position`, value is the
+    full `%Event{}` struct
+
+  Per-stream reads walk the stream table to collect positions, then look
+  each event up in the global table. This costs one extra ETS lookup per
+  event read but cuts the in-memory footprint roughly in half — at scale
+  the duplicate full-event storage in both indexes dominated total RAM
+  (see `.arbor/roadmap/0-inbox/historian-startup-replay-cost.md`).
 
   Supports subscriber notifications via pid monitoring.
 
@@ -24,6 +32,17 @@ defmodule Arbor.Persistence.EventLog.ETS do
   @default_max_events 1_000_000
   @default_max_read 10_000
   @warning_threshold 0.8
+
+  # Retention: events older than max_age_ms get trimmed by a periodic
+  # sweep. 24h is the initial choice (aggressive — we want to surface
+  # any fallthrough-path bugs early; tune up if cache miss rate proves
+  # too high). Disable per-instance by passing `:max_age_ms => :infinity`.
+  @default_max_age_ms 24 * 60 * 60 * 1_000
+  # 10 minutes between sweeps. Each sweep walks from the front of the
+  # global table and stops at the first event still within the window,
+  # so cost is proportional to "events that aged out since last sweep,"
+  # not total event count. Disable with `:trim_interval_ms => :disabled`.
+  @default_trim_interval_ms 10 * 60 * 1_000
 
   # --- Client API (EventLog behaviour) ---
 
@@ -88,6 +107,20 @@ defmodule Arbor.Persistence.EventLog.ETS do
     GenServer.call(name, {:read_agent_events, agent_id, opts})
   end
 
+  @doc """
+  Return the lowest `event_number` currently held in ETS for `stream_id`,
+  or `nil` if the stream has no events in cache.
+
+  Used by `Arbor.Persistence` to decide whether a requested read range
+  is fully covered by the ETS cache or whether the durable backend must
+  be queried for events that have aged past retention.
+  """
+  @spec oldest_event_number(String.t(), keyword()) :: non_neg_integer() | nil
+  def oldest_event_number(stream_id, opts) do
+    name = Keyword.fetch!(opts, :name)
+    GenServer.call(name, {:oldest_event_number, stream_id})
+  end
+
   # --- GenServer ---
 
   def start_link(opts) do
@@ -101,14 +134,17 @@ defmodule Arbor.Persistence.EventLog.ETS do
     max_events = Keyword.get(opts, :max_events, @default_max_events)
 
     # Safe: name is module atom from internal start_link opts, not user input
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     stream_table =
-      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       :ets.new(:"#{name}_streams", [:ordered_set, :protected, read_concurrency: true])
 
     # Safe: name is module atom from internal start_link opts, not user input
+    # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     global_table =
-      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       :ets.new(:"#{name}_global", [:ordered_set, :protected, read_concurrency: true])
+
+    max_age_ms = Keyword.get(opts, :max_age_ms, @default_max_age_ms)
+    trim_interval_ms = Keyword.get(opts, :trim_interval_ms, @default_trim_interval_ms)
 
     base_state = %{
       stream_table: stream_table,
@@ -118,7 +154,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
       warning_logged: false,
       stream_versions: %{},
       subscribers: %{},
-      monitors: %{}
+      monitors: %{},
+      max_age_ms: max_age_ms,
+      trim_interval_ms: trim_interval_ms
     }
 
     # Attempt to restore from snapshot if configured
@@ -133,6 +171,8 @@ defmodule Arbor.Persistence.EventLog.ETS do
         snapshot_store_opts,
         snapshot_namespace
       )
+
+    schedule_trim(state)
 
     {:ok, state}
   end
@@ -154,7 +194,16 @@ defmodule Arbor.Persistence.EventLog.ETS do
     limit = Keyword.get(opts, :limit)
     direction = Keyword.get(opts, :direction, :forward)
 
-    events = do_read_stream(state.stream_table, stream_id, from_num, limit, direction)
+    events =
+      do_read_stream(
+        state.stream_table,
+        state.global_table,
+        stream_id,
+        from_num,
+        limit,
+        direction
+      )
+
     {:reply, {:ok, events}, state}
   end
 
@@ -214,6 +263,21 @@ defmodule Arbor.Persistence.EventLog.ETS do
     {:reply, {:ok, snapshot}, state}
   end
 
+  def handle_call({:oldest_event_number, stream_id}, _from, state) do
+    # The stream table is keyed by `{stream_id, event_number}` in an
+    # `:ordered_set`. `:ets.next/2` from `{stream_id, 0}` returns the
+    # next key in tuple-sort order — which is the lowest event_number
+    # for this stream, OR the first key of the next stream if this
+    # stream is fully evicted.
+    result =
+      case :ets.next(state.stream_table, {stream_id, 0}) do
+        {^stream_id, n} -> n
+        _ -> nil
+      end
+
+    {:reply, {:ok, result}, state}
+  end
+
   def handle_call({:read_agent_events, agent_id, opts}, _from, state) do
     limit = Keyword.get(opts, :limit)
     type = Keyword.get(opts, :type)
@@ -241,7 +305,81 @@ defmodule Arbor.Persistence.EventLog.ETS do
     end
   end
 
+  def handle_info(:trim_old_events, state) do
+    state = do_trim(state)
+    schedule_trim(state)
+    {:noreply, state}
+  end
+
   # --- Private ---
+
+  # ----- Retention sweep -----
+
+  defp schedule_trim(%{trim_interval_ms: :disabled}), do: :ok
+
+  defp schedule_trim(%{trim_interval_ms: ms}) when is_integer(ms) and ms > 0 do
+    Process.send_after(self(), :trim_old_events, ms)
+    :ok
+  end
+
+  defp schedule_trim(_), do: :ok
+
+  defp do_trim(%{max_age_ms: :infinity} = state), do: state
+
+  defp do_trim(%{max_age_ms: max_age_ms} = state) when is_integer(max_age_ms) do
+    cutoff = DateTime.add(DateTime.utc_now(), -max_age_ms, :millisecond)
+    trim_from_front(state, cutoff, 0)
+  end
+
+  defp do_trim(state), do: state
+
+  # Walk the global table from the lowest global_position upward, deleting
+  # entries whose timestamp predates cutoff. Stop on the first entry that's
+  # still within the window — the table is ordered by global_position, but
+  # timestamps within bounded clock skew are monotonic enough that this
+  # gives a correct-to-the-second sweep for any practical workload.
+  #
+  # An event with `nil` timestamp is treated as "keep" (stops the sweep)
+  # — we don't want to silently lose events with malformed metadata.
+  defp trim_from_front(state, cutoff, trimmed) do
+    case :ets.first(state.global_table) do
+      :"$end_of_table" ->
+        log_trim(trimmed)
+        state
+
+      gpos ->
+        case :ets.lookup(state.global_table, gpos) do
+          [{^gpos, event}] ->
+            cond do
+              is_nil(event.timestamp) ->
+                log_trim(trimmed)
+                state
+
+              DateTime.compare(event.timestamp, cutoff) == :lt ->
+                :ets.delete(state.global_table, gpos)
+                :ets.delete(state.stream_table, {event.stream_id, event.event_number})
+                trim_from_front(state, cutoff, trimmed + 1)
+
+              true ->
+                log_trim(trimmed)
+                state
+            end
+
+          [] ->
+            log_trim(trimmed)
+            state
+        end
+    end
+  end
+
+  defp log_trim(0), do: :ok
+
+  defp log_trim(n) do
+    Logger.debug("EventLog.ETS: trimmed #{n} events past retention window")
+    :ok
+  end
+
+  # ----- Subscriber bookkeeping -----
 
   defp remove_subscriber(subscribers, sub_key, pid, ref) do
     Map.update(subscribers, sub_key, [], fn subs ->
@@ -257,7 +395,8 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
     {persisted, final_version, final_global} =
       events
-      |> Enum.reduce({[], current_version, state.global_position}, fn %Event{} = event, {acc, ver, gpos} ->
+      |> Enum.reduce({[], current_version, state.global_position}, fn %Event{} = event,
+                                                                      {acc, ver, gpos} ->
         new_ver = ver + 1
         new_gpos = gpos + 1
 
@@ -268,7 +407,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
             stream_id: stream_id
         }
 
-        :ets.insert(state.stream_table, {{stream_id, new_ver}, persisted_event})
+        # Stream table stores a pointer (global_position) into the global
+        # table, NOT the full event — see moduledoc.
+        :ets.insert(state.stream_table, {{stream_id, new_ver}, new_gpos})
         :ets.insert(state.global_table, {new_gpos, persisted_event})
 
         {[persisted_event | acc], new_ver, new_gpos}
@@ -285,9 +426,11 @@ defmodule Arbor.Persistence.EventLog.ETS do
     {persisted, state}
   end
 
-  defp do_read_stream(table, stream_id, from_num, limit, direction) do
-    # Collect all events for this stream from from_num onwards
-    events = collect_stream_events(table, stream_id, from_num, [])
+  defp do_read_stream(stream_table, global_table, stream_id, from_num, limit, direction) do
+    # Walk the stream table to collect global_position pointers, then
+    # dereference each one via the global table to get the full event.
+    # See moduledoc for why stream table holds pointers, not events.
+    events = collect_stream_events(stream_table, global_table, stream_id, from_num, [])
 
     events =
       case direction do
@@ -301,18 +444,34 @@ defmodule Arbor.Persistence.EventLog.ETS do
     end
   end
 
-  defp collect_stream_events(table, stream_id, from_num, acc) do
+  defp collect_stream_events(stream_table, global_table, stream_id, from_num, acc) do
     key = {stream_id, from_num}
 
-    case :ets.lookup(table, key) do
-      [{^key, event}] ->
-        collect_stream_events(table, stream_id, from_num + 1, [event | acc])
+    case :ets.lookup(stream_table, key) do
+      [{^key, gpos}] ->
+        case :ets.lookup(global_table, gpos) do
+          [{^gpos, event}] ->
+            collect_stream_events(
+              stream_table,
+              global_table,
+              stream_id,
+              from_num + 1,
+              [event | acc]
+            )
+
+          [] ->
+            # Stream pointer dangling — global entry trimmed but stream
+            # entry survived. Treat as end-of-stream for this read; the
+            # retention sweep should remove both atomically, so a dangle
+            # is a bug we want to surface eventually. For now: stop here.
+            Enum.reverse(acc)
+        end
 
       [] ->
         # Check if there's a next key in this stream (handles from_num=0 case)
-        case :ets.next(table, key) do
+        case :ets.next(stream_table, key) do
           {^stream_id, next_num} ->
-            collect_stream_events(table, stream_id, next_num, acc)
+            collect_stream_events(stream_table, global_table, stream_id, next_num, acc)
 
           _ ->
             Enum.reverse(acc)
@@ -404,13 +563,17 @@ defmodule Arbor.Persistence.EventLog.ETS do
   def deserialize_event(map) when is_map(map) do
     timestamp =
       case map["timestamp"] do
-        nil -> nil
+        nil ->
+          nil
+
         ts when is_binary(ts) ->
           case DateTime.from_iso8601(ts) do
             {:ok, dt, _} -> dt
             _ -> nil
           end
-        %DateTime{} = dt -> dt
+
+        %DateTime{} = dt ->
+          dt
       end
 
     %Event{
@@ -485,12 +648,20 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
     Enum.each(events, fn event_map ->
       event = deserialize_event(event_map)
-      :ets.insert(state.stream_table, {{event.stream_id, event.event_number}, event})
+      # Stream table is pointer-only; global table holds the value.
+      :ets.insert(
+        state.stream_table,
+        {{event.stream_id, event.event_number}, event.global_position}
+      )
+
       :ets.insert(state.global_table, {event.global_position, event})
     end)
 
     event_count = length(events)
-    Logger.info("EventLog.ETS: restored #{event_count} events from snapshot (pos: #{global_position})")
+
+    Logger.info(
+      "EventLog.ETS: restored #{event_count} events from snapshot (pos: #{global_position})"
+    )
 
     %{state | global_position: global_position, stream_versions: stream_versions}
   end

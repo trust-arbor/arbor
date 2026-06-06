@@ -188,6 +188,49 @@ defmodule Arbor.Historian.QueryEngineTest do
     end
   end
 
+  describe "cache-miss fallthrough (graceful degradation)" do
+    # When ETS has events from oldest_event_number onward and a read
+    # requests events from BEFORE that, the fallthrough check fires.
+    # In tests there's no Postgres Repo running, so `postgres_available?`
+    # returns false — the cache result is returned unchanged. This guards
+    # the degradation path from accidental breakage by a future refactor.
+    test "with :from earlier than cache coverage, returns cache result when Postgres unavailable",
+         %{
+           ctx: ctx
+         } do
+      # Populate the stream with a few events.
+      signal_1 = TestHelpers.build_signal(category: :test, type: :evt1)
+      signal_2 = TestHelpers.build_signal(category: :test, type: :evt2)
+      TestHelpers.collect_signal(ctx, signal_1)
+      TestHelpers.collect_signal(ctx, signal_2)
+
+      # Read with :from set to an integer — exercises the fallthrough
+      # check. Postgres isn't running in unit tests, so we must get the
+      # cache result back without crashing.
+      result =
+        QueryEngine.read_stream("global",
+          event_log: ctx.event_log,
+          from: 0
+        )
+
+      assert {:ok, entries} = result
+      assert is_list(entries)
+    end
+
+    test "non-integer :from skips fallthrough (post-filter case)", %{ctx: ctx} do
+      # query/1 passes DateTime values via :from / :to as post-filter
+      # bounds, not event_number cursors. The fallthrough path must
+      # NOT try to do `oldest > from + 1` on a DateTime.
+      TestHelpers.collect_signal(ctx, TestHelpers.build_signal(category: :test, type: :evt))
+
+      now = DateTime.utc_now()
+      past = DateTime.add(now, -3600, :second)
+
+      result = QueryEngine.read_stream("global", event_log: ctx.event_log, from: past)
+      assert {:ok, _} = result
+    end
+  end
+
   describe "find_by_signal_id/2" do
     test "finds entry by original signal ID", %{ctx: ctx} do
       signal = TestHelpers.build_signal(id: "sig_findme", category: :metrics, type: :cpu)
