@@ -412,6 +412,22 @@ defmodule Arbor.Security do
         action,
         opts
       ) do
+    # If the caller passed `:file_path` and the URI is the bare
+    # `arbor://fs/<op>` form, synthesize the path-embedded URI for
+    # cap lookup. Without this, path-scoped caps like
+    # `arbor://fs/read/Users/azmaveth/.arbor/reports/upstream-deps/**`
+    # don't match the action's bare URI, AuthDecision falls through
+    # to PolicyEnforcer, the trust profile says `:ask`, PolicyEnforcer
+    # auto-grants with `requires_approval: true`, and the auth chain
+    # hits the approval gate. With this synthesis, the per-run cap
+    # matches via `uri_matches?/2`'s `/**` prefix rule and AuthDecision
+    # returns `:authorized` without the approval detour.
+    # FileGuard still runs in `maybe_check_file_guard/4` as
+    # defense-in-depth path normalization. Surfaced 2026-06-06 by the
+    # morning-digest pipelines hitting the gate when run via the
+    # per-run identity flow.
+    resource_uri = maybe_synthesize_fs_path_uri(resource_uri, opts)
+
     # Step 1: Reflexes — instant safety block, must run before anything else
     reflex_context = build_reflex_context(resource_uri, action, opts)
 
@@ -873,6 +889,31 @@ defmodule Arbor.Security do
       :ok
     end
   end
+
+  # Synthesize the path-embedded URI when the caller passed a bare
+  # `arbor://fs/<op>` URI plus the `:file_path` opt. Lets path-scoped
+  # caps participate in the URI matcher directly.
+  defp maybe_synthesize_fs_path_uri(resource_uri, opts) when is_binary(resource_uri) do
+    case Keyword.get(opts, :file_path) do
+      file_path when is_binary(file_path) ->
+        if bare_fs_op_uri?(resource_uri) do
+          "#{resource_uri}/#{String.trim_leading(file_path, "/")}"
+        else
+          resource_uri
+        end
+
+      _ ->
+        resource_uri
+    end
+  end
+
+  defp maybe_synthesize_fs_path_uri(resource_uri, _opts), do: resource_uri
+
+  # `arbor://fs/<op>` with no further path segments. Matches:
+  #   "arbor://fs/read", "arbor://fs/write", "arbor://fs/list", etc.
+  # Doesn't match: "arbor://fs/read/some/path" (already path-embedded).
+  defp bare_fs_op_uri?("arbor://fs/" <> rest), do: not String.contains?(rest, "/")
+  defp bare_fs_op_uri?(_), do: false
 
   # When authorizing arbor://fs/* URIs with a file_path option,
   # verify the path via FileGuard. This integrates path-scoped
