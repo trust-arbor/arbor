@@ -608,24 +608,60 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   defp extract_reasoning_text(%ReqLLM.Response{message: nil}), do: nil
 
-  defp extract_reasoning_text(%ReqLLM.Response{message: %ReqLLM.Message{reasoning_details: nil}}),
-    do: nil
+  defp extract_reasoning_text(%ReqLLM.Response{message: %ReqLLM.Message{} = msg}) do
+    # Two upstream paths for chain-of-thought content, depending on the
+    # provider's ReqLLM adapter:
+    #
+    # 1. `message.reasoning_details` — a list of structured
+    #    `ReasoningDetails`. Used by providers that surface reasoning
+    #    as a separate top-level field (some OpenAI o-series paths,
+    #    certain Anthropic flows).
+    #
+    # 2. `message.content` parts with `type: :thinking` — used by
+    #    Ollama for reasoning models like kimi-k2.6:cloud and the
+    #    gemma-3-it thinking variants. Pre-fix, this path was silently
+    #    dropped — `reasoning_content` ended up nil even though the
+    #    model HAD emitted reasoning. Worse, when a reasoning model
+    #    exhausted its budget mid-CoT and produced no final `:text`
+    #    part, `text` came back "" with no signal as to why.
+    #
+    # Combine both sources; nil if neither yields text.
+    reasoning_from_details(msg) || reasoning_from_thinking_parts(msg)
+  end
 
-  defp extract_reasoning_text(%ReqLLM.Response{
-         message: %ReqLLM.Message{reasoning_details: details}
-       })
+  defp extract_reasoning_text(_), do: nil
+
+  defp reasoning_from_details(%ReqLLM.Message{reasoning_details: nil}), do: nil
+
+  defp reasoning_from_details(%ReqLLM.Message{reasoning_details: details})
        when is_list(details) do
     details
     |> Enum.map(fn %ReqLLM.Message.ReasoningDetails{text: text} -> text end)
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
-    |> case do
-      "" -> nil
-      joined -> joined
-    end
+    |> nil_if_blank()
   end
 
-  defp extract_reasoning_text(_), do: nil
+  defp reasoning_from_details(_), do: nil
+
+  defp reasoning_from_thinking_parts(%ReqLLM.Message{content: nil}), do: nil
+
+  defp reasoning_from_thinking_parts(%ReqLLM.Message{content: parts}) when is_list(parts) do
+    parts
+    |> Enum.filter(fn
+      %ReqLLM.Message.ContentPart{type: :thinking} -> true
+      _ -> false
+    end)
+    |> Enum.map(& &1.text)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+    |> nil_if_blank()
+  end
+
+  defp reasoning_from_thinking_parts(_), do: nil
+
+  defp nil_if_blank(""), do: nil
+  defp nil_if_blank(s) when is_binary(s), do: s
 
   defp translate_finish_reason(nil), do: :stop
   defp translate_finish_reason(:stop), do: :stop

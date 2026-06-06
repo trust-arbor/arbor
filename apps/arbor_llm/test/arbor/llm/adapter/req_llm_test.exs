@@ -413,6 +413,122 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       arbor_resp = Adapter.translate_response(req_resp, req)
       assert arbor_resp.reasoning_content == nil
     end
+
+    test "regression: :thinking content parts surface as reasoning_content" do
+      # Some providers (notably Ollama for kimi-k2.6:cloud and the
+      # gemma-thinking variants) put chain-of-thought into the
+      # message's CONTENT as `%ReqLLM.Message.ContentPart{type: :thinking}`
+      # instead of into the top-level `reasoning_details` field.
+      # Pre-fix, `extract_reasoning_text/1` only looked at
+      # `reasoning_details` so this path was silently dropped — the
+      # reasoning_content came back nil even when the model HAD
+      # emitted reasoning. Surfaced 2026-06-05 when the code-review
+      # pipeline switched to `kimi-k2.6:cloud` and got an empty
+      # response with no clue why.
+
+      req = %Request{provider: "ollama", model: "kimi-k2.6:cloud"}
+
+      msg = %ReqLLM.Message{
+        role: :assistant,
+        content: [
+          %ReqLLM.Message.ContentPart{
+            type: :thinking,
+            text: "Let me think about this. The user wants 2+2."
+          },
+          %ReqLLM.Message.ContentPart{type: :text, text: "4"}
+        ],
+        reasoning_details: nil
+      }
+
+      req_resp = %ReqLLM.Response{
+        id: "test",
+        model: "ollama/kimi-k2.6:cloud",
+        context: ReqLLM.Context.new([]),
+        message: msg,
+        stream?: false,
+        stream: nil,
+        usage: %{},
+        finish_reason: :stop,
+        provider_meta: %{},
+        error: nil
+      }
+
+      arbor_resp = Adapter.translate_response(req_resp, req)
+
+      assert arbor_resp.text == "4"
+      assert arbor_resp.reasoning_content =~ "Let me think about this"
+    end
+
+    test "regression: :thinking parts surface even when no :text part exists" do
+      # The diagnostic case from the code-review pipeline failure:
+      # a reasoning model can emit only thinking and run out of
+      # budget before producing a final answer. Without surfacing
+      # the thinking as reasoning_content, the caller sees an empty
+      # response with NO signal that the model was reasoning.
+
+      req = %Request{provider: "ollama", model: "kimi-k2.6:cloud"}
+
+      msg = %ReqLLM.Message{
+        role: :assistant,
+        content: [
+          %ReqLLM.Message.ContentPart{
+            type: :thinking,
+            text: "I need to think very carefully about this complex problem..."
+          }
+        ],
+        reasoning_details: nil
+      }
+
+      req_resp = %ReqLLM.Response{
+        id: "test",
+        model: "ollama/kimi-k2.6:cloud",
+        context: ReqLLM.Context.new([]),
+        message: msg,
+        stream?: false,
+        stream: nil,
+        usage: %{},
+        finish_reason: :length,
+        provider_meta: %{},
+        error: nil
+      }
+
+      arbor_resp = Adapter.translate_response(req_resp, req)
+
+      assert arbor_resp.text == ""
+      assert arbor_resp.reasoning_content =~ "think very carefully"
+      assert arbor_resp.finish_reason == :length
+    end
+
+    test "joins multiple :thinking content parts" do
+      req = %Request{provider: "ollama", model: "kimi-k2.6:cloud"}
+
+      msg = %ReqLLM.Message{
+        role: :assistant,
+        content: [
+          %ReqLLM.Message.ContentPart{type: :thinking, text: "First idea"},
+          %ReqLLM.Message.ContentPart{type: :thinking, text: "Second idea"},
+          %ReqLLM.Message.ContentPart{type: :text, text: "answer"}
+        ],
+        reasoning_details: nil
+      }
+
+      req_resp = %ReqLLM.Response{
+        id: "test",
+        model: "ollama/kimi-k2.6:cloud",
+        context: ReqLLM.Context.new([]),
+        message: msg,
+        stream?: false,
+        stream: nil,
+        usage: %{},
+        finish_reason: :stop,
+        provider_meta: %{},
+        error: nil
+      }
+
+      arbor_resp = Adapter.translate_response(req_resp, req)
+
+      assert arbor_resp.reasoning_content == "First idea\nSecond idea"
+    end
   end
 
   describe "translate_tools/1 — Session 4 parity" do
