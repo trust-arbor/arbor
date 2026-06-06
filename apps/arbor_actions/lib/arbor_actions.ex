@@ -142,6 +142,20 @@ defmodule Arbor.Actions do
         []
       end
 
+    # For fs actions, plumb `:file_path` through to Security.authorize so
+    # the synthesis path in `Security.maybe_synthesize_fs_path_uri/2` can
+    # turn the bare `arbor://fs/<op>` resource into the path-embedded
+    # form. Without this, path-scoped caps (like the per-run identity
+    # caps minted from `.caps.json` for the scheduler pipelines) don't
+    # match the bare URI in `uri_matches?/2`, AuthDecision falls through
+    # to PolicyEnforcer, and the auth chain hits the approval gate.
+    # Surfaced 2026-06-06 by the morning-digest LLM pipelines.
+    auth_opts =
+      case extract_fs_path(resource, params) do
+        nil -> auth_opts
+        path -> Keyword.put(auth_opts, :file_path, path)
+      end
+
     case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
       result
       when result == {:ok, :authorized} or
@@ -1061,4 +1075,16 @@ defmodule Arbor.Actions do
       uri
     end
   end
+
+  # For fs actions, pull `path` from params so `Security.authorize` can
+  # synthesize the path-embedded URI. Returns nil for non-fs actions or
+  # when no path param is present.
+  defp extract_fs_path(resource, params) when is_map(params) do
+    if is_binary(resource) and String.starts_with?(resource, "arbor://fs/") do
+      Map.get(params, :path) || Map.get(params, "path") ||
+        Map.get(params, :file_path) || Map.get(params, "file_path")
+    end
+  end
+
+  defp extract_fs_path(_resource, _params), do: nil
 end
