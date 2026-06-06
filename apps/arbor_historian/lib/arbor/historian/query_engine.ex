@@ -31,7 +31,7 @@ defmodule Arbor.Historian.QueryEngine do
   alias Arbor.Historian.HistoryEntry
   alias Arbor.Historian.StreamIds
   alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
-  alias Arbor.Persistence.EventLog.Postgres, as: PersistenceDurable
+  alias Arbor.Persistence.EventLog.Ecto, as: PersistenceDurable
   alias Arbor.Signals
 
   @type query_opts :: [

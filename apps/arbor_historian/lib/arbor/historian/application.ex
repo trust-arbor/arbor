@@ -33,7 +33,7 @@ defmodule Arbor.Historian.Application do
     case Supervisor.start_link(children, opts) do
       {:ok, pid} ->
         if children != [] do
-          replay_from_postgres()
+          replay_from_durable()
           emit_started()
         end
 
@@ -44,21 +44,23 @@ defmodule Arbor.Historian.Application do
     end
   end
 
-  # Replay durable events from Postgres into the ETS EventLog.
-  # This populates the fast query cache with events persisted before restart.
-  defp replay_from_postgres do
-    postgres = Arbor.Persistence.EventLog.Postgres
+  # Replay durable events from the SQL backend into the ETS EventLog.
+  # This populates the fast query cache with events persisted before
+  # restart. The durable backend is adapter-agnostic (Postgres or
+  # SQLite3 via the configured `Arbor.Persistence.Repo` adapter).
+  defp replay_from_durable do
+    durable = Arbor.Persistence.EventLog.Ecto
     ets = Arbor.Persistence.EventLog.ETS
     repo = Arbor.Persistence.Repo
 
-    if Code.ensure_loaded?(postgres) and Code.ensure_loaded?(repo) and Process.whereis(repo) do
+    if Code.ensure_loaded?(durable) and Code.ensure_loaded?(repo) and Process.whereis(repo) do
       Task.start(fn ->
         try do
-          case apply(postgres, :list_streams, [[repo: repo]]) do
+          case apply(durable, :list_streams, [[repo: repo]]) do
             {:ok, streams} ->
               total =
                 Enum.reduce(streams, 0, fn stream_id, count ->
-                  case apply(postgres, :read_stream, [stream_id, [repo: repo]]) do
+                  case apply(durable, :read_stream, [stream_id, [repo: repo]]) do
                     {:ok, events} ->
                       Enum.each(events, fn event ->
                         ets.append(stream_id, event, name: @event_log_name)

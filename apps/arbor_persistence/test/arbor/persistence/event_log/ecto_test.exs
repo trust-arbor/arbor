@@ -1,6 +1,12 @@
-defmodule Arbor.Persistence.EventLog.PostgresTest do
+defmodule Arbor.Persistence.EventLog.EctoTest do
   @moduledoc """
-  Tests for the PostgreSQL EventLog backend.
+  Tests for the Ecto-backed EventLog (adapter-agnostic — the module
+  works against PostgreSQL or SQLite3 depending on Repo config).
+
+  These tests target PostgreSQL specifically because they rely on the
+  `Ecto.Adapters.SQL.Sandbox` pool, which is a Postgres-only feature.
+  The module itself is unit-tested against SQLite indirectly via the
+  `:fast` ETS+fallthrough suite.
 
   ## Setup Required
 
@@ -15,7 +21,7 @@ defmodule Arbor.Persistence.EventLog.PostgresTest do
 
   Or for just this file:
 
-      mix test apps/arbor_persistence/test/arbor/persistence/event_log/postgres_test.exs --include database
+      mix test apps/arbor_persistence/test/arbor/persistence/event_log/ecto_test.exs --include database
 
   ## Configuration
 
@@ -32,7 +38,7 @@ defmodule Arbor.Persistence.EventLog.PostgresTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Persistence.Event
-  alias Arbor.Persistence.EventLog.Postgres, as: EventLog
+  alias Arbor.Persistence.EventLog.Ecto, as: EventLog
   alias Arbor.Persistence.Repo
 
   @moduletag :integration
@@ -85,7 +91,9 @@ defmodule Arbor.Persistence.EventLog.PostgresTest do
 
       {:ok, [a1]} = EventLog.append("stream-a", events_a, repo: Repo)
       {:ok, [b1]} = EventLog.append("stream-b", events_b, repo: Repo)
-      {:ok, [a2]} = EventLog.append("stream-a", [Event.new("stream-a", "test.a2", %{})], repo: Repo)
+
+      {:ok, [a2]} =
+        EventLog.append("stream-a", [Event.new("stream-a", "test.a2", %{})], repo: Repo)
 
       # Event numbers are per-stream
       assert a1.event_number == 1
@@ -236,7 +244,11 @@ defmodule Arbor.Persistence.EventLog.PostgresTest do
 
     test "returns total events across all streams" do
       {:ok, _} = EventLog.append("stream-a", [Event.new("stream-a", "t", %{})], repo: Repo)
-      {:ok, _} = EventLog.append("stream-b", [Event.new("stream-b", "t", %{}), Event.new("stream-b", "t", %{})], repo: Repo)
+
+      {:ok, _} =
+        EventLog.append(
+          "stream-b",
+          [Event.new("stream-b", "t", %{}), Event.new("stream-b", "t", %{})], repo: Repo)
 
       assert {:ok, 3} = EventLog.event_count(repo: Repo)
     end
