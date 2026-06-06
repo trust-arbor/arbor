@@ -1,31 +1,31 @@
 {
-  "version": 1,
-  "issuer_id": "agent_30b455a27f7f4e02ef291fd9f7862677f731a1f8b08c997f5fb8ad430d594b6e",
   "capabilities": [
     {
-      "resource_uri": "arbor://shell/exec/git",
-      "constraints": {}
+      "constraints": {},
+      "resource_uri": "arbor://shell/exec/git"
     },
     {
-      "resource_uri": "arbor://shell/exec/mix/test",
-      "constraints": {}
+      "constraints": {},
+      "resource_uri": "arbor://shell/exec/mix/test"
     },
     {
-      "resource_uri": "arbor://shell/exec/gh",
-      "constraints": {}
+      "constraints": {},
+      "resource_uri": "arbor://shell/exec/gh"
     },
     {
-      "resource_uri": "arbor://fs/read/Users/azmaveth/code/trust-arbor/arbor/**",
-      "constraints": {}
+      "constraints": {},
+      "resource_uri": "arbor://fs/read/Users/azmaveth/code/trust-arbor/arbor/**"
     },
     {
-      "resource_uri": "arbor://action/code_review/apply_changes",
-      "constraints": {}
+      "constraints": {},
+      "resource_uri": "arbor://action/code_review/apply_changes"
     },
     {
-      "resource_uri": "arbor://action/tdd/record_attempt",
-      "constraints": {}
+      "constraints": {},
+      "resource_uri": "arbor://action/tdd/record_attempt"
     }
   ],
-  "signature": ""
+  "issuer_id": "agent_30b455a27f7f4e02ef291fd9f7862677f731a1f8b08c997f5fb8ad430d594b6e",
+  "signature": "hc86KfL+uzY0gkAydL829hw+aPQUDHvcuqoB+Up8DGM4IV06rJ6tWgkKa8xmKCaDLworK4SLlC8BRyuKL5AJDA==",
+  "version": 1
 }
