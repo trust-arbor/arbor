@@ -3,10 +3,29 @@ defmodule Arbor.Historian.Application do
   Supervisor for the Historian subsystem.
 
   Starts:
-  1. Persistence.EventLog.ETS - Unified event storage (fast queries)
+  1. Persistence.EventLog.ETS - In-memory event cache for fast queries
   2. StreamRegistry - Tracks stream metadata
-  3. Startup replay - Loads durable events from the SQL backend
-     (Postgres or SQLite3, via the configured Repo adapter) into ETS
+  3. Metadata rehydrate - Aligns the cache's `stream_versions` and
+     `global_position` counters with the durable SQL backend
+     (Postgres or SQLite3, via the configured Repo adapter), without
+     replaying any events. The cache starts empty; reads for historical
+     events fall through to the durable backend at the query layer.
+
+  ## Boot behavior
+
+  Pre-2026-06-06: this supervisor used to spawn a background `Task`
+  that called `EventLog.ETS.append/3` for every event in the durable
+  log. With ~873k events on a hot dev instance, that loaded ~2.3 GB
+  into ETS and pinned the boot sequence's RAM curve to the durable
+  log's lifetime growth.
+
+  Post-2026-06-06: ETS is bounded by retention (24h default) and
+  reads fall through to the durable backend on cache miss
+  (`QueryEngine.fetch_events_with_fallthrough`). Boot only needs to
+  rehydrate the bookkeeping (max event_number per stream, max
+  global_position) so subsequent appends don't collide. That's two
+  SQL aggregate queries — order-of-magnitude faster boot, bounded
+  RAM, no semantic change for callers.
   """
 
   use Application
@@ -34,7 +53,7 @@ defmodule Arbor.Historian.Application do
     case Supervisor.start_link(children, opts) do
       {:ok, pid} ->
         if children != [] do
-          replay_from_durable()
+          hydrate_metadata_from_durable()
           emit_started()
         end
 
@@ -45,49 +64,47 @@ defmodule Arbor.Historian.Application do
     end
   end
 
-  # Replay durable events from the SQL backend into the ETS EventLog.
-  # This populates the fast query cache with events persisted before
-  # restart. The durable backend is adapter-agnostic (Postgres or
-  # SQLite3 via the configured `Arbor.Persistence.Repo` adapter).
-  defp replay_from_durable do
+  # Rehydrate the in-memory bookkeeping (stream_versions map +
+  # global_position counter) from the durable backend so that
+  # subsequent appends use correct, non-colliding values from t=0.
+  # Synchronous — boot blocks until done (~1s on a hot DB). If the
+  # Repo isn't available (some test setups, ETS-only dev instances),
+  # the cache starts at the zero state and is populated by new
+  # writes; historical queries return empty until events are written.
+  defp hydrate_metadata_from_durable do
     durable = Arbor.Persistence.EventLog.Ecto
     ets = Arbor.Persistence.EventLog.ETS
     repo = Arbor.Persistence.Repo
 
     if Code.ensure_loaded?(durable) and Code.ensure_loaded?(repo) and Process.whereis(repo) do
-      Task.start(fn ->
-        try do
-          case apply(durable, :list_streams, [[repo: repo]]) do
-            {:ok, streams} ->
-              total =
-                Enum.reduce(streams, 0, fn stream_id, count ->
-                  case apply(durable, :read_stream, [stream_id, [repo: repo]]) do
-                    {:ok, events} ->
-                      Enum.each(events, fn event ->
-                        ets.append(stream_id, event, name: @event_log_name)
-                      end)
+      try do
+        case apply(durable, :metadata_snapshot, [[repo: repo]]) do
+          {:ok, snapshot} ->
+            apply(ets, :rehydrate_metadata, [snapshot, [name: @event_log_name]])
+            stream_count = map_size(snapshot.stream_versions)
 
-                      count + length(events)
+            if stream_count > 0 or snapshot.global_position > 0 do
+              Logger.info(
+                "[Historian] Rehydrated metadata: #{stream_count} streams, global_position=#{snapshot.global_position}"
+              )
+            end
 
-                    {:error, _} ->
-                      count
-                  end
-                end)
-
-              if total > 0 do
-                Logger.info(
-                  "[Historian] Replayed #{total} events from #{length(streams)} streams"
-                )
-              end
-
-            {:error, reason} ->
-              Logger.warning("[Historian] Failed to list streams for replay: #{inspect(reason)}")
-          end
-        rescue
-          e ->
-            Logger.warning("[Historian] Startup replay failed: #{Exception.message(e)}")
+          {:error, reason} ->
+            Logger.warning(
+              "[Historian] Metadata rehydrate failed: #{inspect(reason)}; cache starts at zero state"
+            )
         end
-      end)
+      rescue
+        e ->
+          Logger.warning(
+            "[Historian] Metadata rehydrate exception: #{Exception.message(e)}; cache starts at zero state"
+          )
+      catch
+        :exit, reason ->
+          Logger.warning(
+            "[Historian] Metadata rehydrate exit: #{inspect(reason)}; cache starts at zero state"
+          )
+      end
     end
   end
 

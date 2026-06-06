@@ -219,6 +219,19 @@ defmodule Arbor.Historian.QueryEngineTest do
       assert is_list(entries)
     end
 
+    test "empty cache + integer :from triggers fallthrough check (PR 2 fix)", %{ctx: ctx} do
+      # After PR 2, ETS starts empty at boot for streams that exist
+      # only in the durable backend. The fallthrough must fire when
+      # `oldest_event_number` returns nil. Without the durable backend
+      # running in tests, the path falls back to cache (empty list) —
+      # the important thing is that this does NOT raise.
+      assert {:ok, []} =
+               Arbor.Historian.QueryEngine.read_stream("stream_only_in_durable",
+                 event_log: ctx.event_log,
+                 from: 5
+               )
+    end
+
     test "non-integer :from skips fallthrough (post-filter case)", %{ctx: ctx} do
       # query/1 passes DateTime values via :from / :to as post-filter
       # bounds, not event_number cursors. The fallthrough path must

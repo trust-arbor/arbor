@@ -121,6 +121,34 @@ defmodule Arbor.Persistence.EventLog.ETS do
     GenServer.call(name, {:oldest_event_number, stream_id})
   end
 
+  @doc """
+  Align the in-memory `stream_versions` map and `global_position`
+  counter with a snapshot from the durable backend, without inserting
+  any events into the ETS tables.
+
+  At boot time, the durable backend may hold many streams whose latest
+  `event_number` and the system's latest `global_position` need to be
+  reflected here so that subsequent `append/3` calls assign the correct
+  next values (no collisions with already-persisted events). The actual
+  events stay in the durable backend; reads for historical events go
+  through fallthrough at the query layer.
+
+  Idempotent: the `stream_versions` map is merged (max wins per stream)
+  and `global_position` takes the max of current and incoming. Safe to
+  call multiple times.
+  """
+  @spec rehydrate_metadata(
+          %{
+            stream_versions: %{String.t() => non_neg_integer()},
+            global_position: non_neg_integer()
+          },
+          keyword()
+        ) :: :ok
+  def rehydrate_metadata(snapshot, opts) do
+    name = Keyword.fetch!(opts, :name)
+    GenServer.call(name, {:rehydrate_metadata, snapshot})
+  end
+
   # --- GenServer ---
 
   def start_link(opts) do
@@ -261,6 +289,18 @@ defmodule Arbor.Persistence.EventLog.ETS do
     }
 
     {:reply, {:ok, snapshot}, state}
+  end
+
+  def handle_call({:rehydrate_metadata, snapshot}, _from, state) do
+    merged_stream_versions =
+      Map.merge(state.stream_versions, snapshot.stream_versions, fn _k, current, incoming ->
+        max(current, incoming)
+      end)
+
+    new_global_position = max(state.global_position, snapshot.global_position)
+
+    {:reply, :ok,
+     %{state | stream_versions: merged_stream_versions, global_position: new_global_position}}
   end
 
   def handle_call({:oldest_event_number, stream_id}, _from, state) do
