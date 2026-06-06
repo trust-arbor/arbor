@@ -154,6 +154,42 @@ defmodule Arbor.Security.IssuerRegistry do
   end
 
   @doc """
+  Replace the envelope list for an active issuer.
+
+  Use this when an operator needs to expand or narrow an existing
+  issuer's authority WITHOUT going through revoke + re-register, which
+  would invalidate every `.caps.json` previously signed under the
+  original envelope set even if those files would still fit within the
+  new envelopes.
+
+  Semantics:
+    - Replaces the FULL envelope list (not appends). Callers pass the
+      complete new set; what isn't in the list is dropped.
+    - Issuer must be active. Revoked issuers can't be updated — caller
+      must explicitly re-enroll if they want to bring a revoked issuer
+      back, which is a deliberate friction point (key compromise
+      shouldn't be quietly undone).
+    - Validates the new list is non-empty and contains only `Capability`
+      structs (same as `register/3`).
+    - Persists immediately via BufferedStore.
+
+  ## Options
+
+    - `:reason` — human-readable reason for the update, recorded for audit.
+
+  Returns `:ok | {:error, :not_found | :revoked | :empty_envelopes |
+  :invalid_envelope}`.
+  """
+  @spec update_envelopes(String.t(), [Capability.t()], keyword()) ::
+          :ok | {:error, atom() | tuple()}
+  def update_envelopes(issuer_id, envelope_caps, opts \\ [])
+
+  def update_envelopes(issuer_id, envelope_caps, opts)
+      when is_binary(issuer_id) and is_list(envelope_caps) do
+    GenServer.call(__MODULE__, {:update_envelopes, issuer_id, envelope_caps, opts})
+  end
+
+  @doc """
   List all enrolled issuers with their status. Used by audit tooling.
   """
   @spec list() :: [
@@ -262,6 +298,42 @@ defmodule Arbor.Security.IssuerRegistry do
   def handle_call(:list, _from, state) do
     entries = list_all_entries()
     {:reply, entries, state}
+  end
+
+  @impl true
+  def handle_call({:update_envelopes, issuer_id, envelope_caps, opts}, _from, state) do
+    cond do
+      envelope_caps == [] ->
+        {:reply, {:error, :empty_envelopes}, state}
+
+      not Enum.all?(envelope_caps, &match?(%Capability{}, &1)) ->
+        {:reply, {:error, :invalid_envelope}, state}
+
+      true ->
+        case load_entry(issuer_id) do
+          nil ->
+            {:reply, {:error, :not_found}, state}
+
+          %{status: :revoked} ->
+            # Revoked issuers can't be updated. The deliberate friction
+            # is the point: key compromise shouldn't be quietly undone
+            # by a "just add this envelope" call. Operators must
+            # consciously re-enroll if they want to bring a revoked
+            # issuer back.
+            {:reply, {:error, :revoked}, state}
+
+          entry ->
+            updated = %{
+              entry
+              | max_envelope_caps: envelope_caps,
+                status_changed_at: DateTime.utc_now(),
+                status_reason: Keyword.get(opts, :reason, entry.status_reason)
+            }
+
+            persist_to_store(issuer_id, updated)
+            {:reply, :ok, state}
+        end
+    end
   end
 
   # ===========================================================================
