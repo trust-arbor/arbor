@@ -9,14 +9,20 @@ defmodule Arbor.Historian.QueryEngine do
 
   The ETS EventLog is bounded by time-based retention (24h default). When
   a read requests events older than what's in cache, this module falls
-  through to the durable Postgres backend for the full requested range
-  and returns those results. The cache stays authoritative for recent
-  reads (sub-microsecond); older reads pay one Postgres round-trip.
+  through to the durable Ecto-backed EventLog for the full requested
+  range and returns those results. The cache stays authoritative for
+  recent reads (sub-microsecond); older reads pay one durable-backend
+  round-trip.
 
-  Fallthrough is best-effort: if Postgres is unavailable or errors, the
-  cache result is returned unchanged. Configurations without Postgres
-  (SQLite-only setups, dev instances) get cache-only semantics, same as
-  before.
+  The durable backend is adapter-agnostic — it dispatches via
+  `Arbor.Persistence.Repo` to whichever Ecto adapter is configured
+  (PostgreSQL or SQLite3). The fallthrough fires regardless of adapter
+  choice.
+
+  Fallthrough is best-effort: if the durable backend is unavailable or
+  errors, the cache result is returned unchanged. Configurations without
+  a started Repo (some test setups, ETS-only dev instances) get
+  cache-only semantics, same as before.
   """
 
   require Logger
@@ -25,7 +31,7 @@ defmodule Arbor.Historian.QueryEngine do
   alias Arbor.Historian.HistoryEntry
   alias Arbor.Historian.StreamIds
   alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
-  alias Arbor.Persistence.EventLog.Postgres, as: PersistencePostgres
+  alias Arbor.Persistence.EventLog.Postgres, as: PersistenceDurable
   alias Arbor.Signals
 
   @type query_opts :: [
@@ -63,11 +69,13 @@ defmodule Arbor.Historian.QueryEngine do
 
   # Try ETS first. If the cache's oldest event_number is greater than the
   # requested `from`, events in [from..oldest-1] have aged past retention
-  # and only exist in Postgres — fetch the full range from there.
+  # and only exist in the durable backend — fetch the full range from
+  # there. The durable backend is Ecto-based and adapter-agnostic; this
+  # works for both PostgreSQL and SQLite3 configurations.
   #
-  # Cache-only fallback when Postgres isn't running (SQLite setups, tests
-  # without a Repo) — return whatever ETS gave us, log at debug level so
-  # the divergence is observable without spamming.
+  # Cache-only fallback when the Repo isn't running (some test setups,
+  # ETS-only dev instances) — return whatever ETS gave us, log at debug
+  # level so the divergence is observable without spamming.
   defp fetch_events_with_fallthrough(stream_id, opts, event_log) do
     ets_result = PersistenceETS.read_stream(stream_id, name: event_log)
     from = Keyword.get(opts, :from)
@@ -89,14 +97,14 @@ defmodule Arbor.Historian.QueryEngine do
          {:ok, oldest} when not is_nil(oldest) <-
            PersistenceETS.oldest_event_number(stream_id, name: event_log),
          true <- oldest > from + 1,
-         true <- postgres_available?() do
-      case PersistencePostgres.read_stream(stream_id, opts) do
+         true <- durable_backend_available?() do
+      case PersistenceDurable.read_stream(stream_id, opts) do
         {:ok, durable_events} ->
           {:ok, durable_events}
 
         {:error, reason} ->
           Logger.debug(
-            "QueryEngine: fallthrough to Postgres failed for #{stream_id}: #{inspect(reason)}; serving cache result"
+            "QueryEngine: fallthrough to durable backend failed for #{stream_id}: #{inspect(reason)}; serving cache result"
           )
 
           ets_result
@@ -106,7 +114,11 @@ defmodule Arbor.Historian.QueryEngine do
     end
   end
 
-  defp postgres_available? do
+  # The Repo dispatches to whichever Ecto adapter is configured
+  # (Postgres or SQLite3 — see `Arbor.Persistence.Repo`). This check
+  # is adapter-agnostic; the only thing we need is a running Repo
+  # process to talk to.
+  defp durable_backend_available? do
     repo = Arbor.Persistence.Repo
     Code.ensure_loaded?(repo) and Process.whereis(repo) != nil
   end

@@ -191,10 +191,12 @@ defmodule Arbor.Historian.QueryEngineTest do
   describe "cache-miss fallthrough (graceful degradation)" do
     # When ETS has events from oldest_event_number onward and a read
     # requests events from BEFORE that, the fallthrough check fires.
-    # In tests there's no Postgres Repo running, so `postgres_available?`
+    # In tests there's no Repo running, so `durable_backend_available?`
     # returns false — the cache result is returned unchanged. This guards
     # the degradation path from accidental breakage by a future refactor.
-    test "with :from earlier than cache coverage, returns cache result when Postgres unavailable",
+    # The durable backend is adapter-agnostic (Postgres or SQLite3) — the
+    # check is on Repo presence, not on a specific adapter.
+    test "with :from earlier than cache coverage, returns cache result when durable backend unavailable",
          %{
            ctx: ctx
          } do
