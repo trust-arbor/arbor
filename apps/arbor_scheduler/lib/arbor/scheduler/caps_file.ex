@@ -74,7 +74,8 @@ defmodule Arbor.Scheduler.CapsFile do
 
   @type cap_descriptor :: %{
           required(:resource_uri) => String.t(),
-          required(:constraints) => map()
+          required(:constraints) => map(),
+          required(:issuer_id) => String.t()
         }
 
   @doc """
@@ -108,7 +109,10 @@ defmodule Arbor.Scheduler.CapsFile do
            lookup_issuer(parsed.issuer_id),
          :ok <- verify_signature(parsed, pk),
          :ok <- verify_all_caps_in_envelope(parsed.capabilities, envelopes, parsed.issuer_id) do
-      {:ok, parsed.capabilities}
+      # Tag each descriptor with the verified issuer. RunIdentity carries
+      # this forward into capability metadata as provenance, which
+      # AuthDecision uses to bypass ceiling :ask for bounded, signed grants.
+      {:ok, Enum.map(parsed.capabilities, &Map.put(&1, :issuer_id, parsed.issuer_id))}
     end
   end
 

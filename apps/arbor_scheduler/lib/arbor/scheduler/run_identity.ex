@@ -163,10 +163,24 @@ defmodule Arbor.Scheduler.RunIdentity do
   defp grant_run_caps(agent_id, descriptors) do
     descriptors
     |> Enum.reduce_while({:ok, []}, fn descriptor, {:ok, acc} ->
+      # Provenance records that this cap was minted from a verified signed
+      # envelope. `AuthDecision.check_approval` consults this metadata to
+      # bypass the security ceiling :ask gate for parameter-bounded caps on
+      # the "askable" URI classes (fs/write, code/write, file.* actions).
+      # Always-locked URIs (shell, governance, code.hot_load) ignore this
+      # marker — pre-approval can't unlock parameter-unbounded blast radius.
+      metadata = %{
+        provenance: %{
+          source: :caps_file,
+          issuer_id: descriptor.issuer_id
+        }
+      }
+
       case Security.grant(
              principal: agent_id,
              resource: descriptor.resource_uri,
-             constraints: descriptor.constraints
+             constraints: descriptor.constraints,
+             metadata: metadata
            ) do
         {:ok, cap} -> {:cont, {:ok, [cap | acc]}}
         {:error, reason} -> {:halt, {:error, {:grant_failed, descriptor.resource_uri, reason}}}
