@@ -5,7 +5,8 @@ defmodule Arbor.Historian.Application do
   Starts:
   1. Persistence.EventLog.ETS - Unified event storage (fast queries)
   2. StreamRegistry - Tracks stream metadata
-  3. Startup replay - Loads durable events from Postgres into ETS
+  3. Startup replay - Loads durable events from the SQL backend
+     (Postgres or SQLite3, via the configured Repo adapter) into ETS
   """
 
   use Application
