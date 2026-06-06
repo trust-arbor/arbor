@@ -24,8 +24,8 @@ defmodule Arbor.Persistence.MixProject do
           Arbor.Persistence.Schemas.Event,
           Arbor.Persistence.Schemas.Record,
           Arbor.Persistence.Schemas.MemoryEmbedding,
-          # PostgreSQL backends - require database for testing
-          Arbor.Persistence.EventLog.Postgres,
+          # SQL backends - require database for testing
+          Arbor.Persistence.EventLog.Ecto,
           Arbor.Persistence.QueryableStore.Postgres,
           Arbor.Persistence.Repo,
           # Test support modules

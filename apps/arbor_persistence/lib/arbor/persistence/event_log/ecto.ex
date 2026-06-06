@@ -1,8 +1,14 @@
-defmodule Arbor.Persistence.EventLog.Postgres do
+defmodule Arbor.Persistence.EventLog.Ecto do
   @moduledoc """
-  PostgreSQL-backed EventLog implementation.
+  Ecto-backed EventLog implementation.
 
-  Provides durable, ACID-compliant event storage with support for:
+  Provides durable, ACID-compliant event storage. Adapter-agnostic: this
+  module uses only `Ecto.Query` plus `Arbor.Persistence.Repo`, which
+  dispatches to whichever Ecto adapter is configured at compile time
+  (PostgreSQL or SQLite3 — see `Arbor.Persistence.Repo` for the
+  selection logic).
+
+  Supports:
   - Append-only event streams
   - Global ordering via sequence
   - Stream versioning with optimistic concurrency
@@ -10,7 +16,7 @@ defmodule Arbor.Persistence.EventLog.Postgres do
 
   ## Configuration
 
-  The Repo module must be configured and started:
+  The Repo module must be configured and started. For PostgreSQL:
 
       config :arbor_persistence, Arbor.Persistence.Repo,
         database: "arbor_dev",
@@ -18,17 +24,22 @@ defmodule Arbor.Persistence.EventLog.Postgres do
         password: System.get_env("DB_PASS", "postgres"),
         hostname: "localhost"
 
+  For SQLite3:
+
+      config :arbor_persistence, Arbor.Persistence.Repo,
+        database: Path.expand("~/.arbor/arbor_dev.db")
+
   ## Usage
 
       # Append events to a stream
       event = Event.new("stream-123", "user.created", %{name: "Alice"})
-      {:ok, [persisted]} = Postgres.append("stream-123", [event], repo: MyRepo)
+      {:ok, [persisted]} = Ecto.append("stream-123", [event], repo: MyRepo)
 
       # Read events from a stream
-      {:ok, events} = Postgres.read_stream("stream-123", repo: MyRepo)
+      {:ok, events} = Ecto.read_stream("stream-123", repo: MyRepo)
 
       # Read with options
-      {:ok, events} = Postgres.read_stream("stream-123",
+      {:ok, events} = Ecto.read_stream("stream-123",
         repo: MyRepo,
         from: 10,
         limit: 100
@@ -245,8 +256,10 @@ defmodule Arbor.Persistence.EventLog.Postgres do
   @doc """
   Subscribe to new events on a stream.
 
-  Note: PostgreSQL subscriptions require pg_notify setup.
-  This is a placeholder that returns an error for now.
+  Note: durable-backed subscriptions are adapter-specific (pg_notify on
+  PostgreSQL, no native equivalent on SQLite3). This is a placeholder
+  that returns an error for now — real-time subscribers should use the
+  ETS-backed EventLog, which carries the pubsub path.
   """
   @impl true
   def subscribe(_stream_id, _pid, _opts \\ []) do

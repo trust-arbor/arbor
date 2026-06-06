@@ -119,14 +119,16 @@ defmodule Arbor.Signals do
         apply(persistence_mod, :append, [event_log_name, event_log_backend, stream_id, event])
       end
 
-      # Postgres write (durable, async)
-      postgres_mod = Arbor.Persistence.EventLog.Postgres
+      # Durable write (async). The Ecto-backed EventLog dispatches via
+      # `Arbor.Persistence.Repo` to whichever adapter is configured —
+      # PostgreSQL or SQLite3.
+      durable_mod = Arbor.Persistence.EventLog.Ecto
       repo_mod = Arbor.Persistence.Repo
 
-      if Code.ensure_loaded?(postgres_mod) && Process.whereis(repo_mod) do
+      if Code.ensure_loaded?(durable_mod) && Process.whereis(repo_mod) do
         Task.start(fn ->
           try do
-            apply(postgres_mod, :append, [stream_id, event])
+            apply(durable_mod, :append, [stream_id, event])
           rescue
             _ -> :ok
           end
@@ -224,6 +226,7 @@ defmodule Arbor.Signals do
     # Stamp emitter_pid and origin_node if not already set
     signal = if signal.emitter_pid, do: signal, else: %{signal | emitter_pid: self()}
     signal = if signal.origin_node, do: signal, else: %{signal | origin_node: node()}
+
     if healthy?() do
       # Encrypt restricted-topic signals BEFORE storing to prevent
       # plaintext sensitive data in the Store. Bus.publish will skip
