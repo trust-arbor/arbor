@@ -95,7 +95,8 @@ defmodule Arbor.Scheduler.RunIdentity do
          {:ok, identity} <- generate_identity(),
          :ok <- register_identity(identity),
          {:ok, lobby_cap} <- grant_orchestrator_execute(identity.agent_id),
-         {:ok, run_caps} <- grant_run_caps(identity.agent_id, descriptors) do
+         {:ok, run_caps} <- grant_run_caps(identity.agent_id, descriptors),
+         :ok <- set_trust_profile_rules(identity.agent_id, descriptors) do
       {:ok,
        %{
          agent_id: identity.agent_id,
@@ -174,6 +175,104 @@ defmodule Arbor.Scheduler.RunIdentity do
     |> case do
       {:ok, caps} -> {:ok, Enum.reverse(caps)}
       err -> err
+    end
+  end
+
+  # Set trust profile rules on the ephemeral identity to `:allow` for
+  # each granted cap's URI prefix. Without this, AuthDecision's
+  # `check_approval/3` consults the trust profile AFTER finding the
+  # cap; the default `:ask` mode for fs/shell/etc. operations forces
+  # the auth chain to require human approval, which then times out
+  # because the ephemeral identity has no human presence. Mirrors the
+  # pattern in `Arbor.Scheduler.Identity.ensure_trust_profile/1`.
+  #
+  # The lobby cap (`arbor://orchestrator/execute/**`) is handled
+  # separately by the same trust rule pattern. Each descriptor's URI
+  # gets its `best_rule_prefix` (e.g. `arbor://fs/read/<path>/**`
+  # becomes `arbor://fs/read`) and that prefix is allowed.
+  #
+  # Surfaced 2026-06-06 by the morning-digest LLM pipelines hitting
+  # the approval gate even with matching per-run caps.
+  defp set_trust_profile_rules(agent_id, descriptors) do
+    trust_authority = Arbor.Trust.Authority
+    trust_store = Arbor.Trust.Store
+
+    if Code.ensure_loaded?(trust_authority) and Code.ensure_loaded?(trust_store) and
+         function_exported?(trust_store, :profile_exists?, 1) do
+      prefixes =
+        descriptors
+        |> Enum.map(&trust_rule_prefix(&1.resource_uri))
+        |> Enum.uniq()
+        # Lobby cap covers pipeline traversal — needed by every run.
+        |> List.insert_at(0, "arbor://orchestrator/execute")
+
+      with :ok <- ensure_profile_exists(agent_id, trust_authority, trust_store),
+           :ok <- apply_allow_rules(agent_id, prefixes, trust_store) do
+        :ok
+      else
+        {:error, reason} ->
+          Logger.warning(
+            "[RunIdentity] trust profile setup failed for #{agent_id}: #{inspect(reason)}"
+          )
+
+          # Don't fail the mint — the cap chain may still allow the run
+          # depending on trust config. Logged for visibility.
+          :ok
+      end
+    else
+      # arbor_trust not loaded — best-effort skip.
+      :ok
+    end
+  end
+
+  defp ensure_profile_exists(agent_id, trust_authority, trust_store) do
+    if apply(trust_store, :profile_exists?, [agent_id]) do
+      :ok
+    else
+      profile = apply(trust_authority, :new_profile, [agent_id, :untrusted])
+
+      case apply(trust_store, :store_profile, [profile]) do
+        {:ok, _} -> :ok
+        :ok -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp apply_allow_rules(agent_id, prefixes, trust_store) do
+    result =
+      apply(trust_store, :update_profile, [
+        agent_id,
+        fn profile ->
+          rules = profile.rules || %{}
+          new_rules = Enum.reduce(prefixes, rules, fn p, acc -> Map.put(acc, p, :allow) end)
+          %{profile | rules: new_rules}
+        end
+      ])
+
+    case result do
+      {:ok, _} -> :ok
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # Mirrors `Arbor.Trust.Store.best_rule_prefix/1`. Extracts the
+  # `arbor://<domain>/<operation>` prefix from a fuller URI. Used to set
+  # trust rules at the operation scope instead of per-path.
+  defp trust_rule_prefix(uri) when is_binary(uri) do
+    case String.split(uri, "/") do
+      ["arbor:", "", domain, operation | _] -> "arbor://#{domain}/#{operation}"
+      ["arbor:", "", domain | _] -> "arbor://#{domain}"
+      _ -> uri
     end
   end
 
