@@ -4,12 +4,28 @@ defmodule Arbor.Historian.QueryEngine do
 
   Reads events from EventLog streams and converts them to HistoryEntries.
   Provides convenience functions for common access patterns.
+
+  ## Cache-miss fallthrough
+
+  The ETS EventLog is bounded by time-based retention (24h default). When
+  a read requests events older than what's in cache, this module falls
+  through to the durable Postgres backend for the full requested range
+  and returns those results. The cache stays authoritative for recent
+  reads (sub-microsecond); older reads pay one Postgres round-trip.
+
+  Fallthrough is best-effort: if Postgres is unavailable or errors, the
+  cache result is returned unchanged. Configurations without Postgres
+  (SQLite-only setups, dev instances) get cache-only semantics, same as
+  before.
   """
+
+  require Logger
 
   alias Arbor.Historian.EventConverter
   alias Arbor.Historian.HistoryEntry
   alias Arbor.Historian.StreamIds
   alias Arbor.Persistence.EventLog.ETS, as: PersistenceETS
+  alias Arbor.Persistence.EventLog.Postgres, as: PersistencePostgres
   alias Arbor.Signals
 
   @type query_opts :: [
@@ -30,7 +46,7 @@ defmodule Arbor.Historian.QueryEngine do
   def read_stream(stream_id, opts) do
     event_log = Keyword.get(opts, :event_log, Arbor.Historian.EventLog.ETS)
 
-    case PersistenceETS.read_stream(stream_id, name: event_log) do
+    case fetch_events_with_fallthrough(stream_id, opts, event_log) do
       {:ok, persistence_events} ->
         entries =
           persistence_events
@@ -43,6 +59,56 @@ defmodule Arbor.Historian.QueryEngine do
         emit_query_failed(:read_stream, stream_id, reason)
         error
     end
+  end
+
+  # Try ETS first. If the cache's oldest event_number is greater than the
+  # requested `from`, events in [from..oldest-1] have aged past retention
+  # and only exist in Postgres — fetch the full range from there.
+  #
+  # Cache-only fallback when Postgres isn't running (SQLite setups, tests
+  # without a Repo) — return whatever ETS gave us, log at debug level so
+  # the divergence is observable without spamming.
+  defp fetch_events_with_fallthrough(stream_id, opts, event_log) do
+    ets_result = PersistenceETS.read_stream(stream_id, name: event_log)
+    from = Keyword.get(opts, :from)
+
+    # Fallthrough only applies when `:from` is an event_number (integer).
+    # `query/1` passes DateTime values via `:from`/`:to` as post-filter
+    # bounds — those aren't query-time event_number cursors and don't
+    # trigger fallthrough. The cache result is post-filtered by the
+    # caller.
+    if is_integer(from) do
+      maybe_fallthrough(stream_id, opts, from, event_log, ets_result)
+    else
+      ets_result
+    end
+  end
+
+  defp maybe_fallthrough(stream_id, opts, from, event_log, ets_result) do
+    with {:ok, _events} <- ets_result,
+         {:ok, oldest} when not is_nil(oldest) <-
+           PersistenceETS.oldest_event_number(stream_id, name: event_log),
+         true <- oldest > from + 1,
+         true <- postgres_available?() do
+      case PersistencePostgres.read_stream(stream_id, opts) do
+        {:ok, durable_events} ->
+          {:ok, durable_events}
+
+        {:error, reason} ->
+          Logger.debug(
+            "QueryEngine: fallthrough to Postgres failed for #{stream_id}: #{inspect(reason)}; serving cache result"
+          )
+
+          ets_result
+      end
+    else
+      _ -> ets_result
+    end
+  end
+
+  defp postgres_available? do
+    repo = Arbor.Persistence.Repo
+    Code.ensure_loaded?(repo) and Process.whereis(repo) != nil
   end
 
   @doc """

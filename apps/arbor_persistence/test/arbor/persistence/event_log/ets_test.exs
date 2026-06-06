@@ -265,4 +265,134 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       assert length(events) == 3
     end
   end
+
+  describe "stream-table dedup invariant" do
+    # PR landing 2026-06-06: stream table value type changed from full
+    # %Event{} to global_position integer. The two-index storage no
+    # longer doubles RAM cost. This test guards the shape so a future
+    # refactor doesn't silently revert it.
+    test "stream_table value is the global_position integer, not the event", %{name: name} do
+      ETS.append("s1", Event.new("s1", "t1", %{v: 1}), name: name)
+      ETS.append("s1", Event.new("s1", "t2", %{v: 2}), name: name)
+
+      state = :sys.get_state(name)
+      stream_entries = :ets.tab2list(state.stream_table)
+
+      # Expect [{{"s1", 1}, 1}, {{"s1", 2}, 2}] — pointer-only, not events.
+      assert length(stream_entries) == 2
+
+      Enum.each(stream_entries, fn {{stream_id, event_number}, value} ->
+        assert stream_id == "s1"
+        assert is_integer(event_number)
+
+        assert is_integer(value),
+               "stream_table value must be global_position, got: #{inspect(value)}"
+      end)
+    end
+
+    test "read_stream still returns full events after dedup", %{name: name} do
+      e1 = Event.new("s1", "first", %{v: 1})
+      e2 = Event.new("s1", "second", %{v: 2})
+
+      ETS.append("s1", [e1, e2], name: name)
+      {:ok, events} = ETS.read_stream("s1", name: name)
+
+      assert length(events) == 2
+
+      assert [%Event{type: "first", data: %{v: 1}}, %Event{type: "second", data: %{v: 2}}] =
+               events
+    end
+  end
+
+  describe "retention trim" do
+    # Trim is age-based. We force trim deterministically by sending the
+    # :trim_old_events message directly rather than waiting for the timer.
+    test "trims events whose timestamp is older than max_age_ms" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"el_retention_#{:erlang.unique_integer([:positive])}"
+      # 1-minute window; disable the periodic timer so the test drives trim
+      start_supervised!(
+        {ETS, name: name, max_age_ms: 60_000, trim_interval_ms: :disabled},
+        id: name
+      )
+
+      old = DateTime.utc_now() |> DateTime.add(-2 * 60 * 60, :second)
+      fresh = DateTime.utc_now()
+
+      old_event =
+        Event.new("s1", "old_event", %{}, timestamp: old)
+
+      fresh_event =
+        Event.new("s1", "fresh_event", %{}, timestamp: fresh)
+
+      ETS.append("s1", [old_event, fresh_event], name: name)
+
+      {:ok, before_trim} = ETS.read_stream("s1", name: name)
+      assert length(before_trim) == 2
+
+      # Force a trim sweep
+      send(Process.whereis(name), :trim_old_events)
+      # Allow the cast/info to be processed before reading.
+      _ = :sys.get_state(name)
+
+      {:ok, after_trim} = ETS.read_stream("s1", name: name)
+      assert length(after_trim) == 1
+      assert hd(after_trim).type == "fresh_event"
+    end
+
+    test "max_age_ms: :infinity disables trim" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"el_no_retention_#{:erlang.unique_integer([:positive])}"
+
+      start_supervised!(
+        {ETS, name: name, max_age_ms: :infinity, trim_interval_ms: :disabled},
+        id: name
+      )
+
+      ancient = DateTime.utc_now() |> DateTime.add(-365 * 24 * 60 * 60, :second)
+      ETS.append("s1", Event.new("s1", "ancient", %{}, timestamp: ancient), name: name)
+
+      send(Process.whereis(name), :trim_old_events)
+      _ = :sys.get_state(name)
+
+      {:ok, events} = ETS.read_stream("s1", name: name)
+      assert length(events) == 1
+    end
+  end
+
+  describe "oldest_event_number/2" do
+    test "returns nil for streams with no events in cache", %{name: name} do
+      assert {:ok, nil} = ETS.oldest_event_number("never_existed", name: name)
+    end
+
+    test "returns 1 immediately after the first append", %{name: name} do
+      ETS.append("s1", Event.new("s1", "t", %{}), name: name)
+      assert {:ok, 1} = ETS.oldest_event_number("s1", name: name)
+    end
+
+    test "advances after retention trims older events" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"el_oldest_#{:erlang.unique_integer([:positive])}"
+
+      start_supervised!(
+        {ETS, name: name, max_age_ms: 60_000, trim_interval_ms: :disabled},
+        id: name
+      )
+
+      old = DateTime.utc_now() |> DateTime.add(-2 * 60 * 60, :second)
+      fresh = DateTime.utc_now()
+
+      ETS.append("s1", Event.new("s1", "e1", %{}, timestamp: old), name: name)
+      ETS.append("s1", Event.new("s1", "e2", %{}, timestamp: old), name: name)
+      ETS.append("s1", Event.new("s1", "e3", %{}, timestamp: fresh), name: name)
+
+      assert {:ok, 1} = ETS.oldest_event_number("s1", name: name)
+
+      send(Process.whereis(name), :trim_old_events)
+      _ = :sys.get_state(name)
+
+      # First two events were trimmed, so oldest is now event_number 3.
+      assert {:ok, 3} = ETS.oldest_event_number("s1", name: name)
+    end
+  end
 end
