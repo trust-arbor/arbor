@@ -175,6 +175,13 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         {result, Map.put(span_meta, :result, outcome)}
       end)
 
+    # Opt-in auto-retry when a reasoning model exhausts max_tokens mid-CoT
+    # (text == "" + reasoning_content non-empty + finish_reason :length).
+    # Default off. Per-node attrs: `auto_retry_on_reasoning_cutoff="true"`
+    # and `auto_retry_max_tokens_multiplier="N"` (default 2). Retries ONCE;
+    # if the retry also cuts off, both warnings are appended and we give up.
+    llm_result = maybe_retry_on_reasoning_cutoff(llm_result, prompt, node, context, graph, opts)
+
     case llm_result do
       {:ok, raw_response} ->
         response = PipelineResponse.normalize(raw_response)
@@ -1114,6 +1121,111 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # Opt-in auto-retry for reasoning-model max-tokens-cutoff. Triggers
+  # only when:
+  #   1. The node's attrs say `auto_retry_on_reasoning_cutoff="true"`
+  #   2. The first response had `text == ""` AND non-empty
+  #      `reasoning_content` AND `finish_reason: :length` — the exact
+  #      signal that the model exhausted its budget mid-CoT
+  # Retries ONCE with `max_tokens * multiplier` (multiplier from
+  # `auto_retry_max_tokens_multiplier`, default 2). If the retry also
+  # cuts off, both warnings are appended and we give up — no recursion.
+  # Operator/caller visibility: warnings on `Response.warnings` plus a
+  # Logger.info line describing the decision.
+  #
+  # Default off because cloud reasoning models (Claude extended thinking,
+  # o1, Gemini thinking) charge per token — silent doubling would be
+  # surprising at scale.
+  defp maybe_retry_on_reasoning_cutoff(
+         {:ok, %Arbor.LLM.Response{} = raw_response} = original,
+         prompt,
+         node,
+         context,
+         graph,
+         opts
+       ) do
+    if retry_enabled?(node) and reasoning_cutoff?(raw_response) do
+      old_max_tokens = parse_int(Map.get(node.attrs, "max_tokens"), 4096)
+      multiplier = parse_int(Map.get(node.attrs, "auto_retry_max_tokens_multiplier"), 2)
+      new_max_tokens = old_max_tokens * multiplier
+
+      retry_warning =
+        "auto_retry: response cut off mid-reasoning at #{old_max_tokens} tokens " <>
+          "(reasoning=#{byte_size(raw_response.reasoning_content || "")} bytes); " <>
+          "retrying with max_tokens=#{new_max_tokens}"
+
+      Logger.info("[LlmHandler] #{node.id}: #{retry_warning}")
+
+      retry_node = %{node | attrs: Map.put(node.attrs, "max_tokens", to_string(new_max_tokens))}
+
+      case call_llm(prompt, retry_node, context, graph, opts) do
+        {:ok, %Arbor.LLM.Response{} = retry_response} ->
+          retry_response = append_warning(retry_response, retry_warning)
+
+          retry_response =
+            if reasoning_cutoff?(retry_response) do
+              second_warning =
+                "auto_retry: retry also cut off mid-reasoning at #{new_max_tokens} tokens; " <>
+                  "giving up (no further retries)"
+
+              Logger.warning("[LlmHandler] #{node.id}: #{second_warning}")
+              append_warning(retry_response, second_warning)
+            else
+              Logger.info(
+                "[LlmHandler] #{node.id}: auto-retry succeeded — text=#{String.length(retry_response.text)} chars"
+              )
+
+              retry_response
+            end
+
+          {:ok, retry_response}
+
+        {:error, reason} ->
+          # Retry failed entirely — return the original response with a
+          # warning explaining that the cutoff persisted because the
+          # retry itself failed. The caller still sees the empty-text
+          # reasoning_content and can act on it (better than a bare error
+          # tuple that loses the reasoning trail).
+          Logger.warning(
+            "[LlmHandler] #{node.id}: auto-retry failed (#{inspect(reason, limit: 80)}); " <>
+              "returning original cut-off response"
+          )
+
+          failed_warning = retry_warning <> " — retry FAILED, original response returned"
+          {:ok, append_warning(raw_response, failed_warning)}
+      end
+    else
+      original
+    end
+  end
+
+  defp maybe_retry_on_reasoning_cutoff(other, _prompt, _node, _context, _graph, _opts), do: other
+
+  defp retry_enabled?(node) do
+    Map.get(node.attrs, "auto_retry_on_reasoning_cutoff") in ["true", true]
+  end
+
+  defp reasoning_cutoff?(%Arbor.LLM.Response{} = response) do
+    text_empty? = response.text in [nil, ""]
+
+    reasoning_present? =
+      is_binary(response.reasoning_content) and response.reasoning_content != ""
+
+    length_finish? = response.finish_reason == :length
+    text_empty? and reasoning_present? and length_finish?
+  end
+
+  defp reasoning_cutoff?(_), do: false
+
+  defp append_warning(%Arbor.LLM.Response{warnings: warnings} = response, msg)
+       when is_list(warnings) do
+    %{response | warnings: warnings ++ [msg]}
+  end
+
+  defp append_warning(%Arbor.LLM.Response{} = response, msg) do
+    %{response | warnings: [msg]}
   end
 
   # Structural shape dump of an empty Arbor.LLM.Response — pairs with the
