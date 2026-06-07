@@ -23,16 +23,19 @@ defmodule Arbor.Comms.Supervisor do
   end
 
   defp build_children do
-    # Channel infrastructure starts first (Registry → DynamicSupervisor → restore)
+    # Channel infrastructure starts first (Registry → DynamicSupervisor → restore).
+    # InteractionRouter pieces (registry + tracker) come BEFORE the per-channel
+    # pollers/keepers so anything that registers presence at boot
+    # (e.g., Signal.PresenceKeeper) finds PresenceTracker already running.
     [
       {Registry, keys: :unique, name: Arbor.Comms.ChannelRegistry},
       {DynamicSupervisor, name: Arbor.Comms.ChannelSupervisor, strategy: :one_for_one}
     ]
     |> maybe_add_channel_restore()
+    |> maybe_add_interaction_router()
     |> maybe_add_handler()
     |> maybe_add_signal()
     |> maybe_add_limitless()
-    |> maybe_add_interaction_router()
   end
 
   # HITL router Phase 1: registry for pending interactions + Phoenix.Tracker
@@ -107,7 +110,13 @@ defmodule Arbor.Comms.Supervisor do
 
   defp maybe_add_signal(children) do
     if Config.channel_enabled?(:signal) do
-      children ++ [{Signal.Poller, []}]
+      # PresenceKeeper goes alongside the poller — both are
+      # boot-tied to the Signal channel being enabled. The keeper
+      # registers `:signal` presence with PresenceTracker (started
+      # earlier in the chain via `maybe_add_interaction_router`) so
+      # InteractionRouter can route to Signal as a fallback when no
+      # more-recent channel is active.
+      children ++ [{Signal.Poller, []}, {Signal.PresenceKeeper, []}]
     else
       children
     end
