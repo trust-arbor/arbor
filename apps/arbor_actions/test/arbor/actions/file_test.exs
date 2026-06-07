@@ -648,4 +648,134 @@ defmodule Arbor.Actions.FileTest do
       assert tool[:name] == "file_search"
     end
   end
+
+  # Strategy parity — `File.Search` dispatches to ripgrep, grep, or
+  # BEAM-native based on what's installed. The output shape MUST be
+  # identical across strategies. The process-dictionary key
+  # `:__arbor_file_search_force_strategy__` is the testing seam that
+  # forces a specific path so we can pin shape parity.
+  describe "Search — strategy parity" do
+    setup :tmp_dir_fixture
+
+    defp tmp_dir_fixture(_) do
+      tmp = System.tmp_dir!() |> Path.join("file_search_strategy_#{:rand.uniform(100_000)}")
+      File.mkdir_p!(tmp)
+      on_exit(fn -> File.rm_rf(tmp) end)
+      {:ok, tmp_dir: tmp}
+    end
+
+    defp run_with_strategy(strategy, params) do
+      Process.put(:__arbor_file_search_force_strategy__, strategy)
+
+      try do
+        FileActions.Search.run(params, %{})
+      after
+        Process.delete(:__arbor_file_search_force_strategy__)
+      end
+    end
+
+    test "all available strategies return the same shape for a literal search", %{
+      tmp_dir: tmp_dir
+    } do
+      path = Path.join(tmp_dir, "parity.txt")
+
+      File.write!(path, """
+      line 1: alpha
+      line 2: beta
+      line 3: gamma_NEEDLE_target
+      line 4: delta
+      line 5: epsilon_NEEDLE
+      """)
+
+      strategies_to_test =
+        [
+          :beam,
+          if(System.find_executable("rg"), do: :ripgrep),
+          if(System.find_executable("grep"), do: :grep)
+        ]
+        |> Enum.reject(&is_nil/1)
+
+      results =
+        Enum.map(strategies_to_test, fn strategy ->
+          {:ok, result} =
+            run_with_strategy(strategy, %{
+              pattern: "NEEDLE",
+              path: path,
+              context_lines: 1
+            })
+
+          {strategy, result}
+        end)
+
+      # All strategies must find both NEEDLE occurrences
+      for {strategy, result} <- results do
+        assert result.count == 2, "strategy #{strategy} found #{result.count} matches, expected 2"
+      end
+
+      # All strategies must return matches at the same lines + file
+      for {strategy, result} <- results do
+        lines = result.matches |> Enum.map(& &1.line) |> Enum.sort()
+
+        assert lines == [3, 5],
+               "strategy #{strategy} returned lines #{inspect(lines)}, expected [3, 5]"
+
+        for match <- result.matches do
+          assert match.file == path
+        end
+      end
+
+      # Content includes context lines (the matched line is marked with
+      # the > prefix in every strategy)
+      for {strategy, result} <- results do
+        first_match = Enum.find(result.matches, &(&1.line == 3))
+
+        assert is_binary(first_match.content) and
+                 String.contains?(first_match.content, "> 3:"),
+               "strategy #{strategy} content missing match marker: #{inspect(first_match.content)}"
+      end
+    end
+
+    test "no-match path returns empty list under every strategy", %{tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "no_match.txt")
+      File.write!(path, "nothing relevant here\n")
+
+      strategies_to_test =
+        [
+          :beam,
+          if(System.find_executable("rg"), do: :ripgrep),
+          if(System.find_executable("grep"), do: :grep)
+        ]
+        |> Enum.reject(&is_nil/1)
+
+      for strategy <- strategies_to_test do
+        {:ok, result} =
+          run_with_strategy(strategy, %{pattern: "ZZZ_NOT_PRESENT_ZZZ", path: path})
+
+        assert result.count == 0, "strategy #{strategy} returned non-empty for no-match"
+        assert result.matches == []
+      end
+    end
+
+    test "empty file list short-circuits without invoking any external tool", %{
+      tmp_dir: tmp_dir
+    } do
+      # A directory with no matching files for the glob — get_files_to_search
+      # returns []. The search_files dispatcher should return {:ok, []}
+      # immediately, regardless of strategy.
+      File.write!(Path.join(tmp_dir, "ignored.md"), "anything")
+
+      for strategy <- [:beam, :ripgrep, :grep] do
+        {:ok, result} =
+          run_with_strategy(strategy, %{
+            pattern: "x",
+            path: tmp_dir,
+            # Filter to files that don't exist
+            glob: "*.this_extension_does_not_match"
+          })
+
+        assert result.count == 0
+        assert result.matches == []
+      end
+    end
+  end
 end
