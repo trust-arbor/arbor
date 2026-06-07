@@ -1137,13 +1137,23 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   end
 
   defp summarize_req_llm_response(req_response) when is_struct(req_response) do
+    msg = Map.get(req_response, :message)
+
     %{
       finish_reason: Map.get(req_response, :finish_reason),
       error: presence(Map.get(req_response, :error)),
       object: presence(Map.get(req_response, :object)),
       provider_meta_keys: map_keys(Map.get(req_response, :provider_meta, %{})),
       usage_keys: map_keys(Map.get(req_response, :usage, %{})),
-      message: summarize_message(Map.get(req_response, :message))
+      message: summarize_message(msg),
+      # Peek one level into the content list — the
+      # `content: {:list, 1}` shape isn't enough to tell "thinking-typed
+      # ContentPart" from "empty-text ContentPart". The inner type field
+      # IS the discriminator that lets operators say "yep, content went
+      # to reasoning, bump max_tokens" without enabling fuller logging.
+      # Surfaced during 2026-06-07 probe against qwen3.6-27b-mtp +
+      # gpt-oss-120b-2experts — both `type: :thinking` patterns.
+      content_first: summarize_first_content_part(msg)
     }
   end
 
@@ -1176,6 +1186,38 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   defp map_keys(m) when is_map(m), do: Map.keys(m) |> Enum.sort()
   defp map_keys(_), do: []
+
+  # Peek into the content list's first item. Returns the inner shape
+  # (struct + per-field shape) when there's at least one item; nil/empty
+  # otherwise. See the comment in summarize_req_llm_response/1 for why
+  # this matters.
+  defp summarize_first_content_part(msg) when is_struct(msg) do
+    case Map.get(msg, :content) do
+      list when is_list(list) and list != [] ->
+        first = hd(list)
+
+        if is_struct(first) do
+          inner =
+            first
+            |> Map.from_struct()
+            |> Enum.into(%{}, fn {k, v} -> {k, summarize_value(v)} end)
+
+          %{struct: first.__struct__, fields: inner}
+        else
+          summarize_value(first)
+        end
+
+      [] ->
+        :empty_list
+
+      _other ->
+        :not_a_list
+    end
+  rescue
+    _ -> :inspect_failed
+  end
+
+  defp summarize_first_content_part(_), do: :no_message
 
   defp presence(nil), do: nil
   defp presence(""), do: :empty
