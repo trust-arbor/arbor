@@ -202,6 +202,14 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
               "reasoning=#{inspect(reasoning_size)} " <>
               "tool_rounds=#{inspect(response.tool_rounds)}"
           )
+
+          # Phase 1 diagnostic: when the warning above fires, debug-level
+          # consumers (operators chasing a new model variant) can see the
+          # structural shape of the underlying ReqLLM.Response.
+          # Field names + value sizes/types, no literal text content —
+          # enough to spot "content went into provider_meta.reasoning_text"
+          # without flooding logs or leaking prompt/output content.
+          log_empty_response_shape(raw_response)
         end
 
         elapsed = System.monotonic_time(:millisecond) - start_time
@@ -1107,4 +1115,71 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   catch
     :exit, _ -> :ok
   end
+
+  # Structural shape dump of an empty Arbor.LLM.Response — pairs with the
+  # Logger.warning above so debug-mode operators can see what the model
+  # actually returned without enabling verbose logging globally. Reports
+  # field names + value sizes/types only; never literal text content.
+  # See .arbor/roadmap/0-inbox/llm-empty-response-from-reasoning-and-mtp-models.md.
+  defp log_empty_response_shape(raw_response) do
+    raw_field = Map.get(raw_response, :raw)
+
+    req_llm_shape =
+      case raw_field do
+        %{req_llm_response: req_response} -> summarize_req_llm_response(req_response)
+        nil -> :no_raw_field
+        other -> {:unexpected_raw_shape, inspect(other, limit: 80)}
+      end
+
+    Logger.debug(
+      "[LlmHandler] Empty-response diagnostic: req_llm_shape=#{inspect(req_llm_shape, pretty: false, limit: :infinity)}"
+    )
+  end
+
+  defp summarize_req_llm_response(req_response) when is_struct(req_response) do
+    %{
+      finish_reason: Map.get(req_response, :finish_reason),
+      error: presence(Map.get(req_response, :error)),
+      object: presence(Map.get(req_response, :object)),
+      provider_meta_keys: map_keys(Map.get(req_response, :provider_meta, %{})),
+      usage_keys: map_keys(Map.get(req_response, :usage, %{})),
+      message: summarize_message(Map.get(req_response, :message))
+    }
+  end
+
+  defp summarize_req_llm_response(other), do: {:not_struct, inspect(other, limit: 60)}
+
+  # Message structure shape — keys + value type/size, content elided.
+  defp summarize_message(nil), do: :nil_message
+
+  defp summarize_message(%{} = msg) do
+    msg
+    |> Map.from_struct()
+    |> Enum.into(%{}, fn {k, v} -> {k, summarize_value(v)} end)
+  rescue
+    _ ->
+      msg
+      |> Enum.into(%{}, fn {k, v} -> {k, summarize_value(v)} end)
+  end
+
+  defp summarize_message(other), do: {:unexpected_message, inspect(other, limit: 60)}
+
+  defp summarize_value(nil), do: nil
+  defp summarize_value(""), do: :empty_string
+  defp summarize_value(v) when is_binary(v), do: {:string, byte_size(v)}
+  defp summarize_value(v) when is_list(v), do: {:list, length(v)}
+  defp summarize_value(v) when is_map(v) and not is_struct(v), do: {:map_keys, map_keys(v)}
+  defp summarize_value(v) when is_struct(v), do: {:struct, v.__struct__}
+  defp summarize_value(v) when is_atom(v), do: v
+  defp summarize_value(v) when is_number(v), do: v
+  defp summarize_value(v), do: {:type, :erlang.tuple_to_list({:other, inspect(v, limit: 40)})}
+
+  defp map_keys(m) when is_map(m), do: Map.keys(m) |> Enum.sort()
+  defp map_keys(_), do: []
+
+  defp presence(nil), do: nil
+  defp presence(""), do: :empty
+  defp presence(%{} = m) when map_size(m) == 0, do: :empty
+  defp presence([]), do: :empty
+  defp presence(_), do: :present
 end
