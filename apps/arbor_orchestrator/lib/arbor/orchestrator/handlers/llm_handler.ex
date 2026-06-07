@@ -714,7 +714,15 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       |> Keyword.put(:client, client)
       |> Keyword.put(:policy, build_dispatch_policy(context, request))
 
-    Dispatcher.dispatch(request, dispatch_opts)
+    run_id = Keyword.get(call_opts, :run_id)
+
+    # Long reasoning calls + HITL waits can block longer than the
+    # RecoveryCoordinator's stale threshold. Refresh the heartbeat
+    # while dispatch blocks. No-op when run_id isn't set (out-of-engine
+    # call sites like tests). See HeartbeatRefresher moduledoc.
+    Arbor.Orchestrator.HeartbeatRefresher.with_heartbeat_refresh(run_id, fn ->
+      Dispatcher.dispatch(request, dispatch_opts)
+    end)
   end
 
   defp call_llm_direct(client, request, call_opts, context, on_stream) do
@@ -732,7 +740,11 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       |> Keyword.put(:callbacks, callbacks)
       |> Keyword.put(:policy, build_dispatch_policy(context, request))
 
-    Dispatcher.dispatch(request, dispatch_opts)
+    run_id = Keyword.get(call_opts, :run_id)
+
+    Arbor.Orchestrator.HeartbeatRefresher.with_heartbeat_refresh(run_id, fn ->
+      Dispatcher.dispatch(request, dispatch_opts)
+    end)
   end
 
   # Assemble the Selector policy from session context. Currently
