@@ -106,12 +106,17 @@ defmodule Arbor.Security.Escalation do
 
     if Code.ensure_loaded?(router) and Code.ensure_loaded?(interaction_mod) and
          function_exported?(router, :request, 2) do
-      # Phase 1: agent identity is used as the user identity for routing.
-      # A future agent-owner lookup may map agent_id → human user_id.
+      # Route to the human operator's user_id (the same identifier
+      # Signal.PresenceKeeper registers with PresenceTracker). Without
+      # this lookup, user_id == agent_id silently maps to a presence
+      # nobody is registered for, the router queues with no adapter, and
+      # the operator never sees the prompt.
+      user_id = resolve_operator(principal_id)
+
       attrs = %{
         kind: :approval,
         agent_id: principal_id,
-        user_id: principal_id,
+        user_id: user_id,
         description: "Authorization request for #{resource_uri}",
         resource_uri: resource_uri,
         metadata: %{
@@ -148,6 +153,21 @@ defmodule Arbor.Security.Escalation do
   defp interaction_router_available? do
     router = Module.concat([:Arbor, :Comms, :InteractionRouter])
     Code.ensure_loaded?(router) and function_exported?(router, :request, 2)
+  end
+
+  # Resolve the human operator's user_id for routing. Uses
+  # Arbor.Comms.operator_for_agent/1 when present (which reads the
+  # configured operator from :arbor_comms, :signal, :interaction_user_id)
+  # and falls back to principal_id for symmetry with the legacy
+  # behavior in deployments without Arbor.Comms running.
+  defp resolve_operator(principal_id) do
+    comms = Module.concat([:Arbor, :Comms])
+
+    if Code.ensure_loaded?(comms) and function_exported?(comms, :operator_for_agent, 1) do
+      apply(comms, :operator_for_agent, [principal_id])
+    else
+      principal_id
+    end
   end
 
   @doc """

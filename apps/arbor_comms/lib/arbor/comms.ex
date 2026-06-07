@@ -32,6 +32,30 @@ defmodule Arbor.Comms do
   alias Arbor.Comms.Config
   alias Arbor.Comms.Dispatcher
 
+  @doc """
+  Resolve the human operator's `user_id` for routing an interaction
+  on behalf of `agent_id`.
+
+  Single-operator deployments (current default) return the configured
+  `:arbor_comms, :signal, :interaction_user_id` for any agent — the
+  same identifier `Signal.PresenceKeeper` registers with
+  `PresenceTracker`. Multi-operator deployments will eventually plug in
+  a per-agent owner lookup here; for now the configured operator is
+  the universal target.
+
+  Falls back to `agent_id` itself when no operator is configured (the
+  pre-this-helper behavior), so deployments without a Signal config
+  see no behavior change.
+  """
+  @spec operator_for_agent(String.t()) :: String.t()
+  def operator_for_agent(agent_id) when is_binary(agent_id) do
+    case Application.get_env(:arbor_comms, :signal, []) |> Keyword.get(:interaction_user_id) do
+      nil -> agent_id
+      "" -> agent_id
+      operator when is_binary(operator) -> operator
+    end
+  end
+
   # -- Sending --
 
   @doc """

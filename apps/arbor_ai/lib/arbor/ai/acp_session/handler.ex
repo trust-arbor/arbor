@@ -169,7 +169,7 @@ defmodule Arbor.AI.AcpSession.Handler do
 
   defp authorize_action(agent_id, resource_uri, action, state) do
     # Check trust tier confirmation mode first (if available), then security authorization
-    with :authorized <- check_confirmation_mode(agent_id, resource_uri),
+    with :authorized <- check_confirmation_mode(agent_id, resource_uri, state),
          :authorized <- check_security_authorize(agent_id, resource_uri, action, state) do
       :authorized
     end
@@ -177,13 +177,27 @@ defmodule Arbor.AI.AcpSession.Handler do
 
   # Trust tier integration via runtime bridge (arbor_ai does not depend on arbor_trust).
   # Falls back to :authorized when Trust.Policy or Trust.Manager is unavailable.
-  defp check_confirmation_mode(agent_id, resource_uri) do
+  #
+  # `:gated` means the trust policy says "this resource requires human
+  # approval at this agent's tier" — it's the trust system's way of
+  # saying "ask the human". Escalate via HITL rather than flat-denying
+  # so the operator gets the same Signal/dashboard prompt as a
+  # `:pending_approval` from the capability layer. Without this
+  # escalation, an `:ask`-tier resource (e.g. `arbor://shell/exec/*`)
+  # is unconditionally denied even when the operator is available to
+  # approve it.
+  defp check_confirmation_mode(agent_id, resource_uri, state) do
     if Code.ensure_loaded?(Arbor.Trust.Policy) and
          Process.whereis(Arbor.Trust.Manager) != nil do
       case apply(Arbor.Trust.Policy, :confirmation_mode, [agent_id, resource_uri]) do
-        :auto -> :authorized
-        :gated -> {:denied, "requires human approval (gated by trust policy)"}
-        :deny -> {:denied, "denied by trust policy"}
+        :auto ->
+          :authorized
+
+        :gated ->
+          escalate_for_trust_approval(agent_id, resource_uri, state)
+
+        :deny ->
+          {:denied, "denied by trust policy"}
       end
     else
       :authorized
@@ -194,9 +208,85 @@ defmodule Arbor.AI.AcpSession.Handler do
     :exit, _ -> :authorized
   end
 
+  # Trust gate escalation. The capability layer's pending_approval path
+  # already calls InteractionRouter.request inside Security.Escalation;
+  # the trust gate doesn't go through Security, so we submit the
+  # interaction directly here. After submission, the wait path is
+  # shared with the capability-layer escalation via await_human_approval.
+  defp escalate_for_trust_approval(agent_id, resource_uri, state) do
+    if interaction_router_available?() do
+      attrs = %{
+        kind: :approval,
+        agent_id: agent_id,
+        user_id: operator_user_id_for(agent_id),
+        description: "Trust gate: #{resource_uri} requires human approval",
+        resource_uri: resource_uri,
+        metadata: %{source: :trust_policy_gated}
+      }
+
+      case apply(Arbor.Comms.InteractionRouter, :request, [attrs, []]) do
+        {:ok, request_id} ->
+          await_human_approval(agent_id, request_id, resource_uri, state)
+
+        {:error, reason} ->
+          Logger.warning(
+            "[AcpSession.Handler] trust-gate escalation failed for #{resource_uri}: #{inspect(reason)} — failing closed"
+          )
+
+          {:denied, "trust gate escalation failed: #{inspect(reason)}"}
+      end
+    else
+      Logger.warning(
+        "[AcpSession.Handler] trust-gated #{resource_uri} but InteractionRouter unavailable — failing closed"
+      )
+
+      {:denied, "trust-gated and HITL routing unavailable"}
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "[AcpSession.Handler] trust-gate escalation crashed for #{resource_uri}: #{Exception.message(e)}"
+      )
+
+      {:denied, "trust gate escalation crashed"}
+  catch
+    :exit, reason ->
+      Logger.warning(
+        "[AcpSession.Handler] trust-gate escalation exited for #{resource_uri}: #{inspect(reason)}"
+      )
+
+      {:denied, "trust gate escalation exited"}
+  end
+
+  defp interaction_router_available? do
+    Code.ensure_loaded?(Arbor.Comms.InteractionRouter) and
+      function_exported?(Arbor.Comms.InteractionRouter, :request, 2)
+  end
+
+  # Resolve the operator user_id for routing. Uses Arbor.Comms.operator_for_agent/1
+  # when available (which reads the configured operator from
+  # :arbor_comms, :signal, :interaction_user_id) and falls back to the
+  # agent_id itself for symmetry with the legacy behavior.
+  defp operator_user_id_for(agent_id) do
+    if Code.ensure_loaded?(Arbor.Comms) and
+         function_exported?(Arbor.Comms, :operator_for_agent, 1) do
+      apply(Arbor.Comms, :operator_for_agent, [agent_id])
+    else
+      agent_id
+    end
+  end
+
   defp check_security_authorize(agent_id, resource_uri, action, state) do
     if Process.whereis(Arbor.Security.CapabilityStore) do
-      case Arbor.Security.authorize(agent_id, resource_uri, action) do
+      # `verify_identity: false` — the ACP handler is an internal caller.
+      # The `agent_id` was set at `Handler.init/1` time from session opts
+      # (which are locked down via signed caps for pipelines), so the
+      # identity is already established by construction. The signed-
+      # request gate is for external authn — ExMCP's
+      # `session/request_permission` JSON-RPC doesn't carry one and
+      # shouldn't need to, since the agent identity is intrinsic to the
+      # session itself.
+      case Arbor.Security.authorize(agent_id, resource_uri, action, verify_identity: false) do
         {:ok, :authorized} ->
           :authorized
 
