@@ -425,6 +425,19 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   # Flat `agent` attr (or `session.acp_agent` context fallback, mirroring provider/model)
   # + JSON `provider_options` string → map; `agent` picks the ACP CLI (else provider="acp"
   # defaults to :claude). Context fallback lets sub-pipelines parameterize the agent.
+  #
+  # ACP adapter constraints (2026-06-06): pipelines that route through
+  # the `:acp` runtime can carry per-node permission / tool restrictions
+  # for the ExMCP Claude adapter via three node attrs:
+  #
+  #   acp_permission_mode="deny"
+  #   acp_allowed_tools="WebSearch,WebFetch"
+  #   acp_disallowed_tools="Write,Edit"
+  #
+  # These get packed into `provider_options["acp_adapter_opts"]` as a
+  # keyword list, which `Runtime.Acp.build_checkout_opts/2` forwards to
+  # `AcpSession.Config.merge_opts/2` for merging with the
+  # provider-default `adapter_opts`. Per-call (per-node) settings win.
   defp build_provider_options(attrs, agent_override) do
     base =
       case Map.get(attrs, "provider_options") do
@@ -441,9 +454,80 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           %{}
       end
 
+    base = put_acp_adapter_opts(base, attrs)
+
     case Map.get(attrs, "agent") || agent_override do
       nil -> base
       agent -> Map.put(base, "agent", agent)
+    end
+  end
+
+  defp put_acp_adapter_opts(provider_options, attrs) do
+    adapter_opts =
+      []
+      |> append_permission_mode(attrs)
+      |> append_tool_list(attrs, "acp_allowed_tools", :allowed_tools)
+      |> append_tool_list(attrs, "acp_disallowed_tools", :disallowed_tools)
+
+    case adapter_opts do
+      [] -> provider_options
+      ao -> Map.put(provider_options, "acp_adapter_opts", ao)
+    end
+  end
+
+  defp append_permission_mode(kw, attrs) do
+    case Map.get(attrs, "acp_permission_mode") do
+      nil ->
+        kw
+
+      mode when is_binary(mode) ->
+        atom = safe_permission_atom(mode)
+        if atom, do: Keyword.put(kw, :permission_mode, atom), else: kw
+
+      atom when is_atom(atom) ->
+        Keyword.put(kw, :permission_mode, atom)
+    end
+  end
+
+  defp append_tool_list(kw, attrs, attr_key, opt_key) do
+    case Map.get(attrs, attr_key) do
+      nil ->
+        kw
+
+      str when is_binary(str) ->
+        tools =
+          str
+          |> String.split(",", trim: true)
+          |> Enum.map(&String.trim/1)
+          |> Enum.reject(&(&1 == ""))
+
+        case tools do
+          [] -> kw
+          list -> Keyword.put(kw, opt_key, list)
+        end
+
+      list when is_list(list) ->
+        Keyword.put(kw, opt_key, list)
+    end
+  end
+
+  # Whitelist of permission-mode atoms — DOT attrs come from operator-
+  # authored files but still go through atom encoding; pin to the
+  # known set to avoid unbounded atom growth and surprise modes.
+  # The recognized values mirror ExMCP.ACP.Adapters.Claude's mapping
+  # to Claude CLI's `--permission-mode` values. See ex_mcp commit
+  # `3c119d4` and code.claude.com/docs/en/permissions for semantics.
+  defp safe_permission_atom(str) do
+    case str do
+      "nil" -> nil
+      "bypass" -> :bypass
+      "default" -> :default
+      "accept_edits" -> :accept_edits
+      "plan" -> :plan
+      "auto" -> :auto
+      "dont_ask" -> :dont_ask
+      "bypass_permissions" -> :bypass_permissions
+      _ -> nil
     end
   end
 
@@ -613,7 +697,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     dispatch_opts =
       call_opts
       |> Keyword.put(:client, client)
-      |> Keyword.put(:policy, build_dispatch_policy(context))
+      |> Keyword.put(:policy, build_dispatch_policy(context, request))
 
     Dispatcher.dispatch(request, dispatch_opts)
   end
@@ -631,7 +715,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       call_opts
       |> Keyword.put(:client, client)
       |> Keyword.put(:callbacks, callbacks)
-      |> Keyword.put(:policy, build_dispatch_policy(context))
+      |> Keyword.put(:policy, build_dispatch_policy(context, request))
 
     Dispatcher.dispatch(request, dispatch_opts)
   end
@@ -640,8 +724,27 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   # carries fallback_chain only; runtime/provider/model overrides flow
   # via the Request struct itself (Selector reads them as pins). Add
   # more fields here as additional policy controls land.
-  defp build_dispatch_policy(context) do
-    %{fallback_chain: Context.get(context, "session.llm_fallback_chain", [])}
+  defp build_dispatch_policy(context, request) do
+    policy = %{fallback_chain: Context.get(context, "session.llm_fallback_chain", [])}
+
+    # Forward the request's runtime as a per-turn Selector override.
+    # Without this, `Selector.choose/2` falls back to its default of
+    # `:arbor`, which means a node attr like `llm_runtime="acp"` ends
+    # up on the Request struct but never reaches the Selector chain —
+    # the Request gets rewritten to whatever runtime the default picks
+    # before Runtime dispatch.
+    #
+    # Source of truth is `request.runtime` (already resolved in
+    # `build_llm_request/4` from node attr → session.llm_runtime →
+    # default). We forward it here so Selector + rewrite_request agree
+    # on which runtime to use.
+    runtime =
+      case request do
+        %{runtime: r} when is_atom(r) and not is_nil(r) and r != :arbor -> r
+        _ -> nil
+      end
+
+    if runtime, do: Map.put(policy, :runtime, runtime), else: policy
   end
 
   defp stream_event_callbacks(on_stream) when is_function(on_stream, 1) do

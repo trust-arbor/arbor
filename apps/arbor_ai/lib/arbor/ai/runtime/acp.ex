@@ -151,6 +151,24 @@ defmodule Arbor.AI.Runtime.Acp do
     )
     |> maybe_add(:capabilities, Map.get(request.provider_options, "capabilities"))
     |> maybe_add(:tool_modules, Map.get(request.provider_options, "tool_modules"))
+    |> maybe_add_adapter_opts(request)
+  end
+
+  # Per-call ExMCP adapter_opts override. The caller (e.g., a DOT
+  # compute node) puts a keyword list under
+  # `request.provider_options["acp_adapter_opts"]`; we forward it as
+  # the pool's `:adapter_opts` opt. `AcpSession.init` then passes it to
+  # `Config.resolve`, which merges with the provider's default
+  # adapter_opts (`AcpSession.Config.merge_opts/2` does a
+  # `Keyword.merge` that lets the override win).
+  #
+  # Used today for per-pipeline Claude permission constraints:
+  # `permission_mode: :deny, allowed_tools: [...], disallowed_tools: [...]`.
+  defp maybe_add_adapter_opts(opts, %Request{provider_options: po}) do
+    case Map.get(po, "acp_adapter_opts") do
+      ao when is_list(ao) and ao != [] -> Keyword.put(opts, :adapter_opts, ao)
+      _ -> opts
+    end
   end
 
   defp pool_checkout(cli, opts) do

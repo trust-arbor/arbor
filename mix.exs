@@ -35,7 +35,9 @@ defmodule Arbor.MixProject do
       # jido_sandbox has no Hex release yet
       {:jido_sandbox,
        git: "https://github.com/agentjido/jido_sandbox.git", branch: "main", override: true},
-      {:ex_mcp, "~> 0.11.0", override: true},
+      # Path dep while permission_mode work is unpublished. Flip back
+      # to `{:ex_mcp, "~> 0.12.0", override: true}` once published.
+      {:ex_mcp, path: "../../ex_mcp", override: true},
 
       # Dev/test tools
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
