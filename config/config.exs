@@ -44,11 +44,12 @@ config :arbor_comms, :handler,
   conversation_window: 20,
   dedup_window_seconds: 300
 
-# InteractionRouter Phase 1: which channel maps to which adapter
-# module. Dashboard is wired today; Signal/Telegram/Discord are
-# additive future entries.
+# InteractionRouter: which channel maps to which adapter module.
+# Dashboard (Phase 1, 2026-06-04) and Signal (Phase 2, 2026-06-06)
+# wired today; Telegram/Discord/voice are additive future entries.
 config :arbor_comms, :interaction_adapters, %{
-  dashboard: Arbor.Dashboard.InteractionAdapter
+  dashboard: Arbor.Dashboard.InteractionAdapter,
+  signal: Arbor.Comms.Channels.Signal.InteractionAdapter
 }
 
 # Phase 3: Enable mandatory middleware (capability, taint, sanitization checks)
