@@ -77,17 +77,101 @@ defmodule Arbor.AI.AcpSession.Handler do
   Checks `Arbor.Security.authorize/4` with a tool-specific capability URI.
   Falls back to approved when no agent_id is set or Security is unavailable.
   """
-  def handle_permission_request(_session_id, tool_call, _options, state) do
-    tool_name = Map.get(tool_call, "name") || Map.get(tool_call, :name, "unknown")
+  def handle_permission_request(_session_id, tool_call, options, state) do
+    # Newer ACP spec (Gemini) carries the actual tool name on `toolCall.title`
+    # or a structured field; the older shape carried `"name"`. Try both so the
+    # capability URI reflects what the agent actually wants to do.
+    tool_name =
+      Map.get(tool_call, "name") ||
+        Map.get(tool_call, :name) ||
+        infer_tool_name(tool_call)
+
     resource_uri = "arbor://acp/tool/#{tool_name}"
 
     case authorize_action(state.agent_id, resource_uri, :execute, state) do
       :authorized ->
-        {:ok, %{"outcome" => "approved"}, state}
+        {:ok, build_outcome(:approved, options), state}
 
       {:denied, reason} ->
         Logger.info("AcpSession.Handler: denied permission for #{tool_name}: #{reason}")
-        {:ok, %{"outcome" => "denied", "reason" => reason}, state}
+        {:ok, build_outcome(:rejected, options, reason), state}
+    end
+  end
+
+  # ACP spec
+  # (https://agentclientprotocol.com/protocol/tool-calls#permission-response)
+  # requires the outcome to reference one of the offered `optionId`s:
+  #
+  #     {"outcome": {"outcome": "selected", "optionId": "<allowed-id>"}}
+  #     {"outcome": {"outcome": "cancelled"}}
+  #
+  # Returning a non-spec shape (e.g. {"outcome": "approved"}) causes
+  # spec-compliant agents like Gemini to ignore the response and re-ask —
+  # which surfaced as the "three Signal prompts for one tool use" bug
+  # during HITL smoke testing.
+  defp build_outcome(decision, options, reason \\ nil)
+
+  defp build_outcome(:approved, options, _reason) do
+    case pick_option(options, ["allow_once", "allow_always"]) do
+      nil ->
+        # No options offered — legacy/abbreviated form. Some callers (older
+        # ACP integrations, internal callers, unit tests) don't supply the
+        # options list. Return the simple {"outcome": "approved"} form so
+        # these paths keep working.
+        %{"outcome" => "approved"}
+
+      option_id ->
+        %{"outcome" => %{"outcome" => "selected", "optionId" => option_id}}
+    end
+  end
+
+  defp build_outcome(:rejected, options, reason) do
+    case pick_option(options, ["reject_once", "reject_always"]) do
+      nil ->
+        # No options offered — same fallback as the approval path.
+        %{"outcome" => "denied", "reason" => reason}
+
+      option_id ->
+        %{
+          "outcome" => %{"outcome" => "selected", "optionId" => option_id},
+          "reason" => reason
+        }
+    end
+  end
+
+  defp pick_option(options, kinds) when is_list(options) do
+    Enum.find_value(kinds, fn kind ->
+      Enum.find_value(options, fn opt ->
+        if to_string(Map.get(opt, "kind", "")) == kind do
+          Map.get(opt, "optionId")
+        end
+      end)
+    end)
+  end
+
+  defp pick_option(_options, _kinds), do: nil
+
+  # Newer ACP tool_call payloads (e.g. Gemini's) don't always include a
+  # bare `name` field; the human-readable identifier lives in `title` or
+  # is embedded in `toolCallId`. Best-effort extraction for capability
+  # URIs and audit logging — falls back to "unknown" when nothing is
+  # available.
+  defp infer_tool_name(tool_call) when is_map(tool_call) do
+    cond do
+      is_binary(tool_call["title"]) -> tool_call["title"]
+      is_binary(tool_call["toolCallId"]) -> extract_from_tool_call_id(tool_call["toolCallId"])
+      true -> "unknown"
+    end
+  end
+
+  defp infer_tool_name(_), do: "unknown"
+
+  # Gemini's toolCallId pattern: "<tool_name>__<tool_name>_<timestamp>_<idx>"
+  # e.g. "run_shell_command__run_shell_command_1780853379688_0"
+  defp extract_from_tool_call_id(id) when is_binary(id) do
+    case String.split(id, "__", parts: 2) do
+      [name | _] when name != "" -> name
+      _ -> id
     end
   end
 
