@@ -61,6 +61,7 @@ defmodule Arbor.Cartographer.Hardware do
       arch: detect_arch(),
       cpus: detect_cpus(),
       memory_gb: detect_memory_gb(),
+      os: detect_os(),
       gpu: detect_gpus(),
       accelerators: detect_accelerators()
     }
@@ -263,6 +264,85 @@ defmodule Arbor.Cartographer.Hardware do
     end
   rescue
     _ -> system_memory_gb_fallback()
+  end
+
+  @doc """
+  Detect a short OS identifier for display ("macOS 15.0", "OpenBSD 7.5",
+  "Ubuntu 22.04", "Linux 6.5", "Windows 11", etc.).
+
+  Uses `/etc/os-release` for distro-level detail on Linux, `sw_vers`
+  for the macOS marketing version (more friendly than the Darwin
+  kernel version), and `:os.version/0` elsewhere.
+
+  Returns `nil` if no useful identification is available. Best-effort
+  — any failure path returns `nil` rather than raising; the cluster
+  display falls back to omitting the field.
+  """
+  @spec detect_os() :: String.t() | nil
+  def detect_os do
+    case :os.type() do
+      {:unix, :linux} -> detect_linux_os()
+      {:unix, :darwin} -> detect_macos_os()
+      {:unix, :openbsd} -> bsd_version("OpenBSD")
+      {:unix, :freebsd} -> bsd_version("FreeBSD")
+      {:unix, :netbsd} -> bsd_version("NetBSD")
+      {:win32, _} -> detect_windows_os()
+      {family, name} -> "#{name} (#{family})"
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp detect_linux_os do
+    case File.read("/etc/os-release") do
+      {:ok, content} ->
+        case Regex.run(~r/^PRETTY_NAME="?([^"\n]+)"?$/m, content) do
+          [_, pretty] -> pretty
+          _ -> "Linux #{os_version_string()}"
+        end
+
+      _ ->
+        "Linux #{os_version_string()}"
+    end
+  rescue
+    _ -> "Linux"
+  end
+
+  defp detect_macos_os do
+    case System.cmd("sw_vers", ["-productVersion"], stderr_to_stdout: true) do
+      {output, 0} -> "macOS #{String.trim(output)}"
+      _ -> "macOS"
+    end
+  rescue
+    _ -> "macOS"
+  end
+
+  defp bsd_version(label) do
+    "#{label} #{os_version_string()}"
+  end
+
+  defp detect_windows_os do
+    case System.cmd(
+           "powershell",
+           ["-Command", "(Get-CimInstance Win32_OperatingSystem).Caption"],
+           stderr_to_stdout: true
+         ) do
+      {output, 0} -> output |> String.trim() |> String.replace_prefix("Microsoft ", "")
+      _ -> "Windows"
+    end
+  rescue
+    _ -> "Windows"
+  end
+
+  defp os_version_string do
+    case :os.version() do
+      {maj, min, patch} -> "#{maj}.#{min}.#{patch}"
+      ver when is_list(ver) -> to_string(ver)
+      _ -> "?"
+    end
+  rescue
+    _ -> "?"
   end
 
   # OpenBSD / FreeBSD / NetBSD: sysctl exposes physical memory in
