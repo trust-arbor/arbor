@@ -449,4 +449,170 @@ defmodule Arbor.AI.AcpSessionTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
     end
   end
+
+  describe "Handler.await_human_approval/4 — HITL bridge" do
+    alias Arbor.AI.AcpSession.Handler
+    alias Arbor.Contracts.Comms.Interaction
+
+    @pubsub Arbor.Comms.PubSub
+
+    # Ensure Arbor.Comms.PubSub is up so the helper can subscribe. arbor_ai
+    # doesn't depend on arbor_comms, so we start the PubSub here if it's
+    # not already running.
+    setup do
+      case Process.whereis(@pubsub) do
+        nil ->
+          start_supervised!({Phoenix.PubSub, name: @pubsub})
+          :ok
+
+        _pid ->
+          :ok
+      end
+    end
+
+    defp test_state(timeout_ms \\ 200) do
+      {:ok, state} = Handler.init(permission_timeout_ms: timeout_ms)
+      state
+    end
+
+    defp broadcast_response(agent_id, request_id, response) do
+      topic = Interaction.response_topic_for_agent(agent_id)
+
+      payload =
+        {:interaction_response,
+         %{
+           request_id: request_id,
+           response: response,
+           metadata: %{},
+           resolved_at: DateTime.utc_now()
+         }}
+
+      Phoenix.PubSub.broadcast(@pubsub, topic, payload)
+    end
+
+    test "returns :authorized when operator approves" do
+      agent_id = "agent_hitl_#{:erlang.unique_integer([:positive])}"
+      request_id = "req_#{:erlang.unique_integer([:positive])}"
+
+      task =
+        Task.async(fn ->
+          Handler.await_human_approval(
+            agent_id,
+            request_id,
+            "arbor://acp/tool/web_search",
+            test_state(2_000)
+          )
+        end)
+
+      # Give the inner subscribe a moment to land before broadcasting.
+      Process.sleep(50)
+      broadcast_response(agent_id, request_id, :approved)
+
+      assert :authorized = Task.await(task, 3_000)
+    end
+
+    test "returns {:denied, _} when operator rejects" do
+      agent_id = "agent_hitl_#{:erlang.unique_integer([:positive])}"
+      request_id = "req_#{:erlang.unique_integer([:positive])}"
+
+      task =
+        Task.async(fn ->
+          Handler.await_human_approval(
+            agent_id,
+            request_id,
+            "arbor://acp/tool/write",
+            test_state(2_000)
+          )
+        end)
+
+      Process.sleep(50)
+      broadcast_response(agent_id, request_id, :rejected)
+
+      assert {:denied, reason} = Task.await(task, 3_000)
+      assert reason =~ "human operator"
+    end
+
+    test "returns {:denied, _} on timeout when no response arrives" do
+      agent_id = "agent_hitl_#{:erlang.unique_integer([:positive])}"
+      request_id = "req_#{:erlang.unique_integer([:positive])}"
+
+      # Tight timeout — 100ms — so the test runs fast.
+      result =
+        Handler.await_human_approval(
+          agent_id,
+          request_id,
+          "arbor://acp/tool/timeout_demo",
+          test_state(100)
+        )
+
+      assert {:denied, reason} = result
+      assert reason =~ "did not respond in time"
+    end
+
+    test "ignores responses for other request_ids and times out" do
+      agent_id = "agent_hitl_#{:erlang.unique_integer([:positive])}"
+      our_request_id = "req_target_#{:erlang.unique_integer([:positive])}"
+      other_request_id = "req_other_#{:erlang.unique_integer([:positive])}"
+
+      task =
+        Task.async(fn ->
+          Handler.await_human_approval(
+            agent_id,
+            our_request_id,
+            "arbor://acp/tool/mismatch_demo",
+            test_state(200)
+          )
+        end)
+
+      Process.sleep(50)
+      # Broadcast a response for a different request_id; our task should
+      # ignore it and time out.
+      broadcast_response(agent_id, other_request_id, :approved)
+
+      assert {:denied, reason} = Task.await(task, 1_000)
+      assert reason =~ "did not respond in time"
+    end
+  end
+
+  describe "Handler.init/1 — permission timeout configuration" do
+    alias Arbor.AI.AcpSession.Handler
+
+    test "defaults to 60_000 ms when no opt and no app env" do
+      original = Application.get_env(:arbor_ai, :acp_permission_timeout_ms)
+      Application.delete_env(:arbor_ai, :acp_permission_timeout_ms)
+
+      on_exit(fn ->
+        if is_nil(original) do
+          Application.delete_env(:arbor_ai, :acp_permission_timeout_ms)
+        else
+          Application.put_env(:arbor_ai, :acp_permission_timeout_ms, original)
+        end
+      end)
+
+      {:ok, state} = Handler.init([])
+      assert state.permission_timeout_ms == 60_000
+    end
+
+    test "explicit opt wins over app env" do
+      Application.put_env(:arbor_ai, :acp_permission_timeout_ms, 999)
+
+      on_exit(fn ->
+        Application.delete_env(:arbor_ai, :acp_permission_timeout_ms)
+      end)
+
+      {:ok, state} = Handler.init(permission_timeout_ms: 12_345)
+      assert state.permission_timeout_ms == 12_345
+    end
+
+    test "app env wins when no explicit opt" do
+      Application.put_env(:arbor_ai, :acp_permission_timeout_ms, 7_777)
+
+      on_exit(fn ->
+        Application.delete_env(:arbor_ai, :acp_permission_timeout_ms)
+      end)
+
+      {:ok, state} = Handler.init([])
+      assert state.permission_timeout_ms == 7_777
+    end
+  end
 end

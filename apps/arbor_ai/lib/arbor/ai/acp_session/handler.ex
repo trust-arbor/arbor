@@ -21,7 +21,15 @@ defmodule Arbor.AI.AcpSession.Handler do
 
   require Logger
 
-  defstruct [:session_pid, :agent_id, :workspace_root, roots: []]
+  @default_permission_timeout_ms 60_000
+
+  defstruct [
+    :session_pid,
+    :agent_id,
+    :workspace_root,
+    permission_timeout_ms: @default_permission_timeout_ms,
+    roots: []
+  ]
 
   @doc false
   def init(opts) do
@@ -37,10 +45,25 @@ defmodule Arbor.AI.AcpSession.Handler do
       session_pid: Keyword.get(opts, :session_pid),
       agent_id: Keyword.get(opts, :agent_id),
       workspace_root: cwd,
+      permission_timeout_ms: resolve_permission_timeout(opts),
       roots: roots
     }
 
     {:ok, state}
+  end
+
+  # Resolution order: explicit opt > app env > module default. Both surfaces
+  # stay configurable so deployments can tune (e.g. shorter for unattended
+  # hosts, longer for operator-in-meeting). DOT compute nodes can plumb a
+  # per-pipeline override through handler_opts down the road.
+  defp resolve_permission_timeout(opts) do
+    case Keyword.get(opts, :permission_timeout_ms) do
+      ms when is_integer(ms) and ms > 0 ->
+        ms
+
+      _ ->
+        Application.get_env(:arbor_ai, :acp_permission_timeout_ms, @default_permission_timeout_ms)
+    end
   end
 
   @doc false
@@ -58,7 +81,7 @@ defmodule Arbor.AI.AcpSession.Handler do
     tool_name = Map.get(tool_call, "name") || Map.get(tool_call, :name, "unknown")
     resource_uri = "arbor://acp/tool/#{tool_name}"
 
-    case authorize_action(state.agent_id, resource_uri, :execute) do
+    case authorize_action(state.agent_id, resource_uri, :execute, state) do
       :authorized ->
         {:ok, %{"outcome" => "approved"}, state}
 
@@ -142,12 +165,12 @@ defmodule Arbor.AI.AcpSession.Handler do
 
   # Generic action authorization via Security.authorize/4.
   # When no agent_id, skip (system/anonymous calls).
-  defp authorize_action(nil, _resource_uri, _action), do: :authorized
+  defp authorize_action(nil, _resource_uri, _action, _state), do: :authorized
 
-  defp authorize_action(agent_id, resource_uri, action) do
+  defp authorize_action(agent_id, resource_uri, action, state) do
     # Check trust tier confirmation mode first (if available), then security authorization
     with :authorized <- check_confirmation_mode(agent_id, resource_uri),
-         :authorized <- check_security_authorize(agent_id, resource_uri, action) do
+         :authorized <- check_security_authorize(agent_id, resource_uri, action, state) do
       :authorized
     end
   end
@@ -171,12 +194,22 @@ defmodule Arbor.AI.AcpSession.Handler do
     :exit, _ -> :authorized
   end
 
-  defp check_security_authorize(agent_id, resource_uri, action) do
+  defp check_security_authorize(agent_id, resource_uri, action, state) do
     if Process.whereis(Arbor.Security.CapabilityStore) do
       case Arbor.Security.authorize(agent_id, resource_uri, action) do
-        {:ok, :authorized} -> :authorized
-        {:ok, :pending_approval, _id} -> {:denied, "pending human approval"}
-        {:error, reason} -> {:denied, inspect(reason)}
+        {:ok, :authorized} ->
+          :authorized
+
+        {:ok, :pending_approval, request_id} ->
+          # Escalation already fired inside Security.authorize → Escalation
+          # → InteractionRouter. Operator sees the prompt on their active
+          # channel (dashboard, Signal, etc.). Block here until the operator
+          # responds — that's the contract the agent expects from a
+          # synchronous permission_request.
+          await_human_approval(agent_id, request_id, resource_uri, state)
+
+        {:error, reason} ->
+          {:denied, inspect(reason)}
       end
     else
       :authorized
@@ -185,6 +218,90 @@ defmodule Arbor.AI.AcpSession.Handler do
     _ -> :authorized
   catch
     :exit, _ -> :authorized
+  end
+
+  @doc false
+  # Public for testability — production callers go through
+  # check_security_authorize. Subscribes to the per-agent response topic,
+  # waits for the matching request_id, and maps the operator's response
+  # to a handler authorization decision. Uses a Task so subscription +
+  # receive happen in a child process — non-matching messages die with
+  # the Task instead of polluting the HandlerRunner GenServer's mailbox
+  # (it has no catchall handle_info).
+  def await_human_approval(agent_id, request_id, resource_uri, state) do
+    pubsub_name = Arbor.Comms.PubSub
+    timeout_ms = state.permission_timeout_ms
+
+    if pubsub_available?(pubsub_name) do
+      topic = Arbor.Contracts.Comms.Interaction.response_topic_for_agent(agent_id)
+
+      task =
+        Task.async(fn ->
+          # Subscribe inside the Task — the subscription dies with the
+          # Task on completion/shutdown, so stale messages cannot leak
+          # into HandlerRunner's mailbox.
+          Phoenix.PubSub.subscribe(pubsub_name, topic)
+
+          receive do
+            {:interaction_response, %{request_id: ^request_id, response: response}} ->
+              {:response, response}
+          after
+            timeout_ms ->
+              :timeout
+          end
+        end)
+
+      # Outer yield gets a small slack window beyond the inner `after`
+      # so the Task can complete its `:timeout` return before we kill it.
+      case Task.yield(task, timeout_ms + 1_000) || Task.shutdown(task, :brutal_kill) do
+        {:ok, {:response, :approved}} ->
+          Logger.info("[AcpSession.Handler] human approved #{resource_uri}")
+          :authorized
+
+        {:ok, {:response, :rejected}} ->
+          Logger.info("[AcpSession.Handler] human rejected #{resource_uri}")
+          {:denied, "denied by human operator"}
+
+        {:ok, {:response, other}} ->
+          Logger.warning(
+            "[AcpSession.Handler] unexpected operator response for #{resource_uri}: #{inspect(other)}"
+          )
+
+          {:denied, "unexpected operator response: #{inspect(other)}"}
+
+        {:ok, :timeout} ->
+          Logger.info("[AcpSession.Handler] approval timed out for #{resource_uri}")
+          {:denied, "operator did not respond in time"}
+
+        nil ->
+          # Outer yield timed out; Task.shutdown returned nil because we
+          # already shut it down.
+          Logger.warning(
+            "[AcpSession.Handler] approval task did not respond within outer slack window for #{resource_uri}"
+          )
+
+          {:denied, "operator did not respond in time"}
+
+        {:exit, reason} ->
+          Logger.warning(
+            "[AcpSession.Handler] approval task crashed for #{resource_uri}: #{inspect(reason)}"
+          )
+
+          {:denied, "approval task crashed"}
+      end
+    else
+      # PubSub isn't running (Arbor.Comms not started in this BEAM, or test
+      # scenario). Fail closed — the operator can't be reached.
+      Logger.warning(
+        "[AcpSession.Handler] HITL PubSub unavailable; failing closed for #{resource_uri}"
+      )
+
+      {:denied, "HITL routing unavailable"}
+    end
+  end
+
+  defp pubsub_available?(name) do
+    Code.ensure_loaded?(Phoenix.PubSub) and Process.whereis(name) != nil
   end
 
   defp format_denial(:path_traversal), do: "access denied: path traversal attempt"
