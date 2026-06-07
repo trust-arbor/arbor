@@ -272,7 +272,8 @@ defmodule Arbor.Cartographer.Hardware do
 
   Uses `/etc/os-release` for distro-level detail on Linux, `sw_vers`
   for the macOS marketing version (more friendly than the Darwin
-  kernel version), and `:os.version/0` elsewhere.
+  kernel version), `uname -r` for BSD release names, and
+  `:os.version/0` elsewhere.
 
   Returns `nil` if no useful identification is available. Best-effort
   — any failure path returns `nil` rather than raising; the cluster
@@ -319,7 +320,13 @@ defmodule Arbor.Cartographer.Hardware do
   end
 
   defp bsd_version(label) do
-    "#{label} #{os_version_string()}"
+    release =
+      case run_command("uname", ["-r"]) do
+        {:ok, output} -> output
+        {:error, _} -> nil
+      end
+
+    format_bsd_os(label, release, :os.version())
   end
 
   defp detect_windows_os do
@@ -335,15 +342,58 @@ defmodule Arbor.Cartographer.Hardware do
     _ -> "Windows"
   end
 
+  @doc false
+  @spec format_bsd_os(String.t(), String.t() | nil, term()) :: String.t()
+  def format_bsd_os(label, release, fallback_version) do
+    version =
+      case normalize_os_release(release) do
+        nil -> format_os_version(fallback_version, trim_zero_patch: true)
+        value -> value
+      end
+
+    "#{label} #{version}"
+  end
+
+  @doc false
+  @spec format_os_version(term(), keyword()) :: String.t()
+  def format_os_version(version, opts \\ [])
+
+  def format_os_version({maj, min, 0}, opts) when is_integer(maj) and is_integer(min) do
+    if Keyword.get(opts, :trim_zero_patch, false) do
+      "#{maj}.#{min}"
+    else
+      "#{maj}.#{min}.0"
+    end
+  end
+
+  def format_os_version({maj, min, patch}, _opts)
+      when is_integer(maj) and is_integer(min) and is_integer(patch) do
+    "#{maj}.#{min}.#{patch}"
+  end
+
+  def format_os_version(ver, _opts) when is_list(ver), do: to_string(ver)
+  def format_os_version(_, _opts), do: "?"
+
   defp os_version_string do
     case :os.version() do
-      {maj, min, patch} -> "#{maj}.#{min}.#{patch}"
+      version when is_tuple(version) -> format_os_version(version)
       ver when is_list(ver) -> to_string(ver)
       _ -> "?"
     end
   rescue
     _ -> "?"
   end
+
+  defp normalize_os_release(nil), do: nil
+
+  defp normalize_os_release(release) when is_binary(release) do
+    case String.trim(release) do
+      "" -> nil
+      value -> value
+    end
+  end
+
+  defp normalize_os_release(_), do: nil
 
   # OpenBSD / FreeBSD / NetBSD: sysctl exposes physical memory in
   # bytes. `:memsup` from OTP's os_mon historically doesn't support

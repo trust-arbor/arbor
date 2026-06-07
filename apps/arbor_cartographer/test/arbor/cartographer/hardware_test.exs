@@ -71,6 +71,20 @@ defmodule Arbor.Cartographer.HardwareTest do
     end
   end
 
+  describe "OS version formatting" do
+    test "uses the BSD release string when uname reports one" do
+      assert Hardware.format_bsd_os("OpenBSD", "7.9\n", {7, 9, 0}) == "OpenBSD 7.9"
+    end
+
+    test "trims OTP's synthetic zero patch from BSD tuple fallback" do
+      assert Hardware.format_bsd_os("OpenBSD", nil, {7, 9, 0}) == "OpenBSD 7.9"
+    end
+
+    test "keeps zero patch when formatting generic OTP version tuples" do
+      assert Hardware.format_os_version({7, 9, 0}) == "7.9.0"
+    end
+  end
+
   describe "detect_gpus/0" do
     test "returns list or nil" do
       gpus = Hardware.detect_gpus()
