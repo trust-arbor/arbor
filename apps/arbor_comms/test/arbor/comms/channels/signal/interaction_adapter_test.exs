@@ -84,17 +84,37 @@ defmodule Arbor.Comms.Channels.Signal.InteractionAdapterTest do
     end
   end
 
+  describe "parse_response/1 — partial responses (no id)" do
+    test "APPROVE alone → :interaction_response_partial :approved" do
+      assert {:interaction_response_partial, :approved, _meta} =
+               InteractionAdapter.parse_response("APPROVE")
+    end
+
+    test "yes alone → :interaction_response_partial :approved" do
+      assert {:interaction_response_partial, :approved, _} =
+               InteractionAdapter.parse_response("yes")
+    end
+
+    test "DENY alone → :interaction_response_partial :rejected" do
+      assert {:interaction_response_partial, :rejected, _} =
+               InteractionAdapter.parse_response("DENY")
+    end
+
+    test "no alone → :interaction_response_partial :rejected" do
+      assert {:interaction_response_partial, :rejected, _} =
+               InteractionAdapter.parse_response("no")
+    end
+
+    test "approve with extra words but no id → :partial" do
+      # "approve please" — first word still matches; treat as partial.
+      assert {:interaction_response_partial, :approved, _} =
+               InteractionAdapter.parse_response("approve please")
+    end
+  end
+
   describe "parse_response/1 — :not_interaction cases" do
     test "regular chat text" do
       assert :not_interaction = InteractionAdapter.parse_response("hey, what's up")
-    end
-
-    test "approve word but no request_id" do
-      assert :not_interaction = InteractionAdapter.parse_response("approve everything")
-    end
-
-    test "deny word but no request_id" do
-      assert :not_interaction = InteractionAdapter.parse_response("deny everything")
     end
 
     test "request_id but no decision word" do

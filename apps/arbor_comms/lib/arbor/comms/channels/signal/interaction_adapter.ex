@@ -13,13 +13,26 @@ defmodule Arbor.Comms.Channels.Signal.InteractionAdapter do
 
       <description>
 
-      Reply: APPROVE <request_id> or DENY <request_id>
+      Reply: APPROVE or DENY
+      (id: <request_id> — include if multiple pending)
 
-  Inbound (parsed back into a response): the first word of the message
-  must be one of `APPROVE`/`YES`/`OK` or `DENY`/`REJECT`/`NO` (case
-  insensitive). The message must also include the `irq_<hex>` request
-  id so multi-pending requests don't collide — if no id is found, the
-  message is treated as regular chat (`:not_interaction`).
+  Inbound: the first word must match an APPROVE / DENY synonym
+  (YES/OK/Y/NO/N/REJECT/ACK/NACK, case-insensitive). The `irq_<hex>`
+  request id is OPTIONAL on the reply.
+
+    * Reply WITH the id → `{:interaction_response, id, response, meta}`.
+      The router routes directly. Use this when multiple approvals
+      are pending and you need to disambiguate.
+
+    * Reply WITHOUT the id → `{:interaction_response_partial, response,
+      meta}`. The router looks up pending interactions for the
+      sender's user_id: zero → treat as chat; one → use it; multiple
+      → an automatic Signal reply lists the pending requests and the
+      operator's reply is held off until they re-send with an id.
+
+  The mobile-Signal UX motivation: tapping/long-pressing to extract a
+  long hex string is slow; the common case (one pending approval)
+  should accept a one-word reply.
 
   ## Configuration
 
@@ -84,14 +97,17 @@ defmodule Arbor.Comms.Channels.Signal.InteractionAdapter do
 
   @impl true
   @doc """
-  Parse an inbound Signal message. Returns
-  `{:interaction_response, request_id, response, metadata}` when the
-  message looks like an approval response — first-word match against
-  APPROVE/DENY (or synonyms) AND contains a recognizable `irq_<hex>`
-  request id.
+  Parse an inbound Signal message into a `ChannelAdapter.parse_result`.
 
-  Returns `:not_interaction` for plain chat traffic so the inbound
-  router can dispatch normally.
+  Decision-word match on the first content word (APPROVE/DENY +
+  synonyms, case-insensitive). The `irq_<hex>` id is optional.
+
+    * decision + id → `{:interaction_response, id, response, meta}`
+    * decision only → `{:interaction_response_partial, response, meta}`
+    * neither → `:not_interaction`
+
+  See the moduledoc for the multi-pending disambiguation flow the
+  router uses on the partial path.
   """
   def parse_response(raw) when is_binary(raw) do
     decision =
@@ -102,16 +118,17 @@ defmodule Arbor.Comms.Channels.Signal.InteractionAdapter do
       end
 
     request_id = extract_request_id(raw)
+    meta = %{channel: :signal, raw: raw}
 
     case {decision, request_id} do
       {nil, _} ->
         :not_interaction
 
-      {_, nil} ->
-        :not_interaction
+      {response, nil} ->
+        {:interaction_response_partial, response, meta}
 
       {response, rid} ->
-        {:interaction_response, rid, response, %{channel: :signal, raw: raw}}
+        {:interaction_response, rid, response, meta}
     end
   end
 
@@ -127,7 +144,8 @@ defmodule Arbor.Comms.Channels.Signal.InteractionAdapter do
 
     #{description}
 
-    Reply: APPROVE #{i.request_id} or DENY #{i.request_id}
+    Reply: APPROVE or DENY
+    (id: #{i.request_id} — include if multiple pending)
     """
     |> String.trim()
   end

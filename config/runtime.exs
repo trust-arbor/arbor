@@ -142,6 +142,7 @@ end
 signal_account = System.get_env("SIGNAL_FROM") || System.get_env("SIGNAL_ACCOUNT")
 signal_cli_path = System.get_env("SIGNAL_CLI_PATH")
 signal_to = System.get_env("SIGNAL_TO")
+arbor_user_id = System.get_env("ARBOR_USER_ID") || "operator"
 
 if signal_account do
   signal_config =
@@ -150,6 +151,15 @@ if signal_account do
     |> then(fn cfg ->
       if signal_cli_path, do: Keyword.put(cfg, :signal_cli_path, signal_cli_path), else: cfg
     end)
+    # HITL router Phase 2 (2026-06-06): if SIGNAL_TO is set, also use
+    # it as the interaction-routing recipient so approval requests
+    # delivered to this user route to their phone. The user_id maps
+    # to ARBOR_USER_ID (default "operator") — must match the agent's
+    # operator binding so the router's PresenceTracker lookup hits.
+    |> then(fn cfg ->
+      if signal_to, do: Keyword.put(cfg, :interaction_recipient, signal_to), else: cfg
+    end)
+    |> Keyword.put_new(:interaction_user_id, arbor_user_id)
 
   config :arbor_comms, :signal, signal_config
 end
