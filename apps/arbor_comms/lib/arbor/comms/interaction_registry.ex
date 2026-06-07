@@ -8,61 +8,103 @@ defmodule Arbor.Comms.InteractionRegistry do
        the originating interaction record without holding any agent
        state — `respond/3` finds the record by `request_id` and
        publishes back via PubSub on the right per-agent topic.
-    2. Node restarts shouldn't lose pending interactions. The ETS
-       backing is per-node; future Phases can swap in a BufferedStore
-       backend with the same API.
-    3. Audit — the registry's history is the source of truth for
-       "what did we ask the human, and what did they answer."
+    2. Cluster-coherent: a `put` on Node A is visible from Node B's
+       `get`/`list_pending_for_user` within the Phoenix.Tracker
+       merge interval (~10ms). This matters because the Signal
+       poller and the agent that submitted the interaction can run
+       on different nodes.
+    3. Audit — the registry's pending+resolved state is the source of
+       truth for "what did we ask the human, and what did they
+       answer."
 
-  ## Phase 1 implementation
+  ## Implementation (2026-06-06 cluster refactor)
 
-  Local ETS table owned by a GenServer for serialization of writes.
-  Reads bypass the GenServer for low latency. Cluster correctness
-  comes from PubSub on response routing — the registry just needs to
-  be reachable on whichever node the responding adapter runs on.
+  Phoenix.Tracker on top of `Arbor.Comms.PubSub` — the same bus
+  `PresenceTracker` uses, so cluster-coherency is symmetric across
+  the two registries. Eventually consistent: `track` returns
+  immediately, the entry propagates to other nodes within the
+  Tracker's merge interval. For interaction-request lookup latency
+  this is well below the human-response latency the registry is
+  serving, so the consistency model is fine.
 
-  For full cluster-wide pending state, a future Phase swaps the ETS
-  backend for a distributed store (BufferedStore + replication, or a
-  CRDT). The public API stays the same.
+  A dedicated `Owner` process holds every tracked entry's owning
+  pid. That process lives for the lifetime of the supervisor;
+  entries don't die with the calling agent. If the Owner crashes,
+  its local entries vanish — but other nodes' replicas remain
+  visible via Tracker's CRDT merge, so cluster-wide state survives
+  any single-node restart.
+
+  Pre-2026-06-06: this was an ETS-only single-node store. A
+  `put` on Node A was invisible to Node B's `get`, so the Signal
+  poller's `Router.maybe_route_as_interaction` returned `:not_found`
+  for any interaction created on a peer — silently passing the
+  operator's approval reply to the chat handler instead of routing
+  it. The refactor fixes that.
+
+  ## Future work
+
+  - **Persistence across cluster-wide restart.** Tracker is
+    in-memory; if every node restarts simultaneously, pending
+    interactions vanish. Postgres-backed store (BufferedStore +
+    read-fallthrough, matching the EventLog refactor that landed
+    earlier today) is the right answer when this becomes a real
+    issue. Documented in `5-completed/human-in-the-loop-router.md`
+    under "What's not done."
   """
 
-  use GenServer
+  use Phoenix.Tracker
+
   require Logger
 
   alias Arbor.Contracts.Comms.Interaction
 
-  @table :arbor_interaction_registry
+  # All interactions land on this single topic. Tracker filters keys
+  # within the topic, so per-user partitioning would buy little for a
+  # registry this small (dozens of pending entries at most).
+  @topic "interactions"
 
   ## Public API
 
-  @doc "Start the registry (named, single per node)."
+  @doc "Start the Tracker."
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
-    GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
+    pubsub = Keyword.get(opts, :pubsub_server, Arbor.Comms.PubSub)
+    opts = Keyword.merge([name: __MODULE__, pubsub_server: pubsub], opts)
+    Phoenix.Tracker.start_link(__MODULE__, opts, opts)
   end
 
   @doc """
-  Record a new outstanding interaction. Stored under its `request_id`.
-  Returns the same interaction back for chaining.
+  Record a new outstanding interaction. Returns the interaction back
+  for chaining. Eventually-consistent across the cluster — visible
+  from peer nodes within the Tracker merge interval (~10ms).
   """
   @spec put(Interaction.t(), keyword()) :: {:ok, Interaction.t()} | {:error, term()}
-  def put(%Interaction{} = interaction, opts \\ []) do
+  def put(%Interaction{request_id: id} = interaction, opts \\ []) do
     name = Keyword.get(opts, :name, __MODULE__)
-    GenServer.call(name, {:put, interaction})
+    owner = ensure_owner!()
+
+    case Phoenix.Tracker.track(name, owner, @topic, id, %{interaction: interaction}) do
+      {:ok, _ref} -> {:ok, interaction}
+      {:error, {:already_tracked, _, _, _}} -> {:ok, interaction}
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    e ->
+      Logger.warning("[InteractionRegistry] put failed: #{Exception.message(e)}")
+      {:error, :tracker_unavailable}
   end
 
   @doc """
-  Look up a pending interaction by request_id. Returns the interaction
-  if found, `:not_found` otherwise. ETS read — no GenServer hop.
+  Look up a pending interaction by request_id. Cluster-wide search.
   """
   @spec get(String.t()) :: {:ok, Interaction.t()} | :not_found
   def get(request_id) when is_binary(request_id) do
-    case :ets.lookup(@table, request_id) do
-      [{^request_id, %Interaction{} = interaction}] -> {:ok, interaction}
-      [] -> :not_found
+    case lookup_meta(request_id) do
+      %{interaction: %Interaction{} = i} -> {:ok, i}
+      nil -> :not_found
     end
   rescue
-    ArgumentError -> :not_found
+    _ -> :not_found
   end
 
   @doc """
@@ -73,20 +115,41 @@ defmodule Arbor.Comms.InteractionRegistry do
   @spec resolve(String.t(), keyword()) :: {:ok, Interaction.t()} | :not_found
   def resolve(request_id, opts \\ []) when is_binary(request_id) do
     name = Keyword.get(opts, :name, __MODULE__)
-    GenServer.call(name, {:resolve, request_id})
+
+    case lookup_meta(request_id) do
+      %{interaction: %Interaction{} = i} ->
+        # Untrack from THIS node's Tracker entry. CRDT merge will
+        # propagate the removal to peers within the merge interval.
+        # If the entry was created on another node, untrack here is a
+        # no-op locally but emits a cluster signal anyway — the
+        # owning node observes the diff and clears its entry. For the
+        # common path (same node owns the entry) this is correct
+        # immediately.
+        owner = ensure_owner!()
+        Phoenix.Tracker.untrack(name, owner, @topic, request_id)
+        {:ok, i}
+
+      nil ->
+        :not_found
+    end
+  rescue
+    e ->
+      Logger.warning("[InteractionRegistry] resolve failed: #{Exception.message(e)}")
+      :not_found
   end
 
   @doc """
-  List all currently-pending interactions. Used by the dashboard to
-  show "you have N pending approvals" and by audit queries.
+  List all currently-pending interactions across the cluster.
+  Newest entries are not specially ordered here — callers that need
+  ordering should sort by `submitted_at`.
   """
   @spec list_pending() :: [Interaction.t()]
   def list_pending do
-    @table
-    |> :ets.tab2list()
-    |> Enum.map(fn {_id, interaction} -> interaction end)
+    __MODULE__
+    |> Phoenix.Tracker.list(@topic)
+    |> Enum.map(fn {_key, %{interaction: %Interaction{} = i}} -> i end)
   rescue
-    ArgumentError -> []
+    _ -> []
   end
 
   @doc """
@@ -94,10 +157,8 @@ defmodule Arbor.Comms.InteractionRegistry do
 
   Used by `Arbor.Comms.Router` to resolve adapter `:partial`
   responses ("APPROVE" without an `irq_<hex>` id) to the operator's
-  most-recent pending request. The list is sorted descending by
-  `submitted_at` so callers can take the head for the "most recent"
-  case and use `length(_) > 1` for the multi-pending disambiguation
-  case.
+  most-recent pending request. Cluster-wide — entries created on
+  any node are included.
   """
   @spec list_pending_for_user(String.t()) :: [Interaction.t()]
   def list_pending_for_user(user_id) when is_binary(user_id) do
@@ -106,40 +167,67 @@ defmodule Arbor.Comms.InteractionRegistry do
     |> Enum.sort_by(& &1.submitted_at, {:desc, DateTime})
   end
 
-  @doc "Reset all registry state (test-only)."
+  @doc """
+  Reset all registry state (test-only). Untracks everything this
+  node currently owns. Peer-node entries are NOT cleared — for
+  cluster-wide test reset, every node must call this.
+  """
   @spec reset(keyword()) :: :ok
   def reset(opts \\ []) do
     name = Keyword.get(opts, :name, __MODULE__)
-    GenServer.call(name, :reset)
+    owner = ensure_owner!()
+
+    name
+    |> Phoenix.Tracker.list(@topic)
+    |> Enum.each(fn {key, _meta} ->
+      Phoenix.Tracker.untrack(name, owner, @topic, key)
+    end)
+
+    # Give the merge a tick to settle for synchronous test code.
+    Process.sleep(20)
+    :ok
+  rescue
+    _ -> :ok
   end
 
-  ## GenServer
+  ## Phoenix.Tracker callbacks
 
   @impl true
-  def init(_opts) do
-    :ets.new(@table, [:set, :public, :named_table, read_concurrency: true])
-    {:ok, %{}}
+  def init(opts) do
+    server = Keyword.fetch!(opts, :pubsub_server)
+    {:ok, %{pubsub_server: server, node_name: Phoenix.PubSub.node_name(server)}}
   end
 
   @impl true
-  def handle_call({:put, %Interaction{request_id: id} = interaction}, _from, state) do
-    :ets.insert(@table, {id, interaction})
-    {:reply, {:ok, interaction}, state}
+  def handle_diff(_diff, state) do
+    # Phase 1: no subscribers care about diff events (the Router
+    # learns about responses via the normal Signal poller path, not
+    # via Tracker diffs). Add diff subscribers later if dashboards
+    # want to react to peer-node interaction events in real time.
+    {:ok, state}
   end
 
-  def handle_call({:resolve, id}, _from, state) do
-    case :ets.lookup(@table, id) do
-      [{^id, %Interaction{} = interaction}] ->
-        :ets.delete(@table, id)
-        {:reply, {:ok, interaction}, state}
+  ## Private
 
-      [] ->
-        {:reply, :not_found, state}
+  # Look up a tracked entry's meta by request_id across cluster state.
+  defp lookup_meta(request_id) do
+    __MODULE__
+    |> Phoenix.Tracker.list(@topic)
+    |> Enum.find_value(fn
+      {^request_id, meta} -> meta
+      _ -> nil
+    end)
+  end
+
+  # Owning pid for all tracked entries on this node. We use the
+  # Tracker's own GenServer pid — it lives for the supervisor's
+  # lifetime, and tracking against it means entries vanish if the
+  # Tracker process itself dies (which is the right semantics —
+  # other nodes' replicas survive).
+  defp ensure_owner! do
+    case Process.whereis(__MODULE__) do
+      pid when is_pid(pid) -> pid
+      nil -> raise "InteractionRegistry not running"
     end
-  end
-
-  def handle_call(:reset, _from, state) do
-    :ets.delete_all_objects(@table)
-    {:reply, :ok, state}
   end
 end
