@@ -1,0 +1,15 @@
+{
+  "capabilities": [
+    {
+      "constraints": {},
+      "resource_uri": "arbor://net/search/**"
+    },
+    {
+      "constraints": {},
+      "resource_uri": "arbor://fs/write/Users/azmaveth/.arbor/reports/current-trends-brave/**"
+    }
+  ],
+  "issuer_id": "agent_30b455a27f7f4e02ef291fd9f7862677f731a1f8b08c997f5fb8ad430d594b6e",
+  "signature": "mb/RbFz+ozjwqHxkClNg59mrKJklAmhHsvGcufEjZokQ8jI917EHcUJd+NN6h8jAKZkI8W+o58X4/Ro9t3XvDw==",
+  "version": 1
+}

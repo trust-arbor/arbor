@@ -1,0 +1,187 @@
+// Current-Trends Research Pipeline — Path 2 (Brave search + local LLM)
+//
+// Companion to current_trends.dot (Path 1: Claude CLI via ACP).
+// Same goal — produce a brief on the past week's notable activity in
+// agent + harness engineering — but built from independent primitives
+// so we can A/B the output quality and cost:
+//
+//   Path 1: ACP + Claude CLI does its own search + synthesis
+//           (single LLM call, free under existing Claude subscription
+//           until 2026-06-15 Agent SDK billing change)
+//
+//   Path 2 (this one): explicit Brave Search action returns 10 results,
+//           then local LM Studio gemma-4-31b-it synthesizes them
+//           (one paid Brave API call, zero LLM cost since the model
+//           runs locally)
+//
+//   Path 3 (planned): Exa search + same local synthesis
+//           (Exa has stronger freshness controls; A/B vs Brave)
+//
+// Writes to a separate directory so all three paths' outputs sit
+// side-by-side for comparison.
+//
+// Scheduling (planned):
+//   {"30 6 * * *", Arbor.Scheduler.Workers.PipelineRunner,
+//     args: %{"pipeline_path" =>
+//       "apps/arbor_scheduler/priv/pipelines/current_trends_brave.dot"}}
+//
+// Manual:
+//   Arbor.Scheduler.enqueue_pipeline(
+//     "apps/arbor_scheduler/priv/pipelines/current_trends_brave.dot"
+//   )
+
+digraph CurrentTrendsBrave {
+  graph [
+    goal="Produce a brief on the past week's notable activity in agent + harness engineering, from Brave search results synthesized by a local LLM",
+    label="Current Trends — Brave + local LLM"
+  ]
+
+  start [shape=Mdiamond]
+
+  // ─── Set up search params ────────────────────────────────────────────
+  // The web_search action reads `query`, `freshness`, `max_results`
+  // from context. Set each via a shell+transform pair so the values
+  // are explicit (and easy to tweak per-run by overriding via
+  // initial_values when enqueueing).
+
+  set_query [
+    type="shell",
+    command="printf '%s' 'AI coding agent harness MCP ACP tool calling new release update'",
+    sandbox="none",
+    timeout="5000",
+    on_error="fail",
+    data_class="public"
+  ]
+
+  prep_query [
+    type="transform",
+    transform="identity",
+    source_key="shell.set_query.output",
+    output_key="query"
+  ]
+
+  set_freshness [
+    type="shell",
+    command="printf '%s' 'pw'",
+    sandbox="none",
+    timeout="5000",
+    on_error="fail",
+    data_class="public"
+  ]
+
+  prep_freshness [
+    type="transform",
+    transform="identity",
+    source_key="shell.set_freshness.output",
+    output_key="freshness"
+  ]
+
+  // ─── Brave search ───────────────────────────────────────────────────
+  // Returns a structured result with title/url/snippet/age per hit.
+  // The output lands under exec.web_search.* in context.
+  web_search [
+    type="exec",
+    target="action",
+    action="web_search",
+    context_keys="query,freshness"
+  ]
+
+  // Serialize the results list to pretty JSON so the LLM prompt
+  // includes them as text (the compute node coerces prompt context
+  // to string before sending). `format=json` is one of the
+  // TransformHandler's built-in formatters.
+  format_results [
+    type="transform",
+    transform="format",
+    expression="json",
+    source_key="exec.web_search.results",
+    output_key="search_results_json"
+  ]
+
+  // ─── Build today's date into the system prompt ─────────────────────
+  // gemma-4-31b consistently hallucinates the title date from its
+  // training-cutoff window unless today's date is in the prompt. We
+  // interpolate `date -u +%Y-%m-%d` into a shell-built system prompt
+  // and pass it via `system_prompt_context_key` so the prompt the
+  // LLM actually sees has the literal correct date in it.
+  build_system_prompt [
+    type="shell",
+    command="cat <<EOF\nYou are a research assistant producing a weekly brief on agent + harness engineering. Today is $(date -u +%Y-%m-%d). You are given the JSON results of a Brave web search for the past week — a list of {rank, title, url, snippet, age} entries. Synthesize the most signal-bearing items into a Markdown brief.\\n\\nOutput ONLY Markdown with this exact shape:\\n\\n# Current Trends — $(date -u +%Y-%m-%d)\\n\\n## Three headlines\\n\\n1. **<Headline>** — One to three sentences citing the source URL.\\n2. **<Headline>** — Same.\\n3. **<Headline>** — Same.\\n\\n## Releases and updates\\n\\nA bullet list of specific releases or version bumps surfaced by the search, one-line summaries, each with its source URL.\\n\\n## Patterns and shifts\\n\\n3–5 bullets about higher-level patterns visible across the results.\\n\\n## Worth a closer look\\n\\n1–3 items that didn't make the headlines but matter for Arbor specifically (capability-based security, BEAM substrate, multi-agent orchestration, harness engineering). One sentence each with URL.\\n\\nRules:\\n- Use the literal '$(date -u +%Y-%m-%d)' as the date in the title — NOT your training-cutoff date.\\n- Cite source URLs after each claim — pull them straight from the result entries. Don't invent URLs.\\n- Skip results that are obviously off-topic (general AI news, product ads, listicles, curated 'awesome-X' meta-lists).\\n- Be terse. The reader is a single founder working on agent infrastructure; they want signal density, not coverage.\\n- If the search results genuinely don't support a section, say 'No notable items this week' rather than padding.\\n- Markdown only — no preamble, no code fences around the whole document, no chain-of-thought.\nEOF",
+    sandbox="none",
+    timeout="5000",
+    on_error="fail",
+    data_class="public"
+  ]
+
+  prep_system_prompt [
+    type="transform",
+    transform="identity",
+    source_key="shell.build_system_prompt.output",
+    output_key="dynamic_system_prompt"
+  ]
+
+  // ─── Output path setup ──────────────────────────────────────────────
+  // Separate directory from current-trends/ (which is the ACP/Claude
+  // path) so the three approaches' outputs sit side-by-side.
+
+  build_output_path [
+    type="shell",
+    command="mkdir -p \"$HOME/.arbor/reports/current-trends-brave\" && printf '%s' \"$HOME/.arbor/reports/current-trends-brave/$(date -u +%Y-%m-%d).md\"",
+    sandbox="none",
+    timeout="5000",
+    on_error="fail",
+    data_class="internal"
+  ]
+
+  prep_output_path [
+    type="transform",
+    transform="identity",
+    source_key="shell.build_output_path.output",
+    output_key="path"
+  ]
+
+  // ─── Synthesis ──────────────────────────────────────────────────────
+  // Local LM Studio + gemma-4-31b-it. Reads the JSON-encoded search
+  // results from context and produces the structured brief.
+  //
+  // Why gemma 4 31b: roughly capable enough to follow the structured-
+  // output instructions and synthesize 10 search snippets. Smaller
+  // models tend to hallucinate citations or drop the format; bigger
+  // ones don't fit in laptop RAM.
+  synthesize [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    llm_provider="lm_studio",
+    llm_model="gemma-4-31b-it",
+    use_tools="false",
+    max_tokens="32768",
+    temperature="0.4",
+    timeout="1800000",
+    system_prompt_context_key="dynamic_system_prompt",
+    prompt_context_key="search_results_json"
+  ]
+
+  // ─── Write the report ───────────────────────────────────────────────
+
+  prep_content [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="content"
+  ]
+
+  write_report [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
+
+  done [shape=Msquare]
+
+  start -> set_query -> prep_query -> set_freshness -> prep_freshness -> web_search
+  web_search -> format_results -> build_system_prompt -> prep_system_prompt
+  prep_system_prompt -> build_output_path -> prep_output_path -> synthesize
+  synthesize -> prep_content -> write_report -> done
+}

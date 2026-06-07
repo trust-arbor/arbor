@@ -1,0 +1,119 @@
+// Current-Trends Research Pipeline — Path 4 (Tinyfish search + local LLM)
+//
+// Fourth and final variant of the current-trends research pipeline.
+// Same gemma-4-31b-it synthesis as Brave/Exa; the variable is the
+// search provider. Tinyfish positions on "fresh, never cached" and
+// returns the same {title, url, snippet} shape, so the gemma prompt
+// is identical to the Exa version.
+//
+// Writes to `~/.arbor/reports/current-trends-tinyfish/YYYY-MM-DD.md`.
+
+digraph CurrentTrendsTinyfish {
+  graph [
+    goal="Produce a brief on the past week's notable activity in agent + harness engineering, from Tinyfish search results synthesized by a local LLM",
+    label="Current Trends — Tinyfish + local LLM"
+  ]
+
+  start [shape=Mdiamond]
+
+  set_query [
+    type="shell",
+    command="printf '%s' 'AI coding agent harness MCP ACP tool calling new release update'",
+    sandbox="none",
+    timeout="5000",
+    on_error="fail",
+    data_class="public"
+  ]
+
+  prep_query [
+    type="transform",
+    transform="identity",
+    source_key="shell.set_query.output",
+    output_key="query"
+  ]
+
+  tinyfish_search [
+    type="exec",
+    target="action",
+    action="tinyfish_search",
+    context_keys="query"
+  ]
+
+  format_results [
+    type="transform",
+    transform="format",
+    expression="json",
+    source_key="exec.tinyfish_search.results",
+    output_key="search_results_json"
+  ]
+
+  // Build today's date into the system prompt so gemma-31b stops
+  // using its training-cutoff date in the title. See
+  // current_trends_brave.dot for the rationale.
+  build_system_prompt [
+    type="shell",
+    command="cat <<EOF\nYou are a research assistant producing a weekly brief on agent + harness engineering. Today is $(date -u +%Y-%m-%d). You are given the JSON results of a Tinyfish web search — a list of {rank, title, url, snippet, age} entries.\\n\\nOutput ONLY Markdown with this exact shape:\\n\\n# Current Trends — $(date -u +%Y-%m-%d)\\n\\n## Three headlines\\n\\n1. **<Headline>** — One to three sentences citing the source URL.\\n2. **<Headline>** — Same.\\n3. **<Headline>** — Same.\\n\\n## Releases and updates\\n\\nA bullet list of specific releases or version bumps surfaced by the search, one-line summaries, each with its source URL.\\n\\n## Patterns and shifts\\n\\n3–5 bullets about higher-level patterns visible across the results.\\n\\n## Worth a closer look\\n\\n1–3 items that didn't make the headlines but matter for Arbor specifically (capability-based security, BEAM substrate, multi-agent orchestration, harness engineering). One sentence each with URL.\\n\\nRules:\\n- Use the literal '$(date -u +%Y-%m-%d)' as the date in the title — NOT your training-cutoff date.\\n- Cite source URLs after each claim — pull from the result entries, don't invent URLs.\\n- Skip results that are obviously off-topic (general AI news, product ads, listicles, curated 'awesome-X' meta-lists).\\n- Be terse. Signal density, not coverage.\\n- Markdown only — no preamble, no code fences around the whole document, no chain-of-thought.\nEOF",
+    sandbox="none",
+    timeout="5000",
+    on_error="fail",
+    data_class="public"
+  ]
+
+  prep_system_prompt [
+    type="transform",
+    transform="identity",
+    source_key="shell.build_system_prompt.output",
+    output_key="dynamic_system_prompt"
+  ]
+
+  build_output_path [
+    type="shell",
+    command="mkdir -p \"$HOME/.arbor/reports/current-trends-tinyfish\" && printf '%s' \"$HOME/.arbor/reports/current-trends-tinyfish/$(date -u +%Y-%m-%d).md\"",
+    sandbox="none",
+    timeout="5000",
+    on_error="fail",
+    data_class="internal"
+  ]
+
+  prep_output_path [
+    type="transform",
+    transform="identity",
+    source_key="shell.build_output_path.output",
+    output_key="path"
+  ]
+
+  synthesize [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    llm_provider="lm_studio",
+    llm_model="gemma-4-31b-it",
+    use_tools="false",
+    max_tokens="32768",
+    temperature="0.4",
+    timeout="1800000",
+    system_prompt_context_key="dynamic_system_prompt",
+    prompt_context_key="search_results_json"
+  ]
+
+  prep_content [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="content"
+  ]
+
+  write_report [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
+
+  done [shape=Msquare]
+
+  start -> set_query -> prep_query -> tinyfish_search
+  tinyfish_search -> format_results -> build_system_prompt -> prep_system_prompt
+  prep_system_prompt -> build_output_path -> prep_output_path -> synthesize
+  synthesize -> prep_content -> write_report -> done
+}
