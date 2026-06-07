@@ -227,7 +227,7 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_call({:create_session, opts}, _from, state) do
-    cwd = Keyword.get(opts, :cwd) || Keyword.get(state.opts, :cwd)
+    cwd = resolve_cwd(opts, state.opts)
 
     # Inject mcp_servers from pool-provided ToolServer (if any)
     opts =
@@ -266,7 +266,7 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_call({:resume_session, session_id, opts}, _from, state) do
-    cwd = Keyword.get(opts, :cwd) || Keyword.get(state.opts, :cwd)
+    cwd = resolve_cwd(opts, state.opts)
 
     result =
       try do
@@ -564,7 +564,7 @@ defmodule Arbor.AI.AcpSession do
             case apply(@acp_client, :load_session, [
                    client,
                    state.last_session_id,
-                   Keyword.get(state.opts, :cwd)
+                   resolve_cwd([], state.opts)
                  ]) do
               {:ok, _session_info} ->
                 {:ok,
@@ -667,7 +667,10 @@ defmodule Arbor.AI.AcpSession do
   defp ensure_session(%{session_id: sid} = state, _opts) when is_binary(sid), do: {:ok, state}
 
   defp ensure_session(state, opts) do
-    cwd = Keyword.get(opts, :cwd) || workspace_cwd(state.workspace, state.opts)
+    cwd =
+      Keyword.get(opts, :cwd) ||
+        workspace_cwd(state.workspace, state.opts) ||
+        process_cwd_with_log()
 
     new_opts =
       case state.mcp_servers do
@@ -735,6 +738,29 @@ defmodule Arbor.AI.AcpSession do
   defp workspace_cwd({:worktree, path, _branch}, _opts), do: path
   defp workspace_cwd({:directory, path}, _opts), do: path
   defp workspace_cwd(_, opts), do: Keyword.get(opts, :cwd)
+
+  # ex_mcp's Protocol.encode_session_{new,load,resume} require a non-nil
+  # cwd per ACP spec. Without this fallback an internal callsite that
+  # forgets to thread :cwd through (or a fresh session before the workspace
+  # is set up) would raise FunctionClauseError at the wire boundary.
+  # File.cwd!() — the BEAM process's working directory — is the natural
+  # "agent works from where the server runs" default.
+  defp resolve_cwd(opts, state_opts) do
+    Keyword.get(opts, :cwd) ||
+      Keyword.get(state_opts, :cwd) ||
+      process_cwd_with_log()
+  end
+
+  defp process_cwd_with_log do
+    cwd = File.cwd!()
+
+    Logger.debug(
+      "AcpSession falling back to process cwd #{inspect(cwd)} — caller passed no :cwd " <>
+        "and session opts have none either. Specify :cwd in init or per-call opts to silence."
+    )
+
+    cwd
+  end
 
   defp cleanup_workspace({:worktree, path, branch}) do
     if File.dir?(path) do
