@@ -60,6 +60,7 @@ defmodule Mix.Tasks.Arbor.Cluster do
         Mix.shell().info(
           "  #{status_icon} #{node}" <>
             "  #{info.arch} | #{info.cpus} CPUs | #{format_memory(info.memory_gb)} GB" <>
+            if(info.os, do: " | #{info.os}", else: "") <>
             if(info.gpu, do: " | GPU: #{info.gpu}", else: "") <>
             if(info.android, do: " | Android", else: "") <>
             if(info.load, do: " | load: #{info.load}", else: "")
@@ -213,8 +214,8 @@ defmodule Mix.Tasks.Arbor.Cluster do
         _ -> "?"
       end
 
-    # Try cartographer for rich hardware info (system RAM, GPU, Android)
-    {memory_gb, gpu, android} =
+    # Try cartographer for rich hardware info (system RAM, GPU, OS, Android)
+    {memory_gb, gpu, os, android} =
       case :rpc.call(node, Arbor.Cartographer, :detect_hardware, [], 10_000) do
         {:ok, hw} ->
           mem = hw[:memory_gb] || beam_memory_gb(node)
@@ -225,13 +226,14 @@ defmodule Mix.Tasks.Arbor.Cluster do
               _ -> nil
             end
 
+          os_string = hw[:os]
           is_android = hw[:android] != nil
 
-          {mem, gpu_name, is_android}
+          {mem, gpu_name, os_string, is_android}
 
         _ ->
           # Fallback to BEAM memory if cartographer not available
-          {beam_memory_gb(node), nil, false}
+          {beam_memory_gb(node), nil, nil, false}
       end
 
     load =
@@ -240,7 +242,15 @@ defmodule Mix.Tasks.Arbor.Cluster do
         _ -> nil
       end
 
-    %{arch: arch, cpus: cpus, memory_gb: memory_gb, gpu: gpu, android: android, load: load}
+    %{
+      arch: arch,
+      cpus: cpus,
+      memory_gb: memory_gb,
+      gpu: gpu,
+      os: os,
+      android: android,
+      load: load
+    }
   end
 
   defp parse_node(node_str) do
