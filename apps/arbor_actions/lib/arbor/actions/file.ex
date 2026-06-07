@@ -828,7 +828,8 @@ defmodule Arbor.Actions.File do
              ),
            {:ok, search_pattern} <- compile_pattern(pattern, use_regex),
            {:ok, files} <- get_files_to_search(safe_path, glob_pattern),
-           {:ok, matches} <- search_files(files, search_pattern, ctx_lines, max_results) do
+           {:ok, matches} <-
+             search_files(files, pattern, search_pattern, use_regex, ctx_lines, max_results) do
         result = %{
           matches: matches,
           count: length(matches)
@@ -887,13 +888,214 @@ defmodule Arbor.Actions.File do
       end
     end
 
-    defp search_files(files, pattern, context_lines, max_results) do
+    # Search dispatcher — picks the fastest available scanner:
+    #   ripgrep > grep > BEAM-native
+    #
+    # ripgrep and grep do the scanning in native code (fast on large
+    # codebases). They return file:line matches; we re-read each
+    # matched file once in BEAM to extract the `context_lines`-style
+    # multi-line content so the output shape is identical regardless
+    # of strategy.
+    #
+    # BEAM-native stays as the fallback for environments without rg or
+    # grep, and is also used when the file list is empty (no point
+    # shelling out for nothing). It's also the most portable path —
+    # no dependency on external binaries.
+    defp search_files([], _pattern, _regex, _use_regex, _ctx, _max), do: {:ok, []}
+
+    defp search_files(files, pattern, regex, use_regex, ctx_lines, max_results) do
+      strategy =
+        case Process.get(:__arbor_file_search_force_strategy__) do
+          nil -> detect_strategy()
+          forced -> forced
+        end
+
+      case strategy do
+        :ripgrep ->
+          ripgrep_search(files, pattern, use_regex, ctx_lines, max_results)
+
+        :grep ->
+          grep_search(files, pattern, use_regex, ctx_lines, max_results)
+
+        :beam ->
+          beam_search(files, regex, ctx_lines, max_results)
+      end
+    end
+
+    # Cheap detection on each call. `System.find_executable/1` is a
+    # PATH walk, ~microseconds. No need for caching that introduces
+    # staleness when an operator installs rg mid-session.
+    defp detect_strategy do
+      cond do
+        System.find_executable("rg") -> :ripgrep
+        System.find_executable("grep") -> :grep
+        true -> :beam
+      end
+    end
+
+    # ── ripgrep strategy ───────────────────────────────────────────
+
+    defp ripgrep_search(files, pattern, use_regex, ctx_lines, max_results) do
+      # `-N --no-heading` → uniform `file:line:content` output
+      # `--color=never`   → no ANSI noise
+      # `-F` or `-e`      → literal vs regex matching
+      pattern_flag = if use_regex, do: "-e", else: "-F"
+
+      args = [
+        "-n",
+        "--no-heading",
+        "--color=never",
+        "--with-filename",
+        pattern_flag,
+        pattern,
+        "--"
+        | files
+      ]
+
+      try do
+        case System.cmd("rg", args, stderr_to_stdout: false) do
+          {output, 0} ->
+            {:ok, parse_tool_output_and_context(output, ctx_lines, max_results)}
+
+          {_output, 1} ->
+            # rg's "no matches" exit code
+            {:ok, []}
+
+          {error, _code} ->
+            # rg ran but failed (bad pattern, etc.). Fall back to BEAM
+            # so the search still returns something useful.
+            require Logger
+            Logger.debug("[File.Search] rg returned non-zero, falling back: #{error}")
+            beam_search_from_files(files, pattern, use_regex, ctx_lines, max_results)
+        end
+      rescue
+        e ->
+          require Logger
+          Logger.debug("[File.Search] rg raised, falling back: #{Exception.message(e)}")
+          beam_search_from_files(files, pattern, use_regex, ctx_lines, max_results)
+      end
+    end
+
+    # ── grep strategy ──────────────────────────────────────────────
+
+    defp grep_search(files, pattern, use_regex, ctx_lines, max_results) do
+      # `-n -H` → line numbers + filename on every line, even for
+      #           single-file searches (consistent parse path).
+      # `-F` literal, `-E` extended-regex, default basic-regex. Use `-E`
+      # for regex mode so character classes / alternation work without
+      # backslash-escaping.
+      pattern_flag = if use_regex, do: "-E", else: "-F"
+
+      args = ["-n", "-H", pattern_flag, "--", pattern | files]
+
+      try do
+        case System.cmd("grep", args, stderr_to_stdout: false) do
+          {output, 0} ->
+            {:ok, parse_tool_output_and_context(output, ctx_lines, max_results)}
+
+          {_output, 1} ->
+            # grep's "no matches"
+            {:ok, []}
+
+          {error, _code} ->
+            require Logger
+            Logger.debug("[File.Search] grep returned non-zero, falling back: #{error}")
+            beam_search_from_files(files, pattern, use_regex, ctx_lines, max_results)
+        end
+      rescue
+        e ->
+          require Logger
+          Logger.debug("[File.Search] grep raised, falling back: #{Exception.message(e)}")
+          beam_search_from_files(files, pattern, use_regex, ctx_lines, max_results)
+      end
+    end
+
+    # ── Output parsing (shared by rg + grep) ───────────────────────
+
+    # Both rg and grep emit `file:line:content` on stdout, one match
+    # per line. Parse into match records, group by file, re-read each
+    # file in BEAM to extract `context_lines`-style multi-line content
+    # so the output shape is identical to the BEAM-native path.
+    defp parse_tool_output_and_context(output, ctx_lines, max_results) do
+      output
+      |> String.split("\n", trim: true)
+      |> Enum.take(max_results)
+      |> Enum.flat_map(&parse_match_line/1)
+      |> attach_context(ctx_lines)
+    end
+
+    # `file:line:content` — file may contain colons on Windows paths,
+    # so we split only on the first two. The content can also contain
+    # colons; preserve them verbatim.
+    defp parse_match_line(line) do
+      case String.split(line, ":", parts: 3) do
+        [file, line_str, _content] ->
+          case Integer.parse(line_str) do
+            {line_num, ""} -> [{file, line_num}]
+            _ -> []
+          end
+
+        _ ->
+          []
+      end
+    end
+
+    # Group matches by file; for each file, read once and assemble
+    # context for each match. Preserves source order.
+    defp attach_context(matches, ctx_lines) do
+      grouped = Enum.group_by(matches, fn {file, _} -> file end)
+
+      file_lines_cache =
+        Enum.into(grouped, %{}, fn {file, _} ->
+          {file, read_lines_safe(file)}
+        end)
+
+      Enum.flat_map(matches, fn {file, line_num} ->
+        case Map.fetch(file_lines_cache, file) do
+          {:ok, nil} ->
+            []
+
+          {:ok, lines} ->
+            [
+              %{
+                file: file,
+                line: line_num,
+                content: get_context(lines, line_num, ctx_lines)
+              }
+            ]
+
+          :error ->
+            []
+        end
+      end)
+    end
+
+    defp read_lines_safe(file) do
+      case File.read(file) do
+        {:ok, content} -> String.split(content, ~r/\r?\n/)
+        {:error, _} -> nil
+      end
+    end
+
+    # ── BEAM-native strategy (fallback) ────────────────────────────
+
+    defp beam_search(files, pattern, ctx_lines, max_results) do
       matches =
         files
-        |> Enum.flat_map(fn file -> search_file(file, pattern, context_lines) end)
+        |> Enum.flat_map(fn file -> search_file(file, pattern, ctx_lines) end)
         |> Enum.take(max_results)
 
       {:ok, matches}
+    end
+
+    # Used when a shell strategy fails mid-search — compile the regex
+    # fresh from `pattern + use_regex` so the BEAM fallback can take
+    # over without the caller knowing.
+    defp beam_search_from_files(files, pattern, use_regex, ctx_lines, max_results) do
+      case compile_pattern(pattern, use_regex) do
+        {:ok, regex} -> beam_search(files, regex, ctx_lines, max_results)
+        {:error, _} = err -> err
+      end
     end
 
     defp search_file(file, pattern, context_lines) do
