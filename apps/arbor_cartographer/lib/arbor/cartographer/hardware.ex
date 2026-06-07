@@ -226,6 +226,7 @@ defmodule Arbor.Cartographer.Hardware do
       case :os.type() do
         {:unix, :linux} -> detect_linux_memory_gb()
         {:unix, :darwin} -> detect_macos_memory_gb()
+        {:unix, family} when family in [:openbsd, :freebsd, :netbsd] -> detect_bsd_memory_gb()
         {:win32, _} -> detect_windows_memory_gb()
         _ -> system_memory_gb_fallback()
       end
@@ -255,6 +256,30 @@ defmodule Arbor.Cartographer.Hardware do
         case Integer.parse(String.trim(output)) do
           {bytes, _} -> bytes / (1024 * 1024 * 1024)
           :error -> system_memory_gb_fallback()
+        end
+
+      _ ->
+        system_memory_gb_fallback()
+    end
+  rescue
+    _ -> system_memory_gb_fallback()
+  end
+
+  # OpenBSD / FreeBSD / NetBSD: sysctl exposes physical memory in
+  # bytes. `:memsup` from OTP's os_mon historically doesn't support
+  # OpenBSD (no platform shim), so the generic fallback returns 0 or
+  # near-zero — observed on a 2 GB sdr node reporting 0.1 GB (the
+  # BEAM heap, before this branch existed). FreeBSD and NetBSD work
+  # via the same sysctl command, so they share this path even though
+  # they have their own :memsup shims.
+  defp detect_bsd_memory_gb do
+    # `hw.physmem` is a 64-bit integer on modern BSDs; the older
+    # 32-bit-overflow `hw.physmem64` aliases to the same value.
+    case System.cmd("sysctl", ["-n", "hw.physmem"], stderr_to_stdout: true) do
+      {output, 0} ->
+        case Integer.parse(String.trim(output)) do
+          {bytes, _} when bytes > 0 -> bytes / (1024 * 1024 * 1024)
+          _ -> system_memory_gb_fallback()
         end
 
       _ ->
