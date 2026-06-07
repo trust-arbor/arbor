@@ -446,6 +446,8 @@ defmodule Arbor.Actions do
       web: [
         Arbor.Actions.Web.Browse,
         Arbor.Actions.Web.Search,
+        Arbor.Actions.Web.ExaSearch,
+        Arbor.Actions.Web.TinyfishSearch,
         Arbor.Actions.Web.Snapshot
       ],
       tool: [
@@ -914,6 +916,8 @@ defmodule Arbor.Actions do
     # Network facade — arbor://net/{operation}
     Arbor.Actions.Web.Browse => "arbor://net/http",
     Arbor.Actions.Web.Search => "arbor://net/search",
+    Arbor.Actions.Web.ExaSearch => "arbor://net/search",
+    Arbor.Actions.Web.TinyfishSearch => "arbor://net/search",
     Arbor.Actions.Web.Snapshot => "arbor://net/http",
 
     # Identity — arbor://agent/identity

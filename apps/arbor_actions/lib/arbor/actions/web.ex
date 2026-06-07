@@ -290,6 +290,262 @@ defmodule Arbor.Actions.Web do
   end
 
   # ============================================================================
+  # Exa Search Action
+  # ============================================================================
+
+  defmodule ExaSearch do
+    @moduledoc """
+    Search the web using the Exa API.
+
+    Exa's distinctive feature for "current trends" research: explicit
+    `start_crawl_date` / `max_age_hours` filters target recently-discovered
+    pages, and the `mode` opt picks between speed and search-depth modes
+    (`instant`/`fast`/`auto`/`deep`/`deep-reasoning`). Returns the same
+    shape as `Web.Search` so DOT pipelines can swap providers via the DOT
+    node's `action` attr without other plumbing changes.
+
+    ## Parameters
+
+    | Name | Type | Required | Description |
+    |------|------|----------|-------------|
+    | `query` | string | yes | Search query |
+    | `max_results` | integer | no | Maximum results to return (default: 10, max: 100) |
+    | `mode` | string | no | One of `instant`/`fast`/`auto`/`deep-lite`/`deep`/`deep-reasoning` (default: `auto`) |
+    | `start_crawl_date` | string | no | ISO 8601 date — only return results crawled after this date |
+    | `max_age_hours` | integer | no | Force-fetch any cached pages older than this many hours (0 = always fresh) |
+
+    Requires `EXA_API_KEY` in the env.
+    """
+
+    use Jido.Action,
+      name: "exa_search",
+      description:
+        "Search the web using Exa's neural search API with crawl-date freshness controls",
+      category: "web",
+      tags: ["web", "search", "exa", "query"],
+      schema: [
+        query: [type: :string, required: true, doc: "Search query"],
+        max_results: [type: :integer, default: 10, doc: "Maximum results (1–100)"],
+        mode: [type: :string, default: "auto", doc: "Exa search mode"],
+        start_crawl_date: [type: :string, doc: "ISO 8601 lower bound on crawl date"],
+        max_age_hours: [type: :integer, doc: "Cache freshness ceiling in hours"]
+      ]
+
+    alias Arbor.Actions
+
+    @impl true
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
+    def run(%{query: query} = params, _context) do
+      Actions.emit_started(__MODULE__, %{query: query})
+
+      case System.get_env("EXA_API_KEY") do
+        key when is_binary(key) and key != "" ->
+          do_search(key, query, params)
+
+        _ ->
+          err = "EXA_API_KEY not set"
+          Actions.emit_failed(__MODULE__, err)
+          {:error, err}
+      end
+    end
+
+    defp do_search(api_key, query, params) do
+      body =
+        %{
+          "query" => query,
+          "numResults" => Map.get(params, :max_results, 10),
+          "type" => Map.get(params, :mode, "auto"),
+          "contents" => %{"highlights" => true, "text" => true}
+        }
+        |> maybe_put("startCrawlDate", Map.get(params, :start_crawl_date))
+        |> maybe_put("maxAgeHours", Map.get(params, :max_age_hours))
+
+      headers = [{"x-api-key", api_key}, {"content-type", "application/json"}]
+
+      case Req.post("https://api.exa.ai/search",
+             json: body,
+             headers: headers,
+             receive_timeout: 60_000
+           ) do
+        {:ok, %{status: 200, body: %{"results" => results} = response}} when is_list(results) ->
+          formatted =
+            results
+            |> Enum.with_index(1)
+            |> Enum.map(fn {r, rank} ->
+              %{
+                rank: rank,
+                title: r["title"] || "",
+                url: r["url"] || "",
+                snippet: extract_snippet(r),
+                age: r["publishedDate"] || ""
+              }
+            end)
+
+          result = %{
+            query: query,
+            results: formatted,
+            count: length(formatted),
+            cost_dollars: response["costDollars"]
+          }
+
+          Actions.emit_completed(__MODULE__, %{query: query, result_count: result.count})
+          {:ok, result}
+
+        {:ok, %{status: status, body: body}} ->
+          err = "Exa search failed: HTTP #{status}: #{inspect(body)}"
+          Actions.emit_failed(__MODULE__, err)
+          {:error, err}
+
+        {:error, reason} ->
+          err = "Exa request failed: #{inspect(reason)}"
+          Actions.emit_failed(__MODULE__, err)
+          {:error, err}
+      end
+    end
+
+    defp extract_snippet(%{"highlights" => [first | _]}) when is_binary(first), do: first
+    defp extract_snippet(%{"text" => text}) when is_binary(text), do: String.slice(text, 0, 500)
+    defp extract_snippet(_), do: ""
+
+    defp maybe_put(map, _key, nil), do: map
+    defp maybe_put(map, _key, ""), do: map
+    defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+    @doc false
+    def taint_roles do
+      %{
+        query: :control,
+        max_results: :data,
+        mode: :data,
+        start_crawl_date: :data,
+        max_age_hours: :data
+      }
+    end
+  end
+
+  # ============================================================================
+  # Tinyfish Search Action
+  # ============================================================================
+
+  defmodule TinyfishSearch do
+    @moduledoc """
+    Search the web using Tinyfish's Search API.
+
+    Tinyfish positions on "fresh, never cached" web search. Their
+    OpenAPI spec exposes a deliberately small surface: `query` plus
+    optional `location` (country code) and `language`. There's no
+    explicit freshness / date / count control — Tinyfish handles
+    freshness internally.
+
+    Returns the same `{rank, title, url, snippet, age}` shape as
+    `Web.Search` / `Web.ExaSearch` so DOT pipelines can swap
+    providers via the `action` attr.
+
+    ## Parameters
+
+    | Name | Type | Required | Description |
+    |------|------|----------|-------------|
+    | `query` | string | yes | Search query |
+    | `location` | string | no | Country code, defaults to `us` |
+    | `language` | string | no | Language code, defaults to `en` |
+
+    Requires `TINYFISH_API_KEY` in the env. Endpoint per the OpenAPI
+    spec is `GET https://api.search.tinyfish.ai/` with the API key
+    in the `X-API-Key` header.
+    """
+
+    use Jido.Action,
+      name: "tinyfish_search",
+      description: "Search the web using Tinyfish's fresh-search API",
+      category: "web",
+      tags: ["web", "search", "tinyfish", "query"],
+      schema: [
+        query: [type: :string, required: true, doc: "Search query"],
+        location: [type: :string, default: "us", doc: "Country code"],
+        language: [type: :string, default: "en", doc: "Language code"]
+      ]
+
+    alias Arbor.Actions
+
+    @impl true
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
+    def run(%{query: query} = params, _context) do
+      Actions.emit_started(__MODULE__, %{query: query})
+
+      case System.get_env("TINYFISH_API_KEY") do
+        key when is_binary(key) and key != "" ->
+          do_search(key, query, params)
+
+        _ ->
+          err = "TINYFISH_API_KEY not set"
+          Actions.emit_failed(__MODULE__, err)
+          {:error, err}
+      end
+    end
+
+    defp do_search(api_key, query, params) do
+      headers = [{"x-api-key", api_key}, {"accept", "application/json"}]
+
+      query_params =
+        [
+          {"query", query},
+          {"location", Map.get(params, :location, "us")},
+          {"language", Map.get(params, :language, "en")}
+        ]
+
+      case Req.get("https://api.search.tinyfish.ai/",
+             params: query_params,
+             headers: headers,
+             receive_timeout: 60_000
+           ) do
+        {:ok, %{status: 200, body: %{"results" => results} = response}} when is_list(results) ->
+          {:ok, build_result(query, results, response)}
+
+        {:ok, %{status: status, body: body}} ->
+          err = "Tinyfish search failed: HTTP #{status}: #{inspect(body)}"
+          Actions.emit_failed(__MODULE__, err)
+          {:error, err}
+
+        {:error, reason} ->
+          err = "Tinyfish request failed: #{inspect(reason)}"
+          Actions.emit_failed(__MODULE__, err)
+          {:error, err}
+      end
+    end
+
+    # Tinyfish response shape per its OpenAPI:
+    #   results[i]: {position, site_name, title, snippet, url}
+    # No publishedDate field — `age` is left empty.
+    defp build_result(query, results, response) do
+      formatted =
+        Enum.map(results, fn r ->
+          %{
+            rank: r["position"] || 0,
+            title: r["title"] || "",
+            url: r["url"] || "",
+            snippet: r["snippet"] || "",
+            age: "",
+            site_name: r["site_name"] || ""
+          }
+        end)
+
+      Actions.emit_completed(__MODULE__, %{query: query, result_count: length(formatted)})
+
+      %{
+        query: query,
+        results: formatted,
+        count: length(formatted),
+        total_results: response["total_results"]
+      }
+    end
+
+    @doc false
+    def taint_roles do
+      %{query: :control, location: :data, language: :data}
+    end
+  end
+
+  # ============================================================================
   # Snapshot Action
   # ============================================================================
 
