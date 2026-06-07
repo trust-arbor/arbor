@@ -125,6 +125,12 @@ defmodule Arbor.Memory.GoalStore do
       [{{^agent_id, ^goal_id}, goal}] -> {:ok, goal}
       [] -> {:error, :not_found}
     end
+  rescue
+    # Missing ETS table (arbor_memory not booted) — treat as no goals
+    # present. Mirrors the resilience pattern in `at_goal_limit?` above
+    # so isolated test envs (where arbor_memory is a sibling that doesn't
+    # start) and transient ETS issues don't crash the read path.
+    ArgumentError -> {:error, :not_found}
   end
 
   @doc """
@@ -298,6 +304,8 @@ defmodule Arbor.Memory.GoalStore do
     |> :ets.select(match_spec)
     |> Enum.filter(&(&1.status == :active))
     |> Enum.sort_by(& &1.priority, :desc)
+  rescue
+    ArgumentError -> []
   end
 
   @doc """
@@ -307,6 +315,8 @@ defmodule Arbor.Memory.GoalStore do
   def get_all_goals(agent_id) do
     match_spec = [{{{agent_id, :_}, :"$1"}, [], [:"$1"]}]
     :ets.select(@ets_table, match_spec)
+  rescue
+    ArgumentError -> []
   end
 
   @doc """
@@ -332,7 +342,7 @@ defmodule Arbor.Memory.GoalStore do
   """
   @spec delete_goal(String.t(), String.t()) :: :ok
   def delete_goal(agent_id, goal_id) do
-    :ets.delete(@ets_table, {agent_id, goal_id})
+    _ = safe_ets_delete({agent_id, goal_id})
     MemoryStore.delete("goals", "#{agent_id}:#{goal_id}")
     :ok
   end
@@ -343,9 +353,21 @@ defmodule Arbor.Memory.GoalStore do
   @spec clear_goals(String.t()) :: :ok
   def clear_goals(agent_id) do
     match_spec = [{{{agent_id, :_}, :_}, [], [true]}]
-    :ets.select_delete(@ets_table, match_spec)
+    _ = safe_ets_select_delete(match_spec)
     MemoryStore.delete_by_prefix("goals", agent_id)
     :ok
+  end
+
+  defp safe_ets_delete(key) do
+    :ets.delete(@ets_table, key)
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp safe_ets_select_delete(match_spec) do
+    :ets.select_delete(@ets_table, match_spec)
+  rescue
+    ArgumentError -> 0
   end
 
   # ============================================================================
@@ -437,7 +459,10 @@ defmodule Arbor.Memory.GoalStore do
     :ok
   rescue
     e ->
-      Logger.warning("[GoalStore] reload_for_agent failed for #{agent_id}: #{Exception.message(e)}")
+      Logger.warning(
+        "[GoalStore] reload_for_agent failed for #{agent_id}: #{Exception.message(e)}"
+      )
+
       :ok
   end
 
