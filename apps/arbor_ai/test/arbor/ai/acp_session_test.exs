@@ -173,6 +173,45 @@ defmodule Arbor.AI.AcpSessionTest do
                Handler.handle_permission_request("session-1", %{"name" => "tool"}, %{}, state)
     end
 
+    # Spec regression — surfaced during the Gemini E2E HITL smoke test on
+    # 2026-06-07. The handler previously returned `%{"outcome" =>
+    # "approved"}` regardless of what options the agent offered. ACP spec
+    # (https://agentclientprotocol.com/protocol/tool-calls) requires
+    # `%{"outcome" => %{"outcome" => "selected", "optionId" => "<id>"}}`
+    # referencing one of the offered options. Gemini, being spec-compliant,
+    # rejected the non-spec response and re-asked — yielding 3 Signal
+    # prompts for a single tool use until it gave up.
+    test "handle_permission_request returns spec-shaped outcome when options are offered" do
+      {:ok, state} = Handler.init([])
+
+      options = [
+        %{
+          "optionId" => "proceed_always",
+          "name" => "Allow for this session",
+          "kind" => "allow_always"
+        },
+        %{"optionId" => "proceed_once", "name" => "Allow", "kind" => "allow_once"},
+        %{"optionId" => "cancel", "name" => "Reject", "kind" => "reject_once"}
+      ]
+
+      assert {:ok, response, _state} =
+               Handler.handle_permission_request("s1", %{"name" => "tool"}, options, state)
+
+      # No agent_id → :authorized fast path → picks the first allow_once-kind option.
+      assert response == %{"outcome" => %{"outcome" => "selected", "optionId" => "proceed_once"}}
+    end
+
+    test "handle_permission_request infers tool name from toolCallId when name is absent" do
+      {:ok, state} = Handler.init([])
+
+      # Gemini's toolCall payload pattern: name lives in toolCallId
+      tool_call = %{"toolCallId" => "run_shell_command__run_shell_command_1780853379688_0"}
+
+      # No name field — should infer "run_shell_command" without crashing.
+      assert {:ok, _response, _state} =
+               Handler.handle_permission_request("s1", tool_call, [], state)
+    end
+
     test "handle_permission_request with agent_id respects security authorization" do
       {:ok, state} = Handler.init(agent_id: "test-agent")
 
