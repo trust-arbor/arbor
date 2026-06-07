@@ -1,6 +1,12 @@
 defmodule Arbor.Agent.HeartbeatLLMTest do
   use ExUnit.Case, async: true
-  @moduletag :fast
+  # Intentionally NOT @moduletag :fast — every test in this module
+  # is `@tag :llm` and `HeartbeatLLM.think/2` calls
+  # `Arbor.AI.generate_text/2` internally. The previous moduletag
+  # contradicted the per-test :llm tags, so `--only fast` would
+  # include these tests even though they need a real LLM, leading
+  # to 10s timeouts in the fast lane. Run these explicitly via
+  # `--include llm` when an LLM is available.
 
   alias Arbor.Agent.HeartbeatLLM
 
