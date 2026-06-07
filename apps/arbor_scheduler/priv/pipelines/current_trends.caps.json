@@ -1,0 +1,11 @@
+{
+  "capabilities": [
+    {
+      "constraints": {},
+      "resource_uri": "arbor://fs/write/Users/azmaveth/.arbor/reports/current-trends/**"
+    }
+  ],
+  "issuer_id": "agent_30b455a27f7f4e02ef291fd9f7862677f731a1f8b08c997f5fb8ad430d594b6e",
+  "signature": "v9OiW+U+rMeNaLjO/d/9PXN0G7xX13pb+4UGHG4tSNybFGYzENZJPoHGsCxVUI00IKSKg/lcyS62Z1hEtBTqBw==",
+  "version": 1
+}

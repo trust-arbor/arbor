@@ -33,7 +33,18 @@ defmodule Arbor.AI.AcpSession.Config do
     claude: %{
       transport_mod: ExMCP.ACP.AdapterTransport,
       adapter: ExMCP.ACP.Adapters.Claude,
-      adapter_opts: [model: "sonnet"]
+      # `permission_mode: :bypass` reproduces the pre-2026-06-06 ExMCP
+      # behavior (passes `--dangerously-skip-permissions`). Keeping it
+      # here so existing Arbor flows (heartbeat, ChatLive, agent loops)
+      # that rely on Claude's tools being available without prompting
+      # don't change behavior with the ExMCP default flip.
+      #
+      # Pipelines or per-turn callers that want a tighter constraint
+      # should override via adapter_opts, e.g.
+      #   permission_mode: :deny, allowed_tools: ["WebSearch", "WebFetch"]
+      # See `.arbor/roadmap/0-inbox/llm-cli-permission-passthrough.md`
+      # for the per-pipeline plumbing follow-up.
+      adapter_opts: [model: "sonnet", permission_mode: :bypass]
     },
     codex: %{
       transport_mod: ExMCP.ACP.AdapterTransport,

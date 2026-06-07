@@ -1,0 +1,105 @@
+// Current-Trends Research Pipeline (Path 1: Claude CLI via ACP)
+//
+// First of the personal-AI-staff "research" reference pipelines.
+// Routes the research call through the ACP runtime — Arbor spawns
+// the Claude CLI subprocess (already authenticated via OAuth, no
+// API key needed) and the CLI uses its own built-in tools
+// (WebSearch, WebFetch) to gather and synthesize current activity
+// in agent + harness engineering. Output written to
+// `~/.arbor/reports/current-trends/YYYY-MM-DD.md`.
+//
+// Critical attribute: `use_tools="false"`. That's NOT "don't use
+// tools" — it's "don't expose Arbor's tool layer to the LLM."
+// When `use_tools="true"`, LlmHandler routes through
+// Client.complete which only reads `provider` and doesn't honor
+// `runtime: :acp` (Client.resolve_adapter looks for an "anthropic"
+// adapter in the adapters map, which only exists when
+// ANTHROPIC_API_KEY is set in .env — we have OAuth, not an API
+// key, so that path fails with {:unknown_provider, "anthropic"}).
+// With `use_tools="false"` LlmHandler routes through
+// Dispatcher.dispatch → Runtime.Acp → AcpPool, which spawns the
+// CLI subprocess. The CLI subprocess still has its own internal
+// tools active inside the OAuth session.
+//
+// Paths 2 (Brave action + LLM synthesis) and 3 (Exa action +
+// synthesis) ship as separate pipelines so we can A/B their
+// quality + cost vs this CLI-based version.
+//
+// Scheduling (planned):
+//   {"15 6 * * *", Arbor.Scheduler.Workers.PipelineRunner,
+//     args: %{"pipeline_path" =>
+//       "apps/arbor_scheduler/priv/pipelines/current_trends.dot"}}
+//
+// Manual:
+//   Arbor.Scheduler.enqueue_pipeline(
+//     "apps/arbor_scheduler/priv/pipelines/current_trends.dot"
+//   )
+
+digraph CurrentTrends {
+  graph [
+    goal="Produce a brief on the past week's notable activity in agent + harness engineering",
+    label="Current Trends — agent + harness engineering"
+  ]
+
+  start [shape=Mdiamond]
+
+  build_output_path [
+    type="shell",
+    command="mkdir -p \"$HOME/.arbor/reports/current-trends\" && printf '%s' \"$HOME/.arbor/reports/current-trends/$(date -u +%Y-%m-%d).md\"",
+    sandbox="none",
+    timeout="5000",
+    on_error="fail",
+    data_class="internal"
+  ]
+
+  prep_output_path [
+    type="transform",
+    transform="identity",
+    source_key="shell.build_output_path.output",
+    output_key="path"
+  ]
+
+  research [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    llm_provider="anthropic",
+    llm_model="claude-haiku-4-5-20251001",
+    llm_runtime="acp",
+    use_tools="false",
+    max_tokens="32768",
+    temperature="0.5",
+    timeout="1800000",
+    // Per-node ACP adapter constraints — flow through to
+    // ExMCP.ACP.Adapters.Claude.command/1 via LlmHandler →
+    // Request.provider_options["acp_adapter_opts"] →
+    // Runtime.Acp.build_checkout_opts → AcpSession.Config.merge_opts.
+    // Without these the global default of permission_mode=bypass would
+    // give Claude full Write/Edit/Bash access. For research-style
+    // pipelines that just want text output we deny everything except
+    // the web-research tools.
+    acp_permission_mode="dont_ask",
+    acp_allowed_tools="WebSearch,WebFetch,Read",
+    system_prompt="You are a research assistant producing a weekly brief on agent + harness engineering. Use whatever tools you have available (web search, web fetch) to ground the brief in things that actually happened in the last 7 days. Cover: AI-agent platform releases (OpenClaw, Hermes, Claude Code, Codex, Cursor, Cline, Aider, etc.), notable open-source agent frameworks, tooling and runtime developments (MCP, ACP, tool-calling formats), agent-evaluation work, and any infrastructure shifts (sandboxing, observability, capability/security models) that affect how agents are built.\n\nOutput ONLY Markdown with this exact shape:\n\n# Current Trends — <YYYY-MM-DD>\n\n## Three headlines\n\n1. **<Headline>** — One to three sentences, with a source URL in parens.\n2. **<Headline>** — Same.\n3. **<Headline>** — Same.\n\n## Releases and updates\n\nA bullet list of specific releases or version bumps from the last week with one-line summaries and source URLs.\n\n## Patterns and shifts\n\nA short bullet list (3–7 items) of higher-level patterns: what's the field arguing about, what techniques are converging, what's getting deprecated.\n\n## Worth a closer look\n\n1–3 items that didn't make the headlines but might matter for Arbor specifically. One sentence each, with URL.\n\nRules:\n- Cite source URLs after each claim. If you can't find a source, don't include the claim.\n- Skip anything older than 7 days unless it's a delayed reaction to something recent.\n- Be terse. The reader is a single founder working full-time on agent infrastructure; they want signal, not coverage.\n- Markdown only — no preamble, no code fences around the whole document.",
+    prompt="Produce this week's brief on agent + harness engineering activity. Today is the date in the output filename."
+  ]
+
+  prep_content [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="content"
+  ]
+
+  write_report [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
+
+  done [shape=Msquare]
+
+  start -> build_output_path -> prep_output_path -> research
+  research -> prep_content -> write_report -> done
+}
