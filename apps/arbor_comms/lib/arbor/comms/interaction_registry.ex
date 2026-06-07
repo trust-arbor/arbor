@@ -96,12 +96,19 @@ defmodule Arbor.Comms.InteractionRegistry do
 
   @doc """
   Look up a pending interaction by request_id. Cluster-wide search.
+
+  Note on cross-node struct shape: Phoenix.Tracker meta is replicated
+  via the PubSub bus, which goes through Erlang distribution. In some
+  paths the `%Interaction{}` struct arrives on peer nodes as a plain
+  map (no `__struct__` key). `materialize_interaction/1` reconstructs
+  the struct from either shape so callers always get the canonical
+  type.
   """
   @spec get(String.t()) :: {:ok, Interaction.t()} | :not_found
   def get(request_id) when is_binary(request_id) do
     case lookup_meta(request_id) do
-      %{interaction: %Interaction{} = i} -> {:ok, i}
-      nil -> :not_found
+      %{interaction: data} -> {:ok, materialize_interaction(data)}
+      _ -> :not_found
     end
   rescue
     _ -> :not_found
@@ -117,7 +124,7 @@ defmodule Arbor.Comms.InteractionRegistry do
     name = Keyword.get(opts, :name, __MODULE__)
 
     case lookup_meta(request_id) do
-      %{interaction: %Interaction{} = i} ->
+      %{interaction: data} ->
         # Untrack from THIS node's Tracker entry. CRDT merge will
         # propagate the removal to peers within the merge interval.
         # If the entry was created on another node, untrack here is a
@@ -127,9 +134,9 @@ defmodule Arbor.Comms.InteractionRegistry do
         # immediately.
         owner = ensure_owner!()
         Phoenix.Tracker.untrack(name, owner, @topic, request_id)
-        {:ok, i}
+        {:ok, materialize_interaction(data)}
 
-      nil ->
+      _ ->
         :not_found
     end
   rescue
@@ -147,7 +154,10 @@ defmodule Arbor.Comms.InteractionRegistry do
   def list_pending do
     __MODULE__
     |> Phoenix.Tracker.list(@topic)
-    |> Enum.map(fn {_key, %{interaction: %Interaction{} = i}} -> i end)
+    |> Enum.flat_map(fn
+      {_key, %{interaction: data}} -> [materialize_interaction(data)]
+      _ -> []
+    end)
   rescue
     _ -> []
   end
@@ -229,5 +239,39 @@ defmodule Arbor.Comms.InteractionRegistry do
       pid when is_pid(pid) -> pid
       nil -> raise "InteractionRegistry not running"
     end
+  end
+
+  # Reconstruct an `%Interaction{}` struct from either a struct (local
+  # node, same-process put/get) or a plain map (cross-node replicated
+  # meta — Phoenix.Tracker's CRDT distribution serializes struct
+  # values through Erlang term encoding and the receiving node ends up
+  # with a regular map). Confirmed empirically 2026-06-06 on the
+  # homelab cluster: a `put` on node A produced a struct in node A's
+  # local tracker state but a map (no `__struct__` key) on node B's
+  # tracker state. Both shapes need to be acceptable.
+  defp materialize_interaction(%Interaction{} = i), do: i
+
+  defp materialize_interaction(%{} = m) do
+    struct(Interaction, atomize_known_keys(m))
+  end
+
+  @interaction_keys ~w(
+    request_id kind agent_id user_id description metadata resource_uri
+    urgency expires_at response_topic submitted_at
+  )a
+
+  defp atomize_known_keys(map) do
+    Enum.reduce(@interaction_keys, %{}, fn key, acc ->
+      cond do
+        Map.has_key?(map, key) ->
+          Map.put(acc, key, Map.get(map, key))
+
+        Map.has_key?(map, Atom.to_string(key)) ->
+          Map.put(acc, key, Map.get(map, Atom.to_string(key)))
+
+        true ->
+          acc
+      end
+    end)
   end
 end
