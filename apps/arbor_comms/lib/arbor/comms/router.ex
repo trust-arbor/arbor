@@ -17,9 +17,10 @@ defmodule Arbor.Comms.Router do
 
   alias Arbor.Comms.Channels.Signal
   alias Arbor.Comms.Config
+  alias Arbor.Comms.InteractionRegistry
   alias Arbor.Comms.InteractionRouter
   alias Arbor.Comms.MessageHandler
-  alias Arbor.Contracts.Comms.Message
+  alias Arbor.Contracts.Comms.{Interaction, Message}
 
   @doc """
   Handle an inbound message by emitting a signal and dispatching to
@@ -58,27 +59,10 @@ defmodule Arbor.Comms.Router do
        when is_binary(content) do
     case Signal.InteractionAdapter.parse_response(content) do
       {:interaction_response, request_id, response, metadata} ->
-        metadata = Map.merge(metadata, %{from: from})
+        route_explicit_response(request_id, response, metadata, from)
 
-        case InteractionRouter.respond(request_id, response, metadata) do
-          :ok ->
-            Logger.info(
-              "[Router] Signal interaction response: #{request_id} → #{inspect(response)}"
-            )
-
-            :routed
-
-          {:error, :not_found} ->
-            # Operator replied with APPROVE/DENY + a request_id, but
-            # the interaction is unknown (already resolved, expired,
-            # or typo). Treat as not_interaction so the chat handler
-            # can still see it — better than swallowing silently.
-            Logger.info(
-              "[Router] Signal response references unknown request_id #{request_id}; passing through"
-            )
-
-            :not_interaction
-        end
+      {:interaction_response_partial, response, metadata} ->
+        route_partial_response(response, metadata, from)
 
       :not_interaction ->
         :not_interaction
@@ -86,6 +70,109 @@ defmodule Arbor.Comms.Router do
   end
 
   defp maybe_route_as_interaction(_), do: :not_interaction
+
+  defp route_explicit_response(request_id, response, metadata, from) do
+    metadata = Map.merge(metadata, %{from: from})
+
+    case InteractionRouter.respond(request_id, response, metadata) do
+      :ok ->
+        Logger.info("[Router] Signal interaction response: #{request_id} → #{inspect(response)}")
+
+        :routed
+
+      {:error, :not_found} ->
+        # Operator replied with APPROVE/DENY + a request_id, but the
+        # interaction is unknown (already resolved, expired, typo).
+        # Pass through to chat — better than swallowing silently.
+        Logger.info(
+          "[Router] Signal response references unknown request_id #{request_id}; passing through"
+        )
+
+        :not_interaction
+    end
+  end
+
+  # Partial response handling. Operator replied "APPROVE"/"DENY"/"yes"/
+  # "no" without an id. Look up pending for their user_id; resolve or
+  # disambiguate.
+  defp route_partial_response(response, metadata, from) do
+    user_id = signal_user_id()
+
+    if is_binary(user_id) do
+      case InteractionRegistry.list_pending_for_user(user_id) do
+        [] ->
+          # No pending → operator's "yes"/"approve" is just chat.
+          # Pass through so the AI handler sees it.
+          :not_interaction
+
+        [%Interaction{request_id: rid}] ->
+          # Exactly one pending. Use it.
+          metadata = Map.merge(metadata, %{from: from, resolution: :sole_pending})
+          route_explicit_response(rid, response, metadata, from)
+
+        [%Interaction{} | _] = pending ->
+          # Multi-pending. Ask the operator to disambiguate by sending
+          # a Signal reply listing them. Treat as :routed so the chat
+          # handler doesn't ALSO process the ambiguous "yes."
+          send_disambiguation(from, response, pending)
+          :routed
+      end
+    else
+      # No user_id configured for the Signal account — can't resolve.
+      :not_interaction
+    end
+  end
+
+  # Format and send the multi-pending disambiguation reply. Best-effort
+  # — if signal-cli fails (account misconfigured, network), we log and
+  # return :routed anyway so the bad reply doesn't ricochet through the
+  # chat handler.
+  defp send_disambiguation(recipient, decision, pending) do
+    lines =
+      pending
+      |> Enum.map(fn %Interaction{request_id: rid, description: desc, agent_id: agent} ->
+        "  • #{decision_to_verb(decision)} #{rid} — #{short_desc(desc, agent)}"
+      end)
+
+    body = """
+    You have #{length(pending)} pending approvals. Reply with the id of the one you meant:
+
+    #{Enum.join(lines, "\n")}
+    """
+
+    case Signal.send_message(recipient, String.trim(body)) do
+      :ok ->
+        Logger.info(
+          "[Router] Signal partial response from #{recipient} — sent disambiguation for #{length(pending)} pending"
+        )
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Router] Signal disambiguation send failed: #{inspect(reason)} (decision=#{inspect(decision)}, pending=#{length(pending)})"
+        )
+    end
+  end
+
+  defp decision_to_verb(:approved), do: "APPROVE"
+  defp decision_to_verb(:rejected), do: "DENY"
+  defp decision_to_verb(_), do: "REPLY"
+
+  defp short_desc(nil, agent), do: "agent #{agent}"
+
+  defp short_desc(desc, _agent) do
+    desc
+    |> to_string()
+    |> String.split("\n", parts: 2)
+    |> hd()
+    |> String.slice(0, 60)
+  end
+
+  defp signal_user_id do
+    case Application.get_env(:arbor_comms, :signal, []) do
+      kw when is_list(kw) -> Keyword.get(kw, :interaction_user_id)
+      _ -> nil
+    end
+  end
 
   defp maybe_dispatch(%Message{} = msg) do
     if Config.handler_enabled?() do

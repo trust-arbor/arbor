@@ -16,12 +16,31 @@ defmodule Arbor.Contracts.Comms.ChannelAdapter do
   @type channel_user :: term()
 
   @typedoc """
-  Result of parsing an incoming raw message. `:not_interaction` lets
-  the adapter ignore traffic that isn't a response (regular chat,
-  metadata, etc.).
+  Result of parsing an incoming raw message.
+
+    * `{:interaction_response, request_id, response, metadata}` — full
+      response with an explicit `request_id`. The router can route it
+      to a specific pending interaction without ambiguity. Adapters
+      that can always include the id (e.g., dashboard click events
+      carry it natively, Signal messages that quote the suggested
+      `irq_<hex>`) return this.
+
+    * `{:interaction_response_partial, response, metadata}` — the
+      decision is clear but no `request_id` was included. The router
+      resolves this against pending interactions for the sender's
+      user_id: zero pending → treat as regular chat; one pending →
+      use it; multiple pending → adapter-specific disambiguation
+      flow (typically an auto-reply listing them by id). Adapters
+      use this when the channel UX makes copying the id painful
+      (mobile messaging where the operator just wants to type
+      "yes" or "approve").
+
+    * `:not_interaction` — regular chat or metadata; the inbound
+      router dispatches normally.
   """
   @type parse_result ::
           {:interaction_response, request_id :: String.t(), Interaction.response(), map()}
+          | {:interaction_response_partial, Interaction.response(), map()}
           | :not_interaction
 
   @doc """

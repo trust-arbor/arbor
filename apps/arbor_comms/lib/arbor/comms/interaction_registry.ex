@@ -89,6 +89,23 @@ defmodule Arbor.Comms.InteractionRegistry do
     ArgumentError -> []
   end
 
+  @doc """
+  Pending interactions for a specific user, newest first.
+
+  Used by `Arbor.Comms.Router` to resolve adapter `:partial`
+  responses ("APPROVE" without an `irq_<hex>` id) to the operator's
+  most-recent pending request. The list is sorted descending by
+  `submitted_at` so callers can take the head for the "most recent"
+  case and use `length(_) > 1` for the multi-pending disambiguation
+  case.
+  """
+  @spec list_pending_for_user(String.t()) :: [Interaction.t()]
+  def list_pending_for_user(user_id) when is_binary(user_id) do
+    list_pending()
+    |> Enum.filter(fn %Interaction{user_id: uid} -> uid == user_id end)
+    |> Enum.sort_by(& &1.submitted_at, {:desc, DateTime})
+  end
+
   @doc "Reset all registry state (test-only)."
   @spec reset(keyword()) :: :ok
   def reset(opts \\ []) do
