@@ -13,10 +13,22 @@ defmodule Arbor.AI.AcpSession.Config do
       config :arbor_ai, :acp_providers, %{
         claude: %{
           transport_mod: ExMCP.ACP.AdapterTransport,
-          adapter: ExMCP.ACP.Adapters.Claude,
+          adapter: ExMCP.ACP.Adapters.ClaudeSDK,
           adapter_opts: [model: "opus", cli_path: "/usr/local/bin/claude"]
         }
       }
+
+  ## Claude adapter
+
+  Uses `ExMCP.ACP.Adapters.ClaudeSDK` — the SDK-protocol-based adapter
+  that talks to Claude Code via the same stream-json control protocol
+  as `@anthropic-ai/claude-agent-sdk`. The older
+  `ExMCP.ACP.Adapters.Claude` (stream-json without the SDK control
+  channel) is still available in ex_mcp for callers that need it; the
+  SDK adapter is the recommended path for new integrations and
+  supports SDK interrupt cancellation, runtime model/mode/effort
+  config, partial tool-call lifecycle events, plan updates, and the
+  stdio permission prompt control channel used by the HITL bridge.
   """
 
   @native_providers %{
@@ -32,18 +44,20 @@ defmodule Arbor.AI.AcpSession.Config do
   @adapted_providers %{
     claude: %{
       transport_mod: ExMCP.ACP.AdapterTransport,
-      adapter: ExMCP.ACP.Adapters.Claude,
-      # `permission_mode: :bypass` reproduces the pre-2026-06-06 ExMCP
-      # behavior (passes `--dangerously-skip-permissions`). Keeping it
-      # here so existing Arbor flows (heartbeat, ChatLive, agent loops)
-      # that rely on Claude's tools being available without prompting
-      # don't change behavior with the ExMCP default flip.
+      adapter: ExMCP.ACP.Adapters.ClaudeSDK,
+      # `permission_mode: :bypass` keeps existing Arbor flows
+      # (heartbeat, ChatLive, agent loops) running without prompting:
+      # ClaudeSDK encodes `:bypass` as `--permission-mode bypassPermissions`,
+      # which skips all tool-use prompts. Functionally equivalent to
+      # the legacy adapter's `--dangerously-skip-permissions` flag but
+      # routed through the modern permission_mode CLI surface.
       #
       # Pipelines or per-turn callers that want a tighter constraint
       # should override via adapter_opts, e.g.
-      #   permission_mode: :deny, allowed_tools: ["WebSearch", "WebFetch"]
-      # See `.arbor/roadmap/0-inbox/llm-cli-permission-passthrough.md`
-      # for the per-pipeline plumbing follow-up.
+      #   permission_mode: :default, allowed_tools: ["WebSearch", "WebFetch"]
+      # That routes Claude's permission requests through the SDK's
+      # stdio permission_prompt control channel into Arbor's HITL bridge
+      # (see `apps/arbor_ai/lib/arbor/ai/acp_session/handler.ex`).
       adapter_opts: [model: "sonnet", permission_mode: :bypass]
     },
     codex: %{

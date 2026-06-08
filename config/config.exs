@@ -142,9 +142,13 @@ config :arbor_signals,
 # Overrides REPLACE the per-provider default (not deep-merge), so claude's full config is repeated.
 config :arbor_ai, :acp_providers, %{
   # claude → run Opus (built-in default is sonnet)
+  # Adapter pinned to ClaudeSDK (the SDK-protocol-based adapter that talks
+  # to Claude Code via the same stream-json control protocol as
+  # @anthropic-ai/claude-agent-sdk). See
+  # apps/arbor_ai/lib/arbor/ai/acp_session/config.ex for adapter docs.
   claude: %{
     transport_mod: ExMCP.ACP.AdapterTransport,
-    adapter: ExMCP.ACP.Adapters.Claude,
+    adapter: ExMCP.ACP.Adapters.ClaudeSDK,
     adapter_opts: [model: "opus"]
   },
 

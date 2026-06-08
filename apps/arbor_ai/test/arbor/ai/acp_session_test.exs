@@ -15,7 +15,7 @@ defmodule Arbor.AI.AcpSessionTest do
     test "resolves adapted providers" do
       assert {:ok, opts} = Config.resolve(:claude)
       assert opts[:transport_mod] == ExMCP.ACP.AdapterTransport
-      assert opts[:adapter] == ExMCP.ACP.Adapters.Claude
+      assert opts[:adapter] == ExMCP.ACP.Adapters.ClaudeSDK
     end
 
     test "resolves codex adapter" do
