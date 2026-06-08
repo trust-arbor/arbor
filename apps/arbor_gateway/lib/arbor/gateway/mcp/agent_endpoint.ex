@@ -3,7 +3,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
   MCP server endpoint that exposes an Arbor agent's actions as MCP tools.
 
   This is a lightweight GenServer that implements the MCP protocol over
-  ExMCP's Local transport (`:native` or `:beam` mode), enabling agent-to-agent
+  ExMCP's BEAM-local transport (`:beam`), enabling agent-to-agent
   communication via MCP.
 
   ## Usage
@@ -16,7 +16,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
 
       # Another agent connects as MCP client
       {:ok, client} = ExMCP.Client.start_link(
-        transport: :native,
+        transport: :beam,
         server: pid
       )
 
@@ -25,7 +25,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
 
   ## Architecture
 
-  Uses direct Erlang message passing (no JSON serialization overhead in `:native` mode).
+  Uses direct Erlang message passing without JSON serialization overhead.
   The endpoint handles MCP protocol messages:
 
   - `initialize` — returns server info and capabilities

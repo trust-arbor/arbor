@@ -257,12 +257,12 @@ defmodule Arbor.Gateway do
     end
   end
 
-  # -- Agent MCP Endpoints (BEAM-native agent-to-agent) --
+  # -- Agent MCP Endpoints (BEAM-local agent-to-agent) --
 
   @doc """
   Start an MCP endpoint for an agent, exposing its actions as MCP tools.
 
-  Other agents can then connect via ExMCP's Local transport (`:native` mode)
+  Other agents can then connect via ExMCP's BEAM-local transport
   for zero-serialization agent-to-agent communication.
 
   ## Options
@@ -312,23 +312,16 @@ defmodule Arbor.Gateway do
   @doc """
   Connect to another agent's MCP endpoint as a client.
 
-  Uses ExMCP's Local transport in `:native` mode for zero-serialization
+  Uses ExMCP's BEAM-local transport for zero-serialization
   communication. Returns an `ExMCP.Client` pid that can be used with
   `ExMCP.Client.call_tool/3`, `ExMCP.Client.list_tools/1`, etc.
-
-  ## Options
-
-  - `:mode` — `:native` (default) or `:beam` (JSON-validated)
   """
   @spec connect_to_agent(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
-  def connect_to_agent(target_agent_id, opts \\ []) do
+  def connect_to_agent(target_agent_id, _opts \\ []) do
     case EndpointRegistry.lookup(target_agent_id) do
       {:ok, endpoint_pid, _tools} ->
-        mode = Keyword.get(opts, :mode, :native)
-        transport = if mode == :native, do: :native, else: :beam
-
         ExMCP.Client.start_link(
-          transport: transport,
+          transport: :beam,
           server: endpoint_pid
         )
 
