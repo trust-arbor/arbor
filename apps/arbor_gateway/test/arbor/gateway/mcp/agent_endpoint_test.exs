@@ -62,23 +62,22 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     end
 
     # These tests verify MCP protocol behavior, not security.
-    # In umbrella context, CapabilityStore blocks test agents lacking capabilities.
-    # Disable identity verification so authorize/4 falls through to permissive mode.
+    # In umbrella context, the test agent IDs (`proto-agent-1` etc.)
+    # don't carry capabilities, so authorize_and_execute would deny
+    # every tool call. Force the AgentEndpoint into its unauthenticated
+    # fallback path via a config seam — the earlier `GenServer.stop(
+    # CapabilityStore)` approach raced against OTP's permanent-restart
+    # of that GenServer and leaked failures (~60% of seeds) into the
+    # full-suite run.
     prev_identity = Application.get_env(:arbor_security, :identity_verification)
     prev_signing = Application.get_env(:arbor_security, :capability_signing_required)
+
+    prev_require_security =
+      Application.get_env(:arbor_gateway, :mcp_endpoint_require_security)
+
     Application.put_env(:arbor_security, :identity_verification, false)
     Application.put_env(:arbor_security, :capability_signing_required, false)
-
-    # Also stop CapabilityStore if running to prevent capability lookup failures
-    cap_pid = Process.whereis(Arbor.Security.CapabilityStore)
-
-    if cap_pid && Process.alive?(cap_pid) do
-      try do
-        GenServer.stop(cap_pid, :normal, 1000)
-      catch
-        :exit, _ -> :ok
-      end
-    end
+    Application.put_env(:arbor_gateway, :mcp_endpoint_require_security, false)
 
     on_exit(fn ->
       Application.put_env(:arbor_security, :identity_verification, prev_identity || true)
@@ -88,6 +87,11 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
         :capability_signing_required,
         prev_signing || false
       )
+
+      case prev_require_security do
+        nil -> Application.delete_env(:arbor_gateway, :mcp_endpoint_require_security)
+        val -> Application.put_env(:arbor_gateway, :mcp_endpoint_require_security, val)
+      end
     end)
 
     :ok

@@ -327,7 +327,18 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
   end
 
   defp security_available? do
-    Code.ensure_loaded?(Arbor.Security) and
+    # `:require_security` defaults to true — production routes every tool
+    # call through `Arbor.Actions.authorize_and_execute`. Setting it to
+    # `false` (test-only, see `agent_endpoint_test.exs` setup) forces
+    # the unauthenticated fallback path regardless of whether the
+    # `CapabilityStore` GenServer happens to be alive.
+    #
+    # The earlier approach — calling `GenServer.stop(CapabilityStore)`
+    # in test setup — was racy against the OTP supervisor's permanent
+    # restart, leaking failures into ~60% of seeds depending on test
+    # ordering.
+    Application.get_env(:arbor_gateway, :mcp_endpoint_require_security, true) and
+      Code.ensure_loaded?(Arbor.Security) and
       Process.whereis(Arbor.Security.CapabilityStore) != nil
   end
 end
