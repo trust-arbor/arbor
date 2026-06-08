@@ -792,11 +792,15 @@ defmodule Arbor.Actions do
     # GitLab / Forgejo / etc. would get their own roots when added.
     Arbor.Actions.Github.PR => "arbor://shell/exec/gh/pr",
 
-    # Mix — per-task URIs. `arbor://shell/exec/mix/**` grants
-    # everything; `arbor://shell/exec/mix/test` is a test-only grant.
-    Arbor.Actions.Mix.Test => "arbor://shell/exec/mix/test",
-    Arbor.Actions.Mix.Quality => "arbor://shell/exec/mix/quality",
-    Arbor.Actions.Mix.Format => "arbor://shell/exec/mix/format",
+    # Mix — per-task URIs under the action namespace, NOT under shell.
+    # The Mix.{Test,Quality,Format} actions bound their argument space
+    # via Jido schema (no arbitrary `mix deps.update` slipping through),
+    # so they don't belong under the `arbor://shell` always-locked
+    # ceiling. `arbor://action/mix/**` grants everything;
+    # `arbor://action/mix/test` is a test-only grant.
+    Arbor.Actions.Mix.Test => "arbor://action/mix/test",
+    Arbor.Actions.Mix.Quality => "arbor://action/mix/quality",
+    Arbor.Actions.Mix.Format => "arbor://action/mix/format",
 
     # TDD — pure data transforms (build prompt, record attempt). No
     # side effects, but still routed through the capability layer so
