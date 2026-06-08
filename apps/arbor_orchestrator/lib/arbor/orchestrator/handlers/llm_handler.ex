@@ -443,7 +443,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   #
   # ACP adapter constraints (2026-06-06): pipelines that route through
   # the `:acp` runtime can carry per-node permission / tool restrictions
-  # for the ExMCP Claude adapter via three node attrs:
+  # for the ExMCP Claude (ClaudeSDK) adapter via three node attrs:
   #
   #   acp_permission_mode="deny"
   #   acp_allowed_tools="WebSearch,WebFetch"
@@ -529,9 +529,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   # Whitelist of permission-mode atoms — DOT attrs come from operator-
   # authored files but still go through atom encoding; pin to the
   # known set to avoid unbounded atom growth and surprise modes.
-  # The recognized values mirror ExMCP.ACP.Adapters.Claude's mapping
-  # to Claude CLI's `--permission-mode` values. See ex_mcp commit
-  # `3c119d4` and code.claude.com/docs/en/permissions for semantics.
+  # The recognized values mirror ExMCP.ACP.Adapters.ClaudeSDK's
+  # `encode_permission_mode/1` mapping to Claude CLI's `--permission-mode`
+  # values. See code.claude.com/docs/en/permissions for semantics.
   defp safe_permission_atom(str) do
     case str do
       "nil" -> nil
