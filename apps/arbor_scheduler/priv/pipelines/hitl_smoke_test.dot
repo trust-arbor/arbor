@@ -1,0 +1,108 @@
+// HITL Smoke Test — Claude CLI ACP path with permission_mode="default"
+//
+// Smoke test for the HITL approval bridge landed in 85beb10d. The
+// pipeline spawns Claude CLI in `permission_mode="default"` so the
+// CLI sends `session/request_permission` to ExMCP for every tool
+// use. The handler escalates via Security.authorize →
+// InteractionRouter → Signal adapter → operator's phone. Operator
+// replies "Approve" or "Deny" via Signal one-word reply path.
+//
+// Caps file grants `arbor://acp/tool/WebSearch` with
+// `requires_approval: true`, so the FIRST web search Claude attempts
+// triggers the bridge.
+//
+// Manual run:
+//   Arbor.Scheduler.enqueue_pipeline(
+//     "apps/arbor_scheduler/priv/pipelines/hitl_smoke_test.dot"
+//   )
+//
+// Expected flow on dev:
+//   1. Pipeline starts; Claude CLI subprocess spawns
+//   2. Claude reads the prompt, decides to use WebSearch
+//   3. Claude CLI emits session/request_permission for WebSearch
+//   4. Arbor's AcpSession.Handler.handle_permission_request fires
+//   5. Security.authorize(agent_id, "arbor://acp/tool/WebSearch", :execute)
+//      returns {:ok, :pending_approval, request_id} (cap has
+//      requires_approval: true)
+//   6. Escalation fires → InteractionRouter → Signal adapter →
+//      operator's phone shows "Authorization request for
+//      arbor://acp/tool/WebSearch"
+//   7. Operator replies "Approve" via Signal
+//   8. InteractionRegistry.list_pending_for_user resolves the partial
+//      response to the pending request_id; broadcast to
+//      response_topic_for_agent
+//   9. Handler's Task.async receives {:interaction_response, ...},
+//      returns :authorized; ACP outcome "approved" sent back to CLI
+//  10. Claude CLI proceeds with the WebSearch tool call
+//
+// Output: brief markdown brief to ~/.arbor/reports/hitl-smoke/YYYY-MM-DD.md.
+// The content doesn't matter — the test is the wire flow.
+
+digraph HitlSmokeTest {
+  graph [
+    goal="Smoke test the HITL approval bridge end-to-end",
+    label="HITL Smoke Test"
+  ]
+
+  start [shape=Mdiamond]
+
+  build_output_path [
+    type="shell",
+    command="mkdir -p \"$HOME/.arbor/reports/hitl-smoke\" && printf '%s' \"$HOME/.arbor/reports/hitl-smoke/$(date -u +%Y-%m-%d).md\"",
+    sandbox="none",
+    timeout="5000",
+    on_error="fail",
+    data_class="internal"
+  ]
+
+  prep_output_path [
+    type="transform",
+    transform="identity",
+    source_key="shell.build_output_path.output",
+    output_key="path"
+  ]
+
+  smoke [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    llm_provider="anthropic",
+    llm_model="claude-haiku-4-5-20251001",
+    llm_runtime="acp",
+    use_tools="false",
+    max_tokens="4096",
+    temperature="0.5",
+    timeout="600000",
+    // Critical: "default" mode means Claude CLI asks for permission
+    // before each tool use. THAT's what routes the request through
+    // ExMCP → AcpSession.Handler → Security.authorize → HITL.
+    //
+    // NOTE on tool selection: WebSearch is in the user's
+    // ~/code/trust-arbor/arbor/.claude/settings.local.json allow list, so
+    // Claude CLI would pre-approve it locally and never send
+    // session/request_permission. We use a specific Bash command not in
+    // the local allow list so the CLI is forced to escalate via ACP.
+    acp_permission_mode="default",
+    system_prompt="You are running an end-to-end smoke test of an approval system. Use the Bash tool exactly once to run `echo HITL_SMOKE_TEST_OK`. After the bash call returns, write a single short paragraph confirming the command ran. Do NOT call any other tools.",
+    prompt="Do the smoke test now."
+  ]
+
+  prep_content [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="content"
+  ]
+
+  write_report [
+    type="exec",
+    target="action",
+    action="file_write",
+    context_keys="path,content"
+  ]
+
+  done [shape=Msquare]
+
+  start -> build_output_path -> prep_output_path -> smoke
+  smoke -> prep_content -> write_report -> done
+}
