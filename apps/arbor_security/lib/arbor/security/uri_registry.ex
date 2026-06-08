@@ -24,6 +24,7 @@ defmodule Arbor.Security.UriRegistry do
       ├── acp/tool/                 ← ACP handler
       ├── net/{http|search}         ← Network operations
       ├── orchestrator/execute/     ← Pipeline middleware gate
+      ├── action/                   ← Schema-bounded Jido actions (Mix, TDD, CodeReview)
       └── actions/execute/          ← Legacy action-level (transitional)
 
   ## Enforcement
@@ -141,6 +142,13 @@ defmodule Arbor.Security.UriRegistry do
 
     # Orchestrator middleware gate (supplementary)
     "arbor://orchestrator/execute",
+
+    # Action namespace — for Jido actions whose argument space is
+    # schema-bounded and therefore don't belong under the broader
+    # facade ceilings (e.g. Mix.{Test,Quality,Format}, TDD.*,
+    # CodeReview.ApplyChanges). Distinct from `arbor://actions/execute`
+    # (plural, legacy transitional namespace).
+    "arbor://action",
 
     # Legacy action-level URIs (transitional — will be removed)
     "arbor://actions/execute"
