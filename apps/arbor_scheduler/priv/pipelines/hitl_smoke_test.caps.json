@@ -1,0 +1,17 @@
+{
+  "capabilities": [
+    {
+      "constraints": {
+        "requires_approval": true
+      },
+      "resource_uri": "arbor://acp/tool/Bash"
+    },
+    {
+      "constraints": {},
+      "resource_uri": "arbor://fs/write/Users/azmaveth/.arbor/reports/hitl-smoke/**"
+    }
+  ],
+  "issuer_id": "agent_30b455a27f7f4e02ef291fd9f7862677f731a1f8b08c997f5fb8ad430d594b6e",
+  "signature": "fwfygtCA1wkKbta8uyf5SOxppxuQea9GkQAZwkFLMH9CEaNXpTMoshNYTZQlftGmhzuxpAS0/cBlp29tbg9OAQ==",
+  "version": 1
+}
