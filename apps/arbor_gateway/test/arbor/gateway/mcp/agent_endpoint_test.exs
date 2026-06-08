@@ -192,7 +192,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
           actions: [EchoAction, AddAction]
         )
 
-      {:ok, client} = ExMCP.Client.start_link(transport: :native, server: endpoint)
+      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
 
       # Client should have connected
       status = AgentEndpoint.status(endpoint)
@@ -217,7 +217,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
           actions: [EchoAction]
         )
 
-      {:ok, client} = ExMCP.Client.start_link(transport: :native, server: endpoint)
+      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
 
       {:ok, result} = ExMCP.Client.call_tool(client, "echo", %{"message" => "hello"})
 
@@ -238,7 +238,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
           actions: [AddAction]
         )
 
-      {:ok, client} = ExMCP.Client.start_link(transport: :native, server: endpoint)
+      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
 
       {:ok, result} = ExMCP.Client.call_tool(client, "add", %{"a" => 3, "b" => 7})
 
@@ -256,7 +256,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
           actions: [EchoAction]
         )
 
-      {:ok, client} = ExMCP.Client.start_link(transport: :native, server: endpoint)
+      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
 
       {:ok, result} = ExMCP.Client.call_tool(client, "nonexistent", %{})
 
@@ -275,7 +275,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
           actions: [FailAction]
         )
 
-      {:ok, client} = ExMCP.Client.start_link(transport: :native, server: endpoint)
+      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
 
       {:ok, result} = ExMCP.Client.call_tool(client, "fail", %{"reason" => "test failure"})
 

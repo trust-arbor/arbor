@@ -519,14 +519,14 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
             env when is_map(env) -> Keyword.put(opts, :env, Map.to_list(env))
           end
 
-        http when http in [:http, :sse] ->
-          [transport: http, url: Map.fetch!(config, :url)]
+        :http ->
+          [transport: :http, url: Map.fetch!(config, :url)]
+
+        :sse ->
+          [transport: :http, use_sse: true, url: Map.fetch!(config, :url)]
 
         :beam ->
           [transport: :beam, server: Map.fetch!(config, :server)]
-
-        :native ->
-          [transport: :native, server: Map.fetch!(config, :server)]
 
         :test ->
           [transport: :test, server: Map.fetch!(config, :server)]
