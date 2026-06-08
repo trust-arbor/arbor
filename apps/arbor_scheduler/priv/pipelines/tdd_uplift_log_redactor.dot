@@ -1,0 +1,167 @@
+// TDD-style test-coverage uplift with self-correction loop.
+//
+// Target: Arbor.Common.LogRedactor (40 lines, no existing tests).
+//
+// Factory pattern:
+//   - Orchestrator gives the SKELETON: read → prompt → LLM → write →
+//     mix test → gate on result → retry-with-feedback on failure.
+//   - Agent (LLM compute node) gives the MUSCLES.
+//   - Capabilities enforce the boundary: fs/read on the module dir,
+//     fs/write on the test dir, shell/exec/mix/test on the runner.
+//
+// Self-correction loop:
+//   On test failure the pipeline bumps a retry counter, builds a
+//   feedback-aware prompt (module source + prior test + stderr from
+//   the failing run), and uses a `loop_restart=true` edge back to
+//   the LLM node so context is preserved and a fresh execution
+//   slate is granted. Bounded at 3 attempts by edge condition.
+
+digraph TddUpliftLogRedactor {
+  graph [
+    goal="Generate ExUnit tests for Arbor.Common.LogRedactor; self-correct on failure",
+    label="TDD uplift — Arbor.Common.LogRedactor"
+  ]
+
+  start [shape=Mdiamond]
+
+  // ── Read module source ──────────────────────────────────────────
+
+  read_module [
+    type="exec",
+    target="action",
+    action="file_read",
+    param.path="/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_common/lib/arbor/common/log_redactor.ex"
+  ]
+
+  // ── First-attempt prompt: module source only ────────────────────
+
+  build_prompt [
+    type="transform",
+    transform="template",
+    source_key="exec.read_module.content",
+    output_key="prompt",
+    expression="Write ExUnit tests for the Elixir module below.\n\nRules:\n- The first line of your output MUST be: defmodule Arbor.Common.LogRedactorTest do\n- Use `use ExUnit.Case, async: true`\n- Add `@moduletag :fast` at the top of the module.\n- `alias Arbor.Common.LogRedactor`\n- Test the public function `LogRedactor.filter/2` for these cases:\n    1. A log_event with msg={:string, str} preserves the tuple shape with the redacted string.\n    2. A log_event with msg={:report, map} preserves the tuple shape with a redacted map.\n    3. A log_event with msg={:report, map} where map contains nested maps recurses into them.\n    4. A log_event with msg={:report, map} where a value is not a binary (e.g. an integer) leaves that value unchanged.\n    5. A log_event with an unknown msg shape (e.g. msg=:something) is returned unchanged.\n    6. A non-map log_event (the fall-through clause) is returned unchanged.\n- Do NOT assume Arbor.Common.SensitiveData.redact/1 redacts arbitrary strings — it only matches specific PII/secret patterns (emails, API keys). For tests that need to verify redaction happened, use a string that obviously matches one of those patterns (e.g. `test@example.com`). For tests that verify shape-preservation, use plain strings (e.g. `hello world`) and assert the input equals the output.\n- Output ONLY valid Elixir code. No markdown fences, no backticks, no preamble. Start with `defmodule` on the first line.\n\nThe module under test:\n\n{value}\n"
+  ]
+
+  // ── Generate the test code ──────────────────────────────────────
+
+  generate_test [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    llm_provider="lm_studio",
+    llm_model="gemma-4-e4b-it",
+    use_tools="false",
+    max_tokens="8192",
+    temperature="0.2",
+    timeout="600000",
+    prompt_context_key="prompt"
+  ]
+
+  // ── Stash the response for file_write ───────────────────────────
+
+  prep_content [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="content"
+  ]
+
+  // ── Write the test file ─────────────────────────────────────────
+
+  write_test [
+    type="exec",
+    target="action",
+    action="file_write",
+    param.path="/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_common/test/arbor/common/log_redactor_test.exs",
+    param.create_dirs="true",
+    context_keys="content"
+  ]
+
+  // ── Run mix test (fast tag only — picks up the new file) ────────
+
+  run_test [
+    type="exec",
+    target="action",
+    action="mix_test",
+    param.path="/Users/azmaveth/code/trust-arbor/arbor/apps/arbor_common",
+    param.tags="fast"
+  ]
+
+  // ── Gate on the passed boolean ──────────────────────────────────
+
+  check [
+    type="gate",
+    shape=diamond,
+    predicate="expression",
+    expression="exec.run_test.passed"
+  ]
+
+  // ── Pass path ───────────────────────────────────────────────────
+
+  mark_pass [
+    type="transform",
+    transform="constant",
+    expression="pass",
+    output_key="route"
+  ]
+
+  // ── Fail path: bump counter, then conditional retry/exhaust ─────
+
+  bump_retry [
+    type="transform",
+    transform="increment",
+    source_key="retry.count",
+    output_key="retry.count"
+  ]
+
+  // ── Build retry prompt with feedback ────────────────────────────
+  //
+  // The template pulls three pieces from context:
+  //   - The original module source (so the LLM doesn't have to
+  //     re-derive it from memory).
+  //   - The prior test code it generated.
+  //   - The stderr from the failing mix test run.
+  //
+  // The new template substitution syntax `{ctx.<dotted.key>}` makes
+  // this multi-source assembly possible without chaining N transforms.
+
+  build_retry_prompt [
+    type="transform",
+    transform="template",
+    source_key="exec.read_module.content",
+    output_key="prompt",
+    expression="Your previous test for Arbor.Common.LogRedactor failed. Revise it so all tests pass.\n\nRules (unchanged):\n- First line MUST be: defmodule Arbor.Common.LogRedactorTest do\n- `use ExUnit.Case, async: true`\n- `@moduletag :fast`\n- `alias Arbor.Common.LogRedactor`\n- Test LogRedactor.filter/2 for the 6 cases described in the original prompt.\n- Output ONLY Elixir code — no markdown fences.\n\nDO NOT assume SensitiveData.redact/1 transforms arbitrary strings — it only matches specific patterns. If a test depends on redaction actually happening, use an email or a string that obviously matches one of those patterns. For shape-preservation tests, use a plain string and assert input == output.\n\nThe module under test:\n\n{value}\n\nYour previous test attempt:\n\n{ctx.last_response}\n\nThe failing mix test output (stderr):\n\n{ctx.exec.run_test.stderr}\n\nThe stdout (often shows which assertion failed):\n\n{ctx.exec.run_test.stdout}\n\nRevise and output the full test file again.\n"
+  ]
+
+  // ── Exhaustion marker ───────────────────────────────────────────
+
+  mark_fail [
+    type="transform",
+    transform="constant",
+    expression="fail",
+    output_key="route"
+  ]
+
+  done [shape=Msquare]
+
+  // ── Flow ────────────────────────────────────────────────────────
+
+  start -> read_module -> build_prompt -> generate_test
+  generate_test -> prep_content -> write_test -> run_test -> check
+
+  check -> mark_pass [condition="context.exec.run_test.passed=true"]
+  mark_pass -> done
+
+  check -> bump_retry [condition="context.exec.run_test.passed!=true"]
+
+  // Retry budget: < 3 attempts → loop back, ≥ 3 → exhaust
+  bump_retry -> build_retry_prompt [condition="context.retry.count<3"]
+  bump_retry -> mark_fail [condition="context.retry.count>=3"]
+
+  // loop_restart=true tells the engine to restart the pipeline from
+  // generate_test with the new prompt while preserving context.
+  build_retry_prompt -> generate_test [loop_restart="true"]
+
+  mark_fail -> done
+}
