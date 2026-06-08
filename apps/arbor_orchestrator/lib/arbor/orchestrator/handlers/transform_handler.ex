@@ -28,7 +28,7 @@ defmodule Arbor.Orchestrator.Handlers.TransformHandler do
     expression = Map.get(node.attrs, "expression")
     input = Context.get(context, source_key)
 
-    case apply_transform(transform, input, expression) do
+    case apply_transform(transform, input, expression, context) do
       {:ok, result} ->
         %Outcome{
           status: :success,
@@ -55,35 +55,47 @@ defmodule Arbor.Orchestrator.Handlers.TransformHandler do
 
   # --- Transform implementations ---
 
-  defp apply_transform("identity", input, _expr) do
+  defp apply_transform("identity", input, _expr, _ctx) do
     {:ok, input}
   end
 
-  defp apply_transform("json_extract", _input, nil) do
+  defp apply_transform("json_extract", _input, nil, _ctx) do
     {:error, "json_extract requires 'expression' attribute (JSON path)"}
   end
 
-  defp apply_transform("json_extract", input, path) when is_binary(input) do
+  defp apply_transform("json_extract", input, path, _ctx) when is_binary(input) do
     case decode_json_with_fences(input) do
       {:ok, parsed} -> json_path(parsed, path)
       {:error, _} -> {:error, "input is not valid JSON"}
     end
   end
 
-  defp apply_transform("json_extract", input, path) when is_map(input) or is_list(input) do
+  defp apply_transform("json_extract", input, path, _ctx)
+       when is_map(input) or is_list(input) do
     json_path(input, path)
   end
 
-  defp apply_transform("template", _input, nil) do
+  defp apply_transform("template", _input, nil, _ctx) do
     {:error, "template requires 'expression' attribute (template string)"}
   end
 
-  defp apply_transform("template", input, template) do
-    result = String.replace(template, "{value}", to_string(input))
+  # Template substitution.
+  #
+  # `{value}` is replaced with the input read from `source_key`.
+  # `{ctx.<dotted.key>}` placeholders pull additional values from the
+  # pipeline context — useful for retry/feedback prompts that need to
+  # combine multiple prior results (module source + prior LLM output +
+  # tool failure stderr, for example) into one assembled string.
+  defp apply_transform("template", input, template, context) do
+    result =
+      template
+      |> String.replace("{value}", to_string(input))
+      |> substitute_context_keys(context)
+
     {:ok, result}
   end
 
-  defp apply_transform("map", input, expression) when is_binary(input) do
+  defp apply_transform("map", input, expression, _ctx) when is_binary(input) do
     case decode_json_with_fences(input) do
       {:ok, list} when is_list(list) ->
         apply_map(list, expression)
@@ -93,15 +105,15 @@ defmodule Arbor.Orchestrator.Handlers.TransformHandler do
     end
   end
 
-  defp apply_transform("map", input, expression) when is_list(input) do
+  defp apply_transform("map", input, expression, _ctx) when is_list(input) do
     apply_map(input, expression)
   end
 
-  defp apply_transform("filter", _input, nil) do
+  defp apply_transform("filter", _input, nil, _ctx) do
     {:error, "filter requires 'expression' attribute"}
   end
 
-  defp apply_transform("filter", input, expression) when is_binary(input) do
+  defp apply_transform("filter", input, expression, _ctx) when is_binary(input) do
     case Jason.decode(input) do
       {:ok, list} when is_list(list) ->
         apply_filter(list, expression)
@@ -111,11 +123,11 @@ defmodule Arbor.Orchestrator.Handlers.TransformHandler do
     end
   end
 
-  defp apply_transform("filter", input, expression) when is_list(input) do
+  defp apply_transform("filter", input, expression, _ctx) when is_list(input) do
     apply_filter(input, expression)
   end
 
-  defp apply_transform("format", input, format) do
+  defp apply_transform("format", input, format, _ctx) do
     formatted =
       case format do
         "json" -> Jason.encode!(input, pretty: true)
@@ -129,18 +141,45 @@ defmodule Arbor.Orchestrator.Handlers.TransformHandler do
     _ -> {:ok, to_string(input)}
   end
 
-  defp apply_transform("split", input, delimiter) when is_binary(input) do
+  defp apply_transform("split", input, delimiter, _ctx) when is_binary(input) do
     delim = delimiter || ","
     {:ok, String.split(input, delim, trim: true) |> Enum.map(&String.trim/1)}
   end
 
-  defp apply_transform("join", input, delimiter) when is_list(input) do
+  defp apply_transform("join", input, delimiter, _ctx) when is_list(input) do
     delim = delimiter || ","
     {:ok, Enum.join(input, delim)}
   end
 
-  defp apply_transform(unknown, _input, _expr) do
+  # Counter helpers — small deterministic ops so DOT pipelines can
+  # implement bounded retry loops without delegating to an LLM
+  # interpreter for "increment retry.count" instructions.
+  defp apply_transform("increment", input, _expr, _ctx) do
+    value =
+      case input do
+        nil -> 0
+        n when is_integer(n) -> n
+        s when is_binary(s) -> String.to_integer(s)
+      end
+
+    {:ok, value + 1}
+  rescue
+    _ -> {:ok, 1}
+  end
+
+  defp apply_transform("constant", _input, expr, _ctx) when is_binary(expr) do
+    {:ok, expr}
+  end
+
+  defp apply_transform(unknown, _input, _expr, _ctx) do
     {:error, "unknown transform type: #{unknown}"}
+  end
+
+  # Replace `{ctx.<dotted.key>}` placeholders with context lookups.
+  defp substitute_context_keys(template, context) do
+    Regex.replace(~r/\{ctx\.([a-zA-Z0-9_.\-]+)\}/, template, fn _, key ->
+      to_string(Context.get(context, key))
+    end)
   end
 
   # --- Helpers ---
