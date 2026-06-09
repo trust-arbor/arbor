@@ -100,6 +100,12 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://comms/poll",
     "arbor://comms/channel",
 
+    # Signals facade — restricted-topic subscription authorization. Used in
+    # live authz (Signals.Bus → CapabilityAuthorizer builds
+    # "arbor://signals/subscribe/<topic>") but was previously absent from the
+    # canonical registry (Security Sentinel finding, 2026-06-09).
+    "arbor://signals/subscribe",
+
     # Gateway MCP bridge
     "arbor://mcp/",
 
