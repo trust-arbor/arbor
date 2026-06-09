@@ -10,15 +10,16 @@ defmodule Arbor.Actions.Security.WholeTreeScan do
   findings.
   """
 
-  alias Arbor.Actions.Security.Detectors.{SignedFieldCoverage, UriRegistration}
+  alias Arbor.Actions.Security.Detectors.{DependencyScan, SignedFieldCoverage, UriRegistration}
   alias Arbor.Actions.Security.Recorder
   alias Arbor.Contracts.Security.Finding
 
   @default_output_dir ".arbor/security/findings"
 
-  # Registered whole-tree detectors. New L0b detectors (regression-test
-  # presence, serializer⊇signed) are added here.
-  @detectors [SignedFieldCoverage, UriRegistration]
+  # Registered whole-tree detectors. DependencyScan runs its fast static check
+  # here (mutable git deps); its hex.audit pass is opt-in via the dependency
+  # action, not the fast scan. New L0b detectors are added here.
+  @detectors [SignedFieldCoverage, UriRegistration, DependencyScan]
 
   @doc """
   Run all whole-tree detectors over `root` (default `"apps"`). Returns

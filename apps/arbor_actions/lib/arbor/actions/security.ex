@@ -69,6 +69,52 @@ defmodule Arbor.Actions.Security.RunStaticDetectors do
   end
 end
 
+defmodule Arbor.Actions.Security.RunDependencyScan do
+  @moduledoc """
+  Run the supply-chain dependency detector and record findings. Unlike the fast
+  whole-tree pass, this enables the `mix hex.audit` retired-package check by
+  default (the daily dependency pipeline drives it).
+  """
+
+  use Jido.Action,
+    name: "security_run_dependency_scan",
+    description: "Scan dependencies for supply-chain risk (mutable git deps, retired packages)",
+    category: "security",
+    tags: ["security", "supply-chain", "sentinel", "dependencies"],
+    schema: [
+      audit: [type: :boolean, default: true, doc: "Run mix hex.audit for retired packages"],
+      output_dir: [type: :string, default: ".arbor/security/findings", doc: "Findings dir"],
+      record: [type: :boolean, default: true, doc: "Write findings + emit signals"],
+      git_sha: [type: {:or, [:string, nil]}, default: nil, doc: "Git SHA for provenance"]
+    ]
+
+  alias Arbor.Actions.Security.Detectors.DependencyScan
+  alias Arbor.Actions.Security.Recorder
+
+  @impl true
+  def run(params, _context) do
+    findings =
+      DependencyScan.detect(audit: Map.get(params, :audit, true), git_sha: params[:git_sha])
+      |> Enum.uniq_by(& &1.id)
+
+    {_outcomes, summary} =
+      Recorder.record_all(
+        findings,
+        Map.get(params, :record, true),
+        params[:output_dir] || ".arbor/security/findings"
+      )
+
+    {:ok,
+     %{
+       total: summary.total,
+       by_severity: summary.by_severity,
+       by_outcome: summary.by_outcome,
+       recorded_to: summary.recorded_to,
+       finding_ids: Enum.map(findings, & &1.id)
+     }}
+  end
+end
+
 defmodule Arbor.Actions.Security.RunWholeTreeDetectors do
   @moduledoc """
   Run the cross-file (L0b) security detectors — e.g. signed-field coverage — over

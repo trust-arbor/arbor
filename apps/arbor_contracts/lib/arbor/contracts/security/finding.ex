@@ -66,6 +66,7 @@ defmodule Arbor.Contracts.Security.Finding do
           | :unsafe_atom
           | :config_fail_open
           | :unregistered_uri
+          | :dependency_risk
           | :path_traversal
           | :secret_exposure
           | :other
