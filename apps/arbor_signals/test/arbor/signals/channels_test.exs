@@ -30,17 +30,21 @@ defmodule Arbor.Signals.ChannelsTest do
       end
     end
 
-    def seal(plaintext, _recipient_public, _sender_private) do
-      # Simplified mock - just encode for testing
+    # ECIES mock (C2): seal/3 takes the sender's signing private key; unseal/3
+    # takes the sender's signing public key. The mock ignores the crypto and
+    # just round-trips the plaintext for channel-logic testing.
+    def seal(plaintext, _recipient_public, _sender_sign_private) do
       %{
+        v: 2,
         ciphertext: plaintext,
         iv: <<0::96>>,
         tag: <<0::128>>,
-        sender_public: <<0::256>>
+        ephemeral_public: <<0::256>>,
+        signature: <<0::512>>
       }
     end
 
-    def unseal(%{ciphertext: plaintext}, _recipient_private) do
+    def unseal(%{ciphertext: plaintext}, _recipient_private, _sender_sign_public) do
       {:ok, plaintext}
     end
   end
@@ -55,6 +59,10 @@ defmodule Arbor.Signals.ChannelsTest do
     def lookup_encryption_key(_agent_id) do
       {:error, :not_found}
     end
+
+    # Signing-key lookup used by accept_invitation to verify the inviter (C2).
+    def lookup("agent_" <> _rest = _agent_id), do: {:ok, :crypto.strong_rand_bytes(32)}
+    def lookup(_agent_id), do: {:error, :not_found}
   end
 
   setup do
@@ -120,7 +128,8 @@ defmodule Arbor.Signals.ChannelsTest do
 
       sender_keychain = %{
         agent_id: "agent_inviter",
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, invitation} = Channels.invite(channel.id, "agent_invitee", sender_keychain)
@@ -137,7 +146,8 @@ defmodule Arbor.Signals.ChannelsTest do
 
       non_member_keychain = %{
         agent_id: "agent_outsider",
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       assert {:error, :not_a_member} =
@@ -147,7 +157,8 @@ defmodule Arbor.Signals.ChannelsTest do
     test "fails for non-existent channel" do
       sender_keychain = %{
         agent_id: "agent_any",
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       assert {:error, :not_found} =
@@ -161,21 +172,29 @@ defmodule Arbor.Signals.ChannelsTest do
 
       host_keychain = %{
         agent_id: "agent_host",
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, invitation} = Channels.invite(channel.id, "agent_guest", host_keychain)
 
       guest_keychain = %{
         agent_id: "agent_guest",
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       # Mock sealed key contains the actual key as ciphertext in our mock
       sealed_key = %{invitation.sealed_key | ciphertext: key}
 
       {:ok, updated_channel, received_key} =
-        Channels.accept_invitation(channel.id, "agent_guest", sealed_key, guest_keychain)
+        Channels.accept_invitation(
+          channel.id,
+          "agent_guest",
+          invitation.inviter_id,
+          sealed_key,
+          guest_keychain
+        )
 
       assert Channel.member?(updated_channel, "agent_guest")
       assert received_key == key
@@ -205,20 +224,29 @@ defmodule Arbor.Signals.ChannelsTest do
 
       alice_keychain = %{
         agent_id: "agent_alice",
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, _} = Channels.invite(channel.id, "agent_bob", alice_keychain)
 
       bob_keychain = %{
         agent_id: "agent_bob",
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, invitation} = Channels.invite(channel.id, "agent_bob", alice_keychain)
       sealed_key = %{invitation.sealed_key | ciphertext: key}
 
-      {:ok, _, _} = Channels.accept_invitation(channel.id, "agent_bob", sealed_key, bob_keychain)
+      {:ok, _, _} =
+        Channels.accept_invitation(
+          channel.id,
+          "agent_bob",
+          invitation.inviter_id,
+          sealed_key,
+          bob_keychain
+        )
 
       assert :ok = Channels.leave(channel.id, "agent_bob")
 
@@ -231,18 +259,28 @@ defmodule Arbor.Signals.ChannelsTest do
 
       alice_keychain = %{
         agent_id: "agent_alice",
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, invitation} = Channels.invite(channel.id, "agent_bob", alice_keychain)
 
       bob_keychain = %{
         agent_id: "agent_bob",
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       sealed_key = %{invitation.sealed_key | ciphertext: key}
-      {:ok, _, _} = Channels.accept_invitation(channel.id, "agent_bob", sealed_key, bob_keychain)
+
+      {:ok, _, _} =
+        Channels.accept_invitation(
+          channel.id,
+          "agent_bob",
+          invitation.inviter_id,
+          sealed_key,
+          bob_keychain
+        )
 
       assert :ok = Channels.leave(channel.id, "agent_alice")
 
@@ -277,20 +315,28 @@ defmodule Arbor.Signals.ChannelsTest do
 
       owner_keychain = %{
         agent_id: "agent_owner",
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, invitation} = Channels.invite(channel.id, "agent_member", owner_keychain)
 
       member_keychain = %{
         agent_id: "agent_member",
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       sealed_key = %{invitation.sealed_key | ciphertext: key}
 
       {:ok, _, _} =
-        Channels.accept_invitation(channel.id, "agent_member", sealed_key, member_keychain)
+        Channels.accept_invitation(
+          channel.id,
+          "agent_member",
+          invitation.inviter_id,
+          sealed_key,
+          member_keychain
+        )
 
       assert {:error, :not_creator} = Channels.rotate_key(channel.id, "agent_member")
     end
@@ -300,20 +346,28 @@ defmodule Arbor.Signals.ChannelsTest do
 
       owner_keychain = %{
         agent_id: "agent_owner",
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, invitation} = Channels.invite(channel.id, "agent_member", owner_keychain)
 
       member_keychain = %{
         agent_id: "agent_member",
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       sealed_key = %{invitation.sealed_key | ciphertext: key}
 
       {:ok, _, _} =
-        Channels.accept_invitation(channel.id, "agent_member", sealed_key, member_keychain)
+        Channels.accept_invitation(
+          channel.id,
+          "agent_member",
+          invitation.inviter_id,
+          sealed_key,
+          member_keychain
+        )
 
       {:ok, _, members_to_reinvite} = Channels.rotate_key(channel.id, "agent_owner")
 

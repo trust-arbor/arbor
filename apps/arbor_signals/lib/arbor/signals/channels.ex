@@ -112,14 +112,14 @@ defmodule Arbor.Signals.Channels do
 
   Returns `{:ok, channel, key}` where `key` is the decrypted channel key.
   """
-  @spec accept_invitation(channel_id(), agent_id(), map(), map()) ::
+  @spec accept_invitation(channel_id(), agent_id(), agent_id(), map(), map()) ::
           {:ok, Channel.t(), binary()} | {:error, term()}
-  def accept_invitation(channel_id, agent_id, sealed_key, recipient_keychain)
-      when is_binary(channel_id) and is_binary(agent_id) and is_map(sealed_key) and
-             is_map(recipient_keychain) do
+  def accept_invitation(channel_id, agent_id, inviter_id, sealed_key, recipient_keychain)
+      when is_binary(channel_id) and is_binary(agent_id) and is_binary(inviter_id) and
+             is_map(sealed_key) and is_map(recipient_keychain) do
     GenServer.call(
       __MODULE__,
-      {:accept_invitation, channel_id, agent_id, sealed_key, recipient_keychain}
+      {:accept_invitation, channel_id, agent_id, inviter_id, sealed_key, recipient_keychain}
     )
   end
 
@@ -325,9 +325,11 @@ defmodule Arbor.Signals.Channels do
     with {:ok, entry} <- get_channel_entry(state, channel_id),
          :ok <- verify_member(entry.channel, sender_keychain.agent_id),
          {:ok, invitee_enc_pub} <- lookup_encryption_key(invitee_id) do
-      # Seal the channel key for the invitee
+      # Seal the channel key for the invitee — sealed to the invitee's X25519
+      # key, SIGNED with the inviter's Ed25519 signing key (C2) so the invitee
+      # can verify it came from us.
       sealed_key =
-        seal_key(entry.key, invitee_enc_pub, sender_keychain.encryption_keypair.private)
+        seal_key(entry.key, invitee_enc_pub, sender_keychain.signing_keypair.private)
 
       invitation = %{
         channel_id: channel_id,
@@ -362,12 +364,21 @@ defmodule Arbor.Signals.Channels do
 
   @impl true
   def handle_call(
-        {:accept_invitation, channel_id, agent_id, sealed_key, recipient_keychain},
+        {:accept_invitation, channel_id, agent_id, inviter_id, sealed_key, recipient_keychain},
         _from,
         state
       ) do
+    # Look up the inviter's signing public key from the registry and verify
+    # the sealed key's signature against it (C2): the unsealed channel key is
+    # only trusted if it was sealed by the claimed inviter.
     with {:ok, entry} <- get_channel_entry(state, channel_id),
-         {:ok, key} <- unseal_key(sealed_key, recipient_keychain.encryption_keypair.private) do
+         {:ok, inviter_sign_pub} <- lookup_signing_key(inviter_id),
+         {:ok, key} <-
+           unseal_key(
+             sealed_key,
+             recipient_keychain.encryption_keypair.private,
+             inviter_sign_pub
+           ) do
       # Verify the unsealed key matches (in case of tampering or wrong key)
       if key != entry.key do
         {:reply, {:error, :key_mismatch}, state}
@@ -714,16 +725,24 @@ defmodule Arbor.Signals.Channels do
     :exit, _reason -> {:error, :registry_unavailable}
   end
 
-  defp seal_key(key, recipient_public, sender_private) do
+  defp seal_key(key, recipient_public, sender_sign_private) do
     crypto_module = crypto_module()
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    apply(crypto_module, :seal, [key, recipient_public, sender_private])
+    apply(crypto_module, :seal, [key, recipient_public, sender_sign_private])
   end
 
-  defp unseal_key(sealed, recipient_private) do
+  defp unseal_key(sealed, recipient_private, sender_sign_public) do
     crypto_module = crypto_module()
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    apply(crypto_module, :unseal, [sealed, recipient_private])
+    apply(crypto_module, :unseal, [sealed, recipient_private, sender_sign_public])
+  end
+
+  defp lookup_signing_key(agent_id) do
+    registry_module = identity_registry_module()
+
+    registry_module.lookup(agent_id)
+  catch
+    :exit, _reason -> {:error, :registry_unavailable}
   end
 
   defp encrypt_message(data, key, key_version) do
