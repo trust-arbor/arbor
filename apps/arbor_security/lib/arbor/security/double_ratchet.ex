@@ -230,7 +230,8 @@ defmodule Arbor.Security.DoubleRatchet do
   - `{:error, :max_skip_exceeded}` if too many messages were skipped
   """
   @spec decrypt(t(), header(), binary(), binary()) ::
-          {:ok, t(), binary()} | {:error, :decryption_failed | :max_skip_exceeded}
+          {:ok, t(), binary()}
+          | {:error, :decryption_failed | :max_skip_exceeded | :malformed_ciphertext}
   def decrypt(%__MODULE__{} = session, header, ciphertext, aad \\ "")
       when is_map(header) and is_binary(ciphertext) and is_binary(aad) do
     # Check skipped keys first
@@ -358,17 +359,21 @@ defmodule Arbor.Security.DoubleRatchet do
   end
 
   defp decrypt_with_key(packed_ciphertext, message_key, header, aad) do
-    # Unpack IV, tag, and ciphertext
-    <<iv::binary-size(12), tag::binary-size(16), ciphertext::binary>> = packed_ciphertext
+    # C11 review fix (2026-06-09): a too-short ciphertext used to crash the
+    # calling process via a failed binary match. An attacker (or a corrupt
+    # store) can supply arbitrary bytes here, so malformed input must be a
+    # clean {:error, _}, not an exception. Need 12 (IV) + 16 (tag) = 28 bytes
+    # minimum before any AES-GCM payload.
+    case packed_ciphertext do
+      <<iv::binary-size(12), tag::binary-size(16), ciphertext::binary>> ->
+        enc_key = Crypto.derive_key(message_key, @msg_info, 32)
+        header_bytes = encode_header(header)
+        full_aad = header_bytes <> aad
+        Crypto.decrypt(ciphertext, enc_key, iv, tag, full_aad)
 
-    # Derive encryption key from message key
-    enc_key = Crypto.derive_key(message_key, @msg_info, 32)
-
-    # Include header in AAD for authentication
-    header_bytes = encode_header(header)
-    full_aad = header_bytes <> aad
-
-    Crypto.decrypt(ciphertext, enc_key, iv, tag, full_aad)
+      _ ->
+        {:error, :malformed_ciphertext}
+    end
   end
 
   defp encode_header(header) do
@@ -396,8 +401,8 @@ defmodule Arbor.Security.DoubleRatchet do
             session = %{session | skipped_keys: remaining}
             {:ok, session, plaintext}
 
-          {:error, :decryption_failed} ->
-            {:error, :decryption_failed}
+          {:error, reason} ->
+            {:error, reason}
         end
     end
   end
@@ -465,7 +470,12 @@ defmodule Arbor.Security.DoubleRatchet do
     session = %{
       session
       | recv_chain: %{key: chain_key, n: session.recv_chain.n + 1},
-        skipped_keys: Map.put(session.skipped_keys, key_id, {message_key, System.monotonic_time(:millisecond)})
+        skipped_keys:
+          Map.put(
+            session.skipped_keys,
+            key_id,
+            {message_key, System.monotonic_time(:millisecond)}
+          )
     }
 
     do_skip_keys(session, until)
@@ -480,8 +490,8 @@ defmodule Arbor.Security.DoubleRatchet do
         session = %{session | recv_chain: %{key: chain_key, n: session.recv_chain.n + 1}}
         {:ok, session, plaintext}
 
-      {:error, :decryption_failed} ->
-        {:error, :decryption_failed}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
