@@ -479,9 +479,21 @@ defmodule Arbor.Security.CapabilityStore do
           prefix = String.trim_trailing(pattern, "/**")
           resource == prefix or String.starts_with?(resource, prefix <> "/")
 
-        # Prefix + boundary separator
+        # Single-level wildcard: "arbor://foo/*"
+        String.ends_with?(pattern, "/*") ->
+          prefix = String.trim_trailing(pattern, "/*")
+          resource == prefix or String.starts_with?(resource, prefix <> "/")
+
+        # C8 review fix (2026-06-09): a CONCRETE capability URI grants ONLY its
+        # exact resource — it no longer implicitly covers the subtree. A grant
+        # of `arbor://fs/read/project` does NOT authorize
+        # `arbor://fs/read/project/secret`; subtree access must be granted
+        # explicitly with `/**` (or `/*`). Pre-fix, every concrete grant was
+        # silently a `/**`, which is least-surprise-violating for filesystem
+        # grants. (Shell authorizes by command name only — `…/exec/git` — so
+        # it already exact-matches and is unaffected.)
         true ->
-          String.starts_with?(resource, pattern <> "/")
+          false
       end
     end
   end

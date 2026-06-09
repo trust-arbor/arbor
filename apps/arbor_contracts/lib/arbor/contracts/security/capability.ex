@@ -150,7 +150,25 @@ defmodule Arbor.Contracts.Security.Capability do
   """
   @spec grants_access?(t(), String.t()) :: boolean()
   def grants_access?(%__MODULE__{resource_uri: cap_uri}, resource_uri) do
-    cap_uri == resource_uri or String.starts_with?(resource_uri, cap_uri <> "/")
+    # C8 review fix (2026-06-09): a concrete cap URI grants only its EXACT
+    # resource; subtree access requires an explicit `/**` (or `/*`) wildcard.
+    # Pre-fix this also did `starts_with?(resource_uri, cap_uri <> "/")`, so a
+    # concrete grant silently covered the whole subtree.
+    cond do
+      cap_uri == resource_uri ->
+        true
+
+      String.ends_with?(cap_uri, "/**") ->
+        prefix = String.trim_trailing(cap_uri, "/**")
+        resource_uri == prefix or String.starts_with?(resource_uri, prefix <> "/")
+
+      String.ends_with?(cap_uri, "/*") ->
+        prefix = String.trim_trailing(cap_uri, "/*")
+        resource_uri == prefix or String.starts_with?(resource_uri, prefix <> "/")
+
+      true ->
+        false
+    end
   end
 
   @doc """

@@ -89,8 +89,8 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
 
   # ── URI matcher boundaries ────────────────────────────────────────
 
-  describe "subpath grants don't bleed across siblings" do
-    test "cap for arbor://shell/exec/git grants subpaths but NOT git-suffixed siblings",
+  describe "concrete grants are exact-match (C8: no implicit subtree, no sibling bleed)" do
+    test "cap for arbor://shell/exec/git grants ONLY git — not subpaths or siblings",
          %{agent_id: agent} do
       {:ok, _} =
         Security.grant(
@@ -98,20 +98,23 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
           resource: "arbor://shell/exec/git"
         )
 
-      # SHOULD authorize: exact match and subpath (with explicit `/`)
+      # Exact match authorized.
       assert {:ok, :authorized} = Security.authorize(agent, "arbor://shell/exec/git")
-      assert {:ok, :authorized} = Security.authorize(agent, "arbor://shell/exec/git/status")
-      assert {:ok, :authorized} = Security.authorize(agent, "arbor://shell/exec/git/log")
 
-      # MUST NOT authorize: sibling-with-prefix names. If the matcher
-      # was treating `git` as a string prefix without requiring `/`,
-      # these would silently get green-lit.
+      # C8: a concrete grant no longer implicitly covers the subtree. (Shell
+      # authorizes by command name only — `…/exec/git` — so these subpath
+      # URIs don't even occur in real shell auth; this pins the matcher.)
+      assert {:error, _} = Security.authorize(agent, "arbor://shell/exec/git/status")
+      assert {:error, _} = Security.authorize(agent, "arbor://shell/exec/git/log")
+
+      # Sibling-with-prefix names must never match.
       assert {:error, _} = Security.authorize(agent, "arbor://shell/exec/gitleaks")
       assert {:error, _} = Security.authorize(agent, "arbor://shell/exec/github")
       assert {:error, _} = Security.authorize(agent, "arbor://shell/exec/git-leaks")
     end
 
-    test "cap without trailing slash does NOT grant unrelated suffix", %{agent_id: agent} do
+    test "concrete cap grants ONLY the exact resource (no subpath, no sibling)",
+         %{agent_id: agent} do
       {:ok, _} =
         Security.grant(
           principal: agent,
@@ -120,11 +123,20 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
 
       # Exact granted.
       assert {:ok, :authorized} = Security.authorize(agent, "arbor://fs/read/doc")
-      # Subpath via explicit slash granted.
-      assert {:ok, :authorized} = Security.authorize(agent, "arbor://fs/read/doc/readme.md")
+      # C8: subpath NOT granted (requires explicit /**).
+      assert {:error, _} = Security.authorize(agent, "arbor://fs/read/doc/readme.md")
       # Sibling with shared prefix denied.
       assert {:error, _} = Security.authorize(agent, "arbor://fs/read/docs")
       assert {:error, _} = Security.authorize(agent, "arbor://fs/read/document")
+    end
+
+    test "an explicit /** grant DOES cover the subtree", %{agent_id: agent} do
+      {:ok, _} = Security.grant(principal: agent, resource: "arbor://fs/read/doc/**")
+
+      assert {:ok, :authorized} = Security.authorize(agent, "arbor://fs/read/doc/readme.md")
+      assert {:ok, :authorized} = Security.authorize(agent, "arbor://fs/read/doc/a/b/c")
+      # Still boundary-aware: a sibling prefix doesn't match.
+      assert {:error, _} = Security.authorize(agent, "arbor://fs/read/docs/x")
     end
   end
 
@@ -304,7 +316,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
     test "symlink inside authorized root pointing OUTSIDE is rejected",
          %{agent_id: agent, safe_dir: safe_dir} do
       # Grant a cap rooted at safe_dir.
-      cap_uri = "arbor://fs/read#{safe_dir}/"
+      cap_uri = "arbor://fs/read#{safe_dir}/**"
 
       {:ok, _} =
         Security.grant(
@@ -323,7 +335,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
 
     test "regular file inside authorized root still authorizes (no false positive)",
          %{agent_id: agent, safe_dir: safe_dir} do
-      cap_uri = "arbor://fs/read#{safe_dir}/"
+      cap_uri = "arbor://fs/read#{safe_dir}/**"
 
       {:ok, _} =
         Security.grant(
@@ -382,7 +394,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       redirect_path = Path.join(safe_dir, "redirect")
       File.ln_s!(outside_dir, redirect_path)
 
-      cap_uri = "arbor://fs/write#{safe_dir}/"
+      cap_uri = "arbor://fs/write#{safe_dir}/**"
 
       {:ok, _} =
         Security.grant(
@@ -406,7 +418,7 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       sub = Path.join(safe_dir, "real_subdir")
       File.mkdir_p!(sub)
 
-      cap_uri = "arbor://fs/write#{safe_dir}/"
+      cap_uri = "arbor://fs/write#{safe_dir}/**"
 
       {:ok, _} =
         Security.grant(
@@ -423,13 +435,14 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
     test "non-fs URI is unaffected by the FileGuard wiring",
          %{agent_id: agent} do
       # Confirm we didn't introduce a regression for shell / api caps.
+      # (Shell authorizes by exact command URI; FileGuard never runs for it.)
       {:ok, _} =
         Security.grant(
           principal: agent,
           resource: "arbor://shell/exec/git"
         )
 
-      assert {:ok, :authorized} = Security.authorize(agent, "arbor://shell/exec/git/status")
+      assert {:ok, :authorized} = Security.authorize(agent, "arbor://shell/exec/git")
     end
   end
 
