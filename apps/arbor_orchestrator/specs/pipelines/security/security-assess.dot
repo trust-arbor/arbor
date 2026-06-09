@@ -1,0 +1,27 @@
+// Security Sentinel — top-level assessment pipeline (Phase 1).
+//
+// Orchestrates the security assessment loop. Phase 1 invokes the static
+// detection sub-pipeline; the verify / scan-deps / runtime / remediate stages
+// (E1-E3 in the planned spec) slot in here as additional invoke nodes as they
+// land — that's why detection is a separate, reusable sub-pipeline.
+//
+//   mix arbor.pipeline.run specs/pipelines/security/security-assess.dot
+
+digraph security_assess {
+  graph [
+    goal="Assess Arbor's security posture (static detection; verify/deps/runtime to follow)",
+    label="Security: Assess"
+  ]
+
+  start [shape=Mdiamond]
+
+  detect [
+    type="graph.invoke",
+    graph_file="specs/pipelines/security/detect-static.dot"
+  ]
+
+  done [shape=Msquare]
+
+  start -> detect
+  detect -> done
+}
