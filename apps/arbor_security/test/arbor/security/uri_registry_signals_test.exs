@@ -37,4 +37,9 @@ defmodule Arbor.Security.UriRegistrySignalsTest do
   test "the composition dispatch capability URI is registered" do
     assert UriRegistry.registered?("arbor://orchestrator/map/dispatch")
   end
+
+  test "the gateway tool-use and status URIs are registered (authorized at call-site)" do
+    assert UriRegistry.registered?("arbor://tool/use/websearch")
+    assert UriRegistry.registered?("arbor://status/orchestrator/agent_x")
+  end
 end
