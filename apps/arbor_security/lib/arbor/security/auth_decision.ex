@@ -508,22 +508,45 @@ defmodule Arbor.Security.AuthDecision do
 
   defp trust_profile_gates?(principal_id, resource_uri) do
     # Runtime indirection — arbor_trust depends on arbor_security, not the
-    # other way around, so we can't import Trust.Policy directly.
-    policy = Arbor.Trust.Policy
+    # other way around, so we can't import Trust.Policy directly. The module
+    # is resolved via Config so tests can substitute a stub (and so a future
+    # deployment could swap the policy implementation).
+    policy = trust_policy_module()
 
     if Code.ensure_loaded?(policy) and function_exported?(policy, :confirmation_mode, 2) do
       case apply(policy, :confirmation_mode, [principal_id, resource_uri]) do
         :gated -> true
         :deny -> true
+        # An explicit :auto / :allow from the trust profile is a real
+        # "not gated" answer — safe to return false.
         _ -> false
       end
     else
-      false
+      # Trust subsystem not available. FAIL CLOSED: treat as gated so an
+      # unattended shell/governance action can't slip through while trust
+      # is down. Mirrors PolicyEnforcer.get_effective_mode/2 returning
+      # :block in the same situation. (H1 review fix, 2026-06-09 — the
+      # previous `false` here silently removed the approval gate.)
+      true
     end
   rescue
-    _ -> false
+    # Any crash consulting the trust profile must NOT downgrade a gated
+    # resource to ungated — fail closed. Same defect class as the
+    # 2026-04-07 shell-auto-exec regression.
+    _ -> true
   catch
-    :exit, _ -> false
+    :exit, _ -> true
+  end
+
+  # Trust.Policy module, overridable via config for tests / deployment swaps.
+  defp trust_policy_module do
+    config = Arbor.Security.Config
+
+    if Code.ensure_loaded?(config) and function_exported?(config, :trust_policy_module, 0) do
+      apply(config, :trust_policy_module, [])
+    else
+      Arbor.Trust.Policy
+    end
   end
 
   defp graduated?(principal_id, resource_uri) do

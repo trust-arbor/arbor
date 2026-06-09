@@ -350,6 +350,57 @@ defmodule Arbor.Trust.AuthDecisionTrustIntegrationTest do
     end
   end
 
+  describe "trust subsystem error fails CLOSED (H1 review fix, 2026-06-09)" do
+    # Security regression guard: if Trust.Policy.confirmation_mode/2 raises or
+    # the trust subsystem is unavailable, AuthDecision must treat the resource
+    # as GATED (require approval), never silently authorize. The pre-fix code
+    # returned `false` ("not gated") on error, which removed the operator
+    # approval gate for shell/governance whenever trust hiccupped — the same
+    # defect class as the 2026-04-07 shell-auto-exec regression.
+    #
+    # On HEAD~1 these assertions FAIL (the resource authorizes without
+    # approval); on HEAD they pass (it requires approval).
+
+    defmodule RaisingPolicy do
+      @moduledoc false
+      def confirmation_mode(_principal_id, _resource_uri),
+        do: raise("simulated trust subsystem failure")
+    end
+
+    setup do
+      prev = Application.get_env(:arbor_security, :trust_policy_module)
+      Application.put_env(:arbor_security, :trust_policy_module, RaisingPolicy)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:arbor_security, :trust_policy_module)
+          val -> Application.put_env(:arbor_security, :trust_policy_module, val)
+        end
+      end)
+
+      :ok
+    end
+
+    test "shell URI requires approval when the trust check raises", %{agent_id: agent_id} do
+      uri = "arbor://shell/exec/echo"
+      cap = grant_unconstrained_capability(agent_id, uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
+      assert {:ok, :requires_approval, ^cap, _} = AuthDecision.evaluate(auth, uri, :execute)
+    end
+
+    test "normally-auto URI also requires approval when the trust check raises",
+         %{agent_id: agent_id} do
+      # historian/query is :auto under a healthy trust profile. With trust
+      # raising we must NOT fall back to authorizing — fail closed.
+      uri = "arbor://historian/query"
+      cap = grant_unconstrained_capability(agent_id, uri)
+      auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
+
+      assert {:ok, :requires_approval, ^cap, _} = AuthDecision.evaluate(auth, uri, :query)
+    end
+  end
+
   # ============================================================================
   # Helpers
   # ============================================================================
