@@ -190,9 +190,11 @@ defmodule Arbor.Security.AuthDecision do
   # still used (legitimate test paths and replay scenarios rely on it), but
   # only after a debug log so partial outages are visible.
   defp find_matching_capability(%AuthContext{} = auth, resource_uri) do
-    if Code.ensure_loaded?(CapabilityStore) and
-         function_exported?(CapabilityStore, :find_authorizing, 2) do
-      case CapabilityStore.find_authorizing(auth.principal_id, resource_uri) do
+    store = capability_store_module()
+
+    if Code.ensure_loaded?(store) and
+         function_exported?(store, :find_authorizing, 2) do
+      case store.find_authorizing(auth.principal_id, resource_uri) do
         {:ok, cap} ->
           {:ok, cap, auth}
 
@@ -213,6 +215,18 @@ defmodule Arbor.Security.AuthDecision do
     :exit, _ -> capability_store_unavailable_fallback(auth, resource_uri)
   end
 
+  # CapabilityStore module, overridable via config for tests (e.g. to
+  # simulate a store outage and exercise the preloaded fallback).
+  defp capability_store_module do
+    config = Arbor.Security.Config
+
+    if Code.ensure_loaded?(config) and function_exported?(config, :capability_store_module, 0) do
+      apply(config, :capability_store_module, [])
+    else
+      CapabilityStore
+    end
+  end
+
   defp capability_store_unavailable_fallback(auth, resource_uri) do
     if strict_capability_store_mode?() do
       {:error, {:unauthorized, :capability_store_unavailable}, auth}
@@ -228,10 +242,24 @@ defmodule Arbor.Security.AuthDecision do
     strict_identity_mode?()
   end
 
-  # Fallback: search pre-loaded capabilities (no signature verification)
+  # Fallback (CapabilityStore unavailable, non-strict mode): search the
+  # pre-loaded AuthContext capabilities.
+  #
+  # M2 review fix (2026-06-09): this used to match on `uri_matches?` ALONE —
+  # no signature check, no expiry check. That made the store-outage fallback
+  # a signature bypass: any unsigned/expired cap in the AuthContext was
+  # honored. It now applies the SAME gates the primary path
+  # (CapabilityStore.find_authorizing) applies — capability validity AND
+  # signature acceptability — so the fallback can never honor a cap the
+  # store itself would reject. When `capability_signing_required` is true
+  # (dev/prod default) an unsigned preloaded cap is now refused.
   defp try_preloaded_capabilities(%AuthContext{capabilities: caps} = auth, resource_uri)
        when caps != [] do
-    matching = Enum.find(caps, fn cap -> uri_matches?(cap.resource_uri, resource_uri) end)
+    matching =
+      Enum.find(caps, fn cap ->
+        uri_matches?(cap.resource_uri, resource_uri) and
+          preloaded_cap_acceptable?(cap)
+      end)
 
     if matching do
       {:ok, matching, auth}
@@ -242,6 +270,42 @@ defmodule Arbor.Security.AuthDecision do
 
   defp try_preloaded_capabilities(auth, _resource_uri) do
     {:error, :unauthorized, auth}
+  end
+
+  # Mirror of CapabilityStore.signature_acceptable?/1 + Capability.valid?/1
+  # for the preloaded fallback. A signed cap must verify; an unsigned cap is
+  # accepted only when capability signing is not required.
+  defp preloaded_cap_acceptable?(cap) do
+    Arbor.Contracts.Security.Capability.valid?(cap) and signature_acceptable?(cap)
+  end
+
+  defp signature_acceptable?(cap) do
+    cap_mod = Arbor.Contracts.Security.Capability
+    authority = Arbor.Security.SystemAuthority
+    config = Arbor.Security.Config
+
+    signing_required? =
+      Code.ensure_loaded?(config) and
+        function_exported?(config, :capability_signing_required?, 0) and
+        apply(config, :capability_signing_required?, [])
+
+    cond do
+      apply(cap_mod, :signed?, [cap]) ->
+        Code.ensure_loaded?(authority) and
+          function_exported?(authority, :verify_capability_signature, 1) and
+          apply(authority, :verify_capability_signature, [cap]) == :ok
+
+      signing_required? ->
+        false
+
+      true ->
+        true
+    end
+  rescue
+    # Any failure resolving the verification path denies this preloaded cap.
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   defp try_policy_enforcer(principal_id, resource_uri) do
@@ -590,14 +654,19 @@ defmodule Arbor.Security.AuthDecision do
       cap_uri == resource_uri ->
         true
 
-      # Explicit wildcards
+      # Explicit wildcards. L1 review fix (2026-06-09): require a segment
+      # boundary so the prefix can't bleed across siblings, matching
+      # CapabilityStore.authorizes_resource?/2. Pre-fix, a cap
+      # `arbor://agent/profile/agent_X/**` (prefix `…/agent_X`) matched
+      # `…/agent_XEVIL/secret` because the bare `starts_with?` had no `/`
+      # boundary.
       String.ends_with?(cap_uri, "/**") ->
         prefix = String.trim_trailing(cap_uri, "/**")
-        String.starts_with?(resource_uri, prefix)
+        resource_uri == prefix or String.starts_with?(resource_uri, prefix <> "/")
 
       String.ends_with?(cap_uri, "/*") ->
         prefix = String.trim_trailing(cap_uri, "/*")
-        String.starts_with?(resource_uri, prefix)
+        resource_uri == prefix or String.starts_with?(resource_uri, prefix <> "/")
 
       # Prefix match: arbor://shell/exec/git matches arbor://shell/exec/git/status
       # (subpath access — matching CapabilityStore.find_authorizing behavior)

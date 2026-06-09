@@ -209,6 +209,19 @@ defmodule Arbor.Security.Config do
   end
 
   @doc """
+  The module used to look up authorizing capabilities.
+
+  Must implement `find_authorizing/2`. Defaults to
+  `Arbor.Security.CapabilityStore`. Overridable so tests can simulate a
+  store outage (a stub whose `find_authorizing/2` raises) and exercise the
+  preloaded-capability fallback path.
+  """
+  @spec capability_store_module() :: module()
+  def capability_store_module do
+    Application.get_env(@app, :capability_store_module, Arbor.Security.CapabilityStore)
+  end
+
+  @doc """
   The module used to verify capability delegation-chain signatures.
 
   Must implement `verify_delegation_chain/2`. Defaults to
