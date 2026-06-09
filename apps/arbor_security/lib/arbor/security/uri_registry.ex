@@ -138,6 +138,10 @@ defmodule Arbor.Security.UriRegistry do
     # Trust facade
     "arbor://trust/read",
     "arbor://trust/write",
+    # H13 auto-promote gate (arbor://trust/auto_promote/<target_agent_id>) — used
+    # by AutoPromoteGate to authorize trust-profile mutations. Registered after
+    # the Security Sentinel found it granted/authorized but unregistered.
+    "arbor://trust/auto_promote",
 
     # Agent identity and profile
     "arbor://agent/identity",
@@ -148,6 +152,9 @@ defmodule Arbor.Security.UriRegistry do
 
     # Orchestrator middleware gate (supplementary)
     "arbor://orchestrator/execute",
+    # Composition dispatch capability (arbor://orchestrator/map/dispatch) — binds
+    # the map/compose handler. Registered after the Security Sentinel found it.
+    "arbor://orchestrator/map",
 
     # Action namespace — for Jido actions whose argument space is
     # schema-bounded and therefore don't belong under the broader
