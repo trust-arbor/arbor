@@ -23,4 +23,18 @@ defmodule Arbor.Security.UriRegistrySignalsTest do
     assert UriRegistry.registered?("arbor://signals/subscribe/security")
     assert UriRegistry.registered?("arbor://signals/subscribe/identity")
   end
+
+  # Security Sentinel URI-inventory triage (2026-06-09): two action-backed /
+  # actively-authorized namespaces were granted/used but unregistered, so with
+  # enforcement on they were rejected as :unregistered_uri. These assert the gap
+  # is closed; they fail on revert of the registry additions.
+  test "the H13 auto-promote gate URI is registered" do
+    # registered?/1 reflects canonical membership regardless of the enforcement
+    # config (which is off in test), so it's the meaningful fail-on-revert check.
+    assert UriRegistry.registered?("arbor://trust/auto_promote/agent_target123")
+  end
+
+  test "the composition dispatch capability URI is registered" do
+    assert UriRegistry.registered?("arbor://orchestrator/map/dispatch")
+  end
 end
