@@ -144,6 +144,10 @@ defmodule Arbor.Security.UriRegistry do
     # Trust facade
     "arbor://trust/read",
     "arbor://trust/write",
+    # Governance — an always-locked security ceiling (auth_decision
+    # @always_locked_uri_classes; authority/profile_resolver ceilings pin it to
+    # :ask). A real namespace, not a stale grant. (Security Sentinel, 2026-06-09.)
+    "arbor://governance",
     # H13 auto-promote gate (arbor://trust/auto_promote/<target_agent_id>) — used
     # by AutoPromoteGate to authorize trust-profile mutations. Registered after
     # the Security Sentinel found it granted/authorized but unregistered.
