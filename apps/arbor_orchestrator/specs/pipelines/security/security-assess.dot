@@ -20,8 +20,14 @@ digraph security_assess {
     graph_file="specs/pipelines/security/detect-static.dot"
   ]
 
+  scan_deps [
+    type="graph.invoke",
+    graph_file="specs/pipelines/security/scan-deps.dot"
+  ]
+
   done [shape=Msquare]
 
   start -> detect
-  detect -> done
+  detect -> scan_deps
+  scan_deps -> done
 }

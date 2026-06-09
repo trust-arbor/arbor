@@ -1,0 +1,30 @@
+// Security Sentinel — dependency / supply-chain scan sub-pipeline (Phase 2).
+//
+// Runs the supply-chain dependency detector (mutable git deps + mix hex.audit
+// for retired packages) and records any findings. Reusable building block: the
+// top-level security-assess pipeline invokes it, and it can run standalone:
+//
+//   mix arbor.pipeline.run specs/pipelines/security/scan-deps.dot
+//
+// The same check rides the fast static pass (mutable-git-deps only) via
+// `mix arbor.security.scan`; this pipeline additionally runs hex.audit.
+
+digraph security_scan_deps {
+  graph [
+    goal="Scan dependencies for supply-chain risk and record findings",
+    label="Security: Scan deps"
+  ]
+
+  start [shape=Mdiamond]
+
+  scan [
+    type="exec",
+    target="action",
+    action="security.run_dependency_scan"
+  ]
+
+  done [shape=Msquare]
+
+  start -> scan
+  scan -> done
+}
