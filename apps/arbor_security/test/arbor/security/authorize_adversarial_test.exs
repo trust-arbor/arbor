@@ -432,4 +432,64 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
       assert {:ok, :authorized} = Security.authorize(agent, "arbor://shell/exec/git/status")
     end
   end
+
+  # ── FileGuard fails CLOSED on exception (H2 review fix, 2026-06-09) ──
+  describe "FileGuard exception denies (security regression)" do
+    # maybe_check_file_guard/4 used to `rescue _ -> :ok`, so a crash in
+    # path validation silently SKIPPED the path-binding check and the
+    # request authorized. In the explicit-:file_path branch,
+    # FileGuard.authorize/3 IS the binding of a bare arbor://fs/<op> cap to
+    # a concrete path — swallowing its exception would let a broad fs cap
+    # touch any path. The fix fails closed.
+    #
+    # On HEAD~1 these assertions FAIL ({:ok, :authorized}); on HEAD the
+    # request is denied with {:file_guard_error, _}.
+
+    defmodule RaisingFileGuard do
+      @moduledoc false
+      def authorize(_agent, _path, _op), do: raise("simulated FileGuard failure")
+
+      def normalize_uri_path_for_capability(_uri, _cap),
+        do: raise("simulated FileGuard failure")
+    end
+
+    setup do
+      prev = Application.get_env(:arbor_security, :file_guard_module)
+      Application.put_env(:arbor_security, :file_guard_module, RaisingFileGuard)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:arbor_security, :file_guard_module)
+          val -> Application.put_env(:arbor_security, :file_guard_module, val)
+        end
+      end)
+
+      :ok
+    end
+
+    test "explicit file_path + FileGuard raising → denied, not authorized",
+         %{agent_id: agent} do
+      # Agent holds a read cap covering the path. fs/read isn't on the
+      # askable ceiling, so it reaches handle_authorized → file guard.
+      {:ok, _} =
+        Security.grant(
+          principal: agent,
+          resource: "arbor://fs/read/tmp/fgfail/**"
+        )
+
+      result =
+        Security.authorize(agent, "arbor://fs/read/tmp/fgfail/secret.txt", :execute,
+          file_path: "/tmp/fgfail/secret.txt"
+        )
+
+      refute match?({:ok, :authorized}, result),
+             "FileGuard exception must NOT authorize (fail-open); got #{inspect(result)}"
+
+      refute match?({:ok, :authorized, _}, result),
+             "FileGuard exception must NOT authorize (fail-open); got #{inspect(result)}"
+
+      assert match?({:error, {:file_guard_error, _}}, result),
+             "expected fail-closed file_guard_error; got #{inspect(result)}"
+    end
+  end
 end

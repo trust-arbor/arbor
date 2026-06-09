@@ -209,6 +209,19 @@ defmodule Arbor.Security.Config do
   end
 
   @doc """
+  The module used for capability-bound filesystem path checks.
+
+  Must implement `authorize/3` and `normalize_uri_path_for_capability/2`.
+  Defaults to `Arbor.Security.FileGuard`. Overridable so tests can
+  substitute a stub (e.g. one that raises, to prove the auth chain fails
+  closed when path validation is unavailable).
+  """
+  @spec file_guard_module() :: module()
+  def file_guard_module do
+    Application.get_env(@app, :file_guard_module, Arbor.Security.FileGuard)
+  end
+
+  @doc """
   The module used to resolve trust-profile confirmation modes.
 
   Must implement `confirmation_mode/2` returning `:gated | :deny | :auto |
