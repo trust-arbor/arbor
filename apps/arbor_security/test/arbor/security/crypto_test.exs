@@ -54,6 +54,37 @@ defmodule Arbor.Security.CryptoTest do
 
       refute Crypto.verify(message, tampered, public_key)
     end
+
+    test "pure Ed25519 :none digest — pinned cross-version vector (C9 guard)" do
+      # `Crypto.sign/2` uses the `:none` digest argument for pure Ed25519
+      # (RFC 8032 hashes internally). OTP has historically ignored the digest
+      # parameter for eddsa, so on the current OTP `:none` and `:sha512` yield
+      # identical bytes — which is why the C9 swap is no-migration. This pins
+      # a deterministic vector (fixed seed → fixed signature) so that if a
+      # future OTP ever changes eddsa to honor a prehash digest, the signature
+      # changes and THIS TEST FAILS, surfacing the drift instead of silently
+      # breaking interop / verification of stored signatures.
+      seed = :binary.copy(<<0x42>>, 32)
+      {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519, seed)
+      message = "arbor-ed25519-pin-v1"
+
+      expected_pub =
+        Base.decode16!(
+          "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+          case: :lower
+        )
+
+      expected_sig =
+        Base.decode16!(
+          "afd462aa718cee97b480ac869a9d6c15f3db917023d6b73e87d5cf45cbeb90a2" <>
+            "2db6d4c21de0309ce35d092e10e87fde65ce2dc400b70be4fc1dc10a797a2707",
+          case: :lower
+        )
+
+      assert public_key == expected_pub
+      assert Crypto.sign(message, private_key) == expected_sig
+      assert Crypto.verify(message, expected_sig, public_key)
+    end
   end
 
   describe "generate_encryption_keypair/0" do

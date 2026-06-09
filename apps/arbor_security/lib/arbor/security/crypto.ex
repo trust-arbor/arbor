@@ -44,7 +44,13 @@ defmodule Arbor.Security.Crypto do
   """
   @spec sign(binary(), binary()) :: binary()
   def sign(message, private_key) when is_binary(message) and is_binary(private_key) do
-    :crypto.sign(:eddsa, :sha512, message, [private_key, :ed25519])
+    # `:none` is the correct digest argument for pure Ed25519 (RFC 8032,
+    # which hashes internally). The previous `:sha512` was version-dependent:
+    # OTP's eddsa has historically ignored the digest parameter, but relying
+    # on that risks prehash semantics on some OTP release and breaks interop
+    # with standard Ed25519 verifiers. On our OTP it is signature-identical
+    # to `:sha512`, so this is a no-migration swap. (Crypto review C9.)
+    :crypto.sign(:eddsa, :none, message, [private_key, :ed25519])
   end
 
   @doc """
@@ -55,7 +61,9 @@ defmodule Arbor.Security.Crypto do
   @spec verify(binary(), binary(), binary()) :: boolean()
   def verify(message, signature, public_key)
       when is_binary(message) and is_binary(signature) and is_binary(public_key) do
-    :crypto.verify(:eddsa, :sha512, message, signature, [public_key, :ed25519])
+    # `:none` — pure Ed25519. See sign/2. Verify must use the same digest
+    # argument as sign. (Crypto review C9.)
+    :crypto.verify(:eddsa, :none, message, signature, [public_key, :ed25519])
   end
 
   # -------------------------------------------------------------------
