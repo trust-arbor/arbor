@@ -209,6 +209,25 @@ defmodule Arbor.Security.Config do
   end
 
   @doc """
+  The registration-authorization policy module (C10), or `nil`.
+
+  When set, `Identity.Registry.register/2` calls
+  `policy.authorize_registration(identity, opts) :: :ok | {:error, reason}`
+  before creating a NEW identity — the chokepoint for gating who may mint
+  identities once an external registration path exists (e.g. require a signed
+  enrollment token or operator approval).
+
+  Default `nil` (allow): every current registration caller is internal
+  (agent lifecycle, scheduler) and trusted. The self-certifying check
+  (`agent_id == hash(pubkey)`) runs regardless of policy and a configured
+  policy that crashes fails closed.
+  """
+  @spec registration_policy() :: module() | nil
+  def registration_policy do
+    Application.get_env(@app, :registration_policy, nil)
+  end
+
+  @doc """
   The module used to look up authorizing capabilities.
 
   Must implement `find_authorizing/2`. Defaults to
