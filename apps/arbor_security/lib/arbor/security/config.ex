@@ -209,6 +209,19 @@ defmodule Arbor.Security.Config do
   end
 
   @doc """
+  The module used to resolve trust-profile confirmation modes.
+
+  Must implement `confirmation_mode/2` returning `:gated | :deny | :auto |
+  :allow`. Defaults to `Arbor.Trust.Policy`. Overridable so tests can
+  substitute a stub (e.g. one that raises, to prove `AuthDecision` fails
+  closed when the trust subsystem is unavailable).
+  """
+  @spec trust_policy_module() :: module()
+  def trust_policy_module do
+    Application.get_env(@app, :trust_policy_module, Arbor.Trust.Policy)
+  end
+
+  @doc """
   Whether strict identity mode is enabled.
 
   When `true`, unknown (unregistered) identities are rejected during
