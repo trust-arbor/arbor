@@ -42,4 +42,10 @@ defmodule Arbor.Security.UriRegistrySignalsTest do
     assert UriRegistry.registered?("arbor://tool/use/websearch")
     assert UriRegistry.registered?("arbor://status/orchestrator/agent_x")
   end
+
+  test "orchestrator handler + pipeline capability URIs are registered (live infra)" do
+    assert UriRegistry.registered?("arbor://handler/compute/llm")
+    assert UriRegistry.registered?("arbor://handler/read/file/read")
+    assert UriRegistry.registered?("arbor://pipeline/run")
+  end
 end
