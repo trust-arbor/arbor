@@ -33,12 +33,15 @@ defmodule Arbor.Trust.PolicyTest do
       assert Policy.min_tier_for("arbor://code/write/self/impl/*") == :trusted
     end
 
-    test "install requires veteran" do
-      assert Policy.min_tier_for("arbor://install/execute/self") == :veteran
-    end
-
-    test "capability management requires autonomous" do
-      assert Policy.min_tier_for("arbor://capability/request/self/*") == :autonomous
+    # The agent self-management capabilities (install/capability/roadmap/git/
+    # docs/test/config/governance/activity/extension *_self_*) were removed from
+    # the tier templates as stale design (the 5-tier model is being deprecated in
+    # favor of per-resource trust rules; they were unregistered and authorized
+    # nowhere). min_tier_for now returns nil for them.
+    test "removed self-management capabilities return nil" do
+      assert Policy.min_tier_for("arbor://install/execute/self") == nil
+      assert Policy.min_tier_for("arbor://capability/request/self/*") == nil
+      assert Policy.min_tier_for("arbor://roadmap/write/self/*") == nil
     end
 
     test "unknown URI returns nil" do
@@ -169,7 +172,9 @@ defmodule Arbor.Trust.PolicyTest do
       assert Policy.allowed?(agent_id, "arbor://code/read/self/*")
     end
 
-    test "returns true for cautious shell exec (ask mode is allowed but gated)", %{agent_id: agent_id} do
+    test "returns true for cautious shell exec (ask mode is allowed but gated)", %{
+      agent_id: agent_id
+    } do
       create_profile_with_preset(agent_id, :cautious)
       # Cautious: shell/exec => :ask (longest prefix match), which is allowed but gated
       assert Policy.allowed?(agent_id, "arbor://shell/exec/ls")
@@ -213,7 +218,9 @@ defmodule Arbor.Trust.PolicyTest do
       assert Policy.requires_approval?(agent_id, "arbor://fs/write") == true
     end
 
-    test "returns true for :ask mode on shell exec (cautious allows exec with approval)", %{agent_id: agent_id} do
+    test "returns true for :ask mode on shell exec (cautious allows exec with approval)", %{
+      agent_id: agent_id
+    } do
       create_profile_with_preset(agent_id, :cautious)
       # cautious: shell/exec => :ask (longest prefix), requires approval
       assert Policy.requires_approval?(agent_id, "arbor://shell/exec/rm") == true

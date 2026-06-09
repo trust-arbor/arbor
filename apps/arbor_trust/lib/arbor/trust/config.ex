@@ -154,10 +154,6 @@ defmodule Arbor.Trust.Config do
       %{resource_uri: "arbor://code/write/self/sandbox/*", constraints: %{rate_limit: 10}},
       %{resource_uri: "arbor://code/compile/self/sandbox", constraints: %{}},
       %{resource_uri: "arbor://consensus/propose/self", constraints: %{rate_limit: 20}},
-      %{resource_uri: "arbor://roadmap/read/self/*", constraints: %{}},
-      %{resource_uri: "arbor://roadmap/write/self/brainstorming/*", constraints: %{}},
-      %{resource_uri: "arbor://git/read/self/log", constraints: %{}},
-      %{resource_uri: "arbor://activity/emit/self", constraints: %{rate_limit: 100}},
       %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}}
     ],
     trusted: [
@@ -166,17 +162,7 @@ defmodule Arbor.Trust.Config do
       %{resource_uri: "arbor://code/compile/self/sandbox", constraints: %{}},
       %{resource_uri: "arbor://code/write/self/impl/*", constraints: %{requires_approval: true}},
       %{resource_uri: "arbor://code/reload/self/*", constraints: %{requires_approval: true}},
-      %{resource_uri: "arbor://extension/request/self/*", constraints: %{}},
       %{resource_uri: "arbor://consensus/propose/self", constraints: %{rate_limit: 50}},
-      %{resource_uri: "arbor://roadmap/read/self/*", constraints: %{}},
-      %{resource_uri: "arbor://roadmap/write/self/*", constraints: %{}},
-      %{resource_uri: "arbor://roadmap/move/self/discarded", constraints: %{rate_limit: 20}},
-      %{resource_uri: "arbor://roadmap/write/self/discarded/index", constraints: %{rate_limit: 20}},
-      %{resource_uri: "arbor://git/read/self/log", constraints: %{}},
-      %{resource_uri: "arbor://activity/emit/self", constraints: %{rate_limit: 100}},
-      %{resource_uri: "arbor://config/write/self/*", constraints: %{requires_approval: true}},
-      %{resource_uri: "arbor://docs/write/self/*", constraints: %{}},
-      %{resource_uri: "arbor://test/write/self/*", constraints: %{}},
       %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}}
     ],
     veteran: [
@@ -186,18 +172,7 @@ defmodule Arbor.Trust.Config do
       %{resource_uri: "arbor://code/write/self/impl/*", constraints: %{}},
       %{resource_uri: "arbor://code/reload/self/*", constraints: %{}},
       %{resource_uri: "arbor://code/compile/self/impl", constraints: %{}},
-      %{resource_uri: "arbor://extension/request/self/*", constraints: %{}},
       %{resource_uri: "arbor://consensus/propose/self", constraints: %{}},
-      %{resource_uri: "arbor://roadmap/read/self/*", constraints: %{}},
-      %{resource_uri: "arbor://roadmap/write/self/*", constraints: %{}},
-      %{resource_uri: "arbor://roadmap/move/self/discarded", constraints: %{}},
-      %{resource_uri: "arbor://roadmap/write/self/discarded/index", constraints: %{}},
-      %{resource_uri: "arbor://git/read/self/log", constraints: %{}},
-      %{resource_uri: "arbor://activity/emit/self", constraints: %{}},
-      %{resource_uri: "arbor://config/write/self/*", constraints: %{}},
-      %{resource_uri: "arbor://docs/write/self/*", constraints: %{}},
-      %{resource_uri: "arbor://test/write/self/*", constraints: %{}},
-      %{resource_uri: "arbor://install/execute/self", constraints: %{requires_approval: true}},
       %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}}
     ],
     autonomous: [
@@ -207,21 +182,7 @@ defmodule Arbor.Trust.Config do
       %{resource_uri: "arbor://code/write/self/impl/*", constraints: %{}},
       %{resource_uri: "arbor://code/reload/self/*", constraints: %{}},
       %{resource_uri: "arbor://code/compile/self/impl", constraints: %{}},
-      %{resource_uri: "arbor://extension/request/self/*", constraints: %{}},
-      %{resource_uri: "arbor://capability/request/self/*", constraints: %{}},
-      %{resource_uri: "arbor://capability/delegate/self/*", constraints: %{}},
       %{resource_uri: "arbor://consensus/propose/self", constraints: %{}},
-      %{resource_uri: "arbor://roadmap/read/self/*", constraints: %{}},
-      %{resource_uri: "arbor://roadmap/write/self/*", constraints: %{}},
-      %{resource_uri: "arbor://roadmap/move/self/discarded", constraints: %{}},
-      %{resource_uri: "arbor://roadmap/write/self/discarded/index", constraints: %{}},
-      %{resource_uri: "arbor://git/read/self/log", constraints: %{}},
-      %{resource_uri: "arbor://activity/emit/self", constraints: %{}},
-      %{resource_uri: "arbor://config/write/self/*", constraints: %{}},
-      %{resource_uri: "arbor://docs/write/self/*", constraints: %{}},
-      %{resource_uri: "arbor://test/write/self/*", constraints: %{}},
-      %{resource_uri: "arbor://install/execute/self", constraints: %{}},
-      %{resource_uri: "arbor://governance/change/self/*", constraints: %{requires_approval: true}},
       %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}}
     ]
   }
@@ -512,6 +473,7 @@ defmodule Arbor.Trust.Config do
   def compare_tiers(tier_a, tier_b) do
     a = tier_index(tier_a)
     b = tier_index(tier_b)
+
     cond do
       a < b -> :lt
       a > b -> :gt
