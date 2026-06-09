@@ -188,56 +188,105 @@ defmodule Arbor.Security.Crypto do
   # Sealed Messages — ECDH + HKDF + AES-GCM
   # -------------------------------------------------------------------
 
-  @seal_info "arbor-seal-v1"
+  # Bumped v1 -> v2 for the ECIES redesign (C2). The label is HKDF info, so
+  # it domain-separates v2 sealed messages from any v1 material.
+  @seal_info "arbor-seal-v2"
 
   @doc """
-  Seal a message for a specific recipient using ECDH + AES-256-GCM.
+  Seal a message for a recipient using **ECIES** (C2 review redesign).
 
-  1. Derives a shared secret via X25519 ECDH
-  2. Derives an encryption key via HKDF-SHA256
-  3. Encrypts with AES-256-GCM
+  Improvements over the old static-static ECDH:
 
-  Returns a sealed message map containing the ciphertext, IV, tag, and
-  the sender's public key (so the recipient can derive the same shared secret).
+    * **Forward secrecy** — a fresh ephemeral X25519 keypair is generated per
+      message and discarded. Compromise of either party's *static* key does
+      NOT decrypt previously recorded traffic.
+    * **Sender authentication** — an Ed25519 signature over the envelope binds
+      the message to the sender's identity. The old scheme let any party seal
+      a message and claim any sender; here the recipient verifies the
+      signature against the sender's known signing key.
+
+  Arguments:
+    * `plaintext`            — message bytes
+    * `recipient_public`     — recipient's **X25519** public key (32 bytes)
+    * `sender_sign_private`  — sender's **Ed25519** signing private key. NOT an
+      X25519 key — the ephemeral key supplies the ECDH secret, so the sender's
+      static encryption key is no longer involved.
+
+  Returns a sealed map. Decrypt with `unseal/3` and the sender's Ed25519
+  PUBLIC key.
+
+  Note: this is single-message AEAD with FS + sender auth — good for key/
+  channel setup. For ongoing conversations use `DoubleRatchet`, which adds
+  per-message ratcheting and replay handling.
   """
   @spec seal(binary(), binary(), binary()) :: map()
-  def seal(plaintext, recipient_public, sender_private)
+  def seal(plaintext, recipient_public, sender_sign_private)
       when is_binary(plaintext) and byte_size(recipient_public) == 32 and
-             byte_size(sender_private) == 32 do
-    shared_secret = derive_shared_secret(sender_private, recipient_public)
+             is_binary(sender_sign_private) do
+    {ephemeral_public, ephemeral_private} = generate_encryption_keypair()
+    shared_secret = derive_shared_secret(ephemeral_private, recipient_public)
     key = derive_key(shared_secret, @seal_info)
     {ciphertext, iv, tag} = encrypt(plaintext, key)
 
-    # Derive sender public from the ECDH curve (X25519)
-    # We need the sender's public key so the recipient can re-derive the shared secret.
-    # The caller must provide the full keypair context. For convenience, we compute it.
-    {sender_public, _} = :crypto.generate_key(:ecdh, :x25519, sender_private)
+    # Sign the (non-secret) envelope so the recipient can authenticate the
+    # sender. Covers the ephemeral pubkey too, so an attacker can't swap in
+    # their own ephemeral key to redirect the ECDH.
+    signature = sign(ephemeral_public <> iv <> tag <> ciphertext, sender_sign_private)
 
     %{
-      ciphertext: ciphertext,
+      v: 2,
+      ephemeral_public: ephemeral_public,
       iv: iv,
       tag: tag,
-      sender_public: sender_public
+      ciphertext: ciphertext,
+      signature: signature
     }
   end
 
   @doc """
-  Unseal a message from a sender using ECDH + AES-256-GCM.
+  Unseal a message sealed with `seal/3`.
 
-  The sealed message must contain `sender_public`, `ciphertext`, `iv`, and `tag`.
+  Verifies the sender's Ed25519 signature over the envelope BEFORE deriving
+  the decryption key — an unauthenticated message is rejected without any
+  decryption attempt.
 
-  Returns `{:ok, plaintext}` or `{:error, :decryption_failed}`.
+  Arguments:
+    * `sealed`              — the map from `seal/3`
+    * `recipient_private`   — recipient's **X25519** private key (32 bytes)
+    * `sender_sign_public`  — sender's **Ed25519** public key. Look this up
+      from the identity registry / peer record; verifying against it is what
+      binds the message to a known sender.
+
+  Returns `{:ok, plaintext}`, `{:error, :bad_signature}`, or
+  `{:error, :decryption_failed}` (or `{:error, :malformed_sealed}`).
   """
-  @spec unseal(map(), binary()) :: {:ok, binary()} | {:error, :decryption_failed}
+  @spec unseal(map(), binary(), binary()) ::
+          {:ok, binary()}
+          | {:error, :bad_signature | :decryption_failed | :malformed_sealed}
   def unseal(
-        %{ciphertext: ciphertext, iv: iv, tag: tag, sender_public: sender_public},
-        recipient_private
+        %{
+          v: 2,
+          ephemeral_public: ephemeral_public,
+          iv: iv,
+          tag: tag,
+          ciphertext: ciphertext,
+          signature: signature
+        },
+        recipient_private,
+        sender_sign_public
       )
-      when byte_size(recipient_private) == 32 and byte_size(sender_public) == 32 do
-    shared_secret = derive_shared_secret(recipient_private, sender_public)
-    key = derive_key(shared_secret, @seal_info)
-    decrypt(ciphertext, key, iv, tag)
+      when byte_size(recipient_private) == 32 and byte_size(ephemeral_public) == 32 and
+             is_binary(sender_sign_public) do
+    if verify(ephemeral_public <> iv <> tag <> ciphertext, signature, sender_sign_public) do
+      shared_secret = derive_shared_secret(recipient_private, ephemeral_public)
+      key = derive_key(shared_secret, @seal_info)
+      decrypt(ciphertext, key, iv, tag)
+    else
+      {:error, :bad_signature}
+    end
   end
+
+  def unseal(_sealed, _recipient_private, _sender_sign_public), do: {:error, :malformed_sealed}
 
   # -------------------------------------------------------------------
   # Hashing & ID Derivation

@@ -165,7 +165,11 @@ defmodule Arbor.Security.Keychain do
 
         # Store session in peer entry
         updated_peer = %{peer | ratchet_session: session}
-        updated_keychain = %{keychain | peers: Map.put(keychain.peers, peer_agent_id, updated_peer)}
+
+        updated_keychain = %{
+          keychain
+          | peers: Map.put(keychain.peers, peer_agent_id, updated_peer)
+        }
 
         {:ok, updated_keychain}
 
@@ -201,7 +205,11 @@ defmodule Arbor.Security.Keychain do
 
         # Store session in peer entry
         updated_peer = %{peer | ratchet_session: session}
-        updated_keychain = %{keychain | peers: Map.put(keychain.peers, peer_agent_id, updated_peer)}
+
+        updated_keychain = %{
+          keychain
+          | peers: Map.put(keychain.peers, peer_agent_id, updated_peer)
+        }
 
         {:ok, updated_keychain}
 
@@ -300,14 +308,20 @@ defmodule Arbor.Security.Keychain do
 
         # Update session in keychain
         updated_peer = %{peer | ratchet_session: updated_session}
-        updated_keychain = %{keychain | peers: Map.put(keychain.peers, peer_agent_id, updated_peer)}
+
+        updated_keychain = %{
+          keychain
+          | peers: Map.put(keychain.peers, peer_agent_id, updated_peer)
+        }
 
         {:ok, sealed, updated_keychain}
 
       {:ok, peer} ->
-        # Fall back to one-shot ECDH
+        # Fall back to one-shot ECIES (forward-secret + sender-authenticated).
+        # Seal to the peer's X25519 key; SIGN with our Ed25519 signing key so
+        # the peer can authenticate that the message came from us.
         sealed =
-          Crypto.seal(plaintext, peer.encryption_public, keychain.encryption_keypair.private)
+          Crypto.seal(plaintext, peer.encryption_public, keychain.signing_keypair.private)
 
         {:ok, sealed}
 
@@ -336,8 +350,9 @@ defmodule Arbor.Security.Keychain do
           # Ratchet-encrypted message
           unseal_ratchet_message(keychain, sender_agent_id, peer, sealed)
         else
-          # One-shot ECDH
-          Crypto.unseal(sealed, keychain.encryption_keypair.private)
+          # One-shot ECIES — verify the sender's Ed25519 signature (using the
+          # peer's stored signing public key) and decrypt with our X25519 key.
+          Crypto.unseal(sealed, keychain.encryption_keypair.private, peer.signing_public)
         end
 
       {:error, :unknown_peer} = error ->
@@ -355,7 +370,12 @@ defmodule Arbor.Security.Keychain do
       case DoubleRatchet.decrypt(session, sealed.header, sealed.ciphertext) do
         {:ok, updated_session, plaintext} ->
           updated_peer = %{peer | ratchet_session: updated_session}
-          updated_keychain = %{keychain | peers: Map.put(keychain.peers, sender_agent_id, updated_peer)}
+
+          updated_keychain = %{
+            keychain
+            | peers: Map.put(keychain.peers, sender_agent_id, updated_peer)
+          }
+
           {:ok, plaintext, updated_keychain}
 
         {:error, _reason} = error ->
@@ -536,7 +556,11 @@ defmodule Arbor.Security.Keychain do
   defp verify_version(@keychain_version), do: :ok
   defp verify_version(_), do: {:error, :unsupported_version}
 
-  defp verify_and_extract_payload(%{"payload" => inner_json, "hmac" => hmac_b64}, encryption_key, _raw) do
+  defp verify_and_extract_payload(
+         %{"payload" => inner_json, "hmac" => hmac_b64},
+         encryption_key,
+         _raw
+       ) do
     with {:ok, expected_hmac} <- Base.decode64(hmac_b64) do
       actual_hmac = :crypto.mac(:hmac, :sha256, encryption_key, inner_json)
 
@@ -576,6 +600,7 @@ defmodule Arbor.Security.Keychain do
   end
 
   defp build_peers(nil, _ratchet_sessions), do: {:ok, %{}}
+
   defp build_peers(peers_data, ratchet_sessions) when is_map(peers_data) do
     ratchet_sessions = ratchet_sessions || %{}
 
@@ -606,7 +631,9 @@ defmodule Arbor.Security.Keychain do
 
   defp restore_ratchet_session(ratchet_sessions, id) do
     case Map.get(ratchet_sessions, id) do
-      nil -> nil
+      nil ->
+        nil
+
       session_data ->
         case DoubleRatchet.from_map(session_data) do
           {:ok, session} -> session
@@ -616,6 +643,7 @@ defmodule Arbor.Security.Keychain do
   end
 
   defp build_channel_keys(nil), do: {:ok, %{}}
+
   defp build_channel_keys(keys_data) when is_map(keys_data) do
     result =
       Enum.reduce_while(keys_data, {:ok, %{}}, fn {id, encoded}, {:ok, acc} ->

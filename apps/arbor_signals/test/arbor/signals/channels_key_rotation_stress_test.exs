@@ -39,16 +39,20 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
       end
     end
 
-    def seal(plaintext, _recipient_public, _sender_private) do
+    # ECIES mock (C2): seal/3 takes sender signing private; unseal/3 takes
+    # sender signing public. Round-trips plaintext for channel-logic testing.
+    def seal(plaintext, _recipient_public, _sender_sign_private) do
       %{
+        v: 2,
         ciphertext: plaintext,
         iv: <<0::96>>,
         tag: <<0::128>>,
-        sender_public: <<0::256>>
+        ephemeral_public: <<0::256>>,
+        signature: <<0::512>>
       }
     end
 
-    def unseal(%{ciphertext: plaintext}, _recipient_private) do
+    def unseal(%{ciphertext: plaintext}, _recipient_private, _sender_sign_public) do
       {:ok, plaintext}
     end
   end
@@ -63,6 +67,9 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
     def lookup_encryption_key(_agent_id) do
       {:error, :not_found}
     end
+
+    def lookup("agent_" <> _rest = _agent_id), do: {:ok, :crypto.strong_rand_bytes(32)}
+    def lookup(_agent_id), do: {:error, :not_found}
   end
 
   @stress_iterations 3
@@ -101,17 +108,25 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
     Enum.each(member_ids, fn member_id ->
       sender_keychain = %{
         agent_id: creator_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, invitation} = Channels.invite(channel.id, member_id, sender_keychain)
 
       recipient_keychain = %{
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, _ch, _key} =
-        Channels.accept_invitation(channel.id, member_id, invitation.sealed_key, recipient_keychain)
+        Channels.accept_invitation(
+          channel.id,
+          member_id,
+          invitation.inviter_id,
+          invitation.sealed_key,
+          recipient_keychain
+        )
     end)
 
     {channel.id, key}
@@ -125,7 +140,10 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
     test "all concurrent sends succeed on same channel" do
       Enum.each(1..@stress_iterations, fn _iteration ->
         creator = "agent_creator_#{:rand.uniform(100_000)}"
-        members = for i <- 1..@concurrent_senders, do: "agent_member_#{i}_#{:rand.uniform(100_000)}"
+
+        members =
+          for i <- 1..@concurrent_senders, do: "agent_member_#{i}_#{:rand.uniform(100_000)}"
+
         {channel_id, _key} = create_channel_with_members(creator, members)
 
         # All members send concurrently
@@ -243,7 +261,8 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
 
       # Channel should still be functional
       {:ok, channel} = Channels.get(channel_id)
-      assert channel.key_version == 11  # initial + 10 rotations
+      # initial + 10 rotations
+      assert channel.key_version == 11
 
       # Sends still work after many rotations
       assert :ok =
@@ -275,7 +294,8 @@ defmodule Arbor.Signals.ChannelsKeyRotationStressTest do
 
       # Final key version should reflect all rotations
       {:ok, channel} = Channels.get(channel_id)
-      assert channel.key_version == 6  # initial + 5 rotations
+      # initial + 5 rotations
+      assert channel.key_version == 6
     end
   end
 

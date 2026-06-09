@@ -225,44 +225,75 @@ defmodule Arbor.Security.CryptoTest do
     end
   end
 
-  describe "seal/3 and unseal/2" do
-    test "round-trip between two parties" do
-      {alice_pub, alice_priv} = Crypto.generate_encryption_keypair()
-      {bob_pub, bob_priv} = Crypto.generate_encryption_keypair()
+  describe "seal/3 and unseal/3 (ECIES — C2)" do
+    # Alice is the SENDER: she signs with her Ed25519 key. Bob is the
+    # RECIPIENT: he holds the X25519 keypair the message is sealed to.
+    setup do
+      {alice_sign_pub, alice_sign_priv} = Crypto.generate_keypair()
+      {bob_enc_pub, bob_enc_priv} = Crypto.generate_encryption_keypair()
 
+      %{
+        alice_sign_pub: alice_sign_pub,
+        alice_sign_priv: alice_sign_priv,
+        bob_enc_pub: bob_enc_pub,
+        bob_enc_priv: bob_enc_priv
+      }
+    end
+
+    test "round-trip: recipient with the sender's signing pubkey decrypts", ctx do
       plaintext = "hello bob, from alice"
+      sealed = Crypto.seal(plaintext, ctx.bob_enc_pub, ctx.alice_sign_priv)
 
-      sealed = Crypto.seal(plaintext, bob_pub, alice_priv)
+      assert sealed.v == 2
+      assert byte_size(sealed.ephemeral_public) == 32
+      assert is_binary(sealed.signature)
 
-      assert is_binary(sealed.ciphertext)
-      assert is_binary(sealed.iv)
-      assert is_binary(sealed.tag)
-      assert is_binary(sealed.sender_public)
-      assert sealed.sender_public == alice_pub
-
-      assert {:ok, ^plaintext} = Crypto.unseal(sealed, bob_priv)
+      assert {:ok, ^plaintext} =
+               Crypto.unseal(sealed, ctx.bob_enc_priv, ctx.alice_sign_pub)
     end
 
-    test "fails with wrong recipient private key" do
-      {_alice_pub, alice_priv} = Crypto.generate_encryption_keypair()
-      {bob_pub, _bob_priv} = Crypto.generate_encryption_keypair()
+    test "forward secrecy: a fresh ephemeral key per message, not the sender's static key",
+         ctx do
+      s1 = Crypto.seal("same message", ctx.bob_enc_pub, ctx.alice_sign_priv)
+      s2 = Crypto.seal("same message", ctx.bob_enc_pub, ctx.alice_sign_priv)
+
+      # Distinct ephemeral keys + ciphertexts each time.
+      refute s1.ephemeral_public == s2.ephemeral_public
+      refute s1.ciphertext == s2.ciphertext
+      # The ephemeral key is NOT the sender's signing key.
+      refute s1.ephemeral_public == ctx.alice_sign_pub
+    end
+
+    test "sender authentication: a forged sender (wrong signing key) is rejected", ctx do
+      {_mallory_pub, mallory_priv} = Crypto.generate_keypair()
+      # Mallory seals a message but the recipient expects Alice's signature.
+      sealed = Crypto.seal("trust me", ctx.bob_enc_pub, mallory_priv)
+
+      assert {:error, :bad_signature} =
+               Crypto.unseal(sealed, ctx.bob_enc_priv, ctx.alice_sign_pub)
+    end
+
+    test "tampering the ciphertext is rejected at the signature gate", ctx do
+      sealed = Crypto.seal("secret", ctx.bob_enc_pub, ctx.alice_sign_priv)
+      tampered = %{sealed | ciphertext: :crypto.strong_rand_bytes(byte_size(sealed.ciphertext))}
+
+      assert {:error, :bad_signature} =
+               Crypto.unseal(tampered, ctx.bob_enc_priv, ctx.alice_sign_pub)
+    end
+
+    test "wrong recipient key fails to decrypt (after a valid signature)", ctx do
       {_carol_pub, carol_priv} = Crypto.generate_encryption_keypair()
+      sealed = Crypto.seal("secret", ctx.bob_enc_pub, ctx.alice_sign_priv)
 
-      sealed = Crypto.seal("secret", bob_pub, alice_priv)
-
-      # Carol can't unseal Bob's message
-      assert {:error, :decryption_failed} = Crypto.unseal(sealed, carol_priv)
+      # Signature is valid (it's Alice's), but Carol's key can't derive the
+      # ECDH secret → decryption fails.
+      assert {:error, :decryption_failed} =
+               Crypto.unseal(sealed, carol_priv, ctx.alice_sign_pub)
     end
 
-    test "sealed messages are different each time (random IV)" do
-      {_alice_pub, alice_priv} = Crypto.generate_encryption_keypair()
-      {bob_pub, _bob_priv} = Crypto.generate_encryption_keypair()
-
-      sealed1 = Crypto.seal("same message", bob_pub, alice_priv)
-      sealed2 = Crypto.seal("same message", bob_pub, alice_priv)
-
-      refute sealed1.iv == sealed2.iv
-      refute sealed1.ciphertext == sealed2.ciphertext
+    test "malformed sealed map is rejected", ctx do
+      assert {:error, :malformed_sealed} =
+               Crypto.unseal(%{garbage: true}, ctx.bob_enc_priv, ctx.alice_sign_pub)
     end
   end
 

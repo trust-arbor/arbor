@@ -12,11 +12,18 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       :crypto.generate_key(:ecdh, :x25519)
     end
 
-    def seal(plaintext, _recipient_pub, _sender_priv) do
-      %{ciphertext: plaintext, iv: <<0::96>>, tag: <<0::128>>, sender_public: <<0::256>>}
+    def seal(plaintext, _recipient_pub, _sender_sign_priv) do
+      %{
+        v: 2,
+        ciphertext: plaintext,
+        iv: <<0::96>>,
+        tag: <<0::128>>,
+        ephemeral_public: <<0::256>>,
+        signature: <<0::512>>
+      }
     end
 
-    def unseal(%{ciphertext: ciphertext}, _recipient_priv) do
+    def unseal(%{ciphertext: ciphertext}, _recipient_priv, _sender_sign_pub) do
       {:ok, ciphertext}
     end
 
@@ -34,6 +41,8 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
     def lookup_encryption_key(_agent_id) do
       {:ok, :crypto.strong_rand_bytes(32)}
     end
+
+    def lookup(_agent_id), do: {:ok, :crypto.strong_rand_bytes(32)}
   end
 
   setup do
@@ -73,7 +82,8 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
       # Create mock keychain for inviting
       creator_keychain = %{
         agent_id: creator_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       # Invite and accept member
@@ -81,11 +91,18 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       member_keychain = %{
         agent_id: member_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, _updated_channel, _key} =
-        Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+        Channels.accept_invitation(
+          channel_id,
+          member_id,
+          invitation.inviter_id,
+          invitation.sealed_key,
+          member_keychain
+        )
 
       # Get key before leave
       {:ok, key_before} = Channels.get_key(channel_id, creator_id)
@@ -113,18 +130,26 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       creator_keychain = %{
         agent_id: creator_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, invitation} = Channels.invite(channel_id, member_id, creator_keychain)
 
       member_keychain = %{
         agent_id: member_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, _channel, _key} =
-        Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+        Channels.accept_invitation(
+          channel_id,
+          member_id,
+          invitation.inviter_id,
+          invitation.sealed_key,
+          member_keychain
+        )
 
       {:ok, key_before} = Channels.get_key(channel_id, creator_id)
 
@@ -145,18 +170,26 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       creator_keychain = %{
         agent_id: creator_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, invitation} = Channels.invite(channel_id, member_id, creator_keychain)
 
       member_keychain = %{
         agent_id: member_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, _channel, _key} =
-        Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+        Channels.accept_invitation(
+          channel_id,
+          member_id,
+          invitation.inviter_id,
+          invitation.sealed_key,
+          member_keychain
+        )
 
       # Verify member is in channel
       {:ok, channel_before} = Channels.get(channel_id)
@@ -179,18 +212,26 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       creator_keychain = %{
         agent_id: creator_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, invitation} = Channels.invite(channel_id, member_id, creator_keychain)
 
       member_keychain = %{
         agent_id: member_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, _channel, _key} =
-        Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+        Channels.accept_invitation(
+          channel_id,
+          member_id,
+          invitation.inviter_id,
+          invitation.sealed_key,
+          member_keychain
+        )
 
       # Revoke member
       :ok = Channels.revoke(channel_id, member_id, creator_id)
@@ -211,18 +252,26 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       creator_keychain = %{
         agent_id: creator_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, invitation} = Channels.invite(channel_id, member_id, creator_keychain)
 
       member_keychain = %{
         agent_id: member_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, _channel, _key} =
-        Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+        Channels.accept_invitation(
+          channel_id,
+          member_id,
+          invitation.inviter_id,
+          invitation.sealed_key,
+          member_keychain
+        )
 
       {:ok, key_before} = Channels.get_key(channel_id, creator_id)
 
@@ -242,7 +291,8 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       creator_keychain = %{
         agent_id: creator_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       # Add both members
@@ -251,19 +301,33 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       member1_keychain = %{
         agent_id: member1_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       member2_keychain = %{
         agent_id: member2_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, _, _} =
-        Channels.accept_invitation(channel_id, member1_id, inv1.sealed_key, member1_keychain)
+        Channels.accept_invitation(
+          channel_id,
+          member1_id,
+          inv1.inviter_id,
+          inv1.sealed_key,
+          member1_keychain
+        )
 
       {:ok, _, _} =
-        Channels.accept_invitation(channel_id, member2_id, inv2.sealed_key, member2_keychain)
+        Channels.accept_invitation(
+          channel_id,
+          member2_id,
+          inv2.inviter_id,
+          inv2.sealed_key,
+          member2_keychain
+        )
 
       # Member1 tries to revoke member2 (should fail)
       result = Channels.revoke(channel_id, member2_id, member1_id)
@@ -361,7 +425,9 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
           "security.*",
           fn signal ->
             send(test_pid, {:signal, signal})
-          end, principal_id: "test_principal")
+          end,
+          principal_id: "test_principal"
+        )
 
       creator_id = "agent_creator"
       {:ok, channel, _key} = Channels.create("audit-test", creator_id)
@@ -383,7 +449,9 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
           "security.*",
           fn signal ->
             send(test_pid, {:signal, signal})
-          end, principal_id: "test_principal")
+          end,
+          principal_id: "test_principal"
+        )
 
       creator_id = "agent_creator"
       member_id = "agent_member"
@@ -393,18 +461,26 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       creator_keychain = %{
         agent_id: creator_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, invitation} = Channels.invite(channel_id, member_id, creator_keychain)
 
       member_keychain = %{
         agent_id: member_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, _, _} =
-        Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+        Channels.accept_invitation(
+          channel_id,
+          member_id,
+          invitation.inviter_id,
+          invitation.sealed_key,
+          member_keychain
+        )
 
       # Wait for the specific signals we expect
       signals = await_signals([:channel_created, :channel_member_invited, :channel_member_joined])
@@ -425,7 +501,9 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
           "security.*",
           fn signal ->
             send(test_pid, {:signal, signal})
-          end, principal_id: "test_principal")
+          end,
+          principal_id: "test_principal"
+        )
 
       creator_id = "agent_creator"
       member_id = "agent_member"
@@ -435,18 +513,26 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       creator_keychain = %{
         agent_id: creator_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, invitation} = Channels.invite(channel_id, member_id, creator_keychain)
 
       member_keychain = %{
         agent_id: member_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, _, _} =
-        Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+        Channels.accept_invitation(
+          channel_id,
+          member_id,
+          invitation.inviter_id,
+          invitation.sealed_key,
+          member_keychain
+        )
 
       # Clear previous signals
       flush_messages()
@@ -471,7 +557,9 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
           "security.*",
           fn signal ->
             send(test_pid, {:signal, signal})
-          end, principal_id: "test_principal")
+          end,
+          principal_id: "test_principal"
+        )
 
       creator_id = "agent_creator"
       member_id = "agent_member"
@@ -481,18 +569,26 @@ defmodule Arbor.Signals.ChannelsHardeningTest do
 
       creator_keychain = %{
         agent_id: creator_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, invitation} = Channels.invite(channel_id, member_id, creator_keychain)
 
       member_keychain = %{
         agent_id: member_id,
-        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)}
+        encryption_keypair: %{private: :crypto.strong_rand_bytes(32)},
+        signing_keypair: %{private: :crypto.strong_rand_bytes(32)}
       }
 
       {:ok, _, _} =
-        Channels.accept_invitation(channel_id, member_id, invitation.sealed_key, member_keychain)
+        Channels.accept_invitation(
+          channel_id,
+          member_id,
+          invitation.inviter_id,
+          invitation.sealed_key,
+          member_keychain
+        )
 
       flush_messages()
 
