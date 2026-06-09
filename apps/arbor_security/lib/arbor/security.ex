@@ -60,6 +60,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.Reflex
   alias Arbor.Security.SigningKeyStore
   alias Arbor.Security.SystemAuthority
+  alias Arbor.Security.UriRegistry
 
   require Logger
 
@@ -725,6 +726,15 @@ defmodule Arbor.Security do
   Returns `:ok`, `{:blocked, reflex, reason}`, or `{:warned, warnings}`.
   """
   defdelegate check_reflex(context), to: Reflex, as: :check
+
+  @doc """
+  Returns the canonical `arbor://` URI prefixes the registry recognizes.
+
+  Pure (reads the compile-time prefix list) — usable without the registry
+  GenServer running. Exposed for tooling such as the Security Sentinel's
+  URI-registration-coverage detector.
+  """
+  defdelegate canonical_uri_prefixes(), to: UriRegistry, as: :canonical_prefixes
 
   # ===========================================================================
   # Keychain (Seed/Host Phase 4)
