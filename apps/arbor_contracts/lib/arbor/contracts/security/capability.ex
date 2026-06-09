@@ -434,6 +434,16 @@ defmodule Arbor.Contracts.Security.Capability do
   canonical JSON (keys sorted at every depth) so serialization is stable
   regardless of in-memory map ordering.
   """
+  # Intentional exclusions from the signing payload (machine-readable for the
+  # SignedFieldCoverage detector). `delegation_chain` is excluded because each
+  # record in it is independently signed by its delegator — it is not an input
+  # to THIS capability's signature. (`*_signature` fields are auto-excluded.)
+  @signing_excluded [:delegation_chain]
+
+  @doc "Fields intentionally excluded from `signing_payload/1` (see the attribute)."
+  @spec signing_excluded_fields() :: [atom()]
+  def signing_excluded_fields, do: @signing_excluded
+
   @spec signing_payload(t()) :: binary()
   def signing_payload(%__MODULE__{} = cap) do
     expires_bin = if cap.expires_at, do: DateTime.to_iso8601(cap.expires_at), else: ""

@@ -17,7 +17,7 @@ defmodule Arbor.Actions.Security.StaticScan do
   status tracking via a BufferedStore-backed `FindingStore` is Phase 2.)
   """
 
-  alias Arbor.Actions.Security.FindingStore
+  alias Arbor.Actions.Security.Recorder
   alias Arbor.Contracts.Security.Finding
 
   @default_output_dir ".arbor/security/findings"
@@ -69,27 +69,8 @@ defmodule Arbor.Actions.Security.StaticScan do
       |> Enum.flat_map(&scan_path(&1, git_sha))
       |> Enum.uniq_by(& &1.id)
 
-    outcomes = if record?, do: Enum.map(findings, &record(&1, output_dir)), else: []
-
-    {findings, summarize(findings, outcomes, record?, output_dir)}
-  end
-
-  @doc """
-  Records a single finding through the status-aware `FindingStore`, emitting a
-  `security.sentinel_finding` signal only for genuinely NEW or REGRESSED
-  findings (suppressed/refreshed ones stay quiet). Returns the store outcome.
-  """
-  @spec record(Finding.t(), String.t()) :: FindingStore.record_outcome()
-  def record(%Finding{} = finding, output_dir \\ @default_output_dir) do
-    outcome = FindingStore.record(finding, output_dir)
-
-    case outcome do
-      {:recorded, f} -> emit_signal(f, Path.join(output_dir, f.id <> ".md"))
-      {:reopened, f} -> emit_signal(f, Path.join(output_dir, f.id <> ".md"))
-      _suppressed_or_updated -> :ok
-    end
-
-    outcome
+    {_outcomes, summary} = Recorder.record_all(findings, record?, output_dir)
+    {findings, summary}
   end
 
   # ---------------------------------------------------------------------------
@@ -156,46 +137,5 @@ defmodule Arbor.Actions.Security.StaticScan do
       [_, lib] -> lib
       _ -> nil
     end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Record side-effects
-  # ---------------------------------------------------------------------------
-
-  defp emit_signal(finding, path) do
-    if Code.ensure_loaded?(Arbor.Signals) and
-         function_exported?(Arbor.Signals, :emit, 4) do
-      apply(Arbor.Signals, :emit, [
-        :security,
-        :sentinel_finding,
-        %{
-          id: finding.id,
-          category: finding.category,
-          severity: finding.severity[:level],
-          file: finding.location[:file],
-          line: finding.location[:line],
-          path: path
-        },
-        []
-      ])
-    end
-  rescue
-    _ -> :ok
-  catch
-    _, _ -> :ok
-  end
-
-  defp summarize(findings, outcomes, record?, output_dir) do
-    %{
-      total: length(findings),
-      by_category: count_by(findings, & &1.category),
-      by_severity: count_by(findings, &(&1.severity[:level] || :unknown)),
-      by_outcome: count_by(outcomes, &elem(&1, 0)),
-      recorded_to: if(record?, do: output_dir)
-    }
-  end
-
-  defp count_by(findings, fun) do
-    findings |> Enum.group_by(fun) |> Map.new(fn {k, v} -> {k, length(v)} end)
   end
 end

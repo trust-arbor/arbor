@@ -235,7 +235,8 @@ defmodule Arbor.Actions do
   def list_actions do
     %{
       security: [
-        Arbor.Actions.Security.RunStaticDetectors
+        Arbor.Actions.Security.RunStaticDetectors,
+        Arbor.Actions.Security.RunWholeTreeDetectors
       ],
       shell: [
         Arbor.Actions.Shell.Execute,
