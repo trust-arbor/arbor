@@ -380,29 +380,59 @@ defmodule Arbor.Contracts.Security.Capability do
     end
   end
 
+  # Signed-payload version. Bumped when the signed field set or the
+  # canonicalization changes. The version string is itself part of the
+  # signed bytes (domain separation), so a v1 signature can never validate
+  # against a v2 payload — an unambiguous, fail-closed upgrade boundary.
+  #
+  # v2 (2026-06-09, crypto-review C1 / review L2): added parent_capability_id,
+  # principal_scope, allowed_delegatees, and metadata to the payload. Before
+  # v2 these were signature-UNcovered, so anyone able to mutate a stored or
+  # in-transit capability could strip the user binding / delegatee allowlist,
+  # or ADD `metadata.provenance` to forge the ceiling-bypass marker, all
+  # without invalidating issuer_signature. Every field the authorizer reads
+  # must be in the signed payload.
+  @signing_version "arbor-cap-sig-v2"
+
   @doc """
   Compute the canonical signing payload for a capability.
 
-  This is the deterministic binary that gets signed by the issuer.
-  Excludes `issuer_signature`, `delegation_chain` signatures, and `signature` fields.
+  This is the deterministic binary that gets signed by the issuer (and, for
+  delegation records, by the delegator — see `Arbor.Security.Capability.Signer`).
+  Excludes `issuer_signature`, `delegation_chain` signatures, and the legacy
+  `signature` field (those ARE the signatures, not inputs to them).
+
+  Covers every security-relevant field the authorizer reads, including
+  `metadata` (which carries the pre-approval `provenance` marker),
+  `principal_scope` (multi-user binding), `allowed_delegatees` (delegation
+  allowlist), and `parent_capability_id`.
 
   Each variable-length field is length-prefixed (`<<byte_size::32, field::binary>>`)
-  to prevent field-boundary ambiguity attacks.
+  to prevent field-boundary ambiguity attacks. Map/list fields
+  (`constraints`, `metadata`, `allowed_delegatees`) use a recursive
+  canonical JSON (keys sorted at every depth) so serialization is stable
+  regardless of in-memory map ordering.
   """
   @spec signing_payload(t()) :: binary()
   def signing_payload(%__MODULE__{} = cap) do
-    constraints_json =
-      cap.constraints
-      |> Enum.sort_by(fn {k, _v} -> to_string(k) end)
-      |> Jason.encode!()
-
     expires_bin = if cap.expires_at, do: DateTime.to_iso8601(cap.expires_at), else: ""
     not_before_bin = if cap.not_before, do: DateTime.to_iso8601(cap.not_before), else: ""
 
-    length_prefix(cap.id) <>
+    # allowed_delegatees is an allowlist (set semantics) — sort so member
+    # reordering doesn't change the signature.
+    delegatees =
+      case cap.allowed_delegatees do
+        nil -> nil
+        list when is_list(list) -> Enum.sort(list)
+        other -> other
+      end
+
+    length_prefix(@signing_version) <>
+      length_prefix(cap.id) <>
       length_prefix(cap.resource_uri) <>
       length_prefix(cap.principal_id) <>
       length_prefix(cap.issuer_id || "") <>
+      length_prefix(cap.parent_capability_id || "") <>
       length_prefix(DateTime.to_iso8601(cap.granted_at)) <>
       length_prefix(expires_bin) <>
       length_prefix(not_before_bin) <>
@@ -410,9 +440,33 @@ defmodule Arbor.Contracts.Security.Capability do
       length_prefix(if(cap.max_uses, do: Integer.to_string(cap.max_uses), else: "")) <>
       length_prefix(cap.session_id || "") <>
       length_prefix(cap.task_id || "") <>
-      length_prefix(constraints_json) <>
+      length_prefix(cap.principal_scope || "") <>
+      length_prefix(canonical_json(delegatees)) <>
+      length_prefix(canonical_json(cap.constraints)) <>
+      length_prefix(canonical_json(cap.metadata)) <>
       length_prefix(if cap.signed_at, do: DateTime.to_iso8601(cap.signed_at), else: "")
   end
+
+  @doc false
+  # The signed-payload version string, exposed for tests / tooling.
+  @spec signing_version() :: String.t()
+  def signing_version, do: @signing_version
+
+  # Deterministic JSON for maps/lists: every map is turned into a
+  # key-sorted list of [key, value] pairs (recursively) BEFORE Jason sees
+  # it, so no map ordering ever reaches the encoder. Lists keep their order
+  # (callers that need set semantics sort first). Scalars/atoms/structs are
+  # encoded by Jason as-is.
+  defp canonical_json(term), do: term |> canonicalize() |> Jason.encode!()
+
+  defp canonicalize(m) when is_map(m) and not is_struct(m) do
+    m
+    |> Enum.map(fn {k, v} -> [to_string(k), canonicalize(v)] end)
+    |> Enum.sort_by(fn [k, _v] -> k end)
+  end
+
+  defp canonicalize(l) when is_list(l), do: Enum.map(l, &canonicalize/1)
+  defp canonicalize(other), do: other
 
   defp length_prefix(field) when is_binary(field) do
     <<byte_size(field)::32, field::binary>>
