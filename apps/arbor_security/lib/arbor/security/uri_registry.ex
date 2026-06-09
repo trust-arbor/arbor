@@ -161,6 +161,13 @@ defmodule Arbor.Security.UriRegistry do
     # Composition dispatch capability (arbor://orchestrator/map/dispatch) — binds
     # the map/compose handler. Registered after the Security Sentinel found it.
     "arbor://orchestrator/map",
+    # Child-graph execution capability (handler_schema binds it).
+    "arbor://pipeline/run",
+
+    # Orchestrator handler capabilities — declared via `capability_required/1`
+    # on the handler contracts (read/write/compute/compose). Live infra, not a
+    # stale trust grant. (Security Sentinel uri-inventory, 2026-06-09.)
+    "arbor://handler/",
 
     # Action namespace — for Jido actions whose argument space is
     # schema-bounded and therefore don't belong under the broader
