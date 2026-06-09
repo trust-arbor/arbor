@@ -99,7 +99,9 @@ defmodule Arbor.Security.SigningKeyStore do
     keypair_data = %{"signing" => signing_key}
 
     keypair_data =
-      if encryption_key, do: Map.put(keypair_data, "encryption", encryption_key), else: keypair_data
+      if encryption_key,
+        do: Map.put(keypair_data, "encryption", encryption_key),
+        else: keypair_data
 
     with {:ok, enc_key} <- get_encryption_key() do
       # Base64-encode binary keys for JSON serialization
@@ -238,14 +240,25 @@ defmodule Arbor.Security.SigningKeyStore do
   defp generate_master_key(path) do
     key = :crypto.strong_rand_bytes(32)
     dir = Path.dirname(path)
+    tmp = path <> ".tmp"
 
+    # C6 review fix (2026-06-09): the previous `File.write(path) |> File.chmod(0600)`
+    # left a umask-dependent window where the 32-byte master key was
+    # world-readable (commonly 0644) before the chmod landed. Close it two ways:
+    #   1. Restrict the containing directory to 0700 BEFORE writing, so the key
+    #      is unreachable by other users even during any transient file-mode
+    #      window (directory not traversable).
+    #   2. Write to a temp file (inside the now-0700 dir), chmod it 0600, then
+    #      atomically rename into place — so the final path never exists with a
+    #      permissive mode.
     with :ok <- File.mkdir_p(dir),
-         :ok <- File.write(path, key),
-         :ok <- File.chmod(path, 0o600) do
-      # Verify permissions were actually applied
+         :ok <- File.chmod(dir, 0o700),
+         :ok <- File.write(tmp, key),
+         :ok <- File.chmod(tmp, 0o600),
+         :ok <- File.rename(tmp, path) do
       case File.stat(path) do
         {:ok, %{access: access}} when access in [:read_write, :read] ->
-          Logger.info("Generated new master key at #{path} (mode 0600)")
+          Logger.info("Generated new master key at #{path} (dir 0700, file 0600)")
 
         {:ok, _} ->
           Logger.warning("Master key at #{path} may have incorrect permissions")
@@ -257,6 +270,7 @@ defmodule Arbor.Security.SigningKeyStore do
       {:ok, key}
     else
       {:error, reason} ->
+        _ = File.rm(tmp)
         {:error, {:master_key_write_failed, reason}}
     end
   end

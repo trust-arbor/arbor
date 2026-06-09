@@ -88,4 +88,45 @@ defmodule Arbor.Security.SigningKeyStoreTest do
       end
     end
   end
+
+  describe "master key file permissions (C6)" do
+    import Bitwise
+
+    test "key directory is 0700 (no group/other access)" do
+      # Security regression: master key creation used to leave a umask-
+      # dependent window where the key was world-readable. The fix restricts
+      # the containing directory to 0700 (and writes the file via an atomic
+      # 0600 temp-rename). The directory mode is the persistent, testable
+      # discriminator — pre-fix the dir was the umask default (commonly 0755).
+      base = Path.join(System.tmp_dir!(), "arbor_c6_#{:erlang.unique_integer([:positive])}")
+      keypath = Path.join([base, "security", "master.key"])
+      prev = Application.get_env(:arbor_security, :master_key_path)
+      Application.put_env(:arbor_security, :master_key_path, keypath)
+
+      on_exit(fn ->
+        File.rm_rf(base)
+
+        case prev do
+          nil -> Application.delete_env(:arbor_security, :master_key_path)
+          v -> Application.put_env(:arbor_security, :master_key_path, v)
+        end
+      end)
+
+      # Path doesn't exist yet → triggers generation.
+      assert {:ok, key} = SigningKeyStore.ensure_master_key_for_oidc()
+      assert byte_size(key) == 32
+
+      dir = Path.dirname(keypath)
+      {:ok, dir_stat} = File.stat(dir)
+      {:ok, file_stat} = File.stat(keypath)
+
+      assert (dir_stat.mode &&& 0o777) == 0o700,
+             "key dir must be 0700, got 0o#{Integer.to_string(dir_stat.mode &&& 0o777, 8)}"
+
+      assert (file_stat.mode &&& 0o077) == 0,
+             "key file must have no group/other access, got 0o#{Integer.to_string(file_stat.mode &&& 0o777, 8)}"
+
+      refute File.exists?(keypath <> ".tmp"), "temp file must be renamed away, not left behind"
+    end
+  end
 end
