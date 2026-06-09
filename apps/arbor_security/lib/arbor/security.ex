@@ -927,14 +927,15 @@ defmodule Arbor.Security do
 
   defp maybe_check_file_guard(principal_id, resource_uri, opts, cap) do
     file_path = Keyword.get(opts, :file_path)
+    file_guard = file_guard_module()
 
     cond do
       # Explicit path: caller knows they want path-bound checking. Full
       # FileGuard.authorize/3 lookup-and-resolve. Same as before.
       file_path && String.starts_with?(resource_uri, "arbor://fs/") ->
-        if Code.ensure_loaded?(Arbor.Security.FileGuard) do
+        if Code.ensure_loaded?(file_guard) do
           operation = infer_fs_operation(resource_uri)
-          Arbor.Security.FileGuard.authorize(principal_id, file_path, operation)
+          file_guard.authorize(principal_id, file_path, operation)
         else
           :ok
         end
@@ -946,8 +947,8 @@ defmodule Arbor.Security do
       # check already accepted; this adds the SafePath layer that callers
       # used to have to opt into.
       cap != nil and String.starts_with?(resource_uri, "arbor://fs/") and
-          Code.ensure_loaded?(Arbor.Security.FileGuard) ->
-        case Arbor.Security.FileGuard.normalize_uri_path_for_capability(resource_uri, cap) do
+          Code.ensure_loaded?(file_guard) ->
+        case file_guard.normalize_uri_path_for_capability(resource_uri, cap) do
           {:ok, resolved} -> {:ok, resolved}
           :not_applicable -> :ok
           {:error, _reason} = err -> err
@@ -957,9 +958,24 @@ defmodule Arbor.Security do
         :ok
     end
   rescue
-    _ -> :ok
+    # H2 review fix (2026-06-09): a crash in path validation must NOT skip
+    # the path-binding check and authorize. In the explicit-path branch
+    # FileGuard.authorize/3 IS the binding of a bare arbor://fs/<op> cap to
+    # a concrete path — swallowing its exception and returning :ok would let
+    # a broad fs cap write/read anywhere. Fail closed, matching
+    # check_reflexes/5 in this same module. (Was `:ok`.)
+    _ -> {:error, {:file_guard_error, :exception}}
   catch
-    :exit, _ -> :ok
+    :exit, _ -> {:error, {:file_guard_error, :exit}}
+  end
+
+  # FileGuard module, overridable via config for tests / deployment swaps.
+  defp file_guard_module do
+    if Code.ensure_loaded?(Config) and function_exported?(Config, :file_guard_module, 0) do
+      Config.file_guard_module()
+    else
+      Arbor.Security.FileGuard
+    end
   end
 
   defp infer_fs_operation("arbor://fs/read" <> _), do: :read
