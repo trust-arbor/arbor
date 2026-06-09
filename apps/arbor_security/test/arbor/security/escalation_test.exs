@@ -9,13 +9,23 @@ defmodule Arbor.Security.EscalationTest do
   def __bootstrap_router__ do
     pubsub = Arbor.Comms.PubSub
 
-    case Supervisor.start_link(
-           [{Phoenix.PubSub, name: pubsub}],
-           strategy: :one_for_one,
-           name: :Escalation_RouterTest_Sup
-         ) do
-      {:ok, _} -> :ok
-      {:error, {:already_started, _}} -> :ok
+    # Start Phoenix.PubSub only if it isn't already running. The arbor_comms
+    # application (or a peer test) may already own a PubSub of this name;
+    # unconditionally starting a second owner makes the child fail with
+    # {:already_started, _}, which — under a LINKED Supervisor.start_link —
+    # shuts the supervisor down and crashes this (linked) test process with
+    # "failed to start child". Guard on whereis so we reuse the existing one.
+    if Process.whereis(pubsub) == nil do
+      case Supervisor.start_link(
+             [{Phoenix.PubSub, name: pubsub}],
+             strategy: :one_for_one,
+             name: :Escalation_RouterTest_Sup
+           ) do
+        {:ok, _} -> :ok
+        {:error, {:already_started, _}} -> :ok
+        # Lost a race — someone else started it between whereis and now.
+        {:error, {:shutdown, {:failed_to_start_child, _, {:already_started, _}}}} -> :ok
+      end
     end
 
     case Arbor.Comms.InteractionRegistry.start_link([]) do
