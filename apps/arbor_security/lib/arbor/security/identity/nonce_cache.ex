@@ -1,16 +1,36 @@
 defmodule Arbor.Security.Identity.NonceCache do
   @moduledoc """
-  In-memory nonce cache for replay attack prevention.
+  Nonce cache for SignedRequest replay-attack prevention.
 
   Tracks recently seen nonces and rejects duplicates within the TTL window.
   Expired nonces are cleaned up periodically to prevent unbounded growth.
+
+  ## Cluster distribution (C5 review fix)
+
+  In a multi-node deployment a nonce recorded on one node is propagated to
+  the others via a cluster-scoped `security.nonce_seen` signal (the same
+  mechanism `Identity.Registry` and `CapabilityStore` use). Without this, a
+  captured SignedRequest could be replayed against a *different* node within
+  the timestamp-drift window because that node had never seen the nonce.
+
+  This closes the realistic capture-and-replay-later attack: by the time an
+  attacker replays a request to another node, the nonce has already
+  propagated and is rejected. A residual race remains for *simultaneous*
+  delivery of the same nonce to two nodes within signal-propagation latency
+  — closing that fully needs atomic cluster-wide check-and-record (consistent
+  hashing or a shared store), tracked as a follow-up.
 
   Follows the same GenServer pattern as `CapabilityStore`.
   """
 
   use GenServer
 
+  require Logger
+
+  alias Arbor.Security.Config
+
   @cleanup_interval_ms 60_000
+  @signal_type "nonce_seen"
 
   # Client API
 
@@ -45,6 +65,7 @@ defmodule Arbor.Security.Identity.NonceCache do
   @impl true
   def init(_opts) do
     schedule_cleanup()
+    subscribe_to_distributed_signals()
 
     {:ok,
      %{
@@ -64,6 +85,8 @@ defmodule Arbor.Security.Identity.NonceCache do
     else
       expiry = now + ttl_seconds
       state = put_in(state, [:nonces, nonce], expiry)
+      # Propagate to peer nodes so the nonce can't be replayed elsewhere.
+      emit_nonce_seen(nonce, expiry)
       {:reply, :ok, state}
     end
   end
@@ -85,7 +108,76 @@ defmodule Arbor.Security.Identity.NonceCache do
     {:noreply, state}
   end
 
+  # A peer node recorded a nonce — record it locally so a replay aimed at
+  # THIS node is rejected. Never re-emits (no propagation loop).
+  def handle_info({:signal_received, signal}, state) do
+    {:noreply, record_remote_nonce(signal, state)}
+  end
+
+  def handle_info(_msg, state), do: {:noreply, state}
+
   # Private
+
+  defp subscribe_to_distributed_signals do
+    if Config.distributed_signals_enabled?() do
+      bus = Arbor.Signals.Bus
+
+      if Code.ensure_loaded?(bus) and Process.whereis(bus) do
+        me = self()
+
+        Arbor.Signals.subscribe("security.#{@signal_type}", fn signal ->
+          send(me, {:signal_received, signal})
+          :ok
+        end)
+      end
+    end
+
+    :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp emit_nonce_seen(nonce, expiry) do
+    if Config.distributed_signals_enabled?() do
+      Arbor.Signals.emit(
+        :security,
+        @signal_type,
+        %{
+          # hex-encode so the binary nonce survives any signal serialization
+          nonce_hex: Base.encode16(nonce, case: :lower),
+          expiry: expiry,
+          origin_node: node()
+        },
+        scope: :cluster
+      )
+    end
+
+    :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp record_remote_nonce(signal, state) do
+    data = Map.get(signal, :data, %{})
+
+    if data[:origin_node] == node() do
+      # Our own signal echoed back — ignore.
+      state
+    else
+      case Base.decode16(to_string(data[:nonce_hex] || ""), case: :mixed) do
+        {:ok, nonce} when byte_size(nonce) > 0 ->
+          expiry = data[:expiry] || System.system_time(:second)
+          put_in(state, [:nonces, nonce], expiry)
+
+        _ ->
+          state
+      end
+    end
+  catch
+    _, reason ->
+      Logger.warning("[NonceCache] failed to record remote nonce: #{inspect(reason)}")
+      state
+  end
 
   defp cleanup_expired(state) do
     now = System.system_time(:second)
