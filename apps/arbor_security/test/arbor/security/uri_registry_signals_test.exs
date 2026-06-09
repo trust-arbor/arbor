@@ -48,4 +48,8 @@ defmodule Arbor.Security.UriRegistrySignalsTest do
     assert UriRegistry.registered?("arbor://handler/read/file/read")
     assert UriRegistry.registered?("arbor://pipeline/run")
   end
+
+  test "the governance ceiling namespace is registered" do
+    assert UriRegistry.registered?("arbor://governance/change/self/foo")
+  end
 end
