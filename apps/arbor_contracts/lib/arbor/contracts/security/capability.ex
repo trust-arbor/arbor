@@ -36,7 +36,7 @@ defmodule Arbor.Contracts.Security.Capability do
 
   alias Arbor.Types
 
-  @derive {Jason.Encoder, except: [:signature, :issuer_signature]}
+  @derive {Jason.Encoder, except: [:issuer_signature]}
   typedstruct enforce: true do
     @typedoc "A capability granting access to a specific resource"
 
@@ -55,7 +55,10 @@ defmodule Arbor.Contracts.Security.Capability do
     # Multi-user: binds this capability to a specific user principal (nil = any user)
     field(:principal_scope, binary(), enforce: false)
     field(:constraints, map(), default: %{})
-    field(:signature, binary(), enforce: false)
+    # NOTE: `issuer_signature` is the live capability signature. There is no
+    # separate top-level `signature` field — it was dead (never set or
+    # verified) and was removed per crypto review C11 so nothing mistakes it
+    # for a real signature.
     field(:issuer_id, Types.agent_id(), enforce: false)
     field(:issuer_signature, Types.signature(), enforce: false)
     field(:signed_at, DateTime.t(), enforce: false)

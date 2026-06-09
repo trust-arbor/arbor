@@ -29,8 +29,14 @@ defmodule Arbor.Security.CapabilityStore.Serializer do
       "allowed_delegatees" => cap.allowed_delegatees,
       "session_id" => cap.session_id,
       "task_id" => cap.task_id,
+      # principal_scope (multi-user binding) and signed_at are part of the
+      # issuer-signed payload (Capability.signing_payload/1). They MUST be
+      # persisted or a signed capability would reload with these fields
+      # missing and fail signature verification (and silently lose its user
+      # binding). Surfaced by the C1 signing-coverage work, 2026-06-09.
+      "principal_scope" => cap.principal_scope,
+      "signed_at" => encode_optional_datetime(cap.signed_at),
       "constraints" => serialize_constraints(cap.constraints),
-      "signature" => encode_optional_binary(cap.signature),
       "issuer_id" => cap.issuer_id,
       "issuer_signature" => encode_optional_binary(cap.issuer_signature),
       "delegation_chain" => serialize_delegation_chain(cap.delegation_chain),
@@ -58,8 +64,9 @@ defmodule Arbor.Security.CapabilityStore.Serializer do
       allowed_delegatees: data["allowed_delegatees"],
       session_id: data["session_id"],
       task_id: data["task_id"],
+      principal_scope: data["principal_scope"],
+      signed_at: parse_optional_datetime(data["signed_at"]),
       constraints: deserialize_constraints(data["constraints"] || %{}),
-      signature: decode_optional_binary(data["signature"]),
       issuer_id: data["issuer_id"],
       issuer_signature: decode_optional_binary(data["issuer_signature"]),
       delegation_chain: deserialize_delegation_chain(data["delegation_chain"] || []),
