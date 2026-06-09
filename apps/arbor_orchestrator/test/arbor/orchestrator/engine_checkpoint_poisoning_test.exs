@@ -105,7 +105,8 @@ defmodule Arbor.Orchestrator.EngineCheckpointPoisoningTest do
   test "with identity_private_key, resume REJECTS unsigned poisoned checkpoint (security regression)" do
     # SECURITY REGRESSION TEST per CLAUDE.md — fails on HEAD~1, passes on HEAD.
     # When the resumer supplies identity_private_key, the engine derives a
-    # checkpoint HMAC secret via HKDF (Arbor.Security.Crypto.derive_key).
+    # checkpoint HMAC secret (a single load-independent HMAC derivation —
+    # see Engine.derive_checkpoint_hmac_secret/1, C7 fix).
     # Checkpoint.load then requires the payload's __hmac to match.
     # An attacker-crafted unsigned checkpoint has no __hmac → verify/3
     # returns {:error, :tampered} → resume fails closed.
@@ -252,13 +253,17 @@ defmodule Arbor.Orchestrator.EngineCheckpointPoisoningTest do
     # Loading without the secret still succeeds (backward compat).
     assert {:ok, _} = Checkpoint.load(ckpt_path)
 
-    # Loading WITH the matching derived secret succeeds.
-    secret =
-      Module.concat([:Arbor, :Security, :Crypto]).derive_key(
-        private_key,
-        "arbor-checkpoint-hmac-v1",
-        32
-      )
+    # Loading WITH the matching derived secret succeeds. The engine derives
+    # the checkpoint HMAC secret via a single load-independent path
+    # (C7 fix): HMAC-SHA256(key, "arbor-checkpoint-hmac-v2"). Recompute it the
+    # same way here — must match what the engine wrote, and equal
+    # Engine.derive_checkpoint_hmac_secret/1.
+    secret = :crypto.mac(:hmac, :sha256, private_key, "arbor-checkpoint-hmac-v2")
+
+    assert secret ==
+             Arbor.Orchestrator.Engine.derive_checkpoint_hmac_secret(
+               identity_private_key: private_key
+             )
 
     assert {:ok, _} = Checkpoint.load(ckpt_path, hmac_secret: secret)
   end

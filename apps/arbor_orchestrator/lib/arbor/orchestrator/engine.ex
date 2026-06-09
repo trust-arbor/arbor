@@ -1007,25 +1007,35 @@ defmodule Arbor.Orchestrator.Engine do
     end
   end
 
+  @doc false
   # Derive the HMAC secret used to sign engine checkpoints.
   # See the comment at the call site in do_run/2 for the trust model.
-  defp derive_checkpoint_hmac_secret(opts) do
+  #
+  # C7 review fix (2026-06-09): this previously used HKDF when
+  # Arbor.Security.Crypto was loaded and fell back to plain HMAC otherwise —
+  # two DIFFERENT secrets for the same key. A checkpoint signed under one
+  # mode failed verification under the other, a silent correctness hazard
+  # whenever load state differed between sign and verify (hot reload, a
+  # different node, arbor_security not yet started). Collapsed to a single,
+  # load-INDEPENDENT derivation using only `:crypto` (always available), so
+  # the secret is purely a function of the key. HMAC-SHA256(key, label) is a
+  # sound single-output KDF (exactly HKDF-Extract); the review endorses it
+  # as sufficient here.
+  #
+  # Label bumped to v2 so the derivation change is explicit: old (v1)
+  # checkpoints fail verification and restart — fail-closed and acceptable
+  # for ephemeral per-run checkpoints.
+  #
+  # Transitional: deriving the MAC secret from the raw Ed25519 private key
+  # reuses the signing key for a MAC purpose, which needs an extractable key.
+  # The Layer 3/4 plan moves this into the signer process; keep THIS single
+  # function as the swap point. Exposed (@doc false) so the derivation can be
+  # pinned by a regression test.
+  @spec derive_checkpoint_hmac_secret(keyword()) :: binary() | nil
+  def derive_checkpoint_hmac_secret(opts) do
     case Keyword.get(opts, :identity_private_key) do
       key when is_binary(key) and byte_size(key) > 0 ->
-        crypto_mod = Module.concat([:Arbor, :Security, :Crypto])
-
-        if Code.ensure_loaded?(crypto_mod) and
-             function_exported?(crypto_mod, :derive_key, 3) do
-          # Standard HKDF with domain-separation string. Audited in
-          # arbor_security against RFC 5869.
-          apply(crypto_mod, :derive_key, [key, "arbor-checkpoint-hmac-v1", 32])
-        else
-          # Runtime fallback when arbor_security isn't loaded — still
-          # deterministic per-key, just a simpler primitive than HKDF.
-          # HMAC-SHA256(key, label) is collision-resistant given the
-          # secret key as the HMAC key.
-          :crypto.mac(:hmac, :sha256, key, "arbor-checkpoint-hmac-v1")
-        end
+        :crypto.mac(:hmac, :sha256, key, "arbor-checkpoint-hmac-v2")
 
       _ ->
         nil
