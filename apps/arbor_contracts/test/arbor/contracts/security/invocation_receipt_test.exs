@@ -60,7 +60,9 @@ defmodule Arbor.Contracts.Security.InvocationReceiptTest do
     @tag :fast
     test "produces deterministic payload for same receipt" do
       {:ok, receipt} = InvocationReceipt.new(@valid_attrs)
-      assert InvocationReceipt.signing_payload(receipt) == InvocationReceipt.signing_payload(receipt)
+
+      assert InvocationReceipt.signing_payload(receipt) ==
+               InvocationReceipt.signing_payload(receipt)
     end
 
     @tag :fast
@@ -98,27 +100,57 @@ defmodule Arbor.Contracts.Security.InvocationReceiptTest do
     test "correctly signed receipt passes verification" do
       {:ok, receipt} = InvocationReceipt.new(@valid_attrs)
 
-      # Sign with a test keypair
+      # issuer_id is part of the signing payload, so it must be set BEFORE signing.
+      receipt = %{receipt | issuer_id: "agent_authority"}
+
       {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
       payload = InvocationReceipt.signing_payload(receipt)
       signature = :crypto.sign(:eddsa, :sha512, payload, [priv, :ed25519])
 
-      signed = %{receipt | signature: signature, issuer_id: "agent_authority"}
+      signed = %{receipt | signature: signature}
       assert :ok = InvocationReceipt.verify(signed, pub)
     end
 
     @tag :fast
     test "tampered receipt fails verification" do
       {:ok, receipt} = InvocationReceipt.new(@valid_attrs)
+      receipt = %{receipt | issuer_id: "agent_authority"}
 
       {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
       payload = InvocationReceipt.signing_payload(receipt)
       signature = :crypto.sign(:eddsa, :sha512, payload, [priv, :ed25519])
 
-      signed = %{receipt | signature: signature, issuer_id: "agent_authority"}
+      signed = %{receipt | signature: signature}
 
       # Tamper with the resource_uri
       tampered = %{signed | resource_uri: "arbor://fs/write/secrets"}
+      assert {:error, :invalid_receipt_signature} = InvocationReceipt.verify(tampered, pub)
+    end
+
+    @tag :fast
+    test "issuer_id is part of the signing payload (security regression)" do
+      # Two receipts differing only in issuer_id must produce different payloads,
+      # otherwise issuer_id is unsigned and can be relabelled freely.
+      {:ok, receipt} = InvocationReceipt.new(@valid_attrs)
+      a = InvocationReceipt.signing_payload(%{receipt | issuer_id: "agent_a"})
+      b = InvocationReceipt.signing_payload(%{receipt | issuer_id: "agent_b"})
+      refute a == b
+    end
+
+    @tag :fast
+    test "tampering issuer_id fails verification (issuer_id is signed — security regression)" do
+      {:ok, receipt} = InvocationReceipt.new(@valid_attrs)
+      receipt = %{receipt | issuer_id: "agent_authority"}
+
+      {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+      payload = InvocationReceipt.signing_payload(receipt)
+      signature = :crypto.sign(:eddsa, :sha512, payload, [priv, :ed25519])
+      signed = %{receipt | signature: signature}
+
+      assert :ok = InvocationReceipt.verify(signed, pub)
+
+      # Relabel the issuer — must now break the signature.
+      tampered = %{signed | issuer_id: "agent_attacker"}
       assert {:error, :invalid_receipt_signature} = InvocationReceipt.verify(tampered, pub)
     end
 

@@ -86,6 +86,11 @@ defmodule Arbor.Contracts.Security.InvocationReceipt do
 
   Deterministic binary for Ed25519 signing. Excludes the `signature` field.
   Length-prefixed to prevent field-boundary ambiguity.
+
+  Includes `issuer_id` (who issued the receipt) so it cannot be relabelled
+  without invalidating the signature. NOTE: `issuer_id` must be set on the
+  receipt BEFORE the signature is computed — see `SystemAuthority.sign_receipt`.
+  (Security Sentinel finding, 2026-06-09 — `issuer_id` was previously unsigned.)
   """
   @spec signing_payload(t()) :: binary()
   def signing_payload(%__MODULE__{} = receipt) do
@@ -101,6 +106,7 @@ defmodule Arbor.Contracts.Security.InvocationReceipt do
       length_prefix(receipt.nonce) <>
       length_prefix(receipt.session_id || "") <>
       length_prefix(receipt.task_id || "") <>
+      length_prefix(receipt.issuer_id || "") <>
       length_prefix(encode_delegation_chain(receipt.delegation_chain))
   end
 
