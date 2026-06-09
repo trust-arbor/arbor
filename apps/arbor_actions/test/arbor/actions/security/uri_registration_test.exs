@@ -69,6 +69,17 @@ defmodule Arbor.Actions.Security.Detectors.UriRegistrationTest do
     assert uris(dir) == []
   end
 
+  test "excludes provenance URIs in a *_source function (not a capability)", %{dir: dir} do
+    write(dir, "src.ex", """
+    defmodule Src do
+      defp bridge_source(id), do: "arbor://zzzsource/\#{id}"
+      def emit(id), do: %{source: bridge_source(id)}
+    end
+    """)
+
+    assert uris(dir) == []
+  end
+
   test "flags an unregistered interpolated namespace (the signals-gap class)", %{dir: dir} do
     write(dir, "f.ex", """
     defmodule F do
