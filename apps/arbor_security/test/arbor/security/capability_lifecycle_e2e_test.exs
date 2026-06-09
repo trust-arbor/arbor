@@ -63,7 +63,8 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
     end
 
     test "revoking returns error for unknown capability" do
-      assert {:error, :not_found} = Security.revoke("cap_nonexistent_e2e_#{:erlang.unique_integer([:positive])}")
+      assert {:error, :not_found} =
+               Security.revoke("cap_nonexistent_e2e_#{:erlang.unique_integer([:positive])}")
     end
   end
 
@@ -117,9 +118,7 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
 
       # A delegates to B
       {:ok, cap_b} =
-        Security.delegate(cap_a.id, agent_b,
-          delegator_private_key: identity_a.private_key
-        )
+        Security.delegate(cap_a.id, agent_b, delegator_private_key: identity_a.private_key)
 
       assert cap_b.principal_id == agent_b
       assert cap_b.parent_capability_id == cap_a.id
@@ -149,17 +148,13 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
 
       # A delegates to B — B gets depth 0
       {:ok, cap_b} =
-        Security.delegate(cap_a.id, agent_b,
-          delegator_private_key: identity_a.private_key
-        )
+        Security.delegate(cap_a.id, agent_b, delegator_private_key: identity_a.private_key)
 
       assert cap_b.delegation_depth == 0
 
       # B tries to delegate to C — fails because depth is 0
       assert {:error, :delegation_depth_exhausted} =
-               Security.delegate(cap_b.id, agent_c,
-                 delegator_private_key: identity_b.private_key
-               )
+               Security.delegate(cap_b.id, agent_c, delegator_private_key: identity_b.private_key)
     end
 
     test "multi-hop delegation chain A→B→C preserves depth and chain metadata", %{
@@ -179,9 +174,7 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
 
       # A → B
       {:ok, cap_b} =
-        Security.delegate(cap_a.id, agent_b,
-          delegator_private_key: identity_a.private_key
-        )
+        Security.delegate(cap_a.id, agent_b, delegator_private_key: identity_a.private_key)
 
       assert cap_b.delegation_depth == 2
       assert cap_b.parent_capability_id == cap_a.id
@@ -189,9 +182,7 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
 
       # B → C
       {:ok, cap_c} =
-        Security.delegate(cap_b.id, agent_c,
-          delegator_private_key: identity_b.private_key
-        )
+        Security.delegate(cap_b.id, agent_c, delegator_private_key: identity_b.private_key)
 
       assert cap_c.delegation_depth == 1
       assert cap_c.parent_capability_id == cap_b.id
@@ -235,9 +226,7 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
 
       # A delegates to B
       {:ok, _cap_b} =
-        Security.delegate(cap_a.id, agent_b,
-          delegator_private_key: identity_a.private_key
-        )
+        Security.delegate(cap_a.id, agent_b, delegator_private_key: identity_a.private_key)
 
       # B can authorize before cascade
       assert {:ok, :authorized} =
@@ -308,14 +297,10 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
 
       # Subpath matches
       assert {:ok, :authorized} =
-               Security.authorize(agent_a, "arbor://shell/exec/git", nil,
-                 verify_identity: false
-               )
+               Security.authorize(agent_a, "arbor://shell/exec/git", nil, verify_identity: false)
 
       assert {:ok, :authorized} =
-               Security.authorize(agent_a, "arbor://shell/exec/ls", nil,
-                 verify_identity: false
-               )
+               Security.authorize(agent_a, "arbor://shell/exec/ls", nil, verify_identity: false)
 
       # Different category does NOT match
       assert {:error, :unauthorized} =
@@ -333,21 +318,17 @@ defmodule Arbor.Security.CapabilityLifecycleE2ETest do
 
       # Exact match succeeds
       assert {:ok, :authorized} =
-               Security.authorize(agent_a, "arbor://shell/exec/git", nil,
-                 verify_identity: false
-               )
+               Security.authorize(agent_a, "arbor://shell/exec/git", nil, verify_identity: false)
 
-      # Subpath of the resource matches (prefix matching)
-      assert {:ok, :authorized} =
+      # C8: a concrete grant does NOT cover the subtree (would need /**).
+      assert {:error, :unauthorized} =
                Security.authorize(agent_a, "arbor://shell/exec/git/status", nil,
                  verify_identity: false
                )
 
       # Different resource fails
       assert {:error, :unauthorized} =
-               Security.authorize(agent_a, "arbor://shell/exec/rm", nil,
-                 verify_identity: false
-               )
+               Security.authorize(agent_a, "arbor://shell/exec/rm", nil, verify_identity: false)
     end
   end
 end

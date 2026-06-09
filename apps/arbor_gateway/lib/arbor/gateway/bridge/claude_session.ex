@@ -31,12 +31,12 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
   require Logger
 
   # Default capabilities for Claude Code sessions at untrusted tier
-  # Uses prefix matching - "arbor://fs/read/" matches "arbor://fs/read/path/to/file"
+  # Uses prefix matching - "arbor://fs/read/**" matches "arbor://fs/read/path/to/file"
   @default_capabilities [
     # File system read - project directory
-    %{resource_uri: "arbor://fs/read/", constraints: %{}},
+    %{resource_uri: "arbor://fs/read/**", constraints: %{}},
     # File system write - project directory (rate limited)
-    %{resource_uri: "arbor://fs/write/", constraints: %{rate_limit: 100}},
+    %{resource_uri: "arbor://fs/write/**", constraints: %{rate_limit: 100}},
     # Shell execution - safe commands only (prefix matching)
     %{resource_uri: "arbor://shell/exec/git", constraints: %{}},
     %{resource_uri: "arbor://shell/exec/mix", constraints: %{}},
@@ -205,7 +205,7 @@ defmodule Arbor.Gateway.Bridge.ClaudeSession do
 
   defp expand_resource_uri(uri, _cwd) do
     # For now, keep URIs as-is
-    # Could expand "arbor://fs/read/" to "arbor://fs/read/#{cwd}/"
+    # Could expand "arbor://fs/read/**" to "arbor://fs/read/#{cwd}/"
     uri
   end
 

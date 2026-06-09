@@ -52,7 +52,7 @@ if Code.ensure_loaded?(Arbor.Security.CapabilityStore) and
   for test_agent <- test_agents do
     {:ok, agent_cap} =
       Arbor.Contracts.Security.Capability.new(
-        resource_uri: "arbor://orchestrator/execute",
+        resource_uri: "arbor://orchestrator/execute/**",
         principal_id: test_agent,
         delegation_depth: 0,
         constraints: %{},
@@ -77,7 +77,7 @@ defmodule Arbor.Orchestrator.TestCapabilities do
          Code.ensure_loaded?(Arbor.Contracts.Security.Capability) do
       {:ok, cap} =
         Arbor.Contracts.Security.Capability.new(
-          resource_uri: "arbor://orchestrator/execute",
+          resource_uri: "arbor://orchestrator/execute/**",
           principal_id: agent_id,
           delegation_depth: 0,
           constraints: %{},

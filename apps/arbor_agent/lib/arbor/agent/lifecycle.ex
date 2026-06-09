@@ -959,7 +959,10 @@ defmodule Arbor.Agent.Lifecycle do
         apply(Arbor.Contracts.TenantContext, :principal_id, [tenant_context])
 
       for op <- [:read, :write, :list] do
-        resource = "arbor://fs/#{op}/#{String.trim_leading(workspace_root, "/")}"
+        # `/**` so the workspace grant covers files WITHIN the workspace root,
+        # not just the root URI itself. Required as of the C8 fix (concrete
+        # URIs no longer implicitly grant their subtree).
+        resource = "arbor://fs/#{op}/#{String.trim_leading(workspace_root, "/")}/**"
 
         case Arbor.Security.grant(
                principal: agent_id,

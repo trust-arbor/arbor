@@ -668,11 +668,11 @@ defmodule Arbor.Security.AuthDecision do
         prefix = String.trim_trailing(cap_uri, "/*")
         resource_uri == prefix or String.starts_with?(resource_uri, prefix <> "/")
 
-      # Prefix match: arbor://shell/exec/git matches arbor://shell/exec/git/status
-      # (subpath access — matching CapabilityStore.find_authorizing behavior)
-      String.starts_with?(resource_uri, cap_uri <> "/") ->
-        true
-
+      # C8 review fix (2026-06-09): a CONCRETE capability URI grants ONLY its
+      # exact resource — no implicit subtree. Subtree access requires an
+      # explicit `/**` (or `/*`). Mirrors CapabilityStore.authorizes_resource?/2.
+      # Pre-fix, `String.starts_with?(resource_uri, cap_uri <> "/")` made every
+      # concrete grant a silent `/**`.
       true ->
         false
     end

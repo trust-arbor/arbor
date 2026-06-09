@@ -28,8 +28,8 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCoreTest do
       assert template.type == "claude_code"
       assert template.label == "Claude Code"
       resources = Enum.map(template.capabilities, & &1.resource)
-      assert "arbor://fs/read/" in resources
-      assert "arbor://fs/write/" in resources
+      assert "arbor://fs/read/**" in resources
+      assert "arbor://fs/write/**" in resources
       assert "arbor://shell/exec/git" in resources
     end
   end
@@ -177,8 +177,8 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCoreTest do
       claude_resources = Enum.map(claude_opts[:capabilities], & &1.resource)
       generic_resources = Enum.map(generic_opts[:capabilities], & &1.resource)
 
-      assert "arbor://fs/write/" in claude_resources
-      refute "arbor://fs/write/" in generic_resources
+      assert "arbor://fs/write/**" in claude_resources
+      refute "arbor://fs/write/**" in generic_resources
     end
 
     test "metadata includes external_agent flag and registered_via marker" do

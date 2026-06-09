@@ -34,8 +34,8 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
       description:
         "Anthropic's Claude Code CLI / desktop client. Default capabilities mirror the legacy ClaudeSession bridge: filesystem read/write, safe shell commands, web fetch, and limited agent spawning.",
       capabilities: [
-        %{resource: "arbor://fs/read/"},
-        %{resource: "arbor://fs/write/"},
+        %{resource: "arbor://fs/read/**"},
+        %{resource: "arbor://fs/write/**"},
         %{resource: "arbor://shell/exec/git"},
         %{resource: "arbor://shell/exec/mix"},
         %{resource: "arbor://shell/exec/elixir"},
@@ -54,7 +54,7 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
       label: "OpenAI Codex CLI",
       description: "Reserved for future use. Same default cap set as Claude Code.",
       capabilities: [
-        %{resource: "arbor://fs/read/"},
+        %{resource: "arbor://fs/read/**"},
         %{resource: "arbor://shell/exec/git"},
         %{resource: "arbor://tool/use/"}
       ]
@@ -65,7 +65,7 @@ defmodule Arbor.Dashboard.Cores.ExternalAgentsCore do
       description:
         "Minimal cap set: read-only filesystem and tool use. Grant more after registration if needed.",
       capabilities: [
-        %{resource: "arbor://fs/read/"},
+        %{resource: "arbor://fs/read/**"},
         %{resource: "arbor://tool/use/"}
       ]
     }

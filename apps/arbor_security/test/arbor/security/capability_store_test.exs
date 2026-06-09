@@ -105,8 +105,9 @@ defmodule Arbor.Security.CapabilityStoreTest do
       assert found.id == cap.id
     end
 
-    test "finds capability by prefix matching", %{agent_id: agent_id} do
-      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/prefix")
+    test "finds capability by /** subtree grant", %{agent_id: agent_id} do
+      # C8: subtree access requires an explicit /** wildcard.
+      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/prefix/**")
       {:ok, :stored} = CapabilityStore.put(cap)
 
       assert {:ok, _} =
@@ -114,6 +115,19 @@ defmodule Arbor.Security.CapabilityStoreTest do
                  agent_id,
                  "arbor://fs/read/prefix/subpath/file.ex"
                )
+    end
+
+    test "C8: a CONCRETE grant does NOT authorize its subtree (only the exact URI)",
+         %{agent_id: agent_id} do
+      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/exactonly")
+      {:ok, :stored} = CapabilityStore.put(cap)
+
+      # Exact resource is authorized.
+      assert {:ok, _} = CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/exactonly")
+
+      # A child path is NOT — concrete URIs no longer implicitly grant subtrees.
+      assert {:error, :not_found} =
+               CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/exactonly/child.txt")
     end
 
     test "returns not_found for unmatched resource", %{agent_id: agent_id} do
@@ -153,8 +167,9 @@ defmodule Arbor.Security.CapabilityStoreTest do
                CapabilityStore.find_authorizing(agent_id, "arbor://fs/readonly/file.txt")
     end
 
-    test "prefix matching does not cross segment boundaries", %{agent_id: agent_id} do
-      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/home")
+    test "/** wildcard does not cross segment boundaries", %{agent_id: agent_id} do
+      # C8: subtree coverage is via /**, and it must respect segment boundaries.
+      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/home/**")
       {:ok, :stored} = CapabilityStore.put(cap)
 
       # Should match subpath
@@ -166,17 +181,14 @@ defmodule Arbor.Security.CapabilityStoreTest do
                CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/home_config/file.txt")
     end
 
-    test "security regression (H8): trailing-slash pattern still matches subpaths",
+    test "security regression (H8): trailing-slash /** pattern still matches subpaths",
          %{agent_id: agent_id} do
-      # H8: pre-fix, a capability granted with a trailing slash
-      # ("arbor://fs/read/") produced double-slash in the prefix check:
-      #   starts_with?("arbor://fs/read/home", "arbor://fs/read/" <> "/")
-      #   == starts_with?("arbor://fs/read/home", "arbor://fs/read//")
-      #   == false
-      # so legitimate calls were denied despite an apparently correct
-      # capability. The fix normalizes both pattern and resource by
-      # stripping trailing slashes before matching.
-      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/")
+      # H8: pre-fix, a trailing slash produced a double-slash in the prefix
+      # check and wrongly denied legitimate subpaths. The matcher strips
+      # trailing slashes before matching. C8: subtree coverage is now via /**,
+      # so the grant uses the wildcard form; the trailing-slash normalization
+      # still applies to the wildcard prefix.
+      {:ok, cap} = build_capability(agent_id, "arbor://fs/read/**")
       {:ok, :stored} = CapabilityStore.put(cap)
 
       assert {:ok, _} =
@@ -184,7 +196,7 @@ defmodule Arbor.Security.CapabilityStoreTest do
                  agent_id,
                  "arbor://fs/read/home/file.txt"
                ),
-             "Trailing-slash pattern must match subpaths — H8 regression"
+             "/** pattern must match subpaths — H8 regression"
     end
   end
 
