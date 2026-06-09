@@ -229,11 +229,15 @@ defmodule Arbor.AI.AcpSession.Handler do
   # File authorization via FileGuard. When no agent_id, skip auth (system calls).
   # FileGuard does its own SafePath check internally, but we pre-check in validate_path
   # to give better error messages for workspace_root violations.
-  defp authorize_file(nil, _path, _operation), do: :ok
+  # @doc false — public for testability (the fail-closed regression test injects
+  # a raising file_guard_module). Production callers reach it via the read/write
+  # path; the head clauses must stay together so both are `def`.
+  @doc false
+  def authorize_file(nil, _path, _operation), do: :ok
 
-  defp authorize_file(agent_id, path, operation) do
-    if Process.whereis(Arbor.Security.CapabilityStore) do
-      case Arbor.Security.FileGuard.authorize(agent_id, path, operation) do
+  def authorize_file(agent_id, path, operation) do
+    if file_security_available?() do
+      case file_guard_module().authorize(agent_id, path, operation) do
         {:ok, _resolved} -> :ok
         {:error, reason} -> {:error, reason}
       end
@@ -242,9 +246,12 @@ defmodule Arbor.AI.AcpSession.Handler do
       :ok
     end
   rescue
-    _ -> :ok
+    # FAIL CLOSED: a crash while checking file access must DENY, never grant.
+    # (2026-06-09 Sentinel finding — the previous `:ok` auto-authorized a file
+    # operation on any exception/exit from FileGuard.)
+    e -> {:error, {:authorization_check_failed, Exception.message(e)}}
   catch
-    :exit, _ -> :ok
+    :exit, reason -> {:error, {:authorization_check_exited, reason}}
   end
 
   # Generic action authorization via Security.authorize/4.
@@ -360,8 +367,11 @@ defmodule Arbor.AI.AcpSession.Handler do
     end
   end
 
-  defp check_security_authorize(agent_id, resource_uri, action, state) do
-    if Process.whereis(Arbor.Security.CapabilityStore) do
+  # @doc false — public for testability (the fail-closed regression test injects
+  # a raising security_module). Production callers reach it via authorize_action.
+  @doc false
+  def check_security_authorize(agent_id, resource_uri, action, state) do
+    if action_security_available?() do
       # `verify_identity: false` — the ACP handler is an internal caller.
       # The `agent_id` was set at `Handler.init/1` time from session opts
       # (which are locked down via signed caps for pipelines), so the
@@ -370,7 +380,7 @@ defmodule Arbor.AI.AcpSession.Handler do
       # `session/request_permission` JSON-RPC doesn't carry one and
       # shouldn't need to, since the agent identity is intrinsic to the
       # session itself.
-      case Arbor.Security.authorize(agent_id, resource_uri, action, verify_identity: false) do
+      case security_module().authorize(agent_id, resource_uri, action, verify_identity: false) do
         {:ok, :authorized} ->
           :authorized
 
@@ -389,9 +399,28 @@ defmodule Arbor.AI.AcpSession.Handler do
       :authorized
     end
   rescue
-    _ -> :authorized
+    # FAIL CLOSED: a crash while consulting security must DENY, never grant.
+    # (2026-06-09 Sentinel finding — the previous `:authorized` auto-granted an
+    # ACP action on any exception/exit from Security.authorize.)
+    e -> {:denied, "authorization check failed: #{Exception.message(e)}"}
   catch
-    :exit, _ -> :authorized
+    :exit, reason -> {:denied, "authorization check exited: #{inspect(reason)}"}
+  end
+
+  # Security modules + availability, overridable via config for tests.
+  defp security_module, do: Application.get_env(:arbor_ai, :security_module, Arbor.Security)
+
+  defp file_guard_module,
+    do: Application.get_env(:arbor_ai, :file_guard_module, Arbor.Security.FileGuard)
+
+  defp action_security_available? do
+    Application.get_env(:arbor_ai, :security_module) != nil or
+      Process.whereis(Arbor.Security.CapabilityStore) != nil
+  end
+
+  defp file_security_available? do
+    Application.get_env(:arbor_ai, :file_guard_module) != nil or
+      Process.whereis(Arbor.Security.CapabilityStore) != nil
   end
 
   @doc false
