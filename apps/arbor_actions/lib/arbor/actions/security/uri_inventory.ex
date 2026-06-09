@@ -13,10 +13,16 @@ defmodule Arbor.Actions.Security.UriInventory do
   @doc_attrs [:moduledoc, :doc, :shortdoc, :typedoc]
   @uri_regex ~r{arbor://[A-Za-z0-9_/.*\-]+}
 
+  # Functions that take a resource URI to authorize, and variable names that
+  # hold a resource being authorized — used to detect "reaches authorize".
+  @authz_fns ~w(authorize can? validate authorize_file_op authorize_and_execute)a
+  @resource_vars ~w(resource resource_uri uri)a
+
   @type row :: %{
           namespace: String.t(),
           in_registry: boolean(),
           action_backed: boolean(),
+          authorized_at_callsite: boolean(),
           uncovered: [String.t()],
           count: non_neg_integer(),
           files: [String.t()],
@@ -29,6 +35,7 @@ defmodule Arbor.Actions.Security.UriInventory do
     prefixes = canonical_prefixes()
     reg_ns = prefixes |> Enum.map(&ns/1) |> MapSet.new()
     action_ns = action_namespaces()
+    authz_ns = authorized_namespaces(root)
 
     scan(root)
     |> Enum.group_by(fn {uri, _file} -> ns(uri) end)
@@ -38,24 +45,31 @@ defmodule Arbor.Actions.Security.UriInventory do
 
       in_reg = MapSet.member?(reg_ns, namespace)
       backed = MapSet.member?(action_ns, namespace)
+      authorized = MapSet.member?(authz_ns, namespace)
 
       %{
         namespace: namespace,
         in_registry: in_reg,
         action_backed: backed,
+        authorized_at_callsite: authorized,
         uncovered: uncovered,
         count: length(occ),
         files: occ |> Enum.map(&elem(&1, 1)) |> Enum.uniq() |> Enum.take(3),
-        recommendation: recommend(uncovered, in_reg, backed)
+        recommendation: recommend(uncovered, in_reg, backed, authorized)
       }
     end)
     |> Enum.sort_by(fn r -> {r.uncovered == [], r.namespace} end)
   end
 
-  defp recommend([], _in_reg, _backed), do: "ok"
-  defp recommend(_unc, _in_reg, true), do: "REGISTER (action-backed)"
-  defp recommend(_unc, true, _backed), do: "REGISTER sub-path (partial gap)"
-  defp recommend(_unc, false, false), do: "TRIAGE (grant-only: register or remove)"
+  defp recommend([], _reg, _backed, _authz), do: "ok"
+  defp recommend(_unc, _reg, true, _authz), do: "REGISTER (action-backed)"
+  defp recommend(_unc, true, _backed, _authz), do: "REGISTER sub-path (partial gap)"
+
+  defp recommend(_unc, false, false, true),
+    do: "REGISTER (authorized at call-site — denied in dev/prod)"
+
+  defp recommend(_unc, false, false, false),
+    do: "TRIAGE (grant-only, no call-site — likely stale)"
 
   # ---------------------------------------------------------------------------
 
@@ -96,6 +110,53 @@ defmodule Arbor.Actions.Security.UriInventory do
       ["arbor:", "", segment | _] -> segment
       _ -> uri
     end
+  end
+
+  # Namespaces whose URIs appear as an argument to an authz function
+  # (authorize/can?/validate/...) or as the RHS of an assignment to a
+  # resource-ish variable — i.e. URIs that reach `authorize`/`validate` and so
+  # are subject to enforcement. A positive signal (absence ≠ not-authorized,
+  # since many call sites build the URI through variables).
+  defp authorized_namespaces(root) do
+    Path.wildcard(Path.join(root, "**/*.ex"))
+    |> Enum.reject(&String.contains?(&1, "/test/"))
+    |> Enum.flat_map(fn file ->
+      case parse(file) do
+        {:ok, ast} -> authz_uris(ast)
+        _ -> []
+      end
+    end)
+    |> Enum.map(&ns/1)
+    |> MapSet.new()
+  end
+
+  defp authz_uris(ast) do
+    {_, uris} =
+      Macro.prewalk(ast, [], fn
+        {fun, _, args} = node, acc when fun in @authz_fns and is_list(args) ->
+          {node, uris_in(args) ++ acc}
+
+        {{:., _, [_mod, fun]}, _, args} = node, acc when fun in @authz_fns and is_list(args) ->
+          {node, uris_in(args) ++ acc}
+
+        {:=, _, [{var, _, ctx}, rhs]} = node, acc when var in @resource_vars and is_atom(ctx) ->
+          {node, uris_in([rhs]) ++ acc}
+
+        node, acc ->
+          {node, acc}
+      end)
+
+    Enum.uniq(uris)
+  end
+
+  defp uris_in(ast) do
+    {_, found} =
+      Macro.prewalk(ast, [], fn
+        s, acc when is_binary(s) -> {s, extract(s) ++ acc}
+        n, acc -> {n, acc}
+      end)
+
+    found
   end
 
   defp covered?(uri, prefixes) do

@@ -32,8 +32,8 @@ defmodule Mix.Tasks.Arbor.Security.UriInventory do
 
     Enum.each(rows, fn r ->
       Mix.shell().info(
-        "#{pad(r.namespace, 16)} #{yn(r.in_registry)}  #{yn(r.action_backed)}  " <>
-          "#{pad(to_string(length(r.uncovered)), 4)}  #{r.recommendation}"
+        "#{pad(r.namespace, 16)} #{yn(r.in_registry)}#{yn(r.action_backed)}" <>
+          "#{yn(r.authorized_at_callsite)} #{pad(to_string(length(r.uncovered)), 4)} #{r.recommendation}"
       )
     end)
 
@@ -42,8 +42,8 @@ defmodule Mix.Tasks.Arbor.Security.UriInventory do
   end
 
   defp header do
-    "#{pad("namespace", 16)} reg act  gap   recommendation\n" <>
-      String.duplicate("-", 60)
+    "#{pad("namespace", 16)} reg act auth gap   recommendation\n" <>
+      String.duplicate("-", 64)
   end
 
   defp yn(true), do: " ✓ "

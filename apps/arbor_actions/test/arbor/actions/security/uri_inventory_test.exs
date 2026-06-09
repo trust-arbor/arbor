@@ -29,6 +29,31 @@ defmodule Arbor.Actions.Security.UriInventoryTest do
     assert "a.ex" in Enum.map(row.files, &Path.basename/1)
   end
 
+  test "flags a grant-only URI authorized at a call-site as REGISTER", %{dir: dir} do
+    File.write!(Path.join(dir, "auth.ex"), """
+    defmodule Auth do
+      def go(id), do: Arbor.Security.authorize("a", "arbor://zzzauth/do/\#{id}", :execute)
+    end
+    """)
+
+    row = row_for(UriInventory.build(dir), "zzzauth")
+    assert row.authorized_at_callsite == true
+    assert row.recommendation =~ "authorized at call-site"
+  end
+
+  test "classifies a grant-only URI with no call-site as likely-stale", %{dir: dir} do
+    File.write!(Path.join(dir, "grant.ex"), """
+    defmodule Grant do
+      @grant %{resource_uri: "arbor://zzzstale/write/self/*"}
+      def g, do: @grant
+    end
+    """)
+
+    row = row_for(UriInventory.build(dir), "zzzstale")
+    assert row.authorized_at_callsite == false
+    assert row.recommendation =~ "likely stale"
+  end
+
   test "a registered namespace has no gap", %{dir: dir} do
     File.write!(Path.join(dir, "b.ex"), """
     defmodule B do
