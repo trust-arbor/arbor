@@ -106,6 +106,14 @@ config :arbor_agent, :auto_start_agents, [
 config :arbor_security,
   identity_verification: true,
   capability_signing_required: true,
+  # M3 review fix (2026-06-09): match prod (prod.exs already sets this).
+  # Without it, identity-registry unavailability / unknown-principal fails
+  # OPEN in dev — and the agent host runs dev. Verified safe before flipping:
+  # on the running server, unregistered string principals (e.g. "system")
+  # are already denied for lack of capabilities, and every working flow uses
+  # a registered crypto agent (status :active), so strict mode changes the
+  # denial *reason* for unregistered principals, not the outcome.
+  strict_identity_mode: true,
   policy_enforcer_enabled: true,
   approval_guard_enabled: true,
   uri_registry_enforcement: true,
