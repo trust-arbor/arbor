@@ -10,15 +10,15 @@ defmodule Arbor.Actions.Security.WholeTreeScan do
   findings.
   """
 
-  alias Arbor.Actions.Security.Detectors.SignedFieldCoverage
+  alias Arbor.Actions.Security.Detectors.{SignedFieldCoverage, UriRegistration}
   alias Arbor.Actions.Security.Recorder
   alias Arbor.Contracts.Security.Finding
 
   @default_output_dir ".arbor/security/findings"
 
-  # Registered whole-tree detectors. New L0b detectors (URI-registration
-  # coverage, regression-test presence, serializer⊇signed) are added here.
-  @detectors [SignedFieldCoverage]
+  # Registered whole-tree detectors. New L0b detectors (regression-test
+  # presence, serializer⊇signed) are added here.
+  @detectors [SignedFieldCoverage, UriRegistration]
 
   @doc """
   Run all whole-tree detectors over `root` (default `"apps"`). Returns
