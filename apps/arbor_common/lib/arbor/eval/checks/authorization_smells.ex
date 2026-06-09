@@ -226,6 +226,7 @@ defmodule Arbor.Eval.Checks.AuthorizationSmells do
     %{
       type: type,
       message: message_for(type, fun_name),
+      function: to_string(fun_name),
       line: meta[:line],
       column: meta[:column],
       severity: :warning,

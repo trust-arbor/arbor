@@ -234,6 +234,9 @@ defmodule Arbor.Actions do
   @spec list_actions() :: %{atom() => [module()]}
   def list_actions do
     %{
+      security: [
+        Arbor.Actions.Security.RunStaticDetectors
+      ],
       shell: [
         Arbor.Actions.Shell.Execute,
         Arbor.Actions.Shell.ExecuteScript
