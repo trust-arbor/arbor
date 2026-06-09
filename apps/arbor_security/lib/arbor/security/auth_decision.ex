@@ -355,7 +355,7 @@ defmodule Arbor.Security.AuthDecision do
 
   defp check_delegation_chain(auth, cap) do
     config = Arbor.Security.Config
-    signer = Arbor.Security.Signer
+    signer = delegation_signer_module()
     registry = Arbor.Security.Identity.Registry
 
     enabled =
@@ -378,12 +378,31 @@ defmodule Arbor.Security.AuthDecision do
         {:error, reason} -> {:error, {:delegation_chain_invalid, reason}, auth}
       end
     else
+      # Verification intentionally disabled (or signer absent) — not an
+      # error path; honor the cap. Only an active-verification crash below
+      # fails closed.
       {:ok, auth}
     end
   rescue
-    _ -> {:ok, auth}
+    # M1 review fix (2026-06-09): an exception while verifying delegation
+    # signatures must NOT accept the (possibly forged/corrupt) chain. The
+    # explicit {:error, {:delegation_chain_invalid, _}} above shows the
+    # intent is to reject bad chains; a crash is at least as suspicious.
+    # Fail closed. (Was `{:ok, auth}`.)
+    _ -> {:error, {:delegation_chain_invalid, :verification_error}, auth}
   catch
-    :exit, _ -> {:ok, auth}
+    :exit, _ -> {:error, {:delegation_chain_invalid, :verification_exit}, auth}
+  end
+
+  # Delegation-chain signer module, overridable via config for tests.
+  defp delegation_signer_module do
+    config = Arbor.Security.Config
+
+    if Code.ensure_loaded?(config) and function_exported?(config, :delegation_signer_module, 0) do
+      apply(config, :delegation_signer_module, [])
+    else
+      Arbor.Security.Signer
+    end
   end
 
   # Time constraints — not_before / expires_at (pure time comparison)

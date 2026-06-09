@@ -209,6 +209,19 @@ defmodule Arbor.Security.Config do
   end
 
   @doc """
+  The module used to verify capability delegation-chain signatures.
+
+  Must implement `verify_delegation_chain/2`. Defaults to
+  `Arbor.Security.Signer`. Overridable so tests can substitute a stub
+  (e.g. one that raises, to prove the auth chain fails closed when
+  delegation verification crashes).
+  """
+  @spec delegation_signer_module() :: module()
+  def delegation_signer_module do
+    Application.get_env(@app, :delegation_signer_module, Arbor.Security.Signer)
+  end
+
+  @doc """
   The module used for capability-bound filesystem path checks.
 
   Must implement `authorize/3` and `normalize_uri_path_for_capability/2`.
