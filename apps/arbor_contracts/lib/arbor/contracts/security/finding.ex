@@ -235,7 +235,12 @@ defmodule Arbor.Contracts.Security.Finding do
   end
 
   @doc """
-  Renders a finding as a roadmap-inbox markdown projection (the human view).
+  Renders a finding as a markdown projection (the human view) with a
+  machine-readable YAML frontmatter header.
+
+  The frontmatter (`status:` in particular) lets the file act as the source of
+  truth for the file-backed FindingStore — re-detection reads the status back to
+  decide whether to suppress (triaged), reopen (regressed), or refresh a finding.
 
   Pure formatting — the `show` step of the CRC pattern.
   """
@@ -247,6 +252,14 @@ defmodule Arbor.Contracts.Security.Finding do
     sev = finding.severity[:level] || finding.severity["level"] || :medium
 
     """
+    ---
+    id: #{finding.id}
+    status: #{finding.status}
+    category: #{finding.category}
+    severity: #{sev}
+    detected_at: #{finding.detected_at && DateTime.to_iso8601(finding.detected_at)}
+    ---
+
     # [#{sev}] #{finding.title}
 
     - **id:** `#{finding.id}`
@@ -267,6 +280,39 @@ defmodule Arbor.Contracts.Security.Finding do
     - risk class: #{finding.actionability[:risk_class] || :high}
     """
   end
+
+  @doc """
+  Parses the `status:` value from a rendered finding markdown (its frontmatter).
+
+  Returns the status atom, or `nil` if absent/unrecognized. Only known statuses
+  are returned (no `String.to_atom` on file content).
+  """
+  @spec status_from_markdown(String.t()) :: status() | nil
+  def status_from_markdown(content) when is_binary(content) do
+    case Regex.run(~r/^status:\s*([a-z_]+)\s*$/m, content) do
+      [_, raw] -> Enum.find(@valid_statuses, &(Atom.to_string(&1) == raw))
+      _ -> nil
+    end
+  end
+
+  @doc """
+  Rewrites the `status:` line in a rendered finding markdown's frontmatter.
+
+  Returns `{:ok, new_content}` or `{:error, :no_status_line | :invalid_status}`.
+  Pure string transform — used by the FindingStore to triage a finding in place.
+  """
+  @spec replace_status_in_markdown(String.t(), status()) ::
+          {:ok, String.t()} | {:error, :no_status_line | :invalid_status}
+  def replace_status_in_markdown(content, status)
+      when is_binary(content) and status in @valid_statuses do
+    if Regex.match?(~r/^status:\s*[a-z_]+\s*$/m, content) do
+      {:ok, Regex.replace(~r/^status:.*$/m, content, "status: #{status}", global: false)}
+    else
+      {:error, :no_status_line}
+    end
+  end
+
+  def replace_status_in_markdown(_content, _status), do: {:error, :invalid_status}
 
   # ---------------------------------------------------------------------------
   # Private

@@ -62,6 +62,7 @@ defmodule Arbor.Actions.Security.RunStaticDetectors do
        total: summary.total,
        by_category: summary.by_category,
        by_severity: summary.by_severity,
+       by_outcome: summary.by_outcome,
        recorded_to: summary.recorded_to,
        finding_ids: Enum.map(findings, & &1.id)
      }}
