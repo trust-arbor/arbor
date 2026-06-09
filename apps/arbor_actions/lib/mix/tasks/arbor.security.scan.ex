@@ -33,33 +33,48 @@ defmodule Mix.Tasks.Arbor.Security.Scan do
 
   use Mix.Task
 
-  alias Arbor.Actions.Security.StaticScan
+  alias Arbor.Actions.Security.{Recorder, StaticScan, WholeTreeScan}
 
-  @switches [changed: :boolean, base: :string, output_dir: :string, record: :boolean]
+  @switches [
+    changed: :boolean,
+    base: :string,
+    output_dir: :string,
+    record: :boolean,
+    whole_tree: :boolean
+  ]
 
   @impl Mix.Task
   def run(argv) do
-    # Compile but do NOT start the app — static scan needs no supervision tree.
+    # Compile but do NOT start the app — scanning needs no supervision tree.
     Mix.Task.run("compile")
 
     {opts, paths, _} = OptionParser.parse(argv, switches: @switches)
 
     targets = resolve_targets(opts, paths)
     git_sha = current_git_sha()
+    dir = Keyword.get(opts, :output_dir, ".arbor/security/findings")
+    record? = Keyword.get(opts, :record, true)
 
-    {findings, summary} =
-      StaticScan.scan(targets,
-        record: Keyword.get(opts, :record, true),
-        output_dir: Keyword.get(opts, :output_dir, ".arbor/security/findings"),
-        git_sha: git_sha
-      )
+    # Detect first (record: false), then record the combined set once so static
+    # (per-file) and whole-tree (cross-file) findings share one dedup + summary.
+    static = StaticScan.scan(targets, record: false, git_sha: git_sha) |> elem(0)
+
+    whole_tree =
+      if Keyword.get(opts, :whole_tree, true) do
+        WholeTreeScan.scan(record: false, git_sha: git_sha) |> elem(0)
+      else
+        []
+      end
+
+    findings = Enum.uniq_by(static ++ whole_tree, & &1.id)
+    {_outcomes, summary} = Recorder.record_all(findings, record?, dir)
 
     report(findings, summary)
 
     # Gate only on UNRESOLVED findings — new, refreshed-open, or regressed.
     # Already-triaged (wontfix / false_positive / accepted) ones are suppressed
     # and must not fail CI.
-    if Keyword.get(opts, :record, true) and unresolved_count(summary) > 0 do
+    if record? and unresolved_count(summary) > 0 do
       exit({:shutdown, 1})
     end
   end
