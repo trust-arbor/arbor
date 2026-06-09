@@ -235,15 +235,13 @@ defmodule Arbor.Security.SystemAuthority do
 
   @impl true
   def handle_call({:sign_receipt, receipt}, _from, %{identity: identity} = state) do
+    # Set issuer_id BEFORE computing the payload so it is covered by the
+    # signature (issuer_id is part of signing_payload as of the 2026-06-09 fix).
+    receipt = Map.put(receipt, :issuer_id, identity.agent_id)
     payload = InvocationReceipt.signing_payload(receipt)
     signature = Crypto.sign(payload, identity.private_key)
 
-    signed_receipt =
-      receipt
-      |> Map.put(:issuer_id, identity.agent_id)
-      |> Map.put(:signature, signature)
-
-    {:reply, {:ok, signed_receipt}, state}
+    {:reply, {:ok, Map.put(receipt, :signature, signature)}, state}
   end
 
   @impl true
