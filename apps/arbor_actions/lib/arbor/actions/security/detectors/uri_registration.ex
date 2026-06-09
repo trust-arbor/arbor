@@ -58,18 +58,56 @@ defmodule Arbor.Actions.Security.Detectors.UriRegistration do
   defp analyze_file(file, prefixes, git_sha) do
     case parse(file) do
       {:ok, ast} ->
-        doc = doc_uris(ast)
+        excluded = MapSet.union(doc_uris(ast), source_uris(ast))
 
         ast
         |> code_uris()
         |> Enum.uniq()
-        |> Enum.reject(&MapSet.member?(doc, &1))
+        |> Enum.reject(&MapSet.member?(excluded, &1))
         |> Enum.reject(&covered?(&1, prefixes))
         |> Enum.map(&finding(file, &1, git_sha))
 
       _ ->
         []
     end
+  end
+
+  # arbor:// literals that are provenance/source identifiers, not capabilities —
+  # the body of a `*_source` function (e.g. `bridge_source(id), do:
+  # "arbor://bridge/\#{id}"`, used as a signal `source:` tag, never authorized).
+  defp source_uris(ast) do
+    {_, uris} =
+      Macro.prewalk(ast, [], fn
+        {kind, _, [head, [do: body]]} = node, acc when kind in [:def, :defp] ->
+          case fun_name(head) do
+            name when is_atom(name) ->
+              if String.ends_with?(Atom.to_string(name), "_source"),
+                do: {node, body_uris(body) ++ acc},
+                else: {node, acc}
+
+            _ ->
+              {node, acc}
+          end
+
+        node, acc ->
+          {node, acc}
+      end)
+
+    MapSet.new(uris)
+  end
+
+  defp fun_name({:when, _, [{n, _, _} | _]}) when is_atom(n), do: n
+  defp fun_name({n, _, _}) when is_atom(n), do: n
+  defp fun_name(_), do: nil
+
+  defp body_uris(body) do
+    {_, uris} =
+      Macro.prewalk(body, [], fn
+        str, acc when is_binary(str) -> {str, extract(str) ++ acc}
+        node, acc -> {node, acc}
+      end)
+
+    uris
   end
 
   defp parse(file) do
