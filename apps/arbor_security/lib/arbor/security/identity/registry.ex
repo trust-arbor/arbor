@@ -14,6 +14,29 @@ defmodule Arbor.Security.Identity.Registry do
       config :arbor_security, :storage_backend, Arbor.Security.Store.JSONFile
 
   Set to `nil` to disable persistence (in-memory only).
+
+  ## Trust model (C10)
+
+  - **Self-certifying IDs.** Non-OIDC `agent_id` MUST equal
+    `hash(public_key)` — enforced in `register/2`. You cannot register as
+    another agent's key, so an existing identity can never be impersonated or
+    silently re-bound. Human (OIDC) IDs derive from `iss:sub`, authenticated
+    by the OIDC token.
+  - **No overwrite.** Re-registering an existing `agent_id` is rejected.
+  - **Names are not security-relevant.** `lookup_by_name/1` is explicitly
+    non-unique and is NEVER used in an authorization decision — identity
+    authorization is always by `agent_id`. Name squatting is therefore a
+    display nuisance, not an auth risk. (Keep it that way: do not add
+    authz-by-name.)
+  - **Registration authorization.** `register/2` consults an optional
+    `Config.registration_policy/0` before creating a NEW identity. Default
+    `nil` (allow) — every current caller is internal (agent lifecycle,
+    scheduler); there is no external registration endpoint. The policy seam is
+    the place to require an enrollment token / operator approval WHEN an
+    external registration path is added.
+  - **Store integrity.** Persisted entries (public keys only) are within the
+    conceded same-UID/file-access threat (T4). A signed/HMAC'd identity store
+    is a Layer 3 follow-up.
   """
 
   use GenServer
@@ -47,10 +70,34 @@ defmodule Arbor.Security.Identity.Registry do
   The identity's private key is stripped before storage. Rejects registration
   if the agent_id does not match the derived ID from the public key, or if
   the agent_id is already registered.
+
+  `opts` is passed to the configured registration policy (see
+  `register/2`) — e.g. `enrollment_token:` or `requested_by:` for an external
+  enrollment flow.
   """
   @spec register(Identity.t()) :: :ok | {:error, term()}
-  def register(%Identity{} = identity) do
-    GenServer.call(__MODULE__, {:register, identity})
+  def register(%Identity{} = identity), do: register(identity, [])
+
+  @doc """
+  Register an identity, passing `opts` to the registration policy.
+
+  ## Registration authorization (C10)
+
+  Before the self-certifying check, the registry consults an optional
+  **registration policy** — `Arbor.Security.Config.registration_policy/0`, a
+  module implementing `authorize_registration/2`. The default is `nil`
+  (allow), preserving today's behavior: every caller is internal (agent
+  lifecycle, scheduler) and trusted.
+
+  This is the chokepoint to enforce *who may mint identities* when an
+  external registration path is added (e.g. require a signed enrollment
+  token, or operator approval). The self-certifying check (`agent_id ==
+  hash(pubkey)`) prevents impersonating an existing key regardless of policy;
+  the policy governs whether a NEW identity may be created at all.
+  """
+  @spec register(Identity.t(), keyword()) :: :ok | {:error, term()}
+  def register(%Identity{} = identity, opts) when is_list(opts) do
+    GenServer.call(__MODULE__, {:register, identity, opts})
   end
 
   @doc """
@@ -229,10 +276,22 @@ defmodule Arbor.Security.Identity.Registry do
   end
 
   @impl true
-  def handle_call({:register, %Identity{} = identity}, _from, state) do
+  def handle_call({:register, %Identity{} = identity, opts}, _from, state) do
     expected_id = Crypto.derive_agent_id(identity.public_key)
+    # C10: evaluate the registration policy ONCE (a policy may consume a
+    # one-time enrollment token, so it must not be called twice).
+    policy_result = registration_authorized(identity, opts)
 
     cond do
+      # Registration-authorization chokepoint. Default policy allows (internal
+      # callers only); a configured policy gates who may create a NEW identity
+      # (e.g. external enrollment requiring a signed token). The self-certifying
+      # check below still runs after, so a policy can never weaken the
+      # agent_id == hash(pubkey) binding.
+      match?({:error, _}, policy_result) ->
+        {:error, reason} = policy_result
+        {:reply, {:error, {:registration_denied, reason}}, state}
+
       # Human identities derive agent_id from OIDC iss:sub, not from public key.
       # The OIDC token verification authenticates the binding; IdentityStore ensures
       # the same iss:sub always loads the same keypair.
@@ -470,6 +529,39 @@ defmodule Arbor.Security.Identity.Registry do
   @impl true
   def handle_info(_msg, state), do: {:noreply, state}
 
+  # C10 registration-authorization seam. A configured policy module
+  # (Config.registration_policy/0) implementing authorize_registration/2 can
+  # gate who may create a new identity. Default (nil) = allow — every current
+  # caller is internal/trusted. Fails CLOSED if a configured policy crashes.
+  defp registration_authorized(identity, opts) do
+    case registration_policy_module() do
+      nil ->
+        :ok
+
+      policy when is_atom(policy) ->
+        if Code.ensure_loaded?(policy) and function_exported?(policy, :authorize_registration, 2) do
+          apply(policy, :authorize_registration, [identity, opts])
+        else
+          # Misconfigured policy — fail closed rather than silently allow.
+          {:error, :registration_policy_unavailable}
+        end
+    end
+  rescue
+    _ -> {:error, :registration_policy_error}
+  catch
+    :exit, _ -> {:error, :registration_policy_error}
+  end
+
+  defp registration_policy_module do
+    config = Arbor.Security.Config
+
+    if Code.ensure_loaded?(config) and function_exported?(config, :registration_policy, 0) do
+      apply(config, :registration_policy, [])
+    else
+      nil
+    end
+  end
+
   defp subscribe_to_distributed_signals do
     if Config.distributed_signals_enabled?() do
       bus = Arbor.Signals.Bus
@@ -477,7 +569,8 @@ defmodule Arbor.Security.Identity.Registry do
       if Code.ensure_loaded?(bus) and Process.whereis(bus) do
         me = self()
 
-        for type <- ~w(identity_registered identity_deregistered identity_suspended identity_resumed identity_revoked) do
+        for type <-
+              ~w(identity_registered identity_deregistered identity_suspended identity_resumed identity_revoked) do
           Signals.subscribe("security.#{type}", fn signal ->
             send(me, {:signal_received, signal})
             :ok
@@ -493,10 +586,15 @@ defmodule Arbor.Security.Identity.Registry do
 
   defp emit_identity_signal(type, agent_id) do
     if Config.distributed_signals_enabled?() do
-      Signals.emit(:security, type, %{
-        agent_id: agent_id,
-        origin_node: node()
-      }, scope: :cluster)
+      Signals.emit(
+        :security,
+        type,
+        %{
+          agent_id: agent_id,
+          origin_node: node()
+        },
+        scope: :cluster
+      )
     end
   catch
     _, _ -> :ok
@@ -539,7 +637,12 @@ defmodule Arbor.Security.Identity.Registry do
   end
 
   defp handle_remote_identity_signal(type, data, state)
-       when type in [:identity_deregistered, :identity_suspended, :identity_resumed, :identity_revoked] do
+       when type in [
+              :identity_deregistered,
+              :identity_suspended,
+              :identity_resumed,
+              :identity_revoked
+            ] do
     agent_id = data[:agent_id] || data["agent_id"]
 
     if agent_id && Map.has_key?(state.by_agent_id, agent_id) do

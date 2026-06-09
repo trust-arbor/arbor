@@ -43,6 +43,85 @@ defmodule Arbor.Security.Identity.RegistryTest do
     end
   end
 
+  describe "registration policy (C10)" do
+    # A policy that denies, reading its verdict + a notify pid from app env so
+    # we can also assert it's consulted exactly once (a real policy may consume
+    # a one-time enrollment token).
+    defmodule TogglePolicy do
+      @moduledoc false
+      def authorize_registration(_identity, _opts) do
+        if pid = Application.get_env(:arbor_security, :test_policy_notify) do
+          send(pid, :policy_called)
+        end
+
+        Application.get_env(:arbor_security, :test_policy_verdict, :ok)
+      end
+    end
+
+    defmodule NoCallbackPolicy do
+      @moduledoc false
+    end
+
+    setup do
+      on_exit(fn ->
+        Application.delete_env(:arbor_security, :registration_policy)
+        Application.delete_env(:arbor_security, :test_policy_verdict)
+        Application.delete_env(:arbor_security, :test_policy_notify)
+      end)
+
+      :ok
+    end
+
+    test "default (no policy) allows registration", %{identity: identity} do
+      assert :ok = Registry.register(identity)
+    end
+
+    test "a denying policy blocks registration with :registration_denied", %{identity: identity} do
+      Application.put_env(:arbor_security, :registration_policy, TogglePolicy)
+      Application.put_env(:arbor_security, :test_policy_verdict, {:error, :no_enrollment_token})
+
+      assert {:error, {:registration_denied, :no_enrollment_token}} = Registry.register(identity)
+      # And the identity was NOT created.
+      assert {:error, :not_found} = Registry.lookup(identity.agent_id)
+    end
+
+    test "an allowing policy permits registration and is consulted exactly once",
+         %{identity: identity} do
+      Application.put_env(:arbor_security, :registration_policy, TogglePolicy)
+      Application.put_env(:arbor_security, :test_policy_verdict, :ok)
+      Application.put_env(:arbor_security, :test_policy_notify, self())
+
+      assert :ok = Registry.register(identity)
+
+      # Exactly one consultation — a policy that consumes a one-time token
+      # must not be double-charged.
+      assert_received :policy_called
+      refute_received :policy_called
+    end
+
+    test "a misconfigured policy (no callback) fails CLOSED", %{identity: identity} do
+      Application.put_env(:arbor_security, :registration_policy, NoCallbackPolicy)
+
+      assert {:error, {:registration_denied, :registration_policy_unavailable}} =
+               Registry.register(identity)
+    end
+
+    test "the policy cannot weaken the self-certifying check" do
+      # Even with an allow-all policy, a mismatched agent_id is still rejected.
+      Application.put_env(:arbor_security, :registration_policy, TogglePolicy)
+      Application.put_env(:arbor_security, :test_policy_verdict, :ok)
+
+      {:ok, identity} = Identity.generate()
+
+      tampered = %{
+        identity
+        | agent_id: "agent_0000000000000000000000000000000000000000000000000000000000000000"
+      }
+
+      assert {:error, {:agent_id_mismatch, _, :expected, _}} = Registry.register(tampered)
+    end
+  end
+
   describe "registered?/1" do
     test "returns true for registered agent", %{identity: identity} do
       :ok = Registry.register(identity)
