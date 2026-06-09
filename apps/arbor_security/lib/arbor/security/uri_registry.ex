@@ -109,6 +109,12 @@ defmodule Arbor.Security.UriRegistry do
     # Gateway MCP bridge
     "arbor://mcp/",
 
+    # Gateway tool/status bridges — authorized at call-sites (ClaudeSession
+    # tool-use fallback, MCP status disclosure) but were unregistered, so
+    # denied under enforcement. (Security Sentinel uri-inventory, 2026-06-09.)
+    "arbor://tool/use",
+    "arbor://status",
+
     # FileGuard (filesystem operations)
     "arbor://fs/read",
     "arbor://fs/write",
