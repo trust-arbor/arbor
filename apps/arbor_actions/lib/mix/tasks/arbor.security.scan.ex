@@ -56,10 +56,20 @@ defmodule Mix.Tasks.Arbor.Security.Scan do
 
     report(findings, summary)
 
-    if summary.total > 0 and Keyword.get(opts, :record, true) do
+    # Gate only on UNRESOLVED findings — new, refreshed-open, or regressed.
+    # Already-triaged (wontfix / false_positive / accepted) ones are suppressed
+    # and must not fail CI.
+    if Keyword.get(opts, :record, true) and unresolved_count(summary) > 0 do
       exit({:shutdown, 1})
     end
   end
+
+  defp unresolved_count(%{by_outcome: outcomes}) do
+    Map.get(outcomes, :recorded, 0) + Map.get(outcomes, :updated, 0) +
+      Map.get(outcomes, :reopened, 0)
+  end
+
+  defp unresolved_count(_), do: 0
 
   defp resolve_targets(opts, paths) do
     cond do
@@ -95,11 +105,15 @@ defmodule Mix.Tasks.Arbor.Security.Scan do
   end
 
   defp report(findings, summary) do
-    Mix.shell().info("Security Sentinel: #{summary.total} finding(s)")
+    Mix.shell().info("Security Sentinel: #{summary.total} finding(s) detected")
     Mix.shell().info("  by severity: #{inspect(summary.by_severity)}")
     Mix.shell().info("  by category: #{inspect(summary.by_category)}")
 
-    if summary.recorded_to, do: Mix.shell().info("  recorded to: #{summary.recorded_to}/")
+    if summary.recorded_to do
+      Mix.shell().info("  outcomes: #{inspect(summary.by_outcome)}")
+      Mix.shell().info("  unresolved (gates CI): #{unresolved_count(summary)}")
+      Mix.shell().info("  recorded to: #{summary.recorded_to}/")
+    end
 
     Mix.shell().info("")
 
