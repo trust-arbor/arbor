@@ -69,7 +69,7 @@ defmodule Arbor.Gateway.MCP.ResourceBridge do
     uri = capability_uri(server_name, resource_name)
 
     if security_available?() do
-      case apply(Arbor.Security, :authorize, [agent_id, uri, %{action: :read}]) do
+      case apply(security_module(), :authorize, [agent_id, uri, %{action: :read}]) do
         {:ok, _} ->
           :ok
 
@@ -81,9 +81,18 @@ defmodule Arbor.Gateway.MCP.ResourceBridge do
       :ok
     end
   rescue
-    _ -> :ok
+    # FAIL CLOSED: a crash while consulting security must DENY, never grant.
+    # (2026-06-09 Sentinel finding — the previous `:ok` auto-authorized an
+    # external MCP resource read on any exception.)
+    e ->
+      {:error, :unauthorized,
+       "authorization check failed for #{capability_uri(server_name, resource_name)}: " <>
+         Exception.message(e)}
   catch
-    :exit, _ -> :ok
+    :exit, reason ->
+      {:error, :unauthorized,
+       "authorization check exited for #{capability_uri(server_name, resource_name)}: " <>
+         inspect(reason)}
   end
 
   @doc """
@@ -108,9 +117,20 @@ defmodule Arbor.Gateway.MCP.ResourceBridge do
 
   # -- Private --
 
-  defp security_available? do
-    Code.ensure_loaded?(Arbor.Security) and
-      function_exported?(Arbor.Security, :authorize, 3) and
-      Process.whereis(Arbor.Security.CapabilityStore) != nil
+  # Security module, overridable via config for tests / deployment swaps.
+  defp security_module do
+    Application.get_env(:arbor_gateway, :security_module, Arbor.Security)
   end
+
+  defp security_available? do
+    mod = security_module()
+
+    Code.ensure_loaded?(mod) and function_exported?(mod, :authorize, 3) and
+      security_running?(mod)
+  end
+
+  defp security_running?(Arbor.Security),
+    do: Process.whereis(Arbor.Security.CapabilityStore) != nil
+
+  defp security_running?(_injected), do: true
 end
