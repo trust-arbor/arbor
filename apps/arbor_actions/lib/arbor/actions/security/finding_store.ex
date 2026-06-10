@@ -98,6 +98,38 @@ defmodule Arbor.Actions.Security.FindingStore do
   end
 
   @doc """
+  Appends an adversarial-verification verdict to a finding's file (advisory — it
+  annotates, it does not change status). Returns `:ok` or `{:error, :not_found}`.
+  """
+  @spec annotate_verification(String.t(), map(), keyword()) :: :ok | {:error, term()}
+  def annotate_verification(id, verdict, opts \\ []) do
+    dir = Keyword.get(opts, :dir, @default_dir)
+    path = path_for(id, dir)
+
+    with {:ok, content} <- read_existing(path) do
+      File.write!(path, content <> verification_block(verdict))
+      :ok
+    end
+  end
+
+  defp verification_block(v) do
+    dissent =
+      case Map.get(v, :dissent, []) do
+        [] -> "  (none)"
+        reasons -> Enum.map_join(reasons, "\n", &"  - #{&1}")
+      end
+
+    """
+
+    ## Verification (adversarial)
+    - verdict: #{v.verdict} (#{v.refuted}/#{v.total} skeptics refuted)
+    - confidence: #{v.confidence}
+    - dissent:
+    #{dissent}
+    """
+  end
+
+  @doc """
   Lists finding ids in the store, optionally filtered by status.
 
   Returns `[{id, status}]`.

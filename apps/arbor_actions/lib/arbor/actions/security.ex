@@ -115,6 +115,53 @@ defmodule Arbor.Actions.Security.RunDependencyScan do
   end
 end
 
+defmodule Arbor.Actions.Security.AggregateVerdict do
+  @moduledoc """
+  Aggregate the adversarial-verify skeptic outputs into a verdict and annotate
+  the finding (advisory). The terminal node of `verify-finding.dot`: the N
+  skeptic `compute` nodes feed their outputs here; this computes majority-refute
+  via `Arbor.Actions.Security.Verifier` and appends the verdict to the finding.
+  """
+
+  use Jido.Action,
+    name: "security_aggregate_verdict",
+    description: "Aggregate adversarial verify-finding skeptic outputs into a verdict",
+    category: "security",
+    tags: ["security", "sentinel", "verify"],
+    schema: [
+      skeptic_1: [type: :string, default: ""],
+      skeptic_2: [type: :string, default: ""],
+      skeptic_3: [type: :string, default: ""],
+      finding_id: [type: {:or, [:string, nil]}, default: nil],
+      output_dir: [type: :string, default: ".arbor/security/findings"]
+    ]
+
+  alias Arbor.Actions.Security.{FindingStore, Verifier}
+
+  @impl true
+  def run(params, _context) do
+    outputs =
+      [params[:skeptic_1], params[:skeptic_2], params[:skeptic_3]]
+      |> Enum.reject(&(&1 in [nil, ""]))
+
+    verdict = Verifier.aggregate_verdict(outputs)
+
+    if params[:finding_id] do
+      FindingStore.annotate_verification(params[:finding_id], verdict,
+        dir: params[:output_dir] || ".arbor/security/findings"
+      )
+    end
+
+    {:ok,
+     %{
+       verdict: verdict.verdict,
+       confidence: verdict.confidence,
+       refuted: verdict.refuted,
+       total: verdict.total
+     }}
+  end
+end
+
 defmodule Arbor.Actions.Security.RunWholeTreeDetectors do
   @moduledoc """
   Run the cross-file (L0b) security detectors — e.g. signed-field coverage — over

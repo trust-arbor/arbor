@@ -237,7 +237,8 @@ defmodule Arbor.Actions do
       security: [
         Arbor.Actions.Security.RunStaticDetectors,
         Arbor.Actions.Security.RunWholeTreeDetectors,
-        Arbor.Actions.Security.RunDependencyScan
+        Arbor.Actions.Security.RunDependencyScan,
+        Arbor.Actions.Security.AggregateVerdict
       ],
       shell: [
         Arbor.Actions.Shell.Execute,
