@@ -9,6 +9,7 @@ defmodule Arbor.Consensus.Coordinator.Voting do
   alias Arbor.Consensus.{Config, Council, EvaluatorAgent, EventEmitter, EventStore}
   alias Arbor.Consensus.Coordinator.TopicRouting
   alias Arbor.Contracts.Consensus.{ConsensusEvent, CouncilDecision, Proposal}
+  alias Arbor.Persistence.VerdictLog
   alias Arbor.Signals
 
   require Logger
@@ -419,6 +420,12 @@ defmodule Arbor.Consensus.Coordinator.Voting do
       EventEmitter.decision_rendered(decision)
     end
 
+    # Project the aggregate decision onto the shared Verdict contract and persist
+    # it to the eval tables alongside judge + security verdicts (the consolidate-
+    # llm-opinion-systems seam). This is what makes CouncilDecision.to_verdict/1
+    # live. Best-effort — never break the decision flow.
+    persist_decision_verdict(decision, proposal)
+
     # Record to in-memory event store
     event_type = if proposal.mode == :advisory, do: :advice_rendered, else: :decision_reached
 
@@ -441,6 +448,26 @@ defmodule Arbor.Consensus.Coordinator.Voting do
 
     maybe_execute(state, proposal, decision)
   end
+
+  defp persist_decision_verdict(%CouncilDecision{} = decision, proposal) do
+    VerdictLog.record(CouncilDecision.to_verdict(decision),
+      domain: "council_decision",
+      source: "council",
+      sample_id: decision.proposal_id,
+      input: Map.get(proposal, :description, ""),
+      result_metadata: %{
+        "proposal_id" => decision.proposal_id,
+        "mode" => to_string(Map.get(proposal, :mode, :decision)),
+        "decision" => to_string(decision.decision)
+      }
+    )
+  rescue
+    e ->
+      Logger.debug("council verdict projection failed: #{Exception.message(e)}")
+      :ok
+  end
+
+  defp persist_decision_verdict(_decision, _proposal), do: :ok
 
   defp maybe_authorize_execution(nil, _proposal, _decision), do: :ok
   defp maybe_authorize_execution(_authorizer, _proposal, nil), do: :ok

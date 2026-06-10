@@ -2,14 +2,14 @@ defmodule Arbor.Actions.Judge.ResultStore do
   @moduledoc """
   Persists judge verdicts as EvalRun + EvalResult records.
 
-  Thin adapter over the shared `Arbor.Actions.Opinion.VerdictLog`: it supplies
+  Thin adapter over the shared `Arbor.Persistence.VerdictLog`: it supplies
   the judge-specific edges (domain `"llm_judge"`, perspective dataset, rubric
   config + snapshot) and lets the shared projection do the Verdict→eval-tables
   write. See the consolidate-llm-opinion-systems roadmap item.
   """
 
-  alias Arbor.Actions.Opinion.VerdictLog
   alias Arbor.Contracts.Judge.Rubric
+  alias Arbor.Persistence.VerdictLog
 
   @domain "llm_judge"
 
