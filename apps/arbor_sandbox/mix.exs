@@ -32,8 +32,11 @@ defmodule Arbor.Sandbox.MixProject do
       {:arbor_security, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
       {:dune, "~> 0.3.15"},
+      # Pinned to an immutable ref (not branch: main) — see root mix.exs.
       {:jido_sandbox,
-       git: "https://github.com/agentjido/jido_sandbox.git", branch: "main", override: true},
+       git: "https://github.com/agentjido/jido_sandbox.git",
+       ref: "7fc90881d3c8ca49e769413cc8217344f2b4c29a",
+       override: true},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
