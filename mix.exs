@@ -32,9 +32,14 @@ defmodule Arbor.MixProject do
       {:jido_signal, "~> 2.0", override: true},
       {:jido_ai, "~> 2.0.0-rc.0", override: true},
       {:req_llm, "~> 1.6", override: true},
-      # jido_sandbox has no Hex release yet
+      # jido_sandbox has no Hex release yet. Pinned to an immutable ref (not
+      # branch: main) — upstream main has since refactored to Jido.Sandbox +
+      # removed the VFS/Lua API arbor_sandbox depends on; adopting it is a
+      # deliberate migration, not an unreviewed branch float. (Sentinel finding.)
       {:jido_sandbox,
-       git: "https://github.com/agentjido/jido_sandbox.git", branch: "main", override: true},
+       git: "https://github.com/agentjido/jido_sandbox.git",
+       ref: "7fc90881d3c8ca49e769413cc8217344f2b4c29a",
+       override: true},
       # Path dep while permission_mode work is unpublished. Flip back
       # to `{:ex_mcp, "~> 0.12.0", override: true}` once published.
       {:ex_mcp, path: "../../ex_mcp", override: true},
