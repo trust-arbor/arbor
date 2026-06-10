@@ -30,7 +30,11 @@ digraph verify_finding {
     llm_model="gemma-4-31b-it",
     use_tools="false",
     temperature="0.3",
-    max_tokens="2048",
+    // Gemma 4 31B is a reasoning model — it spends ~2K tokens thinking before
+    // the answer, so 2048 truncates before the VERDICT line. 8192 finished
+    // cleanly (finish_reason=stop) in live testing; raise if a complex finding
+    // ever truncates. (Same class of issue as upstream_deps_summary's 32K.)
+    max_tokens="8192",
     prompt_context_key="finding_content",
     system_prompt="You are a skeptical, adversarial security reviewer. You are given ONE security finding (markdown). Your job is to REFUTE it: find any reason it is a false positive, intentional/by-design, already mitigated elsewhere, or not actually exploitable. Be specific and concrete. Only CONFIRM if you genuinely cannot refute it. Default to REFUTED when uncertain. End your response with EXACTLY one final line: `VERDICT: REFUTED - <one-line reason>` or `VERDICT: CONFIRMED`."
   ]
