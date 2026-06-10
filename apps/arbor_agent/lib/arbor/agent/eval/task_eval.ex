@@ -173,6 +173,7 @@ defmodule Arbor.Agent.Eval.TaskEval do
       proposal_text: nil,
       proposal_quality: nil,
       council_verdict: nil,
+      judge_verdict: nil,
       file_reads: 0,
       unique_files: MapSet.new(),
       total_actions: 0
@@ -215,12 +216,23 @@ defmodule Arbor.Agent.Eval.TaskEval do
               end
             end
 
+          # Same deep-eval opt-in: an LLM-as-judge rubric verdict (Verdict struct)
+          # complementing the keyword `score` and the council vote.
+          judge_verdict =
+            if council? do
+              case ProposalScorer.judge_score(proposal_text, bug) do
+                {:ok, verdict} -> verdict
+                _ -> nil
+              end
+            end
+
           new_state
           |> Map.merge(%{
             proposal_submitted: true,
             proposal_text: proposal_text,
             proposal_quality: score,
-            council_verdict: council_verdict
+            council_verdict: council_verdict,
+            judge_verdict: judge_verdict
           })
           |> finalize_trial(bug)
         else
@@ -280,6 +292,7 @@ defmodule Arbor.Agent.Eval.TaskEval do
       proposal_text: proposal_text,
       proposal_quality: proposal_quality || ProposalScorer.score("", bug),
       council_verdict: state.council_verdict,
+      judge_verdict: state.judge_verdict,
       file_reads: state.file_reads,
       unique_files: MapSet.size(state.unique_files),
       repeated_reads: repeated_reads,
