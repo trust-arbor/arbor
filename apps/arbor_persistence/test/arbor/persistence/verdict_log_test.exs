@@ -1,16 +1,16 @@
-defmodule Arbor.Actions.Opinion.VerdictLogTest do
+defmodule Arbor.Persistence.VerdictLogTest do
   @moduledoc """
   Tests the pure `VerdictLog.project/2` — the shared Verdict→eval-tables
   projection used by judge, security verify-finding, and council. The write
-  path (`record/2`) degrades silently without Postgres, so we test the
-  projection directly.
+  path (`record/2`) degrades silently without a running Repo, so the projection
+  is tested directly.
   """
   use ExUnit.Case, async: true
 
   @moduletag :fast
 
-  alias Arbor.Actions.Opinion.VerdictLog
   alias Arbor.Contracts.Judge.Verdict
+  alias Arbor.Persistence.VerdictLog
 
   defp verdict(attrs \\ %{}) do
     {:ok, v} =
@@ -69,19 +69,19 @@ defmodule Arbor.Actions.Opinion.VerdictLogTest do
     test "domain-specific edges flow through (sample_id, input, source, metadata merge)" do
       {run, result} =
         VerdictLog.project(verdict(),
-          domain: "security_verify",
-          source: "security.verify_finding",
-          sample_id: "sec-finding_abc",
-          input: "Finding sec-finding_abc",
-          result_metadata: %{"finding_id" => "sec-finding_abc"}
+          domain: "council_decision",
+          source: "council",
+          sample_id: "prop_abc",
+          input: "Proposal prop_abc",
+          result_metadata: %{"proposal_id" => "prop_abc"}
         )
 
-      assert run.metadata["source"] == "security.verify_finding"
-      assert result.sample_id == "sec-finding_abc"
-      assert result.input == "Finding sec-finding_abc"
-      assert result.metadata["finding_id"] == "sec-finding_abc"
+      assert run.metadata["source"] == "council"
+      assert result.sample_id == "prop_abc"
+      assert result.input == "Proposal prop_abc"
+      assert result.metadata["proposal_id"] == "prop_abc"
       # generic metadata still present alongside the merged edge
-      assert result.metadata["source"] == "security.verify_finding"
+      assert result.metadata["source"] == "council"
       assert result.metadata["recommendation"] == "keep"
     end
 
@@ -91,8 +91,9 @@ defmodule Arbor.Actions.Opinion.VerdictLogTest do
   end
 
   describe "record/2 degradation" do
-    test "returns :ok when persistence is unavailable (no DB in test)" do
-      assert VerdictLog.record(verdict(), domain: "security_verify") == :ok
+    test "never raises; returns :ok or {:ok, run_id} regardless of Repo state" do
+      result = VerdictLog.record(verdict(), domain: "security_verify")
+      assert result == :ok or match?({:ok, _}, result)
     end
   end
 end

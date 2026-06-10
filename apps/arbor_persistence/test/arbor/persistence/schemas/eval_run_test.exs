@@ -59,7 +59,7 @@ defmodule Arbor.Persistence.Schemas.EvalRunTest do
       # persist failed changeset validation and degraded silently (2026-06-10
       # architecture review finding).
       for domain <-
-            ~w(coding chat heartbeat embedding advisory_consultation llm_judge security_verify memory_ablation effective_window) do
+            ~w(coding chat heartbeat embedding advisory_consultation llm_judge security_verify council_decision memory_ablation effective_window) do
         cs = EvalRun.changeset(%EvalRun{}, Map.put(@valid_attrs, :domain, domain))
         assert cs.valid?, "Expected domain '#{domain}' to be valid"
       end

@@ -268,8 +268,8 @@ defmodule Arbor.Actions.Security.AggregateVerdict do
       output_dir: [type: :string, default: ".arbor/security/findings"]
     ]
 
-  alias Arbor.Actions.Opinion.VerdictLog
   alias Arbor.Actions.Security.{FindingStore, Verifier}
+  alias Arbor.Persistence.VerdictLog
   alias Arbor.Contracts.Judge.Verdict
 
   @impl true

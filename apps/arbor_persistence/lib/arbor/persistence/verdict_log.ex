@@ -1,29 +1,31 @@
-defmodule Arbor.Actions.Opinion.VerdictLog do
+defmodule Arbor.Persistence.VerdictLog do
   @moduledoc """
   Shared persistence projection for the LLM-opinion systems: writes a
   `Arbor.Contracts.Judge.Verdict` to the eval tables (`EvalRun` + `EvalResult`)
-  so every opinion — judge critique, security verify-finding, council (via
+  so every opinion — judge critique, security verify-finding, and council (via
   `CouncilDecision.to_verdict/1`) — is observable in one place (the eval
   dashboard), partitioned by `domain`.
 
   This is the consolidation seam (see the consolidate-llm-opinion-systems
-  roadmap item): before it, `Judge.ResultStore` and `ConsultationLog` each
-  hand-rolled this write, and security verify-finding wrote nothing to the eval
-  tables at all (its verdict only annotated the Finding file). One Verdict→eval
-  projection, parameterized by the domain-specific edges (`domain`, `dataset`,
-  `sample_id`, `config`, extra metadata).
+  roadmap item). It lives in `arbor_persistence` (Level 1) — which owns the
+  eval tables — precisely so that **every** opinion producer can reach it,
+  including `arbor_consensus` (Level 1). It originally lived in `arbor_actions`
+  (Level 2), which blocked council from using it and left
+  `CouncilDecision.to_verdict/1` defined-but-dead; the 2026-06-10 architecture
+  review flagged that misplacement as the keystone, and this relocation closes it.
 
-  Uses the same runtime bridge as the prior stores (`Code.ensure_loaded?` +
-  `apply/3`) so it degrades silently when Postgres isn't running.
+  Writes go through the `Arbor.Persistence` facade's eval inserts and degrade
+  silently when the Repo isn't running — observability must never break the
+  opinion flow.
 
   ## Options
 
   - `:domain`           — required; the eval-table partition (e.g. "llm_judge",
-                          "security_verify", "advisory_consultation")
+                          "security_verify", "council_decision")
   - `:model`/`:provider`— the deciding model (default "unknown")
   - `:dataset`          — run dataset label (default: the domain)
   - `:graders`          — run graders list (default: `[domain]`)
-  - `:source`           — provenance tag stored in run+result metadata
+  - `:source`           — provenance tag stored in run + result metadata
   - `:sample_id`        — result sample id (default "verdict")
   - `:input`            — the subject text (truncated to 10KB)
   - `:duration_ms`      — result duration
@@ -36,7 +38,6 @@ defmodule Arbor.Actions.Opinion.VerdictLog do
 
   require Logger
 
-  @persistence_mod Arbor.Persistence
   @max_input_bytes 10_000
 
   @doc """
@@ -48,11 +49,11 @@ defmodule Arbor.Actions.Opinion.VerdictLog do
   def record(%Verdict{} = verdict, opts) do
     domain = Keyword.fetch!(opts, :domain)
 
-    if available?() do
+    if repo_started?() do
       {run_attrs, result_attrs} = project(verdict, opts)
 
-      with {:ok, _} <- apply(@persistence_mod, :insert_eval_run, [run_attrs]),
-           {:ok, _} <- apply(@persistence_mod, :insert_eval_result, [result_attrs]) do
+      with {:ok, _} <- Arbor.Persistence.insert_eval_run(run_attrs),
+           {:ok, _} <- Arbor.Persistence.insert_eval_result(result_attrs) do
         Logger.debug("VerdictLog: stored #{domain} verdict #{run_attrs.id}")
         {:ok, run_attrs.id}
       else
@@ -69,7 +70,7 @@ defmodule Arbor.Actions.Opinion.VerdictLog do
   Pure projection of a verdict + opts into `{run_attrs, result_attrs}` — the two
   eval-table records, sharing a freshly-generated `run_id`. Exposed so the
   projection can be tested without a database (the write path in `record/2`
-  degrades silently when Postgres is down).
+  degrades silently when the Repo is down).
   """
   @spec project(Verdict.t(), keyword()) :: {map(), map()}
   def project(%Verdict{} = verdict, opts) do
@@ -159,15 +160,8 @@ defmodule Arbor.Actions.Opinion.VerdictLog do
 
   defp truncate(_), do: ""
 
-  defp available? do
-    Code.ensure_loaded?(@persistence_mod) and
-      function_exported?(@persistence_mod, :insert_eval_run, 1) and
-      repo_started?()
-  end
-
   defp repo_started? do
-    repo = Arbor.Persistence.Repo
-    Code.ensure_loaded?(repo) and is_pid(GenServer.whereis(repo))
+    is_pid(GenServer.whereis(Arbor.Persistence.Repo))
   rescue
     _ -> false
   end
