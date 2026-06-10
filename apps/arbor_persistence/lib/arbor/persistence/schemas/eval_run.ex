@@ -16,25 +16,25 @@ defmodule Arbor.Persistence.Schemas.EvalRun do
   @timestamps_opts [type: :utc_datetime_usec]
 
   schema "eval_runs" do
-    field :domain, :string
-    field :model, :string
-    field :provider, :string
-    field :dataset, :string
-    field :graders, {:array, :string}, default: []
-    field :sample_count, :integer, default: 0
-    field :duration_ms, :integer, default: 0
-    field :metrics, :map, default: %{}
-    field :config, :map, default: %{}
-    field :status, :string, default: "running"
-    field :error, :string
-    field :metadata, :map, default: %{}
+    field(:domain, :string)
+    field(:model, :string)
+    field(:provider, :string)
+    field(:dataset, :string)
+    field(:graders, {:array, :string}, default: [])
+    field(:sample_count, :integer, default: 0)
+    field(:duration_ms, :integer, default: 0)
+    field(:metrics, :map, default: %{})
+    field(:config, :map, default: %{})
+    field(:status, :string, default: "running")
+    field(:error, :string)
+    field(:metadata, :map, default: %{})
 
-    has_many :results, EvalResult, foreign_key: :run_id
+    has_many(:results, EvalResult, foreign_key: :run_id)
 
     timestamps()
   end
 
-  @valid_domains ~w(coding arbor_coding chat heartbeat embedding advisory_consultation llm_judge memory_ablation effective_window summarization preprocessor_tool_retrieval preprocessor_tool_retrieval_llm preprocessor_tool_retrieval_hybrid dot_compilation)
+  @valid_domains ~w(coding arbor_coding chat heartbeat embedding advisory_consultation llm_judge security_verify memory_ablation effective_window summarization preprocessor_tool_retrieval preprocessor_tool_retrieval_llm preprocessor_tool_retrieval_hybrid dot_compilation)
   @valid_statuses ~w(running completed failed)
 
   @required_fields [:id, :domain, :model, :provider, :dataset]
