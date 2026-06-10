@@ -4,6 +4,7 @@ defmodule Arbor.Actions.Security.VerifierTest do
   @moduletag :fast
 
   alias Arbor.Actions.Security.Verifier
+  alias Arbor.Contracts.Judge.Verdict
   alias Arbor.Contracts.Security.Finding
 
   defp finding(opts) do
@@ -32,8 +33,8 @@ defmodule Arbor.Actions.Security.VerifierTest do
     end
   end
 
-  describe "aggregate_verdict/1" do
-    test "all skeptics confirm → :confirmed, confidence 1.0" do
+  describe "aggregate_verdict/1 → Judge.Verdict" do
+    test "all skeptics confirm → :keep, overall_score 1.0" do
       v =
         Verifier.aggregate_verdict([
           "VERDICT: CONFIRMED",
@@ -41,12 +42,16 @@ defmodule Arbor.Actions.Security.VerifierTest do
           "VERDICT: CONFIRMED"
         ])
 
-      assert v.verdict == :confirmed
-      assert v.confidence == 1.0
-      assert v.refuted == 0
+      assert %Verdict{} = v
+      assert v.recommendation == :keep
+      assert v.mode == :verification
+      assert v.overall_score == 1.0
+      assert v.meta.decision == :confirmed
+      assert v.meta.refuted == 0
+      assert Verdict.passed?(v)
     end
 
-    test "majority refute → :refuted with dissent reasons" do
+    test "majority refute → :reject with dissent in meta" do
       v =
         Verifier.aggregate_verdict([
           "VERDICT: REFUTED - the field is intentionally excluded",
@@ -54,22 +59,26 @@ defmodule Arbor.Actions.Security.VerifierTest do
           "VERDICT: CONFIRMED"
         ])
 
-      assert v.verdict == :refuted
-      assert v.refuted == 2
-      assert v.total == 3
-      assert v.confidence == 0.33
-      assert length(v.dissent) == 2
-      assert Enum.any?(v.dissent, &(&1 =~ "intentionally excluded"))
+      assert v.recommendation == :reject
+      assert v.meta.decision == :refuted
+      assert v.meta.refuted == 2
+      assert v.meta.total == 3
+      assert v.overall_score == 0.33
+      assert length(v.meta.dissent) == 2
+      assert Enum.any?(v.meta.dissent, &(&1 =~ "intentionally excluded"))
+      refute Verdict.passed?(v)
     end
 
     test "ambiguous output (no VERDICT line) counts as refuted" do
       v = Verifier.aggregate_verdict(["I'm not sure about this one.", "VERDICT: CONFIRMED"])
-      assert v.refuted == 1
-      assert v.verdict == :confirmed
+      assert v.meta.refuted == 1
+      assert v.meta.decision == :confirmed
     end
 
-    test "empty skeptic set → confidence 0.0" do
-      assert %{total: 0, confidence: +0.0} = Verifier.aggregate_verdict([])
+    test "empty skeptic set → overall_score 0.0" do
+      v = Verifier.aggregate_verdict([])
+      assert v.meta.total == 0
+      assert v.overall_score == +0.0
     end
   end
 
@@ -87,9 +96,26 @@ defmodule Arbor.Actions.Security.VerifierTest do
       updated = Verifier.apply_verdict(f, v)
 
       assert updated.status == f.status
-      assert updated.confidence.score == v.confidence
+      assert updated.confidence.score == v.overall_score
       assert updated.confidence.rationale =~ "skeptics refuted"
       assert updated.metadata.verification == v
+    end
+  end
+
+  describe "to_annotation/1" do
+    test "flattens the verdict to the store annotation map" do
+      v =
+        Verifier.aggregate_verdict([
+          "VERDICT: REFUTED - x",
+          "VERDICT: CONFIRMED",
+          "VERDICT: CONFIRMED"
+        ])
+
+      a = Verifier.to_annotation(v)
+      assert a.verdict == :confirmed
+      assert a.refuted == 1
+      assert a.total == 3
+      assert a.confidence == v.overall_score
     end
   end
 end

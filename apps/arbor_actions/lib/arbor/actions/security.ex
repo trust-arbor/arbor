@@ -137,6 +137,7 @@ defmodule Arbor.Actions.Security.AggregateVerdict do
     ]
 
   alias Arbor.Actions.Security.{FindingStore, Verifier}
+  alias Arbor.Contracts.Judge.Verdict
 
   @impl true
   def run(params, _context) do
@@ -147,17 +148,19 @@ defmodule Arbor.Actions.Security.AggregateVerdict do
     verdict = Verifier.aggregate_verdict(outputs)
 
     if params[:finding_id] do
-      FindingStore.annotate_verification(params[:finding_id], verdict,
+      FindingStore.annotate_verification(params[:finding_id], Verifier.to_annotation(verdict),
         dir: params[:output_dir] || ".arbor/security/findings"
       )
     end
 
     {:ok,
      %{
-       verdict: verdict.verdict,
-       confidence: verdict.confidence,
-       refuted: verdict.refuted,
-       total: verdict.total
+       verdict: verdict.meta.decision,
+       recommendation: verdict.recommendation,
+       confidence: verdict.overall_score,
+       refuted: verdict.meta.refuted,
+       total: verdict.meta.total,
+       passed: Verdict.passed?(verdict)
      }}
   end
 end
