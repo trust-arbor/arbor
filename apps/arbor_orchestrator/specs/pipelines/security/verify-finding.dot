@@ -1,0 +1,81 @@
+// Security Sentinel — adversarial verify-finding sub-pipeline (Phase 2).
+//
+// Verifies ONE finding: three independent LLM skeptics each try to REFUTE it,
+// then security.aggregate_verdict tallies majority-refute and annotates the
+// finding (advisory — it adjusts confidence + records dissent, it does NOT
+// change status). High-precision deterministic findings are gated out upstream
+// (Verifier.needs_verification?); this runs on low-confidence / LLM-discovered
+// ones.
+//
+// Context in (set via initial_values when invoking):
+//   finding_content — the finding markdown (what the skeptics evaluate)
+//   finding_id      — the finding to annotate with the verdict
+//
+// Model: local Gemma via LM Studio by default (cheap, nothing sensitive leaves
+// the box). Override llm_provider / llm_model per the LLM-task-inventory roadmap.
+
+digraph verify_finding {
+  graph [
+    goal="Adversarially verify a single security finding via independent skeptics",
+    label="Security: Verify finding"
+  ]
+
+  // Shared skeptic config. Each skeptic is adversarial and defaults to REFUTED
+  // when uncertain, so a finding must withstand scrutiny to be CONFIRMED.
+  node [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    llm_provider="lm_studio",
+    llm_model="gemma-4-31b-it",
+    use_tools="false",
+    temperature="0.3",
+    max_tokens="2048",
+    prompt_context_key="finding_content",
+    system_prompt="You are a skeptical, adversarial security reviewer. You are given ONE security finding (markdown). Your job is to REFUTE it: find any reason it is a false positive, intentional/by-design, already mitigated elsewhere, or not actually exploitable. Be specific and concrete. Only CONFIRM if you genuinely cannot refute it. Default to REFUTED when uncertain. End your response with EXACTLY one final line: `VERDICT: REFUTED - <one-line reason>` or `VERDICT: CONFIRMED`."
+  ]
+
+  start [shape=Mdiamond]
+
+  skeptic_1 []
+  cap_1 [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="skeptic_1"
+  ]
+
+  skeptic_2 []
+  cap_2 [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="skeptic_2"
+  ]
+
+  skeptic_3 []
+  cap_3 [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="skeptic_3"
+  ]
+
+  aggregate [
+    type="exec",
+    target="action",
+    action="security.aggregate_verdict",
+    context_keys="skeptic_1,skeptic_2,skeptic_3,finding_id"
+  ]
+
+  done [shape=Msquare]
+
+  start -> skeptic_1
+  skeptic_1 -> cap_1
+  cap_1 -> skeptic_2
+  skeptic_2 -> cap_2
+  cap_2 -> skeptic_3
+  skeptic_3 -> cap_3
+  cap_3 -> aggregate
+  aggregate -> done
+}
