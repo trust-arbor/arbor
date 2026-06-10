@@ -44,8 +44,21 @@ digraph UpstreamDepsCheck {
     data_class="internal"
   ]
 
+  // Second half of dependency security: scan THIS tree for supply-chain risk
+  // (mutable git deps + mix hex.audit retired packages) via the Security
+  // Sentinel. Records findings to .arbor/security/findings + emits
+  // security.sentinel_finding signals — complements the upstream-commit report
+  // above. on_error="continue" so a scan hiccup never blocks the upstream report.
+  scan_local_deps [
+    type="exec",
+    target="action",
+    action="security.run_dependency_scan",
+    on_error="continue"
+  ]
+
   done [shape=Msquare]
 
   start -> run_check
-  run_check -> done
+  run_check -> scan_local_deps
+  scan_local_deps -> done
 }
