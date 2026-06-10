@@ -10,28 +10,25 @@ defmodule Arbor.Actions.Security.Verifier do
     * `needs_verification?/1` — selective gate. High-precision deterministic L0
       findings (confidence ≥ threshold) skip verification; low-confidence and
       LLM-discovered (L1/L2) findings get verified. Keeps LLM cost proportional.
-    * `aggregate_verdict/1` — turns the skeptics' raw outputs into a verdict
-      (majority-refute ⇒ `:refuted`), with a confidence = fraction confirming.
-    * `apply_verdict/2` — **advisory**: annotates the finding with the verdict,
-      reasoning, and an adjusted confidence. Does NOT change status — a human (or
-      the future auto-action gate) decides. Auto-suppression is a later phase.
+    * `aggregate_verdict/1` — turns the skeptics' raw outputs into a
+      `Arbor.Contracts.Judge.Verdict` (majority-refute ⇒ `recommendation: :reject`),
+      with `overall_score` = the fraction of skeptics that confirmed. Adopting the
+      shared Judge verdict contract keeps security verdicts uniform with the rest
+      of the judge/council infrastructure (see the consolidate-llm-opinion-systems
+      roadmap item) — security-specific bits live in `meta`.
+    * `apply_verdict/2` — **advisory**: annotates the finding with the verdict +
+      adjusted confidence. Does NOT change status — a human (or the future
+      auto-action gate) decides. Auto-suppression is a later phase.
 
   The LLM skepticism itself lives in `verify-finding.dot` (compute nodes); this
   module is invoked by the `AggregateVerdict` action that the pipeline ends with.
   """
 
+  alias Arbor.Contracts.Judge.Verdict
   alias Arbor.Contracts.Security.Finding
 
   @verify_below_confidence 0.7
   @always_verify_layers ["L1", "L2"]
-
-  @type verdict :: %{
-          verdict: :confirmed | :refuted,
-          refuted: non_neg_integer(),
-          total: non_neg_integer(),
-          confidence: float(),
-          dissent: [String.t()]
-        }
 
   @doc "Whether a finding should go through adversarial verification."
   @spec needs_verification?(Finding.t()) :: boolean()
@@ -43,18 +40,23 @@ defmodule Arbor.Actions.Security.Verifier do
   end
 
   @doc """
-  Aggregates skeptic outputs (raw LLM texts) into a verdict. Each skeptic is
-  asked to end with `VERDICT: REFUTED` or `VERDICT: CONFIRMED`; an ambiguous
+  Aggregates skeptic outputs (raw LLM texts) into a `Judge.Verdict`. Each skeptic
+  is asked to end with `VERDICT: REFUTED` or `VERDICT: CONFIRMED`; an ambiguous
   output counts as a refutation (conservative — the finding must earn "confirmed").
+
+  Mapping: `overall_score` = confirm-fraction; `recommendation` = `:reject` when
+  the majority refute (the finding doesn't survive), else `:keep`; `mode` =
+  `:verification`. `meta` carries `decision` (:confirmed | :refuted),
+  `refuted`/`total` counts, and the `dissent` reasons.
   """
-  @spec aggregate_verdict([String.t()]) :: verdict()
+  @spec aggregate_verdict([String.t()]) :: Verdict.t()
   def aggregate_verdict(skeptic_outputs) when is_list(skeptic_outputs) do
     parsed = Enum.map(skeptic_outputs, &parse_skeptic/1)
     total = length(parsed)
     refuted = Enum.count(parsed, fn {r, _reason} -> r end)
 
-    verdict = if total > 0 and refuted * 2 > total, do: :refuted, else: :confirmed
-    confidence = if total == 0, do: 0.0, else: Float.round((total - refuted) / total, 2)
+    decision = if total > 0 and refuted * 2 > total, do: :refuted, else: :confirmed
+    score = if total == 0, do: 0.0, else: Float.round((total - refuted) / total, 2)
 
     dissent =
       parsed
@@ -62,23 +64,51 @@ defmodule Arbor.Actions.Security.Verifier do
       |> Enum.map(fn {_, reason} -> reason end)
       |> Enum.reject(&(&1 == ""))
 
-    %{verdict: verdict, refuted: refuted, total: total, confidence: confidence, dissent: dissent}
+    {:ok, verdict} =
+      Verdict.new(%{
+        overall_score: score,
+        recommendation: if(decision == :refuted, do: :reject, else: :keep),
+        mode: :verification,
+        meta: %{
+          source: "security.verify_finding",
+          decision: decision,
+          refuted: refuted,
+          total: total,
+          dissent: dissent
+        }
+      })
+
+    verdict
   end
 
   @doc """
   Advisory application: records the verdict on the finding (confidence adjusted to
-  the skeptics' confirm-fraction, verdict + dissent stored in metadata). Status is
-  left untouched.
+  the skeptics' confirm-fraction, the verdict stored in metadata). Status is left
+  untouched.
   """
-  @spec apply_verdict(Finding.t(), verdict()) :: Finding.t()
-  def apply_verdict(%Finding{} = finding, %{} = verdict) do
-    rationale =
-      "adversarial verify: #{verdict.refuted}/#{verdict.total} skeptics refuted (#{verdict.verdict})"
+  @spec apply_verdict(Finding.t(), Verdict.t()) :: Finding.t()
+  def apply_verdict(%Finding{} = finding, %Verdict{meta: m} = verdict) do
+    rationale = "adversarial verify: #{m.refuted}/#{m.total} skeptics refuted (#{m.decision})"
 
     %{
       finding
-      | confidence: %{score: verdict.confidence, rationale: rationale},
+      | confidence: %{score: verdict.overall_score, rationale: rationale},
         metadata: Map.put(finding.metadata, :verification, verdict)
+    }
+  end
+
+  @doc """
+  Flattens a verdict to the plain map the file-backed `FindingStore` annotation
+  expects (keeps the store decoupled from the Judge contract).
+  """
+  @spec to_annotation(Verdict.t()) :: map()
+  def to_annotation(%Verdict{meta: m} = verdict) do
+    %{
+      verdict: m.decision,
+      refuted: m.refuted,
+      total: m.total,
+      confidence: verdict.overall_score,
+      dissent: m.dissent
     }
   end
 
