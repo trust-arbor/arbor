@@ -268,6 +268,7 @@ defmodule Arbor.Actions.Security.AggregateVerdict do
       output_dir: [type: :string, default: ".arbor/security/findings"]
     ]
 
+  alias Arbor.Actions.Opinion.VerdictLog
   alias Arbor.Actions.Security.{FindingStore, Verifier}
   alias Arbor.Contracts.Judge.Verdict
 
@@ -282,6 +283,19 @@ defmodule Arbor.Actions.Security.AggregateVerdict do
     if params[:finding_id] do
       FindingStore.annotate_verification(params[:finding_id], Verifier.to_annotation(verdict),
         dir: params[:output_dir] || ".arbor/security/findings"
+      )
+
+      # Also project the verdict into the shared eval tables so Sentinel
+      # verifications are observable in the eval dashboard alongside judge +
+      # council verdicts (consolidate-llm-opinion-systems Phase 2). Best-effort:
+      # VerdictLog degrades silently when persistence is unavailable.
+      VerdictLog.record(verdict,
+        domain: "security_verify",
+        dataset: "security_verify",
+        source: "security.verify_finding",
+        sample_id: params[:finding_id],
+        input: "Finding #{params[:finding_id]}",
+        result_metadata: %{"finding_id" => params[:finding_id]}
       )
     end
 
