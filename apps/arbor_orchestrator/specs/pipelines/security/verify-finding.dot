@@ -35,6 +35,11 @@ digraph verify_finding {
     // cleanly (finish_reason=stop) in live testing; raise if a complex finding
     // ever truncates. (Same class of issue as upstream_deps_summary's 32K.)
     max_tokens="8192",
+    // Gemma 4 31B reasoning + 8192 tokens exceeds the 120s default — that timed
+    // out in live testing. 5 min per skeptic; raise (toward the summary
+    // pipeline's 30 min) for overnight batch, or pick a faster verification
+    // model per the LLM-task-inventory roadmap item.
+    timeout="300000",
     prompt_context_key="finding_content",
     system_prompt="You are a skeptical, adversarial security reviewer. You are given ONE security finding (markdown). Your job is to REFUTE it: find any reason it is a false positive, intentional/by-design, already mitigated elsewhere, or not actually exploitable. Be specific and concrete. Only CONFIRM if you genuinely cannot refute it. Default to REFUTED when uncertain. End your response with EXACTLY one final line: `VERDICT: REFUTED - <one-line reason>` or `VERDICT: CONFIRMED`."
   ]
@@ -69,7 +74,7 @@ digraph verify_finding {
     type="exec",
     target="action",
     action="security.aggregate_verdict",
-    context_keys="skeptic_1,skeptic_2,skeptic_3,finding_id"
+    context_keys="skeptic_1,skeptic_2,skeptic_3,finding_id,output_dir"
   ]
 
   done [shape=Msquare]
