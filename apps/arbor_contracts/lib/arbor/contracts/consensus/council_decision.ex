@@ -14,6 +14,7 @@ defmodule Arbor.Contracts.Consensus.CouncilDecision do
   use TypedStruct
 
   alias Arbor.Contracts.Consensus.{Evaluation, Proposal, Protocol}
+  alias Arbor.Contracts.Judge.Verdict
 
   @type decision :: :approved | :rejected | :deadlock
   @type mode :: :decision | :advisory
@@ -144,6 +145,72 @@ defmodule Arbor.Contracts.Consensus.CouncilDecision do
       concern_count: length(decision.primary_concerns)
     }
   end
+
+  @doc """
+  Project a council decision onto the shared `Arbor.Contracts.Judge.Verdict`
+  contract — the lingua franca for queryable opinion results across the
+  consensus / judge / verify-finding systems.
+
+  This is **additive**: a `CouncilDecision` keeps its richer vote/quorum
+  semantics; `to_verdict/1` is a lossy projection for uniform querying and
+  persistence, not a replacement.
+
+  Mapping:
+    * `overall_score`  — approval strength = approve / (approve+reject+abstain)
+    * `recommendation` — :approved → :keep, :rejected → :reject, :deadlock → :revise
+    * `mode`           — council :decision → :verification (binding),
+                         :advisory → :critique (opinion)
+    * `dimension_scores` — the three averaged signals the council already tracks:
+                         `%{confidence:, risk:, benefit:}`
+    * `weaknesses`     — the aggregated `primary_concerns`
+    * `meta`           — provenance + the vote/quorum detail a flat Verdict can't hold
+
+  Always succeeds — the projected attrs are within `Verdict`'s validation bounds.
+  """
+  @spec to_verdict(t()) :: Verdict.t()
+  def to_verdict(%__MODULE__{} = d) do
+    total = d.approve_count + d.reject_count + d.abstain_count
+
+    score =
+      if total > 0 do
+        Float.round(d.approve_count / total, 4)
+      else
+        0.0
+      end
+
+    {:ok, verdict} =
+      Verdict.new(%{
+        overall_score: score,
+        dimension_scores: %{
+          confidence: Float.round(d.average_confidence, 4),
+          risk: Float.round(d.average_risk, 4),
+          benefit: Float.round(d.average_benefit, 4)
+        },
+        weaknesses: d.primary_concerns,
+        recommendation: decision_to_recommendation(d.decision),
+        mode: council_mode_to_verdict_mode(d.mode),
+        meta: %{
+          source: "council",
+          decision: d.decision,
+          council_mode: d.mode,
+          proposal_id: d.proposal_id,
+          quorum_met: d.quorum_met,
+          required_quorum: d.required_quorum,
+          approve_count: d.approve_count,
+          reject_count: d.reject_count,
+          abstain_count: d.abstain_count
+        }
+      })
+
+    verdict
+  end
+
+  defp decision_to_recommendation(:approved), do: :keep
+  defp decision_to_recommendation(:rejected), do: :reject
+  defp decision_to_recommendation(:deadlock), do: :revise
+
+  defp council_mode_to_verdict_mode(:advisory), do: :critique
+  defp council_mode_to_verdict_mode(_), do: :verification
 
   @doc """
   Get evaluations by vote type.
