@@ -88,13 +88,15 @@ defmodule Arbor.Contracts.Consensus.CouncilDecisionTest do
 
     test "rejects unsealed evaluations" do
       proposal = make_proposal()
-      {:ok, unsealed} = Evaluation.new(%{
-        proposal_id: "prop_123",
-        evaluator_id: "eval_1",
-        perspective: :security,
-        vote: :approve,
-        reasoning: "good"
-      })
+
+      {:ok, unsealed} =
+        Evaluation.new(%{
+          proposal_id: "prop_123",
+          evaluator_id: "eval_1",
+          perspective: :security,
+          vote: :approve,
+          reasoning: "good"
+        })
 
       assert {:error, {:unsealed_evaluations, _}} =
                CouncilDecision.from_evaluations(proposal, [unsealed])
@@ -198,6 +200,80 @@ defmodule Arbor.Contracts.Consensus.CouncilDecisionTest do
     test "evaluations_by_perspective/2", %{decision: d} do
       sec = CouncilDecision.evaluations_by_perspective(d, :security)
       assert length(sec) == 1
+    end
+  end
+
+  describe "to_verdict/1 (Verdict lingua franca projection)" do
+    alias Arbor.Contracts.Judge.Verdict
+
+    test "projects an approved decision to a :keep verdict" do
+      proposal = make_proposal()
+
+      evals = [
+        make_sealed_evaluation(:approve, :security),
+        make_sealed_evaluation(:approve, :stability),
+        make_sealed_evaluation(:reject, :performance)
+      ]
+
+      {:ok, d} = CouncilDecision.from_evaluations(proposal, evals, quorum: 2)
+      assert d.decision == :approved
+
+      verdict = CouncilDecision.to_verdict(d)
+      assert %Verdict{} = verdict
+      # approve / total = 2/3
+      assert_in_delta verdict.overall_score, 0.6667, 0.001
+      assert verdict.recommendation == :keep
+      assert Verdict.passed?(verdict)
+      # council :decision mode is binding → :verification
+      assert verdict.mode == :verification
+      # the three council signals become dimension scores
+      assert Map.has_key?(verdict.dimension_scores, :confidence)
+      assert Map.has_key?(verdict.dimension_scores, :risk)
+      assert Map.has_key?(verdict.dimension_scores, :benefit)
+      # concerns become weaknesses; provenance + counts land in meta
+      assert verdict.weaknesses == d.primary_concerns
+      assert verdict.meta.source == "council"
+      assert verdict.meta.decision == :approved
+      assert verdict.meta.approve_count == 2
+      assert verdict.meta.proposal_id == d.proposal_id
+    end
+
+    test "rejected → :reject, deadlock → :revise" do
+      proposal = make_proposal()
+
+      rejected =
+        elem(
+          CouncilDecision.from_evaluations(
+            proposal,
+            [
+              make_sealed_evaluation(:reject, :security),
+              make_sealed_evaluation(:reject, :stability),
+              make_sealed_evaluation(:approve, :performance)
+            ],
+            quorum: 2
+          ),
+          1
+        )
+
+      assert rejected.decision == :rejected
+      assert CouncilDecision.to_verdict(rejected).recommendation == :reject
+      refute Verdict.passed?(CouncilDecision.to_verdict(rejected))
+
+      deadlock =
+        elem(
+          CouncilDecision.from_evaluations(
+            proposal,
+            [
+              make_sealed_evaluation(:approve, :security),
+              make_sealed_evaluation(:reject, :stability)
+            ],
+            quorum: 2
+          ),
+          1
+        )
+
+      assert deadlock.decision == :deadlock
+      assert CouncilDecision.to_verdict(deadlock).recommendation == :revise
     end
   end
 end
