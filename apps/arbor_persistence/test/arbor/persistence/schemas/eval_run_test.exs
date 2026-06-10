@@ -54,7 +54,12 @@ defmodule Arbor.Persistence.Schemas.EvalRunTest do
     end
 
     test "valid domains" do
-      for domain <- ~w(coding chat heartbeat embedding advisory_consultation llm_judge memory_ablation effective_window) do
+      # security_verify regression: AggregateVerdict writes this domain via
+      # VerdictLog; it was missing from @valid_domains, so every security verdict
+      # persist failed changeset validation and degraded silently (2026-06-10
+      # architecture review finding).
+      for domain <-
+            ~w(coding chat heartbeat embedding advisory_consultation llm_judge security_verify memory_ablation effective_window) do
         cs = EvalRun.changeset(%EvalRun{}, Map.put(@valid_attrs, :domain, domain))
         assert cs.valid?, "Expected domain '#{domain}' to be valid"
       end
