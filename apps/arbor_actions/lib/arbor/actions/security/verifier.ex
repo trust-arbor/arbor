@@ -35,8 +35,17 @@ defmodule Arbor.Actions.Security.Verifier do
   def needs_verification?(%Finding{} = finding) do
     layer = finding.detector[:layer] || finding.detector["layer"]
     score = get_in_either(finding.confidence, :score) || 0.5
+    needs_verification_gate?(layer, score)
+  end
 
-    layer in @always_verify_layers or score < @verify_below_confidence
+  @doc """
+  The selective gate on raw values — used by the fan-out's select step, which
+  reads `layer`/`confidence` from a finding's stored frontmatter rather than the
+  full struct. LLM-discovered (L1/L2) or low-confidence findings are verified.
+  """
+  @spec needs_verification_gate?(String.t() | nil, number() | nil) :: boolean()
+  def needs_verification_gate?(layer, score) do
+    layer in @always_verify_layers or (is_number(score) and score < @verify_below_confidence)
   end
 
   @doc """

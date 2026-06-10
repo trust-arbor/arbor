@@ -248,9 +248,11 @@ defmodule Arbor.Contracts.Security.Finding do
   @spec to_markdown(t()) :: String.t()
   def to_markdown(%__MODULE__{} = finding) do
     loc = finding.location
-    file = loc[:file] || loc["file"] || "(unknown)"
-    line = loc[:line] || loc[:line_range] || loc["line"] || "?"
-    sev = finding.severity[:level] || finding.severity["level"] || :medium
+    file = coalesce(loc, [:file, "file"], "(unknown)")
+    line = coalesce(loc, [:line, :line_range, "line"], "?")
+    sev = coalesce(finding.severity, [:level, "level"], :medium)
+    score = coalesce(finding.confidence, [:score, "score"], "")
+    layer = coalesce(finding.detector, [:layer, "layer"], "")
 
     """
     ---
@@ -258,6 +260,8 @@ defmodule Arbor.Contracts.Security.Finding do
     status: #{finding.status}
     category: #{finding.category}
     severity: #{sev}
+    confidence: #{score}
+    layer: #{layer}
     detected_at: #{finding.detected_at && DateTime.to_iso8601(finding.detected_at)}
     ---
 
@@ -294,6 +298,30 @@ defmodule Arbor.Contracts.Security.Finding do
       [_, raw] -> Enum.find(@valid_statuses, &(Atom.to_string(&1) == raw))
       _ -> nil
     end
+  end
+
+  @doc """
+  Parses the gating fields (`layer`, `confidence`) from a rendered finding's
+  frontmatter — what the verification selective-gate needs without reconstructing
+  the whole struct. Returns `%{layer: String.t() | nil, confidence: float() | nil}`.
+  """
+  @spec gating_from_markdown(String.t()) :: %{layer: String.t() | nil, confidence: float() | nil}
+  def gating_from_markdown(content) when is_binary(content) do
+    layer =
+      case Regex.run(~r/^layer:\s*(\S+)\s*$/m, content) do
+        [_, l] -> l
+        _ -> nil
+      end
+
+    confidence =
+      with [_, s] <- Regex.run(~r/^confidence:\s*([0-9.]+)\s*$/m, content),
+           {f, _} <- Float.parse(s) do
+        f
+      else
+        _ -> nil
+      end
+
+    %{layer: layer, confidence: confidence}
   end
 
   @doc """
@@ -336,6 +364,13 @@ defmodule Arbor.Contracts.Security.Finding do
       fun -> " in `#{fun}`"
     end
   end
+
+  # First present (non-nil) value among `keys` in `map`, else `default`. Keeps
+  # the atom-or-string key fallback out of to_markdown's complexity.
+  defp coalesce(map, keys, default) when is_map(map),
+    do: Enum.find_value(keys, default, fn k -> map[k] end)
+
+  defp coalesce(_map, _keys, default), do: default
 
   defp format_detector(%{} = d) when map_size(d) > 0 do
     name = d[:name] || d["name"] || "?"

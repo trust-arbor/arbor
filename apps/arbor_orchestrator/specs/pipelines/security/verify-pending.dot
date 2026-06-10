@@ -1,0 +1,59 @@
+// Security Sentinel — verify-pending fan-out (Phase 2, Gap 2).
+//
+// The deterministic half of adversarial verification: select which recorded
+// findings still need scrutiny, then fan `verify-finding.dot` over each.
+//
+//   select     — security.select_findings_to_verify reads the FindingStore and
+//                 keeps open/regressed findings whose frontmatter gating
+//                 (layer/confidence) passes Verifier.needs_verification_gate?
+//                 (L1/L2 or confidence < 0.7). High-precision deterministic
+//                 L0/L0b findings are skipped, keeping LLM cost proportional.
+//   map_verify — for each selected finding_id, invoke verify-finding.dot. The
+//                map sets item_key=finding_id, so each sub-pipeline loads its
+//                own content by id and is fully self-contained — the fan-out
+//                threads nothing but an id per item.
+//
+// Context in (set via initial_values when invoking):
+//   output_dir — the FindingStore directory (select + per-item annotate)
+//
+// max_concurrency=1: the local LM Studio model serves one request at a time;
+// raise once a batch-capable verification model is wired (LLM-task-inventory).
+
+digraph verify_pending {
+  graph [
+    goal="Select findings needing verification and fan adversarial verify-finding over each",
+    label="Security: Verify pending findings"
+  ]
+
+  start [shape=Mdiamond]
+
+  select [
+    type="exec",
+    target="action",
+    action="security.select_findings_to_verify",
+    context_keys="output_dir"
+  ]
+
+  map_verify [
+    type="map",
+    source_key="exec.select.to_verify",
+    item_key="finding_id",
+    collect_key="verify.results",
+    handler_type="graph.invoke",
+    // session.agent_id MUST be forwarded: graph.invoke builds an isolated child
+    // context from pass_context only, and verify-finding's LLM nodes read the
+    // acting identity from context["session.agent_id"] for authorization — drop
+    // it and the skeptics authorize as "system" and fail (the signer itself
+    // flows via opts, but the agent_id is a context value).
+    handler_attrs="{\"graph_file\": \"specs/pipelines/security/verify-finding.dot\", \"pass_context\": \"finding_id,output_dir,session.agent_id\"}",
+    max_concurrency="1",
+    on_item_error="skip",
+    data_class="internal"
+  ]
+
+  done [shape=Msquare]
+
+  start -> select
+  select -> map_verify
+  map_verify -> done
+}

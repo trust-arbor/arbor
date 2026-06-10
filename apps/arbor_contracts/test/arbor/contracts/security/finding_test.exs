@@ -147,4 +147,40 @@ defmodule Arbor.Contracts.Security.FindingTest do
       assert is_binary(decoded["detected_at"])
     end
   end
+
+  describe "gating_from_markdown/1 (verify-pending selector)" do
+    test "round-trips layer + confidence from to_markdown frontmatter" do
+      f =
+        Finding.new(
+          category: :fail_open_authz,
+          title: "L1 diff finding",
+          detector: %{layer: "L1", name: "diff_review"},
+          confidence: %{score: 0.5, rationale: "llm"}
+        )
+
+      gating = Finding.gating_from_markdown(Finding.to_markdown(f))
+      assert gating.layer == "L1"
+      assert gating.confidence == 0.5
+    end
+
+    test "tolerates missing fields" do
+      gating = Finding.gating_from_markdown("no frontmatter here")
+      assert gating.layer == nil
+      assert gating.confidence == nil
+    end
+
+    test "parses an L0 deterministic finding's high confidence" do
+      f =
+        Finding.new(
+          category: :other,
+          title: "L0 finding",
+          detector: %{layer: "L0", name: "auth_smells"},
+          confidence: %{score: 0.9, rationale: "ast"}
+        )
+
+      gating = Finding.gating_from_markdown(Finding.to_markdown(f))
+      assert gating.layer == "L0"
+      assert gating.confidence == 0.9
+    end
+  end
 end
