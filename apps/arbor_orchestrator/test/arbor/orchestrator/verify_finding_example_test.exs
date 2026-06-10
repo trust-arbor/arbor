@@ -54,7 +54,12 @@ defmodule Arbor.Orchestrator.VerifyFindingExampleTest do
     {public_key, _} = :crypto.generate_key(:eddsa, :ed25519, private_key)
     {:ok, identity} = Identity.new(public_key: public_key, name: "verify-finding-example-test")
     assert identity.agent_id == agent_id
-    :ok = Arbor.Security.Identity.Registry.register(identity)
+    # Idempotent: a sibling integration test in the same BEAM may have already
+    # registered this same agent identity.
+    case Arbor.Security.Identity.Registry.register(identity) do
+      :ok -> :ok
+      {:error, {:already_registered, _}} -> :ok
+    end
 
     signer = fn resource -> SignedRequest.sign(resource, agent_id, private_key) end
 
@@ -84,8 +89,10 @@ defmodule Arbor.Orchestrator.VerifyFindingExampleTest do
 
     {:recorded, _} = FindingStore.record(finding, dir)
 
+    # Self-contained: pass ONLY the id + dir. The pipeline's load_content node
+    # reads the finding's markdown from the store by id — no finding_content
+    # threaded in. This is exactly what the verify-pending fan-out provides.
     initial_values = %{
-      "finding_content" => Finding.to_markdown(finding),
       "finding_id" => finding.id,
       "output_dir" => dir,
       "session.agent_id" => agent_id
@@ -104,6 +111,7 @@ defmodule Arbor.Orchestrator.VerifyFindingExampleTest do
     assert result.final_outcome.status == :success,
            "pipeline failed: #{inspect(result.final_outcome.failure_reason)}"
 
+    assert "load_content" in result.completed_nodes
     assert "skeptic_1" in result.completed_nodes
     assert "skeptic_3" in result.completed_nodes
     assert "aggregate" in result.completed_nodes

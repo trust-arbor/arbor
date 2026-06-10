@@ -1,0 +1,49 @@
+// Security Sentinel — L1 diff-trigger (Phase 2 wiring).
+//
+// Computes the diff of changed Elixir files vs a base, then invokes the L1
+// diff-review sub-pipeline on it. This is the production entry point for L1:
+// `l1-diff-review.dot` reviews a diff handed to it; this one *produces* the diff.
+//
+//   mix arbor.pipeline.run specs/pipelines/security/l1-review-changed.dot
+//
+// Base: env L1_DIFF_BASE (default HEAD~1 — the last commit). The diff is capped
+// to keep it within the model's context; large changes should be chunked
+// (future refinement). git_sha + output_dir flow through from the caller.
+
+digraph l1_review_changed {
+  graph [
+    goal="Diff changed Elixir files vs a base and L1-review them",
+    label="Security: L1 review changed"
+  ]
+
+  start [shape=Mdiamond]
+
+  get_diff [
+    type="shell",
+    command="git --no-pager diff ${L1_DIFF_BASE:-HEAD~1} -- '*.ex' | head -c 60000",
+    sandbox="none",
+    timeout="30000",
+    on_error="fail",
+    data_class="internal"
+  ]
+
+  prep_diff [
+    type="transform",
+    transform="identity",
+    source_key="shell.get_diff.output",
+    output_key="diff"
+  ]
+
+  review [
+    type="graph.invoke",
+    graph_file="specs/pipelines/security/l1-diff-review.dot",
+    pass_context="diff,git_sha,output_dir"
+  ]
+
+  done [shape=Msquare]
+
+  start -> get_diff
+  get_diff -> prep_diff
+  prep_diff -> review
+  review -> done
+}

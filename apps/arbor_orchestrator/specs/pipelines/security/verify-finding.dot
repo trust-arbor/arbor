@@ -7,9 +7,11 @@
 // (Verifier.needs_verification?); this runs on low-confidence / LLM-discovered
 // ones.
 //
-// Context in (set via initial_values when invoking):
-//   finding_content — the finding markdown (what the skeptics evaluate)
-//   finding_id      — the finding to annotate with the verdict
+// Context in (set via initial_values / fan-out item_key):
+//   finding_id  — the finding to load, evaluate, and annotate with the verdict
+//   output_dir  — the FindingStore directory (load + annotate)
+// The pipeline is self-contained: load_content reads the finding's markdown by
+// id, so the verify-pending fan-out only has to thread a finding_id per item.
 //
 // Model: local Gemma via LM Studio by default (cheap, nothing sensitive leaves
 // the box). Override llm_provider / llm_model per the LLM-task-inventory roadmap.
@@ -46,6 +48,23 @@ digraph verify_finding {
 
   start [shape=Mdiamond]
 
+  // Self-contained: load the finding's content by id so the fan-out only has to
+  // thread a finding_id (map item_key=finding_id). Standalone callers pass
+  // finding_id + output_dir; the skeptics evaluate the loaded content.
+  load_content [
+    type="exec",
+    target="action",
+    action="security.load_finding",
+    context_keys="finding_id,output_dir"
+  ]
+
+  prep_content [
+    type="transform",
+    transform="identity",
+    source_key="exec.load_content.finding_content",
+    output_key="finding_content"
+  ]
+
   skeptic_1 []
   cap_1 [
     type="transform",
@@ -79,7 +98,9 @@ digraph verify_finding {
 
   done [shape=Msquare]
 
-  start -> skeptic_1
+  start -> load_content
+  load_content -> prep_content
+  prep_content -> skeptic_1
   skeptic_1 -> cap_1
   cap_1 -> skeptic_2
   skeptic_2 -> cap_2

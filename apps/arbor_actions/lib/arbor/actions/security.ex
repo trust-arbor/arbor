@@ -115,6 +115,89 @@ defmodule Arbor.Actions.Security.RunDependencyScan do
   end
 end
 
+defmodule Arbor.Actions.Security.LoadFinding do
+  @moduledoc """
+  Loads a finding's markdown content by id from the store, so `verify-finding.dot`
+  is self-contained: the fan-out threads just a `finding_id`, and this node loads
+  the content the skeptics evaluate. Returns `finding_content` (empty if missing).
+  """
+
+  use Jido.Action,
+    name: "security_load_finding",
+    description: "Load a finding's markdown content by id",
+    category: "security",
+    tags: ["security", "sentinel", "verify"],
+    schema: [
+      finding_id: [type: :string, required: true],
+      output_dir: [type: :string, default: ".arbor/security/findings"]
+    ]
+
+  alias Arbor.Actions.Security.FindingStore
+
+  @impl true
+  def run(params, _context) do
+    content =
+      case FindingStore.read(
+             params[:finding_id],
+             params[:output_dir] || ".arbor/security/findings"
+           ) do
+        {:ok, c} -> c
+        {:error, _} -> ""
+      end
+
+    {:ok, %{finding_content: content}}
+  end
+end
+
+defmodule Arbor.Actions.Security.SelectFindingsToVerify do
+  @moduledoc """
+  Selects the recorded findings that need adversarial verification — the
+  deterministic half of the fan-out. Reads the store, keeps open/regressed
+  findings whose frontmatter gating (`layer`/`confidence`) passes
+  `Verifier.needs_verification_gate?` (L1/L2 or low-confidence), and returns the
+  list of ids for `verify-pending.dot`'s map node to fan `verify-finding` over.
+  """
+
+  use Jido.Action,
+    name: "security_select_findings_to_verify",
+    description: "Select recorded findings that need adversarial verification",
+    category: "security",
+    tags: ["security", "sentinel", "verify"],
+    schema: [
+      output_dir: [type: :string, default: ".arbor/security/findings"],
+      max: [type: :integer, default: 25, doc: "cap on findings verified per run"]
+    ]
+
+  alias Arbor.Actions.Security.{FindingStore, Verifier}
+  alias Arbor.Contracts.Security.Finding
+
+  @impl true
+  def run(params, _context) do
+    dir = params[:output_dir] || ".arbor/security/findings"
+
+    ids =
+      FindingStore.list(dir: dir)
+      |> Enum.filter(fn {id, status} ->
+        status in [:open, :regressed] and needs_verification?(id, dir)
+      end)
+      |> Enum.map(fn {id, _} -> id end)
+      |> Enum.take(params[:max] || 25)
+
+    {:ok, %{to_verify: ids, count: length(ids)}}
+  end
+
+  defp needs_verification?(id, dir) do
+    case FindingStore.read(id, dir) do
+      {:ok, content} ->
+        g = Finding.gating_from_markdown(content)
+        Verifier.needs_verification_gate?(g.layer, g.confidence)
+
+      _ ->
+        false
+    end
+  end
+end
+
 defmodule Arbor.Actions.Security.RecordDiffFindings do
   @moduledoc """
   Parse an L1 diff-review LLM output (JSON array of findings) into `Finding`s and

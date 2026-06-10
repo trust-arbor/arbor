@@ -25,9 +25,18 @@ digraph security_assess {
     graph_file="specs/pipelines/security/scan-deps.dot"
   ]
 
+  // Adversarially verify the findings the detectors just recorded: select the
+  // ones that still need scrutiny (L1/L2 or low-confidence) and fan
+  // verify-finding over each, annotating the store with each verdict.
+  verify_pending [
+    type="graph.invoke",
+    graph_file="specs/pipelines/security/verify-pending.dot"
+  ]
+
   done [shape=Msquare]
 
   start -> detect
   detect -> scan_deps
-  scan_deps -> done
+  scan_deps -> verify_pending
+  verify_pending -> done
 }

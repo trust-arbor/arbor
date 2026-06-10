@@ -68,6 +68,10 @@ defmodule Arbor.Actions.Security.FindingStore do
     end
   end
 
+  @doc "Reads a finding's full markdown content by id."
+  @spec read(String.t(), String.t()) :: {:ok, String.t()} | {:error, :not_found}
+  def read(id, dir \\ @default_dir), do: read_existing(path_for(id, dir))
+
   @doc "Reads the persisted status of a finding by id, or `nil` if not present."
   @spec current_status(String.t(), String.t()) :: Finding.status() | nil
   def current_status(id, dir \\ @default_dir) do
