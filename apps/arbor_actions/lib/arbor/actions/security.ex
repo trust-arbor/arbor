@@ -115,6 +115,55 @@ defmodule Arbor.Actions.Security.RunDependencyScan do
   end
 end
 
+defmodule Arbor.Actions.Security.RecordDiffFindings do
+  @moduledoc """
+  Parse an L1 diff-review LLM output (JSON array of findings) into `Finding`s and
+  record them. The terminal node of `l1-diff-review.dot`: the `compute` node
+  reviews a diff and emits JSON; this parses it via
+  `Arbor.Actions.Security.DiffFindings` (layer `L1`, confidence 0.5) and records
+  via the shared `Recorder` — so L1 findings flow into the store + signals like
+  every other detector, and get sent through adversarial verification.
+  """
+
+  use Jido.Action,
+    name: "security_record_diff_findings",
+    description: "Parse an L1 diff-review LLM output into findings and record them",
+    category: "security",
+    tags: ["security", "sentinel", "l1", "diff-review"],
+    schema: [
+      review: [type: :string, default: "", doc: "The LLM diff-review output (JSON array)"],
+      output_dir: [type: :string, default: ".arbor/security/findings", doc: "Findings dir"],
+      record: [type: :boolean, default: true, doc: "Write findings + emit signals"],
+      git_sha: [type: {:or, [:string, nil]}, default: nil, doc: "Git SHA for provenance"]
+    ]
+
+  alias Arbor.Actions.Security.{DiffFindings, Recorder}
+
+  @impl true
+  def run(params, _context) do
+    findings =
+      (params[:review] || "")
+      |> DiffFindings.parse(git_sha: params[:git_sha])
+      |> Enum.uniq_by(& &1.id)
+
+    {_outcomes, summary} =
+      Recorder.record_all(
+        findings,
+        Map.get(params, :record, true),
+        params[:output_dir] || ".arbor/security/findings"
+      )
+
+    {:ok,
+     %{
+       total: summary.total,
+       by_category: summary.by_category,
+       by_severity: summary.by_severity,
+       by_outcome: summary.by_outcome,
+       finding_ids: Enum.map(findings, & &1.id)
+     }}
+  end
+end
+
 defmodule Arbor.Actions.Security.AggregateVerdict do
   @moduledoc """
   Aggregate the adversarial-verify skeptic outputs into a verdict and annotate
