@@ -238,7 +238,8 @@ defmodule Arbor.Actions do
         Arbor.Actions.Security.RunStaticDetectors,
         Arbor.Actions.Security.RunWholeTreeDetectors,
         Arbor.Actions.Security.RunDependencyScan,
-        Arbor.Actions.Security.AggregateVerdict
+        Arbor.Actions.Security.AggregateVerdict,
+        Arbor.Actions.Security.RecordDiffFindings
       ],
       shell: [
         Arbor.Actions.Shell.Execute,

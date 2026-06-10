@@ -1,0 +1,61 @@
+// Security Sentinel — L1 diff-review sub-pipeline (Phase 2).
+//
+// The LLM-reasoning detector: reviews a git diff for NEWLY-INTRODUCED security
+// issues the deterministic L0/L0b detectors can't see (contextual, novel). Emits
+// JSON findings; security.record_diff_findings parses them into Finding structs
+// (layer L1, confidence 0.5) and records them — which routes them straight into
+// adversarial verify-finding (needs_verification? always verifies L1).
+//
+// Context in:
+//   diff       — the git diff text to review (caller provides; a diff-prep step
+//                or `git diff <base> -- '*.ex'` upstream)
+//   git_sha    — provenance stamped on each finding
+//   output_dir — findings dir (defaults to .arbor/security/findings)
+//
+// Model: local Gemma via LM Studio by default (the diff may contain proprietary
+// code — keep it local; see the llm-task-inventory roadmap item / sensitivity
+// routing for the cloud-fallback policy).
+
+digraph l1_diff_review {
+  graph [
+    goal="Review a diff for newly-introduced security issues and record findings",
+    label="Security: L1 diff review"
+  ]
+
+  start [shape=Mdiamond]
+
+  review [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    llm_provider="lm_studio",
+    llm_model="gemma-4-31b-it",
+    use_tools="false",
+    temperature="0.2",
+    max_tokens="8192",
+    timeout="300000",
+    prompt_context_key="diff",
+    system_prompt="You are a security code reviewer. Review the git diff below for security issues NEWLY INTRODUCED by the change — focus on what the diff adds/changes, not pre-existing code, and ignore style/quality. Look for: authorization that fails open (rescue/catch or a catch-all returning an allow value); missing or bypassed capability checks; crypto misuse (wrong hash mode for Ed25519, fields left out of a signing payload, MAC-after-decrypt, weak randomness); secret/credential/token exposure (logged, returned, embedded); command/SQL injection and unsafe string interpolation into shells/queries; path traversal; unsafe deserialization (binary_to_term on untrusted input); String.to_atom on untrusted input; capability URI over-matching; TOCTOU. Be precise and conservative — only report a real, newly-introduced risk.\n\nOutput ONLY a JSON array (no prose, no markdown fences). Each element: {\"category\": one of [fail_open_authz, crypto_weakness, capability_overmatch, serialization_drop, unsafe_atom, config_fail_open, path_traversal, secret_exposure, injection, dependency_risk, other], \"title\": a short specific title, \"file\": the file path from the diff, \"line\": an integer line number or null, \"severity\": one of [critical, high, medium, low], \"rationale\": why THIS change is a risk, \"recommendation\": the concrete fix}. If the diff introduces no security issue, output exactly []."
+  ]
+
+  prep_review [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="review"
+  ]
+
+  record [
+    type="exec",
+    target="action",
+    action="security.record_diff_findings",
+    context_keys="review,git_sha,output_dir"
+  ]
+
+  done [shape=Msquare]
+
+  start -> review
+  review -> prep_review
+  prep_review -> record
+  record -> done
+}
