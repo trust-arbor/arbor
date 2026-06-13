@@ -161,6 +161,7 @@ defmodule Arbor.Trust.AuthorityTest do
   end
 
   describe "set_tier/2" do
+    @tag spec: "TRUST-12"
     test "updates only the tier label, leaving baseline and rules untouched" do
       profile = Authority.new_profile("agent_123", :untrusted)
       original_baseline = profile.baseline
@@ -173,6 +174,7 @@ defmodule Arbor.Trust.AuthorityTest do
       assert updated.rules == original_rules
     end
 
+    @tag spec: "TRUST-12"
     test "preserves user-customized rules across tier changes (regression)" do
       # Footgun fix: graduating to a higher tier used to silently overwrite
       # the user's "always allow" customizations with the new preset's rules.
@@ -278,6 +280,7 @@ defmodule Arbor.Trust.AuthorityTest do
       assert restored.rules["arbor://custom/api"] == :auto
     end
 
+    @tag spec: "TRUST-10"
     test "from_persistence accepts string-keyed maps (e.g. JSONB roundtrip)" do
       original = Authority.new_profile("agent_string_keyed", :balanced)
       serialized = Authority.for_persistence(original)
@@ -292,6 +295,7 @@ defmodule Arbor.Trust.AuthorityTest do
       assert restored.tier == original.tier
     end
 
+    @tag spec: "TRUST-4,TRUST-10"
     test "from_persistence coerces invalid rule modes to :ask (safe default)" do
       data = %{
         agent_id: "agent_bad_mode",

@@ -9,6 +9,7 @@ defmodule Arbor.Trust.ProfileResolverTest do
   @moduletag :fast
 
   describe "resolve_prefix/3" do
+    @tag spec: "TRUST-5"
     test "returns baseline when no rules match" do
       rules = %{"arbor://shell" => :block}
       assert ProfileResolver.resolve_prefix(rules, "arbor://memory/read", :auto) == :auto
@@ -32,6 +33,7 @@ defmodule Arbor.Trust.ProfileResolverTest do
       assert ProfileResolver.resolve_prefix(rules, "arbor://shell", :auto) == :ask
     end
 
+    @tag spec: "TRUST-5"
     test "matches longest prefix" do
       rules = %{
         "arbor://shell" => :block,
@@ -191,6 +193,7 @@ defmodule Arbor.Trust.ProfileResolverTest do
              ) == :auto
     end
 
+    @tag spec: "TRUST-1"
     test "most restrictive of all three layers wins" do
       profile = %{
         rules: %{"arbor://shell" => :allow},

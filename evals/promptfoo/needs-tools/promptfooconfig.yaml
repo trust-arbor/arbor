@@ -1,0 +1,67 @@
+# needs_tools — binary tool-need gate (task id: preprocessor.needs_tools)
+#
+# Run:   python3 convert_corpus.py        (regenerates dataset.jsonl from _import/)
+#        npx promptfoo@latest eval -c promptfooconfig.yaml -o results.json
+#        npx promptfoo@latest view
+#
+# Compare models on FALSE-NEGATIVE count first (truth=true tests that fail —
+# a missed tool-need routes to the no-tools DIRECT fast lane and the task
+# fails), accuracy second. Per-test metadata.needs_tools_truth supports this.
+#
+# Provider identity convention: label = model + quant + serving endpoint.
+# (Ollama vs LM Studio served DIFFERENT behavior for the same granite model —
+# never compare across unlabeled providers.)
+
+description: >
+  Binary needs_tools judgment for the preprocessor dispositional layer.
+  Production binding: gemma-4-e4b-it@q4_k_xl (LM Studio), locked 2026-05-26
+  (93.1% acc, 10 FN, 0 FP on the 145-prompt corpus). Truth labels:
+  Hysun QA review 2026-05-26.
+
+prompts:
+  # The winning "generic" variant from the 2026-05-26 sweep. Grounding
+  # variants LOST (traded FN for FP explosion) — don't add grounding without
+  # re-running the A/B.
+  - file://prompts/generic.json
+
+providers:
+  # Production binding (champion)
+  - id: openai:chat:gemma-4-e4b-it@q4_k_xl
+    label: gemma-4-e4b-q4@lmstudio
+    config:
+      apiBaseUrl: http://localhost:1234/v1
+      apiKey: lm-studio
+      temperature: 0.0
+      max_tokens: 256
+
+  # Baselines from the 2026-05-26 sweep (challengers; re-run on new releases)
+  - id: openai:chat:granite-4.1-3b
+    label: granite-4.1-3b@lmstudio
+    config:
+      apiBaseUrl: http://localhost:1234/v1
+      apiKey: lm-studio
+      temperature: 0.0
+      max_tokens: 256
+
+  - id: openai:chat:qwen3.5-2b-mtp
+    label: qwen3.5-2b-q8@lmstudio
+    config:
+      apiBaseUrl: http://localhost:1234/v1
+      apiKey: lm-studio
+      temperature: 0.0
+      max_tokens: 256
+
+tests:
+  # 16 curated, unambiguous prompts — committed (no personal content).
+  # A model failing these is disqualified regardless of corpus score.
+  - file://sanity.jsonl
+  # 145-prompt real-usage corpus with QA truth labels — GITIGNORED (real
+  # usage content; public repo). Regenerate locally: python3 convert_corpus.py
+  - file://dataset.jsonl
+
+# NOTE on reasoning models: under LM Studio's json_schema mode some emit JSON
+# into reasoning_content with empty content. promptfoo sees empty output and
+# the assert fails — which is the correct verdict for this latency-critical
+# gate (an answer the pipeline can't read is a wrong answer).
+
+outputPath: results.json

@@ -89,6 +89,48 @@ defmodule Arbor.Persistence.Schemas.EvalRunTest do
       assert changes.status == "running"
       assert changes.metadata == %{}
     end
+
+    test "valid with run-identity fields (eval-system-architecture 2026-06-10)" do
+      attrs =
+        Map.merge(@valid_attrs, %{
+          git_sha: "abc123def456",
+          git_dirty: false,
+          quant: "q4_k_xl",
+          endpoint: "http://localhost:1234/v1",
+          dataset_hash: "sha256:deadbeef",
+          config_fingerprint: "sha256:cafebabe",
+          layer: "task",
+          task_id: "preprocessor.needs_tools"
+        })
+
+      cs = EvalRun.changeset(%EvalRun{}, attrs)
+      assert cs.valid?
+
+      changes = Ecto.Changeset.apply_changes(cs)
+      assert changes.git_sha == "abc123def456"
+      assert changes.git_dirty == false
+      assert changes.quant == "q4_k_xl"
+      assert changes.layer == "task"
+      assert changes.task_id == "preprocessor.needs_tools"
+    end
+
+    test "run-identity fields are optional (legacy callers stay valid)" do
+      cs = EvalRun.changeset(%EvalRun{}, @valid_attrs)
+      assert cs.valid?
+    end
+
+    test "valid layers" do
+      for layer <- ~w(task system) do
+        cs = EvalRun.changeset(%EvalRun{}, Map.put(@valid_attrs, :layer, layer))
+        assert cs.valid?, "Expected layer '#{layer}' to be valid"
+      end
+    end
+
+    test "invalid with bad layer" do
+      cs = EvalRun.changeset(%EvalRun{}, Map.put(@valid_attrs, :layer, "cloud"))
+      refute cs.valid?
+      assert {:layer, _} = List.keyfind(cs.errors, :layer, 0)
+    end
   end
 
   defp errors_on(changeset) do

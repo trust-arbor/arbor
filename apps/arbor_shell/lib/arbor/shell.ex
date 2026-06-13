@@ -103,6 +103,47 @@ defmodule Arbor.Shell do
     authorize_and_dispatch(agent_id, command, opts, fn -> execute_async(command, opts) end)
   end
 
+  @doc """
+  Authorize a shell command for an agent WITHOUT executing it.
+
+  Runs the same capability + reflex policy check as `authorize_and_execute/3`
+  but returns the decision instead of dispatching execution. This is for
+  callers that own their own execution mechanism and cannot route through
+  `execute/2` — notably the DOT `shell` node handler, whose `sandbox: :none`
+  path runs a real `/bin/sh -c` to preserve compound-command semantics
+  (`&&`, `|`, `$(…)`, heredocs) that the argv-based `execute/2` does not
+  provide. Such callers authorize first, then execute themselves.
+
+  ## Returns
+
+  - `{:ok, :authorized}` - the principal may run this command
+  - `{:ok, :pending_approval, proposal_id}` - escalated; not yet authorized
+  - `{:error, :unauthorized}` - the principal lacks the capability
+
+  ## Examples
+
+      {:ok, :authorized} = Arbor.Shell.authorize("agent_001", "ls -la")
+      {:error, :unauthorized} = Arbor.Shell.authorize("agent_002", "rm -rf /")
+  """
+  @spec authorize(String.t(), String.t(), keyword()) ::
+          {:ok, :authorized}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, :unauthorized}
+  def authorize(agent_id, command, opts \\ []) do
+    command_name = extract_command_name(command)
+    resource = "arbor://shell/exec/#{command_name}"
+
+    # Skip identity verification — facade auth is a policy check only; the
+    # caller (or the action layer above it) owns request-signature checks.
+    auth_opts = [command: command, path: Keyword.get(opts, :cwd), verify_identity: false]
+
+    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
+      {:ok, :authorized} -> {:ok, :authorized}
+      {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+      {:error, _reason} -> {:error, :unauthorized}
+    end
+  end
+
   # ===========================================================================
   # Public API — short, human-friendly names (unchecked, for system callers)
   # ===========================================================================
@@ -548,22 +589,10 @@ defmodule Arbor.Shell do
   # Shared authorization dispatch — all authorize_and_execute_* variants
   # use the same auth check pattern, only the execution function differs.
   defp authorize_and_dispatch(agent_id, command, opts, execute_fn) do
-    command_name = extract_command_name(command)
-    resource = "arbor://shell/exec/#{command_name}"
-
-    # Skip identity verification — the caller (authorize_and_execute in Actions)
-    # already verified the signed request. Facade auth is a policy check only.
-    auth_opts = [command: command, path: Keyword.get(opts, :cwd), verify_identity: false]
-
-    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
-      {:ok, :authorized} ->
-        execute_fn.()
-
-      {:ok, :pending_approval, proposal_id} ->
-        {:ok, :pending_approval, proposal_id}
-
-      {:error, _reason} ->
-        {:error, :unauthorized}
+    case authorize(agent_id, command, opts) do
+      {:ok, :authorized} -> execute_fn.()
+      {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+      {:error, :unauthorized} -> {:error, :unauthorized}
     end
   end
 
@@ -573,6 +602,7 @@ defmodule Arbor.Shell do
     |> String.trim_leading()
     |> String.split(~r/\s+/, parts: 2)
     |> List.first()
-    |> String.replace(~r/^.*\//, "")  # Strip path prefix (e.g., /bin/ls -> ls)
+    # Strip path prefix (e.g., /bin/ls -> ls)
+    |> String.replace(~r/^.*\//, "")
   end
 end

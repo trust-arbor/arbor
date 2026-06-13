@@ -18,7 +18,13 @@ defmodule Arbor.LLM.MixProject do
 
   def application do
     [
-      extra_applications: [:logger]
+      # :xmerl — req_llm requires it (its .app lists it), but Mix's code-path
+      # pruning (Elixir >= 1.15) can drop OTP app paths in umbrella mix-task
+      # contexts where only the dep's .app declares them. Declaring it here
+      # keeps xmerl on the code path wherever arbor_llm starts.
+      # Regression: 2026-06-11 `mix arbor.eval` — {:xmerl, {'no such file or
+      # directory', 'xmerl.app'}} despite xmerl present in the toolchain.
+      extra_applications: [:logger, :xmerl]
     ]
   end
 

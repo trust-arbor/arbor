@@ -174,6 +174,8 @@ defmodule Mix.Tasks.Arbor.Eval do
         end
       end
 
+    preflight_provider!(provider, force_refresh: base_url != nil)
+
     models =
       case Keyword.get(opts, :models) do
         nil ->
@@ -746,6 +748,44 @@ defmodule Mix.Tasks.Arbor.Eval do
     Application.ensure_all_started(:req)
     Application.ensure_all_started(:jason)
 
+    # Mix (Elixir >= 1.15) PRUNES OTP application paths at task boot — OTP apps
+    # that only transitive deps declare (req_llm -> :xmerl) can be dropped from
+    # the code path even though the toolchain ships them. ensure_application!
+    # is the canonical escape hatch: it re-adds the pruned path.
+    # Regression: 2026-06-11/12 — {:xmerl, {'no such file or directory',
+    # 'xmerl.app'}} on a toolchain where bare `erl` starts xmerl fine.
+    if function_exported?(Mix, :ensure_application!, 1) do
+      Mix.ensure_application!(:xmerl)
+    end
+
+    # Start the LLM dispatch layer. ReqLLM's cloud-provider registry lives in
+    # :persistent_term and is only populated when :req_llm starts — without
+    # this, ProviderCatalog sees ONLY local providers (acp/lm_studio/ollama)
+    # and every cloud-provider eval fails with "unknown provider" while still
+    # persisting 0.0-score runs. Regression: 2026-06-11 trinity-replacement
+    # bake-off (this harness predates the req_llm migration). Loud on failure:
+    # an LLM eval task without the LLM layer must not proceed.
+    case Application.ensure_all_started(:arbor_llm) do
+      {:ok, _} ->
+        :ok
+
+      {:error, {app, {~c"no such file or directory", _}} = reason}
+      when app in [:xmerl, :ssl, :inets, :crypto, :public_key] ->
+        Mix.raise("""
+        Failed to start :arbor_llm — the OTP application #{inspect(app)} could not
+        be found on the code path (#{inspect(reason)}).
+
+        Most likely cause: Mix code-path pruning dropped it (try adding
+        `Mix.ensure_application!(#{inspect(app)})` before startup — done for :xmerl
+        already). Less likely: the running Erlang genuinely lacks it — check with:
+
+            erl -noshell -eval 'io:format("~p~n",[application:ensure_all_started(#{app})]),halt().'
+        """)
+
+      {:error, reason} ->
+        Mix.raise("Failed to start :arbor_llm (#{inspect(reason)})")
+    end
+
     # Start persistence for DB-backed eval storage (optional — falls back to JSON)
     try do
       Application.ensure_all_started(:arbor_persistence)
@@ -763,6 +803,51 @@ defmodule Mix.Tasks.Arbor.Eval do
     catch
       :exit, _ -> :ok
     end
+  end
+
+  # Fail fast BEFORE creating any EvalRun records when the provider can't be
+  # resolved or isn't reachable. Without this, an unresolvable provider produces
+  # complete-looking runs scored 0.0 across the board — poisoning the
+  # longitudinal eval store with infrastructure failures recorded as model
+  # quality. (2026-06-11: three such garbage runs persisted during the
+  # trinity-replacement bake-off before this guard existed.)
+  defp preflight_provider!(provider, opts) do
+    catalog = Arbor.LLM.ProviderCatalog.all(opts)
+
+    case Enum.find(catalog, fn entry -> entry.provider == provider end) do
+      nil ->
+        available = catalog |> Enum.map(& &1.provider) |> Enum.sort()
+
+        Mix.raise("""
+        Unknown provider: #{inspect(provider)}
+        Known providers: #{inspect(available)}
+        If a cloud provider is missing entirely, the LLM layer may not have started
+        (this task starts :arbor_llm — check for startup errors above).
+        """)
+
+      %{available?: false} = entry ->
+        hint =
+          case entry do
+            %{contract: %{env_vars: [_ | _] = keys}} ->
+              "Likely missing credentials — expected env: #{Enum.join(keys, ", ")}"
+
+            _ ->
+              "Provider known but unavailable — run `mix arbor.doctor` for diagnostics."
+          end
+
+        Mix.raise("""
+        Provider #{inspect(provider)} is known but NOT currently available.
+        #{hint}
+        Refusing to run: results would persist as 0.0 scores and poison the eval store.
+        """)
+
+      _available ->
+        :ok
+    end
+  rescue
+    e in [Mix.Error] -> reraise e, __STACKTRACE__
+    # ProviderCatalog itself failing is the same class — fail loud, not into 0.0s.
+    e -> Mix.raise("Provider preflight failed: #{Exception.message(e)}")
   end
 
   defp maybe_filter(filters, _key, nil), do: filters

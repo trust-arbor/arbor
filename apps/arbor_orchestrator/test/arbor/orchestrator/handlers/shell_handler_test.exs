@@ -15,19 +15,36 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
     %Node{id: id, attrs: Map.merge(%{"type" => "shell", "sandbox" => "none"}, attrs)}
   end
 
+  # These mechanics tests exercise the execution path, not authorization.
+  # Since the phase-0 capability gate (2026-06-10) now authorizes every
+  # shell node — and Arbor.Shell IS loadable in the umbrella test build —
+  # inject an allowing authorizer so the gate is a no-op here. The gate
+  # itself is covered by the "security regression" describe block below.
+  defp run(node, context, opts \\ []) do
+    opts = Keyword.put_new(opts, :shell_authorizer, &allow/3)
+    ShellHandler.execute(node, context, @graph, opts)
+  end
+
+  defp allow(_agent_id, _command, _opts), do: {:ok, :authorized}
+  defp deny(_agent_id, _command, _opts), do: {:error, :unauthorized}
+
+  defp sentinel_path(tag) do
+    Path.join(System.tmp_dir!(), "arbor_shell_gate_#{tag}_#{System.unique_integer([:positive])}")
+  end
+
   describe "execute/4" do
     test "runs a simple command" do
       node = make_node("echo_test", %{"command" => "echo hello"})
       context = Context.new()
 
-      assert %Outcome{status: :success} = ShellHandler.execute(node, context, @graph, [])
+      assert %Outcome{status: :success} = run(node, context)
     end
 
     test "captures command output in context" do
       node = make_node("echo_test", %{"command" => "echo hello_world"})
       context = Context.new()
 
-      outcome = ShellHandler.execute(node, context, @graph, [])
+      outcome = run(node, context)
       assert outcome.status == :success
       assert String.contains?(outcome.context_updates["shell.echo_test.output"], "hello_world")
       assert outcome.context_updates["shell.echo_test.exit_code"] == 0
@@ -37,7 +54,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       node = make_node("fail_test", %{"command" => "sh -c 'exit 1'"})
       context = Context.new()
 
-      outcome = ShellHandler.execute(node, context, @graph, [])
+      outcome = run(node, context)
       assert outcome.status == :fail
       assert outcome.context_updates["shell.fail_test.exit_code"] == 1
     end
@@ -46,7 +63,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       node = make_node("warn_test", %{"command" => "sh -c 'exit 1'", "on_error" => "warn"})
       context = Context.new()
 
-      outcome = ShellHandler.execute(node, context, @graph, [])
+      outcome = run(node, context)
       assert outcome.status == :success
       assert String.contains?(outcome.notes, "code 1")
     end
@@ -57,7 +74,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
 
       context = Context.new()
 
-      outcome = ShellHandler.execute(node, context, @graph, [])
+      outcome = run(node, context)
       assert outcome.status == :success
       assert outcome.context_updates["shell.continue_test.exit_code"] == 42
     end
@@ -66,7 +83,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       node = make_node("no_cmd", %{})
       context = Context.new()
 
-      outcome = ShellHandler.execute(node, context, @graph, [])
+      outcome = run(node, context)
       assert outcome.status == :fail
       assert String.contains?(outcome.failure_reason, "requires 'command'")
     end
@@ -75,7 +92,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       node = make_node("cwd_test", %{"command" => "pwd", "cwd" => "/tmp"})
       context = Context.new()
 
-      outcome = ShellHandler.execute(node, context, @graph, [])
+      outcome = run(node, context)
       assert outcome.status == :success
       # /tmp may resolve to /private/tmp on macOS
       assert String.contains?(outcome.context_updates["shell.cwd_test.output"], "tmp")
@@ -85,7 +102,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       node = make_node("cwd_ctx", %{"command" => "pwd"})
       context = Context.new(%{"workdir" => "/tmp"})
 
-      outcome = ShellHandler.execute(node, context, @graph, [])
+      outcome = run(node, context)
       assert outcome.status == :success
       assert String.contains?(outcome.context_updates["shell.cwd_ctx.output"], "tmp")
     end
@@ -94,7 +111,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       node = make_node("timeout_test", %{"command" => "sleep 10", "timeout" => "100"})
       context = Context.new()
 
-      outcome = ShellHandler.execute(node, context, @graph, [])
+      outcome = run(node, context)
       assert outcome.status == :fail
       assert String.contains?(outcome.failure_reason, "timeout")
     end
@@ -104,7 +121,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       node = make_node("multi", %{"command" => "ls /tmp"})
       context = Context.new()
 
-      outcome = ShellHandler.execute(node, context, @graph, [])
+      outcome = run(node, context)
       assert outcome.status == :success
       output = outcome.context_updates["shell.multi.output"]
       assert String.length(output) > 0
@@ -128,7 +145,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       node = make_node("just_a_shell", %{"command" => "echo from_shell"})
       context = Context.new()
 
-      outcome = ShellHandler.execute(node, context, @graph, [])
+      outcome = run(node, context)
 
       refute Map.has_key?(outcome.context_updates, "last_response"),
              "ShellHandler must not write last_response — that key is " <>
@@ -162,7 +179,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       # Loop to catch raciness — if the bug is back this often fails
       # on the first or second iteration.
       for i <- 1..10 do
-        outcome = ShellHandler.execute(node, context, @graph, [])
+        outcome = run(node, context)
         output = outcome.context_updates["shell.compound.output"]
 
         assert outcome.status == :success, "iteration #{i}: status was #{inspect(outcome.status)}"
@@ -173,6 +190,79 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
                  "Bug B: collect_output/3 returned on :exit_status without " <>
                  "draining trailing :data messages."
       end
+    end
+  end
+
+  describe "security regression: shell node capability gate (2026-06-10)" do
+    # Before the phase-0 fix, ShellHandler.execute/4 ran `command` with NO
+    # authorization. Any agent that could author or influence a DOT graph
+    # got arbitrary shell — including the sandbox="none" real-/bin/sh path.
+    # This is the orphan-path twin of ExecHandler's authorized
+    # target="action" branch.
+    #
+    # Each test injects a DENYING authorizer and asserts the node fails
+    # closed WITHOUT running the command (a sentinel file is never created).
+    # On `git checkout HEAD~1` the command runs and the file appears, so
+    # these fail on revert — proving the gate. See
+    # .arbor/roadmap/1-brainstorming/safe-shell-execution.md (Phase 0).
+
+    test "denies an unauthorized principal and does not execute the command" do
+      sentinel = sentinel_path("denied")
+      File.rm(sentinel)
+      # Principal resolved from the session context.
+      context = Context.new(%{"session.agent_id" => "agent_untrusted"})
+      node = make_node("denied", %{"command" => "touch #{sentinel}"})
+
+      outcome = ShellHandler.execute(node, context, @graph, shell_authorizer: &deny/3)
+
+      assert outcome.status == :fail
+      assert outcome.failure_reason =~ "authorization denied"
+
+      assert outcome.failure_reason =~ "agent_untrusted",
+             "principal must be resolved from session.agent_id"
+
+      refute File.exists?(sentinel),
+             "command executed despite denial — the capability gate did not " <>
+               "fire (regression: shell node ran unauthorized, the 2026-06-10 bug)"
+    end
+
+    test "sandbox=none does NOT bypass the gate (the /bin/sh -c path)" do
+      # The sharpest edge: sandbox="none" runs a real `/bin/sh -c`, which
+      # previously skipped Arbor.Shell entirely. It must still authorize.
+      sentinel = sentinel_path("none")
+      File.rm(sentinel)
+      # make_node already sets sandbox="none".
+      node = make_node("denied_none", %{"command" => "touch #{sentinel} && echo done"})
+
+      outcome = ShellHandler.execute(node, Context.new(), @graph, shell_authorizer: &deny/3)
+
+      assert outcome.status == :fail
+
+      refute File.exists?(sentinel),
+             "sandbox=none bypassed the capability gate — /bin/sh -c ran unauthorized"
+    end
+
+    test "pending approval fails closed (escalation, not execution)" do
+      sentinel = sentinel_path("pending")
+      File.rm(sentinel)
+      pending = fn _agent_id, _command, _opts -> {:ok, :pending_approval, "prop_123"} end
+      node = make_node("pending", %{"command" => "touch #{sentinel}"})
+
+      outcome = ShellHandler.execute(node, Context.new(), @graph, shell_authorizer: pending)
+
+      assert outcome.status == :fail
+
+      refute File.exists?(sentinel),
+             "a command awaiting approval must not run until approved"
+    end
+
+    test "an authorized principal runs the command" do
+      node = make_node("allowed", %{"command" => "echo authorized"})
+
+      outcome = ShellHandler.execute(node, Context.new(), @graph, shell_authorizer: &allow/3)
+
+      assert outcome.status == :success
+      assert outcome.context_updates["shell.allowed.output"] =~ "authorized"
     end
   end
 

@@ -88,7 +88,9 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       assert ConfirmationTracker.graduated?(agent_id, uri)
     end
 
-    test "returns :ok (not suggestion) on subsequent approvals after graduation", %{agent_id: agent_id} do
+    test "returns :ok (not suggestion) on subsequent approvals after graduation", %{
+      agent_id: agent_id
+    } do
       uri = "arbor://code/write/#{agent_id}/impl/file.ex"
 
       ConfirmationTracker.record_approval(agent_id, uri)
@@ -108,6 +110,7 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       refute ConfirmationTracker.graduated?(agent_id, uri)
     end
 
+    @tag spec: "TRUST-7"
     test "rejection resets graduation progress", %{agent_id: agent_id} do
       uri = "arbor://code/write/#{agent_id}/impl/file.ex"
 
@@ -122,6 +125,7 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       refute ConfirmationTracker.graduated?(agent_id, uri)
     end
 
+    @tag spec: "TRUST-7"
     test "rejection reverts existing graduation", %{agent_id: agent_id} do
       uri = "arbor://code/write/#{agent_id}/impl/file.ex"
 
@@ -153,6 +157,7 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
   # ===========================================================================
 
   describe "security invariants" do
+    @tag spec: "TRUST-8"
     test "shell NEVER graduates regardless of approvals", %{agent_id: agent_id} do
       uri = "arbor://shell/exec/ls"
 
@@ -164,6 +169,7 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       assert ConfirmationTracker.threshold_for("arbor://shell") == :never
     end
 
+    @tag spec: "TRUST-8"
     test "governance NEVER graduates regardless of approvals", %{agent_id: agent_id} do
       uri = "arbor://governance/change/self/policy"
 
@@ -248,6 +254,7 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
   end
 
   describe "reset/1" do
+    @tag spec: "TRUST-9"
     test "clears all confirmation history for an agent", %{agent_id: agent_id} do
       write_uri = "arbor://code/write/#{agent_id}/impl/file.ex"
       network_uri = "arbor://network/request/https://example.com"
@@ -264,6 +271,7 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       assert ConfirmationTracker.status(agent_id, "arbor://network") == new_entry()
     end
 
+    @tag spec: "TRUST-9"
     test "does not affect other agents", %{agent_id: agent_id} do
       other_id = "other_agent_#{System.unique_integer([:positive])}"
       uri = "arbor://code/write/self/impl/file.ex"
@@ -317,7 +325,9 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       assert ConfirmationTracker.resolve_tracking_prefix("arbor://shell/exec/ls") ==
                "arbor://shell"
 
-      assert ConfirmationTracker.resolve_tracking_prefix("arbor://network/request/https://example.com") ==
+      assert ConfirmationTracker.resolve_tracking_prefix(
+               "arbor://network/request/https://example.com"
+             ) ==
                "arbor://network"
     end
 
@@ -368,10 +378,12 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       for _ <- 1..4 do
         assert :ok = ConfirmationTracker.record_approval(agent_id, uri)
       end
+
       refute ConfirmationTracker.graduated?(agent_id, uri)
 
       assert {:graduation_suggested, "arbor://network"} =
                ConfirmationTracker.record_approval(agent_id, uri)
+
       assert ConfirmationTracker.graduated?(agent_id, uri)
     end
 
@@ -381,10 +393,12 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       for _ <- 1..9 do
         assert :ok = ConfirmationTracker.record_approval(agent_id, uri)
       end
+
       refute ConfirmationTracker.graduated?(agent_id, uri)
 
       assert {:graduation_suggested, "arbor://config"} =
                ConfirmationTracker.record_approval(agent_id, uri)
+
       assert ConfirmationTracker.graduated?(agent_id, uri)
     end
 
@@ -435,6 +449,7 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       # Re-graduate — should suggest again
       ConfirmationTracker.record_approval(agent_id, uri)
       ConfirmationTracker.record_approval(agent_id, uri)
+
       assert {:graduation_suggested, "arbor://code/write"} =
                ConfirmationTracker.record_approval(agent_id, uri)
     end

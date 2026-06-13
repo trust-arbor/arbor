@@ -19,6 +19,18 @@ Guidelines for consistent test tagging across the Arbor codebase.
 | `:integration` | Tests that cross app boundaries or require external resources |
 | `:behavioral` | End-to-end behavioral tests using `BehavioralCase`. See below. |
 
+### Spec Conformance
+
+| Tag | When to use |
+|-----|-------------|
+| `spec: "TRUST-7"` | The test proves a normative statement from `docs/specs/*.md`. Comma-separate multiple IDs: `spec: "TRUST-1,TRUST-2"`. |
+
+Spec statements are numbered RFC 2119 statements (`- **TRUST-7** (MUST): ...`).
+`mix arbor.spec.coverage` maps statements ↔ tests and reports unproven claims and dead
+refs; `--strict` fails CI on unproven non-planned MUSTs. When fixing a security bug, give
+the regression test a spec ID so the invariant is named, not just tested. See
+`.arbor/roadmap/1-brainstorming/executable-specs-and-conformance.md`.
+
 ### External Dependencies
 
 | Tag | When to use |
