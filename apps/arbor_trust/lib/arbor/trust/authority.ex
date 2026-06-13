@@ -33,14 +33,15 @@ defmodule Arbor.Trust.Authority do
     {:ok, profile} = Profile.new(agent_id)
     {baseline, rules} = preset_rules_for_tier(tier)
 
-    %{profile |
-      tier: tier,
-      baseline: baseline,
-      rules: rules,
-      trust_score: 0,
-      trust_points: 0,
-      created_at: DateTime.utc_now(),
-      updated_at: DateTime.utc_now()
+    %{
+      profile
+      | tier: tier,
+        baseline: baseline,
+        rules: rules,
+        trust_score: 0,
+        trust_points: 0,
+        created_at: DateTime.utc_now(),
+        updated_at: DateTime.utc_now()
     }
   end
 
@@ -226,11 +227,7 @@ defmodule Arbor.Trust.Authority do
   def apply_tier_preset(%Profile{} = profile, tier) do
     {baseline, rules} = preset_rules_for_tier(tier)
 
-    %{profile |
-      tier: tier,
-      baseline: baseline,
-      rules: Map.merge(profile.rules, rules)
-    }
+    %{profile | tier: tier, baseline: baseline, rules: Map.merge(profile.rules, rules)}
   end
 
   # ===========================================================================
@@ -384,16 +381,17 @@ defmodule Arbor.Trust.Authority do
         end)
 
       # Restore DateTime fields
-      profile = %{profile |
-        created_at: maybe_parse_datetime(profile.created_at),
-        updated_at: maybe_parse_datetime(profile.updated_at),
-        last_activity_at: maybe_parse_datetime(profile.last_activity_at),
-        frozen_at: maybe_parse_datetime(profile.frozen_at)
+      profile = %{
+        profile
+        | created_at: maybe_parse_datetime(profile.created_at),
+          updated_at: maybe_parse_datetime(profile.updated_at),
+          last_activity_at: maybe_parse_datetime(profile.last_activity_at),
+          frozen_at: maybe_parse_datetime(profile.frozen_at)
       }
 
       # Ensure rules keys are strings and modes are valid atoms
       rules =
-        for {k, v} <- (profile.rules || %{}), into: %{} do
+        for {k, v} <- profile.rules || %{}, into: %{} do
           {to_string(k), safe_mode(v)}
         end
 
@@ -596,14 +594,15 @@ defmodule Arbor.Trust.Authority do
           rollback * @weights.rollback
       )
 
-    %{profile |
-      success_rate_score: success_rate,
-      security_score: security,
-      test_pass_score: test_pass,
-      rollback_score: rollback,
-      trust_score: score,
-      tier: compute_tier(score, profile.trust_points),
-      updated_at: DateTime.utc_now()
+    %{
+      profile
+      | success_rate_score: success_rate,
+        security_score: security,
+        test_pass_score: test_pass,
+        rollback_score: rollback,
+        trust_score: score,
+        tier: compute_tier(score, profile.trust_points),
+        updated_at: DateTime.utc_now()
     }
   end
 
@@ -625,7 +624,7 @@ defmodule Arbor.Trust.Authority do
     # Longest prefix match
     matching =
       rules
-      |> Enum.filter(fn {prefix, _mode} -> String.starts_with?(uri, prefix) end)
+      |> Enum.filter(fn {prefix, _mode} -> prefix_matches?(uri, prefix) end)
       |> Enum.sort_by(fn {prefix, _} -> -String.length(prefix) end)
 
     case matching do
@@ -641,7 +640,8 @@ defmodule Arbor.Trust.Authority do
       constraints
       |> Enum.filter(fn
         {{class, prefix}, _mode} ->
-          class == model_class and String.starts_with?(uri, prefix)
+          class == model_class and prefix_matches?(uri, prefix)
+
         _ ->
           false
       end)
@@ -655,9 +655,13 @@ defmodule Arbor.Trust.Authority do
 
   defp find_matching_rule(rules, uri) do
     rules
-    |> Enum.filter(fn {prefix, _} -> String.starts_with?(uri, prefix) end)
+    |> Enum.filter(fn {prefix, _} -> prefix_matches?(uri, prefix) end)
     |> Enum.sort_by(fn {prefix, _} -> -String.length(prefix) end)
     |> List.first()
+  end
+
+  defp prefix_matches?(uri, prefix) do
+    uri == prefix or String.starts_with?(uri, prefix <> "/")
   end
 
   defp mode_index(:block), do: 0

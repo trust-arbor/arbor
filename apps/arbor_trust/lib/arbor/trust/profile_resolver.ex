@@ -10,6 +10,9 @@ defmodule Arbor.Trust.ProfileResolver do
   3. **Model constraint** — optional per-model-class ceiling
 
   The effective mode is the most restrictive of all three layers.
+  Prefix rules are segment-boundary-aware: a rule matches only when the
+  resource URI is exactly the rule prefix or starts with the prefix followed
+  by `/`.
 
   ## Modes
 
@@ -83,7 +86,8 @@ defmodule Arbor.Trust.ProfileResolver do
   Resolve the mode for a URI using longest-prefix match against a rules map.
 
   Returns the mode from the longest matching prefix, or the baseline if
-  no prefix matches.
+  no prefix matches. Prefix matching is segment-boundary-aware: a prefix
+  matches only the exact URI or a child URI whose next character is `/`.
 
   ## Examples
 
@@ -98,7 +102,7 @@ defmodule Arbor.Trust.ProfileResolver do
   @spec resolve_prefix(rules(), String.t(), mode()) :: mode()
   def resolve_prefix(rules, uri, baseline) when is_map(rules) do
     rules
-    |> Enum.filter(fn {prefix, _mode} -> String.starts_with?(uri, prefix) end)
+    |> Enum.filter(fn {prefix, _mode} -> prefix_matches?(uri, prefix) end)
     |> case do
       [] -> baseline
       matches -> matches |> Enum.max_by(fn {prefix, _} -> byte_size(prefix) end) |> elem(1)
@@ -168,12 +172,12 @@ defmodule Arbor.Trust.ProfileResolver do
     # Find which rule matched
     user_match =
       rules
-      |> Enum.filter(fn {prefix, _} -> String.starts_with?(resource_uri, prefix) end)
+      |> Enum.filter(fn {prefix, _} -> prefix_matches?(resource_uri, prefix) end)
       |> Enum.max_by(fn {prefix, _} -> byte_size(prefix) end, fn -> nil end)
 
     ceiling_match =
       ceilings
-      |> Enum.filter(fn {prefix, _} -> String.starts_with?(resource_uri, prefix) end)
+      |> Enum.filter(fn {prefix, _} -> prefix_matches?(resource_uri, prefix) end)
       |> Enum.max_by(fn {prefix, _} -> byte_size(prefix) end, fn -> nil end)
 
     %{
@@ -209,12 +213,11 @@ defmodule Arbor.Trust.ProfileResolver do
 
   The keys here are URI **prefixes** matched longest-first by
   `Authority.effective_mode/3`. Both the legacy short-namespace form
-  (`arbor://shell`) and the canonical action-URI form
-  (`arbor://actions/execute/shell.`) are listed because action
-  authorization passes the canonical form (e.g.
-  `arbor://actions/execute/shell.execute`) which would not match the
-  short namespace alone — that mismatch produced a real security
-  regression where shell.execute auto-ran without approval.
+  (`arbor://shell`) and known legacy action-URI forms
+  (`arbor://actions/execute/shell.execute`) are listed because action
+  authorization may pass the action form, which would not match the short
+  namespace alone. Dotted action names are listed as exact URIs because
+  prefix matching is segment-boundary-aware.
 
   ## Two ceiling tiers
 
@@ -240,10 +243,10 @@ defmodule Arbor.Trust.ProfileResolver do
     %{
       # Shell — never auto, even for veteran agents.
       "arbor://shell" => :ask,
-      "arbor://actions/execute/shell." => :ask,
+      "arbor://actions/execute/shell.execute" => :ask,
+      "arbor://actions/execute/shell.execute_script" => :ask,
       # Governance changes — never auto.
       "arbor://governance" => :ask,
-      "arbor://actions/execute/governance." => :ask,
       # Defense in depth: code and filesystem writes need confirmation
       # even on the most trusting profiles. Reads remain unrestricted.
       # Without these, a veteran agent on the :hands_off preset can write
@@ -281,7 +284,7 @@ defmodule Arbor.Trust.ProfileResolver do
     # Model constraints are keyed by {model_class, uri_prefix}
     constraints
     |> Enum.filter(fn
-      {{mc, prefix}, _mode} -> mc == model_class and String.starts_with?(uri, prefix)
+      {{mc, prefix}, _mode} -> mc == model_class and prefix_matches?(uri, prefix)
       _ -> false
     end)
     |> case do
@@ -291,4 +294,8 @@ defmodule Arbor.Trust.ProfileResolver do
   end
 
   defp resolve_model_constraint(_, _, _), do: nil
+
+  defp prefix_matches?(uri, prefix) do
+    uri == prefix or String.starts_with?(uri, prefix <> "/")
+  end
 end
