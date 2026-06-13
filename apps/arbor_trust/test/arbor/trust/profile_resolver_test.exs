@@ -1,5 +1,8 @@
 defmodule Arbor.Trust.ProfileResolverTest do
   use ExUnit.Case, async: true
+  use ExUnitProperties
+
+  import StreamData
 
   alias Arbor.Trust.ProfileResolver
 
@@ -14,6 +17,19 @@ defmodule Arbor.Trust.ProfileResolverTest do
     test "matches exact prefix" do
       rules = %{"arbor://shell" => :block}
       assert ProfileResolver.resolve_prefix(rules, "arbor://shell", :auto) == :block
+    end
+
+    test "does not match sibling URI text that shares the prefix" do
+      rules = %{"arbor://shell" => :block}
+
+      assert ProfileResolver.resolve_prefix(rules, "arbor://shellEVIL/exec", :auto) == :auto
+    end
+
+    test "matches child paths only at slash segment boundaries" do
+      rules = %{"arbor://shell" => :ask}
+
+      assert ProfileResolver.resolve_prefix(rules, "arbor://shell/exec/git", :auto) == :ask
+      assert ProfileResolver.resolve_prefix(rules, "arbor://shell", :auto) == :ask
     end
 
     test "matches longest prefix" do
@@ -33,6 +49,19 @@ defmodule Arbor.Trust.ProfileResolverTest do
     test "prefix match is greedy (matches child paths)" do
       rules = %{"arbor://shell" => :ask}
       assert ProfileResolver.resolve_prefix(rules, "arbor://shell/exec/git/status", :auto) == :ask
+    end
+
+    property "security regression: prefix rules never bleed into sibling URI segments" do
+      check all(
+              prefix_segments <- list_of(uri_segment(), min_length: 1, max_length: 4),
+              sibling_suffix <- uri_segment(),
+              child_segments <- list_of(uri_segment(), min_length: 1, max_length: 3)
+            ) do
+        prefix = "arbor://" <> Enum.join(prefix_segments, "/")
+        sibling_uri = prefix <> sibling_suffix <> "/" <> Enum.join(child_segments, "/")
+
+        assert ProfileResolver.resolve_prefix(%{prefix => :block}, sibling_uri, :auto) == :auto
+      end
     end
   end
 
@@ -118,6 +147,14 @@ defmodule Arbor.Trust.ProfileResolverTest do
              ) == :block
     end
 
+    test "user rules and security ceilings do not match sibling URI text" do
+      profile = %{rules: %{"arbor://shell" => :block}, baseline: :auto}
+
+      assert ProfileResolver.effective_mode(profile, "arbor://shellEVIL/exec",
+               security_ceilings: %{"arbor://shell" => :ask}
+             ) == :auto
+    end
+
     test "model constraint applies when model_class provided" do
       profile = %{
         rules: %{"arbor://shell/exec/git" => :allow},
@@ -127,9 +164,7 @@ defmodule Arbor.Trust.ProfileResolverTest do
 
       # Without model_class, model constraint doesn't apply
       result_no_model =
-        ProfileResolver.effective_mode(profile, "arbor://shell/exec/git",
-          security_ceilings: %{}
-        )
+        ProfileResolver.effective_mode(profile, "arbor://shell/exec/git", security_ceilings: %{})
 
       assert result_no_model == :allow
 
@@ -141,6 +176,19 @@ defmodule Arbor.Trust.ProfileResolverTest do
         )
 
       assert result_with_model == :ask
+    end
+
+    test "model constraints do not match sibling URI text" do
+      profile = %{
+        rules: %{},
+        baseline: :auto,
+        model_constraints: %{{:frontier_cloud, "arbor://shell"} => :block}
+      }
+
+      assert ProfileResolver.effective_mode(profile, "arbor://shellEVIL/exec",
+               security_ceilings: %{},
+               model_class: :frontier_cloud
+             ) == :auto
     end
 
     test "most restrictive of all three layers wins" do
@@ -158,7 +206,9 @@ defmodule Arbor.Trust.ProfileResolverTest do
 
     test "defaults to :ask baseline when not specified" do
       profile = %{}
-      assert ProfileResolver.effective_mode(profile, "arbor://anything", security_ceilings: %{}) == :ask
+
+      assert ProfileResolver.effective_mode(profile, "arbor://anything", security_ceilings: %{}) ==
+               :ask
     end
   end
 
@@ -193,6 +243,50 @@ defmodule Arbor.Trust.ProfileResolverTest do
       # Default ceiling: shell => :ask
       assert result.security_ceiling == :ask
       assert result.effective_mode == :ask
+    end
+
+    test "shows boundary-aware behavior for user rules and security ceilings" do
+      profile = %{
+        rules: %{"arbor://shell" => :block},
+        baseline: :auto,
+        model_constraints: %{}
+      }
+
+      result =
+        ProfileResolver.explain(profile, "arbor://shellEVIL/exec",
+          security_ceilings: %{"arbor://shell" => :ask}
+        )
+
+      assert result.user_mode == :auto
+      assert result.user_match == nil
+      assert result.security_ceiling == :auto
+      assert result.ceiling_match == nil
+      assert result.effective_mode == :auto
+    end
+
+    test "shows boundary-aware behavior for model constraints" do
+      profile = %{
+        rules: %{},
+        baseline: :auto,
+        model_constraints: %{{:frontier_cloud, "arbor://shell"} => :block}
+      }
+
+      sibling =
+        ProfileResolver.explain(profile, "arbor://shellEVIL/exec",
+          security_ceilings: %{},
+          model_class: :frontier_cloud
+        )
+
+      child =
+        ProfileResolver.explain(profile, "arbor://shell/exec",
+          security_ceilings: %{},
+          model_class: :frontier_cloud
+        )
+
+      assert sibling.model_ceiling == nil
+      assert sibling.effective_mode == :auto
+      assert child.model_ceiling == :block
+      assert child.effective_mode == :block
     end
   end
 
@@ -256,15 +350,24 @@ defmodule Arbor.Trust.ProfileResolverTest do
     test "effective_mode works with Profile struct" do
       {:ok, profile} = Arbor.Contracts.Trust.Profile.new("test_agent")
       # Should use defaults — baseline :ask, no rules
-      result = ProfileResolver.effective_mode(profile, "arbor://memory/read", security_ceilings: %{})
+      result =
+        ProfileResolver.effective_mode(profile, "arbor://memory/read", security_ceilings: %{})
+
       assert result == :ask
     end
 
     test "effective_mode works with Profile struct with custom rules" do
       {:ok, profile} = Arbor.Contracts.Trust.Profile.new("test_agent")
       profile = %{profile | rules: %{"arbor://memory" => :auto}, baseline: :allow}
-      result = ProfileResolver.effective_mode(profile, "arbor://memory/read", security_ceilings: %{})
+
+      result =
+        ProfileResolver.effective_mode(profile, "arbor://memory/read", security_ceilings: %{})
+
       assert result == :auto
     end
+  end
+
+  defp uri_segment do
+    string(:alphanumeric, min_length: 1)
   end
 end
