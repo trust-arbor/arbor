@@ -38,8 +38,43 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
         Keyword.get(opts, :workdir, ".")
 
     sandbox = Map.get(node.attrs, "sandbox", "basic")
+    agent_id = resolve_agent_id(node, context)
 
-    case run_command(command, cwd: cwd, timeout: timeout, sandbox: sandbox) do
+    # Capability gate (phase 0, 2026-06-10). This handler previously ran
+    # `command` with NO authorization — any agent that could author or
+    # influence a DOT graph got arbitrary shell, including the
+    # `sandbox="none"` real-`/bin/sh -c` path. Authorize the resolved
+    # principal before *any* execution mechanism; fail closed on
+    # denial/escalation. ExecHandler's sibling `target="action"` branch
+    # already authorizes; `target="shell"` was the orphan path.
+    # See .arbor/roadmap/1-brainstorming/safe-shell-execution.md (Phase 0).
+    case authorize_shell(agent_id, command, cwd, opts) do
+      :ok ->
+        run_authorized(node, command, on_error, cwd: cwd, timeout: timeout, sandbox: sandbox)
+
+      {:error, reason} ->
+        %Outcome{
+          status: :fail,
+          failure_reason: "shell authorization denied for #{agent_id}: #{inspect(reason)}",
+          context_updates: %{"shell.#{node.id}.error" => "unauthorized: #{inspect(reason)}"}
+        }
+    end
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "shell handler error: #{Exception.message(e)}"
+      }
+  end
+
+  @impl true
+  def idempotency, do: :side_effecting
+
+  # --- Authorization (phase 0 capability gate) ---
+
+  # Original execution path — reached ONLY after authorize_shell/4 passes.
+  defp run_authorized(node, command, on_error, opts) do
+    case run_command(command, opts) do
       {:ok, output, exit_code} ->
         # Shell stdout is exposed as `shell.<id>.output` only — NOT as
         # `last_response`. `last_response` is the LLM-output convention
@@ -54,11 +89,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
         }
 
         if exit_code == 0 do
-          %Outcome{
-            status: :success,
-            notes: truncate(output, 500),
-            context_updates: base_updates
-          }
+          %Outcome{status: :success, notes: truncate(output, 500), context_updates: base_updates}
         else
           handle_error(on_error, exit_code, output, base_updates, node)
         end
@@ -67,21 +98,63 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
         %Outcome{
           status: :fail,
           failure_reason: "shell error: #{inspect(reason)}",
-          context_updates: %{
-            "shell.#{node.id}.error" => inspect(reason)
-          }
+          context_updates: %{"shell.#{node.id}.error" => inspect(reason)}
         }
     end
-  rescue
-    e ->
-      %Outcome{
-        status: :fail,
-        failure_reason: "shell handler error: #{Exception.message(e)}"
-      }
   end
 
-  @impl true
-  def idempotency, do: :side_effecting
+  # Resolve the principal whose capabilities govern this shell node. Mirrors
+  # ExecHandler's action path: explicit node override, else the session's
+  # agent, else the "system" default.
+  defp resolve_agent_id(node, context) do
+    Map.get(node.attrs, "agent_id") ||
+      Context.get(context, "session.agent_id", "system")
+  end
+
+  # Capability gate. Returns :ok to proceed, or {:error, reason} to fail
+  # closed (the node fails; the command never runs).
+  defp authorize_shell(agent_id, command, cwd, opts) do
+    case shell_authorizer(opts) do
+      nil ->
+        # No security facade available (standalone orchestrator without
+        # arbor_shell). There is no capability system to consult and no
+        # agent system to attack — preserve legacy direct execution for
+        # dev/test standalone use. In the full umbrella the facade is
+        # loaded and the branch below runs.
+        :ok
+
+      authorize_fun ->
+        auth_opts = if cwd, do: [cwd: cwd], else: []
+
+        case authorize_fun.(agent_id, command, auth_opts) do
+          {:ok, :authorized} -> :ok
+          {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  # Resolve the shell authorizer:
+  #   1. explicit override in opts (tests inject a stub via :shell_authorizer)
+  #   2. Arbor.Shell.authorize/3 when the security facade is loaded (production)
+  #   3. nil — standalone mode, no capability system present
+  #
+  # Runtime indirection (Code.ensure_loaded?/apply) because arbor_orchestrator
+  # is standalone and must not take a compile-time dep on arbor_shell.
+  defp shell_authorizer(opts) do
+    cond do
+      is_function(opts[:shell_authorizer], 3) ->
+        opts[:shell_authorizer]
+
+      Code.ensure_loaded?(Arbor.Shell) and function_exported?(Arbor.Shell, :authorize, 3) ->
+        fn agent_id, command, auth_opts ->
+          apply(Arbor.Shell, :authorize, [agent_id, command, auth_opts])
+        end
+
+      true ->
+        nil
+    end
+  end
 
   # --- Command execution with runtime bridge ---
 

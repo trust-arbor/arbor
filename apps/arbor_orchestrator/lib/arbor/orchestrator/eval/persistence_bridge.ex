@@ -21,8 +21,17 @@ defmodule Arbor.Orchestrator.Eval.PersistenceBridge do
     _ -> false
   end
 
-  @doc "Create a new eval run record."
+  @doc """
+  Create a new eval run record.
+
+  Run-identity fields (git_sha, git_dirty, dataset_hash, config_fingerprint)
+  are auto-captured via `RunIdentity.capture/1` so every run is bound to the
+  code, dataset contents, and config under test. Caller-provided values win;
+  capture is best-effort and never fails the run.
+  """
   def create_run(attrs) do
+    attrs = Arbor.Orchestrator.Eval.RunIdentity.capture(attrs)
+
     if available?() do
       case apply(@persistence, :insert_eval_run, [attrs]) do
         {:ok, _} = ok ->

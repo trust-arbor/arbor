@@ -254,6 +254,7 @@ defmodule Arbor.Trust.PolicyTest do
       assert Policy.confirmation_mode(agent_id, "arbor://shell/exec/ls") == :gated
     end
 
+    @tag spec: "TRUST-3"
     test "gated for unknown agent (fail closed)" do
       # Unknown agent → :ask → :gated (not :deny)
       assert Policy.confirmation_mode(

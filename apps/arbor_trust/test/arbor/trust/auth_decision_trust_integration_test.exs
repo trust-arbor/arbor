@@ -79,6 +79,7 @@ defmodule Arbor.Trust.AuthDecisionTrustIntegrationTest do
                AuthDecision.evaluate(auth, "arbor://shell/exec/echo", :execute)
     end
 
+    @tag spec: "TRUST-13"
     test "Trust-gated canonical action URI also requires approval",
          %{agent_id: agent_id} do
       uri = "arbor://actions/execute/shell.execute"
@@ -155,6 +156,7 @@ defmodule Arbor.Trust.AuthDecisionTrustIntegrationTest do
     # filesystem writes. Without these ceilings, a veteran agent can write
     # arbitrary code and files without prompting — defeating the purpose of
     # any reflective oversight.
+    @tag spec: "TRUST-2"
     test "code/write requires approval even for permissive profiles",
          %{agent_id: agent_id} do
       promote_to_hands_off(agent_id)
@@ -164,6 +166,7 @@ defmodule Arbor.Trust.AuthDecisionTrustIntegrationTest do
       assert {:ok, :requires_approval, ^cap, _} = AuthDecision.evaluate(auth, uri, :execute)
     end
 
+    @tag spec: "TRUST-2"
     test "fs/write requires approval even for permissive profiles",
          %{agent_id: agent_id} do
       promote_to_hands_off(agent_id)
@@ -173,6 +176,7 @@ defmodule Arbor.Trust.AuthDecisionTrustIntegrationTest do
       assert {:ok, :requires_approval, ^cap, _} = AuthDecision.evaluate(auth, uri, :execute)
     end
 
+    @tag spec: "TRUST-2,TRUST-13"
     test "file.write canonical action URI requires approval", %{agent_id: agent_id} do
       promote_to_hands_off(agent_id)
       uri = "arbor://actions/execute/file.write"

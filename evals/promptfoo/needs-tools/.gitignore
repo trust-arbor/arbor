@@ -1,0 +1,6 @@
+# Real usage content — Arbor is a public repo. The raw corpus and anything
+# derived from it stay local. Regenerate dataset.jsonl via convert_corpus.py.
+_import/
+dataset.jsonl
+results.json
+.env.local

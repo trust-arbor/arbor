@@ -328,6 +328,7 @@ defmodule Arbor.Trust.ManagerTest do
                Manager.check_trust_authorization("agent_low_trust", :trusted)
     end
 
+    @tag spec: "TRUST-11"
     test "frozen agent returns :trust_frozen" do
       {:ok, _} = Manager.create_trust_profile("agent_frozen_auth")
       :ok = Manager.freeze_trust("agent_frozen_auth", :test_reason)
@@ -625,7 +626,13 @@ defmodule Arbor.Trust.ManagerTest do
       {:ok, _} = Manager.create_trust_profile("agent_deduct")
       :ok = Manager.record_trust_event("agent_deduct", :trust_points_awarded, %{points: 20})
       Process.sleep(50)
-      :ok = Manager.record_trust_event("agent_deduct", :trust_points_deducted, %{points: 5, reason: :test})
+
+      :ok =
+        Manager.record_trust_event("agent_deduct", :trust_points_deducted, %{
+          points: 5,
+          reason: :test
+        })
+
       Process.sleep(50)
 
       {:ok, profile} = Manager.get_trust_profile("agent_deduct")
@@ -651,9 +658,7 @@ defmodule Arbor.Trust.ManagerTest do
     test "decays inactive profiles" do
       # Start with decay enabled
       stop_supervised!(Manager)
-      start_supervised!(
-        {Manager, [circuit_breaker: false, decay: true, event_store: true]}
-      )
+      start_supervised!({Manager, [circuit_breaker: false, decay: true, event_store: true]})
 
       {:ok, _} = Manager.create_trust_profile("agent_decay_test")
 
@@ -684,9 +689,7 @@ defmodule Arbor.Trust.ManagerTest do
   describe "circuit breaker integration" do
     test "handle_info :check_circuit_breaker processes without crash" do
       stop_supervised!(Manager)
-      start_supervised!(
-        {Manager, [circuit_breaker: true, decay: false, event_store: true]}
-      )
+      start_supervised!({Manager, [circuit_breaker: true, decay: false, event_store: true]})
 
       {:ok, _} = Manager.create_trust_profile("agent_cb_test")
 
@@ -701,9 +704,7 @@ defmodule Arbor.Trust.ManagerTest do
 
     test "rapid failures trigger circuit breaker check" do
       stop_supervised!(Manager)
-      start_supervised!(
-        {Manager, [circuit_breaker: true, decay: false, event_store: true]}
-      )
+      start_supervised!({Manager, [circuit_breaker: true, decay: false, event_store: true]})
 
       {:ok, _} = Manager.create_trust_profile("agent_cb_rapid")
 
@@ -758,9 +759,7 @@ defmodule Arbor.Trust.ManagerTest do
     test "3+ rollbacks trigger tier demotion path" do
       stop_supervised!(Manager)
 
-      start_supervised!(
-        {Manager, [circuit_breaker: true, decay: false, event_store: true]}
-      )
+      start_supervised!({Manager, [circuit_breaker: true, decay: false, event_store: true]})
 
       {:ok, _} = Manager.create_trust_profile("agent_demote")
 
@@ -792,9 +791,7 @@ defmodule Arbor.Trust.ManagerTest do
     test "demote_tier handles agent at lowest tier (untrusted)" do
       stop_supervised!(Manager)
 
-      start_supervised!(
-        {Manager, [circuit_breaker: true, decay: false, event_store: true]}
-      )
+      start_supervised!({Manager, [circuit_breaker: true, decay: false, event_store: true]})
 
       {:ok, _} = Manager.create_trust_profile("agent_lowest_tier")
 
@@ -820,9 +817,7 @@ defmodule Arbor.Trust.ManagerTest do
     test "handles event store being disabled gracefully" do
       stop_supervised!(Manager)
 
-      start_supervised!(
-        {Manager, [circuit_breaker: false, decay: false, event_store: false]}
-      )
+      start_supervised!({Manager, [circuit_breaker: false, decay: false, event_store: false]})
 
       # All operations that persist events should work fine with event_store disabled
       {:ok, _} = Manager.create_trust_profile("agent_no_es")
@@ -837,9 +832,7 @@ defmodule Arbor.Trust.ManagerTest do
     test "freeze and unfreeze work with event_store disabled" do
       stop_supervised!(Manager)
 
-      start_supervised!(
-        {Manager, [circuit_breaker: false, decay: false, event_store: false]}
-      )
+      start_supervised!({Manager, [circuit_breaker: false, decay: false, event_store: false]})
 
       {:ok, _} = Manager.create_trust_profile("agent_freeze_no_es")
       assert :ok = Manager.freeze_trust("agent_freeze_no_es", :test_reason)
@@ -856,9 +849,7 @@ defmodule Arbor.Trust.ManagerTest do
     test "delete works with event_store disabled" do
       stop_supervised!(Manager)
 
-      start_supervised!(
-        {Manager, [circuit_breaker: false, decay: false, event_store: false]}
-      )
+      start_supervised!({Manager, [circuit_breaker: false, decay: false, event_store: false]})
 
       {:ok, _} = Manager.create_trust_profile("agent_del_no_es")
       assert :ok = Manager.delete_trust_profile("agent_del_no_es")
@@ -874,9 +865,7 @@ defmodule Arbor.Trust.ManagerTest do
     test "handles profile with nil last_activity_at" do
       stop_supervised!(Manager)
 
-      start_supervised!(
-        {Manager, [circuit_breaker: false, decay: true, event_store: true]}
-      )
+      start_supervised!({Manager, [circuit_breaker: false, decay: true, event_store: true]})
 
       {:ok, _} = Manager.create_trust_profile("agent_nil_activity")
 
@@ -906,9 +895,7 @@ defmodule Arbor.Trust.ManagerTest do
     test "decay applies to profiles with old last_activity_at" do
       stop_supervised!(Manager)
 
-      start_supervised!(
-        {Manager, [circuit_breaker: false, decay: true, event_store: true]}
-      )
+      start_supervised!({Manager, [circuit_breaker: false, decay: true, event_store: true]})
 
       {:ok, _} = Manager.create_trust_profile("agent_old_activity")
 
@@ -953,9 +940,7 @@ defmodule Arbor.Trust.ManagerTest do
     test "3+ security violations trigger freeze" do
       stop_supervised!(Manager)
 
-      start_supervised!(
-        {Manager, [circuit_breaker: true, decay: false, event_store: true]}
-      )
+      start_supervised!({Manager, [circuit_breaker: true, decay: false, event_store: true]})
 
       {:ok, _} = Manager.create_trust_profile("agent_sec_cb")
 

@@ -77,6 +77,7 @@ apps/arbor_orchestrator/specs/pipelines/dev/
 .venv/
 venv/
 .aider*
+.codex/worktrees/
 
 .arbor/
 

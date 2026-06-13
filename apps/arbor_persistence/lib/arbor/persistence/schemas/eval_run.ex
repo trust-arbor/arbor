@@ -29,6 +29,19 @@ defmodule Arbor.Persistence.Schemas.EvalRun do
     field(:error, :string)
     field(:metadata, :map, default: %{})
 
+    # Run identity — binds results to the code, model serving identity,
+    # dataset contents, and config under test, so longitudinal comparison
+    # ("did this change improve the system?") is a query instead of guesswork.
+    # See .arbor/roadmap/1-brainstorming/eval-system-architecture.md.
+    field(:git_sha, :string)
+    field(:git_dirty, :boolean)
+    field(:quant, :string)
+    field(:endpoint, :string)
+    field(:dataset_hash, :string)
+    field(:config_fingerprint, :string)
+    field(:layer, :string)
+    field(:task_id, :string)
+
     has_many(:results, EvalResult, foreign_key: :run_id)
 
     timestamps()
@@ -46,8 +59,18 @@ defmodule Arbor.Persistence.Schemas.EvalRun do
     :config,
     :status,
     :error,
-    :metadata
+    :metadata,
+    :git_sha,
+    :git_dirty,
+    :quant,
+    :endpoint,
+    :dataset_hash,
+    :config_fingerprint,
+    :layer,
+    :task_id
   ]
+
+  @valid_layers ~w(task system)
 
   @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
   def changeset(schema \\ %__MODULE__{}, attrs) do
@@ -56,5 +79,6 @@ defmodule Arbor.Persistence.Schemas.EvalRun do
     |> validate_required(@required_fields)
     |> validate_inclusion(:domain, @valid_domains)
     |> validate_inclusion(:status, @valid_statuses)
+    |> validate_inclusion(:layer, @valid_layers)
   end
 end
