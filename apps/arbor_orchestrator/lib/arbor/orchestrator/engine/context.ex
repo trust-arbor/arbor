@@ -165,6 +165,42 @@ defmodule Arbor.Orchestrator.Engine.Context do
     record_output_taint(ctx, output_keys, effective)
   end
 
+  @doc """
+  Reduce the provenance level of an EXISTING context key toward `target` with a
+  justification `reason` (e.g. `:human_review`, `:verified_pipeline`, `:consensus`).
+
+  Delegates the allowed-reduction check to `Arbor.Signals.Taint.reduce/3` and
+  applies the result ONLY when it genuinely lowers severity — a "reduction" can
+  never raise a key's taint. Unlabeled keys are a no-op (nothing to reduce).
+  Sanitization bits/confidence carry through; only the level changes.
+  """
+  @spec reduce_taint(t(), String.t(), taint_level(), atom()) :: t()
+  def reduce_taint(%__MODULE__{taint: taint} = ctx, key, target, reason) do
+    case Map.get(taint, key) do
+      %{__struct__: _, level: current} = t ->
+        case Arbor.Signals.Taint.reduce(current, target, reason) do
+          {:ok, new_level} ->
+            if level_rank(new_level) <= level_rank(current) do
+              %{ctx | taint: Map.put(taint, key, %{t | level: new_level})}
+            else
+              ctx
+            end
+
+          {:error, _} ->
+            ctx
+        end
+
+      _ ->
+        ctx
+    end
+  end
+
+  defp level_rank(:trusted), do: 0
+  defp level_rank(:derived), do: 1
+  defp level_rank(:untrusted), do: 2
+  defp level_rank(:hostile), do: 3
+  defp level_rank(_), do: 2
+
   # Normalize a bare level atom into a %Taint{}; pass structs through unchanged.
   defp as_taint(%{__struct__: _} = taint), do: taint
   defp as_taint(level) when is_atom(level) and not is_nil(level), do: %TaintStruct{level: level}

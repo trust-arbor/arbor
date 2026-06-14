@@ -296,6 +296,11 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
           outcome
           |> Map.from_struct()
           |> Map.update(:context_updates, %{}, &Map.drop(&1, @internal_keys))
+          # taint_reductions is a list of {key, target, reason} tuples — transient
+          # (applied immediately by the engine; its effect persists in
+          # context_taint) and NOT reconstructed on deserialize. Drop it so the
+          # checkpoint JSON/HMAC doesn't choke on tuples.
+          |> Map.put(:taint_reductions, [])
 
         {node_id, sanitized}
       end)

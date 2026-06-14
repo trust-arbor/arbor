@@ -145,6 +145,52 @@ defmodule Arbor.Orchestrator.Engine.ContextTaintTest do
     end
   end
 
+  describe "reduce_taint/4 (human-review / verified-pipeline level reduction)" do
+    test "human_review lowers untrusted -> trusted" do
+      ctx =
+        %Context{values: %{}}
+        |> Context.record_output_taint(["x"], :untrusted)
+        |> Context.reduce_taint("x", :trusted, :human_review)
+
+      assert Context.taint_level(ctx, "x") == :trusted
+    end
+
+    test "preserves sanitization bits, only changes the level" do
+      ctx =
+        %Context{values: %{}}
+        |> Context.record_output_taint(["x"], %Taint{level: :untrusted, sanitizations: 4})
+        |> Context.reduce_taint("x", :derived, :human_review)
+
+      assert Context.taint_label(ctx, "x").level == :derived
+      assert Context.taint_label(ctx, "x").sanitizations == 4
+    end
+
+    test "never RAISES a key's taint (a reduction can only lower)" do
+      ctx =
+        %Context{values: %{}}
+        |> Context.record_output_taint(["x"], :trusted)
+        # human_review CAN target :untrusted, but that would raise — refused.
+        |> Context.reduce_taint("x", :untrusted, :human_review)
+
+      assert Context.taint_level(ctx, "x") == :trusted
+    end
+
+    test "unlabeled key is a no-op" do
+      ctx = Context.reduce_taint(%Context{values: %{}}, "missing", :trusted, :human_review)
+      assert Context.taint_level(ctx, "missing") == nil
+    end
+
+    test "a disallowed reduction reason leaves the level unchanged" do
+      ctx =
+        %Context{values: %{}}
+        |> Context.record_output_taint(["x"], :untrusted)
+        # verified_pipeline cannot reach :trusted (only :derived).
+        |> Context.reduce_taint("x", :trusted, :verified_pipeline)
+
+      assert Context.taint_level(ctx, "x") == :untrusted
+    end
+  end
+
   describe "combine/1 (collapse a list of taint structs to one)" do
     test "max level, nils ignored, empty -> nil" do
       assert Context.combine([]) == nil

@@ -407,6 +407,7 @@ defmodule Arbor.Orchestrator.Engine do
         context
         |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
         |> record_node_taint(node, outcome)
+        |> apply_taint_reductions(node, outcome)
         |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
         |> Context.set("__completed_nodes__", completed, node.id, step_now)
 
@@ -568,6 +569,7 @@ defmodule Arbor.Orchestrator.Engine do
         context
         |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
         |> record_node_taint(node, outcome)
+        |> apply_taint_reductions(node, outcome)
         |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
         |> Context.set("__completed_nodes__", completed, node.id, step_now)
         |> maybe_set_preferred_label(outcome, node.id, step_now)
@@ -895,6 +897,49 @@ defmodule Arbor.Orchestrator.Engine do
       outcome.output_taint,
       node_input_keys(node)
     )
+  end
+
+  # Apply taint reductions a node requested on EXISTING context keys (e.g. a
+  # human-approved gate reducing reviewed data via :human_review). Lowering-only
+  # (Context.reduce_taint guards against raising); emits :taint_reduced per key
+  # whose level actually changed. Taint-tracking-rebuild Phase 4.
+  defp apply_taint_reductions(context, node, %Outcome{taint_reductions: reductions})
+       when is_list(reductions) and reductions != [] do
+    Enum.reduce(reductions, context, fn {key, target, reason}, ctx ->
+      from = Context.taint_level(ctx, key)
+      new_ctx = Context.reduce_taint(ctx, key, target, reason)
+      to = Context.taint_level(new_ctx, key)
+      if to != from, do: emit_taint_reduced(from, to, reason, node, new_ctx)
+      new_ctx
+    end)
+  end
+
+  defp apply_taint_reductions(context, _node, _outcome), do: context
+
+  defp emit_taint_reduced(from_level, to_level, reason, node, context) do
+    data = %{
+      from_level: from_level,
+      to_level: to_level,
+      reason: reason,
+      node_id: node.id,
+      agent_id: Context.get(context, "session.agent_id")
+    }
+
+    cond do
+      not Code.ensure_loaded?(Arbor.Signals) ->
+        :ok
+
+      function_exported?(Arbor.Signals, :durable_emit, 4) ->
+        Arbor.Signals.durable_emit(:security, :taint_reduced, data, stream_id: "security:events")
+
+      function_exported?(Arbor.Signals, :emit, 3) ->
+        Arbor.Signals.emit(:security, :taint_reduced, data)
+
+      true ->
+        :ok
+    end
+  rescue
+    _ -> :ok
   end
 
   # The context keys a node declares it reads. Mirrors the input-key attrs the
