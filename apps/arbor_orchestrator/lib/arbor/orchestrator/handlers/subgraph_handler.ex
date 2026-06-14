@@ -74,8 +74,17 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
 
   # --- Child execution ---
 
-  defp run_child(dot_source, child_context_values, child_opts, node, _context) do
-    child_opts = Keyword.put(child_opts, :initial_values, child_context_values)
+  defp run_child(dot_source, child_context_values, child_opts, node, context) do
+    # Taint inheritance across the subgraph boundary (taint-rebuild Phase 3):
+    # carry the provenance of the passed-in keys INTO the child so the child's
+    # internal enforcement sees it, and carry the child's final provenance back
+    # OUT so the parent's downstream nodes are gated on child-produced taint.
+    child_taint = build_child_taint(node, context)
+
+    child_opts =
+      child_opts
+      |> Keyword.put(:initial_values, child_context_values)
+      |> Keyword.put(:initial_taint, child_taint)
 
     case Arbor.Orchestrator.run(dot_source, child_opts) do
       {:ok, result} ->
@@ -90,11 +99,21 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
             length(result.completed_nodes)
           )
 
+        # Collapse the child's per-key taint into one boundary level applied to
+        # all of this node's outputs (conservative — over-taints rather than
+        # leaking provenance). Includes the inherited input taint as a floor.
+        out_taint =
+          Context.worst_level([
+            Context.worst_level(Map.values(child_taint)),
+            Context.worst_level(Map.values(result.taint || %{}))
+          ])
+
         if child_status == :success or ignore_failure do
           %Outcome{
             status: :success,
             notes: "Child graph completed: #{length(result.completed_nodes)} nodes",
-            context_updates: context_updates
+            context_updates: context_updates,
+            output_taint: out_taint
           }
         else
           failure_reason =
@@ -171,6 +190,31 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
 
       true ->
         {:ok, %{}}
+    end
+  end
+
+  # The provenance taint of the keys passed into the child — mirrors the key
+  # selection in build_child_context/2 so the child inherits the right labels.
+  defp build_child_taint(node, context) do
+    full = Context.taint_map(context)
+
+    cond do
+      Map.get(node.attrs, "pass_all_context") == "true" ->
+        full
+
+      keys_str = Map.get(node.attrs, "pass_context") ->
+        keys_str
+        |> String.split(",")
+        |> Enum.map(&String.trim/1)
+        |> Enum.reduce(%{}, fn key, acc ->
+          case Map.get(full, key) do
+            nil -> acc
+            level -> Map.put(acc, key, level)
+          end
+        end)
+
+      true ->
+        %{}
     end
   end
 

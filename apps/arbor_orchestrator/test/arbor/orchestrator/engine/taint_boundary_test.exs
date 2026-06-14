@@ -1,0 +1,63 @@
+defmodule Arbor.Orchestrator.Engine.TaintBoundaryTest do
+  @moduledoc """
+  Taint inheritance across pipeline boundaries (taint-rebuild Phase 3 nuance):
+  a top-level run can be seeded with provenance and reports its final
+  provenance, and parallel branches don't silently drop it.
+  """
+  use ExUnit.Case, async: false
+
+  @moduletag :integration
+
+  describe "Engine.run taint I/O (the foundation subgraph/parallel rely on)" do
+    test "initial_taint is inherited and the final taint map is returned" do
+      dot = """
+      digraph T {
+        start [shape=Mdiamond]
+        done [shape=Msquare]
+        start -> done
+      }
+      """
+
+      {:ok, result} =
+        Arbor.Orchestrator.run(dot, initial_taint: %{"seed" => :untrusted})
+
+      assert result.taint["seed"] == :untrusted
+    end
+  end
+
+  describe "parallel branches inherit parent provenance" do
+    test "aggregated parallel results carry the worst parent taint" do
+      dot = """
+      digraph Flow {
+        start [shape=Mdiamond]
+        parallel [shape=component, join_policy="wait_all", fan_out="false"]
+        branch_a [label="A"]
+        branch_b [label="B"]
+        join [shape=tripleoctagon]
+        exit [shape=Msquare]
+
+        start -> parallel
+        parallel -> branch_a
+        parallel -> branch_b
+        branch_a -> join
+        branch_b -> join
+        join -> exit
+      }
+      """
+
+      branch_executor = fn branch_node_id, _ctx, _graph, _opts ->
+        %{"id" => branch_node_id, "status" => "success", "score" => 0.5}
+      end
+
+      {:ok, result} =
+        Arbor.Orchestrator.run(dot,
+          parallel_branch_executor: branch_executor,
+          initial_taint: %{"seed" => :untrusted}
+        )
+
+      # Branches read the full parent snapshot, so the fan-in output is at least
+      # as tainted as the most-tainted parent key — not silently untainted.
+      assert result.taint["parallel.results"] == :untrusted
+    end
+  end
+end
