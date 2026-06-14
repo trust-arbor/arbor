@@ -250,12 +250,26 @@ defmodule Arbor.Orchestrator.EngineTest do
         "arbor_orchestrator_resume_#{System.unique_integer([:positive])}"
       )
 
+    # Resume now requires an identity (the engine derives the checkpoint HMAC
+    # from :identity_private_key) — the legacy unsigned-checkpoint fail-open is
+    # closed. Sign on the initial run, verify on resume, with the same key.
+    key = "test-resume-identity-key-32-bytes!!"
+
     assert {:error, :max_steps_exceeded} =
-             Arbor.Orchestrator.run(dot, logs_root: logs_root, max_steps: 2)
+             Arbor.Orchestrator.run(dot,
+               logs_root: logs_root,
+               max_steps: 2,
+               identity_private_key: key
+             )
 
     assert File.exists?(Path.join(logs_root, "checkpoint.json"))
 
-    assert {:ok, resumed} = Arbor.Orchestrator.run(dot, logs_root: logs_root, resume: true)
+    assert {:ok, resumed} =
+             Arbor.Orchestrator.run(dot,
+               logs_root: logs_root,
+               resume: true,
+               identity_private_key: key
+             )
 
     assert "start" in resumed.completed_nodes
     assert "a" in resumed.completed_nodes
