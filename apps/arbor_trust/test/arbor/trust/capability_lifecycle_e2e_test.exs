@@ -261,16 +261,31 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
   # ===========================================================================
 
   describe "wildcard matching" do
-    test "prefix capability matches sub-resources", %{agent_id: agent_id} do
-      # Grant arbor://shell/exec (no trailing /*)
-      grant_capability(agent_id, "arbor://shell/exec")
+    test "concrete grant does not cover its subtree (C8 hardening)", %{agent_id: agent_id} do
+      # C8/H8 review hardening (2026-06-09): a CONCRETE capability URI (no
+      # trailing /* or /**) grants ONLY its exact resource. It is NOT a silent
+      # /** — sub-resources are denied. See AuthDecision.uri_matches?/2 and
+      # CapabilityStore.authorizes_resource?/2.
+      grant_capability(agent_id, "arbor://test/tool")
 
-      # Should match sub-resources via boundary-aware prefix matching
+      # Exact resource authorizes...
       assert {:ok, :authorized} =
-               Security.authorize(agent_id, "arbor://shell/exec/echo", :execute)
+               Security.authorize(agent_id, "arbor://test/tool", :execute)
+
+      # ...but the subtree does NOT (would have been a silent /** pre-fix).
+      assert {:error, :unauthorized} =
+               Security.authorize(agent_id, "arbor://test/tool/sub", :execute)
+    end
+
+    test "single-level wildcard /* matches one segment of sub-resources", %{agent_id: agent_id} do
+      # Subtree access is opt-in via an explicit wildcard.
+      grant_capability(agent_id, "arbor://test/group/*")
 
       assert {:ok, :authorized} =
-               Security.authorize(agent_id, "arbor://shell/exec/ls", :execute)
+               Security.authorize(agent_id, "arbor://test/group/a", :execute)
+
+      assert {:ok, :authorized} =
+               Security.authorize(agent_id, "arbor://test/group/b", :execute)
     end
 
     test "glob wildcard /** matches deeply nested resources", %{agent_id: agent_id} do
@@ -295,14 +310,16 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
                Security.authorize(agent_id, "arbor://test/other_tool", :execute)
     end
 
-    test "prefix match is boundary-aware", %{agent_id: agent_id} do
-      grant_capability(agent_id, "arbor://fs/read/home")
+    test "wildcard prefix match is boundary-aware", %{agent_id: agent_id} do
+      # A wildcard grant matches sub-paths only at a segment boundary, so a
+      # sibling with a similar name does not inherit access.
+      grant_capability(agent_id, "arbor://fs/read/home/**")
 
-      # Sub-path should match (boundary at /)
+      # Sub-path matches (boundary at /)
       assert {:ok, :authorized} =
                Security.authorize(agent_id, "arbor://fs/read/home/docs", :read)
 
-      # Similar name without boundary should NOT match
+      # Similar name without a boundary should NOT match
       assert {:error, :unauthorized} =
                Security.authorize(agent_id, "arbor://fs/read/home_config", :read)
     end
