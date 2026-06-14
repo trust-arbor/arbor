@@ -401,10 +401,7 @@ defmodule Arbor.Orchestrator.Engine do
       context =
         context
         |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
-        |> Context.record_output_taint(
-          Map.keys(outcome.context_updates || %{}),
-          outcome.output_taint
-        )
+        |> record_node_taint(node, outcome)
         |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
         |> Context.set("__completed_nodes__", completed, node.id, step_now)
 
@@ -565,10 +562,7 @@ defmodule Arbor.Orchestrator.Engine do
       context =
         context
         |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
-        |> Context.record_output_taint(
-          Map.keys(outcome.context_updates || %{}),
-          outcome.output_taint
-        )
+        |> record_node_taint(node, outcome)
         |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
         |> Context.set("__completed_nodes__", completed, node.id, step_now)
         |> maybe_set_preferred_label(outcome, node.id, step_now)
@@ -871,6 +865,59 @@ defmodule Arbor.Orchestrator.Engine do
   end
 
   defp maybe_set_preferred_label(context, _, _node_id, _now), do: context
+
+  # Record provenance taint on a node's output keys (taint-tracking-rebuild
+  # Phases 1-3).
+  #
+  # - Phase 1: an ingress/reduction action declares its own provenance
+  #   (`outcome.output_taint` — web -> :untrusted, LLM -> :derived). That
+  #   declaration is authoritative for this node's outputs.
+  # - Phase 3 (per-edge propagation): when a node declares NO provenance, its
+  #   outputs inherit the worst taint of the context keys it declared as inputs
+  #   (source_key/input_key/graph_source_key/prompt_context_key/context_keys).
+  #   This closes the laundering hole where a transform node read untrusted data
+  #   and re-emitted it under a new, unlabeled key. We propagate only across
+  #   DECLARED edges (not the ambient "worst of the whole context"), so a node
+  #   that didn't read a tainted key doesn't inherit its taint.
+  #
+  # Taint is read from `context` BEFORE this node's own outputs are recorded, so
+  # input lookups see upstream provenance, not this node's writes.
+  defp record_node_taint(context, node, %Outcome{} = outcome) do
+    Context.propagate_output_taint(
+      context,
+      Map.keys(outcome.context_updates || %{}),
+      outcome.output_taint,
+      node_input_keys(node)
+    )
+  end
+
+  # The context keys a node declares it reads. Mirrors the input-key attrs the
+  # taint middleware and ExecHandler use. `context_keys` is a comma-separated
+  # list; the rest are single keys. `last_response` is deliberately NOT treated
+  # as an implicit input here — propagating it to every node would recreate the
+  # "everything becomes tainted" cascade Phase 3 exists to avoid.
+  defp node_input_keys(%{attrs: attrs}) when is_map(attrs) do
+    single =
+      ["source_key", "input_key", "graph_source_key", "prompt_context_key"]
+      |> Enum.map(&Map.get(attrs, &1))
+      |> Enum.reject(&is_nil/1)
+
+    csv =
+      case Map.get(attrs, "context_keys") do
+        nil ->
+          []
+
+        list when is_binary(list) ->
+          list |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+        _ ->
+          []
+      end
+
+    Enum.uniq(single ++ csv)
+  end
+
+  defp node_input_keys(_), do: []
 
   defp maybe_set_fidelity_thread(context, %{thread_id: nil}, _node_id, _now), do: context
 

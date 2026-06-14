@@ -109,6 +109,27 @@ defmodule Arbor.Orchestrator.Engine.Context do
     end)
   end
 
+  @doc """
+  Record provenance taint on a node's output keys (Phases 1 & 3).
+
+  - When the node declares its own provenance (`declared` non-nil — an ingress
+    like web `:untrusted`, or a reduction point like an LLM `:derived`), that
+    declaration is authoritative for the outputs.
+  - Otherwise the outputs inherit the worst taint of the node's declared
+    `input_keys` — per-edge propagation. This closes the laundering hole where a
+    transform reads untrusted data and re-emits it under a new, unlabeled key.
+    Propagation is across DECLARED input edges only (not the whole context), so
+    a node doesn't inherit taint from keys it never read.
+
+  `input_keys` taint is read from `ctx` as-is, so callers must invoke this
+  BEFORE recording the node's own outputs (the engine does).
+  """
+  @spec propagate_output_taint(t(), [String.t()], taint_level() | nil, [String.t()]) :: t()
+  def propagate_output_taint(%__MODULE__{} = ctx, output_keys, declared, input_keys) do
+    effective = declared || worst_taint(ctx, input_keys)
+    record_output_taint(ctx, output_keys, effective)
+  end
+
   defp taint_rank(:hostile), do: 3
   defp taint_rank(:untrusted), do: 2
   defp taint_rank(:derived), do: 1

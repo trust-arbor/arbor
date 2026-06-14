@@ -69,4 +69,51 @@ defmodule Arbor.Orchestrator.Engine.ContextTaintTest do
       assert Context.worst_taint(ctx, ["a", "x"]) == :untrusted
     end
   end
+
+  describe "propagate_output_taint/4 (Phase 3 per-edge propagation)" do
+    test "a declared provenance is authoritative for outputs (ingress / reduction)" do
+      # An ingress (web -> :untrusted) labels its outputs regardless of inputs.
+      ctx =
+        %Context{values: %{}}
+        |> Context.propagate_output_taint(["page"], :untrusted, [])
+
+      assert Context.taint_label(ctx, "page") == :untrusted
+
+      # A reduction point (LLM -> :derived) labels :derived even when it read
+      # untrusted input — the deliberate derived asymmetry.
+      ctx2 =
+        %Context{values: %{}}
+        |> Context.record_output_taint(["raw"], :untrusted)
+        |> Context.propagate_output_taint(["summary"], :derived, ["raw"])
+
+      assert Context.taint_label(ctx2, "summary") == :derived
+    end
+
+    test "undeclared transform propagates the worst input taint to its outputs (closes laundering)" do
+      # The laundering hole: a transform reads untrusted "raw" and re-emits it as
+      # "clean". Without propagation "clean" would be unlabeled and a downstream
+      # shell node would see no taint. With propagation it inherits :untrusted.
+      ctx =
+        %Context{values: %{}}
+        |> Context.record_output_taint(["raw"], :untrusted)
+        |> Context.propagate_output_taint(["clean"], nil, ["raw"])
+
+      assert Context.taint_label(ctx, "clean") == :untrusted
+    end
+
+    test "propagation is per-edge: outputs do not inherit taint from unread keys" do
+      ctx =
+        %Context{values: %{}}
+        |> Context.record_output_taint(["unread_secret"], :untrusted)
+        # node declares it only read "safe_input" (untainted), not unread_secret
+        |> Context.propagate_output_taint(["out"], nil, ["safe_input"])
+
+      assert Context.taint_label(ctx, "out") == nil
+    end
+
+    test "no declaration and no tainted inputs leaves outputs unlabeled" do
+      ctx = Context.propagate_output_taint(%Context{values: %{}}, ["out"], nil, ["a", "b"])
+      assert Context.taint_label(ctx, "out") == nil
+    end
+  end
 end
