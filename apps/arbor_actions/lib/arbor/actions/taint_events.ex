@@ -126,6 +126,39 @@ defmodule Arbor.Actions.TaintEvents do
     })
   end
 
+  @doc """
+  Emit a signal when an action's egress crosses the trust boundary
+  (2026-06-14 URI-addressing-vs-classification decision).
+
+  Always emitted for external egress (`:external_provider` / `:external_peer`),
+  regardless of whether the egress gate is enforcing — this is the observability
+  that lets the gate land dark and gather data before enforcement is enabled.
+  `intent` records what the gate *would* do (`:ask` / `:advise` / `:allow`).
+  Never logs the egressed payload.
+  """
+  @spec emit_egress_observed(module(), atom(), atom(), map()) :: :ok
+  def emit_egress_observed(action_module, egress_tier, intent, context) do
+    data = %{
+      action: action_module_to_string(action_module),
+      egress_tier: egress_tier,
+      gate_intent: intent,
+      enforcing: Application.get_env(:arbor_security, :egress_gate_enforcing, false) == true,
+      taint_level: extract_taint_level(get_in_context(context, :taint)),
+      taint_source: get_in_context(context, :taint_source),
+      agent_id: Map.get(context, :agent_id)
+    }
+
+    if function_exported?(Signals, :durable_emit, 4) do
+      Signals.durable_emit(:security, :egress_observed, data, stream_id: "security:events")
+    else
+      Signals.emit(:security, :egress_observed, data)
+    end
+  end
+
+  defp extract_taint_level(%{level: level}), do: level
+  defp extract_taint_level(level) when is_atom(level), do: level
+  defp extract_taint_level(_), do: nil
+
   # Convert action module to a loggable string
   defp action_module_to_string(module) when is_atom(module) do
     module

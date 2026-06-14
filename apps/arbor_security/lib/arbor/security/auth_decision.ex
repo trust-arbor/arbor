@@ -33,7 +33,7 @@ defmodule Arbor.Security.AuthDecision do
   decision without triggering any side effects.
   """
 
-  alias Arbor.Contracts.Security.AuthContext
+  alias Arbor.Contracts.Security.{AuthContext, Classification}
   alias Arbor.Security.{CapabilityStore, Identity.Verifier, UriRegistry}
 
   require Logger
@@ -70,7 +70,9 @@ defmodule Arbor.Security.AuthDecision do
          {:ok, auth} <- check_delegation_chain(auth, cap),
          {:ok, auth} <- check_time_constraints(auth, cap),
          {:ok, auth} <- check_file_guard(auth, resource_uri),
-         result <- check_approval(auth, cap, resource_uri) do
+         {:ok, auth} <- check_egress_block(auth, opts),
+         result <- check_approval(auth, cap, resource_uri),
+         result <- apply_egress_ask(result, cap, resource_uri, opts) do
       case result do
         {:authorized, auth} ->
           {:ok, :authorized, cap, AuthContext.record_decision(auth, resource_uri, :authorized)}
@@ -528,6 +530,75 @@ defmodule Arbor.Security.AuthDecision do
 
       true ->
         {:requires_approval, cap, auth}
+    end
+  end
+
+  # ===========================================================================
+  # Egress gate (2026-06-14 URI-addressing-vs-classification decision)
+  # ===========================================================================
+  #
+  # Keys off the *resolved classification* threaded in via opts
+  # (`:egress_tier`, `:egress_taint`), NOT off parsing the URI string. Two
+  # pure steps:
+  #
+  #   check_egress_block/2 — hard-block untrusted/hostile data flowing OUT to an
+  #     external destination (the outbound mirror of the taint rebuild's inbound
+  #     control-param protection).
+  #   apply_egress_ask/4 — escalate external egress to the ceiling :ask path,
+  #     unless a provenance-bound pre-approved cap already covers it.
+  #
+  # BOTH are inert unless egress enforcement is switched on
+  # (`config :arbor_security, :egress_gate_enforcing`, default false). The gate
+  # lands dark: classification is resolved and observed (telemetry lives in the
+  # impure caller, `Arbor.Actions.authorize_and_execute/4`) before enforcement
+  # is enabled, so turning it on is a deliberate operator action that won't
+  # surprise the running agents (whose heartbeats make routine LLM egress).
+
+  @egress_blocking_taint [:untrusted, :hostile]
+
+  # Hard block: tainted data must not leave to an external destination.
+  defp check_egress_block(auth, opts) do
+    tier = Keyword.get(opts, :egress_tier, :none)
+
+    if egress_enforcing?() and Classification.external_egress?(tier) and
+         egress_taint_level(opts) in @egress_blocking_taint do
+      {:error, {:egress_blocked, tier, egress_taint_level(opts)}, auth}
+    else
+      {:ok, auth}
+    end
+  end
+
+  # Escalate external egress to :ask unless a pre-approved cap covers it.
+  # Receives the check_approval/3 result shape and returns the same shape.
+  defp apply_egress_ask({:authorized, auth} = result, cap, resource_uri, opts) do
+    tier = Keyword.get(opts, :egress_tier, :none)
+
+    if egress_enforcing?() and
+         Classification.gate_intent(tier, egress_gate_on_premises?()) == :ask and
+         not pre_approved_bypasses_ceiling?(cap, resource_uri) do
+      {:requires_approval, cap, auth}
+    else
+      result
+    end
+  end
+
+  # Already requires approval (or any other shape) — leave untouched.
+  defp apply_egress_ask(result, _cap, _resource_uri, _opts), do: result
+
+  defp egress_enforcing? do
+    Application.get_env(:arbor_security, :egress_gate_enforcing, false) == true
+  end
+
+  defp egress_gate_on_premises? do
+    Application.get_env(:arbor_security, :gate_on_premises_egress, false) == true
+  end
+
+  # The flowing data's taint level — accepts a bare level atom or a Taint struct.
+  defp egress_taint_level(opts) do
+    case Keyword.get(opts, :egress_taint) do
+      %{level: level} -> level
+      level when is_atom(level) -> level
+      _ -> nil
     end
   end
 

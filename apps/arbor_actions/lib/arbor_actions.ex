@@ -72,8 +72,10 @@ defmodule Arbor.Actions do
   See individual action modules for detailed documentation.
   """
 
+  alias Arbor.Actions.Egress
   alias Arbor.Actions.TaintEnforcement
   alias Arbor.Actions.TaintEvents
+  alias Arbor.Contracts.Security.Classification
   alias Arbor.Signals
 
   # ===========================================================================
@@ -155,6 +157,23 @@ defmodule Arbor.Actions do
         nil -> auth_opts
         path -> Keyword.put(auth_opts, :file_path, path)
       end
+
+    # Egress classification (2026-06-14 URI-addressing-vs-classification
+    # decision): resolve the action's effect class + runtime egress tier and
+    # thread them into auth_opts so the egress gate in AuthDecision can fire,
+    # then emit observability telemetry for boundary-crossing egress. The gate
+    # itself is inert unless `:arbor_security, :egress_gate_enforcing` is on —
+    # this resolves + observes regardless, so the gate can land dark.
+    effect_class = Egress.effect_class_for(action_module)
+    egress_tier = Egress.egress_tier_for(action_module, params, clean_context)
+
+    auth_opts =
+      auth_opts
+      |> Keyword.put(:effect_class, effect_class)
+      |> Keyword.put(:egress_tier, egress_tier)
+      |> Keyword.put(:egress_taint, Map.get(clean_context, :taint))
+
+    maybe_observe_egress(action_module, egress_tier, clean_context)
 
     case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
       result
@@ -770,6 +789,20 @@ defmodule Arbor.Actions do
   end
 
   defp maybe_inject_taint_policy(context), do: context
+
+  # Egress observability (2026-06-14 decision): emit a security signal whenever
+  # an action's egress crosses the trust boundary (external_provider /
+  # external_peer). Fires regardless of enforcement so the gate can land dark
+  # and gather data first. `gate_intent` records what the gate would do.
+  defp maybe_observe_egress(action_module, egress_tier, context) do
+    if Classification.external_egress?(egress_tier) do
+      on_prem? = Application.get_env(:arbor_security, :gate_on_premises_egress, false) == true
+      intent = Classification.gate_intent(egress_tier, on_prem?)
+      TaintEvents.emit_egress_observed(action_module, egress_tier, intent, context)
+    end
+
+    :ok
+  end
 
   @doc """
   Convert an action module to its canonical dot-separated name for capability URIs.

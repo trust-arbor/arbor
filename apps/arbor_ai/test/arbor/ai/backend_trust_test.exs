@@ -281,4 +281,36 @@ defmodule Arbor.AI.BackendTrustTest do
       assert BackendTrust.data_capabilities(:totally_unknown, "any-model") == [:public]
     end
   end
+
+  describe "egress_tier_for/1 (provider only)" do
+    test "local providers default to :on_host" do
+      assert BackendTrust.egress_tier_for(:lmstudio) == :on_host
+      assert BackendTrust.egress_tier_for(:ollama) == :on_host
+    end
+
+    test "cloud providers are :external_provider" do
+      assert BackendTrust.egress_tier_for(:anthropic) == :external_provider
+      assert BackendTrust.egress_tier_for(:openai) == :external_provider
+      assert BackendTrust.egress_tier_for(:openrouter) == :external_provider
+    end
+
+    test "unknown provider is conservatively :external_provider" do
+      assert BackendTrust.egress_tier_for(:totally_unknown) == :external_provider
+    end
+  end
+
+  describe "egress_tier_for/2 (endpoint locality wins)" do
+    test "local provider pointed at a cloud URL is external" do
+      assert BackendTrust.egress_tier_for(:ollama, "https://api.cloud.example/v1") ==
+               :external_provider
+    end
+
+    test "local provider on the homelab LAN is :on_premises" do
+      assert BackendTrust.egress_tier_for(:ollama, "http://10.42.42.6:11434") == :on_premises
+    end
+
+    test "any provider proxied through localhost is :on_host" do
+      assert BackendTrust.egress_tier_for(:anthropic, "http://127.0.0.1:8080/proxy") == :on_host
+    end
+  end
 end

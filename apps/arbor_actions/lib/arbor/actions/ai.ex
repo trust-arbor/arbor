@@ -107,6 +107,17 @@ defmodule Arbor.Actions.AI do
       }
     end
 
+    # Egress classification (2026-06-14 decision): an LLM call is network egress;
+    # the tier depends on the resolved provider. A nil provider means routing
+    # decides at call time (unknown here) — fail closed to :external_provider.
+    def effect_class, do: :network_egress
+
+    def egress_tier(params, _context) do
+      params[:provider]
+      |> normalize_provider()
+      |> Arbor.AI.BackendTrust.egress_tier_for()
+    end
+
     @allowed_providers [
       :anthropic,
       :openai,
@@ -251,6 +262,15 @@ defmodule Arbor.Actions.AI do
         provider: :control,
         max_tokens: :data
       }
+    end
+
+    # Egress classification (2026-06-14 decision): see AI.GenerateText.
+    def effect_class, do: :network_egress
+
+    def egress_tier(params, _context) do
+      params[:provider]
+      |> normalize_provider()
+      |> Arbor.AI.BackendTrust.egress_tier_for()
     end
 
     @allowed_providers [
