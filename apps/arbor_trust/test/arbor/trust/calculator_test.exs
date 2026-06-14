@@ -51,37 +51,40 @@ defmodule Arbor.Trust.CalculatorTest do
 
   describe "calculate/2 with explicit weights" do
     test "returns 0 when all component scores are zero" do
-      profile = build_profile(%{
-        success_rate_score: 0.0,
-        uptime_score: 0.0,
-        security_score: 0.0,
-        test_pass_score: 0.0,
-        rollback_score: 0.0
-      })
+      profile =
+        build_profile(%{
+          success_rate_score: 0.0,
+          uptime_score: 0.0,
+          security_score: 0.0,
+          test_pass_score: 0.0,
+          rollback_score: 0.0
+        })
 
       assert Calculator.calculate(profile, @weights) == 0
     end
 
     test "returns 100 when all component scores are 100" do
-      profile = build_profile(%{
-        success_rate_score: 100.0,
-        uptime_score: 100.0,
-        security_score: 100.0,
-        test_pass_score: 100.0,
-        rollback_score: 100.0
-      })
+      profile =
+        build_profile(%{
+          success_rate_score: 100.0,
+          uptime_score: 100.0,
+          security_score: 100.0,
+          test_pass_score: 100.0,
+          rollback_score: 100.0
+        })
 
       assert Calculator.calculate(profile, @weights) == 100
     end
 
     test "calculates a properly weighted sum" do
-      profile = build_profile(%{
-        success_rate_score: 85.0,
-        uptime_score: 100.0,
-        security_score: 80.0,
-        test_pass_score: 90.0,
-        rollback_score: 95.0
-      })
+      profile =
+        build_profile(%{
+          success_rate_score: 85.0,
+          uptime_score: 100.0,
+          security_score: 80.0,
+          test_pass_score: 90.0,
+          rollback_score: 95.0
+        })
 
       # Expected: 85*0.30 + 100*0.15 + 80*0.25 + 90*0.20 + 95*0.10
       #         = 25.5   + 15.0   + 20.0   + 18.0   + 9.5
@@ -90,13 +93,14 @@ defmodule Arbor.Trust.CalculatorTest do
     end
 
     test "rounds to nearest integer" do
-      profile = build_profile(%{
-        success_rate_score: 70.0,
-        uptime_score: 50.0,
-        security_score: 60.0,
-        test_pass_score: 40.0,
-        rollback_score: 80.0
-      })
+      profile =
+        build_profile(%{
+          success_rate_score: 70.0,
+          uptime_score: 50.0,
+          security_score: 60.0,
+          test_pass_score: 40.0,
+          rollback_score: 80.0
+        })
 
       # Expected: 70*0.30 + 50*0.15 + 60*0.25 + 40*0.20 + 80*0.10
       #         = 21.0   + 7.5    + 15.0   + 8.0    + 8.0
@@ -106,37 +110,40 @@ defmodule Arbor.Trust.CalculatorTest do
 
     test "clamps score to minimum of 0" do
       # This shouldn't happen normally, but Calculator defensively clamps
-      profile = build_profile(%{
-        success_rate_score: 0.0,
-        uptime_score: 0.0,
-        security_score: 0.0,
-        test_pass_score: 0.0,
-        rollback_score: 0.0
-      })
+      profile =
+        build_profile(%{
+          success_rate_score: 0.0,
+          uptime_score: 0.0,
+          security_score: 0.0,
+          test_pass_score: 0.0,
+          rollback_score: 0.0
+        })
 
       assert Calculator.calculate(profile, @weights) >= 0
     end
 
     test "clamps score to maximum of 100" do
-      profile = build_profile(%{
-        success_rate_score: 100.0,
-        uptime_score: 100.0,
-        security_score: 100.0,
-        test_pass_score: 100.0,
-        rollback_score: 100.0
-      })
+      profile =
+        build_profile(%{
+          success_rate_score: 100.0,
+          uptime_score: 100.0,
+          security_score: 100.0,
+          test_pass_score: 100.0,
+          rollback_score: 100.0
+        })
 
       assert Calculator.calculate(profile, @weights) <= 100
     end
 
     test "handles mixed high and low scores" do
-      profile = build_profile(%{
-        success_rate_score: 100.0,
-        uptime_score: 0.0,
-        security_score: 100.0,
-        test_pass_score: 0.0,
-        rollback_score: 100.0
-      })
+      profile =
+        build_profile(%{
+          success_rate_score: 100.0,
+          uptime_score: 0.0,
+          security_score: 100.0,
+          test_pass_score: 0.0,
+          rollback_score: 100.0
+        })
 
       # Expected: 100*0.30 + 0*0.15 + 100*0.25 + 0*0.20 + 100*0.10
       #         = 30.0    + 0.0    + 25.0    + 0.0    + 10.0
@@ -145,65 +152,70 @@ defmodule Arbor.Trust.CalculatorTest do
     end
 
     test "security weight dominates with only security score" do
-      profile = build_profile(%{
-        success_rate_score: 0.0,
-        uptime_score: 0.0,
-        security_score: 100.0,
-        test_pass_score: 0.0,
-        rollback_score: 0.0
-      })
+      profile =
+        build_profile(%{
+          success_rate_score: 0.0,
+          uptime_score: 0.0,
+          security_score: 100.0,
+          test_pass_score: 0.0,
+          rollback_score: 0.0
+        })
 
       # Expected: 0 + 0 + 100*0.25 + 0 + 0 = 25
       assert Calculator.calculate(profile, @weights) == 25
     end
 
     test "success_rate weight is the largest single factor" do
-      profile = build_profile(%{
-        success_rate_score: 100.0,
-        uptime_score: 0.0,
-        security_score: 0.0,
-        test_pass_score: 0.0,
-        rollback_score: 0.0
-      })
+      profile =
+        build_profile(%{
+          success_rate_score: 100.0,
+          uptime_score: 0.0,
+          security_score: 0.0,
+          test_pass_score: 0.0,
+          rollback_score: 0.0
+        })
 
       # Expected: 100*0.30 = 30
       assert Calculator.calculate(profile, @weights) == 30
     end
 
     test "uptime weight is the smallest non-rollback factor" do
-      profile = build_profile(%{
-        success_rate_score: 0.0,
-        uptime_score: 100.0,
-        security_score: 0.0,
-        test_pass_score: 0.0,
-        rollback_score: 0.0
-      })
+      profile =
+        build_profile(%{
+          success_rate_score: 0.0,
+          uptime_score: 100.0,
+          security_score: 0.0,
+          test_pass_score: 0.0,
+          rollback_score: 0.0
+        })
 
       # Expected: 100*0.15 = 15
       assert Calculator.calculate(profile, @weights) == 15
     end
 
     test "rollback weight is the smallest factor" do
-      profile = build_profile(%{
-        success_rate_score: 0.0,
-        uptime_score: 0.0,
-        security_score: 0.0,
-        test_pass_score: 0.0,
-        rollback_score: 100.0
-      })
+      profile =
+        build_profile(%{
+          success_rate_score: 0.0,
+          uptime_score: 0.0,
+          security_score: 0.0,
+          test_pass_score: 0.0,
+          rollback_score: 100.0
+        })
 
       # Expected: 100*0.10 = 10
       assert Calculator.calculate(profile, @weights) == 10
     end
 
     test "custom weights override defaults" do
-      profile = build_profile(%{
-        success_rate_score: 100.0,
-        uptime_score: 0.0,
-        security_score: 0.0,
-        test_pass_score: 0.0,
-        rollback_score: 0.0
-      })
+      profile =
+        build_profile(%{
+          success_rate_score: 100.0,
+          uptime_score: 0.0,
+          security_score: 0.0,
+          test_pass_score: 0.0,
+          rollback_score: 0.0
+        })
 
       custom_weights = %{
         success_rate: 1.0,
@@ -217,13 +229,14 @@ defmodule Arbor.Trust.CalculatorTest do
     end
 
     test "partial custom weights fall back to module defaults for missing keys" do
-      profile = build_profile(%{
-        success_rate_score: 100.0,
-        uptime_score: 100.0,
-        security_score: 100.0,
-        test_pass_score: 100.0,
-        rollback_score: 100.0
-      })
+      profile =
+        build_profile(%{
+          success_rate_score: 100.0,
+          uptime_score: 100.0,
+          security_score: 100.0,
+          test_pass_score: 100.0,
+          rollback_score: 100.0
+        })
 
       # Only override success_rate; others use module @weights defaults
       partial_weights = %{success_rate: 0.50}
@@ -348,6 +361,7 @@ defmodule Arbor.Trust.CalculatorTest do
 
     test "decays linearly between 8 and 30 days" do
       scores = Enum.map(8..30, &Calculator.days_inactive_score/1)
+
       Enum.reduce(scores, fn current, previous ->
         assert current <= previous, "Expected #{current} <= #{previous}"
         current
@@ -356,6 +370,7 @@ defmodule Arbor.Trust.CalculatorTest do
 
     test "decays linearly between 31 and 60 days" do
       scores = Enum.map(31..60, &Calculator.days_inactive_score/1)
+
       Enum.reduce(scores, fn current, previous ->
         assert current <= previous, "Expected #{current} <= #{previous}"
         current
@@ -453,16 +468,17 @@ defmodule Arbor.Trust.CalculatorTest do
     test "recalculates all component scores from raw counters" do
       now = ~U[2024-01-15 14:00:00Z]
 
-      profile = build_profile(%{
-        total_actions: 200,
-        successful_actions: 170,
-        security_violations: 1,
-        total_tests: 20,
-        tests_passed: 18,
-        rollback_count: 2,
-        improvement_count: 10,
-        last_activity_at: ~U[2024-01-15 12:00:00Z]
-      })
+      profile =
+        build_profile(%{
+          total_actions: 200,
+          successful_actions: 170,
+          security_violations: 1,
+          total_tests: 20,
+          tests_passed: 18,
+          rollback_count: 2,
+          improvement_count: 10,
+          last_activity_at: ~U[2024-01-15 12:00:00Z]
+        })
 
       result = Calculator.recalculate_profile(profile, now, @weights)
 
@@ -477,49 +493,54 @@ defmodule Arbor.Trust.CalculatorTest do
       assert result.trust_score == 87
     end
 
-    test "sets tier based on calculated score" do
+    test "recalculation does NOT move tier (tier-minting kill sweep, P0 gate #1)" do
+      # Recalculation updates component scores and trust_score (telemetry) only.
+      # Tier is a creation-set display label and must never be derived from score
+      # arithmetic. A high-scoring profile that starts :untrusted stays :untrusted.
       now = ~U[2024-01-15 14:00:00Z]
 
-      profile = build_profile(%{
-        total_actions: 200,
-        successful_actions: 170,
-        security_violations: 1,
-        total_tests: 20,
-        tests_passed: 18,
-        rollback_count: 2,
-        improvement_count: 10,
-        last_activity_at: ~U[2024-01-15 12:00:00Z]
-      })
+      profile =
+        build_profile(%{
+          tier: :untrusted,
+          total_actions: 200,
+          successful_actions: 170,
+          security_violations: 1,
+          total_tests: 20,
+          tests_passed: 18,
+          rollback_count: 2,
+          improvement_count: 10,
+          last_activity_at: ~U[2024-01-15 12:00:00Z]
+        })
 
       result = Calculator.recalculate_profile(profile, now, @weights)
 
-      # Score of 87 => :veteran tier (75-89)
-      assert result.tier == :veteran
+      # Score climbs (=> 87, which the old code mapped to :veteran)...
+      assert result.trust_score == 87
+      # ...but tier is untouched.
+      assert result.tier == :untrusted
     end
 
-    test "trust_points can boost tier above what score alone would give (regression)" do
-      # Regression test for the divergence between Calculator and Authority:
-      # Calculator was using only the score-derived tier, ignoring trust_points.
-      # Bulk recalculation could silently demote agents who earned tier through
-      # council approvals (trust_points). Calculator now uses Authority.compute_tier
-      # to honor points-based progression.
+    test "recalculation never derives tier from trust_points (regression)" do
+      # Regression for the tier-minting kill sweep: points-based progression must
+      # NOT mint a higher tier via bulk recalculation. Authorization reads
+      # baseline + rules, never tier; tier is frozen at its creation value.
       now = ~U[2024-01-15 14:00:00Z]
 
-      profile = build_profile(%{
-        # Low component scores → score-derived tier would be :untrusted
-        total_actions: 10,
-        successful_actions: 0,
-        security_violations: 5,
-        last_activity_at: ~U[2024-01-15 12:00:00Z],
-        # But high trust_points → points-derived tier is :veteran (>= 500)
-        trust_points: 600
-      })
+      profile =
+        build_profile(%{
+          tier: :probationary,
+          total_actions: 10,
+          successful_actions: 0,
+          security_violations: 5,
+          last_activity_at: ~U[2024-01-15 12:00:00Z],
+          # High trust_points that the old system mapped to :veteran (>= 500)
+          trust_points: 600
+        })
 
       result = Calculator.recalculate_profile(profile, now, @weights)
 
-      # Score-derived tier would be :untrusted, but points override
-      assert result.tier == :veteran,
-             "expected :veteran from points override; got #{result.tier} (score=#{result.trust_score})"
+      # Tier stays exactly where it started — points do not move it.
+      assert result.tier == :probationary
     end
 
     test "handles brand new profile with no activity" do
@@ -539,22 +560,24 @@ defmodule Arbor.Trust.CalculatorTest do
       # Expected: 0*0.30 + 0*0.15 + 100*0.25 + 0*0.20 + 100*0.10
       #         = 0 + 0 + 25 + 0 + 10 = 35
       assert result.trust_score == 35
-      assert result.tier == :probationary
+      # Tier is not derived from score anymore — stays at the creation value.
+      assert result.tier == :untrusted
     end
 
     test "profile with all perfect metrics" do
       now = ~U[2024-01-15 14:00:00Z]
 
-      profile = build_profile(%{
-        total_actions: 100,
-        successful_actions: 100,
-        security_violations: 0,
-        total_tests: 50,
-        tests_passed: 50,
-        rollback_count: 0,
-        improvement_count: 10,
-        last_activity_at: ~U[2024-01-15 12:00:00Z]
-      })
+      profile =
+        build_profile(%{
+          total_actions: 100,
+          successful_actions: 100,
+          security_violations: 0,
+          total_tests: 50,
+          tests_passed: 50,
+          rollback_count: 0,
+          improvement_count: 10,
+          last_activity_at: ~U[2024-01-15 12:00:00Z]
+        })
 
       result = Calculator.recalculate_profile(profile, now, @weights)
 
@@ -564,22 +587,24 @@ defmodule Arbor.Trust.CalculatorTest do
       assert result.test_pass_score == 100.0
       assert result.rollback_score == 100.0
       assert result.trust_score == 100
-      assert result.tier == :autonomous
+      # Perfect score, but tier is not derived from score — stays at creation value.
+      assert result.tier == :untrusted
     end
 
     test "profile with all worst metrics" do
       now = ~U[2024-06-15 14:00:00Z]
 
-      profile = build_profile(%{
-        total_actions: 100,
-        successful_actions: 0,
-        security_violations: 10,
-        total_tests: 50,
-        tests_passed: 0,
-        rollback_count: 10,
-        improvement_count: 10,
-        last_activity_at: ~U[2024-01-15 12:00:00Z]
-      })
+      profile =
+        build_profile(%{
+          total_actions: 100,
+          successful_actions: 0,
+          security_violations: 10,
+          total_tests: 50,
+          tests_passed: 0,
+          rollback_count: 10,
+          improvement_count: 10,
+          last_activity_at: ~U[2024-01-15 12:00:00Z]
+        })
 
       result = Calculator.recalculate_profile(profile, now, @weights)
 
@@ -606,8 +631,10 @@ defmodule Arbor.Trust.CalculatorTest do
 
     test "weights sum to 1.0" do
       weights = Calculator.weights()
-      total = weights.success_rate + weights.uptime + weights.security +
-              weights.test_pass + weights.rollback
+
+      total =
+        weights.success_rate + weights.uptime + weights.security +
+          weights.test_pass + weights.rollback
 
       assert_in_delta total, 1.0, 0.001
     end

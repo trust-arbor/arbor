@@ -364,26 +364,10 @@ defmodule Arbor.Trust.Manager do
             # Broadcast event
             broadcast_trust_event(agent_id, event_type, metadata)
 
-            # Sync capabilities and profile rules if tier changed
-            if old_profile.tier != new_profile.tier do
-              maybe_update_profile_rules(agent_id, new_profile.tier)
-              safe_sync_capabilities(agent_id, old_profile.tier, new_profile.tier)
-
-              safe_emit_signal(:tier_changed, %{
-                agent_id: agent_id,
-                old_tier: old_profile.tier,
-                new_tier: new_profile.tier,
-                old_score: old_profile.trust_score,
-                new_score: new_profile.trust_score,
-                direction:
-                  if(
-                    Config.tier_index(new_profile.tier) >
-                      Config.tier_index(old_profile.tier),
-                    do: :promotion,
-                    else: :demotion
-                  )
-              })
-            end
+            # NOTE: tier no longer moves from score/points arithmetic (tier-minting
+            # kill sweep, P0 gate #1). Tier is a creation-set display label, so there
+            # is no automatic capability sync / rule reset / :tier_changed emission on
+            # trust events. Authorization reads `baseline` + `rules`, never `tier`.
 
             # Check circuit breaker for negative events
             maybe_trigger_circuit_breaker(event, agent_id, state)
@@ -483,13 +467,14 @@ defmodule Arbor.Trust.Manager do
           event.event_type == :security_violation
       end)
 
-    recent_rollbacks =
-      Enum.count(events, fn event ->
-        DateTime.compare(event.timestamp, one_hour_ago) == :gt and
-          event.event_type == :rollback_executed
-      end)
-
-    # Trigger circuit breaker if thresholds exceeded
+    # Trigger circuit breaker if thresholds exceeded.
+    #
+    # NOTE: the rapid-rollbacks branch that demoted tier was removed in the
+    # tier-minting kill sweep (P0 gate #1) — tier demotion minted/stripped
+    # capabilities through a second authority path. The freeze branches remain:
+    # freeze is rules-compatible enforcement (it revokes modifiable capabilities
+    # via the :trust_frozen handler) and does not move tiers. A rollback-based
+    # abuse response will return with the capability-risk-profiles work.
     cond do
       recent_failures >= 5 ->
         {_reply, state} = do_freeze_trust(agent_id, :rapid_failures, state)
@@ -497,11 +482,6 @@ defmodule Arbor.Trust.Manager do
 
       recent_violations >= 3 ->
         {_reply, state} = do_freeze_trust(agent_id, :security_violations, state)
-        state
-
-      recent_rollbacks >= 3 ->
-        # Just drop tier, don't freeze
-        demote_tier(agent_id)
         state
 
       true ->
@@ -540,47 +520,6 @@ defmodule Arbor.Trust.Manager do
 
       {:error, _} = error ->
         {error, state}
-    end
-  end
-
-  defp demote_tier(agent_id) do
-    case Store.get_profile(agent_id) do
-      {:ok, profile} ->
-        apply_tier_demotion(agent_id, profile)
-
-      _ ->
-        :ok
-    end
-  end
-
-  defp apply_tier_demotion(agent_id, profile) do
-    case Config.previous_tier(profile.tier) do
-      nil ->
-        :ok
-
-      lower_tier ->
-        new_score = Config.max_score(lower_tier)
-
-        Store.update_profile(agent_id, fn p ->
-          %{p | trust_score: new_score, tier: lower_tier}
-        end)
-
-        # Sync capabilities to match new (lower) tier
-        safe_sync_capabilities(agent_id, profile.tier, lower_tier)
-
-        Logger.warning(
-          "Trust demoted for agent #{agent_id}: #{profile.tier} -> #{lower_tier}",
-          agent_id: agent_id,
-          old_tier: profile.tier,
-          new_tier: lower_tier
-        )
-
-        safe_emit_signal(:tier_demoted, %{
-          agent_id: agent_id,
-          old_tier: profile.tier,
-          new_tier: lower_tier,
-          reason: :circuit_breaker
-        })
     end
   end
 
@@ -706,72 +645,12 @@ defmodule Arbor.Trust.Manager do
       Logger.warning("Policy.grant_tier_capabilities exit: #{inspect(reason)}")
   end
 
-  defp safe_sync_capabilities(agent_id, old_tier, new_tier) do
-    if policy_available?() do
-      case Arbor.Trust.Policy.sync_capabilities(agent_id, old_tier, new_tier) do
-        {:ok, result} ->
-          Logger.info(
-            "Synced capabilities for #{agent_id}: #{old_tier} -> #{new_tier} " <>
-              "(granted: #{result.granted}, revoked: #{result.revoked})",
-            agent_id: agent_id,
-            old_tier: old_tier,
-            new_tier: new_tier
-          )
-
-        {:error, reason} ->
-          Logger.warning("Failed to sync capabilities for #{agent_id}: #{inspect(reason)}")
-      end
-
-      # On demotion, reset confirmation history (graduated capabilities revert)
-      if Config.tier_index(new_tier) < Config.tier_index(old_tier) do
-        safe_reset_confirmations(agent_id)
-      end
-    end
-  rescue
-    e -> Logger.warning("Policy.sync_capabilities failed: #{Exception.message(e)}")
-  catch
-    :exit, reason ->
-      Logger.warning("Policy.sync_capabilities exit: #{inspect(reason)}")
-  end
-
-  defp safe_reset_confirmations(agent_id) do
-    if Process.whereis(Arbor.Trust.ConfirmationTracker) do
-      Arbor.Trust.ConfirmationTracker.reset(agent_id)
-    end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
-  end
-
-  # Initialize trust profile rules from the default preset for new agents.
-  # New profiles start at :untrusted tier, which maps to the :cautious preset.
-  # initialize_profile_rules — deleted, replaced by Authority.new_profile
-
-  # Update trust profile rules when tier changes (if rules haven't been customized).
-  # This ensures that as an agent earns trust, their default rules expand.
-  defp maybe_update_profile_rules(agent_id, new_tier) do
-    case Store.get_profile(agent_id) do
-      {:ok, profile} ->
-        # Only update if the profile's rules match the preset for its old tier
-        old_preset = Arbor.Trust.Policy.tier_to_preset(profile.tier)
-        {_old_baseline, old_rules} = Arbor.Trust.Policy.preset_rules(old_preset)
-
-        if profile.rules == old_rules do
-          new_preset = Arbor.Trust.Policy.tier_to_preset(new_tier)
-          {new_baseline, new_rules} = Arbor.Trust.Policy.preset_rules(new_preset)
-
-          Store.update_profile(agent_id, fn p ->
-            %{p | baseline: new_baseline, rules: new_rules}
-          end)
-        end
-
-      _ ->
-        :ok
-    end
-  rescue
-    _ -> :ok
-  end
+  # NOTE: safe_sync_capabilities/3, safe_reset_confirmations/1 and
+  # maybe_update_profile_rules/2 were removed in the tier-minting kill sweep
+  # (P0 gate #1). They existed to re-mint capabilities and reset rules when an
+  # agent's tier changed; tier no longer moves from arithmetic, so the only
+  # tier-driven grant left is the one-time creation grant
+  # (safe_grant_tier_capabilities/2 above).
 
   defp policy_available? do
     Process.whereis(Arbor.Security.CapabilityStore) != nil

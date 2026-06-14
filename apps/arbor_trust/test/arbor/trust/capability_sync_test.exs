@@ -102,8 +102,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
 
       assert {:noreply, ^state} =
                CapabilitySync.handle_info(
-                 {:trust_event, "agent_test", :trust_frozen,
-                  %{reason: :security_violation}},
+                 {:trust_event, "agent_test", :trust_frozen, %{reason: :security_violation}},
                  state
                )
     end
@@ -150,9 +149,9 @@ defmodule Arbor.Trust.CapabilitySyncTest do
     test "tier_changed event handles missing service gracefully" do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
-      # tier_changed with promotion calls grant_tier_upgrade_capabilities
-      # which calls Arbor.Security.grant (CapabilityStore not running)
-      # The handler catches the exit and returns noreply
+      # tier_changed is now a no-op (tier-minting kill sweep, P0 gate #1): it does
+      # not call into the Security facade at all, so it returns noreply regardless
+      # of whether external services are running.
       assert {:noreply, ^state} =
                CapabilitySync.handle_info(
                  {:trust_event, "agent_test", :tier_changed,
@@ -168,8 +167,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
       # which calls Arbor.Security.list_capabilities (CapabilityStore not running)
       assert {:noreply, ^state} =
                CapabilitySync.handle_info(
-                 {:trust_event, "agent_test", :trust_frozen,
-                  %{reason: :security_violation}},
+                 {:trust_event, "agent_test", :trust_frozen, %{reason: :security_violation}},
                  state
                )
     end
@@ -283,84 +281,30 @@ defmodule Arbor.Trust.CapabilitySyncTest do
     end
   end
 
-  describe "handle_info/2 - tier_changed promotion and demotion paths" do
-    test "tier_changed with promotion (lower to higher) dispatches upgrade" do
-      state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
+  describe "handle_info/2 - tier_changed is ignored (tier-minting kill sweep, P0 gate #1)" do
+    # tier_changed used to drive capability promotion/demotion (a second authority
+    # path). Tier no longer moves from arithmetic, so :tier_changed is now a no-op:
+    # the handler must never mint or strip capabilities in response to it. We assert
+    # it is handled inertly (no crash, state unchanged) for a range of tier deltas.
+    for {label, old_tier, new_tier} <- [
+          {"promotion", :untrusted, :trusted},
+          {"demotion", :trusted, :untrusted},
+          {"same tier", :trusted, :trusted},
+          {"nil old_tier", nil, :trusted},
+          {"nil new_tier", :trusted, nil},
+          {"multi-tier promotion", :veteran, :autonomous},
+          {"multi-tier demotion", :autonomous, :probationary}
+        ] do
+      test "tier_changed (#{label}) is a no-op" do
+        state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
-      # Promotion from untrusted to trusted
-      assert {:noreply, ^state} =
-               CapabilitySync.handle_info(
-                 {:trust_event, "agent_promo", :tier_changed,
-                  %{old_tier: :untrusted, new_tier: :trusted}},
-                 state
-               )
-    end
-
-    test "tier_changed with demotion (higher to lower) dispatches downgrade" do
-      state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
-
-      # Demotion from trusted to untrusted
-      assert {:noreply, ^state} =
-               CapabilitySync.handle_info(
-                 {:trust_event, "agent_demo", :tier_changed,
-                  %{old_tier: :trusted, new_tier: :untrusted}},
-                 state
-               )
-    end
-
-    test "tier_changed with same tier does nothing" do
-      state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
-
-      assert {:noreply, ^state} =
-               CapabilitySync.handle_info(
-                 {:trust_event, "agent_same", :tier_changed,
-                  %{old_tier: :trusted, new_tier: :trusted}},
-                 state
-               )
-    end
-
-    test "tier_changed with nil old_tier handles gracefully" do
-      state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
-
-      assert {:noreply, ^state} =
-               CapabilitySync.handle_info(
-                 {:trust_event, "agent_nil_tier", :tier_changed,
-                  %{old_tier: nil, new_tier: :trusted}},
-                 state
-               )
-    end
-
-    test "tier_changed with nil new_tier handles gracefully" do
-      state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
-
-      assert {:noreply, ^state} =
-               CapabilitySync.handle_info(
-                 {:trust_event, "agent_nil_new", :tier_changed,
-                  %{old_tier: :trusted, new_tier: nil}},
-                 state
-               )
-    end
-
-    test "tier_changed multi-tier promotion veteran to autonomous" do
-      state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
-
-      assert {:noreply, ^state} =
-               CapabilitySync.handle_info(
-                 {:trust_event, "agent_vet_auto", :tier_changed,
-                  %{old_tier: :veteran, new_tier: :autonomous}},
-                 state
-               )
-    end
-
-    test "tier_changed multi-tier demotion autonomous to probationary" do
-      state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
-
-      assert {:noreply, ^state} =
-               CapabilitySync.handle_info(
-                 {:trust_event, "agent_auto_prob", :tier_changed,
-                  %{old_tier: :autonomous, new_tier: :probationary}},
-                 state
-               )
+        assert {:noreply, ^state} =
+                 CapabilitySync.handle_info(
+                   {:trust_event, "agent_tc", :tier_changed,
+                    %{old_tier: unquote(old_tier), new_tier: unquote(new_tier)}},
+                   state
+                 )
+      end
     end
   end
 
@@ -381,8 +325,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
 
       assert {:noreply, ^state} =
                CapabilitySync.handle_info(
-                 {:trust_event, "agent_freeze_cb", :trust_frozen,
-                  %{reason: :circuit_breaker}},
+                 {:trust_event, "agent_freeze_cb", :trust_frozen, %{reason: :circuit_breaker}},
                  state
                )
     end
@@ -427,8 +370,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
 
       assert {:noreply, ^state} =
                CapabilitySync.handle_info(
-                 {:trust_event, "agent_new_profile", :profile_created,
-                  %{tier: :untrusted}},
+                 {:trust_event, "agent_new_profile", :profile_created, %{tier: :untrusted}},
                  state
                )
     end
@@ -472,8 +414,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
 
       assert {:noreply, ^state} =
                CapabilitySync.handle_info(
-                 {:trust_event, "agent_partial", :some_event,
-                  %{previous_tier: :trusted}},
+                 {:trust_event, "agent_partial", :some_event, %{previous_tier: :trusted}},
                  state
                )
     end
@@ -483,8 +424,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
 
       assert {:noreply, ^state} =
                CapabilitySync.handle_info(
-                 {:trust_event, "agent_partial2", :some_event,
-                  %{new_tier: :trusted}},
+                 {:trust_event, "agent_partial2", :some_event, %{new_tier: :trusted}},
                  state
                )
     end
@@ -513,7 +453,13 @@ defmodule Arbor.Trust.CapabilitySyncTest do
       {:ok, pid} = CapabilitySync.start_link(enabled: false)
 
       send(pid, {:trust_event, "agent_disabled", :profile_created, %{tier: :untrusted}})
-      send(pid, {:trust_event, "agent_disabled", :tier_changed, %{old_tier: :untrusted, new_tier: :trusted}})
+
+      send(
+        pid,
+        {:trust_event, "agent_disabled", :tier_changed,
+         %{old_tier: :untrusted, new_tier: :trusted}}
+      )
+
       send(pid, {:trust_event, "agent_disabled", :trust_frozen, %{reason: :test}})
       send(pid, {:trust_event, "agent_disabled", :trust_unfrozen, %{}})
 
@@ -551,7 +497,11 @@ defmodule Arbor.Trust.CapabilitySyncTest do
       state = %CapabilitySync{enabled: true, subscribed: true, retry_count: 0}
 
       assert catch_exit(
-               CapabilitySync.handle_call({:sync_capabilities, "agent_test_prefix"}, self(), state)
+               CapabilitySync.handle_call(
+                 {:sync_capabilities, "agent_test_prefix"},
+                 self(),
+                 state
+               )
              )
     end
 
@@ -636,7 +586,8 @@ defmodule Arbor.Trust.CapabilitySyncTest do
 
     test "sync_capabilities for non-existent agent creates profile" do
       # Agent does not exist yet; do_sync_capabilities creates it
-      result = CapabilitySync.sync_capabilities("agent_new_sync_#{System.unique_integer([:positive])}")
+      result =
+        CapabilitySync.sync_capabilities("agent_new_sync_#{System.unique_integer([:positive])}")
 
       case result do
         {:ok, %{granted: _, existing: _, errors: _}} -> assert true
@@ -652,7 +603,10 @@ defmodule Arbor.Trust.CapabilitySyncTest do
     end
 
     test "expected_capabilities for non-existent agent returns error" do
-      result = CapabilitySync.expected_capabilities("totally_missing_agent_#{System.unique_integer([:positive])}")
+      result =
+        CapabilitySync.expected_capabilities(
+          "totally_missing_agent_#{System.unique_integer([:positive])}"
+        )
 
       assert {:error, :not_found} = result
     end
@@ -710,9 +664,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
   defp ensure_manager_started do
     case Process.whereis(Manager) do
       nil ->
-        start_supervised!(
-          {Manager, circuit_breaker: false, decay: false, event_store: true}
-        )
+        start_supervised!({Manager, circuit_breaker: false, decay: false, event_store: true})
 
       _pid ->
         :ok

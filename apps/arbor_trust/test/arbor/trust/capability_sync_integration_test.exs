@@ -2,8 +2,13 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
   @moduledoc """
   Integration tests for Trust-Capability synchronization.
 
-  These tests verify that trust tier changes correctly grant/revoke
+  These tests verify that the explicit, lifecycle-driven capability sync
+  (`CapabilitySync.sync_capabilities/1` and freeze handling) grants/revokes
   signed capabilities through the Security facade.
+
+  They also pin the tier-minting kill sweep (P0 gate #1): recording trust
+  events through the public Manager API must NOT move tier or mint capabilities
+  via a second authority path.
 
   Uses CapabilitySync.sync_capabilities/1 directly since we don't
   have PubSub set up in tests.
@@ -46,6 +51,47 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
     agent_id = "agent_sync_test_#{:erlang.unique_integer([:positive])}"
 
     {:ok, agent_id: agent_id}
+  end
+
+  describe "tier-minting kill sweep (P0 gate #1) — security regression" do
+    test "recording many approvals never moves tier or mints capabilities", %{
+      agent_id: agent_id
+    } do
+      # Profile starts at the creation tier.
+      {:ok, profile} = Trust.create_trust_profile(agent_id)
+      assert profile.tier == :untrusted
+
+      # Establish a deterministic baseline capability set (the creation grant).
+      {:ok, _} = CapabilitySync.sync_capabilities(agent_id)
+      {:ok, baseline_caps} = Security.list_capabilities(agent_id)
+      baseline_ids = MapSet.new(baseline_caps, & &1.id)
+
+      # Award enough trust points to cross EVERY old graduation threshold
+      # (autonomous was >= 2000 points). Under the old system this auto-promoted
+      # tier via maybe_graduate and minted signed tier capabilities through
+      # Policy.sync_capabilities — a parallel authority path that bypassed the
+      # rules/ceilings model. That path is now closed.
+      for _ <- 1..220 do
+        :ok = Manager.record_trust_event(agent_id, :proposal_approved, %{impact: :high})
+      end
+
+      # get_trust_profile is a GenServer.call, so it is processed after all the
+      # preceding record_trust_event casts have been applied.
+      {:ok, after_profile} = Manager.get_trust_profile(agent_id)
+
+      # Points accrued well past the old autonomous threshold...
+      assert after_profile.trust_points >= 2000
+      # ...but tier never moved from its creation value.
+      assert after_profile.tier == :untrusted,
+             "tier must not auto-graduate from trust points (got #{after_profile.tier})"
+
+      # ...and NO new capabilities were minted: the set is byte-for-byte the same.
+      {:ok, after_caps} = Security.list_capabilities(agent_id)
+      after_ids = MapSet.new(after_caps, & &1.id)
+
+      assert MapSet.equal?(after_ids, baseline_ids),
+             "tier-minting path is closed: recording approvals must not grant or revoke capabilities"
+    end
   end
 
   describe "sync_capabilities grants signed capabilities" do

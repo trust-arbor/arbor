@@ -270,11 +270,16 @@ defmodule Arbor.Trust.Calculator do
       Calculator.recalculate_profile(profile, now, weights)
   """
   @spec recalculate_profile(Profile.t(), DateTime.t(), map()) :: Profile.t()
-  def recalculate_profile(%Profile{} = profile, %DateTime{} = now, weights) when is_map(weights) do
+  def recalculate_profile(%Profile{} = profile, %DateTime{} = now, weights)
+      when is_map(weights) do
+    # NOTE: As of the tier-minting kill sweep (P0 gate #1), recalculation
+    # updates component scores and `trust_score` (telemetry/dashboard) only.
+    # It no longer moves `tier` — tier is a display label set at agent creation
+    # and is never derived from score/points arithmetic. Authorization reads
+    # `baseline` + `rules`, never `tier`.
     profile
     |> update_component_scores(now)
     |> update_trust_score(weights)
-    |> update_tier()
   end
 
   @doc """
@@ -304,13 +309,5 @@ defmodule Arbor.Trust.Calculator do
 
   defp update_trust_score(%Profile{} = profile, weights) do
     %{profile | trust_score: calculate(profile, weights)}
-  end
-
-  defp update_tier(%Profile{trust_score: score, trust_points: points} = profile) do
-    # Use Authority's points-aware tier computation. Tier resolution must
-    # honor trust_points (earned via council approvals) so bulk recalculation
-    # never silently demotes a points-based agent below where event-based
-    # updates put them.
-    %{profile | tier: Arbor.Trust.Authority.compute_tier(score, points)}
   end
 end

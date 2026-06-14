@@ -1,22 +1,23 @@
 defmodule Arbor.Trust.CapabilitySync do
   @moduledoc """
-  Synchronizes capabilities with trust tier changes.
+  Synchronizes capabilities with trust profile lifecycle events.
 
-  This module subscribes to trust events and automatically grants or revokes
-  capabilities when an agent's trust tier changes. This ensures the capability
-  system stays in sync with the progressive trust model.
+  This module subscribes to trust events and grants or revokes capabilities at
+  well-defined lifecycle points. As of the tier-minting kill sweep (P0 gate #1)
+  it no longer reacts to tier *movement* — tier is a creation-set display label
+  that never changes from score/points arithmetic, so there is no tier
+  promotion/demotion capability sync.
 
   ## Behavior
 
-  - On tier promotion: Grant new capabilities for the new tier
-  - On tier demotion: Revoke capabilities no longer available at lower tier
-  - On trust freeze: Revoke all modifiable capabilities
-  - On trust unfreeze: Restore capabilities for current tier
+  - On profile creation: Grant the initial (`:untrusted`) capabilities
+  - On trust freeze: Revoke all modifiable capabilities (rules-based enforcement)
+  - On trust unfreeze: Restore capabilities for the profile's tier
 
   ## Usage
 
   The sync handler is started automatically by the Trust.Supervisor.
-  It subscribes to `trust:events` PubSub topic and reacts to tier changes.
+  It subscribes to the `trust:events` PubSub topic.
   """
 
   use GenServer
@@ -135,7 +136,9 @@ defmodule Arbor.Trust.CapabilitySync do
         handle_trust_event(agent_id, event_type, metadata)
       catch
         :exit, reason ->
-          Logger.warning("CapabilitySync: Failed to handle #{event_type} for #{agent_id}: #{inspect(reason)}")
+          Logger.warning(
+            "CapabilitySync: Failed to handle #{event_type} for #{agent_id}: #{inspect(reason)}"
+          )
       end
     end
 
@@ -150,12 +153,13 @@ defmodule Arbor.Trust.CapabilitySync do
   # Private functions
 
   defp handle_trust_event(agent_id, event_type, metadata) do
+    # NOTE: tier-change handling (:tier_changed and the side-effect fallback that
+    # granted/revoked capabilities on tier movement) was removed in the
+    # tier-minting kill sweep (P0 gate #1). Tier no longer moves from score/points
+    # arithmetic, so capabilities are never minted or stripped on tier change.
+    # The remaining handlers cover the one-time creation grant and the
+    # freeze/unfreeze enforcement path, which is rules-based, not tier-based.
     case event_type do
-      :tier_changed ->
-        old_tier = Map.get(metadata, :old_tier)
-        new_tier = Map.get(metadata, :new_tier)
-        handle_tier_change(agent_id, old_tier, new_tier)
-
       :trust_frozen ->
         handle_trust_frozen(agent_id, metadata)
 
@@ -167,37 +171,6 @@ defmodule Arbor.Trust.CapabilitySync do
         grant_tier_capabilities(agent_id, :untrusted)
 
       _ ->
-        # Check if tier changed as a side effect
-        check_tier_change(agent_id, metadata)
-    end
-  end
-
-  defp check_tier_change(agent_id, metadata) do
-    old_tier = Map.get(metadata, :previous_tier)
-    new_tier = Map.get(metadata, :new_tier)
-
-    if old_tier && new_tier && old_tier != new_tier do
-      handle_tier_change(agent_id, old_tier, new_tier)
-    end
-  end
-
-  defp handle_tier_change(agent_id, old_tier, new_tier) do
-    Logger.info("Syncing capabilities for tier change",
-      agent_id: agent_id,
-      old_tier: old_tier,
-      new_tier: new_tier
-    )
-
-    cond do
-      tier_higher?(new_tier, old_tier) ->
-        # Promotion - grant new capabilities
-        grant_tier_upgrade_capabilities(agent_id, old_tier, new_tier)
-
-      tier_higher?(old_tier, new_tier) ->
-        # Demotion - revoke lost capabilities
-        revoke_tier_downgrade_capabilities(agent_id, old_tier, new_tier)
-
-      true ->
         :ok
     end
   end
@@ -302,86 +275,6 @@ defmodule Arbor.Trust.CapabilitySync do
     end
   end
 
-  defp grant_tier_upgrade_capabilities(agent_id, old_tier, new_tier) do
-    principal_id = ensure_agent_prefix(agent_id)
-    gained = Config.capabilities_gained(old_tier, new_tier)
-
-    Enum.each(gained, fn template ->
-      resource_uri = expand_resource_uri(template.resource_uri, agent_id)
-
-      case Arbor.Security.grant(
-             principal: principal_id,
-             resource: resource_uri,
-             constraints: template.constraints,
-             metadata: %{
-               source: :tier_promotion,
-               old_tier: old_tier,
-               new_tier: new_tier,
-               granter_id: "trust_system",
-               synced_at: DateTime.utc_now()
-             }
-           ) do
-        {:ok, cap} ->
-          Logger.debug("Granted capability on promotion",
-            agent_id: agent_id,
-            capability_id: cap.id,
-            resource_uri: resource_uri
-          )
-
-        {:error, reason} ->
-          Logger.warning("Failed to grant capability on promotion",
-            agent_id: agent_id,
-            resource_uri: resource_uri,
-            reason: reason
-          )
-      end
-    end)
-  end
-
-  defp revoke_tier_downgrade_capabilities(agent_id, old_tier, new_tier) do
-    principal_id = ensure_agent_prefix(agent_id)
-    lost = Config.capabilities_lost(old_tier, new_tier)
-
-    lost_uris = Enum.map(lost, fn t -> expand_resource_uri(t.resource_uri, agent_id) end)
-
-    # Find and revoke capabilities that are no longer allowed
-    case Arbor.Security.list_capabilities(principal_id) do
-      {:ok, capabilities} ->
-        Enum.each(capabilities, fn cap ->
-          maybe_revoke_lost_capability(cap, lost_uris, agent_id)
-        end)
-
-      {:error, reason} ->
-        Logger.error("Failed to list capabilities for demotion sync",
-          agent_id: agent_id,
-          reason: reason
-        )
-    end
-  end
-
-  defp maybe_revoke_lost_capability(cap, lost_uris, agent_id) do
-    if Enum.any?(lost_uris, fn uri -> capability_matches_uri?(cap.resource_uri, uri) end) do
-      revoke_capability_with_logging(cap, agent_id)
-    end
-  end
-
-  defp revoke_capability_with_logging(cap, agent_id) do
-    case Arbor.Security.revoke(cap.id) do
-      :ok ->
-        Logger.debug("Revoked capability on demotion",
-          agent_id: agent_id,
-          capability_id: cap.id
-        )
-
-      {:error, reason} ->
-        Logger.warning("Failed to revoke capability on demotion",
-          agent_id: agent_id,
-          capability_id: cap.id,
-          reason: reason
-        )
-    end
-  end
-
   defp revoke_modifiable_capabilities(agent_id) do
     principal_id = ensure_agent_prefix(agent_id)
 
@@ -436,11 +329,6 @@ defmodule Arbor.Trust.CapabilitySync do
 
   defp capability_matches_uri?(cap_uri, target_uri) do
     cap_uri == target_uri
-  end
-
-  defp tier_higher?(tier1, tier2) do
-    tier_order = %{untrusted: 0, probationary: 1, trusted: 2, veteran: 3, autonomous: 4}
-    Map.get(tier_order, tier1, -1) > Map.get(tier_order, tier2, -1)
   end
 
   # Attempt to subscribe to PubSub using configured module

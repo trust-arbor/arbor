@@ -103,7 +103,6 @@ defmodule Arbor.Trust.Authority do
     |> Map.update!(:proposals_approved, &(&1 + 1))
     |> Map.update!(:trust_points, &(&1 + points))
     |> recalculate_scores()
-    |> maybe_graduate()
     |> touch()
   end
 
@@ -435,15 +434,17 @@ defmodule Arbor.Trust.Authority do
   def resolve_tier_from_points(_), do: :untrusted
 
   @doc """
-  Compute the effective tier from a score AND trust points.
+  Compute a tier label from a score AND trust points (pure helper).
 
-  Trust points (earned via council approvals) can boost an agent's tier
-  beyond what their component scores alone would justify. This function
-  takes the maximum of the score-derived tier and the points-derived tier
-  so points-based progression is always honored.
+  Takes the maximum of the score-derived tier and the points-derived tier.
 
-  This is the canonical tier computation — Authority and Calculator both
-  use it so bulk recalculation never silently demotes a points-based agent.
+  NOTE: As of the tier-minting kill sweep (P0 gate #1), this is NOT wired to
+  anything that auto-applies tier. Tier is a display label set at agent
+  creation and never moves from score/points arithmetic — authorization reads
+  `baseline` + `rules` only, never `tier`. This function is retained as a pure
+  derivation utility (e.g. for a future "derived display label"); callers must
+  not use it to mint or change capabilities. See
+  `.arbor/roadmap/0-inbox/trust-tiers-mental-model-review.md`.
   """
   @spec compute_tier(non_neg_integer(), non_neg_integer()) :: atom()
   def compute_tier(score, trust_points) do
@@ -601,19 +602,8 @@ defmodule Arbor.Trust.Authority do
         test_pass_score: test_pass,
         rollback_score: rollback,
         trust_score: score,
-        tier: compute_tier(score, profile.trust_points),
         updated_at: DateTime.utc_now()
     }
-  end
-
-  defp maybe_graduate(%Profile{} = profile) do
-    new_tier = resolve_tier_from_points(profile.trust_points)
-
-    if tier_index(new_tier) > tier_index(profile.tier) do
-      set_tier(profile, new_tier)
-    else
-      profile
-    end
   end
 
   defp touch(%Profile{} = profile) do

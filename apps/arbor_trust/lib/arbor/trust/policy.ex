@@ -66,12 +66,6 @@ defmodule Arbor.Trust.Policy do
   @type mode :: :block | :ask | :allow | :auto
   @type confirmation :: :auto | :gated | :deny
 
-  @type sync_result :: %{
-          granted: non_neg_integer(),
-          revoked: non_neg_integer(),
-          effective_tier: Config.trust_tier()
-        }
-
   # ===========================================================================
   # Query API — Trust Profile Resolution
   # ===========================================================================
@@ -347,53 +341,6 @@ defmodule Arbor.Trust.Policy do
   end
 
   @doc """
-  Sync capabilities when an agent's tier changes.
-
-  Revokes all existing tier-sourced capabilities and grants the new tier's
-  capabilities. This is atomic in the sense that revocation + grant happens
-  in sequence — if grant fails partway, some capabilities may be missing
-  (fail closed is acceptable).
-
-  ## Examples
-
-      {:ok, %{granted: 12, revoked: 8, effective_tier: :trusted}} =
-        Policy.sync_capabilities("agent_123", :probationary, :trusted)
-  """
-  @spec sync_capabilities(String.t(), Config.trust_tier(), Config.trust_tier()) ::
-          {:ok, sync_result()} | {:error, term()}
-  def sync_capabilities(agent_id, old_tier, new_tier) do
-    with :ok <- ensure_security_available() do
-      # Revoke all existing capabilities for this agent
-      revoked =
-        case revoke_agent_capabilities(agent_id) do
-          {:ok, count} -> count
-          {:error, _} -> 0
-        end
-
-      # Grant new tier capabilities
-      case grant_tier_capabilities(agent_id, new_tier) do
-        {:ok, granted} ->
-          direction =
-            if tier_index(new_tier) > tier_index(old_tier), do: :promoted, else: :demoted
-
-          safe_emit(:tier_capabilities_synced, %{
-            agent_id: agent_id,
-            old_tier: old_tier,
-            new_tier: new_tier,
-            direction: direction,
-            granted: granted,
-            revoked: revoked
-          })
-
-          {:ok, %{granted: granted, revoked: revoked, effective_tier: new_tier}}
-
-        {:error, _} = error ->
-          error
-      end
-    end
-  end
-
-  @doc """
   Revoke all capabilities for an agent.
 
   Calls `CapabilityStore.revoke_all/1` directly since the Security facade
@@ -425,8 +372,6 @@ defmodule Arbor.Trust.Policy do
       {:error, :trust_unavailable}
     end
   end
-
-  defp tier_index(tier), do: Config.tier_index(tier)
 
   defp resolve_uri(template_uri, agent_id) do
     template_uri

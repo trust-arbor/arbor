@@ -69,11 +69,15 @@ defmodule Arbor.Trust.AuthorityTest do
       assert updated.proposals_approved == 1
     end
 
-    test "may graduate tier based on points" do
-      profile = %{Authority.new_profile("agent_123") | trust_points: 95}
+    test "does NOT auto-graduate tier from points (tier-minting kill sweep, P0 gate #1)" do
+      # Crossing a points threshold used to auto-promote tier (maybe_graduate),
+      # which then minted signed capabilities through a parallel authority path.
+      # Tier is now a creation-set display label: points accrue, tier does not move.
+      profile = %{Authority.new_profile("agent_123") | trust_points: 95, tier: :untrusted}
       updated = Authority.record_proposal_approved(profile, :medium)
       assert updated.trust_points == 100
-      assert updated.tier == :trusted
+      # Old behavior would have graduated this to :trusted (points >= 100).
+      assert updated.tier == :untrusted
     end
   end
 
