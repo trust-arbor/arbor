@@ -207,9 +207,24 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
       token
     end
   rescue
-    _ -> token
+    e ->
+      # Fail CLOSED: an exception inside a security check must not silently allow
+      # (same bug class as the 2026-02 bridge fail-open). Halt the node.
+      halt_provider_check_error(token, Exception.message(e))
   catch
-    :exit, _ -> token
+    :exit, reason ->
+      halt_provider_check_error(token, "exit: #{inspect(reason)}")
+  end
+
+  defp halt_provider_check_error(token, detail) do
+    Token.halt(
+      token,
+      "node #{token.node.id}: taint provider-constraint check errored (#{detail}) — failing closed",
+      %Outcome{
+        status: :fail,
+        failure_reason: "Taint provider-constraint check errored — failing closed: #{detail}"
+      }
+    )
   end
 
   # Resolve provider atom for constraint checking.
@@ -422,10 +437,15 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
     if sensitive_data_available?() do
       classify_by_content_scan(value)
     else
+      # F3 demotion (taint-rebuild Phase 5): content scanning classifies
+      # SENSITIVITY, never provenance LEVEL. The absence of detectable secrets is
+      # NOT evidence of trust (a prompt injection contains no API keys). Default
+      # to :derived ("provenance unknown, usable-but-audited"), never :trusted.
+      # Real provenance comes from ingress labeling (Context.taint).
       if struct_propagation_available?() do
-        make_taint_struct(:trusted, :public)
+        make_taint_struct(:derived, :public)
       else
-        :trusted
+        :derived
       end
     end
   end
@@ -442,7 +462,10 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
 
     case findings do
       [] ->
-        make_taint_struct(:trusted, :public)
+        # F3 demotion: no detected secrets/PII -> :public sensitivity, but NOT
+        # :trusted level (content-absence is not provenance). :derived = usable,
+        # audited, provenance-unknown.
+        make_taint_struct(:derived, :public)
 
       findings ->
         sensitivity = max_sensitivity_from_findings(findings)
@@ -508,7 +531,9 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
 
   defp extract_level(label) when is_atom(label), do: label
   defp extract_level(%{level: level}), do: level
-  defp extract_level(_), do: :unknown
+  # Fail CLOSED on a malformed/unrecognized label: treat it as :untrusted
+  # (matches Arbor.Actions.Taint.extract_level), not the near-trusted :unknown.
+  defp extract_level(_), do: :untrusted
 
   defp extract_sanitizations(%{sanitizations: s}) when is_integer(s), do: s
   defp extract_sanitizations(_), do: nil
