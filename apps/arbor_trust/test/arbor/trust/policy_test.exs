@@ -344,52 +344,10 @@ defmodule Arbor.Trust.PolicyTest do
     end
   end
 
-  describe "sync_capabilities/3" do
-    setup :start_infrastructure
-
-    test "promotion grants new capabilities", %{agent_id: agent_id} do
-      # Start with probationary capabilities
-      {:ok, _} = Policy.grant_tier_capabilities(agent_id, :probationary)
-      {:ok, old_caps} = Arbor.Security.list_capabilities(agent_id)
-
-      # Promote to trusted
-      {:ok, result} = Policy.sync_capabilities(agent_id, :probationary, :trusted)
-
-      assert result.effective_tier == :trusted
-      assert result.revoked == length(old_caps)
-      assert result.granted > 0
-
-      # Should have trusted-tier capabilities now
-      {:ok, new_caps} = Arbor.Security.list_capabilities(agent_id)
-      expected_count = length(Config.capabilities_for_tier(:trusted))
-      assert length(new_caps) == expected_count
-    end
-
-    test "demotion removes capabilities", %{agent_id: agent_id} do
-      # Start with trusted capabilities
-      {:ok, _} = Policy.grant_tier_capabilities(agent_id, :trusted)
-      {:ok, trusted_caps} = Arbor.Security.list_capabilities(agent_id)
-
-      # Demote to probationary
-      {:ok, result} = Policy.sync_capabilities(agent_id, :trusted, :probationary)
-
-      assert result.effective_tier == :probationary
-      assert result.revoked == length(trusted_caps)
-
-      # Should have fewer capabilities now
-      {:ok, demoted_caps} = Arbor.Security.list_capabilities(agent_id)
-      assert length(demoted_caps) < length(trusted_caps)
-    end
-
-    test "same-tier sync replaces capabilities", %{agent_id: agent_id} do
-      {:ok, _} = Policy.grant_tier_capabilities(agent_id, :trusted)
-      {:ok, result} = Policy.sync_capabilities(agent_id, :trusted, :trusted)
-
-      assert result.effective_tier == :trusted
-      assert result.revoked > 0
-      assert result.granted > 0
-    end
-  end
+  # NOTE: Policy.sync_capabilities/3 (the tier-change revoke-all-and-regrant path)
+  # was removed in the tier-minting kill sweep (P0 gate #1). Tier no longer moves
+  # from arithmetic, so there is no per-tier-change capability sync to test. The
+  # one-time creation grant remains covered by the grant_tier_capabilities tests.
 
   describe "revoke_agent_capabilities/1" do
     setup :start_infrastructure

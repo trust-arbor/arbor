@@ -280,11 +280,6 @@ defmodule Arbor.Trust do
   @spec confirmation_mode(String.t(), String.t()) :: :auto | :gated | :deny
   defdelegate confirmation_mode(agent_id, resource_uri), to: Arbor.Trust.Policy
 
-  @doc "Sync capabilities when tier changes."
-  @spec sync_capabilities(String.t(), atom(), atom()) ::
-          {:ok, Arbor.Trust.Policy.sync_result()} | {:error, term()}
-  defdelegate sync_capabilities(agent_id, old_tier, new_tier), to: Arbor.Trust.Policy
-
   @doc "Grant all capabilities for a tier to an agent."
   @spec grant_tier_capabilities(String.t(), atom()) ::
           {:ok, non_neg_integer()} | {:error, term()}

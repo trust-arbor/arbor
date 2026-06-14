@@ -752,18 +752,17 @@ defmodule Arbor.Trust.ManagerTest do
   end
 
   # ---------------------------------------------------------------------------
-  # demote_tier via circuit breaker rollback path
+  # Circuit breaker: rollbacks no longer demote tier (tier-minting kill sweep)
   # ---------------------------------------------------------------------------
 
-  describe "demote_tier via circuit breaker" do
-    test "3+ rollbacks trigger tier demotion path" do
+  describe "circuit breaker rollbacks (tier-minting kill sweep, P0 gate #1)" do
+    test "rollbacks above the old threshold do NOT demote tier" do
       stop_supervised!(Manager)
 
       start_supervised!({Manager, [circuit_breaker: true, decay: false, event_store: true]})
 
       {:ok, _} = Manager.create_trust_profile("agent_demote")
 
-      # Build up trust score by awarding points to reach a higher tier
       for _ <- 1..25 do
         :ok = Manager.record_trust_event("agent_demote", :action_success, %{})
         Process.sleep(5)
@@ -771,11 +770,12 @@ defmodule Arbor.Trust.ManagerTest do
 
       Process.sleep(100)
 
-      # Verify agent has some trust built up
       {:ok, profile_before} = Manager.get_trust_profile("agent_demote")
       assert profile_before.total_actions >= 25
+      tier_before = profile_before.tier
 
-      # Record 4 rollbacks to trigger demotion check (threshold is 3)
+      # Record 4 rollbacks — the old code demoted tier (and minted/stripped
+      # capabilities) at the rollbacks >= 3 threshold. That path is gone.
       for _ <- 1..4 do
         :ok = Manager.record_trust_event("agent_demote", :rollback_executed, %{})
         Process.sleep(10)
@@ -783,29 +783,10 @@ defmodule Arbor.Trust.ManagerTest do
 
       Process.sleep(300)
 
-      # Agent should still be accessible (not crashed)
       {:ok, profile} = Manager.get_trust_profile("agent_demote")
       assert profile.agent_id == "agent_demote"
-    end
-
-    test "demote_tier handles agent at lowest tier (untrusted)" do
-      stop_supervised!(Manager)
-
-      start_supervised!({Manager, [circuit_breaker: true, decay: false, event_store: true]})
-
-      {:ok, _} = Manager.create_trust_profile("agent_lowest_tier")
-
-      # Record 4 rollbacks on an untrusted agent (already lowest tier)
-      for _ <- 1..4 do
-        :ok = Manager.record_trust_event("agent_lowest_tier", :rollback_executed, %{})
-        Process.sleep(10)
-      end
-
-      Process.sleep(300)
-
-      # Agent should still exist and be at untrusted (can't demote further)
-      {:ok, profile} = Manager.get_trust_profile("agent_lowest_tier")
-      assert profile.agent_id == "agent_lowest_tier"
+      # Tier is unchanged — rollbacks never demote it anymore.
+      assert profile.tier == tier_before
     end
   end
 
