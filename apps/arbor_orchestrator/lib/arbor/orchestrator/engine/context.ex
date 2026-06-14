@@ -238,6 +238,15 @@ defmodule Arbor.Orchestrator.Engine.Context do
   @spec snapshot(t()) :: map()
   def snapshot(%__MODULE__{values: values}), do: values
 
+  @doc """
+  Returns the full provenance taint map (key -> level).
+
+  Used by the checkpoint path to persist provenance so it survives resume —
+  `snapshot/1` (values) deliberately omits it. See `taint_label/2`.
+  """
+  @spec taint_map(t()) :: %{String.t() => taint_level()}
+  def taint_map(%__MODULE__{taint: taint}), do: taint
+
   @doc "Returns the pipeline start time recorded on this context, if any."
   @spec pipeline_started_at(t()) :: DateTime.t() | nil
   def pipeline_started_at(%__MODULE__{pipeline_started_at: at}), do: at

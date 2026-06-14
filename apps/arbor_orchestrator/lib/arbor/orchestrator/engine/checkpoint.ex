@@ -33,6 +33,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
           completed_nodes: [String.t()],
           node_retries: map(),
           context_values: map(),
+          context_taint: map(),
           node_outcomes: %{String.t() => Arbor.Orchestrator.Engine.Outcome.t()},
           context_lineage: map(),
           pipeline_started_at: DateTime.t() | nil,
@@ -54,6 +55,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
             completed_nodes: [],
             node_retries: %{},
             context_values: %{},
+            context_taint: %{},
             node_outcomes: %{},
             context_lineage: %{},
             pipeline_started_at: nil,
@@ -78,6 +80,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
       completed_nodes: completed_nodes,
       node_retries: node_retries,
       context_values: Context.snapshot(context),
+      context_taint: Keyword.get(opts, :context_taint, Context.taint_map(context)),
       node_outcomes: node_outcomes,
       context_lineage: Keyword.get(opts, :context_lineage, Context.lineage(context)),
       pipeline_started_at:
@@ -304,9 +307,35 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     |> Map.from_struct()
     |> Map.put(:node_outcomes, encoded_outcomes)
     |> Map.update(:context_values, %{}, &Map.drop(&1, @internal_keys))
+    |> Map.update(:context_taint, %{}, &serialize_taint/1)
     |> maybe_encode_pipeline_started_at()
     |> Map.put(:context_lineage, lineage)
   end
+
+  # Provenance taint levels are atoms; store them as strings so the JSON
+  # round-trip (and HMAC canonicalization) is deterministic.
+  defp serialize_taint(taint) when is_map(taint) do
+    Map.new(taint, fn {key, level} -> {key, to_string(level)} end)
+  end
+
+  defp serialize_taint(_), do: %{}
+
+  # Atomize known taint levels on the way back in; an unknown/garbage value
+  # fails closed to :untrusted (never silently trusted).
+  defp deserialize_taint(taint) when is_map(taint) do
+    Map.new(taint, fn {key, level} -> {key, parse_taint_level(level)} end)
+  end
+
+  defp deserialize_taint(_), do: %{}
+
+  defp parse_taint_level(level) when level in [:trusted, :derived, :untrusted, :hostile],
+    do: level
+
+  defp parse_taint_level("trusted"), do: :trusted
+  defp parse_taint_level("derived"), do: :derived
+  defp parse_taint_level("untrusted"), do: :untrusted
+  defp parse_taint_level("hostile"), do: :hostile
+  defp parse_taint_level(_), do: :untrusted
 
   defp serialize_lineage(lineage) when is_map(lineage) do
     Map.new(lineage, fn {key, entry} ->
@@ -427,6 +456,7 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
        completed_nodes: Map.get(decoded, "completed_nodes", []),
        node_retries: Map.get(decoded, "node_retries", %{}),
        context_values: Map.get(decoded, "context_values", %{}),
+       context_taint: deserialize_taint(Map.get(decoded, "context_taint", %{})),
        node_outcomes: outcomes,
        context_lineage: deserialize_lineage(Map.get(decoded, "context_lineage", %{})),
        pipeline_started_at: parse_optional_datetime(Map.get(decoded, "pipeline_started_at")),
