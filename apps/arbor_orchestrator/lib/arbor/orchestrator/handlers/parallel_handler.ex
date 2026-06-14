@@ -246,8 +246,18 @@ defmodule Arbor.Orchestrator.Handlers.ParallelHandler do
     fan_in_target =
       Enum.find(common_targets, fn node_id ->
         case Map.get(graph.nodes, node_id) do
-          nil -> false
-          node -> Registry.node_type(node) == "parallel.fan_in"
+          nil ->
+            false
+
+          node ->
+            # `node_type` returns the RAW declared type, which may be either
+            # "fan_in" or the alias "parallel.fan_in" (or a tripleoctagon shape).
+            # Canonicalize before comparing so BOTH forms are recognized — the
+            # old code matched only "parallel.fan_in" (missing `type="fan_in"`
+            # nodes), and a naive "fan_in"-only match misses the alias. Either
+            # miss silently routes a fan-out past its fan-in to the
+            # alphabetically-first common target.
+            Registry.canonical_type(Registry.node_type(node)) == "fan_in"
         end
       end)
 
