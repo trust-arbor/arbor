@@ -78,6 +78,39 @@ defmodule Arbor.Actions.Taint do
   end
 
   @doc """
+  Get the provenance taint an action assigns to its OWN output.
+
+  This is boundary/provenance tainting (taint-tracking-rebuild Phase 1): an
+  action that ingests data from outside the trust boundary (web fetch/search,
+  external messages, etc.) declares the provenance of what it returns via an
+  optional `output_taint/0` callback. The orchestrator records this level on
+  the node's output context keys so downstream nodes that consume them can be
+  gated at control parameters.
+
+  Returns the declared level (e.g. `:untrusted`) or `nil` when the action does
+  not declare output provenance (most actions — their output inherits taint
+  from their inputs, handled by propagation rather than ingress labeling).
+
+  ## Examples
+
+      iex> Arbor.Actions.Taint.output_taint_for(Arbor.Actions.Web.Browse)
+      :untrusted
+
+      iex> Arbor.Actions.Taint.output_taint_for(SomeActionWithoutProvenance)
+      nil
+  """
+  @spec output_taint_for(module()) :: Taint.level() | nil
+  def output_taint_for(action_module) do
+    Code.ensure_loaded(action_module)
+
+    if function_exported?(action_module, :output_taint, 0) do
+      action_module.output_taint()
+    else
+      nil
+    end
+  end
+
+  @doc """
   Check if action parameters comply with taint policy.
 
   For each parameter with a `:control` role, verifies that the taint level

@@ -144,6 +144,11 @@ defmodule Arbor.Actions.Web do
       %{url: {:control, requires: [:ssrf]}, selector: :control, format: :data}
     end
 
+    # Provenance (taint-tracking-rebuild Phase 1): fetched web content crosses
+    # the trust boundary — it is untrusted regardless of what it contains.
+    @doc false
+    def output_taint, do: :untrusted
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{url: url} = params, _context) do
@@ -285,6 +290,11 @@ defmodule Arbor.Actions.Web do
       %{query: :control, max_results: :data, country: :data, search_lang: :data, freshness: :data}
     end
 
+    # Provenance (taint-tracking-rebuild Phase 1): external search results are
+    # untrusted content from outside the trust boundary.
+    @doc false
+    def output_taint, do: :untrusted
+
     defp format_error(reason) when is_binary(reason), do: reason
     defp format_error(reason), do: "Web search failed: #{inspect(reason)}"
   end
@@ -421,6 +431,11 @@ defmodule Arbor.Actions.Web do
         max_age_hours: :data
       }
     end
+
+    # Provenance (taint-tracking-rebuild Phase 1): external search results are
+    # untrusted content from outside the trust boundary.
+    @doc false
+    def output_taint, do: :untrusted
   end
 
   # ============================================================================
@@ -543,6 +558,11 @@ defmodule Arbor.Actions.Web do
     def taint_roles do
       %{query: :control, location: :data, language: :data}
     end
+
+    # Provenance (taint-tracking-rebuild Phase 1): external search results are
+    # untrusted content from outside the trust boundary.
+    @doc false
+    def output_taint, do: :untrusted
   end
 
   # ============================================================================
@@ -635,6 +655,11 @@ defmodule Arbor.Actions.Web do
         max_content_length: :data
       }
     end
+
+    # Provenance (taint-tracking-rebuild Phase 1): a fetched page snapshot is
+    # untrusted content from outside the trust boundary.
+    @doc false
+    def output_taint, do: :untrusted
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}

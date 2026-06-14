@@ -86,6 +86,12 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
           # Context passed to the action's run/2 — includes signed_request
           # so facade auth can see it, and auth_context for the new flow.
+          #
+          # Taint bridge (taint-tracking-rebuild Phase 2): the orchestrator
+          # threads the provenance taint of the data interpolated into this
+          # action's params via the :taint opt. Putting it on context[:taint]
+          # is what finally feeds TaintEnforcement.check — without it the
+          # chokepoint reads no taint and every action passes (F1).
           context =
             %{}
             |> then(fn c ->
@@ -93,6 +99,12 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
             end)
             |> then(fn c ->
               if auth_context, do: Map.put(c, :auth_context, auth_context), else: c
+            end)
+            |> then(fn c ->
+              case Keyword.get(opts, :taint) do
+                nil -> c
+                level -> Map.put(c, :taint, level)
+              end
             end)
 
           case apply(@actions_mod, :authorize_and_execute, [
@@ -348,6 +360,33 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  @doc """
+  Resolve the provenance taint an action declares for its own output.
+
+  Used by ingress handlers (taint-tracking-rebuild Phase 1) to label a node's
+  output context keys with the source's provenance (e.g. web fetch ->
+  `:untrusted`). Returns the declared level or `nil` when the action declares
+  no provenance or the actions library is unavailable (standalone orchestrator).
+  """
+  @spec output_taint(String.t()) :: atom() | nil
+  def output_taint(name) do
+    normalized = normalize_name(name)
+
+    module =
+      resolve_via_registry(normalized) ||
+        resolve_via_registry(name) ||
+        resolve_via_action_map(normalized, name)
+
+    taint_mod = Module.concat([:Arbor, :Actions, :Taint])
+
+    if (module && Code.ensure_loaded?(taint_mod)) and
+         function_exported?(taint_mod, :output_taint_for, 1) do
+      apply(taint_mod, :output_taint_for, [module])
+    else
+      nil
+    end
   end
 
   # Resolve an action name via ActionRegistry (O(1) ETS lookup).

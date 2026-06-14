@@ -25,13 +25,16 @@ defmodule Arbor.Orchestrator.Engine.Context do
 
   @type lineage_entry :: LineageEntry.t()
 
+  @type taint_level :: :trusted | :derived | :untrusted | :hostile
+
   @type t :: %__MODULE__{
           values: map(),
           logs: [String.t()],
           lineage: map(),
-          pipeline_started_at: DateTime.t() | nil
+          pipeline_started_at: DateTime.t() | nil,
+          taint: %{String.t() => taint_level()}
         }
-  defstruct values: %{}, logs: [], lineage: %{}, pipeline_started_at: nil
+  defstruct values: %{}, logs: [], lineage: %{}, pipeline_started_at: nil, taint: %{}
 
   @doc """
   Construct a new context.
@@ -51,6 +54,66 @@ defmodule Arbor.Orchestrator.Engine.Context do
 
   @spec get(t(), String.t(), term()) :: term()
   def get(%__MODULE__{values: values}, key, default \\ nil), do: Map.get(values, key, default)
+
+  # ===========================================================================
+  # Taint provenance (taint-tracking-rebuild Phases 1-2)
+  #
+  # Provenance labels live in a DEDICATED struct field, NOT in `values`. Action
+  # `context_updates` only ever merge into `values` (see apply_updates/2,4), so a
+  # node can never launder or forge provenance by writing the taint map — it is
+  # engine-owned by construction. `record_output_taint/3` is called by the engine
+  # after a node executes, using the node action's declared `output_taint/0`.
+  #
+  # KNOWN GAP (follow-up): `snapshot/1` returns `values` only, so these labels do
+  # NOT survive checkpoint/resume serialization yet — a resumed pipeline starts
+  # with empty provenance (fail-open on resume). Tracked in the taint-rebuild
+  # roadmap item; close before this leaves the branch.
+  # ===========================================================================
+
+  @doc "Return the provenance taint level recorded for a context key, or nil."
+  @spec taint_label(t(), String.t()) :: taint_level() | nil
+  def taint_label(%__MODULE__{taint: taint}, key), do: Map.get(taint, key)
+
+  @doc """
+  Record a provenance taint level for each of the given output keys.
+
+  Used by the engine to label an ingress node's outputs (e.g. web-fetch results
+  as `:untrusted`). A `nil` level is a no-op (most actions declare no provenance).
+  """
+  @spec record_output_taint(t(), [String.t()], taint_level() | nil) :: t()
+  def record_output_taint(%__MODULE__{} = ctx, _keys, nil), do: ctx
+
+  def record_output_taint(%__MODULE__{taint: taint} = ctx, keys, level) when is_list(keys) do
+    new_taint = Enum.reduce(keys, taint, fn key, acc -> Map.put(acc, key, level) end)
+    %{ctx | taint: new_taint}
+  end
+
+  @doc """
+  Worst (most-tainted) provenance level among the given keys.
+
+  Unlabeled keys contribute nothing; returns `nil` if none of the keys carry a
+  provenance label. Ordering mirrors `Arbor.Signals.Taint`:
+  `:hostile` > `:untrusted` > `:derived` > `:trusted`.
+  """
+  @spec worst_taint(t(), [String.t()]) :: taint_level() | nil
+  def worst_taint(%__MODULE__{taint: taint}, keys) when is_list(keys) do
+    keys
+    |> Enum.map(&Map.get(taint, &1))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.reduce(nil, fn level, acc ->
+      cond do
+        acc == nil -> level
+        taint_rank(level) > taint_rank(acc) -> level
+        true -> acc
+      end
+    end)
+  end
+
+  defp taint_rank(:hostile), do: 3
+  defp taint_rank(:untrusted), do: 2
+  defp taint_rank(:derived), do: 1
+  defp taint_rank(:trusted), do: 0
+  defp taint_rank(_), do: 2
 
   @doc "Set a context value without tracking lineage."
   @spec set(t(), String.t(), term()) :: t()

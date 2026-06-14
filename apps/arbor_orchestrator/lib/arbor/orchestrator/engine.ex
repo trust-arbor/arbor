@@ -395,6 +395,10 @@ defmodule Arbor.Orchestrator.Engine do
       context =
         context
         |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
+        |> Context.record_output_taint(
+          Map.keys(outcome.context_updates || %{}),
+          outcome.output_taint
+        )
         |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
         |> Context.set("__completed_nodes__", completed, node.id, step_now)
 
@@ -555,6 +559,10 @@ defmodule Arbor.Orchestrator.Engine do
       context =
         context
         |> Context.apply_updates(outcome.context_updates || %{}, node.id, step_now)
+        |> Context.record_output_taint(
+          Map.keys(outcome.context_updates || %{}),
+          outcome.output_taint
+        )
         |> Context.set("outcome", to_string(outcome.status), node.id, step_now)
         |> Context.set("__completed_nodes__", completed, node.id, step_now)
         |> maybe_set_preferred_label(outcome, node.id, step_now)
