@@ -100,5 +100,31 @@ defmodule Arbor.Actions.TaintProvenanceTest do
     test "no taint context is backward-compatible (allows execution)" do
       assert :ok = TaintEnforcement.check(Shell.Execute, %{command: "ls"}, %{})
     end
+
+    test "a sanitized :derived value passes the requires: gate (Phase 4 payoff)" do
+      # This is what the SanitizeHandler produces: derived level + the
+      # command_injection sanitization bit. The level gate passes (derived ok for
+      # control) AND the sanitization gate passes (bit present) -> allowed, where
+      # the same value without the bit fails closed.
+      {:ok, bit} = Arbor.Contracts.Security.Taint.sanitization_bit(:command_injection)
+      sanitized = %Arbor.Contracts.Security.Taint{level: :derived, sanitizations: bit}
+
+      assert :ok =
+               TaintEnforcement.check(
+                 Shell.Execute,
+                 %{command: "ls"},
+                 %{taint: sanitized, taint_policy: :permissive}
+               )
+
+      # Same level, but no sanitization bit -> still blocked.
+      unsanitized = %Arbor.Contracts.Security.Taint{level: :derived, sanitizations: 0}
+
+      assert {:error, {:missing_sanitization, :command, [:command_injection]}} =
+               TaintEnforcement.check(
+                 Shell.Execute,
+                 %{command: "ls"},
+                 %{taint: unsanitized, taint_policy: :permissive}
+               )
+    end
   end
 end
