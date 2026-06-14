@@ -27,6 +27,41 @@ defmodule Arbor.Actions.TaintProvenanceTest do
     test "actions without provenance return nil" do
       assert Taint.output_taint_for(Shell.Execute) == nil
     end
+
+    test "polled external messages are untrusted" do
+      assert Taint.output_taint_for(Arbor.Actions.Comms.PollMessages) == :untrusted
+    end
+  end
+
+  describe "Phase 1 — path-based provenance (file reads)" do
+    test "path_provenance flags foreign/shared/sensitive locations as untrusted" do
+      assert Taint.path_provenance("/tmp/payload.txt") == :untrusted
+      assert Taint.path_provenance("/var/data/x") == :untrusted
+      assert Taint.path_provenance("/home/u/Downloads/sketchy.md") == :untrusted
+      assert Taint.path_provenance("/app/.env") == :untrusted
+      assert Taint.path_provenance("/app/config/credentials.json") == :untrusted
+    end
+
+    test "path_provenance asserts no provenance for ordinary workspace paths" do
+      assert Taint.path_provenance("lib/arbor/foo.ex") == nil
+      assert Taint.path_provenance("/work/project/README.md") == nil
+      assert Taint.path_provenance(nil) == nil
+    end
+
+    test "File.Read/Search resolve provenance from their path param (atom or string keys)" do
+      for mod <- [Arbor.Actions.File.Read, Arbor.Actions.File.Search] do
+        assert Taint.output_taint_for(mod, %{path: "/tmp/x"}) == :untrusted
+        assert Taint.output_taint_for(mod, %{"path" => "/tmp/x"}) == :untrusted
+        assert Taint.output_taint_for(mod, %{path: "lib/x.ex"}) == nil
+      end
+    end
+
+    test "output_taint_for/2 prefers the params-aware callback, falls back to static" do
+      # Web declares a static output_taint/0 — params are ignored.
+      assert Taint.output_taint_for(Web.Browse, %{path: "/tmp/x"}) == :untrusted
+      # An action with neither callback is nil.
+      assert Taint.output_taint_for(Shell.Execute, %{path: "/tmp/x"}) == nil
+    end
   end
 
   describe "Phase 2 sink — untrusted is blocked at a control param" do

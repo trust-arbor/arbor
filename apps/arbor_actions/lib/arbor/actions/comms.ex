@@ -162,6 +162,12 @@ defmodule Arbor.Actions.Comms do
       }
     end
 
+    # Provenance (taint-tracking-rebuild Phase 1): polled messages come from
+    # external senders (Slack/email/etc.) — untrusted content crossing the
+    # trust boundary, a prime prompt-injection vector.
+    @doc false
+    def output_taint, do: :untrusted
+
     @impl true
     def run(params, _context) do
       Actions.emit_started(__MODULE__, params)

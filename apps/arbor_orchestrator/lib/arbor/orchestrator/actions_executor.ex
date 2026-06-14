@@ -370,8 +370,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   `:untrusted`). Returns the declared level or `nil` when the action declares
   no provenance or the actions library is unavailable (standalone orchestrator).
   """
-  @spec output_taint(String.t()) :: atom() | nil
-  def output_taint(name) do
+  @spec output_taint(String.t(), map()) :: atom() | nil
+  def output_taint(name, params \\ %{}) do
     normalized = normalize_name(name)
 
     module =
@@ -382,8 +382,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     taint_mod = Module.concat([:Arbor, :Actions, :Taint])
 
     if (module && Code.ensure_loaded?(taint_mod)) and
-         function_exported?(taint_mod, :output_taint_for, 1) do
-      apply(taint_mod, :output_taint_for, [module])
+         function_exported?(taint_mod, :output_taint_for, 2) do
+      apply(taint_mod, :output_taint_for, [module, params])
     else
       nil
     end
