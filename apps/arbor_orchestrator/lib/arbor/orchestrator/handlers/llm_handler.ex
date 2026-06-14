@@ -32,6 +32,18 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   @impl true
   def execute(node, context, graph, opts) do
+    # Provenance (taint-tracking-rebuild Phase 1): LLM output is :derived — it
+    # may have incorporated untrusted content the model read, so it can never be
+    # :trusted. The engine records this on the node's output keys. (Sanitization
+    # bits are also wiped at :derived per council decision #6; that struct-level
+    # nuance lands with Phase 4 — here we record the atom level.)
+    case do_execute(node, context, graph, opts) do
+      %Outcome{output_taint: nil} = outcome -> %{outcome | output_taint: :derived}
+      other -> other
+    end
+  end
+
+  defp do_execute(node, context, graph, opts) do
     goal = Map.get(graph.attrs, "goal", "")
 
     prompt =

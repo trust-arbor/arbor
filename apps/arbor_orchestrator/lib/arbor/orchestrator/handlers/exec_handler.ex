@@ -54,7 +54,8 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
       raise "exec with target=action requires non-empty 'action' attribute"
     end
 
-    executor = Arbor.Orchestrator.ActionsExecutor
+    # Injectable for tests (defaults to the real executor in production).
+    executor = Keyword.get(opts, :actions_executor, Arbor.Orchestrator.ActionsExecutor)
 
     if Code.ensure_loaded?(executor) do
       agent_id =
@@ -66,12 +67,20 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
 
       output_prefix = Map.get(node.attrs, "output_prefix")
 
+      # Taint bridge (taint-tracking-rebuild Phase 2): the worst provenance taint
+      # among the context values interpolated into this action's params rides
+      # along to TaintEnforcement.check via ActionsExecutor. Static attr args
+      # (arg.*/param.* from the DOT graph) are author-written and carry no taint;
+      # only context_keys values can be runtime-tainted (e.g. a web-fetch result).
+      input_taint = Context.worst_taint(context, consumed_context_keys(node.attrs))
+
       try do
         signer = Keyword.get(opts, :signer)
 
         case executor.execute(action_name, action_args, workdir,
                agent_id: agent_id,
-               signer: signer
+               signer: signer,
+               taint: input_taint
              ) do
           {:ok, result} ->
             %Outcome{
@@ -79,7 +88,11 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
               notes: "Action #{action_name} executed",
               context_updates:
                 flatten_context_updates(node.id, result)
-                |> maybe_add_prefixed_keys(node.id, result, output_prefix)
+                |> maybe_add_prefixed_keys(node.id, result, output_prefix),
+              # Provenance (Phase 1): if this action is an ingress (e.g. web
+              # fetch -> :untrusted), label its output keys so downstream nodes
+              # that consume them are gated at control params.
+              output_taint: action_output_taint(executor, action_name)
             }
 
           {:error, reason} ->
@@ -182,6 +195,33 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
       end
 
     Map.merge(attr_args, context_args)
+  end
+
+  # The context keys whose values are interpolated into this action's params.
+  # These are the only runtime-tainted inputs (static arg.*/param.* attrs are
+  # author-written and trusted). Mirrors the context_keys parsing in
+  # build_action_args/3.
+  defp consumed_context_keys(attrs) do
+    case Map.get(attrs, "context_keys") do
+      nil ->
+        []
+
+      keys_csv ->
+        keys_csv
+        |> String.split(",")
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+    end
+  end
+
+  # Provenance taint this action assigns to its own output, via the executor's
+  # output_taint/1 resolver (nil for non-ingress actions or standalone mode).
+  defp action_output_taint(executor, action_name) do
+    if function_exported?(executor, :output_taint, 1) do
+      executor.output_taint(action_name)
+    else
+      nil
+    end
   end
 
   defp parse_attr_args(node_id, attrs) do

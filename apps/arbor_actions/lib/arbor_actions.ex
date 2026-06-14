@@ -189,6 +189,23 @@ defmodule Arbor.Actions do
           {:error, {:taint_blocked, param, level, role}} = taint_error ->
             TaintEvents.emit_taint_blocked(action_module, param, level, role, clean_context)
             taint_error
+
+          # A control param with a `requires:` sanitization but no sanitization
+          # evidence (bare-atom taint) fails closed. Pre-taint-bridge this was
+          # unreachable (nothing fed taint); the bridge makes it reachable (e.g.
+          # :derived LLM output -> a requires: control param), so handle it as a
+          # clean block rather than crashing on an unmatched case clause. The
+          # sanitizer-node path that lets sanitized data through is Phase 4.
+          {:error, {:missing_sanitization, param, _missing}} = sanit_error ->
+            TaintEvents.emit_taint_blocked(
+              action_module,
+              param,
+              :unsanitized,
+              :control,
+              clean_context
+            )
+
+            sanit_error
         end
 
       {:ok, :pending_approval, proposal_id} ->
