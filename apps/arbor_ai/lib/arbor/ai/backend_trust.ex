@@ -173,6 +173,54 @@ defmodule Arbor.AI.BackendTrust do
   @spec trust_order() :: [trust_level()]
   def trust_order, do: @trust_order
 
+  @doc """
+  Resolve the egress tier for an LLM backend call (2026-06-14 egress decision).
+
+  Maps a provider (and, when known, its concrete endpoint) to an
+  `Arbor.Contracts.Security.Classification.egress_tier/0`. This is the
+  LLM-specific destination resolver the egress gate consumes — the counterpart
+  to `Arbor.Common.EgressClassifier` for host-addressed egress.
+
+  When a `base_url` is supplied, network locality of the *actual endpoint* wins:
+  a local provider pointed at a cloud URL is external; a cloud provider proxied
+  through localhost is on-host. With no endpoint, fall back to provider trust:
+  `:highest` backends (LM Studio, Ollama) default to `:on_host`; everything else
+  is `:external_provider` (an LLM call always goes to a service, never an
+  arbitrary peer — so it is never `:external_peer`).
+
+  ## Examples
+
+      iex> BackendTrust.egress_tier_for(:lmstudio)
+      :on_host
+
+      iex> BackendTrust.egress_tier_for(:anthropic)
+      :external_provider
+
+      iex> BackendTrust.egress_tier_for(:ollama, "http://10.42.42.6:11434")
+      :on_premises
+
+      iex> BackendTrust.egress_tier_for(:ollama, "https://api.cloud.example/v1")
+      :external_provider
+  """
+  @spec egress_tier_for(atom(), String.t() | nil) ::
+          Arbor.Contracts.Security.Classification.egress_tier()
+  def egress_tier_for(provider, base_url \\ nil)
+
+  def egress_tier_for(provider, nil) when is_atom(provider) do
+    case level(provider) do
+      :highest -> :on_host
+      _ -> :external_provider
+    end
+  end
+
+  def egress_tier_for(_provider, base_url) when is_binary(base_url) do
+    case Arbor.Common.EgressClassifier.locality(base_url) do
+      :on_host -> :on_host
+      :on_premises -> :on_premises
+      :public -> :external_provider
+    end
+  end
+
   # ===========================================================================
   # Data-Visibility Capabilities (Sensitivity Routing)
   # ===========================================================================

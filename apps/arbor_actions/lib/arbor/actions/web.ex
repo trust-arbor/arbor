@@ -149,6 +149,19 @@ defmodule Arbor.Actions.Web do
     @doc false
     def output_taint, do: :untrusted
 
+    # Egress classification (2026-06-14 decision): a fetch is network egress to
+    # whatever host the URL names. An arbitrary public host is an uncontrolled
+    # peer (:external_peer); loopback/LAN resolve to on-host/on-premises.
+    def effect_class, do: :network_egress
+
+    def egress_tier(params, _context) do
+      case Arbor.Common.EgressClassifier.locality(params[:url]) do
+        :on_host -> :on_host
+        :on_premises -> :on_premises
+        :public -> :external_peer
+      end
+    end
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{url: url} = params, _context) do
@@ -289,6 +302,11 @@ defmodule Arbor.Actions.Web do
     def taint_roles do
       %{query: :control, max_results: :data, country: :data, search_lang: :data, freshness: :data}
     end
+
+    # Egress classification (2026-06-14 decision): a search hits a fixed external
+    # search API (a known provider). No destination param to resolve, so the
+    # Egress reader's fail-closed default (:external_provider) is correct.
+    def effect_class, do: :network_egress
 
     # Provenance (taint-tracking-rebuild Phase 1): external search results are
     # untrusted content from outside the trust boundary.
@@ -432,6 +450,10 @@ defmodule Arbor.Actions.Web do
       }
     end
 
+    # Egress classification (2026-06-14 decision): Exa is a fixed external search
+    # API — :external_provider via the reader's fail-closed default.
+    def effect_class, do: :network_egress
+
     # Provenance (taint-tracking-rebuild Phase 1): external search results are
     # untrusted content from outside the trust boundary.
     @doc false
@@ -559,6 +581,10 @@ defmodule Arbor.Actions.Web do
       %{query: :control, location: :data, language: :data}
     end
 
+    # Egress classification (2026-06-14 decision): Tinyfish is a fixed external
+    # search API — :external_provider via the reader's fail-closed default.
+    def effect_class, do: :network_egress
+
     # Provenance (taint-tracking-rebuild Phase 1): external search results are
     # untrusted content from outside the trust boundary.
     @doc false
@@ -660,6 +686,18 @@ defmodule Arbor.Actions.Web do
     # untrusted content from outside the trust boundary.
     @doc false
     def output_taint, do: :untrusted
+
+    # Egress classification (2026-06-14 decision): a snapshot fetches whatever
+    # host the URL names — same resolution as Browse.
+    def effect_class, do: :network_egress
+
+    def egress_tier(params, _context) do
+      case Arbor.Common.EgressClassifier.locality(params[:url]) do
+        :on_host -> :on_host
+        :on_premises -> :on_premises
+        :public -> :external_peer
+      end
+    end
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
