@@ -255,7 +255,13 @@ defmodule Arbor.Orchestrator.Engine do
         pipeline_started_at: checkpoint.pipeline_started_at
       )
 
-    context = %{context | lineage: checkpoint.context_lineage || %{}}
+    context = %{
+      context
+      | lineage: checkpoint.context_lineage || %{},
+        # Restore provenance taint so resume isn't fail-open (a resumed pipeline
+        # must remember which keys were untrusted). Taint-tracking-rebuild Phase 2.
+        taint: checkpoint.context_taint || %{}
+    }
 
     completed = checkpoint.completed_nodes || []
     retries = checkpoint.node_retries || %{}
