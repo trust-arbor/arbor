@@ -302,10 +302,24 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
         "arbor_orchestrator_matrix_resume_#{System.unique_integer([:positive])}"
       )
 
-    assert {:error, :max_steps_exceeded} =
-             Arbor.Orchestrator.run(dot, logs_root: logs_root, max_steps: 2)
+    # Resume requires an identity (checkpoint HMAC derived from
+    # :identity_private_key); legacy unsigned-checkpoint fail-open is closed.
+    key = "test-resume-identity-key-32-bytes!!"
 
-    assert {:ok, resumed} = Arbor.Orchestrator.run(dot, logs_root: logs_root, resume: true)
+    assert {:error, :max_steps_exceeded} =
+             Arbor.Orchestrator.run(dot,
+               logs_root: logs_root,
+               max_steps: 2,
+               identity_private_key: key
+             )
+
+    assert {:ok, resumed} =
+             Arbor.Orchestrator.run(dot,
+               logs_root: logs_root,
+               resume: true,
+               identity_private_key: key
+             )
+
     assert List.last(resumed.completed_nodes) == "exit"
   end
 

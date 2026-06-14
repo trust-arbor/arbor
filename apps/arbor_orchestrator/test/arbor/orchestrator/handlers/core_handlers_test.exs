@@ -292,7 +292,11 @@ defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
           "sandbox" => "none"
         })
 
-      outcome = ExecHandler.execute(node, make_context(), make_graph(), [])
+      # This test exercises exec→shell DELEGATION, not the shell capability gate
+      # (which correctly denies the default `system` principal — see the phase-0
+      # shell auth gate). Inject an approving authorizer so delegation proceeds.
+      opts = [shell_authorizer: fn _agent, _cmd, _opts -> {:ok, :authorized} end]
+      outcome = ExecHandler.execute(node, make_context(), make_graph(), opts)
       assert outcome.status == :success
     end
 

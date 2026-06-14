@@ -1,4 +1,7 @@
-ExUnit.start(exclude: [:llm, :llm_local])
+# :integration_lm_studio tests require a running LM Studio with a model loaded
+# (they make real LLM calls); excluded by default like :llm/:llm_local. Run them
+# explicitly with `--include integration_lm_studio` when LM Studio is up.
+ExUnit.start(exclude: [:llm, :llm_local, :integration_lm_studio])
 
 # Start CapabilityStore and insert a wildcard capability for "agent_system".
 # This is the default principal used by CapabilityCheck middleware when no

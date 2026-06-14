@@ -115,10 +115,24 @@ defmodule Arbor.Orchestrator.Conformance117Test do
         "arbor_orchestrator_11_7_resume_#{System.unique_integer([:positive])}"
       )
 
-    assert {:error, :max_steps_exceeded} =
-             Arbor.Orchestrator.run(dot, logs_root: logs_root, max_steps: 2)
+    # Resume requires an identity (engine derives the checkpoint HMAC from
+    # :identity_private_key); legacy unsigned-checkpoint fail-open is closed.
+    key = "test-resume-identity-key-32-bytes!!"
 
-    assert {:ok, resumed} = Arbor.Orchestrator.run(dot, logs_root: logs_root, resume: true)
+    assert {:error, :max_steps_exceeded} =
+             Arbor.Orchestrator.run(dot,
+               logs_root: logs_root,
+               max_steps: 2,
+               identity_private_key: key
+             )
+
+    assert {:ok, resumed} =
+             Arbor.Orchestrator.run(dot,
+               logs_root: logs_root,
+               resume: true,
+               identity_private_key: key
+             )
+
     assert "b" in resumed.completed_nodes
     assert "exit" in resumed.completed_nodes
   end

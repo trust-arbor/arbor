@@ -20,7 +20,11 @@ defmodule Arbor.Orchestrator.Engine.ContextExplosionAdversarialTest do
   All cases assert bounded wall-clock, no exits, deterministic shape.
   """
 
-  use ExUnit.Case, async: true
+  # async: false — these tests use ExUnit.CaptureLog and assert on the ABSENCE of
+  # "[Context]" budget warnings. Run async, a concurrent test's budget warning
+  # leaks into this process's captured log and flakily fails the refute. Pure
+  # functions, so serializing them is cheap.
+  use ExUnit.Case, async: false
   @moduletag :fast
 
   alias Arbor.Orchestrator.Engine.Context
