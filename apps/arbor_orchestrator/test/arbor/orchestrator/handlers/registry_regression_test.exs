@@ -115,9 +115,10 @@ defmodule Arbor.Orchestrator.Handlers.RegistryRegressionTest do
   describe "new core handlers" do
     test "core handler types are registered" do
       core = Registry.core_handlers()
-      # 15 original + "sanitize" (taint-tracking-rebuild Phase 4).
-      assert map_size(core) == 16
+      # 15 original + "sanitize" + "extract" (taint-tracking-rebuild Phase 4).
+      assert map_size(core) == 17
       assert core["sanitize"] == Arbor.Orchestrator.Handlers.SanitizeHandler
+      assert core["extract"] == Arbor.Orchestrator.Handlers.ExtractHandler
     end
 
     test "core types resolve to new handler modules" do

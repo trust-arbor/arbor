@@ -23,6 +23,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     ComputeHandler,
     ExecHandler,
     ExitHandler,
+    ExtractHandler,
     FanInHandler,
     GateHandler,
     LlmHandler,
@@ -67,7 +68,10 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "gate" => GateHandler,
     # Phase 4 (taint-tracking-rebuild): runs vetted sanitizers and records the
     # resulting sanitization bits on output provenance.
-    "sanitize" => SanitizeHandler
+    "sanitize" => SanitizeHandler,
+    # Phase 4: quarantined extraction via schema validation — passing a strict
+    # schema earns an :untrusted/:hostile -> :derived reduction.
+    "extract" => ExtractHandler
   }
 
   @custom_handlers_key {__MODULE__, :custom_handlers}
