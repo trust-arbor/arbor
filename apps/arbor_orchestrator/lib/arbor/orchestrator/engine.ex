@@ -36,6 +36,7 @@ defmodule Arbor.Orchestrator.Engine do
           final_outcome: Outcome.t() | nil,
           completed_nodes: [String.t()],
           context: map(),
+          taint: %{String.t() => atom()},
           node_durations: %{String.t() => non_neg_integer()}
         }
 
@@ -152,6 +153,7 @@ defmodule Arbor.Orchestrator.Engine do
            final_outcome: final_outcome,
            completed_nodes: completed,
            context: Context.snapshot(context),
+           taint: Context.taint_map(context),
            node_durations: %{}
          }}
 
@@ -232,7 +234,10 @@ defmodule Arbor.Orchestrator.Engine do
           }
           |> then(fn ctx -> if workdir, do: Map.put(ctx, "workdir", workdir), else: ctx end)
           |> Map.merge(initial_values),
-          pipeline_started_at: pipeline_dt
+          pipeline_started_at: pipeline_dt,
+          # Inherit provenance taint from a parent pipeline (subgraph/parallel
+          # boundary). Defaults to empty for a top-level run.
+          taint: Keyword.get(opts, :initial_taint, %{})
         )
 
       with {:ok, start_id} <- find_start_node(graph) do
@@ -668,6 +673,7 @@ defmodule Arbor.Orchestrator.Engine do
        final_outcome: outcome,
        completed_nodes: ordered,
        context: Context.snapshot(state.context),
+       taint: Context.taint_map(state.context),
        node_durations: state.tracking.node_durations
      }}
   end
@@ -892,32 +898,44 @@ defmodule Arbor.Orchestrator.Engine do
   end
 
   # The context keys a node declares it reads. Mirrors the input-key attrs the
-  # taint middleware and ExecHandler use. `context_keys` is a comma-separated
-  # list; the rest are single keys. `last_response` is deliberately NOT treated
-  # as an implicit input here — propagating it to every node would recreate the
-  # "everything becomes tainted" cascade Phase 3 exists to avoid.
+  # taint middleware and ExecHandler use. `context_keys`/`pass_context` are
+  # comma-separated lists; the rest are single keys.
+  #
+  # When a node declares NO explicit input key, we fall back to `last_response`
+  # — many handlers (transform/read/validate/map/compose) default
+  # `source_key`/`result_key` to "last_response", so it IS their implicit input.
+  # We do NOT add `last_response` unconditionally: a node that declares explicit
+  # inputs is consuming those, and treating `last_response` as a universal input
+  # would recreate the "everything becomes tainted" cascade.
+  #
+  # Subgraph/parallel boundary inheritance is handled by those handlers setting
+  # `output_taint` explicitly (from the child/branch result taint), so this
+  # generic extraction doesn't special-case pass_context/pass_all_context.
   defp node_input_keys(%{attrs: attrs}) when is_map(attrs) do
     single =
       ["source_key", "input_key", "graph_source_key", "prompt_context_key"]
       |> Enum.map(&Map.get(attrs, &1))
       |> Enum.reject(&is_nil/1)
 
-    csv =
-      case Map.get(attrs, "context_keys") do
-        nil ->
-          []
+    csv = split_csv_attr(attrs, "context_keys")
 
-        list when is_binary(list) ->
-          list |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
-
-        _ ->
-          []
-      end
-
-    Enum.uniq(single ++ csv)
+    case Enum.uniq(single ++ csv) do
+      [] -> ["last_response"]
+      explicit -> explicit
+    end
   end
 
   defp node_input_keys(_), do: []
+
+  defp split_csv_attr(attrs, key) do
+    case Map.get(attrs, key) do
+      list when is_binary(list) ->
+        list |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+      _ ->
+        []
+    end
+  end
 
   defp maybe_set_fidelity_thread(context, %{thread_id: nil}, _node_id, _now), do: context
 

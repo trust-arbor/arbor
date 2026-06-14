@@ -49,7 +49,10 @@ defmodule Arbor.Orchestrator.Engine.Context do
 
   def new(values, opts) when is_map(values) do
     pipeline_started_at = if is_list(opts), do: Keyword.get(opts, :pipeline_started_at), else: nil
-    %__MODULE__{values: values, pipeline_started_at: pipeline_started_at}
+    # :taint lets a child/branch/resumed context inherit provenance from its
+    # parent (taint-tracking-rebuild Phase 3 — boundary inheritance).
+    taint = if is_list(opts), do: Keyword.get(opts, :taint, %{}), else: %{}
+    %__MODULE__{values: values, pipeline_started_at: pipeline_started_at, taint: taint}
   end
 
   @spec get(t(), String.t(), term()) :: term()
@@ -99,6 +102,17 @@ defmodule Arbor.Orchestrator.Engine.Context do
   def worst_taint(%__MODULE__{taint: taint}, keys) when is_list(keys) do
     keys
     |> Enum.map(&Map.get(taint, &1))
+    |> worst_level()
+  end
+
+  @doc """
+  Worst (most-tainted) level among a list of levels; `nil` entries are ignored.
+  Returns `nil` if the list has no levels. Used at subgraph/parallel boundaries
+  to collapse a child/branch taint map into a single boundary level.
+  """
+  @spec worst_level([taint_level() | nil]) :: taint_level() | nil
+  def worst_level(levels) when is_list(levels) do
+    levels
     |> Enum.reject(&is_nil/1)
     |> Enum.reduce(nil, fn level, acc ->
       cond do

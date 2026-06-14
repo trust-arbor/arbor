@@ -116,4 +116,26 @@ defmodule Arbor.Orchestrator.Engine.ContextTaintTest do
       assert Context.taint_label(ctx, "out") == nil
     end
   end
+
+  describe "new/2 :taint option (boundary inheritance)" do
+    test "a child/branch context can inherit provenance from its parent" do
+      ctx = Context.new(%{"k" => "v"}, taint: %{"k" => :untrusted})
+      assert Context.taint_label(ctx, "k") == :untrusted
+    end
+
+    test "defaults to empty taint" do
+      ctx = Context.new(%{"k" => "v"})
+      assert Context.taint_map(ctx) == %{}
+    end
+  end
+
+  describe "worst_level/1 (collapse a child/branch taint map to one boundary level)" do
+    test "returns the most-tainted level, skipping nils" do
+      assert Context.worst_level([:trusted, nil, :untrusted, :derived]) == :untrusted
+      assert Context.worst_level([:derived, :trusted]) == :derived
+      assert Context.worst_level([nil, nil]) == nil
+      assert Context.worst_level([]) == nil
+      assert Context.worst_level([:untrusted, :hostile]) == :hostile
+    end
+  end
 end

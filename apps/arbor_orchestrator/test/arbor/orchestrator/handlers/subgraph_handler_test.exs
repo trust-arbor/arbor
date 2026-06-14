@@ -116,6 +116,47 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandlerTest do
 
   # --- SubgraphHandler: graph.invoke ---
 
+  describe "taint inheritance across the subgraph boundary (taint-rebuild Phase 3)" do
+    test "subgraph outputs inherit the provenance of passed-in keys" do
+      :ok = GraphRegistry.register("taint-child", @minimal_child)
+
+      # Parent has an :untrusted key that it passes into the child. Without
+      # boundary inheritance the subgraph node's outputs would be unlabeled
+      # (fail-open) and a downstream parent control sink would not be gated.
+      parent_ctx =
+        Context.new(%{"secret" => "x"})
+        |> Context.record_output_taint(["secret"], :untrusted)
+
+      outcome =
+        SubgraphHandler.execute(
+          node("graph.invoke", %{"graph_name" => "taint-child", "pass_context" => "secret"}),
+          parent_ctx,
+          @graph,
+          []
+        )
+
+      assert outcome.status == :success
+      assert outcome.output_taint == :untrusted
+    end
+
+    test "no passed-in taint leaves the subgraph outputs unlabeled" do
+      :ok = GraphRegistry.register("taint-child2", @minimal_child)
+
+      parent_ctx = Context.new(%{"plain" => "x"})
+
+      outcome =
+        SubgraphHandler.execute(
+          node("graph.invoke", %{"graph_name" => "taint-child2", "pass_context" => "plain"}),
+          parent_ctx,
+          @graph,
+          []
+        )
+
+      assert outcome.status == :success
+      assert outcome.output_taint == nil
+    end
+  end
+
   describe "graph.invoke" do
     test "executes named graph from registry" do
       :ok = GraphRegistry.register("invoke-test", @minimal_child)

@@ -78,6 +78,11 @@ defmodule Arbor.Orchestrator.Handlers.ParallelHandler do
           join_status(join_policy, node.attrs, success_count, fail_count, total)
         end
 
+      # Branches read the full parent snapshot, so the aggregated results carry
+      # the worst provenance present in the parent context (conservative — the
+      # fan-in output can't be cleaner than its most-tainted input).
+      out_taint = Context.worst_level(Map.values(Context.taint_map(context)))
+
       %Outcome{
         status: status,
         suggested_next_ids: maybe_list(join_target),
@@ -87,7 +92,8 @@ defmodule Arbor.Orchestrator.Handlers.ParallelHandler do
           "parallel.fail_count" => fail_count,
           "parallel.total_count" => total
         },
-        notes: "Parallel branches executed: #{total}"
+        notes: "Parallel branches executed: #{total}",
+        output_taint: out_taint
       }
     end
   end
@@ -96,7 +102,10 @@ defmodule Arbor.Orchestrator.Handlers.ParallelHandler do
   def idempotency, do: :side_effecting
 
   defp execute_branch(branch_node_id, join_target, context, graph, opts, branch_executor) do
-    branch_context = Context.new(Context.snapshot(context))
+    # Branches see the full parent snapshot — carry its provenance taint too, so
+    # a branch's internal control sinks are gated on inherited taint instead of
+    # silently treating it as untainted (taint-rebuild Phase 3).
+    branch_context = Context.new(Context.snapshot(context), taint: Context.taint_map(context))
 
     cond do
       is_function(branch_executor, 5) ->
