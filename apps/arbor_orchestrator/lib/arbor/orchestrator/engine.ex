@@ -36,7 +36,7 @@ defmodule Arbor.Orchestrator.Engine do
           final_outcome: Outcome.t() | nil,
           completed_nodes: [String.t()],
           context: map(),
-          taint: %{String.t() => atom()},
+          taint: %{String.t() => Arbor.Contracts.Security.Taint.t()},
           node_durations: %{String.t() => non_neg_integer()}
         }
 

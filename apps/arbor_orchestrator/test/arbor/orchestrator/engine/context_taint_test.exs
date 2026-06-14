@@ -1,26 +1,36 @@
 defmodule Arbor.Orchestrator.Engine.ContextTaintTest do
   @moduledoc """
   Unit tests for provenance taint storage on the engine Context
-  (taint-tracking-rebuild Phase 1 mechanism).
+  (taint-tracking-rebuild). Provenance is stored as %Taint{} structs; these
+  tests assert via `taint_level/2` (level) and the struct's `.level`/`.sanitizations`.
   """
   use ExUnit.Case, async: true
 
+  alias Arbor.Contracts.Security.Taint
   alias Arbor.Orchestrator.Engine.Context
 
   @moduletag :fast
 
-  describe "record_output_taint/3 and taint_label/2" do
-    test "records a provenance level on each output key" do
-      ctx =
-        %Context{values: %{}}
-        |> Context.record_output_taint(["a", "b"], :untrusted)
+  describe "record_output_taint/3, taint_label/2, taint_level/2" do
+    test "records provenance on each output key (wrapping a bare level into a struct)" do
+      ctx = Context.record_output_taint(%Context{values: %{}}, ["a", "b"], :untrusted)
 
-      assert Context.taint_label(ctx, "a") == :untrusted
-      assert Context.taint_label(ctx, "b") == :untrusted
+      assert %Taint{level: :untrusted} = Context.taint_label(ctx, "a")
+      assert Context.taint_level(ctx, "a") == :untrusted
+      assert Context.taint_level(ctx, "b") == :untrusted
       assert Context.taint_label(ctx, "missing") == nil
+      assert Context.taint_level(ctx, "missing") == nil
     end
 
-    test "a nil level is a no-op (most actions declare no provenance)" do
+    test "stores a %Taint{} struct as-is (sanitization bits preserved)" do
+      sanitized = %Taint{level: :derived, sanitizations: 4}
+      ctx = Context.record_output_taint(%Context{values: %{}}, ["x"], sanitized)
+
+      assert Context.taint_label(ctx, "x") == sanitized
+      assert Context.taint_label(ctx, "x").sanitizations == 4
+    end
+
+    test "a nil provenance is a no-op (most actions declare none)" do
       ctx = Context.record_output_taint(%Context{values: %{}}, ["a"], nil)
       assert ctx.taint == %{}
     end
@@ -35,11 +45,11 @@ defmodule Arbor.Orchestrator.Engine.ContextTaintTest do
         # the key as ordinary output data must NOT affect the taint map.
         |> Context.apply_updates(%{"__taint__" => %{}, "secret" => "laundered"})
 
-      assert Context.taint_label(ctx, "secret") == :untrusted
+      assert Context.taint_level(ctx, "secret") == :untrusted
     end
   end
 
-  describe "worst_taint/2" do
+  describe "worst_taint/2 (combine via max level, AND sanitizations)" do
     test "returns the most-tainted level among the given keys" do
       ctx =
         %Context{values: %{}}
@@ -47,9 +57,9 @@ defmodule Arbor.Orchestrator.Engine.ContextTaintTest do
         |> Context.record_output_taint(["b"], :untrusted)
         |> Context.record_output_taint(["c"], :trusted)
 
-      assert Context.worst_taint(ctx, ["a", "b", "c"]) == :untrusted
-      assert Context.worst_taint(ctx, ["a", "c"]) == :derived
-      assert Context.worst_taint(ctx, ["c"]) == :trusted
+      assert Context.worst_taint(ctx, ["a", "b", "c"]).level == :untrusted
+      assert Context.worst_taint(ctx, ["a", "c"]).level == :derived
+      assert Context.worst_taint(ctx, ["c"]).level == :trusted
     end
 
     test "hostile outranks untrusted" do
@@ -58,26 +68,32 @@ defmodule Arbor.Orchestrator.Engine.ContextTaintTest do
         |> Context.record_output_taint(["a"], :untrusted)
         |> Context.record_output_taint(["b"], :hostile)
 
-      assert Context.worst_taint(ctx, ["a", "b"]) == :hostile
+      assert Context.worst_taint(ctx, ["a", "b"]).level == :hostile
+    end
+
+    test "sanitizations are intersected (only kept if present in ALL inputs)" do
+      ctx =
+        %Context{values: %{}}
+        |> Context.record_output_taint(["a"], %Taint{level: :derived, sanitizations: 0b110})
+        |> Context.record_output_taint(["b"], %Taint{level: :derived, sanitizations: 0b011})
+
+      combined = Context.worst_taint(ctx, ["a", "b"])
+      # Only bit 0b010 is set in both.
+      assert combined.sanitizations == 0b010
     end
 
     test "unlabeled keys contribute nothing; all-unlabeled returns nil" do
       ctx = Context.record_output_taint(%Context{values: %{}}, ["a"], :untrusted)
 
       assert Context.worst_taint(ctx, ["x", "y"]) == nil
-      # Mixed: only the labeled key counts.
-      assert Context.worst_taint(ctx, ["a", "x"]) == :untrusted
+      assert Context.worst_taint(ctx, ["a", "x"]).level == :untrusted
     end
   end
 
   describe "propagate_output_taint/4 (Phase 3 per-edge propagation)" do
     test "a declared provenance is authoritative for outputs (ingress / reduction)" do
-      # An ingress (web -> :untrusted) labels its outputs regardless of inputs.
-      ctx =
-        %Context{values: %{}}
-        |> Context.propagate_output_taint(["page"], :untrusted, [])
-
-      assert Context.taint_label(ctx, "page") == :untrusted
+      ctx = Context.propagate_output_taint(%Context{values: %{}}, ["page"], :untrusted, [])
+      assert Context.taint_level(ctx, "page") == :untrusted
 
       # A reduction point (LLM -> :derived) labels :derived even when it read
       # untrusted input — the deliberate derived asymmetry.
@@ -86,56 +102,63 @@ defmodule Arbor.Orchestrator.Engine.ContextTaintTest do
         |> Context.record_output_taint(["raw"], :untrusted)
         |> Context.propagate_output_taint(["summary"], :derived, ["raw"])
 
-      assert Context.taint_label(ctx2, "summary") == :derived
+      assert Context.taint_level(ctx2, "summary") == :derived
     end
 
-    test "undeclared transform propagates the worst input taint to its outputs (closes laundering)" do
-      # The laundering hole: a transform reads untrusted "raw" and re-emits it as
-      # "clean". Without propagation "clean" would be unlabeled and a downstream
-      # shell node would see no taint. With propagation it inherits :untrusted.
+    test "undeclared transform propagates the worst input taint (closes laundering)" do
       ctx =
         %Context{values: %{}}
         |> Context.record_output_taint(["raw"], :untrusted)
         |> Context.propagate_output_taint(["clean"], nil, ["raw"])
 
-      assert Context.taint_label(ctx, "clean") == :untrusted
+      assert Context.taint_level(ctx, "clean") == :untrusted
     end
 
     test "propagation is per-edge: outputs do not inherit taint from unread keys" do
       ctx =
         %Context{values: %{}}
         |> Context.record_output_taint(["unread_secret"], :untrusted)
-        # node declares it only read "safe_input" (untainted), not unread_secret
         |> Context.propagate_output_taint(["out"], nil, ["safe_input"])
 
-      assert Context.taint_label(ctx, "out") == nil
+      assert Context.taint_level(ctx, "out") == nil
     end
 
     test "no declaration and no tainted inputs leaves outputs unlabeled" do
       ctx = Context.propagate_output_taint(%Context{values: %{}}, ["out"], nil, ["a", "b"])
-      assert Context.taint_label(ctx, "out") == nil
+      assert Context.taint_level(ctx, "out") == nil
     end
   end
 
   describe "new/2 :taint option (boundary inheritance)" do
-    test "a child/branch context can inherit provenance from its parent" do
+    test "a child/branch context inherits provenance from its parent (atom wrapped)" do
       ctx = Context.new(%{"k" => "v"}, taint: %{"k" => :untrusted})
-      assert Context.taint_label(ctx, "k") == :untrusted
+      assert Context.taint_level(ctx, "k") == :untrusted
+    end
+
+    test "accepts pre-built %Taint{} values" do
+      ctx = Context.new(%{}, taint: %{"k" => %Taint{level: :derived, sanitizations: 4}})
+      assert Context.taint_label(ctx, "k").sanitizations == 4
     end
 
     test "defaults to empty taint" do
-      ctx = Context.new(%{"k" => "v"})
-      assert Context.taint_map(ctx) == %{}
+      assert Context.new(%{"k" => "v"}).taint == %{}
     end
   end
 
-  describe "worst_level/1 (collapse a child/branch taint map to one boundary level)" do
-    test "returns the most-tainted level, skipping nils" do
-      assert Context.worst_level([:trusted, nil, :untrusted, :derived]) == :untrusted
-      assert Context.worst_level([:derived, :trusted]) == :derived
-      assert Context.worst_level([nil, nil]) == nil
-      assert Context.worst_level([]) == nil
-      assert Context.worst_level([:untrusted, :hostile]) == :hostile
+  describe "combine/1 (collapse a list of taint structs to one)" do
+    test "max level, nils ignored, empty -> nil" do
+      assert Context.combine([]) == nil
+      assert Context.combine([nil, nil]) == nil
+
+      assert Context.combine([
+               %Taint{level: :trusted},
+               nil,
+               %Taint{level: :untrusted},
+               %Taint{level: :derived}
+             ]).level == :untrusted
+
+      assert Context.combine([%Taint{level: :untrusted}, %Taint{level: :hostile}]).level ==
+               :hostile
     end
   end
 end

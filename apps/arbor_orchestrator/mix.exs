@@ -35,6 +35,12 @@ defmodule Arbor.Orchestrator.MixProject do
       {:jason, "~> 1.4"},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.0"},
+      # Level 0 shared types (contract-first). Already used pervasively
+      # (Session.*, Security.{Taint,AuthContext,SignedRequest}, CapabilityDescriptor,
+      # ...) — declared explicitly here instead of leaning on the transitive path
+      # through arbor_signals. arbor_contracts has zero in-umbrella deps, so this
+      # introduces no cycle.
+      {:arbor_contracts, in_umbrella: true},
       {:arbor_common, in_umbrella: true},
       {:arbor_llm, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},

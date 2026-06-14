@@ -136,7 +136,7 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandlerTest do
         )
 
       assert outcome.status == :success
-      assert outcome.output_taint == :untrusted
+      assert outcome.output_taint.level == :untrusted
     end
 
     test "no passed-in taint leaves the subgraph outputs unlabeled" do

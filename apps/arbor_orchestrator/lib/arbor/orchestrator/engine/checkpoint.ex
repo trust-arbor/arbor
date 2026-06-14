@@ -312,30 +312,23 @@ defmodule Arbor.Orchestrator.Engine.Checkpoint do
     |> Map.put(:context_lineage, lineage)
   end
 
-  # Provenance taint levels are atoms; store them as strings so the JSON
-  # round-trip (and HMAC canonicalization) is deterministic.
+  # Provenance is a map of context-key -> %Taint{} struct. Persist each struct
+  # via Signals.Taint.to_persistable (string-keyed map, deterministic for JSON +
+  # HMAC). from_persistable fails closed (corrupt values -> most restrictive
+  # defaults: :hostile level, :restricted sensitivity) on the way back in.
   defp serialize_taint(taint) when is_map(taint) do
-    Map.new(taint, fn {key, level} -> {key, to_string(level)} end)
+    Map.new(taint, fn {key, struct} -> {key, Arbor.Signals.Taint.to_persistable(struct)} end)
   end
 
   defp serialize_taint(_), do: %{}
 
-  # Atomize known taint levels on the way back in; an unknown/garbage value
-  # fails closed to :untrusted (never silently trusted).
   defp deserialize_taint(taint) when is_map(taint) do
-    Map.new(taint, fn {key, level} -> {key, parse_taint_level(level)} end)
+    Map.new(taint, fn {key, persisted} ->
+      {key, Arbor.Signals.Taint.from_persistable(persisted)}
+    end)
   end
 
   defp deserialize_taint(_), do: %{}
-
-  defp parse_taint_level(level) when level in [:trusted, :derived, :untrusted, :hostile],
-    do: level
-
-  defp parse_taint_level("trusted"), do: :trusted
-  defp parse_taint_level("derived"), do: :derived
-  defp parse_taint_level("untrusted"), do: :untrusted
-  defp parse_taint_level("hostile"), do: :hostile
-  defp parse_taint_level(_), do: :untrusted
 
   defp serialize_lineage(lineage) when is_map(lineage) do
     Map.new(lineage, fn {key, entry} ->
