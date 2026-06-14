@@ -60,4 +60,30 @@ defmodule Arbor.Orchestrator.Engine.TaintBoundaryTest do
       assert result.taint["parallel.results"].level == :untrusted
     end
   end
+
+  describe "human-review reduction end-to-end (Phase 4)" do
+    test "approving a gate reduces the reviewed key's taint via :human_review" do
+      dot = """
+      digraph H {
+        start [shape=Mdiamond]
+        gate [shape=hexagon, label="Approve use of fetched data?", reviews_keys="seed", review_on_choice="approve"]
+        done [shape=Msquare]
+
+        start -> gate
+        gate -> done [label="approve"]
+      }
+      """
+
+      interviewer = fn _q, _o -> %Arbor.Orchestrator.Human.Answer{value: "approve"} end
+
+      {:ok, result} =
+        Arbor.Orchestrator.run(dot,
+          initial_taint: %{"seed" => :untrusted},
+          interviewer: interviewer
+        )
+
+      # A human approved -> the reviewed key is reduced from :untrusted to :trusted.
+      assert result.taint["seed"].level == :trusted
+    end
+  end
 end

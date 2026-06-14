@@ -65,7 +65,12 @@ defmodule Arbor.Orchestrator.Handlers.WaitHumanHandler do
             context_updates: %{
               "human.gate.selected" => selected.key,
               "human.gate.label" => selected.label
-            }
+            },
+            # Human-review taint reduction (taint-rebuild Phase 4): when this gate
+            # declares reviewed keys AND the operator picked the approval choice,
+            # the reviewed data is reduced via :human_review (a human vouched for
+            # it). Rejection / other choices do NOT reduce.
+            taint_reductions: review_reductions(node, selected)
           }
 
         {:retry, reason} ->
@@ -79,6 +84,40 @@ defmodule Arbor.Orchestrator.Handlers.WaitHumanHandler do
 
   @impl true
   def idempotency, do: :side_effecting
+
+  # Build the human-review taint reductions for an approved gate. Returns [] unless
+  # the node declares `reviews_keys` AND `review_on_choice`, and the operator's
+  # selection matches that approval choice (by accelerator key, label, or target
+  # node id). Target level defaults to :trusted; `review_target="derived"` for a
+  # weaker vouch.
+  defp review_reductions(node, selected) do
+    keys = parse_keys(Map.get(node.attrs, "reviews_keys"))
+    on_choice = Map.get(node.attrs, "review_on_choice")
+
+    if keys != [] and is_binary(on_choice) and approval_choice?(selected, on_choice) do
+      target = parse_review_target(Map.get(node.attrs, "review_target", "trusted"))
+      Enum.map(keys, &{&1, target, :human_review})
+    else
+      []
+    end
+  end
+
+  defp parse_keys(nil), do: []
+
+  defp parse_keys(csv) when is_binary(csv) do
+    csv |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+  end
+
+  defp parse_keys(_), do: []
+
+  defp approval_choice?(selected, on_choice) do
+    to_string(selected.key) == on_choice or
+      to_string(selected.label) == on_choice or
+      to_string(selected.to) == on_choice
+  end
+
+  defp parse_review_target("derived"), do: :derived
+  defp parse_review_target(_), do: :trusted
 
   defp ask_interviewer(question, opts) do
     interviewer = opts[:interviewer]
