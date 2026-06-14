@@ -29,6 +29,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     MapHandler,
     ParallelHandler,
     ReadHandler,
+    SanitizeHandler,
     StartHandler,
     TransformHandler,
     WaitHandler,
@@ -47,7 +48,7 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "octagon" => "graph.adapt"
   }
 
-  # 15 canonical core handlers — registered into HandlerRegistry at boot
+  # Canonical core handlers — registered into HandlerRegistry at boot
   @core_handlers %{
     "start" => StartHandler,
     "exit" => ExitHandler,
@@ -63,7 +64,10 @@ defmodule Arbor.Orchestrator.Handlers.Registry do
     "map" => MapHandler,
     "adapt" => AdaptHandler,
     "wait" => WaitHandler,
-    "gate" => GateHandler
+    "gate" => GateHandler,
+    # Phase 4 (taint-tracking-rebuild): runs vetted sanitizers and records the
+    # resulting sanitization bits on output provenance.
+    "sanitize" => SanitizeHandler
   }
 
   @custom_handlers_key {__MODULE__, :custom_handlers}
