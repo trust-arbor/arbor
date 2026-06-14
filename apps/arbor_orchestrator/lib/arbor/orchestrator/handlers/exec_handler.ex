@@ -90,9 +90,10 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
                 flatten_context_updates(node.id, result)
                 |> maybe_add_prefixed_keys(node.id, result, output_prefix),
               # Provenance (Phase 1): if this action is an ingress (e.g. web
-              # fetch -> :untrusted), label its output keys so downstream nodes
-              # that consume them are gated at control params.
-              output_taint: action_output_taint(executor, action_name)
+              # fetch -> :untrusted, or a foreign-path file read), label its
+              # output keys so downstream nodes that consume them are gated at
+              # control params. Params let path-based actions decide provenance.
+              output_taint: action_output_taint(executor, action_name, action_args)
             }
 
           {:error, reason} ->
@@ -216,11 +217,11 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
 
   # Provenance taint this action assigns to its own output, via the executor's
   # output_taint/1 resolver (nil for non-ingress actions or standalone mode).
-  defp action_output_taint(executor, action_name) do
-    if function_exported?(executor, :output_taint, 1) do
-      executor.output_taint(action_name)
-    else
-      nil
+  defp action_output_taint(executor, action_name, params) do
+    cond do
+      function_exported?(executor, :output_taint, 2) -> executor.output_taint(action_name, params)
+      function_exported?(executor, :output_taint, 1) -> executor.output_taint(action_name)
+      true -> nil
     end
   end
 

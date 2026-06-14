@@ -100,15 +100,59 @@ defmodule Arbor.Actions.Taint do
       nil
   """
   @spec output_taint_for(module()) :: Taint.level() | nil
-  def output_taint_for(action_module) do
+  def output_taint_for(action_module), do: output_taint_for(action_module, %{})
+
+  @doc """
+  Resolve output provenance, allowing a params-aware declaration.
+
+  Prefers `output_taint/1` (so an action like a file read can decide provenance
+  from its params — a foreign path is `:untrusted`, a workspace path is not),
+  then falls back to the static `output_taint/0`, then `nil`.
+  """
+  @spec output_taint_for(module(), map()) :: Taint.level() | nil
+  def output_taint_for(action_module, params) do
     Code.ensure_loaded(action_module)
 
-    if function_exported?(action_module, :output_taint, 0) do
-      action_module.output_taint()
+    cond do
+      function_exported?(action_module, :output_taint, 1) ->
+        action_module.output_taint(params)
+
+      function_exported?(action_module, :output_taint, 0) ->
+        action_module.output_taint()
+
+      true ->
+        nil
+    end
+  end
+
+  @doc """
+  Provenance for content read from a filesystem path (taint-rebuild Phase 1).
+
+  Foreign / shared / sensitive locations are `:untrusted`; everything else
+  returns `nil` (no provenance asserted — we never silently label a read
+  `:trusted`, which would launder it). Mirrors the orchestrator's
+  `auto_classify_by_path` heuristic.
+  """
+  @spec path_provenance(term()) :: :untrusted | nil
+  def path_provenance(path) when is_binary(path) do
+    if String.contains?(path, [
+         ".env",
+         "credentials",
+         "secret",
+         "private_key",
+         "/tmp/",
+         "/var/",
+         "/proc/",
+         "/Downloads/",
+         "/downloads/"
+       ]) do
+      :untrusted
     else
       nil
     end
   end
+
+  def path_provenance(_), do: nil
 
   @doc """
   Check if action parameters comply with taint policy.

@@ -156,6 +156,14 @@ defmodule Arbor.Actions.File do
       }
     end
 
+    # Provenance (taint-tracking-rebuild Phase 1): file content is untrusted when
+    # read from a foreign/shared/sensitive location (/tmp, downloads, secrets);
+    # workspace reads assert no provenance (nil) rather than laundering to trusted.
+    # Params may arrive with string OR atom keys (pre/post schema atomization).
+    @doc false
+    def output_taint(params),
+      do: Arbor.Actions.Taint.path_provenance(params[:path] || params["path"])
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{path: path} = params, context) do
@@ -828,6 +836,12 @@ defmodule Arbor.Actions.File do
       ]
 
     alias Arbor.Actions
+
+    # Provenance (taint-tracking-rebuild Phase 1): search matches are file
+    # content from disk — untrusted when the searched path is foreign/shared.
+    @doc false
+    def output_taint(params),
+      do: Arbor.Actions.Taint.path_provenance(params[:path] || params["path"])
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
