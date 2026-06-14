@@ -99,14 +99,11 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
             length(result.completed_nodes)
           )
 
-        # Collapse the child's per-key taint into one boundary level applied to
-        # all of this node's outputs (conservative — over-taints rather than
+        # Collapse the child's per-key taint into one boundary %Taint{} applied
+        # to all of this node's outputs (conservative — over-taints rather than
         # leaking provenance). Includes the inherited input taint as a floor.
         out_taint =
-          Context.worst_level([
-            Context.worst_level(Map.values(child_taint)),
-            Context.worst_level(Map.values(result.taint || %{}))
-          ])
+          Context.combine(Map.values(child_taint) ++ Map.values(result.taint || %{}))
 
         if child_status == :success or ignore_failure do
           %Outcome{

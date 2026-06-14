@@ -81,7 +81,7 @@ defmodule Arbor.Orchestrator.Handlers.ParallelHandler do
       # Branches read the full parent snapshot, so the aggregated results carry
       # the worst provenance present in the parent context (conservative — the
       # fan-in output can't be cleaner than its most-tainted input).
-      out_taint = Context.worst_level(Map.values(Context.taint_map(context)))
+      out_taint = Context.combine(Map.values(Context.taint_map(context)))
 
       %Outcome{
         status: status,

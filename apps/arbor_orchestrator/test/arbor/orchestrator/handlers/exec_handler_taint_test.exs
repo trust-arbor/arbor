@@ -55,7 +55,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
 
       assert_received {:stub_execute, "shell.execute", %{"command" => _}, _workdir, exec_opts}
 
-      assert Keyword.get(exec_opts, :taint) == :untrusted,
+      assert Keyword.get(exec_opts, :taint).level == :untrusted,
              "ExecHandler must thread the untrusted provenance of the interpolated " <>
                "context key into the executor so TaintEnforcement can block it"
     end
@@ -81,7 +81,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
       ExecHandler.execute(node, context, graph(), opts())
 
       assert_received {:stub_execute, _name, _args, _workdir, exec_opts}
-      assert Keyword.get(exec_opts, :taint) == :untrusted
+      assert Keyword.get(exec_opts, :taint).level == :untrusted
     end
 
     test "static attr args carry no taint (author-written, not runtime input)" do

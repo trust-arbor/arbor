@@ -10,7 +10,9 @@ defmodule Arbor.Orchestrator.Engine.Outcome do
           context_updates: map(),
           notes: String.t() | nil,
           failure_reason: String.t() | nil,
-          output_taint: atom() | nil
+          # A bare level atom (ingress actions declare a level) or a full
+          # %Arbor.Contracts.Security.Taint{} (reductions); the engine normalizes.
+          output_taint: atom() | Arbor.Contracts.Security.Taint.t() | nil
         }
 
   defstruct status: :success,

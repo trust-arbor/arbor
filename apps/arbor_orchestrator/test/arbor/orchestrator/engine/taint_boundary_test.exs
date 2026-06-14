@@ -21,7 +21,7 @@ defmodule Arbor.Orchestrator.Engine.TaintBoundaryTest do
       {:ok, result} =
         Arbor.Orchestrator.run(dot, initial_taint: %{"seed" => :untrusted})
 
-      assert result.taint["seed"] == :untrusted
+      assert result.taint["seed"].level == :untrusted
     end
   end
 
@@ -57,7 +57,7 @@ defmodule Arbor.Orchestrator.Engine.TaintBoundaryTest do
 
       # Branches read the full parent snapshot, so the fan-in output is at least
       # as tainted as the most-tainted parent key — not silently untainted.
-      assert result.taint["parallel.results"] == :untrusted
+      assert result.taint["parallel.results"].level == :untrusted
     end
   end
 end
