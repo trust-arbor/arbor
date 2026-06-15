@@ -19,11 +19,20 @@ defmodule Arbor.Actions.SigningTest do
     # Register identity so Verifier can look up the public key
     :ok = Arbor.Security.register_identity(identity)
 
-    # Grant capability for file read using canonical facade URI
+    # A read target the auth chain will actually accept. Two layers must pass:
+    # (1) capability matching — since the C8 fix (2026-06-09) a concrete cap grants
+    # NO implicit subtree, and authorize_and_execute path-synthesizes the resource
+    # to "arbor://fs/read/<path>", so we need a `/**` subtree cap whose root
+    # contains the path; (2) FileGuard — which resolves symlinks, so the path must
+    # NOT be under /tmp or /var (macOS symlinks those to /private/... → symlink
+    # escape vs the cap root). The repo cwd is symlink-free, so scope there.
+    read_dir = File.cwd!()
+    read_path = Path.join(read_dir, "arbor_signing_test_nonexistent_file")
+
     {:ok, _cap} =
       Arbor.Security.grant(
         principal: agent_id,
-        resource: "arbor://fs/read"
+        resource: "arbor://fs/read#{read_dir}/**"
       )
 
     on_exit(fn ->
@@ -37,11 +46,15 @@ defmodule Arbor.Actions.SigningTest do
       end
     end)
 
-    {:ok, identity: identity, agent_id: agent_id}
+    {:ok, identity: identity, agent_id: agent_id, read_path: read_path}
   end
 
   describe "authorize_and_execute with signed_request" do
-    test "succeeds with valid signed request", %{identity: identity, agent_id: agent_id} do
+    test "succeeds with valid signed request", %{
+      identity: identity,
+      agent_id: agent_id,
+      read_path: read_path
+    } do
       resource = "arbor://fs/read"
       {:ok, signed} = SignedRequest.sign(resource, agent_id, identity.private_key)
 
@@ -54,7 +67,7 @@ defmodule Arbor.Actions.SigningTest do
         Arbor.Actions.authorize_and_execute(
           agent_id,
           Arbor.Actions.File.Read,
-          %{path: "/tmp/arbor_test_nonexistent_file"},
+          %{path: read_path},
           context
         )
 
@@ -116,13 +129,13 @@ defmodule Arbor.Actions.SigningTest do
       assert {:error, :unauthorized} = result
     end
 
-    test "backward compatible without signed_request", %{agent_id: agent_id} do
+    test "backward compatible without signed_request", %{agent_id: agent_id, read_path: read_path} do
       # No context (default path) — should still work based on capability alone
       result =
         Arbor.Actions.authorize_and_execute(
           agent_id,
           Arbor.Actions.File.Read,
-          %{path: "/tmp/arbor_test_nonexistent_file"}
+          %{path: read_path}
         )
 
       # Should not be unauthorized (capability is granted)

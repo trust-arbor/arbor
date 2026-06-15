@@ -44,13 +44,15 @@ defmodule Arbor.Orchestrator.MixActionDotTest do
 
     logs_root = Path.join(tmp_dir, "logs")
 
-    # Grant the test principal the shell:exec:mix:test capability so
-    # authorize_and_execute lets mix_test through. URIs are per-
-    # subcommand — use `arbor://shell/exec/mix/**` for broader grants
-    # but per-test we only need the precise URI.
+    # Grant the canonical Mix.Test action URI so authorize_and_execute lets
+    # mix_test through. The Mix.{Test,Quality,Format} actions are
+    # capability-distinct operations authorized at `arbor://action/mix/<sub>`
+    # (see Arbor.Actions.canonical_uri_for) — NOT the raw `arbor://shell/exec/...`
+    # path (which is always-locked and can't be granted autonomously). Granting
+    # the shell URI here was the stale pre-migration form and never matched.
     # Principal IDs must use the agent_<id> convention — CapabilityStore
     # rejects bare "system".
-    grant_capability("agent_test_mix", "arbor://shell/exec/mix/test")
+    grant_capability("agent_test_mix", "arbor://action/mix/test")
 
     on_exit(fn -> File.rm_rf!(tmp_dir) end)
 
