@@ -69,17 +69,11 @@ defmodule Mix.Tasks.Arbor.Doctor do
     {"lm_studio", :lmstudio, :lmstudio}
   ]
 
-  # Fallback models when LLMDB is unavailable or has no match
-  @fallback_models %{
-    anthropic: "claude-sonnet-4-5-20250514",
-    openai: "gpt-4.1",
-    google: "gemini-2.5-flash",
-    xai: "grok-3-mini",
-    openrouter: "openai/gpt-oss-120b:free",
-    acp: "claude",
-    ollama_cloud: "llama3.2",
-    lmstudio: "default"
-  }
+  # NOTE: there is intentionally NO hard-coded per-provider model map here.
+  # Hard-coded model ids go stale (cf. the retired trinity-large-preview) and bake in
+  # a cloud assumption that conflicts with local-first use. When LLMDB can't answer,
+  # `select_best_model/2` falls back to `fallback_model/2`: the user's configured
+  # default → live discovery from local providers → honest nil (never a fabricated guess).
 
   @impl Mix.Task
   def run(args) do
@@ -439,6 +433,15 @@ defmodule Mix.Tasks.Arbor.Doctor do
 
         Mix.shell().info("")
 
+      {provider_str, _provider_atom, nil} ->
+        Mix.shell().info(
+          "  Best available provider: #{provider_str}, but no model could be determined " <>
+            "(LLMDB unavailable, and no configured or locally-discoverable model). " <>
+            "Set ARBOR_DEFAULT_MODEL, or ensure a local model is loaded (Ollama/LM Studio)."
+        )
+
+        Mix.shell().info("")
+
       {provider_str, provider_atom, model} ->
         current_provider = System.get_env("ARBOR_DEFAULT_PROVIDER")
         current_model = System.get_env("ARBOR_DEFAULT_MODEL")
@@ -496,23 +499,91 @@ defmodule Mix.Tasks.Arbor.Doctor do
 
   # Use LLMDB to find the best model for a provider.
   # Requires chat + tools support, prefers non-deprecated active models.
+  # When LLMDB is unavailable or has no match, defer to fallback_model/2 (no
+  # hard-coded model strings — see the note by @provider_priority).
   defp select_best_model(llmdb_provider, config_provider) do
-    if Code.ensure_loaded?(LLMDB) and function_exported?(LLMDB, :select, 1) do
-      case apply(LLMDB, :select, [
+    with true <- Code.ensure_loaded?(LLMDB) and function_exported?(LLMDB, :select, 1),
+         {:ok, {_provider, model_id}} <-
+           apply(LLMDB, :select, [
              [require: [chat: true], prefer: [llmdb_provider], scope: llmdb_provider]
            ]) do
-        {:ok, {_provider, model_id}} ->
-          model_id
-
-        _ ->
-          Map.get(@fallback_models, llmdb_provider) ||
-            Map.get(@fallback_models, config_provider, "default")
-      end
+      model_id
     else
-      Map.get(@fallback_models, llmdb_provider) ||
-        Map.get(@fallback_models, config_provider, "default")
+      _ -> fallback_model(config_provider, runtime_fallback_deps())
     end
   end
+
+  # Resolve a model when LLMDB can't answer, WITHOUT hard-coding model ids (which go
+  # stale) or assuming a cloud provider. Layered, most-trusted source first:
+  #   1. the user's CONFIGURED default model — but only for the default provider
+  #   2. LIVE discovery from local providers (Ollama/LM Studio) — staleness-proof,
+  #      reflects exactly what the user has loaded
+  #   3. nil — honest "couldn't determine"; the caller reports it rather than
+  #      recommending a fabricated model that may itself be retired
+  # Pure given `deps` (so it's unit-testable); `runtime_fallback_deps/0` wires the
+  # real sources. Public only for testing.
+  @doc false
+  @spec fallback_model(atom(), map()) :: String.t() | nil
+  def fallback_model(config_provider, deps) do
+    cond do
+      is_binary(deps.default_model) and not is_nil(deps.default_provider) and
+          config_provider == deps.default_provider ->
+        deps.default_model
+
+      true ->
+        case deps.discover.(config_provider) do
+          [model | _] when is_binary(model) -> model
+          _ -> nil
+        end
+    end
+  end
+
+  defp runtime_fallback_deps do
+    %{
+      default_provider: ai_config(:default_provider),
+      default_model: ai_config(:default_model),
+      discover: &discover_local_models/1
+    }
+  end
+
+  # Runtime-resolved read of Arbor.AI.Config (arbor_ai is above arbor_common in the
+  # hierarchy — same Code.ensure_loaded?/apply pattern used for LLMDB above).
+  defp ai_config(fun) do
+    mod = Arbor.AI.Config
+
+    if Code.ensure_loaded?(mod) and function_exported?(mod, fun, 0) do
+      apply(mod, fun, [])
+    end
+  end
+
+  # Live model list from a local provider via the existing Arbor.LLM.Preflight
+  # helper (Ollama GET /api/tags, LM Studio GET /v1/models). Returns [] for cloud
+  # providers (no "loaded model" concept) or when the endpoint is unreachable.
+  defp discover_local_models(config_provider) do
+    {pf_provider, base_url} =
+      case config_provider do
+        :ollama -> {:ollama, local_base_url(:ollama)}
+        :lmstudio -> {:lm_studio, local_base_url(:lm_studio)}
+        _ -> {nil, nil}
+      end
+
+    pf = Arbor.LLM.Preflight
+
+    if (pf_provider && Code.ensure_loaded?(pf)) and function_exported?(pf, :loaded_models, 2) do
+      case apply(pf, :loaded_models, [pf_provider, base_url]) do
+        {:ok, ids} when is_list(ids) -> ids
+        _ -> []
+      end
+    else
+      []
+    end
+  end
+
+  defp local_base_url(:ollama),
+    do: System.get_env("OLLAMA_BASE_URL") || "http://localhost:11434"
+
+  defp local_base_url(:lm_studio),
+    do: System.get_env("LM_STUDIO_BASE_URL") || "http://localhost:1234/v1"
 
   defp ensure_llmdb do
     if Code.ensure_loaded?(LLMDB) and function_exported?(LLMDB, :load, 1) do
