@@ -111,7 +111,11 @@ defmodule Arbor.Orchestrator.Session.Builders do
       max_steps: 100,
       initial_values: initial_values,
       authorization: true,
-      authorizer: build_authorizer(state)
+      authorizer: build_authorizer(state),
+      # Turn/heartbeat runs are in-process and never resumed (the Session owns
+      # crash recovery at the session level, not mid-pipeline). Skip writing
+      # per-node resume checkpoints — audit stays in the event stream + status.json.
+      resumable: false
     ]
 
     opts =
