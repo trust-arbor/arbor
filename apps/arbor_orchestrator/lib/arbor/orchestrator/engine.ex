@@ -603,8 +603,11 @@ defmodule Arbor.Orchestrator.Engine do
       end
 
       # Per-node audit (status.json + artifacts) is kept regardless of
-      # resumability — it's the execution record, not resume state.
-      :ok = write_node_status(node.id, outcome, state.logs_root)
+      # resumability — it's the execution record, not resume state. The on-disk
+      # status.json can be retired (config) once the durable event stream carries
+      # the per-node outcome (stage_completed enrichment) — deployments that trust
+      # the durable backend set `status_files_enabled: false`. Default keeps it.
+      if status_files_enabled?(), do: :ok = write_node_status(node.id, outcome, state.logs_root)
       maybe_store_artifact(state.opts, node.id, outcome)
 
       updated_state = %{
@@ -1315,6 +1318,12 @@ defmodule Arbor.Orchestrator.Engine do
   # never resume (Session passes `resumable: false`), so writing per-node resume
   # state for them is unused I/O. Default `true` preserves prior behavior.
   defp resumable?(opts), do: Keyword.get(opts, :resumable, true)
+
+  # The on-disk per-node `status.json` audit dump. Default on (behavior-preserving);
+  # set `config :arbor_orchestrator, :status_files_enabled, false` to retire it once
+  # the durable event stream (enriched stage_completed) is the trusted audit record.
+  defp status_files_enabled?,
+    do: Application.get_env(:arbor_orchestrator, :status_files_enabled, true)
 
   defp resolve_next_node_id(node, last_outcome, context, graph) do
     case Router.select_next_step(node, last_outcome, context, graph) do
