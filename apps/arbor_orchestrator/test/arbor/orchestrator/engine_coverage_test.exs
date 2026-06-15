@@ -75,7 +75,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"compute", %{"label" => "Compute step"}},
+            {"compute", %{"label" => "Compute step", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -98,8 +98,8 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"step_a", %{"label" => "A"}},
-            {"step_b", %{"label" => "B"}},
+            {"step_a", %{"label" => "A", "simulate" => "true"}},
+            {"step_b", %{"label" => "B", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -119,7 +119,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"task", %{"label" => "Task"}},
+            {"task", %{"label" => "Task", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -174,9 +174,9 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"a", %{"label" => "A"}},
-            {"b", %{"label" => "B"}},
-            {"c", %{"label" => "C"}},
+            {"a", %{"label" => "A", "simulate" => "true"}},
+            {"b", %{"label" => "B", "simulate" => "true"}},
+            {"c", %{"label" => "C", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -215,7 +215,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"task", %{"label" => "Task"}},
+            {"task", %{"label" => "Task", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -241,7 +241,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"task", %{"label" => "Task"}},
+            {"task", %{"label" => "Task", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -270,8 +270,8 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"producer", %{"label" => "Producer"}},
-            {"consumer", %{"label" => "Consumer"}},
+            {"producer", %{"label" => "Producer", "simulate" => "true"}},
+            {"consumer", %{"label" => "Consumer", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -295,7 +295,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"step1", %{"label" => "Step 1"}},
+            {"step1", %{"label" => "Step 1", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -315,7 +315,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"task", %{"label" => "Task"}},
+            {"task", %{"label" => "Task", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -335,7 +335,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
           [
             {"start", %{"shape" => "Mdiamond"}},
             {"failing", %{"simulate" => "fail", "max_retries" => "0"}},
-            {"recovery", %{"label" => "Recovery"}},
+            {"recovery", %{"label" => "Recovery", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -358,7 +358,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"task", %{"label" => "Task"}},
+            {"task", %{"label" => "Task", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -382,7 +382,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"a", %{"label" => "A"}},
+            {"a", %{"label" => "A", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -584,9 +584,9 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"check", %{"label" => "Check"}},
-            {"success_path", %{"label" => "Success"}},
-            {"fail_path", %{"label" => "Fail"}},
+            {"check", %{"label" => "Check", "simulate" => "true"}},
+            {"success_path", %{"label" => "Success", "simulate" => "true"}},
+            {"fail_path", %{"label" => "Fail", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -609,8 +609,8 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond", "fan_out" => "false"}},
-            {"high", %{"label" => "High weight"}},
-            {"low", %{"label" => "Low weight"}},
+            {"high", %{"label" => "High weight", "simulate" => "true"}},
+            {"low", %{"label" => "Low weight", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -632,10 +632,10 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"task", %{"label" => "Task"}},
+            {"task", %{"label" => "Task", "simulate" => "true"}},
             {"check", %{"shape" => "diamond"}},
-            {"path_a", %{"label" => "A"}},
-            {"path_b", %{"label" => "B"}},
+            {"path_a", %{"label" => "A", "simulate" => "true"}},
+            {"path_b", %{"label" => "B", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -1678,7 +1678,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"task", %{"fidelity" => "compact"}},
+            {"task", %{"fidelity" => "compact", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -1699,7 +1699,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"task", %{"fidelity" => "truncate"}},
+            {"task", %{"fidelity" => "truncate", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -1720,7 +1720,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"task", %{"label" => "Task"}},
+            {"task", %{"label" => "Task", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -1742,7 +1742,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"task", %{"fidelity" => "invalid_mode"}},
+            {"task", %{"fidelity" => "invalid_mode", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -1769,9 +1769,9 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond"}},
-            {"branch_a", %{"label" => "A"}},
-            {"branch_b", %{"label" => "B"}},
-            {"merge", %{"label" => "Merge"}},
+            {"branch_a", %{"label" => "A", "simulate" => "true"}},
+            {"branch_b", %{"label" => "B", "simulate" => "true"}},
+            {"merge", %{"label" => "Merge", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -1802,8 +1802,8 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
         build_graph(
           [
             {"start", %{"shape" => "Mdiamond", "fan_out" => "false"}},
-            {"a", %{"label" => "A"}},
-            {"b", %{"label" => "B"}},
+            {"a", %{"label" => "A", "simulate" => "true"}},
+            {"b", %{"label" => "B", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -1849,8 +1849,8 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
             {"start", %{"shape" => "Mdiamond"}},
             {"failing",
              %{"simulate" => "fail", "max_retries" => "0", "retry_target" => "repair"}},
-            {"repair", %{"label" => "Repair"}},
-            {"normal", %{"label" => "Normal"}},
+            {"repair", %{"label" => "Repair", "simulate" => "true"}},
+            {"normal", %{"label" => "Normal", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [
@@ -1876,8 +1876,8 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
             {"start", %{"shape" => "Mdiamond"}},
             {"failing",
              %{"simulate" => "fail", "max_retries" => "0", "retry_target" => "repair"}},
-            {"fail_edge_target", %{"label" => "Fail Edge"}},
-            {"repair", %{"label" => "Repair"}},
+            {"fail_edge_target", %{"label" => "Fail Edge", "simulate" => "true"}},
+            {"repair", %{"label" => "Repair", "simulate" => "true"}},
             {"exit", %{"shape" => "Msquare"}}
           ],
           [

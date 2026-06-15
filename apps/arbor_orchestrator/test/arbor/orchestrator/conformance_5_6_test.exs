@@ -7,7 +7,7 @@ defmodule Arbor.Orchestrator.Conformance56Test do
     digraph Flow {
       goal="Verify directory tree"
       start [shape=Mdiamond]
-      task [shape=box, prompt="Do $goal"]
+      task [shape=box, prompt="Do $goal", simulate="true"]
       exit [shape=Msquare]
       start -> task -> exit
     }
@@ -37,7 +37,7 @@ defmodule Arbor.Orchestrator.Conformance56Test do
       goal="Ship"
       label="Directory Test"
       start [shape=Mdiamond]
-      task [shape=box]
+      task [shape=box, simulate="true"]
       exit [shape=Msquare]
       start -> task -> exit
     }

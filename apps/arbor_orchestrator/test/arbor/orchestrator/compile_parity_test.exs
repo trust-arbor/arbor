@@ -112,9 +112,9 @@ defmodule Arbor.Orchestrator.CompileParityTest do
       dot = """
       digraph Three {
         start [shape=Mdiamond]
-        a [label="A"]
-        b [label="B"]
-        c [label="C"]
+        a [label="A", simulate="true"]
+        b [label="B", simulate="true"]
+        c [label="C", simulate="true"]
         exit [shape=Msquare]
         start -> a -> b -> c -> exit
       }
@@ -132,8 +132,8 @@ defmodule Arbor.Orchestrator.CompileParityTest do
       digraph Cond {
         start [shape=Mdiamond]
         check [shape=diamond]
-        yes_path [prompt="Yes"]
-        no_path [prompt="No"]
+        yes_path [prompt="Yes", simulate="true"]
+        no_path [prompt="No", simulate="true"]
         exit [shape=Msquare]
         start -> check
         check -> yes_path [condition="outcome=success"]
@@ -158,7 +158,7 @@ defmodule Arbor.Orchestrator.CompileParityTest do
       digraph Compound {
         start [shape=Mdiamond]
         gate [shape=diamond]
-        approved [label="approved"]
+        approved [label="approved", simulate="true"]
         exit [shape=Msquare]
         start -> gate
         gate -> approved [condition="outcome=success && context.flag=true"]
@@ -192,7 +192,7 @@ defmodule Arbor.Orchestrator.CompileParityTest do
       digraph Goal {
         graph [goal="Build a widget"]
         start [shape=Mdiamond]
-        worker [label="$goal"]
+        worker [label="$goal", simulate="true"]
         exit [shape=Msquare]
         start -> worker -> exit
       }
@@ -214,7 +214,7 @@ defmodule Arbor.Orchestrator.CompileParityTest do
       digraph Retries {
         graph [default_max_retries="2"]
         start [shape=Mdiamond]
-        worker [label="W"]
+        worker [label="W", simulate="true"]
         exit [shape=Msquare]
         start -> worker -> exit
       }
