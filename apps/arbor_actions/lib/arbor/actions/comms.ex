@@ -271,6 +271,17 @@ defmodule Arbor.Actions.Comms do
     # once that lands, gating per the egress posture.
     def egress_destination(_params, _context), do: "localhost"
 
+    @doc """
+    Default rate-limit budget (tokens per `rate_limit_refill_period_seconds`, 1h by
+    default) for the notify capability — the anti-spam budget behind the
+    allow-by-default trust posture. Applied as the `:rate_limit` constraint when the
+    `arbor://comms/notify/session` capability is granted to an agent. Tunable via
+    `config :arbor_actions, :notify_session_rate_limit`.
+    """
+    @spec default_rate_limit() :: pos_integer()
+    def default_rate_limit,
+      do: Application.get_env(:arbor_actions, :notify_session_rate_limit, 30)
+
     @impl true
     def run(params, context) do
       Actions.emit_started(__MODULE__, params)

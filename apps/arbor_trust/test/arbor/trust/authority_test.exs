@@ -134,6 +134,16 @@ defmodule Arbor.Trust.AuthorityTest do
       assert Authority.effective_mode(profile, "arbor://code/read/file.ex") == :auto
       assert Authority.effective_mode(profile, "arbor://code/write/file.ex") == :ask
     end
+
+    test "A1: proactive notify is allowed by default (cautious preset, no ceiling caps it)" do
+      {_baseline, rules} = Authority.preset_rules(:cautious)
+      # The preset grants notify allow-by-default (vs the :ask baseline).
+      assert rules["arbor://comms/notify/session"] == :allow
+
+      profile = %{Authority.new_profile("agent_a1") | rules: rules}
+      # No security ceiling on comms/notify, so :allow survives most_restrictive.
+      assert Authority.effective_mode(profile, "arbor://comms/notify/session") == :allow
+    end
   end
 
   describe "resolve_tier/1" do
