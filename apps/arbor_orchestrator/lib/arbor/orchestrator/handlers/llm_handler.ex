@@ -118,7 +118,24 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       "raise_terminal" ->
         raise "401 unauthorized"
 
-      simulate when simulate in [nil, "true", true] ->
+      nil ->
+        # Defense-in-depth for require-explicit-simulate: a bare compute/llm node
+        # should have been rejected at DOT validation (the Compiler flags it and
+        # Validator.validate_or_error fails the graph before the engine runs). If
+        # one still reaches here — e.g. a programmatically-built graph that skipped
+        # validation — FAIL LOUD rather than silently emitting fake output (the old
+        # behavior, which produced plausible-but-wrong "[Simulated]" responses).
+        Logger.error("[LlmHandler] #{node.id}: missing simulate= — refusing to silently simulate")
+
+        %Outcome{
+          status: :fail,
+          failure_reason:
+            "compute/llm node #{node.id} has no explicit simulate= attribute " <>
+              "(declare simulate=\"false\" for a real call or \"true\" to mock). " <>
+              "This should have been caught by DOT validation."
+        }
+
+      simulate when simulate in ["true", true] ->
         Logger.warning("[LlmHandler] #{node.id}: SIMULATED (simulate=#{inspect(simulate_attr)})")
 
         # Simulation mode — no real LLM call
@@ -134,6 +151,15 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       "false" ->
         # Real LLM call
         call_llm_and_respond(prompt, node, context, graph, base_updates, opts)
+
+      other ->
+        %Outcome{
+          status: :fail,
+          failure_reason:
+            "compute/llm node #{node.id} has an unrecognized simulate= value " <>
+              "#{inspect(other)} (expected: true | false | fail | retry | fail_once | " <>
+              "raise_retryable | raise_terminal)"
+        }
     end
   end
 
