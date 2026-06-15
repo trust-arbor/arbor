@@ -83,31 +83,37 @@ defmodule Arbor.Behavioral.SecureCommsTest do
       assert {:error, :decryption_failed} = Crypto.decrypt(tampered, key, iv, tag)
     end
 
-    test "seal/unseal provides one-shot ECDH encryption" do
-      {_pub_alice, priv_alice} = Crypto.generate_encryption_keypair()
+    test "seal/unseal provides one-shot authenticated ECDH (signcryption)" do
+      # seal/3 encrypts to the recipient's X25519 key AND signs the envelope with
+      # the sender's Ed25519 key; unseal/3 verifies the signature before decrypting.
       {pub_bob, priv_bob} = Crypto.generate_encryption_keypair()
+      {alice_sign_pub, alice_sign_priv} = Crypto.generate_keypair()
 
-      sealed = Crypto.seal("Hello Bob!", pub_bob, priv_alice)
+      sealed = Crypto.seal("Hello Bob!", pub_bob, alice_sign_priv)
 
       assert is_map(sealed)
       assert Map.has_key?(sealed, :ciphertext)
       assert Map.has_key?(sealed, :iv)
       assert Map.has_key?(sealed, :tag)
-      assert Map.has_key?(sealed, :sender_public)
+      # v2 envelope carries the ephemeral ECDH pubkey + the sender's signature
+      # (not a static :sender_public).
+      assert Map.has_key?(sealed, :ephemeral_public)
+      assert Map.has_key?(sealed, :signature)
 
-      assert {:ok, plaintext} = Crypto.unseal(sealed, priv_bob)
+      assert {:ok, plaintext} = Crypto.unseal(sealed, priv_bob, alice_sign_pub)
       assert plaintext == "Hello Bob!"
     end
 
     test "seal/unseal fails with wrong recipient key" do
-      {_pub_alice, priv_alice} = Crypto.generate_encryption_keypair()
       {pub_bob, _priv_bob} = Crypto.generate_encryption_keypair()
       {_pub_eve, priv_eve} = Crypto.generate_encryption_keypair()
+      {alice_sign_pub, alice_sign_priv} = Crypto.generate_keypair()
 
-      sealed = Crypto.seal("Secret for Bob", pub_bob, priv_alice)
+      sealed = Crypto.seal("Secret for Bob", pub_bob, alice_sign_priv)
 
-      # Eve cannot unseal Bob's message
-      assert {:error, :decryption_failed} = Crypto.unseal(sealed, priv_eve)
+      # Eve has a valid view of Alice's signature, but her X25519 key yields the
+      # wrong ECDH secret → decryption fails.
+      assert {:error, :decryption_failed} = Crypto.unseal(sealed, priv_eve, alice_sign_pub)
     end
 
     test "derive_agent_id produces deterministic ID from public key" do
