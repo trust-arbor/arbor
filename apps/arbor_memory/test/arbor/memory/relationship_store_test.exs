@@ -18,25 +18,19 @@ defmodule Arbor.Memory.RelationshipStoreTest do
       mix test apps/arbor_memory/test/arbor/memory/relationship_store_test.exs --include database
   """
 
-  use ExUnit.Case, async: false
+  use Arbor.Persistence.DatabaseCase, async: false
 
   alias Arbor.Memory.{Relationship, RelationshipStore}
-  alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Relationship, as: RelationshipSchema
 
   @moduletag :integration
   @moduletag :database
 
-  setup_all do
-    case Repo.start_link() do
-      {:ok, pid} -> {:ok, repo_pid: pid}
-      {:error, {:already_started, pid}} -> {:ok, repo_pid: pid}
-      {:error, reason} -> {:skip, "Database not available: #{inspect(reason)}"}
-    end
-  end
-
   setup do
-    # Clean up relationships table before each test
+    # DatabaseCase starts the Repo + checks out a per-test Sandbox connection
+    # (consistent :manual mode with the other memory :database tests, so they
+    # can't conflict on sandbox mode in a shared run). The delete_all is
+    # redundant under per-test rollback but harmless.
     Repo.delete_all(RelationshipSchema)
     {:ok, agent_id: "test_agent_001"}
   end
@@ -186,7 +180,8 @@ defmodule Arbor.Memory.RelationshipStoreTest do
     end
 
     test "returns not_found for missing relationship", %{agent_id: agent_id} do
-      assert {:error, :not_found} = RelationshipStore.update(agent_id, "nonexistent", %{salience: 0.9})
+      assert {:error, :not_found} =
+               RelationshipStore.update(agent_id, "nonexistent", %{salience: 0.9})
     end
   end
 
@@ -248,8 +243,14 @@ defmodule Arbor.Memory.RelationshipStoreTest do
     test "persists and restores key moments", %{agent_id: agent_id} do
       rel =
         Relationship.new("Test")
-        |> Relationship.add_moment("First meeting", emotional_markers: [:connection], salience: 0.8)
-        |> Relationship.add_moment("Breakthrough", emotional_markers: [:insight, :joy], salience: 0.9)
+        |> Relationship.add_moment("First meeting",
+          emotional_markers: [:connection],
+          salience: 0.8
+        )
+        |> Relationship.add_moment("Breakthrough",
+          emotional_markers: [:insight, :joy],
+          salience: 0.9
+        )
 
       {:ok, saved} = RelationshipStore.put(agent_id, rel)
       {:ok, retrieved} = RelationshipStore.get(agent_id, saved.id)
