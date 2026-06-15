@@ -125,7 +125,7 @@ The child DOT string is read from `context.generated_dot`. Use this when an upst
 
 ### LLM compute nodes REQUIRE an explicit `simulate=` (no default)
 
-Every node that calls a model — `compute purpose=llm` (the default), a bare-prompt `codergen` node, or `type="llm"` — **must** declare `simulate`. There is no default: omit it and the graph fails **load-time validation** with `compute/llm node must declare an explicit simulate= attribute`. (This used to default to silent simulation — the node returned a deterministic mock string and the pipeline "succeeded" with plausible-but-totally-fake output; it had 9 of 13 stdlib pipelines silently mocking. Declaring intent is now mandatory so you — or an agent composing a DOT — can't accidentally ship a fake-output pipeline.)
+Every node that calls a model — `compute purpose=llm` (the default), a bare-prompt `codergen` node, or `type="llm"` — **must** declare `simulate`. There is no default: omit it and `mix arbor.pipeline.validate` flags it as an error (`compute/llm node must declare an explicit simulate= attribute`), and at runtime the node **fails loud** instead of silently mocking. (This used to default to silent simulation — the node returned a deterministic mock string and the pipeline "succeeded" with plausible-but-totally-fake output; it had 9 of 13 stdlib pipelines silently mocking. Declaring intent is now mandatory so you — or an agent composing a DOT — can't accidentally ship a fake-output pipeline.)
 
 - `simulate="false"` → real LLM call (fails loudly if no provider configured)
 - `simulate="true"` → deterministic mock string (tests / dry runs)

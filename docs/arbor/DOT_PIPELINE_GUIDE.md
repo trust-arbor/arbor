@@ -207,8 +207,10 @@ Idempotency: `idempotent_with_key`. Aliases: `codergen`, `routing.select`.
 
 > **⚠️ `simulate` is MANDATORY on every LLM node.** Any node that calls a model —
 > a `compute` node with `purpose="llm"` (the default), a `codergen`/bare-prompt
-> node, or a `type="llm"` node — **must** declare `simulate`. There is no default:
-> a missing `simulate` is a **load-time validation error** (the graph won't run).
+> node, or a `type="llm"` node — **must** declare `simulate`. There is no default.
+> A missing `simulate` on an LLM node is flagged as an **error by
+> `mix arbor.pipeline.validate`** (run it before shipping a pipeline), and at
+> runtime the node **fails loud** rather than silently producing fake output.
 >
 > - `simulate="false"` → real LLM call (fails loudly if no provider is configured)
 > - `simulate="true"` → deterministic mock string (for tests / dry runs)
