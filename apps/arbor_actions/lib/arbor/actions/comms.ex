@@ -68,6 +68,12 @@ defmodule Arbor.Actions.Comms do
       }
     end
 
+    # Egress classification (2026-06-14 decision): sending a message bridges to an
+    # external service (Signal, Email) — agent-authored content leaves to a fixed
+    # third-party provider. :external_provider via the reader's fail-closed
+    # default. (PollMessages is ingress — covered by its output_taint, not gated.)
+    def effect_class, do: :network_egress
+
     @impl true
     def run(params, _context) do
       Actions.emit_started(__MODULE__, params)
