@@ -947,6 +947,7 @@ defmodule Arbor.Actions do
     # Comms facade — arbor://comms/{operation}
     Arbor.Actions.Comms.SendMessage => "arbor://comms/send",
     Arbor.Actions.Comms.PollMessages => "arbor://comms/poll",
+    Arbor.Actions.Comms.NotifySession => "arbor://comms/notify/session",
 
     # Channel facade — arbor://comms/channel/{operation}
     Arbor.Actions.Channel.List => "arbor://comms/channel/list",
