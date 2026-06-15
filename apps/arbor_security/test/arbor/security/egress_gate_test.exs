@@ -32,6 +32,23 @@ defmodule Arbor.Security.EgressGateTest do
   # would force approval on everything and mask the egress decision.
   defmodule UngatedTrustPolicy do
     def confirmation_mode(_principal, _uri), do: :auto
+    # No egress_mode/2 — exercises the fail-closed :ask fallback for external tiers.
+  end
+
+  # A profile that grants standing to egress to external providers (a trusted
+  # agent), but still asks for peers.
+  defmodule ProviderAllowedPolicy do
+    def confirmation_mode(_principal, _uri), do: :auto
+    def egress_mode(_principal, :external_provider), do: :allow
+    def egress_mode(_principal, :on_premises), do: :allow
+    def egress_mode(_principal, _tier), do: :ask
+  end
+
+  # A profile that hard-blocks external-provider egress.
+  defmodule ProviderBlockedPolicy do
+    def confirmation_mode(_principal, _uri), do: :auto
+    def egress_mode(_principal, :external_provider), do: :block
+    def egress_mode(_principal, _tier), do: :allow
   end
 
   setup do
@@ -167,6 +184,105 @@ defmodule Arbor.Security.EgressGateTest do
 
       assert AuthDecision.check(agent, @resource, :execute, egress_tier: :external_peer) ==
                :authorized
+    end
+  end
+
+  describe "enforcing: trust-ceiling by egress tier (layer 1)" do
+    test "a profile granting external_provider :allow egresses freely (the heartbeat case)",
+         %{agent_id: agent} do
+      enforce!()
+      Application.put_env(:arbor_security, :trust_policy_module, ProviderAllowedPolicy)
+
+      assert AuthDecision.check(agent, @resource, :execute, egress_tier: :external_provider) ==
+               :authorized
+    end
+
+    test "a profile hard-blocking external_provider denies", %{agent_id: agent} do
+      enforce!()
+      Application.put_env(:arbor_security, :trust_policy_module, ProviderBlockedPolicy)
+
+      assert {:error, {:egress_blocked, :external_provider, :policy}} =
+               AuthDecision.check(agent, @resource, :execute, egress_tier: :external_provider)
+    end
+
+    test "default profile (no egress standing) still asks", %{agent_id: agent} do
+      enforce!()
+      # setup's UngatedTrustPolicy has no egress_mode/2 -> fail-closed :ask
+      assert {:requires_approval, _} =
+               AuthDecision.check(agent, @resource, :execute, egress_tier: :external_provider)
+    end
+  end
+
+  describe "enforcing: capability refinement (layer 2)" do
+    setup do
+      # A fresh agent whose ONLY cap carries an egress constraint, so it is the
+      # cap AuthDecision matches for the resource.
+      agent_id = "agent_egresscap_#{System.unique_integer([:positive])}"
+      %{agent_id: agent_id}
+    end
+
+    defp grant_egress_cap(agent_id, egress_constraint) do
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: @resource,
+          principal_id: agent_id,
+          delegation_depth: 0,
+          constraints: %{egress: egress_constraint},
+          metadata: %{test: true}
+        )
+
+      CapabilityStore.put(cap)
+    end
+
+    test "a cap with max_tier covering the request bypasses :ask", %{agent_id: agent} do
+      enforce!()
+      grant_egress_cap(agent, %{max_tier: :external_provider})
+
+      assert AuthDecision.check(agent, @resource, :execute, egress_tier: :external_provider) ==
+               :authorized
+    end
+
+    test "a cap whose max_tier is below the request does NOT cover it (still asks)",
+         %{agent_id: agent} do
+      enforce!()
+      grant_egress_cap(agent, %{max_tier: :on_premises})
+
+      assert {:requires_approval, _} =
+               AuthDecision.check(agent, @resource, :execute, egress_tier: :external_provider)
+    end
+
+    test "a destination-scoped cap covers a matching destination", %{agent_id: agent} do
+      enforce!()
+
+      grant_egress_cap(agent, %{max_tier: :external_provider, destinations: ["api.anthropic.com"]})
+
+      assert AuthDecision.check(agent, @resource, :execute,
+               egress_tier: :external_provider,
+               egress_destination: "api.anthropic.com"
+             ) == :authorized
+    end
+
+    test "a destination-scoped cap does NOT cover a different destination", %{agent_id: agent} do
+      enforce!()
+
+      grant_egress_cap(agent, %{max_tier: :external_provider, destinations: ["api.anthropic.com"]})
+
+      assert {:requires_approval, _} =
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_destination: "evil.example.com"
+               )
+    end
+
+    test "the taint hard-block is NOT bypassable by a covering cap", %{agent_id: agent} do
+      enforce!()
+      grant_egress_cap(agent, %{max_tier: :external_provider})
+
+      assert {:error, {:egress_blocked, :external_provider, :untrusted}} =
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_taint: :untrusted
+               )
     end
   end
 end

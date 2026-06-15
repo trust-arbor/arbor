@@ -556,26 +556,46 @@ defmodule Arbor.Security.AuthDecision do
 
   @egress_blocking_taint [:untrusted, :hostile]
 
-  # Hard block: tainted data must not leave to an external destination.
+  # Escalation order for egress tiers (used for cap max_tier coverage).
+  @egress_tier_rank %{
+    none: 0,
+    on_host: 0,
+    on_premises: 1,
+    external_provider: 2,
+    external_peer: 3
+  }
+
+  # Hard block: (1) tainted data must not leave to an external destination — a
+  # system invariant independent of trust standing or caps; (2) the agent's
+  # trust profile may set the tier's egress mode to :block.
   defp check_egress_block(auth, opts) do
     tier = Keyword.get(opts, :egress_tier, :none)
 
-    if egress_enforcing?() and Classification.external_egress?(tier) and
-         egress_taint_level(opts) in @egress_blocking_taint do
-      {:error, {:egress_blocked, tier, egress_taint_level(opts)}, auth}
-    else
-      {:ok, auth}
+    cond do
+      not egress_enforcing?() ->
+        {:ok, auth}
+
+      Classification.external_egress?(tier) and
+          egress_taint_level(opts) in @egress_blocking_taint ->
+        {:error, {:egress_blocked, tier, egress_taint_level(opts)}, auth}
+
+      egress_policy_mode(auth.principal_id, tier) == :block ->
+        {:error, {:egress_blocked, tier, :policy}, auth}
+
+      true ->
+        {:ok, auth}
     end
   end
 
-  # Escalate external egress to :ask unless a pre-approved cap covers it.
-  # Receives the check_approval/3 result shape and returns the same shape.
-  defp apply_egress_ask({:authorized, auth} = result, cap, resource_uri, opts) do
+  # Escalate external egress to :ask unless a granted cap's egress constraint
+  # covers the resolved tier/destination. Receives + returns the check_approval/3
+  # result shape.
+  defp apply_egress_ask({:authorized, auth} = result, cap, _resource_uri, opts) do
     tier = Keyword.get(opts, :egress_tier, :none)
 
     if egress_enforcing?() and
-         Classification.gate_intent(tier, egress_gate_on_premises?()) == :ask and
-         not pre_approved_bypasses_ceiling?(cap, resource_uri) do
+         egress_policy_mode(auth.principal_id, tier) == :ask and
+         not cap_egress_covers?(cap, tier, opts) do
       {:requires_approval, cap, auth}
     else
       result
@@ -584,6 +604,108 @@ defmodule Arbor.Security.AuthDecision do
 
   # Already requires approval (or any other shape) — leave untouched.
   defp apply_egress_ask(result, _cap, _resource_uri, _opts), do: result
+
+  # The egress intent for a tier from tier semantics + the agent's trust profile,
+  # EXCLUDING cap refinement (caps only downgrade :ask -> allow, in the ask path).
+  #   :external_peer  -> :allow  (1.0 ACP deferral — advisory only; taint still blocks)
+  #   :on_host/:none  -> :allow
+  #   :on_premises    -> profile mode iff the on-premises flag is set, else :allow
+  #   :external_provider -> profile mode (default :ask)
+  @spec egress_policy_mode(String.t(), atom()) :: :allow | :ask | :block
+  defp egress_policy_mode(principal_id, tier) do
+    case tier do
+      :external_peer ->
+        :allow
+
+      :on_host ->
+        :allow
+
+      :none ->
+        :allow
+
+      :on_premises ->
+        if egress_gate_on_premises?(), do: trust_egress_mode(principal_id, tier), else: :allow
+
+      :external_provider ->
+        trust_egress_mode(principal_id, tier)
+
+      _ ->
+        :allow
+    end
+  end
+
+  # Runtime indirection to the trust policy (arbor_trust depends on arbor_security,
+  # not vice versa). Maps :auto -> :allow. Fails closed to :ask when trust is
+  # unavailable — only reached for gated tiers, where :ask is the safe fallback.
+  defp trust_egress_mode(principal_id, tier) do
+    policy = trust_policy_module()
+
+    mode =
+      if Code.ensure_loaded?(policy) and function_exported?(policy, :egress_mode, 2) do
+        apply(policy, :egress_mode, [principal_id, tier])
+      else
+        :ask
+      end
+
+    if mode == :auto, do: :allow, else: mode
+  rescue
+    _ -> :ask
+  catch
+    :exit, _ -> :ask
+  end
+
+  # A granted cap may carry constraints.egress = %{max_tier:, destinations:}.
+  # Covers the request iff the resolved tier is at or below max_tier AND (the
+  # destinations list is empty OR the resolved destination is in it).
+  defp cap_egress_covers?(cap, tier, opts) do
+    case egress_constraint(cap) do
+      nil ->
+        false
+
+      egress ->
+        max_tier = normalize_tier(Map.get(egress, :max_tier) || Map.get(egress, "max_tier"))
+        destinations = Map.get(egress, :destinations) || Map.get(egress, "destinations") || []
+
+        tier_within?(tier, max_tier) and destination_allowed?(destinations, opts)
+    end
+  end
+
+  defp egress_constraint(%{constraints: constraints}) when is_map(constraints) do
+    Map.get(constraints, :egress) || Map.get(constraints, "egress")
+  end
+
+  defp egress_constraint(_), do: nil
+
+  defp tier_within?(_tier, nil), do: false
+
+  defp tier_within?(tier, max_tier) do
+    Map.get(@egress_tier_rank, tier, 99) <= Map.get(@egress_tier_rank, max_tier, -1)
+  end
+
+  defp destination_allowed?([], _opts), do: true
+
+  defp destination_allowed?(destinations, opts) when is_list(destinations) do
+    case Keyword.get(opts, :egress_destination) do
+      dest when is_binary(dest) -> dest in destinations
+      _ -> false
+    end
+  end
+
+  defp destination_allowed?(_destinations, _opts), do: false
+
+  defp normalize_tier(tier) when is_atom(tier) and not is_nil(tier), do: tier
+
+  defp normalize_tier(tier) when is_binary(tier) do
+    case tier do
+      "on_host" -> :on_host
+      "on_premises" -> :on_premises
+      "external_provider" -> :external_provider
+      "external_peer" -> :external_peer
+      _ -> nil
+    end
+  end
+
+  defp normalize_tier(_), do: nil
 
   defp egress_enforcing? do
     Application.get_env(:arbor_security, :egress_gate_enforcing, false) == true

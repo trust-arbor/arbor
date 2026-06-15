@@ -26,6 +26,8 @@ defmodule Arbor.Actions.EgressTest do
         :public -> :external_peer
       end
     end
+
+    def egress_destination(params, _ctx), do: URI.parse(params[:url] || "").host
   end
 
   describe "effect_class_for/1" do
@@ -59,6 +61,18 @@ defmodule Arbor.Actions.EgressTest do
     test "resolver returns :on_premises for a homelab URL" do
       assert Egress.egress_tier_for(WebFetch, %{url: "http://10.42.42.6:11434"}, %{}) ==
                :on_premises
+    end
+  end
+
+  describe "egress_destination_for/3" do
+    test "returns nil when the action declares no destination" do
+      assert Egress.egress_destination_for(EgressNoResolver, %{}, %{}) == nil
+      assert Egress.egress_destination_for(ReadAction, %{}, %{}) == nil
+    end
+
+    test "returns the resolved host when the action declares egress_destination/2" do
+      assert Egress.egress_destination_for(WebFetch, %{url: "https://api.example.com/v1"}, %{}) ==
+               "api.example.com"
     end
   end
 

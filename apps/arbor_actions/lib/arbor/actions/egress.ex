@@ -107,6 +107,23 @@ defmodule Arbor.Actions.Egress do
   end
 
   @doc """
+  Resolve the concrete egress destination (host or provider string) for this
+  invocation, for destination-scoped egress caps. Reads an optional
+  `egress_destination/2` action callback; returns `nil` when the action does not
+  declare one (then only tier-level cap matching applies).
+  """
+  @spec egress_destination_for(module(), map(), map()) :: String.t() | nil
+  def egress_destination_for(action_module, params, context \\ %{}) do
+    Code.ensure_loaded(action_module)
+
+    if function_exported?(action_module, :egress_destination, 2) do
+      action_module.egress_destination(params, context)
+    else
+      nil
+    end
+  end
+
+  @doc """
   Turn a resolved egress tier into the gate's enforcement intent.
 
   Thin convenience over `Arbor.Contracts.Security.Classification.gate_intent/2`
