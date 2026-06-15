@@ -7,7 +7,7 @@ defmodule Arbor.Orchestrator.Conformance114Test do
     digraph Flow {
       start [shape=Mdiamond]
       gate [goal_gate=true, retry_target="repair", simulate="fail_once"]
-      repair [label="Repair work"]
+      repair [label="Repair work", simulate="true"]
       exit [shape=Msquare]
       start -> gate
       gate -> exit [condition="outcome=success"]

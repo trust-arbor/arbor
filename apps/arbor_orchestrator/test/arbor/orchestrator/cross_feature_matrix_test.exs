@@ -92,8 +92,8 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      a [label="A"]
-      b [label="B"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
       exit [shape=Msquare]
       start -> a -> b -> exit
     }
@@ -108,8 +108,8 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
     digraph Flow {
       start [shape=Mdiamond]
       decision [shape=box, simulate="fail"]
-      ok [label="ok"]
-      bad [label="bad"]
+      ok [label="ok", simulate="true"]
+      bad [label="bad", simulate="true"]
       exit [shape=Msquare]
       start -> decision
       decision -> ok [condition="outcome=success"]
@@ -129,7 +129,7 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
     digraph Flow {
       start [shape=Mdiamond]
       gate [goal_gate=true, retry_target="repair", simulate="fail_once"]
-      repair [label="repair"]
+      repair [label="repair", simulate="true"]
       exit [shape=Msquare]
       start -> gate
       gate -> exit
@@ -146,7 +146,7 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      gate [goal_gate=true]
+      gate [goal_gate=true, simulate="true"]
       exit [shape=Msquare]
       start -> gate -> exit
     }
@@ -178,9 +178,9 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
     digraph Flow {
       start [shape=Mdiamond]
       n [simulate="fail"]
-      a [label="A"]
-      b [label="B"]
-      c [label="C"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
+      c [label="C", simulate="true"]
       exit [shape=Msquare]
       start -> n
       n -> c [weight=50]
@@ -201,9 +201,9 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      choose [label="choose", fan_out="false"]
-      high [label="High"]
-      low [label="Low"]
+      choose [label="choose", fan_out="false", simulate="true"]
+      high [label="High", simulate="true"]
+      low [label="Low", simulate="true"]
       exit [shape=Msquare]
       start -> choose
       choose -> low [weight=1]
@@ -222,9 +222,9 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      choose [label="choose", fan_out="false"]
-      alpha [label="Alpha"]
-      zeta [label="Zeta"]
+      choose [label="choose", fan_out="false", simulate="true"]
+      alpha [label="Alpha", simulate="true"]
+      zeta [label="Zeta", simulate="true"]
       exit [shape=Msquare]
       start -> choose
       choose -> zeta [weight=0]
@@ -244,8 +244,8 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
     digraph Flow {
       start [shape=Mdiamond]
       gate [shape=hexagon, label="Choose path", fan_out="false"]
-      left [label="Left"]
-      right [label="Right"]
+      left [label="Left", simulate="true"]
+      right [label="Right", simulate="true"]
       exit [shape=Msquare]
       start -> gate
       gate -> left [label="[L] Left"]
@@ -266,10 +266,10 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      a [label="A", prompt="set"]
+      a [label="A", prompt="set", simulate="true"]
       b [shape=diamond, fan_out="false"]
-      yes [label="yes"]
-      no [label="no"]
+      yes [label="yes", simulate="true"]
+      no [label="no", simulate="true"]
       exit [shape=Msquare]
       start -> a
       a -> b
@@ -289,8 +289,8 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      a [label="A"]
-      b [label="B"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
       exit [shape=Msquare]
       start -> a -> b -> exit
     }
@@ -329,7 +329,7 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
       goal="Build API"
       model_stylesheet="box { llm_model: gpt-5 }"
       start [shape=Mdiamond]
-      task [shape=box, prompt="Do $goal"]
+      task [shape=box, prompt="Do $goal", simulate="true"]
       exit [shape=Msquare]
       start -> task -> exit
     }
@@ -354,8 +354,8 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
     digraph Flow {
       start [shape=Mdiamond]
       p [shape=component, fan_out="false"]
-      a [label="A", score=0.3]
-      b [label="B", score=0.8]
+      a [label="A", score=0.3, simulate="true"]
+      b [label="B", score=0.8, simulate="true"]
       j [shape=tripleoctagon]
       exit [shape=Msquare]
       start -> p
@@ -402,16 +402,16 @@ defmodule Arbor.Orchestrator.CrossFeatureMatrixTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      n1 [label="n1"]
-      n2 [label="n2"]
-      n3 [label="n3"]
-      n4 [label="n4"]
-      n5 [label="n5"]
-      n6 [label="n6"]
-      n7 [label="n7"]
-      n8 [label="n8"]
-      n9 [label="n9"]
-      n10 [label="n10"]
+      n1 [label="n1", simulate="true"]
+      n2 [label="n2", simulate="true"]
+      n3 [label="n3", simulate="true"]
+      n4 [label="n4", simulate="true"]
+      n5 [label="n5", simulate="true"]
+      n6 [label="n6", simulate="true"]
+      n7 [label="n7", simulate="true"]
+      n8 [label="n8", simulate="true"]
+      n9 [label="n9", simulate="true"]
+      n10 [label="n10", simulate="true"]
       exit [shape=Msquare]
       start -> n1 -> n2 -> n3 -> n4 -> n5 -> n6 -> n7 -> n8 -> n9 -> n10 -> exit
     }

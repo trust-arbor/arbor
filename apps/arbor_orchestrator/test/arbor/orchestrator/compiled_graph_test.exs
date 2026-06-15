@@ -34,8 +34,8 @@ defmodule Arbor.Orchestrator.CompiledGraphTest do
   digraph Pipeline {
     start [shape=Mdiamond]
     check [shape=diamond]
-    yes_path [prompt="Yes"]
-    no_path [prompt="No"]
+    yes_path [prompt="Yes", simulate="true"]
+    no_path [prompt="No", simulate="true"]
     exit [shape=Msquare]
     start -> check
     check -> yes_path [condition="outcome=success"]

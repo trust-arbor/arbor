@@ -6,7 +6,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      task [label="Task", prompt="Do task"]
+      task [label="Task", prompt="Do task", simulate="true"]
       exit [shape=Msquare]
       start -> task
       task -> exit
@@ -46,8 +46,8 @@ defmodule Arbor.Orchestrator.EngineTest do
     digraph Flow {
       start [shape=Mdiamond]
       failing [simulate="fail", retry_target="repair"]
-      repair [label="Repair path"]
-      bypass [label="Should not be chosen on fail"]
+      repair [label="Repair path", simulate="true"]
+      bypass [label="Should not be chosen on fail", simulate="true"]
       exit [shape=Msquare]
 
       start -> failing
@@ -71,7 +71,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     digraph Flow {
       start [shape=Mdiamond]
       gate [goal_gate=true, retry_target="repair", simulate="fail_once"]
-      repair [label="Repair work"]
+      repair [label="Repair work", simulate="true"]
       exit [shape=Msquare]
 
       start -> gate
@@ -93,7 +93,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      task [label="Task"]
+      task [label="Task", simulate="true"]
       exit [shape=Msquare]
       start -> task -> exit
     }
@@ -144,7 +144,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     digraph Flow {
       start [shape=Mdiamond]
       flaky [simulate="fail", max_retries=2, retry_initial_delay_ms=1]
-      recovery [label="Recovery"]
+      recovery [label="Recovery", simulate="true"]
       exit [shape=Msquare]
       start -> flaky
       flaky -> recovery [condition="outcome=fail"]
@@ -237,8 +237,8 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      a [label="A"]
-      b [label="B"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
       exit [shape=Msquare]
       start -> a -> b -> exit
     }
@@ -282,8 +282,8 @@ defmodule Arbor.Orchestrator.EngineTest do
     digraph Flow {
       start [shape=Mdiamond]
       gate [shape=hexagon, label="Proceed?", fan_out="false"]
-      yes_path [label="Yes path"]
-      no_path [label="No path"]
+      yes_path [label="Yes path", simulate="true"]
+      no_path [label="No path", simulate="true"]
       exit [shape=Msquare]
       start -> gate
       gate -> yes_path [label="[Y] Yes"]
@@ -306,8 +306,8 @@ defmodule Arbor.Orchestrator.EngineTest do
     digraph Flow {
       start [shape=Mdiamond]
       gate [shape=hexagon, label="Proceed?", human.default_choice="no_path", human.timeout_seconds=2.5, fan_out="false"]
-      yes_path [label="Yes path"]
-      no_path [label="No path"]
+      yes_path [label="Yes path", simulate="true"]
+      no_path [label="No path", simulate="true"]
       exit [shape=Msquare]
       start -> gate
       gate -> yes_path [label="[Y] Yes"]
@@ -352,8 +352,8 @@ defmodule Arbor.Orchestrator.EngineTest do
     digraph Flow {
       start [shape=Mdiamond]
       gate [shape=hexagon, label="Pick one", fan_out="false"]
-      yes_path [label="Yes path"]
-      no_path [label="No path"]
+      yes_path [label="Yes path", simulate="true"]
+      no_path [label="No path", simulate="true"]
       exit [shape=Msquare]
       start -> gate
       gate -> yes_path [label="[Y] Yes"]
@@ -374,8 +374,8 @@ defmodule Arbor.Orchestrator.EngineTest do
     digraph Flow {
       model_stylesheet="* { llm_provider: anthropic } .code { llm_model: claude-opus } #critical { llm_model: gpt-5 } #critical { reasoning_effort: high }"
       start [shape=Mdiamond]
-      critical [class="code"]
-      explicit [class="code", llm_model="explicit-model"]
+      critical [class="code", simulate="true"]
+      explicit [class="code", llm_model="explicit-model", simulate="true"]
       exit [shape=Msquare]
       start -> critical -> explicit -> exit
     }
@@ -410,8 +410,8 @@ defmodule Arbor.Orchestrator.EngineTest do
     digraph Flow {
       default_fidelity="summary:low"
       start [shape=Mdiamond]
-      task [fidelity="compact", thread_id="node-thread"]
-      another [thread_id="another-node-thread"]
+      task [fidelity="compact", thread_id="node-thread", simulate="true"]
+      another [thread_id="another-node-thread", simulate="true"]
       exit [shape=Msquare]
       start -> task [fidelity="full", thread_id="edge-thread"]
       task -> another
@@ -567,7 +567,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      task [label="Task"]
+      task [label="Task", simulate="true"]
       exit [shape=Msquare]
       start -> task -> exit
     }
@@ -596,10 +596,10 @@ defmodule Arbor.Orchestrator.EngineTest do
     digraph Flow {
       start [shape=Mdiamond]
       parallel [shape=component, join_policy="wait_all", fan_out="false"]
-      a1 [label="A1"]
-      a2 [label="A2", score=0.2]
-      b1 [label="B1"]
-      b2 [label="B2", score=0.9]
+      a1 [label="A1", simulate="true"]
+      a2 [label="A2", score=0.2, simulate="true"]
+      b1 [label="B1", simulate="true"]
+      b2 [label="B2", score=0.9, simulate="true"]
       join [shape=tripleoctagon]
       exit [shape=Msquare]
 
@@ -626,9 +626,9 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      a [label="A"]
-      b [label="B"]
-      done [label="Done"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
+      done [label="Done", simulate="true"]
       exit [shape=Msquare]
 
       start -> a
@@ -658,9 +658,9 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond, fan_out="false"]
-      a [label="A"]
-      b [label="B"]
-      done [label="Done"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
+      done [label="Done", simulate="true"]
       exit [shape=Msquare]
 
       start -> a
@@ -693,9 +693,9 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      fast [label="Fast"]
-      slow [label="Slow"]
-      join [label="Join"]
+      fast [label="Fast", simulate="true"]
+      slow [label="Slow", simulate="true"]
+      join [label="Join", simulate="true"]
       exit [shape=Msquare]
 
       start -> fast
@@ -732,10 +732,10 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      a [label="A"]
-      b [label="B"]
-      c [label="C"]
-      merge [label="Merge"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
+      c [label="C", simulate="true"]
+      merge [label="Merge", simulate="true"]
       exit [shape=Msquare]
 
       start -> a
@@ -767,9 +767,9 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      a [label="A"]
-      b [label="B"]
-      fail_path [label="Fail path"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
+      fail_path [label="Fail path", simulate="true"]
       exit [shape=Msquare]
 
       start -> a
@@ -840,7 +840,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      task [auto_status="true"]
+      task [auto_status="true", simulate="true"]
       exit [shape=Msquare]
       start -> task
       task -> exit
@@ -858,8 +858,8 @@ defmodule Arbor.Orchestrator.EngineTest do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      task [label="Task"]
-      checkpoint [label="Checkpoint"]
+      task [label="Task", simulate="true"]
+      checkpoint [label="Checkpoint", simulate="true"]
       exit [shape=Msquare]
       start -> task
       task -> checkpoint [loop_restart="true"]
@@ -883,7 +883,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     digraph Flow {
       start [shape=Mdiamond]
       task [simulate="fail"]
-      repair [label="Repair"]
+      repair [label="Repair", simulate="true"]
       exit [shape=Msquare]
       start -> task
       task -> repair [condition="outcome=fail", loop_restart="true"]

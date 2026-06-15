@@ -97,7 +97,7 @@ defmodule Arbor.Orchestrator.Conformance111Test do
     digraph Flow {
       model_stylesheet=".code { llm_model: class-model; llm_provider: anthropic; }"
       start [shape=Mdiamond]
-      task [shape=box, class="code", prompt="Do work"]
+      task [shape=box, class="code", prompt="Do work", simulate="true"]
       exit [shape=Msquare]
       start -> task -> exit
     }

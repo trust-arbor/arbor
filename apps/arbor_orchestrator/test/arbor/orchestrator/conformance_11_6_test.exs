@@ -43,7 +43,7 @@ defmodule Arbor.Orchestrator.Conformance116Test do
     digraph Flow {
       goal="Ship API"
       start [shape=Mdiamond]
-      task [shape=box, prompt="Do $goal"]
+      task [shape=box, prompt="Do $goal", simulate="true"]
       exit [shape=Msquare]
       start -> task -> exit
     }
@@ -66,8 +66,8 @@ defmodule Arbor.Orchestrator.Conformance116Test do
     digraph Flow {
       start [shape=Mdiamond]
       gate [shape=hexagon, label="Approve?", fan_out="false"]
-      yes_path [label="Yes"]
-      no_path [label="No"]
+      yes_path [label="Yes", simulate="true"]
+      no_path [label="No", simulate="true"]
       exit [shape=Msquare]
 
       start -> gate
@@ -101,10 +101,10 @@ defmodule Arbor.Orchestrator.Conformance116Test do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      seed [shape=box]
+      seed [shape=box, simulate="true"]
       cond [shape=diamond, fan_out="false"]
-      yes [label="Yes"]
-      no [label="No"]
+      yes [label="Yes", simulate="true"]
+      no [label="No", simulate="true"]
       exit [shape=Msquare]
 
       start -> seed -> cond

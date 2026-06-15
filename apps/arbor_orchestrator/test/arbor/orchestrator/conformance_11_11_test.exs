@@ -29,7 +29,7 @@ defmodule Arbor.Orchestrator.Conformance1111Test do
     digraph Flow {
       goal="Ship feature"
       start [shape=Mdiamond]
-      task [shape=box, prompt="Do $goal now"]
+      task [shape=box, prompt="Do $goal now", simulate="true"]
       exit [shape=Msquare]
       start -> task -> exit
     }
@@ -43,7 +43,7 @@ defmodule Arbor.Orchestrator.Conformance1111Test do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      task [shape=box]
+      task [shape=box, simulate="true"]
       exit [shape=Msquare]
       start -> task -> exit
     }
@@ -58,7 +58,7 @@ defmodule Arbor.Orchestrator.Conformance1111Test do
     digraph Flow {
       goal="orig"
       start [shape=Mdiamond]
-      task [shape=box, prompt="Goal:$goal"]
+      task [shape=box, prompt="Goal:$goal", simulate="true"]
       exit [shape=Msquare]
       start -> task -> exit
     }
@@ -75,7 +75,7 @@ defmodule Arbor.Orchestrator.Conformance1111Test do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      task [shape=box, prompt="Do $goal"]
+      task [shape=box, prompt="Do $goal", simulate="true"]
       exit [shape=Msquare]
       start -> task -> exit
     }

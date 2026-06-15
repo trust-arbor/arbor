@@ -102,8 +102,8 @@ defmodule Arbor.Orchestrator.Conformance117Test do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      a [label="A"]
-      b [label="B"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
       exit [shape=Msquare]
       start -> a -> b -> exit
     }
@@ -141,7 +141,7 @@ defmodule Arbor.Orchestrator.Conformance117Test do
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      task [shape=box, prompt="Do thing"]
+      task [shape=box, prompt="Do thing", simulate="true"]
       exit [shape=Msquare]
       start -> task -> exit
     }
