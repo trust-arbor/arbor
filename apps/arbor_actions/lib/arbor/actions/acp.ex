@@ -189,6 +189,13 @@ defmodule Arbor.Actions.Acp do
       }
     end
 
+    # Egress classification (2026-06-14 decision): an ACP session hands data to an
+    # external coding agent (Claude/Codex/Gemini) we don't control — an uncontrolled
+    # peer, which in turn reaches its own cloud backend. :external_peer (advisory +
+    # telemetry only in 1.0 — the ACP enforcement deferral).
+    def effect_class, do: :network_egress
+    def egress_tier(_params, _context), do: :external_peer
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(params, _context) do
@@ -327,6 +334,11 @@ defmodule Arbor.Actions.Acp do
         timeout: :data
       }
     end
+
+    # Egress classification (2026-06-14 decision): sends a coding prompt to an
+    # external agent peer — see Acp.StartSession. :external_peer (advisory in 1.0).
+    def effect_class, do: :network_egress
+    def egress_tier(_params, _context), do: :external_peer
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}

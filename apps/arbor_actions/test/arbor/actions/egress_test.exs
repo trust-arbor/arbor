@@ -93,4 +93,65 @@ defmodule Arbor.Actions.EgressTest do
       assert Egress.gate_decision(:on_premises) == :ask
     end
   end
+
+  # Guards the REAL action declarations (not fixtures) — the egress surface the
+  # gate actually classifies. A regression here means an egressing action lost
+  # its classification and would slip the gate.
+  describe "real egressing action declarations" do
+    test "AI actions are network egress; tier follows the resolved provider" do
+      for mod <- [Arbor.Actions.AI.GenerateText, Arbor.Actions.AI.AnalyzeCode] do
+        assert Egress.effect_class_for(mod) == :network_egress
+        assert Egress.egress_tier_for(mod, %{provider: "anthropic"}, %{}) == :external_provider
+        assert Egress.egress_tier_for(mod, %{provider: "lmstudio"}, %{}) == :on_host
+        # nil provider (routing decides later) fails closed to external
+        assert Egress.egress_tier_for(mod, %{}, %{}) == :external_provider
+      end
+    end
+
+    test "Web fetches are network egress; tier follows the URL host" do
+      for mod <- [Arbor.Actions.Web.Browse, Arbor.Actions.Web.Snapshot] do
+        assert Egress.effect_class_for(mod) == :network_egress
+        assert Egress.egress_tier_for(mod, %{url: "https://example.com"}, %{}) == :external_peer
+        assert Egress.egress_tier_for(mod, %{url: "http://127.0.0.1:8080"}, %{}) == :on_host
+        assert Egress.egress_tier_for(mod, %{url: "http://10.42.42.6"}, %{}) == :on_premises
+      end
+    end
+
+    test "Web searches hit fixed external APIs (:external_provider via fail-closed default)" do
+      for mod <- [
+            Arbor.Actions.Web.Search,
+            Arbor.Actions.Web.ExaSearch,
+            Arbor.Actions.Web.TinyfishSearch
+          ] do
+        assert Egress.effect_class_for(mod) == :network_egress
+        assert Egress.egress_tier_for(mod, %{query: "x"}, %{}) == :external_provider
+      end
+    end
+
+    test "Comms.SendMessage is egress to an external provider" do
+      assert Egress.effect_class_for(Arbor.Actions.Comms.SendMessage) == :network_egress
+
+      assert Egress.egress_tier_for(Arbor.Actions.Comms.SendMessage, %{channel: :email}, %{}) ==
+               :external_provider
+    end
+
+    test "Comms.PollMessages is ingress — NOT classified as egress" do
+      assert Egress.effect_class_for(Arbor.Actions.Comms.PollMessages) == :read
+      assert Egress.egress_tier_for(Arbor.Actions.Comms.PollMessages, %{}, %{}) == :none
+    end
+
+    test "ACP session actions are egress to an external peer (advisory-only deferral)" do
+      for mod <- [Arbor.Actions.Acp.StartSession, Arbor.Actions.Acp.SendMessage] do
+        assert Egress.effect_class_for(mod) == :network_egress
+        assert Egress.egress_tier_for(mod, %{}, %{}) == :external_peer
+      end
+    end
+
+    test "internal Channel actions do NOT egress off-host" do
+      for mod <- [Arbor.Actions.Channel.List, Arbor.Actions.Channel.Read] do
+        assert Egress.effect_class_for(mod) == :read
+        assert Egress.egress_tier_for(mod, %{}, %{}) == :none
+      end
+    end
+  end
 end
