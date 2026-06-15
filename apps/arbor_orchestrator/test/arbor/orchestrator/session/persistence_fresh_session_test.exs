@@ -23,6 +23,7 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
+  alias Arbor.Contracts.Session.AssistantMessage
   alias Arbor.Orchestrator.Session.Persistence
 
   defmodule FakeSessionStore do
@@ -232,7 +233,7 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
       Persistence.persist_turn_entries(
         state,
         %{"role" => "user", "content" => "hello"},
-        %{"role" => "assistant", "content" => "hi there"},
+        %AssistantMessage{content: "hi there", started_at: sent_at, completed_at: completed_at},
         %{},
         user_sent_at: sent_at,
         assistant_completed_at: completed_at
@@ -279,7 +280,7 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
       Persistence.persist_turn_entries(
         state,
         %{"role" => "user", "content" => "test"},
-        %{"role" => "assistant", "content" => "response"},
+        %AssistantMessage{content: "response", started_at: sent_at, completed_at: completed_at},
         %{},
         user_sent_at: sent_at,
         assistant_completed_at: completed_at
@@ -325,7 +326,7 @@ defmodule Arbor.Orchestrator.Session.PersistenceFreshSessionTest do
       Persistence.persist_turn_entries(
         state,
         %{"role" => "user", "content" => "test"},
-        %{"role" => "assistant", "content" => "reply"},
+        %AssistantMessage{content: "reply", started_at: before},
         %{}
       )
 

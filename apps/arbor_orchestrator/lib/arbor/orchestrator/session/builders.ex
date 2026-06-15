@@ -230,7 +230,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
   def apply_turn_result(state, message, result, opts \\ [])
 
   def apply_turn_result(state, message, %{context: result_ctx}, opts) do
-    alias Arbor.Contracts.Session.UserMessage
+    alias Arbor.Contracts.Session.{AssistantMessage, UserMessage}
     alias Arbor.Orchestrator.SessionCore
 
     response = Map.get(result_ctx, "session.response", "")
@@ -252,6 +252,19 @@ defmodule Arbor.Orchestrator.Session.Builders do
     # a real ordering instead of needing the +1µs workaround.
     user_msg = SessionCore.build_user_message(message, user_sent_at)
     assistant_msg = SessionCore.build_assistant_message(response, now)
+
+    # Typed assistant-turn envelope — single source of truth for the turn's
+    # content/usage/model/tools/lifecycle, replacing the magic-string reads the
+    # persistence layer used to do into result_ctx. `started_at` is the LLM-call
+    # start (completed_at minus the recorded call duration), clamped to never
+    # precede the user's send time so the persisted assistant entry can't sort
+    # before the user entry. `first_token_at` stays nil until the streaming work.
+    assistant_message =
+      AssistantMessage.from_result_ctx(
+        result_ctx,
+        assistant_started_at(result_ctx, now, user_sent_at),
+        now
+      )
 
     # Pure: update message list
     updated_messages =
@@ -297,7 +310,7 @@ defmodule Arbor.Orchestrator.Session.Builders do
     Persistence.persist_turn_entries(
       state,
       user_msg,
-      assistant_msg || %{"role" => "assistant", "content" => ""},
+      assistant_message,
       result_ctx,
       user_sent_at: user_sent_at,
       assistant_completed_at: now
@@ -561,5 +574,22 @@ defmodule Arbor.Orchestrator.Session.Builders do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # The assistant turn's LLM-call start time, derived from the recorded call
+  # duration (`session.usage.duration_ms`) — i.e. `completed_at - duration_ms`.
+  # Clamped to never precede `user_sent_at` so the persisted assistant entry can
+  # never sort before the user entry on equal-ish timestamps.
+  defp assistant_started_at(result_ctx, completed_at, user_sent_at) do
+    duration_ms =
+      case Map.get(result_ctx, "session.usage") do
+        %{"duration_ms" => d} when is_integer(d) and d >= 0 -> d
+        %{duration_ms: d} when is_integer(d) and d >= 0 -> d
+        _ -> 0
+      end
+
+    started = DateTime.add(completed_at, -duration_ms, :millisecond)
+
+    if DateTime.compare(started, user_sent_at) == :lt, do: user_sent_at, else: started
   end
 end
