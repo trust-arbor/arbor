@@ -242,7 +242,6 @@ defmodule Arbor.Orchestrator.Session.Builders do
     alias Arbor.Contracts.Session.{AssistantMessage, UserMessage}
     alias Arbor.Orchestrator.SessionCore
 
-    response = Map.get(result_ctx, "session.response", "")
     now = DateTime.utc_now()
 
     # The user's send-time comes from the typed UserMessage envelope when
@@ -255,56 +254,33 @@ defmodule Arbor.Orchestrator.Session.Builders do
         _ -> now
       end
 
-    # Pure: build message structs via SessionCore. The user_msg gets its
-    # real send time; the assistant_msg gets `now` (turn-completion time).
-    # These naturally diverge, which is what gives the SessionStore query
-    # a real ordering instead of needing the +1µs workaround.
-    user_msg = SessionCore.build_user_message(message, user_sent_at)
-    assistant_msg = SessionCore.build_assistant_message(response, now)
+    # ── Functional core ──────────────────────────────────────────────────────
+    # Every *decision* about what this turn becomes — display messages, the typed
+    # assistant envelope, the new message list, working memory, turn count, and
+    # persistence timestamps — is made here, purely, in one call. (The assistant
+    # display msg gets `now`; the user msg its real send time, so they diverge
+    # and the SessionStore query gets a real ordering.)
+    commit =
+      SessionCore.commit_turn(%{
+        message: message,
+        result_ctx: result_ctx,
+        current_messages: ContextBuilder.get_messages(state),
+        current_working_memory: ContextBuilder.get_working_memory(state),
+        current_turn_count: ContextBuilder.get_turn_count(state),
+        now: now,
+        user_sent_at: user_sent_at,
+        envelope_builder: &AssistantMessage.from_result_ctx/3
+      })
 
-    # Typed assistant-turn envelope — single source of truth for the turn's
-    # content/usage/model/tools/lifecycle, replacing the magic-string reads the
-    # persistence layer used to do into result_ctx. `started_at` is the LLM-call
-    # start (completed_at minus the recorded call duration), clamped to never
-    # precede the user's send time so the persisted assistant entry can't sort
-    # before the user entry. `first_token_at` stays nil until the streaming work.
-    assistant_message =
-      AssistantMessage.from_result_ctx(
-        result_ctx,
-        assistant_started_at(result_ctx, now, user_sent_at),
-        now
-      )
+    # ── Imperative shell ─────────────────────────────────────────────────────
+    # Side effects + state adoption, driven entirely by the pure commit.
 
-    # Pure: update message list
-    updated_messages =
-      case Map.get(result_ctx, "session.messages") do
-        msgs when is_list(msgs) ->
-          if assistant_msg, do: msgs ++ [assistant_msg], else: msgs
-
-        _ ->
-          base = ContextBuilder.get_messages(state) ++ [user_msg]
-          if assistant_msg, do: base ++ [assistant_msg], else: base
-      end
-
-    updated_wm =
-      case Map.get(result_ctx, "session.working_memory") do
-        wm when is_map(wm) -> wm
-        _ -> ContextBuilder.get_working_memory(state)
-      end
-
-    # Pure: increment turn count
-    new_turn_count =
-      state
-      |> ContextBuilder.get_turn_count()
-      |> SessionCore.increment_turn()
-
-    # Side effect: compactor (may trigger compaction)
+    # Compactor (may trigger compaction) + compaction telemetry.
     old_compression_count =
       if state.compactor, do: Map.get(state.compactor, :compression_count, 0), else: 0
 
-    compactor = append_to_compactor(state.compactor, user_msg, assistant_msg)
+    compactor = append_to_compactor(state.compactor, commit.user_msg, commit.assistant_msg)
 
-    # Side effect: telemetry recording
     if compactor && Map.get(compactor, :compression_count, 0) > old_compression_count do
       utilization =
         if Map.get(compactor, :effective_window, 0) > 0,
@@ -314,30 +290,29 @@ defmodule Arbor.Orchestrator.Session.Builders do
       maybe_record_compaction_telemetry(state.agent_id, utilization)
     end
 
-    # Side effect: persist to SessionStore. Pass both timestamps explicitly
-    # so user/assistant entries get distinct, accurate times.
+    # Persist to SessionStore — distinct, accurate user/assistant times.
     Persistence.persist_turn_entries(
       state,
-      user_msg,
-      assistant_message,
+      commit.user_msg,
+      commit.assistant_message,
       result_ctx,
-      user_sent_at: user_sent_at,
-      assistant_completed_at: now
+      user_sent_at: commit.user_sent_at,
+      assistant_completed_at: commit.assistant_completed_at
     )
 
-    # Update GenServer state
+    # Adopt new GenServer state.
     state = %{
       state
-      | messages: updated_messages,
-        working_memory: updated_wm,
-        turn_count: new_turn_count,
+      | messages: commit.messages,
+        working_memory: commit.working_memory,
+        turn_count: commit.turn_count,
         compactor: compactor
     }
 
     update_session_state(state, fn ss ->
       ss
-      |> Map.put(:messages, updated_messages)
-      |> Map.put(:working_memory, updated_wm)
+      |> Map.put(:messages, commit.messages)
+      |> Map.put(:working_memory, commit.working_memory)
       |> maybe_call_increment_turn()
     end)
   end
@@ -645,16 +620,4 @@ defmodule Arbor.Orchestrator.Session.Builders do
   # duration (`session.usage.duration_ms`) — i.e. `completed_at - duration_ms`.
   # Clamped to never precede `user_sent_at` so the persisted assistant entry can
   # never sort before the user entry on equal-ish timestamps.
-  defp assistant_started_at(result_ctx, completed_at, user_sent_at) do
-    duration_ms =
-      case Map.get(result_ctx, "session.usage") do
-        %{"duration_ms" => d} when is_integer(d) and d >= 0 -> d
-        %{duration_ms: d} when is_integer(d) and d >= 0 -> d
-        _ -> 0
-      end
-
-    started = DateTime.add(completed_at, -duration_ms, :millisecond)
-
-    if DateTime.compare(started, user_sent_at) == :lt, do: user_sent_at, else: started
-  end
 end

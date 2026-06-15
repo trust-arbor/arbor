@@ -101,6 +101,35 @@ No cycles. No skipping levels. Check each library's `mix.exs` for exact deps.
   - `can?/3` — boolean check for file access authorization
 - Search existing facades before writing new code. Expand a facade rather than reaching into internals.
 
+## Choosing the Right Grain
+
+When building a feature, pick the mechanism that matches its **grain**. Forcing one
+mechanism everywhere (especially "make it a DOT graph") is the recurring mistake.
+The orchestrator is the kernel for *cognition and genuinely program-shaped flows* —
+not for mechanical glue. (Full rationale: `.arbor/decisions/2026-06-15-orchestrator-as-pipeline-kernel.md`.)
+
+| Grain of the work | Mechanism |
+|---|---|
+| Coarse, **branchy / multi-step / durable / agent-authored / per-node-gated** flow | **DOT graph** on the orchestrator (e.g. turn *cognition*, heartbeat) |
+| Mechanical state transform or commit inside a GenServer (e.g. `apply_result` / persist / adopt, normalize) | **Functional core (CRC) + imperative shell** — pure decision in a `*Core`, GenServer does the side effects. **NOT a graph.** |
+| New *generic* execution primitive | **handler (opcode)** — generic, **zero business logic**. Adding one is rare; STOP and justify. |
+| Side-effecting business op | **Jido action (syscall)** — capability-gated, invoked via an `exec` node |
+| Cross-cutting concern spanning a whole graph | **Engine middleware** (capability / taint / telemetry / egress) |
+| Wrapping one external op with cross-cutting concerns | **`Arbor.LLM.Plug` pipeline** — *inside* a compute node |
+| Light synchronous value transform | **plain function** |
+
+Load-bearing invariants (these are *why* the table is shaped this way):
+- **Handlers are opcodes; Jido actions are syscalls.** The handler set was
+  deliberately kept small — never bake business logic into a handler. Business
+  logic lives in actions (side-effecting) or pure cores (decisions), composed by
+  the graph or the shell.
+- **Graph it only if it's genuinely program-shaped.** Mechanical commits
+  (apply/persist/emit) gain nothing from being a program — no branching, no
+  agent-authoring, run in-process in ms. They are CRC core + shell.
+- **The engine context is a JSON serialization boundary** (the Engine checkpoints
+  after every node). Never put rich typed structs in the context; keep it
+  JSON-clean and reconstruct typed envelopes at the GenServer boundary.
+
 ## Architecture Triggers
 
 **STOP and brainstorm** (create `.arbor/roadmap/0-inbox/` item if unclear):
