@@ -167,5 +167,22 @@ defmodule Arbor.Actions.EgressTest do
         assert Egress.egress_tier_for(mod, %{}, %{}) == :none
       end
     end
+
+    test "Web actions expose the fetched host as egress_destination (destination-scoped caps)" do
+      for mod <- [Arbor.Actions.Web.Browse, Arbor.Actions.Web.Snapshot] do
+        assert Egress.egress_destination_for(mod, %{url: "https://api.example.com/v1"}, %{}) ==
+                 "api.example.com"
+
+        assert Egress.egress_destination_for(mod, %{url: "http://10.42.42.6:11434"}, %{}) ==
+                 "10.42.42.6"
+      end
+    end
+
+    test "AI actions expose the provider as egress_destination (nil when routing)" do
+      for mod <- [Arbor.Actions.AI.GenerateText, Arbor.Actions.AI.AnalyzeCode] do
+        assert Egress.egress_destination_for(mod, %{provider: "anthropic"}, %{}) == "anthropic"
+        assert Egress.egress_destination_for(mod, %{}, %{}) == nil
+      end
+    end
   end
 end

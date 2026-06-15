@@ -82,15 +82,20 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
     })
   end
 
-  test "enforcing + no standing: compute-node LLM call HALTS before dispatch" do
+  test "enforcing + no standing: compute-node LLM call HALTS before dispatch, surfaces a refusal" do
     Application.put_env(:arbor_security, :egress_gate_enforcing, true)
 
     outcome = LlmHandler.execute(build_node(), build_context(), build_graph(), [])
 
-    assert outcome.status == :fail
-    assert outcome.failure_reason =~ "egress"
     # The crucial assertion: the LLM was never reached — the gate halted first.
     assert RecordingDispatcher.calls() == []
+    # UX: surfaced as a clear refusal (not a silent empty response). partial_success
+    # so the message reaches context (last_response / llm.content) + pipeline completes.
+    assert outcome.status == :partial_success
+    assert outcome.notes =~ "Egress blocked"
+    assert outcome.context_updates["last_response"] =~ "Egress blocked"
+    assert outcome.context_updates["llm.content"] =~ "Egress blocked"
+    assert outcome.context_updates["egress_blocked"] == true
   end
 
   test "dark by default: the same call proceeds and reaches the LLM" do

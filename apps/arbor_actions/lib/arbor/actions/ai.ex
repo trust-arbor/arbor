@@ -118,6 +118,14 @@ defmodule Arbor.Actions.AI do
       |> Arbor.AI.BackendTrust.egress_tier_for()
     end
 
+    # Destination-scoped egress caps match on the provider (nil when routing decides).
+    def egress_destination(params, _context) do
+      case normalize_provider(params[:provider]) do
+        nil -> nil
+        provider -> to_string(provider)
+      end
+    end
+
     @allowed_providers [
       :anthropic,
       :openai,
@@ -271,6 +279,14 @@ defmodule Arbor.Actions.AI do
       params[:provider]
       |> normalize_provider()
       |> Arbor.AI.BackendTrust.egress_tier_for()
+    end
+
+    # Destination-scoped egress caps match on the provider (nil when routing decides).
+    def egress_destination(params, _context) do
+      case normalize_provider(params[:provider]) do
+        nil -> nil
+        provider -> to_string(provider)
+      end
     end
 
     @allowed_providers [

@@ -162,6 +162,9 @@ defmodule Arbor.Actions.Web do
       end
     end
 
+    # Destination-scoped egress caps match on the fetched host.
+    def egress_destination(params, _context), do: URI.parse(params[:url] || "").host
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{url: url} = params, _context) do
@@ -698,6 +701,9 @@ defmodule Arbor.Actions.Web do
         :public -> :external_peer
       end
     end
+
+    # Destination-scoped egress caps match on the fetched host.
+    def egress_destination(params, _context), do: URI.parse(params[:url] || "").host
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
