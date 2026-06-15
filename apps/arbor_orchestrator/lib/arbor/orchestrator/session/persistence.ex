@@ -8,6 +8,7 @@ defmodule Arbor.Orchestrator.Session.Persistence do
 
   require Logger
 
+  alias Arbor.Contracts.LLM.TokenUsage
   alias Arbor.Orchestrator.Session.ContextBuilder
 
   # Runtime-resolved so tests can inject a fake module via the
@@ -145,7 +146,7 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   # ── Session entry persistence (runtime bridge) ────────────────────
 
   @doc false
-  def persist_turn_entries(state, user_msg, assistant_msg, result_ctx, opts \\ []) do
+  def persist_turn_entries(state, user_msg, assistant_message, _result_ctx, opts \\ []) do
     persist_entry = get_persist_entry_fn(state)
 
     # Distinct timestamps for user vs assistant entries:
@@ -172,21 +173,25 @@ defmodule Arbor.Orchestrator.Session.Persistence do
             timestamp: user_sent_at
           })
 
-          # Build assistant content array (may include tool_use blocks)
-          tool_calls = Map.get(result_ctx, "session.tool_calls", [])
-
+          # Assistant entry from the typed AssistantMessage envelope — typed
+          # field reads (content / tool_calls / model / finish_reason / usage)
+          # instead of magic-string Map.get into result_ctx. (The `llm.usage` /
+          # `llm.content` dead-letter reads lived in this exact spot.)
           assistant_content =
-            build_assistant_content(assistant_msg["content"], tool_calls)
+            build_assistant_content(assistant_message.content, assistant_message.tool_calls)
+
+          token_usage =
+            if is_nil(assistant_message.usage) or TokenUsage.empty?(assistant_message.usage),
+              do: nil,
+              else: TokenUsage.to_persistence(assistant_message.usage)
 
           persist_entry.(%{
             entry_type: "assistant",
             role: "assistant",
             content: assistant_content,
-            model: Map.get(result_ctx, "llm.model"),
-            stop_reason: Map.get(result_ctx, "llm.stop_reason"),
-            # `session.usage` is the live key written by LlmHandler.
-            # `llm.usage` was a dead-letter read — nothing wrote to it.
-            token_usage: Map.get(result_ctx, "session.usage"),
+            model: assistant_message.model,
+            stop_reason: assistant_message.finish_reason,
+            token_usage: token_usage,
             timestamp: assistant_completed_at,
             metadata: %{
               "turn_count" => ContextBuilder.get_turn_count(state) + 1
