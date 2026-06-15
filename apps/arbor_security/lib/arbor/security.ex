@@ -138,14 +138,27 @@ defmodule Arbor.Security do
   # forget; only for external tiers (on_host/on_premises are low-signal).
   defp emit_egress_observed(principal_id, tier, opts)
        when tier in [:external_provider, :external_peer] do
-    if Code.ensure_loaded?(Arbor.Signals) and function_exported?(Arbor.Signals, :emit, 3) do
-      Arbor.Signals.emit(:security, :egress_observed, %{
-        agent_id: principal_id,
-        egress_tier: tier,
-        enforcing: EgressGate.enforcing?(),
-        egress_destination: Keyword.get(opts, :egress_destination),
-        source: :compute_node
-      })
+    data = %{
+      agent_id: principal_id,
+      egress_tier: tier,
+      enforcing: EgressGate.enforcing?(),
+      egress_destination: Keyword.get(opts, :egress_destination),
+      source: :compute_node
+    }
+
+    cond do
+      # Prefer durable emission so observe-before-enable data persists to the
+      # EventLog (security:events stream), matching the action path.
+      Code.ensure_loaded?(Arbor.Signals) and function_exported?(Arbor.Signals, :durable_emit, 4) ->
+        Arbor.Signals.durable_emit(:security, :egress_observed, data,
+          stream_id: "security:events"
+        )
+
+      Code.ensure_loaded?(Arbor.Signals) and function_exported?(Arbor.Signals, :emit, 3) ->
+        Arbor.Signals.emit(:security, :egress_observed, data)
+
+      true ->
+        :ok
     end
 
     :ok

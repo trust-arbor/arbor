@@ -270,6 +270,48 @@ defmodule Arbor.Trust.PolicyTest do
     end
   end
 
+  describe "egress_mode/2 (2026-06-14 egress standing)" do
+    setup :start_infrastructure
+
+    test "conservative library defaults when profile has no egress_modes",
+         %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
+      assert Policy.egress_mode(agent_id, :external_provider) == :ask
+      assert Policy.egress_mode(agent_id, :external_peer) == :ask
+      assert Policy.egress_mode(agent_id, :on_host) == :allow
+      assert Policy.egress_mode(agent_id, :on_premises) == :allow
+    end
+
+    test "an explicit profile egress_modes map wins", %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
+
+      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+        %{profile | egress_modes: %{external_provider: :allow, external_peer: :block}}
+      end)
+
+      assert Policy.egress_mode(agent_id, :external_provider) == :allow
+      assert Policy.egress_mode(agent_id, :external_peer) == :block
+    end
+
+    test "a deployment can set a system-wide default posture via config",
+         %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
+      Application.put_env(:arbor_trust, :default_egress_modes, %{external_provider: :allow})
+      on_exit(fn -> Application.delete_env(:arbor_trust, :default_egress_modes) end)
+
+      # Profile declares nothing for the tier -> falls through to the config default.
+      assert Policy.egress_mode(agent_id, :external_provider) == :allow
+      # Untouched tiers keep the library default.
+      assert Policy.egress_mode(agent_id, :external_peer) == :ask
+    end
+
+    test "unknown agent falls to defaults (fail-closed for external)" do
+      unknown = "agent_unknown_#{System.unique_integer([:positive])}"
+      assert Policy.egress_mode(unknown, :external_provider) == :ask
+      assert Policy.egress_mode(unknown, :on_host) == :allow
+    end
+  end
+
   describe "explain/3" do
     setup :start_infrastructure
 
