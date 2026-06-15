@@ -141,6 +141,19 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   def idempotency, do: :idempotent_with_key
 
   defp call_llm_and_respond(prompt, node, context, graph, base_updates, opts) do
+    # Egress gate (2026-06-14 URI-addressing-vs-classification decision). The
+    # compute-node LLM path has no per-operation capability, so we check egress
+    # standing directly via Arbor.Security.authorize_egress/3 before dispatching.
+    # Runtime indirection — arbor_orchestrator does not hard-dep arbor_security.
+    # Inert unless egress enforcement is switched on; emits observability while
+    # dark. A gate CRASH fails open (never let the gate halt LLM on a bug).
+    case egress_halt_outcome(context, base_updates) do
+      %Outcome{} = halt -> halt
+      _ -> call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts)
+    end
+  end
+
+  defp call_llm_and_respond_allowed(prompt, node, context, graph, base_updates, opts) do
     agent_id = Context.get(context, "session.agent_id", "?")
     prompt_len = if is_binary(prompt), do: String.length(prompt), else: 0
     msgs_count = context |> Context.get("session.messages", []) |> length()
@@ -307,6 +320,82 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           context_updates: Map.put(base_updates, "last_response", nil)
         }
     end
+  end
+
+  # ── Egress gate (2026-06-14) — compute-node LLM path ──────────────────────
+  #
+  # Returns a halt %Outcome{} when egress is blocked/requires-approval, else nil
+  # (proceed). All cross-library calls are guarded runtime indirection (the
+  # orchestrator does not hard-dep arbor_security/arbor_ai); a crash fails open.
+
+  @taint_severity %{trusted: 0, derived: 1, untrusted: 2, hostile: 3}
+
+  defp egress_halt_outcome(context, base_updates) do
+    security = Arbor.Security
+
+    if Code.ensure_loaded?(security) and function_exported?(security, :authorize_egress, 3) do
+      agent_id = Context.get(context, "session.agent_id", "system")
+      tier = resolve_egress_tier(Context.get(context, "session.llm_provider"))
+      taint = egress_taint_level(context)
+
+      case apply(security, :authorize_egress, [agent_id, tier, [egress_taint: taint]]) do
+        :allow ->
+          nil
+
+        {:requires_approval, _} ->
+          %Outcome{
+            status: :fail,
+            failure_reason: "LLM egress requires approval (#{tier}); agent lacks egress standing",
+            context_updates: base_updates
+          }
+
+        {:error, {:egress_blocked, t, reason}} ->
+          %Outcome{
+            status: :fail,
+            failure_reason: "LLM egress blocked (#{t}/#{reason})",
+            context_updates: base_updates
+          }
+      end
+    end
+  rescue
+    e ->
+      Logger.warning("[LlmHandler] egress gate error (failing open): #{Exception.message(e)}")
+      nil
+  end
+
+  # Resolve the egress tier for the provider via BackendTrust (provider -> tier).
+  # Falls back to :external_provider (the gated tier) if AI is unavailable.
+  defp resolve_egress_tier(provider) do
+    backend_trust = Arbor.AI.BackendTrust
+
+    if Code.ensure_loaded?(backend_trust) and
+         function_exported?(backend_trust, :egress_tier_for, 2) do
+      apply(backend_trust, :egress_tier_for, [provider_atom(provider), nil])
+    else
+      :external_provider
+    end
+  end
+
+  defp provider_atom(provider) when is_atom(provider) and not is_nil(provider), do: provider
+
+  defp provider_atom(provider) when is_binary(provider) do
+    case Arbor.Common.SafeAtom.to_existing(provider) do
+      {:ok, atom} -> atom
+      _ -> nil
+    end
+  end
+
+  defp provider_atom(_), do: nil
+
+  # Conservative egress taint: the MOST severe level across all context taint —
+  # the prompt may incorporate any context data, so if anything is untrusted/
+  # hostile, treat the egress as carrying it. Returns nil when no taint present.
+  defp egress_taint_level(context) do
+    context
+    |> Map.get(:taint, %{})
+    |> Map.values()
+    |> Enum.map(fn t -> Map.get(t, :level, :derived) end)
+    |> Enum.max_by(fn level -> Map.get(@taint_severity, level, 1) end, fn -> nil end)
   end
 
   defp call_llm(prompt, node, context, graph, opts) do

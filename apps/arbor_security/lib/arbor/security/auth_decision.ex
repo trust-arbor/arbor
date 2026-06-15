@@ -33,8 +33,8 @@ defmodule Arbor.Security.AuthDecision do
   decision without triggering any side effects.
   """
 
-  alias Arbor.Contracts.Security.{AuthContext, Classification}
-  alias Arbor.Security.{CapabilityStore, Identity.Verifier, UriRegistry}
+  alias Arbor.Contracts.Security.AuthContext
+  alias Arbor.Security.{CapabilityStore, EgressGate, Identity.Verifier, UriRegistry}
 
   require Logger
 
@@ -554,175 +554,34 @@ defmodule Arbor.Security.AuthDecision do
   # is enabled, so turning it on is a deliberate operator action that won't
   # surprise the running agents (whose heartbeats make routine LLM egress).
 
-  @egress_blocking_taint [:untrusted, :hostile]
-
-  # Escalation order for egress tiers (used for cap max_tier coverage).
-  @egress_tier_rank %{
-    none: 0,
-    on_host: 0,
-    on_premises: 1,
-    external_provider: 2,
-    external_peer: 3
-  }
-
-  # Hard block: (1) tainted data must not leave to an external destination — a
-  # system invariant independent of trust standing or caps; (2) the agent's
-  # trust profile may set the tier's egress mode to :block.
+  # Egress decision delegates to the shared Arbor.Security.EgressGate (also used
+  # by the standalone Arbor.Security.authorize_egress/3 for the compute-node LLM
+  # path). Here the matched capability is the only refinement candidate.
+  #
+  #   check_egress_block/2 — hard-block (taint conjunct OR profile :block).
+  #   apply_egress_ask/4    — escalate :ask to the ceiling approval path.
   defp check_egress_block(auth, opts) do
     tier = Keyword.get(opts, :egress_tier, :none)
 
-    cond do
-      not egress_enforcing?() ->
-        {:ok, auth}
-
-      Classification.external_egress?(tier) and
-          egress_taint_level(opts) in @egress_blocking_taint ->
-        {:error, {:egress_blocked, tier, egress_taint_level(opts)}, auth}
-
-      egress_policy_mode(auth.principal_id, tier) == :block ->
-        {:error, {:egress_blocked, tier, :policy}, auth}
-
-      true ->
-        {:ok, auth}
+    case EgressGate.decide(auth.principal_id, tier, opts, []) do
+      {:block, reason} -> {:error, {:egress_blocked, tier, reason}, auth}
+      _ -> {:ok, auth}
     end
   end
 
-  # Escalate external egress to :ask unless a granted cap's egress constraint
-  # covers the resolved tier/destination. Receives + returns the check_approval/3
-  # result shape.
+  # Escalate external egress to :ask unless the matched cap's egress constraint
+  # covers the resolved tier/destination. Receives + returns check_approval/3 shape.
   defp apply_egress_ask({:authorized, auth} = result, cap, _resource_uri, opts) do
     tier = Keyword.get(opts, :egress_tier, :none)
 
-    if egress_enforcing?() and
-         egress_policy_mode(auth.principal_id, tier) == :ask and
-         not cap_egress_covers?(cap, tier, opts) do
-      {:requires_approval, cap, auth}
-    else
-      result
+    case EgressGate.decide(auth.principal_id, tier, opts, [cap]) do
+      :ask -> {:requires_approval, cap, auth}
+      _ -> result
     end
   end
 
   # Already requires approval (or any other shape) — leave untouched.
   defp apply_egress_ask(result, _cap, _resource_uri, _opts), do: result
-
-  # The egress intent for a tier from tier semantics + the agent's trust profile,
-  # EXCLUDING cap refinement (caps only downgrade :ask -> allow, in the ask path).
-  #   :external_peer  -> :allow  (1.0 ACP deferral — advisory only; taint still blocks)
-  #   :on_host/:none  -> :allow
-  #   :on_premises    -> profile mode iff the on-premises flag is set, else :allow
-  #   :external_provider -> profile mode (default :ask)
-  @spec egress_policy_mode(String.t(), atom()) :: :allow | :ask | :block
-  defp egress_policy_mode(principal_id, tier) do
-    case tier do
-      :external_peer ->
-        :allow
-
-      :on_host ->
-        :allow
-
-      :none ->
-        :allow
-
-      :on_premises ->
-        if egress_gate_on_premises?(), do: trust_egress_mode(principal_id, tier), else: :allow
-
-      :external_provider ->
-        trust_egress_mode(principal_id, tier)
-
-      _ ->
-        :allow
-    end
-  end
-
-  # Runtime indirection to the trust policy (arbor_trust depends on arbor_security,
-  # not vice versa). Maps :auto -> :allow. Fails closed to :ask when trust is
-  # unavailable — only reached for gated tiers, where :ask is the safe fallback.
-  defp trust_egress_mode(principal_id, tier) do
-    policy = trust_policy_module()
-
-    mode =
-      if Code.ensure_loaded?(policy) and function_exported?(policy, :egress_mode, 2) do
-        apply(policy, :egress_mode, [principal_id, tier])
-      else
-        :ask
-      end
-
-    if mode == :auto, do: :allow, else: mode
-  rescue
-    _ -> :ask
-  catch
-    :exit, _ -> :ask
-  end
-
-  # A granted cap may carry constraints.egress = %{max_tier:, destinations:}.
-  # Covers the request iff the resolved tier is at or below max_tier AND (the
-  # destinations list is empty OR the resolved destination is in it).
-  defp cap_egress_covers?(cap, tier, opts) do
-    case egress_constraint(cap) do
-      nil ->
-        false
-
-      egress ->
-        max_tier = normalize_tier(Map.get(egress, :max_tier) || Map.get(egress, "max_tier"))
-        destinations = Map.get(egress, :destinations) || Map.get(egress, "destinations") || []
-
-        tier_within?(tier, max_tier) and destination_allowed?(destinations, opts)
-    end
-  end
-
-  defp egress_constraint(%{constraints: constraints}) when is_map(constraints) do
-    Map.get(constraints, :egress) || Map.get(constraints, "egress")
-  end
-
-  defp egress_constraint(_), do: nil
-
-  defp tier_within?(_tier, nil), do: false
-
-  defp tier_within?(tier, max_tier) do
-    Map.get(@egress_tier_rank, tier, 99) <= Map.get(@egress_tier_rank, max_tier, -1)
-  end
-
-  defp destination_allowed?([], _opts), do: true
-
-  defp destination_allowed?(destinations, opts) when is_list(destinations) do
-    case Keyword.get(opts, :egress_destination) do
-      dest when is_binary(dest) -> dest in destinations
-      _ -> false
-    end
-  end
-
-  defp destination_allowed?(_destinations, _opts), do: false
-
-  defp normalize_tier(tier) when is_atom(tier) and not is_nil(tier), do: tier
-
-  defp normalize_tier(tier) when is_binary(tier) do
-    case tier do
-      "on_host" -> :on_host
-      "on_premises" -> :on_premises
-      "external_provider" -> :external_provider
-      "external_peer" -> :external_peer
-      _ -> nil
-    end
-  end
-
-  defp normalize_tier(_), do: nil
-
-  defp egress_enforcing? do
-    Application.get_env(:arbor_security, :egress_gate_enforcing, false) == true
-  end
-
-  defp egress_gate_on_premises? do
-    Application.get_env(:arbor_security, :gate_on_premises_egress, false) == true
-  end
-
-  # The flowing data's taint level — accepts a bare level atom or a Taint struct.
-  defp egress_taint_level(opts) do
-    case Keyword.get(opts, :egress_taint) do
-      %{level: level} -> level
-      level when is_atom(level) -> level
-      _ -> nil
-    end
-  end
 
   # URI classes whose parameter space is fundamentally too open or whose
   # blast radius is too irrecoverable to be unlocked by a pre-signed caps

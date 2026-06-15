@@ -100,6 +100,9 @@ defmodule Mix.Tasks.Arbor.Pipeline.RunTest do
     end
 
     test "orchestrator exposes parse function" do
+      # function_exported?/3 returns false for a not-yet-loaded module, so ensure
+      # it is loaded first — otherwise this flakes on load order.
+      assert Code.ensure_loaded?(Arbor.Orchestrator)
       assert function_exported?(Arbor.Orchestrator, :parse, 1)
     end
 
