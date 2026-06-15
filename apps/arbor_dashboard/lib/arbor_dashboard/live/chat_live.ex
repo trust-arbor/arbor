@@ -15,7 +15,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   import Arbor.Web.Helpers
   import Arbor.Dashboard.Live.ChatLive.Components
 
-  alias Arbor.Agent.{APIAgent, Claude, Lifecycle, Manager}
+  alias Arbor.Agent.{APIAgent, BranchSupervisor, Claude, Lifecycle, Manager}
   alias Arbor.Common.CommandIntake
   alias Arbor.Contracts.Commands.{Context, Result}
   alias Arbor.Contracts.Comms.Interaction
@@ -1152,9 +1152,21 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         |> stream_insert(:messages, user_msg)
         |> assign(input: "", loading: true, error: nil, streaming_text: "")
 
-      dispatch_query(socket.assigns.chat_runtime, socket.assigns.agent_host_pid, user_message)
+      # Resolve the host PID LIVE from the supervisor — the cached
+      # `agent_host_pid` assign goes stale after a rest_for_one restart
+      # (host crash → new pid), and sending to the dead one yields :noproc.
+      dispatch_query(socket.assigns.chat_runtime, live_host_pid(socket), user_message)
 
       {:noreply, socket}
+    end
+  end
+
+  # Current host pid from the supervisor, falling back to the cached assign if the
+  # agent_id isn't known or resolution fails (preserves prior behavior).
+  defp live_host_pid(socket) do
+    case socket.assigns[:agent_id] do
+      nil -> socket.assigns[:agent_host_pid]
+      agent_id -> BranchSupervisor.host_pid(agent_id) || socket.assigns[:agent_host_pid]
     end
   end
 

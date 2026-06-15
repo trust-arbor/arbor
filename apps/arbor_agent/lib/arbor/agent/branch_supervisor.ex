@@ -84,6 +84,18 @@ defmodule Arbor.Agent.BranchSupervisor do
     end
   end
 
+  @doc """
+  Resolve the CURRENT (live) host PID for an agent from its supervisor.
+
+  Use this instead of a cached `metadata[:host_pid]` from the agent Registry:
+  under `rest_for_one`, a host crash restarts the host with a NEW pid, but the
+  cached metadata still holds the dead one — sending to it yields `:noproc`. The
+  supervisor pid is stable across child restarts, so resolving children from it
+  is always current. Returns `nil` if the agent/host isn't running.
+  """
+  @spec host_pid(String.t()) :: pid() | nil
+  def host_pid(agent_id), do: child_pids(agent_id).host
+
   # ── Supervisor callback ────────────────────────────────────────────
 
   @impl true

@@ -86,7 +86,7 @@ defmodule Arbor.Agent.Profile do
       identity: deserialize_identity(map["identity"] || legacy_identity(map["identity_ref"])),
       keychain_ref: map["keychain_ref"],
       auto_start: map["auto_start"] || false,
-      metadata: map["metadata"] || %{},
+      metadata: normalize_metadata(map["metadata"]),
       created_at: maybe_datetime(map["created_at"]),
       version: map["version"] || 1
     }
@@ -95,6 +95,25 @@ defmodule Arbor.Agent.Profile do
   rescue
     e -> {:error, e}
   end
+
+  # Profile metadata is written with atom keys (the idiomatic shape), but JSON
+  # persistence round-trips them to strings — so readers doing `meta[:external_agent]`
+  # silently got `nil` after a restore (a latent footgun that broke the External
+  # Agents dashboard twice). Normalize at this single deserialize boundary instead
+  # of at every read site.
+  #
+  # Atomize ONLY the known profile-flag keys (the ones with atom-key readers). The
+  # rest of metadata is free-form and stays string-keyed — atomizing everything
+  # that happens to be an existing atom (e.g. "description", "source") would break
+  # callers/tests that read those by string. Add a key here when a new metadata
+  # flag is read via an atom key after a restore.
+  @known_metadata_keys [:external_agent, :agent_type, :registered_via, :created_by, :owner_id]
+
+  defp normalize_metadata(meta) when is_map(meta) do
+    SafeAtom.atomize_keys(meta, @known_metadata_keys)
+  end
+
+  defp normalize_metadata(_), do: %{}
 
   @doc """
   Encode profile to JSON string.

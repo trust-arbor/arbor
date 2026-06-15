@@ -505,6 +505,13 @@ defmodule Arbor.Orchestrator.Dot.Parser do
 
   # ── Qualified Key Reading ────────────────────────────────────────
 
+  # Quoted attribute key (DOT spec allows quoted IDs). The whole key — dots and
+  # all — is inside the quotes, so read_string consumes it; no qualified-key
+  # continuation needed. Without this, a key like `"human.default_choice"`
+  # returned "" and the WHOLE bracket block's attrs were silently dropped (the
+  # node lost its type and misrouted). Surfaced by HITL pipelines.
+  defp read_qualified_key("\"" <> rest), do: read_string(rest, [])
+
   defp read_qualified_key(rest) do
     {id, rest} = read_identifier(rest)
 
