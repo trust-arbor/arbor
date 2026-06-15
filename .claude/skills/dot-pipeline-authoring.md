@@ -123,13 +123,18 @@ The child DOT string is read from `context.generated_dot`. Use this when an upst
 
 ## Common traps (the ones that bit me when wiring real pipelines)
 
-### LLM compute nodes default to simulation
+### LLM compute nodes REQUIRE an explicit `simulate=` (no default)
 
-`compute purpose=llm` runs in simulation mode unless you explicitly opt out. Without `simulate="false"` the node returns a deterministic mock string — the pipeline succeeds and produces plausible-looking output that's totally fake. Real call:
+Every node that calls a model — `compute purpose=llm` (the default), a bare-prompt `codergen` node, or `type="llm"` — **must** declare `simulate`. There is no default: omit it and the graph fails **load-time validation** with `compute/llm node must declare an explicit simulate= attribute`. (This used to default to silent simulation — the node returned a deterministic mock string and the pipeline "succeeded" with plausible-but-totally-fake output; it had 9 of 13 stdlib pipelines silently mocking. Declaring intent is now mandatory so you — or an agent composing a DOT — can't accidentally ship a fake-output pipeline.)
+
+- `simulate="false"` → real LLM call (fails loudly if no provider configured)
+- `simulate="true"` → deterministic mock string (tests / dry runs)
 
 ```dot
 generate [type="compute", purpose="llm", simulate="false", llm_provider="...", llm_model="...", prompt_context_key="..."]
 ```
+
+Non-LLM compute purposes (e.g. `purpose="routing"`) do **not** require `simulate`.
 
 ### Don't hardcode `agent_id="…"` on a single exec node
 
@@ -137,7 +142,7 @@ It looks like a harmless override. But the signer you thread through `Orchestrat
 
 ### `mix arbor.pipeline.validate` passing ≠ runtime success
 
-Validation is a *syntax* checker — terminal-node, edge-condition syntax, prompt presence on compute nodes. It does NOT catch: missing capabilities, unstarted services (NonceCache, IdentityRegistry, ExecutionRegistry), unregistered identities, missing LLM providers, missing action registrations. Treat validate-pass as "the graph parses," nothing more.
+Validation is a *syntax* checker — terminal-node, edge-condition syntax, prompt presence on compute nodes, and `simulate=` presence on LLM nodes. It does NOT catch: missing capabilities, unstarted services (NonceCache, IdentityRegistry, ExecutionRegistry), unregistered identities, missing LLM providers, missing action registrations. Treat validate-pass as "the graph parses," nothing more.
 
 ### `arbor://fs/<op>/<root>` — the URI encodes the path scope
 
