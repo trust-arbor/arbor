@@ -144,7 +144,17 @@ defmodule Arbor.Orchestrator.Engine.Executor do
     duration_ms =
       System.monotonic_time(:millisecond) - Keyword.get(opts, :stage_started_at, 0)
 
-    emit(opts, Event.stage_completed(node.id, status, duration_ms: duration_ms))
+    # Carry the per-node outcome detail on the event so it's durably queryable
+    # via the EventLog/Historian — not just in the on-disk status.json dump. The
+    # event persist boundary sanitizes non-JSON terms, so pass the raw fields.
+    emit(
+      opts,
+      Event.stage_completed(node.id, status,
+        duration_ms: duration_ms,
+        context_updates: outcome.context_updates,
+        notes: outcome.notes
+      )
+    )
 
     {outcome, Map.delete(retries, node.id)}
   end

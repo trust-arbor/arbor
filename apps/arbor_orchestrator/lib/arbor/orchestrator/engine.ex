@@ -27,6 +27,7 @@ defmodule Arbor.Orchestrator.Engine do
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.{Handler, Registry}
+  alias Arbor.Orchestrator.JsonSafe
   alias Arbor.Orchestrator.Validation.Validator
 
   @type event :: map()
@@ -1295,9 +1296,9 @@ defmodule Arbor.Orchestrator.Engine do
         # a typed struct without a Jason.Encoder, a pid, a tuple — must NOT crash
         # the whole run (it did, at this `Jason.encode`). Lossy sanitization is
         # correct here precisely because nothing round-trips this file.
-        context_updates: json_safe(sanitized_updates),
+        context_updates: JsonSafe.coerce(sanitized_updates),
         notes: outcome.notes,
-        failure_reason: json_safe(outcome.failure_reason),
+        failure_reason: JsonSafe.coerce(outcome.failure_reason),
         timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
         status: to_string(outcome.status)
       }
@@ -1307,29 +1308,6 @@ defmodule Arbor.Orchestrator.Engine do
       File.write(status_path, encoded)
     end
   end
-
-  # Recursively coerce a term into something `Jason.encode/1` can serialize.
-  # Used for audit dumps (status.json) where lossy is acceptable and a crash is
-  # not. The JSON-friendly date/time structs are left intact (Jason encodes them);
-  # any other struct is flattened to a plain map; pids/refs/funcs/ports/tuples
-  # become inspect strings.
-  @json_safe_structs [DateTime, Date, Time, NaiveDateTime]
-  defp json_safe(%mod{} = v) when mod in @json_safe_structs, do: v
-  defp json_safe(%_{} = struct), do: struct |> Map.from_struct() |> json_safe()
-
-  defp json_safe(v) when is_map(v),
-    do: Map.new(v, fn {k, val} -> {json_safe_key(k), json_safe(val)} end)
-
-  defp json_safe(v) when is_list(v), do: Enum.map(v, &json_safe/1)
-  defp json_safe(v) when is_tuple(v), do: v |> Tuple.to_list() |> json_safe()
-
-  defp json_safe(v) when is_pid(v) or is_reference(v) or is_function(v) or is_port(v),
-    do: inspect(v)
-
-  defp json_safe(v), do: v
-
-  defp json_safe_key(k) when is_binary(k) or is_atom(k), do: k
-  defp json_safe_key(k), do: inspect(k)
 
   # `checkpoint.json` is RESUME state, not the audit record (audit is the event
   # stream + status.json). Only runs that can actually resume need it written —

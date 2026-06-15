@@ -82,13 +82,20 @@ defmodule Arbor.Orchestrator.Event do
     %{type: :stage_started, node_id: node_id}
   end
 
-  @doc "Build a stage_completed event."
-  def stage_completed(node_id, status, opts \\ []) do
-    event = %{type: :stage_completed, node_id: node_id, status: status}
+  @doc """
+  Build a stage_completed event.
 
-    if duration = Keyword.get(opts, :duration_ms),
-      do: Map.put(event, :duration_ms, duration),
-      else: event
+  Optionally carries the node's `:context_updates` and `:notes` so the per-node
+  outcome detail is a first-class, queryable event (durably persisted via the
+  EventLog) rather than living only in the on-disk `status.json` dump. The
+  persist boundary sanitizes non-JSON terms (`Orchestrator.Events`), so callers
+  pass the raw outcome fields.
+  """
+  def stage_completed(node_id, status, opts \\ []) do
+    %{type: :stage_completed, node_id: node_id, status: status}
+    |> maybe_put(:duration_ms, Keyword.get(opts, :duration_ms))
+    |> maybe_put(:context_updates, Keyword.get(opts, :context_updates))
+    |> maybe_put(:notes, Keyword.get(opts, :notes))
   end
 
   @doc "Build a stage_failed event."
