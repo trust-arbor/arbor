@@ -235,4 +235,19 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
 
     HeartbeatService.start_link(opts)
   end
+
+  describe "first beat at startup (A5)" do
+    test "first_beat_delay is a short jittered delay, far below the full interval" do
+      # Sample across the jitter range.
+      delays = for _ <- 1..200, do: HeartbeatService.first_beat_delay()
+
+      assert Enum.all?(delays, &(&1 > 0 and &1 <= 2_000)),
+             "first-beat delay must be a small bounded jitter"
+
+      # The point of A5: the first beat fires SOON after boot, not a full
+      # ~30s interval later — autonomous activity should begin from first boot.
+      assert Enum.max(delays) < 30_000,
+             "first-beat delay must be far below the default heartbeat interval (30s)"
+    end
+  end
 end
