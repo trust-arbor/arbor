@@ -56,6 +56,13 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
   @default_interval 30_000
 
+  # A5 (first beat at startup): the first heartbeat fires after a short jittered
+  # delay rather than a full @default_interval, so an agent begins autonomous
+  # activity ~immediately on boot (the intended UX) instead of ~30s later. The
+  # jitter spreads fleet starts so many agents booting at once don't thunder-herd
+  # the LLM providers on their first beat.
+  @first_beat_max_ms 2_000
+
   # ===========================================================================
   # Public API
   # ===========================================================================
@@ -104,8 +111,10 @@ defmodule Arbor.Orchestrator.HeartbeatService do
       heartbeat_in_flight: false
     }
 
-    # Schedule the first heartbeat
-    state = schedule_heartbeat(state)
+    # A5: fire the first beat soon (short jittered delay), not a full interval
+    # later — autonomous activity should begin right after boot, before any user
+    # message. Subsequent beats use the configured interval.
+    state = schedule_heartbeat(state, first_beat_delay())
 
     {:ok, state}
   end
@@ -233,11 +242,20 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   # Timer management
   # ===========================================================================
 
-  defp schedule_heartbeat(state) do
+  defp schedule_heartbeat(state), do: schedule_heartbeat(state, state.heartbeat_interval)
+
+  defp schedule_heartbeat(state, delay_ms) do
     if state.heartbeat_ref, do: Process.cancel_timer(state.heartbeat_ref)
-    ref = Process.send_after(self(), :heartbeat, state.heartbeat_interval)
+    ref = Process.send_after(self(), :heartbeat, delay_ms)
     %{state | heartbeat_ref: ref}
   end
+
+  # First-beat delay (A5): a jittered delay in (0, @first_beat_max_ms], always far
+  # below @default_interval, so the first heartbeat fires soon after init rather
+  # than a full interval later. Public for testing the invariant; internal otherwise.
+  @doc false
+  @spec first_beat_delay() :: pos_integer()
+  def first_beat_delay, do: :rand.uniform(@first_beat_max_ms)
 
   # ===========================================================================
   # Heartbeat values and engine opts
