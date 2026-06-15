@@ -213,6 +213,56 @@ defmodule Arbor.Security.EgressGateTest do
     end
   end
 
+  describe "authorize_egress/3 — standalone compute-node path (no operation cap)" do
+    test "dark by default → :allow", %{agent_id: agent} do
+      assert Arbor.Security.authorize_egress(agent, :external_provider) == :allow
+    end
+
+    test "enforcing + no egress standing → requires_approval", %{agent_id: agent} do
+      enforce!()
+
+      assert Arbor.Security.authorize_egress(agent, :external_provider) ==
+               {:requires_approval, :egress}
+    end
+
+    test "enforcing + profile grants standing → :allow (the heartbeat case)", %{agent_id: agent} do
+      enforce!()
+      Application.put_env(:arbor_security, :trust_policy_module, ProviderAllowedPolicy)
+      assert Arbor.Security.authorize_egress(agent, :external_provider) == :allow
+    end
+
+    test "enforcing + on_host (local LLM) → :allow", %{agent_id: agent} do
+      enforce!()
+      assert Arbor.Security.authorize_egress(agent, :on_host) == :allow
+    end
+
+    test "enforcing + untrusted data → external → blocked", %{agent_id: agent} do
+      enforce!()
+
+      assert {:error, {:egress_blocked, :external_provider, :untrusted}} =
+               Arbor.Security.authorize_egress(agent, :external_provider,
+                 egress_taint: :untrusted
+               )
+    end
+
+    test "enforcing + agent holds a covering egress cap → :allow", %{agent_id: agent} do
+      enforce!()
+
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: @resource,
+          principal_id: agent,
+          delegation_depth: 0,
+          constraints: %{egress: %{max_tier: :external_provider}},
+          metadata: %{test: true}
+        )
+
+      CapabilityStore.put(cap)
+
+      assert Arbor.Security.authorize_egress(agent, :external_provider) == :allow
+    end
+  end
+
   describe "enforcing: capability refinement (layer 2)" do
     setup do
       # A fresh agent whose ONLY cap carries an egress constraint, so it is the

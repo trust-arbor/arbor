@@ -53,6 +53,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.Constraint
   alias Arbor.Security.Constraint.RateLimiter
   alias Arbor.Security.AuthDecision
+  alias Arbor.Security.EgressGate
   alias Arbor.Security.Events
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
@@ -89,6 +90,70 @@ defmodule Arbor.Security do
         action,
         opts
       )
+
+  @doc """
+  Standalone egress authorization for callers WITHOUT an operation capability
+  (2026-06-14 URI-addressing-vs-classification decision) — notably the
+  compute-node LLM path (`LlmHandler`), where pipeline LLM calls have no per-op
+  capability. Unlike `authorize/4`, this checks ONLY egress (it does not require
+  or look up a capability authorizing the operation itself); it supplies the
+  agent's egress-constrained caps to `EgressGate` for the `:ask`-downgrade
+  refinement.
+
+  Inert (`:allow`) unless `config :arbor_security, :egress_gate_enforcing`. Emits
+  an `:egress_observed` signal for boundary-crossing egress regardless, so the
+  compute-node egress surface is observable while the gate is dark.
+
+  ## Parameters
+  - `egress_tier` — resolved `Arbor.Contracts.Security.Classification.egress_tier`
+  - `opts` — `:egress_taint` (level/Taint), `:egress_destination` (host/provider)
+
+  ## Returns
+  - `:allow`
+  - `{:requires_approval, :egress}` — the agent lacks standing; caller decides how
+    to surface (the compute-node path halts the node)
+  - `{:error, {:egress_blocked, tier, reason}}` — taint exfil or profile `:block`
+  """
+  @spec authorize_egress(String.t(), atom(), keyword()) ::
+          :allow
+          | {:requires_approval, :egress}
+          | {:error, {:egress_blocked, atom(), atom()}}
+  def authorize_egress(principal_id, egress_tier, opts \\ []) do
+    emit_egress_observed(principal_id, egress_tier, opts)
+
+    caps =
+      case CapabilityStore.list_for_principal(principal_id) do
+        {:ok, list} -> list
+        _ -> []
+      end
+
+    case EgressGate.decide(principal_id, egress_tier, opts, caps) do
+      :allow -> :allow
+      :ask -> {:requires_approval, :egress}
+      {:block, reason} -> {:error, {:egress_blocked, egress_tier, reason}}
+    end
+  end
+
+  # Observability for boundary-crossing egress on the standalone path. Fire-and-
+  # forget; only for external tiers (on_host/on_premises are low-signal).
+  defp emit_egress_observed(principal_id, tier, opts)
+       when tier in [:external_provider, :external_peer] do
+    if Code.ensure_loaded?(Arbor.Signals) and function_exported?(Arbor.Signals, :emit, 3) do
+      Arbor.Signals.emit(:security, :egress_observed, %{
+        agent_id: principal_id,
+        egress_tier: tier,
+        enforcing: EgressGate.enforcing?(),
+        egress_destination: Keyword.get(opts, :egress_destination),
+        source: :compute_node
+      })
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp emit_egress_observed(_principal_id, _tier, _opts), do: :ok
 
   @doc """
   Grant a capability to an agent.
