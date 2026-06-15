@@ -193,14 +193,29 @@ defmodule Arbor.Orchestrator.Session.Persistence do
             stop_reason: assistant_message.finish_reason,
             token_usage: token_usage,
             timestamp: assistant_completed_at,
-            metadata: %{
-              "turn_count" => ContextBuilder.get_turn_count(state) + 1
-            }
+            metadata: assistant_entry_metadata(state, assistant_message)
           })
         rescue
           e -> Logger.warning("[Session] Turn entry persistence failed: #{Exception.message(e)}")
         end
       end)
+    end
+  end
+
+  # Persist the assistant turn's status so restored history / eval-replay can tell
+  # :complete from :interrupted (system failure) from :cancelled (user). Carries
+  # the interrupted_reason for the non-complete cases. Lives in metadata so no
+  # SessionEntry schema change is needed.
+  defp assistant_entry_metadata(state, assistant_message) do
+    base = %{
+      "turn_count" => ContextBuilder.get_turn_count(state) + 1,
+      "status" => to_string(assistant_message.status)
+    }
+
+    if assistant_message.status != :complete and not is_nil(assistant_message.interrupted_reason) do
+      Map.put(base, "interrupted_reason", inspect(assistant_message.interrupted_reason))
+    else
+      base
     end
   end
 

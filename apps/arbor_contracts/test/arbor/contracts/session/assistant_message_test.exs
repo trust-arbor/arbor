@@ -125,4 +125,47 @@ defmodule Arbor.Contracts.Session.AssistantMessageTest do
       assert am.content == ""
     end
   end
+
+  describe "interrupted/4 + cancelled/3 (streaming partial preservation)" do
+    test "interrupted/4 preserves the partial content + system-failure reason" do
+      am =
+        AssistantMessage.interrupted("half a thoug", :task_crashed, @started,
+          completed_at: @completed,
+          first_token_at: ~U[2026-06-15 09:00:00.300Z]
+        )
+
+      assert am.status == :interrupted
+      assert am.content == "half a thoug"
+      assert am.interrupted_reason == :task_crashed
+      assert am.started_at == @started
+      assert am.completed_at == @completed
+      assert am.first_token_at == ~U[2026-06-15 09:00:00.300Z]
+      # providers don't return usage until the stream completes
+      assert am.usage == nil
+    end
+
+    test "cancelled/3 defaults the reason to :user_cancelled and uses :cancelled status" do
+      am = AssistantMessage.cancelled("partial answer", @started, completed_at: @completed)
+      assert am.status == :cancelled
+      assert am.interrupted_reason == :user_cancelled
+      assert am.content == "partial answer"
+    end
+
+    test "cancelled/3 accepts an explicit reason override" do
+      am = AssistantMessage.cancelled("x", @started, reason: :navigated_away)
+      assert am.status == :cancelled
+      assert am.interrupted_reason == :navigated_away
+    end
+
+    test "an interrupted partial still converts to persistence with its partial content" do
+      p =
+        "partial"
+        |> AssistantMessage.interrupted(:timeout, @started, completed_at: @completed)
+        |> AssistantMessage.to_persistence()
+
+      assert p.content == "partial"
+      assert p.timestamp == @completed
+      assert p.token_usage == nil
+    end
+  end
 end
