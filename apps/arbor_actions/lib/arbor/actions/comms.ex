@@ -210,4 +210,99 @@ defmodule Arbor.Actions.Comms do
       end
     end
   end
+
+  defmodule NotifySession do
+    @moduledoc """
+    Post a proactive, agent-initiated message into the agent's own chat session
+    (the A1 proactive notify channel).
+
+    Callable from heartbeat pipelines so an agent can surface progress or a thought
+    to the user *without* waiting for a turn — the old 💭 affordance, returned as a
+    governed channel. Emits an `:agent` / `:notification` signal; the dashboard
+    subscribes to `agent.*` and renders it as a visually-distinct agent-initiated
+    message.
+
+    ## Governance
+
+    Gated by the `arbor://comms/notify/session` capability (default mode **allow** +
+    a rate-limit constraint as the anti-spam budget; the user dials block/ask/auto
+    in their trust profile). **Egress-classed** (`:network_egress`): the notify
+    channel is an output boundary — agent-authored, possibly taint-derived content
+    reaches the user — so the egress ceiling + taint conjunct apply. The destination
+    is the user's session: `on_host` for a local dashboard (allowed), and a
+    remote/multi-user session would resolve to its host here and gate accordingly.
+
+    ## Examples
+
+        Arbor.Actions.Comms.NotifySession.run(
+          %{text: "Finished the dependency audit — 3 findings, posting details.", kind: :progress},
+          %{agent_id: "agent_abc", session_id: "sess_1"}
+        )
+    """
+
+    use Jido.Action,
+      name: "comms_notify_session",
+      description: "Post a proactive agent-initiated message into the session's chat channel",
+      category: "comms",
+      tags: ["comms", "notify", "proactive", "heartbeat"],
+      schema: [
+        text: [type: :string, required: true, doc: "Message to surface to the user"],
+        kind: [
+          type: :atom,
+          default: :notification,
+          doc: "Notification kind: :notification | :thought | :progress"
+        ]
+      ]
+
+    alias Arbor.Actions
+
+    def taint_roles do
+      %{text: :data, kind: :control}
+    end
+
+    # Egress classification (A1, 2026-06-15): the notify channel is an output
+    # boundary — agent-authored content reaches the user. Classed :network_egress
+    # so the egress ceiling + taint conjunct apply; the tier resolves from the
+    # session destination (egress_destination/2 → on_host for a local session).
+    def effect_class, do: :network_egress
+
+    # A local dashboard session lives on the same host (loopback) → :on_host →
+    # allowed. A remote/multi-user session would resolve to its actual host here
+    # once that lands, gating per the egress posture.
+    def egress_destination(_params, _context), do: "localhost"
+
+    @impl true
+    def run(params, context) do
+      Actions.emit_started(__MODULE__, params)
+
+      agent_id = context_get(context, :agent_id, "session.agent_id")
+      session_id = context_get(context, :session_id, "session.session_id")
+      kind = params[:kind] || :notification
+
+      data = %{
+        agent_id: agent_id,
+        session_id: session_id,
+        text: params.text,
+        kind: kind,
+        source: :heartbeat
+      }
+
+      # `agent.notification` → the dashboard's `agent.*` subscription; it filters by
+      # agent_id and renders proactive messages distinctly.
+      Arbor.Signals.emit(:agent, :notification, data)
+
+      result = %{status: :notified, kind: kind, agent_id: agent_id}
+      Actions.emit_completed(__MODULE__, result)
+      {:ok, result}
+    rescue
+      e ->
+        Actions.emit_failed(__MODULE__, Exception.message(e))
+        {:error, "notify_session failed: #{Exception.message(e)}"}
+    end
+
+    # Context may be atom-keyed (direct calls) or string-keyed "session.*" (engine).
+    defp context_get(context, atom_key, string_key) do
+      Map.get(context, atom_key) || Map.get(context, string_key)
+    end
+  end
 end

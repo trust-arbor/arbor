@@ -228,4 +228,32 @@ defmodule Arbor.Actions.CommsTest do
       assert result.messages == []
     end
   end
+
+  describe "NotifySession (A1 proactive notify channel)" do
+    alias Arbor.Actions.Comms.NotifySession
+
+    test "is egress-classed (output boundary) with an on-host local destination" do
+      # The notify channel surfaces agent content to the user — a disclosure
+      # boundary, so it flows through the egress ceiling + taint conjunct.
+      assert NotifySession.effect_class() == :network_egress
+      assert NotifySession.egress_destination(%{text: "hi"}, %{}) == "localhost"
+      assert NotifySession.taint_roles() == %{text: :data, kind: :control}
+    end
+
+    test "run/2 notifies and returns status, reading agent_id from atom-keyed context" do
+      ctx = %{agent_id: "agent_abc", session_id: "sess_1"}
+      assert {:ok, result} = NotifySession.run(%{text: "audit done", kind: :progress}, ctx)
+      assert result.status == :notified
+      assert result.kind == :progress
+      assert result.agent_id == "agent_abc"
+    end
+
+    test "run/2 also reads agent_id from engine string-keyed context (session.*)" do
+      ctx = %{"session.agent_id" => "agent_xyz", "session.session_id" => "sess_2"}
+      assert {:ok, result} = NotifySession.run(%{text: "thinking out loud"}, ctx)
+      # kind defaults to :notification when omitted
+      assert result.kind == :notification
+      assert result.agent_id == "agent_xyz"
+    end
+  end
 end
