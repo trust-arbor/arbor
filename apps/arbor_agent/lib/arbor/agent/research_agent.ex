@@ -35,7 +35,7 @@ defmodule Arbor.Agent.ResearchAgent do
 
   ## Options
 
-  - `:model_config` — LLM model configuration (default: trinity-large-preview)
+  - `:model_config` — LLM model configuration (default: gpt-oss-120b:free)
   - `:capabilities` — additional capabilities beyond template defaults
   - `:initial_goals` — override template initial goals
 

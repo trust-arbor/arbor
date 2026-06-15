@@ -188,7 +188,7 @@ defmodule Arbor.AI do
   ## Options
 
   - `:provider` - LLM provider atom (e.g. `:openrouter`, `:zai_coding_plan`)
-  - `:model` - Model string (e.g. `"arcee-ai/trinity-large-preview:free"`)
+  - `:model` - Model string (e.g. `"openai/gpt-oss-120b:free"`)
   - `:system_prompt` - Optional system prompt
   - `:max_tokens` - Max tokens (default: 4096)
   - `:temperature` - Sampling temperature (default: 0.7)

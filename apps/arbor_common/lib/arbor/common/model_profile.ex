@@ -10,7 +10,7 @@ defmodule Arbor.Common.ModelProfile do
 
   Supports multiple model ID formats:
 
-  - OpenRouter: `"arcee-ai/trinity-large-preview:free"`, `"anthropic/claude-sonnet-4"`
+  - OpenRouter: `"openai/gpt-oss-120b:free"`, `"anthropic/claude-sonnet-4"`
   - Provider-prefixed: `"anthropic:claude-3-5-sonnet-20241022"`, `"openai:gpt-4o"`
   - Bare: `"claude-sonnet-4"`, `"gpt-4o"`, `"gemini-2.0-flash"`
 
@@ -27,7 +27,7 @@ defmodule Arbor.Common.ModelProfile do
       ModelProfile.context_size("anthropic/claude-sonnet-4")
       # => 200_000
 
-      ModelProfile.effective_window_pct("arcee-ai/trinity-large-preview:free")
+      ModelProfile.effective_window_pct("openai/gpt-oss-120b:free")
       # => 0.75
 
       ModelProfile.get("openai:gpt-4o")
@@ -117,7 +117,8 @@ defmodule Arbor.Common.ModelProfile do
     },
 
     # ===== OpenRouter Free Models =====
-    # trinity-large-preview retired April 22 2026 — successors below.
+    # NOTE: arcee trinity-large-preview was retired by OpenRouter 2026-04-22;
+    # gpt-oss-120b:free / gpt-oss-20b:free are its successors (below).
     # See .arbor/roadmap/0-inbox/aggregator-provider-model-availability.md
     # for the broader pattern of tracking aggregator-served models.
     "openai/gpt-oss-120b:free" => %{

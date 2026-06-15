@@ -31,7 +31,7 @@ You must use file_read on each file individually.
 Working directory: /Users/azmaveth/code/trust-arbor/arbor
 """
 
-model = "arcee-ai/trinity-large-preview:free"
+model = "openai/gpt-oss-120b:free"
 max_turns = 200
 
 run_agent = fn mode ->
@@ -157,7 +157,9 @@ IO.puts("COMPARISON SUMMARY")
 IO.puts(String.duplicate("=", 70))
 
 format_result = fn
-  {:error, _} -> "FAILED (error)"
+  {:error, _} ->
+    "FAILED (error)"
+
   r ->
     "#{r.status} | #{r.turns} turns | #{length(r.tool_calls)} tool calls"
 end

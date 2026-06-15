@@ -10,11 +10,11 @@ defmodule Arbor.Agent.APIConfig do
   ## Examples
 
       # Resolve with model-specific overrides
-      config = APIConfig.resolve(model_id: "arcee-ai/trinity-large-preview:free")
+      config = APIConfig.resolve(model_id: "openai/gpt-oss-120b:free")
       config.max_tokens  #=> 32_768 (from per-model override)
 
       # Resolve with agent-level override on top
-      config = APIConfig.resolve(model_id: "arcee-ai/trinity-large-preview:free", max_tokens: 65_536)
+      config = APIConfig.resolve(model_id: "openai/gpt-oss-120b:free", max_tokens: 65_536)
       config.max_tokens  #=> 65_536 (agent-level wins)
   """
 

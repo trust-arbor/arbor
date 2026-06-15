@@ -25,16 +25,14 @@ Working directory: /Users/azmaveth/code/trust-arbor/arbor
 
 IO.puts("[Phase 1] Starting SimpleAgent transcript generation...")
 
-IO.puts(
-  "[Phase 1] Model: arcee-ai/trinity-large-preview:free, max_turns: 50, context_management: :none"
-)
+IO.puts("[Phase 1] Model: openai/gpt-oss-120b:free, max_turns: 50, context_management: :none")
 
 start = System.monotonic_time(:second)
 
 result =
   Arbor.Agent.SimpleAgent.run(task,
     provider: :openrouter,
-    model: "arcee-ai/trinity-large-preview:free",
+    model: "openai/gpt-oss-120b:free",
     max_turns: 50,
     working_dir: "/Users/azmaveth/code/trust-arbor/arbor",
     context_management: :none

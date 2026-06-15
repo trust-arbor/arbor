@@ -7,13 +7,13 @@ defmodule Mix.Tasks.Arbor.Eval do
   ## Run an eval
 
       mix arbor.eval --domain coding --model "kimi-k2.5:cloud" --provider ollama
-      mix arbor.eval --domain heartbeat --model "trinity-large-preview:free" --provider ollama
+      mix arbor.eval --domain heartbeat --model "gpt-oss-120b:free" --provider ollama
       mix arbor.eval --domain chat --model "claude-sonnet-4-5-20250929" --provider anthropic
 
   ## Multi-run for statistical analysis
 
       mix arbor.eval --domain coding --model "kimi-k2.5:cloud" --provider ollama --runs 10
-      mix arbor.eval --domain heartbeat --model "trinity-large-preview:free" --provider ollama --runs 5
+      mix arbor.eval --domain heartbeat --model "gpt-oss-120b:free" --provider ollama --runs 5
 
   ## Multi-model eval
 
