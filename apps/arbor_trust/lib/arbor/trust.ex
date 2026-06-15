@@ -295,7 +295,45 @@ defmodule Arbor.Trust do
   @spec record_rejection(String.t(), String.t()) :: :ok
   defdelegate record_rejection(agent_id, resource_uri), to: Arbor.Trust.ConfirmationTracker
 
-  @doc "Check if a capability has graduated to auto-approve for an agent."
+  @doc """
+  Whether a graduation suggestion has been emitted for an agent's URI prefix
+  (the approval streak reached the threshold).
+
+  ADVISORY ONLY — this does NOT grant authorization. Earned autonomy is
+  suggestion-only (TRUST-6, 2026-06-14): a human must accept a suggestion via
+  `accept_graduation/2`, which records it as a persisted profile rule.
+  Authorization reads the profile (`Policy.effective_mode/3`), never this flag.
+  """
   @spec graduated?(String.t(), String.t()) :: boolean()
   defdelegate graduated?(agent_id, resource_uri), to: Arbor.Trust.ConfirmationTracker
+
+  @doc """
+  Accept a graduation suggestion: promote a URI prefix to auto-approve for the
+  agent by recording it as a profile rule (`rules[prefix] => :auto`). This is the
+  human-in-the-loop acceptance — earned autonomy is NEVER applied without it.
+
+  Persists via the trust profile (survives restarts). The security ceiling still
+  caps the effective mode, so accepting a graduation on an always-locked or egress
+  URI does NOT bypass it — `effective_mode` takes the most restrictive of
+  rule/ceiling/model.
+  """
+  @spec accept_graduation(String.t(), String.t()) :: {:ok, term()} | {:error, term()}
+  def accept_graduation(agent_id, uri_prefix)
+      when is_binary(agent_id) and is_binary(uri_prefix) do
+    Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+      %{profile | rules: Map.put(profile.rules || %{}, uri_prefix, :auto)}
+    end)
+  end
+
+  @doc """
+  Revoke an accepted graduation: remove the auto rule for a URI prefix (reverting
+  to the profile baseline / gated). Use for demotion or expiry.
+  """
+  @spec revoke_graduation(String.t(), String.t()) :: {:ok, term()} | {:error, term()}
+  def revoke_graduation(agent_id, uri_prefix)
+      when is_binary(agent_id) and is_binary(uri_prefix) do
+    Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+      %{profile | rules: Map.delete(profile.rules || %{}, uri_prefix)}
+    end)
+  end
 end
