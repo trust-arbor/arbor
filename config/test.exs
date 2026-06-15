@@ -50,6 +50,10 @@ config :arbor_security,
   approval_guard_enabled: false,
   # URI registry enforcement needs the GenServer running.
   uri_registry_enforcement: false,
+  # Egress gate stays DARK in tests — the egress gate tests toggle enforcing
+  # per-test via Application.put_env. Explicit here so a future base-config
+  # change can't silently enforce egress across the whole suite.
+  egress_gate_enforcing: false,
   # Use ephemeral keypair in tests — no persistence side effects
   system_authority_mode: :ephemeral
 

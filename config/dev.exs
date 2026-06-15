@@ -159,3 +159,13 @@ config :arbor_ai, :acp_pool_config,
     claude: %{max: 10, idle_timeout_ms: 300_000},
     gemini: %{max: 3, idle_timeout_ms: 300_000}
   }
+
+# Egress gate — ENABLED (2026-06-14, after dark observation + live validation).
+# See `.arbor/decisions/2026-06-14-uri-addressing-vs-security-classification.md`.
+# Live data: normal agent egress = external_provider / taint=nil; idle heartbeats
+# don't egress. Default-allow posture lets normal cloud egress flow — the
+# always-on taint conjunct (untrusted/hostile -> external = block) and per-agent
+# egress_modes (:block/:ask) are the active protections.
+config :arbor_security, egress_gate_enforcing: true
+config :arbor_trust, default_egress_modes: %{external_provider: :allow}
+# To also gate homelab/LAN egress: config :arbor_security, gate_on_premises_egress: true
