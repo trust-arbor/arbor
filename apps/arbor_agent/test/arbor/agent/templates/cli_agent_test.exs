@@ -15,6 +15,8 @@ defmodule Arbor.Agent.Templates.CliAgentTest do
     end
 
     test "implements optional callbacks" do
+      Code.ensure_loaded!(CliAgent)
+
       assert function_exported?(CliAgent, :description, 0)
       assert function_exported?(CliAgent, :metadata, 0)
       assert function_exported?(CliAgent, :nature, 0)

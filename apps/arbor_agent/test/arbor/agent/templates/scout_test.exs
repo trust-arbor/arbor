@@ -15,6 +15,8 @@ defmodule Arbor.Agent.Templates.ScoutTest do
     end
 
     test "implements optional callbacks" do
+      Code.ensure_loaded!(Scout)
+
       assert function_exported?(Scout, :description, 0)
       assert function_exported?(Scout, :nature, 0)
       assert function_exported?(Scout, :values, 0)

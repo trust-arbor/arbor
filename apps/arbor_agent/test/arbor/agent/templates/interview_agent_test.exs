@@ -16,6 +16,8 @@ defmodule Arbor.Agent.Templates.InterviewAgentTest do
     end
 
     test "implements optional callbacks" do
+      Code.ensure_loaded!(InterviewAgent)
+
       assert function_exported?(InterviewAgent, :description, 0)
       assert function_exported?(InterviewAgent, :nature, 0)
       assert function_exported?(InterviewAgent, :values, 0)

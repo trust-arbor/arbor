@@ -15,6 +15,8 @@ defmodule Arbor.Agent.Templates.DiagnosticianTest do
     end
 
     test "implements optional callbacks" do
+      Code.ensure_loaded!(Diagnostician)
+
       assert function_exported?(Diagnostician, :description, 0)
       assert function_exported?(Diagnostician, :metadata, 0)
     end

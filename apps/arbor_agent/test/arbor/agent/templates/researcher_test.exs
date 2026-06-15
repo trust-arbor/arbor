@@ -15,6 +15,8 @@ defmodule Arbor.Agent.Templates.ResearcherTest do
     end
 
     test "implements optional callbacks" do
+      Code.ensure_loaded!(Researcher)
+
       assert function_exported?(Researcher, :description, 0)
       assert function_exported?(Researcher, :nature, 0)
       assert function_exported?(Researcher, :values, 0)

@@ -15,6 +15,8 @@ defmodule Arbor.Agent.Templates.ClaudeCodeTest do
     end
 
     test "implements optional callbacks" do
+      Code.ensure_loaded!(ClaudeCode)
+
       assert function_exported?(ClaudeCode, :description, 0)
       assert function_exported?(ClaudeCode, :metadata, 0)
       assert function_exported?(ClaudeCode, :nature, 0)
