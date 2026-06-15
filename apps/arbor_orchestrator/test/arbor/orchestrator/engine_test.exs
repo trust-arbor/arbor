@@ -440,8 +440,8 @@ defmodule Arbor.Orchestrator.EngineTest do
     digraph Flow {
       start [shape=Mdiamond]
       parallel [shape=component, join_policy="wait_all", fan_out="false"]
-      branch_a [label="A"]
-      branch_b [label="B"]
+      branch_a [label="A", simulate="true"]
+      branch_b [label="B", simulate="true"]
       join [shape=tripleoctagon]
       exit [shape=Msquare]
 
@@ -478,8 +478,8 @@ defmodule Arbor.Orchestrator.EngineTest do
     digraph Flow {
       start [shape=Mdiamond]
       parallel [shape=component, join_policy="wait_all", fan_out="false"]
-      branch_a [label="A"]
-      branch_b [label="B"]
+      branch_a [label="A", simulate="true"]
+      branch_b [label="B", simulate="true"]
       join [shape=tripleoctagon]
       exit [shape=Msquare]
 

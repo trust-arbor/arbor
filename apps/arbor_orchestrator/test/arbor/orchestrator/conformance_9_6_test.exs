@@ -8,8 +8,8 @@ defmodule Arbor.Orchestrator.Conformance96Test do
       start [shape=Mdiamond]
       gate [shape=hexagon, label="Proceed?", fan_out="false"]
       parallel [shape=component, fan_out="false"]
-      a [label="A"]
-      b [label="B"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
       join [shape=tripleoctagon]
       exit [shape=Msquare]
 

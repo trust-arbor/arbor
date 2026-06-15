@@ -7,9 +7,9 @@ defmodule Arbor.Orchestrator.Conformance37Test do
     digraph Flow {
       start [shape=Mdiamond]
       failing [simulate="fail", retry_target="retry_node", fallback_retry_target="fallback_node"]
-      fail_edge [label="fail edge route"]
-      retry_node [label="retry node"]
-      fallback_node [label="fallback node"]
+      fail_edge [label="fail edge route", simulate="true"]
+      retry_node [label="retry node", simulate="true"]
+      fallback_node [label="fallback node", simulate="true"]
       exit [shape=Msquare]
       start -> failing
       failing -> fail_edge [condition="outcome=fail"]
@@ -30,7 +30,7 @@ defmodule Arbor.Orchestrator.Conformance37Test do
     digraph Flow {
       start [shape=Mdiamond]
       failing [simulate="fail", retry_target="repair"]
-      repair [label="repair"]
+      repair [label="repair", simulate="true"]
       exit [shape=Msquare]
       start -> failing
       repair -> exit
