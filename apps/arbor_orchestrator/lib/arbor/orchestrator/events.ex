@@ -24,6 +24,7 @@ defmodule Arbor.Orchestrator.Events do
 
   require Logger
 
+  alias Arbor.Orchestrator.JsonSafe
   alias Arbor.Persistence.Event, as: PersistenceEvent
 
   @event_log_name :orchestrator_events
@@ -129,12 +130,16 @@ defmodule Arbor.Orchestrator.Events do
     |> Map.new()
   end
 
-  # Strip non-serializable values from event data before persistence.
-  # Engine events are plain maps, but some may contain structs or pids.
+  # Coerce event data into a JSON-encodable shape before persistence.
+  # Engine events are plain maps, but enriched ones (e.g. stage_completed with a
+  # node's context_updates) can carry typed structs, pids, tuples — which would
+  # raise at the EventLog's Jason.encode / Ecto :map cast. JsonSafe.coerce/1
+  # recursively flattens those (lossy is fine — this is an audit record), so the
+  # durable persist boundary can never crash the run.
   defp sanitize_data(event) when is_map(event) do
     event
     |> Map.drop([:timestamp])
-    |> Map.reject(fn {_k, v} -> is_pid(v) or is_reference(v) or is_function(v) end)
+    |> JsonSafe.coerce()
   end
 
   defp event_log_name do
