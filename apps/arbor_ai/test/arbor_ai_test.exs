@@ -79,7 +79,7 @@ defmodule Arbor.AITest do
       result =
         AI.generate_text("Say 'hello' and nothing else",
           provider: :openrouter,
-          model: "arcee-ai/trinity-large-preview:free"
+          model: "openai/gpt-oss-120b:free"
         )
 
       case result do

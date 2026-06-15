@@ -32,7 +32,7 @@ Working directory: /Users/azmaveth/code/trust-arbor/arbor
 """
 
 IO.puts("[Phase 1 Extended] Starting long-running SimpleAgent transcript generation...")
-IO.puts("[Phase 1 Extended] Model: arcee-ai/trinity-large-preview:free")
+IO.puts("[Phase 1 Extended] Model: openai/gpt-oss-120b:free")
 IO.puts("[Phase 1 Extended] Max turns: 200, context_management: :none")
 IO.puts("[Phase 1 Extended] Target: fill context window naturally to 50%+")
 
@@ -41,7 +41,7 @@ start = System.monotonic_time(:second)
 result =
   Arbor.Agent.SimpleAgent.run(task,
     provider: :openrouter,
-    model: "arcee-ai/trinity-large-preview:free",
+    model: "openai/gpt-oss-120b:free",
     max_turns: 200,
     working_dir: "/Users/azmaveth/code/trust-arbor/arbor",
     context_management: :none

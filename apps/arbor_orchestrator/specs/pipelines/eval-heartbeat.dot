@@ -4,7 +4,7 @@
 // Usage:
 //   Engine.run(graph, initial_values: %{
 //     "eval.provider" => "ollama",
-//     "eval.model" => "arcee-ai/trinity-large-preview:free"
+//     "eval.model" => "openai/gpt-oss-120b:free"
 //   })
 
 digraph EvalHeartbeat {

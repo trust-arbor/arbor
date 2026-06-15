@@ -24,7 +24,7 @@ defmodule Arbor.AI.FacadeMigrationTest do
       result =
         Arbor.AI.generate_text("test",
           provider: :openrouter,
-          model: "arcee-ai/trinity-large-preview:free",
+          model: "openai/gpt-oss-120b:free",
           max_tokens: 10
         )
 

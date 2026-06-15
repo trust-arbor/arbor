@@ -75,7 +75,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
     openai: "gpt-4.1",
     google: "gemini-2.5-flash",
     xai: "grok-3-mini",
-    openrouter: "arcee-ai/trinity-large-preview:free",
+    openrouter: "openai/gpt-oss-120b:free",
     acp: "claude",
     ollama_cloud: "llama3.2",
     lmstudio: "default"
