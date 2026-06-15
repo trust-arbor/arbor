@@ -40,9 +40,10 @@ defmodule Arbor.MixProject do
        git: "https://github.com/agentjido/jido_sandbox.git",
        ref: "7fc90881d3c8ca49e769413cc8217344f2b4c29a",
        override: true},
-      # Path dep while permission_mode work is unpublished. Flip back
-      # to `{:ex_mcp, "~> 0.12.0", override: true}` once published.
-      {:ex_mcp, path: "../../ex_mcp", override: true},
+      # ex_mcp 1.0.0-rc.1 is published to Hex (the permission_mode work that
+      # forced the temporary `path: "../../ex_mcp"` dep is now released). Back on
+      # Hex so CI can resolve it — the path dep had no source on the runner.
+      {:ex_mcp, "1.0.0-rc.1", override: true},
 
       # Dev/test tools
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
