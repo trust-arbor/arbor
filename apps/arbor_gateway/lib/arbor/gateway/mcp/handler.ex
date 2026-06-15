@@ -40,10 +40,13 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   @doc false
   def handle_tool_call(name, arguments, _state) do
-    case handle_call_tool(name, arguments, %{}) do
-      {:ok, result, _new_state} -> {:ok, result}
-      {:error, reason, _new_state} -> {:error, reason}
-    end
+    # Every `handle_call_tool/3` clause (incl. the catch-all) returns
+    # `{:ok, result, state}` — there's no `{:error, _, _}` return, so matching
+    # one is dead code (the Elixir 1.19 type-checker flags it). Match the only
+    # shape it can produce; if that ever changes this raises loudly rather than
+    # silently mismatching.
+    {:ok, result, _new_state} = handle_call_tool(name, arguments, %{})
+    {:ok, result}
   end
 
   # ===========================================================================
