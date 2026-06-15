@@ -58,8 +58,53 @@ jobs:
         run: mix sobelow --config --root apps/arbor_dashboard && mix sobelow --config --root apps/arbor_gateway
         continue-on-error: true
 
-      - name: Run full test suite
-        run: mix test --include llm --include integration --include slow --include database --timeout 120000
+      # Default lane excludes :database — it must be fully green on its own.
+      # The :database tests run in the dedicated `database` job below (they need
+      # the Repo started + a per-test Sandbox connection, via DatabaseCase).
+      - name: Run test suite (no database)
+        run: mix test --include llm --include integration --include slow --timeout 120000
+
+  # ── Database lane ───────────────────────────────────────────────────────────
+  # Runs ONLY the :database-tagged tests against Postgres. These need the Repo
+  # started + Sandbox isolation, which `Arbor.Persistence.DatabaseCase` provides.
+  # Split out from the default lane so a DB issue can't redden the whole suite
+  # (and vice-versa).
+  database:
+    name: Database Tests
+    runs-on: native
+    env:
+      MIX_ENV: test
+      ARBOR_COOKIE: ci_test_cookie_not_a_secret
+      ARBOR_DB: postgres
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up toolchain (mise → .tool-versions)
+        run: |
+          mise install
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build/test
+          key: mix-test-${{ hashFiles('.tool-versions', 'mix.lock') }}
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Compile
+        run: mix compile
+
+      - name: Setup test database
+        run: mix ecto.create -r Arbor.Persistence.Repo && mix ecto.migrate -r Arbor.Persistence.Repo
+
+      - name: Run database tests
+        run: mix test --only database --timeout 120000
 
   # ── Experimental tracking lane (allowed to fail) ────────────────────────────
   # Does Arbor build & test on the NEXT Erlang/Elixir generation? This lane
