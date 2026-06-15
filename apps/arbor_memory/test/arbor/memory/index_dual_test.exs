@@ -7,22 +7,20 @@ defmodule Arbor.Memory.IndexDualTest do
   Run with: mix test --include database
   """
 
-  use ExUnit.Case
+  use Arbor.Persistence.DatabaseCase
 
   @moduletag :database
 
   alias Arbor.Memory.{Embedding, Index}
-  alias Arbor.Persistence.Repo
-  alias Ecto.Adapters.SQL.Sandbox
 
+  # Must match the pgvector column dimension (vector(768)); pgvector rejects a
+  # mismatched insert. (Was 128, which crashed the dual-backend write once the
+  # tests actually ran against Postgres.)
   @test_agent_id "test_agent_dual_index"
-  @dimension 128
+  @dimension 768
 
   setup do
-    # Start the sandbox for database transactions
-    :ok = Sandbox.checkout(Repo)
-    Sandbox.mode(Repo, {:shared, self()})
-
+    # Repo is started + a Sandbox connection is checked out by DatabaseCase.
     # Clean up any existing test data
     Embedding.delete_all(@test_agent_id)
 
@@ -42,9 +40,27 @@ defmodule Arbor.Memory.IndexDualTest do
     {:ok, pid: pid}
   end
 
-  defp generate_embedding(seed \\ 0) do
+  defp generate_embedding(seed) do
     for i <- 0..(@dimension - 1) do
       :math.sin((seed + i) / 100) * 0.5 + 0.5
+    end
+  end
+
+  # Poll until `fun` returns true — a deterministic replacement for the fixed
+  # `Process.sleep` calls that waited on the best-effort eager pgvector write.
+  # Returns as soon as the condition holds (no wasted wall-clock) and flunks if
+  # it never does, so the eager write has provably landed before we assert and
+  # the test can't end with an in-flight write hitting a closed sandbox conn.
+  defp eventually(fun, timeout_ms \\ 2_000, interval_ms \\ 10) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_eventually(fun, deadline, interval_ms)
+  end
+
+  defp do_eventually(fun, deadline, interval_ms) do
+    cond do
+      fun.() -> :ok
+      System.monotonic_time(:millisecond) >= deadline -> flunk("condition not met within timeout")
+      true -> Process.sleep(interval_ms) && do_eventually(fun, deadline, interval_ms)
     end
   end
 
@@ -57,16 +73,12 @@ defmodule Arbor.Memory.IndexDualTest do
       embedding = generate_embedding(1)
       {:ok, _id} = Index.index(pid, "Dual backend test", %{type: :fact}, embedding: embedding)
 
-      # Give async write time to complete
-      Process.sleep(100)
+      # ETS write is synchronous
+      assert Index.stats(pid).entry_count == 1
 
-      # Should be in ETS
-      stats = Index.stats(pid)
-      assert stats.entry_count == 1
-
-      # Should also be in pgvector
-      pgvector_count = Embedding.count(@test_agent_id)
-      assert pgvector_count == 1
+      # pgvector write is eager + async — wait deterministically for it to land
+      eventually(fn -> Embedding.count(@test_agent_id) == 1 end)
+      assert Embedding.count(@test_agent_id) == 1
     end
 
     test "recall checks ETS first (cache hit)", %{pid: pid} do
@@ -136,12 +148,12 @@ defmodule Arbor.Memory.IndexDualTest do
       # Index with embedding (this creates a pending sync entry)
       {:ok, _id} = Index.index(pid, "Sync test", %{type: :fact}, embedding: embedding)
 
-      # Give async write time to complete
-      Process.sleep(100)
+      # Explicitly flush pending entries — this is the function under test, and
+      # it's synchronous, so no sleep/race.
+      assert {:ok, _count} = Index.sync_to_persistent(pid)
 
       # Verify it's in pgvector
-      pgvector_count = Embedding.count(@test_agent_id)
-      assert pgvector_count >= 1
+      assert Embedding.count(@test_agent_id) >= 1
     end
 
     test "returns error for non-dual backend" do
@@ -163,18 +175,16 @@ defmodule Arbor.Memory.IndexDualTest do
       embedding = generate_embedding(1)
       {:ok, id} = Index.index(pid, "Delete test", %{type: :fact}, embedding: embedding)
 
-      # Give async write time
-      Process.sleep(100)
+      # Wait for the eager pgvector write to land before deleting
+      eventually(fn -> Embedding.count(@test_agent_id) == 1 end)
 
       # Delete
       :ok = Index.delete(pid, id)
 
       # Verify removed from ETS
       assert {:error, :not_found} = Index.get(pid, id)
-
-      # Verify removed from pgvector (may take a moment)
-      Process.sleep(50)
-      # The pgvector entry uses the same ID
+      # The pgvector entry uses the same ID; ETS removal is the assertion this
+      # test guards (delete-to-pgvector propagation is covered elsewhere).
     end
   end
 end

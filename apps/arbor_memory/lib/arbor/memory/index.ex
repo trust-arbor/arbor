@@ -451,11 +451,20 @@ defmodule Arbor.Memory.Index do
     metadata_with_id = Map.put(entry.metadata, :id, entry_id)
 
     Task.start(fn ->
-      case Embedding.store(state.agent_id, entry.content, entry.embedding, metadata_with_id) do
-        {:ok, _id} -> :ok
-        {:error, reason} ->
-          require Logger
-          Logger.warning("Dual-mode pgvector write failed for #{entry_id}: #{inspect(reason)}")
+      # Best-effort eager persist. `Embedding.store` can RAISE (not just return
+      # {:error, _}) — e.g. a DB/connection error — so wrap it. An unhandled
+      # raise here used to crash the detached Task with a loud stacktrace (noisy
+      # in tests when a sandbox connection closes mid-flight; a transient blip in
+      # prod). Degrade any failure to a single warning, matching the {:error, _}
+      # path. The entry is already in `pending_sync` for a later
+      # `sync_to_persistent/2` flush, so a dropped eager write is recoverable.
+      try do
+        case Embedding.store(state.agent_id, entry.content, entry.embedding, metadata_with_id) do
+          {:ok, _id} -> :ok
+          {:error, reason} -> log_dual_write_failure(entry_id, reason)
+        end
+      rescue
+        e -> log_dual_write_failure(entry_id, e)
       end
     end)
 
@@ -465,6 +474,11 @@ defmodule Arbor.Memory.Index do
        | entry_count: state.entry_count + 1,
          pending_sync: MapSet.put(state.pending_sync, entry_id)
      }}
+  end
+
+  defp log_dual_write_failure(entry_id, reason) do
+    require Logger
+    Logger.warning("Dual-mode pgvector write failed for #{entry_id}: #{inspect(reason)}")
   end
 
   defp do_recall(query, opts, state) do
