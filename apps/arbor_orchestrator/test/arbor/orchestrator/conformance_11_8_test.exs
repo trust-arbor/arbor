@@ -15,8 +15,8 @@ defmodule Arbor.Orchestrator.Conformance118Test do
     digraph Flow {
       start [shape=Mdiamond]
       gate [shape=hexagon, label="Proceed?", fan_out="false"]
-      yes_path [label="Yes path"]
-      no_path [label="No path"]
+      yes_path [label="Yes path", simulate="true"]
+      no_path [label="No path", simulate="true"]
       exit [shape=Msquare]
       start -> gate
       gate -> yes_path [label="[Y] Yes"]
