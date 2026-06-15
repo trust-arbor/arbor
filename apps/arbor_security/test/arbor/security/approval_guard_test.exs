@@ -110,7 +110,9 @@ defmodule Arbor.Security.ApprovalGuardTest do
                ApprovalGuard.check(cap, agent_id, "arbor://code/write/#{agent_id}/impl/file.ex")
     end
 
-    test "gates codebase write for veteran agent (security ceiling enforces :ask)", %{agent_id: agent_id} do
+    test "gates codebase write for veteran agent (security ceiling enforces :ask)", %{
+      agent_id: agent_id
+    } do
       # Security ceilings in ProfileResolver set code/write to :ask regardless
       # of trust tier. Even veteran agents need approval for code writes.
       create_profile_at_tier(agent_id, :veteran)
@@ -121,7 +123,9 @@ defmodule Arbor.Security.ApprovalGuardTest do
                ApprovalGuard.check(cap, agent_id, "arbor://code/write/#{agent_id}/impl/file.ex")
     end
 
-    test "gates shell exec for restricted agent (cautious allows exec with approval)", %{agent_id: agent_id} do
+    test "gates shell exec for restricted agent (cautious allows exec with approval)", %{
+      agent_id: agent_id
+    } do
       create_profile_at_tier(agent_id, :untrusted)
       cap = make_capability("arbor://shell/exec/ls")
 
@@ -187,21 +191,26 @@ defmodule Arbor.Security.ApprovalGuardTest do
       {:ok, agent_id: agent_id}
     end
 
-    test "graduated gated capability auto-approves", %{agent_id: agent_id} do
+    # Security regression (TRUST-6, 2026-06-14): graduation is suggestion-only.
+    # An approval streak must NOT auto-approve a gated capability — that was the
+    # old `graduated?`-flag bypass, which even overrode the security ceiling.
+    # Earned autonomy now requires a human accepting (a persisted profile rule).
+    test "a graduation streak does NOT auto-approve a gated cap (suggestion-only)",
+         %{agent_id: agent_id} do
       create_profile_at_tier(agent_id, :trusted)
       uri = "arbor://code/write/#{agent_id}/impl/file.ex"
       cap = make_capability(uri)
 
-      # Without graduation: gated → escalation disabled
+      # Gated initially.
       assert {:error, :escalation_disabled} = ApprovalGuard.check(cap, agent_id, uri)
 
-      # Record enough approvals to graduate (codebase_write threshold: 3)
+      # Reaching the streak threshold emits a SUGGESTION but must not grant auth.
       Arbor.Trust.ConfirmationTracker.record_approval(agent_id, uri)
       Arbor.Trust.ConfirmationTracker.record_approval(agent_id, uri)
       Arbor.Trust.ConfirmationTracker.record_approval(agent_id, uri)
 
-      # Now graduated → auto-approved
-      assert :ok = ApprovalGuard.check(cap, agent_id, uri)
+      # Still gated — the streak alone is not authorization.
+      assert {:error, :escalation_disabled} = ApprovalGuard.check(cap, agent_id, uri)
     end
 
     test "shell never auto-approves even after graduation attempts", %{agent_id: agent_id} do
@@ -215,22 +224,6 @@ defmodule Arbor.Security.ApprovalGuardTest do
       end
 
       # Still gated → escalation
-      assert {:error, :escalation_disabled} = ApprovalGuard.check(cap, agent_id, uri)
-    end
-
-    test "rejection reverts graduation back to gated", %{agent_id: agent_id} do
-      create_profile_at_tier(agent_id, :trusted)
-      uri = "arbor://code/write/#{agent_id}/impl/file.ex"
-      cap = make_capability(uri)
-
-      # Graduate
-      Arbor.Trust.ConfirmationTracker.record_approval(agent_id, uri)
-      Arbor.Trust.ConfirmationTracker.record_approval(agent_id, uri)
-      Arbor.Trust.ConfirmationTracker.record_approval(agent_id, uri)
-      assert :ok = ApprovalGuard.check(cap, agent_id, uri)
-
-      # Rejection reverts
-      Arbor.Trust.ConfirmationTracker.record_rejection(agent_id, uri)
       assert {:error, :escalation_disabled} = ApprovalGuard.check(cap, agent_id, uri)
     end
   end

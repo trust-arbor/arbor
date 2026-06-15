@@ -95,30 +95,26 @@ defmodule Arbor.Security.ApprovalGuard do
         :ok
 
       :gated ->
-        # Check if graduated via confirm-then-automate
-        if graduated?(principal_id, resource_uri) do
-          safe_emit_signal(:approval_graduated, %{
-            principal_id: principal_id,
-            resource_uri: resource_uri
-          })
+        # No graduation bypass here. Per TRUST-6 (2026-06-14) graduation is
+        # suggestion-only: an accepted graduation is a profile rule, so
+        # confirmation_mode returns :auto (the branch above) and never reaches
+        # :gated. The old `graduated?`-flag bypass auto-approved on a streak
+        # alone, without a human accepting — removed. A :gated op always
+        # escalates for approval.
+        safe_emit_signal(:approval_gated, %{
+          principal_id: principal_id,
+          resource_uri: resource_uri
+        })
 
-          :ok
-        else
-          safe_emit_signal(:approval_gated, %{
-            principal_id: principal_id,
-            resource_uri: resource_uri
-          })
-
-          # Delegate to Escalation for consensus-based approval
-          Escalation.maybe_escalate(
-            %{
-              capability
-              | constraints: Map.put(capability.constraints, :requires_approval, true)
-            },
-            principal_id,
-            resource_uri
-          )
-        end
+        # Delegate to Escalation for consensus-based approval
+        Escalation.maybe_escalate(
+          %{
+            capability
+            | constraints: Map.put(capability.constraints, :requires_approval, true)
+          },
+          principal_id,
+          resource_uri
+        )
 
       :deny ->
         Logger.info("Policy denied access for #{principal_id} to #{resource_uri}",
@@ -152,19 +148,6 @@ defmodule Arbor.Security.ApprovalGuard do
   defp trust_policy_available? do
     Code.ensure_loaded?(Arbor.Trust.Policy) and
       function_exported?(Arbor.Trust.Policy, :confirmation_mode, 2)
-  end
-
-  defp graduated?(principal_id, resource_uri) do
-    if Code.ensure_loaded?(Arbor.Trust.ConfirmationTracker) and
-         function_exported?(Arbor.Trust.ConfirmationTracker, :graduated?, 2) do
-      apply(Arbor.Trust.ConfirmationTracker, :graduated?, [principal_id, resource_uri])
-    else
-      false
-    end
-  rescue
-    _ -> false
-  catch
-    :exit, _ -> false
   end
 
   defp safe_emit_signal(type, data) do

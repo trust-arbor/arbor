@@ -37,12 +37,22 @@ defmodule Arbor.Trust.ConfirmationTracker do
         "arbor://code/write" => 5
       }
 
-  ## Storage
+  ## Storage & persistence (TRUST-6, 2026-06-14)
 
-  State is stored in ETS for O(1) lookups during authorization.
-  Currently does not persist across restarts (fail-safe: fresh start
-  is more conservative). Persistence can be added via BufferedStore
-  when needed.
+  This tracker holds only the **transient** streak counters in ETS — the
+  bookkeeping *toward* a suggestion. It does NOT persist across restarts, and
+  that is correct: re-accumulating a streak after a reboot is harmless.
+
+  The **earned result** does not live here. When a human accepts a graduation
+  suggestion (`Arbor.Trust.accept_graduation/2`), it is recorded as a profile
+  rule (`rules[prefix] => :auto`) on the agent's trust profile, which already
+  persists. So earned autonomy survives restarts via the profile — there is no
+  separate persistence mechanism here to protect.
+
+  Critically, this tracker is **advisory only**: nothing in the authorization
+  path reads its `graduated?` flag. Authorization reads the profile
+  (`Policy.effective_mode/3`), where the security ceiling still caps the result
+  (graduating an always-locked/egress URI cannot bypass its ceiling).
   """
 
   use GenServer
@@ -214,10 +224,11 @@ defmodule Arbor.Trust.ConfirmationTracker do
       threshold = threshold_for(uri_prefix)
 
       updated =
-        %{entry |
-          approvals: entry.approvals + 1,
-          streak: entry.streak + 1,
-          last_confirmation: DateTime.utc_now()
+        %{
+          entry
+          | approvals: entry.approvals + 1,
+            streak: entry.streak + 1,
+            last_confirmation: DateTime.utc_now()
         }
 
       # Check graduation
@@ -225,10 +236,11 @@ defmodule Arbor.Trust.ConfirmationTracker do
         if should_graduate?(updated, threshold) do
           Logger.info(
             "[ConfirmationTracker] URI prefix #{uri_prefix} reached graduation threshold " <>
-            "for agent #{agent_id} (streak: #{updated.streak}, threshold: #{threshold})",
+              "for agent #{agent_id} (streak: #{updated.streak}, threshold: #{threshold})",
             agent_id: agent_id,
             uri_prefix: uri_prefix
           )
+
           {%{updated | graduated: true, graduated_at: DateTime.utc_now()}, not entry.graduated}
         else
           {updated, false}
@@ -275,12 +287,13 @@ defmodule Arbor.Trust.ConfirmationTracker do
       was_graduated = entry.graduated
 
       updated =
-        %{entry |
-          rejections: entry.rejections + 1,
-          streak: 0,
-          graduated: false,
-          graduated_at: nil,
-          last_confirmation: DateTime.utc_now()
+        %{
+          entry
+          | rejections: entry.rejections + 1,
+            streak: 0,
+            graduated: false,
+            graduated_at: nil,
+            last_confirmation: DateTime.utc_now()
         }
 
       :ets.insert(@table, {{agent_id, uri_prefix}, updated})
@@ -288,7 +301,7 @@ defmodule Arbor.Trust.ConfirmationTracker do
       if was_graduated do
         Logger.info(
           "[ConfirmationTracker] URI prefix #{uri_prefix} reverted from graduated " <>
-          "for agent #{agent_id} (rejection)",
+            "for agent #{agent_id} (rejection)",
           agent_id: agent_id,
           uri_prefix: uri_prefix
         )

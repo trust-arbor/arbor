@@ -516,8 +516,12 @@ defmodule Arbor.Security.AuthDecision do
       not needs_approval ->
         {:authorized, auth}
 
-      graduated?(auth.principal_id, resource_uri) ->
-        {:authorized, auth}
+      # Earned autonomy (graduation) is NOT an auth bypass here. Per TRUST-6
+      # (2026-06-14) graduation is suggestion-only: an accepted graduation is a
+      # profile rule (`rules[prefix] => :auto`), so it flows through
+      # `trust_demands_approval` above (effective_mode returns :auto → not gated).
+      # The old `graduated?`-flag bypass auto-approved on a streak alone, without
+      # a human accepting — removed.
 
       # Pre-approval bypass applies ONLY when the ceiling (trust profile)
       # is the reason for asking AND the cap doesn't itself opt into
@@ -682,20 +686,6 @@ defmodule Arbor.Security.AuthDecision do
     else
       Arbor.Trust.Policy
     end
-  end
-
-  defp graduated?(principal_id, resource_uri) do
-    tracker = Arbor.Trust.ConfirmationTracker
-
-    if Code.ensure_loaded?(tracker) and function_exported?(tracker, :graduated?, 2) do
-      apply(tracker, :graduated?, [principal_id, resource_uri])
-    else
-      false
-    end
-  rescue
-    _ -> false
-  catch
-    :exit, _ -> false
   end
 
   # Check if a capability URI matches a resource URI.
