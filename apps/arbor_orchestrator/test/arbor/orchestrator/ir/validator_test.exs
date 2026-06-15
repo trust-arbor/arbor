@@ -14,7 +14,10 @@ defmodule Arbor.Orchestrator.IR.ValidatorTest do
   defp simple_graph do
     %Graph{id: "Test"}
     |> Graph.add_node(%Node{id: "start", attrs: %{"shape" => "Mdiamond"}})
-    |> Graph.add_node(%Node{id: "work", attrs: %{"prompt" => "Do something"}})
+    |> Graph.add_node(%Node{
+      id: "work",
+      attrs: %{"prompt" => "Do something", "simulate" => "false"}
+    })
     |> Graph.add_node(%Node{id: "done", attrs: %{"shape" => "Msquare"}})
     |> Graph.add_edge(%Edge{from: "start", to: "work"})
     |> Graph.add_edge(%Edge{from: "work", to: "done"})
@@ -40,7 +43,9 @@ defmodule Arbor.Orchestrator.IR.ValidatorTest do
   defp missing_prompt_graph do
     %Graph{id: "MissingPrompt"}
     |> Graph.add_node(%Node{id: "start", attrs: %{"shape" => "Mdiamond"}})
-    |> Graph.add_node(%Node{id: "no_prompt", attrs: %{}})
+    # `simulate` present so this fixture isolates the missing-`prompt` error
+    # (the require-explicit-simulate gate would otherwise add a second error).
+    |> Graph.add_node(%Node{id: "no_prompt", attrs: %{"simulate" => "false"}})
     |> Graph.add_node(%Node{id: "done", attrs: %{"shape" => "Msquare"}})
     |> Graph.add_edge(%Edge{from: "start", to: "no_prompt"})
     |> Graph.add_edge(%Edge{from: "no_prompt", to: "done"})

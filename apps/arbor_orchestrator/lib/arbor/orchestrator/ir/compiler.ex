@@ -104,7 +104,11 @@ defmodule Arbor.Orchestrator.IR.Compiler do
   defp compile_standard_node(%Node{} = node, handler_type) do
     {handler_module, %Node{} = prepared_node} = resolve_handler_with_attrs(node)
     schema = HandlerSchema.for_type(handler_type)
-    schema_errors = HandlerSchema.validate_attrs(handler_type, prepared_node.attrs)
+
+    schema_errors =
+      HandlerSchema.validate_attrs(handler_type, prepared_node.attrs) ++
+        validate_simulate_explicit(handler_module, prepared_node.attrs)
+
     idempotency = Handler.idempotency_of(handler_module)
     data_class = resolve_data_classification(prepared_node, schema)
     capabilities = resolve_capabilities(prepared_node, schema)
@@ -128,6 +132,35 @@ defmodule Arbor.Orchestrator.IR.Compiler do
   defp resolve_handler_with_attrs(%Node{} = node) do
     Registry.resolve_with_attrs(node)
   end
+
+  @llm_handler Arbor.Orchestrator.Handlers.LlmHandler
+  @compute_handler Arbor.Orchestrator.Handlers.ComputeHandler
+
+  # Require an explicit `simulate=` on any node that will actually call an LLM:
+  # a direct `llm` node, or a `compute` node whose purpose is "llm" (the default).
+  # A bare such node USED to silently SIMULATE — emitting plausible-but-fake output
+  # ("[Simulated] Response for stage: ...") with only a per-call Logger.warning. The
+  # correct-by-default fix (Hysun, 2026-06-15) is to make the author DECLARE intent:
+  # this is a load-time `:error` (caught by Validator.validate_or_error before the
+  # engine runs), telling them to set simulate="false" (real call) or "true" (mock).
+  # Non-LLM compute purposes (routing, score, …) never reach LlmHandler and are
+  # unaffected — no friction where there's no LLM call.
+  defp validate_simulate_explicit(handler_module, attrs) do
+    if simulate_required?(handler_module, attrs) and Map.get(attrs, "simulate") in [nil, ""] do
+      [
+        {:error,
+         "compute/llm node must declare an explicit simulate= attribute: a missing " <>
+           "simulate no longer defaults to simulation. Set simulate=\"false\" for a " <>
+           "real LLM call, or simulate=\"true\" to mock it."}
+      ]
+    else
+      []
+    end
+  end
+
+  defp simulate_required?(@llm_handler, _attrs), do: true
+  defp simulate_required?(@compute_handler, attrs), do: Map.get(attrs, "purpose", "llm") == "llm"
+  defp simulate_required?(_other, _attrs), do: false
 
   defp resolve_handler_module(%Node{} = node) do
     Registry.resolve(node)

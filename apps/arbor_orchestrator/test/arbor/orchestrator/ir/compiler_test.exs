@@ -9,7 +9,10 @@ defmodule Arbor.Orchestrator.IR.CompilerTest do
   defp simple_graph do
     %Graph{id: "Test"}
     |> Graph.add_node(%Node{id: "start", attrs: %{"shape" => "Mdiamond"}})
-    |> Graph.add_node(%Node{id: "work", attrs: %{"prompt" => "Do something"}})
+    |> Graph.add_node(%Node{
+      id: "work",
+      attrs: %{"prompt" => "Do something", "simulate" => "false"}
+    })
     |> Graph.add_node(%Node{id: "done", attrs: %{"shape" => "Msquare"}})
     |> Graph.add_edge(%Edge{from: "start", to: "work"})
     |> Graph.add_edge(%Edge{from: "work", to: "done"})
@@ -222,6 +225,46 @@ defmodule Arbor.Orchestrator.IR.CompilerTest do
       assert "llm_query" in caps
       assert "custom_cap" in caps
       assert "another_cap" in caps
+    end
+  end
+
+  describe "require-explicit simulate gate (no silent simulation)" do
+    defp sim_gate_graph(node_attrs) do
+      %Graph{id: "SimGate"}
+      |> Graph.add_node(%Node{id: "start", attrs: %{"shape" => "Mdiamond"}})
+      |> Graph.add_node(%Node{id: "think", attrs: node_attrs})
+      |> Graph.add_node(%Node{id: "done", attrs: %{"shape" => "Msquare"}})
+      |> Graph.add_edge(%Edge{from: "start", to: "think"})
+      |> Graph.add_edge(%Edge{from: "think", to: "done"})
+    end
+
+    defp simulate_errors(node_attrs) do
+      {:ok, compiled} = Compiler.compile(sim_gate_graph(node_attrs))
+
+      compiled.nodes
+      |> Map.values()
+      |> Enum.flat_map(& &1.schema_errors)
+      |> Enum.filter(fn {sev, msg} -> sev == :error and msg =~ "simulate" end)
+    end
+
+    test "a compute node WITHOUT simulate= is a schema error (no silent simulation)" do
+      errs = simulate_errors(%{"type" => "compute", "prompt" => "reason about X"})
+      assert length(errs) == 1
+      assert elem(hd(errs), 1) =~ "explicit simulate="
+    end
+
+    test "a bare-prompt (codergen) node WITHOUT simulate= is also caught — it's the LLM path too" do
+      assert length(simulate_errors(%{"prompt" => "reason about X"})) == 1
+    end
+
+    test "an LLM node WITH explicit simulate= compiles clean" do
+      assert simulate_errors(%{"type" => "compute", "prompt" => "x", "simulate" => "false"}) == []
+      assert simulate_errors(%{"prompt" => "x", "simulate" => "true"}) == []
+    end
+
+    test "a non-LLM compute purpose (routing) does NOT require simulate= (no friction off the LLM path)" do
+      assert simulate_errors(%{"type" => "compute", "purpose" => "routing", "prompt" => "x"}) ==
+               []
     end
   end
 end
