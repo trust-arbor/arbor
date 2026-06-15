@@ -50,6 +50,8 @@ defmodule Arbor.Signals do
 
   @behaviour Arbor.Contracts.API.Signals
 
+  require Logger
+
   alias Arbor.Signals.{Bus, Config, Relay, Signal, Store, Taint, TopicKeys}
 
   # ===========================================================================
@@ -132,15 +134,27 @@ defmodule Arbor.Signals do
           try do
             apply(durable_mod, :append, [stream_id, event])
           rescue
-            _ -> :ok
+            e ->
+              # An audit you rely on must surface its gaps. The durable write
+              # stays best-effort (it must never fail the caller), but a failure
+              # is logged rather than silently swallowed, so a persistence outage
+              # is detectable instead of producing invisible holes in the record.
+              Logger.warning(
+                "[Signals.durable_emit] durable EventLog persistence failed for " <>
+                  "stream #{inspect(stream_id)}: #{Exception.message(e)}"
+              )
           end
         end)
       end
     end
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning(
+        "[Signals.durable_emit] persist_to_historian failed: #{Exception.message(e)}"
+      )
   catch
-    :exit, _ -> :ok
+    :exit, reason ->
+      Logger.warning("[Signals.durable_emit] persist_to_historian exited: #{inspect(reason)}")
   end
 
   @doc """

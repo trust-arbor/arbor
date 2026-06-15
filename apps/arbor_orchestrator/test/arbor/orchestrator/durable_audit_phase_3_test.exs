@@ -9,7 +9,7 @@ defmodule Arbor.Orchestrator.DurableAuditPhase3Test do
   """
   use ExUnit.Case, async: false
 
-  alias Arbor.Orchestrator.{Event, Events, JsonSafe}
+  alias Arbor.Orchestrator.{Engine, Event, Events, JsonSafe}
 
   @moduletag :fast
 
@@ -135,6 +135,52 @@ defmodule Arbor.Orchestrator.DurableAuditPhase3Test do
       assert is_map(thing), "the struct was sanitized to a plain map for durable audit"
       assert thing[:note] == "audit me"
       assert persisted.data[:notes] == "completed"
+    end
+  end
+
+  describe "C — status.json is gated by :status_files_enabled" do
+    setup do
+      tmp = Path.join(System.tmp_dir!(), "arbor_statusgate_#{System.unique_integer([:positive])}")
+      prev = Application.get_env(:arbor_orchestrator, :status_files_enabled)
+
+      on_exit(fn ->
+        if is_nil(prev),
+          do: Application.delete_env(:arbor_orchestrator, :status_files_enabled),
+          else: Application.put_env(:arbor_orchestrator, :status_files_enabled, prev)
+
+        File.rm_rf(tmp)
+      end)
+
+      %{tmp: tmp}
+    end
+
+    @gate_dot """
+    digraph T {
+      start [shape=Mdiamond]
+      n [type="transform", transform="identity", source_key="x", output_key="y"]
+      done [shape=Msquare]
+      start -> n -> done
+    }
+    """
+
+    test "default (enabled) writes the per-node status.json", %{tmp: tmp} do
+      Application.delete_env(:arbor_orchestrator, :status_files_enabled)
+      {:ok, g} = Arbor.Orchestrator.compile(@gate_dot)
+
+      assert {:ok, _} =
+               Engine.run(g, logs_root: tmp, resumable: false, initial_values: %{"x" => "hi"})
+
+      assert File.exists?(Path.join([tmp, "n", "status.json"]))
+    end
+
+    test "disabled retires status.json (durable event stream is the audit record)", %{tmp: tmp} do
+      Application.put_env(:arbor_orchestrator, :status_files_enabled, false)
+      {:ok, g} = Arbor.Orchestrator.compile(@gate_dot)
+
+      assert {:ok, _} =
+               Engine.run(g, logs_root: tmp, resumable: false, initial_values: %{"x" => "hi"})
+
+      refute File.exists?(Path.join([tmp, "n", "status.json"]))
     end
   end
 end

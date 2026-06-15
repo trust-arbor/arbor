@@ -59,14 +59,21 @@ defmodule Arbor.Orchestrator.Events do
 
   @doc """
   Query pipeline events for a specific run.
+
+  Reads from the same place `dual_emit` durably writes: when the durable Repo is
+  running, that's the Ecto-backed EventLog (cross-restart, SQLite or Postgres);
+  otherwise it falls back to the configured in-memory backend. This keeps the
+  read aligned with the write (previously the read pointed at a private
+  `:orchestrator_events` log that the durable write never populated).
   """
   @spec read_run_events(String.t(), keyword()) :: {:ok, [PersistenceEvent.t()]} | {:error, term()}
   def read_run_events(run_id, opts \\ []) do
     stream_id = stream_id(run_id)
+    {name, backend} = read_target()
 
     Arbor.Persistence.read_stream(
-      event_log_name(),
-      event_log_backend(),
+      name,
+      backend,
       stream_id,
       opts
     )
@@ -140,6 +147,17 @@ defmodule Arbor.Orchestrator.Events do
     event
     |> Map.drop([:timestamp])
     |> JsonSafe.coerce()
+  end
+
+  # Where read_run_events reads from, aligned with where dual_emit writes:
+  # the durable Ecto EventLog when the Repo is up (cross-restart audit), else the
+  # configured in-memory backend (dev/test, or the events_test ETS alignment).
+  defp read_target do
+    if Process.whereis(Arbor.Persistence.Repo) do
+      {nil, Arbor.Persistence.EventLog.Ecto}
+    else
+      {event_log_name(), event_log_backend()}
+    end
   end
 
   defp event_log_name do
