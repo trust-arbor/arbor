@@ -13,8 +13,12 @@ jobs:
     env:
       MIX_ENV: test
       ARBOR_COOKIE: ci_test_cookie_not_a_secret
-      # LLM configuration for tests that make real API calls
-      UNIFIED_LLM_DEFAULT_MODEL: "arcee-ai/trinity-large-preview:free"
+      # LLM configuration for tests that make real API calls.
+      # arcee-ai/trinity-large-preview:free was RETIRED (Apr 22); the current
+      # free default is openai/gpt-oss-120b:free (config/config.exs, since
+      # 2026-06-04). CI was still forcing the retired model via this env var
+      # (read by Arbor.AI.UnifiedBridge), so :llm tests failed.
+      UNIFIED_LLM_DEFAULT_MODEL: "openai/gpt-oss-120b:free"
       UNIFIED_LLM_DEFAULT_PROVIDER: openrouter
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       # Enable Postgres for database tests
