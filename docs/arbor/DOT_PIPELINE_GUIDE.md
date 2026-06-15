@@ -70,6 +70,7 @@ Attributes are key-value pairs in square brackets. Values must be quoted:
 my_node [
   type="compute"
   prompt="Analyze the code in $goal"
+  simulate="false"
   llm_model="claude-sonnet-4-5-20250929"
   temperature="0.7"
   max_tokens="8192"
@@ -198,11 +199,25 @@ General-purpose computation node. Dispatches by `purpose` attribute. Default pur
 | `max_turns` | `"1"` | Tool-use loop iterations |
 | `use_tools` | `"false"` | Enable tool access |
 | `tools` | _(all)_ | Comma-separated tool whitelist |
-| `simulate` | `"true"` | `true` (mock), `false` (real), `fail`, `retry`, `fail_once` |
+| `simulate` | **REQUIRED — no default** | `false` (real LLM call), `true` (mock), `fail`, `retry`, `fail_once`. Omitting it on an LLM node is a load-time validation error (see callout below). |
 | `timeout` | `"120000"` | LLM call timeout in ms |
 | `reasoning_effort` | _(none)_ | `low`, `medium`, `high` (for supported models) |
 
 Idempotency: `idempotent_with_key`. Aliases: `codergen`, `routing.select`.
+
+> **⚠️ `simulate` is MANDATORY on every LLM node.** Any node that calls a model —
+> a `compute` node with `purpose="llm"` (the default), a `codergen`/bare-prompt
+> node, or a `type="llm"` node — **must** declare `simulate`. There is no default:
+> a missing `simulate` is a **load-time validation error** (the graph won't run).
+>
+> - `simulate="false"` → real LLM call (fails loudly if no provider is configured)
+> - `simulate="true"` → deterministic mock string (for tests / dry runs)
+>
+> This used to default to `true` (silent mock), which let pipelines "succeed" with
+> plausible-but-fake output — the bug had 9 of 13 stdlib pipelines silently mocking.
+> Declaring intent is now required so an author (or an agent composing a DOT) can't
+> accidentally ship a fake-output pipeline. Non-LLM `compute` purposes (e.g.
+> `purpose="routing"`) do **not** require `simulate`.
 
 #### `transform`
 
