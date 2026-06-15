@@ -10,7 +10,7 @@ defmodule Arbor.Orchestrator.Handlers.PipelineValidateHandlerTest do
   @valid_dot """
   digraph Valid {
     start [shape=Mdiamond]
-    work [shape=box]
+    work [shape=box, simulate="true"]
     done [shape=Msquare]
     start -> work -> done
   }

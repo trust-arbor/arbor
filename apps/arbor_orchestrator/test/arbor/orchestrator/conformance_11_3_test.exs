@@ -76,11 +76,11 @@ defmodule Arbor.Orchestrator.Conformance113Test do
     digraph Flow {
       start [shape=Mdiamond]
       chooser [type="priority.custom", simulate="fail", fan_out="false"]
-      condition_wins [label="Condition wins"]
-      preferred [label="Preferred"]
-      suggested [label="Suggested"]
-      weighted [label="Weighted"]
-      lexical [label="Lexical"]
+      condition_wins [label="Condition wins", simulate="true"]
+      preferred [label="Preferred", simulate="true"]
+      suggested [label="Suggested", simulate="true"]
+      weighted [label="Weighted", simulate="true"]
+      lexical [label="Lexical", simulate="true"]
       exit [shape=Msquare]
 
       start -> chooser
@@ -111,9 +111,9 @@ defmodule Arbor.Orchestrator.Conformance113Test do
     digraph Flow {
       start [shape=Mdiamond]
       chooser [type="priority.custom", fan_out="false"]
-      preferred [label="Preferred", weight=1]
-      suggested [label="Suggested", weight=999]
-      weighted [label="Weighted", weight=50]
+      preferred [label="Preferred", weight=1, simulate="true"]
+      suggested [label="Suggested", weight=999, simulate="true"]
+      weighted [label="Weighted", weight=50, simulate="true"]
       exit [shape=Msquare]
 
       start -> chooser

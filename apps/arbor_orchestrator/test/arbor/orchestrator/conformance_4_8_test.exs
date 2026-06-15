@@ -7,8 +7,8 @@ defmodule Arbor.Orchestrator.Conformance48Test do
     digraph Flow {
       start [shape=Mdiamond]
       parallel [shape=component, fan_out="false", join_policy="wait_all"]
-      a [label="A"]
-      b [label="B"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
       join [shape=tripleoctagon]
       exit [shape=Msquare]
       start -> parallel
@@ -51,9 +51,9 @@ defmodule Arbor.Orchestrator.Conformance48Test do
     digraph Flow {
       start [shape=Mdiamond]
       parallel [shape=component, fan_out="false", join_policy="k_of_n", join_k=2]
-      a [label="A"]
-      b [label="B"]
-      c [label="C"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
+      c [label="C", simulate="true"]
       join [shape=tripleoctagon]
       exit [shape=Msquare]
       start -> parallel
@@ -71,9 +71,9 @@ defmodule Arbor.Orchestrator.Conformance48Test do
     digraph Flow {
       start [shape=Mdiamond]
       parallel [shape=component, fan_out="false", join_policy="quorum", quorum_fraction=0.7]
-      a [label="A"]
-      b [label="B"]
-      c [label="C"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
+      c [label="C", simulate="true"]
       join [shape=tripleoctagon]
       exit [shape=Msquare]
       start -> parallel
@@ -112,8 +112,8 @@ defmodule Arbor.Orchestrator.Conformance48Test do
     digraph Flow {
       start [shape=Mdiamond]
       parallel [shape=component, fan_out="false", join_policy="first_success"]
-      a [label="A"]
-      b [label="B"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
       join [shape=tripleoctagon]
       exit [shape=Msquare]
       start -> parallel
@@ -140,9 +140,9 @@ defmodule Arbor.Orchestrator.Conformance48Test do
     digraph Flow {
       start [shape=Mdiamond]
       parallel [shape=component, fan_out="false", join_policy="wait_all", error_policy="fail_fast"]
-      a [label="A"]
-      b [label="B"]
-      c [label="C"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
+      c [label="C", simulate="true"]
       join [shape=tripleoctagon]
       exit [shape=Msquare]
       start -> parallel
@@ -175,8 +175,8 @@ defmodule Arbor.Orchestrator.Conformance48Test do
     digraph Flow {
       start [shape=Mdiamond]
       parallel [shape=component, fan_out="false", join_policy="wait_all", error_policy="ignore"]
-      a [label="A"]
-      b [label="B"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
       join [shape=tripleoctagon]
       exit [shape=Msquare]
       start -> parallel

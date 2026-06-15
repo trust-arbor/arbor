@@ -29,7 +29,7 @@ defmodule Arbor.Orchestrator.Conformance115Test do
     digraph Flow {
       start [shape=Mdiamond]
       flaky [simulate="fail", max_retries=2, retry_initial_delay_ms=1]
-      fail_path [label="fail path"]
+      fail_path [label="fail path", simulate="true"]
       exit [shape=Msquare]
       start -> flaky
       flaky -> fail_path [condition="outcome=fail"]

@@ -125,8 +125,8 @@ defmodule Arbor.Orchestrator.Conformance116Test do
     digraph Flow {
       start [shape=Mdiamond]
       p [shape=component, fan_out="false"]
-      a [label="A"]
-      b [label="B"]
+      a [label="A", simulate="true"]
+      b [label="B", simulate="true"]
       j [shape=tripleoctagon]
       exit [shape=Msquare]
 
