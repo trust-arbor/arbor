@@ -149,6 +149,126 @@ defmodule Arbor.Orchestrator.SessionCore do
   def increment_turn(count), do: count + 1
 
   # ===========================================================================
+  # Reduce — Whole-turn commit (the "I-direction" consolidation)
+  # ===========================================================================
+
+  defmodule TurnCommit do
+    @moduledoc """
+    The pure result of committing one completed turn — everything the GenServer
+    needs to (a) adopt as new state and (b) hand to its side-effecting shell
+    (persist, compactor, telemetry). No side effects were performed to build it.
+    """
+    @enforce_keys [:messages, :working_memory, :turn_count, :user_msg, :assistant_message]
+    defstruct [
+      :messages,
+      :working_memory,
+      :turn_count,
+      :user_msg,
+      :assistant_msg,
+      :assistant_message,
+      :user_sent_at,
+      :assistant_completed_at
+    ]
+
+    @type t :: %__MODULE__{}
+  end
+
+  @doc """
+  Compute the full commit for a completed turn — the pure core of
+  `Session.Builders.apply_turn_result/4`.
+
+  This is the "functional core, imperative shell" consolidation: every *decision*
+  about what the turn becomes (the display messages, the typed assistant
+  envelope, the new message list, working memory, turn count, and the persistence
+  timestamps) is made here, purely, in one place. The GenServer shell takes the
+  returned `%TurnCommit{}` and performs the side effects (compactor append, DB
+  persist, telemetry) and state adoption.
+
+  All inputs are plain values — no GenServer/`state` struct, no `DateTime.utc_now`,
+  no IO — so the whole turn-commit decision is testable in isolation.
+
+  ## Params (map)
+
+    * `:message` — raw user message (string)
+    * `:result_ctx` — the engine result context map (dotted-string keys)
+    * `:current_messages` — message list to fall back to when the result context
+      carries no `"session.messages"`
+    * `:current_working_memory` — working memory to fall back to
+    * `:current_turn_count` — turn count to increment
+    * `:now` — turn-completion time (injected; the assistant display/envelope time)
+    * `:user_sent_at` — the user's send time (from the typed `UserMessage` when
+      available, else `:now`)
+    * `:envelope_builder` — 3-arity fn `(result_ctx, started_at, completed_at) -> envelope`
+      (inject `AssistantMessage.from_result_ctx/3`; kept as a param so this core
+      has no dependency on the contracts layer)
+  """
+  @spec commit_turn(map()) :: TurnCommit.t()
+  def commit_turn(%{} = params) do
+    message = Map.fetch!(params, :message)
+    result_ctx = Map.fetch!(params, :result_ctx)
+    now = Map.fetch!(params, :now)
+    user_sent_at = Map.get(params, :user_sent_at, now)
+    current_messages = Map.get(params, :current_messages, [])
+    current_wm = Map.get(params, :current_working_memory, %{})
+    current_turn_count = Map.get(params, :current_turn_count, 0)
+    envelope_builder = Map.fetch!(params, :envelope_builder)
+
+    response = Map.get(result_ctx, "session.response", "")
+
+    user_msg = build_user_message(message, user_sent_at)
+    assistant_msg = build_assistant_message(response, now)
+
+    assistant_started_at = assistant_started_at(result_ctx, now, user_sent_at)
+    assistant_message = envelope_builder.(result_ctx, assistant_started_at, now)
+
+    messages =
+      case Map.get(result_ctx, "session.messages") do
+        msgs when is_list(msgs) ->
+          if assistant_msg, do: msgs ++ [assistant_msg], else: msgs
+
+        _ ->
+          base = current_messages ++ [user_msg]
+          if assistant_msg, do: base ++ [assistant_msg], else: base
+      end
+
+    working_memory =
+      case Map.get(result_ctx, "session.working_memory") do
+        wm when is_map(wm) -> wm
+        _ -> current_wm
+      end
+
+    %TurnCommit{
+      messages: messages,
+      working_memory: working_memory,
+      turn_count: increment_turn(current_turn_count),
+      user_msg: user_msg,
+      assistant_msg: assistant_msg,
+      assistant_message: assistant_message,
+      user_sent_at: user_sent_at,
+      assistant_completed_at: now
+    }
+  end
+
+  @doc """
+  The assistant LLM-call start time: `completed_at` minus the recorded call
+  duration, clamped to never precede the user's send time (so a persisted
+  assistant entry can't sort before its user entry). Pure.
+  """
+  @spec assistant_started_at(map(), DateTime.t(), DateTime.t()) :: DateTime.t()
+  def assistant_started_at(result_ctx, completed_at, user_sent_at) do
+    duration_ms =
+      case Map.get(result_ctx, "session.usage") do
+        %{"duration_ms" => d} when is_integer(d) and d >= 0 -> d
+        %{duration_ms: d} when is_integer(d) and d >= 0 -> d
+        _ -> 0
+      end
+
+    started = DateTime.add(completed_at, -duration_ms, :millisecond)
+
+    if DateTime.compare(started, user_sent_at) == :lt, do: user_sent_at, else: started
+  end
+
+  # ===========================================================================
   # Convert — Consumer-Specific Views
   # ===========================================================================
 
