@@ -172,6 +172,10 @@ defmodule Arbor.Actions do
       |> Keyword.put(:effect_class, effect_class)
       |> Keyword.put(:egress_tier, egress_tier)
       |> Keyword.put(:egress_taint, Map.get(clean_context, :taint))
+      |> Keyword.put(
+        :egress_destination,
+        Egress.egress_destination_for(action_module, params, clean_context)
+      )
 
     maybe_observe_egress(action_module, egress_tier, clean_context)
 

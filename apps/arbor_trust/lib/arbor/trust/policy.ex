@@ -151,6 +151,61 @@ defmodule Arbor.Trust.Policy do
     mode_to_confirmation(effective_mode(agent_id, resource_uri))
   end
 
+  # Conservative defaults when a profile does not declare an egress mode for a
+  # tier. External egress asks (fail closed); on-host/on-premises/none proceed.
+  # (On-premises is additionally gated by a separate config flag in the auth
+  # path; the profile default here is the un-flagged baseline.)
+  @egress_mode_defaults %{
+    on_host: :allow,
+    on_premises: :allow,
+    external_provider: :ask,
+    external_peer: :ask,
+    none: :allow
+  }
+
+  @doc """
+  Get the agent's egress mode for a resolved egress tier (2026-06-14
+  URI-addressing-vs-classification decision).
+
+  Keyed by `Arbor.Contracts.Security.Classification` egress_tier — NOT by URI.
+  Reads the agent's profile `egress_modes` map (explicit per profile, NOT derived
+  from trust_score, per the tiers→custom-profiles direction). Falls back to a
+  conservative default for unset tiers, and fails closed (`:ask` for external)
+  when the trust system is unavailable. Tolerant of string keys/values from JSON
+  profile round-trips.
+
+  ## Examples
+
+      Policy.egress_mode("agent_trusted", :external_provider)   #=> :allow  (if profile sets it)
+      Policy.egress_mode("agent_new", :external_provider)       #=> :ask    (default)
+      Policy.egress_mode("agent_new", :on_host)                 #=> :allow
+  """
+  @spec egress_mode(String.t(), atom()) :: mode()
+  def egress_mode(agent_id, tier) when is_binary(agent_id) and is_atom(tier) do
+    case get_profile(agent_id) do
+      {:ok, profile} -> lookup_egress_mode(Map.get(profile, :egress_modes), tier)
+      {:error, _} -> Map.get(@egress_mode_defaults, tier, :ask)
+    end
+  end
+
+  defp lookup_egress_mode(modes, tier) when is_map(modes) do
+    raw = Map.get(modes, tier) || Map.get(modes, Atom.to_string(tier))
+
+    case normalize_egress_mode(raw) do
+      nil -> Map.get(@egress_mode_defaults, tier, :ask)
+      mode -> mode
+    end
+  end
+
+  defp lookup_egress_mode(_modes, tier), do: Map.get(@egress_mode_defaults, tier, :ask)
+
+  defp normalize_egress_mode(m) when m in [:allow, :ask, :block, :auto], do: m
+  defp normalize_egress_mode("allow"), do: :allow
+  defp normalize_egress_mode("ask"), do: :ask
+  defp normalize_egress_mode("block"), do: :block
+  defp normalize_egress_mode("auto"), do: :auto
+  defp normalize_egress_mode(_), do: nil
+
   @doc """
   Map a 4-mode trust mode to the 3-mode confirmation vocabulary.
 

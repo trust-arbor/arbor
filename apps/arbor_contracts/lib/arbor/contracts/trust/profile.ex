@@ -103,6 +103,14 @@ defmodule Arbor.Contracts.Trust.Profile do
     # model_constraints: %{{:frontier_cloud, "arbor://shell"} => :ask, ...}
     field(:model_constraints, map(), default: %{})
 
+    # Egress standing (2026-06-14 URI-addressing-vs-classification decision).
+    # Per-tier egress mode, keyed by Arbor.Contracts.Security.Classification
+    # egress_tier (NOT by URI — the whole point of that decision). Explicit per
+    # profile, NOT derived from trust_score (tiers→custom-profiles direction).
+    # Unset tiers fall back to a conservative default in Arbor.Trust.Policy.
+    # e.g. %{external_provider: :allow, external_peer: :ask}
+    field(:egress_modes, map(), default: %{})
+
     # Timestamps
     field(:created_at, DateTime.t())
     field(:updated_at, DateTime.t())
