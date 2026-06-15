@@ -415,25 +415,27 @@ defmodule Arbor.Orchestrator.Engine do
         state.tracking
         |> put_in([:content_hashes, node.id], computed_hash)
 
-      checkpoint =
-        Checkpoint.from_state(
-          node.id,
-          Enum.reverse(completed),
-          state.retries,
-          context,
-          state.outcomes,
-          content_hashes: tracking.content_hashes,
-          run_id: Keyword.get(state.opts, :run_id),
-          graph_hash: Keyword.get(state.opts, :graph_hash),
-          pending_intents: state.tracking.pending_intents,
-          execution_digests: state.tracking.execution_digests,
-          pipeline_started_at: Context.pipeline_started_at(context)
-        )
+      if resumable?(state.opts) do
+        checkpoint =
+          Checkpoint.from_state(
+            node.id,
+            Enum.reverse(completed),
+            state.retries,
+            context,
+            state.outcomes,
+            content_hashes: tracking.content_hashes,
+            run_id: Keyword.get(state.opts, :run_id),
+            graph_hash: Keyword.get(state.opts, :graph_hash),
+            pending_intents: state.tracking.pending_intents,
+            execution_digests: state.tracking.execution_digests,
+            pipeline_started_at: Context.pipeline_started_at(context)
+          )
 
-      :ok =
-        Checkpoint.write(checkpoint, state.logs_root,
-          hmac_secret: Keyword.get(state.opts, :hmac_secret)
-        )
+        :ok =
+          Checkpoint.write(checkpoint, state.logs_root,
+            hmac_secret: Keyword.get(state.opts, :hmac_secret)
+          )
+      end
 
       updated_state = %{state | context: context, completed: completed, tracking: tracking}
 
@@ -577,28 +579,32 @@ defmodule Arbor.Orchestrator.Engine do
       # Check for graph adaptation (graph.adapt handler stores mutated graph in context)
       {graph, context} = check_graph_adaptation(state.graph, context)
 
-      checkpoint =
-        Checkpoint.from_state(node.id, Enum.reverse(completed), retries, context, outcomes,
-          content_hashes: tracking.content_hashes,
-          run_id: Keyword.get(state.opts, :run_id),
-          graph_hash: Keyword.get(state.opts, :graph_hash),
-          pending_intents: tracking.pending_intents,
-          execution_digests: tracking.execution_digests,
-          pipeline_started_at: Context.pipeline_started_at(context)
-        )
+      if resumable?(state.opts) do
+        checkpoint =
+          Checkpoint.from_state(node.id, Enum.reverse(completed), retries, context, outcomes,
+            content_hashes: tracking.content_hashes,
+            run_id: Keyword.get(state.opts, :run_id),
+            graph_hash: Keyword.get(state.opts, :graph_hash),
+            pending_intents: tracking.pending_intents,
+            execution_digests: tracking.execution_digests,
+            pipeline_started_at: Context.pipeline_started_at(context)
+          )
 
-      :ok =
-        Checkpoint.write(checkpoint, state.logs_root,
-          hmac_secret: Keyword.get(state.opts, :hmac_secret)
-        )
+        :ok =
+          Checkpoint.write(checkpoint, state.logs_root,
+            hmac_secret: Keyword.get(state.opts, :hmac_secret)
+          )
 
+        emit(
+          state.opts,
+          Event.checkpoint_saved(node.id, Path.join(state.logs_root, "checkpoint.json"))
+        )
+      end
+
+      # Per-node audit (status.json + artifacts) is kept regardless of
+      # resumability — it's the execution record, not resume state.
       :ok = write_node_status(node.id, outcome, state.logs_root)
       maybe_store_artifact(state.opts, node.id, outcome)
-
-      emit(
-        state.opts,
-        Event.checkpoint_saved(node.id, Path.join(state.logs_root, "checkpoint.json"))
-      )
 
       updated_state = %{
         state
@@ -1284,9 +1290,14 @@ defmodule Arbor.Orchestrator.Engine do
         outcome: to_string(outcome.status),
         preferred_next_label: outcome.preferred_label || "",
         suggested_next_ids: outcome.suggested_next_ids || [],
-        context_updates: sanitized_updates,
+        # json_safe/1: status.json is an audit dump (never read back for resume),
+        # so a non-Jason-encodable term in context_updates or failure_reason — e.g.
+        # a typed struct without a Jason.Encoder, a pid, a tuple — must NOT crash
+        # the whole run (it did, at this `Jason.encode`). Lossy sanitization is
+        # correct here precisely because nothing round-trips this file.
+        context_updates: json_safe(sanitized_updates),
         notes: outcome.notes,
-        failure_reason: outcome.failure_reason,
+        failure_reason: json_safe(outcome.failure_reason),
         timestamp: DateTime.utc_now() |> DateTime.to_iso8601(),
         status: to_string(outcome.status)
       }
@@ -1296,6 +1307,36 @@ defmodule Arbor.Orchestrator.Engine do
       File.write(status_path, encoded)
     end
   end
+
+  # Recursively coerce a term into something `Jason.encode/1` can serialize.
+  # Used for audit dumps (status.json) where lossy is acceptable and a crash is
+  # not. The JSON-friendly date/time structs are left intact (Jason encodes them);
+  # any other struct is flattened to a plain map; pids/refs/funcs/ports/tuples
+  # become inspect strings.
+  @json_safe_structs [DateTime, Date, Time, NaiveDateTime]
+  defp json_safe(%mod{} = v) when mod in @json_safe_structs, do: v
+  defp json_safe(%_{} = struct), do: struct |> Map.from_struct() |> json_safe()
+
+  defp json_safe(v) when is_map(v),
+    do: Map.new(v, fn {k, val} -> {json_safe_key(k), json_safe(val)} end)
+
+  defp json_safe(v) when is_list(v), do: Enum.map(v, &json_safe/1)
+  defp json_safe(v) when is_tuple(v), do: v |> Tuple.to_list() |> json_safe()
+
+  defp json_safe(v) when is_pid(v) or is_reference(v) or is_function(v) or is_port(v),
+    do: inspect(v)
+
+  defp json_safe(v), do: v
+
+  defp json_safe_key(k) when is_binary(k) or is_atom(k), do: k
+  defp json_safe_key(k), do: inspect(k)
+
+  # `checkpoint.json` is RESUME state, not the audit record (audit is the event
+  # stream + status.json). Only runs that can actually resume need it written —
+  # `mix arbor.pipeline.run/resume` + RecoveryCoordinator. Turn/heartbeat runs
+  # never resume (Session passes `resumable: false`), so writing per-node resume
+  # state for them is unused I/O. Default `true` preserves prior behavior.
+  defp resumable?(opts), do: Keyword.get(opts, :resumable, true)
 
   defp resolve_next_node_id(node, last_outcome, context, graph) do
     case Router.select_next_step(node, last_outcome, context, graph) do
