@@ -335,32 +335,83 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
     if Code.ensure_loaded?(security) and function_exported?(security, :authorize_egress, 3) do
       agent_id = Context.get(context, "session.agent_id", "system")
-      tier = resolve_egress_tier(Context.get(context, "session.llm_provider"))
+      provider = Context.get(context, "session.llm_provider")
+      tier = resolve_egress_tier(provider)
       taint = egress_taint_level(context)
+      # Destination-scoped egress caps match on the provider (the LLM endpoint
+      # host isn't resolved here; provider is the stable identifier operators
+      # scope LLM egress by).
+      opts = [egress_taint: taint, egress_destination: provider && to_string(provider)]
 
-      case apply(security, :authorize_egress, [agent_id, tier, [egress_taint: taint]]) do
+      case apply(security, :authorize_egress, [agent_id, tier, opts]) do
         :allow ->
           nil
 
         {:requires_approval, _} ->
-          %Outcome{
-            status: :fail,
-            failure_reason: "LLM egress requires approval (#{tier}); agent lacks egress standing",
-            context_updates: base_updates
-          }
+          egress_refusal(base_updates, agent_id, tier, taint, :requires_approval, context)
 
         {:error, {:egress_blocked, t, reason}} ->
-          %Outcome{
-            status: :fail,
-            failure_reason: "LLM egress blocked (#{t}/#{reason})",
-            context_updates: base_updates
-          }
+          egress_refusal(base_updates, agent_id, t, taint, {:blocked, reason}, context)
       end
     end
   rescue
     e ->
       Logger.warning("[LlmHandler] egress gate error (failing open): #{Exception.message(e)}")
       nil
+  end
+
+  # Surface a halted egress as a clear, honest refusal the user/heartbeat sees,
+  # instead of a silent empty response. :partial_success so the engine applies
+  # the message to context (last_response / llm.content) and the pipeline
+  # completes cleanly. Also emits an :egress_blocked security signal.
+  defp egress_refusal(base_updates, agent_id, tier, taint, kind, context) do
+    msg = egress_refusal_message(tier, kind)
+    emit_egress_blocked_signal(agent_id, tier, taint, kind, context)
+
+    updates =
+      base_updates
+      |> Map.put("last_response", msg)
+      |> Map.put("llm.content", msg)
+      |> Map.put("egress_blocked", true)
+
+    %Outcome{
+      status: :partial_success,
+      notes: msg,
+      failure_reason: msg,
+      context_updates: updates
+    }
+  end
+
+  defp egress_refusal_message(tier, :requires_approval) do
+    "⛔ Egress blocked: this would send data to an external model (#{tier}) and " <>
+      "this agent lacks egress standing — it requires approval. Grant egress " <>
+      "standing (trust profile egress_modes) or route to a local model."
+  end
+
+  defp egress_refusal_message(tier, {:blocked, :policy}) do
+    "⛔ Egress blocked: the trust profile blocks egress to #{tier}."
+  end
+
+  defp egress_refusal_message(tier, {:blocked, taint_level}) do
+    "⛔ Egress blocked: #{taint_level} data must not be sent to an external " <>
+      "destination (#{tier}). Sanitize/review the data or route to a local model."
+  end
+
+  defp emit_egress_blocked_signal(agent_id, tier, taint, kind, context) do
+    if Code.ensure_loaded?(Arbor.Signals) and function_exported?(Arbor.Signals, :emit, 3) do
+      Arbor.Signals.emit(:security, :egress_blocked, %{
+        agent_id: agent_id,
+        egress_tier: tier,
+        egress_taint: taint,
+        reason: kind,
+        node_source: :compute_node,
+        trace_id: Context.get(context, "session.trace_id")
+      })
+    end
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   # Resolve the egress tier for the provider via BackendTrust (provider -> tier).
