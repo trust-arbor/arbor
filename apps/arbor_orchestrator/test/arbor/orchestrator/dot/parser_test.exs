@@ -108,6 +108,31 @@ defmodule Arbor.Orchestrator.Dot.ParserTest do
       assert node.attrs["goal_gate"] == "quality > 0.8"
     end
 
+    test "parses quoted attribute keys (and does not drop the rest of the block)" do
+      # Regression: a quoted attr key (DOT spec) like "human.default_choice" used
+      # to make the parser return "" for the key and silently drop EVERY attr in
+      # the block — the node lost its type and misrouted. The shape/type must
+      # survive alongside the quoted-key attr.
+      dot = """
+      digraph Quoted {
+        gate [
+          shape=box,
+          type=wait_human,
+          "human.default_choice"="Reject",
+          "human.timeout_ms"=30000
+        ]
+      }
+      """
+
+      assert {:ok, graph} = Parser.parse(dot)
+      node = graph.nodes["gate"]
+
+      assert node.attrs["type"] == "wait_human"
+      assert node.attrs["shape"] == "box"
+      assert node.attrs["human.default_choice"] == "Reject"
+      assert node.attrs["human.timeout_ms"] == 30000
+    end
+
     test "node label is NOT auto-defaulted to id (arbor keeps raw attrs)" do
       dot = """
       digraph NoLabel {

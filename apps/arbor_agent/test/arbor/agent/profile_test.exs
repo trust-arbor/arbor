@@ -99,6 +99,32 @@ defmodule Arbor.Agent.ProfileTest do
       assert restored.version == 1
     end
 
+    test "deserialize restores atom-keyed metadata after JSON strings the keys" do
+      # Regression: profile metadata is written with atom keys, but JSON
+      # persistence round-trips them to strings — so readers doing
+      # `meta[:external_agent]` silently got nil after a restore. deserialize/1
+      # now normalizes known (existing-atom) keys back to atoms.
+      original = %Profile{
+        agent_id: "ext-1",
+        character: @character,
+        identity: %{agent_id: "agent_x"},
+        metadata: %{external_agent: true, agent_type: "claude_code"},
+        created_at: DateTime.utc_now()
+      }
+
+      # Simulate the persistence round-trip stringifying the metadata keys.
+      serialized =
+        original
+        |> Profile.serialize()
+        |> Map.put("metadata", %{"external_agent" => true, "agent_type" => "claude_code"})
+
+      {:ok, restored} = Profile.deserialize(serialized)
+
+      # Atom-key readers work again (the bug was these returning nil).
+      assert restored.metadata[:external_agent] == true
+      assert restored.metadata[:agent_type] == "claude_code"
+    end
+
     test "serialize excludes private keys" do
       profile = %Profile{
         agent_id: "scout-1",
