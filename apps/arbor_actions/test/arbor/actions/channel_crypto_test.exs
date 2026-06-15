@@ -164,14 +164,18 @@ defmodule Arbor.Actions.ChannelCryptoTest do
   # ============================================================================
 
   describe "ECDH seal/unseal round-trip" do
-    test "seal and unseal with X25519 keypairs" do
-      {_alice_pub, alice_priv} = Crypto.generate_encryption_keypair()
+    test "seal and unseal (signcryption: recipient X25519 + sender Ed25519)" do
+      # seal/3 is authenticated: encrypt to the recipient's X25519 public key AND
+      # sign the envelope with the sender's Ed25519 signing key. unseal/3 verifies
+      # that signature against the sender's Ed25519 public key before decrypting
+      # with the recipient's X25519 private key.
       {bob_pub, bob_priv} = Crypto.generate_encryption_keypair()
+      {alice_sign_pub, alice_sign_priv} = Crypto.generate_keypair()
 
       plaintext = "Secret message from Alice to Bob"
-      sealed = Crypto.seal(plaintext, bob_pub, alice_priv)
+      sealed = Crypto.seal(plaintext, bob_pub, alice_sign_priv)
 
-      assert {:ok, ^plaintext} = Crypto.unseal(sealed, bob_priv)
+      assert {:ok, ^plaintext} = Crypto.unseal(sealed, bob_priv, alice_sign_pub)
     end
   end
 
