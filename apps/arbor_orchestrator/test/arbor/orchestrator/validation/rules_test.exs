@@ -166,4 +166,58 @@ defmodule Arbor.Orchestrator.Validation.RulesTest do
       assert hd(diags).rule == "start_node"
     end
   end
+
+  describe "LlmSimulate — run-blocking require-explicit-simulate" do
+    alias Arbor.Orchestrator.IR.Compiler
+
+    # The rule reads node.schema_errors (populated by IR.Compiler), so graphs
+    # must be COMPILED — mirrors the run path (ensure_graph always compiles).
+    defp compiled_with(node_attrs) do
+      {:ok, g} =
+        %Graph{
+          id: "SimGate",
+          nodes: %{
+            "start" => Node.from_attrs("start", %{"shape" => "Mdiamond"}),
+            "n" => Node.from_attrs("n", node_attrs),
+            "done" => Node.from_attrs("done", %{"shape" => "Msquare"})
+          },
+          edges: [Edge.from_attrs("start", "n", %{}), Edge.from_attrs("n", "done", %{})]
+        }
+        |> rebuild_adjacency()
+        |> Compiler.compile()
+
+      g
+    end
+
+    test "flags a bare compute (purpose=llm) node missing simulate as :error" do
+      diags = Rules.LlmSimulate.validate(compiled_with(%{"type" => "compute", "prompt" => "x"}))
+
+      assert [%Arbor.Orchestrator.Validation.Diagnostic{severity: :error, rule: "llm_simulate"}] =
+               diags
+    end
+
+    test "flags a bare-prompt codergen node (no type, box shape) missing simulate" do
+      assert [%{severity: :error}] =
+               Rules.LlmSimulate.validate(compiled_with(%{"shape" => "box", "prompt" => "x"}))
+    end
+
+    test "passes when simulate is explicitly declared" do
+      assert Rules.LlmSimulate.validate(
+               compiled_with(%{"type" => "compute", "prompt" => "x", "simulate" => "false"})
+             ) == []
+    end
+
+    test "ignores a non-LLM compute purpose (routing) — no friction off the LLM path" do
+      assert Rules.LlmSimulate.validate(
+               compiled_with(%{"type" => "compute", "purpose" => "routing", "prompt" => "x"})
+             ) == []
+    end
+
+    test "validate_or_error REJECTS a graph with a bare LLM node (run() won't execute it)" do
+      assert {:error, diags} =
+               Validator.validate_or_error(compiled_with(%{"type" => "compute", "prompt" => "x"}))
+
+      assert Enum.any?(diags, &(&1.rule == "llm_simulate" and &1.severity == :error))
+    end
+  end
 end

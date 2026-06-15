@@ -23,7 +23,8 @@ defmodule Arbor.Orchestrator.Validation.Validator do
     Rules.ConditionSyntax,
     Rules.RetryTargetExists,
     Rules.GoalGateRetry,
-    Rules.CodergenPrompt
+    Rules.CodergenPrompt,
+    Rules.LlmSimulate
   ]
 
   @doc """
