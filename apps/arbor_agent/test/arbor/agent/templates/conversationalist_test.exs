@@ -15,6 +15,8 @@ defmodule Arbor.Agent.Templates.ConversationalistTest do
     end
 
     test "implements optional callbacks" do
+      Code.ensure_loaded!(Conversationalist)
+
       assert function_exported?(Conversationalist, :description, 0)
       assert function_exported?(Conversationalist, :metadata, 0)
       assert function_exported?(Conversationalist, :nature, 0)

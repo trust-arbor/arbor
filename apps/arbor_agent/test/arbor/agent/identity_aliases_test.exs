@@ -46,9 +46,14 @@ defmodule Arbor.Agent.IdentityAliasesTest do
     end
 
     # IdentityAliases persists into the :arbor_user_config BufferedStore, which
-    # also isn't part of the test_helper boot sequence. Bring it up the same
-    # way arbor_agent's Application does (JSONFile backend in test).
-    user_config_spec =
+    # isn't part of the test_helper boot sequence. Start it via start_supervised
+    # (tied to THIS module — cleaned up when the module finishes) rather than the
+    # persistent AppSupervisor. The old AppSupervisor.start_child LEAKED the
+    # globally-named process for the rest of the suite, so depending on test order
+    # it collided with UserConfigTest's start_supervised! of the same name
+    # (:already_started) and made the suite flaky by seed. Both tests are
+    # async: false, so they never run concurrently — each owns a clean store.
+    start_supervised!(
       Supervisor.child_spec(
         {Arbor.Persistence.BufferedStore,
          name: :arbor_user_config,
@@ -57,12 +62,7 @@ defmodule Arbor.Agent.IdentityAliasesTest do
          collection: "user_config"},
         id: :arbor_user_config
       )
-
-    case Supervisor.start_child(Arbor.Agent.AppSupervisor, user_config_spec) do
-      {:ok, _} -> :ok
-      {:error, {:already_started, _}} -> :ok
-      {:error, _} -> :ok
-    end
+    )
 
     :ok
   end

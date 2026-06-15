@@ -15,6 +15,8 @@ defmodule Arbor.Agent.Templates.MonitorTest do
     end
 
     test "implements optional callbacks" do
+      Code.ensure_loaded!(Monitor)
+
       assert function_exported?(Monitor, :description, 0)
       assert function_exported?(Monitor, :metadata, 0)
     end

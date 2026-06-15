@@ -15,6 +15,8 @@ defmodule Arbor.Agent.Templates.CodeReviewerTest do
     end
 
     test "implements optional callbacks" do
+      Code.ensure_loaded!(CodeReviewer)
+
       assert function_exported?(CodeReviewer, :description, 0)
       assert function_exported?(CodeReviewer, :nature, 0)
       assert function_exported?(CodeReviewer, :values, 0)
