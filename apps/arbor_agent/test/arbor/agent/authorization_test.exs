@@ -5,14 +5,18 @@ defmodule Arbor.Agent.AuthorizationTest do
 
   @caller_id "test_caller_agent"
 
-  setup do
-    # Ensure CapabilityStore is not running so authorize/3 returns :ok (permissive)
-    if pid = Process.whereis(Arbor.Security.CapabilityStore) do
-      GenServer.stop(pid)
-    end
-
-    :ok
-  end
+  # NOTE: this test deliberately does NOT stop Arbor.Security.CapabilityStore.
+  # It used to `GenServer.stop` the store in setup to force the permissive
+  # (no-store) auth path, but that store is a *permanent* child of the SHARED
+  # Arbor.Security.Supervisor (the arbor_security app supervisor). Stopping it
+  # every test triggered a supervisor restart; with these sub-millisecond tests,
+  # 3+ restarts landed inside the supervisor's 5-second window, exceeded its
+  # restart intensity, and took the whole :arbor_security app down with
+  # reason :shutdown — cascading "no process" failures across every later
+  # behavioral test (CapabilityStore.put) and IdentityAliasesTest. It was also
+  # pointless: the supervisor restarts the store anyway, which is exactly why
+  # the helper below already tolerates BOTH the authorized and the umbrella
+  # "unauthorized" outcomes. (arbor_agent suite flakiness source C, 2026-06-14)
 
   # Helper: in umbrella context, Security supervisor may restart CapabilityStore
   # between our setup and test body, causing authorization to deny. Accept both.
