@@ -433,5 +433,25 @@ config :arbor_dashboard, Arbor.Dashboard.Endpoint,
   pubsub_server: Arbor.Dashboard.PubSub,
   live_view: [signing_salt: "arbor_dashboard_lv"]
 
+# ── Egress gate (2026-06-14 URI-addressing-vs-classification decision) ───────
+#
+# The egress gate classifies outbound operations (LLM/web/comms/ACP) by tier
+# (on_host / on_premises / external_provider / external_peer) and can gate them.
+# It is DARK by default — classification + :egress_observed telemetry run, but
+# nothing is blocked or asked. See `.arbor/decisions/2026-06-14-uri-addressing-
+# vs-security-classification.md`.
+#
+# To ENABLE (do this AFTER observing real :egress_observed telemetry — see the
+# runbook in the decision doc; flipping blind can halt cloud heartbeats that
+# carry untrusted data):
+#
+#   config :arbor_security, egress_gate_enforcing: true
+#   # single-operator default posture so normal cloud egress isn't gated — the
+#   # taint-exfil block (untrusted data -> external) + per-agent :block/:ask
+#   # tightening still apply:
+#   config :arbor_trust, default_egress_modes: %{external_provider: :allow}
+#   # optionally gate homelab/LAN egress too (default off):
+#   # config :arbor_security, gate_on_premises_egress: true
+
 # Import environment-specific config
 import_config "#{config_env()}.exs"

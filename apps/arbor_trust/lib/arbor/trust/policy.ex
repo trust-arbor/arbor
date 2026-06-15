@@ -184,7 +184,7 @@ defmodule Arbor.Trust.Policy do
   def egress_mode(agent_id, tier) when is_binary(agent_id) and is_atom(tier) do
     case get_profile(agent_id) do
       {:ok, profile} -> lookup_egress_mode(Map.get(profile, :egress_modes), tier)
-      {:error, _} -> Map.get(@egress_mode_defaults, tier, :ask)
+      {:error, _} -> default_egress_mode(tier)
     end
   end
 
@@ -192,12 +192,29 @@ defmodule Arbor.Trust.Policy do
     raw = Map.get(modes, tier) || Map.get(modes, Atom.to_string(tier))
 
     case normalize_egress_mode(raw) do
-      nil -> Map.get(@egress_mode_defaults, tier, :ask)
+      nil -> default_egress_mode(tier)
       mode -> mode
     end
   end
 
-  defp lookup_egress_mode(_modes, tier), do: Map.get(@egress_mode_defaults, tier, :ask)
+  defp lookup_egress_mode(_modes, tier), do: default_egress_mode(tier)
+
+  # The fallback egress mode for a tier when the agent's profile does not declare
+  # one. The library default is conservative (external -> :ask), but a deployment
+  # can set a system-wide posture via `config :arbor_trust, :default_egress_modes`
+  # — e.g. a single-operator deployment may default `external_provider: :allow`
+  # so enabling enforcement activates the taint-exfil block + per-agent tightening
+  # without gating every agent's normal cloud egress.
+  defp default_egress_mode(tier) do
+    overrides = Application.get_env(:arbor_trust, :default_egress_modes, %{})
+
+    case normalize_egress_mode(
+           Map.get(overrides, tier) || Map.get(overrides, Atom.to_string(tier))
+         ) do
+      nil -> Map.get(@egress_mode_defaults, tier, :ask)
+      mode -> mode
+    end
+  end
 
   defp normalize_egress_mode(m) when m in [:allow, :ask, :block, :auto], do: m
   defp normalize_egress_mode("allow"), do: :allow
