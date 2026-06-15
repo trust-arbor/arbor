@@ -479,6 +479,10 @@ defmodule Arbor.Trust.Authority do
        "arbor://fs/read" => :auto,
        "arbor://historian/query" => :auto,
        "arbor://orchestrator" => :auto,
+       # A1: proactive notify is allowed by default (the agent can surface
+       # progress/thoughts from first boot), bounded by a rate-limit constraint
+       # as the anti-spam budget. The user dials block/ask in their profile.
+       "arbor://comms/notify/session" => :allow,
        "arbor://shell" => :block,
        "arbor://shell/exec" => :ask
      }}
@@ -493,6 +497,7 @@ defmodule Arbor.Trust.Authority do
        "arbor://fs/write" => :allow,
        "arbor://historian/query" => :auto,
        "arbor://orchestrator" => :auto,
+       "arbor://comms/notify/session" => :allow,
        "arbor://shell" => :ask,
        "arbor://memory" => :auto
      }}

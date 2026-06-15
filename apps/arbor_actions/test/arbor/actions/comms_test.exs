@@ -238,6 +238,9 @@ defmodule Arbor.Actions.CommsTest do
       assert NotifySession.effect_class() == :network_egress
       assert NotifySession.egress_destination(%{text: "hi"}, %{}) == "localhost"
       assert NotifySession.taint_roles() == %{text: :data, kind: :control}
+      # The anti-spam budget behind the allow-by-default posture is declared.
+      assert is_integer(NotifySession.default_rate_limit()) and
+               NotifySession.default_rate_limit() > 0
     end
 
     test "run/2 notifies and returns status, reading agent_id from atom-keyed context" do
