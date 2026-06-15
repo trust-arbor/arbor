@@ -1,5 +1,5 @@
 defmodule Arbor.Memory.ReflectionProcessorRelationshipsTest do
-  use ExUnit.Case, async: false
+  use Arbor.Persistence.DatabaseCase, async: false
 
   alias Arbor.Memory.{ReflectionProcessor, Relationship}
 

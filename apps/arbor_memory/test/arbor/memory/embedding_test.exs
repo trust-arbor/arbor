@@ -6,22 +6,17 @@ defmodule Arbor.Memory.EmbeddingTest do
   Run with: mix test --include database
   """
 
-  use ExUnit.Case
+  use Arbor.Persistence.DatabaseCase
 
   @moduletag :database
 
   alias Arbor.Memory.Embedding
-  alias Arbor.Persistence.Repo
-  alias Ecto.Adapters.SQL.Sandbox
 
   @test_agent_id "test_agent_embedding"
   @dimension 768
 
   setup do
-    # Start the sandbox for database transactions
-    :ok = Sandbox.checkout(Repo)
-    Sandbox.mode(Repo, {:shared, self()})
-
+    # Repo is started + a Sandbox connection is checked out by DatabaseCase.
     # Clean up any existing test data
     Embedding.delete_all(@test_agent_id)
 
@@ -32,7 +27,7 @@ defmodule Arbor.Memory.EmbeddingTest do
     :ok
   end
 
-  defp generate_embedding(seed \\ 0) do
+  defp generate_embedding(seed) do
     for i <- 0..(@dimension - 1) do
       :math.sin((seed + i) / 100) * 0.5 + 0.5
     end
