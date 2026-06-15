@@ -125,7 +125,18 @@ defmodule Arbor.Orchestrator.Session do
     # Progressive tool disclosure: tools discovered via find_tools during session
     discovered_tools: MapSet.new(),
     # Multi-user: identifies the acting principal (nil = single-user mode)
-    tenant_context: nil
+    tenant_context: nil,
+    # The Session's own pid (set in init/1) so the streaming callback closure can
+    # send chunks back here for durable accumulation.
+    pid: nil,
+    # Streaming partial preservation: the in-flight turn's user message, the
+    # partial-stream accumulator, the turn-task pid (for cancel/timeout kill), and
+    # the turn-timeout timer. On crash/cancel/timeout the partial is finalized as
+    # an :interrupted/:cancelled AssistantMessage instead of being lost.
+    turn_user_message: nil,
+    streaming_buffer: nil,
+    turn_task_pid: nil,
+    turn_timeout_ref: nil
   ]
 
   @type phase :: :idle | :processing | :awaiting_tools | :awaiting_llm
@@ -160,7 +171,12 @@ defmodule Arbor.Orchestrator.Session do
           session_config: struct() | nil,
           session_state: struct() | nil,
           behavior: struct() | nil,
-          discovered_tools: MapSet.t()
+          discovered_tools: MapSet.t(),
+          pid: pid() | nil,
+          turn_user_message: Arbor.Contracts.Session.UserMessage.t() | nil,
+          streaming_buffer: map() | nil,
+          turn_task_pid: pid() | nil,
+          turn_timeout_ref: reference() | nil
         }
 
   # ── Public API ───────────────────────────────────────────────────────
@@ -213,6 +229,19 @@ defmodule Arbor.Orchestrator.Session do
           | {:error, term()}
   def send_message(session, message) do
     GenServer.call(session, {:send_message, message}, Arbor.Orchestrator.Config.turn_timeout_ms())
+  end
+
+  @doc """
+  Cancel the in-flight turn (user-initiated).
+
+  Preserves whatever the assistant streamed so far as a `:cancelled`
+  `AssistantMessage` (distinct from a system `:interrupted`), kills the turn
+  task, and unblocks the session. Returns `:ok`, or `{:error, :no_turn_in_flight}`
+  when nothing is running.
+  """
+  @spec cancel_turn(GenServer.server()) :: :ok | {:error, :no_turn_in_flight}
+  def cancel_turn(session) do
+    GenServer.call(session, :cancel_turn)
   end
 
   @doc """
@@ -400,7 +429,8 @@ defmodule Arbor.Orchestrator.Session do
         session_state: session_state,
         behavior: behavior,
         signer: signer,
-        tenant_context: tenant_context
+        tenant_context: tenant_context,
+        pid: self()
       }
 
       # Restore from checkpoint if provided (crash recovery)
@@ -487,6 +517,25 @@ defmodule Arbor.Orchestrator.Session do
 
   def handle_call(:get_state, _from, state) do
     {:reply, state, state}
+  end
+
+  # User cancellation: preserve whatever streamed as a :cancelled partial, kill the
+  # turn task, unblock the original caller and the session. The demonitor [:flush]
+  # before the kill means the task's :DOWN is dropped and can't re-finalize.
+  def handle_call(:cancel_turn, _from, %{turn_in_flight: true} = state) do
+    new_state = transition_phase(state, :processing, :complete, :idle)
+    finalize_partial(state, :cancelled, :user_cancelled)
+    safe_reply(state.turn_from, {:error, :cancelled})
+
+    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
+    if is_pid(state.turn_task_pid), do: Process.exit(state.turn_task_pid, :kill)
+
+    {:reply, :ok, reset_turn(new_state)}
+  end
+
+  def handle_call(:cancel_turn, _from, state) do
+    {:reply, {:error, :no_turn_in_flight}, state}
   end
 
   def handle_call(:execution_mode, _from, state) do
@@ -591,7 +640,7 @@ defmodule Arbor.Orchestrator.Session do
 
     task_sup = Arbor.Orchestrator.Session.TaskSupervisor
 
-    {_task_pid, task_ref} =
+    {task_pid, task_ref} =
       if Process.whereis(task_sup) do
         {:ok, pid} = Task.Supervisor.start_child(task_sup, task_fn)
         ref = Process.monitor(pid)
@@ -605,13 +654,22 @@ defmodule Arbor.Orchestrator.Session do
     caller_pid = elem(from, 0)
     caller_ref = Process.monitor(caller_pid)
 
+    # Streaming partial preservation: arm a hung-task safety-net timeout and open
+    # an accumulator the stream callback writes into. The buffer's started_at is
+    # wall-clock (the partial AssistantMessage's started_at when finalized).
+    timeout_ref = Process.send_after(self(), {:turn_timeout, task_ref}, turn_timeout_ms(state))
+
     new_state = %{
       state
       | turn_in_flight: true,
         turn_from: from,
         turn_task_ref: task_ref,
+        turn_task_pid: task_pid,
         turn_caller_ref: caller_ref,
-        turn_started_at: System.monotonic_time()
+        turn_started_at: System.monotonic_time(),
+        turn_user_message: user_message,
+        streaming_buffer: %{content: "", started_at: DateTime.utc_now(), first_token_at: nil},
+        turn_timeout_ref: timeout_ref
     }
 
     {:noreply, new_state}
@@ -724,15 +782,9 @@ defmodule Arbor.Orchestrator.Session do
     if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
     if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
 
-    {:noreply,
-     %{
-       new_state
-       | turn_in_flight: false,
-         turn_from: nil,
-         turn_task_ref: nil,
-         turn_caller_ref: nil,
-         turn_started_at: nil
-     }}
+    # Normal completion: apply_turn_result already persisted the complete message,
+    # so just clear the turn (incl. buffer + timeout).
+    {:noreply, reset_turn(new_state)}
   end
 
   def handle_info({:turn_result, _user_message, {:error, reason}}, state) do
@@ -741,20 +793,16 @@ defmodule Arbor.Orchestrator.Session do
 
     emit_turn_telemetry(state.turn_started_at, %{agent_id: state.agent_id, status: :error})
 
+    # Engine errors (incl. rescued engine crashes) arrive here — preserve whatever
+    # streamed before the failure as an :interrupted partial.
+    finalize_partial(state, :interrupted, reason)
+
     safe_reply(state.turn_from, {:error, reason})
 
     if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
     if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
 
-    {:noreply,
-     %{
-       new_state
-       | turn_in_flight: false,
-         turn_from: nil,
-         turn_task_ref: nil,
-         turn_caller_ref: nil,
-         turn_started_at: nil
-     }}
+    {:noreply, reset_turn(new_state)}
   end
 
   # Handle Task DOWN messages
@@ -774,24 +822,20 @@ defmodule Arbor.Orchestrator.Session do
   def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
     cond do
       ref == state.turn_task_ref ->
-        # Turn task crashed — reply to caller and reset.
+        # Turn task died non-normally (exit/kill/linked death the task's rescue
+        # didn't catch) — preserve any streamed partial, reply, reset.
         new_state = transition_phase(state, :processing, :complete, :idle)
+        finalize_partial(state, :interrupted, {:task_down, reason})
         safe_reply(state.turn_from, {:error, {:turn_task_crashed, reason}})
         if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
 
-        {:noreply,
-         %{
-           new_state
-           | turn_in_flight: false,
-             turn_from: nil,
-             turn_task_ref: nil,
-             turn_caller_ref: nil,
-             turn_started_at: nil
-         }}
+        {:noreply, reset_turn(new_state)}
 
       not is_nil(state.turn_caller_ref) and ref == state.turn_caller_ref ->
         # Caller died/timed out. Clear in-flight so future turns are accepted;
-        # the background task (if any) completes and hits safe_reply (noop).
+        # the background task (if any) completes and hits safe_reply (noop). We do
+        # NOT finalize a partial here — the turn isn't interrupted, only the caller
+        # left; the task runs on and persists the complete message itself.
         Logger.info(
           "[Session] send_message caller died (timeout or crash) for #{state.agent_id}; clearing in-flight state to unblock future turns"
         )
@@ -799,15 +843,7 @@ defmodule Arbor.Orchestrator.Session do
         if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
         new_state = transition_phase(state, :processing, :complete, :idle)
 
-        {:noreply,
-         %{
-           new_state
-           | turn_in_flight: false,
-             turn_from: nil,
-             turn_task_ref: nil,
-             turn_caller_ref: nil,
-             turn_started_at: nil
-         }}
+        {:noreply, reset_turn(new_state)}
 
       true ->
         {:noreply, state}
@@ -845,6 +881,39 @@ defmodule Arbor.Orchestrator.Session do
     end
   end
 
+  # Streaming partial preservation: the turn's stream callback (running in the
+  # turn Task) sends each chunk here so the partial survives a Task crash. We
+  # accumulate into the in-flight buffer; if there's no active buffer (late chunk
+  # after the turn already finalized), drop it.
+  def handle_info({:stream_chunk, text}, %{streaming_buffer: buf} = state)
+      when is_map(buf) and is_binary(text) do
+    first_token_at = buf.first_token_at || if(text != "", do: DateTime.utc_now())
+    updated = %{buf | content: buf.content <> text, first_token_at: first_token_at}
+    {:noreply, %{state | streaming_buffer: updated}}
+  end
+
+  def handle_info({:stream_chunk, _text}, state), do: {:noreply, state}
+
+  # Hung-task safety net: if the turn task neither completed nor crashed within
+  # the timeout, preserve the partial as :interrupted (reason :timeout), kill the
+  # task, and unblock the session. Only acts if `ref` is still the active turn.
+  def handle_info({:turn_timeout, ref}, %{turn_task_ref: ref} = state) when not is_nil(ref) do
+    Logger.warning("[Session] Turn timed out for #{state.agent_id}; preserving partial")
+    new_state = transition_phase(state, :processing, :complete, :idle)
+    finalize_partial(state, :interrupted, :timeout)
+    safe_reply(state.turn_from, {:error, :turn_timeout})
+
+    # Detach + kill the task so its impending :DOWN can't re-finalize.
+    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
+    if is_pid(state.turn_task_pid), do: Process.exit(state.turn_task_pid, :kill)
+
+    {:noreply, reset_turn(new_state)}
+  end
+
+  # Stale timeout (turn already finished / a different turn now) — ignore.
+  def handle_info({:turn_timeout, _ref}, state), do: {:noreply, state}
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   # ── Private helpers ──────────────────────────────────────────────────
@@ -880,6 +949,59 @@ defmodule Arbor.Orchestrator.Session do
     GenServer.reply(from, reply)
   catch
     _, _ -> :ok
+  end
+
+  # ── Streaming partial preservation helpers ───────────────────────────
+
+  # Clear all in-flight turn state (incl. the stream buffer + user message) and
+  # cancel the hung-task timeout. Used by every turn-end path.
+  defp reset_turn(state) do
+    cancel_turn_timeout(state)
+
+    %{
+      state
+      | turn_in_flight: false,
+        turn_from: nil,
+        turn_task_ref: nil,
+        turn_task_pid: nil,
+        turn_caller_ref: nil,
+        turn_started_at: nil,
+        turn_user_message: nil,
+        streaming_buffer: nil,
+        turn_timeout_ref: nil
+    }
+  end
+
+  defp cancel_turn_timeout(%{turn_timeout_ref: ref}) when is_reference(ref) do
+    Process.cancel_timer(ref)
+    :ok
+  end
+
+  defp cancel_turn_timeout(_), do: :ok
+
+  defp turn_timeout_ms(state) do
+    case state.config do
+      %{turn_timeout_ms: ms} when is_integer(ms) and ms > 0 -> ms
+      _ -> Arbor.Orchestrator.Config.turn_timeout_ms()
+    end
+  end
+
+  # Persist whatever streamed before an interruption as a partial AssistantMessage
+  # (:interrupted for system failures, :cancelled for user cancel). No-op unless
+  # there's accumulated content AND a known in-flight user message. Never raises.
+  defp finalize_partial(state, status, reason) do
+    buf = state.streaming_buffer
+
+    if is_map(buf) and is_binary(buf.content) and buf.content != "" and
+         not is_nil(state.turn_user_message) do
+      Builders.apply_turn_interruption(state, status, reason)
+    end
+
+    :ok
+  rescue
+    e ->
+      Logger.warning("[Session] partial-preservation persist failed: #{Exception.message(e)}")
+      :ok
   end
 
   # ── Gate-level orchestrator authorization ────────────────────────────

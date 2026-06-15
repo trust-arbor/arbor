@@ -192,11 +192,20 @@ defmodule Arbor.Orchestrator.Session.Builders do
   defp build_stream_callback(state, source) do
     agent_id = state.agent_id
     session_id = state.session_id
+    session_pid = state.pid
 
     fn event ->
       case event do
         %{type: :delta, data: data} ->
           text = Map.get(data, :text) || Map.get(data, "text", "")
+
+          # Durable accumulation (streaming partial preservation, Option A): hand
+          # each chat-turn chunk to the Session GenServer so the partial survives a
+          # turn-task crash/cancel/timeout. The signal below stays for the
+          # dashboard's live render. Only :turn streams feed the turn buffer.
+          if source == :turn and is_pid(session_pid) and text != "" do
+            send(session_pid, {:stream_chunk, text})
+          end
 
           ResultProcessor.emit_signal(:agent, :stream_delta, %{
             agent_id: agent_id,
@@ -331,6 +340,62 @@ defmodule Arbor.Orchestrator.Session.Builders do
       |> Map.put(:working_memory, updated_wm)
       |> maybe_call_increment_turn()
     end)
+  end
+
+  @doc """
+  Finalize an interrupted turn: persist whatever streamed as a partial
+  `AssistantMessage` (`:interrupted` for system failures, `:cancelled` for user
+  cancel), alongside the in-flight user message.
+
+  A crashed/cancelled/timed-out turn never reached `apply_turn_result`, so neither
+  entry was persisted — this persists BOTH from `state.streaming_buffer` +
+  `state.turn_user_message`. Called only when the buffer has content (see
+  `Session.finalize_partial/3`). Does not mutate session state (the caller resets).
+  """
+  @spec apply_turn_interruption(Arbor.Orchestrator.Session.t(), atom(), term()) :: :ok
+  def apply_turn_interruption(state, status, reason) do
+    alias Arbor.Contracts.Session.{AssistantMessage, UserMessage}
+    alias Arbor.Orchestrator.SessionCore
+
+    buf = state.streaming_buffer
+    now = DateTime.utc_now()
+    user_message = state.turn_user_message
+
+    user_sent_at =
+      case user_message do
+        %UserMessage{sent_at: %DateTime{} = sent_at} -> sent_at
+        _ -> buf.started_at
+      end
+
+    user_content =
+      case user_message do
+        %UserMessage{content: content} -> content
+        _ -> ""
+      end
+
+    user_msg = SessionCore.build_user_message(user_content, user_sent_at)
+
+    assistant_message =
+      case status do
+        :cancelled ->
+          AssistantMessage.cancelled(buf.content, buf.started_at,
+            completed_at: now,
+            first_token_at: buf.first_token_at
+          )
+
+        _ ->
+          AssistantMessage.interrupted(buf.content, reason, buf.started_at,
+            completed_at: now,
+            first_token_at: buf.first_token_at
+          )
+      end
+
+    Persistence.persist_turn_entries(state, user_msg, assistant_message, %{},
+      user_sent_at: user_sent_at,
+      assistant_completed_at: now
+    )
+
+    :ok
   end
 
   @doc false

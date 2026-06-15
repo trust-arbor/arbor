@@ -33,9 +33,19 @@ defmodule Arbor.Contracts.Session.AssistantMessage do
 
   ## Status
 
-  `:complete` is the normal terminal state. `:failed` carries an
-  `interrupted_reason`. `:streaming` / `:interrupted` exist for the streaming
-  work that builds on this struct — this module does not produce them yet.
+  - `:complete` — normal terminal state.
+  - `:failed` — the turn errored before/without producing usable content
+    (carries `interrupted_reason`).
+  - `:interrupted` — a streaming turn was cut off by a SYSTEM failure (task
+    crash, network drop, or turn-timeout); `content` holds the partial,
+    `interrupted_reason` the cause.
+  - `:cancelled` — a streaming turn was stopped by the USER (benign, intentional);
+    distinguished from `:interrupted` so restored history and eval/replay can tell
+    a deliberate stop from a failure.
+  - `:streaming` — in-flight (live updates); not yet produced by this module.
+
+  `:interrupted` / `:cancelled` partials are built via `interrupted/4` and
+  `cancelled/3` (see Streaming Partial Preservation).
 
   ## Construction (Construct)
 
@@ -60,7 +70,7 @@ defmodule Arbor.Contracts.Session.AssistantMessage do
   alias Arbor.Contracts.LLM.TokenUsage
   alias Arbor.Contracts.Pipeline.Response
 
-  @type status :: :streaming | :complete | :interrupted | :failed
+  @type status :: :streaming | :complete | :interrupted | :failed | :cancelled
 
   typedstruct do
     @typedoc "An assistant turn outcome"
@@ -168,6 +178,58 @@ defmodule Arbor.Contracts.Session.AssistantMessage do
       started_at: started_at,
       completed_at: completed_at,
       interrupted_reason: reason
+    }
+  end
+
+  @doc """
+  Build an `:interrupted` AssistantMessage from a partial stream buffer.
+
+  Used when a streaming turn is cut off by a SYSTEM failure (task crash, network
+  drop, turn-timeout). `content` is whatever accumulated before the cut.
+  `opts`: `:completed_at`, `:first_token_at`, `:usage` (typically `nil` — providers
+  don't return usage until the stream completes).
+
+  ## Examples
+
+      iex> s = ~U[2026-06-15 09:00:00Z]
+      iex> e = ~U[2026-06-15 09:00:03Z]
+      iex> am = AssistantMessage.interrupted("partial...", :task_crashed, s, completed_at: e)
+      iex> {am.status, am.content, am.interrupted_reason}
+      {:interrupted, "partial...", :task_crashed}
+  """
+  @spec interrupted(String.t(), term(), DateTime.t(), keyword()) :: t()
+  def interrupted(content, reason, %DateTime{} = started_at, opts \\ []) do
+    partial(content, :interrupted, started_at, Keyword.put(opts, :reason, reason))
+  end
+
+  @doc """
+  Build a `:cancelled` AssistantMessage from a partial stream buffer.
+
+  Used when the USER stops a streaming turn (benign). Defaults `interrupted_reason`
+  to `:user_cancelled`. Same `opts` as `interrupted/4`.
+
+  ## Examples
+
+      iex> s = ~U[2026-06-15 09:00:00Z]
+      iex> am = AssistantMessage.cancelled("partial...", s)
+      iex> {am.status, am.interrupted_reason}
+      {:cancelled, :user_cancelled}
+  """
+  @spec cancelled(String.t(), DateTime.t(), keyword()) :: t()
+  def cancelled(content, %DateTime{} = started_at, opts \\ []) do
+    partial(content, :cancelled, started_at, Keyword.put_new(opts, :reason, :user_cancelled))
+  end
+
+  @spec partial(String.t(), status(), DateTime.t(), keyword()) :: t()
+  defp partial(content, status, %DateTime{} = started_at, opts) do
+    %__MODULE__{
+      content: content || "",
+      status: status,
+      started_at: started_at,
+      first_token_at: Keyword.get(opts, :first_token_at),
+      completed_at: Keyword.get(opts, :completed_at),
+      interrupted_reason: Keyword.get(opts, :reason),
+      usage: Keyword.get(opts, :usage)
     }
   end
 
