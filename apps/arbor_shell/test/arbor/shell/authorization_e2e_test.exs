@@ -56,7 +56,12 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
     end
 
     test "agent with wildcard shell capability can execute any command", %{agent_id: agent_id} do
-      grant_shell_capability(agent_id, "arbor://shell/exec")
+      # A wildcard shell grant must be an EXPLICIT subtree wildcard (`/**`).
+      # Post-C8 (2026-06-09, AuthDecision.uri_matches?/2), a concrete cap URI
+      # grants ONLY its exact resource — `arbor://shell/exec` would match only
+      # the bare `arbor://shell/exec`, not `arbor://shell/exec/echo`. Subtree
+      # access (any command) requires the `/**` form.
+      grant_shell_capability(agent_id, "arbor://shell/exec/**")
 
       result = Arbor.Shell.authorize_and_execute(agent_id, "echo wildcard", sandbox: :none)
 
