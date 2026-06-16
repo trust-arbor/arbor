@@ -50,8 +50,16 @@ defmodule Arbor.Memory.ContextWindow.Compression do
   # Compression Pipeline
   # ============================================================================
 
+  # How long to wait for the (LLM-backed) summarization and fact-extraction
+  # tasks before degrading to the non-LLM fallback. Slow local providers
+  # (e.g. a loaded homelab Ollama) can exceed the default, so it's
+  # overridable via `config :arbor_memory, :compression_llm_timeout_ms`.
+  @default_compression_llm_timeout_ms :timer.seconds(30)
+
   @doc false
   def run_compression_pipeline(%{multi_layer: true} = window, messages) do
+    timeout = compression_llm_timeout()
+
     # Always run summarization
     summarize_task = Task.async(fn -> summarize_messages(window, messages) end)
 
@@ -63,19 +71,46 @@ defmodule Arbor.Memory.ContextWindow.Compression do
         nil
       end
 
-    # Wait for summarization (required)
-    {demoted_text, demoted_tokens} = Task.await(summarize_task, :timer.seconds(30))
+    # Wait for summarization (required). On timeout, degrade to the
+    # non-LLM fallback (formatted messages) rather than crashing the
+    # whole compression cycle — a slow/unreachable LLM must never take
+    # down the GenServer that drives compression.
+    {demoted_text, demoted_tokens} =
+      case yield_or_shutdown(summarize_task, timeout) do
+        {:ok, result} ->
+          result
 
-    # Wait for fact extraction (optional)
+        :timeout ->
+          Logger.warning("Summarization timed out during compression; using fallback",
+            agent_id: window.agent_id,
+            timeout_ms: timeout
+          )
+
+          fallback_summary(messages)
+      end
+
+    # Wait for fact extraction (optional). Timeout or error degrades to
+    # no extracted facts.
     extracted_facts =
       if fact_task do
-        case Task.await(fact_task, :timer.seconds(30)) do
-          {:ok, facts} -> facts
-          {:error, reason} ->
+        case yield_or_shutdown(fact_task, timeout) do
+          {:ok, {:ok, facts}} ->
+            facts
+
+          {:ok, {:error, reason}} ->
             Logger.debug("Fact extraction failed during compression",
               reason: inspect(reason),
               agent_id: window.agent_id
             )
+
+            []
+
+          :timeout ->
+            Logger.debug("Fact extraction timed out during compression",
+              agent_id: window.agent_id,
+              timeout_ms: timeout
+            )
+
             []
         end
       else
@@ -83,6 +118,22 @@ defmodule Arbor.Memory.ContextWindow.Compression do
       end
 
     {demoted_text, demoted_tokens, extracted_facts}
+  end
+
+  # Await a task with a timeout, shutting it down on timeout so the
+  # linked task process doesn't leak or later deliver a stray message.
+  defp yield_or_shutdown(task, timeout) do
+    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> {:ok, result}
+      _ -> :timeout
+    end
+  end
+
+  # Non-LLM fallback summary identical to what summarize_*/3 produce on an
+  # LLM error: the formatted messages themselves (non-empty).
+  defp fallback_summary(messages) do
+    formatted = Formatting.format_messages_for_summary(messages)
+    {formatted, estimate_tokens_text(formatted)}
   end
 
   @doc false
@@ -347,10 +398,25 @@ defmodule Arbor.Memory.ContextWindow.Compression do
   end
 
   defp summarization_llm_opts(window) do
-    opts = []
-    opts = if window.summarization_model, do: [{:model, window.summarization_model} | opts], else: opts
-    opts = if window.summarization_provider, do: [{:provider, window.summarization_provider} | opts], else: opts
+    opts = [receive_timeout: compression_llm_timeout()]
+
+    opts =
+      if window.summarization_model, do: [{:model, window.summarization_model} | opts], else: opts
+
+    opts =
+      if window.summarization_provider,
+        do: [{:provider, window.summarization_provider} | opts],
+        else: opts
+
     opts
+  end
+
+  defp compression_llm_timeout do
+    Application.get_env(
+      :arbor_memory,
+      :compression_llm_timeout_ms,
+      @default_compression_llm_timeout_ms
+    )
   end
 
   defp call_summarization_llm(prompt, algorithm, llm_opts) do
@@ -480,19 +546,27 @@ defmodule Arbor.Memory.ContextWindow.Compression do
       end)
       |> Enum.filter(&(String.length(&1) > 0))
 
-    opts = [
-      source: "compression_cycle_#{window.compression_count}",
-      min_confidence: window.min_fact_confidence
-    ]
+    opts =
+      [
+        source: "compression_cycle_#{window.compression_count}",
+        min_confidence: window.min_fact_confidence,
+        receive_timeout: compression_llm_timeout()
+      ]
+      |> maybe_add_llm_opt(:model, window.fact_extraction_model)
+      |> maybe_add_llm_opt(:provider, window.fact_extraction_provider)
 
     case FactExtractor.extract_batch(texts, opts) do
       facts when is_list(facts) ->
         # Filter by confidence threshold
-        filtered = Enum.filter(facts, fn f ->
-          (f[:confidence] || f.confidence || 1.0) >= window.min_fact_confidence
-        end)
+        filtered =
+          Enum.filter(facts, fn f ->
+            (f[:confidence] || f.confidence || 1.0) >= window.min_fact_confidence
+          end)
+
         {:ok, filtered}
-      _ -> {:ok, []}
+
+      _ ->
+        {:ok, []}
     end
   rescue
     e -> {:error, {:fact_extraction_error, e}}
@@ -516,8 +590,11 @@ defmodule Arbor.Memory.ContextWindow.Compression do
     embedding = ctx[:embedding] || compute_context_embedding(ctx)
 
     case embedding do
-      nil -> false
-      existing_embedding -> cosine_similarity(new_embedding, existing_embedding) >= @retrieved_dedup_threshold
+      nil ->
+        false
+
+      existing_embedding ->
+        cosine_similarity(new_embedding, existing_embedding) >= @retrieved_dedup_threshold
     end
   end
 

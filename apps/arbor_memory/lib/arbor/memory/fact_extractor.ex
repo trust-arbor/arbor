@@ -142,7 +142,8 @@ defmodule Arbor.Memory.FactExtractor do
     {~r/(?:we use|I use|using)\s+([A-Z][A-Za-z0-9]+)\s+(?:for|as)/i, :tool, 0.75},
 
     # Database patterns
-    {~r/(?:uses?|using|with)\s+(PostgreSQL|MySQL|MongoDB|Redis|SQLite|Postgres)/i, :database, 0.9},
+    {~r/(?:uses?|using|with)\s+(PostgreSQL|MySQL|MongoDB|Redis|SQLite|Postgres)/i, :database,
+     0.9},
 
     # Framework patterns
     {~r/(?:uses?|using|with|built on)\s+(Phoenix|Rails|Django|Express|Next\.js|React|Vue|Angular)/i,
@@ -458,7 +459,7 @@ defmodule Arbor.Memory.FactExtractor do
 
     llm_opts =
       opts
-      |> Keyword.take([:model, :provider])
+      |> Keyword.take([:model, :provider, :receive_timeout, :timeout])
       |> Keyword.put_new(:max_tokens, 1000)
       |> Keyword.put(:system_prompt, @extraction_system_prompt)
 
@@ -540,7 +541,9 @@ defmodule Arbor.Memory.FactExtractor do
   defp parse_confidence(c) when is_number(c), do: max(0.0, min(1.0, c))
   defp parse_confidence(_), do: 0.5
 
-  defp valid_fact?(%{content: content}) when is_binary(content) and byte_size(content) > 10, do: true
+  defp valid_fact?(%{content: content}) when is_binary(content) and byte_size(content) > 10,
+    do: true
+
   defp valid_fact?(_), do: false
 
   @doc false

@@ -236,7 +236,16 @@ defmodule Arbor.LLM.Preflight do
   end
 
   defp default_base_url(:lm_studio), do: "http://localhost:1234/v1"
-  defp default_base_url(:ollama), do: "http://localhost:11434"
+
+  # Ollama's loaded-model probe hits the native /api/tags endpoint (see
+  # loaded_models/2), so this default must be the BARE base URL (no /v1).
+  # Honour ARBOR_OLLAMA_BASE_URL so CI / homelab deployments point the
+  # preflight check at the same Ollama the call path uses.
+  defp default_base_url(:ollama) do
+    (System.get_env("ARBOR_OLLAMA_BASE_URL") || "http://localhost:11434")
+    |> String.replace_suffix("/v1", "")
+  end
+
   defp default_base_url(_), do: ""
 
   defp log_results(results) do

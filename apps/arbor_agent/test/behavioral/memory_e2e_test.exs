@@ -553,7 +553,11 @@ defmodule Arbor.Agent.Behavioral.MemoryE2ETest do
 
   describe "real LLM heartbeat loop" do
     @describetag :llm
-    @describetag timeout: 120_000
+    # Routed at homelab Ollama (granite3.3:2b) — a real heartbeat call
+    # generating up to 1500 tokens can take tens of seconds on a shared
+    # GPU, and the multi-beat tests make several sequential calls, so the
+    # per-test timeout is generous.
+    @describetag timeout: 600_000
 
     setup %{agent_id: agent_id} do
       # Minimal seed for real LLM — give it room to generate
@@ -708,10 +712,16 @@ defmodule Arbor.Agent.Behavioral.MemoryE2ETest do
     prompt = HeartbeatPrompt.build_prompt(state)
     system = HeartbeatPrompt.system_prompt(state)
 
+    # Route at homelab Ollama (small fast model) instead of the slow
+    # default provider. granite3.3:2b is an instruct model that reliably
+    # produces the JSON these behavior assertions expect, while staying
+    # within the 120s describe timeout.
     {:ok, response} =
       Arbor.AI.generate_text(prompt,
+        provider: :ollama,
+        model: "granite3.3:2b",
         max_tokens: 1500,
-        backend: :api,
+        receive_timeout: 120_000,
         system_prompt: system
       )
 

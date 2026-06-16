@@ -33,13 +33,16 @@ defmodule Arbor.Agent.HeartbeatLLM do
     model = Keyword.get(opts, :model) || heartbeat_model()
     provider = Keyword.get(opts, :provider) || heartbeat_provider()
 
-    ai_opts = [
-      model: model,
-      provider: provider,
-      max_tokens: 1500,
-      runtime: :arbor,
-      system_prompt: system
-    ]
+    ai_opts =
+      [
+        model: model,
+        provider: provider,
+        max_tokens: Keyword.get(opts, :max_tokens, 1500),
+        runtime: :arbor,
+        system_prompt: system
+      ]
+      |> maybe_put_opt(opts, :receive_timeout)
+      |> maybe_put_opt(opts, :timeout)
 
     llm_started_at = System.monotonic_time(:millisecond)
     ai_result = call_ai(prompt, ai_opts)
@@ -113,6 +116,16 @@ defmodule Arbor.Agent.HeartbeatLLM do
   end
 
   # -- Private --
+
+  # Forward an optional key from the caller's opts into the AI opts when
+  # present. Used to thread :receive_timeout / :timeout through to the
+  # underlying generate_text call so a slow provider can be bounded.
+  defp maybe_put_opt(ai_opts, opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} -> Keyword.put(ai_opts, key, value)
+      :error -> ai_opts
+    end
+  end
 
   defp call_ai(prompt, opts) do
     if ai_available?() do

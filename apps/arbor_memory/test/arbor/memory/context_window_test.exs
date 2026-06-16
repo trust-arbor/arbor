@@ -387,7 +387,8 @@ defmodule Arbor.Memory.ContextWindowTest do
     end
 
     test "add_message tracks detail_tokens", %{window: window} do
-      window = ContextWindow.add_message(window, %{role: :user, content: String.duplicate("a", 400)})
+      window =
+        ContextWindow.add_message(window, %{role: :user, content: String.duplicate("a", 400)})
 
       assert window.detail_tokens > 0
     end
@@ -510,8 +511,14 @@ defmodule Arbor.Memory.ContextWindowTest do
     test "add_retrieved allows different content", %{window: window} do
       window =
         window
-        |> ContextWindow.add_retrieved(%{content: "The Elixir programming language uses pattern matching and immutable data structures"})
-        |> ContextWindow.add_retrieved(%{content: "Tomorrow's weather forecast calls for heavy rain and thunderstorms in the evening"})
+        |> ContextWindow.add_retrieved(%{
+          content:
+            "The Elixir programming language uses pattern matching and immutable data structures"
+        })
+        |> ContextWindow.add_retrieved(%{
+          content:
+            "Tomorrow's weather forecast calls for heavy rain and thunderstorms in the evening"
+        })
 
       assert length(window.retrieved_context) == 2
     end
@@ -564,12 +571,18 @@ defmodule Arbor.Memory.ContextWindowTest do
     test "compress demotes oldest messages to recent_summary" do
       # Use small_context to easily trigger compression.
       # Set summarization_enabled: true so compression is deferred (not inline in add_message).
-      window = ContextWindow.new("agent_001",
-        multi_layer: true,
-        max_tokens: 100,
-        summarization_enabled: true,
-        ratios: %{full_detail: 0.50, recent_summary: 0.25, distant_summary: 0.15, retrieved: 0.10}
-      )
+      window =
+        ContextWindow.new("agent_001",
+          multi_layer: true,
+          max_tokens: 100,
+          summarization_enabled: true,
+          ratios: %{
+            full_detail: 0.50,
+            recent_summary: 0.25,
+            distant_summary: 0.15,
+            retrieved: 0.10
+          }
+        )
 
       # Add many messages to exceed the budget (50 token budget for detail)
       window =
@@ -611,7 +624,14 @@ defmodule Arbor.Memory.ContextWindowTest do
     end
 
     test "total_tokens sums all sections", %{window: window} do
-      window = %{window | distant_tokens: 100, recent_tokens: 200, detail_tokens: 300, retrieved_tokens: 50}
+      window = %{
+        window
+        | distant_tokens: 100,
+          recent_tokens: 200,
+          detail_tokens: 300,
+          retrieved_tokens: 50
+      }
+
       assert ContextWindow.total_tokens(window) == 650
     end
 
@@ -793,7 +813,11 @@ defmodule Arbor.Memory.ContextWindowTest do
       legacy_data = %{
         "agent_id" => "agent_001",
         "entries" => [
-          %{"type" => "message", "content" => "Hello", "timestamp" => DateTime.to_iso8601(DateTime.utc_now())}
+          %{
+            "type" => "message",
+            "content" => "Hello",
+            "timestamp" => DateTime.to_iso8601(DateTime.utc_now())
+          }
         ],
         "max_tokens" => 10_000,
         "summary_threshold" => 0.7
@@ -859,19 +883,23 @@ defmodule Arbor.Memory.ContextWindowTest do
       window =
         window
         |> ContextWindow.add_retrieved(%{
-          content: "Elixir uses the BEAM virtual machine for concurrent programming with lightweight processes"
+          content:
+            "Elixir uses the BEAM virtual machine for concurrent programming with lightweight processes"
         })
         |> ContextWindow.add_retrieved(%{
-          content: "The stock market experienced significant volatility due to unexpected interest rate changes"
+          content:
+            "The stock market experienced significant volatility due to unexpected interest rate changes"
         })
 
       assert length(window.retrieved_context) == 2
     end
 
     test "stores embeddings on retrieved context when available", %{window: window} do
-      window = ContextWindow.add_retrieved(window, %{
-        content: "A substantial piece of content about Elixir programming patterns and OTP design"
-      })
+      window =
+        ContextWindow.add_retrieved(window, %{
+          content:
+            "A substantial piece of content about Elixir programming patterns and OTP design"
+        })
 
       ctx = hd(window.retrieved_context)
 
@@ -908,10 +936,12 @@ defmodule Arbor.Memory.ContextWindowTest do
     end
 
     test "percentage with model_id resolves against model context" do
-      window = ContextWindow.new("agent_model",
-        max_tokens: {:percentage, 0.10},
-        model_id: "anthropic:claude-3-5-sonnet-20241022"
-      )
+      window =
+        ContextWindow.new("agent_model",
+          max_tokens: {:percentage, 0.10},
+          model_id: "anthropic:claude-3-5-sonnet-20241022"
+        )
+
       # Should resolve based on the model's known context size
       assert window.max_tokens > 0
       assert is_integer(window.max_tokens)
@@ -920,23 +950,25 @@ defmodule Arbor.Memory.ContextWindowTest do
 
   describe "model config for summarization" do
     test "stores summarization_model and summarization_provider" do
-      window = ContextWindow.new("agent_model_cfg",
-        multi_layer: true,
-        summarization_enabled: true,
-        summarization_model: "anthropic:claude-3-5-haiku-20241022",
-        summarization_provider: :anthropic
-      )
+      window =
+        ContextWindow.new("agent_model_cfg",
+          multi_layer: true,
+          summarization_enabled: true,
+          summarization_model: "anthropic:claude-3-5-haiku-20241022",
+          summarization_provider: :anthropic
+        )
 
       assert window.summarization_model == "anthropic:claude-3-5-haiku-20241022"
       assert window.summarization_provider == :anthropic
     end
 
     test "stores fact_extraction_model" do
-      window = ContextWindow.new("agent_fact_cfg",
-        multi_layer: true,
-        fact_extraction_enabled: true,
-        fact_extraction_model: "openai:gpt-4o-mini"
-      )
+      window =
+        ContextWindow.new("agent_fact_cfg",
+          multi_layer: true,
+          fact_extraction_enabled: true,
+          fact_extraction_model: "openai:gpt-4o-mini"
+        )
 
       assert window.fact_extraction_model == "openai:gpt-4o-mini"
     end
@@ -952,14 +984,15 @@ defmodule Arbor.Memory.ContextWindowTest do
 
   describe "model config serialization" do
     test "round-trips model config through serialize/deserialize" do
-      window = ContextWindow.new("agent_ser",
-        multi_layer: true,
-        summarization_enabled: true,
-        summarization_model: "anthropic:claude-3-5-haiku-20241022",
-        summarization_provider: :anthropic,
-        fact_extraction_enabled: true,
-        fact_extraction_model: "openai:gpt-4o-mini"
-      )
+      window =
+        ContextWindow.new("agent_ser",
+          multi_layer: true,
+          summarization_enabled: true,
+          summarization_model: "anthropic:claude-3-5-haiku-20241022",
+          summarization_provider: :anthropic,
+          fact_extraction_enabled: true,
+          fact_extraction_model: "openai:gpt-4o-mini"
+        )
 
       data = ContextWindow.serialize(window)
       restored = ContextWindow.deserialize(data)
@@ -986,28 +1019,57 @@ defmodule Arbor.Memory.ContextWindowTest do
     end
   end
 
+  # These two tests exercise the real LLM summarization + fact-extraction
+  # path (Task.await on Arbor.AI.generate_text). Route them at homelab
+  # Ollama with a fast small model so they respond well within the
+  # 30s Task.await rather than timing out on the slow default provider.
+  # Tagged :llm + :integration so they're excluded from the fast lane and
+  # only run with `--include integration` when an Ollama endpoint is set
+  # via ARBOR_OLLAMA_BASE_URL.
   describe "compression pipeline with fact extraction" do
+    @describetag :llm
+    @describetag :integration
+    @describetag timeout: 120_000
+
     setup do
       # Small budget to trigger compression easily.
       # Use summarization_enabled: true so compression is deferred to compress_if_needed.
-      window = ContextWindow.new("agent_pipeline",
-        multi_layer: true,
-        max_tokens: 200,
-        summarization_enabled: true,
-        fact_extraction_enabled: true,
-        ratios: %{full_detail: 0.50, recent_summary: 0.25, distant_summary: 0.15, retrieved: 0.10}
-      )
+      # Summarization AND fact extraction route through homelab Ollama
+      # with a fast model — these are mechanics tests ("should not raise"),
+      # so the model just needs to respond quickly.
+      window =
+        ContextWindow.new("agent_pipeline",
+          multi_layer: true,
+          max_tokens: 200,
+          summarization_enabled: true,
+          fact_extraction_enabled: true,
+          summarization_provider: :ollama,
+          summarization_model: "granite3.3:2b",
+          fact_extraction_provider: :ollama,
+          fact_extraction_model: "granite3.3:2b",
+          ratios: %{
+            full_detail: 0.50,
+            recent_summary: 0.25,
+            distant_summary: 0.15,
+            retrieved: 0.10
+          }
+        )
 
       %{window: window}
     end
 
     test "compress runs without error when fact_extraction_enabled", %{window: window} do
-      # Add enough messages to trigger compression
+      # Add enough messages to trigger compression. Six longer messages
+      # comfortably exceed the 100-token full_detail budget (max_tokens
+      # 200 × 0.50) while keeping the real-LLM fact-extraction fan-out
+      # (one call per demoted message) bounded for a shared Ollama.
       window =
-        Enum.reduce(1..20, window, fn i, w ->
+        Enum.reduce(1..6, window, fn i, w ->
           ContextWindow.add_message(w, %{
             role: :user,
-            content: "Message #{i} with some content about databases and API endpoints and server config"
+            content:
+              "Message #{i} with some content about databases and API endpoints and " <>
+                "server configuration, deployment pipelines, and observability dashboards"
           })
         end)
 
@@ -1021,10 +1083,12 @@ defmodule Arbor.Memory.ContextWindowTest do
 
     test "compression demotes oldest messages to recent_summary", %{window: window} do
       window =
-        Enum.reduce(1..20, window, fn i, w ->
+        Enum.reduce(1..6, window, fn i, w ->
           ContextWindow.add_message(w, %{
             role: :user,
-            content: "Message #{i}: discussing various topics about API design and database optimization"
+            content:
+              "Message #{i}: discussing various topics about API design and database " <>
+                "optimization, indexing strategies, caching layers, and query planning"
           })
         end)
 
@@ -1039,19 +1103,23 @@ defmodule Arbor.Memory.ContextWindowTest do
 
   describe "timestamps in summary formatting" do
     test "format_messages_for_summary includes timestamps" do
-      window = ContextWindow.new("agent_ts",
-        multi_layer: true,
-        max_tokens: 200,
-        summarization_enabled: false
-      )
+      window =
+        ContextWindow.new("agent_ts",
+          multi_layer: true,
+          max_tokens: 200,
+          summarization_enabled: false
+        )
 
       now = DateTime.utc_now()
 
       window =
-        %{window | full_detail: [
-          %{role: :user, content: "Hello", speaker: "Human", timestamp: now},
-          %{role: :assistant, content: "Hi there", timestamp: now}
-        ]}
+        %{
+          window
+          | full_detail: [
+              %{role: :user, content: "Hello", speaker: "Human", timestamp: now},
+              %{role: :assistant, content: "Hi there", timestamp: now}
+            ]
+        }
 
       # Trigger compression so format_messages_for_summary is called
       window = %{window | detail_tokens: 999}
@@ -1067,19 +1135,26 @@ defmodule Arbor.Memory.ContextWindowTest do
   describe "flow_to_distant with LLM re-summarization" do
     test "flow_to_distant works when summarization is disabled" do
       # With disabled summarization, flow_to_distant still works via truncation
-      window = ContextWindow.new("agent_flow",
-        multi_layer: true,
-        max_tokens: 100,
-        summarization_enabled: false,
-        ratios: %{full_detail: 0.50, recent_summary: 0.25, distant_summary: 0.15, retrieved: 0.10}
-      )
+      window =
+        ContextWindow.new("agent_flow",
+          multi_layer: true,
+          max_tokens: 100,
+          summarization_enabled: false,
+          ratios: %{
+            full_detail: 0.50,
+            recent_summary: 0.25,
+            distant_summary: 0.15,
+            retrieved: 0.10
+          }
+        )
 
       # Add many messages to trigger deep compression
       window =
         Enum.reduce(1..50, window, fn i, w ->
           ContextWindow.add_message(w, %{
             role: :user,
-            content: "Detailed message #{i}: Long content about various topics to fill the context window quickly"
+            content:
+              "Detailed message #{i}: Long content about various topics to fill the context window quickly"
           })
         end)
 

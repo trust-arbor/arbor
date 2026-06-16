@@ -277,6 +277,36 @@ if map_size(contacts) > 0 do
 end
 
 # ============================================================================
+# Ollama base URL (local-LM provider)
+# ============================================================================
+# Single env var controlling where BOTH the embedding path and the
+# text-generation path reach Ollama. Defaults to localhost so dev/test
+# without the var behaves exactly as before; CI sets it to the homelab
+# Ollama (e.g. ARBOR_OLLAMA_BASE_URL=http://10.42.42.100:11434).
+#
+# Two configs are set because the two paths read different keys with a
+# different /v1 convention:
+#   - Embedding path (Arbor.AI.Backends.OllamaEmbedding) hits the native
+#     /api/embed endpoint → wants the bare base URL (NO /v1).
+#   - Text-gen path (Arbor.AI.generate_text → arbor_llm → ProviderRegistry)
+#     routes through req_llm's OpenAI-compatible adapter → wants the
+#     /v1-suffixed base URL.
+ollama_base_url = System.get_env("ARBOR_OLLAMA_BASE_URL") || "http://localhost:11434"
+
+# Embedding path: arbor_ai reads `config :arbor_ai, :ollama, base_url`
+# and calls "#{base_url}/api/embed" — bare URL, no /v1.
+config :arbor_ai, :ollama, base_url: ollama_base_url
+
+# Text-gen path: ProviderRegistry reads `config :arbor_orchestrator, :ollama,
+# base_url` for the OpenAI-compatible endpoint — needs the /v1 suffix.
+ollama_v1_base_url =
+  if String.ends_with?(ollama_base_url, "/v1"),
+    do: ollama_base_url,
+    else: ollama_base_url <> "/v1"
+
+config :arbor_orchestrator, :ollama, base_url: ollama_v1_base_url
+
+# ============================================================================
 # LLM Model & Provider Configuration
 # ============================================================================
 # These override the defaults in config.exs. All are optional.

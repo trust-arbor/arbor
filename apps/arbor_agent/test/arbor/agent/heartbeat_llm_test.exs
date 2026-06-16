@@ -15,6 +15,15 @@ defmodule Arbor.Agent.HeartbeatLLMTest do
   # API keys), we test error propagation and the parse pipeline.
   # The module returns {:error, :ai_unavailable} when Arbor.AI is not loaded.
 
+  # The two tests below that actually drive the LLM ("builds prompt..."
+  # and idle_think "returns error or valid result") route at homelab
+  # Ollama with a fast small model (via ARBOR_OLLAMA_BASE_URL) instead of
+  # the slow default provider that previously timed out at 10s.
+  # max_tokens kept small so generation is fast on a shared Ollama — these
+  # are mechanics tests (the model just needs to respond), not output-quality
+  # checks. receive_timeout bounds per-chunk idle wait.
+  @llm_opts [provider: :ollama, model: "granite3.3:2b", max_tokens: 64, receive_timeout: 30_000]
+
   defp minimal_state(overrides \\ %{}) do
     Map.merge(
       %{
@@ -65,7 +74,7 @@ defmodule Arbor.Agent.HeartbeatLLMTest do
     end
 
     @tag :llm
-    @tag timeout: 10_000
+    @tag timeout: 600_000
     test "builds prompt from state before calling AI" do
       # Verify it doesn't crash on various state shapes
       states = [
@@ -76,7 +85,7 @@ defmodule Arbor.Agent.HeartbeatLLMTest do
       ]
 
       for state <- states do
-        result = HeartbeatLLM.think(state)
+        result = HeartbeatLLM.think(state, @llm_opts)
         assert match?({:ok, _}, result) or match?({:error, _}, result)
       end
     end
@@ -84,9 +93,9 @@ defmodule Arbor.Agent.HeartbeatLLMTest do
 
   describe "idle_think/2" do
     @tag :llm
-    @tag timeout: 10_000
+    @tag timeout: 600_000
     test "returns error or valid result" do
-      result = HeartbeatLLM.idle_think(minimal_state())
+      result = HeartbeatLLM.idle_think(minimal_state(), @llm_opts)
 
       case result do
         {:error, _reason} ->
