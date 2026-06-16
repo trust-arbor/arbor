@@ -946,6 +946,18 @@ defmodule Arbor.Actions.File do
         :ripgrep ->
           ripgrep_search(files, pattern, use_regex, ctx_lines, max_results)
 
+        # grep's `-E` engine is POSIX ERE, which does NOT understand
+        # PCRE escapes (`\d`, `\w`, `\b`, lookarounds, …). The compiled
+        # `regex` we validated up front is PCRE (Elixir `Regex`), so
+        # handing a PCRE pattern to grep silently mis-matches — e.g.
+        # `foo\d+bar` matches a literal `d` under ERE and finds nothing.
+        # ripgrep happens to be PCRE-compatible; grep is not. So in
+        # regex mode never use grep — run the BEAM path, which uses the
+        # already-compiled PCRE `regex` and keeps semantics identical to
+        # ripgrep and to the action's documented behavior.
+        :grep when use_regex ->
+          beam_search(files, regex, ctx_lines, max_results)
+
         :grep ->
           grep_search(files, pattern, use_regex, ctx_lines, max_results)
 
