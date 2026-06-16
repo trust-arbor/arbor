@@ -21,7 +21,9 @@ defmodule Arbor.Common.Application do
           Arbor.Common.ComputeRegistry,
           Arbor.Common.PipelineResolver,
           Arbor.Common.ActionRegistry,
-          {Arbor.Common.SkillLibrary, skill_dirs: [".arbor/skills"]},
+          # No explicit dirs: SkillLibrary uses its default search path
+          # (bundled priv/skills + ~/.arbor/skills). See default_skill_dirs/0.
+          Arbor.Common.SkillLibrary,
           Arbor.Common.AgentTelemetry.Store,
           {Arbor.Common.CapabilityIndex,
            providers: [
