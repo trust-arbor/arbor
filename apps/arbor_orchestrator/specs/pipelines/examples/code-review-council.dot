@@ -27,7 +27,21 @@
 // Context out:
 //   reviews_json     — JSON array of the 4 raw reviewer responses
 //   final_review    — the synthesizer's merged output
-//   exec.write_report.bytes_written — proof the report landed on disk
+//   file.written.write_report — absolute path of the report that landed on disk
+//
+// Why the report is persisted with the core `write` handler (not the
+// `file_write` Jido action): the synthesizer's output is LLM-`:derived`
+// provenance. An `exec` node hands the action ONE combined input taint — the
+// worst over every consumed context key (engine/handlers/exec_handler.ex
+// `worst_taint`). file_write's `path` is a taint `:control` param requiring
+// `path_traversal` sanitization, so bundling it with the `:derived` content
+// makes the gate fail closed ({:missing_sanitization, :path,
+// [:path_traversal]}) even though the path itself is fine. The `write` handler
+// is the orchestrator's purpose-built primitive for persisting a pipeline
+// value to a workspace file: it applies the SAME path-traversal control
+// directly via `SafePath.resolve_within(output, workdir)` (the real guard is
+// NOT weakened) without imposing the action-level control-param taint bundling
+// that's inappropriate for "write derived output to my own scratch dir".
 
 digraph CodeReviewCouncil {
   graph [
@@ -59,14 +73,6 @@ digraph CodeReviewCouncil {
     source_key="last_response",
     expression="code_under_review",
     output_key="code_under_review"
-  ]
-
-  extract_report_path [
-    type="transform",
-    transform="json_extract",
-    source_key="last_response",
-    expression="report_path",
-    output_key="report_path"
   ]
 
   extract_model_provider [
@@ -187,18 +193,15 @@ digraph CodeReviewCouncil {
     output_key="content"
   ]
 
-  prep_report_path [
-    type="transform",
-    transform="identity",
-    source_key="report_path",
-    output_key="path"
-  ]
-
+  // Persist via the core `write` handler. `output` is resolved relative to the
+  // run's `workdir` through SafePath.resolve_within — an escape attempt (e.g.
+  // "../../etc/passwd") is rejected, so the path-traversal guard is fully in
+  // force. `content_key` names the context key holding the synthesized markdown.
   write_report [
-    type="exec",
-    target="action",
-    action="file_write",
-    context_keys="path,content"
+    type="write",
+    target="file",
+    content_key="content",
+    output="review.md"
   ]
 
   // Capture the final review on a stable key for callers to read.
@@ -214,8 +217,8 @@ digraph CodeReviewCouncil {
   // ── Flow ──────────────────────────────────────────────────────────
 
   start -> read_spec
-  read_spec -> extract_review_brief -> extract_code -> extract_report_path
-  extract_report_path -> extract_model_provider -> extract_model_id
+  read_spec -> extract_review_brief -> extract_code
+  extract_code -> extract_model_provider -> extract_model_id
   extract_model_id -> parallel_review
 
   // Each reviewer is a branch of the fan-out. The parallel handler
@@ -233,8 +236,7 @@ digraph CodeReviewCouncil {
   review_performance -> format_reviews
   review_idioms -> format_reviews
 
-  // Snapshot the synthesizer output BEFORE file_write clobbers
-  // last_response with its action result map.
+  // Snapshot the synthesizer output onto a stable key before persisting.
   format_reviews -> synthesize -> snapshot_final
-  snapshot_final -> prep_report_content -> prep_report_path -> write_report -> done
+  snapshot_final -> prep_report_content -> write_report -> done
 }
