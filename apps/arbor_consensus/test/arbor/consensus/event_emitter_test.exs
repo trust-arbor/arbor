@@ -27,14 +27,27 @@ defmodule Arbor.Consensus.EventEmitterTest do
       end
     end)
 
-    %{table: table_name}
+    # Unique correlation/proposal ids so reads can filter to THIS test's own
+    # events. The `:arbor_consensus, :event_log` config is a single global
+    # key shared across the BEAM; production code emitting consensus events
+    # in a concurrent async test reads that same config and writes into THIS
+    # test's table. Counting all events on the stream was flaky (left: 2,
+    # right: 1, seed-dependent). EventEmitter sets `correlation_id` to the
+    # proposal_id, a stable top-level Event field, so we filter on it.
+    uniq = System.unique_integer([:positive])
+
+    %{
+      table: table_name,
+      pid: "prop_#{uniq}",
+      cid: "coord_#{uniq}"
+    }
   end
 
   describe "emit/2" do
-    test "emits ProposalSubmitted event", %{table: table} do
+    test "emits ProposalSubmitted event", %{table: table, pid: pid} do
       event =
         Events.ProposalSubmitted.new(%{
-          proposal_id: "prop_123",
+          proposal_id: pid,
           proposer: "agent_1",
           change_type: :code_modification,
           description: "Add caching"
@@ -42,10 +55,12 @@ defmodule Arbor.Consensus.EventEmitterTest do
 
       assert :ok = EventEmitter.emit(event)
 
-      # Verify event was persisted
+      # Verify event was persisted. Filter to our own event (by unique
+      # proposal_id) — a concurrent async test reading the shared
+      # `:arbor_consensus, :event_log` config can emit into this table.
       {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
-      assert length(events) == 1
-      assert hd(events).type == "proposal.submitted"
+      own = events_for(events, "proposal.submitted", :proposal_id, pid)
+      assert length(own) == 1
     end
 
     test "emits event with correlation_id" do
@@ -74,17 +89,22 @@ defmodule Arbor.Consensus.EventEmitterTest do
   end
 
   describe "convenience emitters" do
-    test "coordinator_started/3", %{table: table} do
-      assert :ok = EventEmitter.coordinator_started("coord_1", %{size: 7})
+    test "coordinator_started/3", %{table: table, cid: cid} do
+      assert :ok = EventEmitter.coordinator_started(cid, %{size: 7})
 
+      # Filter to this test's own event (by unique coordinator_id). The
+      # `:arbor_consensus, :event_log` config is a single global key, so a
+      # concurrent async test that emits a consensus event can land in this
+      # test's table between our emit and read (was flaky: left: 2 vs
+      # right: 1, seed-dependent). Assert on our own event, not all events.
       {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
-      assert length(events) == 1
-      assert hd(events).type == "coordinator.started"
+      own = events_for(events, "coordinator.started", :coordinator_id, cid)
+      assert length(own) == 1
     end
 
-    test "proposal_submitted/2", %{table: table} do
+    test "proposal_submitted/2", %{table: table, pid: pid} do
       proposal = %{
-        id: "prop_1",
+        id: pid,
         proposer: "agent_1",
         topic: :code_modification,
         description: "Fix bug",
@@ -96,27 +116,27 @@ defmodule Arbor.Consensus.EventEmitterTest do
       assert :ok = EventEmitter.proposal_submitted(proposal)
 
       {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
-      assert length(events) == 1
-      assert hd(events).type == "proposal.submitted"
+      own = events_for(events, "proposal.submitted", :proposal_id, pid)
+      assert length(own) == 1
     end
 
-    test "evaluation_started/5", %{table: table} do
+    test "evaluation_started/5", %{table: table, pid: pid} do
       assert :ok =
                EventEmitter.evaluation_started(
-                 "prop_1",
+                 pid,
                  [:security, :stability],
                  7,
                  5
                )
 
       {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
-      assert length(events) == 1
-      assert hd(events).type == "evaluation.started"
+      own = events_for(events, "evaluation.started", :proposal_id, pid)
+      assert length(own) == 1
     end
 
-    test "evaluation_completed/2", %{table: table} do
+    test "evaluation_completed/2", %{table: table, pid: pid} do
       evaluation = %{
-        proposal_id: "prop_1",
+        proposal_id: pid,
         id: "eval_1",
         perspective: :security,
         vote: :approve,
@@ -131,13 +151,13 @@ defmodule Arbor.Consensus.EventEmitterTest do
       assert :ok = EventEmitter.evaluation_completed(evaluation)
 
       {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
-      assert length(events) == 1
-      assert hd(events).type == "evaluation.completed"
+      own = events_for(events, "evaluation.completed", :proposal_id, pid)
+      assert length(own) == 1
     end
 
-    test "decision_rendered/2", %{table: table} do
+    test "decision_rendered/2", %{table: table, pid: pid} do
       decision = %{
-        proposal_id: "prop_1",
+        proposal_id: pid,
         id: "dec_1",
         decision: :approved,
         approve_count: 5,
@@ -152,31 +172,34 @@ defmodule Arbor.Consensus.EventEmitterTest do
       assert :ok = EventEmitter.decision_rendered(decision)
 
       {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
-      assert length(events) == 1
-      assert hd(events).type == "decision.rendered"
+      own = events_for(events, "decision.rendered", :proposal_id, pid)
+      assert length(own) == 1
     end
 
-    test "proposal_executed/4", %{table: table} do
-      {:ok, before} = ETS.read_stream("arbor:consensus", name: table)
-      before_count = length(before)
-
-      assert :ok = EventEmitter.proposal_executed("prop_1", :success, "Applied changes")
+    test "proposal_executed/4", %{table: table, pid: pid} do
+      assert :ok = EventEmitter.proposal_executed(pid, :success, "Applied changes")
 
       {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
-      assert length(events) == before_count + 1
-      assert List.last(events).type == "proposal.executed"
+      own = events_for(events, "proposal.executed", :proposal_id, pid)
+      assert length(own) == 1
     end
 
-    test "proposal_deadlocked/4", %{table: table} do
-      {:ok, before} = ETS.read_stream("arbor:consensus", name: table)
-      before_count = length(before)
-
-      assert :ok = EventEmitter.proposal_deadlocked("prop_1", :no_quorum, "Only 3/5 voted")
+    test "proposal_deadlocked/4", %{table: table, pid: pid} do
+      assert :ok = EventEmitter.proposal_deadlocked(pid, :no_quorum, "Only 3/5 voted")
 
       {:ok, events} = ETS.read_stream("arbor:consensus", name: table)
-      assert length(events) == before_count + 1
-      assert List.last(events).type == "proposal.deadlocked"
+      own = events_for(events, "proposal.deadlocked", :proposal_id, pid)
+      assert length(own) == 1
     end
+  end
+
+  # Select events of `type` whose `data[key]` equals `value`. Filtering on a
+  # unique per-test id keeps the assertion correct even when a concurrent
+  # async test emits events of the same type into the shared event_log.
+  defp events_for(events, type, key, value) do
+    Enum.filter(events, fn event ->
+      event.type == type and (event.data[key] == value or event.data[to_string(key)] == value)
+    end)
   end
 
   describe "enabled?/0" do

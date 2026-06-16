@@ -119,7 +119,12 @@ defmodule Arbor.LLM.Client do
     adapters = Map.merge(discovered_adapters, Keyword.get(opts, :adapters, %{}))
 
     configured_default =
-      Keyword.get(opts, :default_provider, System.get_env("UNIFIED_LLM_DEFAULT_PROVIDER"))
+      Keyword.get(
+        opts,
+        :default_provider,
+        System.get_env("UNIFIED_LLM_DEFAULT_PROVIDER") ||
+          Application.get_env(:arbor_llm, :default_provider)
+      )
 
     default_provider =
       cond do

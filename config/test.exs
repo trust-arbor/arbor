@@ -69,6 +69,14 @@ config :arbor_ai,
     (System.get_env("UNIFIED_LLM_DEFAULT_PROVIDER") || "openrouter") |> String.to_atom(),
   default_model: System.get_env("UNIFIED_LLM_DEFAULT_MODEL") || "openai/gpt-oss-120b:free"
 
+# Hermetic default provider NAME for the gating lane. This is a name only —
+# no api_key, no base_url — so `Arbor.LLM.Client.from_env/1` can CONSTRUCT a
+# client when UNIFIED_LLM_DEFAULT_PROVIDER is unset. Tests that mock the LLM
+# dispatch then run without any network. Tests that make a real call are
+# tagged :llm and run in the non-gating LLM lane.
+config :arbor_llm,
+  default_provider: System.get_env("UNIFIED_LLM_DEFAULT_PROVIDER") || "openrouter"
+
 config :arbor_consensus, start_children: false
 config :arbor_memory, start_children: false
 config :arbor_shell, start_children: false
