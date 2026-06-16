@@ -1,5 +1,11 @@
 defmodule Arbor.Dashboard.OidcAuthTest do
-  use ExUnit.Case, async: true
+  # NOT async: the P0-1 regression test mutates the GLOBAL
+  # `:arbor_dashboard, :require_auth` env to true. Under async, that races with
+  # other async tests reading the same global — notably ConsensusLiveTest's
+  # `live(conn, "/consensus")`, whose mount halts (503/redirect) while
+  # require_auth is briefly true, producing flaky combined-run failures. A sync
+  # module owns the runtime alone, so the put_env/on_exit window can't overlap.
+  use ExUnit.Case, async: false
 
   import Plug.Conn
   import Plug.Test
