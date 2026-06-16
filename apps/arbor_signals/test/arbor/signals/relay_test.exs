@@ -6,51 +6,52 @@ defmodule Arbor.Signals.RelayTest do
 
   @moduletag :fast
 
+  # Reset the (supervised) Relay's internal state in place.
+  #
+  # The Relay is a *permanent* child of the shared Arbor.Signals.Supervisor
+  # (started in test_helper.exs). Calling GenServer.stop/1 + Relay.start_link/1
+  # races the supervisor's automatic restart: either start_link loses and returns
+  # {:error, {:already_started, _}} (a MatchError in the test), or it wins and the
+  # supervisor's restart fails — repeated across the stop/start tests in this file
+  # this churns restart intensity and can take the whole supervisor down. All of
+  # the relay's tunables (rate limits, batch size, batch interval) are read
+  # dynamically from Application env on every operation, so a restart is never
+  # required to pick up new config — only to get clean state. Reset the state in
+  # place instead of bouncing a shared supervised process.
+  defp reset_relay_state do
+    :sys.replace_state(Relay, fn _old ->
+      %{
+        batch: [],
+        batch_size: 0,
+        rate_buckets: %{},
+        node_counters: %{},
+        stats: %{
+          relayed_out: 0,
+          relayed_in: 0,
+          batches_sent: 0,
+          signals_dropped: 0,
+          signals_rate_limited: 0,
+          signals_rejected: 0,
+          peers_seen: 0
+        }
+      }
+    end)
+
+    :ok
+  end
+
   setup do
-    # Ensure relay is running with clean state
+    # The Relay is started by test_helper.exs as a supervised child. Don't
+    # stop/restart it (see reset_relay_state/0) — just reset its state.
     case Process.whereis(Relay) do
       nil ->
+        # Not supervised in this context — start a standalone instance we own.
         {:ok, pid} = Relay.start_link([])
         on_exit(fn -> if Process.alive?(pid), do: GenServer.stop(pid) end)
         :ok
 
-      pid ->
-        # Stop and restart for clean state
-        GenServer.stop(pid)
-        # Brief wait for supervisor to notice (if supervised)
-        Process.sleep(5)
-
-        case Process.whereis(Relay) do
-          nil ->
-            {:ok, new_pid} = Relay.start_link([])
-            on_exit(fn -> if Process.alive?(new_pid), do: GenServer.stop(new_pid) end)
-
-          restarted_pid ->
-            # Supervisor already restarted it — use the existing one
-            # Reset state by replacing it
-            :sys.replace_state(restarted_pid, fn _old ->
-              %{
-                batch: [],
-                batch_size: 0,
-                rate_buckets: %{},
-                node_counters: %{},
-                stats: %{
-                  relayed_out: 0,
-                  relayed_in: 0,
-                  batches_sent: 0,
-                  signals_dropped: 0,
-                  signals_rate_limited: 0,
-                  signals_rejected: 0,
-                  peers_seen: 0
-                }
-              }
-            end)
-
-            on_exit(fn ->
-              if Process.alive?(restarted_pid), do: GenServer.stop(restarted_pid)
-            end)
-        end
-
+      _pid ->
+        reset_relay_state()
         :ok
     end
   end
@@ -196,8 +197,9 @@ defmodule Arbor.Signals.RelayTest do
       end)
 
       # Restart relay with new config
-      GenServer.stop(Relay)
-      {:ok, _} = Relay.start_link([])
+      # Config is read dynamically per-op; reset state instead of bouncing the
+      # supervised Relay (see reset_relay_state/0).
+      reset_relay_state()
 
       # Fill the batch with agent signals (priority 2)
       for _ <- 1..3 do
@@ -218,8 +220,9 @@ defmodule Arbor.Signals.RelayTest do
         Application.delete_env(:arbor_signals, :relay_max_batch_size)
       end)
 
-      GenServer.stop(Relay)
-      {:ok, _} = Relay.start_link([])
+      # Config is read dynamically per-op; reset state instead of bouncing the
+      # supervised Relay (see reset_relay_state/0).
+      reset_relay_state()
 
       # Fill with agent signals
       Relay.relay(Signal.new(:agent, :started, %{}))
@@ -242,8 +245,9 @@ defmodule Arbor.Signals.RelayTest do
         Application.delete_env(:arbor_signals, :relay_batch_interval_ms)
       end)
 
-      GenServer.stop(Relay)
-      {:ok, _} = Relay.start_link([])
+      # Config is read dynamically per-op; reset state instead of bouncing the
+      # supervised Relay (see reset_relay_state/0).
+      reset_relay_state()
 
       Relay.relay(Signal.new(:agent, :started, %{}))
 
@@ -287,8 +291,9 @@ defmodule Arbor.Signals.RelayTest do
         Application.delete_env(:arbor_signals, :relay_category_rate_limit)
       end)
 
-      GenServer.stop(Relay)
-      {:ok, _} = Relay.start_link([])
+      # Config is read dynamically per-op; reset state instead of bouncing the
+      # supervised Relay (see reset_relay_state/0).
+      reset_relay_state()
 
       for _ <- 1..10 do
         Relay.relay(Signal.new(:agent, :started, %{}))
@@ -309,8 +314,9 @@ defmodule Arbor.Signals.RelayTest do
         Application.delete_env(:arbor_signals, :relay_max_batch_size)
       end)
 
-      GenServer.stop(Relay)
-      {:ok, _} = Relay.start_link([])
+      # Config is read dynamically per-op; reset state instead of bouncing the
+      # supervised Relay (see reset_relay_state/0).
+      reset_relay_state()
 
       # Flood with signals from same category
       for _ <- 1..20 do
@@ -330,8 +336,9 @@ defmodule Arbor.Signals.RelayTest do
         Application.delete_env(:arbor_signals, :relay_max_batch_size)
       end)
 
-      GenServer.stop(Relay)
-      {:ok, _} = Relay.start_link([])
+      # Config is read dynamically per-op; reset state instead of bouncing the
+      # supervised Relay (see reset_relay_state/0).
+      reset_relay_state()
 
       # Send 3 agent + 3 security — each category gets its own bucket
       for _ <- 1..3 do
@@ -393,8 +400,9 @@ defmodule Arbor.Signals.RelayTest do
         Application.delete_env(:arbor_signals, :relay_node_rate_limit)
       end)
 
-      GenServer.stop(Relay)
-      {:ok, _} = Relay.start_link([])
+      # Config is read dynamically per-op; reset state instead of bouncing the
+      # supervised Relay (see reset_relay_state/0).
+      reset_relay_state()
 
       signals = for i <- 1..10, do: Signal.new(:agent, :started, %{i: i})
 
@@ -413,8 +421,9 @@ defmodule Arbor.Signals.RelayTest do
         Application.delete_env(:arbor_signals, :relay_node_rate_limit)
       end)
 
-      GenServer.stop(Relay)
-      {:ok, _} = Relay.start_link([])
+      # Config is read dynamically per-op; reset state instead of bouncing the
+      # supervised Relay (see reset_relay_state/0).
+      reset_relay_state()
 
       # Send 10 signals — only 5 should be accepted
       signals = for i <- 1..10, do: Signal.new(:agent, :started, %{i: i})
