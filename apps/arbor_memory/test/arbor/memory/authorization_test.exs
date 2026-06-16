@@ -1,5 +1,11 @@
 defmodule Arbor.Memory.AuthorizationTest do
-  use ExUnit.Case, async: true
+  # NOT async: when run as part of the full arbor_memory suite (as CI does —
+  # one BEAM per app), a sibling test starts the Security stack, so `authorize/2`
+  # here enforces for real instead of taking the permissive no-security fallback.
+  # This module sets global security config to make that enforcement test-friendly
+  # (signing/identity off) and grants the caller a real capability, so it passes
+  # whether or not Security happens to be live. Global config + async don't mix.
+  use ExUnit.Case, async: false
 
   @moduletag :fast
   @moduletag :integration
@@ -8,20 +14,54 @@ defmodule Arbor.Memory.AuthorizationTest do
   @caller_id "agent_caller"
 
   setup do
-    # This unit test targets the *permissive no-security fallback* path of the
-    # `authorize_*` facade (see the module's intent vs `AuthorizationE2ETest`,
-    # which starts the full Security stack and verifies real enforcement).
-    #
-    # In a combined umbrella run the Security stack IS loaded, so `authorize/2`
-    # enforces for real — and this test's premise (permissive fallback) no longer
-    # holds. Rather than duplicate the E2E's full security setup here, skip when
-    # Security is live: AuthorizationE2ETest already covers every `authorize_*`
-    # function with real grant/deny paths in that scenario.
+    # The earlier `{:skip, …}` return was invalid — ExUnit setup callbacks may
+    # only return :ok / a keyword / a map, so it raised once Security was live in
+    # the full-suite BEAM. Instead, make both paths pass:
+    #   * Security absent → `authorize/2` takes the permissive fallback (:ok).
+    #   * Security live    → set signing/identity off and grant the caller a real
+    #     `arbor://memory/**` cap so enforcement returns authorized.
     if security_loaded?() do
-      {:skip, "Security stack is loaded — enforcement is covered by AuthorizationE2ETest"}
-    else
-      :ok
+      prev_security =
+        for key <- [:capability_signing_required, :strict_identity_mode, :identity_verification] do
+          {key, Application.get_env(:arbor_security, key)}
+        end
+
+      Application.put_env(:arbor_security, :capability_signing_required, false)
+      Application.put_env(:arbor_security, :strict_identity_mode, false)
+      Application.put_env(:arbor_security, :identity_verification, false)
+
+      grant_memory_cap(@caller_id)
+
+      on_exit(fn ->
+        for {key, value} <- prev_security do
+          if is_nil(value),
+            do: Application.delete_env(:arbor_security, key),
+            else: Application.put_env(:arbor_security, key, value)
+        end
+      end)
     end
+
+    :ok
+  end
+
+  # Grant the caller a wildcard memory capability so the `authorize_*` facade
+  # returns :ok when the Security stack is live. The `/**` is required post-C8
+  # (a concrete URI grants only its exact resource), and covers every
+  # `arbor://memory/{init,cleanup,read,write,search}/<agent>` resource the facade
+  # checks. Done via runtime apply to avoid a compile-time dep on arbor_security.
+  defp grant_memory_cap(caller_id) do
+    cap = %Arbor.Contracts.Security.Capability{
+      id: "cap_memory_auth_#{System.unique_integer([:positive])}",
+      principal_id: caller_id,
+      resource_uri: "arbor://memory/**",
+      granted_at: DateTime.utc_now(),
+      expires_at: nil,
+      constraints: %{},
+      delegation_depth: 0,
+      metadata: %{test: true}
+    }
+
+    apply(Arbor.Security.CapabilityStore, :put, [cap])
   end
 
   describe "authorize_init/3" do
