@@ -185,6 +185,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
     []
     |> maybe_merge(:base_url, inferred_base_url)
+    |> maybe_merge(:api_key, local_api_key(arbor_provider, opts))
     |> maybe_merge(:provider_options, Keyword.get(opts, :provider_options))
     |> maybe_merge(:dimensions, Keyword.get(opts, :dimensions))
   end
@@ -390,7 +391,37 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
     base
     |> maybe_merge(:base_url, inferred_base_url)
+    |> maybe_merge(:api_key, local_api_key(request.provider, opts))
+    |> maybe_merge(:req_http_options, local_req_http_options(request.provider, opts))
     |> maybe_merge(:provider_options, Keyword.get(opts, :provider_options))
+  end
+
+  # Disable req's transient-retry for local-LM providers. Retrying a slow
+  # local server (e.g. a loaded homelab Ollama) just multiplies a
+  # receive_timeout-bounded wait by the retry count, so a 30s timeout can
+  # silently become 90s+. req_llm exposes req's knobs under
+  # :req_http_options. A caller-supplied value always wins. Returns nil
+  # for cloud providers (keep req's default backoff for flaky cloud APIs).
+  defp local_req_http_options(provider, opts) do
+    cond do
+      Keyword.has_key?(opts, :req_http_options) -> Keyword.get(opts, :req_http_options)
+      is_binary(provider) and ProviderRegistry.local?(provider) -> [retry: false]
+      true -> nil
+    end
+  end
+
+  # Local-LM servers (Ollama, LM Studio) need no real auth, but req_llm's
+  # OpenAI-compatible provider — which we route these through — refuses to
+  # dispatch without an :api_key / OPENAI_API_KEY. Inject a harmless
+  # placeholder so the call reaches the local base_url. Caller-supplied
+  # keys always win. Returns nil for cloud providers (req_llm resolves
+  # their real key from the env).
+  defp local_api_key(provider, opts) do
+    cond do
+      Keyword.get(opts, :api_key) -> Keyword.get(opts, :api_key)
+      is_binary(provider) and ProviderRegistry.local?(provider) -> "arbor-local"
+      true -> nil
+    end
   end
 
   @doc """

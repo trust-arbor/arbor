@@ -271,6 +271,11 @@ defmodule Arbor.AI.UnifiedBridge do
       max_tokens: max_tokens,
       temperature: temperature,
       reasoning_effort: if(thinking_enabled, do: "high"),
+      # Forward an optional HTTP receive timeout so callers (e.g. memory
+      # compression) can bound how long a slow provider may block. Without
+      # this the underlying Finch recv has no deadline and a slow local
+      # LLM blocks the calling process indefinitely.
+      receive_timeout: Keyword.get(opts, :receive_timeout) || Keyword.get(opts, :timeout),
       provider_options: Keyword.get(opts, :provider_options, %{})
     }
   end

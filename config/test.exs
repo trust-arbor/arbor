@@ -151,8 +151,14 @@ config :arbor_actions, default_taint_policy: :permissive
 # Use hash-based test embeddings when no real providers are available
 config :arbor_ai, embedding_test_fallback: true
 
-# Don't probe local LLM servers (LM Studio, Ollama) during tests
-config :arbor_orchestrator, discover_local_providers: false
+# Don't probe local LLM servers (LM Studio, Ollama) during tests by
+# default. But when ARBOR_OLLAMA_BASE_URL is set (homelab / CI with a
+# reachable Ollama), enable discovery so :llm-tagged tests that route at
+# `provider: :ollama` actually reach the server instead of falling back
+# to the non-LLM path. runtime.exs points the ollama base_url at that
+# endpoint; the HTTP probe in Client.from_env then registers the adapter.
+config :arbor_orchestrator,
+  discover_local_providers: System.get_env("ARBOR_OLLAMA_BASE_URL") not in [nil, ""]
 
 # Don't run the model-availability preflight at startup during tests (it would
 # poke LM Studio / Ollama). The Preflight module is still unit-tested directly.
