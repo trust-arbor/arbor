@@ -75,8 +75,10 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilExampleTest do
     on_exit(fn -> File.rm_rf(workdir) end)
 
     spec_path = "spec.json"
+    # The pipeline's write_report node writes to "review.md" relative to workdir
+    # (resolved via SafePath.resolve_within), so the report lands here.
     report_path = Path.join(workdir, "review.md")
-    write_spec_file(workdir, spec_path, report_path)
+    write_spec_file(workdir, spec_path)
 
     logs_root =
       Path.join(System.tmp_dir!(), "arbor_council_logs_#{System.unique_integer([:positive])}")
@@ -207,14 +209,21 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilExampleTest do
     path
   end
 
-  defp write_spec_file(workdir, spec_path, report_path) do
+  defp write_spec_file(workdir, spec_path) do
     spec_json = %{
       "review_brief" => """
       Review this small Elixir helper for production readiness. It's
       intentionally rough — there are at least one issue in each lens.
       """,
       "code_under_review" => sample_code(),
-      "report_path" => report_path,
+      # NB: the report path is NOT carried in the spec. The pipeline's
+      # `write_report` node persists via the core `write` handler, which
+      # resolves a fixed `output="review.md"` relative to `workdir` through
+      # SafePath.resolve_within. Routing the (LLM-:derived) synthesized
+      # content through the `file_write` Jido action instead would fail the
+      # taint gate: an exec node hands the action one combined input taint
+      # (worst over all consumed keys), so the :derived content makes the
+      # path :control param's path_traversal requirement fail closed.
       # OpenRouter chosen over LM Studio for this test because the
       # council fans out to 4 concurrent LLM calls; a local small model
       # (granite-4.1-3b) gets overwhelmed and returns 500s under that
