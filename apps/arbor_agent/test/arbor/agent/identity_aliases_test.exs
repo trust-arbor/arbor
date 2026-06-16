@@ -7,6 +7,29 @@ defmodule Arbor.Agent.IdentityAliasesTest do
   @manage_resource "arbor://identity/alias/manage"
 
   setup_all do
+    # This module authorizes via Arbor.Security with unsigned test capabilities
+    # and unsigned authorize calls, so it needs signing/strict-identity OFF. Set
+    # these explicitly rather than trusting the global default — a combined
+    # umbrella run can have them in force (the full Security tree is started),
+    # which broke the alias grant/deny tests with identity/signing errors. Tests
+    # here are async: false, so this holds; restore prior values on exit.
+    prev_security =
+      for key <- [:capability_signing_required, :strict_identity_mode, :identity_verification] do
+        {key, Application.get_env(:arbor_security, key)}
+      end
+
+    Application.put_env(:arbor_security, :capability_signing_required, false)
+    Application.put_env(:arbor_security, :strict_identity_mode, false)
+    Application.put_env(:arbor_security, :identity_verification, false)
+
+    on_exit(fn ->
+      for {key, value} <- prev_security do
+        if is_nil(value),
+          do: Application.delete_env(:arbor_security, key),
+          else: Application.put_env(:arbor_security, key, value)
+      end
+    end)
+
     # arbor_agent's app supervisor doesn't bring up Arbor.Security on test
     # boot — but our M5 fix authorizes against Arbor.Security.CapabilityStore.
     # Start the minimum chain needed for authorize/4 to actually run.
