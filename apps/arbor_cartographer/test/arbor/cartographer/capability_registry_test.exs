@@ -12,11 +12,20 @@ defmodule Arbor.Cartographer.CapabilityRegistryTest do
     safe_stop(CapabilityRegistry)
     Process.sleep(50)
 
-    # Start fresh registry (may already be running from another test)
+    # Start fresh registry (may already be running from another test or from
+    # the application supervisor in a full-umbrella run).
     case CapabilityRegistry.start_link([]) do
       {:ok, _pid} -> :ok
       {:error, {:already_started, _pid}} -> :ok
     end
+
+    # The registry is backed by a shared, named ETS table. In a full-umbrella
+    # run the application's Scout self-registers the local node at boot, so the
+    # table is NOT empty when these tests run. Clear every existing entry so
+    # each test starts from a known-empty registry without weakening the
+    # registry's real (non-clearing) behavior.
+    {:ok, existing} = CapabilityRegistry.list_all()
+    Enum.each(existing, fn caps -> CapabilityRegistry.unregister(caps.node) end)
 
     on_exit(fn ->
       safe_stop(CapabilityRegistry)
