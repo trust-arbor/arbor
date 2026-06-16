@@ -1,5 +1,9 @@
 defmodule Arbor.Memory.ContextWindowTest do
-  use ExUnit.Case, async: true
+  # async: false — the :llm-tagged "allows semantically distinct content"
+  # test toggles the global `:arbor_ai, :embedding_test_fallback` config so
+  # embeddings route to a real provider; mutating Application env must not
+  # run concurrently with other embedding tests.
+  use ExUnit.Case, async: false
 
   alias Arbor.Memory.ContextWindow
 
@@ -879,7 +883,23 @@ defmodule Arbor.Memory.ContextWindowTest do
       assert length(window.retrieved_context) == 1
     end
 
+    # Semantic dedup keeps distinct content only when a *real* embedder
+    # produces dissimilar vectors. The deterministic hash stub
+    # (TestEmbedding) is documented as NOT semantically meaningful — it
+    # yields cosine ~0.91 for these two unrelated sentences, above the
+    # 0.85 dedup threshold, so they'd be wrongly merged. This test
+    # therefore requires a real embedding provider: tag it :llm +
+    # :integration (excluded from the fast lane) and turn off the test
+    # fallback for its duration so Arbor.AI.embed routes to the
+    # configured provider (homelab Ollama via ARBOR_OLLAMA_BASE_URL).
+    @tag :llm
+    @tag :integration
+    @tag timeout: 120_000
     test "allows semantically distinct content", %{window: window} do
+      prev_fallback = Application.get_env(:arbor_ai, :embedding_test_fallback)
+      Application.put_env(:arbor_ai, :embedding_test_fallback, false)
+      on_exit(fn -> Application.put_env(:arbor_ai, :embedding_test_fallback, prev_fallback) end)
+
       window =
         window
         |> ContextWindow.add_retrieved(%{

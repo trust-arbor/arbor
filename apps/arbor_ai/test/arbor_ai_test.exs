@@ -6,8 +6,9 @@ defmodule Arbor.AITest do
 
   describe "Config" do
     test "default_provider/0 returns configured provider" do
-      # Config uses :openrouter for cost-effective operations
-      assert Config.default_provider() in [:anthropic, :openrouter, :openai, :gemini]
+      # Config uses :openrouter for cost-effective operations.
+      # :ollama is also valid — CI (ARBOR_OLLAMA_BASE_URL set) defaults to it.
+      assert Config.default_provider() in [:anthropic, :openrouter, :openai, :gemini, :ollama]
     end
 
     test "default_model/0 returns configured model" do
