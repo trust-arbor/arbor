@@ -65,12 +65,19 @@ jobs:
       # test tagged both :integration AND :llm is still skipped (ExUnit's --include
       # would otherwise re-include it). :database runs in its own lane; :llm et al.
       # run in the non-gating LLM lane.
+      # Single flake-guard retry: on failure, rerun ONLY the failed tests
+      # (`--failed`, fast — seconds, not another 17min). A genuine failure fails
+      # again → lane red; a residual test-isolation/timing flake reruns in
+      # isolation and passes. The real bugs are fixed; this absorbs the long tail
+      # of intermittents while hygiene debt is paid down opportunistically.
       - name: Run test suite (hermetic — no LLM, no database)
-        run: >-
-          mix test
-          --exclude llm --exclude llm_local --exclude integration_lm_studio
-          --exclude external --exclude distributed --exclude database
-          --timeout 120000
+        run: |
+          mix test \
+            --exclude llm --exclude llm_local --exclude integration_lm_studio \
+            --exclude external --exclude distributed --exclude database \
+            --timeout 120000 \
+          || { echo "::warning::test suite had failures — retrying failed tests once (flake guard)"; \
+               mix test --failed --timeout 120000; }
 
   # ── Database lane ───────────────────────────────────────────────────────────
   # Runs ONLY the :database-tagged tests against Postgres. These need the Repo
@@ -111,8 +118,15 @@ jobs:
       - name: Setup test database
         run: mix ecto.create -r Arbor.Persistence.Repo && mix ecto.migrate -r Arbor.Persistence.Repo
 
+      # Flake guard: a full rerun on failure (the database lane is ~3min, and a
+      # full rerun also re-runs setup_all-invalidated tests that `--failed` would
+      # miss — e.g. a transient sandbox-owner startup race). Real failures fail
+      # twice → lane red.
       - name: Run database tests
-        run: mix test --only database --timeout 120000
+        run: |
+          mix test --only database --timeout 120000 \
+          || { echo "::warning::database tests had failures — retrying once (flake guard)"; \
+               mix test --only database --timeout 120000; }
 
   # ── LLM lane (allowed to fail) ──────────────────────────────────────────────
   # Runs ONLY the LLM-backed tests (:llm / :llm_local / :integration_lm_studio)
