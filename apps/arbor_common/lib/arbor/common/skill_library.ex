@@ -540,7 +540,33 @@ defmodule Arbor.Common.SkillLibrary do
   end
 
   defp configured_dirs do
-    Application.get_env(:arbor_common, :skill_dirs, [".arbor/skills"])
+    Application.get_env(:arbor_common, :skill_dirs) || default_skill_dirs()
+  end
+
+  @doc """
+  Default skill directories, in precedence order:
+
+    1. Product skills bundled with `arbor_common` (`priv/skills`) — version
+       controlled and shipped inside `mix release` artifacts, so a packaged
+       install with no source tree still has them (`Application.app_dir/2`
+       resolves to the bundled path at runtime, and to `_build/.../priv/skills`
+       in dev).
+    2. User / agent-authored skills under `$ARBOR_HOME/skills` (default
+       `~/.arbor/skills`) — the writable per-install layer; may augment or
+       override the bundled product skills.
+
+  Only existing directories are returned, so a missing user dir is a no-op.
+  Override entirely via `config :arbor_common, :skill_dirs`.
+  """
+  @spec default_skill_dirs() :: [String.t()]
+  def default_skill_dirs do
+    arbor_home = System.get_env("ARBOR_HOME") || Path.expand("~/.arbor")
+
+    [
+      Application.app_dir(:arbor_common, "priv/skills"),
+      Path.join(arbor_home, "skills")
+    ]
+    |> Enum.filter(&File.dir?/1)
   end
 
   defp hybrid_search_available? do
