@@ -66,6 +66,32 @@ defmodule Arbor.Test.BehavioralCase do
       {Arbor.Security.Reflex.Registry, []}
     ])
 
+    # Security config this case depends on. Behavioral tests use unsigned test
+    # capabilities (`grant_test_capabilities/1`) and call `authorize/2` without a
+    # signed request, so they require capability signing OFF and strict-identity
+    # OFF. Set these EXPLICITLY rather than trusting the global default —
+    # config/test.exs defaults them false, but another app's test can flip them
+    # in a combined umbrella run (e.g. arbor_security's strict-identity tests),
+    # which previously broke these tests with `{:error, :missing_signed_request}`.
+    # Tests here are `async: false`, so a per-test set holds for the test, and we
+    # restore the prior values on exit.
+    prev_security =
+      for key <- [:capability_signing_required, :strict_identity_mode, :identity_verification] do
+        {key, Application.get_env(:arbor_security, key)}
+      end
+
+    Application.put_env(:arbor_security, :capability_signing_required, false)
+    Application.put_env(:arbor_security, :strict_identity_mode, false)
+    Application.put_env(:arbor_security, :identity_verification, false)
+
+    on_exit(fn ->
+      for {key, value} <- prev_security do
+        if is_nil(value),
+          do: Application.delete_env(:arbor_security, key),
+          else: Application.put_env(:arbor_security, key, value)
+      end
+    end)
+
     # 3. Memory — ETS tables + stores
     for table <- [
           :arbor_memory_graphs,
