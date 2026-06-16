@@ -493,16 +493,18 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
     if Map.has_key?(decision, :approve_count) do
       "#{decision.decision} (#{decision.approve_count}/#{decision.reject_count}/#{decision.abstain_count})"
     else
-      "#{decision.decision}#{if decision[:override], do: " (override)", else: ""}"
+      "#{decision.decision}#{if Map.get(decision, :override), do: " (override)", else: ""}"
     end
   end
 
+  # `decision` is either a plain tally map or a %CouncilDecision{} struct; structs
+  # don't implement Access, so use Map.get/2 (nil-if-absent, works for both).
   defp decision_subtitle(decision) do
-    if decision[:override] do
-      "override by #{decision[:approver] || "system"}"
+    if Map.get(decision, :override) do
+      "override by #{Map.get(decision, :approver) || "system"}"
     else
-      quorum = if decision[:quorum_met], do: "quorum met", else: "no quorum"
-      "#{quorum}, confidence: #{format_confidence(decision[:average_confidence] || 0)}"
+      quorum = if Map.get(decision, :quorum_met), do: "quorum met", else: "no quorum"
+      "#{quorum}, confidence: #{format_confidence(Map.get(decision, :average_confidence) || 0)}"
     end
   end
 
