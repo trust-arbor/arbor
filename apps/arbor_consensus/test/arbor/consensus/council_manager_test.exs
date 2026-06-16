@@ -68,6 +68,27 @@ defmodule Arbor.Consensus.CouncilManagerTest do
       assert :ok = CouncilManager.stop_all()
       assert CouncilManager.running_count() == 0
     end
+
+    test "stop_all then restart is race-free (registry deregistration regression)" do
+      for _ <- 1..15 do
+        :ok = CouncilManager.ensure_started()
+        assert CouncilManager.running_count() == 13
+
+        :ok = CouncilManager.stop_all()
+        assert CouncilManager.running_count() == 0
+
+        for perspective <- CouncilManager.perspectives() do
+          assert {:ok, pid} = CouncilManager.start_perspective(perspective),
+                 "expected #{perspective} to start cleanly, got :already_started " <>
+                   "(stale Registry entry — deregistration race)"
+
+          assert is_pid(pid)
+          assert Process.alive?(pid)
+        end
+
+        assert CouncilManager.running_count() == 13
+      end
+    end
   end
 
   describe "stop_perspective/1" do
