@@ -42,10 +42,10 @@ defmodule Arbor.Dashboard.OidcAuth do
     handle_logout(conn)
   end
 
-  def call(conn, _opts) do
+  def call(conn, opts) do
     case oidc_provider() do
       nil ->
-        if require_auth?() do
+        if require_auth?(opts) do
           # P0-1: fail closed when no OIDC provider is configured but auth is required
           # (production sets require_auth: true). Returning the connection unchanged
           # here would expose the dashboard with no authentication at all.
@@ -294,7 +294,23 @@ defmodule Arbor.Dashboard.OidcAuth do
     end
   end
 
-  defp require_auth?, do: Application.get_env(:arbor_dashboard, :require_auth, false)
+  # `require_auth` resolution, in precedence order:
+  #
+  #   1. an explicit `:require_auth` plug option (compile-time, per-call) — used
+  #      by tests to exercise the fail-closed branch WITHOUT mutating the global
+  #      `:arbor_dashboard, :require_auth` app env. The global env is process-wide
+  #      mutable state; flipping it from one (even `async: false`) test races with
+  #      concurrently-running LiveView mount requests in other test modules, which
+  #      then hit the 503 fail-closed path mid-request. That race is exactly what
+  #      produced the CI-only ConsensusLive `Arbor.ErrorView` 500s.
+  #   2. the application env (production sets `require_auth: true` via runtime.exs).
+  #   3. default: false (dev/test open access).
+  defp require_auth?(opts) do
+    case Keyword.fetch(opts, :require_auth) do
+      {:ok, value} -> value
+      :error -> Application.get_env(:arbor_dashboard, :require_auth, false)
+    end
+  end
 
   @doc """
   Capabilities granted on every OIDC login.
