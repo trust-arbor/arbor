@@ -110,13 +110,32 @@ defmodule Arbor.Monitor.CascadeDetectorTest do
 
       assert CascadeDetector.in_cascade?()
 
-      # Keep adding anomalies
-      Process.sleep(50)
-      CascadeDetector.record_anomaly(make_anomaly())
-      CascadeDetector.record_anomaly(make_anomaly())
-      CascadeDetector.record_anomaly(make_anomaly())
+      # Sustain a high rate for longer than the exit threshold (50ms) AND the
+      # window (100ms) by feeding fresh anomalies in tight rounds. We must NOT
+      # rely on wall-clock sleeps lining up with the exit timer: record_anomaly
+      # is an async cast, and the periodic :cleanup_window handler races the
+      # cast to evaluate the exit condition. Instead, after each round we feed a
+      # fresh anomaly and immediately assert via in_cascade?/0 (a synchronous
+      # call, ordered FIFO after the casts on the same process). Because the
+      # anomaly that bumps last_above_threshold_at was just processed, no
+      # cleanup pass can have measured >= exit_threshold_ms of low rate.
+      #
+      # 15 rounds * ~10ms covers ~150ms of sustained pressure, exceeding both
+      # the 50ms exit threshold and the 100ms window, so this genuinely
+      # verifies "sustained high rate keeps it in cascade" without timing flake.
+      for _ <- 1..15 do
+        CascadeDetector.record_anomaly(make_anomaly())
+        CascadeDetector.record_anomaly(make_anomaly())
+        CascadeDetector.record_anomaly(make_anomaly())
 
-      Process.sleep(50)
+        # Synchronous barrier: drains the casts above before we read state, and
+        # asserts the rate is still above threshold so the exit timer can't fire.
+        assert CascadeDetector.current_rate() >= 3
+        assert CascadeDetector.in_cascade?()
+
+        Process.sleep(10)
+      end
+
       assert CascadeDetector.in_cascade?()
     end
   end
