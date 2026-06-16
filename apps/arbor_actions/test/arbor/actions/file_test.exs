@@ -777,5 +777,40 @@ defmodule Arbor.Actions.FileTest do
         assert result.matches == []
       end
     end
+
+    # Regression: regex parity across strategies. The compiled pattern is
+    # PCRE (Elixir `Regex`), but grep's `-E` engine is POSIX ERE and does
+    # NOT understand PCRE escapes like `\d`. Before the fix, a regex
+    # search under the `:grep` strategy silently returned 0 matches for
+    # `foo\d+bar` (matched a literal `d`), so on a CI runner that had
+    # grep but not ripgrep, "supports regex patterns" found 0 instead of
+    # 2. Every available strategy must agree on a PCRE regex search.
+    test "PCRE regex returns identical results under every strategy", %{tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "regex_parity.txt")
+      File.write!(path, "foo123bar\nfoo456bar\nnotmatching\nfooXbar\n")
+
+      strategies_to_test =
+        [
+          :beam,
+          if(System.find_executable("rg"), do: :ripgrep),
+          if(System.find_executable("grep"), do: :grep)
+        ]
+        |> Enum.reject(&is_nil/1)
+
+      for strategy <- strategies_to_test do
+        {:ok, result} =
+          run_with_strategy(strategy, %{
+            pattern: "foo\\d+bar",
+            path: path,
+            regex: true
+          })
+
+        assert result.count == 2,
+               "strategy #{strategy} found #{result.count} matches for PCRE regex, expected 2"
+
+        assert result.matches |> Enum.map(& &1.line) |> Enum.sort() == [1, 2],
+               "strategy #{strategy} matched wrong lines: #{inspect(Enum.map(result.matches, & &1.line))}"
+      end
+    end
   end
 end
