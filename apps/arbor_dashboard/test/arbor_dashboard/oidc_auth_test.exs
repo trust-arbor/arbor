@@ -40,21 +40,18 @@ defmodule Arbor.Dashboard.OidcAuthTest do
       # Production config sets require_auth: true. Without OIDC, the dashboard must
       # NOT fall through to open access — that would expose memory, capabilities,
       # signals, and agent controls to anyone who can reach the endpoint.
-      original = Application.get_env(:arbor_dashboard, :require_auth)
-      Application.put_env(:arbor_dashboard, :require_auth, true)
-
-      on_exit(fn ->
-        if is_nil(original) do
-          Application.delete_env(:arbor_dashboard, :require_auth)
-        else
-          Application.put_env(:arbor_dashboard, :require_auth, original)
-        end
-      end)
-
+      #
+      # We pass require_auth through the PLUG OPTS rather than mutating the global
+      # `:arbor_dashboard, :require_auth` app env. The global env is process-wide:
+      # flipping it here (even from an async: false module) raced with concurrently
+      # running LiveView mount requests in OTHER test modules — those requests saw
+      # require_auth: true, hit this 503 fail-closed branch mid-mount, and the
+      # halted-503 surfaced as the CI-only ConsensusLive `Arbor.ErrorView` 500s.
+      # The plug opt is per-call, so there is nothing global to race on.
       conn =
         conn(:get, "/")
         |> init_test_session(%{})
-        |> OidcAuth.call(@opts)
+        |> OidcAuth.call(OidcAuth.init(require_auth: true))
 
       assert conn.halted,
              "Dashboard must halt when OIDC absent and require_auth true — P0-1 regression"

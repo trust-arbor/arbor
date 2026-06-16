@@ -431,6 +431,15 @@ config :arbor_scheduler, Oban,
 config :arbor_dashboard, Arbor.Dashboard.Endpoint,
   url: [host: "localhost"],
   pubsub_server: Arbor.Dashboard.PubSub,
+  # Without an explicit render_errors view, Phoenix derives one from the
+  # endpoint's top namespace -> Arbor.ErrorView, which does not exist. Any
+  # request that raised (404/500) then crashed the render-errors path itself
+  # with `no "500" html template defined for Arbor.ErrorView`, masking the
+  # original exception. Point at real, minimal error views instead.
+  render_errors: [
+    formats: [html: Arbor.Dashboard.ErrorHTML, json: Arbor.Dashboard.ErrorJSON],
+    layout: false
+  ],
   live_view: [signing_salt: "arbor_dashboard_lv"]
 
 # ── Egress gate (2026-06-14 URI-addressing-vs-classification decision) ───────
