@@ -60,7 +60,11 @@ defmodule Arbor.Common.CapabilityProviders.SkillProviderTest do
     test "returns descriptors for all skills" do
       capabilities = SkillProvider.list_capabilities()
       assert is_list(capabilities)
-      assert Enum.all?(capabilities, &match?(%CapabilityDescriptor{kind: :skill}, &1))
+      # All entries are valid descriptors. Kind is NOT uniformly :skill — the
+      # bundled product skills (heartbeat/advisory) are exposed as kind: :prompt
+      # with a "prompt:" id, so assert the descriptor shape, not a single kind.
+      assert Enum.all?(capabilities, &match?(%CapabilityDescriptor{}, &1))
+      assert Enum.all?(capabilities, &(&1.kind in [:skill, :prompt]))
 
       ids = Enum.map(capabilities, & &1.id)
       assert "skill:test-email-triage" in ids
