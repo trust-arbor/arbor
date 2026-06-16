@@ -13,14 +13,21 @@ jobs:
     env:
       MIX_ENV: test
       ARBOR_COOKIE: ci_test_cookie_not_a_secret
-      # LLM configuration for tests that make real API calls.
-      # arcee-ai/trinity-large-preview:free was RETIRED (Apr 22); the current
-      # free default is openai/gpt-oss-120b:free (config/config.exs, since
-      # 2026-06-04). CI was still forcing the retired model via this env var
-      # (read by Arbor.AI.UnifiedBridge), so :llm tests failed.
-      UNIFIED_LLM_DEFAULT_MODEL: "openai/gpt-oss-120b:free"
-      UNIFIED_LLM_DEFAULT_PROVIDER: openrouter
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      # LLM configuration for tests — FULLY LOCAL. All :llm tests run against the
+      # homelab Ollama (which serves the Anthropic Messages API natively), so the
+      # gating lane has no external-provider dependency (OpenRouter retiring a
+      # model / rate-limiting / downtime can't break CI). Provider/model/base_url
+      # are all env-driven (read by Arbor.AI / Arbor.LLM), so a developer without
+      # a local Ollama just sets their own env (OpenRouter, etc.) — nothing here
+      # is baked into the source defaults.
+      UNIFIED_LLM_DEFAULT_PROVIDER: ollama
+      UNIFIED_LLM_DEFAULT_MODEL: "granite3.1-moe:1b"
+      ARBOR_OLLAMA_BASE_URL: "http://10.42.42.100:11434"
+      # ClaudeTest drives the real `claude` CLI against the same Ollama endpoint
+      # via the Anthropic-compat env (no paid Anthropic calls).
+      ANTHROPIC_BASE_URL: "http://10.42.42.100:11434"
+      ANTHROPIC_AUTH_TOKEN: ollama
+      ARBOR_ACP_ALTERNATE_MODEL: "granite3.1-moe:1b"
       # Enable Postgres for database tests
       ARBOR_DB: postgres
 
@@ -60,6 +67,23 @@ jobs:
 
       - name: Sobelow (security)
         run: mix sobelow --config --root apps/arbor_dashboard && mix sobelow --config --root apps/arbor_gateway
+        continue-on-error: true
+
+      # ClaudeTest spawns the real `claude` CLI (pointed at Ollama). Install it on
+      # the runner; if this fails the test no-ops gracefully (executable_not_found),
+      # so it never blocks the lane.
+      - name: Install Claude CLI (ClaudeTest → Ollama)
+        run: npm i -g @anthropic-ai/claude-code
+        continue-on-error: true
+
+      # Warm the Ollama model into VRAM before tests so the first :llm call doesn't
+      # eat a multi-second cold-load against per-test timeouts. keep_alive pins it
+      # resident for the suite. Best-effort: never fails the lane.
+      - name: Warm Ollama model
+        run: |
+          curl -sf -m 300 -X POST "$ARBOR_OLLAMA_BASE_URL/api/generate" \
+            -d '{"model":"'"$UNIFIED_LLM_DEFAULT_MODEL"'","prompt":"hi","stream":false,"keep_alive":"30m"}' \
+            && echo "model warmed" || echo "warmup skipped (endpoint unavailable)"
         continue-on-error: true
 
       # Default lane excludes :database — it must be fully green on its own.
