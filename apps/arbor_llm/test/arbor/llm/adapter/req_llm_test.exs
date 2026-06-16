@@ -10,7 +10,11 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
   routing and adds the live coverage.
   """
 
-  use ExUnit.Case, async: true
+  # async: false — several tests mutate the global
+  # `:arbor_orchestrator, :ollama`/`:lm_studio` Application env to verify
+  # the hardcoded localhost fallback (CI sets ARBOR_OLLAMA_BASE_URL, which
+  # runtime.exs threads into that config key).
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
@@ -19,6 +23,21 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
   alias Arbor.LLM.Message
   alias Arbor.LLM.Request
   alias Arbor.LLM.Response
+
+  # Clear any operator/CI-supplied `:arbor_orchestrator, :ollama` config
+  # (set from ARBOR_OLLAMA_BASE_URL via runtime.exs) so a test can assert
+  # the hardcoded localhost fallback. Restores the original value on_exit.
+  defp clear_orchestrator_ollama_config do
+    original = Application.get_env(:arbor_orchestrator, :ollama)
+    Application.delete_env(:arbor_orchestrator, :ollama)
+
+    on_exit(fn ->
+      case original do
+        nil -> Application.delete_env(:arbor_orchestrator, :ollama)
+        v -> Application.put_env(:arbor_orchestrator, :ollama, v)
+      end
+    end)
+  end
 
   describe "provider/0 + behaviour" do
     test "implements Arbor.LLM.ProviderAdapter" do
@@ -96,7 +115,13 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       assert "http://localhost:1234/v1" = Adapter.default_base_url_for("lm_studio")
     end
 
-    test "ollama default points at localhost:11434" do
+    test "ollama default points at localhost:11434 (no operator override)" do
+      # `default_base_url_for/1` reads `config :arbor_orchestrator, :ollama`
+      # (base_url) and falls back to the hardcoded localhost default when
+      # unset. CI sets ARBOR_OLLAMA_BASE_URL → runtime.exs populates that
+      # config key with the homelab URL, so we clear it here to assert the
+      # *fallback*, then restore on_exit.
+      clear_orchestrator_ollama_config()
       assert "http://localhost:11434/v1" = Adapter.default_base_url_for("ollama")
     end
 
@@ -128,7 +153,10 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       assert opts[:base_url] == "http://localhost:1234/v1"
     end
 
-    test "ollama request gets localhost base_url injected automatically" do
+    test "ollama request gets localhost base_url injected automatically (no operator override)" do
+      # See default_base_url_for note above — clear the CI-set override so
+      # we assert the hardcoded localhost fallback, not the homelab URL.
+      clear_orchestrator_ollama_config()
       req = %Request{provider: "ollama", model: "qwen2.5-coder"}
       opts = Adapter.build_req_opts(req, [])
       assert opts[:base_url] == "http://localhost:11434/v1"

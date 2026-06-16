@@ -867,17 +867,29 @@ defmodule Arbor.AI do
   defp snapshot_embedding_config(opts) do
     case Keyword.get(opts, :provider) do
       nil ->
-        # Resolve from config and inject provider + model
-        config = embedding_config()
+        if Application.get_env(:arbor_ai, :embedding_test_fallback, false) do
+          # Test/CI stub: force the deterministic hash backend ahead of
+          # any routing-config discovery. Otherwise discovery would pin
+          # `:provider` to the first configured provider (e.g. `:ollama`)
+          # and route real embeddings through a (slow) local server even
+          # when generation legitimately uses Ollama. Generation routing
+          # is unaffected — this only governs the embedding entry point.
+          opts
+          |> Keyword.put_new(:provider, :test)
+          |> Keyword.put_new(:model, "test-hash-768d")
+        else
+          # Resolve from config and inject provider + model
+          config = embedding_config()
 
-        case config.providers do
-          [{backend, model} | _] ->
-            opts
-            |> Keyword.put_new(:provider, backend)
-            |> Keyword.put_new(:model, model)
+          case config.providers do
+            [{backend, model} | _] ->
+              opts
+              |> Keyword.put_new(:provider, backend)
+              |> Keyword.put_new(:model, model)
 
-          _ ->
-            opts
+            _ ->
+              opts
+          end
         end
 
       _provider ->
