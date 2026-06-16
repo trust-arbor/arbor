@@ -36,6 +36,9 @@ defmodule Arbor.Consensus.CouncilManager do
   require Logger
 
   @perspectives AdvisoryLLM.perspectives()
+  @registry Arbor.Consensus.EvaluatorAgent.Registry
+  @deregistration_poll_ms 5
+  @deregistration_max_attempts 200
 
   @doc """
   Start all 13 perspective agents. Idempotent — skips already-running agents.
@@ -278,7 +281,26 @@ defmodule Arbor.Consensus.CouncilManager do
   # asynchronously. We already waited for :DOWN so the process is dead.
   # running_count/0 uses Process.alive? to filter stale entries, so
   # downstream callers get accurate counts immediately.
-  defp await_deregistration(_agent_name) do
-    :ok
+  defp await_deregistration(agent_name) do
+    await_deregistration(agent_name, @deregistration_max_attempts)
+  end
+
+  defp await_deregistration(_agent_name, 0), do: :ok
+
+  defp await_deregistration(agent_name, attempts) do
+    case Registry.lookup(@registry, agent_name) do
+      [] ->
+        :ok
+
+      [{pid, _}] ->
+        if Process.alive?(pid) do
+          :ok
+        else
+          Process.sleep(@deregistration_poll_ms)
+          await_deregistration(agent_name, attempts - 1)
+        end
+    end
+  rescue
+    ArgumentError -> :ok
   end
 end
