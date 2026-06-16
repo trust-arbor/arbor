@@ -32,11 +32,29 @@ defmodule Arbor.LLM.Conformance81Test do
       |> Enum.reject(&is_nil/1)
       |> Enum.into(%{"UNIFIED_LLM_DEFAULT_PROVIDER" => nil}, &{&1, nil})
 
-    with_env(env, fn ->
-      assert_raise ConfigurationError, fn ->
-        Client.from_env(discover_cli: false, discover_local: false)
-      end
+    without_config_default_provider(fn ->
+      with_env(env, fn ->
+        assert_raise ConfigurationError, fn ->
+          Client.from_env(discover_cli: false, discover_local: false)
+        end
+      end)
     end)
+  end
+
+  # The hermetic gating lane sets `config :arbor_llm, default_provider:` so
+  # `Client.from_env/1` can construct without UNIFIED_LLM_DEFAULT_PROVIDER.
+  # The 8.1 "nothing configured" contract must clear that config source too.
+  defp without_config_default_provider(fun) do
+    previous = Application.get_env(:arbor_llm, :default_provider)
+    Application.delete_env(:arbor_llm, :default_provider)
+
+    try do
+      fun.()
+    after
+      if previous != nil do
+        Application.put_env(:arbor_llm, :default_provider, previous)
+      end
+    end
   end
 
   test "8.1 supports default client storage and model catalog inspection" do

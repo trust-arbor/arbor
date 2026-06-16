@@ -213,10 +213,12 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
   end
 
   test "from_env raises when no default provider and no provider keys are configured" do
-    with_env(clear_all_cloud_keys(), fn ->
-      assert_raise ConfigurationError, fn ->
-        Client.from_env(discover_cli: false, discover_local: false)
-      end
+    without_config_default_provider(fn ->
+      with_env(clear_all_cloud_keys(), fn ->
+        assert_raise ConfigurationError, fn ->
+          Client.from_env(discover_cli: false, discover_local: false)
+        end
+      end)
     end)
   end
 
@@ -232,10 +234,12 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
   test "from_env auto-discovers adapters from provider api keys" do
     env = Map.put(clear_all_cloud_keys(), "OPENAI_API_KEY", "sk-live")
 
-    with_env(env, fn ->
-      client = Client.from_env(discover_cli: false, discover_local: false)
-      assert client.default_provider == "openai"
-      assert Map.has_key?(client.adapters, "openai")
+    without_config_default_provider(fn ->
+      with_env(env, fn ->
+        client = Client.from_env(discover_cli: false, discover_local: false)
+        assert client.default_provider == "openai"
+        assert Map.has_key?(client.adapters, "openai")
+      end)
     end)
   end
 
@@ -598,6 +602,23 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
     assert response.text == "ok-after-timeout-retry"
     assert_receive :timeout_then_success_called
     assert_receive :timeout_then_success_called
+  end
+
+  # The hermetic gating lane sets `config :arbor_llm, default_provider:` so
+  # `Client.from_env/1` can construct without UNIFIED_LLM_DEFAULT_PROVIDER.
+  # Tests asserting the "nothing configured" contract must clear that
+  # config source too, just as they clear the env keys.
+  defp without_config_default_provider(fun) do
+    previous = Application.get_env(:arbor_llm, :default_provider)
+    Application.delete_env(:arbor_llm, :default_provider)
+
+    try do
+      fun.()
+    after
+      if previous != nil do
+        Application.put_env(:arbor_llm, :default_provider, previous)
+      end
+    end
   end
 
   defp with_env(changes, fun) do
