@@ -64,7 +64,12 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
   """
   @spec capability_resources(Arbor.Orchestrator.Graph.Node.t()) :: [String.t()]
   def capability_resources(node) do
-    case node.capabilities_required do
+    # Read defensively: a fully-built %Graph.Node{} always carries
+    # `capabilities_required` (defaults to []), but uncompiled / partially
+    # constructed nodes may omit the key entirely. Absence means "no caps
+    # populated by the IR Compiler" — fall back to the type-based URI rather
+    # than crashing with a KeyError.
+    case Map.get(node, :capabilities_required, []) do
       caps when is_list(caps) and caps != [] ->
         Enum.map(caps, &normalize_capability_uri/1)
 
