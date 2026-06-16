@@ -79,11 +79,17 @@ jobs:
       # Warm the Ollama model into VRAM before tests so the first :llm call doesn't
       # eat a multi-second cold-load against per-test timeouts. keep_alive pins it
       # resident for the suite. Best-effort: never fails the lane.
-      - name: Warm Ollama model
+      - name: Warm Ollama models
         run: |
-          curl -sf -m 300 -X POST "$ARBOR_OLLAMA_BASE_URL/api/generate" \
-            -d '{"model":"'"$UNIFIED_LLM_DEFAULT_MODEL"'","prompt":"hi","stream":false,"keep_alive":"30m"}' \
-            && echo "model warmed" || echo "warmup skipped (endpoint unavailable)"
+          # Warm every model the suite uses: the global default (granite3.1-moe:1b)
+          # and granite3.3:2b (ContextWindow/HeartbeatLLM/MemoryE2E route there).
+          # keep_alive pins them resident so the first :llm call doesn't eat a
+          # cold-load against per-test timeouts. Best-effort: never fails the lane.
+          for m in "$UNIFIED_LLM_DEFAULT_MODEL" granite3.3:2b; do
+            curl -sf -m 600 -X POST "$ARBOR_OLLAMA_BASE_URL/api/generate" \
+              -d '{"model":"'"$m"'","prompt":"hi","stream":false,"keep_alive":"30m"}' \
+              && echo "warmed $m" || echo "warmup skipped for $m (endpoint unavailable)"
+          done
         continue-on-error: true
 
       # Default lane excludes :database — it must be fully green on its own.
