@@ -58,12 +58,23 @@ defmodule Arbor.Consensus.Evaluator.DeterministicTest do
   end
 
   describe "evaluate/3 with :mix_format_check" do
+    # NOTE on timeouts: this evaluator shells out to `mix format --check-formatted`
+    # in the umbrella root with MIX_ENV=dev (see Deterministic.get_env/3). The test
+    # suite itself runs under MIX_ENV=test, so _build/dev is frequently cold in CI.
+    # Booting `mix` under a cold dev build triggers a FULL umbrella recompile (~30
+    # apps + deps, minutes on a slow CI VM) before `mix format` even runs — measured
+    # ~60s wall on a fast dev Mac from cold. The cost is a one-time cold-build hit
+    # that lands on whichever mix-subprocess :slow test happens to run first under a
+    # given seed, which is why this flaked intermittently at the old 120_000ms cap.
+    # Budget both the inner subprocess timeout and the outer ExUnit timeout generously
+    # so a legitimate cold recompile completes and yields a real pass/fail verdict
+    # rather than racing the ExUnit deadline. (Matches the heaviest :mix_compile sibling.)
     @tag :slow
-    @tag timeout: 120_000
+    @tag timeout: 600_000
     test "returns evaluation for format check", %{proposal: proposal} do
       # This may pass or fail depending on current formatting state
       {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_format_check, timeout: 60_000, sandbox: :basic)
+        Deterministic.evaluate(proposal, :mix_format_check, timeout: 300_000, sandbox: :basic)
 
       assert %Evaluation{} = evaluation
       assert evaluation.perspective == :mix_format_check
@@ -167,11 +178,14 @@ defmodule Arbor.Consensus.Evaluator.DeterministicTest do
   end
 
   describe "evaluation result structure" do
+    # Runs `mix compile --warnings-as-errors` against the umbrella under a cold
+    # MIX_ENV=dev build — same recompile cost as :mix_format_check (see that note).
+    # Budget generously so a cold recompile yields a real verdict.
     @tag :slow
-    @tag timeout: 120_000
+    @tag timeout: 600_000
     test "produces sealed evaluation with all required fields", %{proposal: proposal} do
       {:ok, evaluation} =
-        Deterministic.evaluate(proposal, :mix_compile, timeout: 60_000, sandbox: :basic)
+        Deterministic.evaluate(proposal, :mix_compile, timeout: 300_000, sandbox: :basic)
 
       # Check all required Evaluation fields
       assert is_binary(evaluation.id)
@@ -284,12 +298,16 @@ defmodule Arbor.Consensus.Evaluator.DeterministicTest do
   end
 
   describe "evaluate/3 with :mix_credo" do
+    # Same cold MIX_ENV=dev recompile cost as :mix_format_check (see the note there);
+    # `mix credo --strict` additionally must fully compile the umbrella before it can
+    # analyze, so it is the heaviest of these. Budget generously; this one was also
+    # observed to time out under the old cap.
     @tag :slow
-    @tag timeout: 180_000
+    @tag timeout: 600_000
     test "runs credo check", %{proposal: proposal} do
       {:ok, evaluation} =
         Deterministic.evaluate(proposal, :mix_credo,
-          timeout: 120_000,
+          timeout: 300_000,
           sandbox: :basic
         )
 
@@ -381,8 +399,10 @@ defmodule Arbor.Consensus.Evaluator.DeterministicTest do
       :ok
     end
 
+    # Runs `mix compile` against the umbrella under a cold MIX_ENV=dev build;
+    # same recompile cost as :mix_format_check (see that note). Budget generously.
     @tag :slow
-    @tag timeout: 120_000
+    @tag timeout: 600_000
     test "uses default_cwd from config when no project_path" do
       Application.put_env(
         :arbor_consensus,
@@ -400,7 +420,7 @@ defmodule Arbor.Consensus.Evaluator.DeterministicTest do
 
       {:ok, evaluation} =
         Deterministic.evaluate(proposal, :mix_compile,
-          timeout: 60_000,
+          timeout: 300_000,
           sandbox: :basic
         )
 
