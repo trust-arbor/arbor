@@ -62,9 +62,11 @@ defmodule Arbor.Agent.Behavioral.SkillActivationE2ETest do
   # test should be updated to point at another stable real skill.
   @test_skill_name "frontend-design"
 
-  # Path to the umbrella's `.arbor/skills/` directory from this test file.
-  # Matches the pattern prompt_library_test.exs uses.
-  @skills_dir Path.expand("../../../../.arbor/skills", __DIR__)
+  # Committed test fixtures (copies of the real skills, incl. frontend-design).
+  # NOT the live `.arbor/skills/` dir — that is gitignored and therefore absent
+  # in fresh checkouts / CI / worktrees, which made SkillLibrary.get/1 below
+  # return {:error, :not_found}. Matches the fixtures pattern prompt_library_test.exs uses.
+  @skills_dir Path.expand("../fixtures/skills", __DIR__)
 
   setup %{agent_id: agent_id} do
     for table <- @extra_ets_tables do

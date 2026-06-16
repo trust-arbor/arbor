@@ -7,7 +7,11 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
   alias Arbor.Common.SkillLibrary
   alias Arbor.Contracts.Skill
 
-  @skills_dir Path.expand("../../../../.arbor/skills", __DIR__)
+  # Committed test fixtures (copies of the real heartbeat/advisory skills).
+  # NOT the live `.arbor/skills` dir — that is gitignored, so it is absent in
+  # fresh checkouts / CI / worktrees, which left this whole suite indexing an
+  # empty library. Fixtures keep these assertions deterministic everywhere.
+  @skills_dir Path.expand("../fixtures/skills", __DIR__)
 
   setup do
     # Ensure clean state
@@ -26,7 +30,11 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
   describe "heartbeat skill indexing" do
     test "indexes all 12 heartbeat skills from .arbor/skills" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@skills_dir])
-      Process.sleep(100)
+      # Synchronous reload — guarantees the async :scan_dirs index completes
+      # before we assert. A bare Process.sleep/1 races under full-suite load
+      # (the 100ms timer can fire before indexing finishes), which made these
+      # tests flaky in CI even with the fixtures present.
+      :ok = SkillLibrary.reload()
 
       heartbeat_skills = SkillLibrary.list(category: "heartbeat")
       names = Enum.map(heartbeat_skills, &Map.get(&1, :name))
@@ -55,7 +63,11 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
 
     test "heartbeat skills have version field" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@skills_dir])
-      Process.sleep(100)
+      # Synchronous reload — guarantees the async :scan_dirs index completes
+      # before we assert. A bare Process.sleep/1 races under full-suite load
+      # (the 100ms timer can fire before indexing finishes), which made these
+      # tests flaky in CI even with the fixtures present.
+      :ok = SkillLibrary.reload()
 
       {:ok, skill} = SkillLibrary.get("cognitive-goal-pursuit")
       assert Map.get(skill, :version) == "1.0.0"
@@ -65,7 +77,11 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
 
     test "heartbeat-system-prompt has template_vars" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@skills_dir])
-      Process.sleep(100)
+      # Synchronous reload — guarantees the async :scan_dirs index completes
+      # before we assert. A bare Process.sleep/1 races under full-suite load
+      # (the 100ms timer can fire before indexing finishes), which made these
+      # tests flaky in CI even with the fixtures present.
+      :ok = SkillLibrary.reload()
 
       {:ok, skill} = SkillLibrary.get("heartbeat-system-prompt")
       assert "nonce_preamble" in Map.get(skill, :template_vars, [])
@@ -77,7 +93,11 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
   describe "cognitive prompt loading from SkillLibrary" do
     test "loads cognitive prompts from skill files" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@skills_dir])
-      Process.sleep(100)
+      # Synchronous reload — guarantees the async :scan_dirs index completes
+      # before we assert. A bare Process.sleep/1 races under full-suite load
+      # (the 100ms timer can fire before indexing finishes), which made these
+      # tests flaky in CI even with the fixtures present.
+      :ok = SkillLibrary.reload()
 
       prompt = CognitivePrompts.prompt_for(:goal_pursuit)
       assert prompt =~ "Goal Pursuit"
@@ -107,7 +127,11 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
   describe "heartbeat prompt loading from SkillLibrary" do
     test "system_prompt loads from skill file" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@skills_dir])
-      Process.sleep(100)
+      # Synchronous reload — guarantees the async :scan_dirs index completes
+      # before we assert. A bare Process.sleep/1 races under full-suite load
+      # (the 100ms timer can fire before indexing finishes), which made these
+      # tests flaky in CI even with the fixtures present.
+      :ok = SkillLibrary.reload()
 
       prompt = HeartbeatPrompt.system_prompt(%{})
       assert prompt =~ "autonomous AI agent"
@@ -118,7 +142,11 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
 
     test "system_prompt renders nonce template var" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@skills_dir])
-      Process.sleep(100)
+      # Synchronous reload — guarantees the async :scan_dirs index completes
+      # before we assert. A bare Process.sleep/1 races under full-suite load
+      # (the 100ms timer can fire before indexing finishes), which made these
+      # tests flaky in CI even with the fixtures present.
+      :ok = SkillLibrary.reload()
 
       prompt = HeartbeatPrompt.system_prompt(%{nonce: "TEST_NONCE"})
       assert prompt =~ "TEST_NONCE"
@@ -133,7 +161,11 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
 
     test "response_format_section loads from skill file" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@skills_dir])
-      Process.sleep(100)
+      # Synchronous reload — guarantees the async :scan_dirs index completes
+      # before we assert. A bare Process.sleep/1 races under full-suite load
+      # (the 100ms timer can fire before indexing finishes), which made these
+      # tests flaky in CI even with the fixtures present.
+      :ok = SkillLibrary.reload()
 
       prompt = HeartbeatPrompt.build_prompt(%{enabled_prompt_sections: [:response_format]})
       assert prompt =~ "Response Format"
@@ -171,7 +203,11 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
   describe "prompt-aware capability discovery" do
     test "heartbeat skills get kind: :prompt and prompt: prefix" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@skills_dir])
-      Process.sleep(100)
+      # Synchronous reload — guarantees the async :scan_dirs index completes
+      # before we assert. A bare Process.sleep/1 races under full-suite load
+      # (the 100ms timer can fire before indexing finishes), which made these
+      # tests flaky in CI even with the fixtures present.
+      :ok = SkillLibrary.reload()
 
       provider = Arbor.Common.CapabilityProviders.SkillProvider
 
@@ -184,7 +220,11 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
 
     test "advisory skills also get kind: :prompt" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@skills_dir])
-      Process.sleep(100)
+      # Synchronous reload — guarantees the async :scan_dirs index completes
+      # before we assert. A bare Process.sleep/1 races under full-suite load
+      # (the 100ms timer can fire before indexing finishes), which made these
+      # tests flaky in CI even with the fixtures present.
+      :ok = SkillLibrary.reload()
 
       provider = Arbor.Common.CapabilityProviders.SkillProvider
 
@@ -216,7 +256,11 @@ defmodule Arbor.Agent.Integration.PromptLibraryTest do
 
     test "execute with bindings renders template vars" do
       {:ok, pid} = SkillLibrary.start_link(dirs: [@skills_dir])
-      Process.sleep(100)
+      # Synchronous reload — guarantees the async :scan_dirs index completes
+      # before we assert. A bare Process.sleep/1 races under full-suite load
+      # (the 100ms timer can fire before indexing finishes), which made these
+      # tests flaky in CI even with the fixtures present.
+      :ok = SkillLibrary.reload()
 
       provider = Arbor.Common.CapabilityProviders.SkillProvider
 
