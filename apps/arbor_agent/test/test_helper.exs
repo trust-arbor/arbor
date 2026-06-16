@@ -37,4 +37,6 @@ if :ets.whereis(:arbor_memory_goals) == :undefined do
   end
 end
 
-ExUnit.start(exclude: [:skip, :integration, :external, :llm, :llm_local])
+# :integration/:slow run by default (hermetic — gating CI runs plain `mix test`);
+# only backend-dependent tags are excluded. Fast loop: `mix test.fast`.
+ExUnit.start(exclude: [:skip, :external, :llm, :llm_local])

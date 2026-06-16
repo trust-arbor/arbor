@@ -13,22 +13,11 @@ jobs:
     env:
       MIX_ENV: test
       ARBOR_COOKIE: ci_test_cookie_not_a_secret
-      # LLM configuration for tests — FULLY LOCAL. All :llm tests run against the
-      # homelab Ollama (which serves the Anthropic Messages API natively), so the
-      # gating lane has no external-provider dependency (OpenRouter retiring a
-      # model / rate-limiting / downtime can't break CI). Provider/model/base_url
-      # are all env-driven (read by Arbor.AI / Arbor.LLM), so a developer without
-      # a local Ollama just sets their own env (OpenRouter, etc.) — nothing here
-      # is baked into the source defaults.
-      UNIFIED_LLM_DEFAULT_PROVIDER: ollama
-      UNIFIED_LLM_DEFAULT_MODEL: "granite3.1-moe:1b"
-      ARBOR_OLLAMA_BASE_URL: "http://10.42.42.100:11434"
-      # ClaudeTest drives the real `claude` CLI against the same Ollama endpoint
-      # via the Anthropic-compat env (no paid Anthropic calls).
-      ANTHROPIC_BASE_URL: "http://10.42.42.100:11434"
-      ANTHROPIC_AUTH_TOKEN: ollama
-      ARBOR_ACP_ALTERNATE_MODEL: "granite3.1-moe:1b"
-      # Enable Postgres for database tests
+      # This is the GATING lane and it is HERMETIC: it runs no LLM-backed tests,
+      # so it needs no LLM provider (homelab Ollama / OpenRouter / anything). The
+      # :llm / :llm_local / :integration_lm_studio tests run in the separate,
+      # non-gating "LLM Tests" lane below. That's what lets the big inference box
+      # stay off without reddening the merge gate.
       ARBOR_DB: postgres
 
     steps:
@@ -69,34 +58,19 @@ jobs:
         run: mix sobelow --config --root apps/arbor_dashboard && mix sobelow --config --root apps/arbor_gateway
         continue-on-error: true
 
-      # ClaudeTest spawns the real `claude` CLI (pointed at Ollama). Install it on
-      # the runner; if this fails the test no-ops gracefully (executable_not_found),
-      # so it never blocks the lane.
-      - name: Install Claude CLI (ClaudeTest → Ollama)
-        run: npm i -g @anthropic-ai/claude-code
-        continue-on-error: true
-
-      # Warm the Ollama model into VRAM before tests so the first :llm call doesn't
-      # eat a multi-second cold-load against per-test timeouts. keep_alive pins it
-      # resident for the suite. Best-effort: never fails the lane.
-      - name: Warm Ollama models
-        run: |
-          # Warm every model the suite uses: the global default (granite3.1-moe:1b)
-          # and granite3.3:2b (ContextWindow/HeartbeatLLM/MemoryE2E route there).
-          # keep_alive pins them resident so the first :llm call doesn't eat a
-          # cold-load against per-test timeouts. Best-effort: never fails the lane.
-          for m in "$UNIFIED_LLM_DEFAULT_MODEL" granite3.3:2b; do
-            curl -sf -m 600 -X POST "$ARBOR_OLLAMA_BASE_URL/api/generate" \
-              -d '{"model":"'"$m"'","prompt":"hi","stream":false,"keep_alive":"30m"}' \
-              && echo "warmed $m" || echo "warmup skipped for $m (endpoint unavailable)"
-          done
-        continue-on-error: true
-
-      # Default lane excludes :database — it must be fully green on its own.
-      # The :database tests run in the dedicated `database` job below (they need
-      # the Repo started + a per-test Sandbox connection, via DatabaseCase).
-      - name: Run test suite (no database)
-        run: mix test --include llm --include integration --include slow --timeout 120000
+      # Hermetic gating run. Plain `mix test` (NO --include) so the per-app
+      # test_helper + these --exclude flags are authoritative — :integration and
+      # :slow tests RUN (they're hermetic), while every backend/external/db tag is
+      # excluded. Crucially, with no --include nothing overrides the excludes, so a
+      # test tagged both :integration AND :llm is still skipped (ExUnit's --include
+      # would otherwise re-include it). :database runs in its own lane; :llm et al.
+      # run in the non-gating LLM lane.
+      - name: Run test suite (hermetic — no LLM, no database)
+        run: >-
+          mix test
+          --exclude llm --exclude llm_local --exclude integration_lm_studio
+          --exclude external --exclude distributed --exclude database
+          --timeout 120000
 
   # ── Database lane ───────────────────────────────────────────────────────────
   # Runs ONLY the :database-tagged tests against Postgres. These need the Repo
@@ -139,6 +113,70 @@ jobs:
 
       - name: Run database tests
         run: mix test --only database --timeout 120000
+
+  # ── LLM lane (allowed to fail) ──────────────────────────────────────────────
+  # Runs ONLY the LLM-backed tests (:llm / :llm_local / :integration_lm_studio)
+  # against a real model backend. NON-GATING (continue-on-error) so it never
+  # blocks a merge: when the inference box is up it reports real status; when
+  # it's off (the common case — we don't keep the power-hungry GPU server
+  # running for CI) it goes red without consequence. Repoint the backend by
+  # changing ARBOR_OLLAMA_BASE_URL / ANTHROPIC_BASE_URL (homelab Ollama today;
+  # a 3060 laptop or OpenRouter later). All settings are env-driven.
+  llm:
+    name: LLM Tests (non-gating)
+    runs-on: native
+    continue-on-error: true
+    env:
+      MIX_ENV: test
+      ARBOR_COOKIE: ci_test_cookie_not_a_secret
+      UNIFIED_LLM_DEFAULT_PROVIDER: ollama
+      UNIFIED_LLM_DEFAULT_MODEL: "granite3.1-moe:1b"
+      ARBOR_OLLAMA_BASE_URL: "http://10.42.42.100:11434"
+      ANTHROPIC_BASE_URL: "http://10.42.42.100:11434"
+      ANTHROPIC_AUTH_TOKEN: ollama
+      ARBOR_ACP_ALTERNATE_MODEL: "granite3.1-moe:1b"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up toolchain (mise → .tool-versions)
+        run: |
+          mise install
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+
+      # ClaudeTest drives the real `claude` CLI (pointed at the Ollama endpoint).
+      - name: Install Claude CLI
+        run: npm i -g @anthropic-ai/claude-code
+        continue-on-error: true
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build/test
+          key: mix-test-${{ hashFiles('.tool-versions', 'mix.lock') }}
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Compile
+        run: mix compile
+
+      # Warm the models the suite uses into VRAM so the first call doesn't eat a
+      # cold-load against per-test timeouts. Best-effort.
+      - name: Warm Ollama models
+        run: |
+          for m in "$UNIFIED_LLM_DEFAULT_MODEL" granite3.3:2b; do
+            curl -sf -m 600 -X POST "$ARBOR_OLLAMA_BASE_URL/api/generate" \
+              -d '{"model":"'"$m"'","prompt":"hi","stream":false,"keep_alive":"30m"}' \
+              && echo "warmed $m" || echo "warmup skipped for $m (endpoint unavailable)"
+          done
+        continue-on-error: true
+
+      - name: Run LLM tests
+        run: mix test --only llm --include llm_local --include integration_lm_studio --timeout 600000
 
   # ── Experimental tracking lane (allowed to fail) ────────────────────────────
   # Does Arbor build & test on the NEXT Erlang/Elixir generation? This lane

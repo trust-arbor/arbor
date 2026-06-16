@@ -23,4 +23,6 @@ if Process.whereis(Arbor.Memory.Supervisor) do
   end
 end
 
-ExUnit.start(exclude: [:integration, :llm, :llm_local])
+# :integration runs by default (hermetic — gating CI runs plain `mix test`);
+# only backend-dependent tags are excluded. Fast loop: `mix test.fast`.
+ExUnit.start(exclude: [:llm, :llm_local])
