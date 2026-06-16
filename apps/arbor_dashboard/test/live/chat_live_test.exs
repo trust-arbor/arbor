@@ -1,12 +1,34 @@
 defmodule Arbor.Dashboard.Live.ChatLiveTest do
   use Arbor.Dashboard.ConnCase, async: false
 
-  # ChatLive mount calls Manager.find_first_agent/0 when connected,
-  # which requires the :arbor_agent_registry ETS table to exist.
+  # ChatLive mount calls Manager.find_first_agent/0 when connected, which reads
+  # the GLOBAL :arbor_agent_registry ETS table. That table is process-wide
+  # shared state with no per-test isolation — an agent registered (and still
+  # alive) by concurrent activity elsewhere in the BEAM makes find_first_agent/0
+  # return it, flipping ChatLive into its *with-agent* state. The "no-agent
+  # state" test (line ~126) then renders the connected UI instead of the /start
+  # hint and fails intermittently. See the test-isolation flake fixed here.
+  #
+  # We snapshot the registry, clear it so every test in this module sees a
+  # genuinely empty agent listing, and restore it on exit so we don't disturb
+  # entries other modules may depend on.
   setup do
     if :ets.whereis(:arbor_agent_registry) == :undefined do
       :ets.new(:arbor_agent_registry, [:named_table, :set, :public])
     end
+
+    snapshot = :ets.tab2list(:arbor_agent_registry)
+    :ets.delete_all_objects(:arbor_agent_registry)
+
+    on_exit(fn ->
+      # The table is :public/:named — recreate it if a concurrent teardown
+      # removed it, then restore the entries we snapshotted.
+      if :ets.whereis(:arbor_agent_registry) == :undefined do
+        :ets.new(:arbor_agent_registry, [:named_table, :set, :public])
+      end
+
+      :ets.insert(:arbor_agent_registry, snapshot)
+    end)
 
     :ok
   end
