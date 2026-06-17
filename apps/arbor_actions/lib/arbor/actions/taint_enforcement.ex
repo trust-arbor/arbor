@@ -49,8 +49,14 @@ defmodule Arbor.Actions.TaintEnforcement do
     input_taint = extract_taint_level(context)
 
     if input_taint do
-      output_taint = Arbor.Signals.Taint.propagate([input_taint])
-      TaintEvents.emit_taint_propagated(action_module, input_taint, output_taint, context)
+      # context[:taint] may be either a bare level atom OR a full Taint struct
+      # (the orchestrator threads `Context.worst_taint/2`, which returns a
+      # %Taint{} struct). `Arbor.Signals.Taint.propagate/1` is the atom-level
+      # API and crashes on a struct, so normalize to the level first — mirrors
+      # what `Taint.check_params` does internally via extract_level/1.
+      input_level = taint_level(input_taint)
+      output_taint = Arbor.Signals.Taint.propagate([input_level])
+      TaintEvents.emit_taint_propagated(action_module, input_level, output_taint, context)
     else
       :ok
     end
@@ -160,4 +166,10 @@ defmodule Arbor.Actions.TaintEnforcement do
   defp extract_taint_level(context) do
     Map.get(context, :taint) || get_in(context, [:taint_context, :taint])
   end
+
+  # Normalize a taint value (bare level atom or %Taint{} struct) to its level
+  # atom, so the atom-level Arbor.Signals.Taint API can consume it.
+  defp taint_level(%{level: level}), do: level
+  defp taint_level(level) when is_atom(level), do: level
+  defp taint_level(_), do: :untrusted
 end

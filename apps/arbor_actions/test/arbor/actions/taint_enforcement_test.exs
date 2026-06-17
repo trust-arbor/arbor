@@ -105,6 +105,38 @@ defmodule Arbor.Actions.TaintEnforcementTest do
     end
   end
 
+  describe "TaintEnforcement.maybe_emit_propagated/3 (regression: struct taint)" do
+    alias Arbor.Actions.TaintEnforcement
+    alias Arbor.Contracts.Security.Taint, as: TaintStruct
+
+    # Regression for the taint-struct crash surfaced 2026-06-17: the orchestrator
+    # threads context[:taint] as a full %Taint{} struct (Context.worst_taint/2
+    # returns a struct), but maybe_emit_propagated called the atom-level
+    # Arbor.Signals.Taint.propagate/1 directly, which has no clause for a struct
+    # and raised FunctionClauseError — aborting the action (e.g.
+    # security.record_diff_findings) AFTER it had already run. Failed open as a
+    # crash on the post-execution propagation path. maybe_emit_propagated must
+    # normalize a struct to its level before propagating.
+    test "does not crash when context[:taint] is a %Taint{} struct" do
+      context = %{
+        agent_id: "agent_001",
+        taint: %TaintStruct{level: :untrusted, sensitivity: :internal}
+      }
+
+      assert :ok = TaintEnforcement.maybe_emit_propagated(MockControlAction, context, {:ok, %{}})
+    end
+
+    test "still works with a bare level atom on context[:taint]" do
+      context = %{agent_id: "agent_001", taint: :untrusted}
+
+      assert :ok = TaintEnforcement.maybe_emit_propagated(MockControlAction, context, {:ok, %{}})
+    end
+
+    test "is a no-op when there is no taint on context" do
+      assert :ok = TaintEnforcement.maybe_emit_propagated(MockControlAction, %{}, {:ok, %{}})
+    end
+  end
+
   describe "TaintEvents.emit_taint_reduced/4" do
     test "emits a signal for taint reduction" do
       assert :ok =
