@@ -53,9 +53,14 @@ defmodule Arbor.Memory.Signals do
   defdelegate emit_insight_detected(agent_id, suggestion), to: __MODULE__.Proposals
   defdelegate emit_proposal_created(agent_id, proposal), to: __MODULE__.Proposals
   defdelegate emit_proposal_accepted(agent_id, proposal_id, node_id), to: __MODULE__.Proposals
-  defdelegate emit_proposal_rejected(agent_id, proposal_id, proposal_type, reason), to: __MODULE__.Proposals
+
+  defdelegate emit_proposal_rejected(agent_id, proposal_id, proposal_type, reason),
+    to: __MODULE__.Proposals
+
   defdelegate emit_proposal_deferred(agent_id, proposal_id), to: __MODULE__.Proposals
-  defdelegate emit_cognitive_adjustment(agent_id, adjustment_type, details), to: __MODULE__.Proposals
+
+  defdelegate emit_cognitive_adjustment(agent_id, adjustment_type, details),
+    to: __MODULE__.Proposals
 
   # ============================================================================
   # Delegated: Identity & Insight Lifecycle Signals
@@ -120,7 +125,9 @@ defmodule Arbor.Memory.Signals do
   defdelegate emit_curiosity_added(agent_id, item), to: __MODULE__.WorkingMemory
   defdelegate emit_curiosity_satisfied(agent_id, item), to: __MODULE__.WorkingMemory
   defdelegate emit_conversation_changed(agent_id, conversation), to: __MODULE__.WorkingMemory
-  defdelegate emit_relationship_changed(agent_id, human_name, context), to: __MODULE__.WorkingMemory
+
+  defdelegate emit_relationship_changed(agent_id, human_name, context),
+    to: __MODULE__.WorkingMemory
 
   # ============================================================================
   # Query API
@@ -144,7 +151,9 @@ defmodule Arbor.Memory.Signals do
       source = memory_source(agent_id)
 
       filters = [category: :memory, source: source, limit: limit]
-      filters = if since = Keyword.get(opts, :since), do: [{:since, since} | filters], else: filters
+
+      filters =
+        if since = Keyword.get(opts, :since), do: [{:since, since} | filters], else: filters
 
       with {:ok, signals} <- Arbor.Signals.recent(filters) do
         {:ok, filter_by_types(signals, Keyword.get(opts, :types))}
@@ -259,10 +268,15 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_knowledge_added(String.t(), String.t(), atom()) :: :ok
   def emit_knowledge_added(agent_id, node_id, node_type) do
-    emit_memory_signal(agent_id, :knowledge_added, %{
-      node_id: node_id,
-      node_type: node_type
-    }, scope: :cluster)
+    emit_memory_signal(
+      agent_id,
+      :knowledge_added,
+      %{
+        node_id: node_id,
+        node_type: node_type
+      },
+      scope: :cluster
+    )
   end
 
   @doc """
@@ -270,11 +284,16 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_knowledge_linked(String.t(), String.t(), String.t(), atom()) :: :ok
   def emit_knowledge_linked(agent_id, source_id, target_id, relationship) do
-    emit_memory_signal(agent_id, :knowledge_linked, %{
-      source_id: source_id,
-      target_id: target_id,
-      relationship: relationship
-    }, scope: :cluster)
+    emit_memory_signal(
+      agent_id,
+      :knowledge_linked,
+      %{
+        source_id: source_id,
+        target_id: target_id,
+        relationship: relationship
+      },
+      scope: :cluster
+    )
   end
 
   @doc """
@@ -363,12 +382,17 @@ defmodule Arbor.Memory.Signals do
   """
   @spec emit_working_memory_saved(String.t(), map()) :: :ok
   def emit_working_memory_saved(agent_id, stats) do
-    emit_memory_signal(agent_id, :working_memory_saved, %{
-      thought_count: stats[:thought_count],
-      goal_count: stats[:goal_count],
-      engagement_level: stats[:engagement_level],
-      saved_at: DateTime.utc_now()
-    }, scope: :cluster)
+    emit_memory_signal(
+      agent_id,
+      :working_memory_saved,
+      %{
+        thought_count: stats[:thought_count],
+        goal_count: stats[:goal_count],
+        engagement_level: stats[:engagement_level],
+        saved_at: DateTime.utc_now()
+      },
+      scope: :cluster
+    )
   end
 
   @doc """
@@ -571,8 +595,15 @@ defmodule Arbor.Memory.Signals do
       outcome_filter = Keyword.get(opts, :outcome)
       search_text = Keyword.get(opts, :search)
 
-      filters = [category: :memory, type: :episode_archived, source: memory_source(agent_id), limit: limit * 2]
-      filters = if since = Keyword.get(opts, :since), do: [{:since, since} | filters], else: filters
+      filters = [
+        category: :memory,
+        type: :episode_archived,
+        source: memory_source(agent_id),
+        limit: limit * 2
+      ]
+
+      filters =
+        if since = Keyword.get(opts, :since), do: [{:since, since} | filters], else: filters
 
       with {:ok, signals} <- Arbor.Signals.query(filters) do
         episodes =
@@ -607,8 +638,15 @@ defmodule Arbor.Memory.Signals do
       node_type_filter = Keyword.get(opts, :node_type)
       search_text = Keyword.get(opts, :search)
 
-      filters = [category: :memory, type: :knowledge_archived, source: memory_source(agent_id), limit: limit * 2]
-      filters = if since = Keyword.get(opts, :since), do: [{:since, since} | filters], else: filters
+      filters = [
+        category: :memory,
+        type: :knowledge_archived,
+        source: memory_source(agent_id),
+        limit: limit * 2
+      ]
+
+      filters =
+        if since = Keyword.get(opts, :since), do: [{:since, since} | filters], else: filters
 
       with {:ok, signals} <- Arbor.Signals.query(filters) do
         nodes =
@@ -652,48 +690,94 @@ defmodule Arbor.Memory.Signals do
   def memory_signal_types do
     [
       # Operational
-      :indexed, :recalled, :consolidation_started, :consolidation_completed,
-      :fact_extracted, :learning_extracted, :knowledge_added, :knowledge_linked,
-      :knowledge_decayed, :knowledge_pruned, :knowledge_archived,
-      :pending_approved, :pending_rejected, :initialized, :cleaned_up,
+      :indexed,
+      :recalled,
+      :consolidation_started,
+      :consolidation_completed,
+      :fact_extracted,
+      :learning_extracted,
+      :knowledge_added,
+      :knowledge_linked,
+      :knowledge_decayed,
+      :knowledge_pruned,
+      :knowledge_archived,
+      :pending_approved,
+      :pending_rejected,
+      :initialized,
+      :cleaned_up,
       # Working Memory
-      :working_memory_loaded, :working_memory_saved, :thought_recorded,
-      :facts_extracted, :context_summarized,
+      :working_memory_loaded,
+      :working_memory_saved,
+      :thought_recorded,
+      :facts_extracted,
+      :context_summarized,
       # Lifecycle
-      :agent_stopped, :heartbeat,
+      :agent_stopped,
+      :heartbeat,
       # Background / Proposals
-      :background_checks_started, :background_checks_completed,
-      :pattern_detected, :insight_detected,
-      :proposal_created, :proposal_accepted, :proposal_rejected, :proposal_deferred,
+      :background_checks_started,
+      :background_checks_completed,
+      :pattern_detected,
+      :insight_detected,
+      :proposal_created,
+      :proposal_accepted,
+      :proposal_rejected,
+      :proposal_deferred,
       :cognitive_adjustment,
       # Relationships
-      :relationship_created, :relationship_updated, :moment_added, :relationship_accessed,
+      :relationship_created,
+      :relationship_updated,
+      :moment_added,
+      :relationship_accessed,
       # Preconscious
-      :preconscious_check, :preconscious_surfaced,
+      :preconscious_check,
+      :preconscious_surfaced,
       # Reflection
-      :reflection_started, :reflection_completed, :reflection_insight,
-      :reflection_learning, :reflection_goal_update, :reflection_goal_created,
-      :reflection_knowledge_graph, :reflection_knowledge_decay, :reflection_llm_call,
+      :reflection_started,
+      :reflection_completed,
+      :reflection_insight,
+      :reflection_learning,
+      :reflection_goal_update,
+      :reflection_goal_created,
+      :reflection_knowledge_graph,
+      :reflection_knowledge_decay,
+      :reflection_llm_call,
       # Goals
-      :goal_created, :goal_progress, :goal_achieved, :goal_abandoned,
+      :goal_created,
+      :goal_progress,
+      :goal_achieved,
+      :goal_abandoned,
       # Thinking
       :thinking_recorded,
       # Identity / Insight lifecycle
-      :identity, :identity_change, :identity_rollback,
-      :self_insight_created, :self_insight_reinforced,
-      :insight_promoted, :insight_deferred, :insight_blocked,
+      :identity,
+      :identity_change,
+      :identity_rollback,
+      :self_insight_created,
+      :self_insight_reinforced,
+      :insight_promoted,
+      :insight_deferred,
+      :insight_blocked,
       # Episodic
-      :episode_archived, :lesson_extracted,
+      :episode_archived,
+      :lesson_extracted,
       # Memory operations
-      :memory_promoted, :memory_demoted, :memory_corrected,
+      :memory_promoted,
+      :memory_demoted,
+      :memory_corrected,
       # Decision
       :decision,
       # Bridge
-      :bridge_interrupt, :bridge_interrupt_cleared,
+      :bridge_interrupt,
+      :bridge_interrupt_cleared,
       # WorkingMemory state
-      :engagement_changed, :concern_added, :concern_resolved,
-      :curiosity_added, :curiosity_satisfied,
-      :conversation_changed, :relationship_changed,
+      :engagement_changed,
+      :concern_added,
+      :concern_resolved,
+      :curiosity_added,
+      :curiosity_satisfied,
+      :conversation_changed,
+      :relationship_changed,
       # Chat history
       :chat_message_added
     ]
@@ -709,7 +793,9 @@ defmodule Arbor.Memory.Signals do
     data = data |> Map.put(:agent_id, agent_id) |> Map.put(:origin_node, node())
 
     signal_opts = [source: memory_source(agent_id)]
-    signal_opts = if scope = Keyword.get(opts, :scope), do: [{:scope, scope} | signal_opts], else: signal_opts
+
+    signal_opts =
+      if scope = Keyword.get(opts, :scope), do: [{:scope, scope} | signal_opts], else: signal_opts
 
     Arbor.Signals.emit(:memory, type, data, signal_opts)
   end
@@ -743,9 +829,7 @@ defmodule Arbor.Memory.Signals do
   end
 
   defp signals_available? do
-    Code.ensure_loaded?(Arbor.Signals) and
-      function_exported?(Arbor.Signals, :healthy?, 0) and
-      Arbor.Signals.healthy?()
+    Arbor.Signals.healthy?()
   rescue
     _ -> false
   end

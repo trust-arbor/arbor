@@ -408,16 +408,13 @@ defmodule Arbor.Memory.MemoryStore do
         %{}
 
       taint ->
-        if taint_module_available?() do
-          hash_opts = case Keyword.get(opts, :data) do
+        hash_opts =
+          case Keyword.get(opts, :data) do
             nil -> []
-            data -> [data_hash: apply(Arbor.Signals.Taint, :data_hash, [data])]
+            data -> [data_hash: Arbor.Signals.Taint.data_hash(data)]
           end
 
-          %{"taint" => apply(Arbor.Signals.Taint, :to_persistable, [taint, hash_opts])}
-        else
-          %{}
-        end
+        %{"taint" => Arbor.Signals.Taint.to_persistable(taint, hash_opts)}
     end
   end
 
@@ -428,35 +425,23 @@ defmodule Arbor.Memory.MemoryStore do
         default_taint_struct()
 
       taint_map when is_map(taint_map) ->
-        if taint_module_available?() do
-          apply(Arbor.Signals.Taint, :from_persistable, [taint_map])
-        else
-          default_taint_struct()
-        end
+        Arbor.Signals.Taint.from_persistable(taint_map)
     end
   end
 
   defp restore_taint(_), do: default_taint_struct()
 
   defp default_taint_struct do
-    if Code.ensure_loaded?(Arbor.Contracts.Security.Taint) do
-      struct(Arbor.Contracts.Security.Taint,
-        level: :trusted,
-        sensitivity: :internal,
-        sanitizations: 0,
-        confidence: :unverified
-      )
-    else
-      %{level: :trusted, sensitivity: :internal, sanitizations: 0, confidence: :unverified}
-    end
+    struct(Arbor.Contracts.Security.Taint,
+      level: :trusted,
+      sensitivity: :internal,
+      sanitizations: 0,
+      confidence: :unverified
+    )
   end
 
   defp wrap_tainted(data, taint) do
-    if Code.ensure_loaded?(Arbor.Contracts.Security.TaintedValue) do
-      apply(Arbor.Contracts.Security.TaintedValue, :wrap, [data, taint])
-    else
-      %{value: data, taint: taint}
-    end
+    Arbor.Contracts.Security.TaintedValue.wrap(data, taint)
   end
 
   defp load_record_with_metadata(composite_key, bare_key) do
@@ -485,29 +470,18 @@ defmodule Arbor.Memory.MemoryStore do
         metadata
 
       taint ->
-        if taint_module_available?() do
-          Map.put(metadata, :taint, apply(Arbor.Signals.Taint, :to_persistable, [taint]))
-        else
-          metadata
-        end
+        Map.put(metadata, :taint, Arbor.Signals.Taint.to_persistable(taint))
     end
   end
 
   defp verify_stored_data_hash(data, metadata, namespace, key) do
     with %{"taint" => %{"taint_data_hash" => stored_hash}} when is_binary(stored_hash) <- metadata,
-         true <- taint_module_available?(),
-         true <- function_exported?(Arbor.Signals.Taint, :verify_data_hash, 2),
-         {:error, :hash_mismatch} <- apply(Arbor.Signals.Taint, :verify_data_hash, [data, stored_hash]) do
+         {:error, :hash_mismatch} <- Arbor.Signals.Taint.verify_data_hash(data, stored_hash) do
       Logger.warning(
         "Data hash mismatch for #{namespace}/#{key} — data may have been modified after taint classification"
       )
     else
       _ -> :ok
     end
-  end
-
-  defp taint_module_available? do
-    Code.ensure_loaded?(Arbor.Signals.Taint) and
-      function_exported?(Arbor.Signals.Taint, :to_persistable, 2)
   end
 end
