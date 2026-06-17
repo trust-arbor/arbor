@@ -596,10 +596,7 @@ defmodule Arbor.Trust.Manager do
   end
 
   defp safe_emit_signal(type, data) do
-    if Code.ensure_loaded?(Arbor.Signals) and
-         function_exported?(Arbor.Signals, :emit, 3) do
-      Arbor.Signals.emit(:trust, type, data)
-    end
+    Arbor.Signals.emit(:trust, type, data)
   rescue
     _ -> :ok
   catch

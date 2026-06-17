@@ -222,7 +222,13 @@ defmodule Arbor.Trust.Decay do
       |> Enum.map(fn {old_profile, days, decayed_profile} ->
         Store.store_profile(decayed_profile)
         emit_decay_event(old_profile, decayed_profile, days)
-        emit_decay_applied(decayed_profile.agent_id, old_profile.trust_score, decayed_profile.trust_score)
+
+        emit_decay_applied(
+          decayed_profile.agent_id,
+          old_profile.trust_score,
+          decayed_profile.trust_score
+        )
+
         1
       end)
       |> Enum.sum()
@@ -275,18 +281,15 @@ defmodule Arbor.Trust.Decay do
   # Signal emission helper
 
   defp emit_decay_applied(agent_id, old_score, new_score) do
-    if function_exported?(Signals, :durable_emit, 4) do
-      Signals.durable_emit(:trust, :decay_applied, %{
+    Signals.durable_emit(
+      :trust,
+      :decay_applied,
+      %{
         agent_id: agent_id,
         old_score: old_score,
         new_score: new_score
-      }, stream_id: "trust:events")
-    else
-      Signals.emit(:trust, :decay_applied, %{
-        agent_id: agent_id,
-        old_score: old_score,
-        new_score: new_score
-      })
-    end
+      },
+      stream_id: "trust:events"
+    )
   end
 end
