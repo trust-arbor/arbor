@@ -492,34 +492,14 @@ defmodule Arbor.ConsensusTest do
   end
 
   describe "Consensus.when_security_unavailable/0 (H6 regression)" do
-    setup do
-      original = Application.get_env(:arbor_consensus, :strict_facade_mode)
-
-      on_exit(fn ->
-        if is_nil(original) do
-          Application.delete_env(:arbor_consensus, :strict_facade_mode)
-        else
-          Application.put_env(:arbor_consensus, :strict_facade_mode, original)
-        end
-      end)
-
-      :ok
-    end
-
-    test "security regression (H6): strict mode denies when Security is unavailable" do
+    test "security regression (H6): always fails closed when Security is unavailable" do
       # H6: the Consensus facade's internal authorize/2 mirrored the Memory
-      # facade's pre-fix shape — :ok on the "Security unreachable" branch.
-      # In strict mode (production default) this must deny.
-      Application.put_env(:arbor_consensus, :strict_facade_mode, true)
-
+      # facade's pre-fix shape — :ok on the "Security unreachable" branch, which
+      # let partial security outages silently become unconditional authorization.
+      # The dev/test permissive escape hatch (strict_facade_mode?) has been
+      # removed: this seam now denies in EVERY environment.
       assert {:error, :security_unavailable} = Arbor.Consensus.when_security_unavailable(),
-             "Strict mode must deny when Security is unavailable — H6 regression"
-    end
-
-    test "permissive mode preserves the existing :ok response" do
-      Application.put_env(:arbor_consensus, :strict_facade_mode, false)
-
-      assert :ok = Arbor.Consensus.when_security_unavailable()
+             "when_security_unavailable/0 must deny in all environments — H6 regression"
     end
   end
 end
