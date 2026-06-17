@@ -51,13 +51,12 @@ defmodule Arbor.Orchestrator.Authorization do
     if Config.security_available?() do
       auth_opts = build_auth_opts(signer)
 
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      case apply(Arbor.Security, :authorize, [
+      case Arbor.Security.authorize(
              agent_id,
              @orchestrator_resource,
              :execute,
              auth_opts
-           ]) do
+           ) do
         {:ok, :authorized} -> :ok
         {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
         {:error, reason} -> {:error, reason}

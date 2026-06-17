@@ -43,16 +43,12 @@ defmodule Arbor.Orchestrator.Events do
     run_id = Keyword.get(opts, :run_id)
     stream_id = stream_id(run_id)
 
-    if function_exported?(Arbor.Signals, :durable_emit, 4) do
-      # Use centralized durable_emit for signal bus + EventLog + Postgres
-      Arbor.Signals.durable_emit(:orchestrator, event_type, sanitize_data(event),
-        stream_id: stream_id
-      )
-    else
-      # Fallback: persist to EventLog + emit on signal bus separately
-      persist_event(stream_id, event_type, event, opts)
-      emit_signal(event_type, event)
-    end
+    # arbor_signals is a hard dep — durable_emit is always available. It handles
+    # signal bus + EventLog + Postgres centrally, so the legacy split
+    # persist+emit fallback (and the function_exported? guard around it) is gone.
+    Arbor.Signals.durable_emit(:orchestrator, event_type, sanitize_data(event),
+      stream_id: stream_id
+    )
 
     :ok
   end
@@ -85,57 +81,6 @@ defmodule Arbor.Orchestrator.Events do
   def stream_id(run_id), do: "orchestrator:pipeline:#{run_id}"
 
   # --- Private ---
-
-  defp persist_event(stream_id, event_type, event_data, opts) do
-    if Process.whereis(event_log_name()) do
-      event =
-        PersistenceEvent.new(
-          stream_id,
-          to_string(event_type),
-          sanitize_data(event_data),
-          metadata: build_metadata(opts),
-          correlation_id: Keyword.get(opts, :run_id),
-          timestamp: Map.get(event_data, :timestamp, DateTime.utc_now())
-        )
-
-      Arbor.Persistence.append(
-        event_log_name(),
-        event_log_backend(),
-        stream_id,
-        event
-      )
-    else
-      :ok
-    end
-  rescue
-    e ->
-      Logger.warning("[Orchestrator.Events] EventLog persistence failed: #{Exception.message(e)}")
-      {:error, :persistence_unavailable}
-  catch
-    :exit, reason ->
-      Logger.warning("[Orchestrator.Events] EventLog persistence crashed: #{inspect(reason)}")
-      {:error, :persistence_unavailable}
-  end
-
-  defp emit_signal(event_type, event_data) do
-    Arbor.Signals.emit(
-      :orchestrator,
-      event_type,
-      Map.put(event_data, :permanent, true)
-    )
-  rescue
-    _ -> :ok
-  end
-
-  defp build_metadata(opts) do
-    %{
-      source_node: node(),
-      agent_id: Keyword.get(opts, :agent_id),
-      pipeline_id: Keyword.get(opts, :pipeline_id)
-    }
-    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
-    |> Map.new()
-  end
 
   # Coerce event data into a JSON-encodable shape before persistence.
   # Engine events are plain maps, but enriched ones (e.g. stage_completed with a

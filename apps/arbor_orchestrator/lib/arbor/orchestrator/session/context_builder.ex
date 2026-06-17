@@ -104,27 +104,28 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
   # Catch-all for sessions started before compactor field existed
   def compactor_llm_messages(state), do: get_messages(state)
 
-  # ── Memory store runtime bridge ──────────────────────────────────
+  # ── Memory store access ───────────────────────────────────────────
+  #
+  # arbor_memory is a hard dep — Arbor.Memory.* is called directly. The
+  # rescue/catch on each loader guards only against the memory store process
+  # being down (degrade to nil/[] context, never crash the turn).
 
   def load_goals_from_memory(agent_id) do
-    if Code.ensure_loaded?(Arbor.Memory) and
-         function_exported?(Arbor.Memory, :get_active_goals, 1) do
-      case apply(Arbor.Memory, :get_active_goals, [agent_id]) do
-        goals when is_list(goals) and goals != [] ->
-          Enum.map(goals, fn goal ->
-            %{
-              "id" => to_string(Map.get(goal, :id, "")),
-              "description" => to_string(Map.get(goal, :description, "")),
-              "progress" => Map.get(goal, :progress, 0.0),
-              "status" => to_string(Map.get(goal, :status, :active)),
-              "priority" => Map.get(goal, :priority, 50),
-              "type" => to_string(Map.get(goal, :type, :achieve))
-            }
-          end)
+    case Arbor.Memory.get_active_goals(agent_id) do
+      goals when is_list(goals) and goals != [] ->
+        Enum.map(goals, fn goal ->
+          %{
+            "id" => to_string(Map.get(goal, :id, "")),
+            "description" => to_string(Map.get(goal, :description, "")),
+            "progress" => Map.get(goal, :progress, 0.0),
+            "status" => to_string(Map.get(goal, :status, :active)),
+            "priority" => Map.get(goal, :priority, 50),
+            "type" => to_string(Map.get(goal, :type, :achieve))
+          }
+        end)
 
-        _ ->
-          nil
-      end
+      _ ->
+        nil
     end
   rescue
     _ -> nil
@@ -133,11 +134,9 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
   end
 
   def load_working_memory_from_memory(agent_id) do
-    if memory_available?(:get_working_memory, 1) do
-      case apply(Arbor.Memory, :get_working_memory, [agent_id]) do
-        wm when is_map(wm) and map_size(wm) > 0 -> sanitize_working_memory(wm)
-        _ -> nil
-      end
+    case Arbor.Memory.get_working_memory(agent_id) do
+      wm when is_map(wm) and map_size(wm) > 0 -> sanitize_working_memory(wm)
+      _ -> nil
     end
   rescue
     _ -> nil
@@ -178,24 +177,20 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
   def stringify_value(v), do: v
 
   def load_knowledge_graph(agent_id) do
-    if memory_available?(:export_knowledge_graph, 1) do
-      case apply(Arbor.Memory, :export_knowledge_graph, [agent_id]) do
-        {:ok, %{nodes: nodes}} when is_map(nodes) and map_size(nodes) > 0 ->
-          nodes
-          |> Enum.take(20)
-          |> Enum.map(fn {_id, node} ->
-            %{
-              "content" => node["content"] || Map.get(node, :content, ""),
-              "type" => node["type"] || to_string(Map.get(node, :type, "")),
-              "confidence" => node["confidence"] || Map.get(node, :confidence, 0.5)
-            }
-          end)
+    case Arbor.Memory.export_knowledge_graph(agent_id) do
+      {:ok, %{nodes: nodes}} when is_map(nodes) and map_size(nodes) > 0 ->
+        nodes
+        |> Enum.take(20)
+        |> Enum.map(fn {_id, node} ->
+          %{
+            "content" => node["content"] || Map.get(node, :content, ""),
+            "type" => node["type"] || to_string(Map.get(node, :type, "")),
+            "confidence" => node["confidence"] || Map.get(node, :confidence, 0.5)
+          }
+        end)
 
-        _ ->
-          []
-      end
-    else
-      []
+      _ ->
+        []
     end
   rescue
     _ -> []
@@ -204,23 +199,19 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
   end
 
   def load_pending_proposals(agent_id) do
-    if memory_available?(:get_proposals, 1) do
-      case apply(Arbor.Memory, :get_proposals, [agent_id]) do
-        {:ok, proposals} when is_list(proposals) ->
-          Enum.map(proposals, fn p ->
-            %{
-              "id" => to_string(Map.get(p, :id, "")),
-              "type" => to_string(Map.get(p, :type, "")),
-              "content" => to_string(Map.get(p, :content, Map.get(p, :description, ""))),
-              "source" => to_string(Map.get(p, :source, ""))
-            }
-          end)
+    case Arbor.Memory.get_proposals(agent_id) do
+      {:ok, proposals} when is_list(proposals) ->
+        Enum.map(proposals, fn p ->
+          %{
+            "id" => to_string(Map.get(p, :id, "")),
+            "type" => to_string(Map.get(p, :type, "")),
+            "content" => to_string(Map.get(p, :content, Map.get(p, :description, ""))),
+            "source" => to_string(Map.get(p, :source, ""))
+          }
+        end)
 
-        _ ->
-          []
-      end
-    else
-      []
+      _ ->
+        []
     end
   rescue
     _ -> []
@@ -229,34 +220,30 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
   end
 
   def load_active_intents(agent_id) do
-    if memory_available?(:pending_intentions, 1) do
-      case apply(Arbor.Memory, :pending_intentions, [agent_id]) do
-        intents when is_list(intents) ->
-          Enum.map(intents, fn
-            {intent, status} when is_map(intent) ->
-              %{
-                "id" => to_string(Map.get(intent, :id, "")),
-                "action" => to_string(Map.get(intent, :action, "")),
-                "description" => to_string(Map.get(intent, :description, "")),
-                "goal_id" => to_string(Map.get(intent, :goal_id, "")),
-                "status" => to_string(Map.get(status, :status, "pending"))
-              }
+    case Arbor.Memory.pending_intentions(agent_id) do
+      intents when is_list(intents) ->
+        Enum.map(intents, fn
+          {intent, status} when is_map(intent) ->
+            %{
+              "id" => to_string(Map.get(intent, :id, "")),
+              "action" => to_string(Map.get(intent, :action, "")),
+              "description" => to_string(Map.get(intent, :description, "")),
+              "goal_id" => to_string(Map.get(intent, :goal_id, "")),
+              "status" => to_string(Map.get(status, :status, "pending"))
+            }
 
-            intent when is_map(intent) ->
-              %{
-                "id" => to_string(Map.get(intent, :id, "")),
-                "action" => to_string(Map.get(intent, :action, "")),
-                "description" => to_string(Map.get(intent, :description, "")),
-                "goal_id" => to_string(Map.get(intent, :goal_id, "")),
-                "status" => to_string(Map.get(intent, :status, ""))
-              }
-          end)
+          intent when is_map(intent) ->
+            %{
+              "id" => to_string(Map.get(intent, :id, "")),
+              "action" => to_string(Map.get(intent, :action, "")),
+              "description" => to_string(Map.get(intent, :description, "")),
+              "goal_id" => to_string(Map.get(intent, :goal_id, "")),
+              "status" => to_string(Map.get(intent, :status, ""))
+            }
+        end)
 
-        _ ->
-          []
-      end
-    else
-      []
+      _ ->
+        []
     end
   rescue
     _ -> []
@@ -265,23 +252,19 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
   end
 
   def load_recent_thinking(agent_id) do
-    if memory_available?(:recent_thinking, 1) do
-      case apply(Arbor.Memory, :recent_thinking, [agent_id]) do
-        thoughts when is_list(thoughts) ->
-          thoughts
-          |> Enum.take(5)
-          |> Enum.map(fn t ->
-            %{
-              "text" => to_string(Map.get(t, :text, "")),
-              "significant" => Map.get(t, :significant, false)
-            }
-          end)
+    case Arbor.Memory.recent_thinking(agent_id) do
+      thoughts when is_list(thoughts) ->
+        thoughts
+        |> Enum.take(5)
+        |> Enum.map(fn t ->
+          %{
+            "text" => to_string(Map.get(t, :text, "")),
+            "significant" => Map.get(t, :significant, false)
+          }
+        end)
 
-        _ ->
-          []
-      end
-    else
-      []
+      _ ->
+        []
     end
   rescue
     _ -> []
@@ -290,22 +273,18 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
   end
 
   def load_recent_percepts(agent_id) do
-    if memory_available?(:recent_percepts, 1) do
-      case apply(Arbor.Memory, :recent_percepts, [agent_id, [limit: 5]]) do
-        percepts when is_list(percepts) ->
-          Enum.map(percepts, fn p ->
-            %{
-              "action_type" => get_percept_action_type(p),
-              "outcome" => to_string(Map.get(p, :outcome, "")),
-              "data" => Map.get(p, :data, %{})
-            }
-          end)
+    case Arbor.Memory.recent_percepts(agent_id, limit: 5) do
+      percepts when is_list(percepts) ->
+        Enum.map(percepts, fn p ->
+          %{
+            "action_type" => get_percept_action_type(p),
+            "outcome" => to_string(Map.get(p, :outcome, "")),
+            "data" => Map.get(p, :data, %{})
+          }
+        end)
 
-        _ ->
-          []
-      end
-    else
-      []
+      _ ->
+        []
     end
   rescue
     _ -> []
@@ -318,11 +297,6 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
 
     Map.get(data, :action_type) ||
       Map.get(data, "action_type", "unknown")
-  end
-
-  def memory_available?(function, arity) do
-    Code.ensure_loaded?(Arbor.Memory) and
-      function_exported?(Arbor.Memory, function, arity)
   end
 
   # ── Private helpers ───────────────────────────────────────────────

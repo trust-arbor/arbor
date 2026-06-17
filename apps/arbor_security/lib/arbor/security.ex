@@ -195,6 +195,16 @@ defmodule Arbor.Security do
   def revoke(capability_id, opts \\ []), do: revoke_capability_by_id(capability_id, opts)
 
   @doc """
+  Revoke all session-scoped capabilities for a session.
+
+  Used to clean up capabilities granted for a session's lifetime (e.g. after a
+  trust-profile change or session termination). Capabilities not bound to the
+  given `session_id` are left untouched.
+  """
+  @spec revoke_by_session(String.t()) :: {:ok, non_neg_integer()}
+  def revoke_by_session(session_id), do: CapabilityStore.revoke_by_session(session_id)
+
+  @doc """
   Delegate a capability to another agent.
 
   Creates a new signed capability derived from an existing one.

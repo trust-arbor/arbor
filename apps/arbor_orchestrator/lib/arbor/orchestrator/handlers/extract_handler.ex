@@ -180,19 +180,8 @@ defmodule Arbor.Orchestrator.Handlers.ExtractHandler do
       agent_id: Context.get(context, "session.agent_id")
     }
 
-    cond do
-      not Code.ensure_loaded?(Arbor.Signals) ->
-        :ok
-
-      function_exported?(Arbor.Signals, :durable_emit, 4) ->
-        Arbor.Signals.durable_emit(:security, :taint_reduced, data, stream_id: "security:events")
-
-      function_exported?(Arbor.Signals, :emit, 3) ->
-        Arbor.Signals.emit(:security, :taint_reduced, data)
-
-      true ->
-        :ok
-    end
+    # arbor_signals is a hard dep — durable_emit is always available.
+    Arbor.Signals.durable_emit(:security, :taint_reduced, data, stream_id: "security:events")
   rescue
     _ -> :ok
   end

@@ -1088,26 +1088,22 @@ defmodule Arbor.Orchestrator.Session do
     :ok
   end
 
-  # Subscribe to trust profile change signals for reactive tool updates
+  # Subscribe to trust profile change signals for reactive tool updates.
+  # arbor_signals is a hard dep; the rescue/catch guards only against the
+  # signal bus process not being alive (standalone/test slices).
   defp safe_subscribe_profile_signals(agent_id) do
-    if Code.ensure_loaded?(Arbor.Signals) and
-         function_exported?(Arbor.Signals, :subscribe, 2) do
-      apply(Arbor.Signals, :subscribe, ["trust.profile_updated", %{agent_id: agent_id}])
-    end
+    Arbor.Signals.subscribe("trust.profile_updated", %{agent_id: agent_id})
   rescue
     _ -> :ok
   catch
     :exit, _ -> :ok
   end
 
-  # Revoke session-scoped capabilities (cleanup after profile change or termination)
+  # Revoke session-scoped capabilities (cleanup after profile change or
+  # termination). arbor_security is a hard dep; the rescue/catch guards only
+  # against the CapabilityStore process not being alive.
   defp safe_revoke_session_capabilities(session_id) do
-    cap_store = Module.concat([:Arbor, :Security, :CapabilityStore])
-
-    if Code.ensure_loaded?(cap_store) and
-         function_exported?(cap_store, :revoke_by_session, 1) do
-      apply(cap_store, :revoke_by_session, [session_id])
-    end
+    Arbor.Security.revoke_by_session(session_id)
   rescue
     _ -> :ok
   catch

@@ -297,16 +297,9 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
     end)
   end
 
+  # arbor_ai is a hard dep — Arbor.AI.AcpMerge is called directly.
   defp merge_worktree(branch) do
-    if Code.ensure_loaded?(Arbor.AI.AcpMerge) do
-      apply(Arbor.AI.AcpMerge, :merge_worktree, [
-        branch.workdir,
-        "main",
-        [cwd: File.cwd!()]
-      ])
-    else
-      {:error, "AcpMerge not available"}
-    end
+    Arbor.AI.AcpMerge.merge_worktree(branch.workdir, "main", cwd: File.cwd!())
   end
 
   # -- Cleanup --
@@ -408,7 +401,7 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
   # -- Authentication --
 
   defp authenticate_operator do
-    if oidc_available?() and oidc_enabled?() do
+    if oidc_enabled?() do
       authenticate_with_oidc()
     else
       warn("OIDC not configured — running without human identity authentication")
@@ -416,13 +409,14 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
     end
   end
 
+  # arbor_security is a hard dep — Arbor.Security[.OIDC.*] is called directly.
   defp authenticate_with_oidc do
     # Try cached token first
-    case apply(Arbor.Security.OIDC, :load_cached_token, []) do
+    case Arbor.Security.OIDC.load_cached_token() do
       {:ok, cache_data} ->
         id_token = get_in(cache_data, ["token_response", "id_token"])
 
-        case apply(Arbor.Security, :authenticate_oidc_token, [id_token]) do
+        case Arbor.Security.authenticate_oidc_token(id_token) do
           {:ok, agent_id, signer} ->
             success("Authenticated: #{agent_id}")
             {agent_id, signer}
@@ -442,14 +436,13 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
   end
 
   defp try_refresh_or_device_flow do
-    with {:ok, cache_data} <- apply(Arbor.Security.OIDC, :load_cached_token, []),
+    with {:ok, cache_data} <- Arbor.Security.OIDC.load_cached_token(),
          refresh_token when is_binary(refresh_token) <-
            get_in(cache_data, ["token_response", "refresh_token"]),
-         config when not is_nil(config) <- apply(Arbor.Security.OIDC.Config, :device_flow, []),
-         {:ok, new_tokens} <-
-           apply(Arbor.Security.OIDC.DeviceFlow, :refresh, [config, refresh_token]),
+         config when not is_nil(config) <- Arbor.Security.OIDC.Config.device_flow(),
+         {:ok, new_tokens} <- Arbor.Security.OIDC.DeviceFlow.refresh(config, refresh_token),
          id_token when is_binary(id_token) <- Map.get(new_tokens, "id_token"),
-         {:ok, agent_id, signer} <- apply(Arbor.Security, :authenticate_oidc_token, [id_token]) do
+         {:ok, agent_id, signer} <- Arbor.Security.authenticate_oidc_token(id_token) do
       success("Re-authenticated via refresh: #{agent_id}")
       {agent_id, signer}
     else
@@ -458,7 +451,7 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
   end
 
   defp run_device_flow do
-    case apply(Arbor.Security, :authenticate_oidc, []) do
+    case Arbor.Security.authenticate_oidc() do
       {:ok, agent_id, signer} ->
         success("Authenticated: #{agent_id}")
         {agent_id, signer}
@@ -470,17 +463,13 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
     end
   end
 
-  defp oidc_available? do
-    Code.ensure_loaded?(Arbor.Security.OIDC) and
-      Code.ensure_loaded?(Arbor.Security.OIDC.Config)
-  end
-
   defp oidc_enabled? do
     # Mix.Task.run("compile") can reload config, losing runtime.exs values.
     # Re-apply OIDC config from env vars if needed.
     ensure_oidc_config()
 
-    apply(Arbor.Security.OIDC.Config, :enabled?, [])
+    # arbor_security is a hard dep — Arbor.Security.OIDC.Config is called directly.
+    Arbor.Security.OIDC.Config.enabled?()
   rescue
     _ -> false
   end

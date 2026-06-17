@@ -208,14 +208,9 @@ defmodule Mix.Tasks.Arbor.Acp.Probe do
 
   # ── config access (robust to map-or-keyword return shape) ──
 
+  # arbor_ai is a hard dep — Arbor.AI.AcpSession.Config is called directly.
   defp resolve(agent) do
-    cond do
-      not Code.ensure_loaded?(Arbor.AI.AcpSession.Config) ->
-        {:error, :acp_config_unavailable}
-
-      true ->
-        apply(Arbor.AI.AcpSession.Config, :resolve, [agent])
-    end
+    Arbor.AI.AcpSession.Config.resolve(agent)
   rescue
     e -> {:error, Exception.message(e)}
   end

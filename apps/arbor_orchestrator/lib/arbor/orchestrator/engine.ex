@@ -935,19 +935,8 @@ defmodule Arbor.Orchestrator.Engine do
       agent_id: Context.get(context, "session.agent_id")
     }
 
-    cond do
-      not Code.ensure_loaded?(Arbor.Signals) ->
-        :ok
-
-      function_exported?(Arbor.Signals, :durable_emit, 4) ->
-        Arbor.Signals.durable_emit(:security, :taint_reduced, data, stream_id: "security:events")
-
-      function_exported?(Arbor.Signals, :emit, 3) ->
-        Arbor.Signals.emit(:security, :taint_reduced, data)
-
-      true ->
-        :ok
-    end
+    # arbor_signals is a hard dep — durable_emit is always available.
+    Arbor.Signals.durable_emit(:security, :taint_reduced, data, stream_id: "security:events")
   rescue
     _ -> :ok
   end
@@ -1192,26 +1181,28 @@ defmodule Arbor.Orchestrator.Engine do
   end
 
   # Re-validate that the resuming agent still has required capabilities.
-  # Only checked when Security is available and agent_id is provided.
+  #
+  # SECURITY: when an agent_id is present this gate ALWAYS fires —
+  # `Arbor.Security.authorize/3` is a direct, unguarded call. It must never be
+  # skipped on a module-presence check (the "security ceilings fail open
+  # silently" class): a `Code.ensure_loaded?`/`function_exported?` guard around
+  # the authorize meant a false guard silently bypassed authorization. With
+  # arbor_security a hard dep the module is always loaded; the call is direct so
+  # any future refactor that drops it is caught by the compiler and the
+  # security-regression test. We also do NOT rescue exceptions to `:ok` here —
+  # an error during the check must surface as denial, never as a silent pass.
   defp maybe_revalidate_capabilities(_graph, opts) do
-    agent_id = Keyword.get(opts, :agent_id)
+    case Keyword.get(opts, :agent_id) do
+      nil ->
+        :ok
 
-    if agent_id && Code.ensure_loaded?(Arbor.Security) &&
-         function_exported?(Arbor.Security, :authorize, 3) do
-      case apply(Arbor.Security, :authorize, [
-             agent_id,
-             "arbor://orchestrator/execute",
-             :resume
-           ]) do
-        :ok -> :ok
-        {:ok, _} -> :ok
-        {:error, reason} -> {:error, {:unauthorized_resume, reason}}
-      end
-    else
-      :ok
+      agent_id ->
+        case Arbor.Security.authorize(agent_id, "arbor://orchestrator/execute", :resume) do
+          :ok -> :ok
+          {:ok, _} -> :ok
+          {:error, reason} -> {:error, {:unauthorized_resume, reason}}
+        end
     end
-  rescue
-    _ -> :ok
   end
 
   # Check for orphaned PendingIntents on resume.

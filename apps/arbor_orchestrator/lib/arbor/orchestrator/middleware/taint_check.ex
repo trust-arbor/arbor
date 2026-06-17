@@ -59,16 +59,12 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
     end
   end
 
-  # Classification and propagation need Arbor.Signals.Taint for struct-aware
-  # logic. Taint profile enforcement is self-contained (uses IR.TaintProfile
-  # and the Contracts.Security.Taint struct directly).
-  defp maybe_classify_inputs(token) do
-    if taint_available?(), do: classify_inputs(token), else: token
-  end
+  # arbor_signals (Arbor.Signals.Taint) is a hard dep — classification and
+  # propagation always run. Taint profile enforcement is self-contained (uses
+  # IR.TaintProfile and the Contracts.Security.Taint struct directly).
+  defp maybe_classify_inputs(token), do: classify_inputs(token)
 
-  defp maybe_propagate_taint(token) do
-    if taint_available?(), do: propagate_taint(token), else: token
-  end
+  defp maybe_propagate_taint(token), do: propagate_taint(token)
 
   # ── Before-node enforcement (compiled taint_profile) ─────────────────
 
@@ -165,46 +161,45 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
   defp check_provider_constraint(token, %TaintProfile{provider_constraint: constraint}) do
     labels = Map.get(token.assigns, :taint_labels, %{})
 
-    if backend_trust_available?() do
-      # Resolve the actual provider from node attrs or context.
-      # The constraint may be a provider atom directly, or we resolve from context.
-      provider = resolve_provider_for_constraint(constraint, token)
-      model = resolve_model_for_constraint(token)
+    # arbor_ai (Arbor.AI.BackendTrust) is a hard dep — the provider/sensitivity
+    # constraint ALWAYS fires. It must never be skipped on a module-presence
+    # check (fail-open security class). An exception still fails CLOSED below.
+    # Resolve the actual provider from node attrs or context.
+    # The constraint may be a provider atom directly, or we resolve from context.
+    provider = resolve_provider_for_constraint(constraint, token)
+    model = resolve_model_for_constraint(token)
 
-      failed =
-        Enum.find(labels, fn {_key, label} ->
-          case extract_sensitivity(label) do
-            nil ->
-              false
+    failed =
+      Enum.find(labels, fn {_key, label} ->
+        case extract_sensitivity(label) do
+          nil ->
+            false
 
-            sensitivity ->
-              if is_binary(model) do
-                not apply(Arbor.AI.BackendTrust, :can_see?, [provider, model, sensitivity])
-              else
-                not apply(Arbor.AI.BackendTrust, :can_see?, [provider, sensitivity])
-              end
-          end
-        end)
+          sensitivity ->
+            if is_binary(model) do
+              not Arbor.AI.BackendTrust.can_see?(provider, model, sensitivity)
+            else
+              not Arbor.AI.BackendTrust.can_see?(provider, sensitivity)
+            end
+        end
+      end)
 
-      case failed do
-        nil ->
-          token
+    case failed do
+      nil ->
+        token
 
-        {key, label} ->
-          sensitivity = extract_sensitivity(label)
+      {key, label} ->
+        sensitivity = extract_sensitivity(label)
 
-          Token.halt(
-            token,
-            "node #{token.node.id}: provider #{provider} cannot handle #{sensitivity} data in '#{key}'",
-            %Outcome{
-              status: :fail,
-              failure_reason:
-                "Taint check failed: provider #{provider} cannot see #{sensitivity} data"
-            }
-          )
-      end
-    else
-      token
+        Token.halt(
+          token,
+          "node #{token.node.id}: provider #{provider} cannot handle #{sensitivity} data in '#{key}'",
+          %Outcome{
+            status: :fail,
+            failure_reason:
+              "Taint check failed: provider #{provider} cannot see #{sensitivity} data"
+          }
+        )
     end
   rescue
     e ->
@@ -433,22 +428,9 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
     end
   end
 
-  defp classify_by_content(value) do
-    if sensitive_data_available?() do
-      classify_by_content_scan(value)
-    else
-      # F3 demotion (taint-rebuild Phase 5): content scanning classifies
-      # SENSITIVITY, never provenance LEVEL. The absence of detectable secrets is
-      # NOT evidence of trust (a prompt injection contains no API keys). Default
-      # to :derived ("provenance unknown, usable-but-audited"), never :trusted.
-      # Real provenance comes from ingress labeling (Context.taint).
-      if struct_propagation_available?() do
-        make_taint_struct(:derived, :public)
-      else
-        :derived
-      end
-    end
-  end
+  # arbor_common (Arbor.Common.SensitiveData) is a hard dep — content scanning
+  # always runs.
+  defp classify_by_content(value), do: classify_by_content_scan(value)
 
   # Scan content for secrets and PII using Arbor.Common.SensitiveData.
   # Maps finding labels to sensitivity levels:
@@ -457,8 +439,7 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
   #   - Other PII (emails, phones, IPs, paths) → :internal
   #   - No findings → :public
   defp classify_by_content_scan(value) do
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    findings = apply(Arbor.Common.SensitiveData, :scan_all, [value])
+    findings = Arbor.Common.SensitiveData.scan_all(value)
 
     case findings do
       [] ->
@@ -579,18 +560,15 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
   defp worst_taint([]), do: :unknown
 
   defp worst_taint(labels) do
-    if struct_propagation_available?() do
-      structs =
-        Enum.filter(labels, fn
-          %{__struct__: _} -> true
-          _ -> false
-        end)
+    # arbor_signals (Arbor.Signals.Taint) is a hard dep.
+    structs =
+      Enum.filter(labels, fn
+        %{__struct__: _} -> true
+        _ -> false
+      end)
 
-      if structs != [] do
-        apply(Arbor.Signals.Taint, :propagate_taint, [structs])
-      else
-        worst_taint_atoms(labels)
-      end
+    if structs != [] do
+      Arbor.Signals.Taint.propagate_taint(structs)
     else
       worst_taint_atoms(labels)
     end
@@ -602,26 +580,5 @@ defmodule Arbor.Orchestrator.Middleware.TaintCheck do
     labels
     |> Enum.map(&extract_level/1)
     |> Enum.max_by(fn label -> Map.get(severity, label, 0) end)
-  end
-
-  # ── Availability checks ─────────────────────────────────────────────
-
-  defp taint_available? do
-    Code.ensure_loaded?(Arbor.Signals.Taint)
-  end
-
-  defp struct_propagation_available? do
-    Code.ensure_loaded?(Arbor.Signals.Taint) and
-      function_exported?(Arbor.Signals.Taint, :propagate_taint, 1)
-  end
-
-  defp backend_trust_available? do
-    Code.ensure_loaded?(Arbor.AI.BackendTrust) and
-      function_exported?(Arbor.AI.BackendTrust, :can_see?, 2)
-  end
-
-  defp sensitive_data_available? do
-    Code.ensure_loaded?(Arbor.Common.SensitiveData) and
-      function_exported?(Arbor.Common.SensitiveData, :scan_all, 1)
   end
 end

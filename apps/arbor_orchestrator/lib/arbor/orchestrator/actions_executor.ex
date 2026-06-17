@@ -66,24 +66,22 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           # Build AuthContext — single struct with everything auth needs.
           # The signed_request and signer are included so downstream code
           # (authorize_and_execute, facade auth) can access them.
+          # Arbor.Contracts.Security.AuthContext lives in arbor_contracts (a dep).
           auth_context =
-            if Code.ensure_loaded?(Arbor.Contracts.Security.AuthContext) do
-              Arbor.Contracts.Security.AuthContext.new(agent_id,
-                signer: signer,
-                signed_request: signed_request,
-                session_id: Keyword.get(opts, :session_id)
-              )
-            else
-              nil
-            end
+            Arbor.Contracts.Security.AuthContext.new(agent_id,
+              signer: signer,
+              signed_request: signed_request,
+              session_id: Keyword.get(opts, :session_id)
+            )
 
           Logger.debug(
             "[ActionsExecutor] #{name}: signed=#{signed_request != nil}, " <>
-              "auth_context=#{auth_context != nil}, agent=#{agent_id}, module=#{action_module}"
+              "agent=#{agent_id}, module=#{action_module}"
           )
 
           # Context passed to the action's run/2 — includes signed_request
           # so facade auth can see it, and auth_context for the new flow.
+          # auth_context is always built (AuthContext lives in arbor_contracts).
           #
           # Taint bridge (taint-tracking-rebuild Phase 2): the orchestrator
           # threads the provenance taint of the data interpolated into this
@@ -91,12 +89,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           # is what finally feeds TaintEnforcement.check — without it the
           # chokepoint reads no taint and every action passes (F1).
           context =
-            %{}
+            %{auth_context: auth_context}
             |> then(fn c ->
               if signed_request, do: Map.put(c, :signed_request, signed_request), else: c
-            end)
-            |> then(fn c ->
-              if auth_context, do: Map.put(c, :auth_context, auth_context), else: c
             end)
             |> then(fn c ->
               case Keyword.get(opts, :taint) do
@@ -311,28 +306,25 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   # Grant a clean capability (no requires_approval) after consensus approval.
   # This ensures the retry won't trigger escalation again.
   defp grant_approved_capability(agent_id, action_module, context) do
-    security_mod = Module.concat([:Arbor, :Security])
+    # arbor_security is a hard dep — Arbor.Security.grant/1 is called directly.
+    resource = Arbor.Actions.canonical_uri_for(action_module, %{})
 
-    if Code.ensure_loaded?(security_mod) and function_exported?(security_mod, :grant, 1) do
-      resource = Arbor.Actions.canonical_uri_for(action_module, %{})
+    # Extract session_id from context if available
+    session_id =
+      Map.get(context, :session_id) ||
+        Map.get(context, "session_id")
 
-      # Extract session_id from context if available
-      session_id =
-        Map.get(context, :session_id) ||
-          Map.get(context, "session_id")
+    grant_opts = [
+      principal: agent_id,
+      resource: resource,
+      constraints: %{},
+      metadata: %{source: :approval_granted}
+    ]
 
-      grant_opts = [
-        principal: agent_id,
-        resource: resource,
-        constraints: %{},
-        metadata: %{source: :approval_granted}
-      ]
+    grant_opts =
+      if session_id, do: Keyword.put(grant_opts, :session_id, session_id), else: grant_opts
 
-      grant_opts =
-        if session_id, do: Keyword.put(grant_opts, :session_id, session_id), else: grant_opts
-
-      apply(security_mod, :grant, [grant_opts])
-    end
+    Arbor.Security.grant(grant_opts)
   rescue
     _ -> :ok
   catch
@@ -340,12 +332,12 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   # Record approval/rejection with ConfirmationTracker for graduation tracking.
+  # arbor_trust is a hard dep; the Process.whereis liveness check stays (the
+  # tracker process may not be running in standalone/test slices).
   defp track_approval(agent_id, action_module) do
-    tracker = Module.concat([:Arbor, :Trust, :ConfirmationTracker])
-
-    if Code.ensure_loaded?(tracker) and Process.whereis(tracker) do
+    if Process.whereis(Arbor.Trust.ConfirmationTracker) do
       resource = Arbor.Actions.canonical_uri_for(action_module, %{})
-      apply(tracker, :record_approval, [agent_id, resource])
+      Arbor.Trust.ConfirmationTracker.record_approval(agent_id, resource)
     end
   rescue
     _ -> :ok
@@ -354,11 +346,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   defp track_rejection(agent_id, action_module) do
-    tracker = Module.concat([:Arbor, :Trust, :ConfirmationTracker])
-
-    if Code.ensure_loaded?(tracker) and Process.whereis(tracker) do
+    if Process.whereis(Arbor.Trust.ConfirmationTracker) do
       resource = Arbor.Actions.canonical_uri_for(action_module, %{})
-      apply(tracker, :record_rejection, [agent_id, resource])
+      Arbor.Trust.ConfirmationTracker.record_rejection(agent_id, resource)
     end
   rescue
     _ -> :ok
@@ -383,13 +373,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
         resolve_via_registry(name) ||
         resolve_via_action_map(normalized, name)
 
-    taint_mod = Module.concat([:Arbor, :Actions, :Taint])
-
-    if (module && Code.ensure_loaded?(taint_mod)) and
-         function_exported?(taint_mod, :output_taint_for, 2) do
-      apply(taint_mod, :output_taint_for, [module, params])
-    else
-      nil
+    # arbor_actions is a hard dep — Arbor.Actions.Taint is called directly.
+    if module do
+      Arbor.Actions.Taint.output_taint_for(module, params)
     end
   end
 
