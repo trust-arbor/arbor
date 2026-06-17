@@ -151,9 +151,9 @@ defmodule Arbor.Orchestrator.Session.Builders do
     fn ^agent_id, _handler_type ->
       # All engine handler types (compute, exec, transform, etc.) are gated by
       # arbor://orchestrator/execute. The signer produces a fresh SignedRequest
-      # per check so nonce/timestamp are unique.
-      security_mod = Module.concat([:Arbor, :Security])
-
+      # per check so nonce/timestamp are unique. arbor_security is a hard dep;
+      # security_available?/0 remains a runtime liveness gate (CapabilityStore
+      # process present) — fail-closed below when required and it's down.
       if Arbor.Orchestrator.Config.security_available?() do
         auth_opts =
           case signer do
@@ -174,12 +174,12 @@ defmodule Arbor.Orchestrator.Session.Builders do
               []
           end
 
-        case apply(security_mod, :authorize, [
+        case Arbor.Security.authorize(
                agent_id,
                "arbor://orchestrator/execute",
                :execute,
                auth_opts
-             ]) do
+             ) do
           {:ok, :authorized} -> :ok
           {:error, reason} -> {:error, reason}
         end

@@ -31,10 +31,9 @@ defmodule Arbor.Orchestrator.SignalsBridge do
   def handle_info(_msg, state), do: {:noreply, state}
 
   defp emit_signal(type, data) when is_atom(type) do
-    # Runtime bridge: orchestrator (standalone) doesn't depend on arbor_signals
-    if Code.ensure_loaded?(Arbor.Signals) do
-      apply(Arbor.Signals, :emit, [:orchestrator, type, data])
-    end
+    # arbor_signals is a hard dep; the rescue/catch guards only against the
+    # signal bus process not being alive.
+    Arbor.Signals.emit(:orchestrator, type, data)
   rescue
     _ -> :ok
   catch

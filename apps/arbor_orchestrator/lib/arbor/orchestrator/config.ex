@@ -129,16 +129,18 @@ defmodule Arbor.Orchestrator.Config do
   end
 
   @doc """
-  Runtime check: is the security subsystem (module + CapabilityStore) available
+  Runtime check: is the security subsystem (CapabilityStore process) available
   right now? Respects `security_available_override/0` for tests.
+
+  arbor_security is a hard dep so the module is always loaded; this is a pure
+  process-liveness check on the CapabilityStore (the subsystem can be down even
+  when the code is present — e.g. standalone slices or boot ordering).
   """
   @spec security_available?() :: boolean()
   def security_available? do
     case security_available_override() do
       nil ->
-        Code.ensure_loaded?(Arbor.Security) and
-          function_exported?(Arbor.Security, :authorize, 4) and
-          Process.whereis(Arbor.Security.CapabilityStore) != nil
+        Process.whereis(Arbor.Security.CapabilityStore) != nil
 
       bool when is_boolean(bool) ->
         bool

@@ -113,74 +113,47 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
 
   # Capability gate. Returns :ok to proceed, or {:error, reason} to fail
   # closed (the node fails; the command never runs).
+  #
+  # SECURITY: arbor_shell is a hard dep, so the authorizer ALWAYS resolves
+  # (Arbor.Shell.authorize/3 in production, a test stub via :shell_authorizer).
+  # The legacy "no facade → :ok (allow)" fail-open branch is gone: a missing
+  # capability system can no longer let a shell command run unauthorized.
   defp authorize_shell(agent_id, command, cwd, opts) do
-    case shell_authorizer(opts) do
-      nil ->
-        # No security facade available (standalone orchestrator without
-        # arbor_shell). There is no capability system to consult and no
-        # agent system to attack — preserve legacy direct execution for
-        # dev/test standalone use. In the full umbrella the facade is
-        # loaded and the branch below runs.
-        :ok
+    authorize_fun = shell_authorizer(opts)
+    auth_opts = if cwd, do: [cwd: cwd], else: []
 
-      authorize_fun ->
-        auth_opts = if cwd, do: [cwd: cwd], else: []
-
-        case authorize_fun.(agent_id, command, auth_opts) do
-          {:ok, :authorized} -> :ok
-          {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
-          {:error, reason} -> {:error, reason}
-        end
+    case authorize_fun.(agent_id, command, auth_opts) do
+      {:ok, :authorized} -> :ok
+      {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
+      {:error, reason} -> {:error, reason}
     end
   end
 
   # Resolve the shell authorizer:
   #   1. explicit override in opts (tests inject a stub via :shell_authorizer)
-  #   2. Arbor.Shell.authorize/3 when the security facade is loaded (production)
-  #   3. nil — standalone mode, no capability system present
-  #
-  # Runtime indirection (Code.ensure_loaded?/apply) because arbor_orchestrator
-  # is standalone and must not take a compile-time dep on arbor_shell.
+  #   2. Arbor.Shell.authorize/3 — arbor_shell is a hard dep, called directly
   defp shell_authorizer(opts) do
-    cond do
-      is_function(opts[:shell_authorizer], 3) ->
-        opts[:shell_authorizer]
-
-      Code.ensure_loaded?(Arbor.Shell) and function_exported?(Arbor.Shell, :authorize, 3) ->
-        fn agent_id, command, auth_opts ->
-          apply(Arbor.Shell, :authorize, [agent_id, command, auth_opts])
-        end
-
-      true ->
-        nil
+    case opts[:shell_authorizer] do
+      fun when is_function(fun, 3) -> fun
+      _ -> &Arbor.Shell.authorize/3
     end
   end
 
-  # --- Command execution with runtime bridge ---
+  # --- Command execution ---
 
   defp run_command(command, opts) do
-    sandbox = Keyword.get(opts, :sandbox, "basic")
-
-    cond do
-      sandbox == "none" ->
+    case Keyword.get(opts, :sandbox, "basic") do
+      "none" ->
         # Explicit sandbox="none" in DOT spec — caller accepts unsandboxed execution.
-        # Skip Arbor.Shell entirely to avoid :noproc when process isn't running.
+        # Skip Arbor.Shell entirely to avoid :noproc when the process isn't running.
         run_via_system_cmd(command, opts)
 
-      arbor_shell_available?() ->
+      _ ->
+        # arbor_shell is a hard dep; if the Shell process is down at runtime
+        # run_via_arbor_shell fails closed via its :noproc catch (no silent
+        # fall-through to unsandboxed Port.open).
         run_via_arbor_shell(command, opts)
-
-      true ->
-        # Fail-closed: don't silently fall back to unsandboxed Port.open
-        # when Arbor.Shell is unavailable. The :noproc fallback previously
-        # removed all sandboxing on transient process failures.
-        {:error, :sandbox_unavailable}
     end
-  end
-
-  defp arbor_shell_available? do
-    Code.ensure_loaded?(Arbor.Shell) and
-      function_exported?(Arbor.Shell, :execute, 2)
   end
 
   defp run_via_arbor_shell(command, opts) do
@@ -203,7 +176,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
       end
 
     try do
-      case apply(Arbor.Shell, :execute, [command, shell_opts]) do
+      case Arbor.Shell.execute(command, shell_opts) do
         {:ok, result} ->
           output = Map.get(result, :stdout, "") <> Map.get(result, :stderr, "")
           exit_code = Map.get(result, :exit_code, 0)

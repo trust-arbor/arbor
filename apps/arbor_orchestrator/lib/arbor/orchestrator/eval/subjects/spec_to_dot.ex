@@ -84,23 +84,19 @@ defmodule Arbor.Orchestrator.Eval.Subjects.SpecToDot do
   end
 
   defp call_llm(prompt, opts) do
-    cond do
-      Keyword.get(opts, :simulate, false) ->
-        {:ok, simulated_response()}
-
-      Code.ensure_loaded?(Arbor.AI) ->
-        call_arbor_ai(prompt, opts)
-
-      true ->
-        {:ok, simulated_response()}
+    if Keyword.get(opts, :simulate, false) do
+      {:ok, simulated_response()}
+    else
+      call_arbor_ai(prompt, opts)
     end
   end
 
+  # arbor_ai is a hard dep — Arbor.AI.generate_text/2 is called directly.
   defp call_arbor_ai(prompt, opts) do
     ai_opts =
       Keyword.take(opts, [:model, :provider, :max_tokens, :temperature])
 
-    case apply(Arbor.AI, :generate_text, [prompt, ai_opts]) do
+    case Arbor.AI.generate_text(prompt, ai_opts) do
       {:ok, response} when is_map(response) ->
         {:ok, Map.get(response, :text, Map.get(response, "text", ""))}
 

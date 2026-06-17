@@ -122,53 +122,47 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   """
   @spec profile_tools(String.t()) :: {:ok, [String.t()]} | :fallback
   def profile_tools(agent_id) do
-    cap_store = Module.concat([:Arbor, :Security, :CapabilityStore])
+    # arbor_security/arbor_trust are hard deps; the rescue/catch below degrades
+    # to :fallback if either subsystem's process is down.
+    {:ok, caps} = Arbor.Security.list_capabilities_for_principal(agent_id, [])
 
-    if trust_policy_available?() and
-         Code.ensure_loaded?(cap_store) and
-         function_exported?(cap_store, :list_for_principal, 1) do
-      {:ok, caps} = apply(cap_store, :list_for_principal, [agent_id])
+    # Build reverse map: canonical_uri -> tool_name
+    reverse_map = build_uri_to_tool_name_map()
 
-      # Build reverse map: canonical_uri -> tool_name
-      reverse_map = build_uri_to_tool_name_map()
-
-      # Only expose tools the agent has specific capabilities for
-      tools =
-        caps
-        |> Enum.flat_map(fn cap ->
-          case Map.get(reverse_map, cap.resource_uri) do
-            nil -> []
-            name -> [name]
-          end
-        end)
-        |> Enum.filter(fn name ->
-          # Respect trust profile — hide :block tools
-          case Arbor.Actions.tool_name_to_canonical_uri(name) do
-            {:ok, uri} -> get_effective_mode(agent_id, uri) != :block
-            _ -> true
-          end
-        end)
-        |> Enum.uniq()
-
-      # Include find_tools only if the profile allows it
-      discover_mode = get_effective_mode(agent_id, "arbor://agent/discover_tools")
-
-      tools =
-        if discover_mode != :block do
-          ensure_find_tools(tools)
-        else
-          tools
+    # Only expose tools the agent has specific capabilities for
+    tools =
+      caps
+      |> Enum.flat_map(fn cap ->
+        case Map.get(reverse_map, cap.resource_uri) do
+          nil -> []
+          name -> [name]
         end
+      end)
+      |> Enum.filter(fn name ->
+        # Respect trust profile — hide :block tools
+        case Arbor.Actions.tool_name_to_canonical_uri(name) do
+          {:ok, uri} -> get_effective_mode(agent_id, uri) != :block
+          _ -> true
+        end
+      end)
+      |> Enum.uniq()
 
-      Logger.debug(
-        "[ToolDisclosure] profile_tools for #{agent_id}: #{length(tools)} tools " <>
-          "(from #{length(caps)} capabilities)"
-      )
+    # Include find_tools only if the profile allows it
+    discover_mode = get_effective_mode(agent_id, "arbor://agent/discover_tools")
 
-      {:ok, tools}
-    else
-      :fallback
-    end
+    tools =
+      if discover_mode != :block do
+        ensure_find_tools(tools)
+      else
+        tools
+      end
+
+    Logger.debug(
+      "[ToolDisclosure] profile_tools for #{agent_id}: #{length(tools)} tools " <>
+        "(from #{length(caps)} capabilities)"
+    )
+
+    {:ok, tools}
   rescue
     e ->
       Logger.debug("ToolDisclosure.profile_tools failed: #{inspect(e)}")
@@ -206,33 +200,31 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   """
   @spec ask_mode_tools(String.t()) :: MapSet.t()
   def ask_mode_tools(agent_id) do
-    if trust_policy_available?() do
-      all_actions = Arbor.Actions.all_actions()
+    # arbor_trust is a hard dep; the rescue/catch degrades to an empty set if
+    # the trust subsystem is down.
+    all_actions = Arbor.Actions.all_actions()
 
-      all_actions
-      |> Enum.filter(fn action_mod ->
-        name =
-          if function_exported?(action_mod, :name, 0),
-            do: action_mod.name(),
-            else: nil
+    all_actions
+    |> Enum.filter(fn action_mod ->
+      name =
+        if function_exported?(action_mod, :name, 0),
+          do: action_mod.name(),
+          else: nil
 
-        uri =
-          if name do
-            case Arbor.Actions.tool_name_to_canonical_uri(to_string(name)) do
-              {:ok, u} -> u
-              _ -> nil
-            end
+      uri =
+        if name do
+          case Arbor.Actions.tool_name_to_canonical_uri(to_string(name)) do
+            {:ok, u} -> u
+            _ -> nil
           end
+        end
 
-        name != nil and uri != nil and get_effective_mode(agent_id, uri) == :ask
-      end)
-      |> Enum.map(fn action_mod ->
-        to_string(action_mod.name())
-      end)
-      |> MapSet.new()
-    else
-      MapSet.new()
-    end
+      name != nil and uri != nil and get_effective_mode(agent_id, uri) == :ask
+    end)
+    |> Enum.map(fn action_mod ->
+      to_string(action_mod.name())
+    end)
+    |> MapSet.new()
   rescue
     _ -> MapSet.new()
   catch
@@ -278,24 +270,18 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   # ===========================================================================
 
   defp do_ensure_tool_capabilities(agent_id, tool_names) do
-    security_mod = Module.concat([:Arbor, :Security])
-
-    if Code.ensure_loaded?(security_mod) and
-         function_exported?(security_mod, :grant, 1) do
-      tool_names
-      |> Enum.each(fn name ->
-        with {:ok, uri} <- Arbor.Actions.tool_name_to_canonical_uri(name) do
-          apply(security_mod, :grant, [
-            [
-              principal: agent_id,
-              resource: uri,
-              constraints: %{},
-              metadata: %{source: :progressive_disclosure}
-            ]
-          ])
-        end
-      end)
-    end
+    # arbor_security is a hard dep — Arbor.Security.grant/1 is called directly.
+    tool_names
+    |> Enum.each(fn name ->
+      with {:ok, uri} <- Arbor.Actions.tool_name_to_canonical_uri(name) do
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: uri,
+          constraints: %{},
+          metadata: %{source: :progressive_disclosure}
+        )
+      end
+    end)
 
     :ok
   rescue
@@ -305,30 +291,17 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   end
 
   defp get_effective_mode(agent_id, resource_uri) do
-    if Code.ensure_loaded?(Arbor.Trust.Policy) and
-         function_exported?(Arbor.Trust.Policy, :effective_mode, 3) do
-      apply(Arbor.Trust.Policy, :effective_mode, [agent_id, resource_uri, []])
-    else
-      :allow
-    end
+    # arbor_trust is a hard dep — Arbor.Trust.effective_mode/3 is called directly.
+    Arbor.Trust.effective_mode(agent_id, resource_uri, [])
   rescue
     _ -> :allow
   catch
     :exit, _ -> :allow
   end
 
-  defp trust_policy_available? do
-    Code.ensure_loaded?(Arbor.Trust.Policy) and
-      function_exported?(Arbor.Trust.Policy, :effective_mode, 3)
-  end
-
   defp policy_enforcer_enabled? do
-    if Code.ensure_loaded?(Arbor.Security.Config) and
-         function_exported?(Arbor.Security.Config, :policy_enforcer_enabled?, 0) do
-      apply(Arbor.Security.Config, :policy_enforcer_enabled?, [])
-    else
-      false
-    end
+    # arbor_security is a hard dep — Arbor.Security.Config is called directly.
+    Arbor.Security.Config.policy_enforcer_enabled?()
   rescue
     _ -> false
   catch

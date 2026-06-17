@@ -15,28 +15,19 @@ defmodule Arbor.Orchestrator.Session.ResultProcessor do
 
   @doc false
   def create_proposals(agent_id, proposals) do
-    proposal_module = Arbor.Memory.Proposal
-
-    if Code.ensure_loaded?(proposal_module) and
-         function_exported?(proposal_module, :create, 3) do
-      Enum.count(proposals, fn prop ->
-        case apply(proposal_module, :create, [
-               agent_id,
-               prop.type,
-               %{
-                 content: prop.content,
-                 source: "heartbeat",
-                 metadata: prop.metadata,
-                 confidence: 0.7
-               }
-             ]) do
-          {:ok, _} -> true
-          {:error, _} -> false
-        end
-      end)
-    else
-      0
-    end
+    # arbor_memory is a hard dep — Arbor.Memory.Proposal is called directly.
+    # rescue/catch guard only against the memory store process being down.
+    Enum.count(proposals, fn prop ->
+      case Arbor.Memory.Proposal.create(agent_id, prop.type, %{
+             content: prop.content,
+             source: "heartbeat",
+             metadata: prop.metadata,
+             confidence: 0.7
+           }) do
+        {:ok, _} -> true
+        {:error, _} -> false
+      end
+    end)
   rescue
     _ -> 0
   catch
@@ -123,16 +114,16 @@ defmodule Arbor.Orchestrator.Session.ResultProcessor do
 
   @doc false
   def emit_signal(category, event, data, tenant_context \\ nil) do
-    if Code.ensure_loaded?(Arbor.Signals) and
-         function_exported?(Arbor.Signals, :emit, 4) and
-         Process.whereis(Arbor.Signals.Bus) != nil do
+    # arbor_signals is a hard dep; the Process.whereis liveness check stays
+    # (the bus process may not be running in standalone/test slices).
+    if Process.whereis(Arbor.Signals.Bus) != nil do
       agent_id = data[:agent_id]
       meta = if agent_id, do: %{agent_id: agent_id}, else: %{}
 
       # Merge tenant context into signal metadata when present
       meta = merge_tenant_metadata(meta, tenant_context)
 
-      apply(Arbor.Signals, :emit, [category, event, data, [metadata: meta]])
+      Arbor.Signals.emit(category, event, data, metadata: meta)
     end
   rescue
     _ -> :ok
@@ -142,11 +133,7 @@ defmodule Arbor.Orchestrator.Session.ResultProcessor do
   def merge_tenant_metadata(meta, nil), do: meta
 
   def merge_tenant_metadata(meta, tenant_context) do
-    if Code.ensure_loaded?(Arbor.Contracts.TenantContext) and
-         function_exported?(Arbor.Contracts.TenantContext, :to_signal_metadata, 1) do
-      Map.merge(meta, apply(Arbor.Contracts.TenantContext, :to_signal_metadata, [tenant_context]))
-    else
-      meta
-    end
+    # Arbor.Contracts.TenantContext lives in arbor_contracts (a hard dep).
+    Map.merge(meta, Arbor.Contracts.TenantContext.to_signal_metadata(tenant_context))
   end
 end

@@ -47,6 +47,21 @@ defmodule Arbor.Orchestrator.MixProject do
       # arbor_orchestrator (verified acyclic), and only arbor_commands +
       # arbor_dashboard depend on the orchestrator, so this introduces no cycle.
       {:arbor_actions, in_umbrella: true},
+      # arbor_security/ai/memory/trust/shell are hard runtime deps, declared
+      # explicitly here. The orchestrator authorizes capabilities and egress
+      # (Arbor.Security), routes/calls LLMs and resolves ACP + backend trust
+      # (Arbor.AI), reads agent goals/working-memory/percepts (Arbor.Memory),
+      # reads trust policy (Arbor.Trust.Policy), and runs sandboxed shell
+      # (Arbor.Shell). These were previously reached via Code.ensure_loaded?/
+      # apply stale-avoidance bridges; converted to direct calls (2026-06-17).
+      # None of these apps depend on arbor_orchestrator (verified acyclic —
+      # only arbor_commands + arbor_dashboard depend on it; all five sit at a
+      # lower hierarchy level), so this introduces no cycle.
+      {:arbor_security, in_umbrella: true},
+      {:arbor_ai, in_umbrella: true},
+      {:arbor_memory, in_umbrella: true},
+      {:arbor_trust, in_umbrella: true},
+      {:arbor_shell, in_umbrella: true},
       {:arbor_llm, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},

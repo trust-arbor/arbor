@@ -351,34 +351,31 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   # ── Egress gate (2026-06-14) — compute-node LLM path ──────────────────────
   #
   # Returns a halt %Outcome{} when egress is blocked/requires-approval, else nil
-  # (proceed). All cross-library calls are guarded runtime indirection (the
-  # orchestrator does not hard-dep arbor_security/arbor_ai); a crash fails open.
+  # (proceed). arbor_security/arbor_ai are now hard deps so the calls are direct;
+  # a crash still fails open (the egress gate's documented default-allow posture
+  # — the taint conjunct, not this gate, is the fail-closed protection).
 
   @taint_severity %{trusted: 0, derived: 1, untrusted: 2, hostile: 3}
 
   defp egress_halt_outcome(context, base_updates) do
-    security = Arbor.Security
+    agent_id = Context.get(context, "session.agent_id", "system")
+    provider = Context.get(context, "session.llm_provider")
+    tier = resolve_egress_tier(provider)
+    taint = egress_taint_level(context)
+    # Destination-scoped egress caps match on the provider (the LLM endpoint
+    # host isn't resolved here; provider is the stable identifier operators
+    # scope LLM egress by).
+    opts = [egress_taint: taint, egress_destination: provider && to_string(provider)]
 
-    if Code.ensure_loaded?(security) and function_exported?(security, :authorize_egress, 3) do
-      agent_id = Context.get(context, "session.agent_id", "system")
-      provider = Context.get(context, "session.llm_provider")
-      tier = resolve_egress_tier(provider)
-      taint = egress_taint_level(context)
-      # Destination-scoped egress caps match on the provider (the LLM endpoint
-      # host isn't resolved here; provider is the stable identifier operators
-      # scope LLM egress by).
-      opts = [egress_taint: taint, egress_destination: provider && to_string(provider)]
+    case Arbor.Security.authorize_egress(agent_id, tier, opts) do
+      :allow ->
+        nil
 
-      case apply(security, :authorize_egress, [agent_id, tier, opts]) do
-        :allow ->
-          nil
+      {:requires_approval, _} ->
+        egress_refusal(base_updates, agent_id, tier, taint, :requires_approval, context)
 
-        {:requires_approval, _} ->
-          egress_refusal(base_updates, agent_id, tier, taint, :requires_approval, context)
-
-        {:error, {:egress_blocked, t, reason}} ->
-          egress_refusal(base_updates, agent_id, t, taint, {:blocked, reason}, context)
-      end
+      {:error, {:egress_blocked, t, reason}} ->
+        egress_refusal(base_updates, agent_id, t, taint, {:blocked, reason}, context)
     end
   rescue
     e ->
@@ -424,16 +421,14 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   end
 
   defp emit_egress_blocked_signal(agent_id, tier, taint, kind, context) do
-    if Code.ensure_loaded?(Arbor.Signals) and function_exported?(Arbor.Signals, :emit, 3) do
-      Arbor.Signals.emit(:security, :egress_blocked, %{
-        agent_id: agent_id,
-        egress_tier: tier,
-        egress_taint: taint,
-        reason: kind,
-        node_source: :compute_node,
-        trace_id: Context.get(context, "session.trace_id")
-      })
-    end
+    Arbor.Signals.emit(:security, :egress_blocked, %{
+      agent_id: agent_id,
+      egress_tier: tier,
+      egress_taint: taint,
+      reason: kind,
+      node_source: :compute_node,
+      trace_id: Context.get(context, "session.trace_id")
+    })
 
     :ok
   rescue
@@ -441,16 +436,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   end
 
   # Resolve the egress tier for the provider via BackendTrust (provider -> tier).
-  # Falls back to :external_provider (the gated tier) if AI is unavailable.
   defp resolve_egress_tier(provider) do
-    backend_trust = Arbor.AI.BackendTrust
-
-    if Code.ensure_loaded?(backend_trust) and
-         function_exported?(backend_trust, :egress_tier_for, 2) do
-      apply(backend_trust, :egress_tier_for, [provider_atom(provider), nil])
-    else
-      :external_provider
-    end
+    Arbor.AI.BackendTrust.egress_tier_for(provider_atom(provider), nil)
   end
 
   defp provider_atom(provider) when is_atom(provider) and not is_nil(provider), do: provider
@@ -1087,22 +1074,20 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   end
 
   # Consult the sensitivity router if data sensitivity is known.
-  # Uses runtime bridge (Code.ensure_loaded? + apply) because
-  # arbor_orchestrator and arbor_ai are both Standalone — no compile dep.
+  # arbor_ai is a hard dep — Arbor.AI.SensitivityRouter is called directly.
   defp maybe_route_by_sensitivity(provider, model, context) do
     sensitivity = Context.get(context, "__data_sensitivity__")
 
-    if sensitivity && sensitivity != :public && sensitivity_router_available?() do
+    if sensitivity && sensitivity != :public do
       agent_id = Context.get(context, "session.agent_id")
 
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
       decision =
-        apply(Arbor.AI.SensitivityRouter, :decide, [
+        Arbor.AI.SensitivityRouter.decide(
           safe_to_atom(provider),
           model || "",
           sensitivity,
-          [agent_id: agent_id]
-        ])
+          agent_id: agent_id
+        )
 
       case decision do
         %{action: :proceed} ->
@@ -1136,11 +1121,6 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     _ -> {provider, model}
   catch
     :exit, _ -> {provider, model}
-  end
-
-  defp sensitivity_router_available? do
-    Code.ensure_loaded?(Arbor.AI.SensitivityRouter) and
-      function_exported?(Arbor.AI.SensitivityRouter, :decide, 4)
   end
 
   defp safe_to_atom(value) when is_atom(value), do: value
@@ -1264,23 +1244,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     _ -> :ok
   end
 
-  # Classify errors using Arbor.AI.LLMError when available, fallback to basic map.
+  # Classify errors using Arbor.AI.LLMError (arbor_ai is a hard dep).
   defp classify_error(reason) do
-    llm_error_mod = Arbor.AI.LLMError
-
-    if Code.ensure_loaded?(llm_error_mod) and function_exported?(llm_error_mod, :classify, 1) do
-      apply(llm_error_mod, :classify, [reason])
-    else
-      %{
-        type: :unknown,
-        message: inspect(reason) |> String.slice(0..200),
-        status: nil,
-        code: nil,
-        retryable: false,
-        retry_after_ms: nil,
-        provider: nil
-      }
-    end
+    Arbor.AI.LLMError.classify(reason)
   end
 
   defp write_stage_artifacts(opts, node_id, prompt, response) do

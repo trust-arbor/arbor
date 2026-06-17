@@ -99,7 +99,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
   defp check_all_resources(token, agent_id, [resource | rest]) do
     auth_opts = build_auth_opts(token, resource)
 
-    case apply(Arbor.Security, :authorize, [agent_id, resource, :execute, auth_opts]) do
+    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
       {:ok, :authorized} ->
         check_all_resources(token, agent_id, rest)
 
