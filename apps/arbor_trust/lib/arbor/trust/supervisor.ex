@@ -185,19 +185,11 @@ defmodule Arbor.Trust.Supervisor do
   end
 
   defp trust_profile_backend do
-    if Code.ensure_loaded?(Arbor.Persistence.QueryableStore.Postgres) do
-      Arbor.Persistence.QueryableStore.Postgres
-    else
-      nil
-    end
+    Arbor.Persistence.QueryableStore.Postgres
   end
 
   defp persistence_repo do
-    if Code.ensure_loaded?(Arbor.Persistence.Repo) do
-      Arbor.Persistence.Repo
-    else
-      nil
-    end
+    Arbor.Persistence.Repo
   end
 
   defp process_status(name) do

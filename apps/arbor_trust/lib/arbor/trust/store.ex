@@ -466,11 +466,17 @@ defmodule Arbor.Trust.Store do
       :profile_updated ->
         # Invalidate cache — next get will reload from DB
         :ets.delete(state.profiles_table, agent_id)
-        Logger.debug("[Trust.Store] Invalidated profile cache for #{agent_id} from #{data.origin_node}")
+
+        Logger.debug(
+          "[Trust.Store] Invalidated profile cache for #{agent_id} from #{data.origin_node}"
+        )
 
       :profile_deleted ->
         :ets.delete(state.profiles_table, agent_id)
-        Logger.debug("[Trust.Store] Deleted profile cache for #{agent_id} from #{data.origin_node}")
+
+        Logger.debug(
+          "[Trust.Store] Deleted profile cache for #{agent_id} from #{data.origin_node}"
+        )
 
       _ ->
         :ok
@@ -512,13 +518,9 @@ defmodule Arbor.Trust.Store do
   # Async capability sync — revokes stale capabilities after trust profile changes.
   # Runs in a Task to avoid blocking the GenServer.
   defp sync_capabilities_async(agent_id) do
-    enforcer = Arbor.Security.PolicyEnforcer
-
-    if Code.ensure_loaded?(enforcer) and function_exported?(enforcer, :sync_capabilities, 1) do
-      Task.start(fn ->
-        apply(enforcer, :sync_capabilities, [agent_id])
-      end)
-    end
+    Task.start(fn ->
+      Arbor.Security.PolicyEnforcer.sync_capabilities(agent_id)
+    end)
   rescue
     _ -> :ok
   catch
@@ -549,7 +551,10 @@ defmodule Arbor.Trust.Store do
         Enum.count(keys, &load_one_profile(&1, state))
 
       other ->
-        Logger.warning("[Trust.Store] Unexpected list result from BufferedStore: #{inspect(other)}")
+        Logger.warning(
+          "[Trust.Store] Unexpected list result from BufferedStore: #{inspect(other)}"
+        )
+
         0
     end
   end
@@ -581,7 +586,9 @@ defmodule Arbor.Trust.Store do
         other -> Logger.warning("[Trust.Store] persist unexpected: #{inspect(other)}")
       end
     else
-      Logger.warning("[Trust.Store] BufferedStore :arbor_trust_profiles not running, skipping persist")
+      Logger.warning(
+        "[Trust.Store] BufferedStore :arbor_trust_profiles not running, skipping persist"
+      )
     end
   rescue
     e ->
@@ -625,19 +632,15 @@ defmodule Arbor.Trust.Store do
   defp deserialize_profile(data), do: Authority.from_persistence(data)
 
   defp emit_distributed_signal(type, agent_id) do
-    if Code.ensure_loaded?(Arbor.Signals) do
-      if function_exported?(Arbor.Signals, :durable_emit, 4) do
-        Arbor.Signals.durable_emit(:trust, type, %{
-          agent_id: agent_id,
-          origin_node: node()
-        }, stream_id: "trust:events")
-      else
-        Arbor.Signals.emit(:trust, type, %{
-          agent_id: agent_id,
-          origin_node: node()
-        }, scope: :cluster)
-      end
-    end
+    Arbor.Signals.durable_emit(
+      :trust,
+      type,
+      %{
+        agent_id: agent_id,
+        origin_node: node()
+      },
+      stream_id: "trust:events"
+    )
 
     :ok
   catch
@@ -645,9 +648,7 @@ defmodule Arbor.Trust.Store do
   end
 
   defp subscribe_to_distributed_signals do
-    bus = Arbor.Signals.Bus
-
-    if Code.ensure_loaded?(bus) and Process.whereis(bus) do
+    if Process.whereis(Arbor.Signals.Bus) do
       me = self()
 
       for type <- ~w(profile_updated profile_deleted) do
@@ -676,7 +677,7 @@ defmodule Arbor.Trust.Store do
       )
 
     # Persist to EventStore
-    if Code.ensure_loaded?(Arbor.Trust.EventStore) and Process.whereis(Arbor.Trust.EventStore) do
+    if Process.whereis(Arbor.Trust.EventStore) do
       Arbor.Trust.EventStore.record_event(event)
     end
 
@@ -692,23 +693,18 @@ defmodule Arbor.Trust.Store do
     end
 
     # Signal for queryable history via Historian (durable for audit trail)
-    if function_exported?(Arbor.Signals, :durable_emit, 4) do
-      Arbor.Signals.durable_emit(:trust, :tier_changed, %{
+    Arbor.Signals.durable_emit(
+      :trust,
+      :tier_changed,
+      %{
         agent_id: new_profile.agent_id,
         old_tier: old_profile.tier,
         new_tier: new_profile.tier,
         old_score: old_profile.trust_score,
         new_score: new_profile.trust_score
-      }, stream_id: "trust:events")
-    else
-      Arbor.Signals.emit(:trust, :tier_changed, %{
-        agent_id: new_profile.agent_id,
-        old_tier: old_profile.tier,
-        new_tier: new_profile.tier,
-        old_score: old_profile.trust_score,
-        new_score: new_profile.trust_score
-      })
-    end
+      },
+      stream_id: "trust:events"
+    )
 
     Logger.info(
       "Trust tier changed for #{new_profile.agent_id}: #{old_profile.tier} -> #{new_profile.tier}",
