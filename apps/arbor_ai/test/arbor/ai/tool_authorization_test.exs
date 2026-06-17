@@ -89,45 +89,50 @@ defmodule Arbor.AI.ToolAuthorizationTest do
     end
   end
 
-  describe "hierarchy bridge pattern" do
-    test "Code.ensure_loaded? works for Arbor.Security" do
-      # The bridge pattern uses Code.ensure_loaded? to avoid compile-time deps
-      # This should work regardless of whether Security is actually loaded
-      result = Code.ensure_loaded?(Arbor.Security)
-      assert is_boolean(result)
+  describe "direct security dependency (no bridge; fail-open removed)" do
+    # SECURITY REGRESSION (2026-06-17). arbor_security is now a HARD dep of
+    # arbor_ai (mix.exs), and check_tool_authorization/2 calls
+    # Arbor.Security.authorize/4 DIRECTLY. The previous
+    # Code.ensure_loaded?(Arbor.Security)/apply bridge had a fail-open
+    # `else -> :authorized` branch ("Security not loaded => allow the tool"),
+    # which is now GONE.
+    #
+    # Honesty note (same situation as the orchestrator engine resume gate):
+    # the fail-open branch is not reachable in a normal test env (Security is
+    # always loaded, and authorize/4 is fail-closed-returning — it returns
+    # {:error, _} for ungranted/unknown principals, it does not raise), so a
+    # test that flips the bug cannot be written here without re-adding the very
+    # indirection seam the fix removes. The regression guard is therefore
+    # twofold: (1) THE COMPILER — a hard dep + direct call means dropping or
+    # renaming authorize is a compile error; (2) the fail-closed tests below
+    # ({:error,_} -> :unauthorized, rescue/catch -> :unauthorized). Do NOT
+    # reintroduce a module-presence guard that returns :authorized.
+
+    test "arbor_security is a hard dep and authorize/4 is exported (compiler guard basis)" do
+      assert function_exported?(Arbor.Security, :authorize, 4)
     end
 
-    test "apply/3 can call Arbor.Security.authorize when loaded" do
-      if Code.ensure_loaded?(Arbor.Security) do
-        # Verify the dynamic call works with the expected arity
-        assert function_exported?(Arbor.Security, :authorize, 4)
+    test "authorize/4 denies an ungranted principal (gate fires, no fail-open)" do
+      # The direct call's deny path: an agent holding no capability gets
+      # {:error, _}, which check_tool_authorization maps to :unauthorized
+      # (filtering the tool out). Pre-conversion the missing-Security branch
+      # returned :authorized — this asserts the authorize call itself denies.
+      result =
+        try do
+          Arbor.Security.authorize(
+            "agent_tool_authz_ungranted_#{System.unique_integer([:positive])}",
+            "arbor://actions/some_gated_tool",
+            :execute,
+            []
+          )
+        catch
+          # CapabilityStore may not be running in this test env; an exit is
+          # itself fail-closed (check_tool_authorization's catch -> :unauthorized).
+          :exit, _ -> {:error, :process_unavailable}
+        end
 
-        # The apply pattern used in check_tool_authorization
-        # CapabilityStore may not be running in test env, so catch :exit
-        result =
-          try do
-            apply(Arbor.Security, :authorize, [
-              "test_agent_bridge",
-              "arbor://actions/test_tool",
-              :execute,
-              []
-            ])
-          catch
-            :exit, _ -> {:error, :process_unavailable}
-          end
-
-        assert is_tuple(result)
-      end
-    end
-
-    test "graceful degradation when Arbor.Security is not loaded" do
-      # Simulate the fallback path: when Security is not loaded,
-      # check_tool_authorization returns :authorized with a debug log
-      # This is the safe default for development/testing without full stack
-      #
-      # We can't easily unload a module in tests, but we verify the
-      # code structure handles this case
-      assert true, "degradation path verified by code inspection"
+      refute match?({:ok, :authorized}, result),
+             "authorize/4 granted an ungranted principal — fail-open. Got: #{inspect(result)}"
     end
   end
 

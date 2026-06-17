@@ -570,11 +570,9 @@ defmodule Arbor.LLM.ToolLoop do
   end
 
   defp maybe_record_tool_telemetry(agent_id, tool_name, result, duration_ms) do
-    store = Arbor.Common.AgentTelemetry.Store
-
-    if Code.ensure_loaded?(store) do
-      store.record_tool(agent_id, tool_name, result, duration_ms)
-    end
+    # arbor_common is a direct dep — call the telemetry store directly.
+    # rescue/catch stay so telemetry can never crash the tool loop.
+    Arbor.Common.AgentTelemetry.Store.record_tool(agent_id, tool_name, result, duration_ms)
   rescue
     _ -> :ok
   catch

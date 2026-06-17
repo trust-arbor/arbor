@@ -380,12 +380,9 @@ defmodule Arbor.AI.UnifiedBridge do
   # Emit a structured bridge error signal for observability.
   # Non-fatal — never crashes the caller.
   defp safe_emit_bridge_error(reason) do
+    # arbor_signals is a direct dep — emit directly.
     error_info = Arbor.AI.LLMError.classify(reason)
-    signals_mod = Arbor.Signals
-
-    if Code.ensure_loaded?(signals_mod) and function_exported?(signals_mod, :durable_emit, 3) do
-      apply(signals_mod, :durable_emit, [:ai, :llm_bridge_error, error_info])
-    end
+    Arbor.Signals.durable_emit(:ai, :llm_bridge_error, error_info)
   rescue
     _ -> :ok
   catch

@@ -302,15 +302,8 @@ defmodule Arbor.AI.SystemPromptBuilder do
   end
 
   defp format_goal_date(dt) do
-    if Code.ensure_loaded?(Arbor.Common.Time) do
-      Arbor.Common.Time.month_day(dt)
-    else
-      case dt do
-        %DateTime{} -> Calendar.strftime(dt, "%b %-d")
-        %Date{} -> Calendar.strftime(dt, "%b %-d")
-        _ -> to_string(dt)
-      end
-    end
+    # arbor_common is a direct dep — call Time directly.
+    Arbor.Common.Time.month_day(dt)
   end
 
   defp same_day_as_today?(%DateTime{} = dt) do
