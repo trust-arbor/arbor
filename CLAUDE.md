@@ -83,8 +83,8 @@ L0  arbor_contracts, arbor_monitor                       (zero in-umbrella deps)
 L1  arbor_common, arbor_signals, arbor_cartographer, arbor_web
 L2  arbor_llm, arbor_integrations, arbor_security
 L3  arbor_persistence, arbor_shell, arbor_sandbox
-L4  arbor_persistence_ecto, arbor_historian, arbor_trust, arbor_ai, arbor_comms
-L5  arbor_memory, arbor_consensus, arbor_scheduler
+L4  arbor_persistence_ecto, arbor_historian, arbor_trust, arbor_ai, arbor_comms, arbor_consensus
+L5  arbor_memory, arbor_scheduler
 L6  arbor_actions
 L7  arbor_orchestrator, arbor_agent, arbor_gateway
 L8  arbor_commands
@@ -106,7 +106,10 @@ Notes:
 - The 2026-06-17 sweep also added (all acyclic, no level change): `arbor_agent`
   → arbor_llm; `arbor_consensus` → arbor_security; `arbor_dashboard` →
   arbor_security (was already transitive).
-- `arbor_ai` (L4) and `arbor_consensus` (L5) are deep, not standalone.
+- `arbor_ai` (L4) and `arbor_consensus` (L4) are deep, not standalone.
+  (`arbor_consensus` is L4, not L5: its `mix.exs` does NOT declare `arbor_ai` —
+  that dep is commented out / optional-at-runtime via a DI seam — so ai doesn't
+  raise its compile-time level. The drift-guard test computes from real mix.exs.)
 - `arbor_monitor` is the only truly dep-free app besides `arbor_contracts`.
 
 No cycles. Deps point only to lower levels. Always check each library's `mix.exs`
