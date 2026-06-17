@@ -143,12 +143,16 @@ jobs:
     env:
       MIX_ENV: test
       ARBOR_COOKIE: ci_test_cookie_not_a_secret
+      # Backend: the 3060 laptop Ollama (10.42.42.97). gemma4:e4b benchmarked at
+      # ~68 tok/s warm with valid structured-JSON + coherent reasoning (vs ~1
+      # tok/s on the homelab CPU-only box). Swap the backend by changing these
+      # two URLs + the model. ~60s one-time cold load is covered by the warmup.
       UNIFIED_LLM_DEFAULT_PROVIDER: ollama
-      UNIFIED_LLM_DEFAULT_MODEL: "granite3.1-moe:1b"
-      ARBOR_OLLAMA_BASE_URL: "http://10.42.42.100:11434"
-      ANTHROPIC_BASE_URL: "http://10.42.42.100:11434"
+      UNIFIED_LLM_DEFAULT_MODEL: "gemma4:e4b"
+      ARBOR_OLLAMA_BASE_URL: "http://10.42.42.97:11434"
+      ANTHROPIC_BASE_URL: "http://10.42.42.97:11434"
       ANTHROPIC_AUTH_TOKEN: ollama
-      ARBOR_ACP_ALTERNATE_MODEL: "granite3.1-moe:1b"
+      ARBOR_ACP_ALTERNATE_MODEL: "gemma4:e4b"
 
     steps:
       - name: Checkout
@@ -178,15 +182,14 @@ jobs:
       - name: Compile
         run: mix compile
 
-      # Warm the models the suite uses into VRAM so the first call doesn't eat a
-      # cold-load against per-test timeouts. Best-effort.
-      - name: Warm Ollama models
+      # Warm the model into VRAM so the first call doesn't eat the ~60s cold load
+      # against per-test timeouts. All :llm tests now use the lane's default model
+      # (no per-test hardcoded model), so one warmup covers them. Best-effort.
+      - name: Warm Ollama model
         run: |
-          for m in "$UNIFIED_LLM_DEFAULT_MODEL" granite3.3:2b; do
-            curl -sf -m 600 -X POST "$ARBOR_OLLAMA_BASE_URL/api/generate" \
-              -d '{"model":"'"$m"'","prompt":"hi","stream":false,"keep_alive":"30m"}' \
-              && echo "warmed $m" || echo "warmup skipped for $m (endpoint unavailable)"
-          done
+          curl -sf -m 600 -X POST "$ARBOR_OLLAMA_BASE_URL/api/generate" \
+            -d '{"model":"'"$UNIFIED_LLM_DEFAULT_MODEL"'","prompt":"hi","stream":false,"keep_alive":"30m"}' \
+            && echo "warmed $UNIFIED_LLM_DEFAULT_MODEL" || echo "warmup skipped (endpoint unavailable)"
         continue-on-error: true
 
       - name: Run LLM tests
