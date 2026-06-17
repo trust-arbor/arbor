@@ -3,11 +3,12 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
   End-to-end tests for consensus facade authorization (authorize_* functions).
 
   Tests the full flow: CapabilityStore grant -> Security.authorize -> Consensus facade.
-  Validates both authorized and unauthorized paths, plus permissive mode fallback.
+  Validates both authorized and unauthorized paths, plus the fail-closed path
+  taken when Security is unavailable.
 
-  Unlike the basic authorization_test.exs (which runs in permissive mode because
-  Security.healthy?() returns false), this suite starts ALL required security
-  processes so that authorization is fully enforced.
+  This suite starts ALL required security processes so that authorization is
+  fully enforced (the facade fails closed when Security is unavailable — there
+  is no dev/test permissive fallback).
   """
   use ExUnit.Case, async: false
 
@@ -250,7 +251,11 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
         Arbor.Consensus.authorize_force_approve(@caller_id, proposal_id, @caller_id)
 
       # May be authorized, or gated by approval guard (trust-tier dependent)
-      assert result in [:ok, {:error, {:unauthorized, :pending_approval}}, {:error, {:unauthorized, :escalation_disabled}}] or
+      assert result in [
+               :ok,
+               {:error, {:unauthorized, :pending_approval}},
+               {:error, {:unauthorized, :escalation_disabled}}
+             ] or
                not match?({:error, {:unauthorized, :no_capability}}, result)
     end
 
@@ -314,7 +319,11 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
         Arbor.Consensus.authorize_force_reject(@caller_id, proposal_id, @caller_id)
 
       # May be authorized, or gated by approval guard (trust-tier dependent)
-      assert result in [:ok, {:error, {:unauthorized, :pending_approval}}, {:error, {:unauthorized, :escalation_disabled}}] or
+      assert result in [
+               :ok,
+               {:error, {:unauthorized, :pending_approval}},
+               {:error, {:unauthorized, :escalation_disabled}}
+             ] or
                not match?({:error, {:unauthorized, :no_capability}}, result)
     end
 
@@ -338,14 +347,16 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
   end
 
   # ============================================================================
-  # Permissive mode — when Security is not fully available
+  # Fail-closed — when Security is not fully available
   # ============================================================================
 
-  describe "permissive mode" do
-    test "operations are allowed when Security.healthy?() returns false" do
+  describe "fail closed when Security unavailable" do
+    test "security regression (H6): operations are DENIED when Security.healthy?() returns false" do
       # The Consensus module's private authorize/2 function checks
-      # security_available?() which calls Security.healthy?().
-      # When it returns false, all operations are permitted (fail-open for dev/test).
+      # security_available?() which calls Security.healthy?(). When it returns
+      # false the facade now fails CLOSED in every environment — the old
+      # dev/test permissive escape hatch (strict_facade_mode?) was removed so a
+      # partial security outage can never silently become open authorization.
       #
       # We verify this by temporarily making Security unhealthy.
       # Use terminate_child (not GenServer.stop) to prevent supervisor auto-restart.
@@ -355,18 +366,19 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
       refute Security.healthy?(),
              "Security should be unhealthy after terminating CapabilityStore"
 
-      # All operations should be permitted without capabilities
+      # All operations must be denied with :security_unavailable, even though
+      # no capabilities were granted/checked — fail closed.
       attrs = %{
         proposer: @caller_id,
         topic: :code_modification,
-        description: "Permissive mode proposal"
+        description: "Fail-closed proposal"
       }
 
-      result_propose = Arbor.Consensus.authorize_propose(@caller_id, attrs)
-      refute match?({:error, {:unauthorized, _}}, result_propose)
+      assert {:error, {:unauthorized, :security_unavailable}} =
+               Arbor.Consensus.authorize_propose(@caller_id, attrs)
 
-      result_ask = Arbor.Consensus.authorize_ask(@caller_id, "Permissive mode question")
-      refute match?({:error, {:unauthorized, _}}, result_ask)
+      assert {:error, {:unauthorized, :security_unavailable}} =
+               Arbor.Consensus.authorize_ask(@caller_id, "Fail-closed question")
 
       # Restart CapabilityStore so subsequent tests work
       Supervisor.restart_child(Arbor.Security.Supervisor, CapabilityStore)

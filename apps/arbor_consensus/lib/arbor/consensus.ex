@@ -553,28 +553,20 @@ defmodule Arbor.Consensus do
       end
     else
       # H6: pre-fix, this branch returned :ok unconditionally — partial
-      # security outages silently became unconditional authorization. The
-      # strict_facade_mode? seam denies in prod (and wherever it is set).
+      # security outages silently became unconditional authorization. It now
+      # fails closed in every environment via when_security_unavailable/0.
       when_security_unavailable()
     end
   end
 
   # Public (@doc false) for the H6 regression test. See Memory facade for
   # rationale; mirroring the shape here so all three Level-2 facades expose
-  # the same testable seam.
+  # the same testable seam. Fails closed everywhere — a loaded-but-unhealthy
+  # Security subsystem can never be treated as an implicit authorization.
   @doc false
-  @spec when_security_unavailable() :: :ok | {:error, :security_unavailable}
+  @spec when_security_unavailable() :: {:error, :security_unavailable}
   def when_security_unavailable do
-    if strict_facade_mode?() do
-      {:error, :security_unavailable}
-    else
-      :ok
-    end
-  end
-
-  @doc false
-  def strict_facade_mode? do
-    Application.get_env(:arbor_consensus, :strict_facade_mode, Mix.env() == :prod)
+    {:error, :security_unavailable}
   end
 
   defp security_available? do
