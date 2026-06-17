@@ -65,7 +65,7 @@ defmodule Arbor.Memory.ContextWindow.Compression do
 
     # Optionally run fact extraction in parallel
     fact_task =
-      if window.fact_extraction_enabled and fact_extractor_available?() do
+      if window.fact_extraction_enabled do
         Task.async(fn -> extract_facts_from_messages(window, messages) end)
       else
         nil
@@ -261,32 +261,28 @@ defmodule Arbor.Memory.ContextWindow.Compression do
 
   @doc false
   def emit_demotion_signal(%{agent_id: agent_id}, messages, compressed_tokens) do
-    if signals_available?() do
-      original_tokens = tokens_for_messages(messages)
+    original_tokens = tokens_for_messages(messages)
 
-      Signals.emit_context_summarized(agent_id, %{
-        from_layer: :full_detail,
-        to_layer: :recent_summary,
-        original_tokens: original_tokens,
-        compressed_tokens: compressed_tokens,
-        compression_ratio:
-          if(original_tokens > 0, do: compressed_tokens / original_tokens, else: 0),
-        messages_demoted: length(messages)
-      })
-    end
+    Signals.emit_context_summarized(agent_id, %{
+      from_layer: :full_detail,
+      to_layer: :recent_summary,
+      original_tokens: original_tokens,
+      compressed_tokens: compressed_tokens,
+      compression_ratio:
+        if(original_tokens > 0, do: compressed_tokens / original_tokens, else: 0),
+      messages_demoted: length(messages)
+    })
 
     :ok
   end
 
   @doc false
   def emit_fact_extraction_signal(%{agent_id: agent_id}, facts) do
-    if signals_available?() do
-      Signals.emit_facts_extracted(agent_id, %{
-        count: length(facts),
-        categories: Enum.frequencies_by(facts, fn f -> f[:category] || f.category end),
-        source: :compression
-      })
-    end
+    Signals.emit_facts_extracted(agent_id, %{
+      count: length(facts),
+      categories: Enum.frequencies_by(facts, fn f -> f[:category] || f.category end),
+      source: :compression
+    })
 
     :ok
   end
@@ -570,16 +566,6 @@ defmodule Arbor.Memory.ContextWindow.Compression do
     end
   rescue
     e -> {:error, {:fact_extraction_error, e}}
-  end
-
-  defp fact_extractor_available? do
-    Code.ensure_loaded?(FactExtractor) and
-      function_exported?(FactExtractor, :extract_batch, 2)
-  end
-
-  defp signals_available? do
-    Code.ensure_loaded?(Signals) and
-      function_exported?(Signals, :emit_context_summarized, 2)
   end
 
   # ============================================================================

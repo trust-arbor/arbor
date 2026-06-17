@@ -743,29 +743,22 @@ defmodule Arbor.Memory.Proposal do
         Logger.warning("Skipping blank goal proposal for #{agent_id}")
         {:error, :empty_description}
 
-      not Code.ensure_loaded?(Arbor.Memory.GoalStore) ->
-        {:ok, "goal_" <> generate_id()}
-
       goal_with_description_exists?(agent_id, trimmed) ->
         # Defense against double-creation: this proposal-based path used to
         # have no dedup at all, so an LLM that returned the same `new_goals`
         # entry across multiple heartbeats (or via parallel paths) would
         # accumulate identical copies. Same downcased-trim match used by
         # SessionGoals.UpdateGoals.
-        Logger.debug(
-          "[Proposal] Skipping duplicate goal for #{agent_id}: #{trimmed}"
-        )
+        Logger.debug("[Proposal] Skipping duplicate goal for #{agent_id}: #{trimmed}")
 
         {:ok, :duplicate}
 
       true ->
         goal_data = Map.get(proposal.metadata, :goal_data, %{})
 
-        case apply(Arbor.Memory.GoalStore, :add_goal, [
-               agent_id,
-               content,
-               [priority: Map.get(goal_data, "priority", :medium)]
-             ]) do
+        case Arbor.Memory.GoalStore.add_goal(agent_id, content,
+               priority: Map.get(goal_data, "priority", :medium)
+             ) do
           {:ok, goal} -> {:ok, Map.get(goal, :id, generate_id())}
           error -> error
         end
@@ -790,11 +783,11 @@ defmodule Arbor.Memory.Proposal do
     update_data = Map.get(proposal.metadata, :update_data, %{})
     goal_id = Map.get(update_data, "id")
 
-    if goal_id && Code.ensure_loaded?(Arbor.Memory.GoalStore) do
+    if goal_id do
       progress = Map.get(update_data, "progress")
 
       if progress do
-        apply(Arbor.Memory.GoalStore, :update_goal_progress, [agent_id, goal_id, progress])
+        Arbor.Memory.GoalStore.update_goal_progress(agent_id, goal_id, progress)
       end
 
       {:ok, goal_id}
@@ -813,22 +806,17 @@ defmodule Arbor.Memory.Proposal do
   defp store_intent(agent_id, proposal) do
     decomp = Map.get(proposal.metadata, :decomposition, %{})
 
-    if Code.ensure_loaded?(Arbor.Memory.IntentStore) &&
-         Code.ensure_loaded?(Arbor.Contracts.Intent) do
-      intent =
-        apply(Arbor.Contracts.Intent, :capability_intent, [
-          Map.get(decomp, "capability", "unknown"),
-          Map.get(decomp, "op", "unknown"),
-          Map.get(decomp, "target"),
-          [description: proposal.content]
-        ])
+    intent =
+      Arbor.Contracts.Memory.Intent.capability_intent(
+        Map.get(decomp, "capability", "unknown"),
+        Map.get(decomp, "op", "unknown"),
+        Map.get(decomp, "target"),
+        description: proposal.content
+      )
 
-      case apply(Arbor.Memory.IntentStore, :record_intent, [agent_id, intent]) do
-        {:ok, recorded} -> {:ok, Map.get(recorded, :id, intent.id)}
-        error -> error
-      end
-    else
-      {:ok, "intent_" <> generate_id()}
+    case Arbor.Memory.IntentStore.record_intent(agent_id, intent) do
+      {:ok, recorded} -> {:ok, Map.get(recorded, :id, intent.id)}
+      error -> error
     end
   end
 

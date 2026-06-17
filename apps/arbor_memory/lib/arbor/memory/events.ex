@@ -409,26 +409,20 @@ defmodule Arbor.Memory.Events do
     stream_id = stream_id(agent_id)
 
     # Write to the memory-local EventLog so get_history/get_by_type/etc. can read it back.
-    if Code.ensure_loaded?(Arbor.Persistence.Event) do
-      event =
-        Arbor.Persistence.Event.new(
-          stream_id,
-          to_string(event_type),
-          enriched_data,
-          metadata: %{source_node: node()}
-        )
+    event =
+      Arbor.Persistence.Event.new(
+        stream_id,
+        to_string(event_type),
+        enriched_data,
+        metadata: %{source_node: node()}
+      )
 
-      if Process.whereis(@event_log_name) do
-        Arbor.Persistence.append(@event_log_name, @event_log_backend, stream_id, event)
-      end
+    if Process.whereis(@event_log_name) do
+      Arbor.Persistence.append(@event_log_name, @event_log_backend, stream_id, event)
     end
 
     # Signal bus emit (real-time notification + historian/Postgres persistence)
-    if function_exported?(Arbor.Signals, :durable_emit, 4) do
-      Arbor.Signals.durable_emit(:memory, event_type, enriched_data, stream_id: stream_id)
-    else
-      Arbor.Signals.emit(:memory, event_type, Map.put(enriched_data, :permanent, true))
-    end
+    Arbor.Signals.durable_emit(:memory, event_type, enriched_data, stream_id: stream_id)
 
     :ok
   end

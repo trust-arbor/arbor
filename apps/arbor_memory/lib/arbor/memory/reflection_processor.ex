@@ -238,7 +238,13 @@ defmodule Arbor.Memory.ReflectionProcessor do
       GoalProcessor.process_new_goals(agent_id, parsed.new_goals)
       Integrations.integrate_insights(agent_id, parsed.insights)
       Integrations.integrate_learnings(agent_id, parsed.learnings)
-      Integrations.integrate_knowledge_graph(agent_id, parsed.knowledge_nodes, parsed.knowledge_edges)
+
+      Integrations.integrate_knowledge_graph(
+        agent_id,
+        parsed.knowledge_nodes,
+        parsed.knowledge_edges
+      )
+
       Integrations.process_relationships(agent_id, parsed.relationships)
       Integrations.trigger_insight_detection(agent_id)
       Integrations.store_self_insight_suggestions(agent_id, parsed.self_insight_suggestions)
@@ -404,14 +410,22 @@ defmodule Arbor.Memory.ReflectionProcessor do
       Keyword.get(
         opts,
         :interval_ms,
-        Application.get_env(:arbor_memory, :reflection_interval_ms, @default_reflection_interval_ms)
+        Application.get_env(
+          :arbor_memory,
+          :reflection_interval_ms,
+          @default_reflection_interval_ms
+        )
       )
 
     threshold =
       Keyword.get(
         opts,
         :threshold,
-        Application.get_env(:arbor_memory, :reflection_signal_threshold, @default_signal_threshold)
+        Application.get_env(
+          :arbor_memory,
+          :reflection_signal_threshold,
+          @default_signal_threshold
+        )
       )
 
     time_elapsed = time_since_last_reflection(agent_id)
@@ -537,62 +551,58 @@ defmodule Arbor.Memory.ReflectionProcessor do
   end
 
   defp call_arbor_ai(prompt, opts) do
-    if Code.ensure_loaded?(Arbor.AI) do
-      start_time = System.monotonic_time(:millisecond)
-      agent_id = opts[:agent_id] || "unknown"
+    start_time = System.monotonic_time(:millisecond)
+    agent_id = opts[:agent_id] || "unknown"
 
-      provider =
-        opts[:provider] ||
-          Application.get_env(:arbor_memory, :reflection_provider, :anthropic)
+    provider =
+      opts[:provider] ||
+        Application.get_env(:arbor_memory, :reflection_provider, :anthropic)
 
-      model =
-        opts[:model] ||
-          Application.get_env(:arbor_memory, :reflection_model, "claude-3-5-haiku-latest")
+    model =
+      opts[:model] ||
+        Application.get_env(:arbor_memory, :reflection_model, "claude-3-5-haiku-latest")
 
-      system_prompt = """
-      You are a reflective AI examining your recent experiences to extract
-      insights, learnings, and relationship understanding. Be thoughtful and specific.
-      Respond only in valid JSON format.
-      """
+    system_prompt = """
+    You are a reflective AI examining your recent experiences to extract
+    insights, learnings, and relationship understanding. Be thoughtful and specific.
+    Respond only in valid JSON format.
+    """
 
-      llm_opts = [
-        system_prompt: system_prompt,
-        provider: provider,
-        model: model
-      ]
+    llm_opts = [
+      system_prompt: system_prompt,
+      provider: provider,
+      model: model
+    ]
 
-      {result, usage} =
-        case Arbor.AI.generate_text(prompt, llm_opts) do
-          {:ok, %{text: text, usage: usage}} ->
-            {{:ok, text}, usage}
+    {result, usage} =
+      case Arbor.AI.generate_text(prompt, llm_opts) do
+        {:ok, %{text: text, usage: usage}} ->
+          {{:ok, text}, usage}
 
-          {:ok, %{text: text}} ->
-            {{:ok, text}, nil}
+        {:ok, %{text: text}} ->
+          {{:ok, text}, nil}
 
-          {:ok, text} when is_binary(text) ->
-            {{:ok, text}, nil}
+        {:ok, text} when is_binary(text) ->
+          {{:ok, text}, nil}
 
-          {:error, reason} ->
-            {{:error, reason}, nil}
-        end
+        {:error, reason} ->
+          {{:error, reason}, nil}
+      end
 
-      duration_ms = System.monotonic_time(:millisecond) - start_time
+    duration_ms = System.monotonic_time(:millisecond) - start_time
 
-      success = match?({:ok, _}, result)
+    success = match?({:ok, _}, result)
 
-      Signals.emit_reflection_llm_call(agent_id, %{
-        provider: provider,
-        model: model,
-        prompt_chars: String.length(prompt),
-        duration_ms: duration_ms,
-        success: success,
-        usage: usage
-      })
+    Signals.emit_reflection_llm_call(agent_id, %{
+      provider: provider,
+      model: model,
+      prompt_chars: String.length(prompt),
+      duration_ms: duration_ms,
+      success: success,
+      usage: usage
+    })
 
-      result
-    else
-      {:error, :llm_not_available}
-    end
+    result
   end
 
   # ============================================================================
@@ -808,20 +818,25 @@ defmodule Arbor.Memory.ReflectionProcessor do
     """
     @spec generate_text(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
     def generate_text(_prompt, _opts) do
-      json = Jason.encode!(%{
-        "thinking" => "Mock reflection thinking...",
-        "goal_updates" => [],
-        "new_goals" => [],
-        "insights" => [
-          %{"content" => "Mock insight from deep reflection", "importance" => 0.7}
-        ],
-        "learnings" => [
-          %{"content" => "Mock technical learning", "confidence" => 0.8, "category" => "technical"}
-        ],
-        "knowledge_nodes" => [],
-        "knowledge_edges" => [],
-        "self_insight_suggestions" => []
-      })
+      json =
+        Jason.encode!(%{
+          "thinking" => "Mock reflection thinking...",
+          "goal_updates" => [],
+          "new_goals" => [],
+          "insights" => [
+            %{"content" => "Mock insight from deep reflection", "importance" => 0.7}
+          ],
+          "learnings" => [
+            %{
+              "content" => "Mock technical learning",
+              "confidence" => 0.8,
+              "category" => "technical"
+            }
+          ],
+          "knowledge_nodes" => [],
+          "knowledge_edges" => [],
+          "self_insight_suggestions" => []
+        })
 
       {:ok, json}
     end

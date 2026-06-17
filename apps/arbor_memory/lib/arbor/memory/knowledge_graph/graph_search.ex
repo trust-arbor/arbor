@@ -721,19 +721,11 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
   defp same_day_as_today?(_), do: false
 
   defp format_date_short(%DateTime{} = dt) do
-    if Code.ensure_loaded?(Arbor.Common.Time) do
-      Arbor.Common.Time.month_day(dt)
-    else
-      Calendar.strftime(dt, "%b %-d")
-    end
+    Arbor.Common.Time.month_day(dt)
   end
 
   defp format_date_short(%Date{} = d) do
-    if Code.ensure_loaded?(Arbor.Common.Time) do
-      Arbor.Common.Time.month_day(d)
-    else
-      Calendar.strftime(d, "%b %-d")
-    end
+    Arbor.Common.Time.month_day(d)
   end
 
   defp format_date_short(_), do: ""

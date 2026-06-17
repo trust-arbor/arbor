@@ -48,7 +48,9 @@ defmodule Arbor.Memory.ReflectionProcessor.Integrations do
   @doc false
   def add_thought_to_working_memory(agent_id, text) do
     case Arbor.Memory.get_working_memory(agent_id) do
-      nil -> :ok
+      nil ->
+        :ok
+
       wm ->
         updated_wm = WorkingMemory.add_thought(wm, text)
         Arbor.Memory.save_working_memory(agent_id, updated_wm)
@@ -87,21 +89,28 @@ defmodule Arbor.Memory.ReflectionProcessor.Integrations do
 
   defp route_learning_by_category(agent_id, "self", content) do
     case IdentityConsolidator.get_self_knowledge(agent_id) do
-      nil -> :ok
+      nil ->
+        :ok
+
       sk ->
         updated = SelfKnowledge.record_growth(sk, :self_learning, content)
         IdentityConsolidator.save_self_knowledge(agent_id, updated)
     end
   rescue
     e ->
-      Logger.debug("[ReflectionIntegrations] self-learning route failed for #{agent_id}: #{Exception.message(e)}")
+      Logger.debug(
+        "[ReflectionIntegrations] self-learning route failed for #{agent_id}: #{Exception.message(e)}"
+      )
+
       :ok
   end
 
   defp route_learning_by_category(agent_id, "technical", content) do
     # Dedup: check if this learning already exists as a KG node
     case Arbor.Memory.find_knowledge_by_name(agent_id, content) do
-      {:ok, _existing_id} -> :ok
+      {:ok, _existing_id} ->
+        :ok
+
       {:error, _} ->
         Arbor.Memory.add_knowledge(agent_id, %{
           type: :skill,
@@ -111,7 +120,10 @@ defmodule Arbor.Memory.ReflectionProcessor.Integrations do
     end
   rescue
     e ->
-      Logger.debug("[ReflectionIntegrations] technical learning route failed for #{agent_id}: #{Exception.message(e)}")
+      Logger.debug(
+        "[ReflectionIntegrations] technical learning route failed for #{agent_id}: #{Exception.message(e)}"
+      )
+
       :ok
   end
 
@@ -254,9 +266,7 @@ defmodule Arbor.Memory.ReflectionProcessor.Integrations do
 
   @doc false
   def trigger_insight_detection(agent_id) do
-    if Code.ensure_loaded?(Arbor.Memory.InsightDetector) do
-      InsightDetector.detect_and_queue(agent_id)
-    end
+    InsightDetector.detect_and_queue(agent_id)
   rescue
     e ->
       Logger.debug("InsightDetector unavailable: #{inspect(e)}")
@@ -312,7 +322,10 @@ defmodule Arbor.Memory.ReflectionProcessor.Integrations do
     |> Enum.each(&add_goal_to_kg(agent_id, &1))
   rescue
     e ->
-      Logger.debug("[ReflectionIntegrations] add_goals_to_kg failed for #{agent_id}: #{Exception.message(e)}")
+      Logger.debug(
+        "[ReflectionIntegrations] add_goals_to_kg failed for #{agent_id}: #{Exception.message(e)}"
+      )
+
       :ok
   end
 
@@ -363,10 +376,12 @@ defmodule Arbor.Memory.ReflectionProcessor.Integrations do
 
   # Safe atom conversion with fallback
   defp safe_atom(nil, default), do: default
+
   defp safe_atom(str, default) when is_binary(str) do
     String.to_existing_atom(str)
   rescue
     ArgumentError -> default
   end
+
   defp safe_atom(atom, _default) when is_atom(atom), do: atom
 end

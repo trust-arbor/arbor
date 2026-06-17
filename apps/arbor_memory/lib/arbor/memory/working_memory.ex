@@ -549,19 +549,14 @@ defmodule Arbor.Memory.WorkingMemory do
   """
   @spec rebuild_from_long_term(t()) :: {:ok, t()} | {:error, term()}
   def rebuild_from_long_term(%__MODULE__{} = wm) do
-    if Code.ensure_loaded?(Signals) and
-         function_exported?(Signals, :query_recent, 2) do
-      case Signals.query_recent(wm.agent_id, limit: 100) do
-        {:ok, signals} ->
-          rebuilt = Enum.reduce(signals, wm, &apply_memory_event/2)
-          Logger.info("Rebuilt working memory for #{wm.agent_id} from #{length(signals)} signals")
-          {:ok, rebuilt}
+    case Signals.query_recent(wm.agent_id, limit: 100) do
+      {:ok, signals} ->
+        rebuilt = Enum.reduce(signals, wm, &apply_memory_event/2)
+        Logger.info("Rebuilt working memory for #{wm.agent_id} from #{length(signals)} signals")
+        {:ok, rebuilt}
 
-        {:error, _} = error ->
-          error
-      end
-    else
-      {:error, :signals_not_available}
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -1089,7 +1084,7 @@ defmodule Arbor.Memory.WorkingMemory do
   defp format_thoughts(thoughts, opts) do
     temporal = Keyword.get(opts, :temporal, true)
 
-    if temporal and Code.ensure_loaded?(Arbor.Common.TemporalGrouping) do
+    if temporal do
       format_thoughts_temporal(thoughts)
     else
       format_thoughts_flat(thoughts)
