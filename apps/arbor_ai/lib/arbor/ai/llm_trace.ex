@@ -27,8 +27,6 @@ defmodule Arbor.AI.LLMTrace do
 
   require Logger
 
-  @signals_mod Arbor.Signals
-
   @doc "Generate a trace ID and log the start of an LLM call."
   def start(call_type, provider, model, agent_id, prompt) do
     trace_id = Base.encode16(:crypto.strong_rand_bytes(4), case: :lower)
@@ -145,13 +143,8 @@ defmodule Arbor.AI.LLMTrace do
   # Emit to Historian via dual_emit pattern (ETS EventLog + Postgres).
   # Non-fatal — tracing never blocks or crashes the LLM call path.
   defp emit_event(type, data) do
-    if Code.ensure_loaded?(@signals_mod) and function_exported?(@signals_mod, :durable_emit, 3) do
-      apply(@signals_mod, :durable_emit, [:llm, type, data])
-    else
-      if Code.ensure_loaded?(@signals_mod) do
-        apply(@signals_mod, :emit, [:llm, type, data])
-      end
-    end
+    # arbor_signals is a direct dep — durable_emit directly.
+    Arbor.Signals.durable_emit(:llm, type, data)
   rescue
     _ -> :ok
   catch

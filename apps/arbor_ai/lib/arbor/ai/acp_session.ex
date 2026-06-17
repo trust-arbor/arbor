@@ -415,25 +415,21 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp emit_signal(event, state, metadata \\ %{}) do
-    if Code.ensure_loaded?(Arbor.Signals) do
-      signal_data =
-        %{
-          provider: state.provider,
-          session_id: state.session_id,
-          model: state.model,
-          status: state.status
-        }
-        |> Map.merge(metadata)
+    # arbor_signals is a direct dep — emit directly.
+    signal_data =
+      %{
+        provider: state.provider,
+        session_id: state.session_id,
+        model: state.model,
+        status: state.status
+      }
+      |> Map.merge(metadata)
 
-      try do
-        # credo:disable-for-next-line Credo.Check.Refactor.Apply
-        apply(Arbor.Signals, :emit, [:agent, event, signal_data])
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
-    end
+    Arbor.Signals.emit(:agent, event, signal_data)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # -- Streaming Text Accumulation --

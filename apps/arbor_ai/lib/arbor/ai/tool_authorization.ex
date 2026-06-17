@@ -45,45 +45,37 @@ defmodule Arbor.AI.ToolAuthorization do
 
   # Check whether an agent is authorized to execute a specific tool.
   #
-  # Uses the Code.ensure_loaded?/apply bridge pattern to avoid compile-time
-  # dependency on arbor_security (which is Level 1; arbor_ai is Standalone).
+  # arbor_security is a direct dep of arbor_ai, so this is a compile-time call.
+  # (Previously a Code.ensure_loaded?/apply bridge that failed OPEN —
+  # returning :authorized when Security was "not loaded" — which is now gone.)
   #
   # Returns:
-  #   :authorized - agent holds the capability (or security unavailable)
+  #   :authorized - agent holds the capability
   #   :unauthorized - agent lacks the capability
   #   :pending_approval - requires escalation
   @spec check_tool_authorization(String.t(), String.t()) ::
           :authorized | :unauthorized | :pending_approval
   defp check_tool_authorization(agent_id, tool_name) do
-    if Code.ensure_loaded?(Arbor.Security) do
-      resource = resolve_tool_uri(tool_name)
+    resource = resolve_tool_uri(tool_name)
 
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      case apply(Arbor.Security, :authorize, [agent_id, resource, :execute, []]) do
-        {:ok, :authorized} ->
-          :authorized
+    case Arbor.Security.authorize(agent_id, resource, :execute, []) do
+      {:ok, :authorized} ->
+        :authorized
 
-        {:ok, :pending_approval, _proposal_id} ->
-          Logger.debug(
-            "Tool #{tool_name} requires approval for agent #{agent_id}, " <>
-              "excluding from available tools"
-          )
+      {:ok, :pending_approval, _proposal_id} ->
+        Logger.debug(
+          "Tool #{tool_name} requires approval for agent #{agent_id}, " <>
+            "excluding from available tools"
+        )
 
-          :pending_approval
+        :pending_approval
 
-        {:error, reason} ->
-          Logger.debug(
-            "Tool authorization denied for #{tool_name}, agent #{agent_id}: #{inspect(reason)}"
-          )
+      {:error, reason} ->
+        Logger.debug(
+          "Tool authorization denied for #{tool_name}, agent #{agent_id}: #{inspect(reason)}"
+        )
 
-          :unauthorized
-      end
-    else
-      Logger.debug(
-        "Arbor.Security not loaded — tool authorization check skipped for #{tool_name}"
-      )
-
-      :authorized
+        :unauthorized
     end
   rescue
     e ->

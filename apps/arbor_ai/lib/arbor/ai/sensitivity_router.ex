@@ -397,13 +397,10 @@ defmodule Arbor.AI.SensitivityRouter do
   defp trust_mode_to_routing(:auto), do: :auto
   defp trust_mode_to_routing(_), do: :warn
 
-  # Emit a signal via runtime bridge (arbor_ai is Standalone, no compile dep on signals).
+  # arbor_signals is a direct dep — emit directly. rescue/catch stay so a
+  # signal failure can never break routing.
   defp safe_emit_signal(type, data) do
-    if Code.ensure_loaded?(Arbor.Signals) and
-         function_exported?(Arbor.Signals, :emit, 3) do
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(Arbor.Signals, :emit, [:ai, type, data])
-    end
+    Arbor.Signals.emit(:ai, type, data)
   rescue
     _ -> :ok
   catch

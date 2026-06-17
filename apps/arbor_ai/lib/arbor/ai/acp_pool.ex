@@ -294,13 +294,8 @@ defmodule Arbor.AI.AcpPool do
     pg_join()
 
     # Clear the cached UnifiedLLM Client so it re-discovers adapters
-    # (including ACP now that the pool is running).
-    client_mod = Arbor.LLM.Client
-
-    if Code.ensure_loaded?(client_mod) and
-         function_exported?(client_mod, :clear_default_client, 0) do
-      apply(client_mod, :clear_default_client, [])
-    end
+    # (including ACP now that the pool is running). arbor_llm is a direct dep.
+    Arbor.LLM.Client.clear_default_client()
 
     {:ok,
      %__MODULE__{

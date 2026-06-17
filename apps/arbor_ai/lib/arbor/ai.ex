@@ -232,74 +232,65 @@ defmodule Arbor.AI do
         p -> p
       end
 
-    # Get the UnifiedLLM client and build request
-    client_mod = Module.concat([:Arbor, :LLM, :Client])
-    request_mod = Module.concat([:Arbor, :LLM, :Request])
-    message_mod = Module.concat([:Arbor, :LLM, :Message])
-    tool_loop_mod = Module.concat([:Arbor, :LLM, :ToolLoop])
+    # Get the UnifiedLLM client and build request. arbor_llm is a direct dep,
+    # so these are compile-time references — no runtime bridge needed.
+    client = Arbor.LLM.Client.default_client()
 
-    unless Code.ensure_loaded?(client_mod) and Code.ensure_loaded?(tool_loop_mod) do
-      Logger.warning("UnifiedLLM not available for tool-calling")
-      {:error, :unified_llm_unavailable}
-    else
-      client = apply(client_mod, :default_client, [])
+    # Build messages
+    messages =
+      case system_prompt do
+        nil ->
+          [Arbor.LLM.Message.new(:user, prompt)]
 
-      # Build messages
-      messages =
-        case system_prompt do
-          nil ->
-            [apply(message_mod, :new, [:user, prompt])]
-
-          sys ->
-            [apply(message_mod, :new, [:system, sys]), apply(message_mod, :new, [:user, prompt])]
-        end
-
-      request =
-        struct!(request_mod, %{
-          provider: to_string(provider),
-          model: model,
-          messages: messages,
-          max_tokens: Keyword.get(opts, :max_tokens, 16_384),
-          temperature: Keyword.get(opts, :temperature, 0.7)
-        })
-
-      # ToolLoop options
-      tool_loop_opts = [
-        max_turns: Keyword.get(opts, :max_turns, 10),
-        agent_id: agent_id || "system",
-        signer: Keyword.get(opts, :signer),
-        on_tool_call: Keyword.get(opts, :on_tool_call)
-      ]
-
-      # Run ToolLoop — single path through UnifiedLLM
-      case apply(tool_loop_mod, :run, [client, request, tool_loop_opts]) do
-        {:ok, response} ->
-          duration_ms = System.monotonic_time(:millisecond) - start_time
-
-          result = %{
-            text: response.content,
-            thinking: nil,
-            usage: response.usage,
-            model: model,
-            provider: to_string(provider),
-            tool_calls: response.tool_history,
-            tool_rounds: response.tool_rounds,
-            type: :tool_loop
-          }
-
-          ToolSignals.emit_completed(provider, model, duration_ms, result)
-          ToolSignals.record_budget_usage(provider, opts, result)
-          ToolSignals.record_usage_success(provider, opts, result, duration_ms)
-          LLMTrace.finish(trace, {:ok, result})
-          {:ok, result}
-
-        {:error, reason} ->
-          duration_ms = System.monotonic_time(:millisecond) - start_time
-          ToolSignals.emit_failed(provider, model, reason)
-          ToolSignals.record_usage_failure(provider, opts, reason, duration_ms)
-          LLMTrace.finish(trace, {:error, reason})
-          {:error, reason}
+        sys ->
+          [Arbor.LLM.Message.new(:system, sys), Arbor.LLM.Message.new(:user, prompt)]
       end
+
+    request =
+      struct!(Arbor.LLM.Request, %{
+        provider: to_string(provider),
+        model: model,
+        messages: messages,
+        max_tokens: Keyword.get(opts, :max_tokens, 16_384),
+        temperature: Keyword.get(opts, :temperature, 0.7)
+      })
+
+    # ToolLoop options
+    tool_loop_opts = [
+      max_turns: Keyword.get(opts, :max_turns, 10),
+      agent_id: agent_id || "system",
+      signer: Keyword.get(opts, :signer),
+      on_tool_call: Keyword.get(opts, :on_tool_call)
+    ]
+
+    # Run ToolLoop — single path through UnifiedLLM
+    case Arbor.LLM.ToolLoop.run(client, request, tool_loop_opts) do
+      {:ok, response} ->
+        duration_ms = System.monotonic_time(:millisecond) - start_time
+
+        result = %{
+          text: response.content,
+          thinking: nil,
+          usage: response.usage,
+          model: model,
+          provider: to_string(provider),
+          tool_calls: response.tool_history,
+          tool_rounds: response.tool_rounds,
+          type: :tool_loop
+        }
+
+        ToolSignals.emit_completed(provider, model, duration_ms, result)
+        ToolSignals.record_budget_usage(provider, opts, result)
+        ToolSignals.record_usage_success(provider, opts, result, duration_ms)
+        LLMTrace.finish(trace, {:ok, result})
+        {:ok, result}
+
+      {:error, reason} ->
+        duration_ms = System.monotonic_time(:millisecond) - start_time
+        ToolSignals.emit_failed(provider, model, reason)
+        ToolSignals.record_usage_failure(provider, opts, reason, duration_ms)
+        LLMTrace.finish(trace, {:error, reason})
+        {:error, reason}
     end
   end
 
@@ -1039,13 +1030,9 @@ defmodule Arbor.AI do
   defp embedding_backend_available?(backend) do
     provider_str = embedding_backend_to_provider(backend)
 
-    if Code.ensure_loaded?(Arbor.LLM.ProviderCatalog) do
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      catalog = apply(Arbor.LLM.ProviderCatalog, :all, [[]])
-      Enum.any?(catalog, fn entry -> entry.provider == provider_str and entry.available? end)
-    else
-      true
-    end
+    # arbor_llm is a direct dep — call the catalog directly.
+    catalog = Arbor.LLM.ProviderCatalog.all([])
+    Enum.any?(catalog, fn entry -> entry.provider == provider_str and entry.available? end)
   rescue
     _ -> true
   catch
