@@ -123,17 +123,14 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   @spec profile_tools(String.t()) :: {:ok, [String.t()]} | :fallback
   def profile_tools(agent_id) do
     cap_store = Module.concat([:Arbor, :Security, :CapabilityStore])
-    actions_mod = Module.concat([:Arbor, :Actions])
 
     if trust_policy_available?() and
          Code.ensure_loaded?(cap_store) and
-         function_exported?(cap_store, :list_for_principal, 1) and
-         Code.ensure_loaded?(actions_mod) and
-         function_exported?(actions_mod, :all_actions, 0) do
+         function_exported?(cap_store, :list_for_principal, 1) do
       {:ok, caps} = apply(cap_store, :list_for_principal, [agent_id])
 
       # Build reverse map: canonical_uri -> tool_name
-      reverse_map = build_uri_to_tool_name_map(actions_mod)
+      reverse_map = build_uri_to_tool_name_map()
 
       # Only expose tools the agent has specific capabilities for
       tools =
@@ -146,7 +143,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
         end)
         |> Enum.filter(fn name ->
           # Respect trust profile — hide :block tools
-          case apply(actions_mod, :tool_name_to_canonical_uri, [name]) do
+          case Arbor.Actions.tool_name_to_canonical_uri(name) do
             {:ok, uri} -> get_effective_mode(agent_id, uri) != :block
             _ -> true
           end
@@ -181,27 +178,23 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   end
 
   # Build a reverse lookup: canonical_uri -> tool_name from all registered actions
-  defp build_uri_to_tool_name_map(actions_mod) do
-    if function_exported?(actions_mod, :all_actions, 0) do
-      apply(actions_mod, :all_actions, [])
-      |> Enum.flat_map(fn action_mod ->
-        name = if function_exported?(action_mod, :name, 0), do: action_mod.name(), else: nil
+  defp build_uri_to_tool_name_map do
+    Arbor.Actions.all_actions()
+    |> Enum.flat_map(fn action_mod ->
+      name = if function_exported?(action_mod, :name, 0), do: action_mod.name(), else: nil
 
-        if name do
-          tool_name = to_string(name)
+      if name do
+        tool_name = to_string(name)
 
-          case apply(actions_mod, :tool_name_to_canonical_uri, [tool_name]) do
-            {:ok, uri} -> [{uri, tool_name}]
-            _ -> []
-          end
-        else
-          []
+        case Arbor.Actions.tool_name_to_canonical_uri(tool_name) do
+          {:ok, uri} -> [{uri, tool_name}]
+          _ -> []
         end
-      end)
-      |> Map.new()
-    else
-      %{}
-    end
+      else
+        []
+      end
+    end)
+    |> Map.new()
   end
 
   @doc """
@@ -213,12 +206,8 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   """
   @spec ask_mode_tools(String.t()) :: MapSet.t()
   def ask_mode_tools(agent_id) do
-    actions_mod = Module.concat([:Arbor, :Actions])
-
-    if trust_policy_available?() and
-         Code.ensure_loaded?(actions_mod) and
-         function_exported?(actions_mod, :all_actions, 0) do
-      all_actions = apply(actions_mod, :all_actions, [])
+    if trust_policy_available?() do
+      all_actions = Arbor.Actions.all_actions()
 
       all_actions
       |> Enum.filter(fn action_mod ->
@@ -228,8 +217,8 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
             else: nil
 
         uri =
-          if name && function_exported?(actions_mod, :tool_name_to_canonical_uri, 1) do
-            case apply(actions_mod, :tool_name_to_canonical_uri, [to_string(name)]) do
+          if name do
+            case Arbor.Actions.tool_name_to_canonical_uri(to_string(name)) do
               {:ok, u} -> u
               _ -> nil
             end
@@ -289,16 +278,13 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   # ===========================================================================
 
   defp do_ensure_tool_capabilities(agent_id, tool_names) do
-    actions_mod = Module.concat([:Arbor, :Actions])
     security_mod = Module.concat([:Arbor, :Security])
 
-    if Code.ensure_loaded?(actions_mod) and
-         function_exported?(actions_mod, :tool_name_to_canonical_uri, 1) and
-         Code.ensure_loaded?(security_mod) and
+    if Code.ensure_loaded?(security_mod) and
          function_exported?(security_mod, :grant, 1) do
       tool_names
       |> Enum.each(fn name ->
-        with {:ok, uri} <- apply(actions_mod, :tool_name_to_canonical_uri, [name]) do
+        with {:ok, uri} <- Arbor.Actions.tool_name_to_canonical_uri(name) do
           apply(security_mod, :grant, [
             [
               principal: agent_id,

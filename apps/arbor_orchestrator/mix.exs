@@ -42,6 +42,11 @@ defmodule Arbor.Orchestrator.MixProject do
       # introduces no cycle.
       {:arbor_contracts, in_umbrella: true},
       {:arbor_common, in_umbrella: true},
+      # arbor_actions is a hard dep: the orchestrator executes Jido actions
+      # (syscalls) via Arbor.Actions directly. arbor_actions does NOT depend on
+      # arbor_orchestrator (verified acyclic), and only arbor_commands +
+      # arbor_dashboard depend on the orchestrator, so this introduces no cycle.
+      {:arbor_actions, in_umbrella: true},
       {:arbor_llm, in_umbrella: true},
       {:arbor_persistence, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},

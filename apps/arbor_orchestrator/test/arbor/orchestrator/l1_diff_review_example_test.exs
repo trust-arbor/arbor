@@ -19,7 +19,12 @@ defmodule Arbor.Orchestrator.L1DiffReviewExampleTest do
   @moduletag timeout: 600_000
 
   alias Arbor.Contracts.Security.{Capability, Identity, SignedRequest}
-  alias Arbor.Gateway.Signer.ProxyCore
+  # Parse the agent key file via the canonical home in arbor_security
+  # (Arbor.Gateway.Signer.ProxyCore.parse_key_file/1 is just a defdelegate to
+  # this). arbor_gateway is NOT a dep of arbor_orchestrator, so ProxyCore is
+  # unreachable in the isolated per-app test BEAM; Arbor.Security.KeyFile is
+  # reachable transitively via the arbor_actions dep.
+  alias Arbor.Security.KeyFile
 
   @dot_path Path.expand("../../../specs/pipelines/security/l1-diff-review.dot", __DIR__)
   @default_key "~/.claude/arbor-personal/claude_cli_mbp.arbor.key"
@@ -68,7 +73,7 @@ defmodule Arbor.Orchestrator.L1DiffReviewExampleTest do
     if not File.exists?(key_path), do: flunk("No arbor identity key at #{key_path}")
 
     {:ok, %{agent_id: agent_id, private_key: private_key}} =
-      key_path |> File.read!() |> ProxyCore.parse_key_file()
+      key_path |> File.read!() |> KeyFile.parse()
 
     {public_key, _} = :crypto.generate_key(:eddsa, :ed25519, private_key)
     {:ok, identity} = Identity.new(public_key: public_key, name: "l1-diff-review-example-test")

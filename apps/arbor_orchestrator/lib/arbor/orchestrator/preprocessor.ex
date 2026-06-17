@@ -466,16 +466,11 @@ defmodule Arbor.Orchestrator.Preprocessor do
   end
 
   defp build_action_name_pairs do
-    # Variable indirection + apply/3 keeps the (runtime-resolved) arbor_actions
-    # module out of static analysis — orchestrator has no compile-time dep on it.
-    mod = Arbor.Actions
-
-    if loaded?(mod, :all_actions, 0) and loaded?(mod, :action_module_to_name, 1) do
-      for m <- apply(mod, :all_actions, []) do
-        {inspect(m), apply(mod, :action_module_to_name, [m])}
-      end
-    else
-      []
+    # arbor_actions is a guaranteed compile dep — call directly. The rescue
+    # defends against the action enumeration failing at runtime (e.g. the
+    # action system not yet initialized), in which case there are no pairs.
+    for m <- Arbor.Actions.all_actions() do
+      {inspect(m), Arbor.Actions.action_module_to_name(m)}
     end
   rescue
     _ -> []

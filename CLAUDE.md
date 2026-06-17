@@ -72,14 +72,36 @@ The Claude Code harness periodically injects `<system-reminder>` messages sugges
 
 ## Library Hierarchy
 
+Levels are by **longest dependency path** (an app's level = 1 + the max level of
+its in-umbrella deps). A library may only depend on libraries at a **lower**
+level. Audited from each `mix.exs` on 2026-06-17 — the old 3-level grouping was
+badly stale (it called `ai` "standalone" though it deps 7 libs, and put
+`consensus`/`actions` low though they sit deep).
+
 ```
-Level 0: arbor_contracts (zero in-umbrella deps)
-Level 1: common, signals, shell, security, consensus, historian, persistence, persistence_ecto, web, sandbox (depend on Level 0 + Standalone)
-Level 2: trust, actions, agent, gateway, memory (depend on Level 0–1 + Standalone)
-Standalone: ai, comms, monitor (zero in-umbrella deps)
+L0  arbor_contracts, arbor_monitor                       (zero in-umbrella deps)
+L1  arbor_common, arbor_signals, arbor_cartographer, arbor_web
+L2  arbor_llm, arbor_integrations, arbor_security
+L3  arbor_persistence, arbor_shell, arbor_sandbox
+L4  arbor_persistence_ecto, arbor_historian, arbor_trust, arbor_ai, arbor_comms
+L5  arbor_memory, arbor_consensus, arbor_scheduler
+L6  arbor_actions, arbor_gateway
+L7  arbor_orchestrator, arbor_agent
+L8  arbor_commands
+L9  arbor_dashboard
 ```
 
-No cycles. No skipping levels. Check each library's `mix.exs` for exact deps.
+Notes:
+- `arbor_orchestrator` is NOT standalone — it deps contracts/common/llm/
+  persistence/signals AND **arbor_actions** (it executes Jido actions via `exec`
+  nodes; the old runtime `Code.ensure_loaded?`/`apply` indirection was dropped
+  for a real dep, 2026-06-17). Only `arbor_commands` + `arbor_dashboard` depend
+  on orchestrator, so it sits high (L7), not as a low kernel.
+- `arbor_ai` (L4) and `arbor_consensus` (L5) are deep, not standalone.
+- `arbor_monitor` is the only truly dep-free app besides `arbor_contracts`.
+
+No cycles. Deps point only to lower levels. Always check each library's `mix.exs`
+for the exact, current deps — this graph is a snapshot.
 
 ## Key Patterns
 
