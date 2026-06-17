@@ -61,10 +61,8 @@ defmodule Arbor.Gateway.IntentExtractor do
   """
 
   defp extraction_prompt do
-    lib = Arbor.Common.SkillLibrary
-
-    if Code.ensure_loaded?(lib) and Process.whereis(lib) != nil do
-      case lib.get("intent-extraction") do
+    if Process.whereis(Arbor.Common.SkillLibrary) != nil do
+      case Arbor.Common.SkillLibrary.get("intent-extraction") do
         {:ok, skill} when skill.body != "" -> skill.body
         _ -> @fallback_extraction_prompt
       end

@@ -149,20 +149,9 @@ defmodule Arbor.Security do
       source: :compute_node
     }
 
-    cond do
-      # Prefer durable emission so observe-before-enable data persists to the
-      # EventLog (security:events stream), matching the action path.
-      Code.ensure_loaded?(Arbor.Signals) and function_exported?(Arbor.Signals, :durable_emit, 4) ->
-        Arbor.Signals.durable_emit(:security, :egress_observed, data,
-          stream_id: "security:events"
-        )
-
-      Code.ensure_loaded?(Arbor.Signals) and function_exported?(Arbor.Signals, :emit, 3) ->
-        Arbor.Signals.emit(:security, :egress_observed, data)
-
-      true ->
-        :ok
-    end
+    # Prefer durable emission so observe-before-enable data persists to the
+    # EventLog (security:events stream), matching the action path.
+    Arbor.Signals.durable_emit(:security, :egress_observed, data, stream_id: "security:events")
 
     :ok
   rescue

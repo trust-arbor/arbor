@@ -137,18 +137,16 @@ defmodule Arbor.Gateway.MCP.EndpointRegistry do
   end
 
   defp emit_distributed_signal(type, agent_id, tools) do
-    if Code.ensure_loaded?(Arbor.Signals) do
-      Arbor.Signals.emit(
-        :gateway,
-        type,
-        %{
-          agent_id: agent_id,
-          tools: tools,
-          origin_node: node()
-        },
-        scope: :cluster
-      )
-    end
+    Arbor.Signals.emit(
+      :gateway,
+      type,
+      %{
+        agent_id: agent_id,
+        tools: tools,
+        origin_node: node()
+      },
+      scope: :cluster
+    )
 
     :ok
   catch
@@ -160,7 +158,7 @@ defmodule Arbor.Gateway.MCP.EndpointRegistry do
   defp subscribe_to_distributed_signals do
     bus = Arbor.Signals.Bus
 
-    if Code.ensure_loaded?(bus) and Process.whereis(bus) do
+    if Process.whereis(bus) do
       me = self()
 
       for type <- ~w(endpoint_registered endpoint_unregistered) do
