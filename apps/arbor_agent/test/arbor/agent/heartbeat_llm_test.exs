@@ -17,12 +17,16 @@ defmodule Arbor.Agent.HeartbeatLLMTest do
 
   # The two tests below that actually drive the LLM ("builds prompt..."
   # and idle_think "returns error or valid result") route at homelab
-  # Ollama with a fast small model (via ARBOR_OLLAMA_BASE_URL) instead of
-  # the slow default provider that previously timed out at 10s.
-  # max_tokens kept small so generation is fast on a shared Ollama — these
-  # are mechanics tests (the model just needs to respond), not output-quality
-  # checks. receive_timeout bounds per-chunk idle wait.
-  @llm_opts [provider: :ollama, model: "granite3.3:2b", max_tokens: 64, receive_timeout: 30_000]
+  # Ollama (via ARBOR_OLLAMA_BASE_URL) instead of the slow default provider
+  # that previously timed out at 10s. The model is NOT pinned to a specific
+  # backend tag — by omitting `:model`, `Arbor.AI.generate_text/2` resolves it
+  # from the lane's configured default (`UNIFIED_LLM_DEFAULT_MODEL`, surfaced
+  # via `Arbor.AI.Config.default_model/0`), so these tests follow whatever
+  # model the LLM lane points at. max_tokens kept small so generation is fast
+  # on a shared Ollama — these are mechanics tests (the model just needs to
+  # respond), not output-quality checks. receive_timeout bounds per-chunk idle
+  # wait (bumped to 120s to absorb a cold/partial-offload first call).
+  @llm_opts [provider: :ollama, max_tokens: 64, receive_timeout: 120_000]
 
   defp minimal_state(overrides \\ %{}) do
     Map.merge(

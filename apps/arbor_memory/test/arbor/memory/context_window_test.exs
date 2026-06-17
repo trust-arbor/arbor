@@ -1054,9 +1054,12 @@ defmodule Arbor.Memory.ContextWindowTest do
     setup do
       # Small budget to trigger compression easily.
       # Use summarization_enabled: true so compression is deferred to compress_if_needed.
-      # Summarization AND fact extraction route through homelab Ollama
-      # with a fast model — these are mechanics tests ("should not raise"),
-      # so the model just needs to respond quickly.
+      # Summarization AND fact extraction route through homelab Ollama —
+      # these are mechanics tests ("should not raise"), so the model just
+      # needs to respond quickly. The model is NOT pinned to a backend tag:
+      # by omitting *_model, ContextWindow.Compression passes no `:model` opt
+      # so `Arbor.AI.generate_text/2` resolves it from the lane's configured
+      # default (`UNIFIED_LLM_DEFAULT_MODEL` via `Arbor.AI.Config`).
       window =
         ContextWindow.new("agent_pipeline",
           multi_layer: true,
@@ -1064,9 +1067,7 @@ defmodule Arbor.Memory.ContextWindowTest do
           summarization_enabled: true,
           fact_extraction_enabled: true,
           summarization_provider: :ollama,
-          summarization_model: "granite3.3:2b",
           fact_extraction_provider: :ollama,
-          fact_extraction_model: "granite3.3:2b",
           ratios: %{
             full_detail: 0.50,
             recent_summary: 0.25,
