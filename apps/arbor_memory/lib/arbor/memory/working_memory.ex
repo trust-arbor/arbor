@@ -932,6 +932,26 @@ defmodule Arbor.Memory.WorkingMemory do
     }
   end
 
+  # Documented temporal-note shape emitted by the heartbeat prompt:
+  # {"text": "...", "referenced_date": "YYYY-MM-DD"}. Treat "text" as the content.
+  defp normalize_thought(%{"text" => text} = thought) do
+    %{
+      content: text,
+      timestamp: parse_datetime(thought["timestamp"]) || DateTime.utc_now(),
+      cached_tokens: thought["cached_tokens"] || TokenBudget.estimate_tokens(text),
+      referenced_date: parse_datetime(thought["referenced_date"])
+    }
+  end
+
+  defp normalize_thought(%{text: text} = thought) do
+    %{
+      content: text,
+      timestamp: parse_datetime(thought[:timestamp]) || DateTime.utc_now(),
+      cached_tokens: thought[:cached_tokens] || TokenBudget.estimate_tokens(text),
+      referenced_date: parse_datetime(thought[:referenced_date])
+    }
+  end
+
   defp normalize_goal(nil), do: nil
 
   defp normalize_goal(goal) when is_binary(goal) do

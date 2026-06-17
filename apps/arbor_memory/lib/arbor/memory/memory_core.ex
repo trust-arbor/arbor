@@ -53,6 +53,26 @@ defmodule Arbor.Memory.MemoryCore do
     }
   end
 
+  # Documented temporal-note shape emitted by the heartbeat prompt:
+  # {"text": "...", "referenced_date": "YYYY-MM-DD"}. Treat "text" as the content.
+  def normalize_thought(%{"text" => text} = thought) do
+    %{
+      content: text,
+      timestamp: thought["timestamp"] || DateTime.utc_now(),
+      cached_tokens: thought["cached_tokens"] || estimate_tokens(text),
+      referenced_date: thought["referenced_date"]
+    }
+  end
+
+  def normalize_thought(%{text: text} = thought) do
+    %{
+      content: text,
+      timestamp: thought[:timestamp] || DateTime.utc_now(),
+      cached_tokens: thought[:cached_tokens] || estimate_tokens(text),
+      referenced_date: thought[:referenced_date]
+    }
+  end
+
   def normalize_thought(other), do: normalize_thought(inspect(other))
 
   @doc "Normalize a goal to a structured map with required fields."
@@ -325,7 +345,7 @@ defmodule Arbor.Memory.MemoryCore do
           text =
             goals
             |> Enum.map(fn g ->
-              progress = Float.round((Map.get(g, :progress, 0.0)) * 100, 0)
+              progress = Float.round(Map.get(g, :progress, 0.0) * 100, 0)
               "- [#{progress}%] #{Map.get(g, :description, "")}"
             end)
             |> Enum.join("\n")
@@ -462,7 +482,8 @@ defmodule Arbor.Memory.MemoryCore do
     }
   end
 
-  def goal_summary(_), do: %{total: 0, active: 0, achieved: 0, failed: 0, abandoned: 0, avg_progress: 0.0}
+  def goal_summary(_),
+    do: %{total: 0, active: 0, achieved: 0, failed: 0, abandoned: 0, avg_progress: 0.0}
 
   # ===========================================================================
   # Private
@@ -482,6 +503,7 @@ defmodule Arbor.Memory.MemoryCore do
 
   defp safe_atom(nil, default), do: default
   defp safe_atom(a, _default) when is_atom(a), do: a
+
   defp safe_atom(s, default) when is_binary(s) do
     try do
       String.to_existing_atom(s)
@@ -489,6 +511,7 @@ defmodule Arbor.Memory.MemoryCore do
       ArgumentError -> default
     end
   end
+
   defp safe_atom(_, default), do: default
 
   defp maybe_update(map, _key, nil), do: map

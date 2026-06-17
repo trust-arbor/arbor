@@ -82,10 +82,39 @@ config :arbor_memory, start_children: false
 config :arbor_shell, start_children: false
 config :arbor_sandbox, start_children: false
 
+# ---------------------------------------------------------------------------
+# Centralize path-specific LLM model config on UNIFIED_LLM_DEFAULT_MODEL.
+#
+# The non-gating :llm lane points UNIFIED_LLM_DEFAULT_MODEL at a local Ollama
+# model (e.g. gemma4:e4b). Only :arbor_ai default_model honored that env var
+# previously; these path-specific keys stayed hardcoded to OpenRouter/Anthropic
+# models (and providers) and thus 404'd against the local Ollama backend.
+#
+# When UNIFIED_LLM_DEFAULT_MODEL is set we override each model AND its provider
+# to a plain Ollama model id / :ollama. When it is unset, every fallback is the
+# CURRENT config.exs value, so the gating/dev lane behavior is unchanged.
+unified_llm_model = System.get_env("UNIFIED_LLM_DEFAULT_MODEL")
+
+# arbor_agent: heartbeat + idle-heartbeat + context summarizer.
+# Providers MUST also flip to :ollama — Arbor.Agent.LLMDefaults / ContextSummarizer
+# resolve heartbeat_provider/summarizer_provider from these keys first, so leaving
+# them at :openrouter/:anthropic would route the Ollama model id to the wrong host.
 config :arbor_agent,
   start_children: false,
   profile_storage_backend: nil,
-  bootstrap_enabled: false
+  bootstrap_enabled: false,
+  heartbeat_model: unified_llm_model || "openai/gpt-oss-20b:free",
+  idle_heartbeat_model: unified_llm_model || "openai/gpt-oss-20b:free",
+  heartbeat_provider: if(unified_llm_model, do: :ollama, else: :openrouter),
+  summarizer_model: unified_llm_model || "claude-haiku",
+  summarizer_provider: if(unified_llm_model, do: :ollama, else: :anthropic)
+
+# arbor_memory: default_model. NOTE: no code path currently reads
+# :arbor_memory/:default_model (verified — it is inert today), but we override it
+# from the env var for consistency so any future reader resolves to the local
+# Ollama model. Fallback is the current config.exs value.
+config :arbor_memory,
+  default_model: unified_llm_model || "anthropic:claude-sonnet-4-5-20250514"
 
 config :arbor_historian, start_children: false
 config :arbor_dashboard, start_children: false
