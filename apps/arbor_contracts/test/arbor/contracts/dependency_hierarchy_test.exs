@@ -44,11 +44,29 @@ defmodule Arbor.Contracts.DependencyHierarchyTest do
   defp dep_graph do
     root = umbrella_root()
 
-    Path.wildcard(Path.join([root, "apps", "*", "mix.exs"]))
+    tracked_mix_files(root)
     |> Map.new(fn path ->
       app = Path.basename(Path.dirname(path))
       {app, in_umbrella_deps(path)}
     end)
+  end
+
+  # Use git-TRACKED mix.exs files, not a filesystem glob, so the computed graph
+  # reflects the COMMITTED umbrella and is identical in CI and locally. A bare
+  # `Path.wildcard` picks up gitignored local-only apps (e.g.
+  # `apps/arbor_integrations/`, a private business-integrations app excluded via
+  # .gitignore) — which made this test pass on a dev machine but fail in CI's
+  # clean checkout, since the docs describe only the committed apps.
+  defp tracked_mix_files(root) do
+    case System.cmd("git", ["-C", root, "ls-files", "apps/*/mix.exs"], stderr_to_stdout: true) do
+      {out, 0} ->
+        out |> String.split("\n", trim: true) |> Enum.map(&Path.join(root, &1))
+
+      _ ->
+        # Not a git checkout (e.g. an extracted tarball) — best-effort fallback.
+        # In-repo CI/local always take the git path above.
+        Path.wildcard(Path.join([root, "apps", "*", "mix.exs"]))
+    end
   end
 
   defp in_umbrella_deps(path) do
