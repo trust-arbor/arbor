@@ -538,12 +538,13 @@ defmodule Arbor.Consensus do
   # Private — Runtime authorization bridge
   # ============================================================================
 
-  # arbor_consensus does not have a compile-time dependency on arbor_security,
-  # so we use Code.ensure_loaded? + function_exported? to avoid hard coupling.
+  # arbor_security is a hard dep (so the module is always loaded — no
+  # Code.ensure_loaded?/function_exported? module-presence guard). The runtime
+  # security_available?/0 LIVENESS probe still matters: the Security subsystem
+  # can be loaded-but-unhealthy, in which case we route to the
+  # when_security_unavailable/0 H6 seam rather than calling authorize.
   defp authorize(caller_id, resource_uri) do
-    if Code.ensure_loaded?(Arbor.Security) and
-         function_exported?(Arbor.Security, :authorize, 4) and
-         security_available?() do
+    if security_available?() do
       # Identity already verified at action layer — just check capability
       case Arbor.Security.authorize(caller_id, resource_uri, :execute, verify_identity: false) do
         {:ok, :authorized} -> :ok
@@ -552,7 +553,8 @@ defmodule Arbor.Consensus do
       end
     else
       # H6: pre-fix, this branch returned :ok unconditionally — partial
-      # security outages silently became unconditional authorization.
+      # security outages silently became unconditional authorization. The
+      # strict_facade_mode? seam denies in prod (and wherever it is set).
       when_security_unavailable()
     end
   end
@@ -576,16 +578,10 @@ defmodule Arbor.Consensus do
   end
 
   defp security_available? do
-    if function_exported?(Arbor.Security, :healthy?, 0) do
-      try do
-        Arbor.Security.healthy?()
-      rescue
-        _ -> false
-      catch
-        :exit, _ -> false
-      end
-    else
-      true
-    end
+    Arbor.Security.healthy?()
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 end
