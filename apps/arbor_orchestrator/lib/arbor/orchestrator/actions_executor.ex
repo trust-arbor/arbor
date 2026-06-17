@@ -23,8 +23,6 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   require Logger
 
-  @actions_mod Module.concat([:Arbor, :Actions])
-
   @doc """
   Execute an action by name with optional agent identity for authorization.
 
@@ -43,7 +41,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     signed_request = Keyword.get(opts, :signed_request)
     signer = Keyword.get(opts, :signer)
 
-    with_actions_module(fn ->
+    run_action(fn ->
       # Try ActionRegistry first (O(1) ETS lookup), fall back to build_action_map
       normalized = normalize_name(name)
 
@@ -107,12 +105,12 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
               end
             end)
 
-          case apply(@actions_mod, :authorize_and_execute, [
+          case Arbor.Actions.authorize_and_execute(
                  agent_id,
                  action_module,
                  params,
                  context
-               ]) do
+               ) do
             {:ok, :pending_approval, proposal_id} ->
               await_approval_and_retry(
                 proposal_id,
@@ -145,7 +143,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
               {:error, msg}
           end
       end
-    end) || {:error, "Arbor.Actions not available"}
+    end)
   end
 
   @doc """
@@ -156,20 +154,26 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   """
   @spec build_action_map() :: %{String.t() => module()}
   def build_action_map do
-    with_actions_module(fn ->
-      apply(@actions_mod, :all_actions, [])
-      |> Enum.flat_map(fn module ->
-        tool = module.to_tool()
-        canonical = apply(@actions_mod, :action_module_to_name, [module])
-        # Include both canonical (dot) and Jido (underscore) names
-        if canonical == tool.name do
-          [{canonical, module}]
-        else
-          [{canonical, module}, {tool.name, module}]
-        end
-      end)
-      |> Map.new()
-    end) || %{}
+    Arbor.Actions.all_actions()
+    |> Enum.flat_map(fn module ->
+      tool = module.to_tool()
+      canonical = Arbor.Actions.action_module_to_name(module)
+      # Include both canonical (dot) and Jido (underscore) names
+      if canonical == tool.name do
+        [{canonical, module}]
+      else
+        [{canonical, module}, {tool.name, module}]
+      end
+    end)
+    |> Map.new()
+  rescue
+    # The action SYSTEM may not be fully initialized in every context. The
+    # module is a guaranteed compile dep now, but defend against runtime
+    # enumeration failures by returning an empty map (callers treat this as
+    # "no actions resolvable").
+    e ->
+      Logger.warning("ActionsExecutor.build_action_map failed: #{Exception.message(e)}")
+      %{}
   end
 
   # Default timeout for synchronous approval waits (in milliseconds).
@@ -268,12 +272,12 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     # Grant a clean capability for this resource so retry succeeds
     grant_approved_capability(agent_id, action_module, context)
 
-    case apply(@actions_mod, :authorize_and_execute, [
+    case Arbor.Actions.authorize_and_execute(
            agent_id,
            action_module,
            params,
            context
-         ]) do
+         ) do
       {:ok, result} ->
         {:ok, format_result(result)}
 
@@ -310,7 +314,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     security_mod = Module.concat([:Arbor, :Security])
 
     if Code.ensure_loaded?(security_mod) and function_exported?(security_mod, :grant, 1) do
-      resource = apply(@actions_mod, :canonical_uri_for, [action_module, %{}])
+      resource = Arbor.Actions.canonical_uri_for(action_module, %{})
 
       # Extract session_id from context if available
       session_id =
@@ -340,7 +344,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     tracker = Module.concat([:Arbor, :Trust, :ConfirmationTracker])
 
     if Code.ensure_loaded?(tracker) and Process.whereis(tracker) do
-      resource = apply(@actions_mod, :canonical_uri_for, [action_module, %{}])
+      resource = Arbor.Actions.canonical_uri_for(action_module, %{})
       apply(tracker, :record_approval, [agent_id, resource])
     end
   rescue
@@ -353,7 +357,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     tracker = Module.concat([:Arbor, :Trust, :ConfirmationTracker])
 
     if Code.ensure_loaded?(tracker) and Process.whereis(tracker) do
-      resource = apply(@actions_mod, :canonical_uri_for, [action_module, %{}])
+      resource = Arbor.Actions.canonical_uri_for(action_module, %{})
       apply(tracker, :record_rejection, [agent_id, resource])
     end
   rescue
@@ -516,7 +520,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   defp sign_for_module(nil, _action_module, _params), do: nil
 
   defp sign_for_module(signer, action_module, params) when is_function(signer, 1) do
-    resource = apply(@actions_mod, :canonical_uri_for, [action_module, params])
+    resource = Arbor.Actions.canonical_uri_for(action_module, params)
 
     case signer.(resource) do
       {:ok, signed_request} ->
@@ -531,10 +535,33 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   defp sign_for_module(_, _, _), do: nil
 
-  # Runtime bridge — don't crash if arbor_actions isn't loaded
+  # Execute an action thunk. arbor_actions is a guaranteed compile dep, so the
+  # module is always loaded — this no longer guards module availability. It
+  # only converts an unexpected crash inside action execution into a clear
+  # error result instead of letting it propagate as a raw exception (e.g. when
+  # the action SYSTEM, like ActionRegistry, is not running in some context).
+  @doc false
+  def run_action(fun) do
+    fun.()
+  rescue
+    e ->
+      Logger.warning(
+        "ActionsExecutor: #{Exception.message(e)}\n  #{Exception.format_stacktrace(__STACKTRACE__) |> String.slice(0..500)}"
+      )
+
+      {:error, "Action execution failed: #{Exception.message(e)}"}
+  end
+
+  # Public runtime bridge for callers that have NO compile-time dep on
+  # arbor_actions and reach the orchestrator only via runtime apply/3
+  # (e.g. Arbor.LLM.ArborActionsExecutor, a Level-1 lib that can't depend on
+  # the Level-2 arbor_actions). For those callers the "is the actions module
+  # loaded?" guard is still meaningful, so this preserves the original
+  # nil-on-unavailable contract. Orchestrator-internal code calls the actions
+  # module directly and does NOT use this.
   @doc false
   def with_actions_module(fun) do
-    if Code.ensure_loaded?(@actions_mod) do
+    if Code.ensure_loaded?(Arbor.Actions) do
       fun.()
     else
       nil

@@ -120,8 +120,8 @@ defmodule Arbor.Orchestrator.Registrar do
   # --- Action Registry ---
 
   defp register_actions(failures) do
-    if Process.whereis(ActionRegistry) != nil and Code.ensure_loaded?(Arbor.Actions) do
-      actions = apply(Arbor.Actions, :list_actions, [])
+    if Process.whereis(ActionRegistry) != nil do
+      actions = Arbor.Actions.list_actions()
 
       action_failures =
         Enum.flat_map(actions, fn {category, modules} ->
