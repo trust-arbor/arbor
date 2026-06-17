@@ -264,19 +264,16 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
   end
 
   defp persist_group_message(group_id, msg) do
-    store = Arbor.Persistence.SessionStore
-
-    if Code.ensure_loaded?(store) and function_exported?(store, :available?, 0) and
-         apply(store, :available?, []) do
+    if Arbor.Persistence.SessionStore.available?() do
       session_id = "group-session-#{group_id}"
 
       session_uuid =
-        case apply(store, :get_session, [session_id]) do
+        case Arbor.Persistence.SessionStore.get_session(session_id) do
           {:ok, s} ->
             s.id
 
           {:error, :not_found} ->
-            case apply(store, :create_session, [group_id, [session_id: session_id]]) do
+            case Arbor.Persistence.SessionStore.create_session(group_id, session_id: session_id) do
               {:ok, s} -> s.id
               _ -> nil
             end
@@ -288,15 +285,12 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
         content_text =
           if is_binary(msg[:content]), do: msg[:content], else: inspect(msg[:content])
 
-        apply(store, :append_entry, [
-          session_uuid,
-          %{
-            entry_type: role,
-            role: role,
-            content: [%{"type" => "text", "text" => content_text}],
-            timestamp: msg[:timestamp] || DateTime.utc_now()
-          }
-        ])
+        Arbor.Persistence.SessionStore.append_entry(session_uuid, %{
+          entry_type: role,
+          role: role,
+          content: [%{"type" => "text", "text" => content_text}],
+          timestamp: msg[:timestamp] || DateTime.utc_now()
+        })
       end
     end
   rescue
@@ -306,11 +300,10 @@ defmodule Arbor.Dashboard.Live.ChatLive.GroupChat do
   end
 
   defp comms_channel_members(channel_id) do
-    if Code.ensure_loaded?(Arbor.Comms) and
-         function_exported?(Arbor.Comms, :channel_members, 1) do
-      apply(Arbor.Comms, :channel_members, [channel_id])
-    else
-      {:error, :comms_unavailable}
-    end
+    Arbor.Comms.channel_members(channel_id)
+  rescue
+    _ -> {:error, :comms_unavailable}
+  catch
+    :exit, _ -> {:error, :comms_unavailable}
   end
 end

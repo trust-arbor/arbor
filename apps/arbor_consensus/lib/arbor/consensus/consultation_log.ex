@@ -18,14 +18,15 @@ defmodule Arbor.Consensus.ConsultationLog do
 
   ## Graceful Degradation
 
-  Uses runtime bridge to `Arbor.Persistence`. When Postgres isn't running,
-  results are silently dropped (logged at debug level). This ensures
+  Calls `Arbor.Persistence` directly (declared dep). When Postgres isn't
+  running, results are silently dropped (logged at debug level). This ensures
   consultations never fail due to persistence issues.
   """
 
   require Logger
 
-  @persistence_mod Arbor.Persistence
+  alias Arbor.Persistence
+
   @domain "advisory_consultation"
 
   # ============================================================================
@@ -57,7 +58,7 @@ defmodule Arbor.Consensus.ConsultationLog do
 
       result_attrs = build_result(run_id, question, perspective, eval, llm_meta)
 
-      case apply(@persistence_mod, :insert_eval_result, [result_attrs]) do
+      case Persistence.insert_eval_result(result_attrs) do
         {:ok, _} ->
           Logger.debug("ConsultationLog: stored #{perspective} result for run #{run_id}")
 
@@ -102,7 +103,7 @@ defmodule Arbor.Consensus.ConsultationLog do
         }
       }
 
-      case apply(@persistence_mod, :insert_eval_run, [run_attrs]) do
+      case Persistence.insert_eval_run(run_attrs) do
         {:ok, _} -> run_id
         {:error, _} -> nil
       end
@@ -119,10 +120,7 @@ defmodule Arbor.Consensus.ConsultationLog do
     if available?() do
       successful = Enum.count(results, fn {_, eval} -> is_map(eval) end)
 
-      apply(@persistence_mod, :update_eval_run, [
-        run_id,
-        %{status: "completed", sample_count: successful}
-      ])
+      Persistence.update_eval_run(run_id, %{status: "completed", sample_count: successful})
     end
 
     :ok
@@ -167,7 +165,7 @@ defmodule Arbor.Consensus.ConsultationLog do
         }
       }
 
-      case apply(@persistence_mod, :insert_eval_run, [run_attrs]) do
+      case Persistence.insert_eval_run(run_attrs) do
         {:ok, _} ->
           result_attrs =
             Enum.map(results, fn {perspective, eval} ->
@@ -176,8 +174,12 @@ defmodule Arbor.Consensus.ConsultationLog do
               build_result(run_id, question, perspective, eval, llm_meta)
             end)
 
-          apply(@persistence_mod, :insert_eval_results_batch, [result_attrs])
-          Logger.debug("ConsultationLog: stored consultation #{run_id} with #{length(results)} results")
+          Persistence.insert_eval_results_batch(result_attrs)
+
+          Logger.debug(
+            "ConsultationLog: stored consultation #{run_id} with #{length(results)} results"
+          )
+
           {:ok, run_id}
 
         {:error, reason} ->
@@ -201,7 +203,7 @@ defmodule Arbor.Consensus.ConsultationLog do
   def list_consultations(filters \\ []) do
     if available?() do
       filters = Keyword.put(filters, :domain, @domain)
-      apply(@persistence_mod, :list_eval_runs, [filters])
+      Persistence.list_eval_runs(filters)
     else
       {:error, :unavailable}
     end
@@ -213,7 +215,7 @@ defmodule Arbor.Consensus.ConsultationLog do
   @spec get_consultation(String.t()) :: {:ok, map()} | {:error, term()}
   def get_consultation(run_id) do
     if available?() do
-      apply(@persistence_mod, :get_eval_run, [run_id])
+      Persistence.get_eval_run(run_id)
     else
       {:error, :unavailable}
     end
@@ -276,16 +278,11 @@ defmodule Arbor.Consensus.ConsultationLog do
   end
 
   defp available? do
-    Code.ensure_loaded?(@persistence_mod) and
-      function_exported?(@persistence_mod, :insert_eval_run, 1) and
-      repo_started?()
+    repo_started?()
   end
 
   defp repo_started? do
-    repo = Arbor.Persistence.Repo
-
-    Code.ensure_loaded?(repo) and
-      is_pid(GenServer.whereis(repo))
+    is_pid(GenServer.whereis(Arbor.Persistence.Repo))
   rescue
     _ -> false
   end
@@ -306,7 +303,7 @@ defmodule Arbor.Consensus.ConsultationLog do
       metadata: %{"source" => "consult_one"}
     }
 
-    case apply(@persistence_mod, :insert_eval_run, [run_attrs]) do
+    case Persistence.insert_eval_run(run_attrs) do
       {:ok, _} -> run_id
       {:error, _} -> run_id
     end

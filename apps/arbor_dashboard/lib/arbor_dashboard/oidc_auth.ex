@@ -254,20 +254,14 @@ defmodule Arbor.Dashboard.OidcAuth do
   end
 
   defp ensure_workspace(agent_id) do
-    if Code.ensure_loaded?(Arbor.Contracts.TenantContext) do
-      workspace = apply(Arbor.Contracts.TenantContext, :default_workspace_root, [agent_id])
-      File.mkdir_p(workspace)
-    end
+    workspace = Arbor.Contracts.TenantContext.default_workspace_root(agent_id)
+    File.mkdir_p(workspace)
   rescue
     _ -> :ok
   end
 
   defp resolve_identity_alias(agent_id) do
-    if Code.ensure_loaded?(Arbor.Agent.IdentityAliases) do
-      apply(Arbor.Agent.IdentityAliases, :resolve, [agent_id])
-    else
-      agent_id
-    end
+    Arbor.Agent.IdentityAliases.resolve(agent_id)
   rescue
     _ -> agent_id
   catch

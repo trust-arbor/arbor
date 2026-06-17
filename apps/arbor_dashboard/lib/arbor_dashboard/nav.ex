@@ -71,15 +71,12 @@ defmodule Arbor.Dashboard.Nav do
   defp build_tenant_context(nil, _display_name), do: nil
 
   defp build_tenant_context(agent_id, display_name) do
-    if Code.ensure_loaded?(Arbor.Contracts.TenantContext) do
-      workspace_root =
-        apply(Arbor.Contracts.TenantContext, :default_workspace_root, [agent_id])
+    workspace_root = Arbor.Contracts.TenantContext.default_workspace_root(agent_id)
 
-      opts =
-        [workspace_root: workspace_root] ++
-          if(display_name, do: [display_name: display_name], else: [])
+    opts =
+      [workspace_root: workspace_root] ++
+        if(display_name, do: [display_name: display_name], else: [])
 
-      apply(Arbor.Contracts.TenantContext, :new, [agent_id, opts])
-    end
+    Arbor.Contracts.TenantContext.new(agent_id, opts)
   end
 end

@@ -413,11 +413,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
       :ok ->
         case safe_consensus_approve(proposal_id, actor_id) do
           :ok ->
-            store = Arbor.Trust.Store
-
-            if Code.ensure_loaded?(store) and function_exported?(store, :always_allow, 2) do
-              apply(store, :always_allow, [agent_id, resource])
-            end
+            Arbor.Trust.Store.always_allow(agent_id, resource)
 
             {:noreply, drop_approval(socket, proposal_id)}
 
@@ -558,11 +554,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
 
   defp register_interaction_presence(socket) do
     user_id = approval_actor_id(socket)
-    tracker = Module.concat([:Arbor, :Comms, :PresenceTracker])
-
-    if Code.ensure_loaded?(tracker) and function_exported?(tracker, :track, 4) do
-      apply(tracker, :track, [self(), user_id, :dashboard, %{liveview_pid: self()}])
-    end
+    Arbor.Comms.PresenceTracker.track(self(), user_id, :dashboard, %{liveview_pid: self()})
   rescue
     _ -> :ok
   catch
@@ -590,24 +582,19 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   defp interaction_pubsub, do: Arbor.Comms.PubSub
 
   defp respond_to_interaction(socket, request_id, response) do
-    router = Module.concat([:Arbor, :Comms, :InteractionRouter])
     actor_id = approval_actor_id(socket)
 
     result =
-      if Code.ensure_loaded?(router) and function_exported?(router, :respond, 3) do
-        try do
-          apply(router, :respond, [
-            request_id,
-            response,
-            %{channel: :dashboard, responder: actor_id}
-          ])
-        rescue
-          e -> {:error, Exception.message(e)}
-        catch
-          :exit, reason -> {:error, reason}
-        end
-      else
-        {:error, :router_unavailable}
+      try do
+        Arbor.Comms.InteractionRouter.respond(
+          request_id,
+          response,
+          %{channel: :dashboard, responder: actor_id}
+        )
+      rescue
+        e -> {:error, Exception.message(e)}
+      catch
+        :exit, reason -> {:error, reason}
       end
 
     case result do
@@ -1891,13 +1878,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   # ── Approval Helpers ──────────────────────────────────────────────
 
   defp safe_consensus_approve(proposal_id, actor_id) do
-    coordinator = Arbor.Consensus.Coordinator
-
-    if Code.ensure_loaded?(coordinator) and function_exported?(coordinator, :force_approve, 2) do
-      apply(coordinator, :force_approve, [proposal_id, actor_id])
-    else
-      {:error, :consensus_unavailable}
-    end
+    Arbor.Consensus.Coordinator.force_approve(proposal_id, actor_id)
   rescue
     e -> {:error, Exception.message(e)}
   catch
@@ -1905,13 +1886,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   defp safe_consensus_reject(proposal_id, actor_id) do
-    coordinator = Arbor.Consensus.Coordinator
-
-    if Code.ensure_loaded?(coordinator) and function_exported?(coordinator, :force_reject, 2) do
-      apply(coordinator, :force_reject, [proposal_id, actor_id])
-    else
-      {:error, :consensus_unavailable}
-    end
+    Arbor.Consensus.Coordinator.force_reject(proposal_id, actor_id)
   rescue
     e -> {:error, Exception.message(e)}
   catch
@@ -1921,13 +1896,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   # ── SessionStore Helpers ─────────────────────────────────────────
 
   defp load_session_history(session_id, opts) do
-    store = Arbor.Persistence.SessionStore
-
-    if Code.ensure_loaded?(store) and function_exported?(store, :load_recent_for_display, 2) do
-      apply(store, :load_recent_for_display, [session_id, opts])
-    else
-      []
-    end
+    Arbor.Persistence.SessionStore.load_recent_for_display(session_id, opts)
   rescue
     _ -> []
   catch
@@ -1935,13 +1904,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   defp session_message_count(session_id) do
-    store = Arbor.Persistence.SessionStore
-
-    if Code.ensure_loaded?(store) and function_exported?(store, :message_count_by_session_id, 1) do
-      apply(store, :message_count_by_session_id, [session_id])
-    else
-      0
-    end
+    Arbor.Persistence.SessionStore.message_count_by_session_id(session_id)
   rescue
     _ -> 0
   catch
@@ -1949,19 +1912,16 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   defp persist_group_message(group_id, msg) do
-    store = Arbor.Persistence.SessionStore
-
-    if Code.ensure_loaded?(store) and function_exported?(store, :available?, 0) and
-         apply(store, :available?, []) do
+    if Arbor.Persistence.SessionStore.available?() do
       session_id = "group-session-#{group_id}"
 
       session_uuid =
-        case apply(store, :get_session, [session_id]) do
+        case Arbor.Persistence.SessionStore.get_session(session_id) do
           {:ok, s} ->
             s.id
 
           {:error, :not_found} ->
-            case apply(store, :create_session, [group_id, [session_id: session_id]]) do
+            case Arbor.Persistence.SessionStore.create_session(group_id, session_id: session_id) do
               {:ok, s} -> s.id
               _ -> nil
             end
@@ -1973,15 +1933,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
         content_text =
           if is_binary(msg[:content]), do: msg[:content], else: inspect(msg[:content])
 
-        apply(store, :append_entry, [
-          session_uuid,
-          %{
-            entry_type: role,
-            role: role,
-            content: [%{"type" => "text", "text" => content_text}],
-            timestamp: msg[:timestamp] || DateTime.utc_now()
-          }
-        ])
+        Arbor.Persistence.SessionStore.append_entry(session_uuid, %{
+          entry_type: role,
+          role: role,
+          content: [%{"type" => "text", "text" => content_text}],
+          timestamp: msg[:timestamp] || DateTime.utc_now()
+        })
       end
     end
   rescue
@@ -1991,24 +1948,18 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   end
 
   defp get_telemetry_tokens(agent_id) do
-    store = Arbor.Common.AgentTelemetry.Store
+    case Arbor.Common.AgentTelemetry.Store.get(agent_id) do
+      nil ->
+        %{input: 0, output: 0, cached: 0, count: 0, last_duration: nil}
 
-    if Code.ensure_loaded?(store) do
-      case apply(store, :get, [agent_id]) do
-        nil ->
-          %{input: 0, output: 0, cached: 0, count: 0, last_duration: nil}
-
-        t ->
-          %{
-            input: t.session_input_tokens,
-            output: t.session_output_tokens,
-            cached: t.session_cached_tokens,
-            count: t.turn_count,
-            last_duration: List.first(t.llm_latencies || [])
-          }
-      end
-    else
-      %{input: 0, output: 0, cached: 0, count: 0, last_duration: nil}
+      t ->
+        %{
+          input: t.session_input_tokens,
+          output: t.session_output_tokens,
+          cached: t.session_cached_tokens,
+          count: t.turn_count,
+          last_duration: List.first(t.llm_latencies || [])
+        }
     end
   rescue
     _ -> %{input: 0, output: 0, cached: 0, count: 0, last_duration: nil}
