@@ -43,6 +43,7 @@ defmodule Arbor.Dashboard.MixProject do
       {:arbor_persistence, in_umbrella: true},
 
       # Level 2
+      {:arbor_security, in_umbrella: true},
       {:arbor_agent, in_umbrella: true},
       {:arbor_memory, in_umbrella: true},
       {:arbor_trust, in_umbrella: true},

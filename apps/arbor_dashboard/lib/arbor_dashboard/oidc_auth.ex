@@ -225,27 +225,27 @@ defmodule Arbor.Dashboard.OidcAuth do
   end
 
   defp ensure_role(agent_id) do
-    if Code.ensure_loaded?(Arbor.Security) do
-      # M1: default role used to be :admin — any user who completed the OIDC
-      # flow got assigned :admin unless the operator explicitly configured a
-      # different :default_role. That made every authenticated user a root
-      # principal by default. The fallback is now :viewer (least privilege);
-      # operators who want admin must opt in via the OIDC config.
-      role = Arbor.Security.OIDC.Config.get() |> Keyword.get(:default_role, :viewer)
+    # M1: default role used to be :admin — any user who completed the OIDC
+    # flow got assigned :admin unless the operator explicitly configured a
+    # different :default_role. That made every authenticated user a root
+    # principal by default. The fallback is now :viewer (least privilege);
+    # operators who want admin must opt in via the OIDC config.
+    role = Arbor.Security.OIDC.Config.get() |> Keyword.get(:default_role, :viewer)
 
-      case apply(Arbor.Security, :assign_role, [agent_id, role]) do
-        {:ok, _caps} ->
-          :ok
+    case Arbor.Security.assign_role(agent_id, role) do
+      {:ok, _caps} ->
+        :ok
 
-        {:error, reason} ->
-          Logger.warning("[OidcAuth] Role assignment failed: #{inspect(reason)}")
-      end
+      {:error, reason} ->
+        Logger.warning("[OidcAuth] Role assignment failed: #{inspect(reason)}")
+    end
 
-      for resource <- login_grant_resources() do
-        apply(Arbor.Security, :grant, [
-          [principal: agent_id, resource: resource, metadata: %{source: :oidc_login}]
-        ])
-      end
+    for resource <- login_grant_resources() do
+      Arbor.Security.grant(
+        principal: agent_id,
+        resource: resource,
+        metadata: %{source: :oidc_login}
+      )
     end
   rescue
     _ -> :ok
@@ -269,11 +269,9 @@ defmodule Arbor.Dashboard.OidcAuth do
   end
 
   defp generate_session_token(agent_id) do
-    if Code.ensure_loaded?(Arbor.Security.SessionToken) do
-      case apply(Arbor.Security.SessionToken, :generate, [agent_id]) do
-        {:ok, token} -> token
-        {:error, _} -> nil
-      end
+    case Arbor.Security.SessionToken.generate(agent_id) do
+      {:ok, token} -> token
+      _ -> nil
     end
   rescue
     _ -> nil

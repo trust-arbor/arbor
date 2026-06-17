@@ -42,18 +42,14 @@ defmodule Arbor.Dashboard.Cores.AutoPromoteGate do
         actor_id in [nil, "", "system"] ->
           {:error, :no_actor}
 
-        Code.ensure_loaded?(Arbor.Security) and
-            function_exported?(Arbor.Security, :authorize, 3) ->
+        true ->
           try do
-            apply(Arbor.Security, :authorize, [actor_id, resource, :write])
+            Arbor.Security.authorize(actor_id, resource, :write)
           rescue
             _ -> {:error, :security_unavailable}
           catch
             :exit, _ -> {:error, :security_unavailable}
           end
-
-        true ->
-          {:error, :security_unavailable}
       end
 
     decision(decision)

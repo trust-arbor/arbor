@@ -529,15 +529,12 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   defp ensure_dashboard_approver_capability(socket) do
     actor_id = approval_actor_id(socket)
 
-    if Code.ensure_loaded?(Arbor.Security) and
-         function_exported?(Arbor.Security, :grant, 1) do
-      Arbor.Security.grant(
-        principal: actor_id,
-        resource: "arbor://consensus/admin",
-        constraints: %{},
-        metadata: %{source: :chat_live}
-      )
-    end
+    Arbor.Security.grant(
+      principal: actor_id,
+      resource: "arbor://consensus/admin",
+      constraints: %{},
+      metadata: %{source: :chat_live}
+    )
   rescue
     _ -> :ok
   catch
