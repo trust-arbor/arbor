@@ -879,8 +879,16 @@ defmodule Arbor.Gateway.MCP.Handler do
   # Runtime Bridges
   # ===========================================================================
 
+  # arbor_actions is a real in-umbrella dep, so Arbor.Actions is always loaded —
+  # call it directly. The {:ok, _} / {:error, _} wrapper is preserved so the
+  # call sites (list_actions, authorize_and_execute, all_actions) keep failing
+  # CLOSED on any exception/exit (e.g. authorize_and_execute → "## Error").
   defp call_actions(function, args) do
-    bridge_call(Arbor.Actions, function, args)
+    {:ok, apply(Arbor.Actions, function, args)}
+  rescue
+    e -> {:error, {:exception, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
   end
 
   defp bridge_call(module, function, args) do

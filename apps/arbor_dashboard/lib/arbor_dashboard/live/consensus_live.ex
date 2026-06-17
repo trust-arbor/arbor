@@ -679,8 +679,7 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   defp ensure_dashboard_approver_capability(socket) do
     actor_id = approval_actor_id(socket)
 
-    if actor_id != "system" and Code.ensure_loaded?(Arbor.Security) and
-         function_exported?(Arbor.Security, :grant, 1) do
+    if actor_id != "system" do
       for resource <- mount_grant_resources() do
         Arbor.Security.grant(
           principal: actor_id,
@@ -707,9 +706,9 @@ defmodule Arbor.Dashboard.Live.ConsensusLive do
   must come from explicit role-to-capability mapping
   (`Arbor.Security.assign_role/2`).
 
-  Exposed for the H11b regression test (arbor_dashboard does not depend on
-  arbor_security and cannot easily intercept `Security.grant/1` calls from
-  its test suite).
+  Exposed for the H11b regression test so it can pin the mount grant-list
+  policy directly rather than intercepting `Security.grant/1` calls from
+  its test suite.
   """
   @spec mount_grant_resources() :: [String.t()]
   def mount_grant_resources, do: []

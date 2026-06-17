@@ -245,7 +245,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
   # If auth fails, the error propagates to the MCP client.
   defp execute_action(action_module, params, agent_id) do
     if authorized_execution_available?() do
-      apply(Arbor.Actions, :authorize_and_execute, [agent_id, action_module, params, %{}])
+      Arbor.Actions.authorize_and_execute(agent_id, action_module, params, %{})
     else
       # Security not available — use agent_id in context for facade-level auth
       action_module.run(params, %{agent_id: agent_id})
@@ -304,12 +304,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
   end
 
   defp discover_all_actions do
-    if Code.ensure_loaded?(Arbor.Actions) and
-         function_exported?(Arbor.Actions, :all_actions, 0) do
-      apply(Arbor.Actions, :all_actions, [])
-    else
-      []
-    end
+    Arbor.Actions.all_actions()
   rescue
     e ->
       Logger.debug("[AgentEndpoint] discover_all_actions failed: #{Exception.message(e)}")
@@ -321,9 +316,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
   end
 
   defp authorized_execution_available? do
-    Code.ensure_loaded?(Arbor.Actions) and
-      function_exported?(Arbor.Actions, :authorize_and_execute, 4) and
-      security_available?()
+    security_available?()
   end
 
   defp security_available? do

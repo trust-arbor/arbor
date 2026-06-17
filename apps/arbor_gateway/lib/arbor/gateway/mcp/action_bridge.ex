@@ -48,17 +48,12 @@ defmodule Arbor.Gateway.MCP.ActionBridge do
   @doc """
   Build MCP tool definitions from all available Arbor actions.
 
-  Uses the Arbor.Actions facade when available, falls back to empty list.
+  Uses the Arbor.Actions facade; falls back to empty list on error.
   """
   @spec all_mcp_tools() :: [map()]
   def all_mcp_tools do
-    if Code.ensure_loaded?(Arbor.Actions) and
-         function_exported?(Arbor.Actions, :all_actions, 0) do
-      apply(Arbor.Actions, :all_actions, [])
-      |> to_mcp_tools()
-    else
-      []
-    end
+    Arbor.Actions.all_actions()
+    |> to_mcp_tools()
   rescue
     e ->
       Logger.debug("[ActionBridge] all_mcp_tools failed: #{Exception.message(e)}")
