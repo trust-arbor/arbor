@@ -72,15 +72,13 @@ defmodule Arbor.Historian.Application do
   # the cache starts at the zero state and is populated by new
   # writes; historical queries return empty until events are written.
   defp hydrate_metadata_from_durable do
-    durable = Arbor.Persistence.EventLog.Ecto
-    ets = Arbor.Persistence.EventLog.ETS
     repo = Arbor.Persistence.Repo
 
-    if Code.ensure_loaded?(durable) and Code.ensure_loaded?(repo) and Process.whereis(repo) do
+    if Process.whereis(repo) do
       try do
-        case apply(durable, :metadata_snapshot, [[repo: repo]]) do
+        case Arbor.Persistence.EventLog.Ecto.metadata_snapshot(repo: repo) do
           {:ok, snapshot} ->
-            apply(ets, :rehydrate_metadata, [snapshot, [name: @event_log_name]])
+            Arbor.Persistence.EventLog.ETS.rehydrate_metadata(snapshot, name: @event_log_name)
             stream_count = map_size(snapshot.stream_versions)
 
             if stream_count > 0 or snapshot.global_position > 0 do

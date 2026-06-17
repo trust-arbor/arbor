@@ -141,7 +141,8 @@ defmodule Arbor.Security.Events do
   end
 
   @doc "Record a failed identity verification."
-  @spec record_identity_verification_failed(String.t(), term(), keyword()) :: :ok | {:error, term()}
+  @spec record_identity_verification_failed(String.t(), term(), keyword()) ::
+          :ok | {:error, term()}
   def record_identity_verification_failed(agent_id, reason, opts \\ []) do
     dual_emit(:identity_verification_failed, %{
       agent_id: agent_id,
@@ -323,16 +324,10 @@ defmodule Arbor.Security.Events do
 
   # Emit durable signal via centralized Signals.durable_emit/4.
   # This handles: signal bus emit + EventLog ETS write + async Postgres write.
-  # Falls back to plain emit if durable_emit is not yet available.
   #
   # Security operations must not fail because the audit log is unavailable.
   defp dual_emit(event_type, data) do
-    if function_exported?(Arbor.Signals, :durable_emit, 4) do
-      Arbor.Signals.durable_emit(:security, event_type, data, stream_id: @stream_id)
-    else
-      Arbor.Signals.emit(:security, event_type, Map.put(data, :permanent, true))
-    end
-
+    Arbor.Signals.durable_emit(:security, event_type, data, stream_id: @stream_id)
     :ok
   end
 end

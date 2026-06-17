@@ -338,7 +338,6 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
     # restart, leaking failures into ~60% of seeds depending on test
     # ordering.
     Application.get_env(:arbor_gateway, :mcp_endpoint_require_security, true) and
-      Code.ensure_loaded?(Arbor.Security) and
       Process.whereis(Arbor.Security.CapabilityStore) != nil
   end
 end

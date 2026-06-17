@@ -131,8 +131,7 @@ defmodule Arbor.Historian.QueryEngine do
   # is adapter-agnostic; the only thing we need is a running Repo
   # process to talk to.
   defp durable_backend_available? do
-    repo = Arbor.Persistence.Repo
-    Code.ensure_loaded?(repo) and Process.whereis(repo) != nil
+    Process.whereis(Arbor.Persistence.Repo) != nil
   end
 
   @doc """

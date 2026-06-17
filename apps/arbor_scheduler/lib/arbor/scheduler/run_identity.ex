@@ -208,44 +208,35 @@ defmodule Arbor.Scheduler.RunIdentity do
   # Surfaced 2026-06-06 by the morning-digest LLM pipelines hitting
   # the approval gate even with matching per-run caps.
   defp set_trust_profile_rules(agent_id, descriptors) do
-    trust_authority = Arbor.Trust.Authority
-    trust_store = Arbor.Trust.Store
+    prefixes =
+      descriptors
+      |> Enum.map(&trust_rule_prefix(&1.resource_uri))
+      |> Enum.uniq()
+      # Lobby cap covers pipeline traversal — needed by every run.
+      |> List.insert_at(0, "arbor://orchestrator/execute")
 
-    if Code.ensure_loaded?(trust_authority) and Code.ensure_loaded?(trust_store) and
-         function_exported?(trust_store, :profile_exists?, 1) do
-      prefixes =
-        descriptors
-        |> Enum.map(&trust_rule_prefix(&1.resource_uri))
-        |> Enum.uniq()
-        # Lobby cap covers pipeline traversal — needed by every run.
-        |> List.insert_at(0, "arbor://orchestrator/execute")
-
-      with :ok <- ensure_profile_exists(agent_id, trust_authority, trust_store),
-           :ok <- apply_allow_rules(agent_id, prefixes, trust_store) do
-        :ok
-      else
-        {:error, reason} ->
-          Logger.warning(
-            "[RunIdentity] trust profile setup failed for #{agent_id}: #{inspect(reason)}"
-          )
-
-          # Don't fail the mint — the cap chain may still allow the run
-          # depending on trust config. Logged for visibility.
-          :ok
-      end
-    else
-      # arbor_trust not loaded — best-effort skip.
+    with :ok <- ensure_profile_exists(agent_id),
+         :ok <- apply_allow_rules(agent_id, prefixes) do
       :ok
+    else
+      {:error, reason} ->
+        Logger.warning(
+          "[RunIdentity] trust profile setup failed for #{agent_id}: #{inspect(reason)}"
+        )
+
+        # Don't fail the mint — the cap chain may still allow the run
+        # depending on trust config. Logged for visibility.
+        :ok
     end
   end
 
-  defp ensure_profile_exists(agent_id, trust_authority, trust_store) do
-    if apply(trust_store, :profile_exists?, [agent_id]) do
+  defp ensure_profile_exists(agent_id) do
+    if Arbor.Trust.Store.profile_exists?(agent_id) do
       :ok
     else
-      profile = apply(trust_authority, :new_profile, [agent_id, :untrusted])
+      profile = Arbor.Trust.Authority.new_profile(agent_id, :untrusted)
 
-      case apply(trust_store, :store_profile, [profile]) do
+      case Arbor.Trust.Store.store_profile(profile) do
         {:ok, _} -> :ok
         :ok -> :ok
         {:error, reason} -> {:error, reason}
@@ -257,16 +248,16 @@ defmodule Arbor.Scheduler.RunIdentity do
     :exit, reason -> {:error, {:exit, reason}}
   end
 
-  defp apply_allow_rules(agent_id, prefixes, trust_store) do
+  defp apply_allow_rules(agent_id, prefixes) do
     result =
-      apply(trust_store, :update_profile, [
+      Arbor.Trust.Store.update_profile(
         agent_id,
         fn profile ->
           rules = profile.rules || %{}
           new_rules = Enum.reduce(prefixes, rules, fn p, acc -> Map.put(acc, p, :allow) end)
           %{profile | rules: new_rules}
         end
-      ])
+      )
 
     case result do
       {:ok, _} -> :ok

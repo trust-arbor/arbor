@@ -203,10 +203,7 @@ defmodule Arbor.Security.PolicyEnforcer do
   end
 
   defp safe_emit_signal(type, data) do
-    if Code.ensure_loaded?(Arbor.Signals) and
-         function_exported?(Arbor.Signals, :emit, 3) do
-      Arbor.Signals.emit(:security, type, data)
-    end
+    Arbor.Signals.emit(:security, type, data)
   rescue
     _ -> :ok
   catch

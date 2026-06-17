@@ -269,28 +269,19 @@ defmodule Arbor.Gateway.MCP.Handler do
   defp authorize_caller_for_component(caller_id, component, target_id) do
     resource = "arbor://status/#{component}/#{target_id}"
 
-    cond do
-      not (Code.ensure_loaded?(Arbor.Security) and
-               function_exported?(Arbor.Security, :authorize, 4)) ->
+    case Arbor.Security.authorize(caller_id, resource, :read) do
+      {:ok, :authorized} ->
+        {:ok, target_id}
+
+      {:error, _reason} ->
         {:error,
-         "arbor_status: security subsystem unavailable — refusing to disclose " <>
-           "#{component} for #{target_id}."}
+         "arbor_status: caller #{caller_id} is not authorized to view " <>
+           "#{component} for #{target_id} (requires #{resource})."}
 
-      true ->
-        case Arbor.Security.authorize(caller_id, resource, :read) do
-          {:ok, :authorized} ->
-            {:ok, target_id}
-
-          {:error, _reason} ->
-            {:error,
-             "arbor_status: caller #{caller_id} is not authorized to view " <>
-               "#{component} for #{target_id} (requires #{resource})."}
-
-          _other ->
-            {:error,
-             "arbor_status: unexpected authorization result — refusing to " <>
-               "disclose #{component} for #{target_id}."}
-        end
+      _other ->
+        {:error,
+         "arbor_status: unexpected authorization result — refusing to " <>
+           "disclose #{component} for #{target_id}."}
     end
   end
 
@@ -490,29 +481,25 @@ defmodule Arbor.Gateway.MCP.Handler do
   end
 
   # P0-4: Verify agent_id corresponds to a registered, active identity.
-  # When security module is loaded and available, check identity. When security
-  # processes aren't running (dev/test with start_children: false), allow through
-  # with a warning — fail-closed only when module itself isn't available.
+  # When the security processes are running, check identity. When they aren't
+  # (dev/test with start_children: false), allow through with a warning —
+  # identity verification requires a running Registry.
   defp verify_agent_identity(agent_id) do
-    if Code.ensure_loaded?(Arbor.Security) do
-      # Check if security processes are actually running
-      if security_processes_available?() do
-        case bridge_call(Arbor.Security, :identity_active?, [agent_id]) do
-          {:ok, true} -> :ok
-          {:ok, false} -> {:error, :unknown_or_inactive_identity}
-          {:error, _reason} -> {:error, :identity_check_failed}
-        end
-      else
-        # Security module loaded but processes not started (dev/test).
-        # Log and allow — identity verification requires running Registry.
-        Logger.debug(
-          "[MCP] Security processes not running, skipping identity verification for #{agent_id}"
-        )
-
-        :ok
+    # Check if security processes are actually running
+    if security_processes_available?() do
+      case bridge_call(Arbor.Security, :identity_active?, [agent_id]) do
+        {:ok, true} -> :ok
+        {:ok, false} -> {:error, :unknown_or_inactive_identity}
+        {:error, _reason} -> {:error, :identity_check_failed}
       end
     else
-      {:error, :security_unavailable}
+      # Security processes not started (dev/test).
+      # Log and allow — identity verification requires running Registry.
+      Logger.debug(
+        "[MCP] Security processes not running, skipping identity verification for #{agent_id}"
+      )
+
+      :ok
     end
   end
 

@@ -423,18 +423,16 @@ defmodule Arbor.Persistence.BufferedStore do
   defp emit_distributed_signal(%{distributed: false}, _type, _key), do: :ok
 
   defp emit_distributed_signal(%{distributed: true, collection: collection}, type, key) do
-    if Code.ensure_loaded?(Arbor.Signals) do
-      Arbor.Signals.emit(
-        :persistence,
-        type,
-        %{
-          collection: collection,
-          key: key,
-          origin_node: node()
-        },
-        scope: :cluster
-      )
-    end
+    Arbor.Signals.emit(
+      :persistence,
+      type,
+      %{
+        collection: collection,
+        key: key,
+        origin_node: node()
+      },
+      scope: :cluster
+    )
 
     :ok
   catch

@@ -365,9 +365,6 @@ defmodule Arbor.Gateway.Memory.Router do
       is_nil(caller_id) ->
         {:error, :no_authenticated_caller}
 
-      not security_available?() ->
-        {:error, :security_unavailable}
-
       true ->
         case Arbor.Security.authorize(caller_id, resource, action) do
           {:ok, :authorized} ->
@@ -396,11 +393,6 @@ defmodule Arbor.Gateway.Memory.Router do
       id when is_binary(id) and byte_size(id) > 0 -> id
       _ -> nil
     end
-  end
-
-  defp security_available? do
-    Code.ensure_loaded?(Arbor.Security) and
-      function_exported?(Arbor.Security, :authorize, 4)
   end
 
   defp json_response(conn, status, body) do

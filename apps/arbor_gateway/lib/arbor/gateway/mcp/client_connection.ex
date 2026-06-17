@@ -544,15 +544,12 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
   end
 
   defp safe_emit(event_type, data) do
-    if Code.ensure_loaded?(Arbor.Signals) and
-         function_exported?(Arbor.Signals, :emit, 3) do
-      try do
-        Arbor.Signals.emit(:gateway, event_type, data)
-      rescue
-        _ -> :ok
-      catch
-        :exit, _ -> :ok
-      end
+    try do
+      Arbor.Signals.emit(:gateway, event_type, data)
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
     end
   end
 end
