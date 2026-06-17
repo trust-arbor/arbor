@@ -85,18 +85,27 @@ L2  arbor_llm, arbor_integrations, arbor_security
 L3  arbor_persistence, arbor_shell, arbor_sandbox
 L4  arbor_persistence_ecto, arbor_historian, arbor_trust, arbor_ai, arbor_comms
 L5  arbor_memory, arbor_consensus, arbor_scheduler
-L6  arbor_actions, arbor_gateway
-L7  arbor_orchestrator, arbor_agent
+L6  arbor_actions
+L7  arbor_orchestrator, arbor_agent, arbor_gateway
 L8  arbor_commands
 L9  arbor_dashboard
 ```
 
 Notes:
 - `arbor_orchestrator` is NOT standalone — it deps contracts/common/llm/
-  persistence/signals AND **arbor_actions** (it executes Jido actions via `exec`
-  nodes; the old runtime `Code.ensure_loaded?`/`apply` indirection was dropped
-  for a real dep, 2026-06-17). Only `arbor_commands` + `arbor_dashboard` depend
-  on orchestrator, so it sits high (L7), not as a low kernel.
+  persistence/signals AND **arbor_actions/security/ai/memory/trust/shell** (it
+  executes Jido actions via `exec` nodes, authorizes capabilities + egress,
+  routes LLMs/ACP, reads goals/percepts, trust policy, and runs sandboxed
+  shell; the old runtime `Code.ensure_loaded?`/`apply` indirection was dropped
+  for real deps in the 2026-06-17 runtime-bridge sweep). Only `arbor_commands`
+  + `arbor_dashboard` depend on orchestrator, so it sits high (L7), not as a
+  low kernel.
+- `arbor_gateway` moved L6→L7 in the 2026-06-17 sweep — it now deps
+  **arbor_actions** (MCP tool execution via `Arbor.Actions.authorize_and_execute`;
+  acyclic — actions does not dep gateway).
+- The 2026-06-17 sweep also added (all acyclic, no level change): `arbor_agent`
+  → arbor_llm; `arbor_consensus` → arbor_security; `arbor_dashboard` →
+  arbor_security (was already transitive).
 - `arbor_ai` (L4) and `arbor_consensus` (L5) are deep, not standalone.
 - `arbor_monitor` is the only truly dep-free app besides `arbor_contracts`.
 
