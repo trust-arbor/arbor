@@ -502,8 +502,160 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
   end
 
   # ============================================================================
+  # Security regression — capability gate on MCP tool execution
+  # ============================================================================
+  #
+  # Wave-2b fail-open fix: AgentEndpoint.execute_action/3 used to fall back to
+  # an UNAUTHENTICATED `action_module.run/2` whenever the security subsystem
+  # wasn't loaded/available. With arbor_actions now a hard dep and
+  # `:mcp_endpoint_require_security` defaulting to true, the gate MUST engage:
+  # tool calls route through `Arbor.Actions.authorize_and_execute/4` and an
+  # agent lacking the capability is DENIED — the action never runs.
+  #
+  # The other describe blocks above intentionally set
+  # `:mcp_endpoint_require_security = false` (security subsystem isn't running
+  # there) so they exercise MCP protocol behavior, NOT security. THIS block is
+  # the only gate-fires coverage: it starts the security subsystem so
+  # `Arbor.Security.healthy?()` is true and `CapabilityStore` is alive, then
+  # flips `:mcp_endpoint_require_security` back to true.
+  describe "security regression: MCP tool execution is capability-gated" do
+    setup do
+      # Start all security processes needed for Security.healthy?() == true.
+      # Mirrors apps/arbor_consensus/test/arbor/consensus/authorization_e2e_test.exs.
+      # Order matters: Identity.Registry must precede SystemAuthority.
+      security_children = [
+        {Arbor.Security.Identity.Registry, []},
+        {Arbor.Security.Identity.NonceCache, []},
+        {Arbor.Security.Constraint.RateLimiter, []},
+        {Arbor.Security.SystemAuthority, []},
+        {Arbor.Security.CapabilityStore, []},
+        {Arbor.Security.Reflex.Registry, []}
+      ]
+
+      for {mod, opts} <- security_children do
+        unless Process.whereis(mod) do
+          case Supervisor.start_child(Arbor.Security.Supervisor, {mod, opts}) do
+            {:ok, _pid} -> :ok
+            {:error, {:already_started, _}} -> :ok
+            {:error, reason} -> raise "Failed to start #{inspect(mod)}: #{inspect(reason)}"
+          end
+        end
+      end
+
+      Process.sleep(20)
+
+      # Disable signing/identity checks — we're testing the capability gate,
+      # not signature verification.
+      prev_signing = Application.get_env(:arbor_security, :capability_signing_required)
+      prev_identity = Application.get_env(:arbor_security, :identity_verification)
+      prev_strict = Application.get_env(:arbor_security, :strict_identity_mode)
+
+      Application.put_env(:arbor_security, :capability_signing_required, false)
+      Application.put_env(:arbor_security, :identity_verification, false)
+      Application.put_env(:arbor_security, :strict_identity_mode, false)
+
+      # The outer `setup` set this to false; flip it back to true so the gate
+      # engages (process tree above makes the alive-check pass too).
+      prev_require_security =
+        Application.get_env(:arbor_gateway, :mcp_endpoint_require_security)
+
+      Application.put_env(:arbor_gateway, :mcp_endpoint_require_security, true)
+
+      unless Arbor.Security.healthy?() do
+        raise "Security.healthy?() returned false after starting security subsystem"
+      end
+
+      on_exit(fn ->
+        restore_env(:arbor_security, :capability_signing_required, prev_signing)
+        restore_env(:arbor_security, :identity_verification, prev_identity)
+        restore_env(:arbor_security, :strict_identity_mode, prev_strict)
+        restore_env(:arbor_gateway, :mcp_endpoint_require_security, prev_require_security)
+      end)
+
+      :ok
+    end
+
+    test "an agent without the capability cannot execute a tool (gate denies; no direct-run bypass)" do
+      # Precondition: a missing CapabilityStore would silently route through the
+      # unauthenticated fallback path. Make that a LOUD failure, not a fall-through.
+      assert Process.whereis(Arbor.Security.CapabilityStore) != nil,
+             "CapabilityStore must be alive or the gate falls open to the unauthenticated path"
+
+      assert Arbor.Security.healthy?(),
+             "Security must be healthy or authorize/4 runs in permissive mode"
+
+      agent_id = "agent_sec_regression_no_cap_#{System.unique_integer([:positive])}"
+
+      {:ok, endpoint} =
+        AgentEndpoint.start_link(
+          agent_id: agent_id,
+          actions: [EchoAction]
+        )
+
+      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
+
+      {:ok, result} = ExMCP.Client.call_tool(client, "echo", %{"message" => "TOPSECRET"})
+
+      content = get_tool_result_text(result)
+
+      # The action must NOT have run: the echoed payload must be absent and the
+      # call must surface as an error (unauthorized).
+      refute content =~ "TOPSECRET",
+             "Gate failed OPEN: echo payload leaked, meaning the action ran without a capability. Got: #{content}"
+
+      assert content =~ "Error" or content =~ "unauthorized",
+             "Expected an authorization error result, got: #{content}"
+
+      ExMCP.Client.stop(client)
+      GenServer.stop(endpoint)
+    end
+
+    test "an agent WITH the capability can execute the tool (gate permits)" do
+      assert Process.whereis(Arbor.Security.CapabilityStore) != nil
+      assert Arbor.Security.healthy?()
+
+      agent_id = "agent_sec_regression_with_cap_#{System.unique_integer([:positive])}"
+
+      # The test EchoAction is not in the canonical URI map, so it resolves to
+      # the legacy fallback URI. Grant exactly that resource for :execute.
+      resource = Arbor.Actions.canonical_uri_for(EchoAction, %{})
+
+      {:ok, _cap} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: resource
+        )
+
+      {:ok, endpoint} =
+        AgentEndpoint.start_link(
+          agent_id: agent_id,
+          actions: [EchoAction]
+        )
+
+      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
+
+      {:ok, result} = ExMCP.Client.call_tool(client, "echo", %{"message" => "AUTHORIZED"})
+
+      content = get_tool_result_text(result)
+
+      assert content =~ "AUTHORIZED",
+             "Gate failed CLOSED: an authorized agent's echo did not run. Got: #{content}"
+
+      ExMCP.Client.stop(client)
+      GenServer.stop(endpoint)
+
+      if Process.whereis(Arbor.Security.CapabilityStore) do
+        Arbor.Security.CapabilityStore.revoke_all(agent_id)
+      end
+    end
+  end
+
+  # ============================================================================
   # Helpers
   # ============================================================================
+
+  defp restore_env(app, key, nil), do: Application.delete_env(app, key)
+  defp restore_env(app, key, value), do: Application.put_env(app, key, value)
 
   # Extract text content from MCP tool result
   defp get_tool_result_text(result) do
