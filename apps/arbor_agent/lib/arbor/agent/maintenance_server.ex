@@ -210,7 +210,7 @@ defmodule Arbor.Agent.MaintenanceServer do
 
     if memory_available?(:recent_thinking, 1) do
       try do
-        case apply(Arbor.Memory, :recent_thinking, [agent_id]) do
+        case Arbor.Memory.recent_thinking(agent_id) do
           thoughts when is_list(thoughts) and length(thoughts) > ttl ->
             # Keep only the most recent TTL entries — clear and re-record
             excess = length(thoughts) - ttl
@@ -248,7 +248,7 @@ defmodule Arbor.Agent.MaintenanceServer do
 
     if memory_available?(:get_working_memory, 1) do
       try do
-        case apply(Arbor.Memory, :get_working_memory, [agent_id]) do
+        case Arbor.Memory.get_working_memory(agent_id) do
           wm when is_map(wm) ->
             thoughts = Map.get(wm, :thoughts, Map.get(wm, "thoughts", []))
             concerns = Map.get(wm, :concerns, Map.get(wm, "concerns", []))
@@ -294,35 +294,23 @@ defmodule Arbor.Agent.MaintenanceServer do
 
     if memory_available?(:get_self_knowledge, 1) do
       try do
-        case apply(Arbor.Memory, :get_self_knowledge, [agent_id]) do
+        case Arbor.Memory.get_self_knowledge(agent_id) do
           sk when is_map(sk) ->
-            # Use SelfKnowledge.deduplicate if available
-            sk_module = Arbor.Memory.SelfKnowledge
+            deduped = Arbor.Memory.SelfKnowledge.deduplicate(sk, threshold: threshold)
 
-            if Code.ensure_loaded?(sk_module) and
-                 function_exported?(sk_module, :deduplicate, 2) do
-              deduped = apply(sk_module, :deduplicate, [sk, [threshold: threshold]])
+            # Count how many were removed
+            original_count = count_sk_entries(sk)
+            new_count = count_sk_entries(deduped)
+            removed = original_count - new_count
 
-              # Count how many were removed
-              original_count = count_sk_entries(sk)
-              new_count = count_sk_entries(deduped)
-              removed = original_count - new_count
+            if removed > 0 do
+              # Save back
+              Arbor.Memory.IdentityConsolidator.save_self_knowledge(agent_id, deduped)
 
-              if removed > 0 do
-                # Save back
-                if memory_available?(:save_self_knowledge, 2) do
-                  apply(Arbor.Memory, :save_self_knowledge, [agent_id, deduped])
-                end
-
-                Logger.debug(
-                  "[Maintenance] #{agent_id}: deduped #{removed} self-knowledge entries"
-                )
-              end
-
-              removed
-            else
-              0
+              Logger.debug("[Maintenance] #{agent_id}: deduped #{removed} self-knowledge entries")
             end
+
+            removed
 
           _ ->
             0
@@ -363,7 +351,7 @@ defmodule Arbor.Agent.MaintenanceServer do
     if rem(tick_count, consolidation_interval) == 0 do
       if memory_available?(:run_consolidation, 2) do
         try do
-          case apply(Arbor.Memory, :run_consolidation, [agent_id, []]) do
+          case Arbor.Memory.run_consolidation(agent_id, []) do
             {:ok, _graph, metrics} when is_map(metrics) ->
               Logger.debug(
                 "[Maintenance] #{agent_id}: consolidation complete: #{inspect(metrics)}"
@@ -427,10 +415,8 @@ defmodule Arbor.Agent.MaintenanceServer do
   end
 
   defp emit_signal(agent_id, event, data) do
-    if Code.ensure_loaded?(Arbor.Signals) and
-         function_exported?(Arbor.Signals, :emit, 4) and
-         Process.whereis(Arbor.Signals.Bus) != nil do
-      apply(Arbor.Signals, :emit, [:agent, event, data, [metadata: %{agent_id: agent_id}]])
+    if Process.whereis(Arbor.Signals.Bus) != nil do
+      Arbor.Signals.emit(:agent, event, data, metadata: %{agent_id: agent_id})
     end
   rescue
     _ -> :ok
@@ -576,9 +562,8 @@ defmodule Arbor.Agent.MaintenanceServer do
 
   # ── Helpers ─────────────────────────────────────────────────────
 
-  defp memory_available?(function, arity) do
-    Code.ensure_loaded?(Arbor.Memory) and
-      function_exported?(Arbor.Memory, function, arity)
+  defp memory_available?(_function, _arity) do
+    true
   end
 
   defp lookup(agent_id) do

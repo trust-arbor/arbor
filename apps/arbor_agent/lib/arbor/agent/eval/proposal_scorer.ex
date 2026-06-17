@@ -48,27 +48,22 @@ defmodule Arbor.Agent.Eval.ProposalScorer do
   """
   @spec council_evaluate(String.t(), BugCase.t()) :: {:ok, map()} | {:error, term()}
   def council_evaluate(proposal_text, bug_case) do
-    if Code.ensure_loaded?(Arbor.Consensus) and
-         function_exported?(Arbor.Consensus, :decide, 2) do
-      question = """
-      An AI agent was asked to find and fix this bug:
+    question = """
+    An AI agent was asked to find and fix this bug:
 
-      BUG: #{bug_case.name}
-      SYMPTOM: #{bug_case.symptom}
-      ACTUAL ROOT CAUSE: #{bug_case.root_cause}
-      ACTUAL FIX: #{bug_case.fix_description}
+    BUG: #{bug_case.name}
+    SYMPTOM: #{bug_case.symptom}
+    ACTUAL ROOT CAUSE: #{bug_case.root_cause}
+    ACTUAL FIX: #{bug_case.fix_description}
 
-      The agent proposed:
-      #{proposal_text}
+    The agent proposed:
+    #{proposal_text}
 
-      Does this proposal correctly identify the root cause and propose a valid fix?
-      Rate: approve (correct), reject (wrong), or defer (partially correct).
-      """
+    Does this proposal correctly identify the root cause and propose a valid fix?
+    Rate: approve (correct), reject (wrong), or defer (partially correct).
+    """
 
-      apply(Arbor.Consensus, :decide, [question, [timeout: 120_000]])
-    else
-      {:error, :consensus_unavailable}
-    end
+    Arbor.Consensus.decide(question, timeout: 120_000)
   rescue
     e -> {:error, {:council_error, Exception.message(e)}}
   catch

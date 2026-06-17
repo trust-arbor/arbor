@@ -398,17 +398,11 @@ defmodule Arbor.Agent.MentalExecutor do
   # ── Runtime Bridge to Arbor.Memory ─────────────────────────────────
 
   defp with_memory_bridge(function, args) do
-    if Code.ensure_loaded?(Arbor.Memory) do
-      try do
-        apply(Arbor.Memory, function, args)
-      rescue
-        e -> {:error, Exception.message(e)}
-      catch
-        :exit, reason -> {:error, {:memory_unavailable, reason}}
-      end
-    else
-      {:error, :memory_not_available}
-    end
+    apply(Arbor.Memory, function, args)
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, {:memory_unavailable, reason}}
   end
 
   # Memory stores return bare lists, not {:ok, list} tuples.
@@ -419,31 +413,19 @@ defmodule Arbor.Agent.MentalExecutor do
   defp normalize_list_result(_), do: []
 
   defp with_proposal_bridge(function, args) do
-    if Code.ensure_loaded?(Arbor.Memory.Proposal) do
-      try do
-        apply(Arbor.Memory.Proposal, function, args)
-      rescue
-        e -> {:error, Exception.message(e)}
-      catch
-        :exit, reason -> {:error, {:proposal_unavailable, reason}}
-      end
-    else
-      {:error, :proposal_not_available}
-    end
+    apply(Arbor.Memory.Proposal, function, args)
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, {:proposal_unavailable, reason}}
   end
 
   defp with_introspection(function, args) do
-    if Code.ensure_loaded?(Arbor.Memory.Introspection) do
-      try do
-        apply(Arbor.Memory.Introspection, function, args)
-      rescue
-        e -> {:error, Exception.message(e)}
-      catch
-        :exit, reason -> {:error, {:introspection_unavailable, reason}}
-      end
-    else
-      {:error, :introspection_not_available}
-    end
+    apply(Arbor.Memory.Introspection, function, args)
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, {:introspection_unavailable, reason}}
   end
 
   defp with_exec_session(agent_id, code, opts) do
@@ -564,20 +546,15 @@ defmodule Arbor.Agent.MentalExecutor do
   # ── Think Helpers ──────────────────────────────────────────────────
 
   defp get_recent_thinking(agent_id, limit) do
-    if Code.ensure_loaded?(Arbor.Memory.Thinking) do
-      try do
-        case apply(Arbor.Memory.Thinking, :recent, [agent_id, limit]) do
-          {:ok, thoughts} -> thoughts
-          _ -> []
-        end
-      rescue
-        _ -> []
-      catch
-        :exit, _ -> []
-      end
-    else
-      []
+    case Arbor.Memory.Thinking.recent_thinking(agent_id, limit: limit) do
+      thoughts when is_list(thoughts) -> thoughts
+      {:ok, thoughts} -> thoughts
+      _ -> []
     end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
   end
 
   defp get_active_goals_summary(agent_id) do

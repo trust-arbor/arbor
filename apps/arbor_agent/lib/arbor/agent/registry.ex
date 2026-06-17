@@ -290,10 +290,7 @@ defmodule Arbor.Agent.Registry do
   end
 
   defp emit_agent_signal(type, data) do
-    if Code.ensure_loaded?(Arbor.Signals) and
-         function_exported?(Arbor.Signals, :durable_emit, 3) do
-      apply(Arbor.Signals, :durable_emit, [:agent, type, data])
-    end
+    Arbor.Signals.durable_emit(:agent, type, data)
   rescue
     _ -> :ok
   end

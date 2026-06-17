@@ -72,18 +72,11 @@ defmodule Arbor.Agent.LLMDefaults do
   defp agent_value(nil), do: nil
   defp agent_value(key), do: Application.get_env(:arbor_agent, key)
 
-  # Runtime bridge to Arbor.AI.Config (Standalone app, can't compile-time depend)
   defp system_default_model do
-    if Code.ensure_loaded?(Arbor.AI.Config) and
-         function_exported?(Arbor.AI.Config, :default_model, 0) do
-      apply(Arbor.AI.Config, :default_model, [])
-    end
+    Arbor.AI.Config.default_model()
   end
 
   defp system_default_provider do
-    if Code.ensure_loaded?(Arbor.AI.Config) and
-         function_exported?(Arbor.AI.Config, :default_provider, 0) do
-      apply(Arbor.AI.Config, :default_provider, [])
-    end
+    Arbor.AI.Config.default_provider()
   end
 end

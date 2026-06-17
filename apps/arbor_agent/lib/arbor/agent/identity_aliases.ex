@@ -84,25 +84,18 @@ defmodule Arbor.Agent.IdentityAliases do
   # bootstrap, future admin LiveView — all have a known principal at the
   # call site. We never derive it from process-dict ambient context here.
   defp authorize_manage(caller_id) do
-    cond do
-      not (Code.ensure_loaded?(Arbor.Security) and
-               function_exported?(Arbor.Security, :authorize, 4)) ->
-        {:error, :security_unavailable}
+    case Arbor.Security.authorize(caller_id, @manage_resource, :write) do
+      {:ok, :authorized} ->
+        :ok
 
-      true ->
-        case Arbor.Security.authorize(caller_id, @manage_resource, :write) do
-          {:ok, :authorized} ->
-            :ok
+      {:error, reason} ->
+        {:error, {:unauthorized_alias_management, reason}}
 
-          {:error, reason} ->
-            {:error, {:unauthorized_alias_management, reason}}
+      {:ok, :pending_approval, _} ->
+        {:error, {:unauthorized_alias_management, :pending_approval}}
 
-          {:ok, :pending_approval, _} ->
-            {:error, {:unauthorized_alias_management, :pending_approval}}
-
-          other ->
-            {:error, {:unauthorized_alias_management, {:unexpected, other}}}
-        end
+      other ->
+        {:error, {:unauthorized_alias_management, {:unexpected, other}}}
     end
   end
 

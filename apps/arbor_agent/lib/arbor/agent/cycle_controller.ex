@@ -316,17 +316,11 @@ defmodule Arbor.Agent.CycleController do
   end
 
   defp execute_action_backed_mental(agent_id, module, params) do
-    if Code.ensure_loaded?(Arbor.Actions) do
-      try do
-        apply(Arbor.Actions, :authorize_and_execute, [module, agent_id, params, []])
-      rescue
-        e -> {:error, Exception.message(e)}
-      catch
-        :exit, reason -> {:error, {:action_unavailable, reason}}
-      end
-    else
-      {:error, :actions_not_available}
-    end
+    Arbor.Actions.authorize_and_execute(module, agent_id, params, [])
+  rescue
+    e -> {:error, Exception.message(e)}
+  catch
+    :exit, reason -> {:error, {:action_unavailable, reason}}
   end
 
   # ── Utility ───────────────────────────────────────────────────────────

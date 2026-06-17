@@ -590,8 +590,7 @@ defmodule Arbor.Agent.Claude do
   end
 
   defp memory_thinking_available? do
-    Code.ensure_loaded?(Arbor.Memory.Thinking) and
-      Process.whereis(Arbor.Memory.Thinking) != nil
+    Process.whereis(Arbor.Memory.Thinking) != nil
   end
 
   defp record_single_thinking(agent_id, block) do
