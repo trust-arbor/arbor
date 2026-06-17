@@ -308,8 +308,21 @@ defmodule Arbor.Consensus do
           {:ok, String.t()} | {:error, {:unauthorized, term()} | term()}
   def authorize_propose(caller_id, attrs, opts \\ []) do
     case authorize(caller_id, "arbor://consensus/propose") do
-      :ok -> propose(attrs, opts)
-      {:error, reason} -> {:error, {:unauthorized, reason}}
+      :ok ->
+        # The cap check just passed — submit DIRECTLY. Do NOT call propose/2
+        # here: it would re-apply its own :caller_id/strict_propose_caller gate
+        # (we already stripped caller_id), denying this authorized caller with
+        # :caller_id_required under strict mode (the prod default). Mirror
+        # propose/2's attrs normalization since direct callers pass raw attrs.
+        attrs =
+          attrs
+          |> Map.put_new(:topic, :general)
+          |> Map.put_new(:mode, :decision)
+
+        Coordinator.submit(attrs, opts)
+
+      {:error, reason} ->
+        {:error, {:unauthorized, reason}}
     end
   end
 
