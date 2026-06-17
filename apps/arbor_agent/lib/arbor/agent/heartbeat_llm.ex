@@ -128,22 +128,13 @@ defmodule Arbor.Agent.HeartbeatLLM do
   end
 
   defp call_ai(prompt, opts) do
-    if ai_available?() do
-      Arbor.AI.generate_text(prompt, opts)
-    else
-      {:error, :ai_unavailable}
-    end
+    Arbor.AI.generate_text(prompt, opts)
   rescue
     e ->
       {:error, {:ai_exception, Exception.message(e)}}
   catch
     :exit, reason ->
       {:error, {:ai_exit, reason}}
-  end
-
-  defp ai_available? do
-    Code.ensure_loaded?(Arbor.AI) and
-      function_exported?(Arbor.AI, :generate_text, 2)
   end
 
   defp heartbeat_model do

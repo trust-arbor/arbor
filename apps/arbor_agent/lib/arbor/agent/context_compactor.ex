@@ -849,28 +849,19 @@ defmodule Arbor.Agent.ContextCompactor do
   defp generate_narrative(messages, config) do
     prompt = build_narrative_prompt(messages)
 
-    ai_mod = Module.concat([:Arbor, :AI])
+    case Arbor.AI.generate_text(prompt,
+           model: config.compaction_model,
+           provider: config.compaction_provider,
+           max_tokens: 500,
+           temperature: 0.2,
+           runtime: :arbor
+         ) do
+      {:ok, response} ->
+        text = extract_response_text(response)
+        if text && String.length(text) > 0, do: {:ok, text}, else: {:error, :empty_response}
 
-    if Code.ensure_loaded?(ai_mod) and function_exported?(ai_mod, :generate_text, 2) do
-      case apply(ai_mod, :generate_text, [
-             prompt,
-             [
-               model: config.compaction_model,
-               provider: config.compaction_provider,
-               max_tokens: 500,
-               temperature: 0.2,
-               runtime: :arbor
-             ]
-           ]) do
-        {:ok, response} ->
-          text = extract_response_text(response)
-          if text && String.length(text) > 0, do: {:ok, text}, else: {:error, :empty_response}
-
-        error ->
-          error
-      end
-    else
-      {:error, :ai_unavailable}
+      error ->
+        error
     end
   rescue
     e -> {:error, Exception.message(e)}

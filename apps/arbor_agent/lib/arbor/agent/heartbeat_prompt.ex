@@ -13,14 +13,11 @@ defmodule Arbor.Agent.HeartbeatPrompt do
 
   # Skill loading helper — shared by system_prompt, directive_section, response_format_section.
   defp load_skill(name, bindings \\ %{}) do
-    lib = Arbor.Common.SkillLibrary
-    renderer = Arbor.Common.TemplateRenderer
-
-    with true <- Code.ensure_loaded?(lib) and Process.whereis(lib) != nil,
-         {:ok, skill} <- lib.get(name),
+    with true <- Process.whereis(Arbor.Common.SkillLibrary) != nil,
+         {:ok, skill} <- Arbor.Common.SkillLibrary.get(name),
          body when body != "" <- Map.get(skill, :body, "") do
-      if Code.ensure_loaded?(renderer) and map_size(bindings) > 0 do
-        {:ok, renderer.render(body, bindings)}
+      if map_size(bindings) > 0 do
+        {:ok, Arbor.Common.TemplateRenderer.render(body, bindings)}
       else
         {:ok, body}
       end
@@ -297,15 +294,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   end
 
   defp format_goal_date(dt) do
-    if Code.ensure_loaded?(Arbor.Common.Time) do
-      Arbor.Common.Time.month_day(dt)
-    else
-      case dt do
-        %DateTime{} -> Calendar.strftime(dt, "%b %-d")
-        %Date{} -> Calendar.strftime(dt, "%b %-d")
-        _ -> to_string(dt)
-      end
-    end
+    Arbor.Common.Time.month_day(dt)
   end
 
   defp same_day_as_today?(%DateTime{} = dt) do
@@ -430,18 +419,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
   defp conversation_section(_state), do: nil
 
   defp context_window_text(window) do
-    if Code.ensure_loaded?(Arbor.Memory.ContextWindow) do
-      Memory.context_to_prompt_text(window)
-    else
-      entries = Map.get(window, :entries, [])
-
-      Enum.map_join(entries, "\n", fn {_type, content, ts} ->
-        case ts do
-          %DateTime{} -> "[#{Calendar.strftime(ts, "%H:%M")}] #{content}"
-          _ -> content
-        end
-      end)
-    end
+    Memory.context_to_prompt_text(window)
   end
 
   defp pending_section(state) do
@@ -692,10 +670,7 @@ defmodule Arbor.Agent.HeartbeatPrompt do
 
     sk =
       safe_call(fn ->
-        if Code.ensure_loaded?(Arbor.Memory.IdentityConsolidator) and
-             function_exported?(Arbor.Memory.IdentityConsolidator, :get_self_knowledge, 1) do
-          Memory.get_self_knowledge(agent_id)
-        end
+        Memory.get_self_knowledge(agent_id)
       end)
 
     case sk do

@@ -378,10 +378,8 @@ defmodule Arbor.Agent.ActionCycleServer do
   # ── Signal Emission ─────────────────────────────────────────────
 
   defp emit_signal(agent_id, event, data) do
-    if Code.ensure_loaded?(Arbor.Signals) and
-         function_exported?(Arbor.Signals, :emit, 4) and
-         Process.whereis(Arbor.Signals.Bus) != nil do
-      apply(Arbor.Signals, :emit, [:agent, event, data, [metadata: %{agent_id: agent_id}]])
+    if Process.whereis(Arbor.Signals.Bus) != nil do
+      Arbor.Signals.emit(:agent, event, data, metadata: %{agent_id: agent_id})
     end
   rescue
     _ -> :ok
@@ -438,20 +436,16 @@ defmodule Arbor.Agent.ActionCycleServer do
         system_prompt: system_prompt
       ]
 
-      if ai_available?() do
-        case apply(Arbor.AI, :generate_text, [user_msg, ai_opts]) do
-          {:ok, %{text: text}} ->
-            parse_json_response(text)
+      case Arbor.AI.generate_text(user_msg, ai_opts) do
+        {:ok, %{text: text}} ->
+          parse_json_response(text)
 
-          {:ok, response} when is_map(response) ->
-            text = response[:text] || Map.get(response, "text", "")
-            parse_json_response(text)
+        {:ok, response} when is_map(response) ->
+          text = response[:text] || Map.get(response, "text", "")
+          parse_json_response(text)
 
-          {:error, reason} ->
-            {:error, reason}
-        end
-      else
-        {:error, :ai_unavailable}
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
@@ -471,11 +465,6 @@ defmodule Arbor.Agent.ActionCycleServer do
   end
 
   defp parse_json_response(_), do: {:error, :empty_response}
-
-  defp ai_available? do
-    Code.ensure_loaded?(Arbor.AI) and
-      function_exported?(Arbor.AI, :generate_text, 2)
-  end
 
   defp mind_model do
     Arbor.Agent.LLMDefaults.default_model(

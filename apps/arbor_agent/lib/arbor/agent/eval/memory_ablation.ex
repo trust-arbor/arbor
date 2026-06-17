@@ -264,12 +264,7 @@ defmodule Arbor.Agent.Eval.MemoryAblation do
   # -- Persistence bridge --
 
   defp persist_run(attrs) do
-    if Code.ensure_loaded?(Arbor.Persistence) and
-         function_exported?(Arbor.Persistence, :insert_eval_run, 1) do
-      apply(Arbor.Persistence, :insert_eval_run, [attrs])
-    else
-      {:error, :persistence_unavailable}
-    end
+    Arbor.Persistence.insert_eval_run(attrs)
   rescue
     _ -> {:error, :persistence_error}
   catch
@@ -277,12 +272,7 @@ defmodule Arbor.Agent.Eval.MemoryAblation do
   end
 
   defp persist_results_batch(results) do
-    if Code.ensure_loaded?(Arbor.Persistence) and
-         function_exported?(Arbor.Persistence, :insert_eval_results_batch, 1) do
-      apply(Arbor.Persistence, :insert_eval_results_batch, [results])
-    else
-      {:error, :persistence_unavailable}
-    end
+    Arbor.Persistence.insert_eval_results_batch(results)
   rescue
     _ -> {:error, :persistence_error}
   catch

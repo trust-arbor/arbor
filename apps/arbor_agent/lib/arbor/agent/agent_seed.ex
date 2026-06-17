@@ -334,8 +334,7 @@ defmodule Arbor.Agent.AgentSeed do
   @doc false
   @spec memory_available?() :: boolean()
   def memory_available? do
-    Code.ensure_loaded?(Arbor.Memory) and
-      function_exported?(Arbor.Memory, :init_for_agent, 1)
+    true
   end
 
   @doc false
@@ -350,30 +349,25 @@ defmodule Arbor.Agent.AgentSeed do
   @doc false
   @spec security_available?() :: boolean()
   def security_available? do
-    Code.ensure_loaded?(Arbor.Security) and
-      function_exported?(Arbor.Security, :grant, 1) and
-      Process.whereis(Arbor.Security.SystemAuthority) != nil
+    Process.whereis(Arbor.Security.SystemAuthority) != nil
   end
 
   @doc false
   @spec background_checks_available?() :: boolean()
   def background_checks_available? do
-    Code.ensure_loaded?(Arbor.Memory.BackgroundChecks) and
-      function_exported?(Arbor.Memory.BackgroundChecks, :run, 2)
+    true
   end
 
   @doc false
   @spec signals_available?() :: boolean()
   def signals_available? do
-    Code.ensure_loaded?(Arbor.Signals) and
-      Process.whereis(Arbor.Signals.Bus) != nil
+    Process.whereis(Arbor.Signals.Bus) != nil
   end
 
   @doc false
   @spec actions_available?() :: boolean()
   def actions_available? do
-    Code.ensure_loaded?(Arbor.Actions) and
-      function_exported?(Arbor.Actions, :authorize_and_execute, 4)
+    true
   end
 
   @doc false
@@ -486,7 +480,7 @@ defmodule Arbor.Agent.AgentSeed do
   # ============================================================================
 
   defp init_memory_system(agent_id) do
-    if memory_available?() and memory_registry_running?() do
+    if memory_registry_running?() do
       case Arbor.Memory.init_for_agent(agent_id) do
         {:ok, _pid} ->
           Logger.info("Memory system initialized", agent_id: agent_id)
@@ -663,13 +657,7 @@ defmodule Arbor.Agent.AgentSeed do
   end
 
   defp build_self_knowledge_context(agent_id) do
-    if identity_consolidator_available?(:get_self_knowledge, 1),
-      do: fetch_self_knowledge(agent_id)
-  end
-
-  defp identity_consolidator_available?(fun, arity) do
-    Code.ensure_loaded?(Arbor.Memory.IdentityConsolidator) and
-      function_exported?(Arbor.Memory.IdentityConsolidator, fun, arity)
+    fetch_self_knowledge(agent_id)
   end
 
   defp fetch_self_knowledge(agent_id) do
@@ -701,17 +689,12 @@ defmodule Arbor.Agent.AgentSeed do
   defp add_to_context_window(%{context_window: nil} = state, _prompt, _response), do: state
 
   defp add_to_context_window(%{context_window: window} = state, prompt, response) do
-    if Code.ensure_loaded?(Arbor.Memory.ContextWindow) and
-         function_exported?(Arbor.Memory.ContextWindow, :add_entry, 3) do
-      window =
-        window
-        |> Memory.add_context_entry(:message, "Human: #{prompt}")
-        |> Memory.add_context_entry(:message, "Assistant: #{response}")
+    window =
+      window
+      |> Memory.add_context_entry(:message, "Human: #{prompt}")
+      |> Memory.add_context_entry(:message, "Assistant: #{response}")
 
-      %{state | context_window: window}
-    else
-      state
-    end
+    %{state | context_window: window}
   rescue
     _ -> state
   end
@@ -774,10 +757,7 @@ defmodule Arbor.Agent.AgentSeed do
   # ============================================================================
 
   defp subscribe_to_memory_signals(agent_id) do
-    if Code.ensure_loaded?(Arbor.Signals) and
-         function_exported?(Arbor.Signals, :subscribe, 2) do
-      subscribe_to_each_memory_topic(self())
-    end
+    subscribe_to_each_memory_topic(self())
 
     Logger.debug("Subscribed to memory signals", agent_id: agent_id)
   rescue

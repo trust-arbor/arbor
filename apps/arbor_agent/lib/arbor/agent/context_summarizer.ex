@@ -196,22 +196,16 @@ defmodule Arbor.Agent.ContextSummarizer do
     model = config(:summarizer_model, "claude-haiku")
     provider = config(:summarizer_provider, :anthropic)
 
-    if ai_available?() do
-      try do
-        Arbor.AI.generate_text(prompt,
-          model: model,
-          provider: provider,
-          max_tokens: 2000,
-          runtime: :arbor
-        )
-      rescue
-        e -> {:error, {:summarizer_exception, Exception.message(e)}}
-      catch
-        kind, reason -> {:error, {kind, reason}}
-      end
-    else
-      {:error, :ai_unavailable}
-    end
+    Arbor.AI.generate_text(prompt,
+      model: model,
+      provider: provider,
+      max_tokens: 2000,
+      runtime: :arbor
+    )
+  rescue
+    e -> {:error, {:summarizer_exception, Exception.message(e)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   defp build_summarization_prompt(messages, tier, existing_summary) do
@@ -307,11 +301,6 @@ defmodule Arbor.Agent.ContextSummarizer do
       nil -> false
       _pid -> true
     end
-  end
-
-  defp ai_available? do
-    Code.ensure_loaded?(Arbor.AI) and
-      function_exported?(Arbor.AI, :generate_text, 2)
   end
 
   defp config(key, default) do

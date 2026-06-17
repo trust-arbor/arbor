@@ -326,27 +326,20 @@ defmodule Arbor.Agent.SimpleAgent do
 
   # Direct action execution — bypasses authorization (for tests or when security stack unavailable)
   defp direct_execute(name, args, state) do
-    actions_mod = Module.concat([:Arbor, :Actions])
+    case Arbor.Actions.name_to_module(name) do
+      {:ok, module} ->
+        safe_args =
+          args
+          |> atomize_known_keys(module)
+          |> maybe_inject_workdir(state.working_dir)
 
-    if Code.ensure_loaded?(actions_mod) and
-         function_exported?(actions_mod, :name_to_module, 1) do
-      case apply(actions_mod, :name_to_module, [name]) do
-        {:ok, module} ->
-          safe_args =
-            args
-            |> atomize_known_keys(module)
-            |> maybe_inject_workdir(state.working_dir)
+        case module.run(safe_args, %{}) do
+          {:ok, result} -> {:ok, format_action_result(result)}
+          {:error, reason} -> {:error, "Action #{name} failed: #{inspect(reason)}"}
+        end
 
-          case module.run(safe_args, %{}) do
-            {:ok, result} -> {:ok, format_action_result(result)}
-            {:error, reason} -> {:error, "Action #{name} failed: #{inspect(reason)}"}
-          end
-
-        {:error, _} ->
-          {:error, "Unknown tool: #{name}"}
-      end
-    else
-      {:error, "No action system available"}
+      {:error, _} ->
+        {:error, "Unknown tool: #{name}"}
     end
   end
 
@@ -533,13 +526,8 @@ defmodule Arbor.Agent.SimpleAgent do
     end)
   end
 
-  # Runtime bridge to AgentTelemetry.Store (arbor_common is not a compile dep of arbor_agent)
   defp maybe_record_compaction_telemetry(agent_id, utilization) do
-    store = Module.concat([:Arbor, :Common, :AgentTelemetry, :Store])
-
-    if Code.ensure_loaded?(store) and function_exported?(store, :record_compaction, 2) do
-      apply(store, :record_compaction, [agent_id, utilization])
-    end
+    Arbor.Common.AgentTelemetry.Store.record_compaction(agent_id, utilization)
   rescue
     _ -> :ok
   catch

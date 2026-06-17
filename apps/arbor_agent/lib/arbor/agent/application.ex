@@ -102,10 +102,6 @@ defmodule Arbor.Agent.Application do
   end
 
   defp default_profile_backend do
-    if Code.ensure_loaded?(Arbor.Persistence.QueryableStore.Postgres) do
-      Arbor.Persistence.QueryableStore.Postgres
-    else
-      nil
-    end
+    Arbor.Persistence.QueryableStore.Postgres
   end
 end

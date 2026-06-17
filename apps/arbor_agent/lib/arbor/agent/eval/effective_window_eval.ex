@@ -218,41 +218,32 @@ defmodule Arbor.Agent.Eval.EffectiveWindowEval do
   # ── LLM Call ──────────────────────────────────────────────────
 
   defp call_llm(provider, model, messages, timeout) do
-    client_mod = Module.concat([:Arbor, :LLM, :Client])
-    request_mod = Module.concat([:Arbor, :LLM, :Request])
-    message_mod = Module.concat([:Arbor, :LLM, :Message])
+    # Convert our plain maps to Message structs
+    llm_messages =
+      Enum.map(messages, fn msg ->
+        role = msg.role
+        content = msg.content
+        struct(Arbor.LLM.Message, %{role: role, content: content})
+      end)
 
-    if Code.ensure_loaded?(client_mod) and Code.ensure_loaded?(request_mod) and
-         Code.ensure_loaded?(message_mod) do
-      # Convert our plain maps to Message structs
-      llm_messages =
-        Enum.map(messages, fn msg ->
-          role = msg.role
-          content = msg.content
-          struct(message_mod, %{role: role, content: content})
-        end)
+    request =
+      struct(Arbor.LLM.Request, %{
+        provider: provider,
+        model: model,
+        messages: llm_messages,
+        max_tokens: @max_output_tokens,
+        temperature: 0.0
+      })
 
-      request =
-        struct(request_mod, %{
-          provider: provider,
-          model: model,
-          messages: llm_messages,
-          max_tokens: @max_output_tokens,
-          temperature: 0.0
-        })
+    client = Arbor.LLM.Client.from_env([])
 
-      client = apply(client_mod, :from_env, [[]])
+    case Arbor.LLM.Client.complete(client, request, timeout: timeout) do
+      {:ok, response} ->
+        text = Map.get(response, :text, "")
+        {:ok, text}
 
-      case apply(client_mod, :complete, [client, request, [timeout: timeout]]) do
-        {:ok, response} ->
-          text = Map.get(response, :text, "")
-          {:ok, text}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-    else
-      {:error, :unified_llm_unavailable}
+      {:error, reason} ->
+        {:error, reason}
     end
   rescue
     e -> {:error, Exception.message(e)}
@@ -345,15 +336,9 @@ defmodule Arbor.Agent.Eval.EffectiveWindowEval do
   end
 
   defp context_from_token_budget(model) do
-    mod = Module.concat([:Arbor, :Memory, :TokenBudget])
-
-    if Code.ensure_loaded?(mod) and function_exported?(mod, :model_context_size, 1) do
-      size = apply(mod, :model_context_size, [model])
-      # TokenBudget returns 100_000 as default — only trust if it's different
-      if size != 100_000, do: size, else: nil
-    else
-      nil
-    end
+    size = Arbor.Memory.TokenBudget.model_context_size(model)
+    # TokenBudget returns 100_000 as default — only trust if it's different
+    if size != 100_000, do: size, else: nil
   rescue
     _ -> nil
   end
@@ -461,12 +446,7 @@ defmodule Arbor.Agent.Eval.EffectiveWindowEval do
   end
 
   defp persist_run(attrs) do
-    if Code.ensure_loaded?(Arbor.Persistence) and
-         function_exported?(Arbor.Persistence, :insert_eval_run, 1) do
-      apply(Arbor.Persistence, :insert_eval_run, [attrs])
-    else
-      {:error, :persistence_unavailable}
-    end
+    Arbor.Persistence.insert_eval_run(attrs)
   rescue
     _ -> {:error, :persistence_error}
   catch
@@ -474,12 +454,7 @@ defmodule Arbor.Agent.Eval.EffectiveWindowEval do
   end
 
   defp persist_results_batch(results) do
-    if Code.ensure_loaded?(Arbor.Persistence) and
-         function_exported?(Arbor.Persistence, :insert_eval_results_batch, 1) do
-      apply(Arbor.Persistence, :insert_eval_results_batch, [results])
-    else
-      {:error, :persistence_unavailable}
-    end
+    Arbor.Persistence.insert_eval_results_batch(results)
   rescue
     _ -> {:error, :persistence_error}
   catch

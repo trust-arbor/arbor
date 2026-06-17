@@ -684,9 +684,7 @@ defmodule Arbor.Agent.Lifecycle do
     Arbor.Security.delete_signing_key(agent_id)
 
     # Remove identity from registry
-    if function_exported?(Arbor.Security, :deregister_identity, 1) do
-      Arbor.Security.deregister_identity(agent_id)
-    end
+    Arbor.Security.deregister_identity(agent_id)
 
     # Remove profile from store (and legacy JSON)
     ProfileStore.delete_profile(agent_id)
@@ -706,18 +704,11 @@ defmodule Arbor.Agent.Lifecycle do
       provider: Keyword.get(opts, :provider)
     ]
 
-    if Code.ensure_loaded?(Arbor.AI) and
-         function_exported?(Arbor.AI, :build_stable_system_prompt, 2) do
-      try do
-        apply(Arbor.AI, :build_stable_system_prompt, [agent_id, prompt_opts])
-      rescue
-        _ -> fallback_system_prompt(profile)
-      catch
-        :exit, _ -> fallback_system_prompt(profile)
-      end
-    else
-      fallback_system_prompt(profile)
-    end
+    Arbor.AI.build_stable_system_prompt(agent_id, prompt_opts)
+  rescue
+    _ -> fallback_system_prompt(profile)
+  catch
+    :exit, _ -> fallback_system_prompt(profile)
   end
 
   defp fallback_system_prompt(profile) do
@@ -950,13 +941,13 @@ defmodule Arbor.Agent.Lifecycle do
     tenant_context = Keyword.get(opts, :tenant_context)
 
     workspace_root =
-      if tenant_context && Code.ensure_loaded?(Arbor.Contracts.TenantContext) do
-        apply(Arbor.Contracts.TenantContext, :effective_workspace_root, [tenant_context])
+      if tenant_context do
+        Arbor.Contracts.TenantContext.effective_workspace_root(tenant_context)
       end
 
     if workspace_root do
       principal_id =
-        apply(Arbor.Contracts.TenantContext, :principal_id, [tenant_context])
+        Arbor.Contracts.TenantContext.principal_id(tenant_context)
 
       for op <- [:read, :write, :list] do
         # `/**` so the workspace grant covers files WITHIN the workspace root,
@@ -1203,10 +1194,7 @@ defmodule Arbor.Agent.Lifecycle do
         base
 
       ctx ->
-        principal_id =
-          if Code.ensure_loaded?(Arbor.Contracts.TenantContext) do
-            apply(Arbor.Contracts.TenantContext, :principal_id, [ctx])
-          end
+        principal_id = Arbor.Contracts.TenantContext.principal_id(ctx)
 
         if principal_id, do: Map.put(base, :created_by, principal_id), else: base
     end
@@ -1371,15 +1359,10 @@ defmodule Arbor.Agent.Lifecycle do
 
   # Emit durable lifecycle signal via centralized Signals.durable_emit/4.
   # This handles: signal bus emit + EventLog ETS write + async Postgres write.
-  # Falls back to plain emit if durable_emit is not yet available.
   @lifecycle_stream_id "agent:lifecycle"
 
   defp dual_emit_lifecycle(event_type, data) do
-    if function_exported?(Arbor.Signals, :durable_emit, 4) do
-      Arbor.Signals.durable_emit(:agent, event_type, data, stream_id: @lifecycle_stream_id)
-    else
-      Arbor.Signals.emit(:agent, event_type, data)
-    end
+    Arbor.Signals.durable_emit(:agent, event_type, data, stream_id: @lifecycle_stream_id)
   rescue
     _ -> :ok
   catch

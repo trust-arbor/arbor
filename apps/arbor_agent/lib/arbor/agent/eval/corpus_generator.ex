@@ -556,44 +556,35 @@ defmodule Arbor.Agent.Eval.CorpusGenerator do
   # ── LLM Call ──────────────────────────────────────────────────
 
   defp call_llm(provider, model, prompt) do
-    client_mod = Module.concat([:Arbor, :LLM, :Client])
-    request_mod = Module.concat([:Arbor, :LLM, :Request])
-    message_mod = Module.concat([:Arbor, :LLM, :Message])
+    messages = [
+      struct(Arbor.LLM.Message, %{
+        role: :system,
+        content:
+          "You are a content generator for evaluation datasets. " <>
+            "Follow the formatting instructions precisely."
+      }),
+      struct(Arbor.LLM.Message, %{role: :user, content: prompt})
+    ]
 
-    if Code.ensure_loaded?(client_mod) and Code.ensure_loaded?(request_mod) and
-         Code.ensure_loaded?(message_mod) do
-      messages = [
-        struct(message_mod, %{
-          role: :system,
-          content:
-            "You are a content generator for evaluation datasets. " <>
-              "Follow the formatting instructions precisely."
-        }),
-        struct(message_mod, %{role: :user, content: prompt})
-      ]
+    request =
+      struct(Arbor.LLM.Request, %{
+        provider: provider,
+        model: model,
+        messages: messages,
+        max_tokens: @max_tokens_per_call,
+        temperature: 1.0
+      })
 
-      request =
-        struct(request_mod, %{
-          provider: provider,
-          model: model,
-          messages: messages,
-          max_tokens: @max_tokens_per_call,
-          temperature: 1.0
-        })
+    client = Arbor.LLM.Client.from_env([])
 
-      client = apply(client_mod, :from_env, [[]])
+    case Arbor.LLM.Client.complete(client, request, timeout: 90_000) do
+      {:ok, response} ->
+        text = Map.get(response, :text) || Map.get(response, :content) || ""
 
-      case apply(client_mod, :complete, [client, request, [timeout: 90_000]]) do
-        {:ok, response} ->
-          text = Map.get(response, :text) || Map.get(response, :content) || ""
+        {:ok, text}
 
-          {:ok, text}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-    else
-      {:error, :unified_llm_unavailable}
+      {:error, reason} ->
+        {:error, reason}
     end
   rescue
     e -> {:error, Exception.message(e)}

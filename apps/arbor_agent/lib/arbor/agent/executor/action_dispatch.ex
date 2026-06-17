@@ -121,15 +121,13 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   @spec dispatch(atom() | term(), map(), String.t() | nil) :: {:ok, map()} | {:error, term()}
   def dispatch(action, params, agent_id \\ nil)
 
-  # Proposal submission — map to Proposal.Submit action (runtime call to avoid Level 2 cycle)
+  # Proposal submission — map to Proposal.Submit action
   def dispatch(:proposal_submit, params, agent_id) do
     proposal = params[:proposal] || params["proposal"] || %{}
     submit_params = build_submit_params(proposal)
 
-    action_mod = Module.concat([Arbor, Actions, Proposal, Submit])
-
     run_runtime_action(
-      action_mod,
+      Arbor.Actions.Proposal.Submit,
       submit_params,
       :proposal_submit_failed,
       :consensus_unavailable,
@@ -152,10 +150,8 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
 
   # Background checks — compound module name doesn't match single-underscore naming convention
   def dispatch(:background_checks_run, params, agent_id) do
-    action_mod = Module.concat([Arbor, Actions, BackgroundChecks, Run])
-
     run_runtime_action(
-      action_mod,
+      Arbor.Actions.BackgroundChecks.Run,
       params,
       :background_checks_failed,
       :health_checks_unavailable,
@@ -216,24 +212,13 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   end
 
   defp run_via_authorize_and_execute(action_mod, params, error_tag, unavailable_tag, agent_id) do
-    actions_mod = Arbor.Actions
-
-    if Code.ensure_loaded?(actions_mod) and
-         function_exported?(actions_mod, :authorize_and_execute, 4) do
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      case safe_call(fn ->
-             apply(actions_mod, :authorize_and_execute, [agent_id, action_mod, params, %{}])
-           end) do
-        {:ok, {:ok, result}} -> {:ok, result}
-        {:ok, {:error, reason}} -> {:error, {error_tag, reason}}
-        {:error, reason} -> {:error, {error_tag, reason}}
-        nil -> {:error, unavailable_tag}
-      end
-    else
-      # Arbor.Actions facade is not loaded — fall back to direct apply so
-      # the action still runs in environments where the facade isn't part
-      # of the boot set.
-      run_direct(action_mod, params, error_tag, unavailable_tag)
+    case safe_call(fn ->
+           Arbor.Actions.authorize_and_execute(agent_id, action_mod, params, %{})
+         end) do
+      {:ok, {:ok, result}} -> {:ok, result}
+      {:ok, {:error, reason}} -> {:error, {error_tag, reason}}
+      {:error, reason} -> {:error, {error_tag, reason}}
+      nil -> {:error, unavailable_tag}
     end
   end
 
@@ -258,10 +243,8 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
       rollback_timeout_ms: params[:timeout] || 30_000
     }
 
-    action_mod = Module.concat([Arbor, Actions, Code, HotLoad])
-
     run_runtime_action(
-      action_mod,
+      Arbor.Actions.Code.HotLoad,
       hot_load_params,
       :hot_load_failed,
       :code_service_unavailable,
@@ -272,10 +255,7 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   defp do_proposal_status(nil), do: {:error, :missing_proposal_id}
 
   defp do_proposal_status(proposal_id) do
-    consensus_mod = Module.concat([Arbor, Consensus])
-
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    case safe_call(fn -> apply(consensus_mod, :get_status, [proposal_id]) end) do
+    case safe_call(fn -> Arbor.Consensus.get_status(proposal_id) end) do
       {:ok, status} -> {:ok, %{proposal_id: proposal_id, status: status}}
       {:error, reason} -> {:error, {:status_query_failed, reason}}
       nil -> {:error, :consensus_unavailable}
@@ -294,11 +274,9 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
     # The Executor stores its agent_id there so dispatch can enforce auth
     # without threading it through every hardcoded clause.
     agent_id = Process.get(:arbor_executor_agent_id)
-    actions_mod = Module.concat([:Arbor, :Actions])
 
-    if agent_id && Code.ensure_loaded?(actions_mod) &&
-         function_exported?(actions_mod, :authorize_and_execute, 4) do
-      case apply(actions_mod, :authorize_and_execute, [agent_id, action_module, params, %{}]) do
+    if agent_id do
+      case Arbor.Actions.authorize_and_execute(agent_id, action_module, params, %{}) do
         {:ok, :pending_approval, _} -> {:error, {:pending_approval, action}}
         {:error, :unauthorized} -> {:error, {:unauthorized, action}}
         result -> result
