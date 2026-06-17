@@ -1,10 +1,10 @@
 defmodule Arbor.Memory.AuthorizationTest do
-  # NOT async: when run as part of the full arbor_memory suite (as CI does —
-  # one BEAM per app), a sibling test starts the Security stack, so `authorize/2`
-  # here enforces for real instead of taking the permissive no-security fallback.
-  # This module sets global security config to make that enforcement test-friendly
-  # (signing/identity off) and grants the caller a real capability, so it passes
-  # whether or not Security happens to be live. Global config + async don't mix.
+  # NOT async: starts the global Security stack and mutates global security
+  # config (signing/identity off). The Memory facade now FAILS CLOSED in all
+  # environments — there is no permissive dev/test fallback — so every
+  # "...when security permits" test must bring Security up for real and grant
+  # the caller a genuine capability. Enforcement is real here: each test runs
+  # with `Arbor.Security.healthy?() == true`.
   use ExUnit.Case, async: false
 
   @moduletag :fast
@@ -13,60 +13,78 @@ defmodule Arbor.Memory.AuthorizationTest do
   @agent_id "test_agent_auth"
   @caller_id "agent_caller"
 
-  setup do
-    # The earlier `{:skip, …}` return was invalid — ExUnit setup callbacks may
-    # only return :ok / a keyword / a map, so it raised once Security was live in
-    # the full-suite BEAM. Instead, make both paths pass:
-    #   * Security absent → `authorize/2` takes the permissive fallback (:ok).
-    #   * Security live    → set signing/identity off and grant the caller a real
-    #     `arbor://memory/**` cap so enforcement returns authorized.
-    if security_loaded?() do
-      prev_security =
-        for key <- [:capability_signing_required, :strict_identity_mode, :identity_verification] do
-          {key, Application.get_env(:arbor_security, key)}
-        end
+  # Security config keys that gate extra infrastructure we don't want to start
+  # for these capability-only tests. Mirrors AuthorizationE2ETest.
+  @security_config_keys [
+    :reflex_checking_enabled,
+    :capability_signing_required,
+    :strict_identity_mode,
+    :identity_verification,
+    :approval_guard_enabled,
+    :invocation_receipts_enabled
+  ]
 
-      Application.put_env(:arbor_security, :capability_signing_required, false)
-      Application.put_env(:arbor_security, :strict_identity_mode, false)
-      Application.put_env(:arbor_security, :identity_verification, false)
-
-      grant_memory_cap(@caller_id)
-
-      on_exit(fn ->
-        for {key, value} <- prev_security do
-          if is_nil(value),
-            do: Application.delete_env(:arbor_security, key),
-            else: Application.put_env(:arbor_security, key, value)
-        end
+  setup_all do
+    originals =
+      Enum.map(@security_config_keys, fn key ->
+        {key, Application.get_env(:arbor_security, key)}
       end)
+
+    for key <- @security_config_keys do
+      Application.put_env(:arbor_security, key, false)
     end
+
+    on_exit(fn ->
+      for {key, original} <- originals do
+        case original do
+          nil -> Application.delete_env(:arbor_security, key)
+          val -> Application.put_env(:arbor_security, key, val)
+        end
+      end
+    end)
 
     :ok
   end
 
-  # Grant the caller a wildcard memory capability so the `authorize_*` facade
-  # returns :ok when the Security stack is live. The `/**` is required post-C8
-  # (a concrete URI grants only its exact resource), and covers every
-  # `arbor://memory/{init,cleanup,read,write,search}/<agent>` resource the facade
-  # checks. Done via runtime apply to avoid a compile-time dep on arbor_security.
-  defp grant_memory_cap(caller_id) do
-    cap = %Arbor.Contracts.Security.Capability{
-      id: "cap_memory_auth_#{System.unique_integer([:positive])}",
-      principal_id: caller_id,
-      resource_uri: "arbor://memory/**",
-      granted_at: DateTime.utc_now(),
-      expires_at: nil,
-      constraints: %{},
-      delegation_depth: 0,
-      metadata: %{test: true}
-    }
+  setup do
+    # Bring up the Security infrastructure required for real authorization.
+    # These are normally started by Arbor.Security.Application, but
+    # start_children: false in test config disables that.
+    ensure_started(Arbor.Security.Identity.Registry)
+    ensure_started(Arbor.Security.Identity.NonceCache)
+    ensure_started(Arbor.Security.SystemAuthority)
+    ensure_started(Arbor.Security.Constraint.RateLimiter)
+    ensure_started(Arbor.Security.CapabilityStore)
+    ensure_started(Arbor.Security.Reflex.Registry)
 
-    apply(Arbor.Security.CapabilityStore, :put, [cap])
+    # The whole point of this suite post-fail-closed: enforcement is REAL.
+    assert Arbor.Security.healthy?(),
+           "Security system must be healthy — the Memory facade fails closed and these tests exercise real capability checks"
+
+    # Grant the shared caller a wildcard memory capability so each
+    # `authorize_*` facade call has a genuine capability to match against.
+    grant_memory_cap(@caller_id)
+
+    :ok
+  end
+
+  # Grant the caller a wildcard memory capability via the real Security facade
+  # so the `authorize_*` calls below return :ok through genuine enforcement.
+  # `arbor://memory/**` covers every
+  # `arbor://memory/{init,cleanup,read,write,search}/<agent>` resource the
+  # facade checks.
+  defp grant_memory_cap(caller_id) do
+    {:ok, _cap} =
+      Arbor.Security.grant(
+        principal: caller_id,
+        resource: "arbor://memory/**"
+      )
+
+    :ok
   end
 
   describe "authorize_init/3" do
     test "delegates to init_for_agent when security permits" do
-      # Security is not loaded in memory test env — authorize/2 returns :ok
       assert {:ok, _pid} = Arbor.Memory.authorize_init(@caller_id, @agent_id)
     end
 
@@ -205,70 +223,38 @@ defmodule Arbor.Memory.AuthorizationTest do
     end
   end
 
-  # Grant wildcard memory capabilities when Security is running.
-  # When Security is not loaded, authorize/2 permits by default.
-  # Mirror EXACTLY the condition under which `Arbor.Memory`'s private
-  # `authorize/2` enforces (vs. its permissive fallback): Security loaded +
-  # `authorize/4` exported + `security_available?` (which is `healthy?/0` when
-  # exported, else true). When that holds, real enforcement is in play and
-  # AuthorizationE2ETest owns the coverage — so we skip rather than fail on this
-  # test's permissive-path assumptions. (The old helper granted via unsigned
-  # `CapabilityStore.put` of bare URIs, which `authorize/4` ignores — hence the
-  # combined-run failures.)
-  defp security_loaded? do
-    Code.ensure_loaded?(Arbor.Security) and
-      function_exported?(Arbor.Security, :authorize, 4) and
-      security_reports_available?()
-  end
-
-  defp security_reports_available? do
-    if function_exported?(Arbor.Security, :healthy?, 0) do
-      try do
-        Arbor.Security.healthy?()
-      rescue
-        _ -> false
-      catch
-        :exit, _ -> false
-      end
-    else
-      true
-    end
-  end
-
-  describe "Memory.when_security_unavailable/0 (H6 regression)" do
-    setup do
-      original = Application.get_env(:arbor_memory, :strict_facade_mode)
-
-      on_exit(fn ->
-        if is_nil(original) do
-          Application.delete_env(:arbor_memory, :strict_facade_mode)
-        else
-          Application.put_env(:arbor_memory, :strict_facade_mode, original)
-        end
-      end)
-
-      :ok
-    end
-
-    test "security regression (H6): strict mode denies when Security is unavailable" do
+  describe "Memory.when_security_unavailable/0 (H6 regression — fails closed)" do
+    test "security regression (H6): denies whenever Security is unavailable" do
       # H6: pre-fix, the Memory facade's internal authorize/3 returned :ok
       # whenever Code.ensure_loaded?(Arbor.Security) returned false or the
-      # Security GenServer was unreachable. That meant any partial outage of
-      # the security subsystem silently turned every Memory operation into
-      # an unauthenticated success. In strict mode (production by default)
-      # the facade must deny instead.
-      Application.put_env(:arbor_memory, :strict_facade_mode, true)
-
+      # Security GenServer was unreachable. In dev/test that meant any partial
+      # outage of the security subsystem silently turned every Memory
+      # operation into an unauthenticated success. The facade now FAILS CLOSED
+      # in ALL environments — there is no permissive mode — so this seam must
+      # always deny.
       assert {:error, :security_unavailable} = Arbor.Memory.when_security_unavailable(),
-             "Strict mode must deny when Security is unavailable — H6 regression"
+             "Memory facade must deny when Security is unavailable — H6 fail-closed regression"
     end
 
-    test "permissive mode preserves the existing :ok response" do
-      # Dev/test default. Existing test setups that don't bring up
-      # Arbor.Security should keep working — only production flips strict on.
+    test "security regression (H6): fail-closed has no permissive escape hatch" do
+      # Explicitly guard against re-introducing a dev/test permissive mode:
+      # there is no application env that flips this seam back to :ok.
       Application.put_env(:arbor_memory, :strict_facade_mode, false)
 
-      assert :ok = Arbor.Memory.when_security_unavailable()
+      on_exit(fn -> Application.delete_env(:arbor_memory, :strict_facade_mode) end)
+
+      assert {:error, :security_unavailable} = Arbor.Memory.when_security_unavailable(),
+             "No application env may turn the fail-closed seam back into a permissive :ok"
+    end
+  end
+
+  # Helpers
+
+  defp ensure_started(module, opts \\ []) do
+    if Process.whereis(module) do
+      :already_running
+    else
+      start_supervised!({module, opts})
     end
   end
 end
