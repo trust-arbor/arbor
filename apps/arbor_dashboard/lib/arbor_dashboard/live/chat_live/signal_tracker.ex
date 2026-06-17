@@ -146,8 +146,6 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
   Fetch goals for an agent. Used by ChatLive mount and toggle handlers.
   """
   def fetch_goals(agent_id, show_completed) do
-    unless Code.ensure_loaded?(Arbor.Memory), do: throw(:no_memory)
-
     if show_completed do
       fetch_all_goals(agent_id)
     else
@@ -157,7 +155,6 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
     _ -> []
   catch
     :exit, _ -> []
-    :no_memory -> []
   end
 
   defp maybe_refresh_goals(socket, signal) do
@@ -173,24 +170,11 @@ defmodule Arbor.Dashboard.Live.ChatLive.SignalTracker do
   end
 
   defp fetch_all_goals(agent_id) do
-    cond do
-      function_exported?(Arbor.Memory, :get_all_goals, 1) ->
-        agent_id |> Arbor.Memory.get_all_goals() |> sort_goals()
-
-      function_exported?(Arbor.Memory, :get_active_goals, 1) ->
-        Arbor.Memory.get_active_goals(agent_id)
-
-      true ->
-        []
-    end
+    agent_id |> Arbor.Memory.get_all_goals() |> sort_goals()
   end
 
   defp fetch_active_goals(agent_id) do
-    if function_exported?(Arbor.Memory, :get_active_goals, 1) do
-      Arbor.Memory.get_active_goals(agent_id)
-    else
-      []
-    end
+    Arbor.Memory.get_active_goals(agent_id)
   end
 
   defp sort_goals(goals) do

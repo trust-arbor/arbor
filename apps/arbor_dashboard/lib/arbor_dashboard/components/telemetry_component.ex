@@ -525,11 +525,7 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
   defp maybe_reselect(state, agent_id), do: TelemetryCore.select_agent(state, agent_id)
 
   defp fetch_all_telemetry do
-    if Code.ensure_loaded?(Arbor.Common.AgentTelemetry.Store) do
-      apply(Arbor.Common.AgentTelemetry.Store, :all, [])
-    else
-      []
-    end
+    Arbor.Common.AgentTelemetry.Store.all()
   rescue
     _ -> []
   catch
@@ -537,15 +533,9 @@ defmodule Arbor.Dashboard.Components.TelemetryComponent do
   end
 
   defp fetch_history_events(agent_id) do
-    store_mod = Arbor.Common.AgentTelemetry.Store
-
-    if Code.ensure_loaded?(store_mod) and function_exported?(store_mod, :query_events, 2) do
-      case apply(store_mod, :query_events, [agent_id, [limit: 200, order: :desc]]) do
-        {:ok, events} -> events
-        _ -> []
-      end
-    else
-      []
+    case Arbor.Common.AgentTelemetry.Store.query_events(agent_id, limit: 200, order: :desc) do
+      {:ok, events} -> events
+      _ -> []
     end
   rescue
     _ -> []

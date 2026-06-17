@@ -374,26 +374,20 @@ defmodule Arbor.Dashboard.Live.ChannelsLive do
   # ── Safe wrappers ───────────────────────────────────────────────
 
   defp safe_load_channels(name_filter \\ "", type_filter \\ "") do
-    comms = Arbor.Comms
+    opts = build_filter_opts(name_filter, type_filter)
 
-    if Code.ensure_loaded?(comms) do
-      opts = build_filter_opts(name_filter, type_filter)
-
-      if opts == [] do
-        # No filters — list from Registry + enrich
-        comms.list_channels()
-        |> Enum.map(fn {channel_id, _pid} ->
-          case comms.get_channel_info(channel_id) do
-            {:ok, info} -> Map.put(info, :channel_id, channel_id)
-            _ -> nil
-          end
-        end)
-        |> Enum.reject(&is_nil/1)
-      else
-        comms.search_channels(opts)
-      end
+    if opts == [] do
+      # No filters — list from Registry + enrich
+      Arbor.Comms.list_channels()
+      |> Enum.map(fn {channel_id, _pid} ->
+        case Arbor.Comms.get_channel_info(channel_id) do
+          {:ok, info} -> Map.put(info, :channel_id, channel_id)
+          _ -> nil
+        end
+      end)
+      |> Enum.reject(&is_nil/1)
     else
-      []
+      Arbor.Comms.search_channels(opts)
     end
   rescue
     _ -> []
@@ -409,24 +403,18 @@ defmodule Arbor.Dashboard.Live.ChannelsLive do
   end
 
   defp safe_load_detail(channel_id) do
-    comms = Arbor.Comms
+    case Arbor.Comms.get_channel_info(channel_id) do
+      {:ok, info} ->
+        members =
+          case Arbor.Comms.channel_members(channel_id) do
+            {:ok, m} -> m
+            _ -> []
+          end
 
-    if Code.ensure_loaded?(comms) do
-      case comms.get_channel_info(channel_id) do
-        {:ok, info} ->
-          members =
-            case comms.channel_members(channel_id) do
-              {:ok, m} -> m
-              _ -> []
-            end
+        Map.put(info, :members, members)
 
-          Map.put(info, :members, members)
-
-        _ ->
-          nil
-      end
-    else
-      nil
+      _ ->
+        nil
     end
   rescue
     _ -> nil
@@ -435,14 +423,8 @@ defmodule Arbor.Dashboard.Live.ChannelsLive do
   end
 
   defp safe_create_channel(name, type) do
-    comms = Arbor.Comms
-
-    if Code.ensure_loaded?(comms) do
-      type_atom = String.to_existing_atom(type)
-      comms.create_channel(name, type: type_atom)
-    else
-      {:error, :comms_unavailable}
-    end
+    type_atom = String.to_existing_atom(type)
+    Arbor.Comms.create_channel(name, type: type_atom)
   rescue
     _ -> {:error, :create_failed}
   catch

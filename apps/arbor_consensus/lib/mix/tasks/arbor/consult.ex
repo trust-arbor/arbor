@@ -695,19 +695,15 @@ defmodule Mix.Tasks.Arbor.Consult do
   end
 
   defp load_skill(skill_name) do
-    if Code.ensure_loaded?(Arbor.Common.SkillLibrary) do
-      case Arbor.Common.SkillLibrary.get(skill_name) do
-        {:ok, skill} when is_binary(skill.body) and byte_size(skill.body) > 0 ->
-          {:ok, skill.body}
+    case Arbor.Common.SkillLibrary.get(skill_name) do
+      {:ok, skill} when is_binary(skill.body) and byte_size(skill.body) > 0 ->
+        {:ok, skill.body}
 
-        {:ok, _} ->
-          {:error, :empty_skill_body}
+      {:ok, _} ->
+        {:error, :empty_skill_body}
 
-        {:error, _} = error ->
-          error
-      end
-    else
-      {:error, :skill_library_not_available}
+      {:error, _} = error ->
+        error
     end
   end
 
