@@ -25,6 +25,35 @@ defmodule Arbor.Memory.MemoryCoreTest do
       thought = MemoryCore.normalize_thought(%{"content" => "hello"})
       assert thought.content == "hello"
     end
+
+    # Regression: the documented temporal-note shape uses "text", not "content".
+    # The heartbeat prompt asks the model to emit
+    # {"text": "...", "referenced_date": "YYYY-MM-DD"} for dated notes.
+    test "normalizes documented temporal-note shape with string \"text\" key" do
+      thought = MemoryCore.normalize_thought(%{"text" => "the deploy happened"})
+      assert thought.content == "the deploy happened"
+      assert thought.cached_tokens > 0
+      assert thought.timestamp
+    end
+
+    test "normalizes \"text\" note preserving referenced_date and timestamp" do
+      thought =
+        MemoryCore.normalize_thought(%{
+          "text" => "the deploy happened yesterday",
+          "referenced_date" => "2026-02-20",
+          "timestamp" => "2026-02-21T00:00:00Z"
+        })
+
+      assert thought.content == "the deploy happened yesterday"
+      assert thought.referenced_date == "2026-02-20"
+      assert thought.timestamp == "2026-02-21T00:00:00Z"
+    end
+
+    test "normalizes atom-keyed \"text\" note" do
+      thought = MemoryCore.normalize_thought(%{text: "atom keyed", referenced_date: "2026-02-20"})
+      assert thought.content == "atom keyed"
+      assert thought.referenced_date == "2026-02-20"
+    end
   end
 
   describe "normalize_goal/1" do
@@ -60,9 +89,11 @@ defmodule Arbor.Memory.MemoryCoreTest do
     end
 
     test "trims to max" do
-      thoughts = Enum.reduce(1..25, [], fn i, acc ->
-        MemoryCore.add_thought(acc, "thought #{i}", max_thoughts: 10)
-      end)
+      thoughts =
+        Enum.reduce(1..25, [], fn i, acc ->
+          MemoryCore.add_thought(acc, "thought #{i}", max_thoughts: 10)
+        end)
+
       assert length(thoughts) == 10
     end
   end
@@ -195,6 +226,7 @@ defmodule Arbor.Memory.MemoryCoreTest do
         %{id: "high", priority: 90, progress: 0.1},
         %{id: "mid", priority: 50, progress: 0.0}
       ]
+
       sorted = MemoryCore.sort_goals(goals)
       assert Enum.map(sorted, & &1.id) == ["high", "mid", "low"]
     end
@@ -228,6 +260,7 @@ defmodule Arbor.Memory.MemoryCoreTest do
         %{type: :act, content: "b"},
         %{type: :think, content: "c"}
       ]
+
       assert length(MemoryCore.filter_by_type(intents, :think)) == 2
     end
   end
@@ -239,6 +272,7 @@ defmodule Arbor.Memory.MemoryCoreTest do
         %{goal_id: "g2", content: "b"},
         %{goal_id: "g1", content: "c"}
       ]
+
       assert length(MemoryCore.filter_by_goal(intents, "g1")) == 2
     end
   end
@@ -265,7 +299,14 @@ defmodule Arbor.Memory.MemoryCoreTest do
     end
 
     test "handles empty memory" do
-      text = MemoryCore.for_prompt(%{recent_thoughts: [], active_goals: [], concerns: [], curiosity: []})
+      text =
+        MemoryCore.for_prompt(%{
+          recent_thoughts: [],
+          active_goals: [],
+          concerns: [],
+          curiosity: []
+        })
+
       assert text == ""
     end
   end
@@ -275,7 +316,9 @@ defmodule Arbor.Memory.MemoryCoreTest do
       wm = %{
         agent_id: "agent_123",
         recent_thoughts: [%{content: "a"}, %{content: "b"}],
-        active_goals: [%{id: "g1", description: "test", progress: 0.5, status: :active, priority: 80}],
+        active_goals: [
+          %{id: "g1", description: "test", progress: 0.5, status: :active, priority: 80}
+        ],
         concerns: ["c1"],
         curiosity: ["q1"],
         engagement_level: 0.7

@@ -130,6 +130,47 @@ defmodule Arbor.Memory.WorkingMemoryTest do
       assert %DateTime{} = thought.timestamp
       assert is_integer(thought.cached_tokens)
     end
+
+    # Regression: the documented temporal-note shape uses "text", not "content".
+    # The heartbeat prompt asks the model to emit
+    # {"text": "...", "referenced_date": "YYYY-MM-DD"} for dated notes.
+    # Before the fix this raised FunctionClauseError (no catch-all clause).
+    test "accepts documented temporal-note shape with string \"text\" key" do
+      wm =
+        WorkingMemory.new("agent_001")
+        |> WorkingMemory.add_thought(%{"text" => "the deploy happened"})
+
+      thought = hd(wm.recent_thoughts)
+      assert thought.content == "the deploy happened"
+      assert %DateTime{} = thought.timestamp
+      assert is_integer(thought.cached_tokens)
+    end
+
+    test "accepts \"text\" note preserving referenced_date" do
+      # WorkingMemory.parse_datetime/1 uses DateTime.from_iso8601, so the
+      # referenced_date must be a full ISO-8601 datetime (same as the "content"
+      # clause). This mirrors that existing behavior.
+      wm =
+        WorkingMemory.new("agent_001")
+        |> WorkingMemory.add_thought(%{
+          "text" => "the deploy happened yesterday",
+          "referenced_date" => "2026-02-20T00:00:00Z"
+        })
+
+      thought = hd(wm.recent_thoughts)
+      assert thought.content == "the deploy happened yesterday"
+      assert %DateTime{} = thought.referenced_date
+      assert DateTime.to_date(thought.referenced_date) == ~D[2026-02-20]
+    end
+
+    test "accepts atom-keyed \"text\" note" do
+      wm =
+        WorkingMemory.new("agent_001")
+        |> WorkingMemory.add_thought(%{text: "atom keyed note"})
+
+      thought = hd(wm.recent_thoughts)
+      assert thought.content == "atom keyed note"
+    end
   end
 
   # ============================================================================
