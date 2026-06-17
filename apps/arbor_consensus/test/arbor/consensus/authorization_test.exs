@@ -86,12 +86,17 @@ defmodule Arbor.Consensus.AuthorizationTest do
 
   describe "authorize_cancel/3" do
     test "delegates to cancel when security permits" do
+      # propose/2 fails closed without an authenticated :caller_id. @caller_id was
+      # granted arbor://consensus/propose in setup, so authenticate for real.
       {:ok, proposal_id} =
-        Arbor.Consensus.propose(%{
-          proposer: @caller_id,
-          topic: :code_modification,
-          description: "Proposal to cancel"
-        })
+        Arbor.Consensus.propose(
+          %{
+            proposer: @caller_id,
+            topic: :code_modification,
+            description: "Proposal to cancel"
+          },
+          caller_id: @caller_id
+        )
 
       # The cancel may succeed or fail depending on proposal state,
       # but it should not return {:error, {:unauthorized, _}}
@@ -102,12 +107,17 @@ defmodule Arbor.Consensus.AuthorizationTest do
 
   describe "authorize_force_approve/4" do
     test "delegates to force_approve when security permits" do
+      # @caller_id was granted arbor://consensus/propose in setup; authenticate
+      # the create so propose/2 doesn't fail closed on a missing :caller_id.
       {:ok, proposal_id} =
-        Arbor.Consensus.propose(%{
-          proposer: "agent_1",
-          topic: :code_modification,
-          description: "Proposal to force approve"
-        })
+        Arbor.Consensus.propose(
+          %{
+            proposer: @caller_id,
+            topic: :code_modification,
+            description: "Proposal to force approve"
+          },
+          caller_id: @caller_id
+        )
 
       # Wait briefly for evaluation to complete
       Process.sleep(50)
@@ -126,12 +136,17 @@ defmodule Arbor.Consensus.AuthorizationTest do
 
   describe "authorize_force_reject/4" do
     test "delegates to force_reject when security permits" do
+      # @caller_id was granted arbor://consensus/propose in setup; authenticate
+      # the create so propose/2 doesn't fail closed on a missing :caller_id.
       {:ok, proposal_id} =
-        Arbor.Consensus.propose(%{
-          proposer: "agent_1",
-          topic: :code_modification,
-          description: "Proposal to force reject"
-        })
+        Arbor.Consensus.propose(
+          %{
+            proposer: @caller_id,
+            topic: :code_modification,
+            description: "Proposal to force reject"
+          },
+          caller_id: @caller_id
+        )
 
       Process.sleep(50)
 

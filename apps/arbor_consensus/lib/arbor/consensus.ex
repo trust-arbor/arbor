@@ -166,29 +166,20 @@ defmodule Arbor.Consensus do
     attrs = Map.put_new(attrs, :topic, :general)
     attrs = Map.put_new(attrs, :mode, :decision)
 
-    # OQ-5: when strict_propose_caller is true (production default), require an
-    # explicit :caller_id and route through authorize_propose/3 so callers
-    # can't accidentally bypass the gate by going through this facade.
-    # When the flag is false (dev/test default), preserve the existing
-    # no-auth shape — system-internal callers that legitimately need to
-    # submit without an authenticated caller (recovery flows, internal
-    # cleanup) keep working unchanged.
+    # OQ-5: propose/2 now ALWAYS requires an authenticated :caller_id and routes
+    # through authorize_propose/3 so callers can't bypass the capability gate by
+    # going through this facade. There is NO dev/test permissive submit — an
+    # unauthenticated propose (no :caller_id) FAILS CLOSED in every environment.
+    # System-internal callers that legitimately need an un-gated submit must call
+    # Coordinator.submit/2 (or Arbor.Consensus.submit/2) directly and own that
+    # bypass explicitly, rather than smuggling it through propose/2.
     case Keyword.fetch(opts, :caller_id) do
       {:ok, caller_id} when is_binary(caller_id) ->
         authorize_propose(caller_id, attrs, Keyword.delete(opts, :caller_id))
 
       _ ->
-        if strict_propose_caller?() do
-          {:error, {:unauthorized, :caller_id_required}}
-        else
-          Coordinator.submit(attrs, opts)
-        end
+        {:error, {:unauthorized, :caller_id_required}}
     end
-  end
-
-  @doc false
-  def strict_propose_caller? do
-    Application.get_env(:arbor_consensus, :strict_propose_caller, Mix.env() == :prod)
   end
 
   @doc """
@@ -310,10 +301,10 @@ defmodule Arbor.Consensus do
     case authorize(caller_id, "arbor://consensus/propose") do
       :ok ->
         # The cap check just passed — submit DIRECTLY. Do NOT call propose/2
-        # here: it would re-apply its own :caller_id/strict_propose_caller gate
-        # (we already stripped caller_id), denying this authorized caller with
-        # :caller_id_required under strict mode (the prod default). Mirror
-        # propose/2's attrs normalization since direct callers pass raw attrs.
+        # here: it would re-apply its own :caller_id gate (we already stripped
+        # caller_id), denying this authorized caller with :caller_id_required.
+        # Mirror propose/2's attrs normalization since direct callers pass raw
+        # attrs.
         attrs =
           attrs
           |> Map.put_new(:topic, :general)
