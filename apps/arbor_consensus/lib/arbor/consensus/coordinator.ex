@@ -740,8 +740,6 @@ defmodule Arbor.Consensus.Coordinator do
     # Use AuthDecision (pure function) instead of Security.authorize to avoid
     # deadlock: Security.authorize → Escalation → Consensus.submit would call
     # back into this GenServer. AuthDecision only reads from ETS — no GenServer calls.
-    auth_decision = Arbor.Security.AuthDecision
-
     # Skip signed_request verification: force_approve/force_reject are called
     # from the dashboard process where the human is already authenticated at
     # the OIDC session layer (or trusted in dev mode). The Coordinator's job
@@ -750,13 +748,13 @@ defmodule Arbor.Consensus.Coordinator do
     # :missing_signed_request because no signed_request is plumbed through
     # GenServer.call boundaries. (2026-04-07: this is what was breaking the
     # in-chat Approve button on chat_live.)
-    if Code.ensure_loaded?(auth_decision) do
-      auth_decision.check(actor_id, "arbor://consensus/admin", :force, verify_identity: false)
-      |> evaluate_force_authorization(actor_id)
-    else
-      # AuthDecision not available — fail closed
-      {:error, {:unauthorized, :security_unavailable}}
-    end
+    #
+    # arbor_security is a hard dep; the direct call replaces the old
+    # Code.ensure_loaded? bridge. The rescue/catch below still fail CLOSED.
+    Arbor.Security.AuthDecision.check(actor_id, "arbor://consensus/admin", :force,
+      verify_identity: false
+    )
+    |> evaluate_force_authorization(actor_id)
   rescue
     _ ->
       {:error, {:unauthorized, :security_unavailable}}

@@ -54,37 +54,25 @@ defmodule Arbor.Consensus.Authorizers.CapabilityAuthorizer do
   end
 
   defp check(principal_id, resource) when is_binary(principal_id) and is_binary(resource) do
-    security = Arbor.Security
-
-    cond do
-      not (Code.ensure_loaded?(security) and function_exported?(security, :authorize, 4)) ->
-        {:error, {:unauthorized, :security_unavailable}}
-
-      true ->
-        try do
-          case apply(security, :authorize, [
-                 principal_id,
-                 resource,
-                 :write,
-                 [verify_identity: false]
-               ]) do
-            {:ok, :authorized} -> :ok
-            {:error, reason} -> {:error, {:unauthorized, reason}}
-            {:ok, :pending_approval, _} -> {:error, {:unauthorized, :pending_approval}}
-            other -> {:error, {:unauthorized, {:unexpected_auth_result, other}}}
-          end
-        rescue
-          e ->
-            Logger.warning(
-              "[CapabilityAuthorizer] authorize/4 raised — denying: #{Exception.message(e)}"
-            )
-
-            {:error, {:unauthorized, :security_unavailable}}
-        catch
-          :exit, _ ->
-            {:error, {:unauthorized, :security_unavailable}}
-        end
+    # arbor_security is a hard dep — direct call (was a Code.ensure_loaded?/apply
+    # bridge whose missing-module branch already failed closed). rescue/catch
+    # still deny on any raise/exit.
+    case Arbor.Security.authorize(principal_id, resource, :write, verify_identity: false) do
+      {:ok, :authorized} -> :ok
+      {:error, reason} -> {:error, {:unauthorized, reason}}
+      {:ok, :pending_approval, _} -> {:error, {:unauthorized, :pending_approval}}
+      other -> {:error, {:unauthorized, {:unexpected_auth_result, other}}}
     end
+  rescue
+    e ->
+      Logger.warning(
+        "[CapabilityAuthorizer] authorize/4 raised — denying: #{Exception.message(e)}"
+      )
+
+      {:error, {:unauthorized, :security_unavailable}}
+  catch
+    :exit, _ ->
+      {:error, {:unauthorized, :security_unavailable}}
   end
 
   defp check(_, _), do: {:error, {:unauthorized, :invalid_principal}}
