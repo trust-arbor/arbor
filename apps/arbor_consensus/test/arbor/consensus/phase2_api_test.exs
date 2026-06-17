@@ -3,10 +3,50 @@ defmodule Arbor.Consensus.Phase2APITest do
   Integration tests for the Phase 2 agent-facing API:
   propose/2, ask/2, await/2, and the Helpers module.
   """
-  use ExUnit.Case, async: true
+  # async: false — propose/2 fails closed without an authenticated :caller_id, so
+  # propose_and_await/2 here authenticates for real (starts Security, toggles
+  # capability_signing_required, grants the cap). Those touch global Security
+  # processes/config, so this file must not race other async tests.
+  use ExUnit.Case, async: false
 
   alias Arbor.Consensus.{Coordinator, Helpers}
   alias Arbor.Consensus.TestHelpers
+  alias Arbor.Security
+
+  @propose_caller_id "agent_phase2_propose_caller"
+
+  setup_all do
+    # Start all security processes so Security.healthy?() is true and the
+    # consensus facade's propose/2 cap check runs through real enforcement
+    # (no permissive fallback). Order matters: Identity.Registry before
+    # SystemAuthority. Mirrors the AuthorizationE2ETest setup.
+    security_children = [
+      {Arbor.Security.Identity.Registry, []},
+      {Arbor.Security.Identity.NonceCache, []},
+      {Arbor.Security.Constraint.RateLimiter, []},
+      {Arbor.Security.SystemAuthority, []},
+      {Arbor.Security.CapabilityStore, []},
+      {Arbor.Security.Reflex.Registry, []}
+    ]
+
+    for {mod, opts} <- security_children do
+      unless Process.whereis(mod) do
+        case Supervisor.start_child(Arbor.Security.Supervisor, {mod, opts}) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _}} -> :ok
+          {:error, reason} -> raise "Failed to start #{mod}: #{inspect(reason)}"
+        end
+      end
+    end
+
+    Process.sleep(20)
+
+    unless Security.healthy?() do
+      raise "Security.healthy?() returned false after starting all processes"
+    end
+
+    :ok
+  end
 
   setup do
     {_es_pid, es_name} = TestHelpers.start_test_event_store()
@@ -113,15 +153,45 @@ defmodule Arbor.Consensus.Phase2APITest do
 
   describe "Helpers.propose_and_await/2" do
     test "submits and returns the decision in one call", %{coordinator: coord} do
+      # propose/2 fails closed without an authenticated :caller_id, so we
+      # authenticate for REAL: Security is up (assert it), signing is relaxed
+      # for the test, and we grant the caller the arbor://consensus/propose cap.
+      # propose_and_await/2 threads :caller_id through to propose/2, which routes
+      # to authorize_propose/3 → real cap check → Coordinator.submit.
+      assert Security.healthy?(),
+             "Security must be up so the propose cap check runs through real enforcement"
+
+      original_signing = Application.get_env(:arbor_security, :capability_signing_required)
+      Application.put_env(:arbor_security, :capability_signing_required, false)
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: @propose_caller_id,
+          resource: "arbor://consensus/propose"
+        )
+
+      on_exit(fn ->
+        if Process.whereis(Arbor.Security.CapabilityStore) do
+          Arbor.Security.CapabilityStore.revoke_all(@propose_caller_id)
+        end
+
+        if is_nil(original_signing) do
+          Application.delete_env(:arbor_security, :capability_signing_required)
+        else
+          Application.put_env(:arbor_security, :capability_signing_required, original_signing)
+        end
+      end)
+
       assert {:ok, decision} =
                Helpers.propose_and_await(
                  %{
-                   proposer: "agent_1",
+                   proposer: @propose_caller_id,
                    topic: :code_modification,
                    description: "propose_and_await test"
                  },
                  server: coord,
-                 timeout: 10_000
+                 timeout: 10_000,
+                 caller_id: @propose_caller_id
                )
 
       assert decision.decision in [:approved, :rejected]

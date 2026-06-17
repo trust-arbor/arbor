@@ -415,26 +415,12 @@ defmodule Arbor.ConsensusTest do
   end
 
   describe "propose/2 caller routing (OQ-5)" do
-    setup do
-      original = Application.get_env(:arbor_consensus, :strict_propose_caller)
-
-      on_exit(fn ->
-        if is_nil(original) do
-          Application.delete_env(:arbor_consensus, :strict_propose_caller)
-        else
-          Application.put_env(:arbor_consensus, :strict_propose_caller, original)
-        end
-      end)
-
-      :ok
-    end
-
-    test "strict mode: propose without :caller_id is denied", %{coordinator: coord} do
-      # OQ-5: when strict_propose_caller is true (production default), the
-      # facade can't be used as a bypass route — callers MUST provide a
-      # caller_id so the cap check runs.
-      Application.put_env(:arbor_consensus, :strict_propose_caller, true)
-
+    test "security regression: propose without :caller_id is denied in all environments",
+         %{coordinator: coord} do
+      # OQ-5: propose/2 now ALWAYS requires an authenticated :caller_id and
+      # FAILS CLOSED when one is absent — there is no dev/test permissive
+      # submit. The facade can't be used as a bypass route around the cap
+      # check. This denial must hold in every environment (no flag toggles it).
       result =
         Consensus.propose(
           %{
@@ -446,24 +432,28 @@ defmodule Arbor.ConsensusTest do
         )
 
       assert {:error, {:unauthorized, :caller_id_required}} = result,
-             "OQ-5: strict mode must require :caller_id — got #{inspect(result)}"
+             "OQ-5: propose without :caller_id must fail closed — got #{inspect(result)}"
     end
 
-    test "permissive mode: propose without :caller_id preserves the legacy path",
+    test "security regression: there is no permissive mode — caller-less propose still denied",
          %{coordinator: coord} do
-      # Dev/test default. Existing callers without :caller_id continue to
-      # work — preserves backwards compatibility while production rolls in.
-      Application.put_env(:arbor_consensus, :strict_propose_caller, false)
+      # The old strict_propose_caller=false escape hatch let an unauthenticated
+      # propose fall through to Coordinator.submit in dev/test. That hatch is
+      # GONE: a caller-less propose is denied unconditionally. System-internal
+      # callers that legitimately need an un-gated submit must call
+      # Consensus.submit/2 (Coordinator) directly and own that bypass.
+      result =
+        Consensus.propose(
+          %{
+            proposer: "agent_1",
+            change_type: :code_modification,
+            description: "formerly-permissive path"
+          },
+          server: coord
+        )
 
-      assert {:ok, _id} =
-               Consensus.propose(
-                 %{
-                   proposer: "agent_1",
-                   change_type: :code_modification,
-                   description: "permissive mode"
-                 },
-                 server: coord
-               )
+      assert {:error, {:unauthorized, :caller_id_required}} = result,
+             "OQ-5: there is no permissive submit — caller-less propose must deny, got #{inspect(result)}"
     end
 
     test "propose with :caller_id routes through authorize_propose", %{coordinator: coord} do

@@ -106,18 +106,15 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
       assert is_binary(proposal_id)
     end
 
-    test "security regression: strict mode + authorized caller succeeds (no re-entry deny)" do
+    test "security regression: authorized caller succeeds (no re-entry deny)" do
       # Regression for the OQ-5 propose/2 <-> authorize_propose/3 re-entry bug:
       # authorize_propose/3 ran the cap check (PASS) then called propose/2 with
-      # :caller_id already stripped, which under strict_propose_caller hit the
-      # "no caller_id" branch and denied an ALREADY-AUTHORIZED caller with
-      # :caller_id_required. strict_propose_caller defaults to Mix.env()==:prod,
-      # so this broke consensus proposals in production. The fix submits directly
-      # via Coordinator after the cap check instead of bouncing through the gate.
+      # :caller_id already stripped, which hit propose/2's "no caller_id" branch
+      # and denied an ALREADY-AUTHORIZED caller with :caller_id_required. Since
+      # propose/2 now ALWAYS denies a caller-less submit (fail-closed in every
+      # environment), bouncing through it would deny authorized callers; the fix
+      # submits directly via Coordinator after the cap check instead.
       # This test MUST fail on the pre-fix code and pass after.
-      Application.put_env(:arbor_consensus, :strict_propose_caller, true)
-      on_exit(fn -> Application.delete_env(:arbor_consensus, :strict_propose_caller) end)
-
       {:ok, _cap} =
         Security.grant(principal: @caller_id, resource: "arbor://consensus/propose")
 
@@ -205,9 +202,11 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
           resource: "arbor://consensus/cancel"
         )
 
-      # Create a proposal to cancel
+      # Create a proposal to cancel. The proposal's OWN authorization is not
+      # under test here (the cancel cap is), so create the fixture via the
+      # un-gated submit path — propose/2 now fails closed without a :caller_id.
       {:ok, proposal_id} =
-        Arbor.Consensus.propose(%{
+        Arbor.Consensus.submit(%{
           proposer: @caller_id,
           topic: :code_modification,
           description: "Proposal to be cancelled in E2E test"
@@ -221,7 +220,7 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
     test "returns unauthorized when caller lacks capability" do
       # Create a real proposal so the error is from auth, not :not_found
       {:ok, proposal_id} =
-        Arbor.Consensus.propose(%{
+        Arbor.Consensus.submit(%{
           proposer: "agent_other",
           topic: :code_modification,
           description: "Proposal for cancel auth test"
@@ -239,7 +238,7 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
   describe "authorize_force_approve/4" do
     test "returns unauthorized when caller lacks arbor://consensus/force_approve" do
       {:ok, proposal_id} =
-        Arbor.Consensus.propose(%{
+        Arbor.Consensus.submit(%{
           proposer: "agent_other",
           topic: :code_modification,
           description: "Proposal for force_approve auth test"
@@ -265,7 +264,7 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
         )
 
       {:ok, proposal_id} =
-        Arbor.Consensus.propose(%{
+        Arbor.Consensus.submit(%{
           proposer: "agent_other",
           topic: :code_modification,
           description: "Proposal to force approve in E2E test"
@@ -308,7 +307,7 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
   describe "authorize_force_reject/4" do
     test "returns unauthorized when caller lacks arbor://consensus/force_reject" do
       {:ok, proposal_id} =
-        Arbor.Consensus.propose(%{
+        Arbor.Consensus.submit(%{
           proposer: "agent_other",
           topic: :code_modification,
           description: "Proposal for force_reject auth test"
@@ -334,7 +333,7 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
         )
 
       {:ok, proposal_id} =
-        Arbor.Consensus.propose(%{
+        Arbor.Consensus.submit(%{
           proposer: "agent_other",
           topic: :code_modification,
           description: "Proposal to force reject in E2E test"
@@ -362,7 +361,7 @@ defmodule Arbor.Consensus.AuthorizationE2ETest do
         )
 
       {:ok, proposal_id} =
-        Arbor.Consensus.propose(%{
+        Arbor.Consensus.submit(%{
           proposer: "agent_other",
           topic: :code_modification,
           description: "Proposal to test force capability isolation"
