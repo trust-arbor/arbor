@@ -660,6 +660,23 @@ defmodule Arbor.Memory.Index do
   defp compute_embedding(""), do: {:error, :empty_content}
 
   defp compute_embedding(content) do
+    if embedding_service_enabled?() do
+      compute_embedding_via_provider(content)
+    else
+      # Hermetic test lane (config :arbor_memory, :embedding_service_enabled false):
+      # skip the live embedding backend. A synchronous Arbor.AI.embed here runs
+      # INSIDE this GenServer's {:index}/{:recall} handle_call, so when the backend
+      # (Ollama) hangs on Finch under load it blocks past the caller's 5s timeout
+      # (the IndexTest/PreconsciousTest flakes). The deterministic hash fallback
+      # keeps index/recall functional offline.
+      {:ok, hash_fallback_embedding(content)}
+    end
+  end
+
+  defp embedding_service_enabled?,
+    do: Application.get_env(:arbor_memory, :embedding_service_enabled, true)
+
+  defp compute_embedding_via_provider(content) do
     case Arbor.AI.embed(content) do
       {:ok, %{embedding: embedding}} ->
         {:ok, embedding}
