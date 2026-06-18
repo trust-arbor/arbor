@@ -17,6 +17,7 @@ defmodule Arbor.Actions.Security.Detectors.DependencyScan do
   Findings use the `:dependency_risk` category.
   """
 
+  alias Arbor.Actions.Security.Detectors.Common
   alias Arbor.Contracts.Security.Finding
 
   @doc """
@@ -105,7 +106,7 @@ defmodule Arbor.Actions.Security.Detectors.DependencyScan do
       detector: %{layer: "L0b", name: "dependency_scan", version: "1"},
       severity: %{level: :medium},
       confidence: %{score: 0.85, rationale: "git dep with branch/default, no ref/tag"},
-      location: %{library: library_of(file), file: file, function: "deps/0"},
+      location: %{library: Common.library_of(file, "umbrella"), file: file, function: "deps/0"},
       invariant_violated:
         "Git dependencies must be pinned to an immutable ref (commit SHA) or tag — a branch floats with upstream and changes the build unreviewed.",
       evidence: %{dependency: name},
@@ -167,12 +168,5 @@ defmodule Arbor.Actions.Security.Detectors.DependencyScan do
       actionability: %{auto_fixable: false, risk_class: :medium},
       verification: %{must_fail_on_revert: false}
     )
-  end
-
-  defp library_of(file) do
-    case Regex.run(~r{apps/([^/]+)/}, file) do
-      [_, lib] -> lib
-      _ -> "umbrella"
-    end
   end
 end

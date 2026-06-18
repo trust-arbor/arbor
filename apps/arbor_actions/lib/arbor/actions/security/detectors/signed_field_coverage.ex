@@ -25,6 +25,7 @@ defmodule Arbor.Actions.Security.Detectors.SignedFieldCoverage do
   Modules without both a struct and a `signing_payload/1` are ignored.
   """
 
+  alias Arbor.Actions.Security.Detectors.Common
   alias Arbor.Contracts.Security.Finding
 
   @doc """
@@ -36,17 +37,15 @@ defmodule Arbor.Actions.Security.Detectors.SignedFieldCoverage do
     root = Keyword.get(opts, :root, "apps")
     git_sha = Keyword.get(opts, :git_sha)
 
-    Path.wildcard(Path.join(root, "**/*.ex"))
-    |> Enum.reject(&test_file?/1)
+    root
+    |> Common.elixir_source_files()
     |> Enum.flat_map(&analyze_file(&1, git_sha))
   end
 
   # ---------------------------------------------------------------------------
 
-  defp test_file?(file), do: String.contains?(file, "/test/")
-
   defp analyze_file(file, git_sha) do
-    with {:ok, ast} <- parse(file),
+    with {:ok, ast} <- Common.parse(file, columns: true),
          fields = struct_fields(ast),
          true <- fields != [],
          {:ok, signed} <- signing_payload_atoms(ast) do
@@ -76,12 +75,6 @@ defmodule Arbor.Actions.Security.Detectors.SignedFieldCoverage do
       end)
 
     names
-  end
-
-  defp parse(file) do
-    with {:ok, code} <- File.read(file) do
-      Code.string_to_quoted(code, columns: true)
-    end
   end
 
   # -- struct fields (typedstruct + defstruct), as {name, line} ---------------
@@ -231,7 +224,7 @@ defmodule Arbor.Actions.Security.Detectors.SignedFieldCoverage do
       severity: %{level: :high},
       confidence: %{score: 0.7, rationale: "field absent from signing_payload/1 body"},
       location: %{
-        library: library_of(file),
+        library: Common.library_of(file),
         file: file,
         line: line,
         function: "signing_payload/1"
@@ -246,12 +239,5 @@ defmodule Arbor.Actions.Security.Detectors.SignedFieldCoverage do
       actionability: %{auto_fixable: false, risk_class: :high},
       verification: %{must_fail_on_revert: true}
     )
-  end
-
-  defp library_of(file) do
-    case Regex.run(~r{apps/([^/]+)/}, file) do
-      [_, lib] -> lib
-      _ -> nil
-    end
   end
 end

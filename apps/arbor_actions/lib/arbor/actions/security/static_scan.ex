@@ -17,6 +17,7 @@ defmodule Arbor.Actions.Security.StaticScan do
   status tracking via a BufferedStore-backed `FindingStore` is Phase 2.)
   """
 
+  alias Arbor.Actions.Security.Detectors.Common
   alias Arbor.Actions.Security.Recorder
   alias Arbor.Contracts.Security.Finding
 
@@ -111,7 +112,7 @@ defmodule Arbor.Actions.Security.StaticScan do
       severity: %{level: severity_level(violation.severity)},
       confidence: %{score: 0.8, rationale: "static AST match (#{violation.type})"},
       location: %{
-        library: library_of(file),
+        library: Common.library_of(file),
         file: file,
         line: violation.line,
         function: violation[:function]
@@ -130,12 +131,5 @@ defmodule Arbor.Actions.Security.StaticScan do
 
   defp risk_class(file) do
     if Enum.any?(@high_risk_markers, &String.contains?(file, &1)), do: :high, else: :medium
-  end
-
-  defp library_of(file) do
-    case Regex.run(~r{apps/([^/]+)/}, file) do
-      [_, lib] -> lib
-      _ -> nil
-    end
   end
 end
