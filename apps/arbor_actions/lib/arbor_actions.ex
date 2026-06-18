@@ -281,7 +281,8 @@ defmodule Arbor.Actions do
         Arbor.Actions.Security.AggregateVerdict,
         Arbor.Actions.Security.RecordDiffFindings,
         Arbor.Actions.Security.LoadFinding,
-        Arbor.Actions.Security.SelectFindingsToVerify
+        Arbor.Actions.Security.SelectFindingsToVerify,
+        Arbor.Actions.Security.SynthesizeDetector
       ],
       shell: [
         Arbor.Actions.Shell.Execute,

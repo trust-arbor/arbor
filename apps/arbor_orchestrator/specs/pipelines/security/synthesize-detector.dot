@@ -1,0 +1,76 @@
+// Security Sentinel — detector synthesis sub-pipeline (E1.1).
+//
+// Triggered after a finding is CONFIRMED (security.aggregate_verdict, end of
+// verify-finding.dot). Synthesizes a candidate S1 (per-file AST) detector for the
+// finding's CLASS so the deterministic net permanently widens. The LLM proposes a
+// detector-spec ANCHORED ON THE INVARIANT (so the predicate generalizes past the
+// one instance); security.synthesize_detector then generates the detector module
+// source and self-validates it with the G1 re-catch gate (compile in-memory + run
+// against the seed's own file/AST → must re-flag the bug it was born from).
+//
+// E1.1 produces a G1-VALIDATED CANDIDATE ONLY — it does NOT write the module to
+// the suite, sweep the umbrella, or auto-register. The candidate is human-reviewed
+// and never auto-merged (the Sentinel's always-propose rule). G2/G3 sweep+triage
+// and G4 FP-regression tests are E1.3; PR assembly is E1.4.
+//
+// Context in:
+//   finding             — the confirmed Finding (struct/map) to synthesize from
+//   invariant_violated  — the human invariant the detector must enforce (the
+//                         synthesis anchor; falls back to finding.invariant_violated)
+//   evidence            — the seed pattern (code_excerpt / smell_match)
+//   location            — file / function / line — where to look + the re-catch target
+//
+// security.synthesize_detector accepts the LLM-produced spec (JSON) OR falls back
+// to the deterministic spec keyed by category — so a blank/unparseable LLM spec
+// degrades to the proven deterministic path rather than failing.
+//
+// Model: local Gemma via LM Studio by default (nothing sensitive leaves the box).
+
+digraph synthesize_detector {
+  graph [
+    goal="Synthesize a candidate S1 detector from a confirmed finding and G1-self-validate it",
+    label="Security: Synthesize detector"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Propose the detector-spec. Anchored on the INVARIANT so the predicate
+  // generalizes to siblings, not just the seed. Mandatory simulate= per the
+  // LLM-node rule (mirrors verify-finding.dot / l1-diff-review.dot).
+  propose_spec [
+    type="compute",
+    purpose="llm",
+    simulate="false",
+    llm_provider="lm_studio",
+    llm_model="gemma-4-31b-it",
+    use_tools="false",
+    temperature="0.2",
+    max_tokens="8192",
+    timeout="300000",
+    prompt_context_key="invariant_violated",
+    system_prompt="You are a security tooling engineer. You are given the INVARIANT a confirmed security finding violated, plus its evidence and location. Propose a deterministic per-file AST detector that catches ANY function violating this invariant — not just the one instance. Anchor on the invariant, generalize the predicate.\n\nThe detector is an S1 shape: it inspects functions whose name matches, looks at a fail-open clause position, and flags a clause that returns a banned literal.\n\nOutput ONLY a JSON object (no prose, no fences): {\"name\": short snake_case id, \"category\": one of [fail_open_authz, unsafe_atom, path_traversal, config_fail_open], \"invariant\": the invariant in one sentence, \"name_match\": array of lowercase substrings (and \"@exact\" entries prefixed with @ for exact fn names like \"@can?\") that identify the target functions, \"target_literals\": array of the banned return literals as tokens (e.g. \"ok\", \"true\", \"authorized\", or [\"ok\", \"_\"] for the {:ok, _} wildcard), \"exclusions\": array of literals that look banned but are known false positives (same token form), \"clause_position\": one of [rescue, catch_all, rescue_or_catch_all]}."
+  ]
+
+  prep_spec [
+    type="transform",
+    transform="identity",
+    source_key="last_response",
+    output_key="spec"
+  ]
+
+  // Generate the module source + run the G1 re-catch gate. Accepts the LLM spec
+  // (spec) OR falls back to the deterministic spec derived from `finding`.
+  synthesize [
+    type="exec",
+    target="action",
+    action="security.synthesize_detector",
+    context_keys="finding,spec"
+  ]
+
+  done [shape=Msquare]
+
+  start -> propose_spec
+  propose_spec -> prep_spec
+  prep_spec -> synthesize
+  synthesize -> done
+}
