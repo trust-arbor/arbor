@@ -29,7 +29,7 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
 
   use Mix.Task
 
-  alias Arbor.Agent.Eval.SecurityReview.Runner
+  alias Arbor.Agent.Eval.SecurityReview.{Report, Runner, Scorer}
 
   @requirements ["app.start"]
 
@@ -47,30 +47,55 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
       )
 
     corpus = opts[:corpus] || ".arbor/evals/security-review-corpus"
+    output_dir = opts[:output] || ".arbor/evals"
 
-    run_opts =
-      [
-        tiers: csv_atoms(opts[:tiers], [:local]),
-        strategies: csv_atoms(opts[:strategies], [:a, :b_lite]),
-        k: opts[:k] || 1
-      ]
-      |> maybe_put(:output_dir, opts[:output])
+    run_opts = [
+      tiers: csv_atoms(opts[:tiers], [:local]),
+      strategies: csv_atoms(opts[:strategies], [:a, :b_lite]),
+      k: opts[:k] || 1,
+      output_dir: output_dir
+    ]
 
-    case Runner.run(corpus, run_opts) do
-      {:ok, summary} ->
-        Mix.shell().info("""
-        L2-review eval run complete.
-          corpus:     #{summary.corpus_dir}
-          reviewers:  #{Enum.join(summary.reviewers, ", ")}
-          strategies: #{Enum.join(summary.strategies, ", ")}
-          k:          #{summary.k}
-          cells:      #{summary.cell_count}
-          findings:   #{summary.results |> Enum.flat_map(& &1.findings) |> length()}
-        """)
+    with {:ok, summary} <- Runner.run(corpus, run_opts),
+         {:ok, labels} <- Scorer.labels_from_manifest(corpus) do
+      scored = Scorer.score(summary.results, labels)
+      report_path = write_report(scored, summary, labels, output_dir)
 
-      {:error, reason} ->
-        Mix.raise("L2-review eval failed: #{inspect(reason)}")
+      Mix.shell().info("""
+      L2-review eval complete.
+        corpus:    #{summary.corpus_dir}
+        cells:     #{summary.cell_count}   findings: #{summary.results |> Enum.flat_map(& &1.findings) |> length()}
+        report:    #{report_path}
+
+      #{recall_preview(scored)}
+      """)
+    else
+      {:error, reason} -> Mix.raise("L2-review eval failed: #{inspect(reason)}")
     end
+  end
+
+  defp write_report(scored, summary, labels, output_dir) do
+    stamp = DateTime.utc_now() |> DateTime.to_iso8601(:basic) |> String.replace(~r/[^0-9T]/, "")
+
+    meta = %{
+      timestamp: stamp,
+      corpus_dir: summary.corpus_dir,
+      reviewers: summary.reviewers,
+      strategies: summary.strategies,
+      k: summary.k,
+      item_count: map_size(labels),
+      cross_file_count: labels |> Map.values() |> Enum.count(& &1.cross_file)
+    }
+
+    Report.write(scored, meta, Path.join(output_dir, "security-review-report-#{stamp}.md"))
+  end
+
+  defp recall_preview(scored) do
+    scored.by_reviewer_strategy
+    |> Enum.map_join("\n", fn a ->
+      "  #{a.reviewer}/#{a.strategy}: recall=#{Float.round(a.recall_any, 2)} " <>
+        "cross-file=#{Float.round(a.cross_file_recall_any, 2)}"
+    end)
   end
 
   # Allowlist, never String.to_atom on CLI input (the project's unsafe-atom rule).
@@ -86,7 +111,4 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
       Map.get(@known_values, key) || Mix.raise("unknown tier/strategy: #{key}")
     end)
   end
-
-  defp maybe_put(kw, _key, nil), do: kw
-  defp maybe_put(kw, key, val), do: Keyword.put(kw, key, val)
 end

@@ -59,6 +59,30 @@ defmodule Arbor.Agent.Eval.SecurityReview.Scorer do
     }
   end
 
+  @doc """
+  Load the label map (`item_id => %{category, files, cross_file, invariant}`) from a
+  corpus dir's `manifest.json` — the ground truth the scorer matches findings against.
+  """
+  @spec labels_from_manifest(String.t()) ::
+          {:ok, %{optional(String.t()) => label()}} | {:error, term()}
+  def labels_from_manifest(corpus_dir) do
+    with {:ok, json} <- File.read(Path.join(corpus_dir, "manifest.json")),
+         {:ok, entries} <- Jason.decode(json) do
+      labels =
+        Map.new(entries, fn e ->
+          {e["id"],
+           %{
+             category: e["category"],
+             files: e["files"] || [],
+             cross_file: e["cross_file"] || false,
+             invariant: e["invariant"] || ""
+           }}
+        end)
+
+      {:ok, labels}
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Per-cell scoring
   # ---------------------------------------------------------------------------
