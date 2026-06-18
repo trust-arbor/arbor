@@ -122,6 +122,16 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
     end
   end
 
+  # An already-built spec (the common programmatic path — e.g. the loop forwarding
+  # opts[:spec], or a caller that built the spec itself). MUST precede the generic
+  # is_map/1 clause below: a struct IS a map, so without this clause first a
+  # %DetectorSpec{} would fall into DetectorSpec.build/1, which does Access
+  # (`params[:category]`) on the struct and raises. Re-validate by round-tripping
+  # through a plain map so a hand-built struct still gets build/1's checks.
+  defp resolve_spec(finding, %DetectorSpec{} = supplied) do
+    resolve_spec(finding, Map.from_struct(supplied))
+  end
+
   # Prefer an explicitly supplied spec (the LLM-synthesis node's output); else
   # derive deterministically from the finding's category.
   defp resolve_spec(_finding, supplied) when is_map(supplied) and map_size(supplied) > 0 do
@@ -130,10 +140,6 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
       {:error, {:unsupported_shape, _} = reason} -> {:error, reason}
       {:error, reason} -> {:error, {:spec_invalid, reason}}
     end
-  end
-
-  defp resolve_spec(finding, %DetectorSpec{} = supplied) do
-    resolve_spec(finding, Map.from_struct(supplied))
   end
 
   defp resolve_spec(finding, _no_spec) do
