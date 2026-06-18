@@ -4,7 +4,7 @@ defmodule Arbor.Actions.Security.SynthesizeDetectorTest do
 
   @moduletag :fast
 
-  alias Arbor.Actions.Security.SynthesizeDetector
+  alias Arbor.Actions.Security.{DetectorSpec, SynthesizeDetector}
   alias Arbor.Contracts.Security.Finding
 
   # Write a fixture .ex file with a fail-open authorize/2 and return its path +
@@ -266,6 +266,37 @@ defmodule Arbor.Actions.Security.SynthesizeDetectorTest do
 
       assert {:ok, %{g1: :passed, shape: :s3}} =
                SynthesizeDetector.run(%{finding: f, spec: json}, %{})
+    end
+
+    # Regression: a pre-built %DetectorSpec{} struct is the natural programmatic
+    # spec source (e.g. DetectorSynthesisLoop forwarding opts[:spec], or any caller
+    # that built the spec itself). Before the resolve_spec/2 clause reordering, a
+    # struct fell into the generic `is_map/1` clause and was passed to
+    # DetectorSpec.build/1, which does Access (`params[:category]`) on the struct
+    # and RAISED — the dedicated %DetectorSpec{} clause was dead code shadowed by
+    # is_map/1. This test passes a built struct (S3 and S1) and asserts G1 passes;
+    # it fails (raises) on the pre-fix clause ordering.
+    test "accepts a pre-built %DetectorSpec{} struct (S3 + S1) and G1-validates it" do
+      s3_file = overmatch_fixture()
+      {:ok, built_s3} = DetectorSpec.build(s3_spec())
+
+      assert {:ok, %{g1: :passed, shape: :s3}} =
+               SynthesizeDetector.run(%{finding: s3_finding(s3_file), spec: built_s3}, %{})
+
+      {s1_file, s1_line} = fail_open_fixture()
+
+      {:ok, built_s1} =
+        DetectorSpec.build(%{
+          shape: :s1,
+          category: :fail_open_authz,
+          invariant: "Authorization must fail closed.",
+          name_match: ["authoriz"],
+          target_literals: [:ok],
+          clause_position: :rescue_or_catch_all
+        })
+
+      assert {:ok, %{g1: :passed, shape: :s1}} =
+               SynthesizeDetector.run(%{finding: finding(s1_file, s1_line), spec: built_s1}, %{})
     end
   end
 
