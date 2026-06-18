@@ -24,6 +24,15 @@
 // to the deterministic spec keyed by category — so a blank/unparseable LLM spec
 // degrades to the proven deterministic path rather than failing.
 //
+// E1.2: the action ALSO synthesizes S3 (tree-wide pattern) detectors —
+// capability_overmatch / serialization_drop — when the spec carries
+// {"shape":"s3", "match_pattern": ...}. The pipeline is shape-agnostic: it passes
+// `spec` straight through (context_keys), and the action classifies S1 vs S3 from
+// the spec/category and runs the matching G1 gate. The propose_spec prompt below
+// describes the S1 spec only (the proven path); an S3 spec is supplied by the
+// caller or a future E1.4 wiring — keeping this prompt brace-light preserves
+// `mix arbor.pipeline.validate` (the DOT lexer is sensitive to nested braces).
+//
 // Model: local Gemma via LM Studio by default (nothing sensitive leaves the box).
 
 digraph synthesize_detector {
