@@ -47,6 +47,14 @@ defmodule Arbor.Actions.Security.StaticScanTest do
     assert f.severity[:level] == :medium
     assert f.detector[:name] == "authorization_smells"
     assert f.verification[:must_fail_on_revert] == true
+
+    # The finding captures the offending function's source so the Sentinel's G4
+    # stage can pin a real (not synthetic) regression test to the flagged code.
+    # It must be the enclosing def and be parseable Elixir on its own.
+    excerpt = f.evidence[:code_excerpt]
+    assert is_binary(excerpt)
+    assert excerpt =~ "def authorize"
+    assert {:ok, _ast} = Code.string_to_quoted(excerpt)
   end
 
   test "records each finding as <id>.md and emits a markdown projection", %{dir: dir} do

@@ -97,6 +97,12 @@ defmodule Arbor.Actions.Security.SweepCandidateTest do
       assert [sibling] = result.siblings
       assert sibling.category == :fail_open_authz
       assert sibling.location[:function] == "authorize"
+
+      # Each S1 sibling captures the offending function's source (parseable on its
+      # own) so the G4 stage pins a real positive test to the flagged sibling.
+      assert is_binary(sibling.evidence[:code_excerpt])
+      assert sibling.evidence[:code_excerpt] =~ "def authorize"
+      assert {:ok, _} = Code.string_to_quoted(sibling.evidence[:code_excerpt])
     end
 
     test "dedups siblings by dedup_key" do

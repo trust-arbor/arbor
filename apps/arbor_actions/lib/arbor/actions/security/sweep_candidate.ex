@@ -175,7 +175,10 @@ defmodule Arbor.Actions.Security.SweepCandidate do
         function: violation[:function]
       },
       invariant_violated: invariant,
-      evidence: %{smell_match: violation[:type]},
+      evidence: %{
+        smell_match: violation[:type],
+        code_excerpt: Common.code_excerpt(file, violation[:function], violation[:line])
+      },
       recommendation: %{
         approach:
           violation[:suggestion] ||
