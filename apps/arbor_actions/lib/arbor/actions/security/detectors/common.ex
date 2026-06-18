@@ -52,4 +52,61 @@ defmodule Arbor.Actions.Security.Detectors.Common do
       Code.string_to_quoted(code, opts)
     end
   end
+
+  @doc """
+  The source of the `def`/`defp` clause `function` enclosing `line` in `file`.
+
+  Captured so downstream consumers (the Sentinel's detector-synthesis G4 stage)
+  can pin a real positive/FP-regression test to the *actual* flagged code rather
+  than a synthetic fallback. The matching clause's AST is re-rendered via
+  `Macro.to_string/1`, which is guaranteed self-contained and parseable (the S1
+  G4 test `Code.string_to_quoted!`s it) — unlike a raw line-slice, which can clip
+  the trailing `end`.
+
+  Picks the clause whose start line is the greatest at or before `line` (the one
+  the violation sits in); falls back to the earliest clause of that name when
+  none precede `line`. Returns `nil` when `function` is nil/unknown or the file
+  can't be parsed (excerpt is best-effort, never raises).
+  """
+  @spec code_excerpt(String.t(), String.t() | atom() | nil, non_neg_integer() | nil) ::
+          String.t() | nil
+  def code_excerpt(_file, nil, _line), do: nil
+
+  def code_excerpt(file, function, line) do
+    with {:ok, ast} <- parse(file, columns: true),
+         node when not is_nil(node) <- enclosing_def(ast, to_string(function), line) do
+      Macro.to_string(node)
+    else
+      _ -> nil
+    end
+  end
+
+  defp enclosing_def(ast, function, line) do
+    {_, matches} =
+      Macro.prewalk(ast, [], fn
+        {def_kw, meta, [head, body]} = node, acc
+        when def_kw in [:def, :defp] and is_list(body) ->
+          if def_name(head) == function,
+            do: {node, [{meta[:line] || 0, node} | acc]},
+            else: {node, acc}
+
+        node, acc ->
+          {node, acc}
+      end)
+
+    case matches do
+      [] ->
+        nil
+
+      _ ->
+        at_or_before = Enum.filter(matches, fn {l, _} -> is_nil(line) or l <= line end)
+        pool = if at_or_before == [], do: matches, else: at_or_before
+        {_line, node} = Enum.max_by(pool, fn {l, _} -> l end)
+        node
+    end
+  end
+
+  defp def_name({:when, _, [inner | _]}), do: def_name(inner)
+  defp def_name({name, _, _}) when is_atom(name), do: to_string(name)
+  defp def_name(_), do: nil
 end

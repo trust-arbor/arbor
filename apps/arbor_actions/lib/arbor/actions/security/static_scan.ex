@@ -118,7 +118,10 @@ defmodule Arbor.Actions.Security.StaticScan do
         function: violation[:function]
       },
       invariant_violated: Map.get(@invariant_by_category, category),
-      evidence: %{smell_match: violation.type},
+      evidence: %{
+        smell_match: violation.type,
+        code_excerpt: Common.code_excerpt(file, violation[:function], violation[:line])
+      },
       recommendation: %{approach: violation[:suggestion]},
       actionability: %{auto_fixable: false, risk_class: risk_class(file)},
       verification: %{must_fail_on_revert: true}
