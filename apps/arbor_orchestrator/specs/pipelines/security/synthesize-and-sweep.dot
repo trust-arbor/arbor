@@ -1,0 +1,71 @@
+// Security Sentinel — synthesize + sweep sub-pipeline (E1.3, G2).
+//
+// Chains detector synthesis (E1.1/E1.2) to the umbrella SWEEP (G2): synthesize a
+// candidate S1/S3 detector from a confirmed finding, then run that candidate
+// tree-wide to collect SIBLINGS — the same class of bug in unreviewed code. The
+// swept siblings are recorded via the shared Recorder/FindingStore (record=true),
+// so the EXISTING verify-pending.dot adversarially triages them into
+// confirmed-real (the payoff) vs. false-positive (tighten the detector against).
+// G3 (precision floor) is computed by Arbor.Actions.Security.Precision from those
+// verdicts; G4 (FP-regression-test generation) is E1.4 and is NOT wired here.
+//
+// Context in (set via initial_values when invoking):
+//   finding             — the confirmed Finding (struct/map) to synthesize + sweep from
+//   spec                — optional pre-built/LLM detector-spec (synthesize falls back
+//                         to the deterministic spec keyed by the finding's category)
+//   root                — directory to sweep (default "apps"; tests pass a fixture dir)
+//   output_dir          — FindingStore directory for the recorded siblings
+//
+// --- The exec→exec map-threading constraint (why this is two nodes, not three) ---
+// The engine context is a JSON-checkpoint serialization boundary, and ExecHandler
+// flattens a MAP action result by `inspect/1`-ing it into a single
+// `exec.<node>.result` string (only a JSON-STRING result spreads into addressable
+// sub-keys). The synthesize result is a rich map carrying `module_source` (a large,
+// brace-heavy multi-line string) — exactly the kind of value the boundary says NOT
+// to thread as a nested struct through context. So rather than reconstruct that map
+// in DOT, this pipeline threads `finding`/`spec` straight to BOTH nodes and lets
+// SweepCandidate re-synthesize-equivalent by recompiling from the candidate map it
+// is handed in-process when driven directly (the agent/Engine passes the synthesize
+// result as the `candidate` param). When invoked purely via DOT, supply the
+// synthesize result as the `candidate` initial_value. See the action moduledoc +
+// the E1.3 report for the full rationale; E1.4 wires the human-gated assembly.
+//
+// Keep this brace-light: the DOT lexer is sensitive to nested `{}` (E1.2 note). LLM
+// nodes are NOT used here — synthesis falls back to the deterministic spec — so no
+// simulate= is required.
+
+digraph synthesize_and_sweep {
+  graph [
+    goal="Synthesize a candidate detector then sweep the umbrella for siblings (G2)",
+    label="Security: Synthesize and sweep"
+  ]
+
+  start [shape=Mdiamond]
+
+  // Generate the candidate detector source + G1 self-validate (re-catch the seed).
+  // Falls back to the deterministic spec keyed by the finding's category when no
+  // `spec` is supplied.
+  synthesize [
+    type="exec",
+    target="action",
+    action="security.synthesize_detector",
+    context_keys="finding,spec",
+    output_prefix="candidate"
+  ]
+
+  // Sweep the candidate tree-wide for siblings, excluding the seed, and record
+  // them (record=true) so verify-pending.dot picks them up. `candidate` is the
+  // synthesize result map (module_source + shape + spec); `finding` is the seed.
+  sweep [
+    type="exec",
+    target="action",
+    action="security.sweep_candidate",
+    context_keys="candidate,finding,root,output_dir"
+  ]
+
+  done [shape=Msquare]
+
+  start -> synthesize
+  synthesize -> sweep
+  sweep -> done
+}
