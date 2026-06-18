@@ -10,6 +10,8 @@ defmodule Arbor.Actions.Security.UriInventory do
   an action, grant, or namespace to catch drift.
   """
 
+  alias Arbor.Actions.Security.Detectors.Common
+
   @doc_attrs [:moduledoc, :doc, :shortdoc, :typedoc]
   @uri_regex ~r{arbor://[A-Za-z0-9_/.*\-]+}
 
@@ -118,10 +120,10 @@ defmodule Arbor.Actions.Security.UriInventory do
   # are subject to enforcement. A positive signal (absence ≠ not-authorized,
   # since many call sites build the URI through variables).
   defp authorized_namespaces(root) do
-    Path.wildcard(Path.join(root, "**/*.ex"))
-    |> Enum.reject(&String.contains?(&1, "/test/"))
+    root
+    |> Common.elixir_source_files()
     |> Enum.flat_map(fn file ->
-      case parse(file) do
+      case Common.parse(file) do
         {:ok, ast} -> authz_uris(ast)
         _ -> []
       end
@@ -170,13 +172,13 @@ defmodule Arbor.Actions.Security.UriInventory do
 
   # Returns [{uri, file}] for every arbor:// literal in code (doc strings excluded).
   defp scan(root) do
-    Path.wildcard(Path.join(root, "**/*.ex"))
-    |> Enum.reject(&String.contains?(&1, "/test/"))
+    root
+    |> Common.elixir_source_files()
     |> Enum.flat_map(&scan_file/1)
   end
 
   defp scan_file(file) do
-    case parse(file) do
+    case Common.parse(file) do
       {:ok, ast} ->
         excluded = MapSet.union(doc_uris(ast), source_uris(ast))
 
@@ -225,10 +227,6 @@ defmodule Arbor.Actions.Security.UriInventory do
       end)
 
     uris
-  end
-
-  defp parse(file) do
-    with {:ok, code} <- File.read(file), do: Code.string_to_quoted(code)
   end
 
   defp code_uris(ast) do

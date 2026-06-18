@@ -22,6 +22,7 @@ defmodule Arbor.Actions.Security.Detectors.UriRegistration do
   excluded. Comments are dropped by the parser and never seen.
   """
 
+  alias Arbor.Actions.Security.Detectors.Common
   alias Arbor.Contracts.Security.Finding
 
   @doc_attrs [:moduledoc, :doc, :shortdoc, :typedoc]
@@ -36,8 +37,8 @@ defmodule Arbor.Actions.Security.Detectors.UriRegistration do
     if prefixes == [] do
       []
     else
-      Path.wildcard(Path.join(root, "**/*.ex"))
-      |> Enum.reject(&String.contains?(&1, "/test/"))
+      root
+      |> Common.elixir_source_files()
       |> Enum.flat_map(&analyze_file(&1, prefixes, git_sha))
     end
   end
@@ -56,7 +57,7 @@ defmodule Arbor.Actions.Security.Detectors.UriRegistration do
   end
 
   defp analyze_file(file, prefixes, git_sha) do
-    case parse(file) do
+    case Common.parse(file) do
       {:ok, ast} ->
         excluded = MapSet.union(doc_uris(ast), source_uris(ast))
 
@@ -108,12 +109,6 @@ defmodule Arbor.Actions.Security.Detectors.UriRegistration do
       end)
 
     uris
-  end
-
-  defp parse(file) do
-    with {:ok, code} <- File.read(file) do
-      Code.string_to_quoted(code)
-    end
   end
 
   # Every arbor:// literal in code (plain strings + interpolation segments are
@@ -173,7 +168,7 @@ defmodule Arbor.Actions.Security.Detectors.UriRegistration do
       detector: %{layer: "L0b", name: "uri_registration", version: "1"},
       severity: %{level: :medium},
       confidence: %{score: 0.6, rationale: "no canonical prefix covers this URI"},
-      location: %{library: library_of(file), file: file, resource_uri: uri},
+      location: %{library: Common.library_of(file), file: file, resource_uri: uri},
       invariant_violated:
         "Every arbor:// URI used in authorization must be in the canonical URI registry, or it can be rejected when registry enforcement is enabled.",
       evidence: %{uri: uri},
@@ -184,12 +179,5 @@ defmodule Arbor.Actions.Security.Detectors.UriRegistration do
       actionability: %{auto_fixable: false, risk_class: :medium},
       verification: %{must_fail_on_revert: true}
     )
-  end
-
-  defp library_of(file) do
-    case Regex.run(~r{apps/([^/]+)/}, file) do
-      [_, lib] -> lib
-      _ -> nil
-    end
   end
 end
