@@ -172,4 +172,146 @@ defmodule Arbor.Actions.Security.SynthesizeDetectorTest do
       assert {:error, {:seed_unreadable, _}} = SynthesizeDetector.run(%{finding: f}, %{})
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # E1.2 — S3 (tree-wide pattern) synthesis + G1
+  # ---------------------------------------------------------------------------
+
+  # A seed file whose `grant/0` returns an over-broad `arbor://**` capability —
+  # the tree-wide-pattern shape of :capability_overmatch.
+  defp overmatch_fixture do
+    dir = Path.join(System.tmp_dir!(), "synth_s3_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    file = Path.join(dir, "overmatch.ex")
+
+    File.write!(file, """
+    defmodule OvermatchFixture do
+      def grant do
+        "arbor://**/everything"
+      end
+    end
+    """)
+
+    on_exit(fn -> File.rm_rf(dir) end)
+    file
+  end
+
+  defp s3_finding(file, overrides \\ %{}) do
+    Finding.new(
+      Keyword.merge(
+        [
+          category: :capability_overmatch,
+          title: "over-broad capability",
+          location: %{file: file, function: "grant"},
+          invariant_violated: "Capabilities must not grant arbor://** (over-broad)."
+        ],
+        Map.to_list(overrides)
+      )
+    )
+  end
+
+  defp s3_spec(overrides \\ %{}) do
+    Map.merge(
+      %{
+        category: :capability_overmatch,
+        invariant: "Capabilities must not grant arbor://** (over-broad).",
+        match_pattern: %{kind: :literal, literal: "arbor://**"},
+        name_match: ["grant"]
+      },
+      overrides
+    )
+  end
+
+  describe "S3 G1 positive — tree-wide pattern re-catches its own seed" do
+    test "an S3 spec whose pattern matches the seed passes G1" do
+      file = overmatch_fixture()
+      f = s3_finding(file)
+
+      assert {:ok, result} = SynthesizeDetector.run(%{finding: f, spec: s3_spec()}, %{})
+      assert result.g1 == :passed
+      assert result.shape == :s3
+      assert result.category == :capability_overmatch
+      assert is_binary(result.module_source)
+    end
+
+    test "the candidate S3 module compiles + re-catches via detect/1" do
+      file = overmatch_fixture()
+      f = s3_finding(file)
+
+      {:ok, result} = SynthesizeDetector.run(%{finding: f, spec: s3_spec()}, %{})
+
+      name =
+        "Arbor.Actions.Security.Detectors.Synthesized.PostS3_#{System.unique_integer([:positive])}"
+
+      [{mod, _} | _] =
+        Code.compile_string(String.replace(result.module_source, result.module_name, name))
+
+      findings = mod.detect(root: Path.dirname(file))
+      assert [found] = findings
+      assert found.location[:function] == "grant"
+    end
+
+    test "accepts an LLM-produced JSON S3 spec and G1-validates it" do
+      file = overmatch_fixture()
+      f = s3_finding(file)
+
+      json =
+        Jason.encode!(%{
+          "shape" => "s3",
+          "category" => "capability_overmatch",
+          "invariant" => "Capabilities must not grant arbor://** (over-broad).",
+          "match_pattern" => %{"kind" => "literal", "literal" => "arbor://**"},
+          "name_match" => ["grant"]
+        })
+
+      assert {:ok, %{g1: :passed, shape: :s3}} =
+               SynthesizeDetector.run(%{finding: f, spec: json}, %{})
+    end
+  end
+
+  describe "S3 G1 negative — a pattern that does NOT match is rejected" do
+    test "a non-matching literal → {:error, {:g1_failed, :no_violation_recaught}}" do
+      file = overmatch_fixture()
+      f = s3_finding(file)
+
+      bad = s3_spec(%{match_pattern: %{kind: :literal, literal: "arbor://never/matches/this"}})
+
+      assert {:error, {:g1_failed, :no_violation_recaught}} =
+               SynthesizeDetector.run(%{finding: f, spec: bad}, %{})
+    end
+
+    test "matches the pattern but in a different function than the finding → wrong_location" do
+      file = overmatch_fixture()
+      # Finding claims a different function; the detector flags `grant`.
+      f = s3_finding(file, %{location: %{file: file, function: "some_other_fn"}})
+
+      assert {:error, {:g1_failed, {:wrong_location, _file, "some_other_fn"}}} =
+               SynthesizeDetector.run(%{finding: f, spec: s3_spec()}, %{})
+    end
+  end
+
+  describe "S3 scope boundary" do
+    test "an S3 category with no supplied spec → {:no_deterministic_spec, _}" do
+      file = overmatch_fixture()
+      f = s3_finding(file)
+
+      # No deterministic template exists for S3 categories (the match_pattern is
+      # finding-specific), so the LLM/spec path must supply it.
+      assert {:error, {:no_deterministic_spec, :capability_overmatch}} =
+               SynthesizeDetector.run(%{finding: f}, %{})
+    end
+
+    test "a bespoke-correlation category is rejected as :unsupported_shape" do
+      file = overmatch_fixture()
+      # :crypto_weakness (SignedFieldCoverage's transitive-closure shape) is NOT a
+      # tree-wide pattern → not synthesizable, even with a match_pattern supplied.
+      f = s3_finding(file, %{category: :crypto_weakness})
+
+      assert {:error, {:unsupported_shape, :crypto_weakness}} =
+               SynthesizeDetector.run(
+                 %{finding: f, spec: s3_spec(%{category: :crypto_weakness})},
+                 %{}
+               )
+    end
+  end
 end

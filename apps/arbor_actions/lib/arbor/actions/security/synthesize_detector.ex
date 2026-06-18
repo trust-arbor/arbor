@@ -66,6 +66,7 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
   # predicate generalizes past the one seed instance.
   @deterministic_specs %{
     fail_open_authz: %{
+      shape: :s1,
       invariant:
         "Authorization/verification must FAIL CLOSED — an error or unknown case must deny, never allow.",
       name_match:
@@ -83,12 +84,13 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
 
     with {:ok, spec} <- resolve_spec(finding, params[:spec]),
          module_name <- unique_module_name(spec),
-         source <- DetectorTemplate.s1_module_source(spec, module: module_name),
+         source <- module_source(spec, module_name),
          {:ok, module} <- compile_in_memory(source, module_name),
-         :ok <- g1_recatch(module, finding) do
+         :ok <- g1(spec.shape, module, finding) do
       {:ok,
        %{
          spec: spec,
+         shape: spec.shape,
          module_source: source,
          module_name: module_name,
          g1: :passed,
@@ -96,6 +98,14 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
        }}
     end
   end
+
+  # The template differs by shape: S1 emits a `use Arbor.Eval` per-file check with
+  # `run/1`; S3 emits a whole-tree detector with `detect/1`.
+  defp module_source(%DetectorSpec{shape: :s3} = spec, module_name),
+    do: DetectorTemplate.s3_module_source(spec, module: module_name)
+
+  defp module_source(%DetectorSpec{} = spec, module_name),
+    do: DetectorTemplate.s1_module_source(spec, module: module_name)
 
   # ---------------------------------------------------------------------------
   # Spec resolution (LLM-supplied OR deterministic)
@@ -145,12 +155,14 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
         end
 
       :error ->
-        # Either non-S1 or S1 without a deterministic template yet → reject with
-        # the unsupported-shape signal (the LLM path supplies a spec for these).
-        if DetectorSpec.s1_category?(category) do
-          {:error, {:no_deterministic_spec, category}}
-        else
-          {:error, {:unsupported_shape, category}}
+        # No deterministic template for this category. If it is a KNOWN shape
+        # (S1 or S3) the LLM/test path must supply a spec (S3 categories have no
+        # deterministic template — their match_pattern is finding-specific). A
+        # genuinely unknown / bespoke-correlation category is rejected as an
+        # unsupported shape.
+        case DetectorSpec.shape_for_category(category) do
+          {:ok, _shape} -> {:error, {:no_deterministic_spec, category}}
+          :error -> {:error, {:unsupported_shape, category}}
         end
     end
   end
@@ -188,12 +200,14 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
   defp coerce_spec_params(map) do
     %{
       name: get(map, "name"),
+      shape: coerce_shape(get(map, "shape")),
       category: coerce_category(get(map, "category")),
       invariant: get(map, "invariant"),
       name_match: coerce_name_match(get(map, "name_match")),
       target_literals: coerce_literals(get(map, "target_literals")),
       exclusions: coerce_literals(get(map, "exclusions")),
-      clause_position: coerce_clause_position(get(map, "clause_position"))
+      clause_position: coerce_clause_position(get(map, "clause_position")),
+      match_pattern: coerce_match_pattern(get(map, "match_pattern"))
     }
     |> Enum.reject(fn {_k, v} -> is_nil(v) end)
     |> Map.new()
@@ -201,13 +215,52 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
 
   defp get(map, key), do: map[key] || map[String.to_atom(key)]
 
+  # shape is a closed, known token set → coerce against the allowlist only.
+  defp coerce_shape("s1"), do: :s1
+  defp coerce_shape("s3"), do: :s3
+  defp coerce_shape(_), do: nil
+
   defp coerce_category(nil), do: nil
 
+  # Match against BOTH the S1 and S3 known category sets (allowlist only — never
+  # String.to_atom on model output).
   defp coerce_category(str) when is_binary(str) do
-    Enum.find(DetectorSpec.s1_categories(), &(Atom.to_string(&1) == str))
+    Enum.find(
+      DetectorSpec.s1_categories() ++ DetectorSpec.s3_categories(),
+      &(Atom.to_string(&1) == str)
+    )
   end
 
   defp coerce_category(_), do: nil
+
+  # The S3 match_pattern. `kind` is allowlisted; the call target and literal value
+  # are coerced through the SAME hardened coercions as S1 literals/name_match
+  # (no String.to_atom on raw model output). A "Mod.fun" call stays a binary.
+  defp coerce_match_pattern(%{} = mp) do
+    kind = mp["kind"] || mp[:kind]
+
+    case kind do
+      "literal" -> %{kind: :literal, literal: coerce_literal(mp["literal"] || mp[:literal])}
+      "call" -> %{kind: :call, call: coerce_call_target(mp["call"] || mp[:call])}
+      _ -> nil
+    end
+  end
+
+  defp coerce_match_pattern(_), do: nil
+
+  # A call target: a remote "Mod.fun" stays a binary (matched textually by the
+  # generated detector); a bare "fun" / "@fun" / ":fun" becomes an existing atom
+  # when known, else falls back to the binary form (never minting new atoms).
+  defp coerce_call_target(str) when is_binary(str) do
+    if String.contains?(str, "."),
+      do: str,
+      else: to_known_atom_or(strip_colon(strip_at(str)), str)
+  end
+
+  defp coerce_call_target(_), do: nil
+
+  defp strip_at("@" <> rest), do: rest
+  defp strip_at(str), do: str
 
   defp coerce_clause_position(str) when is_binary(str) and str in @known_clause_positions do
     String.to_existing_atom(str)
@@ -283,6 +336,13 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
     end
   end
 
+  # G1 re-catch dispatches by shape. S1 runs the generated `run/1` against the
+  # seed file's AST; S3 runs the generated `detect/1` against the directory
+  # containing the seed file and asserts a Finding lands at the seed's
+  # file+function.
+  defp g1(:s3, module, finding), do: g1_recatch_s3(module, finding)
+  defp g1(_s1, module, finding), do: g1_recatch(module, finding)
+
   defp g1_recatch(module, finding) do
     file = finding.location[:file] || finding.location["file"]
     target_fun = finding.location[:function] || finding.location["function"]
@@ -304,6 +364,52 @@ defmodule Arbor.Actions.Security.SynthesizeDetector do
           :ok
       end
     end
+  end
+
+  # S3 G1: run the generated whole-tree detector against the directory containing
+  # the seed file, then assert it produced a Finding at the seed's file (and, when
+  # known, its function). The detector globs `.ex` under `root`, so we point it at
+  # the seed's own directory — a tree containing exactly the bug it was born from.
+  defp g1_recatch_s3(module, finding) do
+    file = finding.location[:file] || finding.location["file"]
+    target_fun = finding.location[:function] || finding.location["function"]
+
+    with {:ok, file} <- require_file(file) do
+      findings = module.detect(root: Path.dirname(file))
+
+      cond do
+        findings == [] ->
+          {:error, {:g1_failed, :no_violation_recaught}}
+
+        not s3_matches_seed?(findings, file, target_fun) ->
+          {:error, {:g1_failed, {:wrong_location, file, target_fun}}}
+
+        true ->
+          :ok
+      end
+    end
+  end
+
+  # An emitted Finding re-catches the seed iff it lands in the seed file and, when
+  # the finding records a target function, in that function. A nil target function
+  # matches any site in the seed file (we still re-caught the class in the file).
+  defp s3_matches_seed?(findings, file, target_fun) do
+    Enum.any?(findings, fn f ->
+      loc = f.location || %{}
+      same_file?(loc[:file] || loc["file"], file) and s3_function_matches?(loc, target_fun)
+    end)
+  end
+
+  defp same_file?(nil, _seed), do: false
+
+  defp same_file?(found, seed) do
+    Path.expand(to_string(found)) == Path.expand(to_string(seed))
+  end
+
+  defp s3_function_matches?(_loc, nil), do: true
+
+  defp s3_function_matches?(loc, target_fun) do
+    to_string(loc[:function] || loc["function"] || "") == to_string(target_fun)
   end
 
   defp require_file(nil), do: {:error, {:seed_unreadable, :no_file_in_location}}
