@@ -24,10 +24,12 @@ defmodule Arbor.Agent.Eval.SecurityReview.Reviewers do
         }
 
   @seed [
-    # --- local (the first-run default; free + private) ---
-    %{id: "gemma-local", provider: :lm_studio, model: "gemma-4-31b-it", tier: :local},
+    # --- local via LM Studio (the first-run set; free + private) ---
+    %{id: "qwen3.6-27b", provider: :lm_studio, model: "qwen3.6-27b-mtp", tier: :local},
+    %{id: "gemma-4-e4b", provider: :lm_studio, model: "gemma-4-e4b-it", tier: :local},
+    %{id: "gemma-4-31b-qat", provider: :lm_studio, model: "gemma-4-31b-it-qat", tier: :local},
 
-    # --- cloud (inert unless tier :cloud is enabled; placeholders to confirm) ---
+    # --- cloud (inert unless tier :cloud is enabled; placeholder to confirm) ---
     %{id: "claude-sonnet", provider: :anthropic, model: "claude-sonnet-4-6", tier: :cloud}
   ]
 
