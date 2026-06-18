@@ -74,8 +74,15 @@ defmodule Arbor.Memory.KnowledgeGraph do
   @type edge_id :: String.t()
 
   @type node_type ::
-          :fact | :experience | :skill | :insight | :relationship |
-          :goal | :observation | :trait | :intention
+          :fact
+          | :experience
+          | :skill
+          | :insight
+          | :relationship
+          | :goal
+          | :observation
+          | :trait
+          | :intention
 
   @type knowledge_node :: %{
           id: node_id(),
@@ -143,8 +150,17 @@ defmodule Arbor.Memory.KnowledgeGraph do
     last_decay_at: nil
   ]
 
-  @allowed_node_types [:fact, :experience, :skill, :insight, :relationship,
-                       :goal, :observation, :trait, :intention]
+  @allowed_node_types [
+    :fact,
+    :experience,
+    :skill,
+    :insight,
+    :relationship,
+    :goal,
+    :observation,
+    :trait,
+    :intention
+  ]
   @default_decay_rate 0.10
   @default_reinforce_amount 0.15
   @default_max_nodes_per_type 500
@@ -207,8 +223,8 @@ defmodule Arbor.Memory.KnowledgeGraph do
       decay_rate: Keyword.get(opts, :decay_rate, @default_decay_rate),
       max_nodes_per_type: Keyword.get(opts, :max_nodes_per_type, @default_max_nodes_per_type),
       prune_threshold: Keyword.get(opts, :prune_threshold, @default_prune_threshold),
-      auto_embed: Keyword.get(opts, :auto_embed,
-                    Application.get_env(:arbor_memory, :auto_embed, true))
+      auto_embed:
+        Keyword.get(opts, :auto_embed, Application.get_env(:arbor_memory, :auto_embed, true))
     }
 
     %__MODULE__{
@@ -413,7 +429,12 @@ defmodule Arbor.Memory.KnowledgeGraph do
           # Existing edge -- increment strength and merge metadata
           existing_edge = Enum.at(existing_edges, idx)
           merged_meta = Map.merge(Map.get(existing_edge, :metadata, %{}), edge_metadata)
-          updated_edge = %{existing_edge | strength: min(10.0, existing_edge.strength + 0.5), metadata: merged_meta}
+
+          updated_edge = %{
+            existing_edge
+            | strength: min(10.0, existing_edge.strength + 0.5),
+              metadata: merged_meta
+          }
 
           updated_list = List.replace_at(existing_edges, idx, updated_edge)
           new_edges = Map.put(graph.edges, source_id, updated_list)
@@ -848,14 +869,14 @@ defmodule Arbor.Memory.KnowledgeGraph do
   # Deserialization helpers for from_map/1
 
   defp deserialize_nodes(data) do
-    (get_field(data, :nodes, %{}))
+    get_field(data, :nodes, %{})
     |> Map.new(fn {id, node} ->
       {id, ensure_node_fields(node)}
     end)
   end
 
   defp deserialize_edges(data) do
-    (get_field(data, :edges, %{}))
+    get_field(data, :edges, %{})
     |> Map.new(fn {source_id, edge_list} ->
       {source_id, Enum.map(edge_list, &ensure_edge_fields/1)}
     end)
@@ -1122,7 +1143,10 @@ defmodule Arbor.Memory.KnowledgeGraph do
 
   # Embedding service helpers
   defp embedding_service_available? do
-    LazyLoader.exported?(Arbor.AI, :embed, 2)
+    # Config-gated so the hermetic test lane never reaches a live embedding
+    # backend (Ollama); see config :arbor_memory, :embedding_service_enabled.
+    Application.get_env(:arbor_memory, :embedding_service_enabled, true) and
+      LazyLoader.exported?(Arbor.AI, :embed, 2)
   end
 
   defp compute_node_embedding(text) when is_binary(text) do

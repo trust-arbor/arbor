@@ -176,7 +176,13 @@ end
 config :arbor_memory,
   embedding_backend: :ets,
   persistence_backend: nil,
-  auto_embed: false
+  auto_embed: false,
+  # Don't reach the live Arbor.AI embedding backend (Ollama) in the hermetic test
+  # lane (see embedding_service_available? in knowledge_graph[/graph_search] +
+  # context_window/compression). Tests use synthetic embeddings via
+  # Embedding.store/search; the live embed path is :llm-lane territory. Reaching
+  # Ollama here caused flaky Finch pool-exhaustion timeouts (KnowledgeGraphTest).
+  embedding_service_enabled: false
 
 # pgvector tests (requires postgres + pgvector extension)
 config :arbor_persistence,

@@ -762,7 +762,10 @@ defmodule Arbor.Memory.KnowledgeGraph.GraphSearch do
 
   # Embedding service helpers
   defp embedding_service_available? do
-    LazyLoader.exported?(Arbor.AI, :embed, 2)
+    # Config-gated so the hermetic test lane never reaches a live embedding
+    # backend (Ollama); see config :arbor_memory, :embedding_service_enabled.
+    Application.get_env(:arbor_memory, :embedding_service_enabled, true) and
+      LazyLoader.exported?(Arbor.AI, :embed, 2)
   end
 
   defp compute_node_embedding(text) when is_binary(text) do

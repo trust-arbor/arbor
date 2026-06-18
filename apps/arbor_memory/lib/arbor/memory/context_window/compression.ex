@@ -603,7 +603,10 @@ defmodule Arbor.Memory.ContextWindow.Compression do
   defp compute_embedding(_), do: nil
 
   defp embedding_service_available? do
-    LazyLoader.exported?(Arbor.AI, :embed, 2)
+    # Config-gated so the hermetic test lane never reaches a live embedding
+    # backend (Ollama); see config :arbor_memory, :embedding_service_enabled.
+    Application.get_env(:arbor_memory, :embedding_service_enabled, true) and
+      LazyLoader.exported?(Arbor.AI, :embed, 2)
   end
 
   defp cosine_similarity(emb1, emb2) when is_list(emb1) and is_list(emb2) do
