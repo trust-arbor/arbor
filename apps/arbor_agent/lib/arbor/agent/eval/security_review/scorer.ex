@@ -91,7 +91,12 @@ defmodule Arbor.Agent.Eval.SecurityReview.Scorer do
   defp score_cell(cell, nil, _judge) do
     # No label for this item (shouldn't happen) — record as unmatched, no credit.
     base(cell)
-    |> Map.merge(%{matched: false, matched_findings: [], unmatched: length(cell.findings)})
+    |> Map.merge(%{
+      matched: false,
+      matched_findings: [],
+      unmatched: length(cell.findings),
+      difficulty: "unknown"
+    })
   end
 
   defp score_cell(cell, label, judge) do
@@ -103,7 +108,8 @@ defmodule Arbor.Agent.Eval.SecurityReview.Scorer do
     |> Map.merge(%{
       matched: matched_findings != [],
       matched_findings: Enum.map(matched_findings, &finding_title/1),
-      unmatched: length(cell.findings) - length(matched_findings)
+      unmatched: length(cell.findings) - length(matched_findings),
+      difficulty: label[:difficulty] || label["difficulty"] || "unknown"
     })
   end
 

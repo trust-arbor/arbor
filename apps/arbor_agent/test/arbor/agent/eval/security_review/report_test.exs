@@ -37,21 +37,24 @@ defmodule Arbor.Agent.Eval.SecurityReview.ReportTest do
           strategy: :a,
           item_id: "taint",
           cross_file: false,
-          matched: true
+          matched: true,
+          difficulty: "easy"
         },
         %{
           reviewer: "qwen3.6-27b",
           strategy: :a,
           item_id: "uri",
           cross_file: true,
-          matched: false
+          matched: false,
+          difficulty: "hard"
         },
         %{
           reviewer: "qwen3.6-27b",
           strategy: :b_lite,
           item_id: "uri",
           cross_file: true,
-          matched: true
+          matched: true,
+          difficulty: "hard"
         }
       ]
     }
@@ -71,6 +74,9 @@ defmodule Arbor.Agent.Eval.SecurityReview.ReportTest do
 
     assert md =~ "# Security Sentinel L2-review eval"
     assert md =~ "Recall by reviewer × strategy"
+    # recall-by-difficulty section: uri (hard) matched in ≥1 run → 1/1 hard
+    assert md =~ "Recall by difficulty"
+    assert md =~ "Hard"
     # the headline numbers render
     assert md =~ "0.67"
     assert md =~ "1.00"
