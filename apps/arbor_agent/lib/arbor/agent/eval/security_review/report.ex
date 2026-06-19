@@ -34,6 +34,10 @@ defmodule Arbor.Agent.Eval.SecurityReview.Report do
 
     #{recall_table(scored[:by_reviewer_strategy] || [])}
 
+    ## Recall by difficulty
+
+    #{difficulty_table(scored[:cells] || [])}
+
     ## Per-item match matrix
 
     #{item_matrix(scored[:cells] || [])}
@@ -70,6 +74,48 @@ defmodule Arbor.Agent.Eval.SecurityReview.Report do
 
   defp cross_cell(%{cross_file_items: 0}), do: "— (none)"
   defp cross_cell(%{cross_file_recall_any: r, cross_file_items: n}), do: "#{pct(r)} (#{n})"
+
+  # Reviewer × difficulty → matched items / total (matched in ≥1 run per item). The
+  # hard tier is where models separate; easy-only corpora produce misleading ties.
+  @diff_order ["easy", "medium", "hard", "unknown"]
+
+  defp difficulty_table([]), do: "_(no cells)_"
+
+  defp difficulty_table(cells) do
+    diffs =
+      cells
+      |> Enum.map(&diff_of/1)
+      |> Enum.uniq()
+      |> Enum.sort_by(fn d -> Enum.find_index(@diff_order, &(&1 == d)) || 99 end)
+
+    reviewers = cells |> Enum.map(& &1.reviewer) |> Enum.uniq() |> Enum.sort()
+
+    header = "| Reviewer | " <> Enum.map_join(diffs, " | ", &String.capitalize/1) <> " |"
+    sep = "|---|" <> Enum.map_join(diffs, "", fn _ -> "---|" end)
+
+    rows =
+      Enum.map_join(reviewers, "\n", fn rev ->
+        cells_r = Enum.filter(cells, &(&1.reviewer == rev))
+
+        scores =
+          Enum.map_join(diffs, " | ", fn d ->
+            by_item =
+              cells_r
+              |> Enum.filter(&(diff_of(&1) == d))
+              |> Enum.group_by(& &1.item_id)
+
+            total = map_size(by_item)
+            matched = Enum.count(by_item, fn {_id, runs} -> Enum.any?(runs, & &1.matched) end)
+            if total == 0, do: "—", else: "#{matched}/#{total}"
+          end)
+
+        "| #{rev} | #{scores} |"
+      end)
+
+    header <> "\n" <> sep <> "\n" <> rows
+  end
+
+  defp diff_of(cell), do: to_string(Map.get(cell, :difficulty, "unknown"))
 
   defp item_matrix([]), do: "_(no cells)_"
 
