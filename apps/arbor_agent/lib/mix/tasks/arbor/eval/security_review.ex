@@ -29,7 +29,7 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
 
   use Mix.Task
 
-  alias Arbor.Agent.Eval.SecurityReview.{Report, Reviewers, Runner, Scorer}
+  alias Arbor.Agent.Eval.SecurityReview.{Judge, Report, Reviewers, Runner, Scorer}
 
   @requirements ["app.start"]
 
@@ -45,6 +45,7 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
           k: :integer,
           timeout: :integer,
           max_rounds: :integer,
+          judge: :string,
           output: :string
         ]
       )
@@ -62,15 +63,20 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
       |> put_if(:timeout, opts[:timeout] && opts[:timeout] * 1000)
       |> put_if(:max_rounds, opts[:max_rounds])
 
+    score_opts = if opts[:judge], do: [judge: Judge.make(model: opts[:judge])], else: []
+
     with {:ok, summary} <- Runner.run(corpus, run_opts),
          {:ok, labels} <- Scorer.labels_from_manifest(corpus) do
-      scored = Scorer.score(summary.results, labels)
-      report_path = write_report(scored, summary, labels, output_dir)
+      scored = Scorer.score(summary.results, labels, score_opts)
+
+      judge_label = if opts[:judge], do: "LLM judge (#{opts[:judge]})", else: nil
+      report_path = write_report(scored, summary, labels, output_dir, judge_label)
 
       Mix.shell().info("""
       L2-review eval complete.
         corpus:    #{summary.corpus_dir}
         cells:     #{summary.cell_count}   findings: #{summary.results |> Enum.flat_map(& &1.findings) |> length()}
+        judge:     #{opts[:judge] || "deterministic (category + file)"}
         report:    #{report_path}
 
       #{recall_preview(scored)}
@@ -80,7 +86,7 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
     end
   end
 
-  defp write_report(scored, summary, labels, output_dir) do
+  defp write_report(scored, summary, labels, output_dir, judge_label) do
     stamp = DateTime.utc_now() |> DateTime.to_iso8601(:basic) |> String.replace(~r/[^0-9T]/, "")
 
     meta = %{
@@ -89,6 +95,7 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
       reviewers: summary.reviewers,
       strategies: summary.strategies,
       k: summary.k,
+      judge: judge_label,
       item_count: map_size(labels),
       cross_file_count: labels |> Map.values() |> Enum.count(& &1.cross_file)
     }

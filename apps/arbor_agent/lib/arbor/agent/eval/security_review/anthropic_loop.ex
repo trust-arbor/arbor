@@ -64,6 +64,38 @@ defmodule Arbor.Agent.Eval.SecurityReview.AnthropicLoop do
     })
   end
 
+  @doc """
+  One no-tools Anthropic message → the assistant's text. Used by the LLM judge
+  (a single yes/no adjudication, no investigation). Omits the `tools` key entirely.
+  """
+  @spec single_shot(map()) :: {:ok, String.t()} | {:error, term()}
+  def single_shot(%{base_url: base_url, model: model, system: system, user: user} = o) do
+    recv = o[:receive_timeout] || 300_000
+    api_key = o[:api_key] || "lm-studio"
+    post = o[:post] || (&default_post/4)
+
+    url = String.trim_trailing(base_url, "/") <> "/v1/messages"
+
+    headers = [
+      {"content-type", "application/json"},
+      {"anthropic-version", @anthropic_version},
+      {"x-api-key", api_key}
+    ]
+
+    body = %{
+      "model" => model,
+      "max_tokens" => @max_tokens,
+      "system" => system,
+      "messages" => [%{"role" => "user", "content" => user}]
+    }
+
+    case post.(url, headers, body, recv) do
+      {:ok, %{"content" => content}} -> {:ok, text_of(content)}
+      {:ok, other} -> {:error, {:unexpected_response, other}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   # ---------------------------------------------------------------------------
 
   # Out of investigation budget: make ONE final turn with NO tools AND an explicit
