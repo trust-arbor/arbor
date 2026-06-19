@@ -75,6 +75,7 @@ defmodule Arbor.Agent.Eval.SecurityReview.Scorer do
              category: e["category"],
              files: e["files"] || [],
              cross_file: e["cross_file"] || false,
+             difficulty: e["difficulty"] || "unknown",
              invariant: e["invariant"] || ""
            }}
         end)
