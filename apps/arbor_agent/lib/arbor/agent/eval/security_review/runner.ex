@@ -144,10 +144,19 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
       user: Prompt.user(unit.code, unit.label)
     }
 
-    case llm.(call) do
-      {:ok, text} when is_binary(text) -> {:ok, extract_findings(text)}
-      {:error, reason} -> {:error, reason}
-      other -> {:error, {:unexpected_llm_return, other}}
+    # Rescue here (not just in default_llm) so ANY reviewer fn that raises — a bad
+    # provider, an unloaded model, a transport blowup — becomes a captured per-unit
+    # error rather than killing the whole run.
+    try do
+      case llm.(call) do
+        {:ok, text} when is_binary(text) -> {:ok, extract_findings(text)}
+        {:error, reason} -> {:error, reason}
+        other -> {:error, {:unexpected_llm_return, other}}
+      end
+    rescue
+      e -> {:error, {:exception, Exception.message(e)}}
+    catch
+      kind, reason -> {:error, {:caught, kind, reason}}
     end
   end
 
@@ -176,8 +185,10 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
 
   @doc false
   def default_llm(%{provider: provider, model: model, system: system, user: user}) do
+    # Arbor.LLM resolves the adapter by a STRING provider key ("lm_studio"); the
+    # roster may carry an atom (:lm_studio). Normalize.
     case Arbor.LLM.generate(
-           provider: provider,
+           provider: to_string(provider),
            model: model,
            system: system,
            prompt: user,
