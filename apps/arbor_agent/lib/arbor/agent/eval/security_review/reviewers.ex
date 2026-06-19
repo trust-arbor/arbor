@@ -28,6 +28,7 @@ defmodule Arbor.Agent.Eval.SecurityReview.Reviewers do
     %{id: "qwen3.6-27b", provider: :lm_studio, model: "qwen3.6-27b-mtp", tier: :local},
     %{id: "qwen3.5-4b", provider: :lm_studio, model: "qwen3.5-4b-mtp", tier: :local},
     %{id: "qwen3.5-9b", provider: :lm_studio, model: "qwen3.5-9b-mtp", tier: :local},
+    %{id: "qwen3.5-122b", provider: :lm_studio, model: "qwen3.5-122b-a10b-mtp", tier: :local},
     %{id: "gemma-4-e4b", provider: :lm_studio, model: "gemma-4-e4b-it", tier: :local},
     %{id: "gemma-4-31b-qat", provider: :lm_studio, model: "gemma-4-31b-it-qat", tier: :local},
 
