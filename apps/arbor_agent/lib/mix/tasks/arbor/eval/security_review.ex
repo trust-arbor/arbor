@@ -44,6 +44,7 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
           reviewers: :string,
           k: :integer,
           timeout: :integer,
+          max_rounds: :integer,
           output: :string
         ]
       )
@@ -59,6 +60,7 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
       ]
       |> put_reviewers(opts)
       |> put_if(:timeout, opts[:timeout] && opts[:timeout] * 1000)
+      |> put_if(:max_rounds, opts[:max_rounds])
 
     with {:ok, summary} <- Runner.run(corpus, run_opts),
          {:ok, labels} <- Scorer.labels_from_manifest(corpus) do
@@ -122,7 +124,13 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
   defp put_if(kw, key, val), do: Keyword.put(kw, key, val)
 
   # Allowlist, never String.to_atom on CLI input (the project's unsafe-atom rule).
-  @known_values %{"local" => :local, "cloud" => :cloud, "a" => :a, "b_lite" => :b_lite}
+  @known_values %{
+    "local" => :local,
+    "cloud" => :cloud,
+    "a" => :a,
+    "b_lite" => :b_lite,
+    "agentic" => :agentic
+  }
 
   defp csv_atoms(nil, default), do: default
 

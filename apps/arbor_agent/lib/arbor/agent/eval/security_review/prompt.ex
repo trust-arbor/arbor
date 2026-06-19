@@ -46,4 +46,26 @@ defmodule Arbor.Agent.Eval.SecurityReview.Prompt do
   def user(code, label) do
     "Review the following code (#{label}) for security issues.\n\n" <> code
   end
+
+  # --- agentic (tool-using) variant ----------------------------------------
+
+  @agent_system @system <>
+                  "\n\nYou are reviewing a subsystem you cannot see up front. Use the " <>
+                  "provided read-only tools to navigate it: call `list_files` to see " <>
+                  "what's there, `read_file` to read a file, and `search` to find a " <>
+                  "pattern across files. Read what you need to understand the code, " <>
+                  "including how values flow BETWEEN files. When you are done " <>
+                  "investigating, stop calling tools and output the final JSON array " <>
+                  "of findings (and nothing else)."
+
+  @doc "System prompt for the agentic (tool-using) strategy."
+  @spec agent_system() :: String.t()
+  def agent_system, do: @agent_system
+
+  @doc "User kickoff prompt for the agentic strategy (the code is reached via tools)."
+  @spec agent_user() :: String.t()
+  def agent_user do
+    "Review this subsystem for security issues. Start with `list_files`, then read " <>
+      "and search as needed. Output ONLY the final JSON array of findings when done."
+  end
 end

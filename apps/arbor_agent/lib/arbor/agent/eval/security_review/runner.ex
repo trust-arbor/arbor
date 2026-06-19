@@ -26,7 +26,7 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
   """
 
   alias Arbor.Actions.Security.DiffFindings
-  alias Arbor.Agent.Eval.SecurityReview.{Prompt, Reviewers}
+  alias Arbor.Agent.Eval.SecurityReview.{Prompt, Reviewers, Tools}
 
   @default_output_dir ".arbor/evals"
 
@@ -68,6 +68,7 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
       k = opts[:k] || 1
       llm = opts[:llm] || (&default_llm/1)
       timeout = opts[:timeout] || 600_000
+      max_rounds = opts[:max_rounds] || 8
       write? = Keyword.get(opts, :write?, true)
       output_dir = opts[:output_dir] || @default_output_dir
       stamp = opts[:now] || default_stamp()
@@ -82,7 +83,7 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
             item <- items,
             strategy <- strategies,
             run_i <- 1..k do
-          cell = run_cell(reviewer, item, strategy, run_i, llm, timeout)
+          cell = run_cell(reviewer, item, strategy, run_i, llm, timeout, max_rounds, corpus_dir)
           if cells_path, do: File.write!(cells_path, Jason.encode!(cell) <> "\n", [:append])
           cell
         end
@@ -106,13 +107,13 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
   # One cell
   # ---------------------------------------------------------------------------
 
-  defp run_cell(reviewer, item, strategy, run_i, llm, timeout) do
+  defp run_cell(reviewer, item, strategy, run_i, llm, timeout, max_rounds, corpus_dir) do
     start = System.monotonic_time(:millisecond)
-    units = build_units(strategy, item)
+    units = build_units(strategy, item, corpus_dir)
 
     {findings, errors} =
       Enum.reduce(units, {[], []}, fn unit, {fs, es} ->
-        case review_unit(reviewer, unit, llm, timeout) do
+        case review_unit(reviewer, unit, llm, timeout, max_rounds) do
           {:ok, found} -> {fs ++ found, es}
           {:error, reason} -> {fs, [%{unit: unit.label, reason: inspect(reason)} | es]}
         end
@@ -134,8 +135,14 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
     }
   end
 
-  # :a — one unit per file. :b_lite — all files concatenated into one unit.
-  defp build_units(:b_lite, item) do
+  # :agentic — one unit that hands the model read-only navigation tools over the
+  # item's buggy-snapshot dir (it reads on demand instead of being handed a dump).
+  defp build_units(:agentic, item, corpus_dir) do
+    [%{label: "agentic:#{item.id}", scope: Path.join([corpus_dir, item.id, "buggy"])}]
+  end
+
+  # :b_lite — all files concatenated into one unit.
+  defp build_units(:b_lite, item, _corpus_dir) do
     code =
       item.files
       |> Enum.map_join("\n\n", fn %{path: p, code: c} -> "# ==== #{p} ====\n#{c}" end)
@@ -143,22 +150,42 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
     [%{label: "#{length(item.files)} files", code: code}]
   end
 
-  defp build_units(_a, item) do
+  # :a — one unit per file.
+  defp build_units(_a, item, _corpus_dir) do
     Enum.map(item.files, fn %{path: p, code: c} -> %{label: p, code: c} end)
   end
 
-  defp review_unit(reviewer, unit, llm, timeout) do
+  # A unit carries either :scope (agentic — navigate with tools) or :code (dump).
+  defp review_unit(reviewer, %{scope: scope} = unit, llm, timeout, max_rounds) do
+    call = %{
+      provider: reviewer.provider,
+      model: reviewer.model,
+      system: Prompt.agent_system(),
+      user: Prompt.agent_user(),
+      timeout: timeout,
+      tools: Tools.for_scope(scope),
+      max_tool_rounds: max_rounds
+    }
+
+    dispatch(call, unit, llm)
+  end
+
+  defp review_unit(reviewer, %{code: code} = unit, llm, timeout, _max_rounds) do
     call = %{
       provider: reviewer.provider,
       model: reviewer.model,
       system: Prompt.system(),
-      user: Prompt.user(unit.code, unit.label),
+      user: Prompt.user(code, unit.label),
       timeout: timeout
     }
 
-    # Rescue here (not just in default_llm) so ANY reviewer fn that raises — a bad
-    # provider, an unloaded model, a transport blowup — becomes a captured per-unit
-    # error rather than killing the whole run.
+    dispatch(call, unit, llm)
+  end
+
+  # Rescue here (not just in default_llm) so ANY reviewer fn that raises — a bad
+  # provider, an unloaded model, a transport blowup, a tool-loop error — becomes a
+  # captured per-unit error rather than killing the whole run.
+  defp dispatch(call, _unit, llm) do
     try do
       case llm.(call) do
         {:ok, text} when is_binary(text) -> {:ok, extract_findings(text)}
@@ -197,25 +224,33 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
 
   @doc false
   def default_llm(%{provider: provider, model: model, system: system, user: user} = call) do
-    timeout = call[:timeout] || 600_000
+    # `timeout` is the PER-CALL HTTP receive timeout. build_request never sets
+    # request.receive_timeout, so Req's low default (~120s) fires first and every
+    # cold-autoloaded local model times out — push it up via req_http_options
+    # (retry: false keeps the local-provider default that supplying it replaces).
+    per_call = call[:timeout] || 600_000
+    tools = call[:tools] || []
 
-    # Arbor.LLM resolves the adapter by a STRING provider key ("lm_studio"); the
-    # roster may carry an atom (:lm_studio). Normalize.
-    case Arbor.LLM.generate(
-           provider: to_string(provider),
-           model: model,
-           system: system,
-           prompt: user,
-           temperature: 0.2,
-           max_tokens: 8192,
-           # Outer Task timeout. Below it, the HTTP *receive* timeout governs — and
-           # build_request never sets request.receive_timeout, so Req's low default
-           # (~120s) fires first and every cold-autoloaded local model times out.
-           # Push the real HTTP timeout up via req_http_options (retry: false keeps
-           # the local-provider default, which supplying req_http_options replaces).
-           timeout: timeout,
-           client_opts: [req_http_options: [receive_timeout: timeout, retry: false]]
-         ) do
+    # For the agentic (tool-loop) path the OUTER Task timeout must cover ALL rounds,
+    # not one call — else a loop making progress within per-call limits gets cut
+    # mid-investigation. Single-shot: outer == per-call.
+    rounds = call[:max_tool_rounds] || 1
+    outer = if tools == [], do: per_call, else: per_call * rounds
+
+    base = [
+      provider: to_string(provider),
+      model: model,
+      system: system,
+      prompt: user,
+      temperature: 0.2,
+      max_tokens: 8192,
+      timeout: outer,
+      client_opts: [req_http_options: [receive_timeout: per_call, retry: false]]
+    ]
+
+    opts = if tools == [], do: base, else: base ++ [tools: tools, max_tool_rounds: rounds]
+
+    case Arbor.LLM.generate(opts) do
       {:ok, %{text: text}} -> {:ok, text}
       {:error, reason} -> {:error, reason}
       other -> {:error, {:unexpected, other}}
