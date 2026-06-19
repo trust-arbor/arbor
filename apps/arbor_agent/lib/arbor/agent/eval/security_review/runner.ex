@@ -26,7 +26,12 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
   """
 
   alias Arbor.Actions.Security.DiffFindings
-  alias Arbor.Agent.Eval.SecurityReview.{Prompt, Reviewers, Tools}
+  alias Arbor.Agent.Eval.SecurityReview.{AnthropicLoop, Prompt, Reviewers, Tools}
+
+  # LM Studio's Anthropic-compatible endpoint (no /v1 — AnthropicLoop appends
+  # /v1/messages). The agentic strategy speaks Anthropic tool-format here because
+  # local models emit Anthropic tool_use, which the OpenAI endpoint mangles.
+  @default_agentic_base_url "http://localhost:1234"
 
   @default_output_dir ".arbor/evals"
 
@@ -223,34 +228,37 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
   # ---------------------------------------------------------------------------
 
   @doc false
+  def default_llm(%{tools: tools} = call) when is_list(tools) and tools != [] do
+    # Agentic path: drive the Anthropic-format tool loop directly against LM Studio's
+    # /v1/messages (the OpenAI endpoint mangles local models' Anthropic tool_use).
+    AnthropicLoop.run(%{
+      base_url: call[:base_url] || @default_agentic_base_url,
+      model: call.model,
+      system: call.system,
+      user: call.user,
+      tools: tools,
+      max_rounds: call[:max_tool_rounds] || 8,
+      receive_timeout: call[:timeout] || 600_000
+    })
+  end
+
   def default_llm(%{provider: provider, model: model, system: system, user: user} = call) do
-    # `timeout` is the PER-CALL HTTP receive timeout. build_request never sets
-    # request.receive_timeout, so Req's low default (~120s) fires first and every
-    # cold-autoloaded local model times out — push it up via req_http_options
+    # Single-shot path. `timeout` is the PER-CALL HTTP receive timeout. build_request
+    # never sets request.receive_timeout, so Req's low default (~120s) fires first and
+    # every cold-autoloaded local model times out — push it up via req_http_options
     # (retry: false keeps the local-provider default that supplying it replaces).
     per_call = call[:timeout] || 600_000
-    tools = call[:tools] || []
 
-    # For the agentic (tool-loop) path the OUTER Task timeout must cover ALL rounds,
-    # not one call — else a loop making progress within per-call limits gets cut
-    # mid-investigation. Single-shot: outer == per-call.
-    rounds = call[:max_tool_rounds] || 1
-    outer = if tools == [], do: per_call, else: per_call * rounds
-
-    base = [
-      provider: to_string(provider),
-      model: model,
-      system: system,
-      prompt: user,
-      temperature: 0.2,
-      max_tokens: 8192,
-      timeout: outer,
-      client_opts: [req_http_options: [receive_timeout: per_call, retry: false]]
-    ]
-
-    opts = if tools == [], do: base, else: base ++ [tools: tools, max_tool_rounds: rounds]
-
-    case Arbor.LLM.generate(opts) do
+    case Arbor.LLM.generate(
+           provider: to_string(provider),
+           model: model,
+           system: system,
+           prompt: user,
+           temperature: 0.2,
+           max_tokens: 8192,
+           timeout: per_call,
+           client_opts: [req_http_options: [receive_timeout: per_call, retry: false]]
+         ) do
       {:ok, %{text: text}} -> {:ok, text}
       {:error, reason} -> {:error, reason}
       other -> {:error, {:unexpected, other}}
