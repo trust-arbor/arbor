@@ -129,6 +129,19 @@ defmodule Arbor.Agent.Eval.SecurityReview.RunnerTest do
       assert [%{reason: reason}] = cell.errors
       assert reason =~ "model_down"
     end
+
+    test "an LLM that RAISES is captured per-unit, not fatal (the live-run crash class)" do
+      dir = corpus([{"i1", "fail_open_authz", false, [{"lib/a.ex", "A"}]}])
+      raising = fn _call -> raise FunctionClauseError, "no clause" end
+
+      {:ok, summary} =
+        Runner.run(dir, reviewers: reviewer(), strategies: [:a], llm: raising, write?: false)
+
+      cell = hd(summary.results)
+      assert cell.findings == []
+      assert [%{reason: reason}] = cell.errors
+      assert reason =~ "exception"
+    end
   end
 
   describe "run/2 writing" do
