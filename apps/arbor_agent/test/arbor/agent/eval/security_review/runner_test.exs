@@ -95,6 +95,46 @@ defmodule Arbor.Agent.Eval.SecurityReview.RunnerTest do
     end
   end
 
+  describe "agentic strategy" do
+    test "passes scoped tools + max_tool_rounds to the LLM and parses findings" do
+      dir = corpus([{"i1", "fail_open_authz", false, [{"lib/a.ex", "def authorize, do: :ok"}]}])
+
+      # The stub asserts the agentic call carries tools (scoped) + a round budget,
+      # then returns a finding — standing in for the model's post-navigation output.
+      agentic_llm = fn call ->
+        assert is_list(call[:tools]) and call[:tools] != []
+        assert Enum.any?(call[:tools], &(&1.name == "read_file"))
+        assert call[:max_tool_rounds] == 5
+
+        {:ok,
+         Jason.encode!([
+           %{
+             category: "fail_open_authz",
+             title: "t",
+             file: "lib/a.ex",
+             line: 2,
+             severity: "high",
+             rationale: "r"
+           }
+         ])}
+      end
+
+      {:ok, summary} =
+        Runner.run(dir,
+          reviewers: reviewer(),
+          strategies: [:agentic],
+          max_rounds: 5,
+          llm: agentic_llm,
+          write?: false
+        )
+
+      assert [cell] = summary.results
+      assert cell.strategy == :agentic
+      assert cell.units == 1
+      assert [%{category: :fail_open_authz}] = cell.findings
+    end
+  end
+
   describe "run/2 cell envelope + findings" do
     test "parses findings and records the cell metadata" do
       dir = corpus([{"i1", "fail_open_authz", false, [{"lib/a.ex", "def authorize, do: :ok"}]}])
