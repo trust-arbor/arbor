@@ -67,13 +67,24 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
       strategies = opts[:strategies] || [:a, :b_lite]
       k = opts[:k] || 1
       llm = opts[:llm] || (&default_llm/1)
+      timeout = opts[:timeout] || 600_000
+      write? = Keyword.get(opts, :write?, true)
+      output_dir = opts[:output_dir] || @default_output_dir
+      stamp = opts[:now] || default_stamp()
+
+      # Per-cell incremental JSONL: each cell is appended as it completes, so a long
+      # run is observable and salvageable — a killed run is no longer total loss.
+      cells_path = if write?, do: Path.join(output_dir, "security-review-cells-#{stamp}.jsonl")
+      if cells_path, do: File.mkdir_p!(output_dir)
 
       results =
         for reviewer <- reviewers,
             item <- items,
             strategy <- strategies,
             run_i <- 1..k do
-          run_cell(reviewer, item, strategy, run_i, llm)
+          cell = run_cell(reviewer, item, strategy, run_i, llm, timeout)
+          if cells_path, do: File.write!(cells_path, Jason.encode!(cell) <> "\n", [:append])
+          cell
         end
 
       summary = %{
@@ -85,7 +96,7 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
         results: results
       }
 
-      if Keyword.get(opts, :write?, true), do: write_results(summary, opts)
+      if write?, do: write_results(summary, Keyword.put(opts, :now, stamp))
 
       {:ok, summary}
     end
@@ -95,13 +106,13 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
   # One cell
   # ---------------------------------------------------------------------------
 
-  defp run_cell(reviewer, item, strategy, run_i, llm) do
+  defp run_cell(reviewer, item, strategy, run_i, llm, timeout) do
     start = System.monotonic_time(:millisecond)
     units = build_units(strategy, item)
 
     {findings, errors} =
       Enum.reduce(units, {[], []}, fn unit, {fs, es} ->
-        case review_unit(reviewer, unit, llm) do
+        case review_unit(reviewer, unit, llm, timeout) do
           {:ok, found} -> {fs ++ found, es}
           {:error, reason} -> {fs, [%{unit: unit.label, reason: inspect(reason)} | es]}
         end
@@ -136,12 +147,13 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
     Enum.map(item.files, fn %{path: p, code: c} -> %{label: p, code: c} end)
   end
 
-  defp review_unit(reviewer, unit, llm) do
+  defp review_unit(reviewer, unit, llm, timeout) do
     call = %{
       provider: reviewer.provider,
       model: reviewer.model,
       system: Prompt.system(),
-      user: Prompt.user(unit.code, unit.label)
+      user: Prompt.user(unit.code, unit.label),
+      timeout: timeout
     }
 
     # Rescue here (not just in default_llm) so ANY reviewer fn that raises — a bad
@@ -184,7 +196,9 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
   # ---------------------------------------------------------------------------
 
   @doc false
-  def default_llm(%{provider: provider, model: model, system: system, user: user}) do
+  def default_llm(%{provider: provider, model: model, system: system, user: user} = call) do
+    timeout = call[:timeout] || 600_000
+
     # Arbor.LLM resolves the adapter by a STRING provider key ("lm_studio"); the
     # roster may carry an atom (:lm_studio). Normalize.
     case Arbor.LLM.generate(
@@ -199,8 +213,8 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
            # (~120s) fires first and every cold-autoloaded local model times out.
            # Push the real HTTP timeout up via req_http_options (retry: false keeps
            # the local-provider default, which supplying req_http_options replaces).
-           timeout: 600_000,
-           client_opts: [req_http_options: [receive_timeout: 600_000, retry: false]]
+           timeout: timeout,
+           client_opts: [req_http_options: [receive_timeout: timeout, retry: false]]
          ) do
       {:ok, %{text: text}} -> {:ok, text}
       {:error, reason} -> {:error, reason}

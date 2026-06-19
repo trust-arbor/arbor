@@ -29,7 +29,7 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
 
   use Mix.Task
 
-  alias Arbor.Agent.Eval.SecurityReview.{Report, Runner, Scorer}
+  alias Arbor.Agent.Eval.SecurityReview.{Report, Reviewers, Runner, Scorer}
 
   @requirements ["app.start"]
 
@@ -41,7 +41,9 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
           corpus: :string,
           tiers: :string,
           strategies: :string,
+          reviewers: :string,
           k: :integer,
+          timeout: :integer,
           output: :string
         ]
       )
@@ -49,12 +51,14 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
     corpus = opts[:corpus] || ".arbor/evals/security-review-corpus"
     output_dir = opts[:output] || ".arbor/evals"
 
-    run_opts = [
-      tiers: csv_atoms(opts[:tiers], [:local]),
-      strategies: csv_atoms(opts[:strategies], [:a, :b_lite]),
-      k: opts[:k] || 1,
-      output_dir: output_dir
-    ]
+    run_opts =
+      [
+        strategies: csv_atoms(opts[:strategies], [:a, :b_lite]),
+        k: opts[:k] || 1,
+        output_dir: output_dir
+      ]
+      |> put_reviewers(opts)
+      |> put_if(:timeout, opts[:timeout] && opts[:timeout] * 1000)
 
     with {:ok, summary} <- Runner.run(corpus, run_opts),
          {:ok, labels} <- Scorer.labels_from_manifest(corpus) do
@@ -97,6 +101,25 @@ defmodule Mix.Tasks.Arbor.Eval.SecurityReview do
         "cross-file=#{Float.round(a.cross_file_recall_any, 2)}"
     end)
   end
+
+  # --reviewers id1,id2 selects specific roster entries by id (so a fast model can
+  # be run alone); else fall back to --tiers (default local).
+  defp put_reviewers(run_opts, opts) do
+    case opts[:reviewers] do
+      nil ->
+        Keyword.put(run_opts, :tiers, csv_atoms(opts[:tiers], [:local]))
+
+      csv ->
+        ids = csv |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+        chosen = Enum.filter(Reviewers.default(), &(&1.id in ids))
+        if chosen == [], do: Mix.raise("no roster reviewers match: #{csv}")
+        Keyword.put(run_opts, :reviewers, chosen)
+    end
+  end
+
+  defp put_if(kw, _key, nil), do: kw
+  defp put_if(kw, _key, false), do: kw
+  defp put_if(kw, key, val), do: Keyword.put(kw, key, val)
 
   # Allowlist, never String.to_atom on CLI input (the project's unsafe-atom rule).
   @known_values %{"local" => :local, "cloud" => :cloud, "a" => :a, "b_lite" => :b_lite}
