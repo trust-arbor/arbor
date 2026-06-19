@@ -194,7 +194,13 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
            prompt: user,
            temperature: 0.2,
            max_tokens: 8192,
-           timeout: 300_000
+           # Outer Task timeout. Below it, the HTTP *receive* timeout governs — and
+           # build_request never sets request.receive_timeout, so Req's low default
+           # (~120s) fires first and every cold-autoloaded local model times out.
+           # Push the real HTTP timeout up via req_http_options (retry: false keeps
+           # the local-provider default, which supplying req_http_options replaces).
+           timeout: 600_000,
+           client_opts: [req_http_options: [receive_timeout: 600_000, retry: false]]
          ) do
       {:ok, %{text: text}} -> {:ok, text}
       {:error, reason} -> {:error, reason}
