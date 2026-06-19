@@ -57,7 +57,8 @@ defmodule Arbor.Agent.Eval.SecurityReview.Manifest do
             "errors or a level is absent, deny/quarantine, never allow through.",
         cross_file: false,
         expected: %{note: "a gate path that allows the node when taint is unknown/errored"},
-        verified: true
+        verified: true,
+        difficulty: :easy
       },
       %{
         id: "trust-uri-prefix-overmatch",
@@ -76,7 +77,8 @@ defmodule Arbor.Agent.Eval.SecurityReview.Manifest do
             "prefix matching by raw String.starts_with?/contains? without a boundary " <>
               "check, shared between the resolver and the ceiling logic"
         },
-        verified: true
+        verified: true,
+        difficulty: :medium
       },
       %{
         id: "engine-resume-provenance-fail-open",
@@ -91,7 +93,77 @@ defmodule Arbor.Agent.Eval.SecurityReview.Manifest do
             "previously-tainted data must not be treated as clean (fail-open at the boundary).",
         cross_file: true,
         expected: %{note: "checkpoint serialization that drops taint/provenance, lost on resume"},
-        verified: true
+        verified: true,
+        difficulty: :medium
+      },
+
+      # --- HARD tier (2026-06-19): semantic/crypto/cross-file, to break the recall
+      # ceiling and discriminate the strong models. All verified clean exhibits. ---
+      %{
+        id: "session-token-deserialize-before-verify",
+        category: :crypto_weakness,
+        fix_commit: "5db34585",
+        paths: ["apps/arbor_security/lib/arbor/security/session_token.ex"],
+        invariant:
+          "A token's MAC must be verified BEFORE its payload is deserialized — " <>
+            "never run binary_to_term on unverified, attacker-controlled bytes.",
+        cross_file: false,
+        expected: %{
+          note:
+            "decode/deserialize (binary_to_term) happens before signature/MAC verification " <>
+              "— unsafe deserialization of unverified bytes (MAC-then-decrypt ordering)"
+        },
+        verified: true,
+        difficulty: :hard
+      },
+      %{
+        id: "ed25519-wrong-digest-mode",
+        category: :crypto_weakness,
+        fix_commit: "58c6b68d",
+        paths: ["apps/arbor_security/lib/arbor/security/crypto.ex"],
+        invariant:
+          "Pure Ed25519 signing/verification must use the :none digest (RFC 8032 hashes " <>
+            "internally); :sha512 risks prehash semantics + breaks standard-verifier interop.",
+        cross_file: false,
+        expected: %{
+          note: ":crypto.sign/verify(:eddsa, :sha512, ...) instead of :none for pure Ed25519"
+        },
+        verified: true,
+        difficulty: :hard
+      },
+      %{
+        id: "capability-unsigned-field-forgeable",
+        category: :serialization_drop,
+        fix_commit: "875f9417",
+        paths: ["apps/arbor_contracts/lib/arbor/contracts/security/capability.ex"],
+        invariant:
+          "Every security-relevant field the authorizer reads must be in the signed " <>
+            "payload — an unsigned field (e.g. metadata.provenance) is forgeable.",
+        cross_file: true,
+        expected: %{
+          note:
+            "signing_payload excludes fields the authorizer trusts (metadata/principal_scope/" <>
+              "allowed_delegatees), so they can be added/altered without invalidating the signature"
+        },
+        verified: true,
+        difficulty: :hard
+      },
+      %{
+        id: "delegate-constraint-widening",
+        category: :capability_overmatch,
+        fix_commit: "bfa68148",
+        paths: ["apps/arbor_contracts/lib/arbor/contracts/security/capability.ex"],
+        invariant:
+          "A delegated capability must stay within its parent's envelope — the child's " <>
+            "URI + constraints must be a subset; widening must be rejected.",
+        cross_file: false,
+        expected: %{
+          note:
+            "delegate/3 does not verify the child capability is a subset of the parent " <>
+              "(no envelope/uri_subset? check) — allows URI/constraint widening (privilege escalation)"
+        },
+        verified: true,
+        difficulty: :hard
       }
     ]
   end
