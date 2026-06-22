@@ -69,6 +69,7 @@ defmodule Arbor.AI.AcpSessionTest do
       assert :goose in provider_names
       assert :claude in provider_names
       assert :codex in provider_names
+      assert :cursor in provider_names
     end
 
     test "marks providers correctly as native or adapted" do
@@ -77,6 +78,21 @@ defmodule Arbor.AI.AcpSessionTest do
       assert providers[:gemini] == :native
       assert providers[:claude] == :adapted
       assert providers[:codex] == :adapted
+      # cursor-agent speaks ACP natively (`cursor-agent acp`) — no adapter shim.
+      assert providers[:cursor] == :native
+    end
+  end
+
+  describe "Config.resolve/2 for cursor (native ACP)" do
+    test "resolves to a bare command, not an adapter transport" do
+      assert {:ok, opts} = Config.resolve(:cursor, [])
+      assert Keyword.get(opts, :command) == ["cursor-agent", "acp"]
+      refute Keyword.has_key?(opts, :adapter)
+      refute Keyword.has_key?(opts, :transport_mod)
+    end
+
+    test "is not adapted" do
+      refute Config.adapted?(:cursor)
     end
   end
 

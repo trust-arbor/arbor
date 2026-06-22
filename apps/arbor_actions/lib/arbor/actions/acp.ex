@@ -36,7 +36,7 @@ defmodule Arbor.Actions.Acp do
   Capability URIs follow the pattern `arbor://acp/tool`.
   """
 
-  @allowed_providers [:claude, :codex, :gemini, :opencode, :goose]
+  @allowed_providers [:claude, :codex, :gemini, :opencode, :goose, :cursor]
 
   # ── Shared Helpers ──
 
@@ -129,7 +129,7 @@ defmodule Arbor.Actions.Acp do
 
     | Name | Type | Required | Description |
     |------|------|----------|-------------|
-    | `provider` | string | yes | Provider: claude, codex, gemini, opencode, goose |
+    | `provider` | string | yes | Provider: claude, codex, gemini, opencode, goose, cursor |
     | `model` | string | no | Model override |
     | `cwd` | string | no | Working directory for the session |
     | `session_id` | string | no | Resume an existing session by ID |
@@ -146,7 +146,7 @@ defmodule Arbor.Actions.Acp do
         provider: [
           type: :string,
           required: true,
-          doc: "Provider: claude, codex, gemini, opencode, goose"
+          doc: "Provider: claude, codex, gemini, opencode, goose, cursor"
         ],
         model: [
           type: :string,
@@ -175,7 +175,7 @@ defmodule Arbor.Actions.Acp do
     alias Arbor.Actions.Acp
     alias Arbor.Common.SafeAtom
 
-    @allowed_providers [:claude, :codex, :gemini, :opencode, :goose]
+    @allowed_providers [:claude, :codex, :gemini, :opencode, :goose, :cursor]
 
     def taint_roles do
       %{
