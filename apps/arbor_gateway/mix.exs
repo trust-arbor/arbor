@@ -33,6 +33,8 @@ defmodule ArborGateway.MixProject do
       {:arbor_trust, in_umbrella: true},
       {:plug, "~> 1.14"},
       {:plug_cowboy, "~> 2.6"},
+      # WebSocket upgrade for the chat API (Plug.Cowboy + WebSock behaviour).
+      {:websock_adapter, "~> 0.5"},
       {:jason, "~> 1.4"},
       {:ex_mcp, "1.0.0-rc.1", override: true},
       {:zoi, "~> 0.17"},

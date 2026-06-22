@@ -48,6 +48,9 @@ defmodule Arbor.Gateway.Router do
   forward("/api/bridge", to: Arbor.Gateway.Bridge.Router)
   forward("/api/memory", to: Arbor.Gateway.Memory.Router)
   forward("/api/signals", to: Arbor.Gateway.Signals.Router)
+  # Streaming chat for external clients (TUI, mobile): WS upgrade at
+  # /api/chat/socket — see 0-inbox/gateway-chat-api.md.
+  forward("/api/chat", to: Arbor.Gateway.Chat.Router)
   # H4: Dev eval endpoint only compiled into dev/test builds
   if Mix.env() in [:dev, :test] do
     forward("/api/dev", to: Arbor.Gateway.Dev.Router)
