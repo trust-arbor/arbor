@@ -165,12 +165,16 @@ defmodule Arbor.Orchestrator.Session.Persistence do
     if persist_entry do
       Task.start(fn ->
         try do
-          # Persist user message entry
+          # Persist user message entry. The engagement_id stamps which
+          # conversation this turn belongs to (single-mind model: one agent, many
+          # engagements) — the provenance that makes per-engagement history and
+          # "show me my conversations" queryable.
           persist_entry.(%{
             entry_type: "user",
             role: "user",
             content: wrap_content(user_msg["content"]),
-            timestamp: user_sent_at
+            timestamp: user_sent_at,
+            metadata: engagement_metadata(state)
           })
 
           # Assistant entry from the typed AssistantMessage envelope — typed
@@ -207,16 +211,25 @@ defmodule Arbor.Orchestrator.Session.Persistence do
   # the interrupted_reason for the non-complete cases. Lives in metadata so no
   # SessionEntry schema change is needed.
   defp assistant_entry_metadata(state, assistant_message) do
-    base = %{
-      "turn_count" => ContextBuilder.get_turn_count(state) + 1,
-      "status" => to_string(assistant_message.status)
-    }
+    base =
+      %{
+        "turn_count" => ContextBuilder.get_turn_count(state) + 1,
+        "status" => to_string(assistant_message.status)
+      }
+      |> Map.merge(engagement_metadata(state))
 
     if assistant_message.status != :complete and not is_nil(assistant_message.interrupted_reason) do
       Map.put(base, "interrupted_reason", inspect(assistant_message.interrupted_reason))
     else
       base
     end
+  end
+
+  # Engagement provenance stamped on every persisted entry. nil for the default
+  # (back-compat single conversation); a real id once an adapter resolves and
+  # tags an engagement.
+  defp engagement_metadata(state) do
+    %{"engagement_id" => Map.get(state, :current_engagement_id)}
   end
 
   @doc false

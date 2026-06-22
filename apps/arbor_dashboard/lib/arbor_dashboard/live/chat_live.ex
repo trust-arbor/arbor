@@ -1144,6 +1144,29 @@ defmodule Arbor.Dashboard.Live.ChatLive do
   # Sends a regular (non-command) prompt through the existing async query
   # path. Extracted from handle_event("send-message") so the slash command
   # branch and the prompt branch are visually parallel.
+  # Resolve the :user-scoped engagement for this (agent, human) pair — one
+  # continuous conversation per user↔agent that resumes across tabs/devices — and
+  # tag the message so the single-mind Session keys its transcript + persisted-entry
+  # provenance on it. Best-effort: if the store/agent isn't available, fall back to
+  # the agent's default conversation (engagement_id stays nil = today's behavior).
+  defp tag_engagement(user_message, socket) do
+    agent_id = socket.assigns[:agent_id]
+    user_id = approval_actor_id(socket)
+
+    with true <- is_binary(agent_id),
+         true <- Code.ensure_loaded?(Arbor.Comms.EngagementStore),
+         {:ok, engagement} <-
+           Arbor.Comms.EngagementStore.resolve_or_create(agent_id, user_id,
+             scope: :user,
+             visibility: :private,
+             owner_tenant: user_id
+           ) do
+      Arbor.Contracts.Session.UserMessage.with_engagement(user_message, engagement.id)
+    else
+      _ -> user_message
+    end
+  end
+
   defp send_prompt(input, socket) do
     if socket.assigns.loading do
       Logger.debug("[ChatLive] Ignoring send-message — query already in flight")
@@ -1154,6 +1177,7 @@ defmodule Arbor.Dashboard.Live.ChatLive do
           input,
           socket.assigns[:current_agent_id]
         )
+        |> tag_engagement(socket)
 
       user_msg = %{
         id: "msg-#{System.unique_integer([:positive])}",

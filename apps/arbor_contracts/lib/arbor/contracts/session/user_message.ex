@@ -70,6 +70,12 @@ defmodule Arbor.Contracts.Session.UserMessage do
     field(:sender_id, String.t() | nil)
     field(:transport, transport())
     field(:transport_metadata, map(), default: %{})
+    # The conversation this message belongs to (single-mind model: one agent,
+    # many engagements). nil = the agent's default/back-compat conversation. The
+    # adapter resolves the engagement (e.g. EngagementStore.resolve_or_create) and
+    # tags it via `with_engagement/2`; Session keys the per-conversation transcript
+    # + checkpoint on it.
+    field(:engagement_id, String.t() | nil)
   end
 
   # ============================================================================
@@ -98,6 +104,18 @@ defmodule Arbor.Contracts.Session.UserMessage do
       content: content,
       sent_at: DateTime.utc_now()
     }
+  end
+
+  @doc """
+  Tag a message with the engagement (conversation) it belongs to.
+
+  Adapters resolve the engagement at intake (e.g. via
+  `Arbor.Comms.EngagementStore.resolve_or_create/3`) and attach it after building
+  the message with their transport constructor.
+  """
+  @spec with_engagement(t(), String.t() | nil) :: t()
+  def with_engagement(%__MODULE__{} = msg, engagement_id) do
+    %{msg | engagement_id: engagement_id}
   end
 
   @doc """

@@ -83,6 +83,25 @@ defmodule Arbor.Comms.EngagementStoreTest do
       assert length(ids) == 1
     end
 
+    test ":user scope gets a deterministic id stable across restarts (cleared store)" do
+      {:ok, e1} = EngagementStore.resolve_or_create("agent_a", "user_1", scope: :user)
+
+      # Simulate a restart: the ETS store is cleared, but resolution must yield the
+      # SAME engagement_id (so engagement-stamped history stays consistent).
+      for t <- [:arbor_engagements, :arbor_engagement_index], do: :ets.delete_all_objects(t)
+
+      {:ok, e2} = EngagementStore.resolve_or_create("agent_a", "user_1", scope: :user)
+      assert e2.id == e1.id
+      assert String.starts_with?(e1.id, "eng_")
+    end
+
+    test ":channel scope ids are random (not stable across a cleared store)" do
+      {:ok, e1} = EngagementStore.resolve_or_create("agent_a", "chan_1", scope: :channel)
+      for t <- [:arbor_engagements, :arbor_engagement_index], do: :ets.delete_all_objects(t)
+      {:ok, e2} = EngagementStore.resolve_or_create("agent_a", "chan_1", scope: :channel)
+      refute e2.id == e1.id
+    end
+
     test "recreates if the index points at a deleted engagement (stale index)" do
       {:ok, e1} = EngagementStore.resolve_or_create("agent_a", "chan_1")
       # Delete only the record, leaving a dangling index entry behind.
