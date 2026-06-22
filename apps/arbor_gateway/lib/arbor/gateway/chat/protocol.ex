@@ -65,5 +65,6 @@ defmodule Arbor.Gateway.Chat.Protocol do
   defp enc(map), do: Jason.encode!(map)
 
   defp stringify(r) when is_binary(r), do: r
+  defp stringify(r) when is_atom(r), do: Atom.to_string(r)
   defp stringify(r), do: inspect(r)
 end

@@ -41,7 +41,7 @@ defmodule Arbor.Gateway.Chat.Socket do
   # ── Commands ──────────────────────────────────────────────────────
 
   defp handle_command({:attach, %{agent_id: agent_id}}, state) when is_binary(agent_id) do
-    case bridge_call(Arbor.Comms.EngagementStore, :resolve_or_create, [
+    case bridge_call(engagement_store(), :resolve_or_create, [
            agent_id,
            state.principal,
            [scope: :user, visibility: :private, owner_tenant: state.principal]
@@ -74,7 +74,7 @@ defmodule Arbor.Gateway.Chat.Socket do
   end
 
   defp handle_command(:cancel, %{agent_id: agent_id} = state) when is_binary(agent_id) do
-    _ = bridge_call(Arbor.Agent.Manager, :cancel_turn, [agent_id])
+    _ = bridge_call(agent_manager(), :cancel_turn, [agent_id])
     {:ok, state}
   end
 
@@ -82,7 +82,7 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   defp handle_command(:list_engagements, %{agent_id: agent_id} = state)
        when is_binary(agent_id) do
-    case bridge_call(Arbor.Comms.EngagementStore, :list_for_agent, [agent_id]) do
+    case bridge_call(engagement_store(), :list_for_agent, [agent_id]) do
       {:ok, list} when is_list(list) ->
         push({:engagements, Enum.map(list, &%{id: &1.id, visibility: &1.visibility})}, state)
 
@@ -135,10 +135,11 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   defp subscribe_signals(state) do
     socket = self()
+    mod = signals_mod()
 
-    if Code.ensure_loaded?(Arbor.Signals) do
+    if Code.ensure_loaded?(mod) and function_exported?(mod, :subscribe, 2) do
       try do
-        Arbor.Signals.subscribe("agent.*", fn signal -> send(socket, {:chat_signal, signal}) end)
+        apply(mod, :subscribe, ["agent.*", fn signal -> send(socket, {:chat_signal, signal}) end])
       rescue
         _ -> :ok
       end
@@ -173,11 +174,10 @@ defmodule Arbor.Gateway.Chat.Socket do
   # ── Agent turn (runtime indirection) ──────────────────────────────
 
   defp query_agent(agent_id, engagement_id, text) do
-    with {:ok, {:ok, pid, meta}} <-
-           {:ok, bridge_value(Arbor.Agent.Manager, :find_agent, [agent_id])},
+    with {:ok, pid, meta} <- bridge_value(agent_manager(), :find_agent, [agent_id]),
          host_pid when is_pid(host_pid) <- meta[:host_pid] || pid,
          user_message <- build_user_message(text, engagement_id) do
-      bridge_value(Arbor.Agent.APIAgent, :query, [host_pid, user_message])
+      bridge_value(agent_query(), :query, [host_pid, user_message])
     else
       _ -> {:error, :agent_not_found}
     end
@@ -224,4 +224,18 @@ defmodule Arbor.Gateway.Chat.Socket do
   defp bridge_value(module, function, args) do
     if Code.ensure_loaded?(module), do: apply(module, function, args), else: :not_available
   end
+
+  # Cross-app collaborators, config-resolved (real modules by default) so tests
+  # can inject fakes — same pattern as the engagement persistence backend.
+  defp engagement_store,
+    do: Application.get_env(:arbor_gateway, :chat_engagement_store, Arbor.Comms.EngagementStore)
+
+  defp agent_manager,
+    do: Application.get_env(:arbor_gateway, :chat_agent_manager, Arbor.Agent.Manager)
+
+  defp agent_query,
+    do: Application.get_env(:arbor_gateway, :chat_agent_query, Arbor.Agent.APIAgent)
+
+  defp signals_mod,
+    do: Application.get_env(:arbor_gateway, :chat_signals, Arbor.Signals)
 end
