@@ -136,7 +136,18 @@ defmodule Arbor.Orchestrator.Session do
     turn_user_message: nil,
     streaming_buffer: nil,
     turn_task_pid: nil,
-    turn_timeout_ref: nil
+    turn_timeout_ref: nil,
+    # Engagement multiplexing (single-mind model): one Session process per agent
+    # holds many conversations. `messages` is the ACTIVE engagement's transcript;
+    # `transcripts` stashes the others (engagement_id => [messages]);
+    # `current_engagement_id` names the active one (nil = the default/back-compat
+    # single conversation). Turns serialize through the one mind — a send arriving
+    # mid-turn is appended to `turn_queue` (FIFO across engagements) and run when
+    # the current turn finishes, rather than rejected. This preserves "one
+    # continuous experience" without dropping input.
+    current_engagement_id: nil,
+    transcripts: %{},
+    turn_queue: []
   ]
 
   @type phase :: :idle | :processing | :awaiting_tools | :awaiting_llm
@@ -470,49 +481,21 @@ defmodule Arbor.Orchestrator.Session do
     {:reply, {:error, :legacy_mode}, state}
   end
 
-  def handle_call({:send_message, _message}, _from, %{turn_in_flight: true} = state) do
-    {:reply, {:error, :turn_in_progress}, state}
+  # A send arriving mid-turn is QUEUED, not rejected. Single-mind serialization:
+  # the one mind finishes its current turn, then drains the queue in FIFO order
+  # (across all engagements). The caller's GenServer.call blocks until its turn
+  # actually runs and replies (via turn_from). Coerce here so the queued entry is
+  # already a typed envelope (carrying its engagement_id).
+  def handle_call({:send_message, message}, from, %{turn_in_flight: true} = state) do
+    user_message = coerce_user_message(message)
+    {:noreply, %{state | turn_queue: state.turn_queue ++ [{user_message, from}]}}
   end
 
   def handle_call({:send_message, message}, from, state) do
-    alias Arbor.Contracts.Session.UserMessage
-
-    # Coerce any incoming shape (bare string, %UserMessage{}, legacy map)
-    # into a UserMessage envelope at the entry boundary. This is the single
-    # point in the pipeline where we know the message has just arrived from
-    # an adapter, so it's the right place to capture `sent_at`. Bare-string
-    # callers fall through `from_string/1` which stamps `DateTime.utc_now/0`
-    # as the fallback — same behavior as before for them, but adapters that
-    # provide a richer envelope (dashboard, future Signal/Discord/Slack) get
-    # their real send time honored.
-    user_message =
-      case message do
-        %UserMessage{} = um -> um
-        bin when is_binary(bin) -> UserMessage.from_string(bin)
-        # Legacy map shape — extract content if possible, fall back to inspect/0
-        %{"content" => c} when is_binary(c) -> UserMessage.from_string(c)
-        %{content: c} when is_binary(c) -> UserMessage.from_string(c)
-        other -> UserMessage.from_string(inspect(other))
-      end
-
-    # Slash commands no longer intercepted here. As of 2026-04-09 (slash
-    # commands v2 / CRC refactor), every entry point — dashboard ChatLive,
-    # arbor_comms.MessageHandler, future ACP/CLI — is responsible for parsing
-    # commands at its OWN intake layer via Arbor.Common.CommandIntake.handle/3.
-    # By the time a message reaches Session.send_message, it has already been
-    # classified as a regular prompt, not a command.
-    #
-    # Session is back to being a pure agent-runtime container with no UI or
-    # CommandRouter knowledge. If a "/foo" string somehow reaches Session
-    # anyway (entry point forgot to pre-parse), it will simply be forwarded to
-    # the LLM as a regular prompt — which is the right defensive behavior.
-    case authorize_orchestrator(state) do
-      :ok ->
-        do_send_message_async(user_message, from, state)
-
-      {:error, reason} ->
-        {:reply, {:error, {:unauthorized, reason}}, state}
-    end
+    # Slash commands are parsed at each adapter's intake (CommandIntake), not
+    # here; by the time a message reaches Session it has been classified as a
+    # regular prompt. Session stays a pure runtime container.
+    message |> coerce_user_message() |> start_turn(from, state)
   end
 
   def handle_call(:get_state, _from, state) do
@@ -531,6 +514,8 @@ defmodule Arbor.Orchestrator.Session do
     if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
     if is_pid(state.turn_task_pid), do: Process.exit(state.turn_task_pid, :kill)
 
+    # Cancelling the active turn frees the mind — let queued turns proceed.
+    send(self(), :drain_queue)
     {:reply, :ok, reset_turn(new_state)}
   end
 
@@ -708,7 +693,17 @@ defmodule Arbor.Orchestrator.Session do
     end
   end
 
+  # Drain the next queued turn once the current one has finished. Triggered as a
+  # self-message from reset_and_drain/1 (so turn_in_flight is already cleared).
+  # Idempotent: a no-op if a turn is somehow still in flight or the queue is empty.
   @impl true
+  def handle_info(:drain_queue, %{turn_in_flight: true} = state), do: {:noreply, state}
+  def handle_info(:drain_queue, %{turn_queue: []} = state), do: {:noreply, state}
+
+  def handle_info(:drain_queue, %{turn_queue: [{user_message, from} | rest]} = state) do
+    start_turn(user_message, from, %{state | turn_queue: rest})
+  end
+
   def handle_info(
         {:turn_result, %Arbor.Contracts.Session.UserMessage{} = user_message, {:ok, result}},
         state
@@ -784,7 +779,7 @@ defmodule Arbor.Orchestrator.Session do
 
     # Normal completion: apply_turn_result already persisted the complete message,
     # so just clear the turn (incl. buffer + timeout).
-    {:noreply, reset_turn(new_state)}
+    reset_and_drain(new_state)
   end
 
   def handle_info({:turn_result, _user_message, {:error, reason}}, state) do
@@ -802,7 +797,7 @@ defmodule Arbor.Orchestrator.Session do
     if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
     if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
 
-    {:noreply, reset_turn(new_state)}
+    reset_and_drain(new_state)
   end
 
   # Handle Task DOWN messages
@@ -829,7 +824,7 @@ defmodule Arbor.Orchestrator.Session do
         safe_reply(state.turn_from, {:error, {:turn_task_crashed, reason}})
         if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
 
-        {:noreply, reset_turn(new_state)}
+        reset_and_drain(new_state)
 
       not is_nil(state.turn_caller_ref) and ref == state.turn_caller_ref ->
         # Caller died/timed out. Clear in-flight so future turns are accepted;
@@ -843,7 +838,7 @@ defmodule Arbor.Orchestrator.Session do
         if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
         new_state = transition_phase(state, :processing, :complete, :idle)
 
-        {:noreply, reset_turn(new_state)}
+        reset_and_drain(new_state)
 
       true ->
         {:noreply, state}
@@ -908,7 +903,7 @@ defmodule Arbor.Orchestrator.Session do
     if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
     if is_pid(state.turn_task_pid), do: Process.exit(state.turn_task_pid, :kill)
 
-    {:noreply, reset_turn(new_state)}
+    reset_and_drain(new_state)
   end
 
   # Stale timeout (turn already finished / a different turn now) — ignore.
@@ -955,6 +950,63 @@ defmodule Arbor.Orchestrator.Session do
 
   # Clear all in-flight turn state (incl. the stream buffer + user message) and
   # cancel the hung-task timeout. Used by every turn-end path.
+  # Coerce any incoming shape (bare string, %UserMessage{}, legacy map) into a
+  # UserMessage envelope at the entry boundary — the single point where we know
+  # the message just arrived from an adapter, so the right place to honor
+  # `sent_at` and carry the resolved `engagement_id`.
+  defp coerce_user_message(%Arbor.Contracts.Session.UserMessage{} = um), do: um
+
+  defp coerce_user_message(bin) when is_binary(bin),
+    do: Arbor.Contracts.Session.UserMessage.from_string(bin)
+
+  defp coerce_user_message(%{"content" => c}) when is_binary(c),
+    do: Arbor.Contracts.Session.UserMessage.from_string(c)
+
+  defp coerce_user_message(%{content: c}) when is_binary(c),
+    do: Arbor.Contracts.Session.UserMessage.from_string(c)
+
+  defp coerce_user_message(other),
+    do: Arbor.Contracts.Session.UserMessage.from_string(inspect(other))
+
+  # Switch the active engagement (single-mind model): stash the current
+  # transcript under its id, load the target's (empty list on first contact).
+  # No-op when the target is nil (the default/back-compat conversation) or is
+  # already active. `messages` always holds the ACTIVE engagement's transcript,
+  # so the turn loop / SessionCore / Builders / ContextBuilder need no changes.
+  defp maybe_switch_engagement(state, nil), do: state
+  defp maybe_switch_engagement(%{current_engagement_id: target} = state, target), do: state
+
+  defp maybe_switch_engagement(state, target) do
+    stashed = Map.put(state.transcripts, state.current_engagement_id, state.messages)
+    {target_msgs, stashed} = Map.pop(stashed, target, [])
+    %{state | messages: target_msgs, transcripts: stashed, current_engagement_id: target}
+  end
+
+  # Authorize, then start the turn — shared by direct sends and queue drains.
+  # Replies are sent explicitly (GenServer.reply) so this returns {:noreply, _}
+  # uniformly, matching do_send_message_async (which replies later from the turn
+  # task). On auth failure the caller is told and the session stays idle.
+  defp start_turn(user_message, from, state) do
+    state = maybe_switch_engagement(state, user_message.engagement_id)
+
+    case authorize_orchestrator(state) do
+      :ok ->
+        do_send_message_async(user_message, from, state)
+
+      {:error, reason} ->
+        safe_reply(from, {:error, {:unauthorized, reason}})
+        {:noreply, state}
+    end
+  end
+
+  # End the current turn and trigger draining of any queued turns. The drain runs
+  # as a self-message after this handler returns (turn_in_flight already cleared
+  # by reset_turn), so the next queued turn starts cleanly.
+  defp reset_and_drain(state) do
+    send(self(), :drain_queue)
+    {:noreply, reset_turn(state)}
+  end
+
   defp reset_turn(state) do
     cancel_turn_timeout(state)
 

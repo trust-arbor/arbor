@@ -130,7 +130,12 @@ defmodule Arbor.Comms.EngagementStore do
   end
 
   defp create_and_claim(agent_id, resolution_key, opts) do
-    engagement = Engagement.new(Keyword.put(opts, :agent_id, agent_id))
+    opts =
+      opts
+      |> Keyword.put(:agent_id, agent_id)
+      |> maybe_stable_id(agent_id, resolution_key)
+
+    engagement = Engagement.new(opts)
 
     # Atomic test-and-set: only the first caller to claim the index slot wins.
     if :ets.insert_new(@index, {{agent_id, resolution_key}, engagement.id}) do
@@ -167,6 +172,25 @@ defmodule Arbor.Comms.EngagementStore do
       {:error, :not_found} = err ->
         err
     end
+  end
+
+  # :user / :role engagements are durable, addressable conversations — the same
+  # (agent, resolution_key) MUST resolve to the same engagement_id across restarts
+  # so engagement-stamped history stays consistent. The ETS index is cleared on
+  # restart, but a deterministic id regenerates identically, giving stable ids
+  # without requiring the store to be persisted yet (the Postgres follow-up).
+  # :channel scope stays random (ephemeral, 1:1).
+  defp maybe_stable_id(opts, agent_id, resolution_key) do
+    if Keyword.get(opts, :scope) in [:user, :role] and is_nil(Keyword.get(opts, :id)) do
+      Keyword.put(opts, :id, deterministic_id(agent_id, resolution_key))
+    else
+      opts
+    end
+  end
+
+  defp deterministic_id(agent_id, resolution_key) do
+    digest = :crypto.hash(:sha256, "#{agent_id}|#{inspect(resolution_key)}")
+    "eng_" <> (digest |> Base.encode16(case: :lower) |> binary_part(0, 32))
   end
 
   defp ensure_tables do

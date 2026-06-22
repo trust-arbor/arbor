@@ -1248,6 +1248,54 @@ defmodule Arbor.Orchestrator.SessionTest do
       assert state.turn_count == 2
     end
 
+    test "engagement-tagged messages keep isolated transcripts (single-mind model)" do
+      alias Arbor.Contracts.Session.UserMessage
+      {pid, tmp_dir} = start_session([])
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        File.rm_rf(tmp_dir)
+      end)
+
+      send_to = fn eng, text ->
+        msg = UserMessage.from_string(text) |> UserMessage.with_engagement(eng)
+        assert {:ok, _} = Arbor.Orchestrator.Session.send_message(pid, msg)
+      end
+
+      send_to.("eng_a", "hello from A")
+      send_to.("eng_b", "hello from B")
+
+      state = Arbor.Orchestrator.Session.get_state(pid)
+
+      # The active engagement is the last one we talked to; the other's transcript
+      # is stashed (isolated), not lost or merged.
+      assert state.current_engagement_id == "eng_b"
+      assert Map.has_key?(state.transcripts, "eng_a")
+      assert state.transcripts["eng_a"] != []
+
+      # Switching back to A restores A's transcript and stashes B's.
+      send_to.("eng_a", "back to A")
+      state = Arbor.Orchestrator.Session.get_state(pid)
+      assert state.current_engagement_id == "eng_a"
+      assert Map.has_key?(state.transcripts, "eng_b")
+      # A's active transcript carries its earlier turn, not B's.
+      refute state.messages == state.transcripts["eng_b"]
+    end
+
+    test "untagged messages use the default conversation (engagement_id stays nil)" do
+      {pid, tmp_dir} = start_session([])
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        File.rm_rf(tmp_dir)
+      end)
+
+      assert {:ok, _} = Arbor.Orchestrator.Session.send_message(pid, "no engagement")
+      state = Arbor.Orchestrator.Session.get_state(pid)
+      assert state.current_engagement_id == nil
+      assert state.transcripts == %{}
+    end
+
     @tag :spike
     test "turn task crash recovery" do
       {pid, tmp_dir} = start_session([])
