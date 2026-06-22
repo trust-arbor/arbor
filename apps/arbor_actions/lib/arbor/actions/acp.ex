@@ -36,9 +36,31 @@ defmodule Arbor.Actions.Acp do
   Capability URIs follow the pattern `arbor://acp/tool`.
   """
 
-  @allowed_providers [:claude, :codex, :gemini, :opencode, :goose, :cursor]
+  # Fallback allowlist used only when the Arbor.AI ACP catalog can't be reached
+  # (e.g. arbor_ai not loaded). The authoritative list is the runtime catalog —
+  # see allowed_providers/0. Adding an agent to `config :arbor_ai, :acp_providers`
+  # is sufficient; this literal is just a degraded-mode safety net.
+  @fallback_providers [:claude, :codex, :gemini, :opencode, :goose, :cursor]
 
   # ── Shared Helpers ──
+
+  @doc """
+  The authoritative ACP provider allowlist, derived from the `Arbor.AI` catalog
+  (native + adapted + `:acp_providers` config overrides). Falls back to a static
+  well-known set if the catalog can't be reached.
+  """
+  @spec allowed_providers() :: [atom()]
+  def allowed_providers do
+    # credo:disable-for-next-line Credo.Check.Refactor.Apply
+    case apply(Arbor.AI, :acp_providers, []) do
+      [_ | _] = providers -> providers
+      _ -> @fallback_providers
+    end
+  rescue
+    _ -> @fallback_providers
+  catch
+    _, _ -> @fallback_providers
+  end
 
   @doc false
   def acp_available? do
@@ -90,7 +112,7 @@ defmodule Arbor.Actions.Acp do
   def format_error(:session_not_found), do: "Session not found or process is dead"
 
   def format_error({:invalid_provider, p}),
-    do: "Unknown provider '#{p}'. Valid: #{inspect(@allowed_providers)}"
+    do: "Unknown provider '#{p}'. Valid: #{inspect(allowed_providers())}"
 
   def format_error(reason) when is_binary(reason), do: reason
   def format_error(reason), do: "ACP error: #{inspect(reason)}"
@@ -175,8 +197,6 @@ defmodule Arbor.Actions.Acp do
     alias Arbor.Actions.Acp
     alias Arbor.Common.SafeAtom
 
-    @allowed_providers [:claude, :codex, :gemini, :opencode, :goose, :cursor]
-
     def taint_roles do
       %{
         provider: :control,
@@ -221,14 +241,19 @@ defmodule Arbor.Actions.Acp do
     end
 
     defp normalize_provider(provider) when is_binary(provider) do
-      case SafeAtom.to_allowed(provider, @allowed_providers) do
+      case SafeAtom.to_allowed(provider, Acp.allowed_providers()) do
         {:ok, atom} -> {:ok, atom}
         {:error, _} -> {:error, {:invalid_provider, provider}}
       end
     end
 
-    defp normalize_provider(provider) when is_atom(provider) and provider in @allowed_providers,
-      do: {:ok, provider}
+    defp normalize_provider(provider) when is_atom(provider) do
+      if provider in Acp.allowed_providers() do
+        {:ok, provider}
+      else
+        {:error, {:invalid_provider, inspect(provider)}}
+      end
+    end
 
     defp normalize_provider(provider),
       do: {:error, {:invalid_provider, inspect(provider)}}

@@ -214,6 +214,27 @@ defmodule Arbor.Actions.AcpTest do
     end
   end
 
+  describe "allowed_providers/0 (catalog-derived, no static drift)" do
+    test "derives the allowlist from the Arbor.AI ACP catalog" do
+      providers = Acp.allowed_providers()
+      assert is_list(providers)
+      assert Enum.all?(providers, &is_atom/1)
+      # Catalog == authoritative source. Compare against the facade directly.
+      assert MapSet.new(providers) == MapSet.new(Arbor.AI.acp_providers())
+    end
+
+    test "includes config-only providers the old static list missed (grok)" do
+      # `grok` is registered purely via `config :arbor_ai, :acp_providers` in
+      # config/config.exs — it was never in the hardcoded @allowed_providers, so
+      # the action layer used to reject it. Deriving from the catalog fixes that.
+      assert :grok in Acp.allowed_providers()
+    end
+
+    test "includes cursor (native ACP provider)" do
+      assert :cursor in Acp.allowed_providers()
+    end
+  end
+
   describe "resolve_pid/1" do
     test "passes through actual PIDs" do
       assert Acp.resolve_pid(self()) == self()
