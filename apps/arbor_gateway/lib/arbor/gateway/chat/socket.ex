@@ -11,9 +11,11 @@ defmodule Arbor.Gateway.Chat.Socket do
   level) goes through `bridge_call/3` runtime indirection — the same seam
   `Arbor.Gateway.MCP.Handler` uses; no compile-time deps added.
 
-  NOTE: the WebSocket transport is not yet covered by an end-to-end test (needs a
-  WS test client). The pure protocol (`Protocol`) is unit-tested; this shell wires
-  it to the agent + signal bus.
+  Testing: the handler is covered frame-level by `socket_test.exs` (real callbacks,
+  fakes for collaborators), and the cowboy WS upgrade + SignedRequest auth + frame
+  round-trip were validated by a live `Mint.WebSocket` smoke (which caught the
+  pending-approval gate bug → the capability-presence gate below). The standing
+  live-transport integration test will be the escript + term_ui client.
   """
 
   @behaviour WebSock
