@@ -18,6 +18,30 @@ defmodule Arbor.AI.AcpSession.Config do
         }
       }
 
+  ## Native agent env / args (static config)
+
+  Native ACP agents (a bare `command:`) accept optional operator-configured
+  `env:` and `args:`, useful for agents that can talk to multiple backends or
+  need an API key / endpoint without a separate external login step:
+
+      config :arbor_ai, :acp_providers, %{
+        cursor: %{
+          command: ["cursor-agent", "acp"],
+          # `args` are appended to the spawned command list:
+          args: ["--model", "claude-4-sonnet"],
+          # `env` values may be literals OR {:system, "VAR"} references resolved
+          # from the OS env at spawn — the by-reference form keeps secrets out of
+          # this config file AND the JSON engine context. Unset refs are dropped
+          # with a logged warning.
+          env: [{"CURSOR_API_KEY", {:system, "CURSOR_API_KEY"}}]
+        }
+      }
+
+  External authentication (e.g. `cursor-agent login`) remains the default —
+  `env`/`args` are purely additive overrides. They are **static-config only**:
+  per-launch / secret-bearing launch options are taint- and reference-gated and
+  tracked separately (roadmap: acp-launch-options-and-secrets).
+
   ## Claude adapter
 
   Uses `ExMCP.ACP.Adapters.ClaudeSDK` — the SDK-protocol-based adapter
@@ -30,6 +54,8 @@ defmodule Arbor.AI.AcpSession.Config do
   config, partial tool-call lifecycle events, plan updates, and the
   stdio permission prompt control channel used by the HITL bridge.
   """
+
+  require Logger
 
   @native_providers %{
     gemini: %{command: ["gemini", "--experimental-acp"]},
@@ -248,8 +274,14 @@ defmodule Arbor.AI.AcpSession.Config do
   defp merge_opts(provider_config, opts) do
     base =
       case provider_config do
-        %{command: command} ->
-          [command: command]
+        %{command: command} = native ->
+          # Static-config-only env/args for native agents (the stdio transport,
+          # ExMCP.Transport.Stdio, reads top-level :command/:cd/:env). These come
+          # from the operator-trusted provider config — NOT from per-launch opts.
+          # Per-launch / secret-bearing options are taint- and reference-gated and
+          # deferred — see .arbor/roadmap inbox acp-launch-options-and-secrets.
+          [command: append_args(command, Map.get(native, :args))]
+          |> put_static_env(Map.get(native, :env))
 
         %{transport_mod: mod, adapter: adapter} ->
           adapter_opts =
@@ -259,7 +291,10 @@ defmodule Arbor.AI.AcpSession.Config do
           [transport_mod: mod, adapter: adapter, adapter_opts: adapter_opts]
       end
 
-    # Forward non-adapter opts
+    # Forward non-adapter opts. NOTE: :env/:args are intentionally absent — they
+    # are static-config-only for native agents (above), so a caller can't inject
+    # launch env/flags into a spawned coding agent. Per-launch model selection is
+    # handled at the ACP layer (AcpSession.maybe_select_model/3), not here.
     forward_keys = [:model, :system_prompt, :cwd, :timeout, :name, :event_listener]
 
     Enum.reduce(forward_keys, base, fn key, acc ->
@@ -267,6 +302,50 @@ defmodule Arbor.AI.AcpSession.Config do
         nil -> acc
         value -> Keyword.put(acc, key, value)
       end
+    end)
+  end
+
+  # Append operator-configured extra CLI args to a native agent's command list.
+  # For native (stdio) agents, "args" are just extra elements of the :command
+  # list the transport spawns. Static config only.
+  defp append_args(command, nil), do: command
+  defp append_args(command, []), do: command
+
+  defp append_args(command, args) when is_list(args),
+    do: command ++ Enum.map(args, &to_string/1)
+
+  # Thread an operator-configured environment into the native stdio transport.
+  # Values may be literal strings or `{:system, "VAR"}` references resolved from
+  # the OS env at spawn — the by-reference form keeps secrets (API keys, tokens)
+  # out of both the arbor config file and the JSON engine context. An unset
+  # reference is dropped AND logged (fail-loud: never silently spawn with a
+  # missing/empty key, per the "ceilings that fail open are silent" rule).
+  defp put_static_env(client_opts, env) when env in [nil, []], do: client_opts
+
+  defp put_static_env(client_opts, env) when is_list(env) do
+    case resolve_env(env) do
+      [] -> client_opts
+      resolved -> Keyword.put(client_opts, :env, resolved)
+    end
+  end
+
+  defp resolve_env(env) do
+    Enum.flat_map(env, fn
+      {key, {:system, var}} ->
+        case System.get_env(var) do
+          nil ->
+            Logger.warning(
+              "ACP env #{inspect(key)} references unset OS var #{inspect(var)} — dropping it"
+            )
+
+            []
+
+          value ->
+            [{to_string(key), value}]
+        end
+
+      {key, value} ->
+        [{to_string(key), to_string(value)}]
     end)
   end
 end
