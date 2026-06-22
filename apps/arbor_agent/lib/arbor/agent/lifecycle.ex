@@ -86,6 +86,7 @@ defmodule Arbor.Agent.Lifecycle do
          :ok <- persist_signing_key(agent_id, identity),
          :ok <- grant_capabilities(agent_id, opts[:capabilities] || []),
          :ok <- grant_workspace_capabilities(agent_id, opts),
+         :ok <- grant_owner_chat_capability(agent_id, opts),
          :ok <- maybe_delegate_from_parent(agent_id, opts),
          {:ok, _pid} <- init_memory(agent_id, opts[:memory_opts] || []),
          :ok <- set_initial_goals(agent_id, opts[:initial_goals] || []),
@@ -890,6 +891,37 @@ defmodule Arbor.Agent.Lifecycle do
             :ok
         end
     end
+  end
+
+  # Owner-scoped chat: the human who created this agent may chat with it
+  # (`arbor://chat/agent/<agent_id>`), gating the Gateway chat API at attach. The
+  # cap is scoped to THIS agent, so it's multi-user-safe (you chat with your own
+  # agents, not everyone's). Best-effort — never fails agent creation; an
+  # auto/system-spawned agent with no creator principal gets no chat grant.
+  defp grant_owner_chat_capability(agent_id, opts) do
+    case extract_principal_id(opts) do
+      creator when is_binary(creator) ->
+        case Arbor.Security.grant(principal: creator, resource: "arbor://chat/agent/#{agent_id}") do
+          {:ok, _} ->
+            :ok
+
+          {:error, reason} ->
+            Logger.warning(
+              "[Lifecycle] owner chat grant failed for #{agent_id}: #{inspect(reason)}"
+            )
+
+            :ok
+        end
+
+      _ ->
+        :ok
+    end
+  rescue
+    e ->
+      Logger.warning("[Lifecycle] owner chat grant raised: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp grant_capabilities(_agent_id, []), do: :ok
