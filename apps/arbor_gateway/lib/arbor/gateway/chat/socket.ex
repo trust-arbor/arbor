@@ -105,15 +105,23 @@ defmodule Arbor.Gateway.Chat.Socket do
     end
   end
 
-  # Fail-closed: only an explicit `{:ok, :authorized}` permits chat. Pending
-  # approval, denial, or an unavailable security subsystem all deny.
+  # Fail-closed capability-PRESENCE check: does the principal hold a VALID
+  # capability authorizing arbor://chat/agent/<id>? Uses find_authorizing (checks
+  # expiry/not_before, resource match incl. wildcards, signature, delegation;
+  # revoked caps are gone from the store) rather than the full authorize/4
+  # pipeline. Deliberate: the owner-scoped grant (made at agent creation) IS the
+  # authorization — there's nothing to HITL-approve. The authorize/4 pipeline is
+  # for gating what an AGENT may DO (trust tiers + ApprovalGuard escalation), and
+  # the live smoke showed it escalates a human cap-holder to :pending_approval.
+  # The principal is already cryptographically authenticated at the WS upgrade
+  # (SignedRequestAuth); this is purely "do they hold the cap?". Output egress is
+  # gated at the message/notify layer, not inbound attach.
   defp authorized_to_chat?(principal, agent_id) do
-    case bridge_call(security_mod(), :authorize, [
+    case bridge_call(capability_store(), :find_authorizing, [
            principal,
-           "arbor://chat/agent/#{agent_id}",
-           :chat
+           "arbor://chat/agent/#{agent_id}"
          ]) do
-      {:ok, {:ok, :authorized}} -> true
+      {:ok, {:ok, _cap}} -> true
       _ -> false
     end
   end
@@ -264,6 +272,7 @@ defmodule Arbor.Gateway.Chat.Socket do
   defp signals_mod,
     do: Application.get_env(:arbor_gateway, :chat_signals, Arbor.Signals)
 
-  defp security_mod,
-    do: Application.get_env(:arbor_gateway, :chat_security, Arbor.Security)
+  defp capability_store,
+    do:
+      Application.get_env(:arbor_gateway, :chat_capability_store, Arbor.Security.CapabilityStore)
 end

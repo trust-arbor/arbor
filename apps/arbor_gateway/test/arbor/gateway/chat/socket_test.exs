@@ -32,12 +32,14 @@ defmodule Arbor.Gateway.Chat.SocketTest.FakeSignals do
   def subscribe(_pattern, _handler), do: :ok
 end
 
+# The chat gate is a capability-presence check (find_authorizing), so the fakes
+# stand in for the CapabilityStore: Allow = holds a valid cap, Deny = none.
 defmodule Arbor.Gateway.Chat.SocketTest.AllowSecurity do
-  def authorize(_principal, _uri, _action), do: {:ok, :authorized}
+  def find_authorizing(_principal, _uri), do: {:ok, :cap}
 end
 
 defmodule Arbor.Gateway.Chat.SocketTest.DenySecurity do
-  def authorize(_principal, _uri, _action), do: {:error, :no_capability}
+  def find_authorizing(_principal, _uri), do: {:error, :not_found}
 end
 
 defmodule Arbor.Gateway.Chat.SocketTest do
@@ -60,7 +62,7 @@ defmodule Arbor.Gateway.Chat.SocketTest do
     Application.put_env(:arbor_gateway, :chat_agent_manager, FakeManager)
     Application.put_env(:arbor_gateway, :chat_agent_query, FakeAPIAgent)
     Application.put_env(:arbor_gateway, :chat_signals, FakeSignals)
-    Application.put_env(:arbor_gateway, :chat_security, AllowSecurity)
+    Application.put_env(:arbor_gateway, :chat_capability_store, AllowSecurity)
 
     on_exit(fn ->
       for k <- [
@@ -68,7 +70,7 @@ defmodule Arbor.Gateway.Chat.SocketTest do
             :chat_agent_manager,
             :chat_agent_query,
             :chat_signals,
-            :chat_security
+            :chat_capability_store
           ] do
         Application.delete_env(:arbor_gateway, k)
       end
@@ -116,7 +118,7 @@ defmodule Arbor.Gateway.Chat.SocketTest do
     test "capability gate: an unauthorized principal cannot attach (fail-closed)", %{state: state} do
       Application.put_env(
         :arbor_gateway,
-        :chat_security,
+        :chat_capability_store,
         Arbor.Gateway.Chat.SocketTest.DenySecurity
       )
 
