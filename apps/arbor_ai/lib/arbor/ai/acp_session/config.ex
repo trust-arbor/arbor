@@ -38,7 +38,12 @@ defmodule Arbor.AI.AcpSession.Config do
     copilot: %{command: ["github-copilot", "--acp"]},
     kiro: %{command: ["kiro", "--acp"]},
     qwen_code: %{command: ["qwen-code", "--acp"]},
-    hermes: %{command: ["hermes", "acp"]}
+    hermes: %{command: ["hermes", "acp"]},
+    # Cursor CLI is a native ACP server: `cursor-agent acp` (stdio, JSON-RPC 2.0,
+    # newline-delimited). Auth out-of-band via `cursor-agent login`, or pass
+    # `CURSOR_API_KEY` / `CURSOR_AUTH_TOKEN` through adapter_opts[:env]. Modes:
+    # agent, plan, ask. Authenticate methodId is "cursor_login".
+    cursor: %{command: ["cursor-agent", "acp"]}
   }
 
   @adapted_providers %{
