@@ -74,6 +74,9 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   - `{:error, term()}` - Database error
   """
   @impl true
+  # Bounded optimistic-concurrency retry for the event_number race (see do_append).
+  @max_append_attempts 5
+
   def append(stream_id, events, opts \\ [])
 
   def append(stream_id, %Event{} = event, opts) do
@@ -81,6 +84,20 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   end
 
   def append(stream_id, events, opts) when is_list(events) do
+    do_append(stream_id, events, opts, 1)
+  end
+
+  # Concurrent appends to the SAME stream race on event_number assignment: the
+  # number is a read-modify-write (`max(event_number) + 1`) that no lock guards
+  # — and on a fresh stream there are no rows to lock — so two appends can read
+  # the same version, assign the same number, and the second violates the
+  # `events_stream_id_event_number_index` unique constraint. (Surfaced by
+  # heartbeat pipelines firing several durable signals concurrently to one
+  # per-run stream via Task.start.) This is expected for an append-only log;
+  # resolve it the standard event-store way — optimistic concurrency with a
+  # bounded retry. Each attempt re-reads the version in a fresh transaction, so
+  # it picks up the winner's committed event_number.
+  defp do_append(stream_id, events, opts, attempt) do
     repo = Keyword.get(opts, :repo, Repo)
     expected_version = Keyword.get(opts, :expected_version)
 
@@ -115,7 +132,25 @@ defmodule Arbor.Persistence.EventLog.Ecto do
       persisted
     end)
     |> handle_transaction_result()
+  rescue
+    e in Ecto.ConstraintError ->
+      # Retry only the event_number race, and only when the caller did NOT
+      # request a specific expected_version — optimistic-concurrency callers
+      # must observe the conflict, not have it silently resolved underneath them.
+      # (Body-scope bindings don't reach `rescue`; re-derive from `opts`.)
+      if is_nil(Keyword.get(opts, :expected_version)) and event_number_conflict?(e) and
+           attempt < @max_append_attempts do
+        do_append(stream_id, events, opts, attempt + 1)
+      else
+        reraise(e, __STACKTRACE__)
+      end
   end
+
+  defp event_number_conflict?(%Ecto.ConstraintError{} = e) do
+    String.contains?("#{e.constraint} #{Exception.message(e)}", "event_number")
+  end
+
+  defp event_number_conflict?(_), do: false
 
   @doc """
   Read events from a stream.
