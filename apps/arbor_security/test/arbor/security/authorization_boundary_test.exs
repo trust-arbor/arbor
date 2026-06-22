@@ -178,9 +178,7 @@ defmodule Arbor.Security.AuthorizationBoundaryTest do
         grant_capability(agent_id, "arbor://fs/read/**", delegation_depth: 2)
 
       result =
-        Security.delegate(cap.id, delegate_agent,
-          delegator_private_key: identity.private_key
-        )
+        Security.delegate(cap.id, delegate_agent, delegator_private_key: identity.private_key)
 
       case result do
         {:ok, delegated_cap} ->
@@ -202,9 +200,7 @@ defmodule Arbor.Security.AuthorizationBoundaryTest do
   describe "rate-limited capability" do
     test "rate limit constraint is enforced when configured", %{agent_id: agent_id} do
       {:ok, _cap} =
-        grant_capability(agent_id, "arbor://fs/read/**",
-          constraints: %{rate_limit: 2}
-        )
+        grant_capability(agent_id, "arbor://fs/read/**", constraints: %{rate_limit: 2})
 
       # First two calls should succeed
       assert {:ok, :authorized} = Security.authorize(agent_id, "arbor://fs/read/a.txt")
@@ -233,16 +229,18 @@ defmodule Arbor.Security.AuthorizationBoundaryTest do
       other_session = "session_other_#{:erlang.unique_integer([:positive])}"
 
       {:ok, _cap} =
-        grant_capability(agent_id, "arbor://fs/read/**",
-          session_id: session_id
-        )
+        grant_capability(agent_id, "arbor://fs/read/**", session_id: session_id)
 
       # Authorize with correct session
-      result = Security.authorize(agent_id, "arbor://fs/read/test.txt", nil, session_id: session_id)
+      result =
+        Security.authorize(agent_id, "arbor://fs/read/test.txt", nil, session_id: session_id)
+
       assert {:ok, :authorized} = result
 
       # Authorize with wrong session — should fail scope check
-      result = Security.authorize(agent_id, "arbor://fs/read/test.txt", nil, session_id: other_session)
+      result =
+        Security.authorize(agent_id, "arbor://fs/read/test.txt", nil, session_id: other_session)
+
       assert {:error, :scope_mismatch} = result
     end
   end
@@ -257,9 +255,7 @@ defmodule Arbor.Security.AuthorizationBoundaryTest do
       other_task = "task_other_#{:erlang.unique_integer([:positive])}"
 
       {:ok, _cap} =
-        grant_capability(agent_id, "arbor://fs/read/**",
-          task_id: task_id
-        )
+        grant_capability(agent_id, "arbor://fs/read/**", task_id: task_id)
 
       # Authorize with correct task
       result = Security.authorize(agent_id, "arbor://fs/read/test.txt", nil, task_id: task_id)
@@ -300,9 +296,7 @@ defmodule Arbor.Security.AuthorizationBoundaryTest do
       future = DateTime.add(DateTime.utc_now(), 3600, :second)
 
       {:ok, _cap} =
-        grant_capability(agent_id, "arbor://fs/read/**",
-          not_before: future
-        )
+        grant_capability(agent_id, "arbor://fs/read/**", not_before: future)
 
       result = Security.authorize(agent_id, "arbor://fs/read/test.txt")
 
@@ -314,9 +308,7 @@ defmodule Arbor.Security.AuthorizationBoundaryTest do
       past = DateTime.add(DateTime.utc_now(), -3600, :second)
 
       {:ok, _cap} =
-        grant_capability(agent_id, "arbor://fs/read/**",
-          not_before: past
-        )
+        grant_capability(agent_id, "arbor://fs/read/**", not_before: past)
 
       result = Security.authorize(agent_id, "arbor://fs/read/test.txt")
 
@@ -331,9 +323,7 @@ defmodule Arbor.Security.AuthorizationBoundaryTest do
   describe "max_uses enforcement" do
     test "capability with max_uses is consumed after limit", %{agent_id: agent_id} do
       {:ok, _cap} =
-        grant_capability(agent_id, "arbor://fs/read/**",
-          max_uses: 2
-        )
+        grant_capability(agent_id, "arbor://fs/read/**", max_uses: 2)
 
       # First two uses should succeed
       assert {:ok, :authorized} = Security.authorize(agent_id, "arbor://fs/read/a.txt")
@@ -398,6 +388,33 @@ defmodule Arbor.Security.AuthorizationBoundaryTest do
 
       # Should work again
       assert {:ok, :authorized} = Security.authorize(agent_id, "arbor://fs/read/test.txt")
+    end
+  end
+
+  # Owner-scoped chat (the Gateway chat-attach gate): a human granted
+  # arbor://chat/agent/<id> at agent-creation may chat with THAT agent only.
+  describe "owner-scoped chat capability" do
+    test "owner is authorized to chat with the agent they were granted", %{agent_id: human} do
+      target = "agent_target_#{:erlang.unique_integer([:positive])}"
+      {:ok, _} = grant_capability(human, "arbor://chat/agent/#{target}")
+
+      assert {:ok, :authorized} = Security.authorize(human, "arbor://chat/agent/#{target}", :chat)
+    end
+
+    test "without the grant, chat is denied (fail-closed)", %{agent_id: human} do
+      target = "agent_nope_#{:erlang.unique_integer([:positive])}"
+      assert {:error, _} = Security.authorize(human, "arbor://chat/agent/#{target}", :chat)
+    end
+
+    test "a chat grant for one agent does NOT authorize another (owner-scoped)", %{
+      agent_id: human
+    } do
+      a = "agent_a_#{:erlang.unique_integer([:positive])}"
+      b = "agent_b_#{:erlang.unique_integer([:positive])}"
+      {:ok, _} = grant_capability(human, "arbor://chat/agent/#{a}")
+
+      assert {:ok, :authorized} = Security.authorize(human, "arbor://chat/agent/#{a}", :chat)
+      assert {:error, _} = Security.authorize(human, "arbor://chat/agent/#{b}", :chat)
     end
   end
 end
