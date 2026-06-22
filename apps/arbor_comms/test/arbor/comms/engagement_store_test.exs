@@ -1,3 +1,33 @@
+# A fake durable store (ETS-backed) injected via :engagement_persistence_module,
+# so the write-through / recover-from-durable wiring is testable without a DB.
+defmodule Arbor.Comms.EngagementStoreTest.FakeDurable do
+  @t :fake_durable_engagements
+
+  def reset do
+    if :ets.whereis(@t) != :undefined, do: :ets.delete(@t)
+    :ets.new(@t, [:set, :public, :named_table])
+    :ok
+  end
+
+  def available?, do: :ets.whereis(@t) != :undefined
+
+  def upsert(%{id: id} = engagement) do
+    :ets.insert(@t, {id, engagement})
+    {:ok, engagement}
+  end
+
+  def get(id) do
+    case :ets.lookup(@t, id) do
+      [{_, engagement}] -> {:ok, engagement}
+      [] -> {:error, :not_found}
+    end
+  end
+
+  def list_for_agent(agent_id) do
+    :ets.tab2list(@t) |> Enum.map(&elem(&1, 1)) |> Enum.filter(&(&1.agent_id == agent_id))
+  end
+end
+
 defmodule Arbor.Comms.EngagementStoreTest do
   # async: false — the store is a process-wide ETS singleton (shared state).
   use ExUnit.Case, async: false
@@ -148,6 +178,48 @@ defmodule Arbor.Comms.EngagementStoreTest do
 
       {:ok, e2} = EngagementStore.resolve_or_create("agent_a", "chan_1")
       assert e2.id != e1.id
+    end
+  end
+
+  describe "durable backing (write-through + recover via injected store)" do
+    alias Arbor.Comms.EngagementStoreTest.FakeDurable
+
+    setup do
+      FakeDurable.reset()
+      Application.put_env(:arbor_comms, :engagement_persistence_module, FakeDurable)
+      on_exit(fn -> Application.delete_env(:arbor_comms, :engagement_persistence_module) end)
+      :ok
+    end
+
+    test "create writes through to the durable store" do
+      {:ok, e} = EngagementStore.resolve_or_create("agent_a", "user_1", scope: :user)
+      assert {:ok, ^e} = FakeDurable.get(e.id)
+    end
+
+    test "recovers from the durable store after the ETS cache is cleared (restart)" do
+      {:ok, e1} = EngagementStore.resolve_or_create("agent_a", "user_1", scope: :user)
+
+      # Simulate a restart: clear the ETS cache; the durable store retains it.
+      for t <- [:arbor_engagements, :arbor_engagement_index], do: :ets.delete_all_objects(t)
+
+      {:ok, e2} = EngagementStore.resolve_or_create("agent_a", "user_1", scope: :user)
+      assert e2.id == e1.id
+      # hydrated back into the ETS cache
+      assert {:ok, _} = EngagementStore.get(e2.id)
+    end
+
+    test "attach_channel writes through" do
+      {:ok, e} = EngagementStore.resolve_or_create("agent_a", "user_1", scope: :user)
+      {:ok, _} = EngagementStore.attach_channel(e.id, "chan_x")
+      assert {:ok, %{attached_channels: ["chan_x"]}} = FakeDurable.get(e.id)
+    end
+
+    test "list_for_agent reads from the durable store" do
+      {:ok, _} = EngagementStore.resolve_or_create("agent_a", "user_1", scope: :user)
+      {:ok, _} = EngagementStore.resolve_or_create("agent_a", "user_2", scope: :user)
+      {:ok, _} = EngagementStore.resolve_or_create("agent_b", "user_1", scope: :user)
+
+      assert length(EngagementStore.list_for_agent("agent_a")) == 2
     end
   end
 end

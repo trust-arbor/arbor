@@ -17,18 +17,21 @@ defmodule Arbor.Comms.EngagementStore do
   one of the open design questions in the plan doc). Resolution is race-safe via
   `:ets.insert_new` on the index.
 
-  ## Durability caveat (v1 — flagged follow-up)
+  ## Durability
 
-  This is an in-memory ETS store. One limit remains before it's load-bearing,
-  already in the plan ("ETS first, Postgres later"):
+  ETS is the fast in-memory cache/resolver; durability is delegated to
+  `Arbor.Persistence.EngagementStore`, reached by runtime indirection (no
+  compile-time dep on arbor_persistence — same seam `Arbor.Comms` uses for
+  `ChannelStore`). It writes through on create + attach/detach, recovers a record
+  from the durable store on a cache miss (so engagements survive a restart), and
+  backs `list_for_agent/1` ("show me my conversations"). The durable store routes
+  through `Arbor.Persistence.Repo`, which is adapter-aware — **SQLite3 by default,
+  PostgreSQL when configured** — so it uses whichever DB the install runs. All
+  best-effort: with persistence not running (ETS-only tests), the store works
+  purely in memory.
 
-    * **Persistence** — engagements are not yet persisted. `Arbor.Persistence`
-      gets an `EngagementStore` (mirroring `ChannelStore`) so engagements survive
-      a full restart and support "show me all my conversations" cross-device
-      queries. (Until then, an app restart loses in-memory engagements.)
-
-  Table ownership is handled: a supervised GenServer (this module, started in
-  `Arbor.Comms.Application`) owns the tables, so they persist for the app's
+  Table ownership is handled too: a supervised GenServer (this module, started in
+  `Arbor.Comms.Application`) owns the ETS tables, so they live for the app's
   lifetime rather than dying with a transient caller.
   """
 
@@ -87,11 +90,22 @@ defmodule Arbor.Comms.EngagementStore do
     :ok
   end
 
-  @doc "All engagements for an agent (v1: full scan — fine at low volume)."
+  @doc """
+  All engagements for an agent. Reads the durable store when available (the
+  authoritative, restart-surviving view); falls back to an ETS scan otherwise.
+  """
   @spec list_for_agent(String.t()) :: [Engagement.t()]
   def list_for_agent(agent_id) when is_binary(agent_id) do
     ensure_tables()
 
+    if durable_available?() do
+      durable_list(agent_id)
+    else
+      ets_list_for_agent(agent_id)
+    end
+  end
+
+  defp ets_list_for_agent(agent_id) do
     :ets.tab2list(@table)
     |> Enum.flat_map(fn
       {_id, %Engagement{agent_id: ^agent_id} = e} -> [e]
@@ -112,12 +126,12 @@ defmodule Arbor.Comms.EngagementStore do
 
     case :ets.lookup(@index, {agent_id, resolution_key}) do
       [{_, id}] -> resolve_existing(id, agent_id, resolution_key, opts)
-      [] -> create_and_claim(agent_id, resolution_key, opts)
+      [] -> recover_or_create(agent_id, resolution_key, opts)
     end
   end
 
-  # The index points at an id; return it, or recreate if the record is gone
-  # (stale index — e.g. the engagement was deleted out from under it).
+  # The index points at an id; return it, or recover/recreate if the record is
+  # gone (stale index — e.g. cleared on restart, or deleted out from under it).
   defp resolve_existing(id, agent_id, resolution_key, opts) do
     case get(id) do
       {:ok, _} = ok ->
@@ -125,21 +139,39 @@ defmodule Arbor.Comms.EngagementStore do
 
       {:error, :not_found} ->
         :ets.delete(@index, {agent_id, resolution_key})
-        create_and_claim(agent_id, resolution_key, opts)
+        recover_or_create(agent_id, resolution_key, opts)
     end
   end
 
-  defp create_and_claim(agent_id, resolution_key, opts) do
+  # ETS miss. Prep the create opts (agent_id + a deterministic id for stable
+  # scopes), then try to RECOVER the record from the durable store (e.g. after a
+  # restart cleared the ETS cache) before creating a fresh one.
+  defp recover_or_create(agent_id, resolution_key, opts) do
     opts =
       opts
       |> Keyword.put(:agent_id, agent_id)
       |> maybe_stable_id(agent_id, resolution_key)
 
+    case opts[:id] && durable_get(opts[:id]) do
+      {:ok, engagement} -> hydrate(engagement, agent_id, resolution_key)
+      _ -> create_and_claim(agent_id, resolution_key, opts)
+    end
+  end
+
+  # Load a durably-recovered engagement back into the ETS cache + index.
+  defp hydrate(engagement, agent_id, resolution_key) do
+    :ets.insert(@table, {engagement.id, engagement})
+    :ets.insert_new(@index, {{agent_id, resolution_key}, engagement.id})
+    {:ok, engagement}
+  end
+
+  defp create_and_claim(agent_id, resolution_key, opts) do
     engagement = Engagement.new(opts)
 
     # Atomic test-and-set: only the first caller to claim the index slot wins.
     if :ets.insert_new(@index, {{agent_id, resolution_key}, engagement.id}) do
       :ets.insert(@table, {engagement.id, engagement})
+      durable_upsert(engagement)
       {:ok, engagement}
     else
       # Lost the race — use whoever claimed it.
@@ -167,11 +199,72 @@ defmodule Arbor.Comms.EngagementStore do
       {:ok, engagement} ->
         updated = fun.(engagement)
         :ets.insert(@table, {id, updated})
+        durable_upsert(updated)
         {:ok, updated}
 
       {:error, :not_found} = err ->
         err
     end
+  end
+
+  # ── Durable backing (runtime indirection) ──────────────────────────
+  #
+  # Mirrors how Arbor.Comms reaches Arbor.Persistence.ChannelStore: no
+  # compile-time dep on arbor_persistence (it's a lower level, loaded at runtime
+  # if present). All best-effort — if persistence isn't running (e.g. ETS-only
+  # tests), every call is a no-op and the store works purely in memory.
+
+  # Runtime-resolved so tests can inject a fake durable store via the
+  # `:engagement_persistence_module` application env (mirrors how
+  # Arbor.Orchestrator.Session.Persistence resolves its session_store). Default
+  # is the real Ecto-backed store.
+  defp persistence_mod do
+    Application.get_env(
+      :arbor_comms,
+      :engagement_persistence_module,
+      Arbor.Persistence.EngagementStore
+    )
+  end
+
+  defp durable_available? do
+    mod = persistence_mod()
+
+    Code.ensure_loaded?(mod) and
+      function_exported?(mod, :available?, 0) and
+      apply(mod, :available?, [])
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
+
+  defp durable_upsert(engagement) do
+    if durable_available?(), do: apply(persistence_mod(), :upsert, [engagement])
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp durable_get(id) do
+    if durable_available?() do
+      apply(persistence_mod(), :get, [id])
+    else
+      {:error, :unavailable}
+    end
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    _, _ -> {:error, :unavailable}
+  end
+
+  defp durable_list(agent_id) do
+    apply(persistence_mod(), :list_for_agent, [agent_id])
+  rescue
+    _ -> ets_list_for_agent(agent_id)
+  catch
+    _, _ -> ets_list_for_agent(agent_id)
   end
 
   # :user / :role engagements are durable, addressable conversations — the same
