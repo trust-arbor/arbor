@@ -141,20 +141,38 @@ defmodule Arbor.Trust.Config do
     autonomous: 2000
   }
 
+  # Default anti-spam budget for the A1 proactive notify channel
+  # (arbor://comms/notify/session), applied as a :rate_limit constraint on the
+  # grant — tokens per rate_limit_refill_period_seconds (1h default). Notify is
+  # allow-by-default for ALL tiers (Phase 2 trust posture), so every tier gets the
+  # capability with this budget. Keep in sync with
+  # `Arbor.Actions.Comms.NotifySession.default_rate_limit/0` (the action's declared
+  # budget); a drift guard in arbor_agent's lifecycle test asserts they match.
+  # (We can't read NotifySession here — arbor_actions is L6, above arbor_trust L4.)
+  @notify_session_rate_limit 30
+
   # Default capability templates by tier
   # URI format: arbor://category/action/target (target can include wildcards like /self/*)
   @default_tier_capabilities %{
     untrusted: [
       %{resource_uri: "arbor://code/read/self/*", constraints: %{}},
       %{resource_uri: "arbor://consensus/propose/self", constraints: %{rate_limit: 10}},
-      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}}
+      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}},
+      %{
+        resource_uri: "arbor://comms/notify/session",
+        constraints: %{rate_limit: @notify_session_rate_limit}
+      }
     ],
     probationary: [
       %{resource_uri: "arbor://code/read/self/*", constraints: %{}},
       %{resource_uri: "arbor://code/write/self/sandbox/*", constraints: %{rate_limit: 10}},
       %{resource_uri: "arbor://code/compile/self/sandbox", constraints: %{}},
       %{resource_uri: "arbor://consensus/propose/self", constraints: %{rate_limit: 20}},
-      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}}
+      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}},
+      %{
+        resource_uri: "arbor://comms/notify/session",
+        constraints: %{rate_limit: @notify_session_rate_limit}
+      }
     ],
     trusted: [
       %{resource_uri: "arbor://code/read/self/*", constraints: %{}},
@@ -163,7 +181,11 @@ defmodule Arbor.Trust.Config do
       %{resource_uri: "arbor://code/write/self/impl/*", constraints: %{requires_approval: true}},
       %{resource_uri: "arbor://code/reload/self/*", constraints: %{requires_approval: true}},
       %{resource_uri: "arbor://consensus/propose/self", constraints: %{rate_limit: 50}},
-      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}}
+      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}},
+      %{
+        resource_uri: "arbor://comms/notify/session",
+        constraints: %{rate_limit: @notify_session_rate_limit}
+      }
     ],
     veteran: [
       %{resource_uri: "arbor://code/read/self/*", constraints: %{}},
@@ -173,7 +195,11 @@ defmodule Arbor.Trust.Config do
       %{resource_uri: "arbor://code/reload/self/*", constraints: %{}},
       %{resource_uri: "arbor://code/compile/self/impl", constraints: %{}},
       %{resource_uri: "arbor://consensus/propose/self", constraints: %{}},
-      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}}
+      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}},
+      %{
+        resource_uri: "arbor://comms/notify/session",
+        constraints: %{rate_limit: @notify_session_rate_limit}
+      }
     ],
     autonomous: [
       %{resource_uri: "arbor://code/read/self/*", constraints: %{}},
@@ -183,7 +209,11 @@ defmodule Arbor.Trust.Config do
       %{resource_uri: "arbor://code/reload/self/*", constraints: %{}},
       %{resource_uri: "arbor://code/compile/self/impl", constraints: %{}},
       %{resource_uri: "arbor://consensus/propose/self", constraints: %{}},
-      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}}
+      %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}},
+      %{
+        resource_uri: "arbor://comms/notify/session",
+        constraints: %{rate_limit: @notify_session_rate_limit}
+      }
     ]
   }
 

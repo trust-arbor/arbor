@@ -520,7 +520,11 @@ defmodule Arbor.Trust.CapabilitySyncTest do
 
       for cap <- caps do
         assert cap.principal_id == "agent_foo"
-        assert String.contains?(cap.resource_uri, "agent_foo")
+        # Self-scoped caps embed the agent_id; the global A1 notify cap doesn't
+        # (its target session is runtime-bound, not encoded in the URI).
+        unless cap.resource_uri == "arbor://comms/notify/session" do
+          assert String.contains?(cap.resource_uri, "agent_foo")
+        end
       end
     end
 
@@ -529,7 +533,10 @@ defmodule Arbor.Trust.CapabilitySyncTest do
 
       for cap <- caps do
         assert cap.principal_id == "raw_id"
-        assert String.contains?(cap.resource_uri, "raw_id")
+
+        unless cap.resource_uri == "arbor://comms/notify/session" do
+          assert String.contains?(cap.resource_uri, "raw_id")
+        end
       end
     end
   end

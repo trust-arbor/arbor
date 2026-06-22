@@ -509,4 +509,18 @@ defmodule Arbor.Trust.ConfigTest do
       assert Config.actions_for_tier(:unknown_tier) == [:read, :search, :think]
     end
   end
+
+  describe "capabilities_for_tier/1 — A1 proactive notify channel (Phase 3b)" do
+    test "every tier is granted arbor://comms/notify/session with a rate-limit constraint" do
+      for tier <- [:untrusted, :probationary, :trusted, :veteran, :autonomous] do
+        caps = Config.capabilities_for_tier(tier)
+        notify = Enum.find(caps, &(&1.resource_uri == "arbor://comms/notify/session"))
+
+        assert notify, "tier #{tier} is missing the notify capability"
+        # The anti-spam budget is applied as a :rate_limit constraint on the grant
+        # (Phase 3b: makes the Phase-2 declared budget actually enforced).
+        assert notify.constraints[:rate_limit] == 30
+      end
+    end
+  end
 end

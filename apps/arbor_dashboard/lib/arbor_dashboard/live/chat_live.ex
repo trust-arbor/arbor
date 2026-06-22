@@ -701,6 +701,37 @@ defmodule Arbor.Dashboard.Live.ChatLive do
     handle_agent_signal(signal, socket)
   end
 
+  # Signal: proactive agent-initiated notification (A1 notify channel). An agent
+  # surfaces a thought/progress message from a heartbeat without waiting for a
+  # turn; render it as a visually-distinct message in THIS chat only (the old 💭
+  # affordance). Scoped to the displayed agent so a chat on agent X never shows
+  # agent Y's notifications.
+  def handle_info({:signal_received, %{category: :agent, type: :notification} = signal}, socket) do
+    agent_id = socket.assigns.agent_id
+    signal_agent = get_in(signal.data, [:agent_id]) || get_in(signal.data, ["agent_id"])
+
+    if agent_id && signal_agent == agent_id do
+      text = get_in(signal.data, [:text]) || get_in(signal.data, ["text"]) || ""
+      kind = get_in(signal.data, [:kind]) || get_in(signal.data, ["kind"]) || :notification
+
+      msg = %{
+        id: "msg-#{System.unique_integer([:positive])}",
+        role: :notification,
+        kind: kind,
+        content: text,
+        timestamp: signal.timestamp || DateTime.utc_now(),
+        tool_uses: [],
+        memory_count: 0,
+        model: nil,
+        session_id: nil
+      }
+
+      {:noreply, stream_insert(socket, :messages, msg)}
+    else
+      {:noreply, socket}
+    end
+  end
+
   # Signal: security authorization pending (tool approval requests).
   #
   # Only insert if the signal is for THIS chat's agent. The previous
