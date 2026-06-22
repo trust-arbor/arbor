@@ -409,7 +409,14 @@ defmodule Arbor.Trust.PolicyTest do
         # URIs should have agent_id substituted for "self"
         refute String.contains?(cap.resource_uri, "/self/")
         refute String.ends_with?(cap.resource_uri, "/self")
-        assert String.contains?(cap.resource_uri, agent_id)
+
+        # Self-scoped caps (code/profile/etc.) carry the agent_id after
+        # substitution. Globally-scoped caps — the A1 notify channel — reference
+        # the channel itself, not an agent-owned resource, so they legitimately
+        # carry no agent_id (the target session is runtime-bound via context).
+        unless cap.resource_uri == "arbor://comms/notify/session" do
+          assert String.contains?(cap.resource_uri, agent_id)
+        end
       end
     end
 

@@ -10,6 +10,13 @@ defmodule Arbor.Dashboard.Live.ChatLive.Helpers do
 
   def message_style(role, sender_type, group_mode)
 
+  # Proactive agent-initiated notification (A1 notify channel) — a visually-distinct
+  # "thought bubble" affordance (dashed accent + italic), in both group and single
+  # mode. Listed first so it wins over the group-mode catch-all below.
+  def message_style(role, _sender_type, _group_mode) when role in [:notification, "notification"],
+    do:
+      "background: rgba(180, 142, 255, 0.10); border-left: 3px dashed rgba(180, 142, 255, 0.6); margin-right: 2rem; font-style: italic;"
+
   # Group mode: neutral background for all messages, no margins
   def message_style(_role, _sender_type, true) do
     "background: rgba(74, 158, 255, 0.05); border-left: 3px solid rgba(74, 158, 255, 0.3);"
@@ -26,6 +33,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Helpers do
 
   def role_label(role) when role in [:user, "user"], do: "You"
   def role_label(role) when role in [:assistant, "assistant"], do: "Agent"
+  def role_label(role) when role in [:notification, "notification"], do: "💭 Agent"
   def role_label(_), do: "System"
 
   def sender_color(hue) when is_integer(hue) do
