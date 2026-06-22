@@ -271,6 +271,43 @@ defmodule Arbor.Orchestrator.Session.Persistence do
     end
   end
 
+  @doc """
+  Restore an engagement's transcript from the durable store.
+
+  Loads the session's persisted entries and keeps only those stamped with this
+  `engagement_id` (the provenance written by `persist_turn_entries/5`), rebuilt
+  into the `%{"role" => ..., "content" => ...}` message shape the turn loop uses
+  (mirrors `Arbor.Agent.SessionConfig`'s recover path). Used by the Session on the
+  first switch to an engagement, so a resumed conversation isn't empty after a
+  restart. Best-effort: returns `[]` if the store is unavailable or on any error.
+  """
+  @spec load_engagement_transcript(map(), String.t() | nil) :: [map()]
+  def load_engagement_transcript(_state, nil), do: []
+
+  def load_engagement_transcript(state, engagement_id) do
+    if session_store_available?() do
+      apply(session_store(), :load_entries_by_session_id, [state.session_id])
+      |> List.wrap()
+      |> Enum.filter(&(entry_engagement_id(&1) == engagement_id))
+      |> Enum.map(fn entry ->
+        %{"role" => entry.role || entry.entry_type, "content" => entry.content || ""}
+      end)
+    else
+      []
+    end
+  rescue
+    e ->
+      Logger.debug("[Session] engagement transcript restore failed: #{Exception.message(e)}")
+      []
+  catch
+    :exit, _ -> []
+  end
+
+  defp entry_engagement_id(entry) do
+    meta = Map.get(entry, :metadata) || %{}
+    Map.get(meta, "engagement_id") || Map.get(meta, :engagement_id)
+  end
+
   @doc false
   def get_persist_entry_fn(state) do
     # Check adapter first, then fall back to runtime bridge

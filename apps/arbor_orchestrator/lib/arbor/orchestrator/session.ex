@@ -72,6 +72,7 @@ defmodule Arbor.Orchestrator.Session do
 
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Session.Builders
+  alias Arbor.Orchestrator.Session.Persistence
 
   # ── Contract module availability (runtime bridge) ──────────────────
   # Checked at runtime so the orchestrator works standalone without
@@ -978,8 +979,24 @@ defmodule Arbor.Orchestrator.Session do
 
   defp maybe_switch_engagement(state, target) do
     stashed = Map.put(state.transcripts, state.current_engagement_id, state.messages)
-    {target_msgs, stashed} = Map.pop(stashed, target, [])
+
+    {target_msgs, stashed} =
+      if Map.has_key?(stashed, target) do
+        # Already loaded in this process — use the in-memory stash.
+        Map.pop(stashed, target)
+      else
+        # First time this engagement is active here. Restore its transcript from
+        # the durable store (entries stamped with this engagement_id) so a resumed
+        # conversation isn't empty after a restart / on a fresh device. Returns []
+        # for a brand-new engagement or if the store is unavailable.
+        {Persistence.load_engagement_transcript(state, target), stashed}
+      end
+
+    # Mirror the active transcript into session_state — ContextBuilder.get_messages/1
+    # reads `session_state.messages` in preference to top-level `messages`, so both
+    # must move together or the turn would see the previous engagement's history.
     %{state | messages: target_msgs, transcripts: stashed, current_engagement_id: target}
+    |> Persistence.sync_checkpoint_to_session_state()
   end
 
   # Authorize, then start the turn — shared by direct sends and queue drains.
