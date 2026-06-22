@@ -41,17 +41,14 @@ defmodule Arbor.Gateway.Chat.Socket do
   # ── Commands ──────────────────────────────────────────────────────
 
   defp handle_command({:attach, %{agent_id: agent_id}}, state) when is_binary(agent_id) do
-    case bridge_call(engagement_store(), :resolve_or_create, [
-           agent_id,
-           state.principal,
-           [scope: :user, visibility: :private, owner_tenant: state.principal]
-         ]) do
-      {:ok, {:ok, engagement}} ->
-        state = subscribe_signals(%{state | agent_id: agent_id, engagement_id: engagement.id})
-        push({:engagement, %{id: engagement.id, transcript: []}}, state)
-
-      _ ->
-        push({:error, :attach_failed}, state)
+    # Capability gate: the authenticated human must be authorized to chat with
+    # this agent. Fail-closed — no capability ⇒ no attach (and thus no reach into
+    # the agent's unified memory). The grant policy (who holds
+    # arbor://chat/agent/<id>) is set by the operator; see gateway-chat-api.md.
+    if authorized_to_chat?(state.principal, agent_id) do
+      do_attach(agent_id, state)
+    else
+      push({:error, :unauthorized}, state)
     end
   end
 
@@ -92,6 +89,34 @@ defmodule Arbor.Gateway.Chat.Socket do
   end
 
   defp handle_command(:list_engagements, state), do: push({:engagements, []}, state)
+
+  defp do_attach(agent_id, state) do
+    case bridge_call(engagement_store(), :resolve_or_create, [
+           agent_id,
+           state.principal,
+           [scope: :user, visibility: :private, owner_tenant: state.principal]
+         ]) do
+      {:ok, {:ok, engagement}} ->
+        state = subscribe_signals(%{state | agent_id: agent_id, engagement_id: engagement.id})
+        push({:engagement, %{id: engagement.id, transcript: []}}, state)
+
+      _ ->
+        push({:error, :attach_failed}, state)
+    end
+  end
+
+  # Fail-closed: only an explicit `{:ok, :authorized}` permits chat. Pending
+  # approval, denial, or an unavailable security subsystem all deny.
+  defp authorized_to_chat?(principal, agent_id) do
+    case bridge_call(security_mod(), :authorize, [
+           principal,
+           "arbor://chat/agent/#{agent_id}",
+           :chat
+         ]) do
+      {:ok, {:ok, :authorized}} -> true
+      _ -> false
+    end
+  end
 
   # ── Async results + forwarded signals ─────────────────────────────
 
@@ -238,4 +263,7 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   defp signals_mod,
     do: Application.get_env(:arbor_gateway, :chat_signals, Arbor.Signals)
+
+  defp security_mod,
+    do: Application.get_env(:arbor_gateway, :chat_security, Arbor.Security)
 end
