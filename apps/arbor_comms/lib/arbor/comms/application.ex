@@ -14,6 +14,11 @@ defmodule Arbor.Comms.Application do
     # other PubSub existed and skipped starting the router pieces silently.
     children = [
       {Phoenix.PubSub, name: Arbor.Comms.PubSub},
+      # Owns the Engagement ETS tables for the app's lifetime (see
+      # Arbor.Comms.EngagementStore — direct ETS API, GenServer is just the
+      # long-lived table owner). Started before the Supervisor so engagements
+      # resolve stably from boot.
+      Arbor.Comms.EngagementStore,
       Arbor.Comms.Supervisor
     ]
 
