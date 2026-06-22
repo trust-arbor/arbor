@@ -778,6 +778,28 @@ defmodule Arbor.AI do
     AcpSession.close(session)
   end
 
+  @doc """
+  List all known ACP provider atoms from the catalog — native + adapted +
+  any `config :arbor_ai, :acp_providers` overrides.
+
+  This is the authoritative provider allowlist: callers that gate on provider
+  identity (e.g. `Arbor.Actions.Acp`) should derive from this rather than
+  duplicating a static list, so adding an agent to the catalog is the only edit.
+  """
+  @spec acp_providers() :: [atom()]
+  def acp_providers do
+    if Code.ensure_loaded?(AcpSession.Config) do
+      AcpSession.Config.list_providers() |> Enum.map(&elem(&1, 0))
+    else
+      []
+    end
+  end
+
+  @doc "Whether `provider` is a known ACP provider in the catalog."
+  @spec acp_known_provider?(atom()) :: boolean()
+  def acp_known_provider?(provider) when is_atom(provider), do: provider in acp_providers()
+  def acp_known_provider?(_), do: false
+
   # -- ACP Pool API --
 
   @doc """
