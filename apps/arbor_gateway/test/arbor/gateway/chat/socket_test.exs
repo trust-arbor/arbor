@@ -32,12 +32,21 @@ defmodule Arbor.Gateway.Chat.SocketTest.FakeSignals do
   def subscribe(_pattern, _handler), do: :ok
 end
 
+defmodule Arbor.Gateway.Chat.SocketTest.AllowSecurity do
+  def authorize(_principal, _uri, _action), do: {:ok, :authorized}
+end
+
+defmodule Arbor.Gateway.Chat.SocketTest.DenySecurity do
+  def authorize(_principal, _uri, _action), do: {:error, :no_capability}
+end
+
 defmodule Arbor.Gateway.Chat.SocketTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Gateway.Chat.Socket
 
   alias Arbor.Gateway.Chat.SocketTest.{
+    AllowSecurity,
     FakeAPIAgent,
     FakeEngagementStore,
     FakeManager,
@@ -51,9 +60,16 @@ defmodule Arbor.Gateway.Chat.SocketTest do
     Application.put_env(:arbor_gateway, :chat_agent_manager, FakeManager)
     Application.put_env(:arbor_gateway, :chat_agent_query, FakeAPIAgent)
     Application.put_env(:arbor_gateway, :chat_signals, FakeSignals)
+    Application.put_env(:arbor_gateway, :chat_security, AllowSecurity)
 
     on_exit(fn ->
-      for k <- [:chat_engagement_store, :chat_agent_manager, :chat_agent_query, :chat_signals] do
+      for k <- [
+            :chat_engagement_store,
+            :chat_agent_manager,
+            :chat_agent_query,
+            :chat_signals,
+            :chat_security
+          ] do
         Application.delete_env(:arbor_gateway, k)
       end
     end)
@@ -95,6 +111,21 @@ defmodule Arbor.Gateway.Chat.SocketTest do
     test "missing agent_id → error frame", %{state: state} do
       {:push, [event], _} = send_frame(%{type: "attach"}, state)
       assert event["type"] == "error"
+    end
+
+    test "capability gate: an unauthorized principal cannot attach (fail-closed)", %{state: state} do
+      Application.put_env(
+        :arbor_gateway,
+        :chat_security,
+        Arbor.Gateway.Chat.SocketTest.DenySecurity
+      )
+
+      {:push, [event], st} = send_frame(%{type: "attach", agent_id: "agent_a"}, state)
+
+      assert event == %{"type" => "error", "reason" => "unauthorized"}
+      # not attached / not subscribed — no reach into the agent
+      assert st.agent_id == nil
+      refute st.subscribed?
     end
   end
 
