@@ -60,17 +60,41 @@ defmodule ArborTui.App do
       input: "",
       messages: [],
       streaming: nil,
-      turn: :idle
+      turn: :idle,
+      # HITL: tool calls awaiting the user's decision (FIFO; head is prompted),
+      # and tools the user chose to always-allow this session.
+      pending_approvals: [],
+      auto_approve: MapSet.new()
     }
   end
 
   # ── event → msg ────────────────────────────────────────────────────────────
 
   @impl true
-  def event_to_msg(%Event.Key{key: :c, modifiers: mods}, _state) do
-    if :ctrl in mods, do: {:msg, :quit}, else: {:msg, {:char, "c"}}
+  # Ctrl+C always quits, even mid-approval. (`in` over a variable isn't allowed
+  # in a guard, so the ctrl check is in the body.)
+  def event_to_msg(%Event.Key{key: :c, modifiers: mods}, state) do
+    cond do
+      :ctrl in mods -> {:msg, :quit}
+      match?(%{pending_approvals: [_ | _]}, state) -> :ignore
+      true -> {:msg, {:char, "c"}}
+    end
   end
 
+  # Approval mode: while a tool call awaits a decision, y/n/a resolve it and
+  # every other key is swallowed (the prompt is modal until you choose).
+  def event_to_msg(%Event.Key{char: c}, %{pending_approvals: [_ | _]}) when c in ["y", "Y"],
+    do: {:msg, {:approval, :approve}}
+
+  def event_to_msg(%Event.Key{char: c}, %{pending_approvals: [_ | _]}) when c in ["n", "N"],
+    do: {:msg, {:approval, :deny}}
+
+  def event_to_msg(%Event.Key{char: c}, %{pending_approvals: [_ | _]}) when c in ["a", "A"],
+    do: {:msg, {:approval, :always}}
+
+  def event_to_msg(%Event.Key{}, %{pending_approvals: [_ | _]}), do: :ignore
+
+  # Normal input.
   def event_to_msg(%Event.Key{key: :enter}, _state), do: {:msg, :submit}
   def event_to_msg(%Event.Key{key: :backspace}, _state), do: {:msg, :backspace}
   def event_to_msg(%Event.Key{key: :escape}, _state), do: {:msg, :clear_input}
@@ -106,6 +130,36 @@ defmodule ArborTui.App do
          messages: state.messages ++ [msg(:you, text)]
      }}
   end
+
+  # HITL: resolve the head pending approval via y/n/a.
+  def update({:approval, decision}, %{pending_approvals: [current | rest]} = state) do
+    proposal_id = current.proposal_id
+    tool = current.tool
+
+    {command, note, auto} =
+      case decision do
+        :approve ->
+          {{:approve, proposal_id}, "✓ approved #{tool}", state.auto_approve}
+
+        :deny ->
+          {{:deny, proposal_id}, "✗ denied #{tool}", state.auto_approve}
+
+        :always ->
+          {{:approve, proposal_id}, "✓ approved #{tool} (always)",
+           MapSet.put(state.auto_approve, tool)}
+      end
+
+    if connected?(state), do: WSClient.send_command(state.ws, command)
+
+    {%{
+       state
+       | pending_approvals: rest,
+         auto_approve: auto,
+         messages: state.messages ++ [msg(:system, note)]
+     }}
+  end
+
+  def update({:approval, _decision}, state), do: {state}
 
   # Connection lifecycle from the WS client.
   def update({:ws_status, status, detail}, state),
@@ -146,6 +200,46 @@ defmodule ArborTui.App do
 
   defp handle_event({:engagements, _list}, state), do: state
 
+  # HITL: a tool call needs approval.
+  defp handle_event({:approval_request, %{proposal_id: id, tool: tool} = req}, state) do
+    cond do
+      Enum.any?(state.pending_approvals, &(&1.proposal_id == id)) ->
+        state
+
+      MapSet.member?(state.auto_approve, tool) ->
+        if connected?(state), do: WSClient.send_command(state.ws, {:approve, id})
+        %{state | messages: state.messages ++ [msg(:system, "auto-approved #{tool}")]}
+
+      true ->
+        %{state | pending_approvals: state.pending_approvals ++ [req]}
+    end
+  end
+
+  # Pending approvals synced on (re)attach.
+  defp handle_event({:approvals, list}, state) do
+    existing = MapSet.new(state.pending_approvals, & &1.proposal_id)
+
+    new =
+      list
+      |> Enum.map(fn a ->
+        %{
+          proposal_id: a["proposal_id"] || a[:proposal_id],
+          tool: a["tool"] || a[:tool] || "tool",
+          args: a["args"] || a[:args] || %{}
+        }
+      end)
+      |> Enum.reject(fn a ->
+        is_nil(a.proposal_id) or MapSet.member?(existing, a.proposal_id) or
+          MapSet.member?(state.auto_approve, a.tool)
+      end)
+
+    %{state | pending_approvals: state.pending_approvals ++ new}
+  end
+
+  defp handle_event({:approval_resolved, %{proposal_id: id}}, state) do
+    %{state | pending_approvals: Enum.reject(state.pending_approvals, &(&1.proposal_id == id))}
+  end
+
   defp handle_event({:error, reason}, state) do
     %{state | turn: :idle, messages: state.messages ++ [msg(:system, "error: #{reason}")]}
   end
@@ -156,15 +250,24 @@ defmodule ArborTui.App do
 
   @impl true
   def view(state) do
-    stack(:vertical, [
-      header(state),
-      text(""),
-      transcript(state),
-      text(""),
-      status_line(state),
-      input_line(state)
-    ])
+    stack(:vertical, [header(state), text(""), transcript(state), text("")] ++ footer(state))
   end
+
+  # When a tool call is awaiting a decision, the footer becomes a modal approval
+  # prompt (head of the queue); otherwise the normal status + input lines.
+  defp footer(%{pending_approvals: [current | rest]}) do
+    more = if rest == [], do: "", else: "  (+#{length(rest)} more)"
+
+    [
+      text(
+        "🔐 #{current.tool} wants to run#{format_args(current.args)}  (#{short_id(current.proposal_id)})#{more}",
+        Style.new() |> Style.fg(:yellow) |> Style.bold()
+      ),
+      text("❯ (y)es   (n)o   (a)lways-allow", Style.new() |> Style.fg(:yellow))
+    ]
+  end
+
+  defp footer(state), do: [status_line(state), input_line(state)]
 
   defp header(state) do
     text(
@@ -244,4 +347,18 @@ defmodule ArborTui.App do
   defp short("agent_" <> rest), do: "agent_" <> String.slice(rest, 0, 6) <> "…"
   defp short(other) when is_binary(other), do: other
   defp short(_), do: "?"
+
+  defp short_id(id) when is_binary(id), do: String.slice(id, 0, 14)
+  defp short_id(_), do: "?"
+
+  defp format_args(args) when is_map(args) and map_size(args) > 0 do
+    inner =
+      args
+      |> Enum.map(fn {k, v} -> "#{k}: #{inspect(v)}" end)
+      |> Enum.join(", ")
+
+    " — #{inner}"
+  end
+
+  defp format_args(_), do: ""
 end

@@ -49,5 +49,34 @@ defmodule ArborTui.ProtocolTest do
       assert Protocol.decode(~s({"type":"wat"})) == {:error, {:unknown_type, "wat"}}
       assert Protocol.decode("not json{") == {:error, :invalid_json}
     end
+
+    test "HITL approval frames" do
+      assert Protocol.decode(
+               ~s({"type":"approval_request","proposal_id":"irq_1","tool":"shell","args":{"cmd":"ls"}})
+             ) ==
+               {:ok,
+                {:approval_request,
+                 %{proposal_id: "irq_1", tool: "shell", args: %{"cmd" => "ls"}}}}
+
+      assert Protocol.decode(~s({"type":"approvals","approvals":[{"proposal_id":"irq_1"}]})) ==
+               {:ok, {:approvals, [%{"proposal_id" => "irq_1"}]}}
+
+      assert Protocol.decode(
+               ~s({"type":"approval_resolved","proposal_id":"irq_1","status":"approve"})
+             ) ==
+               {:ok, {:approval_resolved, %{proposal_id: "irq_1", status: "approve"}}}
+    end
+  end
+
+  describe "encode/1 — HITL commands" do
+    test "approve / deny / list_approvals" do
+      assert Jason.decode!(Protocol.encode({:approve, "irq_1"})) ==
+               %{"type" => "approve", "proposal_id" => "irq_1"}
+
+      assert Jason.decode!(Protocol.encode({:deny, "irq_1"})) ==
+               %{"type" => "deny", "proposal_id" => "irq_1"}
+
+      assert Jason.decode!(Protocol.encode(:list_approvals)) == %{"type" => "list_approvals"}
+    end
   end
 end

@@ -41,6 +41,24 @@ end
 
 defmodule Arbor.Gateway.Chat.SocketTest.DenySecurity do
   def find_authorizing(_principal, _uri), do: {:error, :not_found}
+  # security_mod().grant/1 (ensure_approver_capability) — no-op in tests.
+  def grant(_opts), do: :ok
+end
+
+# Consensus stubs for HITL approvals. Default list_pending is empty so attach
+# stays a single (engagement) frame; a per-test override returns a pending one.
+defmodule Arbor.Gateway.Chat.SocketTest.FakeConsensus do
+  def list_pending, do: []
+end
+
+defmodule Arbor.Gateway.Chat.SocketTest.FakeConsensusPending do
+  def list_pending,
+    do: [%{id: "irq_1", proposer: "agent_a", metadata: %{tool: "shell", args: %{"cmd" => "ls"}}}]
+end
+
+defmodule Arbor.Gateway.Chat.SocketTest.FakeCoordinator do
+  def force_approve(_id, _actor), do: {:ok, :approved}
+  def force_reject(_id, _actor), do: {:ok, :rejected}
 end
 
 defmodule Arbor.Gateway.Chat.SocketTest do
@@ -65,13 +83,35 @@ defmodule Arbor.Gateway.Chat.SocketTest do
     Application.put_env(:arbor_gateway, :chat_signals, FakeSignals)
     Application.put_env(:arbor_gateway, :chat_capability_store, AllowSecurity)
 
+    Application.put_env(
+      :arbor_gateway,
+      :chat_consensus,
+      Arbor.Gateway.Chat.SocketTest.FakeConsensus
+    )
+
+    Application.put_env(
+      :arbor_gateway,
+      :chat_consensus_coordinator,
+      Arbor.Gateway.Chat.SocketTest.FakeCoordinator
+    )
+
+    # security_mod (grant) — DenySecurity also defines grant/1.
+    Application.put_env(
+      :arbor_gateway,
+      :chat_security,
+      Arbor.Gateway.Chat.SocketTest.DenySecurity
+    )
+
     on_exit(fn ->
       for k <- [
             :chat_engagement_store,
             :chat_agent_manager,
             :chat_session,
             :chat_signals,
-            :chat_capability_store
+            :chat_capability_store,
+            :chat_consensus,
+            :chat_consensus_coordinator,
+            :chat_security
           ] do
         Application.delete_env(:arbor_gateway, k)
       end
@@ -198,6 +238,61 @@ defmodule Arbor.Gateway.Chat.SocketTest do
 
       assert event["type"] == "engagements"
       assert [%{"id" => "eng_test"}] = event["engagements"]
+    end
+  end
+
+  describe "HITL approvals" do
+    test "an authorization_pending signal becomes an approval_request frame", %{state: state} do
+      st = attach(state, "agent_a")
+
+      signal = %{
+        type: :authorization_pending,
+        data: %{
+          principal_id: "agent_a",
+          proposal_id: "irq_1",
+          tool: "shell",
+          args: %{"cmd" => "ls"}
+        }
+      }
+
+      {:push, frames, _} = Socket.handle_info({:chat_signal, signal}, st)
+
+      assert [%{"type" => "approval_request", "proposal_id" => "irq_1", "tool" => "shell"}] =
+               decode_frames(frames)
+    end
+
+    test "approve → force_approve + approval_resolved frame", %{state: state} do
+      st = attach(state, "agent_a")
+      {:push, [event], _} = send_frame(%{type: "approve", proposal_id: "irq_1"}, st)
+
+      assert event == %{
+               "type" => "approval_resolved",
+               "proposal_id" => "irq_1",
+               "status" => "approve"
+             }
+    end
+
+    test "deny → force_reject + approval_resolved frame", %{state: state} do
+      st = attach(state, "agent_a")
+      {:push, [event], _} = send_frame(%{type: "deny", proposal_id: "irq_1"}, st)
+
+      assert event["type"] == "approval_resolved"
+      assert event["status"] == "deny"
+    end
+
+    test "list_approvals returns the agent's pending proposals", %{state: state} do
+      st = attach(state, "agent_a")
+      # Override Consensus to return a pending proposal for this agent.
+      Application.put_env(
+        :arbor_gateway,
+        :chat_consensus,
+        Arbor.Gateway.Chat.SocketTest.FakeConsensusPending
+      )
+
+      {:push, [event], _} = send_frame(%{type: "list_approvals"}, st)
+
+      assert event["type"] == "approvals"
+      assert [%{"proposal_id" => "irq_1", "tool" => "shell"}] = event["approvals"]
     end
   end
 end
