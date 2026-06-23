@@ -123,7 +123,37 @@ defmodule Arbor.Gateway.Chat.Socket do
   defp handle_command({op, _id}, state) when op in [:approve, :deny],
     do: push({:error, :not_attached}, state)
 
+  # "irq_…" ids come from the InteractionRouter; everything else is a Consensus
+  # proposal. (The live node escalates :ask approvals through the router, so this
+  # is the path the TUI actually exercises — mirrors the orchestrator's await.)
   defp resolve_approval(op, proposal_id, state) do
+    if interaction_request?(proposal_id) do
+      resolve_via_router(op, proposal_id, state)
+    else
+      resolve_via_consensus(op, proposal_id, state)
+    end
+  end
+
+  defp interaction_request?(id) when is_binary(id), do: String.starts_with?(id, "irq")
+  defp interaction_request?(_), do: false
+
+  defp resolve_via_router(op, request_id, state) do
+    response = if op == :approve, do: :approved, else: :rejected
+
+    case bridge_call(interaction_router(), :respond, [
+           request_id,
+           response,
+           %{actor: state.principal}
+         ]) do
+      {:ok, :ok} ->
+        push({:approval_resolved, %{proposal_id: request_id, status: op}}, state)
+
+      _ ->
+        push({:error, :approval_failed}, state)
+    end
+  end
+
+  defp resolve_via_consensus(op, proposal_id, state) do
     fun = if op == :approve, do: :force_approve, else: :force_reject
 
     case bridge_call(consensus_coordinator(), fun, [proposal_id, state.principal]) do
@@ -171,12 +201,32 @@ defmodule Arbor.Gateway.Chat.Socket do
     end
   end
 
+  # Pending approvals come from BOTH paths so a (re)connecting client sees every
+  # tool call awaiting its decision regardless of which backend escalated it.
   defp pending_approvals(agent_id) do
+    consensus_pending(agent_id) ++ interaction_pending(agent_id)
+  end
+
+  defp consensus_pending(agent_id) do
     case bridge_call(consensus_mod(), :list_pending, []) do
       {:ok, proposals} when is_list(proposals) ->
         proposals
         |> Enum.filter(fn p -> Map.get(p, :proposer) == agent_id end)
         |> Enum.map(&approval_view/1)
+
+      _ ->
+        []
+    end
+  end
+
+  defp interaction_pending(agent_id) do
+    case bridge_call(interaction_router(), :pending, []) do
+      {:ok, list} when is_list(list) ->
+        list
+        |> Enum.filter(fn i ->
+          Map.get(i, :agent_id) == agent_id and Map.get(i, :kind) == :approval
+        end)
+        |> Enum.map(&interaction_view/1)
 
       _ ->
         []
@@ -190,6 +240,43 @@ defmodule Arbor.Gateway.Chat.Socket do
       proposal_id: Map.get(proposal, :id),
       tool: get(meta, :tool) || get(meta, :action) || get(meta, :resource) || "tool",
       args: get(meta, :args) || get(meta, :params) || %{}
+    }
+  end
+
+  # Render an InteractionRouter interaction (struct or map) as an approval view.
+  # The interaction has no friendly tool name — its resource_uri / description is
+  # the most specific thing to show the operator.
+  defp interaction_view(interaction) do
+    %{
+      proposal_id: to_string(Map.get(interaction, :request_id)),
+      tool:
+        to_string(
+          Map.get(interaction, :resource_uri) || Map.get(interaction, :description) || "tool"
+        ),
+      args: Map.get(interaction, :metadata) || %{}
+    }
+  end
+
+  # Look the full interaction up by request_id to build a rich approval_request
+  # (the `interaction.*` signal only carries ids). Falls back to the signal data.
+  defp interaction_approval_view(request_id, data) do
+    case bridge_call(interaction_router(), :pending, []) do
+      {:ok, list} when is_list(list) ->
+        case Enum.find(list, fn i -> Map.get(i, :request_id) == request_id end) do
+          nil -> fallback_approval_view(request_id, data)
+          interaction -> interaction_view(interaction)
+        end
+
+      _ ->
+        fallback_approval_view(request_id, data)
+    end
+  end
+
+  defp fallback_approval_view(request_id, data) do
+    %{
+      proposal_id: to_string(request_id),
+      tool: to_string(get(data, :kind) || "approval"),
+      args: %{}
     }
   end
 
@@ -279,8 +366,18 @@ defmodule Arbor.Gateway.Chat.Socket do
       handler = fn signal -> send(socket, {:chat_signal, signal}) end
 
       # agent.* = deltas/notifications/tool-use for this agent;
-      # security.authorization_pending = HITL tool-approval requests.
-      for pattern <- ["agent.*", "security.authorization_pending"] do
+      # security.authorization_pending = HITL tool-approval via the Consensus path;
+      # interaction.requested/queued = HITL tool-approval via the InteractionRouter
+      # path (the one the live node actually uses — see resolve_approval). The
+      # Socket subscribing to the interaction signal IS the TUI's "adapter": it
+      # surfaces the prompt and responds via InteractionRouter.respond, so the
+      # TUI is a first-class approval surface alongside the dashboard.
+      for pattern <- [
+            "agent.*",
+            "security.authorization_pending",
+            "interaction.requested",
+            "interaction.queued"
+          ] do
         try do
           apply(mod, :subscribe, [pattern, handler])
         rescue
@@ -324,6 +421,20 @@ defmodule Arbor.Gateway.Chat.Socket do
       {:ok, {:delta, get(data, :text) || get(data, :delta) || ""}}
     else
       :ignore
+    end
+  end
+
+  # HITL (InteractionRouter path): an approval interaction was requested for this
+  # agent. The signal carries only ids (request_id/kind/agent_id) — not the tool
+  # or args — so look the full interaction up in the registry to render the prompt.
+  defp signal_to_event(%{category: :interaction, type: type, data: data})
+       when type in [:requested, :queued] do
+    request_id = get(data, :request_id)
+
+    cond do
+      is_nil(request_id) -> :ignore
+      get(data, :kind) != :approval -> :ignore
+      true -> {:ok, {:approval_request, interaction_approval_view(request_id, data)}}
     end
   end
 
@@ -444,4 +555,15 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   defp security_mod,
     do: Application.get_env(:arbor_gateway, :chat_security, Arbor.Security)
+
+  # HITL (InteractionRouter path): surfaces + resolves :ask approvals on the live
+  # node. The Socket subscribes to its `interaction.*` signals and responds via
+  # `respond/3`; the orchestrator's executor awaits the matching response topic.
+  defp interaction_router,
+    do:
+      Application.get_env(
+        :arbor_gateway,
+        :chat_interaction_router,
+        Arbor.Comms.InteractionRouter
+      )
 end

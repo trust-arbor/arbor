@@ -61,6 +61,27 @@ defmodule Arbor.Gateway.Chat.SocketTest.FakeCoordinator do
   def force_reject(_id, _actor), do: {:ok, :rejected}
 end
 
+# InteractionRouter stub — "irq_…" ids resolve here (the live node's :ask path).
+defmodule Arbor.Gateway.Chat.SocketTest.FakeInteractionRouter do
+  def respond(_request_id, _response, _metadata), do: :ok
+  def pending, do: []
+end
+
+defmodule Arbor.Gateway.Chat.SocketTest.FakeInteractionRouterPending do
+  def respond(_request_id, _response, _metadata), do: :ok
+
+  def pending,
+    do: [
+      %{
+        request_id: "irq_2",
+        agent_id: "agent_a",
+        kind: :approval,
+        resource_uri: "arbor://shell/exec/ls",
+        metadata: %{}
+      }
+    ]
+end
+
 defmodule Arbor.Gateway.Chat.SocketTest do
   use ExUnit.Case, async: false
 
@@ -102,6 +123,12 @@ defmodule Arbor.Gateway.Chat.SocketTest do
       Arbor.Gateway.Chat.SocketTest.DenySecurity
     )
 
+    Application.put_env(
+      :arbor_gateway,
+      :chat_interaction_router,
+      Arbor.Gateway.Chat.SocketTest.FakeInteractionRouter
+    )
+
     on_exit(fn ->
       for k <- [
             :chat_engagement_store,
@@ -111,7 +138,8 @@ defmodule Arbor.Gateway.Chat.SocketTest do
             :chat_capability_store,
             :chat_consensus,
             :chat_consensus_coordinator,
-            :chat_security
+            :chat_security,
+            :chat_interaction_router
           ] do
         Application.delete_env(:arbor_gateway, k)
       end
@@ -261,7 +289,34 @@ defmodule Arbor.Gateway.Chat.SocketTest do
                decode_frames(frames)
     end
 
-    test "approve → force_approve + approval_resolved frame", %{state: state} do
+    test "an interaction.requested signal becomes an approval_request frame", %{state: state} do
+      st = attach(state, "agent_a")
+
+      # Set the pending interaction AFTER attach so the engagement frame stays
+      # clean; the Socket looks the interaction up when the signal arrives.
+      Application.put_env(
+        :arbor_gateway,
+        :chat_interaction_router,
+        Arbor.Gateway.Chat.SocketTest.FakeInteractionRouterPending
+      )
+
+      # The interaction signal carries only ids — the Socket looks the full
+      # interaction up in the router registry to render tool + args.
+      signal = %{
+        category: :interaction,
+        type: :requested,
+        data: %{request_id: "irq_2", kind: :approval, agent_id: "agent_a"}
+      }
+
+      {:push, frames, _} = Socket.handle_info({:chat_signal, signal}, st)
+
+      assert [%{"type" => "approval_request", "proposal_id" => "irq_2", "tool" => tool}] =
+               decode_frames(frames)
+
+      assert tool == "arbor://shell/exec/ls"
+    end
+
+    test "approve of an irq_ id resolves via the InteractionRouter", %{state: state} do
       st = attach(state, "agent_a")
       {:push, [event], _} = send_frame(%{type: "approve", proposal_id: "irq_1"}, st)
 
@@ -272,12 +327,23 @@ defmodule Arbor.Gateway.Chat.SocketTest do
              }
     end
 
-    test "deny → force_reject + approval_resolved frame", %{state: state} do
+    test "deny of an irq_ id resolves via the InteractionRouter", %{state: state} do
       st = attach(state, "agent_a")
       {:push, [event], _} = send_frame(%{type: "deny", proposal_id: "irq_1"}, st)
 
       assert event["type"] == "approval_resolved"
       assert event["status"] == "deny"
+    end
+
+    test "approve of a non-irq id resolves via Consensus", %{state: state} do
+      st = attach(state, "agent_a")
+      {:push, [event], _} = send_frame(%{type: "approve", proposal_id: "prop_1"}, st)
+
+      assert event == %{
+               "type" => "approval_resolved",
+               "proposal_id" => "prop_1",
+               "status" => "approve"
+             }
     end
 
     test "list_approvals returns the agent's pending proposals", %{state: state} do
