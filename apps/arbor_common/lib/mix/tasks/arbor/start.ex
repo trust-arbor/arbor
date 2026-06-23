@@ -59,6 +59,11 @@ defmodule Mix.Tasks.Arbor.Start do
     project_dir = File.cwd!()
     log_file = Config.log_file()
 
+    # Fresh nodes don't have ~/.arbor/logs yet — create it before the shell
+    # redirect below writes to it (otherwise: "cannot create … Directory
+    # nonexistent"). Covers `mix arbor.restart` too (it delegates to Start.run).
+    Config.ensure_runtime_dirs()
+
     # Resolve the real elixir and mix paths from the running Elixir installation.
     # This avoids mise/asdf shim binaries which are Mach-O executables that
     # crash when loaded by `elixir -S mix` (Code.require_file tries to parse

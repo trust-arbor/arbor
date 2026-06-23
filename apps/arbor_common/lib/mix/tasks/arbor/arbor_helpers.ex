@@ -143,6 +143,22 @@ defmodule Mix.Tasks.Arbor.Helpers do
   def log_file, do: @log_file
 
   @doc """
+  Ensure the runtime directories for the pid + log files exist.
+
+  On a fresh node (e.g. a brand-new Proxmox host) `~/.arbor/logs` doesn't exist
+  yet, so the background launch's `> #{@log_file}` shell redirect fails with
+  "cannot create … : Directory nonexistent". Create both parents up front;
+  `mkdir -p` semantics make this idempotent. (`Path.dirname(@log_file)` also
+  creates `~/.arbor`, covering the pid file, but we ensure both explicitly.)
+  """
+  @spec ensure_runtime_dirs() :: :ok
+  def ensure_runtime_dirs do
+    File.mkdir_p!(Path.dirname(@log_file))
+    File.mkdir_p!(Path.dirname(@pid_file))
+    :ok
+  end
+
+  @doc """
   Returns the hostname/IP for node names.
 
   Priority:
