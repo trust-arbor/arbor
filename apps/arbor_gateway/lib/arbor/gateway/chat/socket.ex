@@ -208,6 +208,22 @@ defmodule Arbor.Gateway.Chat.Socket do
       {:ok,
        {:notification, %{text: get(data, :text) || "", kind: get(data, :kind) || :notification}}}
 
+  # Tool invocation (live, from the turn's ToolLoop) → a `tool_use` frame so the
+  # client can render it inline (⚡). `:tool_call_started` fires as each tool is
+  # dispatched; data carries the tool name + the argument keys.
+  defp signal_to_event(%{type: :tool_call_started, data: data}) do
+    name = to_string(get(data, :tool) || get(data, :name) || get(data, :tool_name) || "")
+
+    # Skip blank-name tool calls — these come from models that emit textual
+    # tool-call syntax (e.g. a <tool_code> block) that mis-parses into an
+    # empty-named call rather than a structured tool_call.
+    if name == "" do
+      :ignore
+    else
+      {:ok, {:tool_use, %{name: name, args: get(data, :arg_keys) || []}}}
+    end
+  end
+
   defp signal_to_event(%{type: :stream_delta, data: data}) do
     if get(data, :source) == :turn do
       {:ok, {:delta, get(data, :text) || get(data, :delta) || ""}}
