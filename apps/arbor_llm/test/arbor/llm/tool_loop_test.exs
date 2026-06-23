@@ -262,6 +262,48 @@ defmodule Arbor.LLM.ToolLoopTest do
     end
   end
 
+  # Exercises the STREAMING tool-loop path (stream_callback set → ToolLoop uses
+  # Client.complete_streaming). Regression for: streamed tool calls used to lose
+  # their ARGUMENTS (and earlier their name). complete_streaming must fire the
+  # delta callback AND return a tool call with full args so the tool executes.
+  defmodule StreamAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "stream_test"
+
+    def complete(%Request{} = request, _opts) do
+      case List.last(request.messages).role do
+        :tool ->
+          {:ok,
+           %Response{
+             text: "File contains: #{List.last(request.messages).content}",
+             finish_reason: :stop,
+             content_parts: [
+               ContentPart.text("File contains: #{List.last(request.messages).content}")
+             ],
+             usage: %{},
+             raw: %{}
+           }}
+
+        _ ->
+          {:ok,
+           %Response{
+             text: "",
+             finish_reason: :tool_calls,
+             content_parts: [ContentPart.tool_call("c1", "read_file", %{"path" => "hello.txt"})],
+             usage: %{},
+             raw: %{}
+           }}
+      end
+    end
+
+    # The real adapter assembles full args here (process_stream); the fake just
+    # reuses complete/2 so the returned tool call carries its arguments.
+    def complete_streaming(%Request{} = request, callback, _opts) do
+      callback.(%Arbor.LLM.StreamEvent{type: :delta, data: %{text: "streaming…"}})
+      complete(request, [])
+    end
+  end
+
   defp build_client(adapter) do
     Client.new(default_provider: adapter.provider())
     |> Client.register_adapter(adapter)
@@ -398,6 +440,30 @@ defmodule Arbor.LLM.ToolLoopTest do
       # Pre-fix: content was "" (empty turn — the model finished with no text
       # after the tool round). The tools-stripped retry now forces a text answer.
       assert result.content == "Final answer"
+    end
+
+    @tag :tmp_dir
+    test "streaming path (complete_streaming) preserves tool args + fires deltas (regression)",
+         %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "hello.txt"), "world")
+
+      client = build_client(StreamAdapter)
+      test_pid = self()
+
+      {:ok, result} =
+        ToolLoop.run(client, request("stream_test"),
+          workdir: tmp_dir,
+          tool_executor: MockTools,
+          stream_callback: fn ev -> send(test_pid, {:delta, ev}) end
+        )
+
+      # The delta callback fired (real-time streaming preserved).
+      assert_received {:delta, %Arbor.LLM.StreamEvent{type: :delta}}
+
+      # The tool executed with its "path" argument (read hello.txt → "world").
+      # An empty-arg tool call — the bug — would have read nothing.
+      assert result.content =~ ~r/File contains: <data_[0-9a-f]+>world<\/data_[0-9a-f]+>/
+      assert result.tool_rounds == 2
     end
 
     @tag :tmp_dir

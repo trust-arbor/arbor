@@ -318,6 +318,28 @@ defmodule Arbor.LLM.Client do
   end
 
   @doc """
+  Stream tokens to `callback` and return the fully-assembled response.
+
+  Unlike `stream/3` (a lazy chunk stream whose tool-call chunks lack assembled
+  arguments), this returns a complete `%Response{}` with tool calls + arguments
+  intact, while still delivering real-time deltas via `callback`
+  (`%Arbor.LLM.StreamEvent{}`). Falls back with `{:error, {:stream_not_supported,
+  adapter}}` if the adapter can't stream-and-assemble.
+  """
+  @spec complete_streaming(t(), Request.t(), (Arbor.LLM.StreamEvent.t() -> any()), keyword()) ::
+          {:ok, Response.t()} | {:error, term()}
+  def complete_streaming(%__MODULE__{} = client, %Request{} = request, callback, opts \\ [])
+      when is_function(callback, 1) do
+    with {:ok, adapter} <- resolve_adapter(client, request) do
+      if function_exported?(adapter, :complete_streaming, 3) do
+        adapter.complete_streaming(request, callback, opts)
+      else
+        {:error, {:stream_not_supported, adapter}}
+      end
+    end
+  end
+
+  @doc """
   Generate embeddings for a list of texts using the specified provider.
 
   Resolves the adapter from the request's provider and delegates to the

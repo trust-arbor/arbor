@@ -297,10 +297,14 @@ defmodule Arbor.LLM.ToolLoop do
         Client.complete(client, request, opts)
 
       callback ->
-        case Client.stream(client, request, opts) do
-          {:ok, events} ->
-            events = Stream.each(events, fn event -> callback.(event) end)
-            Client.collect_stream(events)
+        # complete_streaming delivers real-time deltas via `callback` AND returns
+        # a fully-assembled response with tool calls + ARGUMENTS. The old
+        # stream→collect_stream path dropped tool-call arguments (streamed
+        # tool-call chunks carry no assembled args), so tools ran with empty
+        # input. Fall back to complete/3 if the adapter can't stream-and-assemble.
+        case Client.complete_streaming(client, request, callback, opts) do
+          {:ok, _} = ok ->
+            ok
 
           {:error, {:stream_not_supported, _}} ->
             Client.complete(client, request, opts)
