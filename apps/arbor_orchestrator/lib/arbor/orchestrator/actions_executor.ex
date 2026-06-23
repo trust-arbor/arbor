@@ -183,6 +183,75 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   # Wait synchronously for approval, then retry execution on success.
   # On denial or timeout, return an error message to the LLM.
   defp await_approval_and_retry(proposal_id, agent_id, action_module, params, context, name) do
+    if interaction_request?(proposal_id) do
+      await_interaction_and_retry(proposal_id, agent_id, action_module, params, context, name)
+    else
+      await_consensus_and_retry(proposal_id, agent_id, action_module, params, context, name)
+    end
+  end
+
+  # `Escalation.submit_via_router` routes :ask approvals through
+  # `Arbor.Comms.InteractionRouter`, returning an "irq_…" request id whose
+  # decision arrives on the agent's interaction RESPONSE topic — NOT via
+  # Consensus. The DOT-turn path used to await `Consensus.await(irq_…)` and got
+  # `:not_found` for every router-routed approval (so no operator could approve
+  # an agent's tool call from the dashboard or TUI). Mirror the ACP handler's
+  # `await_human_approval` and wait on the response topic instead.
+  defp interaction_request?(id) when is_binary(id), do: String.starts_with?(id, "irq")
+  defp interaction_request?(_), do: false
+
+  defp await_interaction_and_retry(request_id, agent_id, action_module, params, context, name) do
+    topic = Arbor.Contracts.Comms.Interaction.response_topic_for_agent(agent_id)
+    timeout = approval_timeout()
+
+    Logger.info(
+      "[ActionsExecutor] Awaiting operator approval for #{name} via InteractionRouter " <>
+        "(request: #{request_id}, timeout: #{timeout}ms)"
+    )
+
+    task =
+      Task.async(fn ->
+        # Subscribe inside the Task so the subscription dies with it and stale
+        # responses can't leak into the caller's mailbox (per the ACP handler).
+        Phoenix.PubSub.subscribe(Arbor.Comms.PubSub, topic)
+
+        receive do
+          {:interaction_response, %{request_id: ^request_id, response: response}} ->
+            {:response, response}
+        after
+          timeout -> :timeout
+        end
+      end)
+
+    case Task.yield(task, timeout + 1_000) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:response, r}} when r in [:approved, :approve, "approved", "approve"] ->
+        track_approval(agent_id, action_module)
+        retry_execution(agent_id, action_module, params, context, name)
+
+      {:ok, {:response, r}}
+      when r in [:rejected, :reject, :denied, "rejected", "deny", "denied"] ->
+        {:error, "Action #{name} was denied by the operator. Request ID: #{request_id}."}
+
+      {:ok, {:response, other}} ->
+        {:error,
+         "Action #{name}: unexpected approval response #{inspect(other)}. " <>
+           "Request ID: #{request_id}."}
+
+      {:ok, :timeout} ->
+        {:error,
+         "Action #{name} requires approval but timed out after #{div(timeout, 1000)}s. " <>
+           "Request ID: #{request_id}. Ask the user to approve it and try again."}
+
+      _ ->
+        {:error, "Action #{name} approval wait failed. Request ID: #{request_id}."}
+    end
+  rescue
+    e ->
+      Logger.warning("[ActionsExecutor] await_interaction_and_retry crashed: #{inspect(e)}")
+      {:error, "Action #{name} requires approval. Request ID: #{request_id}"}
+  end
+
+  defp await_consensus_and_retry(proposal_id, agent_id, action_module, params, context, name) do
     consensus_mod = Module.concat([:Arbor, :Consensus])
 
     if Code.ensure_loaded?(consensus_mod) and
