@@ -442,7 +442,7 @@ defmodule Arbor.LLM.ToolLoop do
     cost_a = Map.get(a, :cost) || 0
 
     base
-    |> then(fn m -> if cost_b, do: Map.put(m, :cost, (cost_a || 0) + cost_b), else: m end)
+    |> then(fn m -> if cost_b, do: Map.put(m, :cost, add_cost(cost_a || 0, cost_b)), else: m end)
     |> add_optional(a, b, :input_tokens)
     |> add_optional(a, b, :output_tokens)
     |> add_optional(a, b, :cache_read_tokens)
@@ -461,6 +461,21 @@ defmodule Arbor.LLM.ToolLoop do
     str_key = to_string(key)
     (Map.get(a, key, 0) || 0) + (Map.get(b, key) || Map.get(b, str_key) || 0)
   end
+
+  # Accumulate `:cost` across tool rounds. Newer ReqLLM usage carries `:cost` as
+  # a nested breakdown MAP (`%{total:, input_cost:, line_items: [...], ...}`),
+  # not a number — so a naive `0 + cost_map` raised :badarith, which aborted the
+  # tool loop and surfaced as an empty turn. Merge structurally: numbers add,
+  # maps deep-merge field-by-field, and anything else (e.g. `line_items` lists)
+  # keeps the latest value. Never raises.
+  defp add_cost(a, b) when is_number(a) and is_number(b), do: a + b
+
+  defp add_cost(a, b) when is_map(a) and is_map(b),
+    do: Map.merge(a, b, fn _k, va, vb -> add_cost(va, vb) end)
+
+  defp add_cost(a, b) when is_number(a) and is_map(b), do: b
+  defp add_cost(a, _b) when is_map(a), do: a
+  defp add_cost(_a, b), do: b
 
   # Accumulate numeric usage fields that may be present in provider responses
   defp add_optional(map, a, b, key) do

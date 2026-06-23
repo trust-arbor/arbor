@@ -165,6 +165,54 @@ defmodule Arbor.LLM.ToolLoopTest do
 
   # --- Helpers ---
 
+  # Regression: newer ReqLLM usage carries `:cost` as a nested breakdown MAP
+  # (not a number). Merging usage across tool rounds used to do `0 + cost_map`,
+  # raising :badarith and aborting the loop → empty turns. This adapter returns
+  # that shape on both rounds so the test exercises cost-map accumulation.
+  defmodule CostMapAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "cost_map_test"
+
+    @cost %{total: 2.0e-6, input_cost: 1.0e-6, line_items: [%{count: 13, cost: 2.0e-6}]}
+
+    def complete(%Request{} = request, _opts) do
+      case List.last(request.messages).role do
+        :user ->
+          {:ok,
+           %Response{
+             text: "",
+             finish_reason: :tool_calls,
+             content_parts: [ContentPart.tool_call("c1", "read_file", %{"path" => "hello.txt"})],
+             usage: %{
+               "prompt_tokens" => 5,
+               "completion_tokens" => 3,
+               "total_tokens" => 8,
+               cost: @cost
+             },
+             raw: %{}
+           }}
+
+        :tool ->
+          {:ok,
+           %Response{
+             text: "ok",
+             finish_reason: :stop,
+             content_parts: [ContentPart.text("ok")],
+             usage: %{
+               "prompt_tokens" => 10,
+               "completion_tokens" => 5,
+               "total_tokens" => 15,
+               cost: @cost
+             },
+             raw: %{}
+           }}
+
+        _ ->
+          {:ok, %Response{text: "done", finish_reason: :stop, raw: %{}}}
+      end
+    end
+  end
+
   defp build_client(adapter) do
     Client.new(default_provider: adapter.provider())
     |> Client.register_adapter(adapter)
@@ -258,6 +306,31 @@ defmodule Arbor.LLM.ToolLoopTest do
 
       # LoopAdapter returns 8 tokens turn 1, 15 tokens turn 2
       assert result.usage.total_tokens == 23
+    end
+
+    @tag :tmp_dir
+    test "merges usage when :cost is a nested map (regression: :badarith on 0 + cost_map)",
+         %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "hello.txt"), "data")
+
+      client = build_client(CostMapAdapter)
+
+      # Pre-fix, merge_usage_maps did `0 + cost_map` and raised ArithmeticError
+      # here, aborting the loop and surfacing as an empty turn. The {:ok, _} match
+      # alone is the regression assertion (no crash).
+      {:ok, result} =
+        ToolLoop.run(client, request("cost_map_test"),
+          workdir: tmp_dir,
+          tool_executor: MockTools
+        )
+
+      assert result.content =~ "ok"
+      assert result.tool_rounds == 2
+      # Token totals still accumulate (8 + 15) and the cost MAP merged
+      # structurally across both rounds rather than crashing.
+      assert result.usage.total_tokens == 23
+      assert is_map(result.usage.cost)
+      assert result.usage.cost.total > 2.0e-6
     end
 
     @tag :tmp_dir

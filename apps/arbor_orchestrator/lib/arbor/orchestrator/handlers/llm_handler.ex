@@ -965,7 +965,14 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     case Map.get(node.attrs, "tools") do
       nil ->
         case Context.get(context, "session.tools") do
-          session_tools when is_list(session_tools) and session_tools != [] ->
+          # An explicit list — even empty — is authoritative: it's the agent's
+          # capability-scoped tool set from ToolDisclosure. Empty means "no tools",
+          # NOT "all tools". Falling back to the full ~170-action catalog on []
+          # overflowed the provider's 128-tool cap (400 array_above_max_length),
+          # which surfaced as an empty turn. Only a truly-absent (nil) session.tools
+          # — e.g. a non-session pipeline that never set it — defaults to the full
+          # catalog.
+          session_tools when is_list(session_tools) ->
             {resolve_tool_list(session_tools), executor}
 
           _ ->
