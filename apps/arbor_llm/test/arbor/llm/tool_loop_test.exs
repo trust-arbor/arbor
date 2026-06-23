@@ -213,6 +213,55 @@ defmodule Arbor.LLM.ToolLoopTest do
     end
   end
 
+  # Regression: some providers finish a tool round with finish_reason=:stop but
+  # EMPTY text (no further tool calls), which surfaced as an empty turn. ToolLoop
+  # should retry text-only (tools stripped) to force a final answer. This adapter
+  # returns empty after the tool round, then answers once tools are gone.
+  defmodule EmptyAfterToolAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "empty_after_tool_test"
+
+    # Text-only retry (ToolLoop stripped tools) → produce the answer.
+    def complete(%Request{tools: tools}, _opts) when tools in [nil, []] do
+      {:ok,
+       %Response{
+         text: "Final answer",
+         finish_reason: :stop,
+         content_parts: [ContentPart.text("Final answer")],
+         usage: %{"prompt_tokens" => 2, "completion_tokens" => 2, "total_tokens" => 4},
+         raw: %{}
+       }}
+    end
+
+    def complete(%Request{} = request, _opts) do
+      case List.last(request.messages).role do
+        :user ->
+          {:ok,
+           %Response{
+             text: "",
+             finish_reason: :tool_calls,
+             content_parts: [ContentPart.tool_call("c1", "read_file", %{"path" => "hello.txt"})],
+             usage: %{"prompt_tokens" => 5, "completion_tokens" => 3, "total_tokens" => 8},
+             raw: %{}
+           }}
+
+        :tool ->
+          # The bug condition: finished with empty text after the tool round.
+          {:ok,
+           %Response{
+             text: "",
+             finish_reason: :stop,
+             content_parts: [],
+             usage: %{"prompt_tokens" => 4, "completion_tokens" => 0, "total_tokens" => 4},
+             raw: %{}
+           }}
+
+        _ ->
+          {:ok, %Response{text: "done", finish_reason: :stop, raw: %{}}}
+      end
+    end
+  end
+
   defp build_client(adapter) do
     Client.new(default_provider: adapter.provider())
     |> Client.register_adapter(adapter)
@@ -331,6 +380,24 @@ defmodule Arbor.LLM.ToolLoopTest do
       assert result.usage.total_tokens == 23
       assert is_map(result.usage.cost)
       assert result.usage.cost.total > 2.0e-6
+    end
+
+    @tag :tmp_dir
+    test "retries text-only when the model finishes empty after a tool round (regression)",
+         %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "hello.txt"), "data")
+
+      client = build_client(EmptyAfterToolAdapter)
+
+      {:ok, result} =
+        ToolLoop.run(client, request("empty_after_tool_test"),
+          workdir: tmp_dir,
+          tool_executor: MockTools
+        )
+
+      # Pre-fix: content was "" (empty turn — the model finished with no text
+      # after the tool round). The tools-stripped retry now forces a text answer.
+      assert result.content == "Final answer"
     end
 
     @tag :tmp_dir

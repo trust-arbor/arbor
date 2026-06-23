@@ -210,39 +210,64 @@ defmodule Arbor.LLM.ToolLoop do
           loop(client, next_request, opts, %{state | turn: state.turn + 1})
         else
           # Final response — return as normalized PipelineResponse
-          if (response.text || "") == "" do
-            require Logger
-
-            Logger.warning(
-              "[ToolLoop] Final response has empty text after #{state.turn + 1} tool rounds. " <>
-                "finish_reason=#{inspect(response.finish_reason)} " <>
-                "content_parts=#{inspect(Enum.map(response.content_parts || [], & &1.kind))} " <>
-                "text=#{inspect(response.text, limit: 100)}"
-            )
-          end
-
-          # Combine accumulated text from intermediate rounds with final response
           accumulated = Map.get(state, :accumulated_text) || ""
           final_response = if is_binary(response.text), do: String.trim(response.text), else: ""
+          had_tools = request.tools not in [nil, []]
 
-          final_text =
-            case {accumulated, final_response} do
-              {"", ""} -> ""
-              {"", text} -> text
-              {acc, ""} -> acc
-              {acc, text} -> acc <> "\n\n" <> text
-            end
+          cond do
+            # The model finished (no further tool calls) but produced no text, and
+            # nothing was accumulated from earlier rounds — yet tools were on the
+            # table. Some providers return an empty final message after a tool
+            # round (or emit only a tool call and then stop). Force a final answer
+            # with tools stripped so the model MUST respond in text. The retry
+            # request sets tools: [], so `had_tools` is false next time — this
+            # cannot recurse a second time.
+            final_response == "" and accumulated == "" and had_tools ->
+              require Logger
 
-          {:ok,
-           %PipelineResponse{
-             content: final_text,
-             content_parts: response.content_parts || [],
-             finish_reason: response.finish_reason,
-             usage: state.total_usage,
-             tool_rounds: state.turn + 1,
-             raw: response.raw,
-             discovered_tools: state.discovered_tools
-           }}
+              Logger.info(
+                "[ToolLoop] Empty final text after #{state.turn + 1} round(s); " <>
+                  "retrying text-only for agent #{state.agent_id}"
+              )
+
+              retry_request = %{
+                request
+                | tools: [],
+                  messages: request.messages ++ [text_only_wrap_up_message()]
+              }
+
+              loop(client, retry_request, opts, state)
+
+            true ->
+              final_text =
+                case {accumulated, final_response} do
+                  {"", ""} -> ""
+                  {"", text} -> text
+                  {acc, ""} -> acc
+                  {acc, text} -> acc <> "\n\n" <> text
+                end
+
+              if final_text == "" do
+                require Logger
+
+                Logger.warning(
+                  "[ToolLoop] Final response has empty text after #{state.turn + 1} tool rounds. " <>
+                    "finish_reason=#{inspect(response.finish_reason)} " <>
+                    "content_parts=#{inspect(Enum.map(response.content_parts || [], & &1.kind))}"
+                )
+              end
+
+              {:ok,
+               %PipelineResponse{
+                 content: final_text,
+                 content_parts: response.content_parts || [],
+                 finish_reason: response.finish_reason,
+                 usage: state.total_usage,
+                 tool_rounds: state.turn + 1,
+                 raw: response.raw,
+                 discovered_tools: state.discovered_tools
+               }}
+          end
         end
 
       {:error, reason} = error ->
@@ -476,6 +501,16 @@ defmodule Arbor.LLM.ToolLoop do
   defp add_cost(a, b) when is_number(a) and is_map(b), do: b
   defp add_cost(a, _b) when is_map(a), do: a
   defp add_cost(_a, b), do: b
+
+  # Instruction appended for a tools-stripped final pass, forcing a plain-text
+  # answer when the model finished a tool round without producing any text.
+  defp text_only_wrap_up_message do
+    Message.new(
+      :system,
+      "Respond now with a plain-text answer for the user based on what you've done. " <>
+        "Do NOT output any tool calls or JSON — text only."
+    )
+  end
 
   # Accumulate numeric usage fields that may be present in provider responses
   defp add_optional(map, a, b, key) do
