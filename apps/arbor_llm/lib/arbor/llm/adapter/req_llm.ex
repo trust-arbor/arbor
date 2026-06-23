@@ -120,6 +120,42 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     end
   end
 
+  @doc """
+  Stream tokens via `callback` AND return the fully-assembled response.
+
+  The lazy `stream/2` path surfaces tool-call *names* but not their *arguments*
+  (in streaming, ReqLLM emits the tool-call chunk without assembled args — they
+  only land in `StreamResponse`'s reconstructed message). So a tool loop that
+  streams would get empty-argument tool calls.
+
+  `ReqLLM.StreamResponse.process_stream/2` consumes the stream exactly once,
+  fires `on_result`/`on_thinking` for real-time deltas, and returns a complete
+  `%ReqLLM.Response{}` whose `message.tool_calls` carry full arguments — which
+  `translate_response/2` turns into proper tool_call content parts. `callback`
+  receives `%Arbor.LLM.StreamEvent{}` values, matching the lazy-stream contract.
+  """
+  @spec complete_streaming(Request.t(), (Arbor.LLM.StreamEvent.t() -> any()), keyword()) ::
+          {:ok, Response.t()} | {:error, term()}
+  def complete_streaming(%Request{} = request, callback, opts \\ [])
+      when is_function(callback, 1) do
+    with {:ok, model_spec} <- build_model_spec(request),
+         messages <- translate_messages(request.messages),
+         req_opts <- build_req_opts(request, opts),
+         {:ok, %ReqLLM.StreamResponse{} = stream_response} <-
+           call_req_llm_stream(model_spec, messages, req_opts),
+         {:ok, %ReqLLM.Response{} = resp} <-
+           ReqLLM.StreamResponse.process_stream(stream_response,
+             on_result: fn text ->
+               callback.(%Arbor.LLM.StreamEvent{type: :delta, data: %{text: text}})
+             end,
+             on_thinking: fn text ->
+               callback.(%Arbor.LLM.StreamEvent{type: :delta, data: %{thinking: text}})
+             end
+           ) do
+      {:ok, translate_response(resp, request)}
+    end
+  end
+
   @impl true
   @spec embed(texts :: [String.t()], model :: String.t(), opts :: keyword()) ::
           {:ok,
