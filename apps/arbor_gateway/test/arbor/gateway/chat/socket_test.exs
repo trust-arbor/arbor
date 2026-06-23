@@ -17,12 +17,13 @@ defmodule Arbor.Gateway.Chat.SocketTest.FakeEngagementStore do
 end
 
 defmodule Arbor.Gateway.Chat.SocketTest.FakeManager do
-  # host_pid just needs to be a live pid; the fake APIAgent ignores it.
-  def find_agent(_agent_id), do: {:ok, self(), %{host_pid: self()}}
+  # The turn is driven through the Session (meta[:session_pid]); the pid just
+  # needs to be live since the fake Session ignores it.
+  def find_agent(_agent_id), do: {:ok, self(), %{host_pid: self(), session_pid: self()}}
 end
 
-defmodule Arbor.Gateway.Chat.SocketTest.FakeAPIAgent do
-  def query(_host_pid, user_message) do
+defmodule Arbor.Gateway.Chat.SocketTest.FakeSession do
+  def send_message(_session_pid, user_message) do
     {:ok, %{text: "echo:" <> user_message.content, usage: %{tokens: 1}}}
   end
 end
@@ -49,9 +50,9 @@ defmodule Arbor.Gateway.Chat.SocketTest do
 
   alias Arbor.Gateway.Chat.SocketTest.{
     AllowSecurity,
-    FakeAPIAgent,
     FakeEngagementStore,
     FakeManager,
+    FakeSession,
     FakeSignals
   }
 
@@ -60,7 +61,7 @@ defmodule Arbor.Gateway.Chat.SocketTest do
   setup do
     Application.put_env(:arbor_gateway, :chat_engagement_store, FakeEngagementStore)
     Application.put_env(:arbor_gateway, :chat_agent_manager, FakeManager)
-    Application.put_env(:arbor_gateway, :chat_agent_query, FakeAPIAgent)
+    Application.put_env(:arbor_gateway, :chat_session, FakeSession)
     Application.put_env(:arbor_gateway, :chat_signals, FakeSignals)
     Application.put_env(:arbor_gateway, :chat_capability_store, AllowSecurity)
 
@@ -68,7 +69,7 @@ defmodule Arbor.Gateway.Chat.SocketTest do
       for k <- [
             :chat_engagement_store,
             :chat_agent_manager,
-            :chat_agent_query,
+            :chat_session,
             :chat_signals,
             :chat_capability_store
           ] do

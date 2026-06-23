@@ -7,9 +7,12 @@ defmodule Arbor.Gateway.Chat.Socket do
   engagement, `send`s turns, and receives streamed deltas + proactive
   notifications forwarded from the agent's `agent.*` signals.
 
-  Cross-app reach (Manager / APIAgent / EngagementStore are at/above this app's
+  Cross-app reach (Manager / Session / EngagementStore are at/above this app's
   level) goes through `bridge_call/3` runtime indirection — the same seam
-  `Arbor.Gateway.MCP.Handler` uses; no compile-time deps added.
+  `Arbor.Gateway.MCP.Handler` uses; no compile-time deps added. The turn is
+  driven through the agent's **Session** (`send_message`), not APIAgent directly,
+  so it runs the engagement-aware DOT turn pipeline (tool scoping + transcript
+  swap) rather than a bare LLM call.
 
   Testing: the handler is covered frame-level by `socket_test.exs` (real callbacks,
   fakes for collaborators), and the cowboy WS upgrade + SignedRequest auth + frame
@@ -73,7 +76,14 @@ defmodule Arbor.Gateway.Chat.Socket do
   end
 
   defp handle_command(:cancel, %{agent_id: agent_id} = state) when is_binary(agent_id) do
-    _ = bridge_call(agent_manager(), :cancel_turn, [agent_id])
+    case bridge_value(agent_manager(), :find_agent, [agent_id]) do
+      {:ok, _pid, %{session_pid: session_pid}} when is_pid(session_pid) ->
+        bridge_call(session_mod(), :cancel_turn, [session_pid])
+
+      _ ->
+        :ok
+    end
+
     {:ok, state}
   end
 
@@ -208,11 +218,18 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   # ── Agent turn (runtime indirection) ──────────────────────────────
 
+  # Drive the turn through the agent's SESSION (the single-mind engagement
+  # holder), not APIAgent.query directly. The Session runs the DOT turn pipeline
+  # — which scopes tools via ToolDisclosure (the direct path dumped the full
+  # ~170-tool catalog, overflowing the provider's 128 cap) — and routes the
+  # engagement_id (carried in the UserMessage) through maybe_switch_engagement,
+  # so the engagement substrate is actually exercised. The reply shape
+  # ({:ok, %{text:, usage:}}) matches what handle_info/{:query_result} expects.
   defp query_agent(agent_id, engagement_id, text) do
-    with {:ok, pid, meta} <- bridge_value(agent_manager(), :find_agent, [agent_id]),
-         host_pid when is_pid(host_pid) <- meta[:host_pid] || pid,
+    with {:ok, _pid, meta} <- bridge_value(agent_manager(), :find_agent, [agent_id]),
+         session_pid when is_pid(session_pid) <- meta[:session_pid],
          user_message <- build_user_message(text, engagement_id) do
-      bridge_value(agent_query(), :query, [host_pid, user_message])
+      bridge_value(session_mod(), :send_message, [session_pid, user_message])
     else
       _ -> {:error, :agent_not_found}
     end
@@ -268,8 +285,8 @@ defmodule Arbor.Gateway.Chat.Socket do
   defp agent_manager,
     do: Application.get_env(:arbor_gateway, :chat_agent_manager, Arbor.Agent.Manager)
 
-  defp agent_query,
-    do: Application.get_env(:arbor_gateway, :chat_agent_query, Arbor.Agent.APIAgent)
+  defp session_mod,
+    do: Application.get_env(:arbor_gateway, :chat_session, Arbor.Orchestrator.Session)
 
   defp signals_mod,
     do: Application.get_env(:arbor_gateway, :chat_signals, Arbor.Signals)
