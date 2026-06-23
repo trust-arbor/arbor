@@ -580,7 +580,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
            model: routed_model,
            runtime: runtime,
            messages: messages,
-           max_tokens: parse_int(Map.get(node.attrs, "max_tokens"), 4096),
+           # No artificial cap — a 4096 default truncated long agentic/tool-use
+           # turns. nil lets the provider use the model's full output budget; set
+           # the `max_tokens` node attr to cap explicitly when needed.
+           max_tokens: parse_int(Map.get(node.attrs, "max_tokens"), nil),
            temperature: parse_float(Map.get(node.attrs, "temperature"), 0.7),
            # Forwards to req_llm as :receive_timeout (HTTP-layer cutoff).
            # req_llm defaults to 30s for openai-compatible providers, which
