@@ -53,22 +53,28 @@ defmodule Arbor.Common.AgentTelemetry do
   """
   @spec record_turn(Telemetry.t(), map()) :: Telemetry.t()
   def record_turn(%Telemetry{} = t, usage) when is_map(usage) do
-    input = Map.get(usage, :input_tokens, 0)
-    output = Map.get(usage, :output_tokens, 0)
-    cached = Map.get(usage, :cached_tokens, 0)
-    cost = Map.get(usage, :cost, 0.0)
+    # Coerce every numeric value with num/1. Two non-number shapes reach here in
+    # practice: (1) lifetime_* fields restored from Postgres come back as
+    # %Decimal{} (SUM(...)::bigint), and (2) `:cost` may be a nested breakdown
+    # MAP from newer ReqLLM usage. Either one made the `+` below raise :badarith,
+    # which the caller's rescue silently swallowed — so turn telemetry had been
+    # quietly not recording. num/1 makes the arithmetic total-function.
+    input = num(Map.get(usage, :input_tokens, 0))
+    output = num(Map.get(usage, :output_tokens, 0))
+    cached = num(Map.get(usage, :cached_tokens, 0))
+    cost = num(Map.get(usage, :cost, 0.0))
     duration_ms = Map.get(usage, :duration_ms, nil)
     provider = Map.get(usage, :provider, nil)
 
     cost_by_provider =
       if provider do
-        Map.update(t.cost_by_provider, to_string(provider), cost, &(&1 + cost))
+        Map.update(t.cost_by_provider, to_string(provider), cost, &(num(&1) + cost))
       else
         t.cost_by_provider
       end
 
     llm_latencies =
-      if duration_ms do
+      if is_number(duration_ms) do
         append_to_window(t.llm_latencies, duration_ms)
       else
         t.llm_latencies
@@ -76,20 +82,48 @@ defmodule Arbor.Common.AgentTelemetry do
 
     %Telemetry{
       t
-      | session_input_tokens: t.session_input_tokens + input,
-        session_output_tokens: t.session_output_tokens + output,
-        session_cached_tokens: t.session_cached_tokens + cached,
-        session_cost: t.session_cost + cost,
-        lifetime_input_tokens: t.lifetime_input_tokens + input,
-        lifetime_output_tokens: t.lifetime_output_tokens + output,
-        lifetime_cached_tokens: t.lifetime_cached_tokens + cached,
-        lifetime_cost: t.lifetime_cost + cost,
+      | session_input_tokens: num(t.session_input_tokens) + input,
+        session_output_tokens: num(t.session_output_tokens) + output,
+        session_cached_tokens: num(t.session_cached_tokens) + cached,
+        session_cost: num(t.session_cost) + cost,
+        lifetime_input_tokens: num(t.lifetime_input_tokens) + input,
+        lifetime_output_tokens: num(t.lifetime_output_tokens) + output,
+        lifetime_cached_tokens: num(t.lifetime_cached_tokens) + cached,
+        lifetime_cost: num(t.lifetime_cost) + cost,
         cost_by_provider: cost_by_provider,
-        turn_count: t.turn_count + 1,
+        turn_count: num(t.turn_count) + 1,
         llm_latencies: llm_latencies,
         updated_at: DateTime.utc_now()
     }
   end
+
+  # Coerce a usage/accumulator value to a plain number. Handles %Decimal{}
+  # (from Postgres aggregates), a nested cost breakdown map (uses :total), nil,
+  # and anything else (→ 0). Referenced struct/module names resolve at runtime,
+  # so this needs no compile-time dep on `decimal`.
+  defp num(n) when is_number(n), do: n
+
+  # %Decimal{} (Postgres aggregates) — resolve via apply so there's no
+  # compile-time dep on `decimal`. Other structs → 0.
+  defp num(%{__struct__: mod} = v) when is_atom(mod) do
+    cond do
+      function_exported?(mod, :integer?, 1) and function_exported?(mod, :to_integer, 1) ->
+        if apply(mod, :integer?, [v]),
+          do: apply(mod, :to_integer, [v]),
+          else: apply(mod, :to_float, [v])
+
+      function_exported?(mod, :to_float, 1) ->
+        apply(mod, :to_float, [v])
+
+      true ->
+        0
+    end
+  end
+
+  # Nested cost breakdown map (newer ReqLLM usage) — use its total.
+  defp num(%{total: t}) when is_number(t), do: t
+  defp num(%{"total" => t}) when is_number(t), do: t
+  defp num(_), do: 0
 
   @doc """
   Record a tool call.

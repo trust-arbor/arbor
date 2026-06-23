@@ -6,6 +6,38 @@ defmodule Arbor.Common.AgentTelemetryTest do
 
   @moduletag :fast
 
+  # Mimics the %Decimal{} API (integer?/to_integer/to_float) that Postgres
+  # aggregates return, without depending on the `decimal` package — record_turn's
+  # coercion resolves these via apply/3 at runtime.
+  defmodule FakeDecimal do
+    defstruct [:int]
+    def integer?(%__MODULE__{int: i}), do: is_integer(i)
+    def to_integer(%__MODULE__{int: i}), do: i
+    def to_float(%__MODULE__{int: i}), do: i * 1.0
+  end
+
+  describe "record_turn/2 numeric coercion (regression)" do
+    test "coerces Decimal-like accumulator fields (Postgres SUM → struct → :badarith)" do
+      # lifetime_* fields restored from a Postgres aggregate come back as
+      # %Decimal{}; pre-fix `Decimal + integer` raised ArithmeticError here.
+      t = %Telemetry{agent_id: "x", lifetime_input_tokens: %FakeDecimal{int: 100}}
+
+      result = AgentTelemetry.record_turn(t, %{input_tokens: 5, output_tokens: 3})
+
+      assert result.lifetime_input_tokens == 105
+    end
+
+    test "handles a nested :cost map and a nil accumulator without crashing" do
+      t = %Telemetry{agent_id: "x", session_cost: nil}
+
+      result =
+        AgentTelemetry.record_turn(t, %{cost: %{total: 0.5, line_items: []}, input_tokens: 1})
+
+      assert result.session_cost == 0.5
+      assert result.session_input_tokens == 1
+    end
+  end
+
   # ===========================================================================
   # Construct
   # ===========================================================================
