@@ -403,11 +403,15 @@ defmodule Arbor.LLM.Client do
               %{acc | text: acc.text <> to_string(chunk)}
 
             %StreamEvent{type: :tool_call, data: data} ->
+              # translate_stream_chunk emits ATOM keys (%{name:, arguments:});
+              # other sources may use string keys. Reading only "name"/"id"
+              # dropped the streamed tool-call name → empty-named calls →
+              # "Unknown action:" → tool-loop spiral. Read atom keys first.
               part =
                 ContentPart.tool_call(
-                  data["id"] || "",
-                  data["name"] || "",
-                  decode_tool_args(data["arguments"])
+                  data[:id] || data["id"] || "",
+                  data[:name] || data["name"] || "",
+                  decode_tool_args(data[:arguments] || data["arguments"])
                 )
 
               %{acc | tool_calls: acc.tool_calls ++ [part]}
