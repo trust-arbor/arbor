@@ -85,21 +85,36 @@ config :arbor_actions, :persistence,
   queryable_store_backend: Arbor.Persistence.QueryableStore.Postgres,
   event_log_backend: Arbor.Persistence.EventLog.Postgres
 
-# Agent — auto-start infrastructure agents on boot
-config :arbor_agent, :auto_start_agents, [
-  %{
-    display_name: "diagnostician",
-    module: Arbor.Agent.APIAgent,
-    template: "diagnostician",
-    model_config: %{
-      # Matches default_model in config.exs:165 — keep in sync if changing.
-      id: "openai/gpt-oss-120b:free",
-      provider: :openrouter,
-      backend: :api
-    },
-    start_host: true
-  }
-]
+# Agent — auto-start infrastructure agents on boot.
+#
+# DISABLED 2026-06-22: the at-boot diagnostician seed was broken — its identity
+# never registered in Arbor.Agent.Registry (so `find_agent`/`stop_agent` can't
+# see it), yet its orphaned BranchSupervisor heartbeat kept firing the
+# `arbor://orchestrator/execute` authorization gate every ~30s. Each beat
+# escalated via the InteractionRouter, flooding the operator's Signal with
+# thousands of orphaned approval requests. The trust profile is NOT the lever
+# (effective_mode :auto / :veteran tier did not stop it — the break is the
+# bootstrap path, not trust).
+#
+# Re-enable only after migrating the diagnostician to the STANDARD agent
+# lifecycle (Lifecycle.create/start + auto_start flag on its persisted profile)
+# instead of this at-boot seed, so it gets a registered identity + a real trust
+# profile like every other agent. Tracked in
+# `.arbor/roadmap/0-inbox/diagnostician-bootstrap-migration.md`.
+config :arbor_agent, :auto_start_agents, []
+
+# Original seed, preserved for the migration:
+#   %{
+#     display_name: "diagnostician",
+#     module: Arbor.Agent.APIAgent,
+#     template: "diagnostician",
+#     model_config: %{
+#       id: "openai/gpt-oss-120b:free",
+#       provider: :openrouter,
+#       backend: :api
+#     },
+#     start_host: true
+#   }
 
 # Security — all features enabled in dev.
 # Tests disable what they need; dev should match prod behavior.
