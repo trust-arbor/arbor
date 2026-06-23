@@ -83,10 +83,12 @@ defmodule Arbor.LLM.ToolLoop do
       "[ToolLoop] Hit #{max} turn limit. Making final text-only call for agent #{state.agent_id}"
     )
 
-    # Strip tools and add instruction to respond with text only
+    # Strip tools and add instruction to respond with text only.
+    # :user (not :system) — the context already has a system prompt and
+    # OpenAI-compatible providers reject a second system message.
     wrap_up_msg =
       Message.new(
-        :system,
+        :user,
         "You have used all available tool call rounds. You MUST now respond with a text " <>
           "summary of what you accomplished and any remaining issues. Do NOT output any " <>
           "tool calls or JSON — respond in plain text only."
@@ -504,10 +506,16 @@ defmodule Arbor.LLM.ToolLoop do
 
   # Instruction appended for a tools-stripped final pass, forcing a plain-text
   # answer when the model finished a tool round without producing any text.
+  #
+  # NOTE: this MUST be a :user message, not :system. The conversation already
+  # carries the agent's system prompt, and ReqLLM/OpenAI-compatible providers
+  # (LM Studio, etc.) reject more than one system message ("Context should have
+  # at most one system message, found 2"). OpenRouter happened to tolerate it,
+  # which masked the bug.
   defp text_only_wrap_up_message do
     Message.new(
-      :system,
-      "Respond now with a plain-text answer for the user based on what you've done. " <>
+      :user,
+      "Respond now with a plain-text answer based on what you've done. " <>
         "Do NOT output any tool calls or JSON — text only."
     )
   end
