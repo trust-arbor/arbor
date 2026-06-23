@@ -336,6 +336,16 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     # Grant a clean capability for this resource so retry succeeds
     grant_approved_capability(agent_id, action_module, context)
 
+    # Re-sign for the retry. The signed request that drove the original
+    # (escalated) authorize is SINGLE-USE — its nonce was consumed by
+    # `Identity.Verifier.check_nonce_uniqueness`. Replaying it here makes the
+    # post-approval authorize fail `:unauthorized` (nonce replay), so an
+    # approved tool could never actually run. The executor holds the agent's
+    # signer in the AuthContext, so mint a fresh signed request (new nonce)
+    # bound to this resource. (Masked until the InteractionRouter await began
+    # succeeding — see the 2026-06-22 HITL routing fix.)
+    context = resign_for_retry(context, action_module, params)
+
     case Arbor.Actions.authorize_and_execute(
            agent_id,
            action_module,
@@ -398,6 +408,36 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     _ -> :ok
   catch
     :exit, _ -> :ok
+  end
+
+  # Mint a fresh signed request for the post-approval retry so identity
+  # verification doesn't fail on a replayed (already-consumed) nonce. Uses the
+  # signer carried on the AuthContext. If there's no signer (unsigned flow),
+  # leave the context as-is — the original behavior.
+  defp resign_for_retry(context, action_module, params) do
+    case context[:auth_context] do
+      %{signer: signer} when is_function(signer, 1) ->
+        resource = Arbor.Actions.canonical_uri_for(action_module, params)
+
+        case signer.(resource) do
+          {:ok, fresh} ->
+            auth_context = %{context.auth_context | signed_request: fresh}
+
+            context
+            |> Map.put(:signed_request, fresh)
+            |> Map.put(:auth_context, auth_context)
+
+          _ ->
+            context
+        end
+
+      _ ->
+        context
+    end
+  rescue
+    _ -> context
+  catch
+    :exit, _ -> context
   end
 
   # Record approval/rejection with ConfirmationTracker for graduation tracking.
