@@ -142,7 +142,11 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   @impl true
   def handle_info({:query_result, {:ok, %{} = result}}, state) do
-    text = Map.get(result, :text) || Map.get(result, "text") || ""
+    # Session.send_message returns an %Arbor.Contracts.Pipeline.Response{} whose
+    # text lives in :content. (:text/"text" kept as fallbacks for other shapes.)
+    text =
+      Map.get(result, :content) || Map.get(result, :text) || Map.get(result, "text") || ""
+
     usage = Map.get(result, :usage) || Map.get(result, "usage") || %{}
 
     state
