@@ -102,6 +102,42 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   defp handle_command(:list_engagements, state), do: push({:engagements, []}, state)
 
+  # ── HITL approvals ────────────────────────────────────────────────
+
+  defp handle_command(:list_approvals, %{agent_id: agent_id} = state) when is_binary(agent_id) do
+    push({:approvals, pending_approvals(agent_id)}, state)
+  end
+
+  defp handle_command(:list_approvals, state), do: push({:approvals, []}, state)
+
+  defp handle_command({:approve, proposal_id}, %{agent_id: agent_id} = state)
+       when is_binary(agent_id) do
+    resolve_approval(:approve, proposal_id, state)
+  end
+
+  defp handle_command({:deny, proposal_id}, %{agent_id: agent_id} = state)
+       when is_binary(agent_id) do
+    resolve_approval(:deny, proposal_id, state)
+  end
+
+  defp handle_command({op, _id}, state) when op in [:approve, :deny],
+    do: push({:error, :not_attached}, state)
+
+  defp resolve_approval(op, proposal_id, state) do
+    fun = if op == :approve, do: :force_approve, else: :force_reject
+
+    case bridge_call(consensus_coordinator(), fun, [proposal_id, state.principal]) do
+      {:ok, {:ok, _}} ->
+        push({:approval_resolved, %{proposal_id: proposal_id, status: op}}, state)
+
+      {:ok, :ok} ->
+        push({:approval_resolved, %{proposal_id: proposal_id, status: op}}, state)
+
+      _ ->
+        push({:error, :approval_failed}, state)
+    end
+  end
+
   defp do_attach(agent_id, state) do
     case bridge_call(engagement_store(), :resolve_or_create, [
            agent_id,
@@ -109,12 +145,65 @@ defmodule Arbor.Gateway.Chat.Socket do
            [scope: :user, visibility: :private, owner_tenant: state.principal]
          ]) do
       {:ok, {:ok, engagement}} ->
+        # The principal must hold the consensus-admin capability to approve/deny
+        # tool calls (mirrors ChatLive's ensure_dashboard_approver_capability).
+        ensure_approver_capability(state.principal)
         state = subscribe_signals(%{state | agent_id: agent_id, engagement_id: engagement.id})
-        push({:engagement, %{id: engagement.id, transcript: []}}, state)
+        push_attach_frames(engagement, state)
 
       _ ->
         push({:error, :attach_failed}, state)
     end
+  end
+
+  # Engagement frame + any already-pending approvals (so a reconnecting client
+  # sees tool calls still awaiting its decision).
+  defp push_attach_frames(engagement, state) do
+    {frames, state} = event_frames({:engagement, %{id: engagement.id, transcript: []}}, state)
+
+    case pending_approvals(state.agent_id) do
+      [] ->
+        {:push, frames, state}
+
+      pending ->
+        {extra, state} = event_frames({:approvals, pending}, state)
+        {:push, frames ++ extra, state}
+    end
+  end
+
+  defp pending_approvals(agent_id) do
+    case bridge_call(consensus_mod(), :list_pending, []) do
+      {:ok, proposals} when is_list(proposals) ->
+        proposals
+        |> Enum.filter(fn p -> Map.get(p, :proposer) == agent_id end)
+        |> Enum.map(&approval_view/1)
+
+      _ ->
+        []
+    end
+  end
+
+  defp approval_view(proposal) do
+    meta = Map.get(proposal, :metadata) || %{}
+
+    %{
+      proposal_id: Map.get(proposal, :id),
+      tool: get(meta, :tool) || get(meta, :action) || get(meta, :resource) || "tool",
+      args: get(meta, :args) || get(meta, :params) || %{}
+    }
+  end
+
+  defp ensure_approver_capability(principal) do
+    bridge_call(security_mod(), :grant, [
+      [
+        principal: principal,
+        resource: "arbor://consensus/admin",
+        constraints: %{},
+        metadata: %{source: :chat_tui}
+      ]
+    ])
+
+    :ok
   end
 
   # Fail-closed capability-PRESENCE check: does the principal hold a VALID
@@ -187,10 +276,16 @@ defmodule Arbor.Gateway.Chat.Socket do
     mod = signals_mod()
 
     if Code.ensure_loaded?(mod) and function_exported?(mod, :subscribe, 2) do
-      try do
-        apply(mod, :subscribe, ["agent.*", fn signal -> send(socket, {:chat_signal, signal}) end])
-      rescue
-        _ -> :ok
+      handler = fn signal -> send(socket, {:chat_signal, signal}) end
+
+      # agent.* = deltas/notifications/tool-use for this agent;
+      # security.authorization_pending = HITL tool-approval requests.
+      for pattern <- ["agent.*", "security.authorization_pending"] do
+        try do
+          apply(mod, :subscribe, [pattern, handler])
+        rescue
+          _ -> :ok
+        end
       end
     end
 
@@ -229,6 +324,25 @@ defmodule Arbor.Gateway.Chat.Socket do
       {:ok, {:delta, get(data, :text) || get(data, :delta) || ""}}
     else
       :ignore
+    end
+  end
+
+  # HITL: a tool call needs the human's approval. Surface it as an
+  # approval_request so the client can prompt (y)es / (n)o / (a)lways.
+  defp signal_to_event(%{type: :authorization_pending, data: data}) do
+    case get(data, :proposal_id) do
+      nil ->
+        :ignore
+
+      proposal_id ->
+        {:ok,
+         {:approval_request,
+          %{
+            proposal_id: to_string(proposal_id),
+            tool:
+              to_string(get(data, :tool) || get(data, :action) || get(data, :resource) || "tool"),
+            args: get(data, :args) || get(data, :params) || %{}
+          }}}
     end
   end
 
@@ -314,4 +428,20 @@ defmodule Arbor.Gateway.Chat.Socket do
   defp capability_store,
     do:
       Application.get_env(:arbor_gateway, :chat_capability_store, Arbor.Security.CapabilityStore)
+
+  # HITL: Consensus holds pending tool-approval proposals; Coordinator resolves
+  # them; Security grants the approver capability.
+  defp consensus_mod,
+    do: Application.get_env(:arbor_gateway, :chat_consensus, Arbor.Consensus)
+
+  defp consensus_coordinator,
+    do:
+      Application.get_env(
+        :arbor_gateway,
+        :chat_consensus_coordinator,
+        Arbor.Consensus.Coordinator
+      )
+
+  defp security_mod,
+    do: Application.get_env(:arbor_gateway, :chat_security, Arbor.Security)
 end

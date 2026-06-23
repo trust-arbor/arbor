@@ -13,6 +13,9 @@ defmodule Arbor.Gateway.Chat.Protocol do
           | {:send, String.t()}
           | :cancel
           | :list_engagements
+          | :list_approvals
+          | {:approve, String.t()}
+          | {:deny, String.t()}
 
   @typedoc "A server→client event to encode."
   @type event ::
@@ -23,6 +26,9 @@ defmodule Arbor.Gateway.Chat.Protocol do
           | {:tool_use, map()}
           | {:turn_complete, map()}
           | {:engagements, [map()]}
+          | {:approval_request, %{proposal_id: String.t(), tool: String.t(), args: map()}}
+          | {:approvals, [map()]}
+          | {:approval_resolved, %{proposal_id: String.t(), status: String.t()}}
           | {:error, term()}
 
   @doc "Decode a client→server text frame into a command."
@@ -43,6 +49,17 @@ defmodule Arbor.Gateway.Chat.Protocol do
   defp decode_map(%{"type" => "send"}), do: {:error, :missing_text}
   defp decode_map(%{"type" => "cancel"}), do: {:ok, :cancel}
   defp decode_map(%{"type" => "list_engagements"}), do: {:ok, :list_engagements}
+  defp decode_map(%{"type" => "list_approvals"}), do: {:ok, :list_approvals}
+
+  defp decode_map(%{"type" => "approve", "proposal_id" => id}) when is_binary(id),
+    do: {:ok, {:approve, id}}
+
+  defp decode_map(%{"type" => "deny", "proposal_id" => id}) when is_binary(id),
+    do: {:ok, {:deny, id}}
+
+  defp decode_map(%{"type" => type}) when type in ["approve", "deny"],
+    do: {:error, :missing_proposal_id}
+
   defp decode_map(%{"type" => type}), do: {:error, {:unknown_type, type}}
   defp decode_map(_), do: {:error, :missing_type}
 
@@ -60,6 +77,21 @@ defmodule Arbor.Gateway.Chat.Protocol do
   def encode({:tool_use, info}), do: enc(%{type: "tool_use", tool: info})
   def encode({:turn_complete, usage}), do: enc(%{type: "turn_complete", usage: usage})
   def encode({:engagements, list}), do: enc(%{type: "engagements", engagements: list})
+
+  def encode({:approval_request, %{proposal_id: id} = req}),
+    do:
+      enc(%{
+        type: "approval_request",
+        proposal_id: id,
+        tool: Map.get(req, :tool, ""),
+        args: Map.get(req, :args, %{})
+      })
+
+  def encode({:approvals, list}), do: enc(%{type: "approvals", approvals: list})
+
+  def encode({:approval_resolved, %{proposal_id: id, status: status}}),
+    do: enc(%{type: "approval_resolved", proposal_id: id, status: to_string(status)})
+
   def encode({:error, reason}), do: enc(%{type: "error", reason: stringify(reason)})
 
   defp enc(map), do: Jason.encode!(map)

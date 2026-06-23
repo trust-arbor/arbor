@@ -18,7 +18,9 @@ defmodule ArborTui.AppTest do
       input: "",
       messages: [],
       streaming: nil,
-      turn: :idle
+      turn: :idle,
+      pending_approvals: [],
+      auto_approve: MapSet.new()
     }
 
     Map.merge(base, overrides)
@@ -112,6 +114,77 @@ defmodule ArborTui.AppTest do
   describe "quit" do
     test "returns a quit command" do
       assert {_state, [%TermUI.Command{}]} = App.update(:quit, model())
+    end
+  end
+
+  describe "HITL approvals" do
+    defp pending(state \\ %{}) do
+      model(
+        Map.merge(
+          %{pending_approvals: [%{proposal_id: "p1", tool: "find_tools", args: %{}}]},
+          state
+        )
+      )
+    end
+
+    test "y/n/a are intercepted only while an approval is pending" do
+      # idle: keys type into the input
+      assert App.event_to_msg(%Event.Key{char: "y"}, model()) == {:msg, {:char, "y"}}
+
+      # pending: y/n/a decide, other keys (and enter) are swallowed
+      assert App.event_to_msg(%Event.Key{char: "y"}, pending()) == {:msg, {:approval, :approve}}
+      assert App.event_to_msg(%Event.Key{char: "n"}, pending()) == {:msg, {:approval, :deny}}
+      assert App.event_to_msg(%Event.Key{char: "a"}, pending()) == {:msg, {:approval, :always}}
+      assert App.event_to_msg(%Event.Key{char: "z"}, pending()) == :ignore
+      assert App.event_to_msg(%Event.Key{key: :enter}, pending()) == :ignore
+
+      # Ctrl+C still quits mid-approval
+      assert App.event_to_msg(%Event.Key{key: :c, modifiers: [:ctrl]}, pending()) == {:msg, :quit}
+    end
+
+    test "approve pops the head and notes it" do
+      s =
+        pending(%{
+          pending_approvals: [
+            %{proposal_id: "p1", tool: "find_tools", args: %{}},
+            %{proposal_id: "p2", tool: "shell", args: %{}}
+          ]
+        })
+
+      s = up({:approval, :approve}, s)
+      assert [%{proposal_id: "p2"}] = s.pending_approvals
+      assert List.last(s.messages).role == :system
+    end
+
+    test "always-allow remembers the tool and auto-approves future requests" do
+      s = up({:approval, :always}, pending())
+      assert MapSet.member?(s.auto_approve, "find_tools")
+      assert s.pending_approvals == []
+
+      # a later request for the same tool is auto-approved, not queued
+      s =
+        up(
+          {:server_event,
+           {:approval_request, %{proposal_id: "p9", tool: "find_tools", args: %{}}}},
+          s
+        )
+
+      assert s.pending_approvals == []
+      assert Enum.any?(s.messages, &(&1.text =~ "auto-approved"))
+    end
+
+    test "approval_request queues; approval_resolved removes" do
+      s =
+        up(
+          {:server_event,
+           {:approval_request, %{proposal_id: "p1", tool: "shell", args: %{"cmd" => "ls"}}}},
+          model()
+        )
+
+      assert [%{proposal_id: "p1", tool: "shell"}] = s.pending_approvals
+
+      s = up({:server_event, {:approval_resolved, %{proposal_id: "p1", status: "approved"}}}, s)
+      assert s.pending_approvals == []
     end
   end
 end

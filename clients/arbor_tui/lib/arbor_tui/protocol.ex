@@ -13,6 +13,9 @@ defmodule ArborTui.Protocol do
           | {:send, String.t()}
           | :cancel
           | :list_engagements
+          | :list_approvals
+          | {:approve, String.t()}
+          | {:deny, String.t()}
 
   @typedoc "A decoded server→client event."
   @type event ::
@@ -23,6 +26,9 @@ defmodule ArborTui.Protocol do
           | {:tool_use, map()}
           | {:turn_complete, map()}
           | {:engagements, [map()]}
+          | {:approval_request, %{proposal_id: String.t(), tool: String.t(), args: map()}}
+          | {:approvals, [map()]}
+          | {:approval_resolved, %{proposal_id: String.t(), status: String.t()}}
           | {:error, String.t()}
 
   # ── Encode: client → server ────────────────────────────────────────────────
@@ -37,6 +43,9 @@ defmodule ArborTui.Protocol do
   def encode({:send, text}), do: enc(%{type: "send", text: text})
   def encode(:cancel), do: enc(%{type: "cancel"})
   def encode(:list_engagements), do: enc(%{type: "list_engagements"})
+  def encode(:list_approvals), do: enc(%{type: "list_approvals"})
+  def encode({:approve, id}), do: enc(%{type: "approve", proposal_id: id})
+  def encode({:deny, id}), do: enc(%{type: "deny", proposal_id: id})
 
   defp enc(map), do: Jason.encode!(map)
 
@@ -66,6 +75,20 @@ defmodule ArborTui.Protocol do
 
   defp decode_map(%{"type" => "engagements"} = m),
     do: {:ok, {:engagements, m["engagements"] || []}}
+
+  defp decode_map(%{"type" => "approval_request"} = m),
+    do:
+      {:ok,
+       {:approval_request,
+        %{proposal_id: m["proposal_id"], tool: m["tool"] || "tool", args: m["args"] || %{}}}}
+
+  defp decode_map(%{"type" => "approvals"} = m),
+    do: {:ok, {:approvals, m["approvals"] || []}}
+
+  defp decode_map(%{"type" => "approval_resolved"} = m),
+    do:
+      {:ok,
+       {:approval_resolved, %{proposal_id: m["proposal_id"], status: m["status"] || "resolved"}}}
 
   defp decode_map(%{"type" => "error"} = m), do: {:ok, {:error, m["reason"] || "error"}}
   defp decode_map(%{"type" => type}), do: {:error, {:unknown_type, type}}
