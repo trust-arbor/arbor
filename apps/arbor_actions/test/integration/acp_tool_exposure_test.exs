@@ -51,7 +51,15 @@ defmodule Arbor.Actions.AcpToolExposureTest do
       agent_id: agent_id,
       workspace: workspace
     } do
+      # Bare `arbor://fs/read` is the EXPOSURE cap (drives tool_modules_for_agent);
+      # actually reading a file requires a PATH-SCOPED cap. Before the H1
+      # fail-open fix, ToolServer ran the action directly after authz denial, so
+      # this test passed with only the exposure cap (the capability layer was
+      # never really exercised — a false green). Grant both so the call is
+      # genuinely authorized end-to-end. NOTE: spawned ACP agents now likewise
+      # need a path-scoped fs cap, not just the exposure cap.
       {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read")
+      {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read#{workspace}/**")
 
       # Capability filter picks up File.Read but not Shell.Execute
       tool_modules = Arbor.Actions.tool_modules_for_agent(agent_id)
@@ -92,7 +100,22 @@ defmodule Arbor.Actions.AcpToolExposureTest do
       agent_id: agent_id,
       workspace: workspace
     } do
+      # Broad read cap so the call clears the capability layer and REACHES
+      # File.Read — whose workspace constraint (from exec_context) is what this
+      # test is verifying. The bound here is enforced by the action's
+      # validate_path, not the cap. (See the success test above re: exposure vs
+      # path-scoped caps and the H1 fail-open fix.)
       {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read")
+
+      # Scope the read cap to the workspace's PARENT (normalized — no trailing
+      # slash, unlike System.tmp_dir!/0) so BOTH the workspace and the sibling
+      # "outside" file clear the capability layer. The point of this test is
+      # that File.Read's workspace constraint (not the cap) blocks the
+      # out-of-workspace read.
+      tmp_parent = Path.dirname(workspace)
+
+      {:ok, _} =
+        Security.grant(principal: agent_id, resource: "arbor://fs/read#{tmp_parent}/**")
 
       tool_modules = Arbor.Actions.tool_modules_for_agent(agent_id)
 
