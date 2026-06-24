@@ -45,6 +45,42 @@ defmodule Arbor.SandboxTest do
 
       assert sandbox.level == :full
     end
+
+    test "security regression: a requested level is capped to the caller's trust tier",
+         %{base_path: base_path} do
+      # codex authz.sandbox-create-unbounded-options: pre-fix an explicit :level
+      # won outright, so a low-trust caller could request :full / :container.
+      # When a trust tier is known, the request must be capped to it.
+      {:ok, sandbox} =
+        Sandbox.create("agent_cap_1", level: :full, trust_tier: :untrusted, base_path: base_path)
+
+      assert sandbox.level == :pure,
+             "untrusted caller requesting :full must be capped to :pure, got #{sandbox.level}"
+
+      {:ok, s2} =
+        Sandbox.create("agent_cap_2",
+          level: :container,
+          trust_tier: :probationary,
+          base_path: base_path
+        )
+
+      assert s2.level == :limited,
+             "probationary caller requesting :container must be capped to :limited, got #{s2.level}"
+    end
+
+    test "a requested level at or below the tier is honored", %{base_path: base_path} do
+      # Requesting less than the tier permits is fine (no forced elevation).
+      {:ok, sandbox} =
+        Sandbox.create("agent_cap_3", level: :pure, trust_tier: :autonomous, base_path: base_path)
+
+      assert sandbox.level == :pure
+
+      # And a veteran may still get :full when they ask for it.
+      {:ok, s2} =
+        Sandbox.create("agent_cap_4", level: :full, trust_tier: :veteran, base_path: base_path)
+
+      assert s2.level == :full
+    end
   end
 
   describe "get/1" do
