@@ -479,7 +479,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
          from_num,
          limit,
          direction,
-         max_scan \\ nil
+         max_scan
        ) do
     # Walk the stream table to collect global_position pointers, then
     # dereference each one via the global table to get the full event.
