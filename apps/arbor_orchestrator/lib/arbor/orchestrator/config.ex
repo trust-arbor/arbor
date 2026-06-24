@@ -147,6 +147,17 @@ defmodule Arbor.Orchestrator.Config do
     end
   end
 
+  @doc """
+  The security module used for capability authorization (must expose
+  `authorize/4`). Defaults to `Arbor.Security`; overridable via the
+  `:security_module` app env for testing / dependency injection. Production
+  should leave it unset.
+  """
+  @spec security_module() :: module()
+  def security_module do
+    Application.get_env(@app, :security_module, Arbor.Security)
+  end
+
   # ===========================================================================
   # Timeouts (prevent indefinite hangs)
   # ===========================================================================
