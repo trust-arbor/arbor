@@ -138,16 +138,22 @@ defmodule Arbor.Actions.Pipeline do
       end
     end
 
-    defp extract_status(%{final_outcome: %{status: status}}), do: status
+    # @doc false — public for testability (the H4 security regression test
+    # asserts an unknown outcome string maps to :unknown via SafeAtom and is
+    # NOT minted as a new atom). The orchestrator-driven public path
+    # (Pipeline.Run.run/2) can't run in arbor_actions' own test BEAM
+    # (arbor_orchestrator isn't loaded), so the call site is exercised directly.
+    @doc false
+    def extract_status(%{final_outcome: %{status: status}}), do: status
 
-    defp extract_status(%{context: %{"outcome" => outcome}}) do
+    def extract_status(%{context: %{"outcome" => outcome}}) do
       case Arbor.Common.SafeAtom.to_allowed(outcome, ~w(success failure error pending cancelled)a) do
         {:ok, status} -> status
         {:error, _} -> :unknown
       end
     end
 
-    defp extract_status(_), do: :unknown
+    def extract_status(_), do: :unknown
 
     defp sanitize_context(engine_result) do
       # Extract serializable context, dropping internal state

@@ -1,6 +1,8 @@
 defmodule Arbor.Signals.TopicKeysTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   @moduletag :fast
 
   alias Arbor.Signals.TopicKeys
@@ -105,6 +107,24 @@ defmodule Arbor.Signals.TopicKeysTest do
       fake_payload = %{encrypted | key_version: 99}
 
       assert {:error, :key_version_mismatch} = TopicKeys.decrypt(:test_topic_j, fake_payload)
+    end
+
+    test "L4 security regression: key version mismatch is logged as a warning" do
+      # L4 (2026-02-16 review): a key-version mismatch on decrypt must emit a
+      # warning so operators can debug rotation issues / detect attacks. The
+      # fix (topic_keys.ex do_decrypt/2) adds a Logger.warning before
+      # returning {:error, :key_version_mismatch}. Reverting that log line
+      # (returning the error silently) makes this test fail.
+      {:ok, encrypted} = TopicKeys.encrypt(:test_topic_l4, "data")
+      {:ok, _} = TopicKeys.rotate(:test_topic_l4)
+
+      log =
+        capture_log(fn ->
+          assert {:error, :key_version_mismatch} =
+                   TopicKeys.decrypt(:test_topic_l4, encrypted)
+        end)
+
+      assert log =~ "version mismatch"
     end
 
     test "handles empty string" do

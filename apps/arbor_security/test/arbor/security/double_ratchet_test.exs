@@ -232,6 +232,58 @@ defmodule Arbor.Security.DoubleRatchetTest do
       assert map_size(bob4.skipped_keys) == 0
     end
 
+    test "security regression (H3): expired skipped keys are pruned on access (TTL)" do
+      # H3: skipped message keys were stored indefinitely with no TTL, enabling
+      # memory-exhaustion DoS via out-of-order sends. The fix timestamps each
+      # skipped key (System.monotonic_time/1) and prunes entries older than the
+      # 1-hour TTL whenever a skipped key is consumed. This test drives that
+      # behaviorally: a skipped key whose stored_at is well past the TTL must be
+      # gone after the next successful skipped-key access, NOT linger forever.
+      shared_secret = :crypto.strong_rand_bytes(32)
+      bob_keypair = Crypto.generate_encryption_keypair()
+      {bob_pub, _} = bob_keypair
+
+      alice = DoubleRatchet.init_sender(shared_secret, bob_pub)
+      bob = DoubleRatchet.init_receiver(shared_secret, bob_keypair)
+
+      # Alice sends three messages; Bob receives #3 first, which stores keys
+      # for skipped messages #1 and #2.
+      {alice2, h1, c1} = DoubleRatchet.encrypt(alice, "Message 1")
+      {alice3, h2, c2} = DoubleRatchet.encrypt(alice2, "Message 2")
+      {_alice4, h3, c3} = DoubleRatchet.encrypt(alice3, "Message 3")
+
+      {:ok, bob2, "Message 3"} = DoubleRatchet.decrypt(bob, h3, c3)
+      assert map_size(bob2.skipped_keys) == 2
+
+      # Age the skipped key for message #1 past the TTL by rewriting its
+      # stored_at to a far-past monotonic timestamp. We go through the public
+      # to_map/from_map serialization seam so we never touch private internals.
+      now = System.monotonic_time(:millisecond)
+      far_past = now - 7_200_000
+
+      session_map = DoubleRatchet.to_map(bob2)
+
+      aged_skipped =
+        Enum.map(session_map["skipped_keys"], fn entry ->
+          # h1 is message #1's header — age exactly that skipped key.
+          if entry["n"] == h1.n, do: %{entry | "stored_at" => far_past}, else: entry
+        end)
+
+      {:ok, bob2_aged} = DoubleRatchet.from_map(%{session_map | "skipped_keys" => aged_skipped})
+      assert map_size(bob2_aged.skipped_keys) == 2
+
+      # Consume message #2's (fresh) skipped key. On access, the implementation
+      # prunes expired entries — message #1's aged key must be dropped.
+      {:ok, bob3, "Message 2"} = DoubleRatchet.decrypt(bob2_aged, h2, c2)
+
+      # Both #2 (just used) and #1 (pruned as expired) are gone → empty.
+      assert map_size(bob3.skipped_keys) == 0,
+             "expired skipped key was not pruned on access (H3): #{inspect(Map.keys(bob3.skipped_keys))}"
+
+      # And the aged key is genuinely unusable now.
+      assert {:error, _} = DoubleRatchet.decrypt(bob3, h1, c1)
+    end
+
     test "max_skip exceeded returns error" do
       shared_secret = :crypto.strong_rand_bytes(32)
       bob_keypair = Crypto.generate_encryption_keypair()

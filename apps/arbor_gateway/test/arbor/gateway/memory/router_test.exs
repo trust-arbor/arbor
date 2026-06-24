@@ -342,5 +342,34 @@ defmodule Arbor.Gateway.Memory.RouterTest do
     end
   end
 
+  describe "M1: working-memory endpoints require authorization (regression)" do
+    test "security regression (M1): GET /working/:agent_id with no authenticated caller is denied" do
+      # M1: the /working/:agent_id read endpoint must authorize the caller (via
+      # conn.assigns.agent_id, set by the gateway auth pipeline) — never serve a
+      # target's working memory to an unauthenticated request. authorize runs
+      # before any read, so a missing caller is denied (403) without leaking data.
+      conn =
+        conn(:get, "/working/any_target")
+        |> Router.call(@opts)
+
+      assert conn.status == 403,
+             "GET /working without an authenticated caller must be denied — M1 regression. " <>
+               "Got #{conn.status}: #{conn.resp_body}"
+    end
+
+    test "security regression (M1): PUT /working/:agent_id with no authenticated caller is denied" do
+      body = %{working_memory: %{agent_id: "any_target", recent_thoughts: []}}
+
+      conn =
+        conn(:put, "/working/any_target", Jason.encode!(body))
+        |> put_req_header("content-type", "application/json")
+        |> Router.call(@opts)
+
+      assert conn.status == 403,
+             "PUT /working without an authenticated caller must be denied — M1 regression. " <>
+               "Got #{conn.status}: #{conn.resp_body}"
+    end
+  end
+
   defp assign_caller(conn, caller_id), do: assign(conn, :agent_id, caller_id)
 end

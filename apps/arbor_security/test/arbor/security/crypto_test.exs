@@ -295,6 +295,40 @@ defmodule Arbor.Security.CryptoTest do
       assert {:error, :malformed_sealed} =
                Crypto.unseal(%{garbage: true}, ctx.bob_enc_priv, ctx.alice_sign_pub)
     end
+
+    test "security regression (H1): unseal rejects a wrong-size (Ed25519, 64-byte) recipient key",
+         ctx do
+      # H1: seal/unseal re-derive the ECDH from raw binaries with no type
+      # distinction between X25519 (32-byte) and Ed25519 (64-byte) keys. If an
+      # Ed25519 private key is mistakenly passed as the recipient key, the
+      # ECDH silently produced incorrect results instead of failing. The fix
+      # is a `byte_size(recipient_private) == 32` guard on unseal/3 — a 64-byte
+      # key must NOT match the v2 clause; it falls through to {:error,
+      # :malformed_sealed} rather than attempting a confused ECDH.
+      sealed = Crypto.seal("secret", ctx.bob_enc_pub, ctx.alice_sign_priv)
+
+      # A 64-byte key — the classic Ed25519-expanded-form confusion input that
+      # the guard must reject. (Any non-32-byte recipient key must be refused.)
+      ed_priv_64 = :crypto.strong_rand_bytes(64)
+      assert byte_size(ed_priv_64) == 64
+
+      assert {:error, :malformed_sealed} =
+               Crypto.unseal(sealed, ed_priv_64, ctx.alice_sign_pub)
+    end
+
+    test "security regression (H1): seal rejects a wrong-size (Ed25519, 64-byte) recipient key",
+         ctx do
+      # The mirror of the unseal guard: seal/3 requires a 32-byte X25519
+      # recipient *public* key. Passing a 64-byte Ed25519 key must raise a
+      # FunctionClauseError (no matching clause) rather than silently sealing
+      # to a confused/incorrect ECDH key.
+      ed_pub_64 = :crypto.strong_rand_bytes(64)
+      assert byte_size(ed_pub_64) == 64
+
+      assert_raise FunctionClauseError, fn ->
+        Crypto.seal("secret", ed_pub_64, ctx.alice_sign_priv)
+      end
+    end
   end
 
   describe "derive_agent_id/1" do
