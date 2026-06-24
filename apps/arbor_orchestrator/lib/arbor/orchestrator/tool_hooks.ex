@@ -111,32 +111,73 @@ defmodule Arbor.Orchestrator.ToolHooks do
         runner.(command, payload, opts)
 
       _ ->
-        env =
-          payload
-          |> base_env()
-          |> Map.to_list()
-
-        # H14: pre-fix this constructed
-        #   "printf '%s' \"$TOOL_HOOK_PAYLOAD\" | (" <> command <> ")"
-        # and ran it through `/bin/sh -lc`. Two issues:
-        #   1. The `-l` flag makes /bin/sh a *login* shell, sourcing
-        #      ~/.profile / ~/.bashrc / etc. — any malicious modification of
-        #      the user's shell init runs as part of the hook.
-        #   2. The `command` string was concatenated into a shell wrapper
-        #      with no quoting, so any metacharacter in the hook config
-        #      (`;`, `&&`, backticks, command substitution) had double
-        #      interpretation: once as the wrapper command and again when
-        #      the wrapper re-evaluated it.
-        # The fix: drop the `-l` flag (no login shell) and stop wrapping
-        # the command. The hook command is passed as the literal argument
-        # to `sh -c`; the payload reaches the hook via the TOOL_HOOK_PAYLOAD
-        # env variable (already set by base_env) so no shell-level
-        # interpolation is needed.
-        {out, code} =
-          System.cmd("/bin/sh", ["-c", command], env: env, stderr_to_stdout: true)
-
-        {:command, out, code}
+        run_shell_hook(command, payload, opts)
     end
+  end
+
+  # SECURITY (codex command-execution.orchestrator-tool-hooks-shell): graph tool
+  # hooks (`tool_hooks.pre`/`.post`, read from node/graph attrs) are shell
+  # commands. Pre-fix they ran via `/bin/sh -c` with NO sandbox authorization —
+  # unlike the sibling tool *command* path, which routes through
+  # Arbor.Shell.Sandbox (H3). An agent-authored graph could put `rm -rf /` in a
+  # hook and bypass the very gate the command path enforces. Gate the hook
+  # through the same sandbox check at the node's sandbox level (threaded in by
+  # ToolHandler as :sandbox_level). On denial we return {:error, _}, which
+  # normalizes to a failed hook (:skip for :pre, :proceed for :post) so the
+  # dangerous command never reaches System.cmd. `sandbox="none"` on the node is
+  # the explicit escape hatch (same as the command path); the function-runner
+  # seam (tool_hook_runner) is trusted programmatic injection and stays ungated.
+  defp run_shell_hook(command, payload, opts) do
+    level = Keyword.get(opts, :sandbox_level, :basic)
+
+    case sandbox_check(command, level) do
+      {:ok, :allowed} ->
+        run_shell_command(command, payload)
+
+      {:error, reason} ->
+        {:error, "tool hook rejected by sandbox (level=#{level}, reason=#{inspect(reason)})"}
+    end
+  end
+
+  defp sandbox_check(command, level) do
+    sandbox_mod = Arbor.Shell.Sandbox
+
+    if Code.ensure_loaded?(sandbox_mod) and function_exported?(sandbox_mod, :check, 2) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(sandbox_mod, :check, [command, level])
+    else
+      # Sandbox module unreachable. Strict-deny rather than fail-open: an
+      # unsandboxed hook execution must not slip through silently.
+      {:error, :sandbox_unavailable}
+    end
+  end
+
+  defp run_shell_command(command, payload) do
+    env =
+      payload
+      |> base_env()
+      |> Map.to_list()
+
+    # H14: pre-fix this constructed
+    #   "printf '%s' \"$TOOL_HOOK_PAYLOAD\" | (" <> command <> ")"
+    # and ran it through `/bin/sh -lc`. Two issues:
+    #   1. The `-l` flag makes /bin/sh a *login* shell, sourcing
+    #      ~/.profile / ~/.bashrc / etc. — any malicious modification of
+    #      the user's shell init runs as part of the hook.
+    #   2. The `command` string was concatenated into a shell wrapper
+    #      with no quoting, so any metacharacter in the hook config
+    #      (`;`, `&&`, backticks, command substitution) had double
+    #      interpretation: once as the wrapper command and again when
+    #      the wrapper re-evaluated it.
+    # The fix: drop the `-l` flag (no login shell) and stop wrapping
+    # the command. The hook command is passed as the literal argument
+    # to `sh -c`; the payload reaches the hook via the TOOL_HOOK_PAYLOAD
+    # env variable (already set by base_env) so no shell-level
+    # interpolation is needed.
+    {out, code} =
+      System.cmd("/bin/sh", ["-c", command], env: env, stderr_to_stdout: true)
+
+    {:command, out, code}
   end
 
   defp base_env(payload) do

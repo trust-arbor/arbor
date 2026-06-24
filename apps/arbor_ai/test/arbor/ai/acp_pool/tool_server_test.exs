@@ -118,8 +118,27 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
     end
   end
 
+  # Passthrough runner: stands in for authorize-and-execute so plumbing tests
+  # can exercise a running action without the full arbor_security/arbor_actions
+  # stack. The security regression below deliberately does NOT install this, so
+  # it hits the real (fail-closed) authorized_run path.
+  defp install_passthrough_runner do
+    prev = Application.get_env(:arbor_ai, :acp_action_runner)
+
+    Application.put_env(:arbor_ai, :acp_action_runner, fn module, params, _agent_id, ctx ->
+      module.run(params, ctx)
+    end)
+
+    on_exit(fn ->
+      if prev,
+        do: Application.put_env(:arbor_ai, :acp_action_runner, prev),
+        else: Application.delete_env(:arbor_ai, :acp_action_runner)
+    end)
+  end
+
   describe "MCP protocol over HTTP" do
     setup do
+      install_passthrough_runner()
       {:ok, %{port: port, ref: ref}} = ToolServer.start([TestAction, AnotherAction])
       on_exit(fn -> ToolServer.stop(ref) end)
       {:ok, port: port}
@@ -185,6 +204,11 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
   end
 
   describe "per-handler context propagation" do
+    setup do
+      install_passthrough_runner()
+      :ok
+    end
+
     test "workspace from start opts arrives in action context" do
       {:ok, %{port: port, ref: ref}} =
         ToolServer.start([ContextEchoAction], workspace: "/tmp/agent_workspace_xyz")
@@ -216,6 +240,51 @@ defmodule Arbor.AI.AcpPool.ToolServerTest do
 
       decoded = Jason.decode!(hd(response["result"]["content"])["text"])
       assert decoded["workspace"] == nil
+    end
+  end
+
+  # Records execution by messaging a test pid stashed in app env. Lets the
+  # regression test prove the action body did NOT run when authorization fails.
+  defmodule SideEffectAction do
+    @moduledoc false
+
+    def to_tool do
+      %{
+        name: "side_effect",
+        description: "Sends a message when run; used to detect unauthorized execution",
+        parameters_schema: %{"type" => "object", "properties" => %{}}
+      }
+    end
+
+    def run(_params, _context) do
+      if pid = Application.get_env(:arbor_ai, :test_side_effect_pid),
+        do: send(pid, :ACTION_EXECUTED)
+
+      {:ok, %{ran: true}}
+    end
+  end
+
+  describe "authorization enforcement (AUTHZ-002 / H1 regression)" do
+    test "security regression (H1): an action whose authorization is unavailable/denied does NOT execute and fails closed" do
+      # Pre-fix, run_action/4 fell through to a direct action_module.run/2 when
+      # authorization was unavailable (or explicitly denied, or on rescue/catch),
+      # so a spawned CLI agent could run any exposed Jido action with NO grant.
+      # In arbor_ai's isolated test env, arbor_actions (L6) is not loaded, so
+      # authorized_execution_available?() is false and run_action takes the
+      # real (fail-closed) branch — no DI runner is installed here on purpose.
+      Application.put_env(:arbor_ai, :test_side_effect_pid, self())
+      on_exit(fn -> Application.delete_env(:arbor_ai, :test_side_effect_pid) end)
+
+      {:ok, %{port: port, ref: ref}} = ToolServer.start([SideEffectAction])
+      on_exit(fn -> ToolServer.stop(ref) end)
+
+      {:ok, response} =
+        mcp_request(port, "tools/call", %{"name" => "side_effect", "arguments" => %{}})
+
+      assert response["result"]["isError"],
+             "an unauthorized/unavailable action call must fail closed — got #{inspect(response["result"])}"
+
+      refute_receive :ACTION_EXECUTED, 200
     end
   end
 

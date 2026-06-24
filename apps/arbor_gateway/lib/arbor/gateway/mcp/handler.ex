@@ -534,7 +534,17 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   defp get_status("agents", agent_id) do
     if agent_id do
-      get_agent_detail(agent_id)
+      # SECURITY (codex authz.mcp-agents-status-detail-bypass): the per-agent
+      # detail returns the SAME sensitive subsections as the capabilities/goals
+      # components (get_agent_detail embeds get_capabilities/0 + get_goals/0).
+      # Pre-fix it skipped the per-target gate those components use, so any
+      # authenticated MCP caller could read any agent's caps + goals via
+      # component="agents". Gate it identically. (Summary mode — no agent_id —
+      # stays open, like "overview".)
+      case authorize_status_component("agents", agent_id) do
+        {:ok, target} -> get_agent_detail(target)
+        {:error, msg} -> msg
+      end
     else
       "# Running Agents\n\n" <> get_agent_summary()
     end

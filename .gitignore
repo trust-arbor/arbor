@@ -78,6 +78,7 @@ apps/arbor_orchestrator/specs/pipelines/dev/
 venv/
 .aider*
 .codex/worktrees/
+.codex-security/
 
 .arbor/
 

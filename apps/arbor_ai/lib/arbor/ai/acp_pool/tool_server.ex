@@ -252,31 +252,58 @@ defmodule Arbor.AI.AcpPool.ToolServer do
   end
 
   defp run_action(action_module, params, agent_id, exec_context) do
-    # Try authorized execution first, fall back to direct.
-    # exec_context carries workspace + any other per-handler context
-    # built at ToolServer.start/2 (taint policy is auto-injected by
-    # authorize_and_execute from config — not threaded here).
-    if authorized_execution_available?() do
-      case apply(Arbor.Actions, :authorize_and_execute, [
-             agent_id,
-             action_module,
-             params,
-             exec_context
-           ]) do
-        {:error, :unauthorized} ->
-          # Fall back when no capability grants exist yet
-          action_module.run(params, exec_context)
+    case Application.get_env(:arbor_ai, :acp_action_runner) do
+      fun when is_function(fun, 4) ->
+        # DI seam: a configured runner stands in for the authorize-and-execute
+        # path. Used by tests to exercise MCP plumbing without the full
+        # arbor_security/arbor_actions stack (arbor_actions is L6 and not a dep
+        # of arbor_ai, so it can't be loaded in this lib's isolated test env).
+        # Production leaves this unset.
+        run_via_runner(fun, action_module, params, agent_id, exec_context)
 
-        other ->
-          other
-      end
+      _ ->
+        authorized_run(action_module, params, agent_id, exec_context)
+    end
+  end
+
+  defp run_via_runner(fun, action_module, params, agent_id, exec_context) do
+    fun.(action_module, params, agent_id, exec_context)
+  rescue
+    e -> {:error, {:action_runner_error, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:action_runner_exit, reason}}
+  end
+
+  # SECURITY (codex authz.acp-toolserver-direct-fallback, HIGH): the ONLY way an
+  # action may execute here is a SUCCESSFUL Arbor.Actions.authorize_and_execute/4
+  # (it authorizes AND runs the action). Pre-fix, FOUR branches fell through to a
+  # direct action_module.run/2: an explicit {:error, :unauthorized} denial, an
+  # unavailable security subsystem, and any rescue/catch from the auth wrapper.
+  # Each was a full capability bypass — a spawned CLI agent (whose tools reach
+  # this server) could run any exposed Jido action with NO grant, and the
+  # fallback context didn't even carry agent_id. We now fail closed in every
+  # non-authorized case and never call action_module.run/2 directly. This means
+  # ACP tools require the security subsystem to be available (the default
+  # posture); a denial or an unavailable subsystem returns an error to the
+  # caller instead of silently executing.
+  defp authorized_run(action_module, params, agent_id, exec_context) do
+    if authorized_execution_available?() do
+      # exec_context carries workspace + any other per-handler context built at
+      # ToolServer.start/2 (taint policy is auto-injected by authorize_and_execute
+      # from config — not threaded here).
+      apply(Arbor.Actions, :authorize_and_execute, [
+        agent_id,
+        action_module,
+        params,
+        exec_context
+      ])
     else
-      action_module.run(params, exec_context)
+      {:error, :security_unavailable}
     end
   rescue
-    _ -> action_module.run(params, exec_context)
+    e -> {:error, {:authorization_error, Exception.message(e)}}
   catch
-    :exit, _ -> action_module.run(params, exec_context)
+    :exit, reason -> {:error, {:authorization_exit, reason}}
   end
 
   # Per-handler context that flows into each tool call. Workspace scopes

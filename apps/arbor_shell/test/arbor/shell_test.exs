@@ -45,9 +45,43 @@ defmodule Arbor.ShellTest do
         Shell.execute("somecmd -rf /path", sandbox: :basic)
     end
 
+    test "security regression: basic sandbox blocks interpreters wrapping a nested command" do
+      # codex sandbox.shell-basic-nested-command-bypass: the :basic denylist
+      # only inspects the top-level command, so a dangerous command smuggled as
+      # an argument to an interpreter/exec-wrapper slipped through. Each of these
+      # would have run `rm -rf /` (or arbitrary code) under :basic pre-fix.
+      # Metachar-free so the INTERPRETER block fires (not the metacharacter
+      # check). The nested dangerous command rides as an opaque argument.
+      for cmd <- [
+            ~s{sh -c "rm -rf /"},
+            ~s{bash -c "rm -rf /"},
+            ~s{env rm -rf /},
+            ~s{xargs rm},
+            ~s{python -c "__import__('os').system('rm')"},
+            ~s{perl -e "unlink('x')"}
+          ] do
+        assert {:error, {:blocked_interpreter, _}} = Arbor.Shell.Sandbox.check(cmd, :basic),
+               "interpreter bypass not blocked at :basic for: " <> cmd
+      end
+
+      # /bin/sh (absolute path) is caught by basename too.
+      assert {:error, {:blocked_interpreter, _}} =
+               Arbor.Shell.Sandbox.check(~s{/bin/sh -c "echo hi"}, :basic)
+
+      # find -exec (the + form, which has no `;` metacharacter) is caught by flag.
+      assert {:error, {:dangerous_flags, _}} =
+               Arbor.Shell.Sandbox.check("find . -exec rm {} +", :basic)
+
+      # Sanity: ordinary commands still pass :basic.
+      assert {:ok, :allowed} = Arbor.Shell.Sandbox.check("ls -la", :basic)
+      assert {:ok, :allowed} = Arbor.Shell.Sandbox.check("date", :basic)
+    end
+
     test "strict sandbox only allows allowlisted commands" do
       {:ok, _} = Shell.execute("echo hello", sandbox: :strict)
-      {:error, {:not_in_allowlist, "curl"}} = Shell.execute("curl http://example.com", sandbox: :strict)
+
+      {:error, {:not_in_allowlist, "curl"}} =
+        Shell.execute("curl http://example.com", sandbox: :strict)
     end
 
     test "none sandbox allows everything" do
@@ -218,7 +252,9 @@ defmodule Arbor.ShellTest do
 
   describe "execute_streaming/2" do
     test "returns session_id" do
-      {:ok, session_id} = Shell.execute_streaming("echo streaming", stream_to: self(), sandbox: :none)
+      {:ok, session_id} =
+        Shell.execute_streaming("echo streaming", stream_to: self(), sandbox: :none)
+
       assert is_binary(session_id)
       assert String.starts_with?(session_id, "port_")
 

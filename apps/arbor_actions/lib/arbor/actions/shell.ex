@@ -288,10 +288,20 @@ defmodule Arbor.Actions.Shell do
         shell = params[:shell] || "/bin/bash"
         command = "#{shell} #{script_path}"
 
+        # The script CONTENT was already validated line-by-line at
+        # `sandbox_level` by validate_script_content/2 above. The interpreter
+        # invocation itself (`/bin/bash <tmpfile>`) is this action's controlled
+        # mechanism, so run it at :none — re-checking it against the sandbox
+        # command denylist is redundant and, now that interpreters are blocked
+        # at :basic/:strict (codex sandbox.shell-basic-nested-command-bypass),
+        # would deny the action outright. Capability/approval auth in call_shell
+        # still applies regardless of sandbox level.
+        _ = sandbox_level
+
         opts =
           [
             timeout: params[:timeout] || 60_000,
-            sandbox: sandbox_level
+            sandbox: :none
           ]
           |> maybe_add_opt(:cwd, params[:cwd])
           |> maybe_add_opt(:env, params[:env])

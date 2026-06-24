@@ -74,4 +74,48 @@ defmodule Arbor.AI.AcpSession.HandlerAuthzFailClosedTest do
                Handler.check_security_authorize("agent_x", "arbor://shell/exec/rm", :execute, %{})
     end
   end
+
+  # SECURITY REGRESSION (codex authz.acp-session-anonymous-file-access, HIGH):
+  # an ACP session with no caller identity (agent_id == nil) must NOT authorize
+  # the external coding agent's file/tool callbacks. Pre-fix, the handler's
+  # authorize_file(nil,...) returned :ok and authorize_action(nil,...) returned
+  # :authorized — anonymous auto-grant (bounded only by workspace_root, and
+  # UNBOUNDED with no workspace_root). The companion entrypoint fix
+  # (Arbor.Actions.Acp.StartSession) threads the caller's agent_id so this nil
+  # case should not arise in production; these assert the handler fails closed
+  # regardless. They fail on `git checkout HEAD~1` of the fix.
+  describe "anonymous (nil agent_id) fails closed" do
+    test "authorize_file/3 denies a nil-agent file read" do
+      assert {:error, _reason} = Handler.authorize_file(nil, "/etc/passwd", :read)
+    end
+
+    test "authorize_file/3 denies a nil-agent file write" do
+      assert {:error, _reason} = Handler.authorize_file(nil, "/etc/cron.d/x", :write)
+    end
+
+    test "handle_file_read denies when the session has no agent_id (no workspace root)" do
+      {:ok, state} = Handler.init([])
+      assert state.agent_id == nil
+
+      # No workspace_root => path validation passes; the ONLY gate is identity.
+      # Pre-fix this read /etc/hostname; post-fix it denies.
+      assert {:error, _msg, ^state} = Handler.handle_file_read("s1", "/etc/hostname", %{}, state)
+    end
+
+    test "handle_file_write denies when the session has no agent_id (no workspace root)" do
+      {:ok, state} = Handler.init([])
+      path = Path.join(System.tmp_dir!(), "acp_anon_write_#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm(path) end)
+
+      assert {:error, _msg, ^state} = Handler.handle_file_write("s1", path, "pwned", %{}, state)
+      refute File.exists?(path), "anonymous session must not create files"
+    end
+
+    test "handle_permission_request rejects a nil-agent tool request" do
+      {:ok, state} = Handler.init([])
+
+      assert {:ok, %{"outcome" => "denied"}, ^state} =
+               Handler.handle_permission_request("s1", %{"name" => "edit"}, %{}, state)
+    end
+  end
 end

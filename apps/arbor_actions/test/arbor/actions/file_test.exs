@@ -340,6 +340,25 @@ defmodule Arbor.Actions.FileTest do
       assert FileActions.Glob.name() == "file_glob"
       assert "glob" in FileActions.Glob.tags()
     end
+
+    test "security regression: a `..` pattern cannot escape an authorized base_path", %{
+      tmp_dir: tmp_dir
+    } do
+      # codex path-traversal.file-glob-pattern-base-escape: pre-fix, the base was
+      # capability-checked but the pattern was Path.join'd verbatim, so
+      # `../sibling/**` enumerated files OUTSIDE the authorized base.
+      base = Path.join(tmp_dir, "base")
+      File.mkdir_p!(base)
+      create_file(tmp_dir, "sibling/secret.txt")
+
+      result =
+        FileActions.Glob.run(%{pattern: "../sibling/*.txt", base_path: base}, %{})
+
+      assert {:error, msg} = result,
+             "glob pattern with `..` must be rejected, got: #{inspect(result)}"
+
+      assert msg =~ "traversal"
+    end
   end
 
   describe "Exists" do

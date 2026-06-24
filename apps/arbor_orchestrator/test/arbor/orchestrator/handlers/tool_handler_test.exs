@@ -188,4 +188,64 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
       assert outcome.status == :success
     end
   end
+
+  describe "tool-hook sandbox enforcement (H5 regression)" do
+    test "security regression (H5): a dangerous tool_hooks.pre command is gated by the sandbox and never executes" do
+      # H5 (codex command-execution.orchestrator-tool-hooks-shell): pre-fix,
+      # ToolHooks ran graph-authored hook strings via `/bin/sh -c` with NO
+      # sandbox authorization — unlike the tool *command* path (H3). An
+      # agent-authored graph could put `rm -rf /` (or any dangerous command)
+      # in tool_hooks.pre/post and bypass the gate the command path enforces.
+      #
+      # Behavioral proof of non-execution: the hook is `rmdir <sentinel>` on an
+      # existing directory. `rmdir` is in the basic sandbox's dangerous-command
+      # list, so the fix denies it. If the hook had executed via the shell the
+      # directory would be gone; we assert it survives.
+      sentinel = Path.join(@test_dir, "do_not_delete")
+      File.mkdir_p!(sentinel)
+
+      node = %Node{
+        id: "hook_attack",
+        attrs: %{
+          "tool_command" => ~s(/bin/echo ran),
+          "sandbox" => "basic",
+          "tool_hooks.pre" => "rmdir #{sentinel}"
+        }
+      }
+
+      context = Context.new()
+      graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
+
+      outcome = ToolHandler.execute(node, context, graph, [])
+
+      assert File.dir?(sentinel),
+             "dangerous tool_hooks.pre command executed — the sandbox gate did not fire (H5 regression). " <>
+               "Got outcome: #{inspect(outcome)}"
+
+      # A blocked pre-hook reports :skip, so the tool itself is skipped too.
+      assert outcome.status == :skipped,
+             "a sandbox-denied pre-hook must skip the tool — got #{inspect(outcome)}"
+    end
+
+    test "a benign tool_hooks.pre command is allowed and the tool proceeds" do
+      # Control: legitimate hooks (no dangerous command / flag / metacharacter)
+      # still run at the basic level, and the tool command executes after.
+      node = %Node{
+        id: "hook_ok",
+        attrs: %{
+          "tool_command" => ~s(/bin/echo ran),
+          "sandbox" => "basic",
+          "tool_hooks.pre" => "echo hello"
+        }
+      }
+
+      context = Context.new()
+      graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
+
+      outcome = ToolHandler.execute(node, context, graph, [])
+
+      assert outcome.status == :success,
+             "a benign pre-hook must not block the tool — got #{inspect(outcome)}"
+    end
+  end
 end

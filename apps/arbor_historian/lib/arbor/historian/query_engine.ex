@@ -77,7 +77,15 @@ defmodule Arbor.Historian.QueryEngine do
   # ETS-only dev instances) — return whatever ETS gave us, log at debug
   # level so the divergence is observable without spamming.
   defp fetch_events_with_fallthrough(stream_id, opts, event_log) do
-    ets_result = PersistenceETS.read_stream(stream_id, name: event_log)
+    # Forward :max_scan so the ETS read can bound how much of the stream it
+    # walks into memory (DoS backstop — codex resource-exhaustion.historian
+    # -taint-query-full-scan). nil = unbounded (existing behavior).
+    ets_result =
+      PersistenceETS.read_stream(stream_id,
+        name: event_log,
+        max_scan: Keyword.get(opts, :max_scan)
+      )
+
     from = Keyword.get(opts, :from)
 
     # Fallthrough only applies when `:from` is an event_number (integer).

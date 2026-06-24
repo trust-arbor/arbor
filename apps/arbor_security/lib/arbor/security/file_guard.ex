@@ -265,10 +265,13 @@ defmodule Arbor.Security.FileGuard do
         {:ok, real} ->
           # The OS resolved the path. If the real target stays in the
           # cap's root, fine. Otherwise it's a link / junction / mount
-          # escaping the cap's scope.
-          case SafePath.resolve_within(real, root) do
-            {:ok, _} -> {:ok, normalized}
-            {:error, _} -> {:error, :symlink_escape}
+          # escaping the cap's scope. (Root is canonicalized too — see
+          # real_within_root?/2 — so platform ancestor symlinks like macOS
+          # /var -> /private/var don't read as escapes.)
+          if real_within_root?(real, root) do
+            {:ok, normalized}
+          else
+            {:error, :symlink_escape}
           end
 
         {:error, :not_found} ->
@@ -334,15 +337,13 @@ defmodule Arbor.Security.FileGuard do
         # within root.
         case SafePath.resolve_real(parent) do
           {:ok, real} ->
-            case SafePath.resolve_within(real, root) do
-              {:ok, _} ->
-                # This ancestor is fine; continue walking up. We can't
-                # short-circuit here because an OUTER ancestor could
-                # still be a symlink escaping root.
-                verify_ancestor_chain(parent, root, normalized)
-
-              {:error, _} ->
-                {:error, :symlink_escape}
+            if real_within_root?(real, root) do
+              # This ancestor is fine; continue walking up. We can't
+              # short-circuit here because an OUTER ancestor could
+              # still be a symlink escaping root.
+              verify_ancestor_chain(parent, root, normalized)
+            else
+              {:error, :symlink_escape}
             end
 
           {:error, _} ->
@@ -508,11 +509,32 @@ defmodule Arbor.Security.FileGuard do
   end
 
   defp check_real_within(real, root, fallback) do
-    case SafePath.resolve_within(real, root) do
-      {:ok, _} -> {:ok, fallback}
-      {:error, :path_traversal} -> {:error, :symlink_escape}
-      {:error, reason} -> {:error, {:invalid_path, reason}}
+    if real_within_root?(real, root) do
+      {:ok, fallback}
+    else
+      {:error, :symlink_escape}
     end
+  end
+
+  # Compare an already symlink-resolved path against the cap root, canonicalizing
+  # the ROOT the same way (resolve_real) before the containment check.
+  #
+  # Why: `SafePath.resolve_real/1` now resolves symlinks at every component
+  # (the ancestor-symlink fix). On platforms where an ancestor of the workspace
+  # is itself a symlink — notably macOS, where `/var` -> `/private/var` and tmp
+  # dirs live under `/var/folders` — the resolved path gains a `/private`
+  # prefix the lexical root lacks. Comparing resolved-path against lexical-root
+  # would then flag every legitimate in-root file as an escape. Resolving both
+  # sides keeps the comparison apples-to-apples. Falls back to the lexical root
+  # when it can't be resolved (e.g. the root doesn't exist yet).
+  defp real_within_root?(real, root) do
+    canonical_root =
+      case SafePath.resolve_real(root) do
+        {:ok, resolved_root} -> resolved_root
+        _ -> root
+      end
+
+    match?({:ok, _}, SafePath.resolve_within(real, canonical_root))
   end
 
   defp check_pattern_constraints(resolved_path, constraints) do

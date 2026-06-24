@@ -34,11 +34,27 @@ defmodule Arbor.Shell.Sandbox do
     nc netcat ncat curl wget
   ]
 
+  # Interpreters / exec-wrappers blocked at :basic level.
+  # SECURITY (codex sandbox.shell-basic-nested-command-bypass): the :basic
+  # denylist only inspects the TOP-LEVEL command. These programs run an
+  # ARBITRARY nested command supplied as an argument — `sh -c "rm -rf /"`,
+  # `xargs rm`, `env rm`, `python -c "..."`, `perl -e "..."` — which trivially
+  # defeats the top-level check (the dangerous command rides as an opaque arg).
+  # Block the wrappers themselves at :basic; trusted arbitrary execution must
+  # use the :none level (the documented escape hatch).
+  @interpreter_commands ~w[
+    sh bash zsh ksh dash csh tcsh fish ash
+    env eval exec command nohup nice timeout watch stdbuf setsid xargs
+    python python2 python3 perl ruby node nodejs php lua tclsh
+    awk gawk
+  ]
+
   # Dangerous flags blocked at :basic level
   @dangerous_flags ~w[
     -rf --recursive --force
     --no-preserve-root
     -f
+    -exec -execdir
   ]
 
   # Commands allowed at :strict level — read-only utilities only
@@ -71,6 +87,10 @@ defmodule Arbor.Shell.Sandbox do
       cond do
         cmd in @dangerous_commands ->
           {:error, {:blocked_command, cmd}}
+
+        Path.basename(cmd) in @interpreter_commands ->
+          # Match on basename so /bin/sh, /usr/bin/env, etc. are caught too.
+          {:error, {:blocked_interpreter, cmd}}
 
         has_dangerous_flags?(args) ->
           {:error, {:dangerous_flags, find_dangerous_flags(args)}}
