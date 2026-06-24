@@ -87,6 +87,22 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       assert numbers == [3, 2, 1]
     end
 
+    test "security regression (max_scan): bounds how many events are walked into memory",
+         %{name: name} do
+      # codex resource-exhaustion.historian-taint-query-full-scan: without a
+      # bound the reader collects the ENTIRE stream before applying a limit.
+      # :max_scan caps the walk so an unbounded stream can't be materialized.
+      events = for i <- 1..50, do: Event.new("s1", "t", %{i: i})
+      ETS.append("s1", events, name: name)
+
+      {:ok, bounded} = ETS.read_stream("s1", name: name, max_scan: 10)
+      assert length(bounded) == 10, "max_scan must bound the walk to 10, got #{length(bounded)}"
+
+      # Default (no max_scan) is unbounded — backward-compatible.
+      {:ok, all} = ETS.read_stream("s1", name: name)
+      assert length(all) == 50
+    end
+
     test "returns empty for nonexistent stream", %{name: name} do
       {:ok, read} = ETS.read_stream("nonexistent", name: name)
       assert read == []

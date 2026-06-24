@@ -330,6 +330,7 @@ defmodule Arbor.Security.FileGuardTest do
       %{
         agent_id: agent_id,
         workspace: workspace,
+        outside: outside,
         symlink: symlink_in_workspace
       }
     end
@@ -355,6 +356,89 @@ defmodule Arbor.Security.FileGuardTest do
       File.write!(legitimate, "ok")
 
       assert {:ok, _resolved} = FileGuard.authorize(agent_id, legitimate, :read)
+    end
+
+    test "security regression (ancestor-symlink): a file UNDER a symlinked ancestor dir is rejected",
+         %{agent_id: agent_id, workspace: workspace, outside: outside} do
+      # codex path-traversal.fileguard-ancestor-symlink (HIGH): pre-fix,
+      # SafePath.resolve_real only followed the LEAF symlink, never ancestor
+      # components. So `<workspace>/anc_link/secret.txt`, where `anc_link` is a
+      # symlink to `outside/`, normalized lexically inside the workspace and the
+      # real-path check (which also missed the ancestor link) passed — the read
+      # actually hit `outside/secret.txt`. The fix resolves symlinks at every
+      # component, so the ancestor link is followed and the escape is caught.
+      anc_link = Path.join(workspace, "anc_link")
+      File.ln_s!(outside, anc_link)
+      requested = Path.join(anc_link, "secret.txt")
+
+      result = FileGuard.authorize(agent_id, requested, :read)
+
+      assert {:error, :symlink_escape} = result,
+             "file under a symlinked ancestor directory must be rejected. Got: #{inspect(result)}"
+    end
+
+    test "security regression (ancestor-symlink): creating a file under a symlinked ancestor is rejected",
+         %{agent_id: agent_id, workspace: workspace, outside: outside} do
+      # The write/create variant: the target file does not exist yet, so
+      # resolution falls to the ancestor chain. A symlinked ancestor must still
+      # be detected (otherwise the future write lands outside the root).
+      now = DateTime.utc_now()
+
+      CapabilityStore.put(%Capability{
+        id: "cap_h2_write_#{agent_id}",
+        principal_id: agent_id,
+        resource_uri: "arbor://fs/write#{workspace}",
+        granted_at: now,
+        expires_at: DateTime.add(now, 3600, :second)
+      })
+
+      anc_link = Path.join(workspace, "anc_link_w")
+      File.ln_s!(outside, anc_link)
+      requested = Path.join(anc_link, "new_file.txt")
+
+      result = FileGuard.authorize(agent_id, requested, :write)
+
+      assert {:error, :symlink_escape} = result,
+             "creating a file under a symlinked ancestor must be rejected. Got: #{inspect(result)}"
+    end
+
+    test "security regression: create under a DEEPLY-NESTED ancestor symlink requires BOTH controls",
+         %{agent_id: agent_id, workspace: workspace, outside: outside} do
+      # This case fails if EITHER piece of the control is missing:
+      #   * Piece A — SafePath.resolve_real following symlinks at EVERY
+      #     component (not just the leaf). Here the symlink `deep_link` is a
+      #     GRANDPARENT of the requested file; leaf-only resolution never sees
+      #     it.
+      #   * Piece B — FileGuard resolving the nearest EXISTING parent when the
+      #     target file doesn't exist yet (write/create). Without it, the
+      #     missing target short-circuits to "looks contained".
+      #
+      # Layout: <ws>/deep_link -> <outside>, and <outside>/sub exists, but
+      # <outside>/sub/new.txt does not. We request a write to
+      # <ws>/deep_link/sub/new.txt. resolve_real(target) is :not_found (Piece B
+      # walks up to <ws>/deep_link/sub, which exists), and resolving THAT path
+      # must follow the grandparent `deep_link` (Piece A) to land in <outside>
+      # and be flagged. Drop either piece and the escape authorizes.
+      now = DateTime.utc_now()
+
+      CapabilityStore.put(%Capability{
+        id: "cap_h4_deep_#{agent_id}",
+        principal_id: agent_id,
+        resource_uri: "arbor://fs/write#{workspace}",
+        granted_at: now,
+        expires_at: DateTime.add(now, 3600, :second)
+      })
+
+      File.mkdir_p!(Path.join(outside, "sub"))
+      deep_link = Path.join(workspace, "deep_link")
+      File.ln_s!(outside, deep_link)
+      requested = Path.join([deep_link, "sub", "new.txt"])
+
+      result = FileGuard.authorize(agent_id, requested, :write)
+
+      assert {:error, :symlink_escape} = result,
+             "create under a deeply-nested ancestor symlink must be rejected (needs both controls). " <>
+               "Got: #{inspect(result)}"
     end
   end
 end

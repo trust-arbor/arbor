@@ -284,15 +284,18 @@ defmodule Arbor.Common.SafePath do
   def resolve_real(path) when is_binary(path) do
     case :file.read_link_info(path) do
       {:ok, _info} ->
-        # Path exists, get the real path
-        case :filelib.safe_relative_path(path, "/") do
-          :unsafe ->
-            # Fallback to manual resolution
-            resolve_real_manual(path)
-
-          safe_path ->
-            {:ok, "/" <> to_string(safe_path)}
-        end
+        # Path exists. Resolve it to its TRUE filesystem location, following
+        # symlinks at EVERY component — not just the leaf.
+        #
+        # SECURITY (codex path-traversal.fileguard-ancestor-symlink, HIGH): the
+        # pre-fix fast path used :filelib.safe_relative_path/2, which only does
+        # LEXICAL cleanup (collapses `.`/`..`) and does NOT follow symlinks.
+        # resolve_real_manual likewise only read_link'd the leaf. So a symlink
+        # in an ANCESTOR directory (e.g. `<root>/sublink` -> `/etc`) was never
+        # resolved: `<root>/sublink/passwd` came back as itself, looked
+        # contained, and FileGuard authorized an escape. A true component-wise
+        # walk resolves ancestor links so the containment check sees `/etc/...`.
+        resolve_real_manual(path)
 
       {:error, _} ->
         {:error, :not_found}
@@ -436,28 +439,65 @@ defmodule Arbor.Common.SafePath do
     end
   end
 
+  # Maximum number of symlinks to follow before declaring a loop (mirrors the
+  # POSIX MAXSYMLINKS / ELOOP guard). Counts only symlink hops, not path depth.
+  @max_symlink_hops 40
+
+  # True realpath: walk the path component-by-component from filesystem root,
+  # resolving a symlink whenever one is encountered (ancestor OR leaf). A
+  # relative link target resolves against the directory containing the link; an
+  # absolute target restarts from "/". `resolved` is always the already-
+  # canonicalized prefix, so `..` simply pops it.
   defp resolve_real_manual(path) do
-    # Manual resolution following symlinks
-    # This is a fallback when :filelib.safe_relative_path doesn't work
-    expanded = Path.expand(path)
+    walk_symlinks("/", path_components(Path.expand(path)), 0)
+  end
 
-    case File.read_link(expanded) do
-      {:ok, target} ->
-        # It's a symlink, resolve the target
-        if absolute?(target) do
-          resolve_real_manual(target)
-        else
-          resolve_real_manual(Path.join(Path.dirname(expanded), target))
-        end
-
-      {:error, :einval} ->
-        # Not a symlink, this is the real path
-        {:ok, expanded}
-
-      {:error, _} ->
-        {:error, :not_found}
+  defp path_components(path) do
+    case Path.split(path) do
+      ["/" | rest] -> rest
+      rest -> rest
     end
   end
+
+  # Loop guard: too many symlink hops → treat as unresolvable.
+  defp walk_symlinks(_resolved, _rest, hops) when hops > @max_symlink_hops do
+    {:error, :not_found}
+  end
+
+  defp walk_symlinks(resolved, [], _hops), do: {:ok, ensure_root(resolved)}
+
+  defp walk_symlinks(resolved, ["." | rest], hops), do: walk_symlinks(resolved, rest, hops)
+
+  defp walk_symlinks(resolved, [".." | rest], hops),
+    do: walk_symlinks(Path.dirname(resolved), rest, hops)
+
+  defp walk_symlinks(resolved, [comp | rest], hops) do
+    candidate = Path.join(resolved, comp)
+
+    case File.read_link(candidate) do
+      {:ok, target} ->
+        # `comp` is a symlink. Re-inject the link target ahead of the remaining
+        # components and count the hop. Absolute targets restart from root;
+        # relative targets resolve against `resolved` (the link's directory).
+        if absolute?(target) do
+          walk_symlinks("/", path_components(target) ++ rest, hops + 1)
+        else
+          walk_symlinks(resolved, path_components(target) ++ rest, hops + 1)
+        end
+
+      {:error, :enoent} ->
+        # A component (or a link target) does not exist.
+        {:error, :not_found}
+
+      {:error, _} ->
+        # Not a symlink (:einval) or another non-fatal stat result — accept the
+        # component verbatim and continue.
+        walk_symlinks(candidate, rest, hops)
+    end
+  end
+
+  defp ensure_root(""), do: "/"
+  defp ensure_root(resolved), do: resolved
 
   defmodule TraversalError do
     @moduledoc """

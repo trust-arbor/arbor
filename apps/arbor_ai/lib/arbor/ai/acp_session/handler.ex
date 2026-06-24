@@ -226,14 +226,23 @@ defmodule Arbor.AI.AcpSession.Handler do
     end
   end
 
-  # File authorization via FileGuard. When no agent_id, skip auth (system calls).
+  # File authorization via FileGuard.
   # FileGuard does its own SafePath check internally, but we pre-check in validate_path
   # to give better error messages for workspace_root violations.
   # @doc false — public for testability (the fail-closed regression test injects
   # a raising file_guard_module). Production callers reach it via the read/write
   # path; the head clauses must stay together so both are `def`.
+  #
+  # SECURITY (codex authz.acp-session-anonymous-file-access, HIGH): a nil
+  # agent_id means the session was created WITHOUT a caller identity (the
+  # entrypoint bug fixed in Arbor.Actions.Acp). The only caller of this function
+  # is the ACP handler itself, and every real ACP session represents an owning
+  # Arbor agent — there are no legitimate "system" file callbacks here. Pre-fix
+  # this clause returned :ok, auto-authorizing the external coding agent's file
+  # reads/writes as anonymous (bounded only by workspace_root, and UNBOUNDED
+  # when no workspace_root was set). Fail closed.
   @doc false
-  def authorize_file(nil, _path, _operation), do: :ok
+  def authorize_file(nil, _path, _operation), do: {:error, :no_agent_identity}
 
   def authorize_file(agent_id, path, operation) do
     if file_security_available?() do
@@ -255,8 +264,13 @@ defmodule Arbor.AI.AcpSession.Handler do
   end
 
   # Generic action authorization via Security.authorize/4.
-  # When no agent_id, skip (system/anonymous calls).
-  defp authorize_action(nil, _resource_uri, _action, _state), do: :authorized
+  # SECURITY (codex authz.acp-session-anonymous-file-access, HIGH): a nil
+  # agent_id means caller identity was dropped at session creation. Pre-fix this
+  # returned :authorized, auto-approving the coding agent's tool/permission
+  # requests anonymously. Fail closed (deny) — the same reasoning as
+  # authorize_file/3 above.
+  defp authorize_action(nil, _resource_uri, _action, _state),
+    do: {:denied, "no agent identity (anonymous ACP session denied)"}
 
   defp authorize_action(agent_id, resource_uri, action, state) do
     # Check trust tier confirmation mode first (if available), then security authorization

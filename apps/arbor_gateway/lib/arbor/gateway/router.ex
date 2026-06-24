@@ -19,12 +19,21 @@ defmodule Arbor.Gateway.Router do
 
   plug(Plug.Logger)
   plug(:match)
-  plug(:conditional_parsers)
+  # L (codex rate-limit.gateway-auth-failures-before-limiter): the IP-keyed rate
+  # limiter must run BEFORE authentication so that FAILED auth attempts are also
+  # counted — otherwise auth plugs halt the conn first and brute-force/credential
+  # stuffing attempts never hit the limiter. (Skips /health so monitoring probes
+  # aren't throttled.)
+  plug(:rate_limit_unless_health)
+  # M (codex authn.signed-request-body-parser-order): signed-request verification
+  # must run BEFORE body parsing so the Ed25519 signature is verified over the
+  # RAW request body and bound to exactly what downstream routes consume. The
+  # plug caches the raw body in `assigns[:raw_body]`; :conditional_parsers then
+  # reuses it via the cached body_reader (so the stream isn't consumed twice).
   plug(:try_signed_request_auth)
+  plug(:conditional_parsers)
   plug(:try_jwt_auth)
   plug(:require_auth_unless_health)
-  # H13: Rate limiting on all authenticated endpoints
-  plug(Arbor.Gateway.RateLimiter)
   plug(:dispatch)
 
   get "/health" do
@@ -60,10 +69,31 @@ defmodule Arbor.Gateway.Router do
     send_resp(conn, 404, "Not found")
   end
 
-  # Skip body parsing for MCP routes (ExMCP handles its own parsing)
-  @parsers_opts Plug.Parsers.init(parsers: [:json], json_decoder: Jason)
+  # Rate limit everything except the liveness probe. Runs before auth so failed
+  # authentication attempts are counted (brute-force hardening).
+  defp rate_limit_unless_health(%{request_path: "/health"} = conn, _opts), do: conn
+  defp rate_limit_unless_health(conn, _opts), do: Arbor.Gateway.RateLimiter.call(conn, [])
+
+  # Skip body parsing for MCP routes (ExMCP handles its own parsing).
+  # body_reader reuses the raw body already read+cached by SignedRequestAuth so
+  # the request stream isn't consumed twice (and the parsed body is exactly the
+  # bytes whose signature was verified). When no signature was present, raw_body
+  # is absent and the reader falls back to reading the stream normally.
+  @parsers_opts Plug.Parsers.init(
+                  parsers: [:json],
+                  json_decoder: Jason,
+                  body_reader: {__MODULE__, :cached_body_reader, []}
+                )
   defp conditional_parsers(%{request_path: "/mcp" <> _} = conn, _opts), do: conn
   defp conditional_parsers(conn, _opts), do: Plug.Parsers.call(conn, @parsers_opts)
+
+  @doc false
+  def cached_body_reader(conn, opts) do
+    case conn.assigns do
+      %{raw_body: body} when is_binary(body) -> {:ok, body, conn}
+      _ -> Plug.Conn.read_body(conn, opts)
+    end
+  end
 
   # Try SignedRequest auth before JWT — non-destructive passthrough.
   # External agents (Claude Code, etc.) authenticate per-request via Ed25519

@@ -99,12 +99,35 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
   defp check_all_resources(token, agent_id, [resource | rest]) do
     auth_opts = build_auth_opts(token, resource)
 
-    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
+    case Arbor.Orchestrator.Config.security_module().authorize(
+           agent_id,
+           resource,
+           :execute,
+           auth_opts
+         ) do
       {:ok, :authorized} ->
         check_all_resources(token, agent_id, rest)
 
-      {:ok, :pending_approval, _} ->
+      # Explicit-path (FileGuard) authorizations can return a 3-tuple carrying
+      # the resolved path; a granted authorization still proceeds. (Without this
+      # clause such a result would fall to the rescue and fail closed.)
+      {:ok, :authorized, _resolved_path} ->
         check_all_resources(token, agent_id, rest)
+
+      # SECURITY (codex authz.orchestrator-pending-approval-continues): a PENDING
+      # approval is NOT authorization. The node must NOT execute until approval is
+      # actually granted — halt (fail-closed), matching how every other subsystem
+      # (gateway/agent/router) treats :pending_approval.
+      {:ok, :pending_approval, proposal_id} ->
+        Token.halt(
+          token,
+          "capability pending approval: #{resource} for agent #{agent_id}",
+          %Outcome{
+            status: :fail,
+            failure_reason:
+              "Capability check pending approval: #{resource} (proposal #{inspect(proposal_id)})"
+          }
+        )
 
       {:error, reason} ->
         Token.halt(

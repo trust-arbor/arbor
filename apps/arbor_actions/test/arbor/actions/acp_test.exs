@@ -60,6 +60,35 @@ defmodule Arbor.Actions.AcpTest do
       assert {:error, msg} = result
       assert msg =~ "Unknown provider"
     end
+
+    # SECURITY REGRESSION (codex authz.acp-session-anonymous-file-access, HIGH):
+    # StartSession.run/2 discarded its context, so the caller's agent_id never
+    # reached the ACP session — the handler then authorized the coding agent's
+    # file/tool callbacks as ANONYMOUS. The identity must be forwarded into the
+    # session opts. These pin the entrypoint half of the fix (the handler half
+    # lives in arbor_ai/.../handler_authz_failclosed_test.exs). They fail on
+    # `git checkout HEAD~1`.
+    test "security regression: caller_agent_id extracts identity from atom- or string-keyed context" do
+      assert Acp.StartSession.caller_agent_id(%{agent_id: "agent_42"}) == "agent_42"
+      assert Acp.StartSession.caller_agent_id(%{"agent_id" => "agent_42"}) == "agent_42"
+      assert Acp.StartSession.caller_agent_id(%{}) == nil
+      assert Acp.StartSession.caller_agent_id(nil) == nil
+    end
+
+    test "security regression: build_opts threads the caller's agent_id into session opts" do
+      opts = Acp.StartSession.build_opts(%{model: "opus", cwd: "/ws"}, "agent_42")
+
+      assert Keyword.get(opts, :agent_id) == "agent_42",
+             "the session must carry the caller identity so file/tool callbacks are not anonymous"
+
+      assert Keyword.get(opts, :model) == "opus"
+      assert Keyword.get(opts, :cwd) == "/ws"
+    end
+
+    test "build_opts omits agent_id when there is no caller identity" do
+      opts = Acp.StartSession.build_opts(%{model: "opus"}, nil)
+      refute Keyword.has_key?(opts, :agent_id)
+    end
   end
 
   # ── SendMessage ──

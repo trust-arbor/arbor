@@ -221,6 +221,11 @@ defmodule Arbor.Persistence.EventLog.ETS do
     from_num = Keyword.get(opts, :from, 0)
     limit = Keyword.get(opts, :limit)
     direction = Keyword.get(opts, :direction, :forward)
+    # :max_scan bounds how many stream events are walked into memory before
+    # the limit is applied (DoS backstop — codex resource-exhaustion.historian
+    # -taint-query-full-scan). nil = unbounded (existing behavior). Intended for
+    # :forward reads.
+    max_scan = Keyword.get(opts, :max_scan)
 
     events =
       do_read_stream(
@@ -229,7 +234,8 @@ defmodule Arbor.Persistence.EventLog.ETS do
         stream_id,
         from_num,
         limit,
-        direction
+        direction,
+        max_scan
       )
 
     {:reply, {:ok, events}, state}
@@ -466,11 +472,19 @@ defmodule Arbor.Persistence.EventLog.ETS do
     {persisted, state}
   end
 
-  defp do_read_stream(stream_table, global_table, stream_id, from_num, limit, direction) do
+  defp do_read_stream(
+         stream_table,
+         global_table,
+         stream_id,
+         from_num,
+         limit,
+         direction,
+         max_scan
+       ) do
     # Walk the stream table to collect global_position pointers, then
     # dereference each one via the global table to get the full event.
     # See moduledoc for why stream table holds pointers, not events.
-    events = collect_stream_events(stream_table, global_table, stream_id, from_num, [])
+    events = collect_stream_events(stream_table, global_table, stream_id, from_num, [], max_scan)
 
     events =
       case direction do
@@ -484,7 +498,10 @@ defmodule Arbor.Persistence.EventLog.ETS do
     end
   end
 
-  defp collect_stream_events(stream_table, global_table, stream_id, from_num, acc) do
+  # remaining: nil = unbounded (default). 0 = scan ceiling reached → stop.
+  defp collect_stream_events(_st, _gt, _sid, _from_num, acc, 0), do: Enum.reverse(acc)
+
+  defp collect_stream_events(stream_table, global_table, stream_id, from_num, acc, remaining) do
     key = {stream_id, from_num}
 
     case :ets.lookup(stream_table, key) do
@@ -496,7 +513,8 @@ defmodule Arbor.Persistence.EventLog.ETS do
               global_table,
               stream_id,
               from_num + 1,
-              [event | acc]
+              [event | acc],
+              decrement_limit(remaining)
             )
 
           [] ->
@@ -511,7 +529,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
         # Check if there's a next key in this stream (handles from_num=0 case)
         case :ets.next(stream_table, key) do
           {^stream_id, next_num} ->
-            collect_stream_events(stream_table, global_table, stream_id, next_num, acc)
+            collect_stream_events(stream_table, global_table, stream_id, next_num, acc, remaining)
 
           _ ->
             Enum.reverse(acc)
