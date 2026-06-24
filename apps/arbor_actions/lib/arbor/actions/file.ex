@@ -472,7 +472,8 @@ defmodule Arbor.Actions.File do
 
       # Validate base_path if provided and workspace is set
       with {:ok, safe_base} <- validate_base_path(base_path, context),
-           {:ok, safe_base} <- authorize_glob(context, safe_base) do
+           {:ok, safe_base} <- authorize_glob(context, safe_base),
+           :ok <- reject_pattern_escape(pattern, safe_base) do
         Actions.emit_started(__MODULE__, params)
         match_dot = params[:match_dot] || false
 
@@ -507,6 +508,23 @@ defmodule Arbor.Actions.File do
 
     defp authorize_glob(context, base_path),
       do: Arbor.Actions.File.authorize_file_op(context, base_path, :read)
+
+    # SECURITY (codex path-traversal.file-glob-pattern-base-escape): when a base
+    # directory is authorized, the glob PATTERN must not climb out of it. Pre-fix,
+    # `Path.join(safe_base, "../sibling/**/*.ex")` enumerated files outside the
+    # authorized base — the base was capability-checked but the pattern wasn't.
+    # A `..` segment in a glob pattern is never legitimate (patterns descend from
+    # the base), so reject it. Only enforced when a base is in play; a bare
+    # pattern with no authorized base makes no containment claim.
+    defp reject_pattern_escape(_pattern, nil), do: :ok
+
+    defp reject_pattern_escape(pattern, _safe_base) do
+      if ".." in Path.split(pattern) do
+        {:error, "Glob pattern may not contain '..' path traversal"}
+      else
+        :ok
+      end
+    end
   end
 
   defmodule Exists do
