@@ -10,8 +10,13 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
   def execute(node, context, graph, opts) do
     command = Map.get(node.attrs, "tool_command", "")
     hooks = resolve_hooks(node, graph, opts)
+    # H5 (codex command-execution.orchestrator-tool-hooks-shell): tool hooks are
+    # shell commands too. Thread the node's sandbox level into the hook runs so
+    # ToolHooks gates them through Arbor.Shell.Sandbox — same gate the tool
+    # *command* uses (H3). Without this, a graph-authored hook bypassed the gate.
+    hook_opts = Keyword.put(opts, :sandbox_level, sandbox_level_for(node))
     pre_payload = %{phase: "pre", tool_name: node.id, tool_call_id: node.id, command: command}
-    pre_result = ToolHooks.run(:pre, hooks.pre, pre_payload, opts)
+    pre_result = ToolHooks.run(:pre, hooks.pre, pre_payload, hook_opts)
     emit(opts, %{type: :tool_hook_pre, node_id: node.id, tool: node.id, result: pre_result})
 
     cond do
@@ -49,7 +54,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
           result: outcome.context_updates
         }
 
-        post_result = ToolHooks.run(:post, hooks.post, post_payload, opts)
+        post_result = ToolHooks.run(:post, hooks.post, post_payload, hook_opts)
         emit(opts, %{type: :tool_hook_post, node_id: node.id, tool: node.id, result: post_result})
 
         outcome
