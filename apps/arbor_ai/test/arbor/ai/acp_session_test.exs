@@ -1,10 +1,37 @@
 defmodule Arbor.AI.AcpSessionTest do
-  use ExUnit.Case, async: true
+  # async: false — the Handler describes inject :arbor_ai app-env (file_guard /
+  # security module) to exercise authorized file ops without a real grant, after
+  # the H3 anonymous-access fix made nil-agent callbacks fail closed.
+  use ExUnit.Case, async: false
 
   alias Arbor.AI.AcpSession
   alias Arbor.AI.AcpSession.Config
 
   @moduletag :fast
+
+  # Passthrough authz stubs: stand in for a granted agent so the Handler's
+  # workspace/path-validation behavior can be tested without a CapabilityStore
+  # grant. (The anonymous nil-agent path now fails closed — see
+  # handler_authz_failclosed_test.exs.)
+  defmodule PassthroughFileGuard do
+    @moduledoc false
+    def authorize(_agent_id, path, _op), do: {:ok, path}
+  end
+
+  defmodule PassthroughSecurity do
+    @moduledoc false
+    def authorize(_agent_id, _uri, _action, _opts), do: {:ok, :authorized}
+  end
+
+  defp install_passthrough_authz do
+    Application.put_env(:arbor_ai, :file_guard_module, PassthroughFileGuard)
+    Application.put_env(:arbor_ai, :security_module, PassthroughSecurity)
+
+    on_exit(fn ->
+      Application.delete_env(:arbor_ai, :file_guard_module)
+      Application.delete_env(:arbor_ai, :security_module)
+    end)
+  end
 
   describe "Config.resolve/2" do
     test "resolves native ACP providers" do
@@ -182,11 +209,16 @@ defmodule Arbor.AI.AcpSessionTest do
       assert {:ok, ^state} = Handler.handle_session_update("s1", %{"kind" => "status"}, state)
     end
 
-    test "handle_permission_request approves when no agent_id" do
+    test "handle_permission_request DENIES when no agent_id (anonymous session) — H3 regression" do
       {:ok, state} = Handler.init([])
 
-      assert {:ok, %{"outcome" => "approved"}, ^state} =
+      # SECURITY (codex authz.acp-session-anonymous-file-access): pre-fix,
+      # authorize_action(nil,...) returned :authorized and this approved. A
+      # session with no caller identity must not auto-approve tool requests.
+      assert {:ok, %{"outcome" => "denied"} = outcome, ^state} =
                Handler.handle_permission_request("session-1", %{"name" => "tool"}, %{}, state)
+
+      assert outcome["reason"] =~ "identity"
     end
 
     # Spec regression — surfaced during the Gemini E2E HITL smoke test on
@@ -198,7 +230,8 @@ defmodule Arbor.AI.AcpSessionTest do
     # rejected the non-spec response and re-asked — yielding 3 Signal
     # prompts for a single tool use until it gave up.
     test "handle_permission_request returns spec-shaped outcome when options are offered" do
-      {:ok, state} = Handler.init([])
+      install_passthrough_authz()
+      {:ok, state} = Handler.init(agent_id: "test-agent")
 
       options = [
         %{
@@ -213,7 +246,7 @@ defmodule Arbor.AI.AcpSessionTest do
       assert {:ok, response, _state} =
                Handler.handle_permission_request("s1", %{"name" => "tool"}, options, state)
 
-      # No agent_id → :authorized fast path → picks the first allow_once-kind option.
+      # Authorized → picks the first allow_once-kind option.
       assert response == %{"outcome" => %{"outcome" => "selected", "optionId" => "proceed_once"}}
     end
 
@@ -245,7 +278,8 @@ defmodule Arbor.AI.AcpSessionTest do
     end
 
     test "handle_file_read reads existing file (no workspace root)" do
-      {:ok, state} = Handler.init([])
+      install_passthrough_authz()
+      {:ok, state} = Handler.init(agent_id: "test-agent")
       path = Path.join(System.tmp_dir!(), "acp_handler_test_#{:rand.uniform(100_000)}")
 
       try do
@@ -257,12 +291,14 @@ defmodule Arbor.AI.AcpSessionTest do
     end
 
     test "handle_file_read returns error for missing file" do
-      {:ok, state} = Handler.init([])
+      install_passthrough_authz()
+      {:ok, state} = Handler.init(agent_id: "test-agent")
       assert {:error, _, _} = Handler.handle_file_read("s1", "/nonexistent/file", %{}, state)
     end
 
     test "handle_file_write writes file (no workspace root)" do
-      {:ok, state} = Handler.init([])
+      install_passthrough_authz()
+      {:ok, state} = Handler.init(agent_id: "test-agent")
       path = Path.join(System.tmp_dir!(), "acp_handler_write_test_#{:rand.uniform(100_000)}")
 
       try do
@@ -280,10 +316,17 @@ defmodule Arbor.AI.AcpSessionTest do
     alias Arbor.AI.AcpSession.Handler
 
     setup do
+      # Passthrough authz + a real agent_id: these tests exercise workspace_root
+      # / SafePath bounds, not capability grants. The anonymous (nil-agent) path
+      # now fails closed, so an authorized identity is required for the
+      # within-workspace success cases. Traversal/outside cases still deny via
+      # validate_path (which runs before authorization).
+      install_passthrough_authz()
+
       # Create a temp workspace directory
       workspace = Path.join(System.tmp_dir!(), "acp_ws_test_#{:rand.uniform(100_000)}")
       File.mkdir_p!(workspace)
-      {:ok, state} = Handler.init(cwd: workspace)
+      {:ok, state} = Handler.init(cwd: workspace, agent_id: "test-agent")
 
       on_exit(fn -> File.rm_rf(workspace) end)
       %{state: state, workspace: workspace}
