@@ -587,4 +587,60 @@ defmodule Arbor.Actions.ConsensusTest do
       end
     end
   end
+
+  # ============================================================================
+  # H5 security regression — unsafe String.to_atom in branch/perspective id
+  # ============================================================================
+  #
+  # H5 (SECURITY_REVIEW 2026-02-16): branch IDs (perspectives) ultimately derive
+  # from externally-sourced parallel-branch results. The fix replaced
+  # `String.to_atom/1` with `safe_perspective_atom/1`
+  # (`String.to_existing_atom` + rescue -> :adversarial), so an attacker-supplied
+  # branch id can never mint a fresh atom (atom-exhaustion DoS).
+  #
+  # These tests drive the public Decide.run/2 action — which routes
+  # results -> parse_vote_result -> sanitize_perspective -> safe_perspective_atom.
+  # If safe_perspective_atom is reverted to String.to_atom, the unknown branch id
+  # gets interned and `String.to_existing_atom/1` no longer raises -> RED.
+  describe "H5 security regression — perspective atom not minted from untrusted branch id" do
+    test "an unknown branch id does NOT create a new atom" do
+      # Alphanumeric + underscore so it survives sanitize_perspective unchanged;
+      # unique so it cannot already exist in the atom table.
+      unknown_id = "h5_unknown_perspective_#{System.unique_integer([:positive])}"
+
+      # Precondition: the atom must not already exist (otherwise the test proves nothing).
+      assert_raise ArgumentError, fn -> String.to_existing_atom(unknown_id) end
+
+      results = [
+        %{
+          "id" => unknown_id,
+          "context_updates" => %{"last_response" => "vote: approve, confidence 0.8"}
+        }
+      ]
+
+      assert {:ok, _decision} = Consensus.Decide.run(%{results: results, quorum: "majority"}, %{})
+
+      # The security invariant: the untrusted branch id was NOT interned as an atom.
+      # With the unsafe String.to_atom this raise would NOT happen (atom now exists) -> failure.
+      assert_raise ArgumentError, fn -> String.to_existing_atom(unknown_id) end
+    end
+
+    test "atom table does not grow by the untrusted branch id across the action" do
+      unknown_id = "h5_atom_growth_#{System.unique_integer([:positive])}"
+      assert_raise ArgumentError, fn -> String.to_existing_atom(unknown_id) end
+
+      results = [
+        %{
+          "id" => unknown_id,
+          "context_updates" => %{"last_response" => "vote: reject, confidence 0.5"}
+        }
+      ]
+
+      assert {:ok, _} = Consensus.Decide.run(%{results: results, quorum: "majority"}, %{})
+
+      # Even after a second run with the SAME untrusted id, it is still not an atom.
+      assert {:ok, _} = Consensus.Decide.run(%{results: results, quorum: "majority"}, %{})
+      assert_raise ArgumentError, fn -> String.to_existing_atom(unknown_id) end
+    end
+  end
 end

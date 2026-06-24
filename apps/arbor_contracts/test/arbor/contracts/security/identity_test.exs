@@ -37,6 +37,32 @@ defmodule Arbor.Contracts.Security.IdentityTest do
                Identity.new(public_key: public_key, private_key: <<1, 2, 3>>)
     end
 
+    test "L2 security regression: accepts both 32-byte and 64-byte Ed25519 private keys" do
+      # L2 (2026-02-16 review): the Identity contract previously validated
+      # Ed25519 private keys as exactly 32 bytes, but
+      # :crypto.generate_key(:eddsa, :ed25519) returns 64-byte expanded keys.
+      # The fix accepts both 32-byte (seed) and 64-byte (expanded) keys, and
+      # rejects clearly-wrong sizes. Reverting to a 32-byte-only check makes
+      # the 64-byte assertion below fail.
+      {public_key, _private_key} = :crypto.generate_key(:eddsa, :ed25519)
+
+      seed_key = :crypto.strong_rand_bytes(32)
+      expanded_key = :crypto.strong_rand_bytes(64)
+
+      assert {:ok, id32} = Identity.new(public_key: public_key, private_key: seed_key)
+      assert id32.private_key == seed_key
+
+      assert {:ok, id64} = Identity.new(public_key: public_key, private_key: expanded_key)
+      assert id64.private_key == expanded_key
+
+      # Clearly-wrong sizes are rejected (not 32, not 64).
+      assert {:error, {:invalid_private_key_size, 48, :expected, "32 or 64"}} =
+               Identity.new(public_key: public_key, private_key: :crypto.strong_rand_bytes(48))
+
+      assert {:error, {:invalid_private_key_size, _, :expected, "32 or 64"}} =
+               Identity.new(public_key: public_key, private_key: <<1, 2, 3>>)
+    end
+
     test "accepts custom key_version and metadata" do
       {public_key, _private_key} = :crypto.generate_key(:eddsa, :ed25519)
 
