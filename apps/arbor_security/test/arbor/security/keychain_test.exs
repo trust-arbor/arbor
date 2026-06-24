@@ -354,6 +354,55 @@ defmodule Arbor.Security.KeychainTest do
       assert reason in [:hmac_verification_failed, :invalid_encryption_key]
     end
 
+    test "security regression (M3): tampering a PLAINTEXT public field fails deserialization" do
+      # M3: the serialized keychain encrypts private keys but the public fields
+      # (agent_id, public keys, peer info) sit in plaintext. Without an HMAC over
+      # the whole payload, an attacker could rewrite the agent_id or a peer's
+      # public key without breaking decryption. The fix adds an HMAC-SHA256 over
+      # the entire payload, verified before any field is processed. This test
+      # tampers a *plaintext public* field (NOT the encrypted blob, which would
+      # also fail on decryption and thus not prove the HMAC) and asserts the
+      # deserialize is rejected.
+      kc = Keychain.new("agent_victim")
+      encryption_key = :crypto.strong_rand_bytes(32)
+
+      {:ok, serialized} = Keychain.serialize(kc, encryption_key)
+      {:ok, decoded} = Jason.decode(serialized)
+
+      # Tamper the plaintext agent_id in the public section, regardless of
+      # whether the serialized form is HMAC-wrapped (the fix) or a bare payload
+      # (the pre-fix shape). The HMAC over the inner payload JSON is what must
+      # detect this; without it, the forged agent_id is silently accepted.
+      tampered =
+        case decoded do
+          %{"payload" => inner_json, "hmac" => _} ->
+            inner = Jason.decode!(inner_json)
+            tampered_public = Map.put(inner["public"], "agent_id", "agent_attacker")
+            tampered_inner = Map.put(inner, "public", tampered_public)
+            # Keep the original (now-stale) HMAC — that's the point: it must
+            # no longer match the tampered inner payload.
+            Jason.encode!(%{decoded | "payload" => Jason.encode!(tampered_inner)})
+
+          %{"public" => public} ->
+            # Bare-payload (pre-fix) shape — no integrity wrapper at all.
+            tampered_public = Map.put(public, "agent_id", "agent_attacker")
+            Jason.encode!(%{decoded | "public" => tampered_public})
+        end
+
+      result = Keychain.deserialize(tampered, encryption_key)
+
+      assert {:error, reason} = result,
+             "tampered plaintext public field was accepted — M3 regression: got #{inspect(result)}"
+
+      assert reason in [:hmac_verification_failed, :invalid_payload, :invalid_encryption_key],
+             "expected an integrity/verification failure, got #{inspect(reason)}"
+
+      # Belt-and-braces: if deserialization had succeeded with the forged
+      # agent_id, that's the exact bug — assert we never reach an :ok with it.
+      refute match?({:ok, %{agent_id: "agent_attacker"}}, result),
+             "deserialize returned the forged agent_id — M3 regression"
+    end
+
     test "different agents get different encryption results" do
       kc1 = Keychain.new("agent_1")
       kc2 = Keychain.new("agent_2")

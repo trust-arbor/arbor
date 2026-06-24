@@ -108,5 +108,32 @@ defmodule Arbor.Contracts.Security.SignedRequestTest do
                  signature: <<1, 2, 3>>
                )
     end
+
+    test "L3 security regression: rejects an all-zero nonce", ctx do
+      # L3 (2026-02-16 review): an all-zero nonce indicates a broken/failed
+      # entropy source and offers no replay protection. The fix rejects it
+      # with :zero_nonce. A correctly-sized, non-zero nonce is still accepted.
+      # Reverting the zero-nonce guard makes the rejection assertion fail.
+      zero_nonce = <<0::size(16 * 8)>>
+
+      assert {:error, :zero_nonce} =
+               SignedRequest.new(
+                 payload: "data",
+                 agent_id: ctx.agent_id,
+                 timestamp: DateTime.utc_now(),
+                 nonce: zero_nonce,
+                 signature: <<1, 2, 3>>
+               )
+
+      # A normal (non-zero) 16-byte nonce is accepted.
+      assert {:ok, _} =
+               SignedRequest.new(
+                 payload: "data",
+                 agent_id: ctx.agent_id,
+                 timestamp: DateTime.utc_now(),
+                 nonce: :crypto.strong_rand_bytes(16),
+                 signature: <<1, 2, 3>>
+               )
+    end
   end
 end

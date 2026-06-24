@@ -145,6 +145,57 @@ defmodule Arbor.Security.SystemAuthorityTest do
     end
   end
 
+  describe "rotate/0 (L1 regression)" do
+    test "security regression (L1): rotate/0 changes the authority keypair" do
+      # L1: the SystemAuthority keypair was generated once at startup and never
+      # rotatable — a long-lived cluster kept the same root-of-trust key
+      # indefinitely. The fix exposes rotate/0, which mints a fresh identity,
+      # registers it, and swaps it into GenServer state. This asserts the
+      # observable post-rotation behavior differs from pre-rotation: a NEW
+      # agent_id and a NEW public key, with the new key actually registered.
+      old_agent_id = SystemAuthority.agent_id()
+      old_public_key = SystemAuthority.public_key()
+
+      assert {:ok, %{old_agent_id: ^old_agent_id, new_agent_id: new_agent_id}} =
+               SystemAuthority.rotate()
+
+      assert new_agent_id != old_agent_id,
+             "rotate/0 did not change the agent_id — L1 regression"
+
+      new_public_key = SystemAuthority.public_key()
+
+      assert new_public_key != old_public_key,
+             "rotate/0 did not change the public key — L1 regression"
+
+      assert SystemAuthority.agent_id() == new_agent_id
+
+      # The rotated key is the live identity now registered for verification.
+      assert {:ok, ^new_public_key} = Registry.lookup(new_agent_id)
+    end
+
+    test "security regression (L1): capabilities signed after rotation use the new key" do
+      # Behavioral consequence of rotation: a capability signed AFTER rotate/0
+      # carries the new issuer_id and verifies under the current authority. A
+      # no-op rotate (the pre-fix state, where the key never changed) would not
+      # produce a distinct new issuer_id.
+      old_agent_id = SystemAuthority.agent_id()
+
+      {:ok, %{new_agent_id: new_agent_id}} = SystemAuthority.rotate()
+      assert new_agent_id != old_agent_id
+
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/post_rotate",
+          principal_id: "agent_test001"
+        )
+
+      {:ok, signed} = SystemAuthority.sign_capability(cap)
+
+      assert signed.issuer_id == new_agent_id
+      assert :ok = SystemAuthority.verify_capability_signature(signed)
+    end
+  end
+
   # The test environment runs SystemAuthority in :ephemeral mode, so the live
   # GenServer never persists anything. These tests drive persist_keypair/1
   # and load_persisted_keypair/0 directly (both exposed as @doc false) on a

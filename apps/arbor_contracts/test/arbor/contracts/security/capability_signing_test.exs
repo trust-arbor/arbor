@@ -43,6 +43,36 @@ defmodule Arbor.Contracts.Security.CapabilitySigningTest do
       refute payload_without_issuer == payload_with_issuer
     end
 
+    test "M4 security regression: signed_at is part of the signing payload" do
+      # M4 (2026-02-16 review): the capability signing payload must include a
+      # signature timestamp (`signed_at`) so a signature is bound to when it
+      # was created. The fix added `signed_at` to the Capability struct and to
+      # signing_payload/1. If `signed_at` is dropped from the payload, altering
+      # it would NOT change the bytes that get signed — this test catches that
+      # by asserting two capabilities that differ ONLY in signed_at produce
+      # different signing payloads.
+      now = DateTime.utc_now()
+
+      {:ok, cap} =
+        Capability.new(
+          resource_uri: "arbor://fs/read/docs",
+          principal_id: "agent_test001"
+        )
+
+      cap_t1 = %{cap | signed_at: now}
+      cap_t2 = %{cap | signed_at: DateTime.add(now, 60, :second)}
+
+      payload_t1 = Capability.signing_payload(cap_t1)
+      payload_t2 = Capability.signing_payload(cap_t2)
+
+      refute payload_t1 == payload_t2,
+             "altering signed_at must change the signing payload (M4)"
+
+      # And a nil signed_at must differ from a set one (the field is genuinely
+      # covered, not a constant).
+      refute Capability.signing_payload(%{cap | signed_at: nil}) == payload_t1
+    end
+
     test "different constraints produce different payloads" do
       {:ok, cap1} =
         Capability.new(
