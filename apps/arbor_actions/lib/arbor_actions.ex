@@ -893,7 +893,13 @@ defmodule Arbor.Actions do
     Arbor.Actions.Historian.QueryEvents => "arbor://historian/query",
     Arbor.Actions.Historian.CausalityTree => "arbor://historian/query",
     Arbor.Actions.Historian.ReconstructState => "arbor://historian/query",
-    Arbor.Actions.Historian.TaintTrace => "arbor://historian/query",
+    # SECURITY (codex authz.historian-tainttrace-security-stream): TaintTrace
+    # reads the SECURITY taint stream (StreamIds.for_category(:security)), so it
+    # must require a security-scoped historian cap — not the generic query cap
+    # that authorizes ordinary event reads. A bare `arbor://historian/query`
+    # grant no longer authorizes taint reads; an explicit
+    # `arbor://historian/query/security` (or a `/**` wildcard) is required.
+    Arbor.Actions.Historian.TaintTrace => "arbor://historian/query/security",
 
     # Sandbox facade — arbor://sandbox/{operation}
     Arbor.Actions.Sandbox.Create => "arbor://sandbox/create",

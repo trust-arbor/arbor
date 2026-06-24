@@ -152,6 +152,19 @@ defmodule Arbor.Actions.HistorianTest do
       assert "provenance" in Historian.TaintTrace.tags()
     end
 
+    test "security regression: requires a SECURITY-scoped historian cap, not the generic query cap" do
+      # codex authz.historian-tainttrace-security-stream: TaintTrace reads the
+      # security taint stream, so it must NOT be authorized by the same generic
+      # `arbor://historian/query` cap as ordinary event reads. Its canonical URI
+      # is the security-scoped resource; a bare query grant won't prefix-match it.
+      assert Arbor.Actions.canonical_uri_for(Historian.TaintTrace, %{}) ==
+               "arbor://historian/query/security"
+
+      # The non-security historian readers stay on the generic query cap.
+      assert Arbor.Actions.canonical_uri_for(Historian.QueryEvents, %{}) ==
+               "arbor://historian/query"
+    end
+
     test "generates tool schema" do
       tool = Historian.TaintTrace.to_tool()
       assert is_map(tool)
