@@ -115,7 +115,7 @@ defmodule Arbor.Actions.Sandbox do
     def run(%{agent_id: agent_id} = params, context) do
       Actions.emit_started(__MODULE__, %{agent_id: agent_id})
 
-      with {:ok, opts} <- build_opts(params),
+      with {:ok, opts} <- build_opts(params, context),
            {:ok, sandbox} <- call_create(agent_id, opts, context) do
         result = %{
           sandbox_id: sandbox.id,
@@ -143,15 +143,42 @@ defmodule Arbor.Actions.Sandbox do
         {:error, format_error(reason)}
     end
 
-    defp build_opts(params) do
+    defp build_opts(params, context) do
       with {:ok, level} <- normalize_level(params[:level]) do
+        # SECURITY (codex authz.sandbox-create-unbounded-options):
+        #   * Do NOT forward a caller-supplied base_path. It flowed into
+        #     File.mkdir_p, letting an agent create directories at arbitrary
+        #     host paths. Agent-created sandboxes always use the default
+        #     isolated root. (The internal Arbor.Sandbox.create/2 API still
+        #     accepts base_path for trusted/system callers.)
+        #   * Thread the CALLER's trust tier so determine_level caps the
+        #     requested :level to what the tier permits (a low-trust agent can
+        #     no longer self-elevate to :full/:container).
         opts =
           []
           |> maybe_add(:level, level)
-          |> maybe_add(:base_path, params[:base_path])
+          |> maybe_add(:trust_tier, caller_trust_tier(context))
           |> maybe_add(:timeout, params[:timeout])
 
         {:ok, opts}
+      end
+    end
+
+    # Resolve the caller's trust tier via a runtime bridge (arbor_actions does
+    # not compile-depend on arbor_trust). Defaults conservatively to
+    # :probationary (→ :limited) when the caller is anonymous or trust is
+    # unavailable — never elevates.
+    defp caller_trust_tier(context) do
+      agent_id = context[:agent_id]
+      mod = Arbor.Trust
+
+      with true <- is_binary(agent_id),
+           true <- Code.ensure_loaded?(mod) and function_exported?(mod, :get_trust_tier, 1),
+           # credo:disable-for-next-line Credo.Check.Refactor.Apply
+           {:ok, tier} when is_atom(tier) <- apply(mod, :get_trust_tier, [agent_id]) do
+        tier
+      else
+        _ -> :probationary
       end
     end
 

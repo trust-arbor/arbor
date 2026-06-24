@@ -408,18 +408,40 @@ defmodule Arbor.Sandbox do
 
   # Private functions
 
+  # Privilege ranking for capping a requested level to a trust tier's maximum.
+  # Higher = more host capability / resource cost.
+  @level_rank %{pure: 0, limited: 1, full: 2, container: 3}
+
   defp determine_level(opts) do
+    tier_level =
+      case Keyword.fetch(opts, :trust_tier) do
+        {:ok, tier} -> Map.get(@trust_to_level, tier, :limited)
+        :error -> nil
+      end
+
     cond do
+      # SECURITY (codex authz.sandbox-create-unbounded-options): when a caller
+      # both requests a :level AND a trust tier is known, the request must not
+      # exceed what the tier permits — cap it. Pre-fix the explicit :level won
+      # outright, letting a low-trust caller request :full/:container.
+      Keyword.has_key?(opts, :level) and not is_nil(tier_level) ->
+        cap_level(Keyword.fetch!(opts, :level), tier_level)
+
       Keyword.has_key?(opts, :level) ->
         Keyword.fetch!(opts, :level)
 
-      Keyword.has_key?(opts, :trust_tier) ->
-        tier = Keyword.fetch!(opts, :trust_tier)
-        Map.get(@trust_to_level, tier, :limited)
+      not is_nil(tier_level) ->
+        tier_level
 
       true ->
         :limited
     end
+  end
+
+  defp cap_level(requested, tier_level) do
+    if Map.get(@level_rank, requested, 99) > Map.get(@level_rank, tier_level, 0),
+      do: tier_level,
+      else: requested
   end
 
   defp generate_sandbox_id do
