@@ -218,10 +218,18 @@ defmodule Arbor.Actions.Acp do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
-    def run(params, _context) do
+    def run(params, context) do
+      # SECURITY (codex authz.acp-session-anonymous-file-access, HIGH): forward
+      # the CALLER's agent_id into the session. Pre-fix this discarded the
+      # context, so the ACP session handler initialized with agent_id=nil and
+      # authorized the coding agent's file/exec callbacks as ANONYMOUS
+      # (handler.ex authorize_file(nil,...) -> :ok). The identity must be
+      # threaded so callbacks are authorized against the owning agent's caps.
+      agent_id = caller_agent_id(context)
+
       with :ok <- Acp.require_acp!(),
            {:ok, provider} <- normalize_provider(params.provider),
-           {:ok, session_pid, session_info} <- start_or_checkout(provider, params) do
+           {:ok, session_pid, session_info} <- start_or_checkout(provider, params, agent_id) do
         {:ok,
          %{
            session_pid: session_pid,
@@ -258,8 +266,8 @@ defmodule Arbor.Actions.Acp do
     defp normalize_provider(provider),
       do: {:error, {:invalid_provider, inspect(provider)}}
 
-    defp start_or_checkout(provider, %{use_pool: true} = params) do
-      opts = build_opts(params)
+    defp start_or_checkout(provider, %{use_pool: true} = params, agent_id) do
+      opts = build_opts(params, agent_id)
 
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(Arbor.AI, :acp_checkout, [provider, opts]) do
@@ -268,8 +276,8 @@ defmodule Arbor.Actions.Acp do
       end
     end
 
-    defp start_or_checkout(provider, params) do
-      opts = build_opts(params)
+    defp start_or_checkout(provider, params, agent_id) do
+      opts = build_opts(params, agent_id)
 
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(Arbor.AI, :acp_start_session, [provider, opts]) do
@@ -302,11 +310,25 @@ defmodule Arbor.Actions.Acp do
       end
     end
 
-    defp build_opts(params) do
+    # @doc false — public so the security regression test can assert the
+    # caller's agent_id is threaded into the session opts (the anonymous-access
+    # bug was build_opts dropping identity).
+    @doc false
+    def build_opts(params, agent_id) do
       []
       |> maybe_add(:model, params[:model])
       |> maybe_add(:cwd, params[:cwd])
+      |> maybe_add(:agent_id, agent_id)
     end
+
+    # Extract the calling agent's id from the action exec context. Tolerates
+    # atom- or string-keyed contexts (Jido/engine both occur).
+    @doc false
+    def caller_agent_id(context) when is_map(context) do
+      context[:agent_id] || context["agent_id"]
+    end
+
+    def caller_agent_id(_), do: nil
 
     defp maybe_add(opts, _key, nil), do: opts
     defp maybe_add(opts, key, value), do: Keyword.put(opts, key, value)
