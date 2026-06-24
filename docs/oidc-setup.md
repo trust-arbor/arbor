@@ -266,4 +266,4 @@ rm ~/.arbor/identity/oidc_tokens.enc
 - [`docker/zitadel/README.md`](../docker/zitadel/README.md) — full Zitadel docker-compose walkthrough.
 - [`config/runtime.exs`](../config/runtime.exs) — authoritative source for every OIDC env var Arbor reads.
 - [`docs/arbor-security-design.md`](arbor-security-design.md) — the broader security model (capabilities, trust tiers, authorization pipeline).
-- [`SECURITY_REMEDIATION_BREAKAGE.md`](../SECURITY_REMEDIATION_BREAKAGE.md) — operator cheat-sheet (§ "Operator restoration cheat-sheet") for the recent security work, including the `assign_role(:admin)` bootstrap referenced above.
+- The `assign_role(:admin)` / `:dev_admin` bootstrap above is the durable home for that operator guidance. It originated as a cheat-sheet in `SECURITY_REMEDIATION_BREAKAGE.md`, which was archived out of the repo root on 2026-06-24 once its `security/p0-h-remediation` branch merged; see git history (or the local `.arbor/security-history/` archive) for the per-fix restoration notes.
