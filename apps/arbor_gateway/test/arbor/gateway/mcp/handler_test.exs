@@ -515,6 +515,48 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
              "Memory detail returned without an authorizing capability — M8 regression"
     end
 
+    test "security regression: agents detail (caps+goals) is gated per-target like other components",
+         %{state: state} do
+      # codex authz.mcp-agents-status-detail-bypass: component="agents" with an
+      # agent_id returns the agent's Profile + capabilities + goals — the same
+      # sensitive data the capabilities/goals components gate. Pre-fix it skipped
+      # the per-target authorization, so an authenticated caller without an
+      # arbor://status/agents/{target} cap could read any agent's caps + goals.
+      Process.put(:arbor_authenticated_agent_id, "caller_no_cap_agents")
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_status",
+          %{"component" => "agents", "agent_id" => "victim_agents"},
+          state
+        )
+
+      [%{type: "text", text: text}] = result.content
+
+      assert text =~ "not authorized" or text =~ "no_capability",
+             "Expected an authz denial for the agents detail, got: #{inspect(text)}"
+
+      refute text =~ "## Profile",
+             "Agent detail (profile/caps/goals) leaked without an authorizing capability"
+    end
+
+    test "security regression: agents detail with no authenticated caller is denied", %{
+      state: state
+    } do
+      # No Process.put — unauthenticated request must not get agent detail.
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_status",
+          %{"component" => "agents", "agent_id" => "victim_agents"},
+          state
+        )
+
+      [%{type: "text", text: text}] = result.content
+
+      assert text =~ "no authenticated caller"
+      refute text =~ "## Profile"
+    end
+
     test "security regression (M8): overview component does not name any specific agent",
          %{state: state} do
       # M8: the "overview" component used to embed get_memory_summary, which
