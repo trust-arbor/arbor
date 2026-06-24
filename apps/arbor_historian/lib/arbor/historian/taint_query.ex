@@ -163,9 +163,21 @@ defmodule Arbor.Historian.TaintQuery do
   # Private Functions
   # ============================================================================
 
+  # SECURITY (codex resource-exhaustion.historian-taint-query-full-scan): every
+  # taint query reads the security stream before filtering, so an unbounded
+  # stream would be materialized into memory on each call. Cap how far the read
+  # walks via :max_scan (configurable; a caller may override). This bounds
+  # work/memory; for normal-size streams it is inert.
+  @default_max_scan 10_000
+
   defp read_security_stream(opts) do
     stream_id = StreamIds.for_category(:security)
+    opts = Keyword.put_new(opts, :max_scan, max_scan())
     QueryEngine.read_stream(stream_id, opts)
+  end
+
+  defp max_scan do
+    Application.get_env(:arbor_historian, :taint_query_max_scan, @default_max_scan)
   end
 
   defp filter_taint_events(entries, opts) do
