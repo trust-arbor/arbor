@@ -1,0 +1,5 @@
+# Commit the harness + curated sanity set; keep any real conversational corpus out.
+dataset.jsonl
+_import/
+results.json
+*.local.*

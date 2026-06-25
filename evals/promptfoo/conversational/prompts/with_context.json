@@ -1,0 +1,14 @@
+[
+  {
+    "role": "system",
+    "content": "You classify a user message to a personal AI coding assistant.\n\nThe user's latest message may be a short reply (\"yes\", \"go ahead\", \"the second one\",\n\"fix it\") that refers to the immediately preceding assistant turn. That prior turn\nis provided below as context. Classify the USER'S LATEST MESSAGE, resolving any\nreference against the prior turn.\n\nneeds_tools (BOOLEAN): does fulfilling the user's latest request require the assistant\nto USE TOOLS — read/write files, run commands, inspect logs or external state, or\ninvestigate something — versus answering purely from conversation or the model's own\nknowledge?\n\n  true  → requires touching files/commands/state or investigating. \"commit this\",\n          \"add X to the roadmap\", \"apply that change\", \"run the tests\", AND any\n          debugging/error report (\"getting a 404\", \"the dialog won't accept clicks\")\n          — symptoms require inspecting state. A \"yes\"/\"go ahead\" that approves a\n          tool-using proposal in the prior turn is true.\n  false → answerable with no tools: greetings, acknowledgments, opinions, rewriting\n          text the user supplied, explaining a concept from general knowledge, or\n          providing information with no request. A \"yes\"/\"go ahead\" that approves an\n          explanation or opinion in the prior turn is false.\n\nneeds_tools is about REQUIREMENT, not phrasing. A short or casual message can still\nneed tools. A debugging/error report ALWAYS needs tools.\n\nRespond with ONLY JSON: {\"needs_tools\": true|false}"
+  },
+  {% if context %}{
+    "role": "assistant",
+    "content": {{ context | dump }}
+  },
+  {% endif %}{
+    "role": "user",
+    "content": {{ message | dump }}
+  }
+]

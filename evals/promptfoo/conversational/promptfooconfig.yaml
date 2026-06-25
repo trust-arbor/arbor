@@ -1,0 +1,72 @@
+# conversational — does a context slice fix referential turns? (task: preprocessor.needs_tools)
+#
+# The production preprocessor classifies the CURRENT user message ONLY (single-turn).
+# Short referential replies ("yes", "go ahead", "the second one", "fix it") are
+# ambiguous standalone — the antecedent lives in the prior assistant turn. This
+# harness A/Bs the SAME message classified two ways:
+#
+#   prompts/single_turn.json   → message only            (today's production behavior)
+#   prompts/with_context.json  → prior assistant turn + message  (truncated antecedent)
+#
+# Read the result by PROMPT VARIANT, not just by model:
+#   - referential rows (affirm_*/select/continue/deictic): single_turn should FAIL
+#     (the model can't know what "yes" approves); with_context should RECOVER them.
+#   - control rows (control_selfcontained/control_nonactionable): with_context must
+#     NOT degrade them — adding context should not flip a correct single-turn verdict.
+#
+# FN-first, same as ../needs-tools: a missed tool-need routes to the no-tools DIRECT
+# fast lane and the task fails. metadata is in vars.kind for slicing.
+#
+# Run (pre-load the providers first — LM Studio JIT-loading 4 models at -j4 crashes):
+#   lms load gemma-4-e4b-it-qat gemma-4-e4b-it granite-4.1-8b ...
+#   npx promptfoo@latest eval -c promptfooconfig.yaml -j 4 --no-cache -o results.json
+#   npx promptfoo@latest view
+#
+# NOT in scope here (by design, per Hysun 2026-06-25):
+#   - HITL / pending-action approval is a SEPARATE mechanism: the engine PAUSES a
+#     tool call mid-turn and awaits a single key (y/n/a in the TUI, a click in a GUI).
+#     That is not a chat message and does not flow through this classifier, so the
+#     pending proposal is NOT a context source for needs_tools. Don't add it.
+#   - The zero-token routing POLICY (short/referential reply -> bias to the safe path,
+#     inherit the prior turn's disposition) is a routing rule, not a model eval — it's
+#     validated in the orchestrator, not here. This harness only measures whether a
+#     context slice improves the MODEL's verdict.
+
+description: >
+  A/B: single-turn vs prior-assistant-turn context for needs_tools on short
+  referential replies. Production prompt reused verbatim in both variants.
+
+prompts:
+  - file://prompts/single_turn.json
+  - file://prompts/with_context.json
+
+# Leaders from the 2026-06-25 needs_tools corpus sweep. Pre-load before running.
+providers:
+  - id: openai:chat:gemma-4-e4b-it-qat
+    label: "gemma-4-e4b-it-qat (Q4_K_XL)@lmstudio"
+    config: &lmcfg {apiBaseUrl: http://localhost:1234/v1, apiKey: lm-studio, temperature: 0.0, max_tokens: 256}
+  - id: openai:chat:gemma-4-e4b-it@q2_k_xl
+    label: "gemma-4-e4b-it@q2_k_xl (Q2_K_XL)@lmstudio"
+    config: *lmcfg
+  - id: openai:chat:gemma-4-e4b-it
+    label: "gemma-4-e4b-it (Q8_K_XL)@lmstudio"
+    config: *lmcfg
+  - id: openai:chat:granite-4.1-8b
+    label: "granite-4.1-8b (Q4_K_XL)@lmstudio"
+    config: *lmcfg
+
+defaultTest:
+  assert:
+    - type: javascript
+      # Expression form (no `return` — promptfoo@latest rejects statements here).
+      # Empty/unparseable output -> '' -> fails, which is the correct verdict for a
+      # gate the pipeline can't read.
+      value: |
+        ((output.match(/"needs_tools"\s*:\s*(true|false)/i)||[])[1]||'').toLowerCase() === '{{needs_tools_truth}}'
+
+tests:
+  # Curated, synthetic, no personal content — committed. Real conversational
+  # captures (if ever added) go in a gitignored dataset.jsonl, like the sibling dirs.
+  - file://sanity.jsonl
+
+outputPath: results.json
