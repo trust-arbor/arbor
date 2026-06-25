@@ -57,30 +57,17 @@ config :arbor_orchestrator, mandatory_middleware: true
 
 # Pre-turn preprocessor pipeline. DISABLED by default; fails open when enabled.
 # Attaches enrichment to turn context under "session.preprocessor.*".
-# See docs/arbor/PREPROCESSOR.md. To enable: set preprocessor_enabled: true and
-# ensure the configured providers (Ollama / LM Studio) are reachable.
+# See docs/arbor/PREPROCESSOR.md. To enable: set preprocessor_enabled: true (per
+# environment) and ensure the configured provider (LM Studio) is reachable with the
+# model loaded.
+#
+# The per-stage model/provider config lives in ONE place — the consolidated defaults
+# in `Arbor.Orchestrator.Config.@default_preprocessor` (LM Studio + gemma-4-e4b-it-qat
+# for the whole pipeline). Do NOT restate the full config here: a second copy drifts
+# from the module default (it did — the old copy pinned Ollama/granite and silently
+# shadowed the 2026-06-25 consolidation). Override only specific keys when an
+# environment genuinely needs to differ.
 config :arbor_orchestrator, preprocessor_enabled: false
-
-config :arbor_orchestrator, :preprocessor,
-  needs_tools: [
-    provider: :lm_studio,
-    model: "gemma-4-e4b-it@q4_k_xl",
-    base_url: "http://localhost:1234/v1"
-  ],
-  complexity: [provider: :ollama, model: "granite4.1:3b", base_url: "http://localhost:11434"],
-  intent: [provider: :ollama, model: "granite4.1:3b"],
-  decompose: [provider: :ollama, model: "granite4.1:3b", enabled: false],
-  retrieval: [
-    provider: :ollama,
-    model: "granite4:1b",
-    embed_model: "mxbai-embed-large",
-    enabled: false,
-    index_path: nil,
-    top_k: 5
-  ],
-  prompt_classifier: Arbor.Gateway.PromptClassifier,
-  intent_extractor: Arbor.Gateway.IntentExtractor,
-  timeout_ms: 30_000
 
 # P0-1: Default taint enforcement policy for authorize_and_execute.
 # :audit_only logs violations without blocking. Use :strict to block.

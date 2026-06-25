@@ -184,3 +184,11 @@ config :arbor_ai, :acp_pool_config,
 config :arbor_security, egress_gate_enforcing: true
 config :arbor_trust, default_egress_modes: %{external_provider: :allow}
 # To also gate homelab/LAN egress: config :arbor_security, gate_on_premises_egress: true
+
+# Pre-turn preprocessor ON in dev (consolidated 2026-06-25 onto LM Studio +
+# gemma-4-e4b-it-qat for the whole pipeline). Requires the model loaded in LM
+# Studio at localhost:1234. Fails open if unreachable. prod stays off (config.exs)
+# until a deliberate enable; test stays off to keep the suite fast. Per-stage
+# model/provider lives in Arbor.Orchestrator.Config.@default_preprocessor — don't
+# restate it here, only override specific keys if dev needs to differ.
+config :arbor_orchestrator, preprocessor_enabled: true
