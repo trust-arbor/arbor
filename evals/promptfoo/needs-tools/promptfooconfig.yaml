@@ -24,32 +24,31 @@ prompts:
   # re-running the A/B.
   - file://prompts/generic.json
 
+# Candidate matrix (2026-06-25) — SHARED with ../complexity so one sweep picks
+# the single smallest model that clears BOTH tasks. Champion was
+# gemma-4-e4b-it@q4_k_xl (93.1% acc, 10 FN); the -qat-mobile rows are the
+# smaller-quant candidates we're trying to consolidate onto. Compare on
+# FALSE-NEGATIVE count first.
 providers:
-  # Production binding (champion)
-  - id: openai:chat:gemma-4-e4b-it@q4_k_xl
-    label: gemma-4-e4b-q4@lmstudio
-    config:
-      apiBaseUrl: http://localhost:1234/v1
-      apiKey: lm-studio
-      temperature: 0.0
-      max_tokens: 256
-
-  # Baselines from the 2026-05-26 sweep (challengers; re-run on new releases)
   - id: openai:chat:granite-4.1-3b
     label: granite-4.1-3b@lmstudio
-    config:
+    config: &lmcfg
       apiBaseUrl: http://localhost:1234/v1
       apiKey: lm-studio
       temperature: 0.0
       max_tokens: 256
-
-  - id: openai:chat:qwen3.5-2b-mtp
-    label: qwen3.5-2b-q8@lmstudio
-    config:
-      apiBaseUrl: http://localhost:1234/v1
-      apiKey: lm-studio
-      temperature: 0.0
-      max_tokens: 256
+  - id: openai:chat:gemma-4-e4b-it
+    label: gemma-4-e4b-it@lmstudio
+    config: *lmcfg
+  - id: openai:chat:gemma-4-e4b-it-qat-mobile@q8_0
+    label: gemma-4-e4b-qat-mobile-q8@lmstudio
+    config: *lmcfg
+  - id: openai:chat:gemma-4-e4b-it-qat-mobile@q2_k_xl
+    label: gemma-4-e4b-qat-mobile-q2@lmstudio
+    config: *lmcfg
+  - id: openai:chat:gemma-4-e2b-it-qat-mobile
+    label: gemma-4-e2b-qat-mobile@lmstudio
+    config: *lmcfg
 
 tests:
   # 16 curated, unambiguous prompts — committed (no personal content).

@@ -34,8 +34,34 @@ reproduce the eval; only the owner's real corpus stays private.
 ```bash
 cp -r ~/.claude/arbor-personal/eval_corpus _import   # if _import/ is absent
 python3 convert_corpus.py
-npx promptfoo@latest eval -c promptfooconfig.yaml -o results.json
+npx promptfoo@latest eval -c promptfooconfig.yaml -j 1 -o results.json   # -j 1: see below
 ```
+
+### Running against LM Studio (single GPU) — serialize the sweep
+
+promptfoo defaults to concurrency **4**. With a single-GPU LM Studio that
+JIT-loads models on request, that makes it try to load *several different models
+at once* → the loads crash (`SIGABRT`, "engine protocol startup aborted";
+observed 2026-06-25). A single model serving alone handles a few concurrent
+requests fine — the crash is specifically multiple models loading simultaneously.
+
+- **Serialized (simplest):** add `-j 1`. One request at a time; safe, but may
+  hot-swap the model on every call across providers (slow).
+- **One model at a time (recommended for a multi-model sweep):** run once per
+  provider so each model loads exactly once, serves all its prompts, then the
+  next loads:
+  ```bash
+  npx promptfoo@latest eval -c promptfooconfig.yaml \
+    --filter-providers '<provider-id>' -j 2 -o results/<model>.json
+  ```
+  ⚠️ Provider ids share prefixes — `gemma-4-e4b-it` is a substring of
+  `gemma-4-e4b-it-qat-mobile@q8_0` — so anchor the filter (`...e4b-it$`) or use
+  the distinct `label:` to avoid running more than one model per invocation.
+
+**Hardware cost (accuracy-per-GB):** see `../MODELS.md` and `../footprint.sh` for
+each candidate's disk size + in-memory footprint, and why loading at a small
+context (these are single short prompts — max ~1287 tokens) cuts VRAM far more
+than the quant alone.
 
 **Still in `_import/` for future task ports** (don't delete the personal originals
 until these are ported too): `hysun_corpus.jsonl` (573 real prompts — raw material
