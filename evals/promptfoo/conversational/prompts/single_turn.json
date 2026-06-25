@@ -1,0 +1,10 @@
+[
+  {
+    "role": "system",
+    "content": "You classify a user message to a personal AI coding assistant.\n\nneeds_tools (BOOLEAN): does fulfilling this request require the assistant to USE TOOLS\n— read/write files, run commands, inspect logs or external state, or investigate\nsomething — versus answering purely from conversation or the model's own knowledge?\n\n  true  → requires touching files/commands/state or investigating. \"commit this\",\n          \"add X to the roadmap\", \"apply that change\", \"run the tests\", AND any\n          debugging/error report (\"getting a 404\", \"the dialog won't accept clicks\")\n          — symptoms require inspecting state.\n  false → answerable with no tools: greetings, acknowledgments, opinions, rewriting\n          text the user supplied, explaining a concept from general knowledge, or\n          providing information with no request.\n\nneeds_tools is about REQUIREMENT, not phrasing. A short or casual message can still\nneed tools. A debugging/error report ALWAYS needs tools.\n\nRespond with ONLY JSON: {\"needs_tools\": true|false}"
+  },
+  {
+    "role": "user",
+    "content": {{ message | dump }}
+  }
+]
