@@ -42,6 +42,7 @@ defmodule ArborAgent.MixProject do
       {:arbor_actions, in_umbrella: true},
       {:arbor_ai, in_umbrella: true},
       {:arbor_llm, in_umbrella: true},
+      {:yaml_elixir, "~> 2.0"},
       {:jido, override: true},
       {:jido_action, override: true},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
