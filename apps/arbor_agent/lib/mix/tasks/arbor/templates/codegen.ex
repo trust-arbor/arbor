@@ -77,10 +77,7 @@ defmodule Mix.Tasks.Arbor.Templates.Codegen do
     end
   end
 
-  # The 11 builtin template modules. The 10 mapped in
-  # `TemplateStore.@builtin_modules` plus `ClaudeCode` (which `module_to_name/1`
-  # slugs to "claude_code"). Kept here so codegen covers all shipped templates
-  # without modifying `TemplateStore`.
+  # The 10 builtin template modules mapped in `TemplateStore.@builtin_modules`.
   defp builtin_modules do
     [
       Arbor.Agent.Templates.CliAgent,
@@ -92,8 +89,7 @@ defmodule Mix.Tasks.Arbor.Templates.Codegen do
       Arbor.Agent.Templates.Conversationalist,
       Arbor.Agent.Templates.InterviewAgent,
       Arbor.Agent.Templates.ApiAgent,
-      Arbor.Agent.Templates.CouncilEvaluator,
-      Arbor.Agent.Templates.ClaudeCode
+      Arbor.Agent.Templates.CouncilEvaluator
     ]
   end
 

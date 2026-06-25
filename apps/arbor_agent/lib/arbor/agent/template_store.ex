@@ -2,12 +2,31 @@ defmodule Arbor.Agent.TemplateStore do
   @moduledoc """
   File-backed template storage with ETS caching.
 
-  Templates are stored as JSON files in `.arbor/templates/`, one file per template.
-  An ETS table provides fast runtime lookup. Files are the source of truth —
-  use `reload/0` after manual edits.
+  ## Resolution precedence (Phase B1 — file-first, fallback-safe)
 
-  Builtin templates are seeded from module definitions on first boot. They can be
-  edited in-place but not deleted.
+  When a template is resolved by name, the layers are tried in order and the
+  first hit wins:
+
+    1. **user**        `<user_templates_dir>/<name>.md`  (Markdown+frontmatter)
+    2. **shipped**     `<priv>/templates/<name>.md`        (Markdown+frontmatter)
+    3. **legacy_json** `<legacy_dir>/<name>.json`          (the old JSON store)
+    4. **module**      `from_module/1`                      (per-persona modules)
+
+  Layers 1–3 are loaded into the ETS cache by `reload/0` (user winning over
+  shipped, and `.md` winning over legacy `.json`). Layer 4 is the final fallback
+  in `resolve/1` for names that have no file at all.
+
+  Every resolved template carries `data["template_source"]` provenance:
+  `%{"name" => name, "path" => abs_path_or_nil, "layer" => layer}` where layer is
+  one of `"user" | "shipped" | "legacy_json" | "module"`.
+
+  `put/2`, `update/2`, and `create_from_opts/2` still write user JSON files into
+  the legacy dir (the writable layer); they update the ETS cache too. Use
+  `reload/0` after manual edits.
+
+  Builtin templates ship as `.md` files in `priv/templates/` and remain backed by
+  per-persona modules as a final fallback. They can be overridden by a user `.md`
+  but not deleted.
   """
 
   alias Arbor.Agent.{Character, Template}
@@ -50,7 +69,7 @@ defmodule Arbor.Agent.TemplateStore do
 
   # --- CRUD API ---
 
-  @doc "Get a template by name."
+  @doc "Get a template by name (file-first: user .md → shipped .md → legacy .json)."
   @spec get(String.t()) :: {:ok, map()} | {:error, :not_found}
   def get(name) when is_binary(name) do
     ensure_table()
@@ -60,7 +79,7 @@ defmodule Arbor.Agent.TemplateStore do
         {:ok, data}
 
       [] ->
-        case load_from_file(name) do
+        case load_layered(name) do
           {:ok, data} ->
             :ets.insert(@ets_table, {name, data})
             {:ok, data}
@@ -119,7 +138,7 @@ defmodule Arbor.Agent.TemplateStore do
 
     case :ets.lookup(@ets_table, name) do
       [{^name, _}] -> true
-      [] -> File.exists?(template_path(name))
+      [] -> match?({:ok, _}, load_layered(name))
     end
   end
 
@@ -142,35 +161,41 @@ defmodule Arbor.Agent.TemplateStore do
 
   # --- Reload ---
 
-  @doc "Reload all templates from disk into ETS."
+  @doc """
+  Reload all templates from disk into ETS, layering source dirs.
+
+  Load order (later overwrites earlier in ETS, so the LAST writer wins):
+
+    1. legacy `.json` files in the writable/legacy dir
+    2. shipped `.md` files in `priv/templates/`
+    3. user `.md` files in `user_templates_dir/0`
+
+  Net precedence: **user .md > shipped .md > legacy .json**. The module layer is
+  not loaded here — it is the final fallback in `resolve/1` for names that have
+  no file in any dir.
+  """
   @spec reload() :: :ok
   def reload do
     ensure_table()
-    dir = templates_dir()
 
-    if File.dir?(dir) do
-      dir
-      |> File.ls!()
-      |> Enum.filter(&String.ends_with?(&1, ".json"))
-      |> Enum.each(fn filename ->
-        name = String.trim_trailing(filename, ".json")
+    # 1. Legacy JSON (lowest precedence) — load first so .md overwrites it.
+    load_dir_into_ets(legacy_templates_dir(), ".json", "legacy_json")
 
-        case load_from_file(name) do
-          {:ok, data} -> :ets.insert(@ets_table, {name, data})
-          {:error, _} -> :ok
-        end
-      end)
-    end
+    # 2. Shipped .md
+    load_dir_into_ets(shipped_templates_dir(), ".md", "shipped")
+
+    # 3. User .md (highest precedence) — loaded last, overwrites the rest.
+    load_dir_into_ets(user_templates_dir(), ".md", "user")
 
     :ok
   end
 
-  @doc "Reload a single template from disk."
+  @doc "Reload a single template from disk (re-runs the layered lookup)."
   @spec reload(String.t()) :: {:ok, map()} | {:error, term()}
   def reload(name) when is_binary(name) do
     ensure_table()
 
-    case load_from_file(name) do
+    case load_layered(name) do
       {:ok, data} ->
         :ets.insert(@ets_table, {name, data})
         {:ok, data}
@@ -178,6 +203,32 @@ defmodule Arbor.Agent.TemplateStore do
       error ->
         error
     end
+  end
+
+  # Load every `<name><ext>` file in `dir` into ETS, tagging each with the
+  # given provenance layer. No-op when the dir is missing. The legacy dir may
+  # equal a `.md` dir under a test override — that is harmless because the
+  # extension filter keeps the file types separate.
+  defp load_dir_into_ets(dir, ext, layer) do
+    if File.dir?(dir) do
+      dir
+      |> File.ls!()
+      |> Enum.filter(&String.ends_with?(&1, ext))
+      |> Enum.each(fn filename ->
+        name = String.trim_trailing(filename, ext)
+        path = Path.join(dir, filename)
+
+        case load_file_at(path, ext) do
+          {:ok, data} ->
+            :ets.insert(@ets_table, {name, with_source(data, name, path, layer)})
+
+          {:error, _} ->
+            :ok
+        end
+      end)
+    end
+
+    :ok
   end
 
   # --- Seeding ---
@@ -225,10 +276,14 @@ defmodule Arbor.Agent.TemplateStore do
         ok
 
       {:error, :not_found} ->
-        # Fallback: try loading directly from module
+        # Final fallback: load directly from the module definition.
         if Code.ensure_loaded?(module) and function_exported?(module, :character, 0) do
-          data = from_module(module)
-          put(name, data)
+          data = with_source(from_module(module), name, nil, "module")
+          # Cache in ETS only (do NOT write a JSON file) — the module IS the
+          # source of truth for this fallback path; writing a .json would
+          # silently shadow a later-added shipped/user .md.
+          ensure_table()
+          :ets.insert(@ets_table, {name, data})
           {:ok, data}
         else
           {:error, :not_found}
@@ -327,13 +382,23 @@ defmodule Arbor.Agent.TemplateStore do
       domain_context: data["domain_context"] || "",
       description: data["description"] || "",
       metadata: data["metadata"] || %{},
-      meta_awareness: %{
-        grown_from_template: true,
-        template_name: character.name,
-        note: "These initial values came from a template. You can question them."
-      }
+      meta_awareness:
+        %{
+          grown_from_template: true,
+          template_name: character.name,
+          note: "These initial values came from a template. You can question them."
+        }
+        |> maybe_put_meta_source(data["template_source"])
     ]
   end
+
+  # Surface template provenance in meta_awareness when the data map carries it
+  # (resolve/1 attaches it; raw from_module/1 output does not).
+  defp maybe_put_meta_source(meta, %{} = source) when map_size(source) > 0 do
+    Map.put(meta, :template_source, source)
+  end
+
+  defp maybe_put_meta_source(meta, _), do: meta
 
   @doc "Create a template from keyword opts (convenience for programmatic creation)."
   @spec create_from_opts(String.t(), keyword()) :: :ok | {:error, term()}
@@ -375,9 +440,47 @@ defmodule Arbor.Agent.TemplateStore do
   @spec builtin_names() :: [String.t()]
   def builtin_names, do: @builtin_names
 
-  @doc "Return the templates directory path."
+  @doc """
+  Return the legacy/writable templates directory (the `.json` store).
+
+  This is also the directory `put/2`, `update/2`, and `create_from_opts/2`
+  write to. A test override set via `set_templates_dir/1` takes precedence.
+  """
   @spec templates_dir() :: String.t()
-  def templates_dir do
+  def templates_dir, do: legacy_templates_dir()
+
+  @doc """
+  Directory of user-editable `.md` templates (highest resolution precedence).
+
+  Defaults to `~/.arbor/templates` (configurable via
+  `config :arbor_agent, :user_templates_dir`). A test override set via
+  `set_templates_dir/1` takes precedence — so tests can point this at a tmp
+  dir and never touch the real home directory.
+  """
+  @spec user_templates_dir() :: String.t()
+  def user_templates_dir do
+    case Process.get(:arbor_template_dir_override) do
+      nil ->
+        :arbor_agent
+        |> Application.get_env(:user_templates_dir, "~/.arbor/templates")
+        |> Path.expand()
+
+      dir ->
+        dir
+    end
+  end
+
+  @doc """
+  Directory of shipped `.md` templates baked into the release
+  (`priv/templates/`). Read-only at runtime.
+  """
+  @spec shipped_templates_dir() :: String.t()
+  def shipped_templates_dir do
+    Path.join(:code.priv_dir(:arbor_agent), "templates")
+  end
+
+  # Legacy JSON store (lowest file-layer precedence). Honors the test override.
+  defp legacy_templates_dir do
     case Process.get(:arbor_template_dir_override) do
       nil ->
         root = project_root()
@@ -414,22 +517,58 @@ defmodule Arbor.Agent.TemplateStore do
     Path.join(templates_dir(), "#{name}.json")
   end
 
-  defp load_from_file(name) do
-    path = template_path(name)
+  # File-first layered single-name lookup: user .md → shipped .md → legacy .json.
+  # The module layer is NOT tried here (it lives in resolve/1) so `get/1` stays a
+  # pure file lookup. Each hit is tagged with its provenance via with_source/4.
+  defp load_layered(name) do
+    layers = [
+      {Path.join(user_templates_dir(), "#{name}.md"), ".md", "user"},
+      {Path.join(shipped_templates_dir(), "#{name}.md"), ".md", "shipped"},
+      {Path.join(legacy_templates_dir(), "#{name}.json"), ".json", "legacy_json"}
+    ]
 
+    Enum.reduce_while(layers, {:error, :not_found}, fn {path, ext, layer}, acc ->
+      case load_file_at(path, ext) do
+        {:ok, data} -> {:halt, {:ok, with_source(data, name, path, layer)}}
+        {:error, :not_found} -> {:cont, acc}
+        # A malformed file should not silently fall through to a lower layer —
+        # surface the error so the operator notices the bad file.
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  # Read + parse a single template file by extension. Returns {:error, :not_found}
+  # when the file is absent so the layered reducer can fall through.
+  defp load_file_at(path, ext) do
     case File.read(path) do
-      {:ok, content} ->
-        case Jason.decode(content) do
-          {:ok, data} -> {:ok, data}
-          {:error, reason} -> {:error, {:invalid_json, reason}}
-        end
-
-      {:error, :enoent} ->
-        {:error, :not_found}
-
-      {:error, reason} ->
-        {:error, {:file_read_error, reason}}
+      {:ok, content} -> decode_template(content, ext)
+      {:error, :enoent} -> {:error, :not_found}
+      {:error, reason} -> {:error, {:file_read_error, reason}}
     end
+  end
+
+  defp decode_template(content, ".md") do
+    case Template.File.parse(content) do
+      {:ok, data} -> {:ok, data}
+      {:error, reason} -> {:error, {:invalid_markdown, reason}}
+    end
+  end
+
+  defp decode_template(content, ".json") do
+    case Jason.decode(content) do
+      {:ok, data} -> {:ok, data}
+      {:error, reason} -> {:error, {:invalid_json, reason}}
+    end
+  end
+
+  # Attach provenance so a created agent can persist where its template came from.
+  defp with_source(data, name, path, layer) when is_map(data) do
+    Map.put(data, "template_source", %{
+      "name" => name,
+      "path" => path,
+      "layer" => layer
+    })
   end
 
   defp write_to_file(name, data) do

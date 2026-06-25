@@ -304,7 +304,11 @@ config :arbor_agent,
     max_tokens: 16_384,
     temperature: 0.7,
     max_turns: 10
-  ]
+  ],
+  # User-editable agent template directory. Files here (`<name>.md`) override
+  # the shipped templates baked into the release. `TemplateStore.user_templates_dir/0`
+  # expands the leading `~`. Tests override the dir via `set_templates_dir/1`.
+  user_templates_dir: "~/.arbor/templates"
 
 # Memory system defaults
 config :arbor_memory,

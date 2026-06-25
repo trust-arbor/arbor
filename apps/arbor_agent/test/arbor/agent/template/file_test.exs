@@ -4,10 +4,10 @@ defmodule Arbor.Agent.Template.FileTest do
   alias Arbor.Agent.Template.File, as: TemplateFile
   alias Arbor.Agent.TemplateStore
 
-  # The 11 builtin template modules (10 from TemplateStore.@builtin_modules +
-  # ClaudeCode). This is the fidelity guarantee for the data-first migration:
-  # serialize -> parse must round-trip every builtin exactly (ignoring only the
-  # volatile created_at/updated_at timestamps), and validate/1 must pass.
+  # The 10 builtin template modules (from TemplateStore.@builtin_modules). This
+  # is the fidelity guarantee for the data-first migration: serialize -> parse
+  # must round-trip every builtin exactly (ignoring only the volatile
+  # created_at/updated_at timestamps), and validate/1 must pass.
   @builtin_modules [
     Arbor.Agent.Templates.CliAgent,
     Arbor.Agent.Templates.Scout,
@@ -18,8 +18,7 @@ defmodule Arbor.Agent.Template.FileTest do
     Arbor.Agent.Templates.Conversationalist,
     Arbor.Agent.Templates.InterviewAgent,
     Arbor.Agent.Templates.ApiAgent,
-    Arbor.Agent.Templates.CouncilEvaluator,
-    Arbor.Agent.Templates.ClaudeCode
+    Arbor.Agent.Templates.CouncilEvaluator
   ]
 
   @volatile ~w(created_at updated_at)

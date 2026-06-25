@@ -228,6 +228,71 @@ defmodule Arbor.Agent.TemplateStoreTest do
     end
   end
 
+  describe "resolve parity (file-first cutover)" do
+    # The data-first migration guarantee: resolving each builtin by name must
+    # return data equivalent to the legacy from_module/1 path, ignoring only the
+    # volatile timestamps and the new template_source provenance key.
+    @builtin_parity_modules [
+      Arbor.Agent.Templates.CliAgent,
+      Arbor.Agent.Templates.Scout,
+      Arbor.Agent.Templates.Researcher,
+      Arbor.Agent.Templates.CodeReviewer,
+      Arbor.Agent.Templates.Monitor,
+      Arbor.Agent.Templates.Diagnostician,
+      Arbor.Agent.Templates.Conversationalist,
+      Arbor.Agent.Templates.InterviewAgent,
+      Arbor.Agent.Templates.ApiAgent,
+      Arbor.Agent.Templates.CouncilEvaluator
+    ]
+
+    @ignore ~w(created_at updated_at template_source)
+
+    for module <- @builtin_parity_modules do
+      test "resolve/1 matches from_module for #{inspect(module)}" do
+        module = unquote(module)
+        name = TemplateStore.module_to_name(module)
+        expected = TemplateStore.from_module(module)
+
+        # By string name — resolves the shipped .md file.
+        assert {:ok, by_name} = TemplateStore.resolve(name)
+        assert Map.drop(by_name, @ignore) == Map.drop(expected, @ignore)
+        assert by_name["template_source"]["layer"] in ["shipped", "user", "legacy_json"]
+
+        # By module atom — same name path.
+        assert {:ok, by_mod} = TemplateStore.resolve(module)
+        assert Map.drop(by_mod, @ignore) == Map.drop(expected, @ignore)
+      end
+    end
+
+    test "all builtin names resolve" do
+      for name <- TemplateStore.builtin_names() do
+        assert {:ok, _data} = TemplateStore.resolve(name), "expected #{name} to resolve"
+      end
+    end
+
+    test "user .md overrides shipped .md (highest precedence)" do
+      # Write a user-layer override for an existing builtin into the tmp dir
+      # (which the override makes the user/legacy dir).
+      dir = TemplateStore.user_templates_dir()
+      File.mkdir_p!(dir)
+
+      data =
+        TemplateStore.from_module(Arbor.Agent.Templates.Scout)
+        |> Map.put("description", "USER OVERRIDE")
+
+      md = Arbor.Agent.Template.File.serialize(data)
+      File.write!(Path.join(dir, "scout.md"), md)
+
+      # Clear any cached entry so resolve re-reads from disk.
+      TemplateStore.ensure_table()
+      :ets.delete(:arbor_agent_templates, "scout")
+
+      assert {:ok, resolved} = TemplateStore.resolve("scout")
+      assert resolved["description"] == "USER OVERRIDE"
+      assert resolved["template_source"]["layer"] == "user"
+    end
+  end
+
   describe "seed_builtins/0" do
     test "seeds builtin templates and is idempotent" do
       # First seed creates files

@@ -804,6 +804,7 @@ defmodule Arbor.Agent.Lifecycle do
               |> Keyword.put_new(:capabilities, kw[:required_capabilities])
               |> Keyword.put(:template, template_name)
               |> Keyword.put(:template_data, data)
+              |> put_template_source(data)
 
             {:ok, character, opts}
 
@@ -828,6 +829,7 @@ defmodule Arbor.Agent.Lifecycle do
               |> Keyword.put(:template, name)
               |> Keyword.put(:template_data, data)
               |> Keyword.put_new(:template_module, template_mod)
+              |> put_template_source(data)
 
             {:ok, character, opts}
 
@@ -852,6 +854,14 @@ defmodule Arbor.Agent.Lifecycle do
         end
     end
   end
+
+  # Carry template provenance (set by TemplateStore.resolve/1) through opts so
+  # build_profile_metadata/1 can persist it onto profile.metadata.
+  defp put_template_source(opts, %{"template_source" => %{} = source}) do
+    Keyword.put(opts, :template_source, source)
+  end
+
+  defp put_template_source(opts, _data), do: opts
 
   defp generate_identity(display_name) do
     Arbor.Security.generate_identity(name: display_name)
@@ -1218,7 +1228,10 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   defp build_profile_metadata(opts) do
-    base = Keyword.get(opts, :metadata, %{})
+    base =
+      opts
+      |> Keyword.get(:metadata, %{})
+      |> maybe_put_template_source(Keyword.get(opts, :template_source))
 
     # Inject created_by from tenant_context if present
     case Keyword.get(opts, :tenant_context) do
@@ -1231,6 +1244,15 @@ defmodule Arbor.Agent.Lifecycle do
         if principal_id, do: Map.put(base, :created_by, principal_id), else: base
     end
   end
+
+  # Record where the agent's template came from (user/shipped/legacy_json/module
+  # + abs path). Stored string-keyed so it round-trips through JSON profile
+  # persistence unchanged.
+  defp maybe_put_template_source(metadata, %{} = source) when map_size(source) > 0 do
+    Map.put(metadata, "template_source", source)
+  end
+
+  defp maybe_put_template_source(metadata, _), do: metadata
 
   # Re-register identity and capabilities on resume.
   # ETS-based stores lose state on restart, so we re-grant from the profile.
