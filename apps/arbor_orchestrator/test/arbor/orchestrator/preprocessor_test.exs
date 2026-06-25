@@ -6,9 +6,18 @@ defmodule Arbor.Orchestrator.PreprocessorTest do
   @app :arbor_orchestrator
 
   setup do
-    # Preserve and restore the flag so tests don't leak config.
+    # Preserve and restore the flag + per-stage config so tests don't leak.
     original = Application.get_env(@app, :preprocessor_enabled, false)
-    on_exit(fn -> Application.put_env(@app, :preprocessor_enabled, original) end)
+    original_pp = Application.get_env(@app, :preprocessor)
+
+    on_exit(fn ->
+      Application.put_env(@app, :preprocessor_enabled, original)
+
+      if original_pp,
+        do: Application.put_env(@app, :preprocessor, original_pp),
+        else: Application.delete_env(@app, :preprocessor)
+    end)
+
     :ok
   end
 
@@ -100,6 +109,49 @@ defmodule Arbor.Orchestrator.PreprocessorTest do
 
     test "empty input → empty output" do
       assert Preprocessor.expand_modules([]) == []
+    end
+  end
+
+  describe "per-stage enabled toggles (consolidation)" do
+    test "disabling the LLM stages makes run/2 a no-network actionable pass" do
+      # With needs_tools + complexity (+ sensitivity) disabled, NO stage makes a
+      # provider/network call — proving the uniform `enabled:` toggle works and that
+      # a disabled gate falls back to its safe default (no LM Studio/Ollama needed).
+      Application.put_env(@app, :preprocessor_enabled, true)
+
+      Application.put_env(@app, :preprocessor,
+        sensitivity: [enabled: false],
+        needs_tools: [enabled: false],
+        complexity: [enabled: false]
+      )
+
+      assert {:ok, result} = Preprocessor.run("delete the old logs and commit")
+      # needs_tools disabled → fail-safe default true (never a wrong DIRECT skip)
+      assert result["needs_tools"] == true
+      # complexity disabled → default "SIMPLE"
+      assert result["complexity"] == "SIMPLE"
+      # derive_tier(true, "SIMPLE") → STANDARD (no fast-lane, normal tool resolution)
+      assert result["tier"] == "STANDARD"
+      assert result["sensitivity"] == nil
+      refute Map.has_key?(result, "retrieved_tools")
+    end
+  end
+
+  describe "consolidated defaults (one LM Studio model for the whole preprocessor)" do
+    test "complexity defaults to LM Studio + the locked model with a generous budget" do
+      Application.delete_env(@app, :preprocessor)
+      cx = Config.preprocessor_stage(:complexity)
+      assert cx[:provider] == :lm_studio
+      assert cx[:model] == "gemma-4-e4b-it-qat"
+      # generous token budget — the 3-way judgment reasons more than the binary gate
+      assert cx[:max_tokens] >= 1024
+    end
+
+    test "needs_tools and complexity share one model (no multi-model VRAM needed)" do
+      Application.delete_env(@app, :preprocessor)
+      cfg = Config.preprocessor()
+      assert cfg[:needs_tools][:model] == cfg[:complexity][:model]
+      assert cfg[:needs_tools][:provider] == :lm_studio
     end
   end
 

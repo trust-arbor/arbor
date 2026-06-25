@@ -16,42 +16,62 @@ defmodule Arbor.Orchestrator.Config do
       config :arbor_orchestrator,
         preprocessor_enabled: false,
         preprocessor: [
-          # per-stage model + provider. provider is :ollama | :lm_studio.
-          needs_tools: [provider: :lm_studio, model: "gemma-4-e4b-it@q4_k_xl",
-                        base_url: "http://localhost:1234/v1"],
-          complexity:  [provider: :ollama, model: "granite4.1:3b",
-                        base_url: "http://localhost:11434"],
-          intent:      [provider: :ollama, model: "granite4.1:3b"],
-          decompose:   [provider: :ollama, model: "granite4.1:3b", enabled: false],
-          retrieval:   [provider: :ollama, model: "granite4:1b",
-                        embed_model: "mxbai-embed-large", enabled: false,
-                        index_path: nil, top_k: 5],
+          # Per-stage model + provider (provider is :ollama | :lm_studio) and a
+          # uniform `enabled:` toggle. Consolidated onto LM Studio + one model.
+          needs_tools: [provider: :lm_studio, model: "gemma-4-e4b-it-qat",
+                        base_url: "http://localhost:1234/v1", max_tokens: 200],
+          complexity:  [provider: :lm_studio, model: "gemma-4-e4b-it-qat",
+                        base_url: "http://localhost:1234/v1", max_tokens: 1024],
+          intent:      [provider: :lm_studio, model: "gemma-4-e4b-it-qat", enabled: false],
+          decompose:   [provider: :lm_studio, model: "gemma-4-e4b-it-qat", enabled: false],
+          retrieval:   [provider: :lm_studio, embed_model: "mxbai-embed-large-v1",
+                        base_url: "http://localhost:1234/v1", enabled: false,
+                        index_path: nil, top_k: 8],
           # runtime-resolved gateway modules (avoids a compile-time cross-library dep)
           prompt_classifier: Arbor.Gateway.PromptClassifier,
           intent_extractor: Arbor.Gateway.IntentExtractor,
           timeout_ms: 30_000
         ]
+
+  Every stage honors `enabled:` (under the master `preprocessor_enabled?`).
+  Defaults preserve historical behavior: sensitivity/needs_tools/complexity on,
+  intent/retrieval off.
   """
 
   @app :arbor_orchestrator
 
+  # Consolidated onto LM Studio (one provider, one model) for accessibility — users
+  # without multi-model VRAM run the whole preprocessor on a single ~4.2GB model.
+  # `gemma-4-e4b-it-qat` won the 2026-06-25 sweep: lowest false-negatives on the
+  # needs_tools gate (4 vs granite's 18-20) AND clears complexity MULTI_STEP recall.
   @default_preprocessor [
     needs_tools: [
       provider: :lm_studio,
-      model: "gemma-4-e4b-it@q4_k_xl",
-      base_url: "http://localhost:1234/v1"
+      model: "gemma-4-e4b-it-qat",
+      base_url: "http://localhost:1234/v1",
+      max_tokens: 200
     ],
-    complexity: [provider: :ollama, model: "granite4.1:3b", base_url: "http://localhost:11434"],
+    # Same model; generous token budget (the 3-way judgment reasons more than the
+    # binary gate — too tight a budget truncates mid-reasoning → empty output).
+    complexity: [
+      provider: :lm_studio,
+      model: "gemma-4-e4b-it-qat",
+      base_url: "http://localhost:1234/v1",
+      max_tokens: 1024
+    ],
     # intent (goal/risk_level) is the slowest stage and currently unconsumed —
     # gated off by default. Enable once a downstream consumer reads it.
-    intent: [provider: :ollama, model: "granite4.1:3b", enabled: false],
-    decompose: [provider: :ollama, model: "granite4.1:3b", enabled: false],
+    intent: [provider: :lm_studio, model: "gemma-4-e4b-it-qat", enabled: false],
+    decompose: [provider: :lm_studio, model: "gemma-4-e4b-it-qat", enabled: false],
     retrieval: [
-      provider: :ollama,
-      model: "granite4:1b",
-      embed_model: "mxbai-embed-large",
+      provider: :lm_studio,
+      embed_model: "mxbai-embed-large-v1",
+      base_url: "http://localhost:1234/v1",
       enabled: false,
       index_path: nil,
+      # NOTE before enabling: the committed action index was embedded with the
+      # Ollama mxbai model; rebuild it with this LM Studio embed model (same
+      # embedding space) or cosine scores are meaningless.
       # Recall-oriented for injection: take the top-K *modules*, inject all their
       # actions. Order/p@1 doesn't matter (we inject the whole set), so a wider K
       # raises the chance the right tool is present (mxbai recall@5 ≈ 66%).

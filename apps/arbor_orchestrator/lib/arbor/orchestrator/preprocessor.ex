@@ -12,8 +12,9 @@ defmodule Arbor.Orchestrator.Preprocessor do
   1. **sensitivity** — `Arbor.Gateway.PromptClassifier` (PII/secret scan → routing).
   2. **needs_tools** — small LLM judges whether fulfilling the request needs tools
      (files/commands/state/investigation) vs. a pure conversational answer. This is
-     the effort-tier gate. Locked model: `gemma-4-e4b-it@q4` (LM Studio).
+     the effort-tier gate. Locked model: `gemma-4-e4b-it-qat` (LM Studio).
   3. **complexity** — (actionable only) SIMPLE / MULTI_STEP / NON_ACTIONABLE.
+     Same locked model (LM Studio); a generous token budget so reasoning completes.
   4. **intent** — (actionable only) `Arbor.Gateway.IntentExtractor`
      (goal / success_criteria / constraints / risk_level).
   5. **tier** — DERIVED: `needs_tools=false → DIRECT`; `true + SIMPLE → STANDARD`;
@@ -73,6 +74,18 @@ defmodule Arbor.Orchestrator.Preprocessor do
   """
 
   @needs_tools_re ~r/"needs_tools"\s*:\s*(true|false)/i
+  @complexity_re ~r/"label"\s*:\s*"(SIMPLE|MULTI_STEP|NON_ACTIONABLE)"/i
+
+  # Per-stage default for the uniform `enabled:` toggle. Preserves historical
+  # behavior: sensitivity/needs_tools/complexity always ran; intent/retrieval were
+  # opt-in. Every stage now honors `enabled:` under the master `preprocessor_enabled?`.
+  @stage_enabled_default %{
+    sensitivity: true,
+    needs_tools: true,
+    complexity: true,
+    intent: false,
+    retrieval: false
+  }
 
   @doc """
   Run the preprocessor for `prompt`. Returns `{:ok, map}` with string keys suitable
@@ -109,8 +122,17 @@ defmodule Arbor.Orchestrator.Preprocessor do
   defp do_run(prompt) do
     cfg = Config.preprocessor()
 
-    sensitivity = timed_stage(:sensitivity, fn -> sensitivity(prompt, cfg) end, nil)
-    nt = timed_stage(:needs_tools, fn -> needs_tools(prompt, cfg) end, true)
+    sensitivity =
+      if stage_enabled?(cfg, :sensitivity),
+        do: timed_stage(:sensitivity, fn -> sensitivity(prompt, cfg) end, nil),
+        else: nil
+
+    # When needs_tools is disabled, default to `true` (fail-safe): no DIRECT fast
+    # lane, so a tool-needing turn is never wrongly routed tool-less.
+    nt =
+      if stage_enabled?(cfg, :needs_tools),
+        do: timed_stage(:needs_tools, fn -> needs_tools(prompt, cfg) end, true),
+        else: true
 
     base = %{
       "enabled" => true,
@@ -122,32 +144,38 @@ defmodule Arbor.Orchestrator.Preprocessor do
       Map.put(base, "tier", "DIRECT")
     else
       # complexity, intent, and retrieval are independent — run concurrently so the
-      # actionable-turn cost is the slowest stage (intent ~2.2s), not their sum.
+      # actionable-turn cost is the slowest stage, not their sum. A disabled stage
+      # launches no task and uses its safe default.
       await = (cfg[:timeout_ms] || 30_000) + 5_000
 
       c_task =
-        Task.async(fn ->
-          timed_stage(:complexity, fn -> complexity(prompt, cfg) end, "SIMPLE")
-        end)
+        if stage_enabled?(cfg, :complexity),
+          do:
+            Task.async(fn ->
+              timed_stage(:complexity, fn -> complexity(prompt, cfg) end, "SIMPLE")
+            end),
+          else: nil
 
       r_task =
-        Task.async(fn ->
-          timed_stage(:retrieval, fn -> retrieve_tool_names(prompt, cfg) end, [])
-        end)
+        if stage_enabled?(cfg, :retrieval),
+          do:
+            Task.async(fn ->
+              timed_stage(:retrieval, fn -> retrieve_tool_names(prompt, cfg) end, [])
+            end),
+          else: nil
 
       # intent (goal/risk_level) is the slowest stage (~2-4s) and is currently
       # UNCONSUMED downstream — gated off by default. Enable it once something reads it.
       i_task =
-        if Keyword.get(cfg[:intent] || [], :enabled, false) do
-          Task.async(fn ->
-            timed_stage(:intent, fn -> intent(prompt, sensitivity, cfg) end, nil)
-          end)
-        else
-          nil
-        end
+        if stage_enabled?(cfg, :intent),
+          do:
+            Task.async(fn ->
+              timed_stage(:intent, fn -> intent(prompt, sensitivity, cfg) end, nil)
+            end),
+          else: nil
 
-      complexity = task_await(c_task, await, "SIMPLE")
-      retrieved = task_await(r_task, await, [])
+      complexity = if c_task, do: task_await(c_task, await, "SIMPLE"), else: "SIMPLE"
+      retrieved = if r_task, do: task_await(r_task, await, []), else: []
       intent = if i_task, do: task_await(i_task, await, nil), else: nil
 
       enriched =
@@ -168,6 +196,12 @@ defmodule Arbor.Orchestrator.Preprocessor do
       {:ok, result} -> result
       _ -> default
     end
+  end
+
+  # Uniform per-stage `enabled:` toggle. A stage's config may set `enabled: false`
+  # to skip it; the default preserves historical behavior (see @stage_enabled_default).
+  defp stage_enabled?(cfg, key) do
+    Keyword.get(cfg[key] || [], :enabled, Map.fetch!(@stage_enabled_default, key))
   end
 
   # ---- tier derivation ----
@@ -262,7 +296,7 @@ defmodule Arbor.Orchestrator.Preprocessor do
       messages: chat(@needs_tools_prompt, prompt),
       temperature: 0.0,
       response_format: schema,
-      max_tokens: 200
+      max_tokens: stage[:max_tokens] || 200
     }
 
     with {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} | _]}}} <-
@@ -283,14 +317,65 @@ defmodule Arbor.Orchestrator.Preprocessor do
     end
   end
 
-  # ---- Stage 3: complexity (Ollama via Req) ----
+  # ---- Stage 3: complexity (LM Studio / Ollama via Req) ----
   defp complexity(prompt, cfg) do
     stage = cfg[:complexity]
     timeout = cfg[:timeout_ms] || 30_000
 
+    label =
+      case stage[:provider] do
+        :lm_studio -> lm_studio_complexity(stage, prompt, timeout)
+        :ollama -> ollama_complexity(stage, prompt, timeout)
+        _ -> nil
+      end
+
+    if label in ["SIMPLE", "MULTI_STEP", "NON_ACTIONABLE"], do: label, else: "SIMPLE"
+  end
+
+  defp lm_studio_complexity(stage, prompt, timeout) do
+    url = (stage[:base_url] || "http://localhost:1234/v1") <> "/chat/completions"
+
+    schema = %{
+      type: "json_schema",
+      json_schema: %{
+        name: "complexity",
+        strict: true,
+        schema: %{
+          type: "object",
+          properties: %{
+            label: %{type: "string", enum: ["SIMPLE", "MULTI_STEP", "NON_ACTIONABLE"]}
+          },
+          required: ["label"]
+        }
+      }
+    }
+
+    # Generous token budget: the 3-way judgment induces more reasoning than the
+    # binary needs_tools gate, so too tight a budget truncates mid-reasoning and
+    # yields empty/unreadable output (eval finding 2026-06-25 — at 256 tokens the
+    # gemma family went empty on ~46% of long prompts; at ≥1024 it's clean).
+    body = %{
+      model: stage[:model],
+      messages: chat(@complexity_prompt, prompt),
+      temperature: 0.0,
+      response_format: schema,
+      max_tokens: stage[:max_tokens] || 1024
+    }
+
+    with {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} | _]}}} <-
+           Req.post(url, json: body, receive_timeout: timeout),
+         text <- msg["content"] || msg["reasoning_content"] || "",
+         [_, label] <- Regex.run(@complexity_re, text) do
+      String.upcase(label)
+    else
+      _ -> nil
+    end
+  end
+
+  defp ollama_complexity(stage, prompt, timeout) do
     case ollama_json(stage, @complexity_prompt, prompt, timeout) do
-      %{"label" => l} when l in ["SIMPLE", "MULTI_STEP", "NON_ACTIONABLE"] -> l
-      _ -> "SIMPLE"
+      %{"label" => l} -> l
+      _ -> nil
     end
   end
 
@@ -384,6 +469,34 @@ defmodule Arbor.Orchestrator.Preprocessor do
   end
 
   defp embed_query(stage, prompt, timeout) do
+    case stage[:provider] do
+      :lm_studio -> lm_studio_embed(stage, prompt, timeout)
+      _ -> ollama_embed(stage, prompt, timeout)
+    end
+  end
+
+  # LM Studio exposes OpenAI-style embeddings: POST /v1/embeddings with `input`,
+  # response `{"data": [{"embedding": [...]}]}`. The base_url already includes /v1.
+  # NOTE: the query embedding model must match the model the action index was built
+  # with, or cosine scores are meaningless — rebuild the index with the same model
+  # before enabling retrieval on a new provider/model.
+  defp lm_studio_embed(stage, prompt, timeout) do
+    base = stage[:base_url] || "http://localhost:1234/v1"
+    model = stage[:embed_model] || "mxbai-embed-large-v1"
+
+    case Req.post(base <> "/embeddings",
+           json: %{model: model, input: prompt},
+           receive_timeout: timeout
+         ) do
+      {:ok, %{status: 200, body: %{"data" => [%{"embedding" => v} | _]}}} when is_list(v) ->
+        {:ok, v}
+
+      _ ->
+        :error
+    end
+  end
+
+  defp ollama_embed(stage, prompt, timeout) do
     base = stage[:base_url] || "http://localhost:11434"
     model = stage[:embed_model] || "mxbai-embed-large"
 
