@@ -1,0 +1,61 @@
+# complexity — 3-way structural classifier (task id: preprocessor.complexity)
+#
+# Run:   python3 convert_corpus.py        (regenerates dataset.jsonl from _import/)
+#        npx promptfoo@latest eval -c promptfooconfig.yaml -o results.json
+#        npx promptfoo@latest view
+#
+# GOAL: find the single SMALLEST model/quant that does BOTH this task AND
+# needs_tools well (one model for the whole preprocessor → accessible to users
+# without multi-model VRAM). Compare against ../needs-tools with the same
+# provider matrix.
+#
+# ⚠️ TRUTH QUALITY: dataset.jsonl labels are granite4.1:3b-seeded (PROVISIONAL,
+# not human-QA'd). Do NOT rank models by corpus accuracy alone — it's circular
+# for granite. The authoritative signals are:
+#   1. sanity.jsonl accuracy (12 curated, unambiguous, human-labeled).
+#   2. Collapse/distribution shape — a model that maps everything to one label
+#      (e.g. all-SIMPLE) is useless regardless of corpus accuracy. Check the
+#      per-label spread in `promptfoo view`.
+# Authoritative corpus ranking needs a human-QA pass on the 145 labels.
+
+description: >
+  3-way complexity classification (SIMPLE / MULTI_STEP / NON_ACTIONABLE) for the
+  preprocessor. Production prompt = the live @complexity_prompt. Candidate matrix
+  shared with ../needs-tools to pick ONE model for both tasks at the smallest quant.
+
+prompts:
+  - file://prompts/generic.json
+
+# Candidate matrix (Hysun's loaded LM Studio models, 2026-06-25). Label =
+# model + serving endpoint (provider/quant identity changes behavior — see
+# ../needs-tools/README.md: same granite scored differently on Ollama vs LM Studio).
+providers:
+  - id: openai:chat:granite-4.1-3b
+    label: granite-4.1-3b@lmstudio
+    config: &lmcfg
+      apiBaseUrl: http://localhost:1234/v1
+      apiKey: lm-studio
+      temperature: 0.0
+      max_tokens: 64
+  - id: openai:chat:gemma-4-e4b-it
+    label: gemma-4-e4b-it@lmstudio
+    config: *lmcfg
+  - id: openai:chat:gemma-4-e4b-it-qat-mobile@q8_0
+    label: gemma-4-e4b-qat-mobile-q8@lmstudio
+    config: *lmcfg
+  - id: openai:chat:gemma-4-e4b-it-qat-mobile@q2_k_xl
+    label: gemma-4-e4b-qat-mobile-q2@lmstudio
+    config: *lmcfg
+  - id: openai:chat:gemma-4-e2b-it-qat-mobile
+    label: gemma-4-e2b-qat-mobile@lmstudio
+    config: *lmcfg
+
+tests:
+  # 12 curated, unambiguous prompts — committed, no personal content. The
+  # trustworthy ranking signal; a model failing these is disqualified.
+  - file://sanity.jsonl
+  # 145-prompt corpus with PROVISIONAL granite-seeded labels — GITIGNORED.
+  # Use for collapse/distribution detection, not authoritative ranking.
+  - file://dataset.jsonl
+
+outputPath: results.json

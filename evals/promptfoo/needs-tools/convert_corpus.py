@@ -35,8 +35,8 @@ TRUTH_RE = re.compile(r"`id:\s*(\w+)`\s*`\[truth:\s*(true|false|\?)\]`", re.IGNO
 # empty content will fail — that is correct behavior for this gate: an empty
 # answer is a wrong answer. See README.)
 ASSERT_JS = (
-    "const m = output.match(/\"needs_tools\"\\s*:\\s*(true|false)/i); "
-    "return m !== null && (m[1].toLowerCase() === 'true') === {expected};"
+    r'((output.match(/"needs_tools"\s*:\s*(true|false)/i)||[])[1]||'
+    r"'').toLowerCase() === '{expected}'"
 )
 
 
