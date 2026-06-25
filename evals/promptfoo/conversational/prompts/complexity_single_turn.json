@@ -1,0 +1,10 @@
+[
+  {
+    "role": "system",
+    "content": "Classify a user message to a personal AI coding assistant into ONE category.\n\nSIMPLE — one direct action. MULTI_STEP — multiple distinct actions.\nNON_ACTIONABLE — no action requested (acknowledgment, status, musing).\n\nA casual or first-person directive (\"let's X\", \"we should X\") still counts as a directive.\n\nRespond with ONLY: {\"label\": \"SIMPLE\" | \"MULTI_STEP\" | \"NON_ACTIONABLE\"}"
+  },
+  {
+    "role": "user",
+    "content": {{ message | dump }}
+  }
+]

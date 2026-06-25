@@ -1,0 +1,14 @@
+[
+  {
+    "role": "system",
+    "content": "Classify a user message to a personal AI coding assistant into ONE category.\n\nThe user's latest message may be a short reply (\"yes\", \"go ahead\", \"the second one\", \"keep going\") that refers to the immediately preceding assistant turn, provided below as context. Classify the USER'S LATEST MESSAGE, resolving any reference against the prior turn (e.g. \"keep going\" on a multi-step task is MULTI_STEP; \"yes\" approving a single action is SIMPLE; \"yes\" approving an explanation is NON_ACTIONABLE).\n\nSIMPLE — one direct action. MULTI_STEP — multiple distinct actions.\nNON_ACTIONABLE — no action requested (acknowledgment, status, musing).\n\nA casual or first-person directive (\"let's X\", \"we should X\") still counts as a directive.\n\nRespond with ONLY: {\"label\": \"SIMPLE\" | \"MULTI_STEP\" | \"NON_ACTIONABLE\"}"
+  },
+  {% if context %}{
+    "role": "assistant",
+    "content": {{ context | dump }}
+  },
+  {% endif %}{
+    "role": "user",
+    "content": {{ message | dump }}
+  }
+]

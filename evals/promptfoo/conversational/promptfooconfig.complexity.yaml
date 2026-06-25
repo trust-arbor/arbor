@@ -1,0 +1,44 @@
+# conversational (complexity) — does a context slice fix referential turns for the
+# 3-way complexity classifier? (task: preprocessor.complexity)
+#
+# Same A/B as promptfooconfig.yaml (needs_tools), reusing the SAME sanity.jsonl rows
+# — every row carries a hand-labeled complexity_truth, so unlike the granite-seeded
+# 145-corpus this truth is solid. The context slice is a property of the preprocessor
+# INPUT (all stages share it), so this confirms complexity inherits the same win.
+#
+# Run (providers should already be loaded):
+#   npx promptfoo@latest eval -c promptfooconfig.complexity.yaml -j 4 --no-cache -o results.complexity.json
+#   npx promptfoo@latest view
+
+description: >
+  A/B: single-turn vs prior-assistant-turn context for the complexity classifier,
+  on the same curated referential rows. Production @complexity_prompt reused verbatim.
+
+prompts:
+  - file://prompts/complexity_single_turn.json
+  - file://prompts/complexity_with_context.json
+
+providers:
+  - id: openai:chat:gemma-4-e4b-it-qat
+    label: "gemma-4-e4b-it-qat (Q4_K_XL)@lmstudio"
+    config: &lmcfg {apiBaseUrl: http://localhost:1234/v1, apiKey: lm-studio, temperature: 0.0, max_tokens: 256}
+  - id: openai:chat:gemma-4-e4b-it@q2_k_xl
+    label: "gemma-4-e4b-it@q2_k_xl (Q2_K_XL)@lmstudio"
+    config: *lmcfg
+  - id: openai:chat:gemma-4-e4b-it
+    label: "gemma-4-e4b-it (Q8_K_XL)@lmstudio"
+    config: *lmcfg
+  - id: openai:chat:granite-4.1-8b
+    label: "granite-4.1-8b (Q4_K_XL)@lmstudio"
+    config: *lmcfg
+
+defaultTest:
+  assert:
+    - type: javascript
+      value: |
+        ((output.match(/"label"\s*:\s*"(SIMPLE|MULTI_STEP|NON_ACTIONABLE)"/i)||[])[1]||'').toUpperCase() === '{{complexity_truth}}'
+
+tests:
+  - file://sanity.jsonl
+
+outputPath: results.complexity.json
