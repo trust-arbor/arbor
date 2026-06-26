@@ -356,7 +356,9 @@ defmodule Arbor.LLM.Client do
   @spec embed(t(), String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def embed(%__MODULE__{} = client, provider, model, opts \\ [])
       when is_binary(provider) and is_binary(model) do
-    case Map.get(client.adapters, provider) do
+    canonical = ProviderRegistry.normalize(provider)
+
+    case Map.get(client.adapters, canonical) do
       nil ->
         {:error, {:unknown_provider, provider}}
 
@@ -370,7 +372,7 @@ defmodule Arbor.LLM.Client do
           adapter.embed(
             [hd(List.wrap(Keyword.get(opts, :texts, [""])))],
             model,
-            Keyword.put_new(opts, :provider, provider)
+            Keyword.put_new(opts, :provider, canonical)
           )
         else
           {:error, {:embed_not_supported, provider}}
@@ -387,13 +389,15 @@ defmodule Arbor.LLM.Client do
           {:ok, map()} | {:error, term()}
   def embed_batch(%__MODULE__{} = client, provider, model, texts, opts \\ [])
       when is_binary(provider) and is_binary(model) and is_list(texts) do
-    case Map.get(client.adapters, provider) do
+    canonical = ProviderRegistry.normalize(provider)
+
+    case Map.get(client.adapters, canonical) do
       nil ->
         {:error, {:unknown_provider, provider}}
 
       adapter ->
         if function_exported?(adapter, :embed, 3) do
-          adapter.embed(texts, model, Keyword.put_new(opts, :provider, provider))
+          adapter.embed(texts, model, Keyword.put_new(opts, :provider, canonical))
         else
           {:error, {:embed_not_supported, provider}}
         end
@@ -837,7 +841,11 @@ defmodule Arbor.LLM.Client do
 
   defp resolve_adapter(%__MODULE__{adapters: adapters}, %Request{provider: provider})
        when is_binary(provider) do
-    case Map.get(adapters, provider) do
+    # Fold provider-name spellings (e.g. "lmstudio" → "lm_studio") onto
+    # the canonical name adapters are registered under.
+    canonical = ProviderRegistry.normalize(provider)
+
+    case Map.get(adapters, canonical) do
       nil -> {:error, {:unknown_provider, provider}}
       adapter -> {:ok, adapter}
     end
@@ -985,9 +993,11 @@ defmodule Arbor.LLM.Client do
   # use Arbor-only names that differ from llm_db's catalog atoms — the
   # overrides table handles them.
   defp arbor_to_llmdb_atom(provider) when is_binary(provider) do
-    case Map.fetch(@llmdb_provider_overrides, provider) do
+    canonical = ProviderRegistry.normalize(provider)
+
+    case Map.fetch(@llmdb_provider_overrides, canonical) do
       {:ok, atom} -> atom
-      :error -> String.to_existing_atom(provider)
+      :error -> String.to_existing_atom(canonical)
     end
   rescue
     ArgumentError -> nil
