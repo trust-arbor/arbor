@@ -2,7 +2,7 @@ defmodule Arbor.Agent.TemplateStore do
   @moduledoc """
   File-backed template storage with ETS caching.
 
-  ## Resolution precedence (Phase B1 — file-first, fallback-safe)
+  ## Resolution precedence (Phase B2 — data-first, file is the source of truth)
 
   When a template is resolved by name, the layers are tried in order and the
   first hit wins:
@@ -10,45 +10,29 @@ defmodule Arbor.Agent.TemplateStore do
     1. **user**        `<user_templates_dir>/<name>.md`  (Markdown+frontmatter)
     2. **shipped**     `<priv>/templates/<name>.md`        (Markdown+frontmatter)
     3. **legacy_json** `<legacy_dir>/<name>.json`          (the old JSON store)
-    4. **module**      `from_module/1`                      (per-persona modules)
 
-  Layers 1–3 are loaded into the ETS cache by `reload/0` (user winning over
-  shipped, and `.md` winning over legacy `.json`). Layer 4 is the final fallback
-  in `resolve/1` for names that have no file at all.
+  All three layers are loaded into the ETS cache by `reload/0` (user winning over
+  shipped, and `.md` winning over legacy `.json`). There is no longer a module
+  fallback — the per-persona template modules were deleted in Phase B2; the
+  shipped `.md` files in `priv/templates/` ARE the source of truth.
 
   Every resolved template carries `data["template_source"]` provenance:
   `%{"name" => name, "path" => abs_path_or_nil, "layer" => layer}` where layer is
-  one of `"user" | "shipped" | "legacy_json" | "module"`.
+  one of `"user" | "shipped" | "legacy_json"`.
 
   `put/2`, `update/2`, and `create_from_opts/2` still write user JSON files into
   the legacy dir (the writable layer); they update the ETS cache too. Use
   `reload/0` after manual edits.
 
-  Builtin templates ship as `.md` files in `priv/templates/` and remain backed by
-  per-persona modules as a final fallback. They can be overridden by a user `.md`
-  but not deleted.
+  Builtin templates ship as `.md` files in `priv/templates/`. `builtin_names/0`
+  derives the builtin set from the basenames of those shipped files. They can be
+  overridden by a user `.md` but not deleted.
   """
 
-  alias Arbor.Agent.{Character, Template}
+  alias Arbor.Agent.Character
 
   @ets_table :arbor_agent_templates
   @templates_dir ".arbor/templates"
-
-  # Builtin module → name mapping
-  @builtin_modules %{
-    Arbor.Agent.Templates.CliAgent => "cli_agent",
-    Arbor.Agent.Templates.Scout => "scout",
-    Arbor.Agent.Templates.Researcher => "researcher",
-    Arbor.Agent.Templates.CodeReviewer => "code_reviewer",
-    Arbor.Agent.Templates.Monitor => "monitor",
-    Arbor.Agent.Templates.Diagnostician => "diagnostician",
-    Arbor.Agent.Templates.Conversationalist => "conversationalist",
-    Arbor.Agent.Templates.InterviewAgent => "interview_agent",
-    Arbor.Agent.Templates.ApiAgent => "api_agent",
-    Arbor.Agent.Templates.CouncilEvaluator => "council_evaluator"
-  }
-
-  @builtin_names Map.values(@builtin_modules)
 
   # --- ETS Management ---
 
@@ -109,7 +93,7 @@ defmodule Arbor.Agent.TemplateStore do
   @doc "Delete a template. Refuses to delete builtin templates."
   @spec delete(String.t()) :: :ok | {:error, :builtin_protected}
   def delete(name) when is_binary(name) do
-    if name in @builtin_names do
+    if name in builtin_names() do
       {:error, :builtin_protected}
     else
       ensure_table()
@@ -231,88 +215,37 @@ defmodule Arbor.Agent.TemplateStore do
     :ok
   end
 
-  # --- Seeding ---
-
-  @doc "Seed builtin templates from module definitions. Idempotent — skips existing files."
-  @spec seed_builtins() :: {:ok, non_neg_integer()}
-  def seed_builtins do
-    ensure_table()
-    dir = templates_dir()
-    File.mkdir_p!(dir)
-
-    count =
-      @builtin_modules
-      |> Enum.count(fn {module, name} ->
-        path = template_path(name)
-
-        if File.exists?(path) do
-          false
-        else
-          if Code.ensure_loaded?(module) do
-            data = from_module(module)
-            write_to_file(name, data) == :ok
-          else
-            false
-          end
-        end
-      end)
-
-    # Load all into ETS
-    reload()
-    {:ok, count}
-  end
-
   # --- Resolution ---
 
-  @doc "Resolve a template by name (string) or module atom."
+  @doc """
+  Resolve a template by name (string) or — for stray atom callers — by module.
+
+  The string clause is the canonical path: file-first layered lookup. The atom
+  clause is a back-compat convenience for any caller still passing a module
+  atom (e.g. a legacy `Arbor.Agent.Templates.Scout`); it inflects the atom's
+  last segment into a slug name and delegates to the string path. There is no
+  module fallback — the per-persona modules were deleted in Phase B2.
+  """
   @spec resolve(atom() | String.t()) :: {:ok, map()} | {:error, :not_found}
   def resolve(name) when is_binary(name), do: get(name)
 
   def resolve(module) when is_atom(module) do
-    name = module_to_name(module)
-
-    case get(name) do
-      {:ok, _} = ok ->
-        ok
-
-      {:error, :not_found} ->
-        # Final fallback: load directly from the module definition.
-        if Code.ensure_loaded?(module) and function_exported?(module, :character, 0) do
-          data = with_source(from_module(module), name, nil, "module")
-          # Cache in ETS only (do NOT write a JSON file) — the module IS the
-          # source of truth for this fallback path; writing a .json would
-          # silently shadow a later-added shipped/user .md.
-          ensure_table()
-          :ets.insert(@ets_table, {name, data})
-          {:ok, data}
-        else
-          {:error, :not_found}
-        end
-    end
+    resolve(module_to_name(module))
   end
 
   # --- Name Mapping ---
 
-  @doc "Convert a template module to its name slug."
+  @doc """
+  Convert a template module atom to its name slug by inflecting the last
+  module segment (e.g. `Arbor.Agent.Templates.CodeReviewer` -> `"code_reviewer"`).
+  Kept for stray atom callers; the modules themselves no longer exist.
+  """
   @spec module_to_name(atom()) :: String.t()
   def module_to_name(module) when is_atom(module) do
-    case Map.get(@builtin_modules, module) do
-      nil ->
-        module
-        |> Module.split()
-        |> List.last()
-        |> Macro.underscore()
-
-      name ->
-        name
-    end
-  end
-
-  @doc "Convert a template name to its builtin module (if any)."
-  @spec name_to_module(String.t()) :: atom() | nil
-  def name_to_module(name) when is_binary(name) do
-    inverse = Map.new(@builtin_modules, fn {mod, n} -> {n, mod} end)
-    Map.get(inverse, name)
+    module
+    |> Module.split()
+    |> List.last()
+    |> Macro.underscore()
   end
 
   @doc "Normalize a template reference (atom or string) to a name string."
@@ -322,34 +255,6 @@ defmodule Arbor.Agent.TemplateStore do
   def normalize_ref(module) when is_atom(module), do: module_to_name(module)
 
   # --- Conversion ---
-
-  @doc "Convert a template module to a data map."
-  @spec from_module(module()) :: map()
-  def from_module(module) when is_atom(module) do
-    kw = Template.apply(module)
-    now = DateTime.to_iso8601(DateTime.utc_now())
-    name = module_to_name(module)
-
-    %{
-      "name" => name,
-      "version" => 1,
-      "source" => if(module in Map.keys(@builtin_modules), do: "builtin", else: "user"),
-      "character" => character_to_map(kw[:character]),
-      "trust_tier" => to_string(kw[:trust_tier]),
-      "initial_goals" => stringify_keys_list(kw[:initial_goals] || []),
-      "required_capabilities" => stringify_keys_list(kw[:required_capabilities] || []),
-      "description" => kw[:description] || "",
-      "nature" => kw[:nature] || "",
-      "values" => kw[:values] || [],
-      "initial_interests" => kw[:interests] || [],
-      "initial_thoughts" => kw[:initial_thoughts] || [],
-      "relationship_style" => stringify_keys(kw[:relationship_style] || %{}),
-      "domain_context" => kw[:domain_context] || "",
-      "metadata" => stringify_keys(kw[:metadata] || %{}),
-      "created_at" => now,
-      "updated_at" => now
-    }
-  end
 
   @doc "Convert a stored template data map to the keyword list format used by Lifecycle."
   @spec to_keyword(map()) :: keyword()
@@ -393,7 +298,7 @@ defmodule Arbor.Agent.TemplateStore do
   end
 
   # Surface template provenance in meta_awareness when the data map carries it
-  # (resolve/1 attaches it; raw from_module/1 output does not).
+  # (resolve/1 attaches it; a raw data map without a resolved source does not).
   defp maybe_put_meta_source(meta, %{} = source) when map_size(source) > 0 do
     Map.put(meta, :template_source, source)
   end
@@ -436,9 +341,27 @@ defmodule Arbor.Agent.TemplateStore do
     put(name, data)
   end
 
-  @doc "Return the list of builtin template names."
+  @doc """
+  Return the list of builtin template names.
+
+  Derived from the basenames of the shipped `.md` files in
+  `shipped_templates_dir/0` (the source of truth for builtins). Sorted for
+  stable output. Returns `[]` if the shipped dir is somehow absent.
+  """
   @spec builtin_names() :: [String.t()]
-  def builtin_names, do: @builtin_names
+  def builtin_names do
+    dir = shipped_templates_dir()
+
+    if File.dir?(dir) do
+      dir
+      |> File.ls!()
+      |> Enum.filter(&String.ends_with?(&1, ".md"))
+      |> Enum.map(&String.trim_trailing(&1, ".md"))
+      |> Enum.sort()
+    else
+      []
+    end
+  end
 
   @doc """
   Return the legacy/writable templates directory (the `.json` store).
@@ -549,7 +472,7 @@ defmodule Arbor.Agent.TemplateStore do
   end
 
   defp decode_template(content, ".md") do
-    case Template.File.parse(content) do
+    case Arbor.Agent.Template.File.parse(content) do
       {:ok, data} -> {:ok, data}
       {:error, reason} -> {:error, {:invalid_markdown, reason}}
     end

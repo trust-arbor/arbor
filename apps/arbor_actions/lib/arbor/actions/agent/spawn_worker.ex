@@ -219,7 +219,7 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
     worker_name = "worker-#{:erlang.unique_integer([:positive])}"
 
     create_opts = [
-      template: Arbor.Agent.Templates.CouncilEvaluator,
+      template: "council_evaluator",
       delegator_id: parent_id
     ]
 

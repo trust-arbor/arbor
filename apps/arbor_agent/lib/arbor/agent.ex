@@ -62,7 +62,7 @@ defmodule Arbor.Agent do
   ## Examples
 
       {:ok, profile} = Arbor.Agent.create_agent("scout-1",
-        template: Arbor.Agent.Templates.Scout)
+        template: "scout")
 
       {:ok, profile} = Arbor.Agent.create_agent("custom",
         character: Character.new(name: "My Agent"),

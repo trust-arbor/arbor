@@ -937,7 +937,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
 
   @lifecycle_mod Arbor.Agent.Lifecycle
   @manager_mod Arbor.Agent.Manager
-  @template_mod Arbor.Agent.Templates.CouncilEvaluator
+  @template_name "council_evaluator"
 
   @doc false
   def agent_system_available? do
@@ -1043,7 +1043,7 @@ defmodule Arbor.Consensus.Evaluators.AdvisoryLLM do
     provider_atom = parse_provider_atom(provider)
 
     create_opts = [
-      template: @template_mod,
+      template: @template_name,
       perspective: perspective,
       model_config: %{
         provider: provider_atom,
