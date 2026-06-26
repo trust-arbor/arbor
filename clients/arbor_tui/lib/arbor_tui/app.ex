@@ -333,6 +333,8 @@ defmodule ArborTui.App do
   defp role_atom("user"), do: :you
   defp role_atom(:user), do: :you
   defp role_atom("assistant"), do: :agent
+  defp role_atom("system"), do: :system
+  defp role_atom(:system), do: :system
   defp role_atom(_), do: :agent
 
   defp transcript_to_messages(transcript) when is_list(transcript) do
