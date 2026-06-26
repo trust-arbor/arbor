@@ -13,9 +13,14 @@ defmodule Arbor.Gateway.Chat.Router do
   use Plug.Router
 
   alias Arbor.Gateway.Chat.Agents
+  alias Arbor.Gateway.Chat.Lifecycle
 
   plug(:match)
   plug(:dispatch)
+
+  # JSON request bodies are already parsed by the parent `Arbor.Gateway.Router`'s
+  # `:conditional_parsers` plug (which reuses the signature-verified raw body), so
+  # by here `conn.body_params` holds the decoded body for the POST routes below.
 
   # WebSocket upgrade. The authenticated principal is threaded into the socket's
   # initial state; the client then `attach`es to an engagement and exchanges turns.
@@ -54,7 +59,52 @@ defmodule Arbor.Gateway.Chat.Router do
     end
   end
 
+  # Signed HTTP POST: create+start a new agent from a template, granting the
+  # principal chat access to it. Gated on `arbor://agent/lifecycle/create`.
+  # Body: {"template": "...", "name": "..."(opt), "model": "..."(opt)}.
+  post "/agents" do
+    with_principal(conn, fn principal ->
+      lifecycle_result(conn, Lifecycle.create(principal, conn.body_params || %{}))
+    end)
+  end
+
+  # Signed HTTP POST: start an existing stopped agent. Gated on
+  # `arbor://agent/lifecycle/restore`.
+  post "/agents/:id/start" do
+    with_principal(conn, fn principal ->
+      lifecycle_result(conn, Lifecycle.start(principal, id))
+    end)
+  end
+
+  # Signed HTTP POST: stop a running agent. Gated on `arbor://agent/stop/<id>`.
+  post "/agents/:id/stop" do
+    with_principal(conn, fn principal ->
+      lifecycle_result(conn, Lifecycle.stop(principal, id))
+    end)
+  end
+
   match _ do
     send_resp(conn, 404, "not found")
+  end
+
+  # The parent pipeline rejects unauthenticated requests; this only ensures we
+  # never act without a principal in assigns.
+  defp with_principal(conn, fun) do
+    case conn.assigns[:agent_id] do
+      principal when is_binary(principal) -> fun.(principal)
+      _ -> send_resp(conn, 401, "unauthorized")
+    end
+  end
+
+  defp lifecycle_result(conn, {:ok, body}) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, Jason.encode!(body))
+  end
+
+  defp lifecycle_result(conn, {:error, status, message}) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(status, Jason.encode!(%{error: message}))
   end
 end
