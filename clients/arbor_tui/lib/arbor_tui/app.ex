@@ -59,6 +59,11 @@ defmodule ArborTui.App do
 
     %{
       ws: ws,
+      # The TermUI runtime + full identity are kept so client-local commands that
+      # talk to the gateway out-of-band (e.g. /agents, a signed HTTP GET) can
+      # spawn an async fetch and push the result back into this runtime.
+      runtime: runtime_name,
+      identity: identity,
       identity_id: identity.agent_id,
       agent_id: target_agent_id,
       gateway_url: gateway_url,
@@ -183,6 +188,9 @@ defmodule ArborTui.App do
   def update({:ws_status, status, detail}, state),
     do: {%{state | status: status, status_detail: detail}}
 
+  # Async result of the /agents signed HTTP GET (pushed by the spawned fetch).
+  def update({:agents_result, result}, state), do: {render_agents(result, state)}
+
   # Server events forwarded by the WS client.
   def update({:server_event, event}, state), do: {handle_event(event, state)}
 
@@ -193,6 +201,7 @@ defmodule ArborTui.App do
   # Slash input is matched against the small client-local command set FIRST; an
   # unmatched `/command` falls through to the gateway (the server-slash-command
   # path). Plain text goes to the gateway as a chat message.
+  defp handle_input("/agents", state), do: cmd_agents(state)
   defp handle_input("/agent " <> rest, state), do: cmd_agent(String.trim(rest), state)
   defp handle_input("/agent", state), do: cmd_agent("", state)
   defp handle_input("/connect " <> rest, state), do: cmd_connect(String.trim(rest), state)
@@ -242,6 +251,37 @@ defmodule ArborTui.App do
     }
   end
 
+  # /agents — list the agents this client may chat with. A signed HTTP GET (works
+  # whether attached or detached), run ASYNC so the UI doesn't block: spawn the
+  # fetch, push {:agents_result, …} back into the runtime when it lands, and show
+  # a "fetching…" note now.
+  defp cmd_agents(state) do
+    spawn_agents_fetch(state)
+
+    %{
+      state
+      | input: "",
+        messages: state.messages ++ [msg(:system, "Fetching agents from #{state.gateway_url}…")]
+    }
+  end
+
+  defp spawn_agents_fetch(%{runtime: runtime, identity: identity, gateway_url: url})
+       when not is_nil(runtime) and not is_nil(identity) do
+    client = agents_client()
+
+    spawn(fn ->
+      result = client.fetch(identity, url)
+      TermUI.Runtime.send_message(runtime, :root, {:agents_result, result})
+    end)
+
+    :ok
+  end
+
+  defp spawn_agents_fetch(_state), do: :ok
+
+  defp agents_client,
+    do: Application.get_env(:arbor_tui, :agents_client, ArborTui.AgentsClient)
+
   # /connect <url> — change the gateway URL and reconnect (re-attach current).
   defp cmd_connect("", state) do
     %{state | input: "", messages: state.messages ++ [msg(:system, "usage: /connect <ws-url>")]}
@@ -271,6 +311,7 @@ defmodule ArborTui.App do
   defp cmd_help(state) do
     lines = [
       "Client commands (handled locally):",
+      "  /agents         list the agents you can chat with",
       "  /agent <id>     attach to / switch to an agent",
       "  /connect <url>  change the gateway URL and reconnect",
       "  /help           this help",
@@ -279,6 +320,30 @@ defmodule ArborTui.App do
     ]
 
     %{state | input: "", messages: state.messages ++ Enum.map(lines, &msg(:system, &1))}
+  end
+
+  # Render the /agents result into the transcript as system lines.
+  defp render_agents({:ok, []}, state) do
+    %{state | messages: state.messages ++ [msg(:system, "No agents you can chat with.")]}
+  end
+
+  defp render_agents({:ok, agents}, state) when is_list(agents) do
+    lines =
+      Enum.map(agents, fn a ->
+        status = if a.running, do: "running", else: "stopped"
+        "#{short(a.agent_id)}  #{a.display_name}  #{a.template}  [#{status}]"
+      end) ++ ["Use /agent <id> to attach."]
+
+    %{state | messages: state.messages ++ Enum.map(lines, &msg(:system, &1))}
+  end
+
+  defp render_agents({:error, reason}, state) do
+    %{
+      state
+      | messages:
+          state.messages ++
+            [msg(:system, "Couldn't list agents: #{inspect(reason)}")]
+    }
   end
 
   # ── server events ────────────────────────────────────────────────────────
