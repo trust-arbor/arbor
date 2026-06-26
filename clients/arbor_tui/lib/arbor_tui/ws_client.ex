@@ -48,13 +48,32 @@ defmodule ArborTui.WSClient do
     * `:runtime` — the TermUI runtime (name or pid) to push events to (required)
     * `:identity` — `%{agent_id, private_key}` from `ArborTui.Signer` (required)
     * `:gateway_url` — e.g. `"ws://localhost:4000"` (required)
-    * `:target_agent_id` — the agent to `attach` to on connect (required)
+    * `:target_agent_id` — the agent to `attach` to on connect, or `nil` to
+      start IDLE (no connection until `connect_to/2` is called) (required key,
+      `nil` allowed)
   """
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, opts[:gen_opts] || [])
 
   @doc "Send a protocol command to the server (fire-and-forget)."
   @spec send_command(GenServer.server(), Protocol.command()) :: :ok
   def send_command(server, command), do: GenServer.cast(server, {:command, command})
+
+  @doc """
+  Set (or switch) the target agent and (re)connect to it.
+
+  Tears down any existing connection, resets the reconnect attempt counter, and
+  initiates a fresh signed upgrade + attach to `agent_id`. Use this to attach
+  from an idle (unattached) start, or to switch agents.
+  """
+  @spec connect_to(GenServer.server(), String.t()) :: :ok
+  def connect_to(server, agent_id), do: GenServer.cast(server, {:connect_to, agent_id})
+
+  @doc """
+  Change the gateway URL and reconnect (re-attaching to the current target if
+  one is set). A no-op for the connection if there is no target yet.
+  """
+  @spec set_url(GenServer.server(), String.t()) :: :ok
+  def set_url(server, url), do: GenServer.cast(server, {:set_url, url})
 
   @doc """
   The jittered backoff window for a reconnect `attempt` (1-based).
@@ -95,10 +114,20 @@ defmodule ArborTui.WSClient do
       resp_headers: nil,
       # Reconnect bookkeeping (survives reset_conn/1).
       attempt: 0,
-      reconnect_timer: nil
+      reconnect_timer: nil,
+      # Whether the CURRENT target has ever successfully attached. The first
+      # attach is best-effort (failure → detached, no retry); only AFTER a
+      # successful attach does a later drop trigger indefinite backoff-reconnect.
+      # Reset to false on init/connect_to/set_url (a fresh target).
+      attached?: false
     }
 
-    {:ok, state, {:continue, :connect}}
+    # No target yet → start IDLE: no connection until connect_to/2 sets one.
+    if state.target_agent_id do
+      {:ok, state, {:continue, :connect}}
+    else
+      {:ok, state}
+    end
   end
 
   @impl true
@@ -122,6 +151,35 @@ defmodule ArborTui.WSClient do
   def handle_cast({:command, _command}, state) do
     # Not connected (or reconnecting) — drop (the UI shows the connection status).
     {:noreply, state}
+  end
+
+  # Set/switch the target agent and (re)connect. Tear down any live connection,
+  # reset the attempt counter, then run the connect continuation (which signs a
+  # fresh upgrade and attaches to the new target on success).
+  def handle_cast({:connect_to, agent_id}, state) do
+    state =
+      state
+      |> clear_reconnect()
+      |> reset_conn()
+      |> Map.merge(%{target_agent_id: agent_id, attempt: 0, attached?: false})
+
+    {:noreply, _state} = handle_continue(:connect, state)
+  end
+
+  # Change the gateway URL. Reconnect only if a target is set; otherwise just
+  # record the new URL for the next connect_to/2.
+  def handle_cast({:set_url, url}, %{target_agent_id: nil} = state) do
+    {:noreply, %{state | gateway_url: url}}
+  end
+
+  def handle_cast({:set_url, url}, state) do
+    state =
+      state
+      |> clear_reconnect()
+      |> reset_conn()
+      |> Map.merge(%{gateway_url: url, attempt: 0, attached?: false})
+
+    {:noreply, _state} = handle_continue(:connect, state)
   end
 
   @impl true
@@ -209,8 +267,13 @@ defmodule ArborTui.WSClient do
         # Successful upgrade — clear the backoff counter + any pending retry.
         state = clear_reconnect(%{state | conn: conn, websocket: websocket, attempt: 0})
         notify(state, {:ws_status, :connected, nil})
-        # Attach to the target agent's :user engagement immediately.
-        send_frame(state, Protocol.encode({:attach, state.target_agent_id, nil}))
+        # Attach to the target agent's :user engagement immediately (a target is
+        # always set on any path that reaches connect — guarded for safety).
+        if state.target_agent_id do
+          send_frame(state, Protocol.encode({:attach, state.target_agent_id, nil}))
+        else
+          state
+        end
 
       {:error, _conn, reason} ->
         schedule_reconnect(state, "upgrade failed: #{inspect(reason)}")
@@ -236,11 +299,13 @@ defmodule ArborTui.WSClient do
 
   defp handle_frame({:text, text}, state) do
     case Protocol.decode(text) do
-      {:ok, event} -> notify(state, {:server_event, event})
-      {:error, _} -> :ok
-    end
+      {:ok, event} ->
+        notify(state, {:server_event, event})
+        mark_attach_progress(state, event)
 
-    state
+      {:error, _} ->
+        state
+    end
   end
 
   defp handle_frame({:ping, data}, state), do: send_control(state, {:pong, data})
@@ -251,6 +316,13 @@ defmodule ArborTui.WSClient do
   end
 
   defp handle_frame(_frame, state), do: state
+
+  # The server's `:engagement` event is the confirmation of a SUCCESSFUL attach
+  # (it carries the engagement transcript). Once seen, this target is considered
+  # established: a later drop now triggers indefinite backoff-reconnect (the
+  # server-restart case) instead of the best-effort give-up.
+  defp mark_attach_progress(state, {:engagement, _}), do: %{state | attached?: true}
+  defp mark_attach_progress(state, _event), do: state
 
   defp send_control(%{websocket: ws, conn: conn, ref: ref} = state, frame) do
     with {:ok, ws, data} <- Mint.WebSocket.encode(ws, frame),
@@ -280,8 +352,17 @@ defmodule ArborTui.WSClient do
     %{state | conn: nil, ref: nil, websocket: nil, status: nil, resp_headers: nil}
   end
 
-  # Funnel for every disconnect path: tear down, bump the attempt counter,
-  # schedule a jittered :reconnect, and tell the UI we're reconnecting.
+  # Funnel for every disconnect path. The behaviour forks on whether this target
+  # has EVER successfully attached:
+  #
+  #   * attached? == true  → an established connection dropped (e.g. the server
+  #     restarted): tear down + indefinite jittered backoff-reconnect.
+  #   * attached? == false → the FIRST attach to this target never succeeded
+  #     (gateway down, agent not running, unauthorized, upgrade rejected): go
+  #     DETACHED best-effort — no retry-spam against a dead/forbidden agent.
+  defp schedule_reconnect(%{attached?: false} = state, detail),
+    do: detach(state, detail)
+
   defp schedule_reconnect(state, detail) do
     state = state |> clear_reconnect() |> reset_conn()
     attempt = state.attempt + 1
@@ -299,6 +380,26 @@ defmodule ArborTui.WSClient do
 
     state
   end
+
+  # Best-effort give-up: tear down, clear the target, and tell the UI we're
+  # detached (so it can prompt for /agent <id> to retry). No reconnect timer.
+  defp detach(state, detail) do
+    short = short_id(state.target_agent_id)
+    state = state |> clear_reconnect() |> reset_conn()
+    state = %{state | target_agent_id: nil, attempt: 0, attached?: false}
+
+    notify(
+      state,
+      {:ws_status, :detached,
+       "Couldn't attach to #{short} (not running or unauthorized): #{detail}"}
+    )
+
+    state
+  end
+
+  defp short_id(nil), do: "agent"
+  defp short_id("agent_" <> rest), do: "agent_" <> String.slice(rest, 0, 6) <> "…"
+  defp short_id(other) when is_binary(other), do: other
 
   defp clear_reconnect(%{reconnect_timer: nil} = state), do: state
 

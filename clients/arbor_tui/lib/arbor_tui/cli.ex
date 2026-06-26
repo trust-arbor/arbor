@@ -4,12 +4,18 @@ defmodule ArborTui.CLI do
 
   Usage:
 
-      arbor-tui --agent agent_30b4… [--url ws://localhost:4000] [--key PATH]
+      arbor-tui [--agent agent_30b4…] [--url ws://localhost:4000] [--key PATH]
 
-  Loads the client identity from a `.arbor.key` file, then launches the TermUI
-  application (which connects to the Gateway chat WebSocket and attaches to the
-  target agent). `--key` defaults to `$ARBOR_KEY` or `~/.arbor/client.arbor.key`.
+  No flag is required. Settings resolve with the precedence **CLI flag > config
+  file (`~/.arbor/tui.conf`) > env var > built-in default** (see
+  `ArborTui.Config`). With no agent resolved, the client starts UNATTACHED — use
+  `/agent <id>` inside the TUI to attach.
+
+  Loads the client identity from the resolved `.arbor.key` path, then launches
+  the TermUI application.
   """
+
+  alias ArborTui.Config
 
   @runtime_name ArborTui.Runtime
 
@@ -19,12 +25,16 @@ defmodule ArborTui.CLI do
   def main(argv) do
     {opts, _rest, _invalid} = OptionParser.parse(argv, switches: @switches, aliases: @aliases)
 
-    with {:ok, agent_id} <- fetch_agent(opts),
-         key_path = key_path(opts),
-         {:ok, identity} <- ArborTui.Signer.load_key(key_path) do
-      run(identity, agent_id, gateway_url(opts))
-    else
-      {:error, reason} -> abort(reason)
+    config = Config.load()
+    state = Config.load_state()
+    key_path = Config.resolve_key(opts, config)
+
+    case ArborTui.Signer.load_key(key_path) do
+      {:ok, identity} ->
+        run(identity, Config.resolve_agent(opts, config, state), Config.resolve_url(opts, config))
+
+      {:error, reason} ->
+        abort(reason)
     end
   end
 
@@ -38,21 +48,6 @@ defmodule ArborTui.CLI do
       runtime_name: @runtime_name
     )
   end
-
-  defp fetch_agent(opts) do
-    case opts[:agent] do
-      nil -> {:error, "missing --agent <agent_id>"}
-      agent_id -> {:ok, agent_id}
-    end
-  end
-
-  defp gateway_url(opts),
-    do: opts[:url] || System.get_env("ARBOR_GATEWAY_URL") || "ws://localhost:4000"
-
-  defp key_path(opts),
-    do:
-      opts[:key] || System.get_env("ARBOR_KEY") ||
-        Path.join([System.user_home!(), ".arbor", "client.arbor.key"])
 
   defp abort(reason) do
     IO.puts(:stderr, "arbor-tui: #{format_error(reason)}")

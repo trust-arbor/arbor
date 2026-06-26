@@ -34,7 +34,8 @@ defmodule ArborTui.App do
   @impl true
   def init(opts) do
     identity = Keyword.fetch!(opts, :identity)
-    target_agent_id = Keyword.fetch!(opts, :target_agent_id)
+    # nil target ⇒ start UNATTACHED (no connection until /agent <id>).
+    target_agent_id = Keyword.get(opts, :target_agent_id)
     runtime_name = Keyword.fetch!(opts, :runtime_name)
     gateway_url = Keyword.fetch!(opts, :gateway_url)
 
@@ -49,16 +50,23 @@ defmodule ArborTui.App do
         _ -> nil
       end
 
+    {status, messages} =
+      if target_agent_id do
+        {:connecting, []}
+      else
+        {:idle, [msg(:system, "Not attached. Use /agent <id> to attach.")]}
+      end
+
     %{
       ws: ws,
       identity_id: identity.agent_id,
       agent_id: target_agent_id,
       gateway_url: gateway_url,
-      status: :connecting,
+      status: status,
       status_detail: nil,
       engagement_id: nil,
       input: "",
-      messages: [],
+      messages: messages,
       streaming: nil,
       turn: :idle,
       # HITL: tool calls awaiting the user's decision (FIFO; head is prompted),
@@ -120,15 +128,10 @@ defmodule ArborTui.App do
   def update(:submit, %{input: ""} = state), do: {state}
 
   def update(:submit, %{input: text} = state) do
-    if connected?(state), do: WSClient.send_command(state.ws, {:send, text})
-
-    {%{
-       state
-       | input: "",
-         streaming: nil,
-         turn: :thinking,
-         messages: state.messages ++ [msg(:you, text)]
-     }}
+    case String.trim(text) do
+      "/quit" -> {%{state | input: ""}, [Command.quit(:normal)]}
+      trimmed -> {handle_input(trimmed, state)}
+    end
   end
 
   # HITL: resolve the head pending approval via y/n/a.
@@ -162,6 +165,21 @@ defmodule ArborTui.App do
   def update({:approval, _decision}, state), do: {state}
 
   # Connection lifecycle from the WS client.
+  #
+  # `:detached` is the best-effort give-up (initial attach failed): the WSClient
+  # has dropped the target, so clear our agent_id too and surface the message.
+  def update({:ws_status, :detached, detail}, state) do
+    {%{
+       state
+       | status: :detached,
+         status_detail: nil,
+         agent_id: nil,
+         turn: :idle,
+         streaming: nil,
+         messages: state.messages ++ [msg(:system, detail <> " Use /agent <id> to retry.")]
+     }}
+  end
+
   def update({:ws_status, status, detail}, state),
     do: {%{state | status: status, status_detail: detail}}
 
@@ -170,9 +188,105 @@ defmodule ArborTui.App do
 
   def update(_msg, state), do: {state}
 
+  # ── input routing: client-local slash commands, then gateway ───────────────
+
+  # Slash input is matched against the small client-local command set FIRST; an
+  # unmatched `/command` falls through to the gateway (the server-slash-command
+  # path). Plain text goes to the gateway as a chat message.
+  defp handle_input("/agent " <> rest, state), do: cmd_agent(String.trim(rest), state)
+  defp handle_input("/agent", state), do: cmd_agent("", state)
+  defp handle_input("/connect " <> rest, state), do: cmd_connect(String.trim(rest), state)
+  defp handle_input("/connect", state), do: cmd_connect("", state)
+  defp handle_input("/help", state), do: cmd_help(state)
+
+  defp handle_input(text, state) do
+    # Unmatched local command, or a normal message → forward to the gateway,
+    # but only when attached. (/quit is handled in update/2 before we get here.)
+    cond do
+      not attached?(state) ->
+        %{state | input: "", messages: state.messages ++ [msg(:system, not_attached_hint())]}
+
+      true ->
+        if connected?(state), do: WSClient.send_command(state.ws, {:send, text})
+
+        %{
+          state
+          | input: "",
+            streaming: nil,
+            turn: :thinking,
+            messages: state.messages ++ [msg(:you, text)]
+        }
+    end
+  end
+
+  # /agent <id> — set/switch the target agent and (re)connect+attach to it.
+  defp cmd_agent("", state) do
+    %{state | input: "", messages: state.messages ++ [msg(:system, "usage: /agent <agent_id>")]}
+  end
+
+  defp cmd_agent(agent_id, state) do
+    if state.ws, do: WSClient.connect_to(state.ws, agent_id)
+
+    # Switching agents is a fresh conversation — reset the transcript.
+    %{
+      state
+      | input: "",
+        agent_id: agent_id,
+        status: :connecting,
+        status_detail: nil,
+        engagement_id: nil,
+        streaming: nil,
+        turn: :idle,
+        pending_approvals: [],
+        messages: [msg(:system, "Attaching to #{agent_id}…")]
+    }
+  end
+
+  # /connect <url> — change the gateway URL and reconnect (re-attach current).
+  defp cmd_connect("", state) do
+    %{state | input: "", messages: state.messages ++ [msg(:system, "usage: /connect <ws-url>")]}
+  end
+
+  defp cmd_connect(url, state) do
+    if state.ws, do: WSClient.set_url(state.ws, url)
+
+    note =
+      if state.agent_id,
+        do: "Reconnecting to #{url}…",
+        else: "Gateway set to #{url}. Use /agent <id> to attach."
+
+    status = if state.agent_id, do: :connecting, else: state.status
+
+    %{
+      state
+      | input: "",
+        gateway_url: url,
+        status: status,
+        status_detail: nil,
+        messages: state.messages ++ [msg(:system, note)]
+    }
+  end
+
+  # /help — LOCAL help (client commands); other /commands go to the agent.
+  defp cmd_help(state) do
+    lines = [
+      "Client commands (handled locally):",
+      "  /agent <id>     attach to / switch to an agent",
+      "  /connect <url>  change the gateway URL and reconnect",
+      "  /help           this help",
+      "  /quit           exit the TUI",
+      "Other /commands (e.g. /model, /status) are sent to the attached agent."
+    ]
+
+    %{state | input: "", messages: state.messages ++ Enum.map(lines, &msg(:system, &1))}
+  end
+
   # ── server events ────────────────────────────────────────────────────────
 
   defp handle_event({:engagement, %{id: id, transcript: transcript}}, state) do
+    # A successful attach — persist the agent as the resume hint (best-effort).
+    if state.agent_id, do: ArborTui.Config.save_last_agent(state.agent_id)
+
     %{state | engagement_id: id, messages: transcript_to_messages(transcript)}
   end
 
@@ -349,14 +463,23 @@ defmodule ArborTui.App do
   defp connected?(%{status: :connected}), do: true
   defp connected?(_), do: false
 
+  # A target agent is set (attached or attaching). When nil, the client is
+  # UNATTACHED and a /agent <id> is required before chatting.
+  defp attached?(%{agent_id: agent_id}), do: not is_nil(agent_id)
+
+  defp not_attached_hint, do: "Not attached — use /agent <id> first."
+
   defp conn_dot(:connected), do: "●"
   defp conn_dot(:connecting), do: "◌"
   defp conn_dot(:reconnecting), do: "◍"
   defp conn_dot(_), do: "○"
 
   defp status_label(:reconnecting), do: "reconnecting…"
+  defp status_label(:idle), do: "not attached"
+  defp status_label(:detached), do: "not attached"
   defp status_label(status), do: to_string(status)
 
+  defp short(nil), do: "not attached"
   defp short("agent_" <> rest), do: "agent_" <> String.slice(rest, 0, 6) <> "…"
   defp short(other) when is_binary(other), do: other
   defp short(_), do: "?"
