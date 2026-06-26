@@ -344,26 +344,31 @@ defmodule Arbor.Persistence.BufferedStore do
     end
   end
 
+  # A genuine backend failure must NOT be silent: ETS is authoritative for reads
+  # and the next write retries, so we keep returning `:ok` (don't crash the store),
+  # but we elevate the failure to `Logger.error` so it's visible and actionable
+  # rather than buried at warning level. (Pre-2026-06-25 this swallowed the error
+  # at warning level, hiding the spurious `records_pkey` upsert race.)
   defp do_backend_put(backend, key, value, opts) do
     case backend.put(key, value, opts) do
       :ok ->
         :ok
 
       {:error, reason} ->
-        Logger.warning("BufferedStore: backend put failed for #{key}: #{inspect(reason)}")
+        Logger.error("BufferedStore: backend put failed for #{key}: #{inspect(reason)}")
         :ok
     end
   rescue
     e ->
-      Logger.warning("BufferedStore: backend put error for #{key}: #{inspect(e)}")
+      Logger.error("BufferedStore: backend put error for #{key}: #{inspect(e)}")
       :ok
   catch
     :exit, reason ->
-      Logger.warning("BufferedStore: backend put exit for #{key}: #{inspect(reason)}")
+      Logger.error("BufferedStore: backend put exit for #{key}: #{inspect(reason)}")
       :ok
 
     :throw, value ->
-      Logger.warning("BufferedStore: backend put throw for #{key}: #{inspect(value)}")
+      Logger.error("BufferedStore: backend put throw for #{key}: #{inspect(value)}")
       :ok
   end
 

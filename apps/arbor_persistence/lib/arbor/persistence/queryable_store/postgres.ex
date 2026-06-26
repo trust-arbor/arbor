@@ -57,21 +57,32 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
         updated_at: now
       })
 
-    # Scope the id to the namespace to prevent cross-namespace pkey collisions
-    scoped_attrs = %{attrs_with_timestamps | id: "#{namespace}:#{attrs.key}"}
+    # `id` is the deterministic identity for a record: `namespace:key`. It is the
+    # table's primary key AND the SOLE unique arbiter for the upsert (the redundant
+    # `(namespace, key)` UNIQUE index was dropped — see migration
+    # `20260625000001_records_single_unique_identity`). Arbitrating on `id` is
+    # race-safe: a concurrent INSERT for the same `(namespace, key)` computes the
+    # same `id` and so ON CONFLICT(id) DO UPDATE fires instead of raising a pkey
+    # violation on a non-arbiter index.
+    #
+    # Latent constraint: this requires `namespace:key` to be unambiguous — no
+    # namespace may be a prefix of another such that two distinct `(namespace, key)`
+    # pairs concatenate to the same `id`. True for all current namespaces (the
+    # store always looks up by the full `(namespace, key)` pair, and `id` is an
+    # internal surrogate that nothing reads by value).
+    scoped_attrs = %{attrs_with_timestamps | id: scoped_id(namespace, attrs.key)}
 
     %RecordSchema{}
     |> RecordSchema.changeset(scoped_attrs)
     |> repo.insert(
       on_conflict: [
         set: [
-          id: scoped_attrs.id,
           data: attrs.data,
           metadata: attrs.metadata,
           updated_at: now
         ]
       ],
-      conflict_target: [:namespace, :key]
+      conflict_target: [:id]
     )
     |> case do
       {:ok, _schema} -> :ok
@@ -88,12 +99,14 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     namespace = namespace_from_opts(opts)
     repo = repo_from_opts(opts)
 
-    query =
-      from(r in RecordSchema,
-        where: r.namespace == ^namespace and r.key == ^key
-      )
+    # Exact (namespace, key) point lookup → resolve via the primary key `id`
+    # (= "namespace:key", matching put/2's scheme) for an O(1) pkey lookup.
+    # The redundant (namespace, key) UNIQUE index was dropped (migration
+    # 20260625000001), so a where-ns-and-key query would now scan the
+    # non-unique records_namespace_index instead.
+    id = scoped_id(namespace, key)
 
-    case repo.one(query) do
+    case repo.get(RecordSchema, id) do
       nil -> {:error, :not_found}
       schema -> {:ok, RecordSchema.to_record(schema)}
     end
@@ -108,9 +121,10 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     namespace = namespace_from_opts(opts)
     repo = repo_from_opts(opts)
 
-    from(r in RecordSchema,
-      where: r.namespace == ^namespace and r.key == ^key
-    )
+    # Exact point delete → target the primary key `id` directly (see get/2).
+    id = scoped_id(namespace, key)
+
+    from(r in RecordSchema, where: r.id == ^id)
     |> repo.delete_all()
 
     :ok
@@ -145,9 +159,10 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
     namespace = namespace_from_opts(opts)
     repo = repo_from_opts(opts)
 
-    from(r in RecordSchema,
-      where: r.namespace == ^namespace and r.key == ^key
-    )
+    # Exact point existence check → primary key `id` (see get/2).
+    id = scoped_id(namespace, key)
+
+    from(r in RecordSchema, where: r.id == ^id)
     |> repo.exists?()
   end
 
@@ -221,6 +236,11 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   # ===========================================================================
   # Private Helpers
   # ===========================================================================
+
+  # The deterministic primary-key identity for a record: "namespace:key". This is
+  # the single source of truth for the id scheme — put/2 writes it and the exact
+  # point lookups (get/2, delete/2, exists?/2) resolve against it.
+  defp scoped_id(namespace, key), do: "#{namespace}:#{key}"
 
   defp namespace_from_opts(opts) do
     opts |> Keyword.fetch!(:name) |> to_string()
@@ -394,27 +414,19 @@ defmodule Arbor.Persistence.QueryableStore.Postgres do
   # ---------------------------------------------------------------------------
 
   defp execute_aggregate(repo, query, field_str, :sum) do
-    repo.one(
-      select(query, [r], fragment("SUM((?->>?)::numeric)", r.data, ^field_str))
-    )
+    repo.one(select(query, [r], fragment("SUM((?->>?)::numeric)", r.data, ^field_str)))
   end
 
   defp execute_aggregate(repo, query, field_str, :avg) do
-    repo.one(
-      select(query, [r], fragment("AVG((?->>?)::numeric)", r.data, ^field_str))
-    )
+    repo.one(select(query, [r], fragment("AVG((?->>?)::numeric)", r.data, ^field_str)))
   end
 
   defp execute_aggregate(repo, query, field_str, :min) do
-    repo.one(
-      select(query, [r], fragment("MIN((?->>?)::numeric)", r.data, ^field_str))
-    )
+    repo.one(select(query, [r], fragment("MIN((?->>?)::numeric)", r.data, ^field_str)))
   end
 
   defp execute_aggregate(repo, query, field_str, :max) do
-    repo.one(
-      select(query, [r], fragment("MAX((?->>?)::numeric)", r.data, ^field_str))
-    )
+    repo.one(select(query, [r], fragment("MAX((?->>?)::numeric)", r.data, ^field_str)))
   end
 
   # ---------------------------------------------------------------------------
