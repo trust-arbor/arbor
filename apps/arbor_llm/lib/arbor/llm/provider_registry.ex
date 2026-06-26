@@ -51,6 +51,21 @@ defmodule Arbor.LLM.ProviderRegistry do
     "ollama" => %{config_key: :ollama, default_base_url: "http://localhost:11434/v1"}
   }
 
+  # Provider-name aliases. The same physical provider has historically
+  # been spelled different ways across Arbor's layers — arbor_ai uses
+  # the atom `:lmstudio` (no underscore), arbor_orchestrator's
+  # preprocessor uses `:lm_studio` (underscore), `mix arbor.agent`
+  # accepts either string. To keep that a non-footgun, every spelling
+  # is folded onto the one canonical Arbor provider string here. Add a
+  # new alias here rather than special-casing it at a call site.
+  #
+  # Keys are the alias spellings (as strings); the value is the
+  # canonical provider string in `@local_providers` / `list/0`.
+  @aliases %{
+    "lmstudio" => "lm_studio",
+    "lm-studio" => "lm_studio"
+  }
+
   # Display name overrides for providers where titlecasing the atom
   # doesn't read well. Anything not listed gets a sensible default
   # via `compute_display_name/1`.
@@ -95,13 +110,36 @@ defmodule Arbor.LLM.ProviderRegistry do
 
   # ── Identity ────────────────────────────────────────────────────────
 
-  @doc "True if `provider` is a local-LM Arbor provider."
-  @spec local?(String.t()) :: boolean()
-  def local?(provider), do: Map.has_key?(@local_providers, provider)
+  @doc """
+  Fold any accepted spelling of a provider onto its canonical Arbor
+  provider string.
 
-  @doc "True if `provider` is in the registry (cloud or local)."
-  @spec known?(String.t()) :: boolean()
-  def known?(provider), do: provider in list_cloud() or local?(provider)
+  Accepts an atom or a string in any of the historical spellings — for
+  LM Studio that's `:lmstudio | "lmstudio" | :lm_studio | "lm_studio"`,
+  all of which resolve to `"lm_studio"`. Cloud providers and unknown
+  names pass through as their string form unchanged.
+
+  This is the single seam that closes the cross-layer provider-name
+  footgun: every other identity function in this module funnels through
+  it, so the registry treats all spellings of one provider as the same
+  provider.
+  """
+  @spec normalize(atom() | String.t()) :: String.t()
+  def normalize(provider) when is_atom(provider), do: normalize(Atom.to_string(provider))
+
+  def normalize(provider) when is_binary(provider),
+    do: Map.get(@aliases, provider, provider)
+
+  @doc "True if `provider` (any spelling) is a local-LM Arbor provider."
+  @spec local?(atom() | String.t()) :: boolean()
+  def local?(provider), do: Map.has_key?(@local_providers, normalize(provider))
+
+  @doc "True if `provider` (any spelling) is in the registry (cloud or local)."
+  @spec known?(atom() | String.t()) :: boolean()
+  def known?(provider) do
+    canonical = normalize(provider)
+    canonical in list_cloud() or Map.has_key?(@local_providers, canonical)
+  end
 
   @doc """
   Returns the req_llm provider atom for an Arbor provider.
@@ -115,11 +153,13 @@ defmodule Arbor.LLM.ProviderRegistry do
 
   Returns `nil` for unknown providers.
   """
-  @spec req_llm_atom(String.t()) :: atom() | nil
-  def req_llm_atom(provider) when is_binary(provider) do
+  @spec req_llm_atom(atom() | String.t()) :: atom() | nil
+  def req_llm_atom(provider) when is_atom(provider) or is_binary(provider) do
+    canonical = normalize(provider)
+
     cond do
-      local?(provider) -> :openai
-      provider in list_cloud() -> String.to_existing_atom(provider)
+      Map.has_key?(@local_providers, canonical) -> :openai
+      canonical in list_cloud() -> String.to_existing_atom(canonical)
       true -> nil
     end
   rescue
@@ -127,9 +167,10 @@ defmodule Arbor.LLM.ProviderRegistry do
   end
 
   @doc "Human-readable display name for `mix arbor.doctor` etc."
-  @spec display_name(String.t()) :: String.t()
-  def display_name(provider) when is_binary(provider) do
-    Map.get_lazy(@display_overrides, provider, fn -> compute_display_name(provider) end)
+  @spec display_name(atom() | String.t()) :: String.t()
+  def display_name(provider) when is_atom(provider) or is_binary(provider) do
+    canonical = normalize(provider)
+    Map.get_lazy(@display_overrides, canonical, fn -> compute_display_name(canonical) end)
   end
 
   defp compute_display_name(provider) do
@@ -147,12 +188,14 @@ defmodule Arbor.LLM.ProviderRegistry do
   Read from the req_llm provider module's `default_env_key/0`, set in
   `use ReqLLM.Provider`. Arbor doesn't hardcode env-var names.
   """
-  @spec default_env_key(String.t()) :: String.t() | nil
+  @spec default_env_key(atom() | String.t()) :: String.t() | nil
   def default_env_key(provider) do
+    canonical = normalize(provider)
+
     cond do
-      local?(provider) -> nil
-      not known?(provider) -> nil
-      true -> env_key_from_req_llm(req_llm_atom(provider))
+      Map.has_key?(@local_providers, canonical) -> nil
+      not known?(canonical) -> nil
+      true -> env_key_from_req_llm(req_llm_atom(canonical))
     end
   end
 
@@ -177,9 +220,9 @@ defmodule Arbor.LLM.ProviderRegistry do
   config overrides. Returns `nil` for cloud providers (req_llm's
   transport uses its own default).
   """
-  @spec default_base_url(String.t()) :: String.t() | nil
+  @spec default_base_url(atom() | String.t()) :: String.t() | nil
   def default_base_url(provider) do
-    case Map.fetch(@local_providers, provider) do
+    case Map.fetch(@local_providers, normalize(provider)) do
       {:ok, %{config_key: config_key, default_base_url: default}} ->
         config = Application.get_env(:arbor_orchestrator, config_key, [])
         Keyword.get(config, :base_url, default)
@@ -221,17 +264,19 @@ defmodule Arbor.LLM.ProviderRegistry do
   `/v1/chat/completions` and `/v1/embeddings` endpoints support
   (streaming, tool calls, embeddings).
   """
-  @spec capabilities(String.t()) :: Capabilities.t()
+  @spec capabilities(atom() | String.t()) :: Capabilities.t()
   def capabilities(provider) do
+    canonical = normalize(provider)
+
     cond do
-      provider == "ollama" ->
+      canonical == "ollama" ->
         Capabilities.new(streaming: true, tool_calls: true, embeddings: true)
 
-      provider == "lm_studio" ->
+      canonical == "lm_studio" ->
         Capabilities.new(streaming: true, tool_calls: true, structured_output: true)
 
       true ->
-        provider
+        canonical
         |> req_llm_atom()
         |> case do
           nil ->

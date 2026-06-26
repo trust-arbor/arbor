@@ -296,10 +296,14 @@ defmodule Arbor.AI.UnifiedBridge do
         Map.fetch!(@provider_overrides, provider)
 
       is_binary(provider) ->
-        provider
+        # Fold any spelling onto the canonical arbor_llm provider string
+        # so e.g. "lmstudio" and "lm_studio" both resolve identically.
+        Arbor.LLM.ProviderRegistry.normalize(provider)
 
       is_atom(provider) ->
-        Atom.to_string(provider)
+        # `:lm_studio` (orchestrator spelling) and any other atom fold
+        # through the registry too; `:lmstudio` is already handled above.
+        Arbor.LLM.ProviderRegistry.normalize(provider)
     end
   end
 
