@@ -9,10 +9,22 @@ defmodule ArborTui.WSClient do
   :root, {:server_event, event})`; the UI sends commands back via
   `send_command/2`.
 
-  Connection-lifecycle changes (connecting/connected/closed/error) are reported
-  to the runtime as `{:ws_status, status, detail}` so the status bar can render
-  them. This process is intentionally decoupled from the UI loop — the only
-  contract is the messages it sends to the runtime.
+  Connection-lifecycle changes (connecting/connected/reconnecting/closed/error)
+  are reported to the runtime as `{:ws_status, status, detail}` so the status
+  bar can render them. This process is intentionally decoupled from the UI loop —
+  the only contract is the messages it sends to the runtime.
+
+  ## Auto-reconnect
+
+  Every disconnect path — the server `:close` frame, a transport error from
+  `Mint.WebSocket.stream`, an outbound `send_frame`/upgrade failure, and an
+  initial-connect failure — funnels into `schedule_reconnect/2`. The connection
+  is torn down (`reset_conn/1`) while identity/url/target stay, an attempt
+  counter is incremented, and a `:reconnect` is scheduled after a jittered
+  exponential-backoff delay (`backoff_window/1`, capped at 30s, retried
+  indefinitely). On a successful upgrade the attempt counter resets to 0 and any
+  pending reconnect timer is cancelled. The UI never wipes its transcript across
+  a reconnect — the server replays the engagement transcript on re-attach.
   """
 
   use GenServer
@@ -22,6 +34,10 @@ defmodule ArborTui.WSClient do
   alias ArborTui.{Protocol, Signer}
 
   @path "/api/chat/socket"
+
+  # Backoff schedule: base 500ms, doubling per attempt, capped at 30s.
+  @base_backoff_ms 500
+  @max_backoff_ms 30_000
 
   # ── Public API ───────────────────────────────────────────────────────────
 
@@ -40,6 +56,29 @@ defmodule ArborTui.WSClient do
   @spec send_command(GenServer.server(), Protocol.command()) :: :ok
   def send_command(server, command), do: GenServer.cast(server, {:command, command})
 
+  @doc """
+  The jittered backoff window for a reconnect `attempt` (1-based).
+
+  Pure and exported so the schedule is testable. The window is
+  `base 500ms * 2^(attempt-1)`, capped at 30_000ms, returned as a
+  `{ceil(window/2), window}` jitter pair — the actual delay is picked uniformly
+  inside that window. Retries are indefinite (the window simply pins at the cap).
+  """
+  @spec backoff_window(pos_integer()) :: {pos_integer(), pos_integer()}
+  def backoff_window(attempt) when is_integer(attempt) and attempt >= 1 do
+    window =
+      @base_backoff_ms
+      |> Kernel.*(pow2(attempt - 1))
+      |> min(@max_backoff_ms)
+
+    {ceil_div(window, 2), window}
+  end
+
+  # 2^n without floats (avoids :math.pow precision drift at large n).
+  defp pow2(n) when n >= 0, do: Bitwise.bsl(1, n)
+
+  defp ceil_div(n, d), do: div(n + d - 1, d)
+
   # ── GenServer ──────────────────────────────────────────────────────────────
 
   @impl true
@@ -53,7 +92,10 @@ defmodule ArborTui.WSClient do
       ref: nil,
       websocket: nil,
       status: nil,
-      resp_headers: nil
+      resp_headers: nil,
+      # Reconnect bookkeeping (survives reset_conn/1).
+      attempt: 0,
+      reconnect_timer: nil
     }
 
     {:ok, state, {:continue, :connect}}
@@ -68,8 +110,7 @@ defmodule ArborTui.WSClient do
         {:noreply, state}
 
       {:error, reason} ->
-        notify(state, {:ws_status, :error, inspect(reason)})
-        {:noreply, state}
+        {:noreply, schedule_reconnect(state, "connect failed: #{inspect(reason)}")}
     end
   end
 
@@ -79,19 +120,24 @@ defmodule ArborTui.WSClient do
   end
 
   def handle_cast({:command, _command}, state) do
-    # Not connected yet — drop (the UI shows the connection status).
+    # Not connected (or reconnecting) — drop (the UI shows the connection status).
     {:noreply, state}
   end
 
   @impl true
+  def handle_info(:reconnect, state) do
+    # Re-run the same connect continuation (re-signs the upgrade header and
+    # re-attaches to the same target_agent_id on success).
+    {:noreply, _state} = handle_continue(:connect, %{state | reconnect_timer: nil})
+  end
+
   def handle_info(message, %{conn: conn} = state) when conn != nil do
     case Mint.WebSocket.stream(conn, message) do
       {:ok, conn, responses} ->
         {:noreply, handle_responses(%{state | conn: conn}, responses)}
 
-      {:error, conn, reason, _responses} ->
-        notify(state, {:ws_status, :error, inspect(reason)})
-        {:noreply, %{state | conn: conn}}
+      {:error, _conn, reason, _responses} ->
+        {:noreply, schedule_reconnect(state, "transport error: #{inspect(reason)}")}
 
       :unknown ->
         {:noreply, state}
@@ -160,14 +206,14 @@ defmodule ArborTui.WSClient do
   defp complete_upgrade(%{conn: conn, ref: ref, status: status, resp_headers: headers} = state) do
     case Mint.WebSocket.new(conn, ref, status, headers) do
       {:ok, conn, websocket} ->
-        state = %{state | conn: conn, websocket: websocket}
+        # Successful upgrade — clear the backoff counter + any pending retry.
+        state = clear_reconnect(%{state | conn: conn, websocket: websocket, attempt: 0})
         notify(state, {:ws_status, :connected, nil})
         # Attach to the target agent's :user engagement immediately.
         send_frame(state, Protocol.encode({:attach, state.target_agent_id, nil}))
 
-      {:error, conn, reason} ->
-        notify(state, {:ws_status, :error, inspect(reason)})
-        %{state | conn: conn}
+      {:error, _conn, reason} ->
+        schedule_reconnect(state, "upgrade failed: #{inspect(reason)}")
     end
   end
 
@@ -178,13 +224,11 @@ defmodule ArborTui.WSClient do
          {:ok, conn} <- Mint.WebSocket.stream_request_body(conn, ref, data) do
       %{state | websocket: ws, conn: conn}
     else
-      {:error, %Mint.WebSocket{} = ws, reason} ->
-        notify(state, {:ws_status, :error, inspect(reason)})
-        %{state | websocket: ws}
+      {:error, %Mint.WebSocket{}, reason} ->
+        schedule_reconnect(state, "send failed: #{inspect(reason)}")
 
-      {:error, conn, reason} ->
-        notify(state, {:ws_status, :error, inspect(reason)})
-        %{state | conn: conn}
+      {:error, _conn, reason} ->
+        schedule_reconnect(state, "send failed: #{inspect(reason)}")
     end
   end
 
@@ -202,8 +246,8 @@ defmodule ArborTui.WSClient do
   defp handle_frame({:ping, data}, state), do: send_control(state, {:pong, data})
 
   defp handle_frame({:close, _code, reason}, state) do
-    notify(state, {:ws_status, :closed, to_string(reason)})
-    state
+    # The server closed the socket — reconnect rather than going terminal.
+    schedule_reconnect(state, "server closed: #{to_string(reason)}")
   end
 
   defp handle_frame(_frame, state), do: state
@@ -215,6 +259,52 @@ defmodule ArborTui.WSClient do
     else
       _ -> state
     end
+  end
+
+  # ── Reconnect ──────────────────────────────────────────────────────────────
+
+  # Tear down the half-open Mint connection and clear per-connection fields, but
+  # KEEP identity/url/target_agent_id and the attempt counter so a retry can
+  # re-sign + re-attach.
+  defp reset_conn(%{conn: conn} = state) do
+    if conn do
+      try do
+        Mint.HTTP.close(conn)
+      rescue
+        _ -> :ok
+      catch
+        _, _ -> :ok
+      end
+    end
+
+    %{state | conn: nil, ref: nil, websocket: nil, status: nil, resp_headers: nil}
+  end
+
+  # Funnel for every disconnect path: tear down, bump the attempt counter,
+  # schedule a jittered :reconnect, and tell the UI we're reconnecting.
+  defp schedule_reconnect(state, detail) do
+    state = state |> clear_reconnect() |> reset_conn()
+    attempt = state.attempt + 1
+    {lo, hi} = backoff_window(attempt)
+    delay = lo + :rand.uniform(hi - lo + 1) - 1
+
+    timer = Process.send_after(self(), :reconnect, delay)
+
+    state = %{state | attempt: attempt, reconnect_timer: timer}
+
+    notify(
+      state,
+      {:ws_status, :reconnecting, "#{detail} — attempt #{attempt}, retrying in #{delay}ms"}
+    )
+
+    state
+  end
+
+  defp clear_reconnect(%{reconnect_timer: nil} = state), do: state
+
+  defp clear_reconnect(%{reconnect_timer: timer} = state) do
+    Process.cancel_timer(timer)
+    %{state | reconnect_timer: nil}
   end
 
   # ── Runtime delivery ───────────────────────────────────────────────────────

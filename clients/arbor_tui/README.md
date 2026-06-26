@@ -70,10 +70,27 @@ WSClient ──{:server_event, event}──▶ TermUI.Runtime ──▶ App.upda
 ```
 ```
 
+## Reconnect
+
+The `WSClient` reconnects automatically on **any** disconnect — a server
+`:close` frame, a `Mint` transport error (e.g. the Gateway restarting), an
+outbound send/upgrade failure, or a failed initial connect. Every path funnels
+into one place: the half-open connection is torn down (identity/url/target are
+kept), an attempt counter is bumped, and a `:reconnect` is scheduled after a
+jittered exponential backoff — base 500ms, doubling per attempt, capped at 30s,
+retried **indefinitely**. A successful upgrade resets the counter to 0 and
+cancels any pending retry.
+
+The UI shows a `◍ reconnecting…` status with the live "attempt N, retrying in …"
+tail. The **transcript is preserved** across reconnects (the server replays the
+engagement transcript on re-attach), and outbound commands are dropped — not
+sent into a dead socket — while disconnected.
+
 ## Status
 
-Scaffold complete: compiles clean (`--warnings-as-errors`), escript builds, 23
-tests pass (incl. a real Ed25519 sign↔verify round-trip). **Not yet validated
+Scaffold complete: compiles clean (`--warnings-as-errors`), escript builds, the
+suite passes (incl. a real Ed25519 sign↔verify round-trip and WS auto-reconnect
+coverage). Auto-reconnect is **implemented** (see above). **Not yet validated
 against a live Gateway** — that's the next step (and becomes the standing
 live-transport integration test for the chat API). Layout polish (viewport
-scrolling, terminal-dimension-aware truncation) and reconnect are follow-ups.
+scrolling, terminal-dimension-aware truncation) remains a follow-up.
