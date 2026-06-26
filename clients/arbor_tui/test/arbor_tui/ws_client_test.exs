@@ -66,7 +66,11 @@ defmodule ArborTui.WSClientTest do
       port
     end
 
-    test "initial-connect failure yields :reconnecting (NOT a terminal :error) — regression guard" do
+    test "initial attach to an unreachable gateway goes :detached (best-effort, no retry-spam)" do
+      # NEW behaviour: the FIRST attach is best-effort. A never-established
+      # connection that fails must NOT enter the indefinite backoff loop — it
+      # lands in :detached so the UI can prompt for /agent <id> to retry. (The
+      # backoff-reconnect loop only applies AFTER a successful attach.)
       port = closed_port()
 
       {:ok, _pid} =
@@ -77,36 +81,48 @@ defmodule ArborTui.WSClientTest do
           target_agent_id: "agent_target"
         )
 
-      # First the :connecting announcement, then a :reconnecting (never :error).
       assert {:connecting, _} = await_status()
 
-      assert {:reconnecting, detail} = await_status()
-      assert detail =~ "attempt 1"
-      assert detail =~ "retrying in"
+      assert {:detached, detail} = await_status()
+      assert detail =~ "Couldn't attach"
+
+      # And it does NOT keep retrying: no further :connecting/:reconnecting.
+      refute_receive {:"$gen_cast", {:message, :root, {:ws_status, _, _}}}, 1_500
+    end
+  end
+
+  describe "idle start (no target)" do
+    test "starting with target_agent_id: nil does not connect (no :connecting)" do
+      {:ok, _pid} =
+        WSClient.start_link(
+          runtime: self(),
+          identity: fake_identity(),
+          gateway_url: "ws://127.0.0.1:1",
+          target_agent_id: nil
+        )
+
+      # Idle: the client emits nothing until connect_to/2 is called.
+      refute_receive {:"$gen_cast", {:message, :root, {:ws_status, _, _}}}, 500
     end
 
-    test "consecutive failures keep reconnecting with a rising attempt counter" do
+    test "connect_to/2 from idle initiates a connection (best-effort)" do
       port = closed_port()
 
-      {:ok, _pid} =
+      {:ok, pid} =
         WSClient.start_link(
           runtime: self(),
           identity: fake_identity(),
           gateway_url: "ws://127.0.0.1:#{port}",
-          target_agent_id: "agent_target"
+          target_agent_id: nil
         )
 
-      assert {:connecting, _} = await_status()
-      assert {:reconnecting, d1} = await_status()
-      assert d1 =~ "attempt 1"
+      refute_receive {:"$gen_cast", {:message, :root, {:ws_status, _, _}}}, 200
 
-      # The scheduled :reconnect re-runs the connect continuation, so it emits a
-      # fresh :connecting before failing again. attempt 1's jitter window is
-      # [250, 500]ms, so this fires well within the await timeout, then bumps to
-      # attempt 2 (it must never go terminal).
-      assert {:connecting, _} = await_status(2_000)
-      assert {:reconnecting, d2} = await_status(2_000)
-      assert d2 =~ "attempt 2"
+      WSClient.connect_to(pid, "agent_picked")
+
+      assert {:connecting, _} = await_status()
+      # Unreachable → best-effort detach, not infinite retry.
+      assert {:detached, _} = await_status()
     end
   end
 end

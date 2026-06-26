@@ -152,6 +152,97 @@ defmodule ArborTui.AppTest do
     test "returns a quit command" do
       assert {_state, [%TermUI.Command{}]} = App.update(:quit, model())
     end
+
+    test "/quit submitted as input returns a quit command" do
+      assert {_state, [%TermUI.Command{}]} =
+               App.update(:submit, model(%{input: "/quit"}))
+    end
+  end
+
+  describe "unattached state" do
+    # The model when started with no agent (agent_id: nil).
+    defp unattached(overrides \\ %{}) do
+      model(Map.merge(%{agent_id: nil, status: :idle, ws: nil}, overrides))
+    end
+
+    test "a plain message while unattached shows the not-attached hint, not a send" do
+      s = up(:submit, unattached(%{input: "hello"}))
+      assert List.last(s.messages).role == :system
+      assert List.last(s.messages).text =~ "Not attached"
+      # No user message recorded (it wasn't sent anywhere).
+      refute Enum.any?(s.messages, &(&1.role == :you))
+    end
+
+    test "an unknown /command while unattached shows the not-attached hint" do
+      s = up(:submit, unattached(%{input: "/model gpt-4"}))
+      assert List.last(s.messages).text =~ "Not attached"
+    end
+
+    test "header renders 'not attached' when idle" do
+      view = App.view(unattached())
+      rendered = inspect(view, limit: :infinity)
+      assert rendered =~ "not attached"
+    end
+  end
+
+  describe "client-local slash commands" do
+    test "/agent <id> sets the target, resets the transcript, marks connecting" do
+      s = up(:submit, model(%{input: "/agent agent_new", messages: [%{role: :you, text: "old"}]}))
+      assert s.agent_id == "agent_new"
+      assert s.status == :connecting
+      # Fresh conversation: transcript reset to just the attaching note.
+      assert [%{role: :system, text: "Attaching to agent_new…"}] = s.messages
+    end
+
+    test "/agent with no id shows usage and does not change the target" do
+      s = up(:submit, model(%{input: "/agent", agent_id: "agent_old"}))
+      assert s.agent_id == "agent_old"
+      assert List.last(s.messages).text =~ "usage: /agent"
+    end
+
+    test "/connect <url> changes the gateway URL" do
+      s = up(:submit, model(%{input: "/connect ws://other:5000"}))
+      assert s.gateway_url == "ws://other:5000"
+      assert List.last(s.messages).text =~ "ws://other:5000"
+    end
+
+    test "/connect while unattached notes it and prompts for /agent" do
+      s = up(:submit, model(%{input: "/connect ws://x", agent_id: nil, status: :idle}))
+      assert s.gateway_url == "ws://x"
+      assert List.last(s.messages).text =~ "Use /agent"
+    end
+
+    test "/help lists the local client commands" do
+      s = up(:submit, model(%{input: "/help"}))
+      text = s.messages |> Enum.map(& &1.text) |> Enum.join("\n")
+      assert text =~ "/agent"
+      assert text =~ "/connect"
+      assert text =~ "/quit"
+      assert text =~ "sent to the attached agent"
+    end
+
+    test "an unknown /command while attached forwards as a chat message (not intercepted)" do
+      # ws: nil so no actual send; the behavior we assert is that it took the
+      # gateway-forward path (records a :you message + thinking turn), NOT the
+      # local-command path (which would emit a :system note only).
+      s = up(:submit, model(%{input: "/model gpt-4", agent_id: "agent_x", status: :connected}))
+      assert List.last(s.messages) == %{role: :you, text: "/model gpt-4"}
+      assert s.turn == :thinking
+    end
+  end
+
+  describe "best-effort attach / detach" do
+    test ":detached status clears the agent and surfaces a retry hint" do
+      s =
+        up(
+          {:ws_status, :detached, "Couldn't attach to agent_ab… (not running or unauthorized)."},
+          model(%{agent_id: "agent_target", status: :connecting})
+        )
+
+      assert s.status == :detached
+      assert s.agent_id == nil
+      assert List.last(s.messages).text =~ "Use /agent <id> to retry"
+    end
   end
 
   describe "HITL approvals" do
