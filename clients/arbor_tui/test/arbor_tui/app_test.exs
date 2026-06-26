@@ -109,6 +109,43 @@ defmodule ArborTui.AppTest do
       assert s.status == :error
       assert s.status_detail == "econnrefused"
     end
+
+    test "reconnecting status renders the dot/label and keeps the attempt detail" do
+      detail = "transport error: :closed — attempt 3, retrying in 1200ms"
+      s = up({:ws_status, :reconnecting, detail}, model(%{status: :connected}))
+
+      assert s.status == :reconnecting
+      assert s.status_detail == detail
+
+      # The header surfaces the reconnecting marker + the attempt tail.
+      view = App.view(s)
+      rendered = inspect(view, limit: :infinity)
+      assert rendered =~ "◍"
+      assert rendered =~ "reconnecting…"
+      assert rendered =~ "attempt 3"
+    end
+
+    test "the transcript survives a :reconnecting transition (never wiped)" do
+      s =
+        model(%{
+          status: :connected,
+          messages: [%{role: :you, text: "before drop"}, %{role: :agent, text: "reply"}]
+        })
+
+      s =
+        up({:ws_status, :reconnecting, "server closed: normal — attempt 1, retrying in 300ms"}, s)
+
+      assert s.status == :reconnecting
+      assert s.messages == [%{role: :you, text: "before drop"}, %{role: :agent, text: "reply"}]
+    end
+
+    test "outbound commands are dropped while reconnecting (connected? is false)" do
+      # With ws: nil and status: :reconnecting, submit must NOT attempt a send;
+      # it still records the user message locally.
+      s = model(%{status: :reconnecting, input: "hello", ws: nil})
+      s = up(:submit, s)
+      assert List.last(s.messages) == %{role: :you, text: "hello"}
+    end
   end
 
   describe "quit" do

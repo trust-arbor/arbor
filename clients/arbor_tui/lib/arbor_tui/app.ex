@@ -271,10 +271,17 @@ defmodule ArborTui.App do
 
   defp header(state) do
     text(
-      "┌ Arbor · #{short(state.agent_id)} · #{conn_dot(state.status)} #{state.status} ─",
+      "┌ Arbor · #{short(state.agent_id)} · #{conn_dot(state.status)} #{status_label(state.status)}#{reconnect_hint(state)} ─",
       Style.new() |> Style.fg(:cyan) |> Style.bold()
     )
   end
+
+  # While reconnecting, surface the "attempt N, retrying in …" tail the WSClient
+  # stashed in status_detail so the user sees progress, not a frozen client.
+  defp reconnect_hint(%{status: :reconnecting, status_detail: detail}) when is_binary(detail),
+    do: " · #{detail}"
+
+  defp reconnect_hint(_), do: ""
 
   defp transcript(state) do
     lines = Enum.map(state.messages, &message_line/1)
@@ -342,7 +349,11 @@ defmodule ArborTui.App do
 
   defp conn_dot(:connected), do: "●"
   defp conn_dot(:connecting), do: "◌"
+  defp conn_dot(:reconnecting), do: "◍"
   defp conn_dot(_), do: "○"
+
+  defp status_label(:reconnecting), do: "reconnecting…"
+  defp status_label(status), do: to_string(status)
 
   defp short("agent_" <> rest), do: "agent_" <> String.slice(rest, 0, 6) <> "…"
   defp short(other) when is_binary(other), do: other
