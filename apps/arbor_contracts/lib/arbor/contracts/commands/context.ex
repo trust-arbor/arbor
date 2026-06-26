@@ -31,8 +31,8 @@ defmodule Arbor.Contracts.Commands.Context do
 
   ### Always present
   - `:origin` — which entry point built this Context (`:dashboard`,
-    `:arbor_comms`, `:acp`, `:cli`). Commands can use this for entry-point-
-    specific availability or messaging.
+    `:arbor_comms`, `:acp`, `:cli`, `:tui`). Commands can use this for entry-
+    point-specific availability or messaging.
   - `:user_id` — the principal sending the command, if known.
 
   ### Agent-bound (nil when no current agent)
@@ -48,7 +48,7 @@ defmodule Arbor.Contracts.Commands.Context do
 
   use TypedStruct
 
-  @type origin :: :dashboard | :arbor_comms | :acp | :cli | :test
+  @type origin :: :dashboard | :arbor_comms | :acp | :cli | :tui | :test
 
   typedstruct do
     @typedoc "Read-only context for slash command execution"

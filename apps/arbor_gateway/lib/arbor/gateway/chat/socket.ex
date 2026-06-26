@@ -25,6 +25,8 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   require Logger
 
+  alias Arbor.Common.CommandIntake
+  alias Arbor.Contracts.Commands.{Context, Result}
   alias Arbor.Gateway.Chat.Protocol
 
   @impl true
@@ -62,18 +64,19 @@ defmodule Arbor.Gateway.Chat.Socket do
   defp handle_command({:send, _text}, %{agent_id: nil} = state),
     do: push({:error, :not_attached}, state)
 
-  defp handle_command({:send, text}, state) do
-    socket = self()
-    %{agent_id: agent_id, engagement_id: engagement_id} = state
-
-    # Run the turn off-socket so streamed deltas (via signals) flow while it runs.
-    Task.start(fn ->
-      result = query_agent(agent_id, engagement_id, text)
-      send(socket, {:query_result, result})
-    end)
-
-    {:ok, state}
+  defp handle_command({:send, text}, state) when is_binary(text) do
+    # Slash commands are intercepted at the entry-point layer (here), exactly
+    # like the dashboard's ChatLive and arbor_comms' MessageHandler — NOT inside
+    # Session.send_message (see the comment at session.ex). Classify first: a
+    # `/command` runs through CommandIntake and replies inline; a normal prompt
+    # falls through to the existing async turn unchanged.
+    case CommandIntake.classify(text) do
+      {:command, _name, _args} -> handle_slash_command(text, state)
+      {:prompt, _text} -> dispatch_turn(text, state)
+    end
   end
+
+  defp handle_command({:send, text}, state), do: dispatch_turn(text, state)
 
   defp handle_command(:cancel, %{agent_id: agent_id} = state) when is_binary(agent_id) do
     case bridge_value(agent_manager(), :find_agent, [agent_id]) do
@@ -122,6 +125,88 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   defp handle_command({op, _id}, state) when op in [:approve, :deny],
     do: push({:error, :not_attached}, state)
+
+  # ── Turn dispatch + slash-command intake ──────────────────────────
+
+  # The normal turn path: run the turn off-socket so streamed deltas (via
+  # signals) flow while it runs. This is also the `fallback_fn` CommandIntake
+  # calls for non-command input, so non-commands behave exactly as before.
+  defp dispatch_turn(text, state) do
+    socket = self()
+    %{agent_id: agent_id, engagement_id: engagement_id} = state
+
+    Task.start(fn ->
+      result = query_agent(agent_id, engagement_id, text)
+      send(socket, {:query_result, result})
+    end)
+
+    {:ok, state}
+  end
+
+  # Mirrors ChatLive.handle_slash_command/2: build a typed Context fresh from
+  # the agent registry + live Session, run it through CommandIntake, and push
+  # the result back over the WS as a system message. The fallback_fn is the
+  # normal turn path so command/prompt classification can never silently drop
+  # a prompt.
+  defp handle_slash_command(text, %{agent_id: agent_id} = state) do
+    context = build_command_context(agent_id, state.principal)
+
+    intake_result =
+      CommandIntake.handle(text, context, fn prompt ->
+        # Defense-in-depth: classify already returned :command, but if parse and
+        # classify ever drift, fall through to the normal turn rather than drop.
+        {:fallback_prompt, prompt}
+      end)
+
+    dispatch_intake_result(intake_result, state)
+  end
+
+  defp dispatch_intake_result({:command_result, %Result{} = result}, state) do
+    state
+    |> push_command_text(result.text)
+    |> then(fn {:push, frames, st} ->
+      {extra, st} = apply_command_action(result.action, st)
+      {:push, frames ++ extra, st}
+    end)
+  end
+
+  defp dispatch_intake_result({:command_error, message}, state) do
+    push_command_text(state, message)
+  end
+
+  # The fallback fired (classify/parse drift) — treat the input as a normal turn.
+  defp dispatch_intake_result({:fallback_prompt, prompt}, state) do
+    dispatch_turn(prompt, state)
+  end
+
+  defp dispatch_intake_result(other, state) do
+    Logger.warning("[Gateway.Chat] Unexpected intake result: #{inspect(other)}")
+    push_command_text(state, "Sorry, that command couldn't be handled.")
+  end
+
+  # Command output renders as a `system` message (the TUI styles role "system"
+  # distinctly). The common commands (/model, /status, /help, /trust, /tools,
+  # /session) already apply their effect server-side and return display text,
+  # so pushing the text is sufficient.
+  defp push_command_text(state, text) do
+    push_event(state, {:message, %{role: "system", content: to_string(text)}})
+  end
+
+  # Best-effort action interpretation. Display-text commands carry action: nil.
+  # `:clear`/`:compact` mutate the Session; the chat protocol has no clear-frame
+  # affordance for the TUI today, so we confirm with a system message rather than
+  # block on a transcript-clear frame. Other actions (model/runtime/agent switches)
+  # already applied their effect server-side before returning text, so the pushed
+  # text suffices and there's nothing extra to do here.
+  defp apply_command_action(nil, state), do: {[], state}
+
+  defp apply_command_action(:clear, state) do
+    event_frames({:message, %{role: "system", content: "Transcript cleared."}}, state)
+  end
+
+  defp apply_command_action(:compact, state), do: {[], state}
+
+  defp apply_command_action(_action, state), do: {[], state}
 
   # "irq_…" ids come from the InteractionRouter; everything else is a Consensus
   # proposal. (The live node escalates :ask approvals through the router, so this
@@ -461,6 +546,89 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   defp get(map, key), do: Map.get(map, key) || Map.get(map, to_string(key))
 
+  # ── Command Context (fresh-by-agent_id resolution) ────────────────
+  #
+  # Build the typed slash-command Context. Like ChatLive, we trust ONLY the
+  # agent_id string over time — socket-held PIDs (and the registry metadata's
+  # session_pid) go stale after a BranchSupervisor rest_for_one restart. So we
+  # re-resolve the live BranchSupervisor (validated alive by find_agent →
+  # Registry.lookup) and walk its children for the CURRENT :session child, then
+  # convert the live Session state into a Context via the orchestrator's pure
+  # SessionCore builder (the same Convert ChatLive uses).
+  #
+  # When no agent is attached, or resolution fails, fall back to a system-only
+  # Context — /help still works; agent-bound commands return "not available in
+  # this context" via their own available?/1 checks.
+  defp build_command_context(agent_id, principal) when is_binary(agent_id) do
+    with {:ok, sup_pid, meta} <- find_agent_entry(agent_id),
+         {:ok, session_pid} <- live_session_pid(sup_pid),
+         {:ok, session_state} <- session_state(session_pid),
+         {:ok, %Context{} = ctx} <-
+           build_session_context(session_state, session_pid, principal, meta) do
+      ctx
+    else
+      _ -> system_only_context(principal)
+    end
+  rescue
+    _ -> system_only_context(principal)
+  end
+
+  defp build_command_context(_agent_id, principal), do: system_only_context(principal)
+
+  defp system_only_context(principal), do: Context.new(origin: :tui, user_id: principal)
+
+  # find_agent returns {:ok, pid, metadata} where pid is the live (alive-checked)
+  # BranchSupervisor; :not_found otherwise.
+  defp find_agent_entry(agent_id) do
+    case bridge_value(agent_manager(), :find_agent, [agent_id]) do
+      {:ok, pid, meta} when is_pid(pid) and is_map(meta) -> {:ok, pid, meta}
+      _ -> {:error, :agent_not_found}
+    end
+  end
+
+  # Walk the live BranchSupervisor's children for the CURRENT :session child,
+  # bypassing the registry metadata's session_pid (which can go stale after a
+  # restart). Supervisor.which_children/1 is plain OTP — no cross-app dep.
+  defp live_session_pid(sup_pid) when is_pid(sup_pid) do
+    if Process.alive?(sup_pid) do
+      case Enum.find(Supervisor.which_children(sup_pid), fn {id, _, _, _} -> id == :session end) do
+        {:session, pid, _, _} when is_pid(pid) -> {:ok, pid}
+        _ -> {:error, :no_session_child}
+      end
+    else
+      {:error, :supervisor_dead}
+    end
+  catch
+    :exit, _ -> {:error, :supervisor_call_failed}
+  end
+
+  defp live_session_pid(_), do: {:error, :no_supervisor_pid}
+
+  defp session_state(session_pid) when is_pid(session_pid) do
+    {:ok, :sys.get_state(session_pid)}
+  catch
+    :exit, _ -> {:error, :session_unavailable}
+  end
+
+  # Convert the live Session struct → typed Context via the orchestrator's pure
+  # SessionCore builder. arbor_orchestrator is a PEER level (L7), so we reach it
+  # through runtime indirection (same seam as Session.send_message above) — never
+  # a compile-time dep. The Session struct is passed opaquely.
+  defp build_session_context(session_state, session_pid, principal, meta) do
+    case bridge_call(session_core(), :build_command_context, [
+           session_state,
+           session_pid,
+           [
+             origin: :tui,
+             user_id: principal,
+             model_config: Map.get(meta, :model_config) || %{}
+           ]
+         ]) do
+      {:ok, %Context{} = ctx} -> {:ok, ctx}
+      _ -> {:error, :context_unavailable}
+    end
+  end
+
   # ── Agent turn (runtime indirection) ──────────────────────────────
 
   # Drive the turn through the agent's SESSION (the single-mind engagement
@@ -532,6 +700,16 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   defp session_mod,
     do: Application.get_env(:arbor_gateway, :chat_session, Arbor.Orchestrator.Session)
+
+  # Pure Session-struct → command Context builder (CRC "Convert"). Reached via
+  # runtime indirection because arbor_orchestrator is a peer level.
+  defp session_core,
+    do:
+      Application.get_env(
+        :arbor_gateway,
+        :chat_session_core,
+        Arbor.Orchestrator.SessionCore
+      )
 
   defp signals_mod,
     do: Application.get_env(:arbor_gateway, :chat_signals, Arbor.Signals)

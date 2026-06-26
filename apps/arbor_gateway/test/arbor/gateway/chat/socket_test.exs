@@ -22,6 +22,16 @@ defmodule Arbor.Gateway.Chat.SocketTest.FakeManager do
   def find_agent(_agent_id), do: {:ok, self(), %{host_pid: self(), session_pid: self()}}
 end
 
+# Like FakeManager but returns a real BranchSupervisor-shaped supervisor pid
+# (stored in app env by the test) so the Socket's fresh-by-agent_id session
+# resolution (live_session_pid → Supervisor.which_children) walks a live tree.
+defmodule Arbor.Gateway.Chat.SocketTest.FakeManagerSupervised do
+  def find_agent(_agent_id) do
+    sup_pid = Application.fetch_env!(:arbor_gateway, :test_branch_supervisor)
+    {:ok, sup_pid, %{model_config: %{id: "gpt-test", provider: :openai}}}
+  end
+end
+
 defmodule Arbor.Gateway.Chat.SocketTest.FakeSession do
   def send_message(_session_pid, user_message) do
     {:ok, %{text: "echo:" <> user_message.content, usage: %{tokens: 1}}}
@@ -31,6 +41,25 @@ end
 defmodule Arbor.Gateway.Chat.SocketTest.FakeSignals do
   # No-op so the handler doesn't subscribe to the real bus during the test.
   def subscribe(_pattern, _handler), do: :ok
+end
+
+# Stand-in for Arbor.Orchestrator.SessionCore.build_command_context/3 (reached
+# via runtime indirection). Returns a typed agent-bound Context so /status-style
+# commands have model/provider/session_pid to report.
+defmodule Arbor.Gateway.Chat.SocketTest.FakeSessionCore do
+  alias Arbor.Contracts.Commands.Context
+
+  def build_command_context(_state, session_pid, opts) do
+    Context.new(
+      origin: Keyword.fetch!(opts, :origin),
+      user_id: Keyword.get(opts, :user_id),
+      agent_id: "agent_a",
+      session_id: "sess_test",
+      session_pid: session_pid,
+      model: "gpt-test",
+      provider: :openai
+    )
+  end
 end
 
 # The chat gate is a capability-presence check (find_authorizing), so the fakes
@@ -139,7 +168,9 @@ defmodule Arbor.Gateway.Chat.SocketTest do
             :chat_consensus,
             :chat_consensus_coordinator,
             :chat_security,
-            :chat_interaction_router
+            :chat_interaction_router,
+            :chat_session_core,
+            :test_branch_supervisor
           ] do
         Application.delete_env(:arbor_gateway, k)
       end
@@ -200,13 +231,77 @@ defmodule Arbor.Gateway.Chat.SocketTest do
     end
   end
 
+  describe "slash commands (CommandIntake intake)" do
+    test "a /help command is intercepted and pushed back as a message, NOT a turn",
+         %{state: state} do
+      st = attach(state)
+
+      # /help is a system-wide command — it runs through CommandIntake and
+      # replies inline. Crucially it must NOT be forwarded to Session.send_message
+      # (which would happen via a {:query_result, _} Task message).
+      {:push, events, _st} = send_frame(%{type: "send", text: "/help"}, st)
+
+      message = Enum.find(events, &(&1["type"] == "message"))
+      assert message, "expected a message frame for /help output"
+      assert message["message"]["role"] == "system"
+      assert is_binary(message["message"]["content"])
+      assert message["message"]["content"] != ""
+
+      # The command path is synchronous (no Task) — no turn was dispatched.
+      refute_receive {:query_result, _}, 200
+    end
+
+    test "an agent-bound /status command builds the Context via SessionCore",
+         %{state: state} do
+      # Inject a fake SessionCore so the agent-bound Context path is exercised
+      # (the FakeManager pid isn't a real BranchSupervisor, so without this the
+      # builder would fall back to a system-only Context — but /status needs a
+      # session). build_command_context resolves the session fresh; here the fake
+      # short-circuits to a populated Context.
+      Application.put_env(
+        :arbor_gateway,
+        :chat_session_core,
+        Arbor.Gateway.Chat.SocketTest.FakeSessionCore
+      )
+
+      # Manager returns a live, real supervisor whose :session child is alive so
+      # live_session_pid/1 resolves a current pid (the fresh-by-agent_id path).
+      {:ok, sup_pid} =
+        Supervisor.start_link(
+          [%{id: :session, start: {Agent, :start_link, [fn -> %{} end]}}],
+          strategy: :one_for_one
+        )
+
+      Application.put_env(:arbor_gateway, :test_branch_supervisor, sup_pid)
+
+      Application.put_env(
+        :arbor_gateway,
+        :chat_agent_manager,
+        Arbor.Gateway.Chat.SocketTest.FakeManagerSupervised
+      )
+
+      st = attach(state)
+      {:push, events, _st} = send_frame(%{type: "send", text: "/status"}, st)
+
+      message = Enum.find(events, &(&1["type"] == "message"))
+      assert message, "expected a message frame for /status output"
+      assert message["message"]["role"] == "system"
+      # Proves the agent-bound Context was built via SessionCore (system-only
+      # fallback would have no agent → /status would be "not available").
+      assert message["message"]["content"] =~ "Model: gpt-test"
+      refute_receive {:query_result, _}, 200
+    end
+  end
+
   describe "send" do
-    test "runs the turn off-socket; result comes back as message + turn_complete", %{state: state} do
+    test "a non-command prompt still flows to Session.send_message (unchanged)",
+         %{state: state} do
       st = attach(state)
 
       # send returns {:ok, _} immediately (turn runs in a Task that messages us)
       {:ok, [], st} = send_frame(%{type: "send", text: "hello"}, st)
 
+      # The fallback path forwarded the prompt to FakeSession.send_message.
       assert_receive {:query_result, {:ok, %{text: "echo:hello"}}}, 1_000
 
       # Feed the result back through the handler (as the live socket process would).
