@@ -2,47 +2,50 @@ defmodule Arbor.Agent.Template.FileTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Agent.Template.File, as: TemplateFile
-  alias Arbor.Agent.TemplateStore
 
-  # The 10 builtin template modules (from TemplateStore.@builtin_modules). This
-  # is the fidelity guarantee for the data-first migration: serialize -> parse
-  # must round-trip every builtin exactly (ignoring only the volatile
-  # created_at/updated_at timestamps), and validate/1 must pass.
-  @builtin_modules [
-    Arbor.Agent.Templates.CliAgent,
-    Arbor.Agent.Templates.Scout,
-    Arbor.Agent.Templates.Researcher,
-    Arbor.Agent.Templates.CodeReviewer,
-    Arbor.Agent.Templates.Monitor,
-    Arbor.Agent.Templates.Diagnostician,
-    Arbor.Agent.Templates.Conversationalist,
-    Arbor.Agent.Templates.InterviewAgent,
-    Arbor.Agent.Templates.ApiAgent,
-    Arbor.Agent.Templates.CouncilEvaluator
-  ]
+  # Post-B2 (data-first): the shipped `.md` files in `priv/templates/` ARE the
+  # source of truth — there are no longer any per-persona modules. The fidelity
+  # guarantee is now: every shipped `.md` parses, validates, and round-trips
+  # (parse -> serialize -> parse) byte-stably, ignoring only the volatile
+  # created_at/updated_at timestamps.
+  @shipped_md_paths Path.wildcard(
+                      Path.join([
+                        :code.priv_dir(:arbor_agent) |> to_string(),
+                        "templates",
+                        "*.md"
+                      ])
+                    )
 
   @volatile ~w(created_at updated_at)
 
-  describe "serialize/1 + parse/1 round-trip" do
-    for module <- @builtin_modules do
-      test "round-trips #{inspect(module)} losslessly" do
-        module = unquote(module)
-        data = TemplateStore.from_module(module)
+  test "there are shipped builtin .md files to exercise" do
+    assert length(@shipped_md_paths) >= 10
+  end
 
-        markdown = TemplateFile.serialize(data)
-        assert {:ok, parsed} = TemplateFile.parse(markdown)
+  describe "parse/1 + serialize/1 round-trip (shipped .md)" do
+    for path <- @shipped_md_paths do
+      name = path |> Path.basename(".md")
 
-        assert Map.drop(parsed, @volatile) == Map.drop(data, @volatile),
-               "round-trip mismatch for #{inspect(module)}"
+      test "round-trips #{name} losslessly" do
+        content = File.read!(unquote(path))
+
+        assert {:ok, data} = TemplateFile.parse(content)
+
+        # serialize -> parse must reproduce the same data map.
+        assert {:ok, reparsed} = TemplateFile.parse(TemplateFile.serialize(data))
+
+        assert Map.drop(reparsed, @volatile) == Map.drop(data, @volatile),
+               "round-trip mismatch for #{unquote(name)}"
       end
     end
   end
 
   describe "validate/1" do
-    for module <- @builtin_modules do
-      test "validates #{inspect(module)}" do
-        module = unquote(module)
-        data = TemplateStore.from_module(module)
+    for path <- @shipped_md_paths do
+      name = path |> Path.basename(".md")
+
+      test "validates shipped #{name}" do
+        {:ok, data} = TemplateFile.parse(File.read!(unquote(path)))
         assert :ok = TemplateFile.validate(data)
 
         # also valid after a round-trip

@@ -6,9 +6,9 @@ defmodule Arbor.Agent.Template.File do
   (between `---` fences) carries the *structured* template fields and whose
   Markdown body carries the long *prose* fields as `#`-headed sections.
 
-  The canonical in-memory shape is the same string-keyed data map that
-  `Arbor.Agent.TemplateStore.from_module/1` produces — so a parsed file can be
-  fed straight into `TemplateStore.to_keyword/1`.
+  The canonical in-memory shape is the string-keyed template data map (the same
+  shape `TemplateStore.resolve/1` returns) — so a parsed file can be fed straight
+  into `TemplateStore.to_keyword/1`.
 
   ## Frontmatter (structured)
 
@@ -37,7 +37,7 @@ defmodule Arbor.Agent.Template.File do
   @character_frontmatter_keys ~w(name description role tone style traits values quirks knowledge)
 
   @doc """
-  Render a canonical data map (the `from_module/1` shape) to a
+  Render a canonical template data map (the `TemplateStore.resolve/1` shape) to a
   Markdown+frontmatter string.
   """
   @spec serialize(map()) :: String.t()
@@ -52,7 +52,7 @@ defmodule Arbor.Agent.Template.File do
 
   @doc """
   Parse a Markdown+frontmatter string back into the canonical data map
-  (string keys, same shape `from_module/1` returns), regenerating
+  (string keys, the `TemplateStore.resolve/1` shape), regenerating
   `created_at`/`updated_at`.
   """
   @spec parse(String.t()) :: {:ok, map()} | {:error, term()}
@@ -288,10 +288,10 @@ defmodule Arbor.Agent.Template.File do
     Map.put(map, "instructions", instructions)
   end
 
-  # `Character.to_map/1` always emits every struct field. `from_module/1`'s
-  # `stringify_keys` then drops nothing, so the source map has all keys. To
-  # round-trip exactly, restore the struct defaults for any character field
-  # that was empty (and thus omitted from the frontmatter).
+  # `Character.to_map/1` always emits every struct field, so a fully-populated
+  # character data map has all keys. To round-trip exactly, restore the struct
+  # defaults for any character field that was empty (and thus omitted from the
+  # frontmatter).
   defp ensure_character_defaults(char) do
     char
     |> Map.put_new("description", nil)

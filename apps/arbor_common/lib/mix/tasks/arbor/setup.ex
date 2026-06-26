@@ -266,15 +266,13 @@ defmodule Mix.Tasks.Arbor.Setup do
   defp seed_templates do
     store = Arbor.Agent.TemplateStore
 
-    if Code.ensure_loaded?(store) and function_exported?(store, :seed_builtins, 0) do
+    # Builtins now ship as `.md` files in `priv/templates/` (the data-first
+    # template migration removed the module-seeding path). Nothing to seed at
+    # setup time — just confirm the shipped builtins are loadable.
+    if Code.ensure_loaded?(store) and function_exported?(store, :builtin_names, 0) do
       apply(store, :ensure_table, [])
-      {:ok, count} = apply(store, :seed_builtins, [])
-
-      if count > 0 do
-        {:ok, "#{count} new template(s) seeded"}
-      else
-        {:skip, "all templates already exist"}
-      end
+      count = store |> apply(:builtin_names, []) |> length()
+      {:skip, "#{count} builtin template(s) ship as files (no seeding needed)"}
     else
       {:skip, "TemplateStore not available"}
     end

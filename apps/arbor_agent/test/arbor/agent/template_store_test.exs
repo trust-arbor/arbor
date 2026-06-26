@@ -3,7 +3,8 @@ defmodule Arbor.Agent.TemplateStoreTest do
 
   @moduletag :fast
 
-  alias Arbor.Agent.{Character, Template, TemplateStore}
+  alias Arbor.Agent.{Character, TemplateStore}
+  alias Arbor.Agent.Template.File, as: TemplateFile
 
   @test_dir Path.join(
               System.tmp_dir!(),
@@ -86,78 +87,51 @@ defmodule Arbor.Agent.TemplateStoreTest do
     end
   end
 
-  describe "from_module/1" do
-    @builtin_modules [
-      Arbor.Agent.Templates.Scout,
-      Arbor.Agent.Templates.Researcher,
-      Arbor.Agent.Templates.CodeReviewer,
-      Arbor.Agent.Templates.Monitor,
-      Arbor.Agent.Templates.Diagnostician,
-      Arbor.Agent.Templates.Conversationalist
-    ]
+  describe "shipped builtin .md files" do
+    # Post-B2: shipped `.md` files in priv/templates/ are the source of truth.
+    # Each one must resolve, parse, validate, and produce a well-formed data map.
+    for name <- TemplateStore.builtin_names() do
+      test "resolves and validates shipped #{name}" do
+        name = unquote(name)
+        assert {:ok, data} = TemplateStore.resolve(name)
 
-    for mod <- @builtin_modules do
-      test "converts #{mod |> Module.split() |> List.last()} correctly" do
-        module = unquote(mod)
-        data = TemplateStore.from_module(module)
-
-        assert is_binary(data["name"])
-        assert data["version"] == 1
-        assert data["source"] == "builtin"
+        assert data["name"] == name
         assert is_map(data["character"])
         assert is_binary(data["character"]["name"])
         assert is_binary(data["trust_tier"])
         assert is_list(data["initial_goals"])
         assert is_list(data["required_capabilities"])
-        assert is_binary(data["created_at"])
-      end
-    end
+        assert :ok = TemplateFile.validate(data)
 
-    test "character fields are string-keyed" do
-      data = TemplateStore.from_module(Arbor.Agent.Templates.Scout)
-      char = data["character"]
-      assert Map.has_key?(char, "name")
-      assert Map.has_key?(char, "traits")
-      refute Map.has_key?(char, :name)
-    end
+        # character + goals + caps are string-keyed (JSON-clean for the context boundary).
+        char = data["character"]
+        assert Map.has_key?(char, "name")
+        refute Map.has_key?(char, :name)
 
-    test "goals and capabilities have string keys" do
-      data = TemplateStore.from_module(Arbor.Agent.Templates.Scout)
+        for goal <- data["initial_goals"], do: assert(Enum.all?(Map.keys(goal), &is_binary/1))
 
-      for goal <- data["initial_goals"] do
-        assert Enum.all?(Map.keys(goal), &is_binary/1)
-      end
-
-      for cap <- data["required_capabilities"] do
-        assert Enum.all?(Map.keys(cap), &is_binary/1)
+        for cap <- data["required_capabilities"],
+            do: assert(Enum.all?(Map.keys(cap), &is_binary/1))
       end
     end
   end
 
   describe "to_keyword/1" do
-    test "round-trips from module through data and back" do
-      module = Arbor.Agent.Templates.Scout
-      original = Template.apply(module)
-      data = TemplateStore.from_module(module)
+    test "converts a resolved shipped template to a Lifecycle keyword list" do
+      {:ok, data} = TemplateStore.resolve("scout")
       restored = TemplateStore.to_keyword(data)
 
-      # Character struct should match
       assert %Character{} = restored[:character]
-      assert restored[:character].name == original[:character].name
-      assert restored[:character].tone == original[:character].tone
+      assert restored[:character].name == data["character"]["name"]
+      assert to_string(restored[:trust_tier]) == data["trust_tier"]
+      assert restored[:nature] == data["nature"]
+      assert restored[:domain_context] == data["domain_context"]
+      assert restored[:values] == data["values"]
+      assert restored[:initial_thoughts] == data["initial_thoughts"]
 
-      # Scalar fields
-      assert restored[:trust_tier] == original[:trust_tier]
-      assert restored[:name] == original[:name]
-      assert restored[:nature] == original[:nature]
-      assert restored[:domain_context] == original[:domain_context]
-
-      # List fields
-      assert restored[:values] == original[:values]
-      assert restored[:initial_thoughts] == original[:initial_thoughts]
-
-      # Meta-awareness
+      # Meta-awareness + provenance (template_source attached by resolve/1).
       assert restored[:meta_awareness][:grown_from_template] == true
+      assert restored[:meta_awareness][:template_source]["layer"] in ~w(user shipped legacy_json)
     end
 
     test "handles minimal data" do
@@ -170,33 +144,19 @@ defmodule Arbor.Agent.TemplateStoreTest do
   end
 
   describe "name mapping" do
-    test "module_to_name maps builtins correctly" do
-      assert TemplateStore.module_to_name(Arbor.Agent.Templates.Scout) == "scout"
-      assert TemplateStore.module_to_name(Arbor.Agent.Templates.Diagnostician) == "diagnostician"
-
-      assert TemplateStore.module_to_name(Arbor.Agent.Templates.Conversationalist) ==
-               "conversationalist"
-
-      assert TemplateStore.module_to_name(Arbor.Agent.Templates.CodeReviewer) == "code_reviewer"
-    end
-
-    test "module_to_name derives name for unknown modules" do
+    # Post-B2: module_to_name/1 inflects the last module segment (no builtin map);
+    # the per-persona modules no longer exist, so this is purely a back-compat
+    # convenience for stray atom callers.
+    test "module_to_name inflects the last module segment" do
+      assert TemplateStore.module_to_name(Some.Custom.Scout) == "scout"
+      assert TemplateStore.module_to_name(Some.Custom.CodeReviewer) == "code_reviewer"
       assert TemplateStore.module_to_name(Some.Custom.Template) == "template"
-    end
-
-    test "name_to_module returns module for builtins" do
-      assert TemplateStore.name_to_module("scout") == Arbor.Agent.Templates.Scout
-      assert TemplateStore.name_to_module("diagnostician") == Arbor.Agent.Templates.Diagnostician
-    end
-
-    test "name_to_module returns nil for unknown names" do
-      assert TemplateStore.name_to_module("custom_agent") == nil
     end
 
     test "normalize_ref handles all types" do
       assert TemplateStore.normalize_ref(nil) == nil
       assert TemplateStore.normalize_ref("scout") == "scout"
-      assert TemplateStore.normalize_ref(Arbor.Agent.Templates.Scout) == "scout"
+      assert TemplateStore.normalize_ref(Some.Custom.Scout) == "scout"
     end
   end
 
@@ -207,20 +167,17 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert data["name"] == "my_agent"
     end
 
-    test "resolves by module atom" do
-      # Seed first so the file exists
-      data = TemplateStore.from_module(Arbor.Agent.Templates.Scout)
-      TemplateStore.put("scout", data)
-
-      assert {:ok, resolved} = TemplateStore.resolve(Arbor.Agent.Templates.Scout)
+    test "resolves a stray atom by inflecting to the shipped .md name" do
+      # No module exists; the atom clause inflects "Scout" -> "scout" and
+      # resolves the shipped scout.md file.
+      assert {:ok, resolved} = TemplateStore.resolve(Some.Stray.Scout)
       assert resolved["name"] == "scout"
+      assert resolved["template_source"]["layer"] in ~w(user shipped legacy_json)
     end
 
-    test "resolves module by falling back to direct module call" do
-      # Don't seed — should fall back to loading from module
-      assert {:ok, resolved} = TemplateStore.resolve(Arbor.Agent.Templates.Scout)
+    test "resolves a builtin by string name from the shipped .md" do
+      assert {:ok, resolved} = TemplateStore.resolve("scout")
       assert resolved["name"] == "scout"
-      assert resolved["source"] == "builtin"
     end
 
     test "returns not_found for unknown" do
@@ -228,45 +185,21 @@ defmodule Arbor.Agent.TemplateStoreTest do
     end
   end
 
-  describe "resolve parity (file-first cutover)" do
-    # The data-first migration guarantee: resolving each builtin by name must
-    # return data equivalent to the legacy from_module/1 path, ignoring only the
-    # volatile timestamps and the new template_source provenance key.
-    @builtin_parity_modules [
-      Arbor.Agent.Templates.CliAgent,
-      Arbor.Agent.Templates.Scout,
-      Arbor.Agent.Templates.Researcher,
-      Arbor.Agent.Templates.CodeReviewer,
-      Arbor.Agent.Templates.Monitor,
-      Arbor.Agent.Templates.Diagnostician,
-      Arbor.Agent.Templates.Conversationalist,
-      Arbor.Agent.Templates.InterviewAgent,
-      Arbor.Agent.Templates.ApiAgent,
-      Arbor.Agent.Templates.CouncilEvaluator
-    ]
+  describe "resolve (data-first, shipped .md is the source of truth)" do
+    @expected_builtins ~w(
+      api_agent cli_agent code_reviewer conversationalist council_evaluator
+      diagnostician interview_agent monitor researcher scout
+    )
 
-    @ignore ~w(created_at updated_at template_source)
-
-    for module <- @builtin_parity_modules do
-      test "resolve/1 matches from_module for #{inspect(module)}" do
-        module = unquote(module)
-        name = TemplateStore.module_to_name(module)
-        expected = TemplateStore.from_module(module)
-
-        # By string name — resolves the shipped .md file.
-        assert {:ok, by_name} = TemplateStore.resolve(name)
-        assert Map.drop(by_name, @ignore) == Map.drop(expected, @ignore)
-        assert by_name["template_source"]["layer"] in ["shipped", "user", "legacy_json"]
-
-        # By module atom — same name path.
-        assert {:ok, by_mod} = TemplateStore.resolve(module)
-        assert Map.drop(by_mod, @ignore) == Map.drop(expected, @ignore)
-      end
+    test "builtin_names/0 lists exactly the 10 expected builtins" do
+      assert Enum.sort(TemplateStore.builtin_names()) == Enum.sort(@expected_builtins)
     end
 
-    test "all builtin names resolve" do
-      for name <- TemplateStore.builtin_names() do
-        assert {:ok, _data} = TemplateStore.resolve(name), "expected #{name} to resolve"
+    test "every expected builtin resolves from a shipped .md and validates" do
+      for name <- @expected_builtins do
+        assert {:ok, data} = TemplateStore.resolve(name), "expected #{name} to resolve"
+        assert :ok = Arbor.Agent.Template.File.validate(data)
+        assert data["template_source"]["layer"] in ~w(user shipped legacy_json)
       end
     end
 
@@ -276,9 +209,8 @@ defmodule Arbor.Agent.TemplateStoreTest do
       dir = TemplateStore.user_templates_dir()
       File.mkdir_p!(dir)
 
-      data =
-        TemplateStore.from_module(Arbor.Agent.Templates.Scout)
-        |> Map.put("description", "USER OVERRIDE")
+      {:ok, shipped} = TemplateStore.resolve("scout")
+      data = Map.put(shipped, "description", "USER OVERRIDE")
 
       md = Arbor.Agent.Template.File.serialize(data)
       File.write!(Path.join(dir, "scout.md"), md)
@@ -291,30 +223,24 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert resolved["description"] == "USER OVERRIDE"
       assert resolved["template_source"]["layer"] == "user"
     end
-  end
 
-  describe "seed_builtins/0" do
-    test "seeds builtin templates and is idempotent" do
-      # First seed creates files
-      {:ok, first_count} = TemplateStore.seed_builtins()
-      # At least 6 (CliAgent module may not exist yet until rename)
-      assert first_count >= 6
+    test "legacy .json fallback still resolves when no .md exists" do
+      # Write a legacy JSON template into the (overridden) legacy dir under a
+      # name that has no shipped .md, and confirm it resolves via the json layer.
+      dir = TemplateStore.templates_dir()
+      File.mkdir_p!(dir)
 
-      # Verify they're loadable
-      for name <- [
-            "scout",
-            "researcher",
-            "code_reviewer",
-            "monitor",
-            "diagnostician",
-            "conversationalist"
-          ] do
-        assert {:ok, _} = TemplateStore.get(name)
-      end
+      File.write!(
+        Path.join(dir, "legacy_only.json"),
+        Jason.encode!(minimal_template("legacy_only"))
+      )
 
-      # Second seed should create 0 (idempotent)
-      {:ok, second_count} = TemplateStore.seed_builtins()
-      assert second_count == 0
+      TemplateStore.ensure_table()
+      :ets.delete(:arbor_agent_templates, "legacy_only")
+
+      assert {:ok, resolved} = TemplateStore.resolve("legacy_only")
+      assert resolved["name"] == "legacy_only"
+      assert resolved["template_source"]["layer"] == "legacy_json"
     end
   end
 

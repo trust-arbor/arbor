@@ -9,7 +9,7 @@ defmodule Arbor.Agent.Lifecycle do
   ## Examples
 
       # From template (first arg is display name, not agent_id)
-      {:ok, profile} = Lifecycle.create("Scout", template: Arbor.Agent.Templates.Scout)
+      {:ok, profile} = Lifecycle.create("Scout", template: "scout")
       profile.agent_id  #=> "agent_a4f2..."  (crypto-derived)
       profile.display_name  #=> "Scout"
 
@@ -1077,8 +1077,22 @@ defmodule Arbor.Agent.Lifecycle do
       unless MapSet.member?(existing_descriptions, description) do
         type = goal_map[:type] || goal_map["type"] || :achieve
 
+        # Goal types now arrive as strings from data-first template `.md` files
+        # (the per-persona modules that used to supply atom literals were removed
+        # in the template migration). Convert safely: a string that isn't an
+        # existing atom must NOT crash (and must not mint atoms — DoS risk), so
+        # fall back to the contract default `:achieve`.
         type_atom =
-          if is_binary(type), do: String.to_existing_atom(type), else: type
+          case type do
+            t when is_atom(t) ->
+              t
+
+            t when is_binary(t) ->
+              case Arbor.Common.SafeAtom.to_existing(t) do
+                {:ok, atom} -> atom
+                {:error, _} -> :achieve
+              end
+          end
 
         goal = Goal.new(description, type: type_atom)
         Arbor.Memory.add_goal(agent_id, goal)

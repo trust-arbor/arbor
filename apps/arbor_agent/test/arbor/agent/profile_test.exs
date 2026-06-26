@@ -34,7 +34,7 @@ defmodule Arbor.Agent.ProfileTest do
         agent_id: "researcher-1",
         character: @character,
         trust_tier: :probationary,
-        template: Arbor.Agent.Templates.Scout,
+        template: "scout",
         initial_goals: [%{type: :explore, description: "Survey area"}],
         initial_capabilities: [%{resource: "arbor://fs/read/**"}],
         identity: %{agent_id: "agent_abc123"},
@@ -45,7 +45,7 @@ defmodule Arbor.Agent.ProfileTest do
       }
 
       assert profile.trust_tier == :probationary
-      assert profile.template == Arbor.Agent.Templates.Scout
+      assert profile.template == "scout"
       assert length(profile.initial_goals) == 1
       assert profile.identity.agent_id == "agent_abc123"
     end
@@ -73,7 +73,7 @@ defmodule Arbor.Agent.ProfileTest do
         agent_id: "scout-1",
         character: @character,
         trust_tier: :probationary,
-        template: Arbor.Agent.Templates.Scout,
+        template: "scout",
         initial_goals: [%{type: :explore, description: "Survey area"}],
         initial_capabilities: [%{resource: "arbor://fs/read/**"}],
         identity: %{agent_id: "agent_abc123"},

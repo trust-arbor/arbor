@@ -83,12 +83,15 @@ defmodule Arbor.Agent.Application do
     end)
   end
 
+  # Builtins ship as `.md` files in priv/templates/ (data-first migration), so
+  # there is nothing to seed at boot. We still warm the ETS cache from the
+  # shipped/user/legacy layers so the first resolve doesn't pay the disk cost.
   defp schedule_template_seeding do
     Task.start(fn ->
       Process.sleep(500)
 
       try do
-        Arbor.Agent.TemplateStore.seed_builtins()
+        Arbor.Agent.TemplateStore.reload()
       rescue
         _ -> :ok
       catch

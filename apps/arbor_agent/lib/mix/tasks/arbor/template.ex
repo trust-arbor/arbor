@@ -11,16 +11,17 @@ defmodule Mix.Tasks.Arbor.Template do
       mix arbor.template                    # list all templates
       mix arbor.template list               # same as above
       mix arbor.template show <name>        # show template details
-      mix arbor.template create <name>      # create a new template
+      mix arbor.template create <name>      # create a new (minimal) template
       mix arbor.template edit <name>        # open in $EDITOR
       mix arbor.template delete <name>      # delete (refuses builtins)
-      mix arbor.template seed               # re-seed builtins from modules
       mix arbor.template reload             # reload all from disk
       mix arbor.template path               # print templates directory path
 
+  Builtin templates ship as `.md` files in `priv/templates/` — there is no
+  longer a `seed` command or a module-cloning option.
+
   ## Options
 
-    * `--from-module` - Clone from an existing module template (with create)
     * `--json` - Output as raw JSON (with show)
   """
 
@@ -29,7 +30,6 @@ defmodule Mix.Tasks.Arbor.Template do
   @shortdoc "Manage agent templates"
 
   @switches [
-    from_module: :string,
     json: :boolean
   ]
 
@@ -47,7 +47,6 @@ defmodule Mix.Tasks.Arbor.Template do
       ["create", name] -> create_template(name, opts)
       ["edit", name] -> edit_template(name)
       ["delete", name] -> delete_template(name)
-      ["seed"] -> seed_builtins()
       ["reload"] -> reload_templates()
       ["path"] -> print_path()
       _ -> Mix.shell().error("Unknown command. Run `mix help arbor.template` for usage.")
@@ -128,49 +127,26 @@ defmodule Mix.Tasks.Arbor.Template do
     end
   end
 
-  defp create_template(name, opts) do
+  defp create_template(name, _opts) do
     ensure_store()
 
     if Arbor.Agent.TemplateStore.exists?(name) do
       Mix.shell().error("Template '#{name}' already exists.")
     else
-      case opts[:from_module] do
-        nil ->
-          # Create a minimal template
-          result =
-            Arbor.Agent.TemplateStore.create_from_opts(name,
-              description: "Custom template",
-              trust_tier: :probationary
-            )
+      result =
+        Arbor.Agent.TemplateStore.create_from_opts(name,
+          description: "Custom template",
+          trust_tier: :probationary
+        )
 
-          case result do
-            :ok ->
-              path = Path.join(Arbor.Agent.TemplateStore.templates_dir(), "#{name}.json")
-              Mix.shell().info("Created template '#{name}' at #{path}")
-              Mix.shell().info("Edit with: mix arbor.template edit #{name}")
+      case result do
+        :ok ->
+          path = Path.join(Arbor.Agent.TemplateStore.templates_dir(), "#{name}.json")
+          Mix.shell().info("Created template '#{name}' at #{path}")
+          Mix.shell().info("Edit with: mix arbor.template edit #{name}")
 
-            {:error, reason} ->
-              Mix.shell().error("Failed to create template: #{inspect(reason)}")
-          end
-
-        module_str ->
-          module = Module.concat([module_str])
-
-          if Code.ensure_loaded?(module) do
-            data = Arbor.Agent.TemplateStore.from_module(module)
-            data = Map.merge(data, %{"name" => name, "source" => "user"})
-
-            case Arbor.Agent.TemplateStore.put(name, data) do
-              :ok ->
-                path = Path.join(Arbor.Agent.TemplateStore.templates_dir(), "#{name}.json")
-                Mix.shell().info("Created template '#{name}' from #{module_str} at #{path}")
-
-              {:error, reason} ->
-                Mix.shell().error("Failed to create template: #{inspect(reason)}")
-            end
-          else
-            Mix.shell().error("Module #{module_str} not found.")
-          end
+        {:error, reason} ->
+          Mix.shell().error("Failed to create template: #{inspect(reason)}")
       end
     end
   end
@@ -217,14 +193,6 @@ defmodule Mix.Tasks.Arbor.Template do
       {:error, :builtin_protected} ->
         Mix.shell().error("Cannot delete builtin template '#{name}'.")
     end
-  end
-
-  defp seed_builtins do
-    ensure_store()
-
-    {:ok, count} = Arbor.Agent.TemplateStore.seed_builtins()
-    Mix.shell().info("Seeded #{count} new builtin template(s).")
-    list_templates()
   end
 
   defp reload_templates do
