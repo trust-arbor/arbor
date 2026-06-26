@@ -191,6 +191,11 @@ defmodule ArborTui.App do
   # Async result of the /agents signed HTTP GET (pushed by the spawned fetch).
   def update({:agents_result, result}, state), do: {render_agents(result, state)}
 
+  # Async results of the lifecycle POSTs (/new, /start, /stop). On success they
+  # mutate the attachment (auto-attach for create/start, detach for stop), so
+  # they fold into the model AND may issue a WS command.
+  def update({:lifecycle_result, op, result}, state), do: {render_lifecycle(op, result, state)}
+
   # Server events forwarded by the WS client.
   def update({:server_event, event}, state), do: {handle_event(event, state)}
 
@@ -204,6 +209,12 @@ defmodule ArborTui.App do
   defp handle_input("/agents", state), do: cmd_agents(state)
   defp handle_input("/agent " <> rest, state), do: cmd_agent(String.trim(rest), state)
   defp handle_input("/agent", state), do: cmd_agent("", state)
+  defp handle_input("/new " <> rest, state), do: cmd_new(String.trim(rest), state)
+  defp handle_input("/new", state), do: cmd_new("", state)
+  defp handle_input("/start " <> rest, state), do: cmd_start(String.trim(rest), state)
+  defp handle_input("/start", state), do: cmd_start("", state)
+  defp handle_input("/stop " <> rest, state), do: cmd_stop(String.trim(rest), state)
+  defp handle_input("/stop", state), do: cmd_stop("", state)
   defp handle_input("/connect " <> rest, state), do: cmd_connect(String.trim(rest), state)
   defp handle_input("/connect", state), do: cmd_connect("", state)
   defp handle_input("/help", state), do: cmd_help(state)
@@ -282,6 +293,83 @@ defmodule ArborTui.App do
   defp agents_client,
     do: Application.get_env(:arbor_tui, :agents_client, ArborTui.AgentsClient)
 
+  # /new <template> [name] — create+start a new agent, then AUTO-ATTACH to it.
+  # A signed HTTP POST (works attached or detached), run ASYNC like /agents.
+  defp cmd_new("", state) do
+    %{
+      state
+      | input: "",
+        messages: state.messages ++ [msg(:system, "usage: /new <template> [name]")]
+    }
+  end
+
+  defp cmd_new(rest, state) do
+    {template, name} =
+      case String.split(rest, ~r/\s+/, parts: 2) do
+        [t, n] -> {t, n}
+        [t] -> {t, nil}
+      end
+
+    spawn_lifecycle(state, :new, fn client, identity, url ->
+      client.create(identity, url, template, name)
+    end)
+
+    %{
+      state
+      | input: "",
+        messages: state.messages ++ [msg(:system, "Creating agent from '#{template}'…")]
+    }
+  end
+
+  # /start <id> — start an existing stopped agent, then AUTO-ATTACH to it.
+  defp cmd_start("", state) do
+    %{state | input: "", messages: state.messages ++ [msg(:system, "usage: /start <agent_id>")]}
+  end
+
+  defp cmd_start(id, state) do
+    spawn_lifecycle(state, {:start, id}, fn client, identity, url ->
+      client.start(identity, url, id)
+    end)
+
+    %{state | input: "", messages: state.messages ++ [msg(:system, "Starting #{id}…")]}
+  end
+
+  # /stop <id> — stop a running agent; if it's the attached one, detach.
+  defp cmd_stop("", state) do
+    %{state | input: "", messages: state.messages ++ [msg(:system, "usage: /stop <agent_id>")]}
+  end
+
+  defp cmd_stop(id, state) do
+    spawn_lifecycle(state, {:stop, id}, fn client, identity, url ->
+      client.stop(identity, url, id)
+    end)
+
+    %{state | input: "", messages: state.messages ++ [msg(:system, "Stopping #{id}…")]}
+  end
+
+  # Spawn a lifecycle POST and push {:lifecycle_result, op, result} back into the
+  # runtime when it lands — same async pattern as spawn_agents_fetch.
+  defp spawn_lifecycle(
+         %{runtime: runtime, identity: identity, gateway_url: url},
+         op,
+         call
+       )
+       when not is_nil(runtime) and not is_nil(identity) do
+    client = lifecycle_client()
+
+    spawn(fn ->
+      result = call.(client, identity, url)
+      TermUI.Runtime.send_message(runtime, :root, {:lifecycle_result, op, result})
+    end)
+
+    :ok
+  end
+
+  defp spawn_lifecycle(_state, _op, _call), do: :ok
+
+  defp lifecycle_client,
+    do: Application.get_env(:arbor_tui, :lifecycle_client, ArborTui.LifecycleClient)
+
   # /connect <url> — change the gateway URL and reconnect (re-attach current).
   defp cmd_connect("", state) do
     %{state | input: "", messages: state.messages ++ [msg(:system, "usage: /connect <ws-url>")]}
@@ -311,11 +399,14 @@ defmodule ArborTui.App do
   defp cmd_help(state) do
     lines = [
       "Client commands (handled locally):",
-      "  /agents         list the agents you can chat with",
-      "  /agent <id>     attach to / switch to an agent",
-      "  /connect <url>  change the gateway URL and reconnect",
-      "  /help           this help",
-      "  /quit           exit the TUI",
+      "  /agents              list the agents you can chat with",
+      "  /agent <id>          attach to / switch to an agent",
+      "  /new <template> [nm] create+start an agent and attach to it",
+      "  /start <id>          start a stopped agent and attach to it",
+      "  /stop <id>           stop a running agent",
+      "  /connect <url>       change the gateway URL and reconnect",
+      "  /help                this help",
+      "  /quit                exit the TUI",
       "Other /commands (e.g. /model, /status) are sent to the attached agent."
     ]
 
@@ -345,6 +436,83 @@ defmodule ArborTui.App do
             [msg(:system, "Couldn't list agents: #{inspect(reason)}")]
     }
   end
+
+  # ── lifecycle results (/new, /start, /stop) ────────────────────────────────
+
+  # /new success: render "Created <id>" and AUTO-ATTACH to the new agent.
+  defp render_lifecycle(:new, {:ok, %{"agent_id" => id} = body}, state) do
+    name = body["display_name"] || id
+    note = "Created #{name} (#{short(id)}). Attaching…"
+    attach_to(id, msg(:system, note), state)
+  end
+
+  # /start success: AUTO-ATTACH to the started agent.
+  defp render_lifecycle({:start, _requested}, {:ok, %{"agent_id" => id}}, state) do
+    attach_to(id, msg(:system, "Started #{short(id)}. Attaching…"), state)
+  end
+
+  # /stop success: confirm; if the stopped agent is the attached one, detach.
+  defp render_lifecycle({:stop, _requested}, {:ok, %{"agent_id" => id}}, state) do
+    note = msg(:system, "Stopped #{short(id)}.")
+
+    if state.agent_id == id do
+      # Go detached locally; the server-side socket drops as the agent stops, so
+      # we don't drive the WSClient here (mirrors the {:ws_status, :detached} path).
+      %{
+        state
+        | agent_id: nil,
+          status: :detached,
+          status_detail: nil,
+          engagement_id: nil,
+          streaming: nil,
+          turn: :idle,
+          pending_approvals: [],
+          messages: state.messages ++ [note, msg(:system, "Detached. Use /agent <id> to attach.")]
+      }
+    else
+      %{state | messages: state.messages ++ [note]}
+    end
+  end
+
+  defp render_lifecycle(op, {:error, reason}, state) do
+    %{
+      state
+      | messages:
+          state.messages ++ [msg(:system, "#{op_label(op)} failed: #{reason_text(reason)}")]
+    }
+  end
+
+  # Catch-all for an unexpected success shape (e.g. missing agent_id).
+  defp render_lifecycle(op, {:ok, _other}, state) do
+    %{state | messages: state.messages ++ [msg(:system, "#{op_label(op)}: unexpected response")]}
+  end
+
+  # Switch the target agent and (re)connect+attach — mirrors cmd_agent's attach,
+  # but driven from an async result and prepending a custom note. Resets the
+  # transcript since attaching is a fresh conversation.
+  defp attach_to(id, note, state) do
+    if state.ws, do: WSClient.connect_to(state.ws, id)
+
+    %{
+      state
+      | agent_id: id,
+        status: :connecting,
+        status_detail: nil,
+        engagement_id: nil,
+        streaming: nil,
+        turn: :idle,
+        pending_approvals: [],
+        messages: [note]
+    }
+  end
+
+  defp op_label(:new), do: "Create"
+  defp op_label({:start, _}), do: "Start"
+  defp op_label({:stop, _}), do: "Stop"
+
+  defp reason_text({:http_error, status, message}), do: "#{message} (HTTP #{status})"
+  defp reason_text({:http_status, status}), do: "HTTP #{status}"
+  defp reason_text(reason), do: inspect(reason)
 
   # ── server events ────────────────────────────────────────────────────────
 
