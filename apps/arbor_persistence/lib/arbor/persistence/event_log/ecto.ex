@@ -93,15 +93,26 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   # the same version, assign the same number, and the second violates the
   # `events_stream_id_event_number_index` unique constraint. (Surfaced by
   # heartbeat pipelines firing several durable signals concurrently to one
-  # per-run stream via Task.start.) This is expected for an append-only log;
-  # resolve it the standard event-store way — optimistic concurrency with a
-  # bounded retry. Each attempt re-reads the version in a fresh transaction, so
-  # it picks up the winner's committed event_number.
+  # per-run stream via Task.start, flooding the logs with ConstraintError via
+  # Signals.durable_emit.)
+  #
+  # Root-cause fix: serialize appends to the SAME stream with a per-stream
+  # Postgres advisory transaction lock acquired BEFORE reading the version.
+  # Concurrent appends to one stream queue behind the lock and each reads the
+  # previous winner's committed event_number; appends to DIFFERENT streams use
+  # different lock keys and don't contend. The lock auto-releases at transaction
+  # end (commit or rollback). The bounded optimistic retry below is kept as a
+  # backstop but should now essentially never fire.
   defp do_append(stream_id, events, opts, attempt) do
     repo = Keyword.get(opts, :repo, Repo)
     expected_version = Keyword.get(opts, :expected_version)
 
     repo.transaction(fn ->
+      # Serialize concurrent appends to this stream at the database (Postgres
+      # only — SQLite serializes writes already, and the ETS/Agent backends and
+      # the retry-test stub repos have no such lock).
+      lock_stream_for_append(repo, stream_id)
+
       # Get current stream version and global position
       current_version = get_current_version(repo, stream_id)
       global_pos = get_max_global_position(repo)
@@ -133,21 +144,50 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     end)
     |> handle_transaction_result()
   rescue
-    e in Ecto.ConstraintError ->
-      # Retry only the event_number race, and only when the caller did NOT
-      # request a specific expected_version — optimistic-concurrency callers
-      # must observe the conflict, not have it silently resolved underneath them.
-      # (Body-scope bindings don't reach `rescue`; re-derive from `opts`.)
-      if is_nil(Keyword.get(opts, :expected_version)) and event_number_conflict?(e) and
-           attempt < @max_append_attempts do
-        do_append(stream_id, events, opts, attempt + 1)
-      else
-        reraise(e, __STACKTRACE__)
+    # Two shapes of the same residual event_number conflict can surface here:
+    #
+    #   * `Ecto.ConstraintError` — when the DB constraint fires but the schema
+    #     changeset did NOT declare it (e.g. the DB-free retry-test stub repos,
+    #     which raise this directly from their fake `insert!/1`).
+    #   * `Ecto.InvalidChangesetError` — what `insert!/1` raises once the
+    #     changeset DOES declare `unique_constraint(:stream_id, :event_number)`:
+    #     Ecto converts the DB violation into a changeset error and `insert!`
+    #     wraps the now-invalid changeset.
+    #
+    # Both mean "lost the event_number race". Retry only that, and only when the
+    # caller did NOT request a specific expected_version — optimistic-concurrency
+    # callers must observe the conflict, not have it silently resolved underneath
+    # them. (Body-scope bindings don't reach `rescue`; re-derive from `opts`.)
+    e in [Ecto.ConstraintError, Ecto.InvalidChangesetError] ->
+      retryable? = is_nil(Keyword.get(opts, :expected_version)) and event_number_conflict?(e)
+
+      cond do
+        retryable? and attempt < @max_append_attempts ->
+          do_append(stream_id, events, opts, attempt + 1)
+
+        # Retries exhausted on a declared-constraint conflict: surface the
+        # changeset rather than crashing the caller, per the append contract.
+        retryable? and match?(%Ecto.InvalidChangesetError{}, e) ->
+          {:error, e.changeset}
+
+        true ->
+          reraise(e, __STACKTRACE__)
       end
   end
 
   defp event_number_conflict?(%Ecto.ConstraintError{} = e) do
     String.contains?("#{e.constraint} #{Exception.message(e)}", "event_number")
+  end
+
+  defp event_number_conflict?(%Ecto.InvalidChangesetError{changeset: changeset}) do
+    Enum.any?(changeset.errors, fn
+      {field, {_msg, opts}} ->
+        field == :stream_id or field == :event_number or
+          Keyword.get(opts, :constraint_name) == "events_stream_id_event_number_index"
+
+      _ ->
+        false
+    end)
   end
 
   defp event_number_conflict?(_), do: false
@@ -410,6 +450,28 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   # ===========================================================================
   # Private Helpers
   # ===========================================================================
+
+  # Acquire a per-stream advisory transaction lock so concurrent appends to the
+  # SAME stream serialize, eliminating the event_number read-modify-write race at
+  # the root. `pg_advisory_xact_lock` is a blocking lock keyed on `hashtext(stream_id)`
+  # and auto-releases at transaction end. Postgres-only; other backends (SQLite,
+  # ETS/Agent, and the retry-test stub repos) skip it. We must already be inside a
+  # `repo.transaction/1` for the lock to be transaction-scoped (do_append is).
+  defp lock_stream_for_append(repo, stream_id) do
+    if postgres_repo?(repo) do
+      repo.query!("SELECT pg_advisory_xact_lock(hashtext($1))", [stream_id])
+    end
+
+    :ok
+  end
+
+  # True only for a real Ecto.Adapters.Postgres-backed repo. Guarded so the stub
+  # repos used in the DB-free retry tests (which don't define `__adapter__/0`)
+  # don't crash here — they fall through to "not postgres" and skip the lock.
+  defp postgres_repo?(repo) do
+    function_exported?(repo, :__adapter__, 0) and
+      repo.__adapter__() == Ecto.Adapters.Postgres
+  end
 
   defp get_current_version(repo, stream_id) do
     query =

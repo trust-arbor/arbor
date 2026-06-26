@@ -16,22 +16,30 @@ defmodule Arbor.Persistence.Schemas.Event do
   @timestamps_opts [type: :utc_datetime_usec]
 
   schema "events" do
-    field :stream_id, :string
-    field :event_number, :integer
-    field :global_position, :integer
-    field :type, :string
-    field :data, :map, default: %{}
-    field :metadata, :map, default: %{}
-    field :agent_id, :string
-    field :causation_id, :string
-    field :correlation_id, :string
-    field :event_timestamp, :utc_datetime_usec
+    field(:stream_id, :string)
+    field(:event_number, :integer)
+    field(:global_position, :integer)
+    field(:type, :string)
+    field(:data, :map, default: %{})
+    field(:metadata, :map, default: %{})
+    field(:agent_id, :string)
+    field(:causation_id, :string)
+    field(:correlation_id, :string)
+    field(:event_timestamp, :utc_datetime_usec)
 
     timestamps(inserted_at: :created_at, updated_at: false)
   end
 
   @required_fields [:id, :stream_id, :event_number, :type]
-  @optional_fields [:global_position, :data, :metadata, :agent_id, :causation_id, :correlation_id, :event_timestamp]
+  @optional_fields [
+    :global_position,
+    :data,
+    :metadata,
+    :agent_id,
+    :causation_id,
+    :correlation_id,
+    :event_timestamp
+  ]
 
   @doc """
   Create a changeset for inserting a new event.
@@ -41,6 +49,9 @@ defmodule Arbor.Persistence.Schemas.Event do
     schema
     |> cast(attrs, @required_fields ++ @optional_fields)
     |> validate_required(@required_fields)
+    |> unique_constraint([:stream_id, :event_number],
+      name: "events_stream_id_event_number_index"
+    )
   end
 
   @doc """
