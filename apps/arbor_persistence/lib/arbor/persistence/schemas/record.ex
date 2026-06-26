@@ -18,10 +18,10 @@ defmodule Arbor.Persistence.Schemas.Record do
   @timestamps_opts [type: :utc_datetime_usec]
 
   schema "records" do
-    field :namespace, :string
-    field :key, :string
-    field :data, :map, default: %{}
-    field :metadata, :map, default: %{}
+    field(:namespace, :string)
+    field(:key, :string)
+    field(:data, :map, default: %{})
+    field(:metadata, :map, default: %{})
 
     timestamps()
   end
@@ -37,6 +37,12 @@ defmodule Arbor.Persistence.Schemas.Record do
     schema
     |> cast(attrs, @required_fields ++ @optional_fields)
     |> validate_required(@required_fields)
+    # `id` (the pkey) is the sole unique arbiter for upserts. Declaring its
+    # constraint ensures a residual pkey conflict returns `{:error, changeset}`
+    # instead of raising `Ecto.ConstraintError`. The `(namespace, key)` unique
+    # constraint is kept for backward-compat with any deployment that still has
+    # the legacy index (dropped in migration 20260625000001).
+    |> unique_constraint(:id, name: "records_pkey")
     |> unique_constraint([:namespace, :key])
   end
 

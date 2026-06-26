@@ -18,26 +18,23 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
       mix test apps/arbor_persistence/test/arbor/persistence/queryable_store/postgres_test.exs --include database
   """
 
-  use ExUnit.Case, async: false
+  # Uses the shared DatabaseCase template, which starts the Repo lazily and checks
+  # out a `:manual` Sandbox connection per test with `shared: true` — so the
+  # concurrent-upsert regression test's spawned Tasks see the same connection and
+  # roll back cleanly. (Replaces the old hand-rolled `Repo.start_link` setup_all,
+  # which assumed a non-manual sandbox mode and broke once any DatabaseCase module
+  # flipped the Repo to `:manual` globally.)
+  use Arbor.Persistence.DatabaseCase, async: false
 
   alias Arbor.Persistence.{Filter, Record}
   alias Arbor.Persistence.QueryableStore.Postgres
-  alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Record, as: RecordSchema
 
   @moduletag :integration
   @moduletag :database
 
-  setup_all do
-    case Repo.start_link() do
-      {:ok, pid} -> {:ok, repo_pid: pid}
-      {:error, {:already_started, pid}} -> {:ok, repo_pid: pid}
-      {:error, reason} -> {:skip, "Database not available: #{inspect(reason)}"}
-    end
-  end
-
   setup do
-    # Clean up records table before each test
+    # Clean up records table before each test (within the checked-out connection)
     Repo.delete_all(RecordSchema)
     {:ok, name: :test_store}
   end
@@ -401,6 +398,89 @@ defmodule Arbor.Persistence.QueryableStore.PostgresTest do
       assert record.metadata == %{"meta" => true}
       assert record.inserted_at == now
       assert record.updated_at == now
+    end
+  end
+
+  # ===========================================================================
+  # Regression: spurious records_pkey violation under upsert (the dual-index race)
+  #
+  # The `records` table once carried TWO redundant unique constraints: the pkey
+  # `id` (= `namespace:key`) AND `records_namespace_key_index` UNIQUE on
+  # `(namespace, key)`. The upsert arbitrated only `(namespace, key)`, so a fresh
+  # INSERT could surface a violation on the *non-arbiter* pkey index — which the
+  # changeset did not declare, so Ecto raised `Ecto.ConstraintError` instead of
+  # returning `{:error, changeset}`. The fix collapses to `id` as the sole arbiter
+  # (`conflict_target: [:id]`) + declares the pkey constraint.
+  #
+  # This reproduces the raise DETERMINISTICALLY (no timing race): seed a row whose
+  # pkey equals what the next `put` computes, but whose `(namespace, key)` differs.
+  # PRE-FIX: ON CONFLICT(namespace,key) misses → INSERT → pkey collision → raise.
+  # POST-FIX: ON CONFLICT(id) hits → DO UPDATE → no raise.
+  # ===========================================================================
+
+  describe "records_pkey upsert regression (dual-index race)" do
+    test "put does not raise when computed id collides with a row of a different (namespace, key)",
+         %{} do
+      namespace = "regress_ns"
+      dup_key = "dup"
+      colliding_id = "#{namespace}:#{dup_key}"
+
+      # Seed row R directly: its pkey equals what put(namespace, dup_key) will
+      # compute, but its (namespace, key) is DIFFERENT — so an upsert arbitrating
+      # on (namespace, key) won't find it and will attempt an INSERT.
+      now = DateTime.utc_now()
+
+      {:ok, _seeded} =
+        %RecordSchema{}
+        |> RecordSchema.changeset(%{
+          id: colliding_id,
+          namespace: namespace,
+          key: "a-different-key",
+          data: %{"seed" => true},
+          metadata: %{},
+          inserted_at: now,
+          updated_at: now
+        })
+        |> Repo.insert()
+
+      # put computes id = "regress_ns:dup" == colliding_id. PRE-FIX this raises
+      # records_pkey (rescued into {:error, {:put_failed, %Ecto.ConstraintError{}}});
+      # POST-FIX it resolves via ON CONFLICT(id) and returns :ok.
+      record = Record.new(dup_key, %{"version" => 1})
+      result = Postgres.put(dup_key, record, name: namespace, repo: Repo)
+
+      assert result == :ok,
+             "expected upsert to resolve via ON CONFLICT(id), got: #{inspect(result)}"
+
+      # The upsert resolved on the pkey `id`, so it UPDATED the seed row (which
+      # owns that id) rather than inserting a colliding one. Fetch by id directly
+      # to confirm the data was written and no duplicate row was created.
+      fetched = Repo.get(RecordSchema, colliding_id)
+      assert fetched != nil
+      assert fetched.data == %{"version" => 1}
+      assert Repo.aggregate(RecordSchema, :count, :id) == 1
+    end
+
+    test "N concurrent upserts of the same fresh (namespace, key) all succeed", %{} do
+      namespace = "regress_concurrent_ns"
+      key = "hot-key"
+
+      tasks =
+        for i <- 1..25 do
+          Task.async(fn ->
+            record = Record.new(key, %{"writer" => i})
+            Postgres.put(key, record, name: namespace, repo: Repo)
+          end)
+        end
+
+      results = Enum.map(tasks, &Task.await(&1, 10_000))
+
+      assert Enum.all?(results, &(&1 == :ok)),
+             "expected all concurrent upserts to succeed, got: #{inspect(results)}"
+
+      # Exactly one row should exist for this (namespace, key).
+      {:ok, keys} = Postgres.list(name: namespace, repo: Repo)
+      assert keys == [key]
     end
   end
 end
