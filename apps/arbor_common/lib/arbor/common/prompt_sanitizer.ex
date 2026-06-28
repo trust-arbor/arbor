@@ -55,28 +55,36 @@ defmodule Arbor.Common.PromptSanitizer do
     """
   end
 
-  # Matches a data-section delimiter: `<data_NONCE>` or `</data_NONCE>` where
-  # NONCE is the 16-char hex from `generate_nonce/0`. Specific enough that real
-  # assistant prose won't match it.
+  # A whole echoed data section — `<data_NONCE>…</data_NONCE>` with a matching
+  # 16-hex NONCE (backreference, dotall so it spans newlines). And a stray
+  # single delimiter (open or close) that lost its partner.
+  @data_block_re ~r|<data_([0-9a-fA-F]{16})>.*?</data_\1>|s
   @delimiter_re ~r|</?data_[0-9a-fA-F]{16}>|
 
   @doc """
-  Strip `<data_NONCE>` / `</data_NONCE>` delimiters from text, keeping any inner
-  content.
+  Strip echoed `<data_NONCE>…</data_NONCE>` data sections from text.
 
   These delimiters are injected into PROMPTS by `wrap/2` to fence untrusted data.
   Smaller models sometimes ECHO them back into their reply (observed: a local
-  granite model prefixing an empty `<data_NONCE></data_NONCE>` pair before its
-  answer). Run model RESPONSES through this before display/persist so the
-  injection-defense scaffolding never leaks into user-visible output. Removes only
-  the delimiter tags — inner text (the model's actual words) is preserved.
+  granite model prefixing `<data_NONCE></data_NONCE>` or `<data_NONCE>None</data_NONCE>`
+  before its actual answer). Run model RESPONSES through this before display/persist
+  so the injection-defense scaffolding never leaks into user-visible output.
+
+  Removes the WHOLE fenced block (delimiters AND inner content), then any stray
+  unmatched delimiter, then trims. Whole-block removal is safe for model OUTPUT:
+  the model never legitimately generates the prompt's specific 16-hex nonce fence,
+  so any such fence in a reply is echoed scaffolding (the inner content — e.g.
+  "None" — is junk, not the model's answer).
 
   Nonce-agnostic by design: the response handler doesn't need to know which nonce
   was used for the turn's prompt.
   """
   @spec strip_delimiters(String.t()) :: String.t()
   def strip_delimiters(text) when is_binary(text) do
-    String.replace(text, @delimiter_re, "")
+    text
+    |> String.replace(@data_block_re, "")
+    |> String.replace(@delimiter_re, "")
+    |> String.trim()
   end
 
   @doc """

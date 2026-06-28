@@ -56,15 +56,15 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       msg = SessionCore.build_assistant_message(echoed, ~U[2026-04-06 12:00:00Z])
       assert msg["content"] == "Hello! I am River."
 
-      # A reply fully wrapped in the delimiters keeps only the inner words.
-      wrapped = "<data_deadbeefdeadbeef>the real reply</data_deadbeefdeadbeef>"
+      # An echoed block carrying junk inner content (e.g. "None") is removed whole.
+      junk = "<data_deadbeefdeadbeef>None</data_deadbeefdeadbeef>\n\nthe real reply"
 
-      assert SessionCore.build_assistant_message(wrapped, ~U[2026-04-06 12:00:00Z])["content"] ==
+      assert SessionCore.build_assistant_message(junk, ~U[2026-04-06 12:00:00Z])["content"] ==
                "the real reply"
 
-      # A reply that is ONLY echoed (empty) delimiters collapses to nil.
-      only_tags = "<data_0123456789abcdef></data_0123456789abcdef>"
-      assert SessionCore.build_assistant_message(only_tags, ~U[2026-04-06 12:00:00Z]) == nil
+      # A reply that is ONLY an echoed block collapses to nil.
+      only_block = "<data_0123456789abcdef>None</data_0123456789abcdef>"
+      assert SessionCore.build_assistant_message(only_block, ~U[2026-04-06 12:00:00Z]) == nil
     end
   end
 
