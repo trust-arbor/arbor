@@ -45,6 +45,17 @@ defmodule Arbor.Gateway.Chat.AgentsTest.FakeLifecycle do
   end
 end
 
+defmodule Arbor.Gateway.Chat.AgentsTest.FakeUserConfig do
+  # Per-principal KV backed by the test process dictionary (all calls run in the
+  # test process synchronously, so this is sufficient + isolated per test).
+  def get(principal, key), do: Process.get({:uc, principal, key})
+
+  def put(principal, key, value) do
+    Process.put({:uc, principal, key}, value)
+    :ok
+  end
+end
+
 defmodule Arbor.Gateway.Chat.AgentsTest do
   use ExUnit.Case, async: false
 
@@ -52,7 +63,7 @@ defmodule Arbor.Gateway.Chat.AgentsTest do
   import Plug.Conn
 
   alias Arbor.Gateway.Chat.Agents
-  alias Arbor.Gateway.Chat.AgentsTest.{FakeLifecycle, FakeManager, FakeSecurity}
+  alias Arbor.Gateway.Chat.AgentsTest.{FakeLifecycle, FakeManager, FakeSecurity, FakeUserConfig}
   alias Arbor.Gateway.Chat.Router
 
   @moduletag :fast
@@ -63,9 +74,10 @@ defmodule Arbor.Gateway.Chat.AgentsTest do
     Application.put_env(:arbor_gateway, :chat_security, FakeSecurity)
     Application.put_env(:arbor_gateway, :chat_agent_manager, FakeManager)
     Application.put_env(:arbor_gateway, :chat_lifecycle, FakeLifecycle)
+    Application.put_env(:arbor_gateway, :chat_user_config, FakeUserConfig)
 
     on_exit(fn ->
-      for k <- [:chat_security, :chat_agent_manager, :chat_lifecycle] do
+      for k <- [:chat_security, :chat_agent_manager, :chat_lifecycle, :chat_user_config] do
         Application.delete_env(:arbor_gateway, k)
       end
     end)
@@ -149,6 +161,43 @@ defmodule Arbor.Gateway.Chat.AgentsTest do
     test "scoped to authorized agents — can't resolve one the principal can't chat with" do
       # agent_a exists, but human_none holds no chat cap for it.
       assert {:error, :not_found} = Agents.resolve_token("human_none", "agent_a")
+    end
+  end
+
+  describe "user-defined aliases" do
+    test "set_alias resolves the target, and resolve_token then honors the alias" do
+      assert {:ok, "agent_a"} = Agents.set_alias("human_3caps", "ace", "Alice")
+      assert Agents.list_aliases("human_3caps") == %{"ace" => "agent_a"}
+      assert {:ok, "agent_a"} = Agents.resolve_token("human_3caps", "ace")
+    end
+
+    test "an alias wins over what would otherwise be a display_name prefix" do
+      {:ok, _} = Agents.set_alias("human_3caps", "b", "agent_a")
+      # bare "b" would prefix-match Bob; the alias takes precedence.
+      assert {:ok, "agent_a"} = Agents.resolve_token("human_3caps", "b")
+    end
+
+    test "remove_alias drops it" do
+      {:ok, _} = Agents.set_alias("human_3caps", "ace", "agent_a")
+      :ok = Agents.remove_alias("human_3caps", "ace")
+      assert Agents.list_aliases("human_3caps") == %{}
+    end
+
+    test "a stale alias (target no longer authorized) is ignored by resolution" do
+      Process.put({:uc, "human_3caps", :agent_aliases}, %{"ghost" => "agent_zzz"})
+      assert {:error, :not_found} = Agents.resolve_token("human_3caps", "ghost")
+    end
+
+    test "rejects an alias name that looks like an id, has spaces, or is empty" do
+      assert {:error, :alias_looks_like_id} =
+               Agents.set_alias("human_3caps", "agent_x", "agent_a")
+
+      assert {:error, :alias_has_spaces} = Agents.set_alias("human_3caps", "a b", "agent_a")
+      assert {:error, :empty_alias} = Agents.set_alias("human_3caps", "  ", "agent_a")
+    end
+
+    test "set_alias fails when the target doesn't resolve" do
+      assert {:error, :not_found} = Agents.set_alias("human_3caps", "x", "nope")
     end
   end
 
