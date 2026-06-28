@@ -60,7 +60,14 @@ defmodule ArborTui.Protocol do
   end
 
   defp decode_map(%{"type" => "engagement"} = m),
-    do: {:ok, {:engagement, %{id: m["engagement_id"], transcript: m["transcript"] || []}}}
+    do:
+      {:ok,
+       {:engagement,
+        %{
+          id: m["engagement_id"],
+          transcript: m["transcript"] || [],
+          display_name: m["display_name"]
+        }}}
 
   defp decode_map(%{"type" => "delta", "text" => text}), do: {:ok, {:delta, text}}
   defp decode_map(%{"type" => "message", "message" => message}), do: {:ok, {:message, message}}

@@ -71,6 +71,9 @@ defmodule ArborTui.App do
       gateway_url: gateway_url,
       status: status,
       status_detail: nil,
+      # Human-friendly name of the attached agent (from the engagement frame);
+      # the header shows it instead of the raw agent_<hex> id when known.
+      agent_name: nil,
       engagement_id: nil,
       input: "",
       messages: messages,
@@ -203,6 +206,7 @@ defmodule ArborTui.App do
        | status: :detached,
          status_detail: nil,
          agent_id: nil,
+         agent_name: nil,
          turn: :idle,
          streaming: nil,
          messages: state.messages ++ [msg(:system, detail <> " Use /agent <id> to retry.")]
@@ -540,7 +544,7 @@ defmodule ArborTui.App do
 
   # ── server events ────────────────────────────────────────────────────────
 
-  defp handle_event({:engagement, %{id: id, transcript: transcript}}, state) do
+  defp handle_event({:engagement, %{id: id, transcript: transcript} = ev}, state) do
     # A successful attach — persist the agent as the resume hint (best-effort).
     # `state[:state_path]` is nil in production (→ Config.state_path(), the real
     # ~/.arbor/tui.state); tests set it to a tmp path so attach-driven saves never
@@ -548,7 +552,12 @@ defmodule ArborTui.App do
     if state.agent_id,
       do: ArborTui.Config.save_last_agent(state.agent_id, Map.get(state, :state_path))
 
-    %{state | engagement_id: id, messages: transcript_to_messages(transcript)}
+    %{
+      state
+      | engagement_id: id,
+        agent_name: ev[:display_name],
+        messages: transcript_to_messages(transcript)
+    }
   end
 
   defp handle_event({:delta, text}, state) do
@@ -651,10 +660,11 @@ defmodule ArborTui.App do
     status = "#{conn_dot(state.status)} #{status_label(state.status)}#{reconnect_hint(state)}"
 
     # Show the agent segment only when attached/attaching — otherwise it'd read
-    # "not attached … not attached".
+    # "not attached … not attached". Prefer the human-friendly name once the
+    # engagement frame has supplied it, falling back to the short id.
     suffix =
       if state.agent_id,
-        do: " #{short(state.agent_id)} #{status} ─╮",
+        do: " #{state.agent_name || short(state.agent_id)} #{status} ─╮",
         else: " #{status} ─╮"
 
     text(fill_between(prefix, suffix, w), border_style())
@@ -691,7 +701,8 @@ defmodule ArborTui.App do
   defp content_lines(state, w, interior_h) do
     rows =
       (state.messages ++ streaming_msgs(state.streaming))
-      |> Enum.map(&message_block(&1, w))
+      |> Enum.chunk_by(& &1.role)
+      |> Enum.map(&render_group(&1, w))
       |> Enum.intersperse([blank_row(w)])
       |> List.flatten()
 
@@ -702,26 +713,57 @@ defmodule ArborTui.App do
   end
 
   defp streaming_msgs(nil), do: []
-  defp streaming_msgs(t) when is_binary(t), do: [%{role: :agent, text: t, at: nil}]
 
-  # One message → one-or-more bordered rows: the head row carries timestamp +
-  # role + the first wrapped line; continuation rows are indented under the text.
-  defp message_block(%{role: role, text: body} = m, w) do
+  defp streaming_msgs(t) when is_binary(t),
+    do: [%{role: :agent, text: strip_data_tags(t), at: nil}]
+
+  # Defense-in-depth: never display the prompt-injection-defense delimiters
+  # (<data_NONCE>) that smaller models sometimes echo into their reply. The
+  # orchestrator strips them server-side too, but the gateway's streamed/returned
+  # chat text can still carry them, so we scrub at the render boundary. NONCE is
+  # the 16-hex tag from Arbor.Common.PromptSanitizer. We drop the WHOLE fenced
+  # block (the echoed scaffolding + its junk inner content, e.g. "None"), then any
+  # stray unmatched tag, then trim the leading whitespace the removal leaves.
+  @data_block_re ~r|<data_([0-9a-fA-F]{16})>.*?</data_\1>|s
+  @data_tag_re ~r|</?data_[0-9a-fA-F]{16}>|
+  defp strip_data_tags(text) when is_binary(text) do
+    text
+    |> String.replace(@data_block_re, "")
+    |> String.replace(@data_tag_re, "")
+    |> String.trim_leading()
+  end
+
+  defp strip_data_tags(other), do: other
+
+  # Consecutive messages from the same speaker render as one group: only the
+  # first carries the timestamp + role header; the rest are indented under the
+  # text column (Slack/Discord-style grouping) for a calmer transcript.
+  defp render_group([first | rest], w) do
+    message_block(first, w, true) ++ Enum.flat_map(rest, &message_block(&1, w, false))
+  end
+
+  # One message → one-or-more bordered rows. With `header?`, the first row carries
+  # timestamp + role; without it (a grouped follow-on), every row is indented
+  # under the text column. Continuation rows from wrapping are always indented.
+  defp message_block(%{role: role, text: body} = m, w, header?) do
     text_area = max(inner_width(w) - @text_indent, 1)
     {label, rstyle} = frame_role(role)
-    [first | rest] = wrap_text(to_string(body), text_area)
+    lines = wrap_text(strip_data_tags(to_string(body)), text_area)
 
-    ts = pad(m[:at] || "", @ts_w)
-    head_inner = ts <> "  " <> pad(label, @role_w) <> first
-    head = content_row(head_inner, w, rstyle)
+    if header? do
+      [first | rest] = lines
 
-    cont =
-      Enum.map(rest, fn line ->
-        content_row(String.duplicate(" ", @text_indent) <> line, w, rstyle)
-      end)
+      head =
+        content_row(pad(m[:at] || "", @ts_w) <> "  " <> pad(label, @role_w) <> first, w, rstyle)
 
-    [head | cont]
+      [head | Enum.map(rest, &indented_row(&1, w, rstyle))]
+    else
+      Enum.map(lines, &indented_row(&1, w, rstyle))
+    end
   end
+
+  defp indented_row(line, w, style),
+    do: content_row(String.duplicate(" ", @text_indent) <> line, w, style)
 
   # A framed row: cyan side borders + the interior padded to the inner width and
   # coloured by the speaker's style (so each row reads as one speaker).
