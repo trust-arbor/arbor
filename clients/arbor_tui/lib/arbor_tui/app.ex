@@ -518,7 +518,11 @@ defmodule ArborTui.App do
 
   defp handle_event({:engagement, %{id: id, transcript: transcript}}, state) do
     # A successful attach — persist the agent as the resume hint (best-effort).
-    if state.agent_id, do: ArborTui.Config.save_last_agent(state.agent_id)
+    # `state[:state_path]` is nil in production (→ Config.state_path(), the real
+    # ~/.arbor/tui.state); tests set it to a tmp path so attach-driven saves never
+    # pollute the developer's real state file.
+    if state.agent_id,
+      do: ArborTui.Config.save_last_agent(state.agent_id, Map.get(state, :state_path))
 
     %{state | engagement_id: id, messages: transcript_to_messages(transcript)}
   end
