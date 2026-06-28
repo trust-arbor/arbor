@@ -47,7 +47,7 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
   `{:ok, %{"agent_id", "display_name", "running" => true}}` on success.
   """
   @spec create(String.t(), map(), keyword()) :: {:ok, ok_result()} | error()
-  def create(principal, params, _opts \\ []) when is_binary(principal) and is_map(params) do
+  def create(principal, params, opts \\ []) when is_binary(principal) and is_map(params) do
     with {:ok, template} <- fetch_template_name(params),
          {:ok, template_data} <- load_template(template),
          display_name = display_name_for(params, template_data, template),
@@ -56,7 +56,8 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
            template: template,
            display_name: display_name,
            model_config: model_config,
-           principal_id: principal
+           principal_id: principal,
+           signed_request: Keyword.get(opts, :signed_request)
          ],
          {:ok, profile} <- do_create(principal, display_name, create_opts),
          agent_id = profile_agent_id(profile),
@@ -71,9 +72,9 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
   Start an existing, stopped agent `id` after gating on the restore cap.
   Returns `{:ok, %{"agent_id", "running" => true}}` on success.
   """
-  @spec start(String.t(), String.t()) :: {:ok, ok_result()} | error()
-  def start(principal, id) when is_binary(principal) and is_binary(id) do
-    case bridge_call(agent_facade(), :authorize_restore, [principal, id]) do
+  @spec start(String.t(), String.t(), keyword()) :: {:ok, ok_result()} | error()
+  def start(principal, id, opts \\ []) when is_binary(principal) and is_binary(id) do
+    case bridge_call(agent_facade(), :authorize_restore, [principal, id, auth_opts(opts)]) do
       {:ok, {:ok, _profile}} ->
         case do_start(id, principal_id: principal) do
           {:ok, _pid} -> {:ok, %{"agent_id" => id, "running" => true}}
@@ -100,9 +101,9 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
   Stop a running agent `id` after gating on `arbor://agent/stop/<id>`.
   Returns `{:ok, %{"agent_id", "running" => false}}` on success.
   """
-  @spec stop(String.t(), String.t()) :: {:ok, ok_result()} | error()
-  def stop(principal, id) when is_binary(principal) and is_binary(id) do
-    case bridge_call(agent_facade(), :authorize_stop, [principal, id]) do
+  @spec stop(String.t(), String.t(), keyword()) :: {:ok, ok_result()} | error()
+  def stop(principal, id, opts \\ []) when is_binary(principal) and is_binary(id) do
+    case bridge_call(agent_facade(), :authorize_stop, [principal, id, auth_opts(opts)]) do
       {:ok, :ok} ->
         {:ok, %{"agent_id" => id, "running" => false}}
 
@@ -212,6 +213,12 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
   defp profile_agent_id(id) when is_binary(id), do: id
 
   defp unauthorized(reason), do: {:error, 403, "unauthorized: #{inspect(reason)}"}
+
+  # Forward the gateway-verified `:signed_request` to the `Arbor.Agent`
+  # authorize wrappers. `identity_verification` is config-ON in dev/prod, so the
+  # lifecycle gates reject as `:missing_signed_request` without it; nil is fine
+  # (the wrapper treats absence as "no identity proof to forward").
+  defp auth_opts(opts), do: [signed_request: Keyword.get(opts, :signed_request)]
 
   # ── bridge + config seams ──────────────────────────────────────────────────
 

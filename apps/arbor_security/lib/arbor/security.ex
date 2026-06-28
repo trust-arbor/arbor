@@ -609,12 +609,22 @@ defmodule Arbor.Security do
   defp build_auth_context(principal_id, opts) do
     alias Arbor.Contracts.Security.AuthContext
 
-    AuthContext.new(principal_id,
-      signed_request: Keyword.get(opts, :signed_request),
-      signer: Keyword.get(opts, :signer),
-      session_id: Keyword.get(opts, :session_id)
-    )
-    |> AuthContext.load()
+    ctx =
+      AuthContext.new(principal_id,
+        signed_request: Keyword.get(opts, :signed_request),
+        signer: Keyword.get(opts, :signer),
+        session_id: Keyword.get(opts, :session_id)
+      )
+      |> AuthContext.load()
+
+    # `identity_verified: true` is set by callers that have ALREADY verified the
+    # signer's per-request signature upstream (e.g. the Gateway's
+    # SignedRequestAuth, which also consumed the single-use nonce). It marks the
+    # context verified so AuthDecision skips re-verification — re-running it would
+    # trip the nonce replay guard. Only set this after a genuine upstream verify.
+    if Keyword.get(opts, :identity_verified, false),
+      do: AuthContext.mark_verified(ctx),
+      else: ctx
   end
 
   # Look up capability for side-effect operations (max_uses, receipt).
