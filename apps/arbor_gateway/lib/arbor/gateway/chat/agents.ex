@@ -51,6 +51,16 @@ defmodule Arbor.Gateway.Chat.Agents do
     Enum.map(ids, &resolve_agent(&1, profiles))
   end
 
+  @doc """
+  Resolve a single agent's human-friendly display name (live registry metadata →
+  persisted profile → the bare id as fallback). Used by the chat Socket to label
+  the attached agent in the client header.
+  """
+  @spec display_name_for(String.t()) :: String.t()
+  def display_name_for(agent_id) when is_binary(agent_id) do
+    resolve_agent(agent_id, list_profiles())["display_name"] || agent_id
+  end
+
   # ── Authorization: chat-cap ids ───────────────────────────────────────────
 
   defp chat_agent_ids(principal) do

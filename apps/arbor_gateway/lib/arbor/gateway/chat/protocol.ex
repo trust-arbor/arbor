@@ -65,8 +65,14 @@ defmodule Arbor.Gateway.Chat.Protocol do
 
   @doc "Encode a server→client event to a JSON binary (for a `{:text, _}` frame)."
   @spec encode(event()) :: binary()
-  def encode({:engagement, %{id: id, transcript: transcript}}),
-    do: enc(%{type: "engagement", engagement_id: id, transcript: transcript})
+  def encode({:engagement, %{id: id, transcript: transcript} = m}),
+    do:
+      enc(%{
+        type: "engagement",
+        engagement_id: id,
+        transcript: transcript,
+        display_name: Map.get(m, :display_name)
+      })
 
   def encode({:delta, text}), do: enc(%{type: "delta", text: text})
   def encode({:message, message}), do: enc(%{type: "message", message: message})
