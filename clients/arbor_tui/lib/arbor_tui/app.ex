@@ -57,6 +57,8 @@ defmodule ArborTui.App do
         {:idle, [msg(:system, "Not attached. Use /agent <id> to attach.")]}
       end
 
+    {width, height} = initial_terminal_size()
+
     %{
       ws: ws,
       # The TermUI runtime + full identity are kept so client-local commands that
@@ -77,8 +79,24 @@ defmodule ArborTui.App do
       # HITL: tool calls awaiting the user's decision (FIFO; head is prompted),
       # and tools the user chose to always-allow this session.
       pending_approvals: [],
-      auto_approve: MapSet.new()
+      auto_approve: MapSet.new(),
+      # Terminal dimensions. The runtime only emits Event.Resize on CHANGE, so we
+      # query the real size up front (falling back to 80x24); resize events keep
+      # it current after that. The bordered frame draws to these.
+      width: width,
+      height: height
     }
+  end
+
+  # Best-effort initial terminal size (the runtime's Terminal GenServer). Returns
+  # {cols, rows}; falls back to 80x24 if it isn't up yet / can't be read.
+  defp initial_terminal_size do
+    case TermUI.Terminal.get_terminal_size() do
+      {:ok, {rows, cols}} when is_integer(cols) and is_integer(rows) -> {cols, rows}
+      _ -> {80, 24}
+    end
+  catch
+    _, _ -> {80, 24}
   end
 
   # ── event → msg ────────────────────────────────────────────────────────────
@@ -115,6 +133,10 @@ defmodule ArborTui.App do
   def event_to_msg(%Event.Key{char: char}, _state) when is_binary(char) and char != "",
     do: {:msg, {:char, char}}
 
+  # Terminal resize — track dimensions so the bordered frame redraws to the new
+  # width/height.
+  def event_to_msg(%Event.Resize{width: w, height: h}, _state), do: {:msg, {:resize, w, h}}
+
   def event_to_msg(_event, _state), do: :ignore
 
   # ── update ──────────────────────────────────────────────────────────────────
@@ -129,6 +151,8 @@ defmodule ArborTui.App do
   end
 
   def update(:clear_input, state), do: {%{state | input: ""}}
+
+  def update({:resize, w, h}, state), do: {%{state | width: w, height: h}}
 
   def update(:submit, %{input: ""} = state), do: {state}
 
@@ -600,31 +624,51 @@ defmodule ArborTui.App do
   # ── view ──────────────────────────────────────────────────────────────────
 
   @impl true
+  # Layout: a bordered frame (top border carries the title/agent/status, side
+  # borders wrap the wrapped+timestamped transcript, bottom border carries the
+  # turn status), with the input line (or HITL approval prompt) below the frame.
   def view(state) do
-    stack(:vertical, [header(state), text(""), transcript(state), text("")] ++ footer(state))
+    w = frame_width(state)
+    below = below_frame(state)
+    # Fill the screen: interior = height − top border − bottom border − below-frame
+    # lines. Painting every row is what stops terminal scrollback bleeding through.
+    interior_h = max(frame_height(state) - 2 - length(below), 1)
+
+    body = content_lines(state, w, interior_h)
+
+    stack(:vertical, [frame_top(state, w)] ++ body ++ [frame_bottom(state, w)] ++ below)
   end
 
-  # When a tool call is awaiting a decision, the footer becomes a modal approval
-  # prompt (head of the queue); otherwise the normal status + input lines.
-  defp footer(%{pending_approvals: [current | rest]}) do
-    more = if rest == [], do: "", else: "  (+#{length(rest)} more)"
+  # Terminal dims, clamped so the border math never goes negative on a tiny pane.
+  defp frame_width(state), do: max(Map.get(state, :width, 80), 24)
+  defp frame_height(state), do: max(Map.get(state, :height, 24), 6)
+  defp inner_width(w), do: max(w - 4, 1)
 
-    [
-      text(
-        "🔐 #{current.tool} wants to run#{format_args(current.args)}  (#{short_id(current.proposal_id)})#{more}",
-        Style.new() |> Style.fg(:yellow) |> Style.bold()
-      ),
-      text("❯ (y)es   (n)o   (a)lways-allow", Style.new() |> Style.fg(:yellow))
-    ]
+  # ── frame borders ─────────────────────────────────────────────────────────
+
+  defp frame_top(state, w) do
+    prefix = "╭─ Arbor "
+    status = "#{conn_dot(state.status)} #{status_label(state.status)}#{reconnect_hint(state)}"
+
+    # Show the agent segment only when attached/attaching — otherwise it'd read
+    # "not attached … not attached".
+    suffix =
+      if state.agent_id,
+        do: " #{short(state.agent_id)} #{status} ─╮",
+        else: " #{status} ─╮"
+
+    text(fill_between(prefix, suffix, w), border_style())
   end
 
-  defp footer(state), do: [status_line(state), input_line(state)]
+  defp frame_bottom(state, w) do
+    detail = if state.status_detail, do: " (#{state.status_detail})", else: ""
+    text(fill_between("╰─ #{turn_indicator(state)}#{detail} ", "─╯", w), border_style())
+  end
 
-  defp header(state) do
-    text(
-      "┌ Arbor · #{short(state.agent_id)} · #{conn_dot(state.status)} #{status_label(state.status)}#{reconnect_hint(state)} ─",
-      Style.new() |> Style.fg(:cyan) |> Style.bold()
-    )
+  # prefix + ─ filler + suffix, sized to exactly `w` columns (filler clamped ≥ 0).
+  defp fill_between(prefix, suffix, w) do
+    gap = w - String.length(prefix) - String.length(suffix)
+    prefix <> String.duplicate("─", max(gap, 0)) <> suffix
   end
 
   # While reconnecting, surface the "attempt N, retrying in …" tail the WSClient
@@ -634,52 +678,141 @@ defmodule ArborTui.App do
 
   defp reconnect_hint(_), do: ""
 
-  defp transcript(state) do
-    lines = Enum.map(state.messages, &message_line/1)
-    lines = lines ++ streaming_lines(state.streaming)
-    stack(:vertical, if(lines == [], do: [text("")], else: lines))
+  defp turn_indicator(%{turn: :thinking}), do: "◐ thinking…"
+  defp turn_indicator(_), do: "ready"
+
+  # ── transcript content (bordered, wrapped, role-coloured) ───────────────────
+
+  # column widths inside the frame: HH:MM (5) + gap (2) + role (7) = 14 indent
+  @ts_w 5
+  @role_w 7
+  @text_indent 14
+
+  defp content_lines(state, w, interior_h) do
+    rows =
+      (state.messages ++ streaming_msgs(state.streaming))
+      |> Enum.map(&message_block(&1, w))
+      |> Enum.intersperse([blank_row(w)])
+      |> List.flatten()
+
+    # Keep the newest `interior_h` rows visible (auto-scroll to bottom), then pad
+    # the bottom with blank framed rows so the interior always fills the height.
+    visible = Enum.take(rows, -interior_h)
+    visible ++ List.duplicate(blank_row(w), interior_h - length(visible))
   end
 
-  defp streaming_lines(nil), do: []
+  defp streaming_msgs(nil), do: []
+  defp streaming_msgs(t) when is_binary(t), do: [%{role: :agent, text: t, at: nil}]
 
-  defp streaming_lines(text) when is_binary(text),
-    do: [message_line(msg(:agent, text))]
+  # One message → one-or-more bordered rows: the head row carries timestamp +
+  # role + the first wrapped line; continuation rows are indented under the text.
+  defp message_block(%{role: role, text: body} = m, w) do
+    text_area = max(inner_width(w) - @text_indent, 1)
+    {label, rstyle} = frame_role(role)
+    [first | rest] = wrap_text(to_string(body), text_area)
 
-  defp message_line(%{role: role, text: body}) do
-    {prefix, style} = role_style(role)
-    text(prefix <> body, style)
+    ts = pad(m[:at] || "", @ts_w)
+    head_inner = ts <> "  " <> pad(label, @role_w) <> first
+    head = content_row(head_inner, w, rstyle)
+
+    cont =
+      Enum.map(rest, fn line ->
+        content_row(String.duplicate(" ", @text_indent) <> line, w, rstyle)
+      end)
+
+    [head | cont]
   end
 
-  defp status_line(state) do
-    indicator =
-      case state.turn do
-        :thinking -> "◐ thinking…"
-        _ -> "ready"
-      end
-
-    detail = if state.status_detail, do: " (#{state.status_detail})", else: ""
-
-    text(
-      "├─ #{indicator}#{detail}",
-      Style.new() |> Style.fg(:bright_black)
-    )
+  # A framed row: cyan side borders + the interior padded to the inner width and
+  # coloured by the speaker's style (so each row reads as one speaker).
+  defp content_row(inner, w, style) do
+    stack(:horizontal, [
+      text("│ ", border_style()),
+      text(pad(inner, inner_width(w)), style || Style.new()),
+      text(" │", border_style())
+    ])
   end
 
-  defp input_line(state) do
+  defp blank_row(w), do: content_row("", w, nil)
+
+  # ── input / approval (below the frame) ──────────────────────────────────────
+
+  # A pending tool call turns the area below the frame into a modal y/n/a prompt
+  # (head of the FIFO queue); otherwise it's the normal input line.
+  defp below_frame(%{pending_approvals: [current | rest]}) do
+    more = if rest == [], do: "", else: "  (+#{length(rest)} more)"
+
+    [
+      text(
+        "  🔐 #{current.tool} wants to run#{format_args(current.args)}  (#{short_id(current.proposal_id)})#{more}",
+        Style.new() |> Style.fg(:yellow) |> Style.bold()
+      ),
+      text("  ❯ (y)es   (n)o   (a)lways-allow", Style.new() |> Style.fg(:yellow))
+    ]
+  end
+
+  defp below_frame(state) do
     cursor = if state.turn == :thinking, do: "", else: "▏"
-    text("› " <> state.input <> cursor, Style.new() |> Style.bold())
+    [text("  › " <> state.input <> cursor, Style.new() |> Style.bold())]
   end
 
   # ── helpers ─────────────────────────────────────────────────────────────
 
-  defp role_style(:you), do: {"you   ▏ ", Style.new() |> Style.fg(:green) |> Style.bold()}
-  defp role_style(:agent), do: {"agent ▏ ", Style.new()}
-  defp role_style(:notification), do: {"💭 agent ▏ ", Style.new() |> Style.fg(:magenta)}
-  defp role_style(:tool), do: {"⚡ ", Style.new() |> Style.fg(:yellow)}
-  defp role_style(:system), do: {"• ", Style.new() |> Style.fg(:red)}
-  defp role_style(_), do: {"  ", Style.new()}
+  defp border_style, do: Style.new() |> Style.fg(:cyan)
 
-  defp msg(role, text), do: %{role: role, text: text}
+  defp frame_role(:you), do: {"you", Style.new() |> Style.fg(:green) |> Style.bold()}
+  defp frame_role(:agent), do: {"agent", Style.new()}
+  defp frame_role(:notification), do: {"note", Style.new() |> Style.fg(:magenta)}
+  defp frame_role(:tool), do: {"tool", Style.new() |> Style.fg(:yellow)}
+  defp frame_role(:system), do: {"sys", Style.new() |> Style.fg(:bright_black)}
+  defp frame_role(_), do: {"", Style.new()}
+
+  # Pad (right) or truncate a string to exactly `n` display columns.
+  defp pad(s, n) do
+    if String.length(s) > n, do: String.slice(s, 0, n), else: String.pad_trailing(s, n)
+  end
+
+  # Greedy word-wrap, preserving explicit newlines as hard breaks. Words longer
+  # than the width get their own line (and are truncated by pad/2 at render).
+  defp wrap_text("", _w), do: [""]
+
+  defp wrap_text(text, w) do
+    text
+    |> String.split("\n")
+    |> Enum.flat_map(&wrap_line(&1, w))
+    |> case do
+      [] -> [""]
+      lines -> lines
+    end
+  end
+
+  defp wrap_line(line, w) do
+    line
+    |> String.split(~r/\s+/, trim: true)
+    |> do_wrap(w, "", [])
+  end
+
+  defp do_wrap([], _w, "", []), do: [""]
+  defp do_wrap([], _w, cur, acc), do: Enum.reverse([cur | acc])
+  defp do_wrap([word | rest], w, "", acc), do: do_wrap(rest, w, word, acc)
+
+  defp do_wrap([word | rest], w, cur, acc) do
+    if String.length(cur) + 1 + String.length(word) <= w do
+      do_wrap(rest, w, cur <> " " <> word, acc)
+    else
+      do_wrap(rest, w, word, [cur | acc])
+    end
+  end
+
+  # Stamped at creation (in update/handler context) with the local wall-clock
+  # HH:MM, which the framed transcript shows in its timestamp column. NOT called
+  # from the pure view — streaming text builds its own unstamped map there.
+  defp msg(role, text), do: %{role: role, text: text, at: now_hhmm()}
+
+  defp now_hhmm do
+    {_date, {h, m, _s}} = :calendar.local_time()
+    "~2..0B:~2..0B" |> :io_lib.format([h, m]) |> IO.iodata_to_binary()
+  end
 
   defp role_atom("user"), do: :you
   defp role_atom(:user), do: :you
