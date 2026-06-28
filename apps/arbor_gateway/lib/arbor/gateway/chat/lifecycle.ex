@@ -73,7 +73,13 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
   Returns `{:ok, %{"agent_id", "running" => true}}` on success.
   """
   @spec start(String.t(), String.t(), keyword()) :: {:ok, ok_result()} | error()
-  def start(principal, id, opts \\ []) when is_binary(principal) and is_binary(id) do
+  def start(principal, token, opts \\ []) when is_binary(principal) and is_binary(token) do
+    with {:ok, id} <- resolve_token_or_error(principal, token) do
+      do_start_resolved(principal, id, opts)
+    end
+  end
+
+  defp do_start_resolved(principal, id, opts) do
     case bridge_call(agent_facade(), :authorize_restore, [principal, id, auth_opts(opts)]) do
       {:ok, {:ok, _profile}} ->
         case do_start(id, principal_id: principal) do
@@ -102,7 +108,13 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
   Returns `{:ok, %{"agent_id", "running" => false}}` on success.
   """
   @spec stop(String.t(), String.t(), keyword()) :: {:ok, ok_result()} | error()
-  def stop(principal, id, opts \\ []) when is_binary(principal) and is_binary(id) do
+  def stop(principal, token, opts \\ []) when is_binary(principal) and is_binary(token) do
+    with {:ok, id} <- resolve_token_or_error(principal, token) do
+      do_stop_resolved(principal, id, opts)
+    end
+  end
+
+  defp do_stop_resolved(principal, id, opts) do
     case bridge_call(agent_facade(), :authorize_stop, [principal, id, auth_opts(opts)]) do
       {:ok, :ok} ->
         {:ok, %{"agent_id" => id, "running" => false}}
@@ -213,6 +225,39 @@ defmodule Arbor.Gateway.Chat.Lifecycle do
   defp profile_agent_id(id) when is_binary(id), do: id
 
   defp unauthorized(reason), do: {:error, 403, "unauthorized: #{inspect(reason)}"}
+
+  # Resolve a user-typed token (full id, unique prefix, display_name, or alias) to
+  # a full agent_id, scoped to the principal's authorized agents — so /start and
+  # /stop accept the same shorthands as /agent. Maps resolution failure to the
+  # {:error, status, message} shape the router renders.
+  defp resolve_token_or_error(principal, token) do
+    case Arbor.Gateway.Chat.Agents.resolve_token(principal, token) do
+      {:ok, id} ->
+        {:ok, id}
+
+      {:error, {:ambiguous, candidates}} ->
+        {:error, 422, ambiguous_msg(token, candidates)}
+
+      {:error, :not_found} ->
+        # An `agent_`-shaped token falls through to the existing lifecycle gates
+        # (a real full id still works even if the listing path is degraded); a
+        # non-`agent_` shorthand that didn't match is a helpful 404.
+        if String.starts_with?(token, "agent_"),
+          do: {:ok, token},
+          else: {:error, 404, "no agent matches \"#{token}\""}
+    end
+  end
+
+  defp ambiguous_msg(token, candidates) do
+    list =
+      candidates
+      |> Enum.take(6)
+      |> Enum.map_join(", ", fn a ->
+        "#{a["display_name"]} (#{String.slice(a["agent_id"], 0, 14)}…)"
+      end)
+
+    "\"#{token}\" is ambiguous — matches #{list}. Be more specific."
+  end
 
   # Forward the gateway-verified `:signed_request` to the `Arbor.Agent`
   # authorize wrappers. `identity_verification` is config-ON in dev/prod, so the

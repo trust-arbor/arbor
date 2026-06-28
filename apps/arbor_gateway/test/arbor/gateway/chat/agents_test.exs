@@ -123,6 +123,35 @@ defmodule Arbor.Gateway.Chat.AgentsTest do
     end
   end
 
+  describe "Agents.resolve_token/2" do
+    test "exact full id resolves" do
+      assert {:ok, "agent_a"} = Agents.resolve_token("human_3caps", "agent_a")
+    end
+
+    test "display_name resolves case-insensitively" do
+      assert {:ok, "agent_a"} = Agents.resolve_token("human_3caps", "alice")
+      assert {:ok, "agent_b"} = Agents.resolve_token("human_3caps", "BOB")
+    end
+
+    test "a unique display_name prefix resolves" do
+      assert {:ok, "agent_a"} = Agents.resolve_token("human_3caps", "Al")
+    end
+
+    test "an ambiguous prefix returns the candidates" do
+      assert {:error, {:ambiguous, candidates}} = Agents.resolve_token("human_3caps", "agent_")
+      assert Enum.map(candidates, & &1["agent_id"]) |> Enum.sort() == ~w(agent_a agent_b agent_c)
+    end
+
+    test "no match returns :not_found" do
+      assert {:error, :not_found} = Agents.resolve_token("human_3caps", "zzz")
+    end
+
+    test "scoped to authorized agents — can't resolve one the principal can't chat with" do
+      # agent_a exists, but human_none holds no chat cap for it.
+      assert {:error, :not_found} = Agents.resolve_token("human_none", "agent_a")
+    end
+  end
+
   describe "GET /api/chat/agents" do
     test "returns N agents (running + stopped) for a principal with N chat caps" do
       conn =

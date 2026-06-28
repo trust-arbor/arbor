@@ -47,15 +47,27 @@ defmodule Arbor.Gateway.Chat.Socket do
 
   # ── Commands ──────────────────────────────────────────────────────
 
-  defp handle_command({:attach, %{agent_id: agent_id}}, state) when is_binary(agent_id) do
-    # Capability gate: the authenticated human must be authorized to chat with
-    # this agent. Fail-closed — no capability ⇒ no attach (and thus no reach into
-    # the agent's unified memory). The grant policy (who holds
-    # arbor://chat/agent/<id>) is set by the operator; see gateway-chat-api.md.
-    if authorized_to_chat?(state.principal, agent_id) do
-      do_attach(agent_id, state)
-    else
-      push({:error, :unauthorized}, state)
+  defp handle_command({:attach, %{agent_id: token}}, state) when is_binary(token) do
+    # Resolve the user-typed token (full id, unique prefix, display_name, or a
+    # saved alias) to a full agent_id — SCOPED to the principal's authorized
+    # agents, so resolution can't reveal agents the caller can't reach.
+    case Arbor.Gateway.Chat.Agents.resolve_token(state.principal, token) do
+      {:ok, agent_id} ->
+        attach_if_authorized(agent_id, state)
+
+      {:error, {:ambiguous, candidates}} ->
+        push({:error, ambiguous_message(token, candidates)}, state)
+
+      {:error, :not_found} ->
+        # An `agent_`-shaped token that didn't resolve in the list falls through
+        # to the capability gate (so a full id still works even if the listing
+        # path is degraded — same as before resolution existed). A non-`agent_`
+        # token is a shorthand/name that simply didn't match → helpful error.
+        if String.starts_with?(token, "agent_") do
+          attach_if_authorized(token, state)
+        else
+          push({:error, "no agent matches \"#{token}\""}, state)
+        end
     end
   end
 
@@ -253,6 +265,16 @@ defmodule Arbor.Gateway.Chat.Socket do
     end
   end
 
+  # Capability gate (fail-closed): the authenticated human must hold
+  # arbor://chat/agent/<id>. No cap ⇒ no attach, no reach into the agent's memory.
+  defp attach_if_authorized(agent_id, state) do
+    if authorized_to_chat?(state.principal, agent_id) do
+      do_attach(agent_id, state)
+    else
+      push({:error, :unauthorized}, state)
+    end
+  end
+
   defp do_attach(agent_id, state) do
     case bridge_call(engagement_store(), :resolve_or_create, [
            agent_id,
@@ -403,6 +425,18 @@ defmodule Arbor.Gateway.Chat.Socket do
       {:ok, {:ok, _cap}} -> true
       _ -> false
     end
+  end
+
+  # "river" is ambiguous — matches River (agent_64b250…), river-bot (agent_7a…).
+  defp ambiguous_message(token, candidates) do
+    list =
+      candidates
+      |> Enum.take(6)
+      |> Enum.map_join(", ", fn a ->
+        "#{a["display_name"]} (#{String.slice(a["agent_id"], 0, 14)}…)"
+      end)
+
+    "\"#{token}\" is ambiguous — matches #{list}. Be more specific."
   end
 
   # ── Async results + forwarded signals ─────────────────────────────
