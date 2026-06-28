@@ -47,6 +47,25 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       assert SessionCore.build_assistant_message("  ", ~U[2026-04-06 12:00:00Z]) == nil
       assert SessionCore.build_assistant_message(nil, ~U[2026-04-06 12:00:00Z]) == nil
     end
+
+    test "strips prompt-injection-defense delimiters the model echoed back" do
+      # Observed live: a local granite model prefixed an empty
+      # <data_NONCE></data_NONCE> pair before its actual answer. The scaffolding
+      # must never reach user-visible output.
+      echoed = "<data_440a04db5b776185></data_440a04db5b776185>Hello! I am River."
+      msg = SessionCore.build_assistant_message(echoed, ~U[2026-04-06 12:00:00Z])
+      assert msg["content"] == "Hello! I am River."
+
+      # A reply fully wrapped in the delimiters keeps only the inner words.
+      wrapped = "<data_deadbeefdeadbeef>the real reply</data_deadbeefdeadbeef>"
+
+      assert SessionCore.build_assistant_message(wrapped, ~U[2026-04-06 12:00:00Z])["content"] ==
+               "the real reply"
+
+      # A reply that is ONLY echoed (empty) delimiters collapses to nil.
+      only_tags = "<data_0123456789abcdef></data_0123456789abcdef>"
+      assert SessionCore.build_assistant_message(only_tags, ~U[2026-04-06 12:00:00Z]) == nil
+    end
   end
 
   # ===========================================================================

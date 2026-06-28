@@ -76,4 +76,27 @@ defmodule Arbor.Common.PromptSanitizerTest do
       assert {:safe, 1.0} = PromptSanitizer.scan(42)
     end
   end
+
+  describe "strip_delimiters/1" do
+    test "removes <data_NONCE> open/close tags, keeping inner content" do
+      nonce = PromptSanitizer.generate_nonce()
+      wrapped = PromptSanitizer.wrap("the real reply", nonce)
+      assert PromptSanitizer.strip_delimiters(wrapped) == "the real reply"
+    end
+
+    test "removes an echoed empty delimiter pair (the observed model leak)" do
+      assert PromptSanitizer.strip_delimiters(
+               "<data_440a04db5b776185></data_440a04db5b776185>Hello!"
+             ) == "Hello!"
+    end
+
+    test "leaves text without delimiters unchanged" do
+      assert PromptSanitizer.strip_delimiters("just a normal reply") == "just a normal reply"
+    end
+
+    test "does not strip look-alikes that aren't a 16-hex nonce" do
+      assert PromptSanitizer.strip_delimiters("<data_xyz>kept</data_xyz>") ==
+               "<data_xyz>kept</data_xyz>"
+    end
+  end
 end

@@ -55,6 +55,30 @@ defmodule Arbor.Common.PromptSanitizer do
     """
   end
 
+  # Matches a data-section delimiter: `<data_NONCE>` or `</data_NONCE>` where
+  # NONCE is the 16-char hex from `generate_nonce/0`. Specific enough that real
+  # assistant prose won't match it.
+  @delimiter_re ~r|</?data_[0-9a-fA-F]{16}>|
+
+  @doc """
+  Strip `<data_NONCE>` / `</data_NONCE>` delimiters from text, keeping any inner
+  content.
+
+  These delimiters are injected into PROMPTS by `wrap/2` to fence untrusted data.
+  Smaller models sometimes ECHO them back into their reply (observed: a local
+  granite model prefixing an empty `<data_NONCE></data_NONCE>` pair before its
+  answer). Run model RESPONSES through this before display/persist so the
+  injection-defense scaffolding never leaks into user-visible output. Removes only
+  the delimiter tags — inner text (the model's actual words) is preserved.
+
+  Nonce-agnostic by design: the response handler doesn't need to know which nonce
+  was used for the turn's prompt.
+  """
+  @spec strip_delimiters(String.t()) :: String.t()
+  def strip_delimiters(text) when is_binary(text) do
+    String.replace(text, @delimiter_re, "")
+  end
+
   @doc """
   Scan content for prompt injection patterns.
 

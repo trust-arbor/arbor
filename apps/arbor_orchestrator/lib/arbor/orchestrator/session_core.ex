@@ -52,7 +52,10 @@ defmodule Arbor.Orchestrator.SessionCore do
   def build_assistant_message("", _timestamp), do: nil
 
   def build_assistant_message(content, timestamp) do
-    trimmed = String.trim(content)
+    # Strip any prompt-injection-defense delimiters (`<data_NONCE>`) the model
+    # echoed back — smaller local models sometimes parrot the fencing tags into
+    # their reply. Keeps the model's actual words; removes only the scaffolding.
+    trimmed = content |> Arbor.Common.PromptSanitizer.strip_delimiters() |> String.trim()
 
     if trimmed == "" do
       nil
