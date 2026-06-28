@@ -451,6 +451,29 @@ defmodule Arbor.Agent do
     end
   end
 
+  @doc """
+  Best-effort model id from an agent's registry OR profile metadata.
+
+  Tolerant of both metadata shapes — the live-registry `:model_config` and the
+  persisted-profile `:last_model_config` — and of atom- vs string-keyed maps:
+  profile metadata round-trips through JSON, which string-keys everything except
+  a few known atoms, so `last_model_config` and its inner `id` come back as
+  strings. Returns the model id string, or `nil` if none is recorded.
+  """
+  @spec model_id_from_metadata(map() | nil) :: String.t() | nil
+  def model_id_from_metadata(metadata) when is_map(metadata) do
+    config =
+      Map.get(metadata, :model_config) || Map.get(metadata, "model_config") ||
+        Map.get(metadata, :last_model_config) || Map.get(metadata, "last_model_config")
+
+    case config do
+      %{} = c -> Map.get(c, :id) || Map.get(c, "id")
+      _ -> nil
+    end
+  end
+
+  def model_id_from_metadata(_), do: nil
+
   defp build_summary(agent_id, profile) do
     running? = match?({:ok, _}, lookup(agent_id))
     trust = safe_call(fn -> trust_summary_for(agent_id) end)
@@ -465,7 +488,7 @@ defmodule Arbor.Agent do
 
       # Configuration (how it's set up)
       template: profile.template,
-      model: get_in(profile.metadata || %{}, [:last_model_config, :model]),
+      model: model_id_from_metadata(profile.metadata),
 
       # Authority (what it can do)
       trust_tier: profile.trust_tier,

@@ -93,7 +93,7 @@ defmodule Mix.Tasks.Arbor.Agent do
               name: (profile && profile.display_name) || "?",
               template: (profile && format_template(profile.template)) || "?",
               status: "running",
-              model: get_in(entry.metadata, [:model_config, :id]) || "?"
+              model: Arbor.Agent.model_id_from_metadata(entry.metadata) || "?"
             }
           end)
 
@@ -106,7 +106,7 @@ defmodule Mix.Tasks.Arbor.Agent do
               name: p.display_name || "?",
               template: format_template(p.template),
               status: "stopped",
-              model: "-"
+              model: Arbor.Agent.model_id_from_metadata(p.metadata) || "-"
             }
           end)
 
@@ -118,7 +118,7 @@ defmodule Mix.Tasks.Arbor.Agent do
             name: Map.get(entry.metadata, :display_name, "?"),
             template: "?",
             status: "running",
-            model: get_in(entry.metadata, [:model_config, :id]) || "?"
+            model: Arbor.Agent.model_id_from_metadata(entry.metadata) || "?"
           }
         end)
       end
@@ -391,9 +391,13 @@ defmodule Mix.Tasks.Arbor.Agent do
         if running_entry do
           Mix.shell().info("  Status:       running")
           Mix.shell().info("  PID:          #{inspect(running_entry.pid)}")
-          model = get_in(running_entry.metadata, [:model_config, :id])
+          model = Arbor.Agent.model_id_from_metadata(running_entry.metadata)
           if model, do: Mix.shell().info("  Model:        #{model}")
-          provider = get_in(running_entry.metadata, [:model_config, :provider])
+
+          provider =
+            get_in(running_entry.metadata, [:model_config, :provider]) ||
+              get_in(running_entry.metadata, ["model_config", "provider"])
+
           if provider, do: Mix.shell().info("  Provider:     #{provider}")
 
           uptime_ms = System.monotonic_time(:millisecond) - (running_entry.registered_at || 0)
@@ -402,6 +406,8 @@ defmodule Mix.Tasks.Arbor.Agent do
             do: Mix.shell().info("  Uptime:       #{format_duration(uptime_ms)}")
         else
           Mix.shell().info("  Status:       stopped")
+          model = Arbor.Agent.model_id_from_metadata(profile.metadata)
+          if model, do: Mix.shell().info("  Model:        #{model}")
           Mix.shell().info("\n  Resume with: mix arbor.agent resume #{profile.display_name}")
         end
 
