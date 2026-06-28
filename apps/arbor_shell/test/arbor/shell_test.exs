@@ -84,6 +84,18 @@ defmodule Arbor.ShellTest do
         Shell.execute("curl http://example.com", sandbox: :strict)
     end
 
+    test "regression: an unrecognized sandbox level degrades to :strict, never raises" do
+      # The trust-tier path feeds levels this module doesn't define (:standard for
+      # :trusted, :permissive for :veteran). They used to raise FunctionClauseError
+      # and crash shell execution; now they degrade to the most restrictive (:strict).
+      for level <- [:standard, :permissive, :bogus] do
+        assert Arbor.Shell.Sandbox.check("ls", level) == Arbor.Shell.Sandbox.check("ls", :strict)
+
+        assert Arbor.Shell.Sandbox.check("curl http://x", level) ==
+                 {:error, {:not_in_allowlist, "curl"}}
+      end
+    end
+
     test "none sandbox allows everything" do
       # This would be dangerous in production, but tests run in isolation
       {:ok, _} = Shell.execute("echo dangerous", sandbox: :none)
@@ -202,6 +214,11 @@ defmodule Arbor.ShellTest do
       assert %{level: :strict, allowlist: list} = Shell.sandbox_config(:strict)
       assert is_list(list)
       assert %{level: :container} = Shell.sandbox_config(:container)
+    end
+
+    test "an unrecognized level degrades to the :strict config, never raises" do
+      assert Shell.sandbox_config(:standard) == Shell.sandbox_config(:strict)
+      assert Shell.sandbox_config(:permissive) == Shell.sandbox_config(:strict)
     end
   end
 
