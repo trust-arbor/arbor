@@ -64,7 +64,7 @@ defmodule Arbor.Gateway.Chat.Router do
   # Body: {"template": "...", "name": "..."(opt), "model": "..."(opt)}.
   post "/agents" do
     with_principal(conn, fn principal ->
-      lifecycle_result(conn, Lifecycle.create(principal, conn.body_params || %{}))
+      lifecycle_result(conn, Lifecycle.create(principal, conn.body_params || %{}, sr_opts(conn)))
     end)
   end
 
@@ -72,14 +72,14 @@ defmodule Arbor.Gateway.Chat.Router do
   # `arbor://agent/lifecycle/restore`.
   post "/agents/:id/start" do
     with_principal(conn, fn principal ->
-      lifecycle_result(conn, Lifecycle.start(principal, id))
+      lifecycle_result(conn, Lifecycle.start(principal, id, sr_opts(conn)))
     end)
   end
 
   # Signed HTTP POST: stop a running agent. Gated on `arbor://agent/stop/<id>`.
   post "/agents/:id/stop" do
     with_principal(conn, fn principal ->
-      lifecycle_result(conn, Lifecycle.stop(principal, id))
+      lifecycle_result(conn, Lifecycle.stop(principal, id, sr_opts(conn)))
     end)
   end
 
@@ -95,6 +95,13 @@ defmodule Arbor.Gateway.Chat.Router do
       _ -> send_resp(conn, 401, "unauthorized")
     end
   end
+
+  # The parent pipeline's SignedRequestAuth verified the Ed25519 signature and
+  # stashed the bound `SignedRequest` struct in assigns. Forward it so the
+  # capability-gated lifecycle ops can satisfy AuthDecision's identity-binding
+  # step (`identity_verification` is config-ON in dev/prod) — without it the
+  # gates reject authenticated requests as `:missing_signed_request`.
+  defp sr_opts(conn), do: [signed_request: conn.assigns[:signed_request]]
 
   defp lifecycle_result(conn, {:ok, body}) do
     conn

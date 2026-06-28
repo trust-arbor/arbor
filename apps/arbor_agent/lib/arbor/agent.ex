@@ -48,7 +48,7 @@ defmodule Arbor.Agent do
   - Save a final checkpoint on graceful shutdown
   """
 
-  alias Arbor.Agent.{Lifecycle, ProfileStore, Registry, Supervisor}
+  alias Arbor.Agent.{Lifecycle, ProfileStore, Registry}
 
   require Logger
 
@@ -215,12 +215,12 @@ defmodule Arbor.Agent do
   - `{:error, {:unauthorized, reason}}` if caller lacks capability
   - `{:error, :not_found}` if agent is not running
   """
-  @spec authorize_stop(String.t(), String.t()) ::
+  @spec authorize_stop(String.t(), String.t(), keyword()) ::
           :ok | {:error, {:unauthorized, term()} | :not_found}
-  def authorize_stop(caller_id, agent_id) do
+  def authorize_stop(caller_id, agent_id, opts \\ []) do
     resource = "arbor://agent/stop/#{agent_id}"
 
-    case authorize(caller_id, resource, :stop) do
+    case authorize(caller_id, resource, :stop, opts) do
       :ok -> stop(agent_id)
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
@@ -241,9 +241,12 @@ defmodule Arbor.Agent do
           {:ok, term()} | {:error, {:unauthorized, term()} | term()}
   def authorize_create(caller_id, agent_id, opts \\ []) do
     resource = "arbor://agent/lifecycle/create"
+    # `:signed_request` (if forwarded by the gateway) gates the create; the
+    # remaining opts are creation opts passed through to `create_agent/2`.
+    {auth, create_opts} = Keyword.pop(opts, :signed_request)
 
-    case authorize(caller_id, resource, :create) do
-      :ok -> create_agent(agent_id, opts)
+    case authorize(caller_id, resource, :create, signed_request: auth) do
+      :ok -> create_agent(agent_id, create_opts)
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
   end
@@ -280,12 +283,12 @@ defmodule Arbor.Agent do
   - `caller_id` - The ID of the entity requesting the restore
   - `agent_id` - The agent to restore
   """
-  @spec authorize_restore(String.t(), String.t()) ::
+  @spec authorize_restore(String.t(), String.t(), keyword()) ::
           {:ok, term()} | {:error, {:unauthorized, term()} | term()}
-  def authorize_restore(caller_id, agent_id) do
+  def authorize_restore(caller_id, agent_id, opts \\ []) do
     resource = "arbor://agent/lifecycle/restore"
 
-    case authorize(caller_id, resource, :restore) do
+    case authorize(caller_id, resource, :restore, opts) do
       :ok -> restore_agent(agent_id)
       {:error, reason} -> {:error, {:unauthorized, reason}}
     end
@@ -341,7 +344,18 @@ defmodule Arbor.Agent do
   """
   @spec stop(String.t()) :: :ok | {:error, :not_found}
   def stop(agent_id) do
-    Supervisor.stop_agent_by_id(agent_id)
+    # Agents created via Lifecycle run under per-user BranchSupervisors (the
+    # modern path: UserSupervisor → user_sup:<principal> → BranchSupervisor), NOT
+    # the legacy `Arbor.Agent.Supervisor` DynamicSupervisor — so `stop_agent_by_id`
+    # always `:not_found`ed for them. Route teardown through `Lifecycle.stop/1`,
+    # which stops the whole BranchSupervisor tree and unregisters. We check the
+    # registry first so a genuinely-absent agent still reports `{:error,
+    # :not_found}` (e.g. the gateway's 404), rather than the idempotent `:ok`
+    # `Lifecycle.stop/1` returns unconditionally.
+    case Registry.whereis(agent_id) do
+      {:ok, _pid} -> Lifecycle.stop(agent_id)
+      {:error, :not_found} -> {:error, :not_found}
+    end
   end
 
   @doc """
@@ -606,15 +620,31 @@ defmodule Arbor.Agent do
   # Shared authorization helper for new lifecycle wrappers.
   # Guards against CapabilityStore not running (e.g., in unit tests
   # that don't start the full security supervision tree).
-  defp authorize(caller_id, resource, action) do
+  defp authorize(caller_id, resource, action, opts \\ []) do
     if security_available?() do
-      case Arbor.Security.authorize(caller_id, resource, action) do
+      case Arbor.Security.authorize(caller_id, resource, action, auth_opts(opts)) do
         {:ok, :authorized} -> :ok
         {:ok, :pending_approval, _proposal_id} -> :ok
         {:error, reason} -> {:error, reason}
       end
     else
       :ok
+    end
+  end
+
+  # When the caller forwards a `:signed_request` it has ALREADY verified (the
+  # gateway's SignedRequestAuth verifies the Ed25519 per-request signature, binds
+  # the signer to the principal, and consumes the single-use nonce before calling
+  # us), we mark the auth context `identity_verified: true` so AuthDecision skips
+  # re-verification. We must NOT re-verify here: `identity_verification` is config-ON
+  # in dev/prod, and the nonce is single-use — re-running `Verifier.verify` would
+  # trip the replay guard (`:replayed_nonce`). Without the forwarded proof these
+  # gates would instead reject as `:missing_signed_request`. The signed_request is
+  # still threaded for audit/event context.
+  defp auth_opts(opts) do
+    case Keyword.get(opts, :signed_request) do
+      nil -> []
+      sr -> [signed_request: sr, identity_verified: true]
     end
   end
 
