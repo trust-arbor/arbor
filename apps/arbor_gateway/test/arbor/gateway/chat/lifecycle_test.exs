@@ -19,23 +19,26 @@ defmodule Arbor.Gateway.Chat.LifecycleTest.FakeAgent do
   def authorize_create(_principal, _display_name, _opts),
     do: {:error, {:unauthorized, :no_capability}}
 
-  # authorize_restore/2 — gate for /start. "human_ok" authorized.
-  def authorize_restore("human_ok", id) do
-    send(self_pid(), {:authorize_restore, id})
+  # authorize_restore/3 — gate for /start. "human_ok" authorized. The arity-3
+  # form mirrors the real Arbor.Agent facade, which takes `opts` (the gateway
+  # forwards the verified `:signed_request` there); we capture opts so a test can
+  # assert the threading.
+  def authorize_restore("human_ok", id, opts) do
+    send(self_pid(), {:authorize_restore, id, opts})
     {:ok, %{agent_id: id}}
   end
 
-  def authorize_restore("human_missing", _id), do: {:error, :not_found}
-  def authorize_restore(_principal, _id), do: {:error, {:unauthorized, :no_capability}}
+  def authorize_restore("human_missing", _id, _opts), do: {:error, :not_found}
+  def authorize_restore(_principal, _id, _opts), do: {:error, {:unauthorized, :no_capability}}
 
-  # authorize_stop/2 — gate + stop for /stop.
-  def authorize_stop("human_ok", id) do
-    send(self_pid(), {:authorize_stop, id})
+  # authorize_stop/3 — gate + stop for /stop (arity-3 mirrors the real facade).
+  def authorize_stop("human_ok", id, opts) do
+    send(self_pid(), {:authorize_stop, id, opts})
     :ok
   end
 
-  def authorize_stop("human_missing", _id), do: {:error, :not_found}
-  def authorize_stop(_principal, _id), do: {:error, {:unauthorized, :no_capability}}
+  def authorize_stop("human_missing", _id, _opts), do: {:error, :not_found}
+  def authorize_stop(_principal, _id, _opts), do: {:error, {:unauthorized, :no_capability}}
 
   # Stash the test pid in the app env so the fake (running in the router's
   # process, which here is the test process via Plug.Test) can message it.
@@ -89,6 +92,10 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
 
   @opts Router.init([])
 
+  # Stand-in for the SignedRequest the gateway pipeline verifies upstream; the
+  # endpoints must forward exactly this into the capability check's opts.
+  @sentinel_signed_request :sentinel_verified_signed_request
+
   setup do
     Application.put_env(:arbor_gateway, :chat_agent_facade, FakeAgent)
     Application.put_env(:arbor_gateway, :chat_lifecycle, FakeLifecycle)
@@ -120,6 +127,10 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
     |> put_req_header("content-type", "application/json")
     |> Map.put(:body_params, body)
     |> assign(:agent_id, principal)
+    # The parent pipeline's SignedRequestAuth stashes the verified SignedRequest
+    # here; the lifecycle endpoints must forward it to the cap check. We use a
+    # sentinel so tests can assert the threading end-to-end.
+    |> assign(:signed_request, @sentinel_signed_request)
     |> Router.call(@opts)
   end
 
@@ -221,7 +232,9 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
 
       assert conn.status == 200
       assert Jason.decode!(conn.resp_body)["agent_id"] == "agent_existing"
-      assert_received {:authorize_restore, "agent_existing"}
+      assert_received {:authorize_restore, "agent_existing", auth_opts}
+      # The gateway forwards the pipeline-verified signed_request into the cap check.
+      assert auth_opts[:signed_request] == @sentinel_signed_request
       assert_received {:lifecycle_start, "agent_existing", opts}
       assert opts[:principal_id] == "human_ok"
     end
@@ -250,7 +263,9 @@ defmodule Arbor.Gateway.Chat.LifecycleTest do
       body = Jason.decode!(conn.resp_body)
       assert body["agent_id"] == "agent_running"
       assert body["running"] == false
-      assert_received {:authorize_stop, "agent_running"}
+      assert_received {:authorize_stop, "agent_running", auth_opts}
+      # The gateway forwards the pipeline-verified signed_request into the cap check.
+      assert auth_opts[:signed_request] == @sentinel_signed_request
     end
 
     test "unauthorized → 403" do
