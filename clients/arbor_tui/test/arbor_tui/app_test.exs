@@ -20,7 +20,15 @@ defmodule ArborTui.AppTest do
       streaming: nil,
       turn: :idle,
       pending_approvals: [],
-      auto_approve: MapSet.new()
+      auto_approve: MapSet.new(),
+      # Redirect attach-driven save_last_agent writes to a per-test tmp file so the
+      # suite never writes "last_agent = agent_target" into the developer's real
+      # ~/.arbor/tui.state (state_path is nil in production → the real path).
+      state_path:
+        Path.join(
+          System.tmp_dir!(),
+          "arbor_tui_app_test_state_#{System.unique_integer([:positive])}"
+        )
     }
 
     Map.merge(base, overrides)
