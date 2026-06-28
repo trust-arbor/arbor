@@ -274,7 +274,13 @@ defmodule Arbor.Gateway.Chat.Socket do
   # Engagement frame + any already-pending approvals (so a reconnecting client
   # sees tool calls still awaiting its decision).
   defp push_attach_frames(engagement, state) do
-    {frames, state} = event_frames({:engagement, %{id: engagement.id, transcript: []}}, state)
+    display_name = Arbor.Gateway.Chat.Agents.display_name_for(state.agent_id)
+
+    {frames, state} =
+      event_frames(
+        {:engagement, %{id: engagement.id, transcript: [], display_name: display_name}},
+        state
+      )
 
     case pending_approvals(state.agent_id) do
       [] ->

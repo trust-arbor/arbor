@@ -204,7 +204,15 @@ defmodule Arbor.Gateway.Chat.SocketTest do
     test "resolves a :user engagement and replies with an engagement frame", %{state: state} do
       {:push, [event], st} = send_frame(%{type: "attach", agent_id: "agent_a"}, state)
 
-      assert event == %{"type" => "engagement", "engagement_id" => "eng_test", "transcript" => []}
+      # The engagement frame carries the resolved agent display name so the client
+      # can label the header (no profile/registry in test → falls back to the id).
+      assert event == %{
+               "type" => "engagement",
+               "engagement_id" => "eng_test",
+               "transcript" => [],
+               "display_name" => "agent_a"
+             }
+
       assert st.agent_id == "agent_a"
       assert st.engagement_id == "eng_test"
       assert st.subscribed?
