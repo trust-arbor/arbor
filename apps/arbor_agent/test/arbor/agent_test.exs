@@ -74,4 +74,28 @@ defmodule Arbor.AgentTest do
       assert {:error, :not_found} = Arbor.Agent.summary("nonexistent")
     end
   end
+
+  describe "model_id_from_metadata/1" do
+    test "reads the live-registry shape (:model_config, atom keys)" do
+      assert Arbor.Agent.model_id_from_metadata(%{model_config: %{id: "gpt-oss", provider: :x}}) ==
+               "gpt-oss"
+    end
+
+    test "reads the persisted-profile shape (:last_model_config, atom keys)" do
+      assert Arbor.Agent.model_id_from_metadata(%{last_model_config: %{id: "claude"}}) == "claude"
+    end
+
+    test "reads the JSON-reloaded shape (string keys, outer AND inner)" do
+      # normalize_metadata only atomizes known keys, so last_model_config + its
+      # inner id come back string-keyed after a profile round-trips through JSON.
+      assert Arbor.Agent.model_id_from_metadata(%{"last_model_config" => %{"id" => "haiku"}}) ==
+               "haiku"
+    end
+
+    test "returns nil when no model is recorded (the old (unknown) case)" do
+      assert Arbor.Agent.model_id_from_metadata(%{"template_source" => %{}}) == nil
+      assert Arbor.Agent.model_id_from_metadata(%{}) == nil
+      assert Arbor.Agent.model_id_from_metadata(nil) == nil
+    end
+  end
 end

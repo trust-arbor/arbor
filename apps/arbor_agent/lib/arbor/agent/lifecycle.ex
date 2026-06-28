@@ -345,8 +345,12 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   defp extract_model_config(profile, opts) do
+    meta = profile.metadata || %{}
+
+    # Reloaded-from-JSON profiles string-key this (it's not a known-atom key).
     Keyword.get(opts, :model_config) ||
-      get_in(profile.metadata || %{}, [:last_model_config]) ||
+      Map.get(meta, :last_model_config) ||
+      Map.get(meta, "last_model_config") ||
       %{}
   end
 
@@ -1246,6 +1250,7 @@ defmodule Arbor.Agent.Lifecycle do
       opts
       |> Keyword.get(:metadata, %{})
       |> maybe_put_template_source(Keyword.get(opts, :template_source))
+      |> maybe_put_model_config(Keyword.get(opts, :model_config))
 
     # Inject created_by from tenant_context if present
     case Keyword.get(opts, :tenant_context) do
@@ -1262,6 +1267,15 @@ defmodule Arbor.Agent.Lifecycle do
   # Record where the agent's template came from (user/shipped/legacy_json/module
   # + abs path). Stored string-keyed so it round-trips through JSON profile
   # persistence unchanged.
+  # Persist the model_config the agent was created with as `:last_model_config`,
+  # so the model is recoverable for display (mix arbor.agent summary/list/status)
+  # and for re-registration on a later start. (JSON round-trip string-keys it on
+  # reload; readers use Arbor.Agent.model_id_from_metadata/1, which is tolerant.)
+  defp maybe_put_model_config(metadata, %{} = mc) when map_size(mc) > 0,
+    do: Map.put(metadata, :last_model_config, mc)
+
+  defp maybe_put_model_config(metadata, _), do: metadata
+
   defp maybe_put_template_source(metadata, %{} = source) when map_size(source) > 0 do
     Map.put(metadata, "template_source", source)
   end
