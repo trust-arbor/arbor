@@ -83,6 +83,40 @@ defmodule Arbor.Gateway.Chat.Router do
     end)
   end
 
+  # Signed HTTP GET: the principal's saved agent aliases (name → agent_id).
+  get "/aliases" do
+    with_principal(conn, fn principal ->
+      json(conn, 200, %{aliases: Agents.list_aliases(principal)})
+    end)
+  end
+
+  # Signed HTTP POST: save an alias. Body: {"name": "...", "target": "..."}
+  # where target is anything resolve_token accepts (id, prefix, or display_name).
+  post "/aliases" do
+    with_principal(conn, fn principal ->
+      params = conn.body_params || %{}
+
+      case {params["name"], params["target"]} do
+        {name, target} when is_binary(name) and is_binary(target) ->
+          case Agents.set_alias(principal, name, target) do
+            {:ok, agent_id} -> json(conn, 200, %{"name" => name, "agent_id" => agent_id})
+            {:error, reason} -> json(conn, 422, %{"error" => alias_error(reason)})
+          end
+
+        _ ->
+          json(conn, 422, %{"error" => "name and target are required"})
+      end
+    end)
+  end
+
+  # Signed HTTP DELETE: remove an alias by name (idempotent).
+  delete "/aliases/:name" do
+    with_principal(conn, fn principal ->
+      Agents.remove_alias(principal, name)
+      json(conn, 200, %{"name" => name, "removed" => true})
+    end)
+  end
+
   match _ do
     send_resp(conn, 404, "not found")
   end
@@ -102,6 +136,19 @@ defmodule Arbor.Gateway.Chat.Router do
   # step (`identity_verification` is config-ON in dev/prod) — without it the
   # gates reject authenticated requests as `:missing_signed_request`.
   defp sr_opts(conn), do: [signed_request: conn.assigns[:signed_request]]
+
+  defp json(conn, status, body) do
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(status, Jason.encode!(body))
+  end
+
+  defp alias_error(:empty_alias), do: "alias name cannot be empty"
+  defp alias_error(:alias_has_spaces), do: "alias name cannot contain spaces"
+  defp alias_error(:alias_looks_like_id), do: ~s(alias name cannot start with "agent_")
+  defp alias_error(:not_found), do: "no agent matches that target"
+  defp alias_error({:ambiguous, _}), do: "target is ambiguous — be more specific"
+  defp alias_error(other), do: "could not save alias: #{inspect(other)}"
 
   defp lifecycle_result(conn, {:ok, body}) do
     conn

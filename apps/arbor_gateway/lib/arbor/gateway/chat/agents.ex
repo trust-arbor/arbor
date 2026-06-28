@@ -107,7 +107,7 @@ defmodule Arbor.Gateway.Chat.Agents do
         # 3→5: first non-empty tier decides; a tie within a tier is ambiguous
         [
           Enum.filter(agents, &(String.downcase(&1["display_name"] || "") == down)),
-          Enum.filter(agents, &String.starts_with?(&1["agent_id"], token)),
+          Enum.filter(agents, &id_prefix?(&1["agent_id"], token)),
           Enum.filter(
             agents,
             &String.starts_with?(String.downcase(&1["display_name"] || ""), down)
@@ -122,9 +122,77 @@ defmodule Arbor.Gateway.Chat.Agents do
     end
   end
 
-  # Per-principal user-defined aliases (`nickname => agent_id`). Stubbed empty in
-  # Phase 1; Phase 2 backs this with a per-user store + the /alias command.
-  defp aliases_for(_principal), do: %{}
+  @doc """
+  List the principal's user-defined aliases as a `%{name => agent_id}` map.
+  """
+  @spec list_aliases(String.t()) :: %{optional(String.t()) => String.t()}
+  def list_aliases(principal) when is_binary(principal), do: aliases_for(principal)
+
+  @doc """
+  Save an alias `name` pointing at whatever `token` resolves to (a full id,
+  prefix, or display_name) for `principal`. Stores the resolved full agent_id so
+  the alias is concrete; a later destroy makes it stale (resolution drops it).
+
+  Returns `{:ok, agent_id}`, or `{:error, reason}` if the name is invalid or the
+  token doesn't resolve to a single authorized agent.
+  """
+  @spec set_alias(String.t(), String.t(), String.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def set_alias(principal, name, token)
+      when is_binary(principal) and is_binary(name) and is_binary(token) do
+    name = String.trim(name)
+
+    with :ok <- valid_alias_name(name),
+         {:ok, agent_id} <- resolve_token(principal, token) do
+      updated = Map.put(aliases_for(principal), name, agent_id)
+
+      case bridge_call(user_config(), :put, [principal, :agent_aliases, updated]) do
+        {:ok, :ok} -> {:ok, agent_id}
+        {:ok, _} -> {:ok, agent_id}
+        {:error, reason} -> {:error, {:store_unavailable, reason}}
+      end
+    end
+  end
+
+  @doc "Remove an alias by `name`. Idempotent — succeeds even if it didn't exist."
+  @spec remove_alias(String.t(), String.t()) :: :ok | {:error, term()}
+  def remove_alias(principal, name) when is_binary(principal) and is_binary(name) do
+    updated = Map.delete(aliases_for(principal), String.trim(name))
+
+    case bridge_call(user_config(), :put, [principal, :agent_aliases, updated]) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, {:store_unavailable, reason}}
+    end
+  end
+
+  # An alias must be a non-empty single token and must NOT look like an agent id —
+  # otherwise it could shadow / be confused with the real id namespace.
+  defp valid_alias_name(""), do: {:error, :empty_alias}
+
+  defp valid_alias_name(name) do
+    cond do
+      String.contains?(name, " ") -> {:error, :alias_has_spaces}
+      String.starts_with?(name, "agent_") -> {:error, :alias_looks_like_id}
+      true -> :ok
+    end
+  end
+
+  # An id prefix matches with OR without the literal "agent_" — so both
+  # "agent_64b2…" and the bare hex "64b2…" (what users naturally copy from the
+  # truncated /agents listing) resolve.
+  defp id_prefix?("agent_" <> hex = id, token),
+    do: String.starts_with?(id, token) or String.starts_with?(hex, token)
+
+  defp id_prefix?(id, token), do: String.starts_with?(id, token)
+
+  # Per-principal user-defined aliases (`name => agent_id`), backed by the
+  # per-user config store.
+  defp aliases_for(principal) do
+    case bridge_call(user_config(), :get, [principal, :agent_aliases]) do
+      {:ok, %{} = m} -> m
+      _ -> %{}
+    end
+  end
 
   # ── Authorization: chat-cap ids ───────────────────────────────────────────
 
@@ -275,4 +343,7 @@ defmodule Arbor.Gateway.Chat.Agents do
 
   defp lifecycle_mod,
     do: Application.get_env(:arbor_gateway, :chat_lifecycle, Arbor.Agent.Lifecycle)
+
+  defp user_config,
+    do: Application.get_env(:arbor_gateway, :chat_user_config, Arbor.Agent.UserConfig)
 end
