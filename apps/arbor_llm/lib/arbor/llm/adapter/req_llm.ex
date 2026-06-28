@@ -162,7 +162,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
            %{embeddings: [[float()]], model: String.t(), usage: map(), dimensions: pos_integer()}}
           | {:error, term()}
   def embed(texts, model, opts) when is_list(texts) and is_binary(model) do
-    arbor_provider = Keyword.get(opts, :provider) || infer_provider_for_embedding(model)
+    arbor_provider = resolve_embed_provider(opts, model)
 
     cond do
       arbor_provider == nil ->
@@ -182,6 +182,20 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
           {:error, _} = err ->
             err
         end
+    end
+  end
+
+  # Normalize the embed provider to its canonical arbor_llm string (e.g. the
+  # `:lmstudio` atom from the arbor_ai option format → "lm_studio") BEFORE it
+  # flows to `ProviderRegistry` / `default_base_url_for/1`, which are binary-only.
+  # The generate_text path normalizes at its dispatch boundary; the embed path
+  # read `opts[:provider]` raw, so an atom provider crashed
+  # `default_base_url_for/1` with a FunctionClauseError — flooding the log on
+  # every memory embed. `nil` stays `nil` so the missing-provider branch fires.
+  defp resolve_embed_provider(opts, model) do
+    case Keyword.get(opts, :provider) || infer_provider_for_embedding(model) do
+      nil -> nil
+      provider -> ProviderRegistry.normalize(provider)
     end
   end
 
