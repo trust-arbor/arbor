@@ -64,7 +64,7 @@ defmodule ArborTui.AppTest do
       s = model(%{input: "hello"}) |> then(&up(:submit, &1))
       assert s.input == ""
       assert s.turn == :thinking
-      assert List.last(s.messages) == %{role: :you, text: "hello"}
+      assert %{role: :you, text: "hello"} = List.last(s.messages)
     end
 
     test "empty submit is a no-op" do
@@ -80,7 +80,7 @@ defmodule ArborTui.AppTest do
 
       s = up(ev, model())
       assert s.engagement_id == "eng_1"
-      assert s.messages == [%{role: :you, text: "earlier"}]
+      assert [%{role: :you, text: "earlier"}] = s.messages
     end
 
     test "delta accumulates streaming; message finalizes and clears it" do
@@ -91,20 +91,20 @@ defmodule ArborTui.AppTest do
 
       s = up({:server_event, {:message, %{"role" => "assistant", "content" => "Hello"}}}, s)
       assert s.streaming == nil
-      assert List.last(s.messages) == %{role: :agent, text: "Hello"}
+      assert %{role: :agent, text: "Hello"} = List.last(s.messages)
 
       assert up({:server_event, {:turn_complete, %{}}}, s).turn == :idle
     end
 
     test "notification interleaves as the 💭 channel" do
       s = up({:server_event, {:notification, %{text: "audit done", kind: "thought"}}}, model())
-      assert List.last(s.messages) == %{role: :notification, text: "audit done"}
+      assert %{role: :notification, text: "audit done"} = List.last(s.messages)
     end
 
     test "error surfaces and resets the turn" do
       s = up({:server_event, {:error, "unauthorized"}}, model(%{turn: :thinking}))
       assert s.turn == :idle
-      assert List.last(s.messages) == %{role: :system, text: "error: unauthorized"}
+      assert %{role: :system, text: "error: unauthorized"} = List.last(s.messages)
     end
   end
 
@@ -152,7 +152,7 @@ defmodule ArborTui.AppTest do
       # it still records the user message locally.
       s = model(%{status: :reconnecting, input: "hello", ws: nil})
       s = up(:submit, s)
-      assert List.last(s.messages) == %{role: :you, text: "hello"}
+      assert %{role: :you, text: "hello"} = List.last(s.messages)
     end
   end
 
@@ -234,7 +234,7 @@ defmodule ArborTui.AppTest do
       # gateway-forward path (records a :you message + thinking turn), NOT the
       # local-command path (which would emit a :system note only).
       s = up(:submit, model(%{input: "/model gpt-4", agent_id: "agent_x", status: :connected}))
-      assert List.last(s.messages) == %{role: :you, text: "/model gpt-4"}
+      assert %{role: :you, text: "/model gpt-4"} = List.last(s.messages)
       assert s.turn == :thinking
     end
   end
