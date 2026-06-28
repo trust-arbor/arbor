@@ -267,6 +267,9 @@ defmodule ArborTui.App do
   # they fold into the model AND may issue a WS command.
   def update({:lifecycle_result, op, result}, state), do: {render_lifecycle(op, result, state)}
 
+  # Async results of the /alias HTTP calls (list/set/remove).
+  def update({:alias_result, op, result}, state), do: {render_alias(op, result, state)}
+
   # Server events forwarded by the WS client.
   def update({:server_event, event}, state), do: {handle_event(event, state)}
 
@@ -288,6 +291,8 @@ defmodule ArborTui.App do
   defp handle_input("/stop", state), do: cmd_stop("", state)
   defp handle_input("/connect " <> rest, state), do: cmd_connect(String.trim(rest), state)
   defp handle_input("/connect", state), do: cmd_connect("", state)
+  defp handle_input("/alias " <> rest, state), do: cmd_alias(String.trim(rest), state)
+  defp handle_input("/alias", state), do: cmd_alias("", state)
   defp handle_input("/help", state), do: cmd_help(state)
 
   defp handle_input(text, state) do
@@ -466,15 +471,69 @@ defmodule ArborTui.App do
     }
   end
 
+  # /alias — list / set / remove per-principal agent nicknames. Resolution +
+  # storage are server-side (so every client sees them); these just call the
+  # gateway and render the async result.
+  defp cmd_alias("", state) do
+    spawn_alias(state, :list, fn c, id, url -> c.list(id, url) end)
+    note(state, "Fetching aliases…")
+  end
+
+  defp cmd_alias("rm " <> name, state), do: cmd_alias_remove(String.trim(name), state)
+  defp cmd_alias("remove " <> name, state), do: cmd_alias_remove(String.trim(name), state)
+
+  defp cmd_alias(rest, state) do
+    case String.split(rest, ~r/\s+/, parts: 2) do
+      [name, target] ->
+        spawn_alias(state, {:set, name}, fn c, id, url -> c.set(id, url, name, target) end)
+        note(state, "Saving alias #{name} → #{target}…")
+
+      _ ->
+        note(
+          state,
+          "usage: /alias <name> <id|prefix|name>  ·  /alias rm <name>  ·  /alias (list)"
+        )
+    end
+  end
+
+  defp cmd_alias_remove("", state), do: note(state, "usage: /alias rm <name>")
+
+  defp cmd_alias_remove(name, state) do
+    spawn_alias(state, {:remove, name}, fn c, id, url -> c.remove(id, url, name) end)
+    note(state, "Removing alias #{name}…")
+  end
+
+  defp spawn_alias(%{runtime: runtime, identity: identity, gateway_url: url}, op, call)
+       when not is_nil(runtime) and not is_nil(identity) do
+    client = aliases_client()
+
+    spawn(fn ->
+      result = call.(client, identity, url)
+      TermUI.Runtime.send_message(runtime, :root, {:alias_result, op, result})
+    end)
+
+    :ok
+  end
+
+  defp spawn_alias(_state, _op, _call), do: :ok
+
+  defp aliases_client,
+    do: Application.get_env(:arbor_tui, :aliases_client, ArborTui.AliasesClient)
+
+  # A command acknowledgement: clear the input and append a system line.
+  defp note(state, text),
+    do: %{state | input: "", messages: state.messages ++ [msg(:system, text)]}
+
   # /help — LOCAL help (client commands); other /commands go to the agent.
   defp cmd_help(state) do
     lines = [
       "Client commands (handled locally):",
       "  /agents              list the agents you can chat with",
-      "  /agent <id>          attach to / switch to an agent",
+      "  /agent <id|name>     attach (id, unique prefix, display_name, or alias)",
+      "  /alias [<n> <tgt>]   list, or save a nickname (e.g. /alias r 64b2);  /alias rm <n>",
       "  /new <template> [nm] create+start an agent and attach to it",
-      "  /start <id>          start a stopped agent and attach to it",
-      "  /stop <id>           stop a running agent",
+      "  /start <id|name>     start a stopped agent and attach to it",
+      "  /stop <id|name>      stop a running agent",
       "  /connect <url>       change the gateway URL and reconnect",
       "  /help                this help",
       "  /quit                exit the TUI",
@@ -557,6 +616,32 @@ defmodule ArborTui.App do
   defp render_lifecycle(op, {:ok, _other}, state) do
     %{state | messages: state.messages ++ [msg(:system, "#{op_label(op)}: unexpected response")]}
   end
+
+  # ── alias results (/alias) ──────────────────────────────────────────────────
+
+  defp render_alias(:list, {:ok, aliases}, state) when map_size(aliases) == 0 do
+    append_system(state, ["No aliases set. /alias <name> <id|prefix|name> to add one."])
+  end
+
+  defp render_alias(:list, {:ok, aliases}, state) do
+    lines = aliases |> Enum.sort() |> Enum.map(fn {n, id} -> "  #{n} → #{short(id)}" end)
+    append_system(state, ["Aliases:" | lines])
+  end
+
+  defp render_alias({:set, name}, {:ok, %{"agent_id" => id}}, state),
+    do: append_system(state, ["Alias #{name} → #{short(id)}"])
+
+  defp render_alias({:remove, name}, {:ok, _}, state),
+    do: append_system(state, ["Removed alias #{name}"])
+
+  defp render_alias(_op, {:error, {:http_error, _status, message}}, state),
+    do: append_system(state, ["alias error: #{message}"])
+
+  defp render_alias(_op, {:error, reason}, state),
+    do: append_system(state, ["alias error: #{inspect(reason)}"])
+
+  defp append_system(state, lines),
+    do: %{state | messages: state.messages ++ Enum.map(lines, &msg(:system, &1))}
 
   # Switch the target agent and (re)connect+attach — mirrors cmd_agent's attach,
   # but driven from an async result and prepending a custom note. Resets the
@@ -964,7 +1049,7 @@ defmodule ArborTui.App do
   # common server-handled ones (CommandIntake routes the latter). Agent-id
   # completion after `/agent `/`/start `/`/stop ` is a follow-up (needs the
   # /agents list cached client-side).
-  @slash_commands ~w(/help /agents /agent /new /start /stop /connect /quit
+  @slash_commands ~w(/help /agents /agent /alias /new /start /stop /connect /quit
                      /model /status /tools /trust /memory /compact /clear /session)
 
   # Complete a partial slash-command WORD (before the first space). One match →
