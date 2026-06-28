@@ -61,6 +61,71 @@ defmodule Arbor.Gateway.Chat.Agents do
     resolve_agent(agent_id, list_profiles())["display_name"] || agent_id
   end
 
+  @typedoc "Why a token couldn't be resolved to a single agent."
+  @type resolve_error :: :not_found | {:ambiguous, [agent()]}
+
+  @doc """
+  Resolve a user-typed token to a full agent_id, SCOPED to the agents `principal`
+  is authorized to chat with (so a prefix can never reveal an agent the caller
+  can't access). Lets users type something short instead of the full
+  `agent_<64hex>`.
+
+  Match precedence (first tier with any match wins; >1 in that tier ⇒ ambiguous):
+
+    1. a user-defined alias (exact), if it still points at an authorized agent
+    2. an exact full agent_id
+    3. an exact display_name (case-insensitive)
+    4. a unique agent_id prefix
+    5. a unique display_name prefix (case-insensitive)
+
+  Returns `{:ok, agent_id}`, `{:error, :not_found}`, or
+  `{:error, {:ambiguous, candidates}}` (the matching agent maps, for a helpful
+  "did you mean" message).
+  """
+  @spec resolve_token(String.t(), String.t()) :: {:ok, String.t()} | {:error, resolve_error()}
+  def resolve_token(principal, token) when is_binary(principal) and is_binary(token) do
+    do_resolve(String.trim(token), list_for_principal(principal), aliases_for(principal))
+  end
+
+  defp do_resolve("", _agents, _aliases), do: {:error, :not_found}
+
+  defp do_resolve(token, agents, aliases) do
+    ids = Enum.map(agents, & &1["agent_id"])
+    aliased = Map.get(aliases, token)
+    down = String.downcase(token)
+
+    cond do
+      # 1. user alias — only if it still resolves to an authorized agent
+      is_binary(aliased) and aliased in ids ->
+        {:ok, aliased}
+
+      # 2. exact full id
+      token in ids ->
+        {:ok, token}
+
+      true ->
+        # 3→5: first non-empty tier decides; a tie within a tier is ambiguous
+        [
+          Enum.filter(agents, &(String.downcase(&1["display_name"] || "") == down)),
+          Enum.filter(agents, &String.starts_with?(&1["agent_id"], token)),
+          Enum.filter(
+            agents,
+            &String.starts_with?(String.downcase(&1["display_name"] || ""), down)
+          )
+        ]
+        |> Enum.find(&(&1 != []))
+        |> case do
+          nil -> {:error, :not_found}
+          [only] -> {:ok, only["agent_id"]}
+          many -> {:error, {:ambiguous, many}}
+        end
+    end
+  end
+
+  # Per-principal user-defined aliases (`nickname => agent_id`). Stubbed empty in
+  # Phase 1; Phase 2 backs this with a per-user store + the /alias command.
+  defp aliases_for(_principal), do: %{}
+
   # ── Authorization: chat-cap ids ───────────────────────────────────────────
 
   defp chat_agent_ids(principal) do
