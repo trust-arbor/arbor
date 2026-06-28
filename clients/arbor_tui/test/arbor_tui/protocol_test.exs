@@ -24,7 +24,16 @@ defmodule ArborTui.ProtocolTest do
   describe "decode/1 (server → client) — mirrors Arbor.Gateway.Chat.Protocol.encode/1" do
     test "engagement" do
       json = ~s({"type":"engagement","engagement_id":"eng_1","transcript":[]})
-      assert Protocol.decode(json) == {:ok, {:engagement, %{id: "eng_1", transcript: []}}}
+
+      assert Protocol.decode(json) ==
+               {:ok, {:engagement, %{id: "eng_1", transcript: [], display_name: nil}}}
+    end
+
+    test "engagement carries the agent display name when present" do
+      json =
+        ~s({"type":"engagement","engagement_id":"eng_1","transcript":[],"display_name":"River"})
+
+      assert {:ok, {:engagement, %{display_name: "River"}}} = Protocol.decode(json)
     end
 
     test "delta / message / turn_complete" do

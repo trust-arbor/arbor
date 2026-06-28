@@ -11,6 +11,7 @@ defmodule ArborTui.AppTest do
       ws: nil,
       identity_id: "agent_me",
       agent_id: "agent_target",
+      agent_name: nil,
       gateway_url: "ws://localhost:4000",
       status: :connecting,
       status_detail: nil,
