@@ -17,6 +17,9 @@ defmodule ArborTui.AppTest do
       status_detail: nil,
       engagement_id: nil,
       input: "",
+      history: [],
+      hist_pos: nil,
+      draft: "",
       messages: [],
       streaming: nil,
       turn: :idle,
@@ -70,6 +73,50 @@ defmodule ArborTui.AppTest do
 
     test "empty submit is a no-op" do
       assert up(:submit, model()).messages == []
+    end
+  end
+
+  describe "input history + tab completion" do
+    test "submit pushes to history (newest first), dedups consecutive, skips empty" do
+      assert up(:submit, model(%{input: "hello"})).history == ["hello"]
+      # consecutive duplicate is not re-pushed
+      assert up(:submit, model(%{input: "hello", history: ["hello"]})).history == ["hello"]
+      # empty input doesn't touch history
+      assert up(:submit, model(%{input: "", history: ["x"]})).history == ["x"]
+    end
+
+    test "↑ recalls older entries (clamped); ↓ walks back to the live draft" do
+      s = model(%{history: ["second", "first"], input: "draft"})
+
+      s = up(:history_prev, s)
+      assert s.input == "second"
+      s = up(:history_prev, s)
+      assert s.input == "first"
+      # clamps at the oldest
+      s = up(:history_prev, s)
+      assert s.input == "first"
+
+      s = up(:history_next, s)
+      assert s.input == "second"
+      # past the newest restores the saved draft and exits navigation
+      s = up(:history_next, s)
+      assert s.input == "draft"
+      assert s.hist_pos == nil
+    end
+
+    test "↑ on empty history is a no-op" do
+      assert up(:history_prev, model(%{input: "x"})).input == "x"
+    end
+
+    test "Tab completes a partial slash command" do
+      # single match → fill + trailing space
+      assert up(:complete, model(%{input: "/he"})).input == "/help "
+      # several matches → longest common prefix (/agents, /agent → /agent)
+      assert up(:complete, model(%{input: "/ag"})).input == "/agent"
+      # non-slash input is untouched
+      assert up(:complete, model(%{input: "hello"})).input == "hello"
+      # past the command word (a space) → untouched (agent-id completion is TODO)
+      assert up(:complete, model(%{input: "/agent foo"})).input == "/agent foo"
     end
   end
 

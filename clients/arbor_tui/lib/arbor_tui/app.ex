@@ -76,6 +76,12 @@ defmodule ArborTui.App do
       agent_name: nil,
       engagement_id: nil,
       input: "",
+      # Input history (newest first) for ↑/↓ recall. `hist_pos` is nil while
+      # editing live, or an index into `history` while navigating; `draft` holds
+      # the in-progress line so ↓ past the newest entry restores it.
+      history: [],
+      hist_pos: nil,
+      draft: "",
       messages: messages,
       streaming: nil,
       turn: :idle,
@@ -132,6 +138,10 @@ defmodule ArborTui.App do
   def event_to_msg(%Event.Key{key: :enter}, _state), do: {:msg, :submit}
   def event_to_msg(%Event.Key{key: :backspace}, _state), do: {:msg, :backspace}
   def event_to_msg(%Event.Key{key: :escape}, _state), do: {:msg, :clear_input}
+  # ↑/↓ walk the input history; Tab completes a partial slash command.
+  def event_to_msg(%Event.Key{key: :up}, _state), do: {:msg, :history_prev}
+  def event_to_msg(%Event.Key{key: :down}, _state), do: {:msg, :history_next}
+  def event_to_msg(%Event.Key{key: :tab}, _state), do: {:msg, :complete}
 
   def event_to_msg(%Event.Key{char: char}, _state) when is_binary(char) and char != "",
     do: {:msg, {:char, char}}
@@ -147,19 +157,52 @@ defmodule ArborTui.App do
   @impl true
   def update(:quit, state), do: {state, [Command.quit(:normal)]}
 
-  def update({:char, c}, state), do: {%{state | input: state.input <> c}}
+  # Typing/erasing exits history navigation (the line is now a fresh edit).
+  def update({:char, c}, state), do: {%{state | input: state.input <> c, hist_pos: nil}}
 
   def update(:backspace, state) do
-    {%{state | input: String.slice(state.input, 0..-2//1)}}
+    {%{state | input: String.slice(state.input, 0..-2//1), hist_pos: nil}}
   end
 
-  def update(:clear_input, state), do: {%{state | input: ""}}
+  def update(:clear_input, state), do: {%{state | input: "", hist_pos: nil}}
 
   def update({:resize, w, h}, state), do: {%{state | width: w, height: h}}
+
+  # ↑ — recall an older history entry (saving the live draft on first step).
+  def update(:history_prev, %{history: []} = state), do: {state}
+
+  def update(:history_prev, state) do
+    pos =
+      if state.hist_pos == nil, do: 0, else: min(state.hist_pos + 1, length(state.history) - 1)
+
+    draft = if state.hist_pos == nil, do: state.input, else: state.draft
+    {%{state | input: Enum.at(state.history, pos), hist_pos: pos, draft: draft}}
+  end
+
+  # ↓ — step toward newer entries; past the newest restores the saved draft.
+  def update(:history_next, %{hist_pos: nil} = state), do: {state}
+
+  def update(:history_next, %{hist_pos: 0} = state),
+    do: {%{state | input: state.draft, hist_pos: nil}}
+
+  def update(:history_next, state) do
+    pos = state.hist_pos - 1
+    {%{state | input: Enum.at(state.history, pos), hist_pos: pos}}
+  end
+
+  # Tab — complete a partial slash command.
+  def update(:complete, state), do: {%{state | input: complete_input(state.input), hist_pos: nil}}
 
   def update(:submit, %{input: ""} = state), do: {state}
 
   def update(:submit, %{input: text} = state) do
+    state = %{
+      state
+      | history: push_history(state.history, String.trim(text)),
+        hist_pos: nil,
+        draft: ""
+    }
+
     case String.trim(text) do
       "/quit" -> {%{state | input: ""}, [Command.quit(:normal)]}
       trimmed -> {handle_input(trimmed, state)}
@@ -909,4 +952,44 @@ defmodule ArborTui.App do
   end
 
   defp format_args(_), do: ""
+
+  # ── input history + completion ──────────────────────────────────────────────
+
+  # Newest first; skip empties and consecutive duplicates.
+  defp push_history(history, ""), do: history
+  defp push_history([last | _] = history, last), do: history
+  defp push_history(history, entry), do: [entry | history]
+
+  # Known slash commands for Tab completion — the client-local set plus the
+  # common server-handled ones (CommandIntake routes the latter). Agent-id
+  # completion after `/agent `/`/start `/`/stop ` is a follow-up (needs the
+  # /agents list cached client-side).
+  @slash_commands ~w(/help /agents /agent /new /start /stop /connect /quit
+                     /model /status /tools /trust /memory /compact /clear /session)
+
+  # Complete a partial slash-command WORD (before the first space). One match →
+  # fill it + a trailing space; several → fill their longest common prefix;
+  # otherwise leave the input untouched.
+  defp complete_input("/" <> _ = input) do
+    if String.contains?(input, " ") do
+      input
+    else
+      case Enum.filter(@slash_commands, &String.starts_with?(&1, input)) do
+        [] -> input
+        [only] -> only <> " "
+        many -> common_prefix(many)
+      end
+    end
+  end
+
+  defp complete_input(input), do: input
+
+  defp common_prefix([first | rest]),
+    do: Enum.reduce(rest, first, &common_prefix2/2)
+
+  defp common_prefix2(a, b) do
+    Enum.zip(String.graphemes(a), String.graphemes(b))
+    |> Enum.take_while(fn {x, y} -> x == y end)
+    |> Enum.map_join("", &elem(&1, 0))
+  end
 end
