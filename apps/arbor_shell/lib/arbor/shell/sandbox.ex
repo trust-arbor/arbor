@@ -18,7 +18,13 @@ defmodule Arbor.Shell.Sandbox do
   subshells (`$()`, backticks), pipes (`|`), or redirections (`>`, `<`).
   """
 
+  # The recognized sandbox levels. An UNrecognized level (e.g. the trust-tier
+  # vocabulary's :standard/:permissive, which this module doesn't define) is
+  # tolerated by check/2 + config/1 — it degrades to the most restrictive level
+  # (:strict) rather than raising. See the finish-retiring-trust-tiers roadmap item.
   @type level :: :none | :basic | :strict | :container
+
+  require Logger
 
   # Shell metacharacters that enable command injection
   @shell_metacharacters [";", "&&", "||", "|", "`", "$(", ">", "<", "\n", "\r"]
@@ -117,6 +123,19 @@ defmodule Arbor.Shell.Sandbox do
     # Container mode would delegate to container execution
     # For now, treat as :basic until container support is added
     {:error, :container_not_implemented}
+  end
+
+  # Fail-safe: an unrecognized level degrades to the most restrictive recognized
+  # one (:strict) instead of raising. The trust-tier path feeds sandbox levels in
+  # a vocabulary this module doesn't share (:standard/:permissive from
+  # TrustBounds), which previously crashed shell execution for :trusted/:veteran
+  # agents with a FunctionClauseError. Degrade DOWN only — never widen.
+  def check(command, level) do
+    Logger.warning(
+      "[Shell.Sandbox] unrecognized sandbox level #{inspect(level)} — degrading to :strict"
+    )
+
+    check(command, :strict)
   end
 
   @doc """
@@ -237,6 +256,16 @@ defmodule Arbor.Shell.Sandbox do
       blocked_flags: [],
       allowlist: nil
     }
+  end
+
+  # Fail-safe: an unrecognized level uses the most restrictive recognized config
+  # (:strict) instead of raising. (Mirrors check/2 — see its comment.)
+  def config(level) do
+    Logger.warning(
+      "[Shell.Sandbox] unrecognized sandbox level #{inspect(level)} — using :strict config"
+    )
+
+    config(:strict)
   end
 
   # Private functions
