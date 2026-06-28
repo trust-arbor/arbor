@@ -78,16 +78,25 @@ defmodule Arbor.Common.PromptSanitizerTest do
   end
 
   describe "strip_delimiters/1" do
-    test "removes <data_NONCE> open/close tags, keeping inner content" do
+    test "removes the WHOLE echoed <data_NONCE> block, inner content included" do
+      # Output fences are always echoed scaffolding (the model never generates the
+      # prompt's nonce), so the inner content is junk and the whole block goes.
       nonce = PromptSanitizer.generate_nonce()
-      wrapped = PromptSanitizer.wrap("the real reply", nonce)
-      assert PromptSanitizer.strip_delimiters(wrapped) == "the real reply"
+      wrapped = PromptSanitizer.wrap("None", nonce)
+      assert PromptSanitizer.strip_delimiters(wrapped) == ""
+      assert PromptSanitizer.strip_delimiters(wrapped <> "the real reply") == "the real reply"
     end
 
     test "removes an echoed empty delimiter pair (the observed model leak)" do
       assert PromptSanitizer.strip_delimiters(
                "<data_440a04db5b776185></data_440a04db5b776185>Hello!"
              ) == "Hello!"
+    end
+
+    test "removes an echoed block carrying junk inner content (e.g. \"None\")" do
+      assert PromptSanitizer.strip_delimiters(
+               "<data_6e0f9a6584cf97da>None</data_6e0f9a6584cf97da>\n\nHi River!"
+             ) == "Hi River!"
     end
 
     test "leaves text without delimiters unchanged" do

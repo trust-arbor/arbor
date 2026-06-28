@@ -323,6 +323,19 @@ defmodule Arbor.Gateway.Chat.SocketTest do
       assert message["message"]["content"] == "echo:hello"
     end
 
+    test "strips echoed prompt-injection-defense fences from the assistant reply",
+         %{state: state} do
+      st = attach(state)
+
+      # A reply the (small local) model prefixed with an echoed <data_NONCE> fence
+      # carrying junk inner content. The gateway must scrub it for every client.
+      reply = "<data_6e0f9a6584cf97da>None</data_6e0f9a6584cf97da>\n\nHi River!"
+      {:push, frames, _} = Socket.handle_info({:query_result, {:ok, %{content: reply}}}, st)
+
+      message = frames |> decode_frames() |> Enum.find(&(&1["type"] == "message"))
+      assert message["message"]["content"] == "Hi River!"
+    end
+
     test "send before attach → :not_attached error", %{state: state} do
       {:push, [event], _} = send_frame(%{type: "send", text: "hi"}, state)
       assert event == %{"type" => "error", "reason" => "not_attached"}

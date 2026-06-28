@@ -411,8 +411,13 @@ defmodule Arbor.Gateway.Chat.Socket do
   def handle_info({:query_result, {:ok, %{} = result}}, state) do
     # Session.send_message returns an %Arbor.Contracts.Pipeline.Response{} whose
     # text lives in :content. (:text/"text" kept as fallbacks for other shapes.)
+    # Strip any prompt-injection-defense fences the model echoed back (smaller
+    # local models do this), so EVERY chat client (TUI, dashboard) gets clean
+    # text — the build_assistant_message strip only covers the persisted message,
+    # not this streamed/returned reply.
     text =
-      Map.get(result, :content) || Map.get(result, :text) || Map.get(result, "text") || ""
+      (Map.get(result, :content) || Map.get(result, :text) || Map.get(result, "text") || "")
+      |> Arbor.Common.PromptSanitizer.strip_delimiters()
 
     usage = Map.get(result, :usage) || Map.get(result, "usage") || %{}
 
