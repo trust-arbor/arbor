@@ -277,6 +277,7 @@ defmodule Arbor.Agent.TemplateStore do
       name: character.name,
       character: character,
       trust_tier: trust_tier,
+      sandbox_level: Arbor.Contracts.Security.SandboxLevel.coerce(data["sandbox_level"]),
       initial_goals: data["initial_goals"] || [],
       required_capabilities: data["required_capabilities"] || [],
       nature: data["nature"] || "",

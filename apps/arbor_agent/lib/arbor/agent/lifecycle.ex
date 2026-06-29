@@ -461,10 +461,14 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   # Build opts for the Executor child
-  defp build_executor_opts(agent_id, _profile, opts) do
+  defp build_executor_opts(agent_id, profile, opts) do
+    sandbox_level =
+      Keyword.get(opts, :sandbox_level) || Map.get(profile, :sandbox_level) || :strict
+
     Keyword.merge(opts,
       agent_id: agent_id,
-      trust_tier: Keyword.get(opts, :trust_tier, :established)
+      trust_tier: Keyword.get(opts, :trust_tier, :established),
+      sandbox_level: Arbor.Contracts.Security.SandboxLevel.coerce(sandbox_level)
     )
   end
 
@@ -1230,6 +1234,8 @@ defmodule Arbor.Agent.Lifecycle do
       display_name: display_name,
       character: character,
       trust_tier: Keyword.get(opts, :trust_tier) || :untrusted,
+      sandbox_level:
+        Arbor.Contracts.Security.SandboxLevel.coerce(Keyword.get(opts, :sandbox_level)),
       template: template,
       initial_goals: Keyword.get(opts, :initial_goals, []),
       initial_capabilities: Keyword.get(opts, :capabilities, []),
