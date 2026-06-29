@@ -31,6 +31,12 @@ relationship_style:
 required_capabilities:
 - description: "Run DOT session pipelines"
   resource: "arbor://orchestrator/execute"
+- description: "Write to own sandbox workspace"
+  resource: "arbor://code/write/self/sandbox/*"
+  constraints:
+    rate_limit: 10
+- description: "Compile own sandbox code"
+  resource: "arbor://code/compile/self/sandbox"
 source: "builtin"
 trust_tier: "probationary"
 values:

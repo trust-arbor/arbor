@@ -954,22 +954,36 @@ defmodule Arbor.Agent.Lifecycle do
 
     results =
       Enum.map(capabilities, fn cap ->
-        resource = cap[:resource] || cap["resource"]
+        # Self-scoped (`/self/`) URIs resolve to the agent's id, and constraint
+        # keys are atomized — so a template can declare a constrained self-cap
+        # (e.g. `code/write/self/sandbox/*` with `rate_limit: 10`) and it grants
+        # identically to how the trust system grants the baseline.
+        resource = resolve_self_uri(cap[:resource] || cap["resource"], agent_id)
+        constraints = normalize_capability_constraints(cap[:constraints] || cap["constraints"])
 
-        if MapSet.member?(existing_uris, resource) do
-          :skipped
-        else
-          case Arbor.Security.grant(principal: agent_id, resource: resource) do
-            {:ok, _cap} ->
-              :ok
+        cond do
+          is_nil(resource) ->
+            :skipped
 
-            {:error, reason} ->
-              Logger.warning("Failed to grant capability #{resource}: #{inspect(reason)}",
-                agent_id: agent_id
-              )
+          MapSet.member?(existing_uris, resource) ->
+            :skipped
 
-              {:error, reason}
-          end
+          true ->
+            case Arbor.Security.grant(
+                   principal: agent_id,
+                   resource: resource,
+                   constraints: constraints
+                 ) do
+              {:ok, _cap} ->
+                :ok
+
+              {:error, reason} ->
+                Logger.warning("Failed to grant capability #{resource}: #{inspect(reason)}",
+                  agent_id: agent_id
+                )
+
+                {:error, reason}
+            end
         end
       end)
 
@@ -983,6 +997,32 @@ defmodule Arbor.Agent.Lifecycle do
     end
 
     :ok
+  end
+
+  # Expand self-scoped capability URIs to the agent's id. Mirrors the trust
+  # system's `resolve_uri/2` so template-declared `/self/` caps grant to the same
+  # concrete resource the baseline grant would.
+  defp resolve_self_uri(nil, _agent_id), do: nil
+
+  defp resolve_self_uri(uri, agent_id) when is_binary(uri) do
+    uri
+    |> String.replace("/self/", "/#{agent_id}/")
+    |> String.replace(~r"/self$", "/#{agent_id}")
+  end
+
+  # Atomize the known capability constraint keys (`rate_limit`,
+  # `requires_approval`) so constraints declared as strings in template
+  # frontmatter enforce identically to atom-keyed constraints. Unknown keys are
+  # dropped rather than passed through as un-enforceable string keys.
+  defp normalize_capability_constraints(nil), do: %{}
+
+  defp normalize_capability_constraints(constraints) when is_map(constraints) do
+    Enum.reduce(constraints, %{}, fn
+      {k, v}, acc when k in [:rate_limit, :requires_approval] -> Map.put(acc, k, v)
+      {"rate_limit", v}, acc -> Map.put(acc, :rate_limit, v)
+      {"requires_approval", v}, acc -> Map.put(acc, :requires_approval, v)
+      _other, acc -> acc
+    end)
   end
 
   # Grant workspace-scoped fs capabilities when tenant_context provides a workspace root.
@@ -1393,12 +1433,11 @@ defmodule Arbor.Agent.Lifecycle do
 
           apply(store, :store_profile, [profile])
 
-          # Grant tier capabilities
-          if function_exported?(trust, :grant_tier_capabilities, 2) do
-            apply(trust, :grant_tier_capabilities, [agent_id, trust_tier])
-          end
-
-          Logger.info("Trust profile created for #{agent_id} at tier #{trust_tier}")
+          # The universal baseline capabilities are granted tier-independently by
+          # the trust system on profile creation (Manager + CapabilitySync); any
+          # role-specific self-capabilities come from the agent's template
+          # (required_capabilities), not from a trust tier.
+          Logger.info("Trust profile created for #{agent_id}")
       end
 
       # Apply template-specific trust preset if available

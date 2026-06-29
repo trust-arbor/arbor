@@ -413,6 +413,48 @@ defmodule Arbor.Trust.Policy do
   end
 
   @doc """
+  Grant the universal baseline capabilities to an agent, independent of any trust
+  tier. Self-scoped (`/self/`) URIs are resolved to the agent's id. Returns
+  `{:ok, count}` or `{:error, reason}` if the security infrastructure is down.
+  """
+  @spec grant_base_capabilities(String.t()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def grant_base_capabilities(agent_id) do
+    templates = Config.base_capabilities()
+
+    with :ok <- ensure_security_available() do
+      results =
+        Enum.map(templates, fn template ->
+          resource_uri = resolve_uri(template.resource_uri, agent_id)
+
+          Arbor.Security.grant(
+            principal: agent_id,
+            resource: resource_uri,
+            constraints: template.constraints,
+            metadata: %{source: :trust_baseline}
+          )
+        end)
+
+      granted = Enum.count(results, &match?({:ok, _}, &1))
+      errors = Enum.filter(results, &match?({:error, _}, &1))
+
+      if errors != [] do
+        Logger.warning(
+          "[Policy] #{length(errors)} baseline capability grants failed for #{agent_id}: #{inspect(Enum.take(errors, 3))}"
+        )
+      end
+
+      safe_emit(:capabilities_granted, %{
+        agent_id: agent_id,
+        granted: granted,
+        failed: length(errors)
+      })
+
+      {:ok, granted}
+    end
+  end
+
+  @doc """
   Revoke all capabilities for an agent.
 
   Calls `CapabilityStore.revoke_all/1` directly since the Security facade

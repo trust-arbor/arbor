@@ -217,6 +217,22 @@ defmodule Arbor.Trust.Config do
     ]
   }
 
+  # The universal baseline capabilities every agent gets at profile creation,
+  # tier-independent (formerly sourced from `capabilities_for_tier(:untrusted)`).
+  # Self-scoped (`/self/`) URIs are expanded to the agent's id at grant time.
+  # This is the read-only floor preserved across a trust freeze and re-granted on
+  # unfreeze — see Arbor.Trust.CapabilitySync. Kept as its own constant so it
+  # outlives the tier-capability table.
+  @base_capabilities [
+    %{resource_uri: "arbor://code/read/self/*", constraints: %{}},
+    %{resource_uri: "arbor://consensus/propose/self", constraints: %{rate_limit: 10}},
+    %{resource_uri: "arbor://agent/profile/self/*", constraints: %{}},
+    %{
+      resource_uri: "arbor://comms/notify/session",
+      constraints: %{rate_limit: @notify_session_rate_limit}
+    }
+  ]
+
   @default_capability_templates %{}
 
   @default_decay %{
@@ -533,6 +549,14 @@ defmodule Arbor.Trust.Config do
 
   Checks application config for overrides, falls back to built-in defaults.
   """
+  @doc """
+  Get the universal baseline capabilities granted to every agent at profile
+  creation, independent of any trust tier. Self-scoped URIs are expanded to the
+  agent's id by the grant path.
+  """
+  @spec base_capabilities() :: [map()]
+  def base_capabilities, do: @base_capabilities
+
   @spec capabilities_for_tier(trust_tier()) :: [map()]
   def capabilities_for_tier(tier) when is_atom(tier) do
     config_overrides = capability_templates()
