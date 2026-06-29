@@ -36,7 +36,7 @@ defmodule Arbor.Trust.Manager do
 
   alias Arbor.Contracts.Trust.{Event, Profile}
   alias Arbor.Trust.Behaviour, as: Trust
-  alias Arbor.Trust.{Authority, Calculator, Config, EventStore, Store}
+  alias Arbor.Trust.{Authority, Config, EventStore, Store}
 
   require Logger
 
@@ -64,24 +64,6 @@ defmodule Arbor.Trust.Manager do
   @spec get_trust_profile(String.t()) :: {:ok, Profile.t()} | {:error, :not_found | term()}
   def get_trust_profile(agent_id) do
     GenServer.call(__MODULE__, {:get_trust_profile, agent_id})
-  end
-
-  @doc """
-  Calculate the current trust score for an agent.
-  """
-  @impl Trust
-  @spec calculate_trust_score(String.t()) :: {:ok, Trust.trust_score()} | {:error, term()}
-  def calculate_trust_score(agent_id) do
-    GenServer.call(__MODULE__, {:calculate_trust_score, agent_id})
-  end
-
-  @doc """
-  Get the capability tier for a trust score.
-  """
-  @impl Trust
-  @spec get_capability_tier(Trust.trust_score()) :: Trust.trust_tier()
-  def get_capability_tier(trust_score) do
-    Config.resolve_tier(trust_score)
   end
 
   @doc """
@@ -201,20 +183,6 @@ defmodule Arbor.Trust.Manager do
   end
 
   @impl true
-  def handle_call({:calculate_trust_score, agent_id}, _from, state) do
-    case Store.get_profile(agent_id) do
-      {:ok, profile} ->
-        # Recalculate with current time for accurate uptime score
-        updated = Calculator.recalculate_profile(profile, DateTime.utc_now())
-        Store.store_profile(updated)
-        {:reply, {:ok, updated.trust_score}, state}
-
-      {:error, _} = error ->
-        {:reply, error, state}
-    end
-  end
-
-  @impl true
   def handle_call({:check_trust_authorization, agent_id, required_tier}, _from, state) do
     result =
       case Store.get_profile(agent_id) do
@@ -244,12 +212,8 @@ defmodule Arbor.Trust.Manager do
   @impl true
   def handle_call({:unfreeze_trust, agent_id}, _from, state) do
     case Store.unfreeze_profile(agent_id) do
-      {:ok, profile} ->
-        {:ok, event} =
-          Event.freeze_event(agent_id, :unfrozen,
-            previous_score: profile.trust_score,
-            new_score: profile.trust_score
-          )
+      {:ok, _profile} ->
+        {:ok, event} = Event.freeze_event(agent_id, :unfrozen)
 
         record_event(event, state)
 
@@ -274,8 +238,7 @@ defmodule Arbor.Trust.Manager do
     {:ok, event} =
       Event.new(
         agent_id: agent_id,
-        event_type: :profile_created,
-        new_score: 0
+        event_type: :profile_created
       )
 
     record_event(event, state)
@@ -291,14 +254,13 @@ defmodule Arbor.Trust.Manager do
   @impl true
   def handle_call({:delete_trust_profile, agent_id}, _from, state) do
     case Store.get_profile(agent_id) do
-      {:ok, profile} ->
+      {:ok, _profile} ->
         Store.delete_profile(agent_id)
 
         {:ok, event} =
           Event.new(
             agent_id: agent_id,
-            event_type: :profile_deleted,
-            previous_score: profile.trust_score
+            event_type: :profile_deleted
           )
 
         record_event(event, state)
@@ -322,10 +284,10 @@ defmodule Arbor.Trust.Manager do
 
   @impl true
   def handle_cast(:run_decay_check, state) do
-    if state.decay_enabled do
-      run_decay_check_impl()
-    end
-
+    # Trust decay was removed (tiers-retirement phase 3b). The public
+    # run_decay_check/0 entry point is retained as a no-op so callers and
+    # scheduled jobs don't break; a future rebuild is tracked in
+    # `.arbor/roadmap/.../earned-trust-feedback-loop.md`.
     {:noreply, state}
   end
 
@@ -352,8 +314,6 @@ defmodule Arbor.Trust.Manager do
         case Event.new(
                agent_id: agent_id,
                event_type: event_type,
-               previous_score: old_profile.trust_score,
-               new_score: new_profile.trust_score,
                previous_tier: old_profile.tier,
                new_tier: new_profile.tier,
                metadata: metadata
@@ -395,54 +355,10 @@ defmodule Arbor.Trust.Manager do
     end
   end
 
-  defp update_profile_for_event(agent_id, :action_success, _metadata),
-    do: Store.record_action_success(agent_id)
-
-  defp update_profile_for_event(agent_id, :action_failure, _metadata),
-    do: Store.record_action_failure(agent_id)
-
-  defp update_profile_for_event(agent_id, :test_passed, _metadata),
-    do: Store.record_test_result(agent_id, :passed)
-
-  defp update_profile_for_event(agent_id, :test_failed, _metadata),
-    do: Store.record_test_result(agent_id, :failed)
-
-  defp update_profile_for_event(agent_id, :rollback_executed, _metadata),
-    do: Store.record_rollback(agent_id)
-
-  defp update_profile_for_event(agent_id, :security_violation, _metadata),
-    do: Store.record_security_violation(agent_id)
-
-  defp update_profile_for_event(agent_id, :improvement_applied, _metadata),
-    do: Store.record_improvement(agent_id)
-
-  # Council-based trust earning events
-  defp update_profile_for_event(agent_id, :proposal_submitted, _metadata),
-    do: Store.record_proposal_submitted(agent_id)
-
-  defp update_profile_for_event(agent_id, :proposal_approved, metadata),
-    do: Store.record_proposal_approved(agent_id, Map.get(metadata, :impact, :medium))
-
-  defp update_profile_for_event(agent_id, :proposal_rejected, _metadata),
-    do: Store.get_profile(agent_id)
-
-  defp update_profile_for_event(agent_id, :installation_success, metadata),
-    do: Store.record_installation_success(agent_id, Map.get(metadata, :impact, :medium))
-
-  defp update_profile_for_event(agent_id, :installation_rollback, _metadata),
-    do: Store.record_installation_rollback(agent_id)
-
-  defp update_profile_for_event(agent_id, :trust_points_awarded, metadata),
-    do: Store.award_trust_points(agent_id, Map.get(metadata, :points, 0))
-
-  defp update_profile_for_event(agent_id, :trust_points_deducted, metadata) do
-    Store.deduct_trust_points(
-      agent_id,
-      Map.get(metadata, :points, 0),
-      Map.get(metadata, :reason, :unknown)
-    )
-  end
-
+  # Trust events are recorded for audit/observability and feed the circuit
+  # breaker, but they no longer mutate the trust profile — the score/points/decay
+  # feedback loop was removed (tiers-retirement phase 3b). A future rebuild is
+  # tracked in `.arbor/roadmap/.../earned-trust-feedback-loop.md`.
   defp update_profile_for_event(agent_id, _event_type, _metadata),
     do: Store.get_profile(agent_id)
 
@@ -493,12 +409,7 @@ defmodule Arbor.Trust.Manager do
     case Store.freeze_profile(agent_id, reason) do
       {:ok, profile} ->
         # Store freeze event
-        {:ok, event} =
-          Event.freeze_event(agent_id, :frozen,
-            reason: reason,
-            previous_score: profile.trust_score,
-            new_score: profile.trust_score
-          )
+        {:ok, event} = Event.freeze_event(agent_id, :frozen, reason: reason)
 
         record_event(event, state)
 
@@ -512,7 +423,6 @@ defmodule Arbor.Trust.Manager do
         safe_emit_signal(:trust_frozen, %{
           agent_id: agent_id,
           reason: reason,
-          score: profile.trust_score,
           tier: profile.tier
         })
 
@@ -521,56 +431,6 @@ defmodule Arbor.Trust.Manager do
       {:error, _} = error ->
         {error, state}
     end
-  end
-
-  defp run_decay_check_impl do
-    now = DateTime.utc_now()
-
-    {:ok, profiles} = Store.list_profiles([])
-
-    Enum.each(profiles, fn profile ->
-      days_inactive = calculate_days_inactive(profile, now)
-      maybe_apply_decay(profile, days_inactive)
-    end)
-  end
-
-  defp calculate_days_inactive(profile, now) do
-    case profile.last_activity_at do
-      nil -> DateTime.diff(now, profile.created_at, :day)
-      last -> DateTime.diff(now, last, :day)
-    end
-  end
-
-  defp maybe_apply_decay(profile, days_inactive) when days_inactive > 7 do
-    decayed = Profile.apply_decay(profile, days_inactive)
-
-    if decayed.trust_score != profile.trust_score do
-      persist_decay(profile, decayed, days_inactive)
-    end
-  end
-
-  defp maybe_apply_decay(_profile, _days_inactive), do: :ok
-
-  defp persist_decay(profile, decayed, days_inactive) do
-    Store.store_profile(decayed)
-
-    {:ok, event} =
-      Event.new(
-        agent_id: profile.agent_id,
-        event_type: :trust_decayed,
-        previous_score: profile.trust_score,
-        new_score: decayed.trust_score,
-        metadata: %{days_inactive: days_inactive}
-      )
-
-    safe_record_event(event)
-
-    Logger.debug("Trust decayed for inactive agent #{profile.agent_id}",
-      agent_id: profile.agent_id,
-      days_inactive: days_inactive,
-      old_score: profile.trust_score,
-      new_score: decayed.trust_score
-    )
   end
 
   defp broadcast_trust_event(agent_id, event_type, metadata) do

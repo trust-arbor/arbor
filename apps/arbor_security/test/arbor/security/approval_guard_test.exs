@@ -256,21 +256,12 @@ defmodule Arbor.Security.ApprovalGuardTest do
       {:error, :already_exists} -> :ok
     end
 
-    score =
-      case tier do
-        :untrusted -> 0
-        :probationary -> 25
-        :trusted -> 60
-        :veteran -> 80
-        :autonomous -> 95
-      end
-
     # Map tier to preset for profile rules
     preset_name = Arbor.Trust.Policy.tier_to_preset(tier)
     {baseline, rules} = Arbor.Trust.Policy.preset_rules(preset_name)
 
     Arbor.Trust.Store.update_profile(agent_id, fn profile ->
-      %{profile | tier: tier, trust_score: score, baseline: baseline, rules: rules}
+      %{profile | tier: tier, baseline: baseline, rules: rules}
     end)
   end
 end

@@ -436,7 +436,6 @@ defmodule Arbor.Agent do
         template: :diagnostician,
         model: "anthropic/claude-sonnet-4-5",
         trust_tier: :veteran,
-        trust_score: 87,
         turn_count: 42,
         active_goals_count: 3,
         session_cost: 0.15,
@@ -476,7 +475,6 @@ defmodule Arbor.Agent do
 
   defp build_summary(agent_id, profile) do
     running? = match?({:ok, _}, lookup(agent_id))
-    trust = safe_call(fn -> trust_summary_for(agent_id) end)
     telemetry = safe_call(fn -> telemetry_summary_for(agent_id) end)
     goals = safe_call(fn -> Arbor.Memory.get_active_goals(agent_id) end) || []
 
@@ -492,7 +490,6 @@ defmodule Arbor.Agent do
 
       # Authority (what it can do)
       trust_tier: profile.trust_tier,
-      trust_score: trust && trust.trust_score,
 
       # Current activity (what it's doing now)
       turn_count: telemetry && telemetry.turn_count,
@@ -502,14 +499,6 @@ defmodule Arbor.Agent do
       session_cost: telemetry && telemetry.session_cost,
       avg_latency_ms: telemetry && telemetry.llm_p50_ms
     }
-  end
-
-  defp trust_summary_for(agent_id) do
-    with {:ok, profile} <- Arbor.Trust.get_trust_profile(agent_id) do
-      Arbor.Trust.Authority.show_summary(profile)
-    else
-      _ -> nil
-    end
   end
 
   defp telemetry_summary_for(agent_id) do

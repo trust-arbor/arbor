@@ -7,7 +7,6 @@ defmodule Arbor.Trust.Supervisor do
   - Trust.Manager - Main trust coordination GenServer
   - Trust.EventHandler - PubSub event subscriber
   - Trust.CircuitBreaker - Anomaly detection
-  - Trust.Decay - Scheduled trust decay
   - Trust.EventStore - Durable event storage
   - Trust.CapabilitySync - Trust↔capability bridge
 
@@ -19,8 +18,7 @@ defmodule Arbor.Trust.Supervisor do
   3. Manager (depends on Store)
   4. CircuitBreaker (depends on Manager)
   5. EventHandler (depends on Manager)
-  6. Decay (depends on Store)
-  7. CapabilitySync (depends on Manager)
+  6. CapabilitySync (depends on Manager)
 
   ## Configuration
 
@@ -48,7 +46,6 @@ defmodule Arbor.Trust.Supervisor do
     CapabilitySync,
     CircuitBreaker,
     ConfirmationTracker,
-    Decay,
     EventHandler,
     EventStore,
     Manager,
@@ -86,7 +83,6 @@ defmodule Arbor.Trust.Supervisor do
           manager: :stopped | {:running, pid()},
           event_handler: :stopped | {:running, pid()},
           circuit_breaker: :stopped | {:running, pid()},
-          decay: :stopped | {:running, pid()},
           capability_sync: :stopped | {:running, pid()}
         }
   def status do
@@ -97,7 +93,6 @@ defmodule Arbor.Trust.Supervisor do
       manager: process_status(Manager),
       event_handler: process_status(EventHandler),
       circuit_breaker: process_status(CircuitBreaker),
-      decay: process_status(Decay),
       capability_sync: process_status(CapabilitySync)
     }
   end
@@ -163,13 +158,6 @@ defmodule Arbor.Trust.Supervisor do
     children =
       if event_handler_enabled do
         children ++ [{EventHandler, [enabled: true]}]
-      else
-        children
-      end
-
-    children =
-      if decay_enabled do
-        children ++ [{Decay, [enabled: true]}]
       else
         children
       end

@@ -787,8 +787,7 @@ defmodule Arbor.Trust.EventStore do
       :test_failed,
       :rollback_executed,
       :security_violation,
-      :trust_frozen,
-      :trust_decayed
+      :trust_frozen
     ]
 
     # Query each negative type and combine

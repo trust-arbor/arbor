@@ -35,24 +35,6 @@ defmodule Arbor.Trust.BehaviourTest do
     end
   end
 
-  describe "min_score_for_tier/1" do
-    test "returns minimum score for each tier" do
-      assert Behaviour.min_score_for_tier(:untrusted) == 0
-      assert Behaviour.min_score_for_tier(:probationary) == 20
-      assert Behaviour.min_score_for_tier(:trusted) == 50
-      assert Behaviour.min_score_for_tier(:veteran) == 75
-      assert Behaviour.min_score_for_tier(:autonomous) == 90
-    end
-  end
-
-  describe "min_score_for_tier/2" do
-    test "uses custom thresholds" do
-      custom = %{untrusted: 0, probationary: 25, trusted: 55, veteran: 80, autonomous: 95}
-      assert Behaviour.min_score_for_tier(:trusted, custom) == 55
-      assert Behaviour.min_score_for_tier(:autonomous, custom) == 95
-    end
-  end
-
   describe "tier_sufficient?/2" do
     test "same tier is sufficient" do
       assert Behaviour.tier_sufficient?(:trusted, :trusted)

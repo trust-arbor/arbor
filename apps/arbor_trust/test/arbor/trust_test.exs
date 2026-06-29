@@ -46,7 +46,6 @@ defmodule Arbor.TrustTest do
     test "creates a profile via the facade" do
       assert {:ok, profile} = Trust.create_trust_profile("facade_create")
       assert profile.agent_id == "facade_create"
-      assert profile.trust_score == 0
       assert profile.tier == :untrusted
     end
 
@@ -56,7 +55,6 @@ defmodule Arbor.TrustTest do
       assert profile.security_score == 100.0
       assert profile.rollback_score == 100.0
       assert profile.success_rate_score == 0.0
-      assert profile.trust_points == 0
     end
   end
 
@@ -73,100 +71,42 @@ defmodule Arbor.TrustTest do
   end
 
   # ===========================================================================
-  # Trust Scoring
-  # ===========================================================================
-
-  describe "calculate_trust_score/1" do
-    test "calculates score for existing agent" do
-      {:ok, _} = Trust.create_trust_profile("facade_score")
-      {:ok, score} = Trust.calculate_trust_score("facade_score")
-      assert is_integer(score)
-      assert score >= 0
-      assert score <= 100
-    end
-
-    test "returns error for non-existent agent" do
-      assert {:error, :not_found} = Trust.calculate_trust_score("facade_no_score")
-    end
-
-    test "score changes after trust events" do
-      {:ok, _} = Trust.create_trust_profile("facade_score_change")
-      {:ok, initial_score} = Trust.calculate_trust_score("facade_score_change")
-
-      # Record some successes and tests to build score
-      for _ <- 1..10 do
-        :ok = Trust.record_trust_event("facade_score_change", :action_success, %{})
-        Process.sleep(10)
-      end
-
-      for _ <- 1..5 do
-        :ok = Trust.record_trust_event("facade_score_change", :test_passed, %{})
-        Process.sleep(10)
-      end
-
-      Process.sleep(50)
-
-      {:ok, new_score} = Trust.calculate_trust_score("facade_score_change")
-      # Score should have increased from actions and tests
-      assert new_score >= initial_score
-    end
-  end
-
-  # ===========================================================================
   # Trust Events
   # ===========================================================================
 
   describe "record_trust_event/3" do
-    test "records action_success event" do
+    # The scoring/counter feedback loop was removed (tiers-retirement phase 3b):
+    # recording an event returns :ok and records the event for audit, but no
+    # longer mutates the profile counters/scores.
+    test "accepts action_success event without mutating counters" do
       {:ok, _} = Trust.create_trust_profile("facade_evt_success")
       assert :ok = Trust.record_trust_event("facade_evt_success", :action_success, %{})
       Process.sleep(50)
 
       {:ok, profile} = Trust.get_trust_profile("facade_evt_success")
-      assert profile.total_actions == 1
-      assert profile.successful_actions == 1
-    end
-
-    test "records action_failure event" do
-      {:ok, _} = Trust.create_trust_profile("facade_evt_fail")
-      assert :ok = Trust.record_trust_event("facade_evt_fail", :action_failure, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Trust.get_trust_profile("facade_evt_fail")
-      assert profile.total_actions == 1
+      assert profile.total_actions == 0
       assert profile.successful_actions == 0
     end
 
-    test "records security_violation event" do
+    test "accepts security_violation event without reducing security score" do
       {:ok, _} = Trust.create_trust_profile("facade_evt_sec")
       assert :ok = Trust.record_trust_event("facade_evt_sec", :security_violation, %{})
       Process.sleep(50)
 
       {:ok, profile} = Trust.get_trust_profile("facade_evt_sec")
-      assert profile.security_violations == 1
-      assert profile.security_score == 80.0
+      assert profile.security_violations == 0
+      assert profile.security_score == 100.0
     end
 
-    test "records test_passed event" do
-      {:ok, _} = Trust.create_trust_profile("facade_evt_test_pass")
-      assert :ok = Trust.record_trust_event("facade_evt_test_pass", :test_passed, %{})
+    test "accepts test_passed / test_failed events without mutating counters" do
+      {:ok, _} = Trust.create_trust_profile("facade_evt_test")
+      assert :ok = Trust.record_trust_event("facade_evt_test", :test_passed, %{})
+      assert :ok = Trust.record_trust_event("facade_evt_test", :test_failed, %{})
       Process.sleep(50)
 
-      {:ok, profile} = Trust.get_trust_profile("facade_evt_test_pass")
-      assert profile.total_tests == 1
-      assert profile.tests_passed == 1
-      assert profile.test_pass_score == 100.0
-    end
-
-    test "records test_failed event" do
-      {:ok, _} = Trust.create_trust_profile("facade_evt_test_fail")
-      assert :ok = Trust.record_trust_event("facade_evt_test_fail", :test_failed, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Trust.get_trust_profile("facade_evt_test_fail")
-      assert profile.total_tests == 1
+      {:ok, profile} = Trust.get_trust_profile("facade_evt_test")
+      assert profile.total_tests == 0
       assert profile.tests_passed == 0
-      assert profile.test_pass_score == 0.0
     end
 
     test "accepts metadata with events" do
@@ -180,7 +120,7 @@ defmodule Arbor.TrustTest do
 
       Process.sleep(50)
       {:ok, profile} = Trust.get_trust_profile("facade_evt_meta")
-      assert profile.total_actions == 1
+      assert profile.agent_id == "facade_evt_meta"
     end
 
     test "defaults metadata to empty map" do
@@ -189,7 +129,7 @@ defmodule Arbor.TrustTest do
       Process.sleep(50)
 
       {:ok, profile} = Trust.get_trust_profile("facade_evt_no_meta")
-      assert profile.total_actions == 1
+      assert profile.agent_id == "facade_evt_no_meta"
     end
   end
 
@@ -336,13 +276,13 @@ defmodule Arbor.TrustTest do
       {:ok, profile} = Trust.create_trust_profile("lifecycle_agent")
       assert profile.tier == :untrusted
 
-      # Step 2: Record events
+      # Step 2: Record events (no longer mutates counters)
       :ok = Trust.record_trust_event("lifecycle_agent", :action_success, %{})
       Process.sleep(50)
 
       {:ok, profile} = Trust.get_trust_profile("lifecycle_agent")
-      assert profile.total_actions == 1
-      assert profile.successful_actions == 1
+      assert profile.total_actions == 0
+      assert profile.successful_actions == 0
 
       # Step 3: Check authorization (should be authorized for untrusted)
       assert {:ok, :authorized} =
@@ -361,17 +301,17 @@ defmodule Arbor.TrustTest do
                Trust.check_trust_authorization("lifecycle_agent", :untrusted)
     end
 
-    test "security violations reduce security component score" do
+    test "security violations no longer reduce security component score" do
       {:ok, _} = Trust.create_trust_profile("sec_lifecycle")
 
-      # Record a security violation
+      # Recording a security violation no longer mutates the profile
+      # (scoring feedback loop removed, tiers-retirement phase 3b).
       :ok = Trust.record_trust_event("sec_lifecycle", :security_violation, %{})
       Process.sleep(50)
 
       {:ok, profile} = Trust.get_trust_profile("sec_lifecycle")
-      # Security violation reduces security_score from 100 to 80
-      assert profile.security_score == 80.0
-      assert profile.security_violations == 1
+      assert profile.security_score == 100.0
+      assert profile.security_violations == 0
     end
   end
 end

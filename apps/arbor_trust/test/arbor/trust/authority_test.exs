@@ -9,7 +9,6 @@ defmodule Arbor.Trust.AuthorityTest do
       assert profile.agent_id == "agent_123"
       assert profile.tier == :untrusted
       assert profile.baseline == :ask
-      assert profile.trust_score == 0
     end
 
     test "creates profile with veteran tier and hands_off preset" do
@@ -25,85 +24,6 @@ defmodule Arbor.Trust.AuthorityTest do
       profile = Authority.new_profile("agent_123", :autonomous)
       assert profile.tier == :autonomous
       assert profile.baseline == :auto
-    end
-  end
-
-  describe "record_action_success/1" do
-    test "increments success and total counts" do
-      profile = Authority.new_profile("agent_123")
-      updated = Authority.record_action_success(profile)
-      assert updated.successful_actions == 1
-      assert updated.total_actions == 1
-    end
-
-    test "recalculates scores" do
-      profile = Authority.new_profile("agent_123")
-      updated = Authority.record_action_success(profile)
-      assert updated.success_rate_score == 100.0
-    end
-  end
-
-  describe "record_security_violation/1" do
-    test "increments violations" do
-      profile = Authority.new_profile("agent_123")
-      updated = Authority.record_security_violation(profile)
-      assert updated.security_violations == 1
-      assert updated.security_score == 80.0
-    end
-
-    test "security score floors at 0" do
-      profile = Authority.new_profile("agent_123")
-
-      updated =
-        Enum.reduce(1..6, profile, fn _, p -> Authority.record_security_violation(p) end)
-
-      assert updated.security_score == 0.0
-    end
-  end
-
-  describe "record_proposal_approved/2" do
-    test "awards trust points" do
-      profile = Authority.new_profile("agent_123")
-      updated = Authority.record_proposal_approved(profile, :high)
-      assert updated.trust_points == 10
-      assert updated.proposals_approved == 1
-    end
-
-    test "does NOT auto-graduate tier from points (tier-minting kill sweep, P0 gate #1)" do
-      # Crossing a points threshold used to auto-promote tier (maybe_graduate),
-      # which then minted signed capabilities through a parallel authority path.
-      # Tier is now a creation-set display label: points accrue, tier does not move.
-      profile = %{Authority.new_profile("agent_123") | trust_points: 95, tier: :untrusted}
-      updated = Authority.record_proposal_approved(profile, :medium)
-      assert updated.trust_points == 100
-      # Old behavior would have graduated this to :trusted (points >= 100).
-      assert updated.tier == :untrusted
-    end
-  end
-
-  describe "apply_decay/2" do
-    test "no decay within grace period" do
-      profile = %{Authority.new_profile("agent_123") | trust_points: 100}
-      updated = Authority.apply_decay(profile, 5)
-      assert updated.trust_points == 100
-    end
-
-    test "decays after grace period" do
-      profile = %{Authority.new_profile("agent_123") | trust_points: 100}
-      updated = Authority.apply_decay(profile, 17)
-      assert updated.trust_points == 90
-    end
-
-    test "decay floors at 10 points" do
-      profile = %{Authority.new_profile("agent_123") | trust_points: 15}
-      updated = Authority.apply_decay(profile, 100)
-      assert updated.trust_points == 10
-    end
-
-    test "no decay when frozen" do
-      profile = Authority.new_profile("agent_123") |> Authority.freeze(:test)
-      updated = Authority.apply_decay(profile, 100)
-      assert updated.trust_points == 0
     end
   end
 
@@ -278,11 +198,10 @@ defmodule Arbor.Trust.AuthorityTest do
       assert %DateTime{} = restored.updated_at
     end
 
-    test "round-trips a profile with custom rules and trust_points" do
+    test "round-trips a profile with custom rules" do
       original =
         "agent_custom"
         |> Authority.new_profile(:trusted)
-        |> Authority.award_trust_points(150)
         |> then(fn p ->
           %{p | rules: Map.put(p.rules, "arbor://custom/api", :auto)}
         end)
@@ -290,7 +209,6 @@ defmodule Arbor.Trust.AuthorityTest do
       serialized = Authority.for_persistence(original)
       {:ok, restored} = Authority.from_persistence(serialized)
 
-      assert restored.trust_points == 150
       assert restored.rules["arbor://custom/api"] == :auto
     end
 

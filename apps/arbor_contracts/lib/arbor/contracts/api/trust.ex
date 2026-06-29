@@ -46,7 +46,6 @@ defmodule Arbor.Contracts.API.Trust do
 
   @type principal_id :: Types.agent_id()
   @type trust_tier :: :untrusted | :probationary | :trusted | :veteran | :autonomous
-  @type trust_score :: 0..100
   @type trust_profile :: map()
 
   # ===========================================================================
@@ -119,12 +118,6 @@ defmodule Arbor.Contracts.API.Trust do
               required_tier :: trust_tier()
             ) :: {:ok, :authorized} | {:error, :insufficient_trust | :trust_frozen | :not_found}
 
-  @doc """
-  Calculate the trust score for a principal from their event history.
-  """
-  @callback calculate_trust_score_for_principal(principal_id()) ::
-              {:ok, trust_score()} | {:error, term()}
-
   # ===========================================================================
   # Lifecycle
   # ===========================================================================
@@ -146,7 +139,6 @@ defmodule Arbor.Contracts.API.Trust do
   @optional_callbacks [
     check_if_trust_frozen_for_principal: 1,
     subscribe_to_trust_events_for_principal: 2,
-    check_if_principal_meets_required_trust_tier: 2,
-    calculate_trust_score_for_principal: 1
+    check_if_principal_meets_required_trust_tier: 2
   ]
 end

@@ -65,7 +65,6 @@ defmodule Arbor.Actions.Trust do
            %{
              agent_id: profile.agent_id,
              tier: profile.tier,
-             trust_score: profile.trust_score,
              baseline: profile.baseline,
              rules: profile.rules,
              frozen: profile.frozen,
@@ -502,7 +501,6 @@ defmodule Arbor.Actions.Trust do
               %{
                 agent_id: profile.agent_id,
                 tier: profile.tier,
-                trust_score: profile.trust_score,
                 baseline: profile.baseline,
                 rule_count: map_size(profile.rules || %{}),
                 frozen: profile.frozen

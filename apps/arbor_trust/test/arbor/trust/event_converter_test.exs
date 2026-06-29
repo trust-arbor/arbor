@@ -355,7 +355,6 @@ defmodule Arbor.Trust.EventConverterTest do
         "improvement_applied",
         "trust_frozen",
         "trust_unfrozen",
-        "trust_decayed",
         "tier_changed",
         "profile_created",
         "profile_deleted"
