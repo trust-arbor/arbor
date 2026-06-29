@@ -121,13 +121,12 @@ end
 
 defmodule Arbor.Contracts.Agent.Authority.Trust do
   @moduledoc """
-  Trust state — tier, score, profile rules, and activity stats.
+  Trust state — profile rules and activity stats.
 
-  Changes on approvals, violations, and decay. The trust profile contains
-  URI-prefix rules that determine what the agent can do at each trust level.
+  Changes on approvals and violations. The trust profile contains URI-prefix
+  rules (`baseline` + `rules`) that determine what the agent can do.
   """
 
-  @type trust_tier :: :untrusted | :probationary | :established | :trusted | :full_partner
   @type trust_mode :: :block | :ask | :allow | :auto
 
   @type stats :: %{
@@ -150,7 +149,6 @@ defmodule Arbor.Contracts.Agent.Authority.Trust do
         }
 
   @type t :: %__MODULE__{
-          tier: trust_tier(),
           baseline: trust_mode(),
           rules: %{String.t() => trust_mode()},
           model_constraints: map(),
@@ -167,7 +165,6 @@ defmodule Arbor.Contracts.Agent.Authority.Trust do
     :frozen_reason,
     :frozen_at,
     :last_activity_at,
-    tier: :untrusted,
     baseline: :ask,
     rules: %{},
     model_constraints: %{},

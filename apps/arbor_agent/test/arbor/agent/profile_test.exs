@@ -22,7 +22,6 @@ defmodule Arbor.Agent.ProfileTest do
 
       assert profile.agent_id == "scout-1"
       assert profile.character.name == "Scout"
-      assert profile.trust_tier == :untrusted
       assert profile.version == 1
       assert profile.metadata == %{}
     end
@@ -33,7 +32,6 @@ defmodule Arbor.Agent.ProfileTest do
       profile = %Profile{
         agent_id: "researcher-1",
         character: @character,
-        trust_tier: :probationary,
         template: "scout",
         initial_goals: [%{type: :explore, description: "Survey area"}],
         initial_capabilities: [%{resource: "arbor://fs/read/**"}],
@@ -44,7 +42,6 @@ defmodule Arbor.Agent.ProfileTest do
         version: 1
       }
 
-      assert profile.trust_tier == :probationary
       assert profile.template == "scout"
       assert length(profile.initial_goals) == 1
       assert profile.identity.agent_id == "agent_abc123"
@@ -72,7 +69,6 @@ defmodule Arbor.Agent.ProfileTest do
       original = %Profile{
         agent_id: "scout-1",
         character: @character,
-        trust_tier: :probationary,
         template: "scout",
         initial_goals: [%{type: :explore, description: "Survey area"}],
         initial_capabilities: [%{resource: "arbor://fs/read/**"}],
@@ -86,14 +82,12 @@ defmodule Arbor.Agent.ProfileTest do
       serialized = Profile.serialize(original)
       assert is_map(serialized)
       assert serialized["agent_id"] == "scout-1"
-      assert serialized["trust_tier"] == "probationary"
       assert serialized["version"] == 1
       assert is_map(serialized["character"])
       assert serialized["character"].name == "Scout"
 
       {:ok, restored} = Profile.deserialize(serialized)
       assert restored.agent_id == original.agent_id
-      assert restored.trust_tier == :probationary
       assert restored.character.name == "Scout"
       assert restored.character.tone == "concise"
       assert restored.version == 1
@@ -146,7 +140,6 @@ defmodule Arbor.Agent.ProfileTest do
       original = %Profile{
         agent_id: "scout-1",
         character: @character,
-        trust_tier: :probationary,
         initial_goals: [%{type: :explore, description: "Survey"}],
         metadata: %{"key" => "value"},
         created_at: DateTime.utc_now(),
@@ -159,7 +152,6 @@ defmodule Arbor.Agent.ProfileTest do
 
       {:ok, restored} = Profile.from_json(json)
       assert restored.agent_id == "scout-1"
-      assert restored.trust_tier == :probationary
       assert restored.character.name == "Scout"
     end
 

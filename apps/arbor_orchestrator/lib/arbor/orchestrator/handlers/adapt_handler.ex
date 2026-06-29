@@ -12,20 +12,9 @@ defmodule Arbor.Orchestrator.Handlers.AdaptHandler do
     * `mutations_key`  — context key containing JSON mutations (dynamic, takes precedence)
     * `max_mutations`  — maximum number of operations allowed (default: `"10"`)
     * `dry_run`        — `"true"` to validate without applying (default: `"false"`)
-    * `trust_tier`     — minimum trust tier required: `"untrusted"`, `"probationary"`,
-                         `"trusted"`, `"veteran"`, `"autonomous"` (default: none — unrestricted)
-
-  ## Trust-tier constraints (council-recommended)
-
-  When `trust_tier` is set on the adapt node, the handler checks the agent's
-  trust tier from `session.trust_tier` in context. Tiers constrain what mutations
-  are allowed:
-
-    * `untrusted`    — no adapt allowed (always fails)
-    * `probationary` — `modify_attrs` only (parameter tuning)
-    * `trusted`      — `modify_attrs` + `add_edge` + `remove_edge` (rewiring)
-    * `veteran`      — all operations except `remove_node` on non-leaf nodes
-    * `autonomous`   — unrestricted
+    * `trust_tier`     — IGNORED (no-op). The trust-tier band was retired; adapt
+                         mutations are governed by the agent's granular
+                         baseline/rules + capability checks, not by a tier.
 
   ## Engine integration
 
@@ -44,8 +33,6 @@ defmodule Arbor.Orchestrator.Handlers.AdaptHandler do
 
   import Arbor.Orchestrator.Handlers.Helpers
 
-  @trust_tiers ~w(untrusted probationary trusted veteran autonomous)
-
   @impl true
   def execute(node, context, graph, _opts) do
     mutations_key = Map.get(node.attrs, "mutations_key")
@@ -60,10 +47,7 @@ defmodule Arbor.Orchestrator.Handlers.AdaptHandler do
     if is_nil(json) or json == "" do
       fail("no mutations provided for adapt node \"#{node.id}\"")
     else
-      case check_trust_tier(node, context) do
-        :ok -> process_mutations(node, context, graph, json)
-        {:error, reason} -> fail(reason)
-      end
+      process_mutations(node, context, graph, json)
     end
   rescue
     e -> fail("graph.adapt: #{Exception.message(e)}")
@@ -71,28 +55,6 @@ defmodule Arbor.Orchestrator.Handlers.AdaptHandler do
 
   @impl true
   def idempotency, do: :side_effecting
-
-  # --- Trust tier check ---
-
-  defp check_trust_tier(node, context) do
-    required_tier = Map.get(node.attrs, "trust_tier")
-
-    if required_tier && required_tier in @trust_tiers do
-      agent_tier = Context.get(context, "session.trust_tier", "untrusted")
-      tier_index = Enum.find_index(@trust_tiers, &(&1 == agent_tier)) || 0
-      required_index = Enum.find_index(@trust_tiers, &(&1 == required_tier)) || 0
-
-      if tier_index >= required_index do
-        :ok
-      else
-        {:error,
-         "trust tier insufficient: agent has \"#{agent_tier}\", " <>
-           "adapt node requires \"#{required_tier}\""}
-      end
-    else
-      :ok
-    end
-  end
 
   # --- Mutation processing ---
 
@@ -106,7 +68,6 @@ defmodule Arbor.Orchestrator.Handlers.AdaptHandler do
 
     with {:ok, ops} <- GraphMutation.parse(json),
          :ok <- check_count(ops, max_mutations),
-         :ok <- check_tier_allowed_ops(node, context, ops),
          completed_nodes <- get_completed_nodes(context),
          :ok <- GraphMutation.validate(ops, graph, completed_nodes) do
       if dry_run do
@@ -146,49 +107,6 @@ defmodule Arbor.Orchestrator.Handlers.AdaptHandler do
     context
     |> Context.get("__completed_nodes__", [])
     |> MapSet.new()
-  end
-
-  # --- Per-tier operation restrictions ---
-
-  defp check_tier_allowed_ops(node, context, ops) do
-    agent_tier = Context.get(context, "session.trust_tier")
-
-    # Only enforce restrictions if trust_tier is configured
-    if agent_tier && Map.has_key?(node.attrs, "trust_tier") do
-      do_check_tier_ops(agent_tier, ops)
-    else
-      :ok
-    end
-  end
-
-  defp do_check_tier_ops("untrusted", _ops) do
-    {:error, "untrusted agents cannot use adapt nodes"}
-  end
-
-  defp do_check_tier_ops("probationary", ops) do
-    # Only modify_attrs allowed
-    case Enum.find(ops, fn op -> op["op"] != "modify_attrs" end) do
-      nil ->
-        :ok
-
-      op ->
-        {:error, "probationary tier: operation \"#{op["op"]}\" not allowed (only modify_attrs)"}
-    end
-  end
-
-  defp do_check_tier_ops("trusted", ops) do
-    # modify_attrs, add_edge, remove_edge allowed
-    allowed = ~w(modify_attrs add_edge remove_edge)
-
-    case Enum.find(ops, fn op -> op["op"] not in allowed end) do
-      nil -> :ok
-      op -> {:error, "trusted tier: operation \"#{op["op"]}\" not allowed"}
-    end
-  end
-
-  defp do_check_tier_ops(_tier, _ops) do
-    # veteran and autonomous — all ops allowed
-    :ok
   end
 
   # --- Helpers ---

@@ -234,7 +234,7 @@ defmodule Arbor.Scheduler.RunIdentity do
     if Arbor.Trust.Store.profile_exists?(agent_id) do
       :ok
     else
-      profile = Arbor.Trust.Authority.new_profile(agent_id, :untrusted)
+      profile = Arbor.Trust.Authority.new_profile(agent_id)
 
       case Arbor.Trust.Store.store_profile(profile) do
         {:ok, _} -> :ok

@@ -12,42 +12,12 @@ defmodule Arbor.Trust.PolicyTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Trust.Policy
-  alias Arbor.Trust.Config
 
   @moduletag :fast
 
   # ===========================================================================
   # Unit tests — pure functions, no infrastructure needed
   # ===========================================================================
-
-  describe "min_tier_for/1" do
-    test "code read is available from untrusted" do
-      assert Policy.min_tier_for("arbor://code/read/self/*") == :untrusted
-    end
-
-    test "sandbox write requires probationary" do
-      assert Policy.min_tier_for("arbor://code/write/self/sandbox/*") == :probationary
-    end
-
-    test "impl write requires trusted" do
-      assert Policy.min_tier_for("arbor://code/write/self/impl/*") == :trusted
-    end
-
-    # The agent self-management capabilities (install/capability/roadmap/git/
-    # docs/test/config/governance/activity/extension *_self_*) were removed from
-    # the tier templates as stale design (the 5-tier model is being deprecated in
-    # favor of per-resource trust rules; they were unregistered and authorized
-    # nowhere). min_tier_for now returns nil for them.
-    test "removed self-management capabilities return nil" do
-      assert Policy.min_tier_for("arbor://install/execute/self") == nil
-      assert Policy.min_tier_for("arbor://capability/request/self/*") == nil
-      assert Policy.min_tier_for("arbor://roadmap/write/self/*") == nil
-    end
-
-    test "unknown URI returns nil" do
-      assert Policy.min_tier_for("arbor://nonexistent/action/self") == nil
-    end
-  end
 
   describe "mode_to_confirmation/1" do
     test "block maps to deny" do
@@ -64,28 +34,6 @@ defmodule Arbor.Trust.PolicyTest do
 
     test "auto maps to auto" do
       assert Policy.mode_to_confirmation(:auto) == :auto
-    end
-  end
-
-  describe "tier_to_preset/1" do
-    test "untrusted maps to cautious" do
-      assert Policy.tier_to_preset(:untrusted) == :cautious
-    end
-
-    test "probationary maps to cautious" do
-      assert Policy.tier_to_preset(:probationary) == :cautious
-    end
-
-    test "trusted maps to balanced" do
-      assert Policy.tier_to_preset(:trusted) == :balanced
-    end
-
-    test "veteran maps to hands_off" do
-      assert Policy.tier_to_preset(:veteran) == :hands_off
-    end
-
-    test "autonomous maps to full_trust" do
-      assert Policy.tier_to_preset(:autonomous) == :full_trust
     end
   end
 
@@ -373,23 +321,17 @@ defmodule Arbor.Trust.PolicyTest do
     end
   end
 
-  describe "grant_tier_capabilities/2" do
+  describe "grant_base_capabilities/1" do
     setup :start_infrastructure
 
-    test "grants all untrusted capabilities", %{agent_id: agent_id} do
-      expected_count = length(Config.capabilities_for_tier(:untrusted))
-      {:ok, granted} = Policy.grant_tier_capabilities(agent_id, :untrusted)
-      assert granted == expected_count
-    end
-
-    test "grants all trusted capabilities", %{agent_id: agent_id} do
-      expected_count = length(Config.capabilities_for_tier(:trusted))
-      {:ok, granted} = Policy.grant_tier_capabilities(agent_id, :trusted)
+    test "grants the universal baseline capabilities", %{agent_id: agent_id} do
+      expected_count = length(Arbor.Trust.Config.base_capabilities())
+      {:ok, granted} = Policy.grant_base_capabilities(agent_id)
       assert granted == expected_count
     end
 
     test "granted capabilities are signed and stored", %{agent_id: agent_id} do
-      {:ok, _} = Policy.grant_tier_capabilities(agent_id, :probationary)
+      {:ok, _} = Policy.grant_base_capabilities(agent_id)
       {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
 
       assert caps != []
@@ -402,7 +344,7 @@ defmodule Arbor.Trust.PolicyTest do
     end
 
     test "granted capabilities have correct resource URIs with agent_id", %{agent_id: agent_id} do
-      {:ok, _} = Policy.grant_tier_capabilities(agent_id, :untrusted)
+      {:ok, _} = Policy.grant_base_capabilities(agent_id)
       {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
 
       for cap <- caps do
@@ -419,26 +361,13 @@ defmodule Arbor.Trust.PolicyTest do
         end
       end
     end
-
-    test "grants succeed when security is available" do
-      # Verify the happy path — security infrastructure is running
-      assert Process.whereis(Arbor.Security.CapabilityStore) != nil
-      agent_id = "agent_avail_#{System.unique_integer([:positive])}"
-      assert {:ok, count} = Policy.grant_tier_capabilities(agent_id, :untrusted)
-      assert count > 0
-    end
   end
-
-  # NOTE: Policy.sync_capabilities/3 (the tier-change revoke-all-and-regrant path)
-  # was removed in the tier-minting kill sweep (P0 gate #1). Tier no longer moves
-  # from arithmetic, so there is no per-tier-change capability sync to test. The
-  # one-time creation grant remains covered by the grant_tier_capabilities tests.
 
   describe "revoke_agent_capabilities/1" do
     setup :start_infrastructure
 
     test "revokes all capabilities", %{agent_id: agent_id} do
-      {:ok, _} = Policy.grant_tier_capabilities(agent_id, :trusted)
+      {:ok, _} = Policy.grant_base_capabilities(agent_id)
       {:ok, caps_before} = Arbor.Security.list_capabilities(agent_id)
       assert caps_before != []
 

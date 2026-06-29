@@ -52,7 +52,6 @@ defmodule Arbor.Orchestrator.Session do
       {:ok, pid} = Session.start_link(
         session_id: "session-1",
         agent_id: "agent_abc123",
-        trust_tier: :established,
         adapters: %{
           llm_call: &MyLLM.call/3,
           memory_recall: &MyMemory.recall/2
@@ -88,7 +87,6 @@ defmodule Arbor.Orchestrator.Session do
   defstruct [
     :session_id,
     :agent_id,
-    :trust_tier,
     :turn_graph,
     # DOT file path — stored so reload_dot/1 can re-parse without restarting
     :turn_dot_path,
@@ -158,7 +156,6 @@ defmodule Arbor.Orchestrator.Session do
   @type t :: %__MODULE__{
           session_id: String.t(),
           agent_id: String.t(),
-          trust_tier: atom(),
           turn_graph: Arbor.Orchestrator.Graph.t(),
           turn_dot_path: String.t() | nil,
           phase: phase(),
@@ -200,15 +197,12 @@ defmodule Arbor.Orchestrator.Session do
 
     * `:session_id`    — unique session identifier
     * `:agent_id`      — the agent this session belongs to
-    * `:trust_tier`    — atom trust tier (e.g. `:established`)
     * `:turn_dot`      — path to the turn pipeline DOT file
     * `:heartbeat_dot` — path to the heartbeat pipeline DOT file (passed through for HeartbeatService)
 
   ## Optional
 
     * `:adapters`           — map of adapter functions (legacy, unused with action-based DOTs).
-                              Include `:trust_tier_resolver` (`fn agent_id -> {:ok, tier}`)
-                              to verify trust_tier against the authority (e.g. `Arbor.Trust`)
     * `:name`               — GenServer name registration
     * `:session_type`       — `:primary | :background | :delegation | :consultation` (default `:primary`)
     * `:execution_mode`     — `:legacy | :session | :graph` (default `:session`)
@@ -389,7 +383,6 @@ defmodule Arbor.Orchestrator.Session do
   def init(opts) do
     session_id = Keyword.fetch!(opts, :session_id)
     agent_id = Keyword.fetch!(opts, :agent_id)
-    trust_tier = Keyword.fetch!(opts, :trust_tier)
     turn_dot_path = Keyword.fetch!(opts, :turn_dot)
 
     adapters = Keyword.get(opts, :adapters, %{})
@@ -403,10 +396,6 @@ defmodule Arbor.Orchestrator.Session do
     signer = Keyword.get(opts, :signer)
     tenant_context = Keyword.get(opts, :tenant_context)
 
-    # Verify trust_tier if a resolver is available (hierarchy constraint bridge).
-    # Without a resolver, we trust the caller — but log a warning.
-    trust_tier = Builders.verify_trust_tier(trust_tier, agent_id, adapters)
-
     # Initialize compactor if configured (runtime bridge — module lives in arbor_agent)
     compactor = Builders.init_compactor(Keyword.get(opts, :compactor))
 
@@ -416,7 +405,6 @@ defmodule Arbor.Orchestrator.Session do
         Builders.build_contract_structs(
           session_id: session_id,
           agent_id: agent_id,
-          trust_tier: trust_tier,
           session_type: session_type,
           trace_id: trace_id,
           config: config,
@@ -426,7 +414,6 @@ defmodule Arbor.Orchestrator.Session do
       state = %__MODULE__{
         session_id: session_id,
         agent_id: agent_id,
-        trust_tier: trust_tier,
         turn_graph: turn_graph,
         turn_dot_path: turn_dot_path,
         compactor: compactor,
@@ -454,14 +441,13 @@ defmodule Arbor.Orchestrator.Session do
         end
 
       # Grant security capabilities for the session's resolved tool set.
-      # Tools are determined by trust tier via ToolDisclosure; the agent
-      # needs matching capabilities for Security.authorize to succeed.
+      # Tool exposure is profile/capability-derived (not trust-tier gated); the
+      # agent needs matching capabilities for Security.authorize to succeed.
       alias Arbor.Orchestrator.Session.ToolDisclosure
 
       resolved_tools =
         ToolDisclosure.resolve_tools(
           config,
-          trust_tier,
           Map.get(state, :discovered_tools, MapSet.new()),
           agent_id: agent_id
         )
@@ -859,7 +845,6 @@ defmodule Arbor.Orchestrator.Session do
       resolved_tools =
         ToolDisclosure.resolve_tools(
           state.config,
-          state.trust_tier,
           state.discovered_tools,
           agent_id: state.agent_id
         )

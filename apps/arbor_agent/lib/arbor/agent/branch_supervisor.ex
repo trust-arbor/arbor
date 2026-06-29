@@ -16,7 +16,7 @@ defmodule Arbor.Agent.BranchSupervisor do
       BranchSupervisor.start_link(
         agent_id: "agent_abc123",
         host_opts: [id: "agent_abc123", model: "gemini-3-flash", provider: :openrouter],
-        executor_opts: [agent_id: "agent_abc123", trust_tier: :established],
+        executor_opts: [agent_id: "agent_abc123"],
         session_opts: [session_id: "agent-session-abc123", ...]
       )
   """
@@ -180,7 +180,7 @@ defmodule Arbor.Agent.BranchSupervisor do
     enabled = Map.get(heartbeat_config, :enabled, true)
 
     if enabled and Code.ensure_loaded?(Arbor.Orchestrator.HeartbeatService) do
-      # HeartbeatService receives the same agent_id, signer, trust_tier
+      # HeartbeatService receives the same agent_id and signer
       # as Session — extracted from the shared session_opts.
       service_opts =
         heartbeat_opts

@@ -64,8 +64,7 @@ defmodule Mix.Tasks.Arbor.Template do
 
       header =
         String.pad_trailing("NAME", 20) <>
-          String.pad_trailing("SOURCE", 10) <>
-          String.pad_trailing("TRUST TIER", 14) <> "DESCRIPTION"
+          String.pad_trailing("SOURCE", 10) <> "DESCRIPTION"
 
       Mix.shell().info(header)
       Mix.shell().info(String.duplicate("-", 80))
@@ -73,9 +72,8 @@ defmodule Mix.Tasks.Arbor.Template do
       for t <- templates do
         name = String.pad_trailing(t["name"] || "?", 20)
         source = String.pad_trailing(t["source"] || "?", 10)
-        tier = String.pad_trailing(t["trust_tier"] || "?", 14)
         desc = truncate(t["description"] || "", 36)
-        Mix.shell().info("#{name}#{source}#{tier}#{desc}")
+        Mix.shell().info("#{name}#{source}#{desc}")
       end
     end
   end
@@ -92,7 +90,6 @@ defmodule Mix.Tasks.Arbor.Template do
           Mix.shell().info("Template: #{data["name"]}")
           Mix.shell().info("Source: #{data["source"]}")
           Mix.shell().info("Version: #{data["version"]}")
-          Mix.shell().info("Trust Tier: #{data["trust_tier"]}")
           Mix.shell().info("Description: #{data["description"]}")
           Mix.shell().info("Nature: #{data["nature"]}")
 
@@ -135,8 +132,7 @@ defmodule Mix.Tasks.Arbor.Template do
     else
       result =
         Arbor.Agent.TemplateStore.create_from_opts(name,
-          description: "Custom template",
-          trust_tier: :probationary
+          description: "Custom template"
         )
 
       case result do

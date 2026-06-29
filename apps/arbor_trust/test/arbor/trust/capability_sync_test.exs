@@ -516,7 +516,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
 
   describe "ensure_agent_prefix logic (tested via generate_capabilities)" do
     test "agent IDs with prefix are preserved in generated capabilities" do
-      caps = Config.generate_capabilities("agent_foo", :untrusted)
+      caps = Config.generate_capabilities("agent_foo")
 
       for cap <- caps do
         assert cap.principal_id == "agent_foo"
@@ -529,7 +529,7 @@ defmodule Arbor.Trust.CapabilitySyncTest do
     end
 
     test "agent IDs without prefix still work in generated capabilities" do
-      caps = Config.generate_capabilities("raw_id", :untrusted)
+      caps = Config.generate_capabilities("raw_id")
 
       for cap <- caps do
         assert cap.principal_id == "raw_id"

@@ -2,14 +2,13 @@ defmodule Arbor.Trust.Authority do
   @moduledoc """
   Pure CRC module for trust authority operations.
 
-  Centralizes all pure trust logic: score calculation, tier resolution,
-  profile rule evaluation, and profile mutations. GenServer wrappers
-  (Manager, Store) call these functions for the actual logic.
+  Centralizes pure trust logic: profile rule evaluation and profile mutations.
+  GenServer wrappers (Manager, Store) call these functions for the actual logic.
 
   ## CRC Pattern
 
-  - **Construct**: `new_profile/2` — create a trust profile with preset rules
-  - **Reduce**: `freeze/2`, `unfreeze/1`, `set_rule/3`, `set_tier/2` — pure state transitions
+  - **Construct**: `new_profile/1` — create a trust profile with preset rules
+  - **Reduce**: `freeze/2`, `unfreeze/1`, `set_rule/3` — pure state transitions
   - **Convert**: `effective_mode/3`, `explain/3`, `show_summary/1` — formatted output
 
   All functions are pure — no ETS, no GenServer calls, no side effects.
@@ -22,21 +21,19 @@ defmodule Arbor.Trust.Authority do
   # ===========================================================================
 
   @doc """
-  Create a new trust profile with the correct preset for the given tier.
+  Create a new trust profile with the default (cautious) preset rules.
 
-  This is the single entry point for profile creation — resolves the preset
-  (baseline + rules) from the tier, avoiding the bug where tier was set but
-  preset rules weren't applied.
+  This is the single entry point for profile creation — it resolves the
+  preset (baseline + rules) and applies it.
   """
-  @spec new_profile(String.t(), atom()) :: Profile.t()
-  def new_profile(agent_id, tier \\ :untrusted) do
+  @spec new_profile(String.t()) :: Profile.t()
+  def new_profile(agent_id) do
     {:ok, profile} = Profile.new(agent_id)
-    {baseline, rules} = preset_rules_for_tier(tier)
+    {baseline, rules} = preset_rules(:cautious)
 
     %{
       profile
-      | tier: tier,
-        baseline: baseline,
+      | baseline: baseline,
         rules: rules,
         created_at: DateTime.utc_now(),
         updated_at: DateTime.utc_now()
@@ -44,7 +41,7 @@ defmodule Arbor.Trust.Authority do
   end
 
   # ===========================================================================
-  # Reduce — Freeze / Tier
+  # Reduce — Freeze
   # ===========================================================================
 
   @doc "Freeze trust progression."
@@ -60,37 +57,18 @@ defmodule Arbor.Trust.Authority do
   end
 
   @doc """
-  Update the tier label on a profile, leaving rules and baseline unchanged.
-
-  Tier is now a display label that tracks score-based and points-based
-  progression — it does NOT modify the agent's authorization rules. User
-  customizations (e.g., "always allow" rules) are sacrosanct and never
-  overwritten by tier transitions.
-
-  See `apply_tier_preset/2` if you explicitly want to reset rules to a
-  preset (e.g., during agent creation or a deliberate factory reset).
-
-  See `.arbor/roadmap/0-inbox/trust-tiers-mental-model-review.md` for the
-  broader question of whether tiers should exist at all.
-  """
-  @spec set_tier(Profile.t(), atom()) :: Profile.t()
-  def set_tier(%Profile{} = profile, tier) do
-    %{profile | tier: tier}
-  end
-
-  @doc """
-  Apply a tier's preset baseline and rules to a profile, replacing the
+  Apply a named preset's baseline and rules to a profile, replacing the
   existing baseline and merging the preset rules over current rules.
 
-  Use this only for explicit reset operations (e.g., agent creation via
-  `new_profile/2`, or a user-initiated "reset to defaults"). It is NOT
-  called automatically by tier promotion — see `set_tier/2`.
+  Use this for explicit reset operations (e.g., a user-initiated
+  "reset to defaults"). Preset names: `:cautious`, `:balanced`, `:hands_off`,
+  `:full_trust`.
   """
-  @spec apply_tier_preset(Profile.t(), atom()) :: Profile.t()
-  def apply_tier_preset(%Profile{} = profile, tier) do
-    {baseline, rules} = preset_rules_for_tier(tier)
+  @spec apply_preset(Profile.t(), atom()) :: Profile.t()
+  def apply_preset(%Profile{} = profile, preset) do
+    {baseline, rules} = preset_rules(preset)
 
-    %{profile | tier: tier, baseline: baseline, rules: Map.merge(profile.rules, rules)}
+    %{profile | baseline: baseline, rules: Map.merge(profile.rules, rules)}
   end
 
   # ===========================================================================
@@ -169,7 +147,6 @@ defmodule Arbor.Trust.Authority do
       ceiling_mode: ceiling_mode,
       model_mode: model_mode,
       baseline: profile.baseline,
-      tier: profile.tier,
       matching_rule: find_matching_rule(profile.rules, resource_uri)
     }
   end
@@ -183,7 +160,6 @@ defmodule Arbor.Trust.Authority do
   def show_summary(%Profile{} = profile) do
     %{
       agent_id: profile.agent_id,
-      tier: profile.tier,
       frozen: profile.frozen,
       baseline: profile.baseline,
       rule_count: map_size(profile.rules),
@@ -256,15 +232,14 @@ defmodule Arbor.Trust.Authority do
           {to_string(k), safe_mode(v)}
         end
 
-      # Normalize the top-level mode/tier fields too — JSON persistence
-      # round-trips them as strings, and a string `baseline` slipped past
-      # the security ceiling check until 2026-04-07 because
-      # `most_restrictive` couldn't compare it with the atom ceilings.
+      # Normalize the top-level mode field too — JSON persistence round-trips
+      # it as a string, and a string `baseline` slipped past the security
+      # ceiling check until 2026-04-07 because `most_restrictive` couldn't
+      # compare it with the atom ceilings.
       profile = %{
         profile
         | rules: rules,
-          baseline: safe_mode(profile.baseline),
-          tier: safe_tier(profile.tier)
+          baseline: safe_mode(profile.baseline)
       }
 
       {:ok, profile}
@@ -278,30 +253,6 @@ defmodule Arbor.Trust.Authority do
   # ===========================================================================
   # Pure Helpers
   # ===========================================================================
-
-  @doc "Resolve the tier for a trust score."
-  @spec resolve_tier(non_neg_integer()) :: atom()
-  def resolve_tier(score) when score >= 90, do: :autonomous
-  def resolve_tier(score) when score >= 75, do: :veteran
-  def resolve_tier(score) when score >= 50, do: :trusted
-  def resolve_tier(score) when score >= 20, do: :probationary
-  def resolve_tier(_), do: :untrusted
-
-  @doc "Map tier to preset name."
-  @spec tier_to_preset(atom()) :: atom()
-  def tier_to_preset(tier) when tier in [:untrusted, :probationary], do: :cautious
-  def tier_to_preset(:established), do: :cautious
-  def tier_to_preset(:trusted), do: :balanced
-  def tier_to_preset(:veteran), do: :hands_off
-  def tier_to_preset(:autonomous), do: :full_trust
-  def tier_to_preset(_), do: :cautious
-
-  @doc "Get preset rules for a tier."
-  @spec preset_rules_for_tier(atom()) :: {atom(), map()}
-  def preset_rules_for_tier(tier) do
-    preset = tier_to_preset(tier)
-    preset_rules(preset)
-  end
 
   @doc "Get baseline and rules for a preset name."
   @spec preset_rules(atom()) :: {atom(), map()}
@@ -474,17 +425,6 @@ defmodule Arbor.Trust.Authority do
   defp safe_mode("allow"), do: :allow
   defp safe_mode("auto"), do: :auto
   defp safe_mode(_), do: :ask
-
-  # Tier names are bounded — coerce strings to existing atoms only.
-  defp safe_tier(v) when is_atom(v), do: v
-
-  defp safe_tier(v) when is_binary(v) do
-    String.to_existing_atom(v)
-  rescue
-    ArgumentError -> :new
-  end
-
-  defp safe_tier(_), do: :new
 
   defp safe_to_existing_atom(str) when is_binary(str) do
     String.to_existing_atom(str)

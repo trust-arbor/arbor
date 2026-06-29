@@ -20,11 +20,11 @@ defmodule Arbor.Agent.ExecutorIntegration do
   """
   @spec start_executor(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start_executor(agent_id, opts \\ []) do
-    trust_tier = Keyword.get(opts, :trust_tier, :established)
+    executor_opts = Keyword.take(opts, [:sandbox_level])
 
-    case Executor.start(agent_id, trust_tier: trust_tier) do
+    case Executor.start(agent_id, executor_opts) do
       {:ok, pid} ->
-        Logger.info("Executor started for agent #{agent_id}", trust_tier: trust_tier)
+        Logger.info("Executor started for agent #{agent_id}")
         {:ok, pid}
 
       {:error, {:already_started, pid}} ->

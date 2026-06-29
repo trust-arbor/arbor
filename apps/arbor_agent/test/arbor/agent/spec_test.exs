@@ -14,16 +14,6 @@ defmodule Arbor.Agent.SpecTest do
       assert {:error, :missing_display_name} = Spec.new([])
     end
 
-    test "defaults trust_tier to :untrusted" do
-      {:ok, spec} = Spec.new(display_name: "test")
-      assert spec.trust_tier == :untrusted
-    end
-
-    test "applies explicit trust_tier" do
-      {:ok, spec} = Spec.new(display_name: "test", trust_tier: :veteran)
-      assert spec.trust_tier == :veteran
-    end
-
     test "applies model_config" do
       {:ok, spec} =
         Spec.new(
@@ -74,17 +64,6 @@ defmodule Arbor.Agent.SpecTest do
       assert spec.delegator_id == "agent_parent"
     end
 
-    test "explicit trust_tier overrides template default" do
-      {:ok, spec} =
-        Spec.new(
-          display_name: "test",
-          trust_tier: :autonomous,
-          character: Character.new(name: "test")
-        )
-
-      assert spec.trust_tier == :autonomous
-    end
-
     test "applies metadata" do
       {:ok, spec} = Spec.new(display_name: "test", metadata: %{custom: "value"})
       assert spec.metadata.custom == "value"
@@ -97,7 +76,6 @@ defmodule Arbor.Agent.SpecTest do
         agent_id: "agent_123",
         display_name: "test",
         character: Character.new(name: "TestBot"),
-        trust_tier: :veteran,
         template: "diagnostician",
         initial_goals: [%{type: :maintain, description: "monitor"}],
         initial_capabilities: [],
@@ -113,24 +91,10 @@ defmodule Arbor.Agent.SpecTest do
       {:ok, spec} = Spec.from_profile(profile, model_config)
 
       assert spec.display_name == "test"
-      assert spec.trust_tier == :veteran
       assert spec.model == "arcee-ai/trinity-large-thinking"
       assert spec.provider == :openrouter
       assert spec.template == "diagnostician"
       assert spec.auto_start == true
-    end
-
-    test "handles nil trust_tier in profile" do
-      profile = %Profile{
-        agent_id: "agent_123",
-        display_name: "test",
-        character: Character.new(name: "test"),
-        trust_tier: nil,
-        metadata: %{}
-      }
-
-      {:ok, spec} = Spec.from_profile(profile)
-      assert spec.trust_tier == :untrusted
     end
 
     test "security regression (H9): unknown provider strings do not create new atoms" do
@@ -167,7 +131,6 @@ defmodule Arbor.Agent.SpecTest do
       {:ok, spec} =
         Spec.new(
           display_name: "test",
-          trust_tier: :veteran,
           character: Character.new(name: "TestBot"),
           model_config: %{id: "model-1", provider: :openrouter}
         )
@@ -182,7 +145,6 @@ defmodule Arbor.Agent.SpecTest do
 
       assert profile.agent_id == "agent_abc"
       assert profile.display_name == "test"
-      assert profile.trust_tier == :veteran
       assert profile.character.name == "TestBot"
       assert profile.metadata.last_model_config == spec.model_config
     end
@@ -193,7 +155,6 @@ defmodule Arbor.Agent.SpecTest do
       {:ok, spec} =
         Spec.new(
           display_name: "test",
-          trust_tier: :established,
           model_config: %{id: "model-1", provider: :openrouter}
         )
 
@@ -201,7 +162,6 @@ defmodule Arbor.Agent.SpecTest do
 
       assert Keyword.get(opts, :session_id) == "agent-session-agent_abc"
       assert Keyword.get(opts, :agent_id) == "agent_abc"
-      assert Keyword.get(opts, :trust_tier) == :established
       assert opts[:config]["llm_model"] == "model-1"
       assert opts[:config]["llm_provider"] == "openrouter"
     end
@@ -212,7 +172,6 @@ defmodule Arbor.Agent.SpecTest do
       {:ok, spec} =
         Spec.new(
           display_name: "test",
-          trust_tier: :veteran,
           template: "diagnostician",
           character: Character.new(name: "Diag"),
           capabilities: [%{resource: "arbor://monitor/read"}]
@@ -220,7 +179,6 @@ defmodule Arbor.Agent.SpecTest do
 
       opts = Spec.to_lifecycle_opts(spec)
 
-      assert Keyword.get(opts, :trust_tier) == :veteran
       assert Keyword.get(opts, :template) == "diagnostician"
       assert Keyword.get(opts, :character) != nil
       assert length(Keyword.get(opts, :capabilities)) == 1

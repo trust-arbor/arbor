@@ -22,7 +22,6 @@ defmodule Arbor.Contracts.Trust.Event do
   | :improvement_applied | +improvement_count | Self-improvement applied |
   | :trust_frozen | Frozen | Circuit breaker triggered |
   | :trust_unfrozen | Unfrozen | Manual/auto unfreeze |
-  | :tier_changed | Tier changed | Tier band changed |
 
   ## Usage
 
@@ -54,10 +53,6 @@ defmodule Arbor.Contracts.Trust.Event do
     field(:new_score, non_neg_integer(), enforce: false)
     field(:delta, integer(), enforce: false)
 
-    # Tier changes
-    field(:previous_tier, atom(), enforce: false)
-    field(:new_tier, atom(), enforce: false)
-
     # Context
     field(:reason, atom() | String.t(), enforce: false)
     field(:metadata, map(), default: %{})
@@ -73,7 +68,6 @@ defmodule Arbor.Contracts.Trust.Event do
     :improvement_applied,
     :trust_frozen,
     :trust_unfrozen,
-    :tier_changed,
     :profile_created,
     :profile_deleted,
     # Council-based trust earning events
@@ -96,8 +90,6 @@ defmodule Arbor.Contracts.Trust.Event do
 
   - `:previous_score` - Score before the event
   - `:new_score` - Score after the event
-  - `:previous_tier` - Tier before (for tier_changed events)
-  - `:new_tier` - Tier after (for tier_changed events)
   - `:reason` - Reason for the event
   - `:metadata` - Additional context
 
@@ -111,16 +103,6 @@ defmodule Arbor.Contracts.Trust.Event do
         new_score: 46,
         metadata: %{action: "sort_list"}
       )
-
-      # Tier promotion
-      {:ok, event} = Event.new(
-        agent_id: "agent_123",
-        event_type: :tier_changed,
-        previous_tier: :probationary,
-        new_tier: :trusted,
-        previous_score: 49,
-        new_score: 50
-      )
   """
   @spec new(keyword()) :: {:ok, t()} | {:error, term()}
   def new(attrs) do
@@ -132,8 +114,6 @@ defmodule Arbor.Contracts.Trust.Event do
       previous_score: attrs[:previous_score],
       new_score: attrs[:new_score],
       delta: calculate_delta(attrs[:previous_score], attrs[:new_score]),
-      previous_tier: attrs[:previous_tier],
-      new_tier: attrs[:new_tier],
       reason: attrs[:reason],
       metadata: attrs[:metadata] || %{}
     }
@@ -172,22 +152,6 @@ defmodule Arbor.Contracts.Trust.Event do
       Keyword.merge(opts,
         agent_id: agent_id,
         event_type: event_type
-      )
-    )
-  end
-
-  @doc """
-  Create a tier change event.
-  """
-  @spec tier_change_event(String.t(), atom(), atom(), keyword()) ::
-          {:ok, t()} | {:error, term()}
-  def tier_change_event(agent_id, from_tier, to_tier, opts \\ []) do
-    new(
-      Keyword.merge(opts,
-        agent_id: agent_id,
-        event_type: :tier_changed,
-        previous_tier: from_tier,
-        new_tier: to_tier
       )
     )
   end

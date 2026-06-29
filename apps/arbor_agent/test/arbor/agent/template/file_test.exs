@@ -57,7 +57,6 @@ defmodule Arbor.Agent.Template.FileTest do
     test "rejects a missing character name" do
       data = %{
         "character" => %{},
-        "trust_tier" => "probationary",
         "initial_goals" => [],
         "required_capabilities" => []
       }
@@ -66,22 +65,9 @@ defmodule Arbor.Agent.Template.FileTest do
       assert {:character, :missing_name} in reasons
     end
 
-    test "rejects an unknown trust tier" do
-      data = %{
-        "character" => %{"name" => "X"},
-        "trust_tier" => "godmode",
-        "initial_goals" => [],
-        "required_capabilities" => []
-      }
-
-      assert {:error, reasons} = TemplateFile.validate(data)
-      assert Enum.any?(reasons, &match?({:trust_tier, _}, &1))
-    end
-
     test "rejects malformed goals and capabilities" do
       data = %{
         "character" => %{"name" => "X"},
-        "trust_tier" => "trusted",
         "initial_goals" => [%{"type" => "achieve"}],
         "required_capabilities" => [%{"description" => "no resource"}]
       }

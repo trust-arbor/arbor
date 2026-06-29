@@ -34,7 +34,6 @@ defmodule Arbor.Agent.ProfileStoreTest do
       agent_id: agent_id,
       display_name: Keyword.get(opts, :display_name, "Test"),
       character: character,
-      trust_tier: Keyword.get(opts, :trust_tier, :probationary),
       auto_start: Keyword.get(opts, :auto_start, false),
       metadata: Keyword.get(opts, :metadata, %{}),
       created_at: DateTime.utc_now(),
@@ -48,14 +47,13 @@ defmodule Arbor.Agent.ProfileStoreTest do
 
   describe "store_profile/1 and load_profile/1" do
     test "round-trip preserves all fields" do
-      profile = make_profile("round-trip-1", auto_start: true, trust_tier: :trusted)
+      profile = make_profile("round-trip-1", auto_start: true)
 
       assert :ok = ProfileStore.store_profile(profile)
       assert {:ok, loaded} = ProfileStore.load_profile("round-trip-1")
 
       assert loaded.agent_id == "round-trip-1"
       assert loaded.display_name == "Test"
-      assert loaded.trust_tier == :trusted
       assert loaded.auto_start == true
       assert loaded.character.name == "Test Agent"
     end
@@ -255,7 +253,6 @@ defmodule Arbor.Agent.ProfileStoreTest do
         Jason.encode!(%{
           "agent_id" => "old-agent",
           "character" => %{"name" => "Old"},
-          "trust_tier" => "untrusted",
           "version" => 1
         })
 

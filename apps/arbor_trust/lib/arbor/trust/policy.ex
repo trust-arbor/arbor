@@ -2,14 +2,10 @@ defmodule Arbor.Trust.Policy do
   @moduledoc """
   Bridges trust profiles to capability authorization.
 
-  The Policy module is the glue between `Arbor.Trust` (behavioral scoring,
-  trust profiles) and `Arbor.Security` (capability-based authorization).
-  It answers two questions:
-
-  1. **What mode applies?** — Given an agent's trust profile, what
-     behavioral mode (block/ask/allow/auto) applies for a resource URI?
-  2. **How do capabilities change on tier transitions?** — When an agent
-     is promoted or demoted, what capabilities are granted or revoked?
+  The Policy module is the glue between `Arbor.Trust` (trust profiles) and
+  `Arbor.Security` (capability-based authorization). It answers: given an
+  agent's trust profile, what behavioral mode (block/ask/allow/auto) applies
+  for a resource URI?
 
   ## Trust Modes
 
@@ -55,8 +51,8 @@ defmodule Arbor.Trust.Policy do
       Policy.allowed?("agent_123", "arbor://code/read/self/*")
       #=> true
 
-      # Grant all capabilities for a tier
-      {:ok, caps} = Policy.grant_tier_capabilities("agent_123", :trusted)
+      # Grant the universal baseline capabilities
+      {:ok, count} = Policy.grant_base_capabilities("agent_123")
   """
 
   alias Arbor.Trust.{Config, ProfileResolver}
@@ -297,47 +293,9 @@ defmodule Arbor.Trust.Policy do
     end
   end
 
-  @doc """
-  Get the minimum tier required for a resource URI.
-
-  Delegates to `Config.min_tier_for_capability/1`.
-
-  ## Examples
-
-      Policy.min_tier_for("arbor://code/write/self/impl/*")
-      #=> :trusted
-
-      Policy.min_tier_for("arbor://capability/request/self/*")
-      #=> :autonomous
-  """
-  @spec min_tier_for(String.t()) :: Config.trust_tier() | nil
-  def min_tier_for(resource_uri) do
-    Config.min_tier_for_capability(resource_uri)
-  end
-
   # ===========================================================================
   # Trust Profile Management
   # ===========================================================================
-
-  @doc """
-  Derive trust profile rules from a tier.
-
-  Used to initialize rules for profiles that were created before
-  the trust profiles redesign (they have a tier but no rules).
-
-  Maps tiers to presets:
-  - `:untrusted`, `:probationary` → `:cautious`
-  - `:trusted` → `:balanced`
-  - `:veteran` → `:hands_off`
-  - `:autonomous` → `:full_trust`
-
-  ## Examples
-
-      Policy.tier_to_preset(:trusted)
-      #=> :balanced
-  """
-  @spec tier_to_preset(atom()) :: atom()
-  defdelegate tier_to_preset(tier), to: Arbor.Trust.Authority
 
   @doc """
   Initialize trust profile rules from a preset.
@@ -361,60 +319,8 @@ defmodule Arbor.Trust.Policy do
   # ===========================================================================
 
   @doc """
-  Grant all capabilities for a tier to an agent.
-
-  Creates capability entries in the CapabilityStore for each capability
-  template defined at the given tier. Uses `Security.grant/1` which
-  signs capabilities via SystemAuthority.
-
-  Returns `{:ok, count}` with the number of capabilities granted,
-  or `{:error, reason}` if the security infrastructure is unavailable.
-
-  ## Examples
-
-      {:ok, 12} = Policy.grant_tier_capabilities("agent_123", :trusted)
-  """
-  @spec grant_tier_capabilities(String.t(), Config.trust_tier()) ::
-          {:ok, non_neg_integer()} | {:error, term()}
-  def grant_tier_capabilities(agent_id, tier) do
-    templates = Config.capabilities_for_tier(tier)
-
-    with :ok <- ensure_security_available() do
-      results =
-        Enum.map(templates, fn template ->
-          resource_uri = resolve_uri(template.resource_uri, agent_id)
-
-          Arbor.Security.grant(
-            principal: agent_id,
-            resource: resource_uri,
-            constraints: template.constraints,
-            metadata: %{source: :trust_tier, tier: tier}
-          )
-        end)
-
-      granted = Enum.count(results, &match?({:ok, _}, &1))
-      errors = Enum.filter(results, &match?({:error, _}, &1))
-
-      if errors != [] do
-        Logger.warning(
-          "[Policy] #{length(errors)} capability grants failed for #{agent_id}: #{inspect(Enum.take(errors, 3))}"
-        )
-      end
-
-      safe_emit(:capabilities_granted, %{
-        agent_id: agent_id,
-        tier: tier,
-        granted: granted,
-        failed: length(errors)
-      })
-
-      {:ok, granted}
-    end
-  end
-
-  @doc """
-  Grant the universal baseline capabilities to an agent, independent of any trust
-  tier. Self-scoped (`/self/`) URIs are resolved to the agent's id. Returns
+  Grant the universal baseline capabilities to an agent.
+  Self-scoped (`/self/`) URIs are resolved to the agent's id. Returns
   `{:ok, count}` or `{:error, reason}` if the security infrastructure is down.
   """
   @spec grant_base_capabilities(String.t()) ::

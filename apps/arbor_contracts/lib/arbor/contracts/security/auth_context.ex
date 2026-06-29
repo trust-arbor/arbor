@@ -33,7 +33,6 @@ defmodule Arbor.Contracts.Security.AuthContext do
 
   alias Arbor.Contracts.Security.{Capability, Taint}
 
-  @type trust_tier :: :untrusted | :probationary | :established | :trusted | :veteran | :autonomous
   @type trust_mode :: :block | :ask | :allow | :auto
 
   @type decision :: :authorized | {:requires_approval, Capability.t()} | :unauthorized | {:error, term()}
@@ -46,7 +45,6 @@ defmodule Arbor.Contracts.Security.AuthContext do
           signer: (String.t() -> {:ok, term()} | {:error, term()}) | nil,
 
           # Trust (how trusted)
-          trust_tier: trust_tier(),
           trust_baseline: trust_mode(),
           trust_rules: %{String.t() => trust_mode()},
 
@@ -73,7 +71,6 @@ defmodule Arbor.Contracts.Security.AuthContext do
     :session_id,
     :tenant_context,
     identity_verified: false,
-    trust_tier: :untrusted,
     trust_baseline: :ask,
     trust_rules: %{},
     capabilities: [],
@@ -95,7 +92,6 @@ defmodule Arbor.Contracts.Security.AuthContext do
       tenant_context: Keyword.get(opts, :tenant_context),
       taint_state: Keyword.get(opts, :taint_state),
       # These get populated by AuthContext.load/1
-      trust_tier: Keyword.get(opts, :trust_tier, :untrusted),
       trust_baseline: Keyword.get(opts, :trust_baseline, :ask),
       trust_rules: Keyword.get(opts, :trust_rules, %{}),
       capabilities: Keyword.get(opts, :capabilities, [])
@@ -178,7 +174,6 @@ defmodule Arbor.Contracts.Security.AuthContext do
       case apply(store, :get_profile, [pid]) do
         {:ok, profile} ->
           %{ctx |
-            trust_tier: profile.tier || ctx.trust_tier,
             trust_baseline: profile.baseline || ctx.trust_baseline,
             trust_rules: profile.rules || ctx.trust_rules
           }

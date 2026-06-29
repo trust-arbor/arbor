@@ -52,7 +52,7 @@ defmodule Arbor.Trust.StoreTest do
       assert :ok = Store.store_profile(profile)
       assert {:ok, retrieved} = Store.get_profile(profile.agent_id)
       assert retrieved.agent_id == profile.agent_id
-      assert retrieved.tier == profile.tier
+      assert retrieved.baseline == profile.baseline
     end
 
     test "returns {:error, :not_found} for missing profile" do
@@ -63,11 +63,11 @@ defmodule Arbor.Trust.StoreTest do
       :ok = Store.store_profile(profile)
 
       # Create an updated version of the same profile
-      updated_profile = %{profile | tier: :trusted}
+      updated_profile = %{profile | baseline: :allow}
       :ok = Store.store_profile(updated_profile)
 
       {:ok, retrieved} = Store.get_profile(profile.agent_id)
-      assert retrieved.tier == :trusted
+      assert retrieved.baseline == :allow
     end
 
     test "stores multiple different profiles" do
@@ -134,23 +134,6 @@ defmodule Arbor.Trust.StoreTest do
       assert profiles == []
     end
 
-    test "filters by tier" do
-      {:ok, untrusted} = Profile.new("agent_tier_1")
-      {:ok, trusted} = Profile.new("agent_tier_2")
-      trusted = %{trusted | tier: :trusted}
-
-      :ok = Store.store_profile(untrusted)
-      :ok = Store.store_profile(trusted)
-
-      {:ok, untrusted_list} = Store.list_profiles(tier: :untrusted)
-      {:ok, trusted_list} = Store.list_profiles(tier: :trusted)
-
-      assert length(untrusted_list) == 1
-      assert hd(untrusted_list).agent_id == "agent_tier_1"
-      assert length(trusted_list) == 1
-      assert hd(trusted_list).agent_id == "agent_tier_2"
-    end
-
     test "respects limit option" do
       for i <- 1..5 do
         {:ok, p} = Profile.new("agent_limit_#{i}")
@@ -182,10 +165,10 @@ defmodule Arbor.Trust.StoreTest do
 
       {:ok, updated} =
         Store.update_profile(profile.agent_id, fn p ->
-          %{p | tier: :veteran}
+          %{p | baseline: :allow}
         end)
 
-      assert updated.tier == :veteran
+      assert updated.baseline == :allow
       # updated_at should be refreshed
       assert DateTime.compare(updated.updated_at, profile.updated_at) != :lt
     end
@@ -193,7 +176,7 @@ defmodule Arbor.Trust.StoreTest do
     test "returns {:error, :not_found} for missing profile" do
       result =
         Store.update_profile("nonexistent", fn p ->
-          %{p | tier: :veteran}
+          %{p | baseline: :allow}
         end)
 
       assert result == {:error, :not_found}
@@ -217,37 +200,6 @@ defmodule Arbor.Trust.StoreTest do
   end
 
   # Events now live exclusively in EventStore — see event_store_test.exs
-
-  describe "tier change event emission on update" do
-    test "emits tier change event when tier changes", %{profile: profile} do
-      :ok = Store.store_profile(profile)
-
-      # Update profile to trigger tier change (untrusted -> trusted)
-      {:ok, updated} =
-        Store.update_profile(profile.agent_id, fn p ->
-          %{p | tier: :trusted}
-        end)
-
-      assert updated.tier == :trusted
-
-      # Tier change events are now persisted via EventStore
-      # (requires EventStore running — covered by integration tests)
-      assert updated.tier == :trusted
-    end
-
-    test "does not emit tier change event when tier stays the same", %{profile: profile} do
-      :ok = Store.store_profile(profile)
-
-      # Update baseline but keep same tier
-      {:ok, updated} =
-        Store.update_profile(profile.agent_id, fn p ->
-          %{p | baseline: :block}
-        end)
-
-      # Tier should remain :untrusted
-      assert updated.tier == :untrusted
-    end
-  end
 
   describe "get_cache_stats/0" do
     test "returns cache statistics" do

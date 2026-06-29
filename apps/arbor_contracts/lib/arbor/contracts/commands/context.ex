@@ -38,7 +38,7 @@ defmodule Arbor.Contracts.Commands.Context do
   ### Agent-bound (nil when no current agent)
   - `:agent_id`, `:session_id`, `:session_pid`, `:display_name`
   - `:model`, `:provider`
-  - `:trust_tier`, `:trust_profile`
+  - `:trust_profile`
   - `:turn_count`, `:tools`, `:session_started`
 
   ### System-wide (always available, may be nil if not loaded)
@@ -64,7 +64,6 @@ defmodule Arbor.Contracts.Commands.Context do
     field(:display_name, String.t() | nil)
     field(:model, String.t() | nil)
     field(:provider, atom() | String.t() | nil)
-    field(:trust_tier, atom() | nil)
     field(:trust_profile, map() | nil)
     field(:turn_count, non_neg_integer() | nil)
     field(:tools, [String.t()], default: [])
@@ -98,7 +97,6 @@ defmodule Arbor.Contracts.Commands.Context do
       display_name: Keyword.get(attrs, :display_name),
       model: Keyword.get(attrs, :model),
       provider: Keyword.get(attrs, :provider),
-      trust_tier: Keyword.get(attrs, :trust_tier),
       trust_profile: Keyword.get(attrs, :trust_profile),
       turn_count: Keyword.get(attrs, :turn_count),
       tools: Keyword.get(attrs, :tools, []),

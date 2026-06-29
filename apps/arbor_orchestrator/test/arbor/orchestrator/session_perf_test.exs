@@ -360,7 +360,6 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
       state = %Arbor.Orchestrator.Session{
         session_id: "test-123",
         agent_id: "agent_test",
-        trust_tier: :established,
         turn_graph: nil,
         phase: :processing,
         session_type: :consultation,

@@ -124,10 +124,6 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
               <h3 style="margin: 0; font-size: 1.1rem; color: var(--aw-text, #fff);">
                 {agent_name(profile)}
               </h3>
-              <.badge
-                label={to_string(profile.trust_tier)}
-                color={tier_color(profile.trust_tier)}
-              />
               <span
                 style={"width: 10px; height: 10px; border-radius: 50%; background: #{status_dot_color(@running_ids, profile.agent_id)};"}
                 title={status_title(@running_ids, profile.agent_id)}
@@ -389,13 +385,6 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
                 <strong>Model:</strong>
                 <code style="font-size: 0.85em;">{detail.summary.model}</code>
               </div>
-              <div>
-                <strong>Tier:</strong>
-                <.badge
-                  label={to_string(detail.summary.trust_tier)}
-                  color={tier_color(detail.summary.trust_tier)}
-                />
-              </div>
               <div :if={detail.summary.turn_count}>
                 <strong>Turns:</strong>
                 <span>{detail.summary.turn_count}</span>
@@ -422,13 +411,6 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
               <div>
                 <strong>Name:</strong>
                 <span>{agent_name(detail.profile)}</span>
-              </div>
-              <div>
-                <strong>Trust Tier:</strong>
-                <.badge
-                  label={to_string(detail.profile.trust_tier)}
-                  color={tier_color(detail.profile.trust_tier)}
-                />
               </div>
               <div :if={detail.profile.template}>
                 <strong>Template:</strong>
@@ -643,15 +625,6 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
   # Drill-down section formatters (executor_status_color, reasoning_status_color,
   # goal_icon, format_thinking_time) live in AgentDetailCore — see safe_load_detail
   # which pre-shapes the drill-down sections via show_drilldown/1.
-
-  defp tier_color(:full_partner), do: :green
-  defp tier_color(:trusted), do: :green
-  defp tier_color(:established), do: :blue
-  defp tier_color(:verified), do: :blue
-  defp tier_color(:probationary), do: :purple
-  defp tier_color(:untrusted), do: :gray
-  defp tier_color(:restricted), do: :error
-  defp tier_color(_), do: :gray
 
   defp status_dot_color(running_ids, agent_id) do
     if MapSet.member?(running_ids, agent_id) do

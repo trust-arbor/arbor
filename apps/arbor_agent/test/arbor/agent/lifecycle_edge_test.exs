@@ -214,7 +214,6 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
       profile = %Profile{
         agent_id: "minimal-#{System.unique_integer([:positive])}",
         character: character,
-        trust_tier: :untrusted,
         display_name: nil,
         template: nil,
         identity: nil,
@@ -228,7 +227,6 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
       {:ok, restored} = Profile.from_json(json)
 
       assert restored.agent_id == profile.agent_id
-      assert restored.trust_tier == :untrusted
       assert restored.display_name == nil
       assert restored.template == nil
       assert restored.identity == nil
@@ -254,7 +252,6 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
         agent_id: "full-agent-#{System.unique_integer([:positive])}",
         display_name: "Full Agent Display",
         character: character,
-        trust_tier: :trusted,
         template: nil,
         initial_goals: [%{type: :achieve, description: "Complete testing"}],
         initial_capabilities: [%{resource: "arbor://fs/read/**"}],
@@ -278,7 +275,6 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
 
       assert restored.agent_id == profile.agent_id
       assert restored.display_name == "Full Agent Display"
-      assert restored.trust_tier == :trusted
       assert restored.version == 3
       assert restored.character.name == "Full Agent"
       assert restored.character.role == "tester"
@@ -292,7 +288,6 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
         agent_id: "unicode-#{System.unique_integer([:positive])}",
         display_name: "Agent with special chars",
         character: character,
-        trust_tier: :probationary,
         metadata: %{"description" => "Handles emoji and unicode"},
         created_at: DateTime.utc_now(),
         version: 1
@@ -327,7 +322,6 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
       valid_profile = %Profile{
         agent_id: "valid-list-#{System.unique_integer([:positive])}",
         character: character,
-        trust_tier: :untrusted,
         created_at: DateTime.utc_now(),
         version: 1
       }
@@ -371,7 +365,6 @@ defmodule Arbor.Agent.LifecycleEdgeTest do
       profile = %Profile{
         agent_id: agent_id,
         character: character,
-        trust_tier: :probationary,
         created_at: DateTime.utc_now(),
         version: 1
       }

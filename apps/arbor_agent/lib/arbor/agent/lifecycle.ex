@@ -16,7 +16,6 @@ defmodule Arbor.Agent.Lifecycle do
       # From options (inline character)
       {:ok, profile} = Lifecycle.create("My Agent",
         character: Character.new(name: "My Agent", values: ["helpfulness"]),
-        trust_tier: :probationary,
         initial_goals: [%{type: :achieve, description: "Complete the review"}],
         capabilities: [%{resource: "arbor://fs/read/**"}]
       )
@@ -467,7 +466,6 @@ defmodule Arbor.Agent.Lifecycle do
 
     Keyword.merge(opts,
       agent_id: agent_id,
-      trust_tier: Keyword.get(opts, :trust_tier, :established),
       sandbox_level: Arbor.Contracts.Security.SandboxLevel.coerce(sandbox_level)
     )
   end
@@ -494,7 +492,6 @@ defmodule Arbor.Agent.Lifecycle do
 
       session_opts =
         Keyword.merge(opts,
-          trust_tier: profile.trust_tier,
           tools: tools,
           system_prompt: system_prompt,
           start_heartbeat: Keyword.get(opts, :start_heartbeat, true),
@@ -533,7 +530,7 @@ defmodule Arbor.Agent.Lifecycle do
       heartbeat_config = extract_heartbeat_config(profile, opts)
 
       if Map.get(heartbeat_config, :enabled, true) do
-        # HeartbeatService receives the same agent_id, signer, trust_tier as Session
+        # HeartbeatService receives the same agent_id and signer as Session
         signer =
           case build_signer(agent_id) do
             {:ok, signer_fn} -> signer_fn
@@ -543,7 +540,6 @@ defmodule Arbor.Agent.Lifecycle do
         [
           agent_id: agent_id,
           signer: signer,
-          trust_tier: profile.trust_tier,
           heartbeat_config: heartbeat_config,
           heartbeat_dot: Keyword.get(session_opts, :heartbeat_dot)
         ]
@@ -807,7 +803,6 @@ defmodule Arbor.Agent.Lifecycle do
 
             opts =
               opts
-              |> Keyword.put_new(:trust_tier, kw[:trust_tier])
               |> Keyword.put_new(:initial_goals, kw[:initial_goals])
               |> Keyword.put_new(:capabilities, kw[:required_capabilities])
               |> Keyword.put(:template, template_name)
@@ -831,7 +826,6 @@ defmodule Arbor.Agent.Lifecycle do
 
             opts =
               opts
-              |> Keyword.put_new(:trust_tier, kw[:trust_tier])
               |> Keyword.put_new(:initial_goals, kw[:initial_goals])
               |> Keyword.put_new(:capabilities, kw[:required_capabilities])
               |> Keyword.put(:template, name)
@@ -849,7 +843,6 @@ defmodule Arbor.Agent.Lifecycle do
 
               opts =
                 opts
-                |> Keyword.put_new(:trust_tier, template_mod.trust_tier())
                 |> Keyword.put_new(:initial_goals, template_mod.initial_goals())
                 |> Keyword.put_new(:capabilities, template_mod.required_capabilities())
                 |> Keyword.put(:template, name)
@@ -1273,7 +1266,6 @@ defmodule Arbor.Agent.Lifecycle do
       agent_id: agent_id,
       display_name: display_name,
       character: character,
-      trust_tier: Keyword.get(opts, :trust_tier) || :untrusted,
       sandbox_level:
         Arbor.Contracts.Security.SandboxLevel.coerce(Keyword.get(opts, :sandbox_level)),
       template: template,
@@ -1411,7 +1403,6 @@ defmodule Arbor.Agent.Lifecycle do
     trust = Arbor.Trust
     store = Arbor.Trust.Store
     authority = Arbor.Trust.Authority
-    trust_tier = Keyword.get(opts, :trust_tier) || :untrusted
 
     if Code.ensure_loaded?(trust) and Code.ensure_loaded?(store) and
          function_exported?(store, :store_profile, 1) do
@@ -1420,11 +1411,11 @@ defmodule Arbor.Agent.Lifecycle do
           :ok
 
         {:error, :not_found} ->
-          # Use Authority.new_profile — creates with correct tier AND preset
+          # Use Authority.new_profile — creates with the default preset rules
           # in one call. No more create-then-patch-then-patch flow.
           profile =
-            if Code.ensure_loaded?(authority) and function_exported?(authority, :new_profile, 2) do
-              apply(authority, :new_profile, [agent_id, trust_tier])
+            if Code.ensure_loaded?(authority) and function_exported?(authority, :new_profile, 1) do
+              apply(authority, :new_profile, [agent_id])
             else
               # Fallback if Authority not available
               {:ok, p} = Arbor.Contracts.Trust.Profile.new(agent_id)
@@ -1433,10 +1424,10 @@ defmodule Arbor.Agent.Lifecycle do
 
           apply(store, :store_profile, [profile])
 
-          # The universal baseline capabilities are granted tier-independently by
-          # the trust system on profile creation (Manager + CapabilitySync); any
-          # role-specific self-capabilities come from the agent's template
-          # (required_capabilities), not from a trust tier.
+          # The universal baseline capabilities are granted by the trust system
+          # on profile creation (Manager + CapabilitySync); any role-specific
+          # self-capabilities come from the agent's template
+          # (required_capabilities).
           Logger.info("Trust profile created for #{agent_id}")
       end
 
@@ -1479,8 +1470,7 @@ defmodule Arbor.Agent.Lifecycle do
     dual_emit_lifecycle(:created, %{
       agent_id: profile.agent_id,
       name: profile.character.name,
-      template: profile.template,
-      trust_tier: profile.trust_tier
+      template: profile.template
     })
   end
 

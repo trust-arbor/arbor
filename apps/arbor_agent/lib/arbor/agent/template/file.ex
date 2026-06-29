@@ -12,7 +12,7 @@ defmodule Arbor.Agent.Template.File do
 
   ## Frontmatter (structured)
 
-  - top-level: `name`, `version`, `source`, `trust_tier`
+  - top-level: `name`, `version`, `source`
   - `metadata` (model / provider / context_management / version / category / …)
   - `character`: `name`, `description`, `role`, `tone`, `style`, `traits`,
     `values`, `quirks`, `knowledge` (the structured sub-fields)
@@ -71,7 +71,6 @@ defmodule Arbor.Agent.Template.File do
   Checks required fields are present and well-typed:
 
   - `character` is a map with a non-empty `name`
-  - `trust_tier` is one of the known tiers
   - `initial_goals` each have `type` + `description`
   - `required_capabilities` each have a `resource`
   """
@@ -79,7 +78,6 @@ defmodule Arbor.Agent.Template.File do
   def validate(data) when is_map(data) do
     []
     |> validate_character(data)
-    |> validate_trust_tier(data)
     |> validate_goals(data)
     |> validate_capabilities(data)
     |> case do
@@ -87,8 +85,6 @@ defmodule Arbor.Agent.Template.File do
       reasons -> {:error, Enum.reverse(reasons)}
     end
   end
-
-  @known_tiers ~w(untrusted probationary trusted established veteran autonomous)
 
   defp validate_character(reasons, data) do
     case data["character"] do
@@ -103,13 +99,6 @@ defmodule Arbor.Agent.Template.File do
 
       _ ->
         [{:character, :not_a_map} | reasons]
-    end
-  end
-
-  defp validate_trust_tier(reasons, data) do
-    case data["trust_tier"] do
-      tier when tier in @known_tiers -> reasons
-      other -> [{:trust_tier, {:unknown, other}} | reasons]
     end
   end
 
@@ -151,7 +140,6 @@ defmodule Arbor.Agent.Template.File do
     |> put_present("name", data["name"])
     |> put_present("version", data["version"])
     |> put_present("source", data["source"])
-    |> put_present("trust_tier", data["trust_tier"])
     |> put_present("metadata", reject_empty(data["metadata"] || %{}))
     |> put_present("character", character_fm)
     |> put_present("values", data["values"] || [])
@@ -258,7 +246,6 @@ defmodule Arbor.Agent.Template.File do
       "version" => fm["version"] || 1,
       "source" => fm["source"] || "user",
       "character" => character,
-      "trust_tier" => fm["trust_tier"],
       "sandbox_level" => fm["sandbox_level"],
       "initial_goals" => fm["initial_goals"] || [],
       "required_capabilities" => fm["required_capabilities"] || [],

@@ -54,12 +54,12 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
   end
 
   describe "tier-minting kill sweep (P0 gate #1) — security regression" do
-    test "recording many approvals never moves tier or mints capabilities", %{
+    test "recording many approvals never mints capabilities", %{
       agent_id: agent_id
     } do
-      # Profile starts at the creation tier.
+      # Profile starts with the creation baseline.
       {:ok, profile} = Trust.create_trust_profile(agent_id)
-      assert profile.tier == :untrusted
+      assert profile.baseline == :ask
 
       # Establish a deterministic baseline capability set (the creation grant).
       {:ok, _} = CapabilitySync.sync_capabilities(agent_id)
@@ -70,7 +70,7 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       # trust points auto-promoted tier via maybe_graduate and minted signed
       # tier capabilities through Policy.sync_capabilities — a parallel authority
       # path that bypassed the rules/ceilings model. The scoring/points feedback
-      # loop and that minting path are both now closed.
+      # loop and that minting path are both now closed (the tier band is gone).
       for _ <- 1..220 do
         :ok = Manager.record_trust_event(agent_id, :proposal_approved, %{impact: :high})
       end
@@ -79,9 +79,12 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       # preceding record_trust_event casts have been applied.
       {:ok, after_profile} = Manager.get_trust_profile(agent_id)
 
-      # Tier never moved from its creation value.
-      assert after_profile.tier == :untrusted,
-             "tier must not auto-graduate from trust events (got #{after_profile.tier})"
+      # The authorization profile never moved from its creation value.
+      assert after_profile.baseline == profile.baseline,
+             "baseline must not auto-graduate from trust events"
+
+      assert after_profile.rules == profile.rules,
+             "rules must not auto-graduate from trust events"
 
       # ...and NO new capabilities were minted: the set is byte-for-byte the same.
       {:ok, after_caps} = Security.list_capabilities(agent_id)
@@ -93,12 +96,11 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
   end
 
   describe "sync_capabilities grants signed capabilities" do
-    test "syncing at untrusted tier grants capabilities with valid signatures", %{
+    test "syncing grants baseline capabilities with valid signatures", %{
       agent_id: agent_id
     } do
-      # Create trust profile at untrusted tier
       {:ok, profile} = Trust.create_trust_profile(agent_id)
-      assert profile.tier == :untrusted
+      assert profile.baseline == :ask
 
       # Sync capabilities
       {:ok, result} = CapabilitySync.sync_capabilities(agent_id)
@@ -206,7 +208,7 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       assert {:error, :unauthorized} = Security.authorize(agent_id, resource)
     end
 
-    test "unfrozen agent regains tier capabilities", %{agent_id: agent_id} do
+    test "unfrozen agent regains baseline capabilities", %{agent_id: agent_id} do
       {:ok, profile} = Trust.create_trust_profile(agent_id)
       {:ok, _} = CapabilitySync.sync_capabilities(agent_id)
       {:ok, caps_before} = Security.list_capabilities(agent_id)
@@ -220,12 +222,12 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
 
       {:ok, caps_after} = Security.list_capabilities(agent_id)
 
-      # Should have same or more capabilities as before (at same tier)
+      # Should have same or more capabilities as before (same baseline floor)
       assert length(caps_after) >= length(caps_before)
 
-      # Verify tier is unchanged
+      # Verify the profile baseline is unchanged and the agent is unfrozen
       {:ok, profile_after} = Trust.get_trust_profile(agent_id)
-      assert profile_after.tier == profile.tier
+      assert profile_after.baseline == profile.baseline
       refute profile_after.frozen
     end
   end
@@ -242,7 +244,7 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
   describe "recording events" do
     test "recording success events does not mutate the profile", %{agent_id: agent_id} do
       {:ok, initial} = Trust.create_trust_profile(agent_id)
-      assert initial.tier == :untrusted
+      assert initial.baseline == :ask
       assert initial.success_rate_score == 0.0
 
       # Record success events
@@ -255,7 +257,7 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       # Scoring feedback loop removed (tiers-retirement phase 3b): events are
       # recorded for audit but do not move the profile's component scores.
       assert profile_after.success_rate_score == initial.success_rate_score
-      assert profile_after.tier == :untrusted
+      assert profile_after.baseline == initial.baseline
     end
   end
 end

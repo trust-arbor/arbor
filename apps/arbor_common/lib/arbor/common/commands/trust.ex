@@ -18,9 +18,6 @@ defmodule Arbor.Common.Commands.Trust do
 
   @impl true
   def execute(_args, %Context{} = ctx) do
-    tier_lines =
-      if ctx.trust_tier, do: ["Trust tier: #{ctx.trust_tier}"], else: []
-
     profile_lines =
       case ctx.trust_profile do
         nil ->
@@ -39,6 +36,6 @@ defmodule Arbor.Common.Commands.Trust do
           end
       end
 
-    {:ok, Result.ok(Enum.join(tier_lines ++ profile_lines, "\n"))}
+    {:ok, Result.ok(Enum.join(profile_lines, "\n"))}
   end
 end

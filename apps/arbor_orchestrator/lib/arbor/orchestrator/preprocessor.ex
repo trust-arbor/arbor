@@ -92,7 +92,7 @@ defmodule Arbor.Orchestrator.Preprocessor do
   for merging into turn context, or `{:ok, %{}}` when disabled. Never returns
   `{:error, _}` — it fails open.
 
-  `classification_opts` may carry `:agent_id`/`:trust_tier` etc. for future use.
+  `classification_opts` may carry `:agent_id` etc. for future use.
   """
   @spec run(String.t(), keyword()) :: {:ok, map()}
   def run(prompt, _opts \\ []) when is_binary(prompt) do

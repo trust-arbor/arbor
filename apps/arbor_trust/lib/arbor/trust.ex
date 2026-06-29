@@ -6,11 +6,12 @@ defmodule Arbor.Trust do
   providing a unified entry point for all trust operations:
 
   - **Trust Profiles** - Create and manage agent trust profiles
-  - **Trust Scoring** - Calculate and query trust scores
   - **Trust Events** - Record trust-affecting events
-  - **Trust Authorization** - Check trust-tier-based access
   - **Trust Freezing** - Freeze/unfreeze trust progression
-  - **Decay Management** - Periodic trust decay for inactive agents
+  - **Trust Policy** - Resolve effective modes from baseline + rules
+
+  Authorization runs on the granular `baseline` + `rules` + capability checks.
+  There is no trust-tier band.
 
   ## Quick Start
 
@@ -23,29 +24,16 @@ defmodule Arbor.Trust do
       # Record trust events
       :ok = Arbor.Trust.record_trust_event("agent_001", :action_success, %{action: "sort"})
 
-      # Check trust tier
-      {:ok, :authorized} = Arbor.Trust.check_trust_authorization("agent_001", :trusted)
-
       # Freeze trust on security incident
       :ok = Arbor.Trust.freeze_trust("agent_001", :security_violation)
-
-  ## Trust Tiers
-
-  | Tier | Score | Capabilities |
-  |------|-------|--------------|
-  | `:untrusted` | 0-19 | Read own code only |
-  | `:probationary` | 20-49 | Git, limited FS read |
-  | `:trusted` | 50-74 | Full read, workspace write |
-  | `:veteran` | 75-89 | Extensive access |
-  | `:autonomous` | 90-100 | Self-modification |
 
   ## Architecture
 
   This facade delegates to specialized modules:
-  - `Arbor.Trust.Manager` - Trust profiles and authorization
+  - `Arbor.Trust.Manager` - Trust profiles and lifecycle
   - `Arbor.Trust.Store` - In-memory trust profile storage
   - `Arbor.Trust.EventStore` - Durable event persistence
-  - `Arbor.Trust.Config` - Configuration, tier resolution, and capability templates
+  - `Arbor.Trust.Config` - Configuration and capability baseline
   """
 
   @behaviour Arbor.Contracts.API.Trust
@@ -130,17 +118,6 @@ defmodule Arbor.Trust do
   @spec unfreeze_trust(String.t()) :: :ok | {:error, term()}
   defdelegate unfreeze_trust(agent_id), to: Manager
 
-  @doc """
-  Check if an agent has sufficient trust for an operation.
-
-  ## Examples
-
-      {:ok, :authorized} = Arbor.Trust.check_trust_authorization("agent_001", :trusted)
-  """
-  @spec check_trust_authorization(String.t(), atom()) ::
-          {:ok, :authorized} | {:error, :insufficient_trust | :trust_frozen | :not_found}
-  defdelegate check_trust_authorization(agent_id, required_tier), to: Manager
-
   # ===========================================================================
   # Contract implementations — verbose names delegated to Manager
   # ===========================================================================
@@ -163,11 +140,6 @@ defmodule Arbor.Trust do
   @impl true
   defdelegate unfreeze_trust_progression_for_principal(agent_id), to: Manager, as: :unfreeze_trust
 
-  @impl true
-  defdelegate check_if_principal_meets_required_trust_tier(agent_id, required_tier),
-    to: Manager,
-    as: :check_trust_authorization
-
   # ===========================================================================
   # Administration
   # ===========================================================================
@@ -178,12 +150,10 @@ defmodule Arbor.Trust do
   ## Options
 
   - `:limit` - Maximum number of profiles to return
-  - `:tier` - Filter by trust tier
 
   ## Examples
 
       {:ok, profiles} = Arbor.Trust.list_profiles()
-      {:ok, profiles} = Arbor.Trust.list_profiles(tier: :trusted)
   """
   @spec list_profiles(keyword()) :: {:ok, [Arbor.Contracts.Trust.Profile.t()]}
   def list_profiles(opts \\ []) do
@@ -241,11 +211,6 @@ defmodule Arbor.Trust do
   @doc "Get confirmation mode for a resource at agent's current trust level."
   @spec confirmation_mode(String.t(), String.t()) :: :auto | :gated | :deny
   defdelegate confirmation_mode(agent_id, resource_uri), to: Arbor.Trust.Policy
-
-  @doc "Grant all capabilities for a tier to an agent."
-  @spec grant_tier_capabilities(String.t(), atom()) ::
-          {:ok, non_neg_integer()} | {:error, term()}
-  defdelegate grant_tier_capabilities(agent_id, tier), to: Arbor.Trust.Policy
 
   # -- ConfirmationTracker (confirm-then-automate) --
 

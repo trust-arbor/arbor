@@ -15,9 +15,11 @@ defmodule Arbor.Actions.Tool do
     @moduledoc """
     Search for available tools by query and return their full schemas.
 
-    Backed by `CapabilityResolver.search/2` for trust-gated discovery across
-    all registries (actions, skills, pipelines). Returns OpenAI-format tool
-    definitions so the agent can call discovered tools in the same turn.
+    Backed by `CapabilityResolver.search/2` for discovery across all
+    registries (actions, skills, pipelines). Discovery returns all matching
+    tools — exposure is not gated by trust; capabilities still gate execution.
+    Returns OpenAI-format tool definitions so the agent can call discovered
+    tools in the same turn.
 
     ## Parameters
 
@@ -47,10 +49,9 @@ defmodule Arbor.Actions.Tool do
     def taint_roles, do: %{query: :control, limit: :data}
 
     @impl true
-    def run(params, context) do
+    def run(params, _context) do
       query = params[:query]
       limit = params[:limit] || 10
-      trust_tier = context[:trust_tier] || :new
 
       Actions.emit_started(__MODULE__, %{query: query, limit: limit})
 
@@ -61,7 +62,7 @@ defmodule Arbor.Actions.Tool do
         if Code.ensure_loaded?(resolver) and function_exported?(resolver, :search, 2) do
           try do
             matches =
-              resolver.search(query, trust_tier: trust_tier, limit: limit, kind: :action)
+              resolver.search(query, limit: limit, kind: :action)
 
             matches
             |> Enum.flat_map(&match_to_tool_schema(&1, executor_mod))

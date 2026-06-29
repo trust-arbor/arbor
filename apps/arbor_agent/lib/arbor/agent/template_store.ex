@@ -261,22 +261,9 @@ defmodule Arbor.Agent.TemplateStore do
   def to_keyword(data) when is_map(data) do
     character = Character.from_map(data["character"] || %{"name" => data["name"] || "Unknown"})
 
-    trust_tier =
-      case data["trust_tier"] do
-        tier when tier in ~w(untrusted probationary trusted established veteran autonomous) ->
-          String.to_existing_atom(tier)
-
-        tier when is_atom(tier) and not is_nil(tier) ->
-          tier
-
-        _ ->
-          :untrusted
-      end
-
     [
       name: character.name,
       character: character,
-      trust_tier: trust_tier,
       sandbox_level: Arbor.Contracts.Security.SandboxLevel.coerce(data["sandbox_level"]),
       initial_goals: data["initial_goals"] || [],
       required_capabilities: data["required_capabilities"] || [],
@@ -323,7 +310,6 @@ defmodule Arbor.Agent.TemplateStore do
       "version" => 1,
       "source" => "user",
       "character" => character,
-      "trust_tier" => to_string(Keyword.get(opts, :trust_tier, :probationary)),
       "initial_goals" => stringify_keys_list(Keyword.get(opts, :initial_goals, [])),
       "required_capabilities" =>
         stringify_keys_list(Keyword.get(opts, :required_capabilities, [])),

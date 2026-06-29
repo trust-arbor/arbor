@@ -20,13 +20,10 @@ defmodule Arbor.Agent.Profile do
   alias Arbor.Agent.Character
   alias Arbor.Common.SafeAtom
 
-  @known_tiers ~w(untrusted probationary trusted veteran autonomous)a
-
   typedstruct do
     field(:agent_id, String.t(), enforce: true)
     field(:display_name, String.t(), default: nil)
     field(:character, Character.t(), enforce: true)
-    field(:trust_tier, atom(), default: :untrusted)
     # Declared isolation level (replaces the trust-tier → sandbox derivation).
     # Canonical Arbor.Contracts.Security.SandboxLevel value; defaults to the most
     # restrictive (:strict).
@@ -61,7 +58,6 @@ defmodule Arbor.Agent.Profile do
       "version" => profile.version,
       "agent_id" => profile.agent_id,
       "display_name" => profile.display_name,
-      "trust_tier" => Atom.to_string(profile.trust_tier),
       "sandbox_level" => Atom.to_string(profile.sandbox_level),
       "template" => serialize_template(profile.template),
       "character" => Character.to_map(profile.character),
@@ -84,7 +80,6 @@ defmodule Arbor.Agent.Profile do
       agent_id: map["agent_id"],
       display_name: map["display_name"],
       character: deserialize_character(map),
-      trust_tier: safe_to_atom(map["trust_tier"] || "untrusted"),
       sandbox_level: Arbor.Contracts.Security.SandboxLevel.coerce(map["sandbox_level"]),
       template: deserialize_template(map["template"]),
       initial_goals: map["initial_goals"] || [],
@@ -243,14 +238,4 @@ defmodule Arbor.Agent.Profile do
       _ -> nil
     end
   end
-
-  defp safe_to_atom(str) when is_binary(str) do
-    case SafeAtom.to_allowed(str, @known_tiers) do
-      {:ok, atom} -> atom
-      # Fallback for template module names and other non-tier atoms
-      {:error, _} -> String.to_existing_atom(str)
-    end
-  end
-
-  defp safe_to_atom(atom) when is_atom(atom), do: atom
 end

@@ -18,7 +18,6 @@ defmodule Mix.Tasks.Arbor.Profile do
 
   ## Editable Fields (via --set)
 
-    * `trust_tier=<tier>` — untrusted, probationary, trusted, veteran, autonomous
     * `auto_start=true|false` — auto-start on boot
     * `display_name=<name>` — display name
     * `metadata.<key>=<value>` — nested metadata field
@@ -63,7 +62,6 @@ defmodule Mix.Tasks.Arbor.Profile do
         String.pad_trailing("AGENT ID", 24) <>
           String.pad_trailing("NAME", 18) <>
           String.pad_trailing("TEMPLATE", 16) <>
-          String.pad_trailing("TIER", 14) <>
           "AUTO"
 
       Mix.shell().info(header)
@@ -73,9 +71,8 @@ defmodule Mix.Tasks.Arbor.Profile do
         id = String.pad_trailing(truncate(p.agent_id, 22), 24)
         name = String.pad_trailing(p.display_name || "?", 18)
         template = String.pad_trailing(format_template(p.template), 16)
-        tier = String.pad_trailing(to_string(p.trust_tier), 14)
         auto = if p.auto_start, do: "yes", else: "no"
-        Mix.shell().info("#{id}#{name}#{template}#{tier}#{auto}")
+        Mix.shell().info("#{id}#{name}#{template}#{auto}")
       end
     end
   end
@@ -86,7 +83,6 @@ defmodule Mix.Tasks.Arbor.Profile do
         Mix.shell().info("Agent ID: #{p.agent_id}")
         Mix.shell().info("Display Name: #{p.display_name}")
         Mix.shell().info("Template: #{format_template(p.template)}")
-        Mix.shell().info("Trust Tier: #{p.trust_tier}")
         Mix.shell().info("Auto Start: #{p.auto_start}")
         Mix.shell().info("Version: #{p.version}")
 
@@ -221,10 +217,6 @@ defmodule Mix.Tasks.Arbor.Profile do
   defp apply_changes(profile, changes) do
     Enum.reduce(changes, profile, fn {key, value}, p ->
       case key do
-        "trust_tier" ->
-          tier = String.to_existing_atom(value)
-          %{p | trust_tier: tier}
-
         "auto_start" ->
           %{p | auto_start: value in ["true", "1", "yes"]}
 

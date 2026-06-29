@@ -25,7 +25,6 @@ defmodule Arbor.Agent.LifecycleTest do
       profile = %Profile{
         agent_id: "test-agent-1",
         character: character,
-        trust_tier: :probationary,
         initial_goals: [%{type: :achieve, description: "Test"}],
         metadata: %{test: true},
         created_at: DateTime.utc_now(),
@@ -42,7 +41,6 @@ defmodule Arbor.Agent.LifecycleTest do
       {:ok, restored} = Profile.from_json(read_json)
 
       assert restored.agent_id == "test-agent-1"
-      assert restored.trust_tier == :probationary
       assert restored.character.name == "TestAgent"
       assert restored.character.tone == "helpful"
     end

@@ -65,7 +65,7 @@ defmodule Arbor.Agent.SeedTest do
     test "accepts name, self_model, metadata, profile options" do
       model = %{nature: "curious", values: ["accuracy"]}
       meta = %{source: "test"}
-      profile = %{"agent_id" => @agent_id, "trust_tier" => "trusted"}
+      profile = %{"agent_id" => @agent_id}
 
       seed =
         Seed.new(@agent_id,

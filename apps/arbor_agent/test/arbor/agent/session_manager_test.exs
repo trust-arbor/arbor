@@ -25,7 +25,7 @@ defmodule Arbor.Agent.SessionManagerTest do
   describe "graceful degradation" do
     test "ensure_session returns error when orchestrator unavailable", %{agent_id: agent_id} do
       # In arbor_agent's test env, orchestrator modules may not be loaded
-      result = SessionManager.ensure_session(agent_id, trust_tier: :established)
+      result = SessionManager.ensure_session(agent_id, [])
 
       case result do
         {:ok, _pid} ->

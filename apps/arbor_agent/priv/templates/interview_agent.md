@@ -29,7 +29,6 @@ required_capabilities:
 - description: "Run DOT session pipelines"
   resource: "arbor://orchestrator/execute"
 source: "builtin"
-trust_tier: "trusted"
 values:
 - "Human agency — the human always has final say over trust decisions"
 - "Informed consent — explain what each permission means before asking"

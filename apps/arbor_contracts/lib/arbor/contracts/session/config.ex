@@ -16,15 +16,14 @@ defmodule Arbor.Contracts.Session.Config do
   ## Delegation
 
   Use `delegation/2` to spawn a child session that inherits the parent's
-  agent identity, trust tier, and resource budget while getting its own
-  session ID and allowing overrides.
+  agent identity and resource budget while getting its own session ID and
+  allowing overrides.
 
   ## Usage
 
       {:ok, config} = Config.new(
         session_id: "sess_abc123",
-        agent_id: "agent_def456",
-        trust_tier: :established
+        agent_id: "agent_def456"
       )
 
       {:ok, child} = Config.delegation(config,
@@ -46,7 +45,6 @@ defmodule Arbor.Contracts.Session.Config do
 
     field(:session_id, String.t())
     field(:agent_id, String.t())
-    field(:trust_tier, atom())
     field(:session_type, :primary | :background | :delegation | :consultation, default: :primary)
     field(:parent_session_id, String.t() | nil, enforce: false)
     field(:graph_ref, String.t() | nil, enforce: false)
@@ -64,14 +62,12 @@ defmodule Arbor.Contracts.Session.Config do
   @doc """
   Create a new session config with validation.
 
-  Accepts a keyword list or map. Required fields: `session_id`, `agent_id`,
-  `trust_tier`.
+  Accepts a keyword list or map. Required fields: `session_id`, `agent_id`.
 
   ## Options
 
   - `:session_id` — Unique session identifier (required, non-empty string)
   - `:agent_id` — Agent owning this session (required, non-empty string)
-  - `:trust_tier` — Agent's trust tier (required, atom)
   - `:session_type` — Session purpose (default: `:primary`)
   - `:parent_session_id` — ID of the parent session for delegations
   - `:graph_ref` — Reference to the DOT graph driving this session
@@ -85,14 +81,13 @@ defmodule Arbor.Contracts.Session.Config do
 
       {:ok, config} = Config.new(
         session_id: "sess_001",
-        agent_id: "agent_abc",
-        trust_tier: :established
+        agent_id: "agent_abc"
       )
 
-      {:error, {:missing_required, :session_id}} = Config.new(agent_id: "x", trust_tier: :new)
+      {:error, {:missing_required, :session_id}} = Config.new(agent_id: "x")
 
       {:error, {:invalid_session_type, :bogus}} = Config.new(
-        session_id: "s", agent_id: "a", trust_tier: :new, session_type: :bogus
+        session_id: "s", agent_id: "a", session_type: :bogus
       )
   """
   @spec new(keyword() | map()) :: {:ok, t()} | {:error, term()}
@@ -103,7 +98,6 @@ defmodule Arbor.Contracts.Session.Config do
   def new(attrs) when is_map(attrs) do
     with :ok <- validate_required_string(attrs, :session_id),
          :ok <- validate_required_string(attrs, :agent_id),
-         :ok <- validate_required_atom(attrs, :trust_tier),
          :ok <- validate_session_type(get_attr(attrs, :session_type)),
          :ok <- validate_optional_string(attrs, :parent_session_id),
          :ok <- validate_optional_string(attrs, :graph_ref),
@@ -115,7 +109,6 @@ defmodule Arbor.Contracts.Session.Config do
       config = %__MODULE__{
         session_id: get_attr(attrs, :session_id),
         agent_id: get_attr(attrs, :agent_id),
-        trust_tier: get_attr(attrs, :trust_tier),
         session_type: get_attr(attrs, :session_type) || :primary,
         parent_session_id: get_attr(attrs, :parent_session_id),
         graph_ref: get_attr(attrs, :graph_ref),
@@ -133,8 +126,8 @@ defmodule Arbor.Contracts.Session.Config do
   @doc """
   Creates a delegation config from a parent config with overrides.
 
-  The child inherits the parent's `agent_id`, `trust_tier`, and
-  `resource_budget`. The caller must provide a new `session_id`.
+  The child inherits the parent's `agent_id` and `resource_budget`.
+  The caller must provide a new `session_id`.
   `parent_session_id` is set automatically. `session_type` defaults
   to `:delegation` but can be overridden (e.g., to `:consultation`).
 
@@ -142,8 +135,7 @@ defmodule Arbor.Contracts.Session.Config do
 
       {:ok, parent} = Config.new(
         session_id: "sess_parent",
-        agent_id: "agent_abc",
-        trust_tier: :established
+        agent_id: "agent_abc"
       )
 
       {:ok, child} = Config.delegation(parent,
@@ -166,7 +158,6 @@ defmodule Arbor.Contracts.Session.Config do
     attrs =
       %{
         agent_id: parent.agent_id,
-        trust_tier: parent.trust_tier,
         resource_budget: parent.resource_budget,
         session_type: :delegation,
         parent_session_id: parent.session_id,
@@ -186,15 +177,6 @@ defmodule Arbor.Contracts.Session.Config do
       nil -> {:error, {:missing_required, key}}
       val when is_binary(val) and byte_size(val) > 0 -> :ok
       "" -> {:error, {:missing_required, key}}
-      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
-      invalid -> {:error, {:"invalid_#{key}", invalid}}
-    end
-  end
-
-  defp validate_required_atom(attrs, key) do
-    case get_attr(attrs, key) do
-      nil -> {:error, {:missing_required, key}}
-      val when is_atom(val) -> :ok
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       invalid -> {:error, {:"invalid_#{key}", invalid}}
     end

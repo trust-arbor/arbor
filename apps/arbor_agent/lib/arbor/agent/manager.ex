@@ -114,7 +114,7 @@ defmodule Arbor.Agent.Manager do
         resolve_template(model_config)
 
     # Build a fully-resolved AgentSpec — single source of truth for all agent config.
-    # This resolves template, trust_tier, model, tools in one pure function.
+    # This resolves template, model, tools in one pure function.
     spec_opts =
       [
         display_name: display_name,
@@ -122,7 +122,6 @@ defmodule Arbor.Agent.Manager do
         model_config: model_config
       ] ++
         Keyword.take(opts, [
-          :trust_tier,
           :capabilities,
           :initial_goals,
           :delegator_id,

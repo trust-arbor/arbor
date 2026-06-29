@@ -18,7 +18,6 @@ defmodule Arbor.Agent.SessionConfig do
 
   ## Options
 
-  - `:trust_tier` — agent trust tier (default: :established)
   - `:provider` — LLM provider atom
   - `:model` — LLM model string
   - `:runtime` — LLM runtime atom (`:arbor` | `:acp`, default `:arbor`).
@@ -36,7 +35,6 @@ defmodule Arbor.Agent.SessionConfig do
   """
   @spec build(String.t(), keyword()) :: keyword()
   def build(agent_id, opts) do
-    trust_tier = Keyword.get(opts, :trust_tier, :established)
     provider = Keyword.get(opts, :provider)
     runtime = Keyword.get(opts, :runtime, :arbor)
     fallback_chain = Keyword.get(opts, :fallback_chain, [])
@@ -55,7 +53,6 @@ defmodule Arbor.Agent.SessionConfig do
     base = [
       session_id: "agent-session-#{agent_id}",
       agent_id: agent_id,
-      trust_tier: trust_tier,
       adapters: %{},
       turn_dot: turn_dot_path(),
       heartbeat_dot: Keyword.get(opts, :heartbeat_dot, heartbeat_dot_path()),

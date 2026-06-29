@@ -14,7 +14,6 @@ required_capabilities:
 - description: "Run DOT session pipelines"
   resource: "arbor://orchestrator/execute"
 source: "builtin"
-trust_tier: "established"
 version: 1
 ---
 # Description

@@ -8,7 +8,6 @@ defmodule Arbor.Contracts.Security.AuthContextTest do
       ctx = AuthContext.new("agent_123")
       assert ctx.principal_id == "agent_123"
       assert ctx.identity_verified == false
-      assert ctx.trust_tier == :untrusted
       assert ctx.trust_baseline == :ask
       assert ctx.capabilities == []
       assert ctx.decisions == []
@@ -20,13 +19,11 @@ defmodule Arbor.Contracts.Security.AuthContextTest do
       ctx =
         AuthContext.new("agent_123",
           signer: signer,
-          trust_tier: :veteran,
           trust_baseline: :allow,
           session_id: "sess_1"
         )
 
       assert ctx.signer == signer
-      assert ctx.trust_tier == :veteran
       assert ctx.trust_baseline == :allow
       assert ctx.session_id == "sess_1"
     end

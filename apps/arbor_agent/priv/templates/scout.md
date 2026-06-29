@@ -38,7 +38,6 @@ required_capabilities:
 - description: "Compile own sandbox code"
   resource: "arbor://code/compile/self/sandbox"
 source: "builtin"
-trust_tier: "probationary"
 values:
 - "speed and accuracy"
 - "minimal footprint"

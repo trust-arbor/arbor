@@ -18,18 +18,6 @@ defmodule Arbor.Trust.EventConverter do
   alias Arbor.Contracts.Trust.Event, as: TrustEvent
   alias Arbor.Persistence.Event, as: PersistenceEvent
 
-  # Known allowed tiers for safe atom conversion
-  @allowed_tiers [
-    :untrusted,
-    :probationary,
-    :trusted,
-    :veteran,
-    :autonomous,
-    # Legacy score-based tiers
-    :elevated,
-    :core
-  ]
-
   @doc """
   Convert a Trust.Event to a Persistence.Event for durable storage.
   """
@@ -43,8 +31,6 @@ defmodule Arbor.Trust.EventConverter do
       previous_score: event.previous_score,
       new_score: event.new_score,
       delta: event.delta,
-      previous_tier: event.previous_tier,
-      new_tier: event.new_tier,
       reason: event.reason
     }
 
@@ -72,8 +58,6 @@ defmodule Arbor.Trust.EventConverter do
       timestamp: event.timestamp,
       previous_score: data[:previous_score] || data["previous_score"],
       new_score: data[:new_score] || data["new_score"],
-      previous_tier: atomize_tier(data[:previous_tier] || data["previous_tier"]),
-      new_tier: atomize_tier(data[:new_tier] || data["new_tier"]),
       reason: data[:reason] || data["reason"],
       metadata: event.metadata || %{}
     )
@@ -96,14 +80,4 @@ defmodule Arbor.Trust.EventConverter do
     end
   end
 
-  # Safe atom conversion for tier values
-  defp atomize_tier(nil), do: nil
-  defp atomize_tier(value) when is_atom(value), do: value
-
-  defp atomize_tier(value) when is_binary(value) do
-    case SafeAtom.to_allowed(value, @allowed_tiers) do
-      {:ok, atom} -> atom
-      {:error, _} -> nil
-    end
-  end
 end

@@ -27,8 +27,8 @@ defmodule Arbor.Trust.Store do
 
   use GenServer
 
-  alias Arbor.Contracts.Trust.{Event, Profile}
-  alias Arbor.Trust.{Authority, Config}
+  alias Arbor.Contracts.Trust.Profile
+  alias Arbor.Trust.Authority
 
   require Logger
 
@@ -266,11 +266,6 @@ defmodule Arbor.Trust.Store do
         updated = %{updated | updated_at: DateTime.utc_now()}
         :ok = put_profile_in_cache(updated, state)
         persist_profile(updated, state)
-
-        # Check for tier changes
-        if profile.tier != updated.tier do
-          emit_tier_change_event(profile, updated, state)
-        end
 
         emit_distributed_signal(:profile_updated, agent_id)
 
@@ -541,49 +536,5 @@ defmodule Arbor.Trust.Store do
     :ok
   catch
     _, _ -> :ok
-  end
-
-  defp emit_tier_change_event(old_profile, new_profile, _state) do
-    {:ok, event} =
-      Event.tier_change_event(
-        new_profile.agent_id,
-        old_profile.tier,
-        new_profile.tier
-      )
-
-    # Persist to EventStore
-    if Process.whereis(Arbor.Trust.EventStore) do
-      Arbor.Trust.EventStore.record_event(event)
-    end
-
-    # Broadcast via PubSub for real-time LiveView updates
-    try do
-      Phoenix.PubSub.broadcast(
-        Config.pubsub(),
-        "trust:#{new_profile.agent_id}",
-        {:tier_changed, new_profile.agent_id, old_profile.tier, new_profile.tier}
-      )
-    rescue
-      _ -> :ok
-    end
-
-    # Signal for queryable history via Historian (durable for audit trail)
-    Arbor.Signals.durable_emit(
-      :trust,
-      :tier_changed,
-      %{
-        agent_id: new_profile.agent_id,
-        old_tier: old_profile.tier,
-        new_tier: new_profile.tier
-      },
-      stream_id: "trust:events"
-    )
-
-    Logger.info(
-      "Trust tier changed for #{new_profile.agent_id}: #{old_profile.tier} -> #{new_profile.tier}",
-      agent_id: new_profile.agent_id,
-      old_tier: old_profile.tier,
-      new_tier: new_profile.tier
-    )
   end
 end

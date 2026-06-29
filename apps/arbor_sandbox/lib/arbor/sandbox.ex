@@ -140,7 +140,7 @@ defmodule Arbor.Sandbox do
 
   - `:level` - Sandbox level (default: `:limited`)
   - `:base_path` - Base path for filesystem sandbox
-  - `:trust_tier` - Derive level from trust tier
+  - `:max_level` - Ceiling for the requested level (the agent's declared sandbox level)
   """
   @spec create(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def create(agent_id, opts \\ []) do

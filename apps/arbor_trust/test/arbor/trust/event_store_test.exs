@@ -401,34 +401,6 @@ defmodule Arbor.Trust.EventStoreTest do
     end
   end
 
-  describe "get_tier_history/1" do
-    test "returns tier change history" do
-      agent_id = "agent_tier_history"
-
-      {:ok, tier_event} =
-        Event.tier_change_event(agent_id, :untrusted, :probationary,
-          timestamp: ~U[2024-01-01 12:00:00Z],
-          previous_score: 19,
-          new_score: 22
-        )
-
-      :ok = EventStore.record_event(tier_event)
-
-      {:ok, history} = EventStore.get_tier_history(agent_id)
-      assert length(history) == 1
-
-      change = hd(history)
-      assert change.from_tier == :untrusted
-      assert change.to_tier == :probationary
-      assert change.direction == :promotion
-    end
-
-    test "returns empty list for agent with no tier changes" do
-      {:ok, history} = EventStore.get_tier_history("no_tier_changes_agent")
-      assert history == []
-    end
-  end
-
   describe "get_agent_stats/1" do
     test "returns aggregate stats for an agent" do
       agent_id = "agent_stats"

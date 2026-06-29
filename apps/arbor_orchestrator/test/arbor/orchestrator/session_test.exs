@@ -967,7 +967,7 @@ defmodule Arbor.Orchestrator.SessionTest do
 
   describe "context round-trip through turn pipeline" do
     @tag :spike
-    test "messages grow by 2, turn_count increments, trust_tier and goals preserved", %{
+    test "messages grow by 2, turn_count increments, goals preserved", %{
       logs_root: logs_root
     } do
       alias Arbor.Orchestrator.Session
@@ -985,7 +985,6 @@ defmodule Arbor.Orchestrator.SessionTest do
       state = %Session{
         session_id: "ctx-round-trip-test",
         agent_id: "agent_test123",
-        trust_tier: :trusted_partner,
         turn_graph: nil,
         turn_count: 3,
         messages: initial_messages,
@@ -1000,7 +999,6 @@ defmodule Arbor.Orchestrator.SessionTest do
 
       assert values["session.id"] == "ctx-round-trip-test"
       assert values["session.agent_id"] == "agent_test123"
-      assert values["session.trust_tier"] == "trusted_partner"
       assert values["session.turn_count"] == 3
       assert values["session.goals"] == initial_goals
 
@@ -1049,9 +1047,6 @@ defmodule Arbor.Orchestrator.SessionTest do
 
       # Turn count incremented
       assert new_state.turn_count == 4
-
-      # Trust tier preserved (not changed by engine)
-      assert new_state.trust_tier == :trusted_partner
 
       # Goals intact (turn pipeline doesn't modify goals)
       assert new_state.goals == initial_goals
@@ -1146,8 +1141,7 @@ defmodule Arbor.Orchestrator.SessionTest do
       assert msg3["content"] == "How are you?"
       assert msg4["role"] == "assistant"
 
-      # Trust tier, agent_id, session_id remain stable across turns
-      assert state2.trust_tier == :established
+      # agent_id, session_id remain stable across turns
       assert state2.agent_id == "agent_gs_test"
 
       GenServer.stop(pid)
