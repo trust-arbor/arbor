@@ -15,11 +15,6 @@ defmodule Arbor.Sandbox.Code do
   | `:full` | All except dangerous |
   | `:container` | No restrictions (isolated) |
 
-  ## Trust Tier Integration
-
-  Use `validate_for_tier/2` to validate against a trust tier directly.
-  The tier is mapped to a sandbox level via `TrustBounds.sandbox_for_tier/1`.
-
   ## Dangerous Patterns
 
   Some patterns are blocked at all levels:
@@ -35,8 +30,6 @@ defmodule Arbor.Sandbox.Code do
   - `Port.open/2` — Requires `:limited` or higher
   - Network modules — Requires `:limited` or higher
   """
-
-  alias Arbor.Contracts.Security.TrustBounds
 
   # Modules always allowed (safe pure functions)
   # M7: Agent/Task moved to @limited_allowed — they can spawn processes
@@ -182,28 +175,6 @@ defmodule Arbor.Sandbox.Code do
   end
 
   @doc """
-  Validate code against a trust tier.
-
-  Maps the trust tier to a sandbox level using TrustBounds, then validates.
-
-  ## Examples
-
-      iex> ast = quote do: File.read!("test.txt")
-      iex> Arbor.Sandbox.Code.validate_for_tier(ast, :trusted)
-      :ok
-
-      iex> ast = quote do: Code.eval_string("1 + 1")
-      iex> Arbor.Sandbox.Code.validate_for_tier(ast, :autonomous)
-      {:error, {:code_violations, [%{type: :dangerous_call, ...}]}}
-  """
-  @spec validate_for_tier(Macro.t(), TrustBounds.trust_tier()) ::
-          :ok | {:error, {:code_violations, [violation()]}}
-  def validate_for_tier(ast, tier) do
-    level = TrustBounds.sandbox_for_tier(tier)
-    validate(ast, level)
-  end
-
-  @doc """
   Check if a module is allowed at the given level.
   """
   @spec check_module(module(), atom()) :: :ok | {:error, :module_not_allowed}
@@ -213,16 +184,6 @@ defmodule Arbor.Sandbox.Code do
     else
       {:error, :module_not_allowed}
     end
-  end
-
-  @doc """
-  Check if a module is allowed for a trust tier.
-  """
-  @spec check_module_for_tier(module(), TrustBounds.trust_tier()) ::
-          :ok | {:error, :module_not_allowed}
-  def check_module_for_tier(module, tier) do
-    level = TrustBounds.sandbox_for_tier(tier)
-    check_module(module, level)
   end
 
   @doc """

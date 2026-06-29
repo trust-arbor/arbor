@@ -6,15 +6,13 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
   1. Agent at tier X attempts action requiring tier Y
   2. Capability grant → authorize → allowed/denied
   3. Reflex system catches dangerous patterns before capability check
-  4. TrustBounds maps tiers to allowed actions and sandbox levels
-  5. Trust progression via events
+  4. Trust progression via events
 
   Self-contained — uses its own agent identities and capabilities.
   """
   use Arbor.Test.BehavioralCase
 
   alias Arbor.Contracts.Security.Capability
-  alias Arbor.Contracts.Security.TrustBounds
   alias Arbor.Security.CapabilityStore
 
   describe "scenario: capability authorization flow" do
@@ -156,77 +154,6 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
         assert {:error, _} = result
       after
         Application.put_env(:arbor_security, :reflex_checking_enabled, prev)
-      end
-    end
-  end
-
-  describe "scenario: TrustBounds tier mapping" do
-    test "all tiers have defined sandbox levels" do
-      for tier <- TrustBounds.tiers() do
-        sandbox = TrustBounds.sandbox_for_tier(tier)
-
-        assert sandbox in [:strict, :standard, :permissive, :none],
-               "Tier #{inspect(tier)} has sandbox #{inspect(sandbox)}"
-      end
-    end
-
-    test "tier progression increases allowed actions" do
-      untrusted_actions = TrustBounds.allowed_actions(:untrusted)
-      trusted_actions = TrustBounds.allowed_actions(:trusted)
-
-      # Higher tiers should have at least as many allowed actions
-      assert length(List.wrap(trusted_actions)) >= length(List.wrap(untrusted_actions))
-    end
-
-    test "autonomous tier allows all actions" do
-      actions = TrustBounds.allowed_actions(:autonomous)
-      assert actions == :all
-    end
-
-    test "untrusted tier only allows read, search, think" do
-      actions = TrustBounds.allowed_actions(:untrusted)
-      assert is_list(actions)
-
-      for action <- [:read, :search, :think] do
-        assert action in actions,
-               "Untrusted tier should allow #{inspect(action)}"
-      end
-
-      refute :execute in actions
-      refute :network in actions
-    end
-
-    test "action_allowed?/2 checks tier-action compatibility" do
-      assert TrustBounds.action_allowed?(:untrusted, :read) == true
-      assert TrustBounds.action_allowed?(:untrusted, :execute) == false
-      assert TrustBounds.action_allowed?(:veteran, :execute) == true
-      assert TrustBounds.action_allowed?(:autonomous, :network) == true
-    end
-
-    test "sandbox strictness decreases with trust tier" do
-      strict_tiers = [:untrusted, :probationary]
-      permissive_tiers = [:veteran, :autonomous]
-
-      for tier <- strict_tiers do
-        sandbox = TrustBounds.sandbox_for_tier(tier)
-
-        assert sandbox in [:strict, :standard],
-               "Low-trust tier #{inspect(tier)} should have strict/standard sandbox"
-      end
-
-      for tier <- permissive_tiers do
-        sandbox = TrustBounds.sandbox_for_tier(tier)
-
-        assert sandbox in [:permissive, :none],
-               "High-trust tier #{inspect(tier)} should have permissive/none sandbox"
-      end
-    end
-
-    test "display_name/1 returns human-readable tier names" do
-      for tier <- TrustBounds.tiers() do
-        name = TrustBounds.display_name(tier)
-        assert is_binary(name)
-        assert String.length(name) > 0
       end
     end
   end

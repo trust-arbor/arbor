@@ -35,29 +35,13 @@ defmodule Arbor.Sandbox do
       # Use virtual filesystem for preview
       {:ok, vfs} = Arbor.Sandbox.create_virtual()
       {:ok, vfs} = Arbor.Sandbox.vfs_write(vfs, "/test.ex", "IO.puts(:hello)")
-
-  ## Integration with Trust
-
-  Sandbox levels can be derived from trust tiers:
-
-      {:ok, level} = Arbor.Sandbox.level_for_trust(:probationary)
-      # => :limited
   """
 
-  alias Arbor.Contracts.Security.TrustBounds
   alias Arbor.Sandbox.{Code, ExecSession, ExecSupervisor, Filesystem, Registry, Virtual}
   alias Arbor.Signals
 
   @type sandbox_id :: String.t()
   @type level :: :pure | :limited | :full | :container
-
-  @trust_to_level %{
-    untrusted: :pure,
-    probationary: :limited,
-    trusted: :limited,
-    veteran: :full,
-    autonomous: :full
-  }
 
   # ── Authorized API (for agent callers) ──
 
@@ -286,63 +270,6 @@ defmodule Arbor.Sandbox do
   def vfs_restore(vfs, snapshot_id) do
     Virtual.restore(vfs, snapshot_id)
   end
-
-  # Trust Integration
-
-  @doc """
-  Get the sandbox level for a trust tier.
-  """
-  @spec level_for_trust(atom()) :: {:ok, level()} | {:error, :unknown_tier}
-  def level_for_trust(tier) when is_map_key(@trust_to_level, tier) do
-    {:ok, Map.fetch!(@trust_to_level, tier)}
-  end
-
-  def level_for_trust(_tier), do: {:error, :unknown_tier}
-
-  @doc """
-  Get full sandbox configuration for a trust tier.
-
-  Returns a map with sandbox settings derived from the trust tier,
-  using TrustBounds for the tier-to-level mapping.
-
-  ## Example
-
-      config = Arbor.Sandbox.config_for_tier(:trusted)
-      # => %{
-      #      level: :standard,
-      #      allowed_modules: [...],
-      #      restricted_functions: [...],
-      #      file_access: :scoped,
-      #      network_access: :allowed
-      #    }
-  """
-  @spec config_for_tier(atom()) :: map()
-  def config_for_tier(tier) do
-    level = TrustBounds.sandbox_for_tier(tier)
-
-    %{
-      level: level,
-      allowed_modules: Code.allowed_modules(level),
-      restricted_functions: Code.restricted_functions(level),
-      file_access: file_access_for(level),
-      network_access: network_access_for(level),
-      trust_tier: tier
-    }
-  end
-
-  # File access rules by sandbox level
-  # Maps TrustBounds sandbox levels to file access policies
-  defp file_access_for(:strict), do: :read_only
-  defp file_access_for(:standard), do: :scoped
-  defp file_access_for(:permissive), do: :full
-  defp file_access_for(:none), do: :full
-
-  # Network access rules by sandbox level
-  # Maps TrustBounds sandbox levels to network access policies
-  defp network_access_for(:strict), do: :denied
-  defp network_access_for(:standard), do: :allowed
-  defp network_access_for(:permissive), do: :allowed
-  defp network_access_for(:none), do: :allowed
 
   # System API
 

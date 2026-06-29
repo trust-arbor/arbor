@@ -174,20 +174,6 @@ defmodule Arbor.SandboxTest do
     end
   end
 
-  describe "level_for_trust/1" do
-    test "maps trust tiers to sandbox levels" do
-      assert {:ok, :pure} = Sandbox.level_for_trust(:untrusted)
-      assert {:ok, :limited} = Sandbox.level_for_trust(:probationary)
-      assert {:ok, :limited} = Sandbox.level_for_trust(:trusted)
-      assert {:ok, :full} = Sandbox.level_for_trust(:veteran)
-      assert {:ok, :full} = Sandbox.level_for_trust(:autonomous)
-    end
-
-    test "returns error for unknown tier" do
-      assert {:error, :unknown_tier} = Sandbox.level_for_trust(:superduper)
-    end
-  end
-
   describe "list/1" do
     test "lists sandboxes", %{base_path: base_path} do
       {:ok, _} = Sandbox.create("agent_facade_list_1", base_path: base_path)

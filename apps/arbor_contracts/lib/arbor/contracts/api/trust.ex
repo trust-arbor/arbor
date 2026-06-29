@@ -70,12 +70,6 @@ defmodule Arbor.Contracts.API.Trust do
               {:ok, trust_profile()} | {:error, :not_found}
 
   @doc """
-  Get the current trust tier for a principal.
-  """
-  @callback get_current_trust_tier_for_principal(principal_id()) ::
-              {:ok, trust_tier()} | {:error, :not_found}
-
-  @doc """
   Record a trust-affecting event for a principal with metadata.
 
   Events modify the principal's trust score and may trigger tier changes.

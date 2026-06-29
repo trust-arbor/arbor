@@ -468,28 +468,6 @@ defmodule Arbor.Trust.ConfigTest do
     end
   end
 
-  describe "sandbox_for_tier/1" do
-    test "returns sandbox level from default config" do
-      original = Application.get_env(:arbor_trust, :tier_definitions)
-      Application.delete_env(:arbor_trust, :tier_definitions)
-
-      on_exit(fn ->
-        if original,
-          do: Application.put_env(:arbor_trust, :tier_definitions, original),
-          else: Application.delete_env(:arbor_trust, :tier_definitions)
-      end)
-
-      assert Config.sandbox_for_tier(:untrusted) == :strict
-      assert Config.sandbox_for_tier(:trusted) == :standard
-      assert Config.sandbox_for_tier(:veteran) == :permissive
-      assert Config.sandbox_for_tier(:autonomous) == :none
-    end
-
-    test "falls back to :strict for unknown tier" do
-      assert Config.sandbox_for_tier(:unknown_tier) == :strict
-    end
-  end
-
   describe "actions_for_tier/1" do
     test "returns actions from default config" do
       original = Application.get_env(:arbor_trust, :tier_definitions)

@@ -75,27 +75,6 @@ defmodule Arbor.Sandbox.CodeTest do
     end
   end
 
-  describe "validate_for_tier/2" do
-    test "validates against untrusted tier (strict sandbox)" do
-      # File should be blocked for untrusted (maps to :strict)
-      ast = quote do: File.read("/etc/passwd")
-      assert {:error, {:code_violations, _}} = Code.validate_for_tier(ast, :untrusted)
-    end
-
-    test "validates against trusted tier (standard sandbox)" do
-      # File should be allowed for trusted (maps to :standard)
-      ast = quote do: File.read("/tmp/safe.txt")
-      assert :ok = Code.validate_for_tier(ast, :trusted)
-    end
-
-    test "blocks dangerous calls at autonomous tier" do
-      # Code.eval_string should be blocked even for autonomous
-      # credo:disable-for-next-line Credo.Check.Security.UnsafeCodeEval
-      ast = quote do: Code.eval_string("1 + 1")
-      assert {:error, {:code_violations, _}} = Code.validate_for_tier(ast, :autonomous)
-    end
-  end
-
   describe "check_module/2" do
     test "allows Enum at pure level" do
       assert :ok = Code.check_module(Enum, :pure)
@@ -111,16 +90,6 @@ defmodule Arbor.Sandbox.CodeTest do
 
     test "allows custom modules at full level" do
       assert :ok = Code.check_module(MyCustomModule, :full)
-    end
-  end
-
-  describe "check_module_for_tier/2" do
-    test "blocks File for untrusted tier" do
-      assert {:error, :module_not_allowed} = Code.check_module_for_tier(File, :untrusted)
-    end
-
-    test "allows File for trusted tier" do
-      assert :ok = Code.check_module_for_tier(File, :trusted)
     end
   end
 

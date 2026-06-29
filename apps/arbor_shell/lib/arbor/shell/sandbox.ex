@@ -126,10 +126,10 @@ defmodule Arbor.Shell.Sandbox do
   end
 
   # Fail-safe: an unrecognized level degrades to the most restrictive recognized
-  # one (:strict) instead of raising. The trust-tier path feeds sandbox levels in
-  # a vocabulary this module doesn't share (:standard/:permissive from
-  # TrustBounds), which previously crashed shell execution for :trusted/:veteran
-  # agents with a FunctionClauseError. Degrade DOWN only — never widen.
+  # one (:strict) instead of raising. Callers may feed sandbox levels in a
+  # vocabulary this module doesn't share (:standard/:permissive), which would
+  # otherwise crash shell execution with a FunctionClauseError. Degrade DOWN
+  # only — never widen.
   def check(command, level) do
     Logger.warning(
       "[Shell.Sandbox] unrecognized sandbox level #{inspect(level)} — degrading to :strict"
