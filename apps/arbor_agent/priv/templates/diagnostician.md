@@ -59,6 +59,16 @@ relationship_style:
 required_capabilities:
 - description: "Run DOT session pipelines"
   resource: "arbor://orchestrator/execute"
+- description: "Write to own sandbox workspace"
+  resource: "arbor://code/write/self/sandbox/*"
+- description: "Compile own sandbox code"
+  resource: "arbor://code/compile/self/sandbox"
+- description: "Write to own implementation"
+  resource: "arbor://code/write/self/impl/*"
+- description: "Hot-reload own code"
+  resource: "arbor://code/reload/self/*"
+- description: "Compile own implementation"
+  resource: "arbor://code/compile/self/impl"
 source: "builtin"
 trust_tier: "veteran"
 values:

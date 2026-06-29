@@ -283,7 +283,7 @@ defmodule Arbor.Trust.Manager do
     Logger.info("Trust profile created for agent #{agent_id}", agent_id: agent_id)
 
     broadcast_trust_event(agent_id, :profile_created, %{tier: :untrusted})
-    safe_grant_tier_capabilities(agent_id, profile.tier)
+    safe_grant_base_capabilities(agent_id)
 
     {:reply, {:ok, profile}, state}
   end
@@ -625,29 +625,29 @@ defmodule Arbor.Trust.Manager do
   end
 
   # Policy integration — safe wrappers that never crash the Manager
-  defp safe_grant_tier_capabilities(agent_id, tier) do
+  defp safe_grant_base_capabilities(agent_id) do
     if policy_available?() do
-      case Arbor.Trust.Policy.grant_tier_capabilities(agent_id, tier) do
+      case Arbor.Trust.Policy.grant_base_capabilities(agent_id) do
         {:ok, count} ->
-          Logger.debug("Granted #{count} capabilities for #{agent_id} at tier #{tier}")
+          Logger.debug("Granted #{count} baseline capabilities for #{agent_id}")
 
         {:error, reason} ->
-          Logger.warning("Failed to grant tier capabilities for #{agent_id}: #{inspect(reason)}")
+          Logger.warning("Failed to grant baseline capabilities for #{agent_id}: #{inspect(reason)}")
       end
     end
   rescue
-    e -> Logger.warning("Policy.grant_tier_capabilities failed: #{Exception.message(e)}")
+    e -> Logger.warning("Policy.grant_base_capabilities failed: #{Exception.message(e)}")
   catch
     :exit, reason ->
-      Logger.warning("Policy.grant_tier_capabilities exit: #{inspect(reason)}")
+      Logger.warning("Policy.grant_base_capabilities exit: #{inspect(reason)}")
   end
 
   # NOTE: safe_sync_capabilities/3, safe_reset_confirmations/1 and
   # maybe_update_profile_rules/2 were removed in the tier-minting kill sweep
   # (P0 gate #1). They existed to re-mint capabilities and reset rules when an
-  # agent's tier changed; tier no longer moves from arithmetic, so the only
-  # tier-driven grant left is the one-time creation grant
-  # (safe_grant_tier_capabilities/2 above).
+  # agent's tier changed. The creation grant is now tier-independent —
+  # safe_grant_base_capabilities/1 above grants the universal baseline; any
+  # role-specific caps come from the agent's template.
 
   defp policy_available? do
     Process.whereis(Arbor.Security.CapabilityStore) != nil

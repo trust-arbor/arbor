@@ -167,8 +167,8 @@ defmodule Arbor.Trust.CapabilitySync do
         handle_trust_unfrozen(agent_id)
 
       :profile_created ->
-        # Grant initial capabilities for new profiles
-        grant_tier_capabilities(agent_id, :untrusted)
+        # Grant the universal baseline capabilities for new profiles (tier-independent).
+        grant_base_capabilities(agent_id)
 
       _ ->
         :ok
@@ -186,30 +186,27 @@ defmodule Arbor.Trust.CapabilitySync do
   end
 
   defp handle_trust_unfrozen(agent_id) do
-    Logger.info("Restoring capabilities after trust unfreeze",
+    Logger.info("Restoring baseline capabilities after trust unfreeze",
       agent_id: agent_id
     )
 
-    # Restore capabilities based on current tier
+    # Restore the universal baseline floor only. Role/template-specific caps are
+    # NOT re-minted on a trust-state change — re-granting elevated capabilities
+    # on unfreeze was the kind of trust-state→capability minting the 2026-06-14
+    # tier-minting kill removed.
     do_sync_capabilities(agent_id)
   end
 
   defp do_sync_capabilities(agent_id) do
     case Manager.get_trust_profile(agent_id) do
-      {:ok, profile} ->
-        if profile.frozen do
-          # Only grant read capabilities if frozen
-          grant_tier_capabilities(agent_id, :untrusted)
-        else
-          # Grant full tier capabilities
-          grant_tier_capabilities(agent_id, profile.tier)
-        end
+      {:ok, _profile} ->
+        grant_base_capabilities(agent_id)
 
       {:error, :not_found} ->
         # Create profile first
         case Manager.create_trust_profile(agent_id) do
-          {:ok, profile} ->
-            grant_tier_capabilities(agent_id, profile.tier)
+          {:ok, _profile} ->
+            grant_base_capabilities(agent_id)
 
           {:error, reason} ->
             {:error, reason}
@@ -220,23 +217,22 @@ defmodule Arbor.Trust.CapabilitySync do
     end
   end
 
-  defp grant_tier_capabilities(agent_id, tier) do
+  defp grant_base_capabilities(agent_id) do
     principal_id = ensure_agent_prefix(agent_id)
-    templates = Config.capabilities_for_tier(tier)
+    templates = Config.base_capabilities()
 
     results =
       Enum.map(templates, fn template ->
         resource_uri = expand_resource_uri(template.resource_uri, agent_id)
-        grant_or_skip_capability(principal_id, resource_uri, template, tier)
+        grant_or_skip_capability(principal_id, resource_uri, template)
       end)
 
     granted = Enum.count(results, fn r -> match?({:granted, _}, r) end)
     existing = Enum.count(results, fn r -> match?({:already_exists, _}, r) end)
     errors = Enum.count(results, fn r -> match?({:error, _, _}, r) end)
 
-    Logger.info("Capability sync complete",
+    Logger.info("Baseline capability sync complete",
       agent_id: agent_id,
-      tier: tier,
       granted: granted,
       existing: existing,
       errors: errors
@@ -245,24 +241,23 @@ defmodule Arbor.Trust.CapabilitySync do
     {:ok, %{granted: granted, existing: existing, errors: errors}}
   end
 
-  defp grant_or_skip_capability(principal_id, resource_uri, template, tier) do
+  defp grant_or_skip_capability(principal_id, resource_uri, template) do
     case find_existing_capability(principal_id, resource_uri) do
       {:ok, _cap} ->
         {:already_exists, resource_uri}
 
       {:error, :not_found} ->
-        do_grant_capability(principal_id, resource_uri, template, tier)
+        do_grant_capability(principal_id, resource_uri, template)
     end
   end
 
-  defp do_grant_capability(principal_id, resource_uri, template, tier) do
+  defp do_grant_capability(principal_id, resource_uri, template) do
     case Arbor.Security.grant(
            principal: principal_id,
            resource: resource_uri,
            constraints: template.constraints,
            metadata: %{
-             source: :trust_tier,
-             tier: tier,
+             source: :trust_baseline,
              granter_id: "trust_system",
              synced_at: DateTime.utc_now()
            }
@@ -278,9 +273,10 @@ defmodule Arbor.Trust.CapabilitySync do
   defp revoke_modifiable_capabilities(agent_id) do
     principal_id = ensure_agent_prefix(agent_id)
 
-    # Get the read-only capabilities (untrusted tier)
+    # Get the universal baseline capabilities (the read-only floor preserved
+    # across a freeze).
     read_only_uris =
-      Config.capabilities_for_tier(:untrusted)
+      Config.base_capabilities()
       |> Enum.map(fn t -> expand_resource_uri(t.resource_uri, agent_id) end)
       |> MapSet.new()
 

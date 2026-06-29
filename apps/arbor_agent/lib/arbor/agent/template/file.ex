@@ -364,16 +364,18 @@ defmodule Arbor.Agent.Template.File do
 
   defp emit_list_map([], pad, _indent), do: "#{pad}- {}\n"
 
-  defp emit_list_map([{k0, v0} | rest], pad, indent) do
-    child_pad = String.duplicate("  ", indent + 1)
-    first = "#{pad}- #{to_string(k0)}: #{emit_scalar(v0)}\n"
+  defp emit_list_map(pairs, pad, indent) do
+    # Emit each key/value via emit_kv (which handles scalars, nested maps, and
+    # lists), then turn the first line's leading indent into the list dash so a
+    # list item can carry a nested map value (e.g. a capability `constraints:`
+    # block). `pad <> "- "` is the same width as the child indent, keeping the
+    # remaining lines aligned.
+    child_indent = indent + 1
+    child_pad = String.duplicate("  ", child_indent)
 
-    rest_lines =
-      Enum.map_join(rest, "", fn {k, v} ->
-        "#{child_pad}#{to_string(k)}: #{emit_scalar(v)}\n"
-      end)
-
-    first <> rest_lines
+    pairs
+    |> Enum.map_join("", fn {k, v} -> emit_kv(to_string(k), v, child_indent) end)
+    |> String.replace_prefix(child_pad, pad <> "- ")
   end
 
   defp emit_scalar(value) when is_binary(value), do: quote_string(value)
