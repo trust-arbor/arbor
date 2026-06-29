@@ -26,9 +26,6 @@ defmodule Arbor.Trust do
       # Check trust tier
       {:ok, :authorized} = Arbor.Trust.check_trust_authorization("agent_001", :trusted)
 
-      # Get trust tier
-      {:ok, :probationary} = Arbor.Trust.get_trust_tier("agent_001")
-
       # Freeze trust on security incident
       :ok = Arbor.Trust.freeze_trust("agent_001", :security_violation)
 
@@ -116,21 +113,6 @@ defmodule Arbor.Trust do
   defdelegate get_trust_profile(agent_id), to: Manager
 
   @doc """
-  Get the current trust tier for an agent.
-
-  ## Examples
-
-      {:ok, :trusted} = Arbor.Trust.get_trust_tier("agent_001")
-  """
-  @spec get_trust_tier(String.t()) :: {:ok, atom()} | {:error, :not_found | term()}
-  def get_trust_tier(agent_id) do
-    case Manager.get_trust_profile(agent_id) do
-      {:ok, profile} -> {:ok, profile.tier}
-      {:error, _} = error -> error
-    end
-  end
-
-  @doc """
   Calculate the current trust score for an agent.
 
   ## Examples
@@ -180,9 +162,6 @@ defmodule Arbor.Trust do
 
   @impl true
   defdelegate get_trust_profile_for_principal(agent_id), to: Manager, as: :get_trust_profile
-
-  @impl true
-  def get_current_trust_tier_for_principal(agent_id), do: get_trust_tier(agent_id)
 
   @impl true
   defdelegate calculate_trust_score_for_principal(agent_id),

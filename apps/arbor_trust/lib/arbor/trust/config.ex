@@ -359,26 +359,6 @@ defmodule Arbor.Trust.Config do
   end
 
   @doc """
-  Get the sandbox level for a tier.
-
-  Falls back to `:strict` if no definition exists.
-
-  ## Examples
-
-      Config.sandbox_for_tier(:trusted)
-      #=> :standard
-  """
-  @spec sandbox_for_tier(atom()) :: atom()
-  def sandbox_for_tier(tier) do
-    definitions = tier_definitions()
-
-    case Map.get(definitions, tier) do
-      %{sandbox: sandbox} -> sandbox
-      nil -> :strict
-    end
-  end
-
-  @doc """
   Get the allowed actions for a tier.
 
   Falls back to `[:read, :search, :think]` if no definition exists.

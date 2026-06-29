@@ -72,17 +72,6 @@ defmodule Arbor.TrustTest do
     end
   end
 
-  describe "get_trust_tier/1" do
-    test "returns tier for existing agent" do
-      {:ok, _} = Trust.create_trust_profile("facade_tier")
-      assert {:ok, :untrusted} = Trust.get_trust_tier("facade_tier")
-    end
-
-    test "returns error for non-existent agent" do
-      assert {:error, :not_found} = Trust.get_trust_tier("facade_no_tier")
-    end
-  end
-
   # ===========================================================================
   # Trust Scoring
   # ===========================================================================
@@ -370,10 +359,6 @@ defmodule Arbor.TrustTest do
 
       assert {:ok, :authorized} =
                Trust.check_trust_authorization("lifecycle_agent", :untrusted)
-
-      # Step 6: Verify tier is a valid trust tier
-      {:ok, tier} = Trust.get_trust_tier("lifecycle_agent")
-      assert tier in [:untrusted, :probationary, :trusted, :veteran, :autonomous]
     end
 
     test "security violations reduce security component score" do

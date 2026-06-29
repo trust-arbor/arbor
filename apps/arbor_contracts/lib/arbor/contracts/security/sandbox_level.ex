@@ -1,8 +1,7 @@
 defmodule Arbor.Contracts.Security.SandboxLevel do
   @moduledoc """
   Canonical agent isolation level — the single sandbox posture an agent carries
-  (declared in its template), replacing the old trust-tier → sandbox derivation
-  (`TrustBounds.sandbox_for_tier` / `Arbor.Sandbox.level_for_trust`).
+  (declared in its template), replacing the old trust-tier → sandbox derivation.
 
   Ordered most→least restrictive: `:strict` > `:standard` > `:permissive` > `:none`.
   A canonical level maps to the concrete vocabulary of each enforcement subsystem:
