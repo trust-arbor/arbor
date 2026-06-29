@@ -545,11 +545,6 @@ defmodule Arbor.Trust.Config do
   # ===========================================================================
 
   @doc """
-  Get all capability templates for a trust tier.
-
-  Checks application config for overrides, falls back to built-in defaults.
-  """
-  @doc """
   Get the universal baseline capabilities granted to every agent at profile
   creation, independent of any trust tier. Self-scoped URIs are expanded to the
   agent's id by the grant path.
@@ -557,6 +552,11 @@ defmodule Arbor.Trust.Config do
   @spec base_capabilities() :: [map()]
   def base_capabilities, do: @base_capabilities
 
+  @doc """
+  Get all capability templates for a trust tier.
+
+  Checks application config for overrides, falls back to built-in defaults.
+  """
   @spec capabilities_for_tier(trust_tier()) :: [map()]
   def capabilities_for_tier(tier) when is_atom(tier) do
     config_overrides = capability_templates()

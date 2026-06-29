@@ -213,7 +213,7 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
 
   defp run_via_authorize_and_execute(action_mod, params, error_tag, unavailable_tag, agent_id) do
     case safe_call(fn ->
-           Arbor.Actions.authorize_and_execute(agent_id, action_mod, params, %{})
+           Arbor.Actions.authorize_and_execute(agent_id, action_mod, params, executor_context())
          end) do
       {:ok, {:ok, result}} -> {:ok, result}
       {:ok, {:error, reason}} -> {:error, {error_tag, reason}}
@@ -276,7 +276,7 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
     agent_id = Process.get(:arbor_executor_agent_id)
 
     if agent_id do
-      case Arbor.Actions.authorize_and_execute(agent_id, action_module, params, %{}) do
+      case Arbor.Actions.authorize_and_execute(agent_id, action_module, params, executor_context()) do
         {:ok, :pending_approval, _} -> {:error, {:pending_approval, action}}
         {:error, :unauthorized} -> {:error, {:unauthorized, action}}
         result -> result
@@ -379,6 +379,17 @@ defmodule Arbor.Agent.Executor.ActionDispatch do
   end
 
   # ── Config ──
+
+  # Build the action execution context from executor process state. Threads the
+  # agent's declared sandbox level (stashed by the Executor) so the sandbox-create
+  # action can cap a requested level to the agent's declared ceiling. Empty when
+  # not dispatched from an executor process (system-level callers).
+  defp executor_context do
+    case Process.get(:arbor_executor_sandbox_level) do
+      nil -> %{}
+      level -> %{sandbox_level: level}
+    end
+  end
 
   # ── Safety ──
 
