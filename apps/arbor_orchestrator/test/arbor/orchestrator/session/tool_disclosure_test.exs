@@ -5,9 +5,9 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
 
   alias Arbor.Orchestrator.Session.ToolDisclosure
 
-  describe "core_tools/1" do
-    test "base tier includes find_tools and core file/memory/skill/git tools" do
-      tools = ToolDisclosure.core_tools(:new)
+  describe "core_tools/0" do
+    test "includes find_tools and core file/memory/skill/git tools" do
+      tools = ToolDisclosure.core_tools()
 
       assert "tool_find_tools" in tools
       assert "file_read" in tools
@@ -19,63 +19,35 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
       assert "skill_activate" in tools
       assert "git_status" in tools
       assert "git_diff" in tools
-      # shell_execute requires established tier
-      refute "shell_execute" in tools
     end
 
-    test "base tier does not include elevated tools" do
-      tools = ToolDisclosure.core_tools(:new)
-
-      refute "shell_execute" in tools
-      refute "code_compile_and_test" in tools
-      refute "ai_generate_text" in tools
-      refute "git_commit" in tools
-      refute "shell_execute_script" in tools
-      refute "code_hot_load" in tools
-    end
-
-    test "established tier adds shell/code/ai/git_commit tools" do
-      tools = ToolDisclosure.core_tools(:established)
+    test "exposes the full tool set (tool exposure is not trust-gated)" do
+      # The trust-tier band was retired — core_tools/0 returns the full base
+      # set. Tool *exposure* is not gated by trust; capabilities still gate
+      # execution.
+      tools = ToolDisclosure.core_tools()
 
       assert "shell_execute" in tools
       assert "code_compile_and_test" in tools
       assert "ai_generate_text" in tools
       assert "git_commit" in tools
       assert "git_log" in tools
-      # But not trusted-only
-      refute "shell_execute_script" in tools
-      refute "code_hot_load" in tools
-    end
-
-    test "trusted tier includes all tools" do
-      for tier <- [:trusted, :full_partner, :system] do
-        tools = ToolDisclosure.core_tools(tier)
-
-        assert "shell_execute_script" in tools, "#{tier} missing shell_execute_script"
-        assert "code_hot_load" in tools, "#{tier} missing code_hot_load"
-        assert "shell_execute" in tools
-        assert "code_compile_and_test" in tools
-        assert "tool_find_tools" in tools
-      end
-    end
-
-    test "provisional tier gets base tools only" do
-      tools = ToolDisclosure.core_tools(:provisional)
-      assert tools == ToolDisclosure.core_tools(:new)
+      assert "shell_execute_script" in tools
+      assert "code_hot_load" in tools
     end
   end
 
-  describe "resolve_tools/3" do
+  describe "resolve_tools/2" do
     test "returns core tools when no explicit config" do
       config = %{}
-      tools = ToolDisclosure.resolve_tools(config, :new, MapSet.new())
+      tools = ToolDisclosure.resolve_tools(config, MapSet.new())
       assert "tool_find_tools" in tools
       assert "file_read" in tools
     end
 
     test "uses explicit config when set, returns exactly those tools" do
       config = %{"tools" => ["custom_tool_a", "custom_tool_b"]}
-      tools = ToolDisclosure.resolve_tools(config, :new, MapSet.new())
+      tools = ToolDisclosure.resolve_tools(config, MapSet.new())
 
       assert "custom_tool_a" in tools
       assert "custom_tool_b" in tools
@@ -87,14 +59,14 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
 
     test "explicit config with find_tools already present doesn't duplicate" do
       config = %{"tools" => ["tool_find_tools", "custom_tool"]}
-      tools = ToolDisclosure.resolve_tools(config, :new, MapSet.new())
+      tools = ToolDisclosure.resolve_tools(config, MapSet.new())
 
       assert Enum.count(tools, &(&1 == "tool_find_tools")) == 1
     end
 
     test "explicit config with legacy find_tools name doesn't add duplicate" do
       config = %{"tools" => ["find_tools", "custom_tool"]}
-      tools = ToolDisclosure.resolve_tools(config, :new, MapSet.new())
+      tools = ToolDisclosure.resolve_tools(config, MapSet.new())
 
       # find_tools is recognized as a valid name, so tool_find_tools is NOT added
       refute "tool_find_tools" in tools
@@ -103,7 +75,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
 
     test "merges discovered tools with core tools" do
       discovered = MapSet.new(["web_browse", "ai_generate_text"])
-      tools = ToolDisclosure.resolve_tools(%{}, :new, discovered)
+      tools = ToolDisclosure.resolve_tools(%{}, discovered)
 
       assert "web_browse" in tools
       assert "ai_generate_text" in tools
@@ -113,7 +85,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
     test "deduplicates core + discovered" do
       # file_read is already in core
       discovered = MapSet.new(["file_read", "web_browse"])
-      tools = ToolDisclosure.resolve_tools(%{}, :new, discovered)
+      tools = ToolDisclosure.resolve_tools(%{}, discovered)
 
       assert Enum.count(tools, &(&1 == "file_read")) == 1
     end

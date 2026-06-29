@@ -150,14 +150,6 @@ defmodule Arbor.Trust.EventStore do
   end
 
   @doc """
-  Get tier change history for an agent.
-  """
-  @spec get_tier_history(String.t()) :: {:ok, [map()]} | {:error, term()}
-  def get_tier_history(agent_id) do
-    GenServer.call(__MODULE__, {:get_tier_history, agent_id})
-  end
-
-  @doc """
   Get aggregate statistics for an agent.
   """
   @spec get_agent_stats(String.t()) :: {:ok, map()} | {:error, term()}
@@ -273,12 +265,6 @@ defmodule Arbor.Trust.EventStore do
   @impl true
   def handle_call({:get_trust_progression, agent_id, opts}, _from, state) do
     result = get_trust_progression_impl(agent_id, opts, state)
-    {:reply, result, state}
-  end
-
-  @impl true
-  def handle_call({:get_tier_history, agent_id}, _from, state) do
-    result = get_tier_history_impl(agent_id, state)
     {:reply, result, state}
   end
 
@@ -587,8 +573,6 @@ defmodule Arbor.Trust.EventStore do
           previous_score: event.previous_score,
           new_score: event.new_score,
           delta: event.delta,
-          previous_tier: event.previous_tier,
-          new_tier: event.new_tier,
           reason: event.reason,
           metadata: event.metadata,
           time_to_next_ms: time_to_next_ms
@@ -652,37 +636,6 @@ defmodule Arbor.Trust.EventStore do
     }
 
     {:ok, progression}
-  end
-
-  defp get_tier_history_impl(agent_id, state) do
-    {:ok, events} =
-      get_events_impl([agent_id: agent_id, event_type: :tier_changed, order: :asc], state)
-
-    tier_changes =
-      Enum.map(events, fn event ->
-        %{
-          timestamp: event.timestamp,
-          from_tier: event.previous_tier,
-          to_tier: event.new_tier,
-          from_score: event.previous_score,
-          to_score: event.new_score,
-          direction: tier_direction(event.previous_tier, event.new_tier)
-        }
-      end)
-
-    {:ok, tier_changes}
-  end
-
-  defp tier_direction(from, to) do
-    tier_order = [:untrusted, :probationary, :trusted, :veteran, :autonomous]
-    from_idx = Enum.find_index(tier_order, &(&1 == from)) || 0
-    to_idx = Enum.find_index(tier_order, &(&1 == to)) || 0
-
-    cond do
-      to_idx > from_idx -> :promotion
-      to_idx < from_idx -> :demotion
-      true -> :unchanged
-    end
   end
 
   defp get_agent_stats_impl(agent_id, state) do

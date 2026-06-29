@@ -41,10 +41,6 @@ defmodule Arbor.Contracts.CapabilityProvider do
 
   Called during boot sync and periodic re-indexing. Should return
   descriptors for all capabilities the provider currently has.
-
-  ## Options
-
-  - `:trust_tier` — only return capabilities at or below this tier
   """
   @callback list_capabilities(opts()) :: [CapabilityDescriptor.t()]
 

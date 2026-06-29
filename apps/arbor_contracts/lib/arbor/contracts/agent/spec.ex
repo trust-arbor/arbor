@@ -12,7 +12,7 @@ defmodule Arbor.Contracts.Agent.Spec do
 
   ## CRC Pattern
 
-  - **Construct**: `new/1` — resolve template + model + trust + tools into a complete spec
+  - **Construct**: `new/1` — resolve template + model + tools into a complete spec
   - **Convert**: `to_profile/3` — spec → Profile for persistence
   - **Convert**: `to_session_opts/2` — spec → keyword list for Session.init
   - **Convert**: `to_lifecycle_opts/1` — spec → keyword list for Lifecycle.create (migration)
@@ -20,13 +20,11 @@ defmodule Arbor.Contracts.Agent.Spec do
 
   alias Arbor.Agent.Character
 
-  @type trust_tier :: :untrusted | :probationary | :established | :trusted | :veteran | :autonomous
   @type execution_mode :: :session | :direct | :acp
 
   @type t :: %__MODULE__{
           display_name: String.t(),
           character: Character.t() | nil,
-          trust_tier: trust_tier(),
           template: atom() | String.t() | nil,
           template_module: module() | nil,
           provider: atom() | nil,
@@ -55,7 +53,6 @@ defmodule Arbor.Contracts.Agent.Spec do
     :system_prompt,
     :delegator_id,
     :tenant_context,
-    trust_tier: :untrusted,
     tools: [],
     initial_goals: [],
     initial_capabilities: [],

@@ -301,8 +301,8 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
         schema(
           "adapt",
           [],
-          ["mutation", "conditions", "trust_tier"],
-          %{"mutation" => :string, "conditions" => :string, "trust_tier" => :string},
+          ["mutation", "conditions"],
+          %{"mutation" => :string, "conditions" => :string},
           ["graph_mutation"],
           :secret,
           [port("context", :any, :public)],

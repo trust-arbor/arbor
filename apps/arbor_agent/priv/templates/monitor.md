@@ -57,7 +57,6 @@ required_capabilities:
 - description: "Run DOT session pipelines"
   resource: "arbor://orchestrator/execute"
 source: "builtin"
-trust_tier: "probationary"
 values:
 - "reliability over heroics"
 - "early warning saves systems"

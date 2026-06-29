@@ -24,7 +24,6 @@ defmodule Arbor.Common.Commands.Status do
         if(ctx.model, do: "Model: #{ctx.model}"),
         if(ctx.provider, do: "Provider: #{ctx.provider}"),
         if(ctx.session_id, do: "Session: #{ctx.session_id}"),
-        if(ctx.trust_tier, do: "Trust: #{ctx.trust_tier}"),
         if(length(ctx.tools) > 0, do: "Tools: #{length(ctx.tools)} available")
       ]
       |> Enum.reject(&is_nil/1)

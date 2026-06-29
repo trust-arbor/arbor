@@ -26,7 +26,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   ## Lifecycle
 
   Started by BranchSupervisor AFTER Session. Receives agent_id, signer,
-  trust_tier, and heartbeat config at init. Schedules the first heartbeat
+  and heartbeat config at init. Schedules the first heartbeat
   timer immediately. Each cycle:
 
   1. Check authorization (`arbor://orchestrator/execute`)
@@ -91,7 +91,6 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   def init(opts) do
     agent_id = Keyword.fetch!(opts, :agent_id)
     signer = Keyword.get(opts, :signer)
-    trust_tier = Keyword.get(opts, :trust_tier, :untrusted)
 
     heartbeat_config = Keyword.get(opts, :heartbeat_config, %{})
     interval = Map.get(heartbeat_config, :interval, @default_interval)
@@ -103,7 +102,6 @@ defmodule Arbor.Orchestrator.HeartbeatService do
     state = %{
       agent_id: agent_id,
       signer: signer,
-      trust_tier: trust_tier,
       heartbeat_graph: graph,
       heartbeat_dot_path: dot_path,
       heartbeat_interval: interval,
@@ -270,7 +268,6 @@ defmodule Arbor.Orchestrator.HeartbeatService do
         # We provide the minimal subset it needs.
         session_like = %{
           agent_id: state.agent_id,
-          trust_tier: state.trust_tier,
           signer: state.signer
         }
 
@@ -290,7 +287,6 @@ defmodule Arbor.Orchestrator.HeartbeatService do
       try do
         session_like = %{
           agent_id: state.agent_id,
-          trust_tier: state.trust_tier,
           signer: state.signer
         }
 
@@ -326,8 +322,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
     if Code.ensure_loaded?(Arbor.Orchestrator.Session.Builders) do
       try do
         session_like = %{
-          agent_id: state.agent_id,
-          trust_tier: state.trust_tier
+          agent_id: state.agent_id
         }
 
         apply(Arbor.Orchestrator.Session.Builders, :apply_heartbeat_result, [session_like, result])

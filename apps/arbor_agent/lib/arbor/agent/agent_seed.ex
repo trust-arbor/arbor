@@ -704,7 +704,7 @@ defmodule Arbor.Agent.AgentSeed do
   # ============================================================================
 
   defp start_agent_executor(agent_id) do
-    case ExecutorIntegration.start_executor(agent_id, trust_tier: :established) do
+    case ExecutorIntegration.start_executor(agent_id) do
       {:ok, pid} -> pid
       {:error, _} -> nil
     end

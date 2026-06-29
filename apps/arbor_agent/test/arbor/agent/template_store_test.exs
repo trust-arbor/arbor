@@ -40,7 +40,6 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert :ok = TemplateStore.put("test_agent", data)
       assert {:ok, loaded} = TemplateStore.get("test_agent")
       assert loaded["name"] == "test_agent"
-      assert loaded["trust_tier"] == "probationary"
     end
 
     test "get returns not_found for missing template" do
@@ -98,7 +97,6 @@ defmodule Arbor.Agent.TemplateStoreTest do
         assert data["name"] == name
         assert is_map(data["character"])
         assert is_binary(data["character"]["name"])
-        assert is_binary(data["trust_tier"])
         assert is_list(data["initial_goals"])
         assert is_list(data["required_capabilities"])
         assert :ok = TemplateFile.validate(data)
@@ -123,7 +121,6 @@ defmodule Arbor.Agent.TemplateStoreTest do
 
       assert %Character{} = restored[:character]
       assert restored[:character].name == data["character"]["name"]
-      assert to_string(restored[:trust_tier]) == data["trust_tier"]
       assert restored[:nature] == data["nature"]
       assert restored[:domain_context] == data["domain_context"]
       assert restored[:values] == data["values"]
@@ -138,7 +135,6 @@ defmodule Arbor.Agent.TemplateStoreTest do
       data = %{"name" => "minimal", "character" => %{"name" => "Minimal"}}
       kw = TemplateStore.to_keyword(data)
       assert kw[:name] == "Minimal"
-      assert kw[:trust_tier] == :untrusted
       assert kw[:initial_goals] == []
     end
   end
@@ -249,7 +245,6 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert :ok =
                TemplateStore.create_from_opts("custom",
                  character: %{name: "Custom Agent"},
-                 trust_tier: :probationary,
                  initial_goals: [%{type: :explore, description: "Explore"}],
                  required_capabilities: [%{resource: "arbor://fs/read/**"}],
                  description: "A custom agent"
@@ -258,7 +253,6 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert {:ok, data} = TemplateStore.get("custom")
       assert data["name"] == "custom"
       assert data["source"] == "user"
-      assert data["trust_tier"] == "probationary"
       assert data["description"] == "A custom agent"
     end
 
@@ -306,7 +300,6 @@ defmodule Arbor.Agent.TemplateStoreTest do
       "version" => 1,
       "source" => "user",
       "character" => %{"name" => String.capitalize(name)},
-      "trust_tier" => "probationary",
       "initial_goals" => [],
       "required_capabilities" => [],
       "description" => "",

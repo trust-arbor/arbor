@@ -42,8 +42,7 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
     base = %{
       "session.id" => state.session_id,
       "session.agent_id" => state.agent_id,
-      "session.trust_tier" => to_string(state.trust_tier),
-      "session.trust_baseline" => to_string(Map.get(state, :trust_baseline, state.trust_tier)),
+      "session.trust_baseline" => to_string(Map.get(state, :trust_baseline, :ask)),
       "session.turn_count" => get_turn_count(state),
       "session.working_memory" => get_working_memory(state),
       "session.goals" => get_goals(state),
@@ -88,10 +87,9 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
     alias Arbor.Orchestrator.Session.ToolDisclosure
 
     config = state.config || %{}
-    trust_tier = state.trust_tier || :new
     discovered = Map.get(state, :discovered_tools, MapSet.new())
 
-    ToolDisclosure.resolve_tools(config, trust_tier, discovered, agent_id: state.agent_id)
+    ToolDisclosure.resolve_tools(config, discovered, agent_id: state.agent_id)
   end
 
   # Use compactor's projected view if available, otherwise all messages

@@ -3,43 +3,27 @@ defmodule Arbor.Trust.AuthorityTest do
 
   alias Arbor.Trust.Authority
 
-  describe "new_profile/2" do
-    test "creates profile with default untrusted tier" do
+  describe "new_profile/1" do
+    test "creates profile with default (cautious) preset" do
       profile = Authority.new_profile("agent_123")
       assert profile.agent_id == "agent_123"
-      assert profile.tier == :untrusted
       assert profile.baseline == :ask
-    end
-
-    test "creates profile with veteran tier and hands_off preset" do
-      profile = Authority.new_profile("agent_123", :veteran)
-      assert profile.tier == :veteran
-      assert profile.baseline == :allow
-      assert profile.rules["arbor://shell"] == :ask
-      assert profile.rules["arbor://governance"] == :ask
-      assert profile.rules["arbor://fs"] == :auto
-    end
-
-    test "creates profile with autonomous tier and full_trust preset" do
-      profile = Authority.new_profile("agent_123", :autonomous)
-      assert profile.tier == :autonomous
-      assert profile.baseline == :auto
     end
   end
 
   describe "effective_mode/3" do
     test "returns baseline for unmatched URI" do
-      profile = Authority.new_profile("agent_123", :veteran)
+      profile = Authority.apply_preset(Authority.new_profile("agent_123"), :hands_off)
       assert Authority.effective_mode(profile, "arbor://unknown/thing") == :allow
     end
 
     test "returns specific rule for matched URI" do
-      profile = Authority.new_profile("agent_123", :veteran)
+      profile = Authority.apply_preset(Authority.new_profile("agent_123"), :hands_off)
       assert Authority.effective_mode(profile, "arbor://shell/exec") == :ask
     end
 
     test "security ceiling overrides user preference" do
-      profile = Authority.new_profile("agent_123", :autonomous)
+      profile = Authority.apply_preset(Authority.new_profile("agent_123"), :full_trust)
       # full_trust baseline is :auto, but shell ceiling is :ask
       assert Authority.effective_mode(profile, "arbor://shell/exec") == :ask
     end
@@ -66,26 +50,6 @@ defmodule Arbor.Trust.AuthorityTest do
     end
   end
 
-  describe "resolve_tier/1" do
-    test "maps scores to tiers" do
-      assert Authority.resolve_tier(0) == :untrusted
-      assert Authority.resolve_tier(19) == :untrusted
-      assert Authority.resolve_tier(20) == :probationary
-      assert Authority.resolve_tier(50) == :trusted
-      assert Authority.resolve_tier(75) == :veteran
-      assert Authority.resolve_tier(90) == :autonomous
-    end
-  end
-
-  describe "tier_to_preset/1" do
-    test "maps tiers to presets" do
-      assert Authority.tier_to_preset(:untrusted) == :cautious
-      assert Authority.tier_to_preset(:trusted) == :balanced
-      assert Authority.tier_to_preset(:veteran) == :hands_off
-      assert Authority.tier_to_preset(:autonomous) == :full_trust
-    end
-  end
-
   describe "most_restrictive/1" do
     test "returns most restrictive mode" do
       assert Authority.most_restrictive([:auto, :allow, :ask]) == :ask
@@ -94,48 +58,29 @@ defmodule Arbor.Trust.AuthorityTest do
     end
   end
 
-  describe "set_tier/2" do
-    @tag spec: "TRUST-12"
-    test "updates only the tier label, leaving baseline and rules untouched" do
-      profile = Authority.new_profile("agent_123", :untrusted)
-      original_baseline = profile.baseline
-      original_rules = profile.rules
+  describe "apply_preset/2" do
+    test "explicitly resets baseline and merges preset rules" do
+      profile = Authority.new_profile("agent_123")
+      assert profile.baseline == :ask
 
-      updated = Authority.set_tier(profile, :veteran)
-
-      assert updated.tier == :veteran
-      assert updated.baseline == original_baseline
-      assert updated.rules == original_rules
+      updated = Authority.apply_preset(profile, :hands_off)
+      assert updated.baseline == :allow
+      assert updated.rules["arbor://shell"] == :ask
     end
 
-    @tag spec: "TRUST-12"
-    test "preserves user-customized rules across tier changes (regression)" do
-      # Footgun fix: graduating to a higher tier used to silently overwrite
-      # the user's "always allow" customizations with the new preset's rules.
+    test "preserves user-customized rules across preset application" do
       profile =
         "agent_123"
-        |> Authority.new_profile(:untrusted)
+        |> Authority.new_profile()
         |> then(fn p ->
           # User customization: explicit allow on a URI not in any preset
           %{p | rules: Map.put(p.rules, "arbor://custom/private/api", :auto)}
         end)
 
-      updated = Authority.set_tier(profile, :veteran)
+      updated = Authority.apply_preset(profile, :hands_off)
 
       assert updated.rules["arbor://custom/private/api"] == :auto,
-             "user customization should survive tier promotion"
-    end
-  end
-
-  describe "apply_tier_preset/2" do
-    test "explicitly resets baseline and merges preset rules" do
-      profile = Authority.new_profile("agent_123", :untrusted)
-      assert profile.baseline == :ask
-
-      updated = Authority.apply_tier_preset(profile, :veteran)
-      assert updated.tier == :veteran
-      assert updated.baseline == :allow
-      assert updated.rules["arbor://shell"] == :ask
+             "user customization should survive preset application"
     end
   end
 
@@ -157,22 +102,21 @@ defmodule Arbor.Trust.AuthorityTest do
 
   describe "explain/3" do
     test "returns resolution chain" do
-      profile = Authority.new_profile("agent_123", :veteran)
+      profile = Authority.apply_preset(Authority.new_profile("agent_123"), :hands_off)
       explanation = Authority.explain(profile, "arbor://shell/exec")
 
       assert explanation.effective_mode == :ask
       assert explanation.user_mode == :ask
       assert explanation.ceiling_mode == :ask
-      assert explanation.tier == :veteran
+      assert explanation.baseline == :allow
     end
   end
 
   describe "show_summary/1" do
     test "formats profile for display" do
-      profile = Authority.new_profile("agent_123", :veteran)
+      profile = Authority.apply_preset(Authority.new_profile("agent_123"), :hands_off)
       summary = Authority.show_summary(profile)
 
-      assert summary.tier == :veteran
       assert summary.baseline == :allow
       assert is_map(summary.stats)
     end
@@ -180,7 +124,7 @@ defmodule Arbor.Trust.AuthorityTest do
 
   describe "for_persistence/1 + from_persistence/1 round-trip" do
     test "round-trips a fresh profile preserving all material fields" do
-      original = Authority.new_profile("agent_round_trip", :veteran)
+      original = Authority.new_profile("agent_round_trip")
 
       serialized = Authority.for_persistence(original)
       assert is_map(serialized)
@@ -191,7 +135,6 @@ defmodule Arbor.Trust.AuthorityTest do
       {:ok, restored} = Authority.from_persistence(serialized)
 
       assert restored.agent_id == original.agent_id
-      assert restored.tier == original.tier
       assert restored.baseline == original.baseline
       assert restored.rules == original.rules
       assert %DateTime{} = restored.created_at
@@ -201,7 +144,7 @@ defmodule Arbor.Trust.AuthorityTest do
     test "round-trips a profile with custom rules" do
       original =
         "agent_custom"
-        |> Authority.new_profile(:trusted)
+        |> Authority.new_profile()
         |> then(fn p ->
           %{p | rules: Map.put(p.rules, "arbor://custom/api", :auto)}
         end)
@@ -214,7 +157,7 @@ defmodule Arbor.Trust.AuthorityTest do
 
     @tag spec: "TRUST-10"
     test "from_persistence accepts string-keyed maps (e.g. JSONB roundtrip)" do
-      original = Authority.new_profile("agent_string_keyed", :balanced)
+      original = Authority.new_profile("agent_string_keyed")
       serialized = Authority.for_persistence(original)
 
       string_keyed =
@@ -224,7 +167,7 @@ defmodule Arbor.Trust.AuthorityTest do
 
       {:ok, restored} = Authority.from_persistence(string_keyed)
       assert restored.agent_id == "agent_string_keyed"
-      assert restored.tier == original.tier
+      assert restored.baseline == original.baseline
     end
 
     @tag spec: "TRUST-4,TRUST-10"

@@ -20,9 +20,6 @@ defmodule Arbor.Trust.Manager do
       # Create a profile for a new agent
       {:ok, profile} = Trust.Manager.create_trust_profile("agent_123")
 
-      # Check if agent has sufficient trust
-      {:ok, :authorized} = Trust.Manager.check_trust_authorization("agent_123", :trusted)
-
       # Record trust events
       :ok = Trust.Manager.record_trust_event("agent_123", :action_success, %{})
 
@@ -64,16 +61,6 @@ defmodule Arbor.Trust.Manager do
   @spec get_trust_profile(String.t()) :: {:ok, Profile.t()} | {:error, :not_found | term()}
   def get_trust_profile(agent_id) do
     GenServer.call(__MODULE__, {:get_trust_profile, agent_id})
-  end
-
-  @doc """
-  Check if an agent has sufficient trust for an operation.
-  """
-  @impl Trust
-  @spec check_trust_authorization(String.t(), Trust.trust_tier()) ::
-          {:ok, :authorized} | {:error, :insufficient_trust | :trust_frozen | :not_found}
-  def check_trust_authorization(agent_id, required_tier) do
-    GenServer.call(__MODULE__, {:check_trust_authorization, agent_id, required_tier})
   end
 
   @doc """
@@ -183,27 +170,6 @@ defmodule Arbor.Trust.Manager do
   end
 
   @impl true
-  def handle_call({:check_trust_authorization, agent_id, required_tier}, _from, state) do
-    result =
-      case Store.get_profile(agent_id) do
-        {:ok, %{frozen: true}} ->
-          {:error, :trust_frozen}
-
-        {:ok, profile} ->
-          if Config.tier_sufficient?(profile.tier, required_tier) do
-            {:ok, :authorized}
-          else
-            {:error, :insufficient_trust}
-          end
-
-        {:error, :not_found} ->
-          {:error, :not_found}
-      end
-
-    {:reply, result, state}
-  end
-
-  @impl true
   def handle_call({:freeze_trust, agent_id, reason}, _from, state) do
     {reply, state} = do_freeze_trust(agent_id, reason, state)
     {:reply, reply, state}
@@ -231,8 +197,8 @@ defmodule Arbor.Trust.Manager do
 
   @impl true
   def handle_call({:create_trust_profile, agent_id}, _from, state) do
-    # Use Authority.new_profile for correct tier + preset in one call.
-    profile = Authority.new_profile(agent_id, :untrusted)
+    # Use Authority.new_profile to create with default preset rules.
+    profile = Authority.new_profile(agent_id)
     Store.store_profile(profile)
 
     {:ok, event} =
@@ -245,7 +211,7 @@ defmodule Arbor.Trust.Manager do
 
     Logger.info("Trust profile created for agent #{agent_id}", agent_id: agent_id)
 
-    broadcast_trust_event(agent_id, :profile_created, %{tier: :untrusted})
+    broadcast_trust_event(agent_id, :profile_created, %{})
     safe_grant_base_capabilities(agent_id)
 
     {:reply, {:ok, profile}, state}
@@ -307,15 +273,10 @@ defmodule Arbor.Trust.Manager do
 
   defp handle_trust_event(agent_id, event_type, metadata, state) do
     case Store.get_profile(agent_id) do
-      {:ok, old_profile} ->
-        # Update profile based on event type
-        {:ok, new_profile} = update_profile_for_event(agent_id, event_type, metadata)
-
+      {:ok, _profile} ->
         case Event.new(
                agent_id: agent_id,
                event_type: event_type,
-               previous_tier: old_profile.tier,
-               new_tier: new_profile.tier,
                metadata: metadata
              ) do
           {:ok, event} ->
@@ -324,10 +285,9 @@ defmodule Arbor.Trust.Manager do
             # Broadcast event
             broadcast_trust_event(agent_id, event_type, metadata)
 
-            # NOTE: tier no longer moves from score/points arithmetic (tier-minting
-            # kill sweep, P0 gate #1). Tier is a creation-set display label, so there
-            # is no automatic capability sync / rule reset / :tier_changed emission on
-            # trust events. Authorization reads `baseline` + `rules`, never `tier`.
+            # NOTE: trust events are audit/observability only — they don't mutate
+            # the profile. Authorization reads `baseline` + `rules`. There is no
+            # trust tier band.
 
             # Check circuit breaker for negative events
             maybe_trigger_circuit_breaker(event, agent_id, state)
@@ -354,13 +314,6 @@ defmodule Arbor.Trust.Manager do
       send(self(), {:check_circuit_breaker, agent_id})
     end
   end
-
-  # Trust events are recorded for audit/observability and feed the circuit
-  # breaker, but they no longer mutate the trust profile — the score/points/decay
-  # feedback loop was removed (tiers-retirement phase 3b). A future rebuild is
-  # tracked in `.arbor/roadmap/.../earned-trust-feedback-loop.md`.
-  defp update_profile_for_event(agent_id, _event_type, _metadata),
-    do: Store.get_profile(agent_id)
 
   defp check_circuit_breaker(agent_id, state) do
     # Get recent events to check for patterns
@@ -407,7 +360,7 @@ defmodule Arbor.Trust.Manager do
 
   defp do_freeze_trust(agent_id, reason, state) do
     case Store.freeze_profile(agent_id, reason) do
-      {:ok, profile} ->
+      {:ok, _profile} ->
         # Store freeze event
         {:ok, event} = Event.freeze_event(agent_id, :frozen, reason: reason)
 
@@ -422,8 +375,7 @@ defmodule Arbor.Trust.Manager do
 
         safe_emit_signal(:trust_frozen, %{
           agent_id: agent_id,
-          reason: reason,
-          tier: profile.tier
+          reason: reason
         })
 
         {:ok, state}

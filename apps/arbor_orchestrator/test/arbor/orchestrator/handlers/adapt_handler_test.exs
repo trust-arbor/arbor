@@ -277,102 +277,41 @@ defmodule Arbor.Orchestrator.Handlers.AdaptHandlerTest do
   # Trust-tier constraints
   # ==============================
 
-  describe "trust-tier constraints" do
-    test "untrusted agents cannot use adapt" do
+  # The trust-tier band was retired (tiers-retirement phase 3c). The adapt
+  # node's `trust_tier` attribute is now a no-op — mutations are governed by
+  # the agent's granular baseline/rules + capability checks, not by a tier.
+  describe "trust_tier attr is ignored (no-op)" do
+    test "an add_node mutation succeeds regardless of the trust_tier attr" do
       mutations = Jason.encode!([%{"op" => "add_node", "id" => "new"}])
 
+      # Previously a "probationary" node + "untrusted" session was rejected.
       node = make_adapt_node(mutations, %{"trust_tier" => "probationary"})
       outcome = run(node, %{"session.trust_tier" => "untrusted"})
 
-      assert outcome.status == :fail
-      assert outcome.failure_reason =~ "trust tier insufficient"
-    end
-
-    test "probationary allows only modify_attrs" do
-      # modify_attrs should succeed
-      mutations =
-        Jason.encode!([
-          %{"op" => "modify_attrs", "id" => "impl_1", "attrs" => %{"prompt" => "new"}}
-        ])
-
-      node = make_adapt_node(mutations, %{"trust_tier" => "probationary"})
-      outcome = run(node, %{"session.trust_tier" => "probationary"})
-
       assert outcome.status == :success
     end
 
-    test "probationary rejects add_node" do
-      mutations = Jason.encode!([%{"op" => "add_node", "id" => "new"}])
-      node = make_adapt_node(mutations, %{"trust_tier" => "probationary"})
-      outcome = run(node, %{"session.trust_tier" => "probationary"})
-
-      assert outcome.status == :fail
-      assert outcome.failure_reason =~ "probationary tier"
-      assert outcome.failure_reason =~ "add_node"
-    end
-
-    test "trusted allows rewiring but not add_node" do
-      mutations = Jason.encode!([%{"op" => "add_edge", "from" => "start", "to" => "done"}])
-      node = make_adapt_node(mutations, %{"trust_tier" => "trusted"})
-      outcome = run(node, %{"session.trust_tier" => "trusted"})
-
-      assert outcome.status == :success
-    end
-
-    test "trusted rejects add_node" do
-      mutations = Jason.encode!([%{"op" => "add_node", "id" => "new"}])
-      node = make_adapt_node(mutations, %{"trust_tier" => "trusted"})
-      outcome = run(node, %{"session.trust_tier" => "trusted"})
-
-      assert outcome.status == :fail
-      assert outcome.failure_reason =~ "trusted tier"
-    end
-
-    test "veteran allows all operations" do
+    test "all operations succeed irrespective of the trust_tier attr" do
       mutations =
         Jason.encode!([
           %{"op" => "add_node", "id" => "new", "attrs" => %{"shape" => "box"}},
           %{"op" => "add_edge", "from" => "impl_1", "to" => "new"}
         ])
 
-      node = make_adapt_node(mutations, %{"trust_tier" => "veteran"})
-      outcome = run(node, %{"session.trust_tier" => "veteran"})
+      node = make_adapt_node(mutations, %{"trust_tier" => "trusted"})
+      outcome = run(node, %{"session.trust_tier" => "trusted"})
 
       assert outcome.status == :success
     end
 
-    test "autonomous allows all operations" do
-      mutations =
-        Jason.encode!([
-          %{"op" => "add_node", "id" => "new", "attrs" => %{"shape" => "box"}},
-          %{"op" => "remove_node", "id" => "impl_2"}
-        ])
-
-      node = make_adapt_node(mutations, %{"trust_tier" => "autonomous"})
-      outcome = run(node, %{"session.trust_tier" => "autonomous"})
-
-      assert outcome.status == :success
-    end
-
-    test "no trust_tier attr means unrestricted" do
+    test "no trust_tier attr also allows everything" do
       mutations =
         Jason.encode!([
           %{"op" => "add_node", "id" => "anything", "attrs" => %{"shape" => "box"}}
         ])
 
-      # No trust_tier on node attrs — should allow everything
       node = make_adapt_node(mutations)
       outcome = run(node)
-
-      assert outcome.status == :success
-    end
-
-    test "higher tier than required passes" do
-      mutations =
-        Jason.encode!([%{"op" => "modify_attrs", "id" => "impl_1", "attrs" => %{"x" => "y"}}])
-
-      node = make_adapt_node(mutations, %{"trust_tier" => "probationary"})
-      outcome = run(node, %{"session.trust_tier" => "autonomous"})
 
       assert outcome.status == :success
     end

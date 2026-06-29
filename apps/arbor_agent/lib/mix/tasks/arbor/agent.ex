@@ -225,7 +225,6 @@ defmodule Mix.Tasks.Arbor.Agent do
 
       header =
         String.pad_trailing("NAME", 20) <>
-          String.pad_trailing("TIER", 14) <>
           "DESCRIPTION"
 
       Mix.shell().info(header)
@@ -233,9 +232,8 @@ defmodule Mix.Tasks.Arbor.Agent do
 
       for t <- templates do
         name = String.pad_trailing(t["name"] || "?", 20)
-        tier = String.pad_trailing(t["trust_tier"] || "?", 14)
         desc = truncate(t["description"] || "", 36)
-        Mix.shell().info("#{name}#{tier}#{desc}")
+        Mix.shell().info("#{name}#{desc}")
       end
 
       Mix.shell().info("\nStart with: mix arbor.agent start <name>")
@@ -331,8 +329,6 @@ defmodule Mix.Tasks.Arbor.Agent do
         Mix.shell().info("  Template:        #{format_template(s.template)}")
         Mix.shell().info("  Model:           #{s.model || "(unknown)"}")
         Mix.shell().info("")
-        Mix.shell().info("  Trust Tier:      #{s.trust_tier}")
-        Mix.shell().info("")
         Mix.shell().info("  Turns:           #{format_value(s.turn_count)}")
         Mix.shell().info("  Active Goals:    #{s.active_goals_count}")
         Mix.shell().info("")
@@ -384,7 +380,6 @@ defmodule Mix.Tasks.Arbor.Agent do
         Mix.shell().info("  Agent ID:     #{profile.agent_id}")
         Mix.shell().info("  Display Name: #{profile.display_name}")
         Mix.shell().info("  Template:     #{format_template(profile.template)}")
-        Mix.shell().info("  Trust Tier:   #{profile.trust_tier}")
         Mix.shell().info("  Auto Start:   #{profile.auto_start}")
 
         if running_entry do

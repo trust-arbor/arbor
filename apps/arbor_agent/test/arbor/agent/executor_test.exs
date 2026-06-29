@@ -16,7 +16,7 @@ defmodule Arbor.Agent.ExecutorTest do
 
   describe "start/2 and stop/1" do
     test "starts an executor" do
-      assert {:ok, pid} = Executor.start(@agent_id, trust_tier: :probationary)
+      assert {:ok, pid} = Executor.start(@agent_id)
       assert Process.alive?(pid)
       Executor.stop(@agent_id)
     end
@@ -26,7 +26,7 @@ defmodule Arbor.Agent.ExecutorTest do
     end
 
     test "returns error when already started" do
-      {:ok, _pid} = Executor.start(@agent_id, trust_tier: :probationary)
+      {:ok, _pid} = Executor.start(@agent_id)
       assert {:error, {:already_started, _}} = Executor.start(@agent_id)
       Executor.stop(@agent_id)
     end
@@ -34,12 +34,11 @@ defmodule Arbor.Agent.ExecutorTest do
 
   describe "status/1" do
     test "returns status for running executor" do
-      {:ok, _pid} = Executor.start(@agent_id, trust_tier: :probationary)
+      {:ok, _pid} = Executor.start(@agent_id)
 
       {:ok, status} = Executor.status(@agent_id)
       assert status.agent_id == @agent_id
       assert status.status == :running
-      assert status.trust_tier == :probationary
       assert status.pending_count == 0
       assert status.stats.intents_received == 0
 
@@ -53,7 +52,7 @@ defmodule Arbor.Agent.ExecutorTest do
 
   describe "pause/1 and resume/1" do
     test "pause transitions from running to paused" do
-      {:ok, _pid} = Executor.start(@agent_id, trust_tier: :probationary)
+      {:ok, _pid} = Executor.start(@agent_id)
 
       assert :ok = Executor.pause(@agent_id)
       {:ok, status} = Executor.status(@agent_id)
@@ -63,7 +62,7 @@ defmodule Arbor.Agent.ExecutorTest do
     end
 
     test "resume transitions from paused to running" do
-      {:ok, _pid} = Executor.start(@agent_id, trust_tier: :probationary)
+      {:ok, _pid} = Executor.start(@agent_id)
 
       Executor.pause(@agent_id)
       assert :ok = Executor.resume(@agent_id)
@@ -75,7 +74,7 @@ defmodule Arbor.Agent.ExecutorTest do
     end
 
     test "pause when not running returns error" do
-      {:ok, _pid} = Executor.start(@agent_id, trust_tier: :probationary)
+      {:ok, _pid} = Executor.start(@agent_id)
       Executor.pause(@agent_id)
 
       assert {:error, :not_running} = Executor.pause(@agent_id)
@@ -84,7 +83,7 @@ defmodule Arbor.Agent.ExecutorTest do
     end
 
     test "resume when not paused returns error" do
-      {:ok, _pid} = Executor.start(@agent_id, trust_tier: :probationary)
+      {:ok, _pid} = Executor.start(@agent_id)
 
       assert {:error, :not_paused} = Executor.resume(@agent_id)
 
@@ -94,7 +93,7 @@ defmodule Arbor.Agent.ExecutorTest do
 
   describe "execute/2" do
     test "executes a think intent" do
-      {:ok, _pid} = Executor.start(@agent_id, trust_tier: :probationary)
+      {:ok, _pid} = Executor.start(@agent_id)
 
       intent = Intent.think("Considering the situation")
       assert :ok = Executor.execute(@agent_id, intent)
@@ -110,7 +109,7 @@ defmodule Arbor.Agent.ExecutorTest do
     end
 
     test "queues intents when paused" do
-      {:ok, _pid} = Executor.start(@agent_id, trust_tier: :probationary)
+      {:ok, _pid} = Executor.start(@agent_id)
       Executor.pause(@agent_id)
 
       intent = Intent.think("Queued thought")
@@ -127,7 +126,7 @@ defmodule Arbor.Agent.ExecutorTest do
     end
 
     test "processes queued intents on resume" do
-      {:ok, _pid} = Executor.start(@agent_id, trust_tier: :probationary)
+      {:ok, _pid} = Executor.start(@agent_id)
       Executor.pause(@agent_id)
 
       intent = Intent.think("Queued thought")

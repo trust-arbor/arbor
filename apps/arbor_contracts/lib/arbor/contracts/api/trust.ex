@@ -6,9 +6,7 @@ defmodule Arbor.Contracts.API.Trust do
   interact with the trust system. It provides a unified entry point for:
 
   - **Trust Profiles** - Create and manage agent trust profiles
-  - **Trust Scoring** - Calculate and query trust scores
   - **Trust Events** - Record trust-affecting events
-  - **Trust Authorization** - Check trust-tier-based access
   - **Trust Freezing** - Freeze/unfreeze trust progression
 
   ## Quick Start
@@ -22,19 +20,6 @@ defmodule Arbor.Contracts.API.Trust do
       # Record trust events
       :ok = Arbor.Trust.record_trust_event("agent_001", :action_success, %{action: "sort"})
 
-      # Check trust tier
-      {:ok, :authorized} = Arbor.Trust.check_trust_authorization("agent_001", :trusted)
-
-  ## Trust Tiers
-
-  | Tier | Score | Capabilities |
-  |------|-------|--------------|
-  | `:untrusted` | 0-19 | Read own code |
-  | `:probationary` | 20-49 | Sandbox modifications |
-  | `:trusted` | 50-74 | Self-modify with approval |
-  | `:veteran` | 75-89 | Self-modify auto-approved |
-  | `:autonomous` | 90-100 | Modify own capabilities |
-
   @version "1.0.0"
   """
 
@@ -45,7 +30,6 @@ defmodule Arbor.Contracts.API.Trust do
   # ===========================================================================
 
   @type principal_id :: Types.agent_id()
-  @type trust_tier :: :untrusted | :probationary | :trusted | :veteran | :autonomous
   @type trust_profile :: map()
 
   # ===========================================================================
@@ -54,8 +38,6 @@ defmodule Arbor.Contracts.API.Trust do
 
   @doc """
   Create a new trust profile for a principal.
-
-  Initializes the principal with `:untrusted` tier (score 0).
   """
   @callback create_trust_profile_for_principal(principal_id()) ::
               {:ok, trust_profile()} | {:error, :already_exists | term()}
@@ -63,7 +45,7 @@ defmodule Arbor.Contracts.API.Trust do
   @doc """
   Get the complete trust profile for a principal.
 
-  Returns the trust profile including score, tier, and metrics.
+  Returns the trust profile including baseline, rules, and frozen state.
   """
   @callback get_trust_profile_for_principal(principal_id()) ::
               {:ok, trust_profile()} | {:error, :not_found}
@@ -71,7 +53,7 @@ defmodule Arbor.Contracts.API.Trust do
   @doc """
   Record a trust-affecting event for a principal with metadata.
 
-  Events modify the principal's trust score and may trigger tier changes.
+  Events are recorded for audit/observability and feed the circuit breaker.
   """
   @callback record_trust_event_for_principal_with_metadata(
               principal_id(),
@@ -103,20 +85,12 @@ defmodule Arbor.Contracts.API.Trust do
   @doc """
   Subscribe to trust events for a principal or all principals.
 
-  Allows components to react to trust score and tier changes.
+  Allows components to react to trust freeze/unfreeze and audit events.
   """
   @callback subscribe_to_trust_events_for_principal(
               principal_id() | :all,
               handler :: function()
             ) :: {:ok, subscription_id :: String.t()} | {:error, term()}
-
-  @doc """
-  Check if a principal meets the required trust tier.
-  """
-  @callback check_if_principal_meets_required_trust_tier(
-              principal_id(),
-              required_tier :: trust_tier()
-            ) :: {:ok, :authorized} | {:error, :insufficient_trust | :trust_frozen | :not_found}
 
   # ===========================================================================
   # Lifecycle
@@ -138,7 +112,6 @@ defmodule Arbor.Contracts.API.Trust do
 
   @optional_callbacks [
     check_if_trust_frozen_for_principal: 1,
-    subscribe_to_trust_events_for_principal: 2,
-    check_if_principal_meets_required_trust_tier: 2
+    subscribe_to_trust_events_for_principal: 2
   ]
 end

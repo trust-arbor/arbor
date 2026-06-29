@@ -44,7 +44,6 @@ defmodule Arbor.Actions.TrustTest do
       assert {:ok, result} = ReadProfile.run(%{agent_id: agent_id}, %{})
 
       assert result.agent_id == agent_id
-      assert result.tier == :untrusted
       assert is_atom(result.baseline)
       assert is_map(result.rules)
       assert result.frozen == false
@@ -193,7 +192,6 @@ defmodule Arbor.Actions.TrustTest do
 
       agent = Enum.find(result.agents, &(&1.agent_id == agent_id))
       assert agent != nil
-      assert agent.tier == :untrusted
       assert is_atom(agent.baseline)
       assert is_integer(agent.rule_count)
       assert agent.frozen == false

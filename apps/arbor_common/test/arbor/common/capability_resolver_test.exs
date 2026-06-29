@@ -112,18 +112,6 @@ defmodule Arbor.Common.CapabilityResolverTest do
       assert length(results) <= 1
     end
 
-    test "filters by trust tier" do
-      # New tier should only see :new trust capabilities
-      results = CapabilityResolver.search("email triage", trust_tier: :new)
-      assert Enum.all?(results, fn %{descriptor: d} -> d.trust_required == :new end)
-    end
-
-    test "higher trust tier sees more capabilities" do
-      new_results = CapabilityResolver.search("triage email consensus", trust_tier: :new)
-      system_results = CapabilityResolver.search("triage email consensus", trust_tier: :system)
-      assert length(system_results) >= length(new_results)
-    end
-
     test "forced tier 1 only uses keyword search" do
       results = CapabilityResolver.search("greet", tier: 1)
       assert Enum.all?(results, fn %{tier: t} -> t == 1 end)
@@ -149,23 +137,6 @@ defmodule Arbor.Common.CapabilityResolverTest do
 
     test "returns error when no match" do
       assert {:error, :no_match} = CapabilityResolver.best_match("zzzzz nonexistent qqqqq")
-    end
-
-    test "respects trust tier" do
-      # Email triage requires :established, so :new tier shouldn't find it
-      assert {:error, :no_match} =
-               CapabilityResolver.best_match("email triage",
-                 trust_tier: :new,
-                 kind: :skill
-               )
-
-      assert {:ok, match} =
-               CapabilityResolver.best_match("email triage",
-                 trust_tier: :established,
-                 kind: :skill
-               )
-
-      assert match.descriptor.id == "skill:email-triage"
     end
   end
 

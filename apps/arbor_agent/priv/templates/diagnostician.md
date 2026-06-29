@@ -70,7 +70,6 @@ required_capabilities:
 - description: "Compile own implementation"
   resource: "arbor://code/compile/self/impl"
 source: "builtin"
-trust_tier: "veteran"
 values:
 - "evidence before conclusions"
 - "gradual remediation over quick fixes"

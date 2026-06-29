@@ -380,8 +380,7 @@ defmodule Arbor.Orchestrator.SessionCore do
       "session.agent_id" => session_state[:agent_id] || session_state["agent_id"],
       "session.session_id" => session_state[:session_id] || session_state["session_id"],
       "session.messages" => session_state[:messages] || session_state["messages"] || [],
-      "session.turn_count" => session_state[:turn_count] || session_state["turn_count"] || 0,
-      "session.trust_tier" => session_state[:trust_tier] || session_state["trust_tier"]
+      "session.turn_count" => session_state[:turn_count] || session_state["turn_count"] || 0
     }
   end
 
@@ -481,7 +480,6 @@ defmodule Arbor.Orchestrator.SessionCore do
       provider: state_config[:provider] || model_config[:provider],
       session_id: Map.get(state, :session_id),
       session_pid: session_pid,
-      trust_tier: Map.get(state, :trust_tier),
       trust_profile: Keyword.get(opts, :trust_profile),
       turn_count: Map.get(state, :turn_count),
       tools: discovered_tools_list(Map.get(state, :discovered_tools)),

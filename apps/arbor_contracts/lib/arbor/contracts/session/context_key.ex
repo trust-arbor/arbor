@@ -50,10 +50,6 @@ defmodule Arbor.Contracts.Session.ContextKey do
   @spec agent_id() :: String.t()
   def agent_id, do: "#{@session_ns}.agent_id"
 
-  @doc "Trust tier of the agent (e.g., :established, :trusted_partner)."
-  @spec trust_tier() :: String.t()
-  def trust_tier, do: "#{@session_ns}.trust_tier"
-
   @doc "Session type (e.g., :chat, :heartbeat, :query)."
   @spec session_type() :: String.t()
   def session_type, do: "#{@session_ns}.session_type"
@@ -193,7 +189,6 @@ defmodule Arbor.Contracts.Session.ContextKey do
   @all_keys [
     "session.id",
     "session.agent_id",
-    "session.trust_tier",
     "session.input",
     "session.input_type",
     "session.messages",

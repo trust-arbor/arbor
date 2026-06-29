@@ -17,7 +17,6 @@ defmodule Arbor.Contracts.Session.Adapter do
   - `:route_actions` — dispatch extracted actions to the Executor
   - `:update_goals` — persist goal changes to the GoalStore
   - `:background_checks` — run memory health and consolidation checks
-  - `:trust_tier_resolver` — resolve the agent's current trust tier
 
   ## Callbacks
 
@@ -81,7 +80,6 @@ defmodule Arbor.Contracts.Session.Adapter do
           | :route_actions
           | :update_goals
           | :background_checks
-          | :trust_tier_resolver
 
   @typedoc "Map from adapter keys to adapter functions or modules."
   @type adapter_map :: %{optional(adapter_key()) => function()}
@@ -94,8 +92,7 @@ defmodule Arbor.Contracts.Session.Adapter do
     :checkpoint,
     :route_actions,
     :update_goals,
-    :background_checks,
-    :trust_tier_resolver
+    :background_checks
   ]
 
   # ============================================================================

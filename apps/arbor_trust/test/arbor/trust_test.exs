@@ -46,7 +46,7 @@ defmodule Arbor.TrustTest do
     test "creates a profile via the facade" do
       assert {:ok, profile} = Trust.create_trust_profile("facade_create")
       assert profile.agent_id == "facade_create"
-      assert profile.tier == :untrusted
+      assert profile.baseline == :ask
     end
 
     test "profile has correct initial state" do
@@ -168,38 +168,9 @@ defmodule Arbor.TrustTest do
     end
   end
 
-  # ===========================================================================
-  # Trust Authorization
-  # ===========================================================================
-
-  describe "check_trust_authorization/2" do
-    test "authorizes agent for their tier" do
-      {:ok, _} = Trust.create_trust_profile("facade_auth")
-
-      assert {:ok, :authorized} =
-               Trust.check_trust_authorization("facade_auth", :untrusted)
-    end
-
-    test "rejects agent for higher tier" do
-      {:ok, _} = Trust.create_trust_profile("facade_auth_deny")
-
-      assert {:error, :insufficient_trust} =
-               Trust.check_trust_authorization("facade_auth_deny", :trusted)
-    end
-
-    test "returns :trust_frozen for frozen agent" do
-      {:ok, _} = Trust.create_trust_profile("facade_auth_frozen")
-      :ok = Trust.freeze_trust("facade_auth_frozen", :test)
-
-      assert {:error, :trust_frozen} =
-               Trust.check_trust_authorization("facade_auth_frozen", :untrusted)
-    end
-
-    test "returns :not_found for non-existent agent" do
-      assert {:error, :not_found} =
-               Trust.check_trust_authorization("facade_auth_none", :untrusted)
-    end
-  end
+  # Trust authorization (check_trust_authorization/2) was removed in the
+  # tiers-retirement phase 3c — there is no trust-tier band. Authorization runs
+  # on the granular baseline/rules + capability checks (see Policy tests).
 
   # ===========================================================================
   # Administration
@@ -214,22 +185,6 @@ defmodule Arbor.TrustTest do
       agent_ids = Enum.map(profiles, & &1.agent_id)
       assert "facade_list_a" in agent_ids
       assert "facade_list_b" in agent_ids
-    end
-
-    test "supports tier filter" do
-      {:ok, _} = Trust.create_trust_profile("facade_list_filter")
-
-      {:ok, profiles} = Trust.list_profiles(tier: :untrusted)
-      agent_ids = Enum.map(profiles, & &1.agent_id)
-      assert "facade_list_filter" in agent_ids
-    end
-
-    test "returns empty list when no profiles match filter" do
-      {:ok, _} = Trust.create_trust_profile("facade_list_no_match")
-
-      {:ok, profiles} = Trust.list_profiles(tier: :autonomous)
-      agent_ids = Enum.map(profiles, & &1.agent_id)
-      refute "facade_list_no_match" in agent_ids
     end
   end
 
@@ -271,10 +226,11 @@ defmodule Arbor.TrustTest do
   # ===========================================================================
 
   describe "full trust lifecycle" do
-    test "create, record events, check authorization, freeze, unfreeze" do
+    test "create, record events, freeze, unfreeze" do
       # Step 1: Create profile
       {:ok, profile} = Trust.create_trust_profile("lifecycle_agent")
-      assert profile.tier == :untrusted
+      assert profile.baseline == :ask
+      refute profile.frozen
 
       # Step 2: Record events (no longer mutates counters)
       :ok = Trust.record_trust_event("lifecycle_agent", :action_success, %{})
@@ -284,21 +240,15 @@ defmodule Arbor.TrustTest do
       assert profile.total_actions == 0
       assert profile.successful_actions == 0
 
-      # Step 3: Check authorization (should be authorized for untrusted)
-      assert {:ok, :authorized} =
-               Trust.check_trust_authorization("lifecycle_agent", :untrusted)
-
-      # Step 4: Freeze
+      # Step 3: Freeze
       :ok = Trust.freeze_trust("lifecycle_agent", :manual_review)
+      {:ok, profile} = Trust.get_trust_profile("lifecycle_agent")
+      assert profile.frozen
 
-      assert {:error, :trust_frozen} =
-               Trust.check_trust_authorization("lifecycle_agent", :untrusted)
-
-      # Step 5: Unfreeze
+      # Step 4: Unfreeze
       :ok = Trust.unfreeze_trust("lifecycle_agent")
-
-      assert {:ok, :authorized} =
-               Trust.check_trust_authorization("lifecycle_agent", :untrusted)
+      {:ok, profile} = Trust.get_trust_profile("lifecycle_agent")
+      refute profile.frozen
     end
 
     test "security violations no longer reduce security component score" do

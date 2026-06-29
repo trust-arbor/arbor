@@ -444,22 +444,6 @@ defmodule Arbor.Orchestrator.Session.Builders do
   @doc false
   defdelegate sync_checkpoint_to_session_state(state), to: Persistence
 
-  # ── Trust tier verification ──────────────────────────────────────────
-
-  @doc false
-  def verify_trust_tier(declared_tier, agent_id, adapters) do
-    case Map.get(adapters, :trust_tier_resolver) do
-      resolver when is_function(resolver, 1) ->
-        case resolver.(agent_id) do
-          {:ok, verified_tier} -> verified_tier
-          _ -> declared_tier
-        end
-
-      _ ->
-        declared_tier
-    end
-  end
-
   # ── Contract struct helpers ──────────────────────────────────────────
 
   @doc false
@@ -573,7 +557,6 @@ defmodule Arbor.Orchestrator.Session.Builders do
            [
              session_id: Keyword.fetch!(opts, :session_id),
              agent_id: Keyword.fetch!(opts, :agent_id),
-             trust_tier: Keyword.fetch!(opts, :trust_tier),
              session_type: Keyword.get(opts, :session_type, :primary),
              metadata: Keyword.get(opts, :config, %{})
            ]

@@ -2,18 +2,8 @@ defmodule Arbor.Contracts.Trust.Profile do
   @moduledoc """
   Trust profile data structure for self-improving agents.
 
-  A trust profile carries an agent's trust `tier` (a display band) along with
-  its frozen state and URI-prefix authorization rules (`baseline` + `rules`).
-
-  ## Trust Tiers
-
-  | Tier | Capabilities |
-  |------|--------------|
-  | :untrusted | Read own code |
-  | :probationary | Sandbox modifications |
-  | :trusted | Self-modify with approval |
-  | :veteran | Self-modify auto-approved |
-  | :autonomous | Modify own capabilities |
+  A trust profile carries an agent's frozen state and URI-prefix authorization
+  rules (`baseline` + `rules`).
 
   ## Frozen State
 
@@ -22,8 +12,8 @@ defmodule Arbor.Contracts.Trust.Profile do
 
   ## Authorization
 
-  Authorization reads `baseline` + `rules` (URI-prefix trust rules), never the
-  tier. The tier is a display label set at agent creation.
+  Authorization reads `baseline` + `rules` (URI-prefix trust rules). There is no
+  trust-tier band — granular baseline/rules + capability checks govern access.
 
   @version "1.0.0"
   """
@@ -36,9 +26,6 @@ defmodule Arbor.Contracts.Trust.Profile do
 
     # Identity
     field(:agent_id, String.t())
-
-    # Trust tier (display band)
-    field(:tier, atom(), default: :untrusted)
 
     # Frozen state (circuit breaker)
     field(:frozen, boolean(), default: false)
@@ -97,14 +84,13 @@ defmodule Arbor.Contracts.Trust.Profile do
   @doc """
   Create a new trust profile for an agent.
 
-  Initializes at the `:untrusted` tier with default component scores.
   Security and rollback scores start at 100.0 (no violations/rollbacks).
 
   ## Example
 
       {:ok, profile} = Profile.new("agent_123")
-      profile.tier
-      #=> :untrusted
+      profile.frozen
+      #=> false
   """
   @spec new(String.t()) :: {:ok, t()} | {:error, term()}
   def new(agent_id) when is_binary(agent_id) and byte_size(agent_id) > 0 do
@@ -112,7 +98,6 @@ defmodule Arbor.Contracts.Trust.Profile do
 
     profile = %__MODULE__{
       agent_id: agent_id,
-      tier: :untrusted,
       frozen: false,
       success_rate_score: 0.0,
       uptime_score: 0.0,

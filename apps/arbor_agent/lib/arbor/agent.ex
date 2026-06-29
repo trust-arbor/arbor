@@ -65,8 +65,7 @@ defmodule Arbor.Agent do
         template: "scout")
 
       {:ok, profile} = Arbor.Agent.create_agent("custom",
-        character: Character.new(name: "My Agent"),
-        trust_tier: :probationary)
+        character: Character.new(name: "My Agent"))
   """
   defdelegate create_agent(agent_id, opts \\ []), to: Lifecycle, as: :create
 
@@ -435,7 +434,6 @@ defmodule Arbor.Agent do
         status: :running,
         template: :diagnostician,
         model: "anthropic/claude-sonnet-4-5",
-        trust_tier: :veteran,
         turn_count: 42,
         active_goals_count: 3,
         session_cost: 0.15,
@@ -487,9 +485,6 @@ defmodule Arbor.Agent do
       # Configuration (how it's set up)
       template: profile.template,
       model: model_id_from_metadata(profile.metadata),
-
-      # Authority (what it can do)
-      trust_tier: profile.trust_tier,
 
       # Current activity (what it's doing now)
       turn_count: telemetry && telemetry.turn_count,

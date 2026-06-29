@@ -297,9 +297,7 @@ defmodule Arbor.Agent.SessionManager do
                 [
                   session_id: session_id,
                   model: Keyword.get(opts, :model),
-                  metadata: %{
-                    "trust_tier" => to_string(Keyword.get(opts, :trust_tier, :established))
-                  }
+                  metadata: %{}
                 ]
               ])
           end

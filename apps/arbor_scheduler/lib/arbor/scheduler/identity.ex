@@ -285,7 +285,7 @@ defmodule Arbor.Scheduler.Identity do
     if TrustStore.profile_exists?(agent_id) do
       :ok
     else
-      profile = TrustAuthority.new_profile(agent_id, :untrusted)
+      profile = TrustAuthority.new_profile(agent_id)
       TrustStore.store_profile(profile)
     end
   rescue

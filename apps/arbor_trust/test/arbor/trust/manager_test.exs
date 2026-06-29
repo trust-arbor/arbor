@@ -35,7 +35,6 @@ defmodule Arbor.Trust.ManagerTest do
     test "creates a new trust profile for a valid agent_id" do
       assert {:ok, profile} = Manager.create_trust_profile("agent_001")
       assert profile.agent_id == "agent_001"
-      assert profile.tier == :untrusted
       assert profile.frozen == false
     end
 
@@ -91,7 +90,7 @@ defmodule Arbor.Trust.ManagerTest do
       {:ok, created} = Manager.create_trust_profile("agent_same")
       {:ok, fetched} = Manager.get_trust_profile("agent_same")
       assert created.agent_id == fetched.agent_id
-      assert created.tier == fetched.tier
+      assert created.baseline == fetched.baseline
     end
   end
 
@@ -181,35 +180,10 @@ defmodule Arbor.Trust.ManagerTest do
   # check_trust_authorization/2
   # ---------------------------------------------------------------------------
 
-  describe "check_trust_authorization/2" do
-    test "returns :not_found for non-existent agent" do
-      assert {:error, :not_found} =
-               Manager.check_trust_authorization("nonexistent_agent", :untrusted)
-    end
-
-    test "newly created agent is authorized for :untrusted tier" do
-      {:ok, _} = Manager.create_trust_profile("agent_auth")
-
-      assert {:ok, :authorized} =
-               Manager.check_trust_authorization("agent_auth", :untrusted)
-    end
-
-    test "newly created agent has insufficient trust for :trusted tier" do
-      {:ok, _} = Manager.create_trust_profile("agent_low_trust")
-
-      assert {:error, :insufficient_trust} =
-               Manager.check_trust_authorization("agent_low_trust", :trusted)
-    end
-
-    @tag spec: "TRUST-11"
-    test "frozen agent returns :trust_frozen" do
-      {:ok, _} = Manager.create_trust_profile("agent_frozen_auth")
-      :ok = Manager.freeze_trust("agent_frozen_auth", :test_reason)
-
-      assert {:error, :trust_frozen} =
-               Manager.check_trust_authorization("agent_frozen_auth", :untrusted)
-    end
-  end
+  # check_trust_authorization/2 was removed (tiers-retirement phase 3c) — there
+  # is no trust-tier band to check against. Authorization runs on the granular
+  # baseline/rules + capability checks. The frozen-agent gate is covered by the
+  # freeze_trust/get_trust_profile tests below.
 
   # ---------------------------------------------------------------------------
   # freeze_trust/2 and unfreeze_trust/1
@@ -268,18 +242,6 @@ defmodule Arbor.Trust.ManagerTest do
       agent_ids = Enum.map(profiles, & &1.agent_id)
       assert "agent_list_a" in agent_ids
       assert "agent_list_b" in agent_ids
-    end
-
-    test "supports tier filter" do
-      {:ok, _} = Manager.create_trust_profile("agent_filter_tier")
-
-      {:ok, profiles} = Manager.list_profiles(tier: :untrusted)
-      agent_ids = Enum.map(profiles, & &1.agent_id)
-      assert "agent_filter_tier" in agent_ids
-
-      {:ok, profiles} = Manager.list_profiles(tier: :autonomous)
-      agent_ids = Enum.map(profiles, & &1.agent_id)
-      refute "agent_filter_tier" in agent_ids
     end
 
     test "supports limit option" do
@@ -466,7 +428,7 @@ defmodule Arbor.Trust.ManagerTest do
   # ---------------------------------------------------------------------------
 
   describe "circuit breaker rollbacks (tier-minting kill sweep, P0 gate #1)" do
-    test "rollbacks above the old threshold do NOT demote tier" do
+    test "rollbacks above the old threshold do NOT mutate the profile" do
       stop_supervised!(Manager)
 
       start_supervised!({Manager, [circuit_breaker: true, decay: false, event_store: true]})
@@ -481,7 +443,8 @@ defmodule Arbor.Trust.ManagerTest do
       Process.sleep(100)
 
       {:ok, profile_before} = Manager.get_trust_profile("agent_demote")
-      tier_before = profile_before.tier
+      baseline_before = profile_before.baseline
+      rules_before = profile_before.rules
 
       # Record 4 rollbacks — the old code demoted tier (and minted/stripped
       # capabilities) at the rollbacks >= 3 threshold. That path is gone.
@@ -494,8 +457,10 @@ defmodule Arbor.Trust.ManagerTest do
 
       {:ok, profile} = Manager.get_trust_profile("agent_demote")
       assert profile.agent_id == "agent_demote"
-      # Tier is unchanged — rollbacks never demote it anymore.
-      assert profile.tier == tier_before
+      # The authorization profile is unchanged — rollbacks never mint/strip
+      # capabilities or move trust anymore.
+      assert profile.baseline == baseline_before
+      assert profile.rules == rules_before
     end
   end
 
@@ -592,7 +557,7 @@ defmodule Arbor.Trust.ManagerTest do
 
       {:ok, profile} = Manager.get_trust_profile("agent_old_activity")
       assert profile.agent_id == "agent_old_activity"
-      assert profile.tier == :untrusted
+      assert profile.baseline == :ask
     end
 
     test "is a no-op when decay is disabled" do

@@ -34,72 +34,6 @@ defmodule Arbor.Trust.ConfigTest do
     end
   end
 
-  describe "tiers/0" do
-    test "returns default tier list when no app env set" do
-      original = Application.get_env(:arbor_trust, :tiers)
-      Application.delete_env(:arbor_trust, :tiers)
-
-      on_exit(fn ->
-        if original,
-          do: Application.put_env(:arbor_trust, :tiers, original),
-          else: Application.delete_env(:arbor_trust, :tiers)
-      end)
-
-      assert Config.tiers() == [:untrusted, :probationary, :trusted, :veteran, :autonomous]
-    end
-
-    test "returns overridden tier list from app env" do
-      original = Application.get_env(:arbor_trust, :tiers)
-      custom_tiers = [:low, :medium, :high]
-      Application.put_env(:arbor_trust, :tiers, custom_tiers)
-
-      on_exit(fn ->
-        if original,
-          do: Application.put_env(:arbor_trust, :tiers, original),
-          else: Application.delete_env(:arbor_trust, :tiers)
-      end)
-
-      assert Config.tiers() == custom_tiers
-    end
-  end
-
-  describe "tier_thresholds/0" do
-    test "returns default tier thresholds when no app env set" do
-      original = Application.get_env(:arbor_trust, :tier_thresholds)
-      Application.delete_env(:arbor_trust, :tier_thresholds)
-
-      on_exit(fn ->
-        if original,
-          do: Application.put_env(:arbor_trust, :tier_thresholds, original),
-          else: Application.delete_env(:arbor_trust, :tier_thresholds)
-      end)
-
-      expected = %{
-        untrusted: 0,
-        probationary: 20,
-        trusted: 50,
-        veteran: 75,
-        autonomous: 90
-      }
-
-      assert Config.tier_thresholds() == expected
-    end
-
-    test "returns overridden tier thresholds from app env" do
-      original = Application.get_env(:arbor_trust, :tier_thresholds)
-      custom = %{low: 0, medium: 30, high: 70}
-      Application.put_env(:arbor_trust, :tier_thresholds, custom)
-
-      on_exit(fn ->
-        if original,
-          do: Application.put_env(:arbor_trust, :tier_thresholds, original),
-          else: Application.delete_env(:arbor_trust, :tier_thresholds)
-      end)
-
-      assert Config.tier_thresholds() == custom
-    end
-  end
-
   describe "capability_templates/0" do
     test "returns empty map as default when no app env set" do
       original = Application.get_env(:arbor_trust, :capability_templates)
@@ -184,123 +118,25 @@ defmodule Arbor.Trust.ConfigTest do
     end
   end
 
-  describe "tier_definitions/0" do
-    test "returns default tier definitions when no app env set" do
-      original = Application.get_env(:arbor_trust, :tier_definitions)
-      Application.delete_env(:arbor_trust, :tier_definitions)
+  describe "base_capabilities/0 — A1 proactive notify channel" do
+    test "the universal baseline grants arbor://comms/notify/session with a rate-limit constraint" do
+      caps = Config.base_capabilities()
+      notify = Enum.find(caps, &(&1.resource_uri == "arbor://comms/notify/session"))
 
-      on_exit(fn ->
-        if original,
-          do: Application.put_env(:arbor_trust, :tier_definitions, original),
-          else: Application.delete_env(:arbor_trust, :tier_definitions)
-      end)
-
-      definitions = Config.tier_definitions()
-      assert is_map(definitions)
-      assert Map.has_key?(definitions, :untrusted)
-      assert Map.has_key?(definitions, :autonomous)
-
-      # Check structure of one tier
-      untrusted = definitions[:untrusted]
-      assert untrusted.display_name == "New"
-      assert untrusted.description == "Just getting started together"
-      assert untrusted.sandbox == :strict
-      assert untrusted.actions == [:read, :search, :think]
-    end
-
-    test "returns overridden tier definitions from app env" do
-      original = Application.get_env(:arbor_trust, :tier_definitions)
-
-      custom = %{
-        low: %{display_name: "Low Trust", sandbox: :strict, actions: [:read]}
-      }
-
-      Application.put_env(:arbor_trust, :tier_definitions, custom)
-
-      on_exit(fn ->
-        if original,
-          do: Application.put_env(:arbor_trust, :tier_definitions, original),
-          else: Application.delete_env(:arbor_trust, :tier_definitions)
-      end)
-
-      assert Config.tier_definitions() == custom
+      assert notify, "baseline is missing the notify capability"
+      # The anti-spam budget is applied as a :rate_limit constraint on the grant.
+      assert notify.constraints[:rate_limit] == 30
     end
   end
 
-  describe "display_name/1" do
-    test "returns display name from default config" do
-      original = Application.get_env(:arbor_trust, :tier_definitions)
-      Application.delete_env(:arbor_trust, :tier_definitions)
+  describe "generate_capabilities/1" do
+    test "expands self-scoped URIs to the agent id" do
+      caps = Config.generate_capabilities("agent_abc")
+      uris = Enum.map(caps, & &1.resource_uri)
 
-      on_exit(fn ->
-        if original,
-          do: Application.put_env(:arbor_trust, :tier_definitions, original),
-          else: Application.delete_env(:arbor_trust, :tier_definitions)
-      end)
-
-      assert Config.display_name(:untrusted) == "New"
-      assert Config.display_name(:probationary) == "Guided"
-      assert Config.display_name(:trusted) == "Established"
-      assert Config.display_name(:veteran) == "Trusted Partner"
-      assert Config.display_name(:autonomous) == "Full Partner"
-    end
-
-    test "falls back to capitalized atom for unknown tier" do
-      assert Config.display_name(:unknown_tier) == "Unknown_tier"
-    end
-  end
-
-  describe "tier_description/1" do
-    test "returns description from default config" do
-      original = Application.get_env(:arbor_trust, :tier_definitions)
-      Application.delete_env(:arbor_trust, :tier_definitions)
-
-      on_exit(fn ->
-        if original,
-          do: Application.put_env(:arbor_trust, :tier_definitions, original),
-          else: Application.delete_env(:arbor_trust, :tier_definitions)
-      end)
-
-      assert Config.tier_description(:untrusted) == "Just getting started together"
-      assert Config.tier_description(:autonomous) == "Complete partnership"
-    end
-
-    test "returns nil for unknown tier" do
-      assert Config.tier_description(:unknown_tier) == nil
-    end
-  end
-
-  describe "actions_for_tier/1" do
-    test "returns actions from default config" do
-      original = Application.get_env(:arbor_trust, :tier_definitions)
-      Application.delete_env(:arbor_trust, :tier_definitions)
-
-      on_exit(fn ->
-        if original,
-          do: Application.put_env(:arbor_trust, :tier_definitions, original),
-          else: Application.delete_env(:arbor_trust, :tier_definitions)
-      end)
-
-      assert Config.actions_for_tier(:untrusted) == [:read, :search, :think]
-      assert Config.actions_for_tier(:autonomous) == :all
-    end
-
-    test "falls back to basic actions for unknown tier" do
-      assert Config.actions_for_tier(:unknown_tier) == [:read, :search, :think]
-    end
-  end
-
-  describe "capabilities_for_tier/1 — A1 proactive notify channel (Phase 3b)" do
-    test "every tier is granted arbor://comms/notify/session with a rate-limit constraint" do
-      for tier <- [:untrusted, :probationary, :trusted, :veteran, :autonomous] do
-        caps = Config.capabilities_for_tier(tier)
-        notify = Enum.find(caps, &(&1.resource_uri == "arbor://comms/notify/session"))
-
-        assert notify, "tier #{tier} is missing the notify capability"
-        # The anti-spam budget is applied as a :rate_limit constraint on the grant
-        # (Phase 3b: makes the Phase-2 declared budget actually enforced).
-        assert notify.constraints[:rate_limit] == 30
-      end
+      assert "arbor://code/read/agent_abc/*" in uris
+      assert Enum.all?(caps, &(&1.principal_id == "agent_abc"))
+      assert Enum.all?(caps, &(&1.metadata.source == :trust_baseline))
     end
   end
 end

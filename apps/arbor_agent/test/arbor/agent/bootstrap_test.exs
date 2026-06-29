@@ -35,7 +35,6 @@ defmodule Arbor.Agent.BootstrapTest do
       agent_id: agent_id,
       display_name: Keyword.get(opts, :display_name, "Test"),
       character: character,
-      trust_tier: :probationary,
       template: Keyword.get(opts, :template),
       auto_start: Keyword.get(opts, :auto_start, false),
       metadata: Keyword.get(opts, :metadata, %{}),

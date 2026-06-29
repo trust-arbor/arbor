@@ -40,7 +40,6 @@ defmodule Arbor.Agent.Spec do
   - `:display_name` — required, human-readable name
   - `:template` — template name (string) or module (atom)
   - `:model_config` — map with provider/model info (`%{id: "model", provider: :openrouter}`)
-  - `:trust_tier` — explicit trust tier (overrides template)
   - `:character` — explicit Character struct (overrides template)
   - `:initial_goals` — list of goal maps
   - `:capabilities` — list of initial capability maps
@@ -60,7 +59,6 @@ defmodule Arbor.Agent.Spec do
         %AgentSpec{display_name: display_name}
         |> apply_template(opts)
         |> apply_model_config(opts)
-        |> apply_trust_tier(opts)
         |> apply_explicit_overrides(opts)
         |> apply_metadata(opts)
 
@@ -87,7 +85,6 @@ defmodule Arbor.Agent.Spec do
     spec = %AgentSpec{
       display_name: profile.display_name,
       character: profile.character,
-      trust_tier: profile.trust_tier || :untrusted,
       template: profile.template,
       provider: safe_to_atom(provider),
       model: model,
@@ -141,7 +138,6 @@ defmodule Arbor.Agent.Spec do
       agent_id: agent_id,
       display_name: spec.display_name,
       character: spec.character,
-      trust_tier: spec.trust_tier,
       template: template,
       initial_goals: spec.initial_goals,
       initial_capabilities: spec.initial_capabilities,
@@ -174,7 +170,6 @@ defmodule Arbor.Agent.Spec do
     [
       session_id: "agent-session-#{agent_id}",
       agent_id: agent_id,
-      trust_tier: spec.trust_tier,
       config: config,
       execution_mode: spec.execution_mode
     ] ++ extra_opts
@@ -189,7 +184,6 @@ defmodule Arbor.Agent.Spec do
   @spec to_lifecycle_opts(AgentSpec.t()) :: keyword()
   def to_lifecycle_opts(%AgentSpec{} = spec) do
     opts = [
-      trust_tier: spec.trust_tier,
       initial_goals: spec.initial_goals,
       capabilities: spec.initial_capabilities
     ]
@@ -212,7 +206,7 @@ defmodule Arbor.Agent.Spec do
   # Private — Pure Resolution Functions
   # ===========================================================================
 
-  # Apply template if provided. Resolves character, trust_tier, goals, caps from template.
+  # Apply template if provided. Resolves character, goals, caps from template.
   defp apply_template(spec, opts) do
     case Keyword.get(opts, :template) do
       nil ->
@@ -277,9 +271,6 @@ defmodule Arbor.Agent.Spec do
         if Code.ensure_loaded?(mod) and function_exported?(mod, :character, 0) do
           character = mod.character()
 
-          trust_tier =
-            if function_exported?(mod, :trust_tier, 0), do: mod.trust_tier(), else: nil
-
           goals =
             if function_exported?(mod, :initial_goals, 0), do: mod.initial_goals(), else: []
 
@@ -291,7 +282,6 @@ defmodule Arbor.Agent.Spec do
           %{
             spec
             | character: character,
-              trust_tier: trust_tier || spec.trust_tier,
               template: mod,
               template_module: mod,
               initial_goals: goals,
@@ -324,7 +314,6 @@ defmodule Arbor.Agent.Spec do
     %{
       spec
       | character: kw[:character] || spec.character,
-        trust_tier: kw[:trust_tier] || spec.trust_tier,
         template: name,
         initial_goals: kw[:initial_goals] || spec.initial_goals,
         initial_capabilities: kw[:required_capabilities] || spec.initial_capabilities
@@ -352,14 +341,6 @@ defmodule Arbor.Agent.Spec do
         system_prompt: system_prompt || spec.system_prompt,
         model_config: model_config
     }
-  end
-
-  # Apply trust tier — explicit opts override template
-  defp apply_trust_tier(spec, opts) do
-    case Keyword.get(opts, :trust_tier) do
-      nil -> spec
-      tier -> %{spec | trust_tier: tier}
-    end
   end
 
   # Apply any explicit overrides from opts

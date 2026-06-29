@@ -10,7 +10,6 @@ defmodule Arbor.Orchestrator.Session.Supervisor do
       {:ok, pid} = Supervisor.start_session(
         session_id: "session-1",
         agent_id: "agent_abc",
-        trust_tier: :established,
         turn_dot: "specs/pipelines/session/turn.dot",
         heartbeat_dot: "specs/pipelines/session/heartbeat.dot"
       )

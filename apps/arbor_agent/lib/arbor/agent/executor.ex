@@ -14,7 +14,7 @@ defmodule Arbor.Agent.Executor do
 
   ## Example
 
-      {:ok, pid} = Executor.start("agent-1", trust_tier: :probationary)
+      {:ok, pid} = Executor.start("agent-1")
       :ok = Executor.pause("agent-1")
       :ok = Executor.resume("agent-1")
       :ok = Executor.stop("agent-1")
@@ -31,7 +31,6 @@ defmodule Arbor.Agent.Executor do
   @type state :: %{
           agent_id: String.t(),
           status: :running | :paused | :stopped,
-          trust_tier: atom(),
           sandbox_level: atom(),
           intent_subscription: String.t() | nil,
           pending_intents: :queue.queue(),
@@ -107,24 +106,22 @@ defmodule Arbor.Agent.Executor do
 
   @impl true
   def init({agent_id, opts}) do
-    trust_tier = Keyword.get(opts, :trust_tier, :untrusted)
     sandbox_level = SandboxLevel.coerce(Keyword.get(opts, :sandbox_level))
 
     Logger.info(
-      "[Executor] Starting for agent #{agent_id}, trust_tier=#{trust_tier}, sandbox=#{sandbox_level}"
+      "[Executor] Starting for agent #{agent_id}, sandbox=#{sandbox_level}"
     )
 
     # Store agent_id in process dictionary so ActionDispatch can route
     # through authorize_and_execute without threading it through every clause.
     # The declared sandbox level rides alongside so dispatch can thread it into
-    # the action context (the sandbox-create ceiling, post trust-tier).
+    # the action context (the sandbox-create ceiling).
     Process.put(:arbor_executor_agent_id, agent_id)
     Process.put(:arbor_executor_sandbox_level, sandbox_level)
 
     state = %{
       agent_id: agent_id,
       status: :running,
-      trust_tier: trust_tier,
       sandbox_level: sandbox_level,
       intent_subscription: nil,
       pending_intents: :queue.new(),
@@ -143,8 +140,7 @@ defmodule Arbor.Agent.Executor do
     Logger.debug("[Executor] Subscription result: #{inspect(state.intent_subscription)}")
 
     safe_emit(:agent, :executor_started, %{
-      agent_id: agent_id,
-      trust_tier: trust_tier
+      agent_id: agent_id
     })
 
     {:ok, state}
@@ -177,7 +173,6 @@ defmodule Arbor.Agent.Executor do
     info = %{
       agent_id: state.agent_id,
       status: state.status,
-      trust_tier: state.trust_tier,
       pending_count: :queue.len(state.pending_intents),
       stats: state.stats
     }

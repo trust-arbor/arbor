@@ -3,16 +3,15 @@ defmodule Arbor.Trust.CapabilitySync do
   Synchronizes capabilities with trust profile lifecycle events.
 
   This module subscribes to trust events and grants or revokes capabilities at
-  well-defined lifecycle points. As of the tier-minting kill sweep (P0 gate #1)
-  it no longer reacts to tier *movement* — tier is a creation-set display label
-  that never changes from score/points arithmetic, so there is no tier
-  promotion/demotion capability sync.
+  well-defined lifecycle points. Capabilities are never minted/stripped from a
+  trust band — the trust tier was retired. Grants are the universal baseline
+  floor plus freeze/unfreeze enforcement (rules-based).
 
   ## Behavior
 
-  - On profile creation: Grant the initial (`:untrusted`) capabilities
+  - On profile creation: Grant the universal baseline capabilities
   - On trust freeze: Revoke all modifiable capabilities (rules-based enforcement)
-  - On trust unfreeze: Restore capabilities for the profile's tier
+  - On trust unfreeze: Restore the universal baseline capabilities
 
   ## Usage
 
@@ -44,7 +43,7 @@ defmodule Arbor.Trust.CapabilitySync do
   end
 
   @doc """
-  Manually sync capabilities for an agent based on their current trust tier.
+  Manually sync the universal baseline capabilities for an agent.
 
   This is useful for initial setup or recovery scenarios.
   """
@@ -54,13 +53,13 @@ defmodule Arbor.Trust.CapabilitySync do
   end
 
   @doc """
-  Get capabilities an agent should have based on their trust tier.
+  Get the universal baseline capabilities an agent should have.
   """
   @spec expected_capabilities(String.t()) :: {:ok, [map()]} | {:error, term()}
   def expected_capabilities(agent_id) do
     case Manager.get_trust_profile(agent_id) do
-      {:ok, profile} ->
-        caps = Config.generate_capabilities(agent_id, profile.tier)
+      {:ok, _profile} ->
+        caps = Config.generate_capabilities(agent_id)
         {:ok, caps}
 
       {:error, reason} ->

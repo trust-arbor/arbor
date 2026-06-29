@@ -9,7 +9,6 @@ defmodule Arbor.Contracts.Trust.ProfileTest do
     test "creates a new profile with valid agent_id" do
       assert {:ok, profile} = Profile.new("agent_123")
       assert profile.agent_id == "agent_123"
-      assert profile.tier == :untrusted
       assert profile.frozen == false
       assert profile.frozen_reason == nil
       assert profile.frozen_at == nil
@@ -82,7 +81,7 @@ defmodule Arbor.Contracts.Trust.ProfileTest do
       frozen = Profile.freeze(profile, :security_violation)
 
       assert frozen.agent_id == "agent_1"
-      assert frozen.tier == :untrusted
+      assert frozen.baseline == :ask
     end
   end
 
@@ -106,7 +105,7 @@ defmodule Arbor.Contracts.Trust.ProfileTest do
         |> Profile.unfreeze()
 
       assert unfrozen.agent_id == "agent_1"
-      assert unfrozen.tier == :untrusted
+      assert unfrozen.baseline == :ask
     end
   end
 
@@ -118,7 +117,6 @@ defmodule Arbor.Contracts.Trust.ProfileTest do
       assert is_map(map)
       refute is_struct(map)
       assert map.agent_id == "agent_1"
-      assert map.tier == :untrusted
     end
 
     test "includes all fields" do
@@ -127,7 +125,6 @@ defmodule Arbor.Contracts.Trust.ProfileTest do
 
       expected_keys = [
         :agent_id,
-        :tier,
         :frozen,
         :frozen_reason,
         :frozen_at,
@@ -165,6 +162,7 @@ defmodule Arbor.Contracts.Trust.ProfileTest do
 
       refute Map.has_key?(map, :trust_score)
       refute Map.has_key?(map, :trust_points)
+      refute Map.has_key?(map, :tier)
     end
   end
 end

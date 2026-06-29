@@ -12,7 +12,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   When the trust profile system is available, tool visibility is derived from
   the agent's trust profile via `profile_tools/1`. Tools where the profile mode
   is `:block` are hidden; tools where mode is `:ask` are annotated. Falls back
-  to tier-based `core_tools/1` when Trust is unavailable.
+  to `core_tools/0` when Trust is unavailable.
 
   ## Authorization
 
@@ -40,31 +40,19 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
     skill_search skill_activate
     git_status git_diff
     tool_find_tools
+    shell_execute code_compile_and_test ai_generate_text git_commit git_log
+    shell_execute_script code_hot_load
   )
 
-  @established_extras ~w(shell_execute code_compile_and_test ai_generate_text git_commit git_log)
-
-  @trusted_extras ~w(shell_execute_script code_hot_load)
-
   @doc """
-  Return the core tool name list for a given trust tier.
+  Return the core tool name list used as the fallback when the trust profile
+  system is unavailable.
 
-  Higher tiers include progressively more powerful tools. All tiers
-  include `find_tools` for on-demand discovery.
+  Tool *exposure* is not gated by trust — capabilities still gate execution.
+  Always includes `find_tools` for on-demand discovery.
   """
-  @spec core_tools(atom()) :: [String.t()]
-  def core_tools(trust_tier) do
-    case trust_tier do
-      tier when tier in [:trusted, :full_partner, :system] ->
-        @base_tools ++ @established_extras ++ @trusted_extras
-
-      :established ->
-        @base_tools ++ @established_extras
-
-      _ ->
-        @base_tools
-    end
-  end
+  @spec core_tools() :: [String.t()]
+  def core_tools, do: @base_tools
 
   @doc """
   Maximum number of discovered tools to persist per session.
@@ -77,7 +65,7 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
 
   When `agent_id` is provided and Trust profiles are available, derives
   tool visibility from the profile (hiding :block tools, annotating :ask).
-  Falls back to tier-based core tools when Trust is unavailable.
+  Falls back to `core_tools/0` when Trust is unavailable.
 
   Priority:
   1. If `config["tools"]` is explicitly set, use it (backward compat) but
@@ -85,8 +73,8 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   2. If agent_id provided and Trust available, use profile_tools.
   3. Otherwise, merge core tools with discovered tools.
   """
-  @spec resolve_tools(map(), atom(), MapSet.t(), keyword()) :: [String.t()]
-  def resolve_tools(config, trust_tier, discovered_tools, opts \\ []) do
+  @spec resolve_tools(map(), MapSet.t(), keyword()) :: [String.t()]
+  def resolve_tools(config, discovered_tools, opts \\ []) do
     explicit = config["tools"] || config[:tools]
 
     if is_list(explicit) and explicit != [] do
@@ -97,12 +85,12 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
       core =
         case agent_id do
           nil ->
-            core_tools(trust_tier)
+            core_tools()
 
           aid ->
             case profile_tools(aid) do
               {:ok, tools} -> tools
-              :fallback -> core_tools(trust_tier)
+              :fallback -> core_tools()
             end
         end
 

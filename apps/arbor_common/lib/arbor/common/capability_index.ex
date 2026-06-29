@@ -3,9 +3,8 @@ defmodule Arbor.Common.CapabilityIndex do
   Materialized capability index backed by ETS.
 
   Stores `CapabilityDescriptor` entries from all registered providers.
-  Supports keyword search with trust-tier filtering. Updated at boot
-  time by syncing from all providers, and incrementally via `index/1`
-  and `remove/1`.
+  Supports keyword search. Updated at boot time by syncing from all
+  providers, and incrementally via `index/1` and `remove/1`.
 
   ## Architecture
 
@@ -14,12 +13,11 @@ defmodule Arbor.Common.CapabilityIndex do
   registries at query time. This gives O(1) exact lookups and fast
   keyword search.
 
-  ## Trust Filtering
+  ## Discovery vs. Authorization
 
-  All search operations accept an optional `:trust_tier` option. When
-  provided, only capabilities whose `trust_required` is at or below
-  the given tier are returned. This implements "invisible by default" —
-  agents never see capabilities they can't use.
+  Discovery returns all matching capabilities — exposure is not gated by
+  trust. Capabilities still gate execution (capability checks happen at
+  authorize time, not discovery time).
   """
 
   use GenServer
@@ -30,9 +28,6 @@ defmodule Arbor.Common.CapabilityIndex do
 
   @table :capability_index
   @token_table :capability_index_tokens
-
-  # Trust tier ordering (lowest to highest privilege)
-  @trust_order [:new, :provisional, :established, :trusted, :full_partner, :system]
 
   ## Public API
 
@@ -71,20 +66,21 @@ defmodule Arbor.Common.CapabilityIndex do
   end
 
   @doc """
-  Search the index by keyword query with optional trust filtering.
+  Search the index by keyword query.
 
   Tokenizes the query and matches against capability name, description,
   and tags. Returns results sorted by relevance score.
 
+  Discovery is not gated by trust — all matching capabilities are returned.
+  Capabilities still gate execution.
+
   ## Options
 
-  - `:trust_tier` — only return capabilities at or below this tier
   - `:limit` — maximum results (default: 10)
   - `:kind` — filter by capability kind (e.g., `:action`, `:skill`)
   """
   @spec search(String.t(), keyword()) :: [CapabilityMatch.t()]
   def search(query, opts \\ []) do
-    trust_tier = Keyword.get(opts, :trust_tier)
     limit = Keyword.get(opts, :limit, 10)
     kind_filter = Keyword.get(opts, :kind)
 
@@ -101,7 +97,6 @@ defmodule Arbor.Common.CapabilityIndex do
       end)
       |> Enum.filter(fn {descriptor, score} ->
         score > 0.0 and
-          trust_visible?(descriptor.trust_required, trust_tier) and
           kind_matches?(descriptor.kind, kind_filter)
       end)
       |> Enum.sort_by(fn {_d, score} -> score end, :desc)
@@ -117,13 +112,11 @@ defmodule Arbor.Common.CapabilityIndex do
 
   ## Options
 
-  - `:trust_tier` — only return capabilities at or below this tier
   - `:kind` — filter by capability kind
   - `:provider` — filter by provider module
   """
   @spec list(keyword()) :: [CapabilityDescriptor.t()]
   def list(opts \\ []) do
-    trust_tier = Keyword.get(opts, :trust_tier)
     kind_filter = Keyword.get(opts, :kind)
     provider_filter = Keyword.get(opts, :provider)
 
@@ -131,8 +124,7 @@ defmodule Arbor.Common.CapabilityIndex do
     |> :ets.tab2list()
     |> Enum.map(fn {_id, descriptor} -> descriptor end)
     |> Enum.filter(fn descriptor ->
-      trust_visible?(descriptor.trust_required, trust_tier) and
-        kind_matches?(descriptor.kind, kind_filter) and
+      kind_matches?(descriptor.kind, kind_filter) and
         provider_matches?(descriptor.provider, provider_filter)
     end)
   end
@@ -261,16 +253,6 @@ defmodule Arbor.Common.CapabilityIndex do
       String.contains?(name_lower, query_lower) -> min(base_score + 0.15, 1.0)
       true -> base_score
     end
-  end
-
-  defp trust_visible?(_required, nil), do: true
-
-  defp trust_visible?(required, agent_tier) do
-    trust_level(required) <= trust_level(agent_tier)
-  end
-
-  defp trust_level(tier) do
-    Enum.find_index(@trust_order, &(&1 == tier)) || 0
   end
 
   defp kind_matches?(_kind, nil), do: true

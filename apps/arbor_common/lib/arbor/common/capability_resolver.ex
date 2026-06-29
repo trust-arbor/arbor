@@ -3,8 +3,9 @@ defmodule Arbor.Common.CapabilityResolver do
   Public facade for unified capability discovery and execution.
 
   Provides a single entry point for agents to search across all registered
-  capability providers (skills, actions, pipelines, etc.) with trust-gated
-  visibility and tiered resolution.
+  capability providers (skills, actions, pipelines, etc.) with tiered
+  resolution. Discovery returns all matching capabilities — exposure is not
+  gated by trust; capabilities still gate execution.
 
   ## Tiered Resolution
 
@@ -15,10 +16,10 @@ defmodule Arbor.Common.CapabilityResolver do
   ## Usage
 
       # Search for capabilities
-      results = CapabilityResolver.search("email triage", trust_tier: :established)
+      results = CapabilityResolver.search("email triage")
 
       # Get best match
-      {:ok, match} = CapabilityResolver.best_match("file read", trust_tier: :trusted)
+      {:ok, match} = CapabilityResolver.best_match("file read")
 
       # Search and execute in one call
       {:ok, result} = CapabilityResolver.resolve_and_execute("read file", %{path: "foo.ex"})
@@ -42,7 +43,6 @@ defmodule Arbor.Common.CapabilityResolver do
 
   ## Options
 
-  - `:trust_tier` — only return capabilities visible at this tier
   - `:limit` — maximum results (default: 5)
   - `:kind` — filter by capability kind
   - `:tier` — force a specific resolution tier (1 or 2, default: auto)
@@ -94,7 +94,6 @@ defmodule Arbor.Common.CapabilityResolver do
 
   ## Options
 
-  - `:trust_tier` — trust tier for discovery
   - `:context` — execution context passed to the provider
   - `:min_score` — minimum score to accept (default: 0.5)
   """
@@ -144,7 +143,6 @@ defmodule Arbor.Common.CapabilityResolver do
     # Tier 2: semantic search via SkillLibrary hybrid search
     # Only available if SkillLibrary is running
     if skill_library_available?() do
-      trust_tier = Keyword.get(opts, :trust_tier)
       limit = Keyword.get(opts, :limit, 5) * 2
 
       try do
@@ -154,10 +152,6 @@ defmodule Arbor.Common.CapabilityResolver do
             Arbor.Common.CapabilityProviders.SkillProvider.skill_to_descriptor(skill)
 
           %CapabilityMatch{descriptor: descriptor, score: 0.7, tier: 2}
-        end)
-        |> Enum.filter(fn match ->
-          trust_tier == nil or
-            trust_visible?(match.descriptor.trust_required, trust_tier)
         end)
       rescue
         e ->
@@ -200,19 +194,6 @@ defmodule Arbor.Common.CapabilityResolver do
 
   defp skill_library_available? do
     Process.whereis(Arbor.Common.SkillLibrary) != nil
-  end
-
-  # Trust tier ordering for visibility checks
-  @trust_order [:new, :provisional, :established, :trusted, :full_partner, :system]
-
-  defp trust_visible?(_required, nil), do: true
-
-  defp trust_visible?(required, agent_tier) do
-    trust_level(required) <= trust_level(agent_tier)
-  end
-
-  defp trust_level(tier) do
-    Enum.find_index(@trust_order, &(&1 == tier)) || 0
   end
 
   defp config(key, default) do

@@ -64,7 +64,6 @@ defmodule Arbor.Actions.Trust do
           {:ok,
            %{
              agent_id: profile.agent_id,
-             tier: profile.tier,
              baseline: profile.baseline,
              rules: profile.rules,
              frozen: profile.frozen,
@@ -500,7 +499,6 @@ defmodule Arbor.Actions.Trust do
             Enum.map(profiles, fn profile ->
               %{
                 agent_id: profile.agent_id,
-                tier: profile.tier,
                 baseline: profile.baseline,
                 rule_count: map_size(profile.rules || %{}),
                 frozen: profile.frozen

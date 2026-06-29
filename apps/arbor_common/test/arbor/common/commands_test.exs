@@ -112,11 +112,6 @@ defmodule Arbor.Common.CommandsTest do
   describe "Trust" do
     alias Arbor.Common.Commands.Trust
 
-    test "shows trust tier" do
-      assert {:ok, %Result{text: text}} = Trust.execute("", ctx(trust_tier: :full_partner))
-      assert String.contains?(text, "full_partner")
-    end
-
     test "shows profile rules" do
       profile = %{
         rules: [

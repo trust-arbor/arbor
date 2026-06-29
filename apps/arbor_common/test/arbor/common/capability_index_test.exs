@@ -212,7 +212,7 @@ defmodule Arbor.Common.CapabilityIndexTest do
     end
   end
 
-  describe "search/2 — trust filtering" do
+  describe "search/2 — discovery is not trust-gated" do
     setup do
       :ok =
         CapabilityIndex.index(
@@ -247,32 +247,12 @@ defmodule Arbor.Common.CapabilityIndexTest do
       :ok
     end
 
-    test "no trust filter returns all matching" do
+    # The trust-tier band was retired. Discovery returns all matching
+    # capabilities regardless of trust_required — exposure is not gated by
+    # trust; capabilities still gate execution.
+    test "returns all matching capabilities" do
       results = CapabilityIndex.search("tool")
       assert length(results) == 3
-    end
-
-    test "new tier only sees new-trust capabilities" do
-      results = CapabilityIndex.search("tool", trust_tier: :new)
-      assert length(results) == 1
-      assert hd(results).descriptor.id == "public"
-    end
-
-    test "trusted tier sees new through trusted" do
-      results = CapabilityIndex.search("tool", trust_tier: :trusted)
-      ids = Enum.map(results, & &1.descriptor.id) |> Enum.sort()
-      assert ids == ["public", "trusted"]
-    end
-
-    test "system tier sees everything" do
-      results = CapabilityIndex.search("tool", trust_tier: :system)
-      assert length(results) == 3
-    end
-
-    test "provisional tier sees only new" do
-      results = CapabilityIndex.search("tool", trust_tier: :provisional)
-      assert length(results) == 1
-      assert hd(results).descriptor.id == "public"
     end
   end
 
@@ -284,17 +264,6 @@ defmodule Arbor.Common.CapabilityIndexTest do
       results = CapabilityIndex.list()
       assert length(results) == 2
       assert Enum.all?(results, &match?(%CapabilityDescriptor{}, &1))
-    end
-
-    test "filters by trust tier" do
-      :ok =
-        CapabilityIndex.index(make_descriptor(%{id: "a", name: "A", trust_required: :new}))
-
-      :ok =
-        CapabilityIndex.index(make_descriptor(%{id: "b", name: "B", trust_required: :trusted}))
-
-      assert length(CapabilityIndex.list(trust_tier: :new)) == 1
-      assert length(CapabilityIndex.list(trust_tier: :trusted)) == 2
     end
 
     test "filters by kind" do

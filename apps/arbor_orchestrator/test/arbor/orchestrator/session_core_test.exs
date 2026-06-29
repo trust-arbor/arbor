@@ -343,7 +343,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       session = %Session{
         session_id: "test-session-1",
         agent_id: "agent_test",
-        trust_tier: :veteran,
         turn_count: 5,
         config: %{model: "claude-opus-4-6", provider: :anthropic}
       }
@@ -359,7 +358,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       session = %Session{
         session_id: "test-session-2",
         agent_id: "agent_test",
-        trust_tier: :veteran,
         turn_count: 0,
         config: %{model: "gpt-5", provider: :openai}
       }
@@ -374,7 +372,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       session = %Session{
         session_id: "test-session-3",
         agent_id: "agent_xyz",
-        trust_tier: :partner,
         turn_count: 12,
         config: %{}
       }
@@ -383,7 +380,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
 
       assert context.agent_id == "agent_xyz"
       assert context.session_id == "test-session-3"
-      assert context.trust_tier == :partner
       assert context.turn_count == 12
       assert context.session_pid == self()
     end
@@ -392,7 +388,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       session = %Session{
         session_id: "test-session-4",
         agent_id: "agent_test",
-        trust_tier: :veteran,
         turn_count: 0,
         config: %{},
         discovered_tools: MapSet.new(["file_write", "shell_execute", "file_read"])
@@ -409,7 +404,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       session = %Session{
         session_id: "test-session-5",
         agent_id: "agent_test",
-        trust_tier: :veteran,
         turn_count: 0,
         config: %{},
         discovered_tools: nil
@@ -426,7 +420,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       session = %Session{
         session_id: "test-session-6",
         agent_id: "agent_test",
-        trust_tier: :veteran,
         turn_count: 0,
         config: nil
       }
@@ -441,7 +434,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       session = %Session{
         session_id: "test-session-7",
         agent_id: "agent_test",
-        trust_tier: :veteran,
         turn_count: 0,
         config: %{}
       }
@@ -455,7 +447,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       session = %Session{
         session_id: "s",
         agent_id: "a",
-        trust_tier: :veteran,
         turn_count: 0,
         config: %{}
       }
@@ -469,7 +460,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       session = %Session{
         session_id: "s",
         agent_id: "a",
-        trust_tier: :veteran,
         turn_count: 0,
         config: %{}
       }
@@ -488,7 +478,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       session = %Session{
         session_id: "s",
         agent_id: "a",
-        trust_tier: :veteran,
         turn_count: 0,
         config: %{}
       }
@@ -506,7 +495,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       session = %Session{
         session_id: "s",
         agent_id: "a",
-        trust_tier: :veteran,
         turn_count: 0,
         config: %{model: "session-override", provider: :anthropic}
       }
@@ -524,7 +512,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       session = %Session{
         session_id: "s",
         agent_id: "a",
-        trust_tier: :veteran,
         turn_count: 0,
         config: %{},
         working_memory: %{
@@ -547,7 +534,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       session = %Session{
         session_id: "s",
         agent_id: "a",
-        trust_tier: :veteran,
         turn_count: 0,
         config: %{},
         working_memory: %{}
@@ -562,7 +548,6 @@ defmodule Arbor.Orchestrator.SessionCoreTest do
       session = %Session{
         session_id: "s",
         agent_id: "a",
-        trust_tier: :veteran,
         turn_count: 0,
         config: %{}
       }

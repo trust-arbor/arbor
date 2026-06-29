@@ -15,7 +15,7 @@ defmodule Arbor.Agent.LifecycleRuntimeTest do
 
   alias Arbor.Agent.Lifecycle
 
-  defp profile_with(metadata), do: %{trust_tier: :established, metadata: metadata}
+  defp profile_with(metadata), do: %{metadata: metadata}
 
   describe "resolve_agent_runtime/2" do
     test "defaults to :arbor when nothing is set" do
