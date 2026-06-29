@@ -259,6 +259,7 @@ defmodule Arbor.Agent.Template.File do
       "source" => fm["source"] || "user",
       "character" => character,
       "trust_tier" => fm["trust_tier"],
+      "sandbox_level" => fm["sandbox_level"],
       "initial_goals" => fm["initial_goals"] || [],
       "required_capabilities" => fm["required_capabilities"] || [],
       "description" => body_sections["Description"] || "",

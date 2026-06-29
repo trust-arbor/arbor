@@ -24,7 +24,7 @@ defmodule Arbor.Agent.Executor do
 
   alias Arbor.Agent.Executor.ActionDispatch
   alias Arbor.Contracts.Memory.{Intent, Percept}
-  alias Arbor.Contracts.Security.TrustBounds
+  alias Arbor.Contracts.Security.SandboxLevel
 
   require Logger
 
@@ -32,6 +32,7 @@ defmodule Arbor.Agent.Executor do
           agent_id: String.t(),
           status: :running | :paused | :stopped,
           trust_tier: atom(),
+          sandbox_level: atom(),
           intent_subscription: String.t() | nil,
           pending_intents: :queue.queue(),
           current_intent: Intent.t() | nil,
@@ -107,8 +108,11 @@ defmodule Arbor.Agent.Executor do
   @impl true
   def init({agent_id, opts}) do
     trust_tier = Keyword.get(opts, :trust_tier, :untrusted)
+    sandbox_level = SandboxLevel.coerce(Keyword.get(opts, :sandbox_level))
 
-    Logger.info("[Executor] Starting for agent #{agent_id}, trust_tier=#{trust_tier}")
+    Logger.info(
+      "[Executor] Starting for agent #{agent_id}, trust_tier=#{trust_tier}, sandbox=#{sandbox_level}"
+    )
 
     # Store agent_id in process dictionary so ActionDispatch can route
     # through authorize_and_execute without threading it through every clause
@@ -118,6 +122,7 @@ defmodule Arbor.Agent.Executor do
       agent_id: agent_id,
       status: :running,
       trust_tier: trust_tier,
+      sandbox_level: sandbox_level,
       intent_subscription: nil,
       pending_intents: :queue.new(),
       current_intent: nil,
@@ -278,9 +283,11 @@ defmodule Arbor.Agent.Executor do
   end
 
   defp execute_intent(%Intent{} = intent, state, start_time) do
-    sandbox_level = TrustBounds.sandbox_for_tier(state.trust_tier)
+    # The agent's DECLARED isolation level (from its template/profile), translated
+    # to the shell sandbox vocabulary. Replaces the old trust-tier derivation.
+    shell_sandbox = SandboxLevel.to_shell(state.sandbox_level)
 
-    result = do_execute(intent, sandbox_level, state.agent_id)
+    result = do_execute(intent, shell_sandbox, state.agent_id)
 
     duration_ms = System.monotonic_time(:millisecond) - start_time
 

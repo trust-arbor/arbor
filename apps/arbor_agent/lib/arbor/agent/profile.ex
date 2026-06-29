@@ -27,6 +27,10 @@ defmodule Arbor.Agent.Profile do
     field(:display_name, String.t(), default: nil)
     field(:character, Character.t(), enforce: true)
     field(:trust_tier, atom(), default: :untrusted)
+    # Declared isolation level (replaces the trust-tier → sandbox derivation).
+    # Canonical Arbor.Contracts.Security.SandboxLevel value; defaults to the most
+    # restrictive (:strict).
+    field(:sandbox_level, atom(), default: :strict)
     field(:template, atom() | String.t(), default: nil)
     field(:initial_goals, [map()], default: [])
     field(:initial_capabilities, [map()], default: [])
@@ -58,6 +62,7 @@ defmodule Arbor.Agent.Profile do
       "agent_id" => profile.agent_id,
       "display_name" => profile.display_name,
       "trust_tier" => Atom.to_string(profile.trust_tier),
+      "sandbox_level" => Atom.to_string(profile.sandbox_level),
       "template" => serialize_template(profile.template),
       "character" => Character.to_map(profile.character),
       "initial_goals" => profile.initial_goals,
@@ -80,6 +85,7 @@ defmodule Arbor.Agent.Profile do
       display_name: map["display_name"],
       character: deserialize_character(map),
       trust_tier: safe_to_atom(map["trust_tier"] || "untrusted"),
+      sandbox_level: Arbor.Contracts.Security.SandboxLevel.coerce(map["sandbox_level"]),
       template: deserialize_template(map["template"]),
       initial_goals: map["initial_goals"] || [],
       initial_capabilities: map["initial_capabilities"] || [],
