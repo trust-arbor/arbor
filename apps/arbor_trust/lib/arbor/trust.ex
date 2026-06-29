@@ -42,9 +42,8 @@ defmodule Arbor.Trust do
   ## Architecture
 
   This facade delegates to specialized modules:
-  - `Arbor.Trust.Manager` - Trust profiles, scoring, and authorization
+  - `Arbor.Trust.Manager` - Trust profiles and authorization
   - `Arbor.Trust.Store` - In-memory trust profile storage
-  - `Arbor.Trust.Calculator` - Trust score computation
   - `Arbor.Trust.EventStore` - Durable event persistence
   - `Arbor.Trust.Config` - Configuration, tier resolution, and capability templates
   """
@@ -113,17 +112,6 @@ defmodule Arbor.Trust do
   defdelegate get_trust_profile(agent_id), to: Manager
 
   @doc """
-  Calculate the current trust score for an agent.
-
-  ## Examples
-
-      {:ok, 67} = Arbor.Trust.calculate_trust_score("agent_001")
-  """
-  @spec calculate_trust_score(String.t()) ::
-          {:ok, Arbor.Trust.Behaviour.trust_score()} | {:error, term()}
-  defdelegate calculate_trust_score(agent_id), to: Manager
-
-  @doc """
   Record a trust-affecting event.
 
   ## Examples
@@ -162,11 +150,6 @@ defmodule Arbor.Trust do
 
   @impl true
   defdelegate get_trust_profile_for_principal(agent_id), to: Manager, as: :get_trust_profile
-
-  @impl true
-  defdelegate calculate_trust_score_for_principal(agent_id),
-    to: Manager,
-    as: :calculate_trust_score
 
   @impl true
   def record_trust_event_for_principal_with_metadata(agent_id, event_type, metadata),

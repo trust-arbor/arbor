@@ -28,7 +28,7 @@ defmodule Arbor.Trust.Store do
   use GenServer
 
   alias Arbor.Contracts.Trust.{Event, Profile}
-  alias Arbor.Trust.{Authority, Calculator, Config}
+  alias Arbor.Trust.{Authority, Config}
 
   require Logger
 
@@ -153,108 +153,6 @@ defmodule Arbor.Trust.Store do
   end
 
   @doc """
-  Record a successful action for an agent.
-  """
-  @spec record_action_success(String.t()) :: {:ok, Profile.t()} | {:error, term()}
-  def record_action_success(agent_id) do
-    update_profile(agent_id, &Authority.record_action_success/1)
-  end
-
-  @doc """
-  Record a failed action for an agent.
-  """
-  @spec record_action_failure(String.t()) :: {:ok, Profile.t()} | {:error, term()}
-  def record_action_failure(agent_id) do
-    update_profile(agent_id, &Authority.record_action_failure/1)
-  end
-
-  @doc """
-  Record a security violation for an agent.
-  """
-  @spec record_security_violation(String.t()) :: {:ok, Profile.t()} | {:error, term()}
-  def record_security_violation(agent_id) do
-    update_profile(agent_id, &Authority.record_security_violation/1)
-  end
-
-  @doc """
-  Record a test result for an agent.
-  """
-  @spec record_test_result(String.t(), :passed | :failed) ::
-          {:ok, Profile.t()} | {:error, term()}
-  def record_test_result(agent_id, result) when result in [:passed, :failed] do
-    update_profile(agent_id, &Authority.record_test_result(&1, result))
-  end
-
-  @doc """
-  Record a rollback for an agent.
-  """
-  @spec record_rollback(String.t()) :: {:ok, Profile.t()} | {:error, term()}
-  def record_rollback(agent_id) do
-    update_profile(agent_id, &Authority.record_rollback/1)
-  end
-
-  @doc """
-  Record an improvement being applied.
-  """
-  @spec record_improvement(String.t()) :: {:ok, Profile.t()} | {:error, term()}
-  def record_improvement(agent_id) do
-    update_profile(agent_id, &Authority.record_improvement/1)
-  end
-
-  # Council-based trust earning functions
-
-  @doc """
-  Record a proposal submission.
-  """
-  @spec record_proposal_submitted(String.t()) :: {:ok, Profile.t()} | {:error, term()}
-  def record_proposal_submitted(agent_id) do
-    update_profile(agent_id, &Authority.record_proposal_submitted/1)
-  end
-
-  @doc """
-  Record a proposal being approved by council.
-  """
-  @spec record_proposal_approved(String.t(), atom()) :: {:ok, Profile.t()} | {:error, term()}
-  def record_proposal_approved(agent_id, impact \\ :medium) do
-    update_profile(agent_id, &Authority.record_proposal_approved(&1, impact))
-  end
-
-  @doc """
-  Record a successful installation.
-  """
-  @spec record_installation_success(String.t(), atom()) ::
-          {:ok, Profile.t()} | {:error, term()}
-  def record_installation_success(agent_id, impact \\ :medium) do
-    update_profile(agent_id, &Authority.record_installation_success(&1, impact))
-  end
-
-  @doc """
-  Record an installation rollback.
-  """
-  @spec record_installation_rollback(String.t()) :: {:ok, Profile.t()} | {:error, term()}
-  def record_installation_rollback(agent_id) do
-    update_profile(agent_id, &Authority.record_installation_rollback/1)
-  end
-
-  @doc """
-  Award trust points directly (for special cases).
-  """
-  @spec award_trust_points(String.t(), non_neg_integer()) ::
-          {:ok, Profile.t()} | {:error, term()}
-  def award_trust_points(agent_id, points) when points >= 0 do
-    update_profile(agent_id, &Authority.award_trust_points(&1, points))
-  end
-
-  @doc """
-  Deduct trust points (for abuse or violations).
-  """
-  @spec deduct_trust_points(String.t(), non_neg_integer(), atom()) ::
-          {:ok, Profile.t()} | {:error, term()}
-  def deduct_trust_points(agent_id, points, reason) when points >= 0 do
-    update_profile(agent_id, &Authority.deduct_trust_points(&1, points, reason))
-  end
-
-  @doc """
   Freeze a trust profile.
   """
   @spec freeze_profile(String.t(), atom()) :: {:ok, Profile.t()} | {:error, term()}
@@ -280,14 +178,6 @@ defmodule Arbor.Trust.Store do
   @spec list_profiles(keyword()) :: {:ok, [Profile.t()]}
   def list_profiles(opts \\ []) do
     GenServer.call(__MODULE__, {:list_profiles, opts})
-  end
-
-  @doc """
-  Recalculate all profiles (e.g., for uptime score refresh).
-  """
-  @spec recalculate_all() :: :ok
-  def recalculate_all do
-    GenServer.call(__MODULE__, :recalculate_all)
   end
 
   @doc """
@@ -406,23 +296,10 @@ defmodule Arbor.Trust.Store do
       :ets.tab2list(state.profiles_table)
       |> Enum.map(fn {_key, profile} -> profile end)
       |> maybe_filter_by_tier(tier_filter)
-      |> Enum.sort_by(& &1.trust_score, :desc)
+      |> Enum.sort_by(& &1.agent_id)
       |> Enum.take(limit)
 
     {:reply, {:ok, profiles}, state}
-  end
-
-  @impl true
-  def handle_call(:recalculate_all, _from, state) do
-    now = DateTime.utc_now()
-
-    :ets.tab2list(state.profiles_table)
-    |> Enum.each(fn {_agent_id, profile} ->
-      updated = Calculator.recalculate_profile(profile, now)
-      put_profile_in_cache(updated, state)
-    end)
-
-    {:reply, :ok, state}
   end
 
   @impl true
@@ -671,9 +548,7 @@ defmodule Arbor.Trust.Store do
       Event.tier_change_event(
         new_profile.agent_id,
         old_profile.tier,
-        new_profile.tier,
-        previous_score: old_profile.trust_score,
-        new_score: new_profile.trust_score
+        new_profile.tier
       )
 
     # Persist to EventStore
@@ -699,9 +574,7 @@ defmodule Arbor.Trust.Store do
       %{
         agent_id: new_profile.agent_id,
         old_tier: old_profile.tier,
-        new_tier: new_profile.tier,
-        old_score: old_profile.trust_score,
-        new_score: new_profile.trust_score
+        new_tier: new_profile.tier
       },
       stream_id: "trust:events"
     )
@@ -710,9 +583,7 @@ defmodule Arbor.Trust.Store do
       "Trust tier changed for #{new_profile.agent_id}: #{old_profile.tier} -> #{new_profile.tier}",
       agent_id: new_profile.agent_id,
       old_tier: old_profile.tier,
-      new_tier: new_profile.tier,
-      old_score: old_profile.trust_score,
-      new_score: new_profile.trust_score
+      new_tier: new_profile.tier
     )
   end
 end

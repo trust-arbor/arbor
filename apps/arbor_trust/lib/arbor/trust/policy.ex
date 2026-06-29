@@ -168,8 +168,8 @@ defmodule Arbor.Trust.Policy do
   URI-addressing-vs-classification decision).
 
   Keyed by `Arbor.Contracts.Security.Classification` egress_tier — NOT by URI.
-  Reads the agent's profile `egress_modes` map (explicit per profile, NOT derived
-  from trust_score, per the tiers→custom-profiles direction). Falls back to a
+  Reads the agent's profile `egress_modes` map (explicit per profile, per the
+  tiers→custom-profiles direction). Falls back to a
   conservative default for unset tiers, and fails closed (`:ask` for external)
   when the trust system is unavailable. Tolerant of string keys/values from JSON
   profile round-trips.

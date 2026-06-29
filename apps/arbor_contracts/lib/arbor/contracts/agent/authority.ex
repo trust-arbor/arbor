@@ -151,8 +151,6 @@ defmodule Arbor.Contracts.Agent.Authority.Trust do
 
   @type t :: %__MODULE__{
           tier: trust_tier(),
-          trust_score: non_neg_integer(),
-          trust_points: non_neg_integer(),
           baseline: trust_mode(),
           rules: %{String.t() => trust_mode()},
           model_constraints: map(),
@@ -170,8 +168,6 @@ defmodule Arbor.Contracts.Agent.Authority.Trust do
     :frozen_at,
     :last_activity_at,
     tier: :untrusted,
-    trust_score: 0,
-    trust_points: 0,
     baseline: :ask,
     rules: %{},
     model_constraints: %{},

@@ -40,7 +40,6 @@ defmodule Arbor.Trust.SupervisorTest do
       assert Map.has_key?(status, :event_store)
       assert Map.has_key?(status, :event_handler)
       assert Map.has_key?(status, :circuit_breaker)
-      assert Map.has_key?(status, :decay)
       assert Map.has_key?(status, :capability_sync)
     end
 

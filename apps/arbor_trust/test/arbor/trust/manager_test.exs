@@ -35,7 +35,6 @@ defmodule Arbor.Trust.ManagerTest do
     test "creates a new trust profile for a valid agent_id" do
       assert {:ok, profile} = Manager.create_trust_profile("agent_001")
       assert profile.agent_id == "agent_001"
-      assert profile.trust_score == 0
       assert profile.tier == :untrusted
       assert profile.frozen == false
     end
@@ -66,9 +65,8 @@ defmodule Arbor.Trust.ManagerTest do
       assert %DateTime{} = profile.updated_at
     end
 
-    test "created profile has trust_points at zero" do
+    test "created profile has zero council counters" do
       {:ok, profile} = Manager.create_trust_profile("agent_points")
-      assert profile.trust_points == 0
       assert profile.proposals_submitted == 0
       assert profile.proposals_approved == 0
     end
@@ -93,7 +91,6 @@ defmodule Arbor.Trust.ManagerTest do
       {:ok, created} = Manager.create_trust_profile("agent_same")
       {:ok, fetched} = Manager.get_trust_profile("agent_same")
       assert created.agent_id == fetched.agent_id
-      assert created.trust_score == fetched.trust_score
       assert created.tier == fetched.tier
     end
   end
@@ -102,186 +99,63 @@ defmodule Arbor.Trust.ManagerTest do
   # record_trust_event/3 - action_success
   # ---------------------------------------------------------------------------
 
-  describe "record_trust_event/3 with :action_success" do
-    test "increments action counters" do
+  # ---------------------------------------------------------------------------
+  # record_trust_event/3 — score/counter mutation removed (tiers phase 3b)
+  #
+  # Recording a trust event no longer mutates profile counters or scores.
+  # Events are recorded for audit/observability and feed the circuit breaker.
+  # ---------------------------------------------------------------------------
+
+  describe "record_trust_event/3 leaves profile counters/scores unchanged" do
+    test ":action_success does not increment action counters" do
       {:ok, _} = Manager.create_trust_profile("agent_success")
 
       :ok = Manager.record_trust_event("agent_success", :action_success, %{})
-      # Give the cast time to process
       Process.sleep(50)
 
       {:ok, profile} = Manager.get_trust_profile("agent_success")
-      assert profile.total_actions == 1
-      assert profile.successful_actions == 1
+      assert profile.total_actions == 0
+      assert profile.successful_actions == 0
+      assert profile.success_rate_score == 0.0
     end
 
-    test "increases success rate score" do
-      {:ok, _} = Manager.create_trust_profile("agent_rate")
-
-      :ok = Manager.record_trust_event("agent_rate", :action_success, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_rate")
-      assert profile.success_rate_score == 100.0
-    end
-
-    test "multiple successes maintain high success rate" do
-      {:ok, _} = Manager.create_trust_profile("agent_multi_success")
-
-      for _ <- 1..5 do
-        :ok = Manager.record_trust_event("agent_multi_success", :action_success, %{})
-      end
-
-      Process.sleep(100)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_multi_success")
-      assert profile.total_actions == 5
-      assert profile.successful_actions == 5
-      assert profile.success_rate_score == 100.0
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # record_trust_event/3 - action_failure
-  # ---------------------------------------------------------------------------
-
-  describe "record_trust_event/3 with :action_failure" do
-    test "increments total actions but not successful actions" do
+    test ":action_failure does not change counters" do
       {:ok, _} = Manager.create_trust_profile("agent_fail")
 
       :ok = Manager.record_trust_event("agent_fail", :action_failure, %{})
       Process.sleep(50)
 
       {:ok, profile} = Manager.get_trust_profile("agent_fail")
-      assert profile.total_actions == 1
+      assert profile.total_actions == 0
       assert profile.successful_actions == 0
     end
 
-    test "reduces success rate score" do
-      {:ok, _} = Manager.create_trust_profile("agent_fail_rate")
-
-      # Record 1 success and 1 failure
-      :ok = Manager.record_trust_event("agent_fail_rate", :action_success, %{})
-      Process.sleep(50)
-      :ok = Manager.record_trust_event("agent_fail_rate", :action_failure, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_fail_rate")
-      assert profile.total_actions == 2
-      assert profile.successful_actions == 1
-      assert profile.success_rate_score == 50.0
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # record_trust_event/3 - security_violation
-  # ---------------------------------------------------------------------------
-
-  describe "record_trust_event/3 with :security_violation" do
-    test "increments security violations counter" do
+    test ":security_violation does not reduce security score" do
       {:ok, _} = Manager.create_trust_profile("agent_sec")
 
-      :ok = Manager.record_trust_event("agent_sec", :security_violation, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_sec")
-      assert profile.security_violations == 1
-    end
-
-    test "reduces security score by 20 per violation" do
-      {:ok, _} = Manager.create_trust_profile("agent_sec_score")
-
-      :ok = Manager.record_trust_event("agent_sec_score", :security_violation, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_sec_score")
-      assert profile.security_score == 80.0
-    end
-
-    test "multiple violations reduce security score further" do
-      {:ok, _} = Manager.create_trust_profile("agent_sec_multi")
-
       for _ <- 1..3 do
-        :ok = Manager.record_trust_event("agent_sec_multi", :security_violation, %{})
-        Process.sleep(30)
-      end
-
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_sec_multi")
-      assert profile.security_violations == 3
-      assert profile.security_score == 40.0
-    end
-
-    test "security score floors at 0" do
-      {:ok, _} = Manager.create_trust_profile("agent_sec_floor")
-
-      for _ <- 1..6 do
-        :ok = Manager.record_trust_event("agent_sec_floor", :security_violation, %{})
+        :ok = Manager.record_trust_event("agent_sec", :security_violation, %{})
         Process.sleep(20)
       end
 
       Process.sleep(50)
 
-      {:ok, profile} = Manager.get_trust_profile("agent_sec_floor")
-      assert profile.security_score == 0.0
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # record_trust_event/3 - test_passed / test_failed
-  # ---------------------------------------------------------------------------
-
-  describe "record_trust_event/3 with :test_passed" do
-    test "increments test counters" do
-      {:ok, _} = Manager.create_trust_profile("agent_test_pass")
-
-      :ok = Manager.record_trust_event("agent_test_pass", :test_passed, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_test_pass")
-      assert profile.total_tests == 1
-      assert profile.tests_passed == 1
+      {:ok, profile} = Manager.get_trust_profile("agent_sec")
+      assert profile.security_violations == 0
+      assert profile.security_score == 100.0
     end
 
-    test "updates test pass score" do
-      {:ok, _} = Manager.create_trust_profile("agent_test_score")
+    test ":test_passed / :test_failed do not change test counters" do
+      {:ok, _} = Manager.create_trust_profile("agent_test")
 
-      :ok = Manager.record_trust_event("agent_test_score", :test_passed, %{})
+      :ok = Manager.record_trust_event("agent_test", :test_passed, %{})
+      :ok = Manager.record_trust_event("agent_test", :test_failed, %{})
       Process.sleep(50)
 
-      {:ok, profile} = Manager.get_trust_profile("agent_test_score")
-      assert profile.test_pass_score == 100.0
-    end
-  end
-
-  describe "record_trust_event/3 with :test_failed" do
-    test "increments total tests but not tests passed" do
-      {:ok, _} = Manager.create_trust_profile("agent_test_fail")
-
-      :ok = Manager.record_trust_event("agent_test_fail", :test_failed, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_test_fail")
-      assert profile.total_tests == 1
+      {:ok, profile} = Manager.get_trust_profile("agent_test")
+      assert profile.total_tests == 0
       assert profile.tests_passed == 0
-    end
-
-    test "mixed test results produce correct pass rate" do
-      {:ok, _} = Manager.create_trust_profile("agent_test_mix")
-
-      :ok = Manager.record_trust_event("agent_test_mix", :test_passed, %{})
-      Process.sleep(30)
-      :ok = Manager.record_trust_event("agent_test_mix", :test_passed, %{})
-      Process.sleep(30)
-      :ok = Manager.record_trust_event("agent_test_mix", :test_failed, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_test_mix")
-      assert profile.total_tests == 3
-      assert profile.tests_passed == 2
-      # 2/3 * 100 = 66.67
-      assert_in_delta profile.test_pass_score, 66.67, 0.01
+      assert profile.test_pass_score == 0.0
     end
   end
 
@@ -300,7 +174,6 @@ defmodule Arbor.Trust.ManagerTest do
 
       assert {:ok, profile} = Manager.get_trust_profile("agent_auto")
       assert profile.agent_id == "agent_auto"
-      assert profile.total_actions >= 1
     end
   end
 
@@ -374,43 +247,6 @@ defmodule Arbor.Trust.ManagerTest do
 
     test "returns error for non-existent agent" do
       assert {:error, :not_found} = Manager.unfreeze_trust("nonexistent_unfreeze")
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # calculate_trust_score/1
-  # ---------------------------------------------------------------------------
-
-  describe "calculate_trust_score/1" do
-    test "returns 0 for a brand new profile" do
-      {:ok, _} = Manager.create_trust_profile("agent_calc_new")
-
-      # New profile: security_score=100, rollback_score=100, rest 0
-      # Weighted: 100*0.25 + 100*0.10 = 35 (rounded)
-      {:ok, score} = Manager.calculate_trust_score("agent_calc_new")
-      assert is_integer(score)
-      assert score >= 0
-    end
-
-    test "returns error for non-existent agent" do
-      assert {:error, :not_found} = Manager.calculate_trust_score("nonexistent_calc")
-    end
-
-    test "score reflects recorded events" do
-      {:ok, _} = Manager.create_trust_profile("agent_calc_events")
-
-      # Record some successes to build up score
-      for _ <- 1..10 do
-        :ok = Manager.record_trust_event("agent_calc_events", :action_success, %{})
-        Process.sleep(10)
-      end
-
-      Process.sleep(50)
-
-      {:ok, score} = Manager.calculate_trust_score("agent_calc_events")
-      assert is_integer(score)
-      # Should have some score from success_rate and security/rollback defaults
-      assert score > 0
     end
   end
 
@@ -496,40 +332,6 @@ defmodule Arbor.Trust.ManagerTest do
   end
 
   # ---------------------------------------------------------------------------
-  # get_capability_tier/1 (pure function, no GenServer)
-  # ---------------------------------------------------------------------------
-
-  describe "get_capability_tier/1" do
-    test "returns :untrusted for score 0" do
-      assert Manager.get_capability_tier(0) == :untrusted
-    end
-
-    test "returns :probationary for score 20" do
-      assert Manager.get_capability_tier(20) == :probationary
-    end
-
-    test "returns :trusted for score 50" do
-      assert Manager.get_capability_tier(50) == :trusted
-    end
-
-    test "returns :veteran for score 75" do
-      assert Manager.get_capability_tier(75) == :veteran
-    end
-
-    test "returns :autonomous for score 90" do
-      assert Manager.get_capability_tier(90) == :autonomous
-    end
-
-    test "returns correct tier for boundary values" do
-      assert Manager.get_capability_tier(19) == :untrusted
-      assert Manager.get_capability_tier(49) == :probationary
-      assert Manager.get_capability_tier(74) == :trusted
-      assert Manager.get_capability_tier(89) == :veteran
-      assert Manager.get_capability_tier(100) == :autonomous
-    end
-  end
-
-  # ---------------------------------------------------------------------------
   # run_decay_check/0
   # ---------------------------------------------------------------------------
 
@@ -540,103 +342,43 @@ defmodule Arbor.Trust.ManagerTest do
   end
 
   # ---------------------------------------------------------------------------
-  # Additional event types (covers update_profile_for_event clauses)
+  # Additional event types
+  #
+  # The scoring/points feedback loop was removed (tiers-retirement phase 3b):
+  # recording a trust event no longer mutates the profile counters. Events are
+  # still recorded for audit/observability and feed the circuit breaker.
   # ---------------------------------------------------------------------------
 
-  describe "record_trust_event/3 with :rollback_executed" do
-    test "increments rollback count" do
+  describe "record_trust_event/3 does not mutate profile counters" do
+    test ":rollback_executed leaves counters unchanged" do
       {:ok, _} = Manager.create_trust_profile("agent_rollback")
       :ok = Manager.record_trust_event("agent_rollback", :rollback_executed, %{})
       Process.sleep(50)
 
       {:ok, profile} = Manager.get_trust_profile("agent_rollback")
-      assert profile.rollback_count == 1
+      assert profile.rollback_count == 0
     end
-  end
 
-  describe "record_trust_event/3 with :improvement_applied" do
-    test "increments improvement count" do
+    test ":improvement_applied leaves counters unchanged" do
       {:ok, _} = Manager.create_trust_profile("agent_improve")
       :ok = Manager.record_trust_event("agent_improve", :improvement_applied, %{})
       Process.sleep(50)
 
       {:ok, profile} = Manager.get_trust_profile("agent_improve")
-      assert profile.improvement_count == 1
-    end
-  end
-
-  describe "record_trust_event/3 with council events" do
-    test "proposal_submitted increments proposals_submitted" do
-      {:ok, _} = Manager.create_trust_profile("agent_proposal")
-      :ok = Manager.record_trust_event("agent_proposal", :proposal_submitted, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_proposal")
-      assert profile.proposals_submitted == 1
+      assert profile.improvement_count == 0
     end
 
-    test "proposal_approved increments proposals_approved" do
-      {:ok, _} = Manager.create_trust_profile("agent_approved")
-      :ok = Manager.record_trust_event("agent_approved", :proposal_approved, %{impact: :high})
+    test "council events leave counters unchanged" do
+      {:ok, _} = Manager.create_trust_profile("agent_council")
+      :ok = Manager.record_trust_event("agent_council", :proposal_submitted, %{})
+      :ok = Manager.record_trust_event("agent_council", :proposal_approved, %{impact: :high})
+      :ok = Manager.record_trust_event("agent_council", :installation_success, %{impact: :medium})
       Process.sleep(50)
 
-      {:ok, profile} = Manager.get_trust_profile("agent_approved")
-      assert profile.proposals_approved == 1
-    end
-
-    test "proposal_rejected does not change counters" do
-      {:ok, _} = Manager.create_trust_profile("agent_rejected")
-      :ok = Manager.record_trust_event("agent_rejected", :proposal_rejected, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_rejected")
+      {:ok, profile} = Manager.get_trust_profile("agent_council")
       assert profile.proposals_submitted == 0
       assert profile.proposals_approved == 0
-    end
-
-    test "installation_success records success" do
-      {:ok, _} = Manager.create_trust_profile("agent_install")
-      :ok = Manager.record_trust_event("agent_install", :installation_success, %{impact: :medium})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_install")
-      # Should have recorded something (install is similar to proposal_approved)
-      assert profile.trust_points >= 0
-    end
-
-    test "installation_rollback records rollback" do
-      {:ok, _} = Manager.create_trust_profile("agent_install_rb")
-      :ok = Manager.record_trust_event("agent_install_rb", :installation_rollback, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_install_rb")
-      assert profile.rollback_count >= 0
-    end
-
-    test "trust_points_awarded adds points" do
-      {:ok, _} = Manager.create_trust_profile("agent_award")
-      :ok = Manager.record_trust_event("agent_award", :trust_points_awarded, %{points: 10})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_award")
-      assert profile.trust_points == 10
-    end
-
-    test "trust_points_deducted removes points" do
-      {:ok, _} = Manager.create_trust_profile("agent_deduct")
-      :ok = Manager.record_trust_event("agent_deduct", :trust_points_awarded, %{points: 20})
-      Process.sleep(50)
-
-      :ok =
-        Manager.record_trust_event("agent_deduct", :trust_points_deducted, %{
-          points: 5,
-          reason: :test
-        })
-
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_deduct")
-      assert profile.trust_points == 15
+      assert profile.installations_successful == 0
     end
 
     test "unknown event type doesn't crash" do
@@ -647,38 +389,6 @@ defmodule Arbor.Trust.ManagerTest do
       # Manager should still work
       {:ok, profile} = Manager.get_trust_profile("agent_unknown_event")
       assert profile.agent_id == "agent_unknown_event"
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # run_decay_check/0 with profiles
-  # ---------------------------------------------------------------------------
-
-  describe "run_decay_check/0 with profiles" do
-    test "decays inactive profiles" do
-      # Start with decay enabled
-      stop_supervised!(Manager)
-      start_supervised!({Manager, [circuit_breaker: false, decay: true, event_store: true]})
-
-      {:ok, _} = Manager.create_trust_profile("agent_decay_test")
-
-      # Give some initial trust points to have something to decay
-      :ok = Manager.record_trust_event("agent_decay_test", :trust_points_awarded, %{points: 50})
-      Process.sleep(50)
-
-      # Update the profile to have old last_activity
-      Store.update_profile("agent_decay_test", fn profile ->
-        %{profile | last_activity_at: DateTime.add(DateTime.utc_now(), -30, :day)}
-      end)
-
-      # Run decay
-      :ok = Manager.run_decay_check()
-      Process.sleep(100)
-
-      # Profile should have decayed trust score
-      {:ok, profile} = Manager.get_trust_profile("agent_decay_test")
-      # Score should be lower due to inactivity decay
-      assert profile.trust_score >= 0
     end
   end
 
@@ -771,7 +481,6 @@ defmodule Arbor.Trust.ManagerTest do
       Process.sleep(100)
 
       {:ok, profile_before} = Manager.get_trust_profile("agent_demote")
-      assert profile_before.total_actions >= 25
       tier_before = profile_before.tier
 
       # Record 4 rollbacks — the old code demoted tier (and minted/stripped
@@ -807,7 +516,6 @@ defmodule Arbor.Trust.ManagerTest do
 
       {:ok, profile} = Manager.get_trust_profile("agent_no_es")
       assert profile.agent_id == "agent_no_es"
-      assert profile.total_actions == 1
     end
 
     test "freeze and unfreeze work with event_store disabled" do
@@ -842,19 +550,13 @@ defmodule Arbor.Trust.ManagerTest do
   # run_decay_check with nil last_activity_at and active decay
   # ---------------------------------------------------------------------------
 
-  describe "run_decay_check with full decay path" do
-    test "handles profile with nil last_activity_at" do
+  describe "run_decay_check/0 is a no-op (trust decay removed)" do
+    test "handles profile with nil last_activity_at without crash" do
       stop_supervised!(Manager)
 
       start_supervised!({Manager, [circuit_breaker: false, decay: true, event_store: true]})
 
       {:ok, _} = Manager.create_trust_profile("agent_nil_activity")
-
-      # Give the profile some trust score and points to have something to decay
-      :ok =
-        Manager.record_trust_event("agent_nil_activity", :trust_points_awarded, %{points: 50})
-
-      Process.sleep(50)
 
       # Manually update profile to have nil last_activity_at and old created_at
       Store.update_profile("agent_nil_activity", fn profile ->
@@ -866,43 +568,34 @@ defmodule Arbor.Trust.ManagerTest do
       end)
 
       :ok = Manager.run_decay_check()
-      Process.sleep(200)
+      Process.sleep(100)
 
       # Should handle nil last_activity_at without crash
       {:ok, profile} = Manager.get_trust_profile("agent_nil_activity")
       assert profile.agent_id == "agent_nil_activity"
     end
 
-    test "decay applies to profiles with old last_activity_at" do
+    test "does not mutate profiles with old last_activity_at" do
       stop_supervised!(Manager)
 
       start_supervised!({Manager, [circuit_breaker: false, decay: true, event_store: true]})
 
       {:ok, _} = Manager.create_trust_profile("agent_old_activity")
 
-      # Give some trust points
-      :ok =
-        Manager.record_trust_event("agent_old_activity", :trust_points_awarded, %{points: 50})
-
-      Process.sleep(50)
-
       # Set old last_activity
       Store.update_profile("agent_old_activity", fn profile ->
-        %{
-          profile
-          | last_activity_at: DateTime.add(DateTime.utc_now(), -20, :day),
-            trust_score: 50
-        }
+        %{profile | last_activity_at: DateTime.add(DateTime.utc_now(), -20, :day)}
       end)
 
       :ok = Manager.run_decay_check()
-      Process.sleep(200)
+      Process.sleep(100)
 
       {:ok, profile} = Manager.get_trust_profile("agent_old_activity")
       assert profile.agent_id == "agent_old_activity"
+      assert profile.tier == :untrusted
     end
 
-    test "decay is skipped when decay is disabled" do
+    test "is a no-op when decay is disabled" do
       # Default setup has decay: false
       {:ok, _} = Manager.create_trust_profile("agent_no_decay")
       :ok = Manager.run_decay_check()

@@ -332,7 +332,6 @@ defmodule Mix.Tasks.Arbor.Agent do
         Mix.shell().info("  Model:           #{s.model || "(unknown)"}")
         Mix.shell().info("")
         Mix.shell().info("  Trust Tier:      #{s.trust_tier}")
-        Mix.shell().info("  Trust Score:     #{format_value(s.trust_score)}")
         Mix.shell().info("")
         Mix.shell().info("  Turns:           #{format_value(s.turn_count)}")
         Mix.shell().info("  Active Goals:    #{s.active_goals_count}")

@@ -11,37 +11,24 @@ defmodule Arbor.Trust.Behaviour do
 
   ## Trust Tiers
 
-  Agents progress through trust tiers based on their operational history:
+  Agents carry a trust tier (display band):
 
-  | Tier | Score Range | Name | Capabilities |
-  |------|-------------|------|--------------|
-  | 0 | 0-19 | Untrusted | Read own code only |
-  | 1 | 20-49 | Probationary | Sandbox modifications |
-  | 2 | 50-74 | Trusted | Self-modify with approval |
-  | 3 | 75-89 | Veteran | Self-modify auto-approved |
-  | 4 | 90-100 | Autonomous | Can modify own capabilities |
-
-  ## Trust Score Calculation
-
-  The trust score is calculated as a weighted average:
-
-      trust_score = (success_rate * 0.30) +
-                    (uptime * 0.15) +
-                    (security_compliance * 0.25) +
-                    (test_pass_rate * 0.20) +
-                    (rollback_stability * 0.10)
+  | Tier | Name | Capabilities |
+  |------|------|--------------|
+  | 0 | Untrusted | Read own code only |
+  | 1 | Probationary | Sandbox modifications |
+  | 2 | Trusted | Self-modify with approval |
+  | 3 | Veteran | Self-modify auto-approved |
+  | 4 | Autonomous | Can modify own capabilities |
 
   ## Safety Mechanisms
 
   - **Circuit Breaker**: Freezes trust on anomalous behavior
-  - **Decay**: Trust decays 1 point/day after 7 days of inactivity
-  - **Minimum Floor**: Trust never decays below 10 (preserves read access)
   """
 
   alias Arbor.Contracts.Trust.Profile
 
   # Types
-  @type trust_score :: 0..100
   @type trust_tier :: :untrusted | :probationary | :trusted | :veteran | :autonomous
   @type agent_id :: String.t()
 
@@ -55,7 +42,6 @@ defmodule Arbor.Trust.Behaviour do
           | :improvement_applied
           | :trust_frozen
           | :trust_unfrozen
-          | :trust_decayed
 
   # Default tier thresholds
   @default_tier_thresholds %{
@@ -68,10 +54,6 @@ defmodule Arbor.Trust.Behaviour do
 
   @callback get_trust_profile(agent_id()) ::
               {:ok, Profile.t()} | {:error, :not_found | term()}
-
-  @callback calculate_trust_score(agent_id()) :: {:ok, trust_score()} | {:error, term()}
-
-  @callback get_capability_tier(trust_score()) :: trust_tier()
 
   @callback check_trust_authorization(agent_id(), required_tier :: trust_tier()) ::
               {:ok, :authorized} | {:error, :insufficient_trust | :trust_frozen | :not_found}
@@ -111,18 +93,6 @@ defmodule Arbor.Trust.Behaviour do
   """
   @spec tiers() :: [:untrusted | :probationary | :trusted | :veteran | :autonomous, ...]
   def tiers, do: [:untrusted, :probationary, :trusted, :veteran, :autonomous]
-
-  @doc """
-  Get the minimum score required for a tier.
-  """
-  @spec min_score_for_tier(trust_tier()) :: trust_score()
-  def min_score_for_tier(tier), do: Map.fetch!(@default_tier_thresholds, tier)
-
-  @doc """
-  Get the minimum score required for a tier with custom thresholds.
-  """
-  @spec min_score_for_tier(trust_tier(), map()) :: trust_score()
-  def min_score_for_tier(tier, thresholds), do: Map.fetch!(thresholds, tier)
 
   @doc """
   Check if tier_a is at least as high as tier_b.

@@ -9,7 +9,7 @@ defmodule Arbor.Trust.Authority do
   ## CRC Pattern
 
   - **Construct**: `new_profile/2` — create a trust profile with preset rules
-  - **Reduce**: `record_*/1-2`, `apply_decay/2`, `graduate/2` — pure state transitions
+  - **Reduce**: `freeze/2`, `unfreeze/1`, `set_rule/3`, `set_tier/2` — pure state transitions
   - **Convert**: `effective_mode/3`, `explain/3`, `show_summary/1` — formatted output
 
   All functions are pure — no ETS, no GenServer calls, no side effects.
@@ -38,150 +38,14 @@ defmodule Arbor.Trust.Authority do
       | tier: tier,
         baseline: baseline,
         rules: rules,
-        trust_score: 0,
-        trust_points: 0,
         created_at: DateTime.utc_now(),
         updated_at: DateTime.utc_now()
     }
   end
 
   # ===========================================================================
-  # Reduce — Score & Tier
+  # Reduce — Freeze / Tier
   # ===========================================================================
-
-  @doc "Record a successful action and recalculate scores."
-  @spec record_action_success(Profile.t()) :: Profile.t()
-  def record_action_success(%Profile{} = profile) do
-    profile
-    |> Map.update!(:successful_actions, &(&1 + 1))
-    |> Map.update!(:total_actions, &(&1 + 1))
-    |> recalculate_scores()
-    |> touch()
-  end
-
-  @doc "Record a failed action and recalculate scores."
-  @spec record_action_failure(Profile.t()) :: Profile.t()
-  def record_action_failure(%Profile{} = profile) do
-    profile
-    |> Map.update!(:total_actions, &(&1 + 1))
-    |> recalculate_scores()
-    |> touch()
-  end
-
-  @doc "Record a security violation (deducts 20 points from security score)."
-  @spec record_security_violation(Profile.t()) :: Profile.t()
-  def record_security_violation(%Profile{} = profile) do
-    profile
-    |> Map.update!(:security_violations, &(&1 + 1))
-    |> recalculate_scores()
-    |> touch()
-  end
-
-  @doc "Record a test result."
-  @spec record_test_result(Profile.t(), :passed | :failed) :: Profile.t()
-  def record_test_result(%Profile{} = profile, :passed) do
-    profile
-    |> Map.update!(:tests_passed, &(&1 + 1))
-    |> Map.update!(:total_tests, &(&1 + 1))
-    |> recalculate_scores()
-    |> touch()
-  end
-
-  def record_test_result(%Profile{} = profile, :failed) do
-    profile
-    |> Map.update!(:total_tests, &(&1 + 1))
-    |> recalculate_scores()
-    |> touch()
-  end
-
-  @doc "Record an approved proposal (awards trust points based on impact)."
-  @spec record_proposal_approved(Profile.t(), atom()) :: Profile.t()
-  def record_proposal_approved(%Profile{} = profile, impact \\ :medium) do
-    points = points_for_impact(impact)
-
-    profile
-    |> Map.update!(:proposals_approved, &(&1 + 1))
-    |> Map.update!(:trust_points, &(&1 + points))
-    |> recalculate_scores()
-    |> touch()
-  end
-
-  @doc "Record a proposal submission and recalculate."
-  @spec record_proposal_submitted(Profile.t()) :: Profile.t()
-  def record_proposal_submitted(%Profile{} = profile) do
-    profile
-    |> Profile.record_proposal_submitted()
-    |> recalculate_scores()
-    |> touch()
-  end
-
-  @doc "Record a successful installation and recalculate."
-  @spec record_installation_success(Profile.t(), atom()) :: Profile.t()
-  def record_installation_success(%Profile{} = profile, impact \\ :medium) do
-    profile
-    |> Profile.record_installation_success(impact)
-    |> recalculate_scores()
-    |> touch()
-  end
-
-  @doc "Record an installation rollback and recalculate."
-  @spec record_installation_rollback(Profile.t()) :: Profile.t()
-  def record_installation_rollback(%Profile{} = profile) do
-    profile
-    |> Profile.record_installation_rollback()
-    |> recalculate_scores()
-    |> touch()
-  end
-
-  @doc "Record a rollback and recalculate."
-  @spec record_rollback(Profile.t()) :: Profile.t()
-  def record_rollback(%Profile{} = profile) do
-    profile
-    |> Profile.record_rollback()
-    |> recalculate_scores()
-    |> touch()
-  end
-
-  @doc "Record an improvement and recalculate."
-  @spec record_improvement(Profile.t()) :: Profile.t()
-  def record_improvement(%Profile{} = profile) do
-    profile
-    |> Profile.record_improvement()
-    |> recalculate_scores()
-    |> touch()
-  end
-
-  @doc "Award trust points and recalculate tier."
-  @spec award_trust_points(Profile.t(), non_neg_integer()) :: Profile.t()
-  def award_trust_points(%Profile{} = profile, points) when points >= 0 do
-    %{profile | trust_points: profile.trust_points + points}
-    |> recalculate_scores()
-    |> touch()
-  end
-
-  @doc "Deduct trust points and recalculate tier."
-  @spec deduct_trust_points(Profile.t(), non_neg_integer(), atom()) :: Profile.t()
-  def deduct_trust_points(%Profile{} = profile, points, reason) when points >= 0 do
-    profile
-    |> Profile.deduct_trust_points(points, reason)
-    |> recalculate_scores()
-    |> touch()
-  end
-
-  @doc "Apply trust decay for inactivity."
-  @spec apply_decay(Profile.t(), non_neg_integer()) :: Profile.t()
-  def apply_decay(%Profile{frozen: true} = profile, _days_inactive), do: profile
-
-  def apply_decay(%Profile{} = profile, days_inactive) when days_inactive > 7 do
-    # Lose 1 point per day after 7-day grace period, floor at 10
-    points_to_lose = days_inactive - 7
-    new_points = max(profile.trust_points - points_to_lose, 10)
-
-    %{profile | trust_points: new_points}
-    |> recalculate_scores()
-  end
-
-  def apply_decay(profile, _days_inactive), do: profile
 
   @doc "Freeze trust progression."
   @spec freeze(Profile.t(), atom() | String.t()) :: Profile.t()
@@ -320,8 +184,6 @@ defmodule Arbor.Trust.Authority do
     %{
       agent_id: profile.agent_id,
       tier: profile.tier,
-      trust_score: profile.trust_score,
-      trust_points: profile.trust_points,
       frozen: profile.frozen,
       baseline: profile.baseline,
       rule_count: map_size(profile.rules),
@@ -425,34 +287,6 @@ defmodule Arbor.Trust.Authority do
   def resolve_tier(score) when score >= 20, do: :probationary
   def resolve_tier(_), do: :untrusted
 
-  @doc "Resolve tier from trust points."
-  @spec resolve_tier_from_points(non_neg_integer()) :: atom()
-  def resolve_tier_from_points(points) when points >= 2000, do: :autonomous
-  def resolve_tier_from_points(points) when points >= 500, do: :veteran
-  def resolve_tier_from_points(points) when points >= 100, do: :trusted
-  def resolve_tier_from_points(points) when points >= 25, do: :probationary
-  def resolve_tier_from_points(_), do: :untrusted
-
-  @doc """
-  Compute a tier label from a score AND trust points (pure helper).
-
-  Takes the maximum of the score-derived tier and the points-derived tier.
-
-  NOTE: As of the tier-minting kill sweep (P0 gate #1), this is NOT wired to
-  anything that auto-applies tier. Tier is a display label set at agent
-  creation and never moves from score/points arithmetic — authorization reads
-  `baseline` + `rules` only, never `tier`. This function is retained as a pure
-  derivation utility (e.g. for a future "derived display label"); callers must
-  not use it to mint or change capabilities. See
-  `.arbor/roadmap/0-inbox/trust-tiers-mental-model-review.md`.
-  """
-  @spec compute_tier(non_neg_integer(), non_neg_integer()) :: atom()
-  def compute_tier(score, trust_points) do
-    score_tier = resolve_tier(score)
-    points_tier = resolve_tier_from_points(trust_points)
-    max_tier(score_tier, points_tier)
-  end
-
   @doc "Map tier to preset name."
   @spec tier_to_preset(atom()) :: atom()
   def tier_to_preset(tier) when tier in [:untrusted, :probationary], do: :cautious
@@ -553,67 +387,9 @@ defmodule Arbor.Trust.Authority do
   # Unknown / garbage modes default to :ask — fail safe.
   def normalize_mode(_), do: :ask
 
-  @doc "Trust points awarded for impact level."
-  @spec points_for_impact(atom()) :: non_neg_integer()
-  def points_for_impact(:low), do: 3
-  def points_for_impact(:medium), do: 5
-  def points_for_impact(:high), do: 10
-  def points_for_impact(:critical), do: 20
-  def points_for_impact(_), do: 5
-
   # ===========================================================================
   # Private
   # ===========================================================================
-
-  @weights %{
-    success_rate: 0.30,
-    uptime: 0.15,
-    security: 0.25,
-    test_pass: 0.20,
-    rollback: 0.10
-  }
-
-  defp recalculate_scores(%Profile{} = profile) do
-    success_rate =
-      if profile.total_actions > 0,
-        do: profile.successful_actions / profile.total_actions * 100,
-        else: 0.0
-
-    security = max(100.0 - profile.security_violations * 20, 0.0)
-
-    test_pass =
-      if profile.total_tests > 0,
-        do: profile.tests_passed / profile.total_tests * 100,
-        else: 0.0
-
-    rollback =
-      if profile.improvement_count > 0,
-        do: max(100.0 - profile.rollback_count / profile.improvement_count * 100, 0.0),
-        else: 100.0
-
-    score =
-      round(
-        success_rate * @weights.success_rate +
-          profile.uptime_score * @weights.uptime +
-          security * @weights.security +
-          test_pass * @weights.test_pass +
-          rollback * @weights.rollback
-      )
-
-    %{
-      profile
-      | success_rate_score: success_rate,
-        security_score: security,
-        test_pass_score: test_pass,
-        rollback_score: rollback,
-        trust_score: score,
-        updated_at: DateTime.utc_now()
-    }
-  end
-
-  defp touch(%Profile{} = profile) do
-    %{profile | last_activity_at: DateTime.utc_now(), updated_at: DateTime.utc_now()}
-  end
 
   defp resolve_prefix(rules, uri, baseline) when is_map(rules) do
     # Longest prefix match
@@ -667,18 +443,6 @@ defmodule Arbor.Trust.Authority do
   # Callers should normalize via `normalize_mode/1` first so this branch is
   # only ever reached for genuinely unknown atoms.
   defp mode_index(_), do: 1
-
-  defp tier_index(:untrusted), do: 0
-  defp tier_index(:probationary), do: 1
-  defp tier_index(:established), do: 1
-  defp tier_index(:trusted), do: 2
-  defp tier_index(:veteran), do: 3
-  defp tier_index(:autonomous), do: 4
-  defp tier_index(_), do: 0
-
-  defp max_tier(a, b) do
-    if tier_index(a) >= tier_index(b), do: a, else: b
-  end
 
   defp default_security_ceilings do
     %{

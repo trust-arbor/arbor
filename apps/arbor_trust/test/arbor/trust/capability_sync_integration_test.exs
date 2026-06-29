@@ -66,11 +66,11 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       {:ok, baseline_caps} = Security.list_capabilities(agent_id)
       baseline_ids = MapSet.new(baseline_caps, & &1.id)
 
-      # Award enough trust points to cross EVERY old graduation threshold
-      # (autonomous was >= 2000 points). Under the old system this auto-promoted
-      # tier via maybe_graduate and minted signed tier capabilities through
-      # Policy.sync_capabilities — a parallel authority path that bypassed the
-      # rules/ceilings model. That path is now closed.
+      # Record a barrage of approval events. Under the old system, accruing
+      # trust points auto-promoted tier via maybe_graduate and minted signed
+      # tier capabilities through Policy.sync_capabilities — a parallel authority
+      # path that bypassed the rules/ceilings model. The scoring/points feedback
+      # loop and that minting path are both now closed.
       for _ <- 1..220 do
         :ok = Manager.record_trust_event(agent_id, :proposal_approved, %{impact: :high})
       end
@@ -79,11 +79,9 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
       # preceding record_trust_event casts have been applied.
       {:ok, after_profile} = Manager.get_trust_profile(agent_id)
 
-      # Points accrued well past the old autonomous threshold...
-      assert after_profile.trust_points >= 2000
-      # ...but tier never moved from its creation value.
+      # Tier never moved from its creation value.
       assert after_profile.tier == :untrusted,
-             "tier must not auto-graduate from trust points (got #{after_profile.tier})"
+             "tier must not auto-graduate from trust events (got #{after_profile.tier})"
 
       # ...and NO new capabilities were minted: the set is byte-for-byte the same.
       {:ok, after_caps} = Security.list_capabilities(agent_id)
@@ -241,8 +239,8 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
     end
   end
 
-  describe "tier promotion via events" do
-    test "recording success events updates profile", %{agent_id: agent_id} do
+  describe "recording events" do
+    test "recording success events does not mutate the profile", %{agent_id: agent_id} do
       {:ok, initial} = Trust.create_trust_profile(agent_id)
       assert initial.tier == :untrusted
       assert initial.success_rate_score == 0.0
@@ -254,8 +252,10 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
 
       {:ok, profile_after} = Trust.get_trust_profile(agent_id)
 
-      # Success rate should have improved
-      assert profile_after.success_rate_score > initial.success_rate_score
+      # Scoring feedback loop removed (tiers-retirement phase 3b): events are
+      # recorded for audit but do not move the profile's component scores.
+      assert profile_after.success_rate_score == initial.success_rate_score
+      assert profile_after.tier == :untrusted
     end
   end
 end

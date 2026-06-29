@@ -396,10 +396,6 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
                   color={tier_color(detail.summary.trust_tier)}
                 />
               </div>
-              <div :if={detail.summary.trust_score}>
-                <strong>Score:</strong>
-                <span>{detail.summary.trust_score}</span>
-              </div>
               <div :if={detail.summary.turn_count}>
                 <strong>Turns:</strong>
                 <span>{detail.summary.turn_count}</span>
@@ -449,14 +445,6 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
           <div :if={detail.trust_summary} style="margin-bottom: 1.5rem;">
             <h4 style="margin-bottom: 0.75rem;">Trust</h4>
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem;">
-              <div>
-                <strong>Score:</strong>
-                <span>{detail.trust_summary.trust_score}</span>
-              </div>
-              <div>
-                <strong>Points:</strong>
-                <span>{detail.trust_summary.trust_points}</span>
-              </div>
               <div>
                 <strong>Baseline:</strong>
                 <span>{detail.trust_summary.baseline}</span>

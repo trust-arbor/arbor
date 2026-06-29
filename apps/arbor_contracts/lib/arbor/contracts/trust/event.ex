@@ -22,8 +22,7 @@ defmodule Arbor.Contracts.Trust.Event do
   | :improvement_applied | +improvement_count | Self-improvement applied |
   | :trust_frozen | Frozen | Circuit breaker triggered |
   | :trust_unfrozen | Unfrozen | Manual/auto unfreeze |
-  | :trust_decayed | -1 point | Daily decay (inactive) |
-  | :tier_changed | Tier changed | Score crossed threshold |
+  | :tier_changed | Tier changed | Tier band changed |
 
   ## Usage
 
@@ -74,7 +73,6 @@ defmodule Arbor.Contracts.Trust.Event do
     :improvement_applied,
     :trust_frozen,
     :trust_unfrozen,
-    :trust_decayed,
     :tier_changed,
     :profile_created,
     :profile_deleted,
@@ -83,9 +81,7 @@ defmodule Arbor.Contracts.Trust.Event do
     :proposal_approved,
     :proposal_rejected,
     :installation_success,
-    :installation_rollback,
-    :trust_points_awarded,
-    :trust_points_deducted
+    :installation_rollback
   ]
 
   @doc """
@@ -254,27 +250,6 @@ defmodule Arbor.Contracts.Trust.Event do
   end
 
   @doc """
-  Create a trust points event (awarded or deducted).
-  """
-  @spec trust_points_event(String.t(), :awarded | :deducted, integer(), keyword()) ::
-          {:ok, t()} | {:error, term()}
-  def trust_points_event(agent_id, action, points, opts \\ []) do
-    event_type =
-      case action do
-        :awarded -> :trust_points_awarded
-        :deducted -> :trust_points_deducted
-      end
-
-    new(
-      Keyword.merge(opts,
-        agent_id: agent_id,
-        event_type: event_type,
-        metadata: Map.put(opts[:metadata] || %{}, :points, points)
-      )
-    )
-  end
-
-  @doc """
   Check if this is a negative trust event.
   """
   @spec negative_event?(t()) :: boolean()
@@ -285,10 +260,8 @@ defmodule Arbor.Contracts.Trust.Event do
       :rollback_executed,
       :security_violation,
       :trust_frozen,
-      :trust_decayed,
       :proposal_rejected,
-      :installation_rollback,
-      :trust_points_deducted
+      :installation_rollback
     ]
   end
 

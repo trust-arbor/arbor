@@ -174,7 +174,6 @@ defmodule Arbor.Behavioral.TrustCapabilityTest do
       case result do
         {:ok, profile} ->
           assert profile.tier == :untrusted
-          assert profile.trust_score == 0 or profile.trust_score <= 19
 
         {:error, _reason} ->
           # Trust.Manager may not be running in test env
