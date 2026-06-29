@@ -413,25 +413,24 @@ defmodule Arbor.Sandbox do
   @level_rank %{pure: 0, limited: 1, full: 2, container: 3}
 
   defp determine_level(opts) do
-    tier_level =
-      case Keyword.fetch(opts, :trust_tier) do
-        {:ok, tier} -> Map.get(@trust_to_level, tier, :limited)
-        :error -> nil
-      end
+    # SECURITY (codex authz.sandbox-create-unbounded-options): when a caller both
+    # requests a :level AND a ceiling :max_level is known, the request must not
+    # exceed the ceiling — cap it, so a low-isolation agent cannot self-elevate to
+    # :full/:container. The ceiling is the agent's declared sandbox level (threaded
+    # from its executor and translated to a code-sandbox level); it replaces the
+    # former trust-tier ceiling. System/internal callers omit :max_level and an
+    # explicit :level is honored as-is.
+    max_level = Keyword.get(opts, :max_level)
 
     cond do
-      # SECURITY (codex authz.sandbox-create-unbounded-options): when a caller
-      # both requests a :level AND a trust tier is known, the request must not
-      # exceed what the tier permits — cap it. Pre-fix the explicit :level won
-      # outright, letting a low-trust caller request :full/:container.
-      Keyword.has_key?(opts, :level) and not is_nil(tier_level) ->
-        cap_level(Keyword.fetch!(opts, :level), tier_level)
+      Keyword.has_key?(opts, :level) and not is_nil(max_level) ->
+        cap_level(Keyword.fetch!(opts, :level), max_level)
 
       Keyword.has_key?(opts, :level) ->
         Keyword.fetch!(opts, :level)
 
-      not is_nil(tier_level) ->
-        tier_level
+      not is_nil(max_level) ->
+        max_level
 
       true ->
         :limited

@@ -39,45 +39,46 @@ defmodule Arbor.SandboxTest do
       assert sandbox.level == :pure
     end
 
-    test "derives level from trust tier", %{base_path: base_path} do
+    test "derives level from max_level ceiling", %{base_path: base_path} do
       {:ok, sandbox} =
-        Sandbox.create("agent_facade_3", trust_tier: :veteran, base_path: base_path)
+        Sandbox.create("agent_facade_3", max_level: :full, base_path: base_path)
 
       assert sandbox.level == :full
     end
 
-    test "security regression: a requested level is capped to the caller's trust tier",
+    test "security regression: a requested level is capped to the caller's max_level",
          %{base_path: base_path} do
       # codex authz.sandbox-create-unbounded-options: pre-fix an explicit :level
-      # won outright, so a low-trust caller could request :full / :container.
-      # When a trust tier is known, the request must be capped to it.
+      # won outright, so a low-isolation caller could request :full / :container.
+      # The ceiling (max_level — the agent's declared sandbox level, formerly its
+      # trust tier) must cap the request. Fails open if the cap is removed.
       {:ok, sandbox} =
-        Sandbox.create("agent_cap_1", level: :full, trust_tier: :untrusted, base_path: base_path)
+        Sandbox.create("agent_cap_1", level: :full, max_level: :pure, base_path: base_path)
 
       assert sandbox.level == :pure,
-             "untrusted caller requesting :full must be capped to :pure, got #{sandbox.level}"
+             "caller with :pure ceiling requesting :full must be capped to :pure, got #{sandbox.level}"
 
       {:ok, s2} =
         Sandbox.create("agent_cap_2",
           level: :container,
-          trust_tier: :probationary,
+          max_level: :limited,
           base_path: base_path
         )
 
       assert s2.level == :limited,
-             "probationary caller requesting :container must be capped to :limited, got #{s2.level}"
+             "caller with :limited ceiling requesting :container must be capped to :limited, got #{s2.level}"
     end
 
-    test "a requested level at or below the tier is honored", %{base_path: base_path} do
-      # Requesting less than the tier permits is fine (no forced elevation).
+    test "a requested level at or below the ceiling is honored", %{base_path: base_path} do
+      # Requesting less than the ceiling permits is fine (no forced elevation).
       {:ok, sandbox} =
-        Sandbox.create("agent_cap_3", level: :pure, trust_tier: :autonomous, base_path: base_path)
+        Sandbox.create("agent_cap_3", level: :pure, max_level: :full, base_path: base_path)
 
       assert sandbox.level == :pure
 
-      # And a veteran may still get :full when they ask for it.
+      # And a permissive-ceiling caller may still get :full when they ask for it.
       {:ok, s2} =
-        Sandbox.create("agent_cap_4", level: :full, trust_tier: :veteran, base_path: base_path)
+        Sandbox.create("agent_cap_4", level: :full, max_level: :full, base_path: base_path)
 
       assert s2.level == :full
     end

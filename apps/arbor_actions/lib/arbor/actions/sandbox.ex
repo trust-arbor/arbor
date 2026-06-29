@@ -151,35 +151,30 @@ defmodule Arbor.Actions.Sandbox do
         #     host paths. Agent-created sandboxes always use the default
         #     isolated root. (The internal Arbor.Sandbox.create/2 API still
         #     accepts base_path for trusted/system callers.)
-        #   * Thread the CALLER's trust tier so determine_level caps the
-        #     requested :level to what the tier permits (a low-trust agent can
+        #   * Thread the CALLER's declared sandbox ceiling (max_level) so
+        #     determine_level caps the requested :level (a low-isolation agent can
         #     no longer self-elevate to :full/:container).
         opts =
           []
           |> maybe_add(:level, level)
-          |> maybe_add(:trust_tier, caller_trust_tier(context))
+          |> maybe_add(:max_level, caller_max_level(context))
           |> maybe_add(:timeout, params[:timeout])
 
         {:ok, opts}
       end
     end
 
-    # Resolve the caller's trust tier via a runtime bridge (arbor_actions does
-    # not compile-depend on arbor_trust). Defaults conservatively to
-    # :probationary (→ :limited) when the caller is anonymous or trust is
-    # unavailable — never elevates.
-    defp caller_trust_tier(context) do
-      agent_id = context[:agent_id]
-      mod = Arbor.Trust
+    # The caller's sandbox ceiling as a code-sandbox level. The agent's declared
+    # `sandbox_level` is threaded in via the execution context (from its
+    # executor); translate it to the code-sandbox vocabulary. Defaults to the
+    # most restrictive level (:strict → :pure) when the level is absent or the
+    # caller is anonymous — never elevates. Replaces the former trust-tier cap.
+    defp caller_max_level(context) do
+      level = Map.get(context, :sandbox_level) || :strict
 
-      with true <- is_binary(agent_id),
-           true <- Code.ensure_loaded?(mod) and function_exported?(mod, :get_trust_tier, 1),
-           # credo:disable-for-next-line Credo.Check.Refactor.Apply
-           {:ok, tier} when is_atom(tier) <- apply(mod, :get_trust_tier, [agent_id]) do
-        tier
-      else
-        _ -> :probationary
-      end
+      Arbor.Contracts.Security.SandboxLevel.to_code(
+        Arbor.Contracts.Security.SandboxLevel.coerce(level)
+      )
     end
 
     defp normalize_level(nil), do: {:ok, nil}

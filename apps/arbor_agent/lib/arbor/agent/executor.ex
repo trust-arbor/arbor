@@ -115,8 +115,11 @@ defmodule Arbor.Agent.Executor do
     )
 
     # Store agent_id in process dictionary so ActionDispatch can route
-    # through authorize_and_execute without threading it through every clause
+    # through authorize_and_execute without threading it through every clause.
+    # The declared sandbox level rides alongside so dispatch can thread it into
+    # the action context (the sandbox-create ceiling, post trust-tier).
     Process.put(:arbor_executor_agent_id, agent_id)
+    Process.put(:arbor_executor_sandbox_level, sandbox_level)
 
     state = %{
       agent_id: agent_id,
