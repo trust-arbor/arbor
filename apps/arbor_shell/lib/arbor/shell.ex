@@ -87,27 +87,65 @@ defmodule Arbor.Shell do
   # can evaluate command-aware rules (e.g., blocking `rm -rf /`).
   def authorize_and_execute(agent_id, command, opts \\ []) do
     opts = put_cap_allowlist(opts, agent_id)
-    authorize_and_dispatch(agent_id, command, opts, fn -> dispatch_execute(agent_id, command, opts) end)
+
+    if compound_shell_enabled?() and Arbor.Shell.Sandbox.compound?(command) do
+      authorize_and_execute_compound(agent_id, command, opts)
+    else
+      authorize_and_dispatch(agent_id, command, opts, fn -> execute(command, opts) end)
+    end
   end
 
-  # Route compound commands (pipes, &&/||/;, $(…), redirection) — which the
-  # single-command sandbox rejects — to the capability-checked interpreter
-  # (Arbor.Shell.CapShell), which cap-checks EVERY command + filesystem path.
-  # Single commands keep the existing argv-executor path unchanged. Gated by
-  # config (:arbor_shell, :compound_shell_enabled, default true) for
-  # reversibility — with it off, compound commands fall back to the
-  # single-command path (and are rejected by the sandbox, as before). No
-  # regression: compound commands were rejected before this routing existed.
+  # Compound commands (pipes, &&/||/;, $(…), redirection) — which the
+  # single-command sandbox rejects — run through the capability-checked
+  # interpreter (Arbor.Shell.CapShell), which cap-checks EVERY command + every
+  # filesystem path. Gated by config (:arbor_shell, :compound_shell_enabled,
+  # default true) for reversibility; with it off, the caller above falls back to
+  # the single-command path (sandbox metacharacter rejection — the prior
+  # behavior, no regression).
   #
-  # NB: the capability gate + reflex/approval pipeline in authorize_and_dispatch
-  # already ran on the whole command string (gate-1 checks the first command's
-  # cap; the reflex rules and approval ceiling see the full string). CapShell
-  # then authorizes every command in the compound.
-  defp dispatch_execute(agent_id, command, opts) do
-    if compound_shell_enabled?() and Arbor.Shell.Sandbox.compound?(command) do
-      capshell_execute(agent_id, command, opts)
-    else
-      execute(command, opts)
+  # The capability *gate* (gate-1) here cap-checks the first NON-builtin command
+  # rather than the literal first token, so a compound that opens with a shell
+  # builtin (`cd dir && git …`, `echo x && …`) is not spuriously rejected for
+  # lacking a cap on the builtin. CapShell remains the authoritative per-command
+  # authorizer (builtins allowed; externals cap-checked); gate-1 + the reflex /
+  # approval pipeline (which see the full string) are the coarse pre-gate. When
+  # the compound is all-builtin (or all dynamic, e.g. `$CMD`), there is no host
+  # binary to gate at this layer — skip gate-1 and let CapShell authorize each
+  # command as it resolves at runtime.
+  defp authorize_and_execute_compound(agent_id, command, opts) do
+    case gate_command_for(command) do
+      nil ->
+        capshell_execute(agent_id, command, opts)
+
+      gate_command ->
+        authorize_and_dispatch(
+          agent_id,
+          command,
+          Keyword.put(opts, :gate_command, gate_command),
+          fn -> capshell_execute(agent_id, command, opts) end
+        )
+    end
+  end
+
+  # The first non-builtin command name in a (compound) command, for the gate-1
+  # capability check. Uses the bash parser + the library's builtin registry, so
+  # quoting/substitution are handled correctly (a quoted `;` is not a separator).
+  # Returns nil when every command is a builtin or has a non-static name
+  # (CapShell authorizes those at runtime). Falls back to the first token if the
+  # command does not parse.
+  defp gate_command_for(command) do
+    case Bash.parse(command) do
+      {:ok, ast} ->
+        ast
+        |> Bash.AST.reduce([], fn
+          %Bash.AST.Command{literal_name: name}, acc when is_binary(name) -> [name | acc]
+          _node, acc -> acc
+        end)
+        |> Enum.reverse()
+        |> Enum.find(fn name -> not Bash.Builtin.builtin?(Path.basename(name)) end)
+
+      _ ->
+        extract_command_name(command)
     end
   end
 
@@ -180,7 +218,11 @@ defmodule Arbor.Shell do
           | {:ok, :pending_approval, String.t()}
           | {:error, :unauthorized}
   def authorize(agent_id, command, opts \\ []) do
-    command_name = extract_command_name(command)
+    # `:gate_command` lets a caller override which command name the capability
+    # gate checks (used for compound commands, where the leading token may be a
+    # shell builtin). Defaults to the first token of `command`. The reflex rules
+    # still see the full `command` string regardless.
+    command_name = Keyword.get(opts, :gate_command) || extract_command_name(command)
     resource = "arbor://shell/exec/#{command_name}"
 
     # Skip identity verification — facade auth is a policy check only; the

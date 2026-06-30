@@ -123,6 +123,35 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       assert result.stdout =~ "ok"
     end
 
+    test "a compound starting with a BUILTIN is not rejected for lacking the builtin's cap",
+         %{agent_id: agent_id} do
+      # `cd` is a shell builtin; the agent holds NO `cd` cap. Gate-1 cap-checks the
+      # first NON-builtin command (`git`, which is granted) instead of `cd`, so the
+      # compound is not spuriously rejected. (paths override isolates the gate-1
+      # fix from the fs `paths` policy, which separately gates `cd`.)
+      grant_shell_capability(agent_id, "arbor://shell/exec/git")
+
+      assert {:ok, result} =
+               Arbor.Shell.authorize_and_execute(agent_id, "cd /tmp && git --version",
+                 paths: fn _ -> true end
+               )
+
+      assert result.exit_code == 0
+      assert result.stdout =~ "git version"
+    end
+
+    test "an all-builtin compound runs with no shell caps (no host binary to gate)",
+         %{agent_id: agent_id} do
+      # cd + echo are both builtins → gate-1 is skipped (nothing to cap-check at
+      # that layer); CapShell runs the builtins.
+      assert {:ok, result} =
+               Arbor.Shell.authorize_and_execute(agent_id, "cd /tmp && echo hi",
+                 paths: fn _ -> true end
+               )
+
+      assert result.stdout =~ "hi"
+    end
+
     test "with the feature flag off, compound commands fall back to rejection",
          %{agent_id: agent_id} do
       grant_shell_capability(agent_id, "arbor://shell/exec/git")
