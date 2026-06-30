@@ -245,7 +245,6 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
     test "recording success events does not mutate the profile", %{agent_id: agent_id} do
       {:ok, initial} = Trust.create_trust_profile(agent_id)
       assert initial.baseline == :ask
-      assert initial.success_rate_score == 0.0
 
       # Record success events
       Enum.each(1..10, fn _ ->
@@ -254,10 +253,11 @@ defmodule Arbor.Trust.CapabilitySyncIntegrationTest do
 
       {:ok, profile_after} = Trust.get_trust_profile(agent_id)
 
-      # Scoring feedback loop removed (tiers-retirement phase 3b): events are
-      # recorded for audit but do not move the profile's component scores.
-      assert profile_after.success_rate_score == initial.success_rate_score
+      # Scoring feedback loop removed (tiers-retirement phase 3b) and the
+      # score/counter fields removed (post-tier cleanup): events are recorded for
+      # audit but do not mutate the profile.
       assert profile_after.baseline == initial.baseline
+      refute profile_after.frozen
     end
   end
 end

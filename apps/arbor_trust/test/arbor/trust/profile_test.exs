@@ -14,34 +14,6 @@ defmodule Arbor.Contracts.Trust.ProfileTest do
       assert profile.frozen_at == nil
     end
 
-    test "initializes component scores correctly" do
-      {:ok, profile} = Profile.new("agent_1")
-      assert profile.success_rate_score == 0.0
-      assert profile.uptime_score == 0.0
-      assert profile.security_score == 100.0
-      assert profile.test_pass_score == 0.0
-      assert profile.rollback_score == 100.0
-    end
-
-    test "initializes all counters to zero" do
-      {:ok, profile} = Profile.new("agent_1")
-      assert profile.total_actions == 0
-      assert profile.successful_actions == 0
-      assert profile.security_violations == 0
-      assert profile.total_tests == 0
-      assert profile.tests_passed == 0
-      assert profile.rollback_count == 0
-      assert profile.improvement_count == 0
-    end
-
-    test "initializes council counters to zero" do
-      {:ok, profile} = Profile.new("agent_1")
-      assert profile.proposals_submitted == 0
-      assert profile.proposals_approved == 0
-      assert profile.installations_successful == 0
-      assert profile.installations_rolled_back == 0
-    end
-
     test "initializes authorization rule fields" do
       {:ok, profile} = Profile.new("agent_1")
       assert profile.baseline == :ask
@@ -128,22 +100,6 @@ defmodule Arbor.Contracts.Trust.ProfileTest do
         :frozen,
         :frozen_reason,
         :frozen_at,
-        :success_rate_score,
-        :uptime_score,
-        :security_score,
-        :test_pass_score,
-        :rollback_score,
-        :total_actions,
-        :successful_actions,
-        :security_violations,
-        :total_tests,
-        :tests_passed,
-        :rollback_count,
-        :improvement_count,
-        :proposals_submitted,
-        :proposals_approved,
-        :installations_successful,
-        :installations_rolled_back,
         :baseline,
         :rules,
         :created_at,
@@ -163,6 +119,12 @@ defmodule Arbor.Contracts.Trust.ProfileTest do
       refute Map.has_key?(map, :trust_score)
       refute Map.has_key?(map, :trust_points)
       refute Map.has_key?(map, :tier)
+      # Score/counter fields removed in the post-tier cleanup.
+      refute Map.has_key?(map, :success_rate_score)
+      refute Map.has_key?(map, :total_actions)
+      refute Map.has_key?(map, :security_violations)
+      refute Map.has_key?(map, :proposals_approved)
+      refute Map.has_key?(map, :tests_passed)
     end
   end
 end

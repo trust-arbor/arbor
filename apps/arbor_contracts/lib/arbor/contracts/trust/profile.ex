@@ -32,34 +32,6 @@ defmodule Arbor.Contracts.Trust.Profile do
     field(:frozen_reason, atom(), enforce: false)
     field(:frozen_at, DateTime.t(), enforce: false)
 
-    # Component scores (0.0 to 100.0 each)
-    field(:success_rate_score, float(), default: 0.0)
-    field(:uptime_score, float(), default: 0.0)
-    field(:security_score, float(), default: 100.0)
-    field(:test_pass_score, float(), default: 0.0)
-    field(:rollback_score, float(), default: 100.0)
-
-    # Raw counters for success rate
-    field(:total_actions, non_neg_integer(), default: 0)
-    field(:successful_actions, non_neg_integer(), default: 0)
-
-    # Security counters
-    field(:security_violations, non_neg_integer(), default: 0)
-
-    # Test counters
-    field(:total_tests, non_neg_integer(), default: 0)
-    field(:tests_passed, non_neg_integer(), default: 0)
-
-    # Rollback/improvement counters
-    field(:rollback_count, non_neg_integer(), default: 0)
-    field(:improvement_count, non_neg_integer(), default: 0)
-
-    # Council activity counters
-    field(:proposals_submitted, non_neg_integer(), default: 0)
-    field(:proposals_approved, non_neg_integer(), default: 0)
-    field(:installations_successful, non_neg_integer(), default: 0)
-    field(:installations_rolled_back, non_neg_integer(), default: 0)
-
     # URI-prefix trust rules (Trust Profiles Redesign)
     # baseline: default mode when no rule matches (:block | :ask | :allow | :auto)
     field(:baseline, atom(), default: :ask)
@@ -84,8 +56,6 @@ defmodule Arbor.Contracts.Trust.Profile do
   @doc """
   Create a new trust profile for an agent.
 
-  Security and rollback scores start at 100.0 (no violations/rollbacks).
-
   ## Example
 
       {:ok, profile} = Profile.new("agent_123")
@@ -99,22 +69,6 @@ defmodule Arbor.Contracts.Trust.Profile do
     profile = %__MODULE__{
       agent_id: agent_id,
       frozen: false,
-      success_rate_score: 0.0,
-      uptime_score: 0.0,
-      security_score: 100.0,
-      test_pass_score: 0.0,
-      rollback_score: 100.0,
-      total_actions: 0,
-      successful_actions: 0,
-      security_violations: 0,
-      total_tests: 0,
-      tests_passed: 0,
-      rollback_count: 0,
-      improvement_count: 0,
-      proposals_submitted: 0,
-      proposals_approved: 0,
-      installations_successful: 0,
-      installations_rolled_back: 0,
       created_at: now,
       updated_at: now,
       last_activity_at: nil

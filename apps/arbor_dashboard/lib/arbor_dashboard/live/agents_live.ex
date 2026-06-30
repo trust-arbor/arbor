@@ -440,12 +440,6 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
                 <.badge label="frozen" color={:red} />
               </div>
             </div>
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.5rem; margin-top: 0.5rem; font-size: 0.85em; color: var(--aw-text-muted, #888);">
-              <div>Actions: {detail.trust_summary.stats.actions}</div>
-              <div>Violations: {detail.trust_summary.stats.violations}</div>
-              <div>Proposals: {detail.trust_summary.stats.proposals}</div>
-              <div>Tests: {detail.trust_summary.stats.tests}</div>
-            </div>
           </div>
 
           <%!-- Model config (from ConfigCore.show_config CRC convert) --%>

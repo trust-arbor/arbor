@@ -52,9 +52,7 @@ defmodule Arbor.TrustTest do
     test "profile has correct initial state" do
       {:ok, profile} = Trust.create_trust_profile("facade_init")
       assert profile.frozen == false
-      assert profile.security_score == 100.0
-      assert profile.rollback_score == 100.0
-      assert profile.success_rate_score == 0.0
+      assert profile.baseline == :ask
     end
   end
 
@@ -84,29 +82,28 @@ defmodule Arbor.TrustTest do
       Process.sleep(50)
 
       {:ok, profile} = Trust.get_trust_profile("facade_evt_success")
-      assert profile.total_actions == 0
-      assert profile.successful_actions == 0
+      # Recording an event no longer mutates the profile (scoring removed); the
+      # profile stays valid and unfrozen.
+      refute profile.frozen
     end
 
-    test "accepts security_violation event without reducing security score" do
+    test "accepts security_violation event without mutating the profile" do
       {:ok, _} = Trust.create_trust_profile("facade_evt_sec")
       assert :ok = Trust.record_trust_event("facade_evt_sec", :security_violation, %{})
       Process.sleep(50)
 
       {:ok, profile} = Trust.get_trust_profile("facade_evt_sec")
-      assert profile.security_violations == 0
-      assert profile.security_score == 100.0
+      refute profile.frozen
     end
 
-    test "accepts test_passed / test_failed events without mutating counters" do
+    test "accepts test_passed / test_failed events without mutating the profile" do
       {:ok, _} = Trust.create_trust_profile("facade_evt_test")
       assert :ok = Trust.record_trust_event("facade_evt_test", :test_passed, %{})
       assert :ok = Trust.record_trust_event("facade_evt_test", :test_failed, %{})
       Process.sleep(50)
 
       {:ok, profile} = Trust.get_trust_profile("facade_evt_test")
-      assert profile.total_tests == 0
-      assert profile.tests_passed == 0
+      refute profile.frozen
     end
 
     test "accepts metadata with events" do
@@ -237,8 +234,7 @@ defmodule Arbor.TrustTest do
       Process.sleep(50)
 
       {:ok, profile} = Trust.get_trust_profile("lifecycle_agent")
-      assert profile.total_actions == 0
-      assert profile.successful_actions == 0
+      refute profile.frozen
 
       # Step 3: Freeze
       :ok = Trust.freeze_trust("lifecycle_agent", :manual_review)
@@ -251,17 +247,18 @@ defmodule Arbor.TrustTest do
       refute profile.frozen
     end
 
-    test "security violations no longer reduce security component score" do
+    test "security violations no longer mutate the profile" do
       {:ok, _} = Trust.create_trust_profile("sec_lifecycle")
 
       # Recording a security violation no longer mutates the profile
-      # (scoring feedback loop removed, tiers-retirement phase 3b).
+      # (scoring feedback loop removed, tiers-retirement phase 3b; score/counter
+      # fields removed in the post-tier cleanup).
       :ok = Trust.record_trust_event("sec_lifecycle", :security_violation, %{})
       Process.sleep(50)
 
       {:ok, profile} = Trust.get_trust_profile("sec_lifecycle")
-      assert profile.security_score == 100.0
-      assert profile.security_violations == 0
+      refute profile.frozen
+      assert profile.baseline == :ask
     end
   end
 end
