@@ -27,13 +27,9 @@ defmodule Arbor.Memory.Introspection do
 
   - `:memory_system` — KG stats, working memory stats, proposal stats
   - `:identity` — self-knowledge traits/values/capabilities, active goal count by type
-  - `:tools` — capability list with proficiency, optional trust_tier bounds
+  - `:tools` — capability list with proficiency, default cognitive bounds
   - `:cognition` — preferences, working memory engagement/concerns/curiosity
   - `:all` — aggregates all four
-
-  ## Options
-
-  - `:trust_tier` — trust tier for preference bounds (default: `:trusted`)
   """
   @spec read_self(String.t(), atom(), keyword()) :: {:ok, map()}
   def read_self(agent_id, aspect \\ :all, opts \\ []) do
@@ -46,7 +42,7 @@ defmodule Arbor.Memory.Introspection do
           read_self_identity(agent_id, opts)
 
         :tools ->
-          read_self_tools(agent_id, opts)
+          read_self_tools(agent_id)
 
         :cognition ->
           read_self_cognition(agent_id)
@@ -54,7 +50,7 @@ defmodule Arbor.Memory.Introspection do
         :all ->
           Map.merge(
             Map.merge(read_self_memory_system(agent_id), read_self_identity(agent_id, opts)),
-            Map.merge(read_self_tools(agent_id, opts), read_self_cognition(agent_id))
+            Map.merge(read_self_tools(agent_id), read_self_cognition(agent_id))
           )
 
         _ ->
@@ -123,9 +119,8 @@ defmodule Arbor.Memory.Introspection do
     }
   end
 
-  defp read_self_tools(agent_id, opts) do
+  defp read_self_tools(agent_id) do
     sk = IdentityConsolidator.get_self_knowledge(agent_id)
-    trust_tier = Keyword.get(opts, :trust_tier, :trusted)
 
     capabilities =
       if sk do
@@ -138,7 +133,7 @@ defmodule Arbor.Memory.Introspection do
 
     bounds =
       try do
-        Preferences.bounds_for_tier(trust_tier)
+        Preferences.default_bounds()
       rescue
         _ -> %{}
       end
@@ -146,7 +141,6 @@ defmodule Arbor.Memory.Introspection do
     %{
       tools: %{
         capabilities: capabilities,
-        trust_tier: trust_tier,
         trust_bounds: bounds
       }
     }

@@ -227,7 +227,7 @@ defmodule Arbor.Memory do
   defdelegate serialize_preferences(prefs), to: IdentityOps
   defdelegate deserialize_preferences(data), to: IdentityOps
   defdelegate inspect_preferences(agent_id), to: IdentityOps
-  defdelegate introspect_preferences(agent_id, trust_tier), to: IdentityOps
+  defdelegate introspect_preferences(agent_id), to: IdentityOps
   defdelegate set_context_preference(agent_id, key, value), to: IdentityOps
   defdelegate get_context_preference(agent_id, key, default \\ nil), to: IdentityOps
   defdelegate save_preferences_for_agent(agent_id, prefs), to: IdentityOps
