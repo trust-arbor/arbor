@@ -29,6 +29,7 @@ defmodule ArborShell.MixProject do
       {:arbor_contracts, in_umbrella: true},
       {:arbor_security, in_umbrella: true},
       {:arbor_signals, in_umbrella: true},
+      {:bash, "~> 0.5"},
       {:jason, "~> 1.4"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
