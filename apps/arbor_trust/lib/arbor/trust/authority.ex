@@ -162,13 +162,7 @@ defmodule Arbor.Trust.Authority do
       agent_id: profile.agent_id,
       frozen: profile.frozen,
       baseline: profile.baseline,
-      rule_count: map_size(profile.rules),
-      stats: %{
-        actions: "#{profile.successful_actions}/#{profile.total_actions}",
-        violations: profile.security_violations,
-        proposals: "#{profile.proposals_approved}/#{profile.proposals_submitted}",
-        tests: "#{profile.tests_passed}/#{profile.total_tests}"
-      }
+      rule_count: map_size(profile.rules)
     }
   end
 

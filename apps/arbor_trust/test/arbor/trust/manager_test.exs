@@ -38,36 +38,10 @@ defmodule Arbor.Trust.ManagerTest do
       assert profile.frozen == false
     end
 
-    test "created profile has zero counters" do
-      {:ok, profile} = Manager.create_trust_profile("agent_zero")
-      assert profile.total_actions == 0
-      assert profile.successful_actions == 0
-      assert profile.security_violations == 0
-      assert profile.total_tests == 0
-      assert profile.tests_passed == 0
-      assert profile.rollback_count == 0
-      assert profile.improvement_count == 0
-    end
-
-    test "created profile has default component scores" do
-      {:ok, profile} = Manager.create_trust_profile("agent_defaults")
-      assert profile.success_rate_score == 0.0
-      assert profile.uptime_score == 0.0
-      assert profile.security_score == 100.0
-      assert profile.test_pass_score == 0.0
-      assert profile.rollback_score == 100.0
-    end
-
     test "created profile has timestamps set" do
       {:ok, profile} = Manager.create_trust_profile("agent_ts")
       assert %DateTime{} = profile.created_at
       assert %DateTime{} = profile.updated_at
-    end
-
-    test "created profile has zero council counters" do
-      {:ok, profile} = Manager.create_trust_profile("agent_points")
-      assert profile.proposals_submitted == 0
-      assert profile.proposals_approved == 0
     end
   end
 
@@ -99,62 +73,40 @@ defmodule Arbor.Trust.ManagerTest do
   # ---------------------------------------------------------------------------
 
   # ---------------------------------------------------------------------------
-  # record_trust_event/3 — score/counter mutation removed (tiers phase 3b)
+  # record_trust_event/3 — score/counter mutation removed (tiers phase 3b),
+  # and the counter/score fields themselves removed (post-tier cleanup).
   #
-  # Recording a trust event no longer mutates profile counters or scores.
-  # Events are recorded for audit/observability and feed the circuit breaker.
+  # Recording a trust event no longer mutates the profile. Events are recorded
+  # for audit/observability and feed the circuit breaker, not the profile.
   # ---------------------------------------------------------------------------
 
-  describe "record_trust_event/3 leaves profile counters/scores unchanged" do
-    test ":action_success does not increment action counters" do
-      {:ok, _} = Manager.create_trust_profile("agent_success")
+  describe "record_trust_event/3 does not mutate the profile" do
+    test "common event types are accepted and leave the profile retrievable" do
+      {:ok, _} = Manager.create_trust_profile("agent_events")
 
-      :ok = Manager.record_trust_event("agent_success", :action_success, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_success")
-      assert profile.total_actions == 0
-      assert profile.successful_actions == 0
-      assert profile.success_rate_score == 0.0
-    end
-
-    test ":action_failure does not change counters" do
-      {:ok, _} = Manager.create_trust_profile("agent_fail")
-
-      :ok = Manager.record_trust_event("agent_fail", :action_failure, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_fail")
-      assert profile.total_actions == 0
-      assert profile.successful_actions == 0
-    end
-
-    test ":security_violation does not reduce security score" do
-      {:ok, _} = Manager.create_trust_profile("agent_sec")
-
-      for _ <- 1..3 do
-        :ok = Manager.record_trust_event("agent_sec", :security_violation, %{})
-        Process.sleep(20)
+      for event_type <- [
+            :action_success,
+            :action_failure,
+            :security_violation,
+            :test_passed,
+            :test_failed,
+            :rollback_executed,
+            :improvement_applied,
+            :proposal_submitted,
+            :proposal_approved,
+            :installation_success
+          ] do
+        :ok = Manager.record_trust_event("agent_events", event_type, %{})
       end
 
       Process.sleep(50)
 
-      {:ok, profile} = Manager.get_trust_profile("agent_sec")
-      assert profile.security_violations == 0
-      assert profile.security_score == 100.0
-    end
-
-    test ":test_passed / :test_failed do not change test counters" do
-      {:ok, _} = Manager.create_trust_profile("agent_test")
-
-      :ok = Manager.record_trust_event("agent_test", :test_passed, %{})
-      :ok = Manager.record_trust_event("agent_test", :test_failed, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_test")
-      assert profile.total_tests == 0
-      assert profile.tests_passed == 0
-      assert profile.test_pass_score == 0.0
+      # The profile is unchanged behaviorally: still retrievable, not frozen,
+      # baseline/rules intact. (There are no score/counter fields to assert on —
+      # they were removed; events flow to the audit log + circuit breaker.)
+      {:ok, profile} = Manager.get_trust_profile("agent_events")
+      assert profile.agent_id == "agent_events"
+      refute profile.frozen
     end
   end
 
@@ -312,37 +264,6 @@ defmodule Arbor.Trust.ManagerTest do
   # ---------------------------------------------------------------------------
 
   describe "record_trust_event/3 does not mutate profile counters" do
-    test ":rollback_executed leaves counters unchanged" do
-      {:ok, _} = Manager.create_trust_profile("agent_rollback")
-      :ok = Manager.record_trust_event("agent_rollback", :rollback_executed, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_rollback")
-      assert profile.rollback_count == 0
-    end
-
-    test ":improvement_applied leaves counters unchanged" do
-      {:ok, _} = Manager.create_trust_profile("agent_improve")
-      :ok = Manager.record_trust_event("agent_improve", :improvement_applied, %{})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_improve")
-      assert profile.improvement_count == 0
-    end
-
-    test "council events leave counters unchanged" do
-      {:ok, _} = Manager.create_trust_profile("agent_council")
-      :ok = Manager.record_trust_event("agent_council", :proposal_submitted, %{})
-      :ok = Manager.record_trust_event("agent_council", :proposal_approved, %{impact: :high})
-      :ok = Manager.record_trust_event("agent_council", :installation_success, %{impact: :medium})
-      Process.sleep(50)
-
-      {:ok, profile} = Manager.get_trust_profile("agent_council")
-      assert profile.proposals_submitted == 0
-      assert profile.proposals_approved == 0
-      assert profile.installations_successful == 0
-    end
-
     test "unknown event type doesn't crash" do
       {:ok, _} = Manager.create_trust_profile("agent_unknown_event")
       :ok = Manager.record_trust_event("agent_unknown_event", :some_unknown_event, %{})

@@ -118,7 +118,8 @@ defmodule Arbor.Trust.AuthorityTest do
       summary = Authority.show_summary(profile)
 
       assert summary.baseline == :allow
-      assert is_map(summary.stats)
+      assert summary.agent_id == "agent_123"
+      refute Map.has_key?(summary, :stats)
     end
   end
 
