@@ -87,7 +87,42 @@ defmodule Arbor.Shell do
   # can evaluate command-aware rules (e.g., blocking `rm -rf /`).
   def authorize_and_execute(agent_id, command, opts \\ []) do
     opts = put_cap_allowlist(opts, agent_id)
-    authorize_and_dispatch(agent_id, command, opts, fn -> execute(command, opts) end)
+    authorize_and_dispatch(agent_id, command, opts, fn -> dispatch_execute(agent_id, command, opts) end)
+  end
+
+  # Route compound commands (pipes, &&/||/;, $(…), redirection) — which the
+  # single-command sandbox rejects — to the capability-checked interpreter
+  # (Arbor.Shell.CapShell), which cap-checks EVERY command + filesystem path.
+  # Single commands keep the existing argv-executor path unchanged. Gated by
+  # config (:arbor_shell, :compound_shell_enabled, default true) for
+  # reversibility — with it off, compound commands fall back to the
+  # single-command path (and are rejected by the sandbox, as before). No
+  # regression: compound commands were rejected before this routing existed.
+  #
+  # NB: the capability gate + reflex/approval pipeline in authorize_and_dispatch
+  # already ran on the whole command string (gate-1 checks the first command's
+  # cap; the reflex rules and approval ceiling see the full string). CapShell
+  # then authorizes every command in the compound.
+  defp dispatch_execute(agent_id, command, opts) do
+    if compound_shell_enabled?() and Arbor.Shell.Sandbox.compound?(command) do
+      capshell_execute(agent_id, command, opts)
+    else
+      execute(command, opts)
+    end
+  end
+
+  defp capshell_execute(agent_id, command, opts) do
+    case Arbor.Shell.CapShell.run(agent_id, command, opts) do
+      {:ok, %{exit_code: code, stdout: out, stderr: err}} ->
+        {:ok, %{exit_code: code, stdout: out, stderr: err}}
+
+      {:error, {:parse_error, _msg}} = error ->
+        error
+    end
+  end
+
+  defp compound_shell_enabled? do
+    Application.get_env(:arbor_shell, :compound_shell_enabled, true)
   end
 
   @doc """

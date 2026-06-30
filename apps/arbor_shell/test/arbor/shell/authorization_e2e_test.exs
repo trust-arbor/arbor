@@ -88,17 +88,56 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
                Arbor.Shell.authorize_and_execute(agent_id, "git --version", sandbox: :strict)
     end
 
-    test "the safety floor still blocks a metacharacter escape to an ungranted command",
+    test "a compound command cannot execute an ungranted command via chaining",
          %{agent_id: agent_id} do
-      # The agent holds only `git`. Chaining to another command via `;` must be
-      # blocked even though git is granted — otherwise the grant becomes
-      # arbitrary execution.
+      # The agent holds only `git`. Compound commands are routed to the
+      # capability-checked interpreter (CapShell), so `;`/`&&` no longer
+      # hard-reject — but EVERY command is cap-checked, so chaining to an
+      # ungranted command must not execute it. (Previously this whole string was
+      # rejected by the metacharacter floor; the security invariant — no escape
+      # to an ungranted command — is preserved, now enforced per-command.)
+      grant_shell_capability(agent_id, "arbor://shell/exec/git")
+      target = Path.join(System.tmp_dir!(), "e2e_escape_#{:erlang.unique_integer([:positive])}")
+      File.write!(target, "survive")
+
+      assert {:ok, result} =
+               Arbor.Shell.authorize_and_execute(agent_id, "git --version; rm #{target}")
+
+      assert File.exists?(target), "ungranted rm chained after git must be blocked"
+      assert result.stderr =~ "not allowed"
+      File.rm(target)
+    end
+  end
+
+  # ===========================================================================
+  # 1c. Compound command execution (routed to CapShell)
+  # ===========================================================================
+
+  describe "compound command execution" do
+    test "a compound command runs when caps cover its commands", %{agent_id: agent_id} do
+      # git granted; echo is a builtin. `&&` is no longer rejected — it routes to
+      # the capability-checked interpreter, which runs both.
       grant_shell_capability(agent_id, "arbor://shell/exec/git")
 
-      assert {:error, _} =
-               Arbor.Shell.authorize_and_execute(
-                 agent_id,
-                 "git --version; echo pwned",
+      assert {:ok, result} = Arbor.Shell.authorize_and_execute(agent_id, "git --version && echo ok")
+      assert result.stdout =~ "ok"
+    end
+
+    test "with the feature flag off, compound commands fall back to rejection",
+         %{agent_id: agent_id} do
+      grant_shell_capability(agent_id, "arbor://shell/exec/git")
+      prev = Application.get_env(:arbor_shell, :compound_shell_enabled)
+      Application.put_env(:arbor_shell, :compound_shell_enabled, false)
+
+      on_exit(fn ->
+        if is_nil(prev),
+          do: Application.delete_env(:arbor_shell, :compound_shell_enabled),
+          else: Application.put_env(:arbor_shell, :compound_shell_enabled, prev)
+      end)
+
+      # Flag off → single-command path → the sandbox rejects the `&&` metacharacter.
+      assert {:error, {:shell_metacharacters, _}} =
+               Arbor.Shell.authorize_and_execute(agent_id, "git --version && echo ok",
                  sandbox: :strict
                )
     end

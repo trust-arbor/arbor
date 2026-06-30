@@ -108,6 +108,21 @@ defmodule Arbor.Shell.Sandbox do
     end
   end
 
+  @doc """
+  Returns `true` if the command contains shell metacharacters — i.e. it is a
+  *compound* command (sequencing `;`/`&&`/`||`, pipes `|`, substitution `$(…)`/
+  backticks, or redirection `>`/`<`) that the single-command path rejects.
+
+  Used by `Arbor.Shell.authorize_and_execute/3` to route compound commands to the
+  capability-checked interpreter (`Arbor.Shell.CapShell`) instead of rejecting
+  them. (A quoted metacharacter — `grep "a|b"` — also matches here and is routed
+  to the interpreter, which parses it correctly as a single command.)
+  """
+  @spec compound?(String.t()) :: boolean()
+  def compound?(command) when is_binary(command) do
+    Enum.any?(@shell_metacharacters, &String.contains?(command, &1))
+  end
+
   # Capability-derived path: the command must be in the agent's cap-derived
   # allowlist AND clear the always-on safety floor. The allowlist replaces the
   # hardcoded @strict_allowlist; the floor (@dangerous_commands /
