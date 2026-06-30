@@ -82,11 +82,61 @@ defmodule Arbor.Shell.Sandbox do
   Check if a command is allowed under the given sandbox level.
 
   Returns `{:ok, :allowed}` or `{:error, reason}`.
-  """
-  @spec check(String.t(), level()) :: {:ok, :allowed} | {:error, term()}
-  def check(_command, :none), do: {:ok, :allowed}
 
-  def check(command, :basic) do
+  ## Options
+
+  - `:allowlist` — a capability-derived command allowlist
+    (`Arbor.Shell.CapPolicy.allowlist/0`: `:all | {:commands, MapSet}`). When
+    present (the agent path), the COMMAND check uses this allowlist instead of
+    the level's hardcoded list, so the sandbox agrees with the capability grant
+    rather than conflicting with it. The safety floor (metacharacters +
+    dangerous-command/interpreter/flag blocking) is ALWAYS applied on top — a
+    capability grant lets an agent run a command, but never escape it via
+    metacharacters or use the dangerous-command/interpreter floor. `:none` still
+    bypasses entirely (the capability gate already authorized the command).
+    When absent (system callers), the level-based behavior is unchanged.
+  """
+  @spec check(String.t(), level(), keyword()) :: {:ok, :allowed} | {:error, term()}
+  def check(command, level, opts \\ [])
+
+  def check(_command, :none, _opts), do: {:ok, :allowed}
+
+  def check(command, level, opts) do
+    case Keyword.get(opts, :allowlist) do
+      nil -> check_by_level(command, level)
+      allowlist -> check_with_allowlist(command, allowlist)
+    end
+  end
+
+  # Capability-derived path: the command must be in the agent's cap-derived
+  # allowlist AND clear the always-on safety floor. The allowlist replaces the
+  # hardcoded @strict_allowlist; the floor (@dangerous_commands /
+  # @interpreter_commands / @dangerous_flags + metacharacters) is the absolute
+  # safety boundary a capability grant does NOT override.
+  defp check_with_allowlist(command, allowlist) do
+    with :ok <- check_metacharacters(command) do
+      {cmd, args} = parse_command(command)
+
+      cond do
+        not Arbor.Shell.CapPolicy.allows?(allowlist, cmd) ->
+          {:error, {:not_in_allowlist, cmd}}
+
+        cmd in @dangerous_commands ->
+          {:error, {:blocked_command, cmd}}
+
+        Path.basename(cmd) in @interpreter_commands ->
+          {:error, {:blocked_interpreter, cmd}}
+
+        has_dangerous_flags?(args) ->
+          {:error, {:dangerous_flags, find_dangerous_flags(args)}}
+
+        true ->
+          {:ok, :allowed}
+      end
+    end
+  end
+
+  defp check_by_level(command, :basic) do
     with :ok <- check_metacharacters(command) do
       {cmd, args} = parse_command(command)
 
@@ -107,7 +157,7 @@ defmodule Arbor.Shell.Sandbox do
     end
   end
 
-  def check(command, :strict) do
+  defp check_by_level(command, :strict) do
     with :ok <- check_metacharacters(command) do
       {cmd, _args} = parse_command(command)
 
@@ -119,7 +169,7 @@ defmodule Arbor.Shell.Sandbox do
     end
   end
 
-  def check(_command, :container) do
+  defp check_by_level(_command, :container) do
     # Container mode would delegate to container execution
     # For now, treat as :basic until container support is added
     {:error, :container_not_implemented}
@@ -130,12 +180,12 @@ defmodule Arbor.Shell.Sandbox do
   # vocabulary this module doesn't share (:standard/:permissive), which would
   # otherwise crash shell execution with a FunctionClauseError. Degrade DOWN
   # only — never widen.
-  def check(command, level) do
+  defp check_by_level(command, level) do
     Logger.warning(
       "[Shell.Sandbox] unrecognized sandbox level #{inspect(level)} — degrading to :strict"
     )
 
-    check(command, :strict)
+    check_by_level(command, :strict)
   end
 
   @doc """
