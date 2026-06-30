@@ -50,7 +50,10 @@ defmodule Arbor.Memory.ReadSelfTest do
       {:ok, result} = Arbor.Memory.read_self(agent_id, :memory_system)
 
       assert %{memory_system: ms} = result
-      assert ms.knowledge_graph.node_count == 0 || ms.knowledge_graph == %{node_count: 0, edge_count: 0}
+
+      assert ms.knowledge_graph.node_count == 0 ||
+               ms.knowledge_graph == %{node_count: 0, edge_count: 0}
+
       assert is_map(ms.working_memory)
       assert is_map(ms.proposals)
     end
@@ -124,13 +127,13 @@ defmodule Arbor.Memory.ReadSelfTest do
 
       assert %{tools: tools} = result
       assert tools.capabilities == []
-      assert tools.trust_tier == :trusted
+      refute Map.has_key?(tools, :trust_tier)
     end
 
-    test "respects trust_tier option", %{agent_id: agent_id} do
-      {:ok, result} = Arbor.Memory.read_self(agent_id, :tools, trust_tier: :veteran)
+    test "includes default cognitive bounds", %{agent_id: agent_id} do
+      {:ok, result} = Arbor.Memory.read_self(agent_id, :tools)
 
-      assert result.tools.trust_tier == :veteran
+      assert result.tools.trust_bounds == Arbor.Memory.Preferences.default_bounds()
     end
   end
 

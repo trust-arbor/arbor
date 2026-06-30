@@ -15,7 +15,6 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
   - `name` — human-readable identifier for dashboards
   - `tags` — arbitrary metadata map for developer grouping
   - `affinity_key` — for sticky routing (same key → same session)
-  - `trust_tier` — agent's trust level
   - `workspace` — filesystem scope/path for the CLI agent
   - `profile_hash` — computed SHA of provider + sorted tool modules (for O(1) matching)
 
@@ -35,7 +34,6 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
           name: String.t() | nil,
           tags: map(),
           affinity_key: String.t() | nil,
-          trust_tier: atom() | nil,
           workspace: String.t() | nil,
           profile_hash: String.t() | nil
         }
@@ -46,7 +44,6 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
     :trust_domain,
     :name,
     :affinity_key,
-    :trust_tier,
     :workspace,
     :profile_hash,
     tool_modules: [],
@@ -82,7 +79,6 @@ defmodule Arbor.AI.AcpPool.SessionProfile do
       name: Keyword.get(opts, :name) || generate_name(provider, opts),
       tags: Keyword.get(opts, :tags, %{}),
       affinity_key: Keyword.get(opts, :affinity_key),
-      trust_tier: Keyword.get(opts, :trust_tier),
       workspace: Keyword.get(opts, :workspace)
     )
   end

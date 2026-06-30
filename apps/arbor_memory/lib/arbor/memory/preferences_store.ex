@@ -63,17 +63,13 @@ defmodule Arbor.Memory.PreferencesStore do
 
   ## Parameters
 
-  - `:decay_rate` - 0.01 to 0.50 (narrower per trust tier)
-  - `:max_pins` - 1 to 200 (narrower per trust tier)
+  - `:decay_rate` - 0.01 to 0.50
+  - `:max_pins` - 1 to 200
   - `:retrieval_threshold` - 0.0 to 1.0
   - `:consolidation_interval` - 60,000ms to 3,600,000ms
   - `:attention_focus` - String or nil
   - `:type_quota` - Tuple of {type, quota}
   - `:context_preference` - Tuple of {key, value}
-
-  ## Options
-
-  - `:trust_tier` - Trust tier for tier-specific validation bounds
   """
   @spec adjust_preference(String.t(), atom(), term(), keyword()) ::
           {:ok, Preferences.t()} | {:error, term()}
@@ -86,8 +82,7 @@ defmodule Arbor.Memory.PreferencesStore do
 
         Signals.emit_cognitive_adjustment(agent_id, param, %{
           old_value: Map.get(prefs, param),
-          new_value: value,
-          trust_tier: Keyword.get(opts, :trust_tier)
+          new_value: value
         })
 
         {:ok, updated_prefs}
@@ -140,13 +135,13 @@ defmodule Arbor.Memory.PreferencesStore do
   end
 
   @doc """
-  Get a trust-aware introspection of current preferences.
+  Get an introspection of current preferences.
   """
-  @spec introspect_preferences(String.t(), atom()) :: map()
-  def introspect_preferences(agent_id, trust_tier) do
+  @spec introspect_preferences(String.t()) :: map()
+  def introspect_preferences(agent_id) do
     case get_preferences(agent_id) do
       nil -> %{agent_id: agent_id, status: :not_initialized}
-      prefs -> Preferences.introspect(prefs, trust_tier)
+      prefs -> Preferences.introspect(prefs)
     end
   end
 
@@ -231,7 +226,9 @@ defmodule Arbor.Memory.PreferencesStore do
         end
       rescue
         e ->
-          Logger.debug("[PreferencesStore] Persist failed for #{agent_id}: #{Exception.message(e)}")
+          Logger.debug(
+            "[PreferencesStore] Persist failed for #{agent_id}: #{Exception.message(e)}"
+          )
       end
     end)
   end

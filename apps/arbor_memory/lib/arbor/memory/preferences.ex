@@ -11,20 +11,15 @@ defmodule Arbor.Memory.Preferences do
   - Consolidation interval
   - Context preferences (what to include in context windows)
 
-  All parameters are validated to stay within safe ranges. When a trust tier
-  is provided, tier-specific bounds are used for validation.
+  All parameters are validated to stay within safe ranges (the default
+  cognitive bounds).
 
   ## Usage
 
       prefs = Preferences.new("agent_001")
       {:ok, prefs} = Preferences.adjust(prefs, :decay_rate, 0.15)
       prefs = Preferences.pin(prefs, "important_memory_id")
-
-  ## Trust-Aware Usage
-
-      {:ok, prefs} = Preferences.adjust(prefs, :decay_rate, 0.15, trust_tier: :trusted)
-      prefs = Preferences.pin(prefs, "memory_id", trust_tier: :trusted)
-      report = Preferences.introspect(prefs, :trusted)
+      report = Preferences.introspect(prefs)
   """
 
   @type t :: %__MODULE__{
@@ -86,46 +81,15 @@ defmodule Arbor.Memory.Preferences do
     max_context_nodes: 50
   }
 
-  # Per-tier cognitive bounds (self-contained, no external dependency)
-  @tier_cognitive_bounds %{
-    untrusted: %{
-      decay_range: {0.10, 0.10},
-      quota_range: {20, 20},
-      max_pins: 0,
-      can_adjust: false,
-      can_pin: false
-    },
-    probationary: %{
-      decay_range: {0.08, 0.12},
-      quota_range: {15, 25},
-      max_pins: 5,
-      can_adjust: true,
-      can_pin: true
-    },
-    trusted: %{
-      decay_range: {0.05, 0.15},
-      quota_range: {10, 35},
-      max_pins: 15,
-      can_adjust: true,
-      can_pin: true
-    },
-    veteran: %{
-      decay_range: {0.03, 0.20},
-      quota_range: {5, 50},
-      max_pins: 30,
-      can_adjust: true,
-      can_pin: true
-    },
-    autonomous: %{
-      decay_range: {0.01, 0.25},
-      quota_range: {5, 60},
-      max_pins: 50,
-      can_adjust: true,
-      can_pin: true
-    }
+  # Single default cognitive bounds (trust tiers retired). These were formerly
+  # the `:trusted` tier values — the sensible single default for all agents.
+  @default_cognitive_bounds %{
+    decay_range: {0.05, 0.15},
+    quota_range: {10, 35},
+    max_pins: 15,
+    can_adjust: true,
+    can_pin: true
   }
-
-  @valid_tiers Map.keys(@tier_cognitive_bounds)
 
   # ============================================================================
   # Construction
@@ -167,8 +131,7 @@ defmodule Arbor.Memory.Preferences do
       attention_focus: Keyword.get(opts, :attention_focus),
       retrieval_threshold: Keyword.get(opts, :retrieval_threshold, 0.3),
       consolidation_interval: Keyword.get(opts, :consolidation_interval, 1_800_000),
-      context_preferences:
-        Keyword.get(opts, :context_preferences, @default_context_preferences),
+      context_preferences: Keyword.get(opts, :context_preferences, @default_context_preferences),
       last_adjusted_at: nil,
       adjustment_count: 0
     }
@@ -182,12 +145,10 @@ defmodule Arbor.Memory.Preferences do
   Pin a memory to protect it from decay.
 
   Returns error if max_pins limit would be exceeded.
-  When `trust_tier:` is provided, uses tier-specific pin limits.
 
   ## Examples
 
       prefs = Preferences.pin(prefs, "memory_123")
-      prefs = Preferences.pin(prefs, "memory_123", trust_tier: :trusted)
   """
   @spec pin(t(), String.t(), keyword()) :: t() | {:error, :max_pins_reached}
   def pin(%__MODULE__{} = prefs, memory_id, opts \\ []) do
@@ -270,27 +231,21 @@ defmodule Arbor.Memory.Preferences do
   @doc """
   Adjust a cognitive parameter.
 
-  All adjustments are validated against safe ranges. When `trust_tier:` is
-  provided in opts, uses tier-specific bounds for validation.
+  All adjustments are validated against safe ranges (the default cognitive bounds).
 
   ## Parameters
 
-  - `:decay_rate` - 0.01 to 0.50 (narrower per trust tier)
-  - `:max_pins` - 1 to 200 (narrower per trust tier)
+  - `:decay_rate` - 0.01 to 0.50
+  - `:max_pins` - 1 to 200
   - `:retrieval_threshold` - 0.0 to 1.0
   - `:consolidation_interval` - 60,000ms (1 min) to 3,600,000ms (1 hour)
   - `:attention_focus` - String or nil
   - `:type_quota` - Tuple of {type, quota} where quota is positive integer or :unlimited
   - `:context_preference` - Tuple of {key, value} for context preferences
 
-  ## Options
-
-  - `:trust_tier` - Trust tier atom for tier-specific validation bounds
-
   ## Examples
 
       {:ok, prefs} = Preferences.adjust(prefs, :decay_rate, 0.15)
-      {:ok, prefs} = Preferences.adjust(prefs, :decay_rate, 0.10, trust_tier: :trusted)
       {:ok, prefs} = Preferences.adjust(prefs, :type_quota, {:fact, 1000})
   """
   @spec adjust(t(), atom(), term(), keyword()) :: {:ok, t()} | {:error, term()}
@@ -329,8 +284,7 @@ defmodule Arbor.Memory.Preferences do
       {:ok, %{prefs | retrieval_threshold: Float.round(value * 1.0, 4)} |> touch_adjusted()}
     else
       {:error,
-       {:out_of_range, :retrieval_threshold,
-        {@retrieval_threshold_min, @retrieval_threshold_max}}}
+       {:out_of_range, :retrieval_threshold, {@retrieval_threshold_min, @retrieval_threshold_max}}}
     end
   end
 
@@ -367,31 +321,19 @@ defmodule Arbor.Memory.Preferences do
   end
 
   # ============================================================================
-  # Trust Tier Bounds
+  # Cognitive Bounds
   # ============================================================================
 
   @doc """
-  Get cognitive bounds for a trust tier.
-
-  Returns the bounds map for the given tier, or nil for unknown tiers.
+  Get the default cognitive bounds (decay/quota ranges, pin limit, capability flags).
 
   ## Examples
 
-      bounds = Preferences.bounds_for_tier(:trusted)
+      bounds = Preferences.default_bounds()
       # => %{decay_range: {0.05, 0.15}, quota_range: {10, 35}, max_pins: 15, ...}
   """
-  @spec bounds_for_tier(atom()) :: map() | nil
-  def bounds_for_tier(tier) when tier in @valid_tiers do
-    Map.fetch!(@tier_cognitive_bounds, tier)
-  end
-
-  def bounds_for_tier(_), do: nil
-
-  @doc """
-  Returns all valid trust tier atoms.
-  """
-  @spec valid_tiers() :: [atom()]
-  def valid_tiers, do: @valid_tiers
+  @spec default_bounds() :: map()
+  def default_bounds, do: @default_cognitive_bounds
 
   # ============================================================================
   # Introspection
@@ -427,17 +369,17 @@ defmodule Arbor.Memory.Preferences do
   end
 
   @doc """
-  Generate a trust-aware introspection report of cognitive preferences.
+  Generate an introspection report of cognitive preferences.
 
-  Includes allowed ranges and capability flags for the given trust tier.
+  Includes allowed ranges and capability flags from the default cognitive bounds.
 
   ## Examples
 
-      report = Preferences.introspect(prefs, :trusted)
+      report = Preferences.introspect(prefs)
   """
-  @spec introspect(t(), atom()) :: map()
-  def introspect(%__MODULE__{} = prefs, trust_tier) when trust_tier in @valid_tiers do
-    bounds = Map.fetch!(@tier_cognitive_bounds, trust_tier)
+  @spec introspect(t()) :: map()
+  def introspect(%__MODULE__{} = prefs) do
+    bounds = @default_cognitive_bounds
     {min_quota, max_quota} = bounds.quota_range
     {min_decay, max_decay} = bounds.decay_range
 
@@ -465,8 +407,7 @@ defmodule Arbor.Memory.Preferences do
       consolidation_interval_minutes: div(prefs.consolidation_interval, 60_000),
       metadata: %{
         last_adjusted_at: prefs.last_adjusted_at,
-        adjustment_count: prefs.adjustment_count,
-        trust_tier: trust_tier
+        adjustment_count: prefs.adjustment_count
       }
     }
   end
@@ -606,26 +547,9 @@ defmodule Arbor.Memory.Preferences do
   defp decay_interpretation(rate) when rate <= 0.15, do: "Moderate (faster cycling)"
   defp decay_interpretation(_rate), do: "Fast (rapid cycling)"
 
-  defp decay_range_for(opts) do
-    case Keyword.get(opts, :trust_tier) do
-      nil ->
-        {@decay_rate_min, @decay_rate_max}
+  defp decay_range_for(_opts), do: {@decay_rate_min, @decay_rate_max}
 
-      tier when tier in @valid_tiers ->
-        Map.fetch!(@tier_cognitive_bounds, tier).decay_range
-    end
-  end
-
-  defp max_pins_range_for(opts) do
-    case Keyword.get(opts, :trust_tier) do
-      nil ->
-        {@max_pins_min, @max_pins_max}
-
-      tier when tier in @valid_tiers ->
-        bounds = Map.fetch!(@tier_cognitive_bounds, tier)
-        {1, bounds.max_pins}
-    end
-  end
+  defp max_pins_range_for(_opts), do: {@max_pins_min, @max_pins_max}
 
   defp validate_quota(quota, _type, _opts) when is_integer(quota) and quota <= 0 do
     {:error, {:invalid_quota, :must_be_positive_or_unlimited}}
@@ -633,31 +557,10 @@ defmodule Arbor.Memory.Preferences do
 
   defp validate_quota(:unlimited, _type, _opts), do: :ok
 
-  defp validate_quota(quota, type, opts) when is_integer(quota) do
-    case quota_range_for(opts) do
-      nil -> :ok
-      {min, max} when quota >= min and quota <= max -> :ok
-      {_min, max} when quota > max -> {:error, {:exceeds_max_quota, type}}
-      {_min, _max} -> {:error, {:below_min_quota, type}}
-    end
-  end
+  # Any positive integer quota is accepted (no per-tier quota range).
+  defp validate_quota(quota, _type, _opts) when is_integer(quota), do: :ok
 
-  defp quota_range_for(opts) do
-    case Keyword.get(opts, :trust_tier) do
-      nil ->
-        nil
-
-      tier when tier in @valid_tiers ->
-        Map.fetch!(@tier_cognitive_bounds, tier).quota_range
-    end
-  end
-
-  defp tier_max_pins(opts, default) do
-    case Keyword.get(opts, :trust_tier) do
-      nil -> default
-      tier when tier in @valid_tiers -> Map.fetch!(@tier_cognitive_bounds, tier).max_pins
-    end
-  end
+  defp tier_max_pins(_opts, default), do: default
 
   defp serialize_quota(:unlimited), do: "unlimited"
   defp serialize_quota(n) when is_integer(n), do: n

@@ -113,7 +113,6 @@ defmodule Arbor.AI.AcpPool do
   - `:tool_modules` — list of Jido action modules for this session
   - `:trust_domain` — security boundary (sessions never cross domains)
   - `:affinity_key` — sticky routing key (same key → same session)
-  - `:trust_tier` — agent's trust level
   - `:name` — human-readable session name
   - `:tags` — arbitrary metadata map
   """
@@ -586,7 +585,7 @@ defmodule Arbor.AI.AcpPool do
       end
 
     # Remove pool-specific opts before passing to AcpSession
-    pool_keys = [:timeout, :tool_modules, :trust_domain, :affinity_key, :trust_tier, :name, :tags]
+    pool_keys = [:timeout, :tool_modules, :trust_domain, :affinity_key, :name, :tags]
     session_opts = Keyword.drop(session_opts, pool_keys)
 
     case DynamicSupervisor.start_child(

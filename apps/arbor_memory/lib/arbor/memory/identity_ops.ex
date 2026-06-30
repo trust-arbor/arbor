@@ -211,8 +211,8 @@ defmodule Arbor.Memory.IdentityOps do
   @doc "Get a summary of current preferences and usage."
   defdelegate inspect_preferences(agent_id), to: PreferencesStore
 
-  @doc "Get a trust-aware introspection of current preferences."
-  defdelegate introspect_preferences(agent_id, trust_tier), to: PreferencesStore
+  @doc "Get an introspection of current preferences."
+  defdelegate introspect_preferences(agent_id), to: PreferencesStore
 
   @doc "Set a context preference for prompt building."
   defdelegate set_context_preference(agent_id, key, value), to: PreferencesStore
