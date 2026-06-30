@@ -86,6 +86,7 @@ defmodule Arbor.Shell do
   # H6: Pass command context into authorize/4 opts so the reflex pipeline
   # can evaluate command-aware rules (e.g., blocking `rm -rf /`).
   def authorize_and_execute(agent_id, command, opts \\ []) do
+    opts = put_cap_allowlist(opts, agent_id)
     authorize_and_dispatch(agent_id, command, opts, fn -> execute(command, opts) end)
   end
 
@@ -100,7 +101,21 @@ defmodule Arbor.Shell do
           | {:error, :unauthorized | term()}
   # H6: Pass command context into authorize/4 opts for async execution too.
   def authorize_and_execute_async(agent_id, command, opts \\ []) do
+    opts = put_cap_allowlist(opts, agent_id)
     authorize_and_dispatch(agent_id, command, opts, fn -> execute_async(command, opts) end)
+  end
+
+  # Thread the agent's capability-derived shell allowlist into the execution opts
+  # so the downstream sandbox command-check (Arbor.Shell.Sandbox.check/3) uses the
+  # agent's actual `arbor://shell/exec/*` grants instead of a hardcoded list. The
+  # capability gate in authorize/3 remains the authoritative authorization; this
+  # keeps the sandbox layer consistent with it (no more "granted git, still
+  # blocked by :strict" friction). System callers (plain execute/2) never set
+  # this, so their level-based behavior is unchanged.
+  defp put_cap_allowlist(opts, agent_id) do
+    Keyword.put_new_lazy(opts, :allowlist, fn ->
+      Arbor.Shell.CapPolicy.allowlist_for(agent_id)
+    end)
   end
 
   @doc """
@@ -187,7 +202,7 @@ defmodule Arbor.Shell do
   def execute_direct(cmd, args, opts \\ []) do
     sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
 
-    with {:ok, :allowed} <- Sandbox.check(cmd, sandbox),
+    with {:ok, :allowed} <- Sandbox.check(cmd, sandbox, opts),
          {:ok, execution_id} <- register_execution(cmd, opts) do
       emit_started(cmd, execution_id, opts)
 
@@ -306,7 +321,7 @@ defmodule Arbor.Shell do
   def execute_shell_command_with_options(command, opts) do
     sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
 
-    with {:ok, :allowed} <- Sandbox.check(command, sandbox),
+    with {:ok, :allowed} <- Sandbox.check(command, sandbox, opts),
          {:ok, execution_id} <- register_execution(command, opts) do
       emit_started(command, execution_id, opts)
 
@@ -332,7 +347,7 @@ defmodule Arbor.Shell do
   def execute_shell_command_async_with_options(command, opts) do
     sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
 
-    with {:ok, :allowed} <- Sandbox.check(command, sandbox),
+    with {:ok, :allowed} <- Sandbox.check(command, sandbox, opts),
          {:ok, execution_id} <- register_execution(command, opts) do
       emit_started(command, execution_id, opts)
 
@@ -408,7 +423,7 @@ defmodule Arbor.Shell do
   def execute_streaming_shell_command(command, opts) do
     sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
 
-    case Sandbox.check(command, sandbox) do
+    case Sandbox.check(command, sandbox, opts) do
       {:ok, :allowed} ->
         session_opts =
           opts

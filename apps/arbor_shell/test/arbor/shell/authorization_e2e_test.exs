@@ -71,6 +71,40 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
   end
 
   # ===========================================================================
+  # 1b. Capability-derived sandbox allowlist
+  # ===========================================================================
+
+  describe "capability-derived sandbox allowlist" do
+    test "a granted command runs under :strict even though the level allowlist excludes it",
+         %{agent_id: agent_id} do
+      # `git` is NOT in the hardcoded :strict allowlist (ls/cat/grep/…). Before
+      # the capability-derived sandbox, this was blocked by the sandbox despite
+      # the explicit grant ({:error, {:not_in_allowlist, "git"}}). Now the
+      # sandbox derives its allowlist from the agent's caps, so the grant takes
+      # effect.
+      grant_shell_capability(agent_id, "arbor://shell/exec/git")
+
+      assert {:ok, %{exit_code: 0}} =
+               Arbor.Shell.authorize_and_execute(agent_id, "git --version", sandbox: :strict)
+    end
+
+    test "the safety floor still blocks a metacharacter escape to an ungranted command",
+         %{agent_id: agent_id} do
+      # The agent holds only `git`. Chaining to another command via `;` must be
+      # blocked even though git is granted — otherwise the grant becomes
+      # arbitrary execution.
+      grant_shell_capability(agent_id, "arbor://shell/exec/git")
+
+      assert {:error, _} =
+               Arbor.Shell.authorize_and_execute(
+                 agent_id,
+                 "git --version; echo pwned",
+                 sandbox: :strict
+               )
+    end
+  end
+
+  # ===========================================================================
   # 2. Unauthorized execution
   # ===========================================================================
 
