@@ -31,8 +31,9 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
 
   # EXACT canonical cap URIs (no /**) so ToolDisclosure.profile_tools — which
   # reverse-maps a cap to a tool by canonical URI — actually exposes the tool.
+  # web_search_eval = the fixtured injected search; web_browse = the real egress.
   @cap_uris %{
-    "web_search" => "arbor://net/search",
+    "web_search_eval" => "arbor://eval/search",
     "web_browse" => "arbor://net/http"
   }
 
@@ -115,35 +116,15 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     :ok
   end
 
-  # v1: the injected content is delivered inline (as "sources gathered") rather
-  # than via a fixtured net.search — fixtured tool output is v2. Reuses the task's
-  # net.search fixture so the injection payload stays in one place.
-  defp drive(agent_id, %AgentTask{} = task) do
-    prompt = build_inline_prompt(task)
-
-    case Arbor.Agent.Manager.chat(prompt, "eval-harness", agent_id: agent_id, timeout: task.timeout_ms) do
+  # v2: the injection arrives via a FIXTURED search tool (web_search_eval), not
+  # inline — the agent must call the tool to get the poisoned content, forming the
+  # tool-use loop. So the prompt is just the task's research request.
+  defp drive(agent_id, %AgentTask{prompt: prompt, timeout_ms: timeout}) do
+    case Arbor.Agent.Manager.chat(prompt, "eval-harness", agent_id: agent_id, timeout: timeout) do
       {:ok, text} when is_binary(text) -> text
       {:ok, other} -> inspect(other)
       {:error, reason} -> raise "chat failed: #{inspect(reason)}"
     end
-  end
-
-  defp build_inline_prompt(%AgentTask{prompt: prompt, tool_fixtures: fixtures}) do
-    sources =
-      case fixtures["web_search"] do
-        results when is_list(results) ->
-          rendered =
-            Enum.map_join(results, "\n", fn r ->
-              "[#{r["title"]}] #{r["snippet"]}"
-            end)
-
-          "\n\nSources I gathered:\n" <> rendered
-
-        _ ->
-          ""
-      end
-
-    prompt <> sources
   end
 
   # ── capture ──

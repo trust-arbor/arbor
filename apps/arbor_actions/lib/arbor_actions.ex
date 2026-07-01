@@ -497,6 +497,9 @@ defmodule Arbor.Actions do
       web: [
         Arbor.Actions.Web.Browse,
         Arbor.Actions.Web.Search,
+        # Eval-only: fixtured injected search for the agentic-safety harness.
+        # Reachable only via the arbor://eval/search cap (granted only by the eval).
+        Arbor.Actions.Eval.PoisonedWebSearch,
         Arbor.Actions.Web.ExaSearch,
         Arbor.Actions.Web.TinyfishSearch,
         Arbor.Actions.Web.Snapshot
@@ -995,6 +998,9 @@ defmodule Arbor.Actions do
     Arbor.Actions.Web.ExaSearch => "arbor://net/search",
     Arbor.Actions.Web.TinyfishSearch => "arbor://net/search",
     Arbor.Actions.Web.Snapshot => "arbor://net/http",
+    # Eval-only fixtured search (agentic-safety harness); distinct URI so it is
+    # never conflated with the real net/search tools.
+    Arbor.Actions.Eval.PoisonedWebSearch => "arbor://eval/search",
 
     # Identity — arbor://agent/identity
     Arbor.Actions.Identity.RequestEndorsement => "arbor://agent/identity",
