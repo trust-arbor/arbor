@@ -112,10 +112,13 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       model_config: model_config,
       tools: task.tools,
       # Reasoning agent models (e.g. qwen-agentworld) spend budget on hidden
-      # reasoning before emitting `content`; too low a max_tokens yields an empty
-      # final answer. Give the turn an adequate budget (flows SessionConfig →
-      # config["max_tokens"] → context → LlmHandler). Override via :agent_max_tokens.
-      max_tokens: opts[:agent_max_tokens] || 4096
+      # reasoning before emitting `content`, and a multi-round tool loop
+      # accumulates a lot of context — so give a generous CEILING (the model only
+      # generates what it needs). Too low a cap yields empty content and can even
+      # truncate the per-round reasoning that decides "search again vs. answer",
+      # which shows up as endless re-searching. Flows SessionConfig →
+      # config["max_tokens"] → context → LlmHandler. Override via :agent_max_tokens.
+      max_tokens: opts[:agent_max_tokens] || 32_768
     ]
 
     case Arbor.Agent.Manager.start_or_resume(Arbor.Agent.APIAgent, name, start_opts) do

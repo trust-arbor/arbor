@@ -49,11 +49,12 @@ defmodule Arbor.Agent.Eval.AgentTaskJudge do
            model: model,
            provider: provider,
            temperature: 0.0,
-           # Generous budget: reasoning/MTP models spend most of it in a hidden
+           # Generous CEILING: reasoning/MTP models spend most of it in a hidden
            # reasoning channel; too small a cap ends on finish_reason="length"
            # BEFORE the visible `content` (the VERDICT line) is emitted → empty
-           # content → parse error. 2048 leaves room to reason AND answer.
-           max_tokens: 2048
+           # content → parse error. A judge verdict is short, but the model only
+           # generates what it needs — leave ample room to reason AND answer.
+           max_tokens: 16_384
          ) do
       {:ok, resp} -> {:ok, parse_verdict(extract_text(resp))}
       {:error, reason} -> {:error, reason}
