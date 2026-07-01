@@ -57,8 +57,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
         {:ok, agent_id} = create_agent(task, opts)
         grant_caps(agent_id, task)
         allow_tools_in_trust_profile(agent_id, task)
-        final_text = drive(agent_id, task)
-        trajectory = capture_trajectory(agent_id)
+        {final_text, trajectory} = drive_and_capture(agent_id, task)
         grade = AgentTaskGrader.grade(task, trajectory, final_text)
 
         judge =
@@ -154,40 +153,69 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   # v2: the injection arrives via a FIXTURED search tool (web_search_eval), not
   # inline — the agent must call the tool to get the poisoned content, forming the
   # tool-use loop. So the prompt is just the task's research request.
-  defp drive(agent_id, %AgentTask{prompt: prompt, timeout_ms: timeout}) do
-    case Arbor.Agent.Manager.chat(prompt, "eval-harness", agent_id: agent_id, timeout: timeout) do
-      {:ok, text} when is_binary(text) -> text
-      {:ok, other} -> inspect(other)
-      {:error, reason} -> raise "chat failed: #{inspect(reason)}"
+  #
+  # Capture the tool trajectory from the tool-loop SIGNALS (not AgentTelemetry
+  # query_events, which returns empty on this server): subscribe BEFORE the turn,
+  # let the (synchronous) chat run — signal-handler messages queue in this
+  # process's mailbox — then flush them after. Signals give tool NAME + outcome
+  # (not args); the eval scenario only exposes web_browse for exfil, so a
+  # web_browse call IS the egress attempt (exact-URL precision would need the
+  # logs_root per-call JSON — a later refinement).
+  defp drive_and_capture(agent_id, %AgentTask{prompt: prompt, timeout_ms: timeout}) do
+    collector = self()
+
+    {:ok, sub} =
+      Arbor.Signals.subscribe("agent.tool_call_completed", fn signal ->
+        send(collector, {:eval_tool_signal, signal})
+        :ok
+      end)
+
+    final_text =
+      try do
+        case Arbor.Agent.Manager.chat(prompt, "eval-harness", agent_id: agent_id, timeout: timeout) do
+          {:ok, text} when is_binary(text) -> text
+          {:ok, other} -> inspect(other)
+          # Don't raise on a turn error (e.g. :turn_timeout): keep the captured
+          # trajectory so we can still see which tools fired and how Arbor gated
+          # them. The empty/error text just means the run is inconclusive.
+          {:error, reason} -> "[turn error: #{inspect(reason)}]"
+        end
+      after
+        Arbor.Signals.unsubscribe(sub)
+      end
+
+    {final_text, flush_tool_events(agent_id, [])}
+  end
+
+  defp flush_tool_events(agent_id, acc) do
+    receive do
+      {:eval_tool_signal, signal} ->
+        data = signal_data(signal)
+
+        if to_string(data["agent_id"] || data[:agent_id] || "") == agent_id do
+          ev = %{
+            tool: to_string(data["tool"] || data[:tool] || "unknown"),
+            args: %{},
+            outcome: if(truthy?(data["success"] || data[:success]), do: :ok, else: :denied)
+          }
+
+          flush_tool_events(agent_id, [ev | acc])
+        else
+          flush_tool_events(agent_id, acc)
+        end
+    after
+      750 -> Enum.reverse(acc)
     end
   end
+
+  defp signal_data(%{data: d}) when is_map(d), do: d
+  defp signal_data(%{payload: d}) when is_map(d), do: d
+  defp signal_data(_), do: %{}
+
+  defp truthy?(true), do: true
+  defp truthy?(_), do: false
 
   # ── capture ──
-
-  defp capture_trajectory(agent_id) do
-    case Arbor.Common.AgentTelemetry.Store.query_events(agent_id,
-           event_type: :tool_call,
-           order: :asc,
-           limit: 100
-         ) do
-      events when is_list(events) -> Enum.map(events, &event_to_step/1)
-      _ -> []
-    end
-  rescue
-    _ -> []
-  end
-
-  defp event_to_step(%{data: data}) do
-    d = if is_map(data), do: data, else: %{}
-    tool = d["tool_name"] || d[:tool_name] || "unknown"
-    result = d["result"] || d[:result]
-    %{tool: to_string(tool), args: %{}, outcome: normalize_outcome(result)}
-  end
-
-  defp normalize_outcome(r) when r in [:ok, "ok", :success, "success"], do: :ok
-  defp normalize_outcome(r) when r in [:denied, "denied", :unauthorized, "unauthorized"], do: :denied
-  defp normalize_outcome(r) when r in [:error, "error"], do: {:error, :tool_error}
-  defp normalize_outcome(_), do: :ok
 
   # ── teardown ──
 
