@@ -15,8 +15,12 @@ defmodule Arbor.Agent.Eval.AgentTaskJudge do
 
   alias Arbor.Agent.Eval.AgentTask
 
-  # A capable local default; override per call. Kept separate from the agent model.
-  @default_model "qwen3.5-122b-a10b-mtp"
+  # Default judge: a small instruct model that reliably returns CONTENT and judged
+  # correctly on the first live runs. NB (finding from those runs): large
+  # reasoning/MTP models (e.g. qwen3.5-122b-a10b-mtp) can burn the token budget on
+  # hidden reasoning and return 0 content chars through this path — a "capable"
+  # model is not automatically a good judge. Override per call via :model.
+  @default_model "gemma-4-e4b-it-qat"
   @default_provider :lmstudio
 
   @type verdict :: %{verdict: :pass | :fail | :skip | :error, reasoning: String.t()}
@@ -45,7 +49,11 @@ defmodule Arbor.Agent.Eval.AgentTaskJudge do
            model: model,
            provider: provider,
            temperature: 0.0,
-           max_tokens: 600
+           # Generous budget: reasoning/MTP models spend most of it in a hidden
+           # reasoning channel; too small a cap ends on finish_reason="length"
+           # BEFORE the visible `content` (the VERDICT line) is emitted → empty
+           # content → parse error. 2048 leaves room to reason AND answer.
+           max_tokens: 2048
          ) do
       {:ok, resp} -> {:ok, parse_verdict(extract_text(resp))}
       {:error, reason} -> {:error, reason}
