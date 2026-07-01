@@ -582,8 +582,13 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
            messages: messages,
            # No artificial cap — a 4096 default truncated long agentic/tool-use
            # turns. nil lets the provider use the model's full output budget; set
-           # the `max_tokens` node attr to cap explicitly when needed.
-           max_tokens: parse_int(Map.get(node.attrs, "max_tokens"), nil),
+           # the `max_tokens` node attr to cap explicitly when needed. Falls back
+           # to the session-level `max_tokens` (config → context) when the node
+           # doesn't pin one — lets an agent carry an adequate budget for reasoning
+           # models. Precedence: node attr > session config > nil (provider full).
+           max_tokens:
+             parse_int(Map.get(node.attrs, "max_tokens"), nil) ||
+               Context.get(context, "session.max_tokens"),
            temperature: parse_float(Map.get(node.attrs, "temperature"), 0.7),
            # Forwards to req_llm as :receive_timeout (HTTP-layer cutoff).
            # req_llm defaults to 30s for openai-compatible providers, which

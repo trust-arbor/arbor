@@ -60,6 +60,12 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
     base
     |> maybe_put("session.llm_provider", config["llm_provider"] || config[:llm_provider])
     |> maybe_put("session.llm_model", config["llm_model"] || config[:llm_model])
+    # Session-level max_tokens fallback. The LlmHandler prefers a node's
+    # `max_tokens` attr (explicit per-node cap); when unset, it falls back to this
+    # so an agent can be given an adequate budget for reasoning models (whose
+    # answer lands in `content` only after the hidden reasoning finishes — too low
+    # a budget yields empty content). nil ⇒ the provider's full budget.
+    |> maybe_put("session.max_tokens", config["max_tokens"] || config[:max_tokens])
     # Runtime axis propagation (Phase 2d). Defaults to :arbor if the config
     # doesn't pin one — matches the Request struct default and the pre-2c
     # behavior. The LlmHandler reads this and sets request.runtime so the

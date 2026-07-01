@@ -49,6 +49,7 @@ defmodule Arbor.Agent.SessionConfig do
       |> maybe_put("llm_fallback_chain", fallback_chain)
       |> maybe_put("system_prompt", Keyword.get(opts, :system_prompt))
       |> maybe_put("tools", tool_names)
+      |> maybe_put("max_tokens", Keyword.get(opts, :max_tokens))
 
     base = [
       session_id: "agent-session-#{agent_id}",
