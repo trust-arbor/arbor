@@ -39,6 +39,22 @@ defmodule Arbor.Trust.AuthorityTest do
       assert Authority.effective_mode(profile, "arbor://code/write/file.ex") == :ask
     end
 
+    test "arbor://agent/discover_tools is :auto even with an :ask baseline (agents must discover their own tools without an approval prompt)" do
+      # A bare profile: :ask baseline, no rules. Without the infra-auto default,
+      # discover_tools would fall to :ask → an approval request on every turn,
+      # blocking the agent from discovering its own tools.
+      profile = %{Authority.new_profile("agent_123") | baseline: :ask, rules: %{}}
+      assert Authority.effective_mode(profile, "arbor://agent/discover_tools") == :auto
+    end
+
+    test "an explicit profile rule still overrides the discover_tools infra-auto default" do
+      profile =
+        %{Authority.new_profile("agent_123") | baseline: :ask, rules: %{}}
+        |> Authority.set_rule("arbor://agent/discover_tools", :block)
+
+      assert Authority.effective_mode(profile, "arbor://agent/discover_tools") == :block
+    end
+
     test "A1: proactive notify is allowed by default (cautious preset, no ceiling caps it)" do
       {_baseline, rules} = Authority.preset_rules(:cautious)
       # The preset grants notify allow-by-default (vs the :ask baseline).

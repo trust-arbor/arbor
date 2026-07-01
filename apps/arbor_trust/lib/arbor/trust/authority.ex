@@ -102,8 +102,14 @@ defmodule Arbor.Trust.Authority do
   """
   @spec effective_mode(Profile.t(), String.t(), keyword()) :: :block | :ask | :allow | :auto
   def effective_mode(%Profile{} = profile, resource_uri, opts \\ []) do
-    # Layer 1: User preference
-    user_mode = resolve_prefix(profile.rules, resource_uri, profile.baseline)
+    # Layer 1: User preference. Infrastructure URIs (an agent discovering its OWN
+    # tools) default to :auto when the profile has no matching rule — listing tools
+    # grants no access (execution still needs caps), and requiring approval both
+    # spams the owner and blocks the agent from functioning. An explicit profile
+    # rule still overrides (resolve_prefix returns it); ceilings + model constraints
+    # below still apply (most-restrictive wins).
+    layer1_default = if infrastructure_auto?(resource_uri), do: :auto, else: profile.baseline
+    user_mode = resolve_prefix(profile.rules, resource_uri, layer1_default)
 
     # Layer 2: Security ceilings
     ceilings = Keyword.get(opts, :security_ceilings, default_security_ceilings())
@@ -130,7 +136,8 @@ defmodule Arbor.Trust.Authority do
     ceilings = Keyword.get(opts, :security_ceilings, default_security_ceilings())
     model_class = Keyword.get(opts, :model_class)
 
-    user_mode = resolve_prefix(profile.rules, resource_uri, profile.baseline)
+    layer1_default = if infrastructure_auto?(resource_uri), do: :auto, else: profile.baseline
+    user_mode = resolve_prefix(profile.rules, resource_uri, layer1_default)
     ceiling_mode = resolve_prefix(ceilings, resource_uri, :auto)
 
     model_mode =
@@ -150,6 +157,20 @@ defmodule Arbor.Trust.Authority do
       matching_rule: find_matching_rule(profile.rules, resource_uri)
     }
   end
+
+  # URIs that are pure infrastructure for an agent's own operation — they grant no
+  # access on their own, so requiring approval only breaks the agent and spams the
+  # owner. These default to :auto (Layer 1) unless the profile sets an explicit
+  # rule. Discovering one's own tools is the canonical case (arbor://agent/
+  # discover_tools); execution of any discovered tool still requires its capability.
+  @infrastructure_auto_prefixes ["arbor://agent/discover_tools"]
+
+  @spec infrastructure_auto?(String.t()) :: boolean()
+  defp infrastructure_auto?(resource_uri) when is_binary(resource_uri) do
+    Enum.any?(@infrastructure_auto_prefixes, &String.starts_with?(resource_uri, &1))
+  end
+
+  defp infrastructure_auto?(_), do: false
 
   # ===========================================================================
   # Convert — Display
