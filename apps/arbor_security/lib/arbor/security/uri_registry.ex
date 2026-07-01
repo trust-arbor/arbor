@@ -142,6 +142,11 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://net/http",
     "arbor://net/search",
 
+    # Eval-only: fixtured injected search for the agentic-safety eval harness
+    # (Arbor.Actions.Eval.PoisonedWebSearch). A real namespace so the URI registry
+    # doesn't block the eval tool; reachable only via the eval-granted capability.
+    "arbor://eval/search",
+
     # Monitor facade
     "arbor://monitor/read",
     "arbor://monitor/remediate",

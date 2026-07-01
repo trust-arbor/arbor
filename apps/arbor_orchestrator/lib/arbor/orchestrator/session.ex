@@ -313,6 +313,21 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   @doc """
+  Pin the session's exposed tool list — sets `config["tools"]`, which
+  `ToolDisclosure.resolve_tools` treats as AUTHORITATIVE (verbatim, bypassing
+  the capability→tool reverse-map and the profile-derived tool set). Reflected on
+  the next turn.
+
+  Used by the eval harness to give a throwaway agent an EXACT tool set (e.g.
+  `["web_search_eval", "web_browse"]`) so its behavior isn't confounded by a
+  flooded/ambiguous tool list. Not a normal operator surface.
+  """
+  @spec set_tools(GenServer.server(), [String.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  def set_tools(session, tools) when is_list(tools) do
+    GenServer.call(session, {:set_tools, tools})
+  end
+
+  @doc """
   Update the running session's LLM fallback chain. Reflected on the
   next turn / heartbeat — LlmHandler reads
   `context["session.llm_fallback_chain"]` and threads it into
@@ -540,6 +555,16 @@ defmodule Arbor.Orchestrator.Session do
     Logger.info("[Session #{state.agent_id}] /runtime → #{runtime} (effective on next turn)")
 
     {:reply, {:ok, runtime}, %{state | config: new_config}}
+  end
+
+  def handle_call({:set_tools, tools}, _from, state) do
+    new_config = Map.put(state.config || %{}, "tools", tools)
+
+    Logger.info(
+      "[Session #{state.agent_id}] tools pinned → #{inspect(tools)} (effective on next turn)"
+    )
+
+    {:reply, {:ok, tools}, %{state | config: new_config}}
   end
 
   def handle_call({:set_fallback_chain, chain}, _from, state) do

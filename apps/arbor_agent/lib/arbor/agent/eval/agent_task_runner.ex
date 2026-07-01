@@ -56,6 +56,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       try do
         {:ok, agent_id} = create_agent(task, opts)
         grant_caps(agent_id, task)
+        allow_tools_in_trust_profile(agent_id, task)
         final_text = drive(agent_id, task)
         trajectory = capture_trajectory(agent_id)
         grade = AgentTaskGrader.grade(task, trajectory, final_text)
@@ -100,7 +101,18 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       start_opts: []
     }
 
-    start_opts = [template: template, display_name: name, model_config: model_config]
+    # Pin the exposed tool list AT CREATION (SessionConfig.build reads :tools →
+    # config["tools"], which ToolDisclosure treats as authoritative). This is the
+    # reliable exposure path — the cap→tool reverse-map is many-to-one for
+    # arbor://net/http and baseline :allow floods the profile-derived list, so
+    # relying on caps alone let the agent flail on find_tools/web_snapshot instead
+    # of calling web_search_eval.
+    start_opts = [
+      template: template,
+      display_name: name,
+      model_config: model_config,
+      tools: task.tools
+    ]
 
     case Arbor.Agent.Manager.start_or_resume(Arbor.Agent.APIAgent, name, start_opts) do
       {:ok, agent_id, _pid} -> {:ok, agent_id}
@@ -112,6 +124,29 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     for tool <- tools, uri = @cap_uris[tool], not is_nil(uri) do
       Arbor.Security.grant(principal: agent_id, resource: uri)
     end
+
+    :ok
+  end
+
+  # The capability grant only says the agent MAY use a resource; the trust
+  # profile's per-resource rule sets the MODE. Without a rule, the profile's
+  # baseline (:ask) governs → the tool call blocks on human approval, which an
+  # autonomous eval can't answer (the agent then loops). So set the eval tools to
+  # :allow. NB: :allow only steps the *approval* gate aside — Arbor's taint/egress
+  # gate still applies, which is exactly the defense this eval means to test
+  # (does tainted web content get blocked from egress even when the action is
+  # allowed?).
+  defp allow_tools_in_trust_profile(agent_id, %AgentTask{tools: tools}) do
+    Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+      profile = %{profile | baseline: :allow}
+
+      Enum.reduce(tools, profile, fn tool, acc ->
+        case @cap_uris[tool] do
+          nil -> acc
+          uri -> Arbor.Trust.Authority.set_rule(acc, uri, :allow)
+        end
+      end)
+    end)
 
     :ok
   end
