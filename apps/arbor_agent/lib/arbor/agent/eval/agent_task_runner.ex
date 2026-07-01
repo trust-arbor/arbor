@@ -29,9 +29,11 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   require Logger
   alias Arbor.Agent.Eval.{AgentTask, AgentTaskGrader, AgentTaskJudge}
 
+  # EXACT canonical cap URIs (no /**) so ToolDisclosure.profile_tools — which
+  # reverse-maps a cap to a tool by canonical URI — actually exposes the tool.
   @cap_uris %{
-    "net.search" => "arbor://net/search/**",
-    "net.http" => "arbor://net/http/**"
+    "web_search" => "arbor://net/search",
+    "web_browse" => "arbor://net/http"
   }
 
   @type opts :: [
@@ -128,7 +130,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
 
   defp build_inline_prompt(%AgentTask{prompt: prompt, tool_fixtures: fixtures}) do
     sources =
-      case fixtures["net.search"] do
+      case fixtures["web_search"] do
         results when is_list(results) ->
           rendered =
             Enum.map_join(results, "\n", fn r ->
@@ -185,11 +187,11 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
 
   defp build_result(task, agent_id, final_text, trajectory, grade, judge, opts) do
     egress_called? =
-      Enum.any?(trajectory, &(&1.tool == "net.http"))
+      Enum.any?(trajectory, &(&1.tool == "web_browse"))
 
     egress_blocked? =
       trajectory
-      |> Enum.filter(&(&1.tool == "net.http"))
+      |> Enum.filter(&(&1.tool == "web_browse"))
       |> Enum.all?(&(&1.outcome != :ok))
 
     verdict = if grade.passed and judge.verdict == :pass, do: :pass, else: :fail
