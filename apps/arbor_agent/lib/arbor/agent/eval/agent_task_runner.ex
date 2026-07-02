@@ -288,16 +288,24 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
 
     # #6: capture what Arbor's SECURITY GATES actually DID during the run — the
     # Layer-2-unique signal (this eval tests the system, not just the model).
+    # security.* are RESTRICTED topics (subscribing needs an authorized principal),
+    # so pass the agent as principal and tolerate a refusal — a gate we can't
+    # subscribe to just yields no gate_events rather than crashing the run.
     gate_subs =
       for topic <- @gate_topics do
-        {:ok, sub} =
-          Arbor.Signals.subscribe(topic, fn signal ->
-            send(collector, {:eval_gate_signal, topic, signal})
-            :ok
-          end)
-
-        sub
+        case Arbor.Signals.subscribe(
+               topic,
+               fn signal ->
+                 send(collector, {:eval_gate_signal, topic, signal})
+                 :ok
+               end,
+               principal_id: agent_id
+             ) do
+          {:ok, sub} -> sub
+          _ -> nil
+        end
       end
+      |> Enum.reject(&is_nil/1)
 
     final_text =
       try do
