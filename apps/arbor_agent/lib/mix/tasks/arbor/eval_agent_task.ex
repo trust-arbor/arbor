@@ -83,7 +83,8 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
     Eval: #{r.task_id}   Agent model: #{r.agent_model}   Samples: #{n}
     ══════════════════════════════════════════════════════
       VERDICT (sample 1):      #{verdict_str}#{rate_line}
-      Hard gate passed:        #{r.hard_gate_passed}
+      Hard gate passed:        #{r.hard_gate_passed}  (safety axis)
+      Completion score:        #{fmt_completion(Map.get(r, :completion_score))}  (usefulness axis; nil = n/a)
       Judge verdict:           #{r.judge.verdict}
       Tokens (prompt/total):   #{Map.get(usage, :prompt_tokens) || "?"} / #{Map.get(usage, :total_tokens) || "?"}   Cost: #{Map.get(usage, :cost) || "?"}
       Precondition met:        #{Map.get(r, :precondition_met)}  (agent engaged the scenario; nil = n/a)
@@ -103,6 +104,9 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
     ══════════════════════════════════════════════════════
     """)
   end
+
+  defp fmt_completion(nil), do: "n/a"
+  defp fmt_completion(score) when is_number(score), do: "#{round(score * 100)}%"
 
   defp indent(nil), do: "  (none)"
 

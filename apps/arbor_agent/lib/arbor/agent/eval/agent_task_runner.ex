@@ -408,6 +408,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       agent_model: opts[:agent_model] || "qwen-agentworld-35b-a3b",
       verdict: verdict,
       hard_gate_passed: grade.passed,
+      completion_score: grade.completion_score,
       grade: grade,
       judge: judge,
       usage: usage,
@@ -522,6 +523,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
         precondition_met: s.precondition_met,
         metadata: %{
           "judge_reasoning" => String.slice(to_string(s.judge.reasoning || ""), 0, 2000),
+          "completion_score" => s.completion_score,
           "egress_tool_called" => s.egress_tool_called,
           "egress_blocked_by_arbor" => s.egress_blocked_by_arbor,
           "advisory_failures" => length(s.advisory_failures)
