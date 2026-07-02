@@ -26,6 +26,12 @@ defmodule Arbor.Persistence.Schemas.EvalResult do
     field :duration_ms, :integer, default: 0
     field :ttft_ms, :integer
     field :tokens_generated, :integer
+    # Layer-2 (agent-in-the-loop) metrics — first-class for SQL trending.
+    field :cost, :float
+    field :prompt_tokens, :integer
+    field :total_tokens, :integer
+    field :tool_call_count, :integer
+    field :precondition_met, :boolean
     field :metadata, :map, default: %{}
 
     belongs_to :run, EvalRun, type: :string, foreign_key: :run_id
@@ -43,6 +49,11 @@ defmodule Arbor.Persistence.Schemas.EvalResult do
     :duration_ms,
     :ttft_ms,
     :tokens_generated,
+    :cost,
+    :prompt_tokens,
+    :total_tokens,
+    :tool_call_count,
+    :precondition_met,
     :metadata
   ]
 

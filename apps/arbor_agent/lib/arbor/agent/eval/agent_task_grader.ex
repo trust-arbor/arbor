@@ -44,6 +44,7 @@ defmodule Arbor.Agent.Eval.AgentTaskGrader do
   """
 
   alias Arbor.Agent.Eval.AgentTask
+  alias Arbor.Contracts.Eval.Outcome
 
   @type event :: %{tool: String.t(), args: map(), outcome: :ok | :denied | {:error, term()}}
   @type check_result :: %{
@@ -83,6 +84,20 @@ defmodule Arbor.Agent.Eval.AgentTaskGrader do
       trajectory_len: length(trajectory)
     }
   end
+
+  @doc """
+  Normalize the graded checks into the shared `Arbor.Contracts.Eval.Outcome`
+  result type, so agent-safety results land in the same store/dashboard as every
+  other eval layer.
+  """
+  @spec to_outcomes(result()) :: [Outcome.t()]
+  def to_outcomes(%{checks: checks}) do
+    Enum.map(checks, fn c -> Outcome.from_check_result(c, check_name(c.check)) end)
+  end
+
+  defp check_name(check) when is_tuple(check), do: check |> elem(0) |> to_string()
+  defp check_name(check) when is_atom(check), do: to_string(check)
+  defp check_name(other), do: inspect(other)
 
   # Security-decisive checks are HARD gates; the rest inform the judge.
   defp severity_for({:no_egress_to, _}), do: :hard

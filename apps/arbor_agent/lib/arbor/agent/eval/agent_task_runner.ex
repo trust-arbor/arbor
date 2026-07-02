@@ -68,7 +68,9 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
         {:ok, agent_id} = create_agent(task, opts)
         grant_caps(agent_id, task, scenario_dir)
         allow_tools_in_trust_profile(agent_id, task)
+        t0 = System.monotonic_time(:millisecond)
         {final_text, trajectory} = drive_and_capture(agent_id, task, scenario_dir)
+        duration_ms = System.monotonic_time(:millisecond) - t0
         grade = AgentTaskGrader.grade(task, trajectory, final_text)
 
         judge =
@@ -82,7 +84,11 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
             {:error, reason} -> %{verdict: :error, reasoning: "judge failed: #{inspect(reason)}"}
           end
 
-        {:ok, build_result(task, agent_id, final_text, trajectory, grade, judge, opts)}
+        result = build_result(task, agent_id, final_text, trajectory, grade, judge, opts)
+        # Land the run in the shared EvalRun/EvalResult store (best-effort — a
+        # persistence hiccup must not fail the eval or lose the in-memory result).
+        run_id = persist_run(task, result, grade, trajectory, duration_ms, opts)
+        {:ok, Map.put(result, :eval_run_id, run_id)}
       rescue
         e -> {:error, {:run_failed, Exception.message(e)}}
       after
@@ -338,6 +344,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       hard_gate_passed: grade.passed,
       judge: judge,
       injection_delivered: injection_delivered,
+      precondition_met: precondition_met?(task, trajectory),
       search_result_preview: (search_ev && Map.get(search_ev, :result_preview)) || "",
       egress_tool_called: egress_called?,
       egress_blocked_by_arbor: egress_called? and egress_blocked?,
@@ -346,6 +353,97 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       trajectory: trajectory,
       final_text: final_text
     }
+  end
+
+  # Did the agent actually engage the scenario (fire the precondition tool with a
+  # successful result)? nil when the task declares none. A false here means the run
+  # is vacuous — a "pass" is not meaningful.
+  defp precondition_met?(%AgentTask{precondition_tool: nil}, _trajectory), do: nil
+
+  defp precondition_met?(%AgentTask{precondition_tool: tool}, trajectory),
+    do: Enum.any?(trajectory, &(&1.tool == tool and &1.outcome == :ok))
+
+  # Land the run in the shared EvalRun/EvalResult store as a Layer-2 (system) eval,
+  # normalized into Outcomes, with run-identity + first-class metrics. Best-effort:
+  # never fail the eval on a persistence error.
+  defp persist_run(task, result, grade, trajectory, duration_ms, opts) do
+    outcomes = AgentTaskGrader.to_outcomes(grade)
+    run_id = "eval_#{task.id}_#{System.unique_integer([:positive, :monotonic])}"
+    model = opts[:agent_model] || "qwen-agentworld-35b-a3b"
+    scores = Map.new(outcomes, fn o -> {o.evaluator, o.score} end)
+
+    run_attrs = %{
+      id: run_id,
+      domain: "security_verify",
+      model: model,
+      provider: to_string(opts[:agent_provider] || :lmstudio),
+      dataset: task.id,
+      graders: Enum.map(outcomes, & &1.evaluator),
+      sample_count: 1,
+      duration_ms: duration_ms,
+      status: "completed",
+      layer: "system",
+      task_id: task.id,
+      git_sha: git_sha(),
+      git_dirty: git_dirty(),
+      metrics: %{
+        "passed" => result.verdict == :pass,
+        "hard_gate_passed" => result.hard_gate_passed,
+        "judge_verdict" => to_string(result.judge.verdict)
+      }
+    }
+
+    result_attrs = %{
+      id: "#{run_id}_1",
+      run_id: run_id,
+      sample_id: "1",
+      actual: String.slice(result.final_text || "", 0, 4000),
+      passed: result.verdict == :pass,
+      scores: scores,
+      duration_ms: duration_ms,
+      tool_call_count: length(trajectory),
+      precondition_met: result.precondition_met,
+      metadata: %{
+        "judge_reasoning" => String.slice(to_string(result.judge.reasoning || ""), 0, 2000),
+        "egress_tool_called" => result.egress_tool_called,
+        "egress_blocked_by_arbor" => result.egress_blocked_by_arbor,
+        "advisory_failures" => length(result.advisory_failures)
+      }
+    }
+
+    # Check both inserts — a changeset error must NOT masquerade as a persisted run.
+    with {:ok, _} <- Arbor.Persistence.insert_eval_run(run_attrs),
+         {:ok, _} <- Arbor.Persistence.insert_eval_result(result_attrs) do
+      run_id
+    else
+      {:error, changeset} ->
+        require Logger
+        Logger.warning("[eval] persist_run insert failed: #{inspect(changeset.errors)}")
+        nil
+    end
+  rescue
+    e ->
+      require Logger
+      Logger.warning("[eval] persist_run failed: #{Exception.message(e)}")
+      nil
+  end
+
+  defp git_sha do
+    case System.cmd("git", ["rev-parse", "HEAD"], stderr_to_stdout: true) do
+      {out, 0} -> String.trim(out)
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp git_dirty do
+    case System.cmd("git", ["status", "--porcelain"], stderr_to_stdout: true) do
+      {out, 0} -> String.trim(out) != ""
+      _ -> nil
+    end
+  rescue
+    _ -> nil
   end
 
   defp normalize_provider(p) when is_atom(p), do: p
