@@ -150,7 +150,7 @@ defmodule Arbor.Dashboard.Live.EvalLive do
                 {run_field(run, :model) || "unknown"}
               </div>
               <div style="font-size: 0.75rem; opacity: 0.7;">
-                {run_field(run, :provider) || ""} · {run_field(run, :dataset) || ""}
+                {run_field(run, :provider) || ""} · {run_field(run, :dataset) || ""} · {format_layer(run_field(run, :layer))}
               </div>
             </div>
             <.badge
@@ -159,7 +159,7 @@ defmodule Arbor.Dashboard.Live.EvalLive do
             />
             <div style="text-align: right; min-width: 80px;">
               <div style="font-size: 0.9rem; font-weight: 600;">
-                {format_accuracy(run_field(run, :metrics))}
+                {layer2_score(run)}
               </div>
               <div style="font-size: 0.75rem; opacity: 0.7;">
                 {format_sample_count(run_field(run, :sample_count))} samples
@@ -284,6 +284,9 @@ defmodule Arbor.Dashboard.Live.EvalLive do
                 </div>
                 <div style="font-size: 0.8rem; opacity: 0.7;">
                   {format_scores(run_field(result, :scores))}
+                </div>
+                <div style="font-size: 0.7rem; opacity: 0.6; text-align: right; min-width: 130px;">
+                  {layer2_result_meta(result)}
                 </div>
                 <div style="font-size: 0.75rem; opacity: 0.6;">
                   {format_duration(run_field(result, :duration_ms))}
@@ -570,6 +573,37 @@ defmodule Arbor.Dashboard.Live.EvalLive do
   defp format_duration(ms), do: EvalCore.format_duration(ms)
   defp format_graders(graders), do: EvalCore.format_graders(graders)
   defp format_scores(scores), do: EvalCore.format_scores(scores)
+  defp format_layer(layer), do: EvalCore.format_layer(layer)
+  defp format_pass_rate(metrics), do: EvalCore.format_pass_rate(metrics)
+
+  # Layer-2 (agent-in-the-loop) runs report a pass RATE over N samples; Layer-1
+  # runs report accuracy.
+  defp layer2_score(run) do
+    case run_field(run, :layer) do
+      "system" -> format_pass_rate(run_field(run, :metrics))
+      _ -> format_accuracy(run_field(run, :metrics))
+    end
+  end
+
+  # Compact per-result Layer-2 metrics (tool calls, tokens, whether the agent
+  # engaged the scenario). nil fields (Layer-1 results) are omitted.
+  defp layer2_result_meta(result) do
+    [
+      fmt_meta(run_field(result, :tool_call_count), "tools"),
+      fmt_meta(run_field(result, :total_tokens), "tok"),
+      precond_meta(run_field(result, :precondition_met))
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" · ")
+  end
+
+  defp fmt_meta(nil, _label), do: nil
+  defp fmt_meta(n, label), do: "#{n} #{label}"
+
+  defp precond_meta(nil), do: nil
+  defp precond_meta(true), do: "engaged"
+  defp precond_meta(false), do: "⚠ vacuous"
+
   defp format_relative_time(value), do: EvalCore.format_relative_time(value)
   defp datetime_compare_desc(a, b), do: EvalCore.datetime_compare_desc(a, b)
 

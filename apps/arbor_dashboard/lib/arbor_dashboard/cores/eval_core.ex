@@ -43,10 +43,15 @@ defmodule Arbor.Dashboard.Cores.EvalCore do
       domain: domain,
       domain_color: domain_color(domain),
       model: run_field(run, :model),
+      layer: run_field(run, :layer),
+      layer_label: format_layer(run_field(run, :layer)),
+      task_id: run_field(run, :task_id),
       duration_ms: run_field(run, :duration_ms),
       duration_label: format_duration(run_field(run, :duration_ms)),
       sample_count: run_field(run, :sample_count) || 0,
       sample_count_label: format_sample_count(run_field(run, :sample_count)),
+      # Layer-2 (agent-in-the-loop) pass RATE over N samples, when present.
+      pass_rate_label: format_pass_rate(metrics),
       accuracy_label: format_accuracy(metrics),
       mean_score_label: format_mean_score(metrics),
       graders_label: format_graders(run_field(run, :graders)),
@@ -162,6 +167,23 @@ defmodule Arbor.Dashboard.Cores.EvalCore do
   end
 
   def format_accuracy(_), do: "--"
+
+  @doc "Format the eval layer (Layer-2 agent-in-the-loop vs Layer-1 task)."
+  @spec format_layer(String.t() | nil) :: String.t()
+  def format_layer("system"), do: "L2·system"
+  def format_layer("task"), do: "L1·task"
+  def format_layer(_), do: "--"
+
+  @doc "Format the Layer-2 pass RATE (fraction of N samples that passed) as a %."
+  @spec format_pass_rate(map() | nil | term()) :: String.t()
+  def format_pass_rate(metrics) when is_map(metrics) do
+    case metrics["pass_rate"] || metrics[:pass_rate] do
+      r when is_number(r) -> format_pct(r)
+      _ -> "--"
+    end
+  end
+
+  def format_pass_rate(_), do: "--"
 
   @doc "Format a mean_score from a metrics map."
   @spec format_mean_score(map() | nil | term()) :: String.t()
