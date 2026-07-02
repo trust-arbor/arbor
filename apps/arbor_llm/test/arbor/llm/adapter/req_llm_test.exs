@@ -62,9 +62,15 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
   end
 
   describe "build_model_spec/1" do
-    test "joins provider and model with a colon" do
+    test "joins provider and model into a dispatchable spec" do
       req = %Request{provider: "anthropic", model: "claude-3-5-sonnet"}
-      assert {:ok, "anthropic:claude-3-5-sonnet"} = Adapter.build_model_spec(req)
+      # Catalog-known → "provider:model" string (attaches pricing); catalog-miss →
+      # a bare dispatchable struct (so fresh models still run). Either way it must
+      # target the right provider + model.
+      assert {:ok, spec} = Adapter.build_model_spec(req)
+
+      assert spec == "anthropic:claude-3-5-sonnet" or
+               match?(%LLMDB.Model{provider: :anthropic, id: "claude-3-5-sonnet"}, spec)
     end
 
     test "Arbor uses req_llm names directly — 'google' is the gemini provider" do
@@ -94,9 +100,13 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
                Adapter.build_model_spec(%Request{provider: "ollama", model: "nomic-embed-text"})
     end
 
-    test "unknown provider passes through unchanged (operator escape hatch)" do
+    test "operator escape hatch — provider+model still produce a dispatchable spec" do
       req = %Request{provider: "amazon_bedrock", model: "claude-via-bedrock"}
-      assert {:ok, "amazon_bedrock:claude-via-bedrock"} = Adapter.build_model_spec(req)
+      # Passthrough string when catalog-known, dispatchable struct otherwise.
+      assert {:ok, spec} = Adapter.build_model_spec(req)
+
+      assert spec == "amazon_bedrock:claude-via-bedrock" or
+               match?(%LLMDB.Model{provider: :amazon_bedrock, id: "claude-via-bedrock"}, spec)
     end
 
     test "rejects missing provider" do
