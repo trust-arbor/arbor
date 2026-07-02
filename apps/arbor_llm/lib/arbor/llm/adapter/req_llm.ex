@@ -359,7 +359,18 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
           {:ok, provider <> ":" <> model}
 
         atom ->
-          {:ok, Atom.to_string(atom) <> ":" <> model}
+          spec = Atom.to_string(atom) <> ":" <> model
+
+          # The catalog lookup attaches pricing/capability metadata — but its
+          # snapshot lags fresh releases, so a just-launched slug (e.g. a new
+          # OpenRouter model) returns {:error, :not_found} and dispatch fails
+          # before the network. Fall back to a bare struct (as local providers
+          # do) so any provider-served model still runs; the response usage
+          # carries the tokens/cost either way.
+          case ReqLLM.model(spec) do
+            {:ok, _} -> {:ok, spec}
+            _ -> LLMDB.Model.new(%{id: model, model: model, provider: atom})
+          end
       end
     end
   end
