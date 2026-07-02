@@ -138,6 +138,14 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
           {:ok, Response.t()} | {:error, term()}
   def complete_streaming(%Request{} = request, callback, opts \\ [])
       when is_function(callback, 1) do
+    # Accumulate the thinking deltas: ReqLLM's process_stream forwards them to
+    # on_thinking but does NOT retain the full chain-of-thought on the assembled
+    # response (streaming captured only the first fragment, e.g. "Thinking"),
+    # whereas the non-streaming path returns it in full. Collect via the mailbox
+    # (process_stream is synchronous, so all deltas have arrived by the time it
+    # returns) and restore the full reasoning below.
+    collector = self()
+
     with {:ok, model_spec} <- build_model_spec(request),
          messages <- translate_messages(request.messages),
          req_opts <- build_req_opts(request, opts),
@@ -149,10 +157,32 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
                callback.(%Arbor.LLM.StreamEvent{type: :delta, data: %{text: text}})
              end,
              on_thinking: fn text ->
+               send(collector, {:arbor_reasoning_delta, text})
                callback.(%Arbor.LLM.StreamEvent{type: :delta, data: %{thinking: text}})
              end
            ) do
-      {:ok, translate_response(resp, request)}
+      reasoning = flush_reasoning_deltas([])
+      translated = translate_response(resp, request)
+
+      translated =
+        if String.length(reasoning) > String.length(translated.reasoning_content || "") do
+          %{translated | reasoning_content: reasoning}
+        else
+          translated
+        end
+
+      {:ok, translated}
+    end
+  end
+
+  # Drain accumulated thinking deltas from the mailbox (all present once
+  # process_stream has returned). Unique tag so it can't collide with other
+  # messages in the calling process.
+  defp flush_reasoning_deltas(acc) do
+    receive do
+      {:arbor_reasoning_delta, text} -> flush_reasoning_deltas([text | acc])
+    after
+      0 -> acc |> Enum.reverse() |> Enum.join("")
     end
   end
 

@@ -69,7 +69,8 @@ defmodule Mix.Tasks.Arbor.Eval.StreamCheck do
           finish_reason: #{inspect(Map.get(resp, :finish_reason))}
           content_parts: #{length(parts)} #{inspect(Enum.map(parts, &Map.get(&1, :kind)))}
           text preview: #{String.slice(text || "", 0, 300) |> inspect()}
-          raw: #{inspect(Map.get(resp, :raw), limit: 1200)}
+          reasoning length: #{String.length(Map.get(resp, :reasoning_content) || "")}
+          reasoning preview: #{String.slice(Map.get(resp, :reasoning_content) || "", 0, 400) |> inspect()}
         """)
 
       other ->

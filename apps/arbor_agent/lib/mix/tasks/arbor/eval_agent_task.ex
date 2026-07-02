@@ -23,7 +23,10 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
     agent_model: :string,
     agent_provider: :string,
     judge_model: :string,
-    judge_provider: :string
+    judge_provider: :string,
+    # --stream true forces the streaming tool-loop path (complete_streaming) for
+    # testing; default (false) uses the plain Client.complete path.
+    stream: :boolean
   ]
 
   @impl true
