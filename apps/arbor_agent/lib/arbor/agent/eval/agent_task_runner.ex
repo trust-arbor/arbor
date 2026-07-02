@@ -37,6 +37,15 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     "web_browse" => "arbor://net/http"
   }
 
+  # Security-gate signals to capture during a run (#6) — what Arbor's defenses
+  # actually DID: egress/taint blocks, taint propagation, tool-auth denials.
+  @gate_topics [
+    "security.egress_blocked",
+    "security.taint_blocked",
+    "security.taint_propagated",
+    "security.tool_authorization_denied"
+  ]
+
   @type opts :: [
           template: String.t(),
           agent_model: String.t(),
@@ -90,11 +99,12 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       grant_caps(agent_id, task, scenario_dir)
       allow_tools_in_trust_profile(agent_id, task)
       t0 = System.monotonic_time(:millisecond)
-      {final_text, trajectory, usage} = drive_and_capture(agent_id, task, scenario_dir)
+      {final_text, trajectory, usage, gate_events} = drive_and_capture(agent_id, task, scenario_dir)
       duration_ms = System.monotonic_time(:millisecond) - t0
       grade = AgentTaskGrader.grade(task, trajectory, final_text)
       judge = run_judge(task, trajectory, final_text, opts)
-      build_sample(task, agent_id, final_text, trajectory, usage, grade, judge, duration_ms, index, opts)
+
+      build_sample(task, agent_id, final_text, trajectory, usage, gate_events, grade, judge, duration_ms, index, opts)
     after
       if agent_id, do: teardown(agent_id)
       if scenario_dir, do: File.rm_rf(scenario_dir)
@@ -276,6 +286,19 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
         :ok
       end)
 
+    # #6: capture what Arbor's SECURITY GATES actually DID during the run — the
+    # Layer-2-unique signal (this eval tests the system, not just the model).
+    gate_subs =
+      for topic <- @gate_topics do
+        {:ok, sub} =
+          Arbor.Signals.subscribe(topic, fn signal ->
+            send(collector, {:eval_gate_signal, topic, signal})
+            :ok
+          end)
+
+        sub
+      end
+
     final_text =
       try do
         case Arbor.Agent.Manager.chat(prompt, "eval-harness", agent_id: agent_id, timeout: timeout) do
@@ -289,13 +312,14 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       after
         Arbor.Signals.unsubscribe(sub_tool)
         Arbor.Signals.unsubscribe(sub_usage)
+        Enum.each(gate_subs, &Arbor.Signals.unsubscribe/1)
       end
 
-    {events, usage} = flush_signals(agent_id, [], zero_usage())
-    {final_text, events, usage}
+    {events, usage, gate_events} = flush_signals(agent_id, [], zero_usage(), [])
+    {final_text, events, usage, gate_events}
   end
 
-  defp flush_signals(agent_id, events, usage) do
+  defp flush_signals(agent_id, events, usage, gate_events) do
     receive do
       {:eval_tool_signal, signal} ->
         data = signal_data(signal)
@@ -313,21 +337,38 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
             result_preview: to_string(data["result_preview"] || data[:result_preview] || "")
           }
 
-          flush_signals(agent_id, [ev | events], usage)
+          flush_signals(agent_id, [ev | events], usage, gate_events)
         else
-          flush_signals(agent_id, events, usage)
+          flush_signals(agent_id, events, usage, gate_events)
         end
 
       {:eval_usage_signal, signal} ->
         data = signal_data(signal)
 
         if to_string(data["agent_id"] || data[:agent_id] || "") == agent_id do
-          flush_signals(agent_id, events, add_usage(usage, data["usage"] || data[:usage]))
+          flush_signals(agent_id, events, add_usage(usage, data["usage"] || data[:usage]), gate_events)
         else
-          flush_signals(agent_id, events, usage)
+          flush_signals(agent_id, events, usage, gate_events)
+        end
+
+      {:eval_gate_signal, topic, signal} ->
+        data = signal_data(signal)
+        principal = to_string(data["principal_id"] || data[:principal_id] || data["agent_id"] || data[:agent_id] || "")
+
+        # Gate signals may or may not carry the principal; capture ours, plus any
+        # unattributed ones during our (serialized) turn.
+        if principal == "" or principal == agent_id do
+          ge = %{
+            gate: topic |> String.replace_prefix("security.", ""),
+            reason: to_string(data["reason"] || data[:reason] || data["taint"] || data[:taint] || "")
+          }
+
+          flush_signals(agent_id, events, usage, [ge | gate_events])
+        else
+          flush_signals(agent_id, events, usage, gate_events)
         end
     after
-      750 -> {Enum.reverse(events), usage}
+      750 -> {Enum.reverse(events), usage, Enum.reverse(gate_events)}
     end
   end
 
@@ -377,7 +418,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
 
   # ── result ──
 
-  defp build_sample(task, agent_id, final_text, trajectory, usage, grade, judge, duration_ms, index, opts) do
+  defp build_sample(task, agent_id, final_text, trajectory, usage, gate_events, grade, judge, duration_ms, index, opts) do
     egress_called? =
       Enum.any?(trajectory, &(&1.tool == "web_browse"))
 
@@ -412,6 +453,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       grade: grade,
       judge: judge,
       usage: usage,
+      gate_events: gate_events,
       duration_ms: duration_ms,
       injection_delivered: injection_delivered,
       precondition_met: precondition_met?(task, trajectory),
@@ -526,6 +568,9 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
           "completion_score" => s.completion_score,
           "egress_tool_called" => s.egress_tool_called,
           "egress_blocked_by_arbor" => s.egress_blocked_by_arbor,
+          # #6: what Arbor's security gates DID this run (egress/taint blocks, etc.)
+          "gate_events" => Enum.map(s.gate_events, &%{"gate" => &1.gate, "reason" => &1.reason}),
+          "gate_event_count" => length(s.gate_events),
           "advisory_failures" => length(s.advisory_failures)
         }
       }

@@ -92,6 +92,7 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
       EvalRun id (store):      #{Map.get(r, :eval_run_id) || "(not persisted)"}
       Egress tool called:      #{r.egress_tool_called}
       Egress blocked by Arbor: #{r.egress_blocked_by_arbor}
+      Security gate events:    #{fmt_gates(Map.get(r, :gate_events, []))}
       Egress targets (URLs):   #{inspect(Map.get(r, :egress_targets, []))}
       Advisory failures:       #{length(r.advisory_failures)}
       Tool calls:              #{length(r.trajectory)}
@@ -107,6 +108,9 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
 
   defp fmt_completion(nil), do: "n/a"
   defp fmt_completion(score) when is_number(score), do: "#{round(score * 100)}%"
+
+  defp fmt_gates([]), do: "none"
+  defp fmt_gates(gates), do: "#{length(gates)} — " <> Enum.map_join(gates, ", ", & &1.gate)
 
   defp indent(nil), do: "  (none)"
 
