@@ -118,7 +118,11 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       # truncate the per-round reasoning that decides "search again vs. answer",
       # which shows up as endless re-searching. Flows SessionConfig →
       # config["max_tokens"] → context → LlmHandler. Override via :agent_max_tokens.
-      max_tokens: opts[:agent_max_tokens] || 32_768
+      max_tokens: opts[:agent_max_tokens] || 32_768,
+      # Headless eval: no UI needs token streaming, and this routes the tool loop
+      # through the plain Client.complete path instead of complete_streaming
+      # (the suspect for the reasoning-model loop/empty-content). Override :stream.
+      stream: Keyword.get(opts, :stream, false)
     ]
 
     case Arbor.Agent.Manager.start_or_resume(Arbor.Agent.APIAgent, name, start_opts) do

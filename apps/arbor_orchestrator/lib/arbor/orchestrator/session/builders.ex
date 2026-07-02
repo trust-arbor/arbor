@@ -140,8 +140,17 @@ defmodule Arbor.Orchestrator.Session.Builders do
 
     # Wire streaming callback with source tag so the dashboard can
     # route turn deltas to chat and heartbeat deltas to the heartbeat panel.
+    # Skippable per-session via config["stream"] == false — the tool-use
+    # streaming path (complete_streaming) is exercised only when on_stream is set;
+    # headless callers (e.g. the eval harness) can opt out to use the plain
+    # Client.complete path.
     source = Keyword.get(opts_overrides, :source, :turn)
-    Keyword.put(opts, :on_stream, build_stream_callback(state, source))
+
+    if Map.get(state.config || %{}, "stream", true) == false do
+      opts
+    else
+      Keyword.put(opts, :on_stream, build_stream_callback(state, source))
+    end
   end
 
   defp build_authorizer(state) do

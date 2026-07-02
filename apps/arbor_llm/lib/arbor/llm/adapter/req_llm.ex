@@ -383,7 +383,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
         ReqLLM.Context.user(content)
 
       :assistant ->
-        ReqLLM.Context.assistant(content)
+        translate_assistant_content(content)
 
       :system ->
         ReqLLM.Context.system(content)
@@ -399,13 +399,52 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
         tool_call_id =
           Map.get(msg.metadata, "tool_call_id") || Map.get(msg.metadata, :tool_call_id)
 
+        # ReqLLM message content must be a list of ContentPart structs (keyed by
+        # :type), NOT raw strings — a bare string here raised "expected a map,
+        # got: <string>" when encoding the tool-result turn. Wrap the (already
+        # sanitized) tool-result text as a ReqLLM text part.
         %ReqLLM.Message{
           role: :tool,
-          content: List.wrap(content),
+          content: content |> List.wrap() |> Enum.map(&reqllm_text_part/1),
           tool_call_id: tool_call_id
         }
     end
   end
+
+  # Only raw strings need wrapping (the tool-result text that raised "expected a
+  # map"). Existing ContentPart structs / maps pass through unchanged, preserving
+  # the prior List.wrap behavior for non-string content.
+  defp reqllm_text_part(text) when is_binary(text), do: ReqLLM.Message.ContentPart.text(text)
+  defp reqllm_text_part(other), do: other
+
+  # An assistant message is either plain text (from history) OR a list of Arbor
+  # content parts (build_assistant_message emits `%{kind: :text}` +
+  # `%{kind: :tool_call}` maps for the tool-use continuation). ReqLLM has NO
+  # tool_call CONTENT part — tool calls live in the Message's `:tool_calls`
+  # field — and ReqLLM content parts are keyed by `:type`, so handing Arbor's
+  # `:kind`-keyed maps to `Context.assistant/1` as raw content raised
+  # `KeyError :type` on the continuation turn (the text part has no `:type`).
+  # Convert: text parts → the content string, tool_call parts → `:tool_calls`.
+  defp translate_assistant_content(content) when is_binary(content),
+    do: ReqLLM.Context.assistant(content)
+
+  defp translate_assistant_content(parts) when is_list(parts) do
+    text =
+      parts
+      |> Enum.filter(&(Map.get(&1, :kind) == :text))
+      |> Enum.map_join("", &(Map.get(&1, :text) || ""))
+
+    tool_calls =
+      parts
+      |> Enum.filter(&(Map.get(&1, :kind) == :tool_call))
+      |> Enum.map(fn tc ->
+        {Map.get(tc, :name), Map.get(tc, :arguments), [id: Map.get(tc, :id)]}
+      end)
+
+    ReqLLM.Context.assistant(text, tool_calls: tool_calls)
+  end
+
+  defp translate_assistant_content(other), do: ReqLLM.Context.assistant(other)
 
   @doc """
   Build the keyword opts req_llm accepts.

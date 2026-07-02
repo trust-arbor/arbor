@@ -168,6 +168,19 @@ defmodule Arbor.LLM.ToolLoop do
             end)
         })
 
+        # Surface the model's per-round reasoning (reasoning_content) — for
+        # reasoning models this is where the "search again vs. answer" decision
+        # lives, and it's otherwise invisible (not in `content`). Lets us see why
+        # a model loops instead of converging.
+        if response.reasoning_content not in [nil, ""] do
+          require Logger
+
+          Logger.info(
+            "[ToolLoop] agent=#{state.agent_id} turn=#{state.turn} tool_calls=#{length(tool_calls)} " <>
+              "REASONING: #{String.slice(response.reasoning_content, 0, 1200)}"
+          )
+        end
+
         if tool_calls == [] and response.finish_reason == :tool_calls do
           require Logger
 

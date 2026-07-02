@@ -212,6 +212,34 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       assert translated.tool_call_id == "call_xyz"
     end
 
+    test "translates :assistant with Arbor content parts (text + tool_call) into a message with tool_calls" do
+      # Regression: build_assistant_message (the tool-use continuation) emits
+      # %{kind: :text}/%{kind: :tool_call} maps. Passing them raw to
+      # ReqLLM.Context.assistant raised KeyError :type (text part has no :type).
+      content = [
+        ContentPart.text("Let me search."),
+        ContentPart.tool_call("call_1", "web_search", %{"query" => "x"})
+      ]
+
+      [translated] = Adapter.translate_messages([Message.new(:assistant, content)])
+      assert translated.role == :assistant
+      assert is_list(translated.tool_calls) and length(translated.tool_calls) == 1
+    end
+
+    test "translates :tool with STRING content into a ReqLLM content part (no 'expected a map')" do
+      # Regression: build_tool_messages produces a STRING; a bare string as
+      # ReqLLM message content raised "expected a map, got: <string>".
+      msg = %Message{
+        role: :tool,
+        content: "raw tool result text",
+        metadata: %{"tool_call_id" => "c1"}
+      }
+
+      [translated] = Adapter.translate_messages([msg])
+      assert translated.role == :tool
+      assert [%ReqLLM.Message.ContentPart{type: :text}] = translated.content
+    end
+
     test "preserves message order" do
       msgs = [
         Message.new(:system, "S"),
