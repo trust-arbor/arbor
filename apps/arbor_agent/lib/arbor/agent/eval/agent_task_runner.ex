@@ -53,6 +53,10 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     with {:ok, task} <- AgentTask.fetch(task_id) do
       agent_id = nil
 
+      # Seed the scenario as real files the agent reads with the real file_* tools
+      # (no eval-only fixtures). nil when the task has no seed_files.
+      scenario_dir = seed_scenario(task)
+
       # Optionally flip Arbor's egress gate from dark (observe-only) to ENFORCING
       # for this run so we can test whether it blocks a tainted exfil. Local
       # (LM Studio) LLM egress is :on_host → :allow, so this doesn't break the
@@ -62,9 +66,9 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
 
       try do
         {:ok, agent_id} = create_agent(task, opts)
-        grant_caps(agent_id, task)
+        grant_caps(agent_id, task, scenario_dir)
         allow_tools_in_trust_profile(agent_id, task)
-        {final_text, trajectory} = drive_and_capture(agent_id, task)
+        {final_text, trajectory} = drive_and_capture(agent_id, task, scenario_dir)
         grade = AgentTaskGrader.grade(task, trajectory, final_text)
 
         judge =
@@ -83,6 +87,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
         e -> {:error, {:run_failed, Exception.message(e)}}
       after
         if agent_id, do: teardown(agent_id)
+        if scenario_dir, do: File.rm_rf(scenario_dir)
         if opts[:enforce_egress],
           do: Application.put_env(:arbor_security, :egress_gate_enforcing, prior_egress)
       end
@@ -140,12 +145,47 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     end
   end
 
-  defp grant_caps(agent_id, %AgentTask{tools: tools}) do
+  defp grant_caps(agent_id, %AgentTask{tools: tools, capabilities: caps}, scenario_dir) do
+    # Fixtured-tool caps (web_search_eval etc.) by exact canonical URI.
     for tool <- tools, uri = @cap_uris[tool], not is_nil(uri) do
       Arbor.Security.grant(principal: agent_id, resource: uri)
     end
 
+    # Capability-based grants for tasks driven by REAL tools. fs caps are
+    # path-scoped to the seeded scenario dir (FileGuard checks the file_path
+    # against this scope); net/comms are granted as-is.
+    for cap <- caps, uri = capability_uri(cap, scenario_dir), not is_nil(uri) do
+      Arbor.Security.grant(principal: agent_id, resource: uri)
+    end
+
     :ok
+  end
+
+  defp capability_uri(:fs_read, dir) when is_binary(dir), do: fs_uri("read", dir)
+  defp capability_uri(:fs_list, dir) when is_binary(dir), do: fs_uri("list", dir)
+  defp capability_uri(:fs_write, dir) when is_binary(dir), do: fs_uri("write", dir)
+  defp capability_uri(:net_http, _dir), do: "arbor://net/http"
+  defp capability_uri(:comms_notify, _dir), do: "arbor://comms/notify/session"
+  defp capability_uri(_, _), do: nil
+
+  # Mirrors Lifecycle.grant_workspace_capabilities' URI shape: path-scoped, /**.
+  defp fs_uri(op, dir), do: "arbor://fs/#{op}/#{String.trim_leading(dir, "/")}/**"
+
+  # Seed the task's scenario as real files under a temp dir (nil if none). The
+  # agent reads them with the real file_* tools; the runner rm_rf's it after.
+  defp seed_scenario(%AgentTask{seed_files: files}) when map_size(files) == 0, do: nil
+
+  defp seed_scenario(%AgentTask{seed_files: files}) do
+    unique = System.unique_integer([:positive, :monotonic])
+    dir = Path.join(System.tmp_dir!(), "arbor_eval_#{unique}")
+
+    Enum.each(files, fn {rel, content} ->
+      path = Path.join(dir, rel)
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, content)
+    end)
+
+    dir
   end
 
   # The capability grant only says the agent MAY use a resource; the trust
@@ -160,12 +200,19 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     Arbor.Trust.Store.update_profile(agent_id, fn profile ->
       profile = %{profile | baseline: :allow}
 
-      Enum.reduce(tools, profile, fn tool, acc ->
-        case @cap_uris[tool] do
-          nil -> acc
-          uri -> Arbor.Trust.Authority.set_rule(acc, uri, :allow)
-        end
-      end)
+      profile =
+        Enum.reduce(tools, profile, fn tool, acc ->
+          case @cap_uris[tool] do
+            nil -> acc
+            uri -> Arbor.Trust.Authority.set_rule(acc, uri, :allow)
+          end
+        end)
+
+      # baseline :allow means a HALLUCINATED tool the agent wasn't granted (e.g.
+      # shell) hits its own ceiling — for shell that's :ask, which fires a real
+      # approval request to the operator's Signal. A stuck eval agent must not spam
+      # the human, so hard-:block shell (a :block rule beats the :ask ceiling).
+      Arbor.Trust.Authority.set_rule(profile, "arbor://shell/exec", :block)
     end)
 
     :ok
@@ -182,7 +229,10 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   # (not args); the eval scenario only exposes web_browse for exfil, so a
   # web_browse call IS the egress attempt (exact-URL precision would need the
   # logs_root per-call JSON — a later refinement).
-  defp drive_and_capture(agent_id, %AgentTask{prompt: prompt, timeout_ms: timeout}) do
+  defp drive_and_capture(agent_id, %AgentTask{prompt: prompt, timeout_ms: timeout}, scenario_dir) do
+    prompt =
+      if scenario_dir, do: String.replace(prompt, "{{scenario_dir}}", scenario_dir), else: prompt
+
     collector = self()
 
     {:ok, sub} =
