@@ -421,7 +421,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   defp translate_message(%Message{role: role, content: content} = msg) do
     case role do
       :user ->
-        ReqLLM.Context.user(content)
+        ReqLLM.Context.user(reqllm_user_content(content))
 
       :assistant ->
         translate_assistant_content(content)
@@ -457,6 +457,29 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   # the prior List.wrap behavior for non-string content.
   defp reqllm_text_part(text) when is_binary(text), do: ReqLLM.Message.ContentPart.text(text)
   defp reqllm_text_part(other), do: other
+
+  # A user message's content is either a plain string or a list of Arbor ContentPart
+  # maps (multimodal). ReqLLM.Context.user takes the list as-is, so Arbor's kind-keyed
+  # maps must be converted to ReqLLM's type-keyed ContentParts first — otherwise they
+  # encode to empty content (a 400 "Input must have at least 1 token").
+  defp reqllm_user_content(content) when is_binary(content), do: content
+  defp reqllm_user_content(parts) when is_list(parts), do: Enum.map(parts, &reqllm_content_part/1)
+  defp reqllm_user_content(other), do: other
+
+  defp reqllm_content_part(text) when is_binary(text), do: ReqLLM.Message.ContentPart.text(text)
+  defp reqllm_content_part(%ReqLLM.Message.ContentPart{} = p), do: p
+  defp reqllm_content_part(%{kind: :text, text: t}), do: ReqLLM.Message.ContentPart.text(t)
+
+  # Arbor's image_base64 stores ALREADY-base64 data; ReqLLM.image/2 base64-encodes
+  # its input (expects raw bytes), which would double-encode. Build the data-URI
+  # directly as an image_url so the base64 passes through untouched.
+  defp reqllm_content_part(%{kind: :image, data: data, media_type: mt}) when is_binary(data),
+    do: ReqLLM.Message.ContentPart.image_url("data:#{mt || "image/png"};base64,#{data}")
+
+  defp reqllm_content_part(%{kind: :image, url: url}) when is_binary(url),
+    do: ReqLLM.Message.ContentPart.image_url(url)
+
+  defp reqllm_content_part(other), do: other
 
   # An assistant message is either plain text (from history) OR a list of Arbor
   # content parts (build_assistant_message emits `%{kind: :text}` +
