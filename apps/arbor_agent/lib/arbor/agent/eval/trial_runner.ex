@@ -179,7 +179,8 @@ defmodule Arbor.Agent.Eval.TrialRunner do
     ai_opts = [
       model: model,
       provider: provider,
-      max_tokens: 1500,
+      # Effectively uncapped — don't truncate the model's output on a capability trial.
+      max_tokens: 32_000,
       runtime: :arbor,
       system_prompt: system_prompt
     ]

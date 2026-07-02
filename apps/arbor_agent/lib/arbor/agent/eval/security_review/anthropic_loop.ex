@@ -19,7 +19,10 @@ defmodule Arbor.Agent.Eval.SecurityReview.AnthropicLoop do
   """
 
   @anthropic_version "2023-06-01"
-  @max_tokens 4096
+  # Effectively uncapped for security findings — the Anthropic API REQUIRES a value
+  # (nil is illegal), so this is set high rather than removed. Modern Claude models
+  # support 32k+ output; a low cap here truncated long findings JSON.
+  @max_tokens 32_000
 
   @type opts :: %{
           required(:base_url) => String.t(),

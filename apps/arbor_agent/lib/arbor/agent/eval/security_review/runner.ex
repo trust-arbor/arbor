@@ -255,7 +255,8 @@ defmodule Arbor.Agent.Eval.SecurityReview.Runner do
            system: system,
            prompt: user,
            temperature: 0.2,
-           max_tokens: 8192,
+           # Effectively uncapped (Anthropic path requires a value; 32k = modern-model max).
+           max_tokens: 32_000,
            timeout: per_call,
            client_opts: [req_http_options: [receive_timeout: per_call, retry: false]]
          ) do

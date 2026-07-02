@@ -48,13 +48,12 @@ defmodule Arbor.Agent.Eval.AgentTaskJudge do
     case Arbor.AI.generate_text(prompt,
            model: model,
            provider: provider,
-           temperature: 0.0,
-           # Generous CEILING: reasoning/MTP models spend most of it in a hidden
-           # reasoning channel; too small a cap ends on finish_reason="length"
-           # BEFORE the visible `content` (the VERDICT line) is emitted → empty
-           # content → parse error. A judge verdict is short, but the model only
-           # generates what it needs — leave ample room to reason AND answer.
-           max_tokens: 16_384
+           temperature: 0.0
+           # NO max_tokens cap (provider's full budget). Reasoning/MTP models spend
+           # most of the budget in a hidden reasoning channel; ANY ceiling risks ending
+           # on finish_reason="length" BEFORE the visible VERDICT is emitted → empty
+           # content → parse error. The verdict is short and the model stops when done,
+           # so an uncapped budget maximizes correctness with no waste.
          ) do
       {:ok, resp} -> {:ok, parse_verdict(extract_text(resp))}
       {:error, reason} -> {:error, reason}

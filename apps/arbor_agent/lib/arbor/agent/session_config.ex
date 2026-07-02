@@ -53,6 +53,9 @@ defmodule Arbor.Agent.SessionConfig do
       |> maybe_put("stream", Keyword.get(opts, :stream))
       # Image/media ContentPart maps to attach to the turn's user message (multimodal).
       |> maybe_put("user_media", Keyword.get(opts, :user_media))
+      # Sampling params — pinning these makes runs reproducible + comparable.
+      |> maybe_put("temperature", Keyword.get(opts, :temperature))
+      |> maybe_put("top_p", Keyword.get(opts, :top_p))
 
     base = [
       session_id: "agent-session-#{agent_id}",

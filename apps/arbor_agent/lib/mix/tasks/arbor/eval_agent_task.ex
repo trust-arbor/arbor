@@ -25,6 +25,10 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
     # --agent-quant overrides the recorded quant; otherwise it's auto-detected from
     # LM Studio's native /api/v0/models endpoint (nil for non-LM-Studio providers).
     agent_quant: :string,
+    # Sampling params — default to the per-model recommended values in AgentTaskRunner;
+    # override to study a specific setting. Recorded in EvalRun.config either way.
+    agent_temperature: :float,
+    agent_top_p: :float,
     judge_model: :string,
     judge_provider: :string,
     # --stream true forces the streaming tool-loop path (complete_streaming) for

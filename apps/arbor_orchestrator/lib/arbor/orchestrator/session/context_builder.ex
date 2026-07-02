@@ -88,6 +88,10 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
     # Multimodal: image/media ContentPart maps attached to the turn's user message
     # (set by the eval harness). LlmHandler builds a content-part list when present.
     |> maybe_put("session.user_media", config["user_media"] || config[:user_media])
+    # Sampling params (per-model temp/top_p, e.g. from the eval harness) — LlmHandler
+    # applies them with precedence node attr > session > provider default.
+    |> maybe_put("session.temperature", config["temperature"] || config[:temperature])
+    |> maybe_put("session.top_p", config["top_p"] || config[:top_p])
     |> maybe_put("session.tenant_context", state.tenant_context)
   end
 

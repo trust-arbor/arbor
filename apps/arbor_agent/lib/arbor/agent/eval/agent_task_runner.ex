@@ -167,19 +167,24 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     # arbor://net/http and baseline :allow floods the profile-derived list, so
     # relying on caps alone let the agent flail on find_tools/web_snapshot instead
     # of calling web_search_eval.
+    sp = sampling_params_for(model, opts)
+
     start_opts = [
       template: template,
       display_name: name,
+      temperature: sp.temperature,
+      top_p: sp.top_p,
       model_config: model_config,
       tools: task.tools,
-      # Reasoning agent models (e.g. qwen-agentworld) spend budget on hidden
-      # reasoning before emitting `content`, and a multi-round tool loop
-      # accumulates a lot of context — so give a generous CEILING (the model only
-      # generates what it needs). Too low a cap yields empty content and can even
-      # truncate the per-round reasoning that decides "search again vs. answer",
-      # which shows up as endless re-searching. Flows SessionConfig →
-      # config["max_tokens"] → context → LlmHandler. Override via :agent_max_tokens.
-      max_tokens: opts[:agent_max_tokens] || 32_768,
+      # NO artificial max_tokens cap by default — the eval measures MAXIMUM capability,
+      # so the model gets the provider's full budget and is never truncated. Reasoning/
+      # MTP models spend most of the budget in a hidden reasoning channel; any ceiling
+      # risks empty `content` or truncated per-round reasoning (the "search again vs.
+      # answer" decision), which masquerades as endless re-searching. The model only
+      # generates what it needs, so uncapped costs nothing extra on a natural stop.
+      # nil flows SessionConfig → (maybe_put skips it) → LlmHandler's provider default.
+      # Override with :agent_max_tokens only to deliberately study a constrained budget.
+      max_tokens: opts[:agent_max_tokens],
       # Headless eval: no UI needs token streaming, and this routes the tool loop
       # through the plain Client.complete path instead of complete_streaming
       # (the suspect for the reasoning-model loop/empty-content). Override :stream.
@@ -575,6 +580,30 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   # run with N EvalResults (one per sample), normalized into Outcomes, with
   # run-identity + first-class metrics + pass_rate. Best-effort: never fail the
   # eval on a persistence error.
+  # Per-model recommended sampling params (from each model card). Sampling swings output
+  # quality as much as model choice (temp 0.6 vs 0.2 is a different model, effectively),
+  # so we PIN them per model for a fair, reproducible comparison rather than inherit
+  # LM Studio's invisible per-model UI defaults. Reasoning/MTP models want a higher temp;
+  # instruction-tuned models a lower one. Override via --agent-temperature / --agent-top-p.
+  @sampling_params %{
+    "qwen3.5-122b-a10b-mtp" => %{temperature: 0.6, top_p: 0.95},
+    "qwen3.6-27b-mtp" => %{temperature: 0.6, top_p: 0.95},
+    "qwen-agentworld-35b-a3b" => %{temperature: 0.6, top_p: 0.95},
+    "gemma-4-e4b-it-qat" => %{temperature: 0.2, top_p: 0.9},
+    "gemma-4-31b-it-qat" => %{temperature: 0.2, top_p: 0.9},
+    "qwen3.5-2b-mlx" => %{temperature: 0.2, top_p: 0.9}
+  }
+  @default_sampling %{temperature: 0.2, top_p: 0.9}
+
+  defp sampling_params_for(model, opts) do
+    base = Map.get(@sampling_params, model, @default_sampling)
+
+    %{
+      temperature: opts[:agent_temperature] || base.temperature,
+      top_p: opts[:agent_top_p] || base.top_p
+    }
+  end
+
   # Quant is a first-class variable for local models (speed/memory/quality all move with
   # it). Prefer an explicit --agent-quant; otherwise auto-detect from LM Studio's native
   # /api/v0/models endpoint (the OpenAI-compat /v1/models doesn't carry it). nil if unknown.
@@ -612,6 +641,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     n = length(samples)
     passed = Enum.count(samples, &(&1.verdict == :pass))
     model = opts[:agent_model] || "qwen-agentworld-35b-a3b"
+    sp = sampling_params_for(model, opts)
     total_duration = Enum.sum(Enum.map(samples, & &1.duration_ms))
     all_graders = samples |> Enum.flat_map(& &1.grade.checks) |> Enum.map(&elem(&1.check, 0)) |> Enum.uniq()
 
@@ -621,6 +651,14 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       model: model,
       provider: to_string(opts[:agent_provider] || :lmstudio),
       quant: resolve_quant(model, opts),
+      # Effective generation config — sampling params swing quality as much as the model,
+      # so record what was actually used (per-model recommended unless overridden). nil
+      # max_tokens = uncapped (provider full budget).
+      config: %{
+        "temperature" => sp.temperature,
+        "top_p" => sp.top_p,
+        "max_tokens" => opts[:agent_max_tokens]
+      },
       dataset: task.id,
       graders: Enum.map(all_graders, &to_string/1),
       sample_count: n,

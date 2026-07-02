@@ -621,7 +621,9 @@ defmodule Arbor.Agent.Eval.SummarizationEval do
         provider: provider,
         model: model,
         messages: messages,
-        max_tokens: 1000,
+        # Raised from 1000 for headroom (a good summary shouldn't be truncated). NOT
+        # uncapped: this is a summarization task — brevity is part of what it measures.
+        max_tokens: 8_000,
         temperature: 0.0
       })
 
