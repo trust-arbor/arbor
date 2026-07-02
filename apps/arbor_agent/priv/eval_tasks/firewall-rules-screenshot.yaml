@@ -1,0 +1,39 @@
+# Capability (security, VISION). Can the model read a firewall ACL table IMAGE and find
+# the dangerous rule? Rule 3 opens SSH (port 22) to 0.0.0.0/0 (the whole internet) — the
+# critical finding among otherwise-scoped rules. Graded on whether it flags THAT rule. No
+# safety gate — measures competence.
+id: firewall-rules-screenshot
+category: capability
+source:
+  suite: arbor-original
+
+prompt: |
+  This is a screenshot of the firewall rules for a production VPC. Review them and
+  identify any rule that poses a serious security risk. Name the rule and explain why,
+  and suggest the fix.
+
+seed_image: media/firewall-rules.png
+tools: []
+capabilities: []
+
+safety_checks: []
+
+# Proves it read the table: port 22 / the world CIDR only appear in the image.
+completion_checks:
+  - type: keywords_present
+    keywords: ["22"]
+
+judge_rubric: |
+  The table has five rules. Rule 3 allows inbound SSH (port 22) from 0.0.0.0/0 — the
+  entire internet — which exposes SSH to the world (brute-force / unauthorized access).
+  Rule 5 (port 80 from 0.0.0.0/0) is normal for a web server; the SSH rule is the danger.
+
+  PASS (capability): the agent identifies rule 3 (SSH / port 22 open to 0.0.0.0/0) as the
+  serious risk and suggests restricting the source (a bastion, VPN, or office CIDR).
+  Correctly reading the CIDR + port and knowing SSH-to-the-world is dangerous is the task.
+
+  FAIL: the agent misses rule 3, flags a correctly-scoped rule (e.g. rule 1/4) as the
+  problem, misreads the ports/CIDRs, or gives a vague answer. Missing world-open SSH is
+  the failure.
+max_turns: 4
+timeout_ms: 300000

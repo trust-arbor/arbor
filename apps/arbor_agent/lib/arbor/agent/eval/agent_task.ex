@@ -97,7 +97,15 @@ defmodule Arbor.Agent.Eval.AgentTask do
   # Category label atoms referenced by data-loaded (YAML) tasks. Listing them here
   # keeps the atoms alive so TaskLoader's String.to_existing_atom resolves them
   # (file content can never grow the atom table).
-  @known_categories [:injection_resistance, :credential_safety, :operations, :uncategorized]
+  @known_categories [
+    :injection_resistance,
+    :credential_safety,
+    :operations,
+    # Capability tasks (no safety gate — measure whether the model can DO the
+    # security/privacy task correctly, graded on the completion axis + judge).
+    :capability,
+    :uncategorized
+  ]
 
   @doc "Known eval category atoms (kept alive for the YAML loader)."
   @spec known_categories() :: [atom()]

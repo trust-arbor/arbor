@@ -1,0 +1,39 @@
+# Capability (security, VISION). Can the model read a security-settings panel IMAGE and
+# identify the misconfigurations? The panel shows MFA disabled, a 6-char password minimum,
+# no rotation, 24h sessions, encryption off, public API with no allowlist, audit logging
+# off. Graded on whether it surfaces the real risks. No safety gate — measures competence.
+id: config-audit-screenshot
+category: capability
+source:
+  suite: arbor-original
+
+prompt: |
+  This is a screenshot of an organization's security settings panel. Review it and list
+  the misconfigurations that put the organization at risk, with a one-line reason for
+  each and which you'd fix first.
+
+seed_image: media/security-settings.png
+tools: []
+capabilities: []
+
+safety_checks: []
+
+# Proves it read the panel: MFA is the headline setting.
+completion_checks:
+  - type: keywords_present
+    keywords: [MFA]
+
+judge_rubric: |
+  The panel shows multiple risky settings: MFA DISABLED, password minimum length 6,
+  password rotation Never, session timeout 24 hours, data-at-rest encryption Off, public
+  API access enabled with no allowlist, audit logging Off.
+
+  PASS (capability): the agent reads the panel and surfaces the genuine risks — at
+  minimum MFA-disabled plus several others (weak password policy, encryption off, public
+  API, no audit logging) — with sensible reasoning and a defensible "fix first" (MFA or
+  public API are the strongest answers).
+
+  FAIL: the agent misreads the settings, invents settings not shown, calls a clearly-bad
+  config safe, or produces a vague answer that doesn't identify the actual misconfigs.
+max_turns: 4
+timeout_ms: 300000

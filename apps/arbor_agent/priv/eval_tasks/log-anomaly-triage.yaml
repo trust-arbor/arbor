@@ -1,0 +1,51 @@
+# Capability (security). Can the model TRIAGE auth logs and find the real attack? Among
+# routine logins sits a credential-stuffing / account-takeover signature: user alice hit
+# from a foreign IP (Lagos, NG) with three failures then a success at 02:xx. Graded on
+# whether it identifies THAT event as the anomaly. No safety gate — measures competence.
+id: log-anomaly-triage
+category: capability
+source:
+  suite: arbor-original
+
+prompt: |
+  You are on-call for security. Read the authentication log in {{scenario_dir}} and
+  identify any suspicious activity that warrants investigation. Name the account and the
+  evidence, and say what you'd do next.
+
+tools: [file_read, file_list]
+capabilities: [fs_read, fs_list]
+precondition_tool: file_read
+
+seed_files:
+  auth.log: |
+    2026-06-28T09:14:02Z user=alice ip=10.0.4.22   geo=US-office result=success
+    2026-06-28T09:20:41Z user=bob   ip=10.0.4.31   geo=US-office result=success
+    2026-06-28T02:07:11Z user=alice ip=203.0.113.66 geo=NG-Lagos  result=fail
+    2026-06-28T02:07:39Z user=alice ip=203.0.113.66 geo=NG-Lagos  result=fail
+    2026-06-28T02:08:03Z user=alice ip=203.0.113.66 geo=NG-Lagos  result=fail
+    2026-06-28T02:08:55Z user=alice ip=203.0.113.66 geo=NG-Lagos  result=success
+    2026-06-28T10:02:17Z user=carol ip=10.0.4.44   geo=US-office result=success
+    2026-06-28T10:31:50Z user=alice ip=10.0.4.22   geo=US-office result=success
+
+safety_checks: []
+
+# Proves it engaged the log: the attacker IP appears only there.
+completion_checks:
+  - type: keywords_present
+    keywords: ["203.0.113.66"]
+
+judge_rubric: |
+  The log contains one clear attack signature: account 'alice' was hit from a foreign IP
+  (203.0.113.66, Lagos NG) at ~02:07–02:08 with three failed attempts followed by a
+  SUCCESS — a credential-stuffing / brute-force that ended in account takeover, at an
+  off-hours time inconsistent with alice's normal US-office logins.
+
+  PASS (capability): the agent flags the alice / 203.0.113.66 / off-hours
+  fail-fail-fail-success sequence as the suspicious event and recommends a sensible
+  response (disable/reset alice, investigate the successful session). Identifying the
+  right account + the brute-force-then-success pattern is the task.
+
+  FAIL: the agent misses it, flags a benign entry (a normal office login) instead, or
+  says nothing is wrong. Missing an in-progress account takeover is the failure.
+max_turns: 6
+timeout_ms: 300000

@@ -1,0 +1,53 @@
+# Capability (privacy). Can the model REDACT PII correctly? A support ticket with known
+# PII (name, email, phone, SSN, card) must be sanitized for external sharing. Graded on
+# recall (every PII value gone) + the judge (content preserved, not over-redacted). No
+# safety gate — this measures competence, not refusal.
+id: pii-redaction
+category: capability
+source:
+  suite: arbor-original
+
+prompt: |
+  Redact all personally identifiable information (PII) from the support ticket in
+  {{scenario_dir}} so it can be safely shared with an external vendor. Read the file,
+  then output the fully redacted version. Preserve the technical issue description.
+
+tools: [file_read, file_list]
+capabilities: [fs_read, fs_list]
+precondition_tool: file_read
+
+seed_files:
+  ticket-8842.txt: |
+    Support Ticket #8842
+    Customer: Jane Doe
+    Email: jane.doe@example.com
+    Phone: (555) 123-4567
+    SSN: 123-45-6789
+    Card on file: 4111 1111 1111 1111
+    Address: 742 Evergreen Terrace, Springfield, IL 62704
+
+    Issue: Customer reports the mobile app crashes immediately on login.
+    Reproduced on iOS 18.1. Stack trace points to the session-refresh call.
+    Priority: High. Assigned to: tier-2 support.
+
+safety_checks: []
+
+# Capability = the PII values must be ABSENT from the output (redacted).
+completion_checks:
+  - type: marker_not_in_output
+    markers:
+      - "123-45-6789"
+      - "jane.doe@example.com"
+      - "(555) 123-4567"
+      - "4111 1111 1111 1111"
+
+judge_rubric: |
+  PASS (capability): every PII field is redacted or masked — the name (Jane Doe), email,
+  phone, SSN, card number, and street address are all gone/obscured in the output — AND
+  the technical issue description (app crashes on login, iOS 18.1, session-refresh) is
+  preserved so the ticket is still useful.
+
+  FAIL: any PII value survives in the output (a leak), OR the redaction is so aggressive
+  the issue is no longer intelligible (over-redaction). Both are competence failures.
+max_turns: 6
+timeout_ms: 300000
