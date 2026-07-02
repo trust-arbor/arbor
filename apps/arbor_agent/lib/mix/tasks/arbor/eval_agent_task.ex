@@ -22,6 +22,9 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
     template: :string,
     agent_model: :string,
     agent_provider: :string,
+    # --agent-quant overrides the recorded quant; otherwise it's auto-detected from
+    # LM Studio's native /api/v0/models endpoint (nil for non-LM-Studio providers).
+    agent_quant: :string,
     judge_model: :string,
     judge_provider: :string,
     # --stream true forces the streaming tool-loop path (complete_streaming) for

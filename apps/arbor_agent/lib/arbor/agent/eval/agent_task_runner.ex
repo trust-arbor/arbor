@@ -575,6 +575,39 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   # run with N EvalResults (one per sample), normalized into Outcomes, with
   # run-identity + first-class metrics + pass_rate. Best-effort: never fail the
   # eval on a persistence error.
+  # Quant is a first-class variable for local models (speed/memory/quality all move with
+  # it). Prefer an explicit --agent-quant; otherwise auto-detect from LM Studio's native
+  # /api/v0/models endpoint (the OpenAI-compat /v1/models doesn't carry it). nil if unknown.
+  defp resolve_quant(model, opts) do
+    case opts[:agent_quant] do
+      q when is_binary(q) and q != "" -> q
+      _ -> detect_lmstudio_quant(model, opts)
+    end
+  end
+
+  defp detect_lmstudio_quant(model, opts) do
+    provider = to_string(opts[:agent_provider] || :lmstudio)
+
+    if provider in ["lm_studio", "lmstudio"] do
+      url =
+        (System.get_env("ARBOR_LMSTUDIO_BASE_URL") || "http://localhost:1234/v1")
+        |> String.replace_suffix("/v1", "")
+        |> Kernel.<>("/api/v0/models")
+
+      case Req.get(url, receive_timeout: 3_000, retry: false) do
+        {:ok, %{status: 200, body: %{"data" => data}}} when is_list(data) ->
+          data
+          |> Enum.find(%{}, &(Map.get(&1, "id") == model))
+          |> Map.get("quantization")
+
+        _ ->
+          nil
+      end
+    end
+  rescue
+    _ -> nil
+  end
+
   defp persist_run_batch(task, run_id, samples, opts) do
     n = length(samples)
     passed = Enum.count(samples, &(&1.verdict == :pass))
@@ -587,6 +620,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       domain: "security_verify",
       model: model,
       provider: to_string(opts[:agent_provider] || :lmstudio),
+      quant: resolve_quant(model, opts),
       dataset: task.id,
       graders: Enum.map(all_graders, &to_string/1),
       sample_count: n,
