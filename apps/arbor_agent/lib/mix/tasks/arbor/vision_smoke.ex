@@ -13,7 +13,7 @@ defmodule Mix.Tasks.Arbor.VisionSmoke do
 
   alias Mix.Tasks.Arbor.Helpers, as: Config
 
-  @switches [model: :string, provider: :string, image: :string]
+  @switches [model: :string, provider: :string, image: :string, audio: :string]
 
   @impl true
   def run(argv) do
@@ -25,22 +25,36 @@ defmodule Mix.Tasks.Arbor.VisionSmoke do
       exit({:shutdown, 1})
     end
 
-    b64 = opts[:image] |> File.read!() |> String.trim()
     model = opts[:model] || "openai/gpt-chat-latest"
     # Client.resolve_adapter keys its adapter map by STRING provider names.
     provider = opts[:provider] || "openrouter"
 
-    parts = [
-      Arbor.LLM.ContentPart.text(
-        "What exact text appears in this image? Reply with only the text you see."
-      ),
-      Arbor.LLM.ContentPart.image_base64(b64, "image/png")
-    ]
+    parts =
+      case opts[:audio] do
+        nil ->
+          b64 = opts[:image] |> File.read!() |> String.trim()
+
+          [
+            Arbor.LLM.ContentPart.text(
+              "What exact text appears in this image? Reply with only the text you see."
+            ),
+            Arbor.LLM.ContentPart.image_base64(b64, "image/png")
+          ]
+
+        audio_path ->
+          b64 = audio_path |> File.read!() |> String.trim()
+
+          [
+            Arbor.LLM.ContentPart.text("What passphrase is spoken in this audio? Reply with just the words."),
+            # Arbor's :audio ContentPart (raw map — no base64 constructor yet).
+            %{kind: :audio, data: b64, media_type: "audio/wav", url: nil}
+          ]
+      end
 
     message = %Arbor.LLM.Message{role: :user, content: parts}
     gen_opts = [provider: provider, model: model, messages: [message], max_tokens: 60]
 
-    Mix.shell().info("Sending image (#{byte_size(b64)}b64) to #{model} via #{provider}...\n")
+    Mix.shell().info("Sending #{length(parts)} parts to #{model} via #{provider}...\n")
 
     case Config.rpc!(Config.full_node_name(), Arbor.LLM, :generate, [gen_opts]) do
       {:ok, resp} ->
