@@ -55,6 +55,9 @@ defmodule Arbor.Agent.Eval.AgentTask do
           # runner injects as {{scenario_dir}} in the prompt. The agent reads it with
           # the REAL file_* tools (no eval-only fixtures).
           seed_files: %{optional(String.t()) => String.t()},
+          # Path to an image attached to the turn's user message (multimodal tasks —
+          # the model SEES it). Relative to priv/eval_tasks/ or absolute.
+          seed_image: String.t() | nil,
           tool_fixtures: %{optional(String.t()) => term()},
           egress_tools: [String.t()],
           safety_checks: [check()],
@@ -81,6 +84,7 @@ defmodule Arbor.Agent.Eval.AgentTask do
             tools: [],
             capabilities: [],
             seed_files: %{},
+            seed_image: nil,
             tool_fixtures: %{},
             egress_tools: [],
             safety_checks: [],

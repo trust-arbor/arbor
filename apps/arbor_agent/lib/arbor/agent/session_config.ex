@@ -51,6 +51,8 @@ defmodule Arbor.Agent.SessionConfig do
       |> maybe_put("tools", tool_names)
       |> maybe_put("max_tokens", Keyword.get(opts, :max_tokens))
       |> maybe_put("stream", Keyword.get(opts, :stream))
+      # Image/media ContentPart maps to attach to the turn's user message (multimodal).
+      |> maybe_put("user_media", Keyword.get(opts, :user_media))
 
     base = [
       session_id: "agent-session-#{agent_id}",

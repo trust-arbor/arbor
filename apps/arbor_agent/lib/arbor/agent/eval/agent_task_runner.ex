@@ -183,7 +183,11 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       # Headless eval: no UI needs token streaming, and this routes the tool loop
       # through the plain Client.complete path instead of complete_streaming
       # (the suspect for the reasoning-model loop/empty-content). Override :stream.
-      stream: Keyword.get(opts, :stream, false)
+      stream: Keyword.get(opts, :stream, false),
+      # Multimodal: attach the task's seed image to the turn's user message so a
+      # vision model SEES it (flows SessionConfig → config["user_media"] → context
+      # → LlmHandler content-part list). nil for text tasks.
+      user_media: build_user_media(task)
     ]
 
     case Arbor.Agent.Manager.start_or_resume(Arbor.Agent.APIAgent, name, start_opts) do
@@ -217,6 +221,37 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
 
   # Mirrors Lifecycle.grant_workspace_capabilities' URI shape: path-scoped, /**.
   defp fs_uri(op, dir), do: "arbor://fs/#{op}/#{String.trim_leading(dir, "/")}/**"
+
+  # Read the task's seed image → a base64 image ContentPart the turn attaches to
+  # the user message (multimodal). nil for text tasks / unreadable files.
+  defp build_user_media(%AgentTask{seed_image: nil}), do: nil
+
+  defp build_user_media(%AgentTask{seed_image: path}) do
+    with {:ok, bytes} <- File.read(path),
+         {:ok, mt} <- media_type_of(bytes) do
+      [Arbor.LLM.ContentPart.image_base64(Base.encode64(bytes), mt)]
+    else
+      {:error, :unrecognized} ->
+        # FAIL CLOSED: do not base64 + ship unrecognized bytes to an external
+        # provider mislabeled as an image (data-exfil / privacy risk). Only genuine,
+        # recognized images are attached.
+        Logger.warning("[eval] seed_image is not a recognized image (png/jpeg/gif/webp) — NOT attaching: #{path}")
+        nil
+
+      {:error, reason} ->
+        Logger.warning("[eval] seed_image unreadable (#{inspect(reason)}): #{path}")
+        nil
+    end
+  end
+
+  # Detect the media type from the file's MAGIC BYTES, not the extension. Unknown
+  # formats return {:error, :unrecognized} so the caller can fail closed rather than
+  # send arbitrary content to the model.
+  defp media_type_of(<<0x89, "PNG\r\n", 0x1A, 0x0A, _::binary>>), do: {:ok, "image/png"}
+  defp media_type_of(<<0xFF, 0xD8, 0xFF, _::binary>>), do: {:ok, "image/jpeg"}
+  defp media_type_of(<<"GIF8", _::binary>>), do: {:ok, "image/gif"}
+  defp media_type_of(<<"RIFF", _::binary-size(4), "WEBP", _::binary>>), do: {:ok, "image/webp"}
+  defp media_type_of(_), do: {:error, :unrecognized}
 
   # Seed the task's scenario as real files under a temp dir (nil if none). The
   # agent reads them with the real file_* tools; the runner rm_rf's it after.

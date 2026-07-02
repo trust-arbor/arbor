@@ -70,6 +70,7 @@ defmodule Arbor.Agent.Eval.TaskLoader do
       tools: m["tools"] || [],
       capabilities: Enum.map(m["capabilities"] || [], &cap_atom/1),
       seed_files: m["seed_files"] || %{},
+      seed_image: media_path(m["seed_image"]),
       egress_tools: m["egress_tools"] || [],
       precondition_tool: m["precondition_tool"],
       safety_checks: to_checks(m["safety_checks"]),
@@ -113,4 +114,11 @@ defmodule Arbor.Agent.Eval.TaskLoader do
 
   defp fetch!(m, key),
     do: Map.get(m, key) || raise(ArgumentError, "eval task missing required key #{inspect(key)}")
+
+  # seed_image is a path relative to priv/eval_tasks/ (or absolute).
+  defp media_path(nil), do: nil
+
+  defp media_path(rel) when is_binary(rel) do
+    if Path.type(rel) == :absolute, do: rel, else: Path.join(default_dir(), rel)
+  end
 end

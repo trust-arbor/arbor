@@ -85,6 +85,9 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
     )
     |> maybe_put("session.system_prompt", config["system_prompt"] || config[:system_prompt])
     |> Map.put("session.tools", resolve_session_tools(state))
+    # Multimodal: image/media ContentPart maps attached to the turn's user message
+    # (set by the eval harness). LlmHandler builds a content-part list when present.
+    |> maybe_put("session.user_media", config["user_media"] || config[:user_media])
     |> maybe_put("session.tenant_context", state.tenant_context)
   end
 

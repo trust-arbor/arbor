@@ -519,9 +519,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
     system_content = @prompt_sanitizer.preamble(nonce) <> "\n\n" <> system_content
     system_content = maybe_prepend_vote_format(system_content, node.attrs, graph.attrs)
-    user_content = prompt <> previous_outcome
-
-    {system_content, user_content}
+    {system_content, prompt <> previous_outcome}
   end
 
   defp build_llm_request(node, context, system_content, user_content) do
@@ -546,6 +544,13 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
               ]
           end
       end
+
+    # Multimodal: when the turn carries media (image ContentPart maps in the context,
+    # set by the caller — e.g. the eval harness seeding a paper image), attach it to
+    # the LAST user message as a content-part LIST [text | media] so a vision model
+    # sees it. Done HERE (not in build_llm_messages) so it covers the conversation-
+    # history path too. No media → messages unchanged, text path untouched.
+    messages = attach_user_media(messages, context)
 
     # Provider/model: node attrs take priority, fall back to context
     provider =
@@ -716,6 +721,34 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
       "dont_ask" -> :dont_ask
       "bypass_permissions" -> :bypass_permissions
       _ -> nil
+    end
+  end
+
+  # Attach media (image ContentPart maps from the context) to the LAST user message,
+  # turning its string content into a [text | media] content-part list. Handles both
+  # the direct-user-message and conversation-history message shapes.
+  defp attach_user_media(messages, context) do
+    case Context.get(context, "session.user_media", []) do
+      media when is_list(media) and media != [] ->
+        last_user =
+          messages
+          |> Enum.with_index()
+          |> Enum.filter(fn {m, _} -> Map.get(m, :role) == :user end)
+          |> List.last()
+
+        case last_user do
+          {_msg, idx} ->
+            List.update_at(messages, idx, fn m ->
+              text = if is_binary(m.content), do: m.content, else: ""
+              %{m | content: [Arbor.LLM.ContentPart.text(text) | media]}
+            end)
+
+          nil ->
+            messages
+        end
+
+      _ ->
+        messages
     end
   end
 
