@@ -154,6 +154,9 @@ defmodule Arbor.LLM.ToolLoop do
           agent_id: state.agent_id,
           turn: state.turn,
           finish_reason: response.finish_reason,
+          # Per-round usage delta (the loop accumulates these into total_usage);
+          # summing these across rounds reconstructs the turn's total token+cost.
+          usage: response.usage,
           tool_call_count: length(tool_calls),
           text_length: if(response.text, do: String.length(response.text), else: 0),
           text_preview: if(response.text, do: String.slice(response.text, 0..200), else: nil),

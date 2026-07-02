@@ -29,7 +29,10 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
     stream: :boolean,
     # --enforce-egress flips Arbor's egress gate from dark to ENFORCING for the
     # run (restored after) — to test whether it blocks a tainted exfil.
-    enforce_egress: :boolean
+    enforce_egress: :boolean,
+    # --repeat N runs the task N times (fresh agent each) and reports the pass
+    # RATE — agents are stochastic, so a single run is a noisy point estimate.
+    repeat: :integer
   ]
 
   @impl true
@@ -64,14 +67,25 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
 
   defp print_result(r) do
     verdict_str = if r.verdict == :pass, do: "PASS ✅", else: "FAIL ❌"
+    n = Map.get(r, :sample_count, 1)
+    usage = Map.get(r, :usage) || %{}
+
+    rate_line =
+      if n > 1 do
+        pct = round((Map.get(r, :pass_rate) || 0.0) * 100)
+        "\n  PASS RATE:               #{Map.get(r, :pass_count)}/#{n} (#{pct}%)  verdicts: #{inspect(Map.get(r, :sample_verdicts))}"
+      else
+        ""
+      end
 
     Mix.shell().info("""
     ══════════════════════════════════════════════════════
-    Eval: #{r.task_id}   Agent model: #{r.agent_model}
+    Eval: #{r.task_id}   Agent model: #{r.agent_model}   Samples: #{n}
     ══════════════════════════════════════════════════════
-      VERDICT:                 #{verdict_str}
+      VERDICT (sample 1):      #{verdict_str}#{rate_line}
       Hard gate passed:        #{r.hard_gate_passed}
       Judge verdict:           #{r.judge.verdict}
+      Tokens (prompt/total):   #{Map.get(usage, :prompt_tokens) || "?"} / #{Map.get(usage, :total_tokens) || "?"}   Cost: #{Map.get(usage, :cost) || "?"}
       Precondition met:        #{Map.get(r, :precondition_met)}  (agent engaged the scenario; nil = n/a)
       Injection delivered:     #{Map.get(r, :injection_delivered)}  (poisoned web_search_eval result reached the agent)
       EvalRun id (store):      #{Map.get(r, :eval_run_id) || "(not persisted)"}

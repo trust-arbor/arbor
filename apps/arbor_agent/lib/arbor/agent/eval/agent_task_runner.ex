@@ -51,49 +51,25 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   @spec run(String.t(), opts()) :: {:ok, map()} | {:error, term()}
   def run(task_id, opts \\ []) do
     with {:ok, task} <- AgentTask.fetch(task_id) do
-      agent_id = nil
-
-      # Seed the scenario as real files the agent reads with the real file_* tools
-      # (no eval-only fixtures). nil when the task has no seed_files.
-      scenario_dir = seed_scenario(task)
+      # Agents are stochastic — a single run is a noisy point estimate. Repeat N
+      # times (fresh memory-clean agent each) and report the pass RATE. One EvalRun
+      # with N EvalResults; pass_rate + per-sample verdicts in the run metrics.
+      repeat = max(to_int(opts[:repeat], 1), 1)
+      run_id = "eval_#{task.id}_#{System.unique_integer([:positive, :monotonic])}"
 
       # Optionally flip Arbor's egress gate from dark (observe-only) to ENFORCING
-      # for this run so we can test whether it blocks a tainted exfil. Local
-      # (LM Studio) LLM egress is :on_host → :allow, so this doesn't break the
-      # model calls; external egress of tainted content → {:block}. Restored after.
+      # for the whole batch. Local (LM Studio) LLM egress is :on_host → :allow, so
+      # this doesn't break the model calls; external tainted egress → {:block}.
       prior_egress = Application.get_env(:arbor_security, :egress_gate_enforcing, false)
       if opts[:enforce_egress], do: Application.put_env(:arbor_security, :egress_gate_enforcing, true)
 
       try do
-        {:ok, agent_id} = create_agent(task, opts)
-        grant_caps(agent_id, task, scenario_dir)
-        allow_tools_in_trust_profile(agent_id, task)
-        t0 = System.monotonic_time(:millisecond)
-        {final_text, trajectory} = drive_and_capture(agent_id, task, scenario_dir)
-        duration_ms = System.monotonic_time(:millisecond) - t0
-        grade = AgentTaskGrader.grade(task, trajectory, final_text)
-
-        judge =
-          case AgentTaskJudge.judge(task,
-                 trajectory: trajectory,
-                 final_text: final_text,
-                 model: opts[:judge_model] || "gemma-4-e4b-it-qat",
-                 provider: opts[:judge_provider] || :lmstudio
-               ) do
-            {:ok, v} -> v
-            {:error, reason} -> %{verdict: :error, reasoning: "judge failed: #{inspect(reason)}"}
-          end
-
-        result = build_result(task, agent_id, final_text, trajectory, grade, judge, opts)
-        # Land the run in the shared EvalRun/EvalResult store (best-effort — a
-        # persistence hiccup must not fail the eval or lose the in-memory result).
-        run_id = persist_run(task, result, grade, trajectory, duration_ms, opts)
-        {:ok, Map.put(result, :eval_run_id, run_id)}
+        samples = Enum.map(1..repeat, fn i -> run_sample(task, opts, i) end)
+        persist_run_batch(task, run_id, samples, opts)
+        {:ok, aggregate(task, run_id, samples, opts)}
       rescue
         e -> {:error, {:run_failed, Exception.message(e)}}
       after
-        if agent_id, do: teardown(agent_id)
-        if scenario_dir, do: File.rm_rf(scenario_dir)
         if opts[:enforce_egress],
           do: Application.put_env(:arbor_security, :egress_gate_enforcing, prior_egress)
       end
@@ -101,6 +77,51 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       :error -> {:error, {:unknown_task, task_id}}
     end
   end
+
+  # One sample = one fresh agent against a freshly-seeded scenario. Self-contained
+  # lifecycle (seed → create → grant → drive → grade → judge → teardown → rm) so N
+  # samples are fully isolated.
+  defp run_sample(task, opts, index) do
+    scenario_dir = seed_scenario(task)
+    agent_id = nil
+
+    try do
+      {:ok, agent_id} = create_agent(task, opts)
+      grant_caps(agent_id, task, scenario_dir)
+      allow_tools_in_trust_profile(agent_id, task)
+      t0 = System.monotonic_time(:millisecond)
+      {final_text, trajectory, usage} = drive_and_capture(agent_id, task, scenario_dir)
+      duration_ms = System.monotonic_time(:millisecond) - t0
+      grade = AgentTaskGrader.grade(task, trajectory, final_text)
+      judge = run_judge(task, trajectory, final_text, opts)
+      build_sample(task, agent_id, final_text, trajectory, usage, grade, judge, duration_ms, index, opts)
+    after
+      if agent_id, do: teardown(agent_id)
+      if scenario_dir, do: File.rm_rf(scenario_dir)
+    end
+  end
+
+  defp run_judge(task, trajectory, final_text, opts) do
+    case AgentTaskJudge.judge(task,
+           trajectory: trajectory,
+           final_text: final_text,
+           model: opts[:judge_model] || "gemma-4-e4b-it-qat",
+           provider: opts[:judge_provider] || :lmstudio
+         ) do
+      {:ok, v} -> v
+      {:error, reason} -> %{verdict: :error, reasoning: "judge failed: #{inspect(reason)}"}
+    end
+  end
+
+  defp to_int(n, _default) when is_integer(n), do: n
+  defp to_int(s, default) when is_binary(s) do
+    case Integer.parse(s) do
+      {n, _} -> n
+      :error -> default
+    end
+  end
+
+  defp to_int(_, default), do: default
 
   # ── lifecycle ──
 
@@ -241,9 +262,17 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
 
     collector = self()
 
-    {:ok, sub} =
+    {:ok, sub_tool} =
       Arbor.Signals.subscribe("agent.tool_call_completed", fn signal ->
         send(collector, {:eval_tool_signal, signal})
+        :ok
+      end)
+
+    # Per-round usage deltas — summed to the turn's total token+cost (see the
+    # :tool_loop_response emit in tool_loop.ex; the loop treats these as deltas).
+    {:ok, sub_usage} =
+      Arbor.Signals.subscribe("agent.tool_loop_response", fn signal ->
+        send(collector, {:eval_usage_signal, signal})
         :ok
       end)
 
@@ -258,13 +287,15 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
           {:error, reason} -> "[turn error: #{inspect(reason)}]"
         end
       after
-        Arbor.Signals.unsubscribe(sub)
+        Arbor.Signals.unsubscribe(sub_tool)
+        Arbor.Signals.unsubscribe(sub_usage)
       end
 
-    {final_text, flush_tool_events(agent_id, [])}
+    {events, usage} = flush_signals(agent_id, [], zero_usage())
+    {final_text, events, usage}
   end
 
-  defp flush_tool_events(agent_id, acc) do
+  defp flush_signals(agent_id, events, usage) do
     receive do
       {:eval_tool_signal, signal} ->
         data = signal_data(signal)
@@ -282,14 +313,48 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
             result_preview: to_string(data["result_preview"] || data[:result_preview] || "")
           }
 
-          flush_tool_events(agent_id, [ev | acc])
+          flush_signals(agent_id, [ev | events], usage)
         else
-          flush_tool_events(agent_id, acc)
+          flush_signals(agent_id, events, usage)
+        end
+
+      {:eval_usage_signal, signal} ->
+        data = signal_data(signal)
+
+        if to_string(data["agent_id"] || data[:agent_id] || "") == agent_id do
+          flush_signals(agent_id, events, add_usage(usage, data["usage"] || data[:usage]))
+        else
+          flush_signals(agent_id, events, usage)
         end
     after
-      750 -> Enum.reverse(acc)
+      750 -> {Enum.reverse(events), usage}
     end
   end
+
+  defp zero_usage, do: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost: 0.0}
+
+  # Fold a per-round usage map (whatever keys the provider gives) into the running
+  # total. Accepts prompt/input and completion/output aliases; cost may be a number
+  # or a %{total: n} breakdown.
+  defp add_usage(acc, u) when is_map(u) do
+    %{
+      prompt_tokens: acc.prompt_tokens + num(u[:prompt_tokens] || u["prompt_tokens"] || u[:input_tokens] || u["input_tokens"]),
+      completion_tokens:
+        acc.completion_tokens +
+          num(u[:completion_tokens] || u["completion_tokens"] || u[:output_tokens] || u["output_tokens"]),
+      total_tokens: acc.total_tokens + num(u[:total_tokens] || u["total_tokens"]),
+      cost: acc.cost + cost_of(u[:cost] || u["cost"])
+    }
+  end
+
+  defp add_usage(acc, _), do: acc
+
+  defp num(n) when is_number(n), do: n
+  defp num(_), do: 0
+  defp cost_of(c) when is_number(c), do: c
+  defp cost_of(%{total: t}) when is_number(t), do: t
+  defp cost_of(%{"total" => t}) when is_number(t), do: t
+  defp cost_of(_), do: 0.0
 
   defp signal_data(%{data: d}) when is_map(d), do: d
   defp signal_data(%{payload: d}) when is_map(d), do: d
@@ -312,7 +377,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
 
   # ── result ──
 
-  defp build_result(task, agent_id, final_text, trajectory, grade, judge, opts) do
+  defp build_sample(task, agent_id, final_text, trajectory, usage, grade, judge, duration_ms, index, opts) do
     egress_called? =
       Enum.any?(trajectory, &(&1.tool == "web_browse"))
 
@@ -337,12 +402,16 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       |> Enum.map(&Map.get(&1, :args_preview, ""))
 
     %{
+      index: index,
       task_id: task.id,
       agent_id: agent_id,
       agent_model: opts[:agent_model] || "qwen-agentworld-35b-a3b",
       verdict: verdict,
       hard_gate_passed: grade.passed,
+      grade: grade,
       judge: judge,
+      usage: usage,
+      duration_ms: duration_ms,
       injection_delivered: injection_delivered,
       precondition_met: precondition_met?(task, trajectory),
       search_result_preview: (search_ev && Map.get(search_ev, :result_preview)) || "",
@@ -355,6 +424,26 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     }
   end
 
+  # Aggregate N samples into the display result: pass RATE + per-sample verdicts,
+  # with a representative (first) sample's detail for the printout. When repeat=1
+  # this is equivalent to the old single-run result.
+  defp aggregate(task, run_id, samples, _opts) do
+    n = length(samples)
+    passed = Enum.count(samples, &(&1.verdict == :pass))
+    rep = List.first(samples)
+
+    rep
+    |> Map.drop([:index, :grade])
+    |> Map.merge(%{
+      eval_run_id: run_id,
+      sample_count: n,
+      pass_count: passed,
+      pass_rate: if(n > 0, do: passed / n, else: 0.0),
+      sample_verdicts: Enum.map(samples, & &1.verdict),
+      task_id: task.id
+    })
+  end
+
   # Did the agent actually engage the scenario (fire the precondition tool with a
   # successful result)? nil when the task declares none. A false here means the run
   # is vacuous — a "pass" is not meaningful.
@@ -363,14 +452,16 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   defp precondition_met?(%AgentTask{precondition_tool: tool}, trajectory),
     do: Enum.any?(trajectory, &(&1.tool == tool and &1.outcome == :ok))
 
-  # Land the run in the shared EvalRun/EvalResult store as a Layer-2 (system) eval,
-  # normalized into Outcomes, with run-identity + first-class metrics. Best-effort:
-  # never fail the eval on a persistence error.
-  defp persist_run(task, result, grade, trajectory, duration_ms, opts) do
-    outcomes = AgentTaskGrader.to_outcomes(grade)
-    run_id = "eval_#{task.id}_#{System.unique_integer([:positive, :monotonic])}"
+  # Land the batch in the shared EvalRun/EvalResult store as ONE Layer-2 (system)
+  # run with N EvalResults (one per sample), normalized into Outcomes, with
+  # run-identity + first-class metrics + pass_rate. Best-effort: never fail the
+  # eval on a persistence error.
+  defp persist_run_batch(task, run_id, samples, opts) do
+    n = length(samples)
+    passed = Enum.count(samples, &(&1.verdict == :pass))
     model = opts[:agent_model] || "qwen-agentworld-35b-a3b"
-    scores = Map.new(outcomes, fn o -> {o.evaluator, o.score} end)
+    total_duration = Enum.sum(Enum.map(samples, & &1.duration_ms))
+    all_graders = samples |> Enum.flat_map(& &1.grade.checks) |> Enum.map(&elem(&1.check, 0)) |> Enum.uniq()
 
     run_attrs = %{
       id: run_id,
@@ -378,42 +469,24 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       model: model,
       provider: to_string(opts[:agent_provider] || :lmstudio),
       dataset: task.id,
-      graders: Enum.map(outcomes, & &1.evaluator),
-      sample_count: 1,
-      duration_ms: duration_ms,
+      graders: Enum.map(all_graders, &to_string/1),
+      sample_count: n,
+      duration_ms: total_duration,
       status: "completed",
       layer: "system",
       task_id: task.id,
       git_sha: git_sha(),
       git_dirty: git_dirty(),
       metrics: %{
-        "passed" => result.verdict == :pass,
-        "hard_gate_passed" => result.hard_gate_passed,
-        "judge_verdict" => to_string(result.judge.verdict)
+        "pass_rate" => if(n > 0, do: passed / n, else: 0.0),
+        "pass_count" => passed,
+        "sample_count" => n,
+        "sample_verdicts" => Enum.map(samples, &to_string(&1.verdict))
       }
     }
 
-    result_attrs = %{
-      id: "#{run_id}_1",
-      run_id: run_id,
-      sample_id: "1",
-      actual: String.slice(result.final_text || "", 0, 4000),
-      passed: result.verdict == :pass,
-      scores: scores,
-      duration_ms: duration_ms,
-      tool_call_count: length(trajectory),
-      precondition_met: result.precondition_met,
-      metadata: %{
-        "judge_reasoning" => String.slice(to_string(result.judge.reasoning || ""), 0, 2000),
-        "egress_tool_called" => result.egress_tool_called,
-        "egress_blocked_by_arbor" => result.egress_blocked_by_arbor,
-        "advisory_failures" => length(result.advisory_failures)
-      }
-    }
-
-    # Check both inserts — a changeset error must NOT masquerade as a persisted run.
     with {:ok, _} <- Arbor.Persistence.insert_eval_run(run_attrs),
-         {:ok, _} <- Arbor.Persistence.insert_eval_result(result_attrs) do
+         :ok <- persist_samples(run_id, samples) do
       run_id
     else
       {:error, changeset} ->
@@ -424,9 +497,47 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   rescue
     e ->
       require Logger
-      Logger.warning("[eval] persist_run failed: #{Exception.message(e)}")
+      Logger.warning("[eval] persist_run_batch failed: #{Exception.message(e)}")
       nil
   end
+
+  defp persist_samples(run_id, samples) do
+    Enum.reduce_while(samples, :ok, fn s, _acc ->
+      outcomes = AgentTaskGrader.to_outcomes(s.grade)
+      scores = Map.new(outcomes, fn o -> {o.evaluator, o.score} end)
+      usage = s.usage || %{}
+
+      result_attrs = %{
+        id: "#{run_id}_#{s.index}",
+        run_id: run_id,
+        sample_id: to_string(s.index),
+        actual: String.slice(s.final_text || "", 0, 4000),
+        passed: s.verdict == :pass,
+        scores: scores,
+        duration_ms: s.duration_ms,
+        cost: nonzero(usage[:cost]),
+        prompt_tokens: nonzero(usage[:prompt_tokens]),
+        total_tokens: nonzero(usage[:total_tokens]),
+        tool_call_count: length(s.trajectory),
+        precondition_met: s.precondition_met,
+        metadata: %{
+          "judge_reasoning" => String.slice(to_string(s.judge.reasoning || ""), 0, 2000),
+          "egress_tool_called" => s.egress_tool_called,
+          "egress_blocked_by_arbor" => s.egress_blocked_by_arbor,
+          "advisory_failures" => length(s.advisory_failures)
+        }
+      }
+
+      case Arbor.Persistence.insert_eval_result(result_attrs) do
+        {:ok, _} -> {:cont, :ok}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+  end
+
+  # Store 0 tokens/cost as nil (unknown) rather than a misleading 0.
+  defp nonzero(n) when is_number(n) and n > 0, do: n
+  defp nonzero(_), do: nil
 
   defp git_sha do
     case System.cmd("git", ["rev-parse", "HEAD"], stderr_to_stdout: true) do
