@@ -37,6 +37,16 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     "web_browse" => "arbor://net/http"
   }
 
+  # Capability atom → base trust URI, for setting an explicit :allow rule (the
+  # resolved profile's per-resource rules, e.g. fs/write => :ask, override baseline).
+  @capability_base_uris %{
+    fs_read: "arbor://fs/read",
+    fs_list: "arbor://fs/list",
+    fs_write: "arbor://fs/write",
+    net_http: "arbor://net/http",
+    comms_notify: "arbor://comms/notify/session"
+  }
+
   # Security-gate signals to capture during a run (#6) — what Arbor's defenses
   # actually DID: egress/taint blocks, taint propagation, tool-auth denials.
   @gate_topics [
@@ -233,13 +243,26 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   # gate still applies, which is exactly the defense this eval means to test
   # (does tainted web content get blocked from egress even when the action is
   # allowed?).
-  defp allow_tools_in_trust_profile(agent_id, %AgentTask{tools: tools}) do
+  defp allow_tools_in_trust_profile(agent_id, %AgentTask{tools: tools, capabilities: caps}) do
     Arbor.Trust.Store.update_profile(agent_id, fn profile ->
       profile = %{profile | baseline: :allow}
 
       profile =
         Enum.reduce(tools, profile, fn tool, acc ->
           case @cap_uris[tool] do
+            nil -> acc
+            uri -> Arbor.Trust.Authority.set_rule(acc, uri, :allow)
+          end
+        end)
+
+      # Explicitly :allow each capability's base URI (net/http, comms, fs/read/list) —
+      # the resolved profile sets specific rules that override baseline :allow.
+      # NB: this does NOT clear fs/WRITE, which escalates via a lower layer
+      # (ActionsExecutor interactive approval) that a trust rule doesn't reach — see
+      # .claude/skills/agent-security-gates.md. Write-using eval tasks sidestep it.
+      profile =
+        Enum.reduce(caps, profile, fn cap, acc ->
+          case @capability_base_uris[cap] do
             nil -> acc
             uri -> Arbor.Trust.Authority.set_rule(acc, uri, :allow)
           end

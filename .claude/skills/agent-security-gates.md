@@ -62,6 +62,20 @@ another one. It doubles as user documentation — anyone standing up agents need
   ```
   Also mind `context[:workspace]`: when set, paths resolve *within* it (SafePath), so a
   scenario dir outside the workspace is rejected before the cap is even checked.
+- **`fs/write` escalates to human approval and a trust `:allow` rule does NOT clear
+  it (open gap).** `file_write` fires `ActionsExecutor.await_interactive` → a Signal
+  approval that *stalls the agent ~60s per write* (a hidden cause of "why is my
+  autonomous agent so slow"). `file_read`/`file_list` default safe, so read-only tasks
+  don't hit this. VERIFIED 2026-07-02: setting `baseline: :allow` AND an explicit
+  `set_rule(profile, "arbor://fs/write", :allow)` did NOT stop it — there is no
+  fs/write *ceiling* (only `arbor://shell` + `arbor://governance` have ceilings), so
+  the escalation comes from a lower layer: either a capability `requires_approval`
+  constraint on the granted fs/write cap, or the profile being re-resolved (which
+  resets `arbor://fs/write => :ask`, per `profile_resolver.ex`) at authorize time.
+  **Root cause not yet pinned; no known eval-usable bypass.** Until then: for
+  autonomous agents that must write, either provision a pre-approved write cap or have
+  the agent return output another way. (The crm-export eval task outputs its report in
+  the response instead of `file_write` for exactly this reason.)
 
 ## 4. A granted cap ≠ permission to run — the trust profile sets the MODE
 
