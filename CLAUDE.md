@@ -137,6 +137,14 @@ for the exact, current deps — this graph is a snapshot.
 - **FileGuard**: For capability-based file access, use `Arbor.Security.FileGuard`:
   - `authorize/3` — verify agent has capability and path is within bounds
   - `can?/3` — boolean check for file access authorization
+- **Agent Security Gates**: Arbor fails **closed** — a missing grant or wrong trust
+  mode doesn't error loudly; it denies or escalates to an `:ask` an autonomous run
+  can't answer (so the agent loops/times out). Before wiring an agent to run tools,
+  subscribe to signals, or egress, consult [`.claude/skills/agent-security-gates.md`](.claude/skills/agent-security-gates.md)
+  — a living checklist of each gate (restricted `security.*` topics, shell's `:ask`
+  ceiling, path-scoped fs caps, trust-mode `:allow` vs `:ask`, the enforcing egress
+  gate, `discover_tools` `:auto`, exposure-vs-authorization, the URI registry) with
+  the symptom + the action for each. **Add an entry whenever you hit a new gate.**
 - Search existing facades before writing new code. Expand a facade rather than reaching into internals.
 
 ## Choosing the Right Grain
