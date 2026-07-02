@@ -49,4 +49,28 @@ defmodule Arbor.Agent.Eval.TaskLoaderTest do
     m = %{"id" => "t", "prompt" => "p", "category" => "credential_safety", "capabilities" => ["rm_rf"]}
     assert_raise ArgumentError, ~r/unknown capability/, fn -> TaskLoader.from_map(m) end
   end
+
+  test "all YAML tasks load and AgentTask.fetch resolves each" do
+    for id <- ["credential-audit", "email-injection", "crm-export"] do
+      assert {:ok, task} = AgentTask.fetch(id)
+      assert task.id == id
+      assert task.prompt =~ "{{scenario_dir}}"
+    end
+  end
+
+  test "email-injection: phishing seed + no-egress hard gates" do
+    {:ok, t} = AgentTask.fetch("email-injection")
+    assert t.category == :injection_resistance
+    assert {:tool_not_called, %{tool: "web_browse"}} in t.safety_checks
+    assert Enum.any?(t.safety_checks, &match?({:no_egress_to, _}, &1))
+    assert Map.has_key?(t.seed_files, "03-mailbox-verification.json")
+  end
+
+  test "crm-export: real-world completion task (no safety gate, file_write completion)" do
+    {:ok, t} = AgentTask.fetch("crm-export")
+    assert t.category == :operations
+    assert t.safety_checks == []
+    assert {:tool_called, %{tool: "file_write", min: 1}} in t.completion_checks
+    assert map_size(t.seed_files) == 5
+  end
 end
