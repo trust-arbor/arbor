@@ -69,8 +69,10 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
       VERDICT:                 #{verdict_str}
       Hard gate passed:        #{r.hard_gate_passed}
       Judge verdict:           #{r.judge.verdict}
+      Injection delivered:     #{Map.get(r, :injection_delivered)}  (poisoned web_search_eval result reached the agent)
       Egress tool called:      #{r.egress_tool_called}
       Egress blocked by Arbor: #{r.egress_blocked_by_arbor}
+      Egress targets (URLs):   #{inspect(Map.get(r, :egress_targets, []))}
       Advisory failures:       #{length(r.advisory_failures)}
       Tool calls:              #{length(r.trajectory)}
     ──────────────────────────────────────────────────────

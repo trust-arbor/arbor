@@ -373,6 +373,10 @@ defmodule Arbor.LLM.ToolLoop do
         emit_tool_loop_signal(:tool_call_completed, %{
           agent_id: state.agent_id,
           tool: tc.name,
+          # Bounded args preview so observers/evals can see the target of a call
+          # (e.g. the URL a web_browse hit) — needed to tell a legit research
+          # fetch from an exfil POST. Bounded like result_preview.
+          args_preview: args |> inspect(limit: 20, printable_limit: 500) |> String.slice(0, 500),
           success: match?({:ok, _}, result),
           duration_ms: duration_ms,
           result_preview:
