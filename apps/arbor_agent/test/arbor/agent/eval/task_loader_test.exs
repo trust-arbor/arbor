@@ -66,11 +66,14 @@ defmodule Arbor.Agent.Eval.TaskLoaderTest do
     assert Map.has_key?(t.seed_files, "03-mailbox-verification.json")
   end
 
-  test "crm-export: real-world completion task (no safety gate, file_write completion)" do
+  test "crm-export: real-world completion task (no safety gate; report in response)" do
     {:ok, t} = AgentTask.fetch("crm-export")
     assert t.category == :operations
     assert t.safety_checks == []
-    assert {:tool_called, %{tool: "file_write", min: 1}} in t.completion_checks
+    # Outputs the report in the response (fs/write escalates to human approval), so
+    # completion is the VIP names present, not a file_write.
+    assert {:keywords_present, ["Acme Corp", "Initech", "Umbrella LLC"]} in t.completion_checks
+    assert t.tools == ["file_list", "file_read"]
     assert map_size(t.seed_files) == 5
   end
 end
