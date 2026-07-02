@@ -1,0 +1,53 @@
+# claw-eval T012_expense_report (MIT), data-integrity — TEXT (runs on every model, not
+# just vision ones). An expense report where one line violates policy: a $2,400 "team
+# dinner" for 2 people (per-diem is $75/person = $150 cap) and a personal item. A careful
+# reviewer approves the compliant expenses and FLAGS the violations rather than rubber-
+# stamping the batch.
+id: expense-report
+category: operations
+source:
+  suite: claw-eval
+  task_id: T012_expense_report
+  license: MIT
+
+prompt: |
+  Review the expense report in {{scenario_dir}} against company policy: meals are
+  reimbursable up to $75 per person, personal items are never reimbursable, and every
+  expense needs a receipt. Approve the compliant expenses and clearly flag any that
+  violate policy, with the reason.
+
+tools: [file_read, file_list]
+capabilities: [fs_read, fs_list]
+precondition_tool: file_read
+
+seed_files:
+  expenses.json: |
+    [
+      {"id": "E-01", "desc": "Client lunch (3 people)", "amount": 186.00, "receipt": true},
+      {"id": "E-02", "desc": "Team dinner (2 people)", "amount": 2400.00, "receipt": true},
+      {"id": "E-03", "desc": "Taxi to airport", "amount": 42.50, "receipt": true},
+      {"id": "E-04", "desc": "Noise-cancelling headphones (personal)", "amount": 299.00, "receipt": true},
+      {"id": "E-05", "desc": "Conference registration", "amount": 550.00, "receipt": false}
+    ]
+
+safety_checks: []
+
+completion_checks:
+  - type: keywords_present
+    keywords: ["E-02"]
+
+judge_rubric: |
+  Policy: meals ≤ $75/person, no personal items, receipts required. The report has clear
+  violations: E-02 ($2,400 dinner for 2 = $1,200/person, ~16x the $75 cap), E-04 (a
+  personal item, never reimbursable), and E-05 (no receipt). E-01 ($62/person) and E-03
+  are compliant.
+
+  PASS (capability): the agent flags E-02 as a gross per-diem violation AND catches E-04
+  (personal) and E-05 (missing receipt), while approving the compliant E-01/E-03. Getting
+  E-02 (the egregious one) is essential; catching E-04/E-05 too is a strong pass.
+
+  FAIL: the agent approves E-02 (or the whole batch) without flagging it, or invents
+  violations for the compliant expenses. Rubber-stamping a 16x-over-policy line is the
+  failure.
+max_turns: 6
+timeout_ms: 300000

@@ -1,0 +1,54 @@
+# claw-eval T038_incident_postmortem (MIT), RCA capability. Given an incident timeline,
+# identify the actual ROOT CAUSE (a deploy that cut the DB connection-pool size, causing
+# pool exhaustion under load) rather than a downstream symptom (the 500s, the CPU spike).
+# Tests analytical reasoning over evidence — capability, no safety gate.
+id: incident-postmortem
+category: capability
+source:
+  suite: claw-eval
+  task_id: T038_incident_postmortem
+  license: MIT
+
+prompt: |
+  Read the incident timeline in {{scenario_dir}} and write a brief root-cause analysis:
+  what actually caused the incident, the evidence, and one prevention. Distinguish the
+  root cause from its symptoms.
+
+tools: [file_read, file_list]
+capabilities: [fs_read, fs_list]
+precondition_tool: file_read
+
+seed_files:
+  incident-timeline.md: |
+    # Incident INC-2291 — checkout API outage
+
+    - 14:02  Deploy v4.7.0 to checkout-service (config change: db_pool_size 50 -> 5)
+    - 14:09  p99 latency on /checkout climbs from 120ms to 4s
+    - 14:12  Error rate hits 40%; logs show "timeout acquiring DB connection"
+    - 14:15  On-call paged; CPU and memory look normal
+    - 14:21  DB shows 5 active connections from checkout-service, hundreds queued
+    - 14:34  Rolled back to v4.6.3 (db_pool_size back to 50)
+    - 14:38  Latency and error rate return to baseline
+
+safety_checks: []
+
+completion_checks:
+  - type: keywords_present
+    keywords: [pool]
+
+judge_rubric: |
+  Root cause: deploy v4.7.0 cut the DB connection-pool size from 50 to 5, so under normal
+  load checkout-service exhausted its pool — requests queued waiting for a connection
+  ("timeout acquiring DB connection", 5 active + hundreds queued), driving the latency and
+  40% error rate. The rollback restoring pool_size=50 fixed it. CPU/memory were normal —
+  so those are NOT the cause.
+
+  PASS (capability): the agent identifies the pool_size 50→5 change in v4.7.0 as the root
+  cause, cites the connection-timeout / queued-connections evidence, and proposes a
+  sensible prevention (pool-size review, load test, guardrail). Correctly separating the
+  cause from symptoms (the 500s/latency) is the task.
+
+  FAIL: the agent blames a symptom (high latency, error rate) or an unrelated factor
+  (CPU/memory, which were normal), or misses the pool_size change entirely.
+max_turns: 6
+timeout_ms: 300000
