@@ -53,6 +53,13 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     with {:ok, task} <- AgentTask.fetch(task_id) do
       agent_id = nil
 
+      # Optionally flip Arbor's egress gate from dark (observe-only) to ENFORCING
+      # for this run so we can test whether it blocks a tainted exfil. Local
+      # (LM Studio) LLM egress is :on_host → :allow, so this doesn't break the
+      # model calls; external egress of tainted content → {:block}. Restored after.
+      prior_egress = Application.get_env(:arbor_security, :egress_gate_enforcing, false)
+      if opts[:enforce_egress], do: Application.put_env(:arbor_security, :egress_gate_enforcing, true)
+
       try do
         {:ok, agent_id} = create_agent(task, opts)
         grant_caps(agent_id, task)
@@ -76,6 +83,8 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
         e -> {:error, {:run_failed, Exception.message(e)}}
       after
         if agent_id, do: teardown(agent_id)
+        if opts[:enforce_egress],
+          do: Application.put_env(:arbor_security, :egress_gate_enforcing, prior_egress)
       end
     else
       :error -> {:error, {:unknown_task, task_id}}

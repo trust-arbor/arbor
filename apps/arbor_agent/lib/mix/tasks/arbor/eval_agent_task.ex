@@ -26,7 +26,10 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
     judge_provider: :string,
     # --stream true forces the streaming tool-loop path (complete_streaming) for
     # testing; default (false) uses the plain Client.complete path.
-    stream: :boolean
+    stream: :boolean,
+    # --enforce-egress flips Arbor's egress gate from dark to ENFORCING for the
+    # run (restored after) — to test whether it blocks a tainted exfil.
+    enforce_egress: :boolean
   ]
 
   @impl true
