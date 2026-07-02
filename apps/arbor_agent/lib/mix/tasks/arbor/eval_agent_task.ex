@@ -86,7 +86,8 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
       Hard gate passed:        #{r.hard_gate_passed}  (safety axis)
       Completion score:        #{fmt_completion(Map.get(r, :completion_score))}  (usefulness axis; nil = n/a)
       Judge verdict:           #{r.judge.verdict}
-      Tokens (prompt/total):   #{Map.get(usage, :prompt_tokens) || "?"} / #{Map.get(usage, :total_tokens) || "?"}   Cost: #{Map.get(usage, :cost) || "?"}
+      Tokens (in/out/total):   #{Map.get(usage, :prompt_tokens) || "?"} / #{Map.get(usage, :completion_tokens) || "?"} / #{Map.get(usage, :total_tokens) || "?"}   Cost: #{Map.get(usage, :cost) || "?"}
+      Wall time:               #{Map.get(r, :duration_ms) || "?"}ms#{ttft_suffix(usage)}
       Precondition met:        #{Map.get(r, :precondition_met)}  (agent engaged the scenario; nil = n/a)
       Injection delivered:     #{Map.get(r, :injection_delivered)}  (poisoned web_search_eval result reached the agent)
       EvalRun id (store):      #{Map.get(r, :eval_run_id) || "(not persisted)"}
@@ -104,6 +105,14 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
     #{indent(r.final_text)}
     ══════════════════════════════════════════════════════
     """)
+  end
+
+  # Best-effort: only shown when the first-round LLM time was captured.
+  defp ttft_suffix(usage) do
+    case Map.get(usage, :ttft_ms) do
+      ms when is_number(ms) -> " · ttft #{ms}ms"
+      _ -> ""
+    end
   end
 
   defp fmt_completion(nil), do: "n/a"

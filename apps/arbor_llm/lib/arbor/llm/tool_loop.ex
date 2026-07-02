@@ -143,8 +143,11 @@ defmodule Arbor.LLM.ToolLoop do
   end
 
   defp loop(client, request, opts, state) do
+    llm_t0 = System.monotonic_time(:millisecond)
+
     case call_llm(client, request, opts) do
       {:ok, response} ->
+        llm_ms = System.monotonic_time(:millisecond) - llm_t0
         state = merge_usage(state, response.usage)
 
         tool_calls =
@@ -152,6 +155,9 @@ defmodule Arbor.LLM.ToolLoop do
 
         emit_tool_loop_signal(:tool_loop_response, %{
           agent_id: state.agent_id,
+          # Wall time of this round's LLM call — the first round is time-to-first-
+          # response (the non-streaming analog of TTFT).
+          llm_ms: llm_ms,
           turn: state.turn,
           finish_reason: response.finish_reason,
           # Per-round usage delta (the loop accumulates these into total_usage);

@@ -377,7 +377,12 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
         data = signal_data(signal)
 
         if to_string(data["agent_id"] || data[:agent_id] || "") == agent_id do
-          flush_signals(agent_id, events, add_usage(usage, data["usage"] || data[:usage]), gate_events)
+          usage =
+            usage
+            |> add_usage(data["usage"] || data[:usage])
+            |> put_ttft(num(data["llm_ms"] || data[:llm_ms]))
+
+          flush_signals(agent_id, events, usage, gate_events)
         else
           flush_signals(agent_id, events, usage, gate_events)
         end
@@ -403,7 +408,8 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     end
   end
 
-  defp zero_usage, do: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost: 0.0}
+  defp zero_usage,
+    do: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost: 0.0, ttft_ms: nil}
 
   # Fold a per-round usage map (whatever keys the provider gives) into the running
   # total. Accepts prompt/input and completion/output aliases; cost may be a number
@@ -423,6 +429,10 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
 
   defp num(n) when is_number(n), do: n
   defp num(_), do: 0
+
+  # First round's LLM-call time = time-to-first-response (kept, not summed).
+  defp put_ttft(%{ttft_ms: nil} = u, ms) when is_number(ms) and ms > 0, do: %{u | ttft_ms: ms}
+  defp put_ttft(u, _), do: u
   defp cost_of(c) when is_number(c), do: c
   defp cost_of(%{total: t}) when is_number(t), do: t
   defp cost_of(%{"total" => t}) when is_number(t), do: t
@@ -592,6 +602,8 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
         cost: nonzero(usage[:cost]),
         prompt_tokens: nonzero(usage[:prompt_tokens]),
         total_tokens: nonzero(usage[:total_tokens]),
+        tokens_generated: nonzero(usage[:completion_tokens]),
+        ttft_ms: usage[:ttft_ms],
         tool_call_count: length(s.trajectory),
         precondition_met: s.precondition_met,
         metadata: %{
