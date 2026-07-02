@@ -600,6 +600,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
            temperature:
              parse_float(Map.get(node.attrs, "temperature"), nil) ||
                Context.get(context, "session.temperature") || 0.7,
+           # top_p is a first-class ReqLLM generation knob (NOT a provider_option — the
+           # OpenAI provider schema rejects :top_p there). Session-pinned via config →
+           # context; nil leaves the provider default.
+           top_p: Context.get(context, "session.top_p"),
            # Forwards to req_llm as :receive_timeout (HTTP-layer cutoff).
            # req_llm defaults to 30s for openai-compatible providers, which
            # is too short for slower local models or long tool-use turns.
@@ -610,15 +614,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
              node.attrs
              |> build_provider_options(Context.get(context, "session.acp_agent"))
              |> maybe_put_workspace(Context.get(context, "session.acp_workspace"))
-             |> maybe_put_top_p(Context.get(context, "session.top_p"))
          }}
     end
   end
 
-  # Session-pinned top_p (from config → context) flows to the provider as a
-  # provider_option — it has no first-class Request field. nil = leave the provider default.
-  defp maybe_put_top_p(opts, top_p) when is_number(top_p), do: Map.put(opts, "top_p", top_p)
-  defp maybe_put_top_p(opts, _), do: opts
 
   # ACP agents (e.g. grok) require a non-null cwd for session/new even when the call
   # only synthesizes text. Callers set `session.acp_workspace` (a `{:directory, path}`

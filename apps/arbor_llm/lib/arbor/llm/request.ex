@@ -11,6 +11,7 @@ defmodule Arbor.LLM.Request do
           tool_choice: String.t() | nil,
           max_tokens: integer() | nil,
           temperature: float() | nil,
+          top_p: float() | nil,
           reasoning_effort: String.t() | nil,
           receive_timeout: pos_integer() | nil,
           provider_options: map(),
@@ -24,6 +25,7 @@ defmodule Arbor.LLM.Request do
             tool_choice: nil,
             max_tokens: nil,
             temperature: nil,
+            top_p: nil,
             reasoning_effort: nil,
             # nil → use req_llm default (30s for openai-compatible providers).
             # Required for slower local models or long tool-use turns; the
