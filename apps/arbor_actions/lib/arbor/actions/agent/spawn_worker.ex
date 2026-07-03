@@ -567,15 +567,23 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
   end
 
   # Runtime bridge for LLMDefaults (Level 2 module)
-  # Worker provider comes from the coordinator (an LLM) — untrusted input, so map the
-  # string against a known-provider allow-list rather than String.to_atom. Unknown/nil →
-  # nil, so the caller falls back to the system-default provider.
-  @known_providers ~w(openrouter ollama lm_studio openai anthropic google groq xai venice vllm acp)a
+  # Worker provider comes from the coordinator (an LLM) — untrusted input. Validate against
+  # the authoritative Arbor.LLM.ProviderRegistry (which reconciles llm_db's cloud providers
+  # with the local ones) rather than a hardcoded list that would drift. Unknown/nil → nil,
+  # so the caller falls back to the system-default provider. String.to_existing_atom is safe
+  # once known?/1 confirms it's a real provider whose atom already exists.
+  @provider_registry Arbor.LLM.ProviderRegistry
   defp normalize_provider(nil), do: nil
   defp normalize_provider(p) when is_atom(p), do: p
 
   defp normalize_provider(p) when is_binary(p) do
-    Enum.find(@known_providers, fn known -> Atom.to_string(known) == p end)
+    reg = @provider_registry
+
+    if Code.ensure_loaded?(reg) and reg.known?(p) do
+      String.to_existing_atom(reg.normalize(p))
+    end
+  rescue
+    _ -> nil
   end
 
   defp normalize_provider(_), do: nil
