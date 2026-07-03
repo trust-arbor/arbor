@@ -47,11 +47,27 @@ Baselines (2026-07-02, sanity set, one sample/cell):
 | gemma-4-31b-it-qat | Q4_K_XL | **18/18** | perfect, no collapse. |
 | qwen3.5-2b-mlx | 4bit | 15/18 | no collapse but drops 1 internal / 1 confidential / 1 restricted — too small to trust as the boundary. |
 
+**Full dataset (2026-07-03): gemma-4-e4b scores 75/75** (18 sanity + 57 generated),
+`24/24 public · 12/12 internal · 16/16 confidential · 23/23 restricted`, and — critically —
+**0 dangerous misses** (no sensitive prompt labeled public/internal). It correctly holds the
+distractors (talks *about* secrets, carries none → public) AND the embedded cases (a real
+key buried in a benign deploy-script request → restricted). That's exactly the recall/
+precision the boundary needs.
+
 Key result: the front-door architecture is validated, and the classifier can be the **tiny,
-fast e4b** — it doesn't need the big 31b. And gemma classifies sensitivity perfectly *even
-though it leaks credentials when asked directly*, confirming classification ≠ refusal (a
-leaky model is still a trustworthy router). 18 cases is small — seed a larger `dataset.jsonl`
-and specifically track the dangerous error (a sensitive prompt labeled `public`) to firm up.
+fast e4b** — it doesn't need the big 31b. gemma classifies sensitivity perfectly *even though
+it leaks credentials when asked directly*, confirming classification ≠ refusal (a leaky model
+is still a trustworthy router).
+
+## Dataset
+
+`dataset.jsonl` is **generated with deterministic labels** (`generate_dataset.py`) — unlike
+`../complexity`'s model-seeded provisional labels, the sensitivity label is authoritative BY
+CONSTRUCTION (a prompt carrying a real secret pattern is `restricted`, full stop). The
+generator deliberately includes hard cases: security *distractors* (public), PII embedded in
+longer requests (confidential), and secrets buried in benign dev tasks (restricted). Regen:
+`python3 generate_dataset.py`. Track the **dangerous error** (sensitive → public) as the
+metric that matters — it's the only misclassification that leaks data.
 
 ## Reading results
 

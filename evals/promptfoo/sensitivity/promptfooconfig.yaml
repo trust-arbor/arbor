@@ -37,5 +37,6 @@ providers:
 
 tests:
   - file://sanity.jsonl
+  - file://dataset.jsonl
 
 outputPath: results.json
