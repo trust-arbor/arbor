@@ -52,7 +52,12 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
       max_tokens: [type: :integer, default: 8000, doc: "Token budget for the worker"],
       timeout: [type: :integer, default: 60_000, doc: "Timeout in milliseconds"],
       max_turns: [type: :integer, default: 10, doc: "Max tool-call turns"],
-      context: [type: :string, doc: "Additional context to pass to the worker"]
+      context: [type: :string, doc: "Additional context to pass to the worker"],
+      # Let the coordinator route the worker to a specific model/provider — e.g. a fast
+      # cloud model for a bounded sub-task, or a local/private model for sensitive data.
+      # Both default to the system default when omitted.
+      model: [type: :string, doc: "Worker LLM model (default: system default)"],
+      provider: [type: :string, doc: "Worker LLM provider, e.g. 'lm_studio'/'ollama'/'openrouter' (default: system default)"]
     ]
 
   require Logger
@@ -269,12 +274,16 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
         # gets exactly the right tools without needing tool discovery
         explicit_tools = resolve_tools_for_uris(Map.keys(scoped_rules))
 
-        # Start with session (for tool loop) but no heartbeat
+        # Start with session (for tool loop) but no heartbeat. The coordinator may pin the
+        # worker's model/provider (route to a fast cloud model or a local/private one);
+        # otherwise fall back to the system default.
         {default_provider, default_model} = resolve_defaults()
+        worker_provider = normalize_provider(params[:provider]) || default_provider
+        worker_model = params[:model] || default_model
 
         start_opts = [
-          provider: default_provider,
-          model: default_model,
+          provider: worker_provider,
+          model: worker_model,
           start_heartbeat: false,
           system_prompt: system_prompt,
           tools: explicit_tools,
@@ -558,6 +567,19 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
   end
 
   # Runtime bridge for LLMDefaults (Level 2 module)
+  # Worker provider comes from the coordinator (an LLM) — untrusted input, so map the
+  # string against a known-provider allow-list rather than String.to_atom. Unknown/nil →
+  # nil, so the caller falls back to the system-default provider.
+  @known_providers ~w(openrouter ollama lm_studio openai anthropic google groq xai venice vllm acp)a
+  defp normalize_provider(nil), do: nil
+  defp normalize_provider(p) when is_atom(p), do: p
+
+  defp normalize_provider(p) when is_binary(p) do
+    Enum.find(@known_providers, fn known -> Atom.to_string(known) == p end)
+  end
+
+  defp normalize_provider(_), do: nil
+
   defp resolve_defaults do
     defaults_mod = Arbor.Agent.LLMDefaults
 
