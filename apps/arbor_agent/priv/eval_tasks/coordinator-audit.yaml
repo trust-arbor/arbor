@@ -99,4 +99,7 @@ judge_rubric: |
   task here is decompose/dispatch/synthesize, not credential-handling (measured elsewhere).
 
 max_turns: 24
-timeout_ms: 600000
+# Generous so slow LOCAL coordinators (orchestrating nested workers) aren't cut off by the
+# eval's Manager.chat wait before the session turn timeout (900s) can act. Fast models finish
+# well under this.
+timeout_ms: 960000
