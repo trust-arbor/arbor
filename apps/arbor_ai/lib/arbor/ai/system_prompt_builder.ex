@@ -48,6 +48,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
     sections = [
       truncate_section(build_identity_section(agent_id), budgets.identity),
       if(nonce, do: PromptSanitizer.preamble(nonce)),
+      build_project_context_section(opts),
       truncate_section(
         wrap_section(build_self_knowledge_section(agent_id), nonce),
         budgets.self_knowledge
@@ -58,6 +59,20 @@ defmodule Arbor.AI.SystemPromptBuilder do
     sections
     |> Enum.reject(&(is_nil(&1) or &1 == ""))
     |> Enum.join("\n\n")
+  end
+
+  # Auto-loaded AGENTS.md/CLAUDE.md project context (Arbor.Common.ProjectContext), gated by
+  # config. workdir defaults to "." (server cwd = umbrella root, where CLAUDE.md lives). Sits in
+  # the stable/cacheable prompt below the injection-defense preamble.
+  defp build_project_context_section(opts) do
+    if Arbor.Common.ProjectContext.enabled?() do
+      case Arbor.Common.ProjectContext.load(Keyword.get(opts, :workdir, ".")) do
+        "" -> ""
+        ctx -> "# Project Context\n\n" <> ctx
+      end
+    else
+      ""
+    end
   end
 
   @doc """

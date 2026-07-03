@@ -34,6 +34,10 @@ defmodule Arbor.Common.ProjectContext do
     * `:filenames` — per-directory candidates, first-present wins (default
       `#{inspect(@project_filenames)}`)
   """
+  @doc "Whether auto-loading is enabled (config `:arbor_common, :project_context_enabled`)."
+  @spec enabled?() :: boolean()
+  def enabled?, do: Application.get_env(:arbor_common, :project_context_enabled, false)
+
   @spec load(Path.t(), keyword()) :: String.t()
   def load(workdir, opts \\ []) do
     max_bytes = Keyword.get(opts, :max_bytes, @default_max_bytes)

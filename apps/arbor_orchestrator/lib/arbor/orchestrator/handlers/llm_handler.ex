@@ -529,7 +529,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   # Prepend AGENTS.md/CLAUDE.md project context (Arbor.Common.ProjectContext) when enabled.
   # workdir defaults to "." (server cwd = umbrella root, where CLAUDE.md lives). Fails open.
   defp maybe_prepend_project_context(system_content, node) do
-    if Application.get_env(:arbor_orchestrator, :project_context_enabled, false) do
+    if Arbor.Common.ProjectContext.enabled?() do
       workdir = Map.get(node.attrs, "workdir", ".")
 
       case Arbor.Common.ProjectContext.load(workdir) do

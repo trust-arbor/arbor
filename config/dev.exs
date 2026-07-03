@@ -202,8 +202,9 @@ config :arbor_actions, worker_default_model: "kimi-k2.7-code:cloud"
 config :arbor_orchestrator, turn_timeout_ms: 900_000
 
 # Auto-load AGENTS.md/CLAUDE.md into agent system prompts (Claude-Code-style). Off by default
-# (changes every agent's prompt); on in dev so agents know Arbor's conventions.
-config :arbor_orchestrator, project_context_enabled: true
+# (changes every agent's prompt); on in dev so agents know Arbor's conventions. Read by both the
+# APIAgent stable-prompt path (Arbor.AI.SystemPromptBuilder) and the DOT-pipeline path (LlmHandler).
+config :arbor_common, project_context_enabled: true
 
 # Pre-turn preprocessor ON in dev (consolidated 2026-06-25 onto LM Studio +
 # gemma-4-e4b-it-qat for the whole pipeline). Requires the model loaded in LM
