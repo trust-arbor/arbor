@@ -131,10 +131,37 @@ defmodule Arbor.Orchestrator.Registrar do
       # Lock core after all actions registered
       ActionRegistry.lock_core()
 
+      # Re-sync the searchable capability index now that ActionRegistry is populated.
+      # CapabilityIndex (arbor_common, boots early at L1) synced ActionProvider at ITS boot,
+      # when ActionRegistry was still empty — this Registrar (arbor_orchestrator, L7) is what
+      # populates the actions, and it runs much later. Without this re-sync the index never
+      # contains any actions, so CapabilityResolver.search(kind: :action) always returns []
+      # (which broke spawn_worker's capability resolution). Harvest now that they exist.
+      sync_action_capability_index()
+
       failures ++ action_failures
     else
       failures
     end
+  end
+
+  # arbor_orchestrator (L7) → arbor_common (L1) is a legal direct call. Guarded so a config
+  # without CapabilityIndex started (e.g. some test envs) is a no-op rather than a crash.
+  defp sync_action_capability_index do
+    index = Arbor.Common.CapabilityIndex
+    provider = Arbor.Common.CapabilityProviders.ActionProvider
+
+    if Code.ensure_loaded?(index) and Process.whereis(index) do
+      case index.sync_provider(provider) do
+        {:ok, count} ->
+          Logger.info("Registrar: re-synced #{count} actions into CapabilityIndex")
+
+        other ->
+          Logger.warning("Registrar: CapabilityIndex action re-sync returned #{inspect(other)}")
+      end
+    end
+  rescue
+    e -> Logger.warning("Registrar: CapabilityIndex action re-sync failed: #{inspect(e)}")
   end
 
   defp register_single_action(module, category) do
