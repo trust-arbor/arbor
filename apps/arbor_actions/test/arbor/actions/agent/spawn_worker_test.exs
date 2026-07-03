@@ -44,6 +44,7 @@ defmodule Arbor.Actions.Agent.SpawnWorkerTest do
     on_exit(fn ->
       Application.delete_env(:arbor_actions, :spawn_worker_resolver_mod)
       Application.delete_env(:arbor_actions, :spawn_worker_trust_mod)
+      Application.delete_env(:arbor_actions, :spawn_worker_fail_open)
     end)
 
     :ok
@@ -72,22 +73,25 @@ defmodule Arbor.Actions.Agent.SpawnWorkerTest do
     end
   end
 
-  describe "known SECURITY GAP — fail-open when the parent has no trust profile" do
-    @tag :security_gap
-    test "REGRESSION MARKER: missing parent profile currently GRANTS all requested (fail-open)" do
-      # This documents a fail-OPEN in intersect_with_parent: when the parent has no trust
-      # profile, the code grants every requested capability instead of denying — violating
-      # "a worker can never have more than the parent." When that is fixed to fail CLOSED,
-      # flip this assertion to expect {:error, :no_parent_trust_profile} (or similar).
-      # See .arbor/roadmap: spawn_worker-intersection-fail-open.
+  describe "fail-closed by default when the parent's permissions are unknowable" do
+    test "missing parent trust profile is DENIED by default (fail closed)" do
+      # The parent has no trust profile → we can't bound the worker by the parent, so we
+      # must NOT grant it capabilities. This is the security regression test for the
+      # previously fail-OPEN intersection (a worker could exceed the parent).
       Application.put_env(:arbor_actions, :spawn_worker_trust_mod, StubTrustMissing)
+
+      assert {:error, {:no_parent_trust_profile, :not_found}} =
+               SpawnWorker.resolve_and_intersect("orphan-agent", ["shell execute"])
+    end
+
+    test "operators who accept the risk can opt into fail-OPEN via config" do
+      Application.put_env(:arbor_actions, :spawn_worker_trust_mod, StubTrustMissing)
+      Application.put_env(:arbor_actions, :spawn_worker_fail_open, true)
 
       assert {:ok, rules} =
                SpawnWorker.resolve_and_intersect("orphan-agent", ["shell execute"])
 
-      # CURRENT (undesired) behavior: the parent-unbounded worker gets shell anyway.
-      assert Map.has_key?(rules, "arbor://shell/exec"),
-             "fail-open behavior changed — if it now denies, update this test + close the gap"
+      assert Map.has_key?(rules, "arbor://shell/exec")
     end
   end
 end

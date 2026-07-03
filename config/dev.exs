@@ -185,6 +185,12 @@ config :arbor_security, egress_gate_enforcing: true
 config :arbor_trust, default_egress_modes: %{external_provider: :allow}
 # To also gate homelab/LAN egress: config :arbor_security, gate_on_premises_egress: true
 
+# SpawnWorker capability intersection fails CLOSED by default — if a parent's permissions
+# can't be established (no trust profile / trust unavailable / error), a spawned worker is
+# DENIED rather than granted everything requested (it must never exceed the parent). Accept
+# the risk (e.g. profile-less dev agents) by opting into the old fail-OPEN behavior:
+# config :arbor_actions, spawn_worker_fail_open: true
+
 # Pre-turn preprocessor ON in dev (consolidated 2026-06-25 onto LM Studio +
 # gemma-4-e4b-it-qat for the whole pipeline). Requires the model loaded in LM
 # Studio at localhost:1234. Fails open if unreachable. prod stays off (config.exs)

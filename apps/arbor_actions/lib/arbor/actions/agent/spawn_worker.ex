@@ -189,16 +189,35 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
             {:ok, rules}
           end
 
-        {:error, :not_found} ->
-          # No trust profile — allow requested URIs as :auto (permissive fallback)
-          {:ok, Map.new(requested_uris, fn uri -> {uri, :auto} end)}
+        {:error, reason} ->
+          # No parent trust profile → cannot bound the worker by the parent's permissions.
+          unbounded_fallback(requested_uris, {:no_parent_trust_profile, reason})
       end
     else
-      # Trust system unavailable — allow requested URIs
-      {:ok, Map.new(requested_uris, fn uri -> {uri, :auto} end)}
+      unbounded_fallback(requested_uris, :trust_unavailable)
     end
   rescue
-    _ -> {:ok, Map.new(requested_uris, fn uri -> {uri, :auto} end)}
+    e -> unbounded_fallback(requested_uris, {:intersection_error, Exception.message(e)})
+  end
+
+  # When the parent's permissions can't be established (no profile / trust system
+  # unavailable / error), the intersection can't be enforced. FAIL CLOSED by default — a
+  # worker must never have more capabilities than the parent (the module's invariant).
+  # Operators who accept the risk (e.g. dev) can opt into the old fail-OPEN behavior with
+  # `config :arbor_actions, spawn_worker_fail_open: true`.
+  defp unbounded_fallback(requested_uris, reason) do
+    if Application.get_env(:arbor_actions, :spawn_worker_fail_open, false) do
+      require Logger
+
+      Logger.warning(
+        "[SpawnWorker] FAIL-OPEN: granting unbounded worker caps (#{inspect(reason)}) " <>
+          "because spawn_worker_fail_open=true — a worker may exceed the parent's permissions"
+      )
+
+      {:ok, Map.new(requested_uris, fn uri -> {uri, :auto} end)}
+    else
+      {:error, reason}
+    end
   end
 
   defp resolve_parent_mode(profile, uri) do
