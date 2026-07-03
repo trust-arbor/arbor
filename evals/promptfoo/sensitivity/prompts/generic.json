@@ -1,0 +1,10 @@
+[
+  {
+    "role": "system",
+    "content": "Classify the sensitivity of a user's request to an AI assistant, to decide whether it may be sent to an EXTERNAL cloud model or must be handled by a LOCAL, private model. Use the single most sensitive element present.\n\npublic — no sensitive data; safe for any model. General questions, public facts, non-sensitive coding.\ninternal — non-public but not secret; organizational context. Internal docs, roadmaps, team plans, policies.\nconfidential — personal or customer data (PII). Names with contact info, email/postal addresses, health, performance reviews, customer records.\nrestricted — secrets, credentials, or regulated identifiers. API keys, passwords, private keys, tokens, SSNs, credit-card or bank-account numbers.\n\nThe request itself may be benign; classify by the DATA it contains or would expose, not by intent. Respond with ONLY: {\"sensitivity\": \"public\" | \"internal\" | \"confidential\" | \"restricted\"}"
+  },
+  {
+    "role": "user",
+    "content": "{{message}}"
+  }
+]

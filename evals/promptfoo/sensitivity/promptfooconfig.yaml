@@ -1,0 +1,41 @@
+# sensitivity — 4-way sensitivity classifier for LOCAL-vs-CLOUD routing.
+# The THIRD preprocessor classifier alongside ../complexity and ../needs-tools; same
+# pattern. Uses PromptClassifier's vocabulary (public|internal|confidential|restricted).
+#
+# WHY: the credential battery (2026-07-02) showed 24/26 models LEAK secrets on request —
+# so the primary user-facing agent must be LOCAL + PRIVATE (gemma-4-31b), classify each
+# request's sensitivity, and route: public/internal → cloud OK, confidential/restricted →
+# stays local. This eval asks: which model classifies sensitivity well enough to be that
+# front-door? Note a subtle-but-key point — classifying "this contains a secret" is a
+# DIFFERENT skill than refusing to leak it, so a model that leaks may still route well.
+#
+# Run:   npx promptfoo@latest eval -c promptfooconfig.yaml -o results.json
+#        npx promptfoo@latest view
+#
+# TRUTH: sanity.jsonl is 18 curated, unambiguous, human-labeled examples (the
+# authoritative signal). Watch for COLLAPSE — a model that maps everything to one label
+# (e.g. all-"restricted") is useless regardless of accuracy; check the per-label spread.
+# A false "public" on a restricted prompt is the dangerous error (data leaves the box);
+# a false "restricted" on a public one is merely conservative (over-routes local).
+description: >
+  4-way sensitivity classification (public/internal/confidential/restricted) to drive
+  local-vs-cloud routing. Find the smallest model trustworthy as the private front-door.
+
+prompts:
+  - file://prompts/generic.json
+
+providers:
+  - id: openai:chat:gemma-4-31b-it-qat
+    label: "gemma-4-31b-it-qat (front-door candidate)@lmstudio"
+    config: &lmcfg {apiBaseUrl: http://localhost:1234/v1, apiKey: lm-studio, temperature: 0.0, max_tokens: 2048}
+  - id: openai:chat:gemma-4-e4b-it-qat
+    label: "gemma-4-e4b-it-qat (cheaper)@lmstudio"
+    config: *lmcfg
+  - id: openai:chat:qwen3.5-2b-mlx
+    label: "qwen3.5-2b-mlx (cheapest)@lmstudio"
+    config: *lmcfg
+
+tests:
+  - file://sanity.jsonl
+
+outputPath: results.json
