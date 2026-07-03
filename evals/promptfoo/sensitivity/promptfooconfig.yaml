@@ -31,6 +31,9 @@ providers:
   - id: openai:chat:gemma-4-e4b-it-qat
     label: "gemma-4-e4b-it-qat (cheaper)@lmstudio"
     config: *lmcfg
+  - id: openai:chat:gemma-4-e2b-it-qat
+    label: "gemma-4-e2b-it-qat (smallest)@lmstudio"
+    config: *lmcfg
   - id: openai:chat:qwen3.5-2b-mlx
     label: "qwen3.5-2b-mlx (cheapest)@lmstudio"
     config: *lmcfg

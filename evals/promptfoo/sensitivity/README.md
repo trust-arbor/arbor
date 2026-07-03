@@ -53,6 +53,7 @@ Baselines (2026-07-02, sanity set, one sample/cell):
 |---|---|---|---|
 | gemma-4-e4b-it-qat (~11s) | **75/75** | **0** | front-door pick — perfect + fastest |
 | gemma-4-31b-it-qat (~61s) | **75/75** | **0** | also perfect |
+| gemma-4-e2b-it-qat | 70/75 | **3** | ✗ drops PII/secret boundary despite strong general capability |
 | qwen3.5-2b-mlx (~40s) | 64/75 | **5** | ✗ unsafe boundary |
 
 ¹ dangerous = a `confidential`/`restricted` prompt labeled `public`/`internal` (data would
@@ -65,6 +66,15 @@ boundary needs. **The 2B's failures are diagnostic, not random:** all 5 dangerou
 and performance reviews as `internal`. It catches *secrets* (pattern-obvious) but not
 *personal data* (semantic). So capacity matters specifically for PII sensitivity; the 2B is
 too small to be the privacy boundary, and e4b is the minimum viable classifier.
+
+**e2b (2026-07-03) confirms it from the other direction — general capability ≠ privacy-boundary
+reliability.** gemma-4-e2b passed 15/16 agentic-safety tasks AND the coordinator eval, yet its
+3 dangerous misses are the *same* under-recognition: two performance reviews (confidential →
+`internal`) and a hardcoded secret in a deploy script (restricted → `internal`) — all
+downgraded from local-only to cloud-OK. So a 2B can be a capable *worker* but is not safe as the
+*front-door*. **~4B (e4b) is the confirmed floor for the privacy gate; ~2B is not.** This also
+sets the phone-as-front-door floor: the on-device classifier must be e4b, not e2b (see
+`.arbor/roadmap/1-brainstorming/phone-as-front-door-edge-accessibility.md`).
 
 Key result: the front-door architecture is validated, and the classifier can be the **tiny,
 fast e4b** — it doesn't need the big 31b. gemma classifies sensitivity perfectly *even though
