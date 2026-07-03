@@ -21,8 +21,9 @@ defmodule Arbor.Common.Application do
           Arbor.Common.ComputeRegistry,
           Arbor.Common.PipelineResolver,
           Arbor.Common.ActionRegistry,
-          # No explicit dirs: SkillLibrary uses its default search path
-          # (bundled priv/skills + ~/.arbor/skills). See default_skill_dirs/0.
+          # No explicit dirs: SkillLibrary uses its default search path (personal
+          # ~/.agents/skills + ~/.arbor/library/skills, project .agents/skills, bundled
+          # priv/library/skills; personal overrides bundled). See default_skill_dirs/0.
           Arbor.Common.SkillLibrary,
           Arbor.Common.AgentTelemetry.Store,
           {Arbor.Common.CapabilityIndex,

@@ -544,27 +544,32 @@ defmodule Arbor.Common.SkillLibrary do
   end
 
   @doc """
-  Default skill directories, in precedence order:
+  Default skill directories, in precedence order. `maybe_insert/3` uses first-defined-wins, so
+  EARLIER dirs override LATER ones — personal overrides project overrides bundled:
 
-    1. Product skills bundled with `arbor_common` (`priv/skills`) — version
-       controlled and shipped inside `mix release` artifacts, so a packaged
-       install with no source tree still has them (`Application.app_dir/2`
-       resolves to the bundled path at runtime, and to `_build/.../priv/skills`
-       in dev).
-    2. User / agent-authored skills under `$ARBOR_HOME/skills` (default
-       `~/.arbor/skills`) — the writable per-install layer; may augment or
-       override the bundled product skills.
+    1. `~/.agents/skills` — personal cross-tool skills (the vendor-neutral `.agents/` standard
+       that Gemini CLI / agentskills.io converged on; shared across AI tools).
+    2. `$ARBOR_HOME/library/skills` (default `~/.arbor/library/skills`) — personal Arbor skills,
+       the writable per-install layer that survives system updates.
+    3. `.agents/skills` (relative to cwd) — project cross-tool skills for this repo.
+    4. Product skills bundled with `arbor_common` (`priv/library/skills`) — version-controlled +
+       shipped inside `mix release` artifacts (`Application.app_dir/2` resolves the packaged path
+       at runtime, `_build/.../priv/library/skills` in dev).
 
-  Only existing directories are returned, so a missing user dir is a no-op.
-  Override entirely via `config :arbor_common, :skill_dirs`.
+  A same-named skill in an earlier dir wins (so a user's `~/.arbor/library/skills/foo` overrides
+  the bundled `foo`). Only existing directories are returned, so a missing tier is a no-op.
+  `.claude/skills/` is deliberately NOT scanned — that's Claude-Code-CLI-scoped, not runtime-agent
+  skills. Override the whole set via `config :arbor_common, :skill_dirs`.
   """
   @spec default_skill_dirs() :: [String.t()]
   def default_skill_dirs do
     arbor_home = System.get_env("ARBOR_HOME") || Path.expand("~/.arbor")
 
     [
-      Application.app_dir(:arbor_common, "priv/skills"),
-      Path.join(arbor_home, "skills")
+      Path.expand("~/.agents/skills"),
+      Path.join(arbor_home, "library/skills"),
+      Path.expand(".agents/skills"),
+      Application.app_dir(:arbor_common, "priv/library/skills")
     ]
     |> Enum.filter(&File.dir?/1)
   end
