@@ -191,6 +191,12 @@ config :arbor_trust, default_egress_modes: %{external_provider: :allow}
 # the risk (e.g. profile-less dev agents) by opting into the old fail-OPEN behavior:
 # config :arbor_actions, spawn_worker_fail_open: true
 
+# Worker default model — workers run bounded sub-tasks and must not sit on the rate-limited
+# gpt-oss-120b:free tier (429 → empty worker report). Point them at a reliable subscription
+# model, independent of the global agent default.
+config :arbor_actions, worker_default_provider: :ollama
+config :arbor_actions, worker_default_model: "kimi-k2.7-code:cloud"
+
 # Pre-turn preprocessor ON in dev (consolidated 2026-06-25 onto LM Studio +
 # gemma-4-e4b-it-qat for the whole pipeline). Requires the model loaded in LM
 # Studio at localhost:1234. Fails open if unreachable. prod stays off (config.exs)

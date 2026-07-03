@@ -589,6 +589,26 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
   defp normalize_provider(_), do: nil
 
   defp resolve_defaults do
+    # A spawn_worker-specific default takes precedence over the global agent default: workers
+    # run bounded sub-tasks and must not sit on a rate-limited free tier (the default
+    # gpt-oss-120b:free 429s, which returns an empty worker report). Configure a reliable
+    # worker model with:
+    #   config :arbor_actions, worker_default_provider: :ollama,
+    #                          worker_default_model: "kimi-k2.7-code:cloud"
+    # Falls back to the system LLM default when unset.
+    worker_default_override() || resolve_system_defaults()
+  end
+
+  defp worker_default_override do
+    provider = Application.get_env(:arbor_actions, :worker_default_provider)
+    model = Application.get_env(:arbor_actions, :worker_default_model)
+
+    if is_binary(model) and not is_nil(provider) do
+      {normalize_provider(provider) || provider, model}
+    end
+  end
+
+  defp resolve_system_defaults do
     defaults_mod = Arbor.Agent.LLMDefaults
 
     if Code.ensure_loaded?(defaults_mod) do
