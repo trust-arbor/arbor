@@ -77,22 +77,34 @@ defmodule Arbor.AI.AcpSession.Config do
   }
 
   @adapted_providers %{
+    # ── Permission policy for CLI-agent tools (TWO LAYERS) ──────────────────────────────────
+    # ACP tool-use is gated in two places; configure via `adapter_opts` here or per-deployment
+    # via `config :arbor_ai, :acp_providers, %{claude: %{adapter_opts: [...]}}`:
+    #
+    #   Layer 1 — the CLI's OWN permission (adapter_opts):
+    #     permission_mode: :bypass  -> `--permission-mode bypassPermissions`; the CLI runs every
+    #                                  tool WITHOUT asking (≈ --dangerously-skip-permissions).
+    #     permission_mode: :default -> the CLI ASKS for each tool; the request is routed over the
+    #                                  SDK stdio permission channel into Arbor's handler (Layer 2).
+    #     permission_mode: :deny    -> deny.
+    #     allowed_tools:    ["Read","Grep","Glob","LS","Bash"]  -> CLI auto-runs these without
+    #                                  asking (use for read-only RECON); others still ask.
+    #     disallowed_tools: [...]    -> hard-block these tools.
+    #
+    #   Layer 2 — Arbor's capability handler (`acp_session/handler.ex`): when the CLI ASKS
+    #     (:default mode), Arbor authorizes `arbor://acp/tool/<ToolName>` against the session's
+    #     agent_id capabilities. No cap → DENIED. So for :default you must ALSO grant the agent
+    #     `arbor://acp/tool/<Tool>` caps, or the ask is rejected.
+    #
+    # RECON use (e.g. the coding-recon eval): the simplest working policy is `permission_mode:
+    # :bypass` (CLI recons freely in its sandboxed cwd — read-only intent). For a tighter policy,
+    # use `:default` + `allowed_tools: [read-only tools]` AND grant the matching acp/tool caps.
+    # NOTE (2026-07-03): an eval Claude run hit Layer 2 (denied `cd; grep`) despite this :bypass
+    # default — the eval's `acp_start_session` wasn't threading the catalog adapter_opts. Fix:
+    # ensure the ACP start path merges these adapter_opts (or pass permission_mode explicitly).
     claude: %{
       transport_mod: ExMCP.ACP.AdapterTransport,
       adapter: ExMCP.ACP.Adapters.ClaudeSDK,
-      # `permission_mode: :bypass` keeps existing Arbor flows
-      # (heartbeat, ChatLive, agent loops) running without prompting:
-      # ClaudeSDK encodes `:bypass` as `--permission-mode bypassPermissions`,
-      # which skips all tool-use prompts. Functionally equivalent to
-      # the legacy adapter's `--dangerously-skip-permissions` flag but
-      # routed through the modern permission_mode CLI surface.
-      #
-      # Pipelines or per-turn callers that want a tighter constraint
-      # should override via adapter_opts, e.g.
-      #   permission_mode: :default, allowed_tools: ["WebSearch", "WebFetch"]
-      # That routes Claude's permission requests through the SDK's
-      # stdio permission_prompt control channel into Arbor's HITL bridge
-      # (see `apps/arbor_ai/lib/arbor/ai/acp_session/handler.ex`).
       adapter_opts: [model: "sonnet", permission_mode: :bypass]
     },
     codex: %{
