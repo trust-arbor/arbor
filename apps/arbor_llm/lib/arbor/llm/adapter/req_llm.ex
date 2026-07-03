@@ -525,10 +525,18 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
         _ -> nil
       end
 
+    # kimi k2.x-code/thinking models LOCK sampling params to fixed values and ERROR on any
+    # custom value (Moonshot docs). Omit temperature/top_p so the model uses its own defaults.
+    # Minimal per-model policy — only kimi behaves this way, so no general seam is warranted.
+    {temperature, top_p} =
+      if kimi_params_locked?(request.model),
+        do: {nil, nil},
+        else: {request.temperature, request.top_p}
+
     base =
       []
-      |> maybe_put(:temperature, request.temperature)
-      |> maybe_put(:top_p, request.top_p)
+      |> maybe_put(:temperature, temperature)
+      |> maybe_put(:top_p, top_p)
       |> maybe_put(:max_tokens, request.max_tokens)
       |> maybe_put(:reasoning_effort, request.reasoning_effort)
       |> maybe_put(:receive_timeout, request.receive_timeout)
@@ -660,6 +668,11 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # kimi k2.x (k2.5 / k2.6 / k2.7-code) fix temperature/top_p/penalties and reject any custom
+  # value. Kept deliberately narrow — only kimi behaves this way.
+  defp kimi_params_locked?(model) when is_binary(model), do: model =~ ~r/kimi-k2/i
+  defp kimi_params_locked?(_), do: false
 
   defp maybe_merge(opts, _key, nil), do: opts
   defp maybe_merge(opts, key, value), do: Keyword.put(opts, key, value)

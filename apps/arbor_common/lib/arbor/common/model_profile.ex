@@ -146,8 +146,8 @@ defmodule Arbor.Common.ModelProfile do
     # models by default and REJECT custom temperature/top_p/penalties (fixed values — any
     # other value errors), so callers should omit those knobs for kimi.
     "moonshotai/kimi-k2.5" => %{context_size: 128_000, max_output_tokens: 32_768, family: :kimi},
-    "kimi-k2.7-code:cloud" => %{context_size: 128_000, max_output_tokens: 32_768, family: :kimi},
-    "kimi-k2.7-code" => %{context_size: 128_000, max_output_tokens: 32_768, family: :kimi},
+    "kimi-k2.7-code:cloud" => %{context_size: 256_000, max_output_tokens: 32_768, family: :kimi},
+    "kimi-k2.7-code" => %{context_size: 256_000, max_output_tokens: 32_768, family: :kimi},
 
     # ===== Local Models =====
     "llama3.2" => %{context_size: 128_000, max_output_tokens: 4_096, family: :llama},
