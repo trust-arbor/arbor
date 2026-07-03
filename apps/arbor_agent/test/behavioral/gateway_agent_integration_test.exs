@@ -15,6 +15,11 @@ defmodule Arbor.Behavioral.GatewayAgentIntegrationTest do
     end
 
     test "gateway exposes MCP connection functions" do
+      # Force-load the cross-app module first: arbor_gateway isn't a compile-time dep of
+      # arbor_agent, so in an isolated `mix test apps/arbor_agent` run Arbor.Gateway isn't loaded
+      # yet and function_exported?/3 would see it as absent. The beam is on the umbrella code
+      # path, so ensure_loaded finds it. (Passed in full-umbrella runs; this fixes isolation.)
+      Code.ensure_loaded(Arbor.Gateway)
       assert function_exported?(Arbor.Gateway, :list_mcp_connections, 0)
       assert function_exported?(Arbor.Gateway, :connect_mcp_server, 2)
       assert function_exported?(Arbor.Gateway, :disconnect_mcp_server, 1)
