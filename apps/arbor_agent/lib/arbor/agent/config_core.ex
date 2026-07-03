@@ -59,7 +59,9 @@ defmodule Arbor.Agent.ConfigCore do
       tools: spec.tools,
       heartbeat: spec.heartbeat,
       execution_mode: spec.execution_mode,
-      auto_start: spec.auto_start
+      auto_start: spec.auto_start,
+      project_context: Map.get(spec, :project_context, :inherit),
+      skills: Map.get(spec, :skills, :inherit)
     }
   end
 
@@ -87,7 +89,9 @@ defmodule Arbor.Agent.ConfigCore do
       tools: get_field(metadata, :tools) || [],
       heartbeat: get_field(metadata, :heartbeat) || %{},
       execution_mode: get_field(metadata, :execution_mode),
-      auto_start: get_field(metadata, :auto_start) || false
+      auto_start: get_field(metadata, :auto_start) || false,
+      project_context: get_field(metadata, :project_context) || :inherit,
+      skills: get_field(metadata, :skills) || :inherit
     }
   end
 

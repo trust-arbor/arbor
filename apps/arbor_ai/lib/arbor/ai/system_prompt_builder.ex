@@ -49,6 +49,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
       truncate_section(build_identity_section(agent_id), budgets.identity),
       if(nonce, do: PromptSanitizer.preamble(nonce)),
       build_project_context_section(opts),
+      build_skill_catalog_section(opts),
       truncate_section(
         wrap_section(build_self_knowledge_section(agent_id), nonce),
         budgets.self_knowledge
@@ -61,17 +62,67 @@ defmodule Arbor.AI.SystemPromptBuilder do
     |> Enum.join("\n\n")
   end
 
-  # Auto-loaded AGENTS.md/CLAUDE.md project context (Arbor.Common.ProjectContext), gated by
-  # config. workdir defaults to "." (server cwd = umbrella root, where CLAUDE.md lives). Sits in
-  # the stable/cacheable prompt below the injection-defense preamble.
+  @skill_catalog_max_bytes 4_000
+
+  # Auto-loaded AGENTS.md/CLAUDE.md project context (Arbor.Common.ProjectContext). workdir
+  # defaults to "." (server cwd = umbrella root, where CLAUDE.md lives). Sits in the
+  # stable/cacheable prompt below the injection-defense preamble. Gated per-agent + system.
   defp build_project_context_section(opts) do
-    if Arbor.Common.ProjectContext.enabled?() do
+    if context_enabled?(opts, :project_context, :project_context_enabled) do
       case Arbor.Common.ProjectContext.load(Keyword.get(opts, :workdir, ".")) do
         "" -> ""
         ctx -> "# Project Context\n\n" <> ctx
       end
     else
       ""
+    end
+  end
+
+  # Compact catalog of available skills (name + description) — progressive disclosure: the agent
+  # sees WHAT skills exist and loads full bodies on demand via the skill tool. Fixes search-blind
+  # discovery. Gated per-agent (:skills) + system (:skill_catalog_enabled), byte-capped so it
+  # stays a stable/cacheable summary.
+  defp build_skill_catalog_section(opts) do
+    if context_enabled?(opts, :skills, :skill_catalog_enabled) do
+      Arbor.Common.SkillLibrary.list()
+      |> Enum.map(fn skill -> {Map.get(skill, :name), Map.get(skill, :description)} end)
+      |> Enum.reject(fn {name, _desc} -> name in [nil, ""] end)
+      |> format_skill_catalog()
+    else
+      ""
+    end
+  rescue
+    # Skill listing must never break prompt assembly.
+    _ -> ""
+  end
+
+  defp format_skill_catalog([]), do: ""
+
+  defp format_skill_catalog(entries) do
+    body =
+      entries
+      |> Enum.map_join("\n", fn {name, desc} -> "- **#{name}**: #{one_line(desc)}" end)
+      |> truncate_catalog()
+
+    "# Available Skills\n\nActivate any of these with the skill tool to load its full guidance:\n\n" <>
+      body
+  end
+
+  defp one_line(nil), do: ""
+  defp one_line(desc), do: desc |> String.split("\n", parts: 2) |> hd() |> String.trim()
+
+  defp truncate_catalog(body) when byte_size(body) <= @skill_catalog_max_bytes, do: body
+
+  defp truncate_catalog(body),
+    do: binary_part(body, 0, @skill_catalog_max_bytes) <> "\n…[skill catalog truncated]"
+
+  # Per-agent :enabled/:disabled override the system flag; :inherit (or nil) uses the system
+  # config flag under :arbor_common.
+  defp context_enabled?(opts, opts_key, system_flag) do
+    case Keyword.get(opts, opts_key, :inherit) do
+      :enabled -> true
+      :disabled -> false
+      _ -> Application.get_env(:arbor_common, system_flag, false)
     end
   end
 

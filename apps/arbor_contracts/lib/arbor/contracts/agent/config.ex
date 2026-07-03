@@ -24,6 +24,11 @@ defmodule Arbor.Contracts.Agent.Config do
           model: String.t() | nil
         }
 
+  # Per-agent context/skill loading preference. :inherit falls back to the system-wide config
+  # flag; :enabled/:disabled override it for this agent. Lets narrow workers opt out of the
+  # ~20KB project context + skill catalog while cognitive agents keep both.
+  @type context_pref :: :inherit | :enabled | :disabled
+
   @type t :: %__MODULE__{
           provider: atom(),
           model: String.t(),
@@ -35,6 +40,8 @@ defmodule Arbor.Contracts.Agent.Config do
           heartbeat: heartbeat_config(),
           execution_mode: execution_mode(),
           auto_start: boolean(),
+          project_context: context_pref(),
+          skills: context_pref(),
           runtime: Runtime.t() | nil
         }
 
@@ -50,7 +57,9 @@ defmodule Arbor.Contracts.Agent.Config do
     tool_exposure: :full,
     heartbeat: %{enabled: true, interval_ms: 30_000, model: nil},
     execution_mode: :session,
-    auto_start: false
+    auto_start: false,
+    project_context: :inherit,
+    skills: :inherit
   ]
 end
 

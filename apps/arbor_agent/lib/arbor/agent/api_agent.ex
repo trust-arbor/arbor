@@ -380,7 +380,13 @@ defmodule Arbor.Agent.APIAgent do
   end
 
   defp execute_query(prompt, state, _opts) do
-    prompt_opts = [state: state, model: state.config.model, provider: state.config.provider]
+    prompt_opts = [
+      state: state,
+      model: state.config.model,
+      provider: state.config.provider,
+      project_context: state.config.project_context,
+      skills: state.config.skills
+    ]
 
     # Stable system prompt (identity, self-knowledge, tools — cacheable)
     system_prompt = Arbor.AI.build_stable_system_prompt(state.id, prompt_opts)

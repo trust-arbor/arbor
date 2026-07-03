@@ -37,4 +37,28 @@ defmodule Arbor.AI.SystemPromptBuilderProjectContextTest do
     prompt = Arbor.AI.build_stable_system_prompt("agent_pctx_probe", workdir: root)
     refute prompt =~ "PROJECT_MARKER_CONVENTIONS"
   end
+
+  test "per-agent :disabled overrides system :enabled", %{root: root} do
+    Application.put_env(:arbor_common, :project_context_enabled, true)
+
+    prompt =
+      Arbor.AI.build_stable_system_prompt("agent_pctx_probe",
+        workdir: root,
+        project_context: :disabled
+      )
+
+    refute prompt =~ "PROJECT_MARKER_CONVENTIONS"
+  end
+
+  test "per-agent :enabled overrides system :disabled", %{root: root} do
+    Application.put_env(:arbor_common, :project_context_enabled, false)
+
+    prompt =
+      Arbor.AI.build_stable_system_prompt("agent_pctx_probe",
+        workdir: root,
+        project_context: :enabled
+      )
+
+    assert prompt =~ "PROJECT_MARKER_CONVENTIONS"
+  end
 end

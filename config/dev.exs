@@ -206,6 +206,11 @@ config :arbor_orchestrator, turn_timeout_ms: 900_000
 # APIAgent stable-prompt path (Arbor.AI.SystemPromptBuilder) and the DOT-pipeline path (LlmHandler).
 config :arbor_common, project_context_enabled: true
 
+# Surface a compact catalog of available skills (name + description) in the stable prompt so
+# agents know WHAT skills exist (progressive disclosure; bodies load on activate). Off by default;
+# on in dev. Per-agent Config.skills (:enabled/:disabled) overrides this; :inherit uses it.
+config :arbor_common, skill_catalog_enabled: true
+
 # Pre-turn preprocessor ON in dev (consolidated 2026-06-25 onto LM Studio +
 # gemma-4-e4b-it-qat for the whole pipeline). Requires the model loaded in LM
 # Studio at localhost:1234. Fails open if unreachable. prod stays off (config.exs)
