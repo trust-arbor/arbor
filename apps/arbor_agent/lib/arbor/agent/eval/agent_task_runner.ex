@@ -105,6 +105,69 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   # lifecycle (seed → create → grant → drive → grade → judge → teardown → rm) so N
   # samples are fully isolated.
   defp run_sample(task, opts, index) do
+    if opts[:agent_runtime] in ["acp", :acp] do
+      run_sample_acp(task, opts, index)
+    else
+      run_sample_arbor(task, opts, index)
+    end
+  end
+
+  # ACP: drive an EXTERNAL CLI agent (Codex/Claude/Grok) in its OWN harness. It recons with its
+  # native file tools (cwd = read_root), so Arbor's caps / read_paths / ToolLoop-signal capture
+  # don't apply — trajectory is empty and only the final plan text feeds the judge (plan-judge
+  # ONLY; recon_quality + Arbor security-gate metrics are uncapturable for ACP).
+  defp run_sample_acp(task, opts, index) do
+    provider = acp_provider(opts)
+    read_root = acp_read_root(task)
+    prompt = String.replace(task.prompt, "{{read_root}}", read_root)
+    # cwd = repo root so the CLI reads AGENTS.md/CLAUDE.md natively (parity with the Arbor-harness
+    # models' ProjectContext); {{read_root}} still points it at the recon subtree.
+    cwd = File.cwd!()
+
+    t0 = System.monotonic_time(:millisecond)
+    {final_text, usage} = drive_acp(provider, prompt, cwd, task.timeout_ms)
+    duration_ms = System.monotonic_time(:millisecond) - t0
+
+    trajectory = []
+    grade = AgentTaskGrader.grade(task, trajectory, final_text)
+    judge = run_judge(task, trajectory, final_text, opts)
+    agent_id = "acp:#{provider}:#{index}"
+
+    build_sample(task, agent_id, final_text, trajectory, usage, [], grade, judge, duration_ms, index, opts)
+  end
+
+  defp acp_provider(opts) do
+    raw = to_string(opts[:agent_provider] || opts[:agent_model] || "codex")
+
+    try do
+      String.to_existing_atom(raw)
+    rescue
+      ArgumentError -> :codex
+    end
+  end
+
+  defp acp_read_root(task) do
+    case task.read_paths do
+      [first | _] -> Path.expand(first)
+      _ -> File.cwd!()
+    end
+  end
+
+  defp drive_acp(provider, prompt, read_root, timeout) do
+    with {:ok, session} <- Arbor.AI.acp_start_session(provider, timeout: timeout),
+         {:ok, _created} <- Arbor.AI.acp_create_session(session, cwd: read_root),
+         {:ok, response} <- Arbor.AI.acp_send_message(session, prompt, timeout: timeout) do
+      Arbor.AI.acp_close_session(session)
+      {response[:text] || response["text"] || "", response[:usage] || response["usage"] || %{}}
+    else
+      {:error, reason} -> {"[ACP drive error: #{inspect(reason)}]", %{}}
+    end
+  end
+
+  # One sample = one fresh in-process Arbor agent against a freshly-seeded scenario. Self-contained
+  # lifecycle (seed → create → grant → drive → grade → judge → teardown → rm) so N samples are
+  # fully isolated.
+  defp run_sample_arbor(task, opts, index) do
     scenario_dir = seed_scenario(task)
     agent_id = nil
 

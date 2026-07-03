@@ -22,6 +22,9 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
     template: :string,
     agent_model: :string,
     agent_provider: :string,
+    # "acp" drives an external CLI agent (Codex/Claude/Grok) in its own harness via ACP
+    # instead of an in-process Arbor model; agent_provider is the ACP provider (codex/claude/grok).
+    agent_runtime: :string,
     # --agent-quant overrides the recorded quant; otherwise it's auto-detected from
     # LM Studio's native /api/v0/models endpoint (nil for non-LM-Studio providers).
     agent_quant: :string,
