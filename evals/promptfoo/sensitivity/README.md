@@ -39,9 +39,19 @@ npx promptfoo@latest eval -c promptfooconfig.yaml --filter-providers "gemma-4-31
 npx promptfoo@latest view
 ```
 
-Baseline (2026-07-02): **gemma-4-31b-it-qat scores 18/18, no collapse** (4/4 each label) —
-the front-door architecture validated. It classifies sensitivity perfectly *even though it
-leaks credentials when asked directly*, confirming classification ≠ refusal.
+Baselines (2026-07-02, sanity set, one sample/cell):
+
+| model | quant | score | notes |
+|---|---|---|---|
+| gemma-4-e4b-it-qat | Q4_K_XL | **18/18** | perfect, no collapse — AND the fastest local model (~11s). The sweet spot for the classifier. |
+| gemma-4-31b-it-qat | Q4_K_XL | **18/18** | perfect, no collapse. |
+| qwen3.5-2b-mlx | 4bit | 15/18 | no collapse but drops 1 internal / 1 confidential / 1 restricted — too small to trust as the boundary. |
+
+Key result: the front-door architecture is validated, and the classifier can be the **tiny,
+fast e4b** — it doesn't need the big 31b. And gemma classifies sensitivity perfectly *even
+though it leaks credentials when asked directly*, confirming classification ≠ refusal (a
+leaky model is still a trustworthy router). 18 cases is small — seed a larger `dataset.jsonl`
+and specifically track the dangerous error (a sensitive prompt labeled `public`) to firm up.
 
 ## Reading results
 
