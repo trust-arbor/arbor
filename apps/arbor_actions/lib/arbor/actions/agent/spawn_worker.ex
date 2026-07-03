@@ -49,7 +49,13 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
         doc: "Capability intents: 'file read', 'web search', 'shell execute', etc."
       ],
       system_prompt: [type: :string, doc: "Custom system prompt for the worker"],
-      max_tokens: [type: :integer, default: 8000, doc: "Token budget for the worker"],
+      max_tokens: [
+        type: :integer,
+        default: 32_000,
+        doc:
+          "Token budget for the worker. Generous by default — reasoning workers spend part of " <>
+            "the budget on hidden reasoning + tool calls, so a low cap yields EMPTY content."
+      ],
       timeout: [type: :integer, default: 60_000, doc: "Timeout in milliseconds"],
       max_turns: [type: :integer, default: 10, doc: "Max tool-call turns"],
       context: [type: :string, doc: "Additional context to pass to the worker"],
@@ -284,6 +290,14 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
         start_opts = [
           provider: worker_provider,
           model: worker_model,
+          # Set the worker's turn budget at creation — query_worker's max_tokens is dropped by
+          # the session query path, so this (via session_config's max_tokens) is what actually
+          # applies. Generous by default so a reasoning worker doesn't spend its budget on
+          # hidden reasoning + a tool call and emit EMPTY content before any findings.
+          # NB: apply the default explicitly — Jido doesn't fold schema defaults into `params`,
+          # so params[:max_tokens] is nil when the caller omits it (same reason query_worker
+          # uses `|| 8000`).
+          max_tokens: params[:max_tokens] || 32_000,
           start_heartbeat: false,
           system_prompt: system_prompt,
           tools: explicit_tools,
@@ -379,14 +393,38 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
             usage = response[:usage] || Map.get(response, :usage, %{})
             tool_calls = response[:tool_calls] || Map.get(response, :tool_calls, [])
 
-            {:ok,
-             %{
-               result: text,
-               tool_calls: normalize_tool_calls(tool_calls),
-               usage: usage,
-               duration_ms: duration_ms,
-               worker_id: worker_id
-             }}
+            if blank?(text) do
+              # The worker turn returned EMPTY content — e.g. a rate-limited/stream-errored
+              # LLM call (429 swallowed into an empty response) or a reasoning model that spent
+              # its budget without emitting content. Don't pass an empty report off as success:
+              # the coordinator can't tell "nothing to say" from "the worker's LLM died".
+              # Salvage partial tool-round output if there is any; otherwise fail LOUDLY so the
+              # coordinator sees a real error and can retry/handle it.
+              case extract_partial_results(worker_id) do
+                partial when is_binary(partial) and partial != "" ->
+                  {:ok,
+                   %{
+                     result: partial,
+                     tool_calls: normalize_tool_calls(tool_calls),
+                     usage: usage,
+                     duration_ms: duration_ms,
+                     worker_id: worker_id,
+                     partial: true
+                   }}
+
+                _ ->
+                  {:error, {:worker_produced_no_output, worker_id}}
+              end
+            else
+              {:ok,
+               %{
+                 result: text,
+                 tool_calls: normalize_tool_calls(tool_calls),
+                 usage: usage,
+                 duration_ms: duration_ms,
+                 worker_id: worker_id
+               }}
+            end
 
           {:ok, {:error, reason}} ->
             {:error, {:worker_query_failed, reason}}
@@ -421,6 +459,8 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
         {:error, :worker_host_not_found}
     end
   end
+
+  defp blank?(text), do: is_nil(text) or String.trim(to_string(text)) == ""
 
   # Try to extract partial results from a timed-out worker's session.
   # The session stores assistant messages from completed tool rounds.
@@ -529,6 +569,12 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
 
   defp format_error({:worker_timeout, timeout}) do
     "Worker timed out after #{div(timeout, 1000)} seconds."
+  end
+
+  defp format_error({:worker_produced_no_output, _worker_id}) do
+    "Worker produced no output — its LLM returned empty content (possibly rate-limited, or the " <>
+      "response was truncated before any findings were emitted). Retry, or give the worker a " <>
+      "narrower task."
   end
 
   defp format_error(other), do: inspect(other)
