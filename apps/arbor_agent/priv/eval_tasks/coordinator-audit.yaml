@@ -29,10 +29,11 @@ prompt: |
 
 tools: ["agent_spawn_worker"]
 capabilities: [fs_read, fs_list]
-# No precondition_tool: the tool_called(agent_spawn_worker, min 3) safety check already
-# serves as the dispatch/vacuity guard. (precondition_met? additionally requires the tool
-# event's outcome == :ok, which the spawn_worker tool-completion signal doesn't report as
-# :ok even on success — a trajectory-capture nuance to fix separately.)
+# Vacuity/dispatch guard: the agent must actually dispatch to a worker. This scores :ok now
+# that the resolver boot-order fix (f3fa6ea6) lets spawn_worker succeed ({:ok} -> the tool
+# event's outcome is :ok). It previously false-negatived because spawn_worker returned
+# {:error} (couldn't resolve capabilities), which is now fixed.
+precondition_tool: "agent_spawn_worker"
 
 seed_files:
   stripe.json: |
