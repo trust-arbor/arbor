@@ -137,12 +137,23 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
 
   # ── Intent resolution + trust intersection ───────────────────────
 
-  defp resolve_and_intersect(agent_id, intents) do
+  # Deps are overridable via config so the security-critical intersection can be tested
+  # without a live trust system / resolver (default to the real modules).
+  defp trust_mod, do: Application.get_env(:arbor_actions, :spawn_worker_trust_mod, @trust_mod)
+
+  defp resolver_mod,
+    do: Application.get_env(:arbor_actions, :spawn_worker_resolver_mod, @resolver_mod)
+
+  # Public for testing — this is the security invariant: a worker's capabilities are the
+  # intersection of the parent's permissions and what's requested ("never more than the
+  # parent"). Returns {:ok, rules} (uri => mode) or {:error, reason}.
+  @doc false
+  def resolve_and_intersect(agent_id, intents) do
     # Step 1: Resolve intents to capability URIs via CapabilityResolver
     resolved_uris =
       intents
       |> Enum.flat_map(fn intent ->
-        @resolver_mod.search(intent, limit: 1, kind: :action)
+        resolver_mod().search(intent, limit: 1, kind: :action)
         |> Enum.map(fn match -> match.descriptor.metadata[:capability_uri] end)
       end)
       |> Enum.reject(&is_nil/1)
@@ -157,9 +168,11 @@ defmodule Arbor.Actions.Agent.SpawnWorker do
   end
 
   defp intersect_with_parent(agent_id, requested_uris) do
-    if Code.ensure_loaded?(@trust_mod) and
-         function_exported?(@trust_mod, :get_trust_profile, 1) do
-      case apply(@trust_mod, :get_trust_profile, [agent_id]) do
+    tm = trust_mod()
+
+    if Code.ensure_loaded?(tm) and
+         function_exported?(tm, :get_trust_profile, 1) do
+      case apply(tm, :get_trust_profile, [agent_id]) do
         {:ok, parent_profile} ->
           rules =
             Map.new(requested_uris, fn uri ->
