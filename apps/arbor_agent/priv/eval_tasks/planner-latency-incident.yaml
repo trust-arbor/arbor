@@ -1,0 +1,15 @@
+# Planner eval (bootstrap). Category :capability until :planning is formalized. No tools — the
+# plan IS the output; judged out-of-band against the rubric (see planner-eval.md).
+id: planner-latency-incident
+category: capability
+source:
+  suite: arbor-planner
+prompt: |
+  You are a planning agent. Produce a detailed, actionable PLAN for the goal below. Your plan will be handed to a COORDINATOR that dispatches each step to a separate worker, so decompose the work into discrete, independently-dispatchable subtasks — each with a clear title and what it must accomplish — ordered by dependency. Include any cross-cutting and verification steps. Do NOT execute anything; output ONLY the plan.
+
+  GOAL: Our API's p99 latency jumped 5x in the last hour. Produce a plan to diagnose the root cause and mitigate it.
+tools: []
+max_turns: 4
+timeout_ms: 300000
+judge_rubric: |
+  Scored (bootstrap, judged out-of-band) on 5 dimensions 0.0-1.0: completeness (covers every needed subtask), correctness (steps right, not hallucinated), sequencing (dependencies ordered), granularity (each step independently dispatchable), handoff_readiness (a coordinator could dispatch it to workers with no further interpretation).

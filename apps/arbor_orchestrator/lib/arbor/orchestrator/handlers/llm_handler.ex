@@ -604,12 +604,14 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
            # OpenAI provider schema rejects :top_p there). Session-pinned via config →
            # context; nil leaves the provider default.
            top_p: Context.get(context, "session.top_p"),
-           # Forwards to req_llm as :receive_timeout (HTTP-layer cutoff).
-           # req_llm defaults to 30s for openai-compatible providers, which
-           # is too short for slower local models or long tool-use turns.
-           # `timeout` node attr also sets Arbor.LLM.Client's outer timeout
-           # (see build_call_opts/2), so both layers stay aligned.
-           receive_timeout: parse_int(Map.get(node.attrs, "timeout"), nil),
+           # Forwards to req_llm as :receive_timeout (HTTP-layer cutoff). req_llm defaults to
+           # 30s for openai-compatible providers — too short for slow local models or long
+           # tool-use turns: a slow LM Studio model (e.g. gemma-4-31b) FINISHES generating but
+           # Arbor disconnects at 30s → empty response (confirmed in the LM Studio server log).
+           # Default to a generous 5 min so slow local generation completes; the `timeout` node
+           # attr overrides. Also sets Arbor.LLM.Client's outer timeout (build_call_opts/2), so
+           # both layers stay aligned.
+           receive_timeout: parse_int(Map.get(node.attrs, "timeout"), 300_000),
            provider_options:
              node.attrs
              |> build_provider_options(Context.get(context, "session.acp_agent"))
