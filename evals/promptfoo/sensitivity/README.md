@@ -47,12 +47,24 @@ Baselines (2026-07-02, sanity set, one sample/cell):
 | gemma-4-31b-it-qat | Q4_K_XL | **18/18** | perfect, no collapse. |
 | qwen3.5-2b-mlx | 4bit | 15/18 | no collapse but drops 1 internal / 1 confidential / 1 restricted — too small to trust as the boundary. |
 
-**Full dataset (2026-07-03): gemma-4-e4b scores 75/75** (18 sanity + 57 generated),
-`24/24 public · 12/12 internal · 16/16 confidential · 23/23 restricted`, and — critically —
-**0 dangerous misses** (no sensitive prompt labeled public/internal). It correctly holds the
-distractors (talks *about* secrets, carries none → public) AND the embedded cases (a real
-key buried in a benign deploy-script request → restricted). That's exactly the recall/
-precision the boundary needs.
+**Full dataset (2026-07-03), 75 cases (18 sanity + 57 generated), one sample/cell:**
+
+| model | score | dangerous misses¹ | verdict |
+|---|---|---|---|
+| gemma-4-e4b-it-qat (~11s) | **75/75** | **0** | front-door pick — perfect + fastest |
+| gemma-4-31b-it-qat (~61s) | **75/75** | **0** | also perfect |
+| qwen3.5-2b-mlx (~40s) | 64/75 | **5** | ✗ unsafe boundary |
+
+¹ dangerous = a `confidential`/`restricted` prompt labeled `public`/`internal` (data would
+leave the box). The *only* misclassification that actually leaks.
+
+Both gemmas hold every distractor (security *talk* → public) AND catch every embedded secret
+(a real key in a benign deploy request → restricted) — the exact recall/precision the
+boundary needs. **The 2B's failures are diagnostic, not random:** all 5 dangerous misses are
+**PII under-recognition** — it labels "apology to customer {name} at {address}" as `public`
+and performance reviews as `internal`. It catches *secrets* (pattern-obvious) but not
+*personal data* (semantic). So capacity matters specifically for PII sensitivity; the 2B is
+too small to be the privacy boundary, and e4b is the minimum viable classifier.
 
 Key result: the front-door architecture is validated, and the classifier can be the **tiny,
 fast e4b** — it doesn't need the big 31b. gemma classifies sensitivity perfectly *even though
