@@ -143,4 +143,54 @@ defmodule Arbor.Orchestrator.RegistrarTest do
       end
     end
   end
+
+  describe "CapabilityIndex action re-sync (boot-order regression)" do
+    # Regression for the boot-order bug: CapabilityIndex (arbor_common, L1) syncs its
+    # providers at ITS boot, including ActionProvider — but ActionRegistry is populated by
+    # this Registrar (arbor_orchestrator, L7), which boots later. Without a re-sync after
+    # register_actions/1, the index stays EMPTY of actions and
+    # CapabilityResolver.search(kind: :action) returns [] (which broke spawn_worker's
+    # capability resolution and drove a retry runaway). Guards
+    # Registrar.sync_action_capability_index/0.
+    #
+    # The capability infra isn't auto-started in this app's test env
+    # (:start_children=false), so this test OWNS the boot order to reproduce the bug: start
+    # the index against an EMPTY ActionRegistry (boot-sync gets nothing), then register_core
+    # must re-sync it. Without the fix, register_core doesn't re-sync → index stays empty →
+    # the final assert fails.
+    test "register_core re-syncs actions registered AFTER the index booted" do
+      alias Arbor.Common.CapabilityIndex
+      alias Arbor.Common.CapabilityProviders.ActionProvider
+      alias Arbor.Common.CapabilityResolver
+
+      if Code.ensure_loaded?(Arbor.Actions) do
+        # Own the index lifecycle (not started in test env).
+        case GenServer.whereis(CapabilityIndex) do
+          nil -> :ok
+          pid -> GenServer.stop(pid)
+        end
+
+        # Reproduce the buggy order: EMPTY ActionRegistry, THEN the index boots + syncs.
+        :ok = ActionRegistry.reset()
+        {:ok, idx} = CapabilityIndex.start_link(providers: [ActionProvider])
+        on_exit(fn -> if Process.alive?(idx), do: GenServer.stop(idx) end)
+
+        # Bug state: no actions indexed yet (tier: 1 = the ETS index only, no skill noise).
+        assert CapabilityResolver.search("file read", limit: 5, kind: :action, tier: 1) == []
+
+        # The fix: register_core populates ActionRegistry AND re-syncs the index.
+        :ok = Arbor.Orchestrator.Registrar.register_core()
+
+        uris =
+          CapabilityResolver.search("file read", limit: 5, kind: :action, tier: 1)
+          |> Enum.map(fn m ->
+            get_in(m, [Access.key(:descriptor), Access.key(:metadata)])[:capability_uri]
+          end)
+
+        assert "arbor://fs/read" in uris,
+               "expected 'file read' to resolve to arbor://fs/read after register_core; got " <>
+                 "#{inspect(uris)} (empty = the CapabilityIndex action re-sync regressed)"
+      end
+    end
+  end
 end
