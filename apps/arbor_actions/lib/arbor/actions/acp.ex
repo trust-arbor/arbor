@@ -168,7 +168,7 @@ defmodule Arbor.Actions.Acp do
         provider: [
           type: :string,
           required: true,
-          doc: "Provider: claude, codex, gemini, opencode, goose, cursor"
+          doc: "Provider: claude, codex, gemini, grok, opencode, goose, cursor"
         ],
         model: [
           type: :string,

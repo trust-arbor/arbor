@@ -59,6 +59,10 @@ defmodule Arbor.AI.AcpSession.Config do
 
   @native_providers %{
     gemini: %{command: ["gemini", "--experimental-acp"]},
+    # Grok CLI runs its agent over stdio (`grok agent stdio` — JSON-RPC over stdio, per
+    # `grok agent --help`). ACP-compliance to be confirmed at first run. Auth out-of-band
+    # via `grok login`.
+    grok: %{command: ["grok", "agent", "stdio"]},
     opencode: %{command: ["opencode", "acp"]},
     goose: %{command: ["goose", "--acp"]},
     copilot: %{command: ["github-copilot", "--acp"]},

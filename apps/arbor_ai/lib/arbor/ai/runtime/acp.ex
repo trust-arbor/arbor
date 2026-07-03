@@ -50,7 +50,8 @@ defmodule Arbor.AI.Runtime.Acp do
     "openai" => :codex,
     "google" => :gemini,
     "google_vertex" => :gemini,
-    "google_vertex_anthropic" => :claude
+    "google_vertex_anthropic" => :claude,
+    "xai" => :grok
   }
 
   # Runtime bridges — same shape as Adapter.Acp uses, kept for clarity
