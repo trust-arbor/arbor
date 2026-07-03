@@ -29,6 +29,43 @@ defmodule Arbor.Orchestrator.SessionTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
+  # --- Mock LLM + tools for the steering end-to-end test ---
+  # Turn 1: a noop tool call. Once a "STEER:" user message has been folded into the
+  # conversation, acknowledge it and stop.
+  defmodule SteerIntegAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "steer_integ"
+
+    def complete(%Arbor.LLM.Request{} = request, _opts) do
+      steer = Enum.find(request.messages, &(&1.role == :user and &1.content =~ "STEER:"))
+
+      if steer do
+        {:ok,
+         %Arbor.LLM.Response{
+           text: "Acknowledged: #{steer.content}",
+           finish_reason: :stop,
+           content_parts: [Arbor.LLM.ContentPart.text("Acknowledged: #{steer.content}")],
+           usage: %{},
+           raw: %{}
+         }}
+      else
+        {:ok,
+         %Arbor.LLM.Response{
+           text: "",
+           finish_reason: :tool_calls,
+           content_parts: [Arbor.LLM.ContentPart.tool_call("t1", "noop", %{})],
+           usage: %{},
+           raw: %{}
+         }}
+      end
+    end
+  end
+
+  defmodule MockSteerTools do
+    def execute("noop", _args, _workdir, _opts), do: {:ok, "did nothing"}
+    def execute(name, _args, _workdir, _opts), do: {:error, "unknown: #{name}"}
+  end
+
   alias Arbor.Orchestrator
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Engine.Context
@@ -1271,6 +1308,70 @@ defmodule Arbor.Orchestrator.SessionTest do
 
       # Empty queue → :none (nothing left to fold in).
       assert :none == Arbor.Orchestrator.Session.take_steering(pid)
+    end
+
+    test "END-TO-END: a queued mid-turn message steers a live tool loop via the real closure" do
+      {pid, tmp_dir} = start_session([])
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        File.rm_rf(tmp_dir)
+      end)
+
+      fake_from = {self(), make_ref()}
+
+      # A mid-turn message already queued during an in-flight turn.
+      :sys.replace_state(pid, fn s ->
+        %{
+          s
+          | turn_in_flight: true,
+            turn_queue: [{%{content: "STEER: also verify config"}, fake_from}],
+            steer_froms: []
+        }
+      end)
+
+      # The EXACT closure build_engine_opts wires into the turn context.
+      steer_check = fn -> Arbor.Orchestrator.Session.take_steering(pid) end
+
+      client =
+        Arbor.LLM.Client.new(default_provider: SteerIntegAdapter.provider())
+        |> Arbor.LLM.Client.register_adapter(SteerIntegAdapter)
+
+      request = %Arbor.LLM.Request{
+        provider: SteerIntegAdapter.provider(),
+        model: "test",
+        messages: [Arbor.LLM.Message.new(:user, "do the task")]
+      }
+
+      # Turn 1: the noop tool. At the boundary, the real steer_check -> real Session.take_steering
+      # pops the queued message and the tool loop folds it in. Turn 2: the model sees it.
+      {:ok, result} =
+        Arbor.LLM.ToolLoop.run(client, request,
+          tool_executor: MockSteerTools,
+          on_steer_check: steer_check
+        )
+
+      assert result.content =~ "Acknowledged: STEER: also verify config"
+
+      # The real Session drained its queue and folded the caller into the active turn.
+      state = Arbor.Orchestrator.Session.get_state(pid)
+      assert state.turn_queue == []
+      assert fake_from in state.steer_froms
+    end
+
+    test "build_engine_opts wires a callable session.steer_check into the turn context" do
+      {pid, tmp_dir} = start_session([])
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        File.rm_rf(tmp_dir)
+      end)
+
+      state = Arbor.Orchestrator.Session.get_state(pid)
+      opts = Arbor.Orchestrator.Session.Builders.build_engine_opts(state, %{})
+
+      # The reader (LlmHandler) fetches Context.get(context, "session.steer_check") — same key.
+      assert is_function(get_in(opts, [:initial_values])["session.steer_check"], 0)
     end
 
     test "engagement-tagged messages keep isolated transcripts (single-mind model)" do
