@@ -517,9 +517,28 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
           Context.get(context, key, "You are a coding agent.")
       end
 
+    # Auto-load AGENTS.md/CLAUDE.md project context (like Claude Code/Codex/opencode) so the
+    # agent knows the repo's conventions — sits below the injection-defense preamble, above the
+    # task prompt. Gated (default off) since it changes every agent's system prompt.
+    system_content = maybe_prepend_project_context(system_content, node)
     system_content = @prompt_sanitizer.preamble(nonce) <> "\n\n" <> system_content
     system_content = maybe_prepend_vote_format(system_content, node.attrs, graph.attrs)
     {system_content, prompt <> previous_outcome}
+  end
+
+  # Prepend AGENTS.md/CLAUDE.md project context (Arbor.Common.ProjectContext) when enabled.
+  # workdir defaults to "." (server cwd = umbrella root, where CLAUDE.md lives). Fails open.
+  defp maybe_prepend_project_context(system_content, node) do
+    if Application.get_env(:arbor_orchestrator, :project_context_enabled, false) do
+      workdir = Map.get(node.attrs, "workdir", ".")
+
+      case Arbor.Common.ProjectContext.load(workdir) do
+        "" -> system_content
+        ctx -> ctx <> "\n\n" <> system_content
+      end
+    else
+      system_content
+    end
   end
 
   defp build_llm_request(node, context, system_content, user_content) do

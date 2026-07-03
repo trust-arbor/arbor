@@ -201,6 +201,10 @@ config :arbor_actions, worker_default_model: "kimi-k2.7-code:cloud"
 # (gemma-4-31b timed out). 15 min gives agentic local turns room; still a safety net.
 config :arbor_orchestrator, turn_timeout_ms: 900_000
 
+# Auto-load AGENTS.md/CLAUDE.md into agent system prompts (Claude-Code-style). Off by default
+# (changes every agent's prompt); on in dev so agents know Arbor's conventions.
+config :arbor_orchestrator, project_context_enabled: true
+
 # Pre-turn preprocessor ON in dev (consolidated 2026-06-25 onto LM Studio +
 # gemma-4-e4b-it-qat for the whole pipeline). Requires the model loaded in LM
 # Studio at localhost:1234. Fails open if unreachable. prod stays off (config.exs)
