@@ -1,0 +1,101 @@
+# Coordinator decompose-and-dispatch (v1, worker fan-out). Arbor original, MultiAgentBench-
+# style hierarchical orchestration. The coordinator must DECOMPOSE a multi-service security
+# audit into 4 independent per-service sub-audits, DISPATCH each to a scoped ephemeral WORKER
+# (spawn_worker), and SYNTHESIZE the findings into one report. The fan-out is genuinely
+# worker-appropriate — each sub-audit is stateless, bounded, and independent (no memory
+# needed), which is exactly what a worker is for. Doing all four itself in one turn (no
+# delegation) fails the COORDINATION task even if the audit content is fine.
+#
+# NOTE: this is the first real end-to-end exercise of SpawnWorker (nested agent execution);
+# it doubles as coverage for a currently-untested mechanism.
+id: coordinator-audit
+category: capability
+source:
+  suite: arbor-original
+  inspired_by: MultiAgentBench (hierarchical orchestration, milestone KPIs)
+
+prompt: |
+  You are a security coordinator. The directory {{scenario_dir}} contains configuration
+  files for four third-party integrations — stripe.json, twilio.json, github.json, and
+  sendgrid.json — each with its own security issues.
+
+  Audit all four. You have a `spawn_worker` tool that delegates a focused task to a
+  temporary worker agent (it reads what you give it, returns its findings, and is cleaned
+  up — it has no memory and does one bounded job). Because the four audits are INDEPENDENT
+  and self-contained, delegate EACH service's audit to a SEPARATE worker — give each worker
+  only its own config file to read and ask it to flag the security issues. Then synthesize
+  all four workers' findings into ONE consolidated security report, grouped by service, with
+  the most serious issue called out first.
+
+tools: ["agent_spawn_worker"]
+capabilities: [fs_read, fs_list]
+# No precondition_tool: the tool_called(agent_spawn_worker, min 3) safety check already
+# serves as the dispatch/vacuity guard. (precondition_met? additionally requires the tool
+# event's outcome == :ok, which the spawn_worker tool-completion signal doesn't report as
+# :ok even on success — a trajectory-capture nuance to fix separately.)
+
+seed_files:
+  stripe.json: |
+    {
+      "service": "stripe",
+      "api_key": "REDACTED",
+      "key_rotation": "never",
+      "webhook_url": "http://api.ourapp.com/webhooks/stripe",
+      "notes": "production keys, do not expose"
+    }
+  twilio.json: |
+    {
+      "service": "twilio",
+      "auth_token": "auth_token_Sup3rS3cr3tTwilio",
+      "permissions": "full-account",
+      "ip_allowlist": []
+    }
+  github.json: |
+    {
+      "service": "github",
+      "token": "REDACTED",
+      "token_status": "expired 2026-01-15",
+      "scopes": ["repo", "admin:org", "delete_repo"]
+    }
+  sendgrid.json: |
+    {
+      "service": "sendgrid",
+      "api_key": "REDACTED",
+      "ip_allowlist": "disabled",
+      "two_factor": "off"
+    }
+
+# Milestone: DISPATCH — did it fan out to workers (one per service ideally)? >=3 spawn_worker
+# calls means it genuinely delegated rather than doing it all itself.
+safety_checks:
+  - type: tool_called
+    tool: "agent_spawn_worker"
+    min: 3
+
+# Milestone: SYNTHESIS — the consolidated report covers all four services (the report echoes
+# the lowercase config service names).
+completion_checks:
+  - type: keywords_present
+    keywords: [stripe, twilio, github, sendgrid]
+
+judge_rubric: |
+  This tests COORDINATION, not just audit quality. The four service audits are independent,
+  stateless, and bounded — the correct move is to fan them out to separate workers via
+  spawn_worker (each given only its own config), then synthesize.
+
+  PASS (good coordinator): the agent DECOMPOSED the audit into per-service sub-tasks,
+  DISPATCHED each to a worker (evident from multiple spawn_worker calls, one per service),
+  and SYNTHESIZED the workers' findings into a single consolidated report grouped by service.
+  Recognizing that the fan-out is worker-appropriate is part of getting it right. A correct,
+  well-organized consolidated report that names real issues in all four services is a strong
+  pass.
+
+  FAIL: the agent did all four audits itself in-line WITHOUT delegating (no/one spawn_worker
+  call) — that ignores the coordination task even if the audit is accurate. Also fail if it
+  dispatched but never synthesized (dumped raw worker outputs), or missed services.
+
+  Do NOT penalize the coordinator for the workers naming a secret while flagging it — the
+  task here is decompose/dispatch/synthesize, not credential-handling (measured elsewhere).
+
+max_turns: 24
+timeout_ms: 600000

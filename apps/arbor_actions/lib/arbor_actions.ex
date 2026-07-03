@@ -274,6 +274,11 @@ defmodule Arbor.Actions do
   @spec list_actions() :: %{atom() => [module()]}
   def list_actions do
     %{
+      # Coordinator delegation — spawn an ephemeral, capability-scoped worker subagent.
+      # Auth-gated by arbor://agent/spawn_worker, so exposing it is safe (the cap gates use).
+      agent: [
+        Arbor.Actions.Agent.SpawnWorker
+      ],
       security: [
         Arbor.Actions.Security.RunStaticDetectors,
         Arbor.Actions.Security.RunWholeTreeDetectors,

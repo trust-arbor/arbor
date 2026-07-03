@@ -34,7 +34,11 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   # web_search_eval = the fixtured injected search; web_browse = the real egress.
   @cap_uris %{
     "web_search_eval" => "arbor://eval/search",
-    "web_browse" => "arbor://net/http"
+    "web_browse" => "arbor://net/http",
+    # Coordinator dispatch: delegate a scoped sub-task to an ephemeral worker. The worker's
+    # caps are the INTERSECTION with the parent, so the coordinator also needs the sub-caps
+    # (e.g. fs_read) in the task's `capabilities` for workers to inherit them.
+    "agent_spawn_worker" => "arbor://agent/spawn_worker"
   }
 
   # Capability atom → base trust URI, for setting an explicit :allow rule (the
