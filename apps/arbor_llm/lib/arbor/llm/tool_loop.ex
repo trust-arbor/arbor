@@ -69,7 +69,11 @@ defmodule Arbor.LLM.ToolLoop do
       turn: 0,
       total_usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0},
       discovered_tools: [],
-      accumulated_text: ""
+      accumulated_text: "",
+      # Per-tool CONSECUTIVE failure counter (reset on success). Backs the runaway guard:
+      # exponential backoff before retrying a recently-failed tool, and a hard cap that stops
+      # executing a tool that keeps failing so a broken/rate-limited tool can't loop forever.
+      tool_failures: %{}
     })
   end
 
@@ -340,8 +344,8 @@ defmodule Arbor.LLM.ToolLoop do
   defp execute_tools(tool_calls, state) do
     require Logger
 
-    results =
-      Enum.map(tool_calls, fn tc ->
+    {results, tool_failures} =
+      Enum.map_reduce(tool_calls, Map.get(state, :tool_failures, %{}), fn tc, failures ->
         args = normalize_args(tc.arguments)
 
         emit_tool_loop_signal(:tool_call_started, %{
@@ -351,7 +355,7 @@ defmodule Arbor.LLM.ToolLoop do
           turn: state.turn
         })
 
-        start_time = System.monotonic_time(:millisecond)
+        prior_failures = Map.get(failures, tc.name, 0)
 
         # Pass the signer function to the executor — it signs with the correct
         # canonical URI (including params/agent_id scoping) after resolving the
@@ -361,8 +365,24 @@ defmodule Arbor.LLM.ToolLoop do
           [agent_id: state.agent_id]
           |> maybe_add_signer(state.signer)
 
-        result = state.tool_executor.execute(tc.name, args, state.workdir, exec_opts)
-        duration_ms = System.monotonic_time(:millisecond) - start_time
+        {result, duration_ms} =
+          if prior_failures >= max_tool_failures() do
+            # HARD CAP: stop executing a tool that keeps failing, so a broken or
+            # rate-limited tool can't loop forever (the 233-call runaway guard).
+            Logger.warning(
+              "[ToolLoop] tool=#{tc.name} CAPPED after #{prior_failures} consecutive failures — not executing"
+            )
+
+            {{:error, tool_failure_cap_message(tc.name, prior_failures)}, 0}
+          else
+            # EXPONENTIAL BACKOFF before retrying a recently-failed tool, so a transient
+            # rate-limit isn't hammered — retries spread out instead of firing all at once.
+            if prior_failures > 0, do: Process.sleep(retry_backoff_ms(prior_failures))
+
+            start_time = System.monotonic_time(:millisecond)
+            r = state.tool_executor.execute(tc.name, args, state.workdir, exec_opts)
+            {r, System.monotonic_time(:millisecond) - start_time}
+          end
 
         Logger.info(
           "[ToolLoop] tool=#{tc.name} signer=#{state.signer != nil} result=#{match?({:ok, _}, result)} duration=#{duration_ms}ms"
@@ -417,10 +437,35 @@ defmodule Arbor.LLM.ToolLoop do
           state.on_tool_call.(tc.name, args, result)
         end
 
-        {tc.id, tc.name, result}
+        # Consecutive-failure bookkeeping: reset on success, increment on error, and leave a
+        # capped tool at the cap (don't grow unboundedly).
+        new_failures =
+          cond do
+            match?({:ok, _}, result) -> Map.put(failures, tc.name, 0)
+            prior_failures >= max_tool_failures() -> failures
+            true -> Map.update(failures, tc.name, 1, &(&1 + 1))
+          end
+
+        {{tc.id, tc.name, result}, new_failures}
       end)
 
-    {results, state}
+    {results, Map.put(state, :tool_failures, tool_failures)}
+  end
+
+  # Runaway-guard knobs (configurable). A tool that fails this many times IN A ROW stops being
+  # executed for the rest of the turn; before that, each retry waits base*2^(n-1) ms (capped).
+  defp max_tool_failures, do: Application.get_env(:arbor_llm, :tool_loop_max_failures, 5)
+
+  defp retry_backoff_ms(prior_failures) do
+    base = Application.get_env(:arbor_llm, :tool_loop_backoff_base_ms, 500)
+    max = Application.get_env(:arbor_llm, :tool_loop_backoff_max_ms, 8_000)
+    min(max, round(base * :math.pow(2, prior_failures - 1)))
+  end
+
+  defp tool_failure_cap_message(name, failures) do
+    "Tool '#{name}' has failed #{failures} times in a row and will not be retried this turn. " <>
+      "Stop calling it — resolve the underlying problem, take a different approach, or report " <>
+      "that the tool is unavailable."
   end
 
   # Pass the signer function to the executor so it can sign with the correct

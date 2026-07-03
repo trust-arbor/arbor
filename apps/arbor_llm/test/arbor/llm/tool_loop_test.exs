@@ -304,6 +304,29 @@ defmodule Arbor.LLM.ToolLoopTest do
     end
   end
 
+  # Always-failing tool + an adapter that never stops requesting it — simulates an agent
+  # stuck retrying a broken/rate-limited tool (the 233-call runaway).
+  defmodule BoomTools do
+    def execute("boom_tool", _args, _workdir, _opts), do: {:error, "boom: always fails"}
+    def execute(name, _args, _workdir, _opts), do: {:error, "Unknown: #{name}"}
+  end
+
+  defmodule BoomAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "boom_test"
+
+    def complete(%Request{} = _request, _opts) do
+      {:ok,
+       %Response{
+         text: "",
+         finish_reason: :tool_calls,
+         content_parts: [ContentPart.tool_call("boom_call", "boom_tool", %{})],
+         usage: %{},
+         raw: %{}
+       }}
+    end
+  end
+
   defp build_client(adapter) do
     Client.new(default_provider: adapter.provider())
     |> Client.register_adapter(adapter)
@@ -371,6 +394,38 @@ defmodule Arbor.LLM.ToolLoopTest do
           tool_executor: MockTools
         )
 
+      assert result.finish_reason == :max_turns
+    end
+
+    test "a repeatedly-failing tool is CAPPED after max_failures (runaway guard)" do
+      # Runaway guard: the 233-call spawn_worker incident. A tool that keeps failing must stop
+      # being EXECUTED even if the (stuck) model keeps requesting it, independent of max_turns.
+      Application.put_env(:arbor_llm, :tool_loop_max_failures, 3)
+      # Tiny backoff so the test doesn't actually sleep the exponential schedule.
+      Application.put_env(:arbor_llm, :tool_loop_backoff_base_ms, 1)
+
+      on_exit(fn ->
+        Application.delete_env(:arbor_llm, :tool_loop_max_failures)
+        Application.delete_env(:arbor_llm, :tool_loop_backoff_base_ms)
+      end)
+
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+      on_exit(fn -> if Process.alive?(counter), do: Agent.stop(counter) end)
+
+      client = build_client(BoomAdapter)
+
+      {:ok, result} =
+        ToolLoop.run(client, request("boom_test"),
+          max_turns: 20,
+          tool_executor: BoomTools,
+          on_tool_call: fn _name, _args, r ->
+            if match?({:error, "boom: always fails"}, r), do: Agent.update(counter, &(&1 + 1))
+          end
+        )
+
+      # Adapter requested boom_tool for all 20 turns, but it was ACTUALLY executed only 3 times
+      # (max_failures), then capped. Without the guard this would be 20 executions.
+      assert Agent.get(counter, & &1) == 3
       assert result.finish_reason == :max_turns
     end
 
