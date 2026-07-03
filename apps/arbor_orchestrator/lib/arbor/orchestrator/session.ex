@@ -112,6 +112,9 @@ defmodule Arbor.Orchestrator.Session do
     # Async turn execution state
     turn_in_flight: false,
     turn_from: nil,
+    # Callers whose mid-turn messages were folded into THIS turn as steering — they receive
+    # the same turn result as turn_from when it completes.
+    steer_froms: [],
     turn_task_ref: nil,
     # Monitor ref for the GenServer.call caller (so we can clean in_flight state
     # if the caller times out or dies, preventing permanent :turn_in_progress lock)
@@ -248,6 +251,20 @@ defmodule Arbor.Orchestrator.Session do
   @spec cancel_turn(GenServer.server()) :: :ok | {:error, :no_turn_in_flight}
   def cancel_turn(session) do
     GenServer.call(session, :cancel_turn)
+  end
+
+  @doc """
+  Pop the next queued mid-turn message as a STEERING message (its content), folding its caller
+  into the active turn's reply set — or `:none` if the queue is empty. Called by the tool loop's
+  `steer_check` closure (wired in `build_engine_opts`) at each iteration boundary. Best-effort:
+  any Session unavailability returns `:none` so steering simply doesn't happen and never crashes
+  the turn.
+  """
+  @spec take_steering(GenServer.server()) :: String.t() | :none
+  def take_steering(session) do
+    GenServer.call(session, :take_steering, 5_000)
+  catch
+    :exit, _ -> :none
   end
 
   @doc """
@@ -493,6 +510,29 @@ defmodule Arbor.Orchestrator.Session do
     {:noreply, %{state | turn_queue: state.turn_queue ++ [{user_message, from}]}}
   end
 
+  # STEERING: the running tool loop calls this (via the steer_check closure built in
+  # build_engine_opts) at each iteration boundary to pull the next mid-turn user message off
+  # turn_queue and fold it into the ACTIVE turn. The message's caller is added to steer_froms
+  # so it receives the same turn result as the primary caller (rather than a separate follow-up
+  # turn). Returns :none when the queue is empty — the message is consumed here instead of
+  # being drained as its own turn later, so no double-processing.
+  def handle_call(
+        :take_steering,
+        _from,
+        %{turn_queue: [{user_message, caller_from} | rest]} = state
+      ) do
+    require Logger
+
+    Logger.info(
+      "[Session] steering: folding a mid-turn message into the active turn for #{state.agent_id}"
+    )
+
+    new_state = %{state | turn_queue: rest, steer_froms: [caller_from | state.steer_froms]}
+    {:reply, user_message.content, new_state}
+  end
+
+  def handle_call(:take_steering, _from, state), do: {:reply, :none, state}
+
   def handle_call({:send_message, message}, from, state) do
     # Slash commands are parsed at each adapter's intake (CommandIntake), not
     # here; by the time a message reaches Session it has been classified as a
@@ -510,7 +550,7 @@ defmodule Arbor.Orchestrator.Session do
   def handle_call(:cancel_turn, _from, %{turn_in_flight: true} = state) do
     new_state = transition_phase(state, :processing, :complete, :idle)
     finalize_partial(state, :cancelled, :user_cancelled)
-    safe_reply(state.turn_from, {:error, :cancelled})
+    reply_turn(state, {:error, :cancelled})
 
     if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
     if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
@@ -784,7 +824,7 @@ defmodule Arbor.Orchestrator.Session do
          usage: usage
        })}
 
-    safe_reply(state.turn_from, reply)
+    reply_turn(state, reply)
 
     if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
     if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
@@ -804,7 +844,7 @@ defmodule Arbor.Orchestrator.Session do
     # streamed before the failure as an :interrupted partial.
     finalize_partial(state, :interrupted, reason)
 
-    safe_reply(state.turn_from, {:error, reason})
+    reply_turn(state, {:error, reason})
 
     if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
     if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
@@ -833,7 +873,7 @@ defmodule Arbor.Orchestrator.Session do
         # didn't catch) — preserve any streamed partial, reply, reset.
         new_state = transition_phase(state, :processing, :complete, :idle)
         finalize_partial(state, :interrupted, {:task_down, reason})
-        safe_reply(state.turn_from, {:error, {:turn_task_crashed, reason}})
+        reply_turn(state, {:error, {:turn_task_crashed, reason}})
         if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
 
         reset_and_drain(new_state)
@@ -907,7 +947,7 @@ defmodule Arbor.Orchestrator.Session do
     Logger.warning("[Session] Turn timed out for #{state.agent_id}; preserving partial")
     new_state = transition_phase(state, :processing, :complete, :idle)
     finalize_partial(state, :interrupted, :timeout)
-    safe_reply(state.turn_from, {:error, :turn_timeout})
+    reply_turn(state, {:error, :turn_timeout})
 
     # Detach + kill the task so its impending :DOWN can't re-finalize.
     if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
@@ -949,6 +989,13 @@ defmodule Arbor.Orchestrator.Session do
   end
 
   # Reply to a caller safely — the caller may have timed out and died
+  # Reply to the turn's primary caller AND any callers whose mid-turn messages were folded in
+  # as steering — they all get the same result for the turn they contributed to.
+  defp reply_turn(state, reply) do
+    safe_reply(state.turn_from, reply)
+    Enum.each(state.steer_froms || [], &safe_reply(&1, reply))
+  end
+
   defp safe_reply(nil, _reply), do: :ok
 
   defp safe_reply(from, reply) do
@@ -1041,6 +1088,7 @@ defmodule Arbor.Orchestrator.Session do
       state
       | turn_in_flight: false,
         turn_from: nil,
+        steer_froms: [],
         turn_task_ref: nil,
         turn_task_pid: nil,
         turn_caller_ref: nil,

@@ -70,6 +70,10 @@ defmodule Arbor.LLM.ToolLoop do
       total_usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0},
       discovered_tools: [],
       accumulated_text: "",
+      # Steering: an optional 0-arity callback that returns the next queued user message to
+      # fold into the conversation at an iteration boundary (or nil when none). Injected by the
+      # caller (the Session) so the tool loop stays generic — it never reaches into the Session.
+      on_steer_check: Keyword.get(opts, :on_steer_check),
       # Per-tool CONSECUTIVE failure counter (reset on success). Backs the runaway guard:
       # exponential backoff before retrying a recently-failed tool, and a hard cap that stops
       # executing a tool that keeps failing so a broken/rate-limited tool can't loop forever.
@@ -234,6 +238,10 @@ defmodule Arbor.LLM.ToolLoop do
           # Merge discovered tool definitions into request tools for next iteration
           next_tools = merge_tool_definitions(request.tools, new_tool_defs)
           next_request = %{request | messages: updated_messages, tools: next_tools}
+
+          # STEERING: fold in any user messages that arrived mid-turn (drain ALL pending) before
+          # the next LLM call, so the model incorporates them at this iteration boundary.
+          next_request = apply_steering(next_request, state)
 
           loop(client, next_request, opts, %{state | turn: state.turn + 1})
         else
@@ -466,6 +474,35 @@ defmodule Arbor.LLM.ToolLoop do
     "Tool '#{name}' has failed #{failures} times in a row and will not be retried this turn. " <>
       "Stop calling it — resolve the underlying problem, take a different approach, or report " <>
       "that the tool is unavailable."
+  end
+
+  # STEERING: drain ALL queued user messages from the injected checker and append each as a
+  # user message so the model sees them at the next iteration boundary. No-op when no checker is
+  # wired — the tool loop stays generic; the checker is the Session's queue peek. The checker
+  # returns a message string or nil (any non-string ends the drain).
+  defp apply_steering(request, %{on_steer_check: check}) when is_function(check, 0) do
+    case drain_steering(check, []) do
+      [] ->
+        request
+
+      msgs ->
+        require Logger
+
+        Logger.info(
+          "[ToolLoop] steering: folded #{length(msgs)} mid-turn message(s) into the turn"
+        )
+
+        %{request | messages: request.messages ++ Enum.map(msgs, &Message.new(:user, &1))}
+    end
+  end
+
+  defp apply_steering(request, _state), do: request
+
+  defp drain_steering(check, acc) do
+    case check.() do
+      msg when is_binary(msg) and msg != "" -> drain_steering(check, [msg | acc])
+      _ -> Enum.reverse(acc)
+    end
   end
 
   # Pass the signer function to the executor so it can sign with the correct

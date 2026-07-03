@@ -1242,6 +1242,37 @@ defmodule Arbor.Orchestrator.SessionTest do
       assert state.turn_count == 2
     end
 
+    test "take_steering pops a queued mid-turn message and folds its caller into steer_froms" do
+      {pid, tmp_dir} = start_session([])
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        File.rm_rf(tmp_dir)
+      end)
+
+      fake_from = {self(), make_ref()}
+
+      # Simulate a mid-turn message already queued during an in-flight turn.
+      :sys.replace_state(pid, fn state ->
+        %{
+          state
+          | turn_in_flight: true,
+            turn_queue: [{%{content: "also check the config"}, fake_from}],
+            steer_froms: []
+        }
+      end)
+
+      # First call: pop the message as steering + fold its caller into the active turn.
+      assert "also check the config" == Arbor.Orchestrator.Session.take_steering(pid)
+
+      state = Arbor.Orchestrator.Session.get_state(pid)
+      assert state.turn_queue == []
+      assert fake_from in state.steer_froms
+
+      # Empty queue → :none (nothing left to fold in).
+      assert :none == Arbor.Orchestrator.Session.take_steering(pid)
+    end
+
     test "engagement-tagged messages keep isolated transcripts (single-mind model)" do
       alias Arbor.Contracts.Session.UserMessage
       {pid, tmp_dir} = start_session([])

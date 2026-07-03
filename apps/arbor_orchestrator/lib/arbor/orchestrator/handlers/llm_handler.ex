@@ -815,7 +815,12 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
         tool_executor: executor,
         agent_id: agent_id,
         signer: signer,
-        on_tool_call: build_tool_callback(opts, node.id)
+        on_tool_call: build_tool_callback(opts, node.id),
+        # Steering: a 0-arity closure (from the Session) that returns the next mid-turn user
+        # message to fold in at an iteration boundary. Opts get function-stripped for RPC, so
+        # (like signer) the closure travels in the context; read opts first, then context.
+        on_steer_check:
+          Keyword.get(opts, :steer_check) || Context.get(context, "session.steer_check")
       ]
       |> maybe_add_stream_callback(on_stream)
 

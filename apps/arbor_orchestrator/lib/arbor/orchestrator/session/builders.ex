@@ -136,6 +136,16 @@ defmodule Arbor.Orchestrator.Session.Builders do
         initial_values
       end
 
+    # Steering (mirrors signer): a 0-arity closure the tool loop calls at iteration boundaries
+    # to fold mid-turn user messages into the active turn. Put in the CONTEXT (opts get
+    # function-stripped for RPC; local turns aren't checkpointed so the closure survives).
+    # self() is the Session process here — build_engine_opts runs in it before the turn task
+    # spawns, so the closure targets the right GenServer.
+    session_pid = self()
+    steer_check = fn -> Arbor.Orchestrator.Session.take_steering(session_pid) end
+    opts = Keyword.put(opts, :steer_check, steer_check)
+    initial_values = Map.put(initial_values, "session.steer_check", steer_check)
+
     opts = Keyword.put(opts, :initial_values, initial_values)
 
     # Wire streaming callback with source tag so the dashboard can

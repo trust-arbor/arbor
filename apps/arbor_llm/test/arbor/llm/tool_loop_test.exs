@@ -327,6 +327,39 @@ defmodule Arbor.LLM.ToolLoopTest do
     end
   end
 
+  # Loops once (write_file), then — once a "STEER:" user message has been folded into the
+  # conversation — acknowledges it and stops.
+  defmodule SteerAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "steer_test"
+
+    def complete(%Request{} = request, _opts) do
+      steer = Enum.find(request.messages, &(&1.role == :user and &1.content =~ "STEER:"))
+
+      if steer do
+        {:ok,
+         %Response{
+           text: "Acknowledged: #{steer.content}",
+           finish_reason: :stop,
+           content_parts: [ContentPart.text("Acknowledged: #{steer.content}")],
+           usage: %{},
+           raw: %{}
+         }}
+      else
+        {:ok,
+         %Response{
+           text: "",
+           finish_reason: :tool_calls,
+           content_parts: [
+             ContentPart.tool_call("s1", "write_file", %{"path" => "a.txt", "content" => "hi"})
+           ],
+           usage: %{},
+           raw: %{}
+         }}
+      end
+    end
+  end
+
   defp build_client(adapter) do
     Client.new(default_provider: adapter.provider())
     |> Client.register_adapter(adapter)
@@ -427,6 +460,35 @@ defmodule Arbor.LLM.ToolLoopTest do
       # (max_failures), then capped. Without the guard this would be 20 executions.
       assert Agent.get(counter, & &1) == 3
       assert result.finish_reason == :max_turns
+    end
+
+    @tag :tmp_dir
+    test "a mid-turn message is folded in as steering at the iteration boundary", %{
+      tmp_dir: tmp_dir
+    } do
+      # One steering message pending; drained via on_steer_check at the boundary after the
+      # first (write_file) tool round.
+      {:ok, pending} = Agent.start_link(fn -> ["STEER: also verify the config"] end)
+      on_exit(fn -> if Process.alive?(pending), do: Agent.stop(pending) end)
+
+      on_steer_check = fn ->
+        Agent.get_and_update(pending, fn
+          [m | rest] -> {m, rest}
+          [] -> {nil, []}
+        end)
+      end
+
+      client = build_client(SteerAdapter)
+
+      {:ok, result} =
+        ToolLoop.run(client, request("steer_test"),
+          workdir: tmp_dir,
+          tool_executor: MockTools,
+          on_steer_check: on_steer_check
+        )
+
+      # The model only acknowledges once the steering message reached the conversation.
+      assert result.content =~ "Acknowledged: STEER: also verify the config"
     end
 
     test "no tool calls returns immediately" do
