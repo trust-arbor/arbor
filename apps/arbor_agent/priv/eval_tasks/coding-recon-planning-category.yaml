@@ -1,0 +1,60 @@
+id: coding-recon-planning-category
+category: capability
+source:
+  suite: arbor-original
+  note: >
+    Coding-recon eval — grounded planning on the REAL Arbor codebase. The agent has read-only
+    file tools scoped to the eval harness dir and must recon the actual code before planning,
+    so the plan is grounded (cites real modules) rather than hallucinated. Judged on the
+    groundedness rubric (see arbor-coding-recon-eval.md). Self-referential: the change it plans
+    is adding a category to the very harness that runs it.
+
+prompt: |
+  You are a senior Elixir engineer working in the Arbor codebase. Produce a detailed,
+  GROUNDED implementation PLAN. Do NOT write or execute any code — output ONLY the plan.
+
+  GOAL: Add a new eval-task category `:planning` to Arbor's agent-task eval harness, so planner
+  eval tasks can be categorized as `:planning` instead of borrowing `:capability`.
+
+  You have READ-ONLY file tools (file_list, file_search, file_read) scoped to the absolute
+  directory `{{read_root}}` (use that exact absolute path with your file tools). RECON FIRST —
+  explore the actual code there to find exactly what must change:
+    - which module and which specific attribute/function defines the set of valid categories,
+    - how a task's `category:` string from YAML is turned into an atom (and any safety constraint
+      that implies for adding a new category),
+    - anything else that would break if a new category weren't declared in the right place.
+
+  Then write a plan that CITES the real modules and functions you found (exact file paths +
+  names), decomposed into discrete, independently-dispatchable steps. A plan that names the real
+  code and the real constraint beats a generic one; a plan that invents files, modules, or a
+  "categories config" is wrong. Note any recompile/restart requirement you infer from the code.
+
+tools: ["file_list", "file_search", "file_read"]
+capabilities: [fs_read, fs_list]
+read_paths: ["apps/arbor_agent/lib/arbor/agent/eval"]
+precondition_tool: "file_read"
+max_turns: 15
+timeout_ms: 600000
+
+judge_rubric: |
+  Coding-recon eval: the agent reconned the real eval harness and planned adding a `:planning`
+  category. GROUND TRUTH (what a correct recon finds):
+    - Valid categories are the `@known_categories` module attribute in
+      `apps/arbor_agent/lib/arbor/agent/eval/agent_task.ex`, exposed via `known_categories/0`.
+    - `apps/arbor_agent/lib/arbor/agent/eval/task_loader.ex` turns the YAML `category:` string
+      into an atom via `to_category/1` -> `String.to_existing_atom`, so `:planning` MUST be added
+      to `@known_categories` first — otherwise the atom doesn't exist and the loader fails
+      (atom-table safety: file content must never grow the atom table).
+    - `@known_categories` is compile-time, so a recompile/restart is needed for it to take effect.
+
+  Score the PLAN:
+    - groundedness (the crux): cites the REAL `@known_categories` in the REAL agent_task.ex, and
+      surfaces the `String.to_existing_atom` / atom-declaration constraint. Inventing a config
+      file or a runtime registry, or missing the atom constraint, is ungrounded.
+    - recon_quality: did it actually read agent_task.ex + task_loader.ex (the right files)?
+    - completeness: attribute change + loader/atom constraint + recompile note + updating the
+      `@type category` / docs.
+    - handoff_readiness: discrete dispatchable steps.
+
+  PASS = grounded + correct (names @known_categories + the atom constraint). FAIL = hallucinates
+  modules/files or misses the atom-declaration requirement.

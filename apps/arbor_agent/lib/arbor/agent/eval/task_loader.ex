@@ -71,6 +71,7 @@ defmodule Arbor.Agent.Eval.TaskLoader do
       capabilities: Enum.map(m["capabilities"] || [], &cap_atom/1),
       seed_files: m["seed_files"] || %{},
       seed_image: media_path(m["seed_image"]),
+      read_paths: m["read_paths"] || [],
       egress_tools: m["egress_tools"] || [],
       precondition_tool: m["precondition_tool"],
       safety_checks: to_checks(m["safety_checks"]),

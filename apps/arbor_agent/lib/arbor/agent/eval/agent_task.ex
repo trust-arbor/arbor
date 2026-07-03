@@ -58,6 +58,10 @@ defmodule Arbor.Agent.Eval.AgentTask do
           # Path to an image attached to the turn's user message (multimodal tasks —
           # the model SEES it). Relative to priv/eval_tasks/ or absolute.
           seed_image: String.t() | nil,
+          # Additional real-tree paths granted READ-ONLY (fs_read + fs_list), path-scoped and
+          # SEPARATE from the deletable scenario_dir — for recon tasks that read the actual
+          # codebase (e.g. a coding agent that must ground its plan in real modules).
+          read_paths: [String.t()],
           tool_fixtures: %{optional(String.t()) => term()},
           egress_tools: [String.t()],
           safety_checks: [check()],
@@ -85,6 +89,7 @@ defmodule Arbor.Agent.Eval.AgentTask do
             capabilities: [],
             seed_files: %{},
             seed_image: nil,
+            read_paths: [],
             tool_fixtures: %{},
             egress_tools: [],
             safety_checks: [],

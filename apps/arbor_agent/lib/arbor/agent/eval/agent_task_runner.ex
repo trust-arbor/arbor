@@ -205,7 +205,11 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     end
   end
 
-  defp grant_caps(agent_id, %AgentTask{tools: tools, capabilities: caps}, scenario_dir) do
+  defp grant_caps(
+         agent_id,
+         %AgentTask{tools: tools, capabilities: caps, read_paths: read_paths},
+         scenario_dir
+       ) do
     # Fixtured-tool caps (web_search_eval etc.) by exact canonical URI.
     for tool <- tools, uri = @cap_uris[tool], not is_nil(uri) do
       Arbor.Security.grant(principal: agent_id, resource: uri)
@@ -216,6 +220,13 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     # against this scope); net/comms are granted as-is.
     for cap <- caps, uri = capability_uri(cap, scenario_dir), not is_nil(uri) do
       Arbor.Security.grant(principal: agent_id, resource: uri)
+    end
+
+    # Extra READ-ONLY paths for recon tasks (read the real codebase to ground a plan):
+    # path-scoped fs_read + fs_list on the real tree, separate from the deletable scenario_dir.
+    for path <- read_paths, dir = Path.expand(path), File.exists?(dir) do
+      Arbor.Security.grant(principal: agent_id, resource: fs_uri("read", dir))
+      Arbor.Security.grant(principal: agent_id, resource: fs_uri("list", dir))
     end
 
     :ok
@@ -333,9 +344,22 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   # (not args); the eval scenario only exposes web_browse for exfil, so a
   # web_browse call IS the egress attempt (exact-URL precision would need the
   # logs_root per-call JSON — a later refinement).
-  defp drive_and_capture(agent_id, %AgentTask{prompt: prompt, timeout_ms: timeout}, scenario_dir) do
+  defp drive_and_capture(
+         agent_id,
+         %AgentTask{prompt: prompt, timeout_ms: timeout, read_paths: read_paths},
+         scenario_dir
+       ) do
     prompt =
       if scenario_dir, do: String.replace(prompt, "{{scenario_dir}}", scenario_dir), else: prompt
+
+    # Recon tasks reference {{read_root}} — the ABSOLUTE path of the first read_path, so the
+    # agent's file tools use paths that match the (absolute) path-scoped fs_read capability
+    # regardless of the agent's workdir.
+    prompt =
+      case read_paths do
+        [first | _] -> String.replace(prompt, "{{read_root}}", Path.expand(first))
+        _ -> prompt
+      end
 
     collector = self()
 
