@@ -20,6 +20,12 @@ defmodule Arbor.LLM.OAuth do
 
   require Logger
 
+  # Keep the "*_oauth" provider atoms alive so callers that String.to_existing_atom a provider
+  # string (e.g. the eval runner's normalize_provider) can resolve "openai_oauth"/"xai_oauth".
+  @provider_atoms [:openai_oauth, :xai_oauth]
+  @doc false
+  def provider_atoms, do: @provider_atoms
+
   # Per-provider: token file, refresh endpoint + client_id, JWT-exp skew. token acquisition (login)
   # is out of scope — piggyback the CLI files.
   @providers %{

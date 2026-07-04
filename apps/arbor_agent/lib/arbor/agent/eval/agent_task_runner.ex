@@ -869,5 +869,9 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
 
   defp normalize_provider(p) when is_atom(p), do: p
   defp normalize_provider("lm_studio"), do: :lmstudio
+  # Subscription-OAuth providers (raw model on a flat sub) — explicit clauses so the atoms exist
+  # regardless of whether Arbor.LLM.OAuth is loaded in this process.
+  defp normalize_provider("openai_oauth"), do: :openai_oauth
+  defp normalize_provider("xai_oauth"), do: :xai_oauth
   defp normalize_provider(p) when is_binary(p), do: String.to_existing_atom(p)
 end
