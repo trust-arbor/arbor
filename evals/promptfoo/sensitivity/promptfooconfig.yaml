@@ -54,4 +54,15 @@ tests:
   - file://sanity.jsonl
   - file://dataset.jsonl
 
+# Thinking models (e.g. qwen3.5-*-mtp) deliberate candidate labels INSIDE their reasoning trace, so
+# the per-case `output.match(...)` (first-match) asserts grab an intermediate guess, not the final
+# answer — which made qwen-9b look "collapsed" (35%) when its final labels are actually 96% correct.
+# Collapse the output to its LAST "sensitivity" label (the final answer) before asserts run. No-op
+# for non-thinking models (single label → last == first). Verified 2026-07-04: qwen-9b 35% -> 96%.
+defaultTest:
+  options:
+    transform: |
+      const ms = [...String(output).matchAll(/"sensitivity"\s*:\s*"(public|internal|confidential|restricted)"/gi)];
+      return ms.length ? `{"sensitivity": "${ms[ms.length - 1][1].toLowerCase()}"}` : output;
+
 outputPath: results.json
