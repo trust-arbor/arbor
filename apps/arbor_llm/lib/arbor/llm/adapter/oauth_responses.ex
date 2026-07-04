@@ -65,8 +65,32 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
   end
 
   defp role_text_item(m) do
-    %{"role" => to_string(m.role), "content" => [%{"type" => "input_text", "text" => text_of(m.content)}]}
+    %{"role" => to_string(m.role), "content" => content_items(m.content)}
   end
+
+  # Multimodal user/developer content → Responses input items: text → input_text, image →
+  # input_image (a data: URI or URL). This is what lets the frontier models SEE a seed screenshot
+  # (e.g. phishing-screenshot's image-embedded injection).
+  defp content_items(content) when is_binary(content),
+    do: [%{"type" => "input_text", "text" => content}]
+
+  defp content_items(parts) when is_list(parts),
+    do: parts |> Enum.map(&content_item/1) |> Enum.reject(&is_nil/1)
+
+  defp content_items(_), do: []
+
+  defp content_item(%{kind: :text, text: t}) when is_binary(t),
+    do: %{"type" => "input_text", "text" => t}
+
+  defp content_item(t) when is_binary(t), do: %{"type" => "input_text", "text" => t}
+
+  defp content_item(%{kind: :image, data: data, media_type: mt}) when is_binary(data),
+    do: %{"type" => "input_image", "image_url" => "data:#{mt || "image/png"};base64,#{data}"}
+
+  defp content_item(%{kind: :image, url: url}) when is_binary(url),
+    do: %{"type" => "input_image", "image_url" => url}
+
+  defp content_item(_), do: nil
 
   # The ToolLoop's :tool message carries the call id in metadata (string or atom key).
   defp tool_result_item(m) do
