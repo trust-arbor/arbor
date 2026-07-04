@@ -123,14 +123,18 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     # cwd = repo root so the CLI reads AGENTS.md/CLAUDE.md natively (parity with the Arbor-harness
     # models' ProjectContext); {{read_root}} still points it at the recon subtree.
     cwd = File.cwd!()
-    agent_id = nil
+
+    # A REAL Arbor identity so the ACP session isn't anonymous. The CLI's tool-use permission
+    # requests hit AcpSession.Handler, which authorizes arbor://acp/tool/<tool> (+ fs caps for
+    # file reads) against THIS agent's capabilities. Without an identity the handler denies
+    # everything ("anonymous ACP session denied"). Also gives build_sample a persistable agent_id.
+    #
+    # Bind agent_id OUTSIDE the teardown try: a var rebound inside `try` is invisible to its `after`
+    # (Elixir scoping), so the old `agent_id = nil` + rebind-in-try meant `after` saw nil and teardown
+    # never ran → every ACP eval agent leaked + heartbeated forever (2026-07-04 crash).
+    {:ok, agent_id} = create_agent(task, opts)
 
     try do
-      # A REAL Arbor identity so the ACP session isn't anonymous. The CLI's tool-use permission
-      # requests hit AcpSession.Handler, which authorizes arbor://acp/tool/<tool> (+ fs caps for
-      # file reads) against THIS agent's capabilities. Without an identity the handler denies
-      # everything ("anonymous ACP session denied"). Also gives build_sample a persistable agent_id.
-      {:ok, agent_id} = create_agent(task, opts)
       grant_acp_recon_caps(agent_id, cwd)
       allow_tools_in_trust_profile(agent_id, task)
 
@@ -144,7 +148,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
 
       build_sample(task, agent_id, final_text, trajectory, usage, [], grade, judge, duration_ms, index, opts)
     after
-      if agent_id, do: teardown(agent_id)
+      teardown(agent_id)
     end
   end
 
@@ -191,21 +195,28 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   # fully isolated.
   defp run_sample_arbor(task, opts, index) do
     scenario_dir = seed_scenario(task)
-    agent_id = nil
 
+    # NOTE: a variable rebound INSIDE a `try` is NOT visible in its `after` (Elixir scoping). The
+    # old code did `agent_id = nil` then rebound it in the try, so `after`'s `if agent_id` saw nil
+    # and teardown NEVER ran — every eval agent leaked, kept heartbeating, and eventually crashed the
+    # node (2026-07-04). Bind agent_id OUTSIDE the teardown try so cleanup actually sees it.
     try do
       {:ok, agent_id} = create_agent(task, opts)
-      grant_caps(agent_id, task, scenario_dir)
-      allow_tools_in_trust_profile(agent_id, task)
-      t0 = System.monotonic_time(:millisecond)
-      {final_text, trajectory, usage, gate_events} = drive_and_capture(agent_id, task, scenario_dir)
-      duration_ms = System.monotonic_time(:millisecond) - t0
-      grade = AgentTaskGrader.grade(task, trajectory, final_text)
-      judge = run_judge(task, trajectory, final_text, opts)
 
-      build_sample(task, agent_id, final_text, trajectory, usage, gate_events, grade, judge, duration_ms, index, opts)
+      try do
+        grant_caps(agent_id, task, scenario_dir)
+        allow_tools_in_trust_profile(agent_id, task)
+        t0 = System.monotonic_time(:millisecond)
+        {final_text, trajectory, usage, gate_events} = drive_and_capture(agent_id, task, scenario_dir)
+        duration_ms = System.monotonic_time(:millisecond) - t0
+        grade = AgentTaskGrader.grade(task, trajectory, final_text)
+        judge = run_judge(task, trajectory, final_text, opts)
+
+        build_sample(task, agent_id, final_text, trajectory, usage, gate_events, grade, judge, duration_ms, index, opts)
+      after
+        teardown(agent_id)
+      end
     after
-      if agent_id, do: teardown(agent_id)
       if scenario_dir, do: File.rm_rf(scenario_dir)
     end
   end
