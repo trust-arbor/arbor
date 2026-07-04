@@ -61,6 +61,11 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   # immediately regardless of this count.
   @max_consecutive_heartbeat_failures 5
 
+  # (B) An agent with no registered identity can never pass the capability gate. We skip its beats
+  # (running nothing — no flood) and tolerate this many in case identity registration is briefly
+  # racing at startup; after that it's a real orphan and the loop is disabled.
+  @max_no_identity_beats 3
+
   # A5 (first beat at startup): the first heartbeat fires after a short jittered
   # delay rather than a full @default_interval, so an agent begins autonomous
   # activity ~immediately on boot (the intended UX) instead of ~30s later. The
@@ -113,7 +118,10 @@ defmodule Arbor.Orchestrator.HeartbeatService do
       heartbeat_ref: nil,
       heartbeat_in_flight: false,
       heartbeat_failures: 0,
-      heartbeat_disabled: false
+      heartbeat_no_identity_beats: 0,
+      heartbeat_disabled: false,
+      # (B) Injectable so tests can simulate an orphan; defaults to the real Identity.Registry check.
+      identity_checker: Keyword.get(opts, :identity_checker, &identity_registered?/1)
     }
 
     # A5: fire the first beat soon (short jittered delay), not a full interval
@@ -149,9 +157,28 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   end
 
   def handle_info(:heartbeat, state) do
-    state = start_heartbeat_task(state)
-    state = schedule_heartbeat(state)
-    {:noreply, state}
+    if state.identity_checker.(state.agent_id) do
+      state = start_heartbeat_task(state)
+      state = schedule_heartbeat(state)
+      {:noreply, %{state | heartbeat_no_identity_beats: 0}}
+    else
+      # (B) No registered identity — do NOT run the beat (skipping means zero pipelines, so no
+      # flood). Reschedule to re-check (tolerates a startup registration race); after
+      # @max_no_identity_beats misses it's a real orphan and we stop the loop entirely.
+      misses = state.heartbeat_no_identity_beats + 1
+
+      if misses >= @max_no_identity_beats do
+        disable_heartbeat(state, "no registered identity after #{misses} beats (orphaned agent)")
+      else
+        Logger.warning(
+          "[HeartbeatService] #{state.agent_id} has no registered identity; " <>
+            "skipping heartbeat #{misses}/#{@max_no_identity_beats} (not running the pipeline)."
+        )
+
+        state = schedule_heartbeat(state)
+        {:noreply, %{state | heartbeat_no_identity_beats: misses}}
+      end
+    end
   end
 
   def handle_info({:heartbeat_result, {:ok, result}}, state) do
@@ -298,6 +325,18 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   defp terminal_heartbeat_error?(reason) do
     s = inspect(reason)
     String.contains?(s, "unknown_identity") or String.contains?(s, ":unauthorized")
+  end
+
+  # (B) True if the agent has a registered identity (any status). No identity → the auth gate
+  # rejects every beat, so the autonomous loop must not run. Fail-OPEN on a registry error so a
+  # transient Identity.Registry hiccup can't silence a legitimate agent (#1 still catches a genuine
+  # orphan reactively via the terminal-error path).
+  defp identity_registered?(agent_id) do
+    match?({:ok, _}, Arbor.Security.identity_status(agent_id))
+  rescue
+    _ -> true
+  catch
+    :exit, _ -> true
   end
 
   # First-beat delay (A5): a jittered delay in (0, @first_beat_max_ms], always far

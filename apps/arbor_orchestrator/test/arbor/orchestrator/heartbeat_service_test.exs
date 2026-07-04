@@ -168,6 +168,41 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
 
       GenServer.stop(pid)
     end
+
+    test "no registered identity: beats are SKIPPED then the loop disables (B guard, flood prevention)" do
+      # Simulate an orphaned agent (no registered identity) via the injected checker.
+      {:ok, pid} = start_test_service(identity_checker: fn _ -> false end)
+
+      # A beat with no identity must SKIP — no pipeline runs (in_flight stays false), so it can
+      # never flood the orchestrator the way the 2026-07-04 orphans did.
+      send(pid, :heartbeat)
+      Process.sleep(20)
+      mid = HeartbeatService.get_state(pid)
+      assert mid.heartbeat_in_flight == false
+      assert mid.heartbeat_no_identity_beats >= 1
+
+      # After @max_no_identity_beats misses it's a real orphan → disable the loop entirely.
+      send(pid, :heartbeat)
+      send(pid, :heartbeat)
+      send(pid, :heartbeat)
+      Process.sleep(30)
+      assert HeartbeatService.get_state(pid).heartbeat_disabled == true
+
+      GenServer.stop(pid)
+    end
+
+    test "a registered identity lets beats run normally (B guard does not fire)" do
+      {:ok, pid} = start_test_service(identity_checker: fn _ -> true end)
+
+      send(pid, :heartbeat)
+      Process.sleep(20)
+
+      state = HeartbeatService.get_state(pid)
+      assert state.heartbeat_disabled == false
+      assert state.heartbeat_no_identity_beats == 0
+
+      GenServer.stop(pid)
+    end
   end
 
   describe "terminate cleanup" do
