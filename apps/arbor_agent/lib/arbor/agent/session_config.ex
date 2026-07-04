@@ -56,6 +56,7 @@ defmodule Arbor.Agent.SessionConfig do
       # Sampling params — pinning these makes runs reproducible + comparable.
       |> maybe_put("temperature", Keyword.get(opts, :temperature))
       |> maybe_put("top_p", Keyword.get(opts, :top_p))
+      |> maybe_put("provider_options", Keyword.get(opts, :provider_options))
 
     base = [
       session_id: "agent-session-#{agent_id}",

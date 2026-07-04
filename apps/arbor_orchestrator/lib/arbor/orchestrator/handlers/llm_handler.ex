@@ -635,6 +635,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
              node.attrs
              |> build_provider_options(Context.get(context, "session.acp_agent"))
              |> maybe_put_workspace(Context.get(context, "session.acp_workspace"))
+             |> merge_session_provider_options(
+               Context.get(context, "session.provider_options")
+             )
          }}
     end
   end
@@ -662,6 +665,15 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   # keyword list, which `Runtime.Acp.build_checkout_opts/2` forwards to
   # `AcpSession.Config.merge_opts/2` for merging with the
   # provider-default `adapter_opts`. Per-call (per-node) settings win.
+  # Merge session-level provider_options (e.g. eval-pinned top_k/min_p/penalties, from config →
+  # context) UNDER the node/attr-derived ones so a node attr still wins. session_po is JSON-clean
+  # (string keys, scalar values) from the context.
+  defp merge_session_provider_options(po, session_po) when is_map(session_po) and is_map(po) do
+    Map.merge(session_po, po)
+  end
+
+  defp merge_session_provider_options(po, _), do: po
+
   defp build_provider_options(attrs, agent_override) do
     base =
       case Map.get(attrs, "provider_options") do

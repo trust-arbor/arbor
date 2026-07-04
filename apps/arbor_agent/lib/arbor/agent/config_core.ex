@@ -111,7 +111,7 @@ defmodule Arbor.Agent.ConfigCore do
   end
 
   defp extract_generation_params(metadata) do
-    [:temperature, :max_tokens, :top_p, :runtime]
+    [:temperature, :max_tokens, :top_p, :provider_options, :runtime]
     |> Enum.reduce(%{}, fn key, acc ->
       case get_field(metadata, key) do
         nil -> acc

@@ -92,6 +92,10 @@ defmodule Arbor.Orchestrator.Session.ContextBuilder do
     # applies them with precedence node attr > session > provider default.
     |> maybe_put("session.temperature", config["temperature"] || config[:temperature])
     |> maybe_put("session.top_p", config["top_p"] || config[:top_p])
+    |> maybe_put(
+      "session.provider_options",
+      config["provider_options"] || config[:provider_options]
+    )
     |> maybe_put("session.tenant_context", state.tenant_context)
   end
 

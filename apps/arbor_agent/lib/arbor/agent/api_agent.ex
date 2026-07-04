@@ -407,6 +407,8 @@ defmodule Arbor.Agent.APIAgent do
       system_prompt: system_prompt,
       max_tokens: gen_param(state, :max_tokens),
       temperature: gen_param(state, :temperature),
+      top_p: gen_param(state, :top_p),
+      provider_options: gen_param(state, :provider_options),
       auto_execute: true,
       max_turns: gen_param(state, :max_turns)
     ]

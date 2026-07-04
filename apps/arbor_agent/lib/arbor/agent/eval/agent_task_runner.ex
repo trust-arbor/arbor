@@ -263,6 +263,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       display_name: name,
       temperature: sp.temperature,
       top_p: sp.top_p,
+      provider_options: sampling_provider_options(sp),
       model_config: model_config,
       tools: task.tools,
       # NO artificial max_tokens cap by default — the eval measures MAXIMUM capability,
@@ -734,6 +735,16 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       |> Map.put(:temperature, opts[:agent_temperature] || base.temperature)
       |> Map.put(:top_p, opts[:agent_top_p] || base.top_p)
     end
+  end
+
+  # The card-recommended knobs beyond temp/top_p (top_k/min_p/penalties) ride provider_options →
+  # SessionConfig → context → LlmHandler → Request.provider_options → ReqLLM merges them into the
+  # request body (LM Studio applies top_k/min_p/repeat_penalty). Stringified, nils dropped.
+  defp sampling_provider_options(sp) do
+    sp
+    |> Map.drop([:temperature, :top_p])
+    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+    |> Map.new(fn {k, v} -> {to_string(k), v} end)
   end
 
   # Quant is a first-class variable for local models (speed/memory/quality all move with

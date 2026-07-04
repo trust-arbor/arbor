@@ -252,7 +252,9 @@ defmodule Arbor.AI do
         model: model,
         messages: messages,
         max_tokens: Keyword.get(opts, :max_tokens, 16_384),
-        temperature: Keyword.get(opts, :temperature, 0.7)
+        temperature: Keyword.get(opts, :temperature, 0.7),
+        top_p: Keyword.get(opts, :top_p),
+        provider_options: Keyword.get(opts, :provider_options) || %{}
       })
 
     # ToolLoop options
