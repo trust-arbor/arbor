@@ -40,10 +40,10 @@ defmodule Arbor.MixProject do
        git: "https://github.com/agentjido/jido_sandbox.git",
        ref: "7fc90881d3c8ca49e769413cc8217344f2b4c29a",
        override: true},
-      # ex_mcp 1.0.0-rc.1 is published to Hex (the permission_mode work that
-      # forced the temporary `path: "../../ex_mcp"` dep is now released). Back on
-      # Hex so CI can resolve it — the path dep had no source on the runner.
-      {:ex_mcp, "1.0.0-rc.1", override: true},
+      # ex_mcp on Hex (a temporary `path:` dep is only ever for local testing of unreleased
+      # changes — the path has no source on the CI runner). rc.2 ships the synced Codex + Claude
+      # ACP adapters; Claude ACP also needs Arbor's mailbox-drain fix (see acp_session.ex).
+      {:ex_mcp, "1.0.0-rc.2", override: true},
 
       # Dev/test tools
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
