@@ -44,49 +44,169 @@ defmodule Arbor.Agent.Prototypes.XaiVoiceOrchestrator do
         |> send_json(session_update())
         |> send_json(user_text(prompt))
         |> send_json(%{"type" => "response.create"})
-        |> loop(%{text: "", delegations: [], delegate_id: delegate_id, pending_tool: false})
+        |> loop(new_acc(delegate_id))
       after
         Arbor.Agent.Manager.stop_agent(delegate_id)
       end
     end
   end
 
+  @doc """
+  Audio round-trip (testable without a live mic): send PCM16 16kHz mono `audio` as the user's turn,
+  drive the same delegate loop, and return the input transcript, the response transcript, the
+  response AUDIO (PCM16 24kHz), and the delegations. `converse_audio_file/1` reads the PCM from a
+  file and writes the response audio to `<path>.out.pcm`
+  (play with `ffplay -f s16le -ar 24000 -ac 1 -nodisp -autoexit <file>`).
+  """
+  @spec converse_audio(binary(), keyword()) :: {:ok, map()} | {:error, term()}
+  def converse_audio(audio, _opts \\ []) when is_binary(audio) do
+    with {:ok, token} <- OAuth.access_token(:xai),
+         {:ok, delegate_id} <- mint_delegate_agent(),
+         {:ok, sock} <- connect(token) do
+      try do
+        sock
+        |> send_json(audio_session_update())
+        |> send_audio(audio)
+        |> loop(new_acc(delegate_id))
+      after
+        Arbor.Agent.Manager.stop_agent(delegate_id)
+      end
+    end
+  end
+
+  @spec converse_audio_file(String.t()) :: {:ok, map()} | {:error, term()}
+  def converse_audio_file(pcm_path) do
+    with {:ok, audio} <- File.read(pcm_path),
+         {:ok, result} <- converse_audio(audio) do
+      out = pcm_path <> ".out.pcm"
+      File.write(out, result.audio)
+      {:ok, Map.put(result, :audio_path, out)}
+    end
+  end
+
+  @doc """
+  LIVE turn (talk → hear): record `seconds` from the Mac mic, run the audio round-trip, and play the
+  spoken response through the speakers. Turn-based (fixed record window) — the simplest live cut;
+  continuous/server-VAD duplex is a later iteration.
+
+  Requires `ffmpeg`/`ffplay` (Homebrew) and MICROPHONE PERMISSION for the terminal running Arbor
+  (macOS prompts once; grant it in System Settings → Privacy → Microphone). If the default input
+  device is wrong, pass `device:` — list devices with
+  `ffmpeg -f avfoundation -list_devices true -i ""`.
+
+      iex> Arbor.Agent.Prototypes.XaiVoiceOrchestrator.converse_from_mic(6)
+  """
+  @spec converse_from_mic(pos_integer(), keyword()) :: {:ok, map()} | {:error, term()}
+  def converse_from_mic(seconds \\ 6, opts \\ []) do
+    device = opts[:device] || ":default"
+    mic = "/tmp/arbor_mic_in.pcm"
+
+    Logger.info("[VoiceOrch] recording #{seconds}s from mic (#{device})…")
+
+    {_, rc} =
+      System.cmd("ffmpeg", [
+        "-y", "-loglevel", "error", "-f", "avfoundation", "-i", device,
+        "-ar", "16000", "-ac", "1", "-t", to_string(seconds), "-f", "s16le", mic
+      ], stderr_to_stdout: true)
+
+    cond do
+      rc != 0 -> {:error, {:mic_record_failed, rc}}
+      true ->
+        case converse_audio_file(mic) do
+          {:ok, r} ->
+            play_audio(r.audio_path)
+            {:ok, r}
+
+          err ->
+            err
+        end
+    end
+  end
+
+  defp play_audio(pcm_path) do
+    System.cmd(
+      "ffplay",
+      ["-nodisp", "-autoexit", "-loglevel", "error", "-f", "s16le", "-ar", "24000", "-ac", "1", pcm_path],
+      stderr_to_stdout: true
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp new_acc(delegate_id) do
+    %{
+      text: "",
+      input_transcript: "",
+      audio: <<>>,
+      delegations: [],
+      delegate_id: delegate_id,
+      pending_tool: false
+    }
+  end
+
   # ── realtime protocol messages ──
 
   defp session_update do
-    %{
-      "type" => "session.update",
-      "session" => %{
-        "modalities" => ["text"],
-        "turn_detection" => nil,
-        "instructions" =>
-          "You are Arbor's voice front desk. When the user asks to have a coding or engineering " <>
-            "task done, call the delegate_to_agent tool with a `provider` (\"codex\" or \"claude\") " <>
-            "and a clear `task`. After the tool returns, tell the user what the agent produced in " <>
-            "one or two sentences.",
-        "tools" => [
-          %{
-            "type" => "function",
-            "name" => @tool_name,
-            "description" =>
-              "Delegate a coding/engineering task to a CLI agent (Codex or Claude Code) over ACP. " <>
-                "Returns the agent's result text.",
-            "parameters" => %{
-              "type" => "object",
-              "properties" => %{
-                "provider" => %{
-                  "type" => "string",
-                  "enum" => ["codex", "claude"],
-                  "description" => "Which CLI agent to launch"
-                },
-                "task" => %{"type" => "string", "description" => "The task/prompt for the agent"}
-              },
-              "required" => ["provider", "task"]
-            }
-          }
-        ]
-      }
+    %{"type" => "session.update", "session" => Map.put(base_session(), "modalities", ["text"])}
+  end
+
+  # Audio in (PCM16 16kHz) + audio out (PCM16 24kHz) + input transcription. Nested `audio` schema
+  # per xAI docs; `turn_detection: nil` = manual (we commit the buffer + trigger the response).
+  defp audio_session_update do
+    audio = %{
+      "input" => %{
+        "format" => %{"type" => "audio/pcm", "rate" => 16_000},
+        "transcription" => %{}
+      },
+      "output" => %{"format" => %{"type" => "audio/pcm", "rate" => 24_000}, "voice" => "ara"}
     }
+
+    %{"type" => "session.update", "session" => Map.put(base_session(), "audio", audio)}
+  end
+
+  defp base_session do
+    %{
+      "turn_detection" => nil,
+      "instructions" =>
+        "You are Arbor's voice front desk. When the user asks to have a coding or engineering " <>
+          "task done, call the delegate_to_agent tool with a `provider` (\"codex\" or \"claude\") " <>
+          "and a clear `task`. After the tool returns, tell the user what the agent produced in " <>
+          "one or two sentences.",
+      "tools" => [
+        %{
+          "type" => "function",
+          "name" => @tool_name,
+          "description" =>
+            "Delegate a coding/engineering task to a CLI agent (Codex or Claude Code) over ACP. " <>
+              "Returns the agent's result text.",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{
+              "provider" => %{
+                "type" => "string",
+                "enum" => ["codex", "claude"],
+                "description" => "Which CLI agent to launch"
+              },
+              "task" => %{"type" => "string", "description" => "The task/prompt for the agent"}
+            },
+            "required" => ["provider", "task"]
+          }
+        }
+      ]
+    }
+  end
+
+  # Send a user audio turn: append the PCM (base64) then commit + request a response.
+  defp send_audio(sock, pcm) do
+    sock
+    |> send_json(%{
+      "type" => "input_audio_buffer.append",
+      "audio" => Base.encode64(pcm)
+    })
+    |> send_json(%{"type" => "input_audio_buffer.commit"})
+    |> send_json(%{"type" => "response.create"})
   end
 
   defp user_text(text) do
@@ -142,6 +262,22 @@ defmodule Arbor.Agent.Prototypes.XaiVoiceOrchestrator do
     loop(sock, %{acc | text: acc.text <> (event["delta"] || "")})
   end
 
+  # Spoken response audio (PCM16 24kHz) — accumulate the decoded bytes.
+  defp handle("response.output_audio.delta", event, sock, acc) do
+    chunk =
+      case Base.decode64(event["delta"] || "") do
+        {:ok, b} -> b
+        _ -> <<>>
+      end
+
+    loop(sock, %{acc | audio: acc.audio <> chunk})
+  end
+
+  # What the user said (STT of the input audio).
+  defp handle("conversation.item.input_audio_transcription.completed", event, sock, acc) do
+    loop(sock, %{acc | input_transcript: acc.input_transcript <> (event["transcript"] || "")})
+  end
+
   # A response completed. If it was the tool-call response, keep going for the follow-up answer;
   # otherwise this is the final answer — return.
   defp handle("response.done", _event, sock, %{pending_tool: true} = acc) do
@@ -149,7 +285,13 @@ defmodule Arbor.Agent.Prototypes.XaiVoiceOrchestrator do
   end
 
   defp handle("response.done", _event, _sock, acc) do
-    {:ok, %{text: String.trim(acc.text), delegations: acc.delegations}}
+    {:ok,
+     %{
+       text: String.trim(acc.text),
+       input_transcript: String.trim(acc.input_transcript),
+       audio: acc.audio,
+       delegations: acc.delegations
+     }}
   end
 
   defp handle("error", event, _sock, acc) do
