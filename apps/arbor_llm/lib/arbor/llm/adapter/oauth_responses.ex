@@ -4,50 +4,154 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
   (ChatGPT/Codex, xAI/Grok) instead of a metered API key — by translating the `%Request{}` into an
   `Arbor.LLM.OAuth.Responses` call (OpenAI Responses API against the subscription backend).
 
-  Registered under the `"openai_oauth"` / `"xai_oauth"` provider names (see
-  `Client.discover_env_adapters/1`). Anthropic is impossible here — `OAuth.access_token/1` refuses
-  it, and there is no `*_oauth` alias mapping to Anthropic.
+  Registered under `"openai_oauth"` / `"xai_oauth"` (see `Client.discover_env_adapters/1`).
+  Anthropic is impossible here — `OAuth.access_token/1` refuses it and no `*_oauth` alias maps to it.
 
-  Streaming/embeddings aren't supported on this path (the eval + non-streaming turns use `complete`).
+  **Tool calling** is supported (needed for coding-recon + the security evals): `request.tools`
+  (OpenAI-nested) → Responses flat function tools; returned `function_call`s → `%Response{}` with
+  `:tool_call` content parts + `finish_reason: :tool_calls`, which Arbor's `ToolLoop` executes; on
+  the next turn the loop's `:assistant` (list content) + `:tool` (metadata `tool_call_id`) messages
+  are translated back into Responses `function_call` / `function_call_output` input items.
+
+  Streaming (`stream/2`) + embeddings (`embed/3`) are not supported on this path.
   """
 
   @behaviour Arbor.LLM.ProviderAdapter
 
-  alias Arbor.LLM.{OAuth, Request, Response}
+  alias Arbor.LLM.{ContentPart, OAuth, Request, Response}
 
   @impl true
   def provider, do: "openai_oauth"
 
   @impl true
   def complete(%Request{} = request, _opts \\ []) do
-    messages =
-      Enum.map(request.messages, fn m -> %{role: m.role, content: text_of(m.content)} end)
-
+    {instructions, input} = build_input(request.messages)
+    req = %{instructions: instructions, input: input, tools: build_tools(request.tools)}
     opts = if model = model_id(request.model), do: [model: model], else: []
 
-    case OAuth.Responses.complete(oauth_provider(request.provider), messages, opts) do
-      {:ok, text} -> {:ok, %Response{text: text, finish_reason: :stop}}
-      {:error, reason} -> {:error, reason}
+    case OAuth.Responses.complete(oauth_provider(request.provider), req, opts) do
+      {:ok, %{text: text, tool_calls: tool_calls}} ->
+        {:ok, build_response(text, tool_calls)}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  # "xai_oauth" -> :xai ; everything else (openai_oauth) -> :openai. access_token/1 does the
-  # Anthropic refusal, so a hostile provider string can't reach a Claude token.
+  # ── Response: tool_call parts FIRST, then text; finish_reason gates the ToolLoop ──
+
+  defp build_response(text, tool_calls) do
+    tc_parts = Enum.map(tool_calls, fn tc -> ContentPart.tool_call(tc.id, tc.name, tc.arguments) end)
+    text_parts = if is_binary(text) and text != "", do: [ContentPart.text(text)], else: []
+    finish = if tool_calls == [], do: :stop, else: :tool_calls
+    %Response{text: text || "", content_parts: tc_parts ++ text_parts, finish_reason: finish}
+  end
+
+  # ── messages → Responses input items (+ hoisted system instructions) ──
+
+  defp build_input(messages) do
+    {sys, items} =
+      Enum.reduce(messages, {[], []}, fn m, {sys, items} ->
+        case m.role do
+          :system -> {[text_of(m.content) | sys], items}
+          :tool -> {sys, items ++ [tool_result_item(m)]}
+          :assistant -> {sys, items ++ assistant_items(m)}
+          # :user, :developer
+          _ -> {sys, items ++ [role_text_item(m)]}
+        end
+      end)
+
+    {sys |> Enum.reverse() |> Enum.join("\n\n"), items}
+  end
+
+  defp role_text_item(m) do
+    %{"role" => to_string(m.role), "content" => [%{"type" => "input_text", "text" => text_of(m.content)}]}
+  end
+
+  # The ToolLoop's :tool message carries the call id in metadata (string or atom key).
+  defp tool_result_item(m) do
+    call_id = m.metadata["tool_call_id"] || m.metadata[:tool_call_id]
+    %{"type" => "function_call_output", "call_id" => call_id, "output" => text_of(m.content)}
+  end
+
+  # The ToolLoop's :assistant turn is a list of ContentParts (tool_call parts + text). Emit a
+  # function_call item per tool call, plus an assistant message for any text.
+  defp assistant_items(m) do
+    parts = List.wrap(m.content)
+
+    fc_items =
+      parts
+      |> Enum.filter(&(is_map(&1) and Map.get(&1, :kind) == :tool_call))
+      |> Enum.map(fn tc ->
+        %{
+          "type" => "function_call",
+          "call_id" => tc.id,
+          "name" => tc.name,
+          "arguments" => encode_args(tc.arguments)
+        }
+      end)
+
+    text = assistant_text(m.content)
+
+    text_item =
+      if text == "",
+        do: [],
+        else: [%{"role" => "assistant", "content" => [%{"type" => "output_text", "text" => text}]}]
+
+    fc_items ++ text_item
+  end
+
+  # ── tools: OpenAI-nested (%{"function" => %{...}}) → Responses flat function tool ──
+
+  defp build_tools(tools) when is_list(tools) and tools != [] do
+    Enum.map(tools, fn
+      %{"function" => f} when is_map(f) ->
+        %{
+          "type" => "function",
+          "name" => f["name"],
+          "description" => f["description"] || "",
+          "parameters" => f["parameters"] || %{"type" => "object", "properties" => %{}}
+        }
+
+      other ->
+        other
+    end)
+  end
+
+  defp build_tools(_), do: nil
+
+  # ── helpers ──
+
   defp oauth_provider(p) when is_binary(p) do
     if String.contains?(String.downcase(p), "xai"), do: :xai, else: :openai
   end
 
   defp oauth_provider(_), do: :openai
 
-  # Strip any "provider/model" prefix; nil/blank -> let Responses pick its default.
   defp model_id(nil), do: nil
   defp model_id(""), do: nil
   defp model_id(model) when is_binary(model), do: model |> String.split("/") |> List.last()
+
+  # Responses function_call arguments must be a JSON string.
+  defp encode_args(args) when is_binary(args), do: args
+  defp encode_args(args) when is_map(args), do: Jason.encode!(args)
+  defp encode_args(_), do: "{}"
 
   defp text_of(content) when is_binary(content), do: content
   defp text_of(parts) when is_list(parts), do: parts |> Enum.map_join(" ", &part_text/1)
   defp text_of(_), do: ""
 
+  defp assistant_text(content) when is_binary(content), do: content
+
+  defp assistant_text(parts) when is_list(parts) do
+    parts
+    |> Enum.filter(&(is_map(&1) and Map.get(&1, :kind) == :text))
+    |> Enum.map_join(" ", & &1.text)
+  end
+
+  defp assistant_text(_), do: ""
+
+  defp part_text(%{kind: :text, text: t}) when is_binary(t), do: t
   defp part_text(%{text: t}) when is_binary(t), do: t
   defp part_text(%{"text" => t}) when is_binary(t), do: t
   defp part_text(t) when is_binary(t), do: t
