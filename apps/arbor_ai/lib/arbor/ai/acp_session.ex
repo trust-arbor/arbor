@@ -646,6 +646,11 @@ defmodule Arbor.AI.AcpSession do
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
     case apply(@acp_client, :prompt, [state.client, state.session_id, content, opts]) do
       {:ok, result} ->
+        # The streaming chunks arrive as {:acp_session_update} messages DURING the blocking
+        # prompt/4 call, so handle_info can't process them until this handle_call returns. Drain
+        # them from the mailbox NOW so their text is accumulated before we merge. Without this, an
+        # adapter that returns its text ONLY via streaming chunks (Claude) yields an empty response.
+        state = drain_pending_updates(state)
         # Merge streaming text into result if agent didn't include it
         result = merge_accumulated_text(result, state.accumulated_text)
         new_state = %{state | status: :ready} |> accumulate_usage(result)
@@ -657,6 +662,27 @@ defmodule Arbor.AI.AcpSession do
         new_state = %{state | status: :error}
         emit_signal(:acp_session_error, new_state, %{error: reason, phase: :prompt})
         {:reply, error, new_state}
+    end
+  end
+
+  # Process {:acp_session_update} messages already queued in the mailbox (they arrive during the
+  # blocking prompt/4 call but handle_info can't run until it returns). `after 0` returns once the
+  # mailbox is drained — by the time prompt/4 returns the turn is complete, so all chunks are
+  # already enqueued. Mirrors handle_info: fires the stream_callback + accumulates text.
+  defp drain_pending_updates(state) do
+    receive do
+      {:acp_session_update, _session_id, update} ->
+        if state.stream_callback do
+          try do
+            state.stream_callback.(update)
+          rescue
+            e -> Logger.warning("AcpSession stream_callback error: #{inspect(e)}")
+          end
+        end
+
+        drain_pending_updates(accumulate_text(update, state))
+    after
+      0 -> state
     end
   end
 
