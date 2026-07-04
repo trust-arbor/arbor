@@ -444,6 +444,35 @@ defmodule Arbor.AI.AcpSessionTest do
     end
   end
 
+  describe "drain_pending_updates/1 (regression: Claude ACP empty response)" do
+    test "drains queued streaming chunks from the mailbox and accumulates their text" do
+      # Simulates the bug: agent_message_chunk updates arrive as {:acp_session_update} messages
+      # queued in the mailbox during the blocking prompt/4 call. The drain must process them so the
+      # streamed text isn't lost — Claude returns its answer ONLY via these chunks, not the result.
+      state = %{accumulated_text: "", stream_callback: nil}
+
+      send(
+        self(),
+        {:acp_session_update, "s1",
+         %{"sessionUpdate" => "agent_message_chunk", "content" => %{"type" => "text", "text" => "Hello "}}}
+      )
+
+      send(
+        self(),
+        {:acp_session_update, "s1",
+         %{"sessionUpdate" => "agent_message_chunk", "content" => %{"type" => "text", "text" => "world"}}}
+      )
+
+      drained = AcpSession.drain_pending_updates(state)
+      assert drained.accumulated_text == "Hello world"
+    end
+
+    test "returns state unchanged when the mailbox has no updates" do
+      state = %{accumulated_text: "", stream_callback: nil}
+      assert AcpSession.drain_pending_updates(state).accumulated_text == ""
+    end
+  end
+
   describe "status includes usage" do
     @test_client_opts [command: ["echo", "test"], _skip_connect: true]
 

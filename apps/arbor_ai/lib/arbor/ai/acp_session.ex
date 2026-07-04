@@ -669,7 +669,8 @@ defmodule Arbor.AI.AcpSession do
   # blocking prompt/4 call but handle_info can't run until it returns). `after 0` returns once the
   # mailbox is drained — by the time prompt/4 returns the turn is complete, so all chunks are
   # already enqueued. Mirrors handle_info: fires the stream_callback + accumulates text.
-  defp drain_pending_updates(state) do
+  @doc false
+  def drain_pending_updates(state) do
     receive do
       {:acp_session_update, _session_id, update} ->
         if state.stream_callback do
