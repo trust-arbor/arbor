@@ -129,6 +129,45 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
 
       GenServer.stop(pid)
     end
+
+    test "terminal auth error disables the heartbeat loop (flood regression, 2026-07-04)" do
+      {:ok, pid} = start_test_service()
+
+      assert HeartbeatService.get_state(pid).heartbeat_disabled == false
+
+      # Orphaned agent: every beat fails identically on unknown_identity. Pre-fix the loop kept
+      # rescheduling → ramped to ~50 doomed pipelines/sec and crashed the BEAM. It must fail-STOP:
+      # disable the loop and cancel the pending beat instead of flooding the orchestrator.
+      send(pid, {:heartbeat_result, {:error, {:unauthorized, :unknown_identity}}})
+      Process.sleep(50)
+
+      state = HeartbeatService.get_state(pid)
+      assert state.heartbeat_disabled == true
+      assert state.heartbeat_ref == nil
+
+      # Behavioral guarantee: even a stray :heartbeat trigger must NOT restart the loop, so the
+      # flood can never resume once disabled.
+      send(pid, :heartbeat)
+      Process.sleep(50)
+      resumed = HeartbeatService.get_state(pid)
+      assert resumed.heartbeat_ref == nil
+      assert resumed.heartbeat_in_flight == false
+
+      GenServer.stop(pid)
+    end
+
+    test "a single transient (non-terminal) error does NOT disable the heartbeat" do
+      {:ok, pid} = start_test_service()
+
+      send(pid, {:heartbeat_result, {:error, :timeout}})
+      Process.sleep(50)
+
+      # Only terminal errors (or @max_consecutive_heartbeat_failures in a row) stop the loop;
+      # a lone transient failure must keep it alive.
+      assert HeartbeatService.get_state(pid).heartbeat_disabled == false
+
+      GenServer.stop(pid)
+    end
   end
 
   describe "terminate cleanup" do

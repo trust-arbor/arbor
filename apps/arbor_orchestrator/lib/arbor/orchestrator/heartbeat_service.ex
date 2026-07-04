@@ -56,6 +56,11 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
   @default_interval 30_000
 
+  # After this many CONSECUTIVE heartbeat failures with no known-terminal reason, disable the
+  # heartbeat as a flood backstop. Terminal errors (see terminal_heartbeat_error?/1) disable it
+  # immediately regardless of this count.
+  @max_consecutive_heartbeat_failures 5
+
   # A5 (first beat at startup): the first heartbeat fires after a short jittered
   # delay rather than a full @default_interval, so an agent begins autonomous
   # activity ~immediately on boot (the intended UX) instead of ~30s later. The
@@ -106,7 +111,9 @@ defmodule Arbor.Orchestrator.HeartbeatService do
       heartbeat_dot_path: dot_path,
       heartbeat_interval: interval,
       heartbeat_ref: nil,
-      heartbeat_in_flight: false
+      heartbeat_in_flight: false,
+      heartbeat_failures: 0,
+      heartbeat_disabled: false
     }
 
     # A5: fire the first beat soon (short jittered delay), not a full interval
@@ -136,6 +143,11 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   end
 
   @impl true
+  def handle_info(:heartbeat, %{heartbeat_disabled: true} = state) do
+    # Heartbeat was disabled after a terminal/repeated failure — do not run or reschedule.
+    {:noreply, state}
+  end
+
   def handle_info(:heartbeat, state) do
     state = start_heartbeat_task(state)
     state = schedule_heartbeat(state)
@@ -156,7 +168,7 @@ defmodule Arbor.Orchestrator.HeartbeatService do
     # not directly into the chat context window.
     apply_heartbeat_result(state, result)
 
-    {:noreply, %{state | heartbeat_in_flight: false}}
+    {:noreply, %{state | heartbeat_in_flight: false, heartbeat_failures: 0}}
   end
 
   def handle_info({:heartbeat_result, {:error, reason}}, state) do
@@ -166,7 +178,24 @@ defmodule Arbor.Orchestrator.HeartbeatService do
 
     emit_heartbeat_failed_signal(state, reason)
 
-    {:noreply, %{state | heartbeat_in_flight: false}}
+    failures = state.heartbeat_failures + 1
+
+    cond do
+      # A permanent auth/identity failure will recur identically every beat — retrying just
+      # floods the orchestrator with doomed pipelines. This was the 2026-07-04 node-crash root
+      # cause: orphaned agents (no registered identity) heartbeating on {:unauthorized,
+      # :unknown_identity} ramped to ~50 pipelines/sec until the BEAM collapsed. Fail STOP.
+      terminal_heartbeat_error?(reason) ->
+        disable_heartbeat(state, "terminal error #{inspect(reason)}")
+
+      # General backstop: any error that persists for @max_consecutive_heartbeat_failures beats
+      # is treated as stuck, so we never flood indefinitely even on an unrecognized failure.
+      failures >= @max_consecutive_heartbeat_failures ->
+        disable_heartbeat(state, "#{failures} consecutive heartbeat failures")
+
+      true ->
+        {:noreply, %{state | heartbeat_in_flight: false, heartbeat_failures: failures}}
+    end
   end
 
   def handle_info(_msg, state), do: {:noreply, state}
@@ -246,6 +275,29 @@ defmodule Arbor.Orchestrator.HeartbeatService do
     if state.heartbeat_ref, do: Process.cancel_timer(state.heartbeat_ref)
     ref = Process.send_after(self(), :heartbeat, delay_ms)
     %{state | heartbeat_ref: ref}
+  end
+
+  # Stop the heartbeat loop: cancel the already-scheduled next beat and mark disabled so no future
+  # beat runs or reschedules. The agent process stays up (it can still serve turns); only the
+  # autonomous loop is halted. Returns a GenServer :noreply tuple.
+  defp disable_heartbeat(state, why) do
+    Logger.error(
+      "[HeartbeatService] Disabling heartbeat for #{state.agent_id}: #{why}. " <>
+        "Refusing to reschedule (prevents the orphaned-agent pipeline flood)."
+    )
+
+    if state.heartbeat_ref, do: Process.cancel_timer(state.heartbeat_ref)
+
+    {:noreply,
+     %{state | heartbeat_in_flight: false, heartbeat_ref: nil, heartbeat_disabled: true}}
+  end
+
+  # A heartbeat that fails on identity/authorization will fail identically forever: the agent has
+  # no registered identity (`:unknown_identity`) or lacks a required capability (`:unauthorized`) —
+  # neither is fixed by retrying. Treat these as terminal so the loop stops instead of flooding.
+  defp terminal_heartbeat_error?(reason) do
+    s = inspect(reason)
+    String.contains?(s, "unknown_identity") or String.contains?(s, ":unauthorized")
   end
 
   # First-beat delay (A5): a jittered delay in (0, @first_beat_max_ms], always far
