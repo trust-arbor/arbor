@@ -32,6 +32,7 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
     # override to study a specific setting. Recorded in EvalRun.config either way.
     agent_temperature: :float,
     agent_top_p: :float,
+    agent_sampling: :string,
     judge_model: :string,
     judge_provider: :string,
     # --stream true forces the streaming tool-loop path (complete_streaming) for

@@ -37,6 +37,18 @@ providers:
   - id: openai:chat:qwen3.5-2b-mlx
     label: "qwen3.5-2b-mlx (cheapest)@lmstudio"
     config: *lmcfg
+  - id: openai:chat:qwen3.5-9b-mtp
+    label: "qwen3.5-9b-mtp@lmstudio"
+    config: *lmcfg
+  - id: openai:chat:qwen3.5-4b-mtp
+    label: "qwen3.5-4b-mtp@lmstudio"
+    config: *lmcfg
+  - id: "openai:chat:qwen3.5-2b-mtp@q8_k_xl"
+    label: "qwen3.5-2b-mtp@q8_k_xl@lmstudio"
+    config: *lmcfg
+  - id: "openai:chat:qwen3.5-2b-mtp@q4_k_xl"
+    label: "qwen3.5-2b-mtp@q4_k_xl@lmstudio"
+    config: *lmcfg
 
 tests:
   - file://sanity.jsonl

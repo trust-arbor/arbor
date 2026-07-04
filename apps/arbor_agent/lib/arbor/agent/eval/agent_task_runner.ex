@@ -702,19 +702,38 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     "qwen3.5-122b-a10b-mtp" => %{temperature: 0.6, top_p: 0.95},
     "qwen3.6-27b-mtp" => %{temperature: 0.6, top_p: 0.95},
     "qwen-agentworld-35b-a3b" => %{temperature: 0.6, top_p: 0.95},
-    "gemma-4-e4b-it-qat" => %{temperature: 0.2, top_p: 0.9},
     "gemma-4-31b-it-qat" => %{temperature: 0.2, top_p: 0.9},
-    "qwen3.5-2b-mlx" => %{temperature: 0.2, top_p: 0.9}
+    "qwen3.5-2b-mlx" => %{temperature: 0.2, top_p: 0.9},
+    # Model-card sampling (2026-07-04 small-model battery). Gemma 4 QAT: t1.0/p0.95/k64.
+    # Qwen3.5 thinking-general: t1.0/p0.95/k20/min_p0/pen0/rep1.0. NOTE: only temperature + top_p
+    # are SENT by Arbor today (the request path that reaches ReqLLM). top_k/min_p/penalties are
+    # recorded here for the eval-result config AND applied by LM Studio's per-model UI (operator set
+    # them to match); sending them from Arbor needs provider_options plumbing through the APIAgent
+    # path — tracked as a follow-up.
+    "gemma-4-e4b-it-qat" => %{temperature: 1.0, top_p: 0.95, top_k: 64},
+    "gemma-4-e2b-it-qat" => %{temperature: 1.0, top_p: 0.95, top_k: 64},
+    "qwen3.5-9b-mtp" => %{temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.0, presence_penalty: 0.0, repetition_penalty: 1.0},
+    "qwen3.5-4b-mtp" => %{temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.0, presence_penalty: 0.0, repetition_penalty: 1.0},
+    "qwen3.5-2b-mtp@q8_k_xl" => %{temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.0, presence_penalty: 0.0, repetition_penalty: 1.0},
+    "qwen3.5-2b-mtp@q4_k_xl" => %{temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.0, presence_penalty: 0.0, repetition_penalty: 1.0}
   }
   @default_sampling %{temperature: 0.2, top_p: 0.9}
 
   defp sampling_params_for(model, opts) do
-    base = Map.get(@sampling_params, model, @default_sampling)
+    if opts[:agent_sampling] == "passthrough" do
+      # Send NO temperature/top_p. ReqLLM's maybe_put omits nil, so the provider applies its own
+      # sampling — e.g. LM Studio's per-model UI setting (the model-card values the operator set).
+      # Use this to measure a model at its recommended sampling instead of Arbor's fixed defaults.
+      %{temperature: nil, top_p: nil}
+    else
+      base = Map.get(@sampling_params, model, @default_sampling)
 
-    %{
-      temperature: opts[:agent_temperature] || base.temperature,
-      top_p: opts[:agent_top_p] || base.top_p
-    }
+      # Keep the full model-card map (top_k/min_p/penalties) for recording; override temp/top_p
+      # from CLI if given. create_agent sends only temperature + top_p; the rest are recorded.
+      base
+      |> Map.put(:temperature, opts[:agent_temperature] || base.temperature)
+      |> Map.put(:top_p, opts[:agent_top_p] || base.top_p)
+    end
   end
 
   # Quant is a first-class variable for local models (speed/memory/quality all move with
@@ -767,11 +786,11 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       # Effective generation config — sampling params swing quality as much as the model,
       # so record what was actually used (per-model recommended unless overridden). nil
       # max_tokens = uncapped (provider full budget).
-      config: %{
-        "temperature" => sp.temperature,
-        "top_p" => sp.top_p,
-        "max_tokens" => opts[:agent_max_tokens]
-      },
+      config:
+        sp
+        |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+        |> Map.new(fn {k, v} -> {to_string(k), v} end)
+        |> Map.put("max_tokens", opts[:agent_max_tokens]),
       dataset: task.id,
       graders: Enum.map(all_graders, &to_string/1),
       sample_count: n,
