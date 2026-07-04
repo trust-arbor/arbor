@@ -123,17 +123,39 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     # cwd = repo root so the CLI reads AGENTS.md/CLAUDE.md natively (parity with the Arbor-harness
     # models' ProjectContext); {{read_root}} still points it at the recon subtree.
     cwd = File.cwd!()
+    agent_id = nil
 
-    t0 = System.monotonic_time(:millisecond)
-    {final_text, usage} = drive_acp(provider, prompt, cwd, task.timeout_ms)
-    duration_ms = System.monotonic_time(:millisecond) - t0
+    try do
+      # A REAL Arbor identity so the ACP session isn't anonymous. The CLI's tool-use permission
+      # requests hit AcpSession.Handler, which authorizes arbor://acp/tool/<tool> (+ fs caps for
+      # file reads) against THIS agent's capabilities. Without an identity the handler denies
+      # everything ("anonymous ACP session denied"). Also gives build_sample a persistable agent_id.
+      {:ok, agent_id} = create_agent(task, opts)
+      grant_acp_recon_caps(agent_id, cwd)
+      allow_tools_in_trust_profile(agent_id, task)
 
-    trajectory = []
-    grade = AgentTaskGrader.grade(task, trajectory, final_text)
-    judge = run_judge(task, trajectory, final_text, opts)
-    agent_id = "acp:#{provider}:#{index}"
+      t0 = System.monotonic_time(:millisecond)
+      {final_text, usage} = drive_acp(provider, prompt, cwd, agent_id, task.timeout_ms)
+      duration_ms = System.monotonic_time(:millisecond) - t0
 
-    build_sample(task, agent_id, final_text, trajectory, usage, [], grade, judge, duration_ms, index, opts)
+      trajectory = []
+      grade = AgentTaskGrader.grade(task, trajectory, final_text)
+      judge = run_judge(task, trajectory, final_text, opts)
+
+      build_sample(task, agent_id, final_text, trajectory, usage, [], grade, judge, duration_ms, index, opts)
+    after
+      if agent_id, do: teardown(agent_id)
+    end
+  end
+
+  # ACP recon caps: the handler maps each CLI tool-use to arbor://acp/tool/<tool-or-command>
+  # (tool names can be whole shell commands, e.g. Claude's Bash), and file reads to fs caps.
+  # Grant the acp/tool namespace + read-only fs on the repo. The CLI is sandboxed to its cwd and
+  # this is read-only recon; the grant is an AUDITABLE capability, not a blanket permission bypass.
+  defp grant_acp_recon_caps(agent_id, repo_root) do
+    Arbor.Security.grant(principal: agent_id, resource: "arbor://acp/tool/**")
+    Arbor.Security.grant(principal: agent_id, resource: fs_uri("read", repo_root))
+    Arbor.Security.grant(principal: agent_id, resource: fs_uri("list", repo_root))
   end
 
   defp acp_provider(opts) do
@@ -153,9 +175,9 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     end
   end
 
-  defp drive_acp(provider, prompt, read_root, timeout) do
-    with {:ok, session} <- Arbor.AI.acp_start_session(provider, timeout: timeout),
-         {:ok, _created} <- Arbor.AI.acp_create_session(session, cwd: read_root),
+  defp drive_acp(provider, prompt, cwd, agent_id, timeout) do
+    with {:ok, session} <- Arbor.AI.acp_start_session(provider, timeout: timeout, agent_id: agent_id),
+         {:ok, _created} <- Arbor.AI.acp_create_session(session, cwd: cwd),
          {:ok, response} <- Arbor.AI.acp_send_message(session, prompt, timeout: timeout) do
       Arbor.AI.acp_close_session(session)
       {response[:text] || response["text"] || "", response[:usage] || response["usage"] || %{}}
