@@ -908,6 +908,9 @@ defmodule Arbor.LLM.Client do
       adapters
       |> maybe_put_oauth("openai_oauth", :openai)
       |> maybe_put_oauth("xai_oauth", :xai)
+      # Owned LM Studio adapter (direct /v1/chat/completions with full sampling in the body).
+      # Opt-in provider name; ReqLLM still serves plain "lm_studio" until this is proven.
+      |> Map.put("lm_studio_owned", Arbor.LLM.Adapter.LmStudio)
 
     default_discover_local =
       Application.get_env(:arbor_orchestrator, :discover_local_providers, true)

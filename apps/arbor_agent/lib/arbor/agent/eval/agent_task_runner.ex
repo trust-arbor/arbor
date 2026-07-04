@@ -263,7 +263,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       display_name: name,
       temperature: sp.temperature,
       top_p: sp.top_p,
-      provider_options: sampling_provider_options(sp),
+      provider_options: sampling_provider_options(sp, opts),
       model_config: model_config,
       tools: task.tools,
       # NO artificial max_tokens cap by default — the eval measures MAXIMUM capability,
@@ -740,13 +740,20 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   # The card-recommended knobs beyond temp/top_p (top_k/min_p/penalties) ride provider_options →
   # SessionConfig → context → LlmHandler → Request.provider_options → ReqLLM merges them into the
   # request body (LM Studio applies top_k/min_p/repeat_penalty). Stringified, nils dropped.
-  # top_k/min_p/penalties are NOT sent for LM Studio: ReqLLM's OpenAI provider rejects non-schema
-  # keys in provider_options, which breaks generation (empty responses — verified 2026-07-04:
-  # sending them made gemma-4-e4b return nothing; removing them restored PASS/100%). They ARE still
-  # recorded in run_attrs.config (from @sampling_params) and applied by LM Studio's per-model UI
-  # (operator-set to the card values). temp + top_p ARE sent (first-class Request fields).
-  # If a future provider accepts provider_options sampling, return the extras here.
-  defp sampling_provider_options(_sp), do: %{}
+  # top_k/min_p/penalties ride provider_options ONLY for the owned lm_studio_owned adapter (it puts
+  # them in the /v1/chat/completions body directly). ReqLLM's OpenAI provider (plain "lm_studio")
+  # rejects non-schema keys → empty responses (verified 2026-07-04), so it gets %{} and relies on
+  # temp+top_p (first-class) + LM Studio's UI for top_k. Recorded in run_attrs.config either way.
+  defp sampling_provider_options(sp, opts) do
+    if to_string(opts[:agent_provider]) == "lm_studio_owned" do
+      sp
+      |> Map.drop([:temperature, :top_p])
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+      |> Map.new(fn {k, v} -> {to_string(k), v} end)
+    else
+      %{}
+    end
+  end
 
   # Quant is a first-class variable for local models (speed/memory/quality all move with
   # it). Prefer an explicit --agent-quant; otherwise auto-detect from LM Studio's native
@@ -904,5 +911,6 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   # regardless of whether Arbor.LLM.OAuth is loaded in this process.
   defp normalize_provider("openai_oauth"), do: :openai_oauth
   defp normalize_provider("xai_oauth"), do: :xai_oauth
+  defp normalize_provider("lm_studio_owned"), do: :lm_studio_owned
   defp normalize_provider(p) when is_binary(p), do: String.to_existing_atom(p)
 end
