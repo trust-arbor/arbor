@@ -3,19 +3,24 @@ defmodule Arbor.LLM.OAuth do
   Subscription OAuth token access for LLM providers that authenticate against their SUBSCRIPTION
   backends (ChatGPT/Codex, xAI/Grok) rather than metered API keys.
 
-  Piggybacks on the provider CLIs' stored tokens — the user has already run `codex login` /
-  `grok login`, so there is NO OAuth login flow here, only READ + JWT-`exp` expiry check
-  (refresh is a follow-up: reactive refresh-on-401 against the endpoints in `@providers`). The
-  returned access_token is used as `Authorization: Bearer` against the subscription-backend
-  endpoints via the Responses-API adapter (mechanism reverse-engineered from ~/code/hermes-agent).
+  Tokens are held in an Arbor-owned store (`~/.arbor/oauth/<provider>.json`, 0600), imported once
+  from the provider CLIs' files (`~/.codex`, `~/.grok`) on first use. There is NO OAuth LOGIN flow
+  here yet (that's the OIDC-reuse follow-up — see the roadmap); acquisition piggybacks the CLIs.
+  Refresh IS implemented: when the cached access_token is expiring (or grok, which stores only a
+  refresh_token), we mint a new one (openai: POST auth.openai.com; xai: OIDC-discovered endpoint)
+  and WRITE the rotated tokens BACK to the Arbor store — never the CLI file, so the CLI credential
+  is never consumed. The access_token is used as `Authorization: Bearer` against the
+  subscription-backend endpoints via `Arbor.LLM.OAuth.Responses` (reverse-engineered from
+  ~/code/hermes-agent). Verified live 2026-07-03: agents run on ChatGPT (gpt-5.4-mini) AND SuperGrok
+  (grok-4) subscriptions.
 
   ## SECURITY — Anthropic is HARD-REFUSED
 
   Using a Claude subscription OAuth token programmatically is against Anthropic's ToS. This module
   returns `{:error, :anthropic_oauth_forbidden}` for any anthropic-family provider and has no code
   path to a Claude token. xAI + OpenAI subscription OAuth is permitted (that's how the CLIs work).
-  NOTE: xAI OAuth is frequently tier-gated (403 `xai_oauth_tier_denied`) — a SuperGrok sub may not
-  entitle API access; there is no fix for that here (use ACP for Grok).
+  NOTE: xAI OAuth CAN be tier-gated (403 `xai_oauth_tier_denied`) on some accounts — a SuperGrok
+  sub entitled it in testing, but that's account-specific.
   """
 
   require Logger
