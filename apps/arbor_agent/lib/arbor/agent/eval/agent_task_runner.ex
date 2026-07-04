@@ -740,12 +740,13 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   # The card-recommended knobs beyond temp/top_p (top_k/min_p/penalties) ride provider_options →
   # SessionConfig → context → LlmHandler → Request.provider_options → ReqLLM merges them into the
   # request body (LM Studio applies top_k/min_p/repeat_penalty). Stringified, nils dropped.
-  defp sampling_provider_options(sp) do
-    sp
-    |> Map.drop([:temperature, :top_p])
-    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
-    |> Map.new(fn {k, v} -> {to_string(k), v} end)
-  end
+  # top_k/min_p/penalties are NOT sent for LM Studio: ReqLLM's OpenAI provider rejects non-schema
+  # keys in provider_options, which breaks generation (empty responses — verified 2026-07-04:
+  # sending them made gemma-4-e4b return nothing; removing them restored PASS/100%). They ARE still
+  # recorded in run_attrs.config (from @sampling_params) and applied by LM Studio's per-model UI
+  # (operator-set to the card values). temp + top_p ARE sent (first-class Request fields).
+  # If a future provider accepts provider_options sampling, return the extras here.
+  defp sampling_provider_options(_sp), do: %{}
 
   # Quant is a first-class variable for local models (speed/memory/quality all move with
   # it). Prefer an explicit --agent-quant; otherwise auto-detect from LM Studio's native
