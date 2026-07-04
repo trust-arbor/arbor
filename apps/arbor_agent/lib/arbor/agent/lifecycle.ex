@@ -679,8 +679,13 @@ defmodule Arbor.Agent.Lifecycle do
   """
   @spec destroy(String.t()) :: :ok | {:error, term()}
   def destroy(agent_id) do
-    # Stop executor if running
-    Executor.stop(agent_id)
+    # Terminate the whole supervision tree FIRST. stop/1 shuts down the BranchSupervisor and ALL its
+    # children — host, executor, session, AND HeartbeatService. Previously destroy only stopped the
+    # Executor and left the BranchSupervisor running, so the HeartbeatService kept beating on the
+    # identity that deregister_identity (below) then removed → orphaned {:unauthorized,
+    # :unknown_identity} heartbeats flooding the orchestrator (2026-07-04 node crash). Ordering is
+    # load-bearing: kill the heartbeat BEFORE deregistering its identity, else it beats identity-less.
+    stop(agent_id)
 
     # Clean up memory
     Arbor.Memory.cleanup_for_agent(agent_id)
