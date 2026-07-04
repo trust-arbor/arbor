@@ -81,6 +81,19 @@ defmodule Arbor.LLM.OAuth do
   @spec available?(atom() | String.t()) :: boolean()
   def available?(provider), do: match?({:ok, _}, access_token(provider))
 
+  @doc """
+  Whether `provider` has an OAuth token FILE on disk — no refresh, no network. Safe to call at
+  boot / adapter registration (unlike `available?/1`, which for grok triggers a refresh that
+  consumes the rotating refresh_token). Anthropic is refused.
+  """
+  @spec configured?(atom() | String.t()) :: boolean()
+  def configured?(provider) do
+    case resolve(provider) do
+      {:ok, _key, config} -> File.exists?(Path.expand(config.file))
+      _ -> false
+    end
+  end
+
   # ── internals ──
 
   # Map provider aliases -> the config key, refusing Anthropic FIRST (before any file read).
