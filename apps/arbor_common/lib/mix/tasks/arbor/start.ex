@@ -64,6 +64,11 @@ defmodule Mix.Tasks.Arbor.Start do
     # nonexistent"). Covers `mix arbor.restart` too (it delegates to Start.run).
     Config.ensure_runtime_dirs()
 
+    # Rotate the previous log before the `> log_file` truncate below wipes it. Keeps 3 generations
+    # (arbor-dev.log.1/.2/.3) so a crash's evidence survives a restart — truncating on every start is
+    # exactly what erased the 2026-07-04 node-crash logs and forced a Postgres-EventLog reconstruction.
+    rotate_log(log_file)
+
     # Resolve the real elixir and mix paths from the running Elixir installation.
     # This avoids mise/asdf shim binaries which are Mach-O executables that
     # crash when loaded by `elixir -S mix` (Code.require_file tries to parse
@@ -146,6 +151,21 @@ defmodule Mix.Tasks.Arbor.Start do
 
   defp write_pid_file(pid) do
     File.write!(Config.pid_file(), to_string(pid))
+  end
+
+  # Keep the last 3 log generations (.1 newest → .3 oldest) so the shell's `> log_file` truncate on
+  # start doesn't erase the previous run's log. Shift .2→.3, .1→.2, log→.1; the truncate then makes a
+  # fresh log. No-op for a missing/empty log. Best-effort — never block startup on a rename error.
+  defp rotate_log(log_file) do
+    if File.exists?(log_file) and File.stat!(log_file).size > 0 do
+      for n <- 3..1//-1 do
+        src = if n == 1, do: log_file, else: "#{log_file}.#{n - 1}"
+        dst = "#{log_file}.#{n}"
+        if File.exists?(src), do: File.rename(src, dst)
+      end
+    end
+  rescue
+    _ -> :ok
   end
 
   defp resolve_real_paths do
