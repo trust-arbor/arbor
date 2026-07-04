@@ -61,10 +61,13 @@ defmodule Arbor.LLM.OAuth do
 
         is_binary(tokens["refresh_token"]) ->
           # No valid cached access_token (grok stores ONLY a refresh_token; openai's cached one may
-          # be expiring) — mint one via refresh. NOTE: providers ROTATE the refresh_token, so a
-          # robust impl must persist the rotation (follow-up: an Arbor-owned token store, NOT the
-          # CLI file). For now we mint per-call and rely on the CLI to keep the refresh_token warm.
-          refresh(key, config, tokens["refresh_token"])
+          # be expiring) — mint one via refresh. Providers ROTATE the refresh_token, so we WRITE
+          # the rotated tokens back to the Arbor-owned store (~/.arbor/oauth), never the CLI file —
+          # so the CLI credential is never consumed and the next call has a fresh refresh_token.
+          with {:ok, refreshed} <- refresh(key, config, tokens["refresh_token"]) do
+            write_stored(key, Map.merge(tokens, refreshed))
+            {:ok, refreshed["access_token"]}
+          end
 
         true ->
           {:error, :no_usable_token}
@@ -95,7 +98,7 @@ defmodule Arbor.LLM.OAuth do
   @spec configured?(atom() | String.t()) :: boolean()
   def configured?(provider) do
     case resolve(provider) do
-      {:ok, _key, config} -> File.exists?(Path.expand(config.file))
+      {:ok, key, config} -> File.exists?(store_path(key)) or File.exists?(Path.expand(config.file))
       _ -> false
     end
   end
@@ -122,7 +125,25 @@ defmodule Arbor.LLM.OAuth do
     end
   end
 
-  defp read_tokens(:openai, config) do
+  # Store-first: read the Arbor-owned copy (~/.arbor/oauth/<key>.json); import from the CLI file on
+  # first use. This is what makes rotation safe — write-back keeps the Arbor store current without
+  # ever consuming the CLI credential.
+  defp read_tokens(key, config) do
+    case read_json(store_path(key)) do
+      {:ok, %{"access_token" => _} = tokens} -> {:ok, tokens}
+      {:ok, %{"refresh_token" => _} = tokens} -> {:ok, tokens}
+      _ -> import_from_cli(key, config)
+    end
+  end
+
+  defp import_from_cli(key, config) do
+    with {:ok, tokens} <- read_cli_tokens(key, config) do
+      write_stored(key, tokens)
+      {:ok, tokens}
+    end
+  end
+
+  defp read_cli_tokens(:openai, config) do
     with {:ok, json} <- read_json(config.file),
          %{"tokens" => %{} = tokens} <- json do
       {:ok, tokens}
@@ -132,13 +153,25 @@ defmodule Arbor.LLM.OAuth do
   end
 
   # Grok stores the token object under a single "https://auth.x.ai::<uuid>" key.
-  defp read_tokens(:xai, config) do
+  defp read_cli_tokens(:xai, config) do
     with {:ok, json} <- read_json(config.file),
          [{_key, %{} = tokens} | _] <- Map.to_list(json) do
       {:ok, tokens}
     else
       _ -> {:error, {:no_tokens_in_file, config.file}}
     end
+  end
+
+  @store_dir "~/.arbor/oauth"
+  defp store_path(key), do: Path.expand("#{@store_dir}/#{key}.json")
+
+  # Persist tokens to the Arbor-owned store (0600). Returns the tokens for pipelining.
+  defp write_stored(key, tokens) do
+    path = store_path(key)
+    File.mkdir_p(Path.dirname(path))
+    File.write(path, Jason.encode!(tokens))
+    File.chmod(path, 0o600)
+    tokens
   end
 
   defp read_json(path) do
@@ -196,8 +229,8 @@ defmodule Arbor.LLM.OAuth do
 
   defp post_token(url, form) do
     case Req.post(url, form: form, receive_timeout: 20_000) do
-      {:ok, %{status: 200, body: %{"access_token" => at}}} when is_binary(at) ->
-        {:ok, at}
+      {:ok, %{status: 200, body: %{"access_token" => at} = tokens}} when is_binary(at) ->
+        {:ok, tokens}
 
       {:ok, %{status: status, body: body}} ->
         {:error, {:refresh_failed, status, oauth_error(body)}}
