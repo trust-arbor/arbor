@@ -262,6 +262,47 @@ defmodule Arbor.LLM.ToolLoopTest do
     end
   end
 
+  # Regression (Bug A, 2026-07-04): a thinking model (qwen3.5-9b-mtp) emitted WHITESPACE-only text
+  # ("\n\n") alongside its tool call. That accumulated into `accumulated_text`, so the
+  # empty-text-after-tools retry saw `accumulated == "\n\n\n"` (not "") and DID NOT FIRE — the loop
+  # returned 5 newlines instead of a real answer. ToolLoop must trim-check and still retry.
+  defmodule WhitespaceAfterToolAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "whitespace_after_tool_test"
+
+    # Text-only retry (tools stripped) → produce the answer.
+    def complete(%Request{tools: tools}, _opts) when tools in [nil, []] do
+      {:ok,
+       %Response{
+         text: "Final answer",
+         finish_reason: :stop,
+         content_parts: [ContentPart.text("Final answer")],
+         raw: %{}
+       }}
+    end
+
+    def complete(%Request{} = request, _opts) do
+      case List.last(request.messages).role do
+        :user ->
+          # Intermediate round: whitespace text alongside the tool call (the poison).
+          {:ok,
+           %Response{
+             text: "\n\n",
+             finish_reason: :tool_calls,
+             content_parts: [ContentPart.tool_call("c1", "read_file", %{"path" => "hello.txt"})],
+             raw: %{}
+           }}
+
+        :tool ->
+          # Finished with whitespace text after the tool round.
+          {:ok, %Response{text: "\n\n\n", finish_reason: :stop, content_parts: [], raw: %{}}}
+
+        _ ->
+          {:ok, %Response{text: "done", finish_reason: :stop, raw: %{}}}
+      end
+    end
+  end
+
   # Exercises the STREAMING tool-loop path (stream_callback set → ToolLoop uses
   # Client.complete_streaming). Regression for: streamed tool calls used to lose
   # their ARGUMENTS (and earlier their name). complete_streaming must fire the
@@ -556,6 +597,24 @@ defmodule Arbor.LLM.ToolLoopTest do
 
       # Pre-fix: content was "" (empty turn — the model finished with no text
       # after the tool round). The tools-stripped retry now forces a text answer.
+      assert result.content == "Final answer"
+    end
+
+    @tag :tmp_dir
+    test "retries text-only when the model finishes with WHITESPACE after a tool round (Bug A regression)",
+         %{tmp_dir: tmp_dir} do
+      File.write!(Path.join(tmp_dir, "hello.txt"), "data")
+
+      client = build_client(WhitespaceAfterToolAdapter)
+
+      {:ok, result} =
+        ToolLoop.run(client, request("whitespace_after_tool_test"),
+          workdir: tmp_dir,
+          tool_executor: MockTools
+        )
+
+      # Pre-fix: whitespace ("\n\n") accumulated, so `accumulated == ""` was false and the retry
+      # never fired — content came back as newlines. Trim-checking now fires the retry.
       assert result.content == "Final answer"
     end
 

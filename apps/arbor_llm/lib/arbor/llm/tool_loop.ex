@@ -214,9 +214,11 @@ defmodule Arbor.LLM.ToolLoop do
           # Check if find_tools was called — inject discovered tools
           {state, new_tool_defs} = extract_discovered_tools(tool_results, state)
 
-          # Preserve non-empty text from intermediate rounds
+          # Preserve non-empty text from intermediate rounds. Trim-check so whitespace-only text
+          # (thinking models emit stray "\n" between tool rounds) doesn't count as real content —
+          # otherwise accumulated becomes "\n\n\n" and defeats the empty-text-after-tools retry below.
           state =
-            if response.text && response.text != "" do
+            if response.text && String.trim(response.text) != "" do
               Map.update(state, :accumulated_text, response.text, fn prev ->
                 if prev == "" or is_nil(prev),
                   do: response.text,
@@ -258,7 +260,7 @@ defmodule Arbor.LLM.ToolLoop do
             # with tools stripped so the model MUST respond in text. The retry
             # request sets tools: [], so `had_tools` is false next time — this
             # cannot recurse a second time.
-            final_response == "" and accumulated == "" and had_tools ->
+            String.trim(final_response) == "" and String.trim(accumulated) == "" and had_tools ->
               require Logger
 
               Logger.info(
