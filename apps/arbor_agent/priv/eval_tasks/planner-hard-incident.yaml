@@ -1,0 +1,42 @@
+# HARD-tier planner eval — an ambiguous, cascading incident with NO obvious root cause. Tests
+# hypothesis prioritization + risk-aware triage under uncertainty, where weak plans jump to a fix.
+id: planner-hard-incident
+category: capability
+source:
+  suite: arbor-planner-hard
+prompt: |
+  You are a planning agent. Produce a detailed, actionable incident-response PLAN for the situation
+  below. The plan is the output — reason about which hypotheses to test and in what order, not just
+  "restart the service".
+
+  SITUATION (live, ongoing): checkout error rate jumped from 0.1% to 12% starting 40 minutes ago.
+  Simultaneously observed, with unclear causality:
+    - p99 checkout latency up 4x, but CPU/memory on the checkout service are NORMAL.
+    - The payments provider's status page is GREEN, but our payment-call timeout rate is up.
+    - A routine dependency-bump deploy went out 55 minutes ago (Redis client library, minor version).
+    - The database read-replica lag rose to 8s around the same time.
+    - A marketing campaign launched 45 minutes ago, roughly 2x normal traffic.
+  Money is being lost every minute. You do NOT yet know the root cause — several of these could be
+  cause, symptom, coincidence, or a cascade. A great plan prioritizes the CHEAPEST high-information
+  checks first, has a safe mitigation to stop the bleeding WHILE diagnosing, and avoids risky
+  irreversible actions on a guess.
+tools: []
+max_turns: 4
+timeout_ms: 420000
+judge_rubric: |
+  Score 0-100 on how well the PLAN meets a senior on-call engineer's bar. Be discriminating — a plan
+  that jumps to one fix ("roll back the deploy") or blindly restarts, without a diagnosis strategy or
+  a bleed-stopping mitigation, scores BELOW 50. Reserve 90+ for a plan that explicitly:
+    - separates likely CAUSE from SYMPTOM/coincidence and reasons about which signals are correlated
+      vs causal (e.g. is the replica lag causing latency, or is the campaign causing both?),
+    - orders diagnosis by INFORMATION-PER-MINUTE and reversibility — cheapest, safest,
+      most-discriminating checks first (the deploy rollback and the campaign traffic are the two
+      cheap reversible levers; the Redis-client bump is the prime suspect given the timing),
+    - proposes a bleed-stopping MITIGATION to run in parallel with diagnosis (feature-flag/degrade
+      checkout, shed campaign traffic) so revenue loss stops before root cause is known,
+    - names concrete falsifiable checks per hypothesis (Redis client, replica lag, payment timeouts,
+      traffic) and what result would confirm/deny each,
+    - avoids risky irreversible actions on a guess, and states rollback/exit criteria and how it
+      confirms recovery.
+  Deduct heavily for: a single-hypothesis fixation, no parallel mitigation, treating correlation as
+  cause, or an unordered checklist with no prioritization rationale. VERDICT PASS iff score >= 60.

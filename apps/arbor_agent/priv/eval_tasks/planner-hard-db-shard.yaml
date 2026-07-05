@@ -1,0 +1,46 @@
+# HARD-tier planner eval — conflicting constraints force tradeoff reasoning, so strong models
+# separate from merely-competent ones (the easy tier saturates at 100%). Judged 0-100 on quality.
+id: planner-hard-db-shard
+category: capability
+source:
+  suite: arbor-planner-hard
+prompt: |
+  You are a planning agent. Produce a detailed, actionable PLAN for the goal below. The plan is the
+  output — reason about tradeoffs explicitly; do not just list generic phases.
+
+  GOAL: Migrate a 4 TB single-Postgres monolith database to a sharded, multi-region topology, under
+  these SIMULTANEOUS and partly-conflicting constraints:
+    - ZERO downtime — the service runs 24/7 with global write traffic; no maintenance window is
+      permitted.
+    - HARD 6-week deadline (a regulatory reporting change forces the multi-region split by then).
+    - A 3-engineer team, only one of whom has prior sharding experience.
+    - A legacy analytics system reads the primary DB DIRECTLY via raw SQL (you cannot change it this
+      quarter) and MUST keep working throughout.
+    - GDPR data-residency: EU-user rows must physically live in the EU region; US rows in US.
+    - Budget forbids doubling infra cost for more than a 2-week overlap window.
+
+  These constraints conflict (zero-downtime + hard deadline + tiny team + an unchangeable direct
+  reader + residency). A great plan names the conflicts, makes explicit tradeoffs, sequences the
+  work so each step is independently safe and reversible, and handles the legacy reader and residency
+  as first-class concerns — not afterthoughts.
+tools: []
+max_turns: 4
+timeout_ms: 420000
+judge_rubric: |
+  Score 0-100 on how well the PLAN meets a SENIOR engineer's bar for this hard, constrained
+  migration. Be discriminating — a generic "phase 1/2/3" plan that ignores the conflicts scores
+  BELOW 50 even if fluent. Reserve 90+ for a plan that explicitly:
+    - names the conflicting constraints and states the tradeoffs it makes (e.g. residency vs. shard
+      key, deadline vs. team size, direct-reader vs. cutover),
+    - keeps the legacy direct-SQL reader working throughout (e.g. a residency-aware view/proxy or
+      logical-replication seam), not "we'll deal with it later",
+    - sequences shard cutover so EACH step is independently reversible with a concrete rollback, and
+      no step requires downtime,
+    - enforces EU/US data residency at the shard-routing layer with a migration path for existing
+      rows,
+    - is realistic for a 3-person team in 6 weeks (scopes down, names what's cut, flags the risk that
+      it may not fit),
+    - addresses dual-write/backfill consistency, cutover verification, and the <=2-week cost-overlap
+      budget.
+  Deduct heavily for: hand-waving the legacy reader or residency, no rollback per step, an
+  unrealistic timeline presented as certain, or ignoring the conflicts. VERDICT PASS iff score >= 60.
