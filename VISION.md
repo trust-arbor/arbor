@@ -65,12 +65,14 @@ Safety does NOT come from:
 - Human approval loops for every action
 - Suppression of emergent behavior
 
-### Emergence is the Goal
+### Emergence is the Goal — Staged, Not Suppressed
 
 Rather than constraining emergent behavior, Arbor enables and observes it:
 - What do AI agents do when given genuine autonomy?
 - What emerges from multi-agent self-improvement?
-- What novel solutions arise from unconstrained exploration?
+- What novel solutions arise from genuinely open exploration?
+
+Emergence is **staged**, not unconstrained: agents explore and self-modify freely, and every capability they crystallize passes through the same pipeline as everything else — generated, validated, reviewed, signed. This is containment-not-control applied to emergence itself. The agent that authors a new pipeline for itself isn't suppressed; its creation becomes an auditable artifact that can earn its way into shared use. Self-modification with provenance beats self-modification in the dark — for the agent as much as for the human.
 
 With self-healing infrastructure, emergence and stability aren't opposites - they reinforce each other.
 
@@ -116,18 +118,36 @@ With self-healing infrastructure, emergence and stability aren't opposites - the
 
 ### Infrastructure for Human-AI Partnership
 - Seed architecture for AI identity and continuity
-- Trust tiers that grow with demonstrated reliability
-- Communication channels (Signal, CLI, web) for async collaboration
+- Earned autonomy, per capability — trust granted on specific tasks and tools as reliability is demonstrated. Granular trust policies, not a single tier: "shell access for git: earned" is more selective and more legible than a score. (Supersedes the earlier trust-tier model; the house-keys metaphor, at full resolution.)
+- Approvals as a stage of autonomy, not a gate on it — every `ask` that becomes `allow` is the relationship visibly deepening
+- Communication channels (Signal, CLI, TUI, web) for async collaboration
 - Heartbeat rhythms for human oversight without constant presence
 
 ---
+
+## The Position
+
+*(Added 2026-07-04 — the strategic framing that grew out of the May/June 1.0 planning.)*
+
+Frontier providers will ship agent features every quarter — memory, tools, persistence, phone continuity. Competing on those features is a losing game. The position they structurally cannot take:
+
+**Arbor is the user-owned substrate where YOUR agent, YOUR tools, and YOUR memory live — regardless of which model provider you use today.** Their business model is lock-in via memory and tools tied to their model. Arbor offers sovereignty: your stuff stays yours when you switch models, when a provider deprecates a feature, when pricing changes. The Seed metaphor is literal — Arbor is the soil; your actual usage grows the tree, and nobody else's installation has your tree.
+
+For organizations, the same architecture reads differently but sells the same substrate: **Arbor is an agent governance plane.** Every enterprise already has agents; almost none can answer "which agent touched which data, under whose authority, and how do we revoke it?" The capability kernel, signed invocation receipts, event-sourced audit, earned-autonomy policy, and taint tracking answer exactly that — and via the gateway/MCP layer they can govern agents a company *already runs*, without demanding a replatform. Orchestration is a commodity; governance is the unserved need. The framework is how Arbor is built, not how it's pitched.
+
+Three consequences of taking this position honestly:
+
+- **The universal *personal* computing interface** — the interface to *your* computing: your devices, your data, your niche needs. Not all computing; mass-market software stays human-built. Arbor wins on the long tail — the CRM triage agent for a Texas non-profit that no vendor will ever build, done in an afternoon of agent-assisted work. Plugins are how that long tail accumulates into a system uniquely yours.
+- **Privacy by routing, not by promise.** The decision about what's private is made on hardware you own — on-device sensitivity classification, an enforcing egress gate, and task decomposition that sends only the non-sensitive parts to the cloud. *The decision about what's private never leaves your device.* This is structural (GDPR/CCPA/HIPAA by architecture), not a policy bolted on.
+- **Many interfaces, one relationship.** TUI, dashboard, voice, phone, chat apps — co-equal surfaces over one conversation substrate. A conversation started on the phone continues in the terminal. The staged endgame: first many first-class interfaces (built), then the right surface chosen per task, eventually generated interfaces — each stage earning the next.
 
 ## What Arbor is NOT
 
 - **Not fear-based development** (we don't assume AI is dangerous)
 - **Not behavioral control** (we don't tell agents what to think)
-- **Not human gatekeeping** (consensus replaces approval loops)
+- **Not permanent gatekeeping** (approvals are a stage of earned autonomy, and consensus governance absorbs more of the load as it matures — the trajectory is always toward fewer asks, never more)
 - **Not capability-first** (relationship comes first)
+- **Not lock-in** (sovereignty is the product; leaving must always be possible for the trust to be real)
 - **Not fragile** (self-healing makes production stability achievable)
 
 ---
@@ -190,7 +210,7 @@ With self-healing infrastructure, emergence and stability aren't opposites - the
 - How do we measure "AI flourishing"?
 - What's the right balance of autonomy and oversight?
 - How do we handle value conflicts between human and AI?
-- Can this approach scale beyond a single human-AI partnership?
+- Can this approach scale beyond a single human-AI partnership? *(An answer is emerging: node-per-user federation — each person's agent lives on their own node, and the delivery-node model means even a hosted operator sees only ciphertext. The sovereignty stance survives scaling because the cryptographic boundary doesn't move when the operator changes.)*
 - What does "graduation" look like for a module? For an agent? For the system?
 
 ---
@@ -223,5 +243,5 @@ The philosophy wasn't designed top-down. It grew organically from asking the rig
 
 ---
 
-*Last updated: 2026-03-17*
+*Last updated: 2026-07-04 (added The Position; earned autonomy re-expressed as granular trust policies; staged emergence; federation answer sketch)*
 *Contributors: Hysun, Claude*

@@ -2,6 +2,8 @@
 
 *Everything Arbor can actually do today.* This doc is scoped to **working features**. For active development see [INPROGRESS.md](INPROGRESS.md). For committed-but-not-yet-started work see [PLANNED.md](PLANNED.md).
 
+> **Accuracy note (2026-07-04):** a review pass found two "built but not fully wired" caveats worth flagging inline below — turn-time memory recall and the heartbeat cognitive modes. Both are marked ⚠ where they appear. Trust-tier language is being superseded by granular trust policies (see Security & Trust).
+
 ---
 
 ## Security & Trust (`arbor_security`, `arbor_trust`)
@@ -35,6 +37,7 @@
 - Confirmation tracking with streak-based graduation (suggestion-based)
 - Shell and governance never auto-approve (security invariant)
 - Preset profiles for common trust levels
+- ⚠ **Trust tiers are being deprecated** in favor of granular per-task/per-tool trust policies (autonomy earned on specific capabilities, not by moving up a scalar tier). Any "tier" references elsewhere in this doc reflect the older model. See `2-planned/earned-trust-feedback-loop.md`.
 
 ### Safety
 - Prompt hardening and injection defense
@@ -59,7 +62,8 @@
 - HealingSupervisor — signal-based agent health monitoring
 
 ### Autonomy
-- Heartbeat loop with cognitive mode selection (routine/deep/reflective)
+- Heartbeat loop with cognitive mode selection (goal_pursuit / plan_execution / reflection / consolidation / conversation)
+  - ⚠ Mode selection is currently a stateless rule (no dwell/hysteresis); the three LLM modes share one prompt+call path differing only by instruction text. Redesign in `1-brainstorming/heartbeat-cognitive-modes-review.md`.
 - Goal pursuit with decomposition and progress tracking
 - Intent store (ring buffer for action intentions)
 - Mind→Body (intents) and Body→Mind (percepts) communication channels
@@ -176,9 +180,12 @@
 ### Intelligence
 - Semantic embedding search (Ollama/OpenAI + hash fallback)
 - Context compactor (4-step progressive forgetting: semantic squash → omission → distillation → narrative)
-- Memory consolidation (cross-session knowledge integration)
+- Memory consolidation (cross-session knowledge integration: decay → reinforce → archive → prune → quota, with pinned exemptions)
+- Subconscious proposal queue ("proposes, agent decides": fact/insight/pattern extraction with accept/reject/defer, dedup, confidence calibration)
+- Preconscious anticipatory recall layer
 - Index supervisor (per-agent vector index with LRU eviction)
 - File index enrichment (module/function extraction for code context)
+- ⚠ **Recall reaches heartbeats but not conversation turns** — the turn pipeline computes recalled memories but the turn prompt does not yet consume them (the memory a conversation reads is currently the static system prompt). Fix + "memory page" direction in `1-brainstorming/memory-system-review-2026-07-04.md`.
 
 ### Persistence
 - BufferedStore pattern (ETS cache + async Postgres writes)
@@ -334,10 +341,10 @@
 ## Infrastructure
 
 ### Architecture
-- Umbrella project with 22 apps and strict library hierarchy (Level 0-2 + Standalone)
+- Umbrella project with 25 git-tracked apps (26 on disk incl. gitignored `arbor_integrations`) and a strict 10-level library hierarchy (L0–L9)
 - Contract-first design (shared types and behaviours in arbor_contracts)
 - Facade pattern (one public module per library, no cross-library internal imports)
-- Zero-cycle dependency graph enforced by hierarchy
+- Zero-cycle dependency graph enforced by hierarchy (drift-guard test computes levels from git-tracked mix.exs)
 
 ### Persistence
 - Postgres via Ecto + BufferedStore (ETS cache + async writes)
@@ -504,7 +511,7 @@
 
 ## By the Numbers
 
-- **23 umbrella apps** with strict dependency hierarchy
+- **25 git-tracked umbrella apps** (26 on disk) with a strict 10-level dependency hierarchy
 - **73 action modules** across 15+ categories
 - **56 CLI commands** (mix arbor.* tasks) for every aspect of the system
 - **8,600+ fast tests** across all apps
@@ -517,4 +524,4 @@
 - **8-step middleware chain** in DOT pipeline engine
 - **4 protocol versions** supported with backwards compatibility
 
-*Last updated: 2026-05-17*
+*Last updated: 2026-07-04*
