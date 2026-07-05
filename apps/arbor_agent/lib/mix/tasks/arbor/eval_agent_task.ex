@@ -28,6 +28,10 @@ defmodule Mix.Tasks.Arbor.Eval.AgentTask do
     # --agent-quant overrides the recorded quant; otherwise it's auto-detected from
     # LM Studio's native /api/v0/models endpoint (nil for non-LM-Studio providers).
     agent_quant: :string,
+    # --agent-quant-provider overrides the recorded quant PROVIDER (publisher, e.g. unsloth
+    # / bartowski); otherwise auto-detected from LM Studio's "publisher" field. Same size/quant
+    # from different providers can differ in quality, so it's worth recording.
+    agent_quant_provider: :string,
     # Sampling params — default to the per-model recommended values in AgentTaskRunner;
     # override to study a specific setting. Recorded in EvalRun.config either way.
     agent_temperature: :float,

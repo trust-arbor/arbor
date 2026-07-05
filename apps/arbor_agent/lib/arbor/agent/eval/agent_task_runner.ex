@@ -805,17 +805,26 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     end
   end
 
-  # Quant is a first-class variable for local models (speed/memory/quality all move with
-  # it). Prefer an explicit --agent-quant; otherwise auto-detect from LM Studio's native
-  # /api/v0/models endpoint (the OpenAI-compat /v1/models doesn't carry it). nil if unknown.
+  # Quant is a first-class variable for local models (speed/memory/quality all move with it), and so
+  # is the quant PROVIDER (publisher — e.g. unsloth vs bartowski; same size/quant can differ in quality
+  # because recipes/calibration differ). Prefer explicit --agent-quant / --agent-quant-provider; else
+  # auto-detect from LM Studio's native /api/v0/models (the OpenAI-compat /v1/models doesn't carry it).
   defp resolve_quant(model, opts) do
     case opts[:agent_quant] do
       q when is_binary(q) and q != "" -> q
-      _ -> detect_lmstudio_quant(model, opts)
+      _ -> Map.get(detect_lmstudio_meta(model, opts), "quantization")
     end
   end
 
-  defp detect_lmstudio_quant(model, opts) do
+  defp resolve_quant_provider(model, opts) do
+    case opts[:agent_quant_provider] do
+      p when is_binary(p) and p != "" -> p
+      _ -> Map.get(detect_lmstudio_meta(model, opts), "publisher")
+    end
+  end
+
+  # The matching model's LM Studio metadata map (quantization, publisher, arch, ...), or %{}.
+  defp detect_lmstudio_meta(model, opts) do
     provider = to_string(opts[:agent_provider] || :lmstudio)
 
     if provider in ["lm_studio", "lmstudio"] do
@@ -826,16 +835,16 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
 
       case Req.get(url, receive_timeout: 3_000, retry: false) do
         {:ok, %{status: 200, body: %{"data" => data}}} when is_list(data) ->
-          data
-          |> Enum.find(%{}, &(Map.get(&1, "id") == model))
-          |> Map.get("quantization")
+          Enum.find(data, %{}, &(Map.get(&1, "id") == model))
 
         _ ->
-          nil
+          %{}
       end
+    else
+      %{}
     end
   rescue
-    _ -> nil
+    _ -> %{}
   end
 
   defp persist_run_batch(task, run_id, samples, opts) do
@@ -854,12 +863,14 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       quant: resolve_quant(model, opts),
       # Effective generation config — sampling params swing quality as much as the model,
       # so record what was actually used (per-model recommended unless overridden). nil
-      # max_tokens = uncapped (provider full budget).
+      # max_tokens = uncapped (provider full budget). quant_provider (publisher, e.g. unsloth
+      # vs bartowski) is recorded because it can change quality at the SAME size/quant.
       config:
         sp
         |> Enum.reject(fn {_k, v} -> is_nil(v) end)
         |> Map.new(fn {k, v} -> {to_string(k), v} end)
-        |> Map.put("max_tokens", opts[:agent_max_tokens]),
+        |> Map.put("max_tokens", opts[:agent_max_tokens])
+        |> Map.put("quant_provider", resolve_quant_provider(model, opts)),
       dataset: task.id,
       graders: Enum.map(all_graders, &to_string/1),
       sample_count: n,
