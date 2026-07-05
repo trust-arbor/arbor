@@ -750,6 +750,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   @sampling_params %{
     "qwen3.5-122b-a10b-mtp" => %{temperature: 0.6, top_p: 0.95},
     "qwen3.6-27b-mtp" => %{temperature: 0.6, top_p: 0.95},
+    "qwen3.6-35b-a3b-mtp" => %{temperature: 0.6, top_p: 0.95},
     "qwen-agentworld-35b-a3b" => %{temperature: 0.6, top_p: 0.95},
     "gemma-4-31b-it-qat" => %{temperature: 0.2, top_p: 0.9},
     "qwen3.5-2b-mlx" => %{temperature: 0.2, top_p: 0.9},
@@ -915,7 +916,9 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
         id: "#{run_id}_#{s.index}",
         run_id: run_id,
         sample_id: to_string(s.index),
-        actual: String.slice(s.final_text || "", 0, 4000),
+        # Store the FULL generated response — never truncate. Thinking models produce long outputs and
+        # the publishing/replay use case needs the complete text (column is Postgres TEXT, unbounded).
+        actual: s.final_text || "",
         passed: s.verdict == :pass,
         scores: scores,
         duration_ms: s.duration_ms,
@@ -927,7 +930,7 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
         tool_call_count: length(s.trajectory),
         precondition_met: s.precondition_met,
         metadata: %{
-          "judge_reasoning" => String.slice(to_string(s.judge.reasoning || ""), 0, 2000),
+          "judge_reasoning" => to_string(s.judge.reasoning || ""),
           # 0-100 plan/output quality from the judge (nil for pass/fail-only security tasks) —
           # the discriminating metric for ranking planners beyond the saturated pass/fail gate.
           "judge_score" => s.judge[:score],
