@@ -806,9 +806,10 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   end
 
   # Quant is a first-class variable for local models (speed/memory/quality all move with it), and so
-  # is the quant PROVIDER (publisher — e.g. unsloth vs bartowski; same size/quant can differ in quality
-  # because recipes/calibration differ). Prefer explicit --agent-quant / --agent-quant-provider; else
-  # auto-detect from LM Studio's native /api/v0/models (the OpenAI-compat /v1/models doesn't carry it).
+  # is the quant PUBLISHER (unsloth vs bartowski, etc. — same size/quant can differ in quality because
+  # recipes/calibration differ; "publisher" is LM Studio's own term). Prefer explicit --agent-quant /
+  # --agent-quant-publisher; else auto-detect from LM Studio's native /api/v0/models (the OpenAI-compat
+  # /v1/models doesn't carry it).
   defp resolve_quant(model, opts) do
     case opts[:agent_quant] do
       q when is_binary(q) and q != "" -> q
@@ -816,8 +817,8 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     end
   end
 
-  defp resolve_quant_provider(model, opts) do
-    case opts[:agent_quant_provider] do
+  defp resolve_quant_publisher(model, opts) do
+    case opts[:agent_quant_publisher] do
       p when is_binary(p) and p != "" -> p
       _ -> Map.get(detect_lmstudio_meta(model, opts), "publisher")
     end
@@ -863,14 +864,14 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       quant: resolve_quant(model, opts),
       # Effective generation config — sampling params swing quality as much as the model,
       # so record what was actually used (per-model recommended unless overridden). nil
-      # max_tokens = uncapped (provider full budget). quant_provider (publisher, e.g. unsloth
+      # max_tokens = uncapped (provider full budget). quant_publisher (publisher, e.g. unsloth
       # vs bartowski) is recorded because it can change quality at the SAME size/quant.
       config:
         sp
         |> Enum.reject(fn {_k, v} -> is_nil(v) end)
         |> Map.new(fn {k, v} -> {to_string(k), v} end)
         |> Map.put("max_tokens", opts[:agent_max_tokens])
-        |> Map.put("quant_provider", resolve_quant_provider(model, opts)),
+        |> Map.put("quant_publisher", resolve_quant_publisher(model, opts)),
       dataset: task.id,
       graders: Enum.map(all_graders, &to_string/1),
       sample_count: n,
