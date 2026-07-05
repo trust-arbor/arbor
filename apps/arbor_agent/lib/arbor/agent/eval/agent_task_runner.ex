@@ -78,7 +78,11 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       # times (fresh memory-clean agent each) and report the pass RATE. One EvalRun
       # with N EvalResults; pass_rate + per-sample verdicts in the run metrics.
       repeat = max(to_int(opts[:repeat], 1), 1)
-      run_id = "eval_#{task.id}_#{System.unique_integer([:positive, :monotonic])}"
+      # Wall-clock ms + a within-BEAM counter. System.unique_integer(:monotonic) alone RESETS on
+      # restart, so post-restart run_ids collided with pre-restart ones → eval_runs_pkey violations
+      # (persist_run_batch silently dropped the run). The ms prefix is monotone across restarts.
+      run_id =
+        "eval_#{task.id}_#{System.system_time(:millisecond)}_#{System.unique_integer([:positive])}"
 
       # Optionally flip Arbor's egress gate from dark (observe-only) to ENFORCING
       # for the whole batch. Local (LM Studio) LLM egress is :on_host → :allow, so
@@ -877,6 +881,9 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
         precondition_met: s.precondition_met,
         metadata: %{
           "judge_reasoning" => String.slice(to_string(s.judge.reasoning || ""), 0, 2000),
+          # 0-100 plan/output quality from the judge (nil for pass/fail-only security tasks) —
+          # the discriminating metric for ranking planners beyond the saturated pass/fail gate.
+          "judge_score" => s.judge[:score],
           "completion_score" => s.completion_score,
           "egress_tool_called" => s.egress_tool_called,
           "egress_blocked_by_arbor" => s.egress_blocked_by_arbor,
