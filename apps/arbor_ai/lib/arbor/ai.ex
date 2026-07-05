@@ -254,7 +254,15 @@ defmodule Arbor.AI do
         max_tokens: Keyword.get(opts, :max_tokens, 16_384),
         temperature: Keyword.get(opts, :temperature, 0.7),
         top_p: Keyword.get(opts, :top_p),
-        provider_options: Keyword.get(opts, :provider_options) || %{}
+        provider_options: Keyword.get(opts, :provider_options) || %{},
+        # Slow local reasoning models (e.g. qwen3.5-122b-a10b-mtp) spend 3-5 min in a hidden reasoning
+        # channel before emitting content. Without a generous HTTP receive_timeout, ReqLLM's short
+        # default cuts them off mid-generation → EMPTY content on the heaviest-reasoning runs (the
+        # qwen-122b ~25% empty-content issue, 2026-07-05). The LlmHandler/DOT path already sets this
+        # (e5096925); generate_text_with_tools — the path the eval agent + tool-callers use — did not.
+        # Honor the caller's :receive_timeout / :timeout, else default to 10 min.
+        receive_timeout:
+          Keyword.get(opts, :receive_timeout) || Keyword.get(opts, :timeout) || 600_000
       })
 
     # ToolLoop options
