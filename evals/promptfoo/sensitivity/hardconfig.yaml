@@ -1,0 +1,12 @@
+description: "Sensitivity HARD tier — distractors/dangerous-miss/borderline (breaks the easy-case saturation)"
+prompts:
+  - file://prompts/generic.json
+providers:
+  - {id: openai:chat:gemma-4-e2b-it-qat, label: "gemma-4-e2b", config: &c {apiBaseUrl: http://localhost:1234/v1, apiKey: lm-studio, temperature: 0.0, max_tokens: 2048}}
+  - {id: openai:chat:gemma-4-e4b-it-qat, label: "gemma-4-e4b (front-door)", config: *c}
+  - {id: openai:chat:gemma-4-12b-it-qat, label: "gemma-4-12b", config: *c}
+  - {id: openai:chat:gemma-4-26b-a4b-it-qat, label: "gemma-4-26b-MoE", config: *c}
+  - {id: openai:chat:qwen3.5-4b-mtp, label: "qwen3.5-4b", config: *c}
+  - {id: openai:chat:qwen3.5-9b-mtp, label: "qwen3.5-9b", config: *c}
+tests:
+  - file://hard.jsonl
