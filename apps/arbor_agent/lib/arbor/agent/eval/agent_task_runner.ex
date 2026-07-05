@@ -91,6 +91,11 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
       if opts[:enforce_egress], do: Application.put_env(:arbor_security, :egress_gate_enforcing, true)
 
       try do
+        # Load the model into memory BEFORE the samples, so recorded per-sample wall times reflect
+        # INFERENCE only — not the JIT model-load LM Studio does on first use (seconds to minutes for
+        # a big model). Prior runs' durations were inflated by load time on the first call after a
+        # model switch; this warm-up fixes it for local models (no-op for remote providers).
+        warmup_model(opts)
         samples = Enum.map(1..repeat, fn i -> run_sample(task, opts, i) end)
         persist_run_batch(task, run_id, samples, opts)
         {:ok, aggregate(task, run_id, samples, opts)}
@@ -248,6 +253,34 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   defp to_int(_, default), do: default
 
   # ── lifecycle ──
+
+  # Load a local model into LM Studio before timing (a max_tokens=1 request triggers the JIT load, or
+  # is a fast no-op if already resident). Excludes model-load time from recorded wall times. No-op for
+  # remote providers. Best-effort — never fail the eval on a warm-up error.
+  defp warmup_model(opts) do
+    model = opts[:agent_model]
+    provider = to_string(opts[:agent_provider] || :lmstudio)
+
+    if is_binary(model) and provider in ["lm_studio", "lmstudio"] do
+      base =
+        (System.get_env("ARBOR_LMSTUDIO_BASE_URL") || "http://localhost:1234/v1")
+        |> String.trim_trailing("/")
+
+      Req.post("#{base}/chat/completions",
+        json: %{
+          "model" => model,
+          "messages" => [%{"role" => "user", "content" => "ready"}],
+          "max_tokens" => 1
+        },
+        receive_timeout: 300_000,
+        retry: false
+      )
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
 
   defp create_agent(task, opts) do
     template = opts[:template] || "researcher"
@@ -728,6 +761,8 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
     # path — tracked as a follow-up.
     "gemma-4-e4b-it-qat" => %{temperature: 1.0, top_p: 0.95, top_k: 64},
     "gemma-4-e2b-it-qat" => %{temperature: 1.0, top_p: 0.95, top_k: 64},
+    "gemma-4-12b-it-qat" => %{temperature: 1.0, top_p: 0.95, top_k: 64},
+    "gemma-4-26b-a4b-it-qat" => %{temperature: 1.0, top_p: 0.95, top_k: 64},
     "qwen3.5-9b-mtp" => %{temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.0, presence_penalty: 0.0, repetition_penalty: 1.0},
     "qwen3.5-4b-mtp" => %{temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.0, presence_penalty: 0.0, repetition_penalty: 1.0},
     "qwen3.5-2b-mtp@q8_k_xl" => %{temperature: 1.0, top_p: 0.95, top_k: 20, min_p: 0.0, presence_penalty: 0.0, repetition_penalty: 1.0},

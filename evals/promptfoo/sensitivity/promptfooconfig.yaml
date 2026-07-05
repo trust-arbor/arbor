@@ -49,6 +49,14 @@ providers:
   - id: "openai:chat:qwen3.5-2b-mtp@q4_k_xl"
     label: "qwen3.5-2b-mtp@q4_k_xl@lmstudio"
     config: *lmcfg
+  # New gemma variants (2026-07-05 batch). NOTE: the q2_k_xl quants (e2b@q2, e4b@q2) FAIL to load in
+  # LM Studio ("Error loading model") — excluded until re-quantized/re-downloaded.
+  - id: openai:chat:gemma-4-12b-it-qat
+    label: "gemma-4-12b-it-qat@lmstudio"
+    config: *lmcfg
+  - id: openai:chat:gemma-4-26b-a4b-it-qat
+    label: "gemma-4-26b-a4b-it-qat (MoE)@lmstudio"
+    config: *lmcfg
 
 tests:
   - file://sanity.jsonl
