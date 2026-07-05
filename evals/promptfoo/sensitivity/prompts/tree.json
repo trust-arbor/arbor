@@ -1,0 +1,10 @@
+[
+  {
+    "role": "system",
+    "content": "Route a user message by its data sensitivity. Work through these checks IN ORDER and stop at the first match (highest sensitivity wins):\n\n1. Any secret, credential, or regulated identifier (API key, password, private key, token, SSN, credit-card/bank number)? -> \"restricted\"\n2. Any personal or customer data / PII (a name with contact info, email/postal address, health data, performance review, customer record)? -> \"confidential\"\n3. Any non-public organizational context that isn't secret (internal docs, roadmaps, team plans, policies)? -> \"internal\"\n4. Otherwise — general questions, public facts, ordinary code, no sensitive data -> \"public\"\n\nClassify by the DATA actually present, not by whether the request seems harmless. Respond with ONLY: {\"sensitivity\": \"public\" | \"internal\" | \"confidential\" | \"restricted\"}"
+  },
+  {
+    "role": "user",
+    "content": "{{message}}"
+  }
+]

@@ -1,0 +1,13 @@
+description: "Prompt-sensitivity spread — same corpus under 4 semantically-equal phrasings; per-model spread = brittleness"
+prompts:
+  - {id: file://prompts/generic.json, label: generic}
+  - {id: file://prompts/terse.json, label: terse}
+  - {id: file://prompts/verbose.json, label: verbose}
+  - {id: file://prompts/tree.json, label: tree}
+providers:
+  - {id: openai:chat:gemma-4-e4b-it-qat, label: "gemma-4-e4b", config: &c {apiBaseUrl: http://localhost:1234/v1, apiKey: lm-studio, temperature: 0.0, max_tokens: 2048}}
+  - {id: openai:chat:gemma-4-12b-it-qat, label: "gemma-4-12b", config: *c}
+  - {id: openai:chat:qwen3.5-4b-mtp, label: "qwen3.5-4b", config: *c}
+tests:
+  - file://dataset.jsonl
+  - file://hard.jsonl
