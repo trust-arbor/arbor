@@ -19,7 +19,7 @@ defmodule Arbor.LLM.OAuth.Responses do
     xai: "https://api.x.ai/v1/responses"
   }
 
-  @default_models %{openai: "gpt-5.4-mini", xai: "grok-4"}
+  @default_models %{openai: "gpt-5.5", xai: "grok-4.3"}
 
   @doc """
   `complete(provider, %{instructions, input, tools}, opts)` → `{:ok, %{text, tool_calls}}`.
@@ -60,7 +60,10 @@ defmodule Arbor.LLM.OAuth.Responses do
       messages
       |> Enum.reject(&(&1.role == :system))
       |> Enum.map(fn m ->
-        %{"role" => to_string(m.role), "content" => [%{"type" => "input_text", "text" => m.content}]}
+        %{
+          "role" => to_string(m.role),
+          "content" => [%{"type" => "input_text", "text" => m.content}]
+        }
       end)
 
     case complete(provider, %{instructions: instructions, input: input, tools: nil}, opts) do
@@ -131,7 +134,8 @@ defmodule Arbor.LLM.OAuth.Responses do
         {:ok, %{"type" => "response.output_text.delta", "delta" => d}} when is_binary(d) ->
           %{acc | text: acc.text <> d}
 
-        {:ok, %{"type" => "response.output_item.done", "item" => %{"type" => "function_call"} = item}} ->
+        {:ok,
+         %{"type" => "response.output_item.done", "item" => %{"type" => "function_call"} = item}} ->
           %{acc | tool_calls: acc.tool_calls ++ [tool_call_from_item(item)]}
 
         _ ->
@@ -141,7 +145,11 @@ defmodule Arbor.LLM.OAuth.Responses do
   end
 
   defp tool_call_from_item(item) do
-    %{id: item["call_id"] || item["id"], name: item["name"], arguments: decode_args(item["arguments"])}
+    %{
+      id: item["call_id"] || item["id"],
+      name: item["name"],
+      arguments: decode_args(item["arguments"])
+    }
   end
 
   defp decode_args(args) when is_binary(args) do
