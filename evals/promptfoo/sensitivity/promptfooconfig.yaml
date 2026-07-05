@@ -61,6 +61,7 @@ providers:
 tests:
   - file://sanity.jsonl
   - file://dataset.jsonl
+  - file://hard.jsonl
 
 # Thinking models (e.g. qwen3.5-*-mtp) deliberate candidate labels INSIDE their reasoning trace, so
 # the per-case `output.match(...)` (first-match) asserts grab an intermediate guess, not the final

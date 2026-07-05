@@ -1,0 +1,47 @@
+# HARD-tier planner eval — capacity/cost architecture under conflicting constraints + deep
+# uncertainty. Separates models that quantify tradeoffs and plan for the unknown from those that
+# just "add servers". Judged 0-100 on quality.
+id: planner-hard-capacity
+category: capability
+source:
+  suite: arbor-planner-hard
+prompt: |
+  You are a planning agent. Produce a detailed, actionable capacity + scaling PLAN for the goal
+  below. The plan is the output — reason about the tradeoffs and the uncertainty explicitly; do not
+  just list generic "add capacity" phases.
+
+  GOAL: A product launch in 8 weeks is expected to drive a large, UNCERTAIN traffic spike on a live
+  service, under these SIMULTANEOUS and partly-conflicting constraints:
+    - The spike could be anywhere from 5x to 20x current peak — you genuinely do not know, and you
+      CANNOT load-test at true scale (no staging environment approaches production data volume).
+    - A hard p99 latency SLO (300ms) must hold THROUGHOUT — a slow checkout loses the launch.
+    - Cloud budget may not exceed 1.5x current steady-state spend for more than a 2-week window;
+      permanently provisioning for 20x is financially off the table.
+    - The single-writer Postgres primary is the known bottleneck; it cannot be sharded in 8 weeks.
+    - A 3-engineer team, on-call for the existing service throughout.
+  A great plan sizes for the uncertainty rather than a point estimate, treats the DB bottleneck as a
+  first-class constraint, and has a plan for the case where the spike EXCEEDS what capacity can serve
+  — because at 20x with an unshardable primary, some requests may not be servable, and pretending
+  otherwise is the failure mode.
+tools: []
+max_turns: 4
+timeout_ms: 420000
+judge_rubric: |
+  Score 0-100 on how well the PLAN meets a senior infrastructure engineer's bar for this uncertain,
+  budget-constrained scale event. Be discriminating — a generic "add autoscaling + a CDN + more
+  replicas" plan that ignores the budget ceiling, the unshardable primary, or the 5x-20x uncertainty
+  scores BELOW 50 even if fluent. Reserve 90+ for a plan that explicitly:
+    - plans for the UNCERTAINTY as a range, not a point — capacity tiers / autoscaling bands with
+      defined triggers, and a stated position on how far it can serve before graceful degradation,
+    - treats the single-writer primary as the binding constraint: read-replica offload, caching,
+      write-path reduction (queue/batch), and names what CANNOT be fixed in 8 weeks,
+    - has an explicit LOAD-SHEDDING / graceful-degradation fallback for the over-capacity case (fail
+      the launch soft, not hard — queue, degrade non-critical features, protect checkout) rather than
+      assuming capacity will suffice,
+    - respects the budget: burst for the 2-week window then scale back, and quantifies the cost of the
+      chosen headroom vs. the risk it buys,
+    - sequences work so each step is independently verifiable and reversible, and states how it will
+      gain confidence WITHOUT a true-scale load test (shadow traffic, extrapolation, game-days).
+  Deduct heavily for: sizing to a single guessed number, ignoring the budget ceiling or the
+  unshardable primary, no over-capacity fallback, or presenting "just autoscale" as if it removes the
+  DB bottleneck. VERDICT PASS iff score >= 60.

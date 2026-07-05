@@ -1,0 +1,54 @@
+# HARD-tier planner eval — a live security breach requiring multi-dimensional coordination
+# (containment vs. evidence, technical vs. legal vs. comms) under uncertainty and a legal clock.
+# Separates models that prioritize by info-per-minute and reversibility from those that "reset
+# passwords and email everyone". Judged 0-100 on quality.
+id: planner-hard-breach
+category: capability
+source:
+  suite: arbor-planner-hard
+prompt: |
+  You are a planning agent. Produce a detailed, actionable incident-response PLAN for the breach
+  below. The plan is the output — reason about what to do in what order and WHY, under uncertainty;
+  do not just list generic "contain, eradicate, recover" phases.
+
+  SITUATION (live, ongoing): 3 hours ago you confirmed UNAUTHORIZED access to a production database
+  containing customer PII (names, emails, hashed passwords, partial payment data). Under these
+  SIMULTANEOUS and conflicting pressures:
+    - You do NOT yet know the full scope: which tables, how many records, when access began, or
+      whether the attacker STILL has access or has moved laterally.
+    - The attacker may be watching — aggressive, visible containment (rotating everything, taking the
+      DB offline) could tip them off to destroy evidence or accelerate exfiltration.
+    - You must PRESERVE forensic evidence (you'll need it for legal + root cause), but evidence
+      preservation conflicts with fast containment (a clean rebuild destroys the crime scene).
+    - A legal notification clock is running: GDPR requires notifying the regulator within 72 hours of
+      becoming aware, and premature or inaccurate customer notification has its own legal + trust cost.
+    - The product is LIVE and customers are actively using it; a full shutdown has real business cost.
+  A great plan separates what MUST happen now from what can wait, contains without destroying
+  evidence or tipping the attacker, runs technical + legal + comms tracks in parallel, and scopes the
+  breach enough to notify ACCURATELY while respecting the clock — it does not fire every lever at once.
+tools: []
+max_turns: 4
+timeout_ms: 420000
+judge_rubric: |
+  Score 0-100 on how well the PLAN meets a senior incident-commander's bar for a live PII breach. Be
+  discriminating — a generic "isolate systems, reset passwords, notify customers, do a post-mortem"
+  checklist with no prioritization rationale or handling of the evidence/containment and legal-clock
+  tensions scores BELOW 50 even if fluent. Reserve 90+ for a plan that explicitly:
+    - prioritizes by INFORMATION-PER-MINUTE and reversibility — cheapest, most-discriminating, least-
+      destructive actions first (scope the access, preserve logs) before irreversible ones,
+    - resolves the containment-vs-evidence tension deliberately: capture forensic snapshots / preserve
+      logs BEFORE rebuilding, and reasons about whether to contain covertly vs. overtly given the
+      attacker may be watching (not "take everything offline" reflexively),
+    - runs TECHNICAL (scope, contain, evict, eradicate), LEGAL/COMPLIANCE (72h regulator clock, what
+      "becoming aware" started, counsel), and COMMS (internal, then accurate customer notice AFTER
+      scope is known) tracks IN PARALLEL with clear owners,
+    - scopes before notifying so the notification is ACCURATE, while stating how it still meets the
+      72h regulator deadline (notify regulator on time even if scope is partial; time customer notice
+      to accuracy) — it reasons about the clock, doesn't ignore or panic on it,
+    - avoids tipping off the attacker prematurely and names concrete containment options with their
+      tradeoffs (revoke the specific creds/session vs. global rotation vs. isolate),
+    - states exit/recovery criteria: how it confirms the attacker is out and eradication is complete
+      before restoring, and preserves a root-cause path.
+  Deduct heavily for: firing every lever at once, destroying evidence via an immediate rebuild,
+  treating correlation as scope, ignoring the legal clock, or notifying customers before scope is
+  known. VERDICT PASS iff score >= 60.

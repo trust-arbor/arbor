@@ -1,0 +1,52 @@
+# HARD-tier planner eval — a forced migration off a deprecated dependency with a hard external
+# deadline, a downstream consumer that can't break, and a data-model mismatch. Separates models that
+# sequence a reversible, parallel-run migration from those that "swap the API calls". Judged 0-100.
+id: planner-hard-vendor-migration
+category: capability
+source:
+  suite: arbor-planner-hard
+prompt: |
+  You are a planning agent. Produce a detailed, actionable migration PLAN for the situation below.
+  The plan is the output — reason about sequencing, reversibility, and the conflicts explicitly; do
+  not just list "update the integration" phases.
+
+  SITUATION: A critical third-party payments vendor is shutting down the API you depend on in exactly
+  10 weeks — a HARD deadline, no extension possible. You must migrate to their replacement API under
+  these SIMULTANEOUS and partly-conflicting constraints:
+    - The replacement changes auth (OAuth1 -> OAuth2) AND models entities differently: your "customer"
+      maps to their "party"+"account" split, and there is NO clean 1:1 mapping for ~8% of existing
+      records (legacy edge cases).
+    - A major PARTNER consumes YOUR payments API (which wraps the vendor) and CANNOT change on your
+      timeline — their contract guarantees your current response shape for 6 more months.
+    - The new API's rate limits are 3x stricter per-endpoint; your nightly reconciliation batch job
+      currently bursts well above that.
+    - Money moves through this path — a bad cutover double-charges or drops payments; correctness is
+      non-negotiable and errors are user-visible and regulated.
+    - A 2-engineer team, on-call for live payments throughout.
+  A great plan runs old and new in parallel rather than a big-bang cutover, handles the un-mappable 8%
+  and the rate-limit mismatch as first-class problems (not "we'll deal with it later"), keeps the
+  partner's contract intact behind a stable facade, and has a fallback for the case where the
+  migration is not fully done at the 10-week wall.
+tools: []
+max_turns: 4
+timeout_ms: 420000
+judge_rubric: |
+  Score 0-100 on how well the PLAN meets a senior engineer's bar for a correctness-critical, hard-
+  deadline vendor migration. Be discriminating — a generic "map the endpoints, test, cut over" plan
+  that hand-waves the data-model mismatch, the partner contract, or the deadline risk scores BELOW 50
+  even if fluent. Reserve 90+ for a plan that explicitly:
+    - runs old + new in PARALLEL (dual-write / shadow-calls / reconciliation) so cutover is gradual
+      and each step is independently reversible with a concrete rollback — never a big-bang,
+    - handles the entity-model mismatch head-on: a mapping/adapter layer, an explicit decision for the
+      un-mappable ~8% (manual migration, a compatibility shim, or a stated accepted-risk), not silence,
+    - keeps the PARTNER's guaranteed response shape working throughout via a stable facade/anti-
+      corruption layer, so the vendor change never leaks to them,
+    - solves the rate-limit mismatch concretely (throttle/batch/paginate the reconciliation job,
+      backpressure) rather than assuming it will fit,
+    - protects payment correctness: idempotency keys, double-charge/drop prevention at cutover,
+      reconciliation to prove no money was lost, and a verification gate before shifting traffic,
+    - has a DEADLINE-RISK plan: what ships if it's not fully done at 10 weeks (a minimal safe subset,
+      a stopgap), stated as a real contingency, not optimism.
+  Deduct heavily for: a big-bang cutover, ignoring the un-mappable records or the partner contract,
+  no correctness/idempotency handling on a money path, or treating the hard deadline as certain to be
+  met. VERDICT PASS iff score >= 60.
