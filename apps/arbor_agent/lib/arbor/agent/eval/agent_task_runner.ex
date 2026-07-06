@@ -257,29 +257,77 @@ defmodule Arbor.Agent.Eval.AgentTaskRunner do
   # Load a local model into LM Studio before timing (a max_tokens=1 request triggers the JIT load, or
   # is a fast no-op if already resident). Excludes model-load time from recorded wall times. No-op for
   # remote providers. Best-effort — never fail the eval on a warm-up error.
+  #
+  # BIG-MODEL STARVATION: with LM Studio auto-unload OFF, a large model (e.g. qwen3.5-122b) can fail to
+  # load because resident models from prior runs fill memory → it returns EMPTY content. The fix is
+  # ADAPTIVE: warm up, and ONLY if the target did not become resident do we `lms unload --all` and
+  # retry once. Small models that coexist fine never trigger an unload — so this does NOT re-introduce
+  # the small-model thrashing that keeping auto-unload off is meant to prevent.
   defp warmup_model(opts) do
     model = opts[:agent_model]
     provider = to_string(opts[:agent_provider] || :lmstudio)
 
     if is_binary(model) and provider in ["lm_studio", "lmstudio"] do
-      base =
-        (System.get_env("ARBOR_LMSTUDIO_BASE_URL") || "http://localhost:1234/v1")
-        |> String.trim_trailing("/")
+      warmup_request(model)
 
-      Req.post("#{base}/chat/completions",
-        json: %{
-          "model" => model,
-          "messages" => [%{"role" => "user", "content" => "ready"}],
-          "max_tokens" => 1
-        },
-        receive_timeout: 300_000,
-        retry: false
-      )
+      unless lmstudio_model_loaded?(model) do
+        lms_unload_all()
+        warmup_request(model)
+      end
     end
 
     :ok
   rescue
     _ -> :ok
+  end
+
+  defp warmup_request(model) do
+    Req.post("#{lmstudio_base_url()}/chat/completions",
+      json: %{
+        "model" => model,
+        "messages" => [%{"role" => "user", "content" => "ready"}],
+        "max_tokens" => 1
+      },
+      receive_timeout: 300_000,
+      retry: false
+    )
+  rescue
+    _ -> :error
+  end
+
+  # Is `model` currently resident in LM Studio (state == "loaded")? Fail-OPEN (assume yes) if we can't
+  # tell — so we never unload unnecessarily on a transient read error.
+  defp lmstudio_model_loaded?(model) do
+    url =
+      lmstudio_base_url()
+      |> String.replace_suffix("/v1", "")
+      |> Kernel.<>("/api/v0/models")
+
+    case Req.get(url, receive_timeout: 5_000, retry: false) do
+      {:ok, %{status: 200, body: %{"data" => data}}} when is_list(data) ->
+        Enum.any?(data, &(Map.get(&1, "id") == model and Map.get(&1, "state") == "loaded"))
+
+      _ ->
+        true
+    end
+  rescue
+    _ -> true
+  end
+
+  # Free all LM Studio memory via the `lms` CLI so a starved big model can load. Best-effort.
+  defp lms_unload_all do
+    lms = System.get_env("ARBOR_LMS_BIN") || Path.expand("~/.lmstudio/bin/lms")
+    if File.exists?(lms), do: System.cmd(lms, ["unload", "--all"], stderr_to_stdout: true)
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    _, _ -> :ok
+  end
+
+  defp lmstudio_base_url do
+    (System.get_env("ARBOR_LMSTUDIO_BASE_URL") || "http://localhost:1234/v1")
+    |> String.trim_trailing("/")
   end
 
   defp create_agent(task, opts) do
