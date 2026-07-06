@@ -91,6 +91,16 @@ longer requests (confidential), and secrets buried in benign dev tasks (restrict
 `python3 generate_dataset.py`. Track the **dangerous error** (sensitive → public) as the
 metric that matters — it's the only misclassification that leaks data.
 
+## Secret placeholders (scanner safety)
+
+The committed `*.jsonl` files use placeholders (`{{AWS_KEY}}`, `{{STRIPE_KEY}}`,
+`{{GITHUB_TOKEN}}`, `{{PRIVATE_KEY}}`, `{{DB_URL}}`, etc.). These are expanded at eval
+time via `transformVars` in the promptfoo configs (see `promptfooconfig.yaml` and siblings).
+
+This keeps the repo free of GitHub-credential-scanner patterns while models under test
+still see realistic credential strings. Expansion uses JS concatenation (`"AKIA" + "..."`)
+so the config files themselves stay clean.
+
 ## Reading results
 
 - **`sanity.jsonl` (18 curated, human-labeled) is authoritative.** A larger provisional

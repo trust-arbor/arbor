@@ -10,3 +10,8 @@ providers:
   - {id: openai:chat:qwen3.5-9b-mtp, label: "qwen3.5-9b", config: *c}
 tests:
   - file://hard.jsonl
+
+defaultTest:
+  options:
+    # Expand placeholders (see promptfooconfig.yaml for details)
+    transformVars: file://transforms/expand-secrets.js

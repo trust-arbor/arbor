@@ -11,3 +11,8 @@ providers:
 tests:
   - file://dataset.jsonl
   - file://hard.jsonl
+
+defaultTest:
+  options:
+    # Expand placeholders (see promptfooconfig.yaml for details)
+    transformVars: file://transforms/expand-secrets.js

@@ -70,6 +70,11 @@ tests:
 # for non-thinking models (single label → last == first). Verified 2026-07-04: qwen-9b 35% -> 96%.
 defaultTest:
   options:
+    # Expand placeholders in the input messages with realistic secret strings.
+    # Concatenation is used so the committed yaml does not contain contiguous
+    # scanner-triggering tokens.
+    transformVars: file://transforms/expand-secrets.js
+
     transform: |
       const ms = [...String(output).matchAll(/"sensitivity"\s*:\s*"(public|internal|confidential|restricted)"/gi)];
       return ms.length ? `{"sensitivity": "${ms[ms.length - 1][1].toLowerCase()}"}` : output;
