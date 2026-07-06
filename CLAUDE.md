@@ -18,7 +18,7 @@ Arbor is a distributed AI agent orchestration system built on Elixir/OTP. Umbrel
 - **CRC Pattern (Construct-Reduce-Convert)**: Pure functional modules that separate business logic from side effects. `new/1` constructs from input, operations transform state, `show/1` formats for output. All functions are pure — no DB, no GenServer calls, no IO. Used extensively in dashboard cores. See [`.claude/skills/functional-core.md`](.claude/skills/functional-core.md).
 - **Socket-First Component**: Dashboard pattern replacing LiveComponent with plain Phoenix.Component modules that manage state on the parent LiveView's socket via delegate functions. Events namespaced as `"component:action"`. See [`.claude/skills/socket-component.md`](.claude/skills/socket-component.md).
 - **LLM Plug Pipeline**: Cross-cutting LLM-call concerns (record/replay, cost tracking, telemetry, throttling, retry) compose as `Arbor.LLM.Plug` modules piped through an `Arbor.LLM.Call` struct. Mirrors `Plug.Conn` semantics with halted-passthrough; threaded through the four `Arbor.LLM.Adapter.ReqLLM` dispatch points. Add a new concern as a plug, not as a mode flag or wrapper function. See [`.claude/skills/llm-plug-pipeline.md`](.claude/skills/llm-plug-pipeline.md).
-- **Trust Tier**: Graduated trust level governing agent capabilities: `untrusted` (0-19) → `probationary` (20-49) → `trusted` (50-74) → `veteran` (75-89) → `autonomous` (90-100). Managed by `arbor_trust`.
+- **Granular Trust Policies (earned autonomy)**: Per-task/tool autonomy earned through demonstrated reliability — URI-prefix rules with block/ask/allow/auto modes, longest-prefix match, system-enforced ceilings. Managed by `arbor_trust`. **The scalar trust-tier model (untrusted→autonomous, 0–100) is RETIRED (2026-06/07)**: tier language survives only in historical docs — do not design against it or teach it as current. A derived display score may exist for UI purposes only.
 - **Capability**: An unforgeable, signed token granting a specific permission on a resource URI (e.g., `arbor://fs/read/`, `arbor://shell/exec/git`). Granted via `Arbor.Security.grant/1`, checked via `Arbor.Security.authorize/4`. Supports delegation, expiry, constraints (rate limits), and revocation.
 - **Identity**: Ed25519 + X25519 keypair. Agent ID is `"agent_" <> hex(SHA-256(public_key))` — deterministically derived, unforgeable. Private keys stored encrypted at rest via `SigningKeyStore`. External agents authenticate via per-request `SignedRequest` signatures verified by `Arbor.Gateway.SignedRequestAuth`.
 - **Signal**: Fire-and-forget pub/sub event for observability. Emitted via `Arbor.Signals`, consumed by dashboards, event stores, and monitoring. NOT used for lifecycle tracking or execution control — observability only.
@@ -27,6 +27,26 @@ Arbor is a distributed AI agent orchestration system built on Elixir/OTP. Umbrel
 ## Fix the Root Cause
 
 Don't perform actions just to unblock something immediately so you can move on. Always fix the root cause.
+
+## Two-Way vs One-Way Doors (don't block on reversible decisions)
+
+Classify every "should I check with the human?" moment by **reversibility**, not
+importance (Amazon's framing):
+
+- **Two-way door (reversible) — the default.** Config, opts, a policy default, a
+  doc, a refactor, a fix — anything a later commit can undo. Make the best call
+  you can, **record it for review** (state what you decided and why; a decision
+  doc if it's weighty), and **move on** — don't wait. A reversible decision is
+  wrong at worst for one iteration; waiting spends the human's decision bandwidth,
+  which is the real bottleneck (see Applied Learning on decision bandwidth).
+- **One-way door (irreversible / expensive to reverse).** Deleting or overwriting
+  data, force-pushing history, outward-facing messages, spending money,
+  publishing — real blast radius. These need human sign-off. Surface + recommend,
+  then **work on something else while you wait** — don't idle.
+
+The test is not "is this important?" — security-relevant reconcile *policy* is
+important yet reversible (adjust the opts, re-run the table-tests). The test is
+"if I'm wrong, how expensive is the fix?" Cheap → decide, record, proceed.
 
 ## Security Bug Fixes Need Regression Tests
 
@@ -64,7 +84,9 @@ When in doubt, ask first or spawn a worktree.
 
 ## Always Learning
 
-Any time I remind you about something or any time you learn something from trial and error, add that to the Applied Learning section.
+Any time I remind you about something or any time you learn something from trial and error, add that to the Applied Learning section. Retention/decay/promotion rules for harness memory: [`.claude/skills/harness-memory-compounding.md`](.claude/skills/harness-memory-compounding.md).
+
+**Personal/episodic memory lives at `~/.claude/arbor-personal/`** (journal, self_knowledge.json, relationships, last_session.md, `search_sessions`). Claude Code loads it via SessionStart hook; **Cowork/desktop sessions don't run that hook** — if you're in one and continuity matters, read `~/.claude/arbor-personal/context/last_session.md` directly.
 
 ## Task Tool Reminders
 
@@ -137,9 +159,14 @@ for the exact, current deps — this graph is a snapshot.
 - **FileGuard**: For capability-based file access, use `Arbor.Security.FileGuard`:
   - `authorize/3` — verify agent has capability and path is within bounds
   - `can?/3` — boolean check for file access authorization
-- **Agent Security Gates**: Arbor fails **closed** — a missing grant or wrong trust
-  mode doesn't error loudly; it denies or escalates to an `:ask` an autonomous run
-  can't answer (so the agent loops/times out). Before wiring an agent to run tools,
+- **Agent Security Gates**: Arbor (the product) fails **closed** — a missing grant or
+  wrong trust mode doesn't error loudly; it denies or escalates to an `:ask` an
+  autonomous run can't answer (so the agent loops/times out). **One deliberate
+  exception, scoped to dev tooling:** the Claude Code harness bridge
+  (`.claude/hooks/arbor_bridge_authorize.sh`) fails *open* (`passthrough`) when the
+  gateway is unreachable, so local development isn't blocked — see the header comment
+  there. The in-process `authorize/4` path this rule governs is unaffected. Before
+  wiring an agent to run tools,
   subscribe to signals, or egress, consult [`.claude/skills/agent-security-gates.md`](.claude/skills/agent-security-gates.md)
   — a living checklist of each gate (restricted `security.*` topics, shell's `:ask`
   ceiling, path-scoped fs caps, trust-mode `:allow` vs `:ask`, the enforcing egress
@@ -216,6 +243,14 @@ Ideas and work items go in `.arbor/roadmap/` (`0-inbox/` → `1-brainstorming/` 
 ## Applied Learning
 
 **Always search for all occurrences before using `replace_all: true`.** The string may appear in alias declarations, comments, or other contexts where replacement breaks things.
+
+**Verify "X doesn't exist" claims in roadmap docs against source before designing.** Roadmap/brainstorming docs frequently understate what's built (2026-07-04 session found three in one day: ACP delegation actions existed, Goal `parent_id` hierarchy existed, the interview-agent's trust actions existed — each doc claimed otherwise). The docs age; the code is the truth. One grep before design saves a redesign.
+
+**The recurring Arbor bug pattern is built-but-unwired, not broken.** When auditing a subsystem, check the LAST MILE first: recall computed then dropped before the prompt (memory), eval data persisted then never read back (compaction thresholds), signing primitives complete but never verified in the engine path. The machinery is usually sound; the wiring and the end-to-end behavior test are what's missing. Audit by tracing one value from producer to consumer before reading any implementation.
+
+**Hysun's estimates run 2–4x conservative; the real constraint is decision bandwidth, not implementation speed.** Measured (June–July 2026): all 14 H1 items landed at 2–4x estimated speed at ~13 commits/day sustained, while the inbox grew — ideas arrive faster than decisions clear. When planning with him, don't pad implementation estimates, and bias session effort toward design/audit/decision support over code generation; that's where the leverage is.
+
+**Use absolute dates in docs, never relative time-anchors.** "Born last March," "left the company a few days ago," "deadline likely next month" all silently rot into wrong once the doc ages — and roadmap/persona docs age for months. Write `2026-03`, `early April 2026`, `2025`. Exception: verbatim quotes from published material keep their original phrasing (don't edit a quote), but any NEW prose uses absolute dates. (Found 2026-07-06: brand-voice persona anchors and a "TBD deadline" conference doc had both drifted.)
 
 **Don't prematurely cap `max_tokens`.** Let `max_tokens` be whatever the model supports; lower it only when you need faster/cheaper responses, and only *after measuring* that a lower cap doesn't hurt the task. A too-low cap is a silent failure mode with **reasoning models** (e.g. `qwen-agentworld-35b`, `qwen3.5-122b`): they spend the budget on hidden reasoning (`reasoning_content`) and emit the real answer in `content` only *after* reasoning finishes — so a small `max_tokens` yields **empty `content`** that looks like "the model can't answer," a "streaming bug," or "the agent loops," when the real fix is just a bigger budget (verified 2026-07-01: identical empty output on BOTH streaming and non-streaming at 512 tokens; a correct answer at 3000). The turn's `max_tokens` is a `compute`-node attr defaulting to `nil` (provider's full budget) with a session-level fallback (`config["max_tokens"]` → `session.max_tokens`); prefer leaving it unset over guessing a low number.
 
