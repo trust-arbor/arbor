@@ -23,6 +23,46 @@ defmodule Arbor.Actions.SessionLlmTest do
     end
   end
 
+  describe "BuildPrompt — turn mode (regression: recalled memory reaches the turn)" do
+    # Regression for the 2026-07-04 memory-system audit + the migration that dropped memory from the
+    # turn path: the DOT-pipeline rewrite kept recalled memory only in heartbeat mode, so agents
+    # remembered during autonomous heartbeats but forgot during conversation. build_turn now injects
+    # query-relevant recall as a leading system-context section. This fails on the pre-fix build_turn.
+    test "injects recalled memories as a system-context section" do
+      {:ok, result} =
+        SessionLlm.BuildPrompt.run(
+          %{
+            mode: "turn",
+            messages: [%{"role" => "user", "content" => "what did we decide?"}],
+            recalled_memories: [
+              %{"content" => "Hysun prefers verify-before-fix"},
+              %{"content" => "the eval judge is gpt-5.4-mini"}
+            ]
+          },
+          %{}
+        )
+
+      assert Enum.any?(result.messages, fn m ->
+               m["role"] == "system" and String.contains?(m["content"] || "", "Relevant memories") and
+                 String.contains?(m["content"] || "", "Hysun prefers verify-before-fix")
+             end)
+
+      assert result.user_prompt =~ "what did we decide?"
+    end
+
+    test "no recalled memories → no stray system-context message" do
+      {:ok, result} =
+        SessionLlm.BuildPrompt.run(
+          %{mode: "turn", messages: [%{"role" => "user", "content" => "hi"}], recalled_memories: []},
+          %{}
+        )
+
+      refute Enum.any?(result.messages, fn m ->
+               m["role"] == "system" and String.contains?(m["content"] || "", "Relevant memories")
+             end)
+    end
+  end
+
   describe "BuildPrompt — heartbeat mode" do
     test "builds prompt with mode instructions" do
       assert {:ok, result} =

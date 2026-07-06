@@ -57,7 +57,12 @@ defmodule Arbor.Actions.SessionLlm do
         cognitive_mode: [type: :string, required: false, doc: "Cognitive mode"],
         turn_count: [type: :integer, required: false, doc: "Turn number"],
         messages: [type: {:list, :map}, required: false, doc: "Conversation history"],
-        percepts: [type: {:list, :map}, required: false, doc: "Percepts for followup"]
+        percepts: [type: {:list, :map}, required: false, doc: "Percepts for followup"],
+        recalled_memories: [
+          type: {:list, :map},
+          required: false,
+          doc: "Semantic recall relevant to this turn (injected as a context section)"
+        ]
       ]
 
     @impl true
@@ -112,9 +117,21 @@ defmodule Arbor.Actions.SessionLlm do
 
     defp build_turn(params) do
       messages = get_list(params, :messages, "session.messages")
+      recalled = get_list(params, :recalled_memories, "session.recalled_memories")
       timestamped = inject_timestamps(messages)
 
-      {:ok, %{user_prompt: List.last(timestamped)["content"] || "", messages: timestamped}}
+      # Re-establish the migration-lost memory-in-turn wiring (2026-07-04 memory-system audit): the
+      # old reasoning prompt opened with a "## Your Current State" memory section, and the DOT-pipeline
+      # rewrite kept that only in heartbeat mode — so the agent remembered during autonomous heartbeats
+      # but forgot during conversation. Inject query-relevant recall as a leading system-context message
+      # so cross-session memory reaches the turn. Empty recall → unchanged (no stray system message).
+      final_messages =
+        case format_recalled_memories(recalled) do
+          "" -> timestamped
+          section -> [%{"role" => "system", "content" => section} | timestamped]
+        end
+
+      {:ok, %{user_prompt: List.last(timestamped)["content"] || "", messages: final_messages}}
     end
 
     # --- Context assembly ---
@@ -242,6 +259,23 @@ defmodule Arbor.Actions.SessionLlm do
 
       "## Active Intents\n#{items}"
     end
+
+    defp format_recalled_memories([]), do: ""
+
+    defp format_recalled_memories(memories) when is_list(memories) do
+      lines =
+        memories
+        |> Enum.map(fn m ->
+          m["content"] || m["text"] || Map.get(m, :content) || Map.get(m, :text) || ""
+        end)
+        |> Enum.map(&String.trim(to_string(&1)))
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.map_join("\n", &("- " <> &1))
+
+      if lines == "", do: "", else: "## Relevant memories from past sessions\n#{lines}"
+    end
+
+    defp format_recalled_memories(_), do: ""
 
     defp format_recent_thinking([]), do: ""
 
