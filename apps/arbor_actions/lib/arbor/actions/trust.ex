@@ -302,7 +302,7 @@ defmodule Arbor.Actions.Trust do
     end
 
     @impl true
-    def run(params, _context) do
+    def run(params, context) do
       %{agent_id: agent_id, baseline: baseline_str, rules: rules_raw} = params
 
       baseline = parse_mode(baseline_str)
@@ -315,6 +315,7 @@ defmodule Arbor.Actions.Trust do
       case update_trust_profile(agent_id, baseline, rules) do
         {:ok, _profile} ->
           Logger.info("[InterviewAgent] Applied trust profile changes for #{agent_id}")
+          emit_profile_changed(agent_id, baseline, rules, context)
 
           {:ok,
            %{
@@ -347,6 +348,27 @@ defmodule Arbor.Actions.Trust do
       else
         {:error, :trust_unavailable}
       end
+    end
+
+    # Durably audit the trust-profile mutation. A trust-profile change is a change to who-can-do-what
+    # — security-critical — yet it was previously recorded only in ephemeral Logger output, leaving no
+    # durable audit trail (audit-trail-gaps 2026-07-04, Gap 2). Emit to the security stream with the
+    # acting agent (actor) and the applied baseline/rules (the diff). Mirrors taint_events.ex.
+    defp emit_profile_changed(agent_id, baseline, rules, context) do
+      # Direct call, not a `function_exported?` guard: arbor_actions hard-deps arbor_signals, and
+      # `function_exported?/3` returns false when the module isn't loaded yet — which silently skipped
+      # the audit emit. A direct call also triggers module loading.
+      Arbor.Signals.durable_emit(
+        :security,
+        :trust_profile_changed,
+        %{
+          agent_id: agent_id,
+          baseline: baseline,
+          rules: rules,
+          actor: Map.get(context, :agent_id)
+        },
+        stream_id: "security:events"
+      )
     end
 
     defp parse_mode(mode) when is_atom(mode), do: mode

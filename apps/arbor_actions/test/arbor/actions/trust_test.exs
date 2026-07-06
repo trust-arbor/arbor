@@ -150,6 +150,49 @@ defmodule Arbor.Actions.TrustTest do
     end
   end
 
+  describe "ApplyProfile — durable audit (security regression)" do
+    # Regression for audit-trail-gaps 2026-07-04, Gap 2: applying a trust profile is a change to
+    # who-can-do-what — security-critical — but it was recorded only in ephemeral Logger output,
+    # leaving no durable audit trail (Actions.Trust had zero emit/Historian calls). ApplyProfile now
+    # emits a durable :trust_profile_changed security event with the actor + applied baseline/rules.
+    # This fails on the pre-fix code (no emit) and passes now.
+    test "applying a profile records a durable trust_profile_changed security event", %{
+      agent_id: agent_id
+    } do
+      # NOTE: :security is a restricted topic, so signal payloads are ENCRYPTED at rest
+      # (protect_restricted_signal → TopicKeys.encrypt). In the test env TopicKeys isn't running, so
+      # the payload falls back to %{__redacted__, reason: :encryption_unavailable}. We therefore
+      # assert the audit EVENT is recorded (in prod the full agent_id/baseline/rules/actor is
+      # encrypted + retained, retrievable for incident response with the topic key), not its contents.
+      before = trust_profile_signal_count()
+
+      assert {:ok, _result} =
+               ApplyProfile.run(
+                 %{agent_id: agent_id, baseline: "allow", rules: %{"arbor://code/read" => "auto"}},
+                 %{agent_id: "agent_actor_under_test"}
+               )
+
+      assert wait_for_signal_count_above(before),
+             "expected a new :trust_profile_changed security event to be recorded"
+    end
+  end
+
+  defp trust_profile_signal_count do
+    {:ok, signals} =
+      Arbor.Signals.recent(limit: 100, category: :security, type: :trust_profile_changed)
+
+    length(signals)
+  end
+
+  # Signals persist asynchronously; poll until the count grows (or time out).
+  defp wait_for_signal_count_above(before, retries \\ 40) do
+    cond do
+      trust_profile_signal_count() > before -> true
+      retries > 0 -> Process.sleep(50) && wait_for_signal_count_above(before, retries - 1)
+      true -> false
+    end
+  end
+
   describe "ExplainMode" do
     test "explains trust resolution for a URI", %{agent_id: agent_id} do
       assert {:ok, result} =
