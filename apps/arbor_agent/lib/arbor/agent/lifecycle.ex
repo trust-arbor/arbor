@@ -810,6 +810,7 @@ defmodule Arbor.Agent.Lifecycle do
               opts
               |> Keyword.put_new(:initial_goals, kw[:initial_goals])
               |> Keyword.put_new(:capabilities, kw[:required_capabilities])
+              |> Keyword.put_new(:trust_preset, kw[:trust_preset])
               |> Keyword.put(:template, template_name)
               |> Keyword.put(:template_data, data)
               |> put_template_source(data)
@@ -833,6 +834,7 @@ defmodule Arbor.Agent.Lifecycle do
               opts
               |> Keyword.put_new(:initial_goals, kw[:initial_goals])
               |> Keyword.put_new(:capabilities, kw[:required_capabilities])
+              |> Keyword.put_new(:trust_preset, kw[:trust_preset])
               |> Keyword.put(:template, name)
               |> Keyword.put(:template_data, data)
               |> Keyword.put_new(:template_module, template_mod)
@@ -1445,31 +1447,75 @@ defmodule Arbor.Agent.Lifecycle do
     :exit, _ -> :ok
   end
 
-  # If the template module exports trust_preset/0, override the default trust profile
-  # with the template's custom rules. This allows templates like CouncilEvaluator
-  # to define restrictive read-only profiles.
+  # Apply a template's declarative trust preset (a restrictive read-only baseline,
+  # etc.) to the freshly-created profile. Two sources, data-first preferred:
+  #
+  #   * data-first `.md` template — `opts[:trust_preset]` is a string-keyed map from
+  #     the frontmatter: `%{"baseline" => mode, "rules" => %{uri => mode}}`.
+  #   * legacy module template — a `trust_preset/0` callback returning
+  #     `%{baseline: atom, rules: map}`.
+  #
+  # Before this, only the module path fired, so data-first templates could not
+  # declare a read-only baseline (orphaned since templates became `.md` files) —
+  # the mechanism the read-only-by-default agent roster depends on.
   defp apply_template_trust_preset(agent_id, opts) do
-    template_mod = Keyword.get(opts, :template_module)
     store = Arbor.Trust.Store
 
-    if template_mod && Code.ensure_loaded?(template_mod) &&
-         function_exported?(template_mod, :trust_preset, 0) do
-      preset = template_mod.trust_preset()
+    with %{} = preset <- resolve_trust_preset(opts),
+         true <- Code.ensure_loaded?(store) and function_exported?(store, :update_profile, 2) do
       baseline = Map.get(preset, :baseline, :block)
       rules = Map.get(preset, :rules, %{})
 
-      if Code.ensure_loaded?(store) and function_exported?(store, :update_profile, 2) do
-        apply(store, :update_profile, [
-          agent_id,
-          fn profile -> %{profile | baseline: baseline, rules: rules} end
-        ])
-      end
+      apply(store, :update_profile, [
+        agent_id,
+        fn profile -> %{profile | baseline: baseline, rules: rules} end
+      ])
+    else
+      _ -> :ok
     end
   rescue
     _ -> :ok
   catch
     :exit, _ -> :ok
   end
+
+  # Resolve a normalized `%{baseline: atom, rules: %{uri => atom}}` preset, or nil.
+  # Data-first frontmatter wins over the legacy module callback.
+  defp resolve_trust_preset(opts) do
+    frontmatter = Keyword.get(opts, :trust_preset)
+    mod = Keyword.get(opts, :template_module)
+
+    cond do
+      is_map(frontmatter) and map_size(frontmatter) > 0 ->
+        normalize_trust_preset(frontmatter)
+
+      mod && Code.ensure_loaded?(mod) && function_exported?(mod, :trust_preset, 0) ->
+        mod.trust_preset()
+
+      true ->
+        nil
+    end
+  end
+
+  # Normalize a frontmatter trust_preset (string keys/values from YAML) →
+  # `%{baseline: atom, rules: %{uri => atom}}`. Unknown modes default to :block
+  # (deny) — fail-closed, since a mis-typed preset must not silently widen trust.
+  defp normalize_trust_preset(%{} = preset) do
+    baseline = preset |> Map.get("baseline", "block") |> parse_trust_mode()
+
+    rules =
+      (preset["rules"] || %{})
+      |> Enum.into(%{}, fn {uri, mode} -> {to_string(uri), parse_trust_mode(mode)} end)
+
+    %{baseline: baseline, rules: rules}
+  end
+
+  defp parse_trust_mode(mode) when is_atom(mode), do: mode
+  defp parse_trust_mode("block"), do: :block
+  defp parse_trust_mode("ask"), do: :ask
+  defp parse_trust_mode("allow"), do: :allow
+  defp parse_trust_mode("auto"), do: :auto
+  defp parse_trust_mode(_), do: :block
 
   defp emit_created_signal(%Profile{} = profile) do
     dual_emit_lifecycle(:created, %{

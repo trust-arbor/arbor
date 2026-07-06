@@ -40,6 +40,55 @@ defmodule Arbor.Agent.Template.FileTest do
     end
   end
 
+  describe "trust_preset frontmatter (declarative read-only baseline)" do
+    @preset_md """
+    ---
+    character:
+      name: "Read Only Probe"
+    name: "Read Only Probe"
+    trust_preset:
+      baseline: block
+      rules:
+        "arbor://fs/read/**": allow
+        "arbor://fs/list/**": allow
+    ---
+    # Description
+
+    A read-only probe.
+    """
+
+    test "parses trust_preset from frontmatter" do
+      assert {:ok, data} = TemplateFile.parse(@preset_md)
+
+      assert data["trust_preset"]["baseline"] == "block"
+      assert data["trust_preset"]["rules"]["arbor://fs/read/**"] == "allow"
+      assert data["trust_preset"]["rules"]["arbor://fs/list/**"] == "allow"
+    end
+
+    test "round-trips trust_preset (parse -> serialize -> parse) — incl. URI keys" do
+      {:ok, data} = TemplateFile.parse(@preset_md)
+      {:ok, reparsed} = TemplateFile.parse(TemplateFile.serialize(data))
+
+      assert reparsed["trust_preset"] == data["trust_preset"]
+    end
+
+    test "absent trust_preset → empty map (no preset applied)" do
+      {:ok, data} =
+        TemplateFile.parse("""
+        ---
+        character:
+          name: "No Preset"
+        name: "No Preset"
+        ---
+        # Description
+
+        No preset.
+        """)
+
+      assert data["trust_preset"] == %{}
+    end
+  end
+
   describe "validate/1" do
     for path <- @shipped_md_paths do
       name = path |> Path.basename(".md")

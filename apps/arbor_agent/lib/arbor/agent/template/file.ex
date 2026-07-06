@@ -148,6 +148,7 @@ defmodule Arbor.Agent.Template.File do
     |> put_present("initial_goals", data["initial_goals"] || [])
     |> put_present("required_capabilities", data["required_capabilities"] || [])
     |> put_present("relationship_style", reject_empty(data["relationship_style"] || %{}))
+    |> put_present("trust_preset", reject_empty(data["trust_preset"] || %{}))
   end
 
   # Only keep a key if the value is non-nil and non-empty (so absent prose
@@ -257,6 +258,11 @@ defmodule Arbor.Agent.Template.File do
       "relationship_style" => fm["relationship_style"] || %{},
       "domain_context" => body_sections["Domain Context"] || "",
       "metadata" => fm["metadata"] || %{},
+      # Optional declarative trust baseline (data-first equivalent of the old
+      # module `trust_preset/0`): %{"baseline" => mode, "rules" => %{uri => mode}}.
+      # Consumed by Lifecycle.apply_template_trust_preset to give an agent a
+      # restrictive (e.g. read-only) profile at create time.
+      "trust_preset" => fm["trust_preset"] || %{},
       "created_at" => now,
       "updated_at" => now
     }

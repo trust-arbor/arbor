@@ -267,6 +267,7 @@ defmodule Arbor.Agent.TemplateStore do
       sandbox_level: Arbor.Contracts.Security.SandboxLevel.coerce(data["sandbox_level"]),
       initial_goals: data["initial_goals"] || [],
       required_capabilities: data["required_capabilities"] || [],
+      trust_preset: data["trust_preset"] || %{},
       nature: data["nature"] || "",
       values: data["values"] || [],
       interests: data["initial_interests"] || [],
