@@ -48,7 +48,11 @@ defmodule Arbor.Agent.Application do
           Arbor.Agent.Supervisor,
           Arbor.Agent.UserSupervisor,
           # Bootstrap (self-defers via Process.send_after, must be after Supervisor)
-          Arbor.Agent.Bootstrap
+          Arbor.Agent.Bootstrap,
+          # Reconciler — Bootstrap's continuous generalization (periodic
+          # desired-vs-actual reconcile: reap identity-gone zombies, restart
+          # absent auto_start agents). Self-defers via Process.send_after.
+          Arbor.Agent.Reconciler
         ]
       else
         []
