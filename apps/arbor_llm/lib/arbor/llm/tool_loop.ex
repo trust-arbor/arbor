@@ -207,6 +207,9 @@ defmodule Arbor.LLM.ToolLoop do
         end
 
         if response.finish_reason == :tool_calls and tool_calls != [] do
+          # Snapshot the currently-callable tool names so the discovery-cap nudge can list them.
+          state = Map.put(state, :callable_tool_names, callable_tool_names(request.tools))
+
           # Execute each tool call
           {tool_results, state} =
             execute_tools(tool_calls, state)
@@ -376,22 +379,37 @@ defmodule Arbor.LLM.ToolLoop do
           |> maybe_add_signer(state.signer)
 
         {result, duration_ms} =
-          if prior_failures >= max_tool_failures() do
-            # HARD CAP: stop executing a tool that keeps failing, so a broken or
-            # rate-limited tool can't loop forever (the 233-call runaway guard).
-            Logger.warning(
-              "[ToolLoop] tool=#{tc.name} CAPPED after #{prior_failures} consecutive failures — not executing"
-            )
+          cond do
+            # DISCOVERY RUNAWAY GUARD: tool_find_tools SUCCEEDS every call, so the failure cap below
+            # never fires — a model that keeps re-discovering instead of calling tools it already has
+            # can burn the whole round budget (the Test Agent hit 45 discovery calls / 0 reads,
+            # 2026-07-06). Past the cap, stop EXECUTING discovery and return a nudge listing the
+            # already-callable tools so the model uses them directly.
+            discovery_tool?(tc.name) and
+                Map.get(state, :discovery_count, 0) >= max_discovery_calls() ->
+              Logger.warning(
+                "[ToolLoop] tool=#{tc.name} DISCOVERY-CAPPED after #{Map.get(state, :discovery_count, 0)} discovery calls — nudging to use available tools"
+              )
 
-            {{:error, tool_failure_cap_message(tc.name, prior_failures)}, 0}
-          else
-            # EXPONENTIAL BACKOFF before retrying a recently-failed tool, so a transient
-            # rate-limit isn't hammered — retries spread out instead of firing all at once.
-            if prior_failures > 0, do: Process.sleep(retry_backoff_ms(prior_failures))
+              {{:ok, discovery_cap_nudge(state)}, 0}
 
-            start_time = System.monotonic_time(:millisecond)
-            r = state.tool_executor.execute(tc.name, args, state.workdir, exec_opts)
-            {r, System.monotonic_time(:millisecond) - start_time}
+            prior_failures >= max_tool_failures() ->
+              # HARD CAP: stop executing a tool that keeps failing, so a broken or
+              # rate-limited tool can't loop forever (the 233-call runaway guard).
+              Logger.warning(
+                "[ToolLoop] tool=#{tc.name} CAPPED after #{prior_failures} consecutive failures — not executing"
+              )
+
+              {{:error, tool_failure_cap_message(tc.name, prior_failures)}, 0}
+
+            true ->
+              # EXPONENTIAL BACKOFF before retrying a recently-failed tool, so a transient
+              # rate-limit isn't hammered — retries spread out instead of firing all at once.
+              if prior_failures > 0, do: Process.sleep(retry_backoff_ms(prior_failures))
+
+              start_time = System.monotonic_time(:millisecond)
+              r = state.tool_executor.execute(tc.name, args, state.workdir, exec_opts)
+              {r, System.monotonic_time(:millisecond) - start_time}
           end
 
         Logger.info(
@@ -459,7 +477,14 @@ defmodule Arbor.LLM.ToolLoop do
         {{tc.id, tc.name, result}, new_failures}
       end)
 
-    {results, Map.put(state, :tool_failures, tool_failures)}
+    discovery_this_round = Enum.count(tool_calls, &discovery_tool?(&1.name))
+
+    updated_state =
+      state
+      |> Map.put(:tool_failures, tool_failures)
+      |> Map.update(:discovery_count, discovery_this_round, &(&1 + discovery_this_round))
+
+    {results, updated_state}
   end
 
   # Runaway-guard knobs (configurable). A tool that fails this many times IN A ROW stops being
@@ -716,6 +741,38 @@ defmodule Arbor.LLM.ToolLoop do
       end)
 
     existing ++ unique_new
+  end
+
+  # ── Discovery runaway guard ──────────────────────────────────────
+
+  @default_max_discovery_calls 5
+
+  defp max_discovery_calls do
+    Application.get_env(:arbor_llm, :tool_loop_max_discovery_calls, @default_max_discovery_calls)
+  end
+
+  defp discovery_tool?(name), do: name in ["tool_find_tools", "find_tools"]
+
+  defp callable_tool_names(tools) when is_list(tools) do
+    tools
+    |> Enum.map(&get_in(&1, ["function", "name"]))
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp callable_tool_names(_), do: []
+
+  # The nudge returned once discovery is capped: name the tools already on the table (minus the
+  # discovery meta-tool itself) so the model calls one instead of discovering yet again.
+  defp discovery_cap_nudge(state) do
+    names =
+      state
+      |> Map.get(:callable_tool_names, [])
+      |> Enum.reject(&discovery_tool?/1)
+
+    tool_list = if names == [], do: "your granted tools", else: Enum.join(names, ", ")
+
+    "Tool-discovery limit reached — stop calling tool_find_tools. You already have these tools and " <>
+      "can call them directly: #{tool_list}. Call the one you need now instead of discovering again."
   end
 
   # ── Signal Emission ──────────────────────────────────────────────

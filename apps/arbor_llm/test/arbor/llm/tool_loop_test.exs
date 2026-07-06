@@ -464,6 +464,40 @@ defmodule Arbor.LLM.ToolLoopTest do
     end
   end
 
+  # --- Runaway discovery mocks (the cap guard) ---
+
+  defmodule CountingDiscoveryTools do
+    def execute("tool_find_tools", _args, _wd, _opts) do
+      :persistent_term.put(
+        {__MODULE__, :count},
+        :persistent_term.get({__MODULE__, :count}, 0) + 1
+      )
+
+      {:ok, Jason.encode!(%{"tools" => [], "count" => 0, "discovered_tool_names" => []})}
+    end
+
+    def execute(_name, _args, _wd, _opts), do: {:ok, "ok"}
+  end
+
+  defmodule RunawayDiscoveryAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "runaway_discovery"
+
+    # A runaway model: ALWAYS asks to discover, never uses a tool.
+    def complete(%Request{} = _request, _opts) do
+      id = "d" <> Integer.to_string(System.unique_integer([:positive]))
+
+      {:ok,
+       %Response{
+         text: "",
+         finish_reason: :tool_calls,
+         content_parts: [ContentPart.tool_call(id, "tool_find_tools", %{"query" => "tools"})],
+         usage: %{},
+         raw: %{}
+       }}
+    end
+  end
+
   defp build_client(adapter) do
     Client.new(default_provider: adapter.provider())
     |> Client.register_adapter(adapter)
@@ -509,6 +543,30 @@ defmodule Arbor.LLM.ToolLoopTest do
 
       assert "zz_custom_tool" in names,
              "discovered zz_custom_tool did not merge into the callable tools (discover->invoke broken)"
+    end
+
+    test "runaway tool_find_tools is discovery-capped (stops executing after the cap, then nudges)" do
+      Application.put_env(:arbor_llm, :tool_loop_max_discovery_calls, 2)
+      :persistent_term.put({CountingDiscoveryTools, :count}, 0)
+
+      on_exit(fn ->
+        Application.delete_env(:arbor_llm, :tool_loop_max_discovery_calls)
+        :persistent_term.erase({CountingDiscoveryTools, :count})
+      end)
+
+      client = build_client(RunawayDiscoveryAdapter)
+
+      {:ok, result} =
+        ToolLoop.run(client, request("runaway_discovery"),
+          max_turns: 6,
+          tool_executor: CountingDiscoveryTools
+        )
+
+      # Pre-guard, tool_find_tools executes every round (up to max_turns=6). The guard caps
+      # EXECUTION at max_discovery_calls (2); further discovery calls are nudged, not executed —
+      # so a model that won't stop discovering can no longer burn the whole round budget on it.
+      assert :persistent_term.get({CountingDiscoveryTools, :count}) == 2
+      assert result.finish_reason == :max_turns
     end
 
     @tag :tmp_dir
