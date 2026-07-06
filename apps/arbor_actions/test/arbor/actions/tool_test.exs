@@ -11,7 +11,11 @@ defmodule Arbor.Actions.Tool.FindToolsTest do
 
       assert tool.name == "tool_find_tools"
       assert is_binary(tool.description)
-      assert tool.description =~ "IMPORTANT: You start with a small set of core tools"
+      # Fix 4 (discovery-loop): the description must steer to the visible catalog
+      # FIRST, not read as "when in doubt, search."
+      assert tool.description =~ "catalog"
+      assert tool.description =~ "NOT already listed"
+      refute tool.description =~ "ANY task you can't accomplish"
     end
 
     test "has query parameter" do
@@ -62,6 +66,22 @@ defmodule Arbor.Actions.Tool.FindToolsTest do
 
     test "taint_roles marks query as control" do
       assert FindTools.taint_roles() == %{query: :control, limit: :data}
+    end
+
+    test "result carries an imperative instruction to CALL, not re-search (Fix 3)" do
+      result = FindTools.run(%{query: "file", limit: 3}, %{trust_tier: :established})
+
+      assert {:ok, %{instruction: instruction, discovered_tool_names: names}} = result
+      assert is_binary(instruction)
+
+      if names == [] do
+        assert instruction =~ "Do NOT repeat this search"
+      else
+        assert instruction =~ "callable THIS turn"
+        assert instruction =~ "do NOT search for these again"
+        # names the tools it found so the model can select one directly
+        assert Enum.all?(names, fn n -> instruction =~ n end)
+      end
     end
   end
 

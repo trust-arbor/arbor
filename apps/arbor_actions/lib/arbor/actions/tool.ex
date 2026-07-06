@@ -32,9 +32,11 @@ defmodule Arbor.Actions.Tool do
     use Jido.Action,
       name: "tool_find_tools",
       description:
-        "IMPORTANT: You start with a small set of core tools. Use this to discover additional tools " <>
-          "for ANY task you can't accomplish with your current tools (web search, file operations, " <>
-          "shell commands, skills, etc.). Returns full tool schemas you can use immediately in the same turn.",
+        "Discover a tool that is NOT already listed in your \"# Available Tools\" catalog. " <>
+          "Check that catalog FIRST — the tools it names are already callable directly, so do NOT " <>
+          "search for them. Only call this for a capability the catalog doesn't list (an obscure " <>
+          "tool, or one added after your prompt was built). Returns full tool schemas you can use " <>
+          "immediately in the same turn.",
       category: "tool",
       tags: ["tool", "discovery", "search", "progressive"],
       schema: [
@@ -79,12 +81,29 @@ defmodule Arbor.Actions.Tool do
 
       Actions.emit_completed(__MODULE__, %{count: length(tools), tool_names: tool_names})
 
+      # Prompt-shape the result: the model sees this map serialized as the tool
+      # result. Give it an imperative summary so it CALLS what it found instead of
+      # re-searching (the discovery loop). ToolLoop's extract_discovered_tools/2
+      # matches on :tools/:discovered_tool_names — the extra key is inert there.
       {:ok,
        %{
+         instruction: discovery_instruction(tool_names),
          tools: tools,
          count: length(tools),
          discovered_tool_names: tool_names
        }}
+    end
+
+    defp discovery_instruction([]),
+      do:
+        "No tools matched. Do NOT repeat this search with reworded queries — either use a tool " <>
+          "already in your \"# Available Tools\" catalog, or tell the user this capability is unavailable."
+
+    defp discovery_instruction(tool_names) do
+      names = Enum.join(tool_names, ", ")
+
+      "These #{length(tool_names)} tools are now callable THIS turn: #{names}. " <>
+        "Call the one you need directly — do NOT search for these again."
     end
 
     # Convert a CapabilityMatch to OpenAI tool schema(s)

@@ -8,6 +8,7 @@ defmodule Arbor.AI.SystemPromptBuilder do
   if the data isn't available.
   """
 
+  alias Arbor.AI.CatalogSection
   alias Arbor.Common.{LazyLoader, PromptSanitizer}
 
   # Per-section token budgets. {:fixed, N} for static sections,
@@ -49,7 +50,8 @@ defmodule Arbor.AI.SystemPromptBuilder do
       truncate_section(build_identity_section(agent_id), budgets.identity),
       if(nonce, do: PromptSanitizer.preamble(nonce)),
       build_project_context_section(opts),
-      build_skill_catalog_section(opts),
+      CatalogSection.build(:skill, opts),
+      CatalogSection.build(:action, opts),
       truncate_section(
         wrap_section(build_self_knowledge_section(agent_id), nonce),
         budgets.self_knowledge
@@ -61,8 +63,6 @@ defmodule Arbor.AI.SystemPromptBuilder do
     |> Enum.reject(&(is_nil(&1) or &1 == ""))
     |> Enum.join("\n\n")
   end
-
-  @skill_catalog_max_bytes 4_000
 
   # Auto-loaded AGENTS.md/CLAUDE.md project context (Arbor.Common.ProjectContext). workdir
   # defaults to "." (server cwd = umbrella root, where CLAUDE.md lives). Sits in the
@@ -78,43 +78,9 @@ defmodule Arbor.AI.SystemPromptBuilder do
     end
   end
 
-  # Compact catalog of available skills (name + description) — progressive disclosure: the agent
-  # sees WHAT skills exist and loads full bodies on demand via the skill tool. Fixes search-blind
-  # discovery. Gated per-agent (:skills) + system (:skill_catalog_enabled), byte-capped so it
-  # stays a stable/cacheable summary.
-  defp build_skill_catalog_section(opts) do
-    if context_enabled?(opts, :skills, :skill_catalog_enabled) do
-      Arbor.Common.SkillLibrary.list()
-      |> Enum.map(fn skill -> {Map.get(skill, :name), Map.get(skill, :description)} end)
-      |> Enum.reject(fn {name, _desc} -> name in [nil, ""] end)
-      |> format_skill_catalog()
-    else
-      ""
-    end
-  rescue
-    # Skill listing must never break prompt assembly.
-    _ -> ""
-  end
-
-  defp format_skill_catalog([]), do: ""
-
-  defp format_skill_catalog(entries) do
-    body =
-      entries
-      |> Enum.map_join("\n", fn {name, desc} -> "- **#{name}**: #{one_line(desc)}" end)
-      |> truncate_catalog()
-
-    "# Available Skills\n\nActivate any of these with the skill tool to load its full guidance:\n\n" <>
-      body
-  end
-
-  defp one_line(nil), do: ""
-  defp one_line(desc), do: desc |> String.split("\n", parts: 2) |> hd() |> String.trim()
-
-  defp truncate_catalog(body) when byte_size(body) <= @skill_catalog_max_bytes, do: body
-
-  defp truncate_catalog(body),
-    do: binary_part(body, 0, @skill_catalog_max_bytes) <> "\n…[skill catalog truncated]"
+  # Compact skill + tool catalogs (name + one-line purpose) live in
+  # Arbor.AI.CatalogSection — the kind-parameterized progressive-disclosure
+  # pattern shared across capability kinds (see build_stable_system_prompt/2).
 
   # Per-agent :enabled/:disabled override the system flag; :inherit (or nil) uses the system
   # config flag under :arbor_common.
@@ -525,11 +491,13 @@ defmodule Arbor.AI.SystemPromptBuilder do
   defp build_tool_guidance_section do
     """
     ## Tool Usage
-    You start with a core set of tools, but many more are available. When you need
-    a capability you don't have (web search, browser, Excel, skills, etc.), use
-    `tool_find_tools` to discover and activate additional tools immediately.
+    You start with a core set of tools, and the "# Available Tools" catalog above
+    lists more you can call directly by name. Check that catalog FIRST. Only use
+    `tool_find_tools` to discover a capability that is NOT already listed there
+    (an obscure tool, or one added after this prompt was built).
 
-    Always search for tools FIRST before telling the user you can't do something.
+    Don't tell the user you can't do something before checking the catalog and,
+    if needed, searching once for the missing capability.
 
     Core tools available now:
     - Memory: memory_recall, memory_remember, memory_read_self
