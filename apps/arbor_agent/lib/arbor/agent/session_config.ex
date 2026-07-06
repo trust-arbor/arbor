@@ -152,7 +152,12 @@ defmodule Arbor.Agent.SessionConfig do
 
       if Code.ensure_loaded?(compactor_module) do
         compactor_opts = [
-          effective_window: Keyword.get(opts, :effective_window, 75_000),
+          # No 75_000 default here: a flat default shadowed ContextCompactor's per-model
+          # derivation (it only uses `model -> ModelProfile.effective_window(model)` when no
+          # explicit window is passed), so every session compacted at 75k regardless of model —
+          # blowing small-window models (e.g. a 32k model, 75k > 32k). Pass nil through; the
+          # compactor derives per-model, and its own @default_effective_window covers the no-model case.
+          effective_window: Keyword.get(opts, :effective_window),
           model: Keyword.get(opts, :model),
           enable_llm_compaction: context_management == :full
         ]
