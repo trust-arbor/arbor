@@ -670,7 +670,12 @@ defmodule Arbor.LLM.ToolLoop do
   defp extract_discovered_tools(tool_results, state) do
     {new_tool_defs, new_names} =
       Enum.reduce(tool_results, {[], []}, fn {_id, name, result}, {defs, names} ->
-        if name == "find_tools" do
+        # The meta-tool is registered as "tool_find_tools" (Arbor.Actions.Tool.FindTools);
+        # matching only the bare "find_tools" here silently dropped EVERY discovery result, so
+        # discovered tools never merged into the callable set and agents looped in tool_find_tools
+        # without ever invoking what they found (the discover->invoke handoff — found dogfooding the
+        # Test Agent, 2026-07-06). Match both names.
+        if name in ["tool_find_tools", "find_tools"] do
           case result do
             {:ok, json} when is_binary(json) ->
               case Jason.decode(json) do

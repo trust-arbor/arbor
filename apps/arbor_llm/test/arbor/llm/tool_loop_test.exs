@@ -401,6 +401,69 @@ defmodule Arbor.LLM.ToolLoopTest do
     end
   end
 
+  # --- Discovery mocks: tool_find_tools -> merge -> invoke ---
+
+  defmodule DiscoveryTools do
+    # Mirrors format_result(FindTools result): a JSON string with "tools" + "discovered_tool_names".
+    def execute("tool_find_tools", _args, _workdir, _opts) do
+      {:ok,
+       Jason.encode!(%{
+         "tools" => [
+           %{
+             "type" => "function",
+             "function" => %{
+               "name" => "zz_custom_tool",
+               "description" => "Read a file",
+               "parameters" => %{"type" => "object", "properties" => %{}}
+             }
+           }
+         ],
+         "count" => 1,
+         "discovered_tool_names" => ["zz_custom_tool"]
+       })}
+    end
+
+    def execute("zz_custom_tool", _args, _workdir, _opts), do: {:ok, "file contents"}
+    def execute(name, _args, _workdir, _opts), do: {:error, "Unknown: #{name}"}
+  end
+
+  defmodule DiscoveryAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "discovery_test"
+
+    def complete(%Request{} = request, _opts) do
+      case Enum.count(request.messages, &(&1.role == :tool)) do
+        0 ->
+          {:ok, dtool_call("c1", "tool_find_tools", %{"query" => "read files"})}
+
+        1 ->
+          names = Enum.map(request.tools || [], &get_in(&1, ["function", "name"]))
+          send(:persistent_term.get({__MODULE__, :pid}), {:round2_tools, names})
+          {:ok, dtool_call("c2", "zz_custom_tool", %{"path" => "x"})}
+
+        _ ->
+          {:ok,
+           %Response{
+             text: "done",
+             finish_reason: :stop,
+             content_parts: [ContentPart.text("done")],
+             usage: %{},
+             raw: %{}
+           }}
+      end
+    end
+
+    defp dtool_call(id, name, args) do
+      %Response{
+        text: "",
+        finish_reason: :tool_calls,
+        content_parts: [ContentPart.tool_call(id, name, args)],
+        usage: %{},
+        raw: %{}
+      }
+    end
+  end
+
   defp build_client(adapter) do
     Client.new(default_provider: adapter.provider())
     |> Client.register_adapter(adapter)
@@ -417,6 +480,37 @@ defmodule Arbor.LLM.ToolLoopTest do
   # --- Tests ---
 
   describe "ToolLoop.run/3" do
+    @tag :tmp_dir
+    test "tool_find_tools result merges the discovered tool into the callable set (discover->invoke regression)",
+         %{tmp_dir: tmp_dir} do
+      :persistent_term.put({DiscoveryAdapter, :pid}, self())
+      on_exit(fn -> :persistent_term.erase({DiscoveryAdapter, :pid}) end)
+
+      find_tools_schema = %{
+        "type" => "function",
+        "function" => %{
+          "name" => "tool_find_tools",
+          "description" => "discover tools",
+          "parameters" => %{"type" => "object", "properties" => %{}}
+        }
+      }
+
+      req = %{request("discovery_test") | tools: [find_tools_schema]}
+      client = build_client(DiscoveryAdapter)
+
+      {:ok, _result} =
+        ToolLoop.run(client, req, workdir: tmp_dir, tool_executor: DiscoveryTools)
+
+      # THE GUARD: after tool_find_tools returns zz_custom_tool's schema, zz_custom_tool must be in the
+      # callable tool set on the next round. Pre-fix the name check ("find_tools" != the actual
+      # "tool_find_tools") dropped the discovery result, so zz_custom_tool never merged and the agent
+      # could only re-discover — the 50-round loop the Test Agent hit.
+      assert_receive {:round2_tools, names}, 1000
+
+      assert "zz_custom_tool" in names,
+             "discovered zz_custom_tool did not merge into the callable tools (discover->invoke broken)"
+    end
+
     @tag :tmp_dir
     test "single tool call round trip", %{tmp_dir: tmp_dir} do
       # Create the file the mock will try to read
