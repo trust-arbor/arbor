@@ -362,7 +362,9 @@ defmodule Arbor.Trust.Authority do
     matching =
       rules
       |> Enum.filter(fn {prefix, _mode} -> prefix_matches?(uri, prefix) end)
-      |> Enum.sort_by(fn {prefix, _} -> -String.length(prefix) end)
+      |> Enum.sort_by(fn {prefix, mode} ->
+        {-String.length(canonical_trust_prefix(prefix)), mode_index(mode)}
+      end)
 
     case matching do
       [{_prefix, mode} | _] -> mode
@@ -397,7 +399,18 @@ defmodule Arbor.Trust.Authority do
     |> List.first()
   end
 
+  # Trust rules match by URI PREFIX, not glob. A trailing "/**" or "/*" is natural to write
+  # (capabilities use it for path scope) but here it is a literal that matches nothing, silently
+  # disabling the rule. Strip it so the rule covers the subtree its author intended. Canonicalizing
+  # at MATCH time (not on write) covers every rule-write path; ceilings are bare so they're unchanged.
+  defp canonical_trust_prefix(prefix) do
+    prefix
+    |> String.replace_suffix("/**", "")
+    |> String.replace_suffix("/*", "")
+  end
+
   defp prefix_matches?(uri, prefix) do
+    prefix = canonical_trust_prefix(prefix)
     uri == prefix or String.starts_with?(uri, prefix <> "/")
   end
 

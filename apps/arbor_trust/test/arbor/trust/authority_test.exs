@@ -66,6 +66,75 @@ defmodule Arbor.Trust.AuthorityTest do
     end
   end
 
+  # Trust rules match by URI PREFIX, not glob. Authors naturally reach for a
+  # trailing "/**" or "/*" (capabilities use it for path scope), but in a trust
+  # rule that suffix is a literal that matches nothing real — the rule silently
+  # never fires and the request falls to the baseline. Under a `block` baseline
+  # that fails CLOSED (annoying); under an `allow` baseline a "/** block" rule
+  # fails OPEN (a security hole). `canonical_trust_prefix/1` strips the trailing
+  # glob at match time so the rule covers the subtree its author intended.
+  describe "effective_mode/3 — trailing-glob canonicalization in trust rules" do
+    test "regression: a '/**' allow rule under a :block baseline actually fires (was fail-closed)" do
+      profile =
+        %{
+          Authority.new_profile("agent_glob_closed")
+          | baseline: :block,
+            rules: %{"arbor://fs/read/**" => :allow}
+        }
+
+      # Pre-fix, "/**" matched nothing so both fell through to the :block baseline.
+      assert Authority.effective_mode(profile, "arbor://fs/read/anything") == :allow
+      assert Authority.effective_mode(profile, "arbor://fs/read") == :allow
+    end
+
+    test "security regression: a '/** block' rule under an :allow baseline fails OPEN pre-fix" do
+      # This is the dangerous case: the author wrote a rule to BLOCK writes under a
+      # secret subtree, but the literal "/**" matched nothing, so the request fell
+      # to the permissive :allow baseline — the secret path was writable. The fix
+      # canonicalizes the prefix so the block rule actually covers the subtree.
+      profile =
+        %{
+          Authority.new_profile("agent_glob_open")
+          | baseline: :allow,
+            rules: %{"arbor://fs/write/secret/**" => :block}
+        }
+
+      assert Authority.effective_mode(profile, "arbor://fs/write/secret/keys.txt") == :block
+    end
+
+    test "most-specific path rule wins (granular path trust: allow a project, ask for a subtree)" do
+      profile =
+        %{
+          Authority.new_profile("agent_granular")
+          | baseline: :block,
+            rules: %{
+              "arbor://fs/write/my/project" => :allow,
+              "arbor://fs/write/my/project/subproject" => :ask
+            }
+        }
+
+      # Default fs ceilings are :auto, so they don't interfere with these assertions.
+      assert Authority.effective_mode(profile, "arbor://fs/write/my/project/x") == :allow
+      assert Authority.effective_mode(profile, "arbor://fs/write/my/project/subproject/x") == :ask
+    end
+
+    test "on a canonical-length collision (bare vs '/**' for the same op) the most restrictive wins" do
+      # Both keys canonicalize to the same prefix and length; the mode_index
+      # tiebreak in resolve_prefix picks the fail-safe (more restrictive) mode.
+      profile =
+        %{
+          Authority.new_profile("agent_collision")
+          | baseline: :allow,
+            rules: %{
+              "arbor://fs/write/secret" => :allow,
+              "arbor://fs/write/secret/**" => :block
+            }
+        }
+
+      assert Authority.effective_mode(profile, "arbor://fs/write/secret/keys.txt") == :block
+    end
+  end
+
   describe "most_restrictive/1" do
     test "returns most restrictive mode" do
       assert Authority.most_restrictive([:auto, :allow, :ask]) == :ask
