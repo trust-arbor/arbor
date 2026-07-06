@@ -37,7 +37,17 @@ defmodule Arbor.Agent.SessionConfig do
   def build(agent_id, opts) do
     provider = Keyword.get(opts, :provider)
     runtime = Keyword.get(opts, :runtime, :arbor)
-    fallback_chain = Keyword.get(opts, :fallback_chain, [])
+
+    # Resilience default: a subscription-OAuth primary (openai_oauth / xai_oauth) gets an
+    # independent local fallback by default — kimi via Ollama, a *different* failure domain than
+    # OAuth, so it survives the exact token/rate-limit outage it insures against. Only fills an
+    # EMPTY chain (an explicit :fallback_chain always wins); tunable via
+    # `config :arbor_agent, :oauth_fallback_chain`. Entries are atom-keyed to match
+    # LlmHandler.apply_tool_loop_override/2.
+    fallback_chain =
+      opts
+      |> Keyword.get(:fallback_chain, [])
+      |> default_oauth_fallback(provider)
 
     tool_names = resolve_tool_names(Keyword.get(opts, :tools))
 
@@ -141,6 +151,18 @@ defmodule Arbor.Agent.SessionConfig do
         path
     end
   end
+
+  # ── OAuth fallback default ───────────────────────────────────────
+
+  # Subscription-OAuth providers that get the resilient local fallback by default.
+  @oauth_providers [:openai_oauth, :xai_oauth, "openai_oauth", "xai_oauth"]
+  @default_oauth_fallback [%{provider: "ollama", model: "kimi-k2.7-code:cloud"}]
+
+  defp default_oauth_fallback([], provider) when provider in @oauth_providers do
+    Application.get_env(:arbor_agent, :oauth_fallback_chain, @default_oauth_fallback)
+  end
+
+  defp default_oauth_fallback(chain, _provider), do: chain
 
   # ── Compactor config ─────────────────────────────────────────────
 

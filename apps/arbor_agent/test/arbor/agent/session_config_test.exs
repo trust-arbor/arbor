@@ -47,6 +47,41 @@ defmodule Arbor.Agent.SessionConfigTest do
     end
   end
 
+  describe "build/2 — OAuth fallback default (resilience)" do
+    @kimi %{provider: "ollama", model: "kimi-k2.7-code:cloud"}
+
+    test "an openai_oauth primary gets the kimi local fallback by default" do
+      for provider <- [:openai_oauth, "openai_oauth"] do
+        opts = SessionConfig.build("agent_test", provider: provider, recover_session: false)
+        config = Keyword.fetch!(opts, :config)
+
+        assert config["llm_fallback_chain"] == [@kimi],
+               "provider #{inspect(provider)} should default to the kimi fallback"
+      end
+    end
+
+    test "a non-OAuth primary gets no default fallback" do
+      opts = SessionConfig.build("agent_test", provider: :anthropic, recover_session: false)
+      config = Keyword.fetch!(opts, :config)
+
+      assert (config["llm_fallback_chain"] || []) == []
+    end
+
+    test "an explicit fallback_chain always wins over the OAuth default" do
+      explicit = [%{provider: "xai", model: "grok-4.3"}]
+
+      opts =
+        SessionConfig.build("agent_test",
+          provider: :openai_oauth,
+          fallback_chain: explicit,
+          recover_session: false
+        )
+
+      config = Keyword.fetch!(opts, :config)
+      assert config["llm_fallback_chain"] == explicit
+    end
+  end
+
   describe "build/2 — runtime axis (Phase 2d)" do
     test "defaults llm_runtime to :arbor when no :runtime option given" do
       opts = SessionConfig.build("agent_test", recover_session: false)
