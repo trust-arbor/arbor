@@ -175,6 +175,17 @@ defmodule Arbor.Actions.Skill do
         end
 
         Actions.emit_completed(__MODULE__, %{skill_name: skill_name, agent_id: agent_id})
+
+        # Record skill usage as a first-class, queryable event so the library can eventually measure
+        # reuse and prune unused skills (skill-subsystem-audit 2026-07-04 G3: activations recorded no
+        # usable outcome, so the library was write-only). A dedicated :skill stream beats mining the
+        # generic action-completed events. (Usage-driven pruning + did-it-help outcome: follow-on.)
+        Arbor.Signals.durable_emit(:skill, :skill_activated, %{
+          skill_name: skill_name,
+          agent_id: agent_id,
+          token_estimate: token_estimate
+        })
+
         body = skill_field(skill, :body) || ""
 
         {:ok,

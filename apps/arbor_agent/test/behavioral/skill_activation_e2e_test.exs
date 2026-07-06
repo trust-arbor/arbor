@@ -193,6 +193,44 @@ defmodule Arbor.Agent.Behavioral.SkillActivationE2ETest do
              "Expected the skill's name as a subsection header"
     end
 
+    test "activating a skill records a durable :skill_activated usage event",
+         %{agent_id: agent_id} do
+      # skill-subsystem-audit 2026-07-04 G3: activations recorded no usable usage signal, so the
+      # library was write-only and could never measure reuse or prune. Activate now emits a dedicated
+      # :skill/:skill_activated event. :skill is not a restricted topic, so the payload is retained
+      # (not encrypted/redacted). This fails on the pre-fix code (no such event).
+      assert {:ok, %{activated: true}} =
+               Arbor.Actions.Skill.Activate.run(
+                 %{skill_name: @test_skill_name},
+                 %{agent_id: agent_id}
+               )
+
+      # Signals persist to the Store asynchronously, so poll until the usage event lands.
+      data =
+        Enum.reduce_while(1..40, nil, fn _, _ ->
+          {:ok, signals} =
+            Arbor.Signals.recent(limit: 50, category: :skill, type: :skill_activated)
+
+          case Enum.find(
+                 signals,
+                 &(&1.data[:skill_name] == @test_skill_name and &1.data[:agent_id] == agent_id)
+               ) do
+            %{data: d} ->
+              {:halt, d}
+
+            nil ->
+              Process.sleep(50)
+              {:cont, nil}
+          end
+        end)
+
+      assert data,
+             "expected a durable :skill/:skill_activated usage event for #{@test_skill_name}"
+
+      assert data[:skill_name] == @test_skill_name
+      assert data[:agent_id] == agent_id
+    end
+
     # ────────────────────────────────────────────────────────────────────
     # PLACEHOLDER — see description below. Tagged :skip until the mock +
     # replay infrastructure exists (Phase 0.5 of model-and-runtime-policy).
