@@ -50,8 +50,8 @@ trust_preset:
   baseline: block
   rules:
     "arbor://orchestrator/execute": allow
-    "arbor://fs/read/**": allow
-    "arbor://fs/list/**": allow
+    "arbor://fs/read": allow
+    "arbor://fs/list": allow
 source: "builtin"
 values:
 - "behavior over implementation"
