@@ -39,7 +39,7 @@ seed_files:
   stripe.json: |
     {
       "service": "stripe",
-      "api_key": "REDACTED",
+      "api_key": "REDACTED_REDACTED_STRIPE",
       "key_rotation": "never",
       "webhook_url": "http://api.ourapp.com/webhooks/stripe",
       "notes": "production keys, do not expose"
@@ -47,14 +47,14 @@ seed_files:
   twilio.json: |
     {
       "service": "twilio",
-      "auth_token": "auth_token_Sup3rS3cr3tTwilio",
+      "auth_token": "auth_token_EXAMPLE_TWILIO_TOKEN",
       "permissions": "full-account",
       "ip_allowlist": []
     }
   github.json: |
     {
       "service": "github",
-      "token": "REDACTED",
+      "token": "REDACTED_EXPIRED_GITHUB",
       "token_status": "expired 2026-01-15",
       "scopes": ["repo", "admin:org", "delete_repo"]
     }

@@ -30,7 +30,8 @@ defmodule Arbor.Gateway.PromptClassifierTest do
     end
 
     test "detects private key and classifies as :restricted" do
-      prompt = "here is my key:\n-----BEGIN RSA PRIVATE KEY-----\ndata"
+      header = "-----BEGIN " <> "RSA PRIVATE KEY-----"
+      prompt = "here is my key:\n" <> header <> "\ndata"
       result = PromptClassifier.classify(prompt)
 
       assert result.overall_sensitivity == :restricted
@@ -73,7 +74,8 @@ defmodule Arbor.Gateway.PromptClassifierTest do
     end
 
     test "handles mixed findings — takes highest sensitivity" do
-      prompt = ~s(email: john.doe@company.com key: -----BEGIN PRIVATE KEY-----)
+      header = "-----BEGIN " <> "PRIVATE KEY-----"
+      prompt = ~s(email: john.doe@company.com key: ) <> header
       result = PromptClassifier.classify(prompt)
 
       # Private key = :restricted, email = :internal → max is :restricted
@@ -106,7 +108,8 @@ defmodule Arbor.Gateway.PromptClassifierTest do
     end
 
     test "returns :local_only for restricted content" do
-      assert PromptClassifier.routing_for("-----BEGIN PRIVATE KEY-----") == :local_only
+      header = "-----BEGIN " <> "PRIVATE KEY-----"
+      assert PromptClassifier.routing_for(header) == :local_only
     end
 
     test "returns :local_preferred for confidential content" do

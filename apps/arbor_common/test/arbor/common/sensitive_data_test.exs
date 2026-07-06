@@ -58,7 +58,9 @@ defmodule Arbor.Common.SensitiveDataTest do
 
   describe "scan_secrets/2" do
     test "detects AWS access key" do
-      findings = SensitiveData.scan_secrets("key: REDACTED")
+      # Concat to avoid committing a scanner-triggering secret literal
+      aws_key = "AKIA" <> "IOSFODNN7EXAMPLE"
+      findings = SensitiveData.scan_secrets("key: " <> aws_key)
       assert Enum.any?(findings, fn {label, _} -> label == "AWS Access Key" end)
     end
 
@@ -70,7 +72,9 @@ defmodule Arbor.Common.SensitiveDataTest do
     end
 
     test "detects GitHub token" do
-      findings = SensitiveData.scan_secrets("Token: REDACTED")
+      # Concat to avoid committing a scanner-triggering secret literal
+      gh_token = "ghp_" <> "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"
+      findings = SensitiveData.scan_secrets("Token: " <> gh_token)
       assert Enum.any?(findings, fn {label, _} -> label == "GitHub Token" end)
     end
 
@@ -85,7 +89,9 @@ defmodule Arbor.Common.SensitiveDataTest do
     end
 
     test "detects Google API key" do
-      findings = SensitiveData.scan_secrets("GOOGLE_KEY=REDACTED")
+      # Concat to avoid committing a scanner-triggering secret literal
+      g_key = "AIzaSy" <> "DaGmWKa4JsXZ-HjGw7ISLn_3namBGewQe"
+      findings = SensitiveData.scan_secrets("GOOGLE_KEY=" <> g_key)
       assert Enum.any?(findings, fn {label, _} -> label == "Google API Key" end)
     end
 
@@ -96,7 +102,9 @@ defmodule Arbor.Common.SensitiveDataTest do
     end
 
     test "detects private keys" do
-      text = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAK...\n-----END RSA PRIVATE KEY-----"
+      # Concat header to avoid committing a scanner-triggering literal
+      header = "-----BEGIN " <> "RSA PRIVATE KEY-----"
+      text = header <> "\nMIIEpAIBAAK...\n-----END RSA PRIVATE KEY-----"
       findings = SensitiveData.scan_secrets(text)
       assert Enum.any?(findings, fn {label, _} -> label == "Private Key" end)
     end
@@ -131,7 +139,8 @@ defmodule Arbor.Common.SensitiveDataTest do
 
   describe "scan_all/2" do
     test "combines PII and secret findings" do
-      text = "Email john@company.com and key REDACTED"
+      aws_key = "AKIA" <> "IOSFODNN7EXAMPLE"
+      text = "Email john@company.com and key " <> aws_key
       findings = SensitiveData.scan_all(text)
 
       assert Enum.any?(findings, fn {label, _} -> label == "Email Address" end)
@@ -141,9 +150,10 @@ defmodule Arbor.Common.SensitiveDataTest do
 
   describe "redact/1" do
     test "redacts secrets" do
-      text = "My key is REDACTED"
+      aws_key = "AKIA" <> "IOSFODNN7EXAMPLE"
+      text = "My key is " <> aws_key
       redacted = SensitiveData.redact(text)
-      refute String.contains?(redacted, "REDACTED")
+      refute String.contains?(redacted, aws_key)
       assert String.contains?(redacted, "[REDACTED]")
     end
 
@@ -162,7 +172,7 @@ defmodule Arbor.Common.SensitiveDataTest do
 
   describe "redact_pii/1" do
     test "only redacts PII, not secrets" do
-      key = "REDACTED"
+      key = "AKIA" <> "IOSFODNN7EXAMPLE"
       text = "Path /Users/admin/code and key #{key}"
       redacted = SensitiveData.redact_pii(text)
 
@@ -173,11 +183,12 @@ defmodule Arbor.Common.SensitiveDataTest do
 
   describe "redact_secrets/1" do
     test "only redacts secrets, not PII" do
-      text = "Path /Users/admin/code and key REDACTED"
+      aws_key = "AKIA" <> "IOSFODNN7EXAMPLE"
+      text = "Path /Users/admin/code and key " <> aws_key
       redacted = SensitiveData.redact_secrets(text)
 
       assert String.contains?(redacted, "/Users/admin/")
-      refute String.contains?(redacted, "REDACTED")
+      refute String.contains?(redacted, aws_key)
     end
   end
 

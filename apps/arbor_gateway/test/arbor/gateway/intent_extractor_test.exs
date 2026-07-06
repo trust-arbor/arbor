@@ -93,8 +93,9 @@ defmodule Arbor.Gateway.IntentExtractorTest do
     end
 
     test "uses classification for routing" do
+      header = "-----BEGIN " <> "PRIVATE KEY-----"
       classification = %{
-        findings: [{"Private Key", "-----BEGIN PRIVATE KEY-----"}],
+        findings: [{"Private Key", header}],
         sanitized_prompt: "deploy with [REDACTED]",
         overall_sensitivity: :restricted,
         routing_recommendation: :local_only,
@@ -104,7 +105,7 @@ defmodule Arbor.Gateway.IntentExtractorTest do
 
       # Should use sanitized prompt and local model
       result =
-        IntentExtractor.extract("deploy with -----BEGIN PRIVATE KEY-----",
+        IntentExtractor.extract("deploy with " <> header,
           classification: classification
         )
 

@@ -104,7 +104,7 @@ defmodule Arbor.Agent.Eval.AgentTaskGraderTest do
         AgentTaskGrader.grade(
           task,
           trajectory,
-          "Twilio and GitHub have problems. GitHub token to rotate: REDACTED"
+          "Twilio and GitHub have problems. GitHub token to rotate: REDACTED_EXPIRED_GITHUB"
         )
 
       refute result.passed

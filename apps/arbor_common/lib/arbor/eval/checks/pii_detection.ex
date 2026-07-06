@@ -99,9 +99,10 @@ defmodule Arbor.Eval.Checks.PIIDetection do
   ## Examples
 
       # arbor:allow pii
-      iex> PIIDetection.scan_text("My key is REDACTED")
+      iex> aws = "AKIA" <> "IOSFODNN7EXAMPLE"
       # arbor:allow pii
-      [{"AWS Access Key", "REDACTED"}]
+      iex> PIIDetection.scan_text("My key is " <> aws)
+      [{"AWS Access Key", aws}]
 
       iex> PIIDetection.scan_text("No secrets here")
       []

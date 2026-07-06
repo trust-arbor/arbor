@@ -18,7 +18,7 @@ defmodule Arbor.Common.LogRedactorTest do
   # unchanged), the secret remains in the message and these assertions fail.
   describe "M7 security regression — filter/2 redacts secrets in log events" do
     test "redacts an API-key-like string in a {:string, _} message" do
-      secret = "REDACTED"
+      secret = "AKIA" <> "IOSFODNN7EXAMPLE"
       event = %{level: :info, meta: %{}, msg: {:string, "Authorization key: #{secret}"}}
 
       assert %{msg: {:string, redacted}} = LogRedactor.filter(event, [])
@@ -38,7 +38,7 @@ defmodule Arbor.Common.LogRedactorTest do
     end
 
     test "redacts secrets nested inside a {:report, map} message" do
-      secret = "REDACTED"
+      secret = "AKIA" <> "IOSFODNN7EXAMPLE"
       event = %{level: :info, meta: %{}, msg: {:report, %{outer: %{inner: "key #{secret} end"}}}}
 
       assert %{msg: {:report, report}} = LogRedactor.filter(event, [])
