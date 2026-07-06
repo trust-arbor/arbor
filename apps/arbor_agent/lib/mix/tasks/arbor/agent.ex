@@ -160,10 +160,21 @@ defmodule Mix.Tasks.Arbor.Agent do
         display_name =
           opts[:name] || get_in(template_data, ["character", "name"]) || template_name
 
-        model_id = opts[:model] || Arbor.Agent.LLMDefaults.default_model()
+        # Honor the template's declared model/provider (metadata.model / metadata.provider) when no
+        # explicit --model/--provider is given, before the system default. The roster's templates
+        # (e.g. test_agent → gpt-5.5/openai_oauth) rely on this; the task previously dropped the
+        # template's model and always used LLMDefaults, so a started agent ran the wrong model.
+        model_id =
+          opts[:model] ||
+            get_in(template_data, ["metadata", "model"]) ||
+            Arbor.Agent.LLMDefaults.default_model()
 
         provider =
-          parse_provider(opts[:provider] || to_string(Arbor.Agent.LLMDefaults.default_provider()))
+          parse_provider(
+            opts[:provider] ||
+              get_in(template_data, ["metadata", "provider"]) ||
+              to_string(Arbor.Agent.LLMDefaults.default_provider())
+          )
 
         model_config = %{
           id: model_id,
@@ -547,6 +558,10 @@ defmodule Mix.Tasks.Arbor.Agent do
       "acp" -> :acp
       "gemini" -> :gemini
       "xai" -> :xai
+      # Subscription-OAuth providers (roster primaries) — tokens from ~/.codex/auth.json (openai)
+      # / ~/.grok (xai), see Arbor.LLM.OAuth. The *_oauth atoms are what the session config expects.
+      "openai_oauth" -> :openai_oauth
+      "xai_oauth" -> :xai_oauth
       other -> Mix.raise("Unknown provider: #{other}")
     end
   end
