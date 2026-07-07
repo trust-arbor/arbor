@@ -22,6 +22,23 @@ defmodule Arbor.Security.Reflex.Builtin do
 
   alias Arbor.Contracts.Security.Reflex
 
+  @protected_infrastructure_module_names [
+    "Arbor.Monitor",
+    "Arbor.Monitor.Poller",
+    "Arbor.Monitor.AnomalyQueue",
+    "Arbor.Monitor.Verification",
+    "Arbor.Monitor.CascadeDetector",
+    "Arbor.Monitor.RejectionTracker",
+    "Arbor.Monitor.Fingerprint",
+    "Arbor.Monitor.MetricsStore",
+    "Arbor.Monitor.AnomalyDetector",
+    "Arbor.Monitor.HealingSupervisor",
+    "Arbor.Agent.DebugAgent",
+    "Arbor.Security.Reflex",
+    "Arbor.Security.Reflex.Registry",
+    "Arbor.Security.Reflex.Builtin"
+  ]
+
   @doc """
   Returns all built-in reflexes.
   """
@@ -245,24 +262,6 @@ defmodule Arbor.Security.Reflex.Builtin do
   """
   @spec infrastructure_reflexes() :: [Reflex.t()]
   def infrastructure_reflexes do
-    # Modules protected from hot-load by agents
-    protected_modules = [
-      Arbor.Monitor,
-      Arbor.Monitor.Poller,
-      Arbor.Monitor.AnomalyQueue,
-      Arbor.Monitor.Verification,
-      Arbor.Monitor.CascadeDetector,
-      Arbor.Monitor.RejectionTracker,
-      Arbor.Monitor.Fingerprint,
-      Arbor.Monitor.MetricsStore,
-      Arbor.Monitor.AnomalyDetector,
-      Arbor.Monitor.HealingSupervisor,
-      Arbor.Agent.DebugAgent,
-      Arbor.Security.Reflex,
-      Arbor.Security.Reflex.Registry,
-      Arbor.Security.Reflex.Builtin
-    ]
-
     [
       # Block hot-loading of healing infrastructure modules
       Reflex.custom(
@@ -271,7 +270,7 @@ defmodule Arbor.Security.Reflex.Builtin do
           module = Map.get(context, :module)
           action = Map.get(context, :action)
 
-          action == :code_hot_load and module in protected_modules
+          action == :code_hot_load and protected_infrastructure_module?(module)
         end,
         id: "no_self_healing",
         response: :block,
@@ -285,7 +284,7 @@ defmodule Arbor.Security.Reflex.Builtin do
           module = Map.get(context, :module)
           action = Map.get(context, :action)
 
-          action == :code_eval and module in protected_modules
+          action == :code_eval and protected_infrastructure_module?(module)
         end,
         id: "no_healing_eval",
         response: :block,
@@ -304,6 +303,24 @@ defmodule Arbor.Security.Reflex.Builtin do
   def by_category(:network), do: network_reflexes()
   def by_category(:infrastructure), do: infrastructure_reflexes()
   def by_category(_), do: []
+
+  defp protected_infrastructure_module?(module) when is_atom(module) do
+    module
+    |> Atom.to_string()
+    |> normalize_module_name()
+    |> protected_infrastructure_module?()
+  end
+
+  defp protected_infrastructure_module?(module) when is_binary(module) do
+    module
+    |> normalize_module_name()
+    |> then(&(&1 in @protected_infrastructure_module_names))
+  end
+
+  defp protected_infrastructure_module?(_), do: false
+
+  defp normalize_module_name("Elixir." <> module), do: module
+  defp normalize_module_name(module), do: module
 
   @doc """
   Get the IDs of all built-in reflexes.
