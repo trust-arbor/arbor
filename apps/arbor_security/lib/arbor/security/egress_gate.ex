@@ -18,8 +18,10 @@ defmodule Arbor.Security.EgressGate do
      the taint rebuild's inbound control-param protection).
   2. **Tier semantics** — `:external_peer` is advisory (1.0 ACP deferral);
      `:on_host`/`:none` allow; `:on_premises` allows unless the on-premises flag.
-  3. **Trust standing** — the agent's profile `egress_mode` for gated tiers
-     (`:allow`/`:ask`/`:block`).
+  3. **Policy standing** — caller-supplied `opts[:egress_mode]` for gated tiers
+     (`:allow`/`:ask`/`:block`). The security kernel does not consult trust
+     policy directly; callers that want trust-profile modulation supply the
+     resolved mode.
   4. **Capability refinement** — a candidate cap whose `constraints.egress`
      (`max_tier`/`destinations`) covers the request downgrades `:ask` -> `:allow`.
   """
@@ -62,7 +64,7 @@ defmodule Arbor.Security.EgressGate do
         {:block, taint_level(opts)}
 
       true ->
-        case policy_mode(agent_id, tier) do
+        case policy_mode(agent_id, tier, opts) do
           :block -> {:block, :policy}
           :allow -> :allow
           :ask -> if Enum.any?(caps, &cap_covers?(&1, tier, opts)), do: :allow, else: :ask
@@ -70,15 +72,16 @@ defmodule Arbor.Security.EgressGate do
     end
   end
 
-  # The intent for a tier from tier semantics + trust profile, EXCLUDING caps.
-  @spec policy_mode(String.t(), atom()) :: :allow | :ask | :block
-  defp policy_mode(agent_id, tier) do
+  # The intent for a tier from tier semantics + caller-supplied policy standing,
+  # EXCLUDING caps.
+  @spec policy_mode(String.t(), atom(), keyword()) :: :allow | :ask | :block
+  defp policy_mode(_agent_id, tier, opts) do
     case tier do
       :external_peer -> :allow
       :on_host -> :allow
       :none -> :allow
-      :on_premises -> if gate_on_premises?(), do: trust_egress_mode(agent_id, tier), else: :allow
-      :external_provider -> trust_egress_mode(agent_id, tier)
+      :on_premises -> if gate_on_premises?(), do: egress_mode(opts), else: :allow
+      :external_provider -> egress_mode(opts)
       _ -> :allow
     end
   end
@@ -87,33 +90,15 @@ defmodule Arbor.Security.EgressGate do
     Application.get_env(:arbor_security, :gate_on_premises_egress, false) == true
   end
 
-  # Runtime indirection to the trust policy (arbor_trust depends on arbor_security,
-  # not vice versa). Maps :auto -> :allow. Fails closed to :ask when trust is
-  # unavailable — only reached for gated tiers, where :ask is the safe fallback.
-  defp trust_egress_mode(agent_id, tier) do
-    policy = trust_policy_module()
-
-    mode =
-      if Code.ensure_loaded?(policy) and function_exported?(policy, :egress_mode, 2) do
-        apply(policy, :egress_mode, [agent_id, tier])
-      else
-        :ask
-      end
-
-    if mode == :auto, do: :allow, else: mode
-  rescue
-    _ -> :ask
-  catch
-    :exit, _ -> :ask
-  end
-
-  defp trust_policy_module do
-    config = Arbor.Security.Config
-
-    if Code.ensure_loaded?(config) and function_exported?(config, :trust_policy_module, 0) do
-      apply(config, :trust_policy_module, [])
-    else
-      Arbor.Trust.Policy
+  # The policy layer may pass trust-profile standing in `opts[:egress_mode]`.
+  # Missing or malformed standing fails closed to :ask for gated tiers. :auto is
+  # equivalent to :allow in this 3-state egress decision.
+  defp egress_mode(opts) do
+    case Keyword.get(opts, :egress_mode) do
+      mode when mode in [:allow, :auto] -> :allow
+      :block -> :block
+      :ask -> :ask
+      _ -> :ask
     end
   end
 

@@ -212,6 +212,29 @@ defmodule Arbor.Trust do
   @spec confirmation_mode(String.t(), String.t()) :: :auto | :gated | :deny
   defdelegate confirmation_mode(agent_id, resource_uri), to: Arbor.Trust.Policy
 
+  @doc "Get the agent's egress standing for a resolved egress tier."
+  @spec egress_mode(String.t(), atom()) :: :block | :ask | :allow | :auto
+  defdelegate egress_mode(agent_id, tier), to: Arbor.Trust.Policy
+
+  @doc """
+  Authorize standalone egress through the trust-policy layer.
+
+  This wraps `Arbor.Security.authorize_egress/3` with the agent's resolved
+  profile egress standing. The security kernel remains responsible for taint,
+  tier semantics, and capability refinement; trust owns the profile lookup.
+  """
+  @spec authorize_egress(String.t(), atom(), keyword()) ::
+          :allow
+          | {:requires_approval, :egress}
+          | {:error, {:egress_blocked, atom(), atom()}}
+  def authorize_egress(agent_id, tier, opts \\ []) do
+    opts =
+      opts
+      |> Keyword.put_new(:egress_mode, egress_mode(agent_id, tier))
+
+    Arbor.Security.authorize_egress(agent_id, tier, opts)
+  end
+
   @doc """
   Enumerate held and profile-mintable authority for a finite URI surface.
 
@@ -248,6 +271,8 @@ defmodule Arbor.Trust do
           | {:ok, :pending_approval, String.t()}
           | {:error, term()}
   def authorize(agent_id, resource_uri, action \\ nil, opts \\ []) do
+    opts = maybe_put_egress_mode(agent_id, opts)
+
     with {:ok, effective_uri} <-
            Arbor.Security.normalize_authorization_resource_uri(resource_uri, opts),
          {:ok, cap} <- PolicyEnforcer.ensure_capability(agent_id, effective_uri, opts),
@@ -268,6 +293,13 @@ defmodule Arbor.Trust do
       {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
       {:error, reason} -> {:error, reason}
       other -> {:error, {:unexpected_auth_result, other}}
+    end
+  end
+
+  defp maybe_put_egress_mode(agent_id, opts) do
+    case Keyword.get(opts, :egress_tier) do
+      tier when is_atom(tier) -> Keyword.put_new(opts, :egress_mode, egress_mode(agent_id, tier))
+      _ -> opts
     end
   end
 

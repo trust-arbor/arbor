@@ -268,20 +268,6 @@ defmodule Arbor.Security.Config do
   end
 
   @doc """
-  The module used by the legacy in-kernel egress gate to resolve trust-profile
-  egress modes.
-
-  Must implement `egress_mode/2` for enforced external egress tiers. Defaults
-  to `Arbor.Trust.Policy`. Overridable so egress tests can substitute a stub.
-  Operation authorization approval policy moved to `Arbor.Trust.ApprovalGuard`
-  in the 2026-07-07 A1 boundary move.
-  """
-  @spec trust_policy_module() :: module()
-  def trust_policy_module do
-    Application.get_env(@app, :trust_policy_module, Arbor.Trust.Policy)
-  end
-
-  @doc """
   Whether strict identity mode is enabled.
 
   When `true`, unknown (unregistered) identities are rejected during

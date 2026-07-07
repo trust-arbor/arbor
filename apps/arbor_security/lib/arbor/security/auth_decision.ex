@@ -510,7 +510,7 @@ defmodule Arbor.Security.AuthDecision do
   # by the standalone Arbor.Security.authorize_egress/3 for the compute-node LLM
   # path). Here the matched capability is the only refinement candidate.
   #
-  #   check_egress_block/2 — hard-block (taint conjunct OR profile :block).
+  #   check_egress_block/2 — hard-block (taint conjunct OR supplied policy :block).
   #   apply_egress_ask/4    — escalate :ask to the ceiling approval path.
   defp check_egress_block(auth, opts) do
     tier = Keyword.get(opts, :egress_tier, :none)

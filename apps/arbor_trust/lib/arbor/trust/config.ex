@@ -77,16 +77,10 @@ defmodule Arbor.Trust.Config do
 
   @doc """
   Trust policy module used by policy-layer authorization.
-
-  Falls back to the historical `:arbor_security, :trust_policy_module` override
-  while the boundary move migrates tests and deployment config.
   """
   @spec policy_module() :: module()
   def policy_module do
-    get(
-      :policy_module,
-      Application.get_env(:arbor_security, :trust_policy_module, Arbor.Trust.Policy)
-    )
+    get(:policy_module, Arbor.Trust.Policy)
   end
 
   @doc """

@@ -241,6 +241,38 @@ defmodule Arbor.Trust.PolicyTest do
       assert Policy.egress_mode(agent_id, :external_peer) == :block
     end
 
+    test "authorize_egress passes profile egress standing into the security kernel",
+         %{agent_id: agent_id} do
+      create_profile_with_preset(agent_id, :balanced)
+
+      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+        %{profile | egress_modes: %{external_provider: :allow}}
+      end)
+
+      put_security_env(:egress_gate_enforcing, true)
+
+      assert Arbor.Trust.authorize_egress(agent_id, :external_provider) == :allow
+    end
+
+    test "Trust.authorize passes profile egress standing into operation authorization",
+         %{agent_id: agent_id} do
+      resource = "arbor://ai/generate"
+      create_profile_with_rules(agent_id, :ask, %{resource => :allow})
+
+      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+        %{profile | egress_modes: %{external_provider: :allow}}
+      end)
+
+      {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: resource)
+      put_security_env(:egress_gate_enforcing, true)
+
+      assert {:ok, :authorized} =
+               Arbor.Trust.authorize(agent_id, resource, :execute,
+                 egress_tier: :external_provider,
+                 verify_identity: false
+               )
+    end
+
     test "a deployment can set a system-wide default posture via config",
          %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :balanced)
@@ -484,6 +516,19 @@ defmodule Arbor.Trust.PolicyTest do
 
     Arbor.Trust.Store.update_profile(agent_id, fn profile ->
       %{profile | baseline: baseline, rules: rules}
+    end)
+  end
+
+  defp put_security_env(key, value) do
+    previous = Application.get_env(:arbor_security, key)
+    Application.put_env(:arbor_security, key, value)
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        Application.delete_env(:arbor_security, key)
+      else
+        Application.put_env(:arbor_security, key, previous)
+      end
     end)
   end
 end

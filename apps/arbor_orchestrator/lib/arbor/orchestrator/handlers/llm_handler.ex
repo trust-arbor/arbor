@@ -169,8 +169,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   defp call_llm_and_respond(prompt, node, context, graph, base_updates, opts) do
     # Egress gate (2026-06-14 URI-addressing-vs-classification decision). The
     # compute-node LLM path has no per-operation capability, so we check egress
-    # standing directly via Arbor.Security.authorize_egress/3 before dispatching.
-    # Runtime indirection — arbor_orchestrator does not hard-dep arbor_security.
+    # standing through Arbor.Trust.authorize_egress/3 before dispatching.
+    # arbor_orchestrator hard-deps the trust/security stack, so this is direct.
     # Inert unless egress enforcement is switched on; emits observability while
     # dark. A gate CRASH fails open (never let the gate halt LLM on a bug).
     case egress_halt_outcome(context, base_updates) do
@@ -351,7 +351,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   # ── Egress gate (2026-06-14) — compute-node LLM path ──────────────────────
   #
   # Returns a halt %Outcome{} when egress is blocked/requires-approval, else nil
-  # (proceed). arbor_security/arbor_ai are now hard deps so the calls are direct;
+  # (proceed). arbor_security/arbor_trust/arbor_ai are hard deps so the calls are direct;
   # a crash still fails open (the egress gate's documented default-allow posture
   # — the taint conjunct, not this gate, is the fail-closed protection).
 
@@ -367,7 +367,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     # scope LLM egress by).
     opts = [egress_taint: taint, egress_destination: provider && to_string(provider)]
 
-    case Arbor.Security.authorize_egress(agent_id, tier, opts) do
+    case Arbor.Trust.authorize_egress(agent_id, tier, opts) do
       :allow ->
         nil
 
@@ -635,13 +635,10 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
              node.attrs
              |> build_provider_options(Context.get(context, "session.acp_agent"))
              |> maybe_put_workspace(Context.get(context, "session.acp_workspace"))
-             |> merge_session_provider_options(
-               Context.get(context, "session.provider_options")
-             )
+             |> merge_session_provider_options(Context.get(context, "session.provider_options"))
          }}
     end
   end
-
 
   # ACP agents (e.g. grok) require a non-null cwd for session/new even when the call
   # only synthesizes text. Callers set `session.acp_workspace` (a `{:directory, path}`

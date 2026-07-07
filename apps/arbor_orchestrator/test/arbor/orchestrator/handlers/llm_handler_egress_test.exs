@@ -49,8 +49,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
     Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingDispatcher)
 
     prev_enforce = Application.get_env(:arbor_security, :egress_gate_enforcing)
-    prev_policy = Application.get_env(:arbor_security, :trust_policy_module)
-    Application.put_env(:arbor_security, :trust_policy_module, NoEgressStandingPolicy)
+    prev_policy = Application.get_env(:arbor_trust, :policy_module)
+    Application.put_env(:arbor_trust, :policy_module, NoEgressStandingPolicy)
 
     on_exit(fn ->
       Application.delete_env(:arbor_orchestrator, :llm_dispatcher)
@@ -61,8 +61,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
       end
 
       case prev_policy do
-        nil -> Application.delete_env(:arbor_security, :trust_policy_module)
-        v -> Application.put_env(:arbor_security, :trust_policy_module, v)
+        nil -> Application.delete_env(:arbor_trust, :policy_module)
+        v -> Application.put_env(:arbor_trust, :policy_module, v)
       end
     end)
 

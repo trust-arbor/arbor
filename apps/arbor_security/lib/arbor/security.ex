@@ -126,13 +126,16 @@ defmodule Arbor.Security do
   agent's egress-constrained caps to `EgressGate` for the `:ask`-downgrade
   refinement.
 
-  Inert (`:allow`) unless `config :arbor_security, :egress_gate_enforcing`. Emits
-  an `:egress_observed` signal for boundary-crossing egress regardless, so the
-  compute-node egress surface is observable while the gate is dark.
+  Inert (`:allow`) unless `config :arbor_security, :egress_gate_enforcing`. The
+  security kernel does not consult trust policy directly; callers that want
+  profile standing pass `:egress_mode` in `opts` or use `Arbor.Trust.authorize_egress/3`.
+  Emits an `:egress_observed` signal for boundary-crossing egress regardless, so
+  the compute-node egress surface is observable while the gate is dark.
 
   ## Parameters
   - `egress_tier` — resolved `Arbor.Contracts.Security.Classification.egress_tier`
-  - `opts` — `:egress_taint` (level/Taint), `:egress_destination` (host/provider)
+  - `opts` — `:egress_taint` (level/Taint), `:egress_destination` (host/provider),
+    `:egress_mode` (`:allow`/`:ask`/`:block`/`:auto`) from a policy layer
 
   ## Returns
   - `:allow`

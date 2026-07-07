@@ -26,34 +26,11 @@ defmodule Arbor.Security.EgressGateTest do
 
   @resource "arbor://ai/generate"
 
-  # Trust-policy stub for egress. Missing egress_mode/2 exercises the
-  # fail-closed :ask fallback for external tiers.
-  defmodule UngatedTrustPolicy do
-  end
-
-  # A profile that grants standing to egress to external providers (a trusted
-  # agent), but still asks for peers.
-  defmodule ProviderAllowedPolicy do
-    def egress_mode(_principal, :external_provider), do: :allow
-    def egress_mode(_principal, :on_premises), do: :allow
-    def egress_mode(_principal, _tier), do: :ask
-  end
-
-  # A profile that hard-blocks external-provider egress.
-  defmodule ProviderBlockedPolicy do
-    def egress_mode(_principal, :external_provider), do: :block
-    def egress_mode(_principal, _tier), do: :allow
-  end
-
   setup do
-    prev_policy = Application.get_env(:arbor_security, :trust_policy_module)
     prev_enforce = Application.get_env(:arbor_security, :egress_gate_enforcing)
     prev_onprem = Application.get_env(:arbor_security, :gate_on_premises_egress)
 
-    Application.put_env(:arbor_security, :trust_policy_module, UngatedTrustPolicy)
-
     on_exit(fn ->
-      restore(:trust_policy_module, prev_policy)
       restore(:egress_gate_enforcing, prev_enforce)
       restore(:gate_on_premises_egress, prev_onprem)
     end)
@@ -181,27 +158,30 @@ defmodule Arbor.Security.EgressGateTest do
     end
   end
 
-  describe "enforcing: trust-ceiling by egress tier (layer 1)" do
-    test "a profile granting external_provider :allow egresses freely (the heartbeat case)",
+  describe "enforcing: caller-supplied egress standing (layer 1)" do
+    test "caller-supplied external_provider :allow standing egresses freely",
          %{agent_id: agent} do
       enforce!()
-      Application.put_env(:arbor_security, :trust_policy_module, ProviderAllowedPolicy)
 
-      assert AuthDecision.check(agent, @resource, :execute, egress_tier: :external_provider) ==
-               :authorized
+      assert AuthDecision.check(agent, @resource, :execute,
+               egress_tier: :external_provider,
+               egress_mode: :allow
+             ) == :authorized
     end
 
-    test "a profile hard-blocking external_provider denies", %{agent_id: agent} do
+    test "caller-supplied external_provider :block standing denies", %{agent_id: agent} do
       enforce!()
-      Application.put_env(:arbor_security, :trust_policy_module, ProviderBlockedPolicy)
 
       assert {:error, {:egress_blocked, :external_provider, :policy}} =
-               AuthDecision.check(agent, @resource, :execute, egress_tier: :external_provider)
+               AuthDecision.check(agent, @resource, :execute,
+                 egress_tier: :external_provider,
+                 egress_mode: :block
+               )
     end
 
-    test "default profile (no egress standing) still asks", %{agent_id: agent} do
+    test "missing egress standing still asks", %{agent_id: agent} do
       enforce!()
-      # setup's UngatedTrustPolicy has no egress_mode/2 -> fail-closed :ask
+
       assert {:requires_approval, _} =
                AuthDecision.check(agent, @resource, :execute, egress_tier: :external_provider)
     end
@@ -219,10 +199,11 @@ defmodule Arbor.Security.EgressGateTest do
                {:requires_approval, :egress}
     end
 
-    test "enforcing + profile grants standing → :allow (the heartbeat case)", %{agent_id: agent} do
+    test "enforcing + caller supplies standing → :allow", %{agent_id: agent} do
       enforce!()
-      Application.put_env(:arbor_security, :trust_policy_module, ProviderAllowedPolicy)
-      assert Arbor.Security.authorize_egress(agent, :external_provider) == :allow
+
+      assert Arbor.Security.authorize_egress(agent, :external_provider, egress_mode: :allow) ==
+               :allow
     end
 
     test "enforcing + on_host (local LLM) → :allow", %{agent_id: agent} do
