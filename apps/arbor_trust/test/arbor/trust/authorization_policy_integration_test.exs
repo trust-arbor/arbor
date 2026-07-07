@@ -112,6 +112,58 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
              )
   end
 
+  test "B6 security regression: low-risk read auto-grants with profile constraints", %{
+    agent_id: agent_id
+  } do
+    uri = "arbor://fs/read/b6/note.txt"
+    set_profile_rules(agent_id, %{"arbor://fs/read" => :auto})
+
+    assert {:ok, :authorized} =
+             Trust.authorize(agent_id, uri, :read, verify_identity: false)
+
+    assert {:ok, cap} = CapabilityStore.find_authorizing(agent_id, uri)
+    assert cap.constraints == %{rate_limit: 300}
+    assert cap.metadata[:source] == :trust_policy_enforcer
+    assert cap.metadata[:mode] == :auto
+    assert cap.metadata[:profile_uri] == "arbor://fs/read"
+  end
+
+  test "B6 security regression: irreversible profile-backed actions escalate instead of auto-run",
+       %{
+         agent_id: agent_id
+       } do
+    uri = "arbor://agent/create"
+    set_profile_rules(agent_id, %{uri => :auto})
+
+    assert {:error, :escalation_disabled} =
+             Trust.authorize(agent_id, uri, :execute, verify_identity: false)
+
+    assert {:ok, cap} = CapabilityStore.find_authorizing(agent_id, uri)
+    assert cap.metadata[:source] == :trust_policy_enforcer
+    assert cap.metadata[:mode] == :ask
+    assert cap.metadata[:profile_uri] == "arbor://agent/create"
+  end
+
+  test "B6 security regression: permissive baseline alone cannot mint unprofiled caps", %{
+    agent_id: agent_id
+  } do
+    uri = "arbor://unprofiled/baseline-only"
+    Application.put_env(:arbor_trust, :allow_permissive_baseline, true)
+
+    {:ok, _profile} =
+      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+        %{profile | baseline: :allow, rules: %{}}
+      end)
+
+    assert {:error, :unauthorized} =
+             Trust.authorize(agent_id, uri, :execute,
+               security_ceilings: %{},
+               verify_identity: false
+             )
+
+    assert {:error, :not_found} = CapabilityStore.find_authorizing(agent_id, uri)
+  end
+
   test "security ceilings gate code/write even for permissive profiles", %{agent_id: agent_id} do
     promote_to_hands_off(agent_id)
     uri = "arbor://code/write/foo.ex"

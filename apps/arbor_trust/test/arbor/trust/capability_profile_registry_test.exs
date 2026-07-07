@@ -23,9 +23,11 @@ defmodule Arbor.Trust.CapabilityProfileRegistryTest do
     test "non-profiled registered prefixes carry owning library annotations" do
       rows = Map.new(CapabilityProfileRegistry.coverage_rows(), &{&1.uri_prefix, &1})
 
-      assert rows["arbor://memory/read"].owner == :arbor_memory
-      assert rows["arbor://memory/read"].profile == nil
-      assert rows["arbor://memory/read"].not_profileable_reason =~ "owned by arbor_memory"
+      assert rows["arbor://persistence/read"].owner == :arbor_persistence
+      assert rows["arbor://persistence/read"].profile == nil
+
+      assert rows["arbor://persistence/read"].not_profileable_reason =~
+               "owned by arbor_persistence"
     end
   end
 end

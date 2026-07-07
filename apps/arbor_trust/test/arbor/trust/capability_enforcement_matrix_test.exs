@@ -8,7 +8,7 @@ defmodule Arbor.Trust.CapabilityEnforcementMatrixTest do
   describe "rows/0" do
     test "covers every declared high-risk profile with soft and hard gates" do
       profile_uris =
-        CapabilityRiskProfiles.profiles()
+        CapabilityRiskProfiles.high_risk_profiles()
         |> Enum.map(& &1.uri_prefix)
         |> Enum.sort()
 

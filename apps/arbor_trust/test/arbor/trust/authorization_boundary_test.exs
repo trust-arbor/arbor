@@ -14,6 +14,7 @@ defmodule Arbor.Trust.AuthorizationBoundaryTest do
     ensure_started(Arbor.Security.Identity.Registry)
     ensure_started(Arbor.Security.SystemAuthority)
     ensure_started(CapabilityStore)
+    ensure_started(Arbor.Security.Constraint.RateLimiter)
 
     prev_enforcer = Application.get_env(:arbor_trust, :policy_enforcer_enabled)
     prev_guard = Application.get_env(:arbor_trust, :approval_guard_enabled)

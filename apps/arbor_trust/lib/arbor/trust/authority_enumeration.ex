@@ -119,7 +119,8 @@ defmodule Arbor.Trust.AuthorityEnumeration do
     {mode, policy_error} = policy_mode(principal_id, uri, opts)
 
     policy_mintable? =
-      not held? and is_nil(policy_error) and PolicyEnforcer.enabled?() and mode != :block
+      not held? and is_nil(policy_error) and
+        PolicyEnforcer.mintable?(principal_id, uri, opts)
 
     sources =
       []

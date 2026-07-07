@@ -163,7 +163,7 @@ defmodule Arbor.Trust.CapabilityEnforcementMatrix do
   @doc "Return one enforcement row for each declared high-risk capability profile."
   @spec rows() :: [row()]
   def rows do
-    Enum.map(CapabilityRiskProfiles.profiles(), &row_for!/1)
+    Enum.map(CapabilityRiskProfiles.high_risk_profiles(), &row_for!/1)
   end
 
   @doc "Resolve the enforcement row covering a high-risk profile or URI."
@@ -185,7 +185,7 @@ defmodule Arbor.Trust.CapabilityEnforcementMatrix do
 
   def row_for(uri) when is_binary(uri) do
     case CapabilityProfileRegistry.profile_for(uri) do
-      %CapabilityProfile{} = profile -> row_for(profile)
+      %CapabilityProfile{} = profile -> high_risk_row_for(profile)
       nil -> {:error, :unknown_high_risk_profile}
     end
   end
@@ -236,6 +236,16 @@ defmodule Arbor.Trust.CapabilityEnforcementMatrix do
 
   defp capability_class(%CapabilityProfile{uri_prefix: uri_prefix, effect_class: effect_class}) do
     {:error, {:unsupported_high_risk_class, uri_prefix, effect_class}}
+  end
+
+  defp high_risk_row_for(%CapabilityProfile{} = profile) do
+    case row_for(profile) do
+      {:error, {:unsupported_high_risk_class, _uri_prefix, _effect_class}} ->
+        {:error, :unknown_high_risk_profile}
+
+      result ->
+        result
+    end
   end
 
   defp gate_for(gates, capability_class) do

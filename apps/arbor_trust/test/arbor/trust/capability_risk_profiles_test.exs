@@ -35,6 +35,21 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
       refute Map.has_key?(Map.from_struct(profile), :trust_floor)
     end
 
+    test "declares low-friction read profiles with default constraints" do
+      profile =
+        CapabilityRiskProfiles.profiles()
+        |> Enum.find(&(&1.uri_prefix == "arbor://fs/read"))
+
+      assert %CapabilityProfile{} = profile
+      assert profile.blast_radius == :low
+      assert profile.reversibility == :read_only
+      assert profile.effect_class == :read
+      assert profile.default_approval == :auto
+      assert profile.default_constraints == %{rate_limit: 300}
+
+      refute profile in CapabilityRiskProfiles.high_risk_profiles()
+    end
+
     test "layers operator profile overrides over inline defaults" do
       Application.put_env(:arbor_trust, :capability_profile_overrides, %{
         "arbor://fs/write/" => %{
@@ -103,11 +118,10 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
   end
 
   describe "profile-derived policy projections" do
-    test "every high-risk profile has each policy projection" do
+    test "every profile has non-ceiling policy projections" do
       profile_uris = CapabilityRiskProfiles.profiles() |> Enum.map(& &1.uri_prefix) |> Enum.sort()
 
       projections = [
-        CapabilityRiskProfiles.security_ceilings(),
         CapabilityRiskProfiles.graduation_thresholds(),
         CapabilityRiskProfiles.default_constraints(),
         CapabilityRiskProfiles.delegation_defaults(),
@@ -117,6 +131,14 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
       for projection <- projections do
         assert profile_uris -- (projection |> Map.keys() |> Enum.sort()) == []
       end
+    end
+
+    test "every high-risk profile has a security ceiling projection" do
+      profile_uris =
+        CapabilityRiskProfiles.high_risk_profiles() |> Enum.map(& &1.uri_prefix) |> Enum.sort()
+
+      ceiling_uris = CapabilityRiskProfiles.security_ceilings() |> Map.keys() |> Enum.sort()
+      assert profile_uris -- ceiling_uris == []
     end
 
     test "derives graduation thresholds from profile metadata" do
@@ -129,12 +151,15 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
       assert thresholds["arbor://fs/write"] == 3
       assert thresholds["arbor://code/compile"] == 5
       assert thresholds["arbor://action/github/pr"] == 5
+      assert thresholds["arbor://fs/read"] == 0
     end
 
     test "projects constraints, delegation, and approval defaults" do
       assert CapabilityRiskProfiles.default_constraints()["arbor://fs/write"] == %{}
+      assert CapabilityRiskProfiles.default_constraints()["arbor://fs/read"] == %{rate_limit: 300}
       assert CapabilityRiskProfiles.delegation_defaults()["arbor://fs/write"] == false
       assert CapabilityRiskProfiles.approval_defaults()["arbor://fs/write"] == :require_human
+      assert CapabilityRiskProfiles.approval_defaults()["arbor://fs/read"] == :auto
     end
 
     test "operator profile overrides flow through all projections" do

@@ -85,6 +85,22 @@ defmodule Arbor.Trust.AuthorityEnumerationTest do
       refute memory.policy_mintable
       assert memory.sources == []
     end
+
+    test "B6 security regression: unprofiled auto rules are not policy-mintable", %{
+      agent_id: agent_id
+    } do
+      set_policy_enforcer_enabled(true)
+      create_profile_with_rules(agent_id, :ask, %{"arbor://unprofiled" => :auto})
+
+      {:ok, snapshot} = Arbor.Trust.enumerate_authority(agent_id, ["arbor://unprofiled/op"])
+
+      entry = entry(snapshot, "arbor://unprofiled/op")
+      assert entry.mode == :auto
+      refute entry.held
+      refute entry.policy_mintable
+      assert entry.sources == []
+      assert snapshot.policy_mintable_uris == []
+    end
   end
 
   defp entry(snapshot, uri) do

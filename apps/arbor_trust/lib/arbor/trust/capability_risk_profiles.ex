@@ -3,8 +3,9 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
   Capability risk profiles used by trust policy projections.
 
   Ring A introduced a small high-risk map local to `arbor_trust`. Ring B
-  promotes that metadata to the shared `CapabilityProfile` contract while
-  keeping the current high-risk ceiling projection intact.
+  promotes that metadata to the shared `CapabilityProfile` contract and adds the
+  low-friction read profiles needed for property-based JIT capability minting.
+  High-risk ceiling projection remains scoped to `high_risk_profiles/0`.
 
   Operator profile overrides live in:
 
@@ -66,13 +67,30 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
      :confidential, true, :require_human, true, :cheap}
   ]
 
-  @doc "Return inline high-risk URI profiles before operator overrides."
+  @low_friction_profile_specs [
+    {"arbor://fs/read", :arbor_security, :low, :read_only, :read, :confidential, true, :auto,
+     true, :cheap, %{rate_limit: 300}},
+    {"arbor://fs/list", :arbor_security, :low, :read_only, :read, :confidential, true, :auto,
+     true, :cheap, %{rate_limit: 300}},
+    {"arbor://code/read", :arbor_actions, :low, :read_only, :read, :confidential, true, :auto,
+     true, :cheap, %{rate_limit: 300}},
+    {"arbor://historian/query", :arbor_historian, :low, :read_only, :read, :internal, true, :auto,
+     true, :cheap, %{rate_limit: 300}},
+    {"arbor://memory/read", :arbor_memory, :low, :read_only, :read, :confidential, true, :auto,
+     true, :cheap, %{rate_limit: 300}},
+    {"arbor://memory/search", :arbor_memory, :low, :read_only, :read, :confidential, true, :auto,
+     true, :cheap, %{rate_limit: 300}},
+    {"arbor://memory/recall", :arbor_memory, :low, :read_only, :read, :confidential, true, :auto,
+     true, :cheap, %{rate_limit: 300}}
+  ]
+
+  @doc "Return inline URI profiles before operator overrides."
   @spec inline_profiles() :: [risk_profile()]
   def inline_profiles do
-    Enum.map(@high_risk_profile_specs, &profile_from_spec!/1)
+    inline_high_risk_profiles() ++ inline_low_friction_profiles()
   end
 
-  @doc "Return high-risk URI profiles with operator overrides applied."
+  @doc "Return declared URI profiles with operator overrides applied."
   @spec profiles() :: [risk_profile()]
   def profiles do
     inline_profiles()
@@ -82,13 +100,19 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
   @doc """
   Return declared high-risk URI profiles.
 
-  Kept for the Ring A public API; equivalent to `profiles/0`.
+  Kept for the Ring A public API. Low-friction read profiles are intentionally
+  excluded because they do not require independent hard-gate rows.
   """
   @spec high_risk_profiles() :: [risk_profile()]
-  def high_risk_profiles, do: profiles()
+  def high_risk_profiles do
+    high_risk_uris = inline_high_risk_profiles() |> MapSet.new(& &1.uri_prefix)
+
+    profiles()
+    |> Enum.filter(&MapSet.member?(high_risk_uris, &1.uri_prefix))
+  end
 
   @doc """
-  Project high-risk capability profiles into security ceilings.
+  Project capability profiles into security ceilings.
   """
   @spec security_ceilings() :: %{String.t() => ceiling_mode()}
   def security_ceilings do
@@ -102,28 +126,28 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
     |> Map.new()
   end
 
-  @doc "Project high-risk capability profiles into graduation thresholds."
+  @doc "Project capability profiles into graduation thresholds."
   @spec graduation_thresholds() :: %{String.t() => graduation_threshold()}
   def graduation_thresholds do
     profiles()
     |> Map.new(fn profile -> {profile.uri_prefix, graduation_threshold(profile)} end)
   end
 
-  @doc "Project high-risk capability profiles into default capability constraints."
+  @doc "Project capability profiles into default capability constraints."
   @spec default_constraints() :: %{String.t() => map()}
   def default_constraints do
     profiles()
     |> Map.new(fn profile -> {profile.uri_prefix, profile.default_constraints} end)
   end
 
-  @doc "Project high-risk capability profiles into delegation defaults."
+  @doc "Project capability profiles into delegation defaults."
   @spec delegation_defaults() :: %{String.t() => boolean()}
   def delegation_defaults do
     profiles()
     |> Map.new(fn profile -> {profile.uri_prefix, profile.delegable} end)
   end
 
-  @doc "Project high-risk capability profiles into approval defaults."
+  @doc "Project capability profiles into approval defaults."
   @spec approval_defaults() :: %{String.t() => CapabilityProfile.default_approval()}
   def approval_defaults do
     profiles()
@@ -164,9 +188,36 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
   def graduation_threshold(%CapabilityProfile{blast_radius: :medium}), do: 2
   def graduation_threshold(%CapabilityProfile{blast_radius: :low}), do: 1
 
+  defp inline_high_risk_profiles do
+    Enum.map(@high_risk_profile_specs, &profile_from_spec!/1)
+  end
+
+  defp inline_low_friction_profiles do
+    Enum.map(@low_friction_profile_specs, &profile_from_spec!/1)
+  end
+
   defp profile_from_spec!(
          {uri_prefix, owner, blast_radius, reversibility, effect_class, data_class, arg_dependent,
           default_approval, graduation_eligible, cost_class}
+       ) do
+    profile_from_spec!({
+      uri_prefix,
+      owner,
+      blast_radius,
+      reversibility,
+      effect_class,
+      data_class,
+      arg_dependent,
+      default_approval,
+      graduation_eligible,
+      cost_class,
+      %{}
+    })
+  end
+
+  defp profile_from_spec!(
+         {uri_prefix, owner, blast_radius, reversibility, effect_class, data_class, arg_dependent,
+          default_approval, graduation_eligible, cost_class, default_constraints}
        ) do
     CapabilityProfile.new!(%{
       uri_prefix: uri_prefix,
@@ -177,6 +228,7 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
       data_class: data_class,
       arg_dependent: arg_dependent,
       default_approval: default_approval,
+      default_constraints: default_constraints,
       delegable: false,
       cost_class: cost_class,
       graduation_eligible: graduation_eligible

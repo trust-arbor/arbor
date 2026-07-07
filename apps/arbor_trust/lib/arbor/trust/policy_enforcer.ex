@@ -47,30 +47,43 @@ defmodule Arbor.Trust.PolicyEnforcer do
           {:ok, map()} | {:error, term()}
   def check(principal_id, resource_uri, opts \\ []) do
     if enabled?() do
-      case get_effective_mode(principal_id, resource_uri, opts) do
-        mode when mode in [:auto, :allow] ->
-          auto_grant(
-            principal_id,
-            resource_uri,
-            opts,
-            default_constraints_for(resource_uri),
-            mode
-          )
+      mode = get_effective_mode(principal_id, resource_uri, opts)
 
-        :ask ->
-          auto_grant(
-            principal_id,
-            resource_uri,
-            opts,
-            default_constraints_for(resource_uri),
-            :ask
-          )
+      case grant_decision(resource_uri, mode) do
+        {:grant, profile, grant_mode} ->
+          auto_grant(principal_id, resource_uri, opts, profile, grant_mode)
 
-        :block ->
+        {:deny, reason} ->
+          log_mint_denial(principal_id, resource_uri, mode, reason)
           {:error, :unauthorized}
       end
     else
       {:error, :unauthorized}
+    end
+  end
+
+  @doc """
+  Return whether trust policy may mint a missing capability for a resource.
+
+  This is a read-only mirror of `check/3` for authority enumeration. It does not
+  grant capabilities or emit grant signals.
+  """
+  @spec mintable?(String.t(), String.t(), keyword()) :: boolean()
+  def mintable?(principal_id, resource_uri, opts \\ []) do
+    if enabled?() do
+      with {:ok, resource_uri} <-
+             Arbor.Security.normalize_authorization_resource_uri(resource_uri, opts) do
+        mode = get_effective_mode(principal_id, resource_uri, opts)
+
+        case grant_decision(resource_uri, mode) do
+          {:grant, _profile, _grant_mode} -> true
+          {:deny, _reason} -> false
+        end
+      else
+        _ -> false
+      end
+    else
+      false
     end
   end
 
@@ -152,7 +165,9 @@ defmodule Arbor.Trust.PolicyEnforcer do
     :exit, _ -> :ok
   end
 
-  defp auto_grant(principal_id, resource_uri, opts, constraints, mode) do
+  defp auto_grant(principal_id, resource_uri, opts, profile, mode) do
+    constraints = profile.default_constraints
+
     grant_opts = [
       principal: principal_id,
       resource: resource_uri,
@@ -162,7 +177,12 @@ defmodule Arbor.Trust.PolicyEnforcer do
         legacy_source: @legacy_source,
         mode: mode,
         granted_by: __MODULE__,
-        granted_at: DateTime.utc_now()
+        granted_at: DateTime.utc_now(),
+        profile_uri: profile.uri_prefix,
+        profile_effect_class: profile.effect_class,
+        profile_blast_radius: profile.blast_radius,
+        profile_reversibility: profile.reversibility,
+        profile_default_approval: profile.default_approval
       }
     ]
 
@@ -221,11 +241,55 @@ defmodule Arbor.Trust.PolicyEnforcer do
     :exit, _ -> :block
   end
 
-  defp default_constraints_for(resource_uri) do
+  defp grant_decision(resource_uri, mode) do
     case CapabilityProfileRegistry.profile_for(resource_uri) do
-      %{default_constraints: constraints} when is_map(constraints) -> constraints
-      _ -> %{}
+      nil ->
+        {:deny, :unprofiled}
+
+      %{default_approval: :forbid} ->
+        {:deny, :forbidden_profile}
+
+      profile ->
+        grant_decision_for_profile(profile, mode)
     end
+  end
+
+  defp grant_decision_for_profile(_profile, :block), do: {:deny, :blocked}
+
+  defp grant_decision_for_profile(profile, :ask), do: {:grant, profile, :ask}
+
+  defp grant_decision_for_profile(profile, mode) when mode in [:auto, :allow] do
+    if auto_grantable_profile?(profile) do
+      {:grant, profile, mode}
+    else
+      {:deny, {:unsafe_auto_grant, profile.uri_prefix}}
+    end
+  end
+
+  defp grant_decision_for_profile(_profile, mode), do: {:deny, {:unknown_mode, mode}}
+
+  defp auto_grantable_profile?(%{
+         blast_radius: :low,
+         reversibility: reversibility,
+         effect_class: effect_class,
+         default_approval: default_approval,
+         cost_class: :cheap
+       })
+       when reversibility in [:read_only, :reversible] and
+              effect_class in [:read, :local_write] and
+              default_approval in [:auto, :notify],
+       do: true
+
+  defp auto_grantable_profile?(_profile), do: false
+
+  defp log_mint_denial(principal_id, resource_uri, mode, reason) do
+    Logger.debug(
+      "[Trust.PolicyEnforcer] refused to mint #{resource_uri}: #{inspect(reason)}",
+      principal_id: principal_id,
+      resource_uri: resource_uri,
+      mode: mode,
+      reason: reason
+    )
   end
 
   defp trust_minted?(cap) do

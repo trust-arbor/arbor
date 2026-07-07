@@ -84,17 +84,41 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
 
     test "mints profile default constraints when a capability profile matches" do
       agent_id = unique_agent()
-      uri = "arbor://fs/write/policy-default-constraints"
+      uri = "arbor://fs/read/policy-default-constraints"
 
       Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
       Application.put_env(:arbor_trust, :policy_module, AutoPolicy)
 
       Application.put_env(:arbor_trust, :capability_profile_overrides, %{
-        "arbor://fs/write" => %{default_constraints: %{ttl_seconds: 60}}
+        "arbor://fs/read" => %{default_constraints: %{rate_limit: 7}}
       })
 
       assert {:ok, cap} = PolicyEnforcer.ensure_capability(agent_id, uri)
-      assert cap.constraints == %{ttl_seconds: 60}
+      assert cap.constraints == %{rate_limit: 7}
+      assert cap.metadata[:profile_uri] == "arbor://fs/read"
+      assert cap.metadata[:profile_effect_class] == :read
+    end
+
+    test "B6 security regression: high-risk auto standing does not mint a missing capability" do
+      agent_id = unique_agent()
+      uri = "arbor://fs/write/policy-high-risk-auto"
+
+      Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
+      Application.put_env(:arbor_trust, :policy_module, AutoPolicy)
+
+      assert {:error, :unauthorized} = PolicyEnforcer.ensure_capability(agent_id, uri)
+      assert {:error, :not_found} = CapabilityStore.find_authorizing(agent_id, uri)
+    end
+
+    test "B6 security regression: unprofiled auto standing does not mint baseline-only capability" do
+      agent_id = unique_agent()
+      uri = "arbor://unprofiled/policy-auto"
+
+      Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
+      Application.put_env(:arbor_trust, :policy_module, AutoPolicy)
+
+      assert {:error, :unauthorized} = PolicyEnforcer.ensure_capability(agent_id, uri)
+      assert {:error, :not_found} = CapabilityStore.find_authorizing(agent_id, uri)
     end
 
     test "mints an explicit trust-stamped capability when policy mode is :ask" do
