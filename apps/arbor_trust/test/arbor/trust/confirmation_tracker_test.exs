@@ -6,8 +6,20 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
   @moduletag :fast
 
   setup do
+    previous_thresholds = Application.get_env(:arbor_trust, :graduation_thresholds)
+    Application.delete_env(:arbor_trust, :graduation_thresholds)
+
     start_supervised!(ConfirmationTracker)
     agent_id = "agent_tracker_test_#{System.unique_integer([:positive])}"
+
+    on_exit(fn ->
+      if is_nil(previous_thresholds) do
+        Application.delete_env(:arbor_trust, :graduation_thresholds)
+      else
+        Application.put_env(:arbor_trust, :graduation_thresholds, previous_thresholds)
+      end
+    end)
+
     {:ok, agent_id: agent_id}
   end
 
@@ -257,18 +269,18 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
     @tag spec: "TRUST-9"
     test "clears all confirmation history for an agent", %{agent_id: agent_id} do
       write_uri = "arbor://code/write/#{agent_id}/impl/file.ex"
-      network_uri = "arbor://network/request/https://example.com"
+      github_uri = "arbor://action/github/pr/#{agent_id}"
 
       # Build history in multiple prefixes
       ConfirmationTracker.record_approval(agent_id, write_uri)
       ConfirmationTracker.record_approval(agent_id, write_uri)
-      ConfirmationTracker.record_approval(agent_id, network_uri)
+      ConfirmationTracker.record_approval(agent_id, github_uri)
 
       # Reset everything
       ConfirmationTracker.reset(agent_id)
 
       assert ConfirmationTracker.status(agent_id, "arbor://code/write") == new_entry()
-      assert ConfirmationTracker.status(agent_id, "arbor://network") == new_entry()
+      assert ConfirmationTracker.status(agent_id, "arbor://action/github/pr") == new_entry()
     end
 
     @tag spec: "TRUST-9"
@@ -291,13 +303,13 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
   # ===========================================================================
 
   describe "threshold_for/1" do
-    test "returns default thresholds for URI prefixes" do
-      assert ConfirmationTracker.threshold_for("arbor://code/read") == 0
+    test "returns profile-derived thresholds for high-risk URI prefixes" do
       assert ConfirmationTracker.threshold_for("arbor://code/write") == 3
+      assert ConfirmationTracker.threshold_for("arbor://fs/write") == 3
+      assert ConfirmationTracker.threshold_for("arbor://code/compile") == 5
+      assert ConfirmationTracker.threshold_for("arbor://action/github/pr") == 5
       assert ConfirmationTracker.threshold_for("arbor://shell") == :never
-      assert ConfirmationTracker.threshold_for("arbor://network") == 5
-      assert ConfirmationTracker.threshold_for("arbor://ai") == 3
-      assert ConfirmationTracker.threshold_for("arbor://config") == 10
+      assert ConfirmationTracker.threshold_for("arbor://code/hot_load") == :never
       assert ConfirmationTracker.threshold_for("arbor://governance") == :never
     end
 
@@ -310,6 +322,16 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       assert ConfirmationTracker.threshold_for("arbor://shell/exec") == :never
       # arbor://code/write/foo inherits arbor://code/write threshold
       assert ConfirmationTracker.threshold_for("arbor://code/write/foo") == 3
+    end
+
+    test "configuration can override or add threshold prefixes" do
+      Application.put_env(:arbor_trust, :graduation_thresholds, %{
+        "arbor://code/write" => 4,
+        "arbor://config" => 10
+      })
+
+      assert ConfirmationTracker.threshold_for("arbor://code/write/foo") == 4
+      assert ConfirmationTracker.threshold_for("arbor://config/write/self/setting") == 10
     end
   end
 
@@ -325,23 +347,24 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       assert ConfirmationTracker.resolve_tracking_prefix("arbor://shell/exec/ls") ==
                "arbor://shell"
 
-      assert ConfirmationTracker.resolve_tracking_prefix(
-               "arbor://network/request/https://example.com"
-             ) ==
-               "arbor://network"
+      assert ConfirmationTracker.resolve_tracking_prefix("arbor://action/github/pr/repo") ==
+               "arbor://action/github/pr"
     end
 
     test "returns nil for unknown URIs" do
       assert ConfirmationTracker.resolve_tracking_prefix("arbor://unknown/path") == nil
     end
 
+    test "does not match sibling URI text" do
+      assert ConfirmationTracker.resolve_tracking_prefix("arbor://shellfish/exec") == nil
+    end
+
     test "picks longest matching prefix" do
-      # arbor://code/write is more specific than arbor://code/read
       assert ConfirmationTracker.resolve_tracking_prefix("arbor://code/write/file.ex") ==
                "arbor://code/write"
 
-      assert ConfirmationTracker.resolve_tracking_prefix("arbor://code/read/file.ex") ==
-               "arbor://code/read"
+      assert ConfirmationTracker.resolve_tracking_prefix("arbor://action/github/pr/repo") ==
+               "arbor://action/github/pr"
     end
   end
 
@@ -372,8 +395,8 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
   # ===========================================================================
 
   describe "per-prefix graduation thresholds" do
-    test "network requires 5 approvals", %{agent_id: agent_id} do
-      uri = "arbor://network/request/https://example.com"
+    test "network-egress action profiles require 5 approvals", %{agent_id: agent_id} do
+      uri = "arbor://action/github/pr/#{agent_id}"
 
       for _ <- 1..4 do
         assert :ok = ConfirmationTracker.record_approval(agent_id, uri)
@@ -381,13 +404,15 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
 
       refute ConfirmationTracker.graduated?(agent_id, uri)
 
-      assert {:graduation_suggested, "arbor://network"} =
+      assert {:graduation_suggested, "arbor://action/github/pr"} =
                ConfirmationTracker.record_approval(agent_id, uri)
 
       assert ConfirmationTracker.graduated?(agent_id, uri)
     end
 
-    test "config requires 10 approvals", %{agent_id: agent_id} do
+    test "configured non-profiled prefix can require 10 approvals", %{agent_id: agent_id} do
+      Application.put_env(:arbor_trust, :graduation_thresholds, %{"arbor://config" => 10})
+
       uri = "arbor://config/write/self/setting"
 
       for _ <- 1..9 do
@@ -402,8 +427,15 @@ defmodule Arbor.Trust.ConfirmationTrackerTest do
       assert ConfirmationTracker.graduated?(agent_id, uri)
     end
 
-    test "code/read has threshold 0 (always graduated)", %{agent_id: _agent_id} do
-      assert ConfirmationTracker.threshold_for("arbor://code/read") == 0
+    test "critical profiles never graduate", %{agent_id: agent_id} do
+      uri = "arbor://code/hot_load/module"
+
+      for _ <- 1..20 do
+        ConfirmationTracker.record_approval(agent_id, uri)
+      end
+
+      refute ConfirmationTracker.graduated?(agent_id, uri)
+      assert ConfirmationTracker.threshold_for("arbor://code/hot_load") == :never
     end
   end
 

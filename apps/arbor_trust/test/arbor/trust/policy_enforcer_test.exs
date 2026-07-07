@@ -26,11 +26,13 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
     prev_trust_enforcer = Application.get_env(:arbor_trust, :policy_enforcer_enabled)
     prev_security_enforcer = Application.get_env(:arbor_security, :policy_enforcer_enabled)
     prev_policy = Application.get_env(:arbor_trust, :policy_module)
+    prev_profile_overrides = Application.get_env(:arbor_trust, :capability_profile_overrides)
 
     on_exit(fn ->
       restore(:arbor_trust, :policy_enforcer_enabled, prev_trust_enforcer)
       restore(:arbor_security, :policy_enforcer_enabled, prev_security_enforcer)
       restore(:arbor_trust, :policy_module, prev_policy)
+      restore(:arbor_trust, :capability_profile_overrides, prev_profile_overrides)
     end)
 
     :ok
@@ -78,6 +80,21 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
       assert cap.resource_uri == uri
       assert cap.metadata[:source] == :trust_policy_enforcer
       refute cap.constraints[:requires_approval]
+    end
+
+    test "mints profile default constraints when a capability profile matches" do
+      agent_id = unique_agent()
+      uri = "arbor://fs/write/policy-default-constraints"
+
+      Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
+      Application.put_env(:arbor_trust, :policy_module, AutoPolicy)
+
+      Application.put_env(:arbor_trust, :capability_profile_overrides, %{
+        "arbor://fs/write" => %{default_constraints: %{ttl_seconds: 60}}
+      })
+
+      assert {:ok, cap} = PolicyEnforcer.ensure_capability(agent_id, uri)
+      assert cap.constraints == %{ttl_seconds: 60}
     end
 
     test "mints an explicit trust-stamped capability when policy mode is :ask" do

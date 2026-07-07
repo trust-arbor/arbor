@@ -21,6 +21,7 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
 
   @type risk_profile :: CapabilityProfile.t()
   @type ceiling_mode :: :block | :ask | :allow | :auto
+  @type graduation_threshold :: non_neg_integer() | :never
 
   @high_risk_profile_specs [
     {"arbor://shell", :arbor_shell, :critical, :irreversible, :process_spawn, :restricted, true,
@@ -101,6 +102,34 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
     |> Map.new()
   end
 
+  @doc "Project high-risk capability profiles into graduation thresholds."
+  @spec graduation_thresholds() :: %{String.t() => graduation_threshold()}
+  def graduation_thresholds do
+    profiles()
+    |> Map.new(fn profile -> {profile.uri_prefix, graduation_threshold(profile)} end)
+  end
+
+  @doc "Project high-risk capability profiles into default capability constraints."
+  @spec default_constraints() :: %{String.t() => map()}
+  def default_constraints do
+    profiles()
+    |> Map.new(fn profile -> {profile.uri_prefix, profile.default_constraints} end)
+  end
+
+  @doc "Project high-risk capability profiles into delegation defaults."
+  @spec delegation_defaults() :: %{String.t() => boolean()}
+  def delegation_defaults do
+    profiles()
+    |> Map.new(fn profile -> {profile.uri_prefix, profile.delegable} end)
+  end
+
+  @doc "Project high-risk capability profiles into approval defaults."
+  @spec approval_defaults() :: %{String.t() => CapabilityProfile.default_approval()}
+  def approval_defaults do
+    profiles()
+    |> Map.new(fn profile -> {profile.uri_prefix, profile.default_approval} end)
+  end
+
   @doc """
   Derive the ceiling mode from a capability risk profile.
   """
@@ -110,6 +139,30 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
   def ceiling_mode(%{default_approval: :require_human}), do: :ask
   def ceiling_mode(%{default_approval: :notify}), do: :allow
   def ceiling_mode(%{default_approval: :auto}), do: nil
+
+  @doc """
+  Derive the confirmation threshold from a capability risk profile.
+
+  Profiles opt into graduation explicitly via `graduation_eligible`. Mutating
+  governance, trust, identity, and financial effects never graduate even if
+  misconfigured as eligible. Egress and process-spawn profiles require a longer
+  evidence streak than local writes.
+  """
+  @spec graduation_threshold(risk_profile()) :: graduation_threshold()
+  def graduation_threshold(%CapabilityProfile{graduation_eligible: false}), do: :never
+  def graduation_threshold(%CapabilityProfile{default_approval: :forbid}), do: :never
+  def graduation_threshold(%CapabilityProfile{default_approval: :auto}), do: 0
+  def graduation_threshold(%CapabilityProfile{effect_class: :governance}), do: :never
+  def graduation_threshold(%CapabilityProfile{effect_class: :trust_mutating}), do: :never
+  def graduation_threshold(%CapabilityProfile{effect_class: :identity_mutating}), do: :never
+  def graduation_threshold(%CapabilityProfile{effect_class: :financial}), do: :never
+  def graduation_threshold(%CapabilityProfile{reversibility: :irreversible}), do: :never
+  def graduation_threshold(%CapabilityProfile{blast_radius: :critical}), do: :never
+  def graduation_threshold(%CapabilityProfile{effect_class: :network_egress}), do: 5
+  def graduation_threshold(%CapabilityProfile{effect_class: :process_spawn}), do: 5
+  def graduation_threshold(%CapabilityProfile{blast_radius: :high}), do: 3
+  def graduation_threshold(%CapabilityProfile{blast_radius: :medium}), do: 2
+  def graduation_threshold(%CapabilityProfile{blast_radius: :low}), do: 1
 
   defp profile_from_spec!(
          {uri_prefix, owner, blast_radius, reversibility, effect_class, data_class, arg_dependent,

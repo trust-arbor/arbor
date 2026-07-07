@@ -11,6 +11,7 @@ defmodule Arbor.Trust.PolicyEnforcer do
   """
 
   alias Arbor.Security.CapabilityStore
+  alias Arbor.Trust.CapabilityProfileRegistry
   alias Arbor.Trust.Config
 
   require Logger
@@ -48,10 +49,22 @@ defmodule Arbor.Trust.PolicyEnforcer do
     if enabled?() do
       case get_effective_mode(principal_id, resource_uri, opts) do
         mode when mode in [:auto, :allow] ->
-          auto_grant(principal_id, resource_uri, opts, %{}, mode)
+          auto_grant(
+            principal_id,
+            resource_uri,
+            opts,
+            default_constraints_for(resource_uri),
+            mode
+          )
 
         :ask ->
-          auto_grant(principal_id, resource_uri, opts, %{}, :ask)
+          auto_grant(
+            principal_id,
+            resource_uri,
+            opts,
+            default_constraints_for(resource_uri),
+            :ask
+          )
 
         :block ->
           {:error, :unauthorized}
@@ -206,6 +219,13 @@ defmodule Arbor.Trust.PolicyEnforcer do
     _ -> :block
   catch
     :exit, _ -> :block
+  end
+
+  defp default_constraints_for(resource_uri) do
+    case CapabilityProfileRegistry.profile_for(resource_uri) do
+      %{default_constraints: constraints} when is_map(constraints) -> constraints
+      _ -> %{}
+    end
   end
 
   defp trust_minted?(cap) do

@@ -19,16 +19,11 @@ defmodule Arbor.Trust.ConfirmationTracker do
 
   ## Default Thresholds
 
-  | URI Prefix | Threshold | Rationale |
-  |------------|-----------|-----------|
-  | `arbor://code/read` | 0 | Already auto for most profiles |
-  | `arbor://code/write` | 3 | Relatively low risk |
-  | `arbor://network` | 5 | Moderate risk |
-  | `arbor://ai` | 3 | Low risk |
-  | `arbor://config` | 10 | High risk, needs more evidence |
-  | `arbor://shell` | `:never` | Security invariant: never auto |
-  | `arbor://code/hot_load` | `:never` | Runtime code mutation |
-  | `arbor://governance` | `:never` | Always human-confirmed |
+  Default thresholds are projected from `CapabilityProfile` metadata via
+  `Arbor.Trust.CapabilityRiskProfiles.graduation_thresholds/0`. High-risk local
+  writes need three successful approvals, network egress and process-spawn
+  profiles need five, and critical / irreversible / governance / trust /
+  identity / financial profiles never graduate.
 
   ## Configuration
 
@@ -58,20 +53,13 @@ defmodule Arbor.Trust.ConfirmationTracker do
 
   use GenServer
 
+  alias Arbor.Contracts.Security.CapabilityUri
+  alias Arbor.Trust.CapabilityRiskProfiles
+
   require Logger
 
   @table :arbor_confirmation_tracker
-
-  @default_thresholds %{
-    "arbor://code/read" => 0,
-    "arbor://code/write" => 3,
-    "arbor://code/hot_load" => :never,
-    "arbor://shell" => :never,
-    "arbor://network" => 5,
-    "arbor://ai" => 3,
-    "arbor://config" => 10,
-    "arbor://governance" => :never
-  }
+  @fallback_threshold 5
 
   # =========================================================================
   # Public API
@@ -369,7 +357,7 @@ defmodule Arbor.Trust.ConfirmationTracker do
 
     thresholds
     |> Map.keys()
-    |> Enum.filter(fn prefix -> String.starts_with?(resource_uri, prefix) end)
+    |> Enum.filter(&CapabilityUri.prefix_match?(&1, resource_uri))
     |> case do
       [] -> nil
       matches -> Enum.max_by(matches, &byte_size/1)
@@ -412,15 +400,17 @@ defmodule Arbor.Trust.ConfirmationTracker do
 
   defp configured_thresholds do
     config = Application.get_env(:arbor_trust, :graduation_thresholds, %{})
-    Map.merge(@default_thresholds, config)
+
+    CapabilityRiskProfiles.graduation_thresholds()
+    |> Map.merge(config)
   end
 
   defp resolve_threshold(thresholds, uri_prefix) do
     # Longest-prefix match against threshold keys
     thresholds
-    |> Enum.filter(fn {prefix, _} -> String.starts_with?(uri_prefix, prefix) end)
+    |> Enum.filter(fn {prefix, _} -> CapabilityUri.prefix_match?(prefix, uri_prefix) end)
     |> case do
-      [] -> 5
+      [] -> @fallback_threshold
       matches -> matches |> Enum.max_by(fn {prefix, _} -> byte_size(prefix) end) |> elem(1)
     end
   end

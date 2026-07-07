@@ -101,4 +101,61 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
       assert CapabilityRiskProfiles.ceiling_mode(%{default_approval: :auto}) == nil
     end
   end
+
+  describe "profile-derived policy projections" do
+    test "every high-risk profile has each policy projection" do
+      profile_uris = CapabilityRiskProfiles.profiles() |> Enum.map(& &1.uri_prefix) |> Enum.sort()
+
+      projections = [
+        CapabilityRiskProfiles.security_ceilings(),
+        CapabilityRiskProfiles.graduation_thresholds(),
+        CapabilityRiskProfiles.default_constraints(),
+        CapabilityRiskProfiles.delegation_defaults(),
+        CapabilityRiskProfiles.approval_defaults()
+      ]
+
+      for projection <- projections do
+        assert profile_uris -- (projection |> Map.keys() |> Enum.sort()) == []
+      end
+    end
+
+    test "derives graduation thresholds from profile metadata" do
+      thresholds = CapabilityRiskProfiles.graduation_thresholds()
+
+      assert thresholds["arbor://shell"] == :never
+      assert thresholds["arbor://governance"] == :never
+      assert thresholds["arbor://code/hot_load"] == :never
+      assert thresholds["arbor://code/write"] == 3
+      assert thresholds["arbor://fs/write"] == 3
+      assert thresholds["arbor://code/compile"] == 5
+      assert thresholds["arbor://action/github/pr"] == 5
+    end
+
+    test "projects constraints, delegation, and approval defaults" do
+      assert CapabilityRiskProfiles.default_constraints()["arbor://fs/write"] == %{}
+      assert CapabilityRiskProfiles.delegation_defaults()["arbor://fs/write"] == false
+      assert CapabilityRiskProfiles.approval_defaults()["arbor://fs/write"] == :require_human
+    end
+
+    test "operator profile overrides flow through all projections" do
+      Application.put_env(:arbor_trust, :capability_profile_overrides, %{
+        "arbor://fs/write" => %{
+          default_approval: :forbid,
+          default_constraints: %{ttl_seconds: 60},
+          delegable: true,
+          graduation_eligible: false
+        }
+      })
+
+      assert CapabilityRiskProfiles.security_ceilings()["arbor://fs/write"] == :block
+      assert CapabilityRiskProfiles.graduation_thresholds()["arbor://fs/write"] == :never
+
+      assert CapabilityRiskProfiles.default_constraints()["arbor://fs/write"] == %{
+               ttl_seconds: 60
+             }
+
+      assert CapabilityRiskProfiles.delegation_defaults()["arbor://fs/write"]
+      assert CapabilityRiskProfiles.approval_defaults()["arbor://fs/write"] == :forbid
+    end
+  end
 end
