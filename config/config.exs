@@ -52,7 +52,9 @@ config :arbor_comms, :interaction_adapters, %{
   signal: Arbor.Comms.Channels.Signal.InteractionAdapter
 }
 
-# Phase 3: Enable mandatory middleware (capability, taint, sanitization checks)
+# Mandatory engine middleware is enabled by default in every environment. Keep
+# this explicit so runtime config drift is visible; set false only as a local
+# emergency override while debugging a broken middleware rollout.
 config :arbor_orchestrator, mandatory_middleware: true
 
 # Pre-turn preprocessor pipeline. DISABLED by default; fails open when enabled.

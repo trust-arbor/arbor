@@ -207,7 +207,8 @@ config :arbor_orchestrator,
 # poke LM Studio / Ollama). The Preflight module is still unit-tested directly.
 config :arbor_orchestrator, preflight_models_on_start: false
 
-# Enable mandatory middleware (Phase 5 handler primitives)
+# Keep mandatory middleware explicit in tests; Chain also defaults this on when
+# the env key is absent.
 config :arbor_orchestrator, mandatory_middleware: true
 
 # arbor_scheduler — disable real Oban supervision in tests. Tests use

@@ -55,13 +55,13 @@ defmodule Arbor.Orchestrator.Middleware.Chain do
   @doc """
   Returns whether mandatory middleware is enabled.
 
-  P0-2: now a runtime config (was `Application.compile_env`) so the
-  regression test can flip it. Defaults to `Mix.env() == :prod` so production
-  always runs the mandatory chain; dev/test stay opt-in.
+  B7/K6: mandatory middleware is enabled by default in every environment. Set
+  `config :arbor_orchestrator, mandatory_middleware: false` only as a local
+  emergency override while debugging a broken middleware rollout.
   """
   @spec mandatory_enabled?() :: boolean()
   def mandatory_enabled? do
-    Application.get_env(:arbor_orchestrator, :mandatory_middleware, Mix.env() == :prod)
+    Application.get_env(:arbor_orchestrator, :mandatory_middleware, true)
   end
 
   @doc """
@@ -70,8 +70,9 @@ defmodule Arbor.Orchestrator.Middleware.Chain do
   Combines engine config, graph-level, and node-level middleware,
   then removes any listed in the node's skip_middleware attribute.
 
-  When mandatory middleware is enabled (via config), the mandatory chain
-  is prepended before all other middleware.
+  Mandatory middleware is enabled by default and prepended before all other
+  middleware. Set `:mandatory_middleware` to `false` only as a local emergency
+  override.
   """
   @spec build(keyword(), Arbor.Orchestrator.Graph.t(), Arbor.Orchestrator.Graph.Node.t() | nil) ::
           [module()]
