@@ -8,6 +8,7 @@ defmodule Mix.Tasks.Arbor.Security.UriInventory do
 
       mix arbor.security.uri_inventory          # all namespaces
       mix arbor.security.uri_inventory --gaps   # only namespaces with gaps
+      mix arbor.security.uri_inventory --dead   # registered prefixes with no code usage
 
   Columns: namespace, in registry?, action-backed?, uncovered URI count, and a
   recommendation (register / register sub-path / triage / ok). Does not start the
@@ -18,14 +19,23 @@ defmodule Mix.Tasks.Arbor.Security.UriInventory do
 
   alias Arbor.Actions.Security.UriInventory
 
-  @switches [gaps: :boolean, root: :string]
+  @switches [gaps: :boolean, dead: :boolean, root: :string]
 
   @impl Mix.Task
   def run(argv) do
     Mix.Task.run("compile")
     {opts, _, _} = OptionParser.parse(argv, switches: @switches)
+    root = Keyword.get(opts, :root, "apps")
 
-    rows = UriInventory.build(Keyword.get(opts, :root, "apps"))
+    if opts[:dead] do
+      print_dead_prefixes(root)
+    else
+      print_namespace_inventory(root, opts)
+    end
+  end
+
+  defp print_namespace_inventory(root, opts) do
+    rows = UriInventory.build(root)
     rows = if opts[:gaps], do: Enum.reject(rows, &(&1.uncovered == [])), else: rows
 
     Mix.shell().info(header())
@@ -41,9 +51,26 @@ defmodule Mix.Tasks.Arbor.Security.UriInventory do
     Mix.shell().info("\n#{length(rows)} namespaces, #{gaps} with gaps.")
   end
 
+  defp print_dead_prefixes(root) do
+    rows = UriInventory.dead_registry_prefixes(root)
+
+    Mix.shell().info(dead_header())
+
+    Enum.each(rows, fn r ->
+      Mix.shell().info("#{pad(r.prefix, 36)} #{r.recommendation}")
+    end)
+
+    Mix.shell().info("\n#{length(rows)} registered prefixes with no code literal usage.")
+  end
+
   defp header do
     "#{pad("namespace", 16)} reg act auth gap   recommendation\n" <>
       String.duplicate("-", 64)
+  end
+
+  defp dead_header do
+    "#{pad("registered prefix", 36)} recommendation\n" <>
+      String.duplicate("-", 88)
   end
 
   defp yn(true), do: " ✓ "

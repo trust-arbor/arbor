@@ -32,6 +32,11 @@ defmodule Arbor.Actions.Security.UriInventory do
           recommendation: String.t()
         }
 
+  @type dead_registry_prefix :: %{
+          prefix: String.t(),
+          recommendation: String.t()
+        }
+
   @doc "Build the inventory rows for `.ex` files under `root`. Gaps sorted first."
   @spec build(String.t()) :: [row()]
   def build(root \\ "apps") do
@@ -64,6 +69,41 @@ defmodule Arbor.Actions.Security.UriInventory do
     |> Enum.sort_by(fn r -> {r.uncovered == [], r.namespace} end)
   end
 
+  @doc """
+  Return registered URI prefixes that have no matching code literal under `root`.
+
+  This is a triage report rather than a hard failure: some prefixes are
+  intentionally reserved for runtime bridges, and action prefixes can be
+  generated from action declarations rather than repeated as literals.
+  """
+  @spec dead_registry_prefixes(String.t(), [String.t()] | nil, keyword()) :: [
+          dead_registry_prefix()
+        ]
+  def dead_registry_prefixes(root \\ "apps", prefixes \\ nil, opts \\ []) do
+    prefixes = prefixes || canonical_prefixes()
+    generated_prefixes = Keyword.get_lazy(opts, :generated_prefixes, &action_uri_prefixes/0)
+
+    used_uris =
+      root
+      |> scan()
+      |> Enum.map(fn {uri, _file} -> normalize(uri) end)
+      |> Enum.uniq()
+
+    prefixes
+    |> Enum.uniq()
+    |> Enum.reject(&(&1 in generated_prefixes))
+    |> Enum.reject(fn prefix ->
+      Enum.any?(used_uris, &CapabilityUri.prefix_match?(prefix, &1))
+    end)
+    |> Enum.map(fn prefix ->
+      %{
+        prefix: prefix,
+        recommendation: "TRIAGE (registered prefix has no code literal usage)"
+      }
+    end)
+    |> Enum.sort_by(& &1.prefix)
+  end
+
   defp recommend([], _reg, _backed, _authz), do: "ok"
   defp recommend(_unc, _reg, true, _authz), do: "REGISTER (action-backed)"
   defp recommend(_unc, true, _backed, _authz), do: "REGISTER sub-path (partial gap)"
@@ -94,6 +134,17 @@ defmodule Arbor.Actions.Security.UriInventory do
       end
 
     Enum.uniq(security_prefixes ++ action_prefixes)
+  rescue
+    _ -> []
+  end
+
+  defp action_uri_prefixes do
+    if Code.ensure_loaded?(Arbor.Actions) and
+         function_exported?(Arbor.Actions, :action_namespace_uri_prefixes, 0) do
+      Arbor.Actions.action_namespace_uri_prefixes()
+    else
+      []
+    end
   rescue
     _ -> []
   end

@@ -66,6 +66,33 @@ defmodule Arbor.Actions.Security.UriInventoryTest do
     assert row.uncovered == []
     assert row.recommendation == "ok"
   end
+
+  test "reports registered prefixes with no code literal usage", %{dir: dir} do
+    File.write!(Path.join(dir, "live.ex"), """
+    defmodule Live do
+      def uri, do: "arbor://live/read/item"
+    end
+    """)
+
+    dead =
+      UriInventory.dead_registry_prefixes(
+        dir,
+        ["arbor://live/read", "arbor://dead/write"],
+        generated_prefixes: []
+      )
+
+    assert [%{prefix: "arbor://dead/write", recommendation: recommendation}] = dead
+    assert recommendation =~ "TRIAGE"
+  end
+
+  test "does not report generated action prefixes as dead", %{dir: dir} do
+    assert [] =
+             UriInventory.dead_registry_prefixes(
+               dir,
+               ["arbor://action/generated/tool"],
+               generated_prefixes: ["arbor://action/generated/tool"]
+             )
+  end
 end
 
 defmodule Arbor.Actions.Security.UriInventoryDriftTest do
