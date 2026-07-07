@@ -25,6 +25,7 @@ defmodule Arbor.Actions do
   | Web | `Arbor.Actions.Web` | Session-free web browsing, search, and page snapshots |
   | Browser | `Arbor.Actions.Browser` | Interactive browser automation (session-based) |
   | ACP | `Arbor.Actions.Acp` | ACP coding agent session management |
+  | Coding | `Arbor.Actions.Coding` | Reviewable coding-agent change workflows |
   | Trust | `Arbor.Actions.Trust` | Trust profile operations for the InterviewAgent |
 
   ## Quick Start
@@ -418,6 +419,9 @@ defmodule Arbor.Actions do
         Arbor.Actions.Acp.SendMessage,
         Arbor.Actions.Acp.SessionStatus,
         Arbor.Actions.Acp.CloseSession
+      ],
+      coding: [
+        Arbor.Actions.Coding.ProduceReviewableChange
       ],
       background_checks: [
         Arbor.Actions.BackgroundChecks.Run
@@ -1063,6 +1067,10 @@ defmodule Arbor.Actions do
     Arbor.Actions.Acp.SendMessage => "arbor://acp/tool",
     Arbor.Actions.Acp.SessionStatus => "arbor://acp/tool",
     Arbor.Actions.Acp.CloseSession => "arbor://acp/tool",
+
+    # Coding-agent composite workflows — bounded by worktree + human PR review.
+    Arbor.Actions.Coding.ProduceReviewableChange =>
+      "arbor://action/coding/produce_reviewable_change",
 
     # Background checks — routes through shell
     Arbor.Actions.BackgroundChecks.Run => "arbor://shell/exec",

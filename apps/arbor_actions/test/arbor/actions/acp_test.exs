@@ -31,6 +31,9 @@ defmodule Arbor.Actions.AcpTest do
                  cwd: "/tmp",
                  session_id: "sess_123",
                  use_pool: true,
+                 permission_mode: "default",
+                 allowed_tools: ["Read"],
+                 disallowed_tools: ["Write"],
                  timeout: 60_000
                })
     end
@@ -76,18 +79,40 @@ defmodule Arbor.Actions.AcpTest do
     end
 
     test "security regression: build_opts threads the caller's agent_id into session opts" do
-      opts = Acp.StartSession.build_opts(%{model: "opus", cwd: "/ws"}, "agent_42")
+      opts =
+        Acp.StartSession.build_opts(
+          %{
+            model: "opus",
+            cwd: "/ws",
+            permission_mode: "default",
+            allowed_tools: ["Read", "Grep"],
+            disallowed_tools: ["Write"]
+          },
+          "agent_42"
+        )
 
       assert Keyword.get(opts, :agent_id) == "agent_42",
              "the session must carry the caller identity so file/tool callbacks are not anonymous"
 
       assert Keyword.get(opts, :model) == "opus"
       assert Keyword.get(opts, :cwd) == "/ws"
+
+      adapter_opts = Keyword.fetch!(opts, :adapter_opts)
+      assert Keyword.get(adapter_opts, :permission_mode) == :default
+      assert Keyword.get(adapter_opts, :allowed_tools) == ["Read", "Grep"]
+      assert Keyword.get(adapter_opts, :disallowed_tools) == ["Write"]
     end
 
     test "build_opts omits agent_id when there is no caller identity" do
       opts = Acp.StartSession.build_opts(%{model: "opus"}, nil)
       refute Keyword.has_key?(opts, :agent_id)
+    end
+
+    test "normalize_permission_mode refuses unknown values instead of atomizing input" do
+      assert Acp.StartSession.normalize_permission_mode("default") == :default
+      assert Acp.StartSession.normalize_permission_mode(:deny) == :deny
+      assert Acp.StartSession.normalize_permission_mode("bypass") == :bypass
+      assert Acp.StartSession.normalize_permission_mode("String.to_atom footgun") == nil
     end
   end
 

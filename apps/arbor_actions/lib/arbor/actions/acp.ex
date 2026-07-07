@@ -156,6 +156,9 @@ defmodule Arbor.Actions.Acp do
     | `cwd` | string | no | Working directory for the session |
     | `session_id` | string | no | Resume an existing session by ID |
     | `use_pool` | boolean | no | Checkout from pool instead of starting fresh (default: false) |
+    | `permission_mode` | string | no | Adapter permission mode: default, bypass, or deny |
+    | `allowed_tools` | list | no | Adapter tool allowlist |
+    | `disallowed_tools` | list | no | Adapter tool denylist |
     | `timeout` | integer | no | Timeout in ms (default: 120000) |
     """
 
@@ -187,6 +190,18 @@ defmodule Arbor.Actions.Acp do
           default: false,
           doc: "Checkout from pool instead of starting fresh"
         ],
+        permission_mode: [
+          type: :any,
+          doc: "Adapter permission mode: default, bypass, or deny"
+        ],
+        allowed_tools: [
+          type: {:list, :string},
+          doc: "Adapter tool names to allow without prompting"
+        ],
+        disallowed_tools: [
+          type: {:list, :string},
+          doc: "Adapter tool names to hard-block"
+        ],
         timeout: [
           type: :non_neg_integer,
           default: 120_000,
@@ -204,6 +219,9 @@ defmodule Arbor.Actions.Acp do
         cwd: {:control, requires: [:path_traversal]},
         session_id: :control,
         prompt: {:control, requires: [:prompt_injection]},
+        permission_mode: :control,
+        allowed_tools: :control,
+        disallowed_tools: :control,
         use_pool: :data,
         timeout: :data
       }
@@ -319,7 +337,18 @@ defmodule Arbor.Actions.Acp do
       |> maybe_add(:model, params[:model])
       |> maybe_add(:cwd, params[:cwd])
       |> maybe_add(:agent_id, agent_id)
+      |> maybe_add_adapter_opts(params)
     end
+
+    @doc false
+    def normalize_permission_mode(nil), do: nil
+    def normalize_permission_mode(:default), do: :default
+    def normalize_permission_mode(:bypass), do: :bypass
+    def normalize_permission_mode(:deny), do: :deny
+    def normalize_permission_mode("default"), do: :default
+    def normalize_permission_mode("bypass"), do: :bypass
+    def normalize_permission_mode("deny"), do: :deny
+    def normalize_permission_mode(_), do: nil
 
     # Extract the calling agent's id from the action exec context. Tolerates
     # atom- or string-keyed contexts (Jido/engine both occur).
@@ -332,6 +361,26 @@ defmodule Arbor.Actions.Acp do
 
     defp maybe_add(opts, _key, nil), do: opts
     defp maybe_add(opts, key, value), do: Keyword.put(opts, key, value)
+
+    defp maybe_add_adapter_opts(opts, params) do
+      adapter_opts =
+        []
+        |> maybe_add(:permission_mode, normalize_permission_mode(params[:permission_mode]))
+        |> maybe_add_tool_list(:allowed_tools, params[:allowed_tools])
+        |> maybe_add_tool_list(:disallowed_tools, params[:disallowed_tools])
+
+      case adapter_opts do
+        [] -> opts
+        _ -> Keyword.put(opts, :adapter_opts, adapter_opts)
+      end
+    end
+
+    defp maybe_add_tool_list(opts, _key, nil), do: opts
+    defp maybe_add_tool_list(opts, _key, []), do: opts
+
+    defp maybe_add_tool_list(opts, key, tools) when is_list(tools) do
+      Keyword.put(opts, key, Enum.map(tools, &to_string/1))
+    end
   end
 
   # ── SendMessage ──

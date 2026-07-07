@@ -183,11 +183,12 @@ defmodule Arbor.Agent.TemplateStoreTest do
 
   describe "resolve (data-first, shipped .md is the source of truth)" do
     @expected_builtins ~w(
-      api_agent cli_agent code_reviewer conversationalist council_evaluator
-      diagnostician interview_agent monitor researcher scout
+      api_agent blog_agent cli_agent code_reviewer coding_agent conversationalist
+      council_evaluator diagnostician interview_agent monitor researcher scout
+      security_auditor test_agent
     )
 
-    test "builtin_names/0 lists exactly the 10 expected builtins" do
+    test "builtin_names/0 lists exactly the 14 expected builtins" do
       assert Enum.sort(TemplateStore.builtin_names()) == Enum.sort(@expected_builtins)
     end
 
@@ -288,7 +289,31 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert "diagnostician" in names
       assert "cli_agent" in names
       assert "api_agent" in names
-      assert length(names) == 10
+      assert "coding_agent" in names
+      assert length(names) == 14
+    end
+  end
+
+  describe "coding_agent template" do
+    test "delegates implementation to Codex via ACP and keeps human review gates" do
+      assert {:ok, data} = TemplateStore.resolve("coding_agent")
+
+      assert data["metadata"]["runtime"] == "acp"
+      assert data["metadata"]["acp_provider"] == "codex"
+
+      resources = Enum.map(data["required_capabilities"], & &1["resource"])
+      assert "arbor://action/coding/produce_reviewable_change" in resources
+      assert "arbor://acp/tool" in resources
+      assert "arbor://action/github/pr" in resources
+
+      preset = data["trust_preset"]
+      assert preset["baseline"] == "block"
+      assert preset["rules"]["arbor://action/coding/produce_reviewable_change"] == "allow"
+      assert preset["rules"]["arbor://shell/exec/git"] == "ask"
+      assert preset["rules"]["arbor://shell/exec/mix"] == "ask"
+
+      refute Map.has_key?(preset["rules"], "arbor://shell/exec")
+      refute Map.has_key?(preset["rules"], "arbor://trust/write")
     end
   end
 
