@@ -578,7 +578,7 @@ defmodule Arbor.Security do
     # cap lookup. Without this, path-scoped caps like
     # `arbor://fs/read/Users/azmaveth/.arbor/reports/upstream-deps/**`
     # don't match the action's bare URI. With this synthesis, the per-run cap
-    # matches via `uri_matches?/2`'s `/**` prefix rule and AuthDecision
+    # matches via the shared capability URI wildcard matcher and AuthDecision
     # returns `:authorized` without the approval detour.
     # FileGuard still runs in `maybe_check_file_guard/4` as
     # defense-in-depth path normalization. Surfaced 2026-06-06 by the

@@ -91,6 +91,49 @@ defmodule Arbor.Contracts.Security.CapabilityUri do
   @spec canonical(t()) :: String.t()
   def canonical(%__MODULE__{segments: segments}), do: @scheme_prefix <> Enum.join(segments, "/")
 
+  @doc """
+  Return true when a capability URI pattern grants access to a resource URI.
+
+  Unlike registry-prefix matching, a concrete capability URI only grants its
+  exact resource. Subtree grants require an explicit terminal wildcard. Invalid
+  URIs and traversal-like `..` segments fail closed.
+  """
+  @spec capability_match?(String.t(), String.t()) :: boolean()
+  def capability_match?(capability_uri, resource_uri)
+      when is_binary(capability_uri) and is_binary(resource_uri) do
+    with false <- traversal_segment?(capability_uri),
+         false <- traversal_segment?(resource_uri),
+         {:ok, capability} <- parse(capability_uri),
+         {:ok, resource} <- parse(resource_uri) do
+      capability_matches_parsed?(capability, resource)
+    else
+      _ -> false
+    end
+  end
+
+  def capability_match?(_, _), do: false
+
+  @doc """
+  Return true when every resource granted by `child` is also granted by `parent`.
+
+  Used for delegation and issuer-envelope attenuation. This follows
+  `capability_match?/2` semantics: concrete parent URIs are exact, not subtree
+  prefixes.
+  """
+  @spec capability_subset?(String.t(), String.t()) :: boolean()
+  def capability_subset?(child, parent) when is_binary(child) and is_binary(parent) do
+    with false <- traversal_segment?(child),
+         false <- traversal_segment?(parent),
+         {:ok, child_uri} <- parse(child),
+         {:ok, parent_uri} <- parse(parent) do
+      capability_subset_parsed?(child_uri, parent_uri)
+    else
+      _ -> false
+    end
+  end
+
+  def capability_subset?(_, _), do: false
+
   defp strip_scheme(uri) do
     if String.starts_with?(uri, @scheme_prefix) do
       rest = String.replace_prefix(uri, @scheme_prefix, "")
@@ -199,10 +242,59 @@ defmodule Arbor.Contracts.Security.CapabilityUri do
   defp root_wildcard?(%__MODULE__{segments: ["**"], wildcard: :recursive}), do: true
   defp root_wildcard?(_), do: false
 
+  defp capability_matches_parsed?(%__MODULE__{wildcard: :none} = capability, resource) do
+    capability.segments == resource.segments
+  end
+
+  defp capability_matches_parsed?(%__MODULE__{} = capability, resource) do
+    root_wildcard?(capability) or segment_prefix?(match_segments(capability), resource.segments)
+  end
+
+  defp capability_subset_parsed?(_child, %__MODULE__{segments: ["**"], wildcard: :recursive}) do
+    true
+  end
+
+  defp capability_subset_parsed?(
+         %__MODULE__{wildcard: :none} = child,
+         %__MODULE__{
+           wildcard: :none
+         } = parent
+       ) do
+    child.segments == parent.segments
+  end
+
+  defp capability_subset_parsed?(%__MODULE__{wildcard: :none} = child, %__MODULE__{} = parent) do
+    segment_prefix?(match_segments(parent), child.segments)
+  end
+
+  defp capability_subset_parsed?(%__MODULE__{} = child, %__MODULE__{wildcard: :single} = parent) do
+    segment_prefix?(match_segments(parent), match_segments(child)) and
+      child.wildcard != :recursive
+  end
+
+  defp capability_subset_parsed?(%__MODULE__{} = child, %__MODULE__{wildcard: :none}) do
+    # A wildcard child grants more than one exact resource, so it cannot fit
+    # inside a concrete parent. The equal concrete/concrete case is handled above.
+    child.wildcard == :none
+  end
+
+  defp capability_subset_parsed?(%__MODULE__{} = child, %__MODULE__{} = parent) do
+    segment_prefix?(match_segments(parent), match_segments(child))
+  end
+
   defp segment_prefix?([], _segments), do: false
 
   defp segment_prefix?(prefix_segments, segments) do
     prefix_length = length(prefix_segments)
     prefix_length <= length(segments) and Enum.take(segments, prefix_length) == prefix_segments
   end
+
+  defp traversal_segment?(uri) when is_binary(uri) do
+    case parse(uri) do
+      {:ok, %__MODULE__{segments: segments}} -> ".." in segments
+      {:error, _} -> true
+    end
+  end
+
+  defp traversal_segment?(_), do: true
 end

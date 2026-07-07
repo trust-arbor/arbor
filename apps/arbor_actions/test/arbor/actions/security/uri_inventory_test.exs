@@ -67,3 +67,26 @@ defmodule Arbor.Actions.Security.UriInventoryTest do
     assert row.recommendation == "ok"
   end
 end
+
+defmodule Arbor.Actions.Security.UriInventoryDriftTest do
+  use ExUnit.Case, async: true
+
+  @moduletag :integration
+
+  alias Arbor.Actions.Security.UriInventory
+
+  test "drift guard: no action-backed or live authorized URI registry gaps" do
+    actionable_gaps =
+      "apps"
+      |> UriInventory.build()
+      |> Enum.filter(fn row ->
+        row.uncovered != [] and (row.action_backed or row.authorized_at_callsite)
+      end)
+
+    assert actionable_gaps == [],
+           "actionable URI registry gaps:\n" <>
+             Enum.map_join(actionable_gaps, "\n", fn row ->
+               "#{row.namespace}: #{inspect(row.uncovered)} #{row.recommendation}"
+             end)
+  end
+end

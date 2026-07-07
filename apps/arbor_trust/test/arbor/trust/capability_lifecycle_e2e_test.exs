@@ -264,8 +264,7 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
     test "concrete grant does not cover its subtree (C8 hardening)", %{agent_id: agent_id} do
       # C8/H8 review hardening (2026-06-09): a CONCRETE capability URI (no
       # trailing /* or /**) grants ONLY its exact resource. It is NOT a silent
-      # /** — sub-resources are denied. See AuthDecision.uri_matches?/2 and
-      # CapabilityStore.authorizes_resource?/2.
+      # /** — sub-resources are denied by the shared capability URI matcher.
       grant_capability(agent_id, "arbor://test/tool")
 
       # Exact resource authorizes...

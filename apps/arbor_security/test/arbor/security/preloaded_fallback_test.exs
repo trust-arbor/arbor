@@ -10,10 +10,10 @@ defmodule Arbor.Security.PreloadedFallbackTest do
     no expiry check — so a store outage became a signature bypass: any
     unsigned/expired preloaded cap was honored. It now applies the same
     gates as the primary path (validity + signature acceptability).
-  - **L1:** the fallback's `uri_matches?/2` `/**` branch used a bare
-    `starts_with?` with no segment boundary, so a cap
-    `arbor://agent/profile/agent_X/**` matched `…/agent_XEVIL/...`. It now
-    requires a `/` boundary, matching CapabilityStore.authorizes_resource?/2.
+  - **L1:** the fallback's old private `/**` branch used a bare `starts_with?`
+    with no segment boundary, so a cap `arbor://agent/profile/agent_X/**`
+    matched `…/agent_XEVIL/...`. It now uses the same shared capability URI
+    matcher as the primary store path.
 
   The store outage is simulated via the `:capability_store_module` seam
   (a stub whose `find_authorizing/2` raises) so the fallback is reached

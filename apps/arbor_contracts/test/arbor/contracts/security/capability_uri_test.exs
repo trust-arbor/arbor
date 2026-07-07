@@ -103,4 +103,74 @@ defmodule Arbor.Contracts.Security.CapabilityUriTest do
       refute CapabilityUri.prefix_match?("arbor://fs/read", "not-a-uri")
     end
   end
+
+  describe "capability_match?/2" do
+    test "concrete capabilities only match the exact canonical resource" do
+      assert CapabilityUri.capability_match?("arbor://fs/read/docs", "arbor://fs/read/docs/")
+
+      refute CapabilityUri.capability_match?(
+               "arbor://fs/read/docs",
+               "arbor://fs/read/docs/secret.txt"
+             )
+    end
+
+    test "terminal wildcard capabilities match descendants on segment boundaries" do
+      assert CapabilityUri.capability_match?(
+               "arbor://fs/read/docs/**",
+               "arbor://fs/read/docs/secret.txt"
+             )
+
+      refute CapabilityUri.capability_match?(
+               "arbor://fs/read/docs/**",
+               "arbor://fs/read/docs_evil/secret.txt"
+             )
+    end
+
+    test "root wildcard capability matches any valid arbor URI" do
+      assert CapabilityUri.capability_match?("arbor://**", "arbor://action/git/status")
+      assert CapabilityUri.capability_match?("arbor://**", "arbor://fs/read/docs")
+    end
+
+    test "security regression: traversal-like URI segments fail closed" do
+      refute CapabilityUri.capability_match?(
+               "arbor://fs/read/docs/**",
+               "arbor://fs/read/docs/../secrets"
+             )
+
+      refute CapabilityUri.capability_match?(
+               "arbor://fs/read/docs/../secrets/**",
+               "arbor://fs/read/secrets/key"
+             )
+    end
+  end
+
+  describe "capability_subset?/2" do
+    test "wildcard parent covers concrete and narrower wildcard children" do
+      assert CapabilityUri.capability_subset?(
+               "arbor://fs/write/project/file.txt",
+               "arbor://fs/write/project/**"
+             )
+
+      assert CapabilityUri.capability_subset?(
+               "arbor://fs/write/project/src/**",
+               "arbor://fs/write/project/**"
+             )
+    end
+
+    test "concrete parent is exact and does not cover a child path" do
+      refute CapabilityUri.capability_subset?(
+               "arbor://fs/write/project/file.txt",
+               "arbor://fs/write/project"
+             )
+    end
+
+    test "rejects wider children and invalid URI patterns" do
+      refute CapabilityUri.capability_subset?(
+               "arbor://fs/write/**",
+               "arbor://fs/write/project/**"
+             )
+
+      refute CapabilityUri.capability_subset?("not-a-uri", "arbor://fs/write/**")
+    end
+  end
 end

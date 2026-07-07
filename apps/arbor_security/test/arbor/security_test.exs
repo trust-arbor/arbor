@@ -37,8 +37,8 @@ defmodule Arbor.SecurityTest do
       # authorize with `Security.authorize(agent, "arbor://fs/read",
       # :execute, file_path: "/abs/path/file.md")`. Per-run identity
       # caps are scoped like `arbor://fs/read/abs/path/**`. Pre-fix,
-      # the bare URI didn't trigger the cap's `/**` prefix match in
-      # `uri_matches?/2`, so authorization missed the real path-scoped cap.
+      # the bare URI didn't trigger the cap's `/**` prefix match in the
+      # capability URI matcher, so authorization missed the real path-scoped cap.
       # With the synthesis, the bare
       # URI + file_path becomes `arbor://fs/read/abs/path/file.md`
       # which IS matched by the cap's `/**` prefix.

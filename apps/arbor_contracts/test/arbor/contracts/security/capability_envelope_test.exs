@@ -45,9 +45,12 @@ defmodule Arbor.Contracts.Security.CapabilityEnvelopeTest do
              )
     end
 
-    test "concrete child under concrete parent prefix" do
-      # Matches grants_access? semantics: parent's prefix covers subpaths.
-      assert Capability.uri_subset?(
+    test "security regression: concrete parent does NOT cover a child path" do
+      # C8 made concrete capability authorization exact-only. The envelope
+      # subset check must follow the same rule, or a delegator/issuer with a
+      # concrete parent can mint a child-path capability the parent could not
+      # itself use.
+      refute Capability.uri_subset?(
                "arbor://fs/write/X/Y",
                "arbor://fs/write/X"
              )
@@ -199,6 +202,24 @@ defmodule Arbor.Contracts.Security.CapabilityEnvelopeTest do
           resource_uri: "arbor://fs/write/X/Y",
           principal_id: "agent_child",
           constraints: %{rate_limit: 1_000_000}
+        )
+
+      refute Capability.envelope_subset?(child, parent)
+    end
+
+    test "security regression: concrete parent URI does not envelope child path" do
+      {:ok, parent} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/X",
+          principal_id: "agent_parent",
+          constraints: %{}
+        )
+
+      {:ok, child} =
+        Capability.new(
+          resource_uri: "arbor://fs/write/X/Y",
+          principal_id: "agent_child",
+          constraints: %{}
         )
 
       refute Capability.envelope_subset?(child, parent)

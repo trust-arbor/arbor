@@ -442,79 +442,8 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   defp authorizes_resource?(cap, resource_uri) do
-    # H8: pre-fix, the prefix branch did
-    #   `starts_with?(resource_uri, pattern <> "/")`
-    # When a capability was granted with a trailing slash (e.g.
-    # "arbor://fs/read/" — produced by some Claude Code bridge defaults),
-    # the comparison became
-    #   `starts_with?("arbor://fs/read/home", "arbor://fs/read//")`
-    # which failed because of the doubled slash. Legitimate calls were
-    # denied despite an apparently correct capability. The fix normalizes
-    # both pattern and resource by stripping trailing slashes before
-    # matching.
-    #
-    # H9 (2026-06-03): path traversal fail-open. The previous matcher
-    # did pure string-prefix matching with no normalization, so a cap
-    # for "arbor://fs/read/docs/" silently authorized
-    # "arbor://fs/read/docs/../etc/passwd" — the resource started with
-    # the pattern + "/" and nothing checked what came after. The intended
-    # defense (FileGuard) only fired when callers passed :file_path opt,
-    # which 0 of 54 production call sites did. Refuse any resource_uri
-    # containing a ".." path segment. URI segments are never legitimately
-    # `..` — that vocabulary belongs to filesystem paths, not capability
-    # URIs.
-    if contains_traversal_segment?(resource_uri) do
-      false
-    else
-      pattern = String.trim_trailing(cap.resource_uri, "/")
-      resource = String.trim_trailing(resource_uri, "/")
-
-      cond do
-        # Exact match
-        pattern == resource ->
-          true
-
-        # Glob wildcard: "arbor://foo/**" matches "arbor://foo", "arbor://foo/bar", "arbor://foo/bar/baz"
-        String.ends_with?(pattern, "/**") ->
-          prefix = String.trim_trailing(pattern, "/**")
-          resource == prefix or String.starts_with?(resource, prefix <> "/")
-
-        # Single-level wildcard: "arbor://foo/*"
-        String.ends_with?(pattern, "/*") ->
-          prefix = String.trim_trailing(pattern, "/*")
-          resource == prefix or String.starts_with?(resource, prefix <> "/")
-
-        # C8 review fix (2026-06-09): a CONCRETE capability URI grants ONLY its
-        # exact resource — it no longer implicitly covers the subtree. A grant
-        # of `arbor://fs/read/project` does NOT authorize
-        # `arbor://fs/read/project/secret`; subtree access must be granted
-        # explicitly with `/**` (or `/*`). Pre-fix, every concrete grant was
-        # silently a `/**`, which is least-surprise-violating for filesystem
-        # grants. (Shell authorizes by command name only — `…/exec/git` — so
-        # it already exact-matches and is unaffected.)
-        true ->
-          false
-      end
-    end
+    Capability.grants_access?(cap, resource_uri)
   end
-
-  # A URI segment is `..` only if it appears between path separators.
-  # We split on "/" and check membership — that catches "../a", "a/..",
-  # "a/../b", and a bare ".." while NOT flagging "foo..bar" or "..bar"
-  # (those are legitimate identifiers, not traversal).
-  defp contains_traversal_segment?(uri) when is_binary(uri) do
-    path =
-      case String.split(uri, "://", parts: 2) do
-        [_scheme, rest] -> rest
-        [single] -> single
-      end
-
-    path
-    |> String.split("/")
-    |> Enum.any?(&(&1 == ".."))
-  end
-
-  defp contains_traversal_segment?(_), do: false
 
   defp delegation_chain_valid?(%{delegation_chain: nil}), do: true
   defp delegation_chain_valid?(%{delegation_chain: []}), do: true

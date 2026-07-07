@@ -18,10 +18,9 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
        grant arbitrary deeper paths without the explicit wildcard,
        and bogus schemes don't match `arbor://`.
     3. **Defense-in-depth** — path traversal at the resource_uri layer.
-       The URI matcher itself doesn't normalize `..`, so `arbor://fs/read/docs/`
-       can structurally "match" `arbor://fs/read/docs/../etc/passwd`. The
-       FileGuard layer is what's supposed to catch that. Pin both
-       behaviors so a regression in either is visible.
+       The shared capability URI matcher rejects bare `..` segments before
+       wildcard matching. FileGuard still validates real filesystem paths.
+       Pin both behaviors so a regression in either is visible.
   """
 
   use ExUnit.Case, async: false
@@ -200,8 +199,8 @@ defmodule Arbor.Security.AuthorizeAdversarialTest do
   # ── Path traversal — security regression tests ───────────────────
 
   describe "path traversal in resource_uri (rejected by URI matcher)" do
-    # Security regression: CapabilityStore.authorizes_resource?/2 now
-    # rejects any resource URI containing a `..` path segment, before
+    # Security regression: the shared capability URI matcher now rejects any
+    # resource URI containing a `..` path segment, before
     # the prefix-match logic runs. URI segments are never legitimately
     # `..` — that vocabulary belongs to filesystem paths, not capability
     # URIs.

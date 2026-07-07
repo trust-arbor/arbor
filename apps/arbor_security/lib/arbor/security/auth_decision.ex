@@ -254,7 +254,7 @@ defmodule Arbor.Security.AuthDecision do
        when caps != [] do
     matching =
       Enum.find(caps, fn cap ->
-        uri_matches?(cap.resource_uri, resource_uri) and
+        Arbor.Contracts.Security.Capability.grants_access?(cap, resource_uri) and
           preloaded_cap_acceptable?(cap)
       end)
 
@@ -539,38 +539,4 @@ defmodule Arbor.Security.AuthDecision do
     cap.constraints[:requires_approval] == true or
       cap.constraints["requires_approval"] == true
   end
-
-  # Check if a capability URI matches a resource URI.
-  # Supports exact match and wildcard patterns (/** suffix).
-  defp uri_matches?(cap_uri, resource_uri) when is_binary(cap_uri) and is_binary(resource_uri) do
-    cond do
-      # Exact match
-      cap_uri == resource_uri ->
-        true
-
-      # Explicit wildcards. L1 review fix (2026-06-09): require a segment
-      # boundary so the prefix can't bleed across siblings, matching
-      # CapabilityStore.authorizes_resource?/2. Pre-fix, a cap
-      # `arbor://agent/profile/agent_X/**` (prefix `…/agent_X`) matched
-      # `…/agent_XEVIL/secret` because the bare `starts_with?` had no `/`
-      # boundary.
-      String.ends_with?(cap_uri, "/**") ->
-        prefix = String.trim_trailing(cap_uri, "/**")
-        resource_uri == prefix or String.starts_with?(resource_uri, prefix <> "/")
-
-      String.ends_with?(cap_uri, "/*") ->
-        prefix = String.trim_trailing(cap_uri, "/*")
-        resource_uri == prefix or String.starts_with?(resource_uri, prefix <> "/")
-
-      # C8 review fix (2026-06-09): a CONCRETE capability URI grants ONLY its
-      # exact resource — no implicit subtree. Subtree access requires an
-      # explicit `/**` (or `/*`). Mirrors CapabilityStore.authorizes_resource?/2.
-      # Pre-fix, `String.starts_with?(resource_uri, cap_uri <> "/")` made every
-      # concrete grant a silent `/**`.
-      true ->
-        false
-    end
-  end
-
-  defp uri_matches?(_, _), do: false
 end

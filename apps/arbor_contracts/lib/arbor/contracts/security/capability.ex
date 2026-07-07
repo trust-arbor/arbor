@@ -34,6 +34,7 @@ defmodule Arbor.Contracts.Security.Capability do
 
   use TypedStruct
 
+  alias Arbor.Contracts.Security.CapabilityUri
   alias Arbor.Types
 
   @derive {Jason.Encoder, except: [:issuer_signature]}
@@ -146,29 +147,13 @@ defmodule Arbor.Contracts.Security.Capability do
   @doc """
   Check if a capability grants access to a specific resource.
 
-  Supports exact matching and pattern matching for hierarchical resources.
+  Supports exact matching and explicit terminal wildcard patterns for
+  hierarchical resources. Concrete capability URIs grant only the exact
+  resource; subtree access requires `/*` or `/**`.
   """
   @spec grants_access?(t(), String.t()) :: boolean()
   def grants_access?(%__MODULE__{resource_uri: cap_uri}, resource_uri) do
-    # C8 review fix (2026-06-09): a concrete cap URI grants only its EXACT
-    # resource; subtree access requires an explicit `/**` (or `/*`) wildcard.
-    # Pre-fix this also did `starts_with?(resource_uri, cap_uri <> "/")`, so a
-    # concrete grant silently covered the whole subtree.
-    cond do
-      cap_uri == resource_uri ->
-        true
-
-      String.ends_with?(cap_uri, "/**") ->
-        prefix = String.trim_trailing(cap_uri, "/**")
-        resource_uri == prefix or String.starts_with?(resource_uri, prefix <> "/")
-
-      String.ends_with?(cap_uri, "/*") ->
-        prefix = String.trim_trailing(cap_uri, "/*")
-        resource_uri == prefix or String.starts_with?(resource_uri, prefix <> "/")
-
-      true ->
-        false
-    end
+    CapabilityUri.capability_match?(cap_uri, resource_uri)
   end
 
   @doc """
@@ -176,8 +161,8 @@ defmodule Arbor.Contracts.Security.Capability do
 
   A child URI pattern is a subset of a parent URI pattern when every concrete
   URI matched by `child` is also matched by `parent`. Supports the same
-  wildcard suffixes as `Arbor.Security.AuthDecision` capability matching:
-  `/**` (any subtree depth) and `/*` (exactly one level).
+  terminal wildcard suffixes as capability authorization. Concrete parent URIs
+  are exact; they do not implicitly cover child paths.
 
   Used to enforce that delegated/declared capabilities stay within the bounds
   of their parent or issuer envelope.
@@ -202,33 +187,10 @@ defmodule Arbor.Contracts.Security.Capability do
   """
   @spec uri_subset?(String.t(), String.t()) :: boolean()
   def uri_subset?(child, parent) when is_binary(child) and is_binary(parent) do
-    child_prefix = strip_uri_wildcards(child)
-    parent_prefix = strip_uri_wildcards(parent)
-
-    uri_prefix_of?(parent_prefix, child_prefix) and
-      parent_wildcard_covers_child?(parent, child)
+    CapabilityUri.capability_subset?(child, parent)
   end
 
   def uri_subset?(_, _), do: false
-
-  defp strip_uri_wildcards(uri) do
-    uri
-    |> String.replace_suffix("/**", "")
-    |> String.replace_suffix("/*", "")
-  end
-
-  defp uri_prefix_of?(a, b), do: a == b or String.starts_with?(b, a <> "/")
-
-  defp parent_wildcard_covers_child?(parent, child) do
-    cond do
-      # Parent allows any subtree — covers any child shape under its prefix
-      String.ends_with?(parent, "/**") -> true
-      # Parent allows exactly one level — child must NOT use /** (would go deeper)
-      String.ends_with?(parent, "/*") -> not String.ends_with?(child, "/**")
-      # Parent is concrete; its prefix rule already covers subtree access
-      true -> true
-    end
-  end
 
   @doc """
   Check if `child_constraints` are at-least-as-restrictive as `parent_constraints`.
