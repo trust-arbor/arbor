@@ -38,7 +38,7 @@ defmodule Arbor.Trust do
 
   @behaviour Arbor.Contracts.API.Trust
 
-  alias Arbor.Trust.{ApprovalGuard, Manager, PolicyEnforcer}
+  alias Arbor.Trust.{ApprovalGuard, Manager, PolicyEnforcer, ProfileExitAudit}
 
   # ===========================================================================
   # Lifecycle
@@ -159,6 +159,26 @@ defmodule Arbor.Trust do
   def list_profiles(opts \\ []) do
     Manager.list_profiles(opts)
   end
+
+  @doc """
+  Audit trust profiles for the Ring A authorization exit gate.
+
+  Finds legacy permissive baselines (`:auto`/`:allow`) and auto/allow rules
+  whose equivalent explicit capability bundle is not currently held.
+  """
+  @spec audit_profile_exit_gate(keyword()) ::
+          {:ok, ProfileExitAudit.audit_result()} | {:error, term()}
+  defdelegate audit_profile_exit_gate(opts \\ []), to: ProfileExitAudit, as: :audit
+
+  @doc """
+  Migrate trust profiles for the Ring A authorization exit gate.
+
+  Normalizes legacy permissive baselines to `:ask` by default. Pass
+  `grant_missing: true` to also grant explicit capabilities for auto/allow
+  rules that do not have an equivalent held cap.
+  """
+  @spec migrate_profile_exit_gate(keyword()) :: {:ok, map()} | {:error, term()}
+  defdelegate migrate_profile_exit_gate(opts \\ []), to: ProfileExitAudit, as: :migrate
 
   @doc """
   Get recent trust events for an agent.

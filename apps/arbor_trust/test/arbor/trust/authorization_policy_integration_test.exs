@@ -38,7 +38,8 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
       escalation: Application.get_env(:arbor_security, :consensus_escalation_enabled),
       trust_guard: Application.get_env(:arbor_trust, :approval_guard_enabled),
       trust_enforcer: Application.get_env(:arbor_trust, :policy_enforcer_enabled),
-      policy_module: Application.get_env(:arbor_trust, :policy_module)
+      policy_module: Application.get_env(:arbor_trust, :policy_module),
+      allow_permissive_baseline: Application.get_env(:arbor_trust, :allow_permissive_baseline)
     }
 
     Application.put_env(:arbor_security, :reflex_checking_enabled, false)
@@ -63,6 +64,7 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
       restore_trust(:approval_guard_enabled, prev.trust_guard)
       restore_trust(:policy_enforcer_enabled, prev.trust_enforcer)
       restore_trust(:policy_module, prev.policy_module)
+      restore_trust(:allow_permissive_baseline, prev.allow_permissive_baseline)
     end)
 
     agent_id = "agent_policy_auth_#{:erlang.unique_integer([:positive])}"
@@ -107,6 +109,35 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
     assert cap.metadata[:source] == :trust_policy_enforcer
     assert cap.metadata[:mode] == :ask
     refute cap.constraints[:requires_approval]
+  end
+
+  test "security regression: baseline-only profile migration revokes stale policy caps", %{
+    agent_id: agent_id
+  } do
+    uri = "arbor://memory/recall"
+    Application.put_env(:arbor_trust, :allow_permissive_baseline, true)
+
+    {:ok, _profile} =
+      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+        %{profile | baseline: :allow, rules: %{}}
+      end)
+
+    {:ok, stale_cap} =
+      Arbor.Security.grant(
+        principal: agent_id,
+        resource: uri,
+        metadata: %{source: :trust_policy_enforcer, mode: :auto}
+      )
+
+    assert {:ok, ^stale_cap} = CapabilityStore.get(stale_cap.id)
+
+    {:ok, _profile} =
+      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+        %{profile | baseline: :ask}
+      end)
+
+    Process.sleep(50)
+    assert {:error, :not_found} = CapabilityStore.get(stale_cap.id)
   end
 
   test "pre-approved bounded code/write cap bypasses the ceiling", %{agent_id: agent_id} do

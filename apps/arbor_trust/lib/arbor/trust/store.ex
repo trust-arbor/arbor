@@ -269,8 +269,8 @@ defmodule Arbor.Trust.Store do
 
         emit_distributed_signal(:profile_updated, agent_id)
 
-        # Sync capabilities if rules changed
-        if profile.rules != updated.rules do
+        # Sync policy-minted capabilities if authorization standing changed.
+        if profile.rules != updated.rules or profile.baseline != updated.baseline do
           sync_capabilities_async(agent_id)
         end
 
