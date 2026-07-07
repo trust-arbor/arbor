@@ -14,6 +14,8 @@ defmodule Arbor.Contracts.Security.ClassificationTest do
       assert :process_spawn in classes
       assert :financial in classes
       assert :identity_mutating in classes
+      assert :governance in classes
+      assert :trust_mutating in classes
     end
 
     test "egress_tiers/0 includes all four locality tiers plus :none" do

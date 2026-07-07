@@ -200,9 +200,9 @@ defmodule Arbor.Trust.ProfileResolver do
   Get the security ceilings map.
 
   Security ceilings are system-enforced maximums that no user preference
-  can override. Defaults are generated from the Ring A capability risk profile
-  slice; application config can tighten or relax individual URI prefixes by
-  overlaying entries on top of that generated default.
+  can override. Defaults are generated from the `CapabilityProfile` projection;
+  application config can tighten or relax individual URI prefixes by overlaying
+  entries on top of that generated default.
   """
   @spec security_ceilings() :: rules()
   def security_ceilings do
@@ -213,10 +213,9 @@ defmodule Arbor.Trust.ProfileResolver do
   @doc """
   Default security ceilings preserving existing invariants.
 
-  The map is generated from `Arbor.Trust.CapabilityRiskProfiles`, the Ring A
-  slice of capability risk metadata. Shell and governance still require at
-  least `:ask`, but the table is no longer maintained independently from the
-  high-risk URI declarations.
+  The map is generated from `Arbor.Trust.CapabilityRiskProfiles`. Shell and
+  governance still require at least `:ask`, but the table is no longer
+  maintained independently from the high-risk URI declarations.
 
   The keys here are URI **prefixes** matched longest-first by
   `Authority.effective_mode/3`. They use the same canonical resource/facade

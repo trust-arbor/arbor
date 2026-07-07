@@ -1,10 +1,57 @@
 defmodule Arbor.Trust.CapabilityRiskProfilesTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
+  alias Arbor.Contracts.Security.CapabilityProfile
   alias Arbor.Trust.CapabilityRiskProfiles
   alias Arbor.Trust.Presets
 
   @moduletag :fast
+
+  setup do
+    previous = Application.get_env(:arbor_trust, :capability_profile_overrides)
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        Application.delete_env(:arbor_trust, :capability_profile_overrides)
+      else
+        Application.put_env(:arbor_trust, :capability_profile_overrides, previous)
+      end
+    end)
+
+    Application.delete_env(:arbor_trust, :capability_profile_overrides)
+    :ok
+  end
+
+  describe "profiles/0" do
+    test "returns Level-0 CapabilityProfile structs with the resolved field set" do
+      profile =
+        CapabilityRiskProfiles.profiles()
+        |> Enum.find(&(&1.uri_prefix == "arbor://fs/write"))
+
+      assert %CapabilityProfile{} = profile
+      assert profile.owner == :arbor_security
+      assert profile.data_class == :confidential
+      assert profile.graduation_eligible
+      refute Map.has_key?(Map.from_struct(profile), :trust_floor)
+    end
+
+    test "layers operator profile overrides over inline defaults" do
+      Application.put_env(:arbor_trust, :capability_profile_overrides, %{
+        "arbor://fs/write/" => %{
+          default_approval: :forbid,
+          default_constraints: %{ttl_seconds: 60}
+        }
+      })
+
+      profile =
+        CapabilityRiskProfiles.profiles()
+        |> Enum.find(&(&1.uri_prefix == "arbor://fs/write"))
+
+      assert profile.default_approval == :forbid
+      assert profile.default_constraints == %{ttl_seconds: 60}
+      assert CapabilityRiskProfiles.security_ceilings()["arbor://fs/write"] == :block
+    end
+  end
 
   describe "security_ceilings/0" do
     test "generates ceilings from declared high-risk profiles" do
@@ -22,7 +69,7 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
       assert Presets.default_security_ceilings() == generated
     end
 
-    test "covers the Ring A highest-blast-radius URI classes" do
+    test "covers the highest-blast-radius URI classes" do
       ceilings = CapabilityRiskProfiles.security_ceilings()
 
       assert ceilings["arbor://shell"] == :ask

@@ -3,6 +3,7 @@ defmodule Arbor.Actions.CanonicalUriTest do
   @moduletag :fast
 
   alias Arbor.Actions
+  alias Arbor.Contracts.Security.CapabilityProfile
   alias Arbor.Security.UriRegistry
 
   @legacy_action_prefix "arbor://actions/execute"
@@ -61,6 +62,18 @@ defmodule Arbor.Actions.CanonicalUriTest do
       assert Enum.all?(prefixes, &UriRegistry.registered?/1)
       refute UriRegistry.registered?("arbor://action/not_registered")
       refute UriRegistry.registered?("#{@legacy_action_prefix}/git.status")
+    end
+
+    test "generated action namespace prefixes have inline capability profiles" do
+      profile_by_uri =
+        Actions.action_namespace_capability_profiles()
+        |> Map.new(&{&1.uri_prefix, &1})
+
+      assert profile_by_uri |> Map.keys() |> Enum.sort() ==
+               Actions.action_namespace_uri_prefixes()
+
+      assert %CapabilityProfile{owner: :arbor_actions, effect_class: :read} =
+               profile_by_uri["arbor://action/browser/navigate"]
     end
   end
 

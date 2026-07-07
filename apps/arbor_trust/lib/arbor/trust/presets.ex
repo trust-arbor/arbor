@@ -135,8 +135,8 @@ defmodule Arbor.Trust.Presets do
   def preset_rules(_), do: preset_rules(:cautious)
 
   @doc """
-  The default security ceiling generated from the Ring A capability risk
-  profile slice. System ceilings clamp a profile to a maximum:
+  The default security ceiling generated from capability risk profiles.
+  System ceilings clamp a profile to a maximum:
   `most_restrictive([user, ceiling, model])`.
   """
   @spec default_security_ceilings() :: rules()

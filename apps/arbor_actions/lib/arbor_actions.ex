@@ -75,6 +75,7 @@ defmodule Arbor.Actions do
   alias Arbor.Actions.Egress
   alias Arbor.Actions.TaintEnforcement
   alias Arbor.Actions.TaintEvents
+  alias Arbor.Contracts.Security.CapabilityProfile
   alias Arbor.Contracts.Security.Classification
   alias Arbor.Signals
 
@@ -1171,6 +1172,30 @@ defmodule Arbor.Actions do
   end
 
   @doc """
+  Return conservative inline capability profiles for generated action URIs.
+
+  Facade-backed actions inherit profiles from their facade URI. This projection
+  covers only singular `arbor://action/...` prefixes so generated runtime
+  registrations have profile metadata without requiring `arbor_trust` to depend
+  upward on `arbor_actions`.
+  """
+  @spec action_namespace_capability_profiles() :: [CapabilityProfile.t()]
+  def action_namespace_capability_profiles do
+    all_actions()
+    |> Enum.flat_map(fn action_module ->
+      uri = canonical_uri_for(action_module, %{})
+
+      if String.starts_with?(uri, "arbor://action/") do
+        [capability_profile_for_action(action_module, uri)]
+      else
+        []
+      end
+    end)
+    |> Enum.uniq_by(& &1.uri_prefix)
+    |> Enum.sort_by(& &1.uri_prefix)
+  end
+
+  @doc """
   Register generated action-namespace URI prefixes with the security registry.
 
   This is called by `Arbor.Actions.Application` at startup and is public so
@@ -1196,6 +1221,58 @@ defmodule Arbor.Actions do
 
     "arbor://action/#{path}"
   end
+
+  defp capability_profile_for_action(action_module, uri) do
+    effect_class = Egress.effect_class_for(action_module)
+
+    CapabilityProfile.new!(%{
+      uri_prefix: uri,
+      owner: :arbor_actions,
+      blast_radius: action_blast_radius(effect_class),
+      reversibility: action_reversibility(effect_class),
+      effect_class: effect_class,
+      data_class: action_data_class(effect_class),
+      arg_dependent: true,
+      default_approval: action_default_approval(effect_class),
+      delegable: false,
+      cost_class: action_cost_class(effect_class),
+      graduation_eligible: action_graduation_eligible(effect_class)
+    })
+  end
+
+  defp action_blast_radius(:financial), do: :critical
+  defp action_blast_radius(:identity_mutating), do: :critical
+  defp action_blast_radius(:governance), do: :critical
+  defp action_blast_radius(:trust_mutating), do: :critical
+  defp action_blast_radius(:network_egress), do: :high
+  defp action_blast_radius(:process_spawn), do: :high
+  defp action_blast_radius(:local_write), do: :high
+  defp action_blast_radius(:read), do: :medium
+
+  defp action_reversibility(:read), do: :read_only
+  defp action_reversibility(:financial), do: :irreversible
+  defp action_reversibility(:identity_mutating), do: :irreversible
+  defp action_reversibility(:governance), do: :irreversible
+  defp action_reversibility(:trust_mutating), do: :irreversible
+  defp action_reversibility(:network_egress), do: :irreversible
+  defp action_reversibility(_effect_class), do: :reversible
+
+  defp action_data_class(:read), do: :internal
+  defp action_data_class(:network_egress), do: :confidential
+  defp action_data_class(:local_write), do: :confidential
+  defp action_data_class(_effect_class), do: :restricted
+
+  defp action_default_approval(:financial), do: :forbid
+  defp action_default_approval(_effect_class), do: :require_human
+
+  defp action_cost_class(:financial), do: :expensive
+  defp action_cost_class(:network_egress), do: :metered
+  defp action_cost_class(_effect_class), do: :cheap
+
+  defp action_graduation_eligible(effect_class) when effect_class in [:read, :local_write],
+    do: true
+
+  defp action_graduation_eligible(_effect_class), do: false
 
   # Resolve a tool name to its action module.
   # Tries ActionRegistry (O(1) ETS) first, falls back to name_to_module/1.

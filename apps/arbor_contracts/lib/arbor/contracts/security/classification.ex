@@ -11,8 +11,8 @@ defmodule Arbor.Contracts.Security.Classification do
   This module is the single, discoverable home for the classification value
   vocabulary. Actions declare their `effect_class` (and, for egressing actions,
   resolve an `egress_tier` from runtime destination) via optional callbacks read
-  reflectively by `Arbor.Actions.Egress`. The full `CapabilityProfile` struct
-  (capability-risk-profiles) will reference these same types when it lands.
+  reflectively by `Arbor.Actions.Egress`. `CapabilityProfile` references these
+  same effect-class types.
 
   ## Effect class
 
@@ -25,6 +25,8 @@ defmodule Arbor.Contracts.Security.Classification do
   - `:network_egress` — sends data off-process to a network destination
   - `:financial` — moves money or incurs metered cost
   - `:identity_mutating` — changes identity/credentials/capabilities
+  - `:governance` — changes cluster/operator governance state
+  - `:trust_mutating` — changes trust policy, profiles, or graduation state
 
   ## Egress tier
 
@@ -51,6 +53,8 @@ defmodule Arbor.Contracts.Security.Classification do
           | :network_egress
           | :financial
           | :identity_mutating
+          | :governance
+          | :trust_mutating
 
   @type egress_tier ::
           :on_host
@@ -65,7 +69,9 @@ defmodule Arbor.Contracts.Security.Classification do
     :process_spawn,
     :network_egress,
     :financial,
-    :identity_mutating
+    :identity_mutating,
+    :governance,
+    :trust_mutating
   ]
 
   @egress_tiers [:on_host, :on_premises, :external_provider, :external_peer, :none]
