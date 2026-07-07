@@ -3,6 +3,21 @@
 # Claude Code Arbor Bridge - Authorization Hook
 # Intercepts tool calls and routes them through Arbor's capability-based security
 #
+# ⚠ FAIL-OPEN BY DESIGN — and this is the ONE deliberate exception to the
+#   "Arbor fails closed" invariant in CLAUDE.md. Rationale + scope:
+#     * This is HARNESS/dev tooling, not the product. When the Arbor gateway
+#       is unreachable (local dev, gateway restarting), this hook returns
+#       `passthrough` so Claude Code development is not blocked. The PRODUCT's
+#       authorization path (in-process `Arbor.Security.authorize/4`) still
+#       fails closed — that invariant is unchanged and is what the CLAUDE.md
+#       rule refers to.
+#     * The two fail-open points are the curl-failure branch (~line 50) and
+#       the unparseable-response default (~line 60). Both are intentional.
+#   IMPORTANT: when the coding harness becomes a real Arbor agent (see
+#   .arbor/roadmap/1-brainstorming/arbor-specialized-agents.md § Coding Agent),
+#   this HTTP bridge is REPLACED by the in-process kernel call, and the
+#   fail-open exception disappears with it — do not port this behavior.
+#
 # Exit codes:
 #   0 = success (allow tool execution)
 #   2 = blocking error (deny tool execution)

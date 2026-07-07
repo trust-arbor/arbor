@@ -1,3 +1,8 @@
+# Security posture inventory — attacker's map; NEVER commit (repo is public)
+/.security/
+attacksurface.md
+attacksurface.*.md
+
 # Dependencies
 /deps/
 
@@ -104,5 +109,6 @@ apps/arbor_agent/priv/eval_data/padding_corpus.jsonl
 # compiles and runs locally but stays out of the shared repo. Custom integrations
 # should depend on Arbor's public facades, not internals.
 apps/arbor_integrations/
+docs/blog/
 # Test workspace artifacts (ToolLoop file ops use these as workdirs)
 apps/arbor_llm/tmp/
