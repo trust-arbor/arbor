@@ -327,6 +327,25 @@ defmodule Arbor.Security do
     do: list_capabilities_for_principal(principal_id, opts)
 
   @doc """
+  Side-effect-free check that a capability can authorize a resource URI.
+
+  This mirrors the non-mutating parts of the authorization matcher for
+  enumeration and self-inspection paths: capability validity, scope bindings,
+  resource matching, and signature acceptability. It does not emit signals,
+  increment usage counters, or revoke max-use capabilities.
+  """
+  @spec capability_authorizes?(Capability.t(), String.t(), keyword()) :: boolean()
+  def capability_authorizes?(capability, resource_uri, opts \\ [])
+
+  def capability_authorizes?(%Capability{} = cap, resource_uri, opts)
+      when is_binary(resource_uri) do
+    Capability.valid?(cap) and Capability.scope_matches?(cap, scope_context(opts)) and
+      Capability.grants_access?(cap, resource_uri) and capability_signature_acceptable?(cap)
+  end
+
+  def capability_authorizes?(_capability, _resource_uri, _opts), do: false
+
+  @doc """
   Generate a unique trace ID for request correlation.
 
   Trace IDs link authorization, verification, and delegation events
@@ -336,6 +355,33 @@ defmodule Arbor.Security do
   @spec generate_trace_id() :: String.t()
   def generate_trace_id do
     "trace_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
+  end
+
+  defp scope_context(opts) do
+    []
+    |> maybe_put_scope(:session_id, Keyword.get(opts, :session_id))
+    |> maybe_put_scope(:task_id, Keyword.get(opts, :task_id))
+    |> maybe_put_scope(:principal_scope, Keyword.get(opts, :principal_scope))
+  end
+
+  defp maybe_put_scope(scope, _key, nil), do: scope
+  defp maybe_put_scope(scope, key, value), do: Keyword.put(scope, key, value)
+
+  defp capability_signature_acceptable?(%Capability{} = cap) do
+    cond do
+      Capability.signed?(cap) ->
+        SystemAuthority.verify_capability_signature(cap) == :ok
+
+      Config.capability_signing_required?() ->
+        false
+
+      true ->
+        true
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
   end
 
   # ===========================================================================

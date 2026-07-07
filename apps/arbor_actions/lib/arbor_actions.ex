@@ -574,12 +574,10 @@ defmodule Arbor.Actions do
   of relying on `authorize_and_execute/4` to reject every disallowed
   call after the fact.
 
-  Authorization check uses the canonical base URI for each action
-  (parameterless form, e.g. `"arbor://fs/read"`). Actions whose
-  authorization currently returns `:pending_approval` are *included*
-  — exposing them gives the model the chance to request them and
-  trigger the approval flow. Errors and outright denials exclude
-  the action.
+  Exposure uses the read-only trust authority snapshot for each action's
+  canonical base URI (parameterless form, e.g. `"arbor://fs/read"`). Held
+  capabilities and profile-mintable `:ask`/`:allow`/`:auto` URIs are included;
+  outright `:block` candidates are excluded.
 
   Returns `[]` for `nil`/empty agent ids.
   """
@@ -588,22 +586,36 @@ defmodule Arbor.Actions do
   def tool_modules_for_agent(""), do: []
 
   def tool_modules_for_agent(agent_id) when is_binary(agent_id) do
-    Enum.filter(all_actions(), &authorized_for_exposure?(agent_id, &1))
+    uri_index = action_uri_index()
+
+    case Arbor.Trust.enumerate_authority(agent_id, Map.keys(uri_index)) do
+      {:ok, snapshot} ->
+        snapshot.candidate_entries
+        |> Enum.filter(&Arbor.Trust.effective_authority_entry?/1)
+        |> Enum.flat_map(fn entry -> Map.get(uri_index, entry.uri, []) end)
+        |> Enum.uniq()
+
+      {:error, _reason} ->
+        []
+    end
   end
 
-  defp authorized_for_exposure?(agent_id, action_module) do
-    uri = canonical_uri_for(action_module, %{})
-
-    case Arbor.Trust.authorize(agent_id, uri, :execute) do
-      {:ok, :authorized} -> true
-      {:ok, :pending_approval, _proposal_id} -> true
-      {:error, _reason} -> false
-    end
-  rescue
-    # Defensive: if a single action's URI lookup blows up (bad
-    # parameterize_uri input, malformed metadata), skip it rather than
-    # taking down the whole exposure list.
-    _ -> false
+  defp action_uri_index do
+    all_actions()
+    |> Enum.flat_map(fn action_module ->
+      try do
+        [{canonical_uri_for(action_module, %{}), action_module}]
+      rescue
+        # Defensive: if a single action's URI lookup blows up (bad
+        # parameterize_uri input, malformed metadata), skip it rather than
+        # taking down the whole exposure list.
+        _ -> []
+      end
+    end)
+    |> Enum.reduce(%{}, fn {uri, action_module}, acc ->
+      Map.update(acc, uri, [action_module], &[action_module | &1])
+    end)
+    |> Map.new(fn {uri, modules} -> {uri, Enum.reverse(modules)} end)
   end
 
   @doc """

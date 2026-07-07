@@ -169,6 +169,29 @@ defmodule Arbor.SecurityTest do
     end
   end
 
+  describe "capability_authorizes?/3" do
+    test "checks resource matching and scope without mutating state", %{agent_id: agent_id} do
+      {:ok, cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/project/**",
+          session_id: "session_1"
+        )
+
+      assert Security.capability_authorizes?(cap, "arbor://fs/read/project/file.txt",
+               session_id: "session_1"
+             )
+
+      refute Security.capability_authorizes?(cap, "arbor://fs/read/project/file.txt",
+               session_id: "session_2"
+             )
+
+      refute Security.capability_authorizes?(cap, "arbor://fs/write/project/file.txt",
+               session_id: "session_1"
+             )
+    end
+  end
+
   describe "healthy?/0" do
     test "returns true when system is running" do
       assert Security.healthy?() == true

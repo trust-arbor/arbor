@@ -1,5 +1,5 @@
 defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
@@ -91,6 +91,26 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
     end
   end
 
+  describe "profile_tools/1" do
+    setup :start_trust_infrastructure
+
+    test "includes profile-mintable tools without granting capabilities", %{agent_id: agent_id} do
+      set_policy_enforcer_enabled(true)
+      create_profile_with_rules(agent_id, :ask, %{"arbor://fs/read" => :auto})
+
+      {:ok, caps_before} = Arbor.Security.list_capabilities(agent_id)
+      cap_ids_before = Enum.map(caps_before, & &1.id)
+      refute Enum.any?(caps_before, &(&1.resource_uri == "arbor://fs/read"))
+
+      assert {:ok, tools} = ToolDisclosure.profile_tools(agent_id)
+      assert "file_read" in tools
+
+      {:ok, caps_after} = Arbor.Security.list_capabilities(agent_id)
+      assert Enum.map(caps_after, & &1.id) == cap_ids_before
+      refute Enum.any?(caps_after, &(&1.resource_uri == "arbor://fs/read"))
+    end
+  end
+
   describe "merge_discovered/2" do
     test "adds new names to set" do
       existing = MapSet.new(["a", "b"])
@@ -146,5 +166,67 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosureTest do
       assert :ok ==
                ToolDisclosure.ensure_tool_capabilities("test_agent", ["nonexistent_tool_xyz"])
     end
+  end
+
+  defp start_trust_infrastructure(_context) do
+    ensure_started(Arbor.Security.Identity.Registry)
+    ensure_started(Arbor.Security.SystemAuthority)
+    ensure_started(Arbor.Security.CapabilityStore)
+    ensure_started(Arbor.Security.Reflex.Registry)
+    ensure_started(Arbor.Security.Constraint.RateLimiter)
+
+    ensure_started(Arbor.Trust.EventStore)
+    ensure_started(Arbor.Trust.Store)
+
+    ensure_started(Arbor.Trust.Manager,
+      circuit_breaker: false,
+      decay: false,
+      event_store: true
+    )
+
+    agent_id = "agent_tool_disclosure_#{System.unique_integer([:positive])}"
+
+    on_exit(fn ->
+      if Process.whereis(Arbor.Security.CapabilityStore) do
+        case Arbor.Security.list_capabilities(agent_id) do
+          {:ok, caps} -> Enum.each(caps, &Arbor.Security.revoke(&1.id))
+          _ -> :ok
+        end
+      end
+    end)
+
+    {:ok, agent_id: agent_id}
+  end
+
+  defp ensure_started(module, opts \\ []) do
+    if Process.whereis(module) do
+      :already_running
+    else
+      start_supervised!({module, opts})
+    end
+  end
+
+  defp create_profile_with_rules(agent_id, baseline, rules) do
+    case Arbor.Trust.create_trust_profile(agent_id) do
+      {:ok, _} -> :ok
+      {:error, :already_exists} -> :ok
+    end
+
+    Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+      %{profile | baseline: baseline, rules: rules}
+    end)
+  end
+
+  defp set_policy_enforcer_enabled(value) do
+    previous = Application.get_env(:arbor_trust, :policy_enforcer_enabled)
+    Application.put_env(:arbor_trust, :policy_enforcer_enabled, value)
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        Application.delete_env(:arbor_trust, :policy_enforcer_enabled)
+      else
+        Application.put_env(:arbor_trust, :policy_enforcer_enabled, previous)
+      end
+    end)
   end
 end

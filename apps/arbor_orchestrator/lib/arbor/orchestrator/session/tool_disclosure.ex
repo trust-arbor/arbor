@@ -9,8 +9,9 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
 
   ## Tool Visibility
 
-  When the trust profile system is available, tool visibility is derived from
-  the agent's trust profile via `profile_tools/1`. Tools where the profile mode
+  When the trust profile system is available, tool visibility is derived from a
+  read-only authority snapshot via `profile_tools/1`: held capabilities plus
+  candidate URIs the trust profile would JIT-mint. Tools where the profile mode
   is `:block` are hidden; tools where mode is `:ask` are annotated. Falls back
   to `core_tools/0` when Trust is unavailable.
 
@@ -105,35 +106,21 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   @doc """
   Derive tool visibility from the agent's trust profile.
 
-  Queries the profile for all known tool URIs and returns tool names
-  where the effective mode is not `:block`. Returns `:fallback` when
-  the Trust system is unavailable.
+  Queries the authority snapshot for all known tool URIs and returns tool names
+  with either a held capability or profile-mintable reach. Returns `:fallback`
+  when the Trust system is unavailable.
   """
   @spec profile_tools(String.t()) :: {:ok, [String.t()]} | :fallback
   def profile_tools(agent_id) do
     # arbor_security/arbor_trust are hard deps; the rescue/catch below degrades
     # to :fallback if either subsystem's process is down.
-    {:ok, caps} = Arbor.Security.list_capabilities_for_principal(agent_id, [])
+    uri_to_tool_names = build_uri_to_tool_names_map()
+    {:ok, snapshot} = Arbor.Trust.enumerate_authority(agent_id, Map.keys(uri_to_tool_names))
 
-    # Build reverse map: canonical_uri -> tool_name
-    reverse_map = build_uri_to_tool_name_map()
-
-    # Only expose tools the agent has specific capabilities for
     tools =
-      caps
-      |> Enum.flat_map(fn cap ->
-        case Map.get(reverse_map, cap.resource_uri) do
-          nil -> []
-          name -> [name]
-        end
-      end)
-      |> Enum.filter(fn name ->
-        # Respect trust profile — hide :block tools
-        case Arbor.Actions.tool_name_to_canonical_uri(name) do
-          {:ok, uri} -> get_effective_mode(agent_id, uri) != :block
-          _ -> true
-        end
-      end)
+      snapshot.candidate_entries
+      |> Enum.filter(&Arbor.Trust.effective_authority_entry?/1)
+      |> Enum.flat_map(fn entry -> Map.get(uri_to_tool_names, entry.uri, []) end)
       |> Enum.uniq()
 
     # Include find_tools only if the profile allows it
@@ -148,7 +135,8 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
 
     Logger.debug(
       "[ToolDisclosure] profile_tools for #{agent_id}: #{length(tools)} tools " <>
-        "(from #{length(caps)} capabilities)"
+        "(from #{length(snapshot.held_capabilities)} held capabilities, " <>
+        "#{length(snapshot.policy_mintable_uris)} policy-mintable URIs)"
     )
 
     {:ok, tools}
@@ -160,24 +148,23 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
     :exit, _ -> :fallback
   end
 
-  # Build a reverse lookup: canonical_uri -> tool_name from all registered actions
-  defp build_uri_to_tool_name_map do
+  # Build a reverse lookup: canonical_uri -> tool names from all registered actions.
+  defp build_uri_to_tool_names_map do
     Arbor.Actions.all_actions()
     |> Enum.flat_map(fn action_mod ->
       name = if function_exported?(action_mod, :name, 0), do: action_mod.name(), else: nil
 
       if name do
         tool_name = to_string(name)
-
-        case Arbor.Actions.tool_name_to_canonical_uri(tool_name) do
-          {:ok, uri} -> [{uri, tool_name}]
-          _ -> []
-        end
+        [{Arbor.Actions.canonical_uri_for(action_mod, %{}), tool_name}]
       else
         []
       end
     end)
-    |> Map.new()
+    |> Enum.reduce(%{}, fn {uri, tool_name}, acc ->
+      Map.update(acc, uri, [tool_name], &[tool_name | &1])
+    end)
+    |> Map.new(fn {uri, names} -> {uri, names |> Enum.reverse() |> Enum.uniq()} end)
   end
 
   @doc """

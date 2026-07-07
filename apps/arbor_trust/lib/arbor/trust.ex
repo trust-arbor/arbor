@@ -213,6 +213,26 @@ defmodule Arbor.Trust do
   defdelegate confirmation_mode(agent_id, resource_uri), to: Arbor.Trust.Policy
 
   @doc """
+  Enumerate held and profile-mintable authority for a finite URI surface.
+
+  Returns a read-only snapshot combining currently held capabilities with
+  candidate URIs the trust profile would JIT-mint. This is the safe
+  self-inspection/tool-exposure API: it does not call `authorize/4`, grant
+  capabilities, or submit approval proposals.
+  """
+  @spec enumerate_authority(String.t(), [String.t()], keyword()) ::
+          {:ok, Arbor.Trust.AuthorityEnumeration.snapshot()} | {:error, term()}
+  defdelegate enumerate_authority(agent_id, candidate_uris, opts \\ []),
+    to: Arbor.Trust.AuthorityEnumeration,
+    as: :enumerate
+
+  @doc "Return true when an authority snapshot entry is usable through trust-layer authorization."
+  @spec effective_authority_entry?(map()) :: boolean()
+  defdelegate effective_authority_entry?(entry),
+    to: Arbor.Trust.AuthorityEnumeration,
+    as: :effective_entry?
+
+  @doc """
   Authorize an operation through the policy layer.
 
   This is the A1 boundary-move entry point for callers that want trust profiles

@@ -55,6 +55,24 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
              "Shell.Execute should NOT be exposed without arbor://shell/exec grant"
     end
 
+    test "includes profile-mintable actions without granting capabilities", %{agent_id: agent_id} do
+      start_trust_infrastructure()
+      set_policy_enforcer_enabled(true)
+      create_profile_with_rules(agent_id, :ask, %{"arbor://fs/read" => :auto})
+
+      {:ok, caps_before} = Security.list_capabilities(agent_id)
+      cap_ids_before = Enum.map(caps_before, & &1.id)
+      refute Enum.any?(caps_before, &(&1.resource_uri == "arbor://fs/read"))
+
+      modules = Arbor.Actions.tool_modules_for_agent(agent_id)
+
+      assert Arbor.Actions.File.Read in modules
+
+      {:ok, caps_after} = Security.list_capabilities(agent_id)
+      assert Enum.map(caps_after, & &1.id) == cap_ids_before
+      refute Enum.any?(caps_after, &(&1.resource_uri == "arbor://fs/read"))
+    end
+
     test "is a subset of all_actions/0", %{agent_id: agent_id} do
       {:ok, _} = Security.grant(principal: agent_id, resource: "arbor://fs/read")
 
@@ -63,5 +81,48 @@ defmodule Arbor.Actions.ToolModulesForAgentTest do
 
       assert MapSet.subset?(exposed, all)
     end
+  end
+
+  defp start_trust_infrastructure do
+    ensure_started(Arbor.Trust.EventStore)
+    ensure_started(Arbor.Trust.Store)
+
+    ensure_started(Arbor.Trust.Manager,
+      circuit_breaker: false,
+      decay: false,
+      event_store: true
+    )
+  end
+
+  defp ensure_started(module, opts \\ []) do
+    if Process.whereis(module) do
+      :already_running
+    else
+      start_supervised!({module, opts})
+    end
+  end
+
+  defp create_profile_with_rules(agent_id, baseline, rules) do
+    case Arbor.Trust.create_trust_profile(agent_id) do
+      {:ok, _} -> :ok
+      {:error, :already_exists} -> :ok
+    end
+
+    Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+      %{profile | baseline: baseline, rules: rules}
+    end)
+  end
+
+  defp set_policy_enforcer_enabled(value) do
+    previous = Application.get_env(:arbor_trust, :policy_enforcer_enabled)
+    Application.put_env(:arbor_trust, :policy_enforcer_enabled, value)
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        Application.delete_env(:arbor_trust, :policy_enforcer_enabled)
+      else
+        Application.put_env(:arbor_trust, :policy_enforcer_enabled, previous)
+      end
+    end)
   end
 end
