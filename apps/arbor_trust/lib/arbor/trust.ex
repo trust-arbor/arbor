@@ -38,7 +38,13 @@ defmodule Arbor.Trust do
 
   @behaviour Arbor.Contracts.API.Trust
 
-  alias Arbor.Trust.{ApprovalGuard, Manager, PolicyEnforcer, ProfileExitAudit}
+  alias Arbor.Trust.{
+    ApprovalGuard,
+    CapabilityEnforcementMatrix,
+    Manager,
+    PolicyEnforcer,
+    ProfileExitAudit
+  }
 
   # ===========================================================================
   # Lifecycle
@@ -274,6 +280,22 @@ defmodule Arbor.Trust do
   defdelegate effective_authority_entry?(entry),
     to: Arbor.Trust.AuthorityEnumeration,
     as: :effective_entry?
+
+  @doc """
+  Return the declared soft/hard enforcement rows for high-risk capabilities.
+
+  This is a read-only audit surface for the K5 defense-in-depth table. It does
+  not authorize, mint, or revoke capabilities.
+  """
+  @spec capability_enforcement_rows() :: [CapabilityEnforcementMatrix.row()]
+  defdelegate capability_enforcement_rows(), to: CapabilityEnforcementMatrix, as: :rows
+
+  @doc "Resolve the declared K5 enforcement row for a high-risk capability profile or URI."
+  @spec capability_enforcement_for(Arbor.Contracts.Security.CapabilityProfile.t() | String.t()) ::
+          {:ok, CapabilityEnforcementMatrix.row()} | {:error, term()}
+  defdelegate capability_enforcement_for(profile_or_uri),
+    to: CapabilityEnforcementMatrix,
+    as: :row_for
 
   @doc """
   Authorize an operation through the policy layer.
