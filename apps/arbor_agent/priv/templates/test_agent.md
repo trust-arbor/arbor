@@ -43,9 +43,9 @@ required_capabilities:
 - description: "Run DOT session pipelines (turns)"
   resource: "arbor://orchestrator/execute"
 - description: "Read source and test files"
-  resource: "arbor://fs/read/**"
+  resource: "arbor://fs/read/repo"
 - description: "List directories to map the codebase"
-  resource: "arbor://fs/list/**"
+  resource: "arbor://fs/list/repo"
 trust_preset:
   baseline: block
   rules:

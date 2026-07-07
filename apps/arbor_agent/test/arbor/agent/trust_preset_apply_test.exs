@@ -157,6 +157,26 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                Arbor.Security.authorize(agent_id, "arbor://orchestrator/execute/exec", :execute)
     end
 
+    test "template repo file grants mint concrete FileGuard scopes" do
+      assert {:ok, profile} = Lifecycle.create("Repo File Tool Probe", template: "test_agent")
+      agent_id = profile.agent_id
+      cleanup(agent_id)
+
+      repo_root =
+        repo_root()
+        |> String.trim_leading("/")
+
+      assert {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
+      uris = Enum.map(caps, & &1.resource_uri)
+
+      assert "arbor://fs/read" in uris
+      assert "arbor://fs/list" in uris
+      assert "arbor://fs/read/#{repo_root}/**" in uris
+      assert "arbor://fs/list/#{repo_root}/**" in uris
+      refute "arbor://fs/read/**" in uris
+      refute "arbor://fs/list/**" in uris
+    end
+
     test "a template WITHOUT a trust_preset is not forced to :block by this path" do
       assert {:ok, profile} =
                Lifecycle.create("Plain Agent Probe", template: "conversationalist")
@@ -184,6 +204,19 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     end
   catch
     :exit, _ -> :ok
+  end
+
+  defp repo_root do
+    cwd = File.cwd!() |> Path.expand()
+
+    root =
+      [cwd, Path.expand("../..", cwd), Path.expand("..", cwd)]
+      |> Enum.find(fn path ->
+        File.exists?(Path.join(path, "mix.exs")) and File.dir?(Path.join(path, "apps"))
+      end)
+
+    (root || cwd)
+    |> String.trim_trailing("/")
   end
 
   defp cleanup(agent_id) do

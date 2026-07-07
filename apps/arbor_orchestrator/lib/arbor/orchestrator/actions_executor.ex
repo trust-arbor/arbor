@@ -40,6 +40,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     agent_id = Keyword.get(opts, :agent_id, "system")
     signed_request = Keyword.get(opts, :signed_request)
     signer = Keyword.get(opts, :signer)
+    workdir = normalize_workdir(workdir)
 
     run_action(fn ->
       # Try ActionRegistry first (O(1) ETS lookup), fall back to build_action_map
@@ -58,6 +59,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           params =
             args
             |> atomize_known_keys(action_module)
+            |> maybe_resolve_file_paths(action_module, workdir)
             |> maybe_inject_workdir(workdir)
 
           # Sign with the canonical module-derived resource URI.
@@ -90,6 +92,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           # chokepoint reads no taint and every action passes (F1).
           context =
             %{auth_context: auth_context}
+            |> maybe_put_file_workspace(action_module, workdir)
             |> then(fn c ->
               if signed_request, do: Map.put(c, :signed_request, signed_request), else: c
             end)
@@ -589,6 +592,61 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
       Map.put(map, atom_key, value)
     end
   end
+
+  defp normalize_workdir(nil), do: File.cwd!()
+  defp normalize_workdir(""), do: File.cwd!()
+  defp normalize_workdir(workdir) when is_binary(workdir), do: Path.expand(workdir)
+  defp normalize_workdir(_workdir), do: File.cwd!()
+
+  defp maybe_resolve_file_paths(params, Arbor.Actions.File.Glob, workdir) do
+    resolve_path_param(params, :base_path, workdir)
+  end
+
+  defp maybe_resolve_file_paths(params, action_module, workdir)
+       when action_module in [
+              Arbor.Actions.File.Read,
+              Arbor.Actions.File.Write,
+              Arbor.Actions.File.List,
+              Arbor.Actions.File.Exists,
+              Arbor.Actions.File.Edit,
+              Arbor.Actions.File.Search
+            ] do
+    resolve_path_param(params, :path, workdir)
+  end
+
+  defp maybe_resolve_file_paths(params, _action_module, _workdir), do: params
+
+  defp resolve_path_param(params, key, workdir) do
+    case Map.get(params, key) do
+      path when is_binary(path) and path != "" ->
+        resolved_path =
+          if Path.type(path) == :absolute do
+            Path.expand(path)
+          else
+            Path.expand(path, workdir)
+          end
+
+        Map.put(params, key, resolved_path)
+
+      _ ->
+        params
+    end
+  end
+
+  defp maybe_put_file_workspace(context, action_module, workdir)
+       when action_module in [
+              Arbor.Actions.File.Read,
+              Arbor.Actions.File.Write,
+              Arbor.Actions.File.List,
+              Arbor.Actions.File.Glob,
+              Arbor.Actions.File.Exists,
+              Arbor.Actions.File.Edit,
+              Arbor.Actions.File.Search
+            ] do
+    Map.put(context, :workspace, workdir)
+  end
+
+  defp maybe_put_file_workspace(context, _action_module, _workdir), do: context
 
   @doc false
   def format_result(result) when is_binary(result), do: result

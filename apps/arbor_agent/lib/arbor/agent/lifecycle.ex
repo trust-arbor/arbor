@@ -17,7 +17,7 @@ defmodule Arbor.Agent.Lifecycle do
       {:ok, profile} = Lifecycle.create("My Agent",
         character: Character.new(name: "My Agent", values: ["helpfulness"]),
         initial_goals: [%{type: :achieve, description: "Complete the review"}],
-        capabilities: [%{resource: "arbor://fs/read/**"}]
+        capabilities: [%{resource: "arbor://fs/read/repo"}]
       )
 
       # Restore from disk
@@ -952,43 +952,45 @@ defmodule Arbor.Agent.Lifecycle do
         _ -> MapSet.new()
       end
 
-    results =
-      Enum.map(capabilities, fn cap ->
+    {results, _existing_uris} =
+      Enum.reduce(capabilities, {[], existing_uris}, fn cap, {results, existing_uris} ->
         # Self-scoped (`/self/`) URIs resolve to the agent's id, and constraint
         # keys are atomized — so a template can declare a constrained self-cap
         # (e.g. `code/write/self/sandbox/*` with `rate_limit: 10`) and it grants
         # identically to how the trust system grants the baseline.
-        resource =
+        resources =
           (cap[:resource] || cap["resource"])
           |> resolve_self_uri(agent_id)
-          |> normalize_runtime_capability_uri()
+          |> expand_runtime_capability_uris()
 
         constraints = normalize_capability_constraints(cap[:constraints] || cap["constraints"])
 
-        cond do
-          is_nil(resource) ->
-            :skipped
+        Enum.reduce(resources, {results, existing_uris}, fn resource, {results, existing_uris} ->
+          cond do
+            is_nil(resource) ->
+              {[:skipped | results], existing_uris}
 
-          MapSet.member?(existing_uris, resource) ->
-            :skipped
+            MapSet.member?(existing_uris, resource) ->
+              {[:skipped | results], existing_uris}
 
-          true ->
-            case Arbor.Security.grant(
-                   principal: agent_id,
-                   resource: resource,
-                   constraints: constraints
-                 ) do
-              {:ok, _cap} ->
-                :ok
+            true ->
+              case Arbor.Security.grant(
+                     principal: agent_id,
+                     resource: resource,
+                     constraints: constraints
+                   ) do
+                {:ok, _cap} ->
+                  {[:ok | results], MapSet.put(existing_uris, resource)}
 
-              {:error, reason} ->
-                Logger.warning("Failed to grant capability #{resource}: #{inspect(reason)}",
-                  agent_id: agent_id
-                )
+                {:error, reason} ->
+                  Logger.warning("Failed to grant capability #{resource}: #{inspect(reason)}",
+                    agent_id: agent_id
+                  )
 
-                {:error, reason}
-            end
-        end
+                  {[{:error, reason} | results], existing_uris}
+              end
+          end
+        end)
       end)
 
     granted = Enum.count(results, &(&1 == :ok))
@@ -1014,13 +1016,52 @@ defmodule Arbor.Agent.Lifecycle do
     |> String.replace(~r"/self$", "/#{agent_id}")
   end
 
+  defp expand_runtime_capability_uris(nil), do: []
+
   # Template authors declare the coarse orchestrator execution gate. Runtime
   # mandatory middleware checks per-node resources under that gate, so the
   # concrete capability must be a subtree grant.
-  defp normalize_runtime_capability_uri("arbor://orchestrator/execute"),
-    do: "arbor://orchestrator/execute/**"
+  defp expand_runtime_capability_uris("arbor://orchestrator/execute"),
+    do: ["arbor://orchestrator/execute/**"]
 
-  defp normalize_runtime_capability_uri(uri), do: uri
+  # Repo file tools need two resources: the bare action URI for tool exposure /
+  # signing, and an absolute repo-root path scope for FileGuard. Preserve
+  # explicit `/**` grants as literal broad capability wildcards; `repo` is the
+  # least-privilege template shorthand.
+  defp expand_runtime_capability_uris(uri)
+       when uri in ["arbor://fs/read", "arbor://fs/read/repo"],
+       do: repo_scoped_fs_uris(:read)
+
+  defp expand_runtime_capability_uris(uri)
+       when uri in ["arbor://fs/list", "arbor://fs/list/repo"],
+       do: repo_scoped_fs_uris(:list)
+
+  defp expand_runtime_capability_uris(uri), do: [uri]
+
+  defp repo_scoped_fs_uris(operation) when operation in [:read, :list] do
+    op = Atom.to_string(operation)
+
+    repo_root =
+      repo_root_for_capabilities()
+      |> String.trim_leading("/")
+
+    ["arbor://fs/#{op}", "arbor://fs/#{op}/#{repo_root}/**"]
+  end
+
+  defp repo_root_for_capabilities do
+    cwd = File.cwd!() |> Path.expand()
+
+    root =
+      [cwd, Path.expand("../..", cwd), Path.expand("..", cwd)]
+      |> Enum.find(&umbrella_root?/1)
+
+    (root || cwd)
+    |> String.trim_trailing("/")
+  end
+
+  defp umbrella_root?(path) do
+    File.exists?(Path.join(path, "mix.exs")) and File.dir?(Path.join(path, "apps"))
+  end
 
   # Atomize the known capability constraint keys (`rate_limit`,
   # `requires_approval`) so constraints declared as strings in template
