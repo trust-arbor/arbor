@@ -135,25 +135,12 @@ defmodule Arbor.Trust.Presets do
   def preset_rules(_), do: preset_rules(:cautious)
 
   @doc """
-  The default security ceiling — the fuller, write-gating set (was in
-  `ProfileResolver`; `Authority`'s divergent 2-entry fallback is gone). System
-  ceilings clamp a profile to a maximum: `most_restrictive([user, ceiling, model])`.
-  Operator override is layered on top of this default at the ProfileResolver boundary.
+  The default security ceiling generated from the Ring A capability risk
+  profile slice. System ceilings clamp a profile to a maximum:
+  `most_restrictive([user, ceiling, model])`.
   """
   @spec default_security_ceilings() :: rules()
   def default_security_ceilings do
-    %{
-      "arbor://shell" => :ask,
-      "arbor://governance" => :ask,
-      "arbor://code/write" => :ask,
-      "arbor://code/compile" => :ask,
-      "arbor://code/hot_load" => :ask,
-      "arbor://fs/write" => :ask,
-      "arbor://action/git/commit" => :ask,
-      "arbor://action/git/branch" => :ask,
-      "arbor://action/github/pr" => :ask,
-      "arbor://action/mix/format" => :ask,
-      "arbor://action/code_review/apply_changes" => :ask
-    }
+    Arbor.Trust.CapabilityRiskProfiles.security_ceilings()
   end
 end

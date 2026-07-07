@@ -54,7 +54,8 @@ defmodule Arbor.Trust.ProfileResolver do
   ## Options
 
   - `:model_class` — atom identifying the model class (e.g., `:frontier_cloud`)
-  - `:security_ceilings` — override security ceilings (default: from config)
+  - `:security_ceilings` — override security ceilings for this call (default:
+    generated defaults plus application config overrides)
   """
   @spec effective_mode(map(), String.t(), keyword()) :: mode()
   def effective_mode(profile, resource_uri, opts \\ []) do
@@ -199,17 +200,23 @@ defmodule Arbor.Trust.ProfileResolver do
   Get the security ceilings map.
 
   Security ceilings are system-enforced maximums that no user preference
-  can override. Loaded from application config.
+  can override. Defaults are generated from the Ring A capability risk profile
+  slice; application config can tighten or relax individual URI prefixes by
+  overlaying entries on top of that generated default.
   """
   @spec security_ceilings() :: rules()
   def security_ceilings do
-    Application.get_env(:arbor_trust, :security_ceilings, default_security_ceilings())
+    overrides = Application.get_env(:arbor_trust, :security_ceilings, %{}) || %{}
+    Map.merge(default_security_ceilings(), overrides)
   end
 
   @doc """
   Default security ceilings preserving existing invariants.
 
-  Shell and governance always require at least `:ask`.
+  The map is generated from `Arbor.Trust.CapabilityRiskProfiles`, the Ring A
+  slice of capability risk metadata. Shell and governance still require at
+  least `:ask`, but the table is no longer maintained independently from the
+  high-risk URI declarations.
 
   The keys here are URI **prefixes** matched longest-first by
   `Authority.effective_mode/3`. They use the same canonical resource/facade
