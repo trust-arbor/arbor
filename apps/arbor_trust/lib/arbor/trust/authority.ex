@@ -127,7 +127,8 @@ defmodule Arbor.Trust.Authority do
     # spams the owner and blocks the agent from functioning. An explicit profile
     # rule still overrides (resolve_prefix returns it); ceilings + model constraints
     # below still apply (most-restrictive wins).
-    layer1_default = if infrastructure_auto?(resource_uri), do: :auto, else: profile.baseline
+    layer1_default =
+      if infrastructure_auto?(resource_uri), do: :auto, else: constrain_baseline(profile.baseline)
     user_mode = resolve_prefix(profile.rules, resource_uri, layer1_default)
 
     # Layer 2: Security ceilings
@@ -155,7 +156,8 @@ defmodule Arbor.Trust.Authority do
     ceilings = Keyword.get(opts, :security_ceilings, default_security_ceilings())
     model_class = Keyword.get(opts, :model_class)
 
-    layer1_default = if infrastructure_auto?(resource_uri), do: :auto, else: profile.baseline
+    layer1_default =
+      if infrastructure_auto?(resource_uri), do: :auto, else: constrain_baseline(profile.baseline)
     user_mode = resolve_prefix(profile.rules, resource_uri, layer1_default)
     ceiling_mode = resolve_prefix(ceilings, resource_uri, :auto)
 
@@ -390,6 +392,25 @@ defmodule Arbor.Trust.Authority do
   # Callers should normalize via `normalize_mode/1` first so this branch is
   # only ever reached for genuinely unknown atoms.
   defp mode_index(_), do: 1
+
+  # ── Baseline constraint (P1 — forbid :auto baseline) ──────────────
+  # An :auto/:allow BASELINE inverts deny-by-default into a denylist (the ceiling set
+  # becomes the sole gate). Baseline may be :block or :ask only; :allow needs an
+  # explicit opt-in flag; :auto is disallowed and coerced to :block. Enforced HERE at
+  # the effective-mode boundary so it holds for EVERY profile regardless of how the
+  # baseline was set. Per-URI :auto/:allow RULES are untouched — earned autonomy on a
+  # specific power stays. See capability-policy-model-review (P1). Silent (hot path).
+  defp constrain_baseline(:auto), do: :block
+
+  defp constrain_baseline(:allow) do
+    if allow_permissive_baseline?(), do: :allow, else: :block
+  end
+
+  defp constrain_baseline(baseline), do: baseline
+
+  defp allow_permissive_baseline? do
+    Application.get_env(:arbor_trust, :allow_permissive_baseline, false)
+  end
 
   # Delegates to Presets (single source). Was a divergent 2-entry fallback; now
   # === the real ceiling, so direct `Authority.effective_mode` callers that bypass

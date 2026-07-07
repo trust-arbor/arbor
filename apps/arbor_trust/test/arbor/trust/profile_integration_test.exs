@@ -73,11 +73,11 @@ defmodule Arbor.Trust.ProfileIntegrationTest do
     end
 
     test "baseline propagates as default for all unmatched URIs" do
-      profile = build_profile(%{baseline: :allow, rules: %{"arbor://shell" => :block}})
+      profile = build_profile(%{baseline: :ask, rules: %{"arbor://shell" => :block}})
 
-      assert ProfileResolver.effective_mode(profile, @memory_read, security_ceilings: %{}) == :allow
-      assert ProfileResolver.effective_mode(profile, @file_read, security_ceilings: %{}) == :allow
-      assert ProfileResolver.effective_mode(profile, @historian_query, security_ceilings: %{}) == :allow
+      assert ProfileResolver.effective_mode(profile, @memory_read, security_ceilings: %{}) == :ask
+      assert ProfileResolver.effective_mode(profile, @file_read, security_ceilings: %{}) == :ask
+      assert ProfileResolver.effective_mode(profile, @historian_query, security_ceilings: %{}) == :ask
       # Matched rule overrides baseline
       assert ProfileResolver.effective_mode(profile, @shell_exec, security_ceilings: %{}) == :block
     end
@@ -182,7 +182,7 @@ defmodule Arbor.Trust.ProfileIntegrationTest do
 
     test "model constraint uses longest prefix match" do
       profile = build_profile(%{
-        baseline: :auto,
+        baseline: :ask,
         rules: %{},
         model_constraints: %{
           {:local_small, "arbor://shell"} => :block,
@@ -398,11 +398,15 @@ defmodule Arbor.Trust.ProfileIntegrationTest do
   # ── 6. Edge cases ────────────────────────────────────────────────────
 
   describe "edge cases" do
-    test "empty rules with various baselines" do
-      for baseline <- [:block, :ask, :allow, :auto] do
+    test "empty rules: baseline propagates, but P1 coerces :allow/:auto to :block" do
+      # P1 (A4): only :block/:ask are valid baselines; an :allow (unflagged) or :auto
+      # baseline coerces to :block at effective_mode. Per-URI :auto/:allow rules are untouched.
+      for {baseline, expected} <- [{:block, :block}, {:ask, :ask}, {:allow, :block}, {:auto, :block}] do
         profile = build_profile(%{baseline: baseline, rules: %{}})
         result = ProfileResolver.effective_mode(profile, @memory_read, security_ceilings: %{})
-        assert result == baseline, "Expected #{baseline} for empty rules with baseline #{baseline}"
+
+        assert result == expected,
+               "Expected #{expected} for empty rules with baseline #{baseline}"
       end
     end
 
@@ -426,7 +430,7 @@ defmodule Arbor.Trust.ProfileIntegrationTest do
 
     test "nil model_class means model constraints are ignored" do
       profile = build_profile(%{
-        baseline: :auto,
+        baseline: :ask,
         rules: %{},
         model_constraints: %{
           {:any_model, "arbor://"} => :block
@@ -439,7 +443,7 @@ defmodule Arbor.Trust.ProfileIntegrationTest do
         model_class: nil
       )
 
-      assert result == :auto
+      assert result == :ask
     end
 
     test "profile with no fields defaults gracefully" do
@@ -484,8 +488,10 @@ defmodule Arbor.Trust.ProfileIntegrationTest do
 
     test "model constraints with multiple model classes are independent" do
       profile = build_profile(%{
-        baseline: :auto,
-        rules: %{},
+        baseline: :ask,
+        # P1: baseline is :ask, so an explicit :auto rule is needed for the frontier
+        # memory :allow model-constraint to show (else the :ask baseline clamps it).
+        rules: %{"arbor://memory" => :auto},
         model_constraints: %{
           {:frontier_cloud, "arbor://shell"} => :ask,
           {:local_small, "arbor://shell"} => :block,

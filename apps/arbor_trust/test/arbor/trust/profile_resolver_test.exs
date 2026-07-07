@@ -150,11 +150,11 @@ defmodule Arbor.Trust.ProfileResolverTest do
     end
 
     test "user rules and security ceilings do not match sibling URI text" do
-      profile = %{rules: %{"arbor://shell" => :block}, baseline: :auto}
+      profile = %{rules: %{"arbor://shell" => :block}, baseline: :ask}
 
       assert ProfileResolver.effective_mode(profile, "arbor://shellEVIL/exec",
                security_ceilings: %{"arbor://shell" => :ask}
-             ) == :auto
+             ) == :ask
     end
 
     test "model constraint applies when model_class provided" do
@@ -183,14 +183,14 @@ defmodule Arbor.Trust.ProfileResolverTest do
     test "model constraints do not match sibling URI text" do
       profile = %{
         rules: %{},
-        baseline: :auto,
+        baseline: :ask,
         model_constraints: %{{:frontier_cloud, "arbor://shell"} => :block}
       }
 
       assert ProfileResolver.effective_mode(profile, "arbor://shellEVIL/exec",
                security_ceilings: %{},
                model_class: :frontier_cloud
-             ) == :auto
+             ) == :ask
     end
 
     @tag spec: "TRUST-1"
