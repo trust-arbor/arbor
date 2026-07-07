@@ -41,6 +41,32 @@ defmodule Arbor.Actions.Shell do
 
   alias Arbor.Shell
 
+  @doc false
+  @spec authorize_command(String.t(), String.t(), keyword()) ::
+          {:ok, :authorized}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, :unauthorized | term()}
+  def authorize_command(agent_id, command, opts \\ [])
+      when is_binary(agent_id) and is_binary(command) do
+    command_name = Keyword.get(opts, :gate_command) || extract_command_name(command)
+    resource = "arbor://shell/exec/#{command_name}"
+    auth_opts = [command: command, path: Keyword.get(opts, :cwd), verify_identity: false]
+
+    case Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts) do
+      {:ok, :authorized} -> {:ok, :authorized}
+      {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+      {:error, _reason} -> {:error, :unauthorized}
+    end
+  end
+
+  defp extract_command_name(command) do
+    command
+    |> String.trim()
+    |> String.split(~r/\s+/, parts: 2)
+    |> List.first()
+    |> Path.basename()
+  end
+
   defmodule Execute do
     @moduledoc """
     Execute a shell command.
@@ -169,7 +195,10 @@ defmodule Arbor.Actions.Shell do
     # otherwise call raw execute (system-level callers).
     defp call_shell(command, opts, context) do
       if context[:agent_id] do
-        Shell.authorize_and_execute(context[:agent_id], command, opts)
+        with {:ok, :authorized} <-
+               Arbor.Actions.Shell.authorize_command(context[:agent_id], command, opts) do
+          Shell.authorize_and_execute(context[:agent_id], command, opts)
+        end
       else
         Shell.execute(command, opts)
       end
@@ -342,7 +371,10 @@ defmodule Arbor.Actions.Shell do
     # Delegate to facade authorize_and_execute when agent_id is in context
     defp call_shell(command, opts, context) do
       if context[:agent_id] do
-        Shell.authorize_and_execute(context[:agent_id], command, opts)
+        with {:ok, :authorized} <-
+               Arbor.Actions.Shell.authorize_command(context[:agent_id], command, opts) do
+          Shell.authorize_and_execute(context[:agent_id], command, opts)
+        end
       else
         Shell.execute(command, opts)
       end

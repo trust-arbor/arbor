@@ -198,10 +198,11 @@ defmodule Arbor.Security.Config do
   end
 
   @doc """
-  Whether the PolicyEnforcer JIT bridge is enabled.
+  Compatibility reader for the trust-layer PolicyEnforcer switch.
 
-  When `true`, `authorize/4` consults the trust profile on capability miss
-  and auto-grants session-scoped capabilities based on the profile mode.
+  A1 moved JIT policy minting out of `arbor_security`; `authorize/4` no longer
+  consults this flag. `Arbor.Trust.Config.policy_enforcer_enabled?/0` reads the
+  trust key first and falls back to this historical key during config migration.
   """
   @spec policy_enforcer_enabled?() :: boolean()
   def policy_enforcer_enabled? do
@@ -267,12 +268,13 @@ defmodule Arbor.Security.Config do
   end
 
   @doc """
-  The module used to resolve trust-profile confirmation modes.
+  The module used by the legacy in-kernel egress gate to resolve trust-profile
+  egress modes.
 
-  Must implement `confirmation_mode/2` returning `:gated | :deny | :auto |
-  :allow`. Defaults to `Arbor.Trust.Policy`. Overridable so tests can
-  substitute a stub (e.g. one that raises, to prove `AuthDecision` fails
-  closed when the trust subsystem is unavailable).
+  Must implement `egress_mode/2` for enforced external egress tiers. Defaults
+  to `Arbor.Trust.Policy`. Overridable so egress tests can substitute a stub.
+  Operation authorization approval policy moved to `Arbor.Trust.ApprovalGuard`
+  in the 2026-07-07 A1 boundary move.
   """
   @spec trust_policy_module() :: module()
   def trust_policy_module do

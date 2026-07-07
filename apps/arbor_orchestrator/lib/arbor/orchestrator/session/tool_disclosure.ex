@@ -16,9 +16,10 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
 
   ## Authorization
 
-  With `PolicyEnforcer` enabled, capabilities are granted JIT on first use —
-  no upfront `ensure_tool_capabilities` call needed. The security layer
-  auto-grants session-scoped capabilities based on the trust profile.
+  With the trust-layer `PolicyEnforcer` enabled, capabilities are granted JIT on
+  first use through `Arbor.Trust.authorize/4` — no upfront
+  `ensure_tool_capabilities` call needed. The security layer itself only checks
+  held capabilities.
 
   ## Session Persistence
 
@@ -239,13 +240,13 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   @doc """
   Ensure the agent has security capabilities for all resolved tools.
 
-  Deprecated: With PolicyEnforcer enabled, capabilities are granted JIT
-  on first use. This function is retained for backward compatibility when
-  PolicyEnforcer is disabled.
+  Deprecated: with the trust-layer PolicyEnforcer enabled, capabilities are
+  granted JIT on first use. This function is retained for backward
+  compatibility when PolicyEnforcer is disabled.
   """
   @spec ensure_tool_capabilities(String.t(), [String.t()]) :: :ok
   def ensure_tool_capabilities(agent_id, tool_names) do
-    # Skip if PolicyEnforcer is enabled — JIT grants handle this
+    # Skip if trust-layer PolicyEnforcer is enabled — JIT grants handle this.
     if policy_enforcer_enabled?() do
       :ok
     else
@@ -288,8 +289,8 @@ defmodule Arbor.Orchestrator.Session.ToolDisclosure do
   end
 
   defp policy_enforcer_enabled? do
-    # arbor_security is a hard dep — Arbor.Security.Config is called directly.
-    Arbor.Security.Config.policy_enforcer_enabled?()
+    # arbor_trust is a hard dep — Arbor.Trust.Config is called directly.
+    Arbor.Trust.Config.policy_enforcer_enabled?()
   rescue
     _ -> false
   catch

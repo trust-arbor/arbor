@@ -144,13 +144,12 @@ defmodule Arbor.Actions do
         []
       end
 
-    # For fs actions, plumb `:file_path` through to Security.authorize so
-    # the synthesis path in `Security.maybe_synthesize_fs_path_uri/2` can
+    # For fs actions, plumb `:file_path` through to Trust.authorize so
+    # the synthesis path in `Security.authorization_resource_uri/2` can
     # turn the bare `arbor://fs/<op>` resource into the path-embedded
     # form. Without this, path-scoped caps (like the per-run identity
     # caps minted from `.caps.json` for the scheduler pipelines) don't
-    # match the bare URI in `uri_matches?/2`, AuthDecision falls through
-    # to PolicyEnforcer, and the auth chain hits the approval gate.
+    # match the bare URI in `uri_matches?/2`.
     # Surfaced 2026-06-06 by the morning-digest LLM pipelines.
     auth_opts =
       case extract_fs_path(resource, params) do
@@ -179,7 +178,7 @@ defmodule Arbor.Actions do
 
     maybe_observe_egress(action_module, egress_tier, clean_context)
 
-    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
+    case Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts) do
       result
       when result == {:ok, :authorized} or
              (is_tuple(result) and elem(result, 0) == :ok and elem(result, 1) == :authorized) ->
@@ -595,7 +594,7 @@ defmodule Arbor.Actions do
   defp authorized_for_exposure?(agent_id, action_module) do
     uri = canonical_uri_for(action_module, %{})
 
-    case Arbor.Security.authorize(agent_id, uri, :execute) do
+    case Arbor.Trust.authorize(agent_id, uri, :execute) do
       {:ok, :authorized} -> true
       {:ok, :pending_approval, _proposal_id} -> true
       {:error, _reason} -> false
@@ -770,8 +769,8 @@ defmodule Arbor.Actions do
     if context[:agent_id] do
       agent_id = context[:agent_id]
 
-      if agent_id && security_available?() do
-        case Arbor.Security.authorize(agent_id, resource_uri, %{}) do
+      if agent_id && trust_authorization_available?() do
+        case Arbor.Trust.authorize(agent_id, resource_uri, :execute) do
           {:ok, :authorized} -> :ok
           {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
           {:error, reason} -> {:error, {:unauthorized, reason}}
@@ -784,9 +783,9 @@ defmodule Arbor.Actions do
     end
   end
 
-  defp security_available? do
-    Code.ensure_loaded?(Arbor.Security) and
-      function_exported?(Arbor.Security, :authorize, 3) and
+  defp trust_authorization_available? do
+    Code.ensure_loaded?(Arbor.Trust) and
+      function_exported?(Arbor.Trust, :authorize, 3) and
       Process.whereis(Arbor.Security.CapabilityStore) != nil
   end
 

@@ -38,7 +38,7 @@ defmodule Arbor.Eval.Checks.AuthorizationSmells do
     "more restrictive", so `true` there is fail-CLOSED, not fail-open. Catching
     the inverted bug (a restriction predicate that fails to `false`) is deferred.
     This exclusion was added 2026-06-09 after the first real-code scan flagged
-    `trust_profile_gates?` (whose `rescue _ -> true` is the H1 fail-closed fix).
+    a restriction predicate whose `rescue _ -> true` was an H1 fail-closed fix.
   - Side-effect functions (persist/emit/sync) are deliberately NOT matched —
     their `:ok` return is "done", not an authorization grant.
   """
@@ -131,7 +131,7 @@ defmodule Arbor.Eval.Checks.AuthorizationSmells do
 
   # A restriction predicate answers "is this MORE restricted?" — `true` means
   # deny/gate, so a `rescue _ -> true` is fail-closed, not fail-open. Excluded
-  # to avoid misreading the polarity (e.g. `trust_profile_gates?`).
+  # to avoid misreading the polarity.
   defp restriction_predicate?(str) do
     String.ends_with?(str, ["gates?", "gated?", "restricted?", "blocked?", "denied?"]) or
       String.starts_with?(str, "requires_")

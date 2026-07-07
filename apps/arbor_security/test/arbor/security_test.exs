@@ -38,9 +38,8 @@ defmodule Arbor.SecurityTest do
       # :execute, file_path: "/abs/path/file.md")`. Per-run identity
       # caps are scoped like `arbor://fs/read/abs/path/**`. Pre-fix,
       # the bare URI didn't trigger the cap's `/**` prefix match in
-      # `uri_matches?/2`, so AuthDecision fell through to PolicyEnforcer
-      # which auto-granted with `requires_approval: true` — the gate
-      # then timed out on no-presence. With the synthesis, the bare
+      # `uri_matches?/2`, so authorization missed the real path-scoped cap.
+      # With the synthesis, the bare
       # URI + file_path becomes `arbor://fs/read/abs/path/file.md`
       # which IS matched by the cap's `/**` prefix.
 
@@ -70,8 +69,8 @@ defmodule Arbor.SecurityTest do
           resource: cap_uri
         )
 
-      # Pre-fix: bare URI + file_path → fell through to PolicyEnforcer +
-      # approval gate. Post-fix: synthesizes to the full URI, finds the
+      # Pre-fix: bare URI + file_path missed the path-scoped cap. Post-fix:
+      # synthesizes to the full URI, finds the
       # per-path cap directly, returns :authorized.
       assert {:ok, :authorized} =
                Security.authorize(agent_id, "arbor://fs/read", :execute,

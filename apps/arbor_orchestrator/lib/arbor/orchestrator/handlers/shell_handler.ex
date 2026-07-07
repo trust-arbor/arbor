@@ -114,10 +114,11 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
   # Capability gate. Returns :ok to proceed, or {:error, reason} to fail
   # closed (the node fails; the command never runs).
   #
-  # SECURITY: arbor_shell is a hard dep, so the authorizer ALWAYS resolves
-  # (Arbor.Shell.authorize/3 in production, a test stub via :shell_authorizer).
-  # The legacy "no facade → :ok (allow)" fail-open branch is gone: a missing
-  # capability system can no longer let a shell command run unauthorized.
+  # SECURITY: the default authorizer enters the trust-layer policy gate, which
+  # then delegates to the security kernel. Tests can inject a stub via
+  # :shell_authorizer. The legacy "no facade → :ok (allow)" fail-open branch is
+  # gone: a missing capability system can no longer let a shell command run
+  # unauthorized.
   defp authorize_shell(agent_id, command, cwd, opts) do
     authorize_fun = shell_authorizer(opts)
     auth_opts = if cwd, do: [cwd: cwd], else: []
@@ -131,11 +132,11 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
 
   # Resolve the shell authorizer:
   #   1. explicit override in opts (tests inject a stub via :shell_authorizer)
-  #   2. Arbor.Shell.authorize/3 — arbor_shell is a hard dep, called directly
+  #   2. trust-layer shell authorization — policy may mint, security enforces
   defp shell_authorizer(opts) do
     case opts[:shell_authorizer] do
       fun when is_function(fun, 3) -> fun
-      _ -> &Arbor.Shell.authorize/3
+      _ -> &Arbor.Actions.Shell.authorize_command/3
     end
   end
 

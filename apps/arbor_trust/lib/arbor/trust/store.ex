@@ -391,7 +391,7 @@ defmodule Arbor.Trust.Store do
   # Runs in a Task to avoid blocking the GenServer.
   defp sync_capabilities_async(agent_id) do
     Task.start(fn ->
-      Arbor.Security.PolicyEnforcer.sync_capabilities(agent_id)
+      Arbor.Trust.PolicyEnforcer.sync_capabilities(agent_id)
     end)
   rescue
     _ -> :ok

@@ -75,6 +75,49 @@ defmodule Arbor.Trust.Config do
   @spec circuit_breaker_config() :: map()
   def circuit_breaker_config, do: get(:circuit_breaker, @default_circuit_breaker)
 
+  @doc """
+  Trust policy module used by policy-layer authorization.
+
+  Falls back to the historical `:arbor_security, :trust_policy_module` override
+  while the boundary move migrates tests and deployment config.
+  """
+  @spec policy_module() :: module()
+  def policy_module do
+    get(
+      :policy_module,
+      Application.get_env(:arbor_security, :trust_policy_module, Arbor.Trust.Policy)
+    )
+  end
+
+  @doc """
+  Whether trust-policy JIT capability minting is enabled.
+
+  During the A1 kernel/policy boundary move this reads the new trust-layer
+  key first and falls back to the historical `:arbor_security` key so existing
+  dev/prod config keeps its behavior.
+  """
+  @spec policy_enforcer_enabled?() :: boolean()
+  def policy_enforcer_enabled? do
+    get(
+      :policy_enforcer_enabled,
+      Application.get_env(:arbor_security, :policy_enforcer_enabled, true)
+    )
+  end
+
+  @doc """
+  Whether trust-policy approval gating is enabled.
+
+  Reads `:arbor_trust, :approval_guard_enabled` first, then the historical
+  `:arbor_security` key for compatibility.
+  """
+  @spec approval_guard_enabled?() :: boolean()
+  def approval_guard_enabled? do
+    get(
+      :approval_guard_enabled,
+      Application.get_env(:arbor_security, :approval_guard_enabled, true)
+    )
+  end
+
   # ===========================================================================
   # Capabilities
   # ===========================================================================

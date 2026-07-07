@@ -92,6 +92,18 @@ defmodule Arbor.Security do
       )
 
   @doc """
+  Return the effective resource URI used by the authorization matcher.
+
+  This is exposed so policy-layer code can perform explicit pre-authorization
+  decisions against the same URI the security kernel will check. In particular,
+  bare `arbor://fs/<op>` URIs plus `file_path:` are synthesized into the
+  path-embedded URI before capability lookup.
+  """
+  @spec authorization_resource_uri(String.t(), keyword()) :: String.t()
+  def authorization_resource_uri(resource_uri, opts \\ []),
+    do: maybe_synthesize_fs_path_uri(resource_uri, opts)
+
+  @doc """
   Standalone egress authorization for callers WITHOUT an operation capability
   (2026-06-14 URI-addressing-vs-classification decision) — notably the
   compute-node LLM path (`LlmHandler`), where pipeline LLM calls have no per-op
@@ -502,17 +514,14 @@ defmodule Arbor.Security do
     # `arbor://fs/<op>` form, synthesize the path-embedded URI for
     # cap lookup. Without this, path-scoped caps like
     # `arbor://fs/read/Users/azmaveth/.arbor/reports/upstream-deps/**`
-    # don't match the action's bare URI, AuthDecision falls through
-    # to PolicyEnforcer, the trust profile says `:ask`, PolicyEnforcer
-    # auto-grants with `requires_approval: true`, and the auth chain
-    # hits the approval gate. With this synthesis, the per-run cap
+    # don't match the action's bare URI. With this synthesis, the per-run cap
     # matches via `uri_matches?/2`'s `/**` prefix rule and AuthDecision
     # returns `:authorized` without the approval detour.
     # FileGuard still runs in `maybe_check_file_guard/4` as
     # defense-in-depth path normalization. Surfaced 2026-06-06 by the
     # morning-digest pipelines hitting the gate when run via the
     # per-run identity flow.
-    resource_uri = maybe_synthesize_fs_path_uri(resource_uri, opts)
+    resource_uri = authorization_resource_uri(resource_uri, opts)
 
     # Step 1: Reflexes — instant safety block, must run before anything else
     reflex_context = build_reflex_context(resource_uri, action, opts)
@@ -547,18 +556,14 @@ defmodule Arbor.Security do
       # FileGuard for fs:// URIs — runs explicit (caller passed :file_path)
       # OR implicit (we have a matched cap and the URI's path-part is the
       # implicit file_path) defense-in-depth normalization.
-      case maybe_check_file_guard(principal_id, resource_uri, opts, cap) do
+      file_guard_result = maybe_check_file_guard(principal_id, resource_uri, opts, cap)
+
+      case normalize_file_guard_result(file_guard_result) do
         :ok ->
           Events.record_authorization_granted(principal_id, resource_uri, opts)
           if cap, do: maybe_check_max_uses(cap)
           if cap, do: maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, opts)
           {:ok, :authorized}
-
-        {:ok, resolved_path} ->
-          Events.record_authorization_granted(principal_id, resource_uri, opts)
-          if cap, do: maybe_check_max_uses(cap)
-          if cap, do: maybe_emit_receipt(cap, principal_id, resource_uri, action, :granted, opts)
-          {:ok, :authorized, resolved_path}
 
         {:error, reason} ->
           Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
@@ -573,8 +578,9 @@ defmodule Arbor.Security do
 
   # Side effects for requires_approval decisions
   defp handle_requires_approval(cap, _auth, principal_id, resource_uri, action, opts) do
-    # Escalate to Consensus via ApprovalGuard (side effect — GenServer call)
-    case Arbor.Security.ApprovalGuard.check(cap, principal_id, resource_uri) do
+    # Escalate to Consensus for kernel-owned capability constraints. Trust policy
+    # approval lives in Arbor.Trust.ApprovalGuard.
+    case Arbor.Security.Escalation.maybe_escalate(cap, principal_id, resource_uri) do
       :ok ->
         # Graduated — still enforce constraints (rate limits, time windows)
         # AND run the implicit FileGuard normalization for fs URIs. The

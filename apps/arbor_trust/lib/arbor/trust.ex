@@ -38,7 +38,7 @@ defmodule Arbor.Trust do
 
   @behaviour Arbor.Contracts.API.Trust
 
-  alias Arbor.Trust.Manager
+  alias Arbor.Trust.{ApprovalGuard, Manager, PolicyEnforcer}
 
   # ===========================================================================
   # Lifecycle
@@ -211,6 +211,45 @@ defmodule Arbor.Trust do
   @doc "Get confirmation mode for a resource at agent's current trust level."
   @spec confirmation_mode(String.t(), String.t()) :: :auto | :gated | :deny
   defdelegate confirmation_mode(agent_id, resource_uri), to: Arbor.Trust.Policy
+
+  @doc """
+  Authorize an operation through the policy layer.
+
+  This is the A1 boundary-move entry point for callers that want trust profiles
+  to modulate capability use. It may mint explicit policy-derived reach before
+  delegating to the security kernel, then applies approval policy to the held
+  capability.
+
+  Call `Arbor.Security.authorize/4` directly when the caller wants a pure
+  capability check with no trust-policy minting.
+  """
+  @spec authorize(String.t(), String.t(), atom(), keyword()) ::
+          {:ok, :authorized}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, term()}
+  def authorize(agent_id, resource_uri, action \\ nil, opts \\ []) do
+    effective_uri = Arbor.Security.authorization_resource_uri(resource_uri, opts)
+
+    with {:ok, cap} <- PolicyEnforcer.ensure_capability(agent_id, effective_uri, opts),
+         {:ok, authorized_result} <- security_authorize(agent_id, resource_uri, action, opts) do
+      case ApprovalGuard.check(cap, agent_id, effective_uri) do
+        :ok -> authorized_result
+        {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp security_authorize(agent_id, resource_uri, action, opts) do
+    case Arbor.Security.authorize(agent_id, resource_uri, action, opts) do
+      {:ok, :authorized} = result -> {:ok, result}
+      {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:unexpected_auth_result, other}}
+    end
+  end
 
   # -- ConfirmationTracker (confirm-then-automate) --
 

@@ -398,10 +398,10 @@ defmodule Arbor.Actions.Code do
       if context[:agent_id] do
         agent_id = context[:agent_id]
 
-        if agent_id && security_available?() do
+        if agent_id && trust_authorization_available?() do
           uri = "arbor://code/hot_load/#{module_str}"
 
-          case Arbor.Security.authorize(agent_id, uri, :execute, verify_identity: false) do
+          case Arbor.Trust.authorize(agent_id, uri, :execute, verify_identity: false) do
             {:ok, :authorized} -> :ok
             {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
             {:error, reason} -> {:error, {:unauthorized, reason}}
@@ -414,9 +414,9 @@ defmodule Arbor.Actions.Code do
       end
     end
 
-    defp security_available? do
-      Code.ensure_loaded?(Arbor.Security) and
-        function_exported?(Arbor.Security, :authorize, 3) and
+    defp trust_authorization_available? do
+      Code.ensure_loaded?(Arbor.Trust) and
+        function_exported?(Arbor.Trust, :authorize, 3) and
         Process.whereis(Arbor.Security.CapabilityStore) != nil
     end
 

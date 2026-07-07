@@ -26,19 +26,14 @@ defmodule Arbor.Security.EgressGateTest do
 
   @resource "arbor://ai/generate"
 
-  # Trust-policy stub: returns :auto so the trust ceiling NEVER gates. This
-  # isolates the egress tier as the only variable that can force approval —
-  # otherwise the fail-closed trust gate (Arbor.Trust.Policy unavailable here)
-  # would force approval on everything and mask the egress decision.
+  # Trust-policy stub for egress. Missing egress_mode/2 exercises the
+  # fail-closed :ask fallback for external tiers.
   defmodule UngatedTrustPolicy do
-    def confirmation_mode(_principal, _uri), do: :auto
-    # No egress_mode/2 — exercises the fail-closed :ask fallback for external tiers.
   end
 
   # A profile that grants standing to egress to external providers (a trusted
   # agent), but still asks for peers.
   defmodule ProviderAllowedPolicy do
-    def confirmation_mode(_principal, _uri), do: :auto
     def egress_mode(_principal, :external_provider), do: :allow
     def egress_mode(_principal, :on_premises), do: :allow
     def egress_mode(_principal, _tier), do: :ask
@@ -46,7 +41,6 @@ defmodule Arbor.Security.EgressGateTest do
 
   # A profile that hard-blocks external-provider egress.
   defmodule ProviderBlockedPolicy do
-    def confirmation_mode(_principal, _uri), do: :auto
     def egress_mode(_principal, :external_provider), do: :block
     def egress_mode(_principal, _tier), do: :allow
   end
