@@ -2,8 +2,9 @@ defmodule Arbor.Security.Events do
   @moduledoc """
   Permanent event logging for security operations.
 
-  Writes durable events to EventLog via arbor_persistence AND emits on the
-  signal bus for real-time notification (dual-emit pattern).
+  Writes durable events to EventLog via arbor_persistence AND emits telemetry.
+  The `arbor_signals` application may bridge selected telemetry events onto the
+  signal bus for real-time notification.
 
   Uses `apply/3` for runtime module resolution since arbor_persistence
   depends on arbor_security (adding the reverse would create a cycle).
@@ -38,7 +39,7 @@ defmodule Arbor.Security.Events do
   @default_event_log_name Module.concat(["Arbor", "Historian", "EventLog", "ETS"])
   @default_event_log_backend Module.concat(["Arbor", "Persistence", "EventLog", "ETS"])
   @default_event_log_reader Module.concat(["Arbor", "Persistence"])
-  @default_signals_module Module.concat(["Arbor", "Signals"])
+  @default_event_module Module.concat(["Arbor", "Persistence", "Event"])
   @stream_id "security:events"
 
   # ============================================================================
@@ -333,19 +334,41 @@ defmodule Arbor.Security.Events do
   # Private Helpers
   # ============================================================================
 
-  # Emit durable signal via centralized Signals.durable_emit/4.
-  # This handles: signal bus emit + EventLog ETS write + async Postgres write.
-  #
   # Security operations must not fail because the audit log is unavailable.
   defp dual_emit(event_type, data) do
-    signals = signals_module()
+    persist_event(event_type, data)
 
-    if Code.ensure_loaded?(signals) and function_exported?(signals, :durable_emit, 4) do
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(signals, :durable_emit, [:security, event_type, data, [stream_id: @stream_id]])
-    end
+    Arbor.Security.Telemetry.emit(event_type, data,
+      signal_data: Map.put(data, :permanent, true),
+      stream_id: @stream_id
+    )
 
     :ok
+  end
+
+  defp persist_event(event_type, data) do
+    event_module = event_module()
+    persistence = event_log_reader()
+
+    if Code.ensure_loaded?(event_module) &&
+         Code.ensure_loaded?(persistence) &&
+         function_exported?(persistence, :append, 4) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      event =
+        apply(event_module, :new, [
+          @stream_id,
+          to_string(event_type),
+          Map.put(data, :timestamp, DateTime.utc_now()),
+          [metadata: %{source_node: node()}]
+        ])
+
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(persistence, :append, [event_log_name(), event_log_backend(), @stream_id, event])
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp event_log_name do
@@ -360,7 +383,7 @@ defmodule Arbor.Security.Events do
     Application.get_env(:arbor_security, :event_log_reader, @default_event_log_reader)
   end
 
-  defp signals_module do
-    Application.get_env(:arbor_security, :signals_module, @default_signals_module)
+  defp event_module do
+    Application.get_env(:arbor_security, :event_module, @default_event_module)
   end
 end

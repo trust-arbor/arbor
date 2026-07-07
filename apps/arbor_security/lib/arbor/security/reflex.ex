@@ -59,7 +59,6 @@ defmodule Arbor.Security.Reflex do
 
   alias Arbor.Contracts.Security.Reflex, as: ReflexContract
   alias Arbor.Security.Reflex.Registry
-  alias Arbor.Signals
 
   @type check_context :: %{
           optional(:command) => String.t(),
@@ -269,10 +268,10 @@ defmodule Arbor.Security.Reflex do
     :ok
   end
 
-  # ── Signal Emissions ──
+  # ── Telemetry Emissions ──
 
   defp emit_reflex_registered(id, reflex) do
-    Signals.emit(:security, :reflex_registered, %{
+    Arbor.Security.Telemetry.emit(:reflex_registered, %{
       reflex_id: id,
       reflex_name: reflex.name,
       reflex_type: reflex.type,
@@ -281,11 +280,11 @@ defmodule Arbor.Security.Reflex do
   end
 
   defp emit_reflex_unregistered(id) do
-    Signals.emit(:security, :reflex_unregistered, %{reflex_id: id})
+    Arbor.Security.Telemetry.emit(:reflex_unregistered, %{reflex_id: id})
   end
 
   defp emit_reflex_logged(reflex, context) do
-    Signals.emit(:security, :reflex_logged, %{
+    Arbor.Security.Telemetry.emit(:reflex_logged, %{
       reflex_id: reflex.id,
       reflex_name: reflex.name,
       context: sanitize_context(context)

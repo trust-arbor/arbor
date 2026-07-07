@@ -129,8 +129,10 @@ defmodule Arbor.Security do
   Inert (`:allow`) unless `config :arbor_security, :egress_gate_enforcing`. The
   security kernel does not consult trust policy directly; callers that want
   profile standing pass `:egress_mode` in `opts` or use `Arbor.Trust.authorize_egress/3`.
-  Emits an `:egress_observed` signal for boundary-crossing egress regardless, so
-  the compute-node egress surface is observable while the gate is dark.
+  Emits `:egress_observed` telemetry for boundary-crossing egress regardless, so
+  the compute-node egress surface is observable while the gate is dark. Arbor's
+  signal runtime bridges this telemetry back to signals when `arbor_signals` is
+  running.
 
   ## Parameters
   - `egress_tier` — resolved `Arbor.Contracts.Security.Classification.egress_tier`
@@ -178,9 +180,13 @@ defmodule Arbor.Security do
       source: :compute_node
     }
 
-    # Prefer durable emission so observe-before-enable data persists to the
-    # EventLog (security:events stream), matching the action path.
-    Arbor.Signals.durable_emit(:security, :egress_observed, data, stream_id: "security:events")
+    # Prefer durable bridging so observe-before-enable data persists to the
+    # EventLog (security:events stream), matching the action path when the
+    # signals telemetry bridge is attached.
+    Arbor.Security.Telemetry.emit(:egress_observed, data,
+      signal_durable: true,
+      stream_id: "security:events"
+    )
 
     :ok
   rescue

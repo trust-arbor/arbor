@@ -41,7 +41,8 @@ defmodule Arbor.Security.EventsTest do
     end
 
     test "records authorization_denied with reason" do
-      :ok = Events.record_authorization_denied("agent_002", "arbor://shell/exec/rm", :no_capability)
+      :ok =
+        Events.record_authorization_denied("agent_002", "arbor://shell/exec/rm", :no_capability)
 
       {:ok, [event]} = Events.get_by_type(:authorization_denied)
       assert event.data.principal_id == "agent_002"
@@ -150,7 +151,7 @@ defmodule Arbor.Security.EventsTest do
   end
 
   describe "resilience" do
-    test "dual_emit succeeds even without EventLog (signal still emits)" do
+    test "recording succeeds even without EventLog" do
       GenServer.stop(Arbor.Historian.EventLog.ETS)
       Process.sleep(50)
 

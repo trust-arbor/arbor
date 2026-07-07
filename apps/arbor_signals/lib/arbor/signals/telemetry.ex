@@ -32,6 +32,29 @@ defmodule Arbor.Signals.Telemetry do
 
   @logger_id "arbor-signals-telemetry-logger"
   @bridge_id "arbor-signals-telemetry-bridge"
+  @security_bridge_id "arbor-signals-security-telemetry-bridge"
+  @security_events [
+    [:arbor, :security, :authorization_granted],
+    [:arbor, :security, :authorization_denied],
+    [:arbor, :security, :authorization_pending],
+    [:arbor, :security, :capability_granted],
+    [:arbor, :security, :capability_revoked],
+    [:arbor, :security, :invocation_receipt],
+    [:arbor, :security, :identity_registered],
+    [:arbor, :security, :identity_verification_succeeded],
+    [:arbor, :security, :identity_verification_failed],
+    [:arbor, :security, :identity_suspended],
+    [:arbor, :security, :identity_resumed],
+    [:arbor, :security, :identity_revoked],
+    [:arbor, :security, :reflex_triggered],
+    [:arbor, :security, :reflex_warning],
+    [:arbor, :security, :reflex_registered],
+    [:arbor, :security, :reflex_unregistered],
+    [:arbor, :security, :reflex_logged],
+    [:arbor, :security, :delegation_created],
+    [:arbor, :security, :cascade_revocation],
+    [:arbor, :security, :egress_observed]
+  ]
 
   @doc """
   Attach a logging handler to `events`. Span `:stop`/`:exception` and any event
@@ -55,6 +78,10 @@ defmodule Arbor.Signals.Telemetry do
     * `:category` — signal category (default `:telemetry`)
     * `:durable` — use `durable_emit/4` (default `false`)
     * `:sample` — fraction 0.0–1.0 of events to bridge (default `1.0`)
+
+  Event metadata can override the bridged signal with:
+  `:signal_category`, `:signal_type`, `:signal_data`, `:signal_opts`, and
+  `:signal_durable`.
   """
   @spec attach_bridge([[atom()]], keyword()) :: {:ok, binary()}
   def attach_bridge(events, opts \\ []) when is_list(events) do
@@ -69,6 +96,28 @@ defmodule Arbor.Signals.Telemetry do
 
     :ok = :telemetry.attach_many(id, events, &__MODULE__.handle_bridge/4, config)
     {:ok, id}
+  end
+
+  @doc """
+  Attach the standard security telemetry-to-signals bridge.
+
+  Security emits telemetry directly so it does not need to call
+  `Arbor.Signals`. This bridge restores the real-time signal stream in
+  the umbrella runtime.
+  """
+  @spec attach_security_bridge(keyword()) :: {:ok, binary()}
+  def attach_security_bridge(opts \\ []) do
+    opts =
+      Keyword.merge(
+        [
+          id: @security_bridge_id,
+          category: :security,
+          durable: false
+        ],
+        opts
+      )
+
+    attach_bridge(@security_events, opts)
   end
 
   @doc "Detach a handler by id."
@@ -97,18 +146,16 @@ defmodule Arbor.Signals.Telemetry do
 
   def handle_bridge(event, measurements, metadata, config) do
     if sampled?(config.sample) do
-      type = Enum.join(event, ".")
+      category = Map.get(metadata, :signal_category, config.category)
+      type = Map.get(metadata, :signal_type, Enum.join(event, "."))
+      data = Map.get(metadata, :signal_data, default_signal_data(event, measurements, metadata))
+      opts = Map.get(metadata, :signal_opts, [])
+      durable = Map.get(metadata, :signal_durable, config.durable)
 
-      data = %{
-        event: event,
-        measurements: measurements,
-        metadata: Map.drop(metadata, [:telemetry_span_context])
-      }
-
-      if config.durable do
-        Arbor.Signals.durable_emit(config.category, type, data, [])
+      if durable do
+        Arbor.Signals.durable_emit(category, type, data, opts)
       else
-        Arbor.Signals.emit(config.category, type, data, [])
+        Arbor.Signals.emit(category, type, data, opts)
       end
     end
 
@@ -121,6 +168,14 @@ defmodule Arbor.Signals.Telemetry do
   defp sampled?(rate) when rate >= 1.0, do: true
   defp sampled?(rate) when rate <= 0.0, do: false
   defp sampled?(rate), do: :rand.uniform() <= rate
+
+  defp default_signal_data(event, measurements, metadata) do
+    %{
+      event: event,
+      measurements: measurements,
+      metadata: Map.drop(metadata, [:telemetry_span_context])
+    }
+  end
 
   defp ms(native), do: System.convert_time_unit(native, :native, :microsecond) / 1000
 end

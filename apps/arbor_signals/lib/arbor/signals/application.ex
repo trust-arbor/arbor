@@ -19,6 +19,22 @@ defmodule Arbor.Signals.Application do
       end
 
     opts = [strategy: :one_for_one, name: Arbor.Signals.Supervisor]
-    Supervisor.start_link(children, opts)
+
+    case Supervisor.start_link(children, opts) do
+      {:ok, _pid} = ok ->
+        attach_telemetry_bridges()
+        ok
+
+      other ->
+        other
+    end
+  end
+
+  defp attach_telemetry_bridges do
+    if Application.get_env(:arbor_signals, :security_telemetry_bridge, true) do
+      Arbor.Signals.Telemetry.attach_security_bridge()
+    end
+
+    :ok
   end
 end
