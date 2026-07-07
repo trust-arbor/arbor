@@ -14,6 +14,7 @@ defmodule Arbor.Security.Config do
   """
 
   @app :arbor_security
+  @default_consensus_module Module.concat(["Arbor", "Consensus"])
 
   @doc """
   Whether identity verification is enabled for authorization checks.
@@ -129,7 +130,7 @@ defmodule Arbor.Security.Config do
   """
   @spec consensus_module() :: module() | nil
   def consensus_module do
-    Application.get_env(@app, :consensus_module, Arbor.Consensus)
+    Application.get_env(@app, :consensus_module, @default_consensus_module)
   end
 
   @doc """

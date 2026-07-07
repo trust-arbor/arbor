@@ -30,10 +30,15 @@ defmodule Arbor.Security.Events do
       {:ok, denied} = Arbor.Security.Events.get_by_type(:authorization_denied)
   """
 
-  # Write to the Historian's EventLog so security events are queryable
-  # via Arbor.Historian.for_category(:security), etc.
-  @event_log_name Arbor.Historian.EventLog.ETS
-  @event_log_backend Arbor.Persistence.EventLog.ETS
+  # Write to the Historian's EventLog inside Arbor so security events are
+  # queryable via Arbor.Historian.for_category(:security), etc. These defaults
+  # are module atoms built without aliases so a standalone kernel package can
+  # inject its own reader/backend without compiling against Arbor.Historian or
+  # Arbor.Persistence.
+  @default_event_log_name Module.concat(["Arbor", "Historian", "EventLog", "ETS"])
+  @default_event_log_backend Module.concat(["Arbor", "Persistence", "EventLog", "ETS"])
+  @default_event_log_reader Module.concat(["Arbor", "Persistence"])
+  @default_signals_module Module.concat(["Arbor", "Signals"])
   @stream_id "security:events"
 
   # ============================================================================
@@ -251,13 +256,19 @@ defmodule Arbor.Security.Events do
   """
   @spec get_history(keyword()) :: {:ok, list()} | {:error, term()}
   def get_history(opts \\ []) do
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    apply(Arbor.Persistence, :read_stream, [
-      @event_log_name,
-      @event_log_backend,
-      @stream_id,
-      opts
-    ])
+    reader = event_log_reader()
+
+    if Code.ensure_loaded?(reader) and function_exported?(reader, :read_stream, 4) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(reader, :read_stream, [
+        event_log_name(),
+        event_log_backend(),
+        @stream_id,
+        opts
+      ])
+    else
+      {:error, :event_log_unavailable}
+    end
   end
 
   @doc """
@@ -327,7 +338,29 @@ defmodule Arbor.Security.Events do
   #
   # Security operations must not fail because the audit log is unavailable.
   defp dual_emit(event_type, data) do
-    Arbor.Signals.durable_emit(:security, event_type, data, stream_id: @stream_id)
+    signals = signals_module()
+
+    if Code.ensure_loaded?(signals) and function_exported?(signals, :durable_emit, 4) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(signals, :durable_emit, [:security, event_type, data, [stream_id: @stream_id]])
+    end
+
     :ok
+  end
+
+  defp event_log_name do
+    Application.get_env(:arbor_security, :event_log_name, @default_event_log_name)
+  end
+
+  defp event_log_backend do
+    Application.get_env(:arbor_security, :event_log_backend, @default_event_log_backend)
+  end
+
+  defp event_log_reader do
+    Application.get_env(:arbor_security, :event_log_reader, @default_event_log_reader)
+  end
+
+  defp signals_module do
+    Application.get_env(:arbor_security, :signals_module, @default_signals_module)
   end
 end

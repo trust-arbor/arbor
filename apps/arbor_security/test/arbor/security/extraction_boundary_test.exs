@@ -5,13 +5,29 @@ defmodule Arbor.Security.ExtractionBoundaryTest do
 
   @root Path.expand("../../../../../", __DIR__)
 
-  @forbidden_policy_modules [
+  @forbidden_kernel_modules [
     [:Arbor, :Trust],
+    [:Arbor, :Actions],
+    [:Arbor, :Agent],
+    [:Arbor, :AI],
+    [:Arbor, :Commands],
+    [:Arbor, :Comms],
+    [:Arbor, :Consensus],
+    [:Arbor, :Dashboard],
+    [:Arbor, :Gateway],
+    [:Arbor, :Historian],
+    [:Arbor, :LLM],
+    [:Arbor, :Memory],
+    [:Arbor, :Monitor],
+    [:Arbor, :Orchestrator],
+    [:Arbor, :Sandbox],
+    [:Arbor, :Scheduler],
+    [:Arbor, :Shell],
     [:Arbor, :Security, :ApprovalGuard],
     [:Arbor, :Security, :PolicyEnforcer]
   ]
 
-  test "B9 security regression: security kernel has no trust-policy module references" do
+  test "B9 security regression: security kernel has no policy or upper-ring module references" do
     violations =
       security_lib_files()
       |> Enum.flat_map(fn path ->
@@ -56,7 +72,7 @@ defmodule Arbor.Security.ExtractionBoundaryTest do
   end
 
   defp forbidden_policy_reference?(parts) do
-    Enum.any?(@forbidden_policy_modules, &starts_with?(parts, &1))
+    Enum.any?(@forbidden_kernel_modules, &starts_with?(parts, &1))
   end
 
   defp starts_with?(parts, prefix), do: Enum.take(parts, length(prefix)) == prefix
