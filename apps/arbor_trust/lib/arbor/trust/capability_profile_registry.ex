@@ -7,12 +7,13 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   row for registered prefixes that do not yet have a dedicated profile.
 
   Generated `arbor://action/...` prefixes are projected by `Arbor.Actions` so
-  `arbor_trust` does not depend upward on `arbor_actions`.
+  `arbor_trust` does not depend upward on `arbor_actions`. The provider is read
+  through `Arbor.Trust.Config.action_profile_provider/0` at runtime.
   """
 
   alias Arbor.Contracts.Security.CapabilityProfile
   alias Arbor.Contracts.Security.CapabilityUri
-  alias Arbor.Trust.CapabilityRiskProfiles
+  alias Arbor.Trust.{CapabilityRiskProfiles, Config}
 
   @type coverage_row :: %{
           required(:uri_prefix) => String.t(),
@@ -21,9 +22,13 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
           required(:not_profileable_reason) => String.t() | nil
         }
 
-  @doc "Return the resolved high-risk profiles known to the trust registry."
+  @doc "Return the resolved profiles known to the trust registry."
   @spec profiles() :: [CapabilityProfile.t()]
-  def profiles, do: CapabilityRiskProfiles.profiles()
+  def profiles do
+    (CapabilityRiskProfiles.profiles() ++ action_namespace_profiles())
+    |> Enum.uniq_by(& &1.uri_prefix)
+    |> Enum.sort_by(& &1.uri_prefix)
+  end
 
   @doc "Find the most-specific profile covering a resource URI or registered prefix."
   @spec profile_for(String.t()) :: CapabilityProfile.t() | nil
@@ -140,4 +145,22 @@ defmodule Arbor.Trust.CapabilityProfileRegistry do
   end
 
   defp length_segments(%CapabilityUri{segments: segments}), do: length(segments)
+
+  defp action_namespace_profiles do
+    provider = Config.action_profile_provider()
+
+    if is_atom(provider) &&
+         Code.ensure_loaded?(provider) &&
+         function_exported?(provider, :action_namespace_capability_profiles, 0) do
+      provider
+      |> apply(:action_namespace_capability_profiles, [])
+      |> Enum.filter(&match?(%CapabilityProfile{}, &1))
+    else
+      []
+    end
+  rescue
+    _ -> []
+  catch
+    :exit, _ -> []
+  end
 end

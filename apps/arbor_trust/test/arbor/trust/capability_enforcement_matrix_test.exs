@@ -27,7 +27,7 @@ defmodule Arbor.Trust.CapabilityEnforcementMatrixTest do
       end
     end
 
-    test "hard gates are independent of the authorize/4 decision path" do
+    test "declares hard-gate targets separate from the authorize/4 decision path" do
       for row <- CapabilityEnforcementMatrix.rows() do
         refute row.hard_gate.authorize4_dependent?
         refute row.soft_gate.decision_path == row.hard_gate.decision_path

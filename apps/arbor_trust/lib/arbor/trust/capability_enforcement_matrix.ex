@@ -1,16 +1,17 @@
 defmodule Arbor.Trust.CapabilityEnforcementMatrix do
   @moduledoc """
-  Declared soft/hard enforcement pairings for high-risk capability profiles.
+  Declared soft/hard enforcement targets for high-risk capability profiles.
 
   This is an audit surface, not an authorization path. `CapabilityRiskProfiles`
   owns the high-risk URI set; this module records the in-process soft gate and
-  the independent containment or administrative hard gate expected for each
-  high-risk class.
+  the independent containment or administrative hard gate that must eventually
+  exist for each high-risk class.
 
-  The hard gate must not depend on the same `Arbor.Security.authorize/4`
-  decision path as the soft gate. That separation is the K5 defense-in-depth
-  property: a bug in capability/policy authorization should not also remove the
-  host, filesystem, network, or administrative boundary.
+  Rows here are declarations, not proof of enforcement. The real K5
+  defense-in-depth work is to wire hard gates that do not depend on the same
+  `Arbor.Security.authorize/4` decision path as the soft gate, so an
+  authorization bug does not also remove the host, filesystem, network, or
+  administrative boundary.
   """
 
   alias Arbor.Contracts.Security.CapabilityProfile

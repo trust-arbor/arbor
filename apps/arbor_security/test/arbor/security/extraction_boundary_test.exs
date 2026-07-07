@@ -41,9 +41,36 @@ defmodule Arbor.Security.ExtractionBoundaryTest do
   end
 
   test "B9 security regression: security kernel does not depend on arbor_trust" do
-    mix_exs = File.read!(Path.join(@root, "apps/arbor_security/mix.exs"))
+    refute mix_exs() =~ ":arbor_trust"
+  end
 
-    refute mix_exs =~ ":arbor_trust"
+  test "B9 security regression: Arbor.Signals refs are contained to distributed security sync" do
+    refs =
+      security_lib_files()
+      |> Enum.flat_map(fn path ->
+        path
+        |> module_references()
+        |> Enum.filter(&starts_with?(&1, [:Arbor, :Signals]))
+        |> Enum.map(fn parts -> {relative(path), parts} end)
+      end)
+
+    if mix_exs() =~ ":arbor_signals" do
+      allowed_files =
+        MapSet.new([
+          "apps/arbor_security/lib/arbor/security/capability_store.ex",
+          "apps/arbor_security/lib/arbor/security/identity/nonce_cache.ex",
+          "apps/arbor_security/lib/arbor/security/identity/registry.ex"
+        ])
+
+      violations =
+        refs
+        |> Enum.reject(fn {path, _parts} -> MapSet.member?(allowed_files, path) end)
+        |> Enum.map(fn {path, parts} -> "#{path} references #{format_module(parts)}" end)
+
+      assert violations == []
+    else
+      assert refs == []
+    end
   end
 
   defp security_lib_files do
@@ -77,6 +104,7 @@ defmodule Arbor.Security.ExtractionBoundaryTest do
 
   defp starts_with?(parts, prefix), do: Enum.take(parts, length(prefix)) == prefix
 
+  defp mix_exs, do: File.read!(Path.join(@root, "apps/arbor_security/mix.exs"))
   defp relative(path), do: Path.relative_to(path, @root)
   defp format_module(parts), do: Enum.join(parts, ".")
 end

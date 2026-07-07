@@ -66,6 +66,36 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
       assert profile.default_constraints == %{ttl_seconds: 60}
       assert CapabilityRiskProfiles.security_ceilings()["arbor://fs/write"] == :block
     end
+
+    test "rejects operator profile overrides for unknown profile URIs" do
+      Application.put_env(:arbor_trust, :capability_profile_overrides, %{
+        "arbor://action/not_registered" => %{default_approval: :auto}
+      })
+
+      assert_raise ArgumentError, ~r/unknown profile URIs/, fn ->
+        CapabilityRiskProfiles.profiles()
+      end
+    end
+
+    test "rejects operator profile overrides with wildcard URIs" do
+      Application.put_env(:arbor_trust, :capability_profile_overrides, %{
+        "arbor://fs/read/**" => %{default_approval: :auto}
+      })
+
+      assert_raise ArgumentError, ~r/wildcards are not allowed/, fn ->
+        CapabilityRiskProfiles.profiles()
+      end
+    end
+
+    test "rejects non-map operator profile overrides" do
+      Application.put_env(:arbor_trust, :capability_profile_overrides, [
+        {"arbor://fs/read", %{default_approval: :auto}}
+      ])
+
+      assert_raise ArgumentError, ~r/must be a map/, fn ->
+        CapabilityRiskProfiles.profiles()
+      end
+    end
   end
 
   describe "security_ceilings/0" do

@@ -75,6 +75,13 @@ defmodule Arbor.Actions.CanonicalUriTest do
       assert %CapabilityProfile{owner: :arbor_actions, effect_class: :read} =
                profile_by_uri["arbor://action/browser/navigate"]
     end
+
+    test "generated action namespace profiles are visible to the trust registry" do
+      assert %CapabilityProfile{owner: :arbor_actions, effect_class: :read} =
+               Arbor.Trust.CapabilityProfileRegistry.profile_for(
+                 "arbor://action/browser/navigate"
+               )
+    end
   end
 
   describe "tool_name_to_canonical_uri/1" do

@@ -198,6 +198,27 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
     assert {:error, :not_found} = CapabilityStore.find_authorizing(agent_id, uri)
   end
 
+  test "B8 negative control: explicit profile policy can still widen authorization", %{
+    agent_id: agent_id
+  } do
+    uri = "arbor://memory/recall"
+
+    {:ok, _profile} =
+      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+        %{profile | baseline: :block, rules: %{uri => :auto}}
+      end)
+
+    assert {:ok, :authorized} =
+             Trust.authorize(agent_id, uri, :read,
+               security_ceilings: %{},
+               verify_identity: false
+             )
+
+    assert {:ok, cap} = CapabilityStore.find_authorizing(agent_id, uri)
+    assert cap.metadata[:source] == :trust_policy_enforcer
+    assert cap.metadata[:profile_uri] == uri
+  end
+
   test "security ceilings gate code/write even for permissive profiles", %{agent_id: agent_id} do
     promote_to_hands_off(agent_id)
     uri = "arbor://code/write/foo.ex"

@@ -6,6 +6,28 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
   alias Arbor.Security.CapabilityStore
   alias Arbor.Trust.PolicyEnforcer
 
+  defmodule ActionProfileProvider do
+    alias Arbor.Contracts.Security.CapabilityProfile
+
+    def action_namespace_capability_profiles do
+      [
+        CapabilityProfile.new!(%{
+          uri_prefix: "arbor://action/browser/navigate",
+          owner: :arbor_actions,
+          blast_radius: :medium,
+          reversibility: :read_only,
+          effect_class: :read,
+          data_class: :internal,
+          arg_dependent: true,
+          default_approval: :require_human,
+          delegable: false,
+          cost_class: :cheap,
+          graduation_eligible: true
+        })
+      ]
+    end
+  end
+
   defmodule AutoPolicy do
     def effective_mode(_principal, _uri, _opts), do: :auto
   end
@@ -27,12 +49,14 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
     prev_security_enforcer = Application.get_env(:arbor_security, :policy_enforcer_enabled)
     prev_policy = Application.get_env(:arbor_trust, :policy_module)
     prev_profile_overrides = Application.get_env(:arbor_trust, :capability_profile_overrides)
+    prev_action_profile_provider = Application.get_env(:arbor_trust, :action_profile_provider)
 
     on_exit(fn ->
       restore(:arbor_trust, :policy_enforcer_enabled, prev_trust_enforcer)
       restore(:arbor_security, :policy_enforcer_enabled, prev_security_enforcer)
       restore(:arbor_trust, :policy_module, prev_policy)
       restore(:arbor_trust, :capability_profile_overrides, prev_profile_overrides)
+      restore(:arbor_trust, :action_profile_provider, prev_action_profile_provider)
     end)
 
     :ok
@@ -119,6 +143,21 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
 
       assert {:error, :unauthorized} = PolicyEnforcer.ensure_capability(agent_id, uri)
       assert {:error, :not_found} = CapabilityStore.find_authorizing(agent_id, uri)
+    end
+
+    test "B2 regression: action namespace profiles feed policy minting" do
+      agent_id = unique_agent()
+      uri = "arbor://action/browser/navigate"
+
+      Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
+      Application.put_env(:arbor_trust, :policy_module, AskPolicy)
+      Application.put_env(:arbor_trust, :action_profile_provider, ActionProfileProvider)
+
+      assert {:ok, cap} = PolicyEnforcer.ensure_capability(agent_id, uri)
+      assert cap.resource_uri == uri
+      assert cap.metadata[:profile_uri] == "arbor://action/browser/navigate"
+      assert cap.metadata[:profile_effect_class] == :read
+      assert cap.metadata[:mode] == :ask
     end
 
     test "mints an explicit trust-stamped capability when policy mode is :ask" do

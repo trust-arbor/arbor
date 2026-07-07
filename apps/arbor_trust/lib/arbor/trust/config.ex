@@ -33,6 +33,7 @@ defmodule Arbor.Trust.Config do
   # budget); a drift guard in arbor_agent's lifecycle test asserts they match.
   # (We can't read NotifySession here — arbor_actions is L6, above arbor_trust L4.)
   @notify_session_rate_limit 30
+  @default_action_profile_provider Module.concat(["Arbor", "Actions"])
 
   # The universal baseline capabilities every agent gets at profile creation.
   # Self-scoped (`/self/`) URIs are expanded to the agent's id at grant time.
@@ -110,6 +111,17 @@ defmodule Arbor.Trust.Config do
       :approval_guard_enabled,
       Application.get_env(:arbor_security, :approval_guard_enabled, true)
     )
+  end
+
+  @doc """
+  Runtime provider for generated action-namespace capability profiles.
+
+  Defaults to `Arbor.Actions` by module atom without a compile-time dependency;
+  `arbor_trust` is lower in the umbrella hierarchy than `arbor_actions`.
+  """
+  @spec action_profile_provider() :: module() | nil
+  def action_profile_provider do
+    get(:action_profile_provider, @default_action_profile_provider)
   end
 
   # ===========================================================================
