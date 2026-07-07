@@ -1,10 +1,20 @@
 defmodule Arbor.Actions.CanonicalUriTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   @moduletag :fast
 
   alias Arbor.Actions
+  alias Arbor.Security.UriRegistry
 
   @legacy_action_prefix "arbor://actions/execute"
+
+  setup_all do
+    unless Process.whereis(UriRegistry) do
+      start_supervised!({UriRegistry, []})
+    end
+
+    Actions.register_action_uri_prefixes()
+    :ok
+  end
 
   describe "canonical_uri_for/2" do
     test "registered actions do not use the retired plural action namespace" do
@@ -38,6 +48,19 @@ defmodule Arbor.Actions.CanonicalUriTest do
     test "facade actions still authorize through their resource facades" do
       assert Actions.canonical_uri_for(Arbor.Actions.File.Read, %{}) == "arbor://fs/read"
       assert Actions.canonical_uri_for(Arbor.Actions.Shell.Execute, %{}) == "arbor://shell/exec"
+    end
+
+    test "action namespace URI prefixes are generated and registered without a broad prefix" do
+      prefixes = Actions.action_namespace_uri_prefixes()
+
+      assert "arbor://action/git/status" in prefixes
+      assert "arbor://action/browser/navigate" in prefixes
+      refute "arbor://fs/read" in prefixes
+      refute "arbor://action" in Arbor.Security.canonical_uri_prefixes()
+
+      assert Enum.all?(prefixes, &UriRegistry.registered?/1)
+      refute UriRegistry.registered?("arbor://action/not_registered")
+      refute UriRegistry.registered?("#{@legacy_action_prefix}/git.status")
     end
   end
 

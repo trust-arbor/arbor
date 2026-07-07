@@ -13,16 +13,16 @@ defmodule Arbor.Actions.Security.Detectors.UriRegistration do
   It extracts the static portion of each `arbor://` literal (the whole string for
   a plain literal, or the leading static segment for an interpolated one like
   `"arbor://fs/\#{op}"`). A static prefix `S` is flagged only when it is
-  *definitely uncovered*: no canonical prefix `P` satisfies
-  `starts_with?(S, P) or starts_with?(P, S)`. The `starts_with?(P, S)` arm gives
-  interpolations the benefit of the doubt (e.g. `"arbor://fs/"` is covered by the
-  more specific `"arbor://fs/read"`).
+  *definitely uncovered*: no canonical/generated prefix `P` segment-matches `S`,
+  or vice versa. The reverse arm gives interpolations the benefit of the doubt
+  (e.g. `"arbor://fs/"` is covered by the more specific `"arbor://fs/read"`).
 
   URIs that appear only in `@moduledoc`/`@doc`/etc. (documentation examples) are
   excluded. Comments are dropped by the parser and never seen.
   """
 
   alias Arbor.Actions.Security.Detectors.Common
+  alias Arbor.Contracts.Security.CapabilityUri
   alias Arbor.Contracts.Security.Finding
 
   @doc_attrs [:moduledoc, :doc, :shortdoc, :typedoc]
@@ -46,12 +46,23 @@ defmodule Arbor.Actions.Security.Detectors.UriRegistration do
   # ---------------------------------------------------------------------------
 
   defp canonical_prefixes do
-    if Code.ensure_loaded?(Arbor.Security) and
-         function_exported?(Arbor.Security, :canonical_uri_prefixes, 0) do
-      Arbor.Security.canonical_uri_prefixes()
-    else
-      []
-    end
+    security_prefixes =
+      if Code.ensure_loaded?(Arbor.Security) and
+           function_exported?(Arbor.Security, :canonical_uri_prefixes, 0) do
+        Arbor.Security.canonical_uri_prefixes()
+      else
+        []
+      end
+
+    action_prefixes =
+      if Code.ensure_loaded?(Arbor.Actions) and
+           function_exported?(Arbor.Actions, :action_namespace_uri_prefixes, 0) do
+        Arbor.Actions.action_namespace_uri_prefixes()
+      else
+        []
+      end
+
+    Enum.uniq(security_prefixes ++ action_prefixes)
   rescue
     _ -> []
   end
@@ -147,7 +158,7 @@ defmodule Arbor.Actions.Security.Detectors.UriRegistration do
     s = normalize(uri)
 
     Enum.any?(prefixes, fn p ->
-      String.starts_with?(s, p) or String.starts_with?(p, s)
+      CapabilityUri.prefix_match?(p, s) or CapabilityUri.prefix_match?(s, p)
     end)
   end
 

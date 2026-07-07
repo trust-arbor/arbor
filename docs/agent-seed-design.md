@@ -83,7 +83,7 @@ Private key storage:
 
 Signing ceremony:
   {:ok, signer} = Lifecycle.build_signer(agent_id)
-  signer.("arbor://actions/execute/file_read") → {:ok, signed_request}
+  signer.("arbor://fs/read") → {:ok, signed_request}
 
 Per-tool-call signing:
   ToolLoop calls signer before each tool execution

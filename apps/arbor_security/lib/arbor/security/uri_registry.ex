@@ -44,6 +44,8 @@ defmodule Arbor.Security.UriRegistry do
 
   use GenServer
 
+  alias Arbor.Contracts.Security.CapabilityUri
+
   require Logger
 
   # Canonical URI prefixes — the authoritative set of valid capability URIs.
@@ -66,6 +68,7 @@ defmodule Arbor.Security.UriRegistry do
 
     # Agent facade
     "arbor://agent/spawn",
+    "arbor://agent/spawn_worker",
     "arbor://agent/stop",
     "arbor://agent/create",
     "arbor://agent/destroy",
@@ -180,13 +183,12 @@ defmodule Arbor.Security.UriRegistry do
     # Orchestrator handler capabilities — declared via `capability_required/1`
     # on the handler contracts (read/write/compute/compose). Live infra, not a
     # stale trust grant. (Security Sentinel uri-inventory, 2026-06-09.)
-    "arbor://handler/",
+    "arbor://handler/"
 
-    # Action namespace — for Jido actions whose argument space is
-    # schema-bounded and therefore don't belong under the broader
-    # facade ceilings (e.g. Mix.{Test,Quality,Format}, TDD.*,
-    # CodeReview.ApplyChanges).
-    "arbor://action"
+    # Action namespace prefixes are generated and registered by arbor_actions at
+    # application start. arbor_security must not own a broad `arbor://action`
+    # prefix here: it would also segment-match every future action-shaped URI,
+    # defeating the generated registry drift guard.
   ]
 
   # =========================================================================
@@ -205,8 +207,13 @@ defmodule Arbor.Security.UriRegistry do
   """
   @spec registered?(String.t()) :: boolean()
   def registered?(uri) when is_binary(uri) do
-    # Check compile-time prefixes first (fast path)
-    canonical_match?(uri) or runtime_match?(uri)
+    case CapabilityUri.parse(uri) do
+      {:ok, _parsed} ->
+        canonical_match?(uri) or runtime_match?(uri)
+
+      {:error, _reason} ->
+        false
+    end
   end
 
   @doc """
@@ -215,18 +222,15 @@ defmodule Arbor.Security.UriRegistry do
   Returns `:ok` if the URI is registered or enforcement is disabled.
   Returns `{:error, :unregistered_uri}` if enforcement is enabled and URI is not registered.
   """
-  @spec validate(String.t()) :: :ok | {:error, :unregistered_uri}
+  @spec validate(String.t()) :: :ok | {:error, :unregistered_uri | {:invalid_uri, term()}}
   def validate(uri) when is_binary(uri) do
-    if registered?(uri) do
-      :ok
-    else
-      if enforcement_enabled?() do
-        Logger.warning("[UriRegistry] Blocked unregistered URI: #{uri}")
-        {:error, :unregistered_uri}
-      else
-        Logger.debug("[UriRegistry] Unregistered URI (allowed, enforcement off): #{uri}")
-        :ok
-      end
+    case CapabilityUri.parse(uri) do
+      {:ok, _parsed} ->
+        validate_registered_uri(uri)
+
+      {:error, reason} ->
+        Logger.warning("[UriRegistry] Blocked invalid URI #{inspect(uri)}: #{inspect(reason)}")
+        {:error, {:invalid_uri, reason}}
     end
   end
 
@@ -235,13 +239,23 @@ defmodule Arbor.Security.UriRegistry do
 
   Used by facades that register their URIs at startup.
   """
-  @spec register(String.t()) :: :ok
+  @spec register(String.t()) :: :ok | {:error, {:invalid_uri, term()}}
   def register(prefix) when is_binary(prefix) do
-    if Process.whereis(__MODULE__) do
-      GenServer.call(__MODULE__, {:register, prefix})
-    else
-      Logger.debug("[UriRegistry] Not running, skipping registration of #{prefix}")
-      :ok
+    case CapabilityUri.parse(prefix) do
+      {:ok, _parsed} ->
+        if Process.whereis(__MODULE__) do
+          GenServer.call(__MODULE__, {:register, prefix})
+        else
+          Logger.debug("[UriRegistry] Not running, skipping registration of #{prefix}")
+          :ok
+        end
+
+      {:error, reason} ->
+        Logger.warning(
+          "[UriRegistry] Refusing to register invalid URI prefix #{inspect(prefix)}: #{inspect(reason)}"
+        )
+
+        {:error, {:invalid_uri, reason}}
     end
   end
 
@@ -291,15 +305,29 @@ defmodule Arbor.Security.UriRegistry do
   # Private
   # =========================================================================
 
+  defp validate_registered_uri(uri) do
+    if registered?(uri) do
+      :ok
+    else
+      if enforcement_enabled?() do
+        Logger.warning("[UriRegistry] Blocked unregistered URI: #{uri}")
+        {:error, :unregistered_uri}
+      else
+        Logger.debug("[UriRegistry] Unregistered URI (allowed, enforcement off): #{uri}")
+        :ok
+      end
+    end
+  end
+
   defp canonical_match?(uri) do
-    Enum.any?(@canonical_prefixes, &String.starts_with?(uri, &1))
+    Enum.any?(@canonical_prefixes, &CapabilityUri.prefix_match?(&1, uri))
   end
 
   defp runtime_match?(uri) do
     if Process.whereis(__MODULE__) do
       case GenServer.call(__MODULE__, :list_runtime) do
         [] -> false
-        prefixes -> Enum.any?(prefixes, &String.starts_with?(uri, &1))
+        prefixes -> Enum.any?(prefixes, &CapabilityUri.prefix_match?(&1, uri))
       end
     else
       false

@@ -58,10 +58,14 @@ RFC 2119.
   rules. User customizations are sacrosanct across tier transitions.
   *(Regression: graduation previously overwrote user rules — see
   trust-tiers-mental-model-review.)*
-- **TRUST-13** (MUST): Trust gating MUST apply to canonical action URIs
-  (`arbor://actions/execute/<name>`) equivalently to legacy short namespaces.
-  *(Regression: 2026-04-07 — `shell.execute` auto-ran because ceilings matched only the
-  short namespace.)*
+- **TRUST-13** (MUST): Trust gating MUST apply to the canonical authorization
+  URI for each operation: action-backed operations use
+  `arbor://action/<category>/<name>`, while facade resource operations use their
+  resource namespaces such as `arbor://fs/read` and
+  `arbor://shell/exec/<command>`. The retired
+  `arbor://actions/execute/<name>` namespace MUST NOT be used for new grants.
+  *(Regression: 2026-04-07 — `shell.execute` auto-ran because ceilings matched only one
+  namespace shape.)*
 
 ## Planned
 

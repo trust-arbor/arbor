@@ -1152,6 +1152,42 @@ defmodule Arbor.Actions do
     end
   end
 
+  @doc """
+  Return the generated action-namespace URI prefixes provided by registered actions.
+
+  Facade-backed actions authorize through their resource namespaces
+  (`arbor://fs/read`, `arbor://shell/exec`, etc.) and are already registered by
+  `arbor_security`. This list contains only singular `arbor://action/...`
+  prefixes derived from the action registry, so the security registry does not
+  need a broad static `arbor://action` prefix.
+  """
+  @spec action_namespace_uri_prefixes() :: [String.t()]
+  def action_namespace_uri_prefixes do
+    all_actions()
+    |> Enum.map(&canonical_uri_for(&1, %{}))
+    |> Enum.filter(&String.starts_with?(&1, "arbor://action/"))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  @doc """
+  Register generated action-namespace URI prefixes with the security registry.
+
+  This is called by `Arbor.Actions.Application` at startup and is public so
+  narrow tests or tooling that start applications manually can make the generated
+  registry projection explicit.
+  """
+  @spec register_action_uri_prefixes() :: :ok
+  def register_action_uri_prefixes do
+    with {:ok, _started} <- Application.ensure_all_started(:arbor_security),
+         true <- Code.ensure_loaded?(Arbor.Security.UriRegistry) do
+      action_namespace_uri_prefixes()
+      |> Enum.each(&Arbor.Security.UriRegistry.register/1)
+    end
+
+    :ok
+  end
+
   defp default_action_uri_for(action_module) do
     path =
       action_module

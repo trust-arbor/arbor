@@ -35,6 +35,26 @@ defmodule Arbor.Actions.Security.Detectors.UriRegistrationTest do
     assert uris(dir) == []
   end
 
+  test "does not flag a generated action namespace URI", %{dir: dir} do
+    write(dir, "action.ex", """
+    defmodule ActionUri do
+      def go, do: Arbor.Security.authorize("agent_x", "arbor://action/git/status", :execute)
+    end
+    """)
+
+    assert uris(dir) == []
+  end
+
+  test "flags the retired plural action namespace", %{dir: dir} do
+    write(dir, "legacy_action.ex", """
+    defmodule LegacyActionUri do
+      def go, do: Arbor.Security.authorize("agent_x", "arbor://actions/execute/git.status", :execute)
+    end
+    """)
+
+    assert "arbor://actions/execute/git.status" in uris(dir)
+  end
+
   test "does not flag a wildcard grant on a registered namespace", %{dir: dir} do
     write(dir, "c.ex", """
     defmodule C do

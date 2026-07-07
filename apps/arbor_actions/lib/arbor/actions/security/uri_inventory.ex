@@ -11,6 +11,7 @@ defmodule Arbor.Actions.Security.UriInventory do
   """
 
   alias Arbor.Actions.Security.Detectors.Common
+  alias Arbor.Contracts.Security.CapabilityUri
 
   @doc_attrs [:moduledoc, :doc, :shortdoc, :typedoc]
   @uri_regex ~r{arbor://[A-Za-z0-9_/.*\-]+}
@@ -76,12 +77,23 @@ defmodule Arbor.Actions.Security.UriInventory do
   # ---------------------------------------------------------------------------
 
   defp canonical_prefixes do
-    if Code.ensure_loaded?(Arbor.Security) and
-         function_exported?(Arbor.Security, :canonical_uri_prefixes, 0) do
-      Arbor.Security.canonical_uri_prefixes()
-    else
-      []
-    end
+    security_prefixes =
+      if Code.ensure_loaded?(Arbor.Security) and
+           function_exported?(Arbor.Security, :canonical_uri_prefixes, 0) do
+        Arbor.Security.canonical_uri_prefixes()
+      else
+        []
+      end
+
+    action_prefixes =
+      if Code.ensure_loaded?(Arbor.Actions) and
+           function_exported?(Arbor.Actions, :action_namespace_uri_prefixes, 0) do
+        Arbor.Actions.action_namespace_uri_prefixes()
+      else
+        []
+      end
+
+    Enum.uniq(security_prefixes ++ action_prefixes)
   rescue
     _ -> []
   end
@@ -163,7 +175,10 @@ defmodule Arbor.Actions.Security.UriInventory do
 
   defp covered?(uri, prefixes) do
     s = normalize(uri)
-    Enum.any?(prefixes, fn p -> String.starts_with?(s, p) or String.starts_with?(p, s) end)
+
+    Enum.any?(prefixes, fn p ->
+      CapabilityUri.prefix_match?(p, s) or CapabilityUri.prefix_match?(s, p)
+    end)
   end
 
   defp normalize(uri) do

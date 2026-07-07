@@ -16,6 +16,14 @@ defmodule Arbor.Actions.Application do
     ]
 
     opts = [strategy: :one_for_one, name: Arbor.Actions.Supervisor]
-    Supervisor.start_link(children, opts)
+
+    case Supervisor.start_link(children, opts) do
+      {:ok, pid} ->
+        Arbor.Actions.register_action_uri_prefixes()
+        {:ok, pid}
+
+      other ->
+        other
+    end
   end
 end
