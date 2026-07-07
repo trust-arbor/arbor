@@ -289,7 +289,8 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       assert catch_exit(
                Mix.Tasks.Arbor.Scheduler.AuditCaps.run([
                  "--pipelines-dir",
-                 pipelines_dir
+                 pipelines_dir,
+                 "--local"
                ])
              ) == {:shutdown, 1}
 

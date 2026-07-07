@@ -130,8 +130,8 @@ defmodule Arbor.Actions do
     # Ensures taint enforcement is active even when callers don't explicitly set policy.
     clean_context = maybe_inject_taint_policy(clean_context)
 
-    # Use canonical facade URI when available, fall back to action-level URI.
-    # Facade URIs are the authoritative check — action-level URIs are deprecated.
+    # Use canonical facade URI when available; otherwise use the canonical
+    # singular action namespace (`arbor://action/<category>/<name>`).
     resource = canonical_uri_for(action_module, params)
 
     # Build auth opts — when a signed_request is present, enable identity
@@ -625,25 +625,45 @@ defmodule Arbor.Actions do
   """
   @spec name_to_module(String.t()) :: {:ok, module()} | {:error, :unknown_action}
   def name_to_module(name) when is_binary(name) do
-    # Normalize: if no dots, replace underscores with dots
-    normalized =
-      if String.contains?(name, ".") do
-        name
-      else
-        String.replace(name, "_", ".")
-      end
-
-    case Map.get(name_to_module_map(), normalized) do
+    case Map.get(name_to_module_map(), name) ||
+           Map.get(name_to_module_map(), normalize_name(name)) do
       nil -> {:error, :unknown_action}
       module -> {:ok, module}
     end
   end
 
-  # Build a reverse lookup map from action name -> module.
-  # Uses action_module_to_name/1 for each module in all_actions().
+  # Build a reverse lookup map from action/tool name -> module.
+  # Includes the canonical dot name (`security.run_dependency_scan`), the
+  # flattened canonical name (`security_run_dependency_scan`), and the Jido tool
+  # name exported by the action module (`run_dependency_scan`).
   defp name_to_module_map do
     all_actions()
-    |> Map.new(fn module -> {action_module_to_name(module), module} end)
+    |> Enum.flat_map(fn module ->
+      canonical = action_module_to_name(module)
+
+      [
+        canonical,
+        String.replace(canonical, ".", "_"),
+        jido_action_name(module)
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map(&{&1, module})
+    end)
+    |> Map.new()
+  end
+
+  defp normalize_name(name) do
+    if String.contains?(name, ".") do
+      name
+    else
+      String.replace(name, "_", ".")
+    end
+  end
+
+  defp jido_action_name(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :name, 0) do
+      to_string(module.name())
+    end
   end
 
   @doc """
@@ -840,29 +860,25 @@ defmodule Arbor.Actions do
   end
 
   # ===========================================================================
-  # Canonical URI mapping — facade-level URIs replace action-level URIs
+  # Canonical URI mapping
   # ===========================================================================
 
-  # Maps action modules to their canonical facade-level capability URIs.
-  # Actions not in this map fall back to the legacy `arbor://actions/execute/{name}` URI.
-  # Once all actions are mapped, the legacy fallback can be removed.
+  # Maps action modules to their canonical capability URI when a facade/resource
+  # gate is the authoritative boundary. Unmapped schema-bounded actions derive
+  # a singular `arbor://action/<category>/<name>` URI from their module name.
   @canonical_uri_map %{
     # Shell facade — arbor://shell/exec
     Arbor.Actions.Shell.Execute => "arbor://shell/exec",
     Arbor.Actions.Shell.ExecuteScript => "arbor://shell/exec",
 
-    # Git — per-subcommand URIs so operators can grant the precise
-    # surface they want (read vs write, log vs commit, etc.). Grant
-    # `arbor://shell/exec/git/**` for the broad "all git" surface.
-    Arbor.Actions.Git.Status => "arbor://shell/exec/git/status",
-    Arbor.Actions.Git.Diff => "arbor://shell/exec/git/diff",
-    Arbor.Actions.Git.Commit => "arbor://shell/exec/git/commit",
-    Arbor.Actions.Git.Log => "arbor://shell/exec/git/log",
-    Arbor.Actions.Git.Branch => "arbor://shell/exec/git/branch",
-
-    # GitHub via `gh` CLI — distinct binary, distinct URI root.
-    # GitLab / Forgejo / etc. would get their own roots when added.
-    Arbor.Actions.Github.PR => "arbor://shell/exec/gh/pr",
+    # Git/GitHub — schema-bounded actions, not raw shell grants. Operators can
+    # grant a precise read/write subcommand without handing out shell execution.
+    Arbor.Actions.Git.Status => "arbor://action/git/status",
+    Arbor.Actions.Git.Diff => "arbor://action/git/diff",
+    Arbor.Actions.Git.Commit => "arbor://action/git/commit",
+    Arbor.Actions.Git.Log => "arbor://action/git/log",
+    Arbor.Actions.Git.Branch => "arbor://action/git/branch",
+    Arbor.Actions.Github.PR => "arbor://action/github/pr",
 
     # Mix — per-task URIs under the action namespace, NOT under shell.
     # The Mix.{Test,Quality,Format} actions bound their argument space
@@ -1076,11 +1092,11 @@ defmodule Arbor.Actions do
   }
 
   @doc """
-  Look up the canonical facade URI for an action module.
+  Look up the canonical authorization URI for an action module.
 
-  Returns the facade-scoped URI from `@canonical_uri_map` when available,
-  falling back to the legacy `arbor://actions/execute/{name}` format for
-  unmapped actions (Session*, etc.).
+  Returns the facade/resource-scoped URI from `@canonical_uri_map` when that is
+  the authoritative boundary, otherwise derives a singular action URI using the
+  module's canonical action name.
 
   ## Examples
 
@@ -1093,25 +1109,17 @@ defmodule Arbor.Actions do
   @spec canonical_uri_for(module(), map()) :: String.t()
   def canonical_uri_for(action_module, params) do
     case Map.get(@canonical_uri_map, action_module) do
-      nil ->
-        # Legacy fallback for unmapped actions (Session*, etc.)
-        action_name = action_module_to_name(action_module)
-        "arbor://actions/execute/#{action_name}"
-
-      uri ->
-        # Parameterize URI with agent_id when the capability uses /self/ scoping.
-        # E.g. "arbor://agent/profile" + agent_id "x" -> "arbor://agent/profile/x"
-        # so it matches the granted capability "arbor://agent/profile/x/*".
-        parameterize_uri(uri, params)
+      nil -> default_action_uri_for(action_module)
+      uri -> parameterize_uri(uri, params)
     end
   end
 
   @doc """
-  Resolve an LLM tool name string to its canonical facade URI.
+  Resolve an LLM tool name string to its canonical authorization URI.
 
   Tool names are strings like `"file_read"` (Jido underscore format) or
   `"file.read"` (canonical dot format). Resolves to the action module,
-  then looks up the facade URI in `@canonical_uri_map`.
+  then returns `canonical_uri_for/2`.
 
   ## Examples
 
@@ -1127,15 +1135,18 @@ defmodule Arbor.Actions do
   @spec tool_name_to_canonical_uri(String.t()) :: {:ok, String.t()} | :error
   def tool_name_to_canonical_uri(tool_name) when is_binary(tool_name) do
     case resolve_module_by_tool_name(tool_name) do
-      {:ok, module} ->
-        case Map.get(@canonical_uri_map, module) do
-          nil -> :error
-          uri -> {:ok, uri}
-        end
-
-      {:error, _} ->
-        :error
+      {:ok, module} -> {:ok, canonical_uri_for(module, %{})}
+      {:error, _} -> :error
     end
+  end
+
+  defp default_action_uri_for(action_module) do
+    path =
+      action_module
+      |> action_module_to_name()
+      |> String.replace(".", "/")
+
+    "arbor://action/#{path}"
   end
 
   # Resolve a tool name to its action module.

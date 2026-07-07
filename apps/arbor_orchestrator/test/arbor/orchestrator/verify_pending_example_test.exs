@@ -74,7 +74,7 @@ defmodule Arbor.Orchestrator.VerifyPendingExampleTest do
           # The map node is a composition primitive — fanning out N handlers
           # requires an explicit dispatch grant (handler_schema P0-3).
           "arbor://orchestrator/map/dispatch",
-          "arbor://actions/execute/**"
+          "arbor://action/security/**"
         ] do
       grant_capability(agent_id, uri)
     end

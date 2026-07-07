@@ -6,15 +6,23 @@
     },
     {
       "constraints": {},
-      "resource_uri": "arbor://shell/exec/mix/test"
-    },
-    {
-      "constraints": {},
-      "resource_uri": "arbor://shell/exec/gh"
-    },
-    {
-      "constraints": {},
       "resource_uri": "arbor://fs/read/Users/azmaveth/code/trust-arbor/arbor/**"
+    },
+    {
+      "constraints": {},
+      "resource_uri": "arbor://action/git/branch"
+    },
+    {
+      "constraints": {},
+      "resource_uri": "arbor://action/git/commit"
+    },
+    {
+      "constraints": {},
+      "resource_uri": "arbor://action/mix/test"
+    },
+    {
+      "constraints": {},
+      "resource_uri": "arbor://action/github/pr"
     },
     {
       "constraints": {},
@@ -26,6 +34,6 @@
     }
   ],
   "issuer_id": "agent_30b455a27f7f4e02ef291fd9f7862677f731a1f8b08c997f5fb8ad430d594b6e",
-  "signature": "hc86KfL+uzY0gkAydL829hw+aPQUDHvcuqoB+Up8DGM4IV06rJ6tWgkKa8xmKCaDLworK4SLlC8BRyuKL5AJDA==",
+  "signature": "aCpEyw/JGpeznIkOtx21VYDpL1ZAsOVSHpNxHCYMWNVsZmbO2jGI1T01+2bzQSA9CpoCQs1qGfw0TFZJtAtpBg==",
   "version": 1
 }

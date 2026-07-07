@@ -41,11 +41,13 @@
 //   last_failure     — final test runner output (empty if converged)
 //
 // Capabilities required (declared in code_review_with_fixes.caps.json):
-//   arbor://shell/exec/git           — git_diff, git_branch, git_commit
-//   arbor://shell/exec/mix/test      — running the test gate
-//   arbor://shell/exec/gh            — github_pr action shells to gh
+//   arbor://shell/exec/git           — raw shell git diff capture
+//   arbor://action/git/branch        — create/switch the fix branch
+//   arbor://action/git/commit        — commit generated fixes
+//   arbor://action/mix/test          — running the test gate
+//   arbor://action/github/pr         — open the PR via the GitHub action
 //   arbor://fs/read/<repo>/**        — read source for context
-//   arbor://fs/write/<repo>/**       — write fix files
+//   arbor://action/code_review/apply_changes — write fix files within the workdir
 
 digraph CodeReviewWithFixes {
   graph [

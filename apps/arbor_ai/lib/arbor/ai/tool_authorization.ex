@@ -56,23 +56,31 @@ defmodule Arbor.AI.ToolAuthorization do
   @spec check_tool_authorization(String.t(), String.t()) ::
           :authorized | :unauthorized | :pending_approval
   defp check_tool_authorization(agent_id, tool_name) do
-    resource = resolve_tool_uri(tool_name)
+    case resolve_tool_uri(tool_name) do
+      {:ok, resource} ->
+        case Arbor.Security.authorize(agent_id, resource, :execute, []) do
+          {:ok, :authorized} ->
+            :authorized
 
-    case Arbor.Security.authorize(agent_id, resource, :execute, []) do
-      {:ok, :authorized} ->
-        :authorized
+          {:ok, :pending_approval, _proposal_id} ->
+            Logger.debug(
+              "Tool #{tool_name} requires approval for agent #{agent_id}, " <>
+                "excluding from available tools"
+            )
 
-      {:ok, :pending_approval, _proposal_id} ->
+            :pending_approval
+
+          {:error, reason} ->
+            Logger.debug(
+              "Tool authorization denied for #{tool_name}, agent #{agent_id}: #{inspect(reason)}"
+            )
+
+            :unauthorized
+        end
+
+      :error ->
         Logger.debug(
-          "Tool #{tool_name} requires approval for agent #{agent_id}, " <>
-            "excluding from available tools"
-        )
-
-        :pending_approval
-
-      {:error, reason} ->
-        Logger.debug(
-          "Tool authorization denied for #{tool_name}, agent #{agent_id}: #{inspect(reason)}"
+          "Tool authorization denied for #{tool_name}, agent #{agent_id}: unknown tool URI"
         )
 
         :unauthorized
@@ -93,7 +101,7 @@ defmodule Arbor.AI.ToolAuthorization do
       :unauthorized
   end
 
-  # Resolve a tool name to its canonical facade URI via Arbor.Actions.
+  # Resolve a tool name to its canonical authorization URI via Arbor.Actions.
   # arbor_ai is standalone — must use Code.ensure_loaded?/apply bridge.
   defp resolve_tool_uri(tool_name) do
     mod = Module.concat([:Arbor, :Actions])
@@ -101,11 +109,11 @@ defmodule Arbor.AI.ToolAuthorization do
     if Code.ensure_loaded?(mod) and function_exported?(mod, :tool_name_to_canonical_uri, 1) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(mod, :tool_name_to_canonical_uri, [tool_name]) do
-        {:ok, uri} -> uri
-        :error -> "arbor://actions/execute/#{tool_name}"
+        {:ok, uri} -> {:ok, uri}
+        :error -> :error
       end
     else
-      "arbor://actions/execute/#{tool_name}"
+      :error
     end
   end
 

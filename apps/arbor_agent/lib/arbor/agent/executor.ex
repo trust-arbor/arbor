@@ -108,9 +108,7 @@ defmodule Arbor.Agent.Executor do
   def init({agent_id, opts}) do
     sandbox_level = SandboxLevel.coerce(Keyword.get(opts, :sandbox_level))
 
-    Logger.info(
-      "[Executor] Starting for agent #{agent_id}, sandbox=#{sandbox_level}"
-    )
+    Logger.info("[Executor] Starting for agent #{agent_id}, sandbox=#{sandbox_level}")
 
     # Store agent_id in process dictionary so ActionDispatch can route
     # through authorize_and_execute without threading it through every clause.
@@ -412,9 +410,8 @@ defmodule Arbor.Agent.Executor do
   # for UI hints, not security decisions.
   #
   # URI unification: use Arbor.Actions.canonical_uri_for/2 which maps action
-  # modules to facade URIs (e.g., "arbor://fs/read" instead of
-  # "arbor://actions/execute/file.read"). Falls back to legacy format for
-  # actions without a discoverable module.
+  # modules to the same canonical resource URI used by the action executor
+  # (e.g., "arbor://fs/read" or "arbor://action/mix/test").
   defp check_capabilities(%Intent{action: action}, state) do
     resource =
       case ActionDispatch.resolve_action_module(action) do

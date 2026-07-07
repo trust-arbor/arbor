@@ -109,9 +109,17 @@ defmodule Arbor.Trust.Presets do
        "arbor://eval" => :auto,
        "arbor://pipeline" => :auto,
        "arbor://persistence" => :auto,
-       "arbor://actions" => :auto,
        "arbor://tool" => :auto,
        "arbor://consensus/ask" => :auto,
+       # Schema-bounded action-native reads/transforms. Do not grant the
+       # broad `arbor://action` root here; future action categories should
+       # stay gated until deliberately classified.
+       "arbor://action/git/status" => :auto,
+       "arbor://action/git/diff" => :auto,
+       "arbor://action/git/log" => :auto,
+       "arbor://action/mix/test" => :auto,
+       "arbor://action/mix/quality" => :auto,
+       "arbor://action/tdd" => :auto,
        # Never auto, even at full trust (also ceiling-backed).
        "arbor://shell" => :ask,
        "arbor://governance" => :ask,
@@ -136,15 +144,16 @@ defmodule Arbor.Trust.Presets do
   def default_security_ceilings do
     %{
       "arbor://shell" => :ask,
-      "arbor://actions/execute/shell.execute" => :ask,
-      "arbor://actions/execute/shell.execute_script" => :ask,
       "arbor://governance" => :ask,
       "arbor://code/write" => :ask,
+      "arbor://code/compile" => :ask,
+      "arbor://code/hot_load" => :ask,
       "arbor://fs/write" => :ask,
-      "arbor://actions/execute/file.write" => :ask,
-      "arbor://actions/execute/file.edit" => :ask,
-      "arbor://actions/execute/code.compile_and_test" => :ask,
-      "arbor://actions/execute/code.hot_load" => :ask
+      "arbor://action/git/commit" => :ask,
+      "arbor://action/git/branch" => :ask,
+      "arbor://action/github/pr" => :ask,
+      "arbor://action/mix/format" => :ask,
+      "arbor://action/code_review/apply_changes" => :ask
     }
   end
 end

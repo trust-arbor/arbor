@@ -212,19 +212,15 @@ defmodule Arbor.Trust.ProfileResolver do
   Shell and governance always require at least `:ask`.
 
   The keys here are URI **prefixes** matched longest-first by
-  `Authority.effective_mode/3`. Both the legacy short-namespace form
-  (`arbor://shell`) and known legacy action-URI forms
-  (`arbor://actions/execute/shell.execute`) are listed because action
-  authorization may pass the action form, which would not match the short
-  namespace alone. Dotted action names are listed as exact URIs because
-  prefix matching is segment-boundary-aware.
+  `Authority.effective_mode/3`. They use the same canonical resource/facade
+  URIs that action authorization passes at runtime.
 
   ## Two ceiling tiers
 
   Conceptually the entries split into two tiers (enforced in
   `Arbor.Security.AuthDecision.check_approval/3`):
 
-    - **Askable** (fs/code writes, file.write/edit, code.compile_and_test):
+    - **Askable** (fs/code writes, code.compile, schema-bounded write actions):
       a parameter-bounded capability minted from a verified signed `.caps.json`
       bypasses the `:ask` gate. The operator's signature on the caps file IS
       the pre-approval — runtime ask would be redundant friction.
@@ -235,7 +231,7 @@ defmodule Arbor.Trust.ProfileResolver do
 
   Both tiers live in this same table because the trust-profile resolution
   layer doesn't need to distinguish them — the askable/locked split is an
-  exemption rule applied downstream in AuthDecision, not a different
+  exemption rule applied downstream in `Arbor.Trust.ApprovalGuard`, not a different
   default.
   """
   @spec default_security_ceilings() :: rules()

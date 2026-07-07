@@ -241,16 +241,16 @@ defmodule Arbor.Actions.Skill do
       if Code.ensure_loaded?(security_mod) and function_exported?(security_mod, :authorize, 4) do
         unauthorized =
           Enum.reject(tools, fn tool ->
-            resource =
-              case Arbor.Actions.tool_name_to_canonical_uri(tool) do
-                {:ok, uri} -> uri
-                :error -> "arbor://actions/execute/#{tool}"
-              end
+            case Arbor.Actions.tool_name_to_canonical_uri(tool) do
+              {:ok, resource} ->
+                # credo:disable-for-next-line Credo.Check.Refactor.Apply
+                case apply(security_mod, :authorize, [agent_id, resource, :execute, []]) do
+                  {:ok, :authorized} -> true
+                  _ -> false
+                end
 
-            # credo:disable-for-next-line Credo.Check.Refactor.Apply
-            case apply(security_mod, :authorize, [agent_id, resource, :execute, []]) do
-              {:ok, :authorized} -> true
-              _ -> false
+              :error ->
+                false
             end
           end)
 

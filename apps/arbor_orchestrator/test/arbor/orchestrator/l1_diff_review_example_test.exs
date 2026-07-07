@@ -85,7 +85,7 @@ defmodule Arbor.Orchestrator.L1DiffReviewExampleTest do
     for uri <- [
           "arbor://orchestrator/execute/**",
           "arbor://orchestrator/execute/llm_query",
-          "arbor://actions/execute/**"
+          "arbor://action/security/**"
         ] do
       grant_capability(agent_id, uri)
     end

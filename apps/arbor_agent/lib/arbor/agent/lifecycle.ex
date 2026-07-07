@@ -1367,7 +1367,8 @@ defmodule Arbor.Agent.Lifecycle do
     end
 
     # Re-grant capabilities from template or stored list
-    # Filter out actions/execute/* — facade auth replaced action-level auth
+    # Filter out retired plural action grants; action execution now authorizes
+    # against facade/resource URIs or singular arbor://action/* URIs.
     capabilities =
       resolve_capabilities_for_regrant(profile)
       |> Enum.reject(fn cap ->

@@ -20,10 +20,13 @@ defmodule Mix.Tasks.Arbor.Scheduler.UpdateIssuerEnvelopes do
         --envelope-uri "arbor://fs/write/Users/azmaveth/.arbor/reports/**" \\
         --envelope-uri "arbor://fs/read/Users/azmaveth/code/trust-arbor/arbor/**" \\
         --envelope-uri "arbor://shell/exec/git" \\
-        --envelope-uri "arbor://shell/exec/mix/test" \\
-        --envelope-uri "arbor://shell/exec/gh" \\
+        --envelope-uri "arbor://action/git/branch" \\
+        --envelope-uri "arbor://action/git/commit" \\
+        --envelope-uri "arbor://action/mix/test" \\
+        --envelope-uri "arbor://action/github/pr" \\
         --envelope-uri "arbor://action/code_review/apply_changes" \\
         --envelope-uri "arbor://action/tdd/record_attempt" \\
+        --envelope-uri "arbor://action/security/run_dependency_scan" \\
         --reason "adding code review pipeline support"
 
   ## Options

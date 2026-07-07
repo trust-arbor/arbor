@@ -15,9 +15,7 @@ defmodule Arbor.Trust.ApprovalGuard do
   @always_locked_uri_classes [
     "arbor://shell",
     "arbor://governance",
-    "arbor://actions/execute/shell.",
-    "arbor://actions/execute/governance.",
-    "arbor://actions/execute/code.hot_load"
+    "arbor://code/hot_load"
   ]
 
   @doc """
