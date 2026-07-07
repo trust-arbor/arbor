@@ -145,6 +145,18 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert tp.rules["arbor://orchestrator/execute"] == :allow
     end
 
+    test "template orchestrator grant covers mandatory per-node middleware checks" do
+      assert {:ok, profile} = Lifecycle.create("Middleware Gate Probe", template: "test_agent")
+      agent_id = profile.agent_id
+      cleanup(agent_id)
+
+      assert {:ok, :authorized} =
+               Arbor.Security.authorize(agent_id, "arbor://orchestrator/execute", :execute)
+
+      assert {:ok, :authorized} =
+               Arbor.Security.authorize(agent_id, "arbor://orchestrator/execute/exec", :execute)
+    end
+
     test "a template WITHOUT a trust_preset is not forced to :block by this path" do
       assert {:ok, profile} =
                Lifecycle.create("Plain Agent Probe", template: "conversationalist")

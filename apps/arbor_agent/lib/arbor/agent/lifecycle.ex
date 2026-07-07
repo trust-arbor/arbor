@@ -958,7 +958,11 @@ defmodule Arbor.Agent.Lifecycle do
         # keys are atomized — so a template can declare a constrained self-cap
         # (e.g. `code/write/self/sandbox/*` with `rate_limit: 10`) and it grants
         # identically to how the trust system grants the baseline.
-        resource = resolve_self_uri(cap[:resource] || cap["resource"], agent_id)
+        resource =
+          (cap[:resource] || cap["resource"])
+          |> resolve_self_uri(agent_id)
+          |> normalize_runtime_capability_uri()
+
         constraints = normalize_capability_constraints(cap[:constraints] || cap["constraints"])
 
         cond do
@@ -1009,6 +1013,14 @@ defmodule Arbor.Agent.Lifecycle do
     |> String.replace("/self/", "/#{agent_id}/")
     |> String.replace(~r"/self$", "/#{agent_id}")
   end
+
+  # Template authors declare the coarse orchestrator execution gate. Runtime
+  # mandatory middleware checks per-node resources under that gate, so the
+  # concrete capability must be a subtree grant.
+  defp normalize_runtime_capability_uri("arbor://orchestrator/execute"),
+    do: "arbor://orchestrator/execute/**"
+
+  defp normalize_runtime_capability_uri(uri), do: uri
 
   # Atomize the known capability constraint keys (`rate_limit`,
   # `requires_approval`) so constraints declared as strings in template
