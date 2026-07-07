@@ -137,8 +137,11 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       # templates, baseline would be the default :ask and none of these rules
       # would be present.
       assert tp.baseline == :block
-      assert tp.rules["arbor://fs/read/**"] == :allow
-      assert tp.rules["arbor://fs/list/**"] == :allow
+      # Bare-prefix rules (trust rules match by prefix, not glob — see
+      # Arbor.Contracts.Security.TrustRule; templates are bare as of 59fa2cef and the
+      # normalize path canonicalizes any glob form to bare regardless).
+      assert tp.rules["arbor://fs/read"] == :allow
+      assert tp.rules["arbor://fs/list"] == :allow
       assert tp.rules["arbor://orchestrator/execute"] == :allow
     end
 

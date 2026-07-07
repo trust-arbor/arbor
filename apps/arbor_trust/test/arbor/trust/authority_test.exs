@@ -272,4 +272,29 @@ defmodule Arbor.Trust.AuthorityTest do
       assert {:error, :invalid_data} = Authority.from_persistence(nil)
     end
   end
+
+  describe "set_rule/3 — glob canonicalization (A3b, trust-rule-glob-footgun)" do
+    import ExUnit.CaptureLog
+
+    test "a /** rule is canonicalized to the bare prefix and warns loudly" do
+      profile = Authority.new_profile("agent_a3b")
+
+      {p, log} =
+        with_log(fn -> Authority.set_rule(profile, "arbor://fs/read/**", :allow) end)
+
+      # Stored under the bare prefix the matcher uses — NOT the dead glob literal.
+      assert p.rules["arbor://fs/read"] == :allow
+      refute Map.has_key?(p.rules, "arbor://fs/read/**")
+      assert log =~ "glob"
+    end
+
+    test "a bare rule is stored unchanged with no warning" do
+      profile = Authority.new_profile("agent_a3b")
+
+      {p, log} = with_log(fn -> Authority.set_rule(profile, "arbor://fs/read", :allow) end)
+
+      assert p.rules["arbor://fs/read"] == :allow
+      refute log =~ "glob"
+    end
+  end
 end

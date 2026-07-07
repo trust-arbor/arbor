@@ -79,7 +79,26 @@ defmodule Arbor.Trust.Authority do
   @spec set_rule(Profile.t(), String.t(), atom()) :: Profile.t()
   def set_rule(%Profile{} = profile, uri_prefix, mode)
       when mode in [:block, :ask, :allow, :auto] do
-    %{profile | rules: Map.put(profile.rules, uri_prefix, mode)}
+    %{profile | rules: Map.put(profile.rules, warn_and_canonicalize_rule(uri_prefix), mode)}
+  end
+
+  # A trust rule with a glob (/** or /*) is a dead literal (see
+  # Arbor.Contracts.Security.TrustRule): trust rules match by PREFIX, not glob, so
+  # it silently never fires. Warn loudly + canonicalize to the bare prefix the
+  # matcher actually uses, rather than storing a rule that vanishes to baseline.
+  defp warn_and_canonicalize_rule(uri) do
+    if Arbor.Contracts.Security.TrustRule.glob?(uri) do
+      require Logger
+
+      Logger.warning(
+        "[Trust.Authority] set_rule: trust rule #{inspect(uri)} contains a glob; trust rules " <>
+          "match by PREFIX not glob. Canonicalizing to the bare prefix."
+      )
+
+      canonical_trust_prefix(uri)
+    else
+      uri
+    end
   end
 
   @doc "Remove a specific URI rule (falls back to baseline)."

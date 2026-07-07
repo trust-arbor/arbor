@@ -1505,9 +1505,28 @@ defmodule Arbor.Agent.Lifecycle do
 
     rules =
       (preset["rules"] || %{})
-      |> Enum.into(%{}, fn {uri, mode} -> {to_string(uri), parse_trust_mode(mode)} end)
+      |> Enum.into(%{}, fn {uri, mode} ->
+        {normalize_trust_rule_uri(to_string(uri)), parse_trust_mode(mode)}
+      end)
 
     %{baseline: baseline, rules: rules}
+  end
+
+  # Trust rules match by URI PREFIX, not glob — a trailing /** is a dead literal that
+  # silently never fires (Arbor.Contracts.Security.TrustRule). Warn loudly + canonicalize
+  # to the bare prefix so a template's glob rule works instead of vanishing to baseline.
+  defp normalize_trust_rule_uri(uri) do
+    if Arbor.Contracts.Security.TrustRule.glob?(uri) do
+      Logger.warning(
+        "[Lifecycle] trust_preset rule #{inspect(uri)} contains a glob (/** or /*); trust rules " <>
+          "match by PREFIX not glob, so the glob form never fires. Canonicalizing to the bare " <>
+          "prefix — fix the template to use the bare URI."
+      )
+
+      Arbor.Contracts.Security.TrustRule.canonicalize(uri)
+    else
+      uri
+    end
   end
 
   defp parse_trust_mode(mode) when is_atom(mode), do: mode
