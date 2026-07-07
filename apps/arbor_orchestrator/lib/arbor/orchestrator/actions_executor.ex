@@ -599,7 +599,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   defp normalize_workdir(_workdir), do: File.cwd!()
 
   defp maybe_resolve_file_paths(params, Arbor.Actions.File.Glob, workdir) do
-    resolve_path_param(params, :base_path, workdir)
+    params
+    |> put_new_either(:base_path, "base_path", workdir)
+    |> resolve_path_param(:base_path, workdir)
   end
 
   defp maybe_resolve_file_paths(params, action_module, workdir)

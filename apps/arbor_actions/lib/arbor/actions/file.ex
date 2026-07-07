@@ -468,7 +468,7 @@ defmodule Arbor.Actions.File do
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{pattern: pattern} = params, context) do
-      base_path = params[:base_path]
+      base_path = effective_base_path(params, context)
 
       # Validate base_path if provided and workspace is set
       with {:ok, safe_base} <- validate_base_path(base_path, context),
@@ -501,6 +501,14 @@ defmodule Arbor.Actions.File do
       end
     end
 
+    defp effective_base_path(params, context) do
+      case Map.get(params, :base_path) || Map.get(params, "base_path") do
+        nil -> Map.get(context, :workspace) || Map.get(context, "workspace")
+        "" -> Map.get(context, :workspace) || Map.get(context, "workspace")
+        base_path -> base_path
+      end
+    end
+
     defp validate_base_path(nil, _context), do: {:ok, nil}
     defp validate_base_path(path, context), do: Arbor.Actions.File.validate_path(path, context)
 
@@ -513,16 +521,22 @@ defmodule Arbor.Actions.File do
     # directory is authorized, the glob PATTERN must not climb out of it. Pre-fix,
     # `Path.join(safe_base, "../sibling/**/*.ex")` enumerated files outside the
     # authorized base — the base was capability-checked but the pattern wasn't.
-    # A `..` segment in a glob pattern is never legitimate (patterns descend from
-    # the base), so reject it. Only enforced when a base is in play; a bare
-    # pattern with no authorized base makes no containment claim.
+    # A `..` segment or absolute glob pattern is never legitimate when a base is
+    # in play (patterns descend from the base), so reject it. Only enforced when
+    # a base is in play; a bare pattern with no authorized base makes no
+    # containment claim.
     defp reject_pattern_escape(_pattern, nil), do: :ok
 
     defp reject_pattern_escape(pattern, _safe_base) do
-      if ".." in Path.split(pattern) do
-        {:error, "Glob pattern may not contain '..' path traversal"}
-      else
-        :ok
+      cond do
+        Path.type(pattern) == :absolute ->
+          {:error, "Glob pattern must be relative when a base_path or workspace is set"}
+
+        ".." in Path.split(pattern) ->
+          {:error, "Glob pattern may not contain '..' path traversal"}
+
+        true ->
+          :ok
       end
     end
   end

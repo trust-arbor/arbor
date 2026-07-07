@@ -54,6 +54,65 @@ defmodule Arbor.Orchestrator.ActionsExecutorFileWorkspaceTest do
     assert decoded["content"] =~ ~s(name: "test_agent")
   end
 
+  test "security regression: file_read denies absolute paths outside the tool workdir", %{
+    agent_id: agent_id,
+    identity: identity,
+    repo_root: repo_root
+  } do
+    signer = Security.make_signer(agent_id, identity.private_key)
+    outside_path = tmp_probe_path("outside-read")
+    File.write!(outside_path, "outside")
+    on_exit(fn -> File.rm(outside_path) end)
+
+    assert {:error, message} =
+             ActionsExecutor.execute("file_read", %{"path" => outside_path}, repo_root,
+               agent_id: agent_id,
+               signer: signer
+             )
+
+    assert denial_message?(message)
+  end
+
+  test "security regression: file_read denies relative traversal outside the tool workdir", %{
+    agent_id: agent_id,
+    identity: identity,
+    repo_root: repo_root
+  } do
+    signer = Security.make_signer(agent_id, identity.private_key)
+    outside_path = tmp_probe_path("traversal-read")
+    File.write!(outside_path, "outside")
+    on_exit(fn -> File.rm(outside_path) end)
+
+    traversal_path = Path.relative_to(outside_path, repo_root)
+
+    assert {:error, message} =
+             ActionsExecutor.execute("file_read", %{"path" => traversal_path}, repo_root,
+               agent_id: agent_id,
+               signer: signer
+             )
+
+    assert denial_message?(message)
+  end
+
+  test "security regression: file_glob without base_path cannot enumerate outside workdir", %{
+    agent_id: agent_id,
+    identity: identity,
+    repo_root: repo_root
+  } do
+    signer = Security.make_signer(agent_id, identity.private_key)
+    outside_path = tmp_probe_path("glob")
+    File.write!(outside_path, "outside")
+    on_exit(fn -> File.rm(outside_path) end)
+
+    assert {:error, message} =
+             ActionsExecutor.execute("file_glob", %{"pattern" => outside_path}, repo_root,
+               agent_id: agent_id,
+               signer: signer
+             )
+
+    assert message =~ "relative" or denial_message?(message)
+  end
+
   defp start_security_and_trust do
     ensure_started(Arbor.Security.Identity.Registry)
     ensure_started(Arbor.Security.Identity.NonceCache)
@@ -105,5 +164,18 @@ defmodule Arbor.Orchestrator.ActionsExecutorFileWorkspaceTest do
         cwd
     end
     |> String.trim_trailing("/")
+  end
+
+  defp tmp_probe_path(label) do
+    Path.join(
+      System.tmp_dir!(),
+      "arbor_actions_executor_#{label}_#{System.unique_integer([:positive])}.txt"
+    )
+  end
+
+  defp denial_message?(message) when is_binary(message) do
+    String.contains?(message, "unauthorized") or
+      String.contains?(message, "Path traversal denied") or
+      String.contains?(message, "no_capability")
   end
 end

@@ -34,6 +34,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
   @moduletag :integration
 
   alias Arbor.Agent.Lifecycle
+  alias Arbor.Contracts.TenantContext
   alias Arbor.Persistence.BufferedStore
   alias Arbor.Trust.Store, as: TrustStore
 
@@ -177,6 +178,40 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       refute "arbor://fs/list/**" in uris
     end
 
+    test "security regression: read-only specialized templates with tenant_context do not receive workspace write grants" do
+      for template <- ["test_agent", "security_auditor"] do
+        workspace_root = tmp_workspace(template)
+        File.mkdir_p!(workspace_root)
+        on_exit(fn -> File.rm_rf(workspace_root) end)
+
+        tenant_context =
+          TenantContext.new("human_#{template}", workspace_root: workspace_root)
+
+        assert {:ok, profile} =
+                 Lifecycle.create("Tenant #{template} Probe",
+                   template: template,
+                   tenant_context: tenant_context
+                 )
+
+        agent_id = profile.agent_id
+        cleanup(agent_id)
+
+        workspace_uri_root = String.trim_leading(workspace_root, "/")
+
+        assert {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
+        uris = Enum.map(caps, & &1.resource_uri)
+
+        assert "arbor://fs/read/#{workspace_uri_root}/**" in uris
+        assert "arbor://fs/list/#{workspace_uri_root}/**" in uris
+        refute Enum.any?(uris, &String.starts_with?(&1, "arbor://fs/write/"))
+
+        assert {:error, _} =
+                 Arbor.Security.authorize(agent_id, "arbor://fs/write", :execute,
+                   file_path: Path.join(workspace_root, "should_not_write.txt")
+                 )
+      end
+    end
+
     test "a template WITHOUT a trust_preset is not forced to :block by this path" do
       assert {:ok, profile} =
                Lifecycle.create("Plain Agent Probe", template: "conversationalist")
@@ -217,6 +252,13 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
     (root || cwd)
     |> String.trim_trailing("/")
+  end
+
+  defp tmp_workspace(template) do
+    Path.join(
+      System.tmp_dir!(),
+      "arbor_#{template}_workspace_#{System.unique_integer([:positive])}"
+    )
   end
 
   defp cleanup(agent_id) do

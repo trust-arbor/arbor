@@ -1332,7 +1332,8 @@ defmodule Arbor.Actions do
   defp extract_fs_path(resource, params) when is_map(params) do
     if is_binary(resource) and String.starts_with?(resource, "arbor://fs/") do
       Map.get(params, :path) || Map.get(params, "path") ||
-        Map.get(params, :file_path) || Map.get(params, "file_path")
+        Map.get(params, :file_path) || Map.get(params, "file_path") ||
+        Map.get(params, :base_path) || Map.get(params, "base_path")
     end
   end
 

@@ -1092,7 +1092,7 @@ defmodule Arbor.Agent.Lifecycle do
       principal_id =
         Arbor.Contracts.TenantContext.principal_id(tenant_context)
 
-      for op <- [:read, :write, :list] do
+      for op <- workspace_fs_operations(opts) do
         # `/**` so the workspace grant covers files WITHIN the workspace root,
         # not just the root URI itself. Required as of the C8 fix (concrete
         # URIs no longer implicitly grant their subtree).
@@ -1119,6 +1119,31 @@ defmodule Arbor.Agent.Lifecycle do
       :ok
     end
   end
+
+  defp workspace_fs_operations(opts) do
+    declared_ops =
+      (opts[:capabilities] || [])
+      |> Enum.flat_map(&capability_fs_operations/1)
+      |> MapSet.new()
+
+    if MapSet.size(declared_ops) == 0 do
+      [:read, :write, :list]
+    else
+      Enum.filter([:read, :write, :list], &MapSet.member?(declared_ops, &1))
+    end
+  end
+
+  defp capability_fs_operations(capability) when is_map(capability) do
+    case capability[:resource] || capability["resource"] do
+      "arbor://fs/**" -> [:read, :write, :list]
+      "arbor://fs/read" <> _ -> [:read]
+      "arbor://fs/write" <> _ -> [:write]
+      "arbor://fs/list" <> _ -> [:list]
+      _ -> []
+    end
+  end
+
+  defp capability_fs_operations(_capability), do: []
 
   # Delegate capabilities from a parent (human or agent) to the newly created agent.
   # Non-fatal: logs warnings on failure, always returns :ok for backwards compat.
