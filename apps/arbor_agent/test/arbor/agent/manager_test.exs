@@ -31,6 +31,24 @@ defmodule Arbor.Agent.ManagerTest do
     end
   end
 
+  defmodule TimeoutCapturingAgent do
+    @moduledoc false
+    use GenServer
+
+    def start_link(opts) do
+      GenServer.start_link(__MODULE__, opts)
+    end
+
+    @impl true
+    def init(opts), do: {:ok, Map.new(opts)}
+
+    @impl true
+    def handle_call({:query, input, opts}, _from, state) do
+      send(state.parent, {:query_opts, opts})
+      {:reply, {:ok, %{text: "echo: #{input}"}}, state}
+    end
+  end
+
   defp make_profile(agent_id, opts \\ []) do
     character = Character.new(name: Keyword.get(opts, :name, "Test Agent"))
 
@@ -531,6 +549,30 @@ defmodule Arbor.Agent.ManagerTest do
       # APIAgent.query sends {:query, input, opts} which FakeAgent handles
       result = Manager.chat("hello", "Tester", agent_id: agent_id)
       assert {:ok, "echo: hello"} = result
+    end
+
+    test "passes caller timeout through arbor runtime query path" do
+      agent_id = "chat-timeout-#{System.unique_integer([:positive])}"
+
+      {:ok, pid} = TimeoutCapturingAgent.start_link(parent: self())
+
+      Registry.register(agent_id, pid, %{
+        runtime: :arbor,
+        model_config: %{runtime: :arbor},
+        host_pid: pid,
+        module: TimeoutCapturingAgent
+      })
+
+      on_exit(fn ->
+        Registry.unregister(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      assert {:ok, "echo: hello"} =
+               Manager.chat("hello", "Tester", agent_id: agent_id, timeout: 120_000)
+
+      assert_receive {:query_opts, opts}
+      assert opts[:timeout] == 120_000
     end
 
     test "dispatches to registered agent with nil runtime defaults to APIAgent query" do

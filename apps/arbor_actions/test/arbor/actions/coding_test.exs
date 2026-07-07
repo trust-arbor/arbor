@@ -23,6 +23,7 @@ defmodule Arbor.Actions.CodingTest do
     test "delegates to Codex with default ACP permissions, validates, commits, and opens a draft PR",
          %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      base_branch = git!(repo, ["branch", "--show-current"])
       parent = self()
 
       runner = fn
@@ -58,6 +59,7 @@ defmodule Arbor.Actions.CodingTest do
                  %{
                    task: "Add feature file",
                    repo_path: repo,
+                   base_ref: base_branch,
                    branch_name: "test/coding-agent",
                    worktree_base_dir: Path.join(tmp_dir, "worktrees"),
                    validation_commands: [
@@ -72,6 +74,12 @@ defmodule Arbor.Actions.CodingTest do
       assert result.branch == "test/coding-agent"
       assert result.pr_url == "https://example.test/pr/1"
       assert File.exists?(Path.join(result.worktree_path, "feature.txt"))
+      assert result.commit == git!(result.worktree_path, ["rev-parse", "HEAD"])
+
+      assert git!(result.worktree_path, ["rev-list", "--count", "HEAD", "^#{base_branch}"]) ==
+               "1"
+
+      assert git!(result.worktree_path, ["branch", "--show-current"]) == "test/coding-agent"
 
       assert_receive {:start_session, start_params}
       assert start_params.provider == "codex"
@@ -92,6 +100,67 @@ defmodule Arbor.Actions.CodingTest do
       assert pr_params.path == result.worktree_path
       assert pr_params.draft == true
       assert pr_params.body =~ "Human review and merge are required."
+    end
+
+    test "retries reuse one requested branch and reset to one review commit", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      base_branch = git!(repo, ["branch", "--show-current"])
+      parent = self()
+      run_number = :counters.new(1, [])
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "codex-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          :counters.add(run_number, 1, 1)
+          worktree = Process.get(:coding_test_worktree)
+          run = :counters.get(run_number, 1)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented #{run}\n")
+          {:ok, %{text: "STATUS: implemented\nRun #{run}"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, _params, _context ->
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        Github.PR, params, _context ->
+          send(parent, {:pr, params})
+          {:ok, %{url: "https://example.test/pr/#{:counters.get(run_number, 1)}"}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      params = %{
+        task: "Add feature file",
+        repo_path: repo,
+        base_ref: base_branch,
+        branch_name: "test/idempotent-coding-agent",
+        worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+        validation_commands: ["true"]
+      }
+
+      assert {:ok, first} = Coding.ProduceReviewableChange.run(params, %{action_runner: runner})
+      assert {:ok, second} = Coding.ProduceReviewableChange.run(params, %{action_runner: runner})
+
+      assert first.status == "pr_created"
+      assert second.status == "pr_created"
+      assert first.branch == second.branch
+      assert first.worktree_path == second.worktree_path
+      assert first.commit != second.commit
+
+      assert git!(repo, ["branch", "--list", "test/idempotent-coding-agent"]) =~
+               "test/idempotent-coding-agent"
+
+      assert git!(second.worktree_path, ["rev-list", "--count", "HEAD", "^#{base_branch}"]) ==
+               "1"
+
+      assert File.read!(Path.join(second.worktree_path, "feature.txt")) == "implemented 2\n"
+      assert_receive {:pr, _}
+      assert_receive {:pr, _}
     end
 
     test "returns declined without committing or opening a PR", %{tmp_dir: tmp_dir} do
@@ -169,6 +238,7 @@ defmodule Arbor.Actions.CodingTest do
       tmp_dir: tmp_dir
     } do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      base_branch = git!(repo, ["branch", "--show-current"])
       parent = self()
 
       runner = fn
@@ -201,6 +271,7 @@ defmodule Arbor.Actions.CodingTest do
                  %{
                    task: "Add broken file",
                    repo_path: repo,
+                   base_ref: base_branch,
                    branch_name: "test/validation-fails",
                    worktree_base_dir: Path.join(tmp_dir, "worktrees"),
                    validation_commands: ["./bin/mix test"]
@@ -210,8 +281,18 @@ defmodule Arbor.Actions.CodingTest do
 
       assert result.status == "validation_failed"
       assert [%{command: "./bin/mix test", passed: false}] = result.validation
+
+      assert git!(result.worktree_path, ["rev-list", "--count", "HEAD", "^#{base_branch}"]) ==
+               "0"
+
+      assert git!(result.worktree_path, ["status", "--porcelain"]) =~ "broken.txt"
       assert_receive {:validation, _}
       refute_received :unexpected_pr
     end
+  end
+
+  defp git!(path, args) do
+    {output, 0} = System.cmd("git", ["-C", path | args], stderr_to_stdout: true)
+    String.trim(output)
   end
 end

@@ -291,7 +291,9 @@ defmodule Arbor.Agent.APIAgent do
     {_enhanced_prompt, recalled, state} = prepare_query(content, state, enhance_prompt: false)
     recalled = if recall, do: recalled, else: []
 
-    case GenServer.call(session_pid, {:send_message, message}, 600_000) do
+    timeout = Keyword.get(opts, :timeout, 600_000)
+
+    case GenServer.call(session_pid, {:send_message, message}, timeout) do
       {:ok, raw_response} ->
         normalized = PipelineResponse.normalize(raw_response)
         text = normalized.content

@@ -769,8 +769,8 @@ defmodule Arbor.Agent.Manager do
     )
   end
 
-  defp query_runtime(:arbor, pid, input, _opts), do: APIAgent.query(pid, input)
-  defp query_runtime(_, pid, input, _opts), do: APIAgent.query(pid, input)
+  defp query_runtime(:arbor, pid, input, opts), do: APIAgent.query(pid, input, opts)
+  defp query_runtime(_, pid, input, opts), do: APIAgent.query(pid, input, opts)
 
   defp handle_query_result({:ok, response}) do
     text = response[:text] || response.text || ""
