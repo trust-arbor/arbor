@@ -288,63 +288,12 @@ defmodule Arbor.Trust.Authority do
   # Pure Helpers
   # ===========================================================================
 
-  @doc "Get baseline and rules for a preset name."
+  @doc """
+  Preset `{baseline, rules}` for a named preset — delegates to
+  `Arbor.Trust.Presets`, the single source of preset + ceiling policy data.
+  """
   @spec preset_rules(atom()) :: {atom(), map()}
-  def preset_rules(:cautious) do
-    {:ask,
-     %{
-       "arbor://code/read" => :auto,
-       "arbor://code/write" => :block,
-       "arbor://fs/read" => :auto,
-       "arbor://historian/query" => :auto,
-       "arbor://orchestrator" => :auto,
-       # A1: proactive notify is allowed by default (the agent can surface
-       # progress/thoughts from first boot), bounded by a rate-limit constraint
-       # as the anti-spam budget. The user dials block/ask in their profile.
-       "arbor://comms/notify/session" => :allow,
-       "arbor://shell" => :block,
-       "arbor://shell/exec" => :ask
-     }}
-  end
-
-  def preset_rules(:balanced) do
-    {:ask,
-     %{
-       "arbor://code/read" => :auto,
-       "arbor://code/write" => :ask,
-       "arbor://fs/read" => :auto,
-       "arbor://fs/write" => :allow,
-       "arbor://historian/query" => :auto,
-       "arbor://orchestrator" => :auto,
-       "arbor://comms/notify/session" => :allow,
-       "arbor://shell" => :ask,
-       "arbor://memory" => :auto
-     }}
-  end
-
-  def preset_rules(:hands_off) do
-    {:allow,
-     %{
-       "arbor://code/read" => :auto,
-       "arbor://code/write" => :auto,
-       "arbor://fs" => :auto,
-       "arbor://historian" => :auto,
-       "arbor://orchestrator" => :auto,
-       "arbor://memory" => :auto,
-       "arbor://shell" => :ask,
-       "arbor://governance" => :ask
-     }}
-  end
-
-  def preset_rules(:full_trust) do
-    {:auto,
-     %{
-       "arbor://shell" => :ask,
-       "arbor://governance" => :ask
-     }}
-  end
-
-  def preset_rules(_), do: preset_rules(:cautious)
+  defdelegate preset_rules(preset), to: Arbor.Trust.Presets
 
   @doc """
   Most restrictive mode from a list.
@@ -442,12 +391,11 @@ defmodule Arbor.Trust.Authority do
   # only ever reached for genuinely unknown atoms.
   defp mode_index(_), do: 1
 
-  defp default_security_ceilings do
-    %{
-      "arbor://shell" => :ask,
-      "arbor://governance" => :ask
-    }
-  end
+  # Delegates to Presets (single source). Was a divergent 2-entry fallback; now
+  # === the real ceiling, so direct `Authority.effective_mode` callers that bypass
+  # ProfileResolver's injection get the full write-gating ceiling too (closes the
+  # disclosure-vs-authorization drift — see security-ceiling-duplication.md).
+  defp default_security_ceilings, do: Arbor.Trust.Presets.default_security_ceilings()
 
   # ── Persistence helpers (used by for_persistence/from_persistence) ─────────
 

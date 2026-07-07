@@ -196,6 +196,15 @@ defmodule Arbor.Trust.AuthDecisionTrustIntegrationTest do
     test "file.read remains auto even after the new ceilings", %{agent_id: agent_id} do
       promote_to_hands_off(agent_id)
       uri = "arbor://actions/execute/file.read"
+
+      # P1: :hands_off no longer auto-allows an un-ruled URI via a permissive baseline, so
+      # this guard adds the explicit :auto rule and verifies the CEILING doesn't gate a
+      # READ (the write-gating ceilings — file.write/file.edit/... — must not prefix-match
+      # file.read). A too-broad ceiling like ".../file" would flip this to :requires_approval.
+      Arbor.Trust.Store.update_profile(agent_id, fn p ->
+        %{p | rules: Map.put(p.rules, uri, :auto)}
+      end)
+
       cap = grant_unconstrained_capability(agent_id, uri)
       auth = AuthContext.new(agent_id, capabilities: [cap]) |> AuthContext.mark_verified()
 

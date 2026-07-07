@@ -324,14 +324,14 @@ defmodule Arbor.Trust.ProfileResolverTest do
 
     test ":hands_off allows most, asks for shell and governance" do
       preset = ProfileResolver.preset(:hands_off)
-      assert preset.baseline == :allow
+      assert preset.baseline == :ask
       assert preset.rules["arbor://shell"] == :ask
       assert preset.rules["arbor://governance"] == :ask
     end
 
     test ":full_trust auto-allows most, asks for shell and governance" do
       preset = ProfileResolver.preset(:full_trust)
-      assert preset.baseline == :auto
+      assert preset.baseline == :ask
       assert preset.rules["arbor://shell"] == :ask
       assert preset.rules["arbor://governance"] == :ask
     end

@@ -14,7 +14,7 @@ defmodule Arbor.Trust.AuthorityTest do
   describe "effective_mode/3" do
     test "returns baseline for unmatched URI" do
       profile = Authority.apply_preset(Authority.new_profile("agent_123"), :hands_off)
-      assert Authority.effective_mode(profile, "arbor://unknown/thing") == :allow
+      assert Authority.effective_mode(profile, "arbor://unknown/thing") == :ask
     end
 
     test "returns specific rule for matched URI" do
@@ -108,14 +108,14 @@ defmodule Arbor.Trust.AuthorityTest do
           Authority.new_profile("agent_granular")
           | baseline: :block,
             rules: %{
-              "arbor://fs/write/my/project" => :allow,
-              "arbor://fs/write/my/project/subproject" => :ask
+              "arbor://code/read/my/project" => :allow,
+              "arbor://code/read/my/project/subproject" => :ask
             }
         }
 
-      # Default fs ceilings are :auto, so they don't interfere with these assertions.
-      assert Authority.effective_mode(profile, "arbor://fs/write/my/project/x") == :allow
-      assert Authority.effective_mode(profile, "arbor://fs/write/my/project/subproject/x") == :ask
+      # code/read is not ceiling-gated, so the ceiling does not interfere — this exercises most-specific-wins.
+      assert Authority.effective_mode(profile, "arbor://code/read/my/project/x") == :allow
+      assert Authority.effective_mode(profile, "arbor://code/read/my/project/subproject/x") == :ask
     end
 
     test "on a canonical-length collision (bare vs '/**' for the same op) the most restrictive wins" do
@@ -149,7 +149,7 @@ defmodule Arbor.Trust.AuthorityTest do
       assert profile.baseline == :ask
 
       updated = Authority.apply_preset(profile, :hands_off)
-      assert updated.baseline == :allow
+      assert updated.baseline == :ask
       assert updated.rules["arbor://shell"] == :ask
     end
 
@@ -193,7 +193,7 @@ defmodule Arbor.Trust.AuthorityTest do
       assert explanation.effective_mode == :ask
       assert explanation.user_mode == :ask
       assert explanation.ceiling_mode == :ask
-      assert explanation.baseline == :allow
+      assert explanation.baseline == :ask
     end
   end
 
@@ -202,7 +202,7 @@ defmodule Arbor.Trust.AuthorityTest do
       profile = Authority.apply_preset(Authority.new_profile("agent_123"), :hands_off)
       summary = Authority.show_summary(profile)
 
-      assert summary.baseline == :allow
+      assert summary.baseline == :ask
       assert summary.agent_id == "agent_123"
       refute Map.has_key?(summary, :stats)
     end

@@ -52,9 +52,9 @@ defmodule Arbor.Trust.PolicyTest do
       assert rules["arbor://shell"] == :block
     end
 
-    test "full_trust preset has auto baseline" do
+    test "full_trust preset has ask baseline (P1)" do
       {baseline, _rules} = Policy.preset_rules(:full_trust)
-      assert baseline == :auto
+      assert baseline == :ask
     end
   end
 
@@ -105,10 +105,10 @@ defmodule Arbor.Trust.PolicyTest do
       assert Policy.effective_mode(agent_id, "arbor://code/write/self/impl/*") == :ask
     end
 
-    test "hands_off preset allows unmatched URIs", %{agent_id: agent_id} do
+    test "hands_off preset asks for unmatched URIs (P1 baseline :ask)", %{agent_id: agent_id} do
       create_profile_with_preset(agent_id, :hands_off)
-      # hands_off baseline is :allow for unmatched URIs
-      assert Policy.effective_mode(agent_id, "arbor://some/unknown/uri") == :allow
+      # hands_off baseline is now :ask for unmatched URIs (P1)
+      assert Policy.effective_mode(agent_id, "arbor://some/unknown/uri") == :ask
     end
   end
 
