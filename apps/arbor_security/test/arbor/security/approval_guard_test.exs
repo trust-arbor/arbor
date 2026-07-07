@@ -5,6 +5,16 @@ defmodule Arbor.Security.ApprovalGuardTest do
 
   @moduletag :fast
 
+  # Stub trust policies that fail when consulted — for the K1 fail-closed regression
+  # tests. Injected via config (:arbor_security, :trust_policy_module).
+  defmodule RaisingPolicy do
+    def confirmation_mode(_principal, _uri), do: raise("trust subsystem down")
+  end
+
+  defmodule ExitingPolicy do
+    def confirmation_mode(_principal, _uri), do: exit(:trust_down)
+  end
+
   # ===========================================================================
   # enabled? / disabled behavior
   # ===========================================================================
@@ -91,6 +101,28 @@ defmodule Arbor.Security.ApprovalGuardTest do
       cap = make_capability("arbor://code/read/#{agent_id}/file.ex")
 
       assert :ok = ApprovalGuard.check(cap, agent_id, "arbor://code/read/#{agent_id}/file.ex")
+    end
+
+    # K1 security regression (2026-07-07): a crashing/unavailable trust policy must FAIL
+    # CLOSED (escalate), never fall back to :auto (auto-approve). Same defect class as the
+    # 2026-04-07 shell-auto-exec regression. If get_confirmation_mode's fallback is reverted
+    # :gated -> :auto, these go red (check/3 would return :ok = silently auto-approved).
+    test "security regression: a RAISING trust policy fails closed, never auto-approves",
+         %{agent_id: agent_id} do
+      with_trust_policy_module(__MODULE__.RaisingPolicy)
+      uri = "arbor://code/write/#{agent_id}/impl/file.ex"
+      cap = make_capability(uri)
+
+      refute ApprovalGuard.check(cap, agent_id, uri) == :ok
+    end
+
+    test "security regression: an EXITING trust policy fails closed, never auto-approves",
+         %{agent_id: agent_id} do
+      with_trust_policy_module(__MODULE__.ExitingPolicy)
+      uri = "arbor://code/write/#{agent_id}/impl/file.ex"
+      cap = make_capability(uri)
+
+      refute ApprovalGuard.check(cap, agent_id, uri) == :ok
     end
 
     test "denies codebase write for restricted agent", %{agent_id: agent_id} do
@@ -248,6 +280,19 @@ defmodule Arbor.Security.ApprovalGuardTest do
     else
       start_supervised!({module, opts})
     end
+  end
+
+  defp with_trust_policy_module(module) do
+    prev = Application.get_env(:arbor_security, :trust_policy_module)
+    Application.put_env(:arbor_security, :trust_policy_module, module)
+
+    on_exit(fn ->
+      if prev do
+        Application.put_env(:arbor_security, :trust_policy_module, prev)
+      else
+        Application.delete_env(:arbor_security, :trust_policy_module)
+      end
+    end)
   end
 
   defp create_profile_at_tier(agent_id, tier) do

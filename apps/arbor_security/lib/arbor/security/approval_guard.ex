@@ -132,22 +132,54 @@ defmodule Arbor.Security.ApprovalGuard do
   end
 
   defp get_confirmation_mode(principal_id, resource_uri) do
-    if Code.ensure_loaded?(Arbor.Trust.Policy) and
-         function_exported?(Arbor.Trust.Policy, :confirmation_mode, 2) do
-      apply(Arbor.Trust.Policy, :confirmation_mode, [principal_id, resource_uri])
+    # Runtime indirection via Config so tests can substitute a stub (arbor_trust
+    # deps arbor_security, not the reverse) and a deployment could swap the policy.
+    # Mirrors AuthDecision.trust_profile_gates?/2.
+    policy = trust_policy_module()
+
+    if Code.ensure_loaded?(policy) and function_exported?(policy, :confirmation_mode, 2) do
+      apply(policy, :confirmation_mode, [principal_id, resource_uri])
     else
-      # Trust.Policy not available — fall back to :auto (no policy enforcement)
-      :auto
+      # K1 (fail-closed): Trust.Policy unavailable — escalate for approval (:gated),
+      # NEVER :auto. A missing policy collaborator must not silently auto-approve.
+      # Same defect class as the 2026-04-07 shell-auto-exec regression.
+      warn_trust_unavailable(principal_id, resource_uri, :not_loaded)
+      :gated
     end
   rescue
-    _ -> :auto
+    e ->
+      # A crash consulting the trust profile must NOT downgrade to auto-approve.
+      warn_trust_unavailable(principal_id, resource_uri, {:raised, e})
+      :gated
   catch
-    :exit, _ -> :auto
+    :exit, reason ->
+      warn_trust_unavailable(principal_id, resource_uri, {:exit, reason})
+      :gated
   end
 
   defp trust_policy_available? do
-    Code.ensure_loaded?(Arbor.Trust.Policy) and
-      function_exported?(Arbor.Trust.Policy, :confirmation_mode, 2)
+    policy = trust_policy_module()
+    Code.ensure_loaded?(policy) and function_exported?(policy, :confirmation_mode, 2)
+  end
+
+  # Trust.Policy module, overridable via config for tests / deployment swaps.
+  defp trust_policy_module do
+    config = Arbor.Security.Config
+
+    if Code.ensure_loaded?(config) and function_exported?(config, :trust_policy_module, 0) do
+      apply(config, :trust_policy_module, [])
+    else
+      Arbor.Trust.Policy
+    end
+  end
+
+  defp warn_trust_unavailable(principal_id, resource_uri, cause) do
+    Logger.warning(
+      "ApprovalGuard: Trust.Policy unavailable (#{inspect(cause)}) — failing CLOSED to " <>
+        ":gated for #{principal_id} -> #{resource_uri}",
+      principal_id: principal_id,
+      resource_uri: resource_uri
+    )
   end
 
   defp safe_emit_signal(type, data) do
