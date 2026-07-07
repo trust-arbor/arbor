@@ -92,6 +92,24 @@ defmodule Arbor.Scheduler.CapsFileTest do
 
       assert {:ok, [%{constraints: %{rate_limit: 50}}]} = CapsFile.load(path)
     end
+
+    test "canonicalizes resource URIs before signing and verifying", %{
+      identity: identity,
+      tmp_dir: tmp_dir
+    } do
+      caps = [
+        %{
+          resource_uri: "arbor://fs/write/reports/canonical/",
+          constraints: %{}
+        }
+      ]
+
+      path = Path.join(tmp_dir, "canonical.caps.json")
+      write_signed_caps_file(path, identity, caps)
+
+      assert {:ok, [%{resource_uri: "arbor://fs/write/reports/canonical"}]} =
+               CapsFile.load(path)
+    end
   end
 
   describe "load/1 file/JSON errors" do
@@ -169,6 +187,32 @@ defmodule Arbor.Scheduler.CapsFileTest do
       write_signed_caps_file(path, identity, [])
 
       assert {:ok, []} = CapsFile.load(path)
+    end
+
+    test "invalid resource URI returns invalid_schema", %{
+      identity: identity,
+      tmp_dir: tmp_dir
+    } do
+      caps = [%{resource_uri: "https://example.com/not/arbor", constraints: %{}}]
+
+      path = Path.join(tmp_dir, "invalid_uri.caps.json")
+      write_signed_caps_file(path, identity, caps)
+
+      assert {:error, {:invalid_schema, {:invalid_resource_uri, :invalid_scheme}}} =
+               CapsFile.load(path)
+    end
+
+    test "traversal-like resource URI returns invalid_schema", %{
+      identity: identity,
+      tmp_dir: tmp_dir
+    } do
+      caps = [%{resource_uri: "arbor://fs/write/reports/../secrets", constraints: %{}}]
+
+      path = Path.join(tmp_dir, "traversal_uri.caps.json")
+      write_signed_caps_file(path, identity, caps)
+
+      assert {:error, {:invalid_schema, {:invalid_resource_uri, :traversal_segment}}} =
+               CapsFile.load(path)
     end
   end
 

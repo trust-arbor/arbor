@@ -25,9 +25,9 @@ defmodule Arbor.Scheduler.CapsFile do
 
   Each capability declares a `resource_uri` (required) and optional
   `constraints`. The `signature` covers a canonical payload computed from
-  the version, issuer_id, and capabilities (sorted by URI for determinism)
-  — same length-prefix scheme as `Arbor.Contracts.Security.Capability.
-  signing_payload/1` to prevent field-boundary attacks.
+  the version, issuer_id, and capabilities (sorted by canonical URI for
+  determinism) — same length-prefix scheme as `Arbor.Contracts.Security.
+  Capability.signing_payload/1` to prevent field-boundary attacks.
 
   ## Trust chain
 
@@ -66,7 +66,7 @@ defmodule Arbor.Scheduler.CapsFile do
   declaration.
   """
 
-  alias Arbor.Contracts.Security.Capability
+  alias Arbor.Contracts.Security.{Capability, CapabilityUri}
   alias Arbor.Security.Crypto
   alias Arbor.Security.IssuerRegistry
 
@@ -124,13 +124,16 @@ defmodule Arbor.Scheduler.CapsFile do
 
     - version (string)
     - issuer_id
-    - canonical capabilities JSON (sorted by resource_uri)
+    - canonical capabilities JSON (sorted by canonical resource_uri)
 
   This mirrors `Capability.signing_payload/1` semantics.
   """
   @spec signing_payload(map()) :: binary()
   def signing_payload(%{version: version, issuer_id: issuer_id, capabilities: caps}) do
-    sorted_caps = Enum.sort_by(caps, & &1.resource_uri)
+    sorted_caps =
+      caps
+      |> Enum.map(&canonical_capability_descriptor/1)
+      |> Enum.sort_by(& &1.resource_uri)
 
     caps_json =
       sorted_caps
@@ -228,7 +231,13 @@ defmodule Arbor.Scheduler.CapsFile do
         _ -> %{}
       end
 
-    {:ok, %{resource_uri: uri, constraints: constraints}}
+    case canonical_capability_uri(uri) do
+      {:ok, canonical_uri} ->
+        {:ok, %{resource_uri: canonical_uri, constraints: constraints}}
+
+      {:error, reason} ->
+        {:error, {:invalid_schema, {:invalid_resource_uri, reason}}}
+    end
   end
 
   defp validate_capability(_, idx),
@@ -248,6 +257,30 @@ defmodule Arbor.Scheduler.CapsFile do
         {value, rest} -> Map.put(rest, key, value)
       end
     end)
+  end
+
+  defp canonical_capability_descriptor(%{resource_uri: uri, constraints: constraints}) do
+    %{resource_uri: canonical_resource_uri(uri), constraints: constraints}
+  end
+
+  defp canonical_resource_uri(uri) when is_binary(uri) do
+    case CapabilityUri.parse(uri) do
+      {:ok, parsed} -> CapabilityUri.canonical(parsed)
+      {:error, _reason} -> uri
+    end
+  end
+
+  defp canonical_resource_uri(uri), do: uri
+
+  defp canonical_capability_uri(uri) do
+    with {:ok, parsed} <- CapabilityUri.parse(uri),
+         canonical = CapabilityUri.canonical(parsed),
+         true <- CapabilityUri.capability_match?(uri, canonical) do
+      {:ok, canonical}
+    else
+      {:error, reason} -> {:error, reason}
+      false -> {:error, :traversal_segment}
+    end
   end
 
   defp check_version(v) when v == @current_version, do: :ok

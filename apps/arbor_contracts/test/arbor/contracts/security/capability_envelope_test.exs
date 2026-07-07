@@ -92,6 +92,26 @@ defmodule Arbor.Contracts.Security.CapabilityEnvelopeTest do
     end
   end
 
+  describe "new/1 resource URI validation" do
+    test "security regression: rejects traversal-like capability URI segments" do
+      assert {:error, {:invalid_resource_uri, "arbor://fs/write/reports/../secrets"}} =
+               Capability.new(
+                 resource_uri: "arbor://fs/write/reports/../secrets",
+                 principal_id: "agent_parent"
+               )
+    end
+
+    test "canonical parser accepts trailing slash resource URIs" do
+      assert {:ok, cap} =
+               Capability.new(
+                 resource_uri: "arbor://fs/write/reports/",
+                 principal_id: "agent_parent"
+               )
+
+      assert Capability.grants_access?(cap, "arbor://fs/write/reports")
+    end
+  end
+
   describe "constraints_subset?/2" do
     test "child with tighter rate_limit is subset" do
       assert Capability.constraints_subset?(%{rate_limit: 50}, %{rate_limit: 100})
