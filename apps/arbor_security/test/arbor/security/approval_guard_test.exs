@@ -256,12 +256,23 @@ defmodule Arbor.Security.ApprovalGuardTest do
       {:error, :already_exists} -> :ok
     end
 
-    # Map tier to preset for profile rules
-    preset_name = Arbor.Trust.Policy.tier_to_preset(tier)
+    # Tiers are retired (finish-retiring-trust-tiers); map the legacy tier labels these
+    # tests still use onto the current presets. tier_to_preset/1 was removed with the tiers.
+    preset_name =
+      case tier do
+        :untrusted -> :cautious
+        :trusted -> :balanced
+        :veteran -> :hands_off
+        :autonomous -> :full_trust
+        _ -> :cautious
+      end
+
     {baseline, rules} = Arbor.Trust.Policy.preset_rules(preset_name)
 
     Arbor.Trust.Store.update_profile(agent_id, fn profile ->
-      %{profile | tier: tier, baseline: baseline, rules: rules}
+      # tiers are retired — the profile carries no :tier field; the preset (mapped above)
+      # is what drives baseline + rules.
+      %{profile | baseline: baseline, rules: rules}
     end)
   end
 end
