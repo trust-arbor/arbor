@@ -47,6 +47,7 @@ defmodule Arbor.Security do
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.InvocationReceipt
   alias Arbor.Contracts.Security.SignedRequest
+  alias Arbor.Common.SafePath
   alias Arbor.Security.Capability.Signer
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Config
@@ -102,6 +103,19 @@ defmodule Arbor.Security do
   @spec authorization_resource_uri(String.t(), keyword()) :: String.t()
   def authorization_resource_uri(resource_uri, opts \\ []),
     do: maybe_synthesize_fs_path_uri(resource_uri, opts)
+
+  @doc """
+  Return the checked effective resource URI used by authorization.
+
+  Unlike `authorization_resource_uri/2`, this reports path-normalization errors
+  instead of falling back to the caller's original URI. Authorization and trust
+  policy callers use this form so invalid `file_path:` input fails closed before
+  capability lookup or policy minting.
+  """
+  @spec normalize_authorization_resource_uri(String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def normalize_authorization_resource_uri(resource_uri, opts \\ []),
+    do: synthesize_fs_path_uri(resource_uri, opts)
 
   @doc """
   Standalone egress authorization for callers WITHOUT an operation capability
@@ -567,12 +581,12 @@ defmodule Arbor.Security do
     # defense-in-depth path normalization. Surfaced 2026-06-06 by the
     # morning-digest pipelines hitting the gate when run via the
     # per-run identity flow.
-    resource_uri = authorization_resource_uri(resource_uri, opts)
-
     # Step 1: Reflexes — instant safety block, must run before anything else
-    reflex_context = build_reflex_context(resource_uri, action, opts)
+    requested_resource_uri = resource_uri
 
-    with :ok <- check_reflexes(principal_id, reflex_context, resource_uri, action, opts) do
+    with {:ok, resource_uri} <- normalize_authorization_resource_uri(resource_uri, opts),
+         reflex_context = build_reflex_context(resource_uri, action, opts),
+         :ok <- check_reflexes(principal_id, reflex_context, resource_uri, action, opts) do
       # Step 2: Build AuthContext with identity, capabilities, trust profile
       auth = build_auth_context(principal_id, opts)
 
@@ -590,7 +604,7 @@ defmodule Arbor.Security do
       end
     else
       {:error, reason} = error ->
-        Events.record_authorization_denied(principal_id, resource_uri, reason, opts)
+        Events.record_authorization_denied(principal_id, requested_resource_uri, reason, opts)
         error
     end
   end
@@ -1051,20 +1065,112 @@ defmodule Arbor.Security do
   # `arbor://fs/<op>` URI plus the `:file_path` opt. Lets path-scoped
   # caps participate in the URI matcher directly.
   defp maybe_synthesize_fs_path_uri(resource_uri, opts) when is_binary(resource_uri) do
-    case Keyword.get(opts, :file_path) do
-      file_path when is_binary(file_path) ->
-        if bare_fs_op_uri?(resource_uri) do
-          "#{resource_uri}/#{String.trim_leading(file_path, "/")}"
-        else
-          resource_uri
-        end
-
-      _ ->
-        resource_uri
+    case synthesize_fs_path_uri(resource_uri, opts) do
+      {:ok, effective_uri} -> effective_uri
+      {:error, _reason} -> resource_uri
     end
   end
 
   defp maybe_synthesize_fs_path_uri(resource_uri, _opts), do: resource_uri
+
+  defp synthesize_fs_path_uri(resource_uri, opts) when is_binary(resource_uri) do
+    case Keyword.get(opts, :file_path) do
+      file_path when is_binary(file_path) ->
+        if bare_fs_op_uri?(resource_uri) do
+          with {:ok, path} <- normalize_fs_authorization_path(file_path, opts) do
+            {:ok, append_fs_authorization_path(resource_uri, path)}
+          else
+            {:error, reason} -> {:error, {:invalid_file_path, reason}}
+          end
+        else
+          {:ok, resource_uri}
+        end
+
+      nil ->
+        {:ok, resource_uri}
+
+      _other ->
+        if bare_fs_op_uri?(resource_uri) do
+          {:error, {:invalid_file_path, :not_binary}}
+        else
+          {:ok, resource_uri}
+        end
+    end
+  end
+
+  defp synthesize_fs_path_uri(resource_uri, _opts), do: {:ok, resource_uri}
+
+  defp append_fs_authorization_path(resource_uri, ""), do: resource_uri
+  defp append_fs_authorization_path(resource_uri, path), do: "#{resource_uri}/#{path}"
+
+  defp normalize_fs_authorization_path(file_path, opts) do
+    case workspace_root(opts) do
+      {:ok, workspace} ->
+        with {:ok, resolved} <- SafePath.resolve_within(file_path, workspace) do
+          {:ok, relativize_path(resolved, workspace)}
+        end
+
+      :none ->
+        normalize_unscoped_fs_path(file_path)
+    end
+  end
+
+  defp workspace_root(opts) do
+    case Keyword.get(opts, :workspace) do
+      workspace when is_binary(workspace) and workspace != "" ->
+        {:ok, SafePath.normalize(workspace)}
+
+      _ ->
+        :none
+    end
+  end
+
+  defp relativize_path(path, root) do
+    case Path.relative_to(path, root) do
+      "." -> ""
+      relative -> String.trim_leading(relative, "/")
+    end
+  end
+
+  defp normalize_unscoped_fs_path(file_path) do
+    with :ok <- SafePath.validate(file_path) do
+      if SafePath.absolute?(file_path) do
+        {:ok, file_path |> SafePath.normalize() |> String.trim_leading("/")}
+      else
+        normalize_relative_fs_path(file_path)
+      end
+    end
+  end
+
+  defp normalize_relative_fs_path(file_path) do
+    result =
+      file_path
+      |> Path.split()
+      |> Enum.reduce_while({:ok, []}, fn
+        ".", {:ok, parts} ->
+          {:cont, {:ok, parts}}
+
+        "..", {:ok, []} ->
+          {:halt, {:error, :path_traversal}}
+
+        "..", {:ok, [_ | rest]} ->
+          {:cont, {:ok, rest}}
+
+        part, {:ok, parts} ->
+          {:cont, {:ok, [part | parts]}}
+      end)
+
+    case result do
+      {:ok, parts} -> {:ok, parts |> Enum.reverse() |> Enum.join("/")}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp file_guard_authorization_path(file_path, opts) do
+    with {:ok, path} <- normalize_fs_authorization_path(file_path, opts) do
+      {:ok, "/" <> path}
+    end
+  end
 
   # `arbor://fs/<op>` with no further path segments. Matches:
   #   "arbor://fs/read", "arbor://fs/write", "arbor://fs/list", etc.
@@ -1088,11 +1194,15 @@ defmodule Arbor.Security do
 
     cond do
       # Explicit path: caller knows they want path-bound checking. Full
-      # FileGuard.authorize/3 lookup-and-resolve. Same as before.
+      # FileGuard.authorize/3 lookup-and-resolve against the same canonical
+      # path form used for capability lookup above.
       file_path && String.starts_with?(resource_uri, "arbor://fs/") ->
         if Code.ensure_loaded?(file_guard) do
           operation = infer_fs_operation(resource_uri)
-          file_guard.authorize(principal_id, file_path, operation)
+
+          with {:ok, guard_path} <- file_guard_authorization_path(file_path, opts) do
+            file_guard.authorize(principal_id, guard_path, operation)
+          end
         else
           :ok
         end

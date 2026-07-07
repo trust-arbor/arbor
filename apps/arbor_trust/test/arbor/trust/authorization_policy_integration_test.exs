@@ -134,11 +134,62 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
     assert {:error, :escalation_disabled} = Trust.authorize(agent_id, uri, :query)
   end
 
+  test "security regression: trust policy sees normalized file_path before minting", %{
+    agent_id: agent_id
+  } do
+    set_profile_rules(agent_id, %{
+      "arbor://fs/write" => :allow,
+      "arbor://fs/write/secret" => :block
+    })
+
+    assert {:error, :unauthorized} =
+             Trust.authorize(agent_id, "arbor://fs/write", :execute,
+               file_path: "public/../secret/keys.txt",
+               verify_identity: false
+             )
+
+    assert {:error, :not_found} =
+             CapabilityStore.find_authorizing(agent_id, "arbor://fs/write/secret/keys.txt")
+  end
+
+  test "workspace file_path trust grants are minted against workspace-relative URIs", %{
+    agent_id: agent_id
+  } do
+    workspace =
+      System.tmp_dir!()
+      |> Path.join("trust_auth_uri_workspace_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(Path.join(workspace, "public"))
+    file_path = Path.join([workspace, "secret", "..", "public", "note.txt"])
+    File.write!(Path.join(workspace, "public/note.txt"), "ok")
+    on_exit(fn -> File.rm_rf!(workspace) end)
+
+    set_profile_rules(agent_id, %{"arbor://fs/read/public" => :allow})
+
+    assert {:ok, :authorized} =
+             Trust.authorize(agent_id, "arbor://fs/read", :execute,
+               file_path: file_path,
+               workspace: workspace,
+               verify_identity: false
+             )
+
+    assert {:ok, cap} =
+             CapabilityStore.find_authorizing(agent_id, "arbor://fs/read/public/note.txt")
+
+    assert cap.resource_uri == "arbor://fs/read/public/note.txt"
+  end
+
   defp promote_to_hands_off(agent_id) do
     {baseline, rules} = Arbor.Trust.Authority.preset_rules(:hands_off)
 
     Arbor.Trust.Store.update_profile(agent_id, fn profile ->
       %{profile | baseline: baseline, rules: rules}
+    end)
+  end
+
+  defp set_profile_rules(agent_id, rules) do
+    Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+      %{profile | baseline: :ask, rules: rules}
     end)
   end
 

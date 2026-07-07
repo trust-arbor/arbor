@@ -248,9 +248,9 @@ defmodule Arbor.Trust do
           | {:ok, :pending_approval, String.t()}
           | {:error, term()}
   def authorize(agent_id, resource_uri, action \\ nil, opts \\ []) do
-    effective_uri = Arbor.Security.authorization_resource_uri(resource_uri, opts)
-
-    with {:ok, cap} <- PolicyEnforcer.ensure_capability(agent_id, effective_uri, opts),
+    with {:ok, effective_uri} <-
+           Arbor.Security.normalize_authorization_resource_uri(resource_uri, opts),
+         {:ok, cap} <- PolicyEnforcer.ensure_capability(agent_id, effective_uri, opts),
          {:ok, authorized_result} <- security_authorize(agent_id, resource_uri, action, opts) do
       case ApprovalGuard.check(cap, agent_id, effective_uri) do
         :ok -> authorized_result

@@ -110,6 +110,77 @@ defmodule Arbor.SecurityTest do
                  verify_identity: false
                )
     end
+
+    test "regression: bare fs URI normalizes relative file_path aliases before cap lookup",
+         %{agent_id: agent_id} do
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/secret/**"
+        )
+
+      aliased_path = "public/../secret/keys.txt"
+
+      assert {:ok, "arbor://fs/read/secret/keys.txt"} =
+               Security.normalize_authorization_resource_uri("arbor://fs/read",
+                 file_path: aliased_path
+               )
+
+      assert {:ok, :authorized} =
+               Security.authorize(agent_id, "arbor://fs/read", :execute,
+                 file_path: aliased_path,
+                 verify_identity: false
+               )
+    end
+
+    test "regression: workspace file_path synthesis uses workspace-relative canonical URI",
+         %{agent_id: agent_id} do
+      tmp_root =
+        case :file.read_link("/tmp") do
+          {:ok, target} -> "/" <> List.to_string(target)
+          _ -> System.tmp_dir!()
+        end
+
+      workspace = Path.join(tmp_root, "auth_uri_workspace_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(Path.join(workspace, "secret"))
+      file_path = Path.join([workspace, "public", "..", "secret", "keys.txt"])
+      File.write!(Path.join(workspace, "secret/keys.txt"), "ok")
+      on_exit(fn -> File.rm_rf!(workspace) end)
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/secret/**"
+        )
+
+      assert {:ok, "arbor://fs/read/secret/keys.txt"} =
+               Security.normalize_authorization_resource_uri("arbor://fs/read",
+                 file_path: file_path,
+                 workspace: workspace
+               )
+
+      assert {:ok, :authorized} =
+               Security.authorize(agent_id, "arbor://fs/read", :execute,
+                 file_path: file_path,
+                 workspace: workspace,
+                 verify_identity: false
+               )
+    end
+
+    test "security regression: relative file_path cannot escape above its canonical root",
+         %{agent_id: agent_id} do
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/**"
+        )
+
+      assert {:error, {:invalid_file_path, :path_traversal}} =
+               Security.authorize(agent_id, "arbor://fs/read", :execute,
+                 file_path: "../secret.txt",
+                 verify_identity: false
+               )
+    end
   end
 
   describe "authorize/2 boolean-style checks" do

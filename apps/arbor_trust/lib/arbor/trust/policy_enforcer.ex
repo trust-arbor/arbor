@@ -29,12 +29,13 @@ defmodule Arbor.Trust.PolicyEnforcer do
   @spec ensure_capability(String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def ensure_capability(principal_id, resource_uri, opts \\ []) do
-    resource_uri = Arbor.Security.authorization_resource_uri(resource_uri, opts)
-
-    case find_existing_capability(principal_id, resource_uri) do
-      {:ok, cap} -> {:ok, cap}
-      {:error, :not_found} -> check(principal_id, resource_uri, opts)
-      {:error, _reason} -> {:error, :unauthorized}
+    with {:ok, resource_uri} <-
+           Arbor.Security.normalize_authorization_resource_uri(resource_uri, opts) do
+      case find_existing_capability(principal_id, resource_uri) do
+        {:ok, cap} -> {:ok, cap}
+        {:error, :not_found} -> check(principal_id, resource_uri, opts)
+        {:error, _reason} -> {:error, :unauthorized}
+      end
     end
   end
 
