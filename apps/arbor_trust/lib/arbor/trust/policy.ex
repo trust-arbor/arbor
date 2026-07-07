@@ -142,9 +142,9 @@ defmodule Arbor.Trust.Policy do
       Policy.confirmation_mode("agent_123", "arbor://shell/exec/*")
       #=> :gated  (security ceiling enforced)
   """
-  @spec confirmation_mode(String.t(), String.t()) :: confirmation()
-  def confirmation_mode(agent_id, resource_uri) do
-    mode_to_confirmation(effective_mode(agent_id, resource_uri))
+  @spec confirmation_mode(String.t(), String.t(), keyword()) :: confirmation()
+  def confirmation_mode(agent_id, resource_uri, opts \\ []) do
+    mode_to_confirmation(effective_mode(agent_id, resource_uri, opts))
   end
 
   # Conservative defaults when a profile does not declare an egress mode for a

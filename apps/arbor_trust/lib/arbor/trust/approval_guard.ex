@@ -21,11 +21,11 @@ defmodule Arbor.Trust.ApprovalGuard do
   @doc """
   Check whether a valid capability use is approved by trust policy.
   """
-  @spec check(map(), String.t(), String.t()) ::
+  @spec check(map(), String.t(), String.t(), keyword()) ::
           :ok | {:ok, :pending_approval, String.t()} | {:error, term()}
-  def check(capability, principal_id, resource_uri) do
+  def check(capability, principal_id, resource_uri, opts \\ []) do
     if enabled?() do
-      check_with_policy(capability, principal_id, resource_uri)
+      check_with_policy(capability, principal_id, resource_uri, opts)
     else
       Escalation.maybe_escalate(capability, principal_id, resource_uri)
     end
@@ -35,8 +35,8 @@ defmodule Arbor.Trust.ApprovalGuard do
   @spec enabled?() :: boolean()
   def enabled?, do: Config.approval_guard_enabled?()
 
-  defp check_with_policy(capability, principal_id, resource_uri) do
-    case get_confirmation_mode(principal_id, resource_uri) do
+  defp check_with_policy(capability, principal_id, resource_uri, opts) do
+    case get_confirmation_mode(principal_id, resource_uri, opts) do
       :auto ->
         if approval_required?(capability) do
           Escalation.maybe_escalate(capability, principal_id, resource_uri)
@@ -83,15 +83,24 @@ defmodule Arbor.Trust.ApprovalGuard do
     end
   end
 
-  defp get_confirmation_mode(principal_id, resource_uri) do
+  defp get_confirmation_mode(principal_id, resource_uri, opts) do
     policy = Config.policy_module()
 
-    if Code.ensure_loaded?(policy) and
-         function_exported?(policy, :confirmation_mode, 2) do
-      apply(policy, :confirmation_mode, [principal_id, resource_uri])
-    else
-      warn_trust_unavailable(principal_id, resource_uri, :not_loaded)
-      :gated
+    cond do
+      Code.ensure_loaded?(policy) and function_exported?(policy, :confirmation_mode, 3) ->
+        apply(policy, :confirmation_mode, [principal_id, resource_uri, opts])
+
+      Code.ensure_loaded?(policy) and function_exported?(policy, :effective_mode, 3) ->
+        policy
+        |> apply(:effective_mode, [principal_id, resource_uri, opts])
+        |> mode_to_confirmation()
+
+      Code.ensure_loaded?(policy) and function_exported?(policy, :confirmation_mode, 2) ->
+        apply(policy, :confirmation_mode, [principal_id, resource_uri])
+
+      true ->
+        warn_trust_unavailable(principal_id, resource_uri, :not_loaded)
+        :gated
     end
   rescue
     e ->
@@ -102,6 +111,12 @@ defmodule Arbor.Trust.ApprovalGuard do
       warn_trust_unavailable(principal_id, resource_uri, {:exit, reason})
       :gated
   end
+
+  defp mode_to_confirmation(:block), do: :deny
+  defp mode_to_confirmation(:ask), do: :gated
+  defp mode_to_confirmation(:allow), do: :auto
+  defp mode_to_confirmation(:auto), do: :auto
+  defp mode_to_confirmation(_mode), do: :gated
 
   defp require_approval(capability) do
     %{capability | constraints: Map.put(capability.constraints || %{}, :requires_approval, true)}

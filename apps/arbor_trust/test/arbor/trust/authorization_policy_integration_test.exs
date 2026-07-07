@@ -90,6 +90,28 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
     assert {:ok, :authorized} = Trust.authorize(agent_id, uri, :read)
   end
 
+  test "TRUST-15 security regression: hostile taint gates held auto capabilities", %{
+    agent_id: agent_id
+  } do
+    uri = "arbor://test/process"
+    set_profile_rules(agent_id, %{uri => :auto})
+    grant_capability(agent_id, uri)
+
+    assert {:ok, :authorized} =
+             Trust.authorize(agent_id, uri, :execute,
+               security_ceilings: %{},
+               effect_class: :process_spawn,
+               operation_taint: :trusted
+             )
+
+    assert {:error, :escalation_disabled} =
+             Trust.authorize(agent_id, uri, :execute,
+               security_ceilings: %{},
+               effect_class: :process_spawn,
+               operation_taint: :hostile
+             )
+  end
+
   test "security ceilings gate code/write even for permissive profiles", %{agent_id: agent_id} do
     promote_to_hands_off(agent_id)
     uri = "arbor://code/write/foo.ex"

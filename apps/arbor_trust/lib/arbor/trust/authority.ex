@@ -15,6 +15,7 @@ defmodule Arbor.Trust.Authority do
   """
 
   alias Arbor.Contracts.Trust.Profile
+  alias Arbor.Trust.TaintConjunct
 
   # ===========================================================================
   # Construct
@@ -129,6 +130,7 @@ defmodule Arbor.Trust.Authority do
     # below still apply (most-restrictive wins).
     layer1_default =
       if infrastructure_auto?(resource_uri), do: :auto, else: constrain_baseline(profile.baseline)
+
     user_mode = resolve_prefix(profile.rules, resource_uri, layer1_default)
 
     # Layer 2: Security ceilings
@@ -146,8 +148,12 @@ defmodule Arbor.Trust.Authority do
         :auto
       end
 
+    # Layer 4: TRUST-15 taint conjunct. Hostile/untrusted operation inputs
+    # suspend earned autonomy for high-risk effect classes.
+    taint_mode = TaintConjunct.mode(resource_uri, opts)
+
     # Most restrictive wins
-    most_restrictive([user_mode, ceiling_mode, model_mode])
+    most_restrictive([user_mode, ceiling_mode, model_mode, taint_mode])
   end
 
   @doc "Explain the mode resolution chain for debugging."
@@ -158,6 +164,7 @@ defmodule Arbor.Trust.Authority do
 
     layer1_default =
       if infrastructure_auto?(resource_uri), do: :auto, else: constrain_baseline(profile.baseline)
+
     user_mode = resolve_prefix(profile.rules, resource_uri, layer1_default)
     ceiling_mode = resolve_prefix(ceilings, resource_uri, :auto)
 
@@ -168,12 +175,17 @@ defmodule Arbor.Trust.Authority do
         :auto
       end
 
+    taint = TaintConjunct.explain(resource_uri, opts)
+
     %{
       resource_uri: resource_uri,
-      effective_mode: most_restrictive([user_mode, ceiling_mode, model_mode]),
+      effective_mode: most_restrictive([user_mode, ceiling_mode, model_mode, taint.taint_mode]),
       user_mode: user_mode,
       ceiling_mode: ceiling_mode,
       model_mode: model_mode,
+      taint_mode: taint.taint_mode,
+      operation_taint: taint.operation_taint,
+      effect_class: taint.effect_class,
       baseline: profile.baseline,
       matching_rule: find_matching_rule(profile.rules, resource_uri)
     }

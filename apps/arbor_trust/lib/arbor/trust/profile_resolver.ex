@@ -43,6 +43,8 @@ defmodule Arbor.Trust.ProfileResolver do
 
   @mode_order %{block: 0, ask: 1, allow: 2, auto: 3}
 
+  alias Arbor.Trust.TaintConjunct
+
   # ── Public API ──────────────────────────────────────────────────────
 
   @doc """
@@ -168,7 +170,8 @@ defmodule Arbor.Trust.ProfileResolver do
     security_ceiling = resolve_prefix(ceilings, resource_uri, :auto)
     model_ceiling = resolve_model_constraint(model_constraints, resource_uri, model_class)
 
-    effective = most_restrictive([user_mode, security_ceiling, model_ceiling])
+    taint = TaintConjunct.explain(resource_uri, opts)
+    effective = most_restrictive([user_mode, security_ceiling, model_ceiling, taint.taint_mode])
 
     # Find which rule matched
     user_match =
@@ -190,6 +193,9 @@ defmodule Arbor.Trust.ProfileResolver do
       ceiling_match: ceiling_match,
       model_class: model_class,
       model_ceiling: model_ceiling,
+      taint_mode: taint.taint_mode,
+      operation_taint: taint.operation_taint,
+      effect_class: taint.effect_class,
       effective_mode: effective
     }
   end

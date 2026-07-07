@@ -235,8 +235,8 @@ defmodule Arbor.Trust do
   defdelegate policy_allowed?(agent_id, resource_uri), to: Arbor.Trust.Policy, as: :allowed?
 
   @doc "Get confirmation mode for a resource at agent's current trust level."
-  @spec confirmation_mode(String.t(), String.t()) :: :auto | :gated | :deny
-  defdelegate confirmation_mode(agent_id, resource_uri), to: Arbor.Trust.Policy
+  @spec confirmation_mode(String.t(), String.t(), keyword()) :: :auto | :gated | :deny
+  defdelegate confirmation_mode(agent_id, resource_uri, opts \\ []), to: Arbor.Trust.Policy
 
   @doc "Get the agent's egress standing for a resolved egress tier."
   @spec egress_mode(String.t(), atom()) :: :block | :ask | :allow | :auto
@@ -319,7 +319,7 @@ defmodule Arbor.Trust do
            Arbor.Security.normalize_authorization_resource_uri(resource_uri, opts),
          {:ok, cap} <- PolicyEnforcer.ensure_capability(agent_id, effective_uri, opts),
          {:ok, authorized_result} <- security_authorize(agent_id, resource_uri, action, opts) do
-      case ApprovalGuard.check(cap, agent_id, effective_uri) do
+      case ApprovalGuard.check(cap, agent_id, effective_uri, opts) do
         :ok -> authorized_result
         {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
         {:error, reason} -> {:error, reason}

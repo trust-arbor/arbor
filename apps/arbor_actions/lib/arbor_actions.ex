@@ -166,12 +166,14 @@ defmodule Arbor.Actions do
     # this resolves + observes regardless, so the gate can land dark.
     effect_class = Egress.effect_class_for(action_module)
     egress_tier = Egress.egress_tier_for(action_module, params, clean_context)
+    operation_taint = Map.get(clean_context, :taint)
 
     auth_opts =
       auth_opts
       |> Keyword.put(:effect_class, effect_class)
+      |> Keyword.put(:operation_taint, operation_taint)
       |> Keyword.put(:egress_tier, egress_tier)
-      |> Keyword.put(:egress_taint, Map.get(clean_context, :taint))
+      |> Keyword.put(:egress_taint, operation_taint)
       |> Keyword.put(
         :egress_destination,
         Egress.egress_destination_for(action_module, params, clean_context)
@@ -803,7 +805,12 @@ defmodule Arbor.Actions do
       agent_id = context[:agent_id]
 
       if agent_id && trust_authorization_available?() do
-        case Arbor.Trust.authorize(agent_id, resource_uri, :execute) do
+        case Arbor.Trust.authorize(
+               agent_id,
+               resource_uri,
+               :execute,
+               auth_opts_from_context(context)
+             ) do
           {:ok, :authorized} -> :ok
           {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
           {:error, reason} -> {:error, {:unauthorized, reason}}
@@ -818,9 +825,18 @@ defmodule Arbor.Actions do
 
   defp trust_authorization_available? do
     Code.ensure_loaded?(Arbor.Trust) and
-      function_exported?(Arbor.Trust, :authorize, 3) and
+      function_exported?(Arbor.Trust, :authorize, 4) and
       Process.whereis(Arbor.Security.CapabilityStore) != nil
   end
+
+  defp auth_opts_from_context(context) when is_map(context) do
+    case Map.get(context, :taint) || Map.get(context, "taint") do
+      nil -> []
+      taint -> [operation_taint: taint]
+    end
+  end
+
+  defp auth_opts_from_context(_context), do: []
 
   # P0-1: Inject default taint policy from config when not already in context.
   # TaintEnforcement.check reads :taint_policy from context — this ensures

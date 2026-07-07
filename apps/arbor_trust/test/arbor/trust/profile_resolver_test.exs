@@ -207,6 +207,38 @@ defmodule Arbor.Trust.ProfileResolverTest do
              ) == :block
     end
 
+    @tag spec: "TRUST-15"
+    test "hostile operation taint degrades high-risk auto standing to ask" do
+      profile = %{
+        rules: %{"arbor://test/process" => :auto},
+        baseline: :ask
+      }
+
+      assert ProfileResolver.effective_mode(profile, "arbor://test/process",
+               security_ceilings: %{},
+               effect_class: :process_spawn
+             ) == :auto
+
+      assert ProfileResolver.effective_mode(profile, "arbor://test/process",
+               security_ceilings: %{},
+               effect_class: :process_spawn,
+               operation_taint: :hostile
+             ) == :ask
+    end
+
+    @tag spec: "TRUST-15"
+    test "profile-derived identity effects also degrade under hostile taint" do
+      profile = %{
+        rules: %{"arbor://agent/create" => :auto},
+        baseline: :ask
+      }
+
+      assert ProfileResolver.effective_mode(profile, "arbor://agent/create",
+               security_ceilings: %{},
+               operation_taint: :hostile
+             ) == :ask
+    end
+
     test "defaults to :ask baseline when not specified" do
       profile = %{}
 
@@ -230,6 +262,7 @@ defmodule Arbor.Trust.ProfileResolverTest do
       assert result.user_match == {"arbor://shell/exec/git", :auto}
       assert result.baseline == :ask
       assert result.security_ceiling == :auto
+      assert result.taint_mode == :auto
       assert result.effective_mode == :auto
     end
 
@@ -290,6 +323,26 @@ defmodule Arbor.Trust.ProfileResolverTest do
       assert sibling.effective_mode == :auto
       assert child.model_ceiling == :block
       assert child.effective_mode == :block
+    end
+
+    test "shows TRUST-15 taint conjunct impact" do
+      profile = %{
+        rules: %{"arbor://test/process" => :auto},
+        baseline: :ask,
+        model_constraints: %{}
+      }
+
+      result =
+        ProfileResolver.explain(profile, "arbor://test/process",
+          security_ceilings: %{},
+          effect_class: :process_spawn,
+          operation_taint: :untrusted
+        )
+
+      assert result.effect_class == :process_spawn
+      assert result.operation_taint == :untrusted
+      assert result.taint_mode == :ask
+      assert result.effective_mode == :ask
     end
   end
 
