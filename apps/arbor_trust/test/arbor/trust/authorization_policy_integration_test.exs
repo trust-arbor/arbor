@@ -11,8 +11,10 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
   @moduletag :fast
 
   alias Arbor.Contracts.Security.Capability
+  alias Arbor.Contracts.Trust.Event
   alias Arbor.Security.CapabilityStore
   alias Arbor.Trust
+  alias Arbor.Trust.EventStore
 
   defmodule RaisingPolicy do
     def effective_mode(_principal, _uri, _opts), do: :ask
@@ -157,6 +159,38 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
 
     assert {:error, :unauthorized} =
              Trust.authorize(agent_id, uri, :execute,
+               security_ceilings: %{},
+               verify_identity: false
+             )
+
+    assert {:error, :not_found} = CapabilityStore.find_authorizing(agent_id, uri)
+  end
+
+  test "B8 security regression: score state alone cannot widen authorization", %{
+    agent_id: agent_id
+  } do
+    uri = "arbor://memory/recall"
+
+    {:ok, _profile} =
+      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+        %{profile | baseline: :block, rules: %{}}
+      end)
+
+    {:ok, event} =
+      Event.new(
+        agent_id: agent_id,
+        event_type: :action_success,
+        previous_score: 0,
+        new_score: 10_000,
+        reason: :score_threshold,
+        metadata: %{source: :b8_authorize_regression}
+      )
+
+    assert :ok = EventStore.record_event(event)
+    assert {:ok, %{current_score: 10_000}} = EventStore.get_trust_progression(agent_id)
+
+    assert {:error, :unauthorized} =
+             Trust.authorize(agent_id, uri, :read,
                security_ceilings: %{},
                verify_identity: false
              )
