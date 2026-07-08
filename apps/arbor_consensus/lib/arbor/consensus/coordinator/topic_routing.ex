@@ -22,6 +22,11 @@ defmodule Arbor.Consensus.Coordinator.TopicRouting do
   If the proposal already has a specific topic AND TopicRegistry has a rule for it,
   use that topic directly. Otherwise, run TopicMatcher to find best fit.
   """
+  def maybe_route_via_topic_matcher(%Proposal{topic: topic} = proposal)
+      when topic in [:authorization_request, "authorization_request"] do
+    {:ok, proposal}
+  end
+
   def maybe_route_via_topic_matcher(proposal) do
     # If topic is explicitly set (not :general) and exists in registry, use it
     if proposal.topic != :general and topic_exists_in_registry?(proposal.topic) do

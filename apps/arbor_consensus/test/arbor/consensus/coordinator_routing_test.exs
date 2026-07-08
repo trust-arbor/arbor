@@ -70,6 +70,31 @@ defmodule Arbor.Consensus.CoordinatorRoutingTest do
   end
 
   describe "TopicMatcher fallback routing" do
+    test "security regression: authorization requests are never rerouted to :general" do
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.AlwaysApproveBackend,
+          config: [evaluation_timeout_ms: 5_000]
+        )
+
+      {:ok, id} =
+        Coordinator.submit(
+          %{
+            proposer: "agent_1",
+            topic: :authorization_request,
+            description: "Authorization request for arbor://fs/write/repo/file.md"
+          },
+          server: coord,
+          human_approval: true
+        )
+
+      {:ok, proposal} = Coordinator.get_proposal(id, coord)
+
+      assert proposal.topic == :authorization_request
+      assert proposal.status == :pending
+      refute proposal.metadata[:routed_by] == :topic_matcher
+    end
+
     test "proposal that doesn't match any topic stays as :general" do
       {_pid, coord} =
         TestHelpers.start_test_coordinator(
