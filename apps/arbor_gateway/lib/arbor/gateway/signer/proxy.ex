@@ -191,17 +191,16 @@ defmodule Arbor.Gateway.Signer.Proxy do
       {:ok, %{status: 200, body: resp_body}} when is_binary(resp_body) ->
         resp_body
 
-      {:ok, %{status: status, body: resp_body}} ->
-        log_stderr("[arbor.signer] upstream returned #{status}: #{inspect(resp_body)}")
-        id = parse_id_safely(body)
+      {:ok, %{status: status, body: resp_body}}
+      when status in [202, 204] and resp_body in ["", nil] ->
+        if jsonrpc_notification?(body) do
+          :no_response
+        else
+          upstream_error_response(status, resp_body, body)
+        end
 
-        ProxyCore.jsonrpc_error_response(
-          id,
-          -32_603,
-          "upstream gateway error (HTTP #{status})",
-          %{"upstream_body" => inspect(resp_body)}
-        )
-        |> Jason.encode!()
+      {:ok, %{status: status, body: resp_body}} ->
+        upstream_error_response(status, resp_body, body)
 
       {:error, reason} ->
         log_stderr("[arbor.signer] upstream request failed: #{inspect(reason)}")
@@ -267,6 +266,31 @@ defmodule Arbor.Gateway.Signer.Proxy do
       _ -> nil
     end
   end
+
+  defp jsonrpc_notification?(body) do
+    case Jason.decode(body) do
+      {:ok, %{"jsonrpc" => "2.0", "method" => method} = request} when is_binary(method) ->
+        not Map.has_key?(request, "id")
+
+      _ ->
+        false
+    end
+  end
+
+  defp upstream_error_response(status, resp_body, request_body) do
+    log_stderr("[arbor.signer] upstream returned #{status}: #{inspect(resp_body)}")
+    id = parse_id_safely(request_body)
+
+    ProxyCore.jsonrpc_error_response(
+      id,
+      -32_603,
+      "upstream gateway error (HTTP #{status})",
+      %{"upstream_body" => inspect(resp_body)}
+    )
+    |> Jason.encode!()
+  end
+
+  defp write_response(:no_response), do: :ok
 
   defp write_response(response_bytes) when is_binary(response_bytes) do
     # MCP stdio framing is newline-delimited JSON. Each response is one line.
