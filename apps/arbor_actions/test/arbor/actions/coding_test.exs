@@ -1,7 +1,7 @@
 defmodule Arbor.Actions.CodingTest do
   use Arbor.Actions.ActionCase, async: true
 
-  alias Arbor.Actions.{Acp, Coding, Github, Shell}
+  alias Arbor.Actions.{Acp, Coding, Git, Shell}
 
   @moduletag :fast
 
@@ -20,7 +20,7 @@ defmodule Arbor.Actions.CodingTest do
   end
 
   describe "ProduceReviewableChange.run/2" do
-    test "delegates to Codex with default ACP permissions, validates, commits, and opens a draft PR",
+    test "delegates to Codex with default ACP permissions, validates, commits, and skips PR by default",
          %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
       parent = self()
@@ -45,9 +45,9 @@ defmodule Arbor.Actions.CodingTest do
           send(parent, {:validation, params})
           {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
 
-        Github.PR, params, _context ->
-          send(parent, {:pr, params})
-          {:ok, %{url: "https://example.test/pr/1", title: params.title, draft?: true}}
+        Git.PR, params, _context ->
+          send(parent, {:unexpected_pr, params})
+          {:ok, %{url: "https://example.test/pr/unexpected", title: params.title, draft?: true}}
 
         module, params, context ->
           module.run(params, Map.delete(context, :action_runner))
@@ -68,9 +68,9 @@ defmodule Arbor.Actions.CodingTest do
                  %{action_runner: runner}
                )
 
-      assert result.status == "pr_created"
+      assert result.status == "change_committed"
       assert result.branch == "test/coding-agent"
-      assert result.pr_url == "https://example.test/pr/1"
+      refute Map.has_key?(result, :pr_url)
       assert File.exists?(Path.join(result.worktree_path, "feature.txt"))
 
       assert_receive {:start_session, start_params}
@@ -87,6 +87,56 @@ defmodule Arbor.Actions.CodingTest do
       assert_receive {:validation, validation_params}
       assert validation_params.cwd == result.worktree_path
       assert validation_params.command =~ "./bin/mix test"
+
+      refute_received {:unexpected_pr, _}
+    end
+
+    test "opens a draft PR through the platform-agnostic git action when requested",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "codex-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          {:ok, %{text: "STATUS: implemented\nCreated feature.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, _params, _context ->
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        Git.PR, params, _context ->
+          send(parent, {:pr, params})
+          {:ok, %{url: "https://example.test/pr/1", number: 1, draft?: true}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   branch_name: "test/coding-agent-pr",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["./bin/mix test"],
+                   pr_title: "Add feature file",
+                   open_pr: true
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "pr_created"
+      assert result.branch == "test/coding-agent-pr"
+      assert result.pr_url == "https://example.test/pr/1"
 
       assert_receive {:pr, pr_params}
       assert pr_params.path == result.worktree_path
@@ -109,7 +159,7 @@ defmodule Arbor.Actions.CodingTest do
         Acp.CloseSession, _params, _context ->
           {:ok, %{status: "closed"}}
 
-        Github.PR, _params, _context ->
+        Git.PR, _params, _context ->
           send(parent, :unexpected_pr)
           {:ok, %{url: "https://example.test/pr/unexpected"}}
 
@@ -188,7 +238,7 @@ defmodule Arbor.Actions.CodingTest do
           send(parent, {:validation, params})
           {:ok, %{exit_code: 1, stdout: "", stderr: "failed\n"}}
 
-        Github.PR, _params, _context ->
+        Git.PR, _params, _context ->
           send(parent, :unexpected_pr)
           {:ok, %{url: "https://example.test/pr/unexpected"}}
 

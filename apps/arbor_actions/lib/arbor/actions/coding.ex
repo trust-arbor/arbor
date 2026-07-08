@@ -13,13 +13,13 @@ defmodule Arbor.Actions.Coding do
 
     The action creates a new worktree/branch, starts a Codex ACP session in
     `permission_mode: :default`, asks Codex to implement the requested task, runs
-    validation commands, commits the result, and opens a draft PR. It never
-    merges its own work.
+    validation commands, and commits the result. It can optionally open a draft
+    PR, but never merges its own work.
     """
 
     use Jido.Action,
       name: "coding_produce_reviewable_change",
-      description: "Delegate a task to Codex via ACP and return a validated draft PR",
+      description: "Delegate a task to Codex via ACP and return a validated reviewable branch",
       category: "coding",
       tags: ["coding", "codex", "acp", "git", "pr"],
       schema: [
@@ -57,6 +57,11 @@ defmodule Arbor.Actions.Coding do
           type: :string,
           doc: "Additional draft PR body"
         ],
+        open_pr: [
+          type: :boolean,
+          default: false,
+          doc: "Open a draft PR after committing the branch"
+        ],
         model: [
           type: :string,
           doc: "Codex model override"
@@ -80,7 +85,7 @@ defmodule Arbor.Actions.Coding do
       ]
 
     alias Arbor.Actions
-    alias Arbor.Actions.{Acp, Git, Github, Shell}
+    alias Arbor.Actions.{Acp, Git, Shell}
 
     @default_validation_commands ["./bin/mix compile --warnings-as-errors"]
     @default_timeout 900_000
@@ -96,6 +101,7 @@ defmodule Arbor.Actions.Coding do
         validation_commands: {:control, requires: [:command_injection]},
         pr_title: {:control, requires: [:command_injection]},
         pr_body: {:control, requires: [:command_injection]},
+        open_pr: :control,
         model: :control,
         allowed_tools: :control,
         disallowed_tools: :control,
@@ -105,7 +111,7 @@ defmodule Arbor.Actions.Coding do
     end
 
     # The action sends source/task context to an external coding agent and may
-    # open a GitHub PR. Treat it as egress even though it also writes locally.
+    # optionally open a draft PR. Treat it as egress even though it also writes locally.
     def effect_class, do: :network_egress
     def egress_tier(_params, _context), do: :external_peer
 
@@ -156,27 +162,18 @@ defmodule Arbor.Actions.Coding do
 
         true ->
           with {:ok, validations} <- run_validations(worktree_path, params, context),
-               {:ok, commit} <- commit_change(worktree_path, params, context),
-               {:ok, pr} <-
-                 open_draft_pr(
-                   worktree_path,
-                   branch_name,
-                   response,
-                   validations,
-                   params,
-                   context,
-                   commit
-                 ) do
-            result = %{
-              status: "pr_created",
-              repo_path: repo_root,
-              worktree_path: worktree_path,
-              branch: branch_name,
-              commit: commit[:commit_hash] || commit["commit_hash"],
-              pr_url: pr[:url] || pr["url"],
-              validation: validations,
-              response_text: response_text(response)
-            }
+               {:ok, commit} <- commit_change(worktree_path, params, context) do
+            result =
+              maybe_open_pr(
+                repo_root,
+                worktree_path,
+                branch_name,
+                response,
+                validations,
+                params,
+                context,
+                commit
+              )
 
             Actions.emit_completed(__MODULE__, result)
             {:ok, result}
@@ -442,6 +439,85 @@ defmodule Arbor.Actions.Coding do
       )
     end
 
+    defp maybe_open_pr(
+           repo_root,
+           worktree_path,
+           branch_name,
+           response,
+           validations,
+           params,
+           context,
+           commit
+         ) do
+      if open_pr?(params) do
+        case open_draft_pr(
+               worktree_path,
+               branch_name,
+               response,
+               validations,
+               params,
+               context,
+               commit
+             ) do
+          {:ok, pr} ->
+            reviewable_change_result(
+              "pr_created",
+              repo_root,
+              worktree_path,
+              branch_name,
+              response,
+              validations,
+              commit,
+              pr_url: pr[:url] || pr["url"]
+            )
+
+          {:pr_failed, reason, commit} ->
+            reviewable_change_result(
+              "pr_failed",
+              repo_root,
+              worktree_path,
+              branch_name,
+              response,
+              validations,
+              commit,
+              error: reason
+            )
+        end
+      else
+        reviewable_change_result(
+          "change_committed",
+          repo_root,
+          worktree_path,
+          branch_name,
+          response,
+          validations,
+          commit
+        )
+      end
+    end
+
+    defp reviewable_change_result(
+           status,
+           repo_root,
+           worktree_path,
+           branch_name,
+           response,
+           validations,
+           commit,
+           extra \\ []
+         ) do
+      %{
+        status: status,
+        repo_path: repo_root,
+        worktree_path: worktree_path,
+        branch: branch_name,
+        commit: commit[:commit_hash] || commit["commit_hash"],
+        validation: validations,
+        response_text: response_text(response)
+      }
+      |> Map.merge(Map.new(extra))
+    end
+
     defp open_draft_pr(worktree_path, branch_name, response, validations, params, context, commit) do
       pr_params = %{
         path: worktree_path,
@@ -452,11 +528,13 @@ defmodule Arbor.Actions.Coding do
 
       pr_params = put_if_present(pr_params, :base, get_param(params, :base_ref))
 
-      case call_action(Github.PR, pr_params, context) do
+      case call_action(Git.PR, pr_params, context) do
         {:ok, pr} -> {:ok, pr}
         {:error, reason} -> {:pr_failed, reason, commit}
       end
     end
+
+    defp open_pr?(params), do: get_param(params, :open_pr) == true
 
     defp commit_message(params) do
       title = get_param(params, :pr_title) || pr_title(params)
@@ -517,7 +595,14 @@ defmodule Arbor.Actions.Coding do
     defp call_action(module, params, context) do
       case Map.get(context, :action_runner) || Map.get(context, "action_runner") do
         runner when is_function(runner, 3) -> runner.(module, params, context)
-        _runner -> module.run(params, context)
+        _runner -> run_action_module(module, params, context)
+      end
+    end
+
+    defp run_action_module(module, params, context) do
+      case Code.ensure_loaded(module) do
+        {:module, ^module} -> module.run(params, context)
+        {:error, _reason} -> {:error, "#{inspect(module)} is not available"}
       end
     end
 
