@@ -46,6 +46,7 @@ defmodule Arbor.Actions.Council do
   """
 
   alias Arbor.Common.SafeAtom
+  alias Arbor.Actions.Council.BlastRadius
   alias Arbor.Contracts.Consensus.CodeReviewRequest
   alias Arbor.Contracts.Judge.Verdict
   alias Arbor.Persistence.VerdictLog
@@ -441,7 +442,7 @@ defmodule Arbor.Actions.Council do
         ],
         tier_decision: [
           type: :string,
-          doc: "Blast-radius tier decision to persist once D5 classifies it"
+          doc: "Deprecated; blast-radius tier decision is derived by the classifier"
         ]
       ]
 
@@ -476,13 +477,19 @@ defmodule Arbor.Actions.Council do
       with {:ok, request} <- Council.build_code_review_request(params),
            {:ok, decision} <- Council.run_code_review_decision(request, params, context),
            {:ok, verdict} <- Council.verdict_from_review_decision(decision, request) do
-        persistence = Council.persist_review_verdict(verdict, request, decision, params, context)
-        result = Council.review_result(verdict, request, decision, persistence)
+        routing = Council.review_routing(verdict, request, decision, context)
+
+        persistence =
+          Council.persist_review_verdict(verdict, request, decision, params, context, routing)
+
+        result = Council.review_result(verdict, request, decision, persistence, routing)
 
         Actions.emit_completed(__MODULE__, %{
           branch: request.branch,
           recommendation: verdict.recommendation,
-          decision: result.decision
+          decision: result.decision,
+          tier_decision: result.tier_decision,
+          human_required: result.human_required
         })
 
         {:ok, result}
@@ -576,7 +583,8 @@ defmodule Arbor.Actions.Council do
         %CodeReviewRequest{} = request,
         decision,
         params,
-        context
+        context,
+        routing
       ) do
     persist_fun = Map.get(context, :persist_verdict)
 
@@ -598,7 +606,7 @@ defmodule Arbor.Actions.Council do
           input: request.diff,
           dataset: "code_review",
           graders: ["code_review_council"],
-          result_metadata: review_result_metadata(request, decision, params)
+          result_metadata: review_result_metadata(request, decision, routing)
         )
     end
   rescue
@@ -606,7 +614,23 @@ defmodule Arbor.Actions.Council do
   end
 
   @doc false
-  def review_result(%Verdict{} = verdict, %CodeReviewRequest{} = request, decision, persistence) do
+  def review_routing(%Verdict{} = verdict, %CodeReviewRequest{} = request, decision, context) do
+    BlastRadius.route(verdict, request.files,
+      security_veto?: security_veto?(decision, context),
+      authority_widening?: truthy?(context_value(context, :authority_widening?)),
+      capability_profile_for_path: context_value(context, :capability_profile_for_path),
+      policy: context_value(context, :blast_radius_policy) || %{}
+    )
+  end
+
+  @doc false
+  def review_result(
+        %Verdict{} = verdict,
+        %CodeReviewRequest{} = request,
+        decision,
+        persistence,
+        routing
+      ) do
     %{
       status: "reviewed",
       verdict: verdict,
@@ -618,6 +642,12 @@ defmodule Arbor.Actions.Council do
       reject_count: integer_value(decision, "reject_count"),
       abstain_count: integer_value(decision, "abstain_count"),
       quorum_met: boolean_value(decision, "quorum_met"),
+      blast_radius: routing.blast_radius,
+      tier_decision: routing.action,
+      human_required: routing.human_required,
+      security_veto: routing.security_veto,
+      authority_widening: routing.authority_widening,
+      tier_reasons: routing.reasons,
       persistence: persistence
     }
   end
@@ -731,7 +761,7 @@ defmodule Arbor.Actions.Council do
     }
   end
 
-  defp review_result_metadata(request, decision, params) do
+  defp review_result_metadata(request, decision, routing) do
     %{
       "branch" => request.branch,
       "base_ref" => request.base_ref,
@@ -743,7 +773,12 @@ defmodule Arbor.Actions.Council do
       "reject_count" => integer_value(decision, "reject_count"),
       "abstain_count" => integer_value(decision, "abstain_count"),
       "quorum_met" => boolean_value(decision, "quorum_met"),
-      "tier_decision" => get_param(params, :tier_decision) || "pending"
+      "blast_radius" => Atom.to_string(routing.blast_radius),
+      "tier_decision" => Atom.to_string(routing.action),
+      "human_required" => routing.human_required,
+      "security_veto" => routing.security_veto,
+      "authority_widening" => routing.authority_widening,
+      "tier_reasons" => Enum.map(routing.reasons, &Atom.to_string/1)
     }
   end
 
@@ -792,4 +827,40 @@ defmodule Arbor.Actions.Council do
       _ -> false
     end
   end
+
+  defp security_veto?(decision, context) do
+    boolean_value(decision, "security_veto") or
+      boolean_value(decision, "security_veto?") or
+      security_veto_list?(value(decision, "vetoes")) or
+      truthy?(context_value(context, :security_veto?)) or
+      truthy?(context_value(context, :security_veto))
+  end
+
+  defp security_veto_list?(vetoes) when is_list(vetoes) do
+    Enum.any?(vetoes, fn
+      :security -> true
+      "security" -> true
+      veto when is_map(veto) -> veto_perspective?(veto, "security")
+      _ -> false
+    end)
+  end
+
+  defp security_veto_list?(_vetoes), do: false
+
+  defp veto_perspective?(veto, expected) do
+    veto
+    |> value("perspective")
+    |> to_string()
+    |> Kernel.==(expected)
+  end
+
+  defp context_value(context, key) when is_map(context) do
+    Map.get(context, key) || Map.get(context, Atom.to_string(key))
+  end
+
+  defp context_value(_context, _key), do: nil
+
+  defp truthy?(true), do: true
+  defp truthy?("true"), do: true
+  defp truthy?(_), do: false
 end

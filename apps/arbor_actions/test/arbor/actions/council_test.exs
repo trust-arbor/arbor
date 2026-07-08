@@ -167,6 +167,9 @@ defmodule Arbor.Actions.CouncilTest do
       assert result.recommendation == :keep
       assert result.verdict.recommendation == :keep
       assert result.verdict.overall_score == 0.7
+      assert result.blast_radius == :low
+      assert result.tier_decision == :auto_proceed
+      refute result.human_required
       assert result.persistence == {:ok, "run_123"}
 
       assert_receive {:persisted, verdict, request, decision}
@@ -199,6 +202,8 @@ defmodule Arbor.Actions.CouncilTest do
       assert result.recommendation == :reject
       assert result.verdict.recommendation == :reject
       assert result.verdict.weaknesses == ["security regression"]
+      assert result.tier_decision == :stop
+      refute result.human_required
     end
 
     test "deadlock maps to revise so the agent reworks instead of proceeding" do
@@ -223,6 +228,66 @@ defmodule Arbor.Actions.CouncilTest do
       assert result.recommendation == :revise
       assert result.verdict.recommendation == :revise
       assert result.verdict.overall_score == 0.4
+      assert result.tier_decision == :rework
+      refute result.human_required
+    end
+
+    test "high-risk keep verdict routes to human review" do
+      review_runner = fn _request, _params, _context ->
+        {:ok,
+         %{
+           decision: "approved",
+           approve_count: 8,
+           reject_count: 1,
+           abstain_count: 1,
+           quorum_met: true,
+           average_confidence: 0.88
+         }}
+      end
+
+      params = %{@valid_review_params | files: ["apps/arbor_security/lib/arbor/security.ex"]}
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(params, %{
+                 review_runner: review_runner,
+                 persist_verdict: false
+               })
+
+      assert result.recommendation == :keep
+      assert result.blast_radius == :high
+      assert result.tier_decision == :human_review
+      assert result.human_required
+      assert :security_app in result.tier_reasons
+    end
+
+    test "security veto routes to human review even for docs-only keep verdicts" do
+      review_runner = fn _request, _params, _context ->
+        {:ok,
+         %{
+           decision: "approved",
+           approve_count: 9,
+           reject_count: 1,
+           abstain_count: 0,
+           quorum_met: true,
+           average_confidence: 0.91,
+           security_veto: true
+         }}
+      end
+
+      params = %{@valid_review_params | files: ["docs/review-loop.md"]}
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(params, %{
+                 review_runner: review_runner,
+                 persist_verdict: false
+               })
+
+      assert result.recommendation == :keep
+      assert result.blast_radius == :low
+      assert result.tier_decision == :human_review
+      assert result.human_required
+      assert result.security_veto
+      assert :security_veto in result.tier_reasons
     end
 
     test "request map can be overridden by top-level params" do
