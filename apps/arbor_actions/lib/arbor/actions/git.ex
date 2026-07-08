@@ -431,7 +431,8 @@ defmodule Arbor.Actions.Git do
       Actions.emit_started(__MODULE__, %{path: path, message: message})
 
       # Stage files if specified
-      with :ok <- maybe_stage_files(path, params),
+      with {:ok, message} <- normalize_message(message),
+           :ok <- maybe_stage_files(path, params),
            {:ok, commit_result} <- create_commit(path, message, params),
            {:ok, hash} <- get_commit_hash(path) do
         result = %{
@@ -448,6 +449,27 @@ defmodule Arbor.Actions.Git do
           Actions.emit_failed(__MODULE__, reason)
           {:error, "Failed to create commit: #{reason}"}
       end
+    end
+
+    defp normalize_message(message) when is_binary(message) do
+      message =
+        message
+        |> sanitize_message_for_basic_shell()
+        |> String.trim()
+
+      if message == "", do: {:error, "commit message is required"}, else: {:ok, message}
+    end
+
+    defp normalize_message(nil), do: {:error, "commit message is required"}
+    defp normalize_message(message), do: normalize_message(to_string(message))
+
+    defp sanitize_message_for_basic_shell(message) do
+      message
+      |> String.replace("$(", "(")
+      |> String.replace("&&", " and ")
+      |> String.replace("||", " or ")
+      |> String.replace(~r/[;|`<>\r\n]/, " ")
+      |> String.replace(~r/\s+/, " ")
     end
 
     defp maybe_stage_files(path, %{files: files}) when is_list(files) and files != [] do

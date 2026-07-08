@@ -99,6 +99,7 @@ defmodule Arbor.Actions.Coding do
     @default_validation_commands ["./bin/mix compile --warnings-as-errors"]
     @default_timeout 900_000
     @default_validation_timeout 300_000
+    @default_approval_timeout 60_000
 
     def taint_roles do
       %{
@@ -523,31 +524,14 @@ defmodule Arbor.Actions.Coding do
 
     defp run_validation(worktree_path, command, params, context) do
       timeout = get_param(params, :validation_timeout) || @default_validation_timeout
+      shell_params = %{command: command, cwd: worktree_path, timeout: timeout, sandbox: :basic}
 
-      case call_action(
-             Shell.Execute,
-             %{command: command, cwd: worktree_path, timeout: timeout, sandbox: :basic},
-             context
-           ) do
+      case run_validation_command(shell_params, context) do
         {:ok, result} when is_map(result) ->
-          exit_code = result[:exit_code] || result["exit_code"]
-
-          %{
-            command: command,
-            passed: exit_code == 0,
-            exit_code: exit_code,
-            stdout: result[:stdout] || result["stdout"] || "",
-            stderr: result[:stderr] || result["stderr"] || ""
-          }
+          validation_result(command, result)
 
         {:ok, :pending_approval, proposal_id} ->
-          %{
-            command: command,
-            passed: false,
-            exit_code: nil,
-            stdout: "",
-            stderr: "pending approval: #{proposal_id}"
-          }
+          retry_validation_after_approval(command, shell_params, proposal_id, context)
 
         {:error, reason} ->
           %{
@@ -558,6 +542,168 @@ defmodule Arbor.Actions.Coding do
             stderr: to_string(reason)
           }
       end
+    end
+
+    defp run_validation_command(shell_params, context) do
+      call_action(Shell.Execute, shell_params, context)
+    end
+
+    defp retry_validation_after_approval(command, shell_params, proposal_id, context) do
+      resource_uri = shell_resource_uri(command)
+
+      case await_validation_approval(proposal_id, resource_uri, context) do
+        :approved ->
+          approved_context =
+            Map.put(context, :approved_invocation, %{
+              request_id: proposal_id,
+              principal_id: context_agent_id(context),
+              resource_uri: resource_uri,
+              decision: :approved
+            })
+
+          case run_validation_command(shell_params, approved_context) do
+            {:ok, result} when is_map(result) ->
+              validation_result(command, result)
+
+            {:ok, :pending_approval, retry_proposal_id} ->
+              validation_failure(
+                command,
+                "pending approval after approval: #{retry_proposal_id}"
+              )
+
+            {:error, reason} ->
+              validation_failure(command, to_string(reason))
+          end
+
+        {:error, reason} ->
+          validation_failure(command, "approval #{proposal_id} #{format_approval_error(reason)}")
+      end
+    end
+
+    defp validation_result(command, result) do
+      exit_code = result[:exit_code] || result["exit_code"]
+
+      %{
+        command: command,
+        passed: exit_code == 0,
+        exit_code: exit_code,
+        stdout: result[:stdout] || result["stdout"] || "",
+        stderr: result[:stderr] || result["stderr"] || ""
+      }
+    end
+
+    defp validation_failure(command, stderr) do
+      %{
+        command: command,
+        passed: false,
+        exit_code: nil,
+        stdout: "",
+        stderr: stderr
+      }
+    end
+
+    defp await_validation_approval(proposal_id, resource_uri, context) do
+      case Map.get(context, :approval_awaiter) || Map.get(context, "approval_awaiter") do
+        awaiter when is_function(awaiter, 4) ->
+          awaiter.(proposal_id, resource_uri, context, approval_timeout())
+
+        _ ->
+          await_interaction_approval(
+            context_agent_id(context),
+            proposal_id,
+            resource_uri,
+            approval_timeout()
+          )
+      end
+    end
+
+    defp await_interaction_approval(nil, _request_id, _resource_uri, _timeout_ms),
+      do: {:error, :missing_agent_id}
+
+    defp await_interaction_approval(agent_id, request_id, _resource_uri, timeout_ms) do
+      pubsub = Module.concat([:Arbor, :Comms, :PubSub])
+
+      if pubsub_available?(pubsub) do
+        topic = Arbor.Contracts.Comms.Interaction.response_topic_for_agent(agent_id)
+
+        task =
+          Task.async(fn ->
+            apply(pubsub_module(), :subscribe, [pubsub, topic])
+
+            receive do
+              {:interaction_response, %{request_id: ^request_id, response: response}} ->
+                normalize_approval_response(response)
+            after
+              timeout_ms ->
+                {:error, :timeout}
+            end
+          end)
+
+        case Task.yield(task, timeout_ms + 1_000) || Task.shutdown(task, :brutal_kill) do
+          {:ok, result} -> result
+          nil -> {:error, :timeout}
+          {:exit, reason} -> {:error, {:approval_waiter_exit, reason}}
+        end
+      else
+        {:error, :approval_pubsub_unavailable}
+      end
+    end
+
+    defp pubsub_available?(pubsub) do
+      pubsub_module = pubsub_module()
+
+      Code.ensure_loaded?(pubsub_module) and
+        function_exported?(pubsub_module, :subscribe, 2) and
+        not is_nil(Process.whereis(pubsub))
+    end
+
+    defp pubsub_module, do: Module.concat([:Phoenix, :PubSub])
+
+    defp normalize_approval_response(response)
+         when response in [:approved, :approve, "approved", "approve"],
+         do: :approved
+
+    defp normalize_approval_response(response)
+         when response in [
+                :rejected,
+                :reject,
+                :denied,
+                :deny,
+                "rejected",
+                "reject",
+                "denied",
+                "deny"
+              ],
+         do: {:error, :rejected}
+
+    defp normalize_approval_response(response), do: {:error, {:unexpected_response, response}}
+
+    defp approval_timeout do
+      Application.get_env(
+        :arbor_actions,
+        :approval_timeout_ms,
+        Application.get_env(:arbor_orchestrator, :approval_timeout_ms, @default_approval_timeout)
+      )
+    end
+
+    defp format_approval_error(:timeout), do: "timed out"
+    defp format_approval_error(:rejected), do: "was rejected"
+    defp format_approval_error(:missing_agent_id), do: "could not be awaited without an agent id"
+
+    defp format_approval_error(:approval_pubsub_unavailable),
+      do: "could not be awaited: PubSub unavailable"
+
+    defp format_approval_error(reason), do: "failed: #{inspect(reason)}"
+
+    defp shell_resource_uri(command) do
+      command_name =
+        command
+        |> String.trim_leading()
+        |> String.split(~r/\s+/, parts: 2)
+        |> List.first()
+        |> Path.basename()
+
+      "arbor://shell/exec/#{command_name}"
     end
 
     defp commit_change(worktree_path, params, context) do
@@ -975,9 +1121,22 @@ defmodule Arbor.Actions.Coding do
     defp commit_hash(commit), do: map_value(commit, :commit_hash) || map_value(commit, :hash)
 
     defp commit_message(params) do
-      title = get_param(params, :pr_title) || pr_title(params)
+      title =
+        params
+        |> get_param(:pr_title)
+        |> blank_to_nil()
+        |> Kernel.||(pr_title(params))
+
       String.slice(title, 0, 72)
     end
+
+    defp blank_to_nil(value) when is_binary(value) do
+      value = String.trim(value)
+      if value == "", do: nil, else: value
+    end
+
+    defp blank_to_nil(nil), do: nil
+    defp blank_to_nil(value), do: value
 
     defp pr_title(params) do
       task =

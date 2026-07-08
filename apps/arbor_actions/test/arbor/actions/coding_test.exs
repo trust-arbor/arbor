@@ -65,7 +65,7 @@ defmodule Arbor.Actions.CodingTest do
                    validation_commands: [
                      "./bin/mix test apps/arbor_actions/test/arbor/actions/coding_test.exs"
                    ],
-                   pr_title: "Add feature file",
+                   pr_title: "",
                    submit_review: false
                  },
                  %{action_runner: runner}
@@ -576,6 +576,83 @@ defmodule Arbor.Actions.CodingTest do
       assert git!(result.worktree_path, ["status", "--porcelain"]) =~ "broken.txt"
       assert_receive {:validation, _}
       refute_received :unexpected_pr
+    end
+
+    test "waits for pending validation approval and retries with approved invocation", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      base_branch = git!(repo, ["branch", "--show-current"])
+      parent = self()
+      validation_count = :counters.new(1, [])
+
+      approval_awaiter = fn proposal_id, resource_uri, context, timeout ->
+        send(parent, {:await_approval, proposal_id, resource_uri, context[:agent_id], timeout})
+        :approved
+      end
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "codex-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          {:ok, %{text: "STATUS: implemented\nCreated feature.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, params, context ->
+          :counters.add(validation_count, 1, 1)
+          count = :counters.get(validation_count, 1)
+          send(parent, {:validation, count, params, Map.get(context, :approved_invocation)})
+
+          case count do
+            1 -> {:ok, :pending_approval, "irq_validation"}
+            2 -> {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+          end
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   base_ref: base_branch,
+                   branch_name: "test/validation-approval",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["grep implemented feature.txt"],
+                   submit_review: false
+                 },
+                 %{
+                   action_runner: runner,
+                   agent_id: "agent_test",
+                   approval_awaiter: approval_awaiter
+                 }
+               )
+
+      assert result.status == "change_committed"
+      assert [%{command: "grep implemented feature.txt", passed: true}] = result.validation
+
+      assert_receive {:validation, 1, %{command: "grep implemented feature.txt"}, nil}
+
+      assert_receive {:await_approval, "irq_validation", "arbor://shell/exec/grep", "agent_test",
+                      timeout}
+
+      assert is_integer(timeout)
+
+      assert_receive {:validation, 2, %{command: "grep implemented feature.txt"},
+                      %{
+                        request_id: "irq_validation",
+                        principal_id: "agent_test",
+                        resource_uri: "arbor://shell/exec/grep",
+                        decision: :approved
+                      }}
     end
   end
 

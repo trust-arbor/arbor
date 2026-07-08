@@ -77,6 +77,73 @@ defmodule Arbor.Actions.ShellTest do
     end
   end
 
+  describe "authorize_command/3" do
+    setup do
+      {:ok, _} = Application.ensure_all_started(:arbor_security)
+      {:ok, _} = Application.ensure_all_started(:arbor_trust)
+
+      if Process.whereis(Arbor.Trust.Store) == nil do
+        start_supervised!(Arbor.Trust.Store)
+      end
+
+      prev = %{
+        reflex: Application.get_env(:arbor_security, :reflex_checking_enabled),
+        signing: Application.get_env(:arbor_security, :capability_signing_required),
+        identity: Application.get_env(:arbor_security, :strict_identity_mode),
+        uri_registry: Application.get_env(:arbor_security, :uri_registry_enforcement),
+        escalation: Application.get_env(:arbor_security, :consensus_escalation_enabled),
+        trust_guard: Application.get_env(:arbor_trust, :approval_guard_enabled),
+        trust_enforcer: Application.get_env(:arbor_trust, :policy_enforcer_enabled)
+      }
+
+      Application.put_env(:arbor_security, :reflex_checking_enabled, false)
+      Application.put_env(:arbor_security, :capability_signing_required, false)
+      Application.put_env(:arbor_security, :strict_identity_mode, false)
+      Application.put_env(:arbor_security, :uri_registry_enforcement, false)
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
+      Application.put_env(:arbor_trust, :approval_guard_enabled, true)
+      Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
+
+      on_exit(fn ->
+        restore(:arbor_security, :reflex_checking_enabled, prev.reflex)
+        restore(:arbor_security, :capability_signing_required, prev.signing)
+        restore(:arbor_security, :strict_identity_mode, prev.identity)
+        restore(:arbor_security, :uri_registry_enforcement, prev.uri_registry)
+        restore(:arbor_security, :consensus_escalation_enabled, prev.escalation)
+        restore(:arbor_trust, :approval_guard_enabled, prev.trust_guard)
+        restore(:arbor_trust, :policy_enforcer_enabled, prev.trust_enforcer)
+      end)
+
+      agent_id = "agent_shell_approval_#{System.unique_integer([:positive])}"
+      resource_uri = "arbor://shell/exec/grep"
+
+      {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
+      rules = Map.put(profile.rules || %{}, resource_uri, :auto)
+      :ok = Arbor.Trust.Store.store_profile(%{profile | rules: rules})
+      {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: resource_uri)
+
+      {:ok, agent_id: agent_id, resource_uri: resource_uri}
+    end
+
+    test "forwards approved invocation context into trust authorization", %{
+      agent_id: agent_id,
+      resource_uri: resource_uri
+    } do
+      assert {:error, :unauthorized} =
+               Shell.authorize_command(agent_id, "grep needle README.md")
+
+      assert {:ok, :authorized} =
+               Shell.authorize_command(agent_id, "grep needle README.md",
+                 approved_invocation: %{
+                   request_id: "irq_validation",
+                   principal_id: agent_id,
+                   resource_uri: resource_uri,
+                   decision: :approved
+                 }
+               )
+    end
+  end
+
   describe "ExecuteScript" do
     test "runs a multi-line script", %{tmp_dir: tmp_dir} do
       script = """
@@ -204,4 +271,7 @@ defmodule Arbor.Actions.ShellTest do
       assert message =~ "blocked" or message =~ "failed"
     end
   end
+
+  defp restore(app, key, nil), do: Application.delete_env(app, key)
+  defp restore(app, key, value), do: Application.put_env(app, key, value)
 end

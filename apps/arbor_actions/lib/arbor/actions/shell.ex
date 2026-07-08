@@ -50,7 +50,10 @@ defmodule Arbor.Actions.Shell do
       when is_binary(agent_id) and is_binary(command) do
     command_name = Keyword.get(opts, :gate_command) || extract_command_name(command)
     resource = "arbor://shell/exec/#{command_name}"
-    auth_opts = [command: command, path: Keyword.get(opts, :cwd), verify_identity: false]
+
+    auth_opts =
+      [command: command, path: Keyword.get(opts, :cwd), verify_identity: false]
+      |> maybe_add_opt(:approved_invocation, Keyword.get(opts, :approved_invocation))
 
     case Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts) do
       {:ok, :authorized} -> {:ok, :authorized}
@@ -66,6 +69,9 @@ defmodule Arbor.Actions.Shell do
     |> List.first()
     |> Path.basename()
   end
+
+  defp maybe_add_opt(opts, _key, nil), do: opts
+  defp maybe_add_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
   defmodule Execute do
     @moduledoc """
@@ -212,6 +218,7 @@ defmodule Arbor.Actions.Shell do
       opts
       |> maybe_add_opt(:cwd, context[:cwd])
       |> maybe_add_opt(:env, context[:env])
+      |> maybe_add_opt(:approved_invocation, context[:approved_invocation])
     end
 
     defp format_error({:blocked_command, cmd}), do: "Command blocked: #{cmd}"
@@ -413,6 +420,7 @@ defmodule Arbor.Actions.Shell do
       opts
       |> maybe_add_opt(:cwd, context[:cwd])
       |> maybe_add_opt(:env, context[:env])
+      |> maybe_add_opt(:approved_invocation, context[:approved_invocation])
     end
 
     defp format_error({:blocked_command, cmd}), do: "Command blocked: #{cmd}"

@@ -240,6 +240,25 @@ defmodule Arbor.Actions.GitTest do
       assert result.message == "Add new file"
     end
 
+    test "rejects empty commit message before invoking git", %{repo_path: repo_path} do
+      create_file(repo_path, "new_file.txt", "content")
+      System.cmd("git", ["add", "new_file.txt"], cd: repo_path)
+
+      assert {:error, message} = Git.Commit.run(%{path: repo_path, message: ""}, %{})
+      assert message =~ "commit message is required"
+    end
+
+    test "sanitizes shell metacharacters in commit message", %{repo_path: repo_path} do
+      create_file(repo_path, "new_file.txt", "content")
+      System.cmd("git", ["add", "new_file.txt"], cd: repo_path)
+
+      assert {:ok, result} =
+               Git.Commit.run(%{path: repo_path, message: "Use `code` safely"}, %{})
+
+      assert result.message == "Use code safely"
+      assert String.length(result.commit_hash) >= 7
+    end
+
     test "stages and commits specified files", %{repo_path: repo_path} do
       create_file(repo_path, "file1.txt", "content1")
       create_file(repo_path, "file2.txt", "content2")

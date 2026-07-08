@@ -61,6 +61,9 @@ defmodule Arbor.Trust.ApprovalGuard do
         })
 
         cond do
+          approved_invocation?(principal_id, resource_uri, opts) ->
+            :ok
+
           approval_required?(capability) ->
             Escalation.maybe_escalate(
               capability,
@@ -148,6 +151,45 @@ defmodule Arbor.Trust.ApprovalGuard do
     constraints[:requires_approval] == true or
       constraints["requires_approval"] == true
   end
+
+  defp approved_invocation?(principal_id, resource_uri, opts) do
+    case opt(opts, :approved_invocation) do
+      approval when is_map(approval) ->
+        approval_field(approval, :principal_id) == principal_id and
+          approval_field(approval, :resource_uri) == resource_uri and
+          approval_field(approval, :decision) in [:approved, :approve, "approved", "approve"] and
+          is_binary(approval_field(approval, :request_id))
+
+      _ ->
+        false
+    end
+  end
+
+  defp approval_field(map, key), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
+
+  defp opt(opts, key) when is_list(opts) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} ->
+        value
+
+      :error ->
+        string_key = Atom.to_string(key)
+
+        case List.keyfind(opts, string_key, 0) do
+          {^string_key, value} -> value
+          _ -> nil
+        end
+    end
+  end
+
+  defp opt(opts, key) when is_map(opts) do
+    case Map.fetch(opts, key) do
+      {:ok, value} -> value
+      :error -> Map.get(opts, Atom.to_string(key))
+    end
+  end
+
+  defp opt(_opts, _key), do: nil
 
   defp pre_approved_bypasses_ceiling?(capability, requested_uri) do
     has_provenance?(capability) and

@@ -108,6 +108,39 @@ defmodule Arbor.Trust.ApprovalGuardTest do
                )
     end
 
+    test "approved invocation bypasses gated policy only for exact request principal and resource" do
+      Application.put_env(:arbor_trust, :approval_guard_enabled, true)
+      Application.put_env(:arbor_trust, :policy_module, GatedPolicy)
+
+      cap = make_capability("arbor://shell/exec/grep")
+
+      approval = %{
+        request_id: "irq_approved",
+        principal_id: "agent_test",
+        resource_uri: "arbor://shell/exec/grep",
+        decision: :approved
+      }
+
+      assert :ok =
+               ApprovalGuard.check(cap, "agent_test", "arbor://shell/exec/grep",
+                 approved_invocation: approval
+               )
+
+      wrong_resource = %{approval | resource_uri: "arbor://shell/exec/git"}
+
+      assert {:error, :escalation_disabled} =
+               ApprovalGuard.check(cap, "agent_test", "arbor://shell/exec/grep",
+                 approved_invocation: wrong_resource
+               )
+
+      wrong_principal = %{approval | principal_id: "agent_other"}
+
+      assert {:error, :escalation_disabled} =
+               ApprovalGuard.check(cap, "agent_test", "arbor://shell/exec/grep",
+                 approved_invocation: wrong_principal
+               )
+    end
+
     test "deny policy blocks" do
       Application.put_env(:arbor_trust, :approval_guard_enabled, true)
       Application.put_env(:arbor_trust, :policy_module, DenyPolicy)
