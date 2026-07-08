@@ -90,6 +90,18 @@ defmodule Arbor.Agent.ManagerTest do
     end
   end
 
+  defp ensure_signals_started do
+    if Process.whereis(Arbor.Signals.Store) == nil do
+      start_supervised!({Arbor.Signals.Store, []})
+    end
+
+    if Process.whereis(Arbor.Signals.Bus) == nil do
+      start_supervised!({Arbor.Signals.Bus, []})
+    end
+
+    :ok
+  end
+
   defp cleanup_agent(agent_id) do
     try do
       Manager.stop_agent(agent_id)
@@ -638,9 +650,49 @@ defmodule Arbor.Agent.ManagerTest do
       assert {:ok, "echo: hello"} = result
     end
 
-    test "uses default sender 'Opus' when not specified" do
-      result = Manager.chat("hello")
+    test "uses default sender when not specified" do
+      agent_id = "chat-default-sender-#{System.unique_integer([:positive])}"
+      input = "default sender #{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      ensure_signals_started()
+
+      {:ok, pid} = FakeAgent.start_link([])
+
+      Registry.register(agent_id, pid, %{
+        runtime: :arbor,
+        model_config: %{runtime: :arbor},
+        host_pid: pid,
+        module: FakeAgent
+      })
+
+      {:ok, sub_id} =
+        Arbor.Signals.subscribe(
+          "agent.chat_message",
+          fn signal ->
+            send(test_pid, {:chat_signal, signal})
+            :ok
+          end,
+          async: false
+        )
+
+      on_exit(fn ->
+        if Process.whereis(Arbor.Signals.Bus) do
+          Arbor.Signals.unsubscribe(sub_id)
+        end
+
+        Registry.unregister(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      result = Manager.chat(input)
       assert match?({:ok, _}, result) or match?({:error, _}, result)
+
+      assert_receive {:chat_signal,
+                      %{
+                        data: %{role: :user, content: ^input, sender: "Unknown Sender"}
+                      }},
+                     1_000
     end
 
     test "returns :agent_not_found when no agents registered and no agent_id" do

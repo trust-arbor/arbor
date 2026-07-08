@@ -23,6 +23,8 @@ defmodule Arbor.Agent.Manager do
 
   require Logger
 
+  @default_sender "Unknown Sender"
+
   # ── Public API ──────────────────────────────────────────────────────
 
   @doc """
@@ -504,11 +506,11 @@ defmodule Arbor.Agent.Manager do
   This allows external callers (e.g., Claude Code via Tidewave) to have
   conversations with the agent that are visible to any signal subscriber.
 
-  The `sender` label identifies who sent the message (e.g., "Opus", "Hysun").
+  The `sender` label identifies who sent the message (e.g., "Hysun", "Unknown Sender").
   If no `:agent_id` is provided, uses the first running agent.
   """
   @spec chat(String.t(), String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
-  def chat(input, sender \\ "Opus", opts \\ []) do
+  def chat(input, sender \\ @default_sender, opts \\ []) do
     input
     |> chat_response(sender, opts)
     |> handle_query_result()
@@ -522,7 +524,7 @@ defmodule Arbor.Agent.Manager do
   need artifacts rather than final assistant text only.
   """
   @spec chat_response(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
-  def chat_response(input, sender \\ "Opus", opts \\ []) do
+  def chat_response(input, sender \\ @default_sender, opts \\ []) do
     agent_result =
       case Keyword.get(opts, :agent_id) do
         nil ->
