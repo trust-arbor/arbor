@@ -294,17 +294,139 @@ defmodule Arbor.Actions.Coding do
         end
 
       File.mkdir_p!(base_dir)
-      id = System.unique_integer([:positive])
-      worktree_path = Path.join(base_dir, "arbor-coding-agent-#{id}")
       base_ref = get_param(params, :base_ref) || "HEAD"
+      worktree_path = Path.join(base_dir, worktree_dir_name(branch_name))
 
+      with {:ok, base_commit} <- rev_parse(repo_root, base_ref),
+           {:ok, path, reused?} <-
+             ensure_worktree(repo_root, branch_name, worktree_path, base_commit),
+           :ok <- maybe_reset_reused_worktree(path, base_commit, reused?) do
+        {:ok, path}
+      end
+    end
+
+    defp worktree_dir_name(branch_name) do
+      slug =
+        branch_name
+        |> String.replace(~r/[^A-Za-z0-9._-]+/, "-")
+        |> String.trim("-")
+        |> String.slice(0, 48)
+        |> case do
+          "" -> "change"
+          value -> value
+        end
+
+      hash =
+        branch_name
+        |> then(&:crypto.hash(:sha256, &1))
+        |> Base.encode16(case: :lower)
+        |> binary_part(0, 12)
+
+      "arbor-coding-agent-#{slug}-#{hash}"
+    end
+
+    defp rev_parse(repo_root, ref) do
+      case git(repo_root, ["rev-parse", "--verify", ref]) do
+        {:ok, output} -> {:ok, String.trim(output)}
+        {:error, reason} -> {:error, "failed to resolve base_ref #{inspect(ref)}: #{reason}"}
+      end
+    end
+
+    defp ensure_worktree(repo_root, branch_name, worktree_path, base_commit) do
+      cond do
+        File.dir?(worktree_path) ->
+          ensure_existing_worktree_branch(worktree_path, branch_name)
+
+        existing_path = worktree_for_branch(repo_root, branch_name) ->
+          {:ok, existing_path, true}
+
+        branch_exists?(repo_root, branch_name) ->
+          add_existing_branch_worktree(repo_root, branch_name, worktree_path)
+
+        true ->
+          add_new_branch_worktree(repo_root, branch_name, worktree_path, base_commit)
+      end
+    end
+
+    defp ensure_existing_worktree_branch(worktree_path, branch_name) do
+      case git(worktree_path, ["branch", "--show-current"]) do
+        {:ok, output} ->
+          current_branch = String.trim(output)
+
+          if current_branch == branch_name do
+            {:ok, worktree_path, true}
+          else
+            {:error,
+             "existing worktree #{worktree_path} is on #{inspect(current_branch)}, expected #{inspect(branch_name)}"}
+          end
+
+        {:error, reason} ->
+          {:error, "existing worktree #{worktree_path} is not usable: #{reason}"}
+      end
+    end
+
+    defp worktree_for_branch(repo_root, branch_name) do
+      with {:ok, output} <- git(repo_root, ["worktree", "list", "--porcelain"]) do
+        output
+        |> String.split("\n\n", trim: true)
+        |> Enum.find_value(fn entry ->
+          lines = String.split(entry, "\n", trim: true)
+          path = line_value(lines, "worktree ")
+          branch = line_value(lines, "branch refs/heads/")
+
+          if branch == branch_name, do: path
+        end)
+      else
+        _ -> nil
+      end
+    end
+
+    defp line_value(lines, prefix) do
+      lines
+      |> Enum.find_value(fn line ->
+        if String.starts_with?(line, prefix) do
+          String.replace_prefix(line, prefix, "")
+        end
+      end)
+    end
+
+    defp branch_exists?(repo_root, branch_name) do
+      case git(repo_root, ["show-ref", "--verify", "--quiet", "refs/heads/#{branch_name}"]) do
+        {:ok, _} -> true
+        {:error, _} -> false
+      end
+    end
+
+    defp add_existing_branch_worktree(repo_root, branch_name, worktree_path) do
       case System.cmd(
              "git",
-             ["-C", repo_root, "worktree", "add", "-b", branch_name, worktree_path, base_ref],
+             ["-C", repo_root, "worktree", "add", worktree_path, branch_name],
              stderr_to_stdout: true
            ) do
-        {_output, 0} -> {:ok, worktree_path}
+        {_output, 0} -> {:ok, worktree_path, true}
         {output, _code} -> {:error, "failed to create worktree: #{String.trim(output)}"}
+      end
+    end
+
+    defp add_new_branch_worktree(repo_root, branch_name, worktree_path, base_commit) do
+      case System.cmd(
+             "git",
+             ["-C", repo_root, "worktree", "add", "-b", branch_name, worktree_path, base_commit],
+             stderr_to_stdout: true
+           ) do
+        {_output, 0} -> {:ok, worktree_path, false}
+        {output, _code} -> {:error, "failed to create worktree: #{String.trim(output)}"}
+      end
+    end
+
+    defp maybe_reset_reused_worktree(_worktree_path, _base_commit, false), do: :ok
+
+    defp maybe_reset_reused_worktree(worktree_path, base_commit, true) do
+      with {:ok, _} <- git(worktree_path, ["reset", "--hard", base_commit]),
+           {:ok, _} <- git(worktree_path, ["clean", "-fd"]) do
+        :ok
+      else
+        {:error, reason} -> {:error, "failed to reset existing worktree: #{reason}"}
       end
     end
 
