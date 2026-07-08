@@ -39,6 +39,9 @@ defmodule Arbor.Actions.CanonicalUriTest do
 
       assert Actions.canonical_uri_for(Arbor.Actions.Github.PR, %{}) ==
                "arbor://action/github/pr"
+
+      assert Actions.canonical_uri_for(Arbor.Actions.Council.ReviewChange, %{}) ==
+               "arbor://action/council/review"
     end
 
     test "unmapped schema-bounded actions derive a singular action URI" do

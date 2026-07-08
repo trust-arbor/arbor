@@ -98,6 +98,144 @@ defmodule Arbor.Actions.CouncilTest do
     end
   end
 
+  describe "ReviewChange" do
+    @valid_review_params %{
+      diff: "diff --git a/lib/a.ex b/lib/a.ex\n+def ok, do: :ok",
+      files: ["lib/a.ex", "test/a_test.exs"],
+      branch: "agent/review-loop",
+      base_ref: "main",
+      intent: "Add the review loop",
+      agent_id: "agent_123"
+    }
+
+    test "schema accepts field params and request map params" do
+      assert {:ok, _} = Council.ReviewChange.validate_params(@valid_review_params)
+
+      assert {:ok, _} =
+               Council.ReviewChange.validate_params(%{
+                 request: @valid_review_params,
+                 timeout: 30_000,
+                 quorum: "majority",
+                 tier_decision: "pending"
+               })
+    end
+
+    test "validates action metadata and egress classification" do
+      assert Council.ReviewChange.name() == "council_review_change"
+      assert Council.ReviewChange.category() == "council"
+      assert "code_review" in Council.ReviewChange.tags()
+      assert Council.ReviewChange.effect_class() == :network_egress
+      assert Council.ReviewChange.egress_tier(%{}, %{}) == :external_provider
+    end
+
+    test "runtime validation rejects an incomplete request" do
+      assert {:error, {:missing_required_field, :diff}} =
+               Council.ReviewChange.run(%{}, %{review_runner: fn _, _, _ -> flunk("unused") end})
+    end
+
+    test "approved council decision becomes a keep verdict and is persisted" do
+      parent = self()
+
+      review_runner = fn request, _params, _context ->
+        assert request.branch == "agent/review-loop"
+        assert request.files == ["lib/a.ex", "test/a_test.exs"]
+
+        {:ok,
+         %{
+           decision: "approved",
+           approve_count: 7,
+           reject_count: 2,
+           abstain_count: 1,
+           quorum_met: true,
+           average_confidence: 0.82,
+           primary_concerns: []
+         }}
+      end
+
+      persist_verdict = fn verdict, request, decision ->
+        send(parent, {:persisted, verdict, request, decision})
+        {:ok, "run_123"}
+      end
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(@valid_review_params, %{
+                 review_runner: review_runner,
+                 persist_verdict: persist_verdict
+               })
+
+      assert result.status == "reviewed"
+      assert result.recommendation == :keep
+      assert result.verdict.recommendation == :keep
+      assert result.verdict.overall_score == 0.7
+      assert result.persistence == {:ok, "run_123"}
+
+      assert_receive {:persisted, verdict, request, decision}
+      assert verdict.meta.branch == "agent/review-loop"
+      assert request.agent_id == "agent_123"
+      assert decision.decision == "approved"
+    end
+
+    test "negative regression: rejecting panel yields reject verdict, not keep" do
+      review_runner = fn _request, _params, _context ->
+        {:ok,
+         %{
+           "decision" => "rejected",
+           "approve_count" => 2,
+           "reject_count" => 6,
+           "abstain_count" => 2,
+           "quorum_met" => true,
+           "average_confidence" => 0.9,
+           "primary_concerns" => ["security regression"]
+         }}
+      end
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(@valid_review_params, %{
+                 review_runner: review_runner,
+                 persist_verdict: false
+               })
+
+      assert result.decision == "rejected"
+      assert result.recommendation == :reject
+      assert result.verdict.recommendation == :reject
+      assert result.verdict.weaknesses == ["security regression"]
+    end
+
+    test "deadlock maps to revise so the agent reworks instead of proceeding" do
+      review_runner = fn _request, _params, _context ->
+        {:ok,
+         %{
+           decision: "deadlock",
+           approve_count: 4,
+           reject_count: 4,
+           abstain_count: 2,
+           quorum_met: false,
+           average_confidence: 0.61
+         }}
+      end
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(@valid_review_params, %{
+                 review_runner: review_runner,
+                 persist_verdict: false
+               })
+
+      assert result.recommendation == :revise
+      assert result.verdict.recommendation == :revise
+      assert result.verdict.overall_score == 0.4
+    end
+
+    test "request map can be overridden by top-level params" do
+      params = %{
+        request: @valid_review_params,
+        branch: "agent/override"
+      }
+
+      assert {:ok, request} = Council.build_code_review_request(params)
+      assert request.branch == "agent/override"
+    end
+  end
+
   describe "normalize_perspective/1" do
     test "passes through atoms unchanged" do
       assert Council.normalize_perspective(:security) == :security
@@ -124,11 +262,14 @@ defmodule Arbor.Actions.CouncilTest do
     test "modules compile and are usable" do
       assert Code.ensure_loaded?(Council.Consult)
       assert Code.ensure_loaded?(Council.ConsultOne)
+      assert Code.ensure_loaded?(Council.ReviewChange)
 
       assert function_exported?(Council.Consult, :run, 2)
       assert function_exported?(Council.ConsultOne, :run, 2)
+      assert function_exported?(Council.ReviewChange, :run, 2)
       assert function_exported?(Council.Consult, :taint_roles, 0)
       assert function_exported?(Council.ConsultOne, :taint_roles, 0)
+      assert function_exported?(Council.ReviewChange, :taint_roles, 0)
     end
   end
 
@@ -138,12 +279,14 @@ defmodule Arbor.Actions.CouncilTest do
       assert :council in Map.keys(actions)
       assert Council.Consult in actions[:council]
       assert Council.ConsultOne in actions[:council]
+      assert Council.ReviewChange in actions[:council]
     end
 
     test "actions appear in all_actions/0" do
       all = Arbor.Actions.all_actions()
       assert Council.Consult in all
       assert Council.ConsultOne in all
+      assert Council.ReviewChange in all
     end
   end
 

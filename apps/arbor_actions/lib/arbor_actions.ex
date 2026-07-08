@@ -368,7 +368,8 @@ defmodule Arbor.Actions do
       ],
       council: [
         Arbor.Actions.Council.Consult,
-        Arbor.Actions.Council.ConsultOne
+        Arbor.Actions.Council.ConsultOne,
+        Arbor.Actions.Council.ReviewChange
       ],
       consensus: [
         Arbor.Actions.Consensus.Propose,
@@ -1127,7 +1128,8 @@ defmodule Arbor.Actions do
     Arbor.Actions.SessionMemory.Consolidate => "arbor://orchestrator/execute",
     Arbor.Actions.SessionMemory.Recall => "arbor://orchestrator/execute",
     Arbor.Actions.SessionMemory.Update => "arbor://orchestrator/execute",
-    Arbor.Actions.SessionMemory.UpdateWorkingMemory => "arbor://orchestrator/execute"
+    Arbor.Actions.SessionMemory.UpdateWorkingMemory => "arbor://orchestrator/execute",
+    Arbor.Actions.Council.ReviewChange => "arbor://action/council/review"
   }
 
   @doc """

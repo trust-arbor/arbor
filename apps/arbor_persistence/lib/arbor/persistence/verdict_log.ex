@@ -21,7 +21,7 @@ defmodule Arbor.Persistence.VerdictLog do
   ## Options
 
   - `:domain`           — required; the eval-table partition (e.g. "llm_judge",
-                          "security_verify", "council_decision")
+                          "security_verify", "council_decision", "code_review")
   - `:model`/`:provider`— the deciding model (default "unknown")
   - `:dataset`          — run dataset label (default: the domain)
   - `:graders`          — run graders list (default: `[domain]`)

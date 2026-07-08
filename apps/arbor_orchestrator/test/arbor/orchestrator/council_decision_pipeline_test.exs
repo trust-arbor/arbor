@@ -168,5 +168,43 @@ defmodule Arbor.Orchestrator.CouncilDecisionPipelineTest do
         IO.puts("  [skipped] Consult module not available (standalone orchestrator)")
       end
     end
+
+    test "passes custom context through to the decision graph" do
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          "consult-decide-context-#{System.unique_integer([:positive])}.dot"
+        )
+
+      File.write!(path, """
+      digraph context_decide {
+        start [type="start"]
+        done [type="exit"]
+
+        start -> done
+      }
+      """)
+
+      on_exit(fn -> File.rm(path) end)
+
+      context = %{
+        "council.decision" => "approved",
+        "council.approve_count" => 2,
+        "council.reject_count" => 1,
+        "council.abstain_count" => 0,
+        "council.quorum_met" => true
+      }
+
+      assert {:ok, result} =
+               Arbor.Consensus.decide("Should this change pass?",
+                 graph: path,
+                 context: context,
+                 timeout: 5_000
+               )
+
+      assert result.decision == "approved"
+      assert result.approve_count == 2
+      assert result.reject_count == 1
+    end
   end
 end

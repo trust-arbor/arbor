@@ -66,7 +66,9 @@ defmodule Arbor.Consensus.Evaluators.Consult do
 
       # Create a shared consultation run so all perspectives log under one EvalRun
       consultation_id = ConsultationLog.create_run(description, perspectives, opts)
-      eval_opts = opts |> Keyword.drop([:context]) |> Keyword.put(:consultation_id, consultation_id)
+
+      eval_opts =
+        opts |> Keyword.drop([:context]) |> Keyword.put(:consultation_id, consultation_id)
 
       tasks =
         Enum.map(perspectives, fn perspective ->
@@ -207,9 +209,17 @@ defmodule Arbor.Consensus.Evaluators.Consult do
       # Merge overrides into graph attrs
       graph = %{graph | attrs: Map.merge(graph.attrs, overrides)}
 
-      # Set initial context values for the engine
+      # Set initial context values for the engine. `:context` is advertised on
+      # Arbor.Consensus.decide/2 and is load-bearing for specialized council
+      # DOTs (for example code-review-council.dot needs the branch diff).
+      initial_context =
+        opts
+        |> Keyword.get(:context, %{})
+        |> normalize_initial_context()
+        |> Map.put("council.question", description)
+
       engine_opts = [
-        initial_values: %{"council.question" => description}
+        initial_values: initial_context
       ]
 
       engine_opts =
@@ -285,6 +295,9 @@ defmodule Arbor.Consensus.Evaluators.Consult do
       {:error, :orchestrator_not_available}
     end
   end
+
+  defp normalize_initial_context(context) when is_map(context), do: context
+  defp normalize_initial_context(_context), do: %{}
 
   defp run_engine(graph, opts) do
     if Code.ensure_loaded?(@engine_mod) do

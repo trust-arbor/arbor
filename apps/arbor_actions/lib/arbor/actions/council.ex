@@ -12,6 +12,7 @@ defmodule Arbor.Actions.Council do
   |--------|-------------|
   | `Consult` | Query all perspectives in parallel |
   | `ConsultOne` | Query a single perspective |
+  | `ReviewChange` | Run the binding code-review council over a branch diff |
 
   ## Architecture
 
@@ -45,6 +46,9 @@ defmodule Arbor.Actions.Council do
   """
 
   alias Arbor.Common.SafeAtom
+  alias Arbor.Contracts.Consensus.CodeReviewRequest
+  alias Arbor.Contracts.Judge.Verdict
+  alias Arbor.Persistence.VerdictLog
 
   # Perspectives available in AdvisoryLLM
   @allowed_perspectives [
@@ -379,6 +383,124 @@ defmodule Arbor.Actions.Council do
     end
   end
 
+  defmodule ReviewChange do
+    @moduledoc """
+    Run the binding code-review council over a completed branch diff.
+
+    This is the code-review counterpart to advisory council consultation. It
+    builds a `CodeReviewRequest`, runs the `code-review-council.dot` decision
+    graph through `Arbor.Consensus.decide/2`, projects the vote result onto the
+    shared `Verdict` contract, and records the verdict through `VerdictLog`.
+    """
+
+    use Jido.Action,
+      name: "council_review_change",
+      description: "Run the binding code-review council over a branch diff",
+      category: "council",
+      tags: ["council", "code_review", "verdict", "llm"],
+      schema: [
+        request: [
+          type: :map,
+          doc: "Optional CodeReviewRequest-compatible map; field params override it"
+        ],
+        diff: [
+          type: :string,
+          doc: "Unified diff for the completed branch"
+        ],
+        files: [
+          type: {:list, :string},
+          doc: "Relative paths touched by the diff"
+        ],
+        branch: [
+          type: :string,
+          doc: "Branch under review"
+        ],
+        base_ref: [
+          type: :string,
+          doc: "Base ref for the branch"
+        ],
+        intent: [
+          type: :string,
+          doc: "Task or summary the change claims to address"
+        ],
+        agent_id: [
+          type: :string,
+          doc: "Agent that produced the change"
+        ],
+        graph: [
+          type: :string,
+          doc: "Override DOT graph path"
+        ],
+        timeout: [
+          type: :non_neg_integer,
+          doc: "Decision pipeline timeout in milliseconds"
+        ],
+        quorum: [
+          type: :string,
+          doc: "Consensus quorum override"
+        ],
+        tier_decision: [
+          type: :string,
+          doc: "Blast-radius tier decision to persist once D5 classifies it"
+        ]
+      ]
+
+    alias Arbor.Actions
+    alias Arbor.Actions.Council
+
+    def taint_roles do
+      %{
+        request: :data,
+        diff: :data,
+        files: :data,
+        branch: :control,
+        base_ref: :control,
+        intent: :data,
+        agent_id: :data,
+        graph: {:control, requires: [:path_traversal]},
+        timeout: :data,
+        quorum: :control,
+        tier_decision: :data
+      }
+    end
+
+    def effect_class, do: :network_egress
+    def egress_tier(_params, _context), do: :external_provider
+    def egress_destination(_params, _context), do: "code-review-council"
+
+    @impl true
+    @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
+    def run(params, context) do
+      Actions.emit_started(__MODULE__, loggable_params(params))
+
+      with {:ok, request} <- Council.build_code_review_request(params),
+           {:ok, decision} <- Council.run_code_review_decision(request, params, context),
+           {:ok, verdict} <- Council.verdict_from_review_decision(decision, request) do
+        persistence = Council.persist_review_verdict(verdict, request, decision, params, context)
+        result = Council.review_result(verdict, request, decision, persistence)
+
+        Actions.emit_completed(__MODULE__, %{
+          branch: request.branch,
+          recommendation: verdict.recommendation,
+          decision: result.decision
+        })
+
+        {:ok, result}
+      else
+        {:error, reason} = error ->
+          Actions.emit_failed(__MODULE__, reason)
+          error
+      end
+    end
+
+    defp loggable_params(params) do
+      %{
+        branch: Council.get_param(params, :branch),
+        files_count: params |> Council.get_param(:files) |> List.wrap() |> length()
+      }
+    end
+  end
+
   # ===========================================================================
   # Shared Helpers
   # ===========================================================================
@@ -394,4 +516,280 @@ defmodule Arbor.Actions.Council do
   end
 
   def normalize_perspective(other), do: {:error, {:invalid_perspective_type, other}}
+
+  @doc false
+  def build_code_review_request(params) when is_map(params) do
+    base =
+      case get_param(params, :request) do
+        request when is_map(request) -> string_key_map(request)
+        nil -> %{}
+        other -> %{"request" => other}
+      end
+
+    params
+    |> Enum.reduce(base, fn {key, value}, acc ->
+      normalized = normalize_param_key(key)
+
+      if normalized in ~w(diff files branch base_ref intent agent_id) and not is_nil(value) do
+        Map.put(acc, normalized, value)
+      else
+        acc
+      end
+    end)
+    |> CodeReviewRequest.new()
+  end
+
+  @doc false
+  def run_code_review_decision(%CodeReviewRequest{} = request, params, context) do
+    case Map.get(context, :review_runner) do
+      runner when is_function(runner, 3) ->
+        runner.(request, params, context)
+
+      runner when is_function(runner, 2) ->
+        runner.(request, context)
+
+      nil ->
+        default_review_runner(request, params)
+    end
+  end
+
+  @doc false
+  def verdict_from_review_decision(decision, %CodeReviewRequest{} = request) do
+    with {:ok, decision_atom} <- normalize_decision(decision),
+         {:ok, verdict} <-
+           Verdict.new(%{
+             overall_score: approval_score(decision),
+             dimension_scores: dimension_scores(decision),
+             strengths: strengths_for_decision(decision_atom),
+             weaknesses: primary_concerns(decision),
+             recommendation: recommendation_for_decision(decision_atom),
+             mode: :verification,
+             meta: verdict_meta(decision, request, decision_atom)
+           }) do
+      {:ok, verdict}
+    end
+  end
+
+  @doc false
+  def persist_review_verdict(
+        %Verdict{} = verdict,
+        %CodeReviewRequest{} = request,
+        decision,
+        params,
+        context
+      ) do
+    persist_fun = Map.get(context, :persist_verdict)
+
+    cond do
+      persist_fun == false ->
+        :ok
+
+      is_function(persist_fun, 3) ->
+        persist_fun.(verdict, request, decision)
+
+      is_function(persist_fun, 4) ->
+        persist_fun.(verdict, request, decision, params)
+
+      true ->
+        VerdictLog.record(verdict,
+          domain: "code_review",
+          source: "code_review_council",
+          sample_id: request.branch,
+          input: request.diff,
+          dataset: "code_review",
+          graders: ["code_review_council"],
+          result_metadata: review_result_metadata(request, decision, params)
+        )
+    end
+  rescue
+    _ -> :ok
+  end
+
+  @doc false
+  def review_result(%Verdict{} = verdict, %CodeReviewRequest{} = request, decision, persistence) do
+    %{
+      status: "reviewed",
+      verdict: verdict,
+      recommendation: verdict.recommendation,
+      decision: decision_value(decision),
+      branch: request.branch,
+      files: request.files,
+      approve_count: integer_value(decision, "approve_count"),
+      reject_count: integer_value(decision, "reject_count"),
+      abstain_count: integer_value(decision, "abstain_count"),
+      quorum_met: boolean_value(decision, "quorum_met"),
+      persistence: persistence
+    }
+  end
+
+  @doc false
+  def get_param(params, key) when is_map(params) do
+    Map.get(params, key) || Map.get(params, Atom.to_string(key))
+  end
+
+  defp default_review_runner(%CodeReviewRequest{} = request, params) do
+    context = CodeReviewRequest.to_context(request)
+    question = Map.fetch!(context, "council.question")
+
+    opts =
+      [
+        graph: get_param(params, :graph) || default_code_review_graph_path(),
+        mode: "decision",
+        context: context
+      ]
+      |> put_opt(:timeout, get_param(params, :timeout))
+      |> put_opt(:quorum, get_param(params, :quorum))
+
+    Arbor.Consensus.decide(question, opts)
+  end
+
+  defp default_code_review_graph_path do
+    candidates = [
+      Path.join(File.cwd!(), "apps/arbor_orchestrator/specs/pipelines/code-review-council.dot"),
+      Path.join(File.cwd!(), "../arbor_orchestrator/specs/pipelines/code-review-council.dot"),
+      Path.join(File.cwd!(), "specs/pipelines/code-review-council.dot")
+    ]
+
+    Enum.find(candidates, List.first(candidates), &File.exists?/1)
+  end
+
+  defp put_opt(opts, _key, nil), do: opts
+  defp put_opt(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp normalize_param_key(key) when is_atom(key), do: Atom.to_string(key)
+  defp normalize_param_key(key) when is_binary(key), do: key
+  defp normalize_param_key(key), do: to_string(key)
+
+  defp string_key_map(map) do
+    Map.new(map, fn {key, value} -> {normalize_param_key(key), value} end)
+  end
+
+  defp normalize_decision(decision) do
+    case decision_value(decision) do
+      "approved" -> {:ok, :approved}
+      "rejected" -> {:ok, :rejected}
+      "deadlock" -> {:ok, :deadlock}
+      other -> {:error, {:invalid_review_decision, other}}
+    end
+  end
+
+  defp decision_value(decision), do: decision |> value("decision") |> to_string()
+
+  defp recommendation_for_decision(:approved), do: :keep
+  defp recommendation_for_decision(:rejected), do: :reject
+  defp recommendation_for_decision(:deadlock), do: :revise
+
+  defp approval_score(decision) do
+    approve = integer_value(decision, "approve_count")
+    reject = integer_value(decision, "reject_count")
+    abstain = integer_value(decision, "abstain_count")
+    total = approve + reject + abstain
+
+    if total > 0, do: Float.round(approve / total, 4), else: 0.0
+  end
+
+  defp dimension_scores(decision) do
+    %{
+      confidence: float_value(decision, "average_confidence")
+    }
+  end
+
+  defp strengths_for_decision(:approved), do: ["Council majority approved the change"]
+  defp strengths_for_decision(_), do: []
+
+  defp primary_concerns(decision) do
+    case value(decision, "primary_concerns") do
+      list when is_list(list) ->
+        Enum.map(list, &to_string/1)
+
+      "[]" ->
+        []
+
+      nil ->
+        []
+
+      concern when is_binary(concern) ->
+        [concern]
+
+      other ->
+        [inspect(other)]
+    end
+  end
+
+  defp verdict_meta(decision, request, decision_atom) do
+    %{
+      source: "code_review_council",
+      decision: decision_atom,
+      branch: request.branch,
+      base_ref: request.base_ref,
+      files: request.files,
+      agent_id: request.agent_id,
+      approve_count: integer_value(decision, "approve_count"),
+      reject_count: integer_value(decision, "reject_count"),
+      abstain_count: integer_value(decision, "abstain_count"),
+      quorum_met: boolean_value(decision, "quorum_met")
+    }
+  end
+
+  defp review_result_metadata(request, decision, params) do
+    %{
+      "branch" => request.branch,
+      "base_ref" => request.base_ref,
+      "files" => request.files,
+      "intent" => request.intent,
+      "agent_id" => request.agent_id,
+      "decision" => decision_value(decision),
+      "approve_count" => integer_value(decision, "approve_count"),
+      "reject_count" => integer_value(decision, "reject_count"),
+      "abstain_count" => integer_value(decision, "abstain_count"),
+      "quorum_met" => boolean_value(decision, "quorum_met"),
+      "tier_decision" => get_param(params, :tier_decision) || "pending"
+    }
+  end
+
+  defp value(map, key) when is_map(map) do
+    Map.get(map, key) || Map.get(map, String.to_existing_atom(key))
+  rescue
+    ArgumentError -> Map.get(map, key)
+  end
+
+  defp integer_value(map, key) do
+    case value(map, key) do
+      int when is_integer(int) -> int
+      float when is_float(float) -> trunc(float)
+      str when is_binary(str) -> parse_int(str)
+      _ -> 0
+    end
+  end
+
+  defp parse_int(str) do
+    case Integer.parse(str) do
+      {int, _} -> int
+      :error -> 0
+    end
+  end
+
+  defp float_value(map, key) do
+    case value(map, key) do
+      float when is_float(float) -> float
+      int when is_integer(int) -> int / 1
+      str when is_binary(str) -> parse_float(str)
+      _ -> 0.0
+    end
+  end
+
+  defp parse_float(str) do
+    case Float.parse(str) do
+      {float, _} -> float
+      :error -> 0.0
+    end
+  end
+
+  defp boolean_value(map, key) do
+    case value(map, key) do
+      bool when is_boolean(bool) -> bool
+      "true" -> true
+      _ -> false
+    end
+  end
 end
