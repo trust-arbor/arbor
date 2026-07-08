@@ -84,7 +84,8 @@ defmodule Arbor.Common.SensitiveDataTest do
     end
 
     test "detects Slack token" do
-      findings = SensitiveData.scan_secrets("SLACK_TOKEN=REDACTED")
+      token = "xoxb-" <> "1234567890-abcdefghijk"
+      findings = SensitiveData.scan_secrets("SLACK_TOKEN=#{token}")
       assert Enum.any?(findings, fn {label, _} -> label == "Slack Token" end)
     end
 
@@ -189,6 +190,26 @@ defmodule Arbor.Common.SensitiveDataTest do
 
       assert String.contains?(redacted, "/Users/admin/")
       refute String.contains?(redacted, aws_key)
+    end
+
+    test "security regression: redacts short values assigned to sensitive labels" do
+      text =
+        ~s({"access_token":"tiny","credentials":"smallcred","authorization":"Bearer short-token","public":"keep"})
+
+      redacted = SensitiveData.redact_secrets(text)
+
+      refute String.contains?(redacted, "tiny")
+      refute String.contains?(redacted, "smallcred")
+      refute String.contains?(redacted, "short-token")
+      assert String.contains?(redacted, ~s("public":"keep"))
+    end
+
+    test "security regression: redacts high entropy secret findings" do
+      blob = "mF9aQ2rX8vL4nP6sT1uW3yZ5bC7dE9gH0jK2lM4oP6qR8sT0"
+      redacted = SensitiveData.redact_secrets("payload=#{blob}")
+
+      refute String.contains?(redacted, blob)
+      assert String.contains?(redacted, "[REDACTED]")
     end
   end
 

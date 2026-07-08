@@ -289,5 +289,56 @@ defmodule Arbor.Security.EscalationTest do
       assert proposal.metadata.target == "/workspace/report.md"
       assert proposal.description =~ "/workspace/report.md"
     end
+
+    test "security regression: supplied approval context cannot bypass preview redaction", %{
+      capability: cap
+    } do
+      jwt =
+        "eyJhbGciOiJIUzI1NiJ9" <>
+          "." <>
+          "eyJzdWIiOiIxMjM0NTY3ODkwIn0" <>
+          "." <> "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+
+      body =
+        ~s({"message":"keep","access_token":"tiny","authorization":"Bearer short-token","jwt":"#{jwt}"})
+
+      opts = [
+        approval_context: %{
+          payload_preview: %{
+            kind: "content",
+            bytes: byte_size(body),
+            truncated: false,
+            preview: body
+          },
+          params: %{
+            "credentials" => "smallcred",
+            "note" => "token #{jwt}",
+            "nested" => %{"access-token" => "nestedtiny"}
+          }
+        }
+      ]
+
+      {:ok, :pending_approval, _} =
+        Escalation.submit_for_approval(
+          CapturingConsensus,
+          cap,
+          "agent_test",
+          "arbor://fs/write/sensitive",
+          opts
+        )
+
+      assert_receive {:proposal, proposal}
+
+      preview = proposal.context.payload_preview.preview
+      assert preview =~ ~s("message":"keep")
+      refute preview =~ "tiny"
+      refute preview =~ "short-token"
+      refute preview =~ jwt
+
+      assert proposal.context.params["credentials"] == "[REDACTED]"
+      assert proposal.context.params["nested"]["access-token"] == "[REDACTED]"
+      refute proposal.context.params["note"] =~ jwt
+      assert proposal.metadata.approval_context == proposal.context
+    end
   end
 end

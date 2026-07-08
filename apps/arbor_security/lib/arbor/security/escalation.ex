@@ -42,6 +42,7 @@ defmodule Arbor.Security.Escalation do
       }
   """
 
+  alias Arbor.Common.SensitiveData
   alias Arbor.Security.Config
 
   require Logger
@@ -49,13 +50,20 @@ defmodule Arbor.Security.Escalation do
   @preview_limit 500
 
   @sensitive_keys ~w(
+    access_token
     api_key
+    auth_token
     authorization
     bearer
     client_secret
     cookie
+    credential
+    credentials
     password
+    passwd
     private_key
+    pwd
+    refresh_token
     secret
     signed_request
     token
@@ -321,11 +329,27 @@ defmodule Arbor.Security.Escalation do
       |> compact_map()
 
     deep_merge(base, supplied)
+    |> sanitize_context()
     |> Map.put_new(:principal_id, principal_id)
     |> Map.put_new(:resource_uri, resource_uri)
     |> Map.put_new(:capability_id, capability.id)
     |> Map.put_new(:gate, :requires_approval)
     |> Map.put_new(:reason, :capability_requires_approval)
+  end
+
+  defp sanitize_context(context) do
+    context
+    |> update_existing(:target, &sanitize_value/1)
+    |> update_existing(:payload_preview, &normalize_payload_preview/1)
+    |> update_existing(:params, &sanitized_params/1)
+  end
+
+  defp update_existing(map, key, fun) do
+    if Map.has_key?(map, key) do
+      Map.update!(map, key, fun)
+    else
+      map
+    end
   end
 
   defp approval_description(resource_uri, context) do
@@ -450,7 +474,11 @@ defmodule Arbor.Security.Escalation do
     end
   end
 
-  defp sanitize_value(value) when is_binary(value), do: preview_scalar(value)
+  defp sanitize_value(value) when is_binary(value) do
+    value
+    |> SensitiveData.redact_secrets()
+    |> preview_scalar()
+  end
 
   defp sanitize_value(value) when is_atom(value) or is_number(value) or is_boolean(value),
     do: value
@@ -503,21 +531,46 @@ defmodule Arbor.Security.Escalation do
 
   defp normalize_context_key(key), do: key
 
-  defp normalize_payload_preview(preview) when is_map(preview), do: preview
+  defp normalize_payload_preview(preview) when is_map(preview) do
+    kind = Map.get(preview, :kind) || Map.get(preview, "kind")
+
+    preview
+    |> Enum.map(fn {key, value} -> {key, sanitize_payload_preview_field(key, value, kind)} end)
+    |> Map.new()
+  end
+
   defp normalize_payload_preview(preview), do: preview_value(preview, "payload")
 
   defp preview_value(value, kind) when is_binary(value) do
+    preview = redact_preview_text(value, kind)
+
     %{
       kind: to_string(kind),
       bytes: byte_size(value),
       truncated: byte_size(value) > @preview_limit,
-      preview: preview_scalar(value)
+      preview: preview_scalar(preview)
     }
   end
 
   defp preview_value(value, kind) do
     rendered = inspect(value, limit: 50)
     preview_value(rendered, kind)
+  end
+
+  defp redact_preview_text(value, kind) do
+    if sensitive_key?(kind) do
+      "[REDACTED]"
+    else
+      SensitiveData.redact_secrets(value)
+    end
+  end
+
+  defp sanitize_payload_preview_field(key, value, kind) do
+    cond do
+      sensitive_key?(key) -> "[REDACTED]"
+      key in [:preview, "preview"] and sensitive_key?(kind) -> "[REDACTED]"
+      true -> sanitize_value(value)
+    end
   end
 
   defp preview_scalar(value) when is_binary(value) and byte_size(value) > @preview_limit do
@@ -527,11 +580,25 @@ defmodule Arbor.Security.Escalation do
   defp preview_scalar(value) when is_binary(value), do: value
   defp preview_scalar(value), do: inspect(value, limit: 50)
 
+  defp sensitive_key?(nil), do: false
+
   defp sensitive_key?(key) do
+    key = normalize_sensitive_key(key)
+
+    key in @sensitive_keys or
+      String.ends_with?(key, "_token") or
+      String.ends_with?(key, "_secret") or
+      String.ends_with?(key, "_password") or
+      String.ends_with?(key, "_credential") or
+      String.ends_with?(key, "_credentials")
+  end
+
+  defp normalize_sensitive_key(key) do
     key
     |> to_string()
     |> String.downcase()
-    |> then(fn key -> key in @sensitive_keys or String.ends_with?(key, "_token") end)
+    |> String.replace("-", "_")
+    |> String.replace(" ", "_")
   end
 
   defp opt(opts, key, default \\ nil)

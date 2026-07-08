@@ -148,6 +148,8 @@ defmodule Arbor.Common.SensitiveData do
     ]
   end
 
+  @secret_assignment_pattern ~r/(?i)(["']?)(api[_-]?key|apikey|authorization|bearer|client[_-]?secret|cookie|credentials?|private[_-]?key|secret|signed[_-]?request|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|password|passwd|pwd)\1(\s*(?::|=|=>)\s*)(["']?)([^"',}\]\n]+)\4/
+
   # ===========================================================================
   # Scan API
   # ===========================================================================
@@ -244,12 +246,9 @@ defmodule Arbor.Common.SensitiveData do
   """
   @spec redact_secrets(String.t()) :: String.t()
   def redact_secrets(text) when is_binary(text) do
-    secret_regexes =
-      Enum.map(labeled_secret_patterns(), fn {regex, _label} -> regex end)
-
-    Enum.reduce(secret_regexes, text, fn pattern, acc ->
-      Regex.replace(pattern, acc, "[REDACTED]")
-    end)
+    text
+    |> redact_secret_assignments()
+    |> redact_scanned_secrets()
   end
 
   # ===========================================================================
@@ -319,6 +318,28 @@ defmodule Arbor.Common.SensitiveData do
     regex
     |> Regex.scan(text)
     |> Enum.map(&hd/1)
+  end
+
+  defp redact_secret_assignments(text) do
+    Regex.replace(@secret_assignment_pattern, text, fn _full,
+                                                       key_quote,
+                                                       key,
+                                                       separator,
+                                                       value_quote,
+                                                       _value ->
+      "#{key_quote}#{key}#{key_quote}#{separator}#{value_quote}[REDACTED]#{value_quote}"
+    end)
+  end
+
+  defp redact_scanned_secrets(text) do
+    text
+    |> scan_secrets()
+    |> Enum.map(fn {_label, match} -> match end)
+    |> Enum.uniq()
+    |> Enum.sort_by(&byte_size/1, :desc)
+    |> Enum.reduce(text, fn secret, acc ->
+      String.replace(acc, secret, "[REDACTED]")
+    end)
   end
 
   # Filter out common false positives for PII patterns

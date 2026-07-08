@@ -74,7 +74,7 @@ defmodule Arbor.Actions do
   """
 
   alias Arbor.Actions.Egress
-  alias Arbor.Common.SafePath
+  alias Arbor.Common.{SafePath, SensitiveData}
   alias Arbor.Actions.TaintEnforcement
   alias Arbor.Actions.TaintEvents
   alias Arbor.Contracts.Security.CapabilityProfile
@@ -103,13 +103,20 @@ defmodule Arbor.Actions do
   ]
 
   @sensitive_approval_keys ~w(
+    access_token
     api_key
+    auth_token
     authorization
     bearer
     client_secret
     cookie
+    credential
+    credentials
     password
+    passwd
     private_key
+    pwd
+    refresh_token
     secret
     signed_request
     token
@@ -902,11 +909,18 @@ defmodule Arbor.Actions do
   defp approval_payload_preview(_params), do: nil
 
   defp approval_preview(value, key) when is_binary(value) do
+    preview =
+      if sensitive_approval_key?(key) do
+        "[REDACTED]"
+      else
+        truncate_approval_value(value)
+      end
+
     %{
       kind: to_string(key),
       bytes: byte_size(value),
       truncated: byte_size(value) > @approval_preview_limit,
-      preview: truncate_approval_value(value)
+      preview: preview
     }
   end
 
@@ -1010,8 +1024,15 @@ defmodule Arbor.Actions do
       key
       |> to_string()
       |> String.downcase()
+      |> String.replace("-", "_")
+      |> String.replace(" ", "_")
 
-    key in @sensitive_approval_keys or String.ends_with?(key, "_token")
+    key in @sensitive_approval_keys or
+      String.ends_with?(key, "_token") or
+      String.ends_with?(key, "_secret") or
+      String.ends_with?(key, "_password") or
+      String.ends_with?(key, "_credential") or
+      String.ends_with?(key, "_credentials")
   end
 
   defp param_value(params, key) when is_map(params) do
@@ -1026,13 +1047,19 @@ defmodule Arbor.Actions do
 
   defp context_value(_context, _key), do: nil
 
-  defp truncate_approval_value(value)
-       when is_binary(value) and byte_size(value) > @approval_preview_limit do
+  defp truncate_approval_value(value) when is_binary(value) do
+    value
+    |> SensitiveData.redact_secrets()
+    |> truncate_approval_text()
+  end
+
+  defp truncate_approval_value(value), do: inspect(value, limit: 50)
+
+  defp truncate_approval_text(value) when byte_size(value) > @approval_preview_limit do
     String.slice(value, 0, @approval_preview_limit) <> "..."
   end
 
-  defp truncate_approval_value(value) when is_binary(value), do: value
-  defp truncate_approval_value(value), do: inspect(value, limit: 50)
+  defp truncate_approval_text(value), do: value
 
   defp compact_approval_map(map) do
     map

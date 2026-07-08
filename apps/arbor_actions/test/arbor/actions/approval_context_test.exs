@@ -97,6 +97,56 @@ defmodule Arbor.Actions.ApprovalContextTest do
     assert proposal.metadata.target == file_path
   end
 
+  test "security regression: approval context redacts sensitive preview data for gated actions",
+       %{
+         agent_id: agent_id,
+         tmp_dir: tmp_dir
+       } do
+    file_path = Path.join(tmp_dir, "secret-report.md")
+
+    jwt =
+      "eyJhbGciOiJIUzI1NiJ9" <>
+        "." <>
+        "eyJzdWIiOiIxMjM0NTY3ODkwIn0" <>
+        "." <> "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+
+    content =
+      ~s({"message":"keep","access_token":"tiny","authorization":"Bearer short-token","jwt":"#{jwt}"})
+
+    {:ok, _capability} =
+      Arbor.Security.grant(
+        principal: agent_id,
+        resource: "arbor://fs/write#{tmp_dir}/**"
+      )
+
+    assert {:ok, :pending_approval, "proposal_approval_context"} =
+             Arbor.Actions.authorize_and_execute(
+               agent_id,
+               Arbor.Actions.File.Write,
+               %{
+                 path: file_path,
+                 content: content,
+                 credentials: "smallcred",
+                 nested: %{"access-token" => "nestedtiny"}
+               },
+               %{workspace: tmp_dir, taint: :untrusted}
+             )
+
+    refute File.exists?(file_path)
+    assert_receive {:proposal, proposal}
+
+    preview = proposal.context.payload_preview.preview
+    assert preview =~ ~s("message":"keep")
+    refute preview =~ "tiny"
+    refute preview =~ "short-token"
+    refute preview =~ jwt
+
+    assert proposal.context.params.credentials == "[REDACTED]"
+    assert proposal.context.params.nested["access-token"] == "[REDACTED]"
+    refute proposal.context.params.content =~ jwt
+    refute proposal.context.params.content =~ "short-token"
+  end
+
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)
 end
