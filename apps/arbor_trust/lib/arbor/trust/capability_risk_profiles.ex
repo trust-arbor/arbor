@@ -43,6 +43,12 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
      :restricted, true, :require_human, false, :cheap},
     {"arbor://consensus/admin", :arbor_consensus, :critical, :irreversible, :governance,
      :restricted, false, :require_human, false, :cheap},
+    # The authority to approve/deny agent operations. Holding it lets the caller
+    # release any gated op it is scoped for (up to shell/governance), so it is a
+    # critical, irreversible, governance-class capability that is never auto-minted
+    # and never graduation-earned — it is explicitly granted (facade/dashboard).
+    {"arbor://approval/answer", :arbor_agent, :critical, :irreversible, :governance,
+     :restricted, false, :require_human, false, :cheap},
     {"arbor://monitor/remediate", :arbor_monitor, :high, :reversible, :process_spawn, :restricted,
      true, :require_human, false, :cheap},
     {"arbor://code/write", :arbor_actions, :high, :reversible, :local_write, :confidential, true,
@@ -83,6 +89,10 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
     {"arbor://memory/search", :arbor_memory, :low, :read_only, :read, :confidential, true, :auto,
      true, :cheap, %{rate_limit: 300}},
     {"arbor://memory/recall", :arbor_memory, :low, :read_only, :read, :confidential, true, :auto,
+     true, :cheap, %{rate_limit: 300}},
+    # Read-only view of the pending-approval queue (carries enriched context, so
+    # :confidential). Low-risk read, auto-grantable with a rate limit.
+    {"arbor://approval/read", :arbor_agent, :low, :read_only, :read, :confidential, true, :auto,
      true, :cheap, %{rate_limit: 300}}
   ]
 
