@@ -90,6 +90,28 @@ defmodule Arbor.Gateway.Chat.SocketTest.FakeCoordinator do
   def force_reject(_id, _actor), do: {:ok, :rejected}
 end
 
+defmodule Arbor.Gateway.Chat.SocketTest.FakeOrchestration do
+  def list_pending_approvals(_opts), do: {:ok, []}
+  def answer_approval(_id, _decision, _opts), do: :ok
+end
+
+defmodule Arbor.Gateway.Chat.SocketTest.FakeOrchestrationPending do
+  def list_pending_approvals(_opts),
+    do:
+      {:ok,
+       [
+         %{
+           id: "irq_1",
+           source: :consensus,
+           agent_id: "agent_a",
+           principal_id: "agent_a",
+           resource_uri: "shell",
+           metadata: %{"cmd" => "ls"},
+           status: :pending
+         }
+       ]}
+end
+
 # InteractionRouter stub — "irq_…" ids resolve here (the live node's :ask path).
 defmodule Arbor.Gateway.Chat.SocketTest.FakeInteractionRouter do
   def respond(_request_id, _response, _metadata), do: :ok
@@ -145,6 +167,12 @@ defmodule Arbor.Gateway.Chat.SocketTest do
       Arbor.Gateway.Chat.SocketTest.FakeCoordinator
     )
 
+    Application.put_env(
+      :arbor_gateway,
+      :chat_orchestration,
+      Arbor.Gateway.Chat.SocketTest.FakeOrchestration
+    )
+
     # security_mod (grant) — DenySecurity also defines grant/1.
     Application.put_env(
       :arbor_gateway,
@@ -167,6 +195,7 @@ defmodule Arbor.Gateway.Chat.SocketTest do
             :chat_capability_store,
             :chat_consensus,
             :chat_consensus_coordinator,
+            :chat_orchestration,
             :chat_security,
             :chat_interaction_router,
             :chat_session_core,
@@ -432,7 +461,7 @@ defmodule Arbor.Gateway.Chat.SocketTest do
       assert tool == "arbor://shell/exec/ls"
     end
 
-    test "approve of an irq_ id resolves via the InteractionRouter", %{state: state} do
+    test "approve of an irq_ id resolves through orchestration", %{state: state} do
       st = attach(state, "agent_a")
       {:push, [event], _} = send_frame(%{type: "approve", proposal_id: "irq_1"}, st)
 
@@ -443,7 +472,7 @@ defmodule Arbor.Gateway.Chat.SocketTest do
              }
     end
 
-    test "deny of an irq_ id resolves via the InteractionRouter", %{state: state} do
+    test "deny of an irq_ id resolves through orchestration", %{state: state} do
       st = attach(state, "agent_a")
       {:push, [event], _} = send_frame(%{type: "deny", proposal_id: "irq_1"}, st)
 
@@ -451,7 +480,7 @@ defmodule Arbor.Gateway.Chat.SocketTest do
       assert event["status"] == "deny"
     end
 
-    test "approve of a non-irq id resolves via Consensus", %{state: state} do
+    test "approve of a non-irq id resolves through orchestration", %{state: state} do
       st = attach(state, "agent_a")
       {:push, [event], _} = send_frame(%{type: "approve", proposal_id: "prop_1"}, st)
 
@@ -467,8 +496,8 @@ defmodule Arbor.Gateway.Chat.SocketTest do
       # Override Consensus to return a pending proposal for this agent.
       Application.put_env(
         :arbor_gateway,
-        :chat_consensus,
-        Arbor.Gateway.Chat.SocketTest.FakeConsensusPending
+        :chat_orchestration,
+        Arbor.Gateway.Chat.SocketTest.FakeOrchestrationPending
       )
 
       {:push, [event], _} = send_frame(%{type: "list_approvals"}, st)

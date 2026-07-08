@@ -158,6 +158,53 @@ defmodule Arbor.Gateway.MCP.Handler do
           },
           required: ["component"]
         }
+      },
+      %{
+        name: "arbor_list_pending_approvals",
+        description:
+          "List pending Arbor approval requests visible to the authenticated caller. " <>
+            "Supports optional filtering by agent_id, principal_id, and resource_uri prefix.",
+        inputSchema: %{
+          type: "object",
+          properties: %{
+            agent_id: %{
+              type: "string",
+              description: "Optional: filter to approvals for a specific gated agent"
+            },
+            principal_id: %{
+              type: "string",
+              description: "Optional: filter to a gated principal or approver principal"
+            },
+            resource_uri: %{
+              type: "string",
+              description: "Optional: segment-aware resource URI prefix filter"
+            }
+          }
+        }
+      },
+      %{
+        name: "arbor_answer_approval",
+        description:
+          "Answer a pending Arbor approval request. Requires approval-answer authority.",
+        inputSchema: %{
+          type: "object",
+          properties: %{
+            id: %{
+              type: "string",
+              description: "Approval request id returned by arbor_list_pending_approvals"
+            },
+            decision: %{
+              type: "string",
+              description: "Approval decision",
+              enum: ["approve", "deny", "rework"]
+            },
+            note: %{
+              type: "string",
+              description: "Optional note recorded in the security audit log"
+            }
+          },
+          required: ["id", "decision"]
+        }
       }
     ]
   end
@@ -207,6 +254,20 @@ defmodule Arbor.Gateway.MCP.Handler do
     agent_id = args["agent_id"]
     result = get_status(component, agent_id)
     {:ok, %{content: [%{type: "text", text: result}]}, state}
+  end
+
+  def handle_call_tool("arbor_list_pending_approvals", args, state) do
+    case list_pending_approvals(args) do
+      {:ok, result} -> {:ok, json_content(result), state}
+      {:error, message} -> {:ok, error_content(message), state}
+    end
+  end
+
+  def handle_call_tool("arbor_answer_approval", args, state) do
+    case answer_approval(args) do
+      {:ok, result} -> {:ok, json_content(result), state}
+      {:error, message} -> {:ok, error_content(message), state}
+    end
   end
 
   def handle_call_tool(name, _args, state) do
@@ -288,6 +349,131 @@ defmodule Arbor.Gateway.MCP.Handler do
   # ===========================================================================
   # Tool Implementations
   # ===========================================================================
+
+  defp list_pending_approvals(args) do
+    with {:ok, caller_id} <- require_authenticated("arbor_list_pending_approvals"),
+         opts = approval_list_opts(args, caller_id),
+         {:ok, approvals} <- call_orchestration(:list_pending_approvals, [opts]) do
+      {:ok, %{"approvals" => Enum.map(approvals, &json_safe/1)}}
+    else
+      {:error, reason} -> {:error, format_tool_error(reason)}
+    end
+  end
+
+  defp answer_approval(args) do
+    with {:ok, caller_id} <- require_authenticated("arbor_answer_approval"),
+         {:ok, id} <- required_string_arg(args, "id"),
+         {:ok, decision} <- required_string_arg(args, "decision"),
+         opts = approval_answer_opts(args, caller_id),
+         :ok <- call_orchestration(:answer_approval, [id, decision, opts]) do
+      {:ok, %{"ok" => true, "approval_id" => id, "decision" => decision}}
+    else
+      {:error, reason} -> {:error, format_tool_error(reason)}
+      other -> {:error, format_tool_error(other)}
+    end
+  end
+
+  defp approval_list_opts(args, caller_id) do
+    [
+      caller_id: caller_id,
+      agent_id: optional_string_arg(args, "agent_id"),
+      principal_id: optional_string_arg(args, "principal_id"),
+      resource_uri: optional_string_arg(args, "resource_uri")
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp approval_answer_opts(args, caller_id) do
+    [
+      caller_id: caller_id,
+      note: optional_string_arg(args, "note")
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp require_authenticated(tool_name) do
+    case authenticated_agent_id() do
+      id when is_binary(id) and id != "" ->
+        {:ok, id}
+
+      _ ->
+        {:error,
+         "#{tool_name} requires SignedRequest authentication. No verified caller_id " <>
+           "is available in the current request context."}
+    end
+  end
+
+  defp required_string_arg(args, key) do
+    case optional_string_arg(args, key) do
+      nil -> {:error, "Missing required argument: #{key}"}
+      value -> {:ok, value}
+    end
+  end
+
+  defp optional_string_arg(args, key) do
+    case Map.get(args, key) do
+      value when is_binary(value) ->
+        value = String.trim(value)
+        if value == "", do: nil, else: value
+
+      _ ->
+        nil
+    end
+  end
+
+  defp call_orchestration(function, args) do
+    module = orchestration_module()
+
+    if Code.ensure_loaded?(module) and function_exported?(module, function, length(args)) do
+      apply(module, function, args)
+    else
+      {:error, :orchestration_unavailable}
+    end
+  rescue
+    e -> {:error, {:orchestration_error, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:orchestration_exit, reason}}
+  end
+
+  defp orchestration_module do
+    Application.get_env(
+      :arbor_gateway,
+      :orchestration_module,
+      Module.concat([:Arbor, :Agent, :Orchestration])
+    )
+  end
+
+  defp json_content(data) do
+    %{content: [%{type: "text", text: Jason.encode!(json_safe(data))}]}
+  end
+
+  defp error_content(message) do
+    %{
+      content: [%{type: "text", text: message}],
+      isError: true
+    }
+  end
+
+  defp json_safe(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+
+  defp json_safe(%{__struct__: _struct} = struct) do
+    struct
+    |> Map.from_struct()
+    |> json_safe()
+  end
+
+  defp json_safe(map) when is_map(map) do
+    Map.new(map, fn {key, value} -> {to_string(key), json_safe(value)} end)
+  end
+
+  defp json_safe(list) when is_list(list), do: Enum.map(list, &json_safe/1)
+  defp json_safe(tuple) when is_tuple(tuple), do: inspect(tuple)
+  defp json_safe(value) when is_boolean(value) or is_nil(value), do: value
+  defp json_safe(atom) when is_atom(atom), do: Atom.to_string(atom)
+  defp json_safe(value), do: value
+
+  defp format_tool_error(message) when is_binary(message), do: message
+  defp format_tool_error(reason), do: "Error: #{inspect(reason)}"
 
   defp list_actions(nil) do
     native_section =

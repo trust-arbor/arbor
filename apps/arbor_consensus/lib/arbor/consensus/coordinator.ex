@@ -193,6 +193,29 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   @doc """
+  Answer a pending authorization-request proposal.
+
+  This path is scoped to approval prompts. It does not grant general consensus
+  override authority.
+  """
+  @spec answer_authorization_request(
+          String.t(),
+          :approve | :deny | :rework,
+          String.t(),
+          keyword(),
+          GenServer.server()
+        ) :: :ok | {:error, term()}
+  def answer_authorization_request(
+        proposal_id,
+        decision,
+        actor_id,
+        opts \\ [],
+        server \\ __MODULE__
+      ) do
+    GenServer.call(server, {:answer_authorization_request, proposal_id, decision, actor_id, opts})
+  end
+
+  @doc """
   Get coordinator statistics.
   """
   @spec stats(GenServer.server()) :: map()
@@ -576,6 +599,34 @@ defmodule Arbor.Consensus.Coordinator do
   end
 
   @impl true
+  def handle_call(
+        {:answer_authorization_request, proposal_id, decision, actor_id, opts},
+        _from,
+        state
+      ) do
+    with {:ok, normalized_decision} <- normalize_approval_answer(decision),
+         proposal when not is_nil(proposal) <- Map.get(state.proposals, proposal_id),
+         :ok <- ensure_authorization_request(proposal),
+         :ok <- ensure_pending_authorization_request(proposal),
+         :ok <- ensure_not_blocked_authorization_approval(proposal, normalized_decision),
+         :ok <- check_approval_answer_authorization(actor_id, proposal) do
+      {state, status} =
+        answer_authorization_request_proposal(
+          state,
+          proposal,
+          normalized_decision,
+          actor_id,
+          opts
+        )
+
+      {:reply, status, state}
+    else
+      nil -> {:reply, {:error, :not_found}, state}
+      {:error, _} = error -> {:reply, error, state}
+    end
+  end
+
+  @impl true
   def handle_call(:stats, _from, state) do
     stats = %{
       total_proposals: map_size(state.proposals),
@@ -783,6 +834,157 @@ defmodule Arbor.Consensus.Coordinator do
   def evaluate_force_authorization({:error, reason}, actor_id) do
     Logger.warning("Unauthorized force operation attempted by #{actor_id}: #{inspect(reason)}")
     {:error, {:unauthorized, :consensus_admin_required}}
+  end
+
+  defp check_approval_answer_authorization(actor_id, proposal) do
+    principal_id = authorization_principal_id(proposal)
+    scoped_uri = "arbor://approval/answer/#{principal_id}"
+
+    cond do
+      approval_answer_authorized?(actor_id, scoped_uri) ->
+        :ok
+
+      approval_answer_authorized?(actor_id, "arbor://approval/answer") ->
+        :ok
+
+      force_admin_authorized?(actor_id) ->
+        :ok
+
+      true ->
+        {:error, {:unauthorized, :approval_answer_required}}
+    end
+  rescue
+    _ ->
+      {:error, {:unauthorized, :security_unavailable}}
+  catch
+    :exit, _ ->
+      {:error, {:unauthorized, :security_unavailable}}
+  end
+
+  defp approval_answer_authorized?(actor_id, resource_uri) do
+    actor_id
+    |> Arbor.Security.AuthDecision.check(resource_uri, :execute, verify_identity: false)
+    |> authorization_granted?()
+  end
+
+  defp force_admin_authorized?(actor_id) do
+    case check_force_authorization(actor_id) do
+      :ok -> true
+      _ -> false
+    end
+  end
+
+  defp authorization_granted?(:authorized), do: true
+  defp authorization_granted?(_), do: false
+
+  defp authorization_principal_id(proposal) do
+    metadata = Map.get(proposal, :metadata, %{}) || %{}
+    Map.get(metadata, :principal_id) || Map.get(metadata, "principal_id") || proposal.proposer
+  end
+
+  defp ensure_authorization_request(%Proposal{topic: topic})
+       when topic in [:authorization_request, "authorization_request"],
+       do: :ok
+
+  defp ensure_authorization_request(%Proposal{}), do: {:error, :not_authorization_request}
+
+  defp ensure_pending_authorization_request(%Proposal{status: status})
+       when status in [:pending, :evaluating],
+       do: :ok
+
+  defp ensure_pending_authorization_request(%Proposal{}), do: {:error, :already_decided}
+
+  defp ensure_not_blocked_authorization_approval(%Proposal{} = proposal, :approve) do
+    if blocked_authorization_request?(proposal) do
+      {:error, :blocked_approval_cannot_be_approved}
+    else
+      :ok
+    end
+  end
+
+  defp ensure_not_blocked_authorization_approval(%Proposal{}, _decision), do: :ok
+
+  defp blocked_authorization_request?(%Proposal{} = proposal) do
+    metadata = proposal.metadata || %{}
+    context = proposal.context || %{}
+
+    Enum.any?([metadata, context], fn map ->
+      Map.get(map, :blocked) == true or
+        Map.get(map, "blocked") == true or
+        blocked_mode?(Map.get(map, :approval_mode) || Map.get(map, "approval_mode")) or
+        blocked_mode?(Map.get(map, :policy_mode) || Map.get(map, "policy_mode")) or
+        blocked_mode?(Map.get(map, :trust_mode) || Map.get(map, "trust_mode"))
+    end)
+  end
+
+  defp blocked_mode?(:block), do: true
+  defp blocked_mode?("block"), do: true
+  defp blocked_mode?(_), do: false
+
+  defp normalize_approval_answer(decision) when decision in [:approve, :approved],
+    do: {:ok, :approve}
+
+  defp normalize_approval_answer(decision) when decision in [:deny, :denied, :reject, :rejected],
+    do: {:ok, :deny}
+
+  defp normalize_approval_answer(:rework), do: {:ok, :rework}
+  defp normalize_approval_answer(_), do: {:error, :invalid_decision}
+
+  defp answer_authorization_request_proposal(state, proposal, decision, actor_id, opts) do
+    proposal_id = proposal.id
+    state = kill_active_council(state, proposal_id)
+
+    {proposal_status, decision_status} =
+      case decision do
+        :approve -> {:approved, :approved}
+        :deny -> {:rejected, :rejected}
+        :rework -> {:rejected, :rejected}
+      end
+
+    proposal = Proposal.update_status(proposal, proposal_status)
+
+    decision_record = %{
+      decision: decision_status,
+      status: decision_status,
+      requested_decision: decision,
+      proposal_id: proposal_id,
+      override: true,
+      actor: actor_id,
+      note: Keyword.get(opts, :note),
+      answered_at: Keyword.get(opts, :answered_at, DateTime.utc_now()),
+      decided_at: DateTime.utc_now()
+    }
+
+    state = %{
+      state
+      | proposals: Map.put(state.proposals, proposal_id, proposal),
+        decisions: Map.put(state.decisions, proposal_id, decision_record),
+        proposals_by_agent: remove_proposal_from_agent(state.proposals_by_agent, proposal)
+    }
+
+    record_event(state, :decision_reached, %{
+      proposal_id: proposal_id,
+      agent_id: actor_id,
+      decision: decision_status,
+      data: %{
+        override: true,
+        actor: actor_id,
+        approval_answer: true,
+        requested_decision: decision,
+        note: Keyword.get(opts, :note)
+      }
+    })
+
+    state = notify_force_waiters(state, proposal_id, decision_record)
+
+    state =
+      if decision == :approve do
+        Voting.maybe_execute(state, proposal, nil)
+      else
+        state
+      end
+
+    {state, :ok}
   end
 
   # M6: nil authorizer used to mean "allow every proposal." Any agent could

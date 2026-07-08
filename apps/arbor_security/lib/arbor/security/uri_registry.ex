@@ -101,6 +101,10 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://consensus/force_reject",
     "arbor://consensus/admin",
 
+    # Approval orchestration facade
+    "arbor://approval/read",
+    "arbor://approval/answer",
+
     # Comms facade
     "arbor://comms/send",
     "arbor://comms/poll",

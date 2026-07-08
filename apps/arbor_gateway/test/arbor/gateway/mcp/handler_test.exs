@@ -4,6 +4,18 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
   alias Arbor.Gateway.MCP.Handler
 
+  defmodule FakeOrchestration do
+    def list_pending_approvals(opts) do
+      send(self(), {:list_pending_approvals, opts})
+      Process.get({__MODULE__, :list_result}, {:ok, []})
+    end
+
+    def answer_approval(id, decision, opts) do
+      send(self(), {:answer_approval, id, decision, opts})
+      Process.get({__MODULE__, :answer_result}, :ok)
+    end
+  end
+
   setup do
     # Ensure ETS tables exist for memory/security lookups
     for table <- [
@@ -17,6 +29,10 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
         :ets.new(table, [:named_table, :public, :set])
       end
     end
+
+    Process.delete(:arbor_authenticated_agent_id)
+    Process.delete({FakeOrchestration, :list_result})
+    Process.delete({FakeOrchestration, :answer_result})
 
     {:ok, state: %{}}
   end
@@ -48,12 +64,20 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   # ===========================================================================
 
   describe "handle_list_tools/2" do
-    test "returns 4 tools", %{state: state} do
+    test "returns tools", %{state: state} do
       {:ok, tools, nil, _state} = Handler.handle_list_tools(nil, state)
-      assert length(tools) == 4
+      assert length(tools) == 6
 
       names = Enum.map(tools, & &1.name) |> Enum.sort()
-      assert names == ["arbor_actions", "arbor_help", "arbor_run", "arbor_status"]
+
+      assert names == [
+               "arbor_actions",
+               "arbor_answer_approval",
+               "arbor_help",
+               "arbor_list_pending_approvals",
+               "arbor_run",
+               "arbor_status"
+             ]
     end
 
     test "all tools have required fields", %{state: state} do
@@ -86,6 +110,121 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
       status_tool = Enum.find(tools, &(&1.name == "arbor_status"))
       assert "component" in status_tool.inputSchema.required
+    end
+
+    test "arbor_answer_approval requires id and decision", %{state: state} do
+      {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
+      approval_tool = Enum.find(tools, &(&1.name == "arbor_answer_approval"))
+      assert "id" in approval_tool.inputSchema.required
+      assert "decision" in approval_tool.inputSchema.required
+    end
+  end
+
+  # ===========================================================================
+  # approval orchestration tools
+  # ===========================================================================
+
+  describe "approval orchestration tools" do
+    setup do
+      previous = Application.get_env(:arbor_gateway, :orchestration_module)
+      Application.put_env(:arbor_gateway, :orchestration_module, FakeOrchestration)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:arbor_gateway, :orchestration_module)
+          value -> Application.put_env(:arbor_gateway, :orchestration_module, value)
+        end
+
+        Process.delete(:arbor_authenticated_agent_id)
+      end)
+
+      :ok
+    end
+
+    test "list_pending_approvals requires SignedRequest authentication", %{state: state} do
+      {:ok, result, _state} =
+        Handler.handle_call_tool("arbor_list_pending_approvals", %{}, state)
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text =~ "SignedRequest authentication"
+    end
+
+    test "list_pending_approvals calls the shared API with filters", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      Process.put(
+        {FakeOrchestration, :list_result},
+        {:ok,
+         [
+           %{
+             id: "irq_1",
+             source: :interaction,
+             agent_id: "agent_1",
+             principal_id: "agent_1",
+             resource_uri: "arbor://fs/read/repo",
+             status: :pending
+           }
+         ]}
+      )
+
+      {:ok, %{content: [%{text: text}]}, _state} =
+        Handler.handle_call_tool(
+          "arbor_list_pending_approvals",
+          %{
+            "agent_id" => "agent_1",
+            "principal_id" => "agent_1",
+            "resource_uri" => "arbor://fs/read"
+          },
+          state
+        )
+
+      assert %{"approvals" => [%{"id" => "irq_1", "source" => "interaction"}]} =
+               Jason.decode!(text)
+
+      assert_received {:list_pending_approvals, opts}
+      assert opts[:caller_id] == "human_1"
+      assert opts[:agent_id] == "agent_1"
+      assert opts[:principal_id] == "agent_1"
+      assert opts[:resource_uri] == "arbor://fs/read"
+    end
+
+    test "answer_approval calls the shared API with caller and note", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, %{content: [%{text: text}]}, _state} =
+        Handler.handle_call_tool(
+          "arbor_answer_approval",
+          %{
+            "id" => "irq_1",
+            "decision" => "rework",
+            "note" => "add a regression test"
+          },
+          state
+        )
+
+      assert %{"ok" => true, "approval_id" => "irq_1", "decision" => "rework"} =
+               Jason.decode!(text)
+
+      assert_received {:answer_approval, "irq_1", "rework", opts}
+      assert opts[:caller_id] == "human_1"
+      assert opts[:note] == "add a regression test"
+    end
+
+    test "answer_approval marks orchestration errors as MCP errors", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+      Process.put({FakeOrchestration, :answer_result}, {:error, :not_found})
+
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_answer_approval",
+          %{"id" => "missing", "decision" => "approve"},
+          state
+        )
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text =~ ":not_found"
     end
   end
 

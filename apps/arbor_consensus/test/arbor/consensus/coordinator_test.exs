@@ -283,6 +283,108 @@ defmodule Arbor.Consensus.CoordinatorTest do
     end
   end
 
+  describe "answer_authorization_request/5" do
+    setup do
+      ensure_authorization_request_topic!()
+      :ok
+    end
+
+    test "answers authorization requests with the scoped approval-answer capability" do
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.SlowBackend,
+          config: [evaluation_timeout_ms: 60_000]
+        )
+
+      agent_id = unique_id("agent_approval")
+      actor_id = unique_id("human_approval")
+      grant_capability(actor_id, "arbor://approval/answer/#{agent_id}")
+
+      {:ok, id} =
+        Coordinator.submit(
+          %{
+            proposer: agent_id,
+            topic: :authorization_request,
+            description: "Authorization request for arbor://fs/read/repo",
+            metadata: %{
+              principal_id: agent_id,
+              resource_uri: "arbor://fs/read/repo"
+            }
+          },
+          server: coord
+        )
+
+      assert :ok =
+               Coordinator.answer_authorization_request(
+                 id,
+                 :approve,
+                 actor_id,
+                 [note: "bounded"],
+                 coord
+               )
+
+      assert {:ok, :approved} = Coordinator.get_status(id, coord)
+      assert {:ok, decision} = Coordinator.get_decision(id, coord)
+      assert decision.decision == :approved
+      assert decision.requested_decision == :approve
+      assert decision.note == "bounded"
+    end
+
+    test "does not approve authorization requests marked as blocked" do
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.SlowBackend,
+          config: [evaluation_timeout_ms: 60_000]
+        )
+
+      agent_id = unique_id("agent_blocked_approval")
+      actor_id = unique_id("human_blocked_approval")
+      grant_capability(actor_id, "arbor://approval/answer/#{agent_id}")
+
+      {:ok, id} =
+        Coordinator.submit(
+          %{
+            proposer: agent_id,
+            topic: :authorization_request,
+            description: "Authorization request for arbor://fs/write/repo",
+            metadata: %{
+              principal_id: agent_id,
+              resource_uri: "arbor://fs/write/repo",
+              policy_mode: :block
+            }
+          },
+          server: coord
+        )
+
+      assert {:error, :blocked_approval_cannot_be_approved} =
+               Coordinator.answer_authorization_request(id, :approve, actor_id, [], coord)
+
+      assert :ok = Coordinator.answer_authorization_request(id, :deny, actor_id, [], coord)
+      assert {:ok, :rejected} = Coordinator.get_status(id, coord)
+    end
+
+    test "refuses to answer non-authorization proposals" do
+      {_pid, coord} =
+        TestHelpers.start_test_coordinator(
+          evaluator_backend: TestHelpers.SlowBackend,
+          config: [evaluation_timeout_ms: 60_000]
+        )
+
+      agent_id = unique_id("agent_non_auth")
+      actor_id = unique_id("human_non_auth")
+      grant_capability(actor_id, "arbor://approval/answer/#{agent_id}")
+
+      {:ok, id} =
+        Coordinator.submit(
+          %{proposer: agent_id, topic: :code_modification, description: "not an auth request"},
+          server: coord
+        )
+
+      assert {:error, :not_authorization_request} =
+               Coordinator.answer_authorization_request(id, :approve, actor_id, [], coord)
+    end
+  end
+
   describe "stats/1" do
     test "returns coordinator statistics", %{coordinator: coord} do
       stats = Coordinator.stats(coord)
@@ -1256,6 +1358,38 @@ defmodule Arbor.Consensus.CoordinatorTest do
 
   defp restore_config(key, nil), do: Application.delete_env(:arbor_consensus, key)
   defp restore_config(key, value), do: Application.put_env(:arbor_consensus, key, value)
+
+  defp unique_id(prefix) do
+    "#{prefix}_#{System.unique_integer([:positive])}"
+  end
+
+  defp grant_capability(principal_id, resource_uri) do
+    cap = %Arbor.Contracts.Security.Capability{
+      id: "cap_#{System.unique_integer([:positive])}",
+      resource_uri: resource_uri,
+      principal_id: principal_id,
+      granted_at: DateTime.utc_now(),
+      expires_at: nil,
+      constraints: %{},
+      delegation_depth: 0,
+      metadata: %{test: true}
+    }
+
+    Arbor.Security.CapabilityStore.put(cap)
+  end
+
+  defp ensure_authorization_request_topic! do
+    attrs = %{
+      topic: :authorization_request,
+      min_quorum: :majority,
+      match_patterns: ["authorization", "approval", "request"]
+    }
+
+    case Arbor.Consensus.TopicRegistry.register_topic(attrs) do
+      {:ok, _rule} -> :ok
+      {:error, :already_exists} -> :ok
+    end
+  end
 
   describe "evaluate_force_authorization/2 (H12 regression)" do
     test "security regression (H12): human_ actors do NOT bypass :requires_approval" do

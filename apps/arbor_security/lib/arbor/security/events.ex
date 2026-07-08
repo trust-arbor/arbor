@@ -16,6 +16,7 @@ defmodule Arbor.Security.Events do
   | `:authorization_granted` | Agent was authorized for a resource |
   | `:authorization_denied` | Agent was denied access to a resource |
   | `:authorization_pending` | Authorization escalated to consensus |
+  | `:approval_answered` | Human/operator answered an approval request |
   | `:capability_granted` | Capability token granted to agent |
   | `:capability_revoked` | Capability token revoked |
   | `:identity_registered` | Agent identity registered in registry |
@@ -76,6 +77,23 @@ defmodule Arbor.Security.Events do
       principal_id: principal_id,
       resource_uri: resource_uri,
       reason: inspect(reason),
+      trace_id: Keyword.get(opts, :trace_id)
+    })
+  end
+
+  @doc "Record a human/operator answer to a pending approval request."
+  @spec record_approval_answered(String.t(), String.t(), atom(), atom(), keyword()) ::
+          :ok | {:error, term()}
+  def record_approval_answered(actor_id, approval_id, source, decision, opts \\ []) do
+    dual_emit(:approval_answered, %{
+      actor_id: actor_id,
+      approval_id: approval_id,
+      source: source,
+      decision: decision,
+      resource_uri: Keyword.get(opts, :resource_uri),
+      agent_id: Keyword.get(opts, :agent_id),
+      principal_id: Keyword.get(opts, :principal_id),
+      note: Keyword.get(opts, :note),
       trace_id: Keyword.get(opts, :trace_id)
     })
   end

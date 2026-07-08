@@ -93,6 +93,18 @@ defmodule Arbor.Security do
       )
 
   @doc """
+  Record a durable security event for an answered approval request.
+
+  External approval surfaces should use this facade instead of writing directly
+  to the event backend.
+  """
+  @spec record_approval_answered(String.t(), String.t(), atom(), atom(), keyword()) ::
+          :ok | {:error, term()}
+  def record_approval_answered(actor_id, approval_id, source, decision, opts \\ []) do
+    Events.record_approval_answered(actor_id, approval_id, source, decision, opts)
+  end
+
+  @doc """
   Return the effective resource URI used by the authorization matcher.
 
   This is exposed so policy-layer code can perform explicit pre-authorization

@@ -61,6 +61,28 @@ defmodule Arbor.Security.EventsTest do
       assert event.data.proposal_id == "prop_123"
     end
 
+    test "records approval_answered with answer metadata" do
+      :ok =
+        Events.record_approval_answered(
+          "human_1",
+          "irq_123",
+          :interaction,
+          :approve,
+          agent_id: "agent_1",
+          principal_id: "agent_1",
+          resource_uri: "arbor://shell/exec/git",
+          note: "bounded command"
+        )
+
+      {:ok, [event]} = Events.get_by_type(:approval_answered)
+      assert event.data.actor_id == "human_1"
+      assert event.data.approval_id == "irq_123"
+      assert event.data.source == :interaction
+      assert event.data.decision == :approve
+      assert event.data.resource_uri == "arbor://shell/exec/git"
+      assert event.data.note == "bounded command"
+    end
+
     test "includes trace_id when provided" do
       :ok =
         Events.record_authorization_granted("agent_001", "arbor://fs/read/docs",

@@ -138,6 +138,27 @@ defmodule Arbor.Consensus do
   defdelegate force_reject(proposal_id, rejector_id, server \\ Coordinator), to: Coordinator
 
   @doc """
+  Answer a pending authorization-request proposal.
+
+  This is narrower than `force_approve/3` and `force_reject/3`: it only applies
+  to proposals whose topic is `:authorization_request`, and authorizes the actor
+  against `arbor://approval/answer` (or the per-agent subtree) instead of the
+  broader `arbor://consensus/admin` override.
+  """
+  @spec answer_authorization_request(
+          String.t(),
+          :approve | :deny | :rework,
+          String.t(),
+          keyword()
+        ) ::
+          :ok | {:error, term()}
+  def answer_authorization_request(proposal_id, decision, actor_id, opts \\ []) do
+    server = Keyword.get(opts, :server, Coordinator)
+    opts = Keyword.delete(opts, :server)
+    Coordinator.answer_authorization_request(proposal_id, decision, actor_id, opts, server)
+  end
+
+  @doc """
   Get coordinator statistics.
   """
   @spec stats(GenServer.server()) :: map()
