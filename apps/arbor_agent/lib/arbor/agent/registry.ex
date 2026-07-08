@@ -79,19 +79,21 @@ defmodule Arbor.Agent.Registry do
   """
   @spec lookup(String.t()) :: {:ok, agent_entry()} | {:error, :not_found}
   def lookup(agent_id) do
-    case :ets.lookup(@table, agent_id) do
-      [{^agent_id, entry}] ->
-        if Process.alive?(entry.pid) do
-          {:ok, entry}
-        else
-          # Stale entry - clean it up
-          :ets.delete(@table, agent_id)
-          {:error, :not_found}
-        end
+    with_registry_table({:error, :not_found}, fn ->
+      case :ets.lookup(@table, agent_id) do
+        [{^agent_id, entry}] ->
+          if Process.alive?(entry.pid) do
+            {:ok, entry}
+          else
+            # Stale entry - clean it up
+            :ets.delete(@table, agent_id)
+            {:error, :not_found}
+          end
 
-      [] ->
-        {:error, :not_found}
-    end
+        [] ->
+          {:error, :not_found}
+      end
+    end)
   end
 
   @doc """
@@ -116,12 +118,14 @@ defmodule Arbor.Agent.Registry do
   """
   @spec list() :: {:ok, [agent_entry()]}
   def list do
-    entries =
-      :ets.tab2list(@table)
-      |> Enum.map(fn {_id, entry} -> entry end)
-      |> Enum.filter(fn entry -> Process.alive?(entry.pid) end)
+    with_registry_table({:ok, []}, fn ->
+      entries =
+        :ets.tab2list(@table)
+        |> Enum.map(fn {_id, entry} -> entry end)
+        |> Enum.filter(fn entry -> Process.alive?(entry.pid) end)
 
-    {:ok, entries}
+      {:ok, entries}
+    end)
   end
 
   @doc """
@@ -129,7 +133,7 @@ defmodule Arbor.Agent.Registry do
   """
   @spec count() :: non_neg_integer()
   def count do
-    :ets.info(@table, :size)
+    with_registry_table(0, fn -> :ets.info(@table, :size) || 0 end)
   end
 
   @doc """
@@ -289,6 +293,20 @@ defmodule Arbor.Agent.Registry do
     end
   end
 
+  defp with_registry_table(default, fun) when is_function(fun, 0) do
+    case :ets.whereis(@table) do
+      :undefined ->
+        default
+
+      _table ->
+        fun.()
+    end
+  rescue
+    ArgumentError -> default
+  catch
+    :error, :badarg -> default
+  end
+
   defp emit_agent_signal(type, data) do
     Arbor.Signals.durable_emit(:agent, type, data)
   rescue
@@ -315,10 +333,12 @@ defmodule Arbor.Agent.Registry do
 
     if node == Node.self() do
       # Local lookup via ETS
-      case :ets.match_object(@table, {:_, %{pid: pid}}) do
-        [{agent_id, _} | _] -> agent_id
-        _ -> nil
-      end
+      with_registry_table(nil, fn ->
+        case :ets.match_object(@table, {:_, %{pid: pid}}) do
+          [{agent_id, _} | _] -> agent_id
+          _ -> nil
+        end
+      end)
     else
       # Remote lookup via RPC
       case :rpc.call(node, :ets, :match_object, [@table, {:_, %{pid: pid}}], 5_000) do

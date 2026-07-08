@@ -102,6 +102,18 @@ defmodule Arbor.Agent.RegistryTest do
       assert {:ok, []} = Registry.list()
     end
 
+    test "security regression: returns empty list when registry ETS table is unavailable" do
+      on_exit(fn -> restart_registry_child() end)
+
+      assert :ok = Supervisor.terminate_child(Arbor.Agent.AppSupervisor, Registry)
+      assert :ets.whereis(:arbor_agent_registry) == :undefined
+
+      assert {:ok, []} = Registry.list()
+      assert {:error, :not_found} = Registry.lookup("missing-agent")
+      assert Registry.count() == 0
+      assert {:ok, []} = Registry.find(fn _entry -> true end)
+    end
+
     test "returns all registered live agents" do
       pids =
         for i <- 1..3 do
@@ -197,6 +209,31 @@ defmodule Arbor.Agent.RegistryTest do
       Process.sleep(100)
 
       assert {:error, :not_found} = Registry.lookup("test-monitor")
+    end
+  end
+
+  defp restart_registry_child do
+    case Supervisor.restart_child(Arbor.Agent.AppSupervisor, Registry) do
+      {:ok, _pid} -> wait_for_registry_table()
+      {:ok, _pid, _info} -> wait_for_registry_table()
+      {:error, :running} -> wait_for_registry_table()
+      {:error, {:already_started, _pid}} -> wait_for_registry_table()
+      {:error, :not_found} -> :ok
+    end
+  end
+
+  defp wait_for_registry_table(retries \\ 20)
+
+  defp wait_for_registry_table(0), do: flunk("registry ETS table did not restart")
+
+  defp wait_for_registry_table(retries) do
+    case :ets.whereis(:arbor_agent_registry) do
+      :undefined ->
+        Process.sleep(10)
+        wait_for_registry_table(retries - 1)
+
+      _table ->
+        :ok
     end
   end
 end
