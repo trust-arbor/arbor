@@ -36,7 +36,7 @@ defmodule ArborGateway.MixProject do
       # WebSocket upgrade for the chat API (Plug.Cowboy + WebSock behaviour).
       {:websock_adapter, "~> 0.5"},
       {:jason, "~> 1.4"},
-      {:ex_mcp, "1.0.0-rc.2", override: true},
+      {:ex_mcp, "1.0.0-rc.4", override: true},
       {:zoi, "~> 0.17"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}

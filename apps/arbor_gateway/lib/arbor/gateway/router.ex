@@ -48,6 +48,7 @@ defmodule Arbor.Gateway.Router do
     to: ExMCP.HttpPlug,
     init_opts: [
       handler: Arbor.Gateway.MCP.Handler,
+      handler_opts: {Arbor.Gateway.MCP.Handler, :handler_opts_from_conn, []},
       server_info: %{name: "arbor", version: "0.1.0"},
       sse_enabled: true,
       cors_enabled: false

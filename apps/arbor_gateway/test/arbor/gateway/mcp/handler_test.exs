@@ -69,6 +69,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     end
 
     Process.delete(:arbor_authenticated_agent_id)
+    Process.delete(:arbor_authenticated_signed_request)
     Process.delete({FakeOrchestration, :list_result})
     Process.delete({FakeOrchestration, :answer_result})
     Process.delete({FakeOrchestration, :dispatch_result})
@@ -97,6 +98,43 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     test "defaults protocol version when not provided", %{state: state} do
       {:ok, result, _state} = Handler.handle_initialize(%{}, state)
       assert result.protocolVersion == "2024-11-05"
+    end
+  end
+
+  describe "ExMCP auth context bridge" do
+    setup do
+      Process.delete(:arbor_authenticated_agent_id)
+      Process.delete(:arbor_authenticated_signed_request)
+
+      on_exit(fn ->
+        Process.delete(:arbor_authenticated_agent_id)
+        Process.delete(:arbor_authenticated_signed_request)
+      end)
+
+      :ok
+    end
+
+    test "builds handler opts from SignedRequestAuth assigns" do
+      signed_request = %{agent_id: "agent_mcp_bridge", signature: "sig"}
+      conn = %{assigns: %{agent_id: "agent_mcp_bridge", signed_request: signed_request}}
+
+      assert Handler.handler_opts_from_conn(conn, %{"method" => "tools/call"}) == [
+               authenticated_agent_id: "agent_mcp_bridge",
+               authenticated_signed_request: signed_request
+             ]
+    end
+
+    test "security regression: init installs verified auth context in handler process" do
+      signed_request = %{agent_id: "agent_mcp_bridge", signature: "sig"}
+
+      assert {:ok, %{}} =
+               Handler.init(
+                 authenticated_agent_id: "agent_mcp_bridge",
+                 authenticated_signed_request: signed_request
+               )
+
+      assert Process.get(:arbor_authenticated_agent_id) == "agent_mcp_bridge"
+      assert Process.get(:arbor_authenticated_signed_request) == signed_request
     end
   end
 

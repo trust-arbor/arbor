@@ -40,6 +40,17 @@ defmodule Arbor.Gateway.MCP.Handler do
   end
 
   @doc false
+  def handler_opts_from_conn(conn, _request) do
+    assigns = Map.get(conn, :assigns, %{})
+
+    [
+      authenticated_agent_id: Map.get(assigns, :agent_id),
+      authenticated_signed_request: Map.get(assigns, :signed_request)
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  @doc false
   def handle_tool_call(name, arguments, _state) do
     # Every `handle_call_tool/3` clause (incl. the catch-all) returns
     # `{:ok, result, state}` — there's no `{:error, _, _}` return, so matching
@@ -54,9 +65,14 @@ defmodule Arbor.Gateway.MCP.Handler do
   # Handler Callbacks
   # ===========================================================================
 
-  # init/1 and terminate/2 use defaults from `use ExMCP.Server.Handler`
-  # (which injects `use GenServer`). Explicitly defining them here with
-  # @impl GenServer triggers "conflicting behaviours" warnings in Elixir 1.19+.
+  # ExMCP starts a fresh handler GenServer for each HTTP request. SignedRequestAuth
+  # verifies the request in the Plug process; ExMCP passes those verified assigns
+  # through `handler_opts` so the handler process can expose the same request-local
+  # auth context to the existing Arbor tool helpers.
+  def init(opts) do
+    install_auth_context(opts)
+    {:ok, %{}}
+  end
 
   @impl ExMCP.Server.Handler
   def handle_initialize(params, state) do
@@ -357,19 +373,43 @@ defmodule Arbor.Gateway.MCP.Handler do
      }, state}
   end
 
-  # Per-request authenticated agent_id, set by Arbor.Gateway.SignedRequestAuth
-  # in the request process before ExMCP dispatches into this handler. The Plug
-  # pipeline runs synchronously in the request process, so the value is local
-  # to this request and is overwritten on the next one.
+  # Per-request authenticated agent_id, verified by Arbor.Gateway.SignedRequestAuth
+  # and installed into this short-lived ExMCP handler process during init/1.
   defp authenticated_agent_id do
     Process.get(:arbor_authenticated_agent_id)
   end
 
-  # H1: read the signed_request struct stashed by Arbor.Gateway.SignedRequestAuth
+  # H1: read the signed_request struct verified by Arbor.Gateway.SignedRequestAuth
   # so the MCP handler can thread it into Arbor.Actions.authorize_and_execute.
   defp authenticated_signed_request do
     Process.get(:arbor_authenticated_signed_request)
   end
+
+  defp install_auth_context(opts) do
+    if agent_id = auth_context_option(opts, :authenticated_agent_id) do
+      Process.put(:arbor_authenticated_agent_id, agent_id)
+    end
+
+    if signed_request = auth_context_option(opts, :authenticated_signed_request) do
+      Process.put(:arbor_authenticated_signed_request, signed_request)
+    end
+
+    :ok
+  end
+
+  defp auth_context_option(opts, key) when is_map(opts) do
+    Map.get(opts, key) || Map.get(opts, Atom.to_string(key))
+  end
+
+  defp auth_context_option(opts, key) when is_list(opts) do
+    Keyword.get(opts, key) ||
+      case List.keyfind(opts, Atom.to_string(key), 0) do
+        {_string_key, value} -> value
+        nil -> nil
+      end
+  end
+
+  defp auth_context_option(_opts, _key), do: nil
 
   # Public (@doc false) for the H1 regression test, which constructs a fake
   # signed_request in the process dict and asserts the helper threads it

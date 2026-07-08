@@ -41,9 +41,9 @@ defmodule Arbor.MixProject do
        ref: "7fc90881d3c8ca49e769413cc8217344f2b4c29a",
        override: true},
       # ex_mcp on Hex (a temporary `path:` dep is only ever for local testing of unreleased
-      # changes — the path has no source on the CI runner). rc.2 ships the synced Codex + Claude
-      # ACP adapters; Claude ACP also needs Arbor's mailbox-drain fix (see acp_session.ex).
-      {:ex_mcp, "1.0.0-rc.2", override: true},
+      # changes — the path has no source on the CI runner). rc.4 adds per-request HTTP handler
+      # opts so Arbor's MCP handler can receive verified SignedRequest context.
+      {:ex_mcp, "1.0.0-rc.4", override: true},
 
       # Dev/test tools
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
