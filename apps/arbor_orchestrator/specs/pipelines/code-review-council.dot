@@ -1,0 +1,178 @@
+// Code Review Council - binding multi-model branch review.
+//
+// Input context is produced by Arbor.Contracts.Consensus.CodeReviewRequest.to_context/1:
+//   diff/files/intent - top-level aliases for direct DOT/action consumers
+//   review.prompt     - formatted branch, intent, files, and diff for reviewers
+//   review.request    - JSON-clean nested request map
+//   council.question  - decision question for consensus.decide
+//
+// Each reviewer must return a JSON object with keys:
+//   vote: "approve" | "reject" | "abstain"
+//   reasoning: string
+//   confidence: 0.0..1.0
+//   concerns: array of strings
+//   risk_score: 0.0..1.0
+
+digraph code_review_council {
+  goal="Binding code review council for a completed coding-agent branch"
+  mode="decision"
+
+  start [type="start" shape="Mdiamond"]
+
+  evaluate [
+    type="parallel"
+    join_policy="wait_all"
+    error_policy="continue"
+    max_parallel="10"
+    join_target="collect"
+  ]
+
+  correctness [
+    type="compute"
+    purpose="llm"
+    simulate="false"
+    use_tools="false"
+    llm_provider="openai_oauth"
+    llm_model="gpt-5.5"
+    temperature="0.1"
+    prompt_context_key="review.prompt"
+    system_prompt="You are the CORRECTNESS reviewer for Arbor code. Judge whether the diff does what the stated intent claims. Focus on logic bugs, wrong control flow, state transitions, pattern-match failures, concurrency mistakes, and behavior that will surprise callers. Vote reject for concrete correctness bugs that should block review; abstain when the diff is outside your lens. Return only a JSON object with keys vote, reasoning, confidence, concerns, risk_score."
+  ]
+
+  security [
+    type="compute"
+    purpose="llm"
+    simulate="false"
+    use_tools="false"
+    llm_provider="openai_oauth"
+    llm_model="gpt-5.5"
+    temperature="0.1"
+    prompt_context_key="review.prompt"
+    system_prompt="You are the SECURITY reviewer for Arbor, an Elixir/OTP agent system with capabilities, FileGuard, SafePath, SafeAtom, trust policy, and fail-closed authorization. Look for weakened gates, fail-open behavior, confused deputy paths, unsafe path or atom handling, secret exposure, egress expansion, missing regression tests for security fixes, and privilege escalation. Vote reject for any plausible security regression. Return only a JSON object with keys vote, reasoning, confidence, concerns, risk_score."
+  ]
+
+  regression_test_coverage [
+    type="compute"
+    purpose="llm"
+    simulate="false"
+    use_tools="false"
+    llm_provider="ollama"
+    llm_model="kimi-k2.7-code:cloud"
+    temperature="0.1"
+    prompt_context_key="review.prompt"
+    system_prompt="You are the REGRESSION AND TEST COVERAGE reviewer for Arbor code. Check whether the diff includes focused tests for new behavior, bug fixes, edge paths, and security regressions. Security bug fixes must include a committed regression test that fails on the previous commit and passes on the new one. Vote reject when missing tests create material regression risk. Return only a JSON object with keys vote, reasoning, confidence, concerns, risk_score."
+  ]
+
+  edge_cases_error_handling [
+    type="compute"
+    purpose="llm"
+    simulate="false"
+    use_tools="false"
+    llm_provider="ollama"
+    llm_model="kimi-k2.7-code:cloud"
+    temperature="0.1"
+    prompt_context_key="review.prompt"
+    system_prompt="You are the EDGE CASES AND ERROR HANDLING reviewer for Arbor code. Focus on nil and empty inputs, malformed external data, timeouts, partial failures, retries, supervision interactions, stale state, and tuple/error handling. Vote reject for unhandled edge cases likely to fail in normal operation. Return only a JSON object with keys vote, reasoning, confidence, concerns, risk_score."
+  ]
+
+  simplicity_yagni_scope [
+    type="compute"
+    purpose="llm"
+    simulate="false"
+    use_tools="false"
+    llm_provider="xai_oauth"
+    llm_model="grok-4.3"
+    temperature="0.1"
+    prompt_context_key="review.prompt"
+    system_prompt="You are the SIMPLICITY, YAGNI, AND SCOPE reviewer for Arbor code. Judge whether the diff solves the requested problem with minimal surface area and avoids speculative abstractions, unrelated cleanup, premature generalization, and broad behavior changes. Vote reject when scope expansion materially increases review or maintenance risk. Return only a JSON object with keys vote, reasoning, confidence, concerns, risk_score."
+  ]
+
+  readability_maintainability [
+    type="compute"
+    purpose="llm"
+    simulate="false"
+    use_tools="false"
+    llm_provider="xai_oauth"
+    llm_model="grok-4.3"
+    temperature="0.1"
+    prompt_context_key="review.prompt"
+    system_prompt="You are the READABILITY AND MAINTAINABILITY reviewer for Arbor code. Check naming, module placement, comments, typespec clarity, local idioms, error messages, and whether future maintainers can understand the change without reconstructing hidden context. Vote reject only for issues that materially obscure behavior or ownership. Return only a JSON object with keys vote, reasoning, confidence, concerns, risk_score."
+  ]
+
+  contract_api_compat [
+    type="compute"
+    purpose="llm"
+    simulate="false"
+    use_tools="false"
+    llm_provider="ollama"
+    llm_model="glm-5.2:cloud"
+    temperature="0.1"
+    prompt_context_key="review.prompt"
+    system_prompt="You are the CONTRACT AND API COMPATIBILITY reviewer for Arbor code. Check public facades, shared contracts, behavior callbacks, action schemas, serialized context keys, CLI/API compatibility, and dependency-direction constraints. Arbor is contract-first; cross-library callers must use facades. Vote reject for breaking or undocumented public-surface changes. Return only a JSON object with keys vote, reasoning, confidence, concerns, risk_score."
+  ]
+
+  architecture_grain_fit [
+    type="compute"
+    purpose="llm"
+    simulate="false"
+    use_tools="false"
+    llm_provider="ollama"
+    llm_model="glm-5.2:cloud"
+    temperature="0.1"
+    prompt_context_key="review.prompt"
+    system_prompt="You are the ARCHITECTURE AND GRAIN-FIT reviewer for Arbor code. Judge whether the change uses the right mechanism: DOT graph for branchy durable agent-authored flows, CRC core plus shell for mechanical state changes, Jido action for side-effecting business operations, handler only for generic opcodes, and LLM plugs for LLM-call concerns. Vote reject for mechanism mismatches that will create drift. Return only a JSON object with keys vote, reasoning, confidence, concerns, risk_score."
+  ]
+
+  performance_resource [
+    type="compute"
+    purpose="llm"
+    simulate="false"
+    use_tools="false"
+    llm_provider="ollama"
+    llm_model="minimax-m3:cloud"
+    temperature="0.1"
+    prompt_context_key="review.prompt"
+    system_prompt="You are the PERFORMANCE AND RESOURCE reviewer for Arbor code. Check hot-path cost, unbounded memory or process growth, repeated serialization, blocking calls in GenServers, unnecessary network calls, N+1 patterns, and BEAM concurrency or supervision impact. Vote reject for material runtime or scaling risk. Return only a JSON object with keys vote, reasoning, confidence, concerns, risk_score."
+  ]
+
+  docs_naming [
+    type="compute"
+    purpose="llm"
+    simulate="false"
+    use_tools="false"
+    llm_provider="ollama"
+    llm_model="minimax-m3:cloud"
+    temperature="0.1"
+    prompt_context_key="review.prompt"
+    system_prompt="You are the DOCS AND NAMING reviewer for Arbor code. Check public-surface docs, roadmap or decision drift, accurate names, honest comments, absolute dates in docs, and whether new behavior is discoverable where users and agents will look. Vote reject only when missing docs or misleading names create real operational risk. Return only a JSON object with keys vote, reasoning, confidence, concerns, risk_score."
+  ]
+
+  collect [type="parallel.fan_in"]
+
+  decide [
+    type="exec"
+    target="action"
+    action="consensus.decide"
+    param.quorum="majority"
+    param.mode="decision"
+    context_keys="parallel.results,council.question"
+    output_prefix="council"
+  ]
+
+  done [type="exit" shape="Msquare"]
+
+  start -> evaluate
+
+  evaluate -> correctness -> collect
+  evaluate -> security -> collect
+  evaluate -> regression_test_coverage -> collect
+  evaluate -> edge_cases_error_handling -> collect
+  evaluate -> simplicity_yagni_scope -> collect
+  evaluate -> readability_maintainability -> collect
+  evaluate -> contract_api_compat -> collect
+  evaluate -> architecture_grain_fit -> collect
+  evaluate -> performance_resource -> collect
+  evaluate -> docs_naming -> collect
+
+  collect -> decide -> done
+}

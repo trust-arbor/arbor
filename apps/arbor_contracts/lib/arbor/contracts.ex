@@ -32,6 +32,7 @@ defmodule Arbor.Contracts do
   - `Arbor.Contracts.Consensus.Protocol` - Consensus protocol types and helpers
   - `Arbor.Contracts.Consensus.Proposal` - Change proposals
   - `Arbor.Contracts.Consensus.Evaluation` - Evaluator assessments
+  - `Arbor.Contracts.Consensus.CodeReviewRequest` - Code-review council inputs
   - `Arbor.Contracts.Consensus.CouncilDecision` - Council decisions
   - `Arbor.Contracts.Consensus.ConsensusEvent` - Consensus audit trail
 
@@ -89,6 +90,7 @@ defmodule Arbor.Contracts do
       Arbor.Contracts.Consensus.Protocol,
       Arbor.Contracts.Consensus.Proposal,
       Arbor.Contracts.Consensus.Evaluation,
+      Arbor.Contracts.Consensus.CodeReviewRequest,
       Arbor.Contracts.Consensus.CouncilDecision,
       Arbor.Contracts.Consensus.ConsensusEvent,
       # Trust
