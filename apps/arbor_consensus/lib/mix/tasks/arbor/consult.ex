@@ -10,7 +10,7 @@ defmodule Mix.Tasks.Arbor.Consult do
       $ mix arbor.consult -q "Build order?" --all --save --docs design.md
       $ mix arbor.consult "What is consciousness?" --multi-model --save
       $ mix arbor.consult "Review this code" --provider anthropic:claude-sonnet-4-5-20250929
-      $ mix arbor.consult "Quick question" -r --provider ollama:deepseek-v3.2:cloud
+      $ mix arbor.consult "Quick question" -r -b acp --provider ollama:deepseek-v3.2:cloud
       $ mix arbor.consult "Analyze this" --skill security-perspective
 
   ## Options
@@ -29,6 +29,7 @@ defmodule Mix.Tasks.Arbor.Consult do
     * `--provider`            — Override provider:model (e.g. anthropic:claude-sonnet-4-5-20250929)
     * `--skill` / `-k`        — Use a skill from the library as the system prompt
     * `--timeout`             — Per-perspective timeout in seconds (default: 180)
+    * `--runtime` / `-b`      — Force `acp` CLI agents or in-BEAM `arbor` providers
 
   ## Saving Results
 
@@ -58,7 +59,7 @@ defmodule Mix.Tasks.Arbor.Consult do
 
   Use a specific provider:model:
 
-      $ mix arbor.consult "Quick question" -r --provider ollama:deepseek-v3.2:cloud
+      $ mix arbor.consult "Quick question" -r -b acp --provider ollama:deepseek-v3.2:cloud
 
   Use a skill as system prompt:
 
@@ -87,6 +88,7 @@ defmodule Mix.Tasks.Arbor.Consult do
     provider: :string,
     skill: :string,
     timeout: :integer,
+    runtime: :string,
     backend: :string
   ]
 
@@ -122,7 +124,7 @@ defmodule Mix.Tasks.Arbor.Consult do
       -k, --skill NAME         Use a skill from the library as system prompt
           --provider P:M       Override provider:model (e.g. anthropic:claude-sonnet-4-5-20250929)
           --timeout SECONDS    Timeout per perspective (default: 180)
-      -b, --backend cli|api   Force CLI agents (read source code) or API providers
+      -b, --runtime acp|arbor Force CLI agents (read source code) or in-BEAM providers
 
     Perspectives: #{Enum.join(@perspectives, ", ")}
     """)
@@ -131,7 +133,7 @@ defmodule Mix.Tasks.Arbor.Consult do
   end
 
   def run(args) do
-    {opts, positional, _invalid} = OptionParser.parse(args, strict: @switches, aliases: @aliases)
+    {opts, positional, _invalid} = parse_args(args)
 
     question = opts[:question] || Enum.join(positional, " ")
 
@@ -633,6 +635,16 @@ defmodule Mix.Tasks.Arbor.Consult do
     end
   end
 
+  @doc false
+  def parse_args(args) do
+    OptionParser.parse(args, strict: @switches, aliases: @aliases)
+  end
+
+  @doc false
+  def runtime_option(opts) do
+    opts[:runtime] || legacy_backend_runtime(opts[:backend])
+  end
+
   defp build_eval_opts(opts) do
     eval_opts = []
 
@@ -676,9 +688,9 @@ defmodule Mix.Tasks.Arbor.Consult do
       end
 
     # --runtime acp|arbor forces ACP CLI agents (can read source code) or
-    # in-BEAM HTTP via arbor_llm. Replaces the legacy --backend cli|api
-    # toggle as of Phase 3 of priorities-2026-06-02 item 9.
-    case opts[:runtime] do
+    # in-BEAM HTTP via arbor_llm. --backend cli|api is accepted only as a
+    # compatibility shim for the pre-runtime flag.
+    case runtime_option(opts) do
       nil ->
         eval_opts
 
@@ -693,6 +705,11 @@ defmodule Mix.Tasks.Arbor.Consult do
         exit({:shutdown, 1})
     end
   end
+
+  defp legacy_backend_runtime(nil), do: nil
+  defp legacy_backend_runtime("cli"), do: "acp"
+  defp legacy_backend_runtime("api"), do: "arbor"
+  defp legacy_backend_runtime(other), do: other
 
   defp load_skill(skill_name) do
     case Arbor.Common.SkillLibrary.get(skill_name) do
