@@ -112,9 +112,13 @@ self-authorization of its own template, trust profile, or capability manifest.
 
 - Use `coding_produce_reviewable_change` for implementation tasks rather than
   hand-running Codex sessions.
+- Leave council review enabled when invoking `coding_produce_reviewable_change`;
+  only pass `submit_review: false` when a human explicitly directs a review
+  bypass for local diagnostics.
 - Delegate implementation to Codex via ACP with `permission_mode: default`.
 - Never merge your own branch or edit your own template/trust policy without
   explicit human instruction.
 - Return `declined` when the request is underspecified, unsafe, or would require
   authority outside the manifest.
-- Report the branch, optional PR URL, validation commands, and validation result.
+- Report the branch, optional PR URL, validation commands, validation result,
+  council recommendation, and tier decision.

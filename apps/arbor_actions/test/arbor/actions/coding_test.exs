@@ -1,7 +1,7 @@
 defmodule Arbor.Actions.CodingTest do
   use Arbor.Actions.ActionCase, async: true
 
-  alias Arbor.Actions.{Acp, Coding, Git, Shell}
+  alias Arbor.Actions.{Acp, Coding, Council, Git, Shell}
 
   @moduletag :fast
 
@@ -63,7 +63,8 @@ defmodule Arbor.Actions.CodingTest do
                    validation_commands: [
                      "./bin/mix test apps/arbor_actions/test/arbor/actions/coding_test.exs"
                    ],
-                   pr_title: "Add feature file"
+                   pr_title: "Add feature file",
+                   submit_review: false
                  },
                  %{action_runner: runner}
                )
@@ -129,7 +130,8 @@ defmodule Arbor.Actions.CodingTest do
                    worktree_base_dir: Path.join(tmp_dir, "worktrees"),
                    validation_commands: ["./bin/mix test"],
                    pr_title: "Add feature file",
-                   open_pr: true
+                   open_pr: true,
+                   submit_review: false
                  },
                  %{action_runner: runner}
                )
@@ -143,6 +145,234 @@ defmodule Arbor.Actions.CodingTest do
       assert pr_params.branch == "test/coding-agent-pr"
       assert pr_params.draft == true
       assert pr_params.body =~ "Human review and merge are required."
+    end
+
+    test "submits the committed diff to council review and exposes auto-proceed routing",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "codex-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          {:ok, %{text: "STATUS: implemented\nCreated feature.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, _params, _context ->
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        Council.ReviewChange, params, _context ->
+          send(parent, {:review, params})
+
+          {:ok,
+           %{
+             status: "reviewed",
+             recommendation: :keep,
+             decision: "approved",
+             branch: params.branch,
+             files: params.files,
+             approve_count: 9,
+             reject_count: 1,
+             abstain_count: 0,
+             quorum_met: true,
+             blast_radius: :low,
+             tier_decision: :auto_proceed,
+             human_required: false,
+             security_veto: false,
+             tier_reasons: []
+           }}
+
+        Git.PR, params, _context ->
+          send(parent, {:unexpected_pr, params})
+          {:ok, %{url: "https://example.test/pr/unexpected"}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   branch_name: "test/coding-agent-review",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["./bin/mix test"]
+                 },
+                 %{action_runner: runner, agent_id: "agent_coder"}
+               )
+
+      assert result.status == "change_committed"
+      assert result.tier_decision == :auto_proceed
+      assert result.human_required == false
+      assert result.review_recommendation == :keep
+      assert result.review.files == ["feature.txt"]
+
+      assert_receive {:review, review_params}
+      assert review_params.branch == "test/coding-agent-review"
+      assert review_params.files == ["feature.txt"]
+      assert review_params.intent == "Add feature file"
+      assert review_params.agent_id == "agent_coder"
+      assert review_params.diff =~ "+implemented"
+      assert is_binary(review_params.base_ref)
+
+      refute_received {:unexpected_pr, _}
+    end
+
+    test "human-review routing can still open a draft PR when requested",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "codex-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "security.txt"), "review me\n")
+          {:ok, %{text: "STATUS: implemented\nCreated security.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, _params, _context ->
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        Council.ReviewChange, params, _context ->
+          send(parent, {:review, params})
+
+          {:ok,
+           %{
+             status: "reviewed",
+             recommendation: :keep,
+             decision: "approved",
+             branch: params.branch,
+             files: params.files,
+             blast_radius: :high,
+             tier_decision: :human_review,
+             human_required: true,
+             security_veto: false,
+             tier_reasons: [:high_blast_radius]
+           }}
+
+        Git.PR, params, _context ->
+          send(parent, {:pr, params})
+          {:ok, %{url: "https://example.test/pr/2", number: 2, draft?: true}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Touch security-sensitive code",
+                   repo_path: repo,
+                   branch_name: "test/coding-agent-human-review",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["./bin/mix test"],
+                   submit_review: true,
+                   open_pr: true
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "pr_created"
+      assert result.pr_url == "https://example.test/pr/2"
+      assert result.tier_decision == :human_review
+      assert result.human_required == true
+      assert result.blast_radius == :high
+
+      assert_receive {:review, _review_params}
+      assert_receive {:pr, pr_params}
+      assert pr_params.branch == "test/coding-agent-human-review"
+      assert pr_params.draft == true
+    end
+
+    test "review rework and stop routes skip draft PR creation", %{tmp_dir: tmp_dir} do
+      for {tier_decision, expected_status} <- [
+            {:rework, "review_requires_rework"},
+            {:stop, "review_rejected"}
+          ] do
+        repo = create_git_repo(Path.join(tmp_dir, "repo-#{tier_decision}"))
+        parent = self()
+        branch = "test/coding-agent-#{tier_decision}"
+        file_name = "#{tier_decision}.txt"
+
+        runner = fn
+          Acp.StartSession, params, _context ->
+            Process.put(:coding_test_worktree, params.cwd)
+            {:ok, %{session_pid: self(), session_id: "codex-session"}}
+
+          Acp.SendMessage, _params, _context ->
+            worktree = Process.get(:coding_test_worktree)
+            File.write!(Path.join(worktree, file_name), "#{tier_decision}\n")
+            {:ok, %{text: "STATUS: implemented\nCreated #{file_name}"}}
+
+          Acp.CloseSession, _params, _context ->
+            {:ok, %{status: "closed"}}
+
+          Shell.Execute, _params, _context ->
+            {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+          Council.ReviewChange, params, _context ->
+            send(parent, {:review, tier_decision, params})
+
+            recommendation = if tier_decision == :rework, do: :revise, else: :reject
+            decision = if tier_decision == :rework, do: "deadlock", else: "rejected"
+
+            {:ok,
+             %{
+               status: "reviewed",
+               recommendation: recommendation,
+               decision: decision,
+               branch: params.branch,
+               files: params.files,
+               blast_radius: :low,
+               tier_decision: tier_decision,
+               human_required: false,
+               security_veto: false,
+               tier_reasons: []
+             }}
+
+          Git.PR, params, _context ->
+            send(parent, {:unexpected_pr, tier_decision, params})
+            {:ok, %{url: "https://example.test/pr/unexpected"}}
+
+          module, params, context ->
+            module.run(params, Map.delete(context, :action_runner))
+        end
+
+        assert {:ok, result} =
+                 Coding.ProduceReviewableChange.run(
+                   %{
+                     task: "Exercise #{tier_decision} routing",
+                     repo_path: repo,
+                     branch_name: branch,
+                     worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                     validation_commands: ["./bin/mix test"],
+                     submit_review: true,
+                     open_pr: true
+                   },
+                   %{action_runner: runner}
+                 )
+
+        assert result.status == expected_status
+        assert result.tier_decision == tier_decision
+        assert result.review.files == [file_name]
+
+        assert_receive {:review, ^tier_decision, _review_params}
+        refute_received {:unexpected_pr, ^tier_decision, _}
+      end
     end
 
     test "returns declined without committing or opening a PR", %{tmp_dir: tmp_dir} do
