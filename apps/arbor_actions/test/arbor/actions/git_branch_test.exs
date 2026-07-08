@@ -2,9 +2,8 @@ defmodule Arbor.Actions.GitBranchTest do
   @moduledoc """
   Tests for `Arbor.Actions.Git.Branch` — create / switch / list modes.
 
-  `Git.PR` has no test file: it shells out to the `gh` CLI which requires
-  GitHub auth and a real remote. Test it via the integration smoke pipeline
-  rather than unit tests.
+  `Git.PR` is tested separately with an injected HTTP client so it never needs
+  real SCM credentials or network access.
   """
 
   use Arbor.Actions.ActionCase, async: false

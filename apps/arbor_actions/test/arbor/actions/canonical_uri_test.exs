@@ -34,6 +34,9 @@ defmodule Arbor.Actions.CanonicalUriTest do
       assert Actions.canonical_uri_for(Arbor.Actions.Git.Commit, %{}) ==
                "arbor://action/git/commit"
 
+      assert Actions.canonical_uri_for(Arbor.Actions.Git.PR, %{}) ==
+               "arbor://action/git/pr"
+
       assert Actions.canonical_uri_for(Arbor.Actions.Github.PR, %{}) ==
                "arbor://action/github/pr"
     end
@@ -55,6 +58,7 @@ defmodule Arbor.Actions.CanonicalUriTest do
       prefixes = Actions.action_namespace_uri_prefixes()
 
       assert "arbor://action/git/status" in prefixes
+      assert "arbor://action/git/pr" in prefixes
       assert "arbor://action/browser/navigate" in prefixes
       refute "arbor://fs/read" in prefixes
       refute "arbor://action" in Arbor.Security.canonical_uri_prefixes()

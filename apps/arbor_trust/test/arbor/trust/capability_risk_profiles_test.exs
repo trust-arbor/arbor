@@ -134,6 +134,7 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
       assert ceilings["arbor://fs/write"] == :ask
       assert ceilings["arbor://action/git/commit"] == :ask
       assert ceilings["arbor://action/git/branch"] == :ask
+      assert ceilings["arbor://action/git/pr"] == :ask
       assert ceilings["arbor://action/github/pr"] == :ask
       assert ceilings["arbor://action/mix/format"] == :ask
       assert ceilings["arbor://action/code_review/apply_changes"] == :ask
@@ -180,6 +181,7 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
       assert thresholds["arbor://code/write"] == 3
       assert thresholds["arbor://fs/write"] == 3
       assert thresholds["arbor://code/compile"] == 5
+      assert thresholds["arbor://action/git/pr"] == 5
       assert thresholds["arbor://action/github/pr"] == 5
       assert thresholds["arbor://fs/read"] == 0
     end

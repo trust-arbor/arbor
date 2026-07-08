@@ -17,10 +17,7 @@ defmodule Arbor.Actions.Git do
   | `Commit` | Create a new commit |
   | `Log` | Show commit history |
   | `Branch` | Create / switch / list branches |
-
-  GitHub-specific operations (pull requests, etc.) live in
-  `Arbor.Actions.Github` — they're hosting-platform concerns, not
-  core git-protocol operations.
+  | `PR` | Open a draft pull request / merge request through the configured SCM |
 
   ## Examples
 
@@ -819,6 +816,397 @@ defmodule Arbor.Actions.Git do
         {:error, reason} ->
           {:error, inspect(reason)}
       end
+    end
+  end
+
+  defmodule PR do
+    @moduledoc """
+    Open a draft pull request or merge request through the configured SCM.
+
+    This is intentionally one platform-agnostic action. The caller supplies the
+    review content and branch names; provider, endpoint, and token are resolved
+    from action config or the selected git remote.
+    """
+
+    use Jido.Action,
+      name: "git_pr",
+      description: "Open a draft pull request or merge request through the configured SCM",
+      category: "git",
+      tags: ["git", "pr", "mr", "vcs"],
+      schema: [
+        path: [type: :string, required: true, doc: "Path to the Git repository"],
+        head: [type: :string, doc: "Source branch name"],
+        branch: [type: :string, doc: "Source branch name alias"],
+        base: [type: :string, default: "main", doc: "Target branch name"],
+        title: [type: :string, required: true, doc: "PR/MR title"],
+        body: [type: :string, doc: "PR/MR body"],
+        draft: [type: :boolean, default: true, doc: "Open as draft"],
+        owner: [type: :string, doc: "Repository owner/group override"],
+        repo: [type: :string, doc: "Repository name override"],
+        remote: [type: :string, default: "origin", doc: "Git remote to derive owner/repo from"],
+        provider: [type: {:in, [:github, :gitlab, :gitea]}, doc: "SCM provider override"],
+        scm_base_url: [type: :string, doc: "SCM API base URL override"],
+        project_id: [type: :string, doc: "GitLab project id/path override"]
+      ]
+
+    alias Arbor.Actions
+    alias Arbor.Actions.Config
+    alias Arbor.Common.{EgressClassifier, SensitiveData}
+
+    def taint_roles do
+      %{
+        path: {:control, requires: [:path_traversal]},
+        head: {:control, requires: [:command_injection]},
+        branch: {:control, requires: [:command_injection]},
+        base: {:control, requires: [:command_injection]},
+        title: {:control, requires: [:command_injection]},
+        body: {:control, requires: [:command_injection]},
+        draft: :control,
+        owner: {:control, requires: [:command_injection]},
+        repo: {:control, requires: [:command_injection]},
+        remote: {:control, requires: [:command_injection]},
+        provider: :control,
+        scm_base_url: {:control, requires: [:ssrf]},
+        project_id: {:control, requires: [:command_injection]}
+      }
+    end
+
+    def effect_class, do: :network_egress
+
+    def egress_tier(params, context) do
+      case resolved_base_url(params, context) do
+        {:ok, base_url} ->
+          case EgressClassifier.locality(base_url) do
+            :on_host -> :on_host
+            :on_premises -> :on_premises
+            :public -> :external_peer
+          end
+
+        {:error, _reason} ->
+          :external_provider
+      end
+    end
+
+    def egress_destination(params, context) do
+      with {:ok, base_url} <- resolved_base_url(params, context),
+           %URI{host: host} when is_binary(host) <- URI.parse(base_url) do
+        host
+      else
+        _ -> nil
+      end
+    end
+
+    @impl true
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
+    def run(%{path: path, title: title} = params, context) do
+      Actions.emit_started(__MODULE__, %{
+        path: path,
+        title: title,
+        remote: Config.get(params, :remote, "origin")
+      })
+
+      remote_result = remote_info(params)
+      remote_hint = remote_hint(remote_result)
+
+      with {:ok, provider} <- Config.scm_provider(params, context, remote_hint),
+           {:ok, base_url} <- Config.scm_base_url(provider, params, context, remote_hint),
+           {:ok, token} <- Config.scm_token(provider, params, context),
+           {:ok, head} <- resolve_head(path, params),
+           {:ok, {owner, repo}} <- resolve_owner_repo(params, remote_result),
+           {:ok, request} <-
+             build_request(provider, base_url, owner, repo, head, params),
+           {:ok, response} <- post_request(request, provider, token, context),
+           {:ok, result} <- normalize_response(provider, response, params) do
+        completed = Map.merge(result, %{provider: provider, owner: owner, repo: repo, head: head})
+        Actions.emit_completed(__MODULE__, Map.drop(completed, [:body]))
+        {:ok, completed}
+      else
+        {:error, reason} ->
+          safe_reason = redact(reason, nil)
+          Actions.emit_failed(__MODULE__, safe_reason)
+          {:error, safe_reason}
+      end
+    end
+
+    def run(_params, _context), do: {:error, "path and title are required"}
+
+    defp resolved_base_url(params, context) do
+      remote_result = remote_info(params)
+      remote_hint = remote_hint(remote_result)
+
+      with {:ok, provider} <- Config.scm_provider(params, context, remote_hint) do
+        Config.scm_base_url(provider, params, context, remote_hint)
+      end
+    end
+
+    defp remote_hint({:ok, remote}), do: remote
+    defp remote_hint({:error, _reason}), do: nil
+
+    defp remote_info(params) do
+      path = Config.get(params, :path)
+      remote = Config.get(params, :remote, "origin")
+
+      case System.cmd("git", ["-C", path, "remote", "get-url", remote], stderr_to_stdout: true) do
+        {output, 0} ->
+          parse_remote_url(String.trim(output), remote)
+
+        {output, _code} ->
+          {:error, "failed to read git remote #{inspect(remote)}: #{String.trim(output)}"}
+      end
+    end
+
+    defp parse_remote_url(url, remote) do
+      parsed =
+        if String.contains?(url, "://") do
+          parse_uri_remote(url)
+        else
+          parse_scp_remote(url)
+        end
+
+      case parsed do
+        {:ok, info} -> {:ok, Map.merge(info, %{remote: remote, url: url})}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    defp parse_uri_remote(url) do
+      case URI.parse(url) do
+        %URI{scheme: scheme, host: host, path: path, port: port}
+        when is_binary(scheme) and is_binary(host) and is_binary(path) ->
+          with {:ok, owner, repo} <- owner_repo_from_path(path) do
+            {:ok,
+             %{scheme: scheme, host: String.downcase(host), port: port, owner: owner, repo: repo}}
+          end
+
+        _ ->
+          {:error, "unsupported git remote URL: #{url}"}
+      end
+    end
+
+    defp parse_scp_remote(url) do
+      case Regex.run(~r/^(?:[^@]+@)?([^:\/]+):(.+)$/, url) do
+        [_, host, path] ->
+          with {:ok, owner, repo} <- owner_repo_from_path(path) do
+            {:ok,
+             %{scheme: nil, host: String.downcase(host), port: nil, owner: owner, repo: repo}}
+          end
+
+        _ ->
+          {:error, "unsupported git remote URL: #{url}"}
+      end
+    end
+
+    defp owner_repo_from_path(path) do
+      parts =
+        path
+        |> String.trim_leading("/")
+        |> String.trim_trailing(".git")
+        |> String.split("/", trim: true)
+
+      case parts do
+        [_repo] ->
+          {:error, "git remote URL does not include an owner/group"}
+
+        parts when length(parts) >= 2 ->
+          {owner_parts, [repo]} = Enum.split(parts, -1)
+          {:ok, Enum.join(owner_parts, "/"), repo}
+
+        _ ->
+          {:error, "git remote URL does not include a repository path"}
+      end
+    end
+
+    defp resolve_owner_repo(params, remote_result) do
+      owner = Config.get(params, :owner)
+      repo = Config.get(params, :repo)
+
+      cond do
+        is_binary(owner) and owner != "" and is_binary(repo) and repo != "" ->
+          {:ok, {owner, repo}}
+
+        match?({:ok, _}, remote_result) ->
+          {:ok, remote} = remote_result
+          {:ok, {remote.owner, remote.repo}}
+
+        true ->
+          remote_result
+      end
+    end
+
+    defp resolve_head(_path, params) do
+      case Config.get(params, :head) || Config.get(params, :branch) do
+        value when is_binary(value) and value != "" ->
+          {:ok, value}
+
+        _ ->
+          current_branch(Config.get(params, :path))
+      end
+    end
+
+    defp current_branch(path) do
+      case System.cmd("git", ["-C", path, "branch", "--show-current"], stderr_to_stdout: true) do
+        {output, 0} ->
+          case String.trim(output) do
+            "" -> {:error, "head/branch is required when the repo is detached"}
+            branch -> {:ok, branch}
+          end
+
+        {output, _code} ->
+          {:error, "failed to resolve current git branch: #{String.trim(output)}"}
+      end
+    end
+
+    defp build_request(:github, base_url, owner, repo, head, params) do
+      body = %{
+        "head" => head,
+        "base" => base_branch(params),
+        "title" => Config.get(params, :title),
+        "body" => Config.get(params, :body, ""),
+        "draft" => draft?(params)
+      }
+
+      {:ok,
+       %{url: "#{base_url}/repos/#{path_segment(owner)}/#{path_segment(repo)}/pulls", body: body}}
+    end
+
+    defp build_request(:gitea, base_url, owner, repo, head, params) do
+      body = %{
+        "head" => head,
+        "base" => base_branch(params),
+        "title" => Config.get(params, :title),
+        "body" => Config.get(params, :body, ""),
+        "draft" => draft?(params)
+      }
+
+      {:ok,
+       %{
+         url: "#{base_url}/api/v1/repos/#{path_segment(owner)}/#{path_segment(repo)}/pulls",
+         body: body
+       }}
+    end
+
+    defp build_request(:gitlab, base_url, owner, repo, head, params) do
+      project_id = Config.get(params, :project_id) || "#{owner}/#{repo}"
+      title = draft_title(Config.get(params, :title), draft?(params))
+
+      body = %{
+        "source_branch" => head,
+        "target_branch" => base_branch(params),
+        "title" => title,
+        "description" => Config.get(params, :body, "")
+      }
+
+      {:ok,
+       %{
+         url: "#{base_url}/api/v4/projects/#{URI.encode_www_form(project_id)}/merge_requests",
+         body: body
+       }}
+    end
+
+    defp post_request(%{url: url, body: body}, provider, token, context) do
+      opts = [
+        json: body,
+        headers: headers(provider, token),
+        receive_timeout: 60_000,
+        retry: false
+      ]
+
+      case http_post(url, opts, context) do
+        {:ok, %{status: status, body: response_body}} when status in 200..299 ->
+          {:ok, response_body}
+
+        {:ok, %{status: status, body: response_body}} ->
+          safe_body =
+            response_body
+            |> inspect()
+            |> SensitiveData.redact()
+            |> redact(token)
+
+          {:error, "SCM PR request failed: HTTP #{status}: #{safe_body}"}
+
+        {:error, reason} ->
+          {:error, "SCM PR request failed: #{redact(inspect(reason), token)}"}
+      end
+    end
+
+    defp http_post(url, opts, context) do
+      case Config.get(context, :http_request) do
+        request when is_function(request, 3) -> request.(:post, url, opts)
+        request when is_function(request, 2) -> request.(url, opts)
+        _ -> Req.post(url, opts)
+      end
+    end
+
+    defp normalize_response(provider, body, params) when is_map(body) do
+      number =
+        body["number"] || body[:number] || body["iid"] || body[:iid] || body["id"] || body[:id]
+
+      url =
+        body["html_url"] || body[:html_url] || body["web_url"] || body[:web_url] || body["url"] ||
+          body[:url]
+
+      if is_binary(url) and url != "" do
+        {:ok,
+         %{
+           number: number,
+           url: url,
+           title: Config.get(params, :title),
+           draft?: draft?(params),
+           kind: if(provider == :gitlab, do: "merge_request", else: "pull_request")
+         }}
+      else
+        {:error, "SCM PR response did not include a URL"}
+      end
+    end
+
+    defp normalize_response(_provider, body, _params) do
+      {:error, "SCM PR response was not a JSON object: #{inspect(body)}"}
+    end
+
+    defp headers(:github, token) do
+      [
+        {"authorization", "Bearer #{token}"},
+        {"accept", "application/vnd.github+json"},
+        {"content-type", "application/json"}
+      ]
+    end
+
+    defp headers(:gitlab, token) do
+      [
+        {"private-token", token},
+        {"accept", "application/json"},
+        {"content-type", "application/json"}
+      ]
+    end
+
+    defp headers(:gitea, token) do
+      [
+        {"authorization", "token #{token}"},
+        {"accept", "application/json"},
+        {"content-type", "application/json"}
+      ]
+    end
+
+    defp base_branch(params), do: Config.get(params, :base, "main")
+    defp draft?(params), do: Config.get(params, :draft, true) != false
+
+    defp draft_title(title, true) do
+      if String.starts_with?(title, "Draft:"), do: title, else: "Draft: #{title}"
+    end
+
+    defp draft_title(title, false), do: title
+
+    defp path_segment(value) do
+      value
+      |> to_string()
+      |> String.split("/", trim: true)
+      |> Enum.map_join("/", &URI.encode/1)
+    end
+
+    defp redact(text, secret) do
+      text
+      |> SensitiveData.redact()
+      |> Config.redact_secret(secret)
     end
   end
 end

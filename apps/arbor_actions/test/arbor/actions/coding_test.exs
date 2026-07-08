@@ -140,6 +140,7 @@ defmodule Arbor.Actions.CodingTest do
 
       assert_receive {:pr, pr_params}
       assert pr_params.path == result.worktree_path
+      assert pr_params.branch == "test/coding-agent-pr"
       assert pr_params.draft == true
       assert pr_params.body =~ "Human review and merge are required."
     end

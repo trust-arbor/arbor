@@ -45,6 +45,9 @@ defmodule Arbor.Trust.CapabilityEnforcementMatrixTest do
       assert rows["arbor://action/github/pr"].capability_class == :network_egress
       assert rows["arbor://action/github/pr"].soft_gate.id == :egress_gate
       assert rows["arbor://action/github/pr"].hard_gate.id == :host_route_or_netns_filter
+      assert rows["arbor://action/git/pr"].capability_class == :network_egress
+      assert rows["arbor://action/git/pr"].soft_gate.id == :egress_gate
+      assert rows["arbor://action/git/pr"].hard_gate.id == :host_route_or_netns_filter
 
       assert rows["arbor://fs/write"].capability_class == :filesystem_write
       assert rows["arbor://fs/write"].soft_gate.id == :file_guard

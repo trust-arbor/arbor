@@ -521,6 +521,7 @@ defmodule Arbor.Actions.Coding do
     defp open_draft_pr(worktree_path, branch_name, response, validations, params, context, commit) do
       pr_params = %{
         path: worktree_path,
+        branch: branch_name,
         title: get_param(params, :pr_title) || pr_title(params),
         body: pr_body(branch_name, response, validations, params),
         draft: true

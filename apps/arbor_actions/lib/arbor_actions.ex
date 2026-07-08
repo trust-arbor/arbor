@@ -311,7 +311,8 @@ defmodule Arbor.Actions do
         Arbor.Actions.Git.Diff,
         Arbor.Actions.Git.Commit,
         Arbor.Actions.Git.Log,
-        Arbor.Actions.Git.Branch
+        Arbor.Actions.Git.Branch,
+        Arbor.Actions.Git.PR
       ],
       github: [
         Arbor.Actions.Github.PR
@@ -911,6 +912,7 @@ defmodule Arbor.Actions do
     Arbor.Actions.Git.Commit => "arbor://action/git/commit",
     Arbor.Actions.Git.Log => "arbor://action/git/log",
     Arbor.Actions.Git.Branch => "arbor://action/git/branch",
+    Arbor.Actions.Git.PR => "arbor://action/git/pr",
     Arbor.Actions.Github.PR => "arbor://action/github/pr",
 
     # Mix — per-task URIs under the action namespace, NOT under shell.

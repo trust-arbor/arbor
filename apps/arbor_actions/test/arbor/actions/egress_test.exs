@@ -161,6 +161,27 @@ defmodule Arbor.Actions.EgressTest do
       end
     end
 
+    test "Git.PR resolves SCM host for egress classification" do
+      tmp_dir =
+        Path.join(System.tmp_dir!(), "arbor_egress_test_#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> File.rm_rf!(tmp_dir) end)
+      repo_path = Path.join(tmp_dir, "repo")
+      Arbor.Actions.ActionCase.create_git_repo(repo_path)
+
+      System.cmd("git", ["remote", "add", "origin", "https://github.com/acme/widgets.git"],
+        cd: repo_path
+      )
+
+      assert Egress.effect_class_for(Arbor.Actions.Git.PR) == :network_egress
+
+      assert Egress.egress_tier_for(Arbor.Actions.Git.PR, %{path: repo_path}, %{}) ==
+               :external_peer
+
+      assert Egress.egress_destination_for(Arbor.Actions.Git.PR, %{path: repo_path}, %{}) ==
+               "api.github.com"
+    end
+
     test "internal Channel actions do NOT egress off-host" do
       for mod <- [Arbor.Actions.Channel.List, Arbor.Actions.Channel.Read] do
         assert Egress.effect_class_for(mod) == :read

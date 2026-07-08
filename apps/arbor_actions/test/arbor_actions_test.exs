@@ -83,6 +83,7 @@ defmodule Arbor.ActionsTest do
       assert "git_diff" in tool_names
       assert "git_commit" in tool_names
       assert "git_log" in tool_names
+      assert "git_pr" in tool_names
     end
 
     test "returns tools for comms category" do

@@ -59,6 +59,8 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
      true, :require_human, true, :cheap},
     {"arbor://action/git/branch", :arbor_actions, :high, :reversible, :local_write, :confidential,
      true, :require_human, true, :cheap},
+    {"arbor://action/git/pr", :arbor_actions, :high, :reversible, :network_egress, :confidential,
+     true, :require_human, true, :metered},
     {"arbor://action/github/pr", :arbor_actions, :high, :reversible, :network_egress,
      :confidential, true, :require_human, true, :metered},
     {"arbor://action/mix/format", :arbor_actions, :high, :reversible, :local_write, :confidential,
