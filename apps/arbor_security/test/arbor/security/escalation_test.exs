@@ -55,6 +55,15 @@ defmodule Arbor.Security.EscalationTest do
     def healthy?, do: true
   end
 
+  defmodule CapturingConsensus do
+    def submit(proposal, _opts \\ []) do
+      send(self(), {:proposal, proposal})
+      {:ok, "proposal_123"}
+    end
+
+    def healthy?, do: true
+  end
+
   defmodule UnhealthyConsensus do
     def healthy?, do: false
   end
@@ -171,6 +180,44 @@ defmodule Arbor.Security.EscalationTest do
       assert interaction.metadata.capability_id == cap.id
     end
 
+    test "stores approval context in interaction metadata", %{capability: cap} do
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
+      Application.put_env(:arbor_security, :consensus_module, MockConsensus)
+      Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
+
+      on_exit(fn ->
+        Application.delete_env(:arbor_security, :use_interaction_router_for_approval)
+      end)
+
+      opts = [
+        approval_action: "file.write",
+        file_path: "/workspace/report.md",
+        content: "approval preview body",
+        workspace: "/workspace",
+        operation_taint: :untrusted,
+        gate: :trust_policy,
+        reason: :policy_gated,
+        session_id: "session_1"
+      ]
+
+      assert {:ok, :pending_approval, request_id} =
+               Escalation.maybe_escalate(cap, "agent_test", "arbor://fs/write/sensitive", opts)
+
+      assert {:ok, interaction} = Arbor.Comms.InteractionRegistry.get(request_id)
+
+      assert interaction.metadata.target == "/workspace/report.md"
+      assert interaction.metadata.gate == :trust_policy
+      assert interaction.metadata.reason == :policy_gated
+
+      context = interaction.metadata.approval_context
+      assert context.action == "file.write"
+      assert context.target_type == :file_path
+      assert context.payload_preview.preview == "approval preview body"
+      assert context.provenance.session_id == "session_1"
+      assert context.risk_hints.in_workspace == true
+      assert interaction.description =~ "/workspace/report.md"
+    end
+
     test "with the feature flag off, the consensus path runs (backward compat)",
          %{capability: cap} do
       Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
@@ -186,16 +233,6 @@ defmodule Arbor.Security.EscalationTest do
 
   describe "submit_for_approval/4" do
     test "creates proposal with correct structure", %{capability: cap} do
-      # Use a module that captures the proposal
-      defmodule CapturingConsensus do
-        def submit(proposal, _opts \\ []) do
-          send(self(), {:proposal, proposal})
-          {:ok, "proposal_123"}
-        end
-
-        def healthy?, do: true
-      end
-
       {:ok, :pending_approval, _} =
         Escalation.submit_for_approval(
           CapturingConsensus,
@@ -210,6 +247,47 @@ defmodule Arbor.Security.EscalationTest do
       assert proposal.metadata.principal_id == "agent_test"
       assert proposal.metadata.resource_uri == "arbor://fs/write/sensitive"
       assert proposal.metadata.capability_id == "cap_test"
+    end
+
+    test "creates proposal with decision context", %{capability: cap} do
+      opts = [
+        approval_action: "file.write",
+        file_path: "/workspace/report.md",
+        content: "approval preview body",
+        params: %{path: "/workspace/report.md", content: "approval preview body", token: "secret"},
+        workspace: "/workspace",
+        operation_taint: :untrusted,
+        gate: :trust_policy,
+        reason: :policy_gated,
+        session_id: "session_1"
+      ]
+
+      {:ok, :pending_approval, _} =
+        Escalation.submit_for_approval(
+          CapturingConsensus,
+          cap,
+          "agent_test",
+          "arbor://fs/write/sensitive",
+          opts
+        )
+
+      assert_receive {:proposal, proposal}
+
+      assert proposal.context.action == "file.write"
+      assert proposal.context.target == "/workspace/report.md"
+      assert proposal.context.target_type == :file_path
+      assert proposal.context.payload_preview.kind == "content"
+      assert proposal.context.payload_preview.preview == "approval preview body"
+      assert proposal.context.params.token == "[REDACTED]"
+      assert proposal.context.provenance.session_id == "session_1"
+      assert proposal.context.gate == :trust_policy
+      assert proposal.context.reason == :policy_gated
+      assert proposal.context.risk_hints.operation_taint == :untrusted
+      assert proposal.context.risk_hints.in_workspace == true
+
+      assert proposal.metadata.approval_context == proposal.context
+      assert proposal.metadata.target == "/workspace/report.md"
+      assert proposal.description =~ "/workspace/report.md"
     end
   end
 end

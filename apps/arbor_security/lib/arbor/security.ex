@@ -661,7 +661,17 @@ defmodule Arbor.Security do
   defp handle_requires_approval(cap, _auth, principal_id, resource_uri, action, opts) do
     # Escalate to Consensus for kernel-owned capability constraints. Trust policy
     # approval lives in Arbor.Trust.ApprovalGuard.
-    case Arbor.Security.Escalation.maybe_escalate(cap, principal_id, resource_uri) do
+    escalation_opts =
+      opts
+      |> Keyword.put_new(:gate, :capability_constraint)
+      |> Keyword.put_new(:reason, :capability_requires_approval)
+
+    case Arbor.Security.Escalation.maybe_escalate(
+           cap,
+           principal_id,
+           resource_uri,
+           escalation_opts
+         ) do
       :ok ->
         # Graduated — still enforce constraints (rate limits, time windows)
         # AND run the implicit FileGuard normalization for fs URIs. The

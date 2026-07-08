@@ -74,11 +74,46 @@ defmodule Arbor.Actions do
   """
 
   alias Arbor.Actions.Egress
+  alias Arbor.Common.SafePath
   alias Arbor.Actions.TaintEnforcement
   alias Arbor.Actions.TaintEvents
   alias Arbor.Contracts.Security.CapabilityProfile
   alias Arbor.Contracts.Security.Classification
   alias Arbor.Signals
+
+  @approval_preview_limit 500
+
+  @approval_payload_keys [
+    :content,
+    "content",
+    :body,
+    "body",
+    :payload,
+    "payload",
+    :data,
+    "data",
+    :patch,
+    "patch",
+    :diff,
+    "diff",
+    :script,
+    "script",
+    :stdin,
+    "stdin"
+  ]
+
+  @sensitive_approval_keys ~w(
+    api_key
+    authorization
+    bearer
+    client_secret
+    cookie
+    password
+    private_key
+    secret
+    signed_request
+    token
+  )
 
   # ===========================================================================
   # Public API — Authorized execution (for agent callers)
@@ -167,6 +202,7 @@ defmodule Arbor.Actions do
     # this resolves + observes regardless, so the gate can land dark.
     effect_class = Egress.effect_class_for(action_module)
     egress_tier = Egress.egress_tier_for(action_module, params, clean_context)
+    egress_destination = Egress.egress_destination_for(action_module, params, clean_context)
     operation_taint = Map.get(clean_context, :taint)
 
     auth_opts =
@@ -175,9 +211,19 @@ defmodule Arbor.Actions do
       |> Keyword.put(:operation_taint, operation_taint)
       |> Keyword.put(:egress_tier, egress_tier)
       |> Keyword.put(:egress_taint, operation_taint)
+      |> Keyword.put(:egress_destination, egress_destination)
       |> Keyword.put(
-        :egress_destination,
-        Egress.egress_destination_for(action_module, params, clean_context)
+        :approval_context,
+        approval_context_for_action(
+          action_module,
+          resource,
+          params,
+          clean_context,
+          effect_class,
+          egress_tier,
+          egress_destination,
+          operation_taint
+        )
       )
 
     maybe_observe_egress(action_module, egress_tier, clean_context)
@@ -767,6 +813,231 @@ defmodule Arbor.Actions do
       action: action_module.name(),
       error: inspect(error)
     })
+  end
+
+  defp approval_context_for_action(
+         action_module,
+         resource,
+         params,
+         context,
+         effect_class,
+         egress_tier,
+         egress_destination,
+         operation_taint
+       ) do
+    {target_type, target} = approval_target(resource, params, context, egress_destination)
+
+    %{
+      requested_resource_uri: resource,
+      action: action_module_to_name(action_module),
+      action_module: inspect(action_module),
+      target: target,
+      target_type: target_type,
+      payload_preview: approval_payload_preview(params),
+      params: sanitize_approval_params(params),
+      provenance: approval_provenance(context),
+      risk_hints:
+        approval_risk_hints(
+          target_type,
+          target,
+          context,
+          effect_class,
+          egress_tier,
+          egress_destination,
+          operation_taint
+        )
+    }
+    |> compact_approval_map()
+  end
+
+  defp approval_target(resource, params, context, egress_destination) do
+    cond do
+      command = param_value(params, :command) ->
+        {:command, truncate_approval_value(command)}
+
+      script = param_value(params, :script) ->
+        {:script, truncate_approval_value(script)}
+
+      file_path = resolved_approval_file_path(resource, params, context) ->
+        {:file_path, file_path}
+
+      egress_destination ->
+        {:egress_destination, truncate_approval_value(egress_destination)}
+
+      path = param_value(params, :path) || param_value(params, :file_path) ->
+        {:path, truncate_approval_value(path)}
+
+      true ->
+        {:resource_uri, resource}
+    end
+  end
+
+  defp resolved_approval_file_path(resource, params, context) do
+    with path when is_binary(path) <- extract_fs_path(resource, params) do
+      case context_value(context, :workspace) do
+        workspace when is_binary(workspace) ->
+          case SafePath.resolve_within(path, workspace) do
+            {:ok, safe_path} -> safe_path
+            {:error, _reason} -> Path.expand(path)
+          end
+
+        _ ->
+          if Path.type(path) == :absolute, do: path, else: Path.expand(path)
+      end
+    else
+      _ -> nil
+    end
+  end
+
+  defp approval_payload_preview(params) when is_map(params) do
+    @approval_payload_keys
+    |> Enum.find_value(fn key ->
+      case Map.get(params, key) do
+        nil -> nil
+        value -> approval_preview(value, key)
+      end
+    end)
+  end
+
+  defp approval_payload_preview(_params), do: nil
+
+  defp approval_preview(value, key) when is_binary(value) do
+    %{
+      kind: to_string(key),
+      bytes: byte_size(value),
+      truncated: byte_size(value) > @approval_preview_limit,
+      preview: truncate_approval_value(value)
+    }
+  end
+
+  defp approval_preview(value, key) do
+    value
+    |> inspect(limit: 50)
+    |> approval_preview(key)
+  end
+
+  defp approval_provenance(context) when is_map(context) do
+    %{
+      session_id: context_value(context, :session_id),
+      turn_id: context_value(context, :turn_id),
+      task_id: context_value(context, :task_id),
+      node_id: context_value(context, :node_id),
+      pipeline_id: context_value(context, :pipeline_id),
+      engagement_id: context_value(context, :engagement_id),
+      goal_id: context_value(context, :goal_id),
+      trace_id: context_value(context, :trace_id)
+    }
+    |> compact_approval_map()
+  end
+
+  defp approval_provenance(_context), do: %{}
+
+  defp approval_risk_hints(
+         target_type,
+         target,
+         context,
+         effect_class,
+         egress_tier,
+         egress_destination,
+         operation_taint
+       ) do
+    workspace = context_value(context, :workspace)
+
+    %{
+      workspace: workspace,
+      in_workspace: approval_in_workspace?(target_type, target, workspace),
+      effect_class: effect_class,
+      operation_taint: operation_taint,
+      egress_tier: egress_tier,
+      egress_destination: egress_destination,
+      external: Classification.external_egress?(egress_tier)
+    }
+    |> compact_approval_map()
+  end
+
+  defp approval_in_workspace?(:file_path, path, workspace)
+       when is_binary(path) and is_binary(workspace) do
+    expanded_path = Path.expand(path)
+    expanded_workspace = Path.expand(workspace)
+
+    expanded_path == expanded_workspace or
+      String.starts_with?(expanded_path, expanded_workspace <> "/")
+  end
+
+  defp approval_in_workspace?(_target_type, _target, _workspace), do: nil
+
+  defp sanitize_approval_params(params) when is_map(params) do
+    params
+    |> Enum.map(fn {key, value} -> {key, sanitize_approval_value(key, value)} end)
+    |> Map.new()
+  end
+
+  defp sanitize_approval_params(_params), do: nil
+
+  defp sanitize_approval_value(key, value) do
+    if sensitive_approval_key?(key) do
+      "[REDACTED]"
+    else
+      sanitize_approval_value(value)
+    end
+  end
+
+  defp sanitize_approval_value(value) when is_binary(value), do: truncate_approval_value(value)
+
+  defp sanitize_approval_value(value)
+       when is_atom(value) or is_number(value) or is_boolean(value),
+       do: value
+
+  defp sanitize_approval_value(nil), do: nil
+
+  defp sanitize_approval_value(value) when is_list(value) do
+    value
+    |> Enum.take(20)
+    |> Enum.map(&sanitize_approval_value/1)
+  end
+
+  defp sanitize_approval_value(value) when is_map(value) do
+    value
+    |> Enum.take(20)
+    |> Enum.map(fn {key, nested_value} -> {key, sanitize_approval_value(key, nested_value)} end)
+    |> Map.new()
+  end
+
+  defp sanitize_approval_value(value), do: inspect(value, limit: 20)
+
+  defp sensitive_approval_key?(key) do
+    key =
+      key
+      |> to_string()
+      |> String.downcase()
+
+    key in @sensitive_approval_keys or String.ends_with?(key, "_token")
+  end
+
+  defp param_value(params, key) when is_map(params) do
+    Map.get(params, key) || Map.get(params, to_string(key))
+  end
+
+  defp param_value(_params, _key), do: nil
+
+  defp context_value(context, key) when is_map(context) do
+    Map.get(context, key) || Map.get(context, to_string(key))
+  end
+
+  defp context_value(_context, _key), do: nil
+
+  defp truncate_approval_value(value)
+       when is_binary(value) and byte_size(value) > @approval_preview_limit do
+    String.slice(value, 0, @approval_preview_limit) <> "..."
+  end
+
+  defp truncate_approval_value(value) when is_binary(value), do: value
+  defp truncate_approval_value(value), do: inspect(value, limit: 50)
+
+  defp compact_approval_map(map) do
+    map
+    |> Enum.reject(fn {_key, value} -> is_nil(value) or value == %{} end)
+    |> Map.new()
   end
 
   # Sanitize params to avoid logging sensitive data

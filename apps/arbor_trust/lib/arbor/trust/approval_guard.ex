@@ -27,7 +27,7 @@ defmodule Arbor.Trust.ApprovalGuard do
     if enabled?() do
       check_with_policy(capability, principal_id, resource_uri, opts)
     else
-      Escalation.maybe_escalate(capability, principal_id, resource_uri)
+      Escalation.maybe_escalate(capability, principal_id, resource_uri, opts)
     end
   end
 
@@ -39,7 +39,12 @@ defmodule Arbor.Trust.ApprovalGuard do
     case get_confirmation_mode(principal_id, resource_uri, opts) do
       :auto ->
         if approval_required?(capability) do
-          Escalation.maybe_escalate(capability, principal_id, resource_uri)
+          Escalation.maybe_escalate(
+            capability,
+            principal_id,
+            resource_uri,
+            escalation_opts(opts, :capability_constraint, :capability_requires_approval)
+          )
         else
           safe_emit_signal(:approval_auto, %{
             principal_id: principal_id,
@@ -57,7 +62,12 @@ defmodule Arbor.Trust.ApprovalGuard do
 
         cond do
           approval_required?(capability) ->
-            Escalation.maybe_escalate(capability, principal_id, resource_uri)
+            Escalation.maybe_escalate(
+              capability,
+              principal_id,
+              resource_uri,
+              escalation_opts(opts, :capability_constraint, :capability_requires_approval)
+            )
 
           pre_approved_bypasses_ceiling?(capability, resource_uri) ->
             :ok
@@ -65,7 +75,11 @@ defmodule Arbor.Trust.ApprovalGuard do
           true ->
             capability
             |> require_approval()
-            |> Escalation.maybe_escalate(principal_id, resource_uri)
+            |> Escalation.maybe_escalate(
+              principal_id,
+              resource_uri,
+              escalation_opts(opts, :trust_policy, :policy_gated)
+            )
         end
 
       :deny ->
@@ -122,9 +136,17 @@ defmodule Arbor.Trust.ApprovalGuard do
     %{capability | constraints: Map.put(capability.constraints || %{}, :requires_approval, true)}
   end
 
+  defp escalation_opts(opts, gate, reason) do
+    opts
+    |> Keyword.put_new(:gate, gate)
+    |> Keyword.put_new(:reason, reason)
+  end
+
   defp approval_required?(capability) do
-    capability.constraints[:requires_approval] == true or
-      capability.constraints["requires_approval"] == true
+    constraints = capability.constraints || %{}
+
+    constraints[:requires_approval] == true or
+      constraints["requires_approval"] == true
   end
 
   defp pre_approved_bypasses_ceiling?(capability, requested_uri) do
