@@ -551,6 +551,27 @@ defmodule Arbor.Agent.ManagerTest do
       assert {:ok, "echo: hello"} = result
     end
 
+    test "chat_response preserves the structured runtime response" do
+      agent_id = "chat-response-#{System.unique_integer([:positive])}"
+
+      {:ok, pid} = FakeAgent.start_link([])
+
+      Registry.register(agent_id, pid, %{
+        runtime: :arbor,
+        model_config: %{runtime: :arbor},
+        host_pid: pid,
+        module: FakeAgent
+      })
+
+      on_exit(fn ->
+        Registry.unregister(agent_id)
+        if Process.alive?(pid), do: GenServer.stop(pid)
+      end)
+
+      assert {:ok, response} = Manager.chat_response("hello", "Tester", agent_id: agent_id)
+      assert response.text == "echo: hello"
+    end
+
     test "passes caller timeout through arbor runtime query path" do
       agent_id = "chat-timeout-#{System.unique_integer([:positive])}"
 

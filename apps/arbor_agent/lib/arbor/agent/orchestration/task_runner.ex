@@ -10,6 +10,8 @@ defmodule Arbor.Agent.Orchestration.TaskRunner do
 
   @type task :: String.t() | map()
 
+  alias Arbor.Agent.Orchestration.TaskArtifacts
+
   @doc "Run a task against an agent and return a structured result."
   @spec run(String.t(), task(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(agent_id, task, opts \\ []) when is_binary(agent_id) do
@@ -21,8 +23,8 @@ defmodule Arbor.Agent.Orchestration.TaskRunner do
         [agent_id: agent_id]
         |> maybe_put(:timeout, Keyword.get(opts, :timeout))
 
-      case manager.chat(input, sender, chat_opts) do
-        {:ok, result} -> {:ok, normalize_result(result)}
+      case call_manager(manager, input, sender, chat_opts) do
+        {:ok, result} -> {:ok, TaskArtifacts.normalize(result)}
         {:error, reason} -> {:error, reason}
         other -> {:error, {:unexpected_runner_result, other}}
       end
@@ -54,22 +56,12 @@ defmodule Arbor.Agent.Orchestration.TaskRunner do
 
   defp task_input(_task), do: {:error, :invalid_task}
 
-  defp normalize_result(%{result_type: _type, payload: _payload} = result), do: result
-
-  defp normalize_result(text) when is_binary(text) do
-    %{
-      result_type: :chat,
-      payload: %{text: text},
-      raw: text
-    }
-  end
-
-  defp normalize_result(result) do
-    %{
-      result_type: :value,
-      payload: %{value: result},
-      raw: result
-    }
+  defp call_manager(manager, input, sender, chat_opts) do
+    if function_exported?(manager, :chat_response, 3) do
+      manager.chat_response(input, sender, chat_opts)
+    else
+      manager.chat(input, sender, chat_opts)
+    end
   end
 
   defp maybe_put(opts, _key, nil), do: opts

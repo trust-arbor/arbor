@@ -125,6 +125,7 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
       assert ceilings["arbor://agent/destroy"] == :ask
       assert ceilings["arbor://agent/spawn"] == :ask
       assert ceilings["arbor://agent/spawn_worker"] == :ask
+      assert ceilings["arbor://agent/dispatch"] == :ask
       assert ceilings["arbor://consensus/admin"] == :ask
       assert ceilings["arbor://monitor/remediate"] == :ask
       assert ceilings["arbor://code/write"] == :ask
@@ -184,14 +185,27 @@ defmodule Arbor.Trust.CapabilityRiskProfilesTest do
       assert thresholds["arbor://action/git/pr"] == 5
       assert thresholds["arbor://action/github/pr"] == 5
       assert thresholds["arbor://fs/read"] == 0
+      assert thresholds["arbor://agent/dispatch"] == :never
+      assert thresholds["arbor://agent/task/read"] == 0
     end
 
     test "projects constraints, delegation, and approval defaults" do
       assert CapabilityRiskProfiles.default_constraints()["arbor://fs/write"] == %{}
       assert CapabilityRiskProfiles.default_constraints()["arbor://fs/read"] == %{rate_limit: 300}
+
+      assert CapabilityRiskProfiles.default_constraints()["arbor://agent/task/read"] == %{
+               rate_limit: 300
+             }
+
       assert CapabilityRiskProfiles.delegation_defaults()["arbor://fs/write"] == false
+      assert CapabilityRiskProfiles.delegation_defaults()["arbor://agent/dispatch"] == false
       assert CapabilityRiskProfiles.approval_defaults()["arbor://fs/write"] == :require_human
       assert CapabilityRiskProfiles.approval_defaults()["arbor://fs/read"] == :auto
+
+      assert CapabilityRiskProfiles.approval_defaults()["arbor://agent/dispatch"] ==
+               :require_human
+
+      assert CapabilityRiskProfiles.approval_defaults()["arbor://agent/task/read"] == :auto
     end
 
     test "operator profile overrides flow through all projections" do

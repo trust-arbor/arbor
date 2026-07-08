@@ -189,6 +189,41 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert_received {:task_result, "task_1", _opts}
     end
 
+    test "adapts raw coding action results into branch diff file report artifacts" do
+      Process.put(
+        {FakeTaskStore, :result_result},
+        {:ok,
+         %{
+           status: "change_committed",
+           branch: "agent/change",
+           commit: "abc123",
+           diff: "diff --git a/lib/a.ex b/lib/a.ex\n+ok\n",
+           files: ["lib/a.ex"],
+           validation: [%{command: "./bin/mix test", passed: true}],
+           response_text: "STATUS: implemented",
+           review_recommendation: :keep,
+           tier_decision: :auto_proceed,
+           human_required: false,
+           security_veto: false
+         }}
+      )
+
+      assert {:ok, result} =
+               Orchestration.task_result("task_1",
+                 caller_id: "human_1",
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity
+               )
+
+      assert result.result_type == :coding_change
+      assert result.payload.branch == "agent/change"
+      assert result.payload.diff =~ "diff --git"
+      assert result.payload.files == ["lib/a.ex"]
+      assert result.payload.report.validation == [%{command: "./bin/mix test", passed: true}]
+      assert result.payload.verdict.recommendation == :keep
+      assert result.raw.status == "change_committed"
+    end
+
     test "reports running tasks as waiting_approval when the shared queue has a pending item" do
       Process.put(
         {FakeConsensus, :pending},

@@ -14,6 +14,44 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       send(self(), {:answer_approval, id, decision, opts})
       Process.get({__MODULE__, :answer_result}, :ok)
     end
+
+    def dispatch(agent_id, task, opts) do
+      send(self(), {:dispatch_task, agent_id, task, opts})
+      Process.get({__MODULE__, :dispatch_result}, {:ok, "task_1"})
+    end
+
+    def task_status(task_id, opts) do
+      send(self(), {:task_status, task_id, opts})
+
+      Process.get(
+        {__MODULE__, :status_result},
+        {:ok,
+         %{
+           task_id: task_id,
+           agent_id: "agent_1",
+           state: :running,
+           current_step: "running",
+           waiting_on: nil,
+           started_at: ~U[2026-07-08 12:00:00Z],
+           updated_at: ~U[2026-07-08 12:00:01Z],
+           completed_at: nil,
+           metadata: %{"ticket" => "A-1"}
+         }}
+      )
+    end
+
+    def task_result(task_id, opts) do
+      send(self(), {:task_result, task_id, opts})
+
+      Process.get(
+        {__MODULE__, :result_result},
+        {:ok,
+         %{
+           result_type: :coding_change,
+           payload: %{branch: "agent/change", files: ["lib/a.ex"], verdict: %{status: "ok"}}
+         }}
+      )
+    end
   end
 
   setup do
@@ -33,6 +71,9 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     Process.delete(:arbor_authenticated_agent_id)
     Process.delete({FakeOrchestration, :list_result})
     Process.delete({FakeOrchestration, :answer_result})
+    Process.delete({FakeOrchestration, :dispatch_result})
+    Process.delete({FakeOrchestration, :status_result})
+    Process.delete({FakeOrchestration, :result_result})
 
     {:ok, state: %{}}
   end
@@ -66,17 +107,20 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   describe "handle_list_tools/2" do
     test "returns tools", %{state: state} do
       {:ok, tools, nil, _state} = Handler.handle_list_tools(nil, state)
-      assert length(tools) == 6
+      assert length(tools) == 9
 
       names = Enum.map(tools, & &1.name) |> Enum.sort()
 
       assert names == [
                "arbor_actions",
                "arbor_answer_approval",
+               "arbor_dispatch_task",
                "arbor_help",
                "arbor_list_pending_approvals",
                "arbor_run",
-               "arbor_status"
+               "arbor_status",
+               "arbor_task_result",
+               "arbor_task_status"
              ]
     end
 
@@ -117,6 +161,18 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       approval_tool = Enum.find(tools, &(&1.name == "arbor_answer_approval"))
       assert "id" in approval_tool.inputSchema.required
       assert "decision" in approval_tool.inputSchema.required
+    end
+
+    test "task orchestration tools require stable ids", %{state: state} do
+      {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
+      dispatch_tool = Enum.find(tools, &(&1.name == "arbor_dispatch_task"))
+      status_tool = Enum.find(tools, &(&1.name == "arbor_task_status"))
+      result_tool = Enum.find(tools, &(&1.name == "arbor_task_result"))
+
+      assert "agent_id" in dispatch_tool.inputSchema.required
+      assert "task" in dispatch_tool.inputSchema.required
+      assert "task_id" in status_tool.inputSchema.required
+      assert "task_id" in result_tool.inputSchema.required
     end
   end
 
@@ -225,6 +281,80 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert result.isError == true
       assert [%{text: text}] = result.content
       assert text =~ ":not_found"
+    end
+
+    test "dispatch_task requires SignedRequest authentication", %{state: state} do
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_dispatch_task",
+          %{"agent_id" => "agent_1", "task" => "write a patch"},
+          state
+        )
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text =~ "SignedRequest authentication"
+    end
+
+    test "dispatch_task calls the shared API with caller, metadata, and timeout", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, %{content: [%{text: text}]}, _state} =
+        Handler.handle_call_tool(
+          "arbor_dispatch_task",
+          %{
+            "agent_id" => "agent_1",
+            "task" => %{"prompt" => "write a patch"},
+            "timeout" => 120_000,
+            "metadata" => %{"ticket" => "A-1"}
+          },
+          state
+        )
+
+      assert %{"ok" => true, "task_id" => "task_1", "agent_id" => "agent_1"} =
+               Jason.decode!(text)
+
+      assert_received {:dispatch_task, "agent_1", %{"prompt" => "write a patch"}, opts}
+      assert opts[:caller_id] == "human_1"
+      assert opts[:timeout] == 120_000
+      assert opts[:metadata] == %{"ticket" => "A-1"}
+    end
+
+    test "task_status calls the shared API and returns JSON-safe timestamps", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, %{content: [%{text: text}]}, _state} =
+        Handler.handle_call_tool("arbor_task_status", %{"task_id" => "task_1"}, state)
+
+      assert %{
+               "task" => %{
+                 "task_id" => "task_1",
+                 "agent_id" => "agent_1",
+                 "state" => "running",
+                 "started_at" => "2026-07-08T12:00:00Z"
+               }
+             } = Jason.decode!(text)
+
+      assert_received {:task_status, "task_1", opts}
+      assert opts[:caller_id] == "human_1"
+    end
+
+    test "task_result calls the shared API and returns structured artifacts", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, %{content: [%{text: text}]}, _state} =
+        Handler.handle_call_tool("arbor_task_result", %{"task_id" => "task_1"}, state)
+
+      assert %{
+               "task_id" => "task_1",
+               "result" => %{
+                 "result_type" => "coding_change",
+                 "payload" => %{"branch" => "agent/change", "files" => ["lib/a.ex"]}
+               }
+             } = Jason.decode!(text)
+
+      assert_received {:task_result, "task_1", opts}
+      assert opts[:caller_id] == "human_1"
     end
   end
 

@@ -41,14 +41,19 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
      true, :require_human, false, :cheap},
     {"arbor://agent/spawn_worker", :arbor_agent, :high, :reversible, :identity_mutating,
      :restricted, true, :require_human, false, :cheap},
+    # Dispatch starts autonomous agent work. The dispatched agent still runs
+    # through its own trust/capability gates, but this is control-plane
+    # authority and may spend model/tool budget, so it is explicitly granted.
+    {"arbor://agent/dispatch", :arbor_agent, :high, :reversible, :process_spawn, :restricted,
+     true, :require_human, false, :metered},
     {"arbor://consensus/admin", :arbor_consensus, :critical, :irreversible, :governance,
      :restricted, false, :require_human, false, :cheap},
     # The authority to approve/deny agent operations. Holding it lets the caller
     # release any gated op it is scoped for (up to shell/governance), so it is a
     # critical, irreversible, governance-class capability that is never auto-minted
     # and never graduation-earned — it is explicitly granted (facade/dashboard).
-    {"arbor://approval/answer", :arbor_agent, :critical, :irreversible, :governance,
-     :restricted, false, :require_human, false, :cheap},
+    {"arbor://approval/answer", :arbor_agent, :critical, :irreversible, :governance, :restricted,
+     false, :require_human, false, :cheap},
     {"arbor://monitor/remediate", :arbor_monitor, :high, :reversible, :process_spawn, :restricted,
      true, :require_human, false, :cheap},
     {"arbor://code/write", :arbor_actions, :high, :reversible, :local_write, :confidential, true,
@@ -93,6 +98,10 @@ defmodule Arbor.Trust.CapabilityRiskProfiles do
     # Read-only view of the pending-approval queue (carries enriched context, so
     # :confidential). Low-risk read, auto-grantable with a rate limit.
     {"arbor://approval/read", :arbor_agent, :low, :read_only, :read, :confidential, true, :auto,
+     true, :cheap, %{rate_limit: 300}},
+    # Read-only task status/result view. Results can include diffs and reports,
+    # so the data is confidential even though the operation is non-mutating.
+    {"arbor://agent/task/read", :arbor_agent, :low, :read_only, :read, :confidential, true, :auto,
      true, :cheap, %{rate_limit: 300}}
   ]
 

@@ -11,7 +11,7 @@ defmodule Arbor.Agent.Orchestration do
   requests held by those systems.
   """
 
-  alias Arbor.Agent.Orchestration.PendingApproval
+  alias Arbor.Agent.Orchestration.{PendingApproval, TaskArtifacts}
   alias Arbor.Contracts.Security.CapabilityUri
 
   @approval_read_uri "arbor://approval/read"
@@ -636,10 +636,7 @@ defmodule Arbor.Agent.Orchestration do
   defp normalize_task_status_result(:module_unavailable), do: {:error, :task_store_unavailable}
   defp normalize_task_status_result(other), do: {:error, {:unexpected_task_store_result, other}}
 
-  defp normalize_task_result({:ok, result}) when is_map(result), do: {:ok, result}
-
-  defp normalize_task_result({:ok, result}),
-    do: {:ok, %{result_type: :value, payload: %{value: result}, raw: result}}
+  defp normalize_task_result({:ok, result}), do: {:ok, TaskArtifacts.normalize(result)}
 
   defp normalize_task_result({:error, _} = error), do: error
   defp normalize_task_result(:module_unavailable), do: {:error, :task_store_unavailable}

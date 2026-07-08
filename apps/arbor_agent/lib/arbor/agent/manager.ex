@@ -509,6 +509,20 @@ defmodule Arbor.Agent.Manager do
   """
   @spec chat(String.t(), String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def chat(input, sender \\ "Opus", opts \\ []) do
+    input
+    |> chat_response(sender, opts)
+    |> handle_query_result()
+  end
+
+  @doc """
+  Send a message to the agent and return the structured runtime response.
+
+  This is the same dispatch path as `chat/3`, but preserves fields such as
+  tool-call history, usage, model, and provider for orchestration callers that
+  need artifacts rather than final assistant text only.
+  """
+  @spec chat_response(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def chat_response(input, sender \\ "Opus", opts \\ []) do
     agent_result =
       case Keyword.get(opts, :agent_id) do
         nil ->
@@ -522,9 +536,9 @@ defmodule Arbor.Agent.Manager do
       end
 
     case agent_result do
-      {:ok, _agent_id, pid, metadata} ->
+      {:ok, _agent_id, _pid, metadata} ->
         safe_emit(:chat_message, %{role: :user, content: input, sender: sender})
-        dispatch_query(pid, metadata, input, opts)
+        dispatch_query_response(metadata, input, opts)
 
       :not_found ->
         {:error, :agent_not_found}
@@ -722,7 +736,7 @@ defmodule Arbor.Agent.Manager do
     Arbor.Agent.TemplateStore.module_to_name(mod)
   end
 
-  defp dispatch_query(_pid, metadata, input, opts) do
+  defp dispatch_query_response(metadata, input, opts) do
     # Use host_pid from BranchSupervisor metadata (new path),
     # fall back to direct PID lookup for backward compatibility.
     host_pid = metadata[:host_pid]
@@ -749,8 +763,7 @@ defmodule Arbor.Agent.Manager do
       end
 
     if query_pid do
-      result = query_runtime(runtime, query_pid, input, opts)
-      handle_query_result(result)
+      query_runtime(runtime, query_pid, input, opts)
     else
       {:error, :agent_host_not_found}
     end

@@ -2,12 +2,13 @@ defmodule Arbor.Gateway.MCP.Handler do
   @moduledoc """
   MCP server handler for Arbor.
 
-  Provides 4 progressive-disclosure tools for interacting with Arbor:
+  Provides progressive-disclosure tools for interacting with Arbor:
 
   - `arbor_actions` — List action categories and tool names (compact overview)
   - `arbor_help` — Get detailed schema/description for a specific action
   - `arbor_run` — Execute an action with parameters
   - `arbor_status` — Inspect agent, memory, and signal state
+  - orchestration tools — list/answer approvals and dispatch/poll async tasks
 
   Uses runtime bridges (`Code.ensure_loaded?` + `apply/3`) to call into
   arbor_actions, arbor_agent, arbor_memory, and arbor_signals without
@@ -205,6 +206,63 @@ defmodule Arbor.Gateway.MCP.Handler do
           },
           required: ["id", "decision"]
         }
+      },
+      %{
+        name: "arbor_dispatch_task",
+        description:
+          "Dispatch an asynchronous task to an Arbor agent. Returns immediately with a task_id.",
+        inputSchema: %{
+          type: "object",
+          properties: %{
+            agent_id: %{
+              type: "string",
+              description: "Stable id of the agent that should run the task"
+            },
+            task: %{
+              oneOf: [%{type: "string"}, %{type: "object"}],
+              description: "Task prompt or structured task payload"
+            },
+            timeout: %{
+              type: "integer",
+              minimum: 0,
+              description: "Optional soft task timeout in milliseconds"
+            },
+            metadata: %{
+              type: "object",
+              description: "Optional caller metadata copied into task status"
+            }
+          },
+          required: ["agent_id", "task"]
+        }
+      },
+      %{
+        name: "arbor_task_status",
+        description:
+          "Read status for an asynchronous Arbor task, including waiting_approval state.",
+        inputSchema: %{
+          type: "object",
+          properties: %{
+            task_id: %{
+              type: "string",
+              description: "Task id returned by arbor_dispatch_task"
+            }
+          },
+          required: ["task_id"]
+        }
+      },
+      %{
+        name: "arbor_task_result",
+        description: "Read the completed structured result for an asynchronous Arbor task.",
+        inputSchema: %{
+          type: "object",
+          properties: %{
+            task_id: %{
+              type: "string",
+              description: "Task id returned by arbor_dispatch_task"
+            }
+          },
+          required: ["task_id"]
+        }
       }
     ]
   end
@@ -265,6 +323,27 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   def handle_call_tool("arbor_answer_approval", args, state) do
     case answer_approval(args) do
+      {:ok, result} -> {:ok, json_content(result), state}
+      {:error, message} -> {:ok, error_content(message), state}
+    end
+  end
+
+  def handle_call_tool("arbor_dispatch_task", args, state) do
+    case dispatch_task(args) do
+      {:ok, result} -> {:ok, json_content(result), state}
+      {:error, message} -> {:ok, error_content(message), state}
+    end
+  end
+
+  def handle_call_tool("arbor_task_status", args, state) do
+    case task_status(args) do
+      {:ok, result} -> {:ok, json_content(result), state}
+      {:error, message} -> {:ok, error_content(message), state}
+    end
+  end
+
+  def handle_call_tool("arbor_task_result", args, state) do
+    case task_result(args) do
       {:ok, result} -> {:ok, json_content(result), state}
       {:error, message} -> {:ok, error_content(message), state}
     end
@@ -373,6 +452,41 @@ defmodule Arbor.Gateway.MCP.Handler do
     end
   end
 
+  defp dispatch_task(args) do
+    with {:ok, caller_id} <- require_authenticated("arbor_dispatch_task"),
+         {:ok, agent_id} <- required_string_arg(args, "agent_id"),
+         {:ok, task} <- required_task_arg(args, "task"),
+         opts = task_dispatch_opts(args, caller_id),
+         {:ok, task_id} <- call_orchestration(:dispatch, [agent_id, task, opts]) do
+      {:ok, %{"ok" => true, "task_id" => task_id, "agent_id" => agent_id}}
+    else
+      {:error, reason} -> {:error, format_tool_error(reason)}
+      other -> {:error, format_tool_error(other)}
+    end
+  end
+
+  defp task_status(args) do
+    with {:ok, caller_id} <- require_authenticated("arbor_task_status"),
+         {:ok, task_id} <- required_string_arg(args, "task_id"),
+         {:ok, status} <- call_orchestration(:task_status, [task_id, [caller_id: caller_id]]) do
+      {:ok, %{"task" => status}}
+    else
+      {:error, reason} -> {:error, format_tool_error(reason)}
+      other -> {:error, format_tool_error(other)}
+    end
+  end
+
+  defp task_result(args) do
+    with {:ok, caller_id} <- require_authenticated("arbor_task_result"),
+         {:ok, task_id} <- required_string_arg(args, "task_id"),
+         {:ok, result} <- call_orchestration(:task_result, [task_id, [caller_id: caller_id]]) do
+      {:ok, %{"task_id" => task_id, "result" => result}}
+    else
+      {:error, reason} -> {:error, format_tool_error(reason)}
+      other -> {:error, format_tool_error(other)}
+    end
+  end
+
   defp approval_list_opts(args, caller_id) do
     [
       caller_id: caller_id,
@@ -387,6 +501,15 @@ defmodule Arbor.Gateway.MCP.Handler do
     [
       caller_id: caller_id,
       note: optional_string_arg(args, "note")
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp task_dispatch_opts(args, caller_id) do
+    [
+      caller_id: caller_id,
+      timeout: optional_integer_arg(args, "timeout"),
+      metadata: optional_map_arg(args, "metadata")
     ]
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
@@ -410,6 +533,20 @@ defmodule Arbor.Gateway.MCP.Handler do
     end
   end
 
+  defp required_task_arg(args, key) do
+    case Map.get(args, key) do
+      value when is_binary(value) ->
+        value = String.trim(value)
+        if value == "", do: {:error, "Missing required argument: #{key}"}, else: {:ok, value}
+
+      value when is_map(value) and map_size(value) > 0 ->
+        {:ok, value}
+
+      _ ->
+        {:error, "Missing required argument: #{key}"}
+    end
+  end
+
   defp optional_string_arg(args, key) do
     case Map.get(args, key) do
       value when is_binary(value) ->
@@ -418,6 +555,20 @@ defmodule Arbor.Gateway.MCP.Handler do
 
       _ ->
         nil
+    end
+  end
+
+  defp optional_integer_arg(args, key) do
+    case Map.get(args, key) do
+      value when is_integer(value) and value >= 0 -> value
+      _ -> nil
+    end
+  end
+
+  defp optional_map_arg(args, key) do
+    case Map.get(args, key) do
+      value when is_map(value) -> value
+      _ -> nil
     end
   end
 

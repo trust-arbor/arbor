@@ -13,6 +13,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_runner Arbor.Agent.Orchestration.TaskRunner
   @default_max_tasks 1_000
 
+  alias Arbor.Agent.Orchestration.TaskArtifacts
+
   @type task_id :: String.t()
   @type state_name :: :running | :waiting_approval | :done | :failed
 
@@ -262,15 +264,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     }
   end
 
-  defp normalize_result(%{result_type: _type, payload: _payload} = result), do: result
-
-  defp normalize_result(result) do
-    %{
-      result_type: :value,
-      payload: %{value: result},
-      raw: result
-    }
-  end
+  defp normalize_result(result), do: TaskArtifacts.normalize(result)
 
   defp status_view(record) do
     %{
