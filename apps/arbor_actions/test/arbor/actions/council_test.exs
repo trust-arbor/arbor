@@ -290,6 +290,73 @@ defmodule Arbor.Actions.CouncilTest do
       assert :security_veto in result.tier_reasons
     end
 
+    test "security perspective reject vote routes to human review even when majority approves" do
+      review_runner = fn _request, _params, _context ->
+        {:ok,
+         %{
+           decision: "approved",
+           approve_count: 2,
+           reject_count: 1,
+           abstain_count: 0,
+           quorum_met: true,
+           average_confidence: 0.86,
+           perspective_votes: %{
+             "security" => "reject",
+             "correctness" => "approve",
+             "tests" => "approve"
+           }
+         }}
+      end
+
+      params = %{@valid_review_params | files: ["docs/review-loop.md"]}
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(params, %{
+                 review_runner: review_runner,
+                 persist_verdict: false
+               })
+
+      assert result.recommendation == :keep
+      assert result.blast_radius == :low
+      assert result.tier_decision == :human_review
+      assert result.human_required
+      assert result.security_veto
+      assert :security_veto in result.tier_reasons
+    end
+
+    test "default runner uses the decide graph path and preserves security veto" do
+      graph_path = write_review_decide_fixture!()
+
+      on_exit(fn -> File.rm(graph_path) end)
+
+      params =
+        @valid_review_params
+        |> Map.put(:files, ["docs/review-loop.md"])
+        |> Map.put(:graph, graph_path)
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(params, %{
+                 persist_verdict: false,
+                 review_context: %{
+                   "council.decision" => "approved",
+                   "council.approve_count" => 2,
+                   "council.reject_count" => 1,
+                   "council.abstain_count" => 0,
+                   "council.quorum_met" => true,
+                   "council.average_confidence" => 0.86,
+                   "council.primary_concerns" => [],
+                   "council.security_veto" => true
+                 }
+               })
+
+      assert result.decision == "approved"
+      assert result.recommendation == :keep
+      assert result.blast_radius == :low
+      assert result.tier_decision == :human_review
+      assert result.security_veto
+      assert result.human_required
+    end
+
     test "request map can be overridden by top-level params" do
       params = %{
         request: @valid_review_params,
@@ -377,6 +444,26 @@ defmodule Arbor.Actions.CouncilTest do
       assert result.response_count > 0
       assert is_integer(result.duration_ms)
     end
+  end
+
+  defp write_review_decide_fixture! do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "review-decide-fixture-#{System.unique_integer([:positive])}.dot"
+      )
+
+    File.write!(path, """
+    digraph review_decide_fixture {
+      start [type="start"]
+
+      done [type="exit"]
+
+      start -> done
+    }
+    """)
+
+    path
   end
 
   describe "ConsultOne integration" do

@@ -556,7 +556,7 @@ defmodule Arbor.Actions.Council do
         runner.(request, context)
 
       nil ->
-        default_review_runner(request, params)
+        default_review_runner(request, params, context)
     end
   end
 
@@ -657,8 +657,12 @@ defmodule Arbor.Actions.Council do
     Map.get(params, key) || Map.get(params, Atom.to_string(key))
   end
 
-  defp default_review_runner(%CodeReviewRequest{} = request, params) do
-    context = CodeReviewRequest.to_context(request)
+  defp default_review_runner(%CodeReviewRequest{} = request, params, action_context) do
+    context =
+      request
+      |> CodeReviewRequest.to_context()
+      |> Map.merge(review_context_overlay(action_context))
+
     question = Map.fetch!(context, "council.question")
 
     opts =
@@ -672,6 +676,15 @@ defmodule Arbor.Actions.Council do
 
     Arbor.Consensus.decide(question, opts)
   end
+
+  defp review_context_overlay(context) when is_map(context) do
+    case context_value(context, :review_context) do
+      overlay when is_map(overlay) -> overlay
+      _ -> %{}
+    end
+  end
+
+  defp review_context_overlay(_context), do: %{}
 
   defp default_code_review_graph_path do
     candidates = [
@@ -831,10 +844,23 @@ defmodule Arbor.Actions.Council do
   defp security_veto?(decision, context) do
     boolean_value(decision, "security_veto") or
       boolean_value(decision, "security_veto?") or
+      security_reject_vote?(value(decision, "perspective_votes")) or
       security_veto_list?(value(decision, "vetoes")) or
       truthy?(context_value(context, :security_veto?)) or
       truthy?(context_value(context, :security_veto))
   end
+
+  defp security_reject_vote?(votes) when is_map(votes) do
+    votes
+    |> value("security")
+    |> case do
+      :reject -> true
+      "reject" -> true
+      _ -> false
+    end
+  end
+
+  defp security_reject_vote?(_votes), do: false
 
   defp security_veto_list?(vetoes) when is_list(vetoes) do
     Enum.any?(vetoes, fn

@@ -386,6 +386,9 @@ defmodule Arbor.Actions.Consensus do
 
         case call_from_evaluations(proposal, evaluations, quorum: quorum) do
           {:ok, decision} ->
+            perspective_votes = perspective_votes(decision.evaluations)
+            vetoes = vetoes(decision.evaluations)
+
             {:ok,
              %{
                decision: to_string(Map.get(decision, :decision)),
@@ -395,6 +398,9 @@ defmodule Arbor.Actions.Consensus do
                quorum_met: Map.get(decision, :quorum_met, false),
                average_confidence: Map.get(decision, :average_confidence, 0.0),
                primary_concerns: inspect(Map.get(decision, :primary_concerns, [])),
+               perspective_votes: perspective_votes,
+               security_veto: "security" in vetoes,
+               vetoes: vetoes,
                status: "decided"
              }}
 
@@ -589,6 +595,20 @@ defmodule Arbor.Actions.Consensus do
 
     defp call_from_evaluations(proposal, evaluations, opts) do
       CouncilDecision.from_evaluations(proposal, evaluations, opts)
+    end
+
+    defp perspective_votes(evaluations) do
+      Map.new(evaluations, fn eval ->
+        {eval.evaluator_id, to_string(eval.vote)}
+      end)
+    end
+
+    defp vetoes(evaluations) do
+      evaluations
+      |> Enum.filter(&(&1.vote == :reject))
+      |> Enum.map(& &1.evaluator_id)
+      |> Enum.filter(&(&1 == "security"))
+      |> Enum.uniq()
     end
   end
 end

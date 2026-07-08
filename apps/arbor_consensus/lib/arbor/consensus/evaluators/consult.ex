@@ -349,6 +349,15 @@ defmodule Arbor.Consensus.Evaluators.Consult do
          primary_concerns:
            get_context_val(ctx, "exec.decide.primary_concerns") ||
              get_context_val(ctx, "council.primary_concerns", "[]"),
+         perspective_votes:
+           get_context_val(ctx, "exec.decide.perspective_votes") ||
+             get_context_val(ctx, "council.perspective_votes", %{}),
+         security_veto:
+           get_context_val(ctx, "exec.decide.security_veto") ||
+             get_context_val(ctx, "council.security_veto", false),
+         vetoes:
+           get_context_val(ctx, "exec.decide.vetoes") ||
+             get_context_val(ctx, "council.vetoes", []),
          status:
            get_context_val(ctx, "exec.decide.status") ||
              get_context_val(ctx, "consensus.status", "unknown")

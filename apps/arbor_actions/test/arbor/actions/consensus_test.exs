@@ -303,6 +303,33 @@ defmodule Arbor.Actions.ConsensusTest do
       assert result.status == "decided"
     end
 
+    test "majority approve still surfaces security veto when security rejects" do
+      results = [
+        make_branch_result("security", "reject", concerns: ["path traversal"]),
+        make_branch_result("correctness", "approve"),
+        make_branch_result("tests", "approve")
+      ]
+
+      assert {:ok, result} =
+               Consensus.Decide.run(
+                 %{results: results, question: "Should we accept this low-risk diff?"},
+                 %{}
+               )
+
+      assert result.decision == "approved"
+      assert result.approve_count == 2
+      assert result.reject_count == 1
+
+      assert result.perspective_votes == %{
+               "security" => "reject",
+               "correctness" => "approve",
+               "tests" => "approve"
+             }
+
+      assert result.security_veto
+      assert result.vetoes == ["security"]
+    end
+
     test "majority reject produces rejected decision" do
       results = [
         make_branch_result("security", "reject"),
