@@ -456,7 +456,8 @@ defmodule Arbor.Dashboard.Live.ChatLive.Components do
   defp approval_resource_uri(proposal) do
     meta = Map.get(proposal, :metadata) || %{}
 
-    Map.get(meta, :resource_uri) || Map.get(meta, "resource_uri") ||
+    Map.get(proposal, :resource_uri) ||
+      Map.get(meta, :resource_uri) || Map.get(meta, "resource_uri") ||
       Map.get(proposal, :description, "")
   end
 

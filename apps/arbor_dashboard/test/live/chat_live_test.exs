@@ -1,6 +1,27 @@
 defmodule Arbor.Dashboard.Live.ChatLiveTest do
   use Arbor.Dashboard.ConnCase, async: false
 
+  defmodule FakeChatOrchestration do
+    @moduledoc false
+
+    def list_pending_approvals(opts) do
+      notify({:list_pending_approvals, opts})
+      {:ok, Application.get_env(:arbor_dashboard, :chat_live_pending_approvals, [])}
+    end
+
+    def answer_approval(id, decision, opts) do
+      notify({:answer_approval, id, decision, opts})
+      Application.get_env(:arbor_dashboard, :chat_live_answer_result, :ok)
+    end
+
+    defp notify(message) do
+      case Application.get_env(:arbor_dashboard, :chat_live_test_pid) do
+        pid when is_pid(pid) -> send(pid, message)
+        _ -> :ok
+      end
+    end
+  end
+
   # ChatLive mount calls Manager.find_first_agent/0 when connected, which reads
   # the GLOBAL :arbor_agent_registry ETS table. That table is process-wide
   # shared state with no per-test isolation — an agent registered (and still
@@ -13,6 +34,23 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
   # genuinely empty agent listing, and restore it on exit so we don't disturb
   # entries other modules may depend on.
   setup do
+    env_keys = [
+      :chat_orchestration,
+      :chat_live_pending_approvals,
+      :chat_live_answer_result,
+      :chat_live_test_pid
+    ]
+
+    previous_env =
+      Map.new(env_keys, fn key ->
+        {key, Application.fetch_env(:arbor_dashboard, key)}
+      end)
+
+    Application.put_env(:arbor_dashboard, :chat_orchestration, FakeChatOrchestration)
+    Application.put_env(:arbor_dashboard, :chat_live_test_pid, self())
+    Application.delete_env(:arbor_dashboard, :chat_live_pending_approvals)
+    Application.delete_env(:arbor_dashboard, :chat_live_answer_result)
+
     if :ets.whereis(:arbor_agent_registry) == :undefined do
       :ets.new(:arbor_agent_registry, [:named_table, :set, :public])
     end
@@ -21,6 +59,11 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
     :ets.delete_all_objects(:arbor_agent_registry)
 
     on_exit(fn ->
+      Enum.each(previous_env, fn
+        {key, {:ok, value}} -> Application.put_env(:arbor_dashboard, key, value)
+        {key, :error} -> Application.delete_env(:arbor_dashboard, key)
+      end)
+
       # The table is :public/:named — recreate it if a concurrent teardown
       # removed it, then restore the entries we snapshotted.
       if :ets.whereis(:arbor_agent_registry) == :undefined do
@@ -234,10 +277,10 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
     @tag :fast
     test "behavioral: always-allow-tool denies when actor lacks auto_promote cap",
          %{conn: conn} do
-      # H13 behavioral assertion. ChatLive mount grants the actor
-      # arbor://consensus/admin but NOT arbor://trust/auto_promote/*. So a
-      # naked "always-allow-tool" click from a fresh dashboard session must
-      # produce the deny-flash, never silently call Trust.Store.always_allow/2.
+      # H13 behavioral assertion. A naked "always-allow-tool" click from a
+      # fresh dashboard session must produce the deny-flash, never silently call
+      # Trust.Store.always_allow/2. Approval-answer authority is not enough to
+      # mutate the trust profile.
       #
       # Pre-H13, this handler unconditionally called the trust mutation; this
       # test pins the gated behavior so a future refactor that bypasses
@@ -260,12 +303,29 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
     alias Arbor.Contracts.Comms.Interaction
 
     @tag :fast
-    test "renders dashboard_interaction payload in the approvals stream",
+    test "renders pending approval from orchestration facade when dashboard_interaction arrives",
          %{conn: conn} do
+      submitted_at = DateTime.utc_now()
+
+      Application.put_env(:arbor_dashboard, :chat_live_pending_approvals, [
+        %{
+          id: "irq_phase1a_facade",
+          source: :interaction,
+          agent_id: "agent_test_phase1a",
+          principal_id: "agent_test_phase1a",
+          resource_uri: "arbor://shell/exec/mix",
+          action: :approval,
+          description: "Run mix test on the staging branch?",
+          metadata: %{},
+          created_at: submitted_at
+        }
+      ])
+
       {:ok, view, _html} = live(conn, "/chat")
 
       {:ok, interaction} =
         Interaction.new(%{
+          request_id: "irq_phase1a_facade",
           kind: :approval,
           agent_id: "agent_test_phase1a",
           user_id: "human_dashboard",
@@ -277,8 +337,27 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
       send(view.pid, {:dashboard_interaction, interaction})
       html = render(view)
 
+      assert_received {:list_pending_approvals, opts}
+      assert Keyword.fetch!(opts, :caller_id) == "human_dashboard"
+      assert Keyword.fetch!(opts, :agent_id) == "agent_test_phase1a"
+
       assert html =~ interaction.agent_id,
              "ChatLive should render the agent_id from a dashboard_interaction"
+
+      assert html =~ "arbor://shell/exec/mix"
+    end
+
+    @tag :fast
+    test "approve-tool resolves through shared orchestration facade",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/chat")
+
+      html = render_click(view, "approve-tool", %{"id" => "prop_orchestration"})
+
+      assert is_binary(html)
+
+      assert_received {:answer_approval, "prop_orchestration", :approve, opts}
+      assert Keyword.fetch!(opts, :caller_id) == "human_dashboard"
     end
 
     @tag :fast
@@ -329,6 +408,7 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
     @tag :fast
     test "reject-interaction for unknown request_id does not crash",
          %{conn: conn} do
+      Application.put_env(:arbor_dashboard, :chat_live_answer_result, {:error, :not_found})
       {:ok, view, _html} = live(conn, "/chat")
 
       html =
@@ -336,6 +416,8 @@ defmodule Arbor.Dashboard.Live.ChatLiveTest do
 
       assert is_binary(html),
              "reject-interaction must handle :not_found gracefully (already-resolved case)"
+
+      assert_received {:answer_approval, "irq_definitely_unknown", :deny, _opts}
     end
   end
 end

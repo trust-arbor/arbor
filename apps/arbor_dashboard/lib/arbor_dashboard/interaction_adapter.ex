@@ -6,8 +6,8 @@ defmodule Arbor.Dashboard.InteractionAdapter do
   process subscribes (at mount time) to the dashboard-interaction
   channel for its user; when the router dispatches an interaction here,
   this adapter broadcasts to that channel and the LiveView renders an
-  approval banner. The LiveView's approve/reject events call back to
-  `Arbor.Comms.InteractionRouter.respond/3` directly.
+  approval banner. The LiveView's approve/reject events resolve through
+  `Arbor.Agent.Orchestration`, which owns the unified approval facade.
 
   Phase 1 scope. Multi-node correct because the broadcast uses the
   cluster-aware PubSub server; whichever node hosts the user's LiveView

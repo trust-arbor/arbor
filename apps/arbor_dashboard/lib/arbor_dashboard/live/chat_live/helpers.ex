@@ -165,7 +165,7 @@ defmodule Arbor.Dashboard.Live.ChatLive.Helpers do
   end
 
   def format_query_error({:session_failed, {:turn_task_crashed, {:timeout, _}}}) do
-    "Request timed out waiting for approval. Check the Consensus panel for pending approvals."
+    "Request timed out waiting for approval. Check the Approvals panel for pending requests."
   end
 
   def format_query_error({:session_failed, reason}) do
