@@ -721,6 +721,9 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert result[:signed_request] == fake_signed_request,
              "Authenticated signed_request must reach the action context — H1 regression"
 
+      assert result[:identity_verified] == true,
+             "Gateway-verified proofs must set identity_verified so action auth skips nonce re-check"
+
       assert result[:workspace] == "/tmp",
              "Existing context keys must be preserved"
     end

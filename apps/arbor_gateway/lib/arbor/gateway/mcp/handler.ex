@@ -417,8 +417,17 @@ defmodule Arbor.Gateway.MCP.Handler do
   @doc false
   def maybe_put_signed_request(context) do
     case authenticated_signed_request() do
-      nil -> context
-      sr -> Map.put(context, :signed_request, sr)
+      nil ->
+        context
+
+      sr ->
+        # SignedRequestAuth already verified this proof and consumed the
+        # single-use nonce. Flag identity_verified so authorize_and_execute
+        # does not re-verify (would :replayed_nonce) or bind expected_resource
+        # to the action URI (MCP payload is method+path+body).
+        context
+        |> Map.put(:signed_request, sr)
+        |> Map.put(:identity_verified, true)
     end
   end
 

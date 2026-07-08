@@ -178,14 +178,30 @@ defmodule Arbor.Actions do
     # singular action namespace (`arbor://action/<category>/<name>`).
     resource = canonical_uri_for(action_module, params)
 
-    # Build auth opts — when a signed_request is present, enable identity
-    # verification and resource binding. When absent, fall back to config
-    # defaults (disabled in dev/test, enabled in production).
+    # Build auth opts for the signed_request, if any.
+    #
+    # Two proof shapes share this context key:
+    #
+    # 1. **Gateway-preverified** (`identity_verified: true` in context) — the
+    #    HTTP edge (SignedRequestAuth / MCP signer proxy) already verified
+    #    Ed25519 + identity + single-use nonce. Payload is
+    #    `method\\npath\\nbody`, not an action URI. Re-running Verifier would
+    #    hit `:replayed_nonce`; binding `expected_resource` to the action URI
+    #    would hit `:resource_mismatch`. Mark identity_verified so
+    #    AuthDecision skips re-verify (same pattern as `Arbor.Agent.auth_opts/1`).
+    #
+    # 2. **Resource-bound** (payload is `arbor://…`) — first verification at
+    #    this layer; enable verify_identity and bind expected_resource.
     auth_opts =
-      if signed_request do
-        [signed_request: signed_request, verify_identity: true, expected_resource: resource]
-      else
-        []
+      cond do
+        is_map(signed_request) and Map.get(clean_context, :identity_verified) == true ->
+          [signed_request: signed_request, identity_verified: true]
+
+        not is_nil(signed_request) ->
+          [signed_request: signed_request, verify_identity: true, expected_resource: resource]
+
+        true ->
+          []
       end
 
     # For fs actions, plumb `:file_path` through to Trust.authorize so

@@ -144,6 +144,41 @@ defmodule Arbor.Actions.SigningTest do
         _ -> :ok
       end
     end
+
+    test "security regression: gateway-preverified MCP HTTP signature is not re-verified", %{
+      identity: identity,
+      agent_id: agent_id,
+      read_path: read_path
+    } do
+      # MCP signer proxy signs method+path+body. Gateway SignedRequestAuth verifies
+      # once and consumes the nonce. The handler then forwards the same proof with
+      # identity_verified: true. Pre-fix, authorize_and_execute always set
+      # verify_identity: true + expected_resource: action URI, so every MCP tools/call
+      # failed as :unauthorized (replayed_nonce and/or resource_mismatch).
+      http_payload = "POST\n/mcp\n{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\"}"
+      {:ok, signed} = SignedRequest.sign(http_payload, agent_id, identity.private_key)
+
+      # Simulate gateway consume of the nonce (first verify wins).
+      assert {:ok, ^agent_id} = Arbor.Security.verify_request(signed)
+
+      result =
+        Arbor.Actions.authorize_and_execute(
+          agent_id,
+          Arbor.Actions.File.Read,
+          %{path: read_path},
+          %{signed_request: signed, identity_verified: true}
+        )
+
+      case result do
+        {:error, :unauthorized} ->
+          flunk(
+            "Gateway-preverified MCP signature must not be re-verified — would hit :replayed_nonce / :resource_mismatch"
+          )
+
+        _ ->
+          :ok
+      end
+    end
   end
 
   describe "make_signer/2" do
