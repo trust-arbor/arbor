@@ -73,7 +73,9 @@ config :arbor_orchestrator, preprocessor_enabled: false
 
 # P0-1: Default taint enforcement policy for authorize_and_execute.
 # :audit_only logs violations without blocking. Use :strict to block.
-config :arbor_actions, default_taint_policy: :audit_only
+config :arbor_actions,
+  default_taint_policy: :audit_only,
+  coding_default_acp_agent: "codex"
 
 # Channel senders for arbor_actions (runtime resolution, no compile-time dep)
 config :arbor_actions, :channel_senders, %{

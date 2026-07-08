@@ -3,7 +3,7 @@ defmodule Arbor.Actions.Coding do
   Coding-agent orchestration actions.
 
   These actions compose existing primitives into reviewable software-change
-  workflows. The v0 path delegates implementation to Codex over ACP, then
+  workflows. The v0 path delegates implementation to an ACP coding agent, then
   validates and hands the result back as a human-reviewed branch/PR.
   """
 
@@ -11,22 +11,28 @@ defmodule Arbor.Actions.Coding do
     @moduledoc """
     Produce a reviewable code change in an isolated git worktree.
 
-    The action creates a new worktree/branch, starts a Codex ACP session in
-    `permission_mode: :default`, asks Codex to implement the requested task, runs
-    validation commands, and commits the result. It can optionally open a draft
-    PR, but never merges its own work.
+    The action creates a new worktree/branch, starts an ACP coding-agent session
+    in `permission_mode: :default`, asks it to implement the requested task,
+    runs validation commands, and commits the result. It can optionally open a
+    draft PR, but never merges its own work.
     """
 
     use Jido.Action,
       name: "coding_produce_reviewable_change",
-      description: "Delegate a task to Codex via ACP and return a validated reviewable branch",
+      description:
+        "Delegate a task to an ACP coding agent and return a validated reviewable branch",
       category: "coding",
-      tags: ["coding", "codex", "acp", "git", "pr"],
+      tags: ["coding", "acp", "agent", "git", "pr"],
       schema: [
         task: [
           type: :string,
           required: true,
-          doc: "Implementation task for Codex"
+          doc: "Implementation task for the ACP coding agent"
+        ],
+        acp_agent: [
+          type: :string,
+          doc:
+            "ACP provider/agent to run (default from :arbor_actions, :coding_default_acp_agent)"
         ],
         repo_path: [
           type: :string,
@@ -47,7 +53,7 @@ defmodule Arbor.Actions.Coding do
         ],
         validation_commands: [
           type: {:list, :string},
-          doc: "Commands to run after Codex edits"
+          doc: "Commands to run after the ACP coding agent edits"
         ],
         pr_title: [
           type: :string,
@@ -69,15 +75,15 @@ defmodule Arbor.Actions.Coding do
         ],
         model: [
           type: :string,
-          doc: "Codex model override"
+          doc: "ACP provider model override"
         ],
         allowed_tools: [
           type: {:list, :string},
-          doc: "Codex adapter tool allowlist"
+          doc: "ACP adapter tool allowlist"
         ],
         disallowed_tools: [
           type: {:list, :string},
-          doc: "Codex adapter tool denylist"
+          doc: "ACP adapter tool denylist"
         ],
         timeout: [
           type: :non_neg_integer,
@@ -100,10 +106,12 @@ defmodule Arbor.Actions.Coding do
     @default_timeout 900_000
     @default_validation_timeout 300_000
     @default_approval_timeout 60_000
+    @default_acp_agent "codex"
 
     def taint_roles do
       %{
         task: {:control, requires: [:prompt_injection]},
+        acp_agent: :control,
         repo_path: {:control, requires: [:path_traversal]},
         base_ref: {:control, requires: [:command_injection]},
         branch_name: {:control, requires: [:command_injection]},
@@ -135,8 +143,8 @@ defmodule Arbor.Actions.Coding do
       with {:ok, repo_root} <- resolve_repo_root(repo_path),
            {:ok, branch_name} <- resolve_branch_name(params),
            {:ok, worktree_path} <- create_worktree(repo_root, branch_name, params),
-           {:ok, session} <- start_codex_session(worktree_path, params, context),
-           {:ok, response} <- prompt_codex(session, worktree_path, params, context) do
+           {:ok, session} <- start_acp_session(worktree_path, params, context),
+           {:ok, response} <- prompt_acp_agent(session, worktree_path, params, context) do
         maybe_close_session(session, context)
         finish_change(repo_root, worktree_path, branch_name, response, params, context)
       else
@@ -155,6 +163,7 @@ defmodule Arbor.Actions.Coding do
             status: "declined",
             branch: branch_name,
             worktree_path: worktree_path,
+            acp_agent: selected_acp_agent(params),
             response_text: response_text(response)
           }
 
@@ -166,6 +175,7 @@ defmodule Arbor.Actions.Coding do
             status: "no_changes",
             branch: branch_name,
             worktree_path: worktree_path,
+            acp_agent: selected_acp_agent(params),
             response_text: response_text(response)
           }
 
@@ -196,6 +206,7 @@ defmodule Arbor.Actions.Coding do
                 repo_path: repo_root,
                 worktree_path: worktree_path,
                 branch: branch_name,
+                acp_agent: selected_acp_agent(params),
                 validation: validations,
                 response_text: response_text(response)
               }
@@ -210,6 +221,7 @@ defmodule Arbor.Actions.Coding do
                 worktree_path: worktree_path,
                 branch: branch_name,
                 commit: commit[:commit_hash] || commit["commit_hash"],
+                acp_agent: selected_acp_agent(params),
                 error: reason,
                 validation: [],
                 response_text: response_text(response)
@@ -431,10 +443,10 @@ defmodule Arbor.Actions.Coding do
       end
     end
 
-    defp start_codex_session(worktree_path, params, context) do
+    defp start_acp_session(worktree_path, params, context) do
       start_params =
         %{
-          provider: "codex",
+          provider: selected_acp_agent(params),
           cwd: worktree_path,
           permission_mode: "default",
           timeout: get_param(params, :timeout) || @default_timeout
@@ -446,7 +458,7 @@ defmodule Arbor.Actions.Coding do
       call_action(Acp.StartSession, start_params, context)
     end
 
-    defp prompt_codex(session, worktree_path, params, context) do
+    defp prompt_acp_agent(session, worktree_path, params, context) do
       session_pid = session[:session_pid] || session["session_pid"]
 
       prompt_params = %{
@@ -752,6 +764,7 @@ defmodule Arbor.Actions.Coding do
               response,
               validations,
               commit,
+              params,
               review_failure_fields(reason)
             )
         end
@@ -792,6 +805,7 @@ defmodule Arbor.Actions.Coding do
             response,
             validations,
             commit,
+            params,
             fields
           )
 
@@ -804,6 +818,7 @@ defmodule Arbor.Actions.Coding do
             response,
             validations,
             commit,
+            params,
             fields
           )
 
@@ -843,6 +858,7 @@ defmodule Arbor.Actions.Coding do
             response,
             validations,
             commit,
+            params,
             review_failure_fields({:unknown_tier_decision, fields.tier_decision})
           )
       end
@@ -877,6 +893,7 @@ defmodule Arbor.Actions.Coding do
               response,
               validations,
               commit,
+              params,
               pr_url: pr[:url] || pr["url"]
             )
 
@@ -889,6 +906,7 @@ defmodule Arbor.Actions.Coding do
               response,
               validations,
               commit,
+              params,
               error: reason
             )
         end
@@ -900,7 +918,8 @@ defmodule Arbor.Actions.Coding do
           branch_name,
           response,
           validations,
-          commit
+          commit,
+          params
         )
       end
     end
@@ -987,6 +1006,7 @@ defmodule Arbor.Actions.Coding do
            response,
            validations,
            commit,
+           params,
            extra \\ []
          ) do
       %{
@@ -995,6 +1015,7 @@ defmodule Arbor.Actions.Coding do
         worktree_path: worktree_path,
         branch: branch_name,
         commit: commit_hash(commit),
+        acp_agent: selected_acp_agent(params),
         validation: validations,
         response_text: response_text(response)
       }
@@ -1138,6 +1159,21 @@ defmodule Arbor.Actions.Coding do
     defp blank_to_nil(nil), do: nil
     defp blank_to_nil(value), do: value
 
+    defp selected_acp_agent(params) do
+      params
+      |> get_param(:acp_agent)
+      |> blank_to_nil()
+      |> Kernel.||(default_acp_agent())
+      |> to_string()
+    end
+
+    defp default_acp_agent do
+      :arbor_actions
+      |> Application.get_env(:coding_default_acp_agent, @default_acp_agent)
+      |> blank_to_nil()
+      |> Kernel.||(@default_acp_agent)
+    end
+
     defp pr_title(params) do
       task =
         params
@@ -1169,7 +1205,7 @@ defmodule Arbor.Actions.Coding do
 
       Branch: `#{branch_name}`
 
-      ## Codex Response
+      ## ACP Agent Response
 
       #{response_text(response)}
 

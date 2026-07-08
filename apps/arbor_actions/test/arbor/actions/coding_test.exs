@@ -9,7 +9,8 @@ defmodule Arbor.Actions.CodingTest do
     test "is discoverable as a coding action" do
       assert Coding.ProduceReviewableChange.name() == "coding_produce_reviewable_change"
       assert Coding.ProduceReviewableChange.category() == "coding"
-      assert "codex" in Coding.ProduceReviewableChange.tags()
+      assert "acp" in Coding.ProduceReviewableChange.tags()
+      assert "agent" in Coding.ProduceReviewableChange.tags()
 
       assert {:ok, Coding.ProduceReviewableChange} =
                Arbor.Actions.name_to_module("coding.produce_reviewable_change")
@@ -20,7 +21,7 @@ defmodule Arbor.Actions.CodingTest do
   end
 
   describe "ProduceReviewableChange.run/2" do
-    test "delegates to Codex with default ACP permissions, validates, commits, and skips PR by default",
+    test "delegates to default ACP agent with default permissions, validates, commits, and skips PR by default",
          %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
       base_branch = git!(repo, ["branch", "--show-current"])
@@ -30,7 +31,7 @@ defmodule Arbor.Actions.CodingTest do
         Acp.StartSession, params, _context ->
           Process.put(:coding_test_worktree, params.cwd)
           send(parent, {:start_session, params})
-          {:ok, %{session_pid: self(), session_id: "codex-session"}}
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
 
         Acp.SendMessage, params, _context ->
           worktree = Process.get(:coding_test_worktree)
@@ -73,6 +74,7 @@ defmodule Arbor.Actions.CodingTest do
 
       assert result.status == "change_committed"
       assert result.branch == "test/coding-agent"
+      assert result.acp_agent == "codex"
       refute Map.has_key?(result, :pr_url)
       assert File.exists?(Path.join(result.worktree_path, "feature.txt"))
       assert result.commit == git!(result.worktree_path, ["rev-parse", "HEAD"])
@@ -100,6 +102,54 @@ defmodule Arbor.Actions.CodingTest do
       refute_received {:unexpected_pr, _}
     end
 
+    test "uses the requested ACP agent provider", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          send(parent, {:start_session, params})
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          {:ok, %{text: "STATUS: implemented\nCreated feature.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, _params, _context ->
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   acp_agent: "claude",
+                   repo_path: repo,
+                   branch_name: "test/custom-acp-agent",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["true"],
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "change_committed"
+      assert result.acp_agent == "claude"
+
+      assert_receive {:start_session, start_params}
+      assert start_params.provider == "claude"
+      assert start_params.permission_mode == "default"
+      assert start_params.cwd == result.worktree_path
+    end
+
     test "opens a draft PR through the platform-agnostic git action when requested",
          %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
@@ -108,7 +158,7 @@ defmodule Arbor.Actions.CodingTest do
       runner = fn
         Acp.StartSession, params, _context ->
           Process.put(:coding_test_worktree, params.cwd)
-          {:ok, %{session_pid: self(), session_id: "codex-session"}}
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
 
         Acp.SendMessage, _params, _context ->
           worktree = Process.get(:coding_test_worktree)
@@ -164,7 +214,7 @@ defmodule Arbor.Actions.CodingTest do
       runner = fn
         Acp.StartSession, params, _context ->
           Process.put(:coding_test_worktree, params.cwd)
-          {:ok, %{session_pid: self(), session_id: "codex-session"}}
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
 
         Acp.SendMessage, _params, _context ->
           :counters.add(run_number, 1, 1)
@@ -231,7 +281,7 @@ defmodule Arbor.Actions.CodingTest do
       runner = fn
         Acp.StartSession, params, _context ->
           Process.put(:coding_test_worktree, params.cwd)
-          {:ok, %{session_pid: self(), session_id: "codex-session"}}
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
 
         Acp.SendMessage, _params, _context ->
           worktree = Process.get(:coding_test_worktree)
@@ -310,7 +360,7 @@ defmodule Arbor.Actions.CodingTest do
       runner = fn
         Acp.StartSession, params, _context ->
           Process.put(:coding_test_worktree, params.cwd)
-          {:ok, %{session_pid: self(), session_id: "codex-session"}}
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
 
         Acp.SendMessage, _params, _context ->
           worktree = Process.get(:coding_test_worktree)
@@ -387,7 +437,7 @@ defmodule Arbor.Actions.CodingTest do
         runner = fn
           Acp.StartSession, params, _context ->
             Process.put(:coding_test_worktree, params.cwd)
-            {:ok, %{session_pid: self(), session_id: "codex-session"}}
+            {:ok, %{session_pid: self(), session_id: "acp-session"}}
 
           Acp.SendMessage, _params, _context ->
             worktree = Process.get(:coding_test_worktree)
@@ -458,7 +508,7 @@ defmodule Arbor.Actions.CodingTest do
       runner = fn
         Acp.StartSession, params, _context ->
           Process.put(:coding_test_worktree, params.cwd)
-          {:ok, %{session_pid: self(), session_id: "codex-session"}}
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
 
         Acp.SendMessage, _params, _context ->
           {:ok, %{text: "STATUS: declined\nThe task needs a clearer target."}}
@@ -490,13 +540,13 @@ defmodule Arbor.Actions.CodingTest do
       refute_received :unexpected_pr
     end
 
-    test "returns no_changes when Codex edits nothing", %{tmp_dir: tmp_dir} do
+    test "returns no_changes when ACP agent edits nothing", %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
 
       runner = fn
         Acp.StartSession, params, _context ->
           Process.put(:coding_test_worktree, params.cwd)
-          {:ok, %{session_pid: self(), session_id: "codex-session"}}
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
 
         Acp.SendMessage, _params, _context ->
           {:ok, %{text: "STATUS: implemented\nNo edit was necessary."}}
@@ -532,7 +582,7 @@ defmodule Arbor.Actions.CodingTest do
       runner = fn
         Acp.StartSession, params, _context ->
           Process.put(:coding_test_worktree, params.cwd)
-          {:ok, %{session_pid: self(), session_id: "codex-session"}}
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
 
         Acp.SendMessage, _params, _context ->
           worktree = Process.get(:coding_test_worktree)
@@ -594,7 +644,7 @@ defmodule Arbor.Actions.CodingTest do
       runner = fn
         Acp.StartSession, params, _context ->
           Process.put(:coding_test_worktree, params.cwd)
-          {:ok, %{session_pid: self(), session_id: "codex-session"}}
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
 
         Acp.SendMessage, _params, _context ->
           worktree = Process.get(:coding_test_worktree)
