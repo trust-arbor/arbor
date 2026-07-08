@@ -105,6 +105,17 @@ defmodule Arbor.Security do
   end
 
   @doc """
+  Record a durable security event for an async orchestration task dispatch.
+
+  External orchestration surfaces should use this facade after starting a task.
+  """
+  @spec record_orchestration_task_dispatched(String.t(), String.t(), String.t(), keyword()) ::
+          :ok | {:error, term()}
+  def record_orchestration_task_dispatched(actor_id, task_id, agent_id, opts \\ []) do
+    Events.record_orchestration_task_dispatched(actor_id, task_id, agent_id, opts)
+  end
+
+  @doc """
   Return the effective resource URI used by the authorization matcher.
 
   This is exposed so policy-layer code can perform explicit pre-authorization

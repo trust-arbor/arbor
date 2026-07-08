@@ -105,6 +105,10 @@ defmodule Arbor.Security.UriRegistry do
     "arbor://approval/read",
     "arbor://approval/answer",
 
+    # Agent orchestration facade
+    "arbor://agent/dispatch",
+    "arbor://agent/task/read",
+
     # Comms facade
     "arbor://comms/send",
     "arbor://comms/poll",

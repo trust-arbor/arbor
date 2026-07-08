@@ -83,6 +83,26 @@ defmodule Arbor.Security.EventsTest do
       assert event.data.note == "bounded command"
     end
 
+    test "records orchestration_task_dispatched with task metadata" do
+      :ok =
+        Events.record_orchestration_task_dispatched(
+          "human_1",
+          "task_123",
+          "agent_1",
+          task_preview: "write a patch",
+          metadata: %{ticket: "A-1"},
+          trace_id: "trace_abc"
+        )
+
+      {:ok, [event]} = Events.get_by_type(:orchestration_task_dispatched)
+      assert event.data.actor_id == "human_1"
+      assert event.data.task_id == "task_123"
+      assert event.data.agent_id == "agent_1"
+      assert event.data.task_preview == "write a patch"
+      assert event.data.metadata == %{ticket: "A-1"}
+      assert event.data.trace_id == "trace_abc"
+    end
+
     test "includes trace_id when provided" do
       :ok =
         Events.record_authorization_granted("agent_001", "arbor://fs/read/docs",

@@ -41,6 +41,8 @@ defmodule Arbor.Agent.Application do
           Arbor.Agent.SummaryCache,
           Arbor.Agent.Fitness,
           Arbor.Agent.SessionManager,
+          {Task.Supervisor, name: Arbor.Agent.Orchestration.TaskSupervisor},
+          Arbor.Agent.Orchestration.TaskStore,
           # Dynamic supervisors (Phase 3: three-loop architecture)
           Arbor.Agent.ActionCycleSupervisor,
           Arbor.Agent.MaintenanceSupervisor,

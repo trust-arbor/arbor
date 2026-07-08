@@ -16,9 +16,69 @@ defmodule Arbor.Agent.Orchestration do
 
   @approval_read_uri "arbor://approval/read"
   @approval_answer_uri "arbor://approval/answer"
+  @dispatch_uri "arbor://agent/dispatch"
+  @task_read_uri "arbor://agent/task/read"
   @interaction_request_prefix "irq"
 
   @type approval_decision :: :approve | :deny | :rework
+
+  @doc """
+  Dispatch an agent task asynchronously.
+
+  Returns immediately with a stable `task_id`; the background task can be
+  observed with `task_status/2` and `task_result/2`.
+  """
+  @spec dispatch(String.t(), String.t() | map(), keyword() | map()) ::
+          {:ok, String.t()} | {:error, term()}
+  def dispatch(agent_id, task, opts \\ []) do
+    with {:ok, agent_id} <- normalize_agent_id(agent_id),
+         {:ok, task} <- normalize_task(task),
+         {:ok, caller_id} <- caller_id(opts),
+         :ok <- authorize_dispatch(opts, caller_id, agent_id),
+         {:ok, task_id} <- dispatch_task(agent_id, task, opts),
+         :ok <- record_dispatch(task_id, agent_id, task, caller_id, opts) do
+      {:ok, task_id}
+    end
+  end
+
+  @doc """
+  Return structured status for an async orchestration task.
+
+  If a running task has a pending approval for the same agent, the returned
+  status is reported as `:waiting_approval` with `:waiting_on` set to the
+  approval id.
+  """
+  @spec task_status(String.t(), keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def task_status(task_id, opts \\ []) do
+    with {:ok, task_id} <- normalize_task_id(task_id),
+         {:ok, status} <- task_status_unchecked(task_id, opts),
+         {:ok, caller_id} <- caller_id(opts),
+         :ok <- authorize_task_read(opts, caller_id, status) do
+      {:ok, enrich_waiting_approval(status, opts)}
+    end
+  end
+
+  @doc """
+  Return the completed structured result for an async orchestration task.
+  """
+  @spec task_result(String.t(), keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def task_result(task_id, opts \\ []) do
+    with {:ok, task_id} <- normalize_task_id(task_id),
+         {:ok, status} <- task_status_unchecked(task_id, opts),
+         {:ok, caller_id} <- caller_id(opts),
+         :ok <- authorize_task_read(opts, caller_id, status) do
+      case enrich_waiting_approval(status, opts) do
+        %{state: :waiting_approval, waiting_on: approval_id} when is_binary(approval_id) ->
+          {:error, {:waiting_approval, approval_id}}
+
+        _status ->
+          opts
+          |> task_store_module()
+          |> apply_if_exported(:result, [task_id, task_store_opts(opts)])
+          |> normalize_task_result()
+      end
+    end
+  end
 
   @doc """
   List pending approvals from all configured approval backends.
@@ -61,6 +121,122 @@ defmodule Arbor.Agent.Orchestration do
       :ok
     end
   end
+
+  defp dispatch_task(agent_id, task, opts) do
+    opts
+    |> task_store_module()
+    |> apply_if_exported(:dispatch, [agent_id, task, task_store_opts(opts)])
+    |> normalize_task_dispatch_result()
+  end
+
+  defp task_status_unchecked(task_id, opts) do
+    opts
+    |> task_store_module()
+    |> apply_if_exported(:status, [task_id, task_store_opts(opts)])
+    |> normalize_task_status_result()
+  end
+
+  defp enrich_waiting_approval(%{state: :running, agent_id: agent_id} = status, opts)
+       when is_binary(agent_id) do
+    case list_pending_approvals_unchecked(Map.put(normalize_opts(opts), :agent_id, agent_id)) do
+      [%PendingApproval{id: approval_id} | _] ->
+        status
+        |> Map.put(:state, :waiting_approval)
+        |> Map.put(:waiting_on, approval_id)
+
+      [] ->
+        status
+    end
+  end
+
+  defp enrich_waiting_approval(status, _opts), do: status
+
+  defp authorize_dispatch(opts, caller_id, agent_id) do
+    if opt(opts, :authorize?, true) == false do
+      :ok
+    else
+      [scoped_dispatch_uri(agent_id), @dispatch_uri]
+      |> Enum.find_value(fn resource_uri ->
+        case authorize_caller(opts, caller_id, resource_uri, :execute) do
+          :ok -> :ok
+          _ -> nil
+        end
+      end)
+      |> case do
+        :ok -> :ok
+        nil -> {:error, {:unauthorized, :agent_dispatch_required}}
+      end
+    end
+  end
+
+  defp authorize_task_read(opts, caller_id, status) do
+    if opt(opts, :authorize?, true) == false do
+      :ok
+    else
+      status
+      |> task_read_authorization_uris()
+      |> Enum.find_value(fn resource_uri ->
+        case authorize_caller(opts, caller_id, resource_uri, :read) do
+          :ok -> :ok
+          _ -> nil
+        end
+      end)
+      |> case do
+        :ok -> :ok
+        nil -> {:error, {:unauthorized, :task_read_required}}
+      end
+    end
+  end
+
+  defp task_read_authorization_uris(status) do
+    [
+      scoped_task_read_uri(Map.get(status, :task_id)),
+      scoped_task_read_uri(Map.get(status, :agent_id)),
+      @task_read_uri
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp scoped_dispatch_uri(agent_id) when is_binary(agent_id) and agent_id != "",
+    do: "#{@dispatch_uri}/#{agent_id}"
+
+  defp scoped_dispatch_uri(_), do: nil
+
+  defp scoped_task_read_uri(id) when is_binary(id) and id != "",
+    do: "#{@task_read_uri}/#{id}"
+
+  defp scoped_task_read_uri(_), do: nil
+
+  defp record_dispatch(task_id, agent_id, task, caller_id, opts) do
+    data = [
+      trace_id: opt(opts, :trace_id),
+      metadata: opt(opts, :metadata),
+      task_preview: task_preview(task)
+    ]
+
+    opts
+    |> audit_module()
+    |> apply_if_exported(:record_orchestration_task_dispatched, [
+      caller_id,
+      task_id,
+      agent_id,
+      data
+    ])
+    |> normalize_audit_result()
+  end
+
+  defp task_preview(task) when is_binary(task) do
+    if byte_size(task) > 500, do: String.slice(task, 0, 500) <> "...", else: task
+  end
+
+  defp task_preview(task) when is_map(task) do
+    task
+    |> inspect(limit: 20)
+    |> task_preview()
+  end
+
+  defp task_preview(task), do: inspect(task, limit: 20)
 
   defp list_pending_approvals_unchecked(opts) do
     opts
@@ -357,6 +533,25 @@ defmodule Arbor.Agent.Orchestration do
 
   defp normalize_id(_), do: {:error, :invalid_approval_id}
 
+  defp normalize_task_id(id) when is_binary(id) do
+    if String.trim(id) == "", do: {:error, :invalid_task_id}, else: {:ok, id}
+  end
+
+  defp normalize_task_id(_), do: {:error, :invalid_task_id}
+
+  defp normalize_agent_id(agent_id) when is_binary(agent_id) do
+    if String.trim(agent_id) == "", do: {:error, :invalid_agent_id}, else: {:ok, agent_id}
+  end
+
+  defp normalize_agent_id(_agent_id), do: {:error, :invalid_agent_id}
+
+  defp normalize_task(task) when is_binary(task) do
+    if String.trim(task) == "", do: {:error, :empty_task}, else: {:ok, task}
+  end
+
+  defp normalize_task(task) when is_map(task), do: {:ok, task}
+  defp normalize_task(_task), do: {:error, :invalid_task}
+
   defp normalize_decision(decision) when decision in [:approve, :approved], do: {:ok, :approve}
 
   defp normalize_decision(decision) when decision in [:deny, :denied, :reject, :rejected],
@@ -390,6 +585,7 @@ defmodule Arbor.Agent.Orchestration do
   end
 
   defp consensus_module(opts), do: opt(opts, :consensus_module, Arbor.Consensus)
+  defp task_store_module(opts), do: opt(opts, :task_store, Arbor.Agent.Orchestration.TaskStore)
 
   defp interaction_router(opts) do
     opt(opts, :interaction_router, Module.concat([:Arbor, :Comms, :InteractionRouter]))
@@ -416,6 +612,48 @@ defmodule Arbor.Agent.Orchestration do
   defp normalize_backend_result(:module_unavailable), do: {:error, :approval_backend_unavailable}
   defp normalize_backend_result(other), do: {:error, {:unexpected_approval_backend_result, other}}
 
+  defp normalize_task_dispatch_result({:ok, task_id}) when is_binary(task_id), do: {:ok, task_id}
+  defp normalize_task_dispatch_result({:error, _} = error), do: error
+  defp normalize_task_dispatch_result(:module_unavailable), do: {:error, :task_store_unavailable}
+  defp normalize_task_dispatch_result(other), do: {:error, {:unexpected_task_store_result, other}}
+
+  defp normalize_task_status_result({:ok, status}) when is_map(status) do
+    {:ok,
+     %{
+       task_id: value(status, :task_id),
+       agent_id: value(status, :agent_id),
+       state: normalize_task_state(value(status, :state)),
+       current_step: value(status, :current_step),
+       waiting_on: value(status, :waiting_on),
+       started_at: value(status, :started_at),
+       updated_at: value(status, :updated_at),
+       completed_at: value(status, :completed_at),
+       metadata: value(status, :metadata, %{}) || %{}
+     }}
+  end
+
+  defp normalize_task_status_result({:error, _} = error), do: error
+  defp normalize_task_status_result(:module_unavailable), do: {:error, :task_store_unavailable}
+  defp normalize_task_status_result(other), do: {:error, {:unexpected_task_store_result, other}}
+
+  defp normalize_task_result({:ok, result}) when is_map(result), do: {:ok, result}
+
+  defp normalize_task_result({:ok, result}),
+    do: {:ok, %{result_type: :value, payload: %{value: result}, raw: result}}
+
+  defp normalize_task_result({:error, _} = error), do: error
+  defp normalize_task_result(:module_unavailable), do: {:error, :task_store_unavailable}
+  defp normalize_task_result(other), do: {:error, {:unexpected_task_store_result, other}}
+
+  defp normalize_task_state(state) when state in [:running, :waiting_approval, :done, :failed],
+    do: state
+
+  defp normalize_task_state("running"), do: :running
+  defp normalize_task_state("waiting_approval"), do: :waiting_approval
+  defp normalize_task_state("done"), do: :done
+  defp normalize_task_state("failed"), do: :failed
+  defp normalize_task_state(_state), do: :running
+
   defp normalize_audit_result(:ok), do: :ok
   defp normalize_audit_result({:error, _}), do: :ok
   defp normalize_audit_result(:module_unavailable), do: :ok
@@ -440,6 +678,14 @@ defmodule Arbor.Agent.Orchestration do
   end
 
   defp opt(_opts, _key, default), do: default
+
+  defp task_store_opts(opts) when is_list(opts), do: opts
+  defp task_store_opts(opts) when is_map(opts), do: Map.to_list(opts)
+  defp task_store_opts(_opts), do: []
+
+  defp normalize_opts(opts) when is_list(opts), do: Map.new(opts)
+  defp normalize_opts(opts) when is_map(opts), do: opts
+  defp normalize_opts(_opts), do: %{}
 
   defp maybe_put(map, _key, false), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)

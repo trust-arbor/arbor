@@ -17,6 +17,7 @@ defmodule Arbor.Security.Events do
   | `:authorization_denied` | Agent was denied access to a resource |
   | `:authorization_pending` | Authorization escalated to consensus |
   | `:approval_answered` | Human/operator answered an approval request |
+  | `:orchestration_task_dispatched` | Human/operator dispatched an async agent task |
   | `:capability_granted` | Capability token granted to agent |
   | `:capability_revoked` | Capability token revoked |
   | `:identity_registered` | Agent identity registered in registry |
@@ -94,6 +95,20 @@ defmodule Arbor.Security.Events do
       agent_id: Keyword.get(opts, :agent_id),
       principal_id: Keyword.get(opts, :principal_id),
       note: Keyword.get(opts, :note),
+      trace_id: Keyword.get(opts, :trace_id)
+    })
+  end
+
+  @doc "Record an async orchestration task dispatch."
+  @spec record_orchestration_task_dispatched(String.t(), String.t(), String.t(), keyword()) ::
+          :ok | {:error, term()}
+  def record_orchestration_task_dispatched(actor_id, task_id, agent_id, opts \\ []) do
+    dual_emit(:orchestration_task_dispatched, %{
+      actor_id: actor_id,
+      task_id: task_id,
+      agent_id: agent_id,
+      task_preview: Keyword.get(opts, :task_preview),
+      metadata: Keyword.get(opts, :metadata),
       trace_id: Keyword.get(opts, :trace_id)
     })
   end

@@ -56,9 +56,50 @@ defmodule Arbor.Agent.OrchestrationTest do
     end
   end
 
+  defmodule FakeTaskStore do
+    def dispatch(agent_id, task, opts) do
+      send(self(), {:task_dispatch, agent_id, task, opts})
+      Process.get({__MODULE__, :dispatch_result}, {:ok, "task_1"})
+    end
+
+    def status(task_id, opts) do
+      send(self(), {:task_status, task_id, opts})
+
+      Process.get(
+        {__MODULE__, :status_result},
+        {:ok,
+         %{
+           task_id: task_id,
+           agent_id: "agent_1",
+           state: :running,
+           current_step: "running",
+           waiting_on: nil,
+           started_at: DateTime.utc_now(),
+           updated_at: DateTime.utc_now(),
+           completed_at: nil,
+           metadata: %{}
+         }}
+      )
+    end
+
+    def result(task_id, opts) do
+      send(self(), {:task_result, task_id, opts})
+
+      Process.get(
+        {__MODULE__, :result_result},
+        {:ok, %{result_type: :chat, payload: %{text: "done"}, raw: "done"}}
+      )
+    end
+  end
+
   defmodule FakeAudit do
     def record_approval_answered(actor_id, approval_id, source, decision, opts) do
       send(self(), {:audit_answered, actor_id, approval_id, source, decision, opts})
+      :ok
+    end
+
+    def record_orchestration_task_dispatched(actor_id, task_id, agent_id, opts) do
+      send(self(), {:audit_dispatched, actor_id, task_id, agent_id, opts})
       :ok
     end
   end
@@ -69,12 +110,112 @@ defmodule Arbor.Agent.OrchestrationTest do
           {FakeConsensus, :pending},
           {FakeConsensus, :answer_result},
           {FakeInteractionRouter, :pending},
-          {FakeInteractionRouter, :answer_result}
+          {FakeInteractionRouter, :answer_result},
+          {FakeTaskStore, :dispatch_result},
+          {FakeTaskStore, :status_result},
+          {FakeTaskStore, :result_result}
         ] do
       Process.delete(key)
     end
 
     :ok
+  end
+
+  describe "dispatch/3" do
+    test "dispatches a task asynchronously and records an audit event" do
+      assert {:ok, "task_1"} =
+               Orchestration.dispatch("agent_1", "write a patch",
+                 caller_id: "human_1",
+                 metadata: %{ticket: "A-1"},
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity,
+                 audit_module: FakeAudit
+               )
+
+      assert_received {:authorize, "human_1", "arbor://agent/dispatch/agent_1", :execute,
+                       [verify_identity: false]}
+
+      assert_received {:task_dispatch, "agent_1", "write a patch", opts}
+      assert opts[:metadata] == %{ticket: "A-1"}
+
+      assert_received {:audit_dispatched, "human_1", "task_1", "agent_1", audit_opts}
+      assert audit_opts[:metadata] == %{ticket: "A-1"}
+      assert audit_opts[:task_preview] == "write a patch"
+    end
+
+    test "denies dispatch before starting the task when caller lacks capability" do
+      Process.put({FakeSecurity, :result}, {:error, :no_capability})
+
+      assert {:error, {:unauthorized, :agent_dispatch_required}} =
+               Orchestration.dispatch("agent_1", "write a patch",
+                 caller_id: "human_1",
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity,
+                 audit_module: FakeAudit
+               )
+
+      refute_received {:task_dispatch, _, _, _}
+      refute_received {:audit_dispatched, _, _, _, _}
+    end
+  end
+
+  describe "task_status/2 and task_result/2" do
+    test "returns status and result through the task store with read authorization" do
+      assert {:ok, status} =
+               Orchestration.task_status("task_1",
+                 caller_id: "human_1",
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity
+               )
+
+      assert status.task_id == "task_1"
+      assert status.agent_id == "agent_1"
+      assert status.state == :running
+
+      assert_received {:authorize, "human_1", "arbor://agent/task/read/task_1", :read,
+                       [verify_identity: false]}
+
+      assert_received {:task_status, "task_1", _opts}
+
+      assert {:ok, result} =
+               Orchestration.task_result("task_1",
+                 caller_id: "human_1",
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity
+               )
+
+      assert result.result_type == :chat
+      assert result.payload.text == "done"
+      assert_received {:task_result, "task_1", _opts}
+    end
+
+    test "reports running tasks as waiting_approval when the shared queue has a pending item" do
+      Process.put(
+        {FakeConsensus, :pending},
+        [consensus_proposal("prop_approval", "agent_1", "arbor://fs/write/repo/lib.ex")]
+      )
+
+      assert {:ok, status} =
+               Orchestration.task_status("task_1",
+                 caller_id: "human_1",
+                 task_store: FakeTaskStore,
+                 consensus_module: FakeConsensus,
+                 interaction_router: FakeInteractionRouter,
+                 security_module: FakeSecurity
+               )
+
+      assert status.state == :waiting_approval
+      assert status.waiting_on == "prop_approval"
+
+      assert {:error, {:waiting_approval, "prop_approval"}} =
+               Orchestration.task_result("task_1",
+                 caller_id: "human_1",
+                 task_store: FakeTaskStore,
+                 consensus_module: FakeConsensus,
+                 interaction_router: FakeInteractionRouter,
+                 security_module: FakeSecurity
+               )
+    end
   end
 
   describe "list_pending_approvals/1" do
