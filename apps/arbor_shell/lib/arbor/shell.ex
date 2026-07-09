@@ -278,10 +278,14 @@ defmodule Arbor.Shell do
           {:ok, map()} | {:error, term()}
   def execute_direct(cmd, args, opts \\ []) do
     sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
+    # Absolute executable paths (e.g. worktree `…/bin/mix`) must not be
+    # shell-split for policy checks — use basename + argv for sandbox, and
+    # pass the path through to the port as a single executable.
+    check_command = sandbox_check_command(cmd, args)
 
-    with {:ok, :allowed} <- Sandbox.check(cmd, sandbox, opts),
-         {:ok, execution_id} <- register_execution(cmd, opts) do
-      emit_started(cmd, execution_id, opts)
+    with {:ok, :allowed} <- Sandbox.check(check_command, sandbox, opts),
+         {:ok, execution_id} <- register_execution(check_command, opts) do
+      emit_started(check_command, execution_id, opts)
 
       case Executor.run_direct(cmd, args, opts) do
         {:ok, result} ->
@@ -296,9 +300,26 @@ defmodule Arbor.Shell do
       end
     else
       {:error, reason} ->
-        emit_blocked(cmd, reason)
+        emit_blocked(check_command, reason)
         {:error, reason}
     end
+  end
+
+  # Build a space-joined string for Sandbox.check only. Absolute paths are
+  # reduced to their basename so spaces in the path never become extra args.
+  defp sandbox_check_command(cmd, args) when is_binary(cmd) and is_list(args) do
+    name =
+      if absolute_path?(cmd) do
+        Path.basename(cmd)
+      else
+        cmd
+      end
+
+    Enum.join([name | Enum.map(args, &to_string/1)], " ")
+  end
+
+  defp absolute_path?(cmd) when is_binary(cmd) do
+    Path.type(cmd) == :absolute or String.starts_with?(cmd, "/")
   end
 
   @doc """

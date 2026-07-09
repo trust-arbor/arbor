@@ -449,6 +449,12 @@ defmodule Arbor.AI.AcpSession.Handler do
     pubsub_name = Arbor.Comms.PubSub
     timeout_ms = state.permission_timeout_ms
 
+    # Push-notify subscribers (Signal bridge, dashboards, MCP task watchers)
+    # that the ACP session has gone idle waiting for an operator decision.
+    # Distinct from acp_session_completed (finished work) and inactivity timeout
+    # (stuck silence → abort).
+    emit_awaiting_approval(agent_id, request_id, resource_uri, state)
+
     if pubsub_available?(pubsub_name) do
       topic = Arbor.Contracts.Comms.Interaction.response_topic_for_agent(agent_id)
 
@@ -519,6 +525,25 @@ defmodule Arbor.AI.AcpSession.Handler do
 
   defp pubsub_available?(name) do
     Code.ensure_loaded?(Phoenix.PubSub) and Process.whereis(name) != nil
+  end
+
+  defp emit_awaiting_approval(agent_id, request_id, resource_uri, state) do
+    if Code.ensure_loaded?(Arbor.Signals) and function_exported?(Arbor.Signals, :emit, 3) do
+      Arbor.Signals.emit(:agent, :acp_session_awaiting_approval, %{
+        agent_id: agent_id,
+        proposal_id: request_id,
+        resource_uri: resource_uri,
+        session_id: Map.get(state, :session_id) || Map.get(state, "session_id"),
+        provider: Map.get(state, :provider) || Map.get(state, "provider"),
+        source: :acp_permission
+      })
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   defp format_denial(:path_traversal), do: "access denied: path traversal attempt"

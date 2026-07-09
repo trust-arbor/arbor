@@ -190,11 +190,24 @@ defmodule Arbor.Actions do
     #    would hit `:resource_mismatch`. Mark identity_verified so
     #    AuthDecision skips re-verify (same pattern as `Arbor.Agent.auth_opts/1`).
     #
-    # 2. **Resource-bound** (payload is `arbor://…`) — first verification at
+    # 2. **Nested action under an already-verified parent** — parent
+    #    `authorize_and_execute` marks `%AuthContext{identity_verified: true}`
+    #    before calling `run/2`. Nested syscalls reuse the same signed_request;
+    #    re-binding expected_resource to the nested URI would hit
+    #    `:resource_mismatch` / `:replayed_nonce`. Only honor a real
+    #    AuthContext struct for this agent whose signed_request pairs with the
+    #    one on the call — never a bare `%{identity_verified: true}` map a
+    #    caller could inject.
+    #
+    # 3. **Resource-bound** (payload is `arbor://…`) — first verification at
     #    this layer; enable verify_identity and bind expected_resource.
+    identity_already_verified? =
+      Map.get(clean_context, :identity_verified) == true or
+        auth_context_identity_verified?(clean_context, agent_id, signed_request)
+
     auth_opts =
       cond do
-        is_map(signed_request) and Map.get(clean_context, :identity_verified) == true ->
+        is_map(signed_request) and identity_already_verified? ->
           [signed_request: signed_request, identity_verified: true]
 
         not is_nil(signed_request) ->
@@ -235,6 +248,7 @@ defmodule Arbor.Actions do
       |> Keyword.put(:egress_tier, egress_tier)
       |> Keyword.put(:egress_taint, operation_taint)
       |> Keyword.put(:egress_destination, egress_destination)
+      |> maybe_put_approved_invocation(clean_context)
       |> Keyword.put(
         :approval_context,
         approval_context_for_action(
@@ -387,6 +401,7 @@ defmodule Arbor.Actions do
         Arbor.Actions.Github.PR
       ],
       mix: [
+        Arbor.Actions.Mix.Compile,
         Arbor.Actions.Mix.Test,
         Arbor.Actions.Mix.Quality,
         Arbor.Actions.Mix.Format
@@ -838,6 +853,21 @@ defmodule Arbor.Actions do
     })
   end
 
+  @doc """
+  Emit a free-form action-domain signal (e.g. `:awaiting_approval`).
+
+  Used by composite actions that block on human input so dashboards / MCP
+  callers / Signal bridges can push-notify without polling alone.
+  """
+  @spec emit_event(atom(), map()) :: :ok
+  def emit_event(type, data) when is_atom(type) and is_map(data) do
+    Signals.emit(:action, type, data)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
   defp approval_context_for_action(
          action_module,
          resource,
@@ -1172,6 +1202,56 @@ defmodule Arbor.Actions do
 
   defp maybe_inject_taint_policy(context), do: context
 
+  defp maybe_put_approved_invocation(opts, context) when is_map(context) do
+    case Map.get(context, :approved_invocation) || Map.get(context, "approved_invocation") do
+      nil -> opts
+      approved_invocation -> Keyword.put(opts, :approved_invocation, approved_invocation)
+    end
+  end
+
+  defp maybe_put_approved_invocation(opts, _context), do: opts
+
+  # Parent authorize_and_execute marks AuthContext via mark_verified/1 before
+  # calling run/2. Nested authorize_and_execute calls must honor that mark so
+  # they don't re-verify a single-use nonce against a different resource URI.
+  #
+  # Constrained to the real struct + principal match + signed_request pairing
+  # so a plain map `%{identity_verified: true}` cannot skip verification.
+  defp auth_context_identity_verified?(context, agent_id, signed_request)
+       when is_map(context) and is_binary(agent_id) and is_map(signed_request) do
+    case Map.get(context, :auth_context) || Map.get(context, "auth_context") do
+      %Arbor.Contracts.Security.AuthContext{
+        identity_verified: true,
+        principal_id: ^agent_id
+      } = auth ->
+        signed_request_pairs?(signed_request, auth.signed_request)
+
+      _ ->
+        false
+    end
+  end
+
+  defp auth_context_identity_verified?(_context, _agent_id, _signed_request), do: false
+
+  defp signed_request_pairs?(caller_sr, auth_sr) when caller_sr == auth_sr, do: true
+
+  defp signed_request_pairs?(caller_sr, auth_sr)
+       when is_map(caller_sr) and is_map(auth_sr) do
+    caller_agent = map_field(caller_sr, :agent_id)
+    auth_agent = map_field(auth_sr, :agent_id)
+    caller_nonce = map_field(caller_sr, :nonce)
+    auth_nonce = map_field(auth_sr, :nonce)
+
+    is_binary(caller_agent) and caller_agent == auth_agent and
+      is_binary(caller_nonce) and caller_nonce == auth_nonce
+  end
+
+  defp signed_request_pairs?(_caller_sr, _auth_sr), do: false
+
+  defp map_field(map, key) when is_map(map) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  end
+
   # Egress observability (2026-06-14 decision): emit a security signal whenever
   # an action's egress crosses the trust boundary (external_provider /
   # external_peer). Fires regardless of enforcement so the gate can land dark
@@ -1236,6 +1316,7 @@ defmodule Arbor.Actions do
     # so they don't belong under the `arbor://shell` always-locked
     # ceiling. `arbor://action/mix/**` grants everything;
     # `arbor://action/mix/test` is a test-only grant.
+    Arbor.Actions.Mix.Compile => "arbor://action/mix/compile",
     Arbor.Actions.Mix.Test => "arbor://action/mix/test",
     Arbor.Actions.Mix.Quality => "arbor://action/mix/quality",
     Arbor.Actions.Mix.Format => "arbor://action/mix/format",

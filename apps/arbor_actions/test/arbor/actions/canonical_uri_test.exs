@@ -44,6 +44,14 @@ defmodule Arbor.Actions.CanonicalUriTest do
                "arbor://action/council/review"
     end
 
+    test "mix actions use schema-bounded action URIs instead of shell exec" do
+      assert Actions.canonical_uri_for(Arbor.Actions.Mix.Compile, %{}) ==
+               "arbor://action/mix/compile"
+
+      assert Actions.canonical_uri_for(Arbor.Actions.Mix.Test, %{}) ==
+               "arbor://action/mix/test"
+    end
+
     test "unmapped schema-bounded actions derive a singular action URI" do
       assert Actions.canonical_uri_for(Arbor.Actions.Browser.Navigate, %{}) ==
                "arbor://action/browser/navigate"

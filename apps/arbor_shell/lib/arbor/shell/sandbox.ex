@@ -272,10 +272,33 @@ defmodule Arbor.Shell.Sandbox do
   Returns `{:ok, path}` or `{:error, :executable_not_found}`.
   """
   @spec resolve_executable(String.t()) :: {:ok, String.t()} | {:error, :executable_not_found}
-  def resolve_executable(cmd) do
+  def resolve_executable(cmd) when is_binary(cmd) do
     case System.find_executable(cmd) do
-      nil -> {:error, :executable_not_found}
-      path -> {:ok, path}
+      nil ->
+        # Absolute paths (including those with spaces) are not always found by
+        # find_executable; accept them when the file exists and is executable.
+        if absolute_executable?(cmd) do
+          {:ok, cmd}
+        else
+          {:error, :executable_not_found}
+        end
+
+      path ->
+        {:ok, path}
+    end
+  end
+
+  def resolve_executable(_cmd), do: {:error, :executable_not_found}
+
+  defp absolute_executable?(cmd) do
+    absolute? = Path.type(cmd) == :absolute or String.starts_with?(cmd, "/")
+
+    with true <- absolute?,
+         true <- File.regular?(cmd),
+         {:ok, %File.Stat{type: :regular, mode: mode}} <- File.stat(cmd) do
+      :erlang.band(mode, 0o111) != 0
+    else
+      _ -> false
     end
   end
 

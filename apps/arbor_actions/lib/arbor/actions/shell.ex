@@ -52,8 +52,16 @@ defmodule Arbor.Actions.Shell do
     resource = "arbor://shell/exec/#{command_name}"
 
     auth_opts =
-      [command: command, path: Keyword.get(opts, :cwd), verify_identity: false]
+      [
+        command: command,
+        path: Keyword.get(opts, :cwd) || Keyword.get(opts, :path),
+        verify_identity: false
+      ]
       |> maybe_add_opt(:approved_invocation, Keyword.get(opts, :approved_invocation))
+      |> maybe_add_opt(:approval_context, Keyword.get(opts, :approval_context))
+      |> maybe_add_opt(:task_id, Keyword.get(opts, :task_id))
+      |> maybe_add_opt(:session_id, Keyword.get(opts, :session_id))
+      |> maybe_add_opt(:params, Keyword.get(opts, :params) || %{command: command})
 
     case Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts) do
       {:ok, :authorized} -> {:ok, :authorized}
@@ -162,7 +170,9 @@ defmodule Arbor.Actions.Shell do
 
       opts =
         [
-          timeout: params[:timeout] || 30_000,
+          # Do not use `|| 30_000` — timeout: 0 is truthy and becomes an immediate
+          # Port kill (exit 137) in Shell.Executor.
+          timeout: effective_timeout(params[:timeout], 30_000),
           sandbox: params[:sandbox] || :basic
         ]
         |> maybe_add_opt(:cwd, params[:cwd])
@@ -170,7 +180,7 @@ defmodule Arbor.Actions.Shell do
         |> maybe_add_context_opts(context)
 
       case call_shell(params.command, opts, context) do
-        {:ok, result} ->
+        {:ok, result} when is_map(result) ->
           Actions.emit_completed(__MODULE__, result)
 
           {:ok,
@@ -183,13 +193,17 @@ defmodule Arbor.Actions.Shell do
            }}
 
         {:ok, :pending_approval, proposal_id} ->
+          # Preserve the proposal id for owner-side await/retry (coding validation,
+          # ActionsExecutor). Do not convert this into a generic error string —
+          # that path is what left stale irq_* records without a waiter.
           {:ok, :pending_approval, proposal_id}
 
         {:error, :unauthorized} ->
           Actions.emit_failed(__MODULE__, :unauthorized)
 
           {:error,
-           "Shell execution requires approval. The command will be submitted for user review. Try again and the user will be prompted to approve."}
+           "Shell execution unauthorized (missing capability or policy denied). " <>
+             "If an approval was expected, the request was not escalated — check trust rules and grants."}
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
@@ -197,28 +211,114 @@ defmodule Arbor.Actions.Shell do
       end
     end
 
-    # Delegate to facade authorize_and_execute when agent_id is in context,
-    # otherwise call raw execute (system-level callers).
+    # Authorize once through Trust (honors approved_invocation), then execute.
+    # Do NOT call Shell.authorize_and_execute after a successful authorize_command:
+    # that re-runs Security.authorize without Trust.ApprovalGuard and re-asks or
+    # denies even after the operator already approved the exact invocation.
     defp call_shell(command, opts, context) do
-      if context[:agent_id] do
-        with {:ok, :authorized} <-
-               Arbor.Actions.Shell.authorize_command(context[:agent_id], command, opts) do
-          Shell.authorize_and_execute(context[:agent_id], command, opts)
-        end
-      else
-        Shell.execute(command, opts)
+      case context[:agent_id] do
+        agent_id when is_binary(agent_id) and agent_id != "" ->
+          auth_opts = shell_auth_opts(opts, context)
+
+          case Arbor.Actions.Shell.authorize_command(agent_id, command, auth_opts) do
+            {:ok, :authorized} ->
+              execute_authorized_shell(agent_id, command, opts)
+
+            {:ok, :pending_approval, proposal_id} ->
+              {:ok, :pending_approval, proposal_id}
+
+            {:error, reason} ->
+              {:error, reason}
+          end
+
+        _ ->
+          Arbor.Shell.execute(command, opts)
       end
     end
+
+    defp shell_auth_opts(opts, context) do
+      opts
+      |> Keyword.take([:cwd, :path, :approved_invocation, :gate_command, :timeout, :sandbox])
+      |> maybe_add_opt(:cwd, Keyword.get(opts, :cwd) || context[:cwd])
+      |> maybe_add_opt(:approved_invocation, context[:approved_invocation])
+      |> maybe_add_opt(:approval_context, shell_approval_context(opts, context))
+    end
+
+    defp shell_approval_context(opts, context) do
+      case Keyword.get(opts, :approval_context) || context[:approval_context] do
+        %{} = existing ->
+          existing
+
+        _ ->
+          %{
+            task_id: context[:task_id] || context["task_id"],
+            session_id: context[:session_id] || context["session_id"],
+            provenance: %{
+              task_id: context[:task_id] || context["task_id"],
+              session_id: context[:session_id] || context["session_id"]
+            }
+          }
+          |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+          |> Map.new()
+          |> case do
+            empty when empty == %{} -> nil
+            map -> map
+          end
+      end
+    end
+
+    # Execute after Trust already authorized. Compound commands still go through
+    # CapShell for per-token path/capability checks; simple commands use execute/2.
+    defp execute_authorized_shell(agent_id, command, opts) do
+      if compound_shell_enabled?() and Arbor.Shell.Sandbox.compound?(command) do
+        case Arbor.Shell.CapShell.run(agent_id, command, opts) do
+          {:ok, %{exit_code: code, stdout: out, stderr: err} = result} ->
+            {:ok,
+             %{
+               exit_code: code,
+               stdout: out,
+               stderr: err,
+               duration_ms: Map.get(result, :duration_ms, 0),
+               timed_out: Map.get(result, :timed_out, false)
+             }}
+
+          {:ok, result} when is_map(result) ->
+            {:ok, result}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+      else
+        Arbor.Shell.execute(command, opts)
+      end
+    end
+
+    defp compound_shell_enabled? do
+      Application.get_env(:arbor_shell, :compound_shell_enabled, true)
+    end
+
+    # LLM-facing boundary: floor tiny/zero timeouts (0, 1, …) to the default.
+    # Sub-second values are almost always optional-arg footguns, not intentional
+    # budgets. Low-level Executor tests may still pass timeout: 100 directly.
+    @min_action_timeout_ms 1_000
+
+    defp effective_timeout(timeout, _default)
+         when is_integer(timeout) and timeout >= @min_action_timeout_ms,
+         do: timeout
+
+    defp effective_timeout(_timeout, default), do: default
 
     defp maybe_add_opt(opts, _key, nil), do: opts
     defp maybe_add_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
     defp maybe_add_context_opts(opts, context) do
-      # Allow context to override options
+      # Allow context to override options and carry approval/task provenance
       opts
       |> maybe_add_opt(:cwd, context[:cwd])
       |> maybe_add_opt(:env, context[:env])
       |> maybe_add_opt(:approved_invocation, context[:approved_invocation])
+      |> maybe_add_opt(:task_id, context[:task_id] || context["task_id"])
+      |> maybe_add_opt(:session_id, context[:session_id] || context["session_id"])
     end
 
     defp format_error({:blocked_command, cmd}), do: "Command blocked: #{cmd}"

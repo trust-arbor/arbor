@@ -53,7 +53,15 @@ defmodule Arbor.Actions.Coding do
         ],
         validation_commands: [
           type: {:list, :string},
-          doc: "Commands to run after the ACP coding agent edits"
+          doc:
+            "Commands to run after the ACP coding agent edits. " <>
+              "Omit for the default mix compile (shared host deps). " <>
+              "Pass [] or skip_validation: true to skip validation."
+        ],
+        skip_validation: [
+          type: :boolean,
+          default: false,
+          doc: "Skip post-edit validation entirely (smoke tests / docs-only diagnostics)"
         ],
         pr_title: [
           type: :string,
@@ -105,6 +113,7 @@ defmodule Arbor.Actions.Coding do
 
     alias Arbor.Actions
     alias Arbor.Actions.{Acp, Council, Git, Shell}
+    alias Arbor.Actions.Mix, as: MixActions
 
     @default_validation_commands ["./bin/mix compile --warnings-as-errors"]
     @default_timeout 900_000
@@ -121,6 +130,7 @@ defmodule Arbor.Actions.Coding do
         branch_name: {:control, requires: [:command_injection]},
         worktree_base_dir: {:control, requires: [:path_traversal]},
         validation_commands: {:control, requires: [:command_injection]},
+        skip_validation: :control,
         pr_title: {:control, requires: [:command_injection]},
         pr_body: {:control, requires: [:command_injection]},
         open_pr: :control,
@@ -454,7 +464,7 @@ defmodule Arbor.Actions.Coding do
           provider: selected_acp_agent(params),
           cwd: worktree_path,
           permission_mode: "default",
-          timeout: get_param(params, :timeout) || @default_timeout
+          timeout: positive_timeout(get_param(params, :timeout), @default_timeout)
         }
         |> put_if_present(:model, get_param(params, :model))
         |> put_if_present(:allowed_tools, get_param(params, :allowed_tools))
@@ -471,10 +481,31 @@ defmodule Arbor.Actions.Coding do
           session_pid: session_pid,
           prompt: build_prompt(worktree_path, params)
         }
-        |> put_if_present(:timeout, get_param(params, :timeout))
-        |> put_if_present(:inactivity_timeout_ms, get_param(params, :inactivity_timeout_ms))
+        |> put_if_present(:timeout, positive_timeout_or_nil(get_param(params, :timeout)))
+        |> put_if_present(
+          :inactivity_timeout_ms,
+          positive_timeout_or_nil(get_param(params, :inactivity_timeout_ms))
+        )
 
       call_action(Acp.SendMessage, prompt_params, context)
+    end
+
+    # LLMs often pass timeout: 0 or timeout: 1 for optional fields; those would
+    # abort GenServer.call / ACP create_session immediately. Require a floor.
+    @min_sensible_timeout_ms 10_000
+
+    defp positive_timeout(value, default) do
+      case value do
+        t when is_integer(t) and t >= @min_sensible_timeout_ms -> t
+        _ -> default
+      end
+    end
+
+    defp positive_timeout_or_nil(value) do
+      case value do
+        t when is_integer(t) and t >= @min_sensible_timeout_ms -> t
+        _ -> nil
+      end
     end
 
     defp maybe_close_session(session, context) do
@@ -527,30 +558,40 @@ defmodule Arbor.Actions.Coding do
     end
 
     defp run_validations(worktree_path, params, context) do
-      validations =
-        params
-        |> validation_commands()
-        |> Enum.map(fn command ->
-          run_validation(worktree_path, command, params, context)
-        end)
+      commands = validation_commands(params)
 
-      if Enum.all?(validations, & &1.passed) do
-        {:ok, validations}
+      if commands == [] do
+        {:ok, []}
       else
-        {:validation_failed, validations}
+        validations =
+          Enum.map(commands, fn command ->
+            run_validation(worktree_path, command, params, context)
+          end)
+
+        if Enum.all?(validations, & &1.passed) do
+          {:ok, validations}
+        else
+          {:validation_failed, validations}
+        end
       end
     end
 
     defp run_validation(worktree_path, command, params, context) do
-      timeout = get_param(params, :validation_timeout) || @default_validation_timeout
-      shell_params = %{command: command, cwd: worktree_path, timeout: timeout, sandbox: :basic}
+      # Same class of LLM footgun as ACP timeout: validation_timeout: 0/1 is
+      # truthy in Elixir, so `|| @default` does not apply, and Shell.Executor
+      # treats a tiny timeout as an immediate kill (exit_code 137).
+      timeout =
+        positive_timeout(get_param(params, :validation_timeout), @default_validation_timeout)
 
-      case run_validation_command(shell_params, context) do
+      invocation = validation_invocation(worktree_path, command, timeout)
+
+      case run_validation_invocation(invocation, context) do
         {:ok, result} when is_map(result) ->
           validation_result(command, result)
 
         {:ok, :pending_approval, proposal_id} ->
-          retry_validation_after_approval(command, shell_params, proposal_id, context)
+          emit_awaiting_approval_signal(proposal_id, invocation.resource_uri, context, command)
+          retry_validation_after_approval(command, invocation, proposal_id, context)
 
         {:error, reason} ->
           %{
@@ -563,28 +604,187 @@ defmodule Arbor.Actions.Coding do
       end
     end
 
-    defp run_validation_command(shell_params, context) do
-      call_action(Shell.Execute, shell_params, context)
+    defp validation_invocation(worktree_path, command, timeout) do
+      case mix_action_invocation(worktree_path, command, timeout) do
+        {:ok, invocation} ->
+          invocation
+
+        :error ->
+          params = %{command: command, cwd: worktree_path, timeout: timeout, sandbox: :basic}
+
+          %{
+            kind: :shell,
+            module: Shell.Execute,
+            params: params,
+            resource_uri: shell_resource_uri(command)
+          }
+      end
     end
 
-    defp retry_validation_after_approval(command, shell_params, proposal_id, context) do
-      resource_uri = shell_resource_uri(command)
+    # Prefer schema-bounded mix actions over raw shell for known mix tasks so
+    # capability/trust use arbor://action/mix/* (auto for coding agents) and so
+    # worktrees can share the host checkout's deps/_build via Mix.run_mix/3.
+    defp mix_action_invocation(worktree_path, command, timeout) do
+      with {:ok, tokens} <- split_command(command),
+           {:ok, mix_argv} <- mix_args(tokens) do
+        case mix_argv do
+          ["compile" | args] ->
+            with {:ok, parsed} <- parse_mix_compile_args(args) do
+              params =
+                parsed
+                |> Map.put(:path, worktree_path)
+                |> Map.put(:timeout, timeout)
+
+              {:ok,
+               %{
+                 kind: :action,
+                 module: MixActions.Compile,
+                 params: params,
+                 resource_uri: Actions.canonical_uri_for(MixActions.Compile, params)
+               }}
+            end
+
+          # Exact match only — trailing args (e.g. `mix quality --strict`) must
+          # not silently drop flags and run plain quality.
+          ["quality"] ->
+            params = %{path: worktree_path, timeout: timeout}
+
+            {:ok,
+             %{
+               kind: :action,
+               module: MixActions.Quality,
+               params: params,
+               resource_uri: Actions.canonical_uri_for(MixActions.Quality, params)
+             }}
+
+          # `mix test …` and non-exact quality forms stay on the shell path:
+          # free-form paths/flags that the schema-bounded mix actions do not
+          # fully model yet. Compile (and bare quality) share host deps/_build.
+          _ ->
+            :error
+        end
+      else
+        _ -> :error
+      end
+    end
+
+    defp split_command(command) when is_binary(command) do
+      {:ok, OptionParser.split(command)}
+    rescue
+      _ -> :error
+    end
+
+    defp split_command(_command), do: :error
+
+    defp mix_args([executable | args]) when is_binary(executable) do
+      if Path.basename(executable) == "mix" do
+        {:ok, args}
+      else
+        :error
+      end
+    end
+
+    defp mix_args(_tokens), do: :error
+
+    defp parse_mix_compile_args(args) do
+      Enum.reduce_while(args, {:ok, %{}}, fn
+        "--warnings-as-errors", {:ok, acc} ->
+          {:cont, {:ok, Map.put(acc, :warnings_as_errors, true)}}
+
+        _arg, _acc ->
+          {:halt, :error}
+      end)
+    end
+
+    defp emit_awaiting_approval_signal(proposal_id, resource_uri, context, command) do
+      Actions.emit_event(:awaiting_approval, %{
+        proposal_id: proposal_id,
+        resource_uri: resource_uri,
+        command: command,
+        agent_id: context_agent_id(context),
+        task_id: validation_task_id(context),
+        source: :coding_validation
+      })
+    end
+
+    defp run_validation_invocation(%{kind: :action, module: module, params: params}, context) do
+      context = put_validation_agent_context(context)
+
+      cond do
+        has_action_runner?(context) ->
+          call_action(module, params, context)
+
+        agent_id = context_agent_id(context) ->
+          Actions.authorize_and_execute(agent_id, module, params, context)
+
+        true ->
+          call_action(module, params, context)
+      end
+    end
+
+    defp run_validation_invocation(%{kind: :shell, module: module, params: params}, context) do
+      # Shell validation must go through Shell.Execute with agent_id present so
+      # Trust can escalate to pending_approval. Shell.Execute authorizes once via
+      # Trust (honoring approved_invocation) and does not re-auth through the
+      # Security-only Shell.authorize path that previously re-asked after approve.
+      context = put_validation_agent_context(context)
+      call_action(module, params, context)
+    end
+
+    defp has_action_runner?(context) do
+      is_function(Map.get(context, :action_runner), 3) or
+        is_function(Map.get(context, "action_runner"), 3)
+    end
+
+    # Ensure nested shell/mix validation sees the same agent + task provenance the
+    # outer action was running under (needed for Trust auth + task-scoped answer caps).
+    defp put_validation_agent_context(context) when is_map(context) do
+      context
+      |> then(fn c ->
+        case context_agent_id(c) do
+          id when is_binary(id) and id != "" -> Map.put(c, :agent_id, id)
+          _ -> c
+        end
+      end)
+      |> then(fn c ->
+        case validation_task_id(c) do
+          id when is_binary(id) and id != "" -> Map.put(c, :task_id, id)
+          _ -> c
+        end
+      end)
+    end
+
+    defp put_validation_agent_context(context), do: context
+
+    defp validation_task_id(context) do
+      map_value(context, :task_id) ||
+        map_value(context, "session.task_id") ||
+        map_value(context, :session_task_id)
+    end
+
+    defp retry_validation_after_approval(command, invocation, proposal_id, context) do
+      resource_uri = invocation.resource_uri
 
       case await_validation_approval(proposal_id, resource_uri, context) do
         :approved ->
           approved_context =
-            Map.put(context, :approved_invocation, %{
+            context
+            |> put_validation_agent_context()
+            |> Map.put(:approved_invocation, %{
               request_id: proposal_id,
               principal_id: context_agent_id(context),
               resource_uri: resource_uri,
               decision: :approved
             })
 
-          case run_validation_command(shell_params, approved_context) do
+          case run_validation_invocation(invocation, approved_context) do
             {:ok, result} when is_map(result) ->
               validation_result(command, result)
 
             {:ok, :pending_approval, retry_proposal_id} ->
+              # Exact-invocation retry should not re-ask. If it does, surface the
+              # second id so the operator can see the gate still wants approval
+              # (usually resource_uri mismatch on the approved_invocation marker).
               validation_failure(
                 command,
                 "pending approval after approval: #{retry_proposal_id}"
@@ -601,14 +801,37 @@ defmodule Arbor.Actions.Coding do
 
     defp validation_result(command, result) do
       exit_code = result[:exit_code] || result["exit_code"]
+      timed_out = result[:timed_out] == true or result["timed_out"] == true
+      killed = result[:killed] == true or result["killed"] == true
+      stderr = result[:stderr] || result["stderr"] || ""
+
+      # 137 is the shell executor's conventional "killed after timeout" code
+      # (SIGKILL). Without this note, docs-only smoke failures look like a flaky
+      # `ls` rather than a 0/1ms validation_timeout.
+      stderr =
+        cond do
+          timed_out or (killed and exit_code == 137) ->
+            base =
+              "command timed out (exit 137 = killed after timeout; " <>
+                "check validation_timeout — values under 10s are treated as unset)"
+
+            if stderr == "", do: base, else: base <> "; " <> stderr
+
+          true ->
+            stderr
+        end
 
       %{
         command: command,
-        passed: exit_code == 0,
+        passed: exit_code == 0 and not timed_out,
         exit_code: exit_code,
         stdout: result[:stdout] || result["stdout"] || "",
-        stderr: result[:stderr] || result["stderr"] || ""
+        stderr: stderr,
+        timed_out: timed_out,
+        killed: killed
       }
+      |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+      |> Map.new()
     end
 
     defp validation_failure(command, stderr) do
@@ -1132,12 +1355,16 @@ defmodule Arbor.Actions.Coding do
       Map.reject(map, fn {_key, value} -> is_nil(value) end)
     end
 
-    defp map_value(map, key) when is_map(map) do
+    defp map_value(map, key) when is_map(map) and is_atom(key) do
       cond do
         Map.has_key?(map, key) -> Map.get(map, key)
         Map.has_key?(map, Atom.to_string(key)) -> Map.get(map, Atom.to_string(key))
         true -> nil
       end
+    end
+
+    defp map_value(map, key) when is_map(map) and is_binary(key) do
+      Map.get(map, key)
     end
 
     defp map_value(_map, _key), do: nil
@@ -1226,9 +1453,20 @@ defmodule Arbor.Actions.Coding do
     end
 
     defp validation_commands(params) do
-      case get_param(params, :validation_commands) do
-        commands when is_list(commands) and commands != [] -> commands
-        _ -> @default_validation_commands
+      cond do
+        truthy?(get_param(params, :skip_validation)) ->
+          []
+
+        match?([_ | _], get_param(params, :validation_commands)) ->
+          get_param(params, :validation_commands)
+
+        get_param(params, :validation_commands) == [] ->
+          # Explicit empty list means skip (smoke tests / docs-only).
+          # Omitted/nil still uses the default mix compile.
+          []
+
+        true ->
+          @default_validation_commands
       end
     end
 

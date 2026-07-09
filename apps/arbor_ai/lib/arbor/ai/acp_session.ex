@@ -627,8 +627,17 @@ defmodule Arbor.AI.AcpSession do
 
   defp summarize_result(_), do: %{}
 
+  # Floor for GenServer.call timeouts on create/resume. LLM tool args sometimes
+  # pass timeout: 0 or 1 for optional fields; those abort before ACP can respond.
+  @min_call_timeout_ms 30_000
+
   defp timeout(opts) do
-    Keyword.get(opts, :timeout, :infinity)
+    case Keyword.get(opts, :timeout, :infinity) do
+      t when is_integer(t) and t >= @min_call_timeout_ms -> t
+      t when is_integer(t) and t > 0 -> @min_call_timeout_ms
+      :infinity -> :infinity
+      _ -> :infinity
+    end
   end
 
   # -- Workspace Lifecycle --
@@ -791,6 +800,18 @@ defmodule Arbor.AI.AcpSession do
     cleanup_prompt(prompt, timers)
 
     new_state = %{state | status: :error}
+
+    # Inactivity means the ACP agent went silent — could be stuck awaiting a
+    # host-side approval, or truly hung. Emit a distinct idle signal before the
+    # error/kill so Signal/dashboard subscribers can distinguish "waiting" from
+    # hard failure (acp_session_error still fires for the abort itself).
+    if kind == :inactivity_timeout do
+      emit_signal(:acp_session_idle, new_state, %{
+        reason: :inactivity_timeout,
+        phase: :prompt
+      })
+    end
+
     emit_signal(:acp_session_error, new_state, %{error: kind, phase: :prompt})
     {:stop, :normal, {:error, kind}, new_state}
   end

@@ -306,7 +306,7 @@ defmodule Arbor.Actions.Acp do
 
     defp maybe_create_or_resume(pid, %{session_id: sid} = params)
          when is_binary(sid) and sid != "" do
-      timeout = Map.get(params, :timeout, 120_000)
+      timeout = positive_timeout(Map.get(params, :timeout), 120_000)
 
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(Arbor.AI, :acp_resume_session, [pid, sid, [timeout: timeout]]) do
@@ -319,12 +319,29 @@ defmodule Arbor.Actions.Acp do
       opts =
         []
         |> maybe_add(:cwd, params[:cwd])
-        |> maybe_add(:timeout, params[:timeout])
+        # Never pass timeout: 0 — GenServer.call treats it as an immediate miss.
+        |> maybe_add(:timeout, positive_timeout_or_nil(params[:timeout]))
 
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(Arbor.AI, :acp_create_session, [pid, opts]) do
         {:ok, info} -> {:ok, pid, info}
         {:error, _} = error -> error
+      end
+    end
+
+    @min_sensible_timeout_ms 10_000
+
+    defp positive_timeout(value, default) do
+      case value do
+        t when is_integer(t) and t >= @min_sensible_timeout_ms -> t
+        _ -> default
+      end
+    end
+
+    defp positive_timeout_or_nil(value) do
+      case value do
+        t when is_integer(t) and t >= @min_sensible_timeout_ms -> t
+        _ -> nil
       end
     end
 

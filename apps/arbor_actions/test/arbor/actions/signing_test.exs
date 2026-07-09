@@ -179,6 +179,99 @@ defmodule Arbor.Actions.SigningTest do
           :ok
       end
     end
+
+    test "security regression: nested action reuses parent auth_context.identity_verified", %{
+      identity: identity,
+      agent_id: agent_id,
+      read_path: read_path
+    } do
+      # coding_produce_reviewable_change (and similar composites) authorize once,
+      # mark AuthContext verified, then nest authorize_and_execute for validation
+      # actions like Mix.Compile. The nested call reuses the parent's
+      # resource-bound signed_request; re-verifying it against the nested URI
+      # fails with :resource_mismatch / :replayed_nonce → :unauthorized.
+      parent_resource = "arbor://action/coding/produce_reviewable_change"
+      {:ok, signed} = SignedRequest.sign(parent_resource, agent_id, identity.private_key)
+
+      # Parent layer consumes the nonce and marks the AuthContext verified.
+      assert {:ok, ^agent_id} = Arbor.Security.verify_request(signed)
+
+      auth_context =
+        Arbor.Contracts.Security.AuthContext.new(agent_id, signed_request: signed)
+        |> Arbor.Contracts.Security.AuthContext.mark_verified()
+
+      result =
+        Arbor.Actions.authorize_and_execute(
+          agent_id,
+          Arbor.Actions.File.Read,
+          %{path: read_path},
+          %{signed_request: signed, auth_context: auth_context}
+        )
+
+      case result do
+        {:error, :unauthorized} ->
+          flunk(
+            "Nested authorize_and_execute must honor parent auth_context.identity_verified; " <>
+              "re-verifying the parent signed_request against a nested resource is a security regression"
+          )
+
+        _ ->
+          :ok
+      end
+    end
+
+    test "security regression: plain identity_verified map does not skip signed-request verify",
+         %{
+           identity: identity,
+           agent_id: agent_id,
+           read_path: read_path
+         } do
+      parent_resource = "arbor://action/coding/produce_reviewable_change"
+      {:ok, signed} = SignedRequest.sign(parent_resource, agent_id, identity.private_key)
+      assert {:ok, ^agent_id} = Arbor.Security.verify_request(signed)
+
+      # Spoof: caller injects a plain map instead of %AuthContext{}.
+      # After the parent nonce is consumed, re-verify must fail closed —
+      # a bare map must not widen the identity_verified bypass.
+      result =
+        Arbor.Actions.authorize_and_execute(
+          agent_id,
+          Arbor.Actions.File.Read,
+          %{path: read_path},
+          %{
+            signed_request: signed,
+            auth_context: %{identity_verified: true, principal_id: agent_id}
+          }
+        )
+
+      assert result == {:error, :unauthorized}
+    end
+
+    test "security regression: AuthContext for a different principal does not skip verify", %{
+      identity: identity,
+      agent_id: agent_id,
+      read_path: read_path
+    } do
+      parent_resource = "arbor://action/coding/produce_reviewable_change"
+      {:ok, signed} = SignedRequest.sign(parent_resource, agent_id, identity.private_key)
+      assert {:ok, ^agent_id} = Arbor.Security.verify_request(signed)
+
+      other = "agent_other_#{System.unique_integer([:positive])}"
+
+      auth_context =
+        Arbor.Contracts.Security.AuthContext.new(other, signed_request: signed)
+        |> Arbor.Contracts.Security.AuthContext.mark_verified()
+
+      result =
+        Arbor.Actions.authorize_and_execute(
+          agent_id,
+          Arbor.Actions.File.Read,
+          %{path: read_path},
+          %{signed_request: signed, auth_context: auth_context}
+        )
+
+      assert result == {:error, :unauthorized}
+    end
   end
 
   describe "make_signer/2" do

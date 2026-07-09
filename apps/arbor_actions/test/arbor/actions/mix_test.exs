@@ -28,6 +28,26 @@ defmodule Arbor.Actions.MixTest do
     {:ok, project_path: project_path}
   end
 
+  describe "Mix.Compile" do
+    test "passes for a compiling project", %{project_path: project_path} do
+      assert {:ok, result} =
+               MixAction.Compile.run(
+                 %{path: project_path, warnings_as_errors: true},
+                 %{}
+               )
+
+      assert result.path == project_path
+      assert result.exit_code == 0
+      assert result.passed == true
+    end
+
+    test "exposes Jido action metadata" do
+      assert MixAction.Compile.name() == "mix_compile"
+      assert MixAction.Compile.category() == "mix"
+      assert "compile" in MixAction.Compile.tags()
+    end
+  end
+
   describe "Mix.Test" do
     test "passes for a passing project", %{project_path: project_path} do
       assert {:ok, result} = MixAction.Test.run(%{path: project_path}, %{})
@@ -35,7 +55,8 @@ defmodule Arbor.Actions.MixTest do
       assert result.path == project_path
       assert result.exit_code == 0
       assert result.passed == true
-      assert result.stdout =~ "test"
+      # ExUnit wording varies by version ("1 passed" vs "1 test, 0 failures").
+      assert result.stdout =~ ~r/1 (passed|test)/
     end
 
     test "fails for a project with a failing test", %{project_path: project_path} do

@@ -35,7 +35,7 @@ defmodule Arbor.Shell.Executor do
   """
   @spec run(String.t(), keyword()) :: {:ok, result()} | {:error, term()}
   def run(command, opts \\ []) do
-    timeout = Keyword.get(opts, :timeout, @default_timeout)
+    timeout = normalize_timeout(Keyword.get(opts, :timeout, @default_timeout))
     cwd = Keyword.get(opts, :cwd)
     env = Keyword.get(opts, :env, %{})
     stdin = Keyword.get(opts, :stdin)
@@ -78,7 +78,7 @@ defmodule Arbor.Shell.Executor do
   """
   @spec run_direct(String.t(), [String.t()], keyword()) :: {:ok, result()} | {:error, term()}
   def run_direct(cmd, args, opts \\ []) do
-    timeout = Keyword.get(opts, :timeout, @default_timeout)
+    timeout = normalize_timeout(Keyword.get(opts, :timeout, @default_timeout))
     cwd = Keyword.get(opts, :cwd)
     env = Keyword.get(opts, :env, %{})
     stdin = Keyword.get(opts, :stdin)
@@ -119,6 +119,12 @@ defmodule Arbor.Shell.Executor do
   end
 
   # Private functions
+
+  # `after 0` in receive fires immediately. Callers that pass timeout: 0/1
+  # (often LLM-filled optional tool args) must not instantly SIGKILL the port.
+  # Keep small positive values (e.g. 100ms) so unit tests can exercise timeout.
+  defp normalize_timeout(timeout) when is_integer(timeout) and timeout > 0, do: timeout
+  defp normalize_timeout(_timeout), do: @default_timeout
 
   defp resolve_command(command) do
     {cmd, args} = Sandbox.parse_command(command)

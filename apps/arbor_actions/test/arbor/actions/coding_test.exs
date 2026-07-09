@@ -2,6 +2,7 @@ defmodule Arbor.Actions.CodingTest do
   use Arbor.Actions.ActionCase, async: true
 
   alias Arbor.Actions.{Acp, Coding, Council, Git, Shell}
+  alias Arbor.Actions.Mix, as: MixActions
 
   @moduletag :fast
 
@@ -101,6 +102,58 @@ defmodule Arbor.Actions.CodingTest do
       assert validation_params.command =~ "./bin/mix test"
 
       refute_received {:unexpected_pr, _}
+    end
+
+    test "routes default mix compile validation through schema-bounded Mix action",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          {:ok, %{text: "STATUS: implemented\nCreated feature.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        MixActions.Compile, params, _context ->
+          send(parent, {:mix_compile_validation, params})
+          {:ok, %{exit_code: 0, stdout: "compiled\n", stderr: ""}}
+
+        Shell.Execute, params, _context ->
+          send(parent, {:unexpected_shell_validation, params})
+          {:ok, %{exit_code: 0, stdout: "shell\n", stderr: ""}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   branch_name: "test/default-mix-compile-validation",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "change_committed"
+
+      assert_receive {:mix_compile_validation, validation_params}
+      assert validation_params.path == result.worktree_path
+      assert validation_params.warnings_as_errors == true
+      assert validation_params.timeout == 300_000
+
+      refute_received {:unexpected_shell_validation, _}
     end
 
     test "threads an explicit ACP hard timeout only when requested", %{tmp_dir: tmp_dir} do
@@ -755,6 +808,116 @@ defmodule Arbor.Actions.CodingTest do
                         resource_uri: "arbor://shell/exec/grep",
                         decision: :approved
                       }}
+    end
+
+    test "security regression: validation_timeout 0/1 does not force exit 137 on short commands",
+         %{tmp_dir: tmp_dir} do
+      # Live E2E saw `ls …` fail with exit 137 — that is Shell.Executor's timeout
+      # kill code, not a flaky ls. LLM tool args filled validation_timeout with
+      # 0/1; Elixir `0 || default` keeps 0, and receive after 0 fires immediately.
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          {:ok, %{text: "STATUS: implemented\nCreated feature.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, params, _context ->
+          send(parent, {:validation, params})
+          # Assert the action floored the absurd timeout before invoking shell.
+          assert params.timeout >= 10_000
+
+          {:ok,
+           %{
+             exit_code: 0,
+             stdout: "ok\n",
+             stderr: "",
+             timed_out: false,
+             killed: false
+           }}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   branch_name: "test/validation-timeout-floor",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["ls feature.txt"],
+                   validation_timeout: 1,
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "change_committed"
+      assert_receive {:validation, %{timeout: timeout, command: "ls feature.txt"}}
+      assert timeout >= 10_000
+    end
+
+    test "labels timeout kills clearly in validation results", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          {:ok, %{text: "STATUS: implemented\nCreated feature.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, _params, _context ->
+          {:ok,
+           %{
+             exit_code: 137,
+             stdout: "",
+             stderr: "",
+             timed_out: true,
+             killed: true
+           }}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   branch_name: "test/validation-timeout-label",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["ls feature.txt"],
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "validation_failed"
+
+      assert [%{passed: false, exit_code: 137, timed_out: true, stderr: stderr}] =
+               result.validation
+
+      assert stderr =~ "timed out"
+      assert stderr =~ "137"
     end
   end
 

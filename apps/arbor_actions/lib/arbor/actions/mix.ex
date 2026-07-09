@@ -15,6 +15,7 @@ defmodule Arbor.Actions.Mix do
 
   | Action | Description |
   |--------|-------------|
+  | `Compile` | Run `mix compile` (optionally with warnings-as-errors) |
   | `Test` | Run `mix test` (optionally with paths/args) |
   | `Quality` | Run `mix quality` (format-check + credo) |
   | `Format` | Run `mix format` (write or check-only) |
@@ -41,11 +42,175 @@ defmodule Arbor.Actions.Mix do
   @doc false
   def run_mix(path, args, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, mix_timeout())
-    command = Enum.join(["mix" | args], " ")
+    executable = mix_executable(path)
+    env = Keyword.get(opts, :env, %{}) |> Map.merge(shared_host_mix_env(path))
 
-    case Shell.execute(command, cwd: path, timeout: timeout, sandbox: mix_sandbox()) do
+    # argv-safe: absolute worktree paths can contain spaces; never join into a
+    # single shell string. Sandbox policy still sees basename "mix" + args.
+    shell_opts = [
+      cwd: path,
+      timeout: timeout,
+      sandbox: mix_sandbox(),
+      env: env
+    ]
+
+    case Shell.execute_direct(executable, args, shell_opts) do
       {:ok, result} -> {:ok, result}
       {:error, reason} -> {:error, inspect(reason)}
+    end
+  end
+
+  @doc false
+  # Point temporary worktrees at the main checkout's deps/_build so validation
+  # does not require a fresh `mix deps.get` in every worktree (gitignored dirs
+  # are not copied into worktrees).
+  def shared_host_mix_env(path) when is_binary(path) do
+    case main_checkout_root(path) do
+      {:ok, main} ->
+        main = Path.expand(main)
+        work = Path.expand(path)
+
+        if main != work do
+          %{}
+          |> maybe_put_env_dir("MIX_DEPS_PATH", Path.join(main, "deps"))
+          |> maybe_put_env_dir("MIX_BUILD_PATH", Path.join(main, "_build"))
+        else
+          %{}
+        end
+
+      :error ->
+        %{}
+    end
+  end
+
+  def shared_host_mix_env(_path), do: %{}
+
+  defp maybe_put_env_dir(env, key, path) do
+    if File.dir?(path), do: Map.put(env, key, path), else: env
+  end
+
+  defp main_checkout_root(path) do
+    case System.cmd("git", ["-C", path, "rev-parse", "--show-toplevel"], stderr_to_stdout: true) do
+      {output, 0} ->
+        top = String.trim(output)
+
+        # For linked worktrees, prefer the common main worktree (the one that
+        # owns the shared .git directory and typically has deps/_build).
+        case System.cmd("git", ["-C", path, "worktree", "list", "--porcelain"],
+               stderr_to_stdout: true
+             ) do
+          {list, 0} ->
+            case first_worktree_path(list) do
+              main when is_binary(main) and main != "" -> {:ok, main}
+              _ -> {:ok, top}
+            end
+
+          _ ->
+            {:ok, top}
+        end
+
+      _ ->
+        :error
+    end
+  end
+
+  defp first_worktree_path(porcelain) do
+    porcelain
+    |> String.split("\n", trim: true)
+    |> Enum.find_value(fn
+      "worktree " <> path -> path
+      _ -> nil
+    end)
+  end
+
+  defp mix_executable(path) do
+    wrapper = path |> Path.join("bin/mix") |> Path.expand()
+
+    # Prefer the absolute wrapper path. Shell.Sandbox.resolve_executable/1 uses
+    # System.find_executable/1, which does not honor cwd-relative `./bin/mix`,
+    # so validation in temporary worktrees failed with
+    # `{:executable_not_found, "./bin/mix"}` even when the file existed.
+    if File.exists?(wrapper) do
+      wrapper
+    else
+      "mix"
+    end
+  end
+
+  defmodule Compile do
+    @moduledoc """
+    Run `mix compile`.
+
+    ## Parameters
+
+    | Name | Type | Required | Description |
+    |------|------|----------|-------------|
+    | `path` | string | yes | Project root |
+    | `warnings_as_errors` | boolean | no | Pass `--warnings-as-errors` |
+    | `timeout` | integer | no | Command timeout in ms (default 5 min) |
+    """
+
+    use Jido.Action,
+      name: "mix_compile",
+      description: "Run `mix compile` in a project directory",
+      category: "mix",
+      tags: ["mix", "compile", "elixir"],
+      schema: [
+        path: [type: :string, required: true, doc: "Project root path"],
+        warnings_as_errors: [
+          type: :boolean,
+          default: false,
+          doc: "Treat compiler warnings as errors"
+        ],
+        timeout: [type: :non_neg_integer, doc: "Command timeout in ms"]
+      ]
+
+    alias Arbor.Actions
+    alias Arbor.Actions.Mix, as: MixAction
+
+    def taint_roles do
+      %{
+        path: {:control, requires: [:path_traversal]},
+        warnings_as_errors: :control,
+        timeout: :control
+      }
+    end
+
+    @impl true
+    @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
+    def run(%{path: path} = params, _context) do
+      Actions.emit_started(__MODULE__, params)
+
+      args = build_args(params)
+      opts = if params[:timeout], do: [timeout: params[:timeout]], else: []
+
+      case MixAction.run_mix(path, args, opts) do
+        {:ok, result} ->
+          output = %{
+            path: path,
+            exit_code: result.exit_code,
+            passed: result.exit_code == 0,
+            stdout: result.stdout,
+            stderr: result.stderr
+          }
+
+          Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
+          {:ok, output}
+
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, "mix compile failed to execute: #{reason}"}
+      end
+    end
+
+    defp build_args(params) do
+      args = ["compile"]
+
+      if params[:warnings_as_errors] do
+        args ++ ["--warnings-as-errors"]
+      else
+        args
+      end
     end
   end
 

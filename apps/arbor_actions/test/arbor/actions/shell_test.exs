@@ -26,6 +26,17 @@ defmodule Arbor.Actions.ShellTest do
       refute result.timed_out
     end
 
+    test "security regression: timeout 0 falls back instead of exit 137" do
+      # Same class of bug as ACP create_session: optional tool args filled with
+      # 0 must not become an immediate Port kill.
+      assert {:ok, result} =
+               Shell.Execute.run(%{command: "echo not-killed", timeout: 0}, %{})
+
+      assert result.exit_code == 0
+      refute result.timed_out
+      assert result.stdout =~ "not-killed"
+    end
+
     test "captures stderr" do
       assert {:ok, result} = Shell.Execute.run(%{command: "ls /nonexistent_path_12345"}, %{})
       assert result.exit_code != 0
@@ -33,7 +44,8 @@ defmodule Arbor.Actions.ShellTest do
     end
 
     test "respects timeout" do
-      assert {:ok, result} = Shell.Execute.run(%{command: "sleep 5", timeout: 100}, %{})
+      # Action boundary floors sub-second timeouts; use >= 1000ms here.
+      assert {:ok, result} = Shell.Execute.run(%{command: "sleep 5", timeout: 1000}, %{})
       assert result.timed_out
     end
 
@@ -118,7 +130,7 @@ defmodule Arbor.Actions.ShellTest do
       resource_uri = "arbor://shell/exec/grep"
 
       {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
-      rules = Map.put(profile.rules || %{}, resource_uri, :auto)
+      rules = Map.put(profile.rules, resource_uri, :auto)
       :ok = Arbor.Trust.Store.store_profile(%{profile | rules: rules})
       {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: resource_uri)
 
@@ -141,6 +153,59 @@ defmodule Arbor.Actions.ShellTest do
                    decision: :approved
                  }
                )
+    end
+
+    test "security regression: Execute does not re-auth after approved_invocation", %{
+      agent_id: agent_id
+    } do
+      # Shell is always-locked: even an :auto trust rule + held capability still
+      # requires a one-shot approved_invocation marker. Pre-fix, authorize_command
+      # accepted the marker but Shell.Execute then called Shell.authorize_and_execute,
+      # which re-ran Security.authorize without Trust.ApprovalGuard — re-asking or
+      # denying and leaving coding validation stuck at
+      # "pending approval after approval".
+      echo_uri = "arbor://shell/exec/echo"
+      {:ok, profile} = Arbor.Trust.Store.get_profile(agent_id)
+
+      :ok =
+        Arbor.Trust.Store.store_profile(%{
+          profile
+          | rules: Map.put(profile.rules, echo_uri, :auto)
+        })
+
+      {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: echo_uri)
+
+      command = "echo shell-approval-ok"
+
+      # No marker → gated: either pending_approval (escalated IRQ) or unauthorized.
+      # Must NOT auto-run, and must NOT return the old misleading "try again and
+      # the user will be prompted" string for plain :unauthorized.
+      case Shell.Execute.run(%{command: command, sandbox: :none}, %{agent_id: agent_id}) do
+        {:ok, :pending_approval, proposal_id} ->
+          assert is_binary(proposal_id)
+
+        {:error, msg} when is_binary(msg) ->
+          refute msg =~ "will be submitted for user review"
+
+        other ->
+          flunk("expected gated shell without marker, got: #{inspect(other)}")
+      end
+
+      # With the exact approved-invocation marker, Execute must run without a
+      # second Trust/Security re-auth that would re-ask.
+      assert {:ok, result} =
+               Shell.Execute.run(%{command: command, sandbox: :none}, %{
+                 agent_id: agent_id,
+                 approved_invocation: %{
+                   request_id: "irq_shell_exec_regression",
+                   principal_id: agent_id,
+                   resource_uri: echo_uri,
+                   decision: :approved
+                 }
+               })
+
+      assert result.exit_code == 0
+      assert result.stdout =~ "shell-approval-ok"
     end
   end
 

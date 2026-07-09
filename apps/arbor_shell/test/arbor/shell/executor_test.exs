@@ -43,6 +43,17 @@ defmodule Arbor.Shell.ExecutorTest do
       assert result.exit_code == 137
     end
 
+    test "security regression: timeout 0 does not instantly kill short commands" do
+      # LLM optional-arg footgun: timeout: 0 is truthy in Elixir and used to
+      # make receive after 0 fire immediately → exit 137 on even `echo`.
+      {:ok, result} = Executor.run("echo ok", timeout: 0)
+
+      assert result.timed_out == false
+      assert result.killed == false
+      assert result.exit_code == 0
+      assert result.stdout =~ "ok"
+    end
+
     test "returns error when port open fails" do
       # Passing an invalid port option type causes Port.open to raise
       # We test this by using a command that Erlang can't spawn
