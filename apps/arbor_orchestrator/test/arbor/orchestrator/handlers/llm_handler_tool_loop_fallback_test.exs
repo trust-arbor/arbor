@@ -116,6 +116,41 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolLoopFallbackTest do
       assert {:ok, %{provider: "openai"}} = result
     end
 
+    test "regression: JSON-resumed string-key fallback override still applies (session-resume key normalization)" do
+      attempts = :ets.new(:attempts, [:public, :ordered_set])
+
+      do_call = fn req ->
+        idx = :ets.info(attempts, :size)
+        :ets.insert(attempts, {idx, req})
+
+        if idx == 0 do
+          {:error, :timeout}
+        else
+          {:ok, %{provider: req.provider, model: req.model, runtime: req.runtime}}
+        end
+      end
+
+      override =
+        %{provider: "kimi", model: "kimi-k2-thinking", runtime: "acp"}
+        |> Jason.encode!()
+        |> Jason.decode!()
+
+      import ExUnit.CaptureLog
+
+      log =
+        capture_log(fn ->
+          assert {:ok, %{provider: "kimi", model: "kimi-k2-thinking", runtime: :arbor}} =
+                   LlmHandler.call_with_tool_loop_fallback(do_call, build_request(), [override])
+        end)
+
+      assert log =~ "runtime override has no effect"
+
+      [{_, _orig}, {_, fallback_req}] = :ets.tab2list(attempts) |> Enum.sort()
+      assert fallback_req.provider == "kimi"
+      assert fallback_req.model == "kimi-k2-thinking"
+      assert fallback_req.runtime == :arbor
+    end
+
     test "runtime override is logged and dropped (tool loop can't honor it)" do
       attempts = :ets.new(:attempts, [:public, :ordered_set])
 

@@ -905,31 +905,57 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
     Logger.info("[LlmHandler] tool-loop fallback: applying override #{inspect(override)}")
   end
 
-  defp warn_if_runtime_override(%{runtime: runtime} = override) do
-    Logger.warning(
-      "[LlmHandler] tool-loop fallback entry has :runtime (#{inspect(runtime)}) but " <>
-        "tool loops go through Client.complete; runtime override has no effect here. " <>
-        "Drop it from the entry to silence this warning."
-    )
+  defp warn_if_runtime_override(override) do
+    with {:ok, runtime} <- fetch_override(override, :runtime) do
+      override =
+        override
+        |> Map.delete(:runtime)
+        |> Map.delete("runtime")
 
-    Map.delete(override, :runtime)
+      Logger.warning(
+        "[LlmHandler] tool-loop fallback entry has :runtime (#{inspect(runtime)}) but " <>
+          "tool loops go through Client.complete; runtime override has no effect here. " <>
+          "Drop it from the entry to silence this warning."
+      )
+
+      override
+    else
+      :error -> override
+    end
   end
 
-  defp warn_if_runtime_override(override), do: override
-
   defp apply_tool_loop_override(%Request{} = request, override) do
-    has_provider = Map.has_key?(override, :provider)
-    has_model = Map.has_key?(override, :model)
+    has_provider = has_override?(override, :provider)
+    has_model = has_override?(override, :model)
 
     if has_provider or has_model do
       updated =
         request
-        |> maybe_put_field(:provider, Map.get(override, :provider))
-        |> maybe_put_field(:model, Map.get(override, :model))
+        |> maybe_put_field(:provider, get_override(override, :provider))
+        |> maybe_put_field(:model, get_override(override, :model))
 
       {:ok, updated}
     else
       :no_change
+    end
+  end
+
+  defp fetch_override(override, key) do
+    string_key = Atom.to_string(key)
+
+    cond do
+      Map.has_key?(override, key) -> {:ok, Map.get(override, key)}
+      Map.has_key?(override, string_key) -> {:ok, Map.get(override, string_key)}
+      true -> :error
+    end
+  end
+
+  defp has_override?(override, key), do: match?({:ok, _}, fetch_override(override, key))
+
+  defp get_override(override, key) do
+    case fetch_override(override, key) do
+      {:ok, value} -> value
+      :error -> nil
     end
   end
 
