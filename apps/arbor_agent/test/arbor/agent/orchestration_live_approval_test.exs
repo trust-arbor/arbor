@@ -19,12 +19,22 @@ defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
   setup do
     original_config = snapshot_config()
 
+    # This test uses synthetic local identities and no signed request; pin the
+    # full auth posture it needs instead of inheriting suite-global state.
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
     Application.put_env(:arbor_trust, :policy_module, GatedPolicy)
+    Application.put_env(:arbor_trust, :policy_enforcer_enabled, false)
     Application.put_env(:arbor_security, :approval_guard_enabled, true)
     Application.put_env(:arbor_security, :consensus_escalation_enabled, true)
     Application.put_env(:arbor_security, :consensus_module, Arbor.Consensus)
     Application.put_env(:arbor_security, :use_interaction_router_for_approval, false)
+    Application.put_env(:arbor_security, :capability_signing_required, false)
+    Application.put_env(:arbor_security, :identity_verification, false)
+    Application.put_env(:arbor_security, :strict_identity_mode, false)
+    Application.put_env(:arbor_security, :reflex_checking_enabled, false)
+    Application.put_env(:arbor_security, :uri_registry_enforcement, false)
+    Application.put_env(:arbor_security, :egress_gate_enforcing, false)
+    Application.put_env(:arbor_security, :policy_enforcer_enabled, false)
     Application.put_env(:arbor_consensus, :llm_topic_classification_enabled, false)
 
     unique = System.unique_integer([:positive])
@@ -205,10 +215,18 @@ defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
     [
       {:arbor_trust, :approval_guard_enabled},
       {:arbor_trust, :policy_module},
+      {:arbor_trust, :policy_enforcer_enabled},
       {:arbor_security, :approval_guard_enabled},
       {:arbor_security, :consensus_escalation_enabled},
       {:arbor_security, :consensus_module},
       {:arbor_security, :use_interaction_router_for_approval},
+      {:arbor_security, :capability_signing_required},
+      {:arbor_security, :identity_verification},
+      {:arbor_security, :strict_identity_mode},
+      {:arbor_security, :reflex_checking_enabled},
+      {:arbor_security, :uri_registry_enforcement},
+      {:arbor_security, :egress_gate_enforcing},
+      {:arbor_security, :policy_enforcer_enabled},
       {:arbor_consensus, :llm_topic_classification_enabled}
     ]
     |> Map.new(fn {app, key} -> {{app, key}, Application.get_env(app, key)} end)
