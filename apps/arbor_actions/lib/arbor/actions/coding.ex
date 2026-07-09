@@ -87,7 +87,11 @@ defmodule Arbor.Actions.Coding do
         ],
         timeout: [
           type: :non_neg_integer,
-          doc: "ACP implementation timeout in milliseconds"
+          doc: "Optional hard wall-clock cap for ACP implementation in milliseconds"
+        ],
+        inactivity_timeout_ms: [
+          type: :non_neg_integer,
+          doc: "ACP implementation inactivity timeout in milliseconds"
         ],
         review_timeout: [
           type: :non_neg_integer,
@@ -125,6 +129,7 @@ defmodule Arbor.Actions.Coding do
         allowed_tools: :control,
         disallowed_tools: :control,
         timeout: :data,
+        inactivity_timeout_ms: :data,
         review_timeout: :data,
         validation_timeout: :data
       }
@@ -461,11 +466,13 @@ defmodule Arbor.Actions.Coding do
     defp prompt_acp_agent(session, worktree_path, params, context) do
       session_pid = session[:session_pid] || session["session_pid"]
 
-      prompt_params = %{
-        session_pid: session_pid,
-        prompt: build_prompt(worktree_path, params),
-        timeout: get_param(params, :timeout) || @default_timeout
-      }
+      prompt_params =
+        %{
+          session_pid: session_pid,
+          prompt: build_prompt(worktree_path, params)
+        }
+        |> put_if_present(:timeout, get_param(params, :timeout))
+        |> put_if_present(:inactivity_timeout_ms, get_param(params, :inactivity_timeout_ms))
 
       call_action(Acp.SendMessage, prompt_params, context)
     end

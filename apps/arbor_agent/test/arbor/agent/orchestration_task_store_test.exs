@@ -87,6 +87,49 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end)
   end
 
+  test "cancels a running task and keeps it cancelled after the process exits", %{store: store} do
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "do work",
+               name: store,
+               test_pid: self(),
+               metadata: %{ticket: "A-1"}
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_1", "do work"}
+    ref = Process.monitor(runner_pid)
+
+    assert {:ok, status} = TaskStore.cancel(task_id, name: store)
+    assert status.state == :cancelled
+    assert status.current_step == "cancelled"
+    assert status.completed_at
+
+    assert_receive {:DOWN, ^ref, :process, ^runner_pid, :killed}
+
+    assert {:ok, status} = TaskStore.status(task_id, name: store)
+    assert status.state == :cancelled
+    assert {:error, :cancelled} = TaskStore.result(task_id, name: store)
+  end
+
+  test "returns clean errors for unknown and finished task cancellation", %{store: store} do
+    assert {:error, :not_found} = TaskStore.cancel("missing", name: store)
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "do work",
+               name: store,
+               test_pid: self()
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_1", "do work"}
+    send(runner_pid, {:finish, {:ok, %{result_type: :test, payload: %{}, raw: "done"}}})
+
+    assert_eventually(fn ->
+      assert {:ok, status} = TaskStore.status(task_id, name: store)
+      assert status.state == :done
+    end)
+
+    assert {:error, {:not_running, :done}} = TaskStore.cancel(task_id, name: store)
+  end
+
   defp assert_eventually(fun, attempts \\ 20)
 
   defp assert_eventually(fun, attempts) when attempts > 0 do

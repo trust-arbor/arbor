@@ -279,6 +279,20 @@ defmodule Arbor.Gateway.MCP.Handler do
           },
           required: ["task_id"]
         }
+      },
+      %{
+        name: "arbor_cancel_task",
+        description: "Cancel a running asynchronous Arbor task.",
+        inputSchema: %{
+          type: "object",
+          properties: %{
+            task_id: %{
+              type: "string",
+              description: "Task id returned by arbor_dispatch_task"
+            }
+          },
+          required: ["task_id"]
+        }
       }
     ]
   end
@@ -360,6 +374,13 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   def handle_call_tool("arbor_task_result", args, state) do
     case task_result(args) do
+      {:ok, result} -> {:ok, json_content(result), state}
+      {:error, message} -> {:ok, error_content(message), state}
+    end
+  end
+
+  def handle_call_tool("arbor_cancel_task", args, state) do
+    case cancel_task(args) do
       {:ok, result} -> {:ok, json_content(result), state}
       {:error, message} -> {:ok, error_content(message), state}
     end
@@ -530,6 +551,17 @@ defmodule Arbor.Gateway.MCP.Handler do
          {:ok, task_id} <- required_string_arg(args, "task_id"),
          {:ok, result} <- call_orchestration(:task_result, [task_id, [caller_id: caller_id]]) do
       {:ok, %{"task_id" => task_id, "result" => result}}
+    else
+      {:error, reason} -> {:error, format_tool_error(reason)}
+      other -> {:error, format_tool_error(other)}
+    end
+  end
+
+  defp cancel_task(args) do
+    with {:ok, caller_id} <- require_authenticated("arbor_cancel_task"),
+         {:ok, task_id} <- required_string_arg(args, "task_id"),
+         {:ok, status} <- call_orchestration(:cancel_task, [task_id, [caller_id: caller_id]]) do
+      {:ok, %{"ok" => true, "task_id" => task_id, "task" => status}}
     else
       {:error, reason} -> {:error, format_tool_error(reason)}
       other -> {:error, format_tool_error(other)}

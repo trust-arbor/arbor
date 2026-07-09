@@ -134,7 +134,9 @@ defmodule Arbor.Actions.AcpTest do
       assert {:ok, _} =
                Acp.SendMessage.validate_params(%{
                  session_pid: self(),
-                 prompt: "Add tests"
+                 prompt: "Add tests",
+                 timeout: 123_456,
+                 inactivity_timeout_ms: 654_321
                })
     end
 
@@ -149,6 +151,7 @@ defmodule Arbor.Actions.AcpTest do
       assert roles[:prompt] == {:control, requires: [:prompt_injection]}
       assert roles[:session_pid] == :control
       assert roles[:timeout] == :data
+      assert roles[:inactivity_timeout_ms] == :data
     end
 
     test "returns error for dead PID" do

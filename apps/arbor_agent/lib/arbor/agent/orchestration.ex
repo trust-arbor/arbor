@@ -18,6 +18,7 @@ defmodule Arbor.Agent.Orchestration do
   @approval_answer_uri "arbor://approval/answer"
   @dispatch_uri "arbor://agent/dispatch"
   @task_read_uri "arbor://agent/task/read"
+  @task_cancel_uri "arbor://agent/task/cancel"
   @interaction_request_prefix "irq"
 
   @type approval_decision :: :approve | :deny | :rework
@@ -77,6 +78,22 @@ defmodule Arbor.Agent.Orchestration do
           |> apply_if_exported(:result, [task_id, task_store_opts(opts)])
           |> normalize_task_result()
       end
+    end
+  end
+
+  @doc """
+  Cancel a running async orchestration task.
+  """
+  @spec cancel_task(String.t(), keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def cancel_task(task_id, opts \\ []) do
+    with {:ok, task_id} <- normalize_task_id(task_id),
+         {:ok, status} <- task_status_unchecked(task_id, opts),
+         {:ok, caller_id} <- caller_id(opts),
+         :ok <- authorize_task_cancel(opts, caller_id, status) do
+      opts
+      |> task_store_module()
+      |> apply_if_exported(:cancel, [task_id, task_store_opts(opts)])
+      |> normalize_task_cancel_result()
     end
   end
 
@@ -188,11 +205,40 @@ defmodule Arbor.Agent.Orchestration do
     end
   end
 
+  defp authorize_task_cancel(opts, caller_id, status) do
+    if opt(opts, :authorize?, true) == false do
+      :ok
+    else
+      status
+      |> task_cancel_authorization_uris()
+      |> Enum.find_value(fn resource_uri ->
+        case authorize_caller(opts, caller_id, resource_uri, :execute) do
+          :ok -> :ok
+          _ -> nil
+        end
+      end)
+      |> case do
+        :ok -> :ok
+        nil -> {:error, {:unauthorized, :task_cancel_required}}
+      end
+    end
+  end
+
   defp task_read_authorization_uris(status) do
     [
       scoped_task_read_uri(Map.get(status, :task_id)),
       scoped_task_read_uri(Map.get(status, :agent_id)),
       @task_read_uri
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp task_cancel_authorization_uris(status) do
+    [
+      scoped_task_cancel_uri(Map.get(status, :task_id)),
+      scoped_task_cancel_uri(Map.get(status, :agent_id)),
+      @task_cancel_uri
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
@@ -207,6 +253,11 @@ defmodule Arbor.Agent.Orchestration do
     do: "#{@task_read_uri}/#{id}"
 
   defp scoped_task_read_uri(_), do: nil
+
+  defp scoped_task_cancel_uri(id) when is_binary(id) and id != "",
+    do: "#{@task_cancel_uri}/#{id}"
+
+  defp scoped_task_cancel_uri(_), do: nil
 
   defp record_dispatch(task_id, agent_id, task, caller_id, opts) do
     data = [
@@ -642,13 +693,22 @@ defmodule Arbor.Agent.Orchestration do
   defp normalize_task_result(:module_unavailable), do: {:error, :task_store_unavailable}
   defp normalize_task_result(other), do: {:error, {:unexpected_task_store_result, other}}
 
-  defp normalize_task_state(state) when state in [:running, :waiting_approval, :done, :failed],
-    do: state
+  defp normalize_task_cancel_result({:ok, status}) when is_map(status),
+    do: normalize_task_status_result({:ok, status})
+
+  defp normalize_task_cancel_result({:error, _} = error), do: error
+  defp normalize_task_cancel_result(:module_unavailable), do: {:error, :task_store_unavailable}
+  defp normalize_task_cancel_result(other), do: {:error, {:unexpected_task_store_result, other}}
+
+  defp normalize_task_state(state)
+       when state in [:running, :waiting_approval, :done, :failed, :cancelled],
+       do: state
 
   defp normalize_task_state("running"), do: :running
   defp normalize_task_state("waiting_approval"), do: :waiting_approval
   defp normalize_task_state("done"), do: :done
   defp normalize_task_state("failed"), do: :failed
+  defp normalize_task_state("cancelled"), do: :cancelled
   defp normalize_task_state(_state), do: :running
 
   defp normalize_audit_result(:ok), do: :ok

@@ -23,6 +23,84 @@ defmodule Arbor.AI.AcpSessionTest do
     def authorize(_agent_id, _uri, _action, _opts), do: {:ok, :authorized}
   end
 
+  defmodule FakeProgressClient do
+    @moduledoc false
+
+    def start_link(opts) do
+      Agent.start_link(fn -> %{opts: opts} end)
+    end
+
+    def new_session(client, cwd, _opts) do
+      send(test_pid(client), {:fake_new_session, cwd})
+      {:ok, %{"sessionId" => "fake-session"}}
+    end
+
+    def load_session(_client, session_id, _cwd, _opts) do
+      {:ok, %{"sessionId" => session_id}}
+    end
+
+    def set_config_option(_client, _session_id, _key, _value), do: :ok
+
+    def disconnect(client) do
+      test_pid = test_pid(client)
+      send(test_pid, {:fake_disconnect, client})
+      Agent.stop(client, :normal)
+      :ok
+    end
+
+    def cancel(client, session_id) do
+      send(test_pid(client), {:fake_cancel, session_id})
+      :ok
+    end
+
+    def prompt(client, session_id, content, opts) do
+      state = Agent.get(client, & &1)
+      listener = state.opts[:event_listener]
+      send(state.opts[:test_pid], {:fake_prompt_started, self(), content, opts})
+
+      case content do
+        "stall" ->
+          receive do
+            :release -> {:ok, %{"text" => "released"}}
+          after
+            5_000 -> {:ok, %{"text" => "late"}}
+          end
+
+        "steady_progress" ->
+          for _ <- 1..5 do
+            Process.sleep(15)
+            send_progress(listener, session_id)
+          end
+
+          {:ok, %{"text" => "done"}}
+
+        "progress_forever" ->
+          progress_forever(listener, session_id)
+
+        _ ->
+          {:ok, %{"text" => "ok"}}
+      end
+    end
+
+    defp progress_forever(listener, session_id) do
+      send_progress(listener, session_id)
+      Process.sleep(10)
+      progress_forever(listener, session_id)
+    end
+
+    defp send_progress(listener, session_id) do
+      send(
+        listener,
+        {:acp_session_update, session_id,
+         %{"sessionUpdate" => "agent_message_chunk", "content" => %{"text" => "."}}}
+      )
+    end
+
+    defp test_pid(client) do
+      Agent.get(client, & &1.opts[:test_pid])
+    end
+  end
+
   defp install_passthrough_authz do
     Application.put_env(:arbor_ai, :file_guard_module, PassthroughFileGuard)
     Application.put_env(:arbor_ai, :security_module, PassthroughSecurity)
@@ -31,6 +109,26 @@ defmodule Arbor.AI.AcpSessionTest do
       Application.delete_env(:arbor_ai, :file_guard_module)
       Application.delete_env(:arbor_ai, :security_module)
     end)
+  end
+
+  defp install_fake_progress_client(inactivity_timeout_ms) do
+    original_client = Application.get_env(:arbor_ai, :acp_client_module)
+    original_inactivity = Application.get_env(:arbor_ai, :acp_inactivity_timeout_ms)
+
+    Application.put_env(:arbor_ai, :acp_client_module, FakeProgressClient)
+    Application.put_env(:arbor_ai, :acp_inactivity_timeout_ms, inactivity_timeout_ms)
+
+    on_exit(fn ->
+      restore_env(:acp_client_module, original_client)
+      restore_env(:acp_inactivity_timeout_ms, original_inactivity)
+    end)
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_ai, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_ai, key, value)
+
+  defp start_fake_progress_session do
+    AcpSession.start_link(provider: :test, client_opts: [test_pid: self()])
   end
 
   describe "Config.resolve/2" do
@@ -185,6 +283,60 @@ defmodule Arbor.AI.AcpSessionTest do
 
       ref = Process.monitor(session)
       assert :ok = AcpSession.close(session)
+      assert_receive {:DOWN, ^ref, :process, ^session, :normal}
+    end
+  end
+
+  describe "AcpSession prompt timeout behavior" do
+    @tag timeout: 1_000
+    test "security regression: silent prompt aborts on inactivity and tears the session down" do
+      install_fake_progress_client(30)
+
+      {:ok, session} = start_fake_progress_session()
+      ref = Process.monitor(session)
+
+      assert {:error, :inactivity_timeout} = AcpSession.send_message(session, "stall")
+
+      assert_receive {:fake_prompt_started, _worker, "stall", opts}
+      assert Keyword.get(opts, :timeout) == :infinity
+      assert_receive {:fake_cancel, "fake-session"}
+      assert_receive {:fake_disconnect, _client}
+      assert_receive {:DOWN, ^ref, :process, ^session, :normal}
+    end
+
+    @tag timeout: 1_000
+    test "progress updates keep a prompt alive past the inactivity window" do
+      install_fake_progress_client(40)
+
+      {:ok, session} = start_fake_progress_session()
+
+      assert {:ok, result} = AcpSession.send_message(session, "steady_progress")
+
+      assert_receive {:fake_prompt_started, _worker, "steady_progress", opts}
+      assert Keyword.get(opts, :timeout) == :infinity
+      assert result["text"] == "done"
+      assert Process.alive?(session)
+
+      GenServer.stop(session)
+    end
+
+    @tag timeout: 1_000
+    test "explicit timeout is a hard wall-clock cap even while progress continues" do
+      install_fake_progress_client(200)
+
+      {:ok, session} = start_fake_progress_session()
+      ref = Process.monitor(session)
+
+      assert {:error, :timeout} =
+               AcpSession.send_message(session, "progress_forever",
+                 timeout: 50,
+                 inactivity_timeout_ms: 200
+               )
+
+      assert_receive {:fake_prompt_started, _worker, "progress_forever", opts}
+      assert Keyword.get(opts, :timeout) == 50
+      assert_receive {:fake_cancel, "fake-session"}
+      assert_receive {:fake_disconnect, _client}
       assert_receive {:DOWN, ^ref, :process, ^session, :normal}
     end
   end
@@ -454,13 +606,19 @@ defmodule Arbor.AI.AcpSessionTest do
       send(
         self(),
         {:acp_session_update, "s1",
-         %{"sessionUpdate" => "agent_message_chunk", "content" => %{"type" => "text", "text" => "Hello "}}}
+         %{
+           "sessionUpdate" => "agent_message_chunk",
+           "content" => %{"type" => "text", "text" => "Hello "}
+         }}
       )
 
       send(
         self(),
         {:acp_session_update, "s1",
-         %{"sessionUpdate" => "agent_message_chunk", "content" => %{"type" => "text", "text" => "world"}}}
+         %{
+           "sessionUpdate" => "agent_message_chunk",
+           "content" => %{"type" => "text", "text" => "world"}
+         }}
       )
 
       drained = AcpSession.drain_pending_updates(state)
@@ -597,7 +755,7 @@ defmodule Arbor.AI.AcpSessionTest do
       end
     end
 
-    defp test_state(timeout_ms \\ 200) do
+    defp test_state(timeout_ms) do
       {:ok, state} = Handler.init(permission_timeout_ms: timeout_ms)
       state
     end

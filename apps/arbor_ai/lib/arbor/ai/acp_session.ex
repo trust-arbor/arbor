@@ -43,7 +43,8 @@ defmodule Arbor.AI.AcpSession do
 
   alias Arbor.AI.AcpSession.Config
 
-  @acp_client ExMCP.ACP.Client
+  @default_acp_client ExMCP.ACP.Client
+  @default_inactivity_timeout_ms 300_000
 
   defstruct [
     :client,
@@ -108,11 +109,12 @@ defmodule Arbor.AI.AcpSession do
 
   ## Options
 
-  - `:timeout` — override timeout for this request
+  - `:timeout` — optional hard wall-clock timeout for this request
+  - `:inactivity_timeout_ms` — silence window before aborting an in-flight request
   """
   @spec send_message(GenServer.server(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def send_message(session, content, opts \\ []) do
-    GenServer.call(session, {:send_message, content, opts}, timeout(opts))
+    GenServer.call(session, {:send_message, content, opts}, :infinity)
   end
 
   @doc """
@@ -240,7 +242,7 @@ defmodule Arbor.AI.AcpSession do
       end
 
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    case apply(@acp_client, :new_session, [state.client, cwd, opts]) do
+    case apply(acp_client_module(), :new_session, [state.client, cwd, opts]) do
       {:ok, session_info} ->
         session_id = Map.get(session_info, "sessionId") || Map.get(session_info, :session_id)
 
@@ -271,7 +273,7 @@ defmodule Arbor.AI.AcpSession do
     result =
       try do
         # credo:disable-for-next-line Credo.Check.Refactor.Apply
-        apply(@acp_client, :load_session, [state.client, session_id, cwd, opts])
+        apply(acp_client_module(), :load_session, [state.client, session_id, cwd, opts])
       rescue
         e -> {:error, {:resume_failed, Exception.message(e)}}
       catch
@@ -330,24 +332,7 @@ defmodule Arbor.AI.AcpSession do
 
   @impl true
   def handle_info({:acp_session_update, session_id, update}, state) do
-    if state.stream_callback do
-      try do
-        state.stream_callback.(update)
-      rescue
-        e -> Logger.warning("AcpSession stream_callback error: #{inspect(e)}")
-      end
-    end
-
-    # Accumulate streaming text chunks (Gemini delivers text via session/update,
-    # not in prompt result)
-    state = accumulate_text(update, state)
-
-    update_type =
-      Map.get(update, "sessionUpdate") || Map.get(update, "kind", "unknown")
-
-    Logger.debug("ACP session #{session_id} update: #{inspect(update_type)}")
-
-    {:noreply, state}
+    {:noreply, process_session_update(state, session_id, update)}
   end
 
   def handle_info({:DOWN, _ref, :process, pid, reason}, %{client: pid} = state) do
@@ -379,13 +364,17 @@ defmodule Arbor.AI.AcpSession do
 
   # -- Private --
 
+  defp acp_client_module do
+    Application.get_env(:arbor_ai, :acp_client_module, @default_acp_client)
+  end
+
   defp acp_available? do
-    Code.ensure_loaded?(@acp_client)
+    Code.ensure_loaded?(acp_client_module())
   end
 
   defp start_acp_client(opts) do
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    result = apply(@acp_client, :start_link, [opts])
+    result = apply(acp_client_module(), :start_link, [opts])
 
     case result do
       {:ok, pid} ->
@@ -406,7 +395,7 @@ defmodule Arbor.AI.AcpSession do
   defp disconnect_client(%{client: client}) do
     if Process.alive?(client) do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(@acp_client, :disconnect, [client])
+      apply(acp_client_module(), :disconnect, [client])
     end
   rescue
     _ -> :ok
@@ -431,6 +420,46 @@ defmodule Arbor.AI.AcpSession do
   catch
     :exit, _ -> :ok
   end
+
+  # -- Session Updates --
+
+  @progress_update_types [
+    "agent_message_chunk",
+    "agent_thought_chunk",
+    "tool_call",
+    "tool_call_update",
+    "plan",
+    "text"
+  ]
+
+  defp process_session_update(state, session_id, update) do
+    if state.stream_callback do
+      try do
+        state.stream_callback.(update)
+      rescue
+        exception -> Logger.warning("AcpSession stream_callback error: #{inspect(exception)}")
+      end
+    end
+
+    # Accumulate streaming text chunks (Gemini/adapter sessions can deliver text
+    # via session/update instead of the prompt result).
+    state = accumulate_text(update, state)
+
+    Logger.debug("ACP session #{session_id} update: #{inspect(update_type(update))}")
+    state
+  end
+
+  defp progress_update?(update), do: update_type(update) in @progress_update_types
+
+  defp update_type(update) when is_map(update) do
+    Map.get(update, "sessionUpdate") ||
+      Map.get(update, :sessionUpdate) ||
+      Map.get(update, "kind") ||
+      Map.get(update, :kind) ||
+      "unknown"
+  end
+
+  defp update_type(_), do: "unknown"
 
   # -- Streaming Text Accumulation --
 
@@ -557,7 +586,7 @@ defmodule Arbor.AI.AcpSession do
           {:ok, client} ->
             # Try to resume the previous session
             # credo:disable-for-next-line Credo.Check.Refactor.Apply
-            case apply(@acp_client, :load_session, [
+            case apply(acp_client_module(), :load_session, [
                    client,
                    state.last_session_id,
                    resolve_cwd([], state.opts)
@@ -640,48 +669,244 @@ defmodule Arbor.AI.AcpSession do
   # derived from the workspace (as in init/1), not state.opts[:cwd], which is
   # absent in the pool flow.
   defp do_send_message(content, opts, state) do
-    # Reset accumulated text before each prompt — streaming chunks arrive during prompt/4
     state = %{state | status: :busy, accumulated_text: ""}
+    hard_timeout = hard_timeout(opts)
+    inactivity_timeout = inactivity_timeout(opts)
 
+    prompt =
+      start_prompt_worker(
+        state.client,
+        state.session_id,
+        content,
+        prompt_client_opts(opts, hard_timeout)
+      )
+
+    timers =
+      start_prompt_timers(prompt.ref,
+        hard_timeout: hard_timeout,
+        inactivity_timeout: inactivity_timeout
+      )
+
+    await_prompt_result(prompt, timers, state)
+  end
+
+  defp start_prompt_worker(client, session_id, content, opts) do
+    parent = self()
+    ref = make_ref()
+
+    {pid, monitor_ref} =
+      spawn_monitor(fn ->
+        send(parent, {:acp_prompt_result, ref, run_prompt(client, session_id, content, opts)})
+      end)
+
+    %{pid: pid, monitor_ref: monitor_ref, ref: ref}
+  end
+
+  defp run_prompt(client, session_id, content, opts) do
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    case apply(@acp_client, :prompt, [state.client, state.session_id, content, opts]) do
-      {:ok, result} ->
-        # The streaming chunks arrive as {:acp_session_update} messages DURING the blocking
-        # prompt/4 call, so handle_info can't process them until this handle_call returns. Drain
-        # them from the mailbox NOW so their text is accumulated before we merge. Without this, an
-        # adapter that returns its text ONLY via streaming chunks (Claude) yields an empty response.
-        state = drain_pending_updates(state)
-        # Merge streaming text into result if agent didn't include it
-        result = merge_accumulated_text(result, state.accumulated_text)
-        new_state = %{state | status: :ready} |> accumulate_usage(result)
-        maybe_report_usage(new_state, result)
-        emit_signal(:acp_session_completed, new_state, %{result: summarize_result(result)})
-        {:reply, {:ok, result}, new_state}
+    case apply(acp_client_module(), :prompt, [client, session_id, content, opts]) do
+      {:ok, _result} = ok -> ok
+      {:error, _reason} = error -> error
+      other -> {:error, {:unexpected_prompt_result, other}}
+    end
+  rescue
+    exception ->
+      {:error, {:prompt_failed, Exception.message(exception)}}
+  catch
+    :exit, {:timeout, _} -> {:error, :timeout}
+    :exit, reason -> {:error, {:prompt_exit, reason}}
+    kind, reason -> {:error, {kind, reason}}
+  end
 
-      {:error, reason} = error ->
+  defp await_prompt_result(prompt, timers, state) do
+    receive do
+      {:acp_prompt_result, ref, {:ok, result}} when ref == prompt.ref ->
+        complete_prompt_success(prompt, timers, result, state)
+
+      {:acp_prompt_result, ref, {:error, :timeout}} when ref == prompt.ref ->
+        timeout_prompt(:timeout, prompt, timers, state)
+
+      {:acp_prompt_result, ref, {:error, reason} = error} when ref == prompt.ref ->
+        cleanup_prompt(prompt, timers)
         new_state = %{state | status: :error}
         emit_signal(:acp_session_error, new_state, %{error: reason, phase: :prompt})
         {:reply, error, new_state}
+
+      {:DOWN, monitor_ref, :process, _pid, reason} when monitor_ref == prompt.monitor_ref ->
+        cleanup_prompt(prompt, timers)
+        new_state = %{state | status: :error}
+        emit_signal(:acp_session_error, new_state, %{error: reason, phase: :prompt})
+        {:reply, {:error, {:prompt_exit, reason}}, new_state}
+
+      {:DOWN, _ref, :process, pid, reason} when pid == state.client ->
+        kill_prompt_worker(prompt)
+        cancel_prompt_timers(timers)
+        new_state = %{state | status: :error, client: nil}
+        emit_signal(:acp_session_error, new_state, %{error: :client_down, reason: reason})
+        {:reply, {:error, :client_down}, new_state}
+
+      {:acp_session_update, session_id, update} ->
+        new_state = process_session_update(state, session_id, update)
+        timers = maybe_reset_inactivity_timer(timers, prompt.ref, session_id, new_state, update)
+        await_prompt_result(prompt, timers, new_state)
+
+      {:acp_prompt_inactivity_timeout, ref, timer_ref}
+      when ref == prompt.ref and timer_ref == timers.inactivity_timer ->
+        timeout_prompt(:inactivity_timeout, prompt, timers, state)
+
+      {:acp_prompt_inactivity_timeout, ref, _stale_timer_ref} when ref == prompt.ref ->
+        await_prompt_result(prompt, timers, state)
+
+      {:acp_prompt_hard_timeout, ref, timer_ref}
+      when ref == prompt.ref and timer_ref == timers.hard_timer ->
+        timeout_prompt(:timeout, prompt, timers, state)
+
+      {:acp_prompt_hard_timeout, ref, _stale_timer_ref} when ref == prompt.ref ->
+        await_prompt_result(prompt, timers, state)
+
+      {:acp_prompt_inactivity_timeout, _stale_ref, _stale_timer_ref} ->
+        await_prompt_result(prompt, timers, state)
+
+      {:acp_prompt_hard_timeout, _stale_ref, _stale_timer_ref} ->
+        await_prompt_result(prompt, timers, state)
     end
   end
 
-  # Process {:acp_session_update} messages already queued in the mailbox (they arrive during the
-  # blocking prompt/4 call but handle_info can't run until it returns). `after 0` returns once the
-  # mailbox is drained — by the time prompt/4 returns the turn is complete, so all chunks are
-  # already enqueued. Mirrors handle_info: fires the stream_callback + accumulates text.
+  defp complete_prompt_success(prompt, timers, result, state) do
+    cleanup_prompt(prompt, timers)
+
+    # A few adapters enqueue the final chunks immediately before returning the
+    # prompt result. Drain anything already queued before merging text.
+    state = drain_pending_updates(state)
+    result = merge_accumulated_text(result, state.accumulated_text)
+    new_state = %{state | status: :ready} |> accumulate_usage(result)
+    maybe_report_usage(new_state, result)
+    emit_signal(:acp_session_completed, new_state, %{result: summarize_result(result)})
+    {:reply, {:ok, result}, new_state}
+  end
+
+  defp timeout_prompt(kind, prompt, timers, state) do
+    cancel_acp_prompt(state)
+    kill_prompt_worker(prompt)
+    cleanup_prompt(prompt, timers)
+
+    new_state = %{state | status: :error}
+    emit_signal(:acp_session_error, new_state, %{error: kind, phase: :prompt})
+    {:stop, :normal, {:error, kind}, new_state}
+  end
+
+  defp cleanup_prompt(prompt, timers) do
+    Process.demonitor(prompt.monitor_ref, [:flush])
+    cancel_prompt_timers(timers)
+  end
+
+  defp kill_prompt_worker(prompt) do
+    if Process.alive?(prompt.pid), do: Process.exit(prompt.pid, :kill)
+  end
+
+  defp cancel_acp_prompt(%{client: nil}), do: :ok
+
+  defp cancel_acp_prompt(%{client: client, session_id: session_id}) do
+    module = acp_client_module()
+
+    if Process.alive?(client) and function_exported?(module, :cancel, 2) do
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      apply(module, :cancel, [client, session_id])
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp start_prompt_timers(prompt_ref, opts) do
+    hard_timeout = Keyword.fetch!(opts, :hard_timeout)
+    inactivity_timeout = Keyword.fetch!(opts, :inactivity_timeout)
+
+    %{
+      hard_timeout: hard_timeout,
+      hard_timer: schedule_timer(hard_timeout, {:acp_prompt_hard_timeout, prompt_ref}),
+      inactivity_timeout: inactivity_timeout,
+      inactivity_timer:
+        schedule_timer(inactivity_timeout, {:acp_prompt_inactivity_timeout, prompt_ref})
+    }
+  end
+
+  defp schedule_timer(:infinity, _message), do: nil
+
+  defp schedule_timer(timeout_ms, {tag, prompt_ref}) when is_integer(timeout_ms) do
+    timer_ref = make_ref()
+    Process.send_after(self(), {tag, prompt_ref, timer_ref}, timeout_ms)
+    timer_ref
+  end
+
+  defp maybe_reset_inactivity_timer(timers, prompt_ref, session_id, state, update) do
+    if session_id == state.session_id and progress_update?(update) do
+      cancel_timer(timers.inactivity_timer)
+
+      %{
+        timers
+        | inactivity_timer:
+            schedule_timer(
+              timers.inactivity_timeout,
+              {:acp_prompt_inactivity_timeout, prompt_ref}
+            )
+      }
+    else
+      timers
+    end
+  end
+
+  defp cancel_prompt_timers(timers) do
+    cancel_timer(timers.hard_timer)
+    cancel_timer(timers.inactivity_timer)
+  end
+
+  defp cancel_timer(nil), do: :ok
+
+  defp cancel_timer(timer_ref) do
+    Process.cancel_timer(timer_ref)
+    :ok
+  end
+
+  defp prompt_client_opts(opts, hard_timeout) do
+    opts
+    |> Keyword.delete(:inactivity_timeout_ms)
+    |> Keyword.put(:timeout, hard_timeout)
+  end
+
+  defp hard_timeout(opts) do
+    opts
+    |> Keyword.get(:timeout, :infinity)
+    |> normalize_timeout(:infinity)
+  end
+
+  defp inactivity_timeout(opts) do
+    opts
+    |> Keyword.get(
+      :inactivity_timeout_ms,
+      Application.get_env(:arbor_ai, :acp_inactivity_timeout_ms, @default_inactivity_timeout_ms)
+    )
+    |> normalize_timeout(@default_inactivity_timeout_ms)
+  end
+
+  defp normalize_timeout(:infinity, _default), do: :infinity
+
+  defp normalize_timeout(timeout_ms, _default) when is_integer(timeout_ms) and timeout_ms >= 0,
+    do: timeout_ms
+
+  defp normalize_timeout(_timeout_ms, default), do: default
+
+  # Process {:acp_session_update} messages already queued in the mailbox. Most
+  # updates are handled in the prompt wait loop; this catches final chunks that
+  # arrive just before the client returns the prompt result.
   @doc false
   def drain_pending_updates(state) do
     receive do
-      {:acp_session_update, _session_id, update} ->
-        if state.stream_callback do
-          try do
-            state.stream_callback.(update)
-          rescue
-            e -> Logger.warning("AcpSession stream_callback error: #{inspect(e)}")
-          end
-        end
-
-        drain_pending_updates(accumulate_text(update, state))
+      {:acp_session_update, session_id, update} ->
+        drain_pending_updates(process_session_update(state, session_id, update))
     after
       0 -> state
     end
@@ -705,7 +930,7 @@ defmodule Arbor.AI.AcpSession do
       end
 
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    case apply(@acp_client, :new_session, [state.client, cwd, new_opts]) do
+    case apply(acp_client_module(), :new_session, [state.client, cwd, new_opts]) do
       {:ok, info} ->
         sid = Map.get(info, "sessionId") || Map.get(info, :session_id)
         maybe_select_model(state.client, sid, state.model)
@@ -751,7 +976,7 @@ defmodule Arbor.AI.AcpSession do
 
   defp maybe_select_model(client, sid, model) do
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    apply(@acp_client, :set_config_option, [client, sid, "model", model])
+    apply(acp_client_module(), :set_config_option, [client, sid, "model", model])
   rescue
     _ -> :ok
   catch

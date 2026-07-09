@@ -52,6 +52,26 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
          }}
       )
     end
+
+    def cancel_task(task_id, opts) do
+      send(self(), {:cancel_task, task_id, opts})
+
+      Process.get(
+        {__MODULE__, :cancel_result},
+        {:ok,
+         %{
+           task_id: task_id,
+           agent_id: "agent_1",
+           state: :cancelled,
+           current_step: "cancelled",
+           waiting_on: nil,
+           started_at: ~U[2026-07-08 12:00:00Z],
+           updated_at: ~U[2026-07-08 12:00:02Z],
+           completed_at: ~U[2026-07-08 12:00:02Z],
+           metadata: %{}
+         }}
+      )
+    end
   end
 
   setup do
@@ -75,6 +95,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     Process.delete({FakeOrchestration, :dispatch_result})
     Process.delete({FakeOrchestration, :status_result})
     Process.delete({FakeOrchestration, :result_result})
+    Process.delete({FakeOrchestration, :cancel_result})
 
     {:ok, state: %{}}
   end
@@ -145,13 +166,14 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   describe "handle_list_tools/2" do
     test "returns tools", %{state: state} do
       {:ok, tools, nil, _state} = Handler.handle_list_tools(nil, state)
-      assert length(tools) == 9
+      assert length(tools) == 10
 
       names = Enum.map(tools, & &1.name) |> Enum.sort()
 
       assert names == [
                "arbor_actions",
                "arbor_answer_approval",
+               "arbor_cancel_task",
                "arbor_dispatch_task",
                "arbor_help",
                "arbor_list_pending_approvals",
@@ -206,11 +228,13 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       dispatch_tool = Enum.find(tools, &(&1.name == "arbor_dispatch_task"))
       status_tool = Enum.find(tools, &(&1.name == "arbor_task_status"))
       result_tool = Enum.find(tools, &(&1.name == "arbor_task_result"))
+      cancel_tool = Enum.find(tools, &(&1.name == "arbor_cancel_task"))
 
       assert "agent_id" in dispatch_tool.inputSchema.required
       assert "task" in dispatch_tool.inputSchema.required
       assert "task_id" in status_tool.inputSchema.required
       assert "task_id" in result_tool.inputSchema.required
+      assert "task_id" in cancel_tool.inputSchema.required
     end
   end
 
@@ -392,6 +416,31 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
              } = Jason.decode!(text)
 
       assert_received {:task_result, "task_1", opts}
+      assert opts[:caller_id] == "human_1"
+    end
+
+    test "cancel_task requires SignedRequest authentication", %{state: state} do
+      {:ok, result, _state} =
+        Handler.handle_call_tool("arbor_cancel_task", %{"task_id" => "task_1"}, state)
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text =~ "SignedRequest authentication"
+    end
+
+    test "cancel_task calls the shared API and returns cancelled status", %{state: state} do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, %{content: [%{text: text}]}, _state} =
+        Handler.handle_call_tool("arbor_cancel_task", %{"task_id" => "task_1"}, state)
+
+      assert %{
+               "ok" => true,
+               "task_id" => "task_1",
+               "task" => %{"task_id" => "task_1", "state" => "cancelled"}
+             } = Jason.decode!(text)
+
+      assert_received {:cancel_task, "task_1", opts}
       assert opts[:caller_id] == "human_1"
     end
   end

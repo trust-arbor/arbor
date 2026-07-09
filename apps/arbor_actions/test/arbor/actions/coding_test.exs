@@ -92,6 +92,7 @@ defmodule Arbor.Actions.CodingTest do
       assert_receive {:send_message, send_params}
       assert send_params.prompt =~ "STATUS: declined"
       assert send_params.prompt =~ "STATUS: implemented"
+      refute Map.has_key?(send_params, :timeout)
 
       assert_receive {:close_session, _}
 
@@ -100,6 +101,57 @@ defmodule Arbor.Actions.CodingTest do
       assert validation_params.command =~ "./bin/mix test"
 
       refute_received {:unexpected_pr, _}
+    end
+
+    test "threads an explicit ACP hard timeout only when requested", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          send(parent, {:start_session, params})
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, params, _context ->
+          send(parent, {:send_message, params})
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          {:ok, %{text: "STATUS: implemented\nCreated feature.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, _params, _context ->
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   branch_name: "test/coding-agent-timeout",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["true"],
+                   timeout: 123_456,
+                   inactivity_timeout_ms: 654_321,
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "change_committed"
+
+      assert_receive {:start_session, start_params}
+      assert start_params.timeout == 123_456
+
+      assert_receive {:send_message, send_params}
+      assert send_params.timeout == 123_456
+      assert send_params.inactivity_timeout_ms == 654_321
     end
 
     test "uses the requested ACP agent provider", %{tmp_dir: tmp_dir} do

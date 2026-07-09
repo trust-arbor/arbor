@@ -395,7 +395,8 @@ defmodule Arbor.Actions.Acp do
     |------|------|----------|-------------|
     | `session_pid` | any | yes | PID from StartSession (PID or stringified PID) |
     | `prompt` | string | yes | The coding prompt to send |
-    | `timeout` | integer | no | Timeout in ms (default: 300000) |
+    | `timeout` | integer | no | Optional hard wall-clock timeout in ms |
+    | `inactivity_timeout_ms` | integer | no | Silence window before aborting the prompt |
     """
 
     use Jido.Action,
@@ -416,8 +417,11 @@ defmodule Arbor.Actions.Acp do
         ],
         timeout: [
           type: :non_neg_integer,
-          default: 300_000,
-          doc: "Timeout in milliseconds"
+          doc: "Optional hard wall-clock timeout in milliseconds"
+        ],
+        inactivity_timeout_ms: [
+          type: :non_neg_integer,
+          doc: "Silence window before aborting the in-flight prompt"
         ]
       ]
 
@@ -427,7 +431,8 @@ defmodule Arbor.Actions.Acp do
       %{
         session_pid: :control,
         prompt: {:control, requires: [:prompt_injection]},
-        timeout: :data
+        timeout: :data,
+        inactivity_timeout_ms: :data
       }
     end
 
@@ -450,10 +455,13 @@ defmodule Arbor.Actions.Acp do
     end
 
     defp do_send(pid, params) do
-      timeout = Map.get(params, :timeout, 300_000)
+      opts =
+        []
+        |> maybe_add(:timeout, get_param(params, :timeout))
+        |> maybe_add(:inactivity_timeout_ms, get_param(params, :inactivity_timeout_ms))
 
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      case apply(Arbor.AI, :acp_send_message, [pid, params.prompt, [timeout: timeout]]) do
+      case apply(Arbor.AI, :acp_send_message, [pid, get_param(params, :prompt), opts]) do
         {:ok, response} ->
           {:ok,
            %{
@@ -468,6 +476,16 @@ defmodule Arbor.Actions.Acp do
           {:error, Acp.format_error(reason)}
       end
     end
+
+    defp get_param(params, key) do
+      case Map.fetch(params, key) do
+        {:ok, value} -> value
+        :error -> Map.get(params, Atom.to_string(key))
+      end
+    end
+
+    defp maybe_add(opts, _key, nil), do: opts
+    defp maybe_add(opts, key, value), do: Keyword.put(opts, key, value)
   end
 
   # ── SessionStatus ──

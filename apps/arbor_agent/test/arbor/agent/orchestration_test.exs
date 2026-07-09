@@ -90,6 +90,26 @@ defmodule Arbor.Agent.OrchestrationTest do
         {:ok, %{result_type: :chat, payload: %{text: "done"}, raw: "done"}}
       )
     end
+
+    def cancel(task_id, opts) do
+      send(self(), {:task_cancel, task_id, opts})
+
+      Process.get(
+        {__MODULE__, :cancel_result},
+        {:ok,
+         %{
+           task_id: task_id,
+           agent_id: "agent_1",
+           state: :cancelled,
+           current_step: "cancelled",
+           waiting_on: nil,
+           started_at: DateTime.utc_now(),
+           updated_at: DateTime.utc_now(),
+           completed_at: DateTime.utc_now(),
+           metadata: %{}
+         }}
+      )
+    end
   end
 
   defmodule FakeAudit do
@@ -113,7 +133,8 @@ defmodule Arbor.Agent.OrchestrationTest do
           {FakeInteractionRouter, :answer_result},
           {FakeTaskStore, :dispatch_result},
           {FakeTaskStore, :status_result},
-          {FakeTaskStore, :result_result}
+          {FakeTaskStore, :result_result},
+          {FakeTaskStore, :cancel_result}
         ] do
       Process.delete(key)
     end
@@ -250,6 +271,39 @@ defmodule Arbor.Agent.OrchestrationTest do
                  interaction_router: FakeInteractionRouter,
                  security_module: FakeSecurity
                )
+    end
+  end
+
+  describe "cancel_task/2" do
+    test "cancels through the task store with task-cancel authorization" do
+      assert {:ok, status} =
+               Orchestration.cancel_task("task_1",
+                 caller_id: "human_1",
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity
+               )
+
+      assert status.task_id == "task_1"
+      assert status.state == :cancelled
+
+      assert_received {:authorize, "human_1", "arbor://agent/task/cancel/task_1", :execute,
+                       [verify_identity: false]}
+
+      assert_received {:task_status, "task_1", _opts}
+      assert_received {:task_cancel, "task_1", _opts}
+    end
+
+    test "denies unauthorized cancellation before calling the task store cancel" do
+      Process.put({FakeSecurity, :result}, {:error, :no_capability})
+
+      assert {:error, {:unauthorized, :task_cancel_required}} =
+               Orchestration.cancel_task("task_1",
+                 caller_id: "human_1",
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity
+               )
+
+      refute_received {:task_cancel, _, _}
     end
   end
 

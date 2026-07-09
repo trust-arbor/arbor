@@ -16,7 +16,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   alias Arbor.Agent.Orchestration.TaskArtifacts
 
   @type task_id :: String.t()
-  @type state_name :: :running | :waiting_approval | :done | :failed
+  @type state_name :: :running | :waiting_approval | :done | :failed | :cancelled
 
   @type task_status :: %{
           task_id: task_id(),
@@ -33,7 +33,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @type task_result ::
           {:ok, map()}
           | {:error,
-             :not_found | :not_ready | {:waiting_approval, String.t()} | {:failed, term()}}
+             :not_found
+             | :not_ready
+             | :cancelled
+             | {:waiting_approval, String.t()}
+             | {:failed, term()}}
 
   @doc false
   def start_link(opts \\ []) do
@@ -66,6 +70,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @spec result(task_id(), keyword() | map()) :: task_result()
   def result(task_id, opts \\ []) do
     GenServer.call(store_name(opts), {:result, task_id})
+  end
+
+  @doc "Cancel a running task."
+  @spec cancel(task_id(), keyword() | map()) :: {:ok, task_status()} | {:error, term()}
+  def cancel(task_id, opts \\ []) do
+    GenServer.call(store_name(opts), {:cancel, task_id})
   end
 
   @impl true
@@ -140,6 +150,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
         {:ok, %{state: :failed, error: error}} ->
           {:error, {:failed, error}}
 
+        {:ok, %{state: :cancelled}} ->
+          {:error, :cancelled}
+
         {:ok, %{state: :waiting_approval, waiting_on: approval_id}} ->
           {:error, {:waiting_approval, approval_id}}
 
@@ -151,6 +164,40 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       end
 
     {:reply, reply, state}
+  end
+
+  def handle_call({:cancel, task_id}, _from, state) do
+    case Map.fetch(state.tasks, task_id) do
+      {:ok, %{state: :running} = record} ->
+        now = DateTime.utc_now()
+
+        if is_pid(record.pid) and Process.alive?(record.pid) do
+          Process.exit(record.pid, :kill)
+        end
+
+        cancelled_record = %{
+          record
+          | state: :cancelled,
+            current_step: "cancelled",
+            waiting_on: nil,
+            error: nil,
+            updated_at: now,
+            completed_at: now
+        }
+
+        next_state =
+          state
+          |> put_in([:tasks, task_id], cancelled_record)
+          |> remove_ref(record.ref)
+
+        {:reply, {:ok, status_view(cancelled_record)}, next_state}
+
+      {:ok, record} ->
+        {:reply, {:error, {:not_running, record.state}}, state}
+
+      :error ->
+        {:reply, {:error, :not_found}, state}
+    end
   end
 
   @impl true
@@ -181,7 +228,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
               nil
 
             record ->
-              if record.state in [:done, :failed, :waiting_approval] do
+              if record.state in [:done, :failed, :waiting_approval, :cancelled] do
                 record
               else
                 %{
@@ -213,9 +260,13 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           nil
 
         record ->
-          record
-          |> Map.merge(completion_fields(result, now))
-          |> Map.put(:updated_at, now)
+          if record.state == :cancelled do
+            record
+          else
+            record
+            |> Map.merge(completion_fields(result, now))
+            |> Map.put(:updated_at, now)
+          end
       end)
 
     remove_ref(state, ref)
@@ -292,7 +343,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp prune_tasks(%{max_tasks: max_tasks, tasks: tasks} = state) do
     completed =
       tasks
-      |> Enum.filter(fn {_id, record} -> record.state in [:done, :failed] end)
+      |> Enum.filter(fn {_id, record} -> record.state in [:done, :failed, :cancelled] end)
       |> Enum.sort_by(fn {_id, record} -> record.updated_at end, DateTime)
 
     excess = max(map_size(tasks) - max_tasks, 0)

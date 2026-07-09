@@ -31,6 +31,7 @@ defmodule Arbor.Security.UriRegistryTest do
       refute UriRegistry.registered?("arbor://tool/useful/websearch")
 
       assert UriRegistry.registered?("arbor://agent/spawn_worker")
+      assert UriRegistry.registered?("arbor://agent/task/cancel/task_1")
     end
 
     test "supports trailing-slash canonical prefixes" do

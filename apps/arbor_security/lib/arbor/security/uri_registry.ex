@@ -108,6 +108,7 @@ defmodule Arbor.Security.UriRegistry do
     # Agent orchestration facade
     "arbor://agent/dispatch",
     "arbor://agent/task/read",
+    "arbor://agent/task/cancel",
 
     # Comms facade
     "arbor://comms/send",
