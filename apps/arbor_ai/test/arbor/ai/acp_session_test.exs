@@ -339,6 +339,39 @@ defmodule Arbor.AI.AcpSessionTest do
       assert_receive {:fake_disconnect, _client}
       assert_receive {:DOWN, ^ref, :process, ^session, :normal}
     end
+
+    @tag timeout: 2_000
+    test "cancels in-flight prompt and tears the session down when the owner disappears" do
+      install_fake_progress_client(5_000)
+
+      parent = self()
+
+      owner =
+        spawn(fn ->
+          {:ok, session} =
+            AcpSession.start_link(
+              provider: :test,
+              client_opts: [test_pid: parent]
+            )
+
+          send(parent, {:session_started, session})
+          # Block inside send_message while the fake prompt stalls.
+          _ = AcpSession.send_message(session, "stall")
+        end)
+
+      assert_receive {:session_started, session}, 1_000
+      session_ref = Process.monitor(session)
+
+      assert_receive {:fake_prompt_started, _worker, "stall", _opts}, 1_000
+      assert Process.alive?(session)
+
+      # Simulate orchestration cancel killing the owning action/turn process.
+      Process.exit(owner, :kill)
+
+      assert_receive {:fake_cancel, "fake-session"}, 1_000
+      assert_receive {:fake_disconnect, _client}, 1_000
+      assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}, 1_000
+    end
   end
 
   describe "AcpSession.Handler" do

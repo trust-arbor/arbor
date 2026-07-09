@@ -52,6 +52,8 @@ defmodule Arbor.AI.AcpSession do
     :last_session_id,
     :provider,
     :model,
+    :owner,
+    :owner_monitor,
     :stream_callback,
     :opts,
     :workspace,
@@ -83,6 +85,10 @@ defmodule Arbor.AI.AcpSession do
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     {gen_opts, init_opts} = Keyword.split(opts, [:name])
+    # Capture the starter as the session owner so we can monitor it even when
+    # the session is start_link'd (linked) and later :kill'd — trap_exit +
+    # monitor lets us abort prompts and disconnect the ACP client orderly.
+    init_opts = Keyword.put_new(init_opts, :owner, self())
     GenServer.start_link(__MODULE__, init_opts, gen_opts)
   end
 
@@ -162,7 +168,12 @@ defmodule Arbor.AI.AcpSession do
 
   @impl true
   def init(opts) do
+    # Survive linked owner :kill so we can cancel the ACP prompt and disconnect
+    # the client instead of vanishing without terminate/2.
+    Process.flag(:trap_exit, true)
+
     provider = Keyword.fetch!(opts, :provider)
+    {owner, owner_monitor} = monitor_owner(Keyword.get(opts, :owner))
 
     if acp_available?() do
       # Create workspace if requested
@@ -196,6 +207,8 @@ defmodule Arbor.AI.AcpSession do
                 client: client,
                 provider: provider,
                 model: Keyword.get(opts, :model),
+                owner: owner,
+                owner_monitor: owner_monitor,
                 stream_callback: Keyword.get(opts, :stream_callback),
                 mcp_servers: Keyword.get(opts, :mcp_servers),
                 workspace: workspace_result,
@@ -207,19 +220,29 @@ defmodule Arbor.AI.AcpSession do
               {:ok, state}
 
             {:error, reason} ->
+              demonitor_owner(owner_monitor)
               cleanup_workspace(workspace_result)
               Logger.error("Failed to start ACP client for #{provider}: #{inspect(reason)}")
               {:stop, reason}
           end
 
         {:error, reason} ->
+          demonitor_owner(owner_monitor)
           cleanup_workspace(workspace_result)
           Logger.error("Unknown ACP provider: #{inspect(provider)}")
           {:stop, reason}
       end
     else
       Logger.warning("ExMCP.ACP.Client not available — AcpSession will not function")
-      {:ok, %__MODULE__{provider: provider, status: :error, opts: opts}}
+
+      {:ok,
+       %__MODULE__{
+         provider: provider,
+         owner: owner,
+         owner_monitor: owner_monitor,
+         status: :error,
+         opts: opts
+       }}
     end
   end
 
@@ -304,9 +327,9 @@ defmodule Arbor.AI.AcpSession do
     {:reply, {:error, {:not_ready, status}}, state}
   end
 
-  def handle_call({:send_message, content, opts}, _from, state) do
+  def handle_call({:send_message, content, opts}, from, state) do
     case ensure_session(state, opts) do
-      {:ok, state} -> do_send_message(content, opts, state)
+      {:ok, state} -> do_send_message(content, opts, from, state)
       {:error, reason} -> {:reply, {:error, reason}, %{state | status: :error}}
     end
   end
@@ -335,6 +358,16 @@ defmodule Arbor.AI.AcpSession do
     {:noreply, process_session_update(state, session_id, update)}
   end
 
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{owner_monitor: ref} = state) do
+    Logger.info(
+      "AcpSession owner gone (#{inspect(reason)}); aborting session #{inspect(state.session_id)}"
+    )
+
+    disconnect_client(state)
+    emit_signal(:acp_session_closed, state, %{reason: :owner_cancelled})
+    {:stop, :normal, %{state | status: :closed, owner_monitor: nil}}
+  end
+
   def handle_info({:DOWN, _ref, :process, pid, reason}, %{client: pid} = state) do
     Logger.warning("ACP client process died: #{inspect(reason)}")
     emit_signal(:acp_session_error, state, %{error: :client_down, reason: reason})
@@ -350,6 +383,13 @@ defmodule Arbor.AI.AcpSession do
     end
   end
 
+  def handle_info({:EXIT, _pid, _reason}, state) do
+    # trap_exit keeps us alive when a linked owner/client dies with :kill so the
+    # matching Process.monitor DOWN path can cancel/disconnect orderly. Do not
+    # handle owner/client cleanup here — that would race/double-run with DOWN.
+    {:noreply, state}
+  end
+
   def handle_info(msg, state) do
     Logger.debug("AcpSession unexpected message: #{inspect(msg)}")
     {:noreply, state}
@@ -357,6 +397,7 @@ defmodule Arbor.AI.AcpSession do
 
   @impl true
   def terminate(_reason, state) do
+    demonitor_owner(state.owner_monitor)
     disconnect_client(state)
     cleanup_workspace(state.workspace)
     :ok
@@ -677,10 +718,16 @@ defmodule Arbor.AI.AcpSession do
   # session_id would be nil and the agent receives "sessionId": null. cwd is
   # derived from the workspace (as in init/1), not state.opts[:cwd], which is
   # absent in the pool flow.
-  defp do_send_message(content, opts, state) do
+  defp do_send_message(content, opts, from, state) do
     state = %{state | status: :busy, accumulated_text: ""}
     hard_timeout = hard_timeout(opts)
     inactivity_timeout = inactivity_timeout(opts)
+
+    # Monitor the GenServer.call owner for this prompt. When orchestration
+    # cancel kills the action/turn process, we abort the ACP prompt immediately
+    # instead of waiting for inactivity timeout.
+    caller_pid = elem(from, 0)
+    caller_ref = Process.monitor(caller_pid)
 
     prompt =
       start_prompt_worker(
@@ -689,6 +736,7 @@ defmodule Arbor.AI.AcpSession do
         content,
         prompt_client_opts(opts, hard_timeout)
       )
+      |> Map.merge(%{caller_pid: caller_pid, caller_ref: caller_ref})
 
     timers =
       start_prompt_timers(prompt.ref,
@@ -708,7 +756,7 @@ defmodule Arbor.AI.AcpSession do
         send(parent, {:acp_prompt_result, ref, run_prompt(client, session_id, content, opts)})
       end)
 
-    %{pid: pid, monitor_ref: monitor_ref, ref: ref}
+    %{pid: pid, monitor_ref: monitor_ref, ref: ref, caller_pid: nil, caller_ref: nil}
   end
 
   defp run_prompt(client, session_id, content, opts) do
@@ -749,10 +797,21 @@ defmodule Arbor.AI.AcpSession do
 
       {:DOWN, _ref, :process, pid, reason} when pid == state.client ->
         kill_prompt_worker(prompt)
-        cancel_prompt_timers(timers)
+        cleanup_prompt(prompt, timers)
         new_state = %{state | status: :error, client: nil}
         emit_signal(:acp_session_error, new_state, %{error: :client_down, reason: reason})
         {:reply, {:error, :client_down}, new_state}
+
+      # Caller (GenServer.call owner) and/or session owner disappeared — cancel
+      # the ACP prompt immediately. Prefer monitor DOWN only: EXIT is drained
+      # below so trap_exit does not leave a stale message or double-cancel.
+      {:DOWN, ref, :process, _pid, _reason}
+      when ref == prompt.caller_ref or ref == state.owner_monitor ->
+        timeout_prompt(:cancelled, prompt, timers, state)
+
+      {:EXIT, _pid, _reason} ->
+        # Linked owner/client EXIT under trap_exit; DOWN handles real cleanup.
+        await_prompt_result(prompt, timers, state)
 
       {:acp_session_update, session_id, update} ->
         new_state = process_session_update(state, session_id, update)
@@ -818,8 +877,26 @@ defmodule Arbor.AI.AcpSession do
 
   defp cleanup_prompt(prompt, timers) do
     Process.demonitor(prompt.monitor_ref, [:flush])
+    demonitor_owner(Map.get(prompt, :caller_ref))
     cancel_prompt_timers(timers)
   end
+
+  defp monitor_owner(owner) when is_pid(owner) do
+    if Process.alive?(owner) do
+      {owner, Process.monitor(owner)}
+    else
+      {owner, nil}
+    end
+  end
+
+  defp monitor_owner(_owner), do: {nil, nil}
+
+  defp demonitor_owner(ref) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    :ok
+  end
+
+  defp demonitor_owner(_), do: :ok
 
   defp kill_prompt_worker(prompt) do
     if Process.alive?(prompt.pid), do: Process.exit(prompt.pid, :kill)

@@ -157,11 +157,32 @@ defmodule Arbor.Actions.Coding do
 
       with {:ok, repo_root} <- resolve_repo_root(repo_path),
            {:ok, branch_name} <- resolve_branch_name(params),
-           {:ok, worktree_path} <- create_worktree(repo_root, branch_name, params),
-           {:ok, session} <- start_acp_session(worktree_path, params, context),
-           {:ok, response} <- prompt_acp_agent(session, worktree_path, params, context) do
-        maybe_close_session(session, context)
-        finish_change(repo_root, worktree_path, branch_name, response, params, context)
+           {:ok, worktree_path, ownership} <- create_worktree(repo_root, branch_name, params) do
+        # A separate monitor process owns cleanup: TaskStore/Session cancel kills
+        # this action with :kill (try/after never runs). Only paths *added* by this
+        # invocation are owned — never force-remove a pre-existing/reused worktree.
+        # On normal return we release the guard so declined / no_changes /
+        # validation_failed keep the worktree as before.
+        guard =
+          if ownership == :owned do
+            start_worktree_owner_guard(repo_root, worktree_path, context)
+          else
+            nil
+          end
+
+        try do
+          with {:ok, session} <- start_acp_session(worktree_path, params, context),
+               {:ok, response} <- prompt_acp_agent(session, worktree_path, params, context) do
+            maybe_close_session(session, context)
+            finish_change(repo_root, worktree_path, branch_name, response, params, context)
+          else
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              {:error, reason}
+          end
+        after
+          release_worktree_owner_guard(guard)
+        end
       else
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
@@ -312,6 +333,78 @@ defmodule Arbor.Actions.Coding do
       end
     end
 
+    # -- Cancellation-owned worktree cleanup ---------------------------------
+    # Survives :kill of the action process (unlike try/after). Only armed when
+    # this invocation *added* the worktree path (`:owned`). Released on every
+    # normal return path so validation_failed / declined / no_changes retain the
+    # worktree for inspection, matching prior behavior.
+
+    defp start_worktree_owner_guard(repo_root, worktree_path, context) do
+      case map_value(context, :worktree_owner_guard) do
+        fun when is_function(fun, 3) ->
+          fun.(repo_root, worktree_path, self())
+
+        fun when is_function(fun, 2) ->
+          fun.(repo_root, worktree_path)
+
+        _ ->
+          spawn_worktree_owner_guard(repo_root, worktree_path, self())
+      end
+    end
+
+    defp spawn_worktree_owner_guard(repo_root, worktree_path, owner)
+         when is_binary(repo_root) and is_binary(worktree_path) and is_pid(owner) do
+      spawn(fn ->
+        ref = Process.monitor(owner)
+
+        receive do
+          {:DOWN, ^ref, :process, ^owner, _reason} ->
+            remove_owned_worktree(repo_root, worktree_path)
+
+          :release ->
+            Process.demonitor(ref, [:flush])
+            :ok
+        end
+      end)
+    end
+
+    defp release_worktree_owner_guard(guard) when is_pid(guard) do
+      send(guard, :release)
+      :ok
+    end
+
+    defp release_worktree_owner_guard(_guard), do: :ok
+
+    # Destructive: private on purpose — only the owner-death guard may call this.
+    defp remove_owned_worktree(repo_root, worktree_path)
+         when is_binary(repo_root) and is_binary(worktree_path) do
+      if File.dir?(worktree_path) do
+        case System.cmd(
+               "git",
+               ["-C", repo_root, "worktree", "remove", "--force", worktree_path],
+               stderr_to_stdout: true
+             ) do
+          {_output, 0} ->
+            :ok
+
+          {_output, _code} ->
+            # Force-remove even if git worktree metadata is stale (dirty cancel).
+            File.rm_rf(worktree_path)
+            _ = System.cmd("git", ["-C", repo_root, "worktree", "prune"], stderr_to_stdout: true)
+            :ok
+        end
+      else
+        :ok
+      end
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+
+    # Returns `{:ok, path, ownership}` where ownership is:
+    #   :owned     — this invocation added the worktree path (remove on cancel)
+    #   :not_owned — path already present or branch already checked out elsewhere
     defp create_worktree(repo_root, branch_name, params) do
       base_dir =
         params
@@ -326,10 +419,10 @@ defmodule Arbor.Actions.Coding do
       worktree_path = Path.join(base_dir, worktree_dir_name(branch_name))
 
       with {:ok, base_commit} <- rev_parse(repo_root, base_ref),
-           {:ok, path, reused?} <-
+           {:ok, path, ownership, reset?} <-
              ensure_worktree(repo_root, branch_name, worktree_path, base_commit),
-           :ok <- maybe_reset_reused_worktree(path, base_commit, reused?) do
-        {:ok, path}
+           :ok <- maybe_reset_reused_worktree(path, base_commit, reset?) do
+        {:ok, path, ownership}
       end
     end
 
@@ -360,19 +453,35 @@ defmodule Arbor.Actions.Coding do
       end
     end
 
+    # Ownership is about the *path*, not the branch:
+    # - already-present path at our computed location → :not_owned
+    # - branch already checked out at another worktree → :not_owned
+    # - pre-existing branch, newly added path → :owned (branch reuse is fine)
+    # - new branch + new path → :owned
+    # `reset?` is independent: reused worktrees / attached branches start clean.
     defp ensure_worktree(repo_root, branch_name, worktree_path, base_commit) do
       cond do
         File.dir?(worktree_path) ->
-          ensure_existing_worktree_branch(worktree_path, branch_name)
+          with {:ok, path} <- ensure_existing_worktree_branch(worktree_path, branch_name) do
+            # Already-present worktree path — not owned; never remove on cancel.
+            {:ok, path, :not_owned, true}
+          end
 
         existing_path = worktree_for_branch(repo_root, branch_name) ->
-          {:ok, existing_path, true}
+          # Already-checked-out branch path elsewhere — not owned; never remove.
+          {:ok, existing_path, :not_owned, true}
 
         branch_exists?(repo_root, branch_name) ->
-          add_existing_branch_worktree(repo_root, branch_name, worktree_path)
+          # Pre-existing branch with no worktree: path is newly added → owned.
+          with {:ok, path} <- add_existing_branch_worktree(repo_root, branch_name, worktree_path) do
+            {:ok, path, :owned, true}
+          end
 
         true ->
-          add_new_branch_worktree(repo_root, branch_name, worktree_path, base_commit)
+          with {:ok, path} <-
+                 add_new_branch_worktree(repo_root, branch_name, worktree_path, base_commit) do
+            {:ok, path, :owned, false}
+          end
       end
     end
 
@@ -382,7 +491,7 @@ defmodule Arbor.Actions.Coding do
           current_branch = String.trim(output)
 
           if current_branch == branch_name do
-            {:ok, worktree_path, true}
+            {:ok, worktree_path}
           else
             {:error,
              "existing worktree #{worktree_path} is on #{inspect(current_branch)}, expected #{inspect(branch_name)}"}
@@ -431,7 +540,7 @@ defmodule Arbor.Actions.Coding do
              ["-C", repo_root, "worktree", "add", worktree_path, branch_name],
              stderr_to_stdout: true
            ) do
-        {_output, 0} -> {:ok, worktree_path, true}
+        {_output, 0} -> {:ok, worktree_path}
         {output, _code} -> {:error, "failed to create worktree: #{String.trim(output)}"}
       end
     end
@@ -442,7 +551,7 @@ defmodule Arbor.Actions.Coding do
              ["-C", repo_root, "worktree", "add", "-b", branch_name, worktree_path, base_commit],
              stderr_to_stdout: true
            ) do
-        {_output, 0} -> {:ok, worktree_path, false}
+        {_output, 0} -> {:ok, worktree_path}
         {output, _code} -> {:error, "failed to create worktree: #{String.trim(output)}"}
       end
     end

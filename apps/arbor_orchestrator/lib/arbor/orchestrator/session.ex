@@ -149,8 +149,18 @@ defmodule Arbor.Orchestrator.Session do
     # continuous experience" without dropping input.
     current_engagement_id: nil,
     transcripts: %{},
-    turn_queue: []
+    turn_queue: [],
+    # Bounded task-id cancellation tombstones: reject a later send_message that
+    # still carries a cancelled async-task id (race: cancel before Session sees
+    # the task, or cancel while the matching turn is only queued). FIFO-capped.
+    cancelled_task_ids: %{},
+    cancelled_task_id_order: []
   ]
+
+  # Max tombstones retained per session. Async task ids are unique; once the
+  # TaskStore has marked the task cancelled the runner is dead, so a short
+  # retention window is enough for in-flight queue/start races.
+  @max_cancelled_task_ids 64
 
   @type phase :: :idle | :processing | :awaiting_tools | :awaiting_llm
   @type session_type :: :primary | :background | :delegation | :consultation
@@ -252,6 +262,30 @@ defmodule Arbor.Orchestrator.Session do
   def cancel_turn(session) do
     GenServer.call(session, :cancel_turn)
   end
+
+  @doc """
+  Cancel a specific async orchestration task on this session.
+
+  Unlike `cancel_turn/1` (user-initiated, unscoped — always kills the active
+  turn), this is **task-scoped** and race-safe:
+
+    * If the active turn carries `task_id` in `UserMessage.transport_metadata`
+      (also exposed as `session.task_id` in the engine context), cancel it.
+    * If an unrelated active/interactive turn is running, leave it alone.
+    * Matching queued turns are removed and their callers receive
+      `{:error, :cancelled}`.
+    * A bounded tombstone rejects a later `send_message` with the same
+      `task_id` so a cancel that races ahead of Session still cannot run.
+
+  Always records the tombstone (when `task_id` is non-empty) so late arrivals
+  are deterministic. Returns `:ok`, or `{:error, :invalid_task_id}`.
+  """
+  @spec cancel_task(GenServer.server(), String.t()) :: :ok | {:error, term()}
+  def cancel_task(session, task_id) when is_binary(task_id) do
+    GenServer.call(session, {:cancel_task, task_id})
+  end
+
+  def cancel_task(_session, _task_id), do: {:error, :invalid_task_id}
 
   @doc """
   Pop the next queued mid-turn message as a STEERING message (its content), folding its caller
@@ -505,9 +539,15 @@ defmodule Arbor.Orchestrator.Session do
   # (across all engagements). The caller's GenServer.call blocks until its turn
   # actually runs and replies (via turn_from). Coerce here so the queued entry is
   # already a typed envelope (carrying its engagement_id).
+  # Reject immediately when the message's task_id was already cancelled (tombstone).
   def handle_call({:send_message, message}, from, %{turn_in_flight: true} = state) do
     user_message = coerce_user_message(message)
-    {:noreply, %{state | turn_queue: state.turn_queue ++ [{user_message, from}]}}
+
+    if task_cancelled?(state, user_message_task_id(user_message)) do
+      {:reply, {:error, :cancelled}, state}
+    else
+      {:noreply, %{state | turn_queue: state.turn_queue ++ [{user_message, from}]}}
+    end
   end
 
   # STEERING: the running tool loop calls this (via the steer_check closure built in
@@ -516,19 +556,21 @@ defmodule Arbor.Orchestrator.Session do
   # so it receives the same turn result as the primary caller (rather than a separate follow-up
   # turn). Returns :none when the queue is empty — the message is consumed here instead of
   # being drained as its own turn later, so no double-processing.
-  def handle_call(
-        :take_steering,
-        _from,
-        %{turn_queue: [{user_message, caller_from} | rest]} = state
-      ) do
-    require Logger
+  # Skip (and cancel-reply) any leading queue entries whose task_id is tombstoned.
+  def handle_call(:take_steering, _from, %{turn_queue: [_ | _]} = state) do
+    case pop_steering_message(state) do
+      {:ok, content, new_state} ->
+        require Logger
 
-    Logger.info(
-      "[Session] steering: folding a mid-turn message into the active turn for #{state.agent_id}"
-    )
+        Logger.info(
+          "[Session] steering: folding a mid-turn message into the active turn for #{state.agent_id}"
+        )
 
-    new_state = %{state | turn_queue: rest, steer_froms: [caller_from | state.steer_froms]}
-    {:reply, user_message.content, new_state}
+        {:reply, content, new_state}
+
+      {:none, new_state} ->
+        {:reply, :none, new_state}
+    end
   end
 
   def handle_call(:take_steering, _from, state), do: {:reply, :none, state}
@@ -537,7 +579,13 @@ defmodule Arbor.Orchestrator.Session do
     # Slash commands are parsed at each adapter's intake (CommandIntake), not
     # here; by the time a message reaches Session it has been classified as a
     # regular prompt. Session stays a pure runtime container.
-    message |> coerce_user_message() |> start_turn(from, state)
+    user_message = coerce_user_message(message)
+
+    if task_cancelled?(state, user_message_task_id(user_message)) do
+      {:reply, {:error, :cancelled}, state}
+    else
+      start_turn(user_message, from, state)
+    end
   end
 
   def handle_call(:get_state, _from, state) do
@@ -547,22 +595,35 @@ defmodule Arbor.Orchestrator.Session do
   # User cancellation: preserve whatever streamed as a :cancelled partial, kill the
   # turn task, unblock the original caller and the session. The demonitor [:flush]
   # before the kill means the task's :DOWN is dropped and can't re-finalize.
+  # Unscoped — used by explicit user cancel surfaces (e.g. chat socket).
   def handle_call(:cancel_turn, _from, %{turn_in_flight: true} = state) do
-    new_state = transition_phase(state, :processing, :complete, :idle)
-    finalize_partial(state, :cancelled, :user_cancelled)
-    reply_turn(state, {:error, :cancelled})
-
-    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
-    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
-    if is_pid(state.turn_task_pid), do: Process.exit(state.turn_task_pid, :kill)
-
-    # Cancelling the active turn frees the mind — let queued turns proceed.
-    send(self(), :drain_queue)
-    {:reply, :ok, reset_turn(new_state)}
+    {:reply, :ok, do_cancel_active_turn(state, :user_cancelled)}
   end
 
   def handle_call(:cancel_turn, _from, state) do
     {:reply, {:error, :no_turn_in_flight}, state}
+  end
+
+  # Task-scoped cancel for async orchestration (TaskStore → SessionManager).
+  def handle_call({:cancel_task, task_id}, _from, state)
+      when is_binary(task_id) and task_id != "" do
+    state =
+      state
+      |> mark_task_cancelled(task_id)
+      |> purge_queued_task(task_id)
+
+    state =
+      if state.turn_in_flight and active_turn_task_id(state) == task_id do
+        do_cancel_active_turn(state, :task_cancelled)
+      else
+        state
+      end
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:cancel_task, _task_id}, _from, state) do
+    {:reply, {:error, :invalid_task_id}, state}
   end
 
   def handle_call(:execution_mode, _from, state) do
@@ -732,10 +793,8 @@ defmodule Arbor.Orchestrator.Session do
     _ -> values
   end
 
-  defp maybe_put_user_message_task_id(values, %Arbor.Contracts.Session.UserMessage{
-         transport_metadata: metadata
-       }) do
-    case metadata_value(metadata, :task_id) do
+  defp maybe_put_user_message_task_id(values, user_message) do
+    case user_message_task_id(user_message) do
       task_id when is_binary(task_id) and task_id != "" ->
         Map.put(values, "session.task_id", task_id)
 
@@ -744,10 +803,85 @@ defmodule Arbor.Orchestrator.Session do
     end
   end
 
+  defp user_message_task_id(%Arbor.Contracts.Session.UserMessage{transport_metadata: metadata}) do
+    case metadata_value(metadata, :task_id) do
+      task_id when is_binary(task_id) and task_id != "" -> task_id
+      _ -> nil
+    end
+  end
+
+  defp user_message_task_id(_), do: nil
+
+  defp active_turn_task_id(%{turn_user_message: user_message}),
+    do: user_message_task_id(user_message)
+
+  defp active_turn_task_id(_), do: nil
+
   defp metadata_value(map, key) when is_map(map),
     do: Map.get(map, key, Map.get(map, to_string(key)))
 
   defp metadata_value(_map, _key), do: nil
+
+  # ── Task-scoped cancellation helpers ─────────────────────────────────
+
+  defp task_cancelled?(_state, nil), do: false
+  defp task_cancelled?(_state, ""), do: false
+
+  defp task_cancelled?(state, task_id) when is_binary(task_id) do
+    Map.has_key?(state.cancelled_task_ids || %{}, task_id)
+  end
+
+  defp mark_task_cancelled(state, task_id) when is_binary(task_id) and task_id != "" do
+    # Newest-first FIFO; drop oldest beyond the cap so cancellation state stays bounded.
+    order =
+      [task_id | Enum.reject(state.cancelled_task_id_order || [], &(&1 == task_id))]
+      |> Enum.take(@max_cancelled_task_ids)
+
+    cancelled = Map.new(order, &{&1, true})
+    %{state | cancelled_task_ids: cancelled, cancelled_task_id_order: order}
+  end
+
+  defp mark_task_cancelled(state, _task_id), do: state
+
+  defp purge_queued_task(state, task_id) when is_binary(task_id) do
+    {kept, removed} =
+      Enum.split_with(state.turn_queue || [], fn {user_message, _from} ->
+        user_message_task_id(user_message) != task_id
+      end)
+
+    Enum.each(removed, fn {_msg, from} -> safe_reply(from, {:error, :cancelled}) end)
+    %{state | turn_queue: kept}
+  end
+
+  defp do_cancel_active_turn(state, reason) do
+    new_state = transition_phase(state, :processing, :complete, :idle)
+    finalize_partial(state, :cancelled, reason)
+    reply_turn(state, {:error, :cancelled})
+
+    if state.turn_task_ref, do: Process.demonitor(state.turn_task_ref, [:flush])
+    if state.turn_caller_ref, do: Process.demonitor(state.turn_caller_ref, [:flush])
+    if is_pid(state.turn_task_pid), do: Process.exit(state.turn_task_pid, :kill)
+
+    # Cancelling the active turn frees the mind — let queued turns proceed.
+    send(self(), :drain_queue)
+    reset_turn(new_state)
+  end
+
+  # Pop the next non-tombstoned queue entry for steering. Cancel-reply and skip
+  # any leading entries whose task was cancelled while queued.
+  defp pop_steering_message(%{turn_queue: []} = state), do: {:none, state}
+
+  defp pop_steering_message(%{turn_queue: [{user_message, caller_from} | rest]} = state) do
+    state = %{state | turn_queue: rest}
+
+    if task_cancelled?(state, user_message_task_id(user_message)) do
+      safe_reply(caller_from, {:error, :cancelled})
+      pop_steering_message(state)
+    else
+      new_state = %{state | steer_froms: [caller_from | state.steer_froms]}
+      {:ok, user_message.content, new_state}
+    end
+  end
 
   # Engine consumption of the preprocessor: override the turn's tool list based on
   # tier / retrieved tools. `LlmHandler.resolve_tools/3` reads "session.tools" first,
@@ -768,12 +902,21 @@ defmodule Arbor.Orchestrator.Session do
   # Drain the next queued turn once the current one has finished. Triggered as a
   # self-message from reset_and_drain/1 (so turn_in_flight is already cleared).
   # Idempotent: a no-op if a turn is somehow still in flight or the queue is empty.
+  # Skip tombstoned task turns (cancel raced ahead of drain).
   @impl true
   def handle_info(:drain_queue, %{turn_in_flight: true} = state), do: {:noreply, state}
   def handle_info(:drain_queue, %{turn_queue: []} = state), do: {:noreply, state}
 
   def handle_info(:drain_queue, %{turn_queue: [{user_message, from} | rest]} = state) do
-    start_turn(user_message, from, %{state | turn_queue: rest})
+    state = %{state | turn_queue: rest}
+
+    if task_cancelled?(state, user_message_task_id(user_message)) do
+      safe_reply(from, {:error, :cancelled})
+      send(self(), :drain_queue)
+      {:noreply, state}
+    else
+      start_turn(user_message, from, state)
+    end
   end
 
   def handle_info(

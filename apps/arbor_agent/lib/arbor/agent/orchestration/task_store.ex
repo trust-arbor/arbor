@@ -86,6 +86,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
        task_supervisor: Keyword.get(opts, :task_supervisor, @default_task_supervisor),
        runner: Keyword.get(opts, :runner, @default_runner),
        max_tasks: Keyword.get(opts, :max_tasks, @default_max_tasks),
+       # Arity-2: (agent_id, task_id) — task-scoped Session cancel bridge.
+       cancel_turn: Keyword.get(opts, :cancel_turn, &default_cancel_turn/2),
        tasks: %{},
        refs: %{}
      }}
@@ -121,7 +123,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       approval_answer_cap_id: Keyword.get(opts, :approval_answer_cap_id),
       approval_answer_security_module:
         Keyword.get(opts, :approval_answer_security_module, Arbor.Security),
-      approval_answer_revoke: Keyword.get(opts, :approval_answer_revoke)
+      approval_answer_revoke: Keyword.get(opts, :approval_answer_revoke),
+      cancel_turn: Keyword.get(opts, :cancel_turn)
     }
 
     next_state =
@@ -175,6 +178,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     case Map.fetch(state.tasks, task_id) do
       {:ok, %{state: :running} = record} ->
         now = DateTime.utc_now()
+
+        # Root cleanup: cancel the agent turn *before* killing the TaskRunner
+        # wrapper. The real work lives in Orchestrator.Session (and ACP/worktree
+        # owners under that turn). Process.exit(..., :kill) skips try/after, so
+        # propagation must happen from this surviving store process.
+        cancel_active_turn(record, state)
 
         if is_pid(record.pid) and Process.alive?(record.pid) do
           Process.exit(record.pid, :kill)
@@ -332,6 +341,46 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp maybe_revoke_completed_approval_answer_capability(record), do: record
+
+  defp cancel_active_turn(record, state) do
+    cancel_fun =
+      case Map.get(record, :cancel_turn) do
+        fun when is_function(fun, 2) -> fun
+        _ -> state.cancel_turn
+      end
+
+    if is_function(cancel_fun, 2) do
+      cancel_fun.(record.agent_id, record.task_id)
+    else
+      :ok
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  # Default: SessionManager facade → Session.cancel_task/2 (task-scoped bridge).
+  defp default_cancel_turn(agent_id, task_id)
+       when is_binary(agent_id) and agent_id != "" and is_binary(task_id) and task_id != "" do
+    session_manager =
+      Application.get_env(:arbor_agent, :session_manager, Arbor.Agent.SessionManager)
+
+    if is_atom(session_manager) and Code.ensure_loaded?(session_manager) and
+         function_exported?(session_manager, :cancel_task, 2) do
+      apply(session_manager, :cancel_task, [agent_id, task_id])
+    else
+      :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp default_cancel_turn(_agent_id, _task_id), do: :ok
 
   defp revoke_approval_answer_capability(%{approval_answer_cap_id: cap_id} = record)
        when is_binary(cap_id) and cap_id != "" do

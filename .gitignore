@@ -3,8 +3,8 @@
 attacksurface.md
 attacksurface.*.md
 
-# Dependencies
-/deps/
+# Dependencies (directory or accidental worktree symlink to parent deps)
+/deps
 
 # Build artifacts
 /_build/

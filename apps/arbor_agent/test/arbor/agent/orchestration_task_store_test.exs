@@ -119,6 +119,41 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert_receive {:revoke_approval_answer_capability, "cap_task_cancel"}
   end
 
+  test "cancel propagates agent_id and task_id to the scoped turn bridge before killing the runner",
+       %{store: store} do
+    test_pid = self()
+
+    # Production-shaped callback: SessionManager.cancel_task/2 (agent_id, task_id).
+    cancel_turn = fn agent_id, cancelled_task_id ->
+      send(test_pid, {:cancel_turn_hook, agent_id, cancelled_task_id, self()})
+      :ok
+    end
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_coding_1", "implement feature",
+               name: store,
+               test_pid: test_pid,
+               cancel_turn: cancel_turn,
+               approval_answer_cap_id: "cap_turn_cancel",
+               approval_answer_revoke: revoke_to(test_pid)
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_coding_1", "implement feature"}
+    ref = Process.monitor(runner_pid)
+
+    assert {:ok, status} = TaskStore.cancel(task_id, name: store)
+    assert status.state == :cancelled
+
+    # Hook must fire from the store process (survives :kill) with agent + task_id.
+    assert_receive {:cancel_turn_hook, "agent_coding_1", ^task_id, store_pid}
+    assert store_pid != runner_pid
+    assert Process.whereis(store) == store_pid or is_pid(store_pid)
+
+    assert_receive {:DOWN, ^ref, :process, ^runner_pid, :killed}
+    assert_receive {:revoke_approval_answer_capability, "cap_turn_cancel"}
+    assert {:error, :cancelled} = TaskStore.result(task_id, name: store)
+  end
+
   test "returns clean errors for unknown and finished task cancellation", %{store: store} do
     assert {:error, :not_found} = TaskStore.cancel("missing", name: store)
 

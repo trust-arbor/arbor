@@ -177,16 +177,19 @@ defmodule Arbor.Agent.APIAgent do
   defp gen_param(state, key), do: Map.get(state.config.generation_params, key)
 
   @impl true
-  def handle_call({:query, prompt, opts}, _from, state) do
-    # Route through Session — check SessionManager first, then BranchSupervisor
-    case find_session(state.id) do
-      {:ok, session_pid} ->
-        handle_session_query(prompt, opts, state, session_pid)
-
-      :not_found ->
-        # No session available — use direct API query
-        handle_direct_query(prompt, opts, state)
+  def handle_call({:query, prompt, opts}, {caller, _tag} = from, state)
+      when is_pid(caller) do
+    if Process.alive?(caller) do
+      handle_query(prompt, opts, from, state)
+    else
+      # GenServer.call requests already queued in this mailbox survive caller
+      # death. Do not start a cancelled async task after its TaskRunner is gone.
+      {:reply, {:error, :caller_gone}, state}
     end
+  end
+
+  def handle_call({:query, prompt, opts}, from, state) do
+    handle_query(prompt, opts, from, state)
   end
 
   def handle_call(:agent_id, _from, state) do
@@ -215,6 +218,18 @@ defmodule Arbor.Agent.APIAgent do
   def handle_call({:execute_action, action_module, params, opts}, _from, state) do
     result = execute_seed_action(state.id, action_module, params, opts)
     {:reply, result, state}
+  end
+
+  defp handle_query(prompt, opts, _from, state) do
+    # Route through Session — check SessionManager first, then BranchSupervisor
+    case find_session(state.id) do
+      {:ok, session_pid} ->
+        handle_session_query(prompt, opts, state, session_pid)
+
+      :not_found ->
+        # No session available — use direct API query
+        handle_direct_query(prompt, opts, state)
+    end
   end
 
   @impl true

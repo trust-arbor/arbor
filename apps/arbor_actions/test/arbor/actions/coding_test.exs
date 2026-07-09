@@ -919,6 +919,221 @@ defmodule Arbor.Actions.CodingTest do
       assert stderr =~ "timed out"
       assert stderr =~ "137"
     end
+
+    test "removes owned dirty worktree when the action process is cancelled", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          send(parent, {:start_session, params.cwd})
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "dirty.txt"), "uncommitted\n")
+          send(parent, {:prompt_blocked, worktree})
+
+          receive do
+            :never -> :ok
+          after
+            5_000 -> {:error, :test_timeout}
+          end
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      action_pid =
+        spawn(fn ->
+          Coding.ProduceReviewableChange.run(
+            %{
+              task: "Add dirty file",
+              repo_path: repo,
+              branch_name: "test/cancel-worktree",
+              worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+              submit_review: false,
+              skip_validation: true
+            },
+            %{action_runner: runner}
+          )
+        end)
+
+      assert_receive {:start_session, worktree_path}, 2_000
+      assert_receive {:prompt_blocked, ^worktree_path}, 2_000
+      assert File.dir?(worktree_path)
+      assert File.exists?(Path.join(worktree_path, "dirty.txt"))
+
+      # :kill models TaskStore/Session cancel — try/after cannot run.
+      Process.exit(action_pid, :kill)
+
+      assert_eventually(fn ->
+        refute File.dir?(worktree_path)
+      end)
+    end
+
+    test "does not remove a pre-registered worktree when the action process is cancelled", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/keep-existing-worktree"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+      File.mkdir_p!(worktree_base)
+
+      # Deterministic path naming mirrors ProduceReviewableChange.worktree_dir_name/1.
+      worktree_path = expected_worktree_path(worktree_base, branch)
+
+      git!(repo, ["branch", branch])
+      git!(repo, ["worktree", "add", worktree_path, branch])
+      File.write!(Path.join(worktree_path, "preexisting.txt"), "keep me\n")
+
+      # Prove the path is already registered before the action runs.
+      worktree_list = git!(repo, ["worktree", "list", "--porcelain"])
+      assert worktree_list =~ worktree_path
+
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          send(parent, {:start_session, params.cwd})
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "dirty.txt"), "uncommitted\n")
+          send(parent, {:prompt_blocked, worktree})
+
+          receive do
+            :never -> :ok
+          after
+            5_000 -> {:error, :test_timeout}
+          end
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      action_pid =
+        spawn(fn ->
+          Coding.ProduceReviewableChange.run(
+            %{
+              task: "Touch pre-existing worktree",
+              repo_path: repo,
+              branch_name: branch,
+              worktree_base_dir: worktree_base,
+              submit_review: false,
+              skip_validation: true
+            },
+            %{action_runner: runner}
+          )
+        end)
+
+      assert_receive {:start_session, ^worktree_path}, 2_000
+      assert_receive {:prompt_blocked, ^worktree_path}, 2_000
+      assert File.dir?(worktree_path)
+
+      # :kill models TaskStore/Session cancel. Not-owned path must survive.
+      Process.exit(action_pid, :kill)
+
+      # Give any mis-armed guard time to run (it must not).
+      Process.sleep(150)
+
+      assert File.dir?(worktree_path)
+      assert worktree_registered?(repo, worktree_path)
+      # Directory remains usable as a git worktree after cancel.
+      assert git!(worktree_path, ["rev-parse", "--is-inside-work-tree"]) == "true"
+      assert git!(worktree_path, ["branch", "--show-current"]) == branch
+    end
+
+    test "preserves worktree on ordinary validation failure (not cancel)", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "broken.txt"), "nope\n")
+          {:ok, %{text: "STATUS: implemented\n"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, _params, _context ->
+          {:ok, %{exit_code: 1, stdout: "", stderr: "failed\n"}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Break validation",
+                   repo_path: repo,
+                   branch_name: "test/keep-worktree-on-fail",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["false"],
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "validation_failed"
+      assert File.dir?(result.worktree_path)
+      assert File.exists?(Path.join(result.worktree_path, "broken.txt"))
+    end
+  end
+
+  defp assert_eventually(fun, attempts \\ 50)
+
+  defp assert_eventually(fun, attempts) when attempts > 0 do
+    fun.()
+  rescue
+    error in [ExUnit.AssertionError] ->
+      if attempts == 1 do
+        reraise error, __STACKTRACE__
+      else
+        Process.sleep(20)
+        assert_eventually(fun, attempts - 1)
+      end
+  end
+
+  # Mirrors ProduceReviewableChange.worktree_dir_name/1 so tests can pre-register
+  # the exact path the action will reuse.
+  defp expected_worktree_path(base_dir, branch_name) do
+    slug =
+      branch_name
+      |> String.replace(~r/[^A-Za-z0-9._-]+/, "-")
+      |> String.trim("-")
+      |> String.slice(0, 48)
+      |> case do
+        "" -> "change"
+        value -> value
+      end
+
+    hash =
+      branch_name
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode16(case: :lower)
+      |> binary_part(0, 12)
+
+    Path.join(base_dir, "arbor-coding-agent-#{slug}-#{hash}")
+  end
+
+  defp worktree_registered?(repo_root, worktree_path) do
+    git!(repo_root, ["worktree", "list", "--porcelain"])
+    |> String.contains?(worktree_path)
   end
 
   defp git!(path, args) do

@@ -69,6 +69,79 @@ defmodule Arbor.Agent.SessionManager do
   end
 
   @doc """
+  Cancel the in-flight agent turn for `agent_id`, if any.
+
+  Unscoped user-cancel bridge to `Arbor.Orchestrator.Session.cancel_turn/1`.
+  Prefer `cancel_task/2` for async orchestration cancellation so an unrelated
+  interactive turn is not torn down.
+
+  Looks up the live session pid from the public ETS table, then applies the
+  Session cancel contract (`GenServer.call(session, :cancel_turn)`).
+
+  Returns `{:error, :no_session}` when the agent has no live session, or the
+  underlying cancel result (`:ok` | `{:error, :no_turn_in_flight}`).
+  """
+  @spec cancel_turn(String.t()) :: :ok | {:error, term()}
+  def cancel_turn(agent_id) when is_binary(agent_id) do
+    with {:ok, session_pid} <- get_session(agent_id) do
+      session_mod = session_module()
+
+      if Code.ensure_loaded?(session_mod) and function_exported?(session_mod, :cancel_turn, 1) do
+        apply(session_mod, :cancel_turn, [session_pid])
+      else
+        # Fall back to the Session.cancel_turn contract directly so the ETS
+        # bridge still works when the orchestrator beam is not on the path
+        # (e.g. isolated arbor_agent tests with a fake GenServer session).
+        GenServer.call(session_pid, :cancel_turn)
+      end
+    end
+  rescue
+    e -> {:error, {:cancel_turn_failed, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:cancel_turn_exit, reason}}
+  end
+
+  def cancel_turn(_agent_id), do: {:error, :invalid_agent_id}
+
+  @doc """
+  Cancel a specific async orchestration task on the agent's session.
+
+  Bridges to `Arbor.Orchestrator.Session.cancel_task/2` (task-scoped, race-safe).
+  Passes both `agent_id` (ETS session lookup) and `task_id` so an unrelated
+  active/interactive turn is left running while matching queued/active turns
+  for `task_id` are cancelled and tombstoned.
+
+  Returns `{:error, :no_session}` when the agent has no live session, or the
+  underlying cancel result.
+  """
+  @spec cancel_task(String.t(), String.t()) :: :ok | {:error, term()}
+  def cancel_task(agent_id, task_id)
+      when is_binary(agent_id) and is_binary(task_id) and task_id != "" do
+    with {:ok, session_pid} <- get_session(agent_id) do
+      session_mod = session_module()
+
+      if Code.ensure_loaded?(session_mod) and function_exported?(session_mod, :cancel_task, 2) do
+        apply(session_mod, :cancel_task, [session_pid, task_id])
+      else
+        # Fall back to the Session.cancel_task contract directly so the ETS
+        # bridge still works when the orchestrator beam is not on the path
+        # (e.g. isolated arbor_agent tests with a fake GenServer session).
+        GenServer.call(session_pid, {:cancel_task, task_id})
+      end
+    end
+  rescue
+    e -> {:error, {:cancel_task_failed, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:cancel_task_exit, reason}}
+  end
+
+  def cancel_task(_agent_id, _task_id), do: {:error, :invalid_args}
+
+  defp session_module do
+    Application.get_env(:arbor_agent, :orchestrator_session_module, @session_module)
+  end
+
+  @doc """
   Reload DOT pipeline graphs for all active sessions.
 
   Useful when DOT files change after sessions are already running — calls
