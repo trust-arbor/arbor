@@ -44,7 +44,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
              TaskStore.dispatch("agent_1", "do work",
                name: store,
                test_pid: self(),
-               metadata: %{ticket: "A-1"}
+               metadata: %{ticket: "A-1"},
+               approval_answer_cap_id: "cap_task_1",
+               approval_answer_revoke: revoke_to(self())
              )
 
     assert_receive {:runner_started, runner_pid, "agent_1", "do work"}
@@ -70,6 +72,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       assert result.result_type == :test
       assert result.payload.ok == true
     end)
+
+    assert_receive {:revoke_approval_answer_capability, "cap_task_1"}
   end
 
   test "records pending approval tasks as waiting_approval", %{store: store} do
@@ -85,6 +89,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       assert status.waiting_on == "approval_1"
       assert {:error, {:waiting_approval, "approval_1"}} = TaskStore.result(task_id, name: store)
     end)
+
+    refute_received {:revoke_approval_answer_capability, _}
   end
 
   test "cancels a running task and keeps it cancelled after the process exits", %{store: store} do
@@ -92,7 +98,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
              TaskStore.dispatch("agent_1", "do work",
                name: store,
                test_pid: self(),
-               metadata: %{ticket: "A-1"}
+               metadata: %{ticket: "A-1"},
+               approval_answer_cap_id: "cap_task_cancel",
+               approval_answer_revoke: revoke_to(self())
              )
 
     assert_receive {:runner_started, runner_pid, "agent_1", "do work"}
@@ -108,6 +116,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert {:ok, status} = TaskStore.status(task_id, name: store)
     assert status.state == :cancelled
     assert {:error, :cancelled} = TaskStore.result(task_id, name: store)
+    assert_receive {:revoke_approval_answer_capability, "cap_task_cancel"}
   end
 
   test "returns clean errors for unknown and finished task cancellation", %{store: store} do
@@ -142,5 +151,12 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
         Process.sleep(10)
         assert_eventually(fun, attempts - 1)
       end
+  end
+
+  defp revoke_to(test_pid) do
+    fn capability_id ->
+      send(test_pid, {:revoke_approval_answer_capability, capability_id})
+      :ok
+    end
   end
 end

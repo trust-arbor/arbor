@@ -20,6 +20,7 @@ defmodule Arbor.Agent.Orchestration do
   @task_read_uri "arbor://agent/task/read"
   @task_cancel_uri "arbor://agent/task/cancel"
   @interaction_request_prefix "irq"
+  @approval_answer_cap_ttl_seconds 86_400
 
   @type approval_decision :: :approve | :deny | :rework
 
@@ -34,11 +35,26 @@ defmodule Arbor.Agent.Orchestration do
   def dispatch(agent_id, task, opts \\ []) do
     with {:ok, agent_id} <- normalize_agent_id(agent_id),
          {:ok, task} <- normalize_task(task),
+         {:ok, task_id} <- normalize_or_generate_task_id(opts),
          {:ok, caller_id} <- caller_id(opts),
          :ok <- authorize_dispatch(opts, caller_id, agent_id),
-         {:ok, task_id} <- dispatch_task(agent_id, task, opts),
-         :ok <- record_dispatch(task_id, agent_id, task, caller_id, opts) do
-      {:ok, task_id}
+         {:ok, approval_answer_cap_id} <- grant_task_approval_answer(caller_id, task_id, opts) do
+      task_opts = task_scoped_opts(opts, task_id, approval_answer_cap_id)
+
+      case dispatch_task(agent_id, task, task_opts) do
+        {:ok, ^task_id} ->
+          with :ok <- record_dispatch(task_id, agent_id, task, caller_id, opts) do
+            {:ok, task_id}
+          end
+
+        {:ok, other_task_id} ->
+          revoke_task_approval_answer(opts, approval_answer_cap_id)
+          {:error, {:task_id_mismatch, other_task_id}}
+
+        {:error, _reason} = error ->
+          revoke_task_approval_answer(opts, approval_answer_cap_id)
+          error
+      end
     end
   end
 
@@ -258,6 +274,65 @@ defmodule Arbor.Agent.Orchestration do
     do: "#{@task_cancel_uri}/#{id}"
 
   defp scoped_task_cancel_uri(_), do: nil
+
+  defp normalize_or_generate_task_id(opts) do
+    case opt(opts, :task_id) do
+      id when is_binary(id) -> normalize_task_id(id)
+      nil -> {:ok, "task_" <> Integer.to_string(System.unique_integer([:positive]))}
+      _ -> {:error, :invalid_task_id}
+    end
+  end
+
+  defp task_scoped_opts(opts, task_id, approval_answer_cap_id) do
+    opts
+    |> task_store_opts()
+    |> Keyword.put(:task_id, task_id)
+    |> Keyword.put(:approval_answer_cap_id, approval_answer_cap_id)
+    |> Keyword.put(:approval_answer_security_module, security_module(opts))
+  end
+
+  defp grant_task_approval_answer(caller_id, task_id, opts) do
+    grant_opts = [
+      principal: caller_id,
+      resource: scoped_task_answer_uri(task_id),
+      expires_at: DateTime.add(DateTime.utc_now(), @approval_answer_cap_ttl_seconds, :second),
+      constraints: %{},
+      metadata: %{
+        source: :orchestration_task_dispatch,
+        task_id: task_id
+      }
+    ]
+
+    case opts |> security_module() |> apply_if_exported(:grant, [grant_opts]) do
+      {:ok, capability} ->
+        case value(capability, :id) do
+          id when is_binary(id) and id != "" -> {:ok, id}
+          other -> {:error, {:approval_answer_grant_failed, {:missing_capability_id, other}}}
+        end
+
+      {:error, reason} ->
+        {:error, {:approval_answer_grant_failed, reason}}
+
+      :module_unavailable ->
+        {:error, {:approval_answer_grant_failed, :security_unavailable}}
+
+      other ->
+        {:error, {:approval_answer_grant_failed, other}}
+    end
+  end
+
+  defp revoke_task_approval_answer(opts, capability_id)
+       when is_binary(capability_id) and capability_id != "" do
+    opts
+    |> security_module()
+    |> apply_if_exported(:revoke, [capability_id])
+    |> case do
+      :ok -> :ok
+      _ -> :ok
+    end
+  end
+
+  defp revoke_task_approval_answer(_opts, _capability_id), do: :ok
 
   defp record_dispatch(task_id, agent_id, task, caller_id, opts) do
     data = [
@@ -546,6 +621,7 @@ defmodule Arbor.Agent.Orchestration do
 
   defp answer_authorization_uris(%PendingApproval{} = approval) do
     [
+      approval |> approval_task_id() |> scoped_task_answer_uri(),
       scoped_answer_uri(approval.principal_id),
       scoped_answer_uri(approval.agent_id),
       @approval_answer_uri
@@ -558,6 +634,33 @@ defmodule Arbor.Agent.Orchestration do
     do: "#{@approval_answer_uri}/#{id}"
 
   defp scoped_answer_uri(_), do: nil
+
+  defp scoped_task_answer_uri(task_id) when is_binary(task_id) and task_id != "",
+    do: "#{@approval_answer_uri}/task/#{task_id}"
+
+  defp scoped_task_answer_uri(_), do: nil
+
+  defp approval_task_id(%PendingApproval{metadata: metadata, context: context}) do
+    Enum.find_value([metadata, context], &task_id_from_approval_map/1)
+  end
+
+  defp task_id_from_approval_map(map) when is_map(map) do
+    value(map, :task_id) ||
+      nested_value(map, [:provenance, :task_id]) ||
+      nested_value(map, [:approval_context, :task_id]) ||
+      nested_value(map, [:approval_context, :provenance, :task_id])
+  end
+
+  defp task_id_from_approval_map(_), do: nil
+
+  defp nested_value(term, []), do: term
+
+  defp nested_value(term, [key | rest]) do
+    case value(term, key) do
+      nil -> nil
+      next -> nested_value(next, rest)
+    end
+  end
 
   defp authorize_caller(opts, caller_id, resource_uri, action) do
     case opts

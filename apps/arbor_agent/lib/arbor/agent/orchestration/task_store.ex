@@ -54,6 +54,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     * `:runner` - module implementing `run/3`
     * `:task_id` - explicit id, for deterministic tests
     * `:metadata` - caller metadata copied into the task record
+    * `:approval_answer_cap_id` - private temporary approval-answer capability id
   """
   @spec dispatch(String.t(), term(), keyword() | map()) :: {:ok, task_id()} | {:error, term()}
   def dispatch(agent_id, task, opts \\ []) do
@@ -116,7 +117,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       started_at: now,
       updated_at: now,
       completed_at: nil,
-      metadata: metadata(opts)
+      metadata: metadata(opts),
+      approval_answer_cap_id: Keyword.get(opts, :approval_answer_cap_id),
+      approval_answer_security_module:
+        Keyword.get(opts, :approval_answer_security_module, Arbor.Security),
+      approval_answer_revoke: Keyword.get(opts, :approval_answer_revoke)
     }
 
     next_state =
@@ -175,15 +180,17 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           Process.exit(record.pid, :kill)
         end
 
-        cancelled_record = %{
+        cancelled_record =
           record
-          | state: :cancelled,
+          |> Map.merge(%{
+            state: :cancelled,
             current_step: "cancelled",
             waiting_on: nil,
             error: nil,
             updated_at: now,
             completed_at: now
-        }
+          })
+          |> revoke_approval_answer_capability()
 
         next_state =
           state
@@ -231,14 +238,15 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
               if record.state in [:done, :failed, :waiting_approval, :cancelled] do
                 record
               else
-                %{
-                  record
-                  | state: :failed,
-                    current_step: "failed",
-                    error: reason,
-                    updated_at: now,
-                    completed_at: now
-                }
+                record
+                |> Map.merge(%{
+                  state: :failed,
+                  current_step: "failed",
+                  error: reason,
+                  updated_at: now,
+                  completed_at: now
+                })
+                |> revoke_approval_answer_capability()
               end
           end)
 
@@ -266,6 +274,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             record
             |> Map.merge(completion_fields(result, now))
             |> Map.put(:updated_at, now)
+            |> maybe_revoke_completed_approval_answer_capability()
           end
       end)
 
@@ -316,6 +325,49 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp normalize_result(result), do: TaskArtifacts.normalize(result)
+
+  defp maybe_revoke_completed_approval_answer_capability(%{state: state} = record)
+       when state in [:done, :failed, :cancelled] do
+    revoke_approval_answer_capability(record)
+  end
+
+  defp maybe_revoke_completed_approval_answer_capability(record), do: record
+
+  defp revoke_approval_answer_capability(%{approval_answer_cap_id: cap_id} = record)
+       when is_binary(cap_id) and cap_id != "" do
+    record
+    |> revoke_approval_answer_capability(cap_id)
+    |> Map.put(:approval_answer_cap_id, nil)
+  end
+
+  defp revoke_approval_answer_capability(record), do: record
+
+  defp revoke_approval_answer_capability(%{approval_answer_revoke: revoke_fun} = record, cap_id)
+       when is_function(revoke_fun, 1) do
+    revoke_fun.(cap_id)
+    record
+  rescue
+    _ -> record
+  catch
+    :exit, _ -> record
+  end
+
+  defp revoke_approval_answer_capability(
+         %{approval_answer_security_module: module} = record,
+         cap_id
+       ) do
+    if is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :revoke, 1) do
+      apply(module, :revoke, [cap_id])
+    else
+      :ok
+    end
+
+    record
+  rescue
+    _ -> record
+  catch
+    :exit, _ -> record
+  end
 
   defp status_view(record) do
     %{

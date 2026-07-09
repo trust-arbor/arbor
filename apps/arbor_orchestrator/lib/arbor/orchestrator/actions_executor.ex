@@ -40,6 +40,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     agent_id = Keyword.get(opts, :agent_id, "system")
     signed_request = Keyword.get(opts, :signed_request)
     signer = Keyword.get(opts, :signer)
+    task_id = Keyword.get(opts, :task_id)
     workdir = normalize_workdir(workdir)
 
     run_action(fn ->
@@ -92,6 +93,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           # chokepoint reads no taint and every action passes (F1).
           context =
             %{auth_context: auth_context}
+            |> maybe_put_context(:task_id, task_id)
             |> maybe_put_file_workspace(action_module, workdir)
             |> then(fn c ->
               if signed_request, do: Map.put(c, :signed_request, signed_request), else: c
@@ -649,6 +651,10 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   defp maybe_put_file_workspace(context, _action_module, _workdir), do: context
+
+  defp maybe_put_context(context, _key, nil), do: context
+  defp maybe_put_context(context, _key, ""), do: context
+  defp maybe_put_context(context, key, value), do: Map.put(context, key, value)
 
   @doc false
   def format_result(result) when is_binary(result), do: result

@@ -64,6 +64,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
 
       action_args = build_action_args(node.id, node.attrs, context)
       workdir = Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
+      task_id = Context.get(context, "session.task_id")
 
       output_prefix = Map.get(node.attrs, "output_prefix")
 
@@ -80,6 +81,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
         case executor.execute(action_name, action_args, workdir,
                agent_id: agent_id,
                signer: signer,
+               task_id: task_id,
                taint: input_taint
              ) do
           {:ok, result} ->

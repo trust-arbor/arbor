@@ -539,7 +539,12 @@ defmodule Arbor.Agent.Manager do
 
     case agent_result do
       {:ok, _agent_id, _pid, metadata} ->
-        safe_emit(:chat_message, %{role: :user, content: input, sender: sender})
+        safe_emit(:chat_message, %{
+          role: :user,
+          content: chat_signal_content(input),
+          sender: sender
+        })
+
         dispatch_query_response(metadata, input, opts)
 
       :not_found ->
@@ -770,6 +775,9 @@ defmodule Arbor.Agent.Manager do
       {:error, :agent_host_not_found}
     end
   end
+
+  defp chat_signal_content(%Arbor.Contracts.Session.UserMessage{content: content}), do: content
+  defp chat_signal_content(input), do: input
 
   # Phase 3: runtime axis replaces the :cli/:api backend toggle. The
   # legacy :acp provider mapping (old shape) goes through APIAgent →

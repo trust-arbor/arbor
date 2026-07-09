@@ -67,6 +67,7 @@ defmodule Arbor.Orchestrator.SessionTest do
   end
 
   alias Arbor.Orchestrator
+  alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Engine.Context
 
@@ -1254,6 +1255,33 @@ defmodule Arbor.Orchestrator.SessionTest do
 
     # Heartbeat scheduling test removed — heartbeats are now managed by
     # Arbor.Orchestrator.HeartbeatService. See heartbeat_service_test.exs.
+
+    test "typed user message task id enters the engine context" do
+      turn_dot = """
+      digraph Turn {
+        graph [goal="Echo task id"]
+        start [shape=Mdiamond]
+        echo_task [type="transform", transform="identity", source_key="session.task_id", output_key="session.response"]
+        done [shape=Msquare]
+
+        start -> echo_task -> done
+      }
+      """
+
+      {pid, tmp_dir} = start_session(turn_dot: turn_dot)
+
+      on_exit(fn ->
+        if Process.alive?(pid), do: GenServer.stop(pid)
+        File.rm_rf(tmp_dir)
+      end)
+
+      message = %{
+        UserMessage.from_cli("hello", "Orchestration")
+        | transport_metadata: %{task_id: "task_1"}
+      }
+
+      assert {:ok, %{content: "task_1"}} = Arbor.Orchestrator.Session.send_message(pid, message)
+    end
 
     @tag :spike
     test "concurrent turn rejection" do

@@ -93,6 +93,16 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
       assert_received {:stub_execute, _name, %{"command" => "ls"}, _workdir, exec_opts}
       assert Keyword.get(exec_opts, :taint) == nil
     end
+
+    test "session task id is threaded into action executor opts" do
+      context = %Context{values: %{"session.task_id" => "task_1"}}
+      node = action_node(%{"action" => "shell.execute", "arg.command" => "ls"})
+
+      ExecHandler.execute(node, context, graph(), opts())
+
+      assert_received {:stub_execute, _name, _args, _workdir, exec_opts}
+      assert Keyword.get(exec_opts, :task_id) == "task_1"
+    end
   end
 
   describe "Phase 1 ingress — output provenance is stamped on the node outcome" do

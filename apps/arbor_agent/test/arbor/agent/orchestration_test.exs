@@ -10,6 +10,16 @@ defmodule Arbor.Agent.OrchestrationTest do
       send(self(), {:authorize, actor, resource_uri, action, opts})
       Process.get({__MODULE__, :result}, {:ok, :authorized})
     end
+
+    def grant(opts) do
+      send(self(), {:grant, opts})
+      Process.get({__MODULE__, :grant_result}, {:ok, %{id: "cap_task_answer"}})
+    end
+
+    def revoke(capability_id) do
+      send(self(), {:revoke, capability_id})
+      Process.get({__MODULE__, :revoke_result}, :ok)
+    end
   end
 
   defmodule FakeScopedSecurity do
@@ -18,6 +28,18 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       case resource_uri do
         "arbor://approval/answer/agent_1" -> {:ok, :authorized}
+        "arbor://approval/read" -> {:ok, :authorized}
+        _ -> {:error, :no_capability}
+      end
+    end
+  end
+
+  defmodule FakeTaskScopedSecurity do
+    def authorize(actor, resource_uri, action, opts) do
+      send(self(), {:authorize, actor, resource_uri, action, opts})
+
+      case resource_uri do
+        "arbor://approval/answer/task/task_1" -> {:ok, :authorized}
         "arbor://approval/read" -> {:ok, :authorized}
         _ -> {:error, :no_capability}
       end
@@ -59,7 +81,7 @@ defmodule Arbor.Agent.OrchestrationTest do
   defmodule FakeTaskStore do
     def dispatch(agent_id, task, opts) do
       send(self(), {:task_dispatch, agent_id, task, opts})
-      Process.get({__MODULE__, :dispatch_result}, {:ok, "task_1"})
+      Process.get({__MODULE__, :dispatch_result}, {:ok, opts[:task_id] || "task_1"})
     end
 
     def status(task_id, opts) do
@@ -127,6 +149,8 @@ defmodule Arbor.Agent.OrchestrationTest do
   setup do
     for key <- [
           {FakeSecurity, :result},
+          {FakeSecurity, :grant_result},
+          {FakeSecurity, :revoke_result},
           {FakeConsensus, :pending},
           {FakeConsensus, :answer_result},
           {FakeInteractionRouter, :pending},
@@ -147,6 +171,7 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert {:ok, "task_1"} =
                Orchestration.dispatch("agent_1", "write a patch",
                  caller_id: "human_1",
+                 task_id: "task_1",
                  metadata: %{ticket: "A-1"},
                  task_store: FakeTaskStore,
                  security_module: FakeSecurity,
@@ -156,8 +181,17 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert_received {:authorize, "human_1", "arbor://agent/dispatch/agent_1", :execute,
                        [verify_identity: false]}
 
+      assert_received {:grant, grant_opts}
+      assert grant_opts[:principal] == "human_1"
+      assert grant_opts[:resource] == "arbor://approval/answer/task/task_1"
+      assert grant_opts[:constraints] == %{}
+      assert grant_opts[:metadata] == %{source: :orchestration_task_dispatch, task_id: "task_1"}
+
       assert_received {:task_dispatch, "agent_1", "write a patch", opts}
+      assert opts[:task_id] == "task_1"
       assert opts[:metadata] == %{ticket: "A-1"}
+      assert opts[:approval_answer_cap_id] == "cap_task_answer"
+      assert opts[:approval_answer_security_module] == FakeSecurity
 
       assert_received {:audit_dispatched, "human_1", "task_1", "agent_1", audit_opts}
       assert audit_opts[:metadata] == %{ticket: "A-1"}
@@ -176,6 +210,42 @@ defmodule Arbor.Agent.OrchestrationTest do
                )
 
       refute_received {:task_dispatch, _, _, _}
+      refute_received {:audit_dispatched, _, _, _, _}
+    end
+
+    test "fails before starting the task when the task approval-answer grant fails" do
+      Process.put({FakeSecurity, :grant_result}, {:error, :store_down})
+
+      assert {:error, {:approval_answer_grant_failed, :store_down}} =
+               Orchestration.dispatch("agent_1", "write a patch",
+                 caller_id: "human_1",
+                 task_id: "task_1",
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity,
+                 audit_module: FakeAudit
+               )
+
+      assert_received {:grant, grant_opts}
+      assert grant_opts[:resource] == "arbor://approval/answer/task/task_1"
+      refute_received {:task_dispatch, _, _, _}
+      refute_received {:audit_dispatched, _, _, _, _}
+    end
+
+    test "revokes the task approval-answer grant when task dispatch fails" do
+      Process.put({FakeTaskStore, :dispatch_result}, {:error, :store_down})
+
+      assert {:error, :store_down} =
+               Orchestration.dispatch("agent_1", "write a patch",
+                 caller_id: "human_1",
+                 task_id: "task_1",
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity,
+                 audit_module: FakeAudit
+               )
+
+      assert_received {:grant, grant_opts}
+      assert grant_opts[:resource] == "arbor://approval/answer/task/task_1"
+      assert_received {:revoke, "cap_task_answer"}
       refute_received {:audit_dispatched, _, _, _, _}
     end
   end
@@ -425,6 +495,60 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert_received {:interaction_respond, "irq_1", :approved, _metadata}
     end
 
+    test "accepts task-scoped approval-answer capability for matching approval provenance" do
+      Process.put(
+        {FakeInteractionRouter, :pending},
+        [
+          interaction_request("irq_1", "agent_1", "human_1", "arbor://shell/exec/git",
+            metadata: %{
+              principal_id: "agent_1",
+              approval_context: %{provenance: %{task_id: "task_1"}}
+            }
+          )
+        ]
+      )
+
+      assert :ok =
+               Orchestration.answer_approval("irq_1", :approve,
+                 caller_id: "human_1",
+                 consensus_module: FakeConsensus,
+                 interaction_router: FakeInteractionRouter,
+                 security_module: FakeTaskScopedSecurity,
+                 audit_module: FakeAudit
+               )
+
+      assert_received {:authorize, "human_1", "arbor://approval/answer/task/task_1", :execute,
+                       [verify_identity: false]}
+
+      assert_received {:interaction_respond, "irq_1", :approved, _metadata}
+    end
+
+    test "does not allow task-scoped approval-answer capability for another task" do
+      Process.put(
+        {FakeInteractionRouter, :pending},
+        [
+          interaction_request("irq_1", "agent_1", "human_1", "arbor://shell/exec/git",
+            metadata: %{
+              principal_id: "agent_1",
+              approval_context: %{provenance: %{task_id: "task_2"}}
+            }
+          )
+        ]
+      )
+
+      assert {:error, {:unauthorized, :approval_answer_required}} =
+               Orchestration.answer_approval("irq_1", :approve,
+                 caller_id: "human_1",
+                 consensus_module: FakeConsensus,
+                 interaction_router: FakeInteractionRouter,
+                 security_module: FakeTaskScopedSecurity,
+                 audit_module: FakeAudit
+               )
+
+      refute_received {:interaction_respond, _, _, _}
+      refute_received {:audit_answered, _, _, _, _, _}
+    end
+
     test "denies unauthorized callers before resolving the backend request" do
       Process.put({FakeSecurity, :result}, {:error, :no_capability})
 
@@ -487,7 +611,9 @@ defmodule Arbor.Agent.OrchestrationTest do
     }
   end
 
-  defp interaction_request(id, agent_id, user_id, resource_uri) do
+  defp interaction_request(id, agent_id, user_id, resource_uri, opts \\ []) do
+    metadata = Keyword.get(opts, :metadata, %{principal_id: agent_id})
+
     %{
       request_id: id,
       kind: :approval,
@@ -495,7 +621,7 @@ defmodule Arbor.Agent.OrchestrationTest do
       user_id: user_id,
       description: "Authorization request for #{resource_uri}",
       resource_uri: resource_uri,
-      metadata: %{principal_id: agent_id},
+      metadata: metadata,
       submitted_at: DateTime.utc_now()
     }
   end

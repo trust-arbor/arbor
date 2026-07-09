@@ -11,6 +11,7 @@ defmodule Arbor.Agent.Orchestration.TaskRunner do
   @type task :: String.t() | map()
 
   alias Arbor.Agent.Orchestration.TaskArtifacts
+  alias Arbor.Contracts.Session.UserMessage
 
   @doc "Run a task against an agent and return a structured result."
   @spec run(String.t(), task(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -18,12 +19,14 @@ defmodule Arbor.Agent.Orchestration.TaskRunner do
     with {:ok, input} <- task_input(task) do
       manager = Keyword.get(opts, :manager_module, Arbor.Agent.Manager)
       sender = Keyword.get(opts, :sender, @default_sender)
+      input_message = task_input_message(input, sender, opts)
 
       chat_opts =
         [agent_id: agent_id]
         |> maybe_put(:timeout, Keyword.get(opts, :timeout))
+        |> maybe_put(:task_id, Keyword.get(opts, :task_id))
 
-      case call_manager(manager, input, sender, chat_opts) do
+      case call_manager(manager, input_message, sender, chat_opts) do
         {:ok, result} -> {:ok, TaskArtifacts.normalize(result)}
         {:error, reason} -> {:error, reason}
         other -> {:error, {:unexpected_runner_result, other}}
@@ -55,6 +58,19 @@ defmodule Arbor.Agent.Orchestration.TaskRunner do
   end
 
   defp task_input(_task), do: {:error, :invalid_task}
+
+  defp task_input_message(input, sender, opts) do
+    case Keyword.get(opts, :task_id) do
+      task_id when is_binary(task_id) and task_id != "" ->
+        %{
+          UserMessage.from_cli(input, sender)
+          | transport_metadata: %{task_id: task_id}
+        }
+
+      _ ->
+        input
+    end
+  end
 
   defp call_manager(manager, input, sender, chat_opts) do
     if function_exported?(manager, :chat_response, 3) do

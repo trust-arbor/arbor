@@ -3,6 +3,7 @@ defmodule Arbor.Agent.OrchestrationTaskRunnerTest do
   @moduletag :fast
 
   alias Arbor.Agent.Orchestration.TaskRunner
+  alias Arbor.Contracts.Session.UserMessage
 
   defmodule FakeStructuredManager do
     def chat_response(input, sender, opts) do
@@ -73,5 +74,22 @@ defmodule Arbor.Agent.OrchestrationTaskRunnerTest do
     assert opts[:agent_id] == "agent_1"
     assert result.result_type == :chat
     assert result.payload.text == "plain response"
+  end
+
+  test "passes task id through typed user message metadata" do
+    assert {:ok, result} =
+             TaskRunner.run("agent_1", "write a patch",
+               manager_module: FakeStructuredManager,
+               task_id: "task_1"
+             )
+
+    assert_received {:chat_response, %UserMessage{} = message, "Orchestration", opts}
+    assert message.content == "write a patch"
+    assert message.sender == "Orchestration"
+    assert message.transport == :cli
+    assert message.transport_metadata == %{task_id: "task_1"}
+    assert opts[:agent_id] == "agent_1"
+    assert opts[:task_id] == "task_1"
+    assert result.result_type == :coding_change
   end
 end

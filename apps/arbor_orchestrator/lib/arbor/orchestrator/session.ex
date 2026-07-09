@@ -652,7 +652,10 @@ defmodule Arbor.Orchestrator.Session do
     # The engine still receives the bare content string — only the persistence
     # path needs the typed envelope, and that's threaded via the {:turn_result,
     # user_message, result} tuple below.
-    values = Builders.build_turn_values(state, user_message.content)
+    values =
+      state
+      |> Builders.build_turn_values(user_message.content)
+      |> maybe_put_user_message_task_id(user_message)
 
     # Pre-turn preprocessor (disabled by default, fails open). When enabled it
     # attaches enrichment under "session.preprocessor.*". See
@@ -728,6 +731,23 @@ defmodule Arbor.Orchestrator.Session do
   rescue
     _ -> values
   end
+
+  defp maybe_put_user_message_task_id(values, %Arbor.Contracts.Session.UserMessage{
+         transport_metadata: metadata
+       }) do
+    case metadata_value(metadata, :task_id) do
+      task_id when is_binary(task_id) and task_id != "" ->
+        Map.put(values, "session.task_id", task_id)
+
+      _ ->
+        values
+    end
+  end
+
+  defp metadata_value(map, key) when is_map(map),
+    do: Map.get(map, key, Map.get(map, to_string(key)))
+
+  defp metadata_value(_map, _key), do: nil
 
   # Engine consumption of the preprocessor: override the turn's tool list based on
   # tier / retrieved tools. `LlmHandler.resolve_tools/3` reads "session.tools" first,
