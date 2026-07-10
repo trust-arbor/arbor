@@ -28,6 +28,12 @@ defmodule Arbor.Agent.Config do
   to concrete TaskExecutor modules in the umbrella `config/config.exs`. This
   library must not hard-depend on higher-level executor modules; resolve them
   only via `task_executors` configuration.
+
+  ## Coding executor route (operator-only)
+
+  The closed selector `ARBOR_CODING_EXECUTOR=pipeline|legacy` is evaluated at
+  config load (`config/runtime.exs`). Default is `pipeline`. Invalid values
+  fail config evaluation. Task payloads never select this route.
   """
 
   @app :arbor_agent
@@ -35,6 +41,56 @@ defmodule Arbor.Agent.Config do
   # Best-effort bound for optional task_status/2 and cancel_task/2 callbacks.
   # Short on purpose: hung executors must not freeze status or cancellation.
   @default_executor_callback_timeout_ms 250
+  @coding_executor_modes MapSet.new(["pipeline", "legacy"])
+
+  @doc "Return the operator-selected coding executor mode."
+  @spec coding_executor_mode() :: :pipeline | :legacy
+  def coding_executor_mode do
+    Application.get_env(@app, :coding_executor_mode, :pipeline)
+  end
+
+  @doc """
+  Parse the closed operator-only coding-executor mode.
+
+  Accepts `nil` (default `pipeline`), `"pipeline"`, or `"legacy"`. Any other
+  value is invalid and must fail config evaluation — task data must never
+  select this route.
+  """
+  @spec coding_executor_mode(term()) ::
+          {:ok, :pipeline | :legacy} | {:error, {:invalid_coding_executor, term()}}
+  def coding_executor_mode(nil), do: {:ok, :pipeline}
+
+  def coding_executor_mode(value) when is_binary(value) do
+    case String.trim(value) do
+      "pipeline" -> {:ok, :pipeline}
+      "legacy" -> {:ok, :legacy}
+      other -> {:error, {:invalid_coding_executor, other}}
+    end
+  end
+
+  def coding_executor_mode(other), do: {:error, {:invalid_coding_executor, other}}
+
+  @doc """
+  Raise when `value` is not a closed coding-executor mode.
+
+  Used by root `config/runtime.exs` so invalid `ARBOR_CODING_EXECUTOR` values
+  fail startup/config evaluation.
+  """
+  @spec require_coding_executor_mode!(term()) :: :pipeline | :legacy
+  def require_coding_executor_mode!(value) do
+    case coding_executor_mode(value) do
+      {:ok, mode} ->
+        mode
+
+      {:error, {:invalid_coding_executor, invalid}} ->
+        raise """
+        environment variable ARBOR_CODING_EXECUTOR must be one of: pipeline, legacy.
+        Got: #{inspect(invalid)}
+        Allowed: #{@coding_executor_modes |> MapSet.to_list() |> Enum.sort() |> Enum.join(", ")}
+        Task payloads cannot select the coding executor route.
+        """
+    end
+  end
 
   @doc """
   Default executor used for plain string tasks and legacy maps without `kind`.

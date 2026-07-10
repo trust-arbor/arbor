@@ -61,6 +61,21 @@ if roots = parse_coding_roots.("ARBOR_CODING_WORKTREE_ROOTS") do
   config :arbor_orchestrator, coding_worktree_roots: roots
 end
 
+# Operator-only coding executor route. Task payloads never select this.
+coding_executor_mode =
+  System.get_env("ARBOR_CODING_EXECUTOR")
+  |> Arbor.Agent.Config.require_coding_executor_mode!()
+
+coding_executor =
+  case coding_executor_mode do
+    :pipeline -> Arbor.Orchestrator.CodingTaskExecutor
+    :legacy -> Arbor.Agent.Orchestration.LegacyCodingTaskExecutor
+  end
+
+config :arbor_agent,
+  coding_executor_mode: coding_executor_mode,
+  task_executors: %{"coding_change" => coding_executor}
+
 # ============================================================================
 # Dashboard secret key base (production)
 # ============================================================================
