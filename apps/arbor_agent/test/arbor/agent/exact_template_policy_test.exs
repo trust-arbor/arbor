@@ -2,6 +2,7 @@ defmodule Arbor.Agent.ExactTemplatePolicyTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Agent.{ExactTemplatePolicy, TemplateStore}
+  alias Arbor.Common.SafePath
 
   @moduletag :fast
 
@@ -23,15 +24,17 @@ defmodule Arbor.Agent.ExactTemplatePolicyTest do
     assert {:ok, envelope} =
              ExactTemplatePolicy.build("pipeline_architect", data, repo_root: link_root)
 
+    assert {:ok, expected_root} = SafePath.resolve_real(actual_root)
+
     snapshot = ExactTemplatePolicy.snapshot(envelope)
     metadata = ExactTemplatePolicy.template_metadata(snapshot)
-    uri_root = String.trim_leading(actual_root, "/")
+    uri_root = String.trim_leading(expected_root, "/")
 
     assert metadata["provider"] == "openai_oauth"
     assert metadata["model"] == "gpt-5.5"
     assert metadata["context_management"] == "heuristic"
     assert metadata["category"] == "specialized_agent"
-    assert snapshot["repo_root"] == actual_root
+    assert snapshot["repo_root"] == expected_root
 
     assert Enum.map(ExactTemplatePolicy.capabilities(snapshot), & &1["resource"]) == [
              "arbor://fs/list",

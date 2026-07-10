@@ -261,8 +261,9 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                ])
 
       original_cwd = File.cwd!()
-      File.cd!(Path.join(original_cwd, "apps"))
+      umbrella_root = umbrella_root_from(__DIR__)
       on_exit(fn -> File.cd!(original_cwd) end)
+      File.cd!(Path.join(umbrella_root, "apps"))
 
       assert {:ok, _supervisor} =
                Lifecycle.start(agent_id,
@@ -589,6 +590,21 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
     (root || cwd)
     |> String.trim_trailing("/")
+  end
+
+  defp umbrella_root_from(path) do
+    expanded = Path.expand(path)
+
+    cond do
+      File.exists?(Path.join(expanded, "mix.exs")) and File.dir?(Path.join(expanded, "apps")) ->
+        expanded
+
+      Path.dirname(expanded) == expanded ->
+        raise "could not locate umbrella root from #{path}"
+
+      true ->
+        umbrella_root_from(Path.dirname(expanded))
+    end
   end
 
   defp tmp_workspace(template) do
