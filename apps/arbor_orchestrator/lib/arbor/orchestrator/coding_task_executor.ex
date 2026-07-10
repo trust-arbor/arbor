@@ -23,7 +23,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   non-JSON values are rejected (not stringified). Unknown context keys are
   rejected. Optional context fields are type-checked: `task_id` / `caller_id`
   nonblank strings, `timeout` a positive integer when present, `metadata` a
-  JSON object when present.
+  JSON object when present. Each task receives an isolated, path-safe Engine
+  logs directory. A supplied `timeout` is forwarded to Engine handlers and
+  bounds the complete runner invocation.
   """
 
   @behaviour Arbor.Contracts.Agent.TaskExecutor
@@ -508,21 +510,24 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       |> maybe_put_session_caller_id(caller_id)
       |> maybe_put_session_metadata(Map.get(exec_ctx, :metadata))
 
-    opts = [
-      authorization: true,
-      agent_id: agent_id,
-      task_id: task_id,
-      run_id: task_id,
-      pipeline_id: task_id,
-      signer: signer,
-      authorizer: build_authorizer(agent_id, signer),
-      # Trusted checkpoint HMAC material — Engine opt only, never context.
-      identity_private_key: private_key,
-      initial_values: initial_values,
-      workdir: repo_path,
-      spawning_pid: self(),
-      resumable: true
-    ]
+    opts =
+      [
+        authorization: true,
+        agent_id: agent_id,
+        task_id: task_id,
+        run_id: task_id,
+        pipeline_id: task_id,
+        signer: signer,
+        authorizer: build_authorizer(agent_id, signer),
+        # Trusted checkpoint HMAC material — Engine opt only, never context.
+        identity_private_key: private_key,
+        initial_values: initial_values,
+        logs_root: task_logs_root(task_id),
+        workdir: repo_path,
+        spawning_pid: self(),
+        resumable: true
+      ]
+      |> maybe_put_timeout(Map.get(exec_ctx, :timeout))
 
     # Authenticated caller is non-authority provenance only; does not replace
     # agent_id or signer.
@@ -548,6 +553,20 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp maybe_put_session_metadata(values, _), do: values
+
+  defp maybe_put_timeout(opts, timeout) when is_integer(timeout) and timeout > 0 do
+    Keyword.put(opts, :timeout, timeout)
+  end
+
+  defp maybe_put_timeout(opts, _), do: opts
+
+  defp task_logs_root(task_id) do
+    digest =
+      :crypto.hash(:sha256, task_id)
+      |> Base.encode16(case: :lower)
+
+    Path.join(Config.coding_pipeline_logs_root(), "task-" <> digest)
+  end
 
   defp build_authorizer(agent_id, signer) do
     security = Config.security_module()
@@ -606,11 +625,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         {:error, :coding_pipeline_runner_unavailable}
 
       function_exported?(runner, :run_file, 2) ->
-        runner.run_file(graph_path, opts)
+        invoke_with_timeout(fn -> runner.run_file(graph_path, opts) end, opts)
 
       function_exported?(runner, :run, 2) ->
         # Test doubles may implement run/2 with path + opts.
-        runner.run(graph_path, opts)
+        invoke_with_timeout(fn -> runner.run(graph_path, opts) end, opts)
 
       true ->
         {:error, :coding_pipeline_runner_unavailable}
@@ -619,6 +638,42 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     e -> {:error, {:pipeline_run_error, Exception.message(e)}}
   catch
     :exit, reason -> {:error, {:pipeline_run_exit, reason}}
+  end
+
+  defp invoke_with_timeout(fun, opts) when is_function(fun, 0) do
+    case Keyword.fetch(opts, :timeout) do
+      :error ->
+        fun.()
+
+      {:ok, timeout} ->
+        # The link is intentional: TaskStore cancellation kills this owner,
+        # which must also terminate the Engine process and its owned resources.
+        task = Task.async(fn -> capture_runner_result(fun) end)
+
+        case Task.yield(task, timeout) do
+          {:ok, {:ok, result}} ->
+            result
+
+          {:ok, {:error, reason}} ->
+            {:error, reason}
+
+          {:exit, reason} ->
+            {:error, {:pipeline_run_exit, reason}}
+
+          nil ->
+            _ = Task.shutdown(task, :brutal_kill)
+            {:error, {:pipeline_timeout, timeout}}
+        end
+    end
+  end
+
+  defp capture_runner_result(fun) do
+    {:ok, fun.()}
+  rescue
+    e -> {:error, {:pipeline_run_error, Exception.message(e)}}
+  catch
+    :exit, reason -> {:error, {:pipeline_run_exit, reason}}
+    kind, reason -> {:error, {:pipeline_run_throw, {kind, reason}}}
   end
 
   # ===========================================================================

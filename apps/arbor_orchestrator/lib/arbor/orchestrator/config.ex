@@ -283,6 +283,27 @@ defmodule Arbor.Orchestrator.Config do
   end
 
   @doc """
+  Base directory for coding-task pipeline manifests, status, and checkpoints.
+
+  `Arbor.Orchestrator.CodingTaskExecutor` creates a deterministic, path-safe
+  child directory for each task. Defaults to a dedicated directory under the
+  system temporary directory.
+  """
+  @spec coding_pipeline_logs_root() :: String.t()
+  def coding_pipeline_logs_root do
+    case Application.get_env(@app, :coding_pipeline_logs_root) do
+      path when is_binary(path) ->
+        case String.trim(path) do
+          "" -> default_coding_pipeline_logs_root()
+          configured -> Path.expand(configured)
+        end
+
+      _ ->
+        default_coding_pipeline_logs_root()
+    end
+  end
+
+  @doc """
   Facade used for pipeline progress/cancel bookkeeping (`get/1`,
   `mark_abandoned/1`). Defaults to `Arbor.Orchestrator.PipelineStatus`.
   """
@@ -306,5 +327,9 @@ defmodule Arbor.Orchestrator.Config do
         ]
 
     Enum.find(candidates, List.first(candidates), &File.exists?/1)
+  end
+
+  defp default_coding_pipeline_logs_root do
+    Path.join([System.tmp_dir!(), "arbor_orchestrator", "coding_tasks"])
   end
 end

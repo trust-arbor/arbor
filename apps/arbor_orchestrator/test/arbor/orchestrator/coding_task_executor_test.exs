@@ -15,7 +15,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     def run_file(path, opts) do
       case Process.get(:coding_executor_runner_reply) do
         nil ->
-          Process.put(:coding_executor_last_run, {path, opts})
+          capture_run(path, opts)
 
           {:ok,
            %{
@@ -28,12 +28,24 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
            }}
 
         fun when is_function(fun, 2) ->
-          Process.put(:coding_executor_last_run, {path, opts})
+          capture_run(path, opts)
           fun.(path, opts)
 
         reply ->
-          Process.put(:coding_executor_last_run, {path, opts})
+          capture_run(path, opts)
           reply
+      end
+    end
+
+    defp capture_run(path, opts) do
+      Process.put(:coding_executor_last_run, {path, opts})
+
+      case Keyword.get(opts, :spawning_pid) do
+        pid when is_pid(pid) and pid != self() ->
+          send(pid, {:coding_executor_captured_run, path, opts})
+
+        _ ->
+          :ok
       end
     end
 
@@ -49,6 +61,25 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         "workspace_id" => "ws_1",
         "worker_session_id" => "worker_1"
       }
+    end
+  end
+
+  defmodule SlowRunner do
+    @moduledoc false
+
+    def run_file(_path, opts) do
+      owner = Keyword.fetch!(opts, :spawning_pid)
+      links = Process.info(self(), :links) |> elem(1)
+      message = {:slow_runner_started, self(), opts, links}
+      send(owner, message)
+
+      case Application.get_env(:arbor_orchestrator, :coding_executor_test_observer) do
+        observer when is_pid(observer) -> send(observer, message)
+        _ -> :ok
+      end
+
+      Process.sleep(1_000)
+      {:error, :unexpected_completion}
     end
   end
 
@@ -119,6 +150,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     originals = %{
       coding_pipeline_runner: Application.get_env(:arbor_orchestrator, :coding_pipeline_runner),
       coding_pipeline_path: Application.get_env(:arbor_orchestrator, :coding_pipeline_path),
+      coding_pipeline_logs_root:
+        Application.get_env(:arbor_orchestrator, :coding_pipeline_logs_root),
       pipeline_status_module: Application.get_env(:arbor_orchestrator, :pipeline_status_module),
       security_module: Application.get_env(:arbor_orchestrator, :security_module),
       security_available_override:
@@ -151,6 +184,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     on_exit(fn ->
       restore(:coding_pipeline_runner, originals.coding_pipeline_runner)
       restore(:coding_pipeline_path, originals.coding_pipeline_path)
+      restore(:coding_pipeline_logs_root, originals.coding_pipeline_logs_root)
       restore(:pipeline_status_module, originals.pipeline_status_module)
       restore(:security_module, originals.security_module)
       restore(:security_available_override, originals.security_available_override)
@@ -180,8 +214,14 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   end
 
   defp last_opts do
-    assert {_path, opts} = Process.get(:coding_executor_last_run)
-    opts
+    case Process.get(:coding_executor_last_run) do
+      {_path, opts} ->
+        opts
+
+      nil ->
+        assert_receive {:coding_executor_captured_run, _path, opts}
+        opts
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -409,6 +449,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert opts[:spawning_pid] == self()
       assert opts[:resumable] == true
       assert opts[:caller_id] == "human_1"
+      assert Path.dirname(opts[:logs_root]) == Config.coding_pipeline_logs_root()
+      assert Path.basename(opts[:logs_root]) =~ ~r/^task-[0-9a-f]{64}$/
+      refute Keyword.has_key?(opts, :timeout)
       assert is_function(opts[:signer], 1)
       assert is_function(opts[:authorizer], 2)
 
@@ -428,6 +471,84 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       refute Map.has_key?(iv, "task_id")
       # caller_id does not replace target agent identity
       refute iv["session.agent_id"] == "human_1"
+    end
+
+    test "isolates logs by a path-safe digest of task_id" do
+      configured_root = Path.join(System.tmp_dir!(), "coding-executor-custom-root")
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, configured_root)
+
+      assert {:ok, _} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"task_id" => "../../escape"})
+               )
+
+      first_root = last_opts()[:logs_root]
+      assert Path.dirname(first_root) == Path.expand(configured_root)
+      refute first_root =~ "escape"
+      assert Path.relative_to(first_root, configured_root) == Path.basename(first_root)
+
+      assert {:ok, _} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"task_id" => "task_distinct"})
+               )
+
+      refute last_opts()[:logs_root] == first_root
+
+      assert {:ok, _} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"task_id" => "../../escape"})
+               )
+
+      assert last_opts()[:logs_root] == first_root
+    end
+
+    test "threads and enforces a supplied pipeline timeout" do
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, SlowRunner)
+
+      assert {:error, {:pipeline_timeout, 20}} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"timeout" => 20})
+               )
+
+      assert_receive {:slow_runner_started, runner_pid, opts, links}
+      assert opts[:timeout] == 20
+      assert self() in links
+      refute Process.alive?(runner_pid)
+    end
+
+    test "terminates the linked runner when the executor owner is cancelled" do
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, SlowRunner)
+      Application.put_env(:arbor_orchestrator, :coding_executor_test_observer, self())
+
+      on_exit(fn ->
+        Application.delete_env(:arbor_orchestrator, :coding_executor_test_observer)
+      end)
+
+      owner =
+        spawn(fn ->
+          CodingTaskExecutor.run(
+            "agent_1",
+            valid_task(),
+            valid_context(%{"timeout" => 10_000})
+          )
+        end)
+
+      assert_receive {:slow_runner_started, runner_pid, _opts, links}
+      assert owner in links
+
+      runner_ref = Process.monitor(runner_pid)
+      Process.exit(owner, :kill)
+
+      assert_receive {:DOWN, ^runner_ref, :process, ^runner_pid, :killed}
+      refute Process.alive?(runner_pid)
     end
 
     test "threads identity_private_key to trusted Engine opts but not context/result" do
@@ -835,6 +956,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   describe "Config accessors" do
     test "defaults point at real public facades" do
       Application.delete_env(:arbor_orchestrator, :coding_pipeline_runner)
+      Application.delete_env(:arbor_orchestrator, :coding_pipeline_logs_root)
       Application.delete_env(:arbor_orchestrator, :pipeline_status_module)
       Application.delete_env(:arbor_orchestrator, :security_module)
 
@@ -843,6 +965,19 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert Config.security_module() == Arbor.Security
       assert is_binary(Config.coding_pipeline_path())
       assert String.ends_with?(Config.coding_pipeline_path(), "coding-change-v1.dot")
+
+      assert Config.coding_pipeline_logs_root() ==
+               Path.join([System.tmp_dir!(), "arbor_orchestrator", "coding_tasks"])
+    end
+
+    test "coding pipeline logs root accepts a configured path and rejects blank values" do
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, "./tmp/coding-runs")
+      assert Config.coding_pipeline_logs_root() == Path.expand("./tmp/coding-runs")
+
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, "  ")
+
+      assert Config.coding_pipeline_logs_root() ==
+               Path.join([System.tmp_dir!(), "arbor_orchestrator", "coding_tasks"])
     end
   end
 end
