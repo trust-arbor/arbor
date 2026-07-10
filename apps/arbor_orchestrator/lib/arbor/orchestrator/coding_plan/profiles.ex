@@ -14,14 +14,22 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   @required_nodes Enum.sort(~w[
                     acquire_workspace
                     adopt_head_commit
+                    check_review_category_budget
+                    check_review_total_budget
+                    check_validation_category_budget
+                    check_validation_passed
+                    check_validation_total_budget
                     close_worker
                     commit_change
                     done
                     implement
+                    inspect_workspace
+                    load_committed_change
                     open_worker
                     release_workspace
                     review_change
                     route_after_commit
+                    route_review
                     validate
                   ])
 
@@ -30,6 +38,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                              acp_send_message
                              acp_start_session
                              coding_workspace_acquire
+                             coding_workspace_committed_change
+                             coding_workspace_inspect
                              coding_workspace_release
                              council_review_change
                              git_commit

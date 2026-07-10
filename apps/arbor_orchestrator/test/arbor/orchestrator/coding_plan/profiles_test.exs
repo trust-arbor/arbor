@@ -58,9 +58,23 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
              }
 
       assert "mix_compile" in default["required_actions"]
+      assert "coding_workspace_inspect" in default["required_actions"]
+      assert "coding_workspace_committed_change" in default["required_actions"]
       refute "mix_test" in default["required_actions"]
       assert "mix_test" in security["required_actions"]
       refute "mix_compile" in security["required_actions"]
+
+      for node <- ~w[
+            inspect_workspace
+            check_validation_passed
+            check_validation_total_budget
+            load_committed_change
+            route_review
+            check_review_total_budget
+          ] do
+        assert node in default["required_nodes"]
+        assert node in security["required_nodes"]
+      end
     end
 
     test "declares unsupported profiles with precise missing enforcement reasons" do
