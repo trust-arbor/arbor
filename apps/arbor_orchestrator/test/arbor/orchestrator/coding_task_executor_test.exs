@@ -105,6 +105,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         |> maybe_put("branch_name", plan.workspace_policy["branch_name"])
         |> maybe_put("worktree_base_dir", plan.workspace_policy["worktree_base_dir"])
         |> maybe_put("model", plan.worker["model"])
+        |> maybe_put_test_paths(plan)
 
       manifest = %{
         "compiler_version" => "fake-coding-plan-1",
@@ -137,6 +138,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
     defp maybe_put(map, _key, nil), do: map
     defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+    defp maybe_put_test_paths(map, %Plan{validation_profile: "security_regression"} = plan),
+      do: Map.put(map, "test_paths", plan.requested_paths)
+
+    defp maybe_put_test_paths(map, _plan), do: map
+
     defp bool_string(true), do: "true"
     defp bool_string(false), do: "false"
 
@@ -181,6 +188,50 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       initial_values = Map.put(compilation.initial_values, "repo_path", "/tmp/redirected")
       {:ok, %{compilation | initial_values: initial_values}}
+    end
+  end
+
+  defmodule RedirectingWorktreeInitialValuesCompiler do
+    @moduledoc false
+
+    def compile(plan, opts) do
+      {:ok, compilation} =
+        Arbor.Orchestrator.CodingTaskExecutorTest.FakeCompiler.compile(plan, opts)
+
+      redirected = Process.get(:coding_executor_redirected_worktree_base_dir)
+      initial_values = Map.put(compilation.initial_values, "worktree_base_dir", redirected)
+      {:ok, %{compilation | initial_values: initial_values}}
+    end
+  end
+
+  defmodule MutatingInitialValuesCompiler do
+    @moduledoc false
+
+    def compile(plan, opts) do
+      {:ok, compilation} =
+        Arbor.Orchestrator.CodingTaskExecutorTest.FakeCompiler.compile(plan, opts)
+
+      {operation, key, value} = Process.get(:coding_executor_initial_value_mutation)
+
+      initial_values =
+        case operation do
+          :put -> Map.put(compilation.initial_values, key, value)
+          :delete -> Map.delete(compilation.initial_values, key)
+        end
+
+      {:ok, %{compilation | initial_values: initial_values}}
+    end
+  end
+
+  defmodule OutsideWorktreeCreatingRunner do
+    @moduledoc false
+
+    def run_file(_path, opts) do
+      base = opts |> Keyword.fetch!(:initial_values) |> Map.fetch!("worktree_base_dir")
+      marker = Path.join(base, "runner-created-outside-worktree")
+      File.mkdir_p!(marker)
+      send(Keyword.fetch!(opts, :spawning_pid), {:outside_worktree_runner_invoked, marker})
+      {:error, :unexpected_runner_invocation}
     end
   end
 
@@ -372,6 +423,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
     Process.delete(:coding_executor_last_run)
     Process.delete(:coding_executor_signing_key)
+    Process.delete(:coding_executor_redirected_worktree_base_dir)
+    Process.delete(:coding_executor_initial_value_mutation)
     Process.delete(:coding_abandoned_runs)
     Process.delete(:coding_task_control_calls)
     Process.delete(:coding_task_control_reply)
@@ -1025,6 +1078,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         assert Bitwise.band(stat.mode, 0o777) == 0o600
       end
 
+      assert {:ok, root_stat} = File.stat(root)
+      assert Bitwise.band(root_stat.mode, 0o777) == 0o700
+
       assert {:ok, _json} = Jason.encode(result)
     end
 
@@ -1294,6 +1350,99 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
 
       refute_receive {:coding_executor_captured_run, _path, _opts}
+    end
+
+    test "security regression: compiler cannot redirect the canonical worktree base" do
+      outside = Path.join(Process.get(:coding_executor_tmp_dir), "outside-compiler-worktrees")
+      marker = Path.join(outside, "runner-created-outside-worktree")
+      File.mkdir_p!(outside)
+      Process.put(:coding_executor_redirected_worktree_base_dir, outside)
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_compiler,
+        RedirectingWorktreeInitialValuesCompiler
+      )
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_pipeline_runner,
+        OutsideWorktreeCreatingRunner
+      )
+
+      assert {:error,
+              {:invalid_coding_plan_compiler_reply,
+               {:initial_value_mismatch, "worktree_base_dir"}}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      refute File.exists?(marker)
+      refute_receive {:outside_worktree_runner_invoked, ^marker}
+      assert Process.get(:coding_executor_last_run) == nil
+      refute File.exists?(Config.coding_pipeline_logs_root())
+    end
+
+    test "compiler optional initial values remain exactly bound to the canonical plan" do
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_compiler,
+        MutatingInitialValuesCompiler
+      )
+
+      cases = [
+        {valid_direct_task(%{
+           "workspace_policy" => %{
+             "mode" => "isolated",
+             "branch_name" => "feature/bound-branch"
+           }
+         }), :put, "branch_name", "feature/redirected"},
+        {valid_direct_task(%{
+           "worker" => %{"provider" => "grok", "model" => "bound-model"}
+         }), :put, "model", "redirected-model"},
+        {valid_direct_task(%{
+           "task_class" => "security_regression",
+           "validation_profile" => "security_regression",
+           "requested_paths" => ["test/security_regression_test.exs"]
+         }), :put, "test_paths", ["test/redirected_test.exs"]},
+        {valid_direct_task(), :put, "test_paths", ["test/unexpected_test.exs"]},
+        {valid_direct_task(), :put, "branch_name", "feature/unexpected"},
+        {valid_direct_task(), :put, "model", "unexpected-model"}
+      ]
+
+      for {task, operation, key, value} <- cases do
+        Process.put(:coding_executor_initial_value_mutation, {operation, key, value})
+
+        assert {:error, {:invalid_coding_plan_compiler_reply, {:initial_value_mismatch, ^key}}} =
+                 CodingTaskExecutor.run("agent_1", task, valid_context())
+      end
+
+      refute_receive {:coding_executor_captured_run, _path, _opts}
+      assert Process.get(:coding_executor_last_run) == nil
+    end
+
+    test "security regression: task artifact root symlink cannot escape the logs base" do
+      task_id = "task_symlinked_artifact_root"
+      logs_base = Config.coding_pipeline_logs_root()
+      outside = Path.join(Process.get(:coding_executor_tmp_dir), "outside-task-artifacts")
+      File.mkdir_p!(logs_base)
+      File.mkdir_p!(outside)
+
+      digest = :crypto.hash(:sha256, task_id) |> Base.encode16(case: :lower)
+      task_root = Path.join(logs_base, "task-" <> digest)
+      File.ln_s!(outside, task_root)
+
+      assert {:error, :unsafe_coding_task_logs_root} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"task_id" => task_id})
+               )
+
+      for filename <- ~w(coding-plan.json coding-pipeline.dot coding-compile-manifest.json) do
+        refute File.exists?(Path.join(outside, filename))
+      end
+
+      refute_receive {:coding_executor_captured_run, _path, _opts}
+      assert Process.get(:coding_executor_last_run) == nil
     end
 
     test "invalid artifact store module and malformed store replies fail closed" do

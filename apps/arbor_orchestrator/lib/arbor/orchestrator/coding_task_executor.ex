@@ -189,7 +189,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          {:ok, template_path} <- resolve_template_path(),
          {:ok, {signer, private_key}} <- build_signer(agent_id),
          {:ok, compilation} <- compile_plan(plan, template_path),
-         logs_root = task_logs_root(exec_ctx.task_id),
+         {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
          {:ok, artifacts} <- archive_compilation(logs_root, plan, compilation),
          {:ok, opts} <-
            build_engine_opts(
@@ -888,7 +888,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp validate_core_initial_values(initial_values, plan) do
-    expected = %{
+    required = %{
       "task" => plan.task,
       "repo_path" => plan.repo_root,
       "acp_agent" => plan.worker["provider"],
@@ -899,11 +899,45 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       "submit_review" => bool_string(plan.review_profile != "none")
     }
 
-    case Enum.find(expected, fn {key, value} -> Map.get(initial_values, key) != value end) do
+    optional = %{
+      "branch_name" => plan.workspace_policy["branch_name"],
+      "model" => plan.worker["model"],
+      "test_paths" => expected_test_paths(plan),
+      "worktree_base_dir" => plan.workspace_policy["worktree_base_dir"]
+    }
+
+    with :ok <- validate_present_initial_values(initial_values, required),
+         :ok <- validate_optional_initial_values(initial_values, optional) do
+      :ok
+    end
+  end
+
+  defp validate_present_initial_values(initial_values, expected) do
+    case Enum.find(expected, fn {key, value} ->
+           not Map.has_key?(initial_values, key) or Map.fetch!(initial_values, key) != value
+         end) do
       nil -> :ok
       {key, _value} -> {:error, {:initial_value_mismatch, key}}
     end
   end
+
+  defp validate_optional_initial_values(initial_values, expected) do
+    case Enum.find(expected, fn
+           {key, nil} ->
+             Map.has_key?(initial_values, key)
+
+           {key, value} ->
+             not Map.has_key?(initial_values, key) or Map.fetch!(initial_values, key) != value
+         end) do
+      nil -> :ok
+      {key, _value} -> {:error, {:initial_value_mismatch, key}}
+    end
+  end
+
+  defp expected_test_paths(%Plan{validation_profile: "security_regression"} = plan),
+    do: plan.requested_paths
+
+  defp expected_test_paths(_plan), do: nil
 
   defp validate_compilation_manifest(compilation, plan) do
     manifest = compilation.manifest
@@ -943,7 +977,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         {:error, :coding_plan_artifact_store_unavailable}
 
       true ->
-        invoke_artifact_store(store, root, plan, compilation)
+        with {:ok, verified_root} <- verify_task_logs_directory(root, Path.dirname(root)) do
+          invoke_artifact_store(store, verified_root, plan, compilation)
+        end
     end
   end
 
@@ -1015,14 +1051,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp canonical_artifact_root(root) do
-    case SafePath.resolve_real(root) do
-      {:ok, canonical_root} ->
-        if File.dir?(canonical_root),
-          do: {:ok, canonical_root},
-          else: {:error, :artifact_root_missing}
+    expanded_root = Path.expand(root)
 
-      _ ->
-        {:error, :artifact_root_missing}
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(expanded_root),
+         {:ok, canonical_root} <- SafePath.resolve_real(expanded_root),
+         true <- canonical_root == expanded_root,
+         true <- File.dir?(canonical_root) do
+      {:ok, canonical_root}
+    else
+      _ -> {:error, :artifact_root_missing}
     end
   end
 
@@ -1187,12 +1224,95 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   defp maybe_put_session_metadata(values, _), do: values
 
-  defp task_logs_root(task_id) do
+  defp prepare_task_logs_root(task_id) do
     digest =
       :crypto.hash(:sha256, task_id)
       |> Base.encode16(case: :lower)
 
-    Path.join(Config.coding_pipeline_logs_root(), "task-" <> digest)
+    with {:ok, base} <- canonical_logs_base(),
+         {:ok, root} <- SafePath.safe_join(base, "task-" <> digest),
+         :ok <- ensure_task_logs_directory(root),
+         {:ok, canonical_root} <- verify_task_logs_directory(root, base) do
+      {:ok, canonical_root}
+    end
+  end
+
+  defp canonical_logs_base do
+    configured = Config.coding_pipeline_logs_root()
+
+    with :ok <- validate_logs_base_path(configured),
+         :ok <- create_logs_base(configured),
+         {:ok, canonical} <- SafePath.resolve_real(configured),
+         true <- File.dir?(canonical) do
+      {:ok, canonical}
+    else
+      _ -> {:error, :invalid_coding_pipeline_logs_root}
+    end
+  end
+
+  defp validate_logs_base_path(path) when is_binary(path) do
+    with :ok <- SafePath.validate(path),
+         true <- SafePath.absolute?(path) do
+      :ok
+    else
+      _ -> {:error, :invalid_path}
+    end
+  end
+
+  defp validate_logs_base_path(_path), do: {:error, :invalid_path}
+
+  defp create_logs_base(path) do
+    case File.mkdir_p(path) do
+      :ok -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp ensure_task_logs_directory(root) do
+    case File.lstat(root) do
+      {:ok, %File.Stat{type: :directory}} ->
+        :ok
+
+      {:ok, _stat} ->
+        {:error, :unsafe_coding_task_logs_root}
+
+      {:error, :enoent} ->
+        create_task_logs_directory(root)
+
+      {:error, _reason} ->
+        {:error, :unsafe_coding_task_logs_root}
+    end
+  end
+
+  defp create_task_logs_directory(root) do
+    case File.mkdir(root) do
+      :ok ->
+        case File.chmod(root, 0o700) do
+          :ok ->
+            :ok
+
+          {:error, _reason} ->
+            File.rmdir(root)
+            {:error, :unsafe_coding_task_logs_root}
+        end
+
+      {:error, :eexist} ->
+        ensure_task_logs_directory(root)
+
+      {:error, _reason} ->
+        {:error, :unsafe_coding_task_logs_root}
+    end
+  end
+
+  defp verify_task_logs_directory(root, base) do
+    with {:ok, %File.Stat{type: :directory}} <- File.lstat(root),
+         {:ok, canonical_root} <- SafePath.resolve_real(root),
+         true <- canonical_root == root,
+         true <- contained_in?(base, canonical_root) do
+      {:ok, canonical_root}
+    else
+      _ -> {:error, :unsafe_coding_task_logs_root}
+    end
   end
 
   defp build_authorizer(agent_id, signer) do
