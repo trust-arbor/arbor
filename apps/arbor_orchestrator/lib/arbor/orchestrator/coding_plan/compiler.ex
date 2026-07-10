@@ -20,6 +20,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   @compiler_version "coding-plan-1"
   @template_version "coding-change-v1"
   @allowed_options [:template_path, :template_source, :action_catalog]
+  @static_schema_types ~w(string boolean integer number array object)
+  @numeric_schema_constraints ~w(minimum maximum exclusiveMinimum exclusiveMaximum)
+  @string_schema_constraints ~w(minLength maxLength)
 
   @graph_metadata_keys %{
     compiler_version: "coding_plan_compiler_version",
@@ -728,46 +731,220 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     static_params
     |> Enum.sort_by(&elem(&1, 0))
     |> Enum.reduce_while(:ok, fn {name, value}, :ok ->
-      expected = properties |> Map.fetch!(name) |> scalar_schema_type()
+      schema = Map.fetch!(properties, name)
 
-      if static_scalar_valid?(value, expected) do
-        {:cont, :ok}
-      else
-        {:halt,
-         {:error, {:invalid_static_action_parameter, node_id, action, name, expected, value}}}
+      case normalize_static_parameter_schema(node_id, action, name, schema) do
+        {:ok, normalized_schema} ->
+          if static_parameter_valid?(value, normalized_schema) do
+            {:cont, :ok}
+          else
+            expected = static_type_descriptor(normalized_schema.types)
+
+            {:halt,
+             {:error, {:invalid_static_action_parameter, node_id, action, name, expected, value}}}
+          end
+
+        {:error, _reason} = error ->
+          {:halt, error}
       end
     end)
   end
 
-  defp scalar_schema_type(%{"type" => type})
-       when type in ["string", "boolean", "integer", "number"],
-       do: type
-
-  defp scalar_schema_type(%{"type" => types}) when is_list(types) do
-    case Enum.filter(types, &(&1 in ["string", "boolean", "integer", "number"])) do
-      [type] -> type
-      _ -> nil
+  defp normalize_static_parameter_schema(node_id, action, name, schema) do
+    with {:ok, types} <- normalize_static_schema_types(schema),
+         {:ok, enum} <- normalize_static_enum(schema),
+         {:ok, numeric_constraints} <- normalize_numeric_constraints(schema),
+         {:ok, string_constraints} <- normalize_string_constraints(schema) do
+      {:ok,
+       %{
+         types: types,
+         enum: enum,
+         numeric_constraints: numeric_constraints,
+         string_constraints: string_constraints
+       }}
+    else
+      {:error, reason} ->
+        {:error,
+         {:invalid_action_schema, node_id, action, {:invalid_parameter_schema, name, reason}}}
     end
   end
 
-  defp scalar_schema_type(_schema), do: nil
+  defp normalize_static_schema_types(schema) do
+    case Map.fetch(schema, "type") do
+      :error ->
+        {:ok, nil}
 
-  defp static_scalar_valid?(_value, nil), do: true
-  defp static_scalar_valid?(value, "string"), do: is_binary(value)
-  defp static_scalar_valid?(value, "boolean"), do: value in [true, false, "true", "false"]
-  defp static_scalar_valid?(value, "integer") when is_integer(value), do: true
+      {:ok, type} when type in @static_schema_types ->
+        {:ok, [type]}
 
-  defp static_scalar_valid?(value, "integer") when is_binary(value) do
-    match?({_integer, ""}, Integer.parse(value))
+      {:ok, types} when is_list(types) ->
+        cond do
+          types == [] ->
+            {:error, :empty_type_union}
+
+          not Enum.all?(types, &is_binary/1) ->
+            {:error, :invalid_type_union}
+
+          length(types) != length(Enum.uniq(types)) ->
+            {:error, :duplicate_type_union}
+
+          true ->
+            unsupported = Enum.reject(types, &(&1 in @static_schema_types))
+
+            if unsupported == [] do
+              {:ok, types}
+            else
+              {:error, {:unsupported_types, Enum.sort(unsupported)}}
+            end
+        end
+
+      {:ok, type} when is_binary(type) ->
+        {:error, {:unsupported_type, type}}
+
+      {:ok, _type} ->
+        {:error, :invalid_type}
+    end
   end
 
-  defp static_scalar_valid?(value, "number") when is_number(value), do: true
+  defp normalize_static_enum(schema) do
+    case Map.fetch(schema, "enum") do
+      :error ->
+        {:ok, nil}
 
-  defp static_scalar_valid?(value, "number") when is_binary(value) do
-    match?({_number, ""}, Float.parse(value))
+      {:ok, values} when is_list(values) and values != [] ->
+        if length(values) == length(Enum.uniq(values)) do
+          {:ok, values}
+        else
+          {:error, :duplicate_enum_values}
+        end
+
+      {:ok, _values} ->
+        {:error, :invalid_enum}
+    end
   end
 
-  defp static_scalar_valid?(_value, _expected), do: false
+  defp normalize_numeric_constraints(schema) do
+    normalize_constraints(schema, @numeric_schema_constraints, fn value -> is_number(value) end)
+  end
+
+  defp normalize_string_constraints(schema) do
+    normalize_constraints(schema, @string_schema_constraints, fn value ->
+      is_integer(value) and value >= 0
+    end)
+  end
+
+  defp normalize_constraints(schema, keys, valid?) do
+    Enum.reduce_while(keys, {:ok, %{}}, fn key, {:ok, constraints} ->
+      case Map.fetch(schema, key) do
+        :error ->
+          {:cont, {:ok, constraints}}
+
+        {:ok, value} ->
+          if valid?.(value) do
+            {:cont, {:ok, Map.put(constraints, key, value)}}
+          else
+            {:halt, {:error, {:invalid_constraint, key}}}
+          end
+      end
+    end)
+  end
+
+  defp static_type_descriptor(nil), do: nil
+  defp static_type_descriptor([type]), do: type
+  defp static_type_descriptor(types), do: types
+
+  defp static_parameter_valid?(value, %{types: nil} = schema) do
+    type = infer_static_type(value)
+    static_candidate_valid?(type, value, schema)
+  end
+
+  defp static_parameter_valid?(value, %{types: types} = schema) do
+    Enum.any?(types, fn type ->
+      case coerce_static_value(value, type) do
+        {:ok, coerced} -> static_candidate_valid?(type, coerced, schema)
+        :error -> false
+      end
+    end)
+  end
+
+  defp infer_static_type(value) when is_binary(value), do: "string"
+  defp infer_static_type(value) when is_boolean(value), do: "boolean"
+  defp infer_static_type(value) when is_integer(value), do: "integer"
+  defp infer_static_type(value) when is_float(value), do: "number"
+  defp infer_static_type(value) when is_list(value), do: "array"
+  defp infer_static_type(value) when is_map(value) and not is_struct(value), do: "object"
+  defp infer_static_type(_value), do: nil
+
+  defp coerce_static_value(value, "string") when is_binary(value), do: {:ok, value}
+  defp coerce_static_value(value, "boolean") when is_boolean(value), do: {:ok, value}
+  defp coerce_static_value("true", "boolean"), do: {:ok, true}
+  defp coerce_static_value("false", "boolean"), do: {:ok, false}
+  defp coerce_static_value(value, "integer") when is_integer(value), do: {:ok, value}
+
+  defp coerce_static_value(value, "integer") when is_binary(value) do
+    case Integer.parse(value) do
+      {integer, ""} -> {:ok, integer}
+      _other -> :error
+    end
+  end
+
+  defp coerce_static_value(value, "number") when is_number(value), do: {:ok, value}
+
+  defp coerce_static_value(value, "number") when is_binary(value) do
+    case Integer.parse(value) do
+      {integer, ""} ->
+        {:ok, integer}
+
+      _other ->
+        case Float.parse(value) do
+          {number, ""} -> {:ok, number}
+          _other -> :error
+        end
+    end
+  end
+
+  defp coerce_static_value(value, "array") when is_list(value), do: {:ok, value}
+
+  defp coerce_static_value(value, "object") when is_map(value) and not is_struct(value),
+    do: {:ok, value}
+
+  defp coerce_static_value(_value, _type), do: :error
+
+  defp static_candidate_valid?(type, value, schema) do
+    enum_valid?(value, schema.enum) and
+      numeric_constraints_valid?(type, value, schema.numeric_constraints) and
+      string_constraints_valid?(type, value, schema.string_constraints)
+  end
+
+  defp enum_valid?(_value, nil), do: true
+  defp enum_valid?(value, enum), do: Enum.any?(enum, &(&1 == value))
+
+  defp numeric_constraints_valid?(type, value, constraints)
+       when type in ["integer", "number"] do
+    Enum.all?(constraints, fn
+      {"minimum", minimum} -> value >= minimum
+      {"maximum", maximum} -> value <= maximum
+      {"exclusiveMinimum", minimum} -> value > minimum
+      {"exclusiveMaximum", maximum} -> value < maximum
+    end)
+  end
+
+  defp numeric_constraints_valid?(_type, _value, _constraints), do: true
+
+  defp string_constraints_valid?("string", value, constraints) do
+    if String.valid?(value) do
+      length = String.length(value)
+
+      Enum.all?(constraints, fn
+        {"minLength", minimum} -> length >= minimum
+        {"maxLength", maximum} -> length <= maximum
+      end)
+    else
+      false
+    end
+  end
+
+  defp string_constraints_valid?(_type, _value, _constraints), do: true
 
   defp validate_structural_graph(graph) do
     graph

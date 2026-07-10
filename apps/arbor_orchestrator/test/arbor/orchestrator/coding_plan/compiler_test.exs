@@ -357,6 +357,86 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              "integer", "not_integer"}} = compile(plan!(), ctx, wrong_integer)
   end
 
+  test "security regression: static schemas enforce ranges, enums, and collection types", ctx do
+    negative_timeout =
+      String.replace(
+        ctx.template_source,
+        ~s(param.permission_mode="default",),
+        ~s(param.permission_mode="default",\n    param.timeout="-1",),
+        global: false
+      )
+
+    assert {:error,
+            {:invalid_static_action_parameter, "open_worker", "acp_start_session", "timeout",
+             "integer", "-1"}} = compile(plan!(), ctx, negative_timeout)
+
+    enum_catalog =
+      update_action_property_schema(
+        ctx.action_catalog,
+        "acp_start_session",
+        "permission_mode",
+        %{"type" => "string", "enum" => ["deny"]}
+      )
+
+    assert {:error,
+            {:invalid_static_action_parameter, "open_worker", "acp_start_session",
+             "permission_mode", "string", "default"}} =
+             compile_with_catalog(plan!(), ctx, ctx.template_source, enum_catalog)
+
+    string_collection =
+      String.replace(
+        ctx.template_source,
+        ~s(param.permission_mode="default",),
+        ~s(param.permission_mode="default",\n    param.allowed_tools="Read",),
+        global: false
+      )
+
+    assert {:error,
+            {:invalid_static_action_parameter, "open_worker", "acp_start_session",
+             "allowed_tools", "array", "Read"}} = compile(plan!(), ctx, string_collection)
+  end
+
+  test "type unions compile and unsupported types fail closed", ctx do
+    union_catalog =
+      update_action_property_schema(
+        ctx.action_catalog,
+        "acp_start_session",
+        "permission_mode",
+        %{"type" => ["integer", "string"], "minLength" => 1}
+      )
+
+    assert {:ok, _compilation} =
+             compile_with_catalog(plan!(), ctx, ctx.template_source, union_catalog)
+
+    unsupported_catalog =
+      update_action_property_schema(
+        ctx.action_catalog,
+        "acp_start_session",
+        "permission_mode",
+        %{"type" => ["string", "unsupported"]}
+      )
+
+    assert {:error,
+            {:invalid_action_schema, "open_worker", "acp_start_session",
+             {:invalid_parameter_schema, "permission_mode", {:unsupported_types, ["unsupported"]}}}} =
+             compile_with_catalog(plan!(), ctx, ctx.template_source, unsupported_catalog)
+  end
+
+  test "malformed static parameter constraints return tagged schema errors", ctx do
+    malformed_catalog =
+      update_action_property_schema(
+        ctx.action_catalog,
+        "acp_start_session",
+        "permission_mode",
+        %{"type" => "string", "minLength" => "one"}
+      )
+
+    assert {:error,
+            {:invalid_action_schema, "open_worker", "acp_start_session",
+             {:invalid_parameter_schema, "permission_mode", {:invalid_constraint, "minLength"}}}} =
+             compile_with_catalog(plan!(), ctx, ctx.template_source, malformed_catalog)
+  end
+
   test "structural and malformed option inputs return tagged errors", ctx do
     no_start =
       Regex.replace(~r/\bstart\b/, ctx.template_source, "origin")
@@ -421,11 +501,49 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   end
 
   defp compile(plan, ctx, template_source \\ nil) do
+    compile_with_catalog(plan, ctx, template_source || ctx.template_source, ctx.action_catalog)
+  end
+
+  defp compile_with_catalog(plan, _ctx, template_source, action_catalog) do
     Compiler.compile(plan,
-      template_source: template_source || ctx.template_source,
-      action_catalog: ctx.action_catalog
+      template_source: template_source,
+      action_catalog: action_catalog
     )
   end
+
+  defp update_action_property_schema(catalog, action_name, property_name, updates) do
+    actions =
+      Enum.map(catalog["actions"], fn action ->
+        if action["name"] == action_name do
+          update_in(
+            action,
+            ["parameters_schema", "properties", property_name],
+            &Map.merge(&1, updates)
+          )
+        else
+          action
+        end
+      end)
+
+    %{"actions" => actions, "digest" => canonical_digest(actions)}
+  end
+
+  defp canonical_digest(value) do
+    value
+    |> canonicalize()
+    |> Jason.encode!()
+    |> sha256()
+  end
+
+  defp canonicalize(map) when is_map(map) do
+    map
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(fn {key, value} -> {key, canonicalize(value)} end)
+    |> Jason.OrderedObject.new()
+  end
+
+  defp canonicalize(list) when is_list(list), do: Enum.map(list, &canonicalize/1)
+  defp canonicalize(value), do: value
 
   defp plan!(overrides \\ %{}) do
     attrs = deep_merge(base_plan_attrs(), overrides)
