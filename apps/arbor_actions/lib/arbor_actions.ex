@@ -1968,9 +1968,9 @@ defmodule Arbor.Actions do
   @spec register_action_uri_prefixes() :: :ok
   def register_action_uri_prefixes do
     with {:ok, _started} <- Application.ensure_all_started(:arbor_security),
-         true <- Code.ensure_loaded?(Arbor.Security.UriRegistry) do
+         true <- Code.ensure_loaded?(Arbor.Security) do
       action_namespace_uri_prefixes()
-      |> Enum.each(&Arbor.Security.UriRegistry.register/1)
+      |> Enum.each(&Arbor.Security.register_uri_prefix/1)
     end
 
     :ok

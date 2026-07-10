@@ -41,6 +41,17 @@ defmodule Arbor.Security.UriRegistryTest do
     end
   end
 
+  describe "Arbor.Security.uri_registered?/1" do
+    test "exposes canonical and runtime URI membership through the facade" do
+      prefix = "arbor://facade_runtime_#{System.unique_integer([:positive])}/op"
+
+      assert :ok = Arbor.Security.register_uri_prefix(prefix)
+      assert Arbor.Security.uri_registered?("arbor://fs/read/project/src")
+      assert Arbor.Security.uri_registered?(prefix <> "/child")
+      refute Arbor.Security.uri_registered?(prefix <> "posite/child")
+    end
+  end
+
   describe "validate/1" do
     test "valid unknown URIs honor enforcement mode" do
       Application.put_env(:arbor_security, :uri_registry_enforcement, false)

@@ -233,6 +233,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
              pinned_action_bindings,
              pinned_handler_bindings
            ),
+         # Startup URI registration is a snapshot; reconcile hot-loaded actions.
+         :ok <- reconcile_action_uri_prefixes(),
          {:ok, engine_result} <-
            invoke_runner(Map.fetch!(artifacts, "coding_pipeline_path"), opts),
          {:ok, result} <-
@@ -1458,6 +1460,21 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp signed_auth_opts(_), do: []
+
+  defp reconcile_action_uri_prefixes do
+    with :ok <- Arbor.Actions.register_action_uri_prefixes(),
+         prefixes when is_list(prefixes) and prefixes != [] <-
+           Arbor.Actions.action_namespace_uri_prefixes(),
+         true <- Enum.all?(prefixes, &Arbor.Security.uri_registered?/1) do
+      :ok
+    else
+      _ -> {:error, :action_uri_prefix_reconciliation_failed}
+    end
+  rescue
+    _ -> {:error, :action_uri_prefix_reconciliation_failed}
+  catch
+    _, _ -> {:error, :action_uri_prefix_reconciliation_failed}
+  end
 
   defp invoke_runner(graph_path, opts) do
     runner = Config.coding_pipeline_runner()

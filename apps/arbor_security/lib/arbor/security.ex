@@ -939,6 +939,14 @@ defmodule Arbor.Security do
   """
   defdelegate canonical_uri_prefixes(), to: UriRegistry, as: :canonical_prefixes
 
+  @doc "Return whether a URI matches a canonical or runtime-registered prefix."
+  @spec uri_registered?(String.t()) :: boolean()
+  defdelegate uri_registered?(uri), to: UriRegistry, as: :registered?
+
+  @doc "Register an additional runtime URI prefix."
+  @spec register_uri_prefix(String.t()) :: :ok | {:error, term()}
+  defdelegate register_uri_prefix(prefix), to: UriRegistry, as: :register
+
   # ===========================================================================
   # Keychain (Seed/Host Phase 4)
   # ===========================================================================

@@ -400,6 +400,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     Application.put_env(:arbor_orchestrator, :security_available_override, true)
     Application.put_env(:arbor_orchestrator, :coding_executor_test_observer, self())
 
+    ensure_uri_registry!()
+
     tmp_dir =
       Path.join(
         System.tmp_dir!(),
@@ -568,6 +570,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         collect_auth_calls([{agent_id, resource, action, opts} | acc])
     after
       10 -> Enum.reverse(acc)
+    end
+  end
+
+  defp ensure_uri_registry! do
+    unless Process.whereis(Arbor.Security.UriRegistry) do
+      start_supervised!({Arbor.Security.UriRegistry, []})
     end
   end
 
@@ -2016,6 +2024,57 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert result["review_recommendation"] == "keep"
       refute inspect(result["artifacts"]) =~ "forged-private-material"
       assert result["artifacts"]["coding_pipeline_path"] =~ "coding-pipeline.dot"
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Action URI prefix reconciliation (hot-load / stale UriRegistry)
+  # ---------------------------------------------------------------------------
+
+  describe "action URI prefix reconciliation" do
+    @known_cross_app_prefix "arbor://action/coding/cross_app/validate"
+    @unknown_action_prefix "arbor://action/not_a_real_action/for_regression"
+
+    test "reconciles generated action URI prefixes before runner execution" do
+      alias Arbor.Security.UriRegistry
+
+      original_runtime = GenServer.call(UriRegistry, :list_runtime)
+
+      try do
+        :sys.replace_state(UriRegistry, fn state ->
+          %{state | runtime_prefixes: MapSet.new()}
+        end)
+
+        refute Arbor.Security.uri_registered?(@known_cross_app_prefix)
+        refute Arbor.Security.uri_registered?(@unknown_action_prefix)
+
+        owner = self()
+
+        Application.put_env(:arbor_orchestrator, :coding_executor_runner_reply, fn _path, _opts ->
+          send(
+            owner,
+            {:uri_registry_at_runner, Arbor.Security.uri_registered?(@known_cross_app_prefix),
+             Arbor.Security.uri_registered?(@unknown_action_prefix)}
+          )
+
+          {:ok, %{context: %{"status" => "change_committed"}}}
+        end)
+
+        assert {:ok, _result} =
+                 CodingTaskExecutor.run(
+                   "agent_uri_reconcile",
+                   valid_task(%{"task" => "reconcile action URI prefixes"}),
+                   valid_context(%{"task_id" => "task_uri_reconcile"})
+                 )
+
+        assert_receive {:uri_registry_at_runner, true, false}, 1_000
+        assert Arbor.Security.uri_registered?(@known_cross_app_prefix)
+        refute Arbor.Security.uri_registered?(@unknown_action_prefix)
+      after
+        :sys.replace_state(UriRegistry, fn state ->
+          %{state | runtime_prefixes: MapSet.new(original_runtime)}
+        end)
+      end
     end
   end
 
