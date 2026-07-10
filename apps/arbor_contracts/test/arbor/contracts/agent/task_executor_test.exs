@@ -104,5 +104,7 @@ defmodule Arbor.Contracts.Agent.TaskExecutorTest do
     assert moduledoc =~ "task_status"
     assert moduledoc =~ "cancel_task"
     assert moduledoc =~ "steer_task"
+    assert moduledoc =~ "transfers responsibility"
+    assert moduledoc =~ "successful `run/3` return"
   end
 end

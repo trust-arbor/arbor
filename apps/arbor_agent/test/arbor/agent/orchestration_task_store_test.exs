@@ -308,6 +308,141 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     refute_receive {:steer_task_called, _, _, _, _}, 50
   end
 
+  test "successful completion reconciles accepted queued controls exactly once", %{
+    supervisor: supervisor
+  } do
+    store = start_configured_steering_store(supervisor, steer_retry_delay_ms: 10)
+    Application.put_env(:arbor_agent, :task_store_test_steer, :queued)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, runner_pid, "agent_1", "work", _}
+
+    task_ref = :sys.get_state(store).tasks[task_id].ref
+    result = {:ok, %{result_type: :test, payload: %{ok: true}, raw: "done"}}
+
+    assert {:ok, control} = TaskStore.steer(task_id, "queue this", name: store)
+    assert control["status"] == "queued"
+    assert control["delivered_at"] == nil
+    assert_receive {:steer_task_called, "agent_1", delivered, _, _}
+    assert delivered["control_id"] == control["control_id"]
+
+    subscribe_to_task_steering_transitions(task_id)
+    send(runner_pid, {:finish, result})
+
+    status =
+      assert_eventually(fn ->
+        assert {:ok, status} = TaskStore.status(task_id, name: store)
+        assert status.state == :done
+        status
+      end)
+
+    completed_at = DateTime.to_iso8601(status.completed_at)
+    assert status.steering["counts"] == %{"delivered" => 1}
+    assert status.steering["last"]["control_id"] == control["control_id"]
+    assert status.steering["last"]["status"] == "delivered"
+    assert status.steering["last"]["delivered_at"] == completed_at
+    assert status.steering["last"]["error"] == nil
+    refute Map.has_key?(status.steering["last"], "message")
+    refute Map.has_key?(status.steering["last"], "sender_id")
+
+    assert_receive {:task_steering_transition,
+                    %{
+                      task_id: ^task_id,
+                      control_id: control_id,
+                      status: "delivered",
+                      delivered_at: ^completed_at,
+                      error: nil
+                    }},
+                   1_000
+
+    assert control_id == control["control_id"]
+    refute_receive {:steer_task_called, _, _, _, _}, 50
+
+    send(store, {task_ref, result})
+    send(store, {:DOWN, task_ref, :process, runner_pid, :late_down})
+
+    assert {:ok, replayed_status} = TaskStore.status(task_id, name: store)
+    assert replayed_status.steering["last"]["delivered_at"] == completed_at
+
+    refute_receive {:task_steering_transition, %{task_id: ^task_id, status: "delivered"}},
+                   100
+  end
+
+  test "failed completion keeps accepted queued controls explicitly unconfirmed", %{
+    supervisor: supervisor
+  } do
+    store = start_configured_steering_store(supervisor)
+    Application.put_env(:arbor_agent, :task_store_test_steer, :queued)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, runner_pid, "agent_1", "work", _}
+    assert {:ok, control} = TaskStore.steer(task_id, "queue this", name: store)
+    assert control["status"] == "queued"
+    assert_receive {:steer_task_called, "agent_1", _, _, _}
+
+    subscribe_to_task_steering_transitions(task_id)
+    send(runner_pid, {:finish, {:error, :runner_failed}})
+
+    assert_eventually(fn ->
+      assert {:ok, status} = TaskStore.status(task_id, name: store)
+      assert status.state == :failed
+      assert status.steering["counts"] == %{"queued" => 1}
+      assert status.steering["last"]["control_id"] == control["control_id"]
+      assert status.steering["last"]["status"] == "queued"
+      assert status.steering["last"]["delivered_at"] == nil
+
+      assert status.steering["last"]["error"] ==
+               "delivery_unconfirmed_task_failed"
+
+      refute Map.has_key?(status.steering["last"], "message")
+      refute Map.has_key?(status.steering["last"], "sender_id")
+    end)
+
+    assert_receive {:task_steering_transition,
+                    %{
+                      task_id: ^task_id,
+                      status: "queued",
+                      error: "delivery_unconfirmed_task_failed"
+                    }},
+                   1_000
+  end
+
+  test "cancellation keeps accepted queued controls explicitly unconfirmed", %{
+    supervisor: supervisor
+  } do
+    store = start_configured_steering_store(supervisor)
+    Application.put_env(:arbor_agent, :task_store_test_steer, :queued)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _runner_pid, "agent_1", "work", _}
+    assert {:ok, control} = TaskStore.steer(task_id, "queue this", name: store)
+    assert control["status"] == "queued"
+    assert_receive {:steer_task_called, "agent_1", _, _, _}
+
+    subscribe_to_task_steering_transitions(task_id)
+
+    assert {:ok, status} = TaskStore.cancel(task_id, name: store)
+    assert status.state == :cancelled
+    assert status.steering["counts"] == %{"queued" => 1}
+    assert status.steering["last"]["control_id"] == control["control_id"]
+    assert status.steering["last"]["status"] == "queued"
+    assert status.steering["last"]["delivered_at"] == nil
+
+    assert status.steering["last"]["error"] ==
+             "delivery_unconfirmed_task_cancelled"
+
+    refute Map.has_key?(status.steering["last"], "message")
+    refute Map.has_key?(status.steering["last"], "sender_id")
+
+    assert_receive {:task_steering_transition,
+                    %{
+                      task_id: ^task_id,
+                      status: "queued",
+                      error: "delivery_unconfirmed_task_cancelled"
+                    }},
+                   1_000
+  end
+
   test "deferred controls remain retryable past the old retry window and keep the same id", %{
     supervisor: supervisor
   } do
@@ -441,6 +576,8 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert status.steering["counts"] == %{"unsupported" => 2}
     assert status.steering["last"]["control_id"] == second["control_id"]
     assert status.steering["last"]["status"] == "unsupported"
+    assert status.steering["last"]["error"] == "task_terminal"
+    assert status.steering["last"]["delivered_at"] == nil
   end
 
   test "records pending approval tasks as waiting_approval", %{store: store} do
@@ -1297,6 +1434,42 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     fn capability_id ->
       send(test_pid, {:revoke_steer_capability, capability_id})
       :ok
+    end
+  end
+
+  defp subscribe_to_task_steering_transitions(task_id) do
+    test_pid = self()
+    ensure_signals_started()
+
+    {:ok, subscription_id} =
+      Arbor.Signals.subscribe(
+        "agent.task_steering_transition",
+        fn signal ->
+          if signal.data[:task_id] == task_id do
+            send(test_pid, {:task_steering_transition, signal.data})
+          end
+
+          :ok
+        end,
+        async: false
+      )
+
+    on_exit(fn ->
+      if Process.whereis(Arbor.Signals.Bus) do
+        Arbor.Signals.unsubscribe(subscription_id)
+      end
+    end)
+
+    :ok
+  end
+
+  defp ensure_signals_started do
+    if Process.whereis(Arbor.Signals.Store) == nil do
+      start_supervised!({Arbor.Signals.Store, []})
+    end
+
+    if Process.whereis(Arbor.Signals.Bus) == nil do
+      start_supervised!({Arbor.Signals.Bus, []})
     end
   end
 

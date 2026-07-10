@@ -48,6 +48,8 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   runner exits. A steering callback receives the exact JSON-clean control map
   assigned by TaskStore and the original JSON-clean execution context. It may
   report immediate delivery, accepted queued delivery, or terminal unsupported.
+  Queued acceptance transfers responsibility for later delivery to the executor;
+  a successful `run/3` return confirms all accepted controls have settled.
   Operational errors are retained by TaskStore as deferred controls for bounded
   retry. Explicit runner overrides report steering as unsupported.
 
@@ -183,9 +185,11 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   `control_id`, `task_id`, `sequence`, `status`, `sender_id`, `message`, and
   timestamp fields. Return `{:ok, mode}` once delivered, or
   `{:ok, :queued, mode}` after the executor has durably accepted responsibility
-  for later delivery. Return `{:error, :unsupported}` when this executor cannot
-  steer the task. Other errors are treated as retryable operational failures by
-  TaskStore.
+  for later delivery. Queued acceptance transfers responsibility to the executor,
+  so TaskStore does not invoke this callback again for that control; a successful
+  `run/3` return confirms accepted controls have settled. Return
+  `{:error, :unsupported}` when this executor cannot steer the task. Other errors
+  are treated as retryable operational failures by TaskStore.
   """
   @callback steer_task(agent_id(), steering_control(), execution_context()) :: steering_result()
 

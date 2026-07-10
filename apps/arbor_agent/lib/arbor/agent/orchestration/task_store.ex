@@ -279,7 +279,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             updated_at: now,
             completed_at: now
           })
-          |> terminalize_pending_controls()
+          |> reconcile_terminal_controls()
           |> revoke_task_capabilities()
 
         next_state =
@@ -352,7 +352,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
                   updated_at: now,
                   completed_at: now
                 })
-                |> terminalize_pending_controls()
+                |> reconcile_terminal_controls()
                 |> revoke_task_capabilities()
               end
           end)
@@ -385,7 +385,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             record
             |> Map.merge(completion_fields(result, now))
             |> Map.put(:updated_at, now)
-            |> maybe_terminalize_pending_controls()
+            |> maybe_reconcile_terminal_controls()
             |> maybe_revoke_completed_task_capabilities()
           end
       end)
@@ -673,7 +673,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp deliverable_control?(_record, _control), do: false
 
-  defp terminalize_pending_controls(record) do
+  defp reconcile_terminal_controls(record) do
     controls =
       Enum.map(record.controls, fn
         %{"status" => "deferred"} = control ->
@@ -681,7 +681,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
         %{"status" => "queued", "control_id" => control_id} = control ->
           if MapSet.member?(record.accepted_control_ids, control_id) do
-            control
+            reconcile_accepted_control(record, control)
           else
             terminalize_control(record, control)
           end
@@ -693,17 +693,52 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     %{record | controls: controls}
   end
 
+  defp reconcile_accepted_control(%{state: :done} = record, control) do
+    transition_terminal_control(record, control, %{
+      "status" => "delivered",
+      "delivered_at" => DateTime.to_iso8601(record.completed_at),
+      "error" => nil
+    })
+  end
+
+  defp reconcile_accepted_control(%{state: :failed} = record, control) do
+    transition_terminal_control(record, control, %{
+      "status" => "queued",
+      "delivered_at" => nil,
+      "error" => "delivery_unconfirmed_task_failed"
+    })
+  end
+
+  defp reconcile_accepted_control(%{state: :cancelled} = record, control) do
+    transition_terminal_control(record, control, %{
+      "status" => "queued",
+      "delivered_at" => nil,
+      "error" => "delivery_unconfirmed_task_cancelled"
+    })
+  end
+
   defp terminalize_control(record, control) do
-    updated = control |> Map.put("status", "unsupported") |> Map.put("error", "task_terminal")
-    emit_control_transition(record, updated, "unsupported")
+    transition_terminal_control(record, control, %{
+      "status" => "unsupported",
+      "error" => "task_terminal"
+    })
+  end
+
+  defp transition_terminal_control(record, control, fields) do
+    updated = Map.merge(control, fields)
+
+    if updated != control do
+      emit_control_transition(record, updated, updated["status"])
+    end
+
     updated
   end
 
-  defp maybe_terminalize_pending_controls(%{state: state} = record)
+  defp maybe_reconcile_terminal_controls(%{state: state} = record)
        when state in [:done, :failed, :cancelled],
-       do: terminalize_pending_controls(record)
+       do: reconcile_terminal_controls(record)
 
-  defp maybe_terminalize_pending_controls(record), do: record
+  defp maybe_reconcile_terminal_controls(record), do: record
 
   defp bounded_error(result) do
     result
@@ -725,6 +760,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       target_stage: bounded_value(control["target_stage"]),
       queued_at: control["queued_at"],
       delivered_at: control["delivered_at"],
+      error: bounded_value(control["error"]),
       message_preview: String.slice(message, 0, 160),
       message_digest: Base.encode16(:crypto.hash(:sha256, message), case: :lower)
     }
@@ -1010,7 +1046,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
               "delivery_mode",
               "target_stage",
               "queued_at",
-              "delivered_at"
+              "delivered_at",
+              "error"
             ])
         end
     }
