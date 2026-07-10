@@ -303,6 +303,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
 
       resources = Enum.map(data["required_capabilities"], & &1["resource"])
       assert "arbor://action/coding/produce_reviewable_change" in resources
+      assert "arbor://action/coding/workspace/**" in resources
       assert "arbor://acp/tool" in resources
       assert "arbor://action/git/**" in resources
       assert "arbor://action/mix/**" in resources
@@ -315,14 +316,15 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert preset["baseline"] == "block"
       assert preset["rules"]["arbor://orchestrator/execute"] == "auto"
       assert preset["rules"]["arbor://action/coding/produce_reviewable_change"] == "auto"
+      assert preset["rules"]["arbor://action/coding/workspace"] == "auto"
       assert preset["rules"]["arbor://action/git"] == "auto"
       assert preset["rules"]["arbor://action/mix"] == "auto"
+      assert preset["rules"]["arbor://shell/exec"] == "ask"
       assert preset["rules"]["arbor://action/council/review"] == "auto"
       refute Map.has_key?(preset["rules"], "arbor://shell/exec/git")
       refute Map.has_key?(preset["rules"], "arbor://shell/exec/mix")
       refute Map.has_key?(preset["rules"], "arbor://action/github/pr")
 
-      refute Map.has_key?(preset["rules"], "arbor://shell/exec")
       refute Map.has_key?(preset["rules"], "arbor://trust/write")
     end
   end

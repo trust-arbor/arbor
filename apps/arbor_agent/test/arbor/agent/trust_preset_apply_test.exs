@@ -158,6 +158,32 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                Arbor.Security.authorize(agent_id, "arbor://orchestrator/execute/exec", :execute)
     end
 
+    test "security regression: coding template authorizes every canonical graph action" do
+      assert {:ok, profile} =
+               Lifecycle.create("Coding Graph Gate Probe", template: "coding_agent")
+
+      agent_id = profile.agent_id
+      cleanup(agent_id)
+
+      action_uris = [
+        "arbor://action/coding/workspace/acquire",
+        "arbor://action/coding/workspace/inspect",
+        "arbor://action/coding/workspace/committed_change",
+        "arbor://action/coding/workspace/release",
+        "arbor://acp/tool",
+        "arbor://action/mix/compile",
+        "arbor://action/git/commit",
+        "arbor://action/git/pr",
+        "arbor://action/council/review"
+      ]
+
+      for resource_uri <- action_uris do
+        assert {:ok, :authorized} =
+                 Arbor.Trust.authorize(agent_id, resource_uri, :execute),
+               "expected coding agent to authorize #{resource_uri}"
+      end
+    end
+
     test "template repo file grants mint concrete FileGuard scopes" do
       assert {:ok, profile} = Lifecycle.create("Repo File Tool Probe", template: "test_agent")
       agent_id = profile.agent_id

@@ -54,6 +54,8 @@ required_capabilities:
   resource: "arbor://orchestrator/execute"
 - description: "Invoke the bounded reviewable-change workflow"
   resource: "arbor://action/coding/produce_reviewable_change"
+- description: "Acquire, inspect, retain, and release isolated coding workspaces"
+  resource: "arbor://action/coding/workspace/**"
 - description: "Start and message Codex ACP sessions"
   resource: "arbor://acp/tool"
 - description: "Read repository files"
@@ -76,12 +78,14 @@ trust_preset:
   rules:
     "arbor://orchestrator/execute": auto
     "arbor://action/coding/produce_reviewable_change": auto
+    "arbor://action/coding/workspace": auto
     "arbor://acp/tool": auto
     "arbor://fs/read": auto
     "arbor://fs/list": auto
     "arbor://fs/write": auto
     "arbor://action/git": auto
     "arbor://action/mix": auto
+    "arbor://shell/exec": ask
     "arbor://action/council/review": auto
     "arbor://comms/notify/session": auto
 values:
