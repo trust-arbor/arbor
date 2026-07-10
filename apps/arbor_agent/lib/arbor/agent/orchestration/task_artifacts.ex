@@ -28,6 +28,20 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     produce_reviewable_change
   ))
 
+  @coding_artifact_keys MapSet.new(~w(
+                          coding_plan_path
+                          coding_pipeline_path
+                          compile_manifest_path
+                          compiler_version
+                          graph_hash
+                        ))
+  @coding_artifact_path_keys ~w(
+    coding_plan_path
+    coding_pipeline_path
+    compile_manifest_path
+  )
+  @lowercase_sha256 ~r/\A[0-9a-f]{64}\z/
+
   @doc "Normalize a runner result into the public task-result artifact shape."
   @spec normalize(term()) :: map()
   def normalize(result) do
@@ -41,6 +55,8 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   end
 
   defp coding_change_result(raw, original) do
+    artifacts = coding_artifacts(raw)
+
     %{
       result_type: :coding_change,
       payload:
@@ -49,9 +65,9 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
           commit: value(raw, :commit),
           diff: value(raw, :diff),
           files: files(raw),
-          report: report(raw),
+          report: report(raw, artifacts),
           verdict: verdict(raw),
-          artifacts: value(raw, :artifacts),
+          artifacts: artifacts,
           repo_path: value(raw, :repo_path),
           worktree_path: value(raw, :worktree_path),
           pr_url: value(raw, :pr_url)
@@ -215,7 +231,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
       (Enum.any?(
          [:branch, :commit, :worktree_path, :validation, :review],
          &present?(value(map, &1))
-       ) or nonempty_artifacts?(artifacts))
+       ) or valid_coding_artifacts?(artifacts))
   end
 
   defp files(raw) do
@@ -239,7 +255,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
 
   defp normalize_files(_files), do: []
 
-  defp report(raw) do
+  defp report(raw, artifacts) do
     review = value(raw, :review)
 
     %{
@@ -254,7 +270,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
       human_required: value(raw, :human_required) || value(review, :human_required),
       security_veto: value(raw, :security_veto) || value(review, :security_veto),
       blast_radius: value(raw, :blast_radius) || value(review, :blast_radius),
-      artifacts: value(raw, :artifacts),
+      artifacts: artifacts,
       error: value(raw, :error) || value(raw, :review_error)
     }
     |> reject_nil_values()
@@ -316,7 +332,35 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
 
   defp present?(value), do: value not in [nil, "", []]
 
-  defp nonempty_artifacts?(artifacts), do: is_map(artifacts) and map_size(artifacts) > 0
+  defp coding_artifacts(raw) do
+    case value(raw, :artifacts) do
+      artifacts when is_map(artifacts) ->
+        if valid_coding_artifacts?(artifacts), do: artifacts
+
+      _other ->
+        nil
+    end
+  end
+
+  defp valid_coding_artifacts?(artifacts)
+       when is_map(artifacts) and not is_struct(artifacts) do
+    MapSet.new(Map.keys(artifacts)) == @coding_artifact_keys and
+      Enum.all?(@coding_artifact_path_keys, &nonblank_string?(Map.get(artifacts, &1))) and
+      nonblank_string?(Map.get(artifacts, "compiler_version")) and
+      lowercase_sha256?(Map.get(artifacts, "graph_hash"))
+  end
+
+  defp valid_coding_artifacts?(_artifacts), do: false
+
+  defp nonblank_string?(value) when is_binary(value),
+    do: String.valid?(value) and String.trim(value) != ""
+
+  defp nonblank_string?(_value), do: false
+
+  defp lowercase_sha256?(value) when is_binary(value),
+    do: String.valid?(value) and Regex.match?(@lowercase_sha256, value)
+
+  defp lowercase_sha256?(_value), do: false
 
   defp reject_nil_values(map), do: Map.reject(map, fn {_key, value} -> is_nil(value) end)
 
