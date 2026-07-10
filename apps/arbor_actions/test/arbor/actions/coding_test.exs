@@ -18,6 +18,21 @@ defmodule Arbor.Actions.CodingTest do
 
       assert Arbor.Actions.canonical_uri_for(Coding.ProduceReviewableChange, %{}) ==
                "arbor://action/coding/produce_reviewable_change"
+
+      coding = Arbor.Actions.list_actions().coding
+      assert Coding.ProduceReviewableChange in coding
+      assert Coding.Workspace.Acquire in coding
+      assert Coding.Workspace.Inspect in coding
+      assert Coding.Workspace.Release in coding
+
+      assert Arbor.Actions.canonical_uri_for(Coding.Workspace.Acquire, %{}) ==
+               "arbor://action/coding/workspace/acquire"
+
+      assert Arbor.Actions.canonical_uri_for(Coding.Workspace.Inspect, %{}) ==
+               "arbor://action/coding/workspace/inspect"
+
+      assert Arbor.Actions.canonical_uri_for(Coding.Workspace.Release, %{}) ==
+               "arbor://action/coding/workspace/release"
     end
   end
 
@@ -871,6 +886,70 @@ defmodule Arbor.Actions.CodingTest do
       assert result.status == "no_changes"
     end
 
+    test "adopts ACP self-commit instead of reporting no_changes when worktree is clean", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      base_branch = git!(repo, ["branch", "--show-current"])
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "acp_committed.txt"), "worker commit\n")
+          git!(worktree, ["add", "acp_committed.txt"])
+          git!(worktree, ["commit", "-m", "acp worker self-commit"])
+          commit = git!(worktree, ["rev-parse", "HEAD"])
+          send(parent, {:acp_self_commit, commit})
+          {:ok, %{text: "STATUS: implemented\nCommitted acp_committed.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, params, _context ->
+          send(parent, {:validation, params})
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        Git.Commit, params, _context ->
+          send(parent, {:unexpected_wrapper_commit, params})
+          {:ok, %{commit_hash: "should-not-be-used"}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add file via ACP self-commit",
+                   repo_path: repo,
+                   base_ref: base_branch,
+                   branch_name: "test/acp-self-commit",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["true"],
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert_receive {:acp_self_commit, acp_commit}, 2_000
+      assert result.status == "change_committed"
+      assert result.commit == acp_commit
+      assert File.exists?(Path.join(result.worktree_path, "acp_committed.txt"))
+      assert git!(result.worktree_path, ["rev-parse", "HEAD"]) == acp_commit
+
+      assert git!(result.worktree_path, ["rev-list", "--count", "HEAD", "^#{base_branch}"]) ==
+               "1"
+
+      assert_receive {:validation, validation_params}
+      assert validation_params.cwd == result.worktree_path
+      refute_received {:unexpected_wrapper_commit, _}
+    end
+
     test "returns validation_failed and skips PR creation when validation fails", %{
       tmp_dir: tmp_dir
     } do
@@ -1303,26 +1382,10 @@ defmodule Arbor.Actions.CodingTest do
       end
   end
 
-  # Mirrors ProduceReviewableChange.worktree_dir_name/1 so tests can pre-register
+  # Mirrors Coding.Workspace.worktree_dir_name/1 so tests can pre-register
   # the exact path the action will reuse.
   defp expected_worktree_path(base_dir, branch_name) do
-    slug =
-      branch_name
-      |> String.replace(~r/[^A-Za-z0-9._-]+/, "-")
-      |> String.trim("-")
-      |> String.slice(0, 48)
-      |> case do
-        "" -> "change"
-        value -> value
-      end
-
-    hash =
-      branch_name
-      |> then(&:crypto.hash(:sha256, &1))
-      |> Base.encode16(case: :lower)
-      |> binary_part(0, 12)
-
-    Path.join(base_dir, "arbor-coding-agent-#{slug}-#{hash}")
+    Path.join(base_dir, Coding.Workspace.worktree_dir_name(branch_name))
   end
 
   defp worktree_registered?(repo_root, worktree_path) do

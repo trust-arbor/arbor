@@ -5,16 +5,23 @@ defmodule Arbor.Actions.Coding do
   These actions compose existing primitives into reviewable software-change
   workflows. The v0 path delegates implementation to an ACP coding agent, then
   validates and hands the result back as a human-reviewed branch/PR.
+
+  Workspace lease primitives live under `Arbor.Actions.Coding.Workspace`
+  (`acquire` / `inspect` / `release`) and are monitored by
+  `Arbor.Actions.Coding.WorkspaceLeaseRegistry`.
   """
 
   defmodule ProduceReviewableChange do
     @moduledoc """
     Produce a reviewable code change in an isolated git worktree.
 
-    The action creates a new worktree/branch, starts an ACP coding-agent session
-    in `permission_mode: :default`, asks it to implement the requested task,
-    runs validation commands, and commits the result. It can optionally open a
-    draft PR, but never merges its own work.
+    The action acquires a monitored workspace lease (worktree/branch), starts an
+    ACP coding-agent session in `permission_mode: :default`, asks it to implement
+    the requested task, runs validation commands, and commits the result. It can
+    optionally open a draft PR, but never merges its own work.
+
+    On every normal return the worktree is retained. Cancellation via process
+    death removes only invocation-owned worktrees (reused paths survive).
     """
 
     use Jido.Action,
@@ -113,6 +120,7 @@ defmodule Arbor.Actions.Coding do
 
     alias Arbor.Actions
     alias Arbor.Actions.{Acp, Council, Git, Shell}
+    alias Arbor.Actions.Coding.Workspace
     alias Arbor.Actions.Mix, as: MixActions
 
     @default_validation_commands ["./bin/mix compile --warnings-as-errors"]
@@ -155,33 +163,36 @@ defmodule Arbor.Actions.Coding do
     def run(%{task: task, repo_path: repo_path} = params, context) do
       Actions.emit_started(__MODULE__, %{repo_path: repo_path, task: task})
 
-      with {:ok, repo_root} <- resolve_repo_root(repo_path),
-           {:ok, branch_name} <- resolve_branch_name(params),
-           {:ok, worktree_path, ownership} <- create_worktree(repo_root, branch_name, params) do
-        # A separate monitor process owns cleanup: TaskStore/Session cancel kills
-        # this action with :kill (try/after never runs). Only paths *added* by this
-        # invocation are owned — never force-remove a pre-existing/reused worktree.
-        # On normal return we release the guard so declined / no_changes /
-        # validation_failed keep the worktree as before.
-        guard =
-          if ownership == :owned do
-            start_worktree_owner_guard(repo_root, worktree_path, context)
-          else
-            nil
-          end
+      # Workspace lease owns worktree lifecycle + owner-death cleanup (registry
+      # monitor). On every normal return we retain so declined / no_changes /
+      # validation_failed / success keep the worktree for inspection.
+      with {:ok, workspace} <- acquire_workspace(params, context) do
+        repo_root = map_value(workspace, :repo_path)
+        worktree_path = map_value(workspace, :worktree_path)
+        branch_name = map_value(workspace, :branch)
+        workspace_id = map_value(workspace, :workspace_id)
 
         try do
           with {:ok, session} <- start_acp_session(worktree_path, params, context),
                {:ok, response} <- prompt_acp_agent(session, worktree_path, params, context) do
             maybe_close_session(session, context)
-            finish_change(repo_root, worktree_path, branch_name, response, params, context)
+
+            finish_change(
+              repo_root,
+              worktree_path,
+              branch_name,
+              response,
+              params,
+              context,
+              workspace
+            )
           else
             {:error, reason} ->
               Actions.emit_failed(__MODULE__, reason)
               {:error, reason}
           end
         after
-          release_worktree_owner_guard(guard)
+          release_workspace(workspace_id, "retain", context)
         end
       else
         {:error, reason} ->
@@ -192,7 +203,42 @@ defmodule Arbor.Actions.Coding do
 
     def run(_params, _context), do: {:error, "task and repo_path are required"}
 
-    defp finish_change(repo_root, worktree_path, branch_name, response, params, context) do
+    defp acquire_workspace(params, context) do
+      acquire_params =
+        %{repo_path: get_param(params, :repo_path)}
+        |> put_if_present(:base_ref, get_param(params, :base_ref))
+        |> put_if_present(:branch_name, get_param(params, :branch_name))
+        |> put_if_present(:worktree_base_dir, get_param(params, :worktree_base_dir))
+        |> put_if_present(:task, get_param(params, :task))
+
+      call_action(Workspace.Acquire, acquire_params, context)
+    end
+
+    defp release_workspace(workspace_id, mode, context) when is_binary(workspace_id) do
+      _ =
+        call_action(
+          Workspace.Release,
+          %{workspace_id: workspace_id, mode: mode},
+          context
+        )
+
+      :ok
+    end
+
+    defp release_workspace(_workspace_id, _mode, _context), do: :ok
+
+    defp finish_change(
+           repo_root,
+           worktree_path,
+           branch_name,
+           response,
+           params,
+           context,
+           workspace
+         ) do
+      base_commit = map_value(workspace, :base_commit)
+      inspection = Workspace.inspect_worktree(worktree_path, base_commit)
+
       cond do
         declined?(response) ->
           result = %{
@@ -206,7 +252,8 @@ defmodule Arbor.Actions.Coding do
           Actions.emit_completed(__MODULE__, result)
           {:ok, result}
 
-        worktree_clean?(worktree_path) ->
+        # Clean and HEAD still at acquire base: truly no reviewable change.
+        not inspection.changed_from_base ->
           result = %{
             status: "no_changes",
             branch: branch_name,
@@ -218,353 +265,104 @@ defmodule Arbor.Actions.Coding do
           Actions.emit_completed(__MODULE__, result)
           {:ok, result}
 
+        # Dirty worktree: wrapper owns the commit after validation.
+        inspection.dirty == true ->
+          complete_after_edits(
+            repo_root,
+            worktree_path,
+            branch_name,
+            response,
+            params,
+            context,
+            :commit
+          )
+
+        # Clean but HEAD advanced (ACP worker already committed): adopt HEAD.
         true ->
-          with {:ok, validations} <- run_validations(worktree_path, params, context),
-               {:ok, commit} <- commit_change(worktree_path, params, context) do
-            result =
-              finalize_committed_change(
-                repo_root,
-                worktree_path,
-                branch_name,
-                response,
-                validations,
-                params,
-                context,
-                commit
-              )
-
-            Actions.emit_completed(__MODULE__, result)
-            {:ok, result}
-          else
-            {:validation_failed, validations} ->
-              result = %{
-                status: "validation_failed",
-                repo_path: repo_root,
-                worktree_path: worktree_path,
-                branch: branch_name,
-                acp_agent: selected_acp_agent(params),
-                validation: validations,
-                response_text: response_text(response)
-              }
-
-              Actions.emit_completed(__MODULE__, result)
-              {:ok, result}
-
-            {:pr_failed, reason, commit} ->
-              result = %{
-                status: "pr_failed",
-                repo_path: repo_root,
-                worktree_path: worktree_path,
-                branch: branch_name,
-                commit: commit[:commit_hash] || commit["commit_hash"],
-                acp_agent: selected_acp_agent(params),
-                error: reason,
-                validation: [],
-                response_text: response_text(response)
-              }
-
-              Actions.emit_completed(__MODULE__, result)
-              {:ok, result}
-
-            {:error, reason} ->
-              {:error, reason}
-          end
+          complete_after_edits(
+            repo_root,
+            worktree_path,
+            branch_name,
+            response,
+            params,
+            context,
+            {:adopt, inspection.head_commit}
+          )
       end
     end
 
-    defp resolve_repo_root(path) when is_binary(path) do
-      expanded = Path.expand(path)
+    defp complete_after_edits(
+           repo_root,
+           worktree_path,
+           branch_name,
+           response,
+           params,
+           context,
+           commit_mode
+         ) do
+      with {:ok, validations} <- run_validations(worktree_path, params, context),
+           {:ok, commit} <- resolve_reviewable_commit(worktree_path, params, context, commit_mode) do
+        result =
+          finalize_committed_change(
+            repo_root,
+            worktree_path,
+            branch_name,
+            response,
+            validations,
+            params,
+            context,
+            commit
+          )
 
-      case git(expanded, ["rev-parse", "--show-toplevel"]) do
-        {:ok, output} -> {:ok, String.trim(output)}
-        {:error, reason} -> {:error, "repo_path is not a git repository: #{reason}"}
-      end
-    end
-
-    defp resolve_repo_root(_), do: {:error, "repo_path must be a string"}
-
-    defp resolve_branch_name(params) do
-      params
-      |> get_param(:branch_name)
-      |> case do
-        nil -> generated_branch_name(get_param(params, :task))
-        "" -> generated_branch_name(get_param(params, :task))
-        branch -> {:ok, branch}
-      end
-      |> validate_branch_name()
-    end
-
-    defp generated_branch_name(task) do
-      slug =
-        task
-        |> to_string()
-        |> String.downcase()
-        |> String.replace(~r/[^a-z0-9]+/, "-")
-        |> String.trim("-")
-        |> String.slice(0, 48)
-        |> case do
-          "" -> "change"
-          value -> value
-        end
-
-      unique = System.unique_integer([:positive])
-      {:ok, "arbor/coding-agent/#{slug}-#{unique}"}
-    end
-
-    defp validate_branch_name({:ok, branch}) do
-      cond do
-        not is_binary(branch) or branch == "" ->
-          {:error, "branch_name must be a non-empty string"}
-
-        String.starts_with?(branch, "-") ->
-          {:error, "branch_name must not start with '-'"}
-
-        String.contains?(branch, ["..", "@{", "\\"]) ->
-          {:error, "branch_name contains a forbidden git ref sequence"}
-
-        String.ends_with?(branch, ["/", "."]) ->
-          {:error, "branch_name must not end with '/' or '.'"}
-
-        not Regex.match?(~r/^[A-Za-z0-9._\/-]+$/, branch) ->
-          {:error, "branch_name contains unsupported characters"}
-
-        true ->
-          {:ok, branch}
-      end
-    end
-
-    # -- Cancellation-owned worktree cleanup ---------------------------------
-    # Survives :kill of the action process (unlike try/after). Only armed when
-    # this invocation *added* the worktree path (`:owned`). Released on every
-    # normal return path so validation_failed / declined / no_changes retain the
-    # worktree for inspection, matching prior behavior.
-
-    defp start_worktree_owner_guard(repo_root, worktree_path, context) do
-      case map_value(context, :worktree_owner_guard) do
-        fun when is_function(fun, 3) ->
-          fun.(repo_root, worktree_path, self())
-
-        fun when is_function(fun, 2) ->
-          fun.(repo_root, worktree_path)
-
-        _ ->
-          spawn_worktree_owner_guard(repo_root, worktree_path, self())
-      end
-    end
-
-    defp spawn_worktree_owner_guard(repo_root, worktree_path, owner)
-         when is_binary(repo_root) and is_binary(worktree_path) and is_pid(owner) do
-      spawn(fn ->
-        ref = Process.monitor(owner)
-
-        receive do
-          {:DOWN, ^ref, :process, ^owner, _reason} ->
-            remove_owned_worktree(repo_root, worktree_path)
-
-          :release ->
-            Process.demonitor(ref, [:flush])
-            :ok
-        end
-      end)
-    end
-
-    defp release_worktree_owner_guard(guard) when is_pid(guard) do
-      send(guard, :release)
-      :ok
-    end
-
-    defp release_worktree_owner_guard(_guard), do: :ok
-
-    # Destructive: private on purpose — only the owner-death guard may call this.
-    defp remove_owned_worktree(repo_root, worktree_path)
-         when is_binary(repo_root) and is_binary(worktree_path) do
-      if File.dir?(worktree_path) do
-        case System.cmd(
-               "git",
-               ["-C", repo_root, "worktree", "remove", "--force", worktree_path],
-               stderr_to_stdout: true
-             ) do
-          {_output, 0} ->
-            :ok
-
-          {_output, _code} ->
-            # Force-remove even if git worktree metadata is stale (dirty cancel).
-            File.rm_rf(worktree_path)
-            _ = System.cmd("git", ["-C", repo_root, "worktree", "prune"], stderr_to_stdout: true)
-            :ok
-        end
+        Actions.emit_completed(__MODULE__, result)
+        {:ok, result}
       else
-        :ok
-      end
-    rescue
-      _ -> :ok
-    catch
-      :exit, _ -> :ok
-    end
+        {:validation_failed, validations} ->
+          result = %{
+            status: "validation_failed",
+            repo_path: repo_root,
+            worktree_path: worktree_path,
+            branch: branch_name,
+            acp_agent: selected_acp_agent(params),
+            validation: validations,
+            response_text: response_text(response)
+          }
 
-    # Returns `{:ok, path, ownership}` where ownership is:
-    #   :owned     — this invocation added the worktree path (remove on cancel)
-    #   :not_owned — path already present or branch already checked out elsewhere
-    defp create_worktree(repo_root, branch_name, params) do
-      base_dir =
-        params
-        |> get_param(:worktree_base_dir)
-        |> case do
-          nil -> System.tmp_dir!()
-          path -> Path.expand(path)
-        end
+          Actions.emit_completed(__MODULE__, result)
+          {:ok, result}
 
-      File.mkdir_p!(base_dir)
-      base_ref = get_param(params, :base_ref) || "HEAD"
-      worktree_path = Path.join(base_dir, worktree_dir_name(branch_name))
+        {:pr_failed, reason, commit} ->
+          result = %{
+            status: "pr_failed",
+            repo_path: repo_root,
+            worktree_path: worktree_path,
+            branch: branch_name,
+            commit: commit[:commit_hash] || commit["commit_hash"],
+            acp_agent: selected_acp_agent(params),
+            error: reason,
+            validation: [],
+            response_text: response_text(response)
+          }
 
-      with {:ok, base_commit} <- rev_parse(repo_root, base_ref),
-           {:ok, path, ownership, reset?} <-
-             ensure_worktree(repo_root, branch_name, worktree_path, base_commit),
-           :ok <- maybe_reset_reused_worktree(path, base_commit, reset?) do
-        {:ok, path, ownership}
-      end
-    end
-
-    defp worktree_dir_name(branch_name) do
-      slug =
-        branch_name
-        |> String.replace(~r/[^A-Za-z0-9._-]+/, "-")
-        |> String.trim("-")
-        |> String.slice(0, 48)
-        |> case do
-          "" -> "change"
-          value -> value
-        end
-
-      hash =
-        branch_name
-        |> then(&:crypto.hash(:sha256, &1))
-        |> Base.encode16(case: :lower)
-        |> binary_part(0, 12)
-
-      "arbor-coding-agent-#{slug}-#{hash}"
-    end
-
-    defp rev_parse(repo_root, ref) do
-      case git(repo_root, ["rev-parse", "--verify", ref]) do
-        {:ok, output} -> {:ok, String.trim(output)}
-        {:error, reason} -> {:error, "failed to resolve base_ref #{inspect(ref)}: #{reason}"}
-      end
-    end
-
-    # Ownership is about the *path*, not the branch:
-    # - already-present path at our computed location → :not_owned
-    # - branch already checked out at another worktree → :not_owned
-    # - pre-existing branch, newly added path → :owned (branch reuse is fine)
-    # - new branch + new path → :owned
-    # `reset?` is independent: reused worktrees / attached branches start clean.
-    defp ensure_worktree(repo_root, branch_name, worktree_path, base_commit) do
-      cond do
-        File.dir?(worktree_path) ->
-          with {:ok, path} <- ensure_existing_worktree_branch(worktree_path, branch_name) do
-            # Already-present worktree path — not owned; never remove on cancel.
-            {:ok, path, :not_owned, true}
-          end
-
-        existing_path = worktree_for_branch(repo_root, branch_name) ->
-          # Already-checked-out branch path elsewhere — not owned; never remove.
-          {:ok, existing_path, :not_owned, true}
-
-        branch_exists?(repo_root, branch_name) ->
-          # Pre-existing branch with no worktree: path is newly added → owned.
-          with {:ok, path} <- add_existing_branch_worktree(repo_root, branch_name, worktree_path) do
-            {:ok, path, :owned, true}
-          end
-
-        true ->
-          with {:ok, path} <-
-                 add_new_branch_worktree(repo_root, branch_name, worktree_path, base_commit) do
-            {:ok, path, :owned, false}
-          end
-      end
-    end
-
-    defp ensure_existing_worktree_branch(worktree_path, branch_name) do
-      case git(worktree_path, ["branch", "--show-current"]) do
-        {:ok, output} ->
-          current_branch = String.trim(output)
-
-          if current_branch == branch_name do
-            {:ok, worktree_path}
-          else
-            {:error,
-             "existing worktree #{worktree_path} is on #{inspect(current_branch)}, expected #{inspect(branch_name)}"}
-          end
+          Actions.emit_completed(__MODULE__, result)
+          {:ok, result}
 
         {:error, reason} ->
-          {:error, "existing worktree #{worktree_path} is not usable: #{reason}"}
+          {:error, reason}
       end
     end
 
-    defp worktree_for_branch(repo_root, branch_name) do
-      with {:ok, output} <- git(repo_root, ["worktree", "list", "--porcelain"]) do
-        output
-        |> String.split("\n\n", trim: true)
-        |> Enum.find_value(fn entry ->
-          lines = String.split(entry, "\n", trim: true)
-          path = line_value(lines, "worktree ")
-          branch = line_value(lines, "branch refs/heads/")
-
-          if branch == branch_name, do: path
-        end)
-      else
-        _ -> nil
-      end
+    defp resolve_reviewable_commit(worktree_path, params, context, :commit) do
+      commit_change(worktree_path, params, context)
     end
 
-    defp line_value(lines, prefix) do
-      lines
-      |> Enum.find_value(fn line ->
-        if String.starts_with?(line, prefix) do
-          String.replace_prefix(line, prefix, "")
-        end
-      end)
+    defp resolve_reviewable_commit(_worktree_path, _params, _context, {:adopt, head_commit})
+         when is_binary(head_commit) and head_commit != "" do
+      {:ok, %{commit_hash: head_commit}}
     end
 
-    defp branch_exists?(repo_root, branch_name) do
-      case git(repo_root, ["show-ref", "--verify", "--quiet", "refs/heads/#{branch_name}"]) do
-        {:ok, _} -> true
-        {:error, _} -> false
-      end
-    end
-
-    defp add_existing_branch_worktree(repo_root, branch_name, worktree_path) do
-      case System.cmd(
-             "git",
-             ["-C", repo_root, "worktree", "add", worktree_path, branch_name],
-             stderr_to_stdout: true
-           ) do
-        {_output, 0} -> {:ok, worktree_path}
-        {output, _code} -> {:error, "failed to create worktree: #{String.trim(output)}"}
-      end
-    end
-
-    defp add_new_branch_worktree(repo_root, branch_name, worktree_path, base_commit) do
-      case System.cmd(
-             "git",
-             ["-C", repo_root, "worktree", "add", "-b", branch_name, worktree_path, base_commit],
-             stderr_to_stdout: true
-           ) do
-        {_output, 0} -> {:ok, worktree_path}
-        {output, _code} -> {:error, "failed to create worktree: #{String.trim(output)}"}
-      end
-    end
-
-    defp maybe_reset_reused_worktree(_worktree_path, _base_commit, false), do: :ok
-
-    defp maybe_reset_reused_worktree(worktree_path, base_commit, true) do
-      with {:ok, _} <- git(worktree_path, ["reset", "--hard", base_commit]),
-           {:ok, _} <- git(worktree_path, ["clean", "-fd"]) do
-        :ok
-      else
-        {:error, reason} -> {:error, "failed to reset existing worktree: #{reason}"}
-      end
+    defp resolve_reviewable_commit(_worktree_path, _params, _context, {:adopt, _}) do
+      {:error, "ACP self-commit advanced HEAD but commit hash is unavailable"}
     end
 
     defp start_acp_session(worktree_path, params, context) do
@@ -657,14 +455,6 @@ defmodule Arbor.Actions.Coding do
     end
 
     defp response_text(response), do: to_string(response[:text] || response["text"] || "")
-
-    defp worktree_clean?(worktree_path) do
-      case git(worktree_path, ["status", "--porcelain"]) do
-        {:ok, ""} -> true
-        {:ok, output} -> String.trim(output) == ""
-        {:error, _reason} -> false
-      end
-    end
 
     defp run_validations(worktree_path, params, context) do
       commands = validation_commands(params)

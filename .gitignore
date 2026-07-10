@@ -6,7 +6,7 @@ attacksurface.*.md
 # Dependencies (directory or accidental worktree symlink to parent deps)
 /deps
 
-# Build artifacts
+# Build artifacts (directory or accidental worktree symlink to parent _build)
 /_build
 **/apps/*/_build/
 **/apps/*/deps/

@@ -12,7 +12,9 @@ defmodule Arbor.Actions.Application do
   def start(_type, _args) do
     children = [
       # Registry for tracking action executions if needed
-      {Registry, keys: :unique, name: Arbor.Actions.Registry}
+      {Registry, keys: :unique, name: Arbor.Actions.Registry},
+      # Coding workspace leases - monitored worktree lifecycle, independent of orchestrator.
+      Arbor.Actions.Coding.WorkspaceLeaseRegistry
     ]
 
     opts = [strategy: :one_for_one, name: Arbor.Actions.Supervisor]
