@@ -33,6 +33,7 @@ defmodule Arbor.Orchestrator.Engine.ContentHash do
        * `compute` → `prompt_context_key`, `system_prompt_context_key`, `messages_context_key`
        * `gate` with `predicate="expression"` → context refs parsed from `expression`
        * `read` / `write` → `source_key`
+       * `transform` templates → every `{ctx.KEY}` reference in `expression` or `prompt`
 
     Without (3), nodes that read different context values across loop
     iterations (e.g. a transform with `source_key=foo` where `foo` changes
@@ -66,7 +67,7 @@ defmodule Arbor.Orchestrator.Engine.ContentHash do
 
     case type do
       "transform" ->
-        [Map.get(attrs, "source_key", "last_response")]
+        [Map.get(attrs, "source_key", "last_response")] ++ template_context_refs(attrs)
 
       "exec" ->
         from_context_keys =
@@ -145,6 +146,25 @@ defmodule Arbor.Orchestrator.Engine.ContentHash do
   end
 
   defp extract_expression_refs(_), do: []
+
+  # Transform templates read every `{ctx.KEY}` placeholder in addition to their
+  # `source_key`. Keep the extracted keys sorted and unique so the hash input is
+  # stable regardless of placeholder order or duplication.
+  defp template_context_refs(attrs) do
+    attrs
+    |> Map.take(["expression", "prompt"])
+    |> Map.values()
+    |> Enum.flat_map(&extract_template_refs/1)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp extract_template_refs(text) when is_binary(text) do
+    for [key] <- Regex.scan(~r/\{ctx\.([a-zA-Z0-9_.-]+)\}/, text, capture: :all_but_first),
+        do: key
+  end
+
+  defp extract_template_refs(_), do: []
 
   @doc """
   Determine if a node can be skipped based on content hash match.

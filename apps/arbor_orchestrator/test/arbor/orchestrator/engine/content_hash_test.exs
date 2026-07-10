@@ -98,6 +98,34 @@ defmodule Arbor.Orchestrator.Engine.ContentHashTest do
       hash2 = ContentHash.compute(node, ctx2)
       assert hash1 == hash2
     end
+
+    test "template context references invalidate the hash while irrelevant context stays ignored" do
+      node =
+        Node.from_attrs("review_prompt", %{
+          "type" => "transform",
+          "transform" => "template",
+          "source_key" => "task",
+          "expression" =>
+            "Task: {value}; feedback: {ctx.review.feedback}; tier: {ctx.review.tier}; repeat: {ctx.review.feedback}",
+          "prompt" => "Recommendation: {ctx.review.recommendation}"
+        })
+
+      unchanged = %{
+        "task" => "fix the validation failure",
+        "review.feedback" => "add a regression test",
+        "review.tier" => "strict",
+        "review.recommendation" => "rework",
+        "irrelevant" => "first value"
+      }
+
+      feedback_changed = %{unchanged | "review.feedback" => "handle the unknown enum"}
+      irrelevant_changed = %{unchanged | "irrelevant" => "second value"}
+
+      hash = ContentHash.compute(node, Context.new(unchanged))
+
+      refute hash == ContentHash.compute(node, Context.new(feedback_changed))
+      assert hash == ContentHash.compute(node, Context.new(irrelevant_changed))
+    end
   end
 
   describe "can_skip?/4" do

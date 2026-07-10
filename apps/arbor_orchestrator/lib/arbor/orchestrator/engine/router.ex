@@ -108,14 +108,14 @@ defmodule Arbor.Orchestrator.Engine.Router do
           Enum.find(unconditional, fn edge ->
             normalize_label(Map.get(edge.attrs, "label", "")) ==
               normalize_label(outcome.preferred_label || "")
-          end) || best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
+          end) || best_by_weight_then_lexical(unconditional)
 
         outcome.suggested_next_ids != [] ->
           find_suggested_edge(unconditional, outcome.suggested_next_ids) ||
-            best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
+            best_by_weight_then_lexical(unconditional)
 
         true ->
-          best_by_weight_then_lexical(unconditional_or_all(unconditional, edges))
+          best_by_weight_then_lexical(unconditional)
       end
     end
   end
@@ -125,9 +125,6 @@ defmodule Arbor.Orchestrator.Engine.Router do
       Enum.find(unconditional, fn edge -> edge.to == suggested_id end)
     end)
   end
-
-  defp unconditional_or_all([], edges), do: edges
-  defp unconditional_or_all(unconditional, _edges), do: unconditional
 
   defp edge_condition_matches?(edge, outcome, context) do
     case edge.parsed_condition do
