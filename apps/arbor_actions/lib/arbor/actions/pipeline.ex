@@ -414,14 +414,64 @@ defmodule Arbor.Actions.Pipeline do
   end
 
   defp read_verified_source_file(resolved) do
-    with {:ok, identity} <- regular_file_identity(resolved.real_path),
-         {:ok, content} <- File.read(resolved.real_path),
-         :ok <- run_source_file_post_read_hook(resolved.real_path),
-         :ok <- verify_source_file(resolved, identity, byte_size(content)) do
-      {:ok, content}
+    with {:ok, path_identity} <- regular_file_identity(resolved.real_path),
+         {:ok, io_device} <- :file.open(resolved.real_path, [:read, :binary, :raw]) do
+      try do
+        read_open_source_file(io_device, resolved, path_identity)
+      after
+        _ = :file.close(io_device)
+      end
     else
       {:error, :source_file_changed_during_read} = error -> error
       {:error, reason} -> {:error, {:file_read_failed, resolved.real_path, reason}}
+    end
+  end
+
+  defp read_open_source_file(io_device, resolved, path_identity) do
+    with {:ok, opened_identity} <- descriptor_regular_file_identity(io_device),
+         true <- opened_identity == path_identity,
+         :ok <- run_source_file_read_hook(:after_open, resolved.real_path),
+         {:ok, content} <- read_descriptor(io_device, opened_identity.size),
+         :ok <- run_source_file_read_hook(:after_read, resolved.real_path),
+         {:ok, final_descriptor_identity} <- descriptor_regular_file_identity(io_device),
+         true <- final_descriptor_identity == opened_identity,
+         :ok <- verify_source_file(resolved, opened_identity, byte_size(content)) do
+      {:ok, content}
+    else
+      false -> {:error, :source_file_changed_during_read}
+      {:error, :source_not_regular_file} -> {:error, :source_file_changed_during_read}
+      {:error, :source_file_changed_during_read} = error -> error
+      {:error, reason} -> {:error, {:file_read_failed, resolved.real_path, reason}}
+    end
+  end
+
+  defp read_descriptor(io_device, expected_size)
+       when is_integer(expected_size) and expected_size >= 0 do
+    case :file.read(io_device, expected_size) do
+      {:ok, content} when is_binary(content) and byte_size(content) == expected_size ->
+        require_descriptor_eof(io_device, content)
+
+      :eof when expected_size == 0 ->
+        require_descriptor_eof(io_device, <<>>)
+
+      {:ok, _short_or_invalid_content} ->
+        {:error, :source_file_changed_during_read}
+
+      :eof ->
+        {:error, :source_file_changed_during_read}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp read_descriptor(_io_device, _expected_size), do: {:error, :invalid_source_file_size}
+
+  defp require_descriptor_eof(io_device, content) do
+    case :file.read(io_device, 1) do
+      :eof -> {:ok, content}
+      {:ok, _extra_bytes} -> {:error, :source_file_changed_during_read}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -444,25 +494,35 @@ defmodule Arbor.Actions.Pipeline do
 
   defp regular_file_identity(path) do
     case File.lstat(path, time: :posix) do
-      {:ok, %File.Stat{type: :regular} = stat} ->
-        {:ok,
-         %{
-           type: stat.type,
-           inode: stat.inode,
-           major_device: stat.major_device,
-           minor_device: stat.minor_device,
-           size: stat.size,
-           mtime: stat.mtime,
-           ctime: stat.ctime
-         }}
-
-      {:ok, %File.Stat{}} ->
-        {:error, :source_not_regular_file}
+      {:ok, stat} ->
+        regular_identity(stat)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
+
+  defp descriptor_regular_file_identity(io_device) do
+    case :file.read_file_info(io_device, time: :posix) do
+      {:ok, file_info} -> file_info |> File.Stat.from_record() |> regular_identity()
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp regular_identity(%File.Stat{type: :regular} = stat) do
+    {:ok,
+     %{
+       type: stat.type,
+       inode: stat.inode,
+       major_device: stat.major_device,
+       minor_device: stat.minor_device,
+       size: stat.size,
+       mtime: stat.mtime,
+       ctime: stat.ctime
+     }}
+  end
+
+  defp regular_identity(%File.Stat{}), do: {:error, :source_not_regular_file}
 
   defp directory_identity(path) do
     case File.lstat(path, time: :posix) do
@@ -484,13 +544,20 @@ defmodule Arbor.Actions.Pipeline do
   end
 
   # Process-local synchronization point used only by race regression tests.
-  defp run_source_file_post_read_hook(real_path) do
+  defp run_source_file_read_hook(stage, real_path) do
     case Process.get(@source_file_post_read_hook_key) do
       nil ->
         :ok
 
-      hook when is_function(hook, 1) ->
+      hook when is_function(hook, 2) ->
+        hook.(stage, real_path)
+        :ok
+
+      hook when is_function(hook, 1) and stage == :after_read ->
         hook.(real_path)
+        :ok
+
+      hook when is_function(hook, 1) ->
         :ok
 
       _invalid ->

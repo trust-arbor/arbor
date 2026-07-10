@@ -116,7 +116,7 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
     authority
   end
 
-  defp with_source_file_post_read_hook(hook, fun) do
+  defp with_source_file_read_hook(hook, fun) do
     key = {Pipeline, :source_file_post_read_hook}
     previous = Process.put(key, hook)
 
@@ -289,7 +289,7 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
       end
 
       result =
-        with_source_file_post_read_hook(replace_with_symlink, fn ->
+        with_source_file_read_hook(replace_with_symlink, fn ->
           Pipeline.resolve_source(%{source_file: relative_dot}, authority)
         end)
 
@@ -315,7 +315,7 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
       end
 
       result =
-        with_source_file_post_read_hook(replace_with_regular_file, fn ->
+        with_source_file_read_hook(replace_with_regular_file, fn ->
           Pipeline.resolve_source(%{source_file: relative_dot}, authority)
         end)
 
@@ -344,12 +344,53 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
       end
 
       result =
-        with_source_file_post_read_hook(replace_workdir, fn ->
+        with_source_file_read_hook(replace_workdir, fn ->
           Pipeline.resolve_source(%{source_file: relative_dot}, authority)
         end)
 
       assert {:error, :source_file_changed_during_read} = result
       refute match?({:ok, _bytes}, result)
+    end
+
+    test "security regression: descriptor-bound source_file double-swap reads opened inode", %{
+      principal: principal,
+      signer: signer,
+      workdir: workdir
+    } do
+      grant!(principal, "arbor://fs/read#{workdir}/**")
+
+      source_dir = Path.join(workdir, "double-swap")
+      original_dir = Path.join(workdir, "double-swap-original")
+      source_path = Path.join(source_dir, "child.dot")
+      relative_source = "double-swap/child.dot"
+      alternate = String.replace(@simple_dot, "SourceFileAuth", "DoubleSwapRace")
+
+      File.mkdir_p!(source_dir)
+      File.write!(source_path, @simple_dot)
+      refute alternate == @simple_dot
+      assert byte_size(alternate) == byte_size(@simple_dot)
+
+      authority = source_authority!(principal, signer, workdir, relative_source)
+
+      double_swap = fn
+        :after_open, _real_path ->
+          File.rename!(source_dir, original_dir)
+          File.mkdir_p!(source_dir)
+          File.write!(source_path, alternate)
+
+        :after_read, _real_path ->
+          File.rm_rf!(source_dir)
+          File.rename!(original_dir, source_dir)
+      end
+
+      result =
+        with_source_file_read_hook(double_swap, fn ->
+          Pipeline.resolve_source(%{source_file: relative_source}, authority)
+        end)
+
+      assert {:ok, @simple_dot} = result
+      refute result == {:ok, alternate}
+      assert File.read!(source_path) == @simple_dot
     end
 
     test "unchanged authorized source_file returns its bytes", %{
