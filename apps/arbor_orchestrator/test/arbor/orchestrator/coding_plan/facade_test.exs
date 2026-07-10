@@ -2,7 +2,9 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Contracts.Coding.Plan
-  alias Arbor.Orchestrator.CodingPlan.Compilation
+  alias Arbor.Orchestrator.CodingPlan.{Compilation, ExecutionManifest}
+  alias Arbor.Orchestrator.Dot.Parser
+  alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
 
   defmodule FakeCompiler do
     alias Arbor.Contracts.Coding.Plan
@@ -425,6 +427,11 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
     action_catalog_digest = String.duplicate("c", 64)
     compiler_version = "test-compiler-1"
     template_version = "test-template-1"
+    {:ok, parsed_graph} = Parser.parse(dot_source)
+    {:ok, compiled_graph} = IRCompiler.compile(parsed_graph)
+
+    {:ok, {execution_manifest, execution_manifest_digest}} =
+      ExecutionManifest.build(compiled_graph, %{"actions" => []}, graph_hash)
 
     initial_values =
       %{
@@ -461,6 +468,8 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
       "review_profile" => plan.review_profile,
       "overlays" => plan.overlays,
       "action_catalog_digest" => action_catalog_digest,
+      "execution_manifest" => execution_manifest,
+      "execution_manifest_digest" => execution_manifest_digest,
       "action_names" => [],
       "handler_types" => []
     }
@@ -473,6 +482,8 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
       template_version: template_version,
       plan_fingerprint: plan_fingerprint,
       action_catalog_digest: action_catalog_digest,
+      execution_manifest: execution_manifest,
+      execution_manifest_digest: execution_manifest_digest,
       initial_values: initial_values,
       manifest: manifest
     }

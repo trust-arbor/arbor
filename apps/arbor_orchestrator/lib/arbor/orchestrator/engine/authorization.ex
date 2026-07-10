@@ -116,7 +116,9 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
     authority = Keyword.get(opts, :run_authorization)
 
     with %RunAuthorization{} <- authority,
-         :ok <- RunAuthorization.validate_node(node, authority) do
+         :ok <- RunAuthorization.verify_workdir(authority),
+         :ok <- RunAuthorization.validate_node(node, authority),
+         :ok <- RunAuthorization.verify_handler(authority, node, handler) do
       node = RunAuthorization.sanitize_node(node, authority)
       type = Registry.node_type(node)
       agent_id = authority.execution_principal
@@ -154,6 +156,12 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
         %Outcome{
           status: :fail,
           failure_reason: "unauthorized: graph principal override on node #{node_id}"
+        }
+
+      {:error, reason} ->
+        %Outcome{
+          status: :fail,
+          failure_reason: "unauthorized: handler execution binding rejected: #{inspect(reason)}"
         }
 
       _ ->

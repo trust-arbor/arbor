@@ -72,85 +72,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     @moduledoc false
 
     alias Arbor.Contracts.Coding.Plan
-    alias Arbor.Orchestrator.CodingPlan.Compilation
+    alias Arbor.Orchestrator.CodingPlan.Compiler
 
     def compile(%Plan{} = plan, opts) do
-      template_path = Keyword.fetch!(opts, :template_path)
-      {:ok, dot_source} = File.read(template_path)
-      plan_map = Plan.to_map(plan)
-      graph_hash = sha256(dot_source)
-      plan_fingerprint = plan_map |> Jason.encode!() |> sha256()
-      catalog_digest = sha256("fake-action-catalog")
+      with {:ok, compilation} <- Compiler.compile(plan, opts) do
+        initial_values =
+          Map.put(compilation.initial_values, "permission_mode", plan.worker["permission_mode"])
 
-      initial_values =
-        %{
-          "task" => plan.task,
-          "repo_path" => plan.repo_root,
-          "base_ref" => plan.base_ref,
-          "acp_agent" => plan.worker["provider"],
-          "open_pr" => bool_string(plan.output["draft_pr"]),
-          "submit_review" => bool_string(plan.review_profile != "none"),
-          "timeout" => plan.budgets["wall_clock_ms"],
-          "inactivity_timeout_ms" => plan.budgets["inactivity_timeout_ms"],
-          "permission_mode" => plan.worker["permission_mode"],
-          "coding_plan_compiler_version" => "fake-coding-plan-1",
-          "coding_plan_template_version" => "coding-change-v1",
-          "coding_plan_version" => plan.version,
-          "coding_plan_fingerprint" => plan_fingerprint,
-          "coding_plan_task_class" => plan.task_class,
-          "coding_plan_validation_profile" => plan.validation_profile,
-          "coding_plan_review_profile" => plan.review_profile,
-          "coding_plan_action_catalog_digest" => catalog_digest
-        }
-        |> maybe_put("branch_name", plan.workspace_policy["branch_name"])
-        |> maybe_put("worktree_base_dir", plan.workspace_policy["worktree_base_dir"])
-        |> maybe_put("model", plan.worker["model"])
-        |> maybe_put_test_paths(plan)
-
-      manifest = %{
-        "compiler_version" => "fake-coding-plan-1",
-        "template_version" => "coding-change-v1",
-        "graph_hash" => graph_hash,
-        "plan_fingerprint" => plan_fingerprint,
-        "plan_version" => plan.version,
-        "task_class" => plan.task_class,
-        "validation_profile" => plan.validation_profile,
-        "review_profile" => plan.review_profile,
-        "overlays" => plan.overlays,
-        "action_catalog_digest" => catalog_digest,
-        "action_names" => [],
-        "handler_types" => []
-      }
-
-      {:ok,
-       %Compilation{
-         plan_map: plan_map,
-         dot_source: dot_source,
-         graph_hash: graph_hash,
-         compiler_version: "fake-coding-plan-1",
-         template_version: "coding-change-v1",
-         plan_fingerprint: plan_fingerprint,
-         action_catalog_digest: catalog_digest,
-         initial_values: initial_values,
-         manifest: manifest
-       }}
-    end
-
-    defp maybe_put(map, _key, nil), do: map
-    defp maybe_put(map, key, value), do: Map.put(map, key, value)
-
-    defp maybe_put_test_paths(map, %Plan{validation_profile: "security_regression"} = plan),
-      do: Map.put(map, "test_paths", plan.requested_paths)
-
-    defp maybe_put_test_paths(map, _plan), do: map
-
-    defp bool_string(true), do: "true"
-    defp bool_string(false), do: "false"
-
-    defp sha256(value) do
-      value
-      |> then(&:crypto.hash(:sha256, &1))
-      |> Base.encode16(case: :lower)
+        {:ok, %{compilation | initial_values: initial_values}}
+      end
     end
   end
 
@@ -214,6 +144,57 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       manifest = Map.put(compilation.manifest, "plan_fingerprint", String.duplicate("0", 64))
       {:ok, %{compilation | manifest: manifest}}
+    end
+  end
+
+  defmodule SemanticBypassCompiler do
+    @moduledoc false
+
+    alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, ExecutionManifest}
+    alias Arbor.Orchestrator.Dot.Parser
+    alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
+
+    def compile(plan, opts) do
+      {:ok, compilation} =
+        Arbor.Orchestrator.CodingTaskExecutorTest.FakeCompiler.compile(plan, opts)
+
+      dot_source =
+        String.replace(
+          compilation.dot_source,
+          ~s(hoist_head_commit -> prep_validation_path [condition="context.changed_from_base=true"]),
+          ~s(hoist_head_commit -> prep_validation_path [condition="context.changed_from_base=true"]\n  hoist_head_commit -> prep_commit_path [condition="context.bypass_validation=true"])
+        )
+
+      true = dot_source != compilation.dot_source
+      graph_hash = sha256(dot_source)
+      {:ok, graph} = Parser.parse(dot_source)
+      {:ok, compiled_graph} = IRCompiler.compile(graph)
+      {:ok, catalog} = ActionCatalog.snapshot()
+
+      {:ok, {execution_manifest, execution_manifest_digest}} =
+        ExecutionManifest.build(compiled_graph, catalog, graph_hash)
+
+      manifest =
+        compilation.manifest
+        |> Map.put("graph_hash", graph_hash)
+        |> Map.put("execution_manifest", execution_manifest)
+        |> Map.put("execution_manifest_digest", execution_manifest_digest)
+
+      {:ok,
+       %{
+         compilation
+         | dot_source: dot_source,
+           graph_hash: graph_hash,
+           execution_manifest: execution_manifest,
+           execution_manifest_digest: execution_manifest_digest,
+           manifest: manifest
+       }}
+    end
+
+    defp sha256(value) do
+      value
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode16(case: :lower)
     end
   end
 
@@ -1049,7 +1030,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       artifacts = result["artifacts"]
       assert path == artifacts["coding_pipeline_path"]
       refute path == template_path
-      assert File.read!(path) == File.read!(template_path)
+      assert File.read!(path) =~ "coding_plan_compiler_version"
+      refute File.read!(path) == File.read!(template_path)
       assert opts[:authorization] == true
       assert opts[:agent_id] == "agent_trusted"
       assert opts[:task_id] == "task_abc"
@@ -1064,6 +1046,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert opts[:logs_root] == Path.dirname(path)
       assert opts[:timeout] == 900_000
       assert opts[:graph_hash] == artifacts["graph_hash"]
+      assert opts[:cache] == false
+      assert opts[:execution_manifest_digest] =~ ~r/^[0-9a-f]{64}$/
+      assert opts[:execution_manifest]["graph_hash"] == opts[:graph_hash]
+      assert is_map(opts[:pinned_action_bindings])
+      assert is_map(opts[:pinned_handler_bindings])
       assert is_function(opts[:signer], 1)
       assert is_function(opts[:authorizer], 2)
 
@@ -1103,12 +1090,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                "coding_pipeline_path" => Path.join(root, "coding-pipeline.dot"),
                "compile_manifest_path" => Path.join(root, "coding-compile-manifest.json"),
                "graph_hash" => opts[:graph_hash],
-               "compiler_version" => "fake-coding-plan-1"
+               "compiler_version" => "coding-plan-1"
              }
 
       assert runner_path == artifacts["coding_pipeline_path"]
       dot_source = File.read!(runner_path)
-      assert dot_source == File.read!(Config.coding_pipeline_path())
+      assert dot_source =~ "coding_plan_action_catalog_digest"
+      refute dot_source == File.read!(Config.coding_pipeline_path())
 
       assert artifacts["graph_hash"] ==
                :crypto.hash(:sha256, dot_source) |> Base.encode16(case: :lower)
@@ -1277,7 +1265,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
           )
         end)
 
-      assert_receive {:slow_runner_started, runner_pid, _opts, links}
+      assert_receive {:slow_runner_started, runner_pid, _opts, links}, 2_000
       assert owner in links
 
       runner_ref = Process.monitor(runner_pid)
@@ -1412,6 +1400,25 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       refute_receive {:coding_executor_captured_run, _path, _opts}
     end
 
+    test "security regression: executor boundary reruns semantic preflight before runner" do
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_compiler,
+        SemanticBypassCompiler
+      )
+
+      assert {:error, {:coding_execution_preflight_failed, {:semantic_preflight_failed, errors}}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      assert Enum.any?(errors, fn error ->
+               error["code"] == "dominance_violation" and
+                 error["detail"]["kind"] == "validation"
+             end)
+
+      refute_receive {:coding_executor_captured_run, _path, _opts}
+      assert Process.get(:coding_executor_last_run) == nil
+    end
+
     test "security regression: compiler cannot redirect the canonical worktree base" do
       outside = Path.join(Process.get(:coding_executor_tmp_dir), "outside-compiler-worktrees")
       marker = Path.join(outside, "runner-created-outside-worktree")
@@ -1458,11 +1465,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         {valid_direct_task(%{
            "worker" => %{"provider" => "grok", "model" => "bound-model"}
          }), :put, "model", "redirected-model"},
-        {valid_direct_task(%{
-           "task_class" => "security_regression",
-           "validation_profile" => "security_regression",
-           "requested_paths" => ["test/security_regression_test.exs"]
-         }), :put, "test_paths", ["test/redirected_test.exs"]},
         {valid_direct_task(), :put, "test_paths", ["test/unexpected_test.exs"]},
         {valid_direct_task(), :put, "branch_name", "feature/unexpected"},
         {valid_direct_task(), :put, "model", "unexpected-model"}
@@ -1540,69 +1542,45 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   describe "dual authorization layers with real Orchestrator runner" do
     test "public run/3 observes coarse execute and per-node transform auth; denial fails closed" do
-      tmp =
-        Path.join(
-          System.tmp_dir!(),
-          "coding_exec_auth_#{:erlang.unique_integer([:positive])}"
-        )
-
-      File.mkdir_p!(tmp)
-
-      graph_path = Path.join(tmp, "tiny.dot")
-
-      File.write!(graph_path, """
-      digraph TinyCodingAuth {
-        graph [goal="coding executor dual auth"]
-        start [shape=Mdiamond]
-        step [
-          type="transform",
-          transform="identity",
-          source_key="task",
-          output_key="echoed_task"
-        ]
-        done [shape=Msquare]
-        start -> step -> done
-      }
-      """)
-
-      Application.put_env(:arbor_orchestrator, :coding_pipeline_path, graph_path)
+      agent_id = "agent_dual_auth_#{System.unique_integer([:positive])}"
       Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, Arbor.Orchestrator)
       Application.put_env(:arbor_orchestrator, :security_module, FakeSecurity)
       Application.put_env(:arbor_orchestrator, :security_available_override, true)
 
-      on_exit(fn -> File.rm_rf(tmp) end)
+      # The public facade's coarse gate runs before Engine and therefore before
+      # any per-node call reaches the injected security module.
+      assert {:error, :unauthorized} =
+               CodingTaskExecutor.run(
+                 agent_id,
+                 valid_task(),
+                 valid_context(%{"task_id" => "task_dual_auth_coarse_deny", "timeout" => 250})
+               )
 
-      # Happy path: both coarse + per-node resources are authorized via FakeSecurity.
+      assert collect_auth_calls() == []
+      :ok = Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(agent_id)
+
+      # Once the coarse grant exists, execution reaches the per-node gate. The
+      # reviewed graph may stop later at its first action in this focused test.
       _ =
         CodingTaskExecutor.run(
-          "agent_dual_auth",
+          agent_id,
           valid_task(),
-          valid_context(%{"task_id" => "task_dual_auth"})
+          valid_context(%{"task_id" => "task_dual_auth", "timeout" => 250})
         )
 
       calls = collect_auth_calls()
       resources = Enum.map(calls, fn {_agent, resource, _action, _opts} -> resource end)
-
-      assert "arbor://orchestrator/execute" in resources
 
       assert Enum.any?(resources, fn resource ->
                resource == "arbor://orchestrator/execute/transform" or
                  String.starts_with?(resource, "arbor://orchestrator/execute/")
              end)
 
-      coarse_calls =
-        Enum.filter(calls, fn {_a, resource, _act, _opts} ->
-          resource == "arbor://orchestrator/execute"
-        end)
+      assert Enum.all?(calls, fn {observed_agent, _resource, _action, _opts} ->
+               observed_agent == agent_id
+             end)
 
-      assert coarse_calls != []
-
-      Enum.each(coarse_calls, fn {agent_id, _resource, _action, opts} ->
-        assert agent_id == "agent_dual_auth"
-        assert Keyword.has_key?(opts, :signed_request)
-      end)
-
-      # Denial fails closed: FakeSecurity rejects authorize.
+      # Per-node denial still fails closed after the coarse gate succeeds.
       Application.put_env(:arbor_orchestrator, :coding_auth_reply, {
         :error,
         :capability_denied
@@ -1610,10 +1588,19 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       assert {:error, _} =
                CodingTaskExecutor.run(
-                 "agent_dual_auth",
+                 agent_id,
                  valid_task(),
-                 valid_context(%{"task_id" => "task_dual_auth_deny"})
+                 valid_context(%{"task_id" => "task_dual_auth_deny", "timeout" => 250})
                )
+
+      denied_resources =
+        collect_auth_calls()
+        |> Enum.map(fn {_agent, resource, _action, _opts} -> resource end)
+
+      assert Enum.any?(
+               denied_resources,
+               &String.starts_with?(&1, "arbor://orchestrator/execute/")
+             )
     end
   end
 

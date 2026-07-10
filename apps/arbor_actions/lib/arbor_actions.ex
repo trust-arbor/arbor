@@ -83,6 +83,18 @@ defmodule Arbor.Actions do
 
   @approval_preview_limit 500
 
+  @runtime_action_descriptor_keys ~w(
+    beam_sha256
+    effect_class
+    egress_declared
+    egress_destination_resolver
+    egress_tier_resolver
+    module
+    name
+    resource_uri
+  )
+  @active_execution_binding_key {__MODULE__, :active_execution_binding}
+
   @approval_payload_keys [
     :content,
     "content",
@@ -160,6 +172,12 @@ defmodule Arbor.Actions do
           | {:ok, :pending_approval, String.t()}
           | {:error, :unauthorized | {:taint_blocked, atom(), atom(), atom()} | term()}
   def authorize_and_execute(agent_id, action_module, params, context \\ %{}) do
+    with_execution_binding(action_module, context, fn ->
+      do_authorize_and_execute(agent_id, action_module, params, context)
+    end)
+  end
+
+  defp do_authorize_and_execute(agent_id, action_module, params, context) do
     # Extract signing data for action-level auth, but keep it in context
     # so facade-level auth (e.g., File.authorize_file_op) can also use it.
     signed_request = Map.get(context, :signed_request)
@@ -327,12 +345,166 @@ defmodule Arbor.Actions do
     end
   end
 
+  defp with_execution_binding(action_module, context, fun) when is_function(fun, 0) do
+    active = Process.get(@active_execution_binding_key)
+
+    case context_execution_binding(context) do
+      {:ok, nil} when is_nil(active) ->
+        fun.()
+
+      {:ok, nil} ->
+        {:error, {:execution_binding_rejected, :nested_action_binding_removed}}
+
+      {:ok, binding} when is_nil(active) ->
+        case verify_bound_action_module(action_module, binding.action_bindings) do
+          :ok -> with_active_execution_binding(binding, fun)
+          {:error, reason} -> {:error, {:execution_binding_rejected, reason}}
+        end
+
+      {:ok, binding} when binding == active ->
+        case verify_bound_action_module(action_module, binding.action_bindings) do
+          :ok -> fun.()
+          {:error, reason} -> {:error, {:execution_binding_rejected, reason}}
+        end
+
+      {:ok, _binding} ->
+        {:error, {:execution_binding_rejected, :nested_action_binding_replaced}}
+
+      {:error, reason} ->
+        {:error, {:execution_binding_rejected, reason}}
+    end
+  end
+
+  defp with_active_execution_binding(binding, fun) do
+    previous = Process.get(@active_execution_binding_key)
+    Process.put(@active_execution_binding_key, binding)
+
+    try do
+      fun.()
+    after
+      if is_nil(previous) do
+        Process.delete(@active_execution_binding_key)
+      else
+        Process.put(@active_execution_binding_key, previous)
+      end
+    end
+  end
+
+  defp context_execution_binding(context) when is_map(context) do
+    manifest = context_value(context, :execution_manifest)
+    manifest_digest = context_value(context, :execution_manifest_digest)
+    action_bindings = context_value(context, :pinned_action_bindings)
+    action_bindings_digest = context_value(context, :pinned_action_bindings_digest)
+
+    values = [manifest, manifest_digest, action_bindings, action_bindings_digest]
+
+    if Enum.all?(values, &is_nil/1) do
+      {:ok, nil}
+    else
+      with true <- execution_binding_json_clean?(manifest),
+           true <- valid_execution_manifest_digest?(manifest_digest),
+           true <- execution_binding_json_clean?(action_bindings),
+           true <- valid_execution_manifest_digest?(action_bindings_digest),
+           {:ok, ^manifest_digest} <- execution_binding_digest(manifest),
+           {:ok, ^action_bindings_digest} <- execution_binding_digest(action_bindings),
+           {:ok, manifest_action_bindings} <- action_bindings_from_manifest(manifest),
+           true <- manifest_action_bindings == action_bindings do
+        {:ok,
+         %{
+           execution_manifest: manifest,
+           execution_manifest_digest: manifest_digest,
+           action_bindings: action_bindings,
+           action_bindings_digest: action_bindings_digest
+         }}
+      else
+        false -> {:error, :invalid_action_binding_context}
+        {:ok, _other_digest} -> {:error, :execution_binding_digest_mismatch}
+        {:error, _reason} = error -> error
+      end
+    end
+  end
+
+  defp context_execution_binding(_context), do: {:error, :invalid_action_binding_context}
+
+  defp action_bindings_from_manifest(%{"actions" => actions}) when is_list(actions) do
+    Enum.reduce_while(actions, {:ok, %{}}, fn
+      %{"name" => name} = binding, {:ok, index} when is_binary(name) and name != "" ->
+        if Map.has_key?(index, name) do
+          {:halt, {:error, {:duplicate_action_binding, name}}}
+        else
+          {:cont, {:ok, Map.put(index, name, binding)}}
+        end
+
+      _binding, _acc ->
+        {:halt, {:error, :invalid_action_bindings}}
+    end)
+  end
+
+  defp action_bindings_from_manifest(_manifest), do: {:error, :invalid_execution_manifest}
+
+  defp verify_bound_action_module(action_module, bindings) do
+    with {:ok, actual} <- runtime_descriptor(action_module),
+         action_name = actual["name"],
+         {:ok, expected} <- fetch_action_binding(bindings, action_name),
+         expected_runtime = Map.take(expected, @runtime_action_descriptor_keys),
+         :ok <- compare_runtime_action_binding(action_name, expected_runtime, actual) do
+      :ok
+    end
+  end
+
+  defp fetch_action_binding(bindings, action_name) do
+    case Map.fetch(bindings, action_name) do
+      {:ok, binding} when is_map(binding) -> {:ok, binding}
+      _other -> {:error, {:missing_action_binding, action_name}}
+    end
+  end
+
+  defp compare_runtime_action_binding(action_name, expected, actual) do
+    if expected == actual do
+      :ok
+    else
+      fields =
+        @runtime_action_descriptor_keys
+        |> Enum.reject(&(Map.get(expected, &1) == Map.get(actual, &1)))
+        |> Enum.sort()
+
+      {:error, {:action_binding_mismatch, action_name, fields}}
+    end
+  end
+
+  defp valid_execution_manifest_digest?(digest) when is_binary(digest),
+    do: Regex.match?(~r/\A[0-9a-f]{64}\z/, digest)
+
+  defp valid_execution_manifest_digest?(_digest), do: false
+
+  defp execution_binding_json_clean?(map) when is_map(map) and not is_struct(map) do
+    Enum.all?(map, fn
+      {key, value} when is_binary(key) -> execution_binding_json_clean?(value)
+      _other -> false
+    end)
+  end
+
+  defp execution_binding_json_clean?(list) when is_list(list),
+    do: Enum.all?(list, &execution_binding_json_clean?/1)
+
+  defp execution_binding_json_clean?(value)
+       when is_binary(value) or is_number(value) or is_boolean(value) or is_nil(value),
+       do: true
+
+  defp execution_binding_json_clean?(_value), do: false
+
   @doc false
   # Internal: Execute an action without authorization.
   # Only for system-level callers (e.g., AgentSeed bootstrapping).
   # External callers MUST use authorize_and_execute/4 instead.
   @spec execute_action(module(), map(), map()) :: {:ok, any()} | {:error, term()}
   def execute_action(action_module, params, context \\ %{}) do
+    with_execution_binding(action_module, context, fn ->
+      do_execute_action(action_module, params, context)
+    end)
+  end
+
+  defp do_execute_action(action_module, params, context) do
     emit_started(action_module, params)
 
     case action_module.run(params, context) do
@@ -353,6 +525,120 @@ defmodule Arbor.Actions do
   # ===========================================================================
   # Public API — Action discovery
   # ===========================================================================
+
+  @doc """
+  Return the loaded execution identity for an action module.
+
+  The descriptor is deterministic and JSON-clean. It binds the action's exact
+  Jido name and loaded BEAM to the coarse authorization resource and static
+  effect/egress declarations used by the security layer. Object code is read
+  through `:code.get_object_code/1`; modules without retrievable loaded BEAM
+  code fail closed.
+
+  This descriptor identifies executable code. It does not grant authority to
+  execute the action.
+  """
+  @spec runtime_descriptor(module()) :: {:ok, map()} | {:error, atom()}
+  def runtime_descriptor(action_module) when is_atom(action_module) do
+    with {:module, ^action_module} <- Code.ensure_loaded(action_module),
+         {:ok, action_name} <- runtime_action_name(action_module),
+         {:ok, beam_sha256} <- loaded_beam_sha256(action_module),
+         {:ok, effect_class} <- runtime_effect_class(action_module),
+         {:ok, resource_uri} <- runtime_resource_uri(action_module) do
+      {:ok,
+       %{
+         "name" => action_name,
+         "module" => Atom.to_string(action_module),
+         "beam_sha256" => beam_sha256,
+         "resource_uri" => resource_uri,
+         "effect_class" => Atom.to_string(effect_class),
+         "egress_declared" => effect_class == :network_egress,
+         "egress_tier_resolver" => function_exported?(action_module, :egress_tier, 2),
+         "egress_destination_resolver" =>
+           function_exported?(action_module, :egress_destination, 2)
+       }}
+    else
+      {:error, _reason} = error -> error
+      _other -> {:error, :action_module_unavailable}
+    end
+  rescue
+    _exception -> {:error, :action_descriptor_unavailable}
+  catch
+    _kind, _reason -> {:error, :action_descriptor_unavailable}
+  end
+
+  def runtime_descriptor(_action_module), do: {:error, :invalid_action_module}
+
+  @doc "Compute a deterministic SHA-256 digest for JSON-clean execution-binding data."
+  @spec execution_binding_digest(map()) :: {:ok, String.t()} | {:error, atom()}
+  def execution_binding_digest(value) when is_map(value) do
+    with true <- execution_binding_json_clean?(value),
+         {:ok, encoded} <- value |> canonicalize_execution_binding() |> Jason.encode() do
+      {:ok, encoded |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)}
+    else
+      _other -> {:error, :invalid_execution_binding_data}
+    end
+  rescue
+    _exception -> {:error, :invalid_execution_binding_data}
+  catch
+    _kind, _reason -> {:error, :invalid_execution_binding_data}
+  end
+
+  def execution_binding_digest(_value), do: {:error, :invalid_execution_binding_data}
+
+  defp canonicalize_execution_binding(map) when is_map(map) and not is_struct(map) do
+    map
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map(fn {key, value} -> {key, canonicalize_execution_binding(value)} end)
+    |> Jason.OrderedObject.new()
+  end
+
+  defp canonicalize_execution_binding(list) when is_list(list),
+    do: Enum.map(list, &canonicalize_execution_binding/1)
+
+  defp canonicalize_execution_binding(value), do: value
+
+  defp runtime_action_name(action_module) do
+    with true <- function_exported?(action_module, :to_tool, 0),
+         tool when is_map(tool) <- action_module.to_tool(),
+         name when is_binary(name) <- Map.get(tool, :name) || Map.get(tool, "name"),
+         true <- String.valid?(name) and String.trim(name) != "" do
+      {:ok, name}
+    else
+      _other -> {:error, :action_name_unavailable}
+    end
+  end
+
+  defp loaded_beam_sha256(action_module) do
+    case :code.get_object_code(action_module) do
+      {^action_module, beam, _filename} when is_binary(beam) and byte_size(beam) > 0 ->
+        digest = :crypto.hash(:sha256, beam) |> Base.encode16(case: :lower)
+        {:ok, digest}
+
+      _other ->
+        {:error, :action_beam_unavailable}
+    end
+  end
+
+  defp runtime_effect_class(action_module) do
+    effect_class = Egress.effect_class_for(action_module)
+
+    if effect_class in Classification.effect_classes(),
+      do: {:ok, effect_class},
+      else: {:error, :invalid_effect_class}
+  end
+
+  defp runtime_resource_uri(action_module) do
+    case canonical_uri_for(action_module, %{}) do
+      uri when is_binary(uri) ->
+        if String.valid?(uri) and String.trim(uri) != "" and not String.contains?(uri, <<0>>),
+          do: {:ok, uri},
+          else: {:error, :invalid_resource_uri}
+
+      _other ->
+        {:error, :invalid_resource_uri}
+    end
+  end
 
   @doc """
   List all available action modules.

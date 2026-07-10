@@ -4,6 +4,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
   use TypedStruct
 
   alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Orchestrator.CodingPlan.ExecutionManifest
   alias Arbor.Orchestrator.Dot.Parser
 
   @sha256_pattern ~r/\A[0-9a-f]{64}\z/
@@ -21,6 +22,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
     field(:template_version, String.t())
     field(:plan_fingerprint, String.t())
     field(:action_catalog_digest, String.t())
+    field(:execution_manifest, json_object())
+    field(:execution_manifest_digest, String.t())
     field(:initial_values, json_object())
     field(:manifest, json_object())
   end
@@ -42,8 +45,17 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
          :ok <- validate_digest(compilation.graph_hash, "graph_hash"),
          :ok <- validate_digest(compilation.plan_fingerprint, "plan_fingerprint"),
          :ok <- validate_digest(compilation.action_catalog_digest, "action_catalog_digest"),
+         :ok <-
+           validate_digest(compilation.execution_manifest_digest, "execution_manifest_digest"),
          :ok <- validate_graph_hash(compilation),
          :ok <- validate_plan_fingerprint(compilation, plan_map),
+         :ok <- validate_json_object(compilation.execution_manifest, "execution_manifest"),
+         :ok <-
+           ExecutionManifest.validate(
+             compilation.execution_manifest,
+             compilation.execution_manifest_digest,
+             compilation.graph_hash
+           ),
          :ok <- validate_json_object(compilation.initial_values, "initial_values"),
          :ok <- validate_json_object(compilation.manifest, "manifest"),
          :ok <- reject_forbidden_keys(compilation.initial_values, "initial_values", :control),
@@ -68,6 +80,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
       "template_version" => compilation.template_version,
       "plan_fingerprint" => compilation.plan_fingerprint,
       "action_catalog_digest" => compilation.action_catalog_digest,
+      "execution_manifest" => compilation.execution_manifest,
+      "execution_manifest_digest" => compilation.execution_manifest_digest,
       "initial_values" => compilation.initial_values,
       "manifest" => compilation.manifest
     }
@@ -168,6 +182,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
       {"template_version", compilation.template_version},
       {"plan_fingerprint", compilation.plan_fingerprint},
       {"action_catalog_digest", compilation.action_catalog_digest},
+      {"execution_manifest", compilation.execution_manifest},
+      {"execution_manifest_digest", compilation.execution_manifest_digest},
       {"plan_version", plan.version},
       {"task_class", plan.task_class},
       {"validation_profile", plan.validation_profile},
@@ -221,6 +237,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
 
         compact in ["auth", "authcontext"] or String.contains?(compact, "authorization") ->
           :authorization
+
+        compact == "capabilityuris" ->
+          nil
 
         String.contains?(compact, "capabilit") or compact in ["grant", "grants"] ->
           :capabilities

@@ -4,6 +4,18 @@ defmodule Arbor.ActionsTest do
 
   alias Arbor.Actions
 
+  defmodule NoObjectCodeAction do
+    @moduledoc false
+
+    def to_tool do
+      %{
+        name: "no_object_code",
+        description: "Loaded only from the test source",
+        parameters_schema: %{"type" => "object"}
+      }
+    end
+  end
+
   describe "list_actions/0" do
     test "returns actions organized by category" do
       actions = Actions.list_actions()
@@ -27,6 +39,33 @@ defmodule Arbor.ActionsTest do
       assert Arbor.Actions.Shell.Execute in actions
       assert Arbor.Actions.File.Read in actions
       assert Arbor.Actions.Git.Status in actions
+    end
+  end
+
+  describe "runtime_descriptor/1" do
+    test "binds exact Jido name, module, loaded BEAM, resource, and egress declarations" do
+      module = Arbor.Actions.File.Read
+      assert {:ok, descriptor} = Actions.runtime_descriptor(module)
+      assert {^module, beam, _filename} = :code.get_object_code(module)
+
+      assert descriptor == %{
+               "name" => "file_read",
+               "module" => Atom.to_string(module),
+               "beam_sha256" =>
+                 beam |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower),
+               "resource_uri" => "arbor://fs/read",
+               "effect_class" => "read",
+               "egress_declared" => false,
+               "egress_tier_resolver" => false,
+               "egress_destination_resolver" => false
+             }
+
+      assert {:ok, _json} = Jason.encode(descriptor)
+    end
+
+    test "security regression: modules without retrievable BEAM object code fail closed" do
+      assert :error = :code.get_object_code(NoObjectCodeAction)
+      assert {:error, :action_beam_unavailable} = Actions.runtime_descriptor(NoObjectCodeAction)
     end
   end
 

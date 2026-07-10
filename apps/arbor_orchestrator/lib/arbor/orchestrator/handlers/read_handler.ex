@@ -21,26 +21,47 @@ defmodule Arbor.Orchestrator.Handlers.ReadHandler do
 
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Handler.ScopedContext
-  alias Arbor.Orchestrator.Engine.{Context, Outcome}
+  alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
 
   @impl true
   def execute(node, context, _graph, opts) do
     source = Map.get(node.attrs, "source", "file")
-    dispatch_via_registry(source, node, context, opts)
+
+    with {:ok, [{slot, readable_module}]} <- execution_delegates(node),
+         :ok <-
+           RunAuthorization.verify_execution_module(
+             Keyword.get(opts, :run_authorization),
+             node,
+             slot,
+             readable_module
+           ) do
+      if is_atom(readable_module) do
+        execute_readable(readable_module, source, node, context, opts)
+      else
+        legacy_dispatch(source, node, context, opts)
+      end
+    else
+      {:error, reason} ->
+        %Outcome{
+          status: :fail,
+          failure_reason: "Read delegate binding rejected for node #{node.id}: #{inspect(reason)}"
+        }
+    end
   end
 
   @impl true
   def idempotency, do: :read_only
 
-  # Try ReadableRegistry first, fall back to inline implementation.
-  defp dispatch_via_registry(source, node, context, opts) do
+  @doc false
+  def execution_delegates(node) do
+    source = Map.get(node.attrs, "source", "file")
+
     case registry_resolve(source) do
       {:ok, readable_module} ->
-        execute_readable(readable_module, source, node, context, opts)
+        {:ok, [{"read:#{source}", readable_module}]}
 
-      {:error, _} ->
-        # Fallback: inline implementation for core sources
-        legacy_dispatch(source, node, context, opts)
+      {:error, _reason} ->
+        {:ok, [{"read:#{source}", nil}]}
     end
   end
 

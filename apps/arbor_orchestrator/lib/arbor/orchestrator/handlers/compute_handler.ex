@@ -19,41 +19,45 @@ defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
-  alias Arbor.Orchestrator.Engine.Outcome
+  alias Arbor.Orchestrator.Engine.{Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Handlers.LlmHandler
 
   @impl true
   def execute(node, context, graph, opts) do
-    purpose = Map.get(node.attrs, "purpose", "llm")
-
-    case registry_resolve(purpose) do
-      {:ok, handler_module} ->
-        safe_execute(handler_module, node, context, graph, opts)
-
-      {:error, _} ->
-        legacy_dispatch(purpose, node, context, graph, opts)
+    with {:ok, [{slot, handler_module}]} <- execution_delegates(node),
+         :ok <- verify_delegate(node, slot, handler_module, opts) do
+      safe_execute(handler_module, node, context, graph, opts)
+    else
+      {:error, reason} -> binding_failure(node, reason)
+      _other -> binding_failure(node, :invalid_compute_delegate)
     end
   end
 
   @impl true
   def idempotency, do: :idempotent_with_key
 
-  # Legacy inline dispatch — used when registry is unavailable.
-  defp legacy_dispatch(purpose, node, context, graph, opts) do
-    case purpose do
-      "llm" ->
-        LlmHandler.execute(node, context, graph, opts)
+  @doc false
+  def execution_delegates(node) do
+    purpose = Map.get(node.attrs, "purpose", "llm")
 
-      "routing" ->
-        delegate_to(Arbor.Orchestrator.Handlers.RoutingHandler, node, context, graph, opts)
+    module_result =
+      case registry_resolve(purpose) do
+        {:ok, handler_module} -> {:ok, handler_module}
+        {:error, _reason} -> legacy_delegate(purpose)
+      end
 
-      unknown ->
-        %Outcome{
-          status: :fail,
-          failure_reason: "Unknown compute purpose '#{unknown}' for node #{node.id}"
-        }
+    case module_result do
+      {:ok, handler_module} -> {:ok, [{"compute:#{purpose}", handler_module}]}
+      {:error, _reason} = error -> error
     end
   end
+
+  defp legacy_delegate("llm"), do: {:ok, LlmHandler}
+
+  defp legacy_delegate("routing"),
+    do: {:ok, Arbor.Orchestrator.Handlers.RoutingHandler}
+
+  defp legacy_delegate(unknown), do: {:error, {:unknown_compute_purpose, unknown}}
 
   defp safe_execute(module, node, context, graph, opts) do
     if Code.ensure_loaded?(module) and function_exported?(module, :execute, 4) do
@@ -66,15 +70,20 @@ defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
     end
   end
 
-  defp delegate_to(module, node, context, graph, opts) do
-    if Code.ensure_loaded?(module) and function_exported?(module, :execute, 4) do
-      module.execute(node, context, graph, opts)
-    else
-      %Outcome{
-        status: :fail,
-        failure_reason: "Handler module #{inspect(module)} not available"
-      }
-    end
+  defp verify_delegate(node, slot, module, opts) do
+    RunAuthorization.verify_execution_module(
+      Keyword.get(opts, :run_authorization),
+      node,
+      slot,
+      module
+    )
+  end
+
+  defp binding_failure(node, reason) do
+    %Outcome{
+      status: :fail,
+      failure_reason: "Compute delegate binding rejected for node #{node.id}: #{inspect(reason)}"
+    }
   end
 
   defp registry_resolve(purpose) do

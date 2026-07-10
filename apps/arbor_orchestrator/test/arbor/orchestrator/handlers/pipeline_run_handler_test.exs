@@ -2,10 +2,12 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandlerTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Orchestrator.Engine.Context
+  alias Arbor.Orchestrator.Engine.{Context, RunAuthorization}
+  alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.PipelineRunHandler
+  alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
 
   @child_dot """
   digraph Child {
@@ -96,7 +98,7 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandlerTest do
         attrs: %{"type" => "pipeline.run", "source_file" => path}
       }
 
-      context = Context.new()
+      context = Context.new(%{"workdir" => @test_dir})
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
       outcome = PipelineRunHandler.execute(node, context, graph, [])
@@ -135,6 +137,100 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandlerTest do
 
       assert outcome.status == :fail
       assert outcome.failure_reason =~ "no DOT source found"
+    end
+
+    test "security regression: in-workdir source symlink cannot read an outside pipeline" do
+      outside = @test_dir <> "_outside"
+      outside_dot = Path.join(outside, "outside.dot")
+      link = Path.join(@test_dir, "escaped.dot")
+      File.mkdir_p!(outside)
+      File.write!(outside_dot, @child_dot)
+      File.ln_s!(outside_dot, link)
+      on_exit(fn -> File.rm_rf(outside) end)
+
+      node = %Node{
+        id: "symlink_escape",
+        attrs: %{"type" => "pipeline.run", "source_file" => "escaped.dot"}
+      }
+
+      outcome =
+        PipelineRunHandler.execute(
+          node,
+          Context.new(%{"workdir" => @test_dir}),
+          %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}},
+          []
+        )
+
+      assert outcome.status == :fail
+      refute outcome.context_updates["pipeline.ran.symlink_escape"] == true
+    end
+
+    test "security regression: source replacement after run authorization is denied" do
+      outside = @test_dir <> "_replacement_outside"
+      outside_dot = Path.join(outside, "outside.dot")
+      source = Path.join(@test_dir, "replaceable.dot")
+      graph = compiled_graph!(@child_dot)
+      File.mkdir_p!(outside)
+      File.write!(outside_dot, @child_dot)
+      File.write!(source, @child_dot)
+
+      {:ok, canonical_workdir} = Arbor.Common.SafePath.resolve_real(@test_dir)
+
+      {:ok, authority} =
+        RunAuthorization.new(graph,
+          agent_id: "agent_pipeline_source",
+          workdir: canonical_workdir
+        )
+
+      File.rm!(source)
+      File.ln_s!(outside_dot, source)
+      on_exit(fn -> File.rm_rf(outside) end)
+
+      node = %Node{
+        id: "replacement_escape",
+        attrs: %{"type" => "pipeline.run", "source_file" => "replaceable.dot"}
+      }
+
+      outcome =
+        PipelineRunHandler.execute(node, Context.new(), graph, run_authorization: authority)
+
+      assert outcome.status == :fail
+      refute outcome.context_updates["pipeline.ran.replacement_escape"] == true
+    end
+
+    test "security regression: ancestor replacement during source read discards bytes" do
+      source_dir = Path.join(@test_dir, "source_component")
+      original_dir = Path.join(@test_dir, "source_component_original")
+      outside = @test_dir <> "_read_race_outside"
+      source = Path.join(source_dir, "child.dot")
+
+      File.mkdir_p!(source_dir)
+      File.mkdir_p!(outside)
+      File.write!(source, @child_dot)
+      File.write!(Path.join(outside, "child.dot"), @child_dot)
+      on_exit(fn -> File.rm_rf(outside) end)
+
+      replace_component = fn _resolved_path ->
+        File.rename!(source_dir, original_dir)
+        File.ln_s!(outside, source_dir)
+      end
+
+      node = %Node{
+        id: "component_race",
+        attrs: %{"type" => "pipeline.run", "source_file" => "source_component/child.dot"}
+      }
+
+      outcome =
+        PipelineRunHandler.execute(
+          node,
+          Context.new(%{"workdir" => @test_dir}),
+          %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}},
+          source_file_post_read_hook: replace_component
+        )
+
+      assert outcome.status == :fail
+      assert {:ok, ^outside} = File.read_link(source_dir)
+      refute outcome.context_updates["pipeline.ran.component_race"] == true
     end
   end
 
@@ -189,7 +285,9 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandlerTest do
 
       # P0-3: pipeline.run now requires arbor://pipeline/run. This test
       # exercises the runtime path, not the cap check; opt out explicitly.
-      assert {:ok, result} = Arbor.Orchestrator.run(dot, authorization: false)
+      assert {:ok, result} =
+               Arbor.Orchestrator.run(dot, authorization: false, workdir: @test_dir)
+
       assert result.context["pipeline.ran.run_child"] == true
       assert result.context["pipeline.child_status.run_child"] == "success"
       assert result.context["pipeline.child_nodes_completed.run_child"] == 2
@@ -218,10 +316,18 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandlerTest do
 
       # P0-3: pipeline.run now requires arbor://pipeline/run; opt out
       # explicitly for this runtime test.
-      assert {:ok, result} = Arbor.Orchestrator.run(dot, authorization: false)
+      assert {:ok, result} =
+               Arbor.Orchestrator.run(dot, authorization: false, workdir: @test_dir)
+
       assert result.context["pipeline.valid.validate"] == true
       assert result.context["pipeline.ran.run_it"] == true
       assert result.context["pipeline.child_status.run_it"] == "success"
     end
+  end
+
+  defp compiled_graph!(dot) do
+    {:ok, graph} = Parser.parse(dot)
+    {:ok, compiled} = IRCompiler.compile(graph)
+    compiled
   end
 end

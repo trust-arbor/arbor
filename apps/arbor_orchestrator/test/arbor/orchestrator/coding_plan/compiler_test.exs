@@ -38,6 +38,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert first.dot_source == second.dot_source
     assert first.graph_hash == second.graph_hash
     assert first.plan_fingerprint == second.plan_fingerprint
+    assert first.execution_manifest == second.execution_manifest
+    assert first.execution_manifest_digest == second.execution_manifest_digest
     assert first.initial_values == second.initial_values
     assert first.manifest == second.manifest
     assert Compilation.to_map(first) == Compilation.to_map(second)
@@ -45,6 +47,19 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert first.graph_hash == sha256(first.dot_source)
     assert first.manifest["graph_hash"] == first.graph_hash
+    assert first.manifest["execution_manifest"] == first.execution_manifest
+
+    assert first.manifest["execution_manifest_digest"] ==
+             first.execution_manifest_digest
+
+    assert first.execution_manifest["graph_hash"] == first.graph_hash
+
+    assert first.execution_manifest["actions"] ==
+             Enum.sort_by(first.execution_manifest["actions"], & &1["name"])
+
+    assert first.execution_manifest["handlers"] ==
+             Enum.sort_by(first.execution_manifest["handlers"], & &1["handler_type"])
+
     assert first.manifest["action_names"] == Enum.sort(first.manifest["action_names"])
     assert first.manifest["handler_types"] == Enum.sort(first.manifest["handler_types"])
   end
@@ -95,6 +110,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert "council_review_change" in compilation.manifest["action_names"]
     refute "mix_test" in compilation.manifest["action_names"]
     refute Map.has_key?(compilation.manifest, "capabilities")
+
+    assert "arbor://action/mix/compile" in compilation.execution_manifest["capability_uris"]
+
+    assert Enum.any?(compilation.execution_manifest["actions"], fn binding ->
+             binding["name"] == "mix_compile" and
+               binding["module"] == Atom.to_string(Arbor.Actions.Mix.Compile) and
+               binding["beam_sha256"] =~ ~r/^[0-9a-f]{64}$/
+           end)
   end
 
   test "security regression: default profile restores warnings-as-errors after template drift",

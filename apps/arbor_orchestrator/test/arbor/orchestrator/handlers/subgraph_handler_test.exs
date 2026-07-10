@@ -1,11 +1,13 @@
 defmodule Arbor.Orchestrator.Handlers.SubgraphHandlerTest do
   use ExUnit.Case, async: false
 
-  alias Arbor.Orchestrator.Engine.Context
+  alias Arbor.Orchestrator.Engine.{Context, RunAuthorization}
+  alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.GraphRegistry
   alias Arbor.Orchestrator.Handlers.SubgraphHandler
+  alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
 
   @graph %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
@@ -27,7 +29,7 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandlerTest do
   }
   """
 
-  defp node(type, attrs \\ %{}) do
+  defp node(type, attrs) do
     %Node{id: "test_node", attrs: Map.put(attrs, "type", type)}
   end
 
@@ -170,8 +172,94 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandlerTest do
       path = Path.join(tmp_dir, "child.dot")
       File.write!(path, @minimal_child)
 
-      outcome = run("graph.invoke", %{}, %{"graph_file" => path})
+      outcome = run("graph.invoke", %{"workdir" => tmp_dir}, %{"graph_file" => path})
       assert outcome.status == :success
+    end
+
+    test "security regression: in-workdir graph symlink cannot read outside", %{tmp_dir: tmp_dir} do
+      outside = tmp_dir <> "_outside"
+      outside_dot = Path.join(outside, "outside.dot")
+      link = Path.join(tmp_dir, "escaped.dot")
+      File.mkdir_p!(outside)
+      File.write!(outside_dot, @minimal_child)
+      File.ln_s!(outside_dot, link)
+      on_exit(fn -> File.rm_rf(outside) end)
+
+      outcome =
+        run(
+          "graph.invoke",
+          %{"workdir" => tmp_dir},
+          %{"graph_file" => "escaped.dot"}
+        )
+
+      assert outcome.status == :fail
+      assert outcome.failure_reason =~ "path_traversal"
+    end
+
+    test "security regression: graph source replacement after authorization is denied", %{
+      tmp_dir: tmp_dir
+    } do
+      outside = tmp_dir <> "_replacement_outside"
+      outside_dot = Path.join(outside, "outside.dot")
+      source = Path.join(tmp_dir, "replaceable.dot")
+      File.mkdir_p!(outside)
+      File.write!(outside_dot, @minimal_child)
+      File.write!(source, @minimal_child)
+
+      {:ok, canonical_workdir} = Arbor.Common.SafePath.resolve_real(tmp_dir)
+
+      {:ok, authority} =
+        RunAuthorization.new(compiled_graph!(@minimal_child),
+          agent_id: "agent_subgraph_source",
+          workdir: canonical_workdir
+        )
+
+      File.rm!(source)
+      File.ln_s!(outside_dot, source)
+      on_exit(fn -> File.rm_rf(outside) end)
+
+      outcome =
+        run(
+          "graph.invoke",
+          %{},
+          %{"graph_file" => "replaceable.dot"},
+          run_authorization: authority
+        )
+
+      assert outcome.status == :fail
+      assert outcome.failure_reason =~ "path_traversal"
+    end
+
+    test "security regression: ancestor replacement during graph read discards bytes", %{
+      tmp_dir: tmp_dir
+    } do
+      source_dir = Path.join(tmp_dir, "source_component")
+      original_dir = Path.join(tmp_dir, "source_component_original")
+      outside = tmp_dir <> "_read_race_outside"
+      source = Path.join(source_dir, "child.dot")
+
+      File.mkdir_p!(source_dir)
+      File.mkdir_p!(outside)
+      File.write!(source, @minimal_child)
+      File.write!(Path.join(outside, "child.dot"), @minimal_child)
+      on_exit(fn -> File.rm_rf(outside) end)
+
+      replace_component = fn _resolved_path ->
+        File.rename!(source_dir, original_dir)
+        File.ln_s!(outside, source_dir)
+      end
+
+      outcome =
+        run(
+          "graph.invoke",
+          %{"workdir" => tmp_dir},
+          %{"graph_file" => "source_component/child.dot"},
+          source_file_post_read_hook: replace_component
+        )
+
+      assert outcome.status == :fail
+      assert outcome.failure_reason =~ "source_file_changed_during_read"
+      assert {:ok, ^outside} = File.read_link(source_dir)
     end
 
     test "executes graph from context key" do
@@ -301,5 +389,11 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandlerTest do
     test "is side_effecting" do
       assert SubgraphHandler.idempotency() == :side_effecting
     end
+  end
+
+  defp compiled_graph!(dot) do
+    {:ok, graph} = Parser.parse(dot)
+    {:ok, compiled} = IRCompiler.compile(graph)
+    compiled
   end
 end

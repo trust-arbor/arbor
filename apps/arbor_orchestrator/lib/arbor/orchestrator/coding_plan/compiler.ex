@@ -7,7 +7,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   """
 
   alias Arbor.Contracts.Coding.Plan
-  alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, Compilation, Profiles, SemanticPreflight}
+  alias Arbor.Contracts.Security.Classification
+
+  alias Arbor.Orchestrator.CodingPlan.{
+    ActionCatalog,
+    Compilation,
+    ExecutionManifest,
+    Profiles,
+    SemanticPreflight
+  }
+
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Handlers.Registry
@@ -23,6 +32,21 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   @static_schema_types ~w(string boolean integer number array object)
   @numeric_schema_constraints ~w(minimum maximum exclusiveMinimum exclusiveMaximum)
   @string_schema_constraints ~w(minLength maxLength)
+  @catalog_action_keys Enum.sort(~w(
+                         beam_sha256
+                         description
+                         effect_class
+                         egress_declared
+                         egress_destination_resolver
+                         egress_tier_resolver
+                         module
+                         name
+                         parameters_schema
+                         resource_uri
+                       ))
+  @effect_classes Classification.effect_classes()
+                  |> Enum.map(&Atom.to_string/1)
+                  |> Enum.sort()
 
   @graph_metadata_keys %{
     compiler_version: "coding_plan_compiler_version",
@@ -67,8 +91,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          :ok <-
            SemanticPreflight.validate(compiled_graph, profile["semantic_policy"],
              review_profile: plan.review_profile
-           ) do
-      graph_hash = sha256(dot_source)
+           ),
+         graph_hash = sha256(dot_source),
+         {:ok, {execution_manifest, execution_manifest_digest}} <-
+           ExecutionManifest.build(compiled_graph, action_catalog, graph_hash) do
       initial_values = build_initial_values(plan, plan_fingerprint, action_catalog["digest"])
 
       manifest =
@@ -77,7 +103,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
           final_graph,
           graph_hash,
           plan_fingerprint,
-          action_catalog["digest"]
+          action_catalog["digest"],
+          execution_manifest,
+          execution_manifest_digest
         )
 
       {:ok,
@@ -89,6 +117,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          template_version: @template_version,
          plan_fingerprint: plan_fingerprint,
          action_catalog_digest: action_catalog["digest"],
+         execution_manifest: execution_manifest,
+         execution_manifest_digest: execution_manifest_digest,
          initial_values: initial_values,
          manifest: manifest
        }}
@@ -236,16 +266,21 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end)
   end
 
-  defp validate_catalog_action(
-         %{
-           "name" => name,
-           "description" => description,
-           "parameters_schema" => schema
-         } = action
-       )
-       when map_size(action) == 3 and is_binary(name) and byte_size(name) > 0 and
-              is_binary(description) and is_map(schema) do
-    if json_clean?(action), do: :ok, else: {:error, :not_json_clean}
+  defp validate_catalog_action(action) when is_map(action) do
+    valid? =
+      Map.keys(action) |> Enum.sort() == @catalog_action_keys and
+        is_binary(action["name"]) and String.trim(action["name"]) != "" and
+        is_binary(action["description"]) and is_map(action["parameters_schema"]) and
+        is_binary(action["module"]) and String.trim(action["module"]) != "" and
+        is_binary(action["beam_sha256"]) and
+        Regex.match?(~r/\A[0-9a-f]{64}\z/, action["beam_sha256"]) and
+        is_binary(action["resource_uri"]) and String.trim(action["resource_uri"]) != "" and
+        action["effect_class"] in @effect_classes and
+        is_boolean(action["egress_declared"]) and
+        is_boolean(action["egress_tier_resolver"]) and
+        is_boolean(action["egress_destination_resolver"]) and json_clean?(action)
+
+    if valid?, do: :ok, else: {:error, :malformed_action}
   end
 
   defp validate_catalog_action(_action), do: {:error, :malformed_action}
@@ -1112,7 +1147,15 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   defp bool_string(true), do: "true"
   defp bool_string(false), do: "false"
 
-  defp build_manifest(plan, graph, graph_hash, plan_fingerprint, catalog_digest) do
+  defp build_manifest(
+         plan,
+         graph,
+         graph_hash,
+         plan_fingerprint,
+         catalog_digest,
+         execution_manifest,
+         execution_manifest_digest
+       ) do
     %{
       "compiler_version" => @compiler_version,
       "template_version" => @template_version,
@@ -1124,6 +1167,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       "review_profile" => plan.review_profile,
       "overlays" => plan.overlays,
       "action_catalog_digest" => catalog_digest,
+      "execution_manifest" => execution_manifest,
+      "execution_manifest_digest" => execution_manifest_digest,
       "action_names" => generated_action_names(graph),
       "handler_types" => generated_handler_types(graph)
     }

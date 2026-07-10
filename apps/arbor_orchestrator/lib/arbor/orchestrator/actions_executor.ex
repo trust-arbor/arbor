@@ -23,6 +23,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   require Logger
 
+  alias Arbor.Orchestrator.CodingPlan.ExecutionManifest
+
   @doc """
   Execute an action by name with optional agent identity for authorization.
 
@@ -60,103 +62,20 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           {:error, "Unknown action: #{name}"}
 
         action_module ->
-          params =
-            args
-            |> atomize_known_keys(action_module)
-            |> maybe_resolve_file_paths(action_module, workdir)
-            |> maybe_inject_workdir(workdir)
-
-          case verify_caller_authority(action_module, params, agent_id, caller_id, opts) do
-            :ok ->
-              # Sign with the canonical module-derived resource URI.
-              signed_request = signed_request || sign_for_module(signer, action_module, params)
-
-              # Build AuthContext — single struct with everything auth needs.
-              # The signed_request and signer are included so downstream code
-              # (authorize_and_execute, facade auth) can access them.
-              # Arbor.Contracts.Security.AuthContext lives in arbor_contracts (a dep).
-              auth_context =
-                Arbor.Contracts.Security.AuthContext.new(agent_id,
-                  signer: signer,
-                  signed_request: signed_request,
-                  session_id: session_id
-                )
-
-              Logger.debug(
-                "[ActionsExecutor] #{name}: signed=#{signed_request != nil}, " <>
-                  "agent=#{agent_id}, caller=#{caller_id || agent_id}, module=#{action_module}"
-              )
-
-              # Context passed to the action's run/2 — includes signed_request
-              # so facade auth can see it, and auth_context for the new flow.
-              # auth_context is always built (AuthContext lives in arbor_contracts).
-              #
-              # Taint bridge (taint-tracking-rebuild Phase 2): the orchestrator
-              # threads the provenance taint of the data interpolated into this
-              # action's params via the :taint opt. Putting it on context[:taint]
-              # is what finally feeds TaintEnforcement.check — without it the
-              # chokepoint reads no taint and every action passes (F1).
-              context =
-                %{auth_context: auth_context, workdir: workdir}
-                |> maybe_put_context(:task_id, task_id)
-                |> maybe_put_context(:session_id, session_id)
-                |> maybe_put_context(:caller_id, caller_id || agent_id)
-                |> maybe_put_context(:author_id, author_id)
-                |> maybe_put_file_workspace(action_module, workdir)
-                |> then(fn c ->
-                  if signed_request, do: Map.put(c, :signed_request, signed_request), else: c
-                end)
-                |> then(fn c ->
-                  case Keyword.get(opts, :taint) do
-                    nil -> c
-                    level -> Map.put(c, :taint, level)
-                  end
-                end)
-                |> maybe_put_context(:param_taint, Keyword.get(opts, :param_taint))
-
-              case Arbor.Actions.authorize_and_execute(
-                     agent_id,
-                     action_module,
-                     params,
-                     context
-                   ) do
-                {:ok, :pending_approval, proposal_id} ->
-                  await_approval_and_retry(
-                    proposal_id,
-                    agent_id,
-                    action_module,
-                    params,
-                    context,
-                    name
-                  )
-
-                {:ok, result} ->
-                  {:ok, format_result(result)}
-
-                {:error, reason} ->
-                  msg =
-                    case reason do
-                      :unauthorized ->
-                        "Action #{name} unauthorized. You may need additional permissions."
-
-                      {:unauthorized, detail} ->
-                        "Action #{name} unauthorized: #{detail}"
-
-                      reason when is_binary(reason) ->
-                        reason
-
-                      reason ->
-                        "Action #{name} failed: #{inspect(reason)}"
-                    end
-
-                  {:error, msg}
-              end
-
-            {:error, reason} ->
-              {:error,
-               "Caller #{caller_id || "unknown"} lacks authority for action #{name}: " <>
-                 inspect(reason)}
-          end
+          execute_resolved_action(
+            name,
+            args,
+            workdir,
+            opts,
+            action_module,
+            agent_id,
+            caller_id,
+            author_id,
+            task_id,
+            session_id,
+            signed_request,
+            signer
+          )
       end
     end)
   end
@@ -199,6 +118,160 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   # ============================================================================
   # Private
   # ============================================================================
+
+  defp execute_resolved_action(
+         name,
+         args,
+         workdir,
+         opts,
+         action_module,
+         agent_id,
+         caller_id,
+         author_id,
+         task_id,
+         session_id,
+         signed_request,
+         signer
+       ) do
+    with {:ok, pinned_binding} <- verify_pinned_action(action_module, name, opts),
+         {:ok, execution_binding_context} <- execution_binding_context(opts) do
+      params =
+        args
+        |> atomize_known_keys(action_module)
+        |> maybe_resolve_file_paths(action_module, workdir)
+        |> maybe_inject_workdir(workdir)
+
+      case verify_caller_authority(action_module, params, agent_id, caller_id, opts) do
+        :ok ->
+          signed_request = signed_request || sign_for_module(signer, action_module, params)
+
+          auth_context =
+            Arbor.Contracts.Security.AuthContext.new(agent_id,
+              signer: signer,
+              signed_request: signed_request,
+              session_id: session_id
+            )
+
+          Logger.debug(
+            "[ActionsExecutor] #{name}: signed=#{signed_request != nil}, " <>
+              "agent=#{agent_id}, caller=#{caller_id || agent_id}, module=#{action_module}"
+          )
+
+          context =
+            %{auth_context: auth_context, workdir: workdir}
+            |> Map.merge(execution_binding_context)
+            |> maybe_put_context(:task_id, task_id)
+            |> maybe_put_context(:session_id, session_id)
+            |> maybe_put_context(:caller_id, caller_id || agent_id)
+            |> maybe_put_context(:author_id, author_id)
+            |> maybe_put_context(:pinned_action_binding, pinned_binding)
+            |> maybe_put_context(:pinned_action_name, name)
+            |> maybe_put_file_workspace(action_module, workdir)
+            |> then(fn context ->
+              if signed_request,
+                do: Map.put(context, :signed_request, signed_request),
+                else: context
+            end)
+            |> then(fn context ->
+              case Keyword.get(opts, :taint) do
+                nil -> context
+                level -> Map.put(context, :taint, level)
+              end
+            end)
+            |> maybe_put_context(:param_taint, Keyword.get(opts, :param_taint))
+
+          execute_authorized_action(agent_id, action_module, params, context, name)
+
+        {:error, reason} ->
+          {:error,
+           "Caller #{caller_id || "unknown"} lacks authority for action #{name}: " <>
+             inspect(reason)}
+      end
+    else
+      {:error, reason} ->
+        {:error, "Action #{name} execution binding rejected: #{inspect(reason)}"}
+    end
+  end
+
+  defp execute_authorized_action(agent_id, action_module, params, context, name) do
+    case Arbor.Actions.authorize_and_execute(agent_id, action_module, params, context) do
+      {:ok, :pending_approval, proposal_id} ->
+        await_approval_and_retry(
+          proposal_id,
+          agent_id,
+          action_module,
+          params,
+          context,
+          name
+        )
+
+      {:ok, result} ->
+        {:ok, format_result(result)}
+
+      {:error, reason} ->
+        msg =
+          case reason do
+            :unauthorized ->
+              "Action #{name} unauthorized. You may need additional permissions."
+
+            {:unauthorized, detail} ->
+              "Action #{name} unauthorized: #{detail}"
+
+            reason when is_binary(reason) ->
+              reason
+
+            reason ->
+              "Action #{name} failed: #{inspect(reason)}"
+          end
+
+        {:error, msg}
+    end
+  end
+
+  defp verify_pinned_action(action_module, action_name, opts) do
+    bindings = Keyword.get(opts, :pinned_action_bindings)
+    digest = Keyword.get(opts, :execution_manifest_digest)
+
+    cond do
+      not is_nil(digest) and not is_map(bindings) ->
+        {:error, :missing_action_bindings}
+
+      is_nil(bindings) ->
+        {:ok, nil}
+
+      true ->
+        ExecutionManifest.verify_action_module(action_name, action_module, bindings)
+    end
+  end
+
+  defp execution_binding_context(opts) do
+    manifest = Keyword.get(opts, :execution_manifest)
+    manifest_digest = Keyword.get(opts, :execution_manifest_digest)
+    bindings = Keyword.get(opts, :pinned_action_bindings)
+
+    cond do
+      Enum.all?([manifest, manifest_digest, bindings], &is_nil/1) ->
+        {:ok, %{}}
+
+      not is_map(manifest) or not is_binary(manifest_digest) or not is_map(bindings) ->
+        {:error, :incomplete_execution_binding}
+
+      true ->
+        case Arbor.Actions.execution_binding_digest(bindings) do
+          {:ok, bindings_digest} ->
+            {:ok,
+             %{
+               execution_manifest: manifest,
+               execution_manifest_digest: manifest_digest,
+               pinned_action_bindings: bindings,
+               pinned_action_bindings_digest: bindings_digest
+             }}
+
+          {:error, _reason} ->
+            {:error, :invalid_action_bindings}
+        end
+    end
+  end
 
   defp verify_caller_authority(_action_module, _params, agent_id, caller_id, _opts)
        when caller_id in [nil, ""] or caller_id == agent_id,
@@ -426,46 +499,86 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   # Re-execute only the exact invocation that was approved. The one-shot marker
   # satisfies ApprovalGuard for this retry without minting durable authority.
   defp retry_execution(agent_id, action_module, params, context, name, request_id) do
-    resource = Arbor.Actions.canonical_uri_for(action_module, params)
+    with :ok <- verify_retry_resolution(name, action_module),
+         :ok <- verify_retry_binding(name, action_module, context),
+         :ok <- verify_retry_caller_authority(action_module, params, agent_id, context) do
+      resource = Arbor.Actions.canonical_uri_for(action_module, params)
 
-    context =
-      Map.put(context, :approved_invocation, %{
-        request_id: request_id,
-        principal_id: agent_id,
-        resource_uri: resource,
-        decision: :approved
-      })
+      context =
+        Map.put(context, :approved_invocation, %{
+          request_id: request_id,
+          principal_id: agent_id,
+          resource_uri: resource,
+          decision: :approved
+        })
 
-    # Re-sign for the retry. The signed request that drove the original
-    # (escalated) authorize is SINGLE-USE — its nonce was consumed by
-    # `Identity.Verifier.check_nonce_uniqueness`. Replaying it here makes the
-    # post-approval authorize fail `:unauthorized` (nonce replay), so an
-    # approved tool could never actually run. The executor holds the agent's
-    # signer in the AuthContext, so mint a fresh signed request (new nonce)
-    # bound to this resource. (Masked until the InteractionRouter await began
-    # succeeding — see the 2026-06-22 HITL routing fix.)
-    context = resign_for_retry(context, action_module, params)
+      # The signed request that drove the escalated authorize is single-use.
+      context = resign_for_retry(context, action_module, params)
 
-    case Arbor.Actions.authorize_and_execute(
-           agent_id,
-           action_module,
-           params,
-           context
-         ) do
-      {:ok, result} ->
-        {:ok, format_result(result)}
+      case Arbor.Actions.authorize_and_execute(agent_id, action_module, params, context) do
+        {:ok, result} ->
+          {:ok, format_result(result)}
 
-      {:ok, :pending_approval, _proposal_id} ->
-        # Shouldn't happen after approval, but handle gracefully
-        {:error,
-         "Action #{name} still requires approval after consensus granted it. This is a bug."}
+        {:ok, :pending_approval, _proposal_id} ->
+          {:error,
+           "Action #{name} still requires approval after consensus granted it. This is a bug."}
 
-      {:error, reason} when is_binary(reason) ->
-        {:error, reason}
+        {:error, reason} when is_binary(reason) ->
+          {:error, reason}
 
+        {:error, reason} ->
+          {:error, "Action #{name} was approved but execution failed: #{inspect(reason)}"}
+      end
+    else
       {:error, reason} ->
-        {:error, "Action #{name} was approved but execution failed: #{inspect(reason)}"}
+        {:error, "Action #{name} approval retry binding rejected: #{inspect(reason)}"}
     end
+  end
+
+  defp verify_retry_resolution(name, action_module) do
+    normalized = normalize_name(name)
+
+    resolved =
+      resolve_via_registry(normalized) ||
+        resolve_via_registry(name) ||
+        resolve_via_action_map(normalized, name)
+
+    if resolved == action_module,
+      do: :ok,
+      else: {:error, {:action_registry_drift, name}}
+  end
+
+  defp verify_retry_binding(name, action_module, context) do
+    bindings = Map.get(context, :pinned_action_bindings)
+    digest = Map.get(context, :execution_manifest_digest)
+
+    cond do
+      not is_nil(digest) and not is_map(bindings) ->
+        {:error, :missing_action_bindings}
+
+      is_map(bindings) ->
+        case ExecutionManifest.verify_action_module(name, action_module, bindings) do
+          {:ok, _binding} -> :ok
+          {:error, _reason} = error -> error
+        end
+
+      is_nil(bindings) ->
+        :ok
+
+      true ->
+        {:error, :invalid_action_bindings}
+    end
+  end
+
+  defp verify_retry_caller_authority(action_module, params, agent_id, context) do
+    caller_id = Map.get(context, :caller_id)
+
+    opts =
+      []
+      |> maybe_put_opt(:task_id, Map.get(context, :task_id))
+      |> maybe_put_opt(:session_id, Map.get(context, :session_id))
+
+    verify_caller_authority(action_module, params, agent_id, caller_id, opts)
   end
 
   defp format_denial_reason(decision) do

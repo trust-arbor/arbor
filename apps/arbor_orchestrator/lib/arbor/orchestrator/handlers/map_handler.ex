@@ -92,6 +92,13 @@ defmodule Arbor.Orchestrator.Handlers.MapHandler do
   @impl true
   def idempotency, do: :side_effecting
 
+  @doc false
+  # A map node synthesizes per-item node IDs and can dispatch a second wrapper
+  # stack. Until those synthetic nodes have first-class manifest identities,
+  # bound runs must not claim that pinning MapHandler alone binds the code run
+  # for each item.
+  def execution_delegates(_node), do: {:error, :bound_map_delegate_not_supported}
+
   # --- Collection parsing ---
 
   defp parse_collection(list) when is_list(list), do: list

@@ -3,101 +3,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
 
   alias Arbor.Orchestrator.CodingPlan.ActionCatalog
 
-  defmodule AlphaAction do
-    def to_tool do
-      %{
-        name: "alpha_action",
-        description: "Alpha action",
-        function: fn _params, _context -> {:ok, "ignored"} end,
-        module: __MODULE__,
-        owner: self(),
-        parameters_schema: %{
-          "type" => "object",
-          "properties" => %{
-            "count" => %{"minimum" => 0, "type" => "integer"},
-            "label" => %{"type" => "string"}
-          },
-          "required" => ["label"]
-        }
-      }
-    end
-  end
-
-  defmodule ZebraAction do
-    def to_tool do
-      %{
-        "parameters_schema" => %{
-          properties: %{
-            enabled: %{"type" => "boolean"}
-          },
-          type: "object"
-        },
-        "description" => "Zebra action",
-        "name" => "zebra_action"
-      }
-    end
-  end
-
-  defmodule AlphaSchemaChangedAction do
-    def to_tool do
-      %{
-        name: "alpha_action",
-        description: "Alpha action",
-        parameters_schema: %{
-          "type" => "object",
-          "properties" => %{
-            "count" => %{"minimum" => 1, "type" => "integer"},
-            "label" => %{"type" => "string"}
-          },
-          "required" => ["label"]
-        }
-      }
-    end
-  end
-
-  defmodule MissingDescriptionAction do
-    def to_tool do
-      %{name: "missing_description", parameters_schema: %{"type" => "object"}}
-    end
-  end
-
-  defmodule InvalidSchemaAction do
-    def to_tool do
-      %{
-        name: "invalid_schema",
-        description: "Invalid schema",
-        parameters_schema: %{"properties" => %{"callback" => fn -> :ok end}}
-      }
-    end
-  end
-
-  defmodule RaisingAction do
-    def to_tool, do: raise("cannot inspect action")
-  end
-
-  defmodule LongErrorAction do
-    def to_tool, do: raise(String.duplicate("oversized error ", 100))
-  end
-
-  defmodule InvalidUtf8NameAction do
-    def to_tool do
-      %{
-        name: <<"invalid_name_", 0xFF>>,
-        description: "Invalid UTF-8 name",
-        parameters_schema: %{"type" => "object"}
-      }
-    end
-  end
-
-  defmodule InvalidUtf8DescriptionAction do
-    def to_tool do
-      %{
-        name: "invalid_utf8_description",
-        description: <<"invalid description ", 0xFF>>,
-        parameters_schema: %{"type" => "object"}
-      }
-    end
-  end
+  alias Arbor.Actions.TestFixtures.{
+    AlphaAction,
+    AlphaSchemaChangedAction,
+    InvalidSchemaAction,
+    InvalidUtf8DescriptionAction,
+    InvalidUtf8NameAction,
+    LongErrorAction,
+    MissingDescriptionAction,
+    RaisingAction,
+    ZebraAction
+  }
 
   @registry_entries [
     {"zebra.action", ZebraAction, %{category: :test}},
@@ -140,7 +56,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
 
       assert Enum.all?(snapshot["actions"], fn action ->
                Map.keys(action) |> Enum.sort() ==
-                 ["description", "name", "parameters_schema"]
+                 ~w(
+                   beam_sha256
+                   description
+                   effect_class
+                   egress_declared
+                   egress_destination_resolver
+                   egress_tier_resolver
+                   module
+                   name
+                   parameters_schema
+                   resource_uri
+                 )
              end)
 
       assert {:ok, zebra} = ActionCatalog.fetch(snapshot, "zebra_action")
@@ -149,6 +76,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
                "properties" => %{"enabled" => %{"type" => "boolean"}},
                "type" => "object"
              }
+
+      assert zebra["module"] == Atom.to_string(ZebraAction)
+      assert zebra["beam_sha256"] =~ ~r/^[0-9a-f]{64}$/
+      assert zebra["resource_uri"] == "arbor://action/test_fixtures/zebra_action"
+      assert zebra["effect_class"] == "read"
 
       refute contains_runtime_value?(snapshot)
     end

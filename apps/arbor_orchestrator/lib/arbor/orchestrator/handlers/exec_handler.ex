@@ -39,12 +39,25 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
     else
       target = Map.get(node.attrs, "target", "tool")
 
-      case target do
-        "tool" -> ToolHandler.execute(node, context, graph, opts)
-        "shell" -> ShellHandler.execute(node, context, graph, opts)
-        "action" -> execute_action(node, context, opts)
-        "function" -> execute_function(node, context, opts)
-        _ -> ToolHandler.execute(node, context, graph, opts)
+      with {:ok, [{slot, execution_module}]} <- execution_delegates(node, opts),
+           :ok <-
+             RunAuthorization.verify_execution_module(
+               Keyword.get(opts, :run_authorization),
+               node,
+               slot,
+               execution_module
+             ) do
+        dispatch(target, execution_module, node, context, graph, opts)
+      else
+        {:error, reason} ->
+          %Outcome{
+            status: :fail,
+            failure_reason:
+              "Exec delegate binding rejected for node #{node.id}: #{inspect(reason)}"
+          }
+
+        _other ->
+          %Outcome{status: :fail, failure_reason: "Invalid exec delegate for node #{node.id}"}
       end
     end
   end
@@ -52,15 +65,50 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   @impl true
   def idempotency, do: :side_effecting
 
-  defp execute_action(node, context, opts) do
+  @doc false
+  def execution_delegates(node), do: execution_delegates(node, [])
+
+  @doc false
+  def execution_delegates(node, opts) do
+    target = Map.get(node.attrs, "target", "tool")
+
+    selected =
+      case target do
+        "tool" -> ToolHandler
+        "shell" -> ShellHandler
+        "action" -> Keyword.get(opts, :actions_executor, Arbor.Orchestrator.ActionsExecutor)
+        "function" -> nil
+        _unknown -> ToolHandler
+      end
+
+    if is_atom(selected) or is_nil(selected) do
+      {:ok, [{"exec:#{target}", selected}]}
+    else
+      {:error, {:invalid_exec_delegate, target}}
+    end
+  end
+
+  defp dispatch("tool", module, node, context, graph, opts),
+    do: module.execute(node, context, graph, opts)
+
+  defp dispatch("shell", module, node, context, graph, opts),
+    do: module.execute(node, context, graph, opts)
+
+  defp dispatch("action", executor, node, context, _graph, opts),
+    do: execute_action(node, context, opts, executor)
+
+  defp dispatch("function", nil, node, context, _graph, opts),
+    do: execute_function(node, context, opts)
+
+  defp dispatch(_unknown, module, node, context, graph, opts),
+    do: module.execute(node, context, graph, opts)
+
+  defp execute_action(node, context, opts, executor) do
     action_name = Map.get(node.attrs, "action")
 
     if action_name in [nil, ""] do
       raise "exec with target=action requires non-empty 'action' attribute"
     end
-
-    # Injectable for tests (defaults to the real executor in production).
-    executor = Keyword.get(opts, :actions_executor, Arbor.Orchestrator.ActionsExecutor)
 
     if Code.ensure_loaded?(executor) do
       authority = Keyword.get(opts, :run_authorization)
@@ -111,6 +159,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
           taint: input_taint
         ]
         |> maybe_put_param_taint(context, context_keys)
+        |> maybe_put_execution_binding(authority)
 
       try do
         case executor.execute(action_name, action_args, workdir, executor_opts) do
@@ -260,6 +309,21 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
 
     Keyword.put(opts, :param_taint, param_taint)
   end
+
+  defp maybe_put_execution_binding(opts, %RunAuthorization{} = authority) do
+    opts
+    |> maybe_put_executor_opt(:execution_manifest, authority.execution_manifest)
+    |> maybe_put_executor_opt(
+      :execution_manifest_digest,
+      authority.execution_manifest_digest
+    )
+    |> maybe_put_executor_opt(:pinned_action_bindings, authority.pinned_action_bindings)
+  end
+
+  defp maybe_put_execution_binding(opts, _authority), do: opts
+
+  defp maybe_put_executor_opt(opts, _key, nil), do: opts
+  defp maybe_put_executor_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
   # Provenance taint this action assigns to its own output, via the executor's
   # output_taint/1 resolver (nil for non-ingress actions or standalone mode).

@@ -20,37 +20,56 @@ defmodule Arbor.Orchestrator.Handlers.WriteHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
+  alias Arbor.Orchestrator.Engine.{Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Handlers.{AccumulatorHandler, FileWriteHandler}
 
   @impl true
   def execute(node, context, graph, opts) do
-    target = Map.get(node.attrs, "target", "file")
-
-    case registry_resolve(target) do
-      {:ok, handler_module} ->
+    with {:ok, [{slot, handler_module}]} <- execution_delegates(node),
+         :ok <-
+           RunAuthorization.verify_execution_module(
+             Keyword.get(opts, :run_authorization),
+             node,
+             slot,
+             handler_module
+           ) do
+      if Code.ensure_loaded?(handler_module) and function_exported?(handler_module, :execute, 4) do
         handler_module.execute(node, context, graph, opts)
-
-      {:error, _} ->
-        legacy_dispatch(target, node, context, graph, opts)
+      else
+        %Outcome{status: :fail, failure_reason: "Write delegate is unavailable"}
+      end
+    else
+      {:error, reason} ->
+        %Outcome{
+          status: :fail,
+          failure_reason:
+            "Write delegate binding rejected for node #{node.id}: #{inspect(reason)}"
+        }
     end
   end
 
   @impl true
   def idempotency, do: :side_effecting
 
-  # Legacy inline dispatch — used when registry is unavailable.
-  defp legacy_dispatch(target, node, context, graph, opts) do
-    case target do
-      "file" ->
-        FileWriteHandler.execute(node, context, graph, opts)
+  @doc false
+  def execution_delegates(node) do
+    target = Map.get(node.attrs, "target", "file")
 
-      "accumulator" ->
-        AccumulatorHandler.execute(node, context, graph, opts)
+    module =
+      case registry_resolve(target) do
+        {:ok, handler_module} -> handler_module
+        {:error, _reason} -> legacy_delegate(target)
+      end
 
-      _ ->
-        FileWriteHandler.execute(node, context, graph, opts)
+    if is_atom(module) do
+      {:ok, [{"write:#{target}", module}]}
+    else
+      {:error, {:invalid_write_target, target}}
     end
   end
+
+  defp legacy_delegate("accumulator"), do: AccumulatorHandler
+  defp legacy_delegate(_target), do: FileWriteHandler
 
   defp registry_resolve(target) do
     registry = Arbor.Common.WriteableRegistry

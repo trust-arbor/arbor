@@ -1399,14 +1399,7 @@ defmodule Arbor.Actions.Coding do
     defp call_action(module, params, context) do
       case Map.get(context, :action_runner) || Map.get(context, "action_runner") do
         runner when is_function(runner, 3) -> runner.(module, params, context)
-        _runner -> run_action_module(module, params, context)
-      end
-    end
-
-    defp run_action_module(module, params, context) do
-      case Code.ensure_loaded(module) do
-        {:module, ^module} -> module.run(params, context)
-        {:error, _reason} -> {:error, "#{inspect(module)} is not available"}
+        _runner -> Arbor.Actions.execute_action(module, params, context)
       end
     end
 

@@ -152,8 +152,7 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
       file = Map.get(node.attrs, "graph_file") ->
         workdir = fixed_workdir(opts, context)
 
-        with {:ok, safe_path} <- SafePath.resolve_within(file, workdir),
-             {:ok, content} <- File.read(safe_path) do
+        with {:ok, content} <- read_source_file(file, workdir, opts) do
           {:ok, content}
         else
           {:error, reason} -> {:error, {:file_read, reason, file}}
@@ -291,6 +290,11 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
       :session_id,
       :workdir,
       :identity_private_key,
+      :execution_manifest,
+      :execution_manifest_digest,
+      :pinned_action_bindings,
+      :pinned_handler_bindings,
+      :pinned_node_bindings,
       :resumable
     ]
 
@@ -320,6 +324,86 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
     case Keyword.get(opts, :run_authorization) do
       %RunAuthorization{workdir: workdir} -> workdir
       _ -> Path.expand(Context.get(context, "workdir") || Keyword.get(opts, :workdir, "."))
+    end
+  end
+
+  defp resolve_source_file(path, workdir) do
+    expanded_workdir = Path.expand(workdir)
+
+    with {:ok, lexical_path} <- SafePath.resolve_within(path, expanded_workdir),
+         {:ok, canonical_root} <- SafePath.resolve_real(expanded_workdir),
+         {:ok, real_path} <- SafePath.resolve_real(lexical_path),
+         {:ok, ^real_path} <- SafePath.resolve_within(real_path, canonical_root) do
+      {:ok,
+       %{
+         canonical_root: canonical_root,
+         expanded_workdir: expanded_workdir,
+         lexical_path: lexical_path,
+         real_path: real_path
+       }}
+    else
+      {:ok, _outside_path} -> {:error, :path_traversal}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp read_source_file(path, workdir, opts) do
+    with {:ok, resolved} <- resolve_source_file(path, workdir),
+         {:ok, identity} <- regular_file_identity(resolved.real_path),
+         {:ok, content} <- File.read(resolved.real_path),
+         :ok <- run_post_read_hook(opts, resolved.real_path),
+         :ok <- verify_source_file(resolved, identity, byte_size(content)) do
+      {:ok, content}
+    end
+  end
+
+  defp verify_source_file(resolved, expected_identity, content_size) do
+    with {:ok, canonical_root} <- SafePath.resolve_real(resolved.expanded_workdir),
+         true <- canonical_root == resolved.canonical_root,
+         {:ok, real_path} <- SafePath.resolve_real(resolved.lexical_path),
+         true <- real_path == resolved.real_path,
+         {:ok, ^real_path} <- SafePath.resolve_within(real_path, canonical_root),
+         {:ok, identity} <- regular_file_identity(real_path),
+         true <- identity == expected_identity,
+         true <- content_size == identity.size do
+      :ok
+    else
+      _other -> {:error, :source_file_changed_during_read}
+    end
+  end
+
+  defp regular_file_identity(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{type: :regular} = stat} ->
+        {:ok,
+         %{
+           inode: stat.inode,
+           major_device: stat.major_device,
+           minor_device: stat.minor_device,
+           size: stat.size,
+           mtime: stat.mtime,
+           ctime: stat.ctime
+         }}
+
+      {:ok, %File.Stat{}} ->
+        {:error, :source_not_regular_file}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp run_post_read_hook(opts, real_path) do
+    case Keyword.get(opts, :source_file_post_read_hook) do
+      nil ->
+        :ok
+
+      hook when is_function(hook, 1) ->
+        hook.(real_path)
+        :ok
+
+      _invalid ->
+        {:error, :invalid_source_file_post_read_hook}
     end
   end
 

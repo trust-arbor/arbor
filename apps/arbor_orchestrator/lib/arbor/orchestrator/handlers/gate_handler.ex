@@ -25,7 +25,7 @@ defmodule Arbor.Orchestrator.Handlers.GateHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
-  alias Arbor.Orchestrator.Engine.{Context, Outcome}
+  alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
 
   alias Arbor.Orchestrator.Handlers.{
     OutputValidateHandler,
@@ -36,26 +36,56 @@ defmodule Arbor.Orchestrator.Handlers.GateHandler do
   def execute(node, context, graph, opts) do
     predicate = Map.get(node.attrs, "predicate", "output_valid")
 
-    case predicate do
-      "output_valid" ->
-        OutputValidateHandler.execute(node, context, graph, opts)
-
-      "pipeline_valid" ->
-        PipelineValidateHandler.execute(node, context, graph, opts)
-
-      "budget_ok" ->
-        check_budget(node, context)
-
-      "expression" ->
-        check_expression(node, context)
-
-      _ ->
-        OutputValidateHandler.execute(node, context, graph, opts)
+    with {:ok, [{slot, module}]} <- execution_delegates(node),
+         :ok <-
+           RunAuthorization.verify_execution_module(
+             Keyword.get(opts, :run_authorization),
+             node,
+             slot,
+             module
+           ) do
+      dispatch(predicate, module, node, context, graph, opts)
+    else
+      {:error, reason} ->
+        %Outcome{
+          status: :fail,
+          failure_reason: "Gate delegate binding rejected for node #{node.id}: #{inspect(reason)}"
+        }
     end
   end
 
   @impl true
   def idempotency, do: :read_only
+
+  @doc false
+  def execution_delegates(node) do
+    predicate = Map.get(node.attrs, "predicate", "output_valid")
+
+    module =
+      case predicate do
+        "output_valid" -> OutputValidateHandler
+        "pipeline_valid" -> PipelineValidateHandler
+        "budget_ok" -> nil
+        "expression" -> nil
+        _unknown -> OutputValidateHandler
+      end
+
+    {:ok, [{"gate:#{predicate}", module}]}
+  end
+
+  defp dispatch("output_valid", module, node, context, graph, opts),
+    do: module.execute(node, context, graph, opts)
+
+  defp dispatch("pipeline_valid", module, node, context, graph, opts),
+    do: module.execute(node, context, graph, opts)
+
+  defp dispatch("budget_ok", nil, node, context, _graph, _opts), do: check_budget(node, context)
+
+  defp dispatch("expression", nil, node, context, _graph, _opts),
+    do: check_expression(node, context)
+
+  defp dispatch(_unknown, module, node, context, graph, opts),
+    do: module.execute(node, context, graph, opts)
 
   defp check_budget(node, context) do
     budget_status = Context.get(context, "budget_status", "normal")

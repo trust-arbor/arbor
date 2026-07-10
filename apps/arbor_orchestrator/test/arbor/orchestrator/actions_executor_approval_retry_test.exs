@@ -4,6 +4,8 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
   @moduletag :integration
 
   alias Arbor.Orchestrator.ActionsExecutor
+  alias Arbor.Actions.TestFixtures.SessionClassifyReplacementAction
+  alias Arbor.Common.ActionRegistry
   alias Arbor.Persistence.BufferedStore
 
   defmodule GatedPolicy do
@@ -17,6 +19,8 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
 
   setup_all do
     {:ok, _} = Application.ensure_all_started(:arbor_comms)
+    ensure_action_registry_started!()
+    ensure_session_classify_registered!()
 
     for {name, collection} <- [
           {:arbor_security_capabilities, "capabilities"},
@@ -159,6 +163,94 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     assert message =~ "denied by the operator"
   end
 
+  test "security regression: caller task/session capability revocation denies an approved retry" do
+    agent_id = "agent_approval_caller_revocation_#{System.unique_integer([:positive])}"
+    caller_id = "agent_caller_approval_revocation_#{System.unique_integer([:positive])}"
+    task_id = "task_approval_revocation"
+    session_id = "session_approval_revocation"
+    action_module = Arbor.Actions.Session.Classify
+    resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
+    {:ok, binding} = Arbor.Actions.runtime_descriptor(action_module)
+
+    assert {:ok, agent_capability} =
+             Arbor.Security.grant(principal: agent_id, resource: resource_uri)
+
+    assert {:ok, caller_capability} =
+             Arbor.Security.grant(
+               principal: caller_id,
+               resource: resource_uri,
+               task_id: task_id,
+               session_id: session_id
+             )
+
+    on_exit(fn ->
+      Arbor.Security.revoke(agent_capability.id)
+      Arbor.Security.revoke(caller_capability.id)
+    end)
+
+    execution =
+      Task.async(fn ->
+        ActionsExecutor.execute(
+          "session_classify",
+          %{"input" => "must not execute after revocation"},
+          File.cwd!(),
+          [
+            agent_id: agent_id,
+            caller_id: caller_id,
+            task_id: task_id,
+            session_id: session_id
+          ] ++ binding_opts(binding)
+        )
+      end)
+
+    request = await_pending_request(agent_id)
+    assert :ok = Arbor.Security.revoke(caller_capability.id)
+    Process.sleep(25)
+    assert :ok = Arbor.Comms.InteractionRouter.respond(request.request_id, :approved)
+
+    assert {:error, message} = Task.await(execution, 3_000)
+    assert message =~ "caller_authority_missing"
+    assert message =~ resource_uri
+  end
+
+  test "security regression: action registry replacement while awaiting approval is denied on retry" do
+    agent_id = "agent_approval_registry_drift_#{System.unique_integer([:positive])}"
+    action_module = Arbor.Actions.Session.Classify
+    resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
+    {:ok, binding} = Arbor.Actions.runtime_descriptor(action_module)
+    registry_snapshot = ActionRegistry.snapshot()
+    previous_pid = Application.get_env(:arbor_orchestrator, :phase5_action_binding_test_pid)
+    Application.put_env(:arbor_orchestrator, :phase5_action_binding_test_pid, self())
+
+    assert {:ok, capability} =
+             Arbor.Security.grant(principal: agent_id, resource: resource_uri)
+
+    on_exit(fn ->
+      Arbor.Security.revoke(capability.id)
+      :ok = ActionRegistry.restore(registry_snapshot)
+      restore_env(:arbor_orchestrator, :phase5_action_binding_test_pid, previous_pid)
+    end)
+
+    execution =
+      Task.async(fn ->
+        ActionsExecutor.execute(
+          "session_classify",
+          %{"input" => "must remain bound"},
+          File.cwd!(),
+          [agent_id: agent_id] ++ binding_opts(binding)
+        )
+      end)
+
+    request = await_pending_request(agent_id)
+    replace_session_classify_with_fixture!()
+    Process.sleep(25)
+    assert :ok = Arbor.Comms.InteractionRouter.respond(request.request_id, :approved)
+
+    assert {:error, message} = Task.await(execution, 3_000)
+    assert message =~ "action_registry_drift"
+    refute_receive :replacement_action_executed
+  end
+
   defp await_pending_request(agent_id, attempts \\ 100)
 
   defp await_pending_request(_agent_id, 0), do: flunk("approval request did not appear")
@@ -181,6 +273,53 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
       {:error, :already_present} -> :ok
       {:error, reason} -> raise "failed to start security child: #{inspect(reason)}"
     end
+  end
+
+  defp replace_session_classify_with_fixture! do
+    {entries, locked?} = ActionRegistry.snapshot()
+
+    {replaced, count} =
+      Enum.map_reduce(entries, 0, fn
+        {name, _module, metadata, failures, core?}, count
+        when name in ["session.classify", "session_classify"] ->
+          {{name, SessionClassifyReplacementAction, metadata, failures, core?}, count + 1}
+
+        entry, count ->
+          {entry, count}
+      end)
+
+    assert count == 2
+    :ok = ActionRegistry.restore({replaced, locked?})
+  end
+
+  defp ensure_action_registry_started! do
+    unless Process.whereis(ActionRegistry) do
+      start_supervised!(ActionRegistry)
+    end
+  end
+
+  defp ensure_session_classify_registered! do
+    for name <- ["session.classify", "session_classify"] do
+      case ActionRegistry.resolve(name) do
+        {:ok, _module} ->
+          :ok
+
+        {:error, :not_found} ->
+          :ok = ActionRegistry.register(name, Arbor.Actions.Session.Classify)
+      end
+    end
+  end
+
+  defp binding_opts(binding) do
+    bindings = %{"session_classify" => binding}
+    manifest = %{"actions" => [binding]}
+    {:ok, manifest_digest} = Arbor.Actions.execution_binding_digest(manifest)
+
+    [
+      execution_manifest: manifest,
+      execution_manifest_digest: manifest_digest,
+      pinned_action_bindings: bindings
+    ]
   end
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)

@@ -5,18 +5,22 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.Registry
+  alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, ExecutionManifest}
   alias Arbor.Orchestrator.Viz.DotSerializer
+  alias Arbor.Common.SafePath
 
-  @version 1
+  @version 3
   @authority_node_id "__run_authorization__"
 
   @unbound_override_opts [
     :actions_executor,
     :function_handler,
+    :item_handler,
     :middleware,
     :parallel_branch_executor,
     :shell_authorizer,
     :tool_command_runner,
+    :tool_executor,
     :tool_hooks,
     :transforms
   ]
@@ -26,7 +30,15 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
     :caller_id,
     :author_id,
     :graph_hash,
+    :compiled_graph_hash,
     :workdir,
+    :workdir_identity,
+    :execution_manifest,
+    :execution_manifest_digest,
+    :pinned_action_bindings,
+    :pinned_handler_bindings,
+    :pinned_node_bindings,
+    :parent_binding_digest,
     :binding_digest
   ]
   defstruct [
@@ -36,7 +48,15 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
     :task_id,
     :session_id,
     :graph_hash,
+    :compiled_graph_hash,
     :workdir,
+    :workdir_identity,
+    :execution_manifest,
+    :execution_manifest_digest,
+    :pinned_action_bindings,
+    :pinned_handler_bindings,
+    :pinned_node_bindings,
+    :parent_binding_digest,
     :binding_digest
   ]
 
@@ -47,7 +67,15 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
           task_id: String.t() | nil,
           session_id: String.t() | nil,
           graph_hash: String.t(),
+          compiled_graph_hash: String.t(),
           workdir: String.t(),
+          workdir_identity: %{String.t() => non_neg_integer()},
+          execution_manifest: map() | nil,
+          execution_manifest_digest: String.t() | nil,
+          pinned_action_bindings: map() | nil,
+          pinned_handler_bindings: map() | nil,
+          pinned_node_bindings: map() | nil,
+          parent_binding_digest: String.t() | nil,
           binding_digest: String.t()
         }
 
@@ -67,10 +95,19 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
       match?(%__MODULE__{}, inherited) ->
         with :ok <- reject_unbound_overrides(opts),
              :ok <- verify_digest(inherited),
+             :ok <- verify_workdir(inherited),
              :ok <- verify_inherited_opts(inherited, opts),
-             {:ok, current_graph_hash} <- current_graph_hash(graph, opts),
-             :ok <- validate_graph(graph) do
-          {:ok, {inherited, bind_opts(opts, inherited, current_graph_hash)}}
+             current_graph_hash = graph_hash(graph),
+             {:ok, current_compiled_graph_hash} <- ExecutionManifest.compiled_graph_hash(graph),
+             :ok <- validate_graph(graph),
+             {:ok, child_authority} <-
+               derive_child_authority(
+                 graph,
+                 inherited,
+                 current_graph_hash,
+                 current_compiled_graph_hash
+               ) do
+          {:ok, {child_authority, bind_opts(opts, child_authority, current_graph_hash)}}
         end
 
       is_nil(inherited) ->
@@ -94,7 +131,12 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
          {:ok, task_id} <- optional_id(opts, :task_id, nil),
          {:ok, session_id} <- optional_id(opts, :session_id, nil),
          {:ok, graph_hash} <- current_graph_hash(graph, opts),
-         {:ok, workdir} <- fixed_workdir(opts) do
+         {:ok, compiled_graph_hash} <- current_compiled_graph_hash(graph, opts),
+         {:ok, {workdir, workdir_identity}} <- fixed_workdir(opts),
+         {:ok,
+          {execution_manifest, execution_manifest_digest, pinned_action_bindings,
+           pinned_handler_bindings, pinned_node_bindings}} <-
+           execution_binding(opts, graph, graph_hash, compiled_graph_hash) do
       base = %{
         execution_principal: execution_principal,
         caller_id: caller_id,
@@ -102,7 +144,15 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
         task_id: task_id,
         session_id: session_id,
         graph_hash: graph_hash,
-        workdir: workdir
+        compiled_graph_hash: compiled_graph_hash,
+        workdir: workdir,
+        workdir_identity: workdir_identity,
+        execution_manifest: execution_manifest,
+        execution_manifest_digest: execution_manifest_digest,
+        pinned_action_bindings: pinned_action_bindings,
+        pinned_handler_bindings: pinned_handler_bindings,
+        pinned_node_bindings: pinned_node_bindings,
+        parent_binding_digest: nil
       }
 
       {:ok, struct!(__MODULE__, Map.put(base, :binding_digest, digest(base)))}
@@ -128,7 +178,12 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
       "task_id" => authority.task_id,
       "session_id" => authority.session_id,
       "graph_hash" => authority.graph_hash,
+      "compiled_graph_hash" => authority.compiled_graph_hash,
       "workdir" => authority.workdir,
+      "workdir_identity" => authority.workdir_identity,
+      "execution_manifest" => authority.execution_manifest,
+      "execution_manifest_digest" => authority.execution_manifest_digest,
+      "parent_binding_digest" => authority.parent_binding_digest,
       "binding_digest" => authority.binding_digest
     }
   end
@@ -209,10 +264,75 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
   def validate_node(%Node{}, nil), do: :ok
 
   def validate_node(%Node{} = node, %__MODULE__{}) do
-    case Map.get(node.attrs, "agent_id") do
-      nil -> :ok
-      "" -> :ok
-      _ -> {:error, {:graph_principal_override, node.id}}
+    cond do
+      Registry.canonical_type(Registry.node_type(node)) == "adapt" ->
+        {:error, {:authorized_graph_adaptation_forbidden, node.id}}
+
+      Map.get(node.attrs, "agent_id") in [nil, ""] ->
+        :ok
+
+      true ->
+        {:error, {:graph_principal_override, node.id}}
+    end
+  end
+
+  @doc false
+  @spec verify_handler(t(), Node.t(), module() | function()) :: :ok | {:error, term()}
+  def verify_handler(%__MODULE__{} = authority, %Node{} = node, handler)
+      when is_atom(handler) do
+    case ExecutionManifest.verify_handler_module(
+           Registry.node_type(node),
+           handler,
+           authority.pinned_handler_bindings
+         ) do
+      {:ok, _binding} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def verify_handler(%__MODULE__{pinned_handler_bindings: nil}, %Node{}, _handler), do: :ok
+
+  def verify_handler(%__MODULE__{}, %Node{} = node, _handler),
+    do: {:error, {:invalid_bound_handler, Registry.node_type(node)}}
+
+  @doc false
+  @spec verify_execution_module(t() | nil, Node.t(), String.t(), module() | nil) ::
+          :ok | {:error, term()}
+  def verify_execution_module(nil, %Node{}, _slot, _module), do: :ok
+
+  def verify_execution_module(%__MODULE__{} = authority, %Node{} = node, slot, module) do
+    case ExecutionManifest.verify_node_module(
+           node.id,
+           slot,
+           module,
+           authority.pinned_node_bindings
+         ) do
+      {:ok, _binding} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc false
+  @spec verify_graph(t(), Graph.t()) :: :ok | {:error, term()}
+  def verify_graph(%__MODULE__{} = authority, %Graph{} = graph) do
+    with {:ok, actual} <- ExecutionManifest.compiled_graph_hash(graph),
+         true <- actual == authority.compiled_graph_hash do
+      :ok
+    else
+      _other -> {:error, :run_authorization_compiled_graph_changed}
+    end
+  end
+
+  @doc false
+  @spec verify_workdir(t()) :: :ok | {:error, term()}
+  def verify_workdir(%__MODULE__{} = authority) do
+    with {:ok, resolved} <- SafePath.resolve_real(authority.workdir),
+         true <- resolved == authority.workdir,
+         {:ok, identity} <- workdir_identity(resolved),
+         true <- identity == authority.workdir_identity do
+      :ok
+    else
+      _other -> {:error, :run_authorization_workdir_changed}
     end
   end
 
@@ -292,9 +412,124 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
 
     if is_binary(workdir) and String.valid?(workdir) and String.trim(workdir) != "" and
          not String.contains?(workdir, <<0>>) do
-      {:ok, Path.expand(workdir)}
+      expanded = Path.expand(workdir)
+
+      with {:ok, resolved} <- SafePath.resolve_real(expanded),
+           true <- resolved == expanded,
+           {:ok, identity} <- workdir_identity(resolved) do
+        {:ok, {resolved, identity}}
+      else
+        false -> {:error, :run_authorization_workdir_not_canonical}
+        {:error, :not_found} -> {:error, :run_authorization_workdir_not_found}
+        {:error, _reason} -> {:error, :invalid_run_authorization_workdir}
+      end
     else
       {:error, :invalid_run_authorization_workdir}
+    end
+  end
+
+  defp workdir_identity(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{type: :directory} = stat} ->
+        {:ok,
+         %{
+           "inode" => stat.inode,
+           "major_device" => stat.major_device,
+           "minor_device" => stat.minor_device
+         }}
+
+      {:ok, %File.Stat{}} ->
+        {:error, :workdir_not_directory}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp execution_binding(opts, graph, graph_hash, compiled_graph_hash) do
+    manifest = Keyword.get(opts, :execution_manifest)
+    digest = Keyword.get(opts, :execution_manifest_digest)
+    supplied_actions = Keyword.get(opts, :pinned_action_bindings)
+    supplied_handlers = Keyword.get(opts, :pinned_handler_bindings)
+    supplied_nodes = Keyword.get(opts, :pinned_node_bindings)
+
+    cond do
+      Enum.all?(
+        [manifest, digest, supplied_actions, supplied_handlers, supplied_nodes],
+        &is_nil/1
+      ) ->
+        {:ok, {nil, nil, nil, nil, nil}}
+
+      is_map(manifest) and valid_sha256?(digest) ->
+        with :ok <- ExecutionManifest.validate(manifest, digest, graph_hash),
+             :ok <- ExecutionManifest.verify_compiled_graph(manifest, graph),
+             true <- manifest["compiled_graph_hash"] == compiled_graph_hash,
+             {:ok, action_bindings} <- ExecutionManifest.action_binding_index(manifest),
+             {:ok, handler_bindings} <- ExecutionManifest.handler_binding_index(manifest),
+             {:ok, node_bindings} <- ExecutionManifest.node_binding_index(manifest),
+             :ok <- require_supplied_index(supplied_actions, action_bindings, :action),
+             :ok <- require_supplied_index(supplied_handlers, handler_bindings, :handler),
+             :ok <- require_supplied_index(supplied_nodes, node_bindings, :node) do
+          {:ok, {manifest, digest, action_bindings, handler_bindings, node_bindings}}
+        else
+          false -> {:error, :execution_manifest_compiled_graph_mismatch}
+          {:error, _reason} = error -> error
+        end
+
+      true ->
+        {:error, :invalid_execution_manifest_binding}
+    end
+  end
+
+  defp valid_sha256?(digest) when is_binary(digest),
+    do: Regex.match?(~r/\A[0-9a-f]{64}\z/, digest)
+
+  defp valid_sha256?(_digest), do: false
+
+  defp require_supplied_index(nil, _derived, _kind), do: :ok
+  defp require_supplied_index(value, value, _kind), do: :ok
+
+  defp require_supplied_index(_supplied, _derived, kind),
+    do: {:error, {:execution_manifest_index_mismatch, kind}}
+
+  defp derive_child_authority(graph, parent, graph_hash, compiled_graph_hash) do
+    with {:ok, {manifest, manifest_digest, action_bindings, handler_bindings, node_bindings}} <-
+           child_execution_binding(graph, parent, graph_hash) do
+      base = %{
+        execution_principal: parent.execution_principal,
+        caller_id: parent.caller_id,
+        author_id: parent.author_id,
+        task_id: parent.task_id,
+        session_id: parent.session_id,
+        graph_hash: graph_hash,
+        compiled_graph_hash: compiled_graph_hash,
+        workdir: parent.workdir,
+        workdir_identity: parent.workdir_identity,
+        execution_manifest: manifest,
+        execution_manifest_digest: manifest_digest,
+        pinned_action_bindings: action_bindings,
+        pinned_handler_bindings: handler_bindings,
+        pinned_node_bindings: node_bindings,
+        parent_binding_digest: parent.binding_digest
+      }
+
+      {:ok, struct!(__MODULE__, Map.put(base, :binding_digest, digest(base)))}
+    end
+  end
+
+  defp child_execution_binding(_graph, %{execution_manifest_digest: nil}, _graph_hash),
+    do: {:ok, {nil, nil, nil, nil, nil}}
+
+  defp child_execution_binding(graph, parent, graph_hash) do
+    with {:ok, catalog} <- ActionCatalog.snapshot(),
+         {:ok, {manifest, manifest_digest}} <- ExecutionManifest.build(graph, catalog, graph_hash),
+         {:ok, action_bindings} <- ExecutionManifest.action_binding_index(manifest),
+         {:ok, handler_bindings} <- ExecutionManifest.handler_binding_index(manifest),
+         {:ok, node_bindings} <- ExecutionManifest.node_binding_index(manifest),
+         :ok <- ExecutionManifest.require_subset(manifest, parent.execution_manifest) do
+      {:ok, {manifest, manifest_digest, action_bindings, handler_bindings, node_bindings}}
+    else
+      {:error, reason} -> {:error, {:child_execution_manifest_failed, reason}}
     end
   end
 
@@ -303,6 +538,17 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
       nil -> {:ok, graph_hash(graph)}
       hash when is_binary(hash) and hash != "" -> {:ok, hash}
       _ -> {:error, :invalid_run_authorization_graph_hash}
+    end
+  end
+
+  defp current_compiled_graph_hash(graph, opts) do
+    with {:ok, actual} <- ExecutionManifest.compiled_graph_hash(graph) do
+      case Keyword.get(opts, :compiled_graph_hash) do
+        nil -> {:ok, actual}
+        ^actual -> {:ok, actual}
+        hash when is_binary(hash) -> {:error, :run_authorization_compiled_graph_hash_mismatch}
+        _other -> {:error, :invalid_run_authorization_compiled_graph_hash}
+      end
     end
   end
 
@@ -325,7 +571,9 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
       {:author_id, Keyword.get(opts, :author_id)},
       {:author_id, Keyword.get(opts, :graph_author_id)},
       {:task_id, Keyword.get(opts, :task_id)},
-      {:session_id, Keyword.get(opts, :session_id)}
+      {:session_id, Keyword.get(opts, :session_id)},
+      {:execution_manifest_digest, Keyword.get(opts, :execution_manifest_digest)},
+      {:compiled_graph_hash, Keyword.get(opts, :compiled_graph_hash)}
     ]
 
     mismatch =
@@ -337,9 +585,24 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
       mismatch ->
         {:error, {:inherited_run_authorization_mismatch, elem(mismatch, 0)}}
 
-      Keyword.has_key?(opts, :workdir) and
-          Path.expand(Keyword.fetch!(opts, :workdir)) != authority.workdir ->
+      Keyword.has_key?(opts, :workdir) and not workdir_override_matches?(authority, opts) ->
         {:error, {:inherited_run_authorization_mismatch, :workdir}}
+
+      Keyword.has_key?(opts, :pinned_action_bindings) and
+          Keyword.fetch!(opts, :pinned_action_bindings) != authority.pinned_action_bindings ->
+        {:error, {:inherited_run_authorization_mismatch, :pinned_action_bindings}}
+
+      Keyword.has_key?(opts, :pinned_handler_bindings) and
+          Keyword.fetch!(opts, :pinned_handler_bindings) != authority.pinned_handler_bindings ->
+        {:error, {:inherited_run_authorization_mismatch, :pinned_handler_bindings}}
+
+      Keyword.has_key?(opts, :pinned_node_bindings) and
+          Keyword.fetch!(opts, :pinned_node_bindings) != authority.pinned_node_bindings ->
+        {:error, {:inherited_run_authorization_mismatch, :pinned_node_bindings}}
+
+      Keyword.has_key?(opts, :execution_manifest) and
+          Keyword.fetch!(opts, :execution_manifest) != authority.execution_manifest ->
+        {:error, {:inherited_run_authorization_mismatch, :execution_manifest}}
 
       true ->
         :ok
@@ -348,11 +611,26 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
     _ -> {:error, :invalid_inherited_run_authorization}
   end
 
+  defp workdir_override_matches?(authority, opts) do
+    with workdir when is_binary(workdir) <- Keyword.fetch!(opts, :workdir),
+         expanded = Path.expand(workdir),
+         {:ok, resolved} <- SafePath.resolve_real(expanded),
+         true <- resolved == authority.workdir,
+         {:ok, identity} <- workdir_identity(resolved) do
+      identity == authority.workdir_identity
+    else
+      _other -> false
+    end
+  end
+
   defp validate_graph(%Graph{} = graph) do
     Enum.reduce_while(graph.nodes, :ok, fn {_id, node}, :ok ->
       cond do
         Map.get(node.attrs, "agent_id") not in [nil, ""] ->
           {:halt, {:error, {:graph_principal_override, node.id}}}
+
+        Registry.canonical_type(Registry.node_type(node)) == "adapt" ->
+          {:halt, {:error, {:authorized_graph_adaptation_forbidden, node.id}}}
 
         Registry.custom_handler_for(Registry.node_type(node)) != nil ->
           {:halt, {:error, {:unbound_custom_handler, node.id}}}
@@ -389,14 +667,20 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
     |> Keyword.put(:author_id, authority.author_id)
     |> Keyword.put(:workdir, authority.workdir)
     |> Keyword.put(:graph_hash, current_graph_hash)
+    |> Keyword.put(:compiled_graph_hash, authority.compiled_graph_hash)
+    |> maybe_put_keyword(:execution_manifest, authority.execution_manifest)
+    |> maybe_put_keyword(:execution_manifest_digest, authority.execution_manifest_digest)
+    |> maybe_put_keyword(:pinned_action_bindings, authority.pinned_action_bindings)
+    |> maybe_put_keyword(:pinned_handler_bindings, authority.pinned_handler_bindings)
+    |> maybe_put_keyword(:pinned_node_bindings, authority.pinned_node_bindings)
     |> maybe_put_keyword(:task_id, authority.task_id)
     |> maybe_put_keyword(:session_id, authority.session_id)
   end
 
   defp digest(base) do
     base
-    |> Enum.map(fn {key, value} -> {to_string(key), value} end)
-    |> Enum.sort_by(&elem(&1, 0))
+    |> Map.new(fn {key, value} -> {to_string(key), value} end)
+    |> canonicalize()
     |> Jason.encode!()
     |> sha256()
   end
@@ -424,4 +708,14 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
   defp overwrite_if_present(attrs, key, value) do
     if Map.has_key?(attrs, key), do: Map.put(attrs, key, value), else: attrs
   end
+
+  defp canonicalize(map) when is_map(map) and not is_struct(map) do
+    map
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map(fn {key, value} -> {key, canonicalize(value)} end)
+    |> Jason.OrderedObject.new()
+  end
+
+  defp canonicalize(list) when is_list(list), do: Enum.map(list, &canonicalize/1)
+  defp canonicalize(value), do: value
 end

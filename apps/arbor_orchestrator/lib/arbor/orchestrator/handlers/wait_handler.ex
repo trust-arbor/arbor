@@ -22,7 +22,7 @@ defmodule Arbor.Orchestrator.Handlers.WaitHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
-  alias Arbor.Orchestrator.Engine.Outcome
+  alias Arbor.Orchestrator.Engine.{Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Handlers.WaitHumanHandler
 
   import Arbor.Orchestrator.Handlers.Helpers
@@ -31,23 +31,39 @@ defmodule Arbor.Orchestrator.Handlers.WaitHandler do
   def execute(node, context, graph, opts) do
     source = Map.get(node.attrs, "source", "human")
 
-    case source do
-      "human" ->
-        WaitHumanHandler.execute(node, context, graph, opts)
-
-      "timer" ->
-        handle_timer(node)
-
-      "signal" ->
-        handle_signal(node)
-
-      _ ->
-        WaitHumanHandler.execute(node, context, graph, opts)
+    with {:ok, [{slot, module}]} <- execution_delegates(node),
+         :ok <-
+           RunAuthorization.verify_execution_module(
+             Keyword.get(opts, :run_authorization),
+             node,
+             slot,
+             module
+           ) do
+      dispatch(source, module, node, context, graph, opts)
+    else
+      {:error, reason} ->
+        %Outcome{
+          status: :fail,
+          failure_reason: "Wait delegate binding rejected for node #{node.id}: #{inspect(reason)}"
+        }
     end
   end
 
   @impl true
   def idempotency, do: :side_effecting
+
+  @doc false
+  def execution_delegates(node) do
+    source = Map.get(node.attrs, "source", "human")
+    module = if source in ["timer", "signal"], do: nil, else: WaitHumanHandler
+    {:ok, [{"wait:#{source}", module}]}
+  end
+
+  defp dispatch("timer", nil, node, _context, _graph, _opts), do: handle_timer(node)
+  defp dispatch("signal", nil, node, _context, _graph, _opts), do: handle_signal(node)
+
+  defp dispatch(_source, module, node, context, graph, opts),
+    do: module.execute(node, context, graph, opts)
 
   defp handle_timer(node) do
     duration = parse_int(Map.get(node.attrs, "duration"), 1000)

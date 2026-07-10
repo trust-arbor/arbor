@@ -43,7 +43,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Coding.Plan
   alias Arbor.Orchestrator.Config
-  alias Arbor.Orchestrator.CodingPlan.{Compilation, Normalizer}
+
+  alias Arbor.Orchestrator.CodingPlan.{
+    ActionCatalog,
+    Compilation,
+    ExecutionManifest,
+    Normalizer,
+    Profiles,
+    SemanticPreflight
+  }
+
+  alias Arbor.Orchestrator.Dot.Parser
+  alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
 
   @allowed_context_keys MapSet.new(~w(task_id timeout caller_id metadata))
 
@@ -191,6 +202,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          {:ok, compilation} <- compile_plan(plan, template_path),
          {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
          {:ok, artifacts} <- archive_compilation(logs_root, plan, compilation),
+         {:ok, {pinned_action_bindings, pinned_handler_bindings}} <-
+           verify_execution_boundary(
+             Map.fetch!(artifacts, "coding_pipeline_path"),
+             plan,
+             compilation
+           ),
          {:ok, opts} <-
            build_engine_opts(
              agent_id,
@@ -199,7 +216,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
              exec_ctx,
              signer,
              private_key,
-             logs_root
+             logs_root,
+             pinned_action_bindings,
+             pinned_handler_bindings
            ),
          {:ok, engine_result} <-
            invoke_runner(Map.fetch!(artifacts, "coding_pipeline_path"), opts),
@@ -836,6 +855,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          :ok <- validate_nonblank_binary(compilation.template_version, :template_version),
          :ok <- validate_hash(compilation.plan_fingerprint, :plan_fingerprint),
          :ok <- validate_hash(compilation.action_catalog_digest, :action_catalog_digest),
+         :ok <-
+           validate_hash(compilation.execution_manifest_digest, :execution_manifest_digest),
+         :ok <- validate_json_object(compilation.execution_manifest, :execution_manifest),
+         :ok <-
+           ExecutionManifest.validate(
+             compilation.execution_manifest,
+             compilation.execution_manifest_digest,
+             compilation.graph_hash
+           ),
          :ok <- validate_json_object(compilation.initial_values, :initial_values),
          :ok <-
            reject_forbidden_keys(
@@ -948,6 +976,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       "template_version" => compilation.template_version,
       "plan_fingerprint" => compilation.plan_fingerprint,
       "action_catalog_digest" => compilation.action_catalog_digest,
+      "execution_manifest" => compilation.execution_manifest,
+      "execution_manifest_digest" => compilation.execution_manifest_digest,
       "plan_version" => plan.version,
       "task_class" => plan.task_class,
       "validation_profile" => plan.validation_profile,
@@ -1100,6 +1130,50 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
+  defp verify_execution_boundary(graph_path, %Plan{} = plan, %Compilation{} = compilation) do
+    with {:ok, dot_source} <- File.read(graph_path),
+         true <- dot_source == compilation.dot_source,
+         true <- sha256(dot_source) == compilation.graph_hash,
+         {:ok, graph} <- parse_execution_graph(dot_source),
+         {:ok, compiled_graph} <- IRCompiler.compile(graph),
+         {:ok, profile} <- Profiles.fetch_executable(plan.validation_profile),
+         :ok <- Profiles.validate_requirements(profile, compiled_graph),
+         :ok <-
+           SemanticPreflight.validate(compiled_graph, profile["semantic_policy"],
+             review_profile: plan.review_profile
+           ),
+         {:ok, live_catalog} <- ActionCatalog.snapshot(),
+         {:ok, pinned_action_bindings} <-
+           ExecutionManifest.verify(
+             compilation.execution_manifest,
+             compilation.execution_manifest_digest,
+             compiled_graph,
+             live_catalog,
+             compilation.graph_hash
+           ),
+         {:ok, pinned_handler_bindings} <-
+           ExecutionManifest.handler_binding_index(compilation.execution_manifest) do
+      {:ok, {pinned_action_bindings, pinned_handler_bindings}}
+    else
+      false -> {:error, {:coding_execution_preflight_failed, :archived_graph_mismatch}}
+      {:error, reason} -> {:error, {:coding_execution_preflight_failed, reason}}
+      _other -> {:error, {:coding_execution_preflight_failed, :invalid_preflight_result}}
+    end
+  rescue
+    exception ->
+      {:error, {:coding_execution_preflight_failed, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:coding_execution_preflight_failed, {kind, reason}}}
+  end
+
+  defp parse_execution_graph(dot_source) do
+    case Parser.parse(dot_source) do
+      {:ok, graph} -> {:ok, graph}
+      {:ok, _graph, errors} -> {:error, {:execution_graph_parse_failed, errors}}
+      {:error, reason} -> {:error, {:execution_graph_parse_failed, reason}}
+    end
+  end
+
   defp validate_json_object(value, error_tag) when is_map(value) and not is_struct(value) do
     case ensure_string_keyed_json_map(value, error_tag) do
       :ok -> :ok
@@ -1155,7 +1229,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          exec_ctx,
          signer,
          private_key,
-         logs_root
+         logs_root,
+         pinned_action_bindings,
+         pinned_handler_bindings
        ) do
     task_id = exec_ctx.task_id
     caller_id = Map.get(exec_ctx, :caller_id)
@@ -1182,10 +1258,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         initial_values: initial_values,
         logs_root: logs_root,
         graph_hash: compilation.graph_hash,
+        execution_manifest: compilation.execution_manifest,
+        execution_manifest_digest: compilation.execution_manifest_digest,
+        pinned_action_bindings: pinned_action_bindings,
+        pinned_handler_bindings: pinned_handler_bindings,
         workdir: plan.repo_root,
         timeout: timeout,
         spawning_pid: self(),
-        resumable: true
+        resumable: true,
+        cache: false
       ]
 
     # The authenticated caller remains distinct from the execution principal.

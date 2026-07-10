@@ -8,9 +8,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
 
   Registry entries contain aliases and runtime module references. A snapshot
   deduplicates those aliases by module, calls each action's `to_tool/0`, and
-  retains only the name, description, and parameters schema needed by the
-  coding-plan compiler. No module, function, PID, or other runtime reference is
-  retained in the returned value.
+  combines its schema with `Arbor.Actions.runtime_descriptor/1`. Module names
+  and loaded BEAM digests are retained as JSON strings so compilation can bind
+  exact executable code without retaining atoms, functions, PIDs, or other
+  runtime references.
   """
 
   alias Arbor.Common.ActionRegistry
@@ -236,9 +237,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
     module_name = Atom.to_string(module)
 
     try do
-      module
-      |> apply(:to_tool, [])
-      |> normalize_action_spec(module_name)
+      with {:ok, spec} <- module |> apply(:to_tool, []) |> normalize_action_spec(module_name),
+           {:ok, descriptor} <- Arbor.Actions.runtime_descriptor(module),
+           :ok <- require_descriptor_name(descriptor, spec, module_name) do
+        {:ok, Map.merge(spec, descriptor)}
+      else
+        {:error, reason} when is_atom(reason) ->
+          {:error, {:action_uninspectable, module_name, bounded_message(Atom.to_string(reason))}}
+
+        {:error, _reason} = error ->
+          error
+      end
     rescue
       exception ->
         {:error, {:action_uninspectable, module_name, exception_message(exception)}}
@@ -276,6 +285,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
 
   defp normalize_action_spec(_spec, module_name),
     do: {:error, {:invalid_action_spec, module_name, :expected_map}}
+
+  defp require_descriptor_name(%{"name" => name}, %{"name" => name}, _module_name), do: :ok
+
+  defp require_descriptor_name(_descriptor, _spec, module_name),
+    do: {:error, {:invalid_action_spec, module_name, :runtime_name_mismatch}}
 
   defp spec_field(spec, field, module_name) do
     string_field = Atom.to_string(field)
