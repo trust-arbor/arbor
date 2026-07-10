@@ -2,10 +2,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @moduledoc """
   `Arbor.Contracts.Agent.TaskExecutor` for the packaged coding-change pipeline.
 
-  Accepts only canonical JSON task maps with `kind: "coding_change"`. Builds
-  Engine opts from allowlisted task/context fields and trusted `run/3`
-  identity — never from task-supplied authorization, signer, agent_id,
-  task_id, engine module, action executor, graph path, or capabilities.
+  Accepts canonical JSON task maps with `kind: "coding_change"` in either the
+  legacy flat shape or the versioned `Coding.Plan` shape. A reviewed compiler
+  turns the normalized plan and trusted packaged template into immutable DOT;
+  the exact plan, graph, and compile manifest are archived before execution.
+  Engine opts come only from that compilation, allowlisted context fields, and
+  trusted `run/3` identity — never from task-supplied authority or graph data.
 
   Authorization is mandatory (`authorization: true`) with a signer derived from
   the target agent's signing key via the public Security facade. Missing
@@ -39,34 +41,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @behaviour Arbor.Contracts.Agent.TaskExecutor
 
   alias Arbor.Common.SafePath
+  alias Arbor.Contracts.Coding.Plan
   alias Arbor.Orchestrator.Config
-
-  @kind "coding_change"
-
-  @required_task_fields ~w(task repo_path acp_agent)
-  @optional_task_fields ~w(base_ref branch_name worktree_base_dir open_pr submit_review)
-  @allowed_task_keys MapSet.new(["kind" | @required_task_fields ++ @optional_task_fields])
-
-  @boolean_task_fields MapSet.new(~w(open_pr submit_review))
-
-  @forbidden_task_keys MapSet.new(~w(
-    authorization
-    signer
-    agent_id
-    task_id
-    engine
-    engine_module
-    action_executor
-    actions_executor
-    graph
-    graph_path
-    capabilities
-    identity
-    authorizer
-    private_key
-    signing_key
-    identity_private_key
-  ))
+  alias Arbor.Orchestrator.CodingPlan.{Compilation, Normalizer}
 
   @allowed_context_keys MapSet.new(~w(task_id timeout caller_id metadata))
 
@@ -138,6 +115,44 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     identity_private_key
   ))
 
+  @forbidden_initial_value_keys MapSet.new(~w(
+    action_executor
+    actions_executor
+    agent_id
+    artifacts
+    authorization
+    authorizer
+    capabilities
+    coding_pipeline_path
+    compile_manifest_path
+    coding_plan_path
+    engine
+    engine_module
+    graph
+    graph_path
+    identity
+    identity_private_key
+    pipeline_path
+    private_key
+    session.agent_id
+    session.caller_id
+    session.metadata
+    session.task_id
+    signer
+    signing_key
+    task_id
+  ))
+
+  @artifact_descriptor_keys MapSet.new(~w(
+    coding_plan_path
+    coding_pipeline_path
+    compile_manifest_path
+    graph_hash
+    compiler_version
+  ))
+
+  @artifact_path_keys ~w(coding_plan_path coding_pipeline_path compile_manifest_path)
+
   @success_statuses MapSet.new(~w(
     change_committed
     declined
@@ -158,24 +173,38 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   Run the coding-change pipeline for `agent_id`.
 
   `task` must be a JSON-clean string-keyed map with `kind: "coding_change"` and
-  required fields `task`, `repo_path`, and `acp_agent`. `context` must include a
-  nonblank `task_id`; optional `timeout` / `caller_id` / `metadata` are accepted
-  as data only (not as control authority).
+  either legacy coding fields or a versioned `plan` object. `context` must
+  include a nonblank `task_id`; optional `timeout` / `caller_id` / `metadata`
+  are accepted as data only (not as control authority).
   """
   @impl true
   @spec run(String.t(), term(), map() | keyword()) ::
           {:ok, map()} | {:error, term()}
   def run(agent_id, task, context) when is_binary(agent_id) do
     with :ok <- validate_agent_id(agent_id),
-         {:ok, task_data} <- validate_task(task),
          {:ok, exec_ctx} <- validate_context(context),
+         {:ok, plan} <- Normalizer.normalize_task(task),
          :ok <- require_security_available(),
-         {:ok, task_data} <- normalize_workspace_scope(task_data),
-         {:ok, graph_path} <- resolve_graph_path(),
+         {:ok, plan} <- normalize_workspace_scope(plan),
+         {:ok, template_path} <- resolve_template_path(),
          {:ok, {signer, private_key}} <- build_signer(agent_id),
-         opts <- build_engine_opts(agent_id, task_data, exec_ctx, signer, private_key),
-         {:ok, engine_result} <- invoke_runner(graph_path, opts) do
-      adapt_result(engine_result)
+         {:ok, compilation} <- compile_plan(plan, template_path),
+         logs_root = task_logs_root(exec_ctx.task_id),
+         {:ok, artifacts} <- archive_compilation(logs_root, plan, compilation),
+         {:ok, opts} <-
+           build_engine_opts(
+             agent_id,
+             plan,
+             compilation,
+             exec_ctx,
+             signer,
+             private_key,
+             logs_root
+           ),
+         {:ok, engine_result} <-
+           invoke_runner(Map.fetch!(artifacts, "coding_pipeline_path"), opts),
+         {:ok, result} <- adapt_result(engine_result) do
+      {:ok, Map.put(result, "artifacts", artifacts)}
     end
   end
 
@@ -458,19 +487,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
-  defp validate_task(task) when is_map(task) and not is_struct(task) do
-    with :ok <- ensure_string_keyed_json_map(task, :non_json_task),
-         :ok <- reject_forbidden_keys(task, @forbidden_task_keys, :forbidden_task_key),
-         :ok <- reject_unknown_keys(task, @allowed_task_keys, :unknown_task_key),
-         :ok <- require_kind(task),
-         {:ok, required} <- require_nonblank_fields(task, @required_task_fields),
-         {:ok, optional} <- extract_optional_fields(task) do
-      {:ok, Map.merge(required, optional)}
-    end
-  end
-
-  defp validate_task(_task), do: {:error, :invalid_task}
-
   defp validate_context(context) when is_map(context) and not is_struct(context) do
     with :ok <- ensure_string_keyed_json_map(context, :non_json_context),
          :ok <- reject_forbidden_keys(context, @forbidden_context_keys, :forbidden_context_key),
@@ -482,25 +498,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp validate_context(_context), do: {:error, :invalid_context}
-
-  defp require_kind(%{"kind" => kind}) when is_binary(kind) do
-    case String.trim(kind) do
-      @kind -> :ok
-      other -> {:error, {:unsupported_task_kind, other}}
-    end
-  end
-
-  defp require_kind(%{"kind" => _}), do: {:error, {:invalid_field_type, "kind"}}
-  defp require_kind(_), do: {:error, :missing_task_kind}
-
-  defp require_nonblank_fields(map, fields) do
-    Enum.reduce_while(fields, {:ok, %{}}, fn field, {:ok, acc} ->
-      case require_nonblank(map, field) do
-        {:ok, value} -> {:cont, {:ok, Map.put(acc, field, value)}}
-        {:error, _} = err -> {:halt, err}
-      end
-    end)
-  end
 
   defp require_nonblank(map, field) do
     case Map.get(map, field) do
@@ -514,79 +511,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         {:error, {:missing_field, field}}
 
       _other ->
-        {:error, {:invalid_field_type, field}}
-    end
-  end
-
-  defp extract_optional_fields(map) do
-    Enum.reduce_while(@optional_task_fields, {:ok, %{}}, fn field, {:ok, acc} ->
-      case Map.fetch(map, field) do
-        :error ->
-          {:cont, {:ok, acc}}
-
-        {:ok, nil} ->
-          {:cont, {:ok, acc}}
-
-        {:ok, value} ->
-          case normalize_optional_field(field, value) do
-            {:ok, normalized} -> {:cont, {:ok, Map.put(acc, field, normalized)}}
-            {:error, _} = err -> {:halt, err}
-          end
-      end
-    end)
-  end
-
-  defp normalize_optional_field(field, value) do
-    if MapSet.member?(@boolean_task_fields, field) do
-      normalize_bool_string(field, value)
-    else
-      case value do
-        v when is_binary(v) ->
-          case String.trim(v) do
-            "" -> {:error, {:blank_field, field}}
-            trimmed -> {:ok, trimmed}
-          end
-
-        _ ->
-          {:error, {:invalid_field_type, field}}
-      end
-    end
-  end
-
-  defp normalize_bool_string(field, value) do
-    case value do
-      true ->
-        {:ok, "true"}
-
-      false ->
-        {:ok, "false"}
-
-      "true" ->
-        {:ok, "true"}
-
-      "false" ->
-        {:ok, "false"}
-
-      "TRUE" ->
-        {:ok, "true"}
-
-      "FALSE" ->
-        {:ok, "false"}
-
-      "1" ->
-        {:ok, "true"}
-
-      "0" ->
-        {:ok, "false"}
-
-      other when is_binary(other) ->
-        case String.trim(String.downcase(other)) do
-          "true" -> {:ok, "true"}
-          "false" -> {:ok, "false"}
-          _ -> {:error, {:invalid_field_type, field}}
-        end
-
-      _ ->
         {:error, {:invalid_field_type, field}}
     end
   end
@@ -715,20 +639,27 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   # Workspace roots are input scope, not authorization. Both configured roots
   # and caller-supplied paths must already exist so realpath can resolve every
   # symlink before the segment-aware containment check.
-  defp normalize_workspace_scope(task_data) do
+  defp normalize_workspace_scope(%Plan{} = plan) do
     with {:ok, configured_repo_roots} <- Config.coding_repo_roots(),
          {:ok, configured_worktree_roots} <- Config.coding_worktree_roots(),
          {:ok, repo_roots} <- canonicalize_configured_roots(configured_repo_roots, :repo),
          {:ok, worktree_roots} <-
            canonicalize_configured_roots(configured_worktree_roots, :worktree),
          {:ok, requested_repo_path} <-
-           resolve_scoped_path(Map.fetch!(task_data, "repo_path"), repo_roots, :repo_path),
+           resolve_scoped_path(plan.repo_root, repo_roots, :repo_path),
          {:ok, repo_path} <- resolve_git_top_level(requested_repo_path, repo_roots),
-         {:ok, worktree_base_dir} <- resolve_worktree_base(task_data, worktree_roots) do
-      {:ok,
-       task_data
-       |> Map.put("repo_path", repo_path)
-       |> Map.put("worktree_base_dir", worktree_base_dir)}
+         {:ok, worktree_base_dir} <-
+           resolve_worktree_base(plan.workspace_policy["worktree_base_dir"], worktree_roots),
+         plan_map = Plan.to_map(plan),
+         workspace_policy =
+           Map.put(plan_map["workspace_policy"], "worktree_base_dir", worktree_base_dir),
+         {:ok, canonical_plan} <-
+           Plan.new(
+             plan_map
+             |> Map.put("repo_root", repo_path)
+             |> Map.put("workspace_policy", workspace_policy)
+           ) do
+      {:ok, canonical_plan}
     end
   end
 
@@ -829,12 +760,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     :exit, _ -> {:error, :invalid_git_repository}
   end
 
-  defp resolve_worktree_base(task_data, worktree_roots) do
-    case Map.fetch(task_data, "worktree_base_dir") do
-      {:ok, path} -> resolve_scoped_path(path, worktree_roots, :worktree_base_dir)
-      :error -> {:ok, List.first(worktree_roots)}
-    end
-  end
+  defp resolve_worktree_base(nil, worktree_roots), do: {:ok, List.first(worktree_roots)}
+
+  defp resolve_worktree_base(path, worktree_roots),
+    do: resolve_scoped_path(path, worktree_roots, :worktree_base_dir)
 
   # Production coding executor always fails closed when security is down —
   # before any runner (including injected test doubles) is invoked, and
@@ -847,19 +776,306 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
-  defp resolve_graph_path do
+  defp resolve_template_path do
     path = Config.coding_pipeline_path()
 
     cond do
       not is_binary(path) or String.trim(path) == "" ->
         {:error, :coding_pipeline_unavailable}
 
-      File.exists?(path) ->
+      File.regular?(path) ->
         {:ok, path}
 
       true ->
         {:error, {:coding_pipeline_unavailable, path}}
     end
+  end
+
+  defp compile_plan(%Plan{} = plan, template_path) do
+    compiler = Config.coding_plan_compiler()
+
+    cond do
+      not is_atom(compiler) ->
+        {:error, :coding_plan_compiler_unavailable}
+
+      not Code.ensure_loaded?(compiler) ->
+        {:error, :coding_plan_compiler_unavailable}
+
+      not function_exported?(compiler, :compile, 2) ->
+        {:error, :coding_plan_compiler_unavailable}
+
+      true ->
+        invoke_compiler(compiler, plan, template_path)
+    end
+  end
+
+  defp invoke_compiler(compiler, plan, template_path) do
+    case compiler.compile(plan, template_path: template_path) do
+      {:ok, %Compilation{} = compilation} ->
+        validate_compilation(compilation, plan)
+
+      {:error, _reason} = error ->
+        error
+
+      _other ->
+        {:error, :invalid_coding_plan_compiler_reply}
+    end
+  rescue
+    error -> {:error, {:coding_plan_compile_error, Exception.message(error)}}
+  catch
+    :exit, reason -> {:error, {:coding_plan_compile_exit, reason}}
+    kind, reason -> {:error, {:coding_plan_compile_throw, {kind, reason}}}
+  end
+
+  defp validate_compilation(%Compilation{} = compilation, %Plan{} = plan) do
+    with :ok <- validate_compilation_plan(compilation.plan_map, plan),
+         :ok <- validate_nonblank_binary(compilation.dot_source, :dot_source),
+         :ok <- validate_hash(compilation.graph_hash, :graph_hash),
+         :ok <- validate_dot_hash(compilation.dot_source, compilation.graph_hash),
+         :ok <- validate_nonblank_binary(compilation.compiler_version, :compiler_version),
+         :ok <- validate_nonblank_binary(compilation.template_version, :template_version),
+         :ok <- validate_hash(compilation.plan_fingerprint, :plan_fingerprint),
+         :ok <- validate_hash(compilation.action_catalog_digest, :action_catalog_digest),
+         :ok <- validate_json_object(compilation.initial_values, :initial_values),
+         :ok <-
+           reject_forbidden_keys(
+             compilation.initial_values,
+             @forbidden_initial_value_keys,
+             :forbidden_compilation_initial_value
+           ),
+         :ok <- validate_core_initial_values(compilation.initial_values, plan),
+         :ok <- validate_json_object(compilation.manifest, :manifest),
+         :ok <- validate_compilation_manifest(compilation, plan) do
+      {:ok, compilation}
+    else
+      {:error, reason} -> {:error, {:invalid_coding_plan_compiler_reply, reason}}
+    end
+  end
+
+  defp validate_compilation_plan(plan_map, plan) do
+    with :ok <- validate_json_object(plan_map, :plan_map),
+         true <- plan_map == Plan.to_map(plan) do
+      :ok
+    else
+      false -> {:error, :plan_map_mismatch}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_nonblank_binary(value, _field)
+       when is_binary(value) and byte_size(value) > 0 do
+    if String.valid?(value) and String.trim(value) != "",
+      do: :ok,
+      else: {:error, :invalid_binary}
+  end
+
+  defp validate_nonblank_binary(_value, field), do: {:error, {:invalid_field, field}}
+
+  defp validate_hash(value, field) do
+    with :ok <- validate_nonblank_binary(value, field),
+         true <- Regex.match?(~r/^[0-9a-f]{64}$/, value) do
+      :ok
+    else
+      false -> {:error, {:invalid_hash, field}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_dot_hash(dot_source, graph_hash) do
+    if sha256(dot_source) == graph_hash,
+      do: :ok,
+      else: {:error, :graph_hash_mismatch}
+  end
+
+  defp validate_core_initial_values(initial_values, plan) do
+    expected = %{
+      "task" => plan.task,
+      "repo_path" => plan.repo_root,
+      "acp_agent" => plan.worker["provider"],
+      "base_ref" => plan.base_ref,
+      "timeout" => plan.budgets["wall_clock_ms"],
+      "inactivity_timeout_ms" => plan.budgets["inactivity_timeout_ms"],
+      "open_pr" => bool_string(plan.output["draft_pr"]),
+      "submit_review" => bool_string(plan.review_profile != "none")
+    }
+
+    case Enum.find(expected, fn {key, value} -> Map.get(initial_values, key) != value end) do
+      nil -> :ok
+      {key, _value} -> {:error, {:initial_value_mismatch, key}}
+    end
+  end
+
+  defp validate_compilation_manifest(compilation, plan) do
+    manifest = compilation.manifest
+
+    expected = %{
+      "graph_hash" => compilation.graph_hash,
+      "compiler_version" => compilation.compiler_version,
+      "template_version" => compilation.template_version,
+      "plan_fingerprint" => compilation.plan_fingerprint,
+      "action_catalog_digest" => compilation.action_catalog_digest,
+      "plan_version" => plan.version,
+      "task_class" => plan.task_class,
+      "validation_profile" => plan.validation_profile,
+      "review_profile" => plan.review_profile
+    }
+
+    case Enum.find(expected, fn {key, value} -> Map.get(manifest, key) != value end) do
+      nil -> :ok
+      {key, _value} -> {:error, {:manifest_mismatch, key}}
+    end
+  end
+
+  defp bool_string(true), do: "true"
+  defp bool_string(false), do: "false"
+
+  defp archive_compilation(root, %Plan{} = plan, %Compilation{} = compilation) do
+    store = Config.coding_plan_artifact_store()
+
+    cond do
+      not is_atom(store) ->
+        {:error, :coding_plan_artifact_store_unavailable}
+
+      not Code.ensure_loaded?(store) ->
+        {:error, :coding_plan_artifact_store_unavailable}
+
+      not function_exported?(store, :archive, 4) ->
+        {:error, :coding_plan_artifact_store_unavailable}
+
+      true ->
+        invoke_artifact_store(store, root, plan, compilation)
+    end
+  end
+
+  defp invoke_artifact_store(store, root, plan, compilation) do
+    case store.archive(
+           root,
+           Plan.to_map(plan),
+           compilation.dot_source,
+           compilation.manifest
+         ) do
+      {:ok, descriptor} ->
+        validate_artifact_descriptor(descriptor, root, plan, compilation)
+
+      {:error, _reason} = error ->
+        error
+
+      _other ->
+        {:error, :invalid_coding_plan_artifact_store_reply}
+    end
+  rescue
+    error -> {:error, {:coding_plan_artifact_store_error, Exception.message(error)}}
+  catch
+    :exit, reason -> {:error, {:coding_plan_artifact_store_exit, reason}}
+    kind, reason -> {:error, {:coding_plan_artifact_store_throw, {kind, reason}}}
+  end
+
+  defp validate_artifact_descriptor(descriptor, root, plan, compilation) do
+    with :ok <- validate_json_object(descriptor, :artifact_descriptor),
+         :ok <- validate_descriptor_keys(descriptor),
+         :ok <- validate_descriptor_values(descriptor),
+         :ok <- validate_descriptor_identity(descriptor, compilation),
+         {:ok, canonical_root} <- canonical_artifact_root(root),
+         :ok <- validate_descriptor_paths(descriptor, canonical_root),
+         :ok <- validate_archived_contents(descriptor, plan, compilation) do
+      {:ok, descriptor}
+    else
+      {:error, reason} -> {:error, {:invalid_coding_plan_artifact_store_reply, reason}}
+    end
+  end
+
+  defp validate_descriptor_keys(descriptor) do
+    keys = Map.keys(descriptor) |> MapSet.new()
+
+    if MapSet.equal?(keys, @artifact_descriptor_keys),
+      do: :ok,
+      else: {:error, :unexpected_descriptor_keys}
+  end
+
+  defp validate_descriptor_values(descriptor) do
+    Enum.reduce_while(@artifact_descriptor_keys, :ok, fn key, :ok ->
+      case validate_nonblank_binary(Map.get(descriptor, key), key) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp validate_descriptor_identity(descriptor, compilation) do
+    cond do
+      descriptor["graph_hash"] != compilation.graph_hash ->
+        {:error, :descriptor_graph_hash_mismatch}
+
+      descriptor["compiler_version"] != compilation.compiler_version ->
+        {:error, :descriptor_compiler_version_mismatch}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp canonical_artifact_root(root) do
+    case SafePath.resolve_real(root) do
+      {:ok, canonical_root} ->
+        if File.dir?(canonical_root),
+          do: {:ok, canonical_root},
+          else: {:error, :artifact_root_missing}
+
+      _ ->
+        {:error, :artifact_root_missing}
+    end
+  end
+
+  defp validate_descriptor_paths(descriptor, canonical_root) do
+    Enum.reduce_while(@artifact_path_keys, :ok, fn key, :ok ->
+      path = descriptor[key]
+
+      result =
+        with true <- SafePath.absolute?(path),
+             {:ok, canonical_path} <- SafePath.resolve_real(path),
+             true <- File.regular?(canonical_path),
+             true <- contained_in?(canonical_root, canonical_path) do
+          :ok
+        else
+          _ -> {:error, {:invalid_artifact_path, key}}
+        end
+
+      case result do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp validate_archived_contents(descriptor, plan, compilation) do
+    with {:ok, dot_source} <- File.read(descriptor["coding_pipeline_path"]),
+         true <- dot_source == compilation.dot_source,
+         {:ok, plan_json} <- File.read(descriptor["coding_plan_path"]),
+         {:ok, archived_plan} <- Jason.decode(plan_json),
+         true <- archived_plan == Plan.to_map(plan),
+         {:ok, manifest_json} <- File.read(descriptor["compile_manifest_path"]),
+         {:ok, archived_manifest} <- Jason.decode(manifest_json),
+         true <- archived_manifest == compilation.manifest do
+      :ok
+    else
+      false -> {:error, :artifact_content_mismatch}
+      {:error, _reason} -> {:error, :artifact_content_unreadable}
+    end
+  end
+
+  defp validate_json_object(value, error_tag) when is_map(value) and not is_struct(value) do
+    case ensure_string_keyed_json_map(value, error_tag) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {error_tag, reason}}
+    end
+  end
+
+  defp validate_json_object(_value, error_tag), do: {:error, {error_tag, :expected_map}}
+
+  defp sha256(value) do
+    value
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
   end
 
   # Returns {:ok, {signer_fn, private_key}}. The private key is trusted Engine
@@ -895,19 +1111,23 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
-  defp build_engine_opts(agent_id, task_data, exec_ctx, signer, private_key) do
+  defp build_engine_opts(
+         agent_id,
+         %Plan{} = plan,
+         %Compilation{} = compilation,
+         exec_ctx,
+         signer,
+         private_key,
+         logs_root
+       ) do
     task_id = exec_ctx.task_id
-    repo_path = Map.fetch!(task_data, "repo_path")
     caller_id = Map.get(exec_ctx, :caller_id)
+    timeout = effective_timeout(plan, Map.get(exec_ctx, :timeout))
 
     initial_values =
-      task_data
-      |> Map.drop(["kind"])
+      compilation.initial_values
       |> Map.put("session.agent_id", agent_id)
       |> Map.put("session.task_id", task_id)
-      # Graph defaults when optional flags omitted.
-      |> Map.put_new("open_pr", "false")
-      |> Map.put_new("submit_review", "true")
       |> maybe_put_session_caller_id(caller_id)
       |> maybe_put_session_metadata(Map.get(exec_ctx, :metadata))
 
@@ -923,22 +1143,34 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         # Trusted checkpoint HMAC material — Engine opt only, never context.
         identity_private_key: private_key,
         initial_values: initial_values,
-        logs_root: task_logs_root(task_id),
-        workdir: repo_path,
+        logs_root: logs_root,
+        graph_hash: compilation.graph_hash,
+        workdir: plan.repo_root,
+        timeout: timeout,
         spawning_pid: self(),
         resumable: true
       ]
-      |> maybe_put_timeout(Map.get(exec_ctx, :timeout))
 
     # Authenticated caller is non-authority provenance only; does not replace
     # agent_id or signer.
-    case caller_id do
-      cid when is_binary(cid) and cid != "" ->
-        Keyword.put(opts, :caller_id, cid)
+    final_opts =
+      case caller_id do
+        cid when is_binary(cid) and cid != "" ->
+          Keyword.put(opts, :caller_id, cid)
 
-      _ ->
-        opts
-    end
+        _ ->
+          opts
+      end
+
+    {:ok, final_opts}
+  end
+
+  defp effective_timeout(%Plan{} = plan, context_timeout) do
+    plan_timeout = plan.budgets["wall_clock_ms"]
+
+    if is_integer(context_timeout) and context_timeout > 0,
+      do: min(plan_timeout, context_timeout),
+      else: plan_timeout
   end
 
   defp maybe_put_session_caller_id(values, caller_id)
@@ -954,12 +1186,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp maybe_put_session_metadata(values, _), do: values
-
-  defp maybe_put_timeout(opts, timeout) when is_integer(timeout) and timeout > 0 do
-    Keyword.put(opts, :timeout, timeout)
-  end
-
-  defp maybe_put_timeout(opts, _), do: opts
 
   defp task_logs_root(task_id) do
     digest =

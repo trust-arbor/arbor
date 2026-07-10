@@ -7,20 +7,24 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   @moduletag :fast
 
+  alias Arbor.Contracts.Coding.Plan
   alias Arbor.Orchestrator.CodingTaskExecutor
+  alias Arbor.Orchestrator.CodingPlan.{ArtifactStore, Compiler}
   alias Arbor.Orchestrator.Config
 
   defmodule CapturingRunner do
     @moduledoc false
     def run_file(path, opts) do
-      case Process.get(:coding_executor_runner_reply) do
+      case Application.get_env(:arbor_orchestrator, :coding_executor_runner_reply) do
         nil ->
           capture_run(path, opts)
 
           {:ok,
            %{
              run_id: Keyword.get(opts, :run_id),
-             context: Process.get(:coding_executor_final_context) || default_context(opts),
+             context:
+               Application.get_env(:arbor_orchestrator, :coding_executor_final_context) ||
+                 default_context(opts),
              completed_nodes: [],
              final_outcome: nil,
              taint: %{},
@@ -62,6 +66,127 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         "worker_session_id" => "worker_1"
       }
     end
+  end
+
+  defmodule FakeCompiler do
+    @moduledoc false
+
+    alias Arbor.Contracts.Coding.Plan
+    alias Arbor.Orchestrator.CodingPlan.Compilation
+
+    def compile(%Plan{} = plan, opts) do
+      template_path = Keyword.fetch!(opts, :template_path)
+      {:ok, dot_source} = File.read(template_path)
+      plan_map = Plan.to_map(plan)
+      graph_hash = sha256(dot_source)
+      plan_fingerprint = plan_map |> Jason.encode!() |> sha256()
+      catalog_digest = sha256("fake-action-catalog")
+
+      initial_values =
+        %{
+          "task" => plan.task,
+          "repo_path" => plan.repo_root,
+          "base_ref" => plan.base_ref,
+          "acp_agent" => plan.worker["provider"],
+          "open_pr" => bool_string(plan.output["draft_pr"]),
+          "submit_review" => bool_string(plan.review_profile != "none"),
+          "timeout" => plan.budgets["wall_clock_ms"],
+          "inactivity_timeout_ms" => plan.budgets["inactivity_timeout_ms"],
+          "permission_mode" => plan.worker["permission_mode"],
+          "coding_plan_compiler_version" => "fake-coding-plan-1",
+          "coding_plan_template_version" => "coding-change-v1",
+          "coding_plan_version" => plan.version,
+          "coding_plan_fingerprint" => plan_fingerprint,
+          "coding_plan_task_class" => plan.task_class,
+          "coding_plan_validation_profile" => plan.validation_profile,
+          "coding_plan_review_profile" => plan.review_profile,
+          "coding_plan_action_catalog_digest" => catalog_digest
+        }
+        |> maybe_put("branch_name", plan.workspace_policy["branch_name"])
+        |> maybe_put("worktree_base_dir", plan.workspace_policy["worktree_base_dir"])
+        |> maybe_put("model", plan.worker["model"])
+
+      manifest = %{
+        "compiler_version" => "fake-coding-plan-1",
+        "template_version" => "coding-change-v1",
+        "graph_hash" => graph_hash,
+        "plan_fingerprint" => plan_fingerprint,
+        "plan_version" => plan.version,
+        "task_class" => plan.task_class,
+        "validation_profile" => plan.validation_profile,
+        "review_profile" => plan.review_profile,
+        "overlays" => plan.overlays,
+        "action_catalog_digest" => catalog_digest,
+        "action_names" => [],
+        "handler_types" => []
+      }
+
+      {:ok,
+       %Compilation{
+         plan_map: plan_map,
+         dot_source: dot_source,
+         graph_hash: graph_hash,
+         compiler_version: "fake-coding-plan-1",
+         template_version: "coding-change-v1",
+         plan_fingerprint: plan_fingerprint,
+         action_catalog_digest: catalog_digest,
+         initial_values: initial_values,
+         manifest: manifest
+       }}
+    end
+
+    defp maybe_put(map, _key, nil), do: map
+    defp maybe_put(map, key, value), do: Map.put(map, key, value)
+    defp bool_string(true), do: "true"
+    defp bool_string(false), do: "false"
+
+    defp sha256(value) do
+      value
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode16(case: :lower)
+    end
+  end
+
+  defmodule FakeArtifactStore do
+    @moduledoc false
+
+    def archive(root, plan, dot_source, manifest) do
+      Arbor.Orchestrator.CodingPlan.ArtifactStore.archive(root, plan, dot_source, manifest)
+    end
+  end
+
+  defmodule InvalidCompilerReply do
+    @moduledoc false
+    def compile(_plan, _opts), do: {:ok, %{not: "a compilation"}}
+  end
+
+  defmodule MismatchedManifestCompiler do
+    @moduledoc false
+
+    def compile(plan, opts) do
+      {:ok, compilation} =
+        Arbor.Orchestrator.CodingTaskExecutorTest.FakeCompiler.compile(plan, opts)
+
+      manifest = Map.put(compilation.manifest, "plan_fingerprint", String.duplicate("0", 64))
+      {:ok, %{compilation | manifest: manifest}}
+    end
+  end
+
+  defmodule RedirectingInitialValuesCompiler do
+    @moduledoc false
+
+    def compile(plan, opts) do
+      {:ok, compilation} =
+        Arbor.Orchestrator.CodingTaskExecutorTest.FakeCompiler.compile(plan, opts)
+
+      initial_values = Map.put(compilation.initial_values, "repo_path", "/tmp/redirected")
+      {:ok, %{compilation | initial_values: initial_values}}
+    end
+  end
+
+  defmodule InvalidArtifactStoreReply do
+    @moduledoc false
+    def archive(_root, _plan, _dot_source, _manifest), do: {:ok, %{"unexpected" => "reply"}}
   end
 
   defmodule SlowRunner do
@@ -106,10 +231,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
 
     def authorize(agent_id, resource, action, opts \\ []) do
-      calls = Process.get(:coding_auth_calls, [])
-      Process.put(:coding_auth_calls, [{agent_id, resource, action, opts} | calls])
+      case Application.get_env(:arbor_orchestrator, :coding_executor_test_observer) do
+        observer when is_pid(observer) ->
+          send(observer, {:coding_auth_call, agent_id, resource, action, opts})
 
-      case Process.get(:coding_auth_reply) do
+        _ ->
+          :ok
+      end
+
+      case Application.get_env(:arbor_orchestrator, :coding_auth_reply) do
         nil ->
           {:ok, :authorized}
 
@@ -168,6 +298,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       coding_pipeline_path: Application.get_env(:arbor_orchestrator, :coding_pipeline_path),
       coding_pipeline_logs_root:
         Application.get_env(:arbor_orchestrator, :coding_pipeline_logs_root),
+      coding_plan_compiler: Application.get_env(:arbor_orchestrator, :coding_plan_compiler),
+      coding_plan_artifact_store:
+        Application.get_env(:arbor_orchestrator, :coding_plan_artifact_store),
       coding_repo_roots: Application.get_env(:arbor_orchestrator, :coding_repo_roots),
       coding_worktree_roots: Application.get_env(:arbor_orchestrator, :coding_worktree_roots),
       pipeline_status_module: Application.get_env(:arbor_orchestrator, :pipeline_status_module),
@@ -176,14 +309,24 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       security_module: Application.get_env(:arbor_orchestrator, :security_module),
       security_available_override:
         Application.get_env(:arbor_orchestrator, :security_available_override),
-      security_required: Application.get_env(:arbor_orchestrator, :security_required)
+      security_required: Application.get_env(:arbor_orchestrator, :security_required),
+      coding_executor_runner_reply:
+        Application.get_env(:arbor_orchestrator, :coding_executor_runner_reply),
+      coding_executor_final_context:
+        Application.get_env(:arbor_orchestrator, :coding_executor_final_context),
+      coding_auth_reply: Application.get_env(:arbor_orchestrator, :coding_auth_reply),
+      coding_executor_test_observer:
+        Application.get_env(:arbor_orchestrator, :coding_executor_test_observer)
     }
 
     Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, CapturingRunner)
+    Application.put_env(:arbor_orchestrator, :coding_plan_compiler, FakeCompiler)
+    Application.put_env(:arbor_orchestrator, :coding_plan_artifact_store, FakeArtifactStore)
     Application.put_env(:arbor_orchestrator, :pipeline_status_module, FakePipelineStatus)
     Application.put_env(:arbor_orchestrator, :coding_task_control_facade, FakeTaskControlFacade)
     Application.put_env(:arbor_orchestrator, :security_module, FakeSecurity)
     Application.put_env(:arbor_orchestrator, :security_available_override, true)
+    Application.put_env(:arbor_orchestrator, :coding_executor_test_observer, self())
 
     tmp_dir =
       Path.join(
@@ -212,6 +355,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     Process.put(:coding_executor_repo_path, real_path!(repo_path))
     Process.put(:coding_executor_worktree_root, real_path!(worktree_root))
 
+    Application.put_env(
+      :arbor_orchestrator,
+      :coding_pipeline_logs_root,
+      Path.join(real_path!(tmp_dir), "coding-task-artifacts")
+    )
+
     graph_path = Config.coding_pipeline_path()
 
     if not File.exists?(graph_path) do
@@ -221,20 +370,21 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       Application.put_env(:arbor_orchestrator, :coding_pipeline_path, fallback)
     end
 
-    Process.delete(:coding_executor_runner_reply)
-    Process.delete(:coding_executor_final_context)
     Process.delete(:coding_executor_last_run)
     Process.delete(:coding_executor_signing_key)
     Process.delete(:coding_abandoned_runs)
-    Process.delete(:coding_auth_calls)
-    Process.delete(:coding_auth_reply)
     Process.delete(:coding_task_control_calls)
     Process.delete(:coding_task_control_reply)
+    Application.delete_env(:arbor_orchestrator, :coding_executor_runner_reply)
+    Application.delete_env(:arbor_orchestrator, :coding_executor_final_context)
+    Application.delete_env(:arbor_orchestrator, :coding_auth_reply)
 
     on_exit(fn ->
       restore(:coding_pipeline_runner, originals.coding_pipeline_runner)
       restore(:coding_pipeline_path, originals.coding_pipeline_path)
       restore(:coding_pipeline_logs_root, originals.coding_pipeline_logs_root)
+      restore(:coding_plan_compiler, originals.coding_plan_compiler)
+      restore(:coding_plan_artifact_store, originals.coding_plan_artifact_store)
       restore(:coding_repo_roots, originals.coding_repo_roots)
       restore(:coding_worktree_roots, originals.coding_worktree_roots)
       restore(:pipeline_status_module, originals.pipeline_status_module)
@@ -242,6 +392,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       restore(:security_module, originals.security_module)
       restore(:security_available_override, originals.security_available_override)
       restore(:security_required, originals.security_required)
+      restore(:coding_executor_runner_reply, originals.coding_executor_runner_reply)
+      restore(:coding_executor_final_context, originals.coding_executor_final_context)
+      restore(:coding_auth_reply, originals.coding_auth_reply)
+      restore(:coding_executor_test_observer, originals.coding_executor_test_observer)
       File.rm_rf(tmp_dir)
     end)
 
@@ -261,6 +415,21 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       },
       overrides
     )
+  end
+
+  defp valid_direct_task(plan_overrides \\ %{}) do
+    plan =
+      Map.merge(
+        %{
+          "version" => 1,
+          "task" => "add a direct-plan feature",
+          "repo_root" => configured_repo_path(),
+          "worker" => %{"provider" => "grok"}
+        },
+        plan_overrides
+      )
+
+    %{"kind" => "coding_change", "plan" => plan}
   end
 
   defp valid_context(overrides \\ %{}) do
@@ -305,14 +474,25 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     canonical
   end
 
-  defp last_opts do
+  defp last_run do
     case Process.get(:coding_executor_last_run) do
-      {_path, opts} ->
-        opts
+      {path, opts} ->
+        {path, opts}
 
       nil ->
-        assert_receive {:coding_executor_captured_run, _path, opts}
-        opts
+        assert_receive {:coding_executor_captured_run, path, opts}
+        {path, opts}
+    end
+  end
+
+  defp last_opts, do: last_run() |> elem(1)
+
+  defp collect_auth_calls(acc \\ []) do
+    receive do
+      {:coding_auth_call, agent_id, resource, action, opts} ->
+        collect_auth_calls([{agent_id, resource, action, opts} | acc])
+    after
+      10 -> Enum.reverse(acc)
     end
   end
 
@@ -510,6 +690,60 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       refute Keyword.has_key?(opts, :metadata)
       refute Keyword.has_key?(opts, :source)
     end
+
+    test "accepts a direct versioned plan and preserves compiled execution inputs" do
+      task =
+        valid_direct_task(%{
+          "base_ref" => "main",
+          "workspace_policy" => %{
+            "mode" => "isolated",
+            "branch_name" => "feature/direct-plan",
+            "worktree_base_dir" => configured_worktree_root()
+          },
+          "worker" => %{
+            "provider" => "grok",
+            "model" => "grok-code-fast",
+            "permission_mode" => "deny"
+          },
+          "review_profile" => "none",
+          "budgets" => %{
+            "wall_clock_ms" => 120_000,
+            "inactivity_timeout_ms" => 45_000
+          },
+          "output" => %{"draft_pr" => true}
+        })
+
+      assert {:ok, result} =
+               CodingTaskExecutor.run("agent_direct", task, valid_context())
+
+      opts = last_opts()
+      iv = opts[:initial_values]
+      assert opts[:timeout] == 120_000
+      assert iv["acp_agent"] == "grok"
+      assert iv["model"] == "grok-code-fast"
+      assert iv["permission_mode"] == "deny"
+      assert iv["inactivity_timeout_ms"] == 45_000
+      assert iv["open_pr"] == "true"
+      assert iv["submit_review"] == "false"
+      assert iv["branch_name"] == "feature/direct-plan"
+      assert result["artifacts"]["graph_hash"] == opts[:graph_hash]
+    end
+
+    test "rejects mixed direct/legacy shapes and task-supplied authority" do
+      mixed = Map.put(valid_direct_task(), "task", "legacy override")
+
+      assert {:error, :mixed_task_shape} =
+               CodingTaskExecutor.run("agent_1", mixed, valid_context())
+
+      authority =
+        valid_direct_task()
+        |> put_in(["plan", "authorization"], true)
+
+      assert {:error, {:unknown_fields, ["authorization"]}} =
+               CodingTaskExecutor.run("agent_1", authority, valid_context())
+
+      assert Process.get(:coding_executor_last_run) == nil
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -684,10 +918,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   end
 
   describe "engine opts and trusted identity" do
-    test "forces authorization, identities, signer, run ids, and packaged graph path" do
-      graph_path = Config.coding_pipeline_path()
+    test "forces authorization, identities, signer, run ids, and archived graph path" do
+      template_path = Config.coding_pipeline_path()
 
-      assert {:ok, _} =
+      assert {:ok, result} =
                CodingTaskExecutor.run(
                  "agent_trusted",
                  valid_task(%{
@@ -698,8 +932,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  valid_context(%{"task_id" => "task_abc", "caller_id" => "human_1"})
                )
 
-      {path, opts} = Process.get(:coding_executor_last_run)
-      assert path == graph_path
+      {path, opts} = last_run()
+      artifacts = result["artifacts"]
+      assert path == artifacts["coding_pipeline_path"]
+      refute path == template_path
+      assert File.read!(path) == File.read!(template_path)
       assert opts[:authorization] == true
       assert opts[:agent_id] == "agent_trusted"
       assert opts[:task_id] == "task_abc"
@@ -711,7 +948,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert opts[:caller_id] == "human_1"
       assert Path.dirname(opts[:logs_root]) == Config.coding_pipeline_logs_root()
       assert Path.basename(opts[:logs_root]) =~ ~r/^task-[0-9a-f]{64}$/
-      refute Keyword.has_key?(opts, :timeout)
+      assert opts[:logs_root] == Path.dirname(path)
+      assert opts[:timeout] == 900_000
+      assert opts[:graph_hash] == artifacts["graph_hash"]
       assert is_function(opts[:signer], 1)
       assert is_function(opts[:authorizer], 2)
 
@@ -734,8 +973,98 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       refute iv["session.agent_id"] == "human_1"
     end
 
+    test "archives the exact canonical plan, DOT, and manifest with private file modes" do
+      assert {:ok, result} =
+               CodingTaskExecutor.run(
+                 "agent_archive",
+                 valid_task(),
+                 valid_context(%{"task_id" => "task_archive_exact"})
+               )
+
+      {runner_path, opts} = last_run()
+      artifacts = result["artifacts"]
+      root = opts[:logs_root]
+
+      assert artifacts == %{
+               "coding_plan_path" => Path.join(root, "coding-plan.json"),
+               "coding_pipeline_path" => Path.join(root, "coding-pipeline.dot"),
+               "compile_manifest_path" => Path.join(root, "coding-compile-manifest.json"),
+               "graph_hash" => opts[:graph_hash],
+               "compiler_version" => "fake-coding-plan-1"
+             }
+
+      assert runner_path == artifacts["coding_pipeline_path"]
+      dot_source = File.read!(runner_path)
+      assert dot_source == File.read!(Config.coding_pipeline_path())
+
+      assert artifacts["graph_hash"] ==
+               :crypto.hash(:sha256, dot_source) |> Base.encode16(case: :lower)
+
+      {:ok, expected_plan} =
+        Plan.new(%{
+          "task" => "add a feature",
+          "repo_root" => configured_repo_path(),
+          "worker" => %{"provider" => "codex"},
+          "workspace_policy" => %{
+            "mode" => "isolated",
+            "worktree_base_dir" => configured_worktree_root()
+          }
+        })
+
+      assert Jason.decode!(File.read!(artifacts["coding_plan_path"])) ==
+               Plan.to_map(expected_plan)
+
+      manifest = Jason.decode!(File.read!(artifacts["compile_manifest_path"]))
+      assert manifest["graph_hash"] == artifacts["graph_hash"]
+      assert manifest["compiler_version"] == artifacts["compiler_version"]
+
+      for path <-
+            Map.take(artifacts, ~w(coding_plan_path coding_pipeline_path compile_manifest_path))
+            |> Map.values() do
+        assert {:ok, stat} = File.stat(path)
+        assert Bitwise.band(stat.mode, 0o777) == 0o600
+      end
+
+      assert {:ok, _json} = Jason.encode(result)
+    end
+
+    test "real compiler and artifact store generate and archive the reviewed default graph" do
+      Application.put_env(:arbor_orchestrator, :coding_plan_compiler, Compiler)
+      Application.put_env(:arbor_orchestrator, :coding_plan_artifact_store, ArtifactStore)
+
+      assert {:ok, result} =
+               CodingTaskExecutor.run(
+                 "agent_real_compile",
+                 valid_task(%{"acp_agent" => "grok"}),
+                 valid_context(%{"task_id" => "task_real_compiler"})
+               )
+
+      {runner_path, opts} = last_run()
+      artifacts = result["artifacts"]
+      dot_source = File.read!(runner_path)
+
+      assert runner_path == artifacts["coding_pipeline_path"]
+      assert artifacts["compiler_version"] == "coding-plan-1"
+      assert dot_source =~ "coding_plan_compiler_version"
+      assert dot_source =~ "coding-plan-1"
+      assert dot_source =~ "coding_plan_fingerprint"
+      assert dot_source =~ "coding_plan_action_catalog_digest"
+
+      graph_hash = :crypto.hash(:sha256, dot_source) |> Base.encode16(case: :lower)
+      assert graph_hash == artifacts["graph_hash"]
+      assert graph_hash == opts[:graph_hash]
+
+      manifest = Jason.decode!(File.read!(artifacts["compile_manifest_path"]))
+      assert manifest["graph_hash"] == graph_hash
+      assert manifest["compiler_version"] == "coding-plan-1"
+      assert opts[:initial_values]["acp_agent"] == "grok"
+      assert opts[:initial_values]["coding_plan_fingerprint"] == manifest["plan_fingerprint"]
+    end
+
     test "isolates logs by a path-safe digest of task_id" do
-      configured_root = Path.join(System.tmp_dir!(), "coding-executor-custom-root")
+      configured_root =
+        Path.join(Process.get(:coding_executor_tmp_dir), "coding-executor-custom-root")
+
       Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, configured_root)
 
       assert {:ok, _} =
@@ -783,6 +1112,34 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert opts[:timeout] == 20
       assert self() in links
       refute Process.alive?(runner_pid)
+    end
+
+    test "uses the smaller of plan wall-clock and context timeouts" do
+      task =
+        valid_direct_task(%{
+          "budgets" => %{
+            "wall_clock_ms" => 20_000,
+            "inactivity_timeout_ms" => 10_000
+          }
+        })
+
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 task,
+                 valid_context(%{"task_id" => "task_plan_bound", "timeout" => 30_000})
+               )
+
+      assert last_opts()[:timeout] == 20_000
+
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 task,
+                 valid_context(%{"task_id" => "task_context_bound", "timeout" => 12_000})
+               )
+
+      assert last_opts()[:timeout] == 12_000
     end
 
     test "terminates the linked runner when the executor owner is cancelled" do
@@ -901,8 +1258,67 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert Process.get(:coding_executor_last_run) == nil
     end
 
+    test "invalid compiler module and malformed compiler replies fail closed" do
+      Application.put_env(:arbor_orchestrator, :coding_plan_compiler, "not-a-module")
+
+      assert {:error, :coding_plan_compiler_unavailable} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      Application.put_env(:arbor_orchestrator, :coding_plan_compiler, InvalidCompilerReply)
+
+      assert {:error, :invalid_coding_plan_compiler_reply} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      refute_receive {:coding_executor_captured_run, _path, _opts}
+    end
+
+    test "malformed compilation bindings cannot redirect the canonical plan" do
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_compiler,
+        MismatchedManifestCompiler
+      )
+
+      assert {:error,
+              {:invalid_coding_plan_compiler_reply, {:manifest_mismatch, "plan_fingerprint"}}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_compiler,
+        RedirectingInitialValuesCompiler
+      )
+
+      assert {:error,
+              {:invalid_coding_plan_compiler_reply, {:initial_value_mismatch, "repo_path"}}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      refute_receive {:coding_executor_captured_run, _path, _opts}
+    end
+
+    test "invalid artifact store module and malformed store replies fail closed" do
+      Application.put_env(:arbor_orchestrator, :coding_plan_artifact_store, "not-a-module")
+
+      assert {:error, :coding_plan_artifact_store_unavailable} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_artifact_store,
+        InvalidArtifactStoreReply
+      )
+
+      assert {:error, {:invalid_coding_plan_artifact_store_reply, :unexpected_descriptor_keys}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      refute_receive {:coding_executor_captured_run, _path, _opts}
+    end
+
     test "engine/runner failures fail closed" do
-      Process.put(:coding_executor_runner_reply, {:error, :engine_crashed})
+      Application.put_env(:arbor_orchestrator, :coding_executor_runner_reply, {
+        :error,
+        :engine_crashed
+      })
 
       assert {:error, :engine_crashed} =
                CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
@@ -955,7 +1371,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
           valid_context(%{"task_id" => "task_dual_auth"})
         )
 
-      calls = Process.get(:coding_auth_calls, []) |> Enum.reverse()
+      calls = collect_auth_calls()
       resources = Enum.map(calls, fn {_agent, resource, _action, _opts} -> resource end)
 
       assert "arbor://orchestrator/execute" in resources
@@ -978,8 +1394,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       end)
 
       # Denial fails closed: FakeSecurity rejects authorize.
-      Process.put(:coding_auth_calls, [])
-      Process.put(:coding_auth_reply, {:error, :capability_denied})
+      Application.put_env(:arbor_orchestrator, :coding_auth_reply, {
+        :error,
+        :capability_denied
+      })
 
       assert {:error, _} =
                CodingTaskExecutor.run(
@@ -996,7 +1414,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   describe "final context mapping" do
     defp run_with_context(context) do
-      Process.put(:coding_executor_final_context, context)
+      Application.put_env(:arbor_orchestrator, :coding_executor_final_context, context)
       CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
     end
 
@@ -1050,6 +1468,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
         assert result["status"] == status
         assert result["canonical_status"] == status
+
+        assert Map.keys(result["artifacts"]) |> Enum.sort() ==
+                 ~w(coding_pipeline_path coding_plan_path compile_manifest_path compiler_version graph_hash)
       end
     end
 
@@ -1144,6 +1565,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "worktree_path" => "/tmp/ws",
                  "engine_pid" => self(),
                  "callback" => fn -> :ok end,
+                 "artifacts" => %{
+                   "coding_pipeline_path" => "/tmp/forged.dot",
+                   "private_key" => "forged-private-material"
+                 },
                  # PID/ref as list elements must drop the entire list field —
                  # never leave the atom/string "drop" in the payload.
                  "files" => ["lib/a.ex", self(), make_ref()],
@@ -1163,6 +1588,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       # Review map drops non-JSON keys but keeps clean siblings.
       assert result["review"] == %{"recommendation" => "keep"}
       assert result["review_recommendation"] == "keep"
+      refute inspect(result["artifacts"]) =~ "forged-private-material"
+      assert result["artifacts"]["coding_pipeline_path"] =~ "coding-pipeline.dot"
     end
   end
 
@@ -1456,11 +1883,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     test "defaults point at real public facades" do
       Application.delete_env(:arbor_orchestrator, :coding_pipeline_runner)
       Application.delete_env(:arbor_orchestrator, :coding_pipeline_logs_root)
+      Application.delete_env(:arbor_orchestrator, :coding_plan_compiler)
+      Application.delete_env(:arbor_orchestrator, :coding_plan_artifact_store)
       Application.delete_env(:arbor_orchestrator, :pipeline_status_module)
       Application.delete_env(:arbor_orchestrator, :coding_task_control_facade)
       Application.delete_env(:arbor_orchestrator, :security_module)
 
       assert Config.coding_pipeline_runner() == Arbor.Orchestrator
+      assert Config.coding_plan_compiler() == Compiler
+      assert Config.coding_plan_artifact_store() == ArtifactStore
       assert Config.pipeline_status_module() == Arbor.Orchestrator.PipelineStatus
       assert Config.coding_task_control_facade() == Arbor.AI
       assert Config.security_module() == Arbor.Security
