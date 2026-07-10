@@ -9,7 +9,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
   @moduletag :fast
   @moduletag :coding_change_pipeline
 
-  @pipeline_path "apps/arbor_orchestrator/specs/pipelines/coding-change-v1.dot"
+  @pipeline_path "apps/arbor_orchestrator/priv/pipelines/coding-change-v1.dot"
 
   @exec_actions ~w(
     coding_workspace_acquire
@@ -395,7 +395,11 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
   defp load_dot do
     path =
-      [@pipeline_path, Path.expand("../../../specs/pipelines/coding-change-v1.dot", __DIR__)]
+      [
+        @pipeline_path,
+        Path.expand("../../../priv/pipelines/coding-change-v1.dot", __DIR__),
+        Application.app_dir(:arbor_orchestrator, "priv/pipelines/coding-change-v1.dot")
+      ]
       |> Enum.find(@pipeline_path, &File.exists?/1)
 
     File.read!(path)

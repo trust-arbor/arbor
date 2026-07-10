@@ -245,4 +245,66 @@ defmodule Arbor.Orchestrator.Config do
   def context_budget_enforcement do
     Application.get_env(@app, :context_budget_enforcement, :warn)
   end
+
+  # ===========================================================================
+  # Coding task pipeline (TaskExecutor seam)
+  # ===========================================================================
+
+  @coding_pipeline_relpath "pipelines/coding-change-v1.dot"
+  @default_coding_pipeline_runner Arbor.Orchestrator
+  @default_pipeline_status_module Arbor.Orchestrator.PipelineStatus
+
+  @doc """
+  Absolute path to the packaged coding-change-v1 DOT graph.
+
+  Defaults to `:code.priv_dir(:arbor_orchestrator)/pipelines/coding-change-v1.dot`.
+  Overridable via `:coding_pipeline_path` for tests or alternate packaging.
+  """
+  @spec coding_pipeline_path() :: String.t()
+  def coding_pipeline_path do
+    case Application.get_env(@app, :coding_pipeline_path) do
+      path when is_binary(path) and path != "" ->
+        path
+
+      _ ->
+        default_coding_pipeline_path()
+    end
+  end
+
+  @doc """
+  Module used to run the coding pipeline graph (`run_file/2`).
+
+  Defaults to `Arbor.Orchestrator`. Tests may inject a fake runner that
+  captures opts without executing the Engine.
+  """
+  @spec coding_pipeline_runner() :: module()
+  def coding_pipeline_runner do
+    Application.get_env(@app, :coding_pipeline_runner, @default_coding_pipeline_runner)
+  end
+
+  @doc """
+  Facade used for pipeline progress/cancel bookkeeping (`get/1`,
+  `mark_abandoned/1`). Defaults to `Arbor.Orchestrator.PipelineStatus`.
+  """
+  @spec pipeline_status_module() :: module()
+  def pipeline_status_module do
+    Application.get_env(@app, :pipeline_status_module, @default_pipeline_status_module)
+  end
+
+  defp default_coding_pipeline_path do
+    candidates =
+      case :code.priv_dir(@app) do
+        path when is_list(path) ->
+          [Path.join(to_string(path), @coding_pipeline_relpath)]
+
+        _ ->
+          []
+      end ++
+        [
+          Path.expand("apps/arbor_orchestrator/priv/#{@coding_pipeline_relpath}"),
+          Path.expand("priv/#{@coding_pipeline_relpath}")
+        ]
+
+    Enum.find(candidates, List.first(candidates), &File.exists?/1)
+  end
 end

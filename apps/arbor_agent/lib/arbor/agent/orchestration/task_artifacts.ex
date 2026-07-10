@@ -18,6 +18,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     review_failed
     review_rejected
     review_requires_rework
+    rework_exhausted
     validation_failed
   ))
 
@@ -241,6 +242,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
 
     %{
       status: value(raw, :status),
+      canonical_status: value(raw, :canonical_status),
       validation: value(raw, :validation),
       response_text: value(raw, :response_text),
       pr_url: value(raw, :pr_url),

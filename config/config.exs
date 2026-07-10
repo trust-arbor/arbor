@@ -260,6 +260,11 @@ config :arbor_ai,
 
 # Agent autonomy: temporal awareness + cognitive modes + heartbeat loop
 config :arbor_agent,
+  # Structured task kinds -> TaskExecutor modules (root app wiring only; no
+  # arbor_agent -> arbor_orchestrator compile dependency).
+  task_executors: %{
+    "coding_change" => Arbor.Orchestrator.CodingTaskExecutor
+  },
   # Timing context — inject conversational timing into agent prompts
   timing_context_enabled: true,
   timing_format: :human,

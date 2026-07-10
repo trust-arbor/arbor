@@ -115,6 +115,22 @@ defmodule Arbor.Agent.ConfigTest do
     assert {:error, :invalid_task_kind} = Config.normalize_kind(%{})
   end
 
+  test "configured kinded executors resolve without embedding higher-level modules" do
+    # Level-7 boundary: arbor_agent must not hardcode arbor_orchestrator modules.
+    # Production coding_change wiring lives in umbrella config/config.exs and is
+    # asserted from arbor_commands (which may depend on both libraries).
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => ValidExecutor
+    })
+
+    assert {:ok, ValidExecutor} = Config.task_executor("coding_change")
+    assert {:ok, ValidExecutor} = Config.task_executor(:coding_change)
+    assert function_exported?(ValidExecutor, :run, 3)
+
+    # Plain string tasks still use the default runner, not the kinded executor.
+    assert {:ok, TaskRunner} = Config.validated_default_task_executor()
+  end
+
   defp restore_env(key, nil), do: Application.delete_env(:arbor_agent, key)
   defp restore_env(key, value), do: Application.put_env(:arbor_agent, key, value)
 end

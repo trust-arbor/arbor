@@ -22,9 +22,12 @@ defmodule Arbor.Agent.Config do
   Without an explicit runner override, both the default and kinded paths use
   the JSON-clean TaskExecutor boundary. Unknown, blank, unavailable, or
   invalid configured executors fail closed. Optional progress/cancel callbacks
-  are bounded by `executor_callback_timeout_ms/0`. This slice does not register
-  a production pipeline executor; that mapping lands with the orchestrator
-  implementation.
+  are bounded by `executor_callback_timeout_ms/0`.
+
+  Production root wiring maps structured kinds (for example `"coding_change"`)
+  to concrete TaskExecutor modules in the umbrella `config/config.exs`. This
+  library must not hard-depend on higher-level executor modules; resolve them
+  only via `task_executors` configuration.
   """
 
   @app :arbor_agent
