@@ -68,22 +68,24 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
 
       output_prefix = Map.get(node.attrs, "output_prefix")
 
-      # Taint bridge (taint-tracking-rebuild Phase 2): the worst provenance taint
-      # among the context values interpolated into this action's params rides
-      # along to TaintEnforcement.check via ActionsExecutor. Static attr args
-      # (arg.*/param.* from the DOT graph) are author-written and carry no taint;
-      # only context_keys values can be runtime-tainted (e.g. a web-fetch result).
-      input_taint = Context.worst_taint(context, consumed_context_keys(node.attrs))
+      # Preserve the aggregate taint for operation-level authorization, egress,
+      # and telemetry while also carrying each runtime parameter's exact label
+      # to the action enforcement boundary. Static attr args are author-written;
+      # only context_keys values can be runtime-tainted.
+      context_keys = consumed_context_keys(node.attrs)
+      input_taint = Context.worst_taint(context, context_keys)
+
+      executor_opts =
+        [
+          agent_id: agent_id,
+          signer: Keyword.get(opts, :signer),
+          task_id: task_id,
+          taint: input_taint
+        ]
+        |> maybe_put_param_taint(context, context_keys)
 
       try do
-        signer = Keyword.get(opts, :signer)
-
-        case executor.execute(action_name, action_args, workdir,
-               agent_id: agent_id,
-               signer: signer,
-               task_id: task_id,
-               taint: input_taint
-             ) do
+        case executor.execute(action_name, action_args, workdir, executor_opts) do
           {:ok, result} ->
             %Outcome{
               status: :success,
@@ -215,6 +217,20 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
         |> Enum.map(&String.trim/1)
         |> Enum.reject(&(&1 == ""))
     end
+  end
+
+  defp maybe_put_param_taint(opts, _context, []), do: opts
+
+  defp maybe_put_param_taint(opts, context, context_keys) do
+    param_taint =
+      Enum.reduce(context_keys, %{}, fn key, acc ->
+        case Context.get(context, key) do
+          nil -> acc
+          _value -> Map.put(acc, key, Context.taint_label(context, key))
+        end
+      end)
+
+    Keyword.put(opts, :param_taint, param_taint)
   end
 
   # Provenance taint this action assigns to its own output, via the executor's

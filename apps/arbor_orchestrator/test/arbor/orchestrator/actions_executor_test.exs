@@ -1,7 +1,8 @@
 defmodule Arbor.Orchestrator.ActionsExecutorTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   @moduletag :fast
 
+  alias Arbor.Contracts.Security.Taint, as: TaintStruct
   alias Arbor.Orchestrator.ActionsExecutor
 
   # arbor_actions is a hard (compile-time) dep of arbor_orchestrator, so the
@@ -59,6 +60,38 @@ defmodule Arbor.Orchestrator.ActionsExecutorTest do
         ActionsExecutor.execute("file.read", %{"path" => "mix.exs"}, ".", agent_id: "test-agent")
 
       assert match?({:ok, _}, result) or match?({:error, _}, result)
+    end
+
+    test "forwards per-parameter taint to action enforcement" do
+      :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
+
+      on_exit(fn ->
+        :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, false, [])
+      end)
+
+      aggregate = %TaintStruct{level: :trusted, sanitizations: 0b00001000}
+      exact = %{"path" => %TaintStruct{level: :untrusted}}
+      tracer = self()
+
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+        ActionsExecutor.execute(
+          "file.read",
+          %{"path" => "mix.exs"},
+          ".",
+          taint: aggregate,
+          param_taint: exact
+        )
+      end)
+      |> Task.await()
+
+      assert_receive {:trace, _pid, :call,
+                      {Arbor.Actions, :authorize_and_execute,
+                       [_agent_id, Arbor.Actions.File.Read, _params, context]}}
+
+      assert context.taint == aggregate
+      assert context.param_taint == exact
     end
   end
 

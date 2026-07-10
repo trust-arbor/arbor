@@ -19,6 +19,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.ExecHandler
+  alias Arbor.Contracts.Security.Taint, as: TaintStruct
 
   @moduletag :fast
 
@@ -58,6 +59,9 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
       assert Keyword.get(exec_opts, :taint).level == :untrusted,
              "ExecHandler must thread the untrusted provenance of the interpolated " <>
                "context key into the executor so TaintEnforcement can block it"
+
+      assert %{"command" => %TaintStruct{level: :untrusted}} =
+               Keyword.fetch!(exec_opts, :param_taint)
     end
 
     test "unlabeled interpolated keys thread no taint (no false positives)" do
@@ -68,6 +72,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
 
       assert_received {:stub_execute, _name, _args, _workdir, exec_opts}
       assert Keyword.get(exec_opts, :taint) == nil
+      assert Keyword.fetch!(exec_opts, :param_taint) == %{"command" => nil}
     end
 
     test "worst taint wins across multiple interpolated keys" do
@@ -82,6 +87,38 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
 
       assert_received {:stub_execute, _name, _args, _workdir, exec_opts}
       assert Keyword.get(exec_opts, :taint).level == :untrusted
+
+      assert %{
+               "a" => %TaintStruct{level: :derived},
+               "b" => %TaintStruct{level: :untrusted}
+             } = Keyword.fetch!(exec_opts, :param_taint)
+    end
+
+    test "security regression: sanitization evidence remains attached to its parameter" do
+      command_taint = %TaintStruct{level: :trusted, sanitizations: 0b00000100}
+      path_taint = %TaintStruct{level: :trusted, sanitizations: 0b00001000}
+
+      context =
+        %Context{values: %{"command" => "echo safe", "path" => "/repo"}}
+        |> Context.record_output_taint(["command"], command_taint)
+        |> Context.record_output_taint(["path"], path_taint)
+
+      node =
+        action_node(%{
+          "action" => "some.action",
+          "context_keys" => "command,path"
+        })
+
+      ExecHandler.execute(node, context, graph(), opts())
+
+      assert_received {:stub_execute, _name, _args, _workdir, exec_opts}
+
+      assert %{
+               "command" => %TaintStruct{sanitizations: 0b00000100},
+               "path" => %TaintStruct{sanitizations: 0b00001000}
+             } = Keyword.fetch!(exec_opts, :param_taint)
+
+      assert %TaintStruct{sanitizations: 0} = Keyword.fetch!(exec_opts, :taint)
     end
 
     test "static attr args carry no taint (author-written, not runtime input)" do
@@ -92,6 +129,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
 
       assert_received {:stub_execute, _name, %{"command" => "ls"}, _workdir, exec_opts}
       assert Keyword.get(exec_opts, :taint) == nil
+      refute Keyword.has_key?(exec_opts, :param_taint)
     end
 
     test "session task id is threaded into action executor opts" do

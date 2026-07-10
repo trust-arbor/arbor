@@ -104,6 +104,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
                 level -> Map.put(c, :taint, level)
               end
             end)
+            |> maybe_put_context(:param_taint, Keyword.get(opts, :param_taint))
 
           case Arbor.Actions.authorize_and_execute(
                  agent_id,

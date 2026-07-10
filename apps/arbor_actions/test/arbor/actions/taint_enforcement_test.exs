@@ -7,7 +7,8 @@ defmodule Arbor.Actions.TaintEnforcementTest do
   """
   use ExUnit.Case, async: true
 
-  alias Arbor.Actions.TaintEvents
+  alias Arbor.Actions.{TaintEnforcement, TaintEvents}
+  alias Arbor.Contracts.Security.Taint, as: TaintStruct
 
   @moduletag :fast
 
@@ -32,6 +33,35 @@ defmodule Arbor.Actions.TaintEnforcementTest do
     def name, do: "mock_data_only_action"
 
     def run(_params, _context), do: {:ok, %{success: true}}
+  end
+
+  defmodule MockExtendedControlAction do
+    def name, do: "mock_extended_control_action"
+
+    def taint_roles do
+      %{
+        path: {:control, requires: [:path_traversal]},
+        command: {:control, requires: [:command_injection]},
+        sandbox: :control,
+        content: :data
+      }
+    end
+
+    def run(_params, _context), do: {:ok, %{success: true}}
+  end
+
+  defp taint(level, sanitizations \\ []) do
+    bits = TaintStruct.sanitization_bits()
+
+    mask =
+      Enum.reduce(sanitizations, 0, fn name, acc -> Bitwise.bor(acc, Map.fetch!(bits, name)) end)
+
+    %TaintStruct{
+      level: level,
+      sanitizations: mask,
+      confidence: :verified,
+      sensitivity: :internal
+    }
   end
 
   # Helper to call the internal check_taint function indirectly through authorize_and_execute
@@ -106,9 +136,6 @@ defmodule Arbor.Actions.TaintEnforcementTest do
   end
 
   describe "TaintEnforcement.maybe_emit_propagated/3 (regression: struct taint)" do
-    alias Arbor.Actions.TaintEnforcement
-    alias Arbor.Contracts.Security.Taint, as: TaintStruct
-
     # Regression for the taint-struct crash surfaced 2026-06-17: the orchestrator
     # threads context[:taint] as a full %Taint{} struct (Context.worst_taint/2
     # returns a struct), but maybe_emit_propagated called the atom-level
@@ -134,6 +161,151 @@ defmodule Arbor.Actions.TaintEnforcementTest do
 
     test "is a no-op when there is no taint on context" do
       assert :ok = TaintEnforcement.maybe_emit_propagated(MockControlAction, %{}, {:ok, %{}})
+    end
+  end
+
+  describe "per-parameter taint enforcement" do
+    test "security regression: validated path is not contaminated by untrusted data" do
+      params = %{path: "/repo/lib/example.ex", content: "external patch content"}
+
+      context = %{
+        # The aggregate remains untrusted for operation-level policy and egress.
+        taint: taint(:untrusted),
+        param_taint: %{
+          "path" => taint(:trusted, [:path_traversal]),
+          "content" => taint(:untrusted)
+        },
+        taint_policy: :permissive
+      }
+
+      assert :ok = TaintEnforcement.check(MockExtendedControlAction, params, context)
+    end
+
+    test "security regression: one parameter's sanitizer cannot satisfy another" do
+      params = %{path: "/repo", command: "echo safe"}
+
+      context = %{
+        # A fully sanitized aggregate must never substitute for the command's
+        # exact, unsanitized provenance label.
+        taint: taint(:trusted, [:path_traversal, :command_injection]),
+        param_taint: %{
+          path: taint(:trusted, [:path_traversal]),
+          command: taint(:trusted)
+        },
+        taint_policy: :permissive
+      }
+
+      assert {:error, {:missing_sanitization, :command, [:command_injection]}} =
+               TaintEnforcement.check(MockExtendedControlAction, params, context)
+    end
+
+    test "independent sanitizer labels do not erase each other" do
+      params = %{path: "/repo", command: "echo safe"}
+
+      context = %{
+        # This is the aggregate produced by intersecting unrelated sanitizer
+        # bits. Exact labels still carry the evidence each parameter needs.
+        taint: taint(:trusted),
+        param_taint: %{
+          path: taint(:trusted, [:path_traversal]),
+          command: taint(:trusted, [:command_injection])
+        },
+        taint_policy: :permissive
+      }
+
+      assert :ok = TaintEnforcement.check(MockExtendedControlAction, params, context)
+    end
+
+    test "strict mode treats tuple control roles as control" do
+      params = %{command: "echo safe", content: "data"}
+
+      context = %{
+        taint: taint(:derived, [:command_injection]),
+        param_taint: %{
+          command: taint(:derived, [:command_injection]),
+          content: taint(:untrusted)
+        },
+        taint_policy: :strict
+      }
+
+      assert {:error, {:taint_blocked, :command, :derived, :control}} =
+               TaintEnforcement.check(MockExtendedControlAction, params, context)
+    end
+
+    test "strict mode allows a trusted control beside untrusted data" do
+      params = %{path: "/repo", content: "external data"}
+
+      context = %{
+        taint: taint(:untrusted),
+        param_taint: %{
+          path: taint(:trusted, [:path_traversal]),
+          content: taint(:untrusted)
+        },
+        taint_policy: :strict
+      }
+
+      assert :ok = TaintEnforcement.check(MockExtendedControlAction, params, context)
+    end
+
+    test "audit-only evaluates exact labels but never blocks" do
+      params = %{path: "/outside", content: "data"}
+
+      context = %{
+        taint: taint(:trusted, [:path_traversal]),
+        param_taint: %{
+          path: taint(:hostile),
+          content: taint(:trusted)
+        },
+        taint_policy: :audit_only
+      }
+
+      assert :ok = TaintEnforcement.check(MockExtendedControlAction, params, context)
+    end
+
+    test "an empty per-parameter map does not fall back to the aggregate" do
+      context = %{
+        taint: taint(:untrusted),
+        param_taint: %{},
+        taint_policy: :permissive
+      }
+
+      assert :ok =
+               TaintEnforcement.check(MockExtendedControlAction, %{sandbox: "basic"}, context)
+    end
+  end
+
+  describe "legacy aggregate compatibility" do
+    test "permissive mode still blocks untrusted aggregate control data" do
+      context = %{taint: :untrusted, taint_policy: :permissive}
+
+      assert {:error, {:taint_blocked, :sandbox, :untrusted, :control}} =
+               TaintEnforcement.check(
+                 MockExtendedControlAction,
+                 %{sandbox: "basic"},
+                 context
+               )
+    end
+
+    test "audit-only mode still allows aggregate violations" do
+      context = %{taint: :untrusted, taint_policy: :audit_only}
+
+      assert :ok =
+               TaintEnforcement.check(
+                 MockExtendedControlAction,
+                 %{sandbox: "basic"},
+                 context
+               )
+    end
+
+    test "strict mode still blocks derived aggregate bare control data" do
+      context = %{taint: :derived, taint_policy: :strict}
+
+      assert {:error, {:taint_blocked, :sandbox, :derived, :control}} =
+               TaintEnforcement.check(
+                 MockExtendedControlAction,
+                 %{sandbox: "basic"},
+                 context
+               )
     end
   end
 
