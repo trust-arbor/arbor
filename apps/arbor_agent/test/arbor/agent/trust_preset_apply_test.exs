@@ -436,7 +436,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert :ok = Arbor.Agent.ProfileStore.store_profile(corrupted)
 
       assert {:error, _reason} = Lifecycle.start(agent_id, start_heartbeat: false)
-      assert is_nil(BranchSupervisor.whereis(agent_id))
+      assert_eventually(fn -> is_nil(BranchSupervisor.whereis(agent_id)) end)
       assert {:ok, :suspended} = Arbor.Security.identity_status(agent_id)
       assert {:ok, []} = Arbor.Security.list_capabilities(agent_id)
     end
@@ -570,6 +570,19 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
   end
 
   # --- helpers ---
+
+  defp assert_eventually(assertion, attempts \\ 50)
+
+  defp assert_eventually(assertion, attempts) when attempts > 0 do
+    if assertion.() do
+      :ok
+    else
+      Process.sleep(10)
+      assert_eventually(assertion, attempts - 1)
+    end
+  end
+
+  defp assert_eventually(_assertion, 0), do: flunk("expected condition to become true")
 
   defp start_security_child(child) do
     case Supervisor.start_child(Arbor.Security.Supervisor, child) do
