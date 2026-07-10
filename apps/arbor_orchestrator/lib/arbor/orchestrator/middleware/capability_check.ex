@@ -245,7 +245,26 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
        when resource not in ["arbor://fs/read", "arbor://fs/write"],
        do: {:ok, []}
 
-  defp path_auth_opts(node, _resource, workdir) do
+  defp path_auth_opts(node, "arbor://fs/read", workdir) do
+    case file_path(node) do
+      nil ->
+        {:ok, []}
+
+      path when is_binary(path) ->
+        case resolve_read_path(path, workdir) do
+          {:ok, resolved} -> {:ok, [file_path: resolved]}
+          {:error, reason} -> {:error, {:invalid_file_path, path, reason}}
+        end
+
+      path ->
+        {:error, {:invalid_file_path, path}}
+    end
+  end
+
+  # Reads must authorize the same target that the OS will open. A lexical
+  # in-workdir path can otherwise pass authorization while a symlink redirects
+  # the subsequent File.read outside the authorized workdir.
+  defp path_auth_opts(node, "arbor://fs/write", workdir) do
     case file_path(node) do
       nil ->
         {:ok, []}
@@ -258,6 +277,18 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
 
       path ->
         {:error, {:invalid_file_path, path}}
+    end
+  end
+
+  defp resolve_read_path(path, workdir) do
+    with {:ok, lexical_path} <- SafePath.resolve_within(path, workdir),
+         # RunAuthorization binds a canonical workdir. If it now resolves to a
+         # different location, it has been replaced and must not become a new
+         # authorization root.
+         {:ok, ^workdir} <- SafePath.resolve_real(workdir),
+         {:ok, real_path} <- SafePath.resolve_real(lexical_path),
+         {:ok, ^real_path} <- SafePath.resolve_within(real_path, workdir) do
+      {:ok, real_path}
     end
   end
 

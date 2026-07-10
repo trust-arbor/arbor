@@ -1,5 +1,5 @@
 defmodule Arbor.Agent.ExactTemplatePolicyTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Agent.{ExactTemplatePolicy, TemplateStore}
 

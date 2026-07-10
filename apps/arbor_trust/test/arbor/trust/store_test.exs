@@ -165,13 +165,17 @@ defmodule Arbor.Trust.StoreTest do
   end
 
   describe "delete_profile/1" do
-    test "deletes an existing profile", %{profile: profile} do
+    test "deletes an existing profile by replacing it with a deny-all tombstone", %{
+      profile: profile
+    } do
       :ok = Store.store_profile(profile)
       assert Store.profile_exists?(profile.agent_id) == true
 
       assert :ok = Store.delete_profile(profile.agent_id)
-      assert Store.profile_exists?(profile.agent_id) == false
-      assert {:error, :not_found} = Store.get_profile(profile.agent_id)
+      assert Store.profile_exists?(profile.agent_id) == true
+      assert {:ok, tombstone} = Store.get_profile(profile.agent_id)
+      assert tombstone.baseline == :block
+      assert tombstone.frozen
     end
 
     test "returns :ok when deleting a non-existent profile" do
