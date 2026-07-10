@@ -175,6 +175,8 @@ defmodule Arbor.Orchestrator.Viz.DotSerializer do
 
   defp maybe_strip(attrs, false), do: attrs
 
+  defp quote_value(value) when value in ["true", "false"], do: "\"#{value}\""
+
   defp quote_value(value) when is_binary(value) do
     if simple_id?(value) do
       value

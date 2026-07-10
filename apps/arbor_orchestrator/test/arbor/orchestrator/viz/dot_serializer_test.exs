@@ -2,6 +2,7 @@ defmodule Arbor.Orchestrator.Viz.DotSerializerTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
+  alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.{Edge, Node}
   alias Arbor.Orchestrator.Viz.DotSerializer
@@ -246,6 +247,30 @@ defmodule Arbor.Orchestrator.Viz.DotSerializerTest do
       assert result =~ "fan_out=true"
       assert result =~ "max_retries=3"
       assert result =~ "weight=1.5"
+    end
+
+    test "preserves quoted boolean strings across a parse serialize parse roundtrip" do
+      dot = """
+      digraph BooleanTypes {
+        route [fan_out="false", string_true="true", boolean_false=false, boolean_true=true]
+      }
+      """
+
+      assert {:ok, graph} = Parser.parse(dot)
+      serialized = DotSerializer.serialize(graph)
+
+      assert serialized =~ ~s(fan_out="false")
+      assert serialized =~ ~s(string_true="true")
+      assert serialized =~ "boolean_false=false"
+      assert serialized =~ "boolean_true=true"
+
+      assert {:ok, reparsed} = Parser.parse(serialized)
+      attrs = reparsed.nodes["route"].attrs
+
+      assert attrs["fan_out"] == "false"
+      assert attrs["string_true"] == "true"
+      assert attrs["boolean_false"] == false
+      assert attrs["boolean_true"] == true
     end
 
     test "custom indent option" do
