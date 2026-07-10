@@ -381,13 +381,10 @@ defmodule Arbor.Actions.Coding do
     end
 
     defp prompt_acp_agent(session, worktree_path, params, context) do
-      session_pid = session[:session_pid] || session["session_pid"]
-
       prompt_params =
-        %{
-          session_pid: session_pid,
-          prompt: build_prompt(worktree_path, params)
-        }
+        session
+        |> session_handle_params()
+        |> Map.put(:prompt, build_prompt(worktree_path, params))
         |> put_if_present(:timeout, positive_timeout_or_nil(get_param(params, :timeout)))
         |> put_if_present(
           :inactivity_timeout_ms,
@@ -416,14 +413,36 @@ defmodule Arbor.Actions.Coding do
     end
 
     defp maybe_close_session(session, context) do
-      session_pid = session[:session_pid] || session["session_pid"]
+      case session_handle_params(session) do
+        params when map_size(params) > 0 ->
+          call_action(Acp.CloseSession, params, context)
 
-      if session_pid do
-        call_action(Acp.CloseSession, %{session_pid: session_pid}, context)
+        _ ->
+          :ok
       end
 
       :ok
     end
+
+    # Prefer managed worker_session_id; fall back to legacy session_pid for
+    # injected-test fakes. Never stringify a PID into a durable handle.
+    defp session_handle_params(session) when is_map(session) do
+      worker = session[:worker_session_id] || session["worker_session_id"]
+
+      cond do
+        is_binary(worker) and worker != "" ->
+          %{worker_session_id: worker}
+
+        true ->
+          case session[:session_pid] || session["session_pid"] do
+            nil -> %{}
+            "" -> %{}
+            pid -> %{session_pid: pid}
+          end
+      end
+    end
+
+    defp session_handle_params(_), do: %{}
 
     defp build_prompt(worktree_path, params) do
       validation =

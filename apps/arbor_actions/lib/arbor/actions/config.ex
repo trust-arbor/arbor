@@ -31,6 +31,18 @@ defmodule Arbor.Actions.Config do
 
   def get(_map, _key, default), do: default
 
+  @doc """
+  Public AI facade module used by ACP (and similar) actions.
+
+  Defaults to `Arbor.AI`. Tests may override via
+  `Application.put_env(:arbor_actions, :ai_module, FakeAI)`.
+  Actions must call only this public facade, never arbor_ai internals.
+  """
+  @spec ai_module() :: module()
+  def ai_module do
+    Application.get_env(:arbor_actions, :ai_module, Arbor.AI)
+  end
+
   @spec scm_provider(map(), map(), map() | nil) :: {:ok, provider()} | {:error, String.t()}
   def scm_provider(params, context, remote_info \\ nil) do
     params

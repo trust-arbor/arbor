@@ -119,6 +119,76 @@ defmodule Arbor.Actions.CodingTest do
       refute_received {:unexpected_pr, _}
     end
 
+    test "handle-first: uses worker_session_id without session_pid when StartSession returns only a managed handle",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      base_branch = git!(repo, ["branch", "--show-current"])
+      parent = self()
+      handle = "acp_worker_coding_handle_1"
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          send(parent, {:start_session, params})
+
+          {:ok,
+           %{
+             worker_session_id: handle,
+             session_id: "provider-sess",
+             provider: "codex",
+             model: "default",
+             status: "ready",
+             pooled: false
+           }}
+
+        Acp.SendMessage, params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          send(parent, {:send_message, params})
+          {:ok, %{text: "STATUS: implemented\nCreated feature.txt"}}
+
+        Acp.CloseSession, params, _context ->
+          send(parent, {:close_session, params})
+          {:ok, %{status: "closed", worker_session_id: handle}}
+
+        Shell.Execute, _params, _context ->
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file via managed handle",
+                   repo_path: repo,
+                   base_ref: base_branch,
+                   branch_name: "test/coding-handle-first",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: [
+                     "./bin/mix test apps/arbor_actions/test/arbor/actions/coding_test.exs"
+                   ],
+                   pr_title: "",
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "change_committed"
+      assert File.exists?(Path.join(result.worktree_path, "feature.txt"))
+
+      assert_receive {:start_session, _}
+
+      assert_receive {:send_message, send_params}
+      assert send_params.worker_session_id == handle
+      refute Map.has_key?(send_params, :session_pid)
+
+      assert_receive {:close_session, close_params}
+      assert close_params.worker_session_id == handle
+      refute Map.has_key?(close_params, :session_pid)
+    end
+
     test "routes default mix compile validation through schema-bounded Mix action",
          %{tmp_dir: tmp_dir} do
       repo = create_git_repo(Path.join(tmp_dir, "repo"))
