@@ -19,6 +19,7 @@ defmodule Arbor.Agent.Orchestration do
   @dispatch_uri "arbor://agent/dispatch"
   @task_read_uri "arbor://agent/task/read"
   @task_cancel_uri "arbor://agent/task/cancel"
+  @task_steer_uri "arbor://agent/task/steer"
   @interaction_request_prefix "irq"
   @approval_answer_cap_ttl_seconds 86_400
 
@@ -37,24 +38,8 @@ defmodule Arbor.Agent.Orchestration do
          {:ok, task} <- normalize_task(task),
          {:ok, task_id} <- normalize_or_generate_task_id(opts),
          {:ok, caller_id} <- caller_id(opts),
-         :ok <- authorize_dispatch(opts, caller_id, agent_id),
-         {:ok, approval_answer_cap_id} <- grant_task_approval_answer(caller_id, task_id, opts) do
-      task_opts = task_scoped_opts(opts, task_id, approval_answer_cap_id)
-
-      case dispatch_task(agent_id, task, task_opts) do
-        {:ok, ^task_id} ->
-          with :ok <- record_dispatch(task_id, agent_id, task, caller_id, opts) do
-            {:ok, task_id}
-          end
-
-        {:ok, other_task_id} ->
-          revoke_task_approval_answer(opts, approval_answer_cap_id)
-          {:error, {:task_id_mismatch, other_task_id}}
-
-        {:error, _reason} = error ->
-          revoke_task_approval_answer(opts, approval_answer_cap_id)
-          error
-      end
+         :ok <- authorize_dispatch(opts, caller_id, agent_id) do
+      dispatch_with_task_capabilities(agent_id, task, task_id, caller_id, opts)
     end
   end
 
@@ -110,6 +95,32 @@ defmodule Arbor.Agent.Orchestration do
       |> task_store_module()
       |> apply_if_exported(:cancel, [task_id, task_store_opts(opts)])
       |> normalize_task_cancel_result()
+    end
+  end
+
+  @doc """
+  Persist and deliver a steering control to an async orchestration task.
+
+  Authorization checks the exact task scope first, followed by the target agent
+  and the global steering capability. The authenticated caller becomes the
+  control sender; task execution receives no caller-controlled authority beyond
+  that JSON-clean control record.
+  """
+  @spec steer_task(String.t(), String.t(), keyword() | map()) :: {:ok, map()} | {:error, term()}
+  def steer_task(task_id, message, opts \\ []) do
+    with {:ok, task_id} <- normalize_task_id(task_id),
+         {:ok, status} <- task_status_unchecked(task_id, opts),
+         {:ok, caller_id} <- caller_id(opts),
+         :ok <- authorize_task_steer(opts, caller_id, status) do
+      steer_opts =
+        opts
+        |> task_store_opts()
+        |> Keyword.put(:sender_id, caller_id)
+
+      opts
+      |> task_store_module()
+      |> apply_if_exported(:steer, [task_id, message, steer_opts])
+      |> normalize_task_steer_result()
     end
   end
 
@@ -251,6 +262,25 @@ defmodule Arbor.Agent.Orchestration do
     end
   end
 
+  defp authorize_task_steer(opts, caller_id, status) do
+    if opt(opts, :authorize?, true) == false do
+      :ok
+    else
+      status
+      |> task_steer_authorization_uris()
+      |> Enum.find_value(fn resource_uri ->
+        case authorize_caller(opts, caller_id, resource_uri, :execute) do
+          :ok -> :ok
+          _ -> nil
+        end
+      end)
+      |> case do
+        :ok -> :ok
+        nil -> {:error, {:unauthorized, :task_steer_required}}
+      end
+    end
+  end
+
   defp task_read_authorization_uris(status) do
     [
       scoped_task_read_uri(Map.get(status, :task_id)),
@@ -271,6 +301,16 @@ defmodule Arbor.Agent.Orchestration do
     |> Enum.uniq()
   end
 
+  defp task_steer_authorization_uris(status) do
+    [
+      scoped_task_steer_uri(Map.get(status, :task_id)),
+      scoped_task_steer_uri(Map.get(status, :agent_id)),
+      @task_steer_uri
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
   defp scoped_dispatch_uri(agent_id) when is_binary(agent_id) and agent_id != "",
     do: "#{@dispatch_uri}/#{agent_id}"
 
@@ -286,6 +326,11 @@ defmodule Arbor.Agent.Orchestration do
 
   defp scoped_task_cancel_uri(_), do: nil
 
+  defp scoped_task_steer_uri(id) when is_binary(id) and id != "",
+    do: "#{@task_steer_uri}/#{id}"
+
+  defp scoped_task_steer_uri(_), do: nil
+
   defp normalize_or_generate_task_id(opts) do
     case opt(opts, :task_id) do
       id when is_binary(id) -> normalize_task_id(id)
@@ -294,12 +339,46 @@ defmodule Arbor.Agent.Orchestration do
     end
   end
 
-  defp task_scoped_opts(opts, task_id, approval_answer_cap_id) do
+  defp task_scoped_opts(opts, task_id, approval_answer_cap_id, steer_cap_id) do
     opts
     |> task_store_opts()
     |> Keyword.put(:task_id, task_id)
     |> Keyword.put(:approval_answer_cap_id, approval_answer_cap_id)
     |> Keyword.put(:approval_answer_security_module, security_module(opts))
+    |> Keyword.put(:steer_cap_id, steer_cap_id)
+    |> Keyword.put(:steer_security_module, security_module(opts))
+  end
+
+  defp dispatch_with_task_capabilities(agent_id, task, task_id, caller_id, opts) do
+    case grant_task_approval_answer(caller_id, task_id, opts) do
+      {:ok, approval_answer_cap_id} ->
+        case grant_task_steer(caller_id, task_id, opts) do
+          {:ok, steer_cap_id} ->
+            task_opts = task_scoped_opts(opts, task_id, approval_answer_cap_id, steer_cap_id)
+
+            case dispatch_task(agent_id, task, task_opts) do
+              {:ok, ^task_id} ->
+                with :ok <- record_dispatch(task_id, agent_id, task, caller_id, opts) do
+                  {:ok, task_id}
+                end
+
+              {:ok, other_task_id} ->
+                revoke_task_capabilities(opts, approval_answer_cap_id, steer_cap_id)
+                {:error, {:task_id_mismatch, other_task_id}}
+
+              {:error, _reason} = error ->
+                revoke_task_capabilities(opts, approval_answer_cap_id, steer_cap_id)
+                error
+            end
+
+          {:error, _reason} = error ->
+            revoke_task_approval_answer(opts, approval_answer_cap_id)
+            error
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   defp grant_task_approval_answer(caller_id, task_id, opts) do
@@ -332,6 +411,33 @@ defmodule Arbor.Agent.Orchestration do
     end
   end
 
+  defp grant_task_steer(caller_id, task_id, opts) do
+    grant_opts = [
+      principal: caller_id,
+      resource: scoped_task_steer_uri(task_id),
+      expires_at: DateTime.add(DateTime.utc_now(), @approval_answer_cap_ttl_seconds, :second),
+      constraints: %{},
+      metadata: %{source: :orchestration_task_dispatch, task_id: task_id}
+    ]
+
+    case opts |> security_module() |> apply_if_exported(:grant, [grant_opts]) do
+      {:ok, capability} ->
+        case value(capability, :id) do
+          id when is_binary(id) and id != "" -> {:ok, id}
+          other -> {:error, {:steer_grant_failed, {:missing_capability_id, other}}}
+        end
+
+      {:error, reason} ->
+        {:error, {:steer_grant_failed, reason}}
+
+      :module_unavailable ->
+        {:error, {:steer_grant_failed, :security_unavailable}}
+
+      other ->
+        {:error, {:steer_grant_failed, other}}
+    end
+  end
+
   defp revoke_task_approval_answer(opts, capability_id)
        when is_binary(capability_id) and capability_id != "" do
     opts
@@ -344,6 +450,14 @@ defmodule Arbor.Agent.Orchestration do
   end
 
   defp revoke_task_approval_answer(_opts, _capability_id), do: :ok
+
+  defp revoke_task_capabilities(opts, approval_answer_cap_id, steer_cap_id) do
+    revoke_task_approval_answer(opts, approval_answer_cap_id)
+    revoke_task_steer(opts, steer_cap_id)
+  end
+
+  defp revoke_task_steer(opts, capability_id),
+    do: revoke_task_approval_answer(opts, capability_id)
 
   defp record_dispatch(task_id, agent_id, task, caller_id, opts) do
     data = [
@@ -793,7 +907,8 @@ defmodule Arbor.Agent.Orchestration do
        started_at: value(status, :started_at),
        updated_at: value(status, :updated_at),
        completed_at: value(status, :completed_at),
-       metadata: value(status, :metadata, %{}) || %{}
+       metadata: value(status, :metadata, %{}) || %{},
+       steering: value(status, :steering, %{"counts" => %{}, "last" => nil}) || %{}
      }}
   end
 
@@ -813,6 +928,11 @@ defmodule Arbor.Agent.Orchestration do
   defp normalize_task_cancel_result({:error, _} = error), do: error
   defp normalize_task_cancel_result(:module_unavailable), do: {:error, :task_store_unavailable}
   defp normalize_task_cancel_result(other), do: {:error, {:unexpected_task_store_result, other}}
+
+  defp normalize_task_steer_result({:ok, control}) when is_map(control), do: {:ok, control}
+  defp normalize_task_steer_result({:error, _} = error), do: error
+  defp normalize_task_steer_result(:module_unavailable), do: {:error, :task_store_unavailable}
+  defp normalize_task_steer_result(other), do: {:error, {:unexpected_task_store_result, other}}
 
   defp normalize_task_state(state)
        when state in [:running, :waiting_approval, :done, :failed, :cancelled],

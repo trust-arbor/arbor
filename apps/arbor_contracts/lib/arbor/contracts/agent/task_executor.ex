@@ -27,7 +27,7 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   - `{:ok, :pending_approval, approval_id}`
   - `{:error, {:pending_approval, approval_id}}`
 
-  ## Optional progress and cancel
+  ## Optional progress, cancel, and steering
 
   Configured executors may implement `task_status/2` and `cancel_task/2`.
   TaskStore best-effort calls them for configured (non-override) executors:
@@ -42,6 +42,14 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   Both callbacks are time-bounded (supervised, short timeout, brutal kill on
   hang) so one executor cannot freeze status or prevent cancellation.
   Explicit runner overrides do not use these cross-library callbacks.
+
+  Configured executors may also implement `steer_task/3`. TaskStore writes an
+  ordered control record before calling it, then preserves that record across
+  runner exits. A steering callback receives the exact JSON-clean control map
+  assigned by TaskStore and the original JSON-clean execution context. It may
+  report immediate delivery, accepted queued delivery, or terminal unsupported.
+  Operational errors are retained by TaskStore as deferred controls for bounded
+  retry. Explicit runner overrides report steering as unsupported.
 
   ## Task kinds
 
@@ -125,6 +133,19 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   """
   @type cancel_result :: :ok | {:error, term()}
 
+  @typedoc "Stable JSON-clean steering control owned by TaskStore."
+  @type steering_control :: json_map()
+
+  @typedoc "Delivery modes available to a configured task executor."
+  @type steering_delivery_mode ::
+          :native_tool_loop | :acp_native | :same_session_follow_up | :next_stage
+
+  @typedoc "Result of accepting a task steering control."
+  @type steering_result ::
+          {:ok, steering_delivery_mode()}
+          | {:ok, :queued, steering_delivery_mode()}
+          | {:error, :unsupported | term()}
+
   @doc """
   Execute a task for `agent_id` with the given task payload and context.
 
@@ -155,5 +176,18 @@ defmodule Arbor.Contracts.Agent.TaskExecutor do
   """
   @callback cancel_task(agent_id(), execution_context()) :: cancel_result()
 
-  @optional_callbacks task_status: 2, cancel_task: 2
+  @doc """
+  Optionally accept a persisted steering control for a running task.
+
+  The control map contains only JSON values and always includes the stable
+  `control_id`, `task_id`, `sequence`, `status`, `sender_id`, `message`, and
+  timestamp fields. Return `{:ok, mode}` once delivered, or
+  `{:ok, :queued, mode}` after the executor has durably accepted responsibility
+  for later delivery. Return `{:error, :unsupported}` when this executor cannot
+  steer the task. Other errors are treated as retryable operational failures by
+  TaskStore.
+  """
+  @callback steer_task(agent_id(), steering_control(), execution_context()) :: steering_result()
+
+  @optional_callbacks task_status: 2, cancel_task: 2, steer_task: 3
 end

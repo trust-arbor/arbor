@@ -32,6 +32,9 @@ defmodule Arbor.Contracts.Agent.TaskExecutorTest do
 
     @impl true
     def cancel_task(_agent_id, _context), do: :ok
+
+    @impl true
+    def steer_task(_agent_id, _control, _context), do: {:ok, :native_tool_loop}
   end
 
   defmodule PendingApprovalExecutor do
@@ -48,15 +51,18 @@ defmodule Arbor.Contracts.Agent.TaskExecutorTest do
     assert function_exported?(PendingApprovalExecutor, :run, 3)
   end
 
-  test "optional progress and cancel callbacks are declared" do
+  test "optional progress, cancel, and steering callbacks are declared" do
     assert {:task_status, 2} in TaskExecutor.behaviour_info(:optional_callbacks)
     assert {:cancel_task, 2} in TaskExecutor.behaviour_info(:optional_callbacks)
+    assert {:steer_task, 3} in TaskExecutor.behaviour_info(:optional_callbacks)
     assert {:run, 3} in TaskExecutor.behaviour_info(:callbacks)
     assert {:task_status, 2} in TaskExecutor.behaviour_info(:callbacks)
     assert {:cancel_task, 2} in TaskExecutor.behaviour_info(:callbacks)
+    assert {:steer_task, 3} in TaskExecutor.behaviour_info(:callbacks)
 
     assert function_exported?(FullExecutor, :task_status, 2)
     assert function_exported?(FullExecutor, :cancel_task, 2)
+    assert function_exported?(FullExecutor, :steer_task, 3)
     refute function_exported?(CompliantExecutor, :task_status, 2)
     refute function_exported?(CompliantExecutor, :cancel_task, 2)
   end
@@ -83,6 +89,9 @@ defmodule Arbor.Contracts.Agent.TaskExecutorTest do
     assert progress["current_step"] == "compiling"
     assert progress["waiting_on"] == nil
     assert :ok = FullExecutor.cancel_task("agent_1", context)
+
+    assert {:ok, :native_tool_loop} =
+             FullExecutor.steer_task("agent_1", %{"control_id" => "ctl_1"}, context)
   end
 
   test "behaviour module documents the contract" do
@@ -94,5 +103,6 @@ defmodule Arbor.Contracts.Agent.TaskExecutorTest do
     assert moduledoc =~ "coding_change"
     assert moduledoc =~ "task_status"
     assert moduledoc =~ "cancel_task"
+    assert moduledoc =~ "steer_task"
   end
 end

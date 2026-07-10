@@ -46,6 +46,57 @@ defmodule Arbor.Agent.OrchestrationTest do
     end
   end
 
+  defmodule FakeTaskSteerSecurity do
+    def authorize(actor, resource_uri, action, opts) do
+      send(self(), {:authorize, actor, resource_uri, action, opts})
+
+      case {actor, resource_uri} do
+        {"dispatch_owner", "arbor://agent/dispatch/agent_1"} -> {:ok, :authorized}
+        {"dispatch_owner", "arbor://agent/task/steer/task_1"} -> {:ok, :authorized}
+        _ -> {:error, :no_capability}
+      end
+    end
+  end
+
+  defmodule DispatchScopedSecurity do
+    def authorize(actor, resource_uri, _action, _opts) do
+      send(self(), {:scoped_authorize, actor, resource_uri})
+
+      cond do
+        resource_uri == "arbor://agent/dispatch/agent_1" and actor == "dispatch_owner" ->
+          {:ok, :authorized}
+
+        Process.get({__MODULE__, :capabilities}, %{})[resource_uri] == actor ->
+          {:ok, :authorized}
+
+        true ->
+          {:error, :no_capability}
+      end
+    end
+
+    def grant(opts) do
+      cap_id = "cap_" <> Integer.to_string(System.unique_integer([:positive]))
+      capabilities = Process.get({__MODULE__, :capabilities}, %{})
+
+      Process.put(
+        {__MODULE__, :capabilities},
+        Map.put(capabilities, opts[:resource], opts[:principal])
+      )
+
+      Process.put({__MODULE__, :capability_resources}, %{cap_id => opts[:resource]})
+      {:ok, %{id: cap_id}}
+    end
+
+    def revoke(cap_id) do
+      resources = Process.get({__MODULE__, :capability_resources}, %{})
+      resource = Map.get(resources, cap_id)
+      capabilities = Process.get({__MODULE__, :capabilities}, %{})
+      Process.put({__MODULE__, :capabilities}, Map.delete(capabilities, resource))
+      send(self(), {:scoped_revoke, cap_id, resource})
+      :ok
+    end
+  end
+
   defmodule FakeConsensus do
     def list_pending do
       Process.get({__MODULE__, :pending}, [])
@@ -132,6 +183,70 @@ defmodule Arbor.Agent.OrchestrationTest do
          }}
       )
     end
+
+    def steer(task_id, message, opts) do
+      send(self(), {:task_steer, task_id, message, opts})
+
+      {:ok,
+       %{
+         "control_id" => "control_1",
+         "task_id" => task_id,
+         "sequence" => 1,
+         "status" => "delivered",
+         "sender_id" => opts[:sender_id],
+         "message" => message,
+         "queued_at" => "2026-07-10T12:00:00Z",
+         "delivered_at" => "2026-07-10T12:00:01Z",
+         "target_stage" => opts[:target_stage],
+         "delivery_mode" => "native_tool_loop",
+         "error" => nil
+       }}
+    end
+  end
+
+  defmodule TerminalTaskStore do
+    def dispatch(_agent_id, _task, opts) do
+      Process.put({__MODULE__, :dispatch_opts}, opts)
+      {:ok, opts[:task_id]}
+    end
+
+    def status(task_id, _opts) do
+      {:ok,
+       %{
+         task_id: task_id,
+         agent_id: "agent_1",
+         state: :running,
+         current_step: "running",
+         waiting_on: nil,
+         started_at: DateTime.utc_now(),
+         updated_at: DateTime.utc_now(),
+         completed_at: nil,
+         metadata: %{}
+       }}
+    end
+
+    def steer(task_id, message, opts) do
+      send(self(), {:terminal_store_steer, task_id, message, opts})
+      {:ok, %{"control_id" => "control_1", "status" => "delivered"}}
+    end
+
+    def cancel(task_id, _opts) do
+      dispatch_opts = Process.get({__MODULE__, :dispatch_opts}, [])
+      dispatch_opts[:steer_security_module].revoke(dispatch_opts[:steer_cap_id])
+
+      {:ok,
+       %{
+         task_id: task_id,
+         agent_id: "agent_1",
+         state: :cancelled,
+         current_step: "cancelled",
+         waiting_on: nil,
+         started_at: DateTime.utc_now(),
+         updated_at: DateTime.utc_now(),
+         completed_at: DateTime.utc_now(),
+         metadata: %{}
+       }}
+    end
   end
 
   defmodule FakeAudit do
@@ -158,7 +273,10 @@ defmodule Arbor.Agent.OrchestrationTest do
           {FakeTaskStore, :dispatch_result},
           {FakeTaskStore, :status_result},
           {FakeTaskStore, :result_result},
-          {FakeTaskStore, :cancel_result}
+          {FakeTaskStore, :cancel_result},
+          {DispatchScopedSecurity, :capabilities},
+          {DispatchScopedSecurity, :capability_resources},
+          {TerminalTaskStore, :dispatch_opts}
         ] do
       Process.delete(key)
     end
@@ -187,11 +305,16 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert grant_opts[:constraints] == %{}
       assert grant_opts[:metadata] == %{source: :orchestration_task_dispatch, task_id: "task_1"}
 
+      assert_received {:grant, steer_grant_opts}
+      assert steer_grant_opts[:resource] == "arbor://agent/task/steer/task_1"
+
       assert_received {:task_dispatch, "agent_1", "write a patch", opts}
       assert opts[:task_id] == "task_1"
       assert opts[:metadata] == %{ticket: "A-1"}
       assert opts[:approval_answer_cap_id] == "cap_task_answer"
       assert opts[:approval_answer_security_module] == FakeSecurity
+      assert opts[:steer_cap_id] == "cap_task_answer"
+      assert opts[:steer_security_module] == FakeSecurity
 
       assert_received {:audit_dispatched, "human_1", "task_1", "agent_1", audit_opts}
       assert audit_opts[:metadata] == %{ticket: "A-1"}
@@ -245,6 +368,7 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       assert_received {:grant, grant_opts}
       assert grant_opts[:resource] == "arbor://approval/answer/task/task_1"
+      assert_received {:revoke, "cap_task_answer"}
       assert_received {:revoke, "cap_task_answer"}
       refute_received {:audit_dispatched, _, _, _, _}
     end
@@ -408,6 +532,93 @@ defmodule Arbor.Agent.OrchestrationTest do
                )
 
       refute_received {:task_cancel, _, _}
+    end
+  end
+
+  describe "steer_task/3" do
+    test "authorizes task-scoped steering and forwards the authenticated caller as sender" do
+      assert {:ok, control} =
+               Orchestration.steer_task("task_1", "run focused tests",
+                 caller_id: "human_1",
+                 target_stage: "validation",
+                 task_store: FakeTaskStore,
+                 security_module: FakeSecurity
+               )
+
+      assert control["status"] == "delivered"
+      assert control["sender_id"] == "human_1"
+
+      assert_received {:authorize, "human_1", "arbor://agent/task/steer/task_1", :execute,
+                       [verify_identity: false]}
+
+      assert_received {:task_steer, "task_1", "run focused tests", opts}
+      assert opts[:sender_id] == "human_1"
+      assert opts[:target_stage] == "validation"
+    end
+
+    test "security regression: a different caller cannot steer, and dispatch owner is scoped to its task" do
+      base_opts = [task_store: FakeTaskStore, security_module: FakeTaskSteerSecurity]
+
+      assert {:error, {:unauthorized, :task_steer_required}} =
+               Orchestration.steer_task(
+                 "task_1",
+                 "redirect",
+                 Keyword.put(base_opts, :caller_id, "other_caller")
+               )
+
+      refute_received {:task_steer, _, _, _}
+
+      assert {:ok, _control} =
+               Orchestration.steer_task(
+                 "task_1",
+                 "redirect",
+                 Keyword.put(base_opts, :caller_id, "dispatch_owner")
+               )
+
+      assert_received {:task_steer, "task_1", "redirect", opts}
+      assert opts[:sender_id] == "dispatch_owner"
+
+      assert {:error, {:unauthorized, :task_steer_required}} =
+               Orchestration.steer_task(
+                 "task_2",
+                 "cross-task",
+                 Keyword.put(base_opts, :caller_id, "dispatch_owner")
+               )
+
+      refute_received {:task_steer, "task_2", _, _}
+    end
+
+    test "security regression: dispatch grants exact task steering and terminal cleanup revokes it" do
+      opts = [
+        caller_id: "dispatch_owner",
+        task_id: "task_1",
+        task_store: TerminalTaskStore,
+        security_module: DispatchScopedSecurity,
+        audit_module: FakeAudit
+      ]
+
+      assert {:ok, "task_1"} = Orchestration.dispatch("agent_1", "work", opts)
+
+      assert {:ok, _} = Orchestration.steer_task("task_1", "redirect", opts)
+      assert_received {:terminal_store_steer, "task_1", "redirect", _}
+
+      assert {:error, {:unauthorized, :task_steer_required}} =
+               Orchestration.steer_task(
+                 "task_1",
+                 "redirect",
+                 Keyword.put(opts, :caller_id, "other")
+               )
+
+      assert {:error, {:unauthorized, :task_steer_required}} =
+               Orchestration.steer_task("task_2", "redirect", opts)
+
+      assert {:ok, %{state: :cancelled}} =
+               Orchestration.cancel_task("task_1", Keyword.put(opts, :authorize?, false))
+
+      assert_received {:scoped_revoke, _cap_id, "arbor://agent/task/steer/task_1"}
+
+      assert {:error, {:unauthorized, :task_steer_required}} =
+               Orchestration.steer_task("task_1", "redirect", opts)
     end
   end
 

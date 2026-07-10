@@ -147,6 +147,47 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end
   end
 
+  defmodule SteeringExecutor do
+    def run(agent_id, task, context) do
+      send(recording_pid(), {:steering_executor_started, self(), agent_id, task, context})
+
+      receive do
+        {:finish, result} -> result
+      after
+        1_000 -> {:error, :test_timeout}
+      end
+    end
+
+    def steer_task(agent_id, control, context) do
+      send(recording_pid(), {:steer_task_called, agent_id, control, context, self()})
+
+      case Application.get_env(:arbor_agent, :task_store_test_steer, :deliver) do
+        :deliver ->
+          {:ok, :native_tool_loop}
+
+        :queued ->
+          {:ok, :queued, :next_stage}
+
+        :unsupported ->
+          {:error, :unsupported}
+
+        :defer ->
+          {:error, :transport_down}
+
+        {:defer_until, ready_at_ms} ->
+          if System.monotonic_time(:millisecond) >= ready_at_ms do
+            {:ok, :native_tool_loop}
+          else
+            {:error, :transport_down}
+          end
+      end
+    end
+
+    defp recording_pid do
+      Application.fetch_env!(:arbor_agent, :task_store_test_pid)
+    end
+  end
+
   defmodule NoRunModule do
     def other, do: :ok
   end
@@ -167,6 +208,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     original_test_pid = Application.get_env(:arbor_agent, :task_store_test_pid)
     original_progress = Application.get_env(:arbor_agent, :task_store_test_progress)
     original_cancel = Application.get_env(:arbor_agent, :task_store_test_cancel)
+    original_steer = Application.get_env(:arbor_agent, :task_store_test_steer)
 
     Application.put_env(:arbor_agent, :task_store_test_pid, self())
 
@@ -176,6 +218,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       restore_env(:task_store_test_pid, original_test_pid)
       restore_env(:task_store_test_progress, original_progress)
       restore_env(:task_store_test_cancel, original_cancel)
+      restore_env(:task_store_test_steer, original_steer)
     end)
 
     {:ok, store: store, supervisor: supervisor}
@@ -190,7 +233,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                test_pid: self(),
                metadata: %{ticket: "A-1"},
                approval_answer_cap_id: "cap_task_1",
-               approval_answer_revoke: revoke_to(self())
+               approval_answer_revoke: revoke_to(self()),
+               steer_cap_id: "cap_task_steer_1",
+               steer_capability_revoke: revoke_steer_to(self())
              )
 
     assert_receive {:runner_started, runner_pid, "agent_1", "do work", _opts}
@@ -218,6 +263,184 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end)
 
     assert_receive {:revoke_approval_answer_capability, "cap_task_1"}
+    assert_receive {:revoke_steer_capability, "cap_task_steer_1"}
+  end
+
+  test "steering mailbox preserves order and delivers configured controls once", %{
+    supervisor: supervisor
+  } do
+    store = start_configured_steering_store(supervisor)
+    Application.put_env(:arbor_agent, :task_store_test_steer, :deliver)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", %{"task_id" => ^task_id}}
+
+    assert {:ok, first} =
+             TaskStore.steer(task_id, "check tests", name: store, sender_id: "human_1")
+
+    assert {:ok, second} =
+             TaskStore.steer(task_id, "also review docs", name: store, sender_id: "human_1")
+
+    assert first["sequence"] == 1
+    assert second["sequence"] == 2
+    assert first["status"] == "delivered"
+    assert second["status"] == "delivered"
+    assert first["delivery_mode"] == "native_tool_loop"
+
+    assert_receive {:steer_task_called, "agent_1", delivered_first, %{"task_id" => ^task_id}, _}
+    assert_receive {:steer_task_called, "agent_1", delivered_second, %{"task_id" => ^task_id}, _}
+    assert delivered_first["control_id"] == first["control_id"]
+    assert delivered_second["control_id"] == second["control_id"]
+  end
+
+  test "accepted queued controls are not retried", %{supervisor: supervisor} do
+    store = start_configured_steering_store(supervisor, steer_retry_delay_ms: 10)
+    Application.put_env(:arbor_agent, :task_store_test_steer, :queued)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, control} = TaskStore.steer(task_id, "queue this", name: store)
+    assert control["status"] == "queued"
+    assert control["delivery_mode"] == "next_stage"
+    assert_receive {:steer_task_called, "agent_1", delivered, _, _}
+    assert delivered["control_id"] == control["control_id"]
+    refute_receive {:steer_task_called, _, _, _, _}, 50
+  end
+
+  test "deferred controls remain retryable past the old retry window and keep the same id", %{
+    supervisor: supervisor
+  } do
+    store =
+      start_configured_steering_store(supervisor,
+        steer_retry_delay_ms: 100,
+        max_steer_retry_delay_ms: 100
+      )
+
+    Application.put_env(
+      :arbor_agent,
+      :task_store_test_steer,
+      {:defer_until, System.monotonic_time(:millisecond) + 350}
+    )
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+    assert {:ok, control} = TaskStore.steer(task_id, "retry this", name: store)
+    assert control["status"] == "deferred"
+
+    assert_receive {:steer_task_called, "agent_1", first, _, _}
+    assert_receive {:steer_task_called, "agent_1", second, _, _}, 150
+    assert first["control_id"] == control["control_id"]
+    assert second["control_id"] == control["control_id"]
+
+    assert_eventually(
+      fn ->
+        assert {:ok, status} = TaskStore.status(task_id, name: store)
+        assert status.steering["counts"] == %{"delivered" => 1}
+        assert status.steering["last"]["control_id"] == control["control_id"]
+      end,
+      60
+    )
+  end
+
+  test "deferred controls gate later controls until the earliest control is accepted", %{
+    supervisor: supervisor
+  } do
+    store = start_configured_steering_store(supervisor, steer_retry_delay_ms: 30)
+    Application.put_env(:arbor_agent, :task_store_test_steer, :defer)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+    assert {:ok, first} = TaskStore.steer(task_id, "first", name: store)
+    assert_receive {:steer_task_called, "agent_1", first_attempt, _, _}
+    assert first_attempt["control_id"] == first["control_id"]
+
+    assert {:ok, second} = TaskStore.steer(task_id, "second", name: store)
+    assert second["status"] == "queued"
+    refute_receive {:steer_task_called, _, _, _, _}, 20
+
+    Application.put_env(:arbor_agent, :task_store_test_steer, :deliver)
+
+    assert_receive {:steer_task_called, "agent_1", delivered_first, _, _}, 100
+    assert_receive {:steer_task_called, "agent_1", delivered_second, _, _}, 100
+    assert delivered_first["control_id"] == first["control_id"]
+    assert delivered_second["control_id"] == second["control_id"]
+
+    assert_eventually(fn ->
+      assert {:ok, status} = TaskStore.status(task_id, name: store)
+      assert status.steering["counts"] == %{"delivered" => 2}
+      assert status.steering["last"]["sequence"] == 2
+      refute Map.has_key?(status.steering["last"], "message")
+      refute Map.has_key?(status.steering["last"], "sender_id")
+    end)
+  end
+
+  test "steering controls are bounded and use opaque ids", %{supervisor: supervisor} do
+    store = start_configured_steering_store(supervisor, max_controls_per_task: 1)
+    Application.put_env(:arbor_agent, :task_store_test_steer, :deliver)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+    assert {:ok, control} = TaskStore.steer(task_id, "one", name: store)
+    assert control["control_id"] =~ ~r/^control_[A-Za-z0-9_-]{24}$/
+    assert {:error, :too_many_steering_controls} = TaskStore.steer(task_id, "two", name: store)
+  end
+
+  test "steering rejects invalid UTF-8 before string processing", %{store: store} do
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store, test_pid: self())
+    assert_receive {:runner_started, _pid, "agent_1", "work", _}
+    assert {:error, :invalid_steering_message} = TaskStore.steer(task_id, <<0xFF>>, name: store)
+  end
+
+  test "runner overrides and executors without steering report unsupported", %{store: store} do
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store, test_pid: self())
+    assert_receive {:runner_started, _pid, "agent_1", "work", _}
+
+    assert {:ok, control} = TaskStore.steer(task_id, "redirect", name: store)
+    assert control["status"] == "unsupported"
+    assert control["error"] == "executor_unsupported"
+  end
+
+  test "cancellation terminalizes deferred controls without retrying the runner", %{
+    supervisor: supervisor
+  } do
+    store = start_configured_steering_store(supervisor, steer_retry_delay_ms: 100)
+    Application.put_env(:arbor_agent, :task_store_test_steer, :defer)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+    assert {:ok, control} = TaskStore.steer(task_id, "stop after this", name: store)
+    assert control["status"] == "deferred"
+    assert_receive {:steer_task_called, _, _, _, _}
+    assert {:ok, %{state: :cancelled}} = TaskStore.cancel(task_id, name: store)
+    refute_receive {:steer_task_called, _, _, _, _}, 150
+
+    assert {:ok, terminal_control} = TaskStore.steer(task_id, "too late", name: store)
+    assert terminal_control["status"] == "unsupported"
+    assert terminal_control["error"] == "task_terminal"
+  end
+
+  test "terminalization marks queued controls blocked behind a deferred control unsupported", %{
+    supervisor: supervisor
+  } do
+    store = start_configured_steering_store(supervisor, steer_retry_delay_ms: 100)
+    Application.put_env(:arbor_agent, :task_store_test_steer, :defer)
+
+    assert {:ok, task_id} = TaskStore.dispatch("agent_1", "work", name: store)
+    assert_receive {:steering_executor_started, _pid, "agent_1", "work", _}
+    assert {:ok, first} = TaskStore.steer(task_id, "first", name: store)
+    assert_receive {:steer_task_called, "agent_1", first_attempt, _, _}
+    assert first_attempt["control_id"] == first["control_id"]
+
+    assert {:ok, second} = TaskStore.steer(task_id, "second", name: store)
+    assert second["status"] == "queued"
+    refute_receive {:steer_task_called, _, _, _, _}, 20
+
+    assert {:ok, %{state: :cancelled}} = TaskStore.cancel(task_id, name: store)
+    assert {:ok, status} = TaskStore.status(task_id, name: store)
+    assert status.steering["counts"] == %{"unsupported" => 2}
+    assert status.steering["last"]["control_id"] == second["control_id"]
+    assert status.steering["last"]["status"] == "unsupported"
   end
 
   test "records pending approval tasks as waiting_approval", %{store: store} do
@@ -244,7 +467,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                test_pid: self(),
                metadata: %{ticket: "A-1"},
                approval_answer_cap_id: "cap_task_cancel",
-               approval_answer_revoke: revoke_to(self())
+               approval_answer_revoke: revoke_to(self()),
+               steer_cap_id: "cap_task_steer_cancel",
+               steer_capability_revoke: revoke_steer_to(self())
              )
 
     assert_receive {:runner_started, runner_pid, "agent_1", "do work", _opts}
@@ -261,6 +486,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert status.state == :cancelled
     assert {:error, :cancelled} = TaskStore.result(task_id, name: store)
     assert_receive {:revoke_approval_answer_capability, "cap_task_cancel"}
+    assert_receive {:revoke_steer_capability, "cap_task_steer_cancel"}
   end
 
   test "cancel propagates agent_id and task_id to the scoped turn bridge before killing the runner",
@@ -1065,6 +1291,21 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       send(test_pid, {:revoke_approval_answer_capability, capability_id})
       :ok
     end
+  end
+
+  defp revoke_steer_to(test_pid) do
+    fn capability_id ->
+      send(test_pid, {:revoke_steer_capability, capability_id})
+      :ok
+    end
+  end
+
+  defp start_configured_steering_store(supervisor, opts \\ []) do
+    store = Module.concat(__MODULE__, :"SteeringStore#{System.unique_integer([:positive])}")
+    Application.put_env(:arbor_agent, :default_task_executor, SteeringExecutor)
+
+    start_supervised!({TaskStore, [name: store, task_supervisor: supervisor] ++ opts}, id: store)
+    store
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:arbor_agent, key)

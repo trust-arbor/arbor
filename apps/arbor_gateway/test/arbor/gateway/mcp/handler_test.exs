@@ -72,6 +72,28 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
          }}
       )
     end
+
+    def steer_task(task_id, message, opts) do
+      send(self(), {:steer_task, task_id, message, opts})
+
+      Process.get(
+        {__MODULE__, :steer_result},
+        {:ok,
+         %{
+           "control_id" => "control_1",
+           "task_id" => task_id,
+           "sequence" => 1,
+           "status" => "delivered",
+           "sender_id" => opts[:caller_id],
+           "message" => message,
+           "queued_at" => "2026-07-10T12:00:00Z",
+           "delivered_at" => "2026-07-10T12:00:01Z",
+           "target_stage" => opts[:target_stage],
+           "delivery_mode" => "native_tool_loop",
+           "error" => nil
+         }}
+      )
+    end
   end
 
   setup do
@@ -96,6 +118,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
     Process.delete({FakeOrchestration, :status_result})
     Process.delete({FakeOrchestration, :result_result})
     Process.delete({FakeOrchestration, :cancel_result})
+    Process.delete({FakeOrchestration, :steer_result})
 
     {:ok, state: %{}}
   end
@@ -166,7 +189,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   describe "handle_list_tools/2" do
     test "returns tools", %{state: state} do
       {:ok, tools, nil, _state} = Handler.handle_list_tools(nil, state)
-      assert length(tools) == 10
+      assert length(tools) == 11
 
       names = Enum.map(tools, & &1.name) |> Enum.sort()
 
@@ -179,6 +202,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
                "arbor_list_pending_approvals",
                "arbor_run",
                "arbor_status",
+               "arbor_steer_task",
                "arbor_task_result",
                "arbor_task_status"
              ]
@@ -229,12 +253,15 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       status_tool = Enum.find(tools, &(&1.name == "arbor_task_status"))
       result_tool = Enum.find(tools, &(&1.name == "arbor_task_result"))
       cancel_tool = Enum.find(tools, &(&1.name == "arbor_cancel_task"))
+      steer_tool = Enum.find(tools, &(&1.name == "arbor_steer_task"))
 
       assert "agent_id" in dispatch_tool.inputSchema.required
       assert "task" in dispatch_tool.inputSchema.required
       assert "task_id" in status_tool.inputSchema.required
       assert "task_id" in result_tool.inputSchema.required
       assert "task_id" in cancel_tool.inputSchema.required
+      assert "task_id" in steer_tool.inputSchema.required
+      assert "message" in steer_tool.inputSchema.required
     end
   end
 
@@ -442,6 +469,46 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
 
       assert_received {:cancel_task, "task_1", opts}
       assert opts[:caller_id] == "human_1"
+    end
+
+    test "steer_task requires SignedRequest authentication", %{state: state} do
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_steer_task",
+          %{"task_id" => "task_1", "message" => "redirect"},
+          state
+        )
+
+      assert result.isError == true
+      assert [%{text: text}] = result.content
+      assert text =~ "SignedRequest authentication"
+    end
+
+    test "steer_task calls the shared API with the signed caller and stable control result", %{
+      state: state
+    } do
+      Process.put(:arbor_authenticated_agent_id, "human_1")
+
+      {:ok, %{content: [%{text: text}]}, _state} =
+        Handler.handle_call_tool(
+          "arbor_steer_task",
+          %{"task_id" => "task_1", "message" => "run tests", "target_stage" => "validation"},
+          state
+        )
+
+      assert %{
+               "ok" => true,
+               "task_id" => "task_1",
+               "control" => %{
+                 "control_id" => "control_1",
+                 "status" => "delivered",
+                 "delivery_mode" => "native_tool_loop"
+               }
+             } = Jason.decode!(text)
+
+      assert_received {:steer_task, "task_1", "run tests", opts}
+      assert opts[:caller_id] == "human_1"
+      assert opts[:target_stage] == "validation"
     end
   end
 

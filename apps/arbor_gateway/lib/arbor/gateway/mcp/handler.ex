@@ -293,6 +293,30 @@ defmodule Arbor.Gateway.MCP.Handler do
           },
           required: ["task_id"]
         }
+      },
+      %{
+        name: "arbor_steer_task",
+        description: "Steer an active asynchronous Arbor task without cancelling it.",
+        inputSchema: %{
+          type: "object",
+          properties: %{
+            task_id: %{
+              type: "string",
+              description: "Task id returned by arbor_dispatch_task"
+            },
+            message: %{
+              type: "string",
+              minLength: 1,
+              maxLength: 4000,
+              description: "Steering instruction for the active task"
+            },
+            target_stage: %{
+              type: "string",
+              description: "Optional executor-specific target stage"
+            }
+          },
+          required: ["task_id", "message"]
+        }
       }
     ]
   end
@@ -381,6 +405,13 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   def handle_call_tool("arbor_cancel_task", args, state) do
     case cancel_task(args) do
+      {:ok, result} -> {:ok, json_content(result), state}
+      {:error, message} -> {:ok, error_content(message), state}
+    end
+  end
+
+  def handle_call_tool("arbor_steer_task", args, state) do
+    case steer_task(args) do
       {:ok, result} -> {:ok, json_content(result), state}
       {:error, message} -> {:ok, error_content(message), state}
     end
@@ -562,6 +593,23 @@ defmodule Arbor.Gateway.MCP.Handler do
          {:ok, task_id} <- required_string_arg(args, "task_id"),
          {:ok, status} <- call_orchestration(:cancel_task, [task_id, [caller_id: caller_id]]) do
       {:ok, %{"ok" => true, "task_id" => task_id, "task" => status}}
+    else
+      {:error, reason} -> {:error, format_tool_error(reason)}
+      other -> {:error, format_tool_error(other)}
+    end
+  end
+
+  defp steer_task(args) do
+    with {:ok, caller_id} <- require_authenticated("arbor_steer_task"),
+         {:ok, task_id} <- required_string_arg(args, "task_id"),
+         {:ok, message} <- required_string_arg(args, "message"),
+         {:ok, control} <-
+           call_orchestration(:steer_task, [
+             task_id,
+             message,
+             [caller_id: caller_id, target_stage: optional_string_arg(args, "target_stage")]
+           ]) do
+      {:ok, %{"ok" => true, "task_id" => task_id, "control" => control}}
     else
       {:error, reason} -> {:error, format_tool_error(reason)}
       other -> {:error, format_tool_error(other)}

@@ -26,7 +26,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   references, unsupported atoms, and conflicting kind declarations fail before
   any task process starts.
 
-  Optional `task_status/2` and `cancel_task/2` callbacks are best-effort and
+  Optional `task_status/2`, `cancel_task/2`, and `steer_task/3` callbacks are best-effort and
   time-bounded under the task supervisor (see Config
   `executor_callback_timeout_ms/0`); hung callbacks are killed and status falls
   back to the stored view while cancel continues with the turn bridge + hard kill.
@@ -38,6 +38,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_task_supervisor Arbor.Agent.Orchestration.TaskSupervisor
   @default_runner Arbor.Agent.Orchestration.TaskRunner
   @default_max_tasks 1_000
+  @default_steer_retry_delay_ms 100
+  @default_max_steer_retry_delay_ms 5_000
+  @default_max_controls_per_task 100
+  @max_steering_message_bytes 4_000
 
   alias Arbor.Agent.Config
   alias Arbor.Agent.Orchestration.TaskArtifacts
@@ -54,7 +58,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           started_at: DateTime.t(),
           updated_at: DateTime.t(),
           completed_at: DateTime.t() | nil,
-          metadata: map()
+          metadata: map(),
+          steering: map()
         }
 
   @type task_result ::
@@ -65,6 +70,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
              | :cancelled
              | {:waiting_approval, String.t()}
              | {:failed, term()}}
+
+  @type steering_control :: %{required(String.t()) => term()}
 
   @doc false
   def start_link(opts \\ []) do
@@ -108,6 +115,20 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     GenServer.call(store_name(opts), {:cancel, task_id})
   end
 
+  @doc """
+  Persist and attempt delivery of a steering message for one task.
+
+  The returned control is JSON-clean and has a stable `control_id` and
+  monotonically increasing per-task `sequence`. Operational delivery failures
+  return `"deferred"` and are retried by the store; accepted controls are never
+  invoked again.
+  """
+  @spec steer(task_id(), String.t(), keyword() | map()) ::
+          {:ok, steering_control()} | {:error, term()}
+  def steer(task_id, message, opts \\ []) do
+    GenServer.call(store_name(opts), {:steer, task_id, message, normalize_opts(opts)})
+  end
+
   @impl true
   def init(opts) do
     {:ok,
@@ -119,6 +140,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
        max_tasks: Keyword.get(opts, :max_tasks, @default_max_tasks),
        executor_callback_timeout_ms:
          Keyword.get(opts, :executor_callback_timeout_ms, Config.executor_callback_timeout_ms()),
+       steer_retry_delay_ms:
+         Keyword.get(opts, :steer_retry_delay_ms, @default_steer_retry_delay_ms),
+       max_steer_retry_delay_ms:
+         Keyword.get(opts, :max_steer_retry_delay_ms, @default_max_steer_retry_delay_ms),
+       max_controls_per_task:
+         Keyword.get(opts, :max_controls_per_task, @default_max_controls_per_task),
        # Arity-2: (agent_id, task_id) — task-scoped Session cancel bridge.
        cancel_turn: Keyword.get(opts, :cancel_turn, &default_cancel_turn/2),
        tasks: %{},
@@ -161,6 +188,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           approval_answer_security_module:
             Keyword.get(opts, :approval_answer_security_module, Arbor.Security),
           approval_answer_revoke: Keyword.get(opts, :approval_answer_revoke),
+          steer_cap_id: Keyword.get(opts, :steer_cap_id),
+          steer_security_module: Keyword.get(opts, :steer_security_module, Arbor.Security),
+          steer_capability_revoke: Keyword.get(opts, :steer_capability_revoke),
+          controls: [],
+          control_retries: %{},
+          accepted_control_ids: MapSet.new(),
           cancel_turn: Keyword.get(opts, :cancel_turn)
         }
 
@@ -246,7 +279,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             updated_at: now,
             completed_at: now
           })
-          |> revoke_approval_answer_capability()
+          |> terminalize_pending_controls()
+          |> revoke_task_capabilities()
 
         next_state =
           state
@@ -260,6 +294,22 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
       :error ->
         {:reply, {:error, :not_found}, state}
+    end
+  end
+
+  def handle_call({:steer, task_id, message, opts}, _from, state) do
+    with {:ok, message} <- validate_steering_message(message),
+         {:ok, record} <- Map.fetch(state.tasks, task_id),
+         :ok <- ensure_control_capacity(record, state) do
+      control = new_control(record, message, opts)
+      state = put_control(state, task_id, control)
+      emit_control_transition(record, control, "queued")
+      state = maybe_deliver_new_control(state, task_id, control["control_id"])
+
+      {:reply, {:ok, fetch_control!(state, task_id, control["control_id"])}, state}
+    else
+      :error -> {:reply, {:error, :not_found}, state}
+      {:error, _reason} = error -> {:reply, error, state}
     end
   end
 
@@ -302,7 +352,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
                   updated_at: now,
                   completed_at: now
                 })
-                |> revoke_approval_answer_capability()
+                |> terminalize_pending_controls()
+                |> revoke_task_capabilities()
               end
           end)
 
@@ -311,6 +362,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       :error ->
         {:noreply, state}
     end
+  end
+
+  def handle_info({:retry_steer, task_id, control_id}, state) do
+    {:noreply, deliver_control(state, task_id, control_id)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -330,7 +385,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
             record
             |> Map.merge(completion_fields(result, now))
             |> Map.put(:updated_at, now)
-            |> maybe_revoke_completed_approval_answer_capability()
+            |> maybe_terminalize_pending_controls()
+            |> maybe_revoke_completed_task_capabilities()
           end
       end)
 
@@ -382,12 +438,315 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp normalize_result(result), do: TaskArtifacts.normalize(result)
 
-  defp maybe_revoke_completed_approval_answer_capability(%{state: state} = record)
+  defp maybe_revoke_completed_task_capabilities(%{state: state} = record)
        when state in [:done, :failed, :cancelled] do
-    revoke_approval_answer_capability(record)
+    revoke_task_capabilities(record)
   end
 
-  defp maybe_revoke_completed_approval_answer_capability(record), do: record
+  defp maybe_revoke_completed_task_capabilities(record), do: record
+
+  # ---------------------------------------------------------------------------
+  # Steering mailbox
+  # ---------------------------------------------------------------------------
+
+  defp validate_steering_message(message) when is_binary(message) do
+    cond do
+      not String.valid?(message) -> {:error, :invalid_steering_message}
+      String.trim(message) == "" -> {:error, :empty_steering_message}
+      byte_size(message) > @max_steering_message_bytes -> {:error, :steering_message_too_large}
+      true -> {:ok, message}
+    end
+  end
+
+  defp validate_steering_message(_message), do: {:error, :invalid_steering_message}
+
+  defp ensure_control_capacity(record, state) do
+    if length(record.controls) < state.max_controls_per_task do
+      :ok
+    else
+      {:error, :too_many_steering_controls}
+    end
+  end
+
+  defp new_control(record, message, opts) do
+    now = DateTime.utc_now() |> DateTime.to_iso8601()
+    sequence = length(record.controls) + 1
+
+    %{
+      "control_id" =>
+        "control_" <> Base.url_encode64(:crypto.strong_rand_bytes(18), padding: false),
+      "task_id" => record.task_id,
+      "sequence" => sequence,
+      "status" => "queued",
+      "sender_id" => Keyword.get(opts, :sender_id),
+      "message" => message,
+      "queued_at" => now,
+      "delivered_at" => nil,
+      "target_stage" => normalize_target_stage(Keyword.get(opts, :target_stage)),
+      "delivery_mode" => nil,
+      "error" => nil
+    }
+  end
+
+  defp normalize_target_stage(stage) when is_binary(stage) and byte_size(stage) <= 200 do
+    if String.valid?(stage), do: stage, else: nil
+  end
+
+  defp normalize_target_stage(_stage), do: nil
+
+  defp put_control(state, task_id, control) do
+    update_in(state.tasks[task_id], fn record ->
+      record
+      |> Map.update!(:controls, &(&1 ++ [control]))
+      |> Map.update!(:control_retries, &Map.put_new(&1, control["control_id"], 0))
+    end)
+  end
+
+  defp fetch_control!(state, task_id, control_id) do
+    state.tasks
+    |> Map.fetch!(task_id)
+    |> Map.fetch!(:controls)
+    |> Enum.find(&(&1["control_id"] == control_id))
+  end
+
+  defp deliver_control(state, task_id, control_id) do
+    with {:ok, record} <- Map.fetch(state.tasks, task_id),
+         control when not is_nil(control) <- find_control(record, control_id),
+         true <- deliverable_control?(record, control),
+         true <- first_pending_control(record) == control_id do
+      if record.state in [:done, :failed, :cancelled] do
+        update_control(state, task_id, control_id, fn control ->
+          control
+          |> Map.put("status", "unsupported")
+          |> Map.put("error", "task_terminal")
+        end)
+      else
+        apply_control_delivery(state, record, control)
+      end
+    else
+      _ -> state
+    end
+  end
+
+  defp maybe_deliver_new_control(state, task_id, control_id) do
+    case Map.fetch(state.tasks, task_id) do
+      {:ok, record} ->
+        if first_pending_control(record) == control_id do
+          deliver_control(state, task_id, control_id)
+        else
+          state
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp apply_control_delivery(state, record, control) do
+    result =
+      if record.context_mode == :json_clean and is_map(record.context) and
+           is_atom(record.executor) and Code.ensure_loaded?(record.executor) and
+           function_exported?(record.executor, :steer_task, 3) do
+        call_executor_callback(state, fn ->
+          record.executor.steer_task(record.agent_id, control, record.context)
+        end)
+      else
+        {:error, :unsupported}
+      end
+
+    case normalize_steering_delivery(result) do
+      {:accepted, status, mode} ->
+        state
+        |> accept_control(record.task_id, control["control_id"], status, mode)
+        |> advance_mailbox(record.task_id)
+
+      :unsupported ->
+        state
+        |> update_control(record.task_id, control["control_id"], fn value ->
+          value |> Map.put("status", "unsupported") |> Map.put("error", "executor_unsupported")
+        end)
+        |> advance_mailbox(record.task_id)
+
+      {:deferred, error} ->
+        defer_control(state, record.task_id, control["control_id"], error)
+    end
+  end
+
+  defp normalize_steering_delivery({:ok, mode})
+       when mode in [:native_tool_loop, :acp_native, :same_session_follow_up, :next_stage],
+       do: {:accepted, "delivered", mode}
+
+  defp normalize_steering_delivery({:ok, :queued, mode})
+       when mode in [:native_tool_loop, :acp_native, :same_session_follow_up, :next_stage],
+       do: {:accepted, "queued", mode}
+
+  defp normalize_steering_delivery({:error, :unsupported}), do: :unsupported
+  defp normalize_steering_delivery(:unsupported), do: :unsupported
+  defp normalize_steering_delivery(result), do: {:deferred, bounded_error(result)}
+
+  defp defer_control(state, task_id, control_id, error) do
+    record = Map.fetch!(state.tasks, task_id)
+    attempts = Map.get(record.control_retries, control_id, 0) + 1
+
+    state =
+      update_control(state, task_id, control_id, fn value ->
+        value |> Map.put("status", "deferred") |> Map.put("error", error)
+      end)
+      |> update_in([:tasks, task_id, :control_retries], &Map.put(&1, control_id, attempts))
+
+    Process.send_after(
+      self(),
+      {:retry_steer, task_id, control_id},
+      retry_delay_ms(state, attempts)
+    )
+
+    state
+  end
+
+  defp retry_delay_ms(state, attempts) do
+    exponent = min(max(attempts - 1, 0), 6)
+    min(state.steer_retry_delay_ms * Integer.pow(2, exponent), state.max_steer_retry_delay_ms)
+  end
+
+  defp accept_control(state, task_id, control_id, status, mode) do
+    state
+    |> update_control(task_id, control_id, fn value ->
+      value
+      |> Map.put("status", status)
+      |> Map.put("delivery_mode", Atom.to_string(mode))
+      |> Map.put(
+        "delivered_at",
+        if(status == "delivered", do: DateTime.utc_now() |> DateTime.to_iso8601())
+      )
+      |> Map.put("error", nil)
+    end)
+    |> update_in([:tasks, task_id, :accepted_control_ids], &MapSet.put(&1, control_id))
+  end
+
+  defp advance_mailbox(state, task_id) do
+    case Map.fetch(state.tasks, task_id) do
+      {:ok, record} ->
+        case first_pending_control(record) do
+          nil -> state
+          control_id -> deliver_control(state, task_id, control_id)
+        end
+
+      :error ->
+        state
+    end
+  end
+
+  defp update_control(state, task_id, control_id, fun) do
+    update_in(state.tasks[task_id], fn record ->
+      controls =
+        Enum.map(record.controls, fn
+          %{"control_id" => ^control_id} = control ->
+            updated = fun.(control)
+            emit_control_transition(record, updated, updated["status"])
+            updated
+
+          control ->
+            control
+        end)
+
+      %{record | controls: controls}
+    end)
+  end
+
+  defp find_control(record, control_id),
+    do: Enum.find(record.controls, &(&1["control_id"] == control_id))
+
+  defp first_pending_control(record) do
+    record.controls
+    |> Enum.find(&deliverable_control?(record, &1))
+    |> case do
+      nil -> nil
+      control -> control["control_id"]
+    end
+  end
+
+  defp deliverable_control?(_record, %{"status" => "deferred"}), do: true
+
+  defp deliverable_control?(record, %{"status" => "queued", "control_id" => control_id}) do
+    not MapSet.member?(record.accepted_control_ids, control_id)
+  end
+
+  defp deliverable_control?(_record, _control), do: false
+
+  defp terminalize_pending_controls(record) do
+    controls =
+      Enum.map(record.controls, fn
+        %{"status" => "deferred"} = control ->
+          terminalize_control(record, control)
+
+        %{"status" => "queued", "control_id" => control_id} = control ->
+          if MapSet.member?(record.accepted_control_ids, control_id) do
+            control
+          else
+            terminalize_control(record, control)
+          end
+
+        control ->
+          control
+      end)
+
+    %{record | controls: controls}
+  end
+
+  defp terminalize_control(record, control) do
+    updated = control |> Map.put("status", "unsupported") |> Map.put("error", "task_terminal")
+    emit_control_transition(record, updated, "unsupported")
+    updated
+  end
+
+  defp maybe_terminalize_pending_controls(%{state: state} = record)
+       when state in [:done, :failed, :cancelled],
+       do: terminalize_pending_controls(record)
+
+  defp maybe_terminalize_pending_controls(record), do: record
+
+  defp bounded_error(result) do
+    result
+    |> inspect(limit: 10, printable_limit: 160)
+    |> String.slice(0, 200)
+  end
+
+  defp emit_control_transition(record, control, status) do
+    message = control["message"] || ""
+
+    data = %{
+      task_id: bounded_value(record.task_id),
+      agent_id: bounded_value(record.agent_id),
+      control_id: bounded_value(control["control_id"]),
+      sequence: control["sequence"],
+      status: status,
+      delivery_mode: control["delivery_mode"],
+      sender_id: bounded_value(control["sender_id"]),
+      target_stage: bounded_value(control["target_stage"]),
+      queued_at: control["queued_at"],
+      delivered_at: control["delivered_at"],
+      message_preview: String.slice(message, 0, 160),
+      message_digest: Base.encode16(:crypto.hash(:sha256, message), case: :lower)
+    }
+
+    if Code.ensure_loaded?(Arbor.Signals) and function_exported?(Arbor.Signals, :durable_emit, 4) do
+      Arbor.Signals.durable_emit(:agent, :task_steering_transition, data,
+        stream_id: "agent:task_steering"
+      )
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp bounded_value(value) when is_binary(value) do
+    if String.valid?(value), do: String.slice(value, 0, 200), else: nil
+  end
+
+  defp bounded_value(_value), do: nil
 
   defp cancel_active_turn(record, state) do
     cancel_fun =
@@ -438,6 +797,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp revoke_approval_answer_capability(record), do: record
 
+  defp revoke_task_capabilities(record) do
+    record
+    |> revoke_approval_answer_capability()
+    |> revoke_steer_capability()
+  end
+
   defp revoke_approval_answer_capability(%{approval_answer_revoke: revoke_fun} = record, cap_id)
        when is_function(revoke_fun, 1) do
     revoke_fun.(cap_id)
@@ -452,6 +817,39 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
          %{approval_answer_security_module: module} = record,
          cap_id
        ) do
+    if is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :revoke, 1) do
+      apply(module, :revoke, [cap_id])
+    else
+      :ok
+    end
+
+    record
+  rescue
+    _ -> record
+  catch
+    :exit, _ -> record
+  end
+
+  defp revoke_steer_capability(%{steer_cap_id: cap_id} = record)
+       when is_binary(cap_id) and cap_id != "" do
+    record
+    |> revoke_steer_capability(cap_id)
+    |> Map.put(:steer_cap_id, nil)
+  end
+
+  defp revoke_steer_capability(record), do: record
+
+  defp revoke_steer_capability(%{steer_capability_revoke: revoke_fun} = record, cap_id)
+       when is_function(revoke_fun, 1) do
+    revoke_fun.(cap_id)
+    record
+  rescue
+    _ -> record
+  catch
+    :exit, _ -> record
+  end
+
+  defp revoke_steer_capability(%{steer_security_module: module} = record, cap_id) do
     if is_atom(module) and Code.ensure_loaded?(module) and function_exported?(module, :revoke, 1) do
       apply(module, :revoke, [cap_id])
     else
@@ -586,7 +984,35 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       started_at: record.started_at,
       updated_at: record.updated_at,
       completed_at: record.completed_at,
-      metadata: record.metadata
+      metadata: record.metadata,
+      steering: steering_summary(record)
+    }
+  end
+
+  defp steering_summary(record) do
+    controls = Map.get(record, :controls, [])
+
+    %{
+      "counts" =>
+        controls
+        |> Enum.frequencies_by(& &1["status"])
+        |> Map.take(["queued", "deferred", "delivered", "unsupported"]),
+      "last" =>
+        case List.last(controls) do
+          nil ->
+            nil
+
+          control ->
+            Map.take(control, [
+              "control_id",
+              "sequence",
+              "status",
+              "delivery_mode",
+              "target_stage",
+              "queued_at",
+              "delivered_at"
+            ])
+        end
     }
   end
 
