@@ -267,6 +267,9 @@ defmodule Arbor.Actions.Mix do
       `context.exec.<node>.passed=true`)
     - `stdout` — captured stdout
     - `stderr` — captured stderr
+    - `feedback` — JSON-clean bounded output excerpts, truncation flags,
+      and full-output SHA-256 hashes
+    - `feedback_json` — JSON serialization of `feedback`
     """
 
     use Jido.Action,
@@ -305,12 +308,16 @@ defmodule Arbor.Actions.Mix do
 
       case MixAction.run_mix(path, args, opts) do
         {:ok, result} ->
+          feedback = MixAction.compile_feedback(result)
+
           output = %{
             path: path,
             exit_code: result.exit_code,
             passed: result.exit_code == 0,
             stdout: result.stdout,
-            stderr: result.stderr
+            stderr: result.stderr,
+            feedback: feedback,
+            feedback_json: Jason.encode!(feedback)
           }
 
           Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})

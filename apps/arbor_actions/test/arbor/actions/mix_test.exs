@@ -1,6 +1,6 @@
 defmodule Arbor.Actions.MixTest do
   @moduledoc """
-  Tests for `Arbor.Actions.Mix.{Test, Quality, Format}`.
+  Tests for `Arbor.Actions.Mix.{Compile, Test, Quality, Format}`.
 
   These actions wrap real `mix` invocations and are slow (each `mix test`
   warm-up is ~3s). We tag them `:slow` and run them against a tiny
@@ -85,6 +85,7 @@ defmodule Arbor.Actions.MixTest do
       assert result.passed == true
       # ExUnit wording varies by version ("1 passed" vs "1 test, 0 failures").
       assert result.stdout =~ ~r/1 (passed|test)/
+      assert_structured_feedback(result)
     end
 
     test "fails for a project with a failing test", %{project_path: project_path} do
@@ -94,6 +95,7 @@ defmodule Arbor.Actions.MixTest do
 
       assert result.exit_code != 0
       assert result.passed == false
+      assert_structured_feedback(result)
     end
 
     test "respects tag filter via --only", %{project_path: project_path} do
@@ -203,5 +205,35 @@ defmodule Arbor.Actions.MixTest do
       end
     end
     """)
+  end
+
+  defp assert_structured_feedback(result) do
+    feedback = result.feedback
+    text_limit = MixAction.compile_feedback_text_limit()
+
+    assert feedback == MixAction.compile_feedback(result)
+    assert Jason.decode!(result.feedback_json) == feedback
+    assert Jason.decode!(Jason.encode!(feedback)) == feedback
+    assert Enum.all?(Map.keys(feedback), &is_binary/1)
+
+    assert feedback["exit_code"] == result.exit_code
+    assert feedback["passed"] == result.passed
+
+    assert String.length(feedback["stdout_excerpt"]) <= text_limit
+    assert String.length(feedback["stderr_excerpt"]) <= text_limit
+    assert feedback["stdout_excerpt"] == String.slice(result.stdout || "", 0, text_limit)
+    assert feedback["stderr_excerpt"] == String.slice(result.stderr || "", 0, text_limit)
+
+    assert feedback["stdout_truncated"] == String.length(result.stdout || "") > text_limit
+    assert feedback["stderr_truncated"] == String.length(result.stderr || "") > text_limit
+
+    assert feedback["stdout_sha256"] == sha256(result.stdout || "")
+    assert feedback["stderr_sha256"] == sha256(result.stderr || "")
+    assert feedback["stdout_sha256"] =~ ~r/\A[0-9a-f]{64}\z/
+    assert feedback["stderr_sha256"] =~ ~r/\A[0-9a-f]{64}\z/
+  end
+
+  defp sha256(output) do
+    :crypto.hash(:sha256, output) |> Base.encode16(case: :lower)
   end
 end
