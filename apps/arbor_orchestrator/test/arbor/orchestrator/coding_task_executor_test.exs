@@ -1274,7 +1274,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
             {:error, {:unsupported, :provider}},
             {:error, :ambiguous_task_control_session},
             {:error, :nonrecoverable},
-            {:error, {:non_recoverable, :closed}}
+            {:error, {:non_recoverable, :closed}},
+            {:error,
+             {:task_control_terminal, :not_delivered, :provider_prompt_failed_before_delivery}},
+            {:error, {:task_control_terminal, :delivery_unknown, :provider_delivery_failed}},
+            {:error, {:task_control_terminal, :cancelled, :caller_cancelled}}
           ] do
         Process.put(:coding_task_control_reply, managed_reply)
 
