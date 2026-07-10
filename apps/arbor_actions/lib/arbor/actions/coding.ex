@@ -274,6 +274,7 @@ defmodule Arbor.Actions.Coding do
             response,
             params,
             context,
+            workspace,
             :commit
           )
 
@@ -286,6 +287,7 @@ defmodule Arbor.Actions.Coding do
             response,
             params,
             context,
+            workspace,
             {:adopt, inspection.head_commit}
           )
       end
@@ -298,6 +300,7 @@ defmodule Arbor.Actions.Coding do
            response,
            params,
            context,
+           workspace,
            commit_mode
          ) do
       with {:ok, validations} <- run_validations(worktree_path, params, context),
@@ -311,7 +314,8 @@ defmodule Arbor.Actions.Coding do
             validations,
             params,
             context,
-            commit
+            commit,
+            workspace
           )
 
         Actions.emit_completed(__MODULE__, result)
@@ -886,10 +890,18 @@ defmodule Arbor.Actions.Coding do
            validations,
            params,
            context,
-           commit
+           commit,
+           workspace
          ) do
       if submit_review?(params) do
-        case submit_council_review(worktree_path, branch_name, params, context, commit) do
+        case submit_council_review(
+               worktree_path,
+               branch_name,
+               params,
+               context,
+               workspace,
+               commit
+             ) do
           {:ok, review} ->
             finalize_reviewed_change(
               repo_root,
@@ -1072,16 +1084,34 @@ defmodule Arbor.Actions.Coding do
       end
     end
 
-    defp submit_council_review(worktree_path, branch_name, params, context, commit) do
-      with {:ok, hash} <- require_commit_hash(commit),
-           {:ok, diff} <- committed_diff(worktree_path, hash),
-           {:ok, files} <- committed_files(worktree_path, hash) do
+    # Council review material uses the same lease primitive as the canonical
+    # coding-change-v1 graph (coding_workspace_committed_change): cumulative
+    # base_commit..HEAD, clean worktree required.
+    defp submit_council_review(
+           worktree_path,
+           branch_name,
+           params,
+           context,
+           workspace,
+           commit
+         ) do
+      workspace_id = map_value(workspace, :workspace_id)
+      expected_commit = commit_hash(commit)
+
+      with {:ok, change} <-
+             materialize_review_change(
+               workspace_id,
+               worktree_path,
+               workspace,
+               expected_commit,
+               context
+             ) do
         review_params =
           %{
-            diff: diff,
-            files: files,
+            diff: map_value(change, :diff),
+            files: map_value(change, :files),
             branch: branch_name,
-            base_ref: review_base_ref(worktree_path, params, hash),
+            base_ref: map_value(change, :base_ref),
             intent: get_param(params, :task),
             agent_id: context_agent_id(context)
           }
@@ -1091,59 +1121,33 @@ defmodule Arbor.Actions.Coding do
       end
     end
 
-    defp require_commit_hash(commit) do
-      case commit_hash(commit) do
-        hash when is_binary(hash) and hash != "" -> {:ok, hash}
-        _ -> {:error, :missing_commit_hash}
-      end
+    defp materialize_review_change(
+           workspace_id,
+           _worktree_path,
+           _workspace,
+           expected_commit,
+           context
+         )
+         when is_binary(workspace_id) and workspace_id != "" do
+      params =
+        %{workspace_id: workspace_id}
+        |> put_if_present(:commit, expected_commit)
+
+      call_action(Workspace.CommittedChange, params, context)
     end
 
-    defp committed_diff(worktree_path, commit_hash) do
-      case git(worktree_path, [
-             "show",
-             "--format=",
-             "--find-renames",
-             "--no-ext-diff",
-             commit_hash
-           ]) do
-        {:ok, diff} when diff != "" -> {:ok, diff}
-        {:ok, _empty} -> {:error, :empty_commit_diff}
-        {:error, reason} -> {:error, {:diff_failed, reason}}
-      end
-    end
-
-    defp committed_files(worktree_path, commit_hash) do
-      case git(worktree_path, [
-             "diff-tree",
-             "--no-commit-id",
-             "--name-only",
-             "--find-renames",
-             "-r",
-             commit_hash
-           ]) do
-        {:ok, output} ->
-          files =
-            output
-            |> String.split("\n", trim: true)
-            |> Enum.map(&String.trim/1)
-            |> Enum.reject(&(&1 == ""))
-
-          if files == [], do: {:error, :empty_commit_file_list}, else: {:ok, files}
-
-        {:error, reason} ->
-          {:error, {:files_failed, reason}}
-      end
-    end
-
-    defp review_base_ref(worktree_path, params, commit_hash) do
-      get_param(params, :base_ref) || parent_commit(worktree_path, commit_hash)
-    end
-
-    defp parent_commit(worktree_path, commit_hash) do
-      case git(worktree_path, ["rev-parse", "#{commit_hash}^"]) do
-        {:ok, output} -> String.trim(output)
-        {:error, _reason} -> nil
-      end
+    defp materialize_review_change(
+           _workspace_id,
+           worktree_path,
+           workspace,
+           expected_commit,
+           _context
+         ) do
+      Workspace.materialize_committed_change(
+        worktree_path,
+        map_value(workspace, :base_commit),
+        expected_commit
+      )
     end
 
     defp reviewable_change_result(
@@ -1403,13 +1407,6 @@ defmodule Arbor.Actions.Coding do
       case Code.ensure_loaded(module) do
         {:module, ^module} -> module.run(params, context)
         {:error, _reason} -> {:error, "#{inspect(module)} is not available"}
-      end
-    end
-
-    defp git(path, args) do
-      case System.cmd("git", ["-C", path | args], stderr_to_stdout: true) do
-        {output, 0} -> {:ok, output}
-        {output, _code} -> {:error, String.trim(output)}
       end
     end
 

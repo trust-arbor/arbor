@@ -510,7 +510,8 @@ defmodule Arbor.Actions do
         Arbor.Actions.Coding.ProduceReviewableChange,
         Arbor.Actions.Coding.Workspace.Acquire,
         Arbor.Actions.Coding.Workspace.Inspect,
-        Arbor.Actions.Coding.Workspace.Release
+        Arbor.Actions.Coding.Workspace.Release,
+        Arbor.Actions.Coding.Workspace.CommittedChange
       ],
       background_checks: [
         Arbor.Actions.BackgroundChecks.Run
@@ -1475,6 +1476,8 @@ defmodule Arbor.Actions do
     Arbor.Actions.Coding.Workspace.Acquire => "arbor://action/coding/workspace/acquire",
     Arbor.Actions.Coding.Workspace.Inspect => "arbor://action/coding/workspace/inspect",
     Arbor.Actions.Coding.Workspace.Release => "arbor://action/coding/workspace/release",
+    Arbor.Actions.Coding.Workspace.CommittedChange =>
+      "arbor://action/coding/workspace/committed_change",
 
     # Background checks — routes through shell
     Arbor.Actions.BackgroundChecks.Run => "arbor://shell/exec",

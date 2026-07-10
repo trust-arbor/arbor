@@ -484,6 +484,14 @@ defmodule Arbor.Actions.CodingTest do
         Shell.Execute, _params, _context ->
           {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
 
+        Coding.Workspace.CommittedChange, params, context ->
+          send(parent, {:review_material, params})
+
+          Coding.Workspace.CommittedChange.run(
+            params,
+            Map.delete(context, :action_runner)
+          )
+
         Council.ReviewChange, params, _context ->
           send(parent, {:review, params})
 
@@ -530,6 +538,9 @@ defmodule Arbor.Actions.CodingTest do
       assert result.human_required == false
       assert result.review_recommendation == :keep
       assert result.review.files == ["feature.txt"]
+
+      assert_receive {:review_material, material_params}
+      assert material_params.commit == result.commit
 
       assert_receive {:review, review_params}
       assert review_params.branch == "test/coding-agent-review"

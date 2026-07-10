@@ -1,0 +1,687 @@
+// coding-change-v1 - Canonical DOT coding workflow (Phase 1)
+//
+// Macro control flow for a reviewable software change. Side effects stay in
+// schema-bounded Jido actions; the Engine owns branching, rework bounds,
+// cleanup order, and the normalized result status.
+//
+// Context in (initial_values):
+//   task                 - implementation task text (required)
+//   repo_path            - repository root (required)
+//   base_ref             - optional git base ref
+//   branch_name          - optional branch name
+//   worktree_base_dir    - optional worktree parent directory
+//   acp_agent            - ACP provider name (required Phase 1/Phase 2 input;
+//                          no graph-level default; supply e.g. "codex")
+//   open_pr              - "true" | "false" (default false)
+//   submit_review        - "true" | "false" (default true)
+//   session.agent_id     - signing principal
+//   session.task_id      - durable task id for lease/session authority
+//
+// Context out:
+//   status               - normalized terminal status
+//   legacy_status        - optional Phase 2 adapter alias (e.g.
+//                          review_requires_rework when status=rework_exhausted)
+//   workspace_id         - opaque workspace lease id
+//   worker_session_id    - opaque ACP worker handle
+//   branch / commit_hash - reviewable branch tip when produced
+//
+// Worker output contract (acp_send_message text): pure JSON
+//   {"status":"implemented"|"declined","summary":"..."}
+//
+// Resource policy: every terminal path that acquired a workspace releases it
+// in mode=retain (never remove reused worktrees). Worker sessions are closed
+// when opened; if close fails, release still runs. Registry owner-death
+// cleanup remains defense in depth, not the only happy-path cleanup.
+// Cancellation cleanup remains Phase 2.
+//
+// Does NOT call coding_produce_reviewable_change.
+//
+// Rework bound: one shared rework cycle (rework_count 0 -> 1 retry, 2 exhausts).
+// Review-budget exhaustion emits status=rework_exhausted (canonical). A
+// legacy_status=review_requires_rework field is also set for Phase 2 adapters.
+
+digraph CodingChangeV1 {
+  graph [
+    goal="Produce a validated, reviewed, reviewable branch via durable workspace and worker handles",
+    label="Coding Change v1"
+  ]
+
+  start [shape=Mdiamond]
+  done  [shape=Msquare]
+
+  // Init
+
+  init_rework_count [
+    type="transform",
+    transform="constant",
+    expression="0",
+    output_key="rework_count"
+  ]
+
+  classify_profile [
+    type="transform",
+    transform="constant",
+    expression="default",
+    output_key="task_class"
+  ]
+
+  // Workspace lease
+
+  acquire_workspace [
+    type="exec",
+    target="action",
+    action="coding_workspace_acquire",
+    context_keys="repo_path,base_ref,branch_name,worktree_base_dir,task",
+    output_prefix="workspace",
+    max_retries="0"
+  ]
+
+  hoist_workspace_id [
+    type="transform",
+    transform="identity",
+    source_key="workspace.workspace_id",
+    output_key="workspace_id"
+  ]
+
+  hoist_worktree_path [
+    type="transform",
+    transform="identity",
+    source_key="workspace.worktree_path",
+    output_key="worktree_path"
+  ]
+
+  hoist_branch [
+    type="transform",
+    transform="identity",
+    source_key="workspace.branch",
+    output_key="branch"
+  ]
+
+  // Worker session
+
+  prep_cwd [
+    type="transform",
+    transform="identity",
+    source_key="worktree_path",
+    output_key="cwd"
+  ]
+
+  prep_provider [
+    type="transform",
+    transform="identity",
+    source_key="acp_agent",
+    output_key="provider"
+  ]
+
+  open_worker [
+    type="exec",
+    target="action",
+    action="acp_start_session",
+    context_keys="provider,cwd",
+    param.permission_mode="default",
+    output_prefix="worker",
+    max_retries="0"
+  ]
+
+  hoist_worker_session_id [
+    type="transform",
+    transform="identity",
+    source_key="worker.worker_session_id",
+    output_key="worker_session_id"
+  ]
+
+  // Implement (same worker across rework)
+
+  build_implement_prompt [
+    type="transform",
+    transform="template",
+    source_key="task",
+    expression="You are implementing an Arbor code change inside worktree {ctx.worktree_path}. Task: {value}. Requirements: work only in the worktree; produce a reviewable diff; do not merge, push, or open a PR. Respond with ONLY a JSON object: {\"status\":\"implemented\"} or {\"status\":\"declined\"} plus optional \"summary\".",
+    output_key="prompt"
+  ]
+
+  implement [
+    type="exec",
+    target="action",
+    action="acp_send_message",
+    context_keys="worker_session_id,prompt",
+    output_prefix="worker_msg",
+    max_retries="2"
+  ]
+
+  extract_worker_status [
+    type="transform",
+    transform="json_extract",
+    source_key="worker_msg.text",
+    expression="status",
+    output_key="worker_status"
+  ]
+
+  // Inspect outcome
+
+  inspect_workspace [
+    type="exec",
+    target="action",
+    action="coding_workspace_inspect",
+    context_keys="workspace_id",
+    output_prefix="inspect",
+    max_retries="0"
+  ]
+
+  hoist_dirty [
+    type="transform",
+    transform="identity",
+    source_key="inspect.dirty",
+    output_key="workspace_dirty"
+  ]
+
+  hoist_changed [
+    type="transform",
+    transform="identity",
+    source_key="inspect.changed_from_base",
+    output_key="changed_from_base"
+  ]
+
+  hoist_head_commit [
+    type="transform",
+    transform="identity",
+    source_key="inspect.head_commit",
+    output_key="head_commit"
+  ]
+
+  // Validation (top-level; ActionsExecutor owns approval wait/retry)
+
+  prep_validation_path [
+    type="transform",
+    transform="identity",
+    source_key="worktree_path",
+    output_key="path"
+  ]
+
+  validate [
+    type="exec",
+    target="action",
+    action="mix_compile",
+    context_keys="path",
+    param.warnings_as_errors="true",
+    output_prefix="validation",
+    max_retries="0"
+  ]
+
+  check_validation_passed [
+    type="gate",
+    shape=diamond,
+    predicate="expression",
+    expression="validation.passed"
+  ]
+
+  // Rework budget (hard bound: one rework cycle)
+
+  inc_rework_count [
+    type="transform",
+    transform="increment",
+    source_key="rework_count",
+    output_key="rework_count"
+  ]
+
+  check_rework_budget [
+    type="branch",
+    shape=diamond
+  ]
+
+  build_validation_rework_prompt [
+    type="transform",
+    transform="template",
+    source_key="task",
+    expression="Validation failed after your previous edit. Task: {value}. Validation stdout: {ctx.validation.stdout}. Validation stderr: {ctx.validation.stderr}. Fix the issues in the same worktree. Respond with ONLY JSON {\"status\":\"implemented\"} or {\"status\":\"declined\"}.",
+    output_key="prompt"
+  ]
+
+  build_review_rework_prompt [
+    type="transform",
+    transform="template",
+    source_key="task",
+    expression="Code review requested rework. Task: {value}. Tier decision: {ctx.review.tier_decision}. Recommendation: {ctx.review.recommendation}. Address the review feedback in the same worktree. Respond with ONLY JSON {\"status\":\"implemented\"} or {\"status\":\"declined\"}.",
+    output_key="prompt"
+  ]
+
+  // Commit / adopt HEAD
+
+  prep_commit_path [
+    type="transform",
+    transform="identity",
+    source_key="worktree_path",
+    output_key="path"
+  ]
+
+  prep_commit_message [
+    type="transform",
+    transform="template",
+    source_key="task",
+    expression="Coding agent: {value}",
+    output_key="message"
+  ]
+
+  commit_change [
+    type="exec",
+    target="action",
+    action="git_commit",
+    context_keys="path,message",
+    param.all="true",
+    output_prefix="commit",
+    max_retries="0"
+  ]
+
+  hoist_commit_hash [
+    type="transform",
+    transform="identity",
+    source_key="commit.commit_hash",
+    output_key="commit_hash"
+  ]
+
+  adopt_head_commit [
+    type="transform",
+    transform="identity",
+    source_key="head_commit",
+    output_key="commit_hash"
+  ]
+
+  route_after_commit [
+    type="branch",
+    shape=diamond
+  ]
+
+  // Committed diff + binding review
+  // coding_workspace_committed_change materializes base_commit..HEAD for the
+  // lease and requires HEAD to remain at the commit produced above.
+
+  prep_expected_commit [
+    type="transform",
+    transform="identity",
+    source_key="commit_hash",
+    output_key="commit"
+  ]
+
+  load_committed_change [
+    type="exec",
+    target="action",
+    action="coding_workspace_committed_change",
+    context_keys="workspace_id,commit",
+    output_prefix="change",
+    max_retries="0"
+  ]
+
+  prep_review_diff [
+    type="transform",
+    transform="identity",
+    source_key="change.diff",
+    output_key="diff"
+  ]
+
+  prep_review_files [
+    type="transform",
+    transform="identity",
+    source_key="change.files",
+    output_key="files"
+  ]
+
+  prep_review_intent [
+    type="transform",
+    transform="identity",
+    source_key="task",
+    output_key="intent"
+  ]
+
+  prep_review_agent [
+    type="transform",
+    transform="identity",
+    source_key="session.agent_id",
+    output_key="agent_id"
+  ]
+
+  prep_review_base [
+    type="transform",
+    transform="identity",
+    source_key="change.base_ref",
+    output_key="base_ref"
+  ]
+
+  hoist_change_commit [
+    type="transform",
+    transform="identity",
+    source_key="change.commit_hash",
+    output_key="commit_hash"
+  ]
+
+  review_change [
+    type="exec",
+    target="action",
+    action="council_review_change",
+    context_keys="diff,files,branch,base_ref,intent,agent_id",
+    output_prefix="review",
+    max_retries="0"
+  ]
+
+  route_review [
+    type="branch",
+    shape=diamond
+  ]
+
+  // Optional draft PR
+
+  route_publish [
+    type="branch",
+    shape=diamond
+  ]
+
+  prep_pr_path [
+    type="transform",
+    transform="identity",
+    source_key="worktree_path",
+    output_key="path"
+  ]
+
+  prep_pr_title [
+    type="transform",
+    transform="template",
+    source_key="task",
+    expression="Coding agent: {value}",
+    output_key="title"
+  ]
+
+  open_draft_pr [
+    type="exec",
+    target="action",
+    action="git_pr",
+    context_keys="path,branch,title",
+    param.draft="true",
+    output_prefix="pr",
+    max_retries="0"
+  ]
+
+  // Terminal status markers
+
+  status_declined [
+    type="transform",
+    transform="constant",
+    expression="declined",
+    output_key="status"
+  ]
+
+  status_no_changes [
+    type="transform",
+    transform="constant",
+    expression="no_changes",
+    output_key="status"
+  ]
+
+  status_validation_failed [
+    type="transform",
+    transform="constant",
+    expression="validation_failed",
+    output_key="status"
+  ]
+
+  status_rework_exhausted [
+    type="transform",
+    transform="constant",
+    expression="rework_exhausted",
+    output_key="status"
+  ]
+
+  // Phase 2 adapter alias; not production routing policy
+  legacy_status_review_requires_rework [
+    type="transform",
+    transform="constant",
+    expression="review_requires_rework",
+    output_key="legacy_status"
+  ]
+
+  status_review_rejected [
+    type="transform",
+    transform="constant",
+    expression="review_rejected",
+    output_key="status"
+  ]
+
+  status_review_failed [
+    type="transform",
+    transform="constant",
+    expression="review_failed",
+    output_key="status"
+  ]
+
+  status_human_review_required [
+    type="transform",
+    transform="constant",
+    expression="human_review_required",
+    output_key="status"
+  ]
+
+  status_pr_failed [
+    type="transform",
+    transform="constant",
+    expression="pr_failed",
+    output_key="status"
+  ]
+
+  status_pr_created [
+    type="transform",
+    transform="constant",
+    expression="pr_created",
+    output_key="status"
+  ]
+
+  status_change_committed [
+    type="transform",
+    transform="constant",
+    expression="change_committed",
+    output_key="status"
+  ]
+
+  status_pipeline_error [
+    type="transform",
+    transform="constant",
+    expression="pipeline_error",
+    output_key="status"
+  ]
+
+  // Same status as pipeline_error, but routes through worker/workspace cleanup
+  status_pipeline_error_then_close [
+    type="transform",
+    transform="constant",
+    expression="pipeline_error",
+    output_key="status"
+  ]
+
+  // Cleanup
+
+  close_worker [
+    type="exec",
+    target="action",
+    action="acp_close_session",
+    context_keys="worker_session_id",
+    output_prefix="close",
+    max_retries="0"
+  ]
+
+  prep_release_mode [
+    type="transform",
+    transform="constant",
+    expression="retain",
+    output_key="mode"
+  ]
+
+  release_workspace [
+    type="exec",
+    target="action",
+    action="coding_workspace_release",
+    context_keys="workspace_id,mode",
+    output_prefix="release",
+    max_retries="0"
+  ]
+
+  // Release without close (worker never opened)
+  prep_release_mode_only [
+    type="transform",
+    transform="constant",
+    expression="retain",
+    output_key="mode"
+  ]
+
+  release_workspace_only [
+    type="exec",
+    target="action",
+    action="coding_workspace_release",
+    context_keys="workspace_id,mode",
+    output_prefix="release",
+    max_retries="0"
+  ]
+
+  // Flow
+
+  start -> init_rework_count -> classify_profile -> acquire_workspace
+
+  // Acquire failure: no lease held
+  acquire_workspace -> status_pipeline_error [condition="outcome=fail"]
+  status_pipeline_error -> done
+
+  acquire_workspace -> hoist_workspace_id [condition="outcome=success"]
+  hoist_workspace_id -> hoist_worktree_path -> hoist_branch
+  hoist_branch -> prep_cwd -> prep_provider -> open_worker
+
+  // Worker open failure: release workspace, no close
+  open_worker -> prep_release_mode_only [condition="outcome=fail"]
+  prep_release_mode_only -> release_workspace_only -> status_pipeline_error
+
+  open_worker -> hoist_worker_session_id [condition="outcome=success"]
+  hoist_worker_session_id -> build_implement_prompt -> implement
+
+  // Implement hard failure -> status then cleanup
+  implement -> status_pipeline_error_then_close [condition="outcome=fail"]
+  status_pipeline_error_then_close -> close_worker
+
+  implement -> extract_worker_status [condition="outcome=success"]
+  extract_worker_status -> status_pipeline_error_then_close [condition="outcome=fail"]
+  # Gate success paths with outcome=success so empty worker_status on extract
+  # failure cannot match context.worker_status!=declined via select_fail_step.
+  extract_worker_status -> status_declined [condition="outcome=success && context.worker_status=declined"]
+  status_declined -> close_worker
+
+  extract_worker_status -> inspect_workspace [condition="outcome=success && context.worker_status!=declined"]
+  inspect_workspace -> status_pipeline_error_then_close [condition="outcome=fail"]
+  inspect_workspace -> hoist_dirty [condition="outcome=success"]
+  hoist_dirty -> hoist_changed -> hoist_head_commit
+
+  // No reviewable change
+  hoist_head_commit -> status_no_changes [condition="context.changed_from_base!=true"]
+  status_no_changes -> close_worker
+
+  // Changed -> validate
+  hoist_head_commit -> prep_validation_path [condition="context.changed_from_base=true"]
+  prep_validation_path -> validate
+
+  // Hard validation action error (not soft passed=false)
+  validate -> status_validation_failed [condition="outcome=fail"]
+  validate -> check_validation_passed [condition="outcome=success"]
+
+  // Validation soft-fail: rework or exhaust
+  check_validation_passed -> inc_rework_count [condition="outcome=fail"]
+  inc_rework_count -> check_rework_budget
+
+  // After increment: count 1 = still budget, count >= 2 = exhausted
+  check_rework_budget -> status_validation_failed [condition="context.rework_count>=2"]
+  status_validation_failed -> close_worker
+
+  check_rework_budget -> build_validation_rework_prompt [condition="context.rework_count<2"]
+  build_validation_rework_prompt -> implement
+
+  // Validation passed -> commit or adopt HEAD
+  check_validation_passed -> prep_commit_path [condition="outcome=success"]
+  prep_commit_path -> prep_commit_message
+
+  // Dirty worktree: graph owns the commit
+  prep_commit_message -> commit_change [condition="context.workspace_dirty=true"]
+  commit_change -> status_pipeline_error_then_close [condition="outcome=fail"]
+  commit_change -> hoist_commit_hash [condition="outcome=success"]
+
+  // Clean self-commit: adopt HEAD (never empty commit)
+  prep_commit_message -> adopt_head_commit [condition="context.workspace_dirty!=true"]
+
+  hoist_commit_hash -> route_after_commit
+  adopt_head_commit -> route_after_commit
+
+  // Skip review when submit_review=false
+  route_after_commit -> route_publish [condition="context.submit_review=false"]
+  route_after_commit -> prep_expected_commit [condition="context.submit_review!=false"]
+  prep_expected_commit -> load_committed_change
+
+  // Committed review-material failure
+  load_committed_change -> status_review_failed [condition="outcome=fail"]
+  load_committed_change -> hoist_change_commit [condition="outcome=success"]
+  hoist_change_commit -> prep_review_diff
+  prep_review_diff -> prep_review_files -> prep_review_intent -> prep_review_agent -> prep_review_base
+  prep_review_base -> review_change
+
+  review_change -> status_review_failed [condition="outcome=fail"]
+  status_review_failed -> close_worker
+
+  review_change -> route_review [condition="outcome=success"]
+
+  // Review routing by tier_decision
+  route_review -> inc_rework_count_review [condition="context.review.tier_decision=rework"]
+  route_review -> status_review_rejected [condition="context.review.tier_decision=stop"]
+  route_review -> route_human_review [condition="context.review.tier_decision=human_review"]
+  route_review -> route_publish [condition="context.review.tier_decision=auto_proceed"]
+
+  status_review_rejected -> close_worker
+
+  // Human review: optional PR else human_review_required
+  route_human_review [
+    type="branch",
+    shape=diamond
+  ]
+
+  route_human_review -> status_human_review_required [condition="context.open_pr!=true"]
+  status_human_review_required -> close_worker
+  route_human_review -> prep_pr_path [condition="context.open_pr=true"]
+
+  // Review rework shares the one-cycle budget
+  inc_rework_count_review [
+    type="transform",
+    transform="increment",
+    source_key="rework_count",
+    output_key="rework_count"
+  ]
+
+  check_review_rework_budget [
+    type="branch",
+    shape=diamond
+  ]
+
+  inc_rework_count_review -> check_review_rework_budget
+
+  // Exhausted: canonical rework_exhausted + legacy_status for Phase 2 adapters
+  check_review_rework_budget -> legacy_status_review_requires_rework [condition="context.rework_count>=2"]
+  legacy_status_review_requires_rework -> status_rework_exhausted
+  status_rework_exhausted -> close_worker
+
+  check_review_rework_budget -> build_review_rework_prompt [condition="context.rework_count<2"]
+  build_review_rework_prompt -> implement
+
+  // Publish: optional draft PR
+  route_publish -> prep_pr_path [condition="context.open_pr=true"]
+  route_publish -> status_change_committed [condition="context.open_pr!=true"]
+  status_change_committed -> close_worker
+
+  prep_pr_path -> prep_pr_title -> open_draft_pr
+  open_draft_pr -> status_pr_failed [condition="outcome=fail"]
+  status_pr_failed -> close_worker
+  open_draft_pr -> status_pr_created [condition="outcome=success"]
+  status_pr_created -> close_worker
+
+  // Shared cleanup tail (worker opened): close may fail; release still runs
+  close_worker -> prep_release_mode [condition="outcome=success"]
+  close_worker -> prep_release_mode [condition="outcome=fail"]
+  prep_release_mode -> release_workspace -> done
+}

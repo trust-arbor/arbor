@@ -12,6 +12,7 @@ defmodule Arbor.Actions.Coding.Workspace do
   | `Acquire` | `arbor://action/coding/workspace/acquire` |
   | `Inspect` | `arbor://action/coding/workspace/inspect` |
   | `Release` | `arbor://action/coding/workspace/release` |
+  | `CommittedChange` | `arbor://action/coding/workspace/committed_change` |
   """
 
   # -- Shared worktree lifecycle (pure helpers + git side effects) ---
@@ -171,6 +172,116 @@ defmodule Arbor.Actions.Coding.Workspace do
         false
     end
   end
+
+  @doc """
+  Materialize the cumulative committed change for a leased worktree.
+
+  Review input is the range from the lease `base_commit` to the current HEAD
+  (not a single arbitrary commit). The worktree must be clean. When `commit`
+  is supplied it must equal the current HEAD exactly; ancestors, other
+  branches, and revision expressions are rejected before any git read.
+  """
+  @spec materialize_committed_change(String.t(), String.t() | nil, String.t() | nil) ::
+          {:ok, map()} | {:error, term()}
+  def materialize_committed_change(worktree_path, base_commit, requested_commit \\ nil)
+
+  def materialize_committed_change(worktree_path, base_commit, requested_commit)
+      when is_binary(worktree_path) and worktree_path != "" do
+    inspection = inspect_worktree(worktree_path, base_commit)
+
+    with :ok <- require_existing_worktree(inspection),
+         :ok <- require_clean_worktree(inspection),
+         {:ok, head_commit} <- require_head_commit(inspection),
+         {:ok, head_commit} <- ensure_commit_is_exact_head(requested_commit, head_commit),
+         {:ok, base_ref} <- require_base_commit(base_commit),
+         {:ok, diff} <- committed_diff(worktree_path, base_ref, head_commit),
+         {:ok, files} <- committed_files(worktree_path, base_ref, head_commit) do
+      {:ok,
+       %{
+         commit_hash: head_commit,
+         base_ref: base_ref,
+         diff: diff,
+         files: files
+       }}
+    end
+  end
+
+  def materialize_committed_change(_, _, _), do: {:error, :invalid_committed_change_args}
+
+  @doc false
+  @spec committed_diff(String.t(), String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def committed_diff(worktree_path, base_commit, head_commit)
+      when is_binary(worktree_path) and is_binary(base_commit) and is_binary(head_commit) do
+    case git(worktree_path, [
+           "diff",
+           "--find-renames",
+           "--no-ext-diff",
+           "#{base_commit}..#{head_commit}"
+         ]) do
+      {:ok, diff} when diff != "" -> {:ok, diff}
+      {:ok, _empty} -> {:error, :empty_commit_diff}
+      {:error, reason} -> {:error, {:diff_failed, reason}}
+    end
+  end
+
+  def committed_diff(_, _, _), do: {:error, :invalid_committed_change_args}
+
+  @doc false
+  @spec committed_files(String.t(), String.t(), String.t()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def committed_files(worktree_path, base_commit, head_commit)
+      when is_binary(worktree_path) and is_binary(base_commit) and is_binary(head_commit) do
+    case git(worktree_path, [
+           "diff",
+           "--name-only",
+           "--find-renames",
+           "#{base_commit}..#{head_commit}"
+         ]) do
+      {:ok, output} ->
+        files =
+          output
+          |> String.split("\n", trim: true)
+          |> Enum.map(&String.trim/1)
+          |> Enum.reject(&(&1 == ""))
+
+        if files == [], do: {:error, :empty_commit_file_list}, else: {:ok, files}
+
+      {:error, reason} ->
+        {:error, {:files_failed, reason}}
+    end
+  end
+
+  def committed_files(_, _, _), do: {:error, :invalid_committed_change_args}
+
+  defp require_existing_worktree(%{exists: true}), do: :ok
+  defp require_existing_worktree(_), do: {:error, :worktree_missing}
+
+  defp require_clean_worktree(%{dirty: true}), do: {:error, :dirty_workspace}
+  defp require_clean_worktree(_), do: :ok
+
+  defp require_head_commit(%{head_commit: head}) when is_binary(head) and head != "",
+    do: {:ok, head}
+
+  defp require_head_commit(_), do: {:error, :missing_commit_hash}
+
+  defp require_base_commit(base) when is_binary(base) and base != "", do: {:ok, base}
+  defp require_base_commit(_), do: {:error, :missing_base_commit}
+
+  # Exact HEAD only. Do not rev-parse the request; that would allow reading
+  # ancestors or other refs via expressions such as HEAD~1 or branch names.
+  defp ensure_commit_is_exact_head(nil, head), do: {:ok, head}
+  defp ensure_commit_is_exact_head("", head), do: {:ok, head}
+
+  defp ensure_commit_is_exact_head(requested, head)
+       when is_binary(requested) and is_binary(head) do
+    if requested == head do
+      {:ok, head}
+    else
+      {:error, :commit_not_head}
+    end
+  end
+
+  defp ensure_commit_is_exact_head(_, _), do: {:error, :commit_not_head}
 
   defp generated_branch_name(task) do
     slug =
@@ -673,5 +784,119 @@ defmodule Arbor.Actions.Coding.Workspace do
     end
 
     def run(_params, _context), do: {:error, "workspace_id is required"}
+  end
+
+  defmodule CommittedChange do
+    @moduledoc """
+    Read the cumulative committed diff and changed-file list for a workspace lease.
+
+    Authority is the live owner process, or matching non-empty `task_id` plus
+    the same non-empty principal/agent id. Opaque `workspace_id` alone is not
+    sufficient.
+
+    Review material is always the leased range: `base_commit` (recorded at
+    acquire) through the current worktree HEAD. Rework that creates multiple
+    commits is included. The worktree must be clean before materialization.
+
+    Optional `commit` must equal the current HEAD exactly; non-HEAD values are
+    rejected before any git read. Returns JSON-clean `diff`, `files`,
+    `commit_hash` (HEAD), and `base_ref` (lease base_commit). Does not mutate
+    the worktree.
+    """
+
+    use Jido.Action,
+      name: "coding_workspace_committed_change",
+      description:
+        "Read cumulative committed diff and changed files for a coding workspace lease",
+      category: "coding",
+      tags: ["coding", "workspace", "worktree", "git", "diff", "lease"],
+      schema: [
+        workspace_id: [
+          type: :string,
+          required: true,
+          doc: "Opaque workspace lease id from acquire"
+        ],
+        commit: [
+          type: :string,
+          doc:
+            "Optional exact HEAD commit hash only. Ancestors, other branches, and " <>
+              "revision expressions are rejected. Omit to use current HEAD."
+        ]
+      ]
+
+    alias Arbor.Actions
+    alias Arbor.Actions.Coding.Workspace
+    alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+
+    def taint_roles do
+      %{
+        workspace_id: :control,
+        commit: {:control, requires: [:command_injection]}
+      }
+    end
+
+    def effect_class, do: :read
+
+    @impl true
+    @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
+    def run(%{workspace_id: workspace_id} = params, context) when is_binary(workspace_id) do
+      Actions.emit_started(__MODULE__, %{workspace_id: workspace_id})
+
+      case WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{
+             task_id: Workspace.context_task_id(context),
+             principal_id: Workspace.context_principal_id(context)
+           }) do
+        {:ok, lease} ->
+          worktree_path = map_value(lease, :worktree_path)
+          base_commit = map_value(lease, :base_commit)
+          requested_commit = map_value(params, :commit)
+
+          case Workspace.materialize_committed_change(
+                 worktree_path,
+                 base_commit,
+                 requested_commit
+               ) do
+            {:ok, material} ->
+              result = %{
+                workspace_id: workspace_id,
+                commit_hash: material.commit_hash,
+                diff: material.diff,
+                files: material.files,
+                base_ref: material.base_ref,
+                branch: map_value(lease, :branch),
+                worktree_path: worktree_path
+              }
+
+              Actions.emit_completed(__MODULE__, %{
+                workspace_id: workspace_id,
+                commit_hash: material.commit_hash,
+                files_count: length(material.files)
+              })
+
+              {:ok, result}
+
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              {:error, reason}
+          end
+
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, reason}
+      end
+    end
+
+    def run(_params, _context), do: {:error, "workspace_id is required"}
+
+    defp map_value(map, key) when is_map(map) and is_atom(key) do
+      cond do
+        Map.has_key?(map, key) -> Map.get(map, key)
+        Map.has_key?(map, Atom.to_string(key)) -> Map.get(map, Atom.to_string(key))
+        true -> nil
+      end
+    end
+
+    defp map_value(map, key) when is_map(map) and is_binary(key), do: Map.get(map, key)
+    defp map_value(_map, _key), do: nil
   end
 end

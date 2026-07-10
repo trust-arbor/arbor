@@ -15,10 +15,17 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       assert Workspace.Acquire in coding
       assert Workspace.Inspect in coding
       assert Workspace.Release in coding
+      assert Workspace.CommittedChange in coding
 
       assert {:ok, Workspace.Acquire} = Actions.name_to_module("coding.workspace.acquire")
       assert {:ok, Workspace.Inspect} = Actions.name_to_module("coding.workspace.inspect")
       assert {:ok, Workspace.Release} = Actions.name_to_module("coding.workspace.release")
+
+      assert {:ok, Workspace.CommittedChange} =
+               Actions.name_to_module("coding.workspace.committed_change")
+
+      assert {:ok, Workspace.CommittedChange} =
+               Actions.name_to_module("coding_workspace_committed_change")
 
       assert Actions.canonical_uri_for(Workspace.Acquire, %{}) ==
                "arbor://action/coding/workspace/acquire"
@@ -29,9 +36,13 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       assert Actions.canonical_uri_for(Workspace.Release, %{}) ==
                "arbor://action/coding/workspace/release"
 
+      assert Actions.canonical_uri_for(Workspace.CommittedChange, %{}) ==
+               "arbor://action/coding/workspace/committed_change"
+
       assert Workspace.Acquire.name() == "coding_workspace_acquire"
       assert Workspace.Inspect.name() == "coding_workspace_inspect"
       assert Workspace.Release.name() == "coding_workspace_release"
+      assert Workspace.CommittedChange.name() == "coding_workspace_committed_change"
       assert Workspace.Acquire.category() == "coding"
     end
   end
@@ -814,6 +825,280 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
 
       assert {:error, :not_found} =
                WorkspaceLeaseRegistry.inspect_lease(workspace_id, %{})
+    end
+  end
+
+  describe "Workspace.CommittedChange" do
+    test "returns cumulative base..HEAD diff and files for an authorized lease", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/workspace-committed-change"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: branch,
+                   worktree_base_dir: worktree_base
+                 },
+                 %{}
+               )
+
+      File.write!(Path.join(lease.worktree_path, "feature.ex"), "defmodule Feature do\nend\n")
+      git!(lease.worktree_path, ["add", "feature.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "add feature"])
+      head = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      assert {:ok, change} =
+               Workspace.CommittedChange.run(
+                 %{workspace_id: lease.workspace_id, commit: head},
+                 %{}
+               )
+
+      assert Workspace.json_clean?(change)
+      refute_pid_like(change)
+      assert change.workspace_id == lease.workspace_id
+      assert change.commit_hash == head
+      assert change.base_ref == lease.base_commit
+      assert is_binary(change.diff)
+      assert change.diff != ""
+      assert "feature.ex" in change.files
+
+      _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
+    end
+
+    test "defaults to HEAD when commit is omitted", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/workspace-committed-head"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: branch,
+                   worktree_base_dir: worktree_base
+                 },
+                 %{}
+               )
+
+      File.write!(Path.join(lease.worktree_path, "head_only.ex"), "defmodule HeadOnly do\nend\n")
+      git!(lease.worktree_path, ["add", "head_only.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "head only"])
+      head = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      assert {:ok, change} =
+               Workspace.CommittedChange.run(%{workspace_id: lease.workspace_id}, %{})
+
+      assert change.commit_hash == head
+      assert change.base_ref == lease.base_commit
+      assert "head_only.ex" in change.files
+
+      _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
+    end
+
+    test "two-commit cumulative diff includes all leased changes", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/workspace-cumulative-diff"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: branch,
+                   worktree_base_dir: worktree_base
+                 },
+                 %{}
+               )
+
+      File.write!(Path.join(lease.worktree_path, "one.ex"), "defmodule One do\nend\n")
+      git!(lease.worktree_path, ["add", "one.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "first"])
+
+      File.write!(Path.join(lease.worktree_path, "two.ex"), "defmodule Two do\nend\n")
+      git!(lease.worktree_path, ["add", "two.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "second"])
+      head = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      assert {:ok, change} =
+               Workspace.CommittedChange.run(%{workspace_id: lease.workspace_id}, %{})
+
+      assert change.commit_hash == head
+      assert change.base_ref == lease.base_commit
+      assert "one.ex" in change.files
+      assert "two.ex" in change.files
+      assert change.diff =~ "one.ex"
+      assert change.diff =~ "two.ex"
+
+      _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
+    end
+
+    test "rejects dirty workspace before materializing review input", %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/workspace-dirty-reject"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: branch,
+                   worktree_base_dir: worktree_base
+                 },
+                 %{}
+               )
+
+      File.write!(Path.join(lease.worktree_path, "dirty.ex"), "defmodule Dirty do\nend\n")
+
+      assert {:error, :dirty_workspace} =
+               Workspace.CommittedChange.run(%{workspace_id: lease.workspace_id}, %{})
+
+      _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
+    end
+
+    test "security regression: lease owner cannot inspect arbitrary non-HEAD commit", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      branch = "test/workspace-non-head"
+      worktree_base = Path.join(tmp_dir, "worktrees")
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: branch,
+                   worktree_base_dir: worktree_base
+                 },
+                 %{}
+               )
+
+      File.write!(Path.join(lease.worktree_path, "first.ex"), "defmodule First do\nend\n")
+      git!(lease.worktree_path, ["add", "first.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "first"])
+      first = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      File.write!(Path.join(lease.worktree_path, "second.ex"), "defmodule Second do\nend\n")
+      git!(lease.worktree_path, ["add", "second.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "second"])
+      head = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      # Ancestor of HEAD is rejected before any git read of that commit.
+      assert first != head
+
+      assert {:error, :commit_not_head} =
+               Workspace.CommittedChange.run(
+                 %{workspace_id: lease.workspace_id, commit: first},
+                 %{}
+               )
+
+      # Revision expressions and foreign hashes are rejected (exact HEAD only).
+      assert {:error, :commit_not_head} =
+               Workspace.CommittedChange.run(
+                 %{workspace_id: lease.workspace_id, commit: "HEAD~1"},
+                 %{}
+               )
+
+      assert {:error, :commit_not_head} =
+               Workspace.CommittedChange.run(
+                 %{
+                   workspace_id: lease.workspace_id,
+                   commit: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                 },
+                 %{}
+               )
+
+      assert {:ok, change} =
+               Workspace.CommittedChange.run(
+                 %{workspace_id: lease.workspace_id, commit: head},
+                 %{}
+               )
+
+      assert change.commit_hash == head
+      assert "first.ex" in change.files
+      assert "second.ex" in change.files
+
+      _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
+    end
+
+    test "security regression: opaque workspace_id alone cannot read committed change", %{
+      tmp_dir: tmp_dir
+    } do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      parent = self()
+      task_id = "task_committed_#{System.unique_integer([:positive])}"
+      principal_id = "agent_committed_#{System.unique_integer([:positive])}"
+
+      owner =
+        spawn(fn ->
+          {:ok, lease} =
+            Workspace.Acquire.run(
+              %{
+                repo_path: repo,
+                branch_name: "test/committed-auth",
+                worktree_base_dir: Path.join(tmp_dir, "worktrees")
+              },
+              %{task_id: task_id, agent_id: principal_id}
+            )
+
+          File.write!(Path.join(lease.worktree_path, "secret.ex"), "defmodule Secret do\nend\n")
+          git!(lease.worktree_path, ["add", "secret.ex"])
+          git!(lease.worktree_path, ["commit", "-m", "secret"])
+          send(parent, {:leased, lease})
+
+          receive do
+            :hold -> :ok
+          after
+            5_000 -> :ok
+          end
+        end)
+
+      assert_receive {:leased, lease}, 2_000
+
+      assert {:error, :not_authorized} =
+               Workspace.CommittedChange.run(%{workspace_id: lease.workspace_id}, %{})
+
+      assert {:error, :not_authorized} =
+               Workspace.CommittedChange.run(%{workspace_id: lease.workspace_id}, %{
+                 task_id: task_id
+               })
+
+      assert {:ok, change} =
+               Workspace.CommittedChange.run(%{workspace_id: lease.workspace_id}, %{
+                 task_id: task_id,
+                 agent_id: principal_id
+               })
+
+      assert "secret.ex" in change.files
+      send(owner, :hold)
+    end
+
+    test "fails closed for missing workspace and empty lease range", %{tmp_dir: tmp_dir} do
+      assert {:error, :not_found} =
+               Workspace.CommittedChange.run(%{workspace_id: "ws_missing"}, %{})
+
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/committed-empty",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees")
+                 },
+                 %{}
+               )
+
+      # HEAD still equals base_commit: no committed change to review.
+      assert {:error, reason} =
+               Workspace.CommittedChange.run(%{workspace_id: lease.workspace_id}, %{})
+
+      assert reason in [:empty_commit_diff, :empty_commit_file_list]
+
+      _ = Workspace.Release.run(%{workspace_id: lease.workspace_id, mode: "retain"}, %{})
     end
   end
 
