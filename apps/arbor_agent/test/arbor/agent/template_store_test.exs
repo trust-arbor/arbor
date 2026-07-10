@@ -304,6 +304,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
 
       resources = Enum.map(data["required_capabilities"], & &1["resource"])
       assert "arbor://action/coding/produce_reviewable_change" in resources
+      assert "arbor://action/coding/security_regression/validate" in resources
       assert "arbor://action/coding/workspace/**" in resources
       assert "arbor://acp/tool" in resources
       assert "arbor://action/git/**" in resources
@@ -317,6 +318,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert preset["baseline"] == "block"
       assert preset["rules"]["arbor://orchestrator/execute"] == "auto"
       assert preset["rules"]["arbor://action/coding/produce_reviewable_change"] == "auto"
+      assert preset["rules"]["arbor://action/coding/security_regression/validate"] == "ask"
       assert preset["rules"]["arbor://action/coding/workspace"] == "auto"
       assert preset["rules"]["arbor://action/git"] == "auto"
       assert preset["rules"]["arbor://action/mix"] == "auto"
@@ -325,6 +327,20 @@ defmodule Arbor.Agent.TemplateStoreTest do
       refute Map.has_key?(preset["rules"], "arbor://shell/exec/git")
       refute Map.has_key?(preset["rules"], "arbor://shell/exec/mix")
       refute Map.has_key?(preset["rules"], "arbor://action/github/pr")
+
+      trust_rules =
+        preset["rules"]
+        |> Map.new(fn {uri, mode} ->
+          normalized = %{"auto" => :auto, "ask" => :ask, "allow" => :allow, "block" => :block}
+          {uri, Map.fetch!(normalized, mode)}
+        end)
+        |> Map.put("arbor://action/coding", :auto)
+
+      assert Arbor.Trust.ProfileResolver.resolve_prefix(
+               trust_rules,
+               "arbor://action/coding/security_regression/validate",
+               :block
+             ) == :ask
 
       refute Map.has_key?(preset["rules"], "arbor://trust/write")
     end

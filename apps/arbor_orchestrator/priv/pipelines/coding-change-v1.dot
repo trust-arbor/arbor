@@ -460,6 +460,95 @@ digraph CodingChangeV1 {
     fan_out="false"
   ]
 
+  // Dormant security-regression flow. The CodingPlan compiler removes these
+  // nodes for default plans and connects them only for the reviewed profile.
+
+  route_security_after_commit [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  compare_security_rework_commit [
+    type="transform",
+    transform="not_equal",
+    source_key="commit_hash",
+    expression="prior_reviewed_commit",
+    output_key="fresh_rework_commit"
+  ]
+
+  check_security_rework_fresh [
+    type="gate",
+    shape=diamond,
+    predicate="expression",
+    expression="fresh_rework_commit"
+  ]
+
+  error_security_rework_not_fresh [
+    type="transform",
+    transform="template",
+    source_key="commit_hash",
+    expression="security_rework_requires_fresh_commit: current={value}, prior={ctx.prior_reviewed_commit}",
+    output_key="error"
+  ]
+
+  prep_review_validation_profile [
+    type="transform",
+    transform="constant",
+    expression="security_regression",
+    output_key="validation_profile"
+  ]
+
+  remember_validation_reviewed_commit [
+    type="transform",
+    transform="identity",
+    source_key="commit_hash",
+    output_key="prior_reviewed_commit"
+  ]
+
+  remember_review_reviewed_commit [
+    type="transform",
+    transform="identity",
+    source_key="commit_hash",
+    output_key="prior_reviewed_commit"
+  ]
+
+  hoist_review_attestation_id [
+    type="transform",
+    transform="identity",
+    source_key="review.review_attestation_id",
+    output_key="review_attestation_id"
+  ]
+
+  post_validation_expected_commit [
+    type="transform",
+    transform="identity",
+    source_key="commit_hash",
+    output_key="commit"
+  ]
+
+  post_validation_committed_change [
+    type="exec",
+    target="action",
+    action="coding_workspace_committed_change",
+    context_keys="workspace_id,commit",
+    output_prefix="post_validation_change",
+    max_retries="0"
+  ]
+
+  error_post_validation_committed_change [
+    type="transform",
+    transform="constant",
+    expression="post_validation_committed_change_failed",
+    output_key="error"
+  ]
+
+  route_validated_review [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
   // Council rework budget. Like validation, counters represent initiated
   // same-session repair sends rather than denied/exhausted attempts.
 
@@ -756,6 +845,36 @@ digraph CodingChangeV1 {
   repair_worker_protocol -> extract_worker_status [condition="outcome=success"]
   check_protocol_retry_budget -> error_worker_protocol_invalid [condition="context.protocol_retry_count>=2"]
   error_worker_protocol_invalid -> status_pipeline_error_then_close
+
+  // Impossible seed edges keep the reviewed dormant subgraph structurally
+  // reachable. The compiler removes them before activating the security profile;
+  // default compilation drops them with the dormant nodes.
+  start -> route_security_after_commit [condition="0=1"]
+  start -> prep_review_validation_profile [condition="0=1"]
+  start -> remember_validation_reviewed_commit [condition="0=1"]
+  start -> remember_review_reviewed_commit [condition="0=1"]
+  start -> hoist_review_attestation_id [condition="0=1"]
+  start -> post_validation_expected_commit [condition="0=1"]
+
+  // Dormant security-regression edges retain default behavior until the
+  // compiler connects the reviewed profile-specific entry points.
+  route_security_after_commit -> route_after_commit [condition="context.total_rework_count=0"]
+  route_security_after_commit -> compare_security_rework_commit [condition="context.total_rework_count>0"]
+  compare_security_rework_commit -> check_security_rework_fresh
+  check_security_rework_fresh -> route_after_commit [condition="outcome=success"]
+  check_security_rework_fresh -> error_security_rework_not_fresh [condition="outcome=fail"]
+  error_security_rework_not_fresh -> status_validation_failed
+  prep_review_validation_profile -> review_change
+  remember_validation_reviewed_commit -> check_validation_category_budget
+  remember_review_reviewed_commit -> check_review_category_budget
+  hoist_review_attestation_id -> validate
+  post_validation_expected_commit -> post_validation_committed_change
+  post_validation_committed_change -> error_post_validation_committed_change [condition="outcome=fail"]
+  error_post_validation_committed_change -> status_validation_failed
+  post_validation_committed_change -> route_validated_review [condition="outcome=success"]
+  route_validated_review -> route_human_review [condition="context.review.tier_decision=human_review"]
+  route_validated_review -> route_publish [condition="context.review.tier_decision=auto_proceed"]
+  route_validated_review -> error_review_tier_invalid
 
   // Strict worker protocol routing. Unknown/missing statuses use the same
   // bounded repair path as malformed JSON; no status fails open to inspect.

@@ -54,6 +54,8 @@ required_capabilities:
   resource: "arbor://orchestrator/execute"
 - description: "Invoke the bounded reviewable-change workflow"
   resource: "arbor://action/coding/produce_reviewable_change"
+- description: "Validate a Council-attested security regression against both reviewed revisions"
+  resource: "arbor://action/coding/security_regression/validate"
 - description: "Acquire, inspect, retain, and release isolated coding workspaces"
   resource: "arbor://action/coding/workspace/**"
 - description: "Start and message Codex ACP sessions"
@@ -78,6 +80,7 @@ trust_preset:
   rules:
     "arbor://orchestrator/execute": auto
     "arbor://action/coding/produce_reviewable_change": auto
+    "arbor://action/coding/security_regression/validate": ask
     "arbor://action/coding/workspace": auto
     "arbor://acp/tool": auto
     "arbor://fs/read": auto

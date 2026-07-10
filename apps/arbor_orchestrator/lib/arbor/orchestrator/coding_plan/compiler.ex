@@ -28,6 +28,29 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
 
   @compiler_version "coding-plan-1"
   @template_version "coding-change-v1"
+  @security_dormant_nodes ~w[
+    check_security_rework_fresh
+    compare_security_rework_commit
+    error_post_validation_committed_change
+    error_security_rework_not_fresh
+    hoist_review_attestation_id
+    post_validation_committed_change
+    post_validation_expected_commit
+    prep_review_validation_profile
+    remember_review_reviewed_commit
+    remember_validation_reviewed_commit
+    route_security_after_commit
+    route_validated_review
+  ]
+  @security_dormant_roots ~w[
+    route_security_after_commit
+    prep_review_validation_profile
+    remember_validation_reviewed_commit
+    remember_review_reviewed_commit
+    hoist_review_attestation_id
+    post_validation_expected_commit
+  ]
+  @security_dormant_seed_condition "0=1"
   @allowed_options [:template_path, :template_source, :action_catalog]
   @static_schema_types ~w(string boolean integer number array object)
   @numeric_schema_constraints ~w(minimum maximum exclusiveMinimum exclusiveMaximum)
@@ -311,6 +334,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
 
   defp validate_supported_features(%Plan{} = plan) do
     cond do
+      plan.validation_profile == "security_regression" and plan.review_profile == "none" ->
+        {:error, {:security_regression_review_profile_not_allowed, "none"}}
+
       plan.task_class != "default" and plan.task_class != plan.validation_profile ->
         {:error, {:unsupported_v1_profile_mismatch, plan.task_class, plan.validation_profile}}
 
@@ -343,9 +369,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     with {:ok, graph} <- rewrite_classification(graph, plan.task_class),
          {:ok, graph} <- rewrite_worker_open(graph, plan.worker),
          {:ok, graph} <- rewrite_prompt_budgets(graph),
-         {:ok, graph} <- rewrite_validation(graph, plan),
+         {:ok, graph} <- rewrite_profile_flow(graph, plan),
          {:ok, graph} <- rewrite_rework_budget(graph, plan.rework["max_cycles"]),
-         {:ok, graph} <- rewrite_review_route(graph, plan.review_profile),
+         {:ok, graph} <-
+           rewrite_review_route(graph, plan.review_profile, plan.validation_profile),
          :ok <- require_action_node(graph, "review_change", "council_review_change") do
       {:ok, put_graph_metadata(graph, plan, plan_fingerprint, action_catalog["digest"])}
     end
@@ -392,7 +419,83 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end)
   end
 
-  defp rewrite_validation(graph, %Plan{validation_profile: "default"}) do
+  defp rewrite_profile_flow(graph, %Plan{validation_profile: "default"}) do
+    with {:ok, graph} <- rewrite_default_validation(graph) do
+      drop_security_dormant_nodes(graph)
+    end
+  end
+
+  defp rewrite_profile_flow(
+         graph,
+         %Plan{validation_profile: "security_regression"} = plan
+       ) do
+    with :ok <- validate_security_test_paths(plan.requested_paths),
+         {:ok, graph} <- remove_security_dormant_seed_edges(graph),
+         {:ok, graph} <- rewrite_security_validator(graph),
+         {:ok, graph} <- rewrite_security_review(graph),
+         {:ok, graph} <- rewrite_security_rework_prompt(graph),
+         {:ok, graph} <-
+           rewrite_edge(
+             graph,
+             "hoist_head_commit",
+             "prep_validation_path",
+             "context.changed_from_base=true",
+             "prep_commit_path",
+             "context.changed_from_base=true"
+           ),
+         {:ok, graph} <-
+           rewrite_edge(
+             graph,
+             "check_validation_passed",
+             "prep_commit_path",
+             "outcome=success",
+             "post_validation_expected_commit",
+             "outcome=success"
+           ),
+         {:ok, graph} <-
+           rewrite_edge(
+             graph,
+             "check_validation_passed",
+             "check_validation_category_budget",
+             "outcome=fail",
+             "remember_validation_reviewed_commit",
+             "outcome=fail"
+           ),
+         {:ok, graph} <-
+           rewrite_edge(
+             graph,
+             "route_review",
+             "check_review_category_budget",
+             "context.review.tier_decision=rework",
+             "remember_review_reviewed_commit",
+             "context.review.tier_decision=rework"
+           ),
+         {:ok, graph} <-
+           rewrite_unconditional_edge(
+             graph,
+             "prep_review_base",
+             "review_change",
+             "prep_review_validation_profile"
+           ),
+         {:ok, graph} <-
+           rewrite_unconditional_edge(
+             graph,
+             "hoist_commit_hash",
+             "route_after_commit",
+             "route_security_after_commit"
+           ),
+         {:ok, graph} <-
+           rewrite_unconditional_edge(
+             graph,
+             "adopt_head_commit",
+             "route_after_commit",
+             "route_security_after_commit"
+           ) do
+      remove_replaced_status_node(graph, "prep_validation_path", "validate")
+    end
+  end
+
+  defp rewrite_default_validation(graph) do
     update_node(graph, "validate", fn attrs ->
       with :ok <- require_action_attrs(attrs, "mix_compile") do
         {:ok,
@@ -403,18 +506,52 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end)
   end
 
-  defp rewrite_validation(graph, %Plan{validation_profile: "security_regression"} = plan) do
-    with :ok <- validate_security_test_paths(plan.requested_paths) do
-      update_node(graph, "validate", fn attrs ->
-        with :ok <- require_action_attrs(attrs, "mix_compile") do
-          {:ok,
-           attrs
-           |> Map.put("action", "mix_test")
-           |> Map.put("context_keys", "path,test_paths")
-           |> Map.delete("param.warnings_as_errors")}
-        end
-      end)
-    end
+  defp rewrite_security_validator(graph) do
+    update_node(graph, "validate", fn attrs ->
+      with :ok <- require_action_attrs(attrs, "mix_compile") do
+        {:ok,
+         attrs
+         |> Map.put("action", "coding_security_regression_validate")
+         |> Map.put("context_keys", "review_attestation_id")
+         |> Map.delete("param.warnings_as_errors")}
+      end
+    end)
+  end
+
+  defp rewrite_security_review(graph) do
+    update_node(graph, "review_change", fn attrs ->
+      with :ok <- require_action_attrs(attrs, "council_review_change") do
+        {:ok,
+         Map.put(
+           attrs,
+           "context_keys",
+           "diff,files,branch,base_ref,intent,agent_id,workspace_id,test_paths,validation_profile"
+         )}
+      end
+    end)
+  end
+
+  defp rewrite_security_rework_prompt(graph) do
+    update_node(graph, "build_validation_rework_prompt", fn attrs ->
+      with :ok <-
+             require_attrs(attrs, %{
+               "type" => "transform",
+               "transform" => "template",
+               "source_key" => "task",
+               "output_key" => "prompt"
+             }) do
+        {:ok,
+         Map.put(
+           attrs,
+           "expression",
+           "Security regression validation failed after your previous commit. Task: {value}. " <>
+             "Validation reason: {ctx.validation.reason}. Fix the issue in the same worktree " <>
+             "and leave a fresh commit or uncommitted change. Respond with ONLY one JSON object " <>
+             "and no prose or markdown: {\"status\":\"implemented\"} or " <>
+             "{\"status\":\"declined\"}, plus optional {\"summary\":\"...\"}."
+         )}
+      end
+    end)
   end
 
   defp validate_security_test_paths([]),
@@ -447,7 +584,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end)
   end
 
-  defp rewrite_review_route(graph, "none") do
+  defp rewrite_review_route(graph, "none", "default") do
     # Legacy submit_review=false keeps the structural skip-review edge so
     # no-review publication remains possible. Binding/human remove that edge.
     rewrite_edge(
@@ -460,7 +597,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     )
   end
 
-  defp rewrite_review_route(graph, "binding") do
+  defp rewrite_review_route(graph, "binding", "default") do
     with {:ok, graph} <- remove_submit_review_false_edge(graph) do
       rewrite_edge(
         graph,
@@ -473,7 +610,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end
   end
 
-  defp rewrite_review_route(graph, "human_required") do
+  defp rewrite_review_route(graph, "human_required", "default") do
     with {:ok, graph} <- remove_submit_review_false_edge(graph),
          {:ok, graph} <-
            rewrite_edge(
@@ -498,6 +635,111 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       # is gone, so the unattended publication terminals are dead. Drop them so
       # structural reachability stays sound while review remains mandatory.
       remove_unattended_publication_nodes(graph)
+    end
+  end
+
+  defp rewrite_review_route(_graph, "none", "security_regression"),
+    do: {:error, {:security_regression_review_profile_not_allowed, "none"}}
+
+  defp rewrite_review_route(graph, "binding", "security_regression") do
+    with {:ok, graph} <- remove_submit_review_false_edge(graph),
+         {:ok, graph} <- route_security_eligible_review_to_attestation(graph) do
+      {:ok, graph}
+    end
+  end
+
+  defp rewrite_review_route(graph, "human_required", "security_regression") do
+    with {:ok, graph} <- remove_submit_review_false_edge(graph),
+         {:ok, graph} <- route_security_eligible_review_to_attestation(graph),
+         {:ok, graph} <-
+           rewrite_edge(
+             graph,
+             "route_validated_review",
+             "route_publish",
+             "context.review.tier_decision=auto_proceed",
+             "route_human_review",
+             "context.review.tier_decision=auto_proceed"
+           ),
+         {:ok, graph} <-
+           rewrite_edge(
+             graph,
+             "open_draft_pr",
+             "status_pr_created",
+             "outcome=success",
+             "status_human_review_required",
+             "outcome=success"
+           ),
+         {:ok, graph} <- remove_replaced_status_node(graph, "status_pr_created", "close_worker") do
+      remove_unattended_publication_nodes(graph)
+    end
+  end
+
+  defp route_security_eligible_review_to_attestation(graph) do
+    with {:ok, graph} <-
+           rewrite_edge(
+             graph,
+             "route_review",
+             "route_human_review",
+             "context.review.tier_decision=human_review",
+             "hoist_review_attestation_id",
+             "context.review.tier_decision=human_review"
+           ) do
+      rewrite_edge(
+        graph,
+        "route_review",
+        "route_publish",
+        "context.review.tier_decision=auto_proceed",
+        "hoist_review_attestation_id",
+        "context.review.tier_decision=auto_proceed"
+      )
+    end
+  end
+
+  defp drop_security_dormant_nodes(%Graph{} = graph) do
+    missing = Enum.reject(@security_dormant_nodes, &Map.has_key?(graph.nodes, &1))
+
+    if missing == [] do
+      drop_ids = MapSet.new(@security_dormant_nodes)
+
+      nodes = Map.drop(graph.nodes, @security_dormant_nodes)
+
+      edges =
+        Enum.reject(graph.edges, fn edge ->
+          MapSet.member?(drop_ids, edge.from) or MapSet.member?(drop_ids, edge.to)
+        end)
+
+      {:ok, %{graph | nodes: nodes, edges: edges, adjacency: %{}, reverse_adjacency: %{}}}
+    else
+      {:error, {:missing_template_nodes, Enum.sort(missing)}}
+    end
+  end
+
+  defp remove_security_dormant_seed_edges(%Graph{} = graph) do
+    counts =
+      Map.new(@security_dormant_roots, fn root ->
+        count =
+          Enum.count(graph.edges, fn edge ->
+            edge.from == "start" and edge.to == root and
+              Map.get(edge.attrs, "condition") == @security_dormant_seed_condition
+          end)
+
+        {root, count}
+      end)
+
+    unexpected = Enum.reject(counts, fn {_root, count} -> count == 1 end)
+
+    if unexpected == [] do
+      roots = MapSet.new(@security_dormant_roots)
+
+      edges =
+        Enum.reject(graph.edges, fn edge ->
+          edge.from == "start" and MapSet.member?(roots, edge.to) and
+            Map.get(edge.attrs, "condition") == @security_dormant_seed_condition
+        end)
+
+      {:ok, %{graph | edges: edges, adjacency: %{}, reverse_adjacency: %{}}}
+    else
+      {:error, {:unexpected_security_dormant_seed_edges, Enum.sort(unexpected)}}
     end
   end
 
@@ -644,7 +886,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       edges =
         Enum.map(graph.edges, fn edge ->
           if edge.from == from and edge.to == to and Map.get(edge.attrs, "condition") == condition do
-            %{edge | to: new_to, attrs: Map.put(edge.attrs, "condition", new_condition)}
+            attrs =
+              if is_nil(new_condition),
+                do: Map.delete(edge.attrs, "condition"),
+                else: Map.put(edge.attrs, "condition", new_condition)
+
+            %{edge | to: new_to, attrs: attrs}
           else
             edge
           end
@@ -654,6 +901,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     else
       {:error, {:unexpected_template_edge, from, to, condition, matches}}
     end
+  end
+
+  defp rewrite_unconditional_edge(graph, from, to, new_to) do
+    rewrite_edge(graph, from, to, nil, new_to, nil)
   end
 
   defp put_graph_metadata(graph, plan, plan_fingerprint, catalog_digest) do

@@ -10,10 +10,11 @@ defmodule Arbor.Orchestrator.Handlers.TransformHandler do
   ## Node Attributes
 
     - `transform` — transformation type: "json_extract", "template", "map",
-      "filter", "format", "split", "join"
+      "filter", "format", "split", "join", "not_equal"
     - `source_key` — context key to read input from (default: "last_response")
     - `output_key` — context key to write result to (default: "transform.{node_id}")
-    - `expression` — transform-specific expression (JSON path, template string, etc.)
+    - `expression` — transform-specific expression (JSON path, template string,
+      or the comparison context-key reference for `not_equal`)
   """
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
@@ -57,6 +58,15 @@ defmodule Arbor.Orchestrator.Handlers.TransformHandler do
 
   defp apply_transform("identity", input, _expr, _ctx) do
     {:ok, input}
+  end
+
+  defp apply_transform("not_equal", _input, nil, _ctx) do
+    {:error, "not_equal requires 'expression' context key"}
+  end
+
+  defp apply_transform("not_equal", input, context_key, context)
+       when is_binary(context_key) do
+    {:ok, input !== Context.get(context, context_key)}
   end
 
   defp apply_transform("json_extract", _input, nil, _ctx) do

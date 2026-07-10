@@ -230,6 +230,18 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
        when is_integer(timeout) and timeout >= @minimum_timeout and timeout <= @maximum_timeout,
        do: {:ok, timeout}
 
+  defp validate_timeout(timeout) when is_binary(timeout) do
+    case Integer.parse(timeout) do
+      {parsed, ""} ->
+        if Integer.to_string(parsed) == timeout,
+          do: validate_timeout(parsed),
+          else: {:error, :invalid_timeout}
+
+      _other ->
+        {:error, :invalid_timeout}
+    end
+  end
+
   defp validate_timeout(_timeout), do: {:error, :invalid_timeout}
 
   defp param(params, key) do

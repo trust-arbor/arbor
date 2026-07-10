@@ -2,9 +2,9 @@ defmodule Arbor.Actions.Coding.SecurityRegression do
   @moduledoc """
   Actions-side two-revision security-regression validation.
 
-  `Validate` is intentionally not registered yet. Phase 5 integration enables
-  the reviewed profile only after this primitive and semantic preflight are
-  wired together.
+  `Validate` is registered for the executable CodingPlan security profile. The
+  profile's reviewed graph and semantic preflight bind it to a one-shot Council
+  attestation and a capped timeout.
   """
 end
 

@@ -13,6 +13,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     Arbor.Actions.Coding.Workspace.Inspect,
     Arbor.Actions.Coding.Workspace.Release,
     Arbor.Actions.Coding.Workspace.CommittedChange,
+    Arbor.Actions.Coding.SecurityRegression.Validate,
     Arbor.Actions.Mix.Compile,
     Arbor.Actions.Mix.Test,
     Arbor.Actions.Git.Commit,
@@ -81,6 +82,16 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       assert Map.has_key?(graph.nodes, node_id)
     end
 
+    for dormant <- ~w[
+          compare_security_rework_commit
+          hoist_review_attestation_id
+          post_validation_committed_change
+          route_security_after_commit
+          route_validated_review
+        ] do
+      refute Map.has_key?(graph.nodes, dormant)
+    end
+
     assert node_attrs(graph, "validate")["action"] == "mix_compile"
     assert node_attrs(graph, "validate")["param.warnings_as_errors"] == true
     assert node_attrs(graph, "review_change")["action"] == "council_review_change"
@@ -138,11 +149,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert validate["param.warnings_as_errors"] == true
   end
 
-  test "security regression profile remains declared but fails closed without two-revision proof",
+  test "security regression compiles exact reviewed-tree bindings with the measured timeout default",
        ctx do
     requested_paths = [
-      "apps/arbor_security/test/security_regression_test.exs",
-      "apps/arbor_shell/test/shell_security_test.exs"
+      "apps/arbor_shell/test/shell_security_test.exs",
+      "apps/arbor_security/test/security_regression_test.exs"
     ]
 
     plan =
@@ -151,14 +162,73 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
         "requested_paths" => requested_paths
       })
 
-    assert plan.validation_profile == "security_regression"
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
 
-    assert {:error, {:profile_not_executable, "security_regression", reason}} =
+    validate = node_attrs(graph, "validate")
+    assert validate["action"] == "coding_security_regression_validate"
+    assert validate["context_keys"] == "review_attestation_id"
+    refute Map.has_key?(validate, "param.timeout")
+    refute Map.has_key?(validate, "param.warnings_as_errors")
+    refute validate["context_keys"] =~ "path"
+    refute validate["context_keys"] =~ "test_paths"
+
+    assert node_attrs(graph, "review_change")["context_keys"] ==
+             "diff,files,branch,base_ref,intent,agent_id,workspace_id,test_paths,validation_profile"
+
+    assert node_attrs(graph, "prep_review_validation_profile")["expression"] ==
+             "security_regression"
+
+    assert node_attrs(graph, "hoist_review_attestation_id") == %{
+             "type" => "transform",
+             "transform" => "identity",
+             "source_key" => "review.review_attestation_id",
+             "output_key" => "review_attestation_id"
+           }
+
+    assert node_attrs(graph, "post_validation_committed_change")["action"] ==
+             "coding_workspace_committed_change"
+
+    assert node_attrs(graph, "post_validation_committed_change")["context_keys"] ==
+             "workspace_id,commit"
+
+    assert node_attrs(graph, "compare_security_rework_commit")["transform"] == "not_equal"
+    assert node_attrs(graph, "compare_security_rework_commit")["source_key"] == "commit_hash"
+
+    assert node_attrs(graph, "compare_security_rework_commit")["expression"] ==
+             "prior_reviewed_commit"
+
+    refute Map.has_key?(graph.nodes, "prep_validation_path")
+    refute Enum.any?(graph.edges, &submit_review_false_edge?/1)
+    assert auto_proceed_target(graph) == "hoist_review_attestation_id"
+
+    assert edge_target(
+             graph,
+             "route_validated_review",
+             "context.review.tier_decision=auto_proceed"
+           ) == "route_publish"
+
+    assert compilation.initial_values["timeout"] == 900_000
+    assert compilation.initial_values["test_paths"] == Enum.sort(requested_paths)
+    assert "coding_security_regression_validate" in compilation.manifest["action_names"]
+    refute "mix_compile" in compilation.manifest["action_names"]
+    refute "mix_test" in compilation.manifest["action_names"]
+
+    assert "arbor://action/coding/security_regression/validate" in compilation.execution_manifest[
+             "capability_uris"
+           ]
+  end
+
+  test "security regression rejects the legacy none review profile", ctx do
+    plan =
+      plan!(%{
+        "validation_profile" => "security_regression",
+        "review_profile" => "none",
+        "requested_paths" => ["apps/arbor_security/test/regression_test.exs"]
+      })
+
+    assert {:error, {:security_regression_review_profile_not_allowed, "none"}} =
              compile(plan, ctx)
-
-    assert reason ==
-             "No reviewed validation primitive proves that the selected regression test " <>
-               "fails against the base/pre-fix code and passes against the candidate code."
   end
 
   test "review profiles preserve council review and deterministically control routing", ctx do
@@ -281,18 +351,17 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:error, {:unsupported_v1_profile_mismatch, "docs_only", "default"}} =
              compile(mismatch, ctx)
 
-    declared_but_unsupported =
+    security_plan =
       plan!(%{
         "task_class" => "security_regression",
         "validation_profile" => "security_regression",
         "requested_paths" => ["apps/arbor_security/test/regression_test.exs"]
       })
 
-    assert {:error, {:profile_not_executable, "security_regression", reason}} =
-             compile(declared_but_unsupported, ctx)
+    assert {:ok, compilation} = compile(security_plan, ctx)
 
-    assert reason =~ "fails against the base/pre-fix code"
-    assert reason =~ "passes against the candidate code"
+    assert node_attrs(parse!(compilation.dot_source), "classify_profile")["expression"] ==
+             "security_regression"
   end
 
   test "missing mandatory template node or reviewed action fails closed", ctx do

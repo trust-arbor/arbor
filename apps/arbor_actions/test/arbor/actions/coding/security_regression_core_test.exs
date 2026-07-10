@@ -15,6 +15,23 @@ defmodule Arbor.Actions.Coding.SecurityRegression.CoreTest do
     assert input.review_attestation_id == "review_attestation_opaque"
     assert input.timeout == 10_000
 
+    assert {:ok, %{timeout: 300_000}} =
+             Core.new(%{review_attestation_id: "review_attestation_opaque"})
+
+    assert {:ok, %{timeout: 600_000}} =
+             Core.new(%{
+               review_attestation_id: "review_attestation_opaque",
+               timeout: "600000"
+             })
+
+    for invalid <- ["600001", "999", "0600000", "600000ms", " 600000"] do
+      assert {:error, :invalid_timeout} =
+               Core.new(%{
+                 review_attestation_id: "review_attestation_opaque",
+                 timeout: invalid
+               })
+    end
+
     assert {:error, :unsupported_parameter} =
              Core.new(%{
                review_attestation_id: "review_attestation_opaque",

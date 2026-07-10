@@ -36,6 +36,15 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     committed_change_routing
     review_gate
     review_routing_gate
+    validation_profile
+  )
+
+  @security_policy_keys ~w(
+    attestation_source
+    committed_candidate_join
+    committed_material_gate
+    post_validation_exact_head_check
+    post_validation_routing
   )
 
   @forbidden_attr_keys MapSet.new(~w(
@@ -116,6 +125,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         |> check_handlers_and_targets(graph, policy)
         |> check_actions(graph, policy)
         |> check_forbidden_authority(graph)
+        |> check_profile_bindings(graph, policy, review_profile)
         |> check_reachability_and_dominance(graph, policy, review_profile)
         |> Enum.sort_by(&error_sort_key/1)
 
@@ -157,6 +167,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
              :ok <- require_nonempty_string(policy, "committed_change_routing"),
              :ok <- require_nonempty_string(policy, "review_gate"),
              :ok <- require_nonempty_string(policy, "review_routing_gate"),
+             :ok <- require_nonempty_string(policy, "validation_profile"),
+             :ok <- require_profile_policy(policy),
              :ok <- require_sorted_unique(policy, "allowed_handlers"),
              :ok <- require_sorted_unique(policy, "allowed_exec_targets"),
              :ok <- require_sorted_unique(policy, "allowed_actions"),
@@ -219,6 +231,17 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {:error, {:invalid_semantic_policy, {:optional_actions_not_allowed, Enum.sort(missing)}}}
     end
   end
+
+  defp require_profile_policy(%{"validation_profile" => "security_regression"} = policy) do
+    Enum.reduce_while(@security_policy_keys, :ok, fn key, :ok ->
+      case require_nonempty_string(policy, key) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp require_profile_policy(_policy), do: :ok
 
   defp normalize_review_profile(opts) do
     if not Keyword.keyword?(opts) do
@@ -437,6 +460,367 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     |> String.trim("_")
   end
 
+  # --- profile-specific reviewed bindings ----------------------------------
+
+  defp check_profile_bindings(errors, _graph, %{"validation_profile" => "default"}, _review),
+    do: errors
+
+  defp check_profile_bindings(
+         errors,
+         graph,
+         %{"validation_profile" => "security_regression"},
+         review_profile
+       ) do
+    errors
+    |> reject_security_review_none(review_profile)
+    |> check_security_node_bindings(graph)
+    |> check_security_validator_parameters(graph)
+    |> check_security_protected_writers(graph)
+    |> check_security_topology(graph, review_profile)
+  end
+
+  defp check_profile_bindings(errors, _graph, _policy, _review_profile), do: errors
+
+  defp reject_security_review_none(errors, "none") do
+    [
+      error("security_review_profile_forbidden", nil, %{
+        "review_profile" => "none"
+      })
+      | errors
+    ]
+  end
+
+  defp reject_security_review_none(errors, _review_profile), do: errors
+
+  defp check_security_node_bindings(errors, graph) do
+    expected = [
+      {"hoist_workspace_id",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "workspace.workspace_id",
+         "output_key" => "workspace_id"
+       }},
+      {"prep_expected_commit",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "commit_hash",
+         "output_key" => "commit"
+       }},
+      {"load_committed_change",
+       %{
+         "type" => "exec",
+         "target" => "action",
+         "action" => "coding_workspace_committed_change",
+         "context_keys" => "workspace_id,commit",
+         "output_prefix" => "change"
+       }},
+      {"prep_review_diff",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "change.diff",
+         "output_key" => "diff"
+       }},
+      {"prep_review_files",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "change.files",
+         "output_key" => "files"
+       }},
+      {"prep_review_validation_profile",
+       %{
+         "type" => "transform",
+         "transform" => "constant",
+         "expression" => "security_regression",
+         "output_key" => "validation_profile"
+       }},
+      {"review_change",
+       %{
+         "type" => "exec",
+         "target" => "action",
+         "action" => "council_review_change",
+         "context_keys" =>
+           "diff,files,branch,base_ref,intent,agent_id,workspace_id,test_paths,validation_profile",
+         "output_prefix" => "review"
+       }},
+      {"remember_validation_reviewed_commit",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "commit_hash",
+         "output_key" => "prior_reviewed_commit"
+       }},
+      {"remember_review_reviewed_commit",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "commit_hash",
+         "output_key" => "prior_reviewed_commit"
+       }},
+      {"hoist_review_attestation_id",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "review.review_attestation_id",
+         "output_key" => "review_attestation_id"
+       }},
+      {"validate",
+       %{
+         "type" => "exec",
+         "target" => "action",
+         "action" => "coding_security_regression_validate",
+         "context_keys" => "review_attestation_id",
+         "output_prefix" => "validation"
+       }},
+      {"post_validation_expected_commit",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "commit_hash",
+         "output_key" => "commit"
+       }},
+      {"post_validation_committed_change",
+       %{
+         "type" => "exec",
+         "target" => "action",
+         "action" => "coding_workspace_committed_change",
+         "context_keys" => "workspace_id,commit",
+         "output_prefix" => "post_validation_change"
+       }},
+      {"compare_security_rework_commit",
+       %{
+         "type" => "transform",
+         "transform" => "not_equal",
+         "source_key" => "commit_hash",
+         "expression" => "prior_reviewed_commit",
+         "output_key" => "fresh_rework_commit"
+       }},
+      {"check_security_rework_fresh",
+       %{
+         "type" => "gate",
+         "predicate" => "expression",
+         "expression" => "fresh_rework_commit"
+       }}
+    ]
+
+    Enum.reduce(expected, errors, fn {node_id, attrs}, acc ->
+      require_security_node_attrs(acc, graph, node_id, attrs)
+    end)
+  end
+
+  defp require_security_node_attrs(errors, graph, node_id, expected) do
+    case Map.fetch(graph.nodes, node_id) do
+      :error ->
+        [error("security_binding_missing_node", node_id, %{}) | errors]
+
+      {:ok, node} ->
+        Enum.reduce(expected, errors, fn {attribute, expected_value}, acc ->
+          actual = Map.get(node.attrs, attribute)
+
+          if actual == expected_value do
+            acc
+          else
+            [
+              error("security_binding_mismatch", node_id, %{
+                "attribute" => attribute,
+                "expected" => expected_value,
+                "actual" => actual
+              })
+              | acc
+            ]
+          end
+        end)
+    end
+  end
+
+  defp check_security_validator_parameters(errors, graph) do
+    case Map.fetch(graph.nodes, "validate") do
+      :error ->
+        errors
+
+      {:ok, node} ->
+        actual =
+          node.attrs
+          |> Enum.filter(fn {key, _value} ->
+            is_binary(key) and
+              (String.starts_with?(key, "param.") or String.starts_with?(key, "arg."))
+          end)
+          |> Map.new()
+
+        expected = %{}
+
+        if actual == expected do
+          errors
+        else
+          [
+            error("security_validator_parameter_violation", "validate", %{
+              "expected" => expected,
+              "actual" => actual
+            })
+            | errors
+          ]
+        end
+    end
+  end
+
+  defp check_security_protected_writers(errors, graph) do
+    expected = [
+      {"output_key", "workspace_id", ["hoist_workspace_id"]},
+      {"output_key", "test_paths", []},
+      {"output_key", "validation_profile", ["prep_review_validation_profile"]},
+      {"output_prefix", "review", ["review_change"]},
+      {"output_key", "review.review_attestation_id", []},
+      {"output_key", "review_attestation_id", ["hoist_review_attestation_id"]},
+      {"output_key", "prior_reviewed_commit",
+       ["remember_review_reviewed_commit", "remember_validation_reviewed_commit"]},
+      {"output_key", "fresh_rework_commit", ["compare_security_rework_commit"]},
+      {"output_key", "commit", ["post_validation_expected_commit", "prep_expected_commit"]},
+      {"output_key", "commit_hash",
+       ["adopt_head_commit", "hoist_change_commit", "hoist_commit_hash"]},
+      {"output_key", "diff", ["prep_review_diff"]},
+      {"output_key", "files", ["prep_review_files"]}
+    ]
+
+    Enum.reduce(expected, errors, fn {attribute, key, expected_nodes}, acc ->
+      actual_nodes = writer_nodes(graph, attribute, key)
+      expected_nodes = Enum.sort(expected_nodes)
+
+      if actual_nodes == expected_nodes do
+        acc
+      else
+        [
+          error("security_protected_writer_violation", nil, %{
+            "attribute" => attribute,
+            "context_key" => key,
+            "expected_nodes" => expected_nodes,
+            "actual_nodes" => actual_nodes
+          })
+          | acc
+        ]
+      end
+    end)
+  end
+
+  defp writer_nodes(graph, attribute, key) do
+    graph.nodes
+    |> Enum.flat_map(fn {node_id, node} ->
+      if Map.get(node.attrs, attribute) == key, do: [node_id], else: []
+    end)
+    |> Enum.sort()
+  end
+
+  defp check_security_topology(errors, graph, review_profile) do
+    validated_review_edges =
+      case review_profile do
+        "human_required" ->
+          [
+            {"route_human_review", "context.review.tier_decision=auto_proceed"},
+            {"route_human_review", "context.review.tier_decision=human_review"},
+            {"error_review_tier_invalid", nil}
+          ]
+
+        _other ->
+          [
+            {"route_publish", "context.review.tier_decision=auto_proceed"},
+            {"route_human_review", "context.review.tier_decision=human_review"},
+            {"error_review_tier_invalid", nil}
+          ]
+      end
+
+    expected = [
+      {"hoist_commit_hash", [{"route_security_after_commit", nil}]},
+      {"adopt_head_commit", [{"route_security_after_commit", nil}]},
+      {"route_security_after_commit",
+       [
+         {"route_after_commit", "context.total_rework_count=0"},
+         {"compare_security_rework_commit", "context.total_rework_count>0"}
+       ]},
+      {"compare_security_rework_commit", [{"check_security_rework_fresh", nil}]},
+      {"check_security_rework_fresh",
+       [
+         {"route_after_commit", "outcome=success"},
+         {"error_security_rework_not_fresh", "outcome=fail"}
+       ]},
+      {"route_after_commit", [{"prep_expected_commit", "context.submit_review!=false"}]},
+      {"prep_expected_commit", [{"load_committed_change", nil}]},
+      {"load_committed_change",
+       [
+         {"error_committed_change_materialization", "outcome=fail"},
+         {"hoist_change_commit", "outcome=success"}
+       ]},
+      {"prep_review_validation_profile", [{"review_change", nil}]},
+      {"review_change",
+       [
+         {"error_council_review", "outcome=fail"},
+         {"route_review", "outcome=success"}
+       ]},
+      {"route_review",
+       [
+         {"remember_review_reviewed_commit", "context.review.tier_decision=rework"},
+         {"status_review_rejected", "context.review.tier_decision=stop"},
+         {"hoist_review_attestation_id", "context.review.tier_decision=human_review"},
+         {"hoist_review_attestation_id", "context.review.tier_decision=auto_proceed"},
+         {"error_review_tier_invalid", nil}
+       ]},
+      {"remember_review_reviewed_commit", [{"check_review_category_budget", nil}]},
+      {"hoist_review_attestation_id", [{"validate", nil}]},
+      {"validate",
+       [
+         {"status_validation_failed", "outcome=fail"},
+         {"check_validation_passed", "outcome=success"}
+       ]},
+      {"check_validation_passed",
+       [
+         {"remember_validation_reviewed_commit", "outcome=fail"},
+         {"post_validation_expected_commit", "outcome=success"}
+       ]},
+      {"remember_validation_reviewed_commit", [{"check_validation_category_budget", nil}]},
+      {"post_validation_expected_commit", [{"post_validation_committed_change", nil}]},
+      {"post_validation_committed_change",
+       [
+         {"error_post_validation_committed_change", "outcome=fail"},
+         {"route_validated_review", "outcome=success"}
+       ]},
+      {"route_validated_review", validated_review_edges}
+    ]
+
+    Enum.reduce(expected, errors, fn {node_id, outgoing}, acc ->
+      require_exact_security_outgoing(acc, graph, node_id, outgoing)
+    end)
+  end
+
+  defp require_exact_security_outgoing(errors, graph, node_id, expected) do
+    actual =
+      graph.edges
+      |> Enum.flat_map(fn edge ->
+        if edge.from == node_id do
+          [{edge.to, Map.get(edge.attrs, "condition")}]
+        else
+          []
+        end
+      end)
+      |> Enum.sort()
+
+    expected = Enum.sort(expected)
+
+    if actual == expected do
+      errors
+    else
+      [
+        error("security_topology_mismatch", node_id, %{
+          "expected" => Enum.map(expected, &edge_binding_to_json/1),
+          "actual" => Enum.map(actual, &edge_binding_to_json/1)
+        })
+        | errors
+      ]
+    end
+  end
+
+  defp edge_binding_to_json({target, condition}), do: [target, condition]
+
   # --- reachability + dominance ---------------------------------------------
 
   defp check_reachability_and_dominance(errors, graph, policy, review_profile) do
@@ -458,6 +842,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           reachable,
           review_profile
         )
+        |> check_security_rework_dominance(graph, policy)
     end
   end
 
@@ -490,6 +875,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   end
 
   defp check_dominance(errors, policy, dominators, reachable, review_profile) do
+    if policy["validation_profile"] == "security_regression" do
+      check_security_dominance(errors, policy, dominators, reachable)
+    else
+      check_default_dominance(errors, policy, dominators, reachable, review_profile)
+    end
+  end
+
+  defp check_default_dominance(errors, policy, dominators, reachable, review_profile) do
     validation_gate = policy["validation_gate"]
     validation_result_gate = policy["validation_result_gate"]
     post_validation = policy["post_validation_commit_routing"]
@@ -584,6 +977,162 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     else
       errors
     end
+  end
+
+  defp check_security_dominance(errors, policy, dominators, reachable) do
+    committed_candidate_join = policy["committed_candidate_join"]
+    committed_join = policy["committed_change_routing"]
+    committed_material = policy["committed_material_gate"]
+    review_gate = policy["review_gate"]
+    review_routing = policy["review_routing_gate"]
+    attestation_source = policy["attestation_source"]
+    validator = policy["validation_gate"]
+    validator_result = policy["validation_result_gate"]
+    post_validation_check = policy["post_validation_exact_head_check"]
+    post_validation_routing = policy["post_validation_routing"]
+
+    chain = [
+      {committed_candidate_join, committed_join, "committed_candidate_join"},
+      {committed_join, committed_material, "committed_join"},
+      {committed_material, review_gate, "committed_material"},
+      {review_gate, review_routing, "review"},
+      {review_routing, attestation_source, "review_routing"},
+      {attestation_source, validator, "review_attestation"},
+      {validator, validator_result, "validation"},
+      {validator_result, post_validation_check, "validation_result"},
+      {post_validation_check, post_validation_routing, "post_validation_exact_head"}
+    ]
+
+    errors =
+      Enum.reduce(chain, errors, fn {dominator, node, kind}, acc ->
+        require_dominates(acc, dominator, node, reachable, dominators, kind)
+      end)
+
+    publication_targets =
+      policy["publication_nodes"]
+      |> Enum.filter(&MapSet.member?(reachable, &1))
+      |> Enum.sort()
+
+    Enum.reduce(publication_targets, errors, fn target, acc ->
+      acc
+      |> require_dominates(
+        post_validation_check,
+        target,
+        reachable,
+        dominators,
+        "post_validation_exact_head"
+      )
+      |> require_dominates(
+        post_validation_routing,
+        target,
+        reachable,
+        dominators,
+        "post_validation_routing"
+      )
+      |> require_dominates(review_gate, target, reachable, dominators, "review")
+      |> require_dominates(validator, target, reachable, dominators, "validation")
+    end)
+  end
+
+  defp check_security_rework_dominance(
+         errors,
+         graph,
+         %{"validation_profile" => "security_regression"} = policy
+       ) do
+    rework_graph = security_rework_graph(graph)
+
+    entries = [
+      {"remember_review_reviewed_commit", "review_rework"},
+      {"remember_validation_reviewed_commit", "validation_rework"}
+    ]
+
+    chain = [
+      {"compare_security_rework_commit", "check_security_rework_fresh", "fresh_commit_compare"},
+      {"check_security_rework_fresh", policy["committed_change_routing"], "fresh_commit_gate"},
+      {policy["committed_change_routing"], policy["committed_material_gate"],
+       "fresh_committed_material"},
+      {policy["committed_material_gate"], policy["review_gate"], "fresh_review"},
+      {policy["review_gate"], policy["review_routing_gate"], "fresh_review_routing"},
+      {policy["review_routing_gate"], policy["attestation_source"], "fresh_attestation"},
+      {policy["attestation_source"], policy["validation_gate"], "fresh_validation"},
+      {policy["validation_gate"], policy["validation_result_gate"], "fresh_validation_result"},
+      {policy["validation_result_gate"], policy["post_validation_exact_head_check"],
+       "fresh_post_validation_exact_head"},
+      {policy["post_validation_exact_head_check"], policy["post_validation_routing"],
+       "fresh_post_validation_routing"}
+    ]
+
+    publication_targets = policy["publication_nodes"] |> Enum.sort()
+
+    Enum.reduce(entries, errors, fn {entry, rework_kind}, acc ->
+      reachable = reachable_from(rework_graph, entry)
+      dominators = compute_dominators(rework_graph, entry, reachable)
+
+      acc =
+        Enum.reduce(chain, acc, fn {dominator, node, kind}, inner ->
+          require_dominates(
+            inner,
+            dominator,
+            node,
+            reachable,
+            dominators,
+            "#{rework_kind}.#{kind}"
+          )
+        end)
+
+      publication_targets
+      |> Enum.filter(&MapSet.member?(reachable, &1))
+      |> Enum.reduce(acc, fn target, inner ->
+        inner
+        |> require_dominates(
+          policy["attestation_source"],
+          target,
+          reachable,
+          dominators,
+          "#{rework_kind}.fresh_attestation_terminal"
+        )
+        |> require_dominates(
+          policy["validation_gate"],
+          target,
+          reachable,
+          dominators,
+          "#{rework_kind}.fresh_validation_terminal"
+        )
+        |> require_dominates(
+          policy["validation_result_gate"],
+          target,
+          reachable,
+          dominators,
+          "#{rework_kind}.fresh_validation_result_terminal"
+        )
+        |> require_dominates(
+          policy["post_validation_exact_head_check"],
+          target,
+          reachable,
+          dominators,
+          "#{rework_kind}.fresh_post_validation_exact_head_terminal"
+        )
+        |> require_dominates(
+          policy["post_validation_routing"],
+          target,
+          reachable,
+          dominators,
+          "#{rework_kind}.fresh_post_validation_routing_terminal"
+        )
+      end)
+    end)
+  end
+
+  defp check_security_rework_dominance(errors, _graph, _policy), do: errors
+
+  defp security_rework_graph(graph) do
+    edges =
+      Enum.reject(graph.edges, fn edge ->
+        edge.from == "route_security_after_commit" and edge.to == "route_after_commit" and
+          Map.get(edge.attrs, "condition") == "context.total_rework_count=0"
+      end)
+
+    %{graph | edges: edges, adjacency: %{}, reverse_adjacency: %{}}
   end
 
   defp require_dominates(errors, dominator, node, reachable, dominators, kind) do

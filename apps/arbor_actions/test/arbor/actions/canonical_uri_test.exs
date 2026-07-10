@@ -73,6 +73,18 @@ defmodule Arbor.Actions.CanonicalUriTest do
                "arbor://action/pipeline/validate"
     end
 
+    test "security regression validator is registered under its exact canonical URI" do
+      validator = Arbor.Actions.Coding.SecurityRegression.Validate
+
+      assert validator in Actions.all_actions()
+      assert {:ok, ^validator} = Actions.name_to_module("coding_security_regression_validate")
+
+      assert Actions.canonical_uri_for(validator, %{}) ==
+               "arbor://action/coding/security_regression/validate"
+
+      assert "arbor://action/coding/security_regression/validate" in Actions.action_namespace_uri_prefixes()
+    end
+
     test "action namespace URI prefixes are generated and registered without a broad prefix" do
       prefixes = Actions.action_namespace_uri_prefixes()
 
@@ -97,6 +109,14 @@ defmodule Arbor.Actions.CanonicalUriTest do
 
       assert %CapabilityProfile{owner: :arbor_actions, effect_class: :read} =
                profile_by_uri["arbor://action/browser/navigate"]
+
+      assert %CapabilityProfile{
+               owner: :arbor_actions,
+               effect_class: :process_spawn,
+               default_approval: :require_human,
+               graduation_eligible: false
+             } =
+               profile_by_uri["arbor://action/coding/security_regression/validate"]
     end
 
     test "generated action namespace profiles are visible to the trust registry" do

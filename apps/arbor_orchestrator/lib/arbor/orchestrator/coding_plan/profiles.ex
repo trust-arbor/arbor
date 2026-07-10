@@ -11,7 +11,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
 
   @template_version "coding-change-v1"
 
-  @required_nodes Enum.sort(~w[
+  @default_required_nodes Enum.sort(~w[
                     acquire_workspace
                     adopt_head_commit
                     check_review_category_budget
@@ -32,6 +32,24 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     route_review
                     validate
                   ])
+
+  @security_required_nodes Enum.sort(
+                             @default_required_nodes ++
+                               ~w[
+                                 check_security_rework_fresh
+                                 compare_security_rework_commit
+                                 error_post_validation_committed_change
+                                 error_security_rework_not_fresh
+                                 hoist_review_attestation_id
+                                 post_validation_committed_change
+                                 post_validation_expected_commit
+                                 prep_review_validation_profile
+                                 remember_review_reviewed_commit
+                                 remember_validation_reviewed_commit
+                                 route_security_after_commit
+                                 route_validated_review
+                               ]
+                           )
 
   @common_required_actions Enum.sort(~w[
                              acp_close_session
@@ -72,7 +90,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   @allowed_exec_targets ["action"]
 
   @default_required_actions Enum.sort(["mix_compile" | @common_required_actions])
-  @security_required_actions Enum.sort(["mix_test" | @common_required_actions])
+  @security_required_actions Enum.sort([
+                               "coding_security_regression_validate"
+                               | @common_required_actions
+                             ])
 
   @semantic_policy_base %{
     "allowed_handlers" => @allowed_handlers,
@@ -88,53 +109,63 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     "review_routing_gate" => "route_review"
   }
 
+  @security_semantic_nodes %{
+    "attestation_source" => "hoist_review_attestation_id",
+    "committed_candidate_join" => "route_security_after_commit",
+    "committed_material_gate" => "load_committed_change",
+    "post_validation_exact_head_check" => "post_validation_committed_change",
+    "post_validation_routing" => "route_validated_review"
+  }
+
   @profiles [
               %{
                 "id" => "default",
                 "executable" => true,
                 "template_version" => @template_version,
-                "required_nodes" => @required_nodes,
+                "required_nodes" => @default_required_nodes,
                 "required_actions" => @default_required_actions,
                 "validation_strategy" => %{"action" => "mix_compile"},
                 "review_strategy" => @binding_council_review,
                 "semantic_policy" =>
-                  Map.put(
-                    @semantic_policy_base,
+                  @semantic_policy_base
+                  |> Map.put("validation_profile", "default")
+                  |> Map.put(
                     "allowed_actions",
                     Enum.sort(Enum.uniq(@default_required_actions ++ @optional_reviewed_actions))
                   )
               },
-              # Declaration preserves the reviewed future selector strategy. It is
-              # not executable until one primitive proves both sides of the
-              # regression contract against base and candidate revisions.
               %{
                 "id" => "security_regression",
-                "executable" => false,
+                "executable" => true,
                 "template_version" => @template_version,
-                "required_nodes" => @required_nodes,
+                "required_nodes" => @security_required_nodes,
                 "required_actions" => @security_required_actions,
                 "validation_strategy" => %{
-                  "action" => "mix_test",
-                  "path_parameter" => "test_paths",
-                  "path_source" => "requested_paths",
-                  "requires_non_empty_paths" => true
+                  "action" => "coding_security_regression_validate",
+                  "authority_parameter" => "review_attestation_id",
+                  "authority_source" => "review.review_attestation_id",
+                  "per_revision_timeout_default_ms" => 300_000,
+                  "per_revision_timeout_max_ms" => 600_000,
+                  "uses_default_timeout" => true,
+                  "two_revision" => true
                 },
                 "review_strategy" => @binding_council_review,
                 "semantic_policy" =>
-                  Map.put(
-                    @semantic_policy_base,
+                  @semantic_policy_base
+                  |> Map.merge(@security_semantic_nodes)
+                  |> Map.put("validation_profile", "security_regression")
+                  |> Map.put("mandatory_gate_nodes", @security_required_nodes)
+                  |> Map.put("post_validation_commit_routing", "route_validated_review")
+                  |> Map.put(
                     "allowed_actions",
                     Enum.sort(Enum.uniq(@security_required_actions ++ @optional_reviewed_actions))
-                  ),
-                "unsupported_reason" =>
-                  "No reviewed validation primitive proves that the selected regression test " <>
-                    "fails against the base/pre-fix code and passes against the candidate code."
+                  )
               },
               %{
                 "id" => "contract_change",
                 "executable" => false,
                 "template_version" => @template_version,
-                "required_nodes" => @required_nodes,
+                "required_nodes" => @default_required_nodes,
                 "required_actions" => @common_required_actions,
                 "validation_strategy" => %{
                   "required_enforcement" =>
@@ -142,8 +173,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 },
                 "review_strategy" => @binding_council_review,
                 "semantic_policy" =>
-                  Map.put(
-                    @semantic_policy_base,
+                  @semantic_policy_base
+                  |> Map.put("validation_profile", "contract_change")
+                  |> Map.put(
                     "allowed_actions",
                     Enum.sort(Enum.uniq(@common_required_actions ++ @optional_reviewed_actions))
                   ),
@@ -155,7 +187,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 "id" => "frontend_visual",
                 "executable" => false,
                 "template_version" => @template_version,
-                "required_nodes" => @required_nodes,
+                "required_nodes" => @default_required_nodes,
                 "required_actions" => @common_required_actions,
                 "validation_strategy" => %{
                   "required_enforcement" =>
@@ -163,8 +195,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 },
                 "review_strategy" => @binding_council_review,
                 "semantic_policy" =>
-                  Map.put(
-                    @semantic_policy_base,
+                  @semantic_policy_base
+                  |> Map.put("validation_profile", "frontend_visual")
+                  |> Map.put(
                     "allowed_actions",
                     Enum.sort(Enum.uniq(@common_required_actions ++ @optional_reviewed_actions))
                   ),
@@ -176,15 +209,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 "id" => "docs_only",
                 "executable" => false,
                 "template_version" => @template_version,
-                "required_nodes" => @required_nodes,
+                "required_nodes" => @default_required_nodes,
                 "required_actions" => @common_required_actions,
                 "validation_strategy" => %{
                   "required_enforcement" => "documentation_checks"
                 },
                 "review_strategy" => @binding_council_review,
                 "semantic_policy" =>
-                  Map.put(
-                    @semantic_policy_base,
+                  @semantic_policy_base
+                  |> Map.put("validation_profile", "docs_only")
+                  |> Map.put(
                     "allowed_actions",
                     Enum.sort(Enum.uniq(@common_required_actions ++ @optional_reviewed_actions))
                   ),
@@ -196,15 +230,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 "id" => "cross_app",
                 "executable" => false,
                 "template_version" => @template_version,
-                "required_nodes" => @required_nodes,
+                "required_nodes" => @default_required_nodes,
                 "required_actions" => @common_required_actions,
                 "validation_strategy" => %{
                   "required_enforcement" => "dependency_surface_compile_xref_and_test_selection"
                 },
                 "review_strategy" => @binding_council_review,
                 "semantic_policy" =>
-                  Map.put(
-                    @semantic_policy_base,
+                  @semantic_policy_base
+                  |> Map.put("validation_profile", "cross_app")
+                  |> Map.put(
                     "allowed_actions",
                     Enum.sort(Enum.uniq(@common_required_actions ++ @optional_reviewed_actions))
                   ),
@@ -216,7 +251,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 "id" => "database_migration",
                 "executable" => false,
                 "template_version" => @template_version,
-                "required_nodes" => @required_nodes,
+                "required_nodes" => @default_required_nodes,
                 "required_actions" => @common_required_actions,
                 "validation_strategy" => %{
                   "required_enforcement" => "reversible_database_migration_checks"
@@ -228,8 +263,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "unattended_publication" => "forbidden"
                 },
                 "semantic_policy" =>
-                  Map.put(
-                    @semantic_policy_base,
+                  @semantic_policy_base
+                  |> Map.put("validation_profile", "database_migration")
+                  |> Map.put(
                     "allowed_actions",
                     Enum.sort(Enum.uniq(@common_required_actions ++ @optional_reviewed_actions))
                   ),

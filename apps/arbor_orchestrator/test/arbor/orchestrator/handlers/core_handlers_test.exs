@@ -153,6 +153,56 @@ defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
       assert outcome.context_updates["transform.t1"] == "hello"
     end
 
+    test "not_equal compares against an expression-named context key exactly" do
+      context =
+        make_context(%{
+          "candidate_commit" => "commit-b",
+          "reviewed_commit" => "commit-a",
+          "numeric_string" => "42",
+          "numeric_value" => 42
+        })
+
+      different =
+        make_node("different", %{
+          "transform" => "not_equal",
+          "source_key" => "candidate_commit",
+          "expression" => "reviewed_commit"
+        })
+
+      type_stable =
+        make_node("type_stable", %{
+          "transform" => "not_equal",
+          "source_key" => "numeric_string",
+          "expression" => "numeric_value"
+        })
+
+      assert %{status: :success, context_updates: %{"transform.different" => true}} =
+               TransformHandler.execute(different, context, make_graph(), [])
+
+      assert %{status: :success, context_updates: %{"transform.type_stable" => true}} =
+               TransformHandler.execute(type_stable, context, make_graph(), [])
+
+      same_context = make_context(%{"left" => %{"commit" => "a"}, "right" => %{"commit" => "a"}})
+
+      same =
+        make_node("same", %{
+          "transform" => "not_equal",
+          "source_key" => "left",
+          "expression" => "right"
+        })
+
+      assert %{status: :success, context_updates: %{"transform.same" => false}} =
+               TransformHandler.execute(same, same_context, make_graph(), [])
+    end
+
+    test "not_equal requires an expression context-key reference" do
+      node = make_node("missing_compare_key", %{"transform" => "not_equal"})
+      outcome = TransformHandler.execute(node, make_context(), make_graph(), [])
+
+      assert outcome.status == :fail
+      assert outcome.failure_reason =~ "not_equal requires 'expression' context key"
+    end
+
     test "json_extract extracts nested value" do
       json = Jason.encode!(%{"data" => %{"name" => "test"}})
       context = make_context(%{"last_response" => json})

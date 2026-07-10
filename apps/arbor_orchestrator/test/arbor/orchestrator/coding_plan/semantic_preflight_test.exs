@@ -16,6 +16,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     Arbor.Actions.Coding.Workspace.Inspect,
     Arbor.Actions.Coding.Workspace.Release,
     Arbor.Actions.Coding.Workspace.CommittedChange,
+    Arbor.Actions.Coding.SecurityRegression.Validate,
     Arbor.Actions.Mix.Compile,
     Arbor.Actions.Mix.Test,
     Arbor.Actions.Git.Commit,
@@ -86,6 +87,185 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert Enum.any?(errors, fn err ->
              err["code"] == "dominance_violation" and err["detail"]["kind"] == "review"
            end)
+  end
+
+  test "security profile proves exact bindings and rejects review_profile none", ctx do
+    plan = security_plan!()
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("security_regression")
+
+    assert :ok =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(graph, profile["semantic_policy"], review_profile: "none")
+
+    assert Enum.any?(errors, &(&1["code"] == "security_review_profile_forbidden"))
+  end
+
+  test "security profile rejects action, context, source, and writer mutations", ctx do
+    assert {:ok, compilation} = compile(security_plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("security_regression")
+
+    mutations = [
+      update_in(graph.nodes["validate"].attrs, &Map.put(&1, "action", "mix_test")),
+      update_in(
+        graph.nodes["validate"].attrs,
+        &Map.put(&1, "context_keys", "review_attestation_id,workspace_id")
+      ),
+      update_in(
+        graph.nodes["validate"].attrs,
+        &Map.put(&1, "param.test_paths", ["test/forged_test.exs"])
+      ),
+      update_in(
+        graph.nodes["hoist_review_attestation_id"].attrs,
+        &Map.put(&1, "source_key", "forged.review_attestation_id")
+      ),
+      update_in(
+        graph.nodes["prep_review_intent"].attrs,
+        &Map.put(&1, "output_key", "review_attestation_id")
+      ),
+      update_in(
+        graph.nodes["review_change"].attrs,
+        &Map.put(&1, "context_keys", "diff,files,branch,base_ref,intent,agent_id")
+      )
+    ]
+
+    for mutated <- mutations do
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               SemanticPreflight.validate(mutated, profile["semantic_policy"],
+                 review_profile: "binding"
+               )
+
+      assert Enum.any?(errors, fn err ->
+               err["code"] in [
+                 "forbidden_action",
+                 "security_binding_mismatch",
+                 "security_protected_writer_violation",
+                 "security_validator_parameter_violation"
+               ]
+             end)
+    end
+  end
+
+  test "security profile rejects every commit-review-validation dominator bypass", ctx do
+    assert {:ok, compilation} = compile(security_plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("security_regression")
+
+    bypasses = [
+      {"committed_candidate_join", "adopt_head_commit", "route_after_commit"},
+      {"committed_join", "route_security_after_commit", "load_committed_change"},
+      {"committed_material", "route_after_commit", "review_change"},
+      {"review", "load_committed_change", "route_review"},
+      {"review_routing", "review_change", "hoist_review_attestation_id"},
+      {"review_attestation", "route_review", "validate"},
+      {"validation", "hoist_review_attestation_id", "check_validation_passed"},
+      {"validation_result", "validate", "post_validation_committed_change"},
+      {"post_validation_exact_head", "check_validation_passed", "route_validated_review"},
+      {"review", "load_committed_change", "status_change_committed"},
+      {"validation", "hoist_review_attestation_id", "status_change_committed"},
+      {"post_validation_exact_head", "check_validation_passed", "status_change_committed"},
+      {"post_validation_routing", "post_validation_committed_change", "status_change_committed"}
+    ]
+
+    for {kind, from, to} <- bypasses do
+      bypassed = add_edge(graph, from, to, "context.bypass=true")
+
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               SemanticPreflight.validate(bypassed, profile["semantic_policy"],
+                 review_profile: "binding"
+               )
+
+      assert Enum.any?(errors, fn err ->
+               err["code"] == "dominance_violation" and err["detail"]["kind"] == kind
+             end),
+             "expected #{kind} dominance failure for #{from} -> #{to}, got: #{inspect(errors)}"
+    end
+  end
+
+  test "security profile proves both rework entries cross the fresh-commit comparison", ctx do
+    assert {:ok, compilation} = compile(security_plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("security_regression")
+
+    for {entry, kind} <- [
+          {"remember_validation_reviewed_commit", "validation_rework.fresh_commit_compare"},
+          {"remember_review_reviewed_commit", "review_rework.fresh_commit_compare"}
+        ] do
+      bypassed = add_edge(graph, entry, "check_security_rework_fresh", "context.bypass=true")
+
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               SemanticPreflight.validate(bypassed, profile["semantic_policy"],
+                 review_profile: "binding"
+               )
+
+      assert Enum.any?(errors, fn err ->
+               err["code"] == "dominance_violation" and err["detail"]["kind"] == kind
+             end)
+    end
+  end
+
+  test "security profile rejects rework-only validation and publication bypasses", ctx do
+    assert {:ok, compilation} = compile(security_plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("security_regression")
+
+    bypasses = [
+      {"build_validation_rework_prompt", "validate", "validation_rework.fresh_validation"},
+      {"build_review_rework_prompt", "status_change_committed",
+       "review_rework.fresh_post_validation_routing_terminal"}
+    ]
+
+    for {from, to, kind} <- bypasses do
+      bypassed = add_edge(graph, from, to, "context.rework_bypass=true")
+
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               SemanticPreflight.validate(bypassed, profile["semantic_policy"],
+                 review_profile: "binding"
+               )
+
+      assert Enum.any?(errors, fn err ->
+               err["code"] == "dominance_violation" and err["detail"]["kind"] == kind
+             end),
+             "expected #{kind} dominance failure for #{from} -> #{to}, got: #{inspect(errors)}"
+    end
+  end
+
+  test "security human handoff remains dominated by review, validation, and exact-head check",
+       ctx do
+    plan = security_plan!(%{"review_profile" => "human_required"})
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("security_regression")
+
+    assert :ok =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "human_required"
+             )
+
+    bypassed =
+      add_edge(
+        graph,
+        "check_validation_passed",
+        "status_human_review_required",
+        "context.bypass=true"
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(bypassed, profile["semantic_policy"],
+               review_profile: "human_required"
+             )
+
+    for kind <- ["post_validation_exact_head", "post_validation_routing"] do
+      assert Enum.any?(errors, fn err ->
+               err["code"] == "dominance_violation" and err["detail"]["kind"] == kind
+             end)
+    end
   end
 
   test "adversarial: validation bypass fails closed", ctx do
@@ -408,6 +588,18 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
     {:ok, plan} = Plan.new(attrs)
     plan
+  end
+
+  defp security_plan!(overrides \\ %{}) do
+    plan!(
+      Map.merge(
+        %{
+          "validation_profile" => "security_regression",
+          "requested_paths" => ["apps/arbor_security/test/security_regression_test.exs"]
+        },
+        overrides
+      )
+    )
   end
 
   defp parse!(source) do

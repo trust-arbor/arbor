@@ -28,7 +28,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     end
     """)
 
-    params = attested_params(fixture, [test_path])
+    params = fixture |> attested_params([test_path]) |> Map.put(:timeout, "600000")
     assert {:ok, result} = Validate.run(params, fixture.context)
     assert result.passed
     assert result.reason == "security_regression_validated"
@@ -113,6 +113,17 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
 
     assert {:error, :not_found} =
              Validate.run(%{review_attestation_id: "review_attestation_missing"}, fixture.context)
+
+    for invalid_timeout <- ["600001", "not-an-integer"] do
+      assert {:error, :invalid_timeout} =
+               Validate.run(
+                 %{
+                   review_attestation_id: "review_attestation_missing",
+                   timeout: invalid_timeout
+                 },
+                 fixture.context
+               )
+    end
 
     refute File.exists?(marker)
   end
