@@ -32,4 +32,15 @@ fi
 # Prefer PATH lookup so user-installed mise shadows ~/.local/bin (e.g. brew).
 MISE="$(command -v mise || echo "$HOME/.local/bin/mise")"
 
-exec "$MISE" exec -- mix "$@"
+# `mise exec -- mix` is insufficient when the incoming PATH already has a
+# system/Homebrew toolchain before mise's insertion point. This occurs in nested
+# git worktrees and can silently pair the wrong Mix/OTP with the configured
+# Elixir. Resolve the active project installs and put them first explicitly.
+ERLANG_ROOT="$("$MISE" where erlang)"
+ELIXIR_ROOT="$("$MISE" where elixir)"
+
+export PATH="$ERLANG_ROOT/bin:$ELIXIR_ROOT/bin:$PATH"
+export MIX_HOME="$ELIXIR_ROOT/.mix"
+export MIX_ARCHIVES="$MIX_HOME/archives"
+
+exec "$ELIXIR_ROOT/bin/mix" "$@"
