@@ -1,40 +1,24 @@
 defmodule Arbor.Scheduler.CapsFileTest do
-  @moduledoc """
-  Tests for `Arbor.Scheduler.CapsFile` — Phase 3 of the scheduler-privesc
-  redesign.
-
-  Setup mints a fresh identity, registers it, enrolls it as an issuer with
-  a known envelope, then synthesizes signed/unsigned/tampered `.caps.json`
-  files and exercises the loader's verification chain.
-
-  Each failure mode in `CapsFile.load/1` has at least one test asserting the
-  specific error tuple, since callers (PipelineRunner) need to distinguish
-  "issuer not enrolled" from "signature mismatch" from "cap outside envelope"
-  to log meaningful errors.
-  """
-
   use ExUnit.Case, async: false
-  @moduletag :fast
 
-  import Bitwise, only: [bxor: 2]
+  @moduletag :fast
 
   alias Arbor.Contracts.Security.{Capability, Identity}
   alias Arbor.Scheduler.CapsFile
+  alias Arbor.Scheduler.CapsFile.Attestation
   alias Arbor.Security.Crypto
   alias Arbor.Security.Identity.Registry, as: IdentityRegistry
   alias Arbor.Security.IssuerRegistry
 
   @envelope_uri "arbor://fs/write/reports/**"
+  @dot_source "digraph Signed { start [shape=Mdiamond] }"
 
   setup do
     {:ok, identity} = Identity.generate()
     :ok = IdentityRegistry.register(identity)
 
     {:ok, envelope} =
-      Capability.new(
-        resource_uri: @envelope_uri,
-        principal_id: "agent_envelope_holder"
-      )
+      Capability.new(resource_uri: @envelope_uri, principal_id: identity.agent_id)
 
     :ok = IssuerRegistry.register(identity.agent_id, envelope, reason: "caps_file_test")
 
@@ -48,330 +32,257 @@ defmodule Arbor.Scheduler.CapsFileTest do
       File.rm_rf!(tmp_dir)
     end)
 
-    {:ok, identity: identity, envelope: envelope, tmp_dir: tmp_dir}
+    {:ok, identity: identity, tmp_dir: tmp_dir}
   end
 
-  describe "load/1 happy path" do
-    test "loads, verifies signature, returns descriptors", %{
+  describe "version 2 verification" do
+    test "returns the complete verified attestation", %{identity: identity, tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "review.caps.json")
+      initial_args = %{"mode" => "review", "attempts" => [1, 2]}
+
+      write_signed(path, identity, tmp_dir,
+        initial_args: initial_args,
+        capabilities: [
+          %{
+            resource_uri: "arbor://fs/write/reports/review/",
+            constraints: %{"rate_limit" => 5}
+          }
+        ]
+      )
+
+      assert {:ok, %Attestation{} = attestation} = CapsFile.load(path)
+      assert attestation.version == 2
+      assert attestation.issuer_id == identity.agent_id
+      assert attestation.pipeline_root == "test"
+      assert attestation.pipeline_path == "jobs/review.dot"
+      assert attestation.graph_hash == sha256(@dot_source)
+      assert attestation.workdir == Path.expand(tmp_dir)
+      assert attestation.initial_args == initial_args
+
+      assert [descriptor] = attestation.capabilities
+      assert descriptor.resource_uri == "arbor://fs/write/reports/review"
+      assert descriptor.constraints == %{rate_limit: 5}
+      assert descriptor.issuer_id == identity.agent_id
+    end
+
+    test "empty declared capability set is explicit and valid", %{
       identity: identity,
       tmp_dir: tmp_dir
     } do
-      caps = [
-        %{
-          resource_uri: "arbor://fs/write/reports/upstream-deps-summary/**",
-          constraints: %{}
-        },
-        %{
-          resource_uri: "arbor://fs/write/reports/morning-digest-synthesis/**",
-          constraints: %{}
-        }
-      ]
+      path = Path.join(tmp_dir, "empty.caps.json")
+      write_signed(path, identity, tmp_dir, capabilities: [])
 
-      path = Path.join(tmp_dir, "ok.caps.json")
-      write_signed_caps_file(path, identity, caps)
-
-      assert {:ok, descriptors} = CapsFile.load(path)
-      assert length(descriptors) == 2
-      assert Enum.all?(descriptors, &Map.has_key?(&1, :resource_uri))
-      assert Enum.all?(descriptors, &Map.has_key?(&1, :constraints))
+      assert {:ok, %Attestation{capabilities: []}} = CapsFile.load(path)
     end
 
-    test "atomizes known constraint keys (string→atom)", %{
+    test "canonical payload ignores object and capability declaration order", %{
       identity: identity,
       tmp_dir: tmp_dir
     } do
-      caps = [
-        %{
-          resource_uri: "arbor://fs/write/reports/x/**",
-          constraints: %{"rate_limit" => 50}
-        }
+      caps_a = [
+        %{resource_uri: "arbor://fs/write/reports/a", constraints: %{rate_limit: 1}},
+        %{resource_uri: "arbor://fs/write/reports/b", constraints: %{}}
       ]
 
-      path = Path.join(tmp_dir, "atomize.caps.json")
-      write_signed_caps_file(path, identity, caps)
+      caps_b = Enum.reverse(caps_a)
+      args_a = Map.new([{"z", 1}, {"a", %{"y" => 2, "x" => 3}}])
+      args_b = Map.new([{"a", %{"x" => 3, "y" => 2}}, {"z", 1}])
 
-      assert {:ok, [%{constraints: %{rate_limit: 50}}]} = CapsFile.load(path)
+      {:ok, first} = CapsFile.build(identity.agent_id, caps_a, attrs(tmp_dir, args_a))
+      {:ok, second} = CapsFile.build(identity.agent_id, caps_b, attrs(tmp_dir, args_b))
+
+      assert CapsFile.signing_payload(first) == CapsFile.signing_payload(second)
     end
 
-    test "canonicalizes resource URIs before signing and verifying", %{
-      identity: identity,
+    test "exact JSON argument comparison distinguishes numeric encodings" do
+      assert CapsFile.initial_args_match?(%{"n" => 1}, %{"n" => 1})
+      refute CapsFile.initial_args_match?(%{"n" => 1}, %{"n" => 1.0})
+      refute CapsFile.initial_args_match?(%{n: 1}, %{"n" => 1})
+    end
+  end
+
+  describe "version and schema gates" do
+    test "security regression: legacy version 1 fails closed before issuer lookup", %{
       tmp_dir: tmp_dir
     } do
-      caps = [
-        %{
-          resource_uri: "arbor://fs/write/reports/canonical/",
-          constraints: %{}
-        }
-      ]
-
-      path = Path.join(tmp_dir, "canonical.caps.json")
-      write_signed_caps_file(path, identity, caps)
-
-      assert {:ok, [%{resource_uri: "arbor://fs/write/reports/canonical"}]} =
-               CapsFile.load(path)
-    end
-  end
-
-  describe "load/1 file/JSON errors" do
-    test "missing file returns {:read_failed, :enoent}", %{tmp_dir: tmp_dir} do
-      path = Path.join(tmp_dir, "does_not_exist.caps.json")
-      assert {:error, {:read_failed, :enoent}} = CapsFile.load(path)
-    end
-
-    test "malformed JSON returns {:invalid_json, _}", %{tmp_dir: tmp_dir} do
-      path = Path.join(tmp_dir, "broken.caps.json")
-      File.write!(path, "not really json {{{")
-      assert {:error, {:invalid_json, _}} = CapsFile.load(path)
-    end
-  end
-
-  describe "load/1 schema errors" do
-    test "missing version field returns invalid_schema", %{tmp_dir: tmp_dir} do
-      path = Path.join(tmp_dir, "no_version.caps.json")
+      path = Path.join(tmp_dir, "legacy.caps.json")
 
       File.write!(
         path,
-        Jason.encode!(%{"issuer_id" => "x", "capabilities" => [], "signature" => "x"})
+        Jason.encode!(%{
+          "version" => 1,
+          "issuer_id" => "agent_not_enrolled",
+          "capabilities" => [],
+          "signature" => Base.encode64(:crypto.strong_rand_bytes(64))
+        })
       )
 
-      assert {:error, {:invalid_schema, {:missing_or_invalid, "version"}}} = CapsFile.load(path)
+      assert {:error, {:legacy_version, 1}} = CapsFile.load(path)
     end
 
-    test "wrong version returns unsupported_version", %{
-      identity: identity,
-      tmp_dir: tmp_dir
-    } do
-      path = Path.join(tmp_dir, "v99.caps.json")
-
-      write_raw_caps_file(path, %{
-        "version" => 99,
-        "issuer_id" => identity.agent_id,
-        "capabilities" => [%{"resource_uri" => "arbor://fs/write/reports/x"}],
-        "signature" => "AAAA"
-      })
+    test "unsupported future version is rejected", %{tmp_dir: tmp_dir} do
+      path = Path.join(tmp_dir, "future.caps.json")
+      File.write!(path, Jason.encode!(%{"version" => 99}))
 
       assert {:error, {:invalid_schema, {:unsupported_version, 99}}} = CapsFile.load(path)
     end
 
-    test "capability missing resource_uri returns indexed error", %{
-      identity: identity,
-      tmp_dir: tmp_dir
-    } do
-      path = Path.join(tmp_dir, "missing_uri.caps.json")
+    test "missing and malformed files return specific errors", %{tmp_dir: tmp_dir} do
+      missing = Path.join(tmp_dir, "missing.caps.json")
+      malformed = Path.join(tmp_dir, "malformed.caps.json")
+      File.write!(malformed, "not-json")
 
-      write_raw_caps_file(path, %{
-        "version" => 1,
-        "issuer_id" => identity.agent_id,
-        "capabilities" => [
-          %{"resource_uri" => "arbor://fs/write/reports/x"},
-          %{"constraints" => %{}}
-        ],
-        "signature" => "AAAA"
-      })
-
-      assert {:error, {:invalid_schema, {:capability_missing_resource_uri, 1}}} =
-               CapsFile.load(path)
+      assert {:error, {:read_failed, :enoent}} = CapsFile.load(missing)
+      assert {:error, {:invalid_json, _}} = CapsFile.load(malformed)
     end
 
-    test "empty capabilities list is a valid 'no caps needed' declaration", %{
+    test "build rejects non-JSON args and noncanonical execution paths", %{
       identity: identity,
       tmp_dir: tmp_dir
     } do
-      # Shell-only pipelines don't go through the action layer's capability
-      # check (shell stdout is its own thing). They still need a .caps.json
-      # sibling under Phase 5's "no caps file → refuse to run" rule, but
-      # the file can declare an empty capabilities list to signal "this
-      # pipeline explicitly requires no granted resource caps." That's
-      # different from a missing file, which is the unreviewed case.
-      path = Path.join(tmp_dir, "empty_caps.caps.json")
-      write_signed_caps_file(path, identity, [])
+      assert {:error, {:invalid_schema, {:non_string_initial_arg_key, []}}} =
+               CapsFile.build(identity.agent_id, [], attrs(tmp_dir, %{unsafe: true}))
 
-      assert {:ok, []} = CapsFile.load(path)
+      assert {:error, {:invalid_schema, {:invalid_pipeline_path, "../escape.dot"}}} =
+               CapsFile.build(
+                 identity.agent_id,
+                 [],
+                 attrs(tmp_dir, %{}) |> Keyword.put(:pipeline_path, "../escape.dot")
+               )
+
+      assert {:error, {:invalid_schema, {:invalid_workdir, "relative"}}} =
+               CapsFile.build(
+                 identity.agent_id,
+                 [],
+                 attrs(tmp_dir, %{}) |> Keyword.put(:workdir, "relative")
+               )
     end
 
-    test "invalid resource URI returns invalid_schema", %{
+    test "invalid and traversal capability URIs are rejected by build", %{
       identity: identity,
       tmp_dir: tmp_dir
     } do
-      caps = [%{resource_uri: "https://example.com/not/arbor", constraints: %{}}]
-
-      path = Path.join(tmp_dir, "invalid_uri.caps.json")
-      write_signed_caps_file(path, identity, caps)
-
       assert {:error, {:invalid_schema, {:invalid_resource_uri, :invalid_scheme}}} =
-               CapsFile.load(path)
-    end
-
-    test "traversal-like resource URI returns invalid_schema", %{
-      identity: identity,
-      tmp_dir: tmp_dir
-    } do
-      caps = [%{resource_uri: "arbor://fs/write/reports/../secrets", constraints: %{}}]
-
-      path = Path.join(tmp_dir, "traversal_uri.caps.json")
-      write_signed_caps_file(path, identity, caps)
+               CapsFile.build(
+                 identity.agent_id,
+                 [%{resource_uri: "https://example.com", constraints: %{}}],
+                 attrs(tmp_dir, %{})
+               )
 
       assert {:error, {:invalid_schema, {:invalid_resource_uri, :traversal_segment}}} =
-               CapsFile.load(path)
+               CapsFile.build(
+                 identity.agent_id,
+                 [
+                   %{
+                     resource_uri: "arbor://fs/write/reports/../secret",
+                     constraints: %{}
+                   }
+                 ],
+                 attrs(tmp_dir, %{})
+               )
     end
   end
 
-  describe "load/1 trust errors" do
-    test "unenrolled issuer returns :issuer_not_found", %{tmp_dir: tmp_dir} do
-      path = Path.join(tmp_dir, "no_issuer.caps.json")
+  describe "signature binding" do
+    for {field, replacement} <- [
+          {"pipeline_root", "copied_root"},
+          {"pipeline_path", "jobs/copied.dot"},
+          {"graph_hash", String.duplicate("0", 64)},
+          {"workdir", "/different/workdir"},
+          {"initial_args", %{"mode" => "publish"}},
+          {"capabilities",
+           [%{"resource_uri" => "arbor://fs/write/reports/other", "constraints" => %{}}]}
+        ] do
+      test "security regression: tampering #{field} invalidates the signature", %{
+        identity: identity,
+        tmp_dir: tmp_dir
+      } do
+        path = Path.join(tmp_dir, "tampered_#{unquote(field)}.caps.json")
+        raw = signed_manifest(identity, tmp_dir, initial_args: %{"mode" => "review"})
 
-      write_raw_caps_file(path, %{
-        "version" => 1,
-        "issuer_id" => "agent_4444444444444444444444444444444444444444444444444444444444444444",
-        "capabilities" => [%{"resource_uri" => "arbor://fs/write/reports/x"}],
-        "signature" => Base.encode64(:crypto.strong_rand_bytes(64))
-      })
+        File.write!(
+          path,
+          raw |> Map.put(unquote(field), unquote(Macro.escape(replacement))) |> Jason.encode!()
+        )
 
-      assert {:error, :issuer_not_found} = CapsFile.load(path)
+        assert {:error, :invalid_signature} = CapsFile.load(path)
+      end
     end
 
-    test "revoked issuer returns :issuer_revoked", %{
+    test "security regression: invalid signature bytes are rejected", %{
       identity: identity,
       tmp_dir: tmp_dir
     } do
-      caps = [%{resource_uri: "arbor://fs/write/reports/x", constraints: %{}}]
+      path = Path.join(tmp_dir, "bad_signature.caps.json")
 
-      path = Path.join(tmp_dir, "revoked.caps.json")
-      write_signed_caps_file(path, identity, caps)
+      raw =
+        identity
+        |> signed_manifest(tmp_dir)
+        |> Map.put("signature", Base.encode64(:crypto.strong_rand_bytes(64)))
 
-      # Revoke AFTER signing — simulates a key compromise. Pre-existing signed
-      # files must stop being honored.
-      :ok = IssuerRegistry.revoke(identity.agent_id, "compromise")
-
-      assert {:error, :issuer_revoked} = CapsFile.load(path)
-    end
-
-    test "regression: tampered signature returns :invalid_signature", %{
-      identity: identity,
-      tmp_dir: tmp_dir
-    } do
-      # Sign a real payload, then flip a byte in the signature. The crypto
-      # check is what closes the gate — without this guard the loader would
-      # accept anything the issuer technically COULD have signed.
-      caps = [%{resource_uri: "arbor://fs/write/reports/x", constraints: %{}}]
-
-      payload = CapsFile.build(identity.agent_id, caps) |> CapsFile.signing_payload()
-      sig = Crypto.sign(payload, identity.private_key)
-      tampered_sig = flip_first_byte(sig)
-
-      path = Path.join(tmp_dir, "tampered_sig.caps.json")
-
-      write_raw_caps_file(path, %{
-        "version" => 1,
-        "issuer_id" => identity.agent_id,
-        "capabilities" =>
-          Enum.map(caps, fn c ->
-            %{"resource_uri" => c.resource_uri, "constraints" => c.constraints}
-          end),
-        "signature" => Base.encode64(tampered_sig)
-      })
-
-      assert {:error, :invalid_signature} = CapsFile.load(path)
-    end
-
-    test "regression: tampered capability payload returns :invalid_signature", %{
-      identity: identity,
-      tmp_dir: tmp_dir
-    } do
-      # Issuer signs caps A; attacker swaps in caps B. Without signature-
-      # over-payload binding, attacker's substitution would slip through.
-      original_caps = [%{resource_uri: "arbor://fs/write/reports/x", constraints: %{}}]
-
-      payload =
-        CapsFile.build(identity.agent_id, original_caps) |> CapsFile.signing_payload()
-
-      sig = Crypto.sign(payload, identity.private_key)
-
-      # Build file with DIFFERENT capabilities, same signature
-      escalated_caps = [%{resource_uri: "arbor://shell/exec/rm", constraints: %{}}]
-
-      path = Path.join(tmp_dir, "tampered_payload.caps.json")
-
-      write_raw_caps_file(path, %{
-        "version" => 1,
-        "issuer_id" => identity.agent_id,
-        "capabilities" =>
-          Enum.map(escalated_caps, fn c ->
-            %{"resource_uri" => c.resource_uri, "constraints" => c.constraints}
-          end),
-        "signature" => Base.encode64(sig)
-      })
-
+      File.write!(path, Jason.encode!(raw))
       assert {:error, :invalid_signature} = CapsFile.load(path)
     end
   end
 
-  describe "load/1 envelope enforcement" do
-    test "regression: cap outside envelope returns :cap_exceeds_envelope with URI",
-         %{identity: identity, tmp_dir: tmp_dir} do
-      # The whole point of the issuer registry: an issuer authorized to sign
-      # for `arbor://fs/write/reports/**` cannot declare `arbor://shell/exec/rm`
-      # even though they can validly sign anything (cryptographically). The
-      # envelope check is the trust boundary.
-      caps = [
-        %{resource_uri: "arbor://fs/write/reports/x", constraints: %{}},
-        %{resource_uri: "arbor://shell/exec/rm", constraints: %{}}
-      ]
+  describe "issuer envelope" do
+    test "security regression: a valid signature cannot exceed the issuer envelope", %{
+      identity: identity,
+      tmp_dir: tmp_dir
+    } do
+      path = Path.join(tmp_dir, "envelope_escape.caps.json")
 
-      path = Path.join(tmp_dir, "escape.caps.json")
-      write_signed_caps_file(path, identity, caps)
+      write_signed(path, identity, tmp_dir,
+        capabilities: [%{resource_uri: "arbor://shell/exec/rm", constraints: %{}}]
+      )
 
       assert {:error, {:cap_exceeds_envelope, "arbor://shell/exec/rm"}} =
                CapsFile.load(path)
     end
 
-    test "wider URI than envelope rejected", %{
-      identity: identity,
-      tmp_dir: tmp_dir
-    } do
-      # Envelope is arbor://fs/write/reports/** — a cap for arbor://fs/write/**
-      # is wider, must be rejected.
-      caps = [%{resource_uri: "arbor://fs/write/**", constraints: %{}}]
+    test "revoked and unenrolled issuers fail closed", %{identity: identity, tmp_dir: tmp_dir} do
+      revoked_path = Path.join(tmp_dir, "revoked.caps.json")
+      write_signed(revoked_path, identity, tmp_dir)
+      :ok = IssuerRegistry.revoke(identity.agent_id, "compromised")
+      assert {:error, :issuer_revoked} = CapsFile.load(revoked_path)
 
-      path = Path.join(tmp_dir, "wider.caps.json")
-      write_signed_caps_file(path, identity, caps)
-
-      assert {:error, {:cap_exceeds_envelope, "arbor://fs/write/**"}} = CapsFile.load(path)
+      {:ok, other} = Identity.generate()
+      :ok = IdentityRegistry.register(other)
+      unenrolled_path = Path.join(tmp_dir, "unenrolled.caps.json")
+      write_signed(unenrolled_path, other, tmp_dir)
+      assert {:error, :issuer_not_found} = CapsFile.load(unenrolled_path)
     end
   end
 
-  # ---------------------------------------------------------------------------
-  # Helpers
-  # ---------------------------------------------------------------------------
-
-  defp write_signed_caps_file(path, identity, caps) do
-    parsed = CapsFile.build(identity.agent_id, caps)
-    payload = CapsFile.signing_payload(parsed)
-    sig = Crypto.sign(payload, identity.private_key)
-
-    json_data = %{
-      "version" => parsed.version,
-      "issuer_id" => parsed.issuer_id,
-      "capabilities" =>
-        Enum.map(parsed.capabilities, fn c ->
-          %{
-            "resource_uri" => c.resource_uri,
-            "constraints" => stringify_keys(c.constraints)
-          }
-        end),
-      "signature" => Base.encode64(sig)
-    }
-
-    File.write!(path, Jason.encode!(json_data))
+  defp write_signed(path, identity, tmp_dir, opts \\ []) do
+    File.write!(path, signed_manifest(identity, tmp_dir, opts) |> Jason.encode!())
   end
 
-  defp write_raw_caps_file(path, raw_map) do
-    File.write!(path, Jason.encode!(raw_map))
+  defp signed_manifest(identity, tmp_dir, opts \\ []) do
+    capabilities =
+      Keyword.get(opts, :capabilities, [
+        %{resource_uri: "arbor://fs/write/reports/review", constraints: %{}}
+      ])
+
+    initial_args = Keyword.get(opts, :initial_args, %{})
+    {:ok, payload} = CapsFile.build(identity.agent_id, capabilities, attrs(tmp_dir, initial_args))
+    signature = Crypto.sign(CapsFile.signing_payload(payload), identity.private_key)
+    CapsFile.manifest_map(payload, signature)
   end
 
-  defp stringify_keys(map) when is_map(map) do
-    Map.new(map, fn {k, v} -> {to_string(k), v} end)
+  defp attrs(tmp_dir, initial_args) do
+    [
+      pipeline_root: "test",
+      pipeline_path: "jobs/review.dot",
+      graph_hash: sha256(@dot_source),
+      workdir: Path.expand(tmp_dir),
+      initial_args: initial_args
+    ]
   end
 
-  defp flip_first_byte(<<first, rest::binary>>), do: <<bxor(first, 0xFF)::8, rest::binary>>
+  defp sha256(value) do
+    value
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
 end

@@ -1,19 +1,6 @@
 defmodule Arbor.Scheduler.RunIdentityTest do
-  @moduledoc """
-  Tests for `Arbor.Scheduler.RunIdentity` — Phase 5 of the scheduler-privesc
-  redesign. Covers:
-
-    - `mint/1` happy path: ephemeral identity registered, lobby cap +
-      declared caps granted, signer returned
-    - `mint/1` failure modes: missing/invalid caps file, partial state
-      cleaned up
-    - `revoke/1` lifecycle: caps revoked, identity deregistered, safe to
-      call with `nil` handle (uniform call-site shape)
-    - Concurrency: two simultaneous mints produce isolated principals so
-      caps don't bleed across runs
-  """
-
   use ExUnit.Case, async: false
+
   @moduletag :fast
 
   alias Arbor.Contracts.Security.{Capability, Identity}
@@ -34,190 +21,142 @@ defmodule Arbor.Scheduler.RunIdentityTest do
 
     :ok = IssuerRegistry.register(issuer.agent_id, envelope, reason: "run_identity_test")
 
-    tmp =
+    tmp_dir =
       System.tmp_dir!() |> Path.join("run_identity_test_#{System.unique_integer([:positive])}")
 
-    File.mkdir_p!(tmp)
+    File.mkdir_p!(tmp_dir)
 
     on_exit(fn ->
       IssuerRegistry.revoke(issuer.agent_id, "test cleanup")
-      File.rm_rf!(tmp)
+      File.rm_rf!(tmp_dir)
     end)
 
-    {:ok, issuer: issuer, tmp_dir: tmp}
+    {:ok, issuer: issuer, tmp_dir: tmp_dir}
   end
 
-  describe "mint/1 happy path" do
-    test "mints ephemeral identity, grants caps, returns signer", %{
-      issuer: issuer,
-      tmp_dir: tmp_dir
-    } do
-      caps_path = Path.join(tmp_dir, "ok.caps.json")
-
-      write_signed_caps(caps_path, issuer, [
-        %{resource_uri: "arbor://fs/write/reports/x/**", constraints: %{}},
-        %{resource_uri: "arbor://fs/write/reports/y/**", constraints: %{}}
+  test "mints only attested caps and returns the verified attestation", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    attestation =
+      verified_attestation(issuer, tmp_dir, [
+        %{resource_uri: "arbor://fs/write/reports/narrow/**", constraints: %{}}
       ])
 
-      assert {:ok, handle} = RunIdentity.mint(caps_path)
+    assert {:ok, handle} = RunIdentity.mint(attestation)
+    assert handle.attestation == attestation
+    assert String.starts_with?(handle.agent_id, "agent_")
+    assert is_function(handle.signer, 1)
 
-      assert String.starts_with?(handle.agent_id, "agent_")
-      assert is_function(handle.signer, 1)
-      # Lobby cap + 2 declared caps = 3
-      assert length(handle.cap_ids) == 3
+    capabilities = Enum.map(handle.cap_ids, &fetch_cap!/1)
 
-      # Caps are actually stored
-      for cap_id <- handle.cap_ids do
-        assert {:ok, _cap} = CapabilityStore.get(cap_id)
-      end
+    assert Enum.sort(Enum.map(capabilities, & &1.resource_uri)) ==
+             Enum.sort([
+               "arbor://orchestrator/execute/**",
+               "arbor://fs/write/reports/narrow/**"
+             ])
 
-      # Ephemeral identity is registered
-      assert {:ok, _pk} = IdentityRegistry.lookup(handle.agent_id)
+    refute Enum.any?(capabilities, &(&1.resource_uri == @envelope_uri))
 
-      # Cleanup
-      RunIdentity.revoke(handle)
-    end
+    declared = Enum.find(capabilities, &(&1.resource_uri != "arbor://orchestrator/execute/**"))
+    assert declared.principal_id == handle.agent_id
+    assert declared.metadata.provenance.issuer_id == issuer.agent_id
+    assert declared.metadata.provenance.graph_hash == attestation.graph_hash
+
+    assert {:ok, _public_key} = IdentityRegistry.lookup(handle.agent_id)
+    RunIdentity.revoke(handle)
   end
 
-  describe "mint/1 failure modes" do
-    test "missing caps file returns CapsFile read_failed", %{tmp_dir: tmp_dir} do
-      caps_path = Path.join(tmp_dir, "does_not_exist.caps.json")
-      assert {:error, {:read_failed, :enoent}} = RunIdentity.mint(caps_path)
-    end
-
-    test "invalid signature returns :invalid_signature (propagated)", %{
-      issuer: issuer,
-      tmp_dir: tmp_dir
-    } do
-      caps_path = Path.join(tmp_dir, "bad_sig.caps.json")
-
-      # Write a malformed signature; CapsFile.load will reject.
-      File.write!(
-        caps_path,
-        Jason.encode!(%{
-          "version" => 1,
-          "issuer_id" => issuer.agent_id,
-          "capabilities" => [%{"resource_uri" => "arbor://fs/write/reports/x"}],
-          "signature" => Base.encode64(:crypto.strong_rand_bytes(64))
-        })
-      )
-
-      assert {:error, :invalid_signature} = RunIdentity.mint(caps_path)
-    end
-
-    test "cap outside envelope rejected before identity is generated", %{
-      issuer: issuer,
-      tmp_dir: tmp_dir
-    } do
-      caps_path = Path.join(tmp_dir, "escape.caps.json")
-
-      write_signed_caps(caps_path, issuer, [
-        %{resource_uri: "arbor://shell/exec/rm", constraints: %{}}
-      ])
-
-      assert {:error, {:cap_exceeds_envelope, "arbor://shell/exec/rm"}} =
-               RunIdentity.mint(caps_path)
-    end
+  test "requires the verified attestation type" do
+    assert {:error, :verified_attestation_required} = RunIdentity.mint(%{})
+    assert {:error, :verified_attestation_required} = RunIdentity.mint("file.caps.json")
   end
 
-  describe "revoke/1" do
-    test "revokes all caps and deregisters the identity", %{
-      issuer: issuer,
-      tmp_dir: tmp_dir
-    } do
-      caps_path = Path.join(tmp_dir, "lifecycle.caps.json")
+  test "security regression: a forged attestation struct cannot mint authority", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    attestation = verified_attestation(issuer, tmp_dir, [])
+    forged = %{attestation | graph_hash: String.duplicate("0", 64)}
 
-      write_signed_caps(caps_path, issuer, [
+    assert {:error, :invalid_signature} = RunIdentity.mint(forged)
+  end
+
+  test "revoke removes every cap and deregisters the ephemeral identity", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    attestation =
+      verified_attestation(issuer, tmp_dir, [
         %{resource_uri: "arbor://fs/write/reports/lifecycle/**", constraints: %{}}
       ])
 
-      {:ok, handle} = RunIdentity.mint(caps_path)
+    {:ok, handle} = RunIdentity.mint(attestation)
+    assert :ok = RunIdentity.revoke(handle)
 
-      :ok = RunIdentity.revoke(handle)
-
-      # Caps gone
-      for cap_id <- handle.cap_ids do
-        # CapabilityStore.get_by_id should return error or revoked status
-        case CapabilityStore.get(cap_id) do
-          {:error, _} -> :ok
-          # Some implementations return the cap with revoked=true rather than dropping
-          {:ok, cap} -> assert Map.get(cap, :revoked, true) == true or cap.id == cap_id
-        end
+    for cap_id <- handle.cap_ids do
+      case CapabilityStore.get(cap_id) do
+        {:error, _reason} -> :ok
+        {:ok, capability} -> assert Map.get(capability, :revoked, true)
       end
-
-      # Identity gone
-      assert {:error, :not_found} = IdentityRegistry.lookup(handle.agent_id)
     end
 
-    test "nil handle is a no-op (uniform call-site shape)" do
-      assert :ok = RunIdentity.revoke(nil)
-    end
-
-    test "regression: revoke is safe to call twice", %{
-      issuer: issuer,
-      tmp_dir: tmp_dir
-    } do
-      caps_path = Path.join(tmp_dir, "double_revoke.caps.json")
-
-      write_signed_caps(caps_path, issuer, [
-        %{resource_uri: "arbor://fs/write/reports/double/**", constraints: %{}}
-      ])
-
-      {:ok, handle} = RunIdentity.mint(caps_path)
-
-      # First revoke succeeds. Second revoke must not raise — the
-      # try/after pattern in PipelineRunner may double-revoke if
-      # something inside the try block also revoked (defensive).
-      assert :ok = RunIdentity.revoke(handle)
-      assert :ok = RunIdentity.revoke(handle)
-    end
+    assert {:error, :not_found} = IdentityRegistry.lookup(handle.agent_id)
   end
 
-  describe "isolation" do
-    test "concurrent mints produce distinct principals", %{
-      issuer: issuer,
-      tmp_dir: tmp_dir
-    } do
-      caps_path = Path.join(tmp_dir, "iso.caps.json")
+  test "cleanup is nil-safe and idempotent", %{issuer: issuer, tmp_dir: tmp_dir} do
+    attestation = verified_attestation(issuer, tmp_dir, [])
+    {:ok, handle} = RunIdentity.mint(attestation)
 
-      write_signed_caps(caps_path, issuer, [
-        %{resource_uri: "arbor://fs/write/reports/iso/**", constraints: %{}}
-      ])
-
-      {:ok, handle1} = RunIdentity.mint(caps_path)
-      {:ok, handle2} = RunIdentity.mint(caps_path)
-
-      refute handle1.agent_id == handle2.agent_id,
-             "two mints must produce distinct ephemeral principals — " <>
-               "the per-run isolation property depends on this"
-
-      # No cross-bleed: handle1's caps belong to handle1's principal only
-      refute Enum.any?(handle1.cap_ids, &(&1 in handle2.cap_ids))
-
-      RunIdentity.revoke(handle1)
-      RunIdentity.revoke(handle2)
-    end
+    assert :ok = RunIdentity.revoke(nil)
+    assert :ok = RunIdentity.revoke(handle)
+    assert :ok = RunIdentity.revoke(handle)
   end
 
-  # ---------------------------------------------------------------------------
-  # Helpers
-  # ---------------------------------------------------------------------------
+  test "concurrent mints remain isolated", %{issuer: issuer, tmp_dir: tmp_dir} do
+    attestation =
+      verified_attestation(issuer, tmp_dir, [
+        %{resource_uri: "arbor://fs/write/reports/isolation/**", constraints: %{}}
+      ])
 
-  defp write_signed_caps(path, issuer, caps) do
-    parsed = CapsFile.build(issuer.agent_id, caps)
-    payload = CapsFile.signing_payload(parsed)
-    sig = Crypto.sign(payload, issuer.private_key)
+    {:ok, first} = RunIdentity.mint(attestation)
+    {:ok, second} = RunIdentity.mint(attestation)
 
-    json = %{
-      "version" => parsed.version,
-      "issuer_id" => parsed.issuer_id,
-      "capabilities" =>
-        Enum.map(parsed.capabilities, fn c ->
-          %{"resource_uri" => c.resource_uri, "constraints" => c.constraints}
-        end),
-      "signature" => Base.encode64(sig)
-    }
+    refute first.agent_id == second.agent_id
+    refute Enum.any?(first.cap_ids, &(&1 in second.cap_ids))
 
-    File.write!(path, Jason.encode!(json))
+    RunIdentity.revoke(first)
+    RunIdentity.revoke(second)
+  end
+
+  defp verified_attestation(issuer, tmp_dir, capabilities) do
+    path = Path.join(tmp_dir, "run.caps.json")
+    source = "digraph Run { start [shape=Mdiamond] }"
+
+    {:ok, payload} =
+      CapsFile.build(issuer.agent_id, capabilities,
+        pipeline_root: "test",
+        pipeline_path: "run.dot",
+        graph_hash: sha256(source),
+        workdir: Path.expand(tmp_dir),
+        initial_args: %{"mode" => "scheduled"}
+      )
+
+    signature = Crypto.sign(CapsFile.signing_payload(payload), issuer.private_key)
+    File.write!(path, payload |> CapsFile.manifest_map(signature) |> Jason.encode!())
+
+    assert {:ok, attestation} = CapsFile.load(path)
+    attestation
+  end
+
+  defp fetch_cap!(capability_id) do
+    assert {:ok, capability} = CapabilityStore.get(capability_id)
+    capability
+  end
+
+  defp sha256(value) do
+    value
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
   end
 end

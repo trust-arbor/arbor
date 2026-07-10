@@ -121,8 +121,8 @@ defmodule Mix.Tasks.Arbor.Scheduler.AuditCaps do
       label = String.pad_trailing(base, 36)
 
       case status do
-        {:ok, caps} ->
-          Mix.shell().info("  #{label} ✓ ok (#{length(caps)} caps)")
+        {:ok, attestation} ->
+          Mix.shell().info("  #{label} ✓ ok (#{length(attestation.capabilities)} caps)")
 
         :missing ->
           Mix.shell().info("  #{label} ◌ missing (.caps.json not present)")
@@ -144,9 +144,14 @@ defmodule Mix.Tasks.Arbor.Scheduler.AuditCaps do
   defp emit_json(results) do
     payload =
       Enum.map(results, fn
-        {base, {:ok, caps}} -> %{pipeline: base, status: "ok", caps_count: length(caps)}
-        {base, :missing} -> %{pipeline: base, status: "missing"}
-        {base, {:error, reason}} -> %{pipeline: base, status: "error", reason: inspect(reason)}
+        {base, {:ok, attestation}} ->
+          %{pipeline: base, status: "ok", caps_count: length(attestation.capabilities)}
+
+        {base, :missing} ->
+          %{pipeline: base, status: "missing"}
+
+        {base, {:error, reason}} ->
+          %{pipeline: base, status: "error", reason: inspect(reason)}
       end)
 
     Mix.shell().info(Jason.encode!(payload, pretty: true))

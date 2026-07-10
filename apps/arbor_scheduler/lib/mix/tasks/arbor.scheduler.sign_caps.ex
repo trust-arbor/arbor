@@ -1,53 +1,41 @@
 defmodule Mix.Tasks.Arbor.Scheduler.SignCaps do
-  @shortdoc "Sign a scheduler pipeline .caps.json file with an issuer key"
+  @shortdoc "Sign an exact scheduler pipeline execution attestation"
 
   @moduledoc """
-  Sign a `.caps.json` file in-place using the issuer's Ed25519 private key.
+  Build and sign a version 2 scheduler pipeline attestation in-place.
 
-  Phase 4 of the scheduler-privesc redesign. The operator writes a
-  `.caps.json` file declaring the capabilities their pipeline needs (with
-  `signature: ""` as a placeholder), then runs this task to produce a
-  signed file the scheduler will accept at load time.
+  The target file supplies only the issuer and capability declaration. This
+  task resolves the exact sibling DOT under a configured pipeline root,
+  computes its SHA-256, canonicalizes the workdir, parses exact JSON initial
+  arguments, and signs all of those fields together.
 
-  ## Usage
+  ## Usage and version 1 migration
 
-      mix arbor.scheduler.sign_caps \\
-        --key-file ~/.claude/arbor-personal/claude_cli_mbp.arbor.key \\
+      ./bin/mix arbor.scheduler.sign_caps \
+        --key-file ~/.claude/arbor-personal/claude_cli_mbp.arbor.key \
+        --workdir "$(pwd -P)" \
+        --args-json '{}' \
         apps/arbor_scheduler/priv/pipelines/upstream_deps_summary.caps.json
 
-  ## Options
+  The sibling DOT path is inferred by replacing `.caps.json` with `.dot`.
+  Use `--pipeline` only when making that relationship explicit. A version 1
+  file may be used as migration input, but scheduler execution rejects it until
+  this task rewrites it with a signature from the matching private key.
 
-    * `--key-file <path>` (required) — `.arbor.key` file containing the
-      issuer's Ed25519 private key. Same format used by `mix arbor.signer`
-      and the External Agents registration flow.
+  ## Required options
 
-  ## Behavior
+    * `--key-file` - issuer `.arbor.key` file
+    * `--workdir` - fixed existing execution directory
+    * `--args-json` - exact initial argument object, including `{}`
 
-  Reads the target file, validates the schema (version, issuer_id,
-  capabilities present), computes the canonical signing payload via
-  `Arbor.Scheduler.CapsFile.signing_payload/1`, signs with the provided
-  key, and writes the file back with the `signature` field populated.
-
-  ## Verification chain
-
-  Signing this file does NOT enroll the issuer or check the envelope —
-  those are runtime checks done by `CapsFile.load/1` against
-  `Arbor.Security.IssuerRegistry`. The task verifies one thing only:
-  that the agent_id in the `.arbor.key` matches the `issuer_id` declared
-  in the caps file. Signing under a mismatched identity would produce a
-  file that fails signature verification at load time.
-
-  ## Idempotency
-
-  Re-running the task on an already-signed file overwrites the
-  `signature` field with a fresh signature over the (potentially
-  unchanged) payload. Useful when the capabilities list changes — edit
-  the file, re-sign.
+  Signing does not enroll the issuer or widen its envelope. Runtime verification
+  still checks the signature, issuer status, and every declared capability
+  against `Arbor.Security.IssuerRegistry`.
   """
 
   use Mix.Task
 
-  alias Arbor.Scheduler.CapsFile
+  alias Arbor.Scheduler.{CapsFile, PipelinePaths}
   alias Arbor.Security.Crypto
   alias Arbor.Security.KeyFile
 
@@ -55,23 +43,44 @@ defmodule Mix.Tasks.Arbor.Scheduler.SignCaps do
   def run(args) do
     Mix.Task.run("app.config")
 
-    {opts, positional, _} =
+    {opts, positional, _invalid} =
       OptionParser.parse(args,
-        strict: [key_file: :string],
-        aliases: [k: :key_file]
+        strict: [key_file: :string, pipeline: :string, workdir: :string, args_json: :string],
+        aliases: [k: :key_file, p: :pipeline, w: :workdir]
       )
 
     with {:ok, caps_path} <- pick_positional(positional),
          {:ok, key_path} <- fetch_required(opts, :key_file),
-         {:ok, key_material} <- load_key_file(key_path),
+         {:ok, workdir_input} <- fetch_required(opts, :workdir),
+         {:ok, args_json} <- fetch_required(opts, :args_json),
+         {:ok, pipeline_path} <- pipeline_path(opts, caps_path),
+         {:ok, paths} <- PipelinePaths.resolve_pipeline(pipeline_path),
+         :ok <- PipelinePaths.verify_caps_target(caps_path, paths),
+         {:ok, workdir} <- PipelinePaths.resolve_workdir(workdir_input),
+         {:ok, initial_args} <- parse_initial_args(args_json),
+         {:ok, key_material} <- KeyFile.read(key_path),
          {:ok, raw} <- read_json(caps_path),
-         {:ok, parsed} <- normalize_for_signing(raw),
-         :ok <- check_issuer_matches(parsed.issuer_id, key_material.agent_id),
-         {:ok, signed_json} <- sign_and_serialize(parsed, key_material.private_key) do
-      File.write!(caps_path, signed_json)
+         {:ok, declaration} <- normalize_declaration(raw),
+         :ok <- check_issuer_matches(declaration.issuer_id, key_material.agent_id),
+         {:ok, graph_hash} <- PipelinePaths.hash_file(paths.path),
+         {:ok, payload} <-
+           CapsFile.build(declaration.issuer_id, declaration.capabilities,
+             pipeline_root: paths.root_id,
+             pipeline_path: paths.relative_path,
+             graph_hash: graph_hash,
+             workdir: workdir,
+             initial_args: initial_args
+           ),
+         {:ok, signed_json} <- sign_and_serialize(payload, key_material.private_key),
+         :ok <- atomic_write(caps_path, signed_json) do
       Mix.shell().info("Signed #{caps_path}")
-      Mix.shell().info("  issuer:   #{key_material.agent_id}")
-      Mix.shell().info("  caps:     #{length(parsed.capabilities)}")
+      Mix.shell().info("  version:  2")
+      Mix.shell().info("  issuer:   #{payload.issuer_id}")
+      Mix.shell().info("  pipeline: #{payload.pipeline_root}:#{payload.pipeline_path}")
+      Mix.shell().info("  sha256:   #{payload.graph_hash}")
+      Mix.shell().info("  workdir:  #{payload.workdir}")
+      Mix.shell().info("  args:     #{Jason.encode!(payload.initial_args)}")
+      Mix.shell().info("  caps:     #{length(payload.capabilities)}")
     else
       {:error, reason} -> abort(reason)
     end
@@ -84,78 +93,76 @@ defmodule Mix.Tasks.Arbor.Scheduler.SignCaps do
   defp fetch_required(opts, key) do
     case Keyword.get(opts, key) do
       nil -> {:error, {:missing_required_option, key}}
-      v -> {:ok, v}
+      value -> {:ok, value}
     end
   end
 
-  defp load_key_file(path), do: KeyFile.read(path)
+  defp pipeline_path(opts, caps_path) do
+    case Keyword.get(opts, :pipeline) do
+      path when is_binary(path) ->
+        {:ok, path}
+
+      nil ->
+        if String.ends_with?(caps_path, ".caps.json") do
+          {:ok, String.replace_suffix(caps_path, ".caps.json", ".dot")}
+        else
+          {:error, :caps_file_must_end_in_caps_json}
+        end
+    end
+  end
+
+  defp parse_initial_args(json) do
+    case Jason.decode(json) do
+      {:ok, value} when is_map(value) -> {:ok, value}
+      {:ok, _value} -> {:error, :args_json_must_be_an_object}
+      {:error, reason} -> {:error, {:invalid_args_json, reason}}
+    end
+  end
 
   defp read_json(path) do
-    with {:ok, content} <- File.read(path),
-         {:ok, decoded} <- Jason.decode(content) do
-      {:ok, decoded}
-    else
-      {:error, reason} -> {:error, {:caps_file_read_failed, reason}}
+    case File.read(path) do
+      {:ok, content} ->
+        case Jason.decode(content) do
+          {:ok, decoded} -> {:ok, decoded}
+          {:error, reason} -> {:error, {:invalid_caps_json, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:caps_file_read_failed, reason}}
     end
   end
 
-  defp normalize_for_signing(raw) do
+  defp normalize_declaration(raw) when is_map(raw) do
     with {:ok, version} <- fetch_int(raw, "version"),
+         :ok <- migratable_version(version),
          {:ok, issuer_id} <- fetch_string(raw, "issuer_id"),
-         {:ok, caps_raw} <- fetch_list(raw, "capabilities"),
-         {:ok, capabilities} <- normalize_capabilities(caps_raw) do
-      {:ok, %{version: version, issuer_id: issuer_id, capabilities: capabilities}}
+         {:ok, capabilities} <- fetch_list(raw, "capabilities") do
+      {:ok, %{issuer_id: issuer_id, capabilities: capabilities}}
     end
   end
 
-  # Empty list is an explicit "this pipeline declares no caps" — valid;
-  # matches CapsFile.load semantics. Shell-only pipelines use this form.
-  defp normalize_capabilities([]), do: {:ok, []}
+  defp normalize_declaration(_), do: {:error, :caps_file_not_an_object}
 
-  defp normalize_capabilities(caps) do
-    caps
-    |> Enum.with_index()
-    |> Enum.reduce_while({:ok, []}, fn {raw, idx}, {:ok, acc} ->
-      case normalize_capability(raw, idx) do
-        {:ok, descriptor} -> {:cont, {:ok, [descriptor | acc]}}
-        err -> {:halt, err}
-      end
-    end)
-    |> case do
-      {:ok, ds} -> {:ok, Enum.reverse(ds)}
-      err -> err
-    end
-  end
-
-  defp normalize_capability(%{"resource_uri" => uri} = raw, _idx) when is_binary(uri) do
-    constraints =
-      case Map.get(raw, "constraints", %{}) do
-        m when is_map(m) -> m
-        _ -> %{}
-      end
-
-    {:ok, %{resource_uri: uri, constraints: constraints}}
-  end
-
-  defp normalize_capability(_, idx), do: {:error, {:capability_missing_resource_uri, idx}}
+  defp migratable_version(version) when version in [1, 2], do: :ok
+  defp migratable_version(version), do: {:error, {:unsupported_version, version}}
 
   defp fetch_int(map, key) do
     case Map.get(map, key) do
-      v when is_integer(v) -> {:ok, v}
+      value when is_integer(value) -> {:ok, value}
       _ -> {:error, {:missing_or_invalid, key}}
     end
   end
 
   defp fetch_string(map, key) do
     case Map.get(map, key) do
-      v when is_binary(v) and v != "" -> {:ok, v}
+      value when is_binary(value) and value != "" -> {:ok, value}
       _ -> {:error, {:missing_or_invalid, key}}
     end
   end
 
   defp fetch_list(map, key) do
     case Map.get(map, key) do
-      v when is_list(v) -> {:ok, v}
+      value when is_list(value) -> {:ok, value}
       _ -> {:error, {:missing_or_invalid, key}}
     end
   end
@@ -166,21 +173,28 @@ defmodule Mix.Tasks.Arbor.Scheduler.SignCaps do
     {:error, {:issuer_mismatch, %{caps_file: file_issuer, key_file: key_issuer}}}
   end
 
-  defp sign_and_serialize(parsed, private_key) do
-    payload = CapsFile.signing_payload(parsed)
-    signature = Crypto.sign(payload, private_key)
+  defp sign_and_serialize(payload, private_key) do
+    signature = payload |> CapsFile.signing_payload() |> Crypto.sign(private_key)
 
-    json = %{
-      "version" => parsed.version,
-      "issuer_id" => parsed.issuer_id,
-      "capabilities" =>
-        Enum.map(parsed.capabilities, fn c ->
-          %{"resource_uri" => c.resource_uri, "constraints" => c.constraints}
-        end),
-      "signature" => Base.encode64(signature)
-    }
+    json =
+      payload
+      |> CapsFile.manifest_map(signature)
+      |> Jason.encode!(pretty: true)
 
-    {:ok, Jason.encode!(json, pretty: true) <> "\n"}
+    {:ok, json <> "\n"}
+  end
+
+  defp atomic_write(path, content) do
+    temporary = "#{path}.tmp-#{System.unique_integer([:positive])}"
+
+    with :ok <- File.write(temporary, content),
+         :ok <- File.rename(temporary, path) do
+      :ok
+    else
+      {:error, reason} ->
+        File.rm(temporary)
+        {:error, {:caps_file_write_failed, reason}}
+    end
   end
 
   defp abort(reason) do

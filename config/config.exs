@@ -408,6 +408,13 @@ config :arbor_dashboard,
 # own jobs to the crontab below. Each pipeline is a DOT file under
 # `apps/arbor_scheduler/priv/pipelines/`, executed by
 # `Arbor.Scheduler.Workers.PipelineRunner` via the orchestrator.
+# Legacy version 1 `.caps.json` files fail closed until an operator re-signs
+# them as exact version 2 execution attestations with the matching issuer key.
+config :arbor_scheduler,
+  pipeline_roots: %{
+    "scheduler_priv" => Path.expand("../apps/arbor_scheduler/priv/pipelines", __DIR__)
+  }
+
 config :arbor_scheduler, Oban,
   repo: Arbor.Persistence.Repo,
   queues: [default: 10, pipelines: 5, maintenance: 2],

@@ -14,7 +14,7 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
   @moduletag :fast
 
   alias Arbor.Contracts.Security.{Capability, Identity}
-  alias Arbor.Scheduler.CapsFile
+  alias Arbor.Scheduler.{CapsFile, PipelinePaths}
   alias Arbor.Security.Identity.Registry, as: IdentityRegistry
   alias Arbor.Security.IssuerRegistry
 
@@ -29,6 +29,9 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
 
     tmp = System.tmp_dir!() |> Path.join("scheduler_tasks_#{System.unique_integer([:positive])}")
     File.mkdir_p!(tmp)
+
+    restore_env(:pipeline_roots)
+    Application.put_env(:arbor_scheduler, :pipeline_roots, %{"test" => tmp})
 
     on_exit(fn ->
       IssuerRegistry.revoke(identity.agent_id, "test cleanup")
@@ -158,7 +161,9 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
   describe "arbor.scheduler.sign_caps" do
     test "signs a well-formed unsigned caps file", %{identity: identity, tmp_dir: tmp_dir} do
       caps_path = Path.join(tmp_dir, "summary.caps.json")
+      dot_path = Path.join(tmp_dir, "summary.dot")
       key_path = Path.join(tmp_dir, "test.arbor.key")
+      File.write!(dot_path, "digraph Summary { start [shape=Mdiamond] }")
 
       File.write!(
         caps_path,
@@ -183,10 +188,19 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       Mix.Tasks.Arbor.Scheduler.SignCaps.run([
         "--key-file",
         key_path,
+        "--workdir",
+        tmp_dir,
+        "--args-json",
+        ~s({"mode":"summary"}),
         caps_path
       ])
 
-      assert {:ok, [%{resource_uri: uri}]} = CapsFile.load(caps_path)
+      assert {:ok, attestation} = CapsFile.load(caps_path)
+      assert attestation.version == 2
+      assert attestation.pipeline_root == "test"
+      assert attestation.pipeline_path == "summary.dot"
+      assert attestation.initial_args == %{"mode" => "summary"}
+      assert [%{resource_uri: uri}] = attestation.capabilities
       assert uri == "arbor://fs/write/reports/upstream-deps-summary/**"
     end
 
@@ -197,7 +211,9 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       # file ostensibly from someone else (the signature would still fail
       # at load time, but earlier failure with a clear error helps ops).
       caps_path = Path.join(tmp_dir, "mismatched.caps.json")
+      dot_path = Path.join(tmp_dir, "mismatched.dot")
       key_path = Path.join(tmp_dir, "other.arbor.key")
+      File.write!(dot_path, "digraph Mismatched { start [shape=Mdiamond] }")
 
       {:ok, other_identity} = Identity.generate()
 
@@ -217,6 +233,10 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
                Mix.Tasks.Arbor.Scheduler.SignCaps.run([
                  "--key-file",
                  key_path,
+                 "--workdir",
+                 tmp_dir,
+                 "--args-json",
+                 "{}",
                  caps_path
                ])
              ) == {:shutdown, 1}
@@ -227,6 +247,8 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
 
     test "fails for missing key file", %{identity: identity, tmp_dir: tmp_dir} do
       caps_path = Path.join(tmp_dir, "any.caps.json")
+      dot_path = Path.join(tmp_dir, "any.dot")
+      File.write!(dot_path, "digraph Any { start [shape=Mdiamond] }")
 
       File.write!(
         caps_path,
@@ -242,6 +264,10 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
                Mix.Tasks.Arbor.Scheduler.SignCaps.run([
                  "--key-file",
                  Path.join(tmp_dir, "nonexistent.arbor.key"),
+                 "--workdir",
+                 tmp_dir,
+                 "--args-json",
+                 "{}",
                  caps_path
                ])
              ) == {:shutdown, 1}
@@ -273,7 +299,8 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       write_signed_caps(
         Path.join(pipelines_dir, "ok.caps.json"),
         identity,
-        [%{resource_uri: "arbor://fs/write/reports/ok/**", constraints: %{}}]
+        [%{resource_uri: "arbor://fs/write/reports/ok/**", constraints: %{}}],
+        tmp_dir
       )
 
       # broken.caps.json: signed by a DIFFERENT identity that is NOT enrolled
@@ -283,7 +310,8 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
       write_signed_caps(
         Path.join(pipelines_dir, "broken.caps.json"),
         other_identity,
-        [%{resource_uri: "arbor://fs/write/reports/broken/**", constraints: %{}}]
+        [%{resource_uri: "arbor://fs/write/reports/broken/**", constraints: %{}}],
+        tmp_dir
       )
 
       assert catch_exit(
@@ -314,22 +342,23 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
     """)
   end
 
-  defp write_signed_caps(path, identity, caps) do
-    parsed = CapsFile.build(identity.agent_id, caps)
-    payload = CapsFile.signing_payload(parsed)
-    sig = Arbor.Security.Crypto.sign(payload, identity.private_key)
+  defp write_signed_caps(path, identity, caps, root) do
+    dot_path = String.replace_suffix(path, ".caps.json", ".dot")
+    {:ok, workdir} = PipelinePaths.resolve_workdir(root)
 
-    json = %{
-      "version" => parsed.version,
-      "issuer_id" => parsed.issuer_id,
-      "capabilities" =>
-        Enum.map(parsed.capabilities, fn c ->
-          %{"resource_uri" => c.resource_uri, "constraints" => c.constraints}
-        end),
-      "signature" => Base.encode64(sig)
-    }
+    {:ok, payload} =
+      CapsFile.build(identity.agent_id, caps,
+        pipeline_root: "test",
+        pipeline_path: Path.relative_to(dot_path, root),
+        graph_hash: sha256(File.read!(dot_path)),
+        workdir: workdir,
+        initial_args: %{}
+      )
 
-    File.write!(path, Jason.encode!(json))
+    signature =
+      Arbor.Security.Crypto.sign(CapsFile.signing_payload(payload), identity.private_key)
+
+    File.write!(path, payload |> CapsFile.manifest_map(signature) |> Jason.encode!())
   end
 
   defp drain_shell_messages do
@@ -343,5 +372,22 @@ defmodule Mix.Tasks.Arbor.Scheduler.TasksTest do
     after
       0 -> Enum.reverse(acc)
     end
+  end
+
+  defp sha256(value) do
+    value
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp restore_env(key) do
+    previous = Application.get_env(:arbor_scheduler, key, :__missing__)
+
+    on_exit(fn ->
+      case previous do
+        :__missing__ -> Application.delete_env(:arbor_scheduler, key)
+        value -> Application.put_env(:arbor_scheduler, key, value)
+      end
+    end)
   end
 end

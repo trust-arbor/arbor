@@ -7,10 +7,10 @@ defmodule Arbor.Scheduler.CapsAudit do
   node's live `IssuerRegistry`/identity state.
   """
 
-  alias Arbor.Contracts.Security.Capability
   alias Arbor.Scheduler.CapsFile
+  alias Arbor.Scheduler.CapsFile.Attestation
 
-  @type pipeline_status :: {:ok, [Capability.t()]} | :missing | {:error, term()}
+  @type pipeline_status :: {:ok, Attestation.t()} | :missing | {:error, term()}
   @type result :: {String.t(), pipeline_status()}
 
   @doc """
@@ -40,8 +40,8 @@ defmodule Arbor.Scheduler.CapsAudit do
   @doc """
   True when any scanned caps file failed verification.
 
-  Missing `.caps.json` files are reported but are not hard errors for this audit;
-  they represent unsigned/no-cap pipelines.
+  Missing `.caps.json` files are reported separately. PipelineRunner still
+  refuses them at execution time.
   """
   @spec errors?([result()]) :: boolean()
   def errors?(results), do: Enum.any?(results, &match?({_, {:error, _}}, &1))

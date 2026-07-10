@@ -1,44 +1,33 @@
 defmodule Arbor.Scheduler.Workers.PipelineRunner do
   @moduledoc """
-  Oban worker that loads and runs a DOT pipeline.
+  Oban worker that executes an exactly attested DOT pipeline.
 
-  Invoked by `Arbor.Scheduler.enqueue_pipeline/3` (and the
-  `schedule_*` variants). The actual pipeline execution is delegated to
-  `Arbor.Orchestrator.Engine` at runtime via `apply/3` so we don't take
-  a compile-time dep on arbor_orchestrator from this app.
+  The job payload identifies a pipeline and repeats its reviewed initial
+  arguments. It never supplies execution authority. The sibling version 2
+  manifest is authoritative for the canonical DOT identity, SHA-256, workdir,
+  initial values, issuer, and capability envelope.
 
-  ## Args contract
-
-  Oban jobs serialize their `args` to JSON in the database, so all keys
-  are strings on the receive side.
-
-      %{
-        "pipeline_path" => "scheduled/upstream_deps_check.dot",
-        "args"          => %{"repos" => [...]}      # initial context
-      }
-
-  ## Return values
-
-  - `:ok` — pipeline ran to completion successfully
-  - `{:error, reason}` — Oban will retry per `max_attempts`
-
-  Unrecoverable errors (pipeline file not found, etc.) should return
-  `{:discard, reason}` to skip retries.
+  `Arbor.Orchestrator.run_file_as/3` is dispatched through `apply/3` to avoid a
+  compile-time dependency on the higher-level orchestrator app. Until that
+  facade is available, jobs fail with a retryable, explicit error.
   """
 
   use Oban.Worker, queue: :default, max_attempts: 3
 
   require Logger
 
-  alias Arbor.Scheduler.RunIdentity
+  alias Arbor.Scheduler.{CapsFile, PipelinePaths, RunIdentity}
+
+  @workdir_not_supplied :__scheduler_workdir_not_supplied__
 
   @impl Oban.Worker
-  def perform(%Oban.Job{args: %{"pipeline_path" => path} = args}) do
-    initial_context = Map.get(args, "args", %{})
+  def perform(%Oban.Job{args: %{"pipeline_path" => path} = job_args}) when is_binary(path) do
+    initial_args = Map.get(job_args, "args", %{})
+    requested_workdir = Map.get(job_args, "workdir", @workdir_not_supplied)
 
     Logger.info("[Scheduler] Running pipeline: #{path}")
 
-    case run_pipeline(path, initial_context) do
+    case run_pipeline(path, initial_args, requested_workdir) do
       {:ok, _result} ->
         Logger.info("[Scheduler] Pipeline completed: #{path}")
         :ok
@@ -48,24 +37,24 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
         {:discard, "pipeline file not found: #{path}"}
 
       {:error, {:caps_file_missing, caps_path}} ->
-        # Default #3 from the privesc design discussion: a pipeline that
-        # silently runs with zero caps is the exact bug shape this work is
-        # trying to prevent. Refuse to start and tell the operator which
-        # sibling file is expected — they can write one, sign it, and
-        # re-run.
         Logger.error("[Scheduler] Pipeline refused: missing #{caps_path}")
         {:discard, "missing caps file: #{caps_path}"}
 
       {:error, {:caps_file_invalid, reason}} ->
-        # CapsFile.load returned a specific failure mode (invalid_signature,
-        # cap_exceeds_envelope, issuer_revoked, etc.). Surface the exact
-        # reason so the operator can fix root cause rather than guess.
         Logger.error("[Scheduler] Pipeline refused: caps file invalid: #{inspect(reason)}")
         {:discard, "caps file invalid: #{inspect(reason)}"}
 
+      {:error, {:attestation_rejected, reason}} ->
+        Logger.error("[Scheduler] Pipeline attestation rejected: #{inspect(reason)}")
+        {:discard, "pipeline attestation rejected: #{inspect(reason)}"}
+
       {:error, :orchestrator_unavailable} ->
-        Logger.error("[Scheduler] Arbor.Orchestrator unavailable — retry")
+        Logger.error("[Scheduler] Arbor.Orchestrator unavailable; retrying")
         {:error, :orchestrator_unavailable}
+
+      {:error, :orchestrator_run_file_as_unavailable} ->
+        Logger.error("[Scheduler] Arbor.Orchestrator.run_file_as/3 unavailable; retrying")
+        {:error, :orchestrator_run_file_as_unavailable}
 
       {:error, reason} ->
         Logger.error("[Scheduler] Pipeline failed: #{path}: #{inspect(reason)}")
@@ -74,43 +63,31 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
   end
 
   def perform(%Oban.Job{args: args}) do
-    Logger.error("[Scheduler] Job args missing :pipeline_path: #{inspect(args)}")
-    {:discard, "missing pipeline_path"}
+    Logger.error("[Scheduler] Job args missing or invalid pipeline_path: #{inspect(args)}")
+    {:discard, "missing or invalid pipeline_path"}
   end
 
-  # Runtime dispatch to the orchestrator so arbor_scheduler doesn't take
-  # a compile-time dep on arbor_orchestrator. The orchestrator module
-  # surface this worker targets is subject to refinement as the
-  # scheduler matures — start with the simplest viable shape.
-  defp run_pipeline(path, context) do
-    orchestrator = Arbor.Orchestrator
-    caps_path = caps_path_for(path)
-
-    cond do
-      # Check inputs (cheap, deterministic) before dispatching. A missing
-      # pipeline file is unrecoverable regardless of orchestrator state,
-      # so it wins over orchestrator-unavailable (which could be a
-      # transient startup race the operator hits during deploy).
-      not File.exists?(path) ->
-        {:error, :pipeline_not_found}
-
-      not File.exists?(caps_path) ->
-        # Phase 5: pipelines MUST ship a signed .caps.json sibling. The
-        # scheduler-privesc redesign trades "pipelines auto-run with broad
-        # system caps" for "every pipeline declares its caps explicitly,
-        # signed by an enrolled issuer." Fail-closed on missing.
-        {:error, {:caps_file_missing, caps_path}}
-
-      not Code.ensure_loaded?(orchestrator) ->
-        {:error, :orchestrator_unavailable}
-
-      true ->
-        execute_with_caps(orchestrator, path, caps_path, context)
+  defp run_pipeline(path, initial_args, requested_workdir) do
+    with {:ok, paths} <- PipelinePaths.resolve_pipeline(path),
+         {:ok, attestation} <- load_attestation(paths.caps_path),
+         :ok <- verify_pipeline_identity(paths, attestation),
+         :ok <- verify_initial_args(initial_args, attestation),
+         :ok <- verify_requested_workdir(requested_workdir, attestation),
+         :ok <- verify_attested_workdir(attestation),
+         {:ok, orchestrator} <- orchestrator_module() do
+      execute_with_attestation(orchestrator, paths, attestation)
+    else
+      {:error, :pipeline_not_found} = error -> error
+      {:error, {:caps_file_missing, _}} = error -> error
+      {:error, {:caps_file_invalid, _}} = error -> error
+      {:error, :orchestrator_unavailable} = error -> error
+      {:error, :orchestrator_run_file_as_unavailable} = error -> error
+      {:error, reason} -> {:error, {:attestation_rejected, reason}}
     end
   rescue
-    e ->
-      Logger.error("[Scheduler] PipelineRunner exception: #{inspect(e)}")
-      {:error, {:exception, Exception.message(e)}}
+    exception ->
+      Logger.error("[Scheduler] PipelineRunner exception: #{inspect(exception)}")
+      {:error, {:exception, Exception.message(exception)}}
   catch
     :exit, reason ->
       Logger.error("[Scheduler] PipelineRunner exit: #{inspect(reason)}")
@@ -121,60 +98,104 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
       {:error, {:throw, value}}
   end
 
-  defp execute_with_caps(orchestrator, pipeline_path, caps_path, context) do
-    case RunIdentity.mint(caps_path) do
-      {:ok, handle} ->
-        # Try/after guarantees caps are revoked even on pipeline crash
-        # (default #2 from the design discussion). Logging the revoke
-        # outcome happens inside RunIdentity.revoke — it is best-effort
-        # by contract and never raises.
-        try do
-          seeded_context = seed_session_identity(context, handle.agent_id)
+  defp load_attestation(caps_path) do
+    case CapsFile.load(caps_path) do
+      {:ok, attestation} -> {:ok, attestation}
+      {:error, reason} -> {:error, {:caps_file_invalid, reason}}
+    end
+  end
 
-          # credo:disable-for-next-line Credo.Check.Refactor.Apply
-          apply(orchestrator, :run_file, [
-            pipeline_path,
-            [
-              initial_values: seeded_context,
-              signer: handle.signer
-            ]
-          ])
+  defp verify_pipeline_identity(paths, attestation) do
+    actual = %{root: paths.root_id, path: paths.relative_path}
+    expected = %{root: attestation.pipeline_root, path: attestation.pipeline_path}
+
+    if actual == expected,
+      do: :ok,
+      else: {:error, {:pipeline_identity_mismatch, expected, actual}}
+  end
+
+  defp verify_initial_args(initial_args, attestation) do
+    if CapsFile.initial_args_match?(initial_args, attestation.initial_args),
+      do: :ok,
+      else: {:error, :initial_args_mismatch}
+  end
+
+  defp verify_requested_workdir(@workdir_not_supplied, _attestation), do: :ok
+
+  defp verify_requested_workdir(workdir, attestation) do
+    if workdir == attestation.workdir,
+      do: :ok,
+      else: {:error, :workdir_mismatch}
+  end
+
+  defp verify_attested_workdir(attestation) do
+    case PipelinePaths.resolve_workdir(attestation.workdir) do
+      {:ok, workdir} when workdir == attestation.workdir -> :ok
+      {:ok, _other} -> {:error, :attested_workdir_changed}
+      {:error, reason} -> {:error, {:attested_workdir_invalid, reason}}
+    end
+  end
+
+  defp orchestrator_module do
+    orchestrator =
+      Application.get_env(:arbor_scheduler, :orchestrator_module, Arbor.Orchestrator)
+
+    cond do
+      not Code.ensure_loaded?(orchestrator) ->
+        {:error, :orchestrator_unavailable}
+
+      not function_exported?(orchestrator, :run_file_as, 3) ->
+        {:error, :orchestrator_run_file_as_unavailable}
+
+      true ->
+        {:ok, orchestrator}
+    end
+  end
+
+  defp execute_with_attestation(orchestrator, paths, attestation) do
+    case RunIdentity.mint(attestation) do
+      {:ok, handle} ->
+        try do
+          with :ok <- revalidate_paths(paths),
+               {:ok, actual_hash} <- PipelinePaths.hash_file(paths.path),
+               :ok <- verify_graph_hash(attestation.graph_hash, actual_hash) do
+            # The hash check is intentionally the final scheduler operation
+            # before dispatch. run_file_as/3 independently rechecks the same
+            # expected hash while reading the DOT for Engine execution.
+            # credo:disable-for-next-line Credo.Check.Refactor.Apply
+            apply(orchestrator, :run_file_as, [
+              handle.agent_id,
+              paths.path,
+              [
+                signer: handle.signer,
+                graph_hash: attestation.graph_hash,
+                workdir: attestation.workdir,
+                initial_values: attestation.initial_args,
+                author_id: attestation.issuer_id
+              ]
+            ])
+          else
+            {:error, reason} -> {:error, {:attestation_rejected, reason}}
+          end
         after
           RunIdentity.revoke(handle)
         end
 
       {:error, reason} ->
-        {:error, {:caps_file_invalid, reason}}
+        {:error, {:attestation_rejected, {:run_identity_failed, reason}}}
     end
   end
 
-  defp caps_path_for(pipeline_path) do
-    pipeline_path
-    |> String.replace_suffix(".dot", ".caps.json")
-  end
-
-  @doc """
-  Build the initial pipeline context with the scheduler's authoritative
-  `session.agent_id`.
-
-  Public so a security-regression test can hit it directly. Any value
-  the caller (Oban args, operator, attacker) places under
-  `"session.agent_id"` is overwritten by the scheduler's identity —
-  the assigns layer downstream uses that key to derive the principal
-  CapabilityCheck compares against the signer's signed_request.
-  Without this override an attacker who controls the Oban payload
-  could spoof the agent_id.
-
-  When `identity_agent_id` is `nil` (Identity GenServer not running),
-  any pre-seeded `"session.agent_id"` is stripped rather than
-  preserved — fail-closed, no implicit trust of attacker-supplied
-  values when the identity layer is absent.
-  """
-  @spec seed_session_identity(map(), String.t() | nil) :: map()
-  def seed_session_identity(context, identity_agent_id) when is_map(context) do
-    case identity_agent_id do
-      nil -> Map.delete(context, "session.agent_id")
-      id when is_binary(id) -> Map.put(context, "session.agent_id", id)
+  defp revalidate_paths(expected) do
+    case PipelinePaths.resolve_pipeline(expected.path) do
+      {:ok, ^expected} -> :ok
+      {:ok, _changed} -> {:error, :pipeline_path_changed}
+      {:error, reason} -> {:error, {:pipeline_path_changed, reason}}
     end
   end
+
+  defp verify_graph_hash(expected, expected), do: :ok
+
+  defp verify_graph_hash(expected, actual),
+    do: {:error, {:graph_hash_mismatch, expected, actual}}
 end

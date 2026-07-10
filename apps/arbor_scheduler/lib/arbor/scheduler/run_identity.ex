@@ -3,7 +3,7 @@ defmodule Arbor.Scheduler.RunIdentity do
   Per-pipeline-run ephemeral identity + capability lifecycle.
 
   Phase 5 of the scheduler-privesc redesign. For each pipeline run that
-  has a valid signed `.caps.json` file, this module mints a fresh
+  has a verified signed attestation, this module mints a fresh
   Ed25519 keypair, registers it in `Identity.Registry`, grants the
   declared capabilities to that ephemeral principal, and returns a
   signer the orchestrator can use. After the run completes (success
@@ -37,7 +37,7 @@ defmodule Arbor.Scheduler.RunIdentity do
   issuer X signs caps.json declaring caps {Z₁, Z₂}  (Phase 4 sign_caps)
        │
        ▼
-  CapsFile.load verifies signature + envelope        (Phase 3)
+  CapsFile.load verifies the complete attestation     (Phase 5)
        │
        ▼
   RunIdentity.mint creates ephemeral identity E,
@@ -57,61 +57,47 @@ defmodule Arbor.Scheduler.RunIdentity do
 
   alias Arbor.Contracts.Security.Identity, as: IdentityStruct
   alias Arbor.Scheduler.CapsFile
+  alias Arbor.Scheduler.CapsFile.Attestation
   alias Arbor.Security
   alias Arbor.Security.Identity.Registry, as: IdentityRegistry
 
-  # Every pipeline run needs the orchestrator/execute capability to
-  # actually traverse pipeline nodes (the CapabilityCheck middleware
-  # demands it). The persistent scheduler identity holds this cap as a
-  # permanent grant; per-run identities mint their own scoped to /**
-  # so the pipeline can run at all. The "real" security gates are at
-  # the resource layer (fs/write/, shell/exec/) — orchestrator/execute
-  # is the lobby pass, not a resource permission.
+  # Every pipeline run needs orchestrator/execute to traverse graph nodes.
+  # This is lobby authority only. Resource handlers MUST independently require
+  # canonical fs, shell, and action capabilities; this grant cannot substitute
+  # for those checks and must never be expanded into broad resource grants.
   @orchestrator_execute_uri "arbor://orchestrator/execute/**"
 
   @type run_handle :: %{
           agent_id: String.t(),
           signer: (binary() -> {:ok, term()} | {:error, term()}),
-          cap_ids: [String.t()]
+          cap_ids: [String.t()],
+          attestation: Attestation.t()
         }
 
   @doc """
-  Mint a per-run identity, grant the caps declared in `caps_file_path`,
-  return a handle with the signer + cap ids for later revocation.
+  Mint a per-run identity from a verified attestation and grant only its
+  envelope-bounded capability descriptors.
 
   Verification chain (each step fails closed):
-    1. `CapsFile.load` validates the file and returns descriptors
+    1. Caller supplies the `CapsFile.Attestation` returned by `CapsFile.load/1`
     2. `Identity.generate` produces a fresh Ed25519 keypair
     3. `IdentityRegistry.register` enrolls the public key
-    4. `Security.grant` for the orchestrator/execute lobby cap
-    5. `Security.grant` for each declared capability descriptor
+    4. `Security.grant` creates the orchestrator/execute lobby cap
+    5. `Security.grant` creates each attested capability descriptor
 
   On any failure, partial state (e.g., identity registered but caps
   not yet granted) is cleaned up before returning the error.
   """
-  @spec mint(Path.t()) :: {:ok, run_handle()} | {:error, atom() | tuple()}
-  def mint(caps_file_path) do
-    with {:ok, descriptors} <- load_caps(caps_file_path),
+  @spec mint(Attestation.t()) :: {:ok, run_handle()} | {:error, atom() | tuple()}
+  def mint(%Attestation{} = attestation) do
+    with :ok <- CapsFile.verify_attestation(attestation),
          {:ok, identity} <- generate_identity(),
-         :ok <- register_identity(identity),
-         {:ok, lobby_cap} <- grant_orchestrator_execute(identity.agent_id),
-         {:ok, run_caps} <- grant_run_caps(identity.agent_id, descriptors),
-         :ok <- set_trust_profile_rules(identity.agent_id, descriptors) do
-      {:ok,
-       %{
-         agent_id: identity.agent_id,
-         signer: Security.make_signer(identity.agent_id, identity.private_key),
-         cap_ids: [lobby_cap.id | Enum.map(run_caps, & &1.id)]
-       }}
-    else
-      {:error, reason} = err ->
-        # Best-effort cleanup of anything partially built. We don't
-        # bother distinguishing where we were in the with chain — each
-        # cleanup helper is idempotent and quietly ignores misses.
-        cleanup_partial(reason)
-        err
+         :ok <- register_identity(identity) do
+      mint_registered(identity, attestation)
     end
   end
+
+  def mint(_), do: {:error, :verified_attestation_required}
 
   @doc """
   Revoke every cap in the run handle and deregister the ephemeral
@@ -138,13 +124,6 @@ defmodule Arbor.Scheduler.RunIdentity do
   # Internals
   # ===========================================================================
 
-  defp load_caps(path) do
-    case CapsFile.load(path) do
-      {:ok, descriptors} -> {:ok, descriptors}
-      {:error, _} = err -> err
-    end
-  end
-
   defp generate_identity do
     IdentityStruct.generate()
   end
@@ -160,8 +139,38 @@ defmodule Arbor.Scheduler.RunIdentity do
     Security.grant(principal: agent_id, resource: @orchestrator_execute_uri)
   end
 
-  defp grant_run_caps(agent_id, descriptors) do
-    descriptors
+  defp mint_registered(identity, attestation) do
+    case grant_orchestrator_execute(identity.agent_id) do
+      {:ok, lobby_cap} ->
+        mint_declared_caps(identity, attestation, lobby_cap)
+
+      {:error, reason} ->
+        safe_deregister(identity.agent_id)
+        {:error, {:grant_failed, @orchestrator_execute_uri, reason}}
+    end
+  end
+
+  defp mint_declared_caps(identity, attestation, lobby_cap) do
+    case grant_run_caps(identity.agent_id, attestation) do
+      {:ok, run_caps} ->
+        :ok = set_trust_profile_rules(identity.agent_id, attestation.capabilities)
+
+        {:ok,
+         %{
+           agent_id: identity.agent_id,
+           signer: Security.make_signer(identity.agent_id, identity.private_key),
+           cap_ids: [lobby_cap.id | Enum.map(run_caps, & &1.id)],
+           attestation: attestation
+         }}
+
+      {:error, reason, granted_caps} ->
+        cleanup_registered(identity.agent_id, [lobby_cap | granted_caps])
+        {:error, reason}
+    end
+  end
+
+  defp grant_run_caps(agent_id, attestation) do
+    attestation.capabilities
     |> Enum.reduce_while({:ok, []}, fn descriptor, {:ok, acc} ->
       # Provenance records that this cap was minted from a verified signed
       # envelope. `AuthDecision.check_approval` consults this metadata to
@@ -172,7 +181,11 @@ defmodule Arbor.Scheduler.RunIdentity do
       metadata = %{
         provenance: %{
           source: :caps_file,
-          issuer_id: descriptor.issuer_id
+          manifest_version: attestation.version,
+          issuer_id: attestation.issuer_id,
+          pipeline_root: attestation.pipeline_root,
+          pipeline_path: attestation.pipeline_path,
+          graph_hash: attestation.graph_hash
         }
       }
 
@@ -182,13 +195,16 @@ defmodule Arbor.Scheduler.RunIdentity do
              constraints: descriptor.constraints,
              metadata: metadata
            ) do
-        {:ok, cap} -> {:cont, {:ok, [cap | acc]}}
-        {:error, reason} -> {:halt, {:error, {:grant_failed, descriptor.resource_uri, reason}}}
+        {:ok, cap} ->
+          {:cont, {:ok, [cap | acc]}}
+
+        {:error, reason} ->
+          {:halt, {:error, {:grant_failed, descriptor.resource_uri, reason}, Enum.reverse(acc)}}
       end
     end)
     |> case do
       {:ok, caps} -> {:ok, Enum.reverse(caps)}
-      err -> err
+      error -> error
     end
   end
 
@@ -281,15 +297,9 @@ defmodule Arbor.Scheduler.RunIdentity do
     end
   end
 
-  defp cleanup_partial(_reason) do
-    # No-op for now: each helper above leaves the world either fully
-    # advanced or fully rolled back. Future hooks could clean up
-    # half-granted caps if the grant_run_caps step partially failed —
-    # but Security.grant is atomic enough that the only realistic
-    # half-state is "identity registered + lobby cap granted +
-    # run_caps half-done." Surfacing that path under test is on the
-    # follow-up list once a concrete failure mode forces the question.
-    :ok
+  defp cleanup_registered(agent_id, capabilities) do
+    Enum.each(capabilities, &safe_revoke_cap(&1.id))
+    safe_deregister(agent_id)
   end
 
   defp safe_revoke_cap(cap_id) do

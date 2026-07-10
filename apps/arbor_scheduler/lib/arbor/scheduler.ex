@@ -62,7 +62,8 @@ defmodule Arbor.Scheduler do
 
     * `pipeline_path` — path to a DOT file under the configured
       pipelines root (or absolute). Resolution happens in the worker.
-    * `args` — map merged into the pipeline's initial context.
+    * `args` — JSON-clean map that must exactly match the signed version 2
+      attestation. The worker executes the attested copy, never this job copy.
     * `opts` — passed to `Oban.insert/1`:
       * `:queue` — default `:default`
       * `:max_attempts` — default `3` per the worker definition
