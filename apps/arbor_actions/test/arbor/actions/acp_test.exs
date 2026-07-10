@@ -38,18 +38,21 @@ defmodule Arbor.Actions.AcpTest.FakeAI do
       when is_binary(worker_session_id) and is_list(opts) do
     notify({:managed_status, worker_session_id, opts})
 
-    {:ok,
-     %{
-       worker_session_id: worker_session_id,
-       session_id: "provider_sess_1",
-       provider: "claude",
-       model: "opus",
-       status: "ready",
-       pooled: false,
-       context_pressure: true,
-       context_tokens: 42,
-       usage: %{"input_tokens" => 10, "output_tokens" => 5}
-     }}
+    :persistent_term.get(
+      {__MODULE__, :status_result},
+      {:ok,
+       %{
+         worker_session_id: worker_session_id,
+         session_id: "provider_sess_1",
+         provider: "claude",
+         model: "opus",
+         status: "ready",
+         pooled: false,
+         context_pressure: true,
+         context_tokens: 42,
+         usage: %{"input_tokens" => 10, "output_tokens" => 5}
+       }}
+    )
   end
 
   def acp_managed_close_session(worker_session_id, opts)
@@ -120,6 +123,7 @@ defmodule Arbor.Actions.AcpTest do
 
       :persistent_term.erase({FakeAI, :parent})
       :persistent_term.erase({FakeAI, :start_result})
+      :persistent_term.erase({FakeAI, :status_result})
     end)
 
     :ok
@@ -540,6 +544,65 @@ defmodule Arbor.Actions.AcpTest do
       assert second.status in ["closed", "already_closed"]
       assert json_clean?(second)
       refute_pid_like(second)
+    end
+
+    test "managed close snapshots bounded cumulative usage before closing" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :status_result},
+        {:ok,
+         %{
+           context_tokens: 12_345,
+           usage: %{
+             input_tokens: 8_000,
+             output_tokens: 1_200,
+             invalid_pid: self(),
+             nested: %{cache_tokens: 400, invalid_ref: make_ref()}
+           }
+         }}
+      )
+
+      assert {:ok, result} =
+               Acp.CloseSession.run(
+                 %{worker_session_id: "acp_worker_metrics"},
+                 %{agent_id: "agent_metrics", task_id: "task_metrics"}
+               )
+
+      assert result.context_tokens == 12_345
+
+      assert result.usage == %{
+               "input_tokens" => 8_000,
+               "nested" => %{"cache_tokens" => 400},
+               "output_tokens" => 1_200
+             }
+
+      assert json_clean?(result)
+      refute_pid_like(result)
+
+      assert_receive {:managed_status, "acp_worker_metrics", status_opts}
+      assert Keyword.get(status_opts, :task_id) == "task_metrics"
+      assert Keyword.get(status_opts, :principal_id) == "agent_metrics"
+      assert_receive {:managed_close, "acp_worker_metrics", _close_opts}
+    end
+
+    test "managed close still closes when final status is unavailable" do
+      install_fake_ai()
+      :persistent_term.put({FakeAI, :status_result}, {:error, :session_unavailable})
+
+      assert {:ok, result} =
+               Acp.CloseSession.run(
+                 %{worker_session_id: "acp_worker_status_missing"},
+                 %{agent_id: "agent_close", task_id: "task_close"}
+               )
+
+      assert result.status == "closed"
+      refute Map.has_key?(result, :usage)
+      refute Map.has_key?(result, :context_tokens)
+      assert json_clean?(result)
+
+      assert_receive {:managed_status, "acp_worker_status_missing", _status_opts}
+      assert_receive {:managed_close, "acp_worker_status_missing", _close_opts}
     end
   end
 

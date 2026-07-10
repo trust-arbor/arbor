@@ -368,6 +368,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       coding_pipeline_path: Application.get_env(:arbor_orchestrator, :coding_pipeline_path),
       coding_pipeline_logs_root:
         Application.get_env(:arbor_orchestrator, :coding_pipeline_logs_root),
+      coding_approval_timeout_ms:
+        Application.get_env(:arbor_orchestrator, :coding_approval_timeout_ms),
       coding_plan_compiler: Application.get_env(:arbor_orchestrator, :coding_plan_compiler),
       coding_plan_artifact_store:
         Application.get_env(:arbor_orchestrator, :coding_plan_artifact_store),
@@ -455,6 +457,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       restore(:coding_pipeline_runner, originals.coding_pipeline_runner)
       restore(:coding_pipeline_path, originals.coding_pipeline_path)
       restore(:coding_pipeline_logs_root, originals.coding_pipeline_logs_root)
+      restore(:coding_approval_timeout_ms, originals.coding_approval_timeout_ms)
       restore(:coding_plan_compiler, originals.coding_plan_compiler)
       restore(:coding_plan_artifact_store, originals.coding_plan_artifact_store)
       restore(:coding_repo_roots, originals.coding_repo_roots)
@@ -661,6 +664,33 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  Map.put(valid_task(), :task, "forged"),
                  valid_context()
                )
+    end
+
+    test "task and context data cannot set the coding approval timeout" do
+      assert {:error, {:unknown_task_key, "approval_timeout_ms"}} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(%{"approval_timeout_ms" => 999_999}),
+                 valid_context()
+               )
+
+      assert {:error, {:forbidden_context_key, "approval_timeout_ms"}} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"approval_timeout_ms" => 999_999})
+               )
+
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{
+                   "metadata" => %{"approval_timeout_ms" => 999_999}
+                 })
+               )
+
+      assert last_opts()[:approval_timeout_ms] == 300_000
     end
 
     test "rejects invalid optional field types and requires task_id in context" do
@@ -1045,6 +1075,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert Path.basename(opts[:logs_root]) =~ ~r/^task-[0-9a-f]{64}$/
       assert opts[:logs_root] == Path.dirname(path)
       assert opts[:timeout] == 900_000
+      assert opts[:approval_timeout_ms] == 300_000
       assert opts[:graph_hash] == artifacts["graph_hash"]
       assert opts[:cache] == false
       assert opts[:execution_manifest_digest] =~ ~r/^[0-9a-f]{64}$/
@@ -1214,6 +1245,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       assert_receive {:slow_runner_started, runner_pid, opts, links}
       assert opts[:timeout] == 20
+      assert opts[:approval_timeout_ms] == 1
       assert self() in links
       refute Process.alive?(runner_pid)
     end
@@ -1234,7 +1266,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  valid_context(%{"task_id" => "task_plan_bound", "timeout" => 30_000})
                )
 
-      assert last_opts()[:timeout] == 20_000
+      plan_bound_opts = last_opts()
+      assert plan_bound_opts[:timeout] == 20_000
+      assert plan_bound_opts[:approval_timeout_ms] == 15_000
 
       assert {:ok, _result} =
                CodingTaskExecutor.run(
@@ -1243,7 +1277,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  valid_context(%{"task_id" => "task_context_bound", "timeout" => 12_000})
                )
 
-      assert last_opts()[:timeout] == 12_000
+      context_bound_opts = last_opts()
+      assert context_bound_opts[:timeout] == 12_000
+      assert context_bound_opts[:approval_timeout_ms] == 7_000
     end
 
     test "terminates the linked runner when the executor owner is cancelled" do
@@ -1614,6 +1650,29 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
     end
 
+    defp run_with_engine_result(context, overrides \\ %{}) do
+      engine_result =
+        Map.merge(
+          %{
+            run_id: "task_coding_1",
+            context: context,
+            completed_nodes: [],
+            final_outcome: nil,
+            taint: %{},
+            node_durations: %{}
+          },
+          overrides
+        )
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_executor_runner_reply,
+        {:ok, engine_result}
+      )
+
+      CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+    end
+
     test "change_committed maps commit_hash and opaque handles" do
       assert {:ok, result} =
                run_with_context(%{
@@ -1636,7 +1695,178 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert result["workspace_id"] == "ws_1"
       assert result["worker_session_id"] == "w_1"
       assert result["files"] == ["lib/a.ex"]
+      assert result["acp_agent"] == "codex"
       refute Map.has_key?(result, :__struct__)
+    end
+
+    test "metrics use Engine timings and actual repeated validation/review node visits" do
+      completed_nodes = [
+        "start",
+        "validate",
+        "review_change",
+        "implement",
+        "validate",
+        "review_change",
+        "close_worker",
+        "release_workspace",
+        "done"
+      ]
+
+      context = %{
+        "status" => "change_committed",
+        "branch" => "b1",
+        "commit_hash" => "c1",
+        "worktree_path" => "/tmp/ws",
+        "protocol_retry_count" => "1",
+        "validation_rework_count" => 1,
+        "review_rework_count" => "1",
+        "total_rework_count" => 2,
+        "close.status" => "closed",
+        "close.context_tokens" => 4_096,
+        "close.usage" => %{
+          input_tokens: 5_000,
+          output_tokens: 800,
+          invalid_pid: self()
+        },
+        "worker_msg.usage" => %{"input_tokens" => 25, "output_tokens" => 5},
+        "release.status" => "retained",
+        "metrics" => %{"execution_path" => "forged", "validation_attempts" => 99},
+        "acp_agent" => "forged-agent"
+      }
+
+      assert {:ok, result} =
+               run_with_engine_result(context, %{
+                 completed_nodes: completed_nodes,
+                 node_durations: %{
+                   "validate" => 17,
+                   "review_change" => 23,
+                   "close_worker" => 4,
+                   :release_workspace => 3,
+                   self() => 999
+                 },
+                 final_outcome: %{rich: self()},
+                 taint: %{rich: make_ref()}
+               })
+
+      metrics = result["metrics"]
+      assert result["acp_agent"] == "codex"
+      assert metrics["execution_path"] == "pipeline"
+      assert metrics["completed_nodes"] == completed_nodes
+      assert metrics["completed_node_count"] == length(completed_nodes)
+      assert metrics["validation_attempts"] == 2
+      assert metrics["review_attempts"] == 2
+      assert metrics["protocol_retry_count"] == 1
+      assert metrics["validation_rework_count"] == 1
+      assert metrics["review_rework_count"] == 1
+      assert metrics["total_rework_count"] == 2
+
+      assert metrics["node_durations_ms"] == %{
+               "close_worker" => 4,
+               "release_workspace" => 3,
+               "review_change" => 23,
+               "validate" => 17
+             }
+
+      assert metrics["usage"] == %{"input_tokens" => 5_000, "output_tokens" => 800}
+      assert metrics["context_tokens"] == 4_096
+      assert metrics["worker_close_status"] == "closed"
+      assert metrics["workspace_release_status"] == "retained"
+      assert is_integer(metrics["wall_clock_ms"])
+      assert metrics["wall_clock_ms"] >= 0
+      assert {:ok, _encoded} = Jason.encode(result)
+      refute inspect(result) =~ "forged-agent"
+      refute inspect(metrics) =~ "forged"
+    end
+
+    test "metrics fall back to last-message usage and tolerate missing cleanup telemetry" do
+      assert {:ok, result} =
+               run_with_engine_result(%{
+                 "status" => "declined",
+                 "worktree_path" => "/tmp/ws",
+                 "worker_msg.usage" => %{
+                   "input_tokens" => 321,
+                   "output_tokens" => 45
+                 },
+                 "release.status" => "retained"
+               })
+
+      metrics = result["metrics"]
+      assert metrics["usage"] == %{"input_tokens" => 321, "output_tokens" => 45}
+      assert metrics["context_tokens"] == 321
+      assert metrics["workspace_release_status"] == "retained"
+      refute Map.has_key?(metrics, "worker_close_status")
+
+      assert {:ok, missing} =
+               run_with_engine_result(%{
+                 "status" => "no_changes",
+                 "worktree_path" => "/tmp/ws"
+               })
+
+      refute Map.has_key?(missing["metrics"], "usage")
+      refute Map.has_key?(missing["metrics"], "context_tokens")
+      refute Map.has_key?(missing["metrics"], "worker_close_status")
+      refute Map.has_key?(missing["metrics"], "workspace_release_status")
+      assert {:ok, _encoded} = Jason.encode(missing)
+    end
+
+    test "wall clock includes runner latency and preserves Engine node timing" do
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_executor_runner_reply,
+        fn _path, opts ->
+          Process.sleep(25)
+
+          {:ok,
+           %{
+             run_id: Keyword.fetch!(opts, :run_id),
+             context: %{"status" => "change_committed", "worktree_path" => "/tmp/ws"},
+             completed_nodes: ["start", "validate", "done"],
+             final_outcome: nil,
+             taint: %{},
+             node_durations: %{"start" => 0, "validate" => 19, "done" => 0}
+           }}
+        end
+      )
+
+      assert {:ok, result} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      assert result["metrics"]["wall_clock_ms"] >= 20
+
+      assert result["metrics"]["node_durations_ms"] == %{
+               "done" => 0,
+               "start" => 0,
+               "validate" => 19
+             }
+    end
+
+    test "completed-node and duration metrics are deterministically bounded" do
+      completed_nodes =
+        Enum.map(1..520, fn index ->
+          "node_" <> String.pad_leading(Integer.to_string(index), 3, "0")
+        end)
+
+      node_durations =
+        completed_nodes
+        |> Enum.reverse()
+        |> Map.new(fn node_id -> {node_id, 1} end)
+
+      assert {:ok, result} =
+               run_with_engine_result(
+                 %{"status" => "change_committed", "worktree_path" => "/tmp/ws"},
+                 %{completed_nodes: completed_nodes, node_durations: node_durations}
+               )
+
+      metrics = result["metrics"]
+      assert metrics["completed_node_count"] == 520
+      assert length(metrics["completed_nodes"]) == 500
+      assert List.first(metrics["completed_nodes"]) == "node_001"
+      assert List.last(metrics["completed_nodes"]) == "node_500"
+      assert metrics["completed_nodes_truncated"] == true
+      assert map_size(metrics["node_durations_ms"]) == 500
+      assert Map.has_key?(metrics["node_durations_ms"], "node_001")
+      refute Map.has_key?(metrics["node_durations_ms"], "node_501")
+      assert metrics["node_durations_truncated"] == true
     end
 
     test "pr_created extracts pr.url" do

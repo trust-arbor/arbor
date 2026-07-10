@@ -24,6 +24,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
 
   require Logger
 
+  alias Arbor.Orchestrator.Config
   alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
 
   alias Arbor.Orchestrator.Handlers.{
@@ -160,6 +161,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
         ]
         |> maybe_put_param_taint(context, context_keys)
         |> maybe_put_execution_binding(authority)
+        |> maybe_put_approval_timeout(opts)
 
       try do
         case executor.execute(action_name, action_args, workdir, executor_opts) do
@@ -321,6 +323,25 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   end
 
   defp maybe_put_execution_binding(opts, _authority), do: opts
+
+  # Approval timeout is Engine control data, never a node attr or context
+  # value. Re-bound it against the run wall clock before crossing into the
+  # action executor, and mark the internal source so direct action callers
+  # cannot opt into the longer coding wait accidentally.
+  defp maybe_put_approval_timeout(executor_opts, engine_opts) do
+    requested_ms = Keyword.get(engine_opts, :approval_timeout_ms)
+    wall_clock_ms = Keyword.get(engine_opts, :timeout)
+
+    case Config.bounded_coding_approval_timeout_ms(requested_ms, wall_clock_ms) do
+      {:ok, timeout_ms} ->
+        executor_opts
+        |> Keyword.put(:approval_timeout_ms, timeout_ms)
+        |> Keyword.put(:approval_timeout_source, __MODULE__)
+
+      :error ->
+        executor_opts
+    end
+  end
 
   defp maybe_put_executor_opt(opts, _key, nil), do: opts
   defp maybe_put_executor_opt(opts, key, value), do: Keyword.put(opts, key, value)

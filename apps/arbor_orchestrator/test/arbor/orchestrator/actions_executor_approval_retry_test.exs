@@ -295,6 +295,40 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     assert message =~ "run_authorization_workdir_changed"
   end
 
+  test "direct unbound callers cannot extend the global approval timeout" do
+    Application.put_env(:arbor_orchestrator, :approval_timeout_ms, 20)
+
+    agent_id = "agent_approval_timeout_#{System.unique_integer([:positive])}"
+    action_module = Arbor.Actions.Session.Classify
+    resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
+
+    assert {:ok, capability} =
+             Arbor.Security.grant(principal: agent_id, resource: resource_uri)
+
+    on_exit(fn -> Arbor.Security.revoke(capability.id) end)
+
+    execution =
+      Task.async(fn ->
+        ActionsExecutor.execute(
+          "session_classify",
+          %{"input" => "must use the global timeout"},
+          File.cwd!(),
+          agent_id: agent_id,
+          approval_timeout_ms: 10_000,
+          approval_timeout_source: Arbor.Orchestrator.Handlers.ExecHandler
+        )
+      end)
+
+    request = await_pending_request(agent_id)
+
+    assert {:ok, {:error, message}} = Task.yield(execution, 500)
+    assert message =~ "timed out after 0s"
+    refute message =~ "timed out after 10s"
+
+    # Resolve the now-ownerless interaction so it does not leak into later tests.
+    assert :ok = Arbor.Comms.InteractionRouter.respond(request.request_id, :denied)
+  end
+
   defp await_pending_request(agent_id, attempts \\ 100)
 
   defp await_pending_request(_agent_id, 0), do: flunk("approval request did not appear")

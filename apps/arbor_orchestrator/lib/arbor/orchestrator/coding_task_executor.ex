@@ -93,6 +93,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @max_control_message_bytes 4_000
   @max_target_stage_bytes 200
   @max_follow_up_instruction_bytes 16_384
+  @max_metric_completed_nodes 500
+  @max_metric_node_durations 500
+  @max_metric_node_id_bytes 256
+  @max_metric_usage_entries 32
+  @max_metric_usage_list_items 32
+  @max_metric_usage_depth 3
+  @max_metric_usage_key_bytes 128
+  @max_metric_usage_string_bytes 1_024
+  @max_metric_usage_encoded_bytes 16_384
 
   @terminal_control_errors MapSet.new([
                              :unsupported,
@@ -109,6 +118,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
                            ])
 
   @forbidden_context_keys MapSet.new(~w(
+    approval_timeout_ms
     authorization
     signer
     agent_id
@@ -130,6 +140,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     action_executor
     actions_executor
     agent_id
+    approval_timeout_ms
     artifacts
     authorization
     authorizer
@@ -192,6 +203,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @spec run(String.t(), term(), map() | keyword()) ::
           {:ok, map()} | {:error, term()}
   def run(agent_id, task, context) when is_binary(agent_id) do
+    started_at = System.monotonic_time(:millisecond)
+
     with :ok <- validate_agent_id(agent_id),
          {:ok, exec_ctx} <- validate_context(context),
          {:ok, plan} <- Normalizer.normalize_task(task),
@@ -222,7 +235,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
            ),
          {:ok, engine_result} <-
            invoke_runner(Map.fetch!(artifacts, "coding_pipeline_path"), opts),
-         {:ok, result} <- adapt_result(engine_result) do
+         {:ok, result} <-
+           adapt_result(engine_result, started_at, Map.fetch!(plan.worker, "provider")) do
       {:ok, Map.put(result, "artifacts", artifacts)}
     end
   end
@@ -1236,6 +1250,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     task_id = exec_ctx.task_id
     caller_id = Map.get(exec_ctx, :caller_id)
     timeout = effective_timeout(plan, Map.get(exec_ctx, :timeout))
+    approval_timeout_ms = Config.coding_approval_timeout_ms(timeout)
 
     initial_values =
       compilation.initial_values
@@ -1264,6 +1279,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         pinned_handler_bindings: pinned_handler_bindings,
         workdir: plan.repo_root,
         timeout: timeout,
+        approval_timeout_ms: approval_timeout_ms,
         spawning_pid: self(),
         resumable: true,
         cache: false
@@ -1518,18 +1534,32 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   # Result adapter
   # ===========================================================================
 
-  defp adapt_result(%{context: context} = result) when is_map(context) do
-    _ = result
-    adapt_context(context)
+  defp adapt_result(%{context: context} = engine_result, started_at, acp_agent)
+       when is_map(context) do
+    adapt_engine_result(context, engine_result, started_at, acp_agent)
   end
 
-  defp adapt_result(%{"context" => context}) when is_map(context) do
-    adapt_context(context)
+  defp adapt_result(%{"context" => context} = engine_result, started_at, acp_agent)
+       when is_map(context) do
+    adapt_engine_result(context, engine_result, started_at, acp_agent)
   end
 
-  defp adapt_result({:ok, result}), do: adapt_result(result)
-  defp adapt_result({:error, _} = error), do: error
-  defp adapt_result(_other), do: {:error, :invalid_engine_result}
+  defp adapt_result({:ok, result}, started_at, acp_agent),
+    do: adapt_result(result, started_at, acp_agent)
+
+  defp adapt_result({:error, _} = error, _started_at, _acp_agent), do: error
+  defp adapt_result(_other, _started_at, _acp_agent), do: {:error, :invalid_engine_result}
+
+  defp adapt_engine_result(context, engine_result, started_at, acp_agent) do
+    with {:ok, payload} <- adapt_context(context) do
+      wall_clock_ms = max(System.monotonic_time(:millisecond) - started_at, 0)
+
+      {:ok,
+       payload
+       |> Map.put("acp_agent", acp_agent)
+       |> Map.put("metrics", build_pipeline_metrics(engine_result, context, wall_clock_ms))}
+    end
+  end
 
   defp adapt_context(context) when is_map(context) do
     clean = json_clean_map(context)
@@ -1550,6 +1580,277 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         {:ok, build_coding_payload(clean, status, legacy)}
     end
   end
+
+  defp build_pipeline_metrics(engine_result, context, wall_clock_ms) do
+    clean_context = json_clean_map(context)
+    completed = completed_node_ids(engine_result)
+    exposed_completed = Enum.take(completed, @max_metric_completed_nodes)
+    {node_durations, durations_truncated?} = metric_node_durations(engine_result)
+
+    close_usage = metric_context_value(clean_context, "close", "usage")
+    last_message_usage = metric_context_value(clean_context, "worker_msg", "usage")
+
+    usage =
+      clean_metric_usage(close_usage) ||
+        clean_metric_usage(last_message_usage)
+
+    context_tokens =
+      metric_non_negative_integer(metric_context_value(clean_context, "close", "context_tokens")) ||
+        metric_non_negative_integer(
+          metric_context_value(clean_context, "worker_msg", "context_tokens")
+        ) ||
+        usage_input_tokens(clean_metric_usage(last_message_usage))
+
+    %{
+      "execution_path" => "pipeline",
+      "wall_clock_ms" => wall_clock_ms,
+      "node_durations_ms" => node_durations,
+      "completed_nodes" => exposed_completed,
+      "completed_node_count" => length(completed),
+      "validation_attempts" => Enum.count(completed, &(&1 == "validate")),
+      "review_attempts" => Enum.count(completed, &(&1 == "review_change")),
+      "protocol_retry_count" => metric_counter(clean_context, "protocol_retry_count"),
+      "validation_rework_count" => metric_counter(clean_context, "validation_rework_count"),
+      "review_rework_count" => metric_counter(clean_context, "review_rework_count"),
+      "total_rework_count" => metric_counter(clean_context, "total_rework_count")
+    }
+    |> maybe_put_metric(
+      "completed_nodes_truncated",
+      length(completed) > @max_metric_completed_nodes
+    )
+    |> maybe_put_metric("node_durations_truncated", durations_truncated?)
+    |> maybe_put_metric("usage", usage)
+    |> maybe_put_metric("context_tokens", context_tokens)
+    |> maybe_put_metric(
+      "worker_close_status",
+      clean_metric_status(metric_context_value(clean_context, "close", "status"))
+    )
+    |> maybe_put_metric(
+      "workspace_release_status",
+      clean_metric_status(metric_context_value(clean_context, "release", "status"))
+    )
+  end
+
+  defp completed_node_ids(engine_result) do
+    case engine_result_field(engine_result, :completed_nodes, "completed_nodes") do
+      nodes when is_list(nodes) ->
+        nodes
+        |> Enum.reduce([], fn node_id, acc ->
+          case clean_metric_node_id(node_id) do
+            nil -> acc
+            clean -> [clean | acc]
+          end
+        end)
+        |> Enum.reverse()
+
+      _ ->
+        []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp metric_node_durations(engine_result) do
+    entries =
+      case engine_result_field(engine_result, :node_durations, "node_durations") do
+        %_{} ->
+          []
+
+        durations when is_map(durations) ->
+          durations
+          |> Enum.reduce([], fn {node_id, duration}, acc ->
+            with {clean_id, rank} <- clean_metric_node_key(node_id),
+                 true <- is_integer(duration) and duration >= 0 do
+              [{clean_id, rank, duration} | acc]
+            else
+              _ -> acc
+            end
+          end)
+          |> Enum.sort_by(fn {node_id, rank, duration} -> {node_id, rank, duration} end)
+          |> Enum.uniq_by(fn {node_id, _rank, _duration} -> node_id end)
+
+        _ ->
+          []
+      end
+
+    selected = Enum.take(entries, @max_metric_node_durations)
+
+    durations =
+      Map.new(selected, fn {node_id, _rank, duration} ->
+        {node_id, duration}
+      end)
+
+    {durations, length(entries) > @max_metric_node_durations}
+  rescue
+    _ -> {%{}, false}
+  end
+
+  defp engine_result_field(result, atom_key, string_key) when is_map(result) do
+    case Map.fetch(result, atom_key) do
+      {:ok, value} -> value
+      :error -> Map.get(result, string_key)
+    end
+  end
+
+  defp engine_result_field(_result, _atom_key, _string_key), do: nil
+
+  defp clean_metric_node_id(node_id) do
+    case clean_metric_node_key(node_id) do
+      {clean, _rank} -> clean
+      nil -> nil
+    end
+  end
+
+  defp clean_metric_node_key(node_id) when is_binary(node_id) do
+    if String.valid?(node_id) and node_id != "" and
+         byte_size(node_id) <= @max_metric_node_id_bytes,
+       do: {node_id, 0},
+       else: nil
+  end
+
+  defp clean_metric_node_key(node_id) when is_atom(node_id) do
+    case clean_metric_node_key(Atom.to_string(node_id)) do
+      {clean, _rank} -> {clean, 1}
+      nil -> nil
+    end
+  end
+
+  defp clean_metric_node_key(_node_id), do: nil
+
+  defp metric_context_value(context, prefix, key) do
+    context_get(context, "#{prefix}.#{key}") ||
+      nested_get(context_get(context, prefix), key)
+  end
+
+  defp metric_counter(context, key) do
+    metric_non_negative_integer(context_get(context, key)) || 0
+  end
+
+  defp metric_non_negative_integer(value) when is_integer(value) and value >= 0, do: value
+
+  defp metric_non_negative_integer(value) when is_binary(value) and byte_size(value) <= 32 do
+    if String.valid?(value) do
+      case Integer.parse(value) do
+        {parsed, ""} when parsed >= 0 -> parsed
+        _ -> nil
+      end
+    end
+  end
+
+  defp metric_non_negative_integer(_value), do: nil
+
+  defp usage_input_tokens(usage) when is_map(usage) do
+    Enum.find_value(~w(input_tokens inputTokens prompt_tokens promptTokens), fn key ->
+      metric_non_negative_integer(Map.get(usage, key))
+    end)
+  end
+
+  defp usage_input_tokens(_usage), do: nil
+
+  defp clean_metric_status(nil), do: nil
+
+  defp clean_metric_status(value) when is_binary(value) do
+    if String.valid?(value) and value != "" and byte_size(value) <= @max_metric_node_id_bytes,
+      do: value,
+      else: nil
+  end
+
+  defp clean_metric_status(value) when is_atom(value),
+    do: clean_metric_status(Atom.to_string(value))
+
+  defp clean_metric_status(_value), do: nil
+
+  defp clean_metric_usage(%_{}), do: nil
+
+  defp clean_metric_usage(usage) when is_map(usage) do
+    with {:ok, clean} <- clean_metric_map(usage, 0),
+         true <- map_size(clean) > 0,
+         {:ok, encoded} <- Jason.encode(clean),
+         true <- byte_size(encoded) <= @max_metric_usage_encoded_bytes do
+      clean
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+
+  defp clean_metric_usage(_usage), do: nil
+
+  defp clean_metric_map(map, depth) when depth <= @max_metric_usage_depth do
+    entries =
+      map
+      |> Enum.reduce([], fn {key, value}, acc ->
+        with {clean_key, rank} <- clean_metric_key(key),
+             {:ok, clean_value} <- clean_metric_value(value, depth + 1) do
+          [{clean_key, rank, clean_value} | acc]
+        else
+          _ -> acc
+        end
+      end)
+      |> Enum.sort_by(fn {key, rank, _value} -> {key, rank} end)
+      |> Enum.uniq_by(fn {key, _rank, _value} -> key end)
+      |> Enum.take(@max_metric_usage_entries)
+
+    {:ok, Map.new(entries, fn {key, _rank, value} -> {key, value} end)}
+  end
+
+  defp clean_metric_map(_map, _depth), do: :drop
+
+  defp clean_metric_key(key) when is_binary(key) do
+    if String.valid?(key) and byte_size(key) <= @max_metric_usage_key_bytes,
+      do: {key, 0},
+      else: nil
+  end
+
+  defp clean_metric_key(key) when is_atom(key) do
+    case clean_metric_key(Atom.to_string(key)) do
+      {clean, _rank} -> {clean, 1}
+      nil -> nil
+    end
+  end
+
+  defp clean_metric_key(_key), do: nil
+
+  defp clean_metric_value(_value, depth) when depth > @max_metric_usage_depth, do: :drop
+
+  defp clean_metric_value(value, _depth)
+       when is_integer(value) or is_float(value) or is_boolean(value) or is_nil(value),
+       do: {:ok, value}
+
+  defp clean_metric_value(value, _depth) when is_binary(value) do
+    if String.valid?(value) and byte_size(value) <= @max_metric_usage_string_bytes,
+      do: {:ok, value},
+      else: :drop
+  end
+
+  defp clean_metric_value(value, depth) when is_atom(value) do
+    clean_metric_value(Atom.to_string(value), depth)
+  end
+
+  defp clean_metric_value(%_{}, _depth), do: :drop
+  defp clean_metric_value(map, depth) when is_map(map), do: clean_metric_map(map, depth)
+
+  defp clean_metric_value(list, depth) when is_list(list) do
+    clean =
+      list
+      |> Enum.take(@max_metric_usage_list_items)
+      |> Enum.reduce([], fn value, acc ->
+        case clean_metric_value(value, depth + 1) do
+          {:ok, clean_value} -> [clean_value | acc]
+          :drop -> acc
+        end
+      end)
+      |> Enum.reverse()
+
+    {:ok, clean}
+  end
+
+  defp clean_metric_value(_value, _depth), do: :drop
+
+  defp maybe_put_metric(map, _key, nil), do: map
+  defp maybe_put_metric(map, _key, false), do: map
+  defp maybe_put_metric(map, key, value), do: Map.put(map, key, value)
 
   defp build_coding_payload(context, status, legacy) do
     {public_status, canonical_status} =

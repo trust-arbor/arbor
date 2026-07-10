@@ -141,6 +141,40 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
       assert_received {:stub_execute, _name, _args, _workdir, exec_opts}
       assert Keyword.get(exec_opts, :task_id) == "task_1"
     end
+
+    test "coding approval timeout is trusted Engine data bounded by the run wall clock" do
+      context = %Context{values: %{}}
+      node = action_node(%{"action" => "some.action"})
+
+      ExecHandler.execute(
+        node,
+        context,
+        graph(),
+        opts() ++ [approval_timeout_ms: 300_000, timeout: 20_000]
+      )
+
+      assert_received {:stub_execute, _name, _args, _workdir, exec_opts}
+      assert Keyword.fetch!(exec_opts, :approval_timeout_ms) == 15_000
+      assert Keyword.fetch!(exec_opts, :approval_timeout_source) == ExecHandler
+    end
+
+    test "node parameters cannot become approval timeout control data" do
+      context = %Context{values: %{"approval_timeout_ms" => 999_999}}
+
+      node =
+        action_node(%{
+          "action" => "some.action",
+          "context_keys" => "approval_timeout_ms",
+          "arg.timeout" => "999999"
+        })
+
+      ExecHandler.execute(node, context, graph(), opts())
+
+      assert_received {:stub_execute, _name, args, _workdir, exec_opts}
+      assert args["approval_timeout_ms"] == 999_999
+      refute Keyword.has_key?(exec_opts, :approval_timeout_ms)
+      refute Keyword.has_key?(exec_opts, :approval_timeout_source)
+    end
   end
 
   describe "Phase 1 ingress — output provenance is stamped on the node outcome" do

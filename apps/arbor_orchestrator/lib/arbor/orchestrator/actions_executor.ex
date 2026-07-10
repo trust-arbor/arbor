@@ -24,6 +24,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   require Logger
 
   alias Arbor.Common.SafePath
+  alias Arbor.Orchestrator.Config
   alias Arbor.Orchestrator.CodingPlan.ExecutionManifest
   alias Arbor.Orchestrator.Engine.RunAuthorization
   alias Arbor.Orchestrator.Graph
@@ -164,6 +165,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           context =
             %{auth_context: auth_context, workdir: workdir}
             |> Map.merge(execution_binding_context)
+            |> maybe_put_approval_timeout(opts, execution_binding_context)
             |> Map.put(:retry_workdir_guard, retry_workdir_guard)
             |> maybe_put_context(:task_id, task_id)
             |> maybe_put_context(:session_id, session_id)
@@ -357,7 +359,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   defp await_interaction_and_retry(request_id, agent_id, action_module, params, context, name) do
     topic = Arbor.Contracts.Comms.Interaction.response_topic_for_agent(agent_id)
-    timeout = approval_timeout()
+    timeout = approval_timeout(context)
 
     Logger.info(
       "[ActionsExecutor] Awaiting operator approval for #{name} via InteractionRouter " <>
@@ -411,7 +413,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
     if Code.ensure_loaded?(consensus_mod) and
          function_exported?(consensus_mod, :await, 2) do
-      timeout = approval_timeout()
+      timeout = approval_timeout(context)
 
       Logger.info(
         "[ActionsExecutor] Awaiting approval for #{name} (proposal: #{proposal_id}, timeout: #{timeout}ms)"
@@ -627,8 +629,33 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     end
   end
 
-  defp approval_timeout do
-    Application.get_env(:arbor_orchestrator, :approval_timeout_ms, @approval_timeout_ms)
+  defp maybe_put_approval_timeout(context, opts, execution_binding_context) do
+    timeout_ms = Keyword.get(opts, :approval_timeout_ms)
+    source = Keyword.get(opts, :approval_timeout_source)
+
+    if source == Arbor.Orchestrator.Handlers.ExecHandler and
+         map_size(execution_binding_context) > 0 and is_integer(timeout_ms) and timeout_ms > 0 do
+      Map.put(context, :approval_timeout_ms, min(timeout_ms, Config.coding_approval_timeout_ms()))
+    else
+      context
+    end
+  end
+
+  defp approval_timeout(context) do
+    case Map.get(context, :approval_timeout_ms) do
+      timeout when is_integer(timeout) and timeout > 0 ->
+        min(timeout, Config.coding_approval_timeout_ms())
+
+      _ ->
+        global_approval_timeout()
+    end
+  end
+
+  defp global_approval_timeout do
+    case Application.get_env(:arbor_orchestrator, :approval_timeout_ms, @approval_timeout_ms) do
+      timeout when is_integer(timeout) and timeout > 0 -> timeout
+      _ -> @approval_timeout_ms
+    end
   end
 
   # Mint a fresh signed request for the post-approval retry so identity

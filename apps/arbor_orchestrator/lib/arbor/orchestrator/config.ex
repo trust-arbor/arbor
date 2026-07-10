@@ -256,6 +256,8 @@ defmodule Arbor.Orchestrator.Config do
   @default_coding_plan_artifact_store Arbor.Orchestrator.CodingPlan.ArtifactStore
   @default_pipeline_status_module Arbor.Orchestrator.PipelineStatus
   @default_coding_task_control_facade Arbor.AI
+  @default_coding_approval_timeout_ms 300_000
+  @coding_approval_completion_reserve_ms 5_000
 
   @doc """
   Absolute path to the packaged coding-change-v1 DOT graph.
@@ -284,6 +286,49 @@ defmodule Arbor.Orchestrator.Config do
   def coding_pipeline_runner do
     Application.get_env(@app, :coding_pipeline_runner, @default_coding_pipeline_runner)
   end
+
+  @doc """
+  Maximum synchronous approval wait for a coding pipeline.
+
+  The default is five minutes. Invalid configuration falls back to that
+  default; task, graph, and Engine context data are not consulted here.
+  """
+  @spec coding_approval_timeout_ms() :: pos_integer()
+  def coding_approval_timeout_ms do
+    case Application.get_env(
+           @app,
+           :coding_approval_timeout_ms,
+           @default_coding_approval_timeout_ms
+         ) do
+      timeout when is_integer(timeout) and timeout > 0 -> timeout
+      _ -> @default_coding_approval_timeout_ms
+    end
+  end
+
+  @doc """
+  Bound the coding approval wait by the run wall clock.
+
+  A small reserve remains for the approved action result, cleanup nodes, and
+  terminal result adaptation. Very short test runs retain a one-millisecond
+  approval budget rather than producing an invalid timeout.
+  """
+  @spec coding_approval_timeout_ms(pos_integer()) :: pos_integer()
+  def coding_approval_timeout_ms(wall_clock_ms)
+      when is_integer(wall_clock_ms) and wall_clock_ms > 0 do
+    wall_clock_budget = max(wall_clock_ms - @coding_approval_completion_reserve_ms, 1)
+    min(coding_approval_timeout_ms(), wall_clock_budget)
+  end
+
+  @doc false
+  @spec bounded_coding_approval_timeout_ms(term(), term()) ::
+          {:ok, pos_integer()} | :error
+  def bounded_coding_approval_timeout_ms(requested_ms, wall_clock_ms)
+      when is_integer(requested_ms) and requested_ms > 0 and is_integer(wall_clock_ms) and
+             wall_clock_ms > 0 do
+    {:ok, min(requested_ms, coding_approval_timeout_ms(wall_clock_ms))}
+  end
+
+  def bounded_coding_approval_timeout_ms(_requested_ms, _wall_clock_ms), do: :error
 
   @doc """
   Trusted module used to compile validated coding plans into deterministic DOT.

@@ -800,6 +800,13 @@ defmodule Arbor.Actions.Acp do
 
     alias Arbor.Actions.Acp
 
+    @max_usage_entries 32
+    @max_usage_list_items 32
+    @max_usage_depth 3
+    @max_usage_key_bytes 128
+    @max_usage_string_bytes 1_024
+    @max_usage_encoded_bytes 16_384
+
     def taint_roles do
       %{
         worker_session_id: :control,
@@ -828,6 +835,7 @@ defmodule Arbor.Actions.Acp do
 
     defp do_managed_close(worker_session_id, params, context) do
       return_to_pool? = params[:return_to_pool] == true or params["return_to_pool"] == true
+      status_snapshot = managed_status_snapshot(worker_session_id, context)
 
       opts =
         []
@@ -860,12 +868,149 @@ defmodule Arbor.Actions.Acp do
               result
             end
 
-          {:ok, result}
+          {:ok, add_final_session_metrics(result, status_snapshot)}
 
         {:error, reason} ->
           {:error, Acp.format_error(reason)}
       end
     end
+
+    # Closing invalidates the live status source, so capture cumulative usage
+    # immediately beforehand. Status is observational: any failure must not
+    # prevent the authoritative close/check-in operation from running.
+    defp managed_status_snapshot(worker_session_id, context) do
+      opts = Acp.authority_opts(context)
+
+      # credo:disable-for-next-line Credo.Check.Refactor.Apply
+      case apply(Acp.ai_module(), :acp_managed_session_status, [worker_session_id, opts]) do
+        {:ok, status} when is_map(status) and not is_struct(status) -> status
+        _ -> nil
+      end
+    rescue
+      _ -> nil
+    catch
+      _, _ -> nil
+    end
+
+    defp add_final_session_metrics(result, status_snapshot)
+         when is_map(result) and not is_struct(result) and is_map(status_snapshot) do
+      result
+      |> maybe_put_usage(status_snapshot)
+      |> maybe_put_context_tokens(status_snapshot)
+    end
+
+    defp add_final_session_metrics(result, _status_snapshot), do: result
+
+    defp maybe_put_usage(result, status_snapshot) do
+      status_snapshot
+      |> then(&(map_get(&1, :usage) || map_get(&1, "usage")))
+      |> clean_usage()
+      |> case do
+        usage when is_map(usage) and map_size(usage) > 0 -> Map.put(result, :usage, usage)
+        _ -> result
+      end
+    end
+
+    defp maybe_put_context_tokens(result, status_snapshot) do
+      case map_get(status_snapshot, :context_tokens) ||
+             map_get(status_snapshot, "context_tokens") do
+        tokens when is_integer(tokens) and tokens >= 0 ->
+          Map.put(result, :context_tokens, tokens)
+
+        _ ->
+          result
+      end
+    end
+
+    defp clean_usage(%_{}), do: nil
+
+    defp clean_usage(usage) when is_map(usage) do
+      with {:ok, clean} <- clean_usage_map(usage, 0),
+           true <- map_size(clean) > 0,
+           {:ok, encoded} <- Jason.encode(clean),
+           true <- byte_size(encoded) <= @max_usage_encoded_bytes do
+        clean
+      else
+        _ -> nil
+      end
+    rescue
+      _ -> nil
+    end
+
+    defp clean_usage(_usage), do: nil
+
+    defp clean_usage_map(map, depth) when depth <= @max_usage_depth do
+      entries =
+        map
+        |> Enum.reduce([], fn {key, value}, acc ->
+          with {clean_key, rank} <- clean_usage_key(key),
+               {:ok, clean_value} <- clean_usage_value(value, depth + 1) do
+            [{clean_key, rank, clean_value} | acc]
+          else
+            _ -> acc
+          end
+        end)
+        |> Enum.sort_by(fn {key, rank, _value} -> {key, rank} end)
+        |> Enum.uniq_by(fn {key, _rank, _value} -> key end)
+        |> Enum.take(@max_usage_entries)
+
+      {:ok, Map.new(entries, fn {key, _rank, value} -> {key, value} end)}
+    end
+
+    defp clean_usage_map(_map, _depth), do: :drop
+
+    defp clean_usage_key(key) when is_binary(key) do
+      if String.valid?(key) and byte_size(key) <= @max_usage_key_bytes,
+        do: {key, 0},
+        else: nil
+    end
+
+    defp clean_usage_key(key) when is_atom(key) do
+      clean_usage_key(Atom.to_string(key))
+      |> case do
+        {clean, _rank} -> {clean, 1}
+        nil -> nil
+      end
+    end
+
+    defp clean_usage_key(_key), do: nil
+
+    defp clean_usage_value(_value, depth) when depth > @max_usage_depth, do: :drop
+
+    defp clean_usage_value(value, _depth)
+         when is_integer(value) or is_float(value) or is_boolean(value) or is_nil(value),
+         do: {:ok, value}
+
+    defp clean_usage_value(value, _depth) when is_binary(value) do
+      if String.valid?(value) and byte_size(value) <= @max_usage_string_bytes,
+        do: {:ok, value},
+        else: :drop
+    end
+
+    defp clean_usage_value(value, depth) when is_atom(value) do
+      clean_usage_value(Atom.to_string(value), depth)
+    end
+
+    defp clean_usage_value(%_{}, _depth), do: :drop
+
+    defp clean_usage_value(map, depth) when is_map(map), do: clean_usage_map(map, depth)
+
+    defp clean_usage_value(list, depth) when is_list(list) do
+      clean =
+        list
+        |> Enum.take(@max_usage_list_items)
+        |> Enum.reduce([], fn value, acc ->
+          case clean_usage_value(value, depth + 1) do
+            {:ok, clean_value} -> [clean_value | acc]
+            :drop -> acc
+          end
+        end)
+        |> Enum.reverse()
+
+      {:ok, clean}
+    end
+
+    defp clean_usage_value(_value, _depth), do: :drop
 
     defp do_legacy_close(pid, %{return_to_pool: true}) do
       provider = Acp.get_provider(pid)
