@@ -359,6 +359,21 @@ defmodule Arbor.Actions.FileTest do
 
       assert msg =~ "traversal"
     end
+
+    test "security regression: an agent glob without base_path or workspace fails closed", %{
+      tmp_dir: tmp_dir
+    } do
+      create_file(tmp_dir, "outside.txt", "must not be enumerated")
+
+      result =
+        FileActions.Glob.run(
+          %{pattern: Path.join(tmp_dir, "*.txt")},
+          %{agent_id: "agent_glob_without_base"}
+        )
+
+      assert {:error, message} = result
+      assert message =~ "authorized base_path or workspace"
+    end
   end
 
   describe "Exists" do

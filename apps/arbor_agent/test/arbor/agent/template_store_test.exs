@@ -184,11 +184,11 @@ defmodule Arbor.Agent.TemplateStoreTest do
   describe "resolve (data-first, shipped .md is the source of truth)" do
     @expected_builtins ~w(
       api_agent blog_agent cli_agent code_reviewer coding_agent conversationalist
-      council_evaluator diagnostician interview_agent monitor researcher scout
+      council_evaluator diagnostician interview_agent monitor pipeline_architect researcher scout
       security_auditor test_agent
     )
 
-    test "builtin_names/0 lists exactly the 14 expected builtins" do
+    test "builtin_names/0 lists exactly the 15 expected builtins" do
       assert Enum.sort(TemplateStore.builtin_names()) == Enum.sort(@expected_builtins)
     end
 
@@ -290,7 +290,8 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert "cli_agent" in names
       assert "api_agent" in names
       assert "coding_agent" in names
-      assert length(names) == 14
+      assert "pipeline_architect" in names
+      assert length(names) == 15
     end
   end
 
@@ -326,6 +327,114 @@ defmodule Arbor.Agent.TemplateStoreTest do
       refute Map.has_key?(preset["rules"], "arbor://action/github/pr")
 
       refute Map.has_key?(preset["rules"], "arbor://trust/write")
+    end
+  end
+
+  describe "pipeline_architect template" do
+    test "declares the exact read-only runtime, sandbox, tools, and capabilities" do
+      assert {:ok, data} = TemplateStore.resolve("pipeline_architect")
+
+      assert data["sandbox_level"] == "strict"
+
+      assert Map.take(data["metadata"], [
+               "runtime",
+               "runtime_policy",
+               "sandbox_policy",
+               "tool_policy",
+               "tools"
+             ]) == %{
+               "runtime" => "arbor",
+               "runtime_policy" => "exact",
+               "sandbox_policy" => "exact",
+               "tool_policy" => "exact",
+               "tools" => ~w(file_read file_list file_search file_exists)
+             }
+
+      resources =
+        data["required_capabilities"]
+        |> Enum.map(& &1["resource"])
+        |> Enum.sort()
+
+      assert resources ==
+               Enum.sort([
+                 "arbor://orchestrator/execute",
+                 "arbor://fs/read/repo",
+                 "arbor://fs/list/repo"
+               ])
+
+      refute Enum.any?(resources, fn resource ->
+               String.contains?(resource, [
+                 "write",
+                 "shell",
+                 "acp",
+                 "dispatch",
+                 "pipeline/run"
+               ])
+             end)
+    end
+
+    test "uses a baseline:block allowlist with explicit execution-authority blocks" do
+      assert {:ok, data} = TemplateStore.resolve("pipeline_architect")
+      preset = data["trust_preset"]
+      rules = preset["rules"]
+
+      assert preset["baseline"] == "block"
+      assert rules["arbor://orchestrator/execute"] == "allow"
+      assert rules["arbor://fs/read"] == "allow"
+      assert rules["arbor://fs/list"] == "allow"
+
+      blocked = [
+        "arbor://orchestrator/execute/adapt",
+        "arbor://orchestrator/execute/compose",
+        "arbor://orchestrator/execute/file_write",
+        "arbor://orchestrator/execute/graph_mutation",
+        "arbor://orchestrator/execute/map",
+        "arbor://orchestrator/execute/shell_exec",
+        "arbor://orchestrator/map/dispatch",
+        "arbor://fs",
+        "arbor://fs/write",
+        "arbor://fs/execute",
+        "arbor://fs/delete",
+        "arbor://shell",
+        "arbor://acp",
+        "arbor://agent",
+        "arbor://agent/dispatch",
+        "arbor://agent/task",
+        "arbor://agent/spawn",
+        "arbor://agent/spawn_worker",
+        "arbor://agent/lifecycle",
+        "arbor://trust",
+        "arbor://trust/write",
+        "arbor://trust/auto_promote",
+        "arbor://governance",
+        "arbor://action",
+        "arbor://action/coding",
+        "arbor://action/pipeline/run",
+        "arbor://pipeline",
+        "arbor://pipeline/run",
+        "arbor://code",
+        "arbor://code/write",
+        "arbor://code/compile",
+        "arbor://code/hot_load",
+        "arbor://sandbox"
+      ]
+
+      for uri <- blocked do
+        assert rules[uri] == "block", "expected #{uri} to be explicitly blocked"
+      end
+
+      assert map_size(rules) == length(blocked) + 3
+    end
+
+    test "requires strict CodingPlan v1 output and keeps raw DOT proposal-only" do
+      assert {:ok, data} = TemplateStore.resolve("pipeline_architect")
+      instructions = data["character"]["instructions"]
+
+      assert data["domain_context"] =~ "CodingPlan v1 is a closed object"
+      assert data["domain_context"] =~ "A separate caller-bound executor"
+      assert Enum.any?(instructions, &String.contains?(&1, "strict CodingPlan v1 object"))
+      assert Enum.any?(instructions, &String.contains?(&1, "NON-EXECUTABLE PROPOSAL"))
+      assert Enum.any?(instructions, &String.contains?(&1, "never run, validate, compile"))
     end
   end
 

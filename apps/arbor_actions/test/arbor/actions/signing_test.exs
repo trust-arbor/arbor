@@ -274,6 +274,48 @@ defmodule Arbor.Actions.SigningTest do
     end
   end
 
+  describe "authorized file_glob base enforcement" do
+    test "security regression: public agent call cannot evaluate an absolute pattern without a base",
+         %{agent_id: agent_id} do
+      {:ok, _cap} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read"
+        )
+
+      result =
+        Arbor.Actions.authorize_and_execute(
+          agent_id,
+          Arbor.Actions.File.Glob,
+          %{pattern: Path.join(File.cwd!(), "apps/*/mix.exs")}
+        )
+
+      assert {:error, message} = result
+      assert message =~ "authorized base_path or workspace"
+    end
+
+    test "public agent call preserves workspace-relative glob behavior", %{agent_id: agent_id} do
+      {:ok, _cap} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read"
+        )
+
+      workspace = File.cwd!()
+
+      assert {:ok, result} =
+               Arbor.Actions.authorize_and_execute(
+                 agent_id,
+                 Arbor.Actions.File.Glob,
+                 %{pattern: "apps/*/mix.exs"},
+                 %{workspace: workspace}
+               )
+
+      assert result.count > 0
+      assert Enum.all?(result.matches, &String.starts_with?(&1, Path.join(workspace, "apps")))
+    end
+  end
+
   describe "make_signer/2" do
     test "creates a working signer function", %{identity: identity, agent_id: agent_id} do
       signer = Arbor.Security.make_signer(agent_id, identity.private_key)

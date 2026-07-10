@@ -12,7 +12,8 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
   Test 1 is the guard: create an agent from a template whose frontmatter declares
   `baseline: block` + read-only rules, read its trust profile, and assert the
   restrictive baseline + rules landed. Comment out the
-  `apply_template_trust_preset(agent_id, opts)` call in `Lifecycle.ensure_trust_profile/2`
+  `apply_template_trust_preset(agent_id, opts, store)` call in
+  `Lifecycle.ensure_trust_profile/2`
   and this test fails — the baseline reverts to the default `:ask`.
 
   Test 2 proves the preset path only fires when a preset is declared: a template
@@ -33,7 +34,7 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
   use ExUnit.Case, async: false
   @moduletag :integration
 
-  alias Arbor.Agent.Lifecycle
+  alias Arbor.Agent.{BranchSupervisor, Lifecycle}
   alias Arbor.Contracts.TenantContext
   alias Arbor.Persistence.BufferedStore
   alias Arbor.Trust.Store, as: TrustStore
@@ -236,6 +237,128 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                    file_path: Path.join(workspace_root, "should_not_write.txt")
                  )
       end
+    end
+
+    test "pipeline architect runtime restrictions are load-bearing through Session config" do
+      assert {:ok, profile} =
+               Lifecycle.create("Pipeline Architect Runtime Probe",
+                 template: "pipeline_architect",
+                 sandbox_level: :none
+               )
+
+      agent_id = profile.agent_id
+      cleanup(agent_id)
+
+      assert profile.sandbox_level == :strict
+
+      assert profile.initial_capabilities
+             |> Enum.map(&(&1[:resource] || &1["resource"]))
+             |> Enum.sort() ==
+               Enum.sort([
+                 "arbor://orchestrator/execute",
+                 "arbor://fs/read/repo",
+                 "arbor://fs/list/repo"
+               ])
+
+      assert {:ok, _supervisor} =
+               Lifecycle.start(agent_id,
+                 runtime: :acp,
+                 tools: ["file_write", "shell_execute", "pipeline_run"],
+                 sandbox_level: :none,
+                 start_heartbeat: false,
+                 recover_session: false
+               )
+
+      %{executor: executor, session: session} = BranchSupervisor.child_pids(agent_id)
+      assert is_pid(executor)
+      assert is_pid(session)
+
+      session_state = Arbor.Orchestrator.Session.get_state(session)
+      assert session_state.config["llm_runtime"] == :arbor
+
+      assert session_state.config["tools"] ==
+               ~w(file_read file_list file_search file_exists)
+
+      refute Enum.any?(session_state.config["tools"], fn tool ->
+               tool in ~w(file_write file_edit shell_execute agent_spawn_worker pipeline_run)
+             end)
+
+      assert :sys.get_state(executor).sandbox_level == :strict
+    end
+
+    test "pipeline architect capabilities and trust rules deny execution authority" do
+      assert {:ok, profile} =
+               Lifecycle.create("Pipeline Architect Authority Probe",
+                 template: "pipeline_architect"
+               )
+
+      agent_id = profile.agent_id
+      cleanup(agent_id)
+
+      assert {:ok, trust_profile} = TrustStore.get_profile(agent_id)
+      assert trust_profile.baseline == :block
+
+      for uri <- [
+            "arbor://fs/write",
+            "arbor://shell/exec",
+            "arbor://acp/tool",
+            "arbor://agent/dispatch",
+            "arbor://agent/task/steer/task_1",
+            "arbor://agent/spawn_worker",
+            "arbor://trust/write",
+            "arbor://governance/change",
+            "arbor://action/coding/produce_reviewable_change",
+            "arbor://action/pipeline/run",
+            "arbor://pipeline/run",
+            "arbor://orchestrator/map/dispatch",
+            "arbor://orchestrator/execute/graph_mutation",
+            "arbor://code/compile",
+            "arbor://sandbox/create"
+          ] do
+        assert Arbor.Trust.effective_mode(agent_id, uri, []) == :block,
+               "expected #{uri} to resolve to :block"
+
+        assert {:error, _reason} = Arbor.Trust.authorize(agent_id, uri, :execute),
+               "expected #{uri} authorization to fail"
+      end
+
+      assert {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
+      cap_uris = Enum.map(caps, & &1.resource_uri)
+      repo_uri_root = repo_root() |> String.trim_leading("/")
+
+      assert "arbor://orchestrator/execute/**" in cap_uris
+      assert "arbor://fs/read" in cap_uris
+      assert "arbor://fs/list" in cap_uris
+      assert "arbor://fs/read/#{repo_uri_root}/**" in cap_uris
+      assert "arbor://fs/list/#{repo_uri_root}/**" in cap_uris
+
+      refute Enum.any?(cap_uris, fn uri ->
+               String.starts_with?(uri, [
+                 "arbor://fs/write",
+                 "arbor://shell",
+                 "arbor://acp",
+                 "arbor://agent/dispatch",
+                 "arbor://agent/spawn",
+                 "arbor://trust/write",
+                 "arbor://action/pipeline",
+                 "arbor://pipeline/run"
+               ])
+             end)
+    end
+
+    test "security regression: creation fails when a declared trust preset cannot be stored" do
+      before_ids = Lifecycle.list_agents() |> Enum.map(& &1.agent_id) |> MapSet.new()
+
+      assert :ok = stop_supervised(Arbor.Trust.Manager)
+      assert :ok = stop_supervised(TrustStore)
+
+      assert {:error, {:trust_profile_failed, _reason}} =
+               Lifecycle.create("Unstored Restrictive Template Probe",
+                 template: "pipeline_architect"
+               )
+
+      after_ids = Lifecycle.list_agents() |> Enum.map(& &1.agent_id) |> MapSet.new()
+      assert after_ids == before_ids
     end
 
     test "a template WITHOUT a trust_preset is not forced to :block by this path" do

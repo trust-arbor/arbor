@@ -15,7 +15,7 @@ defmodule Arbor.Agent.LifecycleRuntimeTest do
 
   alias Arbor.Agent.Lifecycle
 
-  defp profile_with(metadata), do: %{metadata: metadata}
+  defp profile_with(metadata, template \\ nil), do: %{metadata: metadata, template: template}
 
   describe "resolve_agent_runtime/2" do
     test "defaults to :arbor when nothing is set" do
@@ -54,6 +54,31 @@ defmodule Arbor.Agent.LifecycleRuntimeTest do
 
     test "missing profile.metadata key doesn't crash" do
       assert Lifecycle.resolve_agent_runtime(%{}, []) == :arbor
+    end
+
+    test "an exact template runtime cannot be widened by caller options" do
+      profile = profile_with(%{}, "pipeline_architect")
+
+      assert Lifecycle.resolve_agent_runtime(profile, runtime: :acp) == :arbor
+
+      assert Lifecycle.resolve_agent_runtime(profile, model_config: %{runtime: :acp}) ==
+               :arbor
+    end
+  end
+
+  describe "exact template session restrictions" do
+    test "pipeline architect tools replace a caller-supplied execution tool set" do
+      profile = profile_with(%{}, "pipeline_architect")
+
+      assert Lifecycle.resolve_agent_tools(profile,
+               tools: ["file_write", "shell_execute", "pipeline_run"]
+             ) == ~w(file_read file_list file_search file_exists)
+    end
+
+    test "pipeline architect sandbox cannot be weakened by a caller option" do
+      profile = %{metadata: %{}, template: "pipeline_architect", sandbox_level: :strict}
+
+      assert Lifecycle.resolve_agent_sandbox_level(profile, sandbox_level: :none) == :strict
     end
   end
 

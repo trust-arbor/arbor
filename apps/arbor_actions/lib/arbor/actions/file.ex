@@ -470,8 +470,10 @@ defmodule Arbor.Actions.File do
     def run(%{pattern: pattern} = params, context) do
       base_path = effective_base_path(params, context)
 
-      # Validate base_path if provided and workspace is set
-      with {:ok, safe_base} <- validate_base_path(base_path, context),
+      # Agent calls must bind the pattern to an authorized directory. System-level
+      # calls retain the legacy base-less behavior for internal utilities.
+      with :ok <- require_authorized_base(context, base_path),
+           {:ok, safe_base} <- validate_base_path(base_path, context),
            {:ok, safe_base} <- authorize_glob(context, safe_base),
            :ok <- reject_pattern_escape(pattern, safe_base) do
         Actions.emit_started(__MODULE__, params)
@@ -509,6 +511,18 @@ defmodule Arbor.Actions.File do
       end
     end
 
+    defp require_authorized_base(context, nil) do
+      case Map.get(context, :agent_id) || Map.get(context, "agent_id") do
+        agent_id when is_binary(agent_id) and agent_id != "" ->
+          {:error, "Agent file_glob requires an authorized base_path or workspace"}
+
+        _ ->
+          :ok
+      end
+    end
+
+    defp require_authorized_base(_context, _base_path), do: :ok
+
     defp validate_base_path(nil, _context), do: {:ok, nil}
     defp validate_base_path(path, context), do: Arbor.Actions.File.validate_path(path, context)
 
@@ -522,9 +536,8 @@ defmodule Arbor.Actions.File do
     # `Path.join(safe_base, "../sibling/**/*.ex")` enumerated files outside the
     # authorized base — the base was capability-checked but the pattern wasn't.
     # A `..` segment or absolute glob pattern is never legitimate when a base is
-    # in play (patterns descend from the base), so reject it. Only enforced when
-    # a base is in play; a bare pattern with no authorized base makes no
-    # containment claim.
+    # in play (patterns descend from the base), so reject it. Agent calls are
+    # required to have a base; the nil clause remains for trusted system calls.
     defp reject_pattern_escape(_pattern, nil), do: :ok
 
     defp reject_pattern_escape(pattern, _safe_base) do

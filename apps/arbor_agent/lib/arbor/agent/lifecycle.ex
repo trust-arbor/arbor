@@ -93,19 +93,24 @@ defmodule Arbor.Agent.Lifecycle do
       profile =
         build_profile(agent_id, display_name, identity, endorsement, keychain, character, opts)
 
-      case persist_profile(profile) do
+      case ensure_trust_profile(agent_id, opts) do
         :ok ->
-          ensure_trust_profile(agent_id, opts)
-          emit_created_signal(profile)
+          case persist_profile(profile) do
+            :ok ->
+              emit_created_signal(profile)
 
-          if Keyword.get(opts, :return_identity, false) do
-            {:ok, profile, identity}
-          else
-            {:ok, profile}
+              if Keyword.get(opts, :return_identity, false) do
+                {:ok, profile, identity}
+              else
+                {:ok, profile}
+              end
+
+            {:error, reason} ->
+              {:error, {:persist_failed, reason}}
           end
 
         {:error, reason} ->
-          {:error, {:persist_failed, reason}}
+          {:error, {:trust_profile_failed, reason}}
       end
     end
   end
@@ -372,12 +377,49 @@ defmodule Arbor.Agent.Lifecycle do
   @spec resolve_agent_runtime(map(), keyword()) :: atom()
   def resolve_agent_runtime(profile, opts) do
     metadata = Map.get(profile, :metadata) || %{}
+    template_meta = extract_template_metadata(profile)
+    template_runtime = normalize_template_runtime(metadata_value(template_meta, :runtime))
 
-    Keyword.get(opts, :runtime) ||
-      get_in(opts, [:model_config, :runtime]) ||
-      get_in(metadata, [:last_model_config, :runtime]) ||
-      get_in(metadata, ["last_model_config", "runtime"]) ||
-      :arbor
+    if exact_template_policy?(template_meta, :runtime_policy) do
+      template_runtime || :arbor
+    else
+      Keyword.get(opts, :runtime) ||
+        get_in(opts, [:model_config, :runtime]) ||
+        get_in(metadata, [:last_model_config, :runtime]) ||
+        get_in(metadata, ["last_model_config", "runtime"]) ||
+        template_runtime ||
+        :arbor
+    end
+  end
+
+  @doc false
+  @spec resolve_agent_tools(map(), keyword()) :: list() | nil
+  def resolve_agent_tools(profile, opts) do
+    template_meta = extract_template_metadata(profile)
+    template_tools = normalize_template_tools(metadata_value(template_meta, :tools))
+
+    if exact_template_policy?(template_meta, :tool_policy) do
+      template_tools || []
+    else
+      Keyword.get(opts, :tools) || template_tools
+    end
+  end
+
+  @doc false
+  @spec resolve_agent_sandbox_level(map(), keyword()) ::
+          Arbor.Contracts.Security.SandboxLevel.t()
+  def resolve_agent_sandbox_level(profile, opts) do
+    template_meta = extract_template_metadata(profile)
+    template_level = extract_template_sandbox_level(profile)
+
+    level =
+      if exact_template_policy?(template_meta, :sandbox_policy) do
+        template_level || Map.get(profile, :sandbox_level)
+      else
+        Keyword.get(opts, :sandbox_level) || Map.get(profile, :sandbox_level) || template_level
+      end
+
+    Arbor.Contracts.Security.SandboxLevel.coerce(level)
   end
 
   @doc false
@@ -461,12 +503,9 @@ defmodule Arbor.Agent.Lifecycle do
 
   # Build opts for the Executor child
   defp build_executor_opts(agent_id, profile, opts) do
-    sandbox_level =
-      Keyword.get(opts, :sandbox_level) || Map.get(profile, :sandbox_level) || :strict
-
     Keyword.merge(opts,
       agent_id: agent_id,
-      sandbox_level: Arbor.Contracts.Security.SandboxLevel.coerce(sandbox_level)
+      sandbox_level: resolve_agent_sandbox_level(profile, opts)
     )
   end
 
@@ -475,7 +514,7 @@ defmodule Arbor.Agent.Lifecycle do
     mode = Application.get_env(:arbor_agent, :session_execution_mode, :session)
 
     if mode in [:session, :graph] do
-      tools = Keyword.get(opts, :tools)
+      tools = resolve_agent_tools(profile, opts)
 
       system_prompt =
         Keyword.get_lazy(opts, :system_prompt, fn ->
@@ -730,7 +769,7 @@ defmodule Arbor.Agent.Lifecycle do
   # Extract metadata from the template module (if available).
   # Template metadata may include :context_management, :model, :provider.
   defp extract_template_metadata(profile) do
-    case profile.template do
+    case Map.get(profile, :template) do
       nil ->
         %{}
 
@@ -767,6 +806,37 @@ defmodule Arbor.Agent.Lifecycle do
         end
     end
   end
+
+  defp extract_template_sandbox_level(profile) do
+    case Map.get(profile, :template) do
+      name when is_binary(name) ->
+        case TemplateStore.get(name) do
+          {:ok, data} -> data["sandbox_level"]
+          {:error, _} -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp exact_template_policy?(metadata, key) do
+    metadata_value(metadata, key) in [:exact, "exact"]
+  end
+
+  defp metadata_value(metadata, key) when is_map(metadata) do
+    Map.get(metadata, key) || Map.get(metadata, Atom.to_string(key))
+  end
+
+  defp normalize_template_runtime(runtime) when runtime in [:arbor, "arbor"], do: :arbor
+  defp normalize_template_runtime(runtime) when runtime in [:acp, "acp"], do: :acp
+  defp normalize_template_runtime(_runtime), do: nil
+
+  defp normalize_template_tools(tools) when is_list(tools) do
+    if Enum.all?(tools, &is_binary/1), do: tools, else: nil
+  end
+
+  defp normalize_template_tools(_tools), do: nil
 
   # Merge template-derived options into session_opts.
   # Explicit caller opts take precedence over template defaults.
@@ -811,6 +881,7 @@ defmodule Arbor.Agent.Lifecycle do
               |> Keyword.put_new(:initial_goals, kw[:initial_goals])
               |> Keyword.put_new(:capabilities, kw[:required_capabilities])
               |> Keyword.put_new(:trust_preset, kw[:trust_preset])
+              |> put_template_sandbox_level(data, kw[:sandbox_level])
               |> Keyword.put(:template, template_name)
               |> Keyword.put(:template_data, data)
               |> put_template_source(data)
@@ -835,6 +906,7 @@ defmodule Arbor.Agent.Lifecycle do
               |> Keyword.put_new(:initial_goals, kw[:initial_goals])
               |> Keyword.put_new(:capabilities, kw[:required_capabilities])
               |> Keyword.put_new(:trust_preset, kw[:trust_preset])
+              |> put_template_sandbox_level(data, kw[:sandbox_level])
               |> Keyword.put(:template, name)
               |> Keyword.put(:template_data, data)
               |> Keyword.put_new(:template_module, template_mod)
@@ -860,6 +932,20 @@ defmodule Arbor.Agent.Lifecycle do
               {:error, :not_found}
             end
         end
+    end
+  end
+
+  defp put_template_sandbox_level(opts, data, sandbox_level) do
+    metadata = data["metadata"] || %{}
+
+    if exact_template_policy?(metadata, :sandbox_policy) do
+      Keyword.put(
+        opts,
+        :sandbox_level,
+        Arbor.Contracts.Security.SandboxLevel.coerce(sandbox_level)
+      )
+    else
+      Keyword.put_new(opts, :sandbox_level, sandbox_level)
     end
   end
 
@@ -1483,47 +1569,95 @@ defmodule Arbor.Agent.Lifecycle do
     ProfileStore.store_profile(profile)
   end
 
-  # Create a trust profile for the agent if the Trust system is available.
-  # If the template module exports trust_preset/0, apply those rules after creation.
+  # Create a trust profile and apply any template preset. A declared preset is a
+  # security invariant: creation must fail if the trust subsystem cannot store it.
+  # Templates without a preset retain the historical best-effort behavior.
   defp ensure_trust_profile(agent_id, opts) do
+    preset_required? = not is_nil(resolve_trust_preset(opts))
+
+    result =
+      try do
+        do_ensure_trust_profile(agent_id, opts)
+      rescue
+        error -> {:error, {:exception, Exception.message(error)}}
+      catch
+        :exit, reason -> {:error, {:exit, reason}}
+        kind, reason -> {:error, {kind, reason}}
+      end
+
+    case result do
+      :ok ->
+        :ok
+
+      {:error, reason} when preset_required? ->
+        Logger.error(
+          "[Lifecycle] required template trust preset could not be stored for #{agent_id}: " <>
+            inspect(reason)
+        )
+
+        {:error, reason}
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Lifecycle] trust profile setup failed for #{agent_id}; no template preset was " <>
+            "declared: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  defp do_ensure_trust_profile(agent_id, opts) do
     trust = Arbor.Trust
     store = Arbor.Trust.Store
     authority = Arbor.Trust.Authority
 
-    if Code.ensure_loaded?(trust) and Code.ensure_loaded?(store) and
-         function_exported?(store, :store_profile, 1) do
-      case apply(trust, :get_trust_profile, [agent_id]) do
-        {:ok, _} ->
-          :ok
-
-        {:error, :not_found} ->
-          # Use Authority.new_profile — creates with the default preset rules
-          # in one call. No more create-then-patch-then-patch flow.
-          profile =
-            if Code.ensure_loaded?(authority) and function_exported?(authority, :new_profile, 1) do
-              apply(authority, :new_profile, [agent_id])
-            else
-              # Fallback if Authority not available
-              {:ok, p} = Arbor.Contracts.Trust.Profile.new(agent_id)
-              p
-            end
-
-          apply(store, :store_profile, [profile])
-
-          # The universal baseline capabilities are granted by the trust system
-          # on profile creation (Manager + CapabilitySync); any role-specific
-          # self-capabilities come from the agent's template
-          # (required_capabilities).
-          Logger.info("Trust profile created for #{agent_id}")
-      end
-
-      # Apply template-specific trust preset if available
-      apply_template_trust_preset(agent_id, opts)
+    with true <-
+           Code.ensure_loaded?(trust) and function_exported?(trust, :get_trust_profile, 1) and
+             Code.ensure_loaded?(store) and function_exported?(store, :store_profile, 1) and
+             function_exported?(store, :update_profile, 2),
+         :ok <- ensure_base_trust_profile(agent_id, trust, store, authority),
+         :ok <- apply_template_trust_preset(agent_id, opts, store) do
+      :ok
+    else
+      false -> {:error, :trust_system_unavailable}
+      {:error, _} = error -> error
+      other -> {:error, {:unexpected_trust_setup_result, other}}
     end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
+  end
+
+  defp ensure_base_trust_profile(agent_id, trust, store, authority) do
+    case apply(trust, :get_trust_profile, [agent_id]) do
+      {:ok, _profile} ->
+        :ok
+
+      {:error, :not_found} ->
+        profile =
+          if Code.ensure_loaded?(authority) and function_exported?(authority, :new_profile, 1) do
+            apply(authority, :new_profile, [agent_id])
+          else
+            {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
+            profile
+          end
+
+        case apply(store, :store_profile, [profile]) do
+          :ok ->
+            Logger.info("Trust profile created for #{agent_id}")
+            :ok
+
+          {:error, reason} ->
+            {:error, {:trust_profile_store_failed, reason}}
+
+          other ->
+            {:error, {:unexpected_trust_profile_store_result, other}}
+        end
+
+      {:error, reason} ->
+        {:error, {:trust_profile_lookup_failed, reason}}
+
+      other ->
+        {:error, {:unexpected_trust_profile_lookup_result, other}}
+    end
   end
 
   # Apply a template's declarative trust preset (a restrictive read-only baseline,
@@ -1537,25 +1671,32 @@ defmodule Arbor.Agent.Lifecycle do
   # Before this, only the module path fired, so data-first templates could not
   # declare a read-only baseline (orphaned since templates became `.md` files) —
   # the mechanism the read-only-by-default agent roster depends on.
-  defp apply_template_trust_preset(agent_id, opts) do
-    store = Arbor.Trust.Store
+  defp apply_template_trust_preset(agent_id, opts, store) do
+    case resolve_trust_preset(opts) do
+      nil ->
+        :ok
 
-    with %{} = preset <- resolve_trust_preset(opts),
-         true <- Code.ensure_loaded?(store) and function_exported?(store, :update_profile, 2) do
-      baseline = Map.get(preset, :baseline, :block)
-      rules = Map.get(preset, :rules, %{})
+      %{} = preset ->
+        baseline = Map.get(preset, :baseline, :block)
+        rules = Map.get(preset, :rules, %{})
 
-      apply(store, :update_profile, [
-        agent_id,
-        fn profile -> %{profile | baseline: baseline, rules: rules} end
-      ])
-    else
-      _ -> :ok
+        case apply(store, :update_profile, [
+               agent_id,
+               fn profile -> %{profile | baseline: baseline, rules: rules} end
+             ]) do
+          {:ok, %{baseline: ^baseline, rules: ^rules}} ->
+            :ok
+
+          {:ok, profile} ->
+            {:error, {:trust_preset_mismatch, profile}}
+
+          {:error, reason} ->
+            {:error, {:trust_preset_store_failed, reason}}
+
+          other ->
+            {:error, {:unexpected_trust_preset_store_result, other}}
+        end
     end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
   end
 
   # Resolve a normalized `%{baseline: atom, rules: %{uri => atom}}` preset, or nil.

@@ -12,7 +12,7 @@ defmodule Arbor.Agent.Template.File do
 
   ## Frontmatter (structured)
 
-  - top-level: `name`, `version`, `source`
+  - top-level: `name`, `version`, `source`, `sandbox_level`
   - `metadata` (model / provider / context_management / version / category / …)
   - `character`: `name`, `description`, `role`, `tone`, `style`, `traits`,
     `values`, `quirks`, `knowledge` (the structured sub-fields)
@@ -140,6 +140,7 @@ defmodule Arbor.Agent.Template.File do
     |> put_present("name", data["name"])
     |> put_present("version", data["version"])
     |> put_present("source", data["source"])
+    |> put_present("sandbox_level", data["sandbox_level"])
     |> put_present("metadata", reject_empty(data["metadata"] || %{}))
     |> put_present("character", character_fm)
     |> put_present("values", data["values"] || [])
