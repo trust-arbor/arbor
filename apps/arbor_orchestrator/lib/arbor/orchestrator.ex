@@ -315,15 +315,20 @@ defmodule Arbor.Orchestrator do
   defp resolve_coding_plan_template do
     path = Config.coding_pipeline_path()
 
-    case File.stat(path) do
-      {:ok, %File.Stat{type: :regular}} ->
-        {:ok, path}
+    if is_binary(path) and String.valid?(path) and String.trim(path) != "" and
+         not String.contains?(path, <<0>>) do
+      case File.stat(path) do
+        {:ok, %File.Stat{type: :regular}} ->
+          {:ok, path}
 
-      {:ok, %File.Stat{type: type}} ->
-        {:error, {:coding_plan_template_unavailable, path, {:not_regular_file, type}}}
+        {:ok, %File.Stat{type: type}} ->
+          {:error, {:coding_plan_template_unavailable, path, {:not_regular_file, type}}}
 
-      {:error, reason} ->
-        {:error, {:coding_plan_template_unavailable, path, reason}}
+        {:error, reason} ->
+          {:error, {:coding_plan_template_unavailable, path, reason}}
+      end
+    else
+      {:error, {:coding_plan_template_unavailable, :invalid_path}}
     end
   end
 

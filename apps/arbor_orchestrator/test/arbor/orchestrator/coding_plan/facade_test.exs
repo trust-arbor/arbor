@@ -123,6 +123,17 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
     refute_receive {:coding_plan_compile_called, _plan, _opts}
   end
 
+  test "fails closed when the configured template path is malformed" do
+    for malformed <- [nil, :not_a_path, "  ", "bad" <> <<0>> <> "path"] do
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_path, malformed)
+
+      assert {:error, {:coding_plan_template_unavailable, :invalid_path}} =
+               Arbor.Orchestrator.compile_coding_plan(valid_attrs())
+
+      refute_receive {:coding_plan_compile_called, _plan, _opts}
+    end
+  end
+
   test "fails closed when the configured compiler is invalid" do
     Application.put_env(
       :arbor_orchestrator,
