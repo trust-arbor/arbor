@@ -835,6 +835,7 @@ defmodule Arbor.Actions do
       coding: [
         Arbor.Actions.Coding.ProduceReviewableChange,
         Arbor.Actions.Coding.SecurityRegression.Validate,
+        Arbor.Actions.Coding.CrossApp.Validate,
         Arbor.Actions.Coding.Workspace.Acquire,
         Arbor.Actions.Coding.Workspace.Inspect,
         Arbor.Actions.Coding.Workspace.Release,
@@ -1802,6 +1803,7 @@ defmodule Arbor.Actions do
       "arbor://action/coding/produce_reviewable_change",
     Arbor.Actions.Coding.SecurityRegression.Validate =>
       "arbor://action/coding/security_regression/validate",
+    Arbor.Actions.Coding.CrossApp.Validate => "arbor://action/coding/cross_app/validate",
     Arbor.Actions.Coding.Workspace.Acquire => "arbor://action/coding/workspace/acquire",
     Arbor.Actions.Coding.Workspace.Inspect => "arbor://action/coding/workspace/inspect",
     Arbor.Actions.Coding.Workspace.Release => "arbor://action/coding/workspace/release",

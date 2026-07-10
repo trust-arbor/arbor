@@ -305,6 +305,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       resources = Enum.map(data["required_capabilities"], & &1["resource"])
       assert "arbor://action/coding/produce_reviewable_change" in resources
       assert "arbor://action/coding/security_regression/validate" in resources
+      assert "arbor://action/coding/cross_app/validate" in resources
       assert "arbor://action/coding/workspace/**" in resources
       assert "arbor://acp/tool" in resources
       assert "arbor://action/git/**" in resources
@@ -319,6 +320,7 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert preset["rules"]["arbor://orchestrator/execute"] == "auto"
       assert preset["rules"]["arbor://action/coding/produce_reviewable_change"] == "auto"
       assert preset["rules"]["arbor://action/coding/security_regression/validate"] == "ask"
+      assert preset["rules"]["arbor://action/coding/cross_app/validate"] == "ask"
       assert preset["rules"]["arbor://action/coding/workspace"] == "auto"
       assert preset["rules"]["arbor://action/git"] == "auto"
       assert preset["rules"]["arbor://action/mix"] == "auto"

@@ -14,6 +14,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     Arbor.Actions.Coding.Workspace.Release,
     Arbor.Actions.Coding.Workspace.CommittedChange,
     Arbor.Actions.Coding.SecurityRegression.Validate,
+    Arbor.Actions.Coding.CrossApp.Validate,
     Arbor.Actions.Mix.Compile,
     Arbor.Actions.Mix.Test,
     Arbor.Actions.Git.Commit,
@@ -229,6 +230,55 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert {:error, {:security_regression_review_profile_not_allowed, "none"}} =
              compile(plan, ctx)
+  end
+
+  test "cross_app rewrites validate to coding_cross_app_validate and drops security dormant nodes",
+       ctx do
+    plan = plan!(%{"validation_profile" => "cross_app"})
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
+
+    validate = node_attrs(graph, "validate")
+    assert validate["action"] == "coding_cross_app_validate"
+    assert validate["context_keys"] == "workspace_id"
+    refute Map.has_key?(validate, "param.warnings_as_errors")
+    refute Map.has_key?(validate, "param.timeout")
+    refute validate["context_keys"] =~ "path"
+    refute validate["context_keys"] =~ "test_paths"
+
+    # Dormant security nodes are dropped (same as default).
+    refute Map.has_key?(graph.nodes, "hoist_review_attestation_id")
+    refute Map.has_key?(graph.nodes, "route_validated_review")
+    refute Map.has_key?(graph.nodes, "prep_review_validation_profile")
+
+    # Default binding review route is preserved (not weakened).
+    refute Enum.any?(graph.edges, &submit_review_false_edge?/1)
+    assert auto_proceed_target(graph) == "route_publish"
+
+    assert "coding_cross_app_validate" in compilation.manifest["action_names"]
+    refute "mix_compile" in compilation.manifest["action_names"]
+    refute "mix_test" in compilation.manifest["action_names"]
+    refute "coding_security_regression_validate" in compilation.manifest["action_names"]
+
+    assert "arbor://action/coding/cross_app/validate" in compilation.execution_manifest[
+             "capability_uris"
+           ]
+  end
+
+  test "cross_app human_required review does not weaken review routing", ctx do
+    plan =
+      plan!(%{
+        "validation_profile" => "cross_app",
+        "review_profile" => "human_required"
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
+
+    assert auto_proceed_target(graph) == "route_human_review"
+    refute Enum.any?(graph.edges, &submit_review_false_edge?/1)
+    assert node_attrs(graph, "validate")["action"] == "coding_cross_app_validate"
   end
 
   test "review profiles preserve council review and deterministically control routing", ctx do

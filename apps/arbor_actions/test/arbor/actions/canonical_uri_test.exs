@@ -85,6 +85,18 @@ defmodule Arbor.Actions.CanonicalUriTest do
       assert "arbor://action/coding/security_regression/validate" in Actions.action_namespace_uri_prefixes()
     end
 
+    test "cross-app validator is registered under its exact canonical URI" do
+      validator = Arbor.Actions.Coding.CrossApp.Validate
+
+      assert validator in Actions.all_actions()
+      assert {:ok, ^validator} = Actions.name_to_module("coding_cross_app_validate")
+
+      assert Actions.canonical_uri_for(validator, %{}) ==
+               "arbor://action/coding/cross_app/validate"
+
+      assert "arbor://action/coding/cross_app/validate" in Actions.action_namespace_uri_prefixes()
+    end
+
     test "action namespace URI prefixes are generated and registered without a broad prefix" do
       prefixes = Actions.action_namespace_uri_prefixes()
 

@@ -17,7 +17,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
     security_regression
   ]
 
-  @executable_ids ~w[default security_regression]
+  @executable_ids ~w[cross_app default security_regression]
   @unsupported_ids @known_ids -- @executable_ids
 
   describe "declarations" do
@@ -89,6 +89,27 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       refute "mix_test" in security["required_actions"]
       refute "mix_compile" in security["required_actions"]
 
+      assert {:ok, cross_app} = Profiles.fetch_executable("cross_app")
+      assert cross_app["executable"]
+
+      assert cross_app["validation_strategy"] == %{
+               "action" => "coding_cross_app_validate",
+               "authority_parameter" => "workspace_id",
+               "authority_source" => "workspace_id",
+               "per_check_timeout_default_ms" => 300_000,
+               "per_check_timeout_max_ms" => 600_000,
+               "uses_default_timeout" => true,
+               "selects_downstream_dependents" => true,
+               "runs_xref_graph_evidence" => true,
+               "claims_zero_cycles" => false
+             }
+
+      assert cross_app["semantic_policy"]["validation_profile"] == "cross_app"
+      assert "coding_cross_app_validate" in cross_app["required_actions"]
+      refute "mix_compile" in cross_app["required_actions"]
+      refute "mix_test" in cross_app["required_actions"]
+      assert "coding_cross_app_validate" in cross_app["semantic_policy"]["allowed_actions"]
+
       for node <- ~w[
             inspect_workspace
             check_validation_passed
@@ -99,6 +120,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
           ] do
         assert node in default["required_nodes"]
         assert node in security["required_nodes"]
+        assert node in cross_app["required_nodes"]
       end
     end
 
@@ -110,7 +132,6 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
           "documentation-validation action contract",
           "not an enforceable substitute"
         ],
-        "cross_app" => ["xref", "dependency surface"],
         "database_migration" => ["mandatory human gate", "unattended publication"]
       }
 

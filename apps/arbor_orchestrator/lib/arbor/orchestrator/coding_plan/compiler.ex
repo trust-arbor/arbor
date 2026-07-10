@@ -425,6 +425,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end
   end
 
+  defp rewrite_profile_flow(graph, %Plan{validation_profile: "cross_app"}) do
+    with {:ok, graph} <- rewrite_cross_app_validation(graph) do
+      drop_security_dormant_nodes(graph)
+    end
+  end
+
   defp rewrite_profile_flow(
          graph,
          %Plan{validation_profile: "security_regression"} = plan
@@ -502,6 +508,18 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          attrs
          |> Map.put("context_keys", "path")
          |> Map.put("param.warnings_as_errors", true)}
+      end
+    end)
+  end
+
+  defp rewrite_cross_app_validation(graph) do
+    update_node(graph, "validate", fn attrs ->
+      with :ok <- require_action_attrs(attrs, "mix_compile") do
+        {:ok,
+         attrs
+         |> Map.put("action", "coding_cross_app_validate")
+         |> Map.put("context_keys", "workspace_id")
+         |> Map.delete("param.warnings_as_errors")}
       end
     end)
   end
@@ -637,6 +655,16 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       remove_unattended_publication_nodes(graph)
     end
   end
+
+  # cross_app keeps default review-route semantics (does not weaken review).
+  defp rewrite_review_route(graph, "none", "cross_app"),
+    do: rewrite_review_route(graph, "none", "default")
+
+  defp rewrite_review_route(graph, "binding", "cross_app"),
+    do: rewrite_review_route(graph, "binding", "default")
+
+  defp rewrite_review_route(graph, "human_required", "cross_app"),
+    do: rewrite_review_route(graph, "human_required", "default")
 
   defp rewrite_review_route(_graph, "none", "security_regression"),
     do: {:error, {:security_regression_review_profile_not_allowed, "none"}}

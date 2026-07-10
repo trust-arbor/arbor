@@ -94,6 +94,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                "coding_security_regression_validate"
                                | @common_required_actions
                              ])
+  @cross_app_required_actions Enum.sort([
+                                "coding_cross_app_validate"
+                                | @common_required_actions
+                              ])
 
   @semantic_policy_base %{
     "allowed_handlers" => @allowed_handlers,
@@ -228,12 +232,20 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
               },
               %{
                 "id" => "cross_app",
-                "executable" => false,
+                "executable" => true,
                 "template_version" => @template_version,
                 "required_nodes" => @default_required_nodes,
-                "required_actions" => @common_required_actions,
+                "required_actions" => @cross_app_required_actions,
                 "validation_strategy" => %{
-                  "required_enforcement" => "dependency_surface_compile_xref_and_test_selection"
+                  "action" => "coding_cross_app_validate",
+                  "authority_parameter" => "workspace_id",
+                  "authority_source" => "workspace_id",
+                  "per_check_timeout_default_ms" => 300_000,
+                  "per_check_timeout_max_ms" => 600_000,
+                  "uses_default_timeout" => true,
+                  "selects_downstream_dependents" => true,
+                  "runs_xref_graph_evidence" => true,
+                  "claims_zero_cycles" => false
                 },
                 "review_strategy" => @binding_council_review,
                 "semantic_policy" =>
@@ -241,11 +253,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   |> Map.put("validation_profile", "cross_app")
                   |> Map.put(
                     "allowed_actions",
-                    Enum.sort(Enum.uniq(@common_required_actions ++ @optional_reviewed_actions))
-                  ),
-                "unsupported_reason" =>
-                  "No enforceable action contract derives compile, xref, and test coverage from " <>
-                    "the changed cross-app dependency surface."
+                    Enum.sort(
+                      Enum.uniq(@cross_app_required_actions ++ @optional_reviewed_actions)
+                    )
+                  )
               },
               %{
                 "id" => "database_migration",

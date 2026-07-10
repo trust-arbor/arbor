@@ -1,0 +1,243 @@
+defmodule Arbor.Actions.Coding.CrossApp.Shell do
+  @moduledoc """
+  Imperative shell for cross-app dependency-surface validation.
+
+  Resolves an authorized workspace lease, derives changed files from the lease
+  base through the dirty worktree (including untracked), parses candidate
+  `apps/*/mix.exs` files as AST, selects the downstream app closure, and runs
+  compile → xref → focused tests via `Arbor.Actions.Mix.run_mix/3`.
+  """
+
+  alias Arbor.Actions.Coding.CrossApp.Core
+  alias Arbor.Actions.Coding.CrossApp.Parser
+  alias Arbor.Actions.Coding.Workspace
+  alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+  alias Arbor.Actions.Mix, as: MixAction
+
+  @doc "Execute cross-app validation against a leased workspace."
+  @spec run(Core.input(), map()) :: {:ok, map()} | {:error, term()}
+  def run(input, context) when is_map(input) and is_map(context) do
+    try do
+      do_run(input, context)
+    catch
+      {:execution_error, reason} -> {:error, reason}
+    end
+  end
+
+  def run(_input, _context), do: {:error, :invalid_cross_app_input}
+
+  defp do_run(input, context) do
+    with {:ok, lease} <- resolve_lease(input.workspace_id, context),
+         {:ok, worktree_path, base_commit} <- lease_paths(lease),
+         {:ok, changed_files} <- list_changed_files(worktree_path, base_commit),
+         {:ok, sources} <- load_candidate_mix_exs(worktree_path),
+         {:ok, app_defs} <- Parser.parse_many(sources),
+         {:ok, graph} <- Core.build_graph(app_defs),
+         {:ok, selection} <- Core.select(changed_files, graph),
+         {:ok, checks} <- run_checks(worktree_path, selection, input.timeout) do
+      evidence =
+        Core.show(%{
+          selection: selection,
+          checks: checks,
+          base_commit: base_commit
+        })
+
+      feedback_json = Jason.encode!(evidence)
+      {:ok, Map.put(evidence, :feedback_json, feedback_json)}
+    end
+  end
+
+  defp resolve_lease(workspace_id, context) do
+    caller = %{
+      task_id: Workspace.context_task_id(context),
+      principal_id: Workspace.context_principal_id(context)
+    }
+
+    case WorkspaceLeaseRegistry.inspect_lease(workspace_id, caller) do
+      {:ok, lease} -> {:ok, lease}
+      {:error, :not_found} -> {:error, :workspace_not_found}
+      {:error, :unauthorized} -> {:error, :workspace_unauthorized}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp lease_paths(lease) when is_map(lease) do
+    worktree = map_value(lease, :worktree_path)
+    base = map_value(lease, :base_commit)
+
+    cond do
+      not is_binary(worktree) or worktree == "" ->
+        {:error, :missing_worktree_path}
+
+      not File.dir?(worktree) ->
+        {:error, :worktree_missing}
+
+      not is_binary(base) or base == "" ->
+        {:error, :missing_base_commit}
+
+      true ->
+        {:ok, worktree, base}
+    end
+  end
+
+  defp list_changed_files(worktree_path, base_commit) do
+    with {:ok, tracked} <-
+           git(worktree_path, ["diff", "--name-only", "--find-renames", "-z", base_commit]),
+         {:ok, untracked} <-
+           git(worktree_path, ["ls-files", "--others", "--exclude-standard", "-z"]) do
+      files =
+        (split_z(tracked) ++ split_z(untracked))
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      {:ok, files}
+    else
+      {:error, reason} -> {:error, {:changed_files_failed, reason}}
+    end
+  end
+
+  defp load_candidate_mix_exs(worktree_path) do
+    with {:ok, tracked} <- git(worktree_path, ["ls-files", "-z", "--", "apps/*/mix.exs"]),
+         {:ok, untracked} <-
+           git(worktree_path, [
+             "ls-files",
+             "--others",
+             "--exclude-standard",
+             "-z",
+             "--",
+             "apps/*/mix.exs"
+           ]) do
+      paths =
+        (split_z(tracked) ++ split_z(untracked))
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      Enum.reduce_while(paths, {:ok, []}, fn rel, {:ok, acc} ->
+        case app_dir_for_mix_exs(rel) do
+          {:ok, dir} ->
+            abs = Path.join(worktree_path, rel)
+
+            case File.read(abs) do
+              {:ok, source} ->
+                {:cont, {:ok, [{dir, source} | acc]}}
+
+              {:error, reason} ->
+                {:halt, {:error, {:mix_exs_read_failed, rel, reason}}}
+            end
+
+          :error ->
+            {:halt, {:error, {:invalid_mix_exs_path, rel}}}
+        end
+      end)
+      |> case do
+        {:ok, entries} -> {:ok, Enum.reverse(entries)}
+        {:error, _} = error -> error
+      end
+    else
+      {:error, reason} -> {:error, {:mix_exs_list_failed, reason}}
+    end
+  end
+
+  defp app_dir_for_mix_exs(path) do
+    case Path.split(path) do
+      ["apps", dir, "mix.exs"] when dir != "" -> {:ok, dir}
+      _ -> :error
+    end
+  end
+
+  defp run_checks(worktree_path, selection, timeout) do
+    compile = run_compile(worktree_path, timeout)
+
+    if compile["passed"] do
+      xref = run_xref(worktree_path, timeout)
+
+      test =
+        if xref["passed"] do
+          run_tests(worktree_path, selection.test_paths, timeout)
+        else
+          Core.skipped_check("xref_failed")
+        end
+
+      {:ok, %{compile: compile, xref: xref, test: test}}
+    else
+      {:ok,
+       %{
+         compile: compile,
+         xref: Core.skipped_check("compile_failed"),
+         test: Core.skipped_check("compile_failed")
+       }}
+    end
+  end
+
+  defp run_compile(path, timeout) do
+    case MixAction.run_mix(path, ["compile", "--warnings-as-errors"], timeout: timeout) do
+      {:ok, result} ->
+        Core.completed_check(MixAction.compile_feedback(result))
+
+      {:error, reason} ->
+        throw({:execution_error, {:compile_execution_failed, reason}})
+    end
+  end
+
+  defp run_xref(path, timeout) do
+    # Evidence only — do not pass --fail-above; this repository has baseline
+    # compile-connected cycles. Zero-cycle validation is not claimed.
+    case MixAction.run_mix(path, ["xref", "graph"], timeout: timeout) do
+      {:ok, result} ->
+        Core.completed_check(MixAction.compile_feedback(result),
+          reason: if(result.exit_code == 0, do: nil, else: "xref_failed")
+        )
+
+      {:error, reason} ->
+        throw({:execution_error, {:xref_execution_failed, reason}})
+    end
+  end
+
+  defp run_tests(_path, [], _timeout) do
+    Core.empty_pass_check("no_affected_app_tests")
+  end
+
+  defp run_tests(path, test_paths, timeout) when is_list(test_paths) do
+    # Only pass existing test directories so mix does not fail on missing paths
+    # for apps that declare no tests yet.
+    existing =
+      Enum.filter(test_paths, fn rel -> File.dir?(Path.join(path, rel)) end)
+
+    if existing == [] do
+      Core.empty_pass_check("no_existing_test_dirs")
+    else
+      case MixAction.run_mix(path, ["test" | existing], timeout: timeout) do
+        {:ok, result} ->
+          Core.completed_check(MixAction.compile_feedback(result),
+            reason: if(result.exit_code == 0, do: nil, else: "tests_failed")
+          )
+
+        {:error, reason} ->
+          throw({:execution_error, {:test_execution_failed, reason}})
+      end
+    end
+  end
+
+  defp git(path, args) do
+    case System.cmd("git", ["-C", path | args], stderr_to_stdout: true) do
+      {output, 0} -> {:ok, output}
+      {output, _code} -> {:error, String.trim(output)}
+    end
+  end
+
+  defp split_z(output) when is_binary(output) do
+    String.split(output, <<0>>, trim: true)
+  end
+
+  defp map_value(map, key) when is_map(map) and is_atom(key) do
+    cond do
+      Map.has_key?(map, key) -> Map.get(map, key)
+      Map.has_key?(map, Atom.to_string(key)) -> Map.get(map, Atom.to_string(key))
+      true -> nil
+    end
+  end
+end

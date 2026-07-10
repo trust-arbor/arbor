@@ -56,6 +56,8 @@ required_capabilities:
   resource: "arbor://action/coding/produce_reviewable_change"
 - description: "Validate a Council-attested security regression against both reviewed revisions"
   resource: "arbor://action/coding/security_regression/validate"
+- description: "Validate compile, xref evidence, and downstream tests for cross-app changes"
+  resource: "arbor://action/coding/cross_app/validate"
 - description: "Acquire, inspect, retain, and release isolated coding workspaces"
   resource: "arbor://action/coding/workspace/**"
 - description: "Start and message Codex ACP sessions"
@@ -81,6 +83,7 @@ trust_preset:
     "arbor://orchestrator/execute": auto
     "arbor://action/coding/produce_reviewable_change": auto
     "arbor://action/coding/security_regression/validate": ask
+    "arbor://action/coding/cross_app/validate": ask
     "arbor://action/coding/workspace": auto
     "arbor://acp/tool": auto
     "arbor://fs/read": auto
