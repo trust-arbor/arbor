@@ -56,6 +56,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
       refute "mix_test" in policy["allowed_actions"]
       assert "validate" in policy["mandatory_gate_nodes"]
       assert "review_change" == policy["review_gate"]
+      assert "check_validation_passed" == policy["validation_result_gate"]
+      assert "route_review" == policy["review_routing_gate"]
       assert policy["allowed_handlers"] == Enum.sort(policy["allowed_handlers"])
 
       assert {:ok, security} = Profiles.fetch("security_regression")

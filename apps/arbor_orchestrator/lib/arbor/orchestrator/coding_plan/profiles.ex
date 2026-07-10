@@ -81,9 +81,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     "mandatory_gate_nodes" => @mandatory_gate_nodes,
     "publication_nodes" => @publication_nodes,
     "validation_gate" => "validate",
+    "validation_result_gate" => "check_validation_passed",
     "post_validation_commit_routing" => "route_after_commit",
     "committed_change_routing" => "route_after_commit",
-    "review_gate" => "review_change"
+    "review_gate" => "review_change",
+    "review_routing_gate" => "route_review"
   }
 
   @profiles [

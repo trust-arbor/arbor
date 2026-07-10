@@ -31,9 +31,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     mandatory_gate_nodes
     publication_nodes
     validation_gate
+    validation_result_gate
     post_validation_commit_routing
     committed_change_routing
     review_gate
+    review_routing_gate
   )
 
   @forbidden_attr_keys MapSet.new(~w(
@@ -63,6 +65,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     actions_executor
   ))
 
+  # Bare agent_id is a reviewed template output (prep_review_agent copies
+  # session.agent_id into context). Nested paths like session.agent_id are
+  # rejected via segment checks against authority names below.
   @forbidden_output_keys MapSet.new(~w(
     authorization
     authorizer
@@ -86,6 +91,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     action_executor
     actions_executor
   ))
+
+  # Static DOT params are bound via arg.* / param.* prefixes. After stripping that
+  # prefix the remaining name is checked against authority/control aliases.
+  @static_param_prefix_re ~r/^(?:param|arg)[^A-Za-z0-9]+(.+)$/i
 
   @doc """
   Validate a compiled coding graph against a reviewed semantic policy.
@@ -143,9 +152,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
              :ok <- require_string_list(policy, "mandatory_gate_nodes"),
              :ok <- require_string_list(policy, "publication_nodes"),
              :ok <- require_nonempty_string(policy, "validation_gate"),
+             :ok <- require_nonempty_string(policy, "validation_result_gate"),
              :ok <- require_nonempty_string(policy, "post_validation_commit_routing"),
              :ok <- require_nonempty_string(policy, "committed_change_routing"),
              :ok <- require_nonempty_string(policy, "review_gate"),
+             :ok <- require_nonempty_string(policy, "review_routing_gate"),
              :ok <- require_sorted_unique(policy, "allowed_handlers"),
              :ok <- require_sorted_unique(policy, "allowed_exec_targets"),
              :ok <- require_sorted_unique(policy, "allowed_actions"),
@@ -318,13 +329,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   end
 
   defp forbidden_attr_key?(key) when is_binary(key) do
-    normalized = normalize_key(key)
-
-    MapSet.member?(@forbidden_attr_keys, normalized) or
-      String.starts_with?(normalized, "middleware_") or
-      String.starts_with?(key, "middleware.") or
-      String.starts_with?(key, "authorization.") or
-      String.starts_with?(key, "capabilities.")
+    # Bare authority attrs and static action params (param.*/arg.*) both fail closed.
+    key
+    |> authority_name_candidates()
+    |> Enum.any?(&forbidden_authority_name?/1)
   end
 
   defp forbidden_attr_key?(_key), do: false
@@ -338,15 +346,88 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         do: value
   end
 
-  defp forbidden_output_key?(key) do
+  defp forbidden_output_key?(key) when is_binary(key) do
     normalized = normalize_key(key)
 
-    MapSet.member?(@forbidden_output_keys, normalized) or
-      String.starts_with?(normalized, "middleware") or
+    cond do
+      MapSet.member?(@forbidden_output_keys, normalized) ->
+        true
+
+      output_authority_prefix?(normalized) ->
+        true
+
+      true ->
+        # Nested paths (session.agent_id, Session/Principal-Id, …) fail closed
+        # when any segment is an authority/control name. Bare agent_id stays
+        # allowed for the reviewed prep_review_agent copy.
+        case path_segments(key) do
+          [] ->
+            false
+
+          [_single] ->
+            false
+
+          segments ->
+            Enum.any?(segments, &forbidden_output_path_segment?/1)
+        end
+    end
+  end
+
+  defp forbidden_output_key?(_key), do: false
+
+  defp authority_name_candidates(key) when is_binary(key) do
+    stripped = strip_static_param_prefix(key)
+
+    [key, stripped]
+    |> Enum.uniq()
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp strip_static_param_prefix(key) when is_binary(key) do
+    case Regex.run(@static_param_prefix_re, key) do
+      [_, rest] when is_binary(rest) and rest != "" -> rest
+      _other -> key
+    end
+  end
+
+  # Path segments use structural separators only (., /). Underscores stay inside
+  # names so agent_id remains one segment (not agent + id).
+  defp path_segments(key) when is_binary(key) do
+    key
+    |> String.split(~r/[.\/]+/u, trim: true)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp forbidden_authority_name?(name) when is_binary(name) do
+    normalized = normalize_key(name)
+
+    MapSet.member?(@forbidden_attr_keys, normalized) or
+      String.starts_with?(normalized, "middleware_") or
+      dotted_authority_prefix?(name)
+  end
+
+  defp forbidden_output_path_segment?(segment) when is_binary(segment) do
+    normalized = normalize_key(segment)
+
+    MapSet.member?(@forbidden_attr_keys, normalized) or
+      MapSet.member?(@forbidden_output_keys, normalized) or
+      output_authority_prefix?(normalized)
+  end
+
+  defp output_authority_prefix?(normalized) when is_binary(normalized) do
+    String.starts_with?(normalized, "middleware") or
       String.starts_with?(normalized, "authorization") or
       String.starts_with?(normalized, "capabilities") or
       String.starts_with?(normalized, "signing") or
       String.starts_with?(normalized, "private_key")
+  end
+
+  defp dotted_authority_prefix?(key) when is_binary(key) do
+    down = String.downcase(key)
+
+    String.starts_with?(down, "middleware.") or
+      String.starts_with?(down, "authorization.") or
+      String.starts_with?(down, "capabilities.")
   end
 
   defp normalize_key(key) do
@@ -410,19 +491,46 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   defp check_dominance(errors, policy, dominators, reachable, review_profile) do
     validation_gate = policy["validation_gate"]
+    validation_result_gate = policy["validation_result_gate"]
     post_validation = policy["post_validation_commit_routing"]
     committed_routing = policy["committed_change_routing"]
     review_gate = policy["review_gate"]
+    review_routing_gate = policy["review_routing_gate"]
+    # Reviewed coding template commit node; always mandatory in policy inventories.
+    commit_gate = "commit_change"
 
     publication_targets =
       policy["publication_nodes"]
       |> Enum.filter(&MapSet.member?(reachable, &1))
       |> Enum.sort()
 
-    # Validation must dominate post-validation commit routing on the changed path.
+    # validate dominates the validation-result gate; that gate dominates both
+    # commit_change and post-validation commit routing. Keep validate ->
+    # route_after_commit as a direct proof for the changed success path.
     errors =
-      require_dominates(
-        errors,
+      errors
+      |> require_dominates(
+        validation_gate,
+        validation_result_gate,
+        reachable,
+        dominators,
+        "validation"
+      )
+      |> require_dominates(
+        validation_result_gate,
+        commit_gate,
+        reachable,
+        dominators,
+        "validation_result"
+      )
+      |> require_dominates(
+        validation_result_gate,
+        post_validation,
+        reachable,
+        dominators,
+        "validation_result"
+      )
+      |> require_dominates(
         validation_gate,
         post_validation,
         reachable,
@@ -453,9 +561,24 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         dominators,
         "committed_change_routing"
       )
+      |> require_dominates(
+        review_gate,
+        review_routing_gate,
+        reachable,
+        dominators,
+        "review"
+      )
       |> then(fn acc ->
         Enum.reduce(publication_targets, acc, fn target, inner ->
-          require_dominates(inner, review_gate, target, reachable, dominators, "review")
+          inner
+          |> require_dominates(
+            review_routing_gate,
+            target,
+            reachable,
+            dominators,
+            "review_routing"
+          )
+          |> require_dominates(review_gate, target, reachable, dominators, "review")
         end)
       end)
     else

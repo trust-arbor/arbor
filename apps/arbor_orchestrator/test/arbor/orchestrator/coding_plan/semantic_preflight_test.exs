@@ -189,6 +189,112 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            end)
   end
 
+  test "adversarial: param.graph and separator/case authority aliases fail closed", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    forged =
+      update_in(graph.nodes["commit_change"].attrs, &Map.put(&1, "param.graph", "evil.dot"))
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(forged, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert Enum.any?(errors, fn err ->
+             err["code"] == "forbidden_authority_attribute" and
+               err["node_id"] == "commit_change" and
+               err["detail"]["attribute"] == "param.graph"
+           end)
+
+    aliases = [
+      {"param.agent_id", "agent_forged"},
+      {"arg.principal_id", "principal_forged"},
+      {"Param.Authorization", "forged"},
+      {"ARG.Capabilities", "forged"},
+      {"param.pipeline_path", "/evil/pipeline.dot"},
+      {"param-pipeline_path", "/evil/pipeline.dot"}
+    ]
+
+    for {attr, value} <- aliases do
+      aliased =
+        update_in(graph.nodes["inspect_workspace"].attrs, &Map.put(&1, attr, value))
+
+      assert {:error, {:semantic_preflight_failed, alias_errors}} =
+               SemanticPreflight.validate(aliased, profile["semantic_policy"],
+                 review_profile: "binding"
+               )
+
+      assert Enum.any?(alias_errors, fn err ->
+               err["code"] == "forbidden_authority_attribute" and
+                 err["detail"]["attribute"] == attr
+             end),
+             "expected #{attr} to fail closed"
+    end
+  end
+
+  test "adversarial: output_key session.agent_id overwrites authority and fails closed", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    overridden =
+      update_in(
+        graph.nodes["inspect_workspace"].attrs,
+        &Map.put(&1, "output_key", "session.agent_id")
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(overridden, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert Enum.any?(errors, fn err ->
+             err["code"] == "forbidden_authority_output" and
+               err["node_id"] == "inspect_workspace" and
+               err["detail"]["output_key"] == "session.agent_id"
+           end)
+  end
+
+  test "adversarial: bypass of check_validation_passed fails closed", ctx do
+    # Keep validate reachable, but route success straight to commit prep so the
+    # validation-result gate no longer dominates commit/publication routing.
+    bypassed =
+      String.replace(
+        ctx.template_source,
+        ~s(validate -> check_validation_passed [condition="outcome=success"]),
+        ~s(validate -> check_validation_passed [condition="outcome=success"]\n  validate -> prep_commit_path [condition="context.bypass_validation_result=true"])
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} = compile(plan!(), ctx, bypassed)
+
+    assert Enum.any?(errors, fn err ->
+             err["code"] == "dominance_violation" and
+               err["detail"]["kind"] == "validation_result" and
+               err["detail"]["required_dominator"] == "check_validation_passed"
+           end)
+  end
+
+  test "adversarial: review_change edge that bypasses route_review fails closed", ctx do
+    # review_change still dominates publications if it reaches them directly, but
+    # route_review must dominate every publication terminal under binding review.
+    bypassed =
+      String.replace(
+        ctx.template_source,
+        ~s(review_change -> route_review [condition="outcome=success"]),
+        ~s(review_change -> route_review [condition="outcome=success"]\n  review_change -> route_publish [condition="context.bypass_review_routing=true"])
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} = compile(plan!(), ctx, bypassed)
+
+    assert Enum.any?(errors, fn err ->
+             err["code"] == "dominance_violation" and
+               err["detail"]["kind"] == "review_routing" and
+               err["detail"]["required_dominator"] == "route_review"
+           end)
+  end
+
   test "adversarial: forbidden handler and exec target fail closed", ctx do
     assert {:ok, compilation} = compile(plan!(), ctx)
     graph = compiled_graph!(compilation.dot_source)
