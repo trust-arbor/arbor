@@ -16,6 +16,14 @@ defmodule Arbor.Orchestrator.ActionsExecutorCallerAuthoritySecurityRegressionTes
   end
 
   setup do
+    unless Process.whereis(Arbor.Security.Identity.Registry) do
+      start_supervised!({Arbor.Security.Identity.Registry, []})
+    end
+
+    unless Process.whereis(Arbor.Security.SystemAuthority) do
+      start_supervised!({Arbor.Security.SystemAuthority, []})
+    end
+
     previous = Application.get_env(:arbor_orchestrator, :security_module)
     Application.put_env(:arbor_orchestrator, :security_module, CallerDenySecurity)
 

@@ -100,6 +100,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerCallerAuthoritySecurityRegressio
       attrs: %{"goal" => "exercise a scoped tool call"}
     }
 
+    graph = Arbor.Orchestrator.IR.Compiler.compile!(graph)
+    node = Map.fetch!(graph.nodes, node.id)
+
     {:ok, authority} =
       RunAuthorization.new(graph,
         execution_principal: execution_principal,
