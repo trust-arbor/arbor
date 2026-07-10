@@ -285,6 +285,18 @@ defmodule Arbor.Actions.GitTest do
       assert String.length(result.commit_hash) >= 7
     end
 
+    test "stages all when a DOT static boolean arrives as a string", %{repo_path: repo_path} do
+      create_file(repo_path, "dot_file.txt", "content")
+
+      assert {:ok, result} =
+               Git.Commit.run(
+                 %{path: repo_path, message: "Add DOT file", all: "true"},
+                 %{}
+               )
+
+      assert String.length(result.commit_hash) >= 7
+    end
+
     test "handles commit with no changes", %{repo_path: repo_path} do
       assert {:error, message} = Git.Commit.run(%{path: repo_path, message: "Empty"}, %{})
       assert message =~ "nothing to commit" or message =~ "Failed to create commit"
@@ -294,6 +306,18 @@ defmodule Arbor.Actions.GitTest do
       assert {:ok, result} =
                Git.Commit.run(
                  %{path: repo_path, message: "Empty commit", allow_empty: true},
+                 %{}
+               )
+
+      assert String.length(result.commit_hash) >= 7
+    end
+
+    test "allows an empty commit when a DOT static boolean arrives as a string", %{
+      repo_path: repo_path
+    } do
+      assert {:ok, result} =
+               Git.Commit.run(
+                 %{path: repo_path, message: "Empty DOT commit", allow_empty: "true"},
                  %{}
                )
 

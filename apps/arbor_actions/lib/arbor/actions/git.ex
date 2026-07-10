@@ -479,7 +479,7 @@ defmodule Arbor.Actions.Git do
       end
     end
 
-    defp maybe_stage_files(path, %{all: true}) do
+    defp maybe_stage_files(path, %{all: all}) when all in [true, "true", "1", 1] do
       case git_command(path, ["add", "-A"]) do
         {:ok, _} -> :ok
         {:error, reason} -> {:error, reason}
@@ -490,9 +490,11 @@ defmodule Arbor.Actions.Git do
 
     defp create_commit(path, message, params) do
       args = ["commit", "-m", message]
-      args = if params[:allow_empty], do: args ++ ["--allow-empty"], else: args
+      args = if enabled?(params[:allow_empty]), do: args ++ ["--allow-empty"], else: args
       git_command(path, args)
     end
+
+    defp enabled?(value), do: value in [true, "true", "1", 1]
 
     defp get_commit_hash(path) do
       case git_command(path, ["rev-parse", "HEAD"]) do
