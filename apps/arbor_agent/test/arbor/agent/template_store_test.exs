@@ -346,6 +346,47 @@ defmodule Arbor.Agent.TemplateStoreTest do
 
       refute Map.has_key?(preset["rules"], "arbor://trust/write")
     end
+
+    test "shipped instructions treat structured coding_change as canonical and composite as rollback" do
+      assert {:ok, data} = TemplateStore.resolve("coding_agent")
+      instructions = data["character"]["instructions"]
+      joined = Enum.join(instructions, "\n")
+
+      assert Enum.any?(
+               instructions,
+               &String.contains?(&1, "Structured `coding_change` dispatch is the canonical")
+             )
+
+      assert joined =~ "compile and execute"
+      assert joined =~ "DOT pipeline"
+      assert joined =~ ~s({"kind":"coding_change","plan":{...}})
+      assert joined =~ "worker.provider"
+
+      assert Enum.any?(
+               instructions,
+               &String.contains?(&1, "coding_produce_reviewable_change")
+             )
+
+      assert joined =~ "compatibility/rollback"
+      assert joined =~ "one release window"
+      assert joined =~ "Do not nest `coding_produce_reviewable_change`"
+
+      # Stale primary-macro framing must not remain
+      refute Enum.any?(
+               instructions,
+               &String.contains?(
+                 &1,
+                 "Use `coding_produce_reviewable_change` for implementation tasks"
+               )
+             )
+
+      # Rollback capability/trust entries stay for the legacy window
+      resources = Enum.map(data["required_capabilities"], & &1["resource"])
+      assert "arbor://action/coding/produce_reviewable_change" in resources
+
+      assert data["trust_preset"]["rules"]["arbor://action/coding/produce_reviewable_change"] ==
+               "auto"
+    end
   end
 
   describe "pipeline_architect template" do

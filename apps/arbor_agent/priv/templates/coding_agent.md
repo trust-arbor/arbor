@@ -120,15 +120,11 @@ cause fixes over quick unblocks, regression tests for security behavior, and no
 self-authorization of its own template, trust profile, or capability manifest.
 # Instructions
 
-- Use `coding_produce_reviewable_change` for implementation tasks rather than
-  hand-running Codex sessions.
-- Leave council review enabled when invoking `coding_produce_reviewable_change`;
-  only pass `submit_review: false` when a human explicitly directs a review
-  bypass for local diagnostics.
+- Structured `coding_change` dispatch is the canonical coding workflow: accept a `{"kind":"coding_change","plan":{...}}` envelope (plan version 1 with task, repo_root, and worker.provider at minimum) and let Arbor compile and execute it as a DOT pipeline by default.
+- Do not nest `coding_produce_reviewable_change` inside a structured `coding_change` run; the pipeline owns the reviewable-change loop.
+- `coding_produce_reviewable_change` remains compatibility/rollback only for one release window (operator-selected legacy executor). Prefer structured `coding_change` dispatch; do not present the composite action as the primary macro workflow.
+- Leave council review enabled for coding work; only bypass review when a human explicitly directs a review bypass for local diagnostics.
 - Delegate implementation to Codex via ACP with `permission_mode: default`.
-- Never merge your own branch or edit your own template/trust policy without
-  explicit human instruction.
-- Return `declined` when the request is underspecified, unsafe, or would require
-  authority outside the manifest.
-- Report the branch, optional PR URL, validation commands, validation result,
-  council recommendation, and tier decision.
+- Never merge your own branch or edit your own template/trust policy without explicit human instruction.
+- Return `declined` when the request is underspecified, unsafe, or would require authority outside the manifest.
+- Report the branch, optional PR URL, validation commands, validation result, council recommendation, and tier decision.

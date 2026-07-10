@@ -263,6 +263,55 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       assert "task_id" in steer_tool.inputSchema.required
       assert "message" in steer_tool.inputSchema.required
     end
+
+    test "arbor_dispatch_task documents stable coding_change envelope without dropping string/object support",
+         %{state: state} do
+      {:ok, tools, _, _} = Handler.handle_list_tools(nil, state)
+      dispatch_tool = Enum.find(tools, &(&1.name == "arbor_dispatch_task"))
+      refute is_nil(dispatch_tool)
+
+      desc = dispatch_tool.description
+      assert desc =~ ~s({"kind":"coding_change","plan":{...}})
+      assert desc =~ "version is 1"
+      assert desc =~ "task, repo_root, and worker.provider"
+      assert desc =~ "validation_profile"
+      assert desc =~ "review_profile"
+      assert desc =~ "compiled DOT pipeline by default"
+      assert desc =~ "string prompts"
+      assert desc =~ "generic object"
+
+      task_schema = dispatch_tool.inputSchema.properties.task
+      assert is_list(task_schema.oneOf)
+      assert length(task_schema.oneOf) == 2
+
+      string_branch = Enum.find(task_schema.oneOf, &(&1.type == "string"))
+      object_branch = Enum.find(task_schema.oneOf, &(&1.type == "object"))
+      refute is_nil(string_branch)
+      refute is_nil(object_branch)
+
+      assert object_branch.description =~ ~s({"kind":"coding_change","plan":)
+      assert object_branch.description =~ ~s("version":1)
+      assert object_branch.description =~ ~s("task":)
+      assert object_branch.description =~ ~s("repo_root":)
+      assert object_branch.description =~ ~s("worker":{"provider")
+      assert object_branch.description =~ "validation_profile"
+      assert object_branch.description =~ "review_profile"
+
+      assert object_branch.properties.kind.type == "string"
+      assert object_branch.properties.plan.type == "object"
+      plan_desc = object_branch.properties.plan.description
+      assert plan_desc =~ "task"
+      assert plan_desc =~ "repo_root"
+      assert plan_desc =~ "worker.provider"
+      assert plan_desc =~ "validation_profile"
+      assert plan_desc =~ "review_profile"
+
+      # Non-restrictive object branch: document coding shape without oneOf plan schema forks
+      refute Map.has_key?(object_branch, :required)
+      refute Map.has_key?(object_branch.properties.plan, :required)
+      refute Map.has_key?(object_branch.properties.plan, :oneOf)
+      refute Map.has_key?(object_branch.properties.plan, :properties)
+    end
   end
 
   # ===========================================================================

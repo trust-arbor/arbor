@@ -226,7 +226,13 @@ defmodule Arbor.Gateway.MCP.Handler do
       %{
         name: "arbor_dispatch_task",
         description:
-          "Dispatch an asynchronous task to an Arbor agent. Returns immediately with a task_id.",
+          "Dispatch an asynchronous task to an Arbor agent. Returns immediately with a task_id. " <>
+            "Accepts ordinary string prompts and generic object tasks. " <>
+            "Stable structured coding path: " <>
+            ~s({"kind":"coding_change","plan":{...}}) <>
+            " - plan version is 1 and minimally requires task, repo_root, and worker.provider; " <>
+            "validation_profile and review_profile are optional reviewed selectors. " <>
+            "Structured coding_change dispatch runs the compiled DOT pipeline by default.",
         inputSchema: %{
           type: "object",
           properties: %{
@@ -235,7 +241,32 @@ defmodule Arbor.Gateway.MCP.Handler do
               description: "Stable id of the agent that should run the task"
             },
             task: %{
-              oneOf: [%{type: "string"}, %{type: "object"}],
+              oneOf: [
+                %{
+                  type: "string",
+                  description: "Ordinary task prompt string"
+                },
+                %{
+                  type: "object",
+                  description:
+                    "Structured task payload. Canonical coding example: " <>
+                      ~s({"kind":"coding_change","plan":{"version":1,"task":"...","repo_root":"/path/to/repo","worker":{"provider":"codex"}}}) <>
+                      ". Optional plan fields include validation_profile and review_profile.",
+                  properties: %{
+                    kind: %{
+                      type: "string",
+                      description: "Task kind; use \"coding_change\" for structured coding"
+                    },
+                    plan: %{
+                      type: "object",
+                      description:
+                        "Version-1 coding plan. Minimally requires task, repo_root, and " <>
+                          "worker.provider. Optional reviewed selectors: validation_profile, " <>
+                          "review_profile."
+                    }
+                  }
+                }
+              ],
               description: "Task prompt or structured task payload"
             },
             timeout: %{
