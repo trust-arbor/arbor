@@ -265,6 +265,9 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       on_exit(fn -> File.cd!(original_cwd) end)
       File.cd!(Path.join(umbrella_root, "apps"))
 
+      assert {:ok, ^agent_id} = Lifecycle.ensure_identity(agent_id)
+      File.cd!(original_cwd)
+
       assert {:ok, _supervisor} =
                Lifecycle.start(agent_id,
                  runtime: :acp,
