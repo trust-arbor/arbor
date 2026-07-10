@@ -252,6 +252,8 @@ defmodule Arbor.Orchestrator.Config do
 
   @coding_pipeline_relpath "pipelines/coding-change-v1.dot"
   @default_coding_pipeline_runner Arbor.Orchestrator
+  @default_coding_plan_compiler Arbor.Orchestrator.CodingPlan.Compiler
+  @default_coding_plan_artifact_store Arbor.Orchestrator.CodingPlan.ArtifactStore
   @default_pipeline_status_module Arbor.Orchestrator.PipelineStatus
   @default_coding_task_control_facade Arbor.AI
 
@@ -281,6 +283,32 @@ defmodule Arbor.Orchestrator.Config do
   @spec coding_pipeline_runner() :: module()
   def coding_pipeline_runner do
     Application.get_env(@app, :coding_pipeline_runner, @default_coding_pipeline_runner)
+  end
+
+  @doc """
+  Trusted module used to compile validated coding plans into deterministic DOT.
+
+  Defaults to `Arbor.Orchestrator.CodingPlan.Compiler`. Tests and alternate
+  packaging may inject a compatible module via `:coding_plan_compiler`.
+  """
+  @spec coding_plan_compiler() :: module()
+  def coding_plan_compiler do
+    Application.get_env(@app, :coding_plan_compiler, @default_coding_plan_compiler)
+  end
+
+  @doc """
+  Trusted module used to archive coding-plan compilation artifacts.
+
+  Defaults to `Arbor.Orchestrator.CodingPlan.ArtifactStore`. Tests and alternate
+  packaging may inject a compatible module via `:coding_plan_artifact_store`.
+  """
+  @spec coding_plan_artifact_store() :: module()
+  def coding_plan_artifact_store do
+    Application.get_env(
+      @app,
+      :coding_plan_artifact_store,
+      @default_coding_plan_artifact_store
+    )
   end
 
   @doc """
