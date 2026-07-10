@@ -19,8 +19,8 @@ defmodule Arbor.Orchestrator.Handlers.ExecutionDelegateBindingSecurityRegression
   }
 
   setup do
-    compute_started? = ensure_registry_started(ComputeRegistry)
-    pipeline_started? = ensure_registry_started(PipelineResolver)
+    ensure_registry_started(ComputeRegistry)
+    ensure_registry_started(PipelineResolver)
     :ok = Arbor.Orchestrator.Registrar.register_core()
 
     compute_snapshot = ComputeRegistry.snapshot()
@@ -38,8 +38,8 @@ defmodule Arbor.Orchestrator.Handlers.ExecutionDelegateBindingSecurityRegression
     {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
 
     on_exit(fn ->
-      restore_registry(ComputeRegistry, compute_snapshot, compute_started?)
-      restore_registry(PipelineResolver, pipeline_snapshot, pipeline_started?)
+      restore_registry(ComputeRegistry, compute_snapshot)
+      restore_registry(PipelineResolver, pipeline_snapshot)
       restore_env(:phase5_delegate_binding_test_pid, previous_pid)
       File.rm_rf(root)
     end)
@@ -240,17 +240,14 @@ defmodule Arbor.Orchestrator.Handlers.ExecutionDelegateBindingSecurityRegression
 
   defp ensure_registry_started(registry) do
     if is_nil(Process.whereis(registry)) do
-      {:ok, _pid} = registry.start_link()
-      true
-    else
-      false
+      start_supervised!({registry, []})
     end
   end
 
-  defp restore_registry(registry, snapshot, started?) do
+  defp restore_registry(registry, snapshot) do
+    # A registry started by this test is stopped by the ExUnit test supervisor.
     if Process.whereis(registry) do
       registry.restore(snapshot)
-      if started?, do: GenServer.stop(registry)
     end
   end
 
