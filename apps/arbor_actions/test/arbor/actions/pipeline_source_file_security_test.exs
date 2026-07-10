@@ -106,6 +106,27 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
     |> Map.new()
   end
 
+  defp source_authority!(principal, signer, workdir, relative_dot) do
+    {:ok, authority} =
+      Pipeline.verified_source_authority(
+        %{source_file: relative_dot},
+        run_context(principal, signer, workdir)
+      )
+
+    authority
+  end
+
+  defp with_source_file_post_read_hook(hook, fun) do
+    key = {Pipeline, :source_file_post_read_hook}
+    previous = Process.put(key, hook)
+
+    try do
+      fun.()
+    after
+      if is_nil(previous), do: Process.delete(key), else: Process.put(key, previous)
+    end
+  end
+
   defp deny_source_file_read?(result) do
     match?(
       {:error, :source_file_read_denied},
@@ -246,6 +267,102 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
                  %{source_file: "outside-link.dot", initial_context: %{}},
                  run_context(principal, signer, workdir)
                )
+    end
+
+    test "security regression: a symlink replacement race discards source_file bytes", %{
+      principal: principal,
+      signer: signer,
+      workdir: workdir,
+      dot_path: dot_path,
+      relative_dot: relative_dot
+    } do
+      grant!(principal, "arbor://fs/read#{workdir}/**")
+      authority = source_authority!(principal, signer, workdir, relative_dot)
+      original_path = Path.join(workdir, "child-original.dot")
+      outside_path = workdir <> "_symlink_race_outside.dot"
+      File.write!(outside_path, "sensitive replacement bytes")
+      on_exit(fn -> File.rm(outside_path) end)
+
+      replace_with_symlink = fn real_path ->
+        File.rename!(real_path, original_path)
+        File.ln_s!(outside_path, real_path)
+      end
+
+      result =
+        with_source_file_post_read_hook(replace_with_symlink, fn ->
+          Pipeline.resolve_source(%{source_file: relative_dot}, authority)
+        end)
+
+      assert {:error, :source_file_changed_during_read} = result
+      refute match?({:ok, _bytes}, result)
+      assert {:ok, ^outside_path} = File.read_link(dot_path)
+    end
+
+    test "security regression: a regular-file replacement race discards source_file bytes", %{
+      principal: principal,
+      signer: signer,
+      workdir: workdir,
+      relative_dot: relative_dot
+    } do
+      grant!(principal, "arbor://fs/read#{workdir}/**")
+      authority = source_authority!(principal, signer, workdir, relative_dot)
+      original_path = Path.join(workdir, "child-original.dot")
+      replacement = "sensitive replacement bytes"
+
+      replace_with_regular_file = fn real_path ->
+        File.rename!(real_path, original_path)
+        File.write!(real_path, replacement)
+      end
+
+      result =
+        with_source_file_post_read_hook(replace_with_regular_file, fn ->
+          Pipeline.resolve_source(%{source_file: relative_dot}, authority)
+        end)
+
+      assert {:error, :source_file_changed_during_read} = result
+      refute match?({:ok, _bytes}, result)
+    end
+
+    test "security regression: workdir replacement during read discards source_file bytes", %{
+      principal: principal,
+      signer: signer,
+      workdir: workdir,
+      relative_dot: relative_dot
+    } do
+      grant!(principal, "arbor://fs/read#{workdir}/**")
+      authority = source_authority!(principal, signer, workdir, relative_dot)
+      original_workdir = workdir <> "_original"
+
+      on_exit(fn ->
+        File.rm_rf(workdir)
+        File.rm_rf(original_workdir)
+      end)
+
+      replace_workdir = fn _real_path ->
+        File.rename!(workdir, original_workdir)
+        File.ln_s!(original_workdir, workdir)
+      end
+
+      result =
+        with_source_file_post_read_hook(replace_workdir, fn ->
+          Pipeline.resolve_source(%{source_file: relative_dot}, authority)
+        end)
+
+      assert {:error, :source_file_changed_during_read} = result
+      refute match?({:ok, _bytes}, result)
+    end
+
+    test "unchanged authorized source_file returns its bytes", %{
+      principal: principal,
+      signer: signer,
+      workdir: workdir,
+      relative_dot: relative_dot
+    } do
+      grant!(principal, "arbor://fs/read#{workdir}/**")
+      authority = source_authority!(principal, signer, workdir, relative_dot)
+
+      assert {:ok, @simple_dot} =
+               Pipeline.resolve_source(%{source_file: relative_dot}, authority)
     end
 
     test "security regression: caller run authority cannot substitute for executor authority", %{

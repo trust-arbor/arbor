@@ -47,6 +47,7 @@ defmodule Arbor.Actions.Pipeline do
 
   @orchestrator_mod Arbor.Orchestrator
   @fs_read_resource "arbor://fs/read"
+  @source_file_post_read_hook_key {__MODULE__, :source_file_post_read_hook}
 
   defmodule Run do
     @moduledoc """
@@ -295,12 +296,10 @@ defmodule Arbor.Actions.Pipeline do
 
     if is_binary(workdir) and workdir != "" do
       case resolve_real_source_file(path, workdir) do
-        {:ok, authorization_path, read_path} ->
-          with :ok <- authorize_source_file_read(authority, authorization_path) do
-            case File.read(read_path) do
-              {:ok, content} -> {:ok, content}
-              {:error, reason} -> {:error, {:file_read_failed, read_path, reason}}
-            end
+        {:ok, resolved} ->
+          with :ok <- authorize_source_file_read(authority, resolved.lexical_path),
+               {:ok, content} <- read_verified_source_file(resolved) do
+            {:ok, content}
           end
 
         {:error, reason} ->
@@ -390,18 +389,112 @@ defmodule Arbor.Actions.Pipeline do
   def verified_run_authority(_context), do: {:error, :verified_run_authority_required}
 
   defp resolve_real_source_file(path, workdir) do
-    with {:ok, lexical_path} <- SafePath.resolve_within(path, workdir),
-         {:ok, real_workdir} <- SafePath.resolve_real(workdir),
+    expanded_workdir = Path.expand(workdir)
+
+    with {:ok, lexical_path} <- SafePath.resolve_within(path, expanded_workdir),
+         {:ok, real_workdir} <- SafePath.resolve_real(expanded_workdir),
+         {:ok, workdir_identity} <- directory_identity(real_workdir),
          {:ok, real_path} <- SafePath.resolve_real(lexical_path),
-         {:ok, ^real_path} <- SafePath.resolve_within(real_path, real_workdir),
-         {:ok, %File.Stat{type: :regular}} <- File.lstat(real_path) do
+         {:ok, ^real_path} <- SafePath.resolve_within(real_path, real_workdir) do
       # Authorize the caller-visible lexical path so capabilities rooted at a
       # platform alias such as macOS /var still match. Read the canonical path
       # after proving that its real target remains inside the real workdir.
-      {:ok, lexical_path, real_path}
+      {:ok,
+       %{
+         expanded_workdir: expanded_workdir,
+         lexical_path: lexical_path,
+         real_path: real_path,
+         real_workdir: real_workdir,
+         workdir_identity: workdir_identity
+       }}
     else
       {:error, :path_traversal} = error -> error
       _other -> {:error, :source_file_not_regular_or_outside_workdir}
+    end
+  end
+
+  defp read_verified_source_file(resolved) do
+    with {:ok, identity} <- regular_file_identity(resolved.real_path),
+         {:ok, content} <- File.read(resolved.real_path),
+         :ok <- run_source_file_post_read_hook(resolved.real_path),
+         :ok <- verify_source_file(resolved, identity, byte_size(content)) do
+      {:ok, content}
+    else
+      {:error, :source_file_changed_during_read} = error -> error
+      {:error, reason} -> {:error, {:file_read_failed, resolved.real_path, reason}}
+    end
+  end
+
+  defp verify_source_file(resolved, expected_identity, content_size) do
+    with {:ok, real_workdir} <- SafePath.resolve_real(resolved.expanded_workdir),
+         true <- real_workdir == resolved.real_workdir,
+         {:ok, workdir_identity} <- directory_identity(real_workdir),
+         true <- workdir_identity == resolved.workdir_identity,
+         {:ok, real_path} <- SafePath.resolve_real(resolved.lexical_path),
+         true <- real_path == resolved.real_path,
+         {:ok, ^real_path} <- SafePath.resolve_within(real_path, real_workdir),
+         {:ok, identity} <- regular_file_identity(real_path),
+         true <- identity == expected_identity,
+         true <- content_size == identity.size do
+      :ok
+    else
+      _other -> {:error, :source_file_changed_during_read}
+    end
+  end
+
+  defp regular_file_identity(path) do
+    case File.lstat(path, time: :posix) do
+      {:ok, %File.Stat{type: :regular} = stat} ->
+        {:ok,
+         %{
+           type: stat.type,
+           inode: stat.inode,
+           major_device: stat.major_device,
+           minor_device: stat.minor_device,
+           size: stat.size,
+           mtime: stat.mtime,
+           ctime: stat.ctime
+         }}
+
+      {:ok, %File.Stat{}} ->
+        {:error, :source_not_regular_file}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp directory_identity(path) do
+    case File.lstat(path, time: :posix) do
+      {:ok, %File.Stat{type: :directory} = stat} ->
+        {:ok,
+         %{
+           type: stat.type,
+           inode: stat.inode,
+           major_device: stat.major_device,
+           minor_device: stat.minor_device
+         }}
+
+      {:ok, %File.Stat{}} ->
+        {:error, :workdir_not_directory}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Process-local synchronization point used only by race regression tests.
+  defp run_source_file_post_read_hook(real_path) do
+    case Process.get(@source_file_post_read_hook_key) do
+      nil ->
+        :ok
+
+      hook when is_function(hook, 1) ->
+        hook.(real_path)
+        :ok
+
+      _invalid ->
+        {:error, :invalid_source_file_post_read_hook}
     end
   end
 
