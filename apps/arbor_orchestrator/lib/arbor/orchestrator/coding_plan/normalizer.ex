@@ -54,7 +54,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Normalizer do
   Normalize a strict string-keyed JSON coding task into `Plan` version 1.
 
   Legacy optional `nil` values are treated as omitted for compatibility. Direct
-  plans are passed to `Plan.new/1` without key or value coercion.
+  plans are validated without key or value coercion, and cannot select the
+  legacy-only `none` review profile.
   """
   @spec normalize_task(term()) :: {:ok, Plan.t()} | {:error, term()}
   def normalize_task(task) when is_map(task) and not is_struct(task) do
@@ -79,7 +80,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Normalizer do
         {:error, {:unknown_task_key, hd(extra_keys)}}
 
       true ->
-        Plan.new(plan)
+        with {:ok, plan} <- Plan.new(plan),
+             :ok <- reject_legacy_only_review_profile(plan) do
+          {:ok, plan}
+        end
     end
   end
 
@@ -185,6 +189,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Normalizer do
 
   defp put_optional(map, _key, nil), do: map
   defp put_optional(map, key, value), do: Map.put(map, key, value)
+
+  defp reject_legacy_only_review_profile(%Plan{review_profile: "none"}),
+    do: {:error, {:coding_plan_review_profile_not_allowed, "none"}}
+
+  defp reject_legacy_only_review_profile(%Plan{}), do: :ok
 
   defp reject_forbidden_task_keys(task) do
     task

@@ -162,6 +162,44 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
   end
 
+  defmodule ObservedCompiler do
+    @moduledoc false
+
+    def compile(plan, opts) do
+      notify(:coding_plan_compiler_called)
+      Arbor.Orchestrator.CodingTaskExecutorTest.FakeCompiler.compile(plan, opts)
+    end
+
+    defp notify(message) do
+      case Application.get_env(:arbor_orchestrator, :coding_executor_test_observer) do
+        observer when is_pid(observer) -> send(observer, message)
+        _other -> :ok
+      end
+    end
+  end
+
+  defmodule ObservedArtifactStore do
+    @moduledoc false
+
+    def archive(root, plan, dot_source, manifest) do
+      notify(:coding_plan_artifact_store_called)
+
+      Arbor.Orchestrator.CodingTaskExecutorTest.FakeArtifactStore.archive(
+        root,
+        plan,
+        dot_source,
+        manifest
+      )
+    end
+
+    defp notify(message) do
+      case Application.get_env(:arbor_orchestrator, :coding_executor_test_observer) do
+        observer when is_pid(observer) -> send(observer, message)
+        _other -> :ok
+      end
+    end
+  end
+
   defmodule InvalidCompilerReply do
     @moduledoc false
     def compile(_plan, _opts), do: {:ok, %{not: "a compilation"}}
@@ -758,7 +796,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
             "model" => "grok-code-fast",
             "permission_mode" => "deny"
           },
-          "review_profile" => "none",
+          "review_profile" => "human_required",
           "budgets" => %{
             "wall_clock_ms" => 120_000,
             "inactivity_timeout_ms" => 45_000
@@ -777,9 +815,31 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert iv["permission_mode"] == "deny"
       assert iv["inactivity_timeout_ms"] == 45_000
       assert iv["open_pr"] == "true"
-      assert iv["submit_review"] == "false"
+      assert iv["submit_review"] == "true"
+      assert iv["coding_plan_review_profile"] == "human_required"
       assert iv["branch_name"] == "feature/direct-plan"
       assert result["artifacts"]["graph_hash"] == opts[:graph_hash]
+    end
+
+    test "rejects direct none review before compiler, archive, or runner" do
+      Application.put_env(:arbor_orchestrator, :coding_plan_compiler, ObservedCompiler)
+
+      Application.put_env(
+        :arbor_orchestrator,
+        :coding_plan_artifact_store,
+        ObservedArtifactStore
+      )
+
+      task = valid_direct_task(%{"review_profile" => "none"})
+
+      assert {:error, {:coding_plan_review_profile_not_allowed, "none"}} =
+               CodingTaskExecutor.run("agent_direct", task, valid_context())
+
+      refute_receive :coding_plan_compiler_called
+      refute_receive :coding_plan_artifact_store_called
+      refute_receive {:coding_executor_captured_run, _path, _opts}
+      assert Process.get(:coding_executor_last_run) == nil
+      refute File.exists?(Config.coding_pipeline_logs_root())
     end
 
     test "rejects mixed direct/legacy shapes and task-supplied authority" do

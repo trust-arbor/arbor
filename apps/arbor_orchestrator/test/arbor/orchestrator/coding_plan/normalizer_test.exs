@@ -107,6 +107,15 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
       end
     end
 
+    test "preserves submit_review=false as the legacy-only none review profile" do
+      assert {:ok, plan} =
+               @legacy_task
+               |> Map.put("submit_review", false)
+               |> Normalizer.normalize_task()
+
+      assert plan.review_profile == "none"
+    end
+
     test "treats nil optional compatibility values as omitted" do
       task =
         Map.merge(@legacy_task, %{
@@ -199,6 +208,38 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
 
       assert {:error, {:unknown_fields, ["authorization"]}} =
                Normalizer.normalize_task(task)
+    end
+
+    test "rejects the legacy-only none review profile for direct planner input" do
+      task = %{
+        "kind" => "coding_change",
+        "plan" => %{
+          "task" => "test",
+          "repo_root" => "/workspace/arbor",
+          "worker" => %{"provider" => "grok"},
+          "review_profile" => "none"
+        }
+      }
+
+      assert {:error, {:coding_plan_review_profile_not_allowed, "none"}} =
+               Normalizer.normalize_task(task)
+    end
+
+    test "accepts binding and human-required direct review profiles" do
+      for review_profile <- ~w(binding human_required) do
+        task = %{
+          "kind" => "coding_change",
+          "plan" => %{
+            "task" => "test",
+            "repo_root" => "/workspace/arbor",
+            "worker" => %{"provider" => "grok"},
+            "review_profile" => review_profile
+          }
+        }
+
+        assert {:ok, plan} = Normalizer.normalize_task(task)
+        assert plan.review_profile == review_profile
+      end
     end
 
     test "does not coerce direct plan keys or values" do
