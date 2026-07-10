@@ -13,13 +13,27 @@ defmodule Arbor.AI.Application do
         buffered_store_child() ++
           [
             Arbor.AI.QuotaTracker
-          ] ++ budget_tracker_child() ++ usage_stats_child() ++ acp_pool_children()
+          ] ++
+          budget_tracker_child() ++
+          usage_stats_child() ++
+          managed_acp_children() ++
+          acp_pool_children()
       else
         []
       end
 
     opts = [strategy: :one_for_one, name: Arbor.AI.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # Always-on managed ACP session registry + DynamicSupervisor for non-pooled
+  # managed AcpSession children. Independent of optional AcpPool.
+  @doc false
+  def managed_acp_children do
+    [
+      Arbor.AI.AcpManaged.Supervisor,
+      Arbor.AI.AcpManaged.SessionRegistry
+    ]
   end
 
   # Propagate API keys from environment variables to ReqLLM

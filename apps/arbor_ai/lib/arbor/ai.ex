@@ -863,6 +863,91 @@ defmodule Arbor.AI do
     end
   end
 
+  # -- Managed ACP Session API (opaque durable handles) --
+
+  @doc """
+  Start a managed ACP session and return a JSON-clean opaque handle.
+
+  The live caller process becomes the session owner (any `:owner` / `:owner_pid`
+  option is stripped). PIDs stay inside the AI-owned registry; callers receive
+  only `worker_session_id` metadata suitable for Engine context / checkpoints.
+
+  ## Options
+
+  - `:use_pool` / `:pooled` - checkout from `AcpPool` instead of starting a
+    temporary managed child (default: false)
+  - `:return_to_pool` - on owner death / close of a pooled session, check in
+    rather than hard-close (default: true when pooled). Explicit close may
+    override this stored default via `acp_managed_close_session/2`.
+  - `:create_session` - when pooled, force `create_session` on checkout
+    (default: false; pooled sessions are often pre-created)
+  - `:task_id` / `:principal_id` / `:agent_id` - cross-process resume authority
+    (both non-empty `task_id` and principal required for non-owner access).
+    `:agent_id` is also forwarded to the session/pool so ACP file/exec callbacks
+    authorize as the owning agent.
+  - `:session_id` - resume an existing provider session after start
+  - `:model`, `:cwd`, `:timeout`, `:client_opts`, `:agent_id` - forwarded to the
+    session / pool
+  - `:session_module`, `:pool_module`, `:supervisor`, `:server` - injectable for
+    tests (defaults: `AcpSession`, `AcpPool`, managed supervisor/registry)
+
+  ## Returns
+
+  `{:ok, meta}` where meta includes `worker_session_id`, `session_id` (provider),
+  `provider`, `model`, `status`, `pooled` - no PID/ref/function/struct.
+  """
+  @spec acp_managed_start_session(atom(), keyword()) :: {:ok, map()} | {:error, term()}
+  def acp_managed_start_session(provider, opts \\ []) when is_atom(provider) do
+    Arbor.AI.AcpManaged.start_session(provider, opts)
+  end
+
+  @doc """
+  Send a message on a managed ACP session.
+
+  Authority is resolved quickly in the registry; the actual `AcpSession`
+  call runs in the **original facade caller process** so caller-death prompt
+  cancellation remains owned by the task process (not the registry).
+  """
+  @spec acp_managed_send_message(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def acp_managed_send_message(worker_session_id, content, opts \\ [])
+      when is_binary(worker_session_id) and is_binary(content) do
+    Arbor.AI.AcpManaged.send_message(worker_session_id, content, opts)
+  end
+
+  @doc """
+  Query managed session status (JSON-clean).
+
+  Registry authority check is quick; live status is read from the session
+  process by the facade caller. Returns fields needed by action migration:
+  `worker_session_id`, provider `session_id`, `provider`, `model`, `status`,
+  `pooled`, `context_pressure`, `context_tokens`, and `usage`.
+
+  If live status fails/raises/exits, returns `{:error, :session_unavailable}`
+  without inventing metadata or invalidating a still-live handle.
+  """
+  @spec acp_managed_session_status(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def acp_managed_session_status(worker_session_id, opts \\ [])
+      when is_binary(worker_session_id) do
+    Arbor.AI.AcpManaged.session_status(worker_session_id, opts)
+  end
+
+  @doc """
+  Close a managed ACP session or return a pooled session to the pool.
+
+  Idempotent: closing an unknown/already-closed handle returns success with
+  `status: "already_closed"`.
+
+  For pooled sessions, `return_to_pool: true|false` on this call overrides the
+  stored close policy for the explicit close only. Owner-death cleanup still
+  uses the policy stored at start.
+  """
+  @spec acp_managed_close_session(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def acp_managed_close_session(worker_session_id, opts \\ [])
+      when is_binary(worker_session_id) do
+    Arbor.AI.AcpManaged.close_session(worker_session_id, opts)
+  end
+
   # ===========================================================================
   # Private Helpers
   # ===========================================================================
