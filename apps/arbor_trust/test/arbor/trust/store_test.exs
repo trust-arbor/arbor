@@ -6,6 +6,39 @@ defmodule Arbor.Trust.StoreTest do
   alias Arbor.Contracts.Trust.Profile
   alias Arbor.Trust.Store
 
+  defmodule DurableBackend do
+    @state_key {__MODULE__, :state}
+
+    def reset do
+      :persistent_term.put(@state_key, %{records: %{}, fail_writes?: false})
+    end
+
+    def fail_writes?(value) do
+      update(&Map.put(&1, :fail_writes?, value))
+    end
+
+    def put(key, record, _opts) do
+      if state().fail_writes? do
+        {:error, :simulated_backend_failure}
+      else
+        update(fn state -> put_in(state.records[key], record) end)
+        :ok
+      end
+    end
+
+    def get(key, _opts) do
+      case Map.fetch(state().records, key) do
+        {:ok, record} -> {:ok, record}
+        :error -> {:error, :not_found}
+      end
+    end
+
+    def list(_opts), do: {:ok, state().records |> Map.keys() |> Enum.sort()}
+
+    defp state, do: :persistent_term.get(@state_key, %{records: %{}, fail_writes?: false})
+    defp update(update), do: :persistent_term.put(@state_key, update.(state()))
+  end
+
   setup do
     # Stop the Store if it was already running from a previous test
     case GenServer.whereis(Store) do
@@ -83,6 +116,41 @@ defmodule Arbor.Trust.StoreTest do
       assert retrieved_a.agent_id == "agent_a"
       assert retrieved_b.agent_id == "agent_b"
     end
+
+    test "durable persistence failure is returned and does not populate the cache", %{
+      pid: pid,
+      profile: profile
+    } do
+      GenServer.stop(pid, :normal)
+      assert Process.whereis(:arbor_trust_profiles) == nil
+
+      {:ok, durable_pid} = Store.start_link(persistence: :durable)
+      on_exit(fn -> if Process.alive?(durable_pid), do: GenServer.stop(durable_pid, :normal) end)
+
+      assert {:error, :trust_profile_persistence_unavailable} =
+               Store.store_profile(profile)
+
+      assert {:error, :not_found} = Store.get_profile(profile.agent_id)
+    end
+
+    test "durable backend failure is returned and does not populate the cache", %{
+      pid: pid,
+      profile: profile
+    } do
+      GenServer.stop(pid, :normal)
+      DurableBackend.reset()
+      DurableBackend.fail_writes?(true)
+
+      {:ok, durable_pid} =
+        Store.start_link(persistence: :durable, durable_backend: DurableBackend)
+
+      on_exit(fn -> if Process.alive?(durable_pid), do: GenServer.stop(durable_pid, :normal) end)
+
+      assert {:error, {:trust_profile_persist_failed, :simulated_backend_failure}} =
+               Store.store_profile(profile)
+
+      assert {:error, :not_found} = Store.get_profile(profile.agent_id)
+    end
   end
 
   describe "profile_exists?/1" do
@@ -108,6 +176,41 @@ defmodule Arbor.Trust.StoreTest do
 
     test "returns :ok when deleting a non-existent profile" do
       assert :ok = Store.delete_profile("nonexistent_agent")
+    end
+
+    test "durable deletion failure remains deny-all after a store restart", %{
+      pid: pid,
+      profile: profile
+    } do
+      GenServer.stop(pid, :normal)
+      DurableBackend.reset()
+
+      {:ok, durable_pid} =
+        Store.start_link(persistence: :durable, durable_backend: DurableBackend)
+
+      assert :ok = Store.store_profile(profile)
+      DurableBackend.fail_writes?(true)
+
+      assert {:error, {:trust_profile_persist_failed, :simulated_backend_failure}} =
+               Store.delete_profile(profile.agent_id)
+
+      assert {:ok, denied} = Store.get_profile(profile.agent_id)
+      assert denied.baseline == :block
+      assert denied.frozen
+
+      GenServer.stop(durable_pid, :normal)
+      DurableBackend.fail_writes?(false)
+
+      {:ok, restarted_pid} =
+        Store.start_link(persistence: :durable, durable_backend: DurableBackend)
+
+      on_exit(fn ->
+        if Process.alive?(restarted_pid), do: GenServer.stop(restarted_pid, :normal)
+      end)
+
+      assert {:ok, denied_after_restart} = Store.get_profile(profile.agent_id)
+      assert denied_after_restart.baseline == :block
+      assert denied_after_restart.frozen
     end
   end
 

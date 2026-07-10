@@ -263,6 +263,9 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert {:ok, _supervisor} =
                Lifecycle.start(agent_id,
                  runtime: :acp,
+                 provider: :ollama,
+                 model: "caller-override-must-not-stick",
+                 context_management: :none,
                  tools: ["file_write", "shell_execute", "pipeline_run"],
                  sandbox_level: :none,
                  start_heartbeat: false,
@@ -275,6 +278,8 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
 
       session_state = Arbor.Orchestrator.Session.get_state(session)
       assert session_state.config["llm_runtime"] == :arbor
+      assert session_state.config["llm_provider"] == "openai_oauth"
+      assert session_state.config["llm_model"] == "gpt-5.5"
 
       assert session_state.config["tools"] ==
                ~w(file_read file_list file_search file_exists)
@@ -284,6 +289,16 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
              end)
 
       assert :sys.get_state(executor).sandbox_level == :strict
+
+      assert :ok = Lifecycle.stop(agent_id)
+
+      assert {:ok, _supervisor} =
+               Lifecycle.start(agent_id, start_heartbeat: false, recover_session: false)
+
+      %{session: restored_session} = BranchSupervisor.child_pids(agent_id)
+      restored_state = Arbor.Orchestrator.Session.get_state(restored_session)
+      assert restored_state.config["llm_provider"] == "openai_oauth"
+      assert restored_state.config["llm_model"] == "gpt-5.5"
     end
 
     test "pipeline architect capabilities and trust rules deny execution authority" do
@@ -395,6 +410,27 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                  "arbor://pipeline/run"
                ])
              end)
+    end
+
+    test "security regression: malformed exact policy stops an already-running architect and revokes authority" do
+      assert {:ok, profile} =
+               Lifecycle.create("Corrupt Policy Probe", template: "pipeline_architect")
+
+      agent_id = profile.agent_id
+      cleanup(agent_id)
+
+      assert {:ok, _supervisor} =
+               Lifecycle.start(agent_id, start_heartbeat: false, recover_session: false)
+
+      corrupted =
+        put_in(profile.metadata["exact_template_policy"]["digest"], String.duplicate("0", 64))
+
+      assert :ok = Arbor.Agent.ProfileStore.store_profile(corrupted)
+
+      assert {:error, _reason} = Lifecycle.start(agent_id, start_heartbeat: false)
+      assert is_nil(BranchSupervisor.whereis(agent_id))
+      assert {:ok, :suspended} = Arbor.Security.identity_status(agent_id)
+      assert {:ok, []} = Arbor.Security.list_capabilities(agent_id)
     end
 
     test "security regression: creation fails when a declared trust preset cannot be stored" do

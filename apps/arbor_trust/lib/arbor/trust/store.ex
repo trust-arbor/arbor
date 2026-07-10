@@ -33,16 +33,23 @@ defmodule Arbor.Trust.Store do
   require Logger
 
   @table_name :trust_profile_cache
+  @failed_deletion_key {__MODULE__, :failed_durable_deletions}
 
   defstruct [
     :profiles_table,
-    :db_module,
+    :persistence_mode,
+    :durable_backend,
+    :durable_backend_opts,
+    :durable_collection,
     :cache_stats
   ]
 
   @type state :: %__MODULE__{
           profiles_table: :ets.table(),
-          db_module: module() | nil,
+          persistence_mode: :durable | :memory,
+          durable_backend: module() | nil,
+          durable_backend_opts: keyword(),
+          durable_collection: String.t(),
           cache_stats: map()
         }
 
@@ -202,12 +209,18 @@ defmodule Arbor.Trust.Store do
         {:write_concurrency, true}
       ])
 
-    # Optional PostgreSQL persistence module
-    db_module = opts[:db_module]
+    persistence_mode = Keyword.get(opts, :persistence, :memory)
+
+    unless persistence_mode in [:durable, :memory] do
+      raise ArgumentError, "persistence must be :durable or :memory"
+    end
 
     state = %__MODULE__{
       profiles_table: profiles_table,
-      db_module: db_module,
+      persistence_mode: persistence_mode,
+      durable_backend: Keyword.get(opts, :durable_backend),
+      durable_backend_opts: Keyword.get(opts, :durable_backend_opts, []),
+      durable_collection: Keyword.get(opts, :durable_collection, "trust_profiles"),
       cache_stats: %{hits: 0, misses: 0, writes: 0, deletes: 0}
     }
 
@@ -223,15 +236,21 @@ defmodule Arbor.Trust.Store do
 
   @impl true
   def handle_call({:store_profile, profile}, _from, state) do
-    :ok = put_profile_in_cache(profile, state)
-    persist_profile(profile, state)
-    emit_distributed_signal(:profile_updated, profile.agent_id)
+    case persist_profile(profile, state) do
+      :ok ->
+        :ok = put_profile_in_cache(profile, state)
+        clear_failed_deletion(profile.agent_id)
+        emit_distributed_signal(:profile_updated, profile.agent_id)
 
-    # Sync capabilities to match the new trust profile rules
-    sync_capabilities_async(profile.agent_id)
+        # Sync capabilities to match the new trust profile rules
+        sync_capabilities_async(profile.agent_id)
 
-    new_stats = update_stats(state.cache_stats, :writes, 1)
-    {:reply, :ok, %{state | cache_stats: new_stats}}
+        new_stats = update_stats(state.cache_stats, :writes, 1)
+        {:reply, :ok, %{state | cache_stats: new_stats}}
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
   end
 
   @impl true
@@ -250,12 +269,29 @@ defmodule Arbor.Trust.Store do
 
   @impl true
   def handle_call({:delete_profile, agent_id}, _from, state) do
-    :ets.delete(state.profiles_table, agent_id)
-    delete_profile_from_db(agent_id, state)
-    emit_distributed_signal(:profile_deleted, agent_id)
+    profile =
+      case get_profile_from_cache(agent_id, state) do
+        {:ok, existing} -> existing
+        {:error, :not_found} -> Authority.new_profile(agent_id)
+      end
 
-    new_stats = update_stats(state.cache_stats, :deletes, 1)
-    {:reply, :ok, %{state | cache_stats: new_stats}}
+    tombstone = disabled_profile(profile)
+
+    case persist_profile(tombstone, state) do
+      :ok ->
+        :ok = put_profile_in_cache(tombstone, state)
+        emit_distributed_signal(:profile_updated, agent_id)
+        new_stats = update_stats(state.cache_stats, :deletes, 1)
+        {:reply, :ok, %{state | cache_stats: new_stats}}
+
+      {:error, _} = error ->
+        # The independent identity suspension in exact-policy cleanup remains
+        # the cross-restart enforcement barrier when this tombstone cannot be
+        # persisted. Keep this node deny-all while surfacing the failed write.
+        :ok = put_profile_in_cache(tombstone, state)
+        remember_failed_deletion(agent_id)
+        {:reply, error, state}
+    end
   end
 
   @impl true
@@ -264,18 +300,24 @@ defmodule Arbor.Trust.Store do
       {:ok, profile} ->
         updated = update_fn.(profile)
         updated = %{updated | updated_at: DateTime.utc_now()}
-        :ok = put_profile_in_cache(updated, state)
-        persist_profile(updated, state)
 
-        emit_distributed_signal(:profile_updated, agent_id)
+        case persist_profile(updated, state) do
+          :ok ->
+            :ok = put_profile_in_cache(updated, state)
+            clear_failed_deletion(agent_id)
+            emit_distributed_signal(:profile_updated, agent_id)
 
-        # Sync policy-minted capabilities if authorization standing changed.
-        if profile.rules != updated.rules or profile.baseline != updated.baseline do
-          sync_capabilities_async(agent_id)
+            # Sync policy-minted capabilities if authorization standing changed.
+            if profile.rules != updated.rules or profile.baseline != updated.baseline do
+              sync_capabilities_async(agent_id)
+            end
+
+            new_stats = update_stats(state.cache_stats, :writes, 1)
+            {:reply, {:ok, updated}, %{state | cache_stats: new_stats}}
+
+          {:error, _} = error ->
+            {:reply, error, state}
         end
-
-        new_stats = update_stats(state.cache_stats, :writes, 1)
-        {:reply, {:ok, updated}, %{state | cache_stats: new_stats}}
 
       {:error, :not_found} = error ->
         {:reply, error, state}
@@ -381,6 +423,23 @@ defmodule Arbor.Trust.Store do
     Map.update(stats, key, increment, &(&1 + increment))
   end
 
+  defp disabled_profile(profile) do
+    now = DateTime.utc_now()
+
+    %{
+      profile
+      | frozen: true,
+        frozen_reason: :profile_deleted,
+        frozen_at: now,
+        baseline: :block,
+        rules: %{},
+        model_constraints: %{},
+        egress_modes:
+          Map.new(Arbor.Contracts.Security.Classification.egress_tiers(), &{&1, :block}),
+        updated_at: now
+    }
+  end
+
   defp maybe_filter_by_tier(profiles, nil), do: profiles
 
   defp maybe_filter_by_tier(profiles, tier) do
@@ -399,25 +458,18 @@ defmodule Arbor.Trust.Store do
     :exit, _ -> :ok
   end
 
-  @buffered_store :arbor_trust_profiles
+  defp load_persisted_profiles(%{persistence_mode: :memory}), do: 0
 
   defp load_persisted_profiles(state) do
-    if buffered_store_running?() do
-      list_and_load_profiles(state)
-    else
-      Logger.warning("[Trust.Store] BufferedStore :arbor_trust_profiles not running on init")
-      0
-    end
+    list_and_load_profiles(state)
   rescue
     e ->
       Logger.warning("[Trust.Store] load_persisted_profiles crashed: #{inspect(e)}")
       0
   end
 
-  defp buffered_store_running?, do: Process.whereis(@buffered_store) != nil
-
   defp list_and_load_profiles(state) do
-    case Arbor.Persistence.BufferedStore.list(name: @buffered_store) do
+    case durable_list(state) do
       {:ok, keys} ->
         Logger.info("[Trust.Store] Loading #{length(keys)} persisted profiles from BufferedStore")
         Enum.count(keys, &load_one_profile(&1, state))
@@ -432,7 +484,14 @@ defmodule Arbor.Trust.Store do
   end
 
   defp load_one_profile(key, state) do
-    case load_profile_from_db(key, state) do
+    result =
+      if failed_deletion?(key) do
+        {:ok, disabled_profile(Authority.new_profile(key))}
+      else
+        load_profile_from_db(key, state)
+      end
+
+    case result do
       {:ok, profile} ->
         put_profile_in_cache(profile, state)
         true
@@ -443,60 +502,99 @@ defmodule Arbor.Trust.Store do
     end
   end
 
-  defp persist_profile(profile, _state) do
-    if Process.whereis(@buffered_store) do
-      record = %Arbor.Contracts.Persistence.Record{
-        id: profile.agent_id,
-        key: profile.agent_id,
-        data: serialize_profile(profile),
-        metadata: %{}
-      }
+  defp persist_profile(_profile, %{persistence_mode: :memory}), do: :ok
 
-      case Arbor.Persistence.BufferedStore.put(profile.agent_id, record, name: @buffered_store) do
-        :ok -> :ok
-        {:error, reason} -> Logger.warning("[Trust.Store] persist failed: #{inspect(reason)}")
-        other -> Logger.warning("[Trust.Store] persist unexpected: #{inspect(other)}")
-      end
-    else
-      Logger.warning(
-        "[Trust.Store] BufferedStore :arbor_trust_profiles not running, skipping persist"
-      )
-    end
-  rescue
-    e ->
-      Logger.warning("[Trust.Store] persist_profile crashed: #{inspect(e)}")
+  defp persist_profile(profile, state) do
+    record = %Arbor.Contracts.Persistence.Record{
+      id: profile.agent_id,
+      key: profile.agent_id,
+      data: serialize_profile(profile),
+      metadata: %{}
+    }
+
+    durable_put(profile.agent_id, record, state)
   end
 
-  defp load_profile_from_db(agent_id, _state) do
-    if Process.whereis(@buffered_store) do
-      case Arbor.Persistence.BufferedStore.get(agent_id, name: @buffered_store) do
+  defp load_profile_from_db(_agent_id, %{persistence_mode: :memory}),
+    do: {:error, :not_found}
+
+  defp load_profile_from_db(agent_id, state) do
+    if failed_deletion?(agent_id) do
+      {:ok, disabled_profile(Authority.new_profile(agent_id))}
+    else
+      case durable_get(agent_id, state) do
         {:ok, raw} ->
-          data = unwrap_record(raw)
-          deserialize_profile(data)
+          raw
+          |> unwrap_record()
+          |> deserialize_profile()
 
-        {:error, :not_found} ->
-          {:error, :not_found}
-
-        _ ->
+        {:error, _reason} ->
           {:error, :not_found}
       end
-    else
-      {:error, :not_found}
     end
   rescue
     _ -> {:error, :not_found}
   end
 
-  defp delete_profile_from_db(agent_id, _state) do
-    if Process.whereis(@buffered_store) do
-      Arbor.Persistence.BufferedStore.delete(agent_id, name: @buffered_store)
-    end
-  rescue
-    _ -> :ok
-  end
-
   defp unwrap_record(%Arbor.Contracts.Persistence.Record{data: data}), do: data
   defp unwrap_record(%{} = data), do: data
+
+  defp failed_deletion?(agent_id) do
+    @failed_deletion_key
+    |> :persistent_term.get(MapSet.new())
+    |> MapSet.member?(agent_id)
+  end
+
+  defp remember_failed_deletion(agent_id) do
+    failed = :persistent_term.get(@failed_deletion_key, MapSet.new())
+    :persistent_term.put(@failed_deletion_key, MapSet.put(failed, agent_id))
+  end
+
+  defp clear_failed_deletion(agent_id) do
+    failed = :persistent_term.get(@failed_deletion_key, MapSet.new())
+    :persistent_term.put(@failed_deletion_key, MapSet.delete(failed, agent_id))
+  end
+
+  # BufferedStore intentionally keeps accepting writes when its backend is
+  # unavailable. Trust profiles carry authorization policy, so durable mode
+  # cannot use that best-effort acknowledgement path. The supervisor still
+  # starts BufferedStore first for compatibility with the shared persistence
+  # topology; this store calls the configured backend directly and caches only
+  # after the backend acknowledges the record.
+  defp durable_put(_key, _record, %{durable_backend: nil}),
+    do: {:error, :trust_profile_persistence_unavailable}
+
+  defp durable_put(key, record, state) do
+    durable_call(state, :put, [key, record])
+  end
+
+  defp durable_get(_key, %{durable_backend: nil}),
+    do: {:error, :trust_profile_persistence_unavailable}
+
+  defp durable_get(key, state) do
+    durable_call(state, :get, [key])
+  end
+
+  defp durable_list(%{durable_backend: nil}),
+    do: {:error, :trust_profile_persistence_unavailable}
+
+  defp durable_list(state), do: durable_call(state, :list, [])
+
+  defp durable_call(state, operation, args) do
+    opts = Keyword.put(state.durable_backend_opts, :name, state.durable_collection)
+
+    case apply(state.durable_backend, operation, args ++ [opts]) do
+      :ok when operation == :put -> :ok
+      {:ok, _value} = ok -> ok
+      {:error, reason} -> {:error, {:trust_profile_persist_failed, reason}}
+      other -> {:error, {:unexpected_trust_profile_persist_result, other}}
+    end
+  rescue
+    error -> {:error, {:trust_profile_persist_exception, Exception.message(error)}}
+  catch
+    :exit, reason -> {:error, {:trust_profile_persist_exit, reason}}
+    kind, reason -> {:error, {:trust_profile_persist_failure, kind, reason}}
+  end
 
   # Profile serialization lives on Authority — single source of truth so the
   # encoding can't drift between Store and any future persistence layers.

@@ -30,6 +30,7 @@ defmodule Arbor.Agent.Lifecycle do
   alias Arbor.Agent.{
     BranchSupervisor,
     Character,
+    ExactTemplatePolicy,
     Executor,
     Profile,
     ProfileStore,
@@ -85,20 +86,38 @@ defmodule Arbor.Agent.Lifecycle do
           | {:error, term()}
   def create(display_name, opts \\ []) do
     with {:ok, character, opts} <- resolve_template(opts),
-         {:ok, identity} <- generate_identity(display_name),
-         :ok <- register_identity(identity),
+         {:ok, identity} <- generate_identity(display_name) do
+      case run_creation(display_name, character, identity, opts) do
+        {:ok, _profile} = success ->
+          success
+
+        {:ok, _profile, _identity} = success ->
+          success
+
+        {:error, _reason} = error ->
+          rollback_failed_creation(identity.agent_id)
+          error
+      end
+    end
+  end
+
+  defp run_creation(display_name, character, identity, opts) do
+    do_create(display_name, character, identity, opts)
+  rescue
+    error -> {:error, {:creation_exception, Exception.message(error)}}
+  catch
+    :exit, reason -> {:error, {:creation_exit, reason}}
+    kind, reason -> {:error, {:creation_failure, kind, reason}}
+  end
+
+  defp do_create(display_name, character, identity, opts) do
+    with :ok <- register_identity(identity),
          {:ok, endorsement} <- endorse_identity(identity),
          keychain <- create_keychain(identity),
          agent_id = identity.agent_id,
          :ok <- persist_signing_key(agent_id, identity),
-         :ok <-
-           grant_capabilities(
-             agent_id,
-             opts[:capabilities] || [],
-             template_metadata_from_opts(opts)
-           ),
+         :ok <- grant_initial_capabilities(agent_id, opts),
          :ok <- grant_workspace_capabilities(agent_id, opts),
-         :ok <- grant_owner_chat_capability(agent_id, opts),
          :ok <- maybe_delegate_from_parent(agent_id, opts),
          {:ok, _pid} <- init_memory(agent_id, opts[:memory_opts] || []),
          :ok <- set_initial_goals(agent_id, opts[:initial_goals] || []),
@@ -108,8 +127,19 @@ defmodule Arbor.Agent.Lifecycle do
 
       case ensure_trust_profile(agent_id, opts) do
         :ok ->
-          case persist_profile(profile) do
+          # Trust profile setup can asynchronously synchronize capabilities.
+          # Reconcile after it so exact authority is the final creation state.
+          persistence_result =
+            with :ok <- reconcile_exact_authority_after_trust(agent_id, opts) do
+              persist_profile(profile)
+            end
+
+          case persistence_result do
             :ok ->
+              unless Keyword.has_key?(opts, :exact_template_policy) do
+                grant_owner_chat_capability(agent_id, opts)
+              end
+
               emit_created_signal(profile)
 
               if Keyword.get(opts, :return_identity, false) do
@@ -142,8 +172,13 @@ defmodule Arbor.Agent.Lifecycle do
   def ensure_identity(agent_id) do
     case restore(agent_id) do
       {:ok, profile} ->
-        ensure_identity_and_capabilities(profile)
-        {:ok, agent_id}
+        case prepare_and_activate_authority(profile) do
+          {:ok, _prepared_profile, _policy_mode} ->
+            {:ok, agent_id}
+
+          {:error, _} = error ->
+            handle_authority_failure(profile, error)
+        end
 
       {:error, _} = error ->
         error
@@ -207,56 +242,75 @@ defmodule Arbor.Agent.Lifecycle do
   """
   @spec start(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start(agent_id, opts \\ []) do
-    # Idempotent: if branch supervisor already running, ensure registered and return
+    case restore(agent_id) do
+      {:ok, profile} ->
+        case prepare_and_activate_authority(profile) do
+          {:ok, prepared_profile, policy_mode} ->
+            result = start_activated_profile(prepared_profile, opts)
+
+            case {result, policy_mode} do
+              {{:error, _} = error, {:exact, _envelope}} ->
+                handle_authority_failure(prepared_profile, error)
+
+              _ ->
+                result
+            end
+
+          {:error, _} = error ->
+            handle_authority_failure(profile, error)
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp start_activated_profile(profile, opts) do
+    agent_id = profile.agent_id
+
+    # Idempotent process start, but authority was validated and reconciled first.
     case BranchSupervisor.whereis(agent_id) do
       pid when is_pid(pid) ->
         ensure_registered(agent_id, pid, opts)
         {:ok, pid}
 
       nil ->
-        do_start(agent_id, opts)
+        do_start(profile, opts)
     end
   end
 
-  defp do_start(agent_id, opts) do
-    case restore(agent_id) do
-      {:ok, profile} ->
-        # Re-register identity and capabilities (ETS-only, lost on restart)
-        ensure_identity_and_capabilities(profile)
+  defp do_start(profile, opts) do
+    agent_id = profile.agent_id
 
-        # Re-initialize memory + reload persisted goals/intents from Postgres
-        init_memory(agent_id, reload_persisted: true)
+    # Re-initialize memory + reload persisted goals/intents from Postgres
+    init_memory(agent_id, reload_persisted: true)
 
-        # Build child opts for the BranchSupervisor
-        host_opts = build_host_opts(agent_id, profile, opts)
-        executor_opts = build_executor_opts(agent_id, profile, opts)
-        session_opts = build_branch_session_opts(agent_id, profile, opts)
-        heartbeat_opts = build_heartbeat_opts(agent_id, profile, opts, session_opts)
-        start_session = Keyword.get(opts, :start_session, true)
+    # Build child opts for the BranchSupervisor
+    host_opts = build_host_opts(agent_id, profile, opts)
+    executor_opts = build_executor_opts(agent_id, profile, opts)
+    session_opts = build_branch_session_opts(agent_id, profile, opts)
+    heartbeat_opts = build_heartbeat_opts(agent_id, profile, opts, session_opts)
+    start_session = Keyword.get(opts, :start_session, true)
 
-        branch_opts = [
-          agent_id: agent_id,
-          host_opts: host_opts,
-          executor_opts: executor_opts,
-          session_opts: session_opts,
-          heartbeat_opts: heartbeat_opts,
-          start_session: start_session
-        ]
+    branch_opts = [
+      agent_id: agent_id,
+      host_opts: host_opts,
+      executor_opts: executor_opts,
+      session_opts: session_opts,
+      heartbeat_opts: heartbeat_opts,
+      start_session: start_session
+    ]
 
-        # Start the branch supervisor under the global DynamicSupervisor
-        case start_branch_supervised(agent_id, branch_opts, opts) do
-          {:ok, sup_pid} ->
-            # Register in Agent.Registry AFTER supervision is confirmed
-            register_in_agent_registry(agent_id, sup_pid, profile, opts)
-            dual_emit_lifecycle(:started, %{agent_id: agent_id})
-            {:ok, sup_pid}
+    # Start the branch supervisor under the global DynamicSupervisor
+    case start_branch_supervised(agent_id, branch_opts, opts) do
+      {:ok, sup_pid} ->
+        # Register in Agent.Registry AFTER supervision is confirmed
+        register_in_agent_registry(agent_id, sup_pid, profile, opts)
+        dual_emit_lifecycle(:started, %{agent_id: agent_id})
+        {:ok, sup_pid}
 
-          {:error, {:already_started, sup_pid}} ->
-            {:ok, sup_pid}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
+      {:error, {:already_started, sup_pid}} ->
+        {:ok, sup_pid}
 
       {:error, reason} ->
         {:error, reason}
@@ -452,13 +506,18 @@ defmodule Arbor.Agent.Lifecycle do
   @spec resolve_fallback_chain(map(), keyword()) :: [map()]
   def resolve_fallback_chain(profile, opts) do
     metadata = Map.get(profile, :metadata) || %{}
+    template_meta = extract_template_metadata(profile)
 
     raw =
-      Keyword.get(opts, :fallback_chain) ||
-        get_in(opts, [:model_config, :fallback_chain]) ||
-        get_in(metadata, [:last_model_config, :fallback_chain]) ||
-        get_in(metadata, ["last_model_config", "fallback_chain"]) ||
-        []
+      if exact_template_policy?(template_meta, :runtime_policy) do
+        metadata_value(template_meta, :fallback_chain) || []
+      else
+        Keyword.get(opts, :fallback_chain) ||
+          get_in(opts, [:model_config, :fallback_chain]) ||
+          get_in(metadata, [:last_model_config, :fallback_chain]) ||
+          get_in(metadata, ["last_model_config", "fallback_chain"]) ||
+          []
+      end
 
     normalize_fallback_chain(raw)
   end
@@ -505,12 +564,17 @@ defmodule Arbor.Agent.Lifecycle do
 
   # Build opts for the APIAgent host child
   defp build_host_opts(agent_id, profile, opts) do
+    template_meta = extract_template_metadata(profile)
+
     [
       id: agent_id,
       display_name: profile.display_name || agent_id,
-      model: Keyword.get_lazy(opts, :model, fn -> Arbor.Agent.LLMDefaults.default_model() end),
+      model:
+        exact_template_value(template_meta, :model) ||
+          Keyword.get_lazy(opts, :model, fn -> Arbor.Agent.LLMDefaults.default_model() end),
       provider:
-        Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end)
+        exact_template_value(template_meta, :provider) ||
+          Keyword.get_lazy(opts, :provider, fn -> Arbor.Agent.LLMDefaults.default_provider() end)
     ]
   end
 
@@ -782,56 +846,90 @@ defmodule Arbor.Agent.Lifecycle do
   # Extract metadata from the template module (if available).
   # Template metadata may include :context_management, :model, :provider.
   defp extract_template_metadata(profile) do
-    case Map.get(profile, :template) do
-      nil ->
-        %{}
+    case exact_policy_snapshot(profile) do
+      {:ok, snapshot} ->
+        snapshot
+        |> ExactTemplatePolicy.template_metadata()
+        |> atomize_known_template_metadata()
 
-      name when is_binary(name) ->
-        case TemplateStore.get(name) do
-          {:ok, data} ->
-            meta = data["metadata"] || %{}
-            # Convert string keys to atom keys for compatibility
-            Map.new(meta, fn
-              {k, v} when is_binary(k) ->
-                try do
-                  {String.to_existing_atom(k), v}
-                rescue
-                  ArgumentError -> {k, v}
-                end
+      {:error, _reason} ->
+        fail_closed_exact_metadata()
 
-              {k, v} ->
-                {k, v}
-            end)
-
-          {:error, _} ->
-            %{}
-        end
-
-      module when is_atom(module) ->
-        if Code.ensure_loaded?(module) and function_exported?(module, :metadata, 0) do
-          try do
-            module.metadata()
-          rescue
-            _ -> %{}
-          end
-        else
-          %{}
-        end
+      :not_marked ->
+        load_template_metadata(Map.get(profile, :template))
     end
   end
 
   defp extract_template_sandbox_level(profile) do
-    case Map.get(profile, :template) do
-      name when is_binary(name) ->
-        case TemplateStore.get(name) do
-          {:ok, data} -> data["sandbox_level"]
-          {:error, _} -> nil
-        end
-
-      _ ->
-        nil
+    case exact_policy_snapshot(profile) do
+      {:ok, snapshot} -> ExactTemplatePolicy.sandbox_level(snapshot)
+      {:error, _reason} -> :strict
+      :not_marked -> load_template_sandbox_level(Map.get(profile, :template))
     end
   end
+
+  defp exact_policy_snapshot(profile) do
+    case ExactTemplatePolicy.from_metadata(Map.get(profile, :metadata) || %{}) do
+      {:ok, envelope} -> {:ok, ExactTemplatePolicy.snapshot(envelope)}
+      :not_marked -> :not_marked
+      {:error, _} = error -> error
+    end
+  end
+
+  defp fail_closed_exact_metadata do
+    %{
+      capability_policy: :exact,
+      runtime_policy: :exact,
+      runtime: :arbor,
+      sandbox_policy: :exact,
+      tool_policy: :exact,
+      tools: [],
+      trust_preset_policy: :exact
+    }
+  end
+
+  defp load_template_metadata(nil), do: %{}
+
+  defp load_template_metadata(name) when is_binary(name) do
+    case TemplateStore.get(name) do
+      {:ok, data} -> atomize_known_template_metadata(data["metadata"] || %{})
+      {:error, _} -> %{}
+    end
+  end
+
+  defp load_template_metadata(module) when is_atom(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :metadata, 0) do
+      try do
+        module.metadata()
+      rescue
+        _ -> %{}
+      end
+    else
+      %{}
+    end
+  end
+
+  defp atomize_known_template_metadata(metadata) do
+    Map.new(metadata, fn
+      {key, value} when is_binary(key) ->
+        case Arbor.Common.SafeAtom.to_existing(key) do
+          {:ok, atom} -> {atom, value}
+          {:error, _} -> {key, value}
+        end
+
+      pair ->
+        pair
+    end)
+  end
+
+  defp load_template_sandbox_level(name) when is_binary(name) do
+    case TemplateStore.get(name) do
+      {:ok, data} -> data["sandbox_level"]
+      {:error, _} -> nil
+    end
+  end
+
+  defp load_template_sandbox_level(_template), do: nil
 
   defp exact_template_policy?(metadata, key) do
     metadata_value(metadata, key) in [:exact, "exact"]
@@ -858,8 +956,8 @@ defmodule Arbor.Agent.Lifecycle do
 
   defp normalize_template_tools(_tools), do: nil
 
-  # Merge template-derived options into session_opts.
-  # Explicit caller opts take precedence over template defaults.
+  # Merge template-derived options into session opts. Exact policy values are
+  # persisted authority, so they intentionally override caller-provided values.
   defp merge_template_opts(session_opts, template_meta, caller_opts) do
     template_keys = [
       {:context_management, :context_management},
@@ -867,16 +965,27 @@ defmodule Arbor.Agent.Lifecycle do
       {:provider, :provider}
     ]
 
+    exact_runtime? = exact_template_policy?(template_meta, :runtime_policy)
+
     Enum.reduce(template_keys, session_opts, fn {meta_key, opt_key}, acc ->
-      if Keyword.has_key?(caller_opts, opt_key) do
-        acc
-      else
-        case Map.get(template_meta, meta_key) do
-          nil -> acc
-          value -> Keyword.put_new(acc, opt_key, value)
-        end
+      case metadata_value(template_meta, meta_key) do
+        nil ->
+          acc
+
+        value ->
+          cond do
+            exact_runtime? -> Keyword.put(acc, opt_key, value)
+            not Keyword.has_key?(caller_opts, opt_key) -> Keyword.put_new(acc, opt_key, value)
+            true -> acc
+          end
       end
     end)
+  end
+
+  defp exact_template_value(template_meta, key) do
+    if exact_template_policy?(template_meta, :runtime_policy) do
+      metadata_value(template_meta, key)
+    end
   end
 
   defp resolve_template(opts) do
@@ -906,7 +1015,9 @@ defmodule Arbor.Agent.Lifecycle do
               |> Keyword.put(:template_data, data)
               |> put_template_source(data)
 
-            {:ok, character, opts}
+            with {:ok, opts} <- put_exact_template_policy(opts, template_name, data) do
+              {:ok, character, opts}
+            end
 
           {:error, _} = error ->
             error
@@ -932,7 +1043,9 @@ defmodule Arbor.Agent.Lifecycle do
               |> Keyword.put_new(:template_module, template_mod)
               |> put_template_source(data)
 
-            {:ok, character, opts}
+            with {:ok, opts} <- put_exact_template_policy(opts, name, data) do
+              {:ok, character, opts}
+            end
 
           {:error, :not_found} ->
             # Direct module fallback for backward compatibility
@@ -952,6 +1065,14 @@ defmodule Arbor.Agent.Lifecycle do
               {:error, :not_found}
             end
         end
+    end
+  end
+
+  defp put_exact_template_policy(opts, template_name, data) do
+    case ExactTemplatePolicy.build(template_name, data, repo_root: repo_root_for_capabilities()) do
+      {:ok, envelope} -> {:ok, Keyword.put(opts, :exact_template_policy, envelope)}
+      :not_exact -> {:ok, opts}
+      {:error, _} = error -> error
     end
   end
 
@@ -1068,12 +1189,33 @@ defmodule Arbor.Agent.Lifecycle do
     :exit, _ -> :ok
   end
 
+  defp grant_initial_capabilities(agent_id, opts) do
+    case Keyword.get(opts, :exact_template_policy) do
+      %{} = envelope ->
+        reconcile_exact_capabilities(agent_id, envelope)
+
+      _other ->
+        grant_capabilities(
+          agent_id,
+          opts[:capabilities] || [],
+          template_metadata_from_opts(opts)
+        )
+    end
+  end
+
+  defp reconcile_exact_authority_after_trust(agent_id, opts) do
+    case Keyword.get(opts, :exact_template_policy) do
+      %{} = envelope -> reconcile_exact_capabilities(agent_id, envelope)
+      _ -> :ok
+    end
+  end
+
   defp grant_capabilities(_agent_id, [], _template_metadata), do: :ok
 
   defp grant_capabilities(agent_id, capabilities, template_metadata) do
     # Check which capabilities the agent already has to avoid duplicates
     existing_uris =
-      case Arbor.Security.CapabilityStore.list_for_principal(agent_id) do
+      case Arbor.Security.list_capabilities(agent_id) do
         {:ok, caps} -> MapSet.new(caps, & &1.resource_uri)
         _ -> MapSet.new()
       end
@@ -1131,6 +1273,138 @@ defmodule Arbor.Agent.Lifecycle do
     :ok
   end
 
+  defp reconcile_exact_capabilities(agent_id, envelope) do
+    snapshot = ExactTemplatePolicy.snapshot(envelope)
+    digest = ExactTemplatePolicy.digest(envelope)
+
+    with {:ok, desired_specs} <- exact_capability_specs(agent_id, snapshot),
+         {:ok, current_caps} <- Arbor.Security.list_capabilities(agent_id),
+         {:ok, retained_keys} <-
+           revoke_stale_exact_capabilities(current_caps, desired_specs, digest),
+         :ok <- grant_missing_exact_capabilities(agent_id, desired_specs, retained_keys, digest),
+         :ok <- verify_exact_capabilities(agent_id, desired_specs, digest) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:exact_capability_reconcile_failed, reason}}
+      other -> {:error, {:exact_capability_reconcile_failed, {:unexpected_result, other}}}
+    end
+  end
+
+  defp exact_capability_specs(agent_id, snapshot) do
+    specs =
+      snapshot
+      |> ExactTemplatePolicy.capabilities()
+      |> Enum.map(fn capability ->
+        resource = capability["resource"] |> resolve_self_uri(agent_id)
+        constraints = normalize_capability_constraints(capability["constraints"])
+
+        %{resource: resource, constraints: constraints}
+      end)
+      |> Enum.uniq_by(&exact_capability_key/1)
+
+    if Enum.all?(specs, &(is_binary(&1.resource) and &1.resource != "")) do
+      {:ok, specs}
+    else
+      {:error, :invalid_desired_capability}
+    end
+  end
+
+  defp revoke_stale_exact_capabilities(current_caps, desired_specs, digest) do
+    desired_by_key = Map.new(desired_specs, &{exact_capability_key(&1), &1})
+
+    {retained, stale} =
+      Enum.reduce(current_caps, {MapSet.new(), []}, fn cap, {retained, stale} ->
+        key = exact_capability_key(cap)
+        desired = Map.get(desired_by_key, key)
+
+        if desired && not MapSet.member?(retained, key) &&
+             exact_capability_matches?(cap, desired, digest) do
+          {MapSet.put(retained, key), stale}
+        else
+          {retained, [cap | stale]}
+        end
+      end)
+
+    case revoke_capabilities(stale) do
+      :ok -> {:ok, retained}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp grant_missing_exact_capabilities(agent_id, desired_specs, retained_keys, digest) do
+    desired_specs
+    |> Enum.reject(&MapSet.member?(retained_keys, exact_capability_key(&1)))
+    |> Enum.reduce_while(:ok, fn spec, :ok ->
+      case Arbor.Security.grant(
+             principal: agent_id,
+             resource: spec.resource,
+             constraints: spec.constraints,
+             metadata: %{
+               source: :exact_template_policy,
+               template_digest: digest
+             }
+           ) do
+        {:ok, _capability} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:grant_failed, spec.resource, reason}}}
+      end
+    end)
+  end
+
+  defp verify_exact_capabilities(agent_id, desired_specs, digest) do
+    with {:ok, caps} <- Arbor.Security.list_capabilities(agent_id) do
+      desired_by_key = Map.new(desired_specs, &{exact_capability_key(&1), &1})
+
+      valid? =
+        length(caps) == length(desired_specs) and
+          Enum.all?(caps, fn cap ->
+            case Map.get(desired_by_key, exact_capability_key(cap)) do
+              nil -> false
+              desired -> exact_capability_matches?(cap, desired, digest)
+            end
+          end)
+
+      if valid?, do: :ok, else: {:error, :post_reconcile_verification_failed}
+    end
+  end
+
+  defp exact_capability_matches?(cap, desired, digest) do
+    cap.resource_uri == desired.resource and
+      cap.constraints == desired.constraints and
+      is_nil(cap.expires_at) and
+      is_nil(cap.not_before) and
+      is_nil(cap.parent_capability_id) and
+      is_nil(cap.max_uses) and
+      is_nil(cap.session_id) and
+      is_nil(cap.task_id) and
+      is_nil(cap.principal_scope) and
+      exact_capability_metadata?(cap.metadata, digest)
+  end
+
+  defp exact_capability_metadata?(metadata, digest) when is_map(metadata) do
+    source = Map.get(metadata, :source) || Map.get(metadata, "source")
+    stored_digest = Map.get(metadata, :template_digest) || Map.get(metadata, "template_digest")
+
+    source in [:exact_template_policy, "exact_template_policy"] and stored_digest == digest
+  end
+
+  defp exact_capability_metadata?(_metadata, _digest), do: false
+
+  defp exact_capability_key(%{resource: resource, constraints: constraints}),
+    do: {resource, constraints}
+
+  defp exact_capability_key(%{resource_uri: resource, constraints: constraints}),
+    do: {resource, constraints}
+
+  defp revoke_capabilities(capabilities) do
+    Enum.reduce_while(capabilities, :ok, fn cap, :ok ->
+      case Arbor.Security.revoke(cap.id) do
+        :ok -> {:cont, :ok}
+        {:error, :not_found} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:revoke_failed, cap.id, reason}}}
+      end
+    end)
+  end
+
   # Expand self-scoped capability URIs to the agent's id. Mirrors the trust
   # system's `resolve_uri/2` so template-declared `/self/` caps grant to the same
   # concrete resource the baseline grant would.
@@ -1184,7 +1458,8 @@ defmodule Arbor.Agent.Lifecycle do
     cwd = File.cwd!() |> Path.expand()
 
     root =
-      [cwd, Path.expand("../..", cwd), Path.expand("..", cwd)]
+      cwd
+      |> ancestor_paths()
       |> Enum.find(&umbrella_root?/1)
 
     (root || cwd)
@@ -1193,6 +1468,18 @@ defmodule Arbor.Agent.Lifecycle do
 
   defp umbrella_root?(path) do
     File.exists?(Path.join(path, "mix.exs")) and File.dir?(Path.join(path, "apps"))
+  end
+
+  defp ancestor_paths(path), do: ancestor_paths(path, [])
+
+  defp ancestor_paths(path, acc) do
+    parent = Path.dirname(path)
+
+    if parent == path do
+      Enum.reverse([path | acc])
+    else
+      ancestor_paths(parent, [path | acc])
+    end
   end
 
   # Atomize the known capability constraint keys (`rate_limit`,
@@ -1288,6 +1575,14 @@ defmodule Arbor.Agent.Lifecycle do
   # Delegate capabilities from a parent (human or agent) to the newly created agent.
   # Non-fatal: logs warnings on failure, always returns :ok for backwards compat.
   defp maybe_delegate_from_parent(agent_id, opts) do
+    if Keyword.has_key?(opts, :exact_template_policy) do
+      :ok
+    else
+      do_maybe_delegate_from_parent(agent_id, opts)
+    end
+  end
+
+  defp do_maybe_delegate_from_parent(agent_id, opts) do
     delegator_id = Keyword.get(opts, :delegator_id)
     delegator_key = Keyword.get(opts, :delegator_private_key)
 
@@ -1514,6 +1809,7 @@ defmodule Arbor.Agent.Lifecycle do
       |> Keyword.get(:metadata, %{})
       |> maybe_put_template_source(Keyword.get(opts, :template_source))
       |> maybe_put_model_config(Keyword.get(opts, :model_config))
+      |> maybe_put_exact_template_policy(Keyword.get(opts, :exact_template_policy))
 
     # Inject created_by from tenant_context if present
     case Keyword.get(opts, :tenant_context) do
@@ -1545,9 +1841,155 @@ defmodule Arbor.Agent.Lifecycle do
 
   defp maybe_put_template_source(metadata, _), do: metadata
 
+  defp maybe_put_exact_template_policy(metadata, %{} = envelope) do
+    ExactTemplatePolicy.put_metadata(metadata, envelope)
+  end
+
+  defp maybe_put_exact_template_policy(metadata, _envelope), do: metadata
+
+  defp prepare_and_activate_authority(%Profile{} = profile) do
+    case resolve_exact_profile_policy(profile) do
+      {:ok, prepared_profile, envelope} ->
+        snapshot = ExactTemplatePolicy.snapshot(envelope)
+
+        with :ok <- register_profile_identity(prepared_profile, :strict),
+             :ok <- ensure_exact_trust_profile(prepared_profile.agent_id, snapshot),
+             :ok <- reconcile_exact_capabilities(prepared_profile.agent_id, envelope),
+             :ok <- ensure_exact_identity_active(prepared_profile.agent_id) do
+          {:ok, prepared_profile, {:exact, envelope}}
+        end
+
+      :not_exact ->
+        with :ok <- ensure_identity_and_capabilities(profile) do
+          {:ok, profile, :legacy}
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp resolve_exact_profile_policy(%Profile{} = profile) do
+    metadata = profile.metadata || %{}
+
+    case ExactTemplatePolicy.from_metadata(metadata) do
+      {:ok, _envelope} ->
+        validate_exact_profile_template(profile)
+
+      :not_marked ->
+        if ExactTemplatePolicy.migration_candidate?(profile) do
+          migrate_pipeline_architect_policy(profile)
+        else
+          :not_exact
+        end
+
+      {:error, _} = error ->
+        error
+    end
+  end
+
+  defp validate_exact_profile_template(%Profile{template: template} = profile)
+       when is_binary(template) do
+    with {:ok, stored} <- ExactTemplatePolicy.from_metadata(profile.metadata || %{}),
+         repo_root = stored |> ExactTemplatePolicy.snapshot() |> ExactTemplatePolicy.repo_root(),
+         :ok <- validate_exact_repo_root(repo_root),
+         {:ok, data} <- reload_exact_template(template),
+         {:ok, envelope} <-
+           ExactTemplatePolicy.validate(template, profile.metadata || %{}, data,
+             repo_root: repo_root
+           ) do
+      {:ok, profile, envelope}
+    end
+  end
+
+  defp validate_exact_profile_template(_profile) do
+    {:error, {:exact_template_policy, :template_reference_missing_or_invalid}}
+  end
+
+  defp migrate_pipeline_architect_policy(%Profile{template: template} = profile) do
+    with {:ok, data} <- reload_exact_template(template),
+         repo_root = repo_root_for_capabilities(),
+         :ok <- validate_exact_repo_root(repo_root),
+         {:ok, envelope} <-
+           require_exact_policy(ExactTemplatePolicy.build(template, data, repo_root: repo_root)),
+         snapshot = ExactTemplatePolicy.snapshot(envelope),
+         migrated = %{
+           profile
+           | metadata: ExactTemplatePolicy.put_metadata(profile.metadata || %{}, envelope),
+             initial_capabilities: ExactTemplatePolicy.capabilities(snapshot),
+             sandbox_level: ExactTemplatePolicy.sandbox_level(snapshot)
+         },
+         :ok <- persist_profile(migrated) do
+      Logger.info("[Lifecycle] migrated Pipeline Architect exact policy snapshot",
+        agent_id: profile.agent_id,
+        template_digest: ExactTemplatePolicy.digest(envelope)
+      )
+
+      {:ok, migrated, envelope}
+    else
+      {:error, reason} -> {:error, {:exact_policy_migration_failed, reason}}
+      other -> {:error, {:exact_policy_migration_failed, {:unexpected_result, other}}}
+    end
+  end
+
+  defp reload_exact_template(template) do
+    case TemplateStore.reload(template) do
+      {:ok, data} -> {:ok, data}
+      {:error, reason} -> {:error, {:exact_template_unavailable, reason}}
+    end
+  rescue
+    error -> {:error, {:exact_template_unreadable, Exception.message(error)}}
+  catch
+    :exit, reason -> {:error, {:exact_template_unreadable, {:exit, reason}}}
+    kind, reason -> {:error, {:exact_template_unreadable, {kind, reason}}}
+  end
+
+  defp require_exact_policy({:ok, envelope}), do: {:ok, envelope}
+
+  defp require_exact_policy(:not_exact),
+    do: {:error, {:exact_template_policy, :template_exact_metadata_missing}}
+
+  defp require_exact_policy({:error, _} = error), do: error
+
+  defp validate_exact_repo_root(nil), do: :ok
+
+  defp validate_exact_repo_root(repo_root) when is_binary(repo_root) do
+    if Path.type(repo_root) == :absolute and umbrella_root?(repo_root) do
+      :ok
+    else
+      {:error, {:exact_template_policy, {:repo_root_unavailable, repo_root}}}
+    end
+  end
+
+  defp validate_exact_repo_root(repo_root),
+    do: {:error, {:exact_template_policy, {:repo_root_invalid, repo_root}}}
+
+  defp ensure_exact_trust_profile(agent_id, snapshot) do
+    opts = [trust_preset: ExactTemplatePolicy.trust_preset(snapshot)]
+    ensure_trust_profile(agent_id, opts)
+  end
+
   # Re-register identity and capabilities on resume.
   # ETS-based stores lose state on restart, so we re-grant from the profile.
   defp ensure_identity_and_capabilities(%Profile{} = profile) do
+    agent_id = profile.agent_id
+
+    _result = register_profile_identity(profile, :best_effort)
+
+    # Re-grant capabilities from template or stored list
+    # Filter out retired plural action grants; action execution now authorizes
+    # against facade/resource URIs or singular arbor://action/* URIs.
+    capabilities =
+      resolve_capabilities_for_regrant(profile)
+      |> Enum.reject(fn cap ->
+        resource = cap[:resource] || cap["resource"] || ""
+        String.starts_with?(resource, "arbor://actions/execute/")
+      end)
+
+    grant_capabilities(agent_id, capabilities, extract_template_metadata(profile))
+  end
+
+  defp register_profile_identity(%Profile{} = profile, mode) do
     agent_id = profile.agent_id
 
     # Re-register identity from stored public key
@@ -1570,31 +2012,38 @@ defmodule Arbor.Agent.Lifecycle do
               {:error, :already_registered} ->
                 :ok
 
+              {:error, {:already_registered, _agent_id}} ->
+                :ok
+
               {:error, reason} ->
-                Logger.warning("Failed to re-register identity: #{inspect(reason)}",
-                  agent_id: agent_id
-                )
+                identity_registration_failure(mode, agent_id, reason)
             end
 
           :error ->
-            Logger.warning("Invalid public key hex in profile", agent_id: agent_id)
+            identity_registration_failure(mode, agent_id, :invalid_public_key)
         end
 
       _ ->
-        :ok
+        identity_registration_failure(mode, agent_id, :identity_metadata_missing)
     end
+  end
 
-    # Re-grant capabilities from template or stored list
-    # Filter out retired plural action grants; action execution now authorizes
-    # against facade/resource URIs or singular arbor://action/* URIs.
-    capabilities =
-      resolve_capabilities_for_regrant(profile)
-      |> Enum.reject(fn cap ->
-        resource = cap[:resource] || cap["resource"] || ""
-        String.starts_with?(resource, "arbor://actions/execute/")
-      end)
+  defp identity_registration_failure(:strict, _agent_id, reason),
+    do: {:error, {:identity_registration_failed, reason}}
 
-    grant_capabilities(agent_id, capabilities, extract_template_metadata(profile))
+  defp identity_registration_failure(:best_effort, agent_id, reason) do
+    Logger.warning("Failed to re-register identity: #{inspect(reason)}", agent_id: agent_id)
+    :ok
+  end
+
+  defp ensure_exact_identity_active(agent_id) do
+    case Arbor.Security.identity_status(agent_id) do
+      {:ok, :active} -> :ok
+      {:ok, :suspended} -> Arbor.Security.resume_identity(agent_id)
+      {:ok, status} -> {:error, {:identity_not_activatable, status}}
+      {:error, reason} -> {:error, {:identity_status_failed, reason}}
+      other -> {:error, {:unexpected_identity_status, other}}
+    end
   end
 
   defp resolve_capabilities_for_regrant(%Profile{} = profile) do
@@ -1621,6 +2070,117 @@ defmodule Arbor.Agent.Lifecycle do
 
   defp persist_profile(%Profile{} = profile) do
     ProfileStore.store_profile(profile)
+  end
+
+  defp handle_authority_failure(%Profile{} = profile, {:error, reason} = error) do
+    if ExactTemplatePolicy.managed_profile?(profile) do
+      _ = stop(profile.agent_id)
+
+      results = [
+        suspend_exact_identity(profile.agent_id),
+        cleanup_agent_authority(profile.agent_id)
+      ]
+
+      case Enum.reject(results, &(&1 == :ok)) do
+        [] ->
+          error
+
+        cleanup_errors ->
+          {:error, {:exact_authority_activation_failed, reason, cleanup_errors}}
+      end
+    else
+      error
+    end
+  end
+
+  defp suspend_exact_identity(agent_id) do
+    case Arbor.Security.identity_status(agent_id) do
+      {:ok, :active} ->
+        safe_cleanup(fn ->
+          Arbor.Security.suspend_identity(agent_id, reason: :exact_policy_activation_failed)
+        end)
+
+      {:ok, :suspended} ->
+        :ok
+
+      {:ok, :revoked} ->
+        :ok
+
+      {:error, :not_found} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, {:identity_status_failed, reason}}
+
+      other ->
+        {:error, {:unexpected_identity_status, other}}
+    end
+  rescue
+    error -> {:error, {:identity_suspension_exception, Exception.message(error)}}
+  catch
+    :exit, reason -> {:error, {:identity_suspension_exit, reason}}
+    kind, reason -> {:error, {:identity_suspension_failure, kind, reason}}
+  end
+
+  defp rollback_failed_creation(agent_id) do
+    cleanup_results = [
+      cleanup_agent_authority(agent_id),
+      safe_cleanup(fn -> Arbor.Security.delete_signing_key(agent_id) end),
+      safe_cleanup(fn -> Arbor.Security.deregister_identity(agent_id) end),
+      safe_cleanup(fn -> ProfileStore.delete_profile(agent_id) end),
+      safe_cleanup(fn -> Arbor.Memory.cleanup_for_agent(agent_id) end)
+    ]
+
+    errors = Enum.reject(cleanup_results, &(&1 == :ok))
+
+    if errors != [] do
+      Logger.error("[Lifecycle] failed creation cleanup was incomplete",
+        agent_id: agent_id,
+        cleanup_errors: inspect(errors)
+      )
+    end
+
+    :ok
+  end
+
+  defp cleanup_agent_authority(agent_id) do
+    results = [
+      revoke_all_agent_capabilities(agent_id),
+      safe_cleanup(fn -> Arbor.Trust.delete_trust_profile(agent_id) end)
+    ]
+
+    case Enum.reject(results, &(&1 == :ok)) do
+      [] -> :ok
+      errors -> {:error, errors}
+    end
+  end
+
+  defp revoke_all_agent_capabilities(agent_id) do
+    case Arbor.Security.list_capabilities(agent_id) do
+      {:ok, capabilities} -> revoke_capabilities(capabilities)
+      {:error, reason} -> {:error, {:capability_list_failed, reason}}
+      other -> {:error, {:unexpected_capability_list_result, other}}
+    end
+  rescue
+    error -> {:error, {:capability_cleanup_exception, Exception.message(error)}}
+  catch
+    :exit, reason -> {:error, {:capability_cleanup_exit, reason}}
+    kind, reason -> {:error, {:capability_cleanup_failure, kind, reason}}
+  end
+
+  defp safe_cleanup(cleanup) when is_function(cleanup, 0) do
+    case cleanup.() do
+      :ok -> :ok
+      {:ok, _value} -> :ok
+      {:error, :not_found} -> :ok
+      {:error, _} = error -> error
+      other -> {:error, {:unexpected_cleanup_result, other}}
+    end
+  rescue
+    error -> {:error, {:cleanup_exception, Exception.message(error)}}
+  catch
+    :exit, reason -> {:error, {:cleanup_exit, reason}}
+    kind, reason -> {:error, {:cleanup_failure, kind, reason}}
   end
 
   # Create a trust profile and apply any template preset. A declared preset is a
@@ -1662,82 +2222,19 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   defp do_ensure_trust_profile(agent_id, opts) do
-    trust = Arbor.Trust
-    store = Arbor.Trust.Store
-    authority = Arbor.Trust.Authority
-
-    with true <-
-           Code.ensure_loaded?(trust) and function_exported?(trust, :get_trust_profile, 1) and
-             Code.ensure_loaded?(store) and function_exported?(store, :store_profile, 1) and
-             function_exported?(store, :update_profile, 2),
-         :ok <- ensure_base_trust_profile(agent_id, trust, store, authority),
-         :ok <- apply_template_trust_preset(agent_id, opts, store) do
-      :ok
-    else
-      false -> {:error, :trust_system_unavailable}
-      {:error, _} = error -> error
-      other -> {:error, {:unexpected_trust_setup_result, other}}
-    end
-  end
-
-  defp ensure_base_trust_profile(agent_id, trust, store, authority) do
-    case apply(trust, :get_trust_profile, [agent_id]) do
-      {:ok, _profile} ->
-        :ok
-
-      {:error, :not_found} ->
-        profile =
-          if Code.ensure_loaded?(authority) and function_exported?(authority, :new_profile, 1) do
-            apply(authority, :new_profile, [agent_id])
-          else
-            {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
-            profile
-          end
-
-        case apply(store, :store_profile, [profile]) do
-          :ok ->
-            Logger.info("Trust profile created for #{agent_id}")
-            :ok
-
-          {:error, reason} ->
-            {:error, {:trust_profile_store_failed, reason}}
-
-          other ->
-            {:error, {:unexpected_trust_profile_store_result, other}}
-        end
-
-      {:error, reason} ->
-        {:error, {:trust_profile_lookup_failed, reason}}
-
-      other ->
-        {:error, {:unexpected_trust_profile_lookup_result, other}}
-    end
-  end
-
-  # Apply a template's declarative trust preset (a restrictive read-only baseline,
-  # etc.) to the freshly-created profile. Two sources, data-first preferred:
-  #
-  #   * data-first `.md` template — `opts[:trust_preset]` is a string-keyed map from
-  #     the frontmatter: `%{"baseline" => mode, "rules" => %{uri => mode}}`.
-  #   * legacy module template — a `trust_preset/0` callback returning
-  #     `%{baseline: atom, rules: map}`.
-  #
-  # Before this, only the module path fired, so data-first templates could not
-  # declare a read-only baseline (orphaned since templates became `.md` files) —
-  # the mechanism the read-only-by-default agent roster depends on.
-  defp apply_template_trust_preset(agent_id, opts, store) do
     case resolve_trust_preset(opts) do
       nil ->
-        :ok
+        case Arbor.Trust.ensure_trust_profile(agent_id) do
+          {:ok, _profile} -> :ok
+          {:error, _} = error -> error
+          other -> {:error, {:unexpected_trust_setup_result, other}}
+        end
 
       %{} = preset ->
         baseline = Map.get(preset, :baseline, :block)
         rules = Map.get(preset, :rules, %{})
 
-        case apply(store, :update_profile, [
-               agent_id,
-               fn profile -> %{profile | baseline: baseline, rules: rules} end
-             ]) do
+        case Arbor.Trust.ensure_trust_profile(agent_id, baseline: baseline, rules: rules) do
           {:ok, %{baseline: ^baseline, rules: ^rules}} ->
             :ok
 

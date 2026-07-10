@@ -40,10 +40,12 @@ defmodule Arbor.Trust do
 
   alias Arbor.Trust.{
     ApprovalGuard,
+    Authority,
     CapabilityEnforcementMatrix,
     Manager,
     PolicyEnforcer,
-    ProfileExitAudit
+    ProfileExitAudit,
+    Store
   }
 
   # ===========================================================================
@@ -104,6 +106,43 @@ defmodule Arbor.Trust do
   @spec get_trust_profile(String.t()) ::
           {:ok, Arbor.Contracts.Trust.Profile.t()} | {:error, :not_found | term()}
   defdelegate get_trust_profile(agent_id), to: Manager
+
+  @doc """
+  Ensure a trust profile exists and durably apply an optional exact policy.
+
+  Unlike the event-oriented Manager creation path, this function acknowledges
+  success only after the Store acknowledges the write. Callers may provide both
+  `:baseline` and `:rules` to replace the policy atomically.
+  """
+  @spec ensure_trust_profile(String.t(), keyword()) ::
+          {:ok, Arbor.Contracts.Trust.Profile.t()} | {:error, term()}
+  def ensure_trust_profile(agent_id, opts \\ []) when is_binary(agent_id) do
+    with {:ok, profile} <- get_or_build_trust_profile(agent_id),
+         desired <- apply_profile_policy(profile, opts),
+         {:ok, stored} <- persist_trust_profile(profile, desired) do
+      {:ok, stored}
+    end
+  rescue
+    error -> {:error, {:trust_store_exception, Exception.message(error)}}
+  catch
+    :exit, reason -> {:error, {:trust_store_exit, reason}}
+    kind, reason -> {:error, {:trust_store_failure, kind, reason}}
+  end
+
+  @doc "Delete a trust profile, returning persistence failures to the caller."
+  @spec delete_trust_profile(String.t()) :: :ok | {:error, term()}
+  def delete_trust_profile(agent_id) when is_binary(agent_id) do
+    case Store.get_profile(agent_id) do
+      {:ok, _profile} -> Store.delete_profile(agent_id)
+      {:error, :not_found} -> :ok
+      {:error, _} = error -> error
+    end
+  rescue
+    error -> {:error, {:trust_store_exception, Exception.message(error)}}
+  catch
+    :exit, reason -> {:error, {:trust_store_exit, reason}}
+    kind, reason -> {:error, {:trust_store_failure, kind, reason}}
+  end
 
   @doc """
   Record a trust-affecting event.
@@ -395,5 +434,37 @@ defmodule Arbor.Trust do
     Arbor.Trust.Store.update_profile(agent_id, fn profile ->
       %{profile | rules: Map.delete(profile.rules || %{}, uri_prefix)}
     end)
+  end
+
+  defp get_or_build_trust_profile(agent_id) do
+    case Store.get_profile(agent_id) do
+      {:ok, profile} -> {:ok, profile}
+      {:error, :not_found} -> {:ok, Authority.new_profile(agent_id)}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp apply_profile_policy(profile, opts) do
+    case {Keyword.fetch(opts, :baseline), Keyword.fetch(opts, :rules)} do
+      {{:ok, baseline}, {:ok, rules}} -> %{profile | baseline: baseline, rules: rules}
+      {:error, :error} -> profile
+      _partial -> raise ArgumentError, "baseline and rules must be supplied together"
+    end
+  end
+
+  defp persist_trust_profile(original, desired) do
+    cond do
+      original == desired and Store.profile_exists?(original.agent_id) ->
+        {:ok, original}
+
+      Store.profile_exists?(original.agent_id) ->
+        Store.update_profile(original.agent_id, fn _profile -> desired end)
+
+      true ->
+        case Store.store_profile(desired) do
+          :ok -> {:ok, desired}
+          {:error, _} = error -> error
+        end
+    end
   end
 end

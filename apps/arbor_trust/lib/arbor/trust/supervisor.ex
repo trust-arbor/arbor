@@ -134,7 +134,13 @@ defmodule Arbor.Trust.Supervisor do
          collection: "trust_profiles"},
         id: :arbor_trust_profiles
       ),
-      {Store, []},
+      {Store,
+       [
+         persistence: :durable,
+         durable_backend: trust_profile_backend(),
+         durable_backend_opts: [repo: persistence_repo()],
+         durable_collection: "trust_profiles"
+       ]},
       {EventStore, []},
       {Manager,
        [
