@@ -124,7 +124,10 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
   end
 
   test "fails closed when the configured template path is malformed" do
-    for malformed <- [nil, :not_a_path, "  ", "bad" <> <<0>> <> "path"] do
+    # Non-binary and blank configuration intentionally falls back to the
+    # packaged template in Config. These malformed binaries cross that seam
+    # and must still fail before File.stat/1 or the compiler is called.
+    for malformed <- [<<255>>, "bad" <> <<0>> <> "path"] do
       Application.put_env(:arbor_orchestrator, :coding_pipeline_path, malformed)
 
       assert {:error, {:coding_plan_template_unavailable, :invalid_path}} =
