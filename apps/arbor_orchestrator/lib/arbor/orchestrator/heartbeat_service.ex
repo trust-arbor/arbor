@@ -359,7 +359,11 @@ defmodule Arbor.Orchestrator.HeartbeatService do
         # We provide the minimal subset it needs.
         session_like = %{
           agent_id: state.agent_id,
-          signer: state.signer
+          signer: state.signer,
+          session_id: "heartbeat:#{state.agent_id}",
+          adapters: %{},
+          config: %{"stream" => false},
+          pid: nil
         }
 
         apply(Arbor.Orchestrator.Session.Builders, :build_heartbeat_values, [session_like])
@@ -378,7 +382,11 @@ defmodule Arbor.Orchestrator.HeartbeatService do
       try do
         session_like = %{
           agent_id: state.agent_id,
-          signer: state.signer
+          signer: state.signer,
+          session_id: "heartbeat:#{state.agent_id}",
+          adapters: %{},
+          config: %{"stream" => false},
+          pid: nil
         }
 
         apply(Arbor.Orchestrator.Session.Builders, :build_engine_opts, [

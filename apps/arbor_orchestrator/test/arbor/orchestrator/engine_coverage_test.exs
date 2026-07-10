@@ -14,7 +14,17 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
   @moduletag :fast
 
   alias Arbor.Orchestrator.Engine
-  alias Arbor.Orchestrator.Engine.{Authorization, Condition, Context, Executor, Outcome, Router}
+
+  alias Arbor.Orchestrator.Engine.{
+    Authorization,
+    Condition,
+    Context,
+    Executor,
+    Outcome,
+    Router,
+    RunAuthorization
+  }
+
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.{Edge, Node}
   alias Arbor.Orchestrator.Handlers.LlmHandler
@@ -55,6 +65,16 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
 
     Enum.reduce(edges, graph, fn {from, to, edge_attrs}, g ->
       Graph.add_edge(g, %Edge{from: from, to: to, attrs: edge_attrs})
+    end)
+  end
+
+  defp authorization_opts(graph, principal, authorizer \\ nil) do
+    {:ok, authority} =
+      RunAuthorization.new(graph, agent_id: principal, workdir: File.cwd!())
+
+    [authorization: true, agent_id: principal, run_authorization: authority]
+    |> then(fn opts ->
+      if authorizer, do: Keyword.put(opts, :authorizer, authorizer), else: opts
     end)
   end
 
@@ -1187,7 +1207,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
       node = %Node{id: "task", attrs: %{"type" => "codergen"}}
       ctx = Context.new(%{"session.agent_id" => "agent_001"})
       graph = %Graph{attrs: %{}}
-      opts = [authorization: true, authorizer: authorizer]
+      opts = authorization_opts(graph, "agent_001", authorizer)
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
       assert outcome.status == :success
@@ -1203,7 +1223,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
       node = %Node{id: "task", attrs: %{"type" => "tool"}}
       ctx = Context.new(%{"session.agent_id" => "untrusted"})
       graph = %Graph{attrs: %{}}
-      opts = [authorization: true, authorizer: authorizer]
+      opts = authorization_opts(graph, "untrusted", authorizer)
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
       assert outcome.status == :fail
@@ -1221,7 +1241,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
       node = %Node{id: "start", attrs: %{"shape" => "Mdiamond"}}
       ctx = Context.new(%{"session.agent_id" => "untrusted"})
       graph = %Graph{attrs: %{}}
-      opts = [authorization: true, authorizer: authorizer]
+      opts = authorization_opts(graph, "untrusted", authorizer)
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
       # Start nodes bypass authorization
@@ -1238,7 +1258,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
       node = %Node{id: "exit", attrs: %{"shape" => "Msquare"}}
       ctx = Context.new(%{"session.agent_id" => "untrusted"})
       graph = %Graph{attrs: %{}}
-      opts = [authorization: true, authorizer: authorizer]
+      opts = authorization_opts(graph, "untrusted", authorizer)
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
       assert outcome.status == :success
@@ -1253,7 +1273,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
       node = %Node{id: "task", attrs: %{"type" => "codergen"}}
       ctx = Context.new(%{"session.agent_id" => "agent"})
       graph = %Graph{attrs: %{}}
-      opts = [authorization: true]
+      opts = authorization_opts(graph, "agent")
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
       assert outcome.status == :fail

@@ -65,7 +65,7 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
 
   require Logger
 
-  alias Arbor.Orchestrator.Engine.{Context, Outcome}
+  alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.Registry
   alias Arbor.Orchestrator.Middleware.Chain
@@ -113,30 +113,51 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
   # --- Private ---
 
   defp execute_with_authorization(handler, node, context, graph, opts) do
-    type = Registry.node_type(node)
+    authority = Keyword.get(opts, :run_authorization)
 
-    if type in @always_authorized do
-      Logger.debug("Authorization: #{type} node #{node.id} always authorized")
-      call_handler(handler, node, context, graph, opts)
-    else
-      agent_id = Context.get(context, "session.agent_id")
-      authorizer = Keyword.get(opts, :authorizer)
+    with %RunAuthorization{} <- authority,
+         :ok <- RunAuthorization.validate_node(node, authority) do
+      node = RunAuthorization.sanitize_node(node, authority)
+      type = Registry.node_type(node)
+      agent_id = authority.execution_principal
 
-      case check_authorization(authorizer, agent_id, type) do
-        :ok ->
-          Logger.debug("Authorization: #{type} node #{node.id} authorized for agent #{agent_id}")
-          call_handler(handler, node, context, graph, opts)
+      if type in @always_authorized do
+        Logger.debug("Authorization: #{type} node #{node.id} always authorized")
+        call_handler(handler, node, context, graph, opts)
+      else
+        authorizer = Keyword.get(opts, :authorizer)
 
-        {:error, reason} ->
-          Logger.debug(
-            "Authorization: #{type} node #{node.id} denied for agent #{agent_id}: #{inspect(reason)}"
-          )
+        case check_authorization(authorizer, agent_id, type) do
+          :ok ->
+            Logger.debug(
+              "Authorization: #{type} node #{node.id} authorized for agent #{agent_id}"
+            )
 
-          %Outcome{
-            status: :fail,
-            failure_reason: "unauthorized: #{type} for agent #{agent_id}"
-          }
+            call_handler(handler, node, context, graph, opts)
+
+          {:error, reason} ->
+            Logger.debug(
+              "Authorization: #{type} node #{node.id} denied for agent #{agent_id}: #{inspect(reason)}"
+            )
+
+            %Outcome{
+              status: :fail,
+              failure_reason: "unauthorized: #{type} for agent #{agent_id}"
+            }
+        end
       end
+    else
+      nil ->
+        %Outcome{status: :fail, failure_reason: "unauthorized: missing run authorization"}
+
+      {:error, {:graph_principal_override, node_id}} ->
+        %Outcome{
+          status: :fail,
+          failure_reason: "unauthorized: graph principal override on node #{node_id}"
+        }
+
+      _ ->
+        %Outcome{status: :fail, failure_reason: "unauthorized: invalid run authorization"}
     end
   end
 
@@ -205,12 +226,29 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
   end
 
   defp build_assigns(context, opts, node) do
-    assigns = %{}
+    authority = Keyword.get(opts, :run_authorization)
+
+    assigns = %{
+      authorization: Keyword.get(opts, :authorization, false),
+      run_authorization: authority
+    }
 
     assigns =
-      case Context.get(context, "session.agent_id") do
-        nil -> assigns
-        agent_id -> Map.put(assigns, :agent_id, agent_id)
+      case authority do
+        %RunAuthorization{} = auth ->
+          assigns
+          |> Map.put(:agent_id, auth.execution_principal)
+          |> Map.put(:caller_id, auth.caller_id)
+          |> Map.put(:author_id, auth.author_id)
+          |> Map.put(:task_id, auth.task_id)
+          |> Map.put(:session_id, auth.session_id)
+          |> Map.put(:workdir, auth.workdir)
+
+        _ ->
+          case Context.get(context, "session.agent_id") do
+            nil -> assigns
+            agent_id -> Map.put(assigns, :agent_id, agent_id)
+          end
       end
 
     # Thread signer function for signed request creation in CapabilityCheck

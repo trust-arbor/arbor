@@ -10,7 +10,8 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
-  alias Arbor.Orchestrator.Engine.{Context, Outcome}
+  alias Arbor.Common.SafePath
+  alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
 
   @impl true
   def execute(node, context, _graph, opts) do
@@ -73,14 +74,13 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandler do
   defp get_source(node, context, opts) do
     if Map.get(node.attrs, "source_file") do
       path = Map.get(node.attrs, "source_file")
-      workdir = Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
+      workdir = fixed_workdir(context, opts)
 
-      resolved =
-        if Path.type(path) == :absolute, do: path, else: Path.join(workdir, path)
-
-      case File.read(Path.expand(resolved)) do
-        {:ok, content} -> content
-        {:error, _} -> nil
+      with {:ok, resolved} <- SafePath.resolve_within(path, workdir),
+           {:ok, content} <- File.read(resolved) do
+        content
+      else
+        _ -> nil
       end
     else
       key = Map.get(node.attrs, "source_key", "last_response")
@@ -89,17 +89,30 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandler do
   end
 
   defp build_child_opts(node, context, opts) do
-    workdir =
-      Map.get(node.attrs, "workdir") ||
-        Context.get(context, "workdir") ||
-        Keyword.get(opts, :workdir)
+    workdir = fixed_workdir(context, opts)
 
     # P0-3: thread the authorization context into the child graph run.
     # The pre-fix Keyword.take dropped :authorization, :authorizer,
     # :signer, and :auth_context — child pipelines started with no
     # parent auth context at all.
-    forwarded_keys =
-      [:logs_root, :on_event, :authorization, :authorizer, :signer, :auth_context, :caller_id]
+    forwarded_keys = [
+      :logs_root,
+      :on_event,
+      :authorization,
+      :authorizer,
+      :signer,
+      :auth_context,
+      :run_authorization,
+      :execution_principal,
+      :agent_id,
+      :caller_id,
+      :author_id,
+      :task_id,
+      :session_id,
+      :workdir,
+      :identity_private_key,
+      :resumable
+    ]
 
     child_opts = Keyword.take(opts, forwarded_keys)
 
@@ -110,6 +123,13 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandler do
     # eventually hit the engine's max_depth gate.
     parent_depth = Keyword.get(opts, :max_depth, 3)
     Keyword.put(child_opts, :max_depth, parent_depth - 1)
+  end
+
+  defp fixed_workdir(context, opts) do
+    case Keyword.get(opts, :run_authorization) do
+      %RunAuthorization{workdir: workdir} -> workdir
+      _ -> Path.expand(Context.get(context, "workdir") || Keyword.get(opts, :workdir, "."))
+    end
   end
 
   # Promote selected child context values into parent context under a namespace

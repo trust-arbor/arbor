@@ -1188,8 +1188,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         resumable: true
       ]
 
-    # Authenticated caller is non-authority provenance only; does not replace
-    # agent_id or signer.
+    # The authenticated caller remains distinct from the execution principal.
+    # Engine middleware intersects both principals' scoped capabilities at
+    # every node and action invocation.
     final_opts =
       case caller_id do
         cid when is_binary(cid) and cid != "" ->
@@ -1370,6 +1371,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
       not Code.ensure_loaded?(runner) ->
         {:error, :coding_pipeline_runner_unavailable}
+
+      function_exported?(runner, :run_file_as, 4) ->
+        principal = Keyword.fetch!(opts, :agent_id)
+        signer = Keyword.fetch!(opts, :signer)
+
+        invoke_with_timeout(
+          fn -> runner.run_file_as(graph_path, principal, signer, opts) end,
+          opts
+        )
 
       function_exported?(runner, :run_file, 2) ->
         invoke_with_timeout(fn -> runner.run_file(graph_path, opts) end, opts)

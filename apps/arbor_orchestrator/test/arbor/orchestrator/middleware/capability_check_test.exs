@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Orchestrator.Engine.Context
+  alias Arbor.Orchestrator.Engine.{Context, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Middleware.{CapabilityCheck, Token}
@@ -11,7 +11,20 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckTest do
     node = %Node{id: "cap_node", attrs: Map.merge(%{"type" => "compute"}, attrs)}
     context = %Context{values: %{}}
     graph = %Graph{nodes: %{"cap_node" => node}, edges: [], attrs: %{}}
-    %Token{node: node, context: context, graph: graph, assigns: assigns}
+    {:ok, authority} = RunAuthorization.new(graph, agent_id: "agent_test", workdir: File.cwd!())
+
+    default_assigns = %{
+      authorization: true,
+      agent_id: "agent_test",
+      run_authorization: authority
+    }
+
+    %Token{
+      node: node,
+      context: context,
+      graph: graph,
+      assigns: Map.merge(default_assigns, assigns)
+    }
   end
 
   defp make_compiled_node(overrides) do
@@ -58,8 +71,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckTest do
       assert is_struct(result, Token)
     end
 
-    test "uses default agent_id when not in assigns" do
-      # Verifies the default "agent_system" path doesn't crash
+    test "uses the immutable authority principal" do
       token = make_token()
       result = CapabilityCheck.before_node(token)
       assert is_struct(result, Token)
@@ -74,7 +86,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckTest do
 
       assert CapabilityCheck.capability_resources(node) == [
                "arbor://orchestrator/execute/llm_query",
-               "arbor://orchestrator/execute/file_read"
+               "arbor://fs/read"
              ]
     end
 
@@ -92,7 +104,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckTest do
 
     test "falls back to type-based URI for empty list" do
       node = make_compiled_node(%{capabilities_required: [], attrs: %{"type" => "shell"}})
-      assert CapabilityCheck.capability_resources(node) == ["arbor://orchestrator/execute/shell"]
+      assert CapabilityCheck.capability_resources(node) == ["arbor://shell/exec"]
     end
 
     test "falls back to type-based URI for nil" do
@@ -135,6 +147,33 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckTest do
 
       assert CapabilityCheck.capability_resources(node) == [
                "arbor://orchestrator/execute/already_prefixed"
+             ]
+    end
+
+    test "raw file and command handlers use canonical host-effect resources" do
+      read = %Node{id: "read", attrs: %{"type" => "read", "source" => "file"}}
+      write = %Node{id: "write", attrs: %{"type" => "file.write"}}
+      shell = %Node{id: "shell", attrs: %{"type" => "shell"}}
+      tool = %Node{id: "tool", attrs: %{"type" => "tool"}}
+
+      assert CapabilityCheck.capability_resources(read) == ["arbor://fs/read"]
+      assert CapabilityCheck.capability_resources(write) == ["arbor://fs/write"]
+      assert CapabilityCheck.capability_resources(shell) == ["arbor://shell/exec"]
+      assert CapabilityCheck.capability_resources(tool) == ["arbor://shell/exec"]
+    end
+
+    test "context reads and accumulator writes remain traversal-only" do
+      read = %Node{id: "read", attrs: %{"type" => "read", "source" => "context"}}
+
+      write =
+        %Node{id: "write", attrs: %{"type" => "write", "target" => "accumulator"}}
+
+      assert CapabilityCheck.capability_resources(read) == [
+               "arbor://orchestrator/execute/read"
+             ]
+
+      assert CapabilityCheck.capability_resources(write) == [
+               "arbor://orchestrator/execute/write"
              ]
     end
 

@@ -35,8 +35,8 @@ defmodule Arbor.Actions.Pipeline do
 
   ## Authorization
 
-  - Run: `arbor://orchestrator/execute`
-  - Validate: `arbor://orchestrator/execute`
+  - Run: `arbor://action/pipeline/run`
+  - Validate: `arbor://action/pipeline/validate`
   """
 
   alias Arbor.Common.SafePath
@@ -101,7 +101,7 @@ defmodule Arbor.Actions.Pipeline do
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
-    def run(params, _context) do
+    def run(params, context) do
       Actions.emit_started(__MODULE__, %{
         has_source: is_binary(params[:source]),
         has_source_file: is_binary(params[:source_file])
@@ -109,8 +109,9 @@ defmodule Arbor.Actions.Pipeline do
 
       start_time = System.monotonic_time(:millisecond)
 
-      with {:ok, dot_source} <- Pipeline.resolve_source(params),
-           {:ok, engine_result} <- Pipeline.run_pipeline(dot_source, params) do
+      with {:ok, authority} <- Pipeline.verified_run_authority(context),
+           {:ok, dot_source} <- Pipeline.resolve_source(params, authority.workdir),
+           {:ok, engine_result} <- Pipeline.run_pipeline(dot_source, params, authority) do
         duration_ms = System.monotonic_time(:millisecond) - start_time
 
         status = extract_status(engine_result)
@@ -284,12 +285,38 @@ defmodule Arbor.Actions.Pipeline do
   end
 
   @doc false
-  def run_pipeline(dot_source, params) do
+  def resolve_source(%{source: source}, _workdir) when is_binary(source) and source != "" do
+    {:ok, source}
+  end
+
+  def resolve_source(%{source_file: path}, workdir)
+      when is_binary(path) and path != "" and is_binary(workdir) do
+    case SafePath.resolve_within(path, workdir) do
+      {:ok, safe_path} ->
+        case File.read(safe_path) do
+          {:ok, content} -> {:ok, content}
+          {:error, reason} -> {:error, {:file_read_failed, safe_path, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:invalid_path, path, reason}}
+    end
+  end
+
+  def resolve_source(_params, _workdir), do: {:error, :source_or_source_file_required}
+
+  @doc false
+  def run_pipeline(dot_source, params, authority) do
     if Code.ensure_loaded?(@orchestrator_mod) do
-      opts = build_opts(params)
+      opts = build_opts(params, authority)
 
       try do
-        apply(@orchestrator_mod, :run, [dot_source, opts])
+        apply(@orchestrator_mod, :run_as, [
+          dot_source,
+          authority.execution_principal,
+          authority.signer,
+          opts
+        ])
       catch
         :exit, reason -> {:error, {:orchestrator_unavailable, reason}}
       end
@@ -297,6 +324,8 @@ defmodule Arbor.Actions.Pipeline do
       {:error, :orchestrator_not_available}
     end
   end
+
+  def run_pipeline(_dot_source, _params), do: {:error, :verified_run_authority_required}
 
   @doc false
   def validate_pipeline(dot_source) do
@@ -312,15 +341,123 @@ defmodule Arbor.Actions.Pipeline do
     end
   end
 
-  defp build_opts(params) do
-    opts = []
+  @doc false
+  def verified_run_authority(context) when is_map(context) do
+    auth_context = Map.get(context, :auth_context) || Map.get(context, "auth_context")
 
-    case params[:initial_context] do
-      ctx when is_map(ctx) and map_size(ctx) > 0 ->
-        Keyword.put(opts, :initial_values, ctx)
-
-      _ ->
-        opts
+    with %Arbor.Contracts.Security.AuthContext{
+           identity_verified: true,
+           principal_id: raw_principal,
+           signer: signer
+         } = auth <- auth_context,
+         {:ok, principal} <- validate_id(raw_principal),
+         true <- is_function(signer, 1),
+         {:ok, workdir} <- trusted_workdir(context),
+         {:ok, caller_id} <- context_id(context, :caller_id, principal),
+         {:ok, author_id} <- context_id(context, :author_id, caller_id),
+         {:ok, task_id} <- context_id(context, :task_id, nil),
+         {:ok, session_id} <- context_id(context, :session_id, auth.session_id),
+         :ok <- verify_caller_run_capability(caller_id, task_id, session_id) do
+      {:ok,
+       %{
+         execution_principal: principal,
+         caller_id: caller_id,
+         author_id: author_id,
+         task_id: task_id,
+         session_id: session_id,
+         signer: signer,
+         workdir: workdir
+       }}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :verified_run_authority_required}
     end
   end
+
+  def verified_run_authority(_context), do: {:error, :verified_run_authority_required}
+
+  defp build_opts(params, authority) do
+    initial_values =
+      case params[:initial_context] do
+        ctx when is_map(ctx) ->
+          Map.drop(ctx, [
+            :agent_id,
+            :caller_id,
+            :task_id,
+            :session_id,
+            :workdir,
+            "session.agent_id",
+            "session.caller_id",
+            "session.task_id",
+            "session.session_id",
+            "workdir"
+          ])
+
+        _ ->
+          %{}
+      end
+
+    [
+      initial_values: initial_values,
+      caller_id: authority.caller_id,
+      author_id: authority.author_id,
+      workdir: authority.workdir
+    ]
+    |> maybe_put_opt(:task_id, authority.task_id)
+    |> maybe_put_opt(:session_id, authority.session_id)
+  end
+
+  defp verify_caller_run_capability(caller_id, task_id, session_id) do
+    scope_opts = [] |> maybe_put_opt(:task_id, task_id) |> maybe_put_opt(:session_id, session_id)
+
+    with {:ok, capabilities} <- Arbor.Security.list_capabilities(caller_id, scope_opts),
+         true <-
+           Enum.any?(capabilities, fn capability ->
+             Arbor.Security.capability_authorizes?(
+               capability,
+               "arbor://action/pipeline/run",
+               scope_opts
+             )
+           end) do
+      :ok
+    else
+      _ -> {:error, :caller_pipeline_run_authority_missing}
+    end
+  end
+
+  defp trusted_workdir(context) do
+    case Map.get(context, :workdir) || Map.get(context, "workdir") do
+      workdir when is_binary(workdir) ->
+        trimmed = String.trim(workdir)
+
+        if trimmed != "" and String.valid?(trimmed) and not String.contains?(trimmed, <<0>>),
+          do: {:ok, Path.expand(trimmed)},
+          else: {:error, :trusted_workdir_required}
+
+      _ ->
+        {:error, :trusted_workdir_required}
+    end
+  end
+
+  defp context_id(context, key, default) do
+    value = Map.get(context, key) || Map.get(context, to_string(key)) || default
+
+    case value do
+      nil -> {:ok, nil}
+      value -> validate_id(value)
+    end
+  end
+
+  defp validate_id(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    if trimmed != "" and String.valid?(trimmed) and not String.contains?(trimmed, <<0>>),
+      do: {:ok, trimmed},
+      else: {:error, :invalid_run_authority_id}
+  end
+
+  defp validate_id(_value), do: {:error, :invalid_run_authority_id}
+
+  defp maybe_put_opt(opts, _key, nil), do: opts
+  defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
 end

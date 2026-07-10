@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Orchestrator.Engine.{Authorization, Context, Outcome}
+  alias Arbor.Orchestrator.Engine.{Authorization, Context, Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
 
@@ -52,7 +52,7 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       authorizer = fn _agent_id, _type -> :ok end
       node = %Node{id: "build", attrs: %{"type" => "codergen"}}
       ctx = Context.new(%{"session.agent_id" => "agent_abc"})
-      opts = [authorization: true, authorizer: authorizer]
+      opts = auth_opts("agent_abc", authorizer)
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
 
@@ -65,7 +65,7 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       authorizer = fn _agent_id, _type -> {:error, "insufficient privileges"} end
       node = %Node{id: "deploy", attrs: %{"type" => "tool"}}
       ctx = Context.new(%{"session.agent_id" => "agent_untrusted"})
-      opts = [authorization: true, authorizer: authorizer]
+      opts = auth_opts("agent_untrusted", authorizer)
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
 
@@ -77,7 +77,7 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       handler = stub_handler(:success, "should not run")
       node = %Node{id: "build", attrs: %{"type" => "codergen"}}
       ctx = Context.new(%{"session.agent_id" => "agent_abc"})
-      opts = [authorization: true]
+      opts = auth_opts("agent_abc")
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
 
@@ -96,14 +96,14 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       handler = stub_handler(:success)
       node = %Node{id: "x", attrs: %{"type" => "file.write"}}
       ctx = Context.new(%{"session.agent_id" => "agent_42"})
-      opts = [authorization: true, authorizer: authorizer]
+      opts = auth_opts("agent_42", authorizer)
 
       Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
 
       assert_received {:auth_check, "agent_42", "file.write"}
     end
 
-    test "authorizer receives nil agent_id when not in context" do
+    test "authorizer receives immutable agent_id when context is empty" do
       test_pid = self()
 
       authorizer = fn agent_id, _type ->
@@ -113,11 +113,11 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
 
       handler = stub_handler(:success)
       node = %Node{id: "x", attrs: %{"type" => "codergen"}}
-      opts = [authorization: true, authorizer: authorizer]
+      opts = auth_opts("agent_abc", authorizer)
 
       Authorization.authorize_and_execute(handler, node, Context.new(), @graph, opts)
 
-      assert_received {:agent, nil}
+      assert_received {:agent, "agent_abc"}
     end
   end
 
@@ -127,7 +127,7 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       authorizer = fn _a, _t -> {:error, "always deny"} end
       node = %Node{id: "start", attrs: %{"shape" => "Mdiamond"}}
       ctx = Context.new(%{"session.agent_id" => "agent_abc"})
-      opts = [authorization: true, authorizer: authorizer]
+      opts = auth_opts("agent_abc", authorizer)
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
 
@@ -140,7 +140,7 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       authorizer = fn _a, _t -> {:error, "always deny"} end
       node = %Node{id: "done", attrs: %{"type" => "exit"}}
       ctx = Context.new(%{"session.agent_id" => "agent_abc"})
-      opts = [authorization: true, authorizer: authorizer]
+      opts = auth_opts("agent_abc", authorizer)
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
 
@@ -153,7 +153,7 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       authorizer = fn _a, _t -> {:error, "deny"} end
       node = %Node{id: "entry", attrs: %{"shape" => "Mdiamond"}}
       ctx = Context.new(%{"session.agent_id" => "agent_abc"})
-      opts = [authorization: true, authorizer: authorizer]
+      opts = auth_opts("agent_abc", authorizer)
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
       assert outcome.status == :success
@@ -164,7 +164,7 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       authorizer = fn _a, _t -> {:error, "deny"} end
       node = %Node{id: "fin", attrs: %{"type" => "exit"}}
       ctx = Context.new(%{"session.agent_id" => "agent_abc"})
-      opts = [authorization: true, authorizer: authorizer]
+      opts = auth_opts("agent_abc", authorizer)
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
       assert outcome.status == :success
@@ -219,5 +219,19 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
     fn _node, _context, _graph, _opts ->
       %Outcome{status: status, notes: notes}
     end
+  end
+
+  defp auth_opts(principal, authorizer \\ nil) do
+    {:ok, authority} =
+      RunAuthorization.new(@graph, agent_id: principal, workdir: File.cwd!())
+
+    [
+      authorization: true,
+      agent_id: principal,
+      run_authorization: authority
+    ]
+    |> then(fn opts ->
+      if authorizer, do: Keyword.put(opts, :authorizer, authorizer), else: opts
+    end)
   end
 end

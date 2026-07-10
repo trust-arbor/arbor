@@ -51,6 +51,7 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Orchestrator.Conformance
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Engine
+  alias Arbor.Orchestrator.Engine.RunAuthorization
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.IR
   alias Arbor.Orchestrator.JobRegistry
@@ -83,16 +84,52 @@ defmodule Arbor.Orchestrator do
     end
   end
 
-  @doc "Parse, compile, validate, and execute a DOT pipeline. Returns the engine result."
+  @doc """
+  Parse, compile, validate, and execute a DOT pipeline through the legacy/trusted API.
+
+  New caller-bound execution should use `run_as/4`. This compatibility API keeps
+  authorization disabled unless trusted code explicitly supplies Engine options.
+  """
   @spec run(String.t() | Graph.t(), keyword()) :: run_result()
   def run(source_or_graph, opts \\ []) do
-    with {:ok, graph} <- ensure_graph(source_or_graph, opts),
+    with :ok <- reject_early_authorized_overrides(opts),
+         {:ok, graph} <- ensure_graph(source_or_graph, opts),
          :ok <- Validator.validate_or_error(graph) do
       Engine.run(graph, opts)
     end
   end
 
-  @doc "Read a .dot file from disk and execute it as a pipeline."
+  @doc """
+  Securely execute a pipeline as an explicit principal.
+
+  The signer and principal are trusted facade inputs. This function forces
+  authorization on, installs the orchestrator authorizer, verifies the coarse
+  execution gate, and binds the exact source hash before Engine execution.
+  """
+  @spec run_as(String.t() | Graph.t(), String.t(), function(), keyword()) :: run_result()
+  def run_as(source_or_graph, execution_principal, signer, opts \\ []) do
+    with :ok <- validate_secure_principal(execution_principal),
+         :ok <- validate_secure_signer(signer),
+         :ok <- validate_principal_opt(opts, execution_principal),
+         {:ok, opts} <- bind_secure_graph_hash(source_or_graph, opts),
+         :ok <-
+           Arbor.Orchestrator.Authorization.check_orchestrator_access(
+             execution_principal,
+             signer
+           ) do
+      secure_opts =
+        opts
+        |> Keyword.put(:authorization, true)
+        |> Keyword.put(:execution_principal, execution_principal)
+        |> Keyword.put(:agent_id, execution_principal)
+        |> Keyword.put(:signer, signer)
+        |> Keyword.put(:authorizer, secure_authorizer(execution_principal, signer))
+
+      run(source_or_graph, secure_opts)
+    end
+  end
+
+  @doc "Read and execute a .dot file through the legacy/trusted compatibility API."
   @spec run_file(String.t(), keyword()) :: run_result()
   def run_file(path, opts \\ []) do
     with {:ok, source} <- File.read(path),
@@ -108,11 +145,88 @@ defmodule Arbor.Orchestrator do
     end
   end
 
+  @doc "Read a .dot file and securely execute it as an explicit principal."
+  @spec run_file_as(String.t(), String.t(), function(), keyword()) :: run_result()
+  def run_file_as(path, execution_principal, signer, opts \\ []) do
+    with {:ok, source} <- File.read(path),
+         graph_hash = :crypto.hash(:sha256, source) |> Base.encode16(case: :lower),
+         :ok <- verify_expected_graph_hash(opts, graph_hash) do
+      opts =
+        opts
+        |> Keyword.put(:dot_source_path, Path.expand(path))
+        |> Keyword.put(:graph_hash, graph_hash)
+
+      run_as(source, execution_principal, signer, opts)
+    end
+  end
+
   defp verify_expected_graph_hash(opts, actual_hash) do
     case Keyword.fetch(opts, :graph_hash) do
       :error -> :ok
       {:ok, ^actual_hash} -> :ok
       {:ok, expected_hash} -> {:error, {:graph_hash_mismatch, expected_hash, actual_hash}}
+    end
+  end
+
+  defp bind_secure_graph_hash(source_or_graph, opts) do
+    actual_hash =
+      case source_or_graph do
+        source when is_binary(source) ->
+          :crypto.hash(:sha256, source) |> Base.encode16(case: :lower)
+
+        %Graph{} = graph ->
+          RunAuthorization.graph_hash(graph)
+
+        _ ->
+          nil
+      end
+
+    if actual_hash do
+      with :ok <- verify_expected_graph_hash(opts, actual_hash) do
+        {:ok, Keyword.put(opts, :graph_hash, actual_hash)}
+      end
+    else
+      {:error, :invalid_graph_input}
+    end
+  end
+
+  defp validate_secure_principal(principal) when is_binary(principal) do
+    trimmed = String.trim(principal)
+
+    if trimmed != "" and trimmed == principal and String.valid?(principal) and
+         not String.contains?(principal, <<0>>),
+       do: :ok,
+       else: {:error, :invalid_execution_principal}
+  end
+
+  defp validate_secure_principal(_principal), do: {:error, :invalid_execution_principal}
+
+  defp validate_secure_signer(signer) when is_function(signer, 1), do: :ok
+  defp validate_secure_signer(_signer), do: {:error, :signer_required}
+
+  defp validate_principal_opt(opts, principal) do
+    supplied = Keyword.get(opts, :execution_principal) || Keyword.get(opts, :agent_id)
+
+    if supplied in [nil, principal],
+      do: :ok,
+      else: {:error, :execution_principal_mismatch}
+  end
+
+  defp secure_authorizer(execution_principal, signer) do
+    fn received_principal, _handler_type ->
+      if received_principal == execution_principal do
+        Arbor.Orchestrator.Authorization.check_orchestrator_access(execution_principal, signer)
+      else
+        {:error, :execution_principal_mismatch}
+      end
+    end
+  end
+
+  defp reject_early_authorized_overrides(opts) do
+    if Keyword.get(opts, :authorization, false) and Keyword.get(opts, :transforms, []) != [] do
+      {:error, {:unbound_authorized_override, :transforms}}
+    else
+      :ok
     end
   end
 

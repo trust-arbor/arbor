@@ -3,6 +3,7 @@ defmodule Arbor.Actions.Pipeline.RunH4SecurityTest do
   @moduletag :fast
 
   alias Arbor.Actions.Pipeline.Run
+  alias Arbor.Contracts.Security.AuthContext
 
   # H4 (2026-02-16 review): pipeline outcome parsing used String.to_atom on an
   # untrusted "outcome" context value — an atom-exhaustion vector. The fix routes
@@ -29,6 +30,37 @@ defmodule Arbor.Actions.Pipeline.RunH4SecurityTest do
       assert Run.extract_status(%{context: %{"outcome" => "success"}}) == :success
       assert Run.extract_status(%{context: %{"outcome" => "failure"}}) == :failure
       assert Run.extract_status(%{context: %{"outcome" => "cancelled"}}) == :cancelled
+    end
+  end
+
+  describe "caller-bound pipeline execution" do
+    test "security regression: Pipeline.Run fails closed without verified AuthContext" do
+      source = "digraph NoAuthority { start [shape=Mdiamond] done [shape=Msquare] start -> done }"
+
+      assert {:error, :verified_run_authority_required} =
+               Run.run(%{source: source, initial_context: %{}}, %{})
+    end
+
+    test "security regression: a verified identity still needs caller pipeline.run authority" do
+      principal = "agent_pipeline_no_cap_#{System.unique_integer([:positive])}"
+      signer = fn _resource -> {:ok, %{signature: "test"}} end
+
+      auth_context =
+        principal
+        |> AuthContext.new(signer: signer)
+        |> AuthContext.mark_verified()
+
+      source = "digraph NoCallerCap { start [shape=Mdiamond] done [shape=Msquare] start -> done }"
+
+      assert {:error, :caller_pipeline_run_authority_missing} =
+               Run.run(
+                 %{source: source, initial_context: %{}},
+                 %{
+                   auth_context: auth_context,
+                   caller_id: principal,
+                   workdir: File.cwd!()
+                 }
+               )
     end
   end
 end

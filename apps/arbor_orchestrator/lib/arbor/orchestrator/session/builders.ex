@@ -98,19 +98,27 @@ defmodule Arbor.Orchestrator.Session.Builders do
 
   @doc false
   def build_engine_opts(state, initial_values, opts_overrides \\ []) do
+    agent_id = state.agent_id
+    session_id = Map.get(state, :session_id) || "heartbeat:#{agent_id}"
+
     logs_root =
       Path.join([
         System.tmp_dir!(),
         "arbor_sessions",
-        state.session_id
+        session_id
       ])
 
     opts = [
-      session_adapters: state.adapters,
+      session_adapters: Map.get(state, :adapters, %{}),
       logs_root: logs_root,
       max_steps: 100,
       initial_values: initial_values,
       authorization: true,
+      execution_principal: agent_id,
+      agent_id: agent_id,
+      caller_id: agent_id,
+      author_id: agent_id,
+      session_id: session_id,
       authorizer: build_authorizer(state),
       # Turn/heartbeat runs are in-process and never resumed (the Session owns
       # crash recovery at the session level, not mid-pipeline). Skip writing
@@ -166,6 +174,8 @@ defmodule Arbor.Orchestrator.Session.Builders do
   defp build_authorizer(state) do
     agent_id = state.agent_id
     signer = state.signer
+    session_id = Map.get(state, :session_id) || "heartbeat:#{agent_id}"
+    task_id = Map.get(state, :task_id)
 
     fn ^agent_id, _handler_type ->
       # All engine handler types (compute, exec, transform, etc.) are gated by
@@ -192,6 +202,11 @@ defmodule Arbor.Orchestrator.Session.Builders do
             _ ->
               []
           end
+
+        auth_opts =
+          auth_opts
+          |> Keyword.put(:session_id, session_id)
+          |> then(fn opts -> if task_id, do: Keyword.put(opts, :task_id, task_id), else: opts end)
 
         case Arbor.Security.authorize(
                agent_id,

@@ -3,7 +3,7 @@ defmodule Arbor.Orchestrator.Handlers.ParallelHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
-  alias Arbor.Orchestrator.Engine.{Condition, Context, Outcome}
+  alias Arbor.Orchestrator.Engine.{Authorization, Condition, Context, Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Handlers.Registry
 
@@ -140,6 +140,9 @@ defmodule Arbor.Orchestrator.Handlers.ParallelHandler do
   end
 
   defp do_run_branch(node_id, join_target, context, graph, opts, steps, max_steps, last_result) do
+    context =
+      RunAuthorization.enforce_context(context, Keyword.get(opts, :run_authorization))
+
     cond do
       node_id in [nil, ""] ->
         %{
@@ -173,7 +176,13 @@ defmodule Arbor.Orchestrator.Handlers.ParallelHandler do
 
             outcome =
               try do
-                handler.execute(resolved_node, context, graph, opts)
+                Authorization.authorize_and_execute(
+                  handler,
+                  resolved_node,
+                  context,
+                  graph,
+                  opts
+                )
               rescue
                 exception -> %Outcome{status: :fail, failure_reason: Exception.message(exception)}
               end

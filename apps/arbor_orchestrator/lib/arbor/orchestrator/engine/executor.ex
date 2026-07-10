@@ -48,40 +48,68 @@ defmodule Arbor.Orchestrator.Engine.Executor do
         :local
 
       parsed ->
-        case Placement.resolve(parsed) do
-          nil ->
-            :local
-
-          {:ok, target_node} ->
-            if target_node == Node.self() do
-              :local
-            else
-              {handler, _node} = resolve_handler(node)
-
-              if is_atom(handler) do
-                {:remote, target_node, handler}
-              else
-                Logger.warning(
-                  "Placement: node #{node.id} resolved to #{target_node} but handler " <>
-                    "is a function — functions can't be RPC'd. Executing locally."
-                )
-
-                :local
-              end
-            end
-
-          {:error, reason} ->
-            if Keyword.get(opts, :placement_required, false) do
-              {:error, reason}
-            else
-              Logger.warning(
-                "Placement: node #{node.id} failed to resolve (#{inspect(reason)}), executing locally"
-              )
-
-              :local
-            end
+        if authorized_explicit_remote?(parsed, opts) do
+          {:error, :authorized_remote_placement_requires_signed_lease}
+        else
+          resolve_parsed_placement(parsed, node, opts)
         end
     end
+  end
+
+  defp resolve_parsed_placement(parsed, node, opts) do
+    case Placement.resolve(parsed) do
+      nil ->
+        :local
+
+      {:ok, target_node} ->
+        if target_node == Node.self() do
+          :local
+        else
+          if Keyword.get(opts, :authorization, false) do
+            {:error, :authorized_remote_placement_requires_signed_lease}
+          else
+            resolve_remote_handler(target_node, node)
+          end
+        end
+
+      {:error, reason} ->
+        if Keyword.get(opts, :placement_required, false) do
+          {:error, reason}
+        else
+          Logger.warning(
+            "Placement: node #{node.id} failed to resolve (#{inspect(reason)}), executing locally"
+          )
+
+          :local
+        end
+    end
+  end
+
+  defp resolve_remote_handler(target_node, node) do
+    {handler, _node} = resolve_handler(node)
+
+    if is_atom(handler) do
+      {:remote, target_node, handler}
+    else
+      Logger.warning(
+        "Placement: node #{node.id} resolved to #{target_node} but handler " <>
+          "is a function — functions can't be RPC'd. Executing locally."
+      )
+
+      :local
+    end
+  end
+
+  defp authorized_explicit_remote?(parsed, opts) do
+    Keyword.get(opts, :authorization, false) and
+      (Map.get(parsed, :node) not in [nil, Node.self()] or
+         present_remote_node_string?(Map.get(parsed, :node_str)))
+  end
+
+  defp present_remote_node_string?(nil), do: false
+
+  defp present_remote_node_string?(node_string) when is_binary(node_string) do
+    node_string != Atom.to_string(Node.self())
   end
 
   defp do_local_execute_with_retry(node, context, graph, retries, opts) do

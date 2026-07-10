@@ -17,6 +17,7 @@ defmodule Arbor.Orchestrator.Engine.State do
           outcomes: %{String.t() => Outcome.t()},
           pending: [{String.t(), Edge.t() | nil}],
           opts: keyword(),
+          run_authorization: Arbor.Orchestrator.Engine.RunAuthorization.t() | nil,
           pipeline_started_at: integer(),
           tracking: map(),
           # Process-local lifecycle tracking via RunState CRC core.
@@ -34,6 +35,7 @@ defmodule Arbor.Orchestrator.Engine.State do
     :logs_root,
     :max_steps,
     :pipeline_started_at,
+    :run_authorization,
     completed: [],
     retries: %{},
     outcomes: %{},

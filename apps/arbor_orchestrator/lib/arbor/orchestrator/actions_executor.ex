@@ -41,6 +41,9 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     signed_request = Keyword.get(opts, :signed_request)
     signer = Keyword.get(opts, :signer)
     task_id = Keyword.get(opts, :task_id)
+    session_id = Keyword.get(opts, :session_id)
+    caller_id = Keyword.get(opts, :caller_id)
+    author_id = Keyword.get(opts, :author_id)
     workdir = normalize_workdir(workdir)
 
     run_action(fn ->
@@ -63,85 +66,96 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
             |> maybe_resolve_file_paths(action_module, workdir)
             |> maybe_inject_workdir(workdir)
 
-          # Sign with the canonical module-derived resource URI.
-          signed_request = signed_request || sign_for_module(signer, action_module, params)
+          case verify_caller_authority(action_module, params, agent_id, caller_id, opts) do
+            :ok ->
+              # Sign with the canonical module-derived resource URI.
+              signed_request = signed_request || sign_for_module(signer, action_module, params)
 
-          # Build AuthContext — single struct with everything auth needs.
-          # The signed_request and signer are included so downstream code
-          # (authorize_and_execute, facade auth) can access them.
-          # Arbor.Contracts.Security.AuthContext lives in arbor_contracts (a dep).
-          auth_context =
-            Arbor.Contracts.Security.AuthContext.new(agent_id,
-              signer: signer,
-              signed_request: signed_request,
-              session_id: Keyword.get(opts, :session_id)
-            )
+              # Build AuthContext — single struct with everything auth needs.
+              # The signed_request and signer are included so downstream code
+              # (authorize_and_execute, facade auth) can access them.
+              # Arbor.Contracts.Security.AuthContext lives in arbor_contracts (a dep).
+              auth_context =
+                Arbor.Contracts.Security.AuthContext.new(agent_id,
+                  signer: signer,
+                  signed_request: signed_request,
+                  session_id: session_id
+                )
 
-          Logger.debug(
-            "[ActionsExecutor] #{name}: signed=#{signed_request != nil}, " <>
-              "agent=#{agent_id}, module=#{action_module}"
-          )
-
-          # Context passed to the action's run/2 — includes signed_request
-          # so facade auth can see it, and auth_context for the new flow.
-          # auth_context is always built (AuthContext lives in arbor_contracts).
-          #
-          # Taint bridge (taint-tracking-rebuild Phase 2): the orchestrator
-          # threads the provenance taint of the data interpolated into this
-          # action's params via the :taint opt. Putting it on context[:taint]
-          # is what finally feeds TaintEnforcement.check — without it the
-          # chokepoint reads no taint and every action passes (F1).
-          context =
-            %{auth_context: auth_context}
-            |> maybe_put_context(:task_id, task_id)
-            |> maybe_put_file_workspace(action_module, workdir)
-            |> then(fn c ->
-              if signed_request, do: Map.put(c, :signed_request, signed_request), else: c
-            end)
-            |> then(fn c ->
-              case Keyword.get(opts, :taint) do
-                nil -> c
-                level -> Map.put(c, :taint, level)
-              end
-            end)
-            |> maybe_put_context(:param_taint, Keyword.get(opts, :param_taint))
-
-          case Arbor.Actions.authorize_and_execute(
-                 agent_id,
-                 action_module,
-                 params,
-                 context
-               ) do
-            {:ok, :pending_approval, proposal_id} ->
-              await_approval_and_retry(
-                proposal_id,
-                agent_id,
-                action_module,
-                params,
-                context,
-                name
+              Logger.debug(
+                "[ActionsExecutor] #{name}: signed=#{signed_request != nil}, " <>
+                  "agent=#{agent_id}, caller=#{caller_id || agent_id}, module=#{action_module}"
               )
 
-            {:ok, result} ->
-              {:ok, format_result(result)}
+              # Context passed to the action's run/2 — includes signed_request
+              # so facade auth can see it, and auth_context for the new flow.
+              # auth_context is always built (AuthContext lives in arbor_contracts).
+              #
+              # Taint bridge (taint-tracking-rebuild Phase 2): the orchestrator
+              # threads the provenance taint of the data interpolated into this
+              # action's params via the :taint opt. Putting it on context[:taint]
+              # is what finally feeds TaintEnforcement.check — without it the
+              # chokepoint reads no taint and every action passes (F1).
+              context =
+                %{auth_context: auth_context, workdir: workdir}
+                |> maybe_put_context(:task_id, task_id)
+                |> maybe_put_context(:session_id, session_id)
+                |> maybe_put_context(:caller_id, caller_id || agent_id)
+                |> maybe_put_context(:author_id, author_id)
+                |> maybe_put_file_workspace(action_module, workdir)
+                |> then(fn c ->
+                  if signed_request, do: Map.put(c, :signed_request, signed_request), else: c
+                end)
+                |> then(fn c ->
+                  case Keyword.get(opts, :taint) do
+                    nil -> c
+                    level -> Map.put(c, :taint, level)
+                  end
+                end)
+                |> maybe_put_context(:param_taint, Keyword.get(opts, :param_taint))
+
+              case Arbor.Actions.authorize_and_execute(
+                     agent_id,
+                     action_module,
+                     params,
+                     context
+                   ) do
+                {:ok, :pending_approval, proposal_id} ->
+                  await_approval_and_retry(
+                    proposal_id,
+                    agent_id,
+                    action_module,
+                    params,
+                    context,
+                    name
+                  )
+
+                {:ok, result} ->
+                  {:ok, format_result(result)}
+
+                {:error, reason} ->
+                  msg =
+                    case reason do
+                      :unauthorized ->
+                        "Action #{name} unauthorized. You may need additional permissions."
+
+                      {:unauthorized, detail} ->
+                        "Action #{name} unauthorized: #{detail}"
+
+                      reason when is_binary(reason) ->
+                        reason
+
+                      reason ->
+                        "Action #{name} failed: #{inspect(reason)}"
+                    end
+
+                  {:error, msg}
+              end
 
             {:error, reason} ->
-              msg =
-                case reason do
-                  :unauthorized ->
-                    "Action #{name} unauthorized. You may need additional permissions."
-
-                  {:unauthorized, detail} ->
-                    "Action #{name} unauthorized: #{detail}"
-
-                  reason when is_binary(reason) ->
-                    reason
-
-                  reason ->
-                    "Action #{name} failed: #{inspect(reason)}"
-                end
-
-              {:error, msg}
+              {:error,
+               "Caller #{caller_id || "unknown"} lacks authority for action #{name}: " <>
+                 inspect(reason)}
           end
       end
     end)
@@ -185,6 +199,63 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   # ============================================================================
   # Private
   # ============================================================================
+
+  defp verify_caller_authority(_action_module, _params, agent_id, caller_id, _opts)
+       when caller_id in [nil, ""] or caller_id == agent_id,
+       do: :ok
+
+  defp verify_caller_authority(action_module, params, _agent_id, caller_id, opts) do
+    security = Arbor.Orchestrator.Config.security_module()
+    resource = Arbor.Actions.canonical_uri_for(action_module, params)
+    scope_opts = scope_opts(opts)
+    resource_opts = maybe_put_file_path(scope_opts, resource, params)
+
+    with true <- function_exported?(security, :list_capabilities, 2),
+         true <- function_exported?(security, :capability_authorizes?, 3),
+         {:ok, effective_resource} <- effective_resource(security, resource, resource_opts),
+         {:ok, capabilities} <- security.list_capabilities(caller_id, scope_opts),
+         true <-
+           Enum.any?(capabilities, fn capability ->
+             security.capability_authorizes?(capability, effective_resource, scope_opts)
+           end) do
+      :ok
+    else
+      _ -> {:error, {:caller_authority_missing, resource}}
+    end
+  end
+
+  defp effective_resource(security, resource, opts) do
+    cond do
+      function_exported?(security, :normalize_authorization_resource_uri, 2) ->
+        security.normalize_authorization_resource_uri(resource, opts)
+
+      function_exported?(security, :authorization_resource_uri, 2) ->
+        {:ok, security.authorization_resource_uri(resource, opts)}
+
+      true ->
+        {:ok, resource}
+    end
+  end
+
+  defp scope_opts(opts) do
+    []
+    |> maybe_put_opt(:task_id, Keyword.get(opts, :task_id))
+    |> maybe_put_opt(:session_id, Keyword.get(opts, :session_id))
+  end
+
+  defp maybe_put_file_path(opts, resource, params) do
+    if resource in ["arbor://fs/read", "arbor://fs/write"] do
+      case params[:path] || params[:file_path] || params[:base_path] do
+        path when is_binary(path) and path != "" -> Keyword.put(opts, :file_path, path)
+        _ -> opts
+      end
+    else
+      opts
+    end
+  end
+
+  defp maybe_put_opt(opts, _key, nil), do: opts
+  defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
   # Wait synchronously for approval, then retry execution on success.
   # On denial or timeout, return an error message to the LLM.

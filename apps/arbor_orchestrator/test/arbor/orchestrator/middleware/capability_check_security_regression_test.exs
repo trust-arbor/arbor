@@ -4,7 +4,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
-  alias Arbor.Orchestrator.Engine.Context
+  alias Arbor.Orchestrator.Engine.{Context, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Middleware.{CapabilityCheck, Token}
@@ -46,12 +46,18 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
 
   defp token do
     node = %Node{id: "n", attrs: %{"type" => "compute"}}
+    graph = %Graph{nodes: %{"n" => node}, edges: [], attrs: %{}}
+    {:ok, authority} = RunAuthorization.new(graph, agent_id: "agent_test", workdir: File.cwd!())
 
     %Token{
       node: node,
       context: %Context{values: %{}},
-      graph: %Graph{nodes: %{"n" => node}, edges: [], attrs: %{}},
-      assigns: %{}
+      graph: graph,
+      assigns: %{
+        authorization: true,
+        agent_id: "agent_test",
+        run_authorization: authority
+      }
     }
   end
 

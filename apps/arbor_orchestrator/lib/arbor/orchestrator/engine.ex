@@ -19,6 +19,7 @@ defmodule Arbor.Orchestrator.Engine do
     FidelityTransformer,
     Outcome,
     Router,
+    RunAuthorization,
     State
   }
 
@@ -78,6 +79,12 @@ defmodule Arbor.Orchestrator.Engine do
   end
 
   defp do_run(%Graph{} = graph, opts) do
+    with {:ok, {run_authorization, opts}} <- RunAuthorization.prepare(graph, opts) do
+      do_prepared_run(graph, run_authorization, opts)
+    end
+  end
+
+  defp do_prepared_run(%Graph{} = graph, run_authorization, opts) do
     logs_root = Keyword.get(opts, :logs_root, Path.join(System.tmp_dir!(), "arbor_orchestrator"))
     max_steps = Keyword.get(opts, :max_steps, 500)
     pipeline_started_at = System.monotonic_time(:millisecond)
@@ -105,6 +112,12 @@ defmodule Arbor.Orchestrator.Engine do
         nil -> opts
         secret -> Keyword.put(opts, :hmac_secret, secret)
       end
+
+    # Authorized resume is meaningful only when the checkpoint can be
+    # authenticated. Session runs already opt out explicitly; secure ad-hoc
+    # runs without checkpoint key material are made non-resumable here rather
+    # than writing an unsigned authority projection that can never be trusted.
+    opts = maybe_disable_unverifiable_resume(opts, run_authorization)
 
     # Compute graph hash for version checking on resume
     graph_hash = Keyword.get(opts, :graph_hash)
@@ -188,7 +201,8 @@ defmodule Arbor.Orchestrator.Engine do
           opts: opts,
           pipeline_started_at: pipeline_started_at,
           tracking: tracking,
-          run_state: run_state
+          run_state: run_state,
+          run_authorization: run_authorization
         }
 
         loop(engine_state)
@@ -210,6 +224,11 @@ defmodule Arbor.Orchestrator.Engine do
                run_id: Keyword.get(opts, :run_id),
                hmac_secret: Keyword.get(opts, :hmac_secret)
              ),
+           :ok <-
+             RunAuthorization.verify_checkpoint(
+               Keyword.get(opts, :run_authorization),
+               checkpoint.run_authorization
+             ),
            :ok <- maybe_revalidate_capabilities(graph, opts),
            :ok <- check_indeterminate_intents(checkpoint, graph, opts),
            {:ok, state} <- state_from_checkpoint(graph, checkpoint) do
@@ -222,19 +241,22 @@ defmodule Arbor.Orchestrator.Engine do
          |> Map.put(:execution_digests, checkpoint.execution_digests || %{})}
       end
     else
-      workdir = Keyword.get(opts, :workdir)
       initial_values = Keyword.get(opts, :initial_values, %{})
+      run_authorization = Keyword.get(opts, :run_authorization)
 
       pipeline_dt = Keyword.get(opts, :pipeline_started_at, DateTime.utc_now())
 
+      values =
+        %{
+          "graph.goal" => Map.get(graph.attrs, "goal", ""),
+          "graph.label" => Map.get(graph.attrs, "label", "")
+        }
+        |> Map.merge(initial_values)
+        |> RunAuthorization.seed_values(run_authorization, Keyword.get(opts, :workdir))
+
       context =
         Context.new(
-          %{
-            "graph.goal" => Map.get(graph.attrs, "goal", ""),
-            "graph.label" => Map.get(graph.attrs, "label", "")
-          }
-          |> then(fn ctx -> if workdir, do: Map.put(ctx, "workdir", workdir), else: ctx end)
-          |> Map.merge(initial_values),
+          values,
           pipeline_started_at: pipeline_dt,
           # Inherit provenance taint from a parent pipeline (subgraph/parallel
           # boundary). Defaults to empty for a top-level run.
@@ -367,7 +389,14 @@ defmodule Arbor.Orchestrator.Engine do
     state = maybe_touch_heartbeat(state)
 
     node = Map.fetch!(state.graph.nodes, state.node_id)
-    fidelity = Fidelity.resolve(node, state.incoming_edge, state.graph, state.context)
+
+    # Context is data, never authority. Reassert the JSON-clean mirrors before
+    # every node so a prior outcome cannot redirect legacy handlers that still
+    # read session.agent_id/workdir from context.
+    authority_context =
+      RunAuthorization.enforce_context(state.context, state.run_authorization)
+
+    fidelity = Fidelity.resolve(node, state.incoming_edge, state.graph, authority_context)
 
     # Capture a single logical timestamp for all context lineage entries created
     # while processing this node. This gives "one node execution step = one time"
@@ -376,7 +405,7 @@ defmodule Arbor.Orchestrator.Engine do
     step_now = DateTime.utc_now()
 
     context =
-      state.context
+      authority_context
       |> Context.set("current_node", node.id, node.id, step_now)
       |> Context.set("internal.fidelity.mode", fidelity.mode, node.id, step_now)
       |> maybe_set_fidelity_thread(fidelity, node.id, step_now)
@@ -429,7 +458,8 @@ defmodule Arbor.Orchestrator.Engine do
             graph_hash: Keyword.get(state.opts, :graph_hash),
             pending_intents: state.tracking.pending_intents,
             execution_digests: state.tracking.execution_digests,
-            pipeline_started_at: Context.pipeline_started_at(context)
+            pipeline_started_at: Context.pipeline_started_at(context),
+            run_authorization: RunAuthorization.projection(state.run_authorization)
           )
 
         :ok =
@@ -588,7 +618,8 @@ defmodule Arbor.Orchestrator.Engine do
             graph_hash: Keyword.get(state.opts, :graph_hash),
             pending_intents: tracking.pending_intents,
             execution_digests: tracking.execution_digests,
-            pipeline_started_at: Context.pipeline_started_at(context)
+            pipeline_started_at: Context.pipeline_started_at(context),
+            run_authorization: RunAuthorization.projection(state.run_authorization)
           )
 
         :ok =
@@ -1192,16 +1223,69 @@ defmodule Arbor.Orchestrator.Engine do
   # security-regression test. We also do NOT rescue exceptions to `:ok` here —
   # an error during the check must surface as denial, never as a silent pass.
   defp maybe_revalidate_capabilities(_graph, opts) do
-    case Keyword.get(opts, :agent_id) do
+    authority = Keyword.get(opts, :run_authorization)
+
+    agent_id =
+      case authority do
+        %RunAuthorization{execution_principal: principal} -> principal
+        _ -> Keyword.get(opts, :agent_id)
+      end
+
+    auth_opts =
+      case authority do
+        %RunAuthorization{} -> RunAuthorization.scope_opts(authority)
+        _ -> []
+      end
+
+    case agent_id do
       nil ->
         :ok
 
       agent_id ->
-        case Arbor.Security.authorize(agent_id, "arbor://orchestrator/execute", :resume) do
-          :ok -> :ok
-          {:ok, _} -> :ok
-          {:error, reason} -> {:error, {:unauthorized_resume, reason}}
+        with result <-
+               Arbor.Security.authorize(
+                 agent_id,
+                 "arbor://orchestrator/execute",
+                 :resume,
+                 auth_opts
+               ),
+             :ok <- normalize_resume_authorization(result),
+             :ok <- revalidate_resume_caller(authority, auth_opts) do
+          :ok
         end
+    end
+  end
+
+  defp normalize_resume_authorization(:ok), do: :ok
+  defp normalize_resume_authorization({:ok, :authorized}), do: :ok
+
+  defp normalize_resume_authorization({:error, reason}),
+    do: {:error, {:unauthorized_resume, reason}}
+
+  defp normalize_resume_authorization(other),
+    do: {:error, {:unauthorized_resume, {:unexpected_result, other}}}
+
+  defp revalidate_resume_caller(nil, _scope_opts), do: :ok
+
+  defp revalidate_resume_caller(
+         %RunAuthorization{caller_id: caller, execution_principal: caller},
+         _scope_opts
+       ),
+       do: :ok
+
+  defp revalidate_resume_caller(%RunAuthorization{caller_id: caller}, scope_opts) do
+    with {:ok, capabilities} <- Arbor.Security.list_capabilities(caller, scope_opts),
+         true <-
+           Enum.any?(capabilities, fn capability ->
+             Arbor.Security.capability_authorizes?(
+               capability,
+               "arbor://orchestrator/execute",
+               scope_opts
+             )
+           end) do
+      :ok
+    else
+      _ -> {:error, {:unauthorized_resume, :caller_authority_missing}}
     end
   end
 
@@ -1308,6 +1392,16 @@ defmodule Arbor.Orchestrator.Engine do
   # `mix arbor.pipeline.run/resume` + RecoveryCoordinator. Turn/heartbeat runs
   # never resume (Session passes `resumable: false`), so writing per-node resume
   # state for them is unused I/O. Default `true` preserves prior behavior.
+  defp maybe_disable_unverifiable_resume(opts, nil), do: opts
+
+  defp maybe_disable_unverifiable_resume(opts, %RunAuthorization{}) do
+    if Keyword.get(opts, :hmac_secret) do
+      opts
+    else
+      Keyword.put(opts, :resumable, false)
+    end
+  end
+
   defp resumable?(opts), do: Keyword.get(opts, :resumable, true)
 
   # The on-disk per-node `status.json` audit dump. Default on (behavior-preserving);

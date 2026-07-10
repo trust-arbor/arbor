@@ -24,7 +24,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
 
   require Logger
 
-  alias Arbor.Orchestrator.Engine.{Context, Outcome}
+  alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
 
   alias Arbor.Orchestrator.Handlers.{
     ShellHandler,
@@ -33,14 +33,19 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
 
   @impl true
   def execute(node, context, graph, opts) do
-    target = Map.get(node.attrs, "target", "tool")
+    if Keyword.get(opts, :authorization, false) and
+         not match?(%RunAuthorization{}, Keyword.get(opts, :run_authorization)) do
+      %Outcome{status: :fail, failure_reason: "exec authorization missing immutable principal"}
+    else
+      target = Map.get(node.attrs, "target", "tool")
 
-    case target do
-      "tool" -> ToolHandler.execute(node, context, graph, opts)
-      "shell" -> ShellHandler.execute(node, context, graph, opts)
-      "action" -> execute_action(node, context, opts)
-      "function" -> execute_function(node, context, opts)
-      _ -> ToolHandler.execute(node, context, graph, opts)
+      case target do
+        "tool" -> ToolHandler.execute(node, context, graph, opts)
+        "shell" -> ShellHandler.execute(node, context, graph, opts)
+        "action" -> execute_action(node, context, opts)
+        "function" -> execute_function(node, context, opts)
+        _ -> ToolHandler.execute(node, context, graph, opts)
+      end
     end
   end
 
@@ -58,13 +63,33 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
     executor = Keyword.get(opts, :actions_executor, Arbor.Orchestrator.ActionsExecutor)
 
     if Code.ensure_loaded?(executor) do
-      agent_id =
-        Map.get(node.attrs, "agent_id") ||
-          Context.get(context, "session.agent_id", "system")
+      authority = Keyword.get(opts, :run_authorization)
+
+      {agent_id, caller_id, author_id, task_id, session_id, workdir} =
+        case authority do
+          %RunAuthorization{} = auth ->
+            {
+              auth.execution_principal,
+              auth.caller_id,
+              auth.author_id,
+              auth.task_id,
+              auth.session_id,
+              auth.workdir
+            }
+
+          _ ->
+            {
+              Map.get(node.attrs, "agent_id") ||
+                Context.get(context, "session.agent_id", "system"),
+              Keyword.get(opts, :caller_id),
+              Keyword.get(opts, :author_id),
+              Context.get(context, "session.task_id") || Keyword.get(opts, :task_id),
+              Keyword.get(opts, :session_id),
+              Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
+            }
+        end
 
       action_args = build_action_args(node.id, node.attrs, context)
-      workdir = Context.get(context, "workdir") || Keyword.get(opts, :workdir, ".")
-      task_id = Context.get(context, "session.task_id")
 
       output_prefix = Map.get(node.attrs, "output_prefix")
 
@@ -78,8 +103,11 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
       executor_opts =
         [
           agent_id: agent_id,
+          caller_id: caller_id,
+          author_id: author_id,
           signer: Keyword.get(opts, :signer),
           task_id: task_id,
+          session_id: session_id,
           taint: input_taint
         ]
         |> maybe_put_param_taint(context, context_keys)

@@ -248,6 +248,8 @@ defmodule Arbor.Actions do
       |> Keyword.put(:egress_tier, egress_tier)
       |> Keyword.put(:egress_taint, operation_taint)
       |> Keyword.put(:egress_destination, egress_destination)
+      |> maybe_put_auth_scope(:task_id, context_value(clean_context, :task_id))
+      |> maybe_put_auth_scope(:session_id, context_value(clean_context, :session_id))
       |> maybe_put_approved_invocation(clean_context)
       |> Keyword.put(
         :approval_context,
@@ -1482,9 +1484,9 @@ defmodule Arbor.Actions do
     # Background checks — routes through shell
     Arbor.Actions.BackgroundChecks.Run => "arbor://shell/exec",
 
-    # Pipeline — arbor://orchestrator/execute
-    Arbor.Actions.Pipeline.Run => "arbor://orchestrator/execute",
-    Arbor.Actions.Pipeline.Validate => "arbor://orchestrator/execute",
+    # Pipeline execution and validation are distinct privileges.
+    Arbor.Actions.Pipeline.Run => "arbor://action/pipeline/run",
+    Arbor.Actions.Pipeline.Validate => "arbor://action/pipeline/validate",
 
     # Persistence/relationship — arbor://persistence/{operation}
     Arbor.Actions.Relationship.Get => "arbor://persistence/read",
@@ -1746,4 +1748,7 @@ defmodule Arbor.Actions do
   end
 
   defp extract_fs_path(_resource, _params), do: nil
+
+  defp maybe_put_auth_scope(opts, _key, nil), do: opts
+  defp maybe_put_auth_scope(opts, key, value), do: Keyword.put(opts, key, value)
 end

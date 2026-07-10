@@ -129,7 +129,7 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
 
     test "capability_resources/1 falls back to type-based URI for empty list" do
       node = make_compiled_node(%{capabilities_required: [], attrs: %{"type" => "shell"}})
-      assert CapabilityCheck.capability_resources(node) == ["arbor://orchestrator/execute/shell"]
+      assert CapabilityCheck.capability_resources(node) == ["arbor://shell/exec"]
     end
 
     test "capability_resources/1 falls back to type-based URI for nil" do

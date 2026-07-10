@@ -26,7 +26,8 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
-  alias Arbor.Orchestrator.Engine.{Context, Outcome}
+  alias Arbor.Common.SafePath
+  alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
   alias Arbor.Orchestrator.GraphRegistry
 
   @impl true
@@ -43,7 +44,7 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
   # --- Dispatch ---
 
   defp handle_type("graph.invoke", node, context, opts) do
-    with {:ok, dot_source} <- resolve_graph_source(node, context),
+    with {:ok, dot_source} <- resolve_graph_source(node, context, opts),
          {:ok, child_context_values} <- build_child_context(node, context),
          {:ok, child_opts} <- build_child_opts(node, opts) do
       run_child(dot_source, child_context_values, child_opts, node, context)
@@ -143,14 +144,18 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
 
   # --- Graph resolution ---
 
-  defp resolve_graph_source(node, context) do
+  defp resolve_graph_source(node, context, opts) do
     cond do
       name = Map.get(node.attrs, "graph_name") ->
         GraphRegistry.resolve(name)
 
       file = Map.get(node.attrs, "graph_file") ->
-        case File.read(Path.expand(file)) do
-          {:ok, content} -> {:ok, content}
+        workdir = fixed_workdir(opts, context)
+
+        with {:ok, safe_path} <- SafePath.resolve_within(file, workdir),
+             {:ok, content} <- File.read(safe_path) do
+          {:ok, content}
+        else
           {:error, reason} -> {:error, {:file_read, reason, file}}
         end
 
@@ -271,8 +276,23 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
     # NO auth_context — the parent's grants and identity were silently
     # discarded. Auth keys are forwarded explicitly here; per-node checks at
     # the child level then see the same context the parent saw.
-    forwarded_keys =
-      [:on_event, :authorization, :authorizer, :signer, :auth_context, :caller_id]
+    forwarded_keys = [
+      :on_event,
+      :authorization,
+      :authorizer,
+      :signer,
+      :auth_context,
+      :run_authorization,
+      :execution_principal,
+      :agent_id,
+      :caller_id,
+      :author_id,
+      :task_id,
+      :session_id,
+      :workdir,
+      :identity_private_key,
+      :resumable
+    ]
 
     child_opts = Keyword.take(parent_opts, forwarded_keys)
 
@@ -294,6 +314,13 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
     child_opts = Keyword.put(child_opts, :max_depth, parent_depth - 1)
 
     {:ok, child_opts}
+  end
+
+  defp fixed_workdir(opts, context) do
+    case Keyword.get(opts, :run_authorization) do
+      %RunAuthorization{workdir: workdir} -> workdir
+      _ -> Path.expand(Context.get(context, "workdir") || Keyword.get(opts, :workdir, "."))
+    end
   end
 
   defp fail(reason) do
