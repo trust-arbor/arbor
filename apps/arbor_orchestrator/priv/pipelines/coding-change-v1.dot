@@ -24,6 +24,10 @@
 //   workspace_id         - opaque workspace lease id
 //   worker_session_id    - opaque ACP worker handle
 //   branch / commit_hash - reviewable branch tip when produced
+//   validation_rework_count / review_rework_count / total_rework_count
+//                        - initiated same-session rework-cycle counters
+//   rework_kind          - most recently initiated rework category
+//   rework_iteration     - total initiated rework-cycle sequence
 //   error                - stable terminal failure code when applicable
 //
 // Worker output contract (acp_send_message text): pure JSON
@@ -37,7 +41,8 @@
 //
 // Does NOT call coding_produce_reviewable_change.
 //
-// Rework bound: one shared rework cycle (rework_count 0 -> 1 retry, 2 exhausts).
+// Rework bound: one initiated validation repair and one initiated council
+// repair, with a hard total maximum of two same-session repair attempts.
 // Review-budget exhaustion emits status=rework_exhausted (canonical). A
 // legacy_status=review_requires_rework field is also set for Phase 2 adapters.
 
@@ -52,11 +57,25 @@ digraph CodingChangeV1 {
 
   // Init
 
-  init_rework_count [
+  init_validation_rework_count [
     type="transform",
     transform="constant",
     expression="0",
-    output_key="rework_count"
+    output_key="validation_rework_count"
+  ]
+
+  init_review_rework_count [
+    type="transform",
+    transform="constant",
+    expression="0",
+    output_key="review_rework_count"
+  ]
+
+  init_total_rework_count [
+    type="transform",
+    transform="constant",
+    expression="0",
+    output_key="total_rework_count"
   ]
 
   init_protocol_retry_count [
@@ -165,8 +184,14 @@ digraph CodingChangeV1 {
     output_key="worker_status"
   ]
 
-  // A malformed worker response gets one same-session steering attempt. This
-  // counter is intentionally independent from implementation rework_count.
+  route_worker_status [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  // A malformed response or unknown/missing status gets one same-session
+  // protocol repair. This counter is independent from implementation rework.
 
   inc_protocol_retry_count [
     type="transform",
@@ -254,25 +279,54 @@ digraph CodingChangeV1 {
     expression="validation.passed"
   ]
 
-  // Rework budget (hard bound: one rework cycle)
+  // Validation rework budget. Counters advance when a repair send is
+  // initiated; transport failure can therefore leave an initiated count.
 
-  inc_rework_count [
-    type="transform",
-    transform="increment",
-    source_key="rework_count",
-    output_key="rework_count"
+  check_validation_category_budget [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
   ]
 
-  check_rework_budget [
+  check_validation_total_budget [
     type="branch",
-    shape=diamond
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  inc_validation_rework_count [
+    type="transform",
+    transform="increment",
+    source_key="validation_rework_count",
+    output_key="validation_rework_count"
+  ]
+
+  inc_validation_total_rework_count [
+    type="transform",
+    transform="increment",
+    source_key="total_rework_count",
+    output_key="total_rework_count"
+  ]
+
+  mark_validation_rework_kind [
+    type="transform",
+    transform="constant",
+    expression="validation",
+    output_key="rework_kind"
+  ]
+
+  mark_validation_rework_iteration [
+    type="transform",
+    transform="identity",
+    source_key="total_rework_count",
+    output_key="rework_iteration"
   ]
 
   build_validation_rework_prompt [
     type="transform",
     transform="template",
     source_key="task",
-    expression="Validation failed after your previous edit. Task: {value}. Validation stdout: {ctx.validation.stdout}. Validation stderr: {ctx.validation.stderr}. Fix the issues in the same worktree. Respond with ONLY JSON {\"status\":\"implemented\"} or {\"status\":\"declined\"}.",
+    expression="Validation failed after your previous edit. Task: {value}. Structured validation feedback JSON: {ctx.validation.feedback_json}. Fix the issues in the same worktree. Respond with ONLY one JSON object and no prose or markdown: {\"status\":\"implemented\"} or {\"status\":\"declined\"}, plus optional {\"summary\":\"...\"}.",
     output_key="prompt"
   ]
 
@@ -280,7 +334,7 @@ digraph CodingChangeV1 {
     type="transform",
     transform="template",
     source_key="task",
-    expression="Code review requested rework. Task: {value}. Tier decision: {ctx.review.tier_decision}. Recommendation: {ctx.review.recommendation}. Address the review feedback in the same worktree. Respond with ONLY JSON {\"status\":\"implemented\"} or {\"status\":\"declined\"}.",
+    expression="Code review requested rework. Task: {value}. Structured review feedback JSON: {ctx.review.feedback_json}. Address the review feedback in the same worktree. Respond with ONLY one JSON object and no prose or markdown: {\"status\":\"implemented\"} or {\"status\":\"declined\"}, plus optional {\"summary\":\"...\"}.",
     output_key="prompt"
   ]
 
@@ -402,7 +456,51 @@ digraph CodingChangeV1 {
 
   route_review [
     type="branch",
-    shape=diamond
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  // Council rework budget. Like validation, counters represent initiated
+  // same-session repair sends rather than denied/exhausted attempts.
+
+  check_review_category_budget [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  check_review_total_budget [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  inc_review_rework_count [
+    type="transform",
+    transform="increment",
+    source_key="review_rework_count",
+    output_key="review_rework_count"
+  ]
+
+  inc_review_total_rework_count [
+    type="transform",
+    transform="increment",
+    source_key="total_rework_count",
+    output_key="total_rework_count"
+  ]
+
+  mark_review_rework_kind [
+    type="transform",
+    transform="constant",
+    expression="review",
+    output_key="rework_kind"
+  ]
+
+  mark_review_rework_iteration [
+    type="transform",
+    transform="identity",
+    source_key="total_rework_count",
+    output_key="rework_iteration"
   ]
 
   // Optional draft PR
@@ -550,6 +648,13 @@ digraph CodingChangeV1 {
     output_key="error"
   ]
 
+  error_review_tier_invalid [
+    type="transform",
+    transform="constant",
+    expression="review_tier_invalid_or_missing",
+    output_key="error"
+  ]
+
   error_draft_pr [
     type="transform",
     transform="constant",
@@ -617,7 +722,9 @@ digraph CodingChangeV1 {
 
   // Flow
 
-  start -> init_rework_count -> init_protocol_retry_count -> classify_profile -> acquire_workspace
+  start -> init_validation_rework_count -> init_review_rework_count
+  init_review_rework_count -> init_total_rework_count -> init_protocol_retry_count
+  init_protocol_retry_count -> classify_profile -> acquire_workspace
 
   // Acquire failure: no lease held
   acquire_workspace -> status_pipeline_error [condition="outcome=fail"]
@@ -640,6 +747,7 @@ digraph CodingChangeV1 {
 
   implement -> extract_worker_status [condition="outcome=success"]
   extract_worker_status -> inc_protocol_retry_count [condition="outcome=fail"]
+  extract_worker_status -> route_worker_status [condition="outcome=success"]
   inc_protocol_retry_count -> check_protocol_retry_budget
   check_protocol_retry_budget -> build_protocol_repair_prompt [condition="context.protocol_retry_count<2"]
   build_protocol_repair_prompt -> repair_worker_protocol
@@ -648,12 +756,13 @@ digraph CodingChangeV1 {
   repair_worker_protocol -> extract_worker_status [condition="outcome=success"]
   check_protocol_retry_budget -> error_worker_protocol_invalid [condition="context.protocol_retry_count>=2"]
   error_worker_protocol_invalid -> status_pipeline_error_then_close
-  # Gate success paths with outcome=success so empty worker_status on extract
-  # failure cannot match context.worker_status!=declined via select_fail_step.
-  extract_worker_status -> status_declined [condition="outcome=success && context.worker_status=declined"]
-  status_declined -> close_worker
 
-  extract_worker_status -> inspect_workspace [condition="outcome=success && context.worker_status!=declined"]
+  // Strict worker protocol routing. Unknown/missing statuses use the same
+  // bounded repair path as malformed JSON; no status fails open to inspect.
+  route_worker_status -> status_declined [condition="context.worker_status=declined"]
+  status_declined -> close_worker
+  route_worker_status -> inspect_workspace [condition="context.worker_status=implemented"]
+  route_worker_status -> inc_protocol_retry_count
   inspect_workspace -> status_pipeline_error_then_close [condition="outcome=fail"]
   inspect_workspace -> hoist_dirty [condition="outcome=success"]
   hoist_dirty -> hoist_changed -> hoist_head_commit
@@ -670,15 +779,18 @@ digraph CodingChangeV1 {
   validate -> status_validation_failed [condition="outcome=fail"]
   validate -> check_validation_passed [condition="outcome=success"]
 
-  // Validation soft-fail: rework or exhaust
-  check_validation_passed -> inc_rework_count [condition="outcome=fail"]
-  inc_rework_count -> check_rework_budget
-
-  // After increment: count 1 = still budget, count >= 2 = exhausted
-  check_rework_budget -> status_validation_failed [condition="context.rework_count>=2"]
+  // Validation soft-fail: initiate at most one validation repair and never a
+  // third total repair attempt.
+  check_validation_passed -> check_validation_category_budget [condition="outcome=fail"]
+  check_validation_category_budget -> status_validation_failed [condition="context.validation_rework_count>=1"]
+  check_validation_category_budget -> check_validation_total_budget [condition="context.validation_rework_count<1"]
+  check_validation_total_budget -> status_validation_failed [condition="context.total_rework_count>=2"]
+  check_validation_total_budget -> inc_validation_rework_count [condition="context.total_rework_count<2"]
   status_validation_failed -> close_worker
-
-  check_rework_budget -> build_validation_rework_prompt [condition="context.rework_count<2"]
+  inc_validation_rework_count -> inc_validation_total_rework_count
+  inc_validation_total_rework_count -> mark_validation_rework_kind
+  mark_validation_rework_kind -> mark_validation_rework_iteration
+  mark_validation_rework_iteration -> build_validation_rework_prompt
   build_validation_rework_prompt -> implement
 
   // Validation passed -> commit or adopt HEAD
@@ -716,10 +828,12 @@ digraph CodingChangeV1 {
   review_change -> route_review [condition="outcome=success"]
 
   // Review routing by tier_decision
-  route_review -> inc_rework_count_review [condition="context.review.tier_decision=rework"]
+  route_review -> check_review_category_budget [condition="context.review.tier_decision=rework"]
   route_review -> status_review_rejected [condition="context.review.tier_decision=stop"]
   route_review -> route_human_review [condition="context.review.tier_decision=human_review"]
   route_review -> route_publish [condition="context.review.tier_decision=auto_proceed"]
+  route_review -> error_review_tier_invalid
+  error_review_tier_invalid -> status_review_failed
 
   status_review_rejected -> close_worker
 
@@ -733,27 +847,20 @@ digraph CodingChangeV1 {
   status_human_review_required -> close_worker
   route_human_review -> prep_pr_path [condition="context.open_pr=true"]
 
-  // Review rework shares the one-cycle budget
-  inc_rework_count_review [
-    type="transform",
-    transform="increment",
-    source_key="rework_count",
-    output_key="rework_count"
-  ]
-
-  check_review_rework_budget [
-    type="branch",
-    shape=diamond
-  ]
-
-  inc_rework_count_review -> check_review_rework_budget
+  // Review repair uses its own one-cycle category budget and the shared hard
+  // total of two initiated repair attempts.
+  check_review_category_budget -> legacy_status_review_requires_rework [condition="context.review_rework_count>=1"]
+  check_review_category_budget -> check_review_total_budget [condition="context.review_rework_count<1"]
+  check_review_total_budget -> legacy_status_review_requires_rework [condition="context.total_rework_count>=2"]
+  check_review_total_budget -> inc_review_rework_count [condition="context.total_rework_count<2"]
 
   // Exhausted: canonical rework_exhausted + legacy_status for Phase 2 adapters
-  check_review_rework_budget -> legacy_status_review_requires_rework [condition="context.rework_count>=2"]
   legacy_status_review_requires_rework -> status_rework_exhausted
   status_rework_exhausted -> close_worker
-
-  check_review_rework_budget -> build_review_rework_prompt [condition="context.rework_count<2"]
+  inc_review_rework_count -> inc_review_total_rework_count
+  inc_review_total_rework_count -> mark_review_rework_kind
+  mark_review_rework_kind -> mark_review_rework_iteration
+  mark_review_rework_iteration -> build_review_rework_prompt
   build_review_rework_prompt -> implement
 
   // Publish: optional draft PR

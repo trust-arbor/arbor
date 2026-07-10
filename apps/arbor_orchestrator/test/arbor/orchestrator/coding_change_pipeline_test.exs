@@ -1,6 +1,6 @@
 defmodule Arbor.Orchestrator.CodingChangePipelineTest do
   @moduledoc """
-  Phase 1 structural + deterministic execution tests for coding-change-v1.dot.
+  Structural + deterministic execution tests for coding-change-v1.dot.
 
   Execution uses a fake ActionsExecutor; no real shell, network, ACP, or LLM.
   """
@@ -216,6 +216,18 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                 "Implemented the requested change.\n" <>
                   Jason.encode!(%{status: "implemented", summary: "prefixed progress"})
 
+              {:unknown_worker_status_repair_success, 0} ->
+                Jason.encode!(%{status: "working", summary: "not terminal yet"})
+
+              {:unknown_worker_status_repair_success, _} ->
+                Jason.encode!(%{status: "implemented", summary: "status repaired"})
+
+              {:unknown_worker_status_repair_exhausted, 0} ->
+                Jason.encode!(%{status: "working", summary: "not terminal yet"})
+
+              {:unknown_worker_status_repair_exhausted, _} ->
+                Jason.encode!(%{summary: "still missing a terminal status"})
+
               {:close_failed, _} ->
                 Jason.encode!(%{status: "implemented", summary: "close boom path"})
 
@@ -310,16 +322,34 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
               {:validation_failed, _} -> false
               {:rework_exhausted, 0} -> false
               {:rework_exhausted, _} -> true
+              {:validation_then_review_rework_success, 0} -> false
+              {:validation_then_review_rework_success, _} -> true
               _ -> true
             end
+
+          stdout = if(passed, do: "compile ok", else: "RAW_VALIDATION_STDOUT_SENTINEL")
+          stderr = if(passed, do: "", else: "RAW_VALIDATION_STDERR_SENTINEL")
+
+          feedback = %{
+            "exit_code" => if(passed, do: 0, else: 1),
+            "passed" => passed,
+            "stdout_excerpt" => if(passed, do: "compile ok", else: "bounded stdout excerpt"),
+            "stderr_excerpt" => if(passed, do: "", else: "bounded compile feedback"),
+            "stdout_truncated" => not passed,
+            "stderr_truncated" => not passed,
+            "stdout_sha256" => String.duplicate("a", 64),
+            "stderr_sha256" => String.duplicate("b", 64)
+          }
 
           {:ok,
            %{
              path: "/tmp/ws_fixture_1",
              exit_code: if(passed, do: 0, else: 1),
              passed: passed,
-             stdout: if(passed, do: "ok", else: "error"),
-             stderr: if(passed, do: "", else: "compile failed")
+             stdout: stdout,
+             stderr: stderr,
+             feedback: feedback,
+             feedback_json: Jason.encode!(feedback)
            }}
       end
     end
@@ -382,20 +412,81 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           # After validation rework, review keeps asking for rework until exhausted
           {:ok, review_payload("rework")}
 
+        :validation_then_review_rework_success ->
+          {:ok, review_payload(if(n == 0, do: "rework", else: "auto_proceed"))}
+
+        :unknown_review_tier ->
+          {:ok, review_payload("unexpected_tier")}
+
+        :missing_review_tier ->
+          {:ok, Map.delete(review_payload("auto_proceed"), :tier_decision)}
+
         _ ->
           {:ok, review_payload("auto_proceed")}
       end
     end
 
     defp review_payload(tier) do
+      recommendation = if(tier == "stop", do: "reject", else: "revise")
+
+      feedback = %{
+        "recommendation" => recommendation,
+        "tier" => %{
+          "blast_radius" => "low",
+          "decision" => tier,
+          "reasons" => ["bounded_reason"]
+        },
+        "verdict" => %{
+          "weaknesses" => ["bounded council feedback"],
+          "scores" => %{"correctness" => 0.8},
+          "counts" => %{"approve" => 1, "reject" => 0, "abstain" => 0}
+        },
+        "flags" => %{
+          "security_veto" => false,
+          "human_required" => tier == "human_review",
+          "authority_widening" => false
+        }
+      }
+
       %{
         status: "reviewed",
         tier_decision: tier,
-        recommendation: if(tier == "stop", do: "reject", else: "revise"),
+        verdict: %{
+          overall_score: 0.8,
+          dimension_scores: %{"correctness" => 0.8},
+          strengths: ["focused change"],
+          weaknesses: ["bounded council feedback"],
+          recommendation: recommendation,
+          mode: "binding",
+          meta: %{
+            "source" => "code_review_council",
+            "decision" => "approved",
+            "branch" => "arbor/coding-agent/fixture",
+            "base_ref" => "basecommit0001",
+            "files" => ["file.ex"],
+            "agent_id" => "agent_fixture",
+            "approve_count" => 1,
+            "reject_count" => 0,
+            "abstain_count" => 0,
+            "quorum_met" => true
+          }
+        },
+        recommendation: recommendation,
+        decision: "approved",
+        branch: "arbor/coding-agent/fixture",
+        files: ["file.ex"],
+        approve_count: 1,
+        reject_count: 0,
+        abstain_count: 0,
+        quorum_met: true,
         human_required: tier == "human_review",
         security_veto: false,
+        authority_widening: false,
         blast_radius: "low",
-        decision: "reviewed"
+        tier_reasons: ["bounded_reason"],
+        persistence: %{"status" => "recorded"},
+        feedback: feedback,
+        feedback_json: Jason.encode!(feedback)
       }
     end
 
@@ -531,6 +622,24 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     assert called?(calls, "coding_workspace_release")
   end
 
+  defp assert_single_worker_session(calls, expected_send_count) do
+    start_calls = Enum.filter(calls, fn {name, _args} -> name == "acp_start_session" end)
+    send_calls = Enum.filter(calls, fn {name, _args} -> name == "acp_send_message" end)
+
+    assert length(start_calls) == 1
+    assert length(send_calls) == expected_send_count
+
+    assert Enum.all?(send_calls, fn {_name, args} ->
+             args["worker_session_id"] == "acp_worker_fixture_1"
+           end)
+
+    send_calls
+  end
+
+  defp action_prompts(calls) do
+    for {"acp_send_message", args} <- calls, do: args["prompt"]
+  end
+
   defp called?(calls, action_name), do: Enum.any?(calls, fn {n, _} -> n == action_name end)
 
   # ---------------------------------------------------------------------------
@@ -603,6 +712,19 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert graph.nodes["status_rework_exhausted"]
       assert graph.nodes["legacy_status_review_requires_rework"]
 
+      # Strict enum routers have explicit, single-path fallbacks. This keeps an
+      # unconditional error edge from becoming a fan-out sibling.
+      assert graph.nodes["route_worker_status"].attrs["fan_out"] == "false"
+      assert graph.nodes["route_review"].attrs["fan_out"] == "false"
+      assert graph.nodes["error_review_tier_invalid"]
+
+      for counter <- ~w(validation_rework_count review_rework_count total_rework_count) do
+        assert String.contains?(load_dot(), "output_key=\"#{counter}\"")
+      end
+
+      refute load_dot() =~ "worker_status!=declined"
+      refute load_dot() =~ "source_key=\"rework_count\""
+
       # Bind materialization to the exact commit produced by this run.
       load = graph.nodes["load_committed_change"]
       assert load.attrs["context_keys"] == "workspace_id,commit"
@@ -633,30 +755,80 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       refute called?(calls, "git_commit")
     end
 
-    test "validation_failed after bounded rework" do
+    test "repeated validation failure exhausts only the validation retry" do
       assert {{:ok, result}, calls} = run_fixture(:validation_failed)
       assert result.context["status"] == "validation_failed"
+      assert result.context["validation_rework_count"] == 1
+      assert result.context["review_rework_count"] == "0"
+      assert result.context["total_rework_count"] == 1
+      assert result.context["rework_kind"] == "validation"
+      assert result.context["rework_iteration"] == 1
       assert_closed_and_released(calls)
 
       validate_calls = Enum.count(calls, fn {n, _} -> n == "mix_compile" end)
-      implement_calls = Enum.count(calls, fn {n, _} -> n == "acp_send_message" end)
-      assert validate_calls >= 2
-      assert implement_calls >= 2
+      assert validate_calls == 2
+
+      prompts = action_prompts(calls)
+      assert_single_worker_session(calls, 2)
+      assert Enum.at(prompts, 1) =~ "Structured validation feedback JSON"
+      assert Enum.at(prompts, 1) =~ "bounded compile feedback"
+      refute Enum.at(prompts, 1) =~ "RAW_VALIDATION_STDOUT_SENTINEL"
+      refute Enum.at(prompts, 1) =~ "RAW_VALIDATION_STDERR_SENTINEL"
+      assert Enum.at(prompts, 1) =~ "ONLY one JSON object"
       refute called?(calls, "git_commit")
     end
 
-    test "rework_exhausted when review revise exhausts budget with legacy_status" do
+    test "repeated council rework exhausts only the review retry" do
       assert {{:ok, result}, calls} = run_fixture(:review_requires_rework)
       assert result.context["status"] == "rework_exhausted"
       assert result.context["legacy_status"] == "review_requires_rework"
+      assert result.context["validation_rework_count"] == "0"
+      assert result.context["review_rework_count"] == 1
+      assert result.context["total_rework_count"] == 1
+      assert result.context["rework_kind"] == "review"
+      assert result.context["rework_iteration"] == 1
       assert_closed_and_released(calls)
-      assert called?(calls, "council_review_change")
+
+      assert Enum.count(calls, fn {name, _args} -> name == "council_review_change" end) == 2
+      prompts = action_prompts(calls)
+      assert_single_worker_session(calls, 2)
+      assert Enum.at(prompts, 1) =~ "Structured review feedback JSON"
+      assert Enum.at(prompts, 1) =~ "bounded council feedback"
+      assert Enum.at(prompts, 1) =~ "ONLY one JSON object"
     end
 
-    test "rework_exhausted after validation rework then review rework" do
+    test "validation retry then successful council retry reuse one worker session" do
+      assert {{:ok, result}, calls} = run_fixture(:validation_then_review_rework_success)
+      assert result.context["status"] == "change_committed"
+      assert result.context["validation_rework_count"] == 1
+      assert result.context["review_rework_count"] == 1
+      assert result.context["total_rework_count"] == 2
+      assert result.context["rework_kind"] == "review"
+      assert result.context["rework_iteration"] == 2
+
+      prompts = action_prompts(calls)
+      assert_single_worker_session(calls, 3)
+      assert Enum.at(prompts, 1) =~ "Structured validation feedback JSON"
+      assert Enum.at(prompts, 1) =~ "bounded compile feedback"
+      refute Enum.at(prompts, 1) =~ "RAW_VALIDATION_STDOUT_SENTINEL"
+      refute Enum.at(prompts, 1) =~ "RAW_VALIDATION_STDERR_SENTINEL"
+      assert Enum.at(prompts, 2) =~ "Structured review feedback JSON"
+      assert Enum.at(prompts, 2) =~ "bounded council feedback"
+      assert Enum.all?(prompts, &String.contains?(&1, "ONLY"))
+      refute "error_review_tier_invalid" in result.completed_nodes
+      assert_closed_and_released(calls)
+    end
+
+    test "hard total remains two when validation and repeated review exhaust" do
       assert {{:ok, result}, calls} = run_fixture(:rework_exhausted)
       assert result.context["status"] == "rework_exhausted"
       assert result.context["legacy_status"] == "review_requires_rework"
+      assert result.context["validation_rework_count"] == 1
+      assert result.context["review_rework_count"] == 1
+      assert result.context["total_rework_count"] == 2
+      assert result.context["rework_kind"] == "review"
+      assert result.context["rework_iteration"] == 2
+      assert_single_worker_session(calls, 3)
       assert_closed_and_released(calls)
     end
 
@@ -673,6 +845,19 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert result.context["error"] == "council_review_failed"
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
+    end
+
+    for scenario <- [:unknown_review_tier, :missing_review_tier] do
+      test "#{scenario} fails closed as review_failed and cleans up" do
+        assert {{:ok, result}, calls} = run_fixture(unquote(scenario))
+        assert result.context["status"] == "review_failed"
+        assert result.context["error"] == "review_tier_invalid_or_missing"
+        assert "error_review_tier_invalid" in result.completed_nodes
+        refute called?(calls, "git_pr")
+        assert_single_worker_session(calls, 1)
+        assert_closed_and_released(calls)
+        assert_json_clean_context(result.context)
+      end
     end
 
     test "human_review_required without PR" do
@@ -712,6 +897,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                end)
 
       assert materialize_args["commit"] == "commitabc123"
+      refute "error_review_tier_invalid" in result.completed_nodes
+      refute "inc_protocol_retry_count" in result.completed_nodes
       assert_json_clean_context(result.context)
       assert_opaque_handles(result.context)
     end
@@ -756,23 +943,28 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert {{:ok, result}, calls} = run_fixture(:protocol_repair_success)
       assert result.context["status"] == "change_committed"
       assert result.context["protocol_retry_count"] == 1
-      assert result.context["rework_count"] == "0"
+      assert result.context["validation_rework_count"] == "0"
+      assert result.context["review_rework_count"] == "0"
+      assert result.context["total_rework_count"] == "0"
       refute Map.has_key?(result.context, "error")
 
-      send_calls =
-        Enum.filter(calls, fn {name, _args} -> name == "acp_send_message" end)
-
-      assert length(send_calls) == 2
-      assert Enum.count(calls, fn {name, _args} -> name == "acp_start_session" end) == 1
-
-      assert Enum.all?(send_calls, fn {_name, args} ->
-               args["worker_session_id"] == "acp_worker_fixture_1"
-             end)
-
+      send_calls = assert_single_worker_session(calls, 2)
       assert {"acp_send_message", repair_args} = List.last(send_calls)
       assert repair_args["prompt"] =~ "ONLY one JSON object"
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
+    end
+
+    test "unknown worker status gets one same-session protocol repair" do
+      assert {{:ok, result}, calls} = run_fixture(:unknown_worker_status_repair_success)
+      assert result.context["status"] == "change_committed"
+      assert result.context["protocol_retry_count"] == 1
+      refute Map.has_key?(result.context, "error")
+
+      send_calls = assert_single_worker_session(calls, 2)
+      assert {"acp_send_message", repair_args} = List.last(send_calls)
+      assert repair_args["prompt"] =~ "ONLY one JSON object"
+      assert_closed_and_released(calls)
     end
   end
 
@@ -810,8 +1002,22 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert result.context["status"] == "pipeline_error"
       assert result.context["error"] == "worker_protocol_invalid_json_after_retry"
       assert result.context["protocol_retry_count"] == 2
-      assert result.context["rework_count"] == "0"
-      assert Enum.count(calls, fn {name, _args} -> name == "acp_send_message" end) == 2
+      assert result.context["validation_rework_count"] == "0"
+      assert result.context["review_rework_count"] == "0"
+      assert result.context["total_rework_count"] == "0"
+      assert_single_worker_session(calls, 2)
+      assert_closed_and_released(calls)
+      assert_json_clean_context(result.context)
+    end
+
+    test "second unknown or missing worker status fails closed after one repair" do
+      assert {{:ok, result}, calls} = run_fixture(:unknown_worker_status_repair_exhausted)
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "worker_protocol_invalid_json_after_retry"
+      assert result.context["protocol_retry_count"] == 2
+      assert result.context["total_rework_count"] == "0"
+      assert_single_worker_session(calls, 2)
+      refute called?(calls, "coding_workspace_inspect")
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
     end
@@ -821,7 +1027,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert result.context["status"] == "pipeline_error"
       assert result.context["error"] == "worker_protocol_repair_failed"
       assert result.context["protocol_retry_count"] == 1
-      assert Enum.count(calls, fn {name, _args} -> name == "acp_send_message" end) == 2
+      assert_single_worker_session(calls, 2)
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
     end
