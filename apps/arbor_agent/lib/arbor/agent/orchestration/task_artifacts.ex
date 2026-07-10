@@ -51,6 +51,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
           files: files(raw),
           report: report(raw),
           verdict: verdict(raw),
+          artifacts: value(raw, :artifacts),
           repo_path: value(raw, :repo_path),
           worktree_path: value(raw, :worktree_path),
           pr_url: value(raw, :pr_url)
@@ -207,13 +208,14 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
 
   defp coding_result?(%{} = map) do
     status = value(map, :status)
+    artifacts = value(map, :artifacts)
 
     is_binary(status) and
       MapSet.member?(@coding_statuses, status) and
-      Enum.any?(
-        [:branch, :commit, :worktree_path, :validation, :review],
-        &present?(value(map, &1))
-      )
+      (Enum.any?(
+         [:branch, :commit, :worktree_path, :validation, :review],
+         &present?(value(map, &1))
+       ) or nonempty_artifacts?(artifacts))
   end
 
   defp files(raw) do
@@ -252,6 +254,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
       human_required: value(raw, :human_required) || value(review, :human_required),
       security_veto: value(raw, :security_veto) || value(review, :security_veto),
       blast_radius: value(raw, :blast_radius) || value(review, :blast_radius),
+      artifacts: value(raw, :artifacts),
       error: value(raw, :error) || value(raw, :review_error)
     }
     |> reject_nil_values()
@@ -312,6 +315,8 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   defp value(_term, _key, default), do: default
 
   defp present?(value), do: value not in [nil, "", []]
+
+  defp nonempty_artifacts?(artifacts), do: is_map(artifacts) and map_size(artifacts) > 0
 
   defp reject_nil_values(map), do: Map.reject(map, fn {_key, value} -> is_nil(value) end)
 

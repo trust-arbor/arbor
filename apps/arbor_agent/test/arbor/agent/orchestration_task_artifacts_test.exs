@@ -68,6 +68,54 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
     end
   end
 
+  test "promotes an atom-key artifact descriptor without changing it" do
+    artifacts = %{
+      "plan" => %{"path" => "/tmp/task/coding-plan.json", "sha256" => "plan-hash"},
+      "pipeline" => %{"path" => "/tmp/task/coding-pipeline.dot", "sha256" => "dot-hash"}
+    }
+
+    raw = %{status: "validation_failed", artifacts: artifacts}
+
+    result = TaskArtifacts.normalize(raw)
+
+    assert result.result_type == :coding_change
+    assert result.payload.artifacts === artifacts
+    assert result.payload.report.artifacts === artifacts
+    assert result.raw === raw
+  end
+
+  test "promotes a string-key artifact descriptor without changing it" do
+    artifacts = %{
+      "manifest" => %{
+        "path" => "/tmp/task/coding-compile-manifest.json",
+        "compiler_version" => "coding-plan-1",
+        "metadata" => %{"profile" => "security_regression"}
+      }
+    }
+
+    raw = %{"status" => "no_changes", "artifacts" => artifacts}
+
+    result = TaskArtifacts.normalize(raw)
+
+    assert result.result_type == :coding_change
+    assert result.payload.artifacts === artifacts
+    assert result.payload.report.artifacts === artifacts
+    assert result.raw === raw
+  end
+
+  test "artifact-like data does not change generic result fallbacks" do
+    raw = %{
+      "status" => "running",
+      "artifacts" => %{"plan" => %{"path" => "/tmp/task/coding-plan.json"}}
+    }
+
+    assert TaskArtifacts.normalize(raw) == %{
+             result_type: :value,
+             payload: %{value: raw},
+             raw: raw
+           }
+  end
+
   test "generic chat fallback is unchanged" do
     result = TaskArtifacts.normalize("hello")
     assert result.result_type == :chat
