@@ -12,7 +12,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
 
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Handlers.Registry
-  alias Arbor.Orchestrator.CodingPlan.LoadedModuleIdentity
+  alias Arbor.Common.LoadedModuleIdentity
   alias Arbor.Contracts.Security.Classification
 
   @version 2

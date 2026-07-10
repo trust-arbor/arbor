@@ -1,5 +1,11 @@
-defmodule Arbor.Orchestrator.CodingPlan.LoadedModuleIdentity do
-  @moduledoc false
+defmodule Arbor.Common.LoadedModuleIdentity do
+  @moduledoc """
+  Binds retrievable BEAM bytes to the module code currently loaded by the VM.
+
+  `:code.get_object_code/1` may return bytes from the code path after a module
+  has been hot-reloaded. The loaded module MD5 must therefore agree with the
+  object-code MD5 before those bytes are safe to identify executable code.
+  """
 
   @spec sha256(module()) :: {:ok, String.t()} | {:error, atom()}
   def sha256(module) when is_atom(module) do
@@ -22,8 +28,5 @@ defmodule Arbor.Orchestrator.CodingPlan.LoadedModuleIdentity do
 
   def sha256(_module), do: {:error, :module_object_code_unavailable}
 
-  # module_info/1 is served by the code loaded in the VM. beam_lib.md5/1 is
-  # derived from the object bytes returned by the code server. They must agree
-  # before those bytes can identify code that a subsequent remote call invokes.
   defp loaded_md5(module), do: apply(module, :module_info, [:md5])
 end

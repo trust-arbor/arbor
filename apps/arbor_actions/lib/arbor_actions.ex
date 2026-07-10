@@ -346,7 +346,7 @@ defmodule Arbor.Actions do
   end
 
   defp with_execution_binding(action_module, context, fun) when is_function(fun, 0) do
-    active = Process.get(@active_execution_binding_key)
+    {active, inherited?} = active_execution_binding()
 
     case context_execution_binding(context) do
       {:ok, nil} when is_nil(active) ->
@@ -363,6 +363,7 @@ defmodule Arbor.Actions do
 
       {:ok, binding} when binding == active ->
         case verify_bound_action_module(action_module, binding.action_bindings) do
+          :ok when inherited? -> with_active_execution_binding(binding, fun)
           :ok -> fun.()
           {:error, reason} -> {:error, {:execution_binding_rejected, reason}}
         end
@@ -374,6 +375,46 @@ defmodule Arbor.Actions do
         {:error, {:execution_binding_rejected, reason}}
     end
   end
+
+  defp active_execution_binding do
+    case Process.get(@active_execution_binding_key) do
+      nil ->
+        case inherited_execution_binding() do
+          nil -> {nil, false}
+          binding -> {binding, true}
+        end
+
+      binding ->
+        {binding, false}
+    end
+  end
+
+  # Elixir tasks carry their caller chain in process metadata. Consult active
+  # callers so a bound composite cannot shed its manifest merely by moving a
+  # nested facade call into Task.async/Task.async_stream and dropping context.
+  defp inherited_execution_binding do
+    callers = List.wrap(Process.get(:"$callers"))
+    ancestors = List.wrap(Process.get(:"$ancestors"))
+
+    Enum.find_value(callers ++ ancestors, &process_execution_binding/1)
+  end
+
+  defp process_execution_binding(pid) when is_pid(pid) do
+    case Process.info(pid, :dictionary) do
+      {:dictionary, dictionary} ->
+        case List.keyfind(dictionary, @active_execution_binding_key, 0) do
+          {@active_execution_binding_key, binding} when is_map(binding) -> binding
+          _other -> nil
+        end
+
+      _other ->
+        nil
+    end
+  rescue
+    _exception -> nil
+  end
+
+  defp process_execution_binding(_other), do: nil
 
   defp with_active_execution_binding(binding, fun) do
     previous = Process.get(@active_execution_binding_key)
@@ -531,9 +572,9 @@ defmodule Arbor.Actions do
 
   The descriptor is deterministic and JSON-clean. It binds the action's exact
   Jido name and loaded BEAM to the coarse authorization resource and static
-  effect/egress declarations used by the security layer. Object code is read
-  through `:code.get_object_code/1`; modules without retrievable loaded BEAM
-  code fail closed.
+  effect/egress declarations used by the security layer. The code-path object
+  bytes must match the module code currently loaded by the VM; hot-reload drift
+  and modules without retrievable BEAM code fail closed.
 
   This descriptor identifies executable code. It does not grant authority to
   execute the action.
@@ -610,13 +651,10 @@ defmodule Arbor.Actions do
   end
 
   defp loaded_beam_sha256(action_module) do
-    case :code.get_object_code(action_module) do
-      {^action_module, beam, _filename} when is_binary(beam) and byte_size(beam) > 0 ->
-        digest = :crypto.hash(:sha256, beam) |> Base.encode16(case: :lower)
-        {:ok, digest}
-
-      _other ->
-        {:error, :action_beam_unavailable}
+    case Arbor.Common.LoadedModuleIdentity.sha256(action_module) do
+      {:ok, digest} -> {:ok, digest}
+      {:error, :loaded_object_code_mismatch} -> {:error, :action_loaded_code_mismatch}
+      {:error, _reason} -> {:error, :action_beam_unavailable}
     end
   end
 

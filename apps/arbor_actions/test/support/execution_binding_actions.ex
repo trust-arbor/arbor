@@ -84,6 +84,28 @@ defmodule Arbor.Actions.TestFixtures.BoundParallelCompositeAction do
   end
 end
 
+defmodule Arbor.Actions.TestFixtures.BoundStrippedTaskCompositeAction do
+  @moduledoc false
+
+  use Jido.Action,
+    name: "bound_stripped_task_composite_action",
+    description: "Composite action used to verify task caller binding inheritance",
+    schema: []
+
+  @impl true
+  def run(_params, context) do
+    Task.async(fn ->
+      Arbor.Actions.authorize_and_execute(
+        Map.get(context, :agent_id, "system"),
+        Arbor.Actions.TestFixtures.BoundNestedInnerAction,
+        %{},
+        %{}
+      )
+    end)
+    |> Task.await(1_000)
+  end
+end
+
 defmodule Arbor.Actions.TestFixtures.BoundBatchCompositeAction do
   @moduledoc false
 
