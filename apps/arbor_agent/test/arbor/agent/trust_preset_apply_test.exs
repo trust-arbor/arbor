@@ -260,6 +260,10 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
                  "arbor://fs/list/repo"
                ])
 
+      original_cwd = File.cwd!()
+      File.cd!(Path.join(original_cwd, "apps"))
+      on_exit(fn -> File.cd!(original_cwd) end)
+
       assert {:ok, _supervisor} =
                Lifecycle.start(agent_id,
                  runtime: :acp,
