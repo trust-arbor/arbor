@@ -437,6 +437,54 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert {:ok, []} = Arbor.Security.list_capabilities(agent_id)
     end
 
+    test "legacy Pipeline Architect profiles migrate to an exact snapshot before activation" do
+      assert {:ok, profile} =
+               Lifecycle.create("Legacy Architect Probe", template: "pipeline_architect")
+
+      agent_id = profile.agent_id
+      cleanup(agent_id)
+
+      legacy = %{profile | metadata: Map.delete(profile.metadata, "exact_template_policy")}
+      assert :ok = Arbor.Agent.ProfileStore.store_profile(legacy)
+
+      assert {:ok, ^agent_id} = Lifecycle.ensure_identity(agent_id)
+      assert {:ok, migrated} = Lifecycle.restore(agent_id)
+      assert %{} = migrated.metadata["exact_template_policy"]
+    end
+
+    test "security regression: a missing exact template fails closed and removes authority" do
+      assert {:ok, profile} =
+               Lifecycle.create("Missing Template Probe", template: "pipeline_architect")
+
+      agent_id = profile.agent_id
+      cleanup(agent_id)
+
+      assert :ok =
+               Arbor.Agent.ProfileStore.store_profile(%{
+                 profile
+                 | template: "missing_pipeline_architect"
+               })
+
+      assert {:error, _reason} = Lifecycle.ensure_identity(agent_id)
+      assert {:ok, :suspended} = Arbor.Security.identity_status(agent_id)
+      assert {:ok, []} = Arbor.Security.list_capabilities(agent_id)
+    end
+
+    test "security regression: exact reconciliation revokes capabilities widened after creation" do
+      assert {:ok, profile} =
+               Lifecycle.create("Widened Capability Probe", template: "pipeline_architect")
+
+      agent_id = profile.agent_id
+      cleanup(agent_id)
+
+      assert {:ok, _capability} =
+               Arbor.Security.grant(principal: agent_id, resource: "arbor://shell/exec")
+
+      assert {:ok, ^agent_id} = Lifecycle.ensure_identity(agent_id)
+      assert {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
+      refute "arbor://shell/exec" in Enum.map(caps, & &1.resource_uri)
+    end
+
     test "security regression: creation fails when a declared trust preset cannot be stored" do
       before_ids = Lifecycle.list_agents() |> Enum.map(& &1.agent_id) |> MapSet.new()
 
