@@ -144,6 +144,48 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
              ExecutionManifest.verify(expected, digest, drifted_graph, catalog, graph_hash)
   end
 
+  test "security regression: same-module hot reload cannot satisfy a handler BEAM binding" do
+    graph = compiled_graph!()
+    graph_hash = sha256(@dot)
+
+    {:ok, {manifest, _digest}} =
+      ExecutionManifest.build(graph, catalog!([BindingOriginalAction]), graph_hash)
+
+    {:ok, handler_bindings} = ExecutionManifest.handler_binding_index(manifest)
+    handler_type = "start"
+    handler_module = graph.nodes["start"].handler_module
+
+    {^handler_module, original_beam, original_filename} =
+      :code.get_object_code(handler_module)
+
+    original_md5 = apply(handler_module, :module_info, [:md5])
+
+    on_exit(fn -> restore_loaded_module!(handler_module, original_filename, original_beam) end)
+
+    replacement_source = """
+    defmodule #{inspect(handler_module)} do
+      def execute(_node, _context, _graph, _opts), do: raise("replacement executed")
+      def idempotency, do: :side_effecting
+    end
+    """
+
+    [{^handler_module, _replacement_beam}] = Code.compile_string(replacement_source)
+
+    refute apply(handler_module, :module_info, [:md5]) == original_md5
+
+    assert {^handler_module, code_path_beam, _filename} =
+             :code.get_object_code(handler_module)
+
+    assert :beam_lib.md5(code_path_beam) == {:ok, {handler_module, original_md5}}
+
+    assert {:error, {:execution_module_loaded_code_mismatch, {:handler, ^handler_type}}} =
+             ExecutionManifest.verify_handler_module(
+               handler_type,
+               handler_module,
+               handler_bindings
+             )
+  end
+
   test "security regression: child subset covers handlers, capability URIs, and egress" do
     graph = compiled_graph!()
     graph_hash = sha256(@dot)
@@ -205,5 +247,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     value
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
+  end
+
+  defp restore_loaded_module!(module, filename, beam) do
+    :code.purge(module)
+    {:module, ^module} = :code.load_binary(module, filename, beam)
+    :code.purge(module)
+    :ok
   end
 end

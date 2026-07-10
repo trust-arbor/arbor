@@ -251,6 +251,50 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     refute_receive :replacement_action_executed
   end
 
+  test "security regression: approval retry rejects a replaced workdir inode" do
+    agent_id = "agent_approval_workdir_drift_#{System.unique_integer([:positive])}"
+    action_module = Arbor.Actions.Session.Classify
+    resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
+    {:ok, binding} = Arbor.Actions.runtime_descriptor(action_module)
+
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "approval_retry_workdir_#{System.unique_integer([:positive])}"
+      )
+
+    displaced = root <> "_displaced"
+    File.mkdir_p!(root)
+
+    assert {:ok, capability} =
+             Arbor.Security.grant(principal: agent_id, resource: resource_uri)
+
+    on_exit(fn ->
+      Arbor.Security.revoke(capability.id)
+      File.rm_rf(root)
+      File.rm_rf(displaced)
+    end)
+
+    execution =
+      Task.async(fn ->
+        ActionsExecutor.execute(
+          "session_classify",
+          %{"input" => "must not run in a replacement workdir"},
+          root,
+          [agent_id: agent_id] ++ binding_opts(binding)
+        )
+      end)
+
+    request = await_pending_request(agent_id)
+    File.rename!(root, displaced)
+    File.mkdir_p!(root)
+    Process.sleep(25)
+    assert :ok = Arbor.Comms.InteractionRouter.respond(request.request_id, :approved)
+
+    assert {:error, message} = Task.await(execution, 3_000)
+    assert message =~ "run_authorization_workdir_changed"
+  end
+
   defp await_pending_request(agent_id, attempts \\ 100)
 
   defp await_pending_request(_agent_id, 0), do: flunk("approval request did not appear")

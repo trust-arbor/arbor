@@ -262,6 +262,46 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandlerTest do
       assert {:ok, ^outside} = File.read_link(source_dir)
     end
 
+    test "security regression: opened descriptor defeats a restored-path graph double-swap", %{
+      tmp_dir: tmp_dir
+    } do
+      source_dir = Path.join(tmp_dir, "descriptor_source")
+      held_dir = Path.join(tmp_dir, "descriptor_source_held")
+      alternate_dir = Path.join(tmp_dir, "descriptor_source_alternate")
+      source = Path.join(source_dir, "child.dot")
+      alternate_source = Path.join(alternate_dir, "child.dot")
+      alternate_dot = "digraph { broken syntax {{{{"
+
+      File.mkdir_p!(source_dir)
+      File.mkdir_p!(alternate_dir)
+      File.write!(source, @minimal_child)
+      File.write!(alternate_source, alternate_dot)
+
+      install_alternate = fn _resolved_path ->
+        File.rename!(source_dir, held_dir)
+        File.rename!(alternate_dir, source_dir)
+      end
+
+      restore_original = fn _resolved_path ->
+        File.rename!(source_dir, alternate_dir)
+        File.rename!(held_dir, source_dir)
+      end
+
+      outcome =
+        run(
+          "graph.invoke",
+          %{"workdir" => tmp_dir},
+          %{"graph_file" => "descriptor_source/child.dot"},
+          source_file_after_open_hook: install_alternate,
+          source_file_post_read_hook: restore_original
+        )
+
+      assert outcome.status == :success
+      assert outcome.context_updates["subgraph.test_node.status"] == "success"
+      assert File.read!(source) == @minimal_child
+      assert File.read!(alternate_source) == alternate_dot
+    end
+
     test "executes graph from context key" do
       outcome =
         run(

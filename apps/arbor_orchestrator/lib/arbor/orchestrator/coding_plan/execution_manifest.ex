@@ -12,6 +12,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
 
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Handlers.Registry
+  alias Arbor.Orchestrator.CodingPlan.LoadedModuleIdentity
   alias Arbor.Contracts.Security.Classification
 
   @version 2
@@ -432,16 +433,14 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   end
 
   defp module_identity(module, error_context) when is_atom(module) do
-    case :code.get_object_code(module) do
-      {^module, beam, _filename} when is_binary(beam) and byte_size(beam) > 0 ->
-        {:ok,
-         %{
-           "module" => Atom.to_string(module),
-           "beam_sha256" =>
-             beam |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
-         }}
+    case LoadedModuleIdentity.sha256(module) do
+      {:ok, beam_sha256} ->
+        {:ok, %{"module" => Atom.to_string(module), "beam_sha256" => beam_sha256}}
 
-      _other ->
+      {:error, :loaded_object_code_mismatch} ->
+        {:error, {:execution_module_loaded_code_mismatch, error_context}}
+
+      {:error, _reason} ->
         {:error, {:execution_module_beam_unavailable, error_context}}
     end
   end

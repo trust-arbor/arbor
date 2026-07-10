@@ -23,7 +23,10 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   require Logger
 
+  alias Arbor.Common.SafePath
   alias Arbor.Orchestrator.CodingPlan.ExecutionManifest
+  alias Arbor.Orchestrator.Engine.RunAuthorization
+  alias Arbor.Orchestrator.Graph
 
   @doc """
   Execute an action by name with optional agent identity for authorization.
@@ -134,7 +137,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
          signer
        ) do
     with {:ok, pinned_binding} <- verify_pinned_action(action_module, name, opts),
-         {:ok, execution_binding_context} <- execution_binding_context(opts) do
+         {:ok, execution_binding_context} <- execution_binding_context(opts),
+         {:ok, retry_workdir_guard} <- capture_retry_workdir_guard(workdir, agent_id) do
       params =
         args
         |> atomize_known_keys(action_module)
@@ -160,6 +164,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
           context =
             %{auth_context: auth_context, workdir: workdir}
             |> Map.merge(execution_binding_context)
+            |> Map.put(:retry_workdir_guard, retry_workdir_guard)
             |> maybe_put_context(:task_id, task_id)
             |> maybe_put_context(:session_id, session_id)
             |> maybe_put_context(:caller_id, caller_id || agent_id)
@@ -501,21 +506,19 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   defp retry_execution(agent_id, action_module, params, context, name, request_id) do
     with :ok <- verify_retry_resolution(name, action_module),
          :ok <- verify_retry_binding(name, action_module, context),
-         :ok <- verify_retry_caller_authority(action_module, params, agent_id, context) do
-      resource = Arbor.Actions.canonical_uri_for(action_module, params)
-
-      context =
-        Map.put(context, :approved_invocation, %{
-          request_id: request_id,
-          principal_id: agent_id,
-          resource_uri: resource,
-          decision: :approved
-        })
-
-      # The signed request that drove the escalated authorize is single-use.
-      context = resign_for_retry(context, action_module, params)
-
-      case Arbor.Actions.authorize_and_execute(agent_id, action_module, params, context) do
+         :ok <- verify_retry_caller_authority(action_module, params, agent_id, context),
+         resource = Arbor.Actions.canonical_uri_for(action_module, params),
+         retry_context =
+           Map.put(context, :approved_invocation, %{
+             request_id: request_id,
+             principal_id: agent_id,
+             resource_uri: resource,
+             decision: :approved
+           }),
+         # The signed request that drove the escalated authorize is single-use.
+         retry_context = resign_for_retry(retry_context, action_module, params),
+         :ok <- verify_retry_workdir(retry_context) do
+      case Arbor.Actions.authorize_and_execute(agent_id, action_module, params, retry_context) do
         {:ok, result} ->
           {:ok, format_result(result)}
 
@@ -580,6 +583,39 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
     verify_caller_authority(action_module, params, agent_id, caller_id, opts)
   end
+
+  defp capture_retry_workdir_guard(workdir, agent_id) do
+    with {:ok, canonical_workdir} <- SafePath.resolve_real(workdir),
+         {:ok, authority} <-
+           RunAuthorization.new(
+             %Graph{id: "ActionsExecutorRetryWorkdir", compiled: true},
+             agent_id: agent_id,
+             workdir: canonical_workdir
+           ) do
+      # Retain the same digest-bound workdir identity used by Engine runs
+      # from the first attempt through the otherwise unbounded approval wait.
+      {:ok, %{authority: authority, supplied_workdir: workdir}}
+    else
+      _other -> {:error, :retry_workdir_binding_unavailable}
+    end
+  end
+
+  defp verify_retry_workdir(%{
+         retry_workdir_guard: %{
+           authority: %RunAuthorization{} = authority,
+           supplied_workdir: supplied_workdir
+         }
+       }) do
+    with {:ok, resolved_workdir} <- SafePath.resolve_real(supplied_workdir),
+         true <- resolved_workdir == authority.workdir,
+         :ok <- RunAuthorization.verify_workdir(authority) do
+      :ok
+    else
+      _other -> {:error, :run_authorization_workdir_changed}
+    end
+  end
+
+  defp verify_retry_workdir(_context), do: {:error, :missing_retry_workdir_binding}
 
   defp format_denial_reason(decision) do
     concerns = Map.get(decision, :primary_concerns, [])

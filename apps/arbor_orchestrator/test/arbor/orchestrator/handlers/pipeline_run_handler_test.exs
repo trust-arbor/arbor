@@ -232,6 +232,47 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandlerTest do
       assert {:ok, ^outside} = File.read_link(source_dir)
       refute outcome.context_updates["pipeline.ran.component_race"] == true
     end
+
+    test "security regression: opened descriptor defeats a restored-path source double-swap" do
+      source_dir = Path.join(@test_dir, "descriptor_source")
+      held_dir = Path.join(@test_dir, "descriptor_source_held")
+      alternate_dir = Path.join(@test_dir, "descriptor_source_alternate")
+      source = Path.join(source_dir, "child.dot")
+
+      File.mkdir_p!(source_dir)
+      File.mkdir_p!(alternate_dir)
+      File.write!(source, @child_dot)
+      File.write!(Path.join(alternate_dir, "child.dot"), @invalid_dot)
+
+      install_alternate = fn _resolved_path ->
+        File.rename!(source_dir, held_dir)
+        File.rename!(alternate_dir, source_dir)
+      end
+
+      restore_original = fn _resolved_path ->
+        File.rename!(source_dir, alternate_dir)
+        File.rename!(held_dir, source_dir)
+      end
+
+      node = %Node{
+        id: "descriptor_double_swap",
+        attrs: %{"type" => "pipeline.run", "source_file" => "descriptor_source/child.dot"}
+      }
+
+      outcome =
+        PipelineRunHandler.execute(
+          node,
+          Context.new(%{"workdir" => @test_dir}),
+          %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}},
+          source_file_after_open_hook: install_alternate,
+          source_file_post_read_hook: restore_original
+        )
+
+      assert outcome.status == :success
+      assert outcome.context_updates["pipeline.ran.descriptor_double_swap"] == true
+      assert File.read!(source) == @child_dot
+      assert File.read!(Path.join(alternate_dir, "child.dot")) == @invalid_dot
+    end
   end
 
   describe "execute/4 - child context promotion" do

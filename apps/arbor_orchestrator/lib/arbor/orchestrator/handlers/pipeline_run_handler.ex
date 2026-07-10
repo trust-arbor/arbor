@@ -158,23 +158,42 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandler do
 
   defp read_source_file(path, workdir, opts) do
     with {:ok, resolved} <- resolve_source_file(path, workdir),
-         {:ok, identity} <- regular_file_identity(resolved.real_path),
-         {:ok, content} <- File.read(resolved.real_path),
-         :ok <- run_post_read_hook(opts, resolved.real_path),
-         :ok <- verify_source_file(resolved, identity, byte_size(content)) do
-      {:ok, content}
+         {:ok, authorized_identity} <- regular_file_identity(resolved.real_path),
+         {:ok, io_device} <- File.open(resolved.real_path, [:read, :binary, :raw]) do
+      try do
+        read_open_source_file(io_device, resolved, authorized_identity, opts)
+      after
+        File.close(io_device)
+      end
     end
   end
 
-  defp verify_source_file(resolved, expected_identity, content_size) do
+  defp read_open_source_file(io_device, resolved, authorized_identity, opts) do
+    with {:ok, opened_identity} <- open_file_identity(io_device),
+         true <- opened_identity == authorized_identity,
+         :ok <- run_source_file_hook(opts, :source_file_after_open_hook, resolved.real_path),
+         {:ok, content} <- read_open_file(io_device),
+         {:ok, post_read_identity} <- open_file_identity(io_device),
+         true <- post_read_identity == opened_identity,
+         true <- byte_size(content) == opened_identity.size,
+         :ok <- run_source_file_hook(opts, :source_file_post_read_hook, resolved.real_path),
+         :ok <- verify_source_file(resolved, opened_identity) do
+      {:ok, content}
+    else
+      false -> {:error, :source_file_changed_during_read}
+      {:error, _reason} = error -> error
+      _other -> {:error, :source_file_changed_during_read}
+    end
+  end
+
+  defp verify_source_file(resolved, expected_identity) do
     with {:ok, canonical_root} <- SafePath.resolve_real(resolved.expanded_workdir),
          true <- canonical_root == resolved.canonical_root,
          {:ok, real_path} <- SafePath.resolve_real(resolved.lexical_path),
          true <- real_path == resolved.real_path,
          {:ok, ^real_path} <- SafePath.resolve_within(real_path, canonical_root),
          {:ok, identity} <- regular_file_identity(real_path),
-         true <- identity == expected_identity,
-         true <- content_size == identity.size do
+         true <- identity == expected_identity do
       :ok
     else
       _other -> {:error, :source_file_changed_during_read}
@@ -202,8 +221,42 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandler do
     end
   end
 
-  defp run_post_read_hook(opts, real_path) do
-    case Keyword.get(opts, :source_file_post_read_hook) do
+  defp open_file_identity(io_device) do
+    case :file.read_file_info(io_device, time: :posix) do
+      {:ok, file_info} ->
+        case File.Stat.from_record(file_info) do
+          %File.Stat{type: :regular} = stat ->
+            {:ok,
+             %{
+               inode: stat.inode,
+               major_device: stat.major_device,
+               minor_device: stat.minor_device,
+               size: stat.size,
+               mtime: stat.mtime,
+               ctime: stat.ctime
+             }}
+
+          %File.Stat{} ->
+            {:error, :source_not_regular_file}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp read_open_file(io_device) do
+    case IO.binread(io_device, :eof) do
+      content when is_binary(content) -> {:ok, content}
+      :eof -> {:ok, ""}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Hooks are function-valued Engine opts used only by deterministic tests;
+  # graph attributes and graph context cannot supply executable hook values.
+  defp run_source_file_hook(opts, hook_name, real_path) do
+    case Keyword.get(opts, hook_name) do
       nil ->
         :ok
 
@@ -212,7 +265,7 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandler do
         :ok
 
       _invalid ->
-        {:error, :invalid_source_file_post_read_hook}
+        {:error, :invalid_source_file_read_hook}
     end
   end
 
