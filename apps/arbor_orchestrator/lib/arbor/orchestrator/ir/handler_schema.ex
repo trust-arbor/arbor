@@ -53,10 +53,22 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
             provider_constraint: nil,
             refinements: %{}
 
-  @doc "Returns the schema for a handler type, or a permissive default for unknown types."
+  alias Arbor.Orchestrator.Stdlib.Aliases
+
+  @doc "Returns the direct or canonical schema for a handler type, or a permissive default."
   @spec for_type(String.t()) :: t()
   def for_type(handler_type) do
-    Map.get(schemas(), handler_type, default_schema(handler_type))
+    schemas = schemas()
+
+    case Map.fetch(schemas, handler_type) do
+      {:ok, schema} ->
+        schema
+
+      :error ->
+        handler_type
+        |> Aliases.canonical_type()
+        |> then(&Map.get(schemas, &1, default_schema(handler_type)))
+    end
   end
 
   @doc "Returns all known handler type names."
@@ -274,8 +286,8 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
             "workdir" => :string,
             "max_iterations" => :integer
           },
-          [],
-          :public,
+          ["arbor://action/pipeline/run"],
+          :restricted,
           [port("context", :any, :public)],
           [port("context", :any, :public)],
           sensitivity: :public
@@ -388,8 +400,8 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
           [],
           ["max_iterations"],
           %{"max_iterations" => :integer},
-          [],
-          :public,
+          ["arbor://action/pipeline/run"],
+          :restricted,
           [port("context", :any, :public)],
           [port("context", :any, :public)],
           sensitivity: :public
@@ -529,9 +541,9 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
           # P0-3: pipeline.run nests a child DOT graph inside the current
           # execution context. Pre-fix the schema required no capability,
           # which let any graph spawn an arbitrary sub-pipeline. The
-          # arbor://pipeline/run cap binds child-graph execution to an
+          # arbor://action/pipeline/run cap binds child-graph execution to an
           # explicit grant.
-          ["arbor://pipeline/run"],
+          ["arbor://action/pipeline/run"],
           :restricted,
           [port("context", :any, :public)],
           [port("pipeline.child_status", :string, :public)],

@@ -3,6 +3,7 @@ defmodule Arbor.Orchestrator.IR.HandlerSchemaTest do
   @moduletag :fast
 
   alias Arbor.Orchestrator.IR.HandlerSchema
+  alias Arbor.Orchestrator.Stdlib.Aliases
 
   describe "for_type/1" do
     test "returns schema for known types" do
@@ -124,7 +125,22 @@ defmodule Arbor.Orchestrator.IR.HandlerSchemaTest do
   end
 
   describe "composition primitive capabilities (P0-3 regression)" do
-    test "security regression (P0-3): pipeline.run requires arbor://pipeline/run capability" do
+    test "security regression: every executable composition schema requires pipeline.run" do
+      for type <- Aliases.aliases_for("compose") do
+        schema = HandlerSchema.for_type(type)
+
+        assert "arbor://action/pipeline/run" in schema.capabilities,
+               "#{type} must require the graph-composition capability; got " <>
+                 inspect(schema.capabilities)
+
+        assert schema.default_classification == :restricted
+      end
+
+      assert HandlerSchema.for_type("graph.compose").handler_type == "compose"
+      assert HandlerSchema.for_type("graph.invoke").handler_type == "compose"
+    end
+
+    test "security regression (P0-3): pipeline.run uses the canonical action URI" do
       # P0-3: pre-fix the pipeline.run schema declared `capabilities: []`,
       # meaning a graph could embed an arbitrary child pipeline without any
       # capability grant. Combined with the composite-handler auth bypass
@@ -132,8 +148,8 @@ defmodule Arbor.Orchestrator.IR.HandlerSchemaTest do
       # unrestricted escape hatch into child-graph execution.
       schema = HandlerSchema.for_type("pipeline.run")
 
-      assert "arbor://pipeline/run" in schema.capabilities,
-             "pipeline.run schema must require arbor://pipeline/run — P0-3 regression. " <>
+      assert "arbor://action/pipeline/run" in schema.capabilities,
+             "pipeline.run schema must require arbor://action/pipeline/run — P0-3 regression. " <>
                "Got capabilities: #{inspect(schema.capabilities)}"
 
       assert schema.default_classification == :restricted,

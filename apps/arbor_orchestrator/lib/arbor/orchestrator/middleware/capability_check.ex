@@ -14,7 +14,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
 
   ## Token Assigns
 
-    - `:agent_id` — the agent ID to check capabilities for (defaults to `"agent_system"`)
+    - `:agent_id` — the execution principal bound by `RunAuthorization`
     - `:skip_capability_check` — set to true to bypass this middleware
   """
 
@@ -23,6 +23,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
   alias Arbor.Common.SafePath
   alias Arbor.Orchestrator.Engine.{Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Handlers.Registry
+  alias Arbor.Orchestrator.Stdlib.Aliases
 
   @impl true
   def before_node(token) do
@@ -45,6 +46,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
   end
 
   @orchestrator_uri_prefix "arbor://orchestrator/execute/"
+  @pipeline_run_uri "arbor://action/pipeline/run"
 
   @doc """
   Returns the list of capability URIs required for a node.
@@ -91,7 +93,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
        do: [shell_or_exec_resource(node)]
 
   defp normalize_capability_uri("arbor://pipeline/run", _node),
-    do: ["arbor://action/pipeline/run"]
+    do: [@pipeline_run_uri]
 
   defp normalize_capability_uri(cap, _node) when is_binary(cap) do
     if String.starts_with?(cap, "arbor://") do
@@ -273,11 +275,12 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
       type == "eval.dataset" ->
         Map.get(attrs, "dataset")
 
-      type in ["graph.invoke", "compose"] ->
-        Map.get(attrs, "graph_file") || Map.get(attrs, "file")
-
-      type == "pipeline.run" ->
-        Map.get(attrs, "source_file") || Map.get(attrs, "file")
+      composition_node?(node) ->
+        case composition_file_binding(node) do
+          {:bound, path} -> path
+          {:invalid, value} -> {:invalid_composition_file_binding, value}
+          :none -> nil
+        end
 
       type == "exec" and Map.get(attrs, "target") == "action" ->
         Map.get(attrs, "param.path") || Map.get(attrs, "arg.path") ||
@@ -306,13 +309,11 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
       type == "exec" ->
         [shell_or_exec_resource(node)]
 
-      type in ["graph.invoke", "compose"] and
-          present?(Map.get(attrs, "graph_file") || Map.get(attrs, "file")) ->
-        ["arbor://fs/read"]
-
-      type == "pipeline.run" and
-          present?(Map.get(attrs, "source_file") || Map.get(attrs, "file")) ->
-        ["arbor://action/pipeline/run", "arbor://fs/read"]
+      composition_node?(node) ->
+        case composition_file_binding(node) do
+          :none -> [@pipeline_run_uri]
+          {_binding, _value} -> [@pipeline_run_uri, "arbor://fs/read"]
+        end
 
       true ->
         []
@@ -353,6 +354,62 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
 
   defp action_resource(_action), do: @orchestrator_uri_prefix <> "exec"
 
+  defp composition_node?(node) do
+    case Registry.node_type(node) do
+      type when is_binary(type) -> Registry.canonical_type(type) == "compose"
+      _ -> false
+    end
+  end
+
+  defp composition_file_binding(node) do
+    attrs = composition_attrs(node)
+
+    node
+    |> composition_file_keys()
+    |> Enum.find_value(:none, fn key ->
+      if Map.has_key?(attrs, key) do
+        case Map.get(attrs, key) do
+          value when is_binary(value) ->
+            if String.valid?(value) and String.trim(value) != "" do
+              {:bound, value}
+            else
+              {:invalid, value}
+            end
+
+          value ->
+            {:invalid, value}
+        end
+      else
+        false
+      end
+    end)
+  end
+
+  defp composition_file_keys(node) do
+    type = Registry.node_type(node)
+    attrs = composition_attrs(node)
+
+    mode =
+      case type do
+        "pipeline.run" -> "pipeline"
+        "graph.compose" -> "compose"
+        "graph.invoke" -> "invoke"
+        _ -> Map.get(attrs, "mode", "invoke")
+      end
+
+    case mode do
+      "pipeline" -> ["source_file", "file", "graph_file"]
+      _ -> ["graph_file", "file", "source_file"]
+    end
+  end
+
+  defp composition_attrs(node) do
+    case Aliases.resolve(Registry.node_type(node)) do
+      {_canonical, injected_attrs} -> Map.merge(injected_attrs, node.attrs)
+      :passthrough -> node.attrs
+    end
+  end
+
   defp format_authorization_error(resource, {:caller_authority_missing, caller_id}) do
     "Caller authority check failed: #{resource} for #{caller_id}"
   end
@@ -364,6 +421,4 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
   defp halt(token, message) do
     Token.halt(token, message, %Outcome{status: :fail, failure_reason: message})
   end
-
-  defp present?(value), do: is_binary(value) and String.trim(value) != ""
 end

@@ -6,6 +6,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckTest do
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Middleware.{CapabilityCheck, Token}
+  alias Arbor.Orchestrator.Stdlib.Aliases
 
   defp make_token(attrs \\ %{}, assigns \\ %{}) do
     node = %Node{id: "cap_node", attrs: Map.merge(%{"type" => "compute"}, attrs)}
@@ -192,6 +193,61 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckTest do
                "arbor://orchestrator/execute/bare_cap",
                "arbor://memory/write/notes"
              ]
+    end
+
+    test "security regression: composition aliases and modes always require pipeline.run" do
+      for type <- Aliases.aliases_for("compose") do
+        node = %Node{id: type, attrs: %{"type" => type}}
+
+        assert "arbor://action/pipeline/run" in CapabilityCheck.capability_resources(node),
+               "missing composition capability for #{inspect(node.attrs)}"
+      end
+    end
+
+    test "file-backed composition additionally requires fs/read" do
+      for node <- [
+            %Node{
+              id: "graph_file",
+              attrs: %{"type" => "graph.invoke", "graph_file" => "child.dot"}
+            },
+            %Node{
+              id: "canonical_graph_file",
+              attrs: %{"type" => "compose", "mode" => "invoke", "graph_file" => "child.dot"}
+            },
+            %Node{
+              id: "pipeline_file",
+              attrs: %{"type" => "pipeline.run", "source_file" => "child.dot"}
+            },
+            %Node{
+              id: "canonical_pipeline_file",
+              attrs: %{"type" => "compose", "mode" => "pipeline", "source_file" => "child.dot"}
+            }
+          ] do
+        resources = CapabilityCheck.capability_resources(node)
+        assert "arbor://action/pipeline/run" in resources
+        assert "arbor://fs/read" in resources
+      end
+
+      context_backed = %Node{
+        id: "context_graph",
+        attrs: %{"type" => "graph.compose", "source_key" => "child_dot"}
+      }
+
+      assert CapabilityCheck.capability_resources(context_backed) == [
+               "arbor://action/pipeline/run"
+             ]
+    end
+
+    test "file-backed composition aliases require fs/read after alias injection" do
+      for type <- Aliases.aliases_for("compose"),
+          {_canonical, injected} <- [Aliases.resolve(type)],
+          Enum.any?(["graph_file", "file", "source_file"], &Map.has_key?(injected, &1)) do
+        node = %Node{id: type, attrs: %{"type" => type}}
+        resources = CapabilityCheck.capability_resources(node)
+
+        assert "arbor://action/pipeline/run" in resources
+        assert "arbor://fs/read" in resources, "#{type} must authorize its injected graph file"
+      end
     end
   end
 end

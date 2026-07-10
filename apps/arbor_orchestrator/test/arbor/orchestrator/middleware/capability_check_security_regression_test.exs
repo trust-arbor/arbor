@@ -27,6 +27,13 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
     def authorize(_agent, _resource, _action, _opts), do: {:error, :no_capability}
   end
 
+  defmodule LobbyOnlySecurity do
+    def authorize(_agent, "arbor://orchestrator/execute/" <> _rest, _action, _opts),
+      do: {:ok, :authorized}
+
+    def authorize(_agent, _resource, _action, _opts), do: {:error, :no_capability}
+  end
+
   setup do
     prev_mod = Application.get_env(:arbor_orchestrator, :security_module)
     prev_override = Application.get_env(:arbor_orchestrator, :security_available_override)
@@ -44,8 +51,8 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
   defp restore(key, nil), do: Application.delete_env(:arbor_orchestrator, key)
   defp restore(key, val), do: Application.put_env(:arbor_orchestrator, key, val)
 
-  defp token do
-    node = %Node{id: "n", attrs: %{"type" => "compute"}}
+  defp token(attrs \\ %{}) do
+    node = %Node{id: "n", attrs: Map.merge(%{"type" => "compute"}, attrs)}
     graph = %Graph{nodes: %{"n" => node}, edges: [], attrs: %{}}
     {:ok, authority} = RunAuthorization.new(graph, agent_id: "agent_test", workdir: File.cwd!())
 
@@ -87,6 +94,33 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
     test "control: a denial halts" do
       Application.put_env(:arbor_orchestrator, :security_module, DeniedSecurity)
       assert CapabilityCheck.before_node(token()).halted
+    end
+  end
+
+  describe "security regression: graph composition has an independent capability floor" do
+    test "an orchestrator-lobby-only principal cannot compose a child pipeline" do
+      Application.put_env(:arbor_orchestrator, :security_module, LobbyOnlySecurity)
+
+      result =
+        CapabilityCheck.before_node(token(%{"type" => "graph.compose", "source_key" => "child"}))
+
+      assert result.halted
+      assert result.outcome.status == :fail
+      assert result.outcome.failure_reason =~ "arbor://action/pipeline/run"
+    end
+
+    test "malformed file-backed composition bindings fail closed" do
+      Application.put_env(:arbor_orchestrator, :security_module, GrantedSecurity)
+
+      for graph_file <- [nil, "", <<255>>, 123] do
+        result =
+          CapabilityCheck.before_node(
+            token(%{"type" => "graph.invoke", "graph_file" => graph_file})
+          )
+
+        assert result.halted
+        assert result.outcome.failure_reason =~ "invalid_file_path"
+      end
     end
   end
 end

@@ -13,6 +13,9 @@ defmodule Arbor.LLM.ToolLoop do
     * `:on_tool_call` - Optional callback `fn name, args, result -> :ok end`
     * `:tools` - Tool definitions (default: `CodingTools.definitions()`)
     * `:tool_executor` - Module implementing `execute/3` (default: `CodingTools`)
+    * `:authorization` - Marks an Engine-authorized run. Requires immutable
+      `:execution_principal`, `:caller_id`, `:author_id`, `:task_id`, and
+      `:session_id` bindings (the last two may be `nil`).
 
   ## Example
 
@@ -49,37 +52,143 @@ defmodule Arbor.LLM.ToolLoop do
 
   @spec run(Client.t(), Request.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(client, %Request{} = request, opts \\ []) do
-    max_turns = Keyword.get(opts, :max_turns, @default_max_turns)
-    workdir = Keyword.get(opts, :workdir, ".")
-    on_tool_call = Keyword.get(opts, :on_tool_call)
-    tool_executor = Keyword.get(opts, :tool_executor, ArborActionsExecutor)
-    agent_id = Keyword.get(opts, :agent_id, "system")
+    with {:ok, identity} <- execution_identity(opts) do
+      max_turns = Keyword.get(opts, :max_turns, @default_max_turns)
+      workdir = Keyword.get(opts, :workdir, ".")
+      on_tool_call = Keyword.get(opts, :on_tool_call)
+      tool_executor = Keyword.get(opts, :tool_executor, ArborActionsExecutor)
+      signer = Keyword.get(opts, :signer)
 
-    signer = Keyword.get(opts, :signer)
-    tools = Keyword.get(opts, :tools, ArborActionsExecutor.definitions())
-    request = %{request | tools: tools}
+      tools =
+        case Keyword.fetch(opts, :tools) do
+          {:ok, tools} -> tools
+          :error -> ArborActionsExecutor.definitions()
+        end
 
-    loop(client, request, opts, %{
-      max_turns: max_turns,
-      workdir: workdir,
-      on_tool_call: on_tool_call,
-      tool_executor: tool_executor,
-      agent_id: agent_id,
-      signer: signer,
-      turn: 0,
-      total_usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0},
-      discovered_tools: [],
-      accumulated_text: "",
-      # Steering: an optional 0-arity callback that returns the next queued user message to
-      # fold into the conversation at an iteration boundary (or nil when none). Injected by the
-      # caller (the Session) so the tool loop stays generic — it never reaches into the Session.
-      on_steer_check: Keyword.get(opts, :on_steer_check),
-      # Per-tool CONSECUTIVE failure counter (reset on success). Backs the runaway guard:
-      # exponential backoff before retrying a recently-failed tool, and a hard cap that stops
-      # executing a tool that keeps failing so a broken/rate-limited tool can't loop forever.
-      tool_failures: %{}
-    })
+      request = %{request | tools: tools}
+
+      loop(client, request, opts, %{
+        max_turns: max_turns,
+        workdir: workdir,
+        on_tool_call: on_tool_call,
+        tool_executor: tool_executor,
+        agent_id: identity.execution_principal,
+        executor_opts: identity.executor_opts,
+        signer: signer,
+        turn: 0,
+        total_usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0},
+        discovered_tools: [],
+        accumulated_text: "",
+        # Steering: an optional 0-arity callback that returns the next queued user message to
+        # fold into the conversation at an iteration boundary (or nil when none). Injected by the
+        # caller (the Session) so the tool loop stays generic — it never reaches into the Session.
+        on_steer_check: Keyword.get(opts, :on_steer_check),
+        # Per-tool CONSECUTIVE failure counter (reset on success). Backs the runaway guard:
+        # exponential backoff before retrying a recently-failed tool, and a hard cap that stops
+        # executing a tool that keeps failing so a broken/rate-limited tool can't loop forever.
+        tool_failures: %{}
+      })
+    end
   end
+
+  defp execution_identity(opts) do
+    if Keyword.get(opts, :authorization, false) == true do
+      authorized_execution_identity(opts)
+    else
+      execution_principal = Keyword.get(opts, :agent_id, "system")
+
+      executor_opts =
+        [agent_id: execution_principal]
+        |> maybe_put_executor_opt(:caller_id, Keyword.get(opts, :caller_id))
+        |> maybe_put_executor_opt(:author_id, Keyword.get(opts, :author_id))
+        |> maybe_put_executor_opt(:task_id, Keyword.get(opts, :task_id))
+        |> maybe_put_executor_opt(:session_id, Keyword.get(opts, :session_id))
+
+      {:ok, %{execution_principal: execution_principal, executor_opts: executor_opts}}
+    end
+  end
+
+  defp authorized_execution_identity(opts) do
+    with {:ok, execution_principal} <- required_identity(opts, :execution_principal),
+         {:ok, caller_id} <- required_identity(opts, :caller_id),
+         {:ok, author_id} <- required_identity(opts, :author_id),
+         {:ok, task_id} <- required_scope_binding(opts, :task_id),
+         {:ok, session_id} <- required_scope_binding(opts, :session_id) do
+      {:ok,
+       %{
+         execution_principal: execution_principal,
+         executor_opts:
+           [
+             execution_principal: execution_principal,
+             agent_id: execution_principal,
+             caller_id: caller_id,
+             author_id: author_id,
+             task_id: task_id,
+             session_id: session_id
+           ]
+           |> forward_immutable_execution_bindings(opts)
+       }}
+    end
+  end
+
+  defp required_identity(opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} ->
+        validate_authorized_id(value, key)
+
+      :error ->
+        {:error, {:missing_authorized_tool_binding, key}}
+    end
+  end
+
+  defp required_scope_binding(opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, value} ->
+        validate_authorized_id(value, key)
+
+      :error ->
+        {:error, {:missing_authorized_tool_binding, key}}
+    end
+  end
+
+  defp validate_authorized_id(value, key) when is_binary(value) do
+    if String.valid?(value) do
+      trimmed = String.trim(value)
+
+      if trimmed != "" and not String.contains?(trimmed, <<0>>) do
+        {:ok, trimmed}
+      else
+        {:error, {:invalid_authorized_tool_binding, key}}
+      end
+    else
+      {:error, {:invalid_authorized_tool_binding, key}}
+    end
+  end
+
+  defp validate_authorized_id(_value, key), do: {:error, {:invalid_authorized_tool_binding, key}}
+
+  defp forward_immutable_execution_bindings(executor_opts, opts) do
+    Enum.reduce(
+      [
+        :execution_manifest,
+        :execution_manifest_digest,
+        :pinned_action_bindings,
+        :pinned_handler_bindings
+      ],
+      executor_opts,
+      fn key, acc ->
+        if Keyword.has_key?(opts, key),
+          do: Keyword.put(acc, key, Keyword.fetch!(opts, key)),
+          else: acc
+      end
+    )
+  end
+
+  defp maybe_put_executor_opt(opts, _key, nil), do: opts
+  defp maybe_put_executor_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp loop(client, request, _opts, %{turn: turn, max_turns: max} = state)
        when turn >= max do
@@ -374,9 +483,7 @@ defmodule Arbor.LLM.ToolLoop do
         # canonical URI (including params/agent_id scoping) after resolving the
         # action module. Pre-signing here used a different URI path that could
         # mismatch with what authorize_and_execute expects.
-        exec_opts =
-          [agent_id: state.agent_id]
-          |> maybe_add_signer(state.signer)
+        exec_opts = maybe_add_signer(state.executor_opts, state.signer)
 
         {result, duration_ms} =
           cond do

@@ -7,7 +7,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
 
   alias Arbor.Contracts.Pipeline.Response, as: PipelineResponse
 
-  alias Arbor.Orchestrator.Engine.{Context, Outcome}
+  alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
 
   alias Arbor.LLM.ArborActionsExecutor
 
@@ -819,52 +819,85 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   end
 
   defp call_llm_with_tools(client, request, node, context, on_stream, opts) do
-    workdir = Map.get(node.attrs, "workdir") || Keyword.get(opts, :workdir, ".")
-    max_turns = parse_int(Map.get(node.attrs, "max_turns"), 50)
+    with {:ok, authority_opts} <- tool_loop_authority_opts(node, context, opts) do
+      workdir =
+        Keyword.get(authority_opts, :workdir) ||
+          Map.get(node.attrs, "workdir") || Keyword.get(opts, :workdir, ".")
 
-    {tool_defs, executor} = resolve_tools(node, context, opts)
+      max_turns = parse_int(Map.get(node.attrs, "max_turns"), 50)
+      {tool_defs, executor} = resolve_tools(node, context, opts)
+      agent_id = Keyword.fetch!(authority_opts, :agent_id)
 
-    agent_id =
-      Map.get(node.attrs, "agent_id") ||
-        Context.get(context, "session.agent_id", "system")
+      # Annotate ask-mode tools with "(requires approval)" in description
+      tool_defs = annotate_ask_mode_tools(tool_defs, agent_id)
 
-    # Annotate ask-mode tools with "(requires approval)" in description
-    tool_defs = annotate_ask_mode_tools(tool_defs, agent_id)
+      # Extract signer from context — allows cryptographic identity verification
+      # for every tool call executed within the pipeline
+      signer =
+        Keyword.get(opts, :signer) ||
+          Context.get(context, "session.signer")
 
-    # Extract signer from context — allows cryptographic identity verification
-    # for every tool call executed within the pipeline
-    signer =
-      Keyword.get(opts, :signer) ||
-        Context.get(context, "session.signer")
+      tool_loop_opts =
+        [
+          workdir: workdir,
+          max_turns: max_turns,
+          tools: tool_defs,
+          tool_executor: executor,
+          signer: signer,
+          on_tool_call: build_tool_callback(opts, node.id),
+          # Steering: a 0-arity closure (from the Session) that returns the next mid-turn user
+          # message to fold in at an iteration boundary. Opts get function-stripped for RPC, so
+          # (like signer) the closure travels in the context; read opts first, then context.
+          on_steer_check:
+            Keyword.get(opts, :steer_check) || Context.get(context, "session.steer_check")
+        ]
+        |> Keyword.merge(authority_opts)
+        |> maybe_add_stream_callback(on_stream)
 
-    tool_loop_opts =
-      [
-        workdir: workdir,
-        max_turns: max_turns,
-        tools: tool_defs,
-        tool_executor: executor,
-        agent_id: agent_id,
-        signer: signer,
-        on_tool_call: build_tool_callback(opts, node.id),
-        # Steering: a 0-arity closure (from the Session) that returns the next mid-turn user
-        # message to fold in at an iteration boundary. Opts get function-stripped for RPC, so
-        # (like signer) the closure travels in the context; read opts first, then context.
-        on_steer_check:
-          Keyword.get(opts, :steer_check) || Context.get(context, "session.steer_check")
-      ]
-      |> maybe_add_stream_callback(on_stream)
+      # Phase 4+ (B4): wrap ToolLoop in a fallback loop so per-agent
+      # fallback chains apply to tool turns too. ToolLoop itself stays in
+      # arbor_llm and uses Client.complete internally — moving it would
+      # require behaviour-injection through ToolLoop too. For now we accept
+      # that tool-loop fallback only supports provider/model swaps; :runtime
+      # entries are skipped with a warning (they'd require dispatching the
+      # whole loop through a different runtime, which is incoherent for a
+      # multi-turn conversation).
+      chain = Context.get(context, "session.llm_fallback_chain", [])
+      do_call = fn req -> tool_loop_attempt(client, req, tool_loop_opts) end
+      call_with_tool_loop_fallback(do_call, request, chain)
+    end
+  end
 
-    # Phase 4+ (B4): wrap ToolLoop in a fallback loop so per-agent
-    # fallback chains apply to tool turns too. ToolLoop itself stays in
-    # arbor_llm and uses Client.complete internally — moving it would
-    # require behaviour-injection through ToolLoop too. For now we accept
-    # that tool-loop fallback only supports provider/model swaps; :runtime
-    # entries are skipped with a warning (they'd require dispatching the
-    # whole loop through a different runtime, which is incoherent for a
-    # multi-turn conversation).
-    chain = Context.get(context, "session.llm_fallback_chain", [])
-    do_call = fn req -> tool_loop_attempt(client, req, tool_loop_opts) end
-    call_with_tool_loop_fallback(do_call, request, chain)
+  defp tool_loop_authority_opts(node, context, opts) do
+    case {Keyword.get(opts, :authorization, false), Keyword.get(opts, :run_authorization)} do
+      {true, %RunAuthorization{} = authority} ->
+        {:ok,
+         [
+           authorization: true,
+           execution_principal: authority.execution_principal,
+           agent_id: authority.execution_principal,
+           caller_id: authority.caller_id,
+           author_id: authority.author_id,
+           task_id: authority.task_id,
+           session_id: authority.session_id,
+           workdir: authority.workdir,
+           execution_manifest: authority.execution_manifest,
+           execution_manifest_digest: authority.execution_manifest_digest,
+           pinned_action_bindings: authority.pinned_action_bindings,
+           pinned_handler_bindings: authority.pinned_handler_bindings
+         ]}
+
+      {true, _missing_or_invalid} ->
+        {:error, :missing_immutable_run_authorization_for_tool_loop}
+
+      {false, _authority} ->
+        agent_id =
+          Map.get(node.attrs, "agent_id") ||
+            Context.get(context, "session.agent_id", "system")
+
+        legacy_scope = Keyword.take(opts, [:caller_id, :author_id, :task_id, :session_id])
+        {:ok, [authorization: false, agent_id: agent_id] ++ legacy_scope}
+    end
   end
 
   defp tool_loop_attempt(client, request, tool_loop_opts) do
