@@ -22,13 +22,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   Production TaskStore already canonicalizes. This module therefore accepts
   only non-struct, string-keyed JSON maps at `run/3`, `task_status/2`, and
-  `cancel_task/2`. Atom keys, keywords, structs, PIDs, functions, and other
-  non-JSON values are rejected (not stringified). Unknown context keys are
-  rejected. Optional context fields are type-checked: `task_id` / `caller_id`
-  nonblank strings, `timeout` a positive integer when present, `metadata` a
-  JSON object when present. Each task receives an isolated, path-safe Engine
-  logs directory. A supplied `timeout` is forwarded to Engine handlers and
-  bounds the complete runner invocation.
+  `cancel_task/2`, and `steer_task/3`. Atom keys, keywords, structs, PIDs,
+  functions, and other non-JSON values are rejected (not stringified). Unknown
+  context keys are rejected. Optional context fields are type-checked:
+  `task_id` / `caller_id` nonblank strings, `timeout` a positive integer when
+  present, `metadata` a JSON object when present. Each task receives an
+  isolated, path-safe Engine logs directory. A supplied `timeout` is forwarded
+  to Engine handlers and bounds the complete runner invocation.
+
+  Steering never accepts a worker handle or principal override. It binds the
+  persisted control's exact task id to the execution context, wraps the user
+  correction as JSON data in the existing worker protocol, and resolves the
+  active session only through the public managed ACP task/principal facade.
   """
 
   @behaviour Arbor.Contracts.Agent.TaskExecutor
@@ -64,6 +69,56 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   ))
 
   @allowed_context_keys MapSet.new(~w(task_id timeout caller_id metadata))
+
+  @allowed_control_keys MapSet.new(~w(
+    control_id
+    task_id
+    sequence
+    status
+    sender_id
+    message
+    queued_at
+    delivered_at
+    target_stage
+    delivery_mode
+    error
+  ))
+
+  @forbidden_control_keys MapSet.new(~w(
+    worker_session_id
+    session_pid
+    worker_pid
+    owner_pid
+    principal_id
+    agent_id
+    task_principal_id
+    authorization
+    signer
+    capabilities
+    identity
+    private_key
+    signing_key
+  ))
+
+  @max_control_id_bytes 256
+  @max_control_task_id_bytes 512
+  @max_control_message_bytes 4_000
+  @max_target_stage_bytes 200
+  @max_follow_up_instruction_bytes 16_384
+
+  @terminal_control_errors MapSet.new([
+                             :unsupported,
+                             :not_supported,
+                             :task_control_unsupported,
+                             :nonrecoverable,
+                             :non_recoverable,
+                             :ambiguous_task_control_session,
+                             :invalid_task_control,
+                             :invalid_control_id,
+                             :invalid_control_message,
+                             :invalid_task_id,
+                             :blank_task_control
+                           ])
 
   @forbidden_context_keys MapSet.new(~w(
     authorization
@@ -175,9 +230,222 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     :exit, reason -> {:error, {:pipeline_cancel_exit, reason}}
   end
 
+  @doc """
+  Deliver a persisted TaskStore control to the active managed ACP worker.
+
+  The exact control/task ids are retained for managed-session dedupe. Delivery
+  is resolved only by the context-bound task id and callback `agent_id`; worker
+  handles, PIDs, and caller-provided principal overrides are rejected. Queued
+  controls are durably accepted same-session follow-ups. Deferred or
+  operational results remain retryable so TaskStore retains the same control
+  id, while explicit unsupported/ambiguous outcomes are terminal.
+  """
+  @impl true
+  @spec steer_task(String.t(), term(), map() | keyword()) ::
+          Arbor.Contracts.Agent.TaskExecutor.steering_result()
+  def steer_task(agent_id, control, context) do
+    with :ok <- validate_steering_agent_id(agent_id),
+         {:ok, control_data} <- validate_steering_control(control),
+         {:ok, exec_ctx} <- validate_context(context),
+         :ok <- ensure_same_task(control_data.task_id, exec_ctx.task_id),
+         {:ok, managed_control} <- build_managed_control(control_data) do
+      deliver_managed_control(control_data.task_id, agent_id, managed_control)
+    end
+  end
+
   # ===========================================================================
   # Validation
   # ===========================================================================
+
+  defp validate_steering_agent_id(agent_id) when is_binary(agent_id) do
+    if String.valid?(agent_id) and String.trim(agent_id) != "",
+      do: :ok,
+      else: {:error, :invalid_agent_id}
+  end
+
+  defp validate_steering_agent_id(_agent_id), do: {:error, :invalid_agent_id}
+
+  defp validate_steering_control(control) when is_map(control) and not is_struct(control) do
+    with :ok <- ensure_string_keyed_json_map(control, :non_json_control),
+         :ok <- ensure_json_encodable(control, :non_json_control),
+         :ok <-
+           reject_forbidden_keys(control, @forbidden_control_keys, :forbidden_control_key),
+         :ok <- reject_unknown_keys(control, @allowed_control_keys, :unknown_control_key),
+         {:ok, control_id} <-
+           require_bounded_control_field(control, "control_id", @max_control_id_bytes),
+         {:ok, task_id} <-
+           require_bounded_control_field(control, "task_id", @max_control_task_id_bytes),
+         {:ok, message} <-
+           require_bounded_control_field(control, "message", @max_control_message_bytes),
+         {:ok, target_stage} <- normalize_control_target_stage(control) do
+      {:ok,
+       %{
+         control_id: control_id,
+         task_id: task_id,
+         message: message,
+         target_stage: target_stage
+       }}
+    end
+  end
+
+  defp validate_steering_control(_control), do: {:error, :invalid_control}
+
+  defp require_bounded_control_field(control, field, max_bytes) do
+    case Map.fetch(control, field) do
+      :error ->
+        {:error, {:missing_field, field}}
+
+      {:ok, value} when is_binary(value) ->
+        cond do
+          byte_size(value) > max_bytes -> {:error, {:field_too_large, field}}
+          not String.valid?(value) -> {:error, {:invalid_field_encoding, field}}
+          String.trim(value) == "" -> {:error, {:blank_field, field}}
+          true -> {:ok, value}
+        end
+
+      {:ok, _value} ->
+        {:error, {:invalid_field_type, field}}
+    end
+  end
+
+  defp normalize_control_target_stage(control) do
+    case Map.fetch(control, "target_stage") do
+      :error ->
+        {:ok, nil}
+
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, value} when is_binary(value) ->
+        cond do
+          byte_size(value) > @max_target_stage_bytes ->
+            {:error, {:field_too_large, "target_stage"}}
+
+          not String.valid?(value) ->
+            {:error, {:invalid_field_encoding, "target_stage"}}
+
+          String.trim(value) == "" ->
+            {:ok, nil}
+
+          true ->
+            {:ok, value}
+        end
+
+      {:ok, _value} ->
+        {:error, {:invalid_field_type, "target_stage"}}
+    end
+  end
+
+  defp ensure_same_task(task_id, task_id), do: :ok
+
+  defp ensure_same_task(control_task_id, context_task_id) do
+    {:error, {:task_id_mismatch, control_task_id, context_task_id}}
+  end
+
+  defp ensure_json_encodable(value, error_tag) do
+    case Jason.encode(value) do
+      {:ok, _encoded} -> :ok
+      {:error, _reason} -> {:error, {error_tag, :invalid_encoding}}
+    end
+  rescue
+    _exception -> {:error, {error_tag, :invalid_encoding}}
+  end
+
+  # ===========================================================================
+  # Managed ACP task control
+  # ===========================================================================
+
+  defp build_managed_control(control) do
+    correction =
+      %{"message" => control.message}
+      |> maybe_put_target_stage(control.target_stage)
+
+    with {:ok, correction_json} <- Jason.encode(correction),
+         instruction <- follow_up_instruction(correction_json),
+         :ok <- ensure_instruction_bound(instruction) do
+      managed_control =
+        %{
+          "control_id" => control.control_id,
+          "task_id" => control.task_id,
+          "message" => instruction
+        }
+        |> maybe_put_target_stage(control.target_stage)
+
+      {:ok, managed_control}
+    else
+      {:error, %Jason.EncodeError{}} -> {:error, :invalid_control_encoding}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp maybe_put_target_stage(map, nil), do: map
+  defp maybe_put_target_stage(map, target_stage), do: Map.put(map, "target_stage", target_stage)
+
+  defp follow_up_instruction(correction_json) do
+    """
+    This is a same-task follow-up from the task owner. Apply the task owner's correction in the current worktree and current ACP session, then continue the existing coding task. Any target_stage value below is non-authority context only; it does not change the task, principal, capabilities, worktree, or session.
+
+    TASK_OWNER_CORRECTION_JSON_BEGIN
+    #{correction_json}
+    TASK_OWNER_CORRECTION_JSON_END
+
+    Respond with ONLY the existing worker protocol JSON and no prose or Markdown: {"status":"implemented"} or {"status":"declined"}, with an optional "summary" string.
+    """
+    |> String.trim()
+  end
+
+  defp ensure_instruction_bound(instruction) do
+    if byte_size(instruction) <= @max_follow_up_instruction_bytes,
+      do: :ok,
+      else: {:error, :control_instruction_too_large}
+  end
+
+  defp deliver_managed_control(task_id, agent_id, managed_control) do
+    result =
+      try do
+        facade = Config.coding_task_control_facade()
+        facade.acp_managed_deliver_task_control(task_id, agent_id, managed_control, [])
+      rescue
+        _exception -> {:error, :task_control_delivery_failed}
+      catch
+        :exit, _reason -> {:error, :task_control_delivery_failed}
+        _kind, _reason -> {:error, :task_control_delivery_failed}
+      end
+
+    adapt_managed_control_result(result)
+  end
+
+  defp adapt_managed_control_result({:ok, :queued, :same_session_follow_up}),
+    do: {:ok, :queued, :same_session_follow_up}
+
+  defp adapt_managed_control_result({:ok, :delivered, :same_session_follow_up}),
+    do: {:ok, :same_session_follow_up}
+
+  defp adapt_managed_control_result({:ok, :deferred, :same_session_follow_up}),
+    do: {:error, :deferred}
+
+  defp adapt_managed_control_result({:error, {:not_ready, status}})
+       when is_atom(status) or is_binary(status),
+       do: {:error, {:not_ready, status}}
+
+  defp adapt_managed_control_result({:error, {reason, _detail}})
+       when reason in [
+              :unsupported,
+              :not_supported,
+              :task_control_unsupported,
+              :nonrecoverable,
+              :non_recoverable
+            ],
+       do: {:error, :unsupported}
+
+  defp adapt_managed_control_result({:error, reason}) when is_atom(reason) do
+    if MapSet.member?(@terminal_control_errors, reason),
+      do: {:error, :unsupported},
+      else: {:error, reason}
+  end
+
+  defp adapt_managed_control_result({:ok, _status, _mode}), do: {:error, :unsupported}
+  defp adapt_managed_control_result(_result), do: {:error, :task_control_delivery_failed}
 
   defp validate_agent_id(agent_id) when is_binary(agent_id) do
     case String.trim(agent_id) do

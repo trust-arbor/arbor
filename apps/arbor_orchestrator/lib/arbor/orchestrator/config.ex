@@ -253,6 +253,7 @@ defmodule Arbor.Orchestrator.Config do
   @coding_pipeline_relpath "pipelines/coding-change-v1.dot"
   @default_coding_pipeline_runner Arbor.Orchestrator
   @default_pipeline_status_module Arbor.Orchestrator.PipelineStatus
+  @default_coding_task_control_facade Arbor.AI
 
   @doc """
   Absolute path to the packaged coding-change-v1 DOT graph.
@@ -334,6 +335,22 @@ defmodule Arbor.Orchestrator.Config do
   @spec pipeline_status_module() :: module()
   def pipeline_status_module do
     Application.get_env(@app, :pipeline_status_module, @default_pipeline_status_module)
+  end
+
+  @doc """
+  Public facade used to deliver coding-task controls to managed ACP sessions.
+
+  Defaults to `Arbor.AI`, whose task-control API resolves exclusively by task
+  and principal. Tests may inject a narrow facade implementing
+  `acp_managed_deliver_task_control/4`.
+  """
+  @spec coding_task_control_facade() :: module()
+  def coding_task_control_facade do
+    Application.get_env(
+      @app,
+      :coding_task_control_facade,
+      @default_coding_task_control_facade
+    )
   end
 
   defp default_coding_pipeline_path do
