@@ -171,13 +171,24 @@ defmodule Arbor.Agent.Orchestration do
 
   defp enrich_waiting_approval(%{state: :running, agent_id: agent_id} = status, opts)
        when is_binary(agent_id) do
-    case list_pending_approvals_unchecked(Map.put(normalize_opts(opts), :agent_id, agent_id)) do
-      [%PendingApproval{id: approval_id} | _] ->
+    task_id = Map.get(status, :task_id)
+
+    pending_approval =
+      if is_binary(task_id) and task_id != "" do
+        opts
+        |> normalize_opts()
+        |> Map.put(:agent_id, agent_id)
+        |> list_pending_approvals_unchecked()
+        |> Enum.find(&(approval_task_id(&1) == task_id))
+      end
+
+    case pending_approval do
+      %PendingApproval{id: approval_id} ->
         status
         |> Map.put(:state, :waiting_approval)
         |> Map.put(:waiting_on, approval_id)
 
-      [] ->
+      nil ->
         status
     end
   end

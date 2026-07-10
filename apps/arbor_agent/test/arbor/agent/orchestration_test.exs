@@ -318,7 +318,11 @@ defmodule Arbor.Agent.OrchestrationTest do
     test "reports running tasks as waiting_approval when the shared queue has a pending item" do
       Process.put(
         {FakeConsensus, :pending},
-        [consensus_proposal("prop_approval", "agent_1", "arbor://fs/write/repo/lib.ex")]
+        [
+          consensus_proposal("prop_approval", "agent_1", "arbor://fs/write/repo/lib.ex",
+            metadata: %{task_id: "task_1"}
+          )
+        ]
       )
 
       assert {:ok, status} =
@@ -341,6 +345,36 @@ defmodule Arbor.Agent.OrchestrationTest do
                  interaction_router: FakeInteractionRouter,
                  security_module: FakeSecurity
                )
+    end
+
+    test "security regression: isolates pending approval projection by exact task id" do
+      Process.put(
+        {FakeConsensus, :pending},
+        [
+          consensus_proposal("prop_task_2", "agent_1", "arbor://fs/write/repo/two.ex",
+            metadata: %{task_id: "task_2"}
+          ),
+          consensus_proposal("prop_task_1", "agent_1", "arbor://fs/write/repo/one.ex",
+            metadata: %{task_id: "task_1"}
+          )
+        ]
+      )
+
+      opts = [
+        caller_id: "human_1",
+        task_store: FakeTaskStore,
+        consensus_module: FakeConsensus,
+        interaction_router: FakeInteractionRouter,
+        security_module: FakeSecurity
+      ]
+
+      assert {:ok, task_1_status} = Orchestration.task_status("task_1", opts)
+      assert task_1_status.state == :waiting_approval
+      assert task_1_status.waiting_on == "prop_task_1"
+
+      assert {:ok, unrelated_status} = Orchestration.task_status("task_3", opts)
+      assert unrelated_status.state == :running
+      assert unrelated_status.waiting_on == nil
     end
   end
 
