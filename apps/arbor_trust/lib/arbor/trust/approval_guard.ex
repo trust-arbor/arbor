@@ -38,20 +38,25 @@ defmodule Arbor.Trust.ApprovalGuard do
   defp check_with_policy(capability, principal_id, resource_uri, opts) do
     case get_confirmation_mode(principal_id, resource_uri, opts) do
       :auto ->
-        if approval_required?(capability) do
-          Escalation.maybe_escalate(
-            capability,
-            principal_id,
-            resource_uri,
-            escalation_opts(opts, :capability_constraint, :capability_requires_approval)
-          )
-        else
-          safe_emit_signal(:approval_auto, %{
-            principal_id: principal_id,
-            resource_uri: resource_uri
-          })
+        cond do
+          approved_invocation?(principal_id, resource_uri, opts) ->
+            :ok
 
-          :ok
+          approval_required?(capability) ->
+            Escalation.maybe_escalate(
+              capability,
+              principal_id,
+              resource_uri,
+              escalation_opts(opts, :capability_constraint, :capability_requires_approval)
+            )
+
+          true ->
+            safe_emit_signal(:approval_auto, %{
+              principal_id: principal_id,
+              resource_uri: resource_uri
+            })
+
+            :ok
         end
 
       :gated ->

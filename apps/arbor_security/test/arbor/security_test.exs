@@ -766,6 +766,40 @@ defmodule Arbor.SecurityTest do
       assert {:error, :escalation_disabled} = Security.authorize(agent_id, resource)
     end
 
+    test "security regression: exact approved invocation is one-shot authority", %{
+      agent_id: agent_id
+    } do
+      resource = "arbor://code/read/approved_once_#{:erlang.unique_integer([:positive])}"
+
+      Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
+
+      {:ok, _cap} =
+        Security.grant(
+          principal: agent_id,
+          resource: resource,
+          constraints: %{requires_approval: true}
+        )
+
+      approval = %{
+        request_id: "irq_approved_once",
+        principal_id: agent_id,
+        resource_uri: resource,
+        decision: :approved
+      }
+
+      assert {:ok, :authorized} =
+               Security.authorize(agent_id, resource, :execute, approved_invocation: approval)
+
+      wrong_resource = %{approval | resource_uri: resource <> "/other"}
+
+      assert {:error, :escalation_disabled} =
+               Security.authorize(agent_id, resource, :execute,
+                 approved_invocation: wrong_resource
+               )
+
+      assert {:error, :escalation_disabled} = Security.authorize(agent_id, resource)
+    end
+
     test "returns authorized when no constraints", %{agent_id: agent_id} do
       resource = "arbor://fs/read/simple_#{:erlang.unique_integer([:positive])}"
 

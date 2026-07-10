@@ -96,6 +96,27 @@ defmodule Arbor.Trust.ApprovalGuardTest do
                ApprovalGuard.check(cap, "agent_test", "arbor://code/read/file.ex")
     end
 
+    test "security regression: exact approved invocation bypasses an auto-policy capability constraint once" do
+      Application.put_env(:arbor_trust, :approval_guard_enabled, true)
+      Application.put_env(:arbor_trust, :policy_module, AutoPolicy)
+
+      resource = "arbor://code/read/file.ex"
+      cap = make_capability(resource, %{requires_approval: true})
+
+      approval = %{
+        request_id: "irq_approved_once",
+        principal_id: "agent_test",
+        resource_uri: resource,
+        decision: :approved
+      }
+
+      assert :ok =
+               ApprovalGuard.check(cap, "agent_test", resource, approved_invocation: approval)
+
+      assert {:error, :escalation_disabled} =
+               ApprovalGuard.check(cap, "agent_test", resource)
+    end
+
     test "gated policy escalates" do
       Application.put_env(:arbor_trust, :approval_guard_enabled, true)
       Application.put_env(:arbor_trust, :policy_module, GatedPolicy)

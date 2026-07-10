@@ -71,7 +71,7 @@ defmodule Arbor.Security.AuthDecision do
          {:ok, auth} <- check_time_constraints(auth, cap),
          {:ok, auth} <- check_file_guard(auth, resource_uri),
          {:ok, auth} <- check_egress_block(auth, opts),
-         result <- check_approval(auth, cap, resource_uri),
+         result <- check_approval(auth, cap, resource_uri, opts),
          result <- apply_egress_ask(result, cap, resource_uri, opts) do
       case result do
         {:authorized, auth} ->
@@ -479,10 +479,17 @@ defmodule Arbor.Security.AuthDecision do
     end
   end
 
-  defp check_approval(%AuthContext{} = auth, cap, _resource_uri) do
-    if has_approval_constraint?(cap),
-      do: {:requires_approval, cap, auth},
-      else: {:authorized, auth}
+  defp check_approval(%AuthContext{} = auth, cap, resource_uri, opts) do
+    cond do
+      approved_invocation?(auth.principal_id, resource_uri, opts) ->
+        {:authorized, auth}
+
+      has_approval_constraint?(cap) ->
+        {:requires_approval, cap, auth}
+
+      true ->
+        {:authorized, auth}
+    end
   end
 
   # ===========================================================================
@@ -522,13 +529,17 @@ defmodule Arbor.Security.AuthDecision do
   end
 
   # Escalate external egress to :ask unless the matched cap's egress constraint
-  # covers the resolved tier/destination. Receives + returns check_approval/3 shape.
-  defp apply_egress_ask({:authorized, auth} = result, cap, _resource_uri, opts) do
-    tier = Keyword.get(opts, :egress_tier, :none)
+  # covers the resolved tier/destination. Receives + returns check_approval/4 shape.
+  defp apply_egress_ask({:authorized, auth} = result, cap, resource_uri, opts) do
+    if approved_invocation?(auth.principal_id, resource_uri, opts) do
+      result
+    else
+      tier = Keyword.get(opts, :egress_tier, :none)
 
-    case EgressGate.decide(auth.principal_id, tier, opts, [cap]) do
-      :ask -> {:requires_approval, cap, auth}
-      _ -> result
+      case EgressGate.decide(auth.principal_id, tier, opts, [cap]) do
+        :ask -> {:requires_approval, cap, auth}
+        _ -> result
+      end
     end
   end
 
@@ -539,4 +550,19 @@ defmodule Arbor.Security.AuthDecision do
     cap.constraints[:requires_approval] == true or
       cap.constraints["requires_approval"] == true
   end
+
+  defp approved_invocation?(principal_id, resource_uri, opts) do
+    case Keyword.get(opts, :approved_invocation) do
+      approval when is_map(approval) ->
+        approval_field(approval, :principal_id) == principal_id and
+          approval_field(approval, :resource_uri) == resource_uri and
+          approval_field(approval, :decision) in [:approved, :approve, "approved", "approve"] and
+          is_binary(approval_field(approval, :request_id))
+
+      _ ->
+        false
+    end
+  end
+
+  defp approval_field(map, key), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
 end

@@ -231,7 +231,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     case Task.yield(task, timeout + 1_000) || Task.shutdown(task, :brutal_kill) do
       {:ok, {:response, r}} when r in [:approved, :approve, "approved", "approve"] ->
         track_approval(agent_id, action_module)
-        retry_execution(agent_id, action_module, params, context, name)
+        retry_execution(agent_id, action_module, params, context, name, request_id)
 
       {:ok, {:response, r}}
       when r in [:rejected, :reject, :denied, "rejected", "deny", "denied"] ->
@@ -269,12 +269,20 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
       case apply(consensus_mod, :await, [proposal_id, [timeout: timeout]]) do
         {:ok, decision} when is_map(decision) ->
-          handle_approval_decision(decision, agent_id, action_module, params, context, name)
+          handle_approval_decision(
+            decision,
+            agent_id,
+            action_module,
+            params,
+            context,
+            name,
+            proposal_id
+          )
 
         {:ok, :approved} ->
           # Simple approval atom (some paths return this)
           track_approval(agent_id, action_module)
-          retry_execution(agent_id, action_module, params, context, name)
+          retry_execution(agent_id, action_module, params, context, name, proposal_id)
 
         {:error, :timeout} ->
           Logger.info(
@@ -309,14 +317,22 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
       {:error, "Action #{name} requires approval. Proposal ID: #{proposal_id}"}
   end
 
-  defp handle_approval_decision(decision, agent_id, action_module, params, context, name) do
+  defp handle_approval_decision(
+         decision,
+         agent_id,
+         action_module,
+         params,
+         context,
+         name,
+         proposal_id
+       ) do
     status = Map.get(decision, :decision) || Map.get(decision, :status)
 
     case status do
       :approved ->
         Logger.info("[ActionsExecutor] Approval granted for #{name}, executing")
         track_approval(agent_id, action_module)
-        retry_execution(agent_id, action_module, params, context, name)
+        retry_execution(agent_id, action_module, params, context, name, proposal_id)
 
       :rejected ->
         track_rejection(agent_id, action_module)
@@ -335,11 +351,18 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     end
   end
 
-  # Re-execute the action after approval. Grant a clean capability (no
-  # requires_approval constraint) so the retry doesn't trigger escalation again.
-  defp retry_execution(agent_id, action_module, params, context, name) do
-    # Grant a clean capability for this resource so retry succeeds
-    grant_approved_capability(agent_id, action_module, context)
+  # Re-execute only the exact invocation that was approved. The one-shot marker
+  # satisfies ApprovalGuard for this retry without minting durable authority.
+  defp retry_execution(agent_id, action_module, params, context, name, request_id) do
+    resource = Arbor.Actions.canonical_uri_for(action_module, params)
+
+    context =
+      Map.put(context, :approved_invocation, %{
+        request_id: request_id,
+        principal_id: agent_id,
+        resource_uri: resource,
+        decision: :approved
+      })
 
     # Re-sign for the retry. The signed request that drove the original
     # (escalated) authorize is SINGLE-USE — its nonce was consumed by
@@ -385,34 +408,6 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   defp approval_timeout do
     Application.get_env(:arbor_orchestrator, :approval_timeout_ms, @approval_timeout_ms)
-  end
-
-  # Grant a clean capability (no requires_approval) after consensus approval.
-  # This ensures the retry won't trigger escalation again.
-  defp grant_approved_capability(agent_id, action_module, context) do
-    # arbor_security is a hard dep — Arbor.Security.grant/1 is called directly.
-    resource = Arbor.Actions.canonical_uri_for(action_module, %{})
-
-    # Extract session_id from context if available
-    session_id =
-      Map.get(context, :session_id) ||
-        Map.get(context, "session_id")
-
-    grant_opts = [
-      principal: agent_id,
-      resource: resource,
-      constraints: %{},
-      metadata: %{source: :approval_granted}
-    ]
-
-    grant_opts =
-      if session_id, do: Keyword.put(grant_opts, :session_id, session_id), else: grant_opts
-
-    Arbor.Security.grant(grant_opts)
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
   end
 
   # Mint a fresh signed request for the post-approval retry so identity
