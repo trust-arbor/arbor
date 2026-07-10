@@ -470,6 +470,37 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert {:ok, []} = Arbor.Security.list_capabilities(agent_id)
     end
 
+    test "security regression: a changed exact template fails closed and removes authority" do
+      assert {:ok, profile} =
+               Lifecycle.create("Changed Template Probe", template: "pipeline_architect")
+
+      agent_id = profile.agent_id
+      cleanup(agent_id)
+
+      override_dir = tmp_workspace("changed_pipeline_template")
+      File.mkdir_p!(override_dir)
+
+      shipped_path =
+        Path.join(Arbor.Agent.TemplateStore.shipped_templates_dir(), "pipeline_architect.md")
+
+      changed_template =
+        shipped_path
+        |> File.read!()
+        |> String.replace("model: \"gpt-5.5\"", "model: \"changed-template-model\"")
+
+      File.write!(Path.join(override_dir, "pipeline_architect.md"), changed_template)
+      Arbor.Agent.TemplateStore.set_templates_dir(override_dir)
+
+      on_exit(fn ->
+        Arbor.Agent.TemplateStore.clear_templates_dir_override()
+        File.rm_rf(override_dir)
+      end)
+
+      assert {:error, _reason} = Lifecycle.ensure_identity(agent_id)
+      assert {:ok, :suspended} = Arbor.Security.identity_status(agent_id)
+      assert {:ok, []} = Arbor.Security.list_capabilities(agent_id)
+    end
+
     test "security regression: exact reconciliation revokes capabilities widened after creation" do
       assert {:ok, profile} =
                Lifecycle.create("Widened Capability Probe", template: "pipeline_architect")
