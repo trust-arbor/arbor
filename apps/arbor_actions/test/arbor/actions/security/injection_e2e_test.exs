@@ -228,20 +228,16 @@ defmodule Arbor.Actions.Security.InjectionE2ETest do
 
       result = TaintEnforcement.check(Arbor.Actions.Shell.Execute, params, context)
 
-      # The taint_level in the error is the full struct (not extracted atom)
-      assert {:error, {:taint_blocked, :sandbox, taint_level, :control}} = result
-      assert %TaintStruct{level: :derived} = taint_level
+      assert {:error, {:taint_blocked, :sandbox, :derived, :control}} = result
     end
 
-    test "derived taint on {control, requires} role passes strict when sanitized" do
+    test "derived taint on {control, requires} role is blocked under strict policy" do
       # Shell.Execute's :command param is {:control, requires: [:command_injection]}.
-      # Strict mode's check_strict_taint only matches bare :control, not tuples.
-      # This means strict mode relies on the requires: check for extended roles.
       params = %{command: "find . -name '*.ex'"}
       context = %{taint: derived_sanitized_taint(), taint_policy: :strict}
 
-      # Passes because strict check only sees bare :control roles
-      assert :ok = TaintEnforcement.check(Arbor.Actions.Shell.Execute, params, context)
+      assert {:error, {:taint_blocked, :command, :derived, :control}} =
+               TaintEnforcement.check(Arbor.Actions.Shell.Execute, params, context)
     end
 
     test "derived taint passes audit_only policy (logged but not blocked)" do

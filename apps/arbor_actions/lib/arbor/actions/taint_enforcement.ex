@@ -132,24 +132,22 @@ defmodule Arbor.Actions.TaintEnforcement do
     end
   end
 
-  defp check_with_policy(action_module, params, taint_level, :strict, _context) do
-    # Strict: block derived, untrusted, hostile on control params
-    # Only trusted is allowed for control parameters
-    if taint_level == :trusted do
-      :ok
-    else
-      roles = Taint.roles_for(action_module)
-      check_strict_taint(params, roles, taint_level)
+  defp check_with_policy(action_module, params, taint, :strict, _context) do
+    roles = Taint.roles_for(action_module)
+
+    case check_strict_taint(params, roles, taint_level(taint)) do
+      :ok -> Taint.check_params(action_module, params, %{taint: taint})
+      error -> error
     end
   end
 
-  defp check_with_policy(action_module, params, taint_level, _permissive, context) do
+  defp check_with_policy(action_module, params, taint, _permissive, context) do
     # Permissive (default): use standard check from Taint module
     # This blocks untrusted/hostile on control, but allows derived
-    case Taint.check_params(action_module, params, %{taint: taint_level}) do
+    case Taint.check_params(action_module, params, %{taint: taint}) do
       :ok ->
         # If derived was used on control params, emit audit signal
-        if taint_level == :derived do
+        if taint_level(taint) == :derived do
           maybe_emit_derived_audit(action_module, params, context)
         end
 
@@ -255,14 +253,13 @@ defmodule Arbor.Actions.TaintEnforcement do
   end
 
   # Strict mode: any non-trusted taint on control params is blocked
-  defp check_strict_taint(params, roles, taint_level) do
-    # Find first control param (under strict, any non-trusted is blocked)
+  defp check_strict_taint(params, roles, level) do
     violation =
       Enum.find_value(params, fn {param_name, _value} ->
         role = Map.get(roles, param_name, :data)
 
-        if role == :control do
-          {:taint_blocked, param_name, taint_level, :control}
+        if control_role?(role) and level != :trusted do
+          {:taint_blocked, param_name, level, :control}
         else
           nil
         end
@@ -279,7 +276,7 @@ defmodule Arbor.Actions.TaintEnforcement do
     roles = Taint.roles_for(action_module)
 
     Enum.each(params, fn {param_name, _value} ->
-      if Map.get(roles, param_name) == :control do
+      if control_role?(Map.get(roles, param_name, :data)) do
         TaintEvents.emit_taint_audited(action_module, param_name, :derived, context)
       end
     end)

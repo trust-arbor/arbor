@@ -5,7 +5,7 @@ defmodule Arbor.Actions.TaintEnforcementTest do
   These tests verify that the dispatcher correctly blocks or allows
   actions based on taint levels and policies.
   """
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Actions.{TaintEnforcement, TaintEvents}
   alias Arbor.Contracts.Security.Taint, as: TaintStruct
@@ -306,6 +306,52 @@ defmodule Arbor.Actions.TaintEnforcementTest do
                  %{sandbox: "basic"},
                  context
                )
+    end
+
+    test "strict mode normalizes struct taint in blocked errors" do
+      context = %{taint: taint(:derived), taint_policy: :strict}
+
+      assert {:error, {:taint_blocked, :sandbox, :derived, :control}} =
+               TaintEnforcement.check(
+                 MockExtendedControlAction,
+                 %{sandbox: "basic"},
+                 context
+               )
+    end
+
+    test "permissive mode audits derived struct taint on tuple control roles" do
+      handler_id = {__MODULE__, make_ref()}
+
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:arbor, :signals, :emitted],
+          fn
+            _event, _measurements, %{category: :security, type: :taint_audited}, pid ->
+              send(pid, :tuple_control_audited)
+
+            _event, _measurements, _metadata, _pid ->
+              :ok
+          end,
+          self()
+        )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      context = %{
+        agent_id: "agent_tuple_audit",
+        taint: taint(:derived, [:path_traversal]),
+        taint_policy: :permissive
+      }
+
+      assert :ok =
+               TaintEnforcement.check(
+                 MockExtendedControlAction,
+                 %{path: "/repo"},
+                 context
+               )
+
+      assert_receive :tuple_control_audited
     end
   end
 

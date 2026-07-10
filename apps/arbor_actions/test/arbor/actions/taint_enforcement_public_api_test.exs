@@ -6,11 +6,10 @@ defmodule Arbor.Actions.TaintEnforcementPublicApiTest do
 
   alias Arbor.Contracts.Security.Taint
 
-  test "security regression: sanitizer evidence cannot transfer between action parameters" do
+  setup do
     unique = System.unique_integer([:positive])
     principal = "agent_param_taint_regression_#{unique}"
     workspace = Path.join(File.cwd!(), ".arbor_param_taint_test_#{unique}")
-    target = Path.join(workspace, "blocked-write.txt")
 
     File.mkdir_p!(workspace)
 
@@ -24,6 +23,15 @@ defmodule Arbor.Actions.TaintEnforcementPublicApiTest do
       Arbor.Security.revoke(capability.id)
       File.rm_rf!(workspace)
     end)
+
+    {:ok, principal: principal, workspace: workspace}
+  end
+
+  test "security regression: sanitizer evidence cannot transfer between action parameters", %{
+    principal: principal,
+    workspace: workspace
+  } do
+    target = Path.join(workspace, "blocked-write.txt")
 
     path_sanitization = Map.fetch!(Taint.sanitization_bits(), :path_traversal)
     sanitized_content = %Taint{level: :trusted, sanitizations: path_sanitization}
@@ -42,6 +50,29 @@ defmodule Arbor.Actions.TaintEnforcementPublicApiTest do
                    content: sanitized_content
                  },
                  taint_policy: :permissive
+               }
+             )
+
+    refute File.exists?(target)
+  end
+
+  test "security regression: strict aggregate blocks derived tuple control parameters", %{
+    principal: principal,
+    workspace: workspace
+  } do
+    target = Path.join(workspace, "strict-blocked-write.txt")
+    path_sanitization = Map.fetch!(Taint.sanitization_bits(), :path_traversal)
+    derived_path = %Taint{level: :derived, sanitizations: path_sanitization}
+
+    assert {:error, {:taint_blocked, :path, :derived, :control}} =
+             Arbor.Actions.authorize_and_execute(
+               principal,
+               Arbor.Actions.File.Write,
+               %{path: target, content: "safe test content"},
+               %{
+                 workspace: workspace,
+                 taint: derived_path,
+                 taint_policy: :strict
                }
              )
 
