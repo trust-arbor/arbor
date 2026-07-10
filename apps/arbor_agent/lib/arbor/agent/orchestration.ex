@@ -11,6 +11,8 @@ defmodule Arbor.Agent.Orchestration do
   requests held by those systems.
   """
 
+  require Logger
+
   alias Arbor.Agent.Orchestration.{PendingApproval, TaskArtifacts}
   alias Arbor.Contracts.Security.CapabilityUri
 
@@ -22,6 +24,7 @@ defmodule Arbor.Agent.Orchestration do
   @task_steer_uri "arbor://agent/task/steer"
   @interaction_request_prefix "irq"
   @approval_answer_cap_ttl_seconds 86_400
+  @task_cancel_cleanup_note "Pending approval closed because its orchestration task was cancelled"
 
   @type approval_decision :: :approve | :deny | :rework
 
@@ -91,10 +94,20 @@ defmodule Arbor.Agent.Orchestration do
          {:ok, status} <- task_status_unchecked(task_id, opts),
          {:ok, caller_id} <- caller_id(opts),
          :ok <- authorize_task_cancel(opts, caller_id, status) do
-      opts
-      |> task_store_module()
-      |> apply_if_exported(:cancel, [task_id, task_store_opts(opts)])
-      |> normalize_task_cancel_result()
+      cancel_result =
+        opts
+        |> task_store_module()
+        |> apply_if_exported(:cancel, [task_id, task_store_opts(opts)])
+        |> normalize_task_cancel_result()
+
+      case cancel_result do
+        {:ok, _status} = success ->
+          cleanup_task_approvals(task_id, caller_id, opts)
+          success
+
+        error ->
+          error
+      end
     end
   end
 
@@ -494,6 +507,124 @@ defmodule Arbor.Agent.Orchestration do
     |> all_pending_approvals()
     |> Enum.filter(&matches_filters?(&1, opts))
   end
+
+  defp cleanup_task_approvals(task_id, caller_id, opts) do
+    opts
+    |> all_pending_approvals()
+    |> Enum.filter(&(approval_task_id(&1) == task_id))
+    |> Enum.each(fn approval ->
+      cleanup_task_approval(approval, task_id, caller_id, opts)
+    end)
+  rescue
+    exception ->
+      Logger.warning(
+        "Approval cleanup after task cancellation failed " <>
+          "task_id=#{bounded_inspect(task_id)} reason=#{Exception.message(exception)}"
+      )
+  catch
+    kind, reason ->
+      Logger.warning(
+        "Approval cleanup after task cancellation failed " <>
+          "task_id=#{bounded_inspect(task_id)} reason=#{bounded_inspect({kind, reason})}"
+      )
+  end
+
+  defp cleanup_task_approval(%PendingApproval{} = approval, task_id, caller_id, opts) do
+    result =
+      approval
+      |> dispatch_task_cancellation_cleanup(task_id, caller_id, opts)
+      |> normalize_backend_result()
+
+    case result do
+      :ok ->
+        record_task_approval_cleanup(approval, task_id, caller_id, :resolved, nil, opts)
+
+      {:error, reason} when reason in [:not_found, :already_decided, :already_resolved] ->
+        record_task_approval_cleanup(
+          approval,
+          task_id,
+          caller_id,
+          :already_resolved,
+          reason,
+          opts
+        )
+
+      {:error, reason} ->
+        Logger.warning(
+          "Approval cleanup after task cancellation failed " <>
+            "task_id=#{bounded_inspect(task_id)} approval_id=#{bounded_inspect(approval.id)} " <>
+            "source=#{approval.source} reason=#{bounded_inspect(reason)}"
+        )
+
+        record_task_approval_cleanup(approval, task_id, caller_id, :failed, reason, opts)
+    end
+
+    :ok
+  end
+
+  defp dispatch_task_cancellation_cleanup(
+         %PendingApproval{source: :interaction, id: id},
+         task_id,
+         caller_id,
+         opts
+       ) do
+    metadata = task_cancellation_metadata(task_id, caller_id, opts)
+
+    opts
+    |> interaction_router()
+    |> apply_if_exported(:respond, [id, :rejected, metadata])
+  end
+
+  defp dispatch_task_cancellation_cleanup(
+         %PendingApproval{source: :consensus, id: id},
+         _task_id,
+         _caller_id,
+         opts
+       ) do
+    opts
+    |> consensus_module()
+    |> apply_if_exported(:cancel, [id])
+  end
+
+  defp task_cancellation_metadata(task_id, caller_id, opts) do
+    :task_cancelled
+    |> answer_metadata(caller_id, opts)
+    |> Map.put(:task_id, task_id)
+    |> Map.put(:cleanup, :task_cancellation)
+    |> Map.put(:note, @task_cancel_cleanup_note)
+  end
+
+  defp record_task_approval_cleanup(approval, task_id, caller_id, outcome, reason, opts) do
+    decision =
+      if outcome == :failed,
+        do: :task_cancellation_cleanup_failed,
+        else: :task_cancelled
+
+    data = [
+      resource_uri: approval.resource_uri,
+      agent_id: approval.agent_id,
+      principal_id: approval.principal_id,
+      task_id: task_id,
+      cleanup: :task_cancellation,
+      outcome: outcome,
+      error: if(is_nil(reason), do: nil, else: bounded_inspect(reason)),
+      note: @task_cancel_cleanup_note,
+      trace_id: opt(opts, :trace_id)
+    ]
+
+    opts
+    |> audit_module()
+    |> apply_if_exported(:record_approval_answered, [
+      caller_id,
+      approval.id,
+      approval.source,
+      decision,
+      data
+    ])
+    |> normalize_audit_result()
+  end
+
+  defp bounded_inspect(term), do: inspect(term, limit: 10, printable_limit: 500)
 
   defp all_pending_approvals(opts) do
     consensus_pending(opts) ++ interaction_pending(opts)

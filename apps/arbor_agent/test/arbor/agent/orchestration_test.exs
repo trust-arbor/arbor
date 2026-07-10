@@ -102,6 +102,18 @@ defmodule Arbor.Agent.OrchestrationTest do
       Process.get({__MODULE__, :pending}, [])
     end
 
+    def cancel(id) do
+      send(self(), {:consensus_cancel, id})
+      result = Process.get({__MODULE__, :cancel_result}, :ok)
+
+      if result == :ok do
+        pending = Process.get({__MODULE__, :pending}, [])
+        Process.put({__MODULE__, :pending}, Enum.reject(pending, &(Map.get(&1, :id) == id)))
+      end
+
+      result
+    end
+
     def answer_authorization_request(id, decision, caller_id, opts) do
       send(self(), {:consensus_answer, id, decision, caller_id, opts})
       Process.get({__MODULE__, :answer_result}, :ok)
@@ -125,7 +137,18 @@ defmodule Arbor.Agent.OrchestrationTest do
 
     def respond(id, response, metadata) do
       send(self(), {:interaction_respond, id, response, metadata})
-      Process.get({__MODULE__, :answer_result}, :ok)
+      result = Process.get({__MODULE__, :answer_result}, :ok)
+
+      if result == :ok do
+        pending = Process.get({__MODULE__, :pending}, [])
+
+        Process.put(
+          {__MODULE__, :pending},
+          Enum.reject(pending, &(Map.get(&1, :request_id) == id))
+        )
+      end
+
+      result
     end
   end
 
@@ -268,6 +291,7 @@ defmodule Arbor.Agent.OrchestrationTest do
           {FakeSecurity, :revoke_result},
           {FakeConsensus, :pending},
           {FakeConsensus, :answer_result},
+          {FakeConsensus, :cancel_result},
           {FakeInteractionRouter, :pending},
           {FakeInteractionRouter, :answer_result},
           {FakeTaskStore, :dispatch_result},
@@ -508,6 +532,8 @@ defmodule Arbor.Agent.OrchestrationTest do
                Orchestration.cancel_task("task_1",
                  caller_id: "human_1",
                  task_store: FakeTaskStore,
+                 consensus_module: FakeConsensus,
+                 interaction_router: FakeInteractionRouter,
                  security_module: FakeSecurity
                )
 
@@ -519,6 +545,226 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       assert_received {:task_status, "task_1", _opts}
       assert_received {:task_cancel, "task_1", _opts}
+    end
+
+    test "security regression: cancellation closes only approvals with the exact task provenance" do
+      task_id = "task_22082"
+
+      Process.put(
+        {FakeConsensus, :pending},
+        [
+          consensus_proposal("prop_matching", "agent_1", "arbor://fs/write/repo/one.ex",
+            metadata: %{provenance: %{task_id: task_id}}
+          ),
+          consensus_proposal("prop_prefix", "agent_1", "arbor://fs/write/repo/two.ex",
+            metadata: %{provenance: %{task_id: task_id <> "0"}}
+          ),
+          consensus_proposal("prop_missing", "agent_1", "arbor://fs/write/repo/three.ex")
+        ]
+      )
+
+      Process.put(
+        {FakeInteractionRouter, :pending},
+        [
+          interaction_request("irq_matching", "agent_1", "human_1", "arbor://shell/exec/git",
+            metadata: %{
+              principal_id: "agent_1",
+              approval_context: %{provenance: %{task_id: task_id}}
+            }
+          ),
+          interaction_request("irq_other", "agent_1", "human_1", "arbor://shell/exec/mix",
+            metadata: %{principal_id: "agent_1", task_id: "task_other"}
+          ),
+          interaction_request("irq_missing", "agent_1", "human_1", "arbor://fs/write/repo",
+            metadata: %{principal_id: "agent_1"}
+          )
+        ]
+      )
+
+      opts = [
+        caller_id: "human_1",
+        task_store: FakeTaskStore,
+        consensus_module: FakeConsensus,
+        interaction_router: FakeInteractionRouter,
+        security_module: FakeSecurity,
+        audit_module: FakeAudit
+      ]
+
+      assert {:ok, %{task_id: ^task_id, state: :cancelled}} =
+               Orchestration.cancel_task(task_id, opts)
+
+      assert_received {:consensus_cancel, "prop_matching"}
+
+      assert_received {:interaction_respond, "irq_matching", :rejected, metadata}
+      assert metadata.actor == "human_1"
+      assert metadata.task_id == task_id
+      assert metadata.decision == :task_cancelled
+      assert metadata.cleanup == :task_cancellation
+      assert metadata.note =~ "task was cancelled"
+
+      refute_received {:consensus_cancel, "prop_prefix"}
+      refute_received {:consensus_cancel, "prop_missing"}
+      refute_received {:interaction_respond, "irq_other", _, _}
+      refute_received {:interaction_respond, "irq_missing", _, _}
+
+      assert {:ok, remaining} =
+               Orchestration.list_pending_approvals(
+                 authorize?: false,
+                 consensus_module: FakeConsensus,
+                 interaction_router: FakeInteractionRouter
+               )
+
+      assert Enum.sort(Enum.map(remaining, & &1.id)) ==
+               Enum.sort(["prop_prefix", "prop_missing", "irq_other", "irq_missing"])
+
+      assert_received {:audit_answered, "human_1", "prop_matching", :consensus, :task_cancelled,
+                       consensus_audit}
+
+      assert consensus_audit[:task_id] == task_id
+      assert consensus_audit[:cleanup] == :task_cancellation
+      assert consensus_audit[:outcome] == :resolved
+
+      assert_received {:audit_answered, "human_1", "irq_matching", :interaction, :task_cancelled,
+                       interaction_audit}
+
+      assert interaction_audit[:task_id] == task_id
+      assert interaction_audit[:cleanup] == :task_cancellation
+      assert interaction_audit[:outcome] == :resolved
+
+      assert_received {:authorize, "human_1", "arbor://agent/task/cancel/" <> ^task_id, :execute,
+                       [verify_identity: false]}
+
+      refute_received {:authorize, _, _, _, _}
+    end
+
+    test "failed task cancellation leaves every pending approval untouched" do
+      Process.put({FakeTaskStore, :cancel_result}, {:error, :executor_refused})
+
+      Process.put(
+        {FakeConsensus, :pending},
+        [
+          consensus_proposal("prop_matching", "agent_1", "arbor://fs/write/repo/one.ex",
+            metadata: %{task_id: "task_1"}
+          )
+        ]
+      )
+
+      Process.put(
+        {FakeInteractionRouter, :pending},
+        [
+          interaction_request("irq_matching", "agent_1", "human_1", "arbor://shell/exec/git",
+            metadata: %{principal_id: "agent_1", provenance: %{task_id: "task_1"}}
+          )
+        ]
+      )
+
+      opts = [
+        caller_id: "human_1",
+        task_store: FakeTaskStore,
+        consensus_module: FakeConsensus,
+        interaction_router: FakeInteractionRouter,
+        security_module: FakeSecurity,
+        audit_module: FakeAudit
+      ]
+
+      assert {:error, :executor_refused} = Orchestration.cancel_task("task_1", opts)
+
+      assert {:ok, remaining} =
+               Orchestration.list_pending_approvals(
+                 authorize?: false,
+                 consensus_module: FakeConsensus,
+                 interaction_router: FakeInteractionRouter
+               )
+
+      assert Enum.sort(Enum.map(remaining, & &1.id)) == ["irq_matching", "prop_matching"]
+      refute_received {:consensus_cancel, _}
+      refute_received {:interaction_respond, _, _, _}
+      refute_received {:audit_answered, _, _, _, _, _}
+    end
+
+    test "repeated cancellation cleanup is harmless" do
+      Process.put(
+        {FakeConsensus, :pending},
+        [
+          consensus_proposal("prop_matching", "agent_1", "arbor://fs/write/repo/one.ex",
+            metadata: %{task_id: "task_1"}
+          )
+        ]
+      )
+
+      Process.put(
+        {FakeInteractionRouter, :pending},
+        [
+          interaction_request("irq_matching", "agent_1", "human_1", "arbor://shell/exec/git",
+            metadata: %{principal_id: "agent_1", provenance: %{task_id: "task_1"}}
+          )
+        ]
+      )
+
+      opts = [
+        caller_id: "human_1",
+        task_store: FakeTaskStore,
+        consensus_module: FakeConsensus,
+        interaction_router: FakeInteractionRouter,
+        security_module: FakeSecurity,
+        audit_module: FakeAudit
+      ]
+
+      assert {:ok, %{state: :cancelled}} = Orchestration.cancel_task("task_1", opts)
+      assert_received {:consensus_cancel, "prop_matching"}
+      assert_received {:interaction_respond, "irq_matching", :rejected, _}
+
+      assert {:ok, %{state: :cancelled}} = Orchestration.cancel_task("task_1", opts)
+      refute_received {:consensus_cancel, _}
+      refute_received {:interaction_respond, _, _, _}
+    end
+
+    test "already-resolved backend results do not fail a successful task cancellation" do
+      Process.put({FakeConsensus, :cancel_result}, {:error, :already_decided})
+      Process.put({FakeInteractionRouter, :answer_result}, {:error, :not_found})
+
+      Process.put(
+        {FakeConsensus, :pending},
+        [
+          consensus_proposal("prop_stale", "agent_1", "arbor://fs/write/repo/one.ex",
+            metadata: %{task_id: "task_1"}
+          )
+        ]
+      )
+
+      Process.put(
+        {FakeInteractionRouter, :pending},
+        [
+          interaction_request("irq_stale", "agent_1", "human_1", "arbor://shell/exec/git",
+            metadata: %{principal_id: "agent_1", provenance: %{task_id: "task_1"}}
+          )
+        ]
+      )
+
+      assert {:ok, %{state: :cancelled}} =
+               Orchestration.cancel_task("task_1",
+                 caller_id: "human_1",
+                 task_store: FakeTaskStore,
+                 consensus_module: FakeConsensus,
+                 interaction_router: FakeInteractionRouter,
+                 security_module: FakeSecurity,
+                 audit_module: FakeAudit
+               )
+
+      assert_received {:consensus_cancel, "prop_stale"}
+      assert_received {:interaction_respond, "irq_stale", :rejected, _}
+
+      assert_received {:audit_answered, "human_1", "prop_stale", :consensus, :task_cancelled,
+                       consensus_audit}
+
+      assert consensus_audit[:outcome] == :already_resolved
+      assert consensus_audit[:error] == ":already_decided"
+
+      assert_received {:audit_answered, "human_1", "irq_stale", :interaction, :task_cancelled,
+                       interaction_audit}
+
+      assert interaction_audit[:outcome] == :already_resolved
+      assert interaction_audit[:error] == ":not_found"
     end
 
     test "denies unauthorized cancellation before calling the task store cancel" do
@@ -593,6 +839,8 @@ defmodule Arbor.Agent.OrchestrationTest do
         caller_id: "dispatch_owner",
         task_id: "task_1",
         task_store: TerminalTaskStore,
+        consensus_module: FakeConsensus,
+        interaction_router: FakeInteractionRouter,
         security_module: DispatchScopedSecurity,
         audit_module: FakeAudit
       ]
