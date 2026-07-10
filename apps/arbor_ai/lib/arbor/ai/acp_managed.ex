@@ -56,6 +56,22 @@ defmodule Arbor.AI.AcpManaged do
   end
 
   @doc false
+  @spec deliver_task_control(String.t(), String.t(), map(), keyword()) ::
+          {:ok, :queued | :delivered | :deferred, :same_session_follow_up} | {:error, term()}
+  def deliver_task_control(task_id, principal_id, control, opts \\ [])
+      when is_binary(task_id) and is_binary(principal_id) and is_map(control) and is_list(opts) do
+    with {:ok, resolved} <- SessionRegistry.resolve_task_control(task_id, principal_id, opts) do
+      control = control |> Map.delete(:task_id) |> Map.put("task_id", task_id)
+
+      resolved.session_module.deliver_task_control(
+        resolved.session_pid,
+        control,
+        timeout: Keyword.get(opts, :control_timeout, 5_000)
+      )
+    end
+  end
+
+  @doc false
   @spec session_status(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def session_status(worker_session_id, opts \\ [])
       when is_binary(worker_session_id) and is_list(opts) do

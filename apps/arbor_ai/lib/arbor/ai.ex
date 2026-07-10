@@ -916,6 +916,28 @@ defmodule Arbor.AI do
   end
 
   @doc """
+  Deliver a JSON-clean task control to exactly one managed ACP session.
+
+  Resolution is by the nonblank `task_id` and `principal_id` pair only. Worker
+  handles and session PIDs are deliberately not accepted as task-control
+  authority. While a prompt is active the result is immediately
+  `{:ok, :queued, :same_session_follow_up}`; an idle session returns
+  `{:ok, :deferred, :same_session_follow_up}`.
+  """
+  @spec acp_managed_deliver_task_control(String.t(), String.t(), map(), keyword()) ::
+          {:ok, :queued | :delivered | :deferred, :same_session_follow_up} | {:error, term()}
+  def acp_managed_deliver_task_control(task_id, principal_id, control, opts \\ [])
+      when is_binary(task_id) and is_binary(principal_id) and is_map(control) do
+    Arbor.AI.AcpManaged.deliver_task_control(task_id, principal_id, control, opts)
+  end
+
+  @doc "Return the provider's operator-declared ACP task-control capabilities."
+  @spec acp_task_control_capabilities(atom()) :: map()
+  def acp_task_control_capabilities(provider) when is_atom(provider) do
+    AcpSession.Config.task_control_capabilities(provider)
+  end
+
+  @doc """
   Query managed session status (JSON-clean).
 
   Registry authority check is quick; live status is read from the session

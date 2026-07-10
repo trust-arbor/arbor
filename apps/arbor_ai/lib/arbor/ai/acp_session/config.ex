@@ -265,6 +265,39 @@ defmodule Arbor.AI.AcpSession.Config do
   end
 
   @doc """
+  Return task-control capabilities for an ACP provider.
+
+  Stable ACP has no standard in-flight steering request.  The follow-up path is
+  therefore always available. `native_steer_configured` preserves an operator's
+  future-provider intent, but configuration is not an acknowledgement and never
+  reports implemented native delivery.
+  """
+  @spec task_control_capabilities(atom()) :: %{
+          native_steer: boolean(),
+          native_steer_acknowledged: false,
+          native_steer_configured: boolean(),
+          same_session_follow_up: true,
+          fallback_mode: :same_session_follow_up
+        }
+  def task_control_capabilities(provider) when is_atom(provider) do
+    config = Application.get_env(:arbor_ai, :acp_providers, %{}) |> Map.get(provider, %{})
+
+    task_control =
+      Map.get(config, :task_control) || Map.get(config, "task_control") || %{}
+
+    native_steer =
+      Map.get(task_control, :native_steer) || Map.get(task_control, "native_steer") || false
+
+    %{
+      native_steer: false,
+      native_steer_acknowledged: false,
+      native_steer_configured: native_steer == true,
+      same_session_follow_up: true,
+      fallback_mode: :same_session_follow_up
+    }
+  end
+
+  @doc """
   Resolve raw client options without provider lookup.
 
   Used for testing — pass transport options directly.

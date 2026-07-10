@@ -45,6 +45,12 @@ defmodule Arbor.AI.AcpSession do
 
   @default_acp_client ExMCP.ACP.Client
   @default_inactivity_timeout_ms 300_000
+  @task_control_timeout_ms 5_000
+  @max_task_control_message_bytes 16_384
+  @max_task_control_id_bytes 256
+  @max_task_id_bytes 512
+  @max_task_control_history 256
+  @max_queued_task_controls 64
 
   defstruct [
     :client,
@@ -62,7 +68,10 @@ defmodule Arbor.AI.AcpSession do
     accumulated_text: "",
     context_tokens: 0,
     reconnect_attempted: false,
-    usage: %{input_tokens: 0, output_tokens: 0}
+    usage: %{input_tokens: 0, output_tokens: 0},
+    task_controls: %{},
+    task_control_sequence: [],
+    task_control_history_order: []
   ]
 
   # -- Public API --
@@ -122,6 +131,30 @@ defmodule Arbor.AI.AcpSession do
   def send_message(session, content, opts \\ []) do
     GenServer.call(session, {:send_message, content, opts}, :infinity)
   end
+
+  @doc """
+  Deliver an opaque task control without exposing session internals.
+
+  This intentionally uses the session mailbox instead of `GenServer.call/3`:
+  an active prompt owns the GenServer process in `await_prompt_result/3` and
+  can acknowledge a queued control immediately.
+  """
+  @spec deliver_task_control(GenServer.server(), map(), keyword()) ::
+          {:ok, :queued | :delivered | :deferred, :same_session_follow_up} | {:error, term()}
+  def deliver_task_control(session, control, opts \\ []) when is_map(control) and is_list(opts) do
+    ref = make_ref()
+    send(session, {:acp_task_control, ref, self(), control})
+
+    receive do
+      {:acp_task_control_result, ^ref, result} -> result
+    after
+      Keyword.get(opts, :timeout, @task_control_timeout_ms) -> {:error, :control_delivery_timeout}
+    end
+  end
+
+  @doc "Provider-declared task-control capabilities."
+  @spec task_control_capabilities(GenServer.server()) :: map()
+  def task_control_capabilities(session), do: GenServer.call(session, :task_control_capabilities)
 
   @doc """
   Get the current status of this session.
@@ -347,6 +380,10 @@ defmodule Arbor.AI.AcpSession do
     {:reply, info, state}
   end
 
+  def handle_call(:task_control_capabilities, _from, state) do
+    {:reply, task_control_capabilities_for(state), state}
+  end
+
   def handle_call(:close, _from, state) do
     disconnect_client(state)
     emit_signal(:acp_session_closed, state)
@@ -356,6 +393,15 @@ defmodule Arbor.AI.AcpSession do
   @impl true
   def handle_info({:acp_session_update, session_id, update}, state) do
     {:noreply, process_session_update(state, session_id, update)}
+  end
+
+  # No prompt is active. The control is retained for idempotency but there is
+  # no in-flight ACP request to steer, so never claim it was delivered.
+  def handle_info({:acp_task_control, ref, reply_to, control}, state)
+      when is_reference(ref) and is_pid(reply_to) do
+    {result, state} = accept_deferred_task_control(control, state)
+    send(reply_to, {:acp_task_control_result, ref, result})
+    {:noreply, state}
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{owner_monitor: ref} = state) do
@@ -730,13 +776,8 @@ defmodule Arbor.AI.AcpSession do
     caller_ref = Process.monitor(caller_pid)
 
     prompt =
-      start_prompt_worker(
-        state.client,
-        state.session_id,
-        content,
-        prompt_client_opts(opts, hard_timeout)
-      )
-      |> Map.merge(%{caller_pid: caller_pid, caller_ref: caller_ref})
+      start_task_prompt(state, content, opts, hard_timeout, inactivity_timeout)
+      |> Map.merge(%{caller_pid: caller_pid, caller_ref: caller_ref, control: nil})
 
     timers =
       start_prompt_timers(prompt.ref,
@@ -759,6 +800,280 @@ defmodule Arbor.AI.AcpSession do
     %{pid: pid, monitor_ref: monitor_ref, ref: ref, caller_pid: nil, caller_ref: nil}
   end
 
+  defp start_task_prompt(state, content, opts, hard_timeout, inactivity_timeout) do
+    start_prompt_worker(
+      state.client,
+      state.session_id,
+      content,
+      prompt_client_opts(opts, hard_timeout)
+    )
+    |> Map.merge(%{
+      prompt_opts: opts,
+      hard_timeout: hard_timeout,
+      inactivity_timeout: inactivity_timeout
+    })
+  end
+
+  # -- Managed task controls -----------------------------------------------
+
+  # A control is only accepted as data. There is deliberately no attempt to
+  # infer a vendor-specific steering protocol from its text; stable ACP has no
+  # standard native-steer operation. Accepted controls run as ordered follow-up
+  # prompts against this exact client/session after the current prompt finishes.
+  defp accept_queued_task_control(control, %{status: :busy} = state) do
+    with {:ok, control} <- normalize_task_control(control) do
+      case Map.fetch(state.task_controls, control.control_id) do
+        {:ok, existing} ->
+          promote_deferred_task_control(existing, state)
+
+        :error ->
+          with {:ok, state} <- ensure_task_control_capacity(state),
+               :ok <- ensure_queue_capacity(state) do
+            control = Map.put(control, :status, :queued)
+            state = put_task_control(state, control, queue?: true)
+            emit_native_steer_unsupported(state, control)
+            emit_task_control_signal(:acp_task_control_queued, state, control)
+            {{:ok, :queued, :same_session_follow_up}, state}
+          else
+            {:error, reason} ->
+              emit_task_control_unsupported(state, control, reason)
+              {{:error, reason}, state}
+          end
+      end
+    else
+      {:error, reason} ->
+        emit_invalid_task_control_signal(state, control, reason)
+        {{:error, reason}, state}
+    end
+  end
+
+  defp accept_queued_task_control(control, state) do
+    accept_deferred_task_control(control, state)
+  end
+
+  defp accept_deferred_task_control(control, state) do
+    with {:ok, control} <- normalize_task_control(control) do
+      case Map.fetch(state.task_controls, control.control_id) do
+        {:ok, existing} ->
+          {{:ok, existing.status, :same_session_follow_up}, state}
+
+        :error when state.status == :ready ->
+          with {:ok, state} <- ensure_task_control_capacity(state) do
+            control = Map.put(control, :status, :deferred)
+            state = put_task_control(state, control)
+            emit_native_steer_unsupported(state, control)
+            emit_task_control_signal(:acp_task_control_deferred, state, control)
+            {{:ok, :deferred, :same_session_follow_up}, state}
+          else
+            {:error, reason} ->
+              emit_task_control_unsupported(state, control, reason)
+              {{:error, reason}, state}
+          end
+
+        :error ->
+          {{:error, {:not_ready, state.status}}, state}
+      end
+    else
+      {:error, reason} ->
+        emit_invalid_task_control_signal(state, control, reason)
+        {{:error, reason}, state}
+    end
+  end
+
+  defp next_queued_task_control(state) do
+    case Enum.find(state.task_control_sequence, fn control_id ->
+           match?(%{status: :queued}, Map.get(state.task_controls, control_id))
+         end) do
+      nil ->
+        {:none, state}
+
+      control_id ->
+        {{control_id, Map.fetch!(state.task_controls, control_id)}, state}
+    end
+  end
+
+  # A deferred control was accepted while no prompt existed. Retrying its same
+  # opaque ID during a prompt turns that accepted instruction into one ordered
+  # follow-up; a different retry payload cannot replace the original message.
+  defp promote_deferred_task_control(%{status: :deferred} = control, state) do
+    case ensure_queue_capacity(state) do
+      :ok ->
+        control = %{control | status: :queued}
+        state = put_task_control(state, control, queue?: true)
+        emit_native_steer_unsupported(state, control)
+        emit_task_control_signal(:acp_task_control_queued, state, control)
+        {{:ok, :queued, :same_session_follow_up}, state}
+
+      {:error, reason} ->
+        emit_task_control_unsupported(state, control, reason)
+        {{:error, reason}, state}
+    end
+  end
+
+  defp promote_deferred_task_control(existing, state),
+    do: {{:ok, existing.status, :same_session_follow_up}, state}
+
+  defp ensure_task_control_capacity(state) do
+    state = prune_terminal_task_controls(state)
+
+    if map_size(state.task_controls) < @max_task_control_history,
+      do: {:ok, state},
+      else: {:error, :task_control_history_full}
+  end
+
+  defp ensure_queue_capacity(state) do
+    if queued_task_control_count(state) < @max_queued_task_controls,
+      do: :ok,
+      else: {:error, :task_control_queue_full}
+  end
+
+  defp queued_task_control_count(state) do
+    Enum.count(state.task_controls, fn {_id, control} -> control.status == :queued end)
+  end
+
+  # Keep idempotency data bounded without ever dropping an accepted follow-up.
+  # Terminal entries are pruned oldest-first; once every slot is queued the
+  # caller gets an explicit backpressure error instead of silent re-execution.
+  defp prune_terminal_task_controls(state) do
+    if map_size(state.task_controls) < @max_task_control_history do
+      state
+    else
+      case Enum.find(state.task_control_history_order, fn control_id ->
+             match?(
+               %{status: status} when status in [:delivered, :deferred],
+               Map.get(state.task_controls, control_id)
+             )
+           end) do
+        nil ->
+          state
+
+        control_id ->
+          %{
+            state
+            | task_controls: Map.delete(state.task_controls, control_id),
+              task_control_sequence: List.delete(state.task_control_sequence, control_id),
+              task_control_history_order:
+                List.delete(state.task_control_history_order, control_id)
+          }
+      end
+    end
+  end
+
+  defp put_task_control(state, control, opts \\ []) do
+    queue? = Keyword.get(opts, :queue?, false)
+    existing? = Map.has_key?(state.task_controls, control.control_id)
+
+    %{
+      state
+      | task_controls: Map.put(state.task_controls, control.control_id, control),
+        task_control_sequence:
+          if(queue?,
+            do: state.task_control_sequence ++ [control.control_id],
+            else: state.task_control_sequence
+          ),
+        task_control_history_order:
+          if(existing?,
+            do: state.task_control_history_order,
+            else: state.task_control_history_order ++ [control.control_id]
+          )
+    }
+  end
+
+  defp mark_task_control_delivered(state, %{control: nil} = _prompt), do: state
+
+  defp mark_task_control_delivered(state, %{control: control_id}) do
+    case Map.fetch(state.task_controls, control_id) do
+      {:ok, control} ->
+        delivered = %{control | status: :delivered}
+        state = %{state | task_controls: Map.put(state.task_controls, control_id, delivered)}
+        emit_task_control_signal(:acp_task_control_delivered, state, delivered)
+        state
+
+      :error ->
+        state
+    end
+  end
+
+  defp normalize_task_control(control) when is_map(control) do
+    control_id = Map.get(control, :control_id) || Map.get(control, "control_id")
+    message = Map.get(control, :message) || Map.get(control, "message")
+    task_id = Map.get(control, :task_id) || Map.get(control, "task_id")
+
+    with :ok <- bounded_nonblank(control_id, @max_task_control_id_bytes, :invalid_control_id),
+         :ok <-
+           bounded_nonblank(message, @max_task_control_message_bytes, :invalid_control_message),
+         :ok <- bounded_nonblank(task_id, @max_task_id_bytes, :invalid_task_id) do
+      {:ok, %{control_id: control_id, message: message, task_id: task_id}}
+    end
+  end
+
+  defp normalize_task_control(_), do: {:error, :invalid_task_control}
+
+  defp bounded_nonblank(value, max_bytes, _reason)
+       when is_binary(value) and byte_size(value) >= 1 and byte_size(value) <= max_bytes do
+    if String.trim(value) == "", do: {:error, :blank_task_control}, else: :ok
+  end
+
+  defp bounded_nonblank(_value, _max_bytes, reason), do: {:error, reason}
+
+  defp task_control_capabilities_for(state) do
+    Config.task_control_capabilities(state.provider)
+  end
+
+  defp emit_task_control_signal(event, state, control) do
+    emit_signal(event, state, %{
+      control_id: control.control_id,
+      task_id: control.task_id,
+      provider: state.provider,
+      mode: :same_session_follow_up
+    })
+  end
+
+  defp emit_native_steer_unsupported(state, control) do
+    emit_task_control_unsupported(state, control, :native_steer_unavailable)
+  end
+
+  defp emit_task_control_unsupported(state, control, reason) do
+    capabilities = task_control_capabilities_for(state)
+
+    emit_signal(:acp_task_control_unsupported, state, %{
+      control_id: bounded_signal_value(control.control_id, @max_task_control_id_bytes),
+      task_id: bounded_signal_value(control.task_id, @max_task_id_bytes),
+      provider: state.provider,
+      mode: :same_session_follow_up,
+      native_steer: capabilities.native_steer,
+      native_steer_configured: capabilities.native_steer_configured,
+      native_steer_acknowledged: capabilities.native_steer_acknowledged,
+      reason: reason
+    })
+  end
+
+  defp emit_invalid_task_control_signal(state, control, reason) do
+    task_id =
+      if is_map(control), do: Map.get(control, :task_id) || Map.get(control, "task_id"), else: nil
+
+    control_id =
+      if is_map(control),
+        do: Map.get(control, :control_id) || Map.get(control, "control_id"),
+        else: nil
+
+    # Keep malformed caller input out of signals except for bounded IDs.
+    emit_task_control_unsupported(
+      state,
+      %{
+        control_id: bounded_signal_value(control_id, @max_task_control_id_bytes),
+        task_id: bounded_signal_value(task_id, @max_task_id_bytes)
+      },
+      reason
+    )
+  end
+
+  defp bounded_signal_value(value, max_bytes)
+       when is_binary(value) and byte_size(value) <= max_bytes,
+       do: value
+
+  defp bounded_signal_value(_value, _max_bytes), do: nil
+
   defp run_prompt(client, session_id, content, opts) do
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
     case apply(acp_client_module(), :prompt, [client, session_id, content, opts]) do
@@ -779,6 +1094,11 @@ defmodule Arbor.AI.AcpSession do
     receive do
       {:acp_prompt_result, ref, {:ok, result}} when ref == prompt.ref ->
         complete_prompt_success(prompt, timers, result, state)
+
+      {:acp_task_control, ref, reply_to, control} when is_reference(ref) and is_pid(reply_to) ->
+        {result, new_state} = accept_queued_task_control(control, state)
+        send(reply_to, {:acp_task_control_result, ref, result})
+        await_prompt_result(prompt, timers, new_state)
 
       {:acp_prompt_result, ref, {:error, :timeout}} when ref == prompt.ref ->
         timeout_prompt(:timeout, prompt, timers, state)
@@ -841,16 +1161,47 @@ defmodule Arbor.AI.AcpSession do
   end
 
   defp complete_prompt_success(prompt, timers, result, state) do
-    cleanup_prompt(prompt, timers)
+    cleanup_prompt(prompt, timers, preserve_caller_monitor: true)
 
     # A few adapters enqueue the final chunks immediately before returning the
     # prompt result. Drain anything already queued before merging text.
-    state = drain_pending_updates(state)
+    state = state |> drain_pending_updates() |> drain_pending_task_controls()
     result = merge_accumulated_text(result, state.accumulated_text)
-    new_state = %{state | status: :ready} |> accumulate_usage(result)
+
+    new_state =
+      %{state | status: :busy} |> accumulate_usage(result) |> mark_task_control_delivered(prompt)
+
     maybe_report_usage(new_state, result)
     emit_signal(:acp_session_completed, new_state, %{result: summarize_result(result)})
-    {:reply, {:ok, result}, new_state}
+
+    case next_queued_task_control(new_state) do
+      {:none, new_state} ->
+        demonitor_owner(prompt.caller_ref)
+        {:reply, {:ok, result}, %{new_state | status: :ready}}
+
+      {{control_id, control}, new_state} ->
+        follow_up =
+          start_task_prompt(
+            new_state,
+            control.message,
+            prompt.prompt_opts,
+            prompt.hard_timeout,
+            prompt.inactivity_timeout
+          )
+          |> Map.merge(%{
+            caller_pid: prompt.caller_pid,
+            caller_ref: prompt.caller_ref,
+            control: control_id
+          })
+
+        follow_up_timers =
+          start_prompt_timers(follow_up.ref,
+            hard_timeout: follow_up.hard_timeout,
+            inactivity_timeout: follow_up.inactivity_timeout
+          )
+
+        await_prompt_result(follow_up, follow_up_timers, %{new_state | accumulated_text: ""})
+    end
   end
 
   defp timeout_prompt(kind, prompt, timers, state) do
@@ -875,9 +1226,12 @@ defmodule Arbor.AI.AcpSession do
     {:stop, :normal, {:error, kind}, new_state}
   end
 
-  defp cleanup_prompt(prompt, timers) do
+  defp cleanup_prompt(prompt, timers, opts \\ []) do
     Process.demonitor(prompt.monitor_ref, [:flush])
-    demonitor_owner(Map.get(prompt, :caller_ref))
+
+    unless Keyword.get(opts, :preserve_caller_monitor, false),
+      do: demonitor_owner(Map.get(prompt, :caller_ref))
+
     cancel_prompt_timers(timers)
   end
 
@@ -1005,6 +1359,20 @@ defmodule Arbor.AI.AcpSession do
     receive do
       {:acp_session_update, session_id, update} ->
         drain_pending_updates(process_session_update(state, session_id, update))
+    after
+      0 -> state
+    end
+  end
+
+  # A prompt result and a control can cross in the mailbox. Drain controls that
+  # were already accepted by the process scheduler while the prompt was active
+  # before deciding whether to reply to the original caller.
+  defp drain_pending_task_controls(%{status: :busy} = state) do
+    receive do
+      {:acp_task_control, ref, reply_to, control} when is_reference(ref) and is_pid(reply_to) ->
+        {result, state} = accept_queued_task_control(control, state)
+        send(reply_to, {:acp_task_control_result, ref, result})
+        drain_pending_task_controls(state)
     after
       0 -> state
     end

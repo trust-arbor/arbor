@@ -86,6 +86,16 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
     call({:resolve, worker_session_id, caller}, server_opts)
   end
 
+  @doc false
+  @spec resolve_task_control(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def resolve_task_control(task_id, principal_id, opts \\ [])
+      when is_binary(task_id) and is_binary(principal_id) and is_list(opts) do
+    call(
+      {:resolve_task_control, normalize_id(task_id), normalize_id(principal_id)},
+      Keyword.take(opts, [:server, :timeout])
+    )
+  end
+
   @doc """
   Return JSON-clean status metadata when authorized.
   """
@@ -152,6 +162,25 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
+    end
+  end
+
+  # Task control has no worker handle authority. It must find exactly one live
+  # task/principal pair; duplicate registrations are an explicit ambiguity.
+  def handle_call({:resolve_task_control, task_id, principal_id}, _from, state) do
+    matches =
+      state.sessions
+      |> Map.values()
+      |> Enum.filter(fn entry ->
+        entry.task_id == task_id and entry.principal_id == principal_id and
+          non_empty_id?(task_id) and non_empty_id?(principal_id) and
+          Process.alive?(entry.session_pid)
+      end)
+
+    case matches do
+      [entry] -> {:reply, {:ok, resolve_view(entry)}, state}
+      [] -> {:reply, {:error, :not_found}, state}
+      _ -> {:reply, {:error, :ambiguous_task_control_session}, state}
     end
   end
 
