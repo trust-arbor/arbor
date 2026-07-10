@@ -30,6 +30,13 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutor do
 
   @allowed_context_keys MapSet.new(~w(task_id timeout caller_id metadata))
 
+  @max_action_metric_entries 24
+  @max_action_metric_list_items 32
+  @max_action_metric_depth 3
+  @max_action_metric_key_bytes 128
+  @max_action_metric_string_bytes 1_024
+  @max_action_metrics_encoded_bytes 16_384
+
   @forbidden_task_keys MapSet.new(~w(
     action_executor
     actions
@@ -101,12 +108,14 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutor do
           | {:error, {:pending_approval, String.t()}}
           | {:error, term()}
   def run(agent_id, task, context) when is_binary(agent_id) do
+    started_at = System.monotonic_time(:millisecond)
+
     with :ok <- validate_agent_id(agent_id),
          {:ok, exec_ctx} <- validate_context(context),
          {:ok, params} <- validate_and_build_params(task),
          {:ok, action_context} <- build_action_context(agent_id, exec_ctx),
          params <- maybe_put_timeout(params, exec_ctx) do
-      invoke_action(agent_id, params, action_context)
+      invoke_action(agent_id, params, action_context, started_at)
     end
   end
 
@@ -466,7 +475,7 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutor do
     end
   end
 
-  defp invoke_action(agent_id, params, action_context) do
+  defp invoke_action(agent_id, params, action_context, started_at) do
     actions = actions_module()
 
     case actions.authorize_and_execute(
@@ -482,7 +491,7 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutor do
         pending
 
       {:ok, result} ->
-        normalize_success(result)
+        normalize_success(result, started_at)
 
       {:error, _reason} = error ->
         error
@@ -497,12 +506,137 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutor do
     kind, reason -> {:error, {:legacy_coding_action_throw, {kind, reason}}}
   end
 
-  defp normalize_success(result) do
+  defp normalize_success(result, started_at)
+       when is_map(result) and not is_struct(result) do
+    wall_clock_ms = max(System.monotonic_time(:millisecond) - started_at, 0)
+
+    result = Map.put(result, "metrics", legacy_metrics(result, wall_clock_ms))
+    result = Map.delete(result, :metrics)
     normalized = TaskArtifacts.normalize(result)
 
     with :ok <- ensure_result_json_clean(normalized) do
       {:ok, normalized}
     end
+  end
+
+  defp normalize_success(_result, _started_at), do: {:error, :invalid_legacy_coding_result}
+
+  defp legacy_metrics(result, wall_clock_ms) do
+    preserved = preserved_action_metrics(result)
+
+    Map.merge(preserved, %{
+      "execution_path" => "legacy",
+      "wall_clock_ms" => wall_clock_ms,
+      "validation_attempts" => evidence_presence_count(result_value(result, :validation)),
+      "validation_command_count" => validation_command_count(result_value(result, :validation)),
+      "review_attempts" => evidence_count(result_value(result, :review)),
+      "protocol_retry_count" => 0,
+      "validation_rework_count" => 0,
+      "review_rework_count" => 0,
+      "total_rework_count" => 0
+    })
+  end
+
+  defp preserved_action_metrics(result) do
+    metrics = result_value(result, :metrics)
+
+    with true <- is_map(metrics) and not is_struct(metrics),
+         {:ok, clean} <- clean_metric_map(metrics, 0),
+         {:ok, encoded} <- Jason.encode(clean),
+         true <- byte_size(encoded) <= @max_action_metrics_encoded_bytes do
+      clean
+    else
+      _ -> %{}
+    end
+  rescue
+    _ -> %{}
+  end
+
+  defp clean_metric_map(map, depth)
+       when depth <= @max_action_metric_depth and
+              map_size(map) <= @max_action_metric_entries do
+    Enum.reduce_while(map, {:ok, %{}}, fn {key, value}, {:ok, acc} ->
+      with {:ok, clean_key} <- clean_metric_key(key),
+           false <- Map.has_key?(acc, clean_key),
+           {:ok, clean_value} <- clean_metric_value(value, depth + 1) do
+        {:cont, {:ok, Map.put(acc, clean_key, clean_value)}}
+      else
+        _ -> {:halt, :error}
+      end
+    end)
+  end
+
+  defp clean_metric_map(_map, _depth), do: :error
+
+  defp clean_metric_key(key) when is_atom(key), do: clean_metric_key(Atom.to_string(key))
+
+  defp clean_metric_key(key) when is_binary(key) do
+    if String.valid?(key) and byte_size(key) <= @max_action_metric_key_bytes,
+      do: {:ok, key},
+      else: :error
+  end
+
+  defp clean_metric_key(_key), do: :error
+
+  defp clean_metric_value(_value, depth) when depth > @max_action_metric_depth, do: :error
+
+  defp clean_metric_value(value, _depth)
+       when is_integer(value) or is_float(value) or is_boolean(value) or is_nil(value),
+       do: {:ok, value}
+
+  defp clean_metric_value(value, _depth) when is_binary(value) do
+    if String.valid?(value) and byte_size(value) <= @max_action_metric_string_bytes,
+      do: {:ok, value},
+      else: :error
+  end
+
+  defp clean_metric_value(%_{}, _depth), do: :error
+  defp clean_metric_value(map, depth) when is_map(map), do: clean_metric_map(map, depth)
+
+  defp clean_metric_value(list, depth) when is_list(list) do
+    if length(list) <= @max_action_metric_list_items do
+      Enum.reduce_while(list, {:ok, []}, fn value, {:ok, acc} ->
+        case clean_metric_value(value, depth + 1) do
+          {:ok, clean} -> {:cont, {:ok, [clean | acc]}}
+          :error -> {:halt, :error}
+        end
+      end)
+      |> case do
+        {:ok, reversed} -> {:ok, Enum.reverse(reversed)}
+        :error -> :error
+      end
+    else
+      :error
+    end
+  end
+
+  defp clean_metric_value(_value, _depth), do: :error
+
+  defp evidence_count(nil), do: 0
+  defp evidence_count([]), do: 0
+  defp evidence_count(list) when is_list(list), do: length(list)
+
+  defp evidence_count(map) when is_map(map) and not is_struct(map) do
+    if map_size(map) == 0, do: 0, else: 1
+  end
+
+  defp evidence_count(_evidence), do: 0
+
+  defp evidence_presence_count(nil), do: 0
+  defp evidence_presence_count([]), do: 0
+
+  defp evidence_presence_count(map) when is_map(map) and not is_struct(map) do
+    if map_size(map) == 0, do: 0, else: 1
+  end
+
+  defp evidence_presence_count(list) when is_list(list), do: 1
+  defp evidence_presence_count(_evidence), do: 0
+
+  defp validation_command_count(list) when is_list(list), do: length(list)
+  defp validation_command_count(_evidence), do: 0
+
+  defp result_value(map, key) do
+    Map.get(map, key, Map.get(map, Atom.to_string(key)))
   end
 
   defp ensure_result_json_clean(result) when is_map(result) do

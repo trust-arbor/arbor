@@ -135,6 +135,82 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
     assert result.raw === raw
   end
 
+  test "promotes valid atom- and string-keyed metrics into payload and report" do
+    cases = [
+      %{
+        status: "change_committed",
+        branch: "agent/atom-metrics",
+        metrics: %{
+          execution_path: "pipeline",
+          wall_clock_ms: 12,
+          usage: %{input_tokens: 34}
+        }
+      },
+      %{
+        "status" => "change_committed",
+        "branch" => "agent/string-metrics",
+        "metrics" => %{
+          "execution_path" => "pipeline",
+          "wall_clock_ms" => 12,
+          "usage" => %{"input_tokens" => 34}
+        }
+      }
+    ]
+
+    for raw <- cases do
+      metrics = Map.get(raw, :metrics, Map.get(raw, "metrics"))
+      result = TaskArtifacts.normalize(raw)
+
+      assert result.result_type == :coding_change
+      assert result.payload.metrics === metrics
+      assert result.payload.report.metrics === metrics
+      assert result.raw === raw
+    end
+  end
+
+  test "malformed metrics are omitted from an otherwise coding result" do
+    malformed_metrics = [
+      %URI{scheme: "https", host: "example.com"},
+      %{1 => "non-string-or-atom key"},
+      %{"worker" => self()},
+      %{"callback" => fn -> :ok end},
+      %{"nested" => [%{"valid" => true}, {:runtime, :tuple}]},
+      %{"status" => :not_json}
+    ]
+
+    for metrics <- malformed_metrics do
+      raw = %{
+        status: "change_committed",
+        branch: "agent/change",
+        worktree_path: "/tmp/ws",
+        metrics: metrics
+      }
+
+      result = TaskArtifacts.normalize(raw)
+
+      assert result.result_type == :coding_change
+      refute Map.has_key?(result.payload, :metrics)
+      refute Map.has_key?(result.payload.report, :metrics)
+      assert result.raw === raw
+    end
+  end
+
+  test "metrics do not classify an otherwise generic result as coding" do
+    raw = %{
+      "status" => "change_committed",
+      "metrics" => %{
+        "execution_path" => "pipeline",
+        "wall_clock_ms" => 12
+      }
+    }
+
+    assert TaskArtifacts.normalize(raw) == %{
+             result_type: :value,
+             payload: %{value: raw},
+             raw: raw
+           }
+  end
+
   test "artifact-like data does not change generic result fallbacks" do
     raw = %{
       "status" => "running",

@@ -214,6 +214,69 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutorTest do
     assert is_binary(encoded)
   end
 
+  test "adds bounded executor-owned metrics that action output cannot forge" do
+    Application.put_env(:arbor_agent, :legacy_coding_action_reply, {
+      :ok,
+      %{
+        status: "change_committed",
+        branch: "feat/metrics",
+        commit: "deadbeef",
+        worktree_path: "/tmp/ws",
+        validation: [
+          %{"command" => "mix compile", "passed" => true},
+          %{"command" => "mix test", "passed" => true}
+        ],
+        review: %{"status" => "approved", "recommendation" => "keep"},
+        metrics: %{
+          "action_metric" => %{"value" => 7},
+          execution_path: "forged",
+          wall_clock_ms: -1,
+          validation_attempts: 99,
+          validation_command_count: 99,
+          review_attempts: 99,
+          protocol_retry_count: 99,
+          validation_rework_count: 99,
+          review_rework_count: 99,
+          total_rework_count: 99
+        }
+      }
+    })
+
+    assert {:ok, result} =
+             LegacyCodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+    metrics = result.payload.metrics
+
+    assert metrics["execution_path"] == "legacy"
+    assert is_integer(metrics["wall_clock_ms"])
+    assert metrics["wall_clock_ms"] >= 0
+    assert metrics["validation_attempts"] == 1
+    assert metrics["validation_command_count"] == 2
+    assert metrics["review_attempts"] == 1
+    assert metrics["protocol_retry_count"] == 0
+    assert metrics["validation_rework_count"] == 0
+    assert metrics["review_rework_count"] == 0
+    assert metrics["total_rework_count"] == 0
+    assert metrics["action_metric"] == %{"value" => 7}
+    assert result.payload.report.metrics == metrics
+    assert result.raw["metrics"] == metrics
+    refute Map.has_key?(result.raw, :metrics)
+    assert {:ok, _encoded} = Jason.encode(result)
+  end
+
+  test "reports zero attempts when validation and review evidence are absent" do
+    assert {:ok, result} =
+             LegacyCodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+    metrics = result.payload.metrics
+
+    assert metrics["validation_attempts"] == 0
+    assert metrics["validation_command_count"] == 0
+    assert metrics["review_attempts"] == 0
+    assert metrics["protocol_retry_count"] == 0
+    assert metrics["total_rework_count"] == 0
+  end
+
   # ---------------------------------------------------------------------------
   # Malformed / unknown input
   # ---------------------------------------------------------------------------

@@ -41,6 +41,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
     compile_manifest_path
   )
   @lowercase_sha256 ~r/\A[0-9a-f]{64}\z/
+  @max_metrics_depth 16
 
   @doc "Normalize a runner result into the public task-result artifact shape."
   @spec normalize(term()) :: map()
@@ -56,6 +57,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
 
   defp coding_change_result(raw, original) do
     artifacts = coding_artifacts(raw)
+    metrics = coding_metrics(raw)
 
     %{
       result_type: :coding_change,
@@ -65,9 +67,10 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
           commit: value(raw, :commit),
           diff: value(raw, :diff),
           files: files(raw),
-          report: report(raw, artifacts),
+          report: report(raw, artifacts, metrics),
           verdict: verdict(raw),
           artifacts: artifacts,
+          metrics: metrics,
           repo_path: value(raw, :repo_path),
           worktree_path: value(raw, :worktree_path),
           pr_url: value(raw, :pr_url)
@@ -255,7 +258,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
 
   defp normalize_files(_files), do: []
 
-  defp report(raw, artifacts) do
+  defp report(raw, artifacts, metrics) do
     review = value(raw, :review)
 
     %{
@@ -271,6 +274,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
       security_veto: value(raw, :security_veto) || value(review, :security_veto),
       blast_radius: value(raw, :blast_radius) || value(review, :blast_radius),
       artifacts: artifacts,
+      metrics: metrics,
       error: value(raw, :error) || value(raw, :review_error)
     }
     |> reject_nil_values()
@@ -351,6 +355,79 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   end
 
   defp valid_coding_artifacts?(_artifacts), do: false
+
+  defp coding_metrics(raw) do
+    case value(raw, :metrics) do
+      metrics when is_map(metrics) and not is_struct(metrics) ->
+        if valid_metrics?(metrics), do: metrics
+
+      _other ->
+        nil
+    end
+  end
+
+  defp valid_metrics?(metrics) do
+    with :ok <- validate_metric_map(metrics, 0),
+         {:ok, _encoded} <- Jason.encode(metrics) do
+      true
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp validate_metric_map(_map, depth) when depth > @max_metrics_depth, do: :error
+
+  defp validate_metric_map(map, depth) do
+    map
+    |> Enum.reduce_while({:ok, MapSet.new()}, fn {key, metric_value}, {:ok, keys} ->
+      with {:ok, clean_key} <- validate_metric_key(key),
+           false <- MapSet.member?(keys, clean_key),
+           :ok <- validate_metric_value(metric_value, depth + 1) do
+        {:cont, {:ok, MapSet.put(keys, clean_key)}}
+      else
+        _ -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, _keys} -> :ok
+      :error -> :error
+    end
+  end
+
+  defp validate_metric_key(key) when is_atom(key),
+    do: {:ok, Atom.to_string(key)}
+
+  defp validate_metric_key(key) when is_binary(key) do
+    if String.valid?(key), do: {:ok, key}, else: :error
+  end
+
+  defp validate_metric_key(_key), do: :error
+
+  defp validate_metric_value(_value, depth) when depth > @max_metrics_depth, do: :error
+
+  defp validate_metric_value(value, _depth)
+       when is_integer(value) or is_float(value) or is_boolean(value) or is_nil(value),
+       do: :ok
+
+  defp validate_metric_value(value, _depth) when is_binary(value) do
+    if String.valid?(value), do: :ok, else: :error
+  end
+
+  defp validate_metric_value(%_{}, _depth), do: :error
+  defp validate_metric_value(map, depth) when is_map(map), do: validate_metric_map(map, depth)
+
+  defp validate_metric_value(list, depth) when is_list(list) do
+    Enum.reduce_while(list, :ok, fn value, :ok ->
+      case validate_metric_value(value, depth + 1) do
+        :ok -> {:cont, :ok}
+        :error -> {:halt, :error}
+      end
+    end)
+  end
+
+  defp validate_metric_value(_value, _depth), do: :error
 
   defp nonblank_string?(value) when is_binary(value),
     do: String.valid?(value) and String.trim(value) != ""
