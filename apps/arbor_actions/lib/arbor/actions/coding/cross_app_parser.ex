@@ -204,6 +204,14 @@ defmodule Arbor.Actions.Coding.CrossApp.Parser do
 
   defp parse_deps_list(_), do: {:error, :dynamic_or_malformed_deps}
 
+  # Three-element tuple literals are represented as a :{} AST call. The safe
+  # encoder turns that call name into the non-atom "{}" marker too.
+  defp parse_dep_entry({:{}, _meta, elements}) when is_list(elements),
+    do: parse_dep_tuple_elements(elements)
+
+  defp parse_dep_entry({{:__non_atom__, "{}"}, _meta, elements}) when is_list(elements),
+    do: parse_dep_tuple_elements(elements)
+
   # {name, opts} where name may be atom or {:__non_atom__, "name"}
   defp parse_dep_entry({name_term, opts}) when is_list(opts) do
     case ident_name(name_term) do
@@ -229,6 +237,22 @@ defmodule Arbor.Actions.Coding.CrossApp.Parser do
   end
 
   defp parse_dep_entry(_), do: {:error, :malformed_dep_entry}
+
+  defp parse_dep_tuple_elements([name_term, opts]) when is_list(opts) do
+    case ident_name(name_term) do
+      name when is_binary(name) -> classify_dep(name, opts)
+      :error -> {:error, :malformed_dep_entry}
+    end
+  end
+
+  defp parse_dep_tuple_elements([name_term, _requirement, opts]) when is_list(opts) do
+    case ident_name(name_term) do
+      name when is_binary(name) -> classify_dep(name, opts)
+      :error -> {:error, :malformed_dep_entry}
+    end
+  end
+
+  defp parse_dep_tuple_elements(_), do: {:error, :malformed_dep_entry}
 
   defp classify_dep(name, opts) do
     with true <- valid_identifier?(name),

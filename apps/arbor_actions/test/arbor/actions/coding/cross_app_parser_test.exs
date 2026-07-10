@@ -22,6 +22,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ParserTest do
         [
           {:beta, in_umbrella: true},
           {:jason, "~> 1.0"},
+          {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
           {:gamma, path: "../gamma", in_umbrella: true}
         ]
       end
