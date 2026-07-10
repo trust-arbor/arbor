@@ -45,6 +45,9 @@ defmodule Arbor.Orchestrator do
   - **IR** — Typed intermediate representation for security analysis
   """
 
+  alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Orchestrator.CodingPlan.Compilation
+  alias Arbor.Orchestrator.Config
   alias Arbor.Orchestrator.Conformance
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Engine
@@ -117,6 +120,32 @@ defmodule Arbor.Orchestrator do
   def compile(source_or_graph, opts \\ []) do
     with {:ok, graph} <- ensure_graph(source_or_graph, opts) do
       IR.Compiler.compile(graph)
+    end
+  end
+
+  @doc """
+  Compile a reviewed coding plan into deterministic, non-executed pipeline data.
+
+  The template path and compiler module come exclusively from trusted
+  orchestrator configuration. This function does not archive, authorize, sign,
+  or execute the resulting pipeline.
+  """
+  @spec compile_coding_plan(Plan.t() | map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def compile_coding_plan(plan_or_attrs) do
+    with {:ok, plan} <- normalize_coding_plan(plan_or_attrs),
+         {:ok, template_path} <- resolve_coding_plan_template(),
+         {:ok, compiler} <- resolve_coding_plan_compiler() do
+      case compiler.compile(plan, template_path: template_path) do
+        {:ok, %Compilation{} = compilation} ->
+          {:ok, Compilation.to_map(compilation)}
+
+        {:error, _reason} = error ->
+          error
+
+        other ->
+          {:error, {:coding_plan_compiler_malformed_reply, other}}
+      end
     end
   end
 
@@ -279,6 +308,35 @@ defmodule Arbor.Orchestrator do
   end
 
   defp load_graph_for_entry(_), do: {:error, :no_dot_source_path}
+
+  defp normalize_coding_plan(%Plan{} = plan), do: {:ok, plan}
+  defp normalize_coding_plan(attrs), do: Plan.new(attrs)
+
+  defp resolve_coding_plan_template do
+    path = Config.coding_pipeline_path()
+
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular}} ->
+        {:ok, path}
+
+      {:ok, %File.Stat{type: type}} ->
+        {:error, {:coding_plan_template_unavailable, path, {:not_regular_file, type}}}
+
+      {:error, reason} ->
+        {:error, {:coding_plan_template_unavailable, path, reason}}
+    end
+  end
+
+  defp resolve_coding_plan_compiler do
+    compiler = Config.coding_plan_compiler()
+
+    if is_atom(compiler) and Code.ensure_loaded?(compiler) and
+         function_exported?(compiler, :compile, 2) do
+      {:ok, compiler}
+    else
+      {:error, {:coding_plan_compiler_unavailable, compiler}}
+    end
+  end
 
   # Already compiled — just apply caller-supplied custom transforms.
   # Built-in transforms (VariableExpansion, ModelStylesheet) are assumed to
