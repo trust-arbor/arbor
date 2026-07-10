@@ -95,16 +95,24 @@ defmodule Arbor.Orchestrator do
   @doc "Read a .dot file from disk and execute it as a pipeline."
   @spec run_file(String.t(), keyword()) :: run_result()
   def run_file(path, opts \\ []) do
-    with {:ok, source} <- File.read(path) do
+    with {:ok, source} <- File.read(path),
+         graph_hash = :crypto.hash(:sha256, source) |> Base.encode16(case: :lower),
+         :ok <- verify_expected_graph_hash(opts, graph_hash) do
       # Thread source path and hash for crash recovery + graph version checks
-      graph_hash = :crypto.hash(:sha256, source) |> Base.encode16(case: :lower)
-
       opts =
         opts
         |> Keyword.put_new(:dot_source_path, Path.expand(path))
         |> Keyword.put_new(:graph_hash, graph_hash)
 
       run(source, opts)
+    end
+  end
+
+  defp verify_expected_graph_hash(opts, actual_hash) do
+    case Keyword.fetch(opts, :graph_hash) do
+      :error -> :ok
+      {:ok, ^actual_hash} -> :ok
+      {:ok, expected_hash} -> {:error, {:graph_hash_mismatch, expected_hash, actual_hash}}
     end
   end
 

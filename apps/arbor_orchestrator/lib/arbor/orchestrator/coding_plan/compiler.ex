@@ -351,9 +351,14 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   end
 
   defp rewrite_validation(graph, %Plan{validation_profile: "default"}) do
-    with :ok <- require_action_node(graph, "validate", "mix_compile") do
-      {:ok, graph}
-    end
+    update_node(graph, "validate", fn attrs ->
+      with :ok <- require_action_attrs(attrs, "mix_compile") do
+        {:ok,
+         attrs
+         |> Map.put("context_keys", "path")
+         |> Map.put("param.warnings_as_errors", true)}
+      end
+    end)
   end
 
   defp rewrite_validation(graph, %Plan{validation_profile: "security_regression"} = plan) do

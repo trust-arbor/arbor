@@ -97,6 +97,24 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     refute Map.has_key?(compilation.manifest, "capabilities")
   end
 
+  test "security regression: default profile restores warnings-as-errors after template drift",
+       ctx do
+    weakened_template =
+      String.replace(
+        ctx.template_source,
+        ~s(    param.warnings_as_errors="true",\n),
+        "",
+        global: false
+      )
+
+    assert {:ok, compilation} = compile(plan!(), ctx, weakened_template)
+    validate = node_attrs(parse!(compilation.dot_source), "validate")
+
+    assert validate["action"] == "mix_compile"
+    assert validate["context_keys"] == "path"
+    assert validate["param.warnings_as_errors"] == true
+  end
+
   test "security regression profile uses focused mix_test paths", ctx do
     requested_paths = [
       "apps/arbor_security/test/security_regression_test.exs",
@@ -336,14 +354,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     wrong_boolean =
       String.replace(
         ctx.template_source,
-        ~s(param.warnings_as_errors="true"),
-        ~s(param.warnings_as_errors="not_boolean"),
+        ~s(param.all="true"),
+        ~s(param.all="not_boolean"),
         global: false
       )
 
     assert {:error,
-            {:invalid_static_action_parameter, "validate", "mix_compile", "warnings_as_errors",
-             "boolean", "not_boolean"}} =
+            {:invalid_static_action_parameter, "commit_change", "git_commit", "all", "boolean",
+             "not_boolean"}} =
              compile(plan!(), ctx, wrong_boolean)
 
     wrong_integer =
