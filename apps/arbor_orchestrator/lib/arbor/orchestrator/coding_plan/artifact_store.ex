@@ -166,18 +166,31 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStore do
   defp atomic_write(path, content) do
     temporary_path = temporary_path(path)
 
-    result =
-      with :ok <- File.write(temporary_path, content, [:binary, :exclusive]),
-           :ok <- File.chmod(temporary_path, 0o600),
+    try do
+      with :ok <- write_secure_temp(temporary_path, content),
            :ok <- File.rename(temporary_path, path) do
         :ok
       else
         {:error, reason} ->
           {:error, {:write_artifact_failed, Path.basename(path), reason}}
       end
+    after
+      File.rm(temporary_path)
+    end
+  end
 
-    if result != :ok, do: File.rm(temporary_path)
-    result
+  defp write_secure_temp(path, content) do
+    # The file is empty until its final restrictive mode is in place.
+    case File.open(path, [:write, :binary, :exclusive], fn device ->
+           with :ok <- File.chmod(path, 0o600),
+                :ok <- IO.binwrite(device, content) do
+             :ok
+           end
+         end) do
+      {:ok, :ok} -> :ok
+      {:ok, {:error, reason}} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp temporary_path(path) do

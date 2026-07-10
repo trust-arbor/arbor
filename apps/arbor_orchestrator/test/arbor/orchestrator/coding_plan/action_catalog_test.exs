@@ -79,6 +79,26 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
     def to_tool, do: raise(String.duplicate("oversized error ", 100))
   end
 
+  defmodule InvalidUtf8NameAction do
+    def to_tool do
+      %{
+        name: <<"invalid_name_", 0xFF>>,
+        description: "Invalid UTF-8 name",
+        parameters_schema: %{"type" => "object"}
+      }
+    end
+  end
+
+  defmodule InvalidUtf8DescriptionAction do
+    def to_tool do
+      %{
+        name: "invalid_utf8_description",
+        description: <<"invalid description ", 0xFF>>,
+        parameters_schema: %{"type" => "object"}
+      }
+    end
+  end
+
   @registry_entries [
     {"zebra.action", ZebraAction, %{category: :test}},
     {"zebra_action", ZebraAction, %{category: :test, is_jido_alias: true}},
@@ -156,6 +176,18 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
 
       assert byte_size(long_message) <= 512
       assert String.ends_with?(long_message, "...")
+    end
+
+    test "security regression: invalid UTF-8 names and descriptions return tagged errors" do
+      assert {:error, {:invalid_action_spec, name_module, :invalid_name}} =
+               ActionCatalog.snapshot(modules: [InvalidUtf8NameAction])
+
+      assert name_module == Atom.to_string(InvalidUtf8NameAction)
+
+      assert {:error, {:invalid_action_spec, description_module, :invalid_description}} =
+               ActionCatalog.snapshot(modules: [InvalidUtf8DescriptionAction])
+
+      assert description_module == Atom.to_string(InvalidUtf8DescriptionAction)
     end
 
     test "changes the digest when a parameter schema changes" do

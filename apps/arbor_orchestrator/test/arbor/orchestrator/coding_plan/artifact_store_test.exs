@@ -57,6 +57,47 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     end
   end
 
+  test "security regression: nonempty temporary artifacts are already mode 0600", %{
+    root: root
+  } do
+    parent = self()
+    large_dot = :binary.copy("x", 64 * 1024 * 1024)
+
+    archive_task =
+      Task.async(fn ->
+        Process.flag(:priority, :low)
+        send(parent, {:archive_ready, self()})
+
+        receive do
+          :archive -> :ok
+        end
+
+        ArtifactStore.archive(root, plan_fixture(), large_dot, manifest_fixture())
+      end)
+
+    observer_task =
+      Task.async(fn ->
+        Process.flag(:priority, :high)
+        send(parent, {:observer_ready, self()})
+
+        receive do
+          {:observe, archive_pid} ->
+            send(parent, :observer_polling)
+            deadline = System.monotonic_time(:millisecond) + 5_000
+            await_secure_nonempty_temp(root, archive_pid, deadline)
+        end
+      end)
+
+    assert_receive {:archive_ready, archive_pid}, 1_000
+    assert_receive {:observer_ready, observer_pid}, 1_000
+    send(observer_pid, {:observe, archive_pid})
+    assert_receive :observer_polling, 1_000
+    send(archive_pid, :archive)
+
+    assert :ok = Task.await(observer_task, 5_000)
+    assert {:ok, _descriptor} = Task.await(archive_task, 5_000)
+  end
+
   test "overwrites deterministically through fixed artifact paths", %{root: root} do
     plan = plan_fixture()
     manifest = manifest_fixture()
@@ -156,6 +197,22 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
     assert reason in [:eexist, :enotdir]
   end
 
+  test "removes the temporary file when atomic rename fails", %{root: root} do
+    destination = Path.join(root, "coding-plan.json")
+    File.mkdir_p!(destination)
+
+    assert {:error, {:write_artifact_failed, "coding-plan.json", reason}} =
+             ArtifactStore.archive(
+               root,
+               plan_fixture(),
+               "digraph G {}",
+               manifest_fixture()
+             )
+
+    assert is_atom(reason)
+    refute Enum.any?(File.ls!(root), &String.contains?(&1, ".tmp-"))
+  end
+
   defp plan_fixture do
     %{
       "version" => 1,
@@ -183,5 +240,50 @@ defmodule Arbor.Orchestrator.CodingPlan.ArtifactStoreTest do
       "coding_pipeline_path",
       "compile_manifest_path"
     ])
+  end
+
+  defp await_secure_nonempty_temp(root, task_pid, deadline) do
+    observations = temporary_file_observations(root)
+    nonempty = Enum.filter(observations, &(&1.size > 0))
+
+    case Enum.find(nonempty, &(&1.mode != 0o600)) do
+      nil when nonempty != [] ->
+        :ok
+
+      nil ->
+        cond do
+          not Process.alive?(task_pid) ->
+            {:error, :archive_completed_before_temp_was_observed}
+
+          System.monotonic_time(:millisecond) >= deadline ->
+            {:error, :timed_out_observing_nonempty_temp}
+
+          true ->
+            Process.sleep(0)
+            await_secure_nonempty_temp(root, task_pid, deadline)
+        end
+
+      observation ->
+        {:error, {:nonempty_temp_had_insecure_mode, observation}}
+    end
+  end
+
+  defp temporary_file_observations(root) do
+    case File.ls(root) do
+      {:ok, names} ->
+        names
+        |> Enum.filter(&String.starts_with?(&1, ".coding-pipeline.dot.tmp-"))
+        |> Enum.flat_map(fn name ->
+          path = Path.join(root, name)
+
+          case File.stat(path) do
+            {:ok, stat} -> [%{name: name, size: stat.size, mode: stat.mode &&& 0o777}]
+            {:error, :enoent} -> []
+          end
+        end)
+
+      {:error, :enoent} ->
+        []
+    end
   end
 end

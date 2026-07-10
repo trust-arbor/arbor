@@ -40,6 +40,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
           | {:action_uninspectable, String.t(), String.t()}
           | {:invalid_action_spec, String.t(), term()}
           | {:duplicate_action_name, String.t()}
+          | {:catalog_digest_failed, String.t()}
 
   @doc """
   Build the current action-schema snapshot.
@@ -57,11 +58,12 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
   def snapshot(opts) when is_list(opts) do
     with :ok <- validate_options(opts),
          {:ok, modules} <- modules_for(opts),
-         {:ok, actions} <- inspect_actions(modules) do
+         {:ok, actions} <- inspect_actions(modules),
+         {:ok, digest} <- digest(actions) do
       {:ok,
        %{
          "actions" => actions,
-         "digest" => digest(actions)
+         "digest" => digest
        }}
     end
   end
@@ -296,20 +298,35 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
     end
   end
 
-  defp validate_name(name, _module_name) when is_binary(name) and byte_size(name) > 0, do: :ok
+  defp validate_name(name, module_name) when is_binary(name) do
+    if String.valid?(name) and String.trim(name) != "" do
+      :ok
+    else
+      {:error, {:invalid_action_spec, module_name, :invalid_name}}
+    end
+  end
 
   defp validate_name(_name, module_name),
     do: {:error, {:invalid_action_spec, module_name, :invalid_name}}
 
-  defp validate_description(description, _module_name) when is_binary(description), do: :ok
+  defp validate_description(description, module_name) when is_binary(description) do
+    if String.valid?(description) do
+      :ok
+    else
+      {:error, {:invalid_action_spec, module_name, :invalid_description}}
+    end
+  end
 
   defp validate_description(_description, module_name),
     do: {:error, {:invalid_action_spec, module_name, :invalid_description}}
 
   defp validate_schema(schema, _module_name) when is_map(schema) do
     case Jason.encode(schema) do
-      {:ok, _json} -> :ok
-      {:error, reason} -> {:error, {:invalid_json, {:not_json_encodable, inspect(reason)}}}
+      {:ok, _json} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, {:invalid_json, {:not_json_encodable, error_message(reason)}}}
     end
   end
 
@@ -381,11 +398,20 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
   end
 
   defp digest(actions) do
-    actions
-    |> canonicalize()
-    |> Jason.encode!()
-    |> then(&:crypto.hash(:sha256, &1))
-    |> Base.encode16(case: :lower)
+    with {:ok, encoded} <- actions |> canonicalize() |> Jason.encode() do
+      digest =
+        encoded
+        |> then(&:crypto.hash(:sha256, &1))
+        |> Base.encode16(case: :lower)
+
+      {:ok, digest}
+    else
+      {:error, reason} -> {:error, {:catalog_digest_failed, error_message(reason)}}
+    end
+  rescue
+    exception -> {:error, {:catalog_digest_failed, exception_message(exception)}}
+  catch
+    kind, reason -> {:error, {:catalog_digest_failed, caught_message(kind, reason)}}
   end
 
   defp canonicalize(map) when is_map(map) do
@@ -403,6 +429,9 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
     |> Exception.message()
     |> bounded_message()
   end
+
+  defp error_message(%{__exception__: true} = exception), do: exception_message(exception)
+  defp error_message(reason), do: caught_message(:error, reason)
 
   defp caught_message(kind, reason) do
     reason =
