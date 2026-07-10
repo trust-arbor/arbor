@@ -7,7 +7,7 @@ attacksurface.*.md
 /deps
 
 # Build artifacts
-/_build/
+/_build
 **/apps/*/_build/
 **/apps/*/deps/
 /cover/
