@@ -3,6 +3,7 @@ defmodule Arbor.Agent.OrchestrationTaskRunnerTest do
   @moduletag :fast
 
   alias Arbor.Agent.Orchestration.TaskRunner
+  alias Arbor.Contracts.Agent.TaskExecutor
   alias Arbor.Contracts.Session.UserMessage
 
   defmodule FakeStructuredManager do
@@ -43,6 +44,16 @@ defmodule Arbor.Agent.OrchestrationTaskRunnerTest do
       send(self(), {:chat, input, sender, opts})
       {:ok, "plain response"}
     end
+  end
+
+  defmodule PendingManager do
+    def chat_response(_input, _sender, _opts) do
+      {:ok, :pending_approval, "approval_runner_1"}
+    end
+  end
+
+  test "implements the TaskExecutor behaviour" do
+    assert TaskExecutor in Keyword.get(TaskRunner.__info__(:attributes), :behaviour, [])
   end
 
   test "preserves coding-agent artifacts from structured manager tool history" do
@@ -91,5 +102,43 @@ defmodule Arbor.Agent.OrchestrationTaskRunnerTest do
     assert opts[:agent_id] == "agent_1"
     assert opts[:task_id] == "task_1"
     assert result.result_type == :coding_change
+  end
+
+  test "accepts JSON-clean map context with string and atom keys" do
+    assert {:ok, _result} =
+             TaskRunner.run(
+               "agent_1",
+               %{"prompt" => "write a patch"},
+               %{
+                 "task_id" => "task_map_1",
+                 :timeout => 5_000,
+                 "manager_module" => FakeStructuredManager
+               }
+             )
+
+    assert_received {:chat_response, %UserMessage{} = message, "Orchestration", opts}
+    assert message.content == "write a patch"
+    assert message.transport_metadata == %{task_id: "task_map_1"}
+    assert opts[:task_id] == "task_map_1"
+    assert opts[:timeout] == 5_000
+  end
+
+  test "preserves pending-approval results from the manager" do
+    assert {:ok, :pending_approval, "approval_runner_1"} =
+             TaskRunner.run("agent_1", "needs approval", manager_module: PendingManager)
+  end
+
+  test "legacy map fields remain the chat input path" do
+    for {key, value} <- [
+          {:input, "from input"},
+          {"message", "from message"},
+          {:task, "from task"}
+        ] do
+      assert {:ok, result} =
+               TaskRunner.run("agent_1", %{key => value}, manager_module: FakeLegacyManager)
+
+      assert_received {:chat, ^value, "Orchestration", _opts}
+      assert result.result_type == :chat
+    end
   end
 end

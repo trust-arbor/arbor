@@ -1,0 +1,98 @@
+defmodule Arbor.Contracts.Agent.TaskExecutorTest do
+  use ExUnit.Case, async: true
+
+  @moduletag :fast
+
+  alias Arbor.Contracts.Agent.TaskExecutor
+
+  defmodule CompliantExecutor do
+    @behaviour TaskExecutor
+
+    @impl true
+    def run(agent_id, task, context) when is_binary(agent_id) do
+      {:ok,
+       %{
+         result_type: :test,
+         payload: %{agent_id: agent_id, task: task, context: context},
+         raw: "ok"
+       }}
+    end
+  end
+
+  defmodule FullExecutor do
+    @behaviour TaskExecutor
+
+    @impl true
+    def run(_agent_id, _task, _context), do: {:ok, %{result_type: :test, payload: %{}, raw: "ok"}}
+
+    @impl true
+    def task_status(_agent_id, _context) do
+      {:ok, %{"current_step" => "compiling", "waiting_on" => nil}}
+    end
+
+    @impl true
+    def cancel_task(_agent_id, _context), do: :ok
+  end
+
+  defmodule PendingApprovalExecutor do
+    @behaviour TaskExecutor
+
+    @impl true
+    def run(_agent_id, _task, _context) do
+      {:ok, :pending_approval, "approval_contract_1"}
+    end
+  end
+
+  test "behaviour callback is implemented by compliant modules" do
+    assert function_exported?(CompliantExecutor, :run, 3)
+    assert function_exported?(PendingApprovalExecutor, :run, 3)
+  end
+
+  test "optional progress and cancel callbacks are declared" do
+    assert {:task_status, 2} in TaskExecutor.behaviour_info(:optional_callbacks)
+    assert {:cancel_task, 2} in TaskExecutor.behaviour_info(:optional_callbacks)
+    assert {:run, 3} in TaskExecutor.behaviour_info(:callbacks)
+    assert {:task_status, 2} in TaskExecutor.behaviour_info(:callbacks)
+    assert {:cancel_task, 2} in TaskExecutor.behaviour_info(:callbacks)
+
+    assert function_exported?(FullExecutor, :task_status, 2)
+    assert function_exported?(FullExecutor, :cancel_task, 2)
+    refute function_exported?(CompliantExecutor, :task_status, 2)
+    refute function_exported?(CompliantExecutor, :cancel_task, 2)
+  end
+
+  test "run/3 returns structured success with JSON-clean context" do
+    task = %{"kind" => "coding_change", "input" => "ship it"}
+    context = %{"task_id" => "task_1", "timeout" => 1_000, "caller_id" => "caller_1"}
+
+    assert {:ok, result} = CompliantExecutor.run("agent_1", task, context)
+    assert result.payload.agent_id == "agent_1"
+    assert result.payload.task == task
+    assert result.payload.context == context
+  end
+
+  test "run/3 preserves pending-approval result support" do
+    assert {:ok, :pending_approval, "approval_contract_1"} =
+             PendingApprovalExecutor.run("agent_1", "work", %{"task_id" => "task_1"})
+  end
+
+  test "task_status/2 and cancel_task/2 return contract shapes" do
+    context = %{"task_id" => "task_1"}
+
+    assert {:ok, progress} = FullExecutor.task_status("agent_1", context)
+    assert progress["current_step"] == "compiling"
+    assert progress["waiting_on"] == nil
+    assert :ok = FullExecutor.cancel_task("agent_1", context)
+  end
+
+  test "behaviour module documents the contract" do
+    assert {:docs_v1, _, :elixir, _, %{"en" => moduledoc}, _, _} =
+             Code.fetch_docs(TaskExecutor)
+
+    assert moduledoc =~ "JSON-clean"
+    assert moduledoc =~ "pending_approval"
+    assert moduledoc =~ "coding_change"
+    assert moduledoc =~ "task_status"
+    assert moduledoc =~ "cancel_task"
+  end
+end

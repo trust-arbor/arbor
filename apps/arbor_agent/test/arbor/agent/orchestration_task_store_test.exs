@@ -1,5 +1,6 @@
 defmodule Arbor.Agent.OrchestrationTaskStoreTest do
-  use ExUnit.Case, async: true
+  # async: false because kind-routing cases mutate shared Application env.
+  use ExUnit.Case, async: false
   @moduletag :fast
 
   alias Arbor.Agent.Orchestration.TaskStore
@@ -7,7 +8,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
   defmodule ControlledRunner do
     def run(agent_id, task, opts) do
       test_pid = Keyword.fetch!(opts, :test_pid)
-      send(test_pid, {:runner_started, self(), agent_id, task})
+      send(test_pid, {:runner_started, self(), agent_id, task, opts})
 
       receive do
         {:finish, result} -> result
@@ -23,6 +24,133 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end
   end
 
+  defmodule CodingChangeExecutor do
+    def run(agent_id, task, context) do
+      test_pid = recording_pid()
+      send(test_pid, {:configured_executor, self(), agent_id, task, context})
+
+      receive do
+        {:finish, result} -> result
+      after
+        1_000 -> {:error, :test_timeout}
+      end
+    end
+
+    def task_status(agent_id, context) do
+      test_pid = recording_pid()
+      send(test_pid, {:task_status_called, agent_id, context, self()})
+
+      case Application.get_env(:arbor_agent, :task_store_test_progress) do
+        progress when is_map(progress) ->
+          {:ok, progress}
+
+        {:error, reason} ->
+          {:error, reason}
+
+        :raise ->
+          raise "task_status boom"
+
+        :exit ->
+          exit(:task_status_exit)
+
+        :hang ->
+          receive do
+          after
+            30_000 -> {:ok, %{}}
+          end
+
+        _ ->
+          {:ok, %{}}
+      end
+    end
+
+    def cancel_task(agent_id, context) do
+      test_pid = recording_pid()
+      send(test_pid, {:cancel_task_called, agent_id, context, self()})
+
+      case Application.get_env(:arbor_agent, :task_store_test_cancel) do
+        :error ->
+          {:error, :cancel_failed}
+
+        :raise ->
+          raise "cancel_task boom"
+
+        :exit ->
+          exit(:cancel_task_exit)
+
+        :hang ->
+          receive do
+          after
+            30_000 -> :ok
+          end
+
+        _ ->
+          :ok
+      end
+    end
+
+    defp recording_pid do
+      Application.fetch_env!(:arbor_agent, :task_store_test_pid)
+    end
+  end
+
+  # Map-context recording executor for the configured default path (JSON-clean).
+  defmodule DefaultRecordingExecutor do
+    def run(agent_id, task, context) do
+      send(recording_pid(), {:default_executor, self(), agent_id, task, context})
+
+      receive do
+        {:finish, result} -> result
+      after
+        1_000 -> {:error, :test_timeout}
+      end
+    end
+
+    defp recording_pid do
+      Application.fetch_env!(:arbor_agent, :task_store_test_pid)
+    end
+  end
+
+  defmodule StatusOnlyExecutor do
+    def run(agent_id, task, context) do
+      send(recording_pid(), {:configured_executor, self(), agent_id, task, context})
+
+      receive do
+        {:finish, result} -> result
+      after
+        1_000 -> {:error, :test_timeout}
+      end
+    end
+
+    def task_status(_agent_id, _context) do
+      {:ok, %{"current_step" => "reviewing", "waiting_on" => "human"}}
+    end
+
+    defp recording_pid do
+      Application.fetch_env!(:arbor_agent, :task_store_test_pid)
+    end
+  end
+
+  defmodule RunOnlyExecutor do
+    def run(agent_id, task, context) do
+      send(recording_pid(), {:configured_executor, self(), agent_id, task, context})
+
+      receive do
+        {:finish, result} -> result
+      after
+        1_000 -> {:error, :test_timeout}
+      end
+    end
+
+    defp recording_pid do
+      Application.fetch_env!(:arbor_agent, :task_store_test_pid)
+    end
+  end
+
+  defmodule NoRunModule do
+    def other, do: :ok
+  end
+
   setup do
     unique = System.unique_integer([:positive])
     supervisor = Module.concat(__MODULE__, :"TaskSupervisor#{unique}")
@@ -34,7 +162,23 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       {TaskStore, name: store, task_supervisor: supervisor, runner: ControlledRunner}
     )
 
-    {:ok, store: store}
+    original_executors = Application.get_env(:arbor_agent, :task_executors)
+    original_default = Application.get_env(:arbor_agent, :default_task_executor)
+    original_test_pid = Application.get_env(:arbor_agent, :task_store_test_pid)
+    original_progress = Application.get_env(:arbor_agent, :task_store_test_progress)
+    original_cancel = Application.get_env(:arbor_agent, :task_store_test_cancel)
+
+    Application.put_env(:arbor_agent, :task_store_test_pid, self())
+
+    on_exit(fn ->
+      restore_env(:task_executors, original_executors)
+      restore_env(:default_task_executor, original_default)
+      restore_env(:task_store_test_pid, original_test_pid)
+      restore_env(:task_store_test_progress, original_progress)
+      restore_env(:task_store_test_cancel, original_cancel)
+    end)
+
+    {:ok, store: store, supervisor: supervisor}
   end
 
   test "dispatch returns before the runner completes, then stores the structured result", %{
@@ -49,7 +193,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                approval_answer_revoke: revoke_to(self())
              )
 
-    assert_receive {:runner_started, runner_pid, "agent_1", "do work"}
+    assert_receive {:runner_started, runner_pid, "agent_1", "do work", _opts}
 
     assert {:ok, status} = TaskStore.status(task_id, name: store)
     assert status.state == :running
@@ -103,7 +247,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                approval_answer_revoke: revoke_to(self())
              )
 
-    assert_receive {:runner_started, runner_pid, "agent_1", "do work"}
+    assert_receive {:runner_started, runner_pid, "agent_1", "do work", _opts}
     ref = Process.monitor(runner_pid)
 
     assert {:ok, status} = TaskStore.cancel(task_id, name: store)
@@ -138,7 +282,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                approval_answer_revoke: revoke_to(test_pid)
              )
 
-    assert_receive {:runner_started, runner_pid, "agent_coding_1", "implement feature"}
+    assert_receive {:runner_started, runner_pid, "agent_coding_1", "implement feature", _opts}
     ref = Process.monitor(runner_pid)
 
     assert {:ok, status} = TaskStore.cancel(task_id, name: store)
@@ -163,7 +307,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
                test_pid: self()
              )
 
-    assert_receive {:runner_started, runner_pid, "agent_1", "do work"}
+    assert_receive {:runner_started, runner_pid, "agent_1", "do work", _opts}
     send(runner_pid, {:finish, {:ok, %{result_type: :test, payload: %{}, raw: "done"}}})
 
     assert_eventually(fn ->
@@ -172,6 +316,734 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end)
 
     assert {:error, {:not_running, :done}} = TaskStore.cancel(task_id, name: store)
+  end
+
+  test "string and legacy maps use the default runner path", %{store: store} do
+    assert {:ok, _task_id} =
+             TaskStore.dispatch("agent_1", "plain string", name: store, test_pid: self())
+
+    assert_receive {:runner_started, _pid, "agent_1", "plain string", opts}
+    assert is_list(opts)
+    assert opts[:test_pid] == self()
+
+    assert {:ok, _task_id} =
+             TaskStore.dispatch("agent_1", %{"input" => "legacy input"},
+               name: store,
+               test_pid: self()
+             )
+
+    assert_receive {:runner_started, _pid, "agent_1", %{"input" => "legacy input"}, _opts}
+
+    assert {:ok, _task_id} =
+             TaskStore.dispatch("agent_1", %{prompt: "legacy prompt"},
+               name: store,
+               test_pid: self()
+             )
+
+    assert_receive {:runner_started, _pid, "agent_1", %{prompt: "legacy prompt"}, _opts}
+  end
+
+  test "configured default executor uses JSON-clean boundary for plain string and legacy map",
+       %{
+         supervisor: supervisor
+       } do
+    Application.put_env(:arbor_agent, :default_task_executor, DefaultRecordingExecutor)
+
+    unique = System.unique_integer([:positive])
+    store = Module.concat(__MODULE__, :"DefaultExecStore#{unique}")
+
+    start_supervised!(
+      {TaskStore, name: store, task_supervisor: supervisor},
+      id: store
+    )
+
+    # Plain string stays a string; private TaskStore opts do not leak.
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "via default config",
+               name: store,
+               task_id: "task_default_1",
+               timeout: 15_000,
+               caller_id: "caller_default",
+               metadata: %{"ticket" => "D-1"},
+               approval_answer_cap_id: "cap_private_default",
+               approval_answer_revoke: revoke_to(self()),
+               test_pid: self()
+             )
+
+    assert_receive {:default_executor, runner_pid, "agent_1", "via default config", context}
+    assert is_map(context)
+    assert context["task_id"] == "task_default_1"
+    assert context["timeout"] == 15_000
+    assert context["caller_id"] == "caller_default"
+    assert context["metadata"] == %{"ticket" => "D-1"}
+    refute Map.has_key?(context, :test_pid)
+    refute Map.has_key?(context, "test_pid")
+    refute Map.has_key?(context, :approval_answer_cap_id)
+    refute Map.has_key?(context, "approval_answer_cap_id")
+    refute Map.has_key?(context, :approval_answer_revoke)
+    refute is_list(context)
+    assert {:ok, _} = Jason.encode(context)
+
+    send(runner_pid, {:finish, {:ok, %{result_type: :test, payload: %{}, raw: "ok"}}})
+
+    assert_eventually(fn ->
+      assert {:ok, status} = TaskStore.status(task_id, name: store)
+      assert status.state == :done
+    end)
+
+    # Legacy unkinded map is canonicalized to a string-keyed JSON map.
+    assert {:ok, _task_id2} =
+             TaskStore.dispatch("agent_1", %{prompt: "legacy default", ticket: "L-1"},
+               name: store,
+               task_id: "task_default_legacy"
+             )
+
+    assert_receive {:default_executor, runner_pid2, "agent_1", clean_legacy, context2}
+    assert clean_legacy == %{"prompt" => "legacy default", "ticket" => "L-1"}
+    assert is_map(context2)
+    assert context2["task_id"] == "task_default_legacy"
+    assert {:ok, _} = Jason.encode(clean_legacy)
+    send(runner_pid2, {:finish, {:ok, %{result_type: :test, payload: %{}, raw: "ok"}}})
+
+    # Non-JSON metadata rejected before spawn on the default path.
+    assert {:error, :non_json_execution_context} =
+             TaskStore.dispatch("agent_1", "will not start",
+               name: store,
+               metadata: %{"owner" => self()}
+             )
+
+    refute_received {:default_executor, _, _, _, _}
+
+    # Non-JSON values inside a legacy map rejected before spawn.
+    assert {:error, :non_json_task} =
+             TaskStore.dispatch("agent_1", %{input: "x", owner: self()}, name: store)
+
+    refute_received {:default_executor, _, _, _, _}
+  end
+
+  test "invalid default_task_executor is rejected before spawn", %{supervisor: supervisor} do
+    Application.put_env(:arbor_agent, :default_task_executor, NoRunModule)
+
+    unique = System.unique_integer([:positive])
+    store = Module.concat(__MODULE__, :"BadDefaultStore#{unique}")
+
+    start_supervised!(
+      {TaskStore, name: store, task_supervisor: supervisor},
+      id: store
+    )
+
+    assert {:error, {:invalid_default_task_executor, NoRunModule}} =
+             TaskStore.dispatch("agent_1", "will not start", name: store)
+
+    refute_received {:runner_started, _, _, _, _}
+    refute_received {:configured_executor, _, _, _, _}
+  end
+
+  test "explicit coding_change kind routes to the configured executor with JSON-clean context",
+       %{
+         supervisor: supervisor
+       } do
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => CodingChangeExecutor
+    })
+
+    unique = System.unique_integer([:positive])
+    store = Module.concat(__MODULE__, :"KindStore#{unique}")
+
+    start_supervised!(
+      {TaskStore, name: store, task_supervisor: supervisor},
+      id: store
+    )
+
+    task = %{
+      "kind" => "coding_change",
+      "input" => "implement feature",
+      "repo" => "/tmp/repo"
+    }
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_coding", task,
+               name: store,
+               task_id: "task_coding_1",
+               timeout: 30_000,
+               caller_id: "caller_42",
+               metadata: %{"ticket" => "C-1"},
+               # Private store options must not leak into configured executor context.
+               approval_answer_cap_id: "cap_private",
+               approval_answer_revoke: revoke_to(self()),
+               test_pid: self()
+             )
+
+    assert_receive {:configured_executor, runner_pid, "agent_coding", clean_task, context}
+
+    assert clean_task == %{
+             "kind" => "coding_change",
+             "input" => "implement feature",
+             "repo" => "/tmp/repo"
+           }
+
+    assert is_map(context)
+    assert context["task_id"] == "task_coding_1"
+    assert context["timeout"] == 30_000
+    assert context["caller_id"] == "caller_42"
+    assert context["metadata"] == %{"ticket" => "C-1"}
+
+    refute Map.has_key?(context, :test_pid)
+    refute Map.has_key?(context, "test_pid")
+    refute Map.has_key?(context, :approval_answer_cap_id)
+    refute Map.has_key?(context, "approval_answer_cap_id")
+    refute Map.has_key?(context, :approval_answer_revoke)
+    refute is_list(context)
+
+    assert {:ok, _} = Jason.encode(context)
+    assert {:ok, _} = Jason.encode(clean_task)
+
+    send(runner_pid, {:finish, {:ok, %{result_type: :coding_change, payload: %{}, raw: "ok"}}})
+
+    assert_eventually(fn ->
+      assert {:ok, status} = TaskStore.status(task_id, name: store)
+      assert status.state == :done
+    end)
+  end
+
+  test "atom coding_change kind is canonicalized to string form before spawn", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_executors, %{
+      coding_change: CodingChangeExecutor
+    })
+
+    unique = System.unique_integer([:positive])
+    store = Module.concat(__MODULE__, :"AtomKindStore#{unique}")
+
+    start_supervised!(
+      {TaskStore, name: store, task_supervisor: supervisor},
+      id: store
+    )
+
+    task = %{kind: :coding_change, input: "atom kind task"}
+
+    assert {:ok, _task_id} =
+             TaskStore.dispatch("agent_1", task,
+               name: store,
+               metadata: %{"ticket" => "atom"}
+             )
+
+    assert_receive {:configured_executor, runner_pid, "agent_1", clean_task, context}
+    assert clean_task == %{"kind" => "coding_change", "input" => "atom kind task"}
+    assert context["metadata"] == %{"ticket" => "atom"}
+    assert {:ok, _} = Jason.encode(clean_task)
+    send(runner_pid, {:finish, {:ok, %{result_type: :test, payload: %{}, raw: "ok"}}})
+  end
+
+  test "conflicting atom and string kinds are rejected before spawn", %{supervisor: supervisor} do
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => CodingChangeExecutor,
+      "other_kind" => CodingChangeExecutor
+    })
+
+    unique = System.unique_integer([:positive])
+    store = Module.concat(__MODULE__, :"ConflictStore#{unique}")
+
+    start_supervised!(
+      {TaskStore, name: store, task_supervisor: supervisor},
+      id: store
+    )
+
+    conflicting_task = %{
+      :kind => :coding_change,
+      "kind" => "other_kind",
+      "input" => "x"
+    }
+
+    assert {:error, :conflicting_task_kind} =
+             TaskStore.dispatch("agent_1", conflicting_task, name: store)
+
+    refute_received {:configured_executor, _, _, _, _}
+  end
+
+  test "non-JSON task and metadata fail before spawn", %{supervisor: supervisor} do
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => CodingChangeExecutor
+    })
+
+    unique = System.unique_integer([:positive])
+    store = Module.concat(__MODULE__, :"NonJsonStore#{unique}")
+
+    start_supervised!(
+      {TaskStore, name: store, task_supervisor: supervisor},
+      id: store
+    )
+
+    assert {:error, :non_json_task} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "x", "owner" => self()},
+               name: store
+             )
+
+    refute_received {:configured_executor, _, _, _, _}
+
+    assert {:error, :non_json_task} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "x", "cb" => fn -> :ok end},
+               name: store
+             )
+
+    refute_received {:configured_executor, _, _, _, _}
+
+    assert {:error, :non_json_task} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "x", "mode" => :fast},
+               name: store
+             )
+
+    refute_received {:configured_executor, _, _, _, _}
+
+    assert {:error, :non_json_execution_context} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "x"},
+               name: store,
+               metadata: %{"test_pid" => self()}
+             )
+
+    refute_received {:configured_executor, _, _, _, _}
+  end
+
+  test "status projects only current_step and waiting_on from task_status/2", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => CodingChangeExecutor
+    })
+
+    Application.put_env(:arbor_agent, :task_store_test_progress, %{
+      "current_step" => "validating",
+      "waiting_on" => "approval_9",
+      "task_id" => "forged_task",
+      "state" => "done",
+      "started_at" => "forged",
+      "updated_at" => "forged",
+      "completed_at" => "forged",
+      "metadata" => %{"evil" => true},
+      "agent_id" => "forged_agent"
+    })
+
+    unique = System.unique_integer([:positive])
+    store = Module.concat(__MODULE__, :"ProgressStore#{unique}")
+
+    start_supervised!(
+      {TaskStore, name: store, task_supervisor: supervisor},
+      id: store
+    )
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "progress"},
+               name: store,
+               task_id: "task_progress_1",
+               metadata: %{"ticket" => "P-1"}
+             )
+
+    assert_receive {:configured_executor, runner_pid, "agent_1", _task, _context}
+
+    assert {:ok, status} = TaskStore.status(task_id, name: store)
+    assert status.state == :running
+    assert status.task_id == "task_progress_1"
+    assert status.agent_id == "agent_1"
+    assert status.current_step == "validating"
+    assert status.waiting_on == "approval_9"
+    assert status.metadata == %{"ticket" => "P-1"}
+    assert %DateTime{} = status.started_at
+    assert %DateTime{} = status.updated_at
+    assert status.completed_at == nil
+
+    assert_receive {:task_status_called, "agent_1", %{"task_id" => "task_progress_1"}, _from}
+
+    send(runner_pid, {:finish, {:ok, %{result_type: :test, payload: %{}, raw: "ok"}}})
+  end
+
+  test "status ignores non-JSON progress and invalid field values", %{supervisor: supervisor} do
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => CodingChangeExecutor
+    })
+
+    unique = System.unique_integer([:positive])
+    store = Module.concat(__MODULE__, :"BadProgressStore#{unique}")
+
+    start_supervised!(
+      {TaskStore, name: store, task_supervisor: supervisor},
+      id: store
+    )
+
+    # Non-JSON progress (PID) is ignored entirely; stored view is preserved.
+    Application.put_env(:arbor_agent, :task_store_test_progress, %{
+      "current_step" => "should_not_project",
+      "waiting_on" => "should_not_project",
+      "owner" => self()
+    })
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "bad progress"},
+               name: store
+             )
+
+    assert_receive {:configured_executor, runner_pid, "agent_1", _task, _context}
+
+    assert {:ok, status} = TaskStore.status(task_id, name: store)
+    assert status.state == :running
+    assert status.current_step == "running"
+    assert status.waiting_on == nil
+    assert_receive {:task_status_called, "agent_1", _context, _from}
+
+    # Invalid field values are ignored; valid projected fields still apply.
+    Application.put_env(:arbor_agent, :task_store_test_progress, %{
+      "current_step" => "compiling",
+      "waiting_on" => 99,
+      "extra" => true
+    })
+
+    assert {:ok, status2} = TaskStore.status(task_id, name: store)
+    assert status2.current_step == "compiling"
+    assert status2.waiting_on == nil
+    assert_receive {:task_status_called, "agent_1", _context, _from}
+
+    send(runner_pid, {:finish, {:ok, %{result_type: :test, payload: %{}, raw: "ok"}}})
+  end
+
+  test "status falls back when task_status/2 is absent or errors", %{supervisor: supervisor} do
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => RunOnlyExecutor
+    })
+
+    unique = System.unique_integer([:positive])
+    store = Module.concat(__MODULE__, :"NoStatusStore#{unique}")
+
+    start_supervised!(
+      {TaskStore, name: store, task_supervisor: supervisor},
+      id: store
+    )
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "no status cb"},
+               name: store
+             )
+
+    assert_receive {:configured_executor, runner_pid, "agent_1", _task, _context}
+
+    assert {:ok, status} = TaskStore.status(task_id, name: store)
+    assert status.state == :running
+    assert status.current_step == "running"
+    assert status.waiting_on == nil
+
+    send(runner_pid, {:finish, {:ok, %{result_type: :test, payload: %{}, raw: "ok"}}})
+
+    # Error from task_status also falls back.
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => CodingChangeExecutor
+    })
+
+    Application.put_env(:arbor_agent, :task_store_test_progress, {:error, :busy})
+
+    unique2 = System.unique_integer([:positive])
+    store2 = Module.concat(__MODULE__, :"StatusErrStore#{unique2}")
+
+    start_supervised!(
+      {TaskStore, name: store2, task_supervisor: supervisor},
+      id: store2
+    )
+
+    assert {:ok, task_id2} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "status error"},
+               name: store2
+             )
+
+    assert_receive {:configured_executor, runner_pid2, "agent_1", _task, _context}
+    assert {:ok, status2} = TaskStore.status(task_id2, name: store2)
+    assert status2.current_step == "running"
+    assert status2.waiting_on == nil
+    send(runner_pid2, {:finish, {:ok, %{result_type: :test, payload: %{}, raw: "ok"}}})
+  end
+
+  test "cancel invokes cancel_task/2 before turn bridge and hard kill", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => CodingChangeExecutor
+    })
+
+    unique = System.unique_integer([:positive])
+    store = Module.concat(__MODULE__, :"CancelOrderStore#{unique}")
+    test_pid = self()
+
+    cancel_turn = fn agent_id, cancelled_task_id ->
+      send(test_pid, {:cancel_turn_hook, agent_id, cancelled_task_id})
+      :ok
+    end
+
+    start_supervised!(
+      {TaskStore, name: store, task_supervisor: supervisor, cancel_turn: cancel_turn},
+      id: store
+    )
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "cancel me"},
+               name: store,
+               task_id: "task_cancel_order",
+               approval_answer_cap_id: "cap_cancel_order",
+               approval_answer_revoke: revoke_to(test_pid)
+             )
+
+    assert_receive {:configured_executor, runner_pid, "agent_1", _task, context}
+    ref = Process.monitor(runner_pid)
+
+    assert {:ok, status} = TaskStore.cancel(task_id, name: store)
+    assert status.state == :cancelled
+
+    assert_receive {:cancel_task_called, "agent_1", ^context, _from}
+    assert_receive {:cancel_turn_hook, "agent_1", ^task_id}
+    assert_receive {:DOWN, ^ref, :process, ^runner_pid, :killed}
+    assert_receive {:revoke_approval_answer_capability, "cap_cancel_order"}
+  end
+
+  test "cancel still completes when cancel_task/2 errors or exits", %{supervisor: supervisor} do
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => CodingChangeExecutor
+    })
+
+    for mode <- [:error, :raise, :exit] do
+      Application.put_env(:arbor_agent, :task_store_test_cancel, mode)
+
+      unique = System.unique_integer([:positive])
+      store = Module.concat(__MODULE__, :"CancelTolStore#{unique}_#{mode}")
+
+      start_supervised!(
+        {TaskStore, name: store, task_supervisor: supervisor},
+        id: store
+      )
+
+      assert {:ok, task_id} =
+               TaskStore.dispatch(
+                 "agent_1",
+                 %{"kind" => "coding_change", "input" => "cancel #{mode}"},
+                 name: store
+               )
+
+      assert_receive {:configured_executor, runner_pid, "agent_1", _task, _context}
+      ref = Process.monitor(runner_pid)
+
+      assert {:ok, status} = TaskStore.cancel(task_id, name: store)
+      assert status.state == :cancelled
+      assert_receive {:cancel_task_called, "agent_1", _context, _from}
+      assert_receive {:DOWN, ^ref, :process, ^runner_pid, :killed}
+      assert {:error, :cancelled} = TaskStore.result(task_id, name: store)
+    end
+  end
+
+  test "hung task_status/2 and cancel_task/2 are bounded and cancel still completes", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => CodingChangeExecutor
+    })
+
+    callback_timeout_ms = 80
+    bound_ms = 500
+
+    unique = System.unique_integer([:positive])
+    store = Module.concat(__MODULE__, :"HangCbStore#{unique}")
+
+    start_supervised!(
+      {TaskStore,
+       name: store, task_supervisor: supervisor, executor_callback_timeout_ms: callback_timeout_ms},
+      id: store
+    )
+
+    Application.put_env(:arbor_agent, :task_store_test_progress, :hang)
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "hang callbacks"},
+               name: store,
+               task_id: "task_hang_cb"
+             )
+
+    assert_receive {:configured_executor, runner_pid, "agent_1", _task, _context}
+    ref = Process.monitor(runner_pid)
+
+    # Status must return within a bounded interval with the stored view.
+    status_started = System.monotonic_time(:millisecond)
+    assert {:ok, status} = TaskStore.status(task_id, name: store)
+    status_elapsed = System.monotonic_time(:millisecond) - status_started
+
+    assert status.state == :running
+    assert status.current_step == "running"
+    assert status.waiting_on == nil
+    assert status_elapsed < bound_ms
+    assert_receive {:task_status_called, "agent_1", %{"task_id" => "task_hang_cb"}, _from}
+
+    # Cancel must return within a bounded interval despite hung cancel_task/2.
+    Application.put_env(:arbor_agent, :task_store_test_cancel, :hang)
+    cancel_started = System.monotonic_time(:millisecond)
+    assert {:ok, cancelled} = TaskStore.cancel(task_id, name: store)
+    cancel_elapsed = System.monotonic_time(:millisecond) - cancel_started
+
+    assert cancelled.state == :cancelled
+    assert cancel_elapsed < bound_ms
+    assert_receive {:cancel_task_called, "agent_1", _context, _from}
+    assert_receive {:DOWN, ^ref, :process, ^runner_pid, :killed}
+    assert {:error, :cancelled} = TaskStore.result(task_id, name: store)
+  end
+
+  test "callback absence on cancel falls back to turn bridge and kill", %{
+    supervisor: supervisor
+  } do
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => StatusOnlyExecutor
+    })
+
+    unique = System.unique_integer([:positive])
+    store = Module.concat(__MODULE__, :"NoCancelCbStore#{unique}")
+    test_pid = self()
+
+    cancel_turn = fn agent_id, cancelled_task_id ->
+      send(test_pid, {:cancel_turn_hook, agent_id, cancelled_task_id})
+      :ok
+    end
+
+    start_supervised!(
+      {TaskStore, name: store, task_supervisor: supervisor, cancel_turn: cancel_turn},
+      id: store
+    )
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "no cancel cb"},
+               name: store
+             )
+
+    assert_receive {:configured_executor, runner_pid, "agent_1", _task, _context}
+    ref = Process.monitor(runner_pid)
+
+    assert {:ok, status} = TaskStore.status(task_id, name: store)
+    assert status.current_step == "reviewing"
+    assert status.waiting_on == "human"
+
+    assert {:ok, cancelled} = TaskStore.cancel(task_id, name: store)
+    assert cancelled.state == :cancelled
+    refute_received {:cancel_task_called, _, _, _}
+    assert_receive {:cancel_turn_hook, "agent_1", ^task_id}
+    assert_receive {:DOWN, ^ref, :process, ^runner_pid, :killed}
+  end
+
+  test "explicit runner overrides skip cross-library progress and cancel callbacks", %{
+    store: store
+  } do
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => CodingChangeExecutor
+    })
+
+    Application.put_env(:arbor_agent, :task_store_test_progress, %{
+      "current_step" => "should_not_apply"
+    })
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "override"},
+               name: store,
+               runner: ControlledRunner,
+               test_pid: self()
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_1",
+                    %{"kind" => "coding_change", "input" => "override"}, _opts}
+
+    assert {:ok, status} = TaskStore.status(task_id, name: store)
+    assert status.current_step == "running"
+    refute_received {:task_status_called, _, _, _}
+
+    assert {:ok, cancelled} = TaskStore.cancel(task_id, name: store)
+    assert cancelled.state == :cancelled
+    refute_received {:cancel_task_called, _, _, _}
+    refute Process.alive?(runner_pid)
+  end
+
+  test "unknown blank malformed and invalid executors fail closed before spawn", %{
+    store: store,
+    supervisor: supervisor
+  } do
+    Application.delete_env(:arbor_agent, :task_executors)
+
+    # Unknown kind: no spawn (a runner override would swallow this, so use a production store).
+    unique = System.unique_integer([:positive])
+    prod_store = Module.concat(__MODULE__, :"ProdStore#{unique}")
+
+    start_supervised!(
+      {TaskStore, name: prod_store, task_supervisor: supervisor},
+      id: prod_store
+    )
+
+    assert {:error, {:unsupported_task_kind, "unknown_kind"}} =
+             TaskStore.dispatch("agent_1", %{"kind" => "unknown_kind", "input" => "x"},
+               name: prod_store
+             )
+
+    assert {:error, :blank_task_kind} =
+             TaskStore.dispatch("agent_1", %{"kind" => "  ", "input" => "x"}, name: prod_store)
+
+    assert {:error, :invalid_task_kind} =
+             TaskStore.dispatch("agent_1", %{"kind" => 99, "input" => "x"}, name: prod_store)
+
+    Application.put_env(:arbor_agent, :task_executors, %{
+      "coding_change" => NoRunModule
+    })
+
+    assert {:error, {:invalid_task_executor, "coding_change", NoRunModule}} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "x"},
+               name: prod_store
+             )
+
+    # Store-level runner override remains a compatibility seam (does not fail closed).
+    assert {:ok, _task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "coding_change", "input" => "override path"},
+               name: store,
+               test_pid: self()
+             )
+
+    assert_receive {:runner_started, _pid, "agent_1",
+                    %{"kind" => "coding_change", "input" => "override path"}, _opts}
+
+    # Per-dispatch runner override also wins.
+    assert {:ok, _task_id} =
+             TaskStore.dispatch(
+               "agent_1",
+               %{"kind" => "still_unknown", "input" => "dispatch override"},
+               name: prod_store,
+               runner: ControlledRunner,
+               test_pid: self()
+             )
+
+    assert_receive {:runner_started, _pid, "agent_1",
+                    %{"kind" => "still_unknown", "input" => "dispatch override"}, _opts}
   end
 
   defp assert_eventually(fun, attempts \\ 20)
@@ -194,4 +1066,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       :ok
     end
   end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_agent, key)
+  defp restore_env(key, value), do: Application.put_env(:arbor_agent, key, value)
 end

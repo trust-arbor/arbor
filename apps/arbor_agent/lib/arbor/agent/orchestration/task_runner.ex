@@ -1,10 +1,16 @@
 defmodule Arbor.Agent.Orchestration.TaskRunner do
   @moduledoc """
-  Default async orchestration task runner.
+  Default async orchestration task runner (agent-query / chat path).
 
   The runner adapts the existing synchronous `Arbor.Agent.Manager.chat/3`
   surface into the structured result shape returned by Slice 2 task APIs.
+
+  Implements `Arbor.Contracts.Agent.TaskExecutor`. Production callers should
+  pass a JSON-clean map context; keyword options remain supported for
+  test/internal compatibility (`manager_module`, `sender`, etc.).
   """
+
+  @behaviour Arbor.Contracts.Agent.TaskExecutor
 
   @default_sender "Orchestration"
 
@@ -14,8 +20,15 @@ defmodule Arbor.Agent.Orchestration.TaskRunner do
   alias Arbor.Contracts.Session.UserMessage
 
   @doc "Run a task against an agent and return a structured result."
-  @spec run(String.t(), task(), keyword()) :: {:ok, map()} | {:error, term()}
-  def run(agent_id, task, opts \\ []) when is_binary(agent_id) do
+  @impl true
+  @spec run(String.t(), task(), map() | keyword()) ::
+          {:ok, map()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, {:pending_approval, String.t()}}
+          | {:error, term()}
+  def run(agent_id, task, context \\ []) when is_binary(agent_id) do
+    opts = normalize_context(context)
+
     with {:ok, input} <- task_input(task) do
       manager = Keyword.get(opts, :manager_module, Arbor.Agent.Manager)
       sender = Keyword.get(opts, :sender, @default_sender)
@@ -28,10 +41,29 @@ defmodule Arbor.Agent.Orchestration.TaskRunner do
 
       case call_manager(manager, input_message, sender, chat_opts) do
         {:ok, result} -> {:ok, TaskArtifacts.normalize(result)}
+        {:ok, :pending_approval, approval_id} -> {:ok, :pending_approval, approval_id}
         {:error, reason} -> {:error, reason}
         other -> {:error, {:unexpected_runner_result, other}}
       end
     end
+  end
+
+  defp normalize_context(opts) when is_list(opts), do: opts
+
+  defp normalize_context(context) when is_map(context) do
+    []
+    |> maybe_put(:task_id, context_get(context, :task_id, "task_id"))
+    |> maybe_put(:timeout, context_get(context, :timeout, "timeout"))
+    |> maybe_put(:caller_id, context_get(context, :caller_id, "caller_id"))
+    |> maybe_put(:metadata, context_get(context, :metadata, "metadata"))
+    |> maybe_put(:manager_module, context_get(context, :manager_module, "manager_module"))
+    |> maybe_put(:sender, context_get(context, :sender, "sender"))
+  end
+
+  defp normalize_context(_context), do: []
+
+  defp context_get(map, atom_key, string_key) when is_map(map) do
+    Map.get(map, atom_key, Map.get(map, string_key))
   end
 
   defp task_input(task) when is_binary(task) do
@@ -44,6 +76,8 @@ defmodule Arbor.Agent.Orchestration.TaskRunner do
   end
 
   defp task_input(task) when is_map(task) do
+    # Structured kinds are routed by TaskStore; if a kinded task reaches the
+    # default chat runner (override path), still require a text input field.
     [:input, "input", :prompt, "prompt", :message, "message", :task, "task"]
     |> Enum.find_value(fn key ->
       case Map.get(task, key) do
