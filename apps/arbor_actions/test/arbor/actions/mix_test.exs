@@ -39,12 +39,40 @@ defmodule Arbor.Actions.MixTest do
       assert result.path == project_path
       assert result.exit_code == 0
       assert result.passed == true
+      assert result.feedback["exit_code"] == 0
+      assert result.feedback["passed"]
+      assert Jason.decode!(result.feedback_json) == result.feedback
     end
 
     test "exposes Jido action metadata" do
       assert MixAction.Compile.name() == "mix_compile"
       assert MixAction.Compile.category() == "mix"
       assert "compile" in MixAction.Compile.tags()
+    end
+
+    test "builds deterministic, bounded, JSON-clean compile feedback" do
+      stdout = String.duplicate("stdout ", MixAction.compile_feedback_text_limit())
+      stderr = String.duplicate("stderr ", MixAction.compile_feedback_text_limit())
+      result = %{exit_code: 1, stdout: stdout, stderr: stderr}
+
+      feedback = MixAction.compile_feedback(result)
+
+      assert feedback == MixAction.compile_feedback(result)
+      assert Jason.encode!(feedback) == Jason.encode!(MixAction.compile_feedback(result))
+      assert feedback["exit_code"] == 1
+      refute feedback["passed"]
+      assert feedback["stdout_truncated"]
+      assert feedback["stderr_truncated"]
+      assert String.length(feedback["stdout_excerpt"]) == MixAction.compile_feedback_text_limit()
+      assert String.length(feedback["stderr_excerpt"]) == MixAction.compile_feedback_text_limit()
+
+      assert feedback["stdout_sha256"] ==
+               Base.encode16(:crypto.hash(:sha256, stdout), case: :lower)
+
+      assert feedback["stderr_sha256"] ==
+               Base.encode16(:crypto.hash(:sha256, stderr), case: :lower)
+
+      assert {:ok, _json} = Jason.encode(feedback)
     end
   end
 

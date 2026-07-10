@@ -51,6 +51,10 @@ defmodule Arbor.Actions.Council do
   alias Arbor.Contracts.Judge.Verdict
   alias Arbor.Persistence.VerdictLog
 
+  @feedback_text_limit 1_000
+  @feedback_list_limit 20
+  @result_files_limit 100
+
   # Perspectives available in AdvisoryLLM
   @allowed_perspectives [
     :brainstorming,
@@ -631,24 +635,55 @@ defmodule Arbor.Actions.Council do
         persistence,
         routing
       ) do
+    recommendation = enum_string(verdict.recommendation)
+    tier_decision = enum_string(routing.action)
+    blast_radius = enum_string(routing.blast_radius)
+    tier_reasons = bounded_enum_list(routing.reasons)
+    verdict = verdict_projection(verdict)
+
+    feedback = %{
+      "recommendation" => recommendation,
+      "tier" => %{
+        "blast_radius" => blast_radius,
+        "decision" => tier_decision,
+        "reasons" => tier_reasons
+      },
+      "verdict" => %{
+        "weaknesses" => verdict.weaknesses,
+        "scores" => verdict.dimension_scores,
+        "counts" => %{
+          "approve" => integer_value(decision, "approve_count"),
+          "reject" => integer_value(decision, "reject_count"),
+          "abstain" => integer_value(decision, "abstain_count")
+        }
+      },
+      "flags" => %{
+        "security_veto" => routing.security_veto,
+        "human_required" => routing.human_required,
+        "authority_widening" => routing.authority_widening
+      }
+    }
+
     %{
       status: "reviewed",
       verdict: verdict,
-      recommendation: verdict.recommendation,
+      recommendation: recommendation,
       decision: decision_value(decision),
-      branch: request.branch,
-      files: request.files,
+      branch: bounded_text(request.branch),
+      files: bounded_text_list(request.files, @result_files_limit),
       approve_count: integer_value(decision, "approve_count"),
       reject_count: integer_value(decision, "reject_count"),
       abstain_count: integer_value(decision, "abstain_count"),
       quorum_met: boolean_value(decision, "quorum_met"),
-      blast_radius: routing.blast_radius,
-      tier_decision: routing.action,
+      blast_radius: blast_radius,
+      tier_decision: tier_decision,
       human_required: routing.human_required,
       security_veto: routing.security_veto,
       authority_widening: routing.authority_widening,
-      tier_reasons: routing.reasons,
-      persistence: persistence
+      tier_reasons: tier_reasons,
+      persistence: persistence_metadata(persistence),
+      feedback: feedback,
+      feedback_json: Jason.encode!(feedback)
     }
   end
 
@@ -794,6 +829,70 @@ defmodule Arbor.Actions.Council do
       "tier_reasons" => Enum.map(routing.reasons, &Atom.to_string/1)
     }
   end
+
+  # The action result crosses the Engine checkpoint boundary. Keep this
+  # projection intentionally smaller and simpler than the persisted Verdict.
+  defp verdict_projection(%Verdict{} = verdict) do
+    %{
+      overall_score: verdict.overall_score,
+      dimension_scores:
+        Map.new(verdict.dimension_scores, fn {dimension, score} ->
+          {enum_string(dimension), score}
+        end),
+      strengths: bounded_text_list(verdict.strengths),
+      weaknesses: bounded_text_list(verdict.weaknesses),
+      recommendation: enum_string(verdict.recommendation),
+      mode: enum_string(verdict.mode),
+      meta: verdict_meta_projection(verdict.meta)
+    }
+  end
+
+  defp verdict_meta_projection(meta) when is_map(meta) do
+    %{
+      "source" => bounded_text(Map.get(meta, :source) || Map.get(meta, "source")),
+      "decision" => enum_string(Map.get(meta, :decision) || Map.get(meta, "decision")),
+      "branch" => bounded_text(Map.get(meta, :branch) || Map.get(meta, "branch")),
+      "base_ref" => bounded_text(Map.get(meta, :base_ref) || Map.get(meta, "base_ref")),
+      "files" =>
+        bounded_text_list(Map.get(meta, :files) || Map.get(meta, "files"), @result_files_limit),
+      "agent_id" => bounded_text(Map.get(meta, :agent_id) || Map.get(meta, "agent_id")),
+      "approve_count" => integer_value(meta, "approve_count"),
+      "reject_count" => integer_value(meta, "reject_count"),
+      "abstain_count" => integer_value(meta, "abstain_count"),
+      "quorum_met" => boolean_value(meta, "quorum_met")
+    }
+  end
+
+  defp verdict_meta_projection(_meta), do: %{}
+
+  defp persistence_metadata({:ok, run_id}) when is_binary(run_id) do
+    %{"status" => "recorded", "run_id" => bounded_text(run_id)}
+  end
+
+  defp persistence_metadata(:ok), do: %{"status" => "not_recorded"}
+  defp persistence_metadata(_persistence), do: %{"status" => "unavailable"}
+
+  defp bounded_enum_list(values),
+    do: values |> List.wrap() |> Enum.map(&enum_string/1) |> Enum.take(@feedback_list_limit)
+
+  defp bounded_text_list(values, limit \\ @feedback_list_limit) do
+    values
+    |> List.wrap()
+    |> Enum.map(&bounded_text/1)
+    |> Enum.take(limit)
+  end
+
+  defp bounded_text(nil), do: nil
+  defp bounded_text(value) when is_binary(value), do: String.slice(value, 0, @feedback_text_limit)
+
+  defp bounded_text(value),
+    do: value |> inspect(limit: 20, printable_limit: @feedback_text_limit) |> bounded_text()
+
+  defp enum_string(value) when is_atom(value), do: Atom.to_string(value)
+  defp enum_string(value) when is_binary(value), do: bounded_text(value)
+
+  defp enum_string(value),
+    do: value |> inspect(limit: 20, printable_limit: @feedback_text_limit) |> bounded_text()
 
   defp value(map, key) when is_map(map) do
     Map.get(map, key) || Map.get(map, String.to_existing_atom(key))

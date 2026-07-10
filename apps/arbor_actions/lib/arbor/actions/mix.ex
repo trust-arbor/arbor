@@ -32,10 +32,36 @@ defmodule Arbor.Actions.Mix do
 
   alias Arbor.Shell
 
+  @compile_feedback_text_limit 2_000
+
   @doc false
   def mix_timeout, do: 300_000
   @doc false
   def mix_sandbox, do: :basic
+
+  @doc false
+  def compile_feedback_text_limit, do: @compile_feedback_text_limit
+
+  @doc false
+  def compile_feedback(%{exit_code: exit_code, stdout: stdout, stderr: stderr}) do
+    stdout = stdout || ""
+    stderr = stderr || ""
+
+    %{
+      "exit_code" => exit_code,
+      "passed" => exit_code == 0,
+      "stdout_excerpt" => String.slice(stdout, 0, @compile_feedback_text_limit),
+      "stderr_excerpt" => String.slice(stderr, 0, @compile_feedback_text_limit),
+      "stdout_truncated" => String.length(stdout) > @compile_feedback_text_limit,
+      "stderr_truncated" => String.length(stderr) > @compile_feedback_text_limit,
+      "stdout_sha256" => sha256(stdout),
+      "stderr_sha256" => sha256(stderr)
+    }
+  end
+
+  defp sha256(output) do
+    :crypto.hash(:sha256, output) |> Base.encode16(case: :lower)
+  end
 
   # ── Shared command runner ─────────────────────────────────────────
 
@@ -186,12 +212,16 @@ defmodule Arbor.Actions.Mix do
 
       case MixAction.run_mix(path, args, opts) do
         {:ok, result} ->
+          feedback = MixAction.compile_feedback(result)
+
           output = %{
             path: path,
             exit_code: result.exit_code,
             passed: result.exit_code == 0,
             stdout: result.stdout,
-            stderr: result.stderr
+            stderr: result.stderr,
+            feedback: feedback,
+            feedback_json: Jason.encode!(feedback)
           }
 
           Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})

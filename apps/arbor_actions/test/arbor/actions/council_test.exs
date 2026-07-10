@@ -164,13 +164,13 @@ defmodule Arbor.Actions.CouncilTest do
                })
 
       assert result.status == "reviewed"
-      assert result.recommendation == :keep
-      assert result.verdict.recommendation == :keep
+      assert result.recommendation == "keep"
+      assert result.verdict.recommendation == "keep"
       assert result.verdict.overall_score == 0.7
-      assert result.blast_radius == :low
-      assert result.tier_decision == :auto_proceed
+      assert result.blast_radius == "low"
+      assert result.tier_decision == "auto_proceed"
       refute result.human_required
-      assert result.persistence == {:ok, "run_123"}
+      assert result.persistence == %{"status" => "recorded", "run_id" => "run_123"}
 
       assert_receive {:persisted, verdict, request, decision}
       assert verdict.meta.branch == "agent/review-loop"
@@ -199,10 +199,10 @@ defmodule Arbor.Actions.CouncilTest do
                })
 
       assert result.decision == "rejected"
-      assert result.recommendation == :reject
-      assert result.verdict.recommendation == :reject
+      assert result.recommendation == "reject"
+      assert result.verdict.recommendation == "reject"
       assert result.verdict.weaknesses == ["security regression"]
-      assert result.tier_decision == :stop
+      assert result.tier_decision == "stop"
       refute result.human_required
     end
 
@@ -225,10 +225,10 @@ defmodule Arbor.Actions.CouncilTest do
                  persist_verdict: false
                })
 
-      assert result.recommendation == :revise
-      assert result.verdict.recommendation == :revise
+      assert result.recommendation == "revise"
+      assert result.verdict.recommendation == "revise"
       assert result.verdict.overall_score == 0.4
-      assert result.tier_decision == :rework
+      assert result.tier_decision == "rework"
       refute result.human_required
     end
 
@@ -253,11 +253,11 @@ defmodule Arbor.Actions.CouncilTest do
                  persist_verdict: false
                })
 
-      assert result.recommendation == :keep
-      assert result.blast_radius == :high
-      assert result.tier_decision == :human_review
+      assert result.recommendation == "keep"
+      assert result.blast_radius == "high"
+      assert result.tier_decision == "human_review"
       assert result.human_required
-      assert :security_app in result.tier_reasons
+      assert "security_app" in result.tier_reasons
     end
 
     test "security veto routes to human review even for docs-only keep verdicts" do
@@ -282,12 +282,12 @@ defmodule Arbor.Actions.CouncilTest do
                  persist_verdict: false
                })
 
-      assert result.recommendation == :keep
-      assert result.blast_radius == :low
-      assert result.tier_decision == :human_review
+      assert result.recommendation == "keep"
+      assert result.blast_radius == "low"
+      assert result.tier_decision == "human_review"
       assert result.human_required
       assert result.security_veto
-      assert :security_veto in result.tier_reasons
+      assert "security_veto" in result.tier_reasons
     end
 
     test "security perspective reject vote routes to human review even when majority approves" do
@@ -316,12 +316,12 @@ defmodule Arbor.Actions.CouncilTest do
                  persist_verdict: false
                })
 
-      assert result.recommendation == :keep
-      assert result.blast_radius == :low
-      assert result.tier_decision == :human_review
+      assert result.recommendation == "keep"
+      assert result.blast_radius == "low"
+      assert result.tier_decision == "human_review"
       assert result.human_required
       assert result.security_veto
-      assert :security_veto in result.tier_reasons
+      assert "security_veto" in result.tier_reasons
     end
 
     test "default runner uses the decide graph path and preserves security veto" do
@@ -350,9 +350,9 @@ defmodule Arbor.Actions.CouncilTest do
                })
 
       assert result.decision == "approved"
-      assert result.recommendation == :keep
-      assert result.blast_radius == :low
-      assert result.tier_decision == :human_review
+      assert result.recommendation == "keep"
+      assert result.blast_radius == "low"
+      assert result.tier_decision == "human_review"
       assert result.security_veto
       assert result.human_required
     end
@@ -365,6 +365,54 @@ defmodule Arbor.Actions.CouncilTest do
 
       assert {:ok, request} = Council.build_code_review_request(params)
       assert request.branch == "agent/override"
+    end
+
+    test "successful outputs are JSON-clean on keep, revise, reject, and human routes" do
+      routes = [
+        {"keep", @valid_review_params,
+         %{decision: "approved", approve_count: 3, reject_count: 0, abstain_count: 0}},
+        {"revise", @valid_review_params,
+         %{decision: "deadlock", approve_count: 1, reject_count: 1, abstain_count: 1}},
+        {"reject", @valid_review_params,
+         %{decision: "rejected", approve_count: 0, reject_count: 3, abstain_count: 0}},
+        {"human", %{@valid_review_params | files: ["apps/arbor_security/lib/arbor/security.ex"]},
+         %{decision: "approved", approve_count: 3, reject_count: 0, abstain_count: 0}}
+      ]
+
+      for {_route, params, decision} <- routes do
+        assert {:ok, result} =
+                 Council.ReviewChange.run(params, %{
+                   review_runner: fn _, _, _ -> {:ok, decision} end,
+                   persist_verdict: false
+                 })
+
+        assert {:ok, json} = Jason.encode(result)
+        assert Jason.decode!(json)["feedback"] == Jason.decode!(result.feedback_json)
+        assert is_binary(result.recommendation)
+        assert is_binary(result.tier_decision)
+        assert is_map(result.verdict)
+        assert is_map(result.persistence)
+      end
+    end
+
+    test "feedback bounds text and list fields" do
+      concerns = List.duplicate(String.duplicate("w", 1_500), 25)
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(@valid_review_params, %{
+                 review_runner: fn _, _, _ ->
+                   {:ok,
+                    %{
+                      decision: "rejected",
+                      reject_count: 1,
+                      primary_concerns: concerns
+                    }}
+                 end,
+                 persist_verdict: false
+               })
+
+      assert length(result.feedback["verdict"]["weaknesses"]) == 20
+      assert Enum.all?(result.feedback["verdict"]["weaknesses"], &(String.length(&1) <= 1_000))
     end
   end
 
