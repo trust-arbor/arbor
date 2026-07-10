@@ -142,18 +142,11 @@ defmodule Arbor.Orchestrator do
           {:ok, map()} | {:error, term()}
   def compile_coding_plan(plan_or_attrs) do
     with {:ok, plan} <- normalize_coding_plan(plan_or_attrs),
+         :ok <- validate_planner_review_profile(plan),
          {:ok, template_path} <- resolve_coding_plan_template(),
-         {:ok, compiler} <- resolve_coding_plan_compiler() do
-      case compiler.compile(plan, template_path: template_path) do
-        {:ok, %Compilation{} = compilation} ->
-          {:ok, Compilation.to_map(compilation)}
-
-        {:error, _reason} = error ->
-          error
-
-        other ->
-          {:error, {:coding_plan_compiler_malformed_reply, other}}
-      end
+         {:ok, compiler} <- resolve_coding_plan_compiler(),
+         {:ok, reply} <- invoke_coding_plan_compiler(compiler, plan, template_path) do
+      validate_coding_plan_compiler_reply(reply, plan)
     end
   end
 
@@ -319,6 +312,52 @@ defmodule Arbor.Orchestrator do
 
   defp normalize_coding_plan(%Plan{} = plan), do: {:ok, plan}
   defp normalize_coding_plan(attrs), do: Plan.new(attrs)
+
+  defp validate_planner_review_profile(%Plan{review_profile: "none"}),
+    do: {:error, {:coding_plan_review_profile_not_allowed, "none"}}
+
+  defp validate_planner_review_profile(%Plan{}), do: :ok
+
+  defp invoke_coding_plan_compiler(compiler, plan, template_path) do
+    try do
+      {:ok, compiler.compile(plan, template_path: template_path)}
+    rescue
+      _exception -> {:error, {:coding_plan_compiler_failed, :raise}}
+    catch
+      :exit, _reason -> {:error, {:coding_plan_compiler_failed, :exit}}
+      :throw, _reason -> {:error, {:coding_plan_compiler_failed, :throw}}
+    end
+  end
+
+  defp validate_coding_plan_compiler_reply({:ok, %Compilation{} = compilation}, plan) do
+    case Compilation.validate(compilation, plan) do
+      {:ok, validated} ->
+        {:ok, Compilation.to_map(validated)}
+
+      {:error, reason} ->
+        {:error, {:coding_plan_compiler_invalid_reply, reason}}
+    end
+  end
+
+  defp validate_coding_plan_compiler_reply({:ok, _payload}, _plan),
+    do: {:error, {:coding_plan_compiler_malformed_reply, :invalid_success_payload}}
+
+  defp validate_coding_plan_compiler_reply({:error, reason}, _plan),
+    do: {:error, {:coding_plan_compiler_error, compiler_error_tag(reason)}}
+
+  defp validate_coding_plan_compiler_reply(_reply, _plan),
+    do: {:error, {:coding_plan_compiler_malformed_reply, :invalid_reply_shape}}
+
+  defp compiler_error_tag(reason) when is_atom(reason), do: reason
+
+  defp compiler_error_tag(reason) when is_tuple(reason) and tuple_size(reason) > 0 do
+    case elem(reason, 0) do
+      tag when is_atom(tag) -> tag
+      _other -> :returned_error
+    end
+  end
+
+  defp compiler_error_tag(_reason), do: :returned_error
 
   defp resolve_coding_plan_template do
     path = Config.coding_pipeline_path()
