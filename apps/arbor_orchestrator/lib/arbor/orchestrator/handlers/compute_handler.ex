@@ -28,6 +28,7 @@ defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
          :ok <- verify_delegate(node, slot, handler_module, opts) do
       safe_execute(handler_module, node, context, graph, opts)
     else
+      {:error, {:unknown_compute_purpose, purpose}} -> unknown_purpose_failure(node, purpose)
       {:error, reason} -> binding_failure(node, reason)
       _other -> binding_failure(node, :invalid_compute_delegate)
     end
@@ -77,6 +78,13 @@ defmodule Arbor.Orchestrator.Handlers.ComputeHandler do
       slot,
       module
     )
+  end
+
+  defp unknown_purpose_failure(node, purpose) do
+    %Outcome{
+      status: :fail,
+      failure_reason: "Unknown compute purpose '#{purpose}' for node #{node.id}"
+    }
   end
 
   defp binding_failure(node, reason) do

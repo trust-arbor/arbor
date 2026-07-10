@@ -35,10 +35,10 @@ defmodule Arbor.Orchestrator.Handlers.ReadHandler do
              slot,
              readable_module
            ) do
-      if is_atom(readable_module) do
-        execute_readable(readable_module, source, node, context, opts)
-      else
-        legacy_dispatch(source, node, context, opts)
+      case readable_module do
+        nil -> legacy_dispatch(source, node, context, opts)
+        module when is_atom(module) -> execute_readable(module, source, node, context, opts)
+        _other -> legacy_dispatch(source, node, context, opts)
       end
     else
       {:error, reason} ->
