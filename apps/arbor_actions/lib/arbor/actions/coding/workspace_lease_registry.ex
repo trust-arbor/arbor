@@ -25,6 +25,12 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   * **reused** leases - drop the lease record only; never remove a pre-existing
     worktree
 
+  Two-revision validation resources are child leases. Their private staging,
+  isolated build directories, and detached base worktree are monitored against
+  both the invoking process and the parent workspace owner. Normal release,
+  validation-process death, workspace-owner death, and workspace removal all
+  clean those resources.
+
   ## Public views
 
   All client-facing maps are JSON-clean: no PIDs, monitor refs, functions, or
@@ -51,6 +57,25 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           ownership: ownership(),
           active: boolean(),
           cleanup_armed: boolean()
+        }
+
+  @type validation_resource :: %{
+          resource_id: String.t(),
+          workspace_id: String.t(),
+          owner_pid: pid(),
+          owner_ref: reference(),
+          repo_path: String.t(),
+          candidate_path: String.t(),
+          base_commit: String.t(),
+          root_path: String.t(),
+          stage_path: String.t(),
+          candidate_build_path: String.t(),
+          base_build_path: String.t(),
+          base_worktree_path: String.t(),
+          runner_path: String.t(),
+          candidate_result_path: String.t(),
+          base_result_path: String.t(),
+          snapshot_created: boolean()
         }
 
   @registry_name __MODULE__
@@ -112,6 +137,38 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   @doc false
+  @spec acquire_validation_resource(String.t(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def acquire_validation_resource(workspace_id, opts \\ %{}) when is_binary(workspace_id) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:acquire_validation_resource, workspace_id, caller}, server_opts)
+  end
+
+  @doc false
+  @spec create_validation_snapshot(String.t(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def create_validation_snapshot(resource_id, opts \\ %{}) when is_binary(resource_id) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:create_validation_snapshot, resource_id, caller}, server_opts)
+  end
+
+  @doc false
+  @spec release_validation_resource(String.t(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def release_validation_resource(resource_id, opts \\ %{}) when is_binary(resource_id) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:release_validation_resource, resource_id, caller}, server_opts)
+  end
+
+  @doc false
+  @spec validation_resources(String.t(), map() | keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def validation_resources(workspace_id, opts \\ %{}) when is_binary(workspace_id) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:validation_resources, workspace_id, caller}, server_opts)
+  end
+
+  @doc false
   @spec public_view(map()) :: map()
   def public_view(lease) when is_map(lease) do
     %{
@@ -129,7 +186,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   @impl true
   def init(_opts) do
-    {:ok, %{leases: %{}, by_ref: %{}}}
+    {:ok,
+     %{
+       leases: %{},
+       by_ref: %{},
+       validation_resources: %{},
+       validation_by_ref: %{},
+       validation_by_workspace: %{}
+     }}
   end
 
   @impl true
@@ -165,6 +229,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
       {:ok, lease} ->
         if authorized?(lease, caller) do
+          state = cleanup_workspace_validation_resources(state, lease.workspace_id)
           {result, state} = do_release(state, lease, mode)
           {:reply, {:ok, result}, state}
         else
@@ -173,26 +238,95 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
+  def handle_call(
+        {:acquire_validation_resource, workspace_id, caller},
+        {from_pid, _tag},
+        state
+      ) do
+    caller = %{caller | owner_pid: from_pid}
+
+    with {:ok, lease} <- fetch_authorized(state, workspace_id, caller),
+         :ok <- ensure_no_validation_resource(state, workspace_id) do
+      perform_validation_resource_acquire(state, lease, from_pid)
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(
+        {:create_validation_snapshot, resource_id, caller},
+        {from_pid, _tag},
+        state
+      ) do
+    caller = %{caller | owner_pid: from_pid}
+
+    case fetch_authorized_validation_resource(state, resource_id, caller) do
+      {:ok, resource} ->
+        perform_validation_snapshot_create(state, resource)
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(
+        {:release_validation_resource, resource_id, caller},
+        {from_pid, _tag},
+        state
+      ) do
+    caller = %{caller | owner_pid: from_pid}
+
+    case Map.fetch(state.validation_resources, resource_id) do
+      :error ->
+        {:reply, {:ok, %{resource_id: resource_id, active: false, status: "already_released"}},
+         state}
+
+      {:ok, resource} ->
+        case fetch_authorized_validation_resource(state, resource_id, caller) do
+          {:ok, _authorized} ->
+            {result, state} = do_release_validation_resource(state, resource)
+            {:reply, result, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+    end
+  end
+
+  def handle_call({:validation_resources, workspace_id, caller}, {from_pid, _tag}, state) do
+    caller = %{caller | owner_pid: from_pid}
+
+    case fetch_authorized(state, workspace_id, caller) do
+      {:ok, _lease} ->
+        resources =
+          state.validation_by_workspace
+          |> Map.get(workspace_id, MapSet.new())
+          |> Enum.map(&Map.fetch!(state.validation_resources, &1))
+          |> Enum.map(&validation_resource_view/1)
+          |> Enum.sort_by(& &1.resource_id)
+
+        {:reply, {:ok, resources}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
-    case Map.pop(state.by_ref, ref) do
-      {nil, _by_ref} ->
-        {:noreply, state}
+    case Map.fetch(state.validation_by_ref, ref) do
+      {:ok, resource_id} ->
+        case Map.get(state.validation_resources, resource_id) do
+          nil ->
+            {:noreply, %{state | validation_by_ref: Map.delete(state.validation_by_ref, ref)}}
 
-      {workspace_id, by_ref} ->
-        state = %{state | by_ref: by_ref}
-
-        case Map.pop(state.leases, workspace_id) do
-          {nil, _leases} ->
+          resource ->
+            {_result, state} = do_release_validation_resource(state, resource, demonitor: false)
             {:noreply, state}
-
-          {lease, leases} ->
-            if lease.cleanup_armed and lease.ownership == :owned do
-              remove_owned_worktree(lease.repo_path, lease.worktree_path)
-            end
-
-            {:noreply, %{state | leases: leases}}
         end
+
+      :error ->
+        handle_workspace_owner_down(ref, state)
     end
   end
 
@@ -211,6 +345,288 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
       :exit, {:normal, _} ->
         {:error, :registry_unavailable}
+    end
+  end
+
+  defp ensure_no_validation_resource(state, workspace_id) do
+    resources = Map.get(state.validation_by_workspace, workspace_id, MapSet.new())
+
+    if MapSet.size(resources) == 0,
+      do: :ok,
+      else: {:error, :validation_in_progress}
+  end
+
+  defp perform_validation_resource_acquire(state, lease, owner_pid) do
+    owner_ref = Process.monitor(owner_pid)
+
+    case create_validation_root(lease.workspace_id) do
+      {:ok, resource_id, root_path} ->
+        resource = %{
+          resource_id: resource_id,
+          workspace_id: lease.workspace_id,
+          owner_pid: owner_pid,
+          owner_ref: owner_ref,
+          repo_path: lease.repo_path,
+          candidate_path: lease.worktree_path,
+          base_commit: lease.base_commit,
+          root_path: root_path,
+          stage_path: Path.join(root_path, "staged"),
+          candidate_build_path: Path.join(root_path, "build-candidate"),
+          base_build_path: Path.join(root_path, "build-base"),
+          base_worktree_path: Path.join(root_path, "base"),
+          runner_path: Path.join(root_path, "runner.exs"),
+          candidate_result_path: Path.join(root_path, "candidate-result.etf"),
+          base_result_path: Path.join(root_path, "base-result.etf"),
+          snapshot_created: false
+        }
+
+        state = put_validation_resource(state, resource)
+        {:reply, {:ok, validation_resource_view(resource)}, state}
+
+      {:error, reason} ->
+        Process.demonitor(owner_ref, [:flush])
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp perform_validation_snapshot_create(state, %{snapshot_created: true} = resource) do
+    {:reply, {:ok, validation_resource_view(resource)}, state}
+  end
+
+  defp perform_validation_snapshot_create(state, resource) do
+    case Workspace.create_detached_worktree(
+           resource.repo_path,
+           resource.base_worktree_path,
+           resource.base_commit
+         ) do
+      {:ok, _path} ->
+        resource = %{resource | snapshot_created: true}
+
+        state = %{
+          state
+          | validation_resources:
+              Map.put(state.validation_resources, resource.resource_id, resource)
+        }
+
+        {:reply, {:ok, validation_resource_view(resource)}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp fetch_authorized_validation_resource(state, resource_id, caller) do
+    with {:ok, resource} <- fetch_validation_resource(state, resource_id),
+         {:ok, lease} <- fetch_lease(state, resource.workspace_id),
+         true <- validation_resource_authorized?(resource, lease, caller) do
+      {:ok, resource}
+    else
+      false -> {:error, :not_authorized}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_validation_resource(state, resource_id) do
+    case Map.fetch(state.validation_resources, resource_id) do
+      {:ok, resource} -> {:ok, resource}
+      :error -> {:error, :not_found}
+    end
+  end
+
+  defp fetch_lease(state, workspace_id) do
+    case Map.fetch(state.leases, workspace_id) do
+      {:ok, lease} -> {:ok, lease}
+      :error -> {:error, :not_found}
+    end
+  end
+
+  defp validation_resource_authorized?(resource, lease, caller) do
+    resource_owner_match?(resource, caller) or authorized?(lease, caller)
+  end
+
+  defp resource_owner_match?(resource, caller) do
+    is_pid(caller.owner_pid) and is_pid(resource.owner_pid) and
+      caller.owner_pid == resource.owner_pid and Process.alive?(resource.owner_pid)
+  end
+
+  defp do_release_validation_resource(state, resource, opts \\ []) do
+    cleanup_result = cleanup_validation_resource_files(resource)
+
+    if Keyword.get(opts, :demonitor, true) do
+      Process.demonitor(resource.owner_ref, [:flush])
+    end
+
+    state = drop_validation_resource(state, resource)
+
+    result =
+      case cleanup_result do
+        :ok ->
+          {:ok,
+           %{
+             resource_id: resource.resource_id,
+             workspace_id: resource.workspace_id,
+             active: false,
+             status: "removed"
+           }}
+
+        {:error, _reason} ->
+          {:error, :validation_resource_cleanup_failed}
+      end
+
+    {result, state}
+  end
+
+  defp cleanup_workspace_validation_resources(state, workspace_id) do
+    resource_ids =
+      state.validation_by_workspace
+      |> Map.get(workspace_id, MapSet.new())
+      |> Enum.to_list()
+
+    Enum.reduce(resource_ids, state, fn resource_id, acc ->
+      case Map.get(acc.validation_resources, resource_id) do
+        nil -> acc
+        resource -> elem(do_release_validation_resource(acc, resource), 1)
+      end
+    end)
+  end
+
+  defp cleanup_validation_resource_files(resource) do
+    _ =
+      Workspace.remove_detached_worktree(
+        resource.repo_path,
+        resource.base_worktree_path
+      )
+
+    _ = File.rm_rf(resource.root_path)
+
+    case File.lstat(resource.root_path) do
+      {:error, :enoent} -> :ok
+      _other -> {:error, :resource_root_still_exists}
+    end
+  rescue
+    _error -> {:error, :resource_cleanup_failed}
+  catch
+    :exit, _reason -> {:error, :resource_cleanup_failed}
+  end
+
+  defp put_validation_resource(state, resource) do
+    workspace_resources =
+      state.validation_by_workspace
+      |> Map.get(resource.workspace_id, MapSet.new())
+      |> MapSet.put(resource.resource_id)
+
+    %{
+      state
+      | validation_resources: Map.put(state.validation_resources, resource.resource_id, resource),
+        validation_by_ref:
+          Map.put(state.validation_by_ref, resource.owner_ref, resource.resource_id),
+        validation_by_workspace:
+          Map.put(state.validation_by_workspace, resource.workspace_id, workspace_resources)
+    }
+  end
+
+  defp drop_validation_resource(state, resource) do
+    workspace_resources =
+      state.validation_by_workspace
+      |> Map.get(resource.workspace_id, MapSet.new())
+      |> MapSet.delete(resource.resource_id)
+
+    validation_by_workspace =
+      if MapSet.size(workspace_resources) == 0 do
+        Map.delete(state.validation_by_workspace, resource.workspace_id)
+      else
+        Map.put(state.validation_by_workspace, resource.workspace_id, workspace_resources)
+      end
+
+    %{
+      state
+      | validation_resources: Map.delete(state.validation_resources, resource.resource_id),
+        validation_by_ref: Map.delete(state.validation_by_ref, resource.owner_ref),
+        validation_by_workspace: validation_by_workspace
+    }
+  end
+
+  defp validation_resource_view(resource) do
+    %{
+      resource_id: resource.resource_id,
+      workspace_id: resource.workspace_id,
+      repo_path: resource.repo_path,
+      candidate_path: resource.candidate_path,
+      base_commit: resource.base_commit,
+      root_path: resource.root_path,
+      stage_path: resource.stage_path,
+      candidate_build_path: resource.candidate_build_path,
+      base_build_path: resource.base_build_path,
+      base_worktree_path: resource.base_worktree_path,
+      runner_path: resource.runner_path,
+      candidate_result_path: resource.candidate_result_path,
+      base_result_path: resource.base_result_path,
+      snapshot_created: resource.snapshot_created,
+      active: true
+    }
+  end
+
+  defp create_validation_root(workspace_id, attempts \\ 4)
+
+  defp create_validation_root(_workspace_id, 0),
+    do: {:error, :validation_resource_collision}
+
+  defp create_validation_root(workspace_id, attempts) do
+    token = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+    workspace_hash = sha256(workspace_id) |> binary_part(0, 12)
+    resource_id = "security_regression_" <> token
+
+    root_path =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-security-regression-#{workspace_hash}-#{token}"
+      )
+
+    case File.mkdir(root_path) do
+      :ok ->
+        case File.chmod(root_path, 0o700) do
+          :ok ->
+            {:ok, resource_id, root_path}
+
+          {:error, _reason} ->
+            _ = File.rm_rf(root_path)
+            {:error, :validation_resource_create_failed}
+        end
+
+      {:error, :eexist} ->
+        create_validation_root(workspace_id, attempts - 1)
+
+      {:error, _reason} ->
+        {:error, :validation_resource_create_failed}
+    end
+  rescue
+    _error -> {:error, :validation_resource_create_failed}
+  end
+
+  defp sha256(value) do
+    :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
+  end
+
+  defp handle_workspace_owner_down(ref, state) do
+    case Map.pop(state.by_ref, ref) do
+      {nil, _by_ref} ->
+        {:noreply, state}
+
+      {workspace_id, by_ref} ->
+        state = %{state | by_ref: by_ref}
+        state = cleanup_workspace_validation_resources(state, workspace_id)
+
+        case Map.pop(state.leases, workspace_id) do
+          {nil, _leases} ->
+            {:noreply, state}
+
+          {lease, leases} ->
+            if lease.cleanup_armed and lease.ownership == :owned do
+              remove_owned_worktree(lease.repo_path, lease.worktree_path)
+            end
+
+            {:noreply, %{state | leases: leases}}
+        end
     end
   end
 

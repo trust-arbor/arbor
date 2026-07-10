@@ -98,6 +98,75 @@ defmodule Arbor.Actions.Coding.Workspace do
   end
 
   @doc false
+  @spec create_detached_worktree(String.t(), String.t(), String.t()) ::
+          {:ok, String.t()} | {:error, term()}
+  def create_detached_worktree(repo_root, worktree_path, commit)
+      when is_binary(repo_root) and is_binary(worktree_path) and is_binary(commit) do
+    with :ok <- require_exact_commit_hash(commit),
+         :ok <- require_absent_path(worktree_path),
+         {_output, 0} <-
+           System.cmd(
+             "git",
+             ["-C", repo_root, "worktree", "add", "--detach", worktree_path, commit],
+             stderr_to_stdout: true
+           ),
+         {:ok, actual_commit} <- git(worktree_path, ["rev-parse", "HEAD"]),
+         true <- String.trim(actual_commit) == commit do
+      {:ok, worktree_path}
+    else
+      {_output, code} when is_integer(code) ->
+        remove_detached_worktree(repo_root, worktree_path)
+        {:error, :detached_snapshot_create_failed}
+
+      false ->
+        remove_detached_worktree(repo_root, worktree_path)
+        {:error, :detached_snapshot_commit_mismatch}
+
+      {:error, _reason} = error ->
+        remove_detached_worktree(repo_root, worktree_path)
+        error
+    end
+  rescue
+    _error ->
+      remove_detached_worktree(repo_root, worktree_path)
+      {:error, :detached_snapshot_create_failed}
+  catch
+    :exit, _reason ->
+      remove_detached_worktree(repo_root, worktree_path)
+      {:error, :detached_snapshot_create_failed}
+  end
+
+  def create_detached_worktree(_repo_root, _worktree_path, _commit),
+    do: {:error, :invalid_detached_snapshot}
+
+  @doc false
+  @spec remove_detached_worktree(String.t(), String.t()) :: :ok | {:error, term()}
+  def remove_detached_worktree(repo_root, worktree_path)
+      when is_binary(repo_root) and is_binary(worktree_path) do
+    _ =
+      System.cmd(
+        "git",
+        ["-C", repo_root, "worktree", "remove", "--force", worktree_path],
+        stderr_to_stdout: true
+      )
+
+    _ = File.rm_rf(worktree_path)
+    _ = System.cmd("git", ["-C", repo_root, "worktree", "prune"], stderr_to_stdout: true)
+
+    case File.lstat(worktree_path) do
+      {:error, :enoent} -> :ok
+      _other -> {:error, :detached_snapshot_cleanup_failed}
+    end
+  rescue
+    _error -> {:error, :detached_snapshot_cleanup_failed}
+  catch
+    :exit, _reason -> {:error, :detached_snapshot_cleanup_failed}
+  end
+
+  def remove_detached_worktree(_repo_root, _worktree_path),
+    do: {:error, :invalid_detached_snapshot}
+
+  @doc false
   def context_task_id(context) when is_map(context) do
     map_value(context, :task_id) ||
       map_value(context, "session.task_id") ||
@@ -266,6 +335,21 @@ defmodule Arbor.Actions.Coding.Workspace do
 
   defp require_base_commit(base) when is_binary(base) and base != "", do: {:ok, base}
   defp require_base_commit(_), do: {:error, :missing_base_commit}
+
+  defp require_exact_commit_hash(commit) do
+    if Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, commit) do
+      :ok
+    else
+      {:error, :invalid_base_commit}
+    end
+  end
+
+  defp require_absent_path(path) do
+    case File.lstat(path) do
+      {:error, :enoent} -> :ok
+      _other -> {:error, :detached_snapshot_path_exists}
+    end
+  end
 
   # Exact HEAD only. Do not rev-parse the request; that would allow reading
   # ancestors or other refs via expressions such as HEAD~1 or branch names.

@@ -69,7 +69,16 @@ defmodule Arbor.Actions.Mix do
   def run_mix(path, args, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, mix_timeout())
     executable = mix_executable(path)
-    env = Keyword.get(opts, :env, %{}) |> Map.merge(shared_host_mix_env(path))
+
+    shared_env =
+      shared_host_mix_env(path,
+        share_build_path: Keyword.get(opts, :share_build_path, true)
+      )
+
+    # Explicit caller isolation always wins over convenience sharing. The
+    # security-regression runner uses this to share deps while forcing a fresh,
+    # per-leg MIX_BUILD_PATH.
+    env = Map.merge(shared_env, Keyword.get(opts, :env, %{}))
 
     # argv-safe: absolute worktree paths can contain spaces; never join into a
     # single shell string. Sandbox policy still sees basename "mix" + args.
@@ -87,19 +96,26 @@ defmodule Arbor.Actions.Mix do
   end
 
   @doc false
-  # Point temporary worktrees at the main checkout's deps/_build so validation
-  # does not require a fresh `mix deps.get` in every worktree (gitignored dirs
-  # are not copied into worktrees).
-  def shared_host_mix_env(path) when is_binary(path) do
+  # Point temporary worktrees at the main checkout's deps and, by default,
+  # _build so ordinary validation does not require a fresh setup in every
+  # worktree. Security-sensitive callers disable build sharing and provide an
+  # isolated MIX_BUILD_PATH explicitly.
+  def shared_host_mix_env(path, opts \\ [])
+
+  def shared_host_mix_env(path, opts) when is_binary(path) and is_list(opts) do
     case main_checkout_root(path) do
       {:ok, main} ->
         main = Path.expand(main)
         work = Path.expand(path)
 
         if main != work do
-          %{}
-          |> maybe_put_env_dir("MIX_DEPS_PATH", Path.join(main, "deps"))
-          |> maybe_put_env_dir("MIX_BUILD_PATH", Path.join(main, "_build"))
+          env = maybe_put_env_dir(%{}, "MIX_DEPS_PATH", Path.join(main, "deps"))
+
+          if Keyword.get(opts, :share_build_path, true) do
+            maybe_put_env_dir(env, "MIX_BUILD_PATH", Path.join(main, "_build"))
+          else
+            env
+          end
         else
           %{}
         end
@@ -109,7 +125,7 @@ defmodule Arbor.Actions.Mix do
     end
   end
 
-  def shared_host_mix_env(_path), do: %{}
+  def shared_host_mix_env(_path, _opts), do: %{}
 
   defp maybe_put_env_dir(env, key, path) do
     if File.dir?(path), do: Map.put(env, key, path), else: env

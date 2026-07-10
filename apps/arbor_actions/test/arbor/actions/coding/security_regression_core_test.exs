@@ -1,0 +1,139 @@
+defmodule Arbor.Actions.Coding.SecurityRegression.CoreTest do
+  use ExUnit.Case, async: true
+
+  alias Arbor.Actions.Coding.SecurityRegression.Core
+
+  @moduletag :fast
+
+  test "accepts only the bounded opaque-workspace input" do
+    assert {:ok, input} =
+             Core.new(%{
+               workspace_id: "ws_opaque",
+               test_paths: ["test/security_regression_test.exs"],
+               timeout: 10_000
+             })
+
+    assert input.workspace_id == "ws_opaque"
+    assert input.timeout == 10_000
+
+    assert {:error, :unsupported_parameter} =
+             Core.new(%{
+               workspace_id: "ws_opaque",
+               test_paths: ["test/security_regression_test.exs"],
+               command: "mix test"
+             })
+
+    assert {:error, :test_paths_not_sorted} =
+             Core.new(%{
+               workspace_id: "ws_opaque",
+               test_paths: ["test/z_test.exs", "test/a_test.exs"]
+             })
+
+    assert {:error, :invalid_test_paths} =
+             Core.new(%{
+               workspace_id: "ws_opaque",
+               test_paths: ["../escape_test.exs"]
+             })
+  end
+
+  test "validates the formatter artifact against an exact schema" do
+    counts = artifact_counts()
+    artifact = {Core.artifact_tag(), Core.artifact_version(), counts}
+
+    assert {:ok, normalized} = Core.validate_artifact(artifact)
+    assert normalized["executed"] == 2
+    assert normalized["test_failures"] == 1
+
+    assert {:error, :invalid_result_artifact} =
+             Core.validate_artifact(
+               {Core.artifact_tag(), Core.artifact_version(), Map.put(counts, :extra, 1)}
+             )
+
+    assert {:error, :invalid_result_artifact} =
+             Core.validate_artifact(
+               {Core.artifact_tag(), Core.artifact_version(), %{counts | total: 99}}
+             )
+  end
+
+  test "requires candidate pass and a real base test failure" do
+    candidate =
+      completed_leg(%{artifact_counts() | executed: 1, passed: 1, test_failures: 0, total: 1})
+
+    base = completed_leg(%{artifact_counts() | passed: 1, test_failures: 1, total: 2}, 2)
+
+    assert Core.verdict(candidate, base) == %{
+             passed: true,
+             reason: "security_regression_validated"
+           }
+
+    base_passed = completed_leg(%{artifact_counts() | passed: 2, test_failures: 0}, 0)
+
+    assert Core.verdict(candidate, base_passed) == %{
+             passed: false,
+             reason: "base_tests_passed"
+           }
+
+    non_test_exit =
+      completed_leg(
+        %{artifact_counts() | executed: 1, passed: 1, test_failures: 0, total: 1},
+        17
+      )
+
+    assert Core.verdict(candidate, non_test_exit) == %{
+             passed: false,
+             reason: "base_non_test_failure"
+           }
+  end
+
+  test "fails closed for setup failures and zero executed tests" do
+    candidate =
+      completed_leg(%{artifact_counts() | executed: 1, passed: 1, test_failures: 0, total: 1})
+
+    setup_failure =
+      completed_leg(%{
+        artifact_counts()
+        | executed: 0,
+          passed: 0,
+          test_failures: 0,
+          setup_failures: 1,
+          invalid: 1,
+          total: 1
+      })
+
+    assert Core.verdict(candidate, setup_failure).reason == "base_setup_failed"
+
+    zero_tests =
+      completed_leg(%{
+        artifact_counts()
+        | executed: 0,
+          passed: 0,
+          test_failures: 0,
+          total: 0
+      })
+
+    assert Core.candidate_gate(zero_tests) == {:error, "candidate_zero_tests"}
+  end
+
+  defp completed_leg(counts, exit_code \\ 0) do
+    {:ok, normalized} =
+      Core.validate_artifact({Core.artifact_tag(), Core.artifact_version(), counts})
+
+    Core.completed_leg(exit_code, false, normalized, %{})
+  end
+
+  defp artifact_counts do
+    %{
+      excluded: 0,
+      executed: 2,
+      invalid: 0,
+      max_failures_reached: false,
+      passed: 1,
+      setup_failures: 0,
+      skipped: 0,
+      suite_completed: true,
+      suite_started: true,
+      test_failures: 1,
+      total: 2
+    }
+  end
+end
