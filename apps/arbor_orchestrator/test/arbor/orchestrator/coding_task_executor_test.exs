@@ -152,6 +152,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       coding_pipeline_path: Application.get_env(:arbor_orchestrator, :coding_pipeline_path),
       coding_pipeline_logs_root:
         Application.get_env(:arbor_orchestrator, :coding_pipeline_logs_root),
+      coding_repo_roots: Application.get_env(:arbor_orchestrator, :coding_repo_roots),
+      coding_worktree_roots: Application.get_env(:arbor_orchestrator, :coding_worktree_roots),
       pipeline_status_module: Application.get_env(:arbor_orchestrator, :pipeline_status_module),
       security_module: Application.get_env(:arbor_orchestrator, :security_module),
       security_available_override:
@@ -163,6 +165,33 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     Application.put_env(:arbor_orchestrator, :pipeline_status_module, FakePipelineStatus)
     Application.put_env(:arbor_orchestrator, :security_module, FakeSecurity)
     Application.put_env(:arbor_orchestrator, :security_available_override, true)
+
+    tmp_dir =
+      Path.join(
+        System.tmp_dir!(),
+        "coding_task_executor_#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    repo_scope = Path.join(tmp_dir, "repo-scope")
+    repo_path = Path.join(repo_scope, "repo")
+    worktree_root = Path.join(tmp_dir, "worktrees")
+
+    File.mkdir_p!(repo_scope)
+    File.mkdir_p!(worktree_root)
+    create_git_repo!(repo_path)
+
+    Application.put_env(:arbor_orchestrator, :coding_repo_roots, [real_path!(repo_scope)])
+
+    Application.put_env(
+      :arbor_orchestrator,
+      :coding_worktree_roots,
+      [real_path!(worktree_root)]
+    )
+
+    Process.put(:coding_executor_tmp_dir, real_path!(tmp_dir))
+    Process.put(:coding_executor_repo_scope, real_path!(repo_scope))
+    Process.put(:coding_executor_repo_path, real_path!(repo_path))
+    Process.put(:coding_executor_worktree_root, real_path!(worktree_root))
 
     graph_path = Config.coding_pipeline_path()
 
@@ -185,10 +214,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       restore(:coding_pipeline_runner, originals.coding_pipeline_runner)
       restore(:coding_pipeline_path, originals.coding_pipeline_path)
       restore(:coding_pipeline_logs_root, originals.coding_pipeline_logs_root)
+      restore(:coding_repo_roots, originals.coding_repo_roots)
+      restore(:coding_worktree_roots, originals.coding_worktree_roots)
       restore(:pipeline_status_module, originals.pipeline_status_module)
       restore(:security_module, originals.security_module)
       restore(:security_available_override, originals.security_available_override)
       restore(:security_required, originals.security_required)
+      File.rm_rf(tmp_dir)
     end)
 
     :ok
@@ -202,7 +234,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       %{
         "kind" => "coding_change",
         "task" => "add a feature",
-        "repo_path" => "/tmp/repo",
+        "repo_path" => configured_repo_path(),
         "acp_agent" => "codex"
       },
       overrides
@@ -211,6 +243,25 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
   defp valid_context(overrides \\ %{}) do
     Map.merge(%{"task_id" => "task_coding_1"}, overrides)
+  end
+
+  defp configured_repo_path do
+    Process.get(:coding_executor_repo_path)
+  end
+
+  defp configured_worktree_root do
+    Process.get(:coding_executor_worktree_root)
+  end
+
+  defp create_git_repo!(path) do
+    File.mkdir_p!(path)
+    {_output, 0} = System.cmd("git", ["init", "--quiet", path], stderr_to_stdout: true)
+    path
+  end
+
+  defp real_path!(path) do
+    {:ok, canonical} = Arbor.Common.SafePath.resolve_real(path)
+    canonical
   end
 
   defp last_opts do
@@ -392,7 +443,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  valid_task(%{
                    "base_ref" => "main",
                    "branch_name" => "feature/x",
-                   "worktree_base_dir" => "/tmp/wt",
+                   "worktree_base_dir" => configured_worktree_root(),
                    "open_pr" => true,
                    "submit_review" => false
                  }),
@@ -410,6 +461,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert iv["submit_review"] == "false"
       assert iv["base_ref"] == "main"
       assert iv["branch_name"] == "feature/x"
+      assert iv["worktree_base_dir"] == configured_worktree_root()
       assert opts[:caller_id] == "caller_abc"
       assert iv["session.caller_id"] == "caller_abc"
       assert iv["session.metadata"] == %{"source" => "test"}
@@ -423,6 +475,173 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   # Engine opts / identity
   # ---------------------------------------------------------------------------
 
+  describe "workspace scope security" do
+    test "security regression: rejects repositories outside configured roots" do
+      outside_repo =
+        Process.get(:coding_executor_tmp_dir)
+        |> Path.join("outside/repo")
+        |> create_git_repo!()
+        |> real_path!()
+
+      assert {:error, {:coding_path_outside_roots, :repo_path}} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(%{"repo_path" => outside_repo}),
+                 valid_context()
+               )
+
+      assert Process.get(:coding_executor_last_run) == nil
+    end
+
+    test "security regression: rejects a repository symlink that escapes its configured root" do
+      outside_repo =
+        Process.get(:coding_executor_tmp_dir)
+        |> Path.join("outside-symlink-target/repo")
+        |> create_git_repo!()
+        |> real_path!()
+
+      link = Path.join(Process.get(:coding_executor_repo_scope), "escaped-repo")
+      File.ln_s!(outside_repo, link)
+
+      assert {:error, {:coding_path_outside_roots, :repo_path}} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(%{"repo_path" => link}),
+                 valid_context()
+               )
+
+      assert Process.get(:coding_executor_last_run) == nil
+    end
+
+    test "security regression: rejects sibling-prefix repositories outside configured roots" do
+      sibling_repo =
+        Process.get(:coding_executor_tmp_dir)
+        |> Path.join("repo-scope-evil/repo")
+        |> create_git_repo!()
+        |> real_path!()
+
+      assert {:error, {:coding_path_outside_roots, :repo_path}} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(%{"repo_path" => sibling_repo}),
+                 valid_context()
+               )
+
+      assert Process.get(:coding_executor_last_run) == nil
+    end
+
+    test "security regression: rejects a worktree symlink that escapes its configured root" do
+      outside_worktrees = Path.join(Process.get(:coding_executor_tmp_dir), "outside-worktrees")
+      File.mkdir_p!(outside_worktrees)
+
+      link = Path.join(configured_worktree_root(), "escaped-worktrees")
+      File.ln_s!(outside_worktrees, link)
+
+      assert {:error, {:coding_path_outside_roots, :worktree_base_dir}} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(%{"worktree_base_dir" => link}),
+                 valid_context()
+               )
+
+      assert Process.get(:coding_executor_last_run) == nil
+    end
+
+    test "security regression: rejects sibling-prefix worktree paths outside configured roots" do
+      sibling_worktree = Path.join(Process.get(:coding_executor_tmp_dir), "worktrees-evil")
+      File.mkdir_p!(sibling_worktree)
+
+      assert {:error, {:coding_path_outside_roots, :worktree_base_dir}} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(%{"worktree_base_dir" => sibling_worktree}),
+                 valid_context()
+               )
+
+      assert Process.get(:coding_executor_last_run) == nil
+    end
+
+    test "security regression: rejects a Git top-level outside configured roots" do
+      outer_repo =
+        Process.get(:coding_executor_tmp_dir)
+        |> Path.join("outer-repo")
+        |> create_git_repo!()
+
+      allowed_subdir = Path.join(outer_repo, "allowed")
+      nested_path = Path.join(allowed_subdir, "nested")
+      File.mkdir_p!(nested_path)
+      Application.put_env(:arbor_orchestrator, :coding_repo_roots, [real_path!(allowed_subdir)])
+
+      assert {:error, :git_root_outside_coding_roots} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(%{"repo_path" => real_path!(nested_path)}),
+                 valid_context()
+               )
+
+      assert Process.get(:coding_executor_last_run) == nil
+    end
+
+    test "normalizes accepted paths before constructing Engine opts" do
+      repo_link = Path.join(Process.get(:coding_executor_repo_scope), "repo-link")
+      File.ln_s!(configured_repo_path(), repo_link)
+
+      worktree_target = Path.join(configured_worktree_root(), "target")
+      worktree_link = Path.join(configured_worktree_root(), "target-link")
+      File.mkdir_p!(worktree_target)
+      File.ln_s!(worktree_target, worktree_link)
+
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(%{"repo_path" => repo_link, "worktree_base_dir" => worktree_link}),
+                 valid_context()
+               )
+
+      opts = last_opts()
+      assert opts[:workdir] == configured_repo_path()
+      assert opts[:initial_values]["repo_path"] == configured_repo_path()
+      assert opts[:initial_values]["worktree_base_dir"] == real_path!(worktree_target)
+    end
+
+    test "uses the configured canonical worktree root when the task omits it" do
+      assert {:ok, _result} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      assert last_opts()[:initial_values]["worktree_base_dir"] == configured_worktree_root()
+    end
+
+    test "security regression: missing, malformed, and nonexistent roots fail closed" do
+      Application.delete_env(:arbor_orchestrator, :coding_repo_roots)
+
+      assert {:error, {:coding_roots_not_configured, :repo}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      Application.put_env(:arbor_orchestrator, :coding_repo_roots, ["relative/repo"])
+
+      assert {:error, {:invalid_coding_roots, :repo}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      Application.put_env(:arbor_orchestrator, :coding_repo_roots, [configured_repo_path()])
+      Application.delete_env(:arbor_orchestrator, :coding_worktree_roots)
+
+      assert {:error, {:coding_roots_not_configured, :worktree}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      Application.put_env(:arbor_orchestrator, :coding_worktree_roots, ["/"])
+
+      assert {:error, {:invalid_coding_roots, :worktree}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      missing = Path.join(Process.get(:coding_executor_tmp_dir), "missing-root")
+      Application.put_env(:arbor_orchestrator, :coding_worktree_roots, [missing])
+
+      assert {:error, {:invalid_coding_root, :worktree}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      assert Process.get(:coding_executor_last_run) == nil
+    end
+  end
+
   describe "engine opts and trusted identity" do
     test "forces authorization, identities, signer, run ids, and packaged graph path" do
       graph_path = Config.coding_pipeline_path()
@@ -432,7 +651,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "agent_trusted",
                  valid_task(%{
                    "task" => "do work",
-                   "repo_path" => "/tmp/repo",
+                   "repo_path" => configured_repo_path(),
                    "acp_agent" => "codex"
                  }),
                  valid_context(%{"task_id" => "task_abc", "caller_id" => "human_1"})
@@ -445,7 +664,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert opts[:task_id] == "task_abc"
       assert opts[:run_id] == "task_abc"
       assert opts[:pipeline_id] == "task_abc"
-      assert opts[:workdir] == "/tmp/repo"
+      assert opts[:workdir] == configured_repo_path()
       assert opts[:spawning_pid] == self()
       assert opts[:resumable] == true
       assert opts[:caller_id] == "human_1"
@@ -460,7 +679,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert iv["session.task_id"] == "task_abc"
       assert iv["session.caller_id"] == "human_1"
       assert iv["task"] == "do work"
-      assert iv["repo_path"] == "/tmp/repo"
+      assert iv["repo_path"] == configured_repo_path()
+      assert iv["worktree_base_dir"] == configured_worktree_root()
       assert iv["acp_agent"] == "codex"
       # Defaults when optional flags omitted
       assert iv["open_pr"] == "false"
@@ -532,11 +752,13 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         Application.delete_env(:arbor_orchestrator, :coding_executor_test_observer)
       end)
 
+      task = valid_task()
+
       owner =
         spawn(fn ->
           CodingTaskExecutor.run(
             "agent_1",
-            valid_task(),
+            task,
             valid_context(%{"timeout" => 10_000})
           )
         end)

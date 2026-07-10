@@ -201,6 +201,14 @@ config :arbor_actions, worker_default_model: "kimi-k2.7-code:cloud"
 # (gemma-4-31b timed out). 15 min gives agentic local turns room; still a safety net.
 config :arbor_orchestrator, turn_timeout_ms: 900_000
 
+# Structured coding tasks accept repository input only within this explicit
+# root. `runtime.exs` creates a project-scoped temporary worktree root in dev,
+# keeping generated worktrees outside this checkout. Prod deliberately has no
+# implicit root configuration.
+arbor_source_root = Path.expand("..", __DIR__)
+
+config :arbor_orchestrator, coding_repo_roots: [arbor_source_root]
+
 # Auto-load AGENTS.md/CLAUDE.md into agent system prompts (Claude-Code-style). Off by default
 # (changes every agent's prompt); on in dev so agents know Arbor's conventions. Read by both the
 # APIAgent stable-prompt path (Arbor.AI.SystemPromptBuilder) and the DOT-pipeline path (LlmHandler).

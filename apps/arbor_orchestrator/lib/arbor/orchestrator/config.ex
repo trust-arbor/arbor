@@ -304,6 +304,30 @@ defmodule Arbor.Orchestrator.Config do
   end
 
   @doc """
+  Explicit trusted roots that may contain repositories for structured coding
+  tasks. Missing or malformed configuration has no fallback and is rejected by
+  `CodingTaskExecutor` before it invokes the pipeline.
+  """
+  @spec coding_repo_roots() ::
+          {:ok, [String.t()]}
+          | {:error, {:coding_roots_not_configured | :invalid_coding_roots, :repo}}
+  def coding_repo_roots do
+    configured_coding_roots(:coding_repo_roots, :repo)
+  end
+
+  @doc """
+  Explicit trusted roots under which structured coding tasks may create Git
+  worktrees. The executor uses the first canonical root when a task omits
+  `worktree_base_dir`.
+  """
+  @spec coding_worktree_roots() ::
+          {:ok, [String.t()]}
+          | {:error, {:coding_roots_not_configured | :invalid_coding_roots, :worktree}}
+  def coding_worktree_roots do
+    configured_coding_roots(:coding_worktree_roots, :worktree)
+  end
+
+  @doc """
   Facade used for pipeline progress/cancel bookkeeping (`get/1`,
   `mark_abandoned/1`). Defaults to `Arbor.Orchestrator.PipelineStatus`.
   """
@@ -332,4 +356,46 @@ defmodule Arbor.Orchestrator.Config do
   defp default_coding_pipeline_logs_root do
     Path.join([System.tmp_dir!(), "arbor_orchestrator", "coding_tasks"])
   end
+
+  defp configured_coding_roots(key, kind) do
+    case Application.fetch_env(@app, key) do
+      :error ->
+        {:error, {:coding_roots_not_configured, kind}}
+
+      {:ok, roots} when is_list(roots) and roots != [] ->
+        normalize_configured_roots(roots, kind)
+
+      {:ok, _invalid} ->
+        {:error, {:invalid_coding_roots, kind}}
+    end
+  end
+
+  defp normalize_configured_roots(roots, kind) do
+    Enum.reduce_while(roots, {:ok, []}, fn root, {:ok, acc} ->
+      case normalize_configured_root(root) do
+        {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
+        :error -> {:halt, {:error, {:invalid_coding_roots, kind}}}
+      end
+    end)
+    |> case do
+      {:ok, normalized} -> {:ok, normalized |> Enum.reverse() |> Enum.uniq()}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp normalize_configured_root(root) when is_binary(root) do
+    if String.valid?(root) do
+      trimmed = String.trim(root)
+
+      if trimmed != "" and Path.type(trimmed) == :absolute and Path.expand(trimmed) != "/" do
+        {:ok, trimmed}
+      else
+        :error
+      end
+    else
+      :error
+    end
+  end
+
+  defp normalize_configured_root(_root), do: :error
 end

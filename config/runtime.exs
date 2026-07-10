@@ -33,6 +33,34 @@ if File.exists?(dotenv_path) do
   end)
 end
 
+# Development creates a project-scoped temporary root so generated worktrees
+# stay outside the source checkout. Production has no workspace-scope default:
+# absent or invalid settings are rejected by CodingTaskExecutor before it starts
+# a coding pipeline.
+if config_env() == :dev do
+  dev_coding_worktree_root = Path.join(System.tmp_dir!(), "arbor-coding-worktrees")
+  File.mkdir_p!(dev_coding_worktree_root)
+
+  config :arbor_orchestrator, coding_worktree_roots: [dev_coding_worktree_root]
+end
+
+# A comma-separated value is intentionally kept as a list so Config can reject
+# empty, relative, and filesystem-root entries consistently in every environment.
+parse_coding_roots = fn env_name ->
+  case System.get_env(env_name) do
+    nil -> nil
+    value -> value |> String.split(",", trim: true) |> Enum.map(&String.trim/1)
+  end
+end
+
+if roots = parse_coding_roots.("ARBOR_CODING_REPO_ROOTS") do
+  config :arbor_orchestrator, coding_repo_roots: roots
+end
+
+if roots = parse_coding_roots.("ARBOR_CODING_WORKTREE_ROOTS") do
+  config :arbor_orchestrator, coding_worktree_roots: roots
+end
+
 # ============================================================================
 # Dashboard secret key base (production)
 # ============================================================================
