@@ -61,11 +61,10 @@ defmodule Arbor.Scheduler.RunIdentity do
   alias Arbor.Security
   alias Arbor.Security.Identity.Registry, as: IdentityRegistry
 
-  # Every pipeline run needs orchestrator/execute to traverse graph nodes.
-  # This is lobby authority only. Resource handlers MUST independently require
-  # canonical fs, shell, and action capabilities; this grant cannot substitute
-  # for those checks and must never be expanded into broad resource grants.
-  @orchestrator_execute_uri "arbor://orchestrator/execute/**"
+  # Every pipeline run needs the exact orchestrator/execute lobby capability to
+  # enter the Engine. Descendant node operations are deliberately excluded:
+  # each must be present in the signed attestation before it can be granted.
+  @orchestrator_execute_uri "arbor://orchestrator/execute"
 
   @type run_handle :: %{
           agent_id: String.t(),
@@ -216,7 +215,7 @@ defmodule Arbor.Scheduler.RunIdentity do
   # because the ephemeral identity has no human presence. Mirrors the
   # pattern in `Arbor.Scheduler.Identity.ensure_trust_profile/1`.
   #
-  # The lobby cap (`arbor://orchestrator/execute/**`) is handled
+  # The exact lobby cap (`arbor://orchestrator/execute`) is handled
   # separately by the same trust rule pattern. Each descriptor's URI
   # gets its `best_rule_prefix` (e.g. `arbor://fs/read/<path>/**`
   # becomes `arbor://fs/read`) and that prefix is allowed.

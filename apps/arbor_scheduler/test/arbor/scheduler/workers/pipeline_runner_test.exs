@@ -5,21 +5,23 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
 
   alias Arbor.Contracts.Security.{Capability, Identity}
   alias Arbor.Scheduler.{CapsFile, PipelinePaths}
+  alias Arbor.Scheduler.Test.WorkdirReplacingOrchestrator
   alias Arbor.Scheduler.Workers.PipelineRunner
   alias Arbor.Security.Crypto
   alias Arbor.Security.Identity.Registry, as: IdentityRegistry
   alias Arbor.Security.IssuerRegistry
 
   defmodule OrchestratorStub do
-    def run_file_as(agent_id, path, opts) do
+    def run_file_as(path, agent_id, signer, opts) do
       test_pid = Application.fetch_env!(:arbor_scheduler, :pipeline_runner_test_pid)
       identity_registered? = match?({:ok, _}, Arbor.Security.Identity.Registry.lookup(agent_id))
-      send(test_pid, {:run_file_as, agent_id, path, opts, identity_registered?})
+      send(test_pid, {:run_file_as, path, agent_id, signer, opts, identity_registered?})
       {:ok, %{status: :completed}}
     end
   end
 
-  defmodule MissingFacadeStub do
+  defmodule LegacyFacadeStub do
+    def run_file_as(_agent_id, _path, _opts), do: {:ok, %{status: :completed}}
   end
 
   setup do
@@ -46,6 +48,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
     restore_env(:pipeline_roots)
     restore_env(:orchestrator_module)
     restore_env(:pipeline_runner_test_pid)
+    restore_env(:pipeline_runner_workdir_replacement)
 
     Application.put_env(:arbor_scheduler, :pipeline_roots, %{"test" => root})
     Application.put_env(:arbor_scheduler, :orchestrator_module, OrchestratorStub)
@@ -60,7 +63,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
   end
 
   describe "exact attestation execution" do
-    test "security regression: exact graph, path, workdir, and args call run_file_as/3", %{
+    test "security regression: exact graph, path, workdir, and args call run_file_as/4", %{
       issuer: issuer,
       root: root
     } do
@@ -71,27 +74,46 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
 
       assert :ok = PipelineRunner.perform(job(dot, initial_args))
 
-      assert_receive {:run_file_as, agent_id, canonical_dot, opts, true}
+      assert_receive {:run_file_as, canonical_dot, agent_id, signer, opts, true}
       assert {:ok, expected_dot} = Arbor.Common.SafePath.resolve_real(dot)
       assert canonical_dot == expected_dot
+      assert is_function(signer, 1)
       assert opts[:graph_hash] == hash
       assert opts[:workdir] == workdir
       assert opts[:initial_values] == initial_args
       assert opts[:author_id] == issuer.agent_id
-      assert is_function(opts[:signer], 1)
+      refute Keyword.has_key?(opts, :signer)
       refute Map.has_key?(opts[:initial_values], "session.agent_id")
 
       assert {:error, :not_found} = IdentityRegistry.lookup(agent_id)
     end
 
-    test "clean fallback when run_file_as/3 is not available", %{issuer: issuer, root: root} do
+    test "the real facade exposes path, principal, signer, opts in that order", %{root: root} do
+      path = Path.join(root, "facade_contract.dot")
+      File.write!(path, dot_source("facade_contract"))
+      facade = Arbor.Orchestrator
+
+      assert Code.ensure_loaded?(facade)
+      assert function_exported?(facade, :run_file_as, 4)
+
+      assert {:error, :invalid_execution_principal} =
+               apply(facade, :run_file_as, [path, "", fn _ -> {:error, :unused} end, []])
+
+      assert {:error, :signer_required} =
+               apply(facade, :run_file_as, [path, "agent_contract_probe", :not_a_signer, []])
+    end
+
+    test "clean fallback when only legacy run_file_as/3 is available", %{
+      issuer: issuer,
+      root: root
+    } do
       %{dot: dot} = write_attested_pipeline(root, "missing_facade", issuer)
-      Application.put_env(:arbor_scheduler, :orchestrator_module, MissingFacadeStub)
+      Application.put_env(:arbor_scheduler, :orchestrator_module, LegacyFacadeStub)
 
       assert {:error, :orchestrator_run_file_as_unavailable} =
                PipelineRunner.perform(job(dot, %{}))
 
-      refute_received {:run_file_as, _, _, _, _}
+      refute_received {:run_file_as, _, _, _, _, _}
     end
   end
 
@@ -108,7 +130,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
 
       assert {:discard, reason} = PipelineRunner.perform(job(copied_dot, %{}))
       assert reason =~ "pipeline_identity_mismatch"
-      refute_received {:run_file_as, _, _, _, _}
+      refute_received {:run_file_as, _, _, _, _, _}
     end
 
     test "security regression: editing DOT after signing is rejected before Engine", %{
@@ -120,7 +142,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
 
       assert {:discard, reason} = PipelineRunner.perform(job(dot, %{}))
       assert reason =~ "graph_hash_mismatch"
-      refute_received {:run_file_as, _, _, _, _}
+      refute_received {:run_file_as, _, _, _, _, _}
     end
 
     test "security regression: changed job args are rejected before identity mint", %{
@@ -134,7 +156,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
                PipelineRunner.perform(job(dot, %{"operation" => "publish"}))
 
       assert reason =~ "initial_args_mismatch"
-      refute_received {:run_file_as, _, _, _, _}
+      refute_received {:run_file_as, _, _, _, _, _}
     end
 
     test "security regression: changed workdir is rejected", %{
@@ -149,7 +171,45 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
                PipelineRunner.perform(job(dot, %{}, %{"workdir" => other_workdir}))
 
       assert reason =~ "workdir_mismatch"
-      refute_received {:run_file_as, _, _, _, _}
+      refute_received {:run_file_as, _, _, _, _, _}
+    end
+
+    test "security regression: workdir replaced by a symlink before dispatch is rejected", %{
+      issuer: issuer,
+      root: root,
+      outside: outside
+    } do
+      workdir = Path.join(outside, "attested_workdir")
+      replacement = Path.join(outside, "replacement_workdir")
+      File.mkdir_p!(workdir)
+      File.mkdir_p!(replacement)
+
+      %{dot: dot, workdir: canonical_workdir} =
+        write_attested_pipeline(root, "workdir_race", issuer, workdir: workdir)
+
+      {:ok, canonical_replacement} = PipelinePaths.resolve_workdir(replacement)
+
+      Application.put_env(
+        :arbor_scheduler,
+        :pipeline_runner_workdir_replacement,
+        {canonical_workdir, canonical_replacement, self()}
+      )
+
+      Application.put_env(
+        :arbor_scheduler,
+        :orchestrator_module,
+        WorkdirReplacingOrchestrator
+      )
+
+      beam_path = :code.which(WorkdirReplacingOrchestrator)
+      assert is_list(beam_path)
+      :code.purge(WorkdirReplacingOrchestrator)
+      :code.delete(WorkdirReplacingOrchestrator)
+
+      assert {:discard, reason} = PipelineRunner.perform(job(dot, %{}))
+      assert_receive {:workdir_replaced, :ok, ^canonical_workdir, ^canonical_replacement}
+      assert reason =~ "attested_workdir_changed"
+      refute_received {:replacement_stub_dispatched, _, _, _, _}
     end
 
     test "security regression: invalid manifest signature is rejected", %{
@@ -164,7 +224,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
 
       assert {:discard, reason} = PipelineRunner.perform(job(dot, %{}))
       assert reason =~ "invalid_signature"
-      refute_received {:run_file_as, _, _, _, _}
+      refute_received {:run_file_as, _, _, _, _, _}
     end
 
     test "security regression: legacy version 1 manifest is rejected", %{
@@ -187,7 +247,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
 
       assert {:discard, reason} = PipelineRunner.perform(job(dot, %{}))
       assert reason =~ "legacy_version"
-      refute_received {:run_file_as, _, _, _, _}
+      refute_received {:run_file_as, _, _, _, _, _}
     end
   end
 
@@ -200,7 +260,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
 
       assert {:discard, reason} = PipelineRunner.perform(job(dot, %{}))
       assert reason =~ "outside_allowed_roots"
-      refute_received {:run_file_as, _, _, _, _}
+      refute_received {:run_file_as, _, _, _, _, _}
     end
 
     test "pipeline symlink escape is rejected", %{root: root, outside: outside} do
@@ -211,7 +271,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
 
       assert {:discard, reason} = PipelineRunner.perform(job(link, %{}))
       assert reason =~ "symlink_or_non_regular_file"
-      refute_received {:run_file_as, _, _, _, _}
+      refute_received {:run_file_as, _, _, _, _, _}
     end
 
     test "caps-file symlink escape is rejected", %{
@@ -228,7 +288,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
 
       assert {:discard, reason} = PipelineRunner.perform(job(dot, %{}))
       assert reason =~ "caps_path_rejected"
-      refute_received {:run_file_as, _, _, _, _}
+      refute_received {:run_file_as, _, _, _, _, _}
     end
 
     test "pipeline without a sibling manifest is rejected", %{root: root} do
@@ -237,7 +297,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunnerTest do
 
       assert {:discard, reason} = PipelineRunner.perform(job(dot, %{}))
       assert reason =~ "missing caps file"
-      refute_received {:run_file_as, _, _, _, _}
+      refute_received {:run_file_as, _, _, _, _, _}
     end
   end
 

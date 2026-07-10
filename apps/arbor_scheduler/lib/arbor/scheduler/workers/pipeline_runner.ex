@@ -7,7 +7,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
   manifest is authoritative for the canonical DOT identity, SHA-256, workdir,
   initial values, issuer, and capability envelope.
 
-  `Arbor.Orchestrator.run_file_as/3` is dispatched through `apply/3` to avoid a
+  `Arbor.Orchestrator.run_file_as/4` is dispatched through `apply/3` to avoid a
   compile-time dependency on the higher-level orchestrator app. Until that
   facade is available, jobs fail with a retryable, explicit error.
   """
@@ -53,7 +53,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
         {:error, :orchestrator_unavailable}
 
       {:error, :orchestrator_run_file_as_unavailable} ->
-        Logger.error("[Scheduler] Arbor.Orchestrator.run_file_as/3 unavailable; retrying")
+        Logger.error("[Scheduler] Arbor.Orchestrator.run_file_as/4 unavailable; retrying")
         {:error, :orchestrator_run_file_as_unavailable}
 
       {:error, reason} ->
@@ -129,10 +129,9 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
   end
 
   defp verify_attested_workdir(attestation) do
-    case PipelinePaths.resolve_workdir(attestation.workdir) do
-      {:ok, workdir} when workdir == attestation.workdir -> :ok
-      {:ok, _other} -> {:error, :attested_workdir_changed}
-      {:error, reason} -> {:error, {:attested_workdir_invalid, reason}}
+    case revalidate_workdir(attestation.workdir) do
+      {:ok, _canonical_workdir} -> :ok
+      {:error, _reason} = error -> error
     end
   end
 
@@ -144,7 +143,7 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
       not Code.ensure_loaded?(orchestrator) ->
         {:error, :orchestrator_unavailable}
 
-      not function_exported?(orchestrator, :run_file_as, 3) ->
+      not function_exported?(orchestrator, :run_file_as, 4) ->
         {:error, :orchestrator_run_file_as_unavailable}
 
       true ->
@@ -158,18 +157,21 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
         try do
           with :ok <- revalidate_paths(paths),
                {:ok, actual_hash} <- PipelinePaths.hash_file(paths.path),
-               :ok <- verify_graph_hash(attestation.graph_hash, actual_hash) do
+               :ok <- verify_graph_hash(attestation.graph_hash, actual_hash),
+               {:ok, canonical_workdir} <- revalidate_workdir(attestation.workdir) do
             # The hash check is intentionally the final scheduler operation
-            # before dispatch. run_file_as/3 independently rechecks the same
-            # expected hash while reading the DOT for Engine execution.
+            # on the DOT. Workdir resolution then runs immediately before
+            # dispatch so a replacement or symlink race cannot redirect the
+            # reviewed run. run_file_as/4 independently rechecks the expected
+            # graph hash while reading the DOT for Engine execution.
             # credo:disable-for-next-line Credo.Check.Refactor.Apply
             apply(orchestrator, :run_file_as, [
-              handle.agent_id,
               paths.path,
+              handle.agent_id,
+              handle.signer,
               [
-                signer: handle.signer,
                 graph_hash: attestation.graph_hash,
-                workdir: attestation.workdir,
+                workdir: canonical_workdir,
                 initial_values: attestation.initial_args,
                 author_id: attestation.issuer_id
               ]
@@ -191,6 +193,14 @@ defmodule Arbor.Scheduler.Workers.PipelineRunner do
       {:ok, ^expected} -> :ok
       {:ok, _changed} -> {:error, :pipeline_path_changed}
       {:error, reason} -> {:error, {:pipeline_path_changed, reason}}
+    end
+  end
+
+  defp revalidate_workdir(expected) do
+    case PipelinePaths.resolve_workdir(expected) do
+      {:ok, ^expected} -> {:ok, expected}
+      {:ok, _changed} -> {:error, :attested_workdir_changed}
+      {:error, reason} -> {:error, {:attested_workdir_invalid, reason}}
     end
   end
 

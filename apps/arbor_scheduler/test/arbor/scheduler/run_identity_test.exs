@@ -5,21 +5,37 @@ defmodule Arbor.Scheduler.RunIdentityTest do
 
   alias Arbor.Contracts.Security.{Capability, Identity}
   alias Arbor.Scheduler.{CapsFile, RunIdentity}
+  alias Arbor.Security
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Crypto
   alias Arbor.Security.Identity.Registry, as: IdentityRegistry
   alias Arbor.Security.IssuerRegistry
 
   @envelope_uri "arbor://fs/write/reports/**"
+  @lobby_uri "arbor://orchestrator/execute"
+  @per_node_resources [
+    "arbor://orchestrator/execute/llm_query",
+    "arbor://orchestrator/execute/graph_mutation",
+    "arbor://orchestrator/map/dispatch",
+    "arbor://orchestrator/execute/compose"
+  ]
 
   setup do
     {:ok, issuer} = Identity.generate()
     :ok = IdentityRegistry.register(issuer)
 
-    {:ok, envelope} =
-      Capability.new(resource_uri: @envelope_uri, principal_id: issuer.agent_id)
+    envelopes =
+      Enum.map(
+        [@envelope_uri, "arbor://orchestrator/execute/**", "arbor://orchestrator/map/**"],
+        fn resource_uri ->
+          {:ok, envelope} =
+            Capability.new(resource_uri: resource_uri, principal_id: issuer.agent_id)
 
-    :ok = IssuerRegistry.register(issuer.agent_id, envelope, reason: "run_identity_test")
+          envelope
+        end
+      )
+
+    :ok = IssuerRegistry.register(issuer.agent_id, envelopes, reason: "run_identity_test")
 
     tmp_dir =
       System.tmp_dir!() |> Path.join("run_identity_test_#{System.unique_integer([:positive])}")
@@ -52,18 +68,54 @@ defmodule Arbor.Scheduler.RunIdentityTest do
 
     assert Enum.sort(Enum.map(capabilities, & &1.resource_uri)) ==
              Enum.sort([
-               "arbor://orchestrator/execute/**",
+               @lobby_uri,
                "arbor://fs/write/reports/narrow/**"
              ])
 
     refute Enum.any?(capabilities, &(&1.resource_uri == @envelope_uri))
 
-    declared = Enum.find(capabilities, &(&1.resource_uri != "arbor://orchestrator/execute/**"))
+    declared = Enum.find(capabilities, &(&1.resource_uri != @lobby_uri))
     assert declared.principal_id == handle.agent_id
     assert declared.metadata.provenance.issuer_id == issuer.agent_id
     assert declared.metadata.provenance.graph_hash == attestation.graph_hash
 
     assert {:ok, _public_key} = IdentityRegistry.lookup(handle.agent_id)
+    RunIdentity.revoke(handle)
+  end
+
+  test "security regression: empty attestation leaves per-node operations unauthorized", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    attestation = verified_attestation(issuer, tmp_dir, [])
+
+    assert {:ok, handle} = RunIdentity.mint(attestation)
+    assert [lobby_cap] = Enum.map(handle.cap_ids, &fetch_cap!/1)
+    assert lobby_cap.resource_uri == @lobby_uri
+    assert {:ok, :authorized} = authorize_as(handle, @lobby_uri)
+
+    for resource <- @per_node_resources do
+      assert {:error, :unauthorized} = authorize_as(handle, resource)
+    end
+
+    RunIdentity.revoke(handle)
+  end
+
+  test "explicitly attested per-node operations remain authorized", %{
+    issuer: issuer,
+    tmp_dir: tmp_dir
+  } do
+    capabilities =
+      Enum.map(@per_node_resources, &%{resource_uri: &1, constraints: %{}})
+
+    attestation = verified_attestation(issuer, tmp_dir, capabilities)
+
+    assert {:ok, handle} = RunIdentity.mint(attestation)
+
+    for resource <- @per_node_resources do
+      assert {:ok, :authorized} = authorize_as(handle, resource)
+    end
+
     RunIdentity.revoke(handle)
   end
 
@@ -152,6 +204,12 @@ defmodule Arbor.Scheduler.RunIdentityTest do
   defp fetch_cap!(capability_id) do
     assert {:ok, capability} = CapabilityStore.get(capability_id)
     capability
+  end
+
+  defp authorize_as(handle, resource) do
+    assert {:ok, signed_request} = handle.signer.(resource)
+
+    Security.authorize(handle.agent_id, resource, :execute, signed_request: signed_request)
   end
 
   defp sha256(value) do
