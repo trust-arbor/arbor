@@ -1,6 +1,8 @@
 defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
-  use ExUnit.Case, async: true
+  # Mutates shared ActionRegistry in the reconciliation regression; not async.
+  use ExUnit.Case, async: false
 
+  alias Arbor.Common.ActionRegistry
   alias Arbor.Orchestrator.CodingPlan.ActionCatalog
 
   alias Arbor.Actions.TestFixtures.{
@@ -21,6 +23,13 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
     {"alpha.action", AlphaAction, %{category: :test}},
     {"alpha_action", AlphaAction, %{category: :test, is_jido_alias: true}}
   ]
+
+  # Keep ActionRegistry alive for the module so on_exit restore after the
+  # stale-registry regression can still GenServer.call the named process.
+  setup_all do
+    ensure_action_registry_started!()
+    :ok
+  end
 
   describe "snapshot/1" do
     test "registry and facade shaped sources normalize identically" do
@@ -133,6 +142,38 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
       assert {:error, {:duplicate_action_name, "alpha_action"}} =
                ActionCatalog.snapshot(modules: [AlphaAction, AlphaSchemaChangedAction])
     end
+
+    test "production snapshot unions a stale locked registry with the current facade" do
+      registry_snapshot = ActionRegistry.snapshot()
+
+      on_exit(fn ->
+        if Process.whereis(ActionRegistry) do
+          :ok = ActionRegistry.restore(registry_snapshot)
+        end
+      end)
+
+      # Simulate registry core-locked before a facade action was hot-loaded:
+      # only a fixture registry entry remains, locked so plugins cannot refill.
+      stale_entries = [
+        {"alpha.action", AlphaAction, %{category: :test}, 0, true},
+        {"alpha_action", AlphaAction, %{category: :test, is_jido_alias: true}, 0, true}
+      ]
+
+      :ok = ActionRegistry.restore({stale_entries, true})
+      assert ActionRegistry.core_locked?()
+
+      assert {:ok, snapshot} = ActionCatalog.snapshot()
+      names = ActionCatalog.names(snapshot)
+
+      # Registry-only fixture is preserved.
+      assert "alpha_action" in names
+
+      # Facade core action that is absent from the stale locked registry is still present.
+      assert "coding_cross_app_validate" in names
+
+      assert {:ok, validate} = ActionCatalog.fetch(snapshot, "coding_cross_app_validate")
+      assert validate["module"] == Atom.to_string(Arbor.Actions.Coding.CrossApp.Validate)
+    end
   end
 
   describe "fetch/2 and names/1" do
@@ -144,6 +185,25 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalogTest do
       assert :error = ActionCatalog.fetch(snapshot, "alpha.action")
       assert :error = ActionCatalog.fetch(snapshot, "missing")
       assert ActionCatalog.names(snapshot) == ["alpha_action", "zebra_action"]
+    end
+  end
+
+  defp ensure_action_registry_started! do
+    case Process.whereis(ActionRegistry) do
+      pid when is_pid(pid) ->
+        :ok
+
+      nil ->
+        # Prefer a module-scoped supervised start (setup_all). Fall back to an
+        # unlinked start if called outside a supervised test context.
+        try do
+          start_supervised!(ActionRegistry)
+          :ok
+        rescue
+          _ ->
+            {:ok, _pid} = ActionRegistry.start_link([])
+            :ok
+        end
     end
   end
 

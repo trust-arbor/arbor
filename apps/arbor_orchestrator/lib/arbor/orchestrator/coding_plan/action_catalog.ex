@@ -2,9 +2,20 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
   @moduledoc """
   Builds a deterministic, JSON-clean snapshot of live Jido action schemas.
 
-  The running `Arbor.Common.ActionRegistry` is authoritative because it can
-  contain dynamically registered actions. When the registry is unavailable,
-  the catalog falls back to modules exposed by `Arbor.Actions.list_actions/0`.
+  Production snapshots **union** modules from the running
+  `Arbor.Common.ActionRegistry` with the current `Arbor.Actions.list_actions/0`
+  facade:
+
+  - The registry preserves dynamically registered / plugin actions that may not
+    appear in the facade.
+  - The facade covers core actions that were hot-loaded after the registry was
+    populated and core-locked (so a stale locked registry alone cannot hide a
+    published action until node restart).
+  - When the registry is unavailable, the facade alone is sufficient.
+
+  Entries are deduplicated by module (registry aliases and facade overlap collapse
+  to one inspect). Distinct modules that publish the same action name still fail
+  closed via `{:duplicate_action_name, name}`.
 
   Registry entries contain aliases and runtime module references. A snapshot
   deduplicates those aliases by module, calls each action's `to_tool/0`, and
@@ -46,12 +57,15 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
   @doc """
   Build the current action-schema snapshot.
 
-  With no options, the live action registry is used when it is running;
-  otherwise the public Actions facade supplies the fallback module map.
+  With no options, production mode unions the live action registry (when it is
+  running) with the public Actions facade so plugin/dynamic entries and
+  post-lock facade core actions are both present. If the registry is unavailable,
+  the facade alone supplies the module map.
 
   Tests and other deterministic callers can inject either registry-shaped
   `:entries` (`{name, module, metadata}` tuples) or facade-shaped `:modules`
-  (a category map or flat module list). The two options are mutually exclusive.
+  (a category map or flat module list). The two options are mutually exclusive
+  and bypass production reconciliation.
   """
   @spec snapshot(keyword()) :: {:ok, snapshot()} | {:error, error_reason()}
   def snapshot(opts \\ [])
@@ -123,8 +137,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ActionCatalog do
 
   defp production_modules do
     case registry_entries() do
-      {:ok, entries} -> modules_from_entries(entries)
-      :unavailable -> fallback_modules()
+      {:ok, entries} ->
+        with {:ok, registry_modules} <- modules_from_entries(entries),
+             {:ok, facade_modules} <- fallback_modules() do
+          # Union: keep plugin/dynamic registry modules and always include the
+          # current facade so hot-loaded core actions appear without restart.
+          dedupe_modules({:ok, registry_modules ++ facade_modules})
+        end
+
+      :unavailable ->
+        fallback_modules()
     end
   end
 
