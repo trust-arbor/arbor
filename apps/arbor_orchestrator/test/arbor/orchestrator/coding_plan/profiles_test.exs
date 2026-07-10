@@ -17,7 +17,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
     security_regression
   ]
 
-  @executable_ids ~w[default security_regression]
+  @executable_ids ~w[default]
   @unsupported_ids @known_ids -- @executable_ids
 
   describe "declarations" do
@@ -48,7 +48,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "binding" => true
              }
 
-      assert {:ok, security} = Profiles.fetch_executable("security_regression")
+      assert {:ok, security} = Profiles.fetch("security_regression")
+      refute security["executable"]
 
       assert security["validation_strategy"] == %{
                "action" => "mix_test",
@@ -79,6 +80,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
 
     test "declares unsupported profiles with precise missing enforcement reasons" do
       expected_reason_terms = %{
+        "security_regression" => ["fails against the base/pre-fix code", "candidate code"],
         "contract_change" => ["CONTRACT_RULES", "compatibility review"],
         "frontend_visual" => ["Playwright", "desktop/mobile visual evidence"],
         "docs_only" => [

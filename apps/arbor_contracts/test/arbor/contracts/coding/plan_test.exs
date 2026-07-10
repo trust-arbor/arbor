@@ -170,7 +170,7 @@ defmodule Arbor.Contracts.Coding.PlanTest do
       end
     end
 
-    test "accepts every known task and validation profile" do
+    test "accepts every declared task and validation profile independent of executability" do
       profiles = ~w(
         default
         security_regression
@@ -533,6 +533,18 @@ defmodule Arbor.Contracts.Coding.PlanTest do
 
       for path <- invalid_paths do
         assert {:error, {:invalid_field, "requested_paths[0]", _}} =
+                 Plan.new(Map.put(@minimal_attrs, :requested_paths, [path]))
+      end
+    end
+
+    test "security regression: rejects option-like Mix selectors" do
+      for path <- [
+            "--exclude=nonexistent_test.exs",
+            "--only=security",
+            "-e",
+            "-"
+          ] do
+        assert {:error, {:invalid_field, "requested_paths[0]", :option_like_path}} =
                  Plan.new(Map.put(@minimal_attrs, :requested_paths, [path]))
       end
     end

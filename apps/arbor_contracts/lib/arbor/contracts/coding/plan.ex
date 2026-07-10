@@ -13,6 +13,11 @@ defmodule Arbor.Contracts.Coding.Plan do
   are rejected before construction. `to_map/1` emits the canonical string-keyed
   representation used at JSON and Engine checkpoint boundaries.
 
+  Profile IDs in this contract are declarations for discovery and plan
+  interchange, not guarantees of executability. Execution boundaries must
+  separately require a reviewed, executable profile and fail closed when its
+  enforcement primitive is not available.
+
   ## Defaults and bounds
 
   * base ref: `HEAD`
@@ -394,6 +399,9 @@ defmodule Arbor.Contracts.Coding.Plan do
 
       traversal_path?(path) ->
         {:error, {:invalid_field, field, :traversal_segment}}
+
+      String.starts_with?(path, "-") ->
+        {:error, {:invalid_field, field, :option_like_path}}
 
       true ->
         {:ok, path}

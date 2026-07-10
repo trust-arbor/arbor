@@ -60,9 +60,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 "validation_strategy" => %{"action" => "mix_compile"},
                 "review_strategy" => @binding_council_review
               },
+              # Declaration preserves the reviewed future selector strategy. It is
+              # not executable until one primitive proves both sides of the
+              # regression contract against base and candidate revisions.
               %{
                 "id" => "security_regression",
-                "executable" => true,
+                "executable" => false,
                 "template_version" => @template_version,
                 "required_nodes" => @required_nodes,
                 "required_actions" => Enum.sort(["mix_test" | @common_required_actions]),
@@ -72,7 +75,10 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "path_source" => "requested_paths",
                   "requires_non_empty_paths" => true
                 },
-                "review_strategy" => @binding_council_review
+                "review_strategy" => @binding_council_review,
+                "unsupported_reason" =>
+                  "No reviewed validation primitive proves that the selected regression test " <>
+                    "fails against the base/pre-fix code and passes against the candidate code."
               },
               %{
                 "id" => "contract_change",

@@ -115,7 +115,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert validate["param.warnings_as_errors"] == true
   end
 
-  test "security regression profile uses focused mix_test paths", ctx do
+  test "security regression profile remains declared but fails closed without two-revision proof",
+       ctx do
     requested_paths = [
       "apps/arbor_security/test/security_regression_test.exs",
       "apps/arbor_shell/test/shell_security_test.exs"
@@ -127,36 +128,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
         "requested_paths" => requested_paths
       })
 
-    assert {:ok, compilation} = compile(plan, ctx)
-    graph = parse!(compilation.dot_source)
-    validate = node_attrs(graph, "validate")
+    assert plan.validation_profile == "security_regression"
 
-    assert validate["action"] == "mix_test"
-    assert validate["context_keys"] == "path,test_paths"
-    refute Map.has_key?(validate, "param.warnings_as_errors")
-    assert compilation.initial_values["test_paths"] == requested_paths
+    assert {:error, {:profile_not_executable, "security_regression", reason}} =
+             compile(plan, ctx)
 
-    assert compilation.initial_values["coding_plan_validation_profile"] ==
-             "security_regression"
-
-    assert "mix_test" in compilation.manifest["action_names"]
-    refute "mix_compile" in compilation.manifest["action_names"]
-  end
-
-  test "security regression profile rejects empty and non-test paths", ctx do
-    empty = plan!(%{"validation_profile" => "security_regression"})
-
-    assert {:error, {:invalid_security_regression_paths, :empty}} = compile(empty, ctx)
-
-    non_test =
-      plan!(%{
-        "validation_profile" => "security_regression",
-        "requested_paths" => ["apps/arbor_security/lib/authorization.ex"]
-      })
-
-    assert {:error,
-            {:invalid_security_regression_paths, ["apps/arbor_security/lib/authorization.ex"]}} =
-             compile(non_test, ctx)
+    assert reason ==
+             "No reviewed validation primitive proves that the selected regression test " <>
+               "fails against the base/pre-fix code and passes against the candidate code."
   end
 
   test "review profiles preserve council review and deterministically control routing", ctx do
@@ -268,17 +247,18 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:error, {:unsupported_v1_profile_mismatch, "docs_only", "default"}} =
              compile(mismatch, ctx)
 
-    compatible =
+    declared_but_unsupported =
       plan!(%{
         "task_class" => "security_regression",
         "validation_profile" => "security_regression",
         "requested_paths" => ["apps/arbor_security/test/regression_test.exs"]
       })
 
-    assert {:ok, compilation} = compile(compatible, ctx)
+    assert {:error, {:profile_not_executable, "security_regression", reason}} =
+             compile(declared_but_unsupported, ctx)
 
-    assert node_attrs(parse!(compilation.dot_source), "classify_profile")["expression"] ==
-             "security_regression"
+    assert reason =~ "fails against the base/pre-fix code"
+    assert reason =~ "passes against the candidate code"
   end
 
   test "missing mandatory template node or reviewed action fails closed", ctx do
