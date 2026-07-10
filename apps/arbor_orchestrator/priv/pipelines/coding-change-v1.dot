@@ -24,6 +24,7 @@
 //   workspace_id         - opaque workspace lease id
 //   worker_session_id    - opaque ACP worker handle
 //   branch / commit_hash - reviewable branch tip when produced
+//   error                - stable terminal failure code when applicable
 //
 // Worker output contract (acp_send_message text): pure JSON
 //   {"status":"implemented"|"declined","summary":"..."}
@@ -56,6 +57,13 @@ digraph CodingChangeV1 {
     transform="constant",
     expression="0",
     output_key="rework_count"
+  ]
+
+  init_protocol_retry_count [
+    type="transform",
+    transform="constant",
+    expression="0",
+    output_key="protocol_retry_count"
   ]
 
   classify_profile [
@@ -155,6 +163,37 @@ digraph CodingChangeV1 {
     source_key="worker_msg.text",
     expression="status",
     output_key="worker_status"
+  ]
+
+  // A malformed worker response gets one same-session steering attempt. This
+  // counter is intentionally independent from implementation rework_count.
+
+  inc_protocol_retry_count [
+    type="transform",
+    transform="increment",
+    source_key="protocol_retry_count",
+    output_key="protocol_retry_count"
+  ]
+
+  check_protocol_retry_budget [
+    type="branch",
+    shape=diamond
+  ]
+
+  build_protocol_repair_prompt [
+    type="transform",
+    transform="constant",
+    expression="Your previous response was not valid protocol JSON. Respond now with ONLY one JSON object and no prose or markdown: {\"status\":\"implemented\"} or {\"status\":\"declined\"}, plus optional {\"summary\":\"...\"}.",
+    output_key="prompt"
+  ]
+
+  repair_worker_protocol [
+    type="exec",
+    target="action",
+    action="acp_send_message",
+    context_keys="worker_session_id,prompt",
+    output_prefix="worker_msg",
+    max_retries="0"
   ]
 
   // Inspect outcome
@@ -494,6 +533,45 @@ digraph CodingChangeV1 {
     output_key="status"
   ]
 
+  // Failed-node details remain in the Engine outcome audit. These normalized
+  // codes use the existing terminal `error` context convention so callers get
+  // a stable, JSON-clean reason after cleanup completes.
+
+  error_committed_change_materialization [
+    type="transform",
+    transform="constant",
+    expression="committed_change_materialization_failed",
+    output_key="error"
+  ]
+
+  error_council_review [
+    type="transform",
+    transform="constant",
+    expression="council_review_failed",
+    output_key="error"
+  ]
+
+  error_draft_pr [
+    type="transform",
+    transform="constant",
+    expression="draft_pr_failed",
+    output_key="error"
+  ]
+
+  error_worker_protocol_invalid [
+    type="transform",
+    transform="constant",
+    expression="worker_protocol_invalid_json_after_retry",
+    output_key="error"
+  ]
+
+  error_worker_protocol_repair [
+    type="transform",
+    transform="constant",
+    expression="worker_protocol_repair_failed",
+    output_key="error"
+  ]
+
   // Cleanup
 
   close_worker [
@@ -540,7 +618,7 @@ digraph CodingChangeV1 {
 
   // Flow
 
-  start -> init_rework_count -> classify_profile -> acquire_workspace
+  start -> init_rework_count -> init_protocol_retry_count -> classify_profile -> acquire_workspace
 
   // Acquire failure: no lease held
   acquire_workspace -> status_pipeline_error [condition="outcome=fail"]
@@ -562,7 +640,15 @@ digraph CodingChangeV1 {
   status_pipeline_error_then_close -> close_worker
 
   implement -> extract_worker_status [condition="outcome=success"]
-  extract_worker_status -> status_pipeline_error_then_close [condition="outcome=fail"]
+  extract_worker_status -> inc_protocol_retry_count [condition="outcome=fail"]
+  inc_protocol_retry_count -> check_protocol_retry_budget
+  check_protocol_retry_budget -> build_protocol_repair_prompt [condition="context.protocol_retry_count<2"]
+  build_protocol_repair_prompt -> repair_worker_protocol
+  repair_worker_protocol -> error_worker_protocol_repair [condition="outcome=fail"]
+  error_worker_protocol_repair -> status_pipeline_error_then_close
+  repair_worker_protocol -> extract_worker_status [condition="outcome=success"]
+  check_protocol_retry_budget -> error_worker_protocol_invalid [condition="context.protocol_retry_count>=2"]
+  error_worker_protocol_invalid -> status_pipeline_error_then_close
   # Gate success paths with outcome=success so empty worker_status on extract
   # failure cannot match context.worker_status!=declined via select_fail_step.
   extract_worker_status -> status_declined [condition="outcome=success && context.worker_status=declined"]
@@ -617,13 +703,15 @@ digraph CodingChangeV1 {
   prep_expected_commit -> load_committed_change
 
   // Committed review-material failure
-  load_committed_change -> status_review_failed [condition="outcome=fail"]
+  load_committed_change -> error_committed_change_materialization [condition="outcome=fail"]
+  error_committed_change_materialization -> status_review_failed
   load_committed_change -> hoist_change_commit [condition="outcome=success"]
   hoist_change_commit -> prep_review_diff
   prep_review_diff -> prep_review_files -> prep_review_intent -> prep_review_agent -> prep_review_base
   prep_review_base -> review_change
 
-  review_change -> status_review_failed [condition="outcome=fail"]
+  review_change -> error_council_review [condition="outcome=fail"]
+  error_council_review -> status_review_failed
   status_review_failed -> close_worker
 
   review_change -> route_review [condition="outcome=success"]
@@ -675,7 +763,8 @@ digraph CodingChangeV1 {
   status_change_committed -> close_worker
 
   prep_pr_path -> prep_pr_title -> open_draft_pr
-  open_draft_pr -> status_pr_failed [condition="outcome=fail"]
+  open_draft_pr -> error_draft_pr [condition="outcome=fail"]
+  error_draft_pr -> status_pr_failed
   status_pr_failed -> close_worker
   open_draft_pr -> status_pr_created [condition="outcome=success"]
   status_pr_created -> close_worker

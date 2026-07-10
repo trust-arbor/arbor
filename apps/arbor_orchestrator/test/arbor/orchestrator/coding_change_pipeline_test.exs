@@ -145,9 +145,12 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       n = Map.get(counters, :implement, 0)
       Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :implement, n + 1)} end)
 
-      case scenario do
-        :implement_hard_fail ->
+      case {scenario, n} do
+        {:implement_hard_fail, _} ->
           {:error, "implement transport failed"}
+
+        {:protocol_repair_transport_failed, 1} ->
+          {:error, "protocol steering transport failed"}
 
         _ ->
           text =
@@ -194,6 +197,24 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
               {:extract_hard_fail, _} ->
                 # Invalid JSON so json_extract fails
                 "not-json-status"
+
+              {:protocol_repair_success, 0} ->
+                "Implemented the requested change.\n" <>
+                  Jason.encode!(%{status: "implemented", summary: "prefixed progress"})
+
+              {:protocol_repair_success, _} ->
+                Jason.encode!(%{status: "implemented", summary: "protocol repaired"})
+
+              {:protocol_repair_exhausted, 0} ->
+                "Implemented the requested change.\n" <>
+                  Jason.encode!(%{status: "implemented", summary: "still prefixed"})
+
+              {:protocol_repair_exhausted, _} ->
+                "I already gave you the result above."
+
+              {:protocol_repair_transport_failed, 0} ->
+                "Implemented the requested change.\n" <>
+                  Jason.encode!(%{status: "implemented", summary: "prefixed progress"})
 
               {:close_failed, _} ->
                 Jason.encode!(%{status: "implemented", summary: "close boom path"})
@@ -649,7 +670,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     test "review_failed on council error" do
       assert {{:ok, result}, calls} = run_fixture(:review_failed)
       assert result.context["status"] == "review_failed"
+      assert result.context["error"] == "council_review_failed"
       assert_closed_and_released(calls)
+      assert_json_clean_context(result.context)
     end
 
     test "human_review_required without PR" do
@@ -662,8 +685,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     test "pr_failed" do
       assert {{:ok, result}, calls} = run_fixture(:pr_failed, %{"open_pr" => "true"})
       assert result.context["status"] == "pr_failed"
+      assert result.context["error"] == "draft_pr_failed"
       assert_closed_and_released(calls)
       assert called?(calls, "git_pr")
+      assert_json_clean_context(result.context)
     end
 
     test "pr_created" do
@@ -710,6 +735,29 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                is_pid(v) or is_function(v) or is_reference(v)
              end)
     end
+
+    test "malformed worker JSON gets one same-session protocol repair without consuming rework" do
+      assert {{:ok, result}, calls} = run_fixture(:protocol_repair_success)
+      assert result.context["status"] == "change_committed"
+      assert result.context["protocol_retry_count"] == 1
+      assert result.context["rework_count"] == "0"
+      refute Map.has_key?(result.context, "error")
+
+      send_calls =
+        Enum.filter(calls, fn {name, _args} -> name == "acp_send_message" end)
+
+      assert length(send_calls) == 2
+      assert Enum.count(calls, fn {name, _args} -> name == "acp_start_session" end) == 1
+
+      assert Enum.all?(send_calls, fn {_name, args} ->
+               args["worker_session_id"] == "acp_worker_fixture_1"
+             end)
+
+      assert {"acp_send_message", repair_args} = List.last(send_calls)
+      assert repair_args["prompt"] =~ "ONLY one JSON object"
+      assert_closed_and_released(calls)
+      assert_json_clean_context(result.context)
+    end
   end
 
   describe "hard-failure routing and cleanup" do
@@ -737,7 +785,29 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     test "structured-output extraction hard failure sets pipeline_error and cleans up" do
       assert {{:ok, result}, calls} = run_fixture(:extract_hard_fail)
       assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "worker_protocol_invalid_json_after_retry"
       assert_closed_and_released(calls)
+    end
+
+    test "second malformed worker response fails deterministically without consuming rework" do
+      assert {{:ok, result}, calls} = run_fixture(:protocol_repair_exhausted)
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "worker_protocol_invalid_json_after_retry"
+      assert result.context["protocol_retry_count"] == 2
+      assert result.context["rework_count"] == "0"
+      assert Enum.count(calls, fn {name, _args} -> name == "acp_send_message" end) == 2
+      assert_closed_and_released(calls)
+      assert_json_clean_context(result.context)
+    end
+
+    test "protocol steering transport failure is terminal and still cleans up" do
+      assert {{:ok, result}, calls} = run_fixture(:protocol_repair_transport_failed)
+      assert result.context["status"] == "pipeline_error"
+      assert result.context["error"] == "worker_protocol_repair_failed"
+      assert result.context["protocol_retry_count"] == 1
+      assert Enum.count(calls, fn {name, _args} -> name == "acp_send_message" end) == 2
+      assert_closed_and_released(calls)
+      assert_json_clean_context(result.context)
     end
 
     test "workspace inspect hard failure sets pipeline_error and cleans up" do
@@ -762,8 +832,10 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     test "committed review-material failure sets review_failed and cleans up" do
       assert {{:ok, result}, calls} = run_fixture(:committed_change_failed)
       assert result.context["status"] == "review_failed"
+      assert result.context["error"] == "committed_change_materialization_failed"
       assert_closed_and_released(calls)
       refute called?(calls, "council_review_change")
+      assert_json_clean_context(result.context)
     end
 
     test "close failure still releases workspace" do
