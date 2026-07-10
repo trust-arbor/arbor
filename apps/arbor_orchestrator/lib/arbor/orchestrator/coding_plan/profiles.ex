@@ -50,15 +50,57 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     "binding" => true
   }
 
+  @optional_reviewed_actions ["git_pr"]
+
+  @mandatory_gate_nodes Enum.sort(~w[
+                          validate
+                          check_validation_passed
+                          commit_change
+                          route_after_commit
+                          load_committed_change
+                          review_change
+                          route_review
+                        ])
+
+  @publication_nodes Enum.sort(~w[
+                       status_change_committed
+                       status_pr_created
+                       status_human_review_required
+                     ])
+
+  @allowed_handlers Enum.sort(~w[start exit transform exec branch gate])
+  @allowed_exec_targets ["action"]
+
+  @default_required_actions Enum.sort(["mix_compile" | @common_required_actions])
+  @security_required_actions Enum.sort(["mix_test" | @common_required_actions])
+
+  @semantic_policy_base %{
+    "allowed_handlers" => @allowed_handlers,
+    "allowed_exec_targets" => @allowed_exec_targets,
+    "optional_actions" => @optional_reviewed_actions,
+    "mandatory_gate_nodes" => @mandatory_gate_nodes,
+    "publication_nodes" => @publication_nodes,
+    "validation_gate" => "validate",
+    "post_validation_commit_routing" => "route_after_commit",
+    "committed_change_routing" => "route_after_commit",
+    "review_gate" => "review_change"
+  }
+
   @profiles [
               %{
                 "id" => "default",
                 "executable" => true,
                 "template_version" => @template_version,
                 "required_nodes" => @required_nodes,
-                "required_actions" => Enum.sort(["mix_compile" | @common_required_actions]),
+                "required_actions" => @default_required_actions,
                 "validation_strategy" => %{"action" => "mix_compile"},
-                "review_strategy" => @binding_council_review
+                "review_strategy" => @binding_council_review,
+                "semantic_policy" =>
+                  Map.put(
+                    @semantic_policy_base,
+                    "allowed_actions",
+                    Enum.sort(Enum.uniq(@default_required_actions ++ @optional_reviewed_actions))
+                  )
               },
               # Declaration preserves the reviewed future selector strategy. It is
               # not executable until one primitive proves both sides of the
@@ -68,7 +110,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 "executable" => false,
                 "template_version" => @template_version,
                 "required_nodes" => @required_nodes,
-                "required_actions" => Enum.sort(["mix_test" | @common_required_actions]),
+                "required_actions" => @security_required_actions,
                 "validation_strategy" => %{
                   "action" => "mix_test",
                   "path_parameter" => "test_paths",
@@ -76,6 +118,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "requires_non_empty_paths" => true
                 },
                 "review_strategy" => @binding_council_review,
+                "semantic_policy" =>
+                  Map.put(
+                    @semantic_policy_base,
+                    "allowed_actions",
+                    Enum.sort(Enum.uniq(@security_required_actions ++ @optional_reviewed_actions))
+                  ),
                 "unsupported_reason" =>
                   "No reviewed validation primitive proves that the selected regression test " <>
                     "fails against the base/pre-fix code and passes against the candidate code."
@@ -91,6 +139,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     "contract_rules_preflight_and_consumer_api_compatibility"
                 },
                 "review_strategy" => @binding_council_review,
+                "semantic_policy" =>
+                  Map.put(
+                    @semantic_policy_base,
+                    "allowed_actions",
+                    Enum.sort(Enum.uniq(@common_required_actions ++ @optional_reviewed_actions))
+                  ),
                 "unsupported_reason" =>
                   "No registered action enforces CONTRACT_RULES preflight and consumer/API " <>
                     "compatibility review for contract changes."
@@ -106,6 +160,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     "playwright_interaction_and_desktop_mobile_visual_evidence"
                 },
                 "review_strategy" => @binding_council_review,
+                "semantic_policy" =>
+                  Map.put(
+                    @semantic_policy_base,
+                    "allowed_actions",
+                    Enum.sort(Enum.uniq(@common_required_actions ++ @optional_reviewed_actions))
+                  ),
                 "unsupported_reason" =>
                   "No registered action contract produces and verifies Playwright interaction " <>
                     "plus desktop/mobile visual evidence."
@@ -120,6 +180,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "required_enforcement" => "documentation_checks"
                 },
                 "review_strategy" => @binding_council_review,
+                "semantic_policy" =>
+                  Map.put(
+                    @semantic_policy_base,
+                    "allowed_actions",
+                    Enum.sort(Enum.uniq(@common_required_actions ++ @optional_reviewed_actions))
+                  ),
                 "unsupported_reason" =>
                   "No registered documentation-validation action contract exists; " <>
                     "mix_compile is not an enforceable substitute for documentation checks."
@@ -134,6 +200,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "required_enforcement" => "dependency_surface_compile_xref_and_test_selection"
                 },
                 "review_strategy" => @binding_council_review,
+                "semantic_policy" =>
+                  Map.put(
+                    @semantic_policy_base,
+                    "allowed_actions",
+                    Enum.sort(Enum.uniq(@common_required_actions ++ @optional_reviewed_actions))
+                  ),
                 "unsupported_reason" =>
                   "No enforceable action contract derives compile, xref, and test coverage from " <>
                     "the changed cross-app dependency surface."
@@ -153,6 +225,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   "human_gate" => "required",
                   "unattended_publication" => "forbidden"
                 },
+                "semantic_policy" =>
+                  Map.put(
+                    @semantic_policy_base,
+                    "allowed_actions",
+                    Enum.sort(Enum.uniq(@common_required_actions ++ @optional_reviewed_actions))
+                  ),
                 "unsupported_reason" =>
                   "No enforceable migration action contract combines reversible migration " <>
                     "checks, a mandatory human gate, and prohibition of unattended publication."

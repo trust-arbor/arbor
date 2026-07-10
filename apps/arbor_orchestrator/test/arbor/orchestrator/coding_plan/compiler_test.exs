@@ -173,6 +173,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     refute Map.has_key?(human_graph.nodes, "status_pr_created")
     refute Map.has_key?(human_with_pr_graph.nodes, "status_pr_created")
+    refute Map.has_key?(human_graph.nodes, "route_publish")
+    refute Map.has_key?(human_graph.nodes, "status_change_committed")
+    refute Map.has_key?(human_with_pr_graph.nodes, "route_publish")
+    refute Map.has_key?(human_with_pr_graph.nodes, "status_change_committed")
 
     assert edge_target(binding_graph, "open_draft_pr", "outcome=success") ==
              "status_pr_created"
@@ -187,6 +191,13 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert human_with_pr_compilation.initial_values["open_pr"] == "true"
     assert binding_compilation.initial_values["submit_review"] == "true"
     assert none_compilation.initial_values["submit_review"] == "false"
+
+    # Binding/human remove the infeasible submit_review=false bypass so review
+    # dominance is structural. Legacy none keeps the skip edge.
+    refute Enum.any?(binding_graph.edges, &submit_review_false_edge?/1)
+    refute Enum.any?(human_graph.edges, &submit_review_false_edge?/1)
+    refute Enum.any?(human_with_pr_graph.edges, &submit_review_false_edge?/1)
+    assert Enum.any?(none_graph.edges, &submit_review_false_edge?/1)
   end
 
   test "rework max cycles rewrites both shared total-budget gates", ctx do
@@ -595,6 +606,11 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     graph.edges
     |> Enum.find(&(&1.from == from and &1.attrs["condition"] == condition))
     |> Map.fetch!(:to)
+  end
+
+  defp submit_review_false_edge?(edge) do
+    edge.from == "route_after_commit" and edge.to == "route_publish" and
+      edge.attrs["condition"] == "context.submit_review=false"
   end
 
   defp sha256(value) do

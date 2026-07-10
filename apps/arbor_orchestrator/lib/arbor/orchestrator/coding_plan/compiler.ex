@@ -7,7 +7,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   """
 
   alias Arbor.Contracts.Coding.Plan
-  alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, Compilation, Profiles}
+  alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, Compilation, Profiles, SemanticPreflight}
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Handlers.Registry
@@ -63,7 +63,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          :ok <- validate_structural_graph(final_graph),
          {:ok, compiled_graph} <- compile_ir(final_graph),
          :ok <- validate_typed_graph(compiled_graph),
-         :ok <- Profiles.validate_requirements(profile, compiled_graph) do
+         :ok <- Profiles.validate_requirements(profile, compiled_graph),
+         :ok <-
+           SemanticPreflight.validate(compiled_graph, profile["semantic_policy"],
+             review_profile: plan.review_profile
+           ) do
       graph_hash = sha256(dot_source)
       initial_values = build_initial_values(plan, plan_fingerprint, action_catalog["digest"])
 
@@ -408,8 +412,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end)
   end
 
-  defp rewrite_review_route(graph, review_profile)
-       when review_profile in ["binding", "none"] do
+  defp rewrite_review_route(graph, "none") do
+    # Legacy submit_review=false keeps the structural skip-review edge so
+    # no-review publication remains possible. Binding/human remove that edge.
     rewrite_edge(
       graph,
       "route_review",
@@ -420,8 +425,22 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     )
   end
 
+  defp rewrite_review_route(graph, "binding") do
+    with {:ok, graph} <- remove_submit_review_false_edge(graph) do
+      rewrite_edge(
+        graph,
+        "route_review",
+        "route_publish",
+        "context.review.tier_decision=auto_proceed",
+        "route_publish",
+        "context.review.tier_decision=auto_proceed"
+      )
+    end
+  end
+
   defp rewrite_review_route(graph, "human_required") do
-    with {:ok, graph} <-
+    with {:ok, graph} <- remove_submit_review_false_edge(graph),
+         {:ok, graph} <-
            rewrite_edge(
              graph,
              "route_review",
@@ -438,8 +457,74 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              "outcome=success",
              "status_human_review_required",
              "outcome=success"
-           ) do
-      remove_replaced_status_node(graph, "status_pr_created", "close_worker")
+           ),
+         {:ok, graph} <- remove_replaced_status_node(graph, "status_pr_created", "close_worker") do
+      # Auto-proceed no longer reaches route_publish, and the skip-review edge
+      # is gone, so the unattended publication terminals are dead. Drop them so
+      # structural reachability stays sound while review remains mandatory.
+      remove_unattended_publication_nodes(graph)
+    end
+  end
+
+  # For binding/human plans submit_review is always true, so the template's
+  # submit_review=false bypass is infeasible. Removing it makes review
+  # dominance structural rather than a runtime context assumption.
+  defp remove_submit_review_false_edge(%Graph{} = graph) do
+    matches =
+      Enum.count(graph.edges, fn edge ->
+        edge.from == "route_after_commit" and edge.to == "route_publish" and
+          Map.get(edge.attrs, "condition") == "context.submit_review=false"
+      end)
+
+    if matches == 1 do
+      edges =
+        Enum.reject(graph.edges, fn edge ->
+          edge.from == "route_after_commit" and edge.to == "route_publish" and
+            Map.get(edge.attrs, "condition") == "context.submit_review=false"
+        end)
+
+      {:ok, %{graph | edges: edges, adjacency: %{}, reverse_adjacency: %{}}}
+    else
+      {:error,
+       {:unexpected_template_edge, "route_after_commit", "route_publish",
+        "context.submit_review=false", matches}}
+    end
+  end
+
+  defp remove_unattended_publication_nodes(%Graph{} = graph) do
+    # route_publish must already be unreachable (no external predecessors). Its
+    # only dependents (status_change_committed, optional PR prep edge) drop with it.
+    route_incoming =
+      Enum.filter(graph.edges, fn edge ->
+        edge.to == "route_publish" and edge.from != "route_publish"
+      end)
+
+    cond do
+      not Map.has_key?(graph.nodes, "route_publish") ->
+        {:error, {:missing_template_node, "route_publish"}}
+
+      not Map.has_key?(graph.nodes, "status_change_committed") ->
+        {:error, {:missing_template_node, "status_change_committed"}}
+
+      route_incoming != [] ->
+        {:error,
+         {:unexpected_template_node, "route_publish",
+          {:remaining_incoming_edges, length(route_incoming)}}}
+
+      true ->
+        drop_ids = MapSet.new(["route_publish", "status_change_committed"])
+
+        nodes =
+          Enum.reduce(drop_ids, graph.nodes, fn id, acc ->
+            Map.delete(acc, id)
+          end)
+
+        edges =
+          Enum.reject(graph.edges, fn edge ->
+            MapSet.member?(drop_ids, edge.from) or MapSet.member?(drop_ids, edge.to)
+          end)
+
+        {:ok, %{graph | nodes: nodes, edges: edges, adjacency: %{}, reverse_adjacency: %{}}}
     end
   end
 

@@ -48,6 +48,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ProfilesTest do
                "binding" => true
              }
 
+      policy = default["semantic_policy"]
+      assert is_map(policy)
+      assert "git_pr" in policy["allowed_actions"]
+      assert "git_pr" in policy["optional_actions"]
+      assert "mix_compile" in policy["allowed_actions"]
+      refute "mix_test" in policy["allowed_actions"]
+      assert "validate" in policy["mandatory_gate_nodes"]
+      assert "review_change" == policy["review_gate"]
+      assert policy["allowed_handlers"] == Enum.sort(policy["allowed_handlers"])
+
       assert {:ok, security} = Profiles.fetch("security_regression")
       refute security["executable"]
 
