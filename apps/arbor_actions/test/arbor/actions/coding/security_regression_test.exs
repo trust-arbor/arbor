@@ -441,6 +441,187 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
              )
   end
 
+  test "cleanup failure retains attestation, resource, and parent lease until explicit retry", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/cleanup_retry_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.CleanupRetryTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    %{review_attestation_id: id} = attested_params(fixture, [test_path])
+
+    assert {:ok, %{resource: resource}} =
+             WorkspaceLeaseRegistry.claim_review_attestation(
+               id,
+               Map.put(fixture.context, :cleanup_failures, 2)
+             )
+
+    assert {:error, :validation_resource_cleanup_failed} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               resource.resource_id,
+               fixture.context
+             )
+
+    assert {:ok, [retained]} =
+             WorkspaceLeaseRegistry.validation_resources(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    assert retained.resource_id == resource.resource_id
+    assert File.dir?(retained.root_path)
+
+    assert {:ok, _material} =
+             WorkspaceLeaseRegistry.finalize_review_attestation(id, fixture.context)
+
+    assert {:error, :validation_resource_cleanup_failed} =
+             WorkspaceLeaseRegistry.release(
+               fixture.lease.workspace_id,
+               :retain,
+               fixture.context
+             )
+
+    assert {:ok, _lease} =
+             WorkspaceLeaseRegistry.inspect_lease(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    assert {:ok, %{status: "removed"}} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               resource.resource_id,
+               fixture.context
+             )
+
+    refute File.exists?(retained.root_path)
+
+    assert {:ok, _released} =
+             WorkspaceLeaseRegistry.release(
+               fixture.lease.workspace_id,
+               :retain,
+               fixture.context
+             )
+
+    assert {:error, :not_found} =
+             WorkspaceLeaseRegistry.finalize_review_attestation(id, fixture.context)
+  end
+
+  test "partial setup plus rollback failure retains the candidate root for retry", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/partial_cleanup_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.PartialCleanupTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    %{review_attestation_id: id} = attested_params(fixture, [test_path])
+
+    assert {:error, :validation_resource_setup_failed_cleanup_retained} =
+             WorkspaceLeaseRegistry.claim_review_attestation(
+               id,
+               fixture.context
+               |> Map.put(:force_dependency_snapshot_failure, true)
+               |> Map.put(:force_partial_cleanup_failure_once, true)
+             )
+
+    assert {:ok, [resource]} =
+             WorkspaceLeaseRegistry.validation_resources(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    assert resource.setup_status == "setup_failed"
+    assert File.dir?(resource.root_path)
+    assert File.dir?(resource.candidate_path)
+
+    assert {:ok, _material} =
+             WorkspaceLeaseRegistry.finalize_review_attestation(id, fixture.context)
+
+    assert {:ok, %{status: "removed"}} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               resource.resource_id,
+               fixture.context
+             )
+
+    refute File.exists?(resource.root_path)
+    refute File.exists?(resource.candidate_path)
+  end
+
+  test "workspace owner death retains failed child and task-principal recovery authority", %{
+    tmp_dir: tmp_dir
+  } do
+    repo = create_base_project(Path.join(tmp_dir, "owner-cleanup-repo"), valid_module())
+    server = :"cleanup_owner_death_#{System.unique_integer([:positive])}"
+    start_supervised!({WorkspaceLeaseRegistry, name: server})
+    task_id = "task-cleanup-owner-death"
+    principal_id = "agent-cleanup-owner-death"
+    recovery = %{server: server, task_id: task_id, principal_id: principal_id}
+    parent = self()
+
+    owner =
+      spawn(fn ->
+        result =
+          WorkspaceLeaseRegistry.acquire(
+            %{
+              repo_path: repo,
+              branch: "test/cleanup-owner-death",
+              task_id: task_id,
+              principal_id: principal_id,
+              worktree_base_dir: Path.join(tmp_dir, "cleanup-owner-worktrees")
+            },
+            server: server
+          )
+
+        send(parent, {:owner_lease, result})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:owner_lease, {:ok, lease}}, 5_000
+
+    assert {:ok, resource} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               lease.workspace_id,
+               Map.put(recovery, :force_cleanup_failure_once, true)
+             )
+
+    Process.exit(owner, :kill)
+
+    assert_eventually(fn ->
+      state = :sys.get_state(server)
+
+      case Map.get(state.leases, lease.workspace_id) do
+        nil -> false
+        retained_lease -> not Map.has_key?(state.by_ref, retained_lease.owner_ref)
+      end
+    end)
+
+    assert {:ok, _lease} =
+             WorkspaceLeaseRegistry.inspect_lease(lease.workspace_id, recovery)
+
+    assert {:ok, [retained]} =
+             WorkspaceLeaseRegistry.validation_resources(lease.workspace_id, recovery)
+
+    assert retained.resource_id == resource.resource_id
+    assert File.dir?(retained.root_path)
+
+    assert {:ok, %{status: "removed"}} =
+             WorkspaceLeaseRegistry.release_validation_resource(resource.resource_id, recovery)
+
+    assert {:ok, _released} =
+             WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, recovery)
+  end
+
   test "council issues only after approved quorum routing and compares the reviewed full diff", %{
     tmp_dir: tmp_dir
   } do
