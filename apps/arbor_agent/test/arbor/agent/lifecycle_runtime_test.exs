@@ -10,7 +10,7 @@ defmodule Arbor.Agent.LifecycleRuntimeTest do
   heartbeat through the in-BEAM HTTP path.
   """
 
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
   @moduletag :fast
 
   alias Arbor.Agent.Lifecycle
