@@ -716,6 +716,22 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_opaque_handles(result.context)
     end
 
+    test "security regression: task text is never interpolated into the git commit message" do
+      hostile_task = "docs; rm -rf /tmp/example `touch /tmp/example`"
+
+      assert {{:ok, result}, calls} =
+               run_fixture(:change_committed, %{"task" => hostile_task})
+
+      assert result.context["status"] == "change_committed"
+
+      assert {"git_commit", commit_args} =
+               Enum.find(calls, fn {name, _args} -> name == "git_commit" end)
+
+      assert commit_args["message"] == "Coding agent change"
+      refute commit_args["message"] =~ hostile_task
+      assert_closed_and_released(calls)
+    end
+
     test "clean self-commit adopts HEAD and does not call git_commit" do
       assert {{:ok, result}, calls} =
                run_fixture(:self_commit_adopt, %{"submit_review" => "false", "open_pr" => "false"})

@@ -295,9 +295,8 @@ digraph CodingChangeV1 {
 
   prep_commit_message [
     type="transform",
-    transform="template",
-    source_key="task",
-    expression="Coding agent: {value}",
+    transform="constant",
+    expression="Coding agent change",
     output_key="message"
   ]
 
