@@ -4,6 +4,7 @@ defmodule Arbor.Trust.StoreTest do
   @moduletag :fast
 
   alias Arbor.Contracts.Trust.Profile
+  alias Arbor.Trust
   alias Arbor.Trust.Store
 
   defmodule DurableBackend do
@@ -22,6 +23,15 @@ defmodule Arbor.Trust.StoreTest do
         {:error, :simulated_backend_failure}
       else
         update(fn state -> put_in(state.records[key], record) end)
+        :ok
+      end
+    end
+
+    def delete(key, _opts) do
+      if state().fail_writes? do
+        {:error, :simulated_backend_failure}
+      else
+        update(fn state -> update_in(state.records, &Map.delete(&1, key)) end)
         :ok
       end
     end
@@ -59,7 +69,7 @@ defmodule Arbor.Trust.StoreTest do
       end
     end)
 
-    {:ok, profile} = Profile.new("agent_test_1")
+    {:ok, profile} = Profile.new("agent_test_#{System.unique_integer([:positive])}")
     {:ok, pid: pid, profile: profile}
   end
 
@@ -165,17 +175,13 @@ defmodule Arbor.Trust.StoreTest do
   end
 
   describe "delete_profile/1" do
-    test "deletes an existing profile by replacing it with a deny-all tombstone", %{
-      profile: profile
-    } do
+    test "deletes an existing profile", %{profile: profile} do
       :ok = Store.store_profile(profile)
       assert Store.profile_exists?(profile.agent_id) == true
 
       assert :ok = Store.delete_profile(profile.agent_id)
-      assert Store.profile_exists?(profile.agent_id) == true
-      assert {:ok, tombstone} = Store.get_profile(profile.agent_id)
-      assert tombstone.baseline == :block
-      assert tombstone.frozen
+      assert Store.profile_exists?(profile.agent_id) == false
+      assert {:error, :not_found} = Store.get_profile(profile.agent_id)
     end
 
     test "returns :ok when deleting a non-existent profile" do
@@ -216,7 +222,92 @@ defmodule Arbor.Trust.StoreTest do
       assert denied_after_restart.baseline == :block
       assert denied_after_restart.frozen
     end
+
+    test "successful durable deletion removes the persisted profile", %{
+      pid: pid,
+      profile: profile
+    } do
+      GenServer.stop(pid, :normal)
+      DurableBackend.reset()
+
+      {:ok, durable_pid} =
+        Store.start_link(persistence: :durable, durable_backend: DurableBackend)
+
+      assert :ok = Store.store_profile(profile)
+      assert :ok = Store.delete_profile(profile.agent_id)
+      assert {:error, :not_found} = Store.get_profile(profile.agent_id)
+
+      GenServer.stop(durable_pid, :normal)
+
+      {:ok, restarted_pid} =
+        Store.start_link(persistence: :durable, durable_backend: DurableBackend)
+
+      on_exit(fn ->
+        if Process.alive?(restarted_pid), do: GenServer.stop(restarted_pid, :normal)
+      end)
+
+      assert {:error, :not_found} = Store.get_profile(profile.agent_id)
+    end
+
+    test "exact recovery replaces only a failed-delete tombstone", %{profile: profile} do
+      assert :ok = Store.store_profile(profile)
+      assert {:ok, _} = Store.freeze_profile(profile.agent_id, :profile_deleted)
+
+      assert {:ok, recovered} =
+               Trust.ensure_trust_profile(profile.agent_id,
+                 baseline: :block,
+                 rules: %{"arbor://fs/read" => :allow},
+                 recover_deleted: true
+               )
+
+      refute recovered.frozen
+      assert recovered.rules == %{"arbor://fs/read" => :allow}
+    end
+
+    test "exact recovery does not thaw an unrelated freeze", %{profile: profile} do
+      assert :ok = Store.store_profile(profile)
+      assert {:ok, _} = Store.freeze_profile(profile.agent_id, :security_violation)
+
+      assert {:ok, preserved} =
+               Trust.ensure_trust_profile(profile.agent_id,
+                 baseline: :block,
+                 rules: %{},
+                 recover_deleted: true
+               )
+
+      assert preserved.frozen
+      assert preserved.frozen_reason == :security_violation
+    end
+
+    test "profile_disabled signal installs a deny-all tombstone on a peer cache", %{
+      profile: profile
+    } do
+      assert :ok = Store.store_profile(profile)
+
+      send(
+        Process.whereis(Store),
+        {:signal_received,
+         %{type: :profile_disabled, data: %{agent_id: profile.agent_id, origin_node: :peer}}}
+      )
+
+      assert_eventually(fn ->
+        match?({:ok, %{frozen: true, baseline: :block}}, Store.get_profile(profile.agent_id))
+      end)
+    end
   end
+
+  defp assert_eventually(assertion, attempts \\ 20)
+
+  defp assert_eventually(assertion, attempts) when attempts > 0 do
+    if assertion.() do
+      :ok
+    else
+      Process.sleep(10)
+      assert_eventually(assertion, attempts - 1)
+    end
+  end
+
+  defp assert_eventually(_assertion, 0), do: flunk("expected eventual condition")
 
   describe "list_profiles/0 and list_profiles/1" do
     test "lists all stored profiles" do

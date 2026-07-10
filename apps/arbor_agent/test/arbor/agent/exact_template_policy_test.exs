@@ -5,23 +5,33 @@ defmodule Arbor.Agent.ExactTemplatePolicyTest do
 
   @moduletag :fast
 
-  test "Pipeline Architect snapshot retains runtime defaults and fixes repo-scoped resources" do
+  test "Pipeline Architect snapshot retains runtime defaults and canonicalizes a symlink repo root" do
     assert {:ok, data} = TemplateStore.resolve("pipeline_architect")
 
-    repo_root = Path.expand("/tmp/arbor-exact-policy-root")
+    actual_root =
+      Path.join(System.tmp_dir!(), "arbor-exact-policy-#{System.unique_integer([:positive])}")
+
+    link_root = actual_root <> "-link"
+    File.mkdir_p!(actual_root)
+    File.ln_s!(actual_root, link_root)
+
+    on_exit(fn ->
+      File.rm_rf(actual_root)
+      File.rm(link_root)
+    end)
 
     assert {:ok, envelope} =
-             ExactTemplatePolicy.build("pipeline_architect", data, repo_root: repo_root)
+             ExactTemplatePolicy.build("pipeline_architect", data, repo_root: link_root)
 
     snapshot = ExactTemplatePolicy.snapshot(envelope)
     metadata = ExactTemplatePolicy.template_metadata(snapshot)
-    uri_root = String.trim_leading(repo_root, "/")
+    uri_root = String.trim_leading(actual_root, "/")
 
     assert metadata["provider"] == "openai_oauth"
     assert metadata["model"] == "gpt-5.5"
     assert metadata["context_management"] == "heuristic"
     assert metadata["category"] == "specialized_agent"
-    assert snapshot["repo_root"] == repo_root
+    assert snapshot["repo_root"] == actual_root
 
     assert Enum.map(ExactTemplatePolicy.capabilities(snapshot), & &1["resource"]) == [
              "arbor://fs/list",
@@ -38,7 +48,7 @@ defmodule Arbor.Agent.ExactTemplatePolicyTest do
 
   test "stored repo root validates independently of the current working directory" do
     assert {:ok, data} = TemplateStore.resolve("pipeline_architect")
-    repo_root = Path.expand("/tmp/arbor-exact-policy-root")
+    repo_root = File.cwd!() |> Path.expand()
 
     assert {:ok, envelope} =
              ExactTemplatePolicy.build("pipeline_architect", data, repo_root: repo_root)
@@ -49,5 +59,10 @@ defmodule Arbor.Agent.ExactTemplatePolicyTest do
              ExactTemplatePolicy.validate("pipeline_architect", metadata, data,
                repo_root: repo_root
              )
+  end
+
+  test "non-exact template data does not require a repo-root snapshot" do
+    assert {:ok, data} = TemplateStore.resolve("conversationalist")
+    refute ExactTemplatePolicy.exact?(data)
   end
 end

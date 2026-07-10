@@ -462,6 +462,24 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       assert tp.baseline == :ask
       refute tp.baseline == :block
     end
+
+    test "non-exact template creation does not require an umbrella cwd" do
+      original_cwd = File.cwd!()
+      isolated_cwd = tmp_workspace("non_exact_cwd")
+      File.mkdir_p!(isolated_cwd)
+
+      on_exit(fn ->
+        File.cd!(original_cwd)
+        File.rm_rf(isolated_cwd)
+      end)
+
+      File.cd!(isolated_cwd)
+
+      assert {:ok, profile} =
+               Lifecycle.create("Non-exact CWD Probe", template: "conversationalist")
+
+      cleanup(profile.agent_id)
+    end
   end
 
   # --- helpers ---

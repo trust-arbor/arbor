@@ -445,12 +445,30 @@ defmodule Arbor.Trust do
   end
 
   defp apply_profile_policy(profile, opts) do
+    profile = maybe_recover_deleted_profile(profile, opts)
+
     case {Keyword.fetch(opts, :baseline), Keyword.fetch(opts, :rules)} do
       {{:ok, baseline}, {:ok, rules}} -> %{profile | baseline: baseline, rules: rules}
       {:error, :error} -> profile
       _partial -> raise ArgumentError, "baseline and rules must be supplied together"
     end
   end
+
+  # A failed delete leaves a local deny-all tombstone. Only the exact-policy
+  # recovery path may replace that sentinel; never thaw an unrelated freeze.
+  defp maybe_recover_deleted_profile(profile, opts) do
+    if Keyword.get(opts, :recover_deleted, false) and profile_deleted?(profile) do
+      Authority.new_profile(profile.agent_id)
+    else
+      profile
+    end
+  end
+
+  defp profile_deleted?(%{frozen: true, frozen_reason: reason})
+       when reason in [:profile_deleted, "profile_deleted"],
+       do: true
+
+  defp profile_deleted?(_profile), do: false
 
   defp persist_trust_profile(original, desired) do
     cond do

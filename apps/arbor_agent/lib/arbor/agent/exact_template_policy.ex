@@ -1,6 +1,7 @@
 defmodule Arbor.Agent.ExactTemplatePolicy do
   @moduledoc false
 
+  alias Arbor.Common.SafePath
   alias Arbor.Contracts.Security.{SandboxLevel, TrustRule}
 
   @metadata_key "exact_template_policy"
@@ -53,6 +54,19 @@ defmodule Arbor.Agent.ExactTemplatePolicy do
       :not_exact
     end
   end
+
+  @spec exact?(map()) :: boolean()
+  def exact?(data) when is_map(data) do
+    case value(data, "metadata") do
+      metadata when is_map(metadata) ->
+        Enum.any?(@policy_keys, &(value(metadata, &1) in ["exact", :exact]))
+
+      _ ->
+        false
+    end
+  end
+
+  def exact?(_data), do: false
 
   @spec from_metadata(map()) :: {:ok, envelope()} | :not_marked | {:error, term()}
   def from_metadata(metadata) when is_map(metadata) do
@@ -285,12 +299,11 @@ defmodule Arbor.Agent.ExactTemplatePolicy do
   defp normalize_repo_root(nil), do: {:ok, nil}
 
   defp normalize_repo_root(repo_root) when is_binary(repo_root) do
-    expanded = Path.expand(repo_root) |> String.trim_trailing("/")
+    expanded = Path.expand(repo_root)
 
-    if Path.type(expanded) == :absolute and expanded != "" do
-      {:ok, expanded}
-    else
-      error(:repo_root_invalid)
+    case SafePath.resolve_real(expanded) do
+      {:ok, real_root} when real_root != "" -> {:ok, String.trim_trailing(real_root, "/")}
+      _ -> error(:repo_root_invalid)
     end
   end
 

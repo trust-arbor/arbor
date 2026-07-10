@@ -39,6 +39,7 @@ defmodule Arbor.Agent.Lifecycle do
     TemplateStore
   }
 
+  alias Arbor.Common.SafePath
   alias Arbor.Contracts.Memory.Goal
 
   require Logger
@@ -1069,10 +1070,16 @@ defmodule Arbor.Agent.Lifecycle do
   end
 
   defp put_exact_template_policy(opts, template_name, data) do
-    case ExactTemplatePolicy.build(template_name, data, repo_root: repo_root_for_capabilities()) do
-      {:ok, envelope} -> {:ok, Keyword.put(opts, :exact_template_policy, envelope)}
-      :not_exact -> {:ok, opts}
-      {:error, _} = error -> error
+    if ExactTemplatePolicy.exact?(data) do
+      with {:ok, repo_root} <- exact_repo_root_for_capabilities() do
+        case ExactTemplatePolicy.build(template_name, data, repo_root: repo_root) do
+          {:ok, envelope} -> {:ok, Keyword.put(opts, :exact_template_policy, envelope)}
+          :not_exact -> {:ok, opts}
+          {:error, _} = error -> error
+        end
+      end
+    else
+      {:ok, opts}
     end
   end
 
@@ -1464,6 +1471,22 @@ defmodule Arbor.Agent.Lifecycle do
 
     (root || cwd)
     |> String.trim_trailing("/")
+  end
+
+  defp exact_repo_root_for_capabilities do
+    root = repo_root_for_capabilities()
+
+    case SafePath.resolve_real(root) do
+      {:ok, real_root} ->
+        if umbrella_root?(real_root) do
+          {:ok, String.trim_trailing(real_root, "/")}
+        else
+          {:error, {:exact_template_policy, {:repo_root_unavailable, root}}}
+        end
+
+      _ ->
+        {:error, {:exact_template_policy, {:repo_root_unavailable, root}}}
+    end
   end
 
   defp umbrella_root?(path) do
@@ -1908,8 +1931,7 @@ defmodule Arbor.Agent.Lifecycle do
 
   defp migrate_pipeline_architect_policy(%Profile{template: template} = profile) do
     with {:ok, data} <- reload_exact_template(template),
-         repo_root = repo_root_for_capabilities(),
-         :ok <- validate_exact_repo_root(repo_root),
+         {:ok, repo_root} <- exact_repo_root_for_capabilities(),
          {:ok, envelope} <-
            require_exact_policy(ExactTemplatePolicy.build(template, data, repo_root: repo_root)),
          snapshot = ExactTemplatePolicy.snapshot(envelope),
@@ -1954,10 +1976,14 @@ defmodule Arbor.Agent.Lifecycle do
   defp validate_exact_repo_root(nil), do: :ok
 
   defp validate_exact_repo_root(repo_root) when is_binary(repo_root) do
-    if Path.type(repo_root) == :absolute and umbrella_root?(repo_root) do
-      :ok
-    else
-      {:error, {:exact_template_policy, {:repo_root_unavailable, repo_root}}}
+    case SafePath.resolve_real(repo_root) do
+      {:ok, ^repo_root} ->
+        if Path.type(repo_root) == :absolute and umbrella_root?(repo_root),
+          do: :ok,
+          else: {:error, {:exact_template_policy, {:repo_root_unavailable, repo_root}}}
+
+      _ ->
+        {:error, {:exact_template_policy, {:repo_root_unavailable, repo_root}}}
     end
   end
 
@@ -1965,8 +1991,19 @@ defmodule Arbor.Agent.Lifecycle do
     do: {:error, {:exact_template_policy, {:repo_root_invalid, repo_root}}}
 
   defp ensure_exact_trust_profile(agent_id, snapshot) do
-    opts = [trust_preset: ExactTemplatePolicy.trust_preset(snapshot)]
-    ensure_trust_profile(agent_id, opts)
+    %{baseline: baseline, rules: rules} =
+      snapshot
+      |> ExactTemplatePolicy.trust_preset()
+      |> normalize_trust_preset()
+
+    case Arbor.Trust.ensure_trust_profile(agent_id,
+           baseline: baseline,
+           rules: rules,
+           recover_deleted: true
+         ) do
+      {:ok, _profile} -> :ok
+      {:error, reason} -> {:error, {:exact_trust_profile_failed, reason}}
+    end
   end
 
   # Re-register identity and capabilities on resume.

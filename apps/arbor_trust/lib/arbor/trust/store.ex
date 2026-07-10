@@ -277,19 +277,20 @@ defmodule Arbor.Trust.Store do
 
     tombstone = disabled_profile(profile)
 
-    case persist_profile(tombstone, state) do
+    case delete_persisted_profile(agent_id, state) do
       :ok ->
-        :ok = put_profile_in_cache(tombstone, state)
-        emit_distributed_signal(:profile_updated, agent_id)
+        :ets.delete(state.profiles_table, agent_id)
+        clear_failed_deletion(agent_id)
+        emit_distributed_signal(:profile_deleted, agent_id)
         new_stats = update_stats(state.cache_stats, :deletes, 1)
         {:reply, :ok, %{state | cache_stats: new_stats}}
 
       {:error, _} = error ->
-        # The independent identity suspension in exact-policy cleanup remains
-        # the cross-restart enforcement barrier when this tombstone cannot be
-        # persisted. Keep this node deny-all while surfacing the failed write.
+        # Durable deletion failed. Deny locally and notify current peers; a
+        # full node loss still relies on Lifecycle's identity/capability gates.
         :ok = put_profile_in_cache(tombstone, state)
         remember_failed_deletion(agent_id)
+        emit_distributed_signal(:profile_disabled, agent_id)
         {:reply, error, state}
     end
   end
@@ -387,9 +388,18 @@ defmodule Arbor.Trust.Store do
 
       :profile_deleted ->
         :ets.delete(state.profiles_table, agent_id)
+        clear_failed_deletion(agent_id)
 
         Logger.debug(
           "[Trust.Store] Deleted profile cache for #{agent_id} from #{data.origin_node}"
+        )
+
+      :profile_disabled ->
+        :ok = put_profile_in_cache(disabled_profile(Authority.new_profile(agent_id)), state)
+        remember_failed_deletion(agent_id)
+
+        Logger.warning(
+          "[Trust.Store] Installed fail-closed profile tombstone for #{agent_id} from #{data.origin_node}"
         )
 
       _ ->
@@ -515,6 +525,10 @@ defmodule Arbor.Trust.Store do
     durable_put(profile.agent_id, record, state)
   end
 
+  defp delete_persisted_profile(_agent_id, %{persistence_mode: :memory}), do: :ok
+
+  defp delete_persisted_profile(agent_id, state), do: durable_delete(agent_id, state)
+
   defp load_profile_from_db(_agent_id, %{persistence_mode: :memory}),
     do: {:error, :not_found}
 
@@ -580,11 +594,16 @@ defmodule Arbor.Trust.Store do
 
   defp durable_list(state), do: durable_call(state, :list, [])
 
+  defp durable_delete(_key, %{durable_backend: nil}),
+    do: {:error, :trust_profile_persistence_unavailable}
+
+  defp durable_delete(key, state), do: durable_call(state, :delete, [key])
+
   defp durable_call(state, operation, args) do
     opts = Keyword.put(state.durable_backend_opts, :name, state.durable_collection)
 
     case apply(state.durable_backend, operation, args ++ [opts]) do
-      :ok when operation == :put -> :ok
+      :ok when operation in [:put, :delete] -> :ok
       {:ok, _value} = ok -> ok
       {:error, reason} -> {:error, {:trust_profile_persist_failed, reason}}
       other -> {:error, {:unexpected_trust_profile_persist_result, other}}
@@ -621,7 +640,7 @@ defmodule Arbor.Trust.Store do
     if Process.whereis(Arbor.Signals.Bus) do
       me = self()
 
-      for type <- ~w(profile_updated profile_deleted) do
+      for type <- ~w(profile_updated profile_deleted profile_disabled) do
         Arbor.Signals.subscribe("trust.#{type}", fn signal ->
           send(me, {:signal_received, signal})
           :ok

@@ -7,6 +7,10 @@ defmodule Arbor.Trust.ManagerTest do
   alias Arbor.Trust.Manager
   alias Arbor.Trust.Store
 
+  defmodule FailingDeleteBackend do
+    def delete(_key, _opts), do: {:error, :simulated_delete_failure}
+  end
+
   setup do
     # Start EventStore
     start_supervised!({EventStore, []})
@@ -219,6 +223,29 @@ defmodule Arbor.Trust.ManagerTest do
 
     test "returns :ok for non-existent profile" do
       assert :ok = Manager.delete_trust_profile("nonexistent_delete")
+    end
+
+    test "returns a Store deletion failure and does not record a deletion event" do
+      {:ok, _} = Manager.create_trust_profile("agent_delete_failure")
+
+      :sys.replace_state(Store, fn state ->
+        %{
+          state
+          | persistence_mode: :durable,
+            durable_backend: FailingDeleteBackend,
+            durable_backend_opts: [],
+            durable_collection: "trust_profiles"
+        }
+      end)
+
+      assert {:error, {:trust_profile_persist_failed, :simulated_delete_failure}} =
+               Manager.delete_trust_profile("agent_delete_failure")
+
+      assert {:ok, %{frozen: true, baseline: :block}} =
+               Store.get_profile("agent_delete_failure")
+
+      assert {:ok, events} = Manager.get_events("agent_delete_failure")
+      refute Enum.any?(events, &(&1.event_type == :profile_deleted))
     end
   end
 

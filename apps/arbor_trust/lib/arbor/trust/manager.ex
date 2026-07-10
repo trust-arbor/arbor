@@ -221,21 +221,25 @@ defmodule Arbor.Trust.Manager do
   def handle_call({:delete_trust_profile, agent_id}, _from, state) do
     case Store.get_profile(agent_id) do
       {:ok, _profile} ->
-        Store.delete_profile(agent_id)
+        case Store.delete_profile(agent_id) do
+          :ok ->
+            {:ok, event} =
+              Event.new(
+                agent_id: agent_id,
+                event_type: :profile_deleted
+              )
 
-        {:ok, event} =
-          Event.new(
-            agent_id: agent_id,
-            event_type: :profile_deleted
-          )
+            record_event(event, state)
 
-        record_event(event, state)
+            Logger.info("Trust profile deleted for agent #{agent_id}",
+              agent_id: agent_id
+            )
 
-        Logger.info("Trust profile deleted for agent #{agent_id}",
-          agent_id: agent_id
-        )
+            {:reply, :ok, state}
 
-        {:reply, :ok, state}
+          {:error, _} = error ->
+            {:reply, error, state}
+        end
 
       {:error, :not_found} ->
         {:reply, :ok, state}
@@ -444,7 +448,9 @@ defmodule Arbor.Trust.Manager do
           Logger.debug("Granted #{count} baseline capabilities for #{agent_id}")
 
         {:error, reason} ->
-          Logger.warning("Failed to grant baseline capabilities for #{agent_id}: #{inspect(reason)}")
+          Logger.warning(
+            "Failed to grant baseline capabilities for #{agent_id}: #{inspect(reason)}"
+          )
       end
     end
   rescue
