@@ -529,6 +529,200 @@ defmodule Arbor.Actions.CodingTest do
       assert pr_params.draft == true
     end
 
+    test "human-review routing without open_pr returns human_review_required",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      parent = self()
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "security.txt"), "review me\n")
+          {:ok, %{text: "STATUS: implemented\nCreated security.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, _params, _context ->
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        Council.ReviewChange, params, _context ->
+          send(parent, {:review, params})
+
+          {:ok,
+           %{
+             status: "reviewed",
+             recommendation: :keep,
+             decision: "approved",
+             branch: params.branch,
+             files: params.files,
+             blast_radius: :high,
+             tier_decision: :human_review,
+             human_required: true,
+             security_veto: false,
+             tier_reasons: [:high_blast_radius]
+           }}
+
+        Git.PR, params, _context ->
+          send(parent, {:unexpected_pr, params})
+          {:ok, %{url: "https://example.test/pr/unexpected"}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Touch security-sensitive code",
+                   repo_path: repo,
+                   branch_name: "test/coding-agent-human-review-required",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["./bin/mix test"],
+                   submit_review: true,
+                   open_pr: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "human_review_required"
+      assert result.branch == "test/coding-agent-human-review-required"
+      assert is_binary(result.commit)
+      assert result.tier_decision == :human_review
+      assert result.human_required == true
+      assert result.blast_radius == :high
+      assert result.review_recommendation == :keep
+      assert result.review.files == ["security.txt"]
+      refute Map.has_key?(result, :pr_url)
+
+      assert_receive {:review, _review_params}
+      refute_received {:unexpected_pr, _}
+    end
+
+    test "returns review_failed with normalized human-review fields when council errors",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      parent = self()
+      review_error = {:council_unavailable, "review service down"}
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          {:ok, %{text: "STATUS: implemented\nCreated feature.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, _params, _context ->
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        Council.ReviewChange, params, _context ->
+          send(parent, {:review, params})
+          {:error, review_error}
+
+        Git.PR, params, _context ->
+          send(parent, {:unexpected_pr, params})
+          {:ok, %{url: "https://example.test/pr/unexpected"}}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   branch_name: "test/coding-agent-review-failed",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["./bin/mix test"],
+                   submit_review: true,
+                   open_pr: true
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "review_failed"
+      assert result.branch == "test/coding-agent-review-failed"
+      assert is_binary(result.commit)
+      assert result.review.status == "review_failed"
+      assert result.review.error == inspect(review_error)
+      assert result.review_error == inspect(review_error)
+      assert result.tier_decision == :human_review
+      assert result.human_required == true
+      assert result.security_veto == false
+      refute Map.has_key?(result, :pr_url)
+
+      assert_receive {:review, _review_params}
+      refute_received {:unexpected_pr, _}
+    end
+
+    test "returns pr_failed with reviewable commit and branch when draft PR creation fails",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+      parent = self()
+      pr_error = {:platform_error, "gh unavailable"}
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          {:ok, %{text: "STATUS: implemented\nCreated feature.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, _params, _context ->
+          {:ok, %{exit_code: 0, stdout: "ok\n", stderr: ""}}
+
+        Git.PR, params, _context ->
+          send(parent, {:pr, params})
+          {:error, pr_error}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   branch_name: "test/coding-agent-pr-failed",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["./bin/mix test"],
+                   pr_title: "Add feature file",
+                   open_pr: true,
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "pr_failed"
+      assert result.branch == "test/coding-agent-pr-failed"
+      assert is_binary(result.commit)
+      assert result.commit == git!(result.worktree_path, ["rev-parse", "HEAD"])
+      assert result.error == pr_error
+      refute Map.has_key?(result, :pr_url)
+
+      assert_receive {:pr, pr_params}
+      assert pr_params.branch == "test/coding-agent-pr-failed"
+      assert pr_params.draft == true
+    end
+
     test "review rework and stop routes skip draft PR creation", %{tmp_dir: tmp_dir} do
       for {tier_decision, expected_status} <- [
             {:rework, "review_requires_rework"},
