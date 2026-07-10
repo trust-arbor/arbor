@@ -31,9 +31,33 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
   def run(input, context) when is_map(input) and is_map(context) do
     caller = caller_context(context)
 
-    with {:ok, resource} <-
-           WorkspaceLeaseRegistry.acquire_validation_resource(input.workspace_id, caller) do
-      result = guarded_execute(resource, input, caller)
+    with {:ok, claim} <-
+           WorkspaceLeaseRegistry.claim_review_attestation(input.review_attestation_id, caller) do
+      resource = claim.resource
+      material = claim.material
+
+      execution_input =
+        Map.merge(input, %{
+          workspace_id: material.workspace_id,
+          test_paths: Enum.map(material.selected_tests, & &1.path),
+          material: material
+        })
+
+      result =
+        with {:ok, evidence} <- guarded_execute(resource, execution_input, caller),
+             {:ok, finalized_material} <-
+               WorkspaceLeaseRegistry.finalize_review_attestation(
+                 input.review_attestation_id,
+                 caller
+               ) do
+          {:ok,
+           bind_attestation_evidence(
+             evidence,
+             finalized_material,
+             claim.council_decision_digest
+           )}
+        end
+
       cleanup = WorkspaceLeaseRegistry.release_validation_resource(resource.resource_id, caller)
 
       case {result, cleanup} do
@@ -64,6 +88,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
 
   defp execute(resource, input, caller) do
     with {:ok, sources} <- stage_sources(resource, input.test_paths),
+         :ok <- verify_attested_sources(sources, input.material.selected_tests),
          {:ok, candidate_fingerprint} <-
            workspace_fingerprint(resource.candidate_path, resource.root_path, "candidate"),
          {:ok, candidate, stable_fingerprint} <-
@@ -76,8 +101,21 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
          sources: sources,
          candidate: candidate,
          base: base
-       })}
+       })
+       |> Map.put(:evidence_type, "reviewed_regression_evidence")}
     end
+  end
+
+  defp bind_attestation_evidence(evidence, material, council_decision_digest) do
+    Map.merge(evidence, %{
+      attested_base_commit: material.base_commit,
+      attested_candidate_commit: material.candidate_commit,
+      attested_candidate_tree_oid: material.candidate_tree_oid,
+      attested_diff_sha256: material.diff_sha256,
+      attested_selected_tests: material.selected_tests,
+      review_attestation_digest: material.canonical_digest,
+      council_decision_digest: council_decision_digest
+    })
   end
 
   defp run_candidate(resource, input, sources, candidate_fingerprint) do
@@ -218,7 +256,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
     opts = [
       timeout: input.timeout,
       share_build_path: false,
-      env: isolated_mix_env(resource.repo_path, build_path)
+      env: isolated_mix_env(build_path, dependency_path_for(root, resource))
     ]
 
     case MixAction.run_mix(root, args, opts) do
@@ -251,15 +289,21 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
     end
   end
 
-  defp isolated_mix_env(repo_path, build_path) do
-    deps_path = Path.join(repo_path, "deps")
-
+  # Candidate and base receive independent pre-candidate dependency snapshots.
+  # The base leg must never consume a tree candidate code could have mutated.
+  defp isolated_mix_env(build_path, deps_path) do
     %{
       "MIX_BUILD_PATH" => build_path,
       "MIX_BUILD_ROOT" => false,
-      "MIX_DEPS_PATH" => if(File.dir?(deps_path), do: deps_path, else: false),
+      "MIX_DEPS_PATH" => deps_path,
       "MIX_ENV" => "test"
     }
+  end
+
+  defp dependency_path_for(root, resource) do
+    if root == resource.candidate_path,
+      do: resource.candidate_deps_path,
+      else: resource.base_deps_path
   end
 
   defp stage_sources(resource, test_paths) do
@@ -323,6 +367,17 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Shell do
           {:halt, {:error, :candidate_source_changed}}
       end
     end)
+  end
+
+  defp verify_attested_sources(sources, selected_tests) do
+    actual = Enum.map(sources, &Map.take(&1, [:path, :sha256]))
+
+    expected =
+      Enum.map(selected_tests, fn test ->
+        %{path: test.path, sha256: test.blob_sha256}
+      end)
+
+    if actual == expected, do: :ok, else: {:error, :attested_test_source_changed}
   end
 
   defp write_staged_source(stage_root, source) do

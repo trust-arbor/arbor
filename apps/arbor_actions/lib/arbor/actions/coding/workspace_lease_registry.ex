@@ -66,11 +66,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
           owner_ref: reference(),
           repo_path: String.t(),
           candidate_path: String.t(),
+          candidate_commit: String.t() | nil,
           base_commit: String.t(),
           root_path: String.t(),
           stage_path: String.t(),
           candidate_build_path: String.t(),
+          candidate_deps_path: String.t(),
           base_build_path: String.t(),
+          base_deps_path: String.t(),
           base_worktree_path: String.t(),
           runner_path: String.t(),
           candidate_result_path: String.t(),
@@ -169,6 +172,41 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   @doc false
+  @spec issue_review_attestation(String.t(), map(), String.t(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def issue_review_attestation(workspace_id, material, council_decision_digest, opts \\ %{})
+      when is_binary(workspace_id) and is_map(material) and is_binary(council_decision_digest) do
+    {server_opts, caller} = split_caller_opts(opts)
+
+    call(
+      {:issue_review_attestation, workspace_id, material, council_decision_digest, caller},
+      server_opts
+    )
+  end
+
+  @doc false
+  @spec claim_review_attestation(String.t(), map() | keyword()) :: {:ok, map()} | {:error, term()}
+  def claim_review_attestation(attestation_id, opts \\ %{}) when is_binary(attestation_id) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:claim_review_attestation, attestation_id, caller}, server_opts)
+  end
+
+  @doc false
+  @spec revoke_review_attestation(String.t(), map() | keyword()) :: :ok | {:error, term()}
+  def revoke_review_attestation(attestation_id, opts \\ %{}) when is_binary(attestation_id) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:revoke_review_attestation, attestation_id, caller}, server_opts)
+  end
+
+  @doc false
+  @spec finalize_review_attestation(String.t(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def finalize_review_attestation(attestation_id, opts \\ %{}) when is_binary(attestation_id) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:finalize_review_attestation, attestation_id, caller}, server_opts)
+  end
+
+  @doc false
   @spec public_view(map()) :: map()
   def public_view(lease) when is_map(lease) do
     %{
@@ -192,7 +230,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
        by_ref: %{},
        validation_resources: %{},
        validation_by_ref: %{},
-       validation_by_workspace: %{}
+       validation_by_workspace: %{},
+       review_attestations: %{},
+       attestation_by_workspace: %{},
+       attestation_states: %{}
      }}
   end
 
@@ -230,6 +271,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       {:ok, lease} ->
         if authorized?(lease, caller) do
           state = cleanup_workspace_validation_resources(state, lease.workspace_id)
+          state = cleanup_workspace_attestations(state, lease.workspace_id)
           {result, state} = do_release(state, lease, mode)
           {:reply, {:ok, result}, state}
         else
@@ -247,7 +289,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
     with {:ok, lease} <- fetch_authorized(state, workspace_id, caller),
          :ok <- ensure_no_validation_resource(state, workspace_id) do
-      perform_validation_resource_acquire(state, lease, from_pid)
+      perform_validation_resource_acquire(state, lease, from_pid, caller)
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -312,6 +354,96 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
+  def handle_call(
+        {:issue_review_attestation, workspace_id, material, council_decision_digest, caller},
+        {from_pid, _tag},
+        state
+      ) do
+    caller = %{caller | owner_pid: from_pid}
+
+    with {:ok, lease} <- fetch_authorized(state, workspace_id, caller),
+         {:ok, canonical} <-
+           Arbor.Actions.Coding.SecurityRegression.Attestation.new(
+             material,
+             council_decision_digest
+           ),
+         :ok <- ensure_material_matches_lease(canonical, lease),
+         :ok <- verify_review_material(lease, canonical),
+         true <- valid_digest?(council_decision_digest) do
+      attestation_id =
+        "review_attestation_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+
+      record = %{
+        attestation_id: attestation_id,
+        workspace_id: workspace_id,
+        material: canonical,
+        council_decision_digest: council_decision_digest,
+        task_id: lease.task_id,
+        principal_id: lease.principal_id
+      }
+
+      state = put_review_attestation(state, record)
+      {:reply, {:ok, %{review_attestation_id: attestation_id}}, state}
+    else
+      false -> {:reply, {:error, :invalid_council_decision_digest}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:claim_review_attestation, attestation_id, caller}, {from_pid, _tag}, state) do
+    caller = %{caller | owner_pid: from_pid}
+
+    with {:ok, record} <- fetch_review_attestation(state, attestation_id),
+         :ok <- ensure_attestation_available(state, attestation_id),
+         {:ok, lease} <- fetch_authorized(state, record.workspace_id, caller),
+         :ok <- ensure_record_authority(record, lease, caller),
+         :ok <- verify_review_material(lease, record.material),
+         {:ok, state} <- mark_attestation_claimed(state, attestation_id),
+         {:ok, resource, state} <-
+           create_attested_validation_resource(state, lease, from_pid, record.material) do
+      {:reply,
+       {:ok,
+        %{
+          material: record.material,
+          council_decision_digest: record.council_decision_digest,
+          resource: validation_resource_view(resource)
+        }}, state}
+    else
+      {:error, reason} ->
+        state = mark_attestation_revoked_if_present(state, attestation_id, reason)
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:revoke_review_attestation, attestation_id, caller}, {from_pid, _tag}, state) do
+    caller = %{caller | owner_pid: from_pid}
+
+    with {:ok, record} <- fetch_review_attestation(state, attestation_id),
+         {:ok, lease} <- fetch_authorized(state, record.workspace_id, caller),
+         :ok <- ensure_record_authority(record, lease, caller) do
+      {:reply, :ok, put_attestation_state(state, attestation_id, :revoked)}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:finalize_review_attestation, attestation_id, caller}, {from_pid, _tag}, state) do
+    caller = %{caller | owner_pid: from_pid}
+
+    with {:ok, record} <- fetch_review_attestation(state, attestation_id),
+         :claimed <- Map.get(state.attestation_states, attestation_id),
+         {:ok, lease} <- fetch_authorized(state, record.workspace_id, caller),
+         :ok <- ensure_record_authority(record, lease, caller),
+         :ok <- verify_review_material(lease, record.material) do
+      {:reply, {:ok, record.material}, state}
+    else
+      :available -> {:reply, {:error, :attestation_not_claimed}, state}
+      :revoked -> {:reply, {:error, :attestation_revoked}, state}
+      nil -> {:reply, {:error, :attestation_revoked}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
     case Map.fetch(state.validation_by_ref, ref) do
@@ -356,38 +488,277 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       else: {:error, :validation_in_progress}
   end
 
-  defp perform_validation_resource_acquire(state, lease, owner_pid) do
+  defp perform_validation_resource_acquire(state, lease, owner_pid, caller) do
+    case create_validation_resource(
+           state,
+           lease,
+           owner_pid,
+           nil,
+           caller.force_dependency_snapshot_failure
+         ) do
+      {:ok, resource, state} -> {:reply, {:ok, validation_resource_view(resource)}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp create_attested_validation_resource(state, lease, owner_pid, material) do
+    create_validation_resource(state, lease, owner_pid, material.candidate_commit, false)
+  end
+
+  defp create_validation_resource(
+         state,
+         lease,
+         owner_pid,
+         candidate_commit,
+         force_dependency_snapshot_failure
+       ) do
     owner_ref = Process.monitor(owner_pid)
 
     case create_validation_root(lease.workspace_id) do
       {:ok, resource_id, root_path} ->
-        resource = %{
-          resource_id: resource_id,
-          workspace_id: lease.workspace_id,
-          owner_pid: owner_pid,
-          owner_ref: owner_ref,
-          repo_path: lease.repo_path,
-          candidate_path: lease.worktree_path,
-          base_commit: lease.base_commit,
-          root_path: root_path,
-          stage_path: Path.join(root_path, "staged"),
-          candidate_build_path: Path.join(root_path, "build-candidate"),
-          base_build_path: Path.join(root_path, "build-base"),
-          base_worktree_path: Path.join(root_path, "base"),
-          runner_path: Path.join(root_path, "runner.exs"),
-          candidate_result_path: Path.join(root_path, "candidate-result.etf"),
-          base_result_path: Path.join(root_path, "base-result.etf"),
-          snapshot_created: false
-        }
+        case build_validation_resource(
+               lease,
+               owner_pid,
+               owner_ref,
+               resource_id,
+               root_path,
+               candidate_commit,
+               force_dependency_snapshot_failure
+             ) do
+          {:ok, resource} ->
+            {:ok, resource, put_validation_resource(state, resource)}
 
-        state = put_validation_resource(state, resource)
-        {:reply, {:ok, validation_resource_view(resource)}, state}
+          {:error, reason} ->
+            cleanup_partial_validation_root(lease.repo_path, root_path, candidate_commit)
+            Process.demonitor(owner_ref, [:flush])
+            {:error, reason}
+        end
 
       {:error, reason} ->
         Process.demonitor(owner_ref, [:flush])
-        {:reply, {:error, reason}, state}
+        {:error, reason}
     end
   end
+
+  defp build_validation_resource(
+         lease,
+         owner_pid,
+         owner_ref,
+         resource_id,
+         root_path,
+         candidate_commit,
+         force_dependency_snapshot_failure
+       ) do
+    with :ok <- maybe_force_dependency_snapshot_failure(force_dependency_snapshot_failure),
+         :ok <- snapshot_dependencies(lease.repo_path, Path.join(root_path, "deps-candidate")),
+         :ok <- snapshot_dependencies(lease.repo_path, Path.join(root_path, "deps-base")),
+         {:ok, candidate_path} <- create_candidate_snapshot(lease, root_path, candidate_commit) do
+      {:ok,
+       %{
+         resource_id: resource_id,
+         workspace_id: lease.workspace_id,
+         owner_pid: owner_pid,
+         owner_ref: owner_ref,
+         repo_path: lease.repo_path,
+         candidate_path: candidate_path,
+         candidate_commit: candidate_commit,
+         base_commit: lease.base_commit,
+         root_path: root_path,
+         stage_path: Path.join(root_path, "staged"),
+         candidate_build_path: Path.join(root_path, "build-candidate"),
+         candidate_deps_path: Path.join(root_path, "deps-candidate"),
+         base_build_path: Path.join(root_path, "build-base"),
+         base_deps_path: Path.join(root_path, "deps-base"),
+         base_worktree_path: Path.join(root_path, "base"),
+         runner_path: Path.join(root_path, "runner.exs"),
+         candidate_result_path: Path.join(root_path, "candidate-result.etf"),
+         base_result_path: Path.join(root_path, "base-result.etf"),
+         snapshot_created: false
+       }}
+    end
+  end
+
+  defp cleanup_partial_validation_root(repo_path, root_path, candidate_commit) do
+    if is_binary(candidate_commit) do
+      _ = Workspace.remove_detached_worktree(repo_path, Path.join(root_path, "candidate"))
+    end
+
+    _ = File.rm_rf(root_path)
+    :ok
+  end
+
+  defp create_candidate_snapshot(lease, _root_path, nil), do: {:ok, lease.worktree_path}
+
+  defp create_candidate_snapshot(lease, root_path, candidate_commit) do
+    path = Path.join(root_path, "candidate")
+
+    case Workspace.create_detached_worktree(lease.repo_path, path, candidate_commit) do
+      {:ok, ^path} -> {:ok, path}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp snapshot_dependencies(repo_path, destination) do
+    source = Path.join(repo_path, "deps")
+
+    cond do
+      not File.dir?(source) ->
+        File.mkdir(destination)
+
+      true ->
+        with :ok <- copy_dependency_tree(source, destination),
+             :ok <- verify_snapshot_symlinks(destination) do
+          :ok
+        else
+          _ -> {:error, :dependency_snapshot_failed}
+        end
+    end
+  rescue
+    _ -> {:error, :dependency_snapshot_failed}
+  end
+
+  defp maybe_force_dependency_snapshot_failure(true), do: {:error, :dependency_snapshot_failed}
+  defp maybe_force_dependency_snapshot_failure(_), do: :ok
+
+  defp copy_dependency_tree(source, destination) do
+    with {:ok, %File.Stat{type: :directory} = stat} <- File.lstat(source),
+         {:ok, source_root} <- canonical_existing_path(source),
+         :ok <- File.mkdir(destination),
+         :ok <- File.chmod(destination, permission_bits(stat.mode)),
+         :ok <- copy_dependency_children(source_root, source, destination) do
+      :ok
+    else
+      other -> {:error, {:copy_dependency_tree_failed, other}}
+    end
+  end
+
+  defp copy_dependency_children(source_root, source, destination) do
+    source
+    |> File.ls!()
+    |> Enum.reduce_while(:ok, fn name, :ok ->
+      source_path = Path.join(source, name)
+      destination_path = Path.join(destination, name)
+
+      case File.lstat(source_path) do
+        {:ok, %File.Stat{type: :directory} = stat} ->
+          with :ok <- File.mkdir(destination_path),
+               :ok <- File.chmod(destination_path, permission_bits(stat.mode)),
+               :ok <- copy_dependency_children(source_root, source_path, destination_path) do
+            {:cont, :ok}
+          else
+            other -> {:halt, {:error, {:dependency_directory_copy_failed, other}}}
+          end
+
+        {:ok, %File.Stat{type: :regular} = stat} ->
+          case File.copy(source_path, destination_path) do
+            {:ok, _bytes} ->
+              case File.chmod(destination_path, permission_bits(stat.mode)) do
+                :ok -> {:cont, :ok}
+                other -> {:halt, {:error, {:dependency_file_mode_failed, other}}}
+              end
+
+            other ->
+              {:halt, {:error, {:dependency_file_copy_failed, other}}}
+          end
+
+        {:ok, %File.Stat{type: :symlink}} ->
+          case copy_dependency_symlink(source_root, source_path, destination_path) do
+            :ok -> {:cont, :ok}
+            other -> {:halt, {:error, {:dependency_symlink_copy_failed, other}}}
+          end
+
+        other ->
+          {:halt, {:error, {:dependency_stat_failed, other}}}
+      end
+    end)
+  rescue
+    _ -> {:error, :dependency_snapshot_failed}
+  end
+
+  defp copy_dependency_symlink(source_root, source_path, destination_path) do
+    with {:ok, target} <- File.read_link(source_path),
+         {:ok, resolved_source} <-
+           canonical_existing_path(Path.expand(target, Path.dirname(source_path))),
+         true <- path_within?(resolved_source, source_root),
+         relative_source <- Path.relative_to(resolved_source, source_root),
+         destination_root <- snapshot_root_for(destination_path, source_path, source_root),
+         resolved_destination <- Path.join(destination_root, relative_source),
+         target_from_destination <-
+           Path.relative_to(resolved_destination, Path.dirname(destination_path)),
+         :ok <- File.ln_s(target_from_destination, destination_path) do
+      :ok
+    else
+      _ -> {:error, :dependency_snapshot_failed}
+    end
+  end
+
+  defp snapshot_root_for(destination_path, source_path, source_root) do
+    source_relative_parent =
+      Path.relative_to(Path.dirname(source_path), source_root)
+      |> Path.split()
+      |> Enum.reject(&(&1 == "."))
+
+    Enum.reduce(source_relative_parent, Path.dirname(destination_path), fn _segment, acc ->
+      Path.dirname(acc)
+    end)
+  end
+
+  defp verify_snapshot_symlinks(destination) do
+    verify_snapshot_children(destination, destination)
+  end
+
+  defp verify_snapshot_children(root, path) do
+    path
+    |> File.ls!()
+    |> Enum.reduce_while(:ok, fn name, :ok ->
+      child = Path.join(path, name)
+
+      case File.lstat(child) do
+        {:ok, %File.Stat{type: :directory}} ->
+          case verify_snapshot_children(root, child) do
+            :ok -> {:cont, :ok}
+            error -> {:halt, error}
+          end
+
+        {:ok, %File.Stat{type: :symlink}} ->
+          case File.read_link(child) do
+            {:ok, target} ->
+              if path_within?(Path.expand(target, Path.dirname(child)), root),
+                do: {:cont, :ok},
+                else: {:halt, {:error, :dependency_snapshot_failed}}
+
+            _ ->
+              {:halt, {:error, :dependency_snapshot_failed}}
+          end
+
+        {:ok, %File.Stat{type: :regular}} ->
+          {:cont, :ok}
+
+        _ ->
+          {:halt, {:error, :dependency_snapshot_failed}}
+      end
+    end)
+  rescue
+    _ -> {:error, :dependency_snapshot_failed}
+  end
+
+  defp path_within?(path, root) do
+    relative = Path.relative_to(Path.expand(path), Path.expand(root))
+
+    relative != ".." and not String.starts_with?(relative, "../") and
+      Path.type(relative) == :relative
+  end
+
+  defp canonical_existing_path(path) do
+    case System.cmd("realpath", [path], stderr_to_stdout: true) do
+      {resolved, 0} -> {:ok, String.trim(resolved)}
+      _ -> {:error, :dependency_snapshot_failed}
+    end
+  rescue
+    _ -> {:error, :dependency_snapshot_failed}
+  end
+
+  defp permission_bits(mode) when is_integer(mode), do: Bitwise.band(mode, 0o777)
 
   defp perform_validation_snapshot_create(state, %{snapshot_created: true} = resource) do
     {:reply, {:ok, validation_resource_view(resource)}, state}
@@ -491,6 +862,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp cleanup_validation_resource_files(resource) do
+    if is_binary(resource.candidate_commit) do
+      _ = Workspace.remove_detached_worktree(resource.repo_path, resource.candidate_path)
+    end
+
     _ =
       Workspace.remove_detached_worktree(
         resource.repo_path,
@@ -552,11 +927,14 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       workspace_id: resource.workspace_id,
       repo_path: resource.repo_path,
       candidate_path: resource.candidate_path,
+      candidate_commit: resource.candidate_commit,
       base_commit: resource.base_commit,
       root_path: resource.root_path,
       stage_path: resource.stage_path,
       candidate_build_path: resource.candidate_build_path,
+      candidate_deps_path: resource.candidate_deps_path,
       base_build_path: resource.base_build_path,
+      base_deps_path: resource.base_deps_path,
       base_worktree_path: resource.base_worktree_path,
       runner_path: resource.runner_path,
       candidate_result_path: resource.candidate_result_path,
@@ -615,6 +993,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       {workspace_id, by_ref} ->
         state = %{state | by_ref: by_ref}
         state = cleanup_workspace_validation_resources(state, workspace_id)
+        state = cleanup_workspace_attestations(state, workspace_id)
 
         case Map.pop(state.leases, workspace_id) do
           {nil, _leases} ->
@@ -630,6 +1009,114 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     end
   end
 
+  defp ensure_material_matches_lease(material, lease) do
+    if material.workspace_id == lease.workspace_id and material.base_commit == lease.base_commit and
+         material.validation_profile == "security_regression" do
+      :ok
+    else
+      {:error, :attestation_lease_mismatch}
+    end
+  end
+
+  defp verify_review_material(lease, material) do
+    paths = Enum.map(material.selected_tests, & &1.path)
+
+    with {:ok, actual} <-
+           Workspace.materialize_security_regression_material(
+             lease.worktree_path,
+             lease.workspace_id,
+             lease.base_commit,
+             paths
+           ),
+         true <- material_without_diff(actual) == material_without_diff(material) do
+      :ok
+    else
+      false -> {:error, :reviewed_material_changed}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp material_without_diff(material),
+    do: Map.drop(material, [:diff, :canonical_digest, :council_decision_digest])
+
+  defp valid_digest?(digest), do: is_binary(digest) and Regex.match?(~r/\A[0-9a-f]{64}\z/, digest)
+
+  defp put_review_attestation(state, record) do
+    ids =
+      state.attestation_by_workspace
+      |> Map.get(record.workspace_id, MapSet.new())
+      |> MapSet.put(record.attestation_id)
+
+    %{
+      state
+      | review_attestations: Map.put(state.review_attestations, record.attestation_id, record),
+        attestation_by_workspace:
+          Map.put(state.attestation_by_workspace, record.workspace_id, ids),
+        attestation_states: Map.put(state.attestation_states, record.attestation_id, :available)
+    }
+  end
+
+  defp fetch_review_attestation(state, attestation_id) do
+    case Map.fetch(state.review_attestations, attestation_id) do
+      {:ok, record} -> {:ok, record}
+      :error -> {:error, :not_found}
+    end
+  end
+
+  defp ensure_attestation_available(state, attestation_id) do
+    case Map.get(state.attestation_states, attestation_id) do
+      :available -> :ok
+      :claimed -> {:error, :attestation_already_claimed}
+      :revoked -> {:error, :attestation_revoked}
+      _ -> {:error, :attestation_revoked}
+    end
+  end
+
+  defp ensure_record_authority(record, lease, caller) do
+    if record.task_id == lease.task_id and record.principal_id == lease.principal_id and
+         authorized?(lease, caller) do
+      :ok
+    else
+      {:error, :not_authorized}
+    end
+  end
+
+  defp mark_attestation_claimed(state, attestation_id) do
+    case ensure_attestation_available(state, attestation_id) do
+      :ok -> {:ok, put_attestation_state(state, attestation_id, :claimed)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp mark_attestation_revoked_if_present(state, attestation_id, reason) do
+    if Map.has_key?(state.review_attestations, attestation_id) and
+         reason not in [
+           :not_found,
+           :not_authorized,
+           :attestation_already_claimed,
+           :attestation_revoked
+         ] do
+      put_attestation_state(state, attestation_id, :revoked)
+    else
+      state
+    end
+  end
+
+  defp put_attestation_state(state, attestation_id, status) do
+    %{state | attestation_states: Map.put(state.attestation_states, attestation_id, status)}
+  end
+
+  defp cleanup_workspace_attestations(state, workspace_id) do
+    ids = Map.get(state.attestation_by_workspace, workspace_id, MapSet.new())
+
+    %{
+      state
+      | review_attestations: Map.drop(state.review_attestations, MapSet.to_list(ids)),
+        attestation_states: Map.drop(state.attestation_states, MapSet.to_list(ids)),
+        attestation_by_workspace: Map.delete(state.attestation_by_workspace, workspace_id)
+    }
+  end
+
   defp split_caller_opts(opts) when is_list(opts) do
     server_opts = Keyword.take(opts, [:server])
 
@@ -637,7 +1124,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       # owner_pid is overwritten by the GenServer caller on handle_call
       owner_pid: nil,
       task_id: normalize_id(Keyword.get(opts, :task_id)),
-      principal_id: normalize_id(Keyword.get(opts, :principal_id) || Keyword.get(opts, :agent_id))
+      principal_id:
+        normalize_id(Keyword.get(opts, :principal_id) || Keyword.get(opts, :agent_id)),
+      force_dependency_snapshot_failure:
+        Keyword.get(opts, :force_dependency_snapshot_failure) == true
     }
 
     {server_opts, caller}
@@ -661,7 +1151,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     caller = %{
       owner_pid: nil,
       task_id: normalize_id(Map.get(opts, :task_id) || Map.get(opts, "task_id")),
-      principal_id: principal
+      principal_id: principal,
+      force_dependency_snapshot_failure:
+        Map.get(opts, :force_dependency_snapshot_failure) == true ||
+          Map.get(opts, "force_dependency_snapshot_failure") == true
     }
 
     {server, caller}

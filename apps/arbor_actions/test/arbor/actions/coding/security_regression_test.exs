@@ -2,60 +2,39 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
   use Arbor.Actions.ActionCase, async: false
 
   alias Arbor.Actions.Coding.SecurityRegression.Validate
+  alias Arbor.Actions.Council
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
 
   @moduletag :slow
 
-  test "valid candidate-pass/base-fail proof is deterministic, bounded, and cleaned", %{
+  test "reviewed candidate-pass/base-fail evidence is detached, one-shot, and cleaned", %{
     tmp_dir: tmp_dir
   } do
     fixture =
-      leased_project(tmp_dir, """
-      defmodule Tiny.Security do
-        def allow_guest?, do: true
-      end
-      """)
+      leased_project(tmp_dir, "defmodule Tiny.Security do\n  def allow_guest?, do: true\nend\n")
 
-    write_candidate_module(fixture, """
-    defmodule Tiny.Security do
-      def allow_guest?, do: false
-    end
-    """)
+    write_candidate_module(
+      fixture,
+      "defmodule Tiny.Security do\n  def allow_guest?, do: false\nend\n"
+    )
 
     test_path = "test/security_regression_test.exs"
 
     write_candidate_test(fixture, test_path, """
     defmodule Tiny.SecurityRegressionTest do
       use ExUnit.Case
-
-      test "guest remains denied" do
-        refute Tiny.Security.allow_guest?()
-      end
+      test "guest remains denied", do: refute(Tiny.Security.allow_guest?())
     end
     """)
 
-    params = %{workspace_id: fixture.lease.workspace_id, test_paths: [test_path]}
-
-    assert {:ok, first} = Validate.run(params, fixture.context)
-    assert {:ok, second} = Validate.run(params, fixture.context)
-
-    assert first == second
-    assert first.passed
-    assert first.reason == "security_regression_validated"
-    assert first.base_commit == fixture.lease.base_commit
-    assert first.test_paths == [test_path]
-    assert first.candidate.executed == 1
-    assert first.candidate.test_failures == 0
-    assert first.base.executed == 1
-    assert first.base.test_failures == 1
-    assert first.candidate_fingerprint =~ ~r/\A[0-9a-f]{64}\z/
-    assert [%{path: ^test_path, sha256: source_hash}] = first.source_hashes
-    assert source_hash =~ ~r/\A[0-9a-f]{64}\z/
-    assert Jason.decode!(first.feedback_json)["passed"]
-    assert byte_size(first.feedback_json) < 12_000
-    refute first.feedback_json =~ tmp_dir
-    refute first.feedback_json =~ "arbor-security-regression-"
+    params = attested_params(fixture, [test_path])
+    assert {:ok, result} = Validate.run(params, fixture.context)
+    assert result.passed
+    assert result.reason == "security_regression_validated"
+    assert result.evidence_type == "reviewed_regression_evidence"
+    assert result.base.test_failures == 1
+    assert {:error, :attestation_already_claimed} = Validate.run(params, fixture.context)
 
     assert {:ok, []} =
              WorkspaceLeaseRegistry.validation_resources(
@@ -64,218 +43,338 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
              )
   end
 
-  test "rejects when the staged test also passes at base", %{tmp_dir: tmp_dir} do
-    fixture =
-      leased_project(tmp_dir, """
-      defmodule Tiny.Security do
-        def allow_guest?, do: false
-      end
-      """)
-
-    test_path = "test/base_pass_test.exs"
-
-    write_candidate_test(fixture, test_path, """
-    defmodule Tiny.BasePassTest do
-      use ExUnit.Case
-
-      test "guest is denied" do
-        refute Tiny.Security.allow_guest?()
-      end
-    end
-    """)
-
-    assert {:ok, result} =
-             Validate.run(
-               %{workspace_id: fixture.lease.workspace_id, test_paths: [test_path]},
-               fixture.context
-             )
-
-    refute result.passed
-    assert result.reason == "base_tests_passed"
-    assert result.base.exit_code == 0
-    assert result.base.test_failures == 0
-  end
-
-  test "candidate test failure never runs the base leg", %{tmp_dir: tmp_dir} do
-    fixture =
-      leased_project(tmp_dir, """
-      defmodule Tiny.Security do
-        def allow_guest?, do: true
-      end
-      """)
-
-    test_path = "test/candidate_failure_test.exs"
-
-    write_candidate_test(fixture, test_path, """
-    defmodule Tiny.CandidateFailureTest do
-      use ExUnit.Case
-
-      test "guest is denied" do
-        refute Tiny.Security.allow_guest?()
-      end
-    end
-    """)
-
-    assert {:ok, result} =
-             Validate.run(
-               %{workspace_id: fixture.lease.workspace_id, test_paths: [test_path]},
-               fixture.context
-             )
-
-    refute result.passed
-    assert result.reason == "candidate_tests_failed"
-    assert result.candidate.test_failures == 1
-    assert result.base.status == "not_run"
-  end
-
-  test "security regression compile failures are inconclusive", %{tmp_dir: tmp_dir} do
-    fixture = leased_project(tmp_dir, valid_module())
-    test_path = "test/compile_failure_test.exs"
-    write_candidate_test(fixture, test_path, "defmodule Broken do\n  this is not valid\n")
-
-    assert {:ok, result} =
-             Validate.run(
-               %{workspace_id: fixture.lease.workspace_id, test_paths: [test_path]},
-               fixture.context
-             )
-
-    refute result.passed
-    assert result.reason == "candidate_suite_incomplete"
-    assert result.candidate.executed == 0
-    assert result.base.status == "not_run"
-  end
-
-  test "security regression setup failures at base are not real test failures", %{
+  test "absolute source-internal dependency links are rewritten into private snapshots", %{
     tmp_dir: tmp_dir
   } do
-    fixture =
-      leased_project(tmp_dir, """
-      defmodule Tiny.Security do
-        def phase, do: :base
-      end
-      """)
+    fixture = leased_project(tmp_dir, valid_module())
+    source_deps = Path.join(fixture.repo, "deps")
+    internal = Path.join(source_deps, "internal")
+    File.mkdir_p!(internal)
+    File.write!(Path.join(internal, "source"), "original")
+    helper = Path.join(source_deps, "build-helper")
+    File.write!(helper, "#!/bin/sh\nexit 0\n")
+    File.chmod!(helper, 0o755)
+    File.ln_s!(internal, Path.join(source_deps, "linked"))
 
-    write_candidate_module(fixture, """
-    defmodule Tiny.Security do
-      def phase, do: :candidate
+    assert {:ok, resource} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+
+    candidate_link = Path.join(resource.candidate_deps_path, "linked")
+    base_link = Path.join(resource.base_deps_path, "linked")
+
+    assert path_inside?(
+             Path.expand(File.read_link!(candidate_link), Path.dirname(candidate_link)),
+             resource.candidate_deps_path
+           )
+
+    assert path_inside?(
+             Path.expand(File.read_link!(base_link), Path.dirname(base_link)),
+             resource.base_deps_path
+           )
+
+    assert Bitwise.band(
+             File.stat!(Path.join(resource.candidate_deps_path, "build-helper")).mode,
+             0o111
+           ) ==
+             0o111
+
+    File.write!(Path.join(candidate_link, "candidate-mutation"), "candidate")
+    refute File.exists?(Path.join(internal, "candidate-mutation"))
+    refute File.exists?(Path.join(base_link, "candidate-mutation"))
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release_validation_resource(
+               resource.resource_id,
+               fixture.context
+             )
+  end
+
+  test "validator accepts neither workspace_id nor test_paths and failed claim spawns no candidate code",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    marker = Path.join(tmp_dir, "candidate-ran")
+    test_path = "test/no_spawn_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.NoSpawnTest do
+      use ExUnit.Case
+      test "would run", do: File.write!(#{inspect(marker)}, "ran")
     end
     """)
 
-    test_path = "test/setup_failure_test.exs"
+    assert {:error, :unsupported_parameter} =
+             Validate.run(
+               %{workspace_id: fixture.lease.workspace_id, test_paths: [test_path]},
+               fixture.context
+             )
 
-    write_candidate_test(fixture, test_path, """
+    assert {:error, :not_found} =
+             Validate.run(%{review_attestation_id: "review_attestation_missing"}, fixture.context)
+
+    refute File.exists?(marker)
+  end
+
+  test "base-pass, candidate-failure, and compile failure retain two-revision behavior", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_project(tmp_dir, valid_module())
+    base_pass = "test/base_pass_test.exs"
+
+    write_candidate_test(fixture, base_pass, """
+    defmodule Tiny.BasePassTest do
+      use ExUnit.Case
+      test "denied", do: refute(Tiny.Security.allow_guest?())
+    end
+    """)
+
+    assert {:ok, base_result} =
+             Validate.run(attested_params(fixture, [base_pass]), fixture.context)
+
+    assert base_result.reason == "base_tests_passed"
+
+    fixture =
+      leased_project(tmp_dir, "defmodule Tiny.Security do\n  def allow_guest?, do: true\nend\n")
+
+    candidate_failure = "test/candidate_failure_test.exs"
+
+    write_candidate_test(fixture, candidate_failure, """
+    defmodule Tiny.CandidateFailureTest do
+      use ExUnit.Case
+      test "denied", do: refute(Tiny.Security.allow_guest?())
+    end
+    """)
+
+    assert {:ok, candidate_result} =
+             Validate.run(attested_params(fixture, [candidate_failure]), fixture.context)
+
+    assert candidate_result.reason == "candidate_tests_failed"
+    assert candidate_result.base.status == "not_run"
+
+    fixture = leased_project(tmp_dir, valid_module())
+    compile_failure = "test/compile_failure_test.exs"
+    write_candidate_test(fixture, compile_failure, "defmodule Broken do\n  this is not valid\n")
+
+    assert {:ok, compile_result} =
+             Validate.run(attested_params(fixture, [compile_failure]), fixture.context)
+
+    assert compile_result.reason == "candidate_suite_incomplete"
+    assert compile_result.base.status == "not_run"
+  end
+
+  test "setup failures, zero tests, and stale candidate BEAMs remain fail-closed", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_project(tmp_dir, "defmodule Tiny.Security do\n  def phase, do: :base\nend\n")
+
+    write_candidate_module(
+      fixture,
+      "defmodule Tiny.Security do\n  def phase, do: :candidate\nend\n"
+    )
+
+    setup_path = "test/setup_failure_test.exs"
+
+    write_candidate_test(fixture, setup_path, """
     defmodule Tiny.SetupFailureTest do
       use ExUnit.Case
-
       setup_all do
         if Tiny.Security.phase() == :base, do: raise("base setup failed")
         :ok
       end
-
-      test "candidate reaches the test body" do
-        assert Tiny.Security.phase() == :candidate
-      end
+      test "candidate", do: assert(Tiny.Security.phase() == :candidate)
     end
     """)
 
-    assert {:ok, result} =
-             Validate.run(
-               %{workspace_id: fixture.lease.workspace_id, test_paths: [test_path]},
-               fixture.context
-             )
+    assert {:ok, setup_result} =
+             Validate.run(attested_params(fixture, [setup_path]), fixture.context)
 
-    refute result.passed
-    assert result.reason == "base_setup_failed"
-    assert result.base.setup_failures > 0
-    assert result.base.test_failures == 0
-  end
+    assert setup_result.reason == "base_setup_failed"
+    assert setup_result.base.test_failures == 0
 
-  test "zero executed tests fail closed", %{tmp_dir: tmp_dir} do
     fixture = leased_project(tmp_dir, valid_module())
-    test_path = "test/zero_test.exs"
+    zero_path = "test/zero_test.exs"
 
-    write_candidate_test(fixture, test_path, """
-    defmodule Tiny.ZeroTest do
-      use ExUnit.Case
-    end
-    """)
+    write_candidate_test(
+      fixture,
+      zero_path,
+      "defmodule Tiny.ZeroTest do\n  use ExUnit.Case\nend\n"
+    )
 
-    assert {:ok, result} =
-             Validate.run(
-               %{workspace_id: fixture.lease.workspace_id, test_paths: [test_path]},
-               fixture.context
-             )
+    assert {:ok, zero_result} =
+             Validate.run(attested_params(fixture, [zero_path]), fixture.context)
 
-    refute result.passed
-    assert result.reason == "candidate_zero_tests"
-    assert result.candidate.executed == 0
-  end
+    assert zero_result.reason == "candidate_zero_tests"
 
-  test "rejects traversal and symlink test sources", %{tmp_dir: tmp_dir} do
     fixture = leased_project(tmp_dir, valid_module())
 
-    assert {:error, :invalid_test_paths} =
-             Validate.run(
-               %{
-                 workspace_id: fixture.lease.workspace_id,
-                 test_paths: ["../escape_test.exs"]
-               },
-               fixture.context
-             )
+    File.write!(
+      Path.join(fixture.lease.worktree_path, "lib/candidate_only.ex"),
+      "defmodule Tiny.CandidateOnly do\n  def fixed?, do: true\nend\n"
+    )
 
-    target_path = "test/real_source.exs"
-    write_candidate_test(fixture, target_path, "defmodule RealSource do\nend\n")
-    link_path = Path.join(fixture.lease.worktree_path, "test/symlink_test.exs")
-    File.ln_s!("real_source.exs", link_path)
+    git!(fixture.lease.worktree_path, ["add", "lib/candidate_only.ex"])
+    git!(fixture.lease.worktree_path, ["commit", "-m", "candidate-only"])
+    beam_path = "test/isolated_beam_test.exs"
 
-    assert {:error, :test_path_symlink} =
-             Validate.run(
-               %{
-                 workspace_id: fixture.lease.workspace_id,
-                 test_paths: ["test/symlink_test.exs"]
-               },
-               fixture.context
-             )
-  end
-
-  test "security regression base cannot pass from stale candidate BEAMs", %{tmp_dir: tmp_dir} do
-    fixture = leased_project(tmp_dir, valid_module())
-
-    candidate_only = Path.join(fixture.lease.worktree_path, "lib/candidate_only.ex")
-
-    File.write!(candidate_only, """
-    defmodule Tiny.CandidateOnly do
-      def fixed?, do: true
-    end
-    """)
-
-    test_path = "test/isolated_beam_test.exs"
-
-    write_candidate_test(fixture, test_path, """
+    write_candidate_test(fixture, beam_path, """
     defmodule Tiny.IsolatedBeamTest do
       use ExUnit.Case
+      test "candidate only", do: assert(Tiny.CandidateOnly.fixed?())
+    end
+    """)
 
-      test "candidate-only fix exists" do
-        assert Tiny.CandidateOnly.fixed?()
+    assert {:ok, beam_result} =
+             Validate.run(attested_params(fixture, [beam_path]), fixture.context)
+
+    assert beam_result.passed
+    assert beam_result.base.test_failures == 1
+  end
+
+  test "post-review HEAD replacement and selected-test blob replacement are denied before spawn",
+       %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/reviewed_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.ReviewedTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    params = attested_params(fixture, [test_path])
+
+    File.write!(Path.join(fixture.lease.worktree_path, test_path), "defmodule Replaced do\nend\n")
+    git!(fixture.lease.worktree_path, ["add", test_path])
+    git!(fixture.lease.worktree_path, ["commit", "-m", "replace reviewed test"])
+
+    assert {:error, :reviewed_material_changed} = Validate.run(params, fixture.context)
+  end
+
+  test "wrong task or principal cannot claim an attestation", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/authority_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.AuthorityTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    params = attested_params(fixture, [test_path])
+
+    assert {:error, :not_authorized} =
+             Task.async(fn ->
+               Validate.run(params, %{
+                 task_id: fixture.context.task_id,
+                 agent_id: "different-agent"
+               })
+             end)
+             |> Task.await(10_000)
+
+    assert {:error, :not_authorized} =
+             Task.async(fn ->
+               Validate.run(params, %{
+                 task_id: "different-task",
+                 agent_id: fixture.context.agent_id
+               })
+             end)
+             |> Task.await(10_000)
+  end
+
+  test "concurrent claim allows exactly one caller", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/claim_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.ClaimTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    %{review_attestation_id: id} = attested_params(fixture, [test_path])
+
+    results =
+      for _ <- 1..2 do
+        Task.async(fn -> WorkspaceLeaseRegistry.claim_review_attestation(id, fixture.context) end)
+      end
+      |> Enum.map(&Task.await(&1, 10_000))
+
+    assert Enum.count(results, &match?({:ok, _}, &1)) == 1
+    assert Enum.count(results, &match?({:error, :attestation_already_claimed}, &1)) == 1
+
+    for {:ok, %{resource: resource}} <- results do
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.release_validation_resource(
+                 resource.resource_id,
+                 fixture.context
+               )
+    end
+  end
+
+  test "candidate dependency mutation does not alter base dependency evidence", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture =
+      leased_project(tmp_dir, "defmodule Tiny.Security do\n  def allow_guest?, do: true\nend\n")
+
+    write_candidate_module(
+      fixture,
+      "defmodule Tiny.Security do\n  def allow_guest?, do: false\nend\n"
+    )
+
+    test_path = "test/dependency_isolation_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.DependencyIsolationTest do
+      use ExUnit.Case
+      test "dependency snapshot is revision-private" do
+        marker = Path.join(System.fetch_env!("MIX_DEPS_PATH"), "candidate-marker")
+        if Tiny.Security.allow_guest?(), do: refute(File.exists?(marker)), else: File.write!(marker, "candidate")
+        refute Tiny.Security.allow_guest?()
       end
     end
     """)
 
-    assert {:ok, result} =
-             Validate.run(
-               %{workspace_id: fixture.lease.workspace_id, test_paths: [test_path]},
-               fixture.context
-             )
-
+    assert {:ok, result} = Validate.run(attested_params(fixture, [test_path]), fixture.context)
     assert result.passed
-    assert result.reason == "security_regression_validated"
-    assert result.candidate.test_failures == 0
     assert result.base.test_failures == 1
   end
 
-  test "normal validation-resource release removes detached worktree and build roots", %{
+  test "selected symlink sources and empty selections fail before candidate execution", %{
     tmp_dir: tmp_dir
   } do
+    fixture = leased_project(tmp_dir, valid_module())
+
+    File.write!(
+      Path.join(fixture.lease.worktree_path, "test/real_source.exs"),
+      "defmodule Tiny.RealSource do\nend\n"
+    )
+
+    File.ln_s!("real_source.exs", Path.join(fixture.lease.worktree_path, "test/symlink_test.exs"))
+    git!(fixture.lease.worktree_path, ["add", "test/real_source.exs", "test/symlink_test.exs"])
+    git!(fixture.lease.worktree_path, ["commit", "-m", "symlink source"])
+
+    assert {:error, :test_path_symlink} =
+             Validate.run(attested_params(fixture, ["test/symlink_test.exs"]), fixture.context)
+
+    assert {:error, :invalid_selected_test_paths} =
+             Workspace.materialize_security_regression_material(
+               fixture.lease.worktree_path,
+               fixture.lease.workspace_id,
+               fixture.lease.base_commit,
+               []
+             )
+  end
+
+  test "normal resource release cleans detached snapshots and action metadata remains process-spawn",
+       %{
+         tmp_dir: tmp_dir
+       } do
     fixture = leased_project(tmp_dir, valid_module())
 
     assert {:ok, resource} =
@@ -284,17 +383,11 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
                fixture.context
              )
 
-    File.mkdir_p!(resource.candidate_build_path)
-    File.write!(Path.join(resource.candidate_build_path, "beam"), "stale")
-
     assert {:ok, snapshot} =
              WorkspaceLeaseRegistry.create_validation_snapshot(
                resource.resource_id,
                fixture.context
              )
-
-    assert File.dir?(snapshot.root_path)
-    assert File.dir?(snapshot.base_worktree_path)
 
     assert {:ok, %{status: "removed"}} =
              WorkspaceLeaseRegistry.release_validation_resource(
@@ -304,15 +397,128 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
 
     refute File.exists?(snapshot.root_path)
     refute File.exists?(snapshot.base_worktree_path)
+    assert Validate.name() == "coding_security_regression_validate"
+    assert Validate.category() == "coding"
+    assert Validate.effect_class() == :process_spawn
   end
 
-  test "lease owner death cleans active detached snapshot and build resources", %{
+  test "lease release and owner death discard private attestations", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/cleanup_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.CleanupTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    %{review_attestation_id: id} = attested_params(fixture, [test_path])
+
+    assert {:ok, _} =
+             WorkspaceLeaseRegistry.release(fixture.lease.workspace_id, :retain, fixture.context)
+
+    assert {:error, :not_found} =
+             WorkspaceLeaseRegistry.claim_review_attestation(id, fixture.context)
+  end
+
+  test "forced dependency snapshot failure cleans the actual private root", %{tmp_dir: tmp_dir} do
+    fixture = leased_project(tmp_dir, valid_module())
+    before = validation_roots()
+
+    assert {:error, :dependency_snapshot_failed} =
+             WorkspaceLeaseRegistry.acquire_validation_resource(
+               fixture.lease.workspace_id,
+               Map.put(fixture.context, :force_dependency_snapshot_failure, true)
+             )
+
+    assert validation_roots() == before
+
+    assert {:ok, []} =
+             WorkspaceLeaseRegistry.validation_resources(
+               fixture.lease.workspace_id,
+               fixture.context
+             )
+  end
+
+  test "council issues only after approved quorum routing and compares the reviewed full diff", %{
     tmp_dir: tmp_dir
   } do
-    repo = create_base_project(Path.join(tmp_dir, "owner_death_repo"), valid_module())
-    repo_root = git!(repo, ["rev-parse", "--show-toplevel"])
-    server = :"security_regression_registry_#{System.unique_integer([:positive])}"
+    fixture = leased_project(tmp_dir, valid_module())
+    test_path = "test/council_bound_test.exs"
+
+    write_candidate_test(fixture, test_path, """
+    defmodule Tiny.CouncilBoundTest do
+      use ExUnit.Case
+      test "ok", do: assert(true)
+    end
+    """)
+
+    {:ok, material} =
+      Workspace.materialize_security_regression_material(
+        fixture.lease.worktree_path,
+        fixture.lease.workspace_id,
+        fixture.lease.base_commit,
+        [test_path]
+      )
+
+    params = %{
+      diff: material.diff,
+      files: [test_path],
+      branch: fixture.lease.branch,
+      base_ref: fixture.lease.base_commit,
+      intent: "prove reviewed tree",
+      agent_id: fixture.context.agent_id,
+      workspace_id: fixture.lease.workspace_id,
+      test_paths: [test_path],
+      validation_profile: "security_regression"
+    }
+
+    approved = %{
+      decision: "approved",
+      approve_count: 3,
+      reject_count: 0,
+      abstain_count: 0,
+      quorum_met: true
+    }
+
+    context =
+      Map.merge(fixture.context, %{
+        persist_verdict: false,
+        review_runner: fn _request, _params, _context -> {:ok, approved} end
+      })
+
+    assert {:ok, %{review_attestation_id: id, tier_decision: "auto_proceed"}} =
+             Council.ReviewChange.run(params, context)
+
+    assert {:ok, _} = WorkspaceLeaseRegistry.claim_review_attestation(id, fixture.context)
+
+    assert {:ok, %{review_attestation_id: _id, tier_decision: "human_review"}} =
+             Council.ReviewChange.run(
+               params,
+               Map.put(context, :authority_widening?, true)
+             )
+
+    for decision <- [
+          %{approved | decision: "rejected", approve_count: 0, reject_count: 3},
+          %{approved | decision: "deadlock", approve_count: 1, reject_count: 1, quorum_met: false}
+        ] do
+      assert {:ok, result} =
+               Council.ReviewChange.run(
+                 params,
+                 %{context | review_runner: fn _, _, _ -> {:ok, decision} end}
+               )
+
+      refute Map.has_key?(result, :review_attestation_id)
+    end
+  end
+
+  test "owner death removes its private attestation records", %{tmp_dir: tmp_dir} do
+    repo = create_base_project(Path.join(tmp_dir, "owner-death-repo"), valid_module())
+    server = :"attestation_owner_death_#{System.unique_integer([:positive])}"
     start_supervised!({WorkspaceLeaseRegistry, name: server})
+    task_id = "task-owner-death"
+    principal_id = "agent-owner-death"
     parent = self()
 
     owner =
@@ -320,56 +526,89 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
         {:ok, lease} =
           WorkspaceLeaseRegistry.acquire(
             %{
-              repo_path: repo_root,
-              branch: "test/security-regression-owner-death",
-              worktree_base_dir: Path.join(tmp_dir, "owner-worktrees")
+              repo_path: repo,
+              branch: "test/attestation-owner-death",
+              task_id: task_id,
+              principal_id: principal_id,
+              worktree_base_dir: Path.join(tmp_dir, "owner-death-worktrees")
             },
             server: server
           )
 
-        {:ok, resource} =
-          WorkspaceLeaseRegistry.acquire_validation_resource(
-            lease.workspace_id,
-            server: server
-          )
+        test_path = "test/owner_death_test.exs"
+        path = Path.join(lease.worktree_path, test_path)
 
-        File.mkdir_p!(resource.base_build_path)
-        File.write!(Path.join(resource.base_build_path, "stale"), "beam")
-
-        {:ok, snapshot} =
-          WorkspaceLeaseRegistry.create_validation_snapshot(
-            resource.resource_id,
-            server: server
-          )
-
-        send(parent, {:active_resource, lease, snapshot})
-
-        receive do
-          :stop -> :ok
+        File.write!(path, """
+        defmodule Tiny.OwnerDeathTest do
+          use ExUnit.Case
+          test "ok", do: assert(true)
         end
+        """)
+
+        git!(lease.worktree_path, ["add", test_path])
+        git!(lease.worktree_path, ["commit", "-m", "owner death test"])
+
+        {:ok, material} =
+          Workspace.materialize_security_regression_material(
+            lease.worktree_path,
+            lease.workspace_id,
+            lease.base_commit,
+            [test_path]
+          )
+
+        {:ok, %{review_attestation_id: id}} =
+          WorkspaceLeaseRegistry.issue_review_attestation(
+            lease.workspace_id,
+            material,
+            String.duplicate("a", 64),
+            server: server
+          )
+
+        send(parent, {:attested_owner, id})
+        Process.sleep(:infinity)
       end)
 
-    assert_receive {:active_resource, lease, snapshot}, 5_000
-    assert File.dir?(lease.worktree_path)
-    assert File.dir?(snapshot.base_worktree_path)
-    assert File.dir?(snapshot.root_path)
-
+    assert_receive {:attested_owner, id}, 5_000
     Process.exit(owner, :kill)
 
     assert_eventually(fn ->
-      not File.exists?(snapshot.root_path) and not File.exists?(snapshot.base_worktree_path) and
-        not File.exists?(lease.worktree_path)
+      WorkspaceLeaseRegistry.claim_review_attestation(id,
+        server: server,
+        task_id: task_id,
+        principal_id: principal_id
+      ) == {:error, :not_found}
     end)
   end
 
-  test "exposes process-spawn action metadata without registry integration" do
-    assert Validate.name() == "coding_security_regression_validate"
-    assert Validate.category() == "coding"
-    assert Validate.effect_class() == :process_spawn
+  defp attested_params(fixture, test_paths) do
+    {:ok, material} =
+      Workspace.materialize_security_regression_material(
+        fixture.lease.worktree_path,
+        fixture.lease.workspace_id,
+        fixture.lease.base_commit,
+        test_paths
+      )
+
+    digest = :crypto.hash(:sha256, "council-approved") |> Base.encode16(case: :lower)
+
+    {:ok, %{review_attestation_id: id}} =
+      WorkspaceLeaseRegistry.issue_review_attestation(
+        fixture.lease.workspace_id,
+        material,
+        digest,
+        fixture.context
+      )
+
+    %{review_attestation_id: id}
   end
 
   defp leased_project(tmp_dir, base_module) do
-    repo = create_base_project(Path.join(tmp_dir, "repo"), base_module)
+    repo =
+      create_base_project(
+        Path.join(tmp_dir, "repo-#{System.unique_integer([:positive])}"),
+        base_module
+      )
+
     task_id = "task_security_regression_#{System.unique_integer([:positive])}"
     principal_id = "agent_security_regression_#{System.unique_integer([:positive])}"
     context = %{task_id: task_id, agent_id: principal_id}
@@ -378,20 +617,13 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
       Workspace.Acquire.run(
         %{
           repo_path: repo,
-          branch_name: "test/security-regression-#{System.unique_integer([:positive])}",
+          branch_name: "test/security-#{System.unique_integer([:positive])}",
           worktree_base_dir: Path.join(tmp_dir, "worktrees")
         },
         context
       )
 
-    on_exit(fn ->
-      _ =
-        WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, %{
-          task_id: task_id,
-          principal_id: principal_id
-        })
-    end)
-
+    on_exit(fn -> _ = WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, context) end)
     %{repo: repo, lease: lease, context: context}
   end
 
@@ -403,53 +635,60 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     File.write!(Path.join(path, "mix.exs"), """
     defmodule Tiny.MixProject do
       use Mix.Project
-
-      def project do
-        [app: :tiny, version: "0.1.0", elixir: "~> 1.14"]
-      end
+      def project, do: [app: :tiny, version: "0.1.0", elixir: "~> 1.14"]
     end
     """)
 
     File.write!(Path.join(path, "lib/security.ex"), base_module)
     File.write!(Path.join(path, "test/test_helper.exs"), "ExUnit.start()\n")
     git!(path, ["add", "mix.exs", "lib/security.ex", "test/test_helper.exs"])
-    git!(path, ["commit", "-m", "base mix project"])
+    git!(path, ["commit", "-m", "base"])
     path
   end
 
   defp write_candidate_module(fixture, source) do
     File.write!(Path.join(fixture.lease.worktree_path, "lib/security.ex"), source)
+    git!(fixture.lease.worktree_path, ["add", "lib/security.ex"])
+    git!(fixture.lease.worktree_path, ["commit", "-m", "candidate module"])
   end
 
   defp write_candidate_test(fixture, relative_path, source) do
     path = Path.join(fixture.lease.worktree_path, relative_path)
     File.mkdir_p!(Path.dirname(path))
     File.write!(path, source)
+    git!(fixture.lease.worktree_path, ["add", relative_path])
+    git!(fixture.lease.worktree_path, ["commit", "-m", "candidate test"])
   end
 
-  defp valid_module do
-    """
-    defmodule Tiny.Security do
-      def valid?, do: true
-    end
-    """
-  end
+  defp valid_module, do: "defmodule Tiny.Security do\n  def allow_guest?, do: false\nend\n"
 
   defp git!(path, args) do
     {output, 0} = System.cmd("git", ["-C", path | args], stderr_to_stdout: true)
     String.trim(output)
   end
 
-  defp assert_eventually(fun, attempts \\ 100)
+  defp validation_roots do
+    System.tmp_dir!()
+    |> File.ls!()
+    |> Enum.filter(&String.starts_with?(&1, "arbor-security-regression-"))
+    |> Enum.sort()
+  end
 
+  defp path_inside?(path, root) do
+    relative = Path.relative_to(path, root)
+    relative != ".." and not String.starts_with?(relative, "../")
+  end
+
+  defp assert_eventually(fun, attempts \\ 100)
   defp assert_eventually(fun, 0), do: assert(fun.())
 
   defp assert_eventually(fun, attempts) do
-    if fun.() do
-      :ok
-    else
-      Process.sleep(25)
-      assert_eventually(fun, attempts - 1)
-    end
+    if fun.(),
+      do: :ok,
+      else:
+        (
+          Process.sleep(25)
+          assert_eventually(fun, attempts - 1)
+        )
   end
 end

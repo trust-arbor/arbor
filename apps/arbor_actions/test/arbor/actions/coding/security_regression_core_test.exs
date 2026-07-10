@@ -5,34 +5,32 @@ defmodule Arbor.Actions.Coding.SecurityRegression.CoreTest do
 
   @moduletag :fast
 
-  test "accepts only the bounded opaque-workspace input" do
+  test "accepts only the bounded opaque review-attestation input" do
     assert {:ok, input} =
              Core.new(%{
-               workspace_id: "ws_opaque",
-               test_paths: ["test/security_regression_test.exs"],
+               review_attestation_id: "review_attestation_opaque",
                timeout: 10_000
              })
 
-    assert input.workspace_id == "ws_opaque"
+    assert input.review_attestation_id == "review_attestation_opaque"
     assert input.timeout == 10_000
 
     assert {:error, :unsupported_parameter} =
              Core.new(%{
-               workspace_id: "ws_opaque",
-               test_paths: ["test/security_regression_test.exs"],
+               review_attestation_id: "review_attestation_opaque",
                command: "mix test"
              })
 
-    assert {:error, :test_paths_not_sorted} =
+    assert {:error, :unsupported_parameter} =
              Core.new(%{
-               workspace_id: "ws_opaque",
+               review_attestation_id: "review_attestation_opaque",
                test_paths: ["test/z_test.exs", "test/a_test.exs"]
              })
 
-    assert {:error, :invalid_test_paths} =
+    assert {:error, :unsupported_parameter} =
              Core.new(%{
                workspace_id: "ws_opaque",
-               test_paths: ["../escape_test.exs"]
+               review_attestation_id: "review_attestation_opaque"
              })
   end
 

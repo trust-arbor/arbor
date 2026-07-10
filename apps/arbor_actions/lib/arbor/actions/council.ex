@@ -447,11 +447,16 @@ defmodule Arbor.Actions.Council do
         tier_decision: [
           type: :string,
           doc: "Deprecated; blast-radius tier decision is derived by the classifier"
-        ]
+        ],
+        workspace_id: [type: :string, doc: "Lease id for a reviewed-tree security regression"],
+        test_paths: [type: {:list, :string}, doc: "Selected reviewed security regression tests"],
+        validation_profile: [type: :string, doc: "Optional reviewed-tree validation profile"]
       ]
 
     alias Arbor.Actions
     alias Arbor.Actions.Council
+    alias Arbor.Actions.Coding.Workspace
+    alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
 
     def taint_roles do
       %{
@@ -465,7 +470,10 @@ defmodule Arbor.Actions.Council do
         graph: {:control, requires: [:path_traversal]},
         timeout: :data,
         quorum: :control,
-        tier_decision: :data
+        tier_decision: :data,
+        workspace_id: :control,
+        test_paths: {:control, requires: [:path_traversal]},
+        validation_profile: :control
       }
     end
 
@@ -488,15 +496,25 @@ defmodule Arbor.Actions.Council do
 
         result = Council.review_result(verdict, request, decision, persistence, routing)
 
-        Actions.emit_completed(__MODULE__, %{
-          branch: request.branch,
-          recommendation: verdict.recommendation,
-          decision: result.decision,
-          tier_decision: result.tier_decision,
-          human_required: result.human_required
-        })
+        with {:ok, result} <-
+               maybe_issue_security_regression_attestation(
+                 result,
+                 decision,
+                 request,
+                 routing,
+                 params,
+                 context
+               ) do
+          Actions.emit_completed(__MODULE__, %{
+            branch: request.branch,
+            recommendation: verdict.recommendation,
+            decision: result.decision,
+            tier_decision: result.tier_decision,
+            human_required: result.human_required
+          })
 
-        {:ok, result}
+          {:ok, result}
+        end
       else
         {:error, reason} = error ->
           Actions.emit_failed(__MODULE__, reason)
@@ -509,6 +527,76 @@ defmodule Arbor.Actions.Council do
         branch: Council.get_param(params, :branch),
         files_count: params |> Council.get_param(:files) |> List.wrap() |> length()
       }
+    end
+
+    defp maybe_issue_security_regression_attestation(
+           result,
+           _decision,
+           request,
+           routing,
+           params,
+           context
+         ) do
+      if Council.get_param(params, :validation_profile) == "security_regression" and
+           eligible_for_security_regression?(result) do
+        with workspace_id when is_binary(workspace_id) and workspace_id != "" <-
+               Council.get_param(params, :workspace_id),
+             test_paths when is_list(test_paths) <- Council.get_param(params, :test_paths),
+             {:ok, lease} <-
+               WorkspaceLeaseRegistry.inspect_lease(workspace_id, registry_caller(context)),
+             {:ok, material} <-
+               Workspace.materialize_security_regression_material(
+                 lease.worktree_path,
+                 workspace_id,
+                 lease.base_commit,
+                 test_paths
+               ),
+             true <- material.diff == request.diff,
+             {:ok, issued} <-
+               WorkspaceLeaseRegistry.issue_review_attestation(
+                 workspace_id,
+                 material,
+                 council_decision_digest(result, routing),
+                 registry_caller(context)
+               ) do
+          {:ok, Map.put(result, :review_attestation_id, issued.review_attestation_id)}
+        else
+          false -> {:error, :reviewed_diff_changed}
+          _ -> {:error, :security_regression_attestation_failed}
+        end
+      else
+        {:ok, result}
+      end
+    end
+
+    defp eligible_for_security_regression?(result) do
+      result.recommendation == "keep" and result.quorum_met == true and
+        result.tier_decision in ["auto_proceed", "human_review"]
+    end
+
+    defp registry_caller(context) do
+      %{
+        task_id: Workspace.context_task_id(context),
+        principal_id: Workspace.context_principal_id(context),
+        server: Map.get(context, :workspace_registry) || Map.get(context, "workspace_registry")
+      }
+    end
+
+    defp council_decision_digest(result, routing) do
+      [
+        "arbor-council-review-v1",
+        result.decision,
+        Integer.to_string(result.approve_count),
+        Integer.to_string(result.reject_count),
+        Integer.to_string(result.abstain_count),
+        Atom.to_string(routing.action),
+        Atom.to_string(routing.blast_radius),
+        if(result.quorum_met, do: "true", else: "false")
+      ]
+      |> Enum.map(fn value -> [Integer.to_string(byte_size(value)), ":", value, "\n"] end)
+      |> IO.iodata_to_binary()
+      |> then(&:crypto.hash(:sha256, &1))
+      |> Base.encode16(case: :lower)
     end
   end
 

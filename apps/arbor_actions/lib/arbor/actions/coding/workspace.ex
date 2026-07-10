@@ -278,6 +278,40 @@ defmodule Arbor.Actions.Coding.Workspace do
   def materialize_committed_change(_, _, _), do: {:error, :invalid_committed_change_args}
 
   @doc false
+  @spec materialize_security_regression_material(String.t(), String.t(), String.t(), [String.t()]) ::
+          {:ok, map()} | {:error, term()}
+  def materialize_security_regression_material(
+        worktree_path,
+        workspace_id,
+        base_commit,
+        test_paths
+      )
+      when is_binary(worktree_path) and is_binary(workspace_id) and is_binary(base_commit) and
+             is_list(test_paths) do
+    with {:ok, change} <- materialize_committed_change(worktree_path, base_commit),
+         :ok <- validate_selected_test_paths(test_paths),
+         {:ok, tree_oid} <- git_oid(worktree_path, "#{change.commit_hash}^{tree}"),
+         {:ok, selected_tests} <- git_test_blobs(worktree_path, change.commit_hash, test_paths),
+         :ok <- verify_materialized_head(worktree_path, change.commit_hash),
+         {:ok, material} <-
+           Arbor.Actions.Coding.SecurityRegression.Attestation.new(%{
+             workspace_id: workspace_id,
+             base_commit: base_commit,
+             candidate_commit: change.commit_hash,
+             candidate_tree_oid: tree_oid,
+             diff_sha256: sha256(change.diff),
+             selected_tests: selected_tests,
+             validation_profile: "security_regression"
+           }),
+         :ok <- verify_materialized_head(worktree_path, change.commit_hash) do
+      {:ok, Map.put(material, :diff, change.diff)}
+    end
+  end
+
+  def materialize_security_regression_material(_, _, _, _),
+    do: {:error, :invalid_security_regression_material_args}
+
+  @doc false
   @spec committed_diff(String.t(), String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
   def committed_diff(worktree_path, base_commit, head_commit)
       when is_binary(worktree_path) and is_binary(base_commit) and is_binary(head_commit) do
@@ -335,6 +369,58 @@ defmodule Arbor.Actions.Coding.Workspace do
 
   defp require_base_commit(base) when is_binary(base) and base != "", do: {:ok, base}
   defp require_base_commit(_), do: {:error, :missing_base_commit}
+
+  defp validate_selected_test_paths(paths) when is_list(paths) and paths != [] do
+    if paths == Enum.sort(paths) and Enum.uniq(paths) == paths and
+         Enum.all?(paths, &valid_selected_test_path?/1),
+       do: :ok,
+       else: {:error, :invalid_selected_test_paths}
+  end
+
+  defp validate_selected_test_paths(_), do: {:error, :invalid_selected_test_paths}
+
+  defp valid_selected_test_path?(path) when is_binary(path) do
+    path != "" and byte_size(path) <= 512 and String.ends_with?(path, "_test.exs") and
+      Path.type(path) != :absolute and path == Path.relative_to(path, ".") and
+      not Enum.member?(Path.split(path), "..") and not String.contains?(path, ["\0", "\\"])
+  end
+
+  defp valid_selected_test_path?(_), do: false
+
+  defp git_oid(path, revision) do
+    case git(path, ["rev-parse", "--verify", revision]) do
+      {:ok, output} -> {:ok, String.trim(output)}
+      {:error, reason} -> {:error, {:tree_oid_failed, reason}}
+    end
+  end
+
+  defp git_test_blobs(worktree_path, candidate_commit, paths) do
+    Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, acc} ->
+      case git(worktree_path, ["show", "#{candidate_commit}:#{path}"]) do
+        {:ok, bytes} ->
+          {:cont, {:ok, [%{path: path, blob_sha256: sha256(bytes)} | acc]}}
+
+        {:error, _reason} ->
+          {:halt, {:error, :selected_test_not_in_candidate}}
+      end
+    end)
+    |> case do
+      {:ok, tests} -> {:ok, Enum.reverse(tests)}
+      error -> error
+    end
+  end
+
+  defp verify_materialized_head(worktree_path, expected_commit) do
+    case git(worktree_path, ["rev-parse", "HEAD"]) do
+      {:ok, output} when is_binary(output) ->
+        if String.trim(output) == expected_commit, do: :ok, else: {:error, :material_head_changed}
+
+      _ ->
+        {:error, :material_head_changed}
+    end
+  end
+
+  defp sha256(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)
 
   defp require_exact_commit_hash(commit) do
     if Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, commit) do

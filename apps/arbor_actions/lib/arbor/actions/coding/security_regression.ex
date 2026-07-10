@@ -10,12 +10,11 @@ end
 
 defmodule Arbor.Actions.Coding.SecurityRegression.Validate do
   @moduledoc """
-  Prove that focused security tests pass on a leased candidate workspace and
-  fail as real ExUnit test failures at that lease's exact base commit.
+  Validate focused tests against the immutable tree reviewed by the council.
 
-  The action accepts only an opaque workspace lease id, sorted repository-
-  relative test paths, and a bounded timeout. Repository paths, refs, commands,
-  expected exits, environment, and build paths are registry- or shell-derived.
+  The action accepts only an opaque review attestation id and bounded timeout.
+  The registry claims the one-shot token before the shell can spawn code, then
+  supplies the authoritative workspace, revisions, tests, and profile.
   """
 
   use Jido.Action,
@@ -24,15 +23,10 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Validate do
     category: "coding",
     tags: ["coding", "security", "regression", "test", "two-revision"],
     schema: [
-      workspace_id: [
+      review_attestation_id: [
         type: :string,
         required: true,
-        doc: "Opaque workspace lease id"
-      ],
-      test_paths: [
-        type: {:list, :string},
-        required: true,
-        doc: "Sorted repository-relative *_test.exs paths"
+        doc: "One-shot reviewed-tree attestation id"
       ],
       timeout: [
         type: :non_neg_integer,
@@ -46,8 +40,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Validate do
 
   def taint_roles do
     %{
-      workspace_id: :control,
-      test_paths: {:control, requires: [:path_traversal]},
+      review_attestation_id: :control,
       timeout: :control
     }
   end
@@ -58,14 +51,13 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Validate do
   @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
   def run(params, context) when is_map(params) and is_map(context) do
     Actions.emit_started(__MODULE__, %{
-      workspace_id: param(params, :workspace_id),
-      test_count: params |> param(:test_paths) |> List.wrap() |> length()
+      review_attestation_id: param(params, :review_attestation_id)
     })
 
     with {:ok, input} <- Core.new(params),
          {:ok, result} <- Shell.run(input, context) do
       Actions.emit_completed(__MODULE__, %{
-        workspace_id: input.workspace_id,
+        review_attestation_id: input.review_attestation_id,
         passed: result.passed,
         reason: result.reason
       })

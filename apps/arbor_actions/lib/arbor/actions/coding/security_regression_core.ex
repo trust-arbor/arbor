@@ -10,9 +10,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
   @default_timeout 300_000
   @minimum_timeout 1_000
   @maximum_timeout 600_000
-  @maximum_test_paths 32
-  @maximum_path_bytes 512
-  @allowed_param_keys [:workspace_id, :test_paths, :timeout]
+  @allowed_param_keys [:review_attestation_id, :timeout]
   @allowed_param_string_keys Enum.map(@allowed_param_keys, &Atom.to_string/1)
 
   @artifact_tag :arbor_security_regression_ex_unit
@@ -33,8 +31,7 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
 
   @typedoc "A normalized, side-effect-free action input."
   @type input :: %{
-          workspace_id: String.t(),
-          test_paths: [String.t()],
+          review_attestation_id: String.t(),
           timeout: pos_integer()
         }
 
@@ -42,13 +39,12 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
   @spec new(map()) :: {:ok, input()} | {:error, atom()}
   def new(params) when is_map(params) do
     with :ok <- validate_param_keys(params),
-         {:ok, workspace_id} <- validate_workspace_id(param(params, :workspace_id)),
-         {:ok, test_paths} <- validate_test_paths(param(params, :test_paths)),
+         {:ok, review_attestation_id} <-
+           validate_review_attestation_id(param(params, :review_attestation_id)),
          {:ok, timeout} <- validate_timeout(param(params, :timeout)) do
       {:ok,
        %{
-         workspace_id: workspace_id,
-         test_paths: test_paths,
+         review_attestation_id: review_attestation_id,
          timeout: timeout
        }}
     end
@@ -208,9 +204,6 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
   @doc false
   def default_timeout, do: @default_timeout
 
-  @doc false
-  def maximum_test_paths, do: @maximum_test_paths
-
   defp validate_param_keys(params) do
     valid? =
       Enum.all?(Map.keys(params), fn key ->
@@ -220,50 +213,16 @@ defmodule Arbor.Actions.Coding.SecurityRegression.Core do
     if valid?, do: :ok, else: {:error, :unsupported_parameter}
   end
 
-  defp validate_workspace_id(value)
+  defp validate_review_attestation_id(value)
        when is_binary(value) and value != "" and byte_size(value) <= 256 do
     if String.valid?(value) and not String.contains?(value, <<0>>) do
       {:ok, value}
     else
-      {:error, :invalid_workspace_id}
+      {:error, :invalid_review_attestation_id}
     end
   end
 
-  defp validate_workspace_id(_value), do: {:error, :invalid_workspace_id}
-
-  defp validate_test_paths(paths) when is_list(paths) do
-    cond do
-      paths == [] ->
-        {:error, :invalid_test_paths}
-
-      length(paths) > @maximum_test_paths ->
-        {:error, :too_many_test_paths}
-
-      paths != Enum.sort(paths) or paths != Enum.uniq(paths) ->
-        {:error, :test_paths_not_sorted}
-
-      not Enum.all?(paths, &valid_test_path?/1) ->
-        {:error, :invalid_test_paths}
-
-      true ->
-        {:ok, paths}
-    end
-  end
-
-  defp validate_test_paths(_paths), do: {:error, :invalid_test_paths}
-
-  defp valid_test_path?(path) when is_binary(path) do
-    parts = Path.split(path)
-
-    String.valid?(path) and path != "" and byte_size(path) <= @maximum_path_bytes and
-      Path.type(path) == :relative and String.ends_with?(path, "_test.exs") and
-      not String.starts_with?(path, "-") and
-      not String.contains?(path, [<<0>>, "\\", "\n", "\r", "//"]) and
-      parts != [] and Enum.all?(parts, &(&1 not in ["", ".", "..", "/"])) and
-      Enum.join(parts, "/") == path
-  end
-
-  defp valid_test_path?(_path), do: false
+  defp validate_review_attestation_id(_value), do: {:error, :invalid_review_attestation_id}
 
   defp validate_timeout(nil), do: {:ok, @default_timeout}
 
