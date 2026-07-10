@@ -337,16 +337,20 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert data["sandbox_level"] == "strict"
 
       assert Map.take(data["metadata"], [
+               "capability_policy",
                "runtime",
                "runtime_policy",
                "sandbox_policy",
                "tool_policy",
+               "trust_preset_policy",
                "tools"
              ]) == %{
+               "capability_policy" => "exact",
                "runtime" => "arbor",
                "runtime_policy" => "exact",
                "sandbox_policy" => "exact",
                "tool_policy" => "exact",
+               "trust_preset_policy" => "exact",
                "tools" => ~w(file_read file_list file_search file_exists)
              }
 

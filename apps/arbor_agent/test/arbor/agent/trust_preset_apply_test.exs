@@ -287,16 +287,41 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     end
 
     test "pipeline architect capabilities and trust rules deny execution authority" do
+      workspace_root = tmp_workspace("pipeline_architect_exact")
+      File.mkdir_p!(workspace_root)
+      on_exit(fn -> File.rm_rf(workspace_root) end)
+
       assert {:ok, profile} =
                Lifecycle.create("Pipeline Architect Authority Probe",
-                 template: "pipeline_architect"
+                 template: "pipeline_architect",
+                 tenant_context:
+                   TenantContext.new("human_pipeline_architect", workspace_root: workspace_root),
+                 capabilities: [
+                   %{resource: "arbor://fs/write/**"},
+                   %{resource: "arbor://shell/**"},
+                   %{resource: "arbor://action/pipeline/run"}
+                 ],
+                 trust_preset: %{
+                   baseline: :ask,
+                   rules: %{"arbor://shell" => :auto}
+                 }
                )
 
       agent_id = profile.agent_id
       cleanup(agent_id)
 
+      assert profile.initial_capabilities
+             |> Enum.map(&(&1[:resource] || &1["resource"]))
+             |> Enum.sort() ==
+               Enum.sort([
+                 "arbor://orchestrator/execute",
+                 "arbor://fs/read/repo",
+                 "arbor://fs/list/repo"
+               ])
+
       assert {:ok, trust_profile} = TrustStore.get_profile(agent_id)
       assert trust_profile.baseline == :block
+      assert trust_profile.rules["arbor://shell"] == :block
 
       for uri <- [
             "arbor://fs/write",
@@ -318,19 +343,45 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
         assert Arbor.Trust.effective_mode(agent_id, uri, []) == :block,
                "expected #{uri} to resolve to :block"
 
-        assert {:error, _reason} = Arbor.Trust.authorize(agent_id, uri, :execute),
-               "expected #{uri} authorization to fail"
+        result = Arbor.Trust.authorize(agent_id, uri, :execute)
+
+        assert match?({:error, _reason}, result),
+               "expected #{uri} authorization to fail, got: #{inspect(result)}"
       end
 
       assert {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
       cap_uris = Enum.map(caps, & &1.resource_uri)
       repo_uri_root = repo_root() |> String.trim_leading("/")
 
-      assert "arbor://orchestrator/execute/**" in cap_uris
-      assert "arbor://fs/read" in cap_uris
-      assert "arbor://fs/list" in cap_uris
-      assert "arbor://fs/read/#{repo_uri_root}/**" in cap_uris
-      assert "arbor://fs/list/#{repo_uri_root}/**" in cap_uris
+      assert MapSet.new(cap_uris) ==
+               MapSet.new([
+                 "arbor://orchestrator/execute",
+                 "arbor://orchestrator/execute/exec",
+                 "arbor://orchestrator/execute/compute",
+                 "arbor://orchestrator/execute/transform",
+                 "arbor://orchestrator/execute/unknown",
+                 "arbor://fs/read",
+                 "arbor://fs/list",
+                 "arbor://fs/read/#{repo_uri_root}/**",
+                 "arbor://fs/list/#{repo_uri_root}/**"
+               ])
+
+      for uri <- [
+            "arbor://orchestrator/execute",
+            "arbor://orchestrator/execute/exec",
+            "arbor://orchestrator/execute/compute",
+            "arbor://orchestrator/execute/transform",
+            "arbor://orchestrator/execute/unknown"
+          ] do
+        assert {:ok, :authorized} = Arbor.Security.authorize(agent_id, uri, :execute)
+      end
+
+      assert {:error, _reason} =
+               Arbor.Security.authorize(
+                 agent_id,
+                 "arbor://orchestrator/execute/graph_mutation",
+                 :execute
+               )
 
       refute Enum.any?(cap_uris, fn uri ->
                String.starts_with?(uri, [

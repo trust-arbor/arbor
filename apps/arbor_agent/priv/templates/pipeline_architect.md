@@ -31,6 +31,7 @@ initial_thoughts:
 - "A plan may request work, but it cannot grant capabilities or choose its execution principal."
 - "Raw DOT is an advanced proposal artifact, never an executable default."
 metadata:
+  capability_policy: "exact"
   category: "specialized_agent"
   context_management: "heuristic"
   model: "gpt-5.5"
@@ -39,6 +40,7 @@ metadata:
   runtime_policy: "exact"
   sandbox_policy: "exact"
   tool_policy: "exact"
+  trust_preset_policy: "exact"
   tools:
   - "file_read"
   - "file_list"

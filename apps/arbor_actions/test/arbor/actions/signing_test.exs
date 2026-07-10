@@ -307,12 +307,12 @@ defmodule Arbor.Actions.SigningTest do
                Arbor.Actions.authorize_and_execute(
                  agent_id,
                  Arbor.Actions.File.Glob,
-                 %{pattern: "apps/*/mix.exs"},
+                 %{pattern: "lib/**/*.ex"},
                  %{workspace: workspace}
                )
 
       assert result.count > 0
-      assert Enum.all?(result.matches, &String.starts_with?(&1, Path.join(workspace, "apps")))
+      assert Enum.all?(result.matches, &String.starts_with?(&1, Path.join(workspace, "lib")))
     end
   end
 

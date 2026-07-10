@@ -42,6 +42,14 @@ defmodule Arbor.Agent.Lifecycle do
 
   require Logger
 
+  @session_turn_capability_uris [
+    "arbor://orchestrator/execute",
+    "arbor://orchestrator/execute/exec",
+    "arbor://orchestrator/execute/compute",
+    "arbor://orchestrator/execute/transform",
+    "arbor://orchestrator/execute/unknown"
+  ]
+
   @doc """
   Create a new agent from a template or options.
 
@@ -83,7 +91,12 @@ defmodule Arbor.Agent.Lifecycle do
          keychain <- create_keychain(identity),
          agent_id = identity.agent_id,
          :ok <- persist_signing_key(agent_id, identity),
-         :ok <- grant_capabilities(agent_id, opts[:capabilities] || []),
+         :ok <-
+           grant_capabilities(
+             agent_id,
+             opts[:capabilities] || [],
+             template_metadata_from_opts(opts)
+           ),
          :ok <- grant_workspace_capabilities(agent_id, opts),
          :ok <- grant_owner_chat_capability(agent_id, opts),
          :ok <- maybe_delegate_from_parent(agent_id, opts),
@@ -828,6 +841,13 @@ defmodule Arbor.Agent.Lifecycle do
     Map.get(metadata, key) || Map.get(metadata, Atom.to_string(key))
   end
 
+  defp template_metadata_from_opts(opts) do
+    case Keyword.get(opts, :template_data) do
+      data when is_map(data) -> Map.get(data, "metadata") || Map.get(data, :metadata) || %{}
+      _ -> %{}
+    end
+  end
+
   defp normalize_template_runtime(runtime) when runtime in [:arbor, "arbor"], do: :arbor
   defp normalize_template_runtime(runtime) when runtime in [:acp, "acp"], do: :acp
   defp normalize_template_runtime(_runtime), do: nil
@@ -879,8 +899,8 @@ defmodule Arbor.Agent.Lifecycle do
             opts =
               opts
               |> Keyword.put_new(:initial_goals, kw[:initial_goals])
-              |> Keyword.put_new(:capabilities, kw[:required_capabilities])
-              |> Keyword.put_new(:trust_preset, kw[:trust_preset])
+              |> put_template_capabilities(data, kw[:required_capabilities])
+              |> put_template_trust_preset(data, kw[:trust_preset])
               |> put_template_sandbox_level(data, kw[:sandbox_level])
               |> Keyword.put(:template, template_name)
               |> Keyword.put(:template_data, data)
@@ -904,8 +924,8 @@ defmodule Arbor.Agent.Lifecycle do
             opts =
               opts
               |> Keyword.put_new(:initial_goals, kw[:initial_goals])
-              |> Keyword.put_new(:capabilities, kw[:required_capabilities])
-              |> Keyword.put_new(:trust_preset, kw[:trust_preset])
+              |> put_template_capabilities(data, kw[:required_capabilities])
+              |> put_template_trust_preset(data, kw[:trust_preset])
               |> put_template_sandbox_level(data, kw[:sandbox_level])
               |> Keyword.put(:template, name)
               |> Keyword.put(:template_data, data)
@@ -946,6 +966,26 @@ defmodule Arbor.Agent.Lifecycle do
       )
     else
       Keyword.put_new(opts, :sandbox_level, sandbox_level)
+    end
+  end
+
+  defp put_template_capabilities(opts, data, capabilities) do
+    metadata = data["metadata"] || %{}
+
+    if exact_template_policy?(metadata, :capability_policy) do
+      Keyword.put(opts, :capabilities, capabilities)
+    else
+      Keyword.put_new(opts, :capabilities, capabilities)
+    end
+  end
+
+  defp put_template_trust_preset(opts, data, trust_preset) do
+    metadata = data["metadata"] || %{}
+
+    if exact_template_policy?(metadata, :trust_preset_policy) do
+      Keyword.put(opts, :trust_preset, trust_preset)
+    else
+      Keyword.put_new(opts, :trust_preset, trust_preset)
     end
   end
 
@@ -1028,9 +1068,9 @@ defmodule Arbor.Agent.Lifecycle do
     :exit, _ -> :ok
   end
 
-  defp grant_capabilities(_agent_id, []), do: :ok
+  defp grant_capabilities(_agent_id, [], _template_metadata), do: :ok
 
-  defp grant_capabilities(agent_id, capabilities) do
+  defp grant_capabilities(agent_id, capabilities, template_metadata) do
     # Check which capabilities the agent already has to avoid duplicates
     existing_uris =
       case Arbor.Security.CapabilityStore.list_for_principal(agent_id) do
@@ -1047,7 +1087,7 @@ defmodule Arbor.Agent.Lifecycle do
         resources =
           (cap[:resource] || cap["resource"])
           |> resolve_self_uri(agent_id)
-          |> expand_runtime_capability_uris()
+          |> expand_runtime_capability_uris(template_metadata)
 
         constraints = normalize_capability_constraints(cap[:constraints] || cap["constraints"])
 
@@ -1102,27 +1142,33 @@ defmodule Arbor.Agent.Lifecycle do
     |> String.replace(~r"/self$", "/#{agent_id}")
   end
 
-  defp expand_runtime_capability_uris(nil), do: []
+  defp expand_runtime_capability_uris(nil, _template_metadata), do: []
 
   # Template authors declare the coarse orchestrator execution gate. Runtime
-  # mandatory middleware checks per-node resources under that gate, so the
-  # concrete capability must be a subtree grant.
-  defp expand_runtime_capability_uris("arbor://orchestrator/execute"),
-    do: ["arbor://orchestrator/execute/**"]
+  # middleware checks per-node resources under that gate. Exact templates get
+  # only the built-in Session turn node resources; other templates retain the
+  # historical subtree expansion needed by arbitrary pipelines.
+  defp expand_runtime_capability_uris("arbor://orchestrator/execute", template_metadata) do
+    if exact_template_policy?(template_metadata, :capability_policy) do
+      @session_turn_capability_uris
+    else
+      ["arbor://orchestrator/execute/**"]
+    end
+  end
 
   # Repo file tools need two resources: the bare action URI for tool exposure /
   # signing, and an absolute repo-root path scope for FileGuard. Preserve
   # explicit `/**` grants as literal broad capability wildcards; `repo` is the
   # least-privilege template shorthand.
-  defp expand_runtime_capability_uris(uri)
+  defp expand_runtime_capability_uris(uri, _template_metadata)
        when uri in ["arbor://fs/read", "arbor://fs/read/repo"],
        do: repo_scoped_fs_uris(:read)
 
-  defp expand_runtime_capability_uris(uri)
+  defp expand_runtime_capability_uris(uri, _template_metadata)
        when uri in ["arbor://fs/list", "arbor://fs/list/repo"],
        do: repo_scoped_fs_uris(:list)
 
-  defp expand_runtime_capability_uris(uri), do: [uri]
+  defp expand_runtime_capability_uris(uri, _template_metadata), do: [uri]
 
   defp repo_scoped_fs_uris(operation) when operation in [:read, :list] do
     op = Atom.to_string(operation)
@@ -1167,6 +1213,14 @@ defmodule Arbor.Agent.Lifecycle do
   # Grant workspace-scoped fs capabilities when tenant_context provides a workspace root.
   # This ensures agents can access their user's workspace directory.
   defp grant_workspace_capabilities(agent_id, opts) do
+    if exact_template_policy?(template_metadata_from_opts(opts), :capability_policy) do
+      :ok
+    else
+      do_grant_workspace_capabilities(agent_id, opts)
+    end
+  end
+
+  defp do_grant_workspace_capabilities(agent_id, opts) do
     tenant_context = Keyword.get(opts, :tenant_context)
 
     workspace_root =
@@ -1540,7 +1594,7 @@ defmodule Arbor.Agent.Lifecycle do
         String.starts_with?(resource, "arbor://actions/execute/")
       end)
 
-    grant_capabilities(agent_id, capabilities)
+    grant_capabilities(agent_id, capabilities, extract_template_metadata(profile))
   end
 
   defp resolve_capabilities_for_regrant(%Profile{} = profile) do
