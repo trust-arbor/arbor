@@ -294,12 +294,12 @@ defmodule Arbor.Actions.Pipeline do
     workdir = Map.get(authority, :workdir)
 
     if is_binary(workdir) and workdir != "" do
-      case SafePath.resolve_within(path, workdir) do
-        {:ok, safe_path} ->
-          with :ok <- authorize_source_file_read(authority, safe_path) do
-            case File.read(safe_path) do
+      case resolve_real_source_file(path, workdir) do
+        {:ok, authorization_path, read_path} ->
+          with :ok <- authorize_source_file_read(authority, authorization_path) do
+            case File.read(read_path) do
               {:ok, content} -> {:ok, content}
-              {:error, reason} -> {:error, {:file_read_failed, safe_path, reason}}
+              {:error, reason} -> {:error, {:file_read_failed, read_path, reason}}
             end
           end
 
@@ -369,6 +369,7 @@ defmodule Arbor.Actions.Pipeline do
          {:ok, author_id} <- context_id(context, :author_id, caller_id),
          {:ok, task_id} <- context_id(context, :task_id, nil),
          {:ok, session_id} <- context_id(context, :session_id, auth.session_id),
+         :ok <- verify_execution_run_capability(principal, task_id, session_id),
          :ok <- verify_caller_run_capability(caller_id, task_id, session_id) do
       {:ok,
        %{
@@ -387,6 +388,22 @@ defmodule Arbor.Actions.Pipeline do
   end
 
   def verified_run_authority(_context), do: {:error, :verified_run_authority_required}
+
+  defp resolve_real_source_file(path, workdir) do
+    with {:ok, lexical_path} <- SafePath.resolve_within(path, workdir),
+         {:ok, real_workdir} <- SafePath.resolve_real(workdir),
+         {:ok, real_path} <- SafePath.resolve_real(lexical_path),
+         {:ok, ^real_path} <- SafePath.resolve_within(real_path, real_workdir),
+         {:ok, %File.Stat{type: :regular}} <- File.lstat(real_path) do
+      # Authorize the caller-visible lexical path so capabilities rooted at a
+      # platform alias such as macOS /var still match. Read the canonical path
+      # after proving that its real target remains inside the real workdir.
+      {:ok, lexical_path, real_path}
+    else
+      {:error, :path_traversal} = error -> error
+      _other -> {:error, :source_file_not_regular_or_outside_workdir}
+    end
+  end
 
   @doc false
   # Authority for reading/validating source. Inline source needs no file authority.
@@ -552,10 +569,23 @@ defmodule Arbor.Actions.Pipeline do
     |> maybe_put_opt(:session_id, authority.session_id)
   end
 
+  defp verify_execution_run_capability(principal_id, task_id, session_id) do
+    verify_run_capability(
+      principal_id,
+      task_id,
+      session_id,
+      :execution_principal_pipeline_run_authority_missing
+    )
+  end
+
   defp verify_caller_run_capability(caller_id, task_id, session_id) do
+    verify_run_capability(caller_id, task_id, session_id, :caller_pipeline_run_authority_missing)
+  end
+
+  defp verify_run_capability(principal_id, task_id, session_id, missing_error) do
     scope_opts = [] |> maybe_put_opt(:task_id, task_id) |> maybe_put_opt(:session_id, session_id)
 
-    with {:ok, capabilities} <- Arbor.Security.list_capabilities(caller_id, scope_opts),
+    with {:ok, capabilities} <- Arbor.Security.list_capabilities(principal_id, scope_opts),
          true <-
            Enum.any?(capabilities, fn capability ->
              Arbor.Security.capability_authorizes?(
@@ -566,7 +596,7 @@ defmodule Arbor.Actions.Pipeline do
            end) do
       :ok
     else
-      _ -> {:error, :caller_pipeline_run_authority_missing}
+      _ -> {:error, missing_error}
     end
   end
 

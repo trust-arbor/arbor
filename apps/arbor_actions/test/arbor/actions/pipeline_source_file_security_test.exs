@@ -22,6 +22,7 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
 
   setup do
     {:ok, _} = Application.ensure_all_started(:arbor_security)
+    start_trust_infrastructure()
 
     workdir =
       Path.join(
@@ -36,6 +37,9 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
     principal = "agent_pipeline_sf_#{System.unique_integer([:positive])}"
     caller = "agent_pipeline_caller_#{System.unique_integer([:positive])}"
     signer = fn _resource -> {:ok, %{signature: "test-fresh-fs-read"}} end
+
+    {:ok, _profile} = Arbor.Trust.create_trust_profile(principal)
+    {:ok, _profile} = Arbor.Trust.accept_graduation(principal, "arbor://fs/read")
 
     granted = []
 
@@ -58,6 +62,25 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
      caller: caller,
      signer: signer,
      granted: granted}
+  end
+
+  defp start_trust_infrastructure do
+    ensure_started(Arbor.Trust.EventStore)
+    ensure_started(Arbor.Trust.Store)
+
+    ensure_started(Arbor.Trust.Manager,
+      circuit_breaker: false,
+      decay: false,
+      event_store: true
+    )
+  end
+
+  defp ensure_started(module, opts \\ []) do
+    if Process.whereis(module) do
+      :already_running
+    else
+      start_supervised!({module, opts})
+    end
   end
 
   defp grant!(agent, resource) do
@@ -100,6 +123,7 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
       {:ok, _} -> true
       {:error, :orchestrator_not_available} -> true
       {:error, {:orchestrator_unavailable, _}} -> true
+      {:error, :unauthorized} -> true
       _ -> false
     end
   end
@@ -197,6 +221,46 @@ defmodule Arbor.Actions.Pipeline.SourceFileSecurityTest do
 
       assert deny_source_file_read?(trav_result),
              "traversal path must be denied, got: #{inspect(trav_result)}"
+    end
+
+    test "security regression: an in-workdir symlink cannot redirect source_file outside", %{
+      principal: principal,
+      signer: signer,
+      workdir: workdir
+    } do
+      grant!(principal, "arbor://action/pipeline/run")
+      grant!(principal, "arbor://fs/**")
+
+      outside =
+        Path.join(
+          System.tmp_dir!(),
+          "outside_pipeline_link_#{System.unique_integer([:positive])}.dot"
+        )
+
+      File.write!(outside, @simple_dot)
+      File.ln_s!(outside, Path.join(workdir, "outside-link.dot"))
+      on_exit(fn -> File.rm(outside) end)
+
+      assert {:error, {:invalid_path, "outside-link.dot", :path_traversal}} =
+               Run.run(
+                 %{source_file: "outside-link.dot", initial_context: %{}},
+                 run_context(principal, signer, workdir)
+               )
+    end
+
+    test "security regression: caller run authority cannot substitute for executor authority", %{
+      principal: principal,
+      caller: caller,
+      signer: signer,
+      workdir: workdir
+    } do
+      grant!(caller, "arbor://action/pipeline/run")
+
+      assert {:error, :execution_principal_pipeline_run_authority_missing} =
+               Run.run(
+                 %{source: @simple_dot, initial_context: %{}},
+                 run_context(principal, signer, workdir, caller_id: caller)
+               )
     end
 
     test "authorized exact path succeeds past the source_file gate", %{
