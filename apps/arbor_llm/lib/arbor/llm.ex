@@ -16,7 +16,17 @@ defmodule Arbor.LLM do
   alias Arbor.LLM.Retry
 
   alias Arbor.LLM.Tool
+
+  @eval_subjects %{
+    "llm" => Arbor.LLM.Eval.Subject
+  }
+
   @type generate_opts :: keyword()
+
+  @doc "Returns an LLM-owned eval subject from the closed symbolic catalog."
+  @spec eval_subject(String.t()) :: module() | nil
+  def eval_subject(name) when is_binary(name), do: Map.get(@eval_subjects, name)
+  def eval_subject(_name), do: nil
 
   @spec generate(generate_opts()) ::
           {:ok, Arbor.LLM.Response.t()} | {:error, term()}

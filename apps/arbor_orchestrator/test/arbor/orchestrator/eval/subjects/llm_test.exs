@@ -2,74 +2,59 @@ defmodule Arbor.Orchestrator.Eval.Subjects.LLMTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Orchestrator.Eval.Subjects.LLM
+  alias Arbor.LLM.{Client, Request, Response}
+  alias Arbor.LLM.Eval.Subject, as: CanonicalSubject
+  alias Arbor.Orchestrator.Eval.Subjects.LLM, as: CompatibilitySubject
 
-  describe "run/2" do
-    @tag :fast
-    test "returns error for unknown provider" do
-      result = LLM.run("hello", provider: "nonexistent")
-      assert {:error, msg} = result
-      assert msg =~ "unknown provider"
-    end
+  defmodule CompatibilityAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
 
-    @tag :llm_local
-    test "returns error when LM Studio is not available" do
-      result = LLM.run("hello", provider: "lm_studio", timeout: 1_000)
+    @impl true
+    def provider, do: "compat_eval"
 
-      case result do
-        {:error, _reason} -> :ok
-        {:ok, %{text: text}} -> assert is_binary(text)
-      end
-    end
+    @impl true
+    def complete(%Request{model: "error"}, _opts), do: {:error, :compat_transport_failed}
 
-    @tag :llm_local
-    test "accepts string input" do
-      result = LLM.run("test prompt", provider: "lm_studio", timeout: 1_000)
-      assert match?({:ok, _}, result) or match?({:error, _}, result)
-    end
-
-    @tag :llm_local
-    test "accepts map input with prompt and system keys" do
-      input = %{"prompt" => "Hello", "system" => "You are helpful"}
-      result = LLM.run(input, provider: "lm_studio", timeout: 1_000)
-      assert match?({:ok, _}, result) or match?({:error, _}, result)
-    end
-
-    @tag :llm_local
-    test "accepts atom-keyed map input" do
-      input = %{prompt: "Hello", system: "Be helpful"}
-      result = LLM.run(input, provider: "lm_studio", timeout: 1_000)
-      assert match?({:ok, _}, result) or match?({:error, _}, result)
-    end
-
-    @tag :llm_local
-    test "returns error for removed CLI provider names" do
-      for provider <- ~w(claude_cli codex_cli) do
-        result = LLM.run("hello", provider: provider, timeout: 1_000)
-        assert {:error, msg} = result
-        assert msg =~ "unknown provider"
-      end
+    def complete(%Request{}, _opts) do
+      {:ok, %Response{text: "compatible", usage: %{output_tokens: 3}, raw: %{}}}
     end
   end
 
-  describe "run/2 with live local models" do
-    @describetag :llm_local
+  defp client do
+    Client.new()
+    |> Client.register_adapter(CompatibilityAdapter)
+  end
 
-    test "generates text via LM Studio" do
-      result =
-        LLM.run("Return exactly the word 'hello'", provider: "lm_studio", timeout: 30_000)
+  test "preserves the compatibility module and public arities" do
+    assert CompatibilitySubject.module_info(:module) == CompatibilitySubject
+    assert function_exported?(CompatibilitySubject, :run, 1)
+    assert function_exported?(CompatibilitySubject, :run, 2)
+  end
 
-      case result do
-        {:ok, %{text: text, duration_ms: ms, model: model}} ->
-          assert is_binary(text)
-          assert String.length(text) > 0
-          assert ms > 0
-          assert is_binary(model)
+  test "delegates successful results to the canonical LLM subject" do
+    opts = [client: client(), provider: "compat_eval", model: "model"]
 
-        {:error, _reason} ->
-          # LM Studio not running — acceptable in CI
-          :ok
-      end
-    end
+    assert {:ok, compatibility_output} = CompatibilitySubject.run("hello", opts)
+    assert {:ok, canonical_output} = CanonicalSubject.run("hello", opts)
+
+    assert Map.delete(compatibility_output, :duration_ms) ==
+             Map.delete(canonical_output, :duration_ms)
+
+    assert is_integer(compatibility_output.duration_ms)
+  end
+
+  test "preserves canonical error behavior" do
+    opts = [client: client(), provider: "compat_eval", model: "error"]
+
+    assert CompatibilitySubject.run("hello", opts) == CanonicalSubject.run("hello", opts)
+    assert CompatibilitySubject.run("hello", opts) == {:error, :compat_transport_failed}
+  end
+
+  test "preserves the unknown provider error shape" do
+    assert {:error, message} =
+             CompatibilitySubject.run("hello", provider: "definitely_not_a_provider")
+
+    assert message =~ "unknown provider: definitely_not_a_provider"
+    assert message =~ "Available:"
   end
 end
