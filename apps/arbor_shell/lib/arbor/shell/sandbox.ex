@@ -114,12 +114,12 @@ defmodule Arbor.Shell.Sandbox do
   backticks, or redirection `>`/`<`) that the single-command path rejects.
 
   Used by `Arbor.Shell.authorize_and_execute/3` to decide whether a command is
-  compound. When `Arbor.Shell.compound_shell_enabled?/0` is true (opt-in; default
-  false), compounds route to the capability-checked interpreter
-  (`Arbor.Shell.CapShell`); otherwise the single-command sandbox rejects them.
-  (A quoted metacharacter — `grep "a|b"` — also matches here and, when CapShell
-  is enabled, is routed to the interpreter, which parses it correctly as a
-  single command.)
+  compound. When `Arbor.Shell.compound_shell_enabled?/0` is true (config opt-in;
+  default false), compounds route to the **fail-closed** CapShell unavailable
+  path — configuration cannot re-enable execution. When the flag is off/absent
+  (the default), the single-command sandbox rejects metacharacters on the
+  bounded Executor path. (A quoted metacharacter — `grep "a|b"` — also matches
+  here as compound.)
   """
   @spec compound?(String.t()) :: boolean()
   def compound?(command) when is_binary(command) do

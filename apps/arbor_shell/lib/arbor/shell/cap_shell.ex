@@ -1,131 +1,77 @@
 defmodule Arbor.Shell.CapShell do
   @moduledoc """
-  Capability-checked **compound** shell execution (PROTOTYPE).
+  Fail-closed compound-shell boundary (intentionally unavailable).
 
-  Where `Arbor.Shell.authorize_and_execute/3` authorizes a *single* command and
-  the sandbox hard-rejects any compound command (pipes, `&&`, `$(…)`,
-  redirection — see `Arbor.Shell.Sandbox`), `CapShell` runs compound commands
-  *safely* by parsing and executing them in one engine (the `bash` library —
-  a pure-Elixir bash parser+interpreter) with a capability-derived policy.
+  ## Intentional security API break
 
-  ## Why this is safe
+  CapShell previously attempted capability-checked **compound** shell execution
+  (pipes, `&&`/`||`/`;`, substitution, redirection) via the pinned `bash`
+  library and a `Bash.CommandPolicy` wired to Arbor capabilities. That prototype
+  is **retired as an execution path**.
 
-  The library parses AND executes (no parse-vs-execute gap — what we authorize is
-  what runs), and its `Bash.CommandPolicy` is consulted for **every** command and
-  **every** filesystem path, including inside pipes, command substitution
-  (`$(…)`), and redirections — and is **immutable** (the running script cannot
-  disable it). We wire that policy to Arbor's capability system:
+  Root-cause analysis against pinned Bash/ExCmd confirmed it cannot currently
+  satisfy Arbor's product-level fail-closed capability and resource guarantees:
 
-  - **commands** → `Arbor.Shell.CapPolicy` allowlist (`arbor://shell/exec/*`),
-    minus an absolute dangerous-command floor a grant does not override. Builtins
-    (`echo`, `cd`, …) are allowed (they don't exec host binaries). The check is a
-    dynamic function, so it runs in-process against live `CapPolicy` — no IPC.
-  - **paths** → `Arbor.Security.FileGuard` (`arbor://fs/read|write/*`), so a
-    redirect/read is allowed only within the agent's fs capabilities.
+  1. **`Bash.CommandPolicy` sees command name/category but not argv** — dynamic
+     expansion and opaque wrappers can bypass dangerous flag/command semantics.
+  2. **`Bash.Session.new` is a synchronous creation boundary** without the
+     cancellation contract Arbor needs for bounded admission.
+  3. **Foreground, background, and coprocess branches have different owners** —
+     Session death is not a uniform process-tree proof.
+  4. **Static AST admission cannot prove runtime-expanded argv** — what is
+     authorized at parse time is not what may execute after expansion.
 
-  ## Status / limitations (prototype)
+  Therefore every public CapShell execution entry returns the stable error
+  `{:error, {:compound_shell_unavailable, :security_boundary_incomplete}}`
+  **before** parsing, `Bash.Session` creation, external process launch,
+  filesystem access, or adapter dispatch. There is no silent fallback to an
+  unchecked shell or to the bounded single-command executor.
 
-  - Wired into `Arbor.Shell.authorize_and_execute/3` and the public facade
-    `Arbor.Shell.execute_compound_with_capabilities/3` (used by the actions
-    shell adapter) behind `Arbor.Shell.compound_shell_enabled?/0`. That gate
-    **defaults false** until CapShell has absolute timeout and retained-output
-    bounds equivalent to `Arbor.Shell.Executor`. Operators opt in with
-    `config :arbor_shell, compound_shell_enabled: true`. Other libraries must
-    call those facade APIs — not this module — for compound detection/execution.
-  - The library's `paths` policy callback is arity-1 (path only, no read/write
-    operation), so the fs check here is coarse: a path is allowed if the agent
-    holds *any* fs capability (read or write) covering it. Finer read/write
-    granularity would need the operation at this layer (a candidate upstream
-    improvement).
-  - No absolute wall-clock timeout or retained-output ceiling yet — that is why
-    the default remains fail-closed (see roadmap
-    `cap-shell-absolute-timeout-and-output-bounds`).
-  - The library is pre-1.0 (pinned); its correctness is part of the security
-    boundary, so the test suite carries adversarial bypass cases.
+  Configuration (`:arbor_shell, :compound_shell_enabled`) defaults to `false`
+  and **cannot re-enable** this prototype when set `true` — operators who opt
+  in still receive the same unavailable error (see `Arbor.Shell`).
+
+  ## Missing upstream contracts (required before any re-enable)
+
+  Any future compound-shell path must obtain, at minimum:
+
+  - **argv-aware runtime policy after expansion** — policy must observe the
+    final command name *and* argv after shell expansion, not only the static
+    AST name/category.
+  - **bounded / cancelable session creation and receipt** — session admission
+    and output collection must honor absolute wall-clock deadlines and
+    retained-output ceilings with a cancelable control plane (not
+    post-truncation after unbounded collection).
+  - **deterministic ownership / termination for every admitted branch** —
+    foreground, background, and coprocess work must share a uniform process-tree
+    ownership proof so Session death terminates all admitted descendants.
+
+  Until those contracts exist upstream (or Arbor owns an equivalent runtime),
+  CapShell remains this small, auditable fail-closed stub. Ordinary
+  non-compound execution continues via `Arbor.Shell.Executor` /
+  `Arbor.Shell.execute/2` unchanged.
   """
 
-  alias Arbor.Shell.CapPolicy
-
-  require Logger
-
-  # Absolute denylist — commands never allowed regardless of capability grant
-  # (parity with Arbor.Shell.Sandbox's dangerous-command floor; the floor is the
-  # hard boundary a cap grant does not lift).
-  @absolute_deny ~w[rm rmdir sudo doas su shutdown reboot halt poweroff mkfs dd]
-
-  @type result :: %{
-          success?: boolean(),
-          exit_code: integer() | nil,
-          stdout: String.t(),
-          stderr: String.t()
-        }
+  @unavailable_reason {:compound_shell_unavailable, :security_boundary_incomplete}
 
   @doc """
-  Parse and run a (possibly compound) shell command for `agent_id`, with every
-  command and filesystem path capability-checked.
+  Fail closed: compound shell execution is intentionally unavailable.
 
-  Returns `{:ok, result}` where `result` carries stdout/stderr/exit_code — a
-  denied command surfaces as a non-zero exit + a `"command not allowed"` stderr
-  (the advisory the agent sees), not a crash. Returns `{:error, {:parse_error,
-  message}}` for unparseable input.
+  Does not parse input, create a `Bash.Session`, launch processes, touch the
+  filesystem, or dispatch to any shell adapter. Always returns
+  `{:error, {:compound_shell_unavailable, :security_boundary_incomplete}}`.
+
+  This is an intentional security API break for the retired CapShell prototype —
+  there is no override or test hook that re-enables execution.
   """
   @spec run(String.t(), String.t(), keyword()) ::
-          {:ok, result()} | {:error, {:parse_error, String.t()}}
-  def run(agent_id, command, opts \\ []) when is_binary(agent_id) and is_binary(command) do
-    allowlist = CapPolicy.allowlist_for(agent_id)
+          {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
+  def run(agent_id, command, opts \\ [])
 
-    command_policy = [
-      commands: command_fn(allowlist),
-      paths: path_fn(agent_id, opts)
-    ]
-
-    case Bash.run(command, command_policy: command_policy) do
-      {:error, %{command: "parse"} = parse_result, _session} ->
-        {:error, {:parse_error, parse_error_message(parse_result)}}
-
-      {_status, _result, _session} = run_result ->
-        {:ok,
-         %{
-           success?: Bash.success?(run_result),
-           exit_code: Bash.exit_code(run_result),
-           stdout: Bash.stdout(run_result),
-           stderr: Bash.stderr(run_result)
-         }}
-    end
+  def run(agent_id, command, opts)
+      when is_binary(agent_id) and is_binary(command) and is_list(opts) do
+    # Fail closed before any parse / Session / process / fs / adapter work.
+    # `_opts` is accepted for call-site compatibility only.
+    {:error, @unavailable_reason}
   end
-
-  # Per-command capability check (dynamic, in-process). Builtins are always
-  # allowed (no host binary). Externals/functions/interop must be in the agent's
-  # cap-derived allowlist AND not in the absolute floor.
-  defp command_fn(allowlist) do
-    fn name, category ->
-      base = Path.basename(name)
-
-      cond do
-        category == :builtin -> true
-        base in @absolute_deny -> false
-        true -> CapPolicy.allows?(allowlist, base)
-      end
-    end
-  end
-
-  # Per-path capability check via FileGuard. Coarse (read OR write) because the
-  # library's paths callback does not carry the operation. An explicit
-  # `opts[:paths]` (a `(path -> boolean)` fun) overrides — useful for testing the
-  # seam without a full fs-capability setup. Fails closed.
-  defp path_fn(agent_id, opts) do
-    case Keyword.get(opts, :paths) do
-      fun when is_function(fun, 1) ->
-        fun
-
-      _ ->
-        fn path ->
-          guard = Arbor.Security.FileGuard
-          guard.can?(agent_id, path, :read) or guard.can?(agent_id, path, :write)
-        end
-    end
-  end
-
-  defp parse_error_message(%{error: msg}) when is_binary(msg), do: msg
-  defp parse_error_message(other), do: inspect(other)
 end

@@ -79,18 +79,23 @@ defmodule Arbor.Shell do
   # Public API — Compound shell (CapShell) feature gate
   # ===========================================================================
 
+  @compound_shell_unavailable {:compound_shell_unavailable, :security_boundary_incomplete}
+
   @doc """
-  Whether the prototype compound-shell backend (`Arbor.Shell.CapShell`) is enabled.
+  Whether compound-shell routing is configured as enabled.
 
   Reads `Application.get_env(:arbor_shell, :compound_shell_enabled)`. **Defaults
-  to `false` (fail-closed)** when the key is absent: CapShell lacks absolute
-  timeout and retained-output bounds that `Arbor.Shell.Executor` already enforces,
-  so authorized compound commands must not route around the bounded single-command
-  path until those resource limits exist.
+  to `false` (fail-closed)** when the key is absent.
 
-  Operators may set `config :arbor_shell, compound_shell_enabled: true` to opt
-  into CapShell deliberately. Other libraries (e.g. `Arbor.Actions.Shell`) must
-  call this facade rather than re-reading Application env with their own default.
+  **Intentional security API break:** even when an operator sets
+  `config :arbor_shell, compound_shell_enabled: true`, CapShell does **not**
+  execute compound commands. Configuration only controls routing into the
+  fail-closed unavailable path (`authorize_and_execute/3` /
+  `execute_compound_with_capabilities/3`); it cannot re-enable the retired
+  prototype. See `Arbor.Shell.CapShell` for the missing upstream contracts.
+
+  Other libraries (e.g. `Arbor.Actions.Shell`) must call this facade rather than
+  re-reading Application env with their own default.
   """
   @spec compound_shell_enabled?() :: boolean()
   def compound_shell_enabled? do
@@ -109,41 +114,27 @@ defmodule Arbor.Shell do
   def compound_command?(command) when is_binary(command), do: Sandbox.compound?(command)
 
   @doc """
-  Execute a compound shell command with CapShell's **per-command and per-path**
-  capability checks for `agent_id`.
+  Fail-closed compound-shell entry (public facade over `Arbor.Shell.CapShell`).
 
-  Public facade over `Arbor.Shell.CapShell`. Other libraries must not call
-  CapShell (or Sandbox) internals. Every external command and filesystem path
-  in the compound string is capability-checked — this is **not** an unchecked
-  authority bypass.
+  **Intentional security API break:** always returns
+  `{:error, {:compound_shell_unavailable, :security_boundary_incomplete}}`
+  without parsing, session creation, process launch, filesystem access, or
+  adapter dispatch. Does **not** fall back to an unchecked shell or the bounded
+  single-command executor.
 
-  Callers that already performed a coarse Trust/Security authorization (for
-  example `Arbor.Actions.Shell.Execute` after `authorize_command/3`) use this
-  instead of `execute/2` when `compound_shell_enabled?/0` is true and
-  `compound_command?/1` is true. When CapShell is disabled (the default), prefer
-  `execute/2`, which rejects metacharacters on the bounded single-command path.
+  Callers that already authorized (e.g. `Arbor.Actions.Shell.Execute`) use this
+  when `compound_shell_enabled?/0` is true and `compound_command?/1` is true so
+  the opt-in path still cannot execute. When CapShell routing is disabled (the
+  default), prefer `execute/2`, which rejects metacharacters on the bounded
+  single-command path.
   """
   @spec execute_compound_with_capabilities(String.t(), String.t(), keyword()) ::
-          {:ok, map()} | {:error, term()}
+          {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
   def execute_compound_with_capabilities(agent_id, command, opts \\ [])
       when is_binary(agent_id) and is_binary(command) do
-    case CapShell.run(agent_id, command, opts) do
-      {:ok, %{exit_code: code, stdout: out, stderr: err} = result} ->
-        {:ok,
-         %{
-           exit_code: code,
-           stdout: out,
-           stderr: err,
-           duration_ms: Map.get(result, :duration_ms, 0),
-           timed_out: Map.get(result, :timed_out, false)
-         }}
-
-      {:ok, result} when is_map(result) ->
-        {:ok, result}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    # Direct callers cannot bypass the fail-closed gate — CapShell.run/3 never
+    # parses or launches. Project the stable error without reshaping.
+    CapShell.run(agent_id, command, opts)
   end
 
   # ===========================================================================
@@ -179,70 +170,17 @@ defmodule Arbor.Shell do
           {:ok, map()}
           | {:ok, :pending_approval, String.t()}
           | {:error, :unauthorized | :timeout | term()}
+          | {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
   # H6: Pass command context into authorize/4 opts so the reflex pipeline
   # can evaluate command-aware rules (e.g., blocking `rm -rf /`).
   def authorize_and_execute(agent_id, command, opts \\ []) do
-    opts = put_cap_allowlist(opts, agent_id)
-
     if compound_shell_enabled?() and compound_command?(command) do
-      authorize_and_execute_compound(agent_id, command, opts)
+      # Fail closed before allowlist, auth dispatch, parse, Session, process, or fs.
+      # Config true must not re-enable the retired CapShell prototype.
+      {:error, @compound_shell_unavailable}
     else
+      opts = put_cap_allowlist(opts, agent_id)
       authorize_and_dispatch(agent_id, command, opts, fn -> execute(command, opts) end)
-    end
-  end
-
-  # Compound commands (pipes, &&/||/;, $(…), redirection) — which the
-  # single-command sandbox rejects — run through the capability-checked
-  # interpreter via `execute_compound_with_capabilities/3`, which cap-checks
-  # EVERY command + every filesystem path. Gated by `compound_shell_enabled?/0`
-  # (Application config `:arbor_shell, :compound_shell_enabled`, **default false**):
-  # CapShell is an opt-in prototype until it has absolute timeout + output bounds
-  # equivalent to Executor. With the flag off/absent, the caller above falls back
-  # to the single-command path (sandbox metacharacter rejection).
-  #
-  # The capability *gate* (gate-1) here cap-checks the first NON-builtin command
-  # rather than the literal first token, so a compound that opens with a shell
-  # builtin (`cd dir && git …`, `echo x && …`) is not spuriously rejected for
-  # lacking a cap on the builtin. CapShell remains the authoritative per-command
-  # authorizer (builtins allowed; externals cap-checked); gate-1 + the reflex /
-  # approval pipeline (which see the full string) are the coarse pre-gate. When
-  # the compound is all-builtin (or all dynamic, e.g. `$CMD`), there is no host
-  # binary to gate at this layer — skip gate-1 and let CapShell authorize each
-  # command as it resolves at runtime.
-  defp authorize_and_execute_compound(agent_id, command, opts) do
-    case gate_command_for(command) do
-      nil ->
-        execute_compound_with_capabilities(agent_id, command, opts)
-
-      gate_command ->
-        authorize_and_dispatch(
-          agent_id,
-          command,
-          Keyword.put(opts, :gate_command, gate_command),
-          fn -> execute_compound_with_capabilities(agent_id, command, opts) end
-        )
-    end
-  end
-
-  # The first non-builtin command name in a (compound) command, for the gate-1
-  # capability check. Uses the bash parser + the library's builtin registry, so
-  # quoting/substitution are handled correctly (a quoted `;` is not a separator).
-  # Returns nil when every command is a builtin or has a non-static name
-  # (CapShell authorizes those at runtime). Falls back to the first token if the
-  # command does not parse.
-  defp gate_command_for(command) do
-    case Bash.parse(command) do
-      {:ok, ast} ->
-        ast
-        |> Bash.AST.reduce([], fn
-          %Bash.AST.Command{literal_name: name}, acc when is_binary(name) -> [name | acc]
-          _node, acc -> acc
-        end)
-        |> Enum.reverse()
-        |> Enum.find(fn name -> not Bash.Builtin.builtin?(Path.basename(name)) end)
-
-      _ ->
-        extract_command_name(command)
     end
   end
 

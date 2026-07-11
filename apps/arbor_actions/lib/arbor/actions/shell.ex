@@ -285,11 +285,13 @@ defmodule Arbor.Actions.Shell do
       end
     end
 
-    # Execute after Trust already authorized. When the shell facade opts into
-    # CapShell (`Arbor.Shell.compound_shell_enabled?/0`, default false), compound
-    # commands go through the capability-checked facade
-    # (`execute_compound_with_capabilities/3` — per-command + per-path checks);
-    # otherwise (and for simple commands) use the bounded Executor via execute/2.
+    # Execute after Trust already authorized. When compound-shell routing is
+    # configured (`Arbor.Shell.compound_shell_enabled?/0`, default false),
+    # compound commands go through the public facade
+    # `execute_compound_with_capabilities/3`, which **fail-closes** with
+    # `{:compound_shell_unavailable, :security_boundary_incomplete}` — config
+    # cannot re-enable the retired CapShell prototype. Otherwise (and for simple
+    # commands) use the bounded Executor via execute/2.
     # Call only public Arbor.Shell APIs — never Sandbox or CapShell internals.
     defp execute_authorized_shell(agent_id, command, opts) do
       if Arbor.Shell.compound_shell_enabled?() and Arbor.Shell.compound_command?(command) do
@@ -338,6 +340,11 @@ defmodule Arbor.Actions.Shell do
     defp format_error({:shell_metacharacters, chars}),
       do:
         "Shell metacharacters #{inspect(chars)} are not allowed. Use individual commands without chaining (no ;, &&, ||, |, etc.)."
+
+    defp format_error({:compound_shell_unavailable, :security_boundary_incomplete}),
+      do:
+        "Compound shell execution is unavailable (security boundary incomplete). " <>
+          "Use individual non-compound commands; CapShell is intentionally fail-closed."
 
     defp format_error(reason) when is_binary(reason), do: reason
     defp format_error(reason), do: "Shell execution failed: #{inspect(reason)}"

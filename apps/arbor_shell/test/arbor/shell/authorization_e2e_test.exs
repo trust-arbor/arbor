@@ -88,13 +88,11 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
                Arbor.Shell.authorize_and_execute(agent_id, "git --version", sandbox: :strict)
     end
 
-    test "a compound command cannot execute an ungranted command via chaining",
+    test "a compound command with config true fails closed without executing chained commands",
          %{agent_id: agent_id} do
-      # With CapShell explicitly enabled, the agent holds only `git`. Compound
-      # commands route to CapShell, so `;`/`&&` no longer hard-reject — but EVERY
-      # command is cap-checked, so chaining to an ungranted command must not
-      # execute it. (With the default-off gate, the whole string is rejected by
-      # the metacharacter floor instead — see the security regression below.)
+      # Intentional security API break: config true routes compounds to the
+      # CapShell unavailable path — no per-command execution of the retired
+      # prototype. Chained ungranted `rm` must not run (and neither may `git`).
       with_compound_shell(true, fn ->
         grant_shell_capability(agent_id, "arbor://shell/exec/git")
         target = Path.join(System.tmp_dir!(), "e2e_escape_#{:erlang.unique_integer([:positive])}")
@@ -102,11 +100,10 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
         File.write!(target, "survive")
 
         try do
-          assert {:ok, result} =
+          assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
                    Arbor.Shell.authorize_and_execute(agent_id, "git --version; rm #{target}")
 
-          assert File.exists?(target), "ungranted rm chained after git must be blocked"
-          assert result.stderr =~ "not allowed"
+          assert File.exists?(target), "compound fail-closed must not execute chained rm"
         after
           File.rm(target)
         end
@@ -158,51 +155,50 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       end)
     end
 
-    test "security regression: explicit compound_shell_enabled true routes to CapShell",
+    test "security regression: explicit compound_shell_enabled true fails closed (no CapShell execution)",
          %{agent_id: agent_id} do
-      # git granted; echo is a builtin. With the opt-in flag, `&&` routes to the
-      # capability-checked interpreter, which runs both.
+      # Intentional security API break: config true must NOT re-enable the
+      # retired CapShell prototype. authorize_and_execute returns the stable
+      # unavailable error without side effects.
       with_compound_shell(true, fn ->
         assert Arbor.Shell.compound_shell_enabled?()
         grant_shell_capability(agent_id, "arbor://shell/exec/git")
 
-        assert {:ok, result} =
-                 Arbor.Shell.authorize_and_execute(agent_id, "git --version && echo ok")
+        marker =
+          Path.join(
+            System.tmp_dir!(),
+            "e2e_capshell_true_#{:erlang.unique_integer([:positive])}"
+          )
 
-        assert result.stdout =~ "ok"
+        File.rm(marker)
+
+        try do
+          assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
+                   Arbor.Shell.authorize_and_execute(
+                     agent_id,
+                     "git --version && touch #{marker}"
+                   )
+
+          Process.sleep(200)
+          refute File.exists?(marker)
+        after
+          File.rm(marker)
+        end
       end)
     end
 
-    test "a compound starting with a BUILTIN is not rejected for lacking the builtin's cap",
+    test "compound with config true fails closed even for builtin-led and all-builtin forms",
          %{agent_id: agent_id} do
-      # `cd` is a shell builtin; the agent holds NO `cd` cap. Gate-1 cap-checks the
-      # first NON-builtin command (`git`, which is granted) instead of `cd`, so the
-      # compound is not spuriously rejected. (paths override isolates the gate-1
-      # fix from the fs `paths` policy, which separately gates `cd`.)
+      # Former positive CapShell cases (builtin gate-1 skip, all-builtin) are
+      # intentionally broken: fail-closed before any CapShell/Bash work.
       with_compound_shell(true, fn ->
         grant_shell_capability(agent_id, "arbor://shell/exec/git")
 
-        assert {:ok, result} =
-                 Arbor.Shell.authorize_and_execute(agent_id, "cd /tmp && git --version",
-                   paths: fn _ -> true end
-                 )
+        assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
+                 Arbor.Shell.authorize_and_execute(agent_id, "cd /tmp && git --version")
 
-        assert result.exit_code == 0
-        assert result.stdout =~ "git version"
-      end)
-    end
-
-    test "an all-builtin compound runs with no shell caps (no host binary to gate)",
-         %{agent_id: agent_id} do
-      # cd + echo are both builtins → gate-1 is skipped (nothing to cap-check at
-      # that layer); CapShell runs the builtins.
-      with_compound_shell(true, fn ->
-        assert {:ok, result} =
-                 Arbor.Shell.authorize_and_execute(agent_id, "cd /tmp && echo hi",
-                   paths: fn _ -> true end
-                 )
-
-        assert result.stdout =~ "hi"
+        assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
+                 Arbor.Shell.authorize_and_execute(agent_id, "cd /tmp && echo hi")
       end)
     end
   end
@@ -220,10 +216,10 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       refute Arbor.Shell.compound_command?("git --version")
     end
 
-    test "execute_compound_with_capabilities/3 retains per-command capability checks",
+    test "execute_compound_with_capabilities/3 always fails closed (security API break)",
          %{agent_id: agent_id} do
-      # Facade must not be an unchecked bypass: agent holds only git; chained rm
-      # must be cap-denied by CapShell and must not delete the marker.
+      # Direct facade entry cannot bypass fail-closed — no CapShell execution,
+      # no silent fallback. Marker must survive; return is the stable error.
       grant_shell_capability(agent_id, "arbor://shell/exec/git")
 
       marker =
@@ -232,33 +228,22 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       File.write!(marker, "survive")
 
       try do
-        assert {:ok, result} =
+        assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
                  Arbor.Shell.execute_compound_with_capabilities(
                    agent_id,
                    "git --version; rm #{marker}"
                  )
 
-        assert File.exists?(marker), "ungranted rm must not run via compound facade"
-        assert result.stderr =~ "not allowed"
+        assert File.exists?(marker), "fail-closed facade must not run compound commands"
+
+        assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
+                 Arbor.Shell.execute_compound_with_capabilities(
+                   agent_id,
+                   "git --version && echo facade-ok"
+                 )
       after
         File.rm(marker)
       end
-    end
-
-    test "execute_compound_with_capabilities/3 runs granted compound commands",
-         %{agent_id: agent_id} do
-      grant_shell_capability(agent_id, "arbor://shell/exec/git")
-
-      assert {:ok, result} =
-               Arbor.Shell.execute_compound_with_capabilities(
-                 agent_id,
-                 "git --version && echo facade-ok"
-               )
-
-      assert result.stdout =~ "facade-ok"
-      assert result.exit_code == 0
-      assert is_integer(result.duration_ms)
-      assert result.timed_out == false
     end
   end
 
