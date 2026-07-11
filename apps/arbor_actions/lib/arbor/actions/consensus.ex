@@ -529,8 +529,17 @@ defmodule Arbor.Actions.Consensus do
 
     def parse_confidence(_), do: 0.5
 
-    defp parse_concerns(list) when is_list(list), do: Enum.map(list, &to_string/1)
+    defp parse_concerns(list) when is_list(list), do: Enum.map(list, &normalize_concern/1)
     defp parse_concerns(_), do: []
+
+    defp normalize_concern(concern) when is_binary(concern), do: concern
+
+    defp normalize_concern(concern) do
+      case Jason.encode(concern) do
+        {:ok, encoded} -> encoded
+        {:error, _reason} -> inspect(concern, limit: 20, printable_limit: 1_024)
+      end
+    end
 
     defp parse_float_val(val) when is_float(val), do: val
     defp parse_float_val(val) when is_integer(val), do: val / 1

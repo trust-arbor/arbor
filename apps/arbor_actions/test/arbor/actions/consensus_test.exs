@@ -350,6 +350,28 @@ defmodule Arbor.Actions.ConsensusTest do
       assert Jason.decode!(encoded)["primary_concerns"] == concerns
     end
 
+    test "normalizes structured council concerns without crashing aggregation" do
+      concern = %{
+        "file" => "apps/arbor_actions/lib/arbor/actions/coding/review_tree.ex",
+        "issue" => "Path parsing excludes a valid tracked filename"
+      }
+
+      results = [
+        make_branch_result("edge_cases_error_handling", "reject", concerns: [concern]),
+        make_branch_result("security", "approve")
+      ]
+
+      assert {:ok, result} =
+               Consensus.Decide.run(
+                 %{results: results, question: "Does this change handle unusual Git paths?"},
+                 %{}
+               )
+
+      assert [encoded_concern] = result.primary_concerns
+      assert Jason.decode!(encoded_concern) == concern
+      assert result.reject_count == 1
+    end
+
     test "majority reject produces rejected decision" do
       results = [
         make_branch_result("security", "reject"),
