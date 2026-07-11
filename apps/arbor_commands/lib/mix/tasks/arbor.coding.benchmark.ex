@@ -1,0 +1,324 @@
+defmodule Mix.Tasks.Arbor.Coding.Benchmark do
+  @shortdoc "Run paired legacy/pipeline coding conformance fixtures"
+  @moduledoc """
+  Runs data-only benchmark manifests through trusted, named coding adapters and
+  writes a JSON conformance report.
+
+  ## Usage
+
+      mix arbor.coding.benchmark \
+        --manifest benchmarks/coding/manifest.json \
+        --acp-agent grok \
+        --repetitions 3 \
+        --output reports/coding-benchmark.json
+
+      mix arbor.coding.benchmark \
+        --manifest benchmarks/coding/manifest.json \
+        --dry-run \
+        --seed 42
+
+  ## Options
+
+    * `--manifest` - required JSON manifest below the current working directory
+    * `--acp-agent` - named ACP agent passed to trusted adapters
+    * `--repetitions` - pair repetitions, from 1 through 100 (default: 1)
+    * `--seed` - deterministic pair-order seed (manifest seed by default)
+    * `--output` - report path below the current working directory
+    * `--dry-run` - validate and emit deterministic skipped rows without adapters
+
+  Adapter and verifier callbacks come only from trusted runtime configuration or
+  the test-only `execute/2` options. A manifest cannot name executable modules or
+  functions.
+  """
+
+  use Mix.Task
+
+  alias Arbor.Commands.CodingBenchmark
+  alias Arbor.Common.SafePath
+
+  @default_output "coding-benchmark-report.json"
+  @max_manifest_bytes 1_048_576
+
+  @impl true
+  def run(args) do
+    case execute(args) do
+      {:ok, %{output_path: output_path, report: report}} ->
+        summary = report["summary"]
+
+        Mix.shell().info(
+          "Wrote #{summary["row_count"]} benchmark rows (#{summary["pair_count"]} pairs) to #{output_path}"
+        )
+
+      {:error, reason} ->
+        Mix.raise(Jason.encode!(reason))
+    end
+  end
+
+  @doc false
+  @spec execute([String.t()], keyword()) ::
+          {:ok, %{output_path: String.t(), report: map()}} | {:error, map()}
+  def execute(args, runtime_opts \\ [])
+
+  def execute(args, runtime_opts) when is_list(args) and is_list(runtime_opts) do
+    with {:ok, cli} <- parse_args(args),
+         {:ok, root} <- trusted_root(Keyword.get(runtime_opts, :root, File.cwd!())),
+         {:ok, manifest_path} <- existing_json_path(cli.manifest, root, "manifest"),
+         {:ok, manifest} <- read_manifest(manifest_path),
+         {:ok, normalized_manifest} <- CodingBenchmark.validate_manifest(manifest),
+         {:ok, output_path} <- output_json_path(cli.output, root),
+         :ok <- distinct_paths(manifest_path, output_path),
+         :ok <-
+           output_outside_fixtures(output_path, normalized_manifest, Path.dirname(manifest_path)),
+         benchmark_opts <- benchmark_opts(cli, runtime_opts, Path.dirname(manifest_path)),
+         {:ok, report} <- CodingBenchmark.run(manifest, benchmark_opts),
+         :ok <- write_report(output_path, report) do
+      {:ok, %{output_path: output_path, report: report}}
+    end
+  end
+
+  def execute(_args, _runtime_opts), do: task_error("arguments", "expected_lists")
+
+  defp parse_args(args) do
+    {opts, positional, invalid} =
+      OptionParser.parse(args,
+        strict: [
+          acp_agent: :string,
+          dry_run: :boolean,
+          manifest: :string,
+          output: :string,
+          repetitions: :integer,
+          seed: :integer
+        ]
+      )
+
+    cond do
+      invalid != [] ->
+        task_error("arguments", "unknown_or_invalid_option")
+
+      positional != [] ->
+        task_error("arguments", "unexpected_positional_argument")
+
+      not is_binary(opts[:manifest]) ->
+        task_error("manifest", "required")
+
+      not valid_repetitions?(Keyword.get(opts, :repetitions, 1)) ->
+        task_error("repetitions", "out_of_bounds")
+
+      not valid_seed?(Keyword.get(opts, :seed)) ->
+        task_error("seed", "out_of_bounds")
+
+      true ->
+        {:ok,
+         %{
+           acp_agent: opts[:acp_agent],
+           dry_run: Keyword.get(opts, :dry_run, false),
+           manifest: opts[:manifest],
+           output: Keyword.get(opts, :output, @default_output),
+           repetitions: Keyword.get(opts, :repetitions, 1),
+           seed: opts[:seed]
+         }}
+    end
+  end
+
+  defp valid_repetitions?(value), do: is_integer(value) and value in 1..100
+  defp valid_seed?(nil), do: true
+  defp valid_seed?(value), do: is_integer(value) and value in 0..2_147_483_647
+
+  defp trusted_root(path) when is_binary(path) do
+    with {:ok, real} <- SafePath.resolve_real(Path.expand(path)),
+         true <- File.dir?(real) do
+      {:ok, real}
+    else
+      _other -> task_error("root", "directory_not_found")
+    end
+  end
+
+  defp trusted_root(_path), do: task_error("root", "expected_path")
+
+  defp existing_json_path(path, root, field) when is_binary(path) do
+    with :ok <- safe_cli_path(path, field),
+         :ok <- json_extension(path, field),
+         {:ok, lexical} <- SafePath.resolve_within(path, root),
+         {:ok, real} <- SafePath.resolve_real(lexical),
+         {:ok, ^real} <- SafePath.resolve_within(real, root),
+         {:ok, stat} <- File.lstat(lexical),
+         true <- stat.type == :regular do
+      {:ok, real}
+    else
+      {:error, %{} = error} -> {:error, error}
+      _other -> task_error(field, "unsafe_or_missing_path")
+    end
+  end
+
+  defp existing_json_path(_path, _root, field), do: task_error(field, "expected_path")
+
+  defp output_json_path(path, root) when is_binary(path) do
+    field = "output"
+
+    with :ok <- safe_cli_path(path, field),
+         :ok <- json_extension(path, field),
+         {:ok, lexical} <- SafePath.resolve_within(path, root),
+         parent <- Path.dirname(lexical),
+         {:ok, real_parent} <- SafePath.resolve_real(parent),
+         {:ok, ^real_parent} <- SafePath.resolve_within(real_parent, root),
+         :ok <- safe_output_leaf(lexical) do
+      {:ok, Path.join(real_parent, Path.basename(lexical))}
+    else
+      {:error, %{} = error} -> {:error, error}
+      _other -> task_error(field, "unsafe_path")
+    end
+  end
+
+  defp output_json_path(_path, _root), do: task_error("output", "expected_path")
+
+  defp safe_cli_path(path, field) do
+    components = Path.split(path)
+
+    cond do
+      not String.valid?(path) or String.contains?(path, <<0>>) ->
+        task_error(field, "invalid_path")
+
+      Enum.any?(components, &(&1 in [".", "..", ""])) ->
+        task_error(field, "unsafe_path")
+
+      true ->
+        case SafePath.validate(path) do
+          :ok -> :ok
+          {:error, _reason} -> task_error(field, "unsafe_path")
+        end
+    end
+  end
+
+  defp json_extension(path, field) do
+    if String.downcase(Path.extname(path)) == ".json",
+      do: :ok,
+      else: task_error(field, "expected_json_path")
+  end
+
+  defp safe_output_leaf(path) do
+    case File.lstat(path) do
+      {:ok, %{type: :regular}} -> :ok
+      {:ok, _other} -> task_error("output", "non_regular_file")
+      {:error, :enoent} -> :ok
+      {:error, _reason} -> task_error("output", "unreadable_path")
+    end
+  end
+
+  defp distinct_paths(path, path), do: task_error("output", "would_overwrite_manifest")
+  defp distinct_paths(_manifest_path, _output_path), do: :ok
+
+  defp output_outside_fixtures(output_path, manifest, fixture_root) do
+    Enum.reduce_while(manifest["fixtures"], :ok, fn fixture, :ok ->
+      with {:ok, lexical} <- SafePath.safe_join(fixture_root, fixture["fixture_path"]),
+           {:ok, real} <- SafePath.resolve_real(lexical),
+           {:ok, ^real} <- SafePath.resolve_within(real, fixture_root) do
+        if path_within?(output_path, real) do
+          {:halt, task_error("output", "inside_fixture")}
+        else
+          {:cont, :ok}
+        end
+      else
+        _other -> {:halt, task_error("manifest.fixture_path", "unsafe_or_missing_fixture")}
+      end
+    end)
+  end
+
+  defp path_within?(path, root), do: path == root or String.starts_with?(path, root <> "/")
+
+  defp read_manifest(path) do
+    with {:ok, stat} <- File.stat(path),
+         true <- stat.size <= @max_manifest_bytes,
+         {:ok, json} <- File.read(path),
+         {:ok, manifest} <- Jason.decode(json) do
+      {:ok, manifest}
+    else
+      false -> task_error("manifest", "file_too_large")
+      {:error, %Jason.DecodeError{}} -> task_error("manifest", "invalid_json")
+      {:error, _reason} -> task_error("manifest", "unreadable")
+    end
+  end
+
+  defp benchmark_opts(cli, runtime_opts, fixture_root) do
+    configured_adapters =
+      Keyword.get_lazy(runtime_opts, :adapters, fn ->
+        Application.get_env(:arbor_commands, :coding_benchmark_adapters)
+      end)
+
+    configured_verifiers =
+      Keyword.get_lazy(runtime_opts, :verifiers, fn ->
+        Application.get_env(:arbor_commands, :coding_benchmark_verifiers)
+      end)
+
+    [
+      acp_agent: cli.acp_agent,
+      adapters: configured_adapters,
+      dry_run: cli.dry_run,
+      executor_selector: Keyword.get(runtime_opts, :executor_selector, default_selector()),
+      fixture_root: fixture_root,
+      measure: Keyword.get(runtime_opts, :measure, &default_measure/1),
+      repetitions: cli.repetitions,
+      verifiers: configured_verifiers,
+      workspace_root: Keyword.get(runtime_opts, :workspace_root, System.tmp_dir!())
+    ]
+    |> maybe_put_seed(cli.seed)
+  end
+
+  defp default_selector do
+    %{
+      app: :arbor_agent,
+      key: :coding_executor_mode,
+      values: %{"legacy" => :legacy, "pipeline" => :pipeline}
+    }
+  end
+
+  defp default_measure(fun) do
+    {microseconds, result} = :timer.tc(fun)
+    {div(microseconds + 999, 1_000), result}
+  end
+
+  defp maybe_put_seed(opts, nil), do: opts
+  defp maybe_put_seed(opts, seed), do: Keyword.put(opts, :seed, seed)
+
+  defp write_report(path, report) do
+    encoded = [Jason.encode_to_iodata!(report, pretty: true), "\n"]
+
+    temp =
+      Path.join(
+        Path.dirname(path),
+        ".#{Path.basename(path)}.tmp-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    case File.open(temp, [:write, :exclusive]) do
+      {:ok, device} ->
+        result =
+          try do
+            with :ok <- IO.binwrite(device, encoded),
+                 :ok <- File.close(device) do
+              File.rename(temp, path)
+            end
+          after
+            File.close(device)
+            File.rm(temp)
+          end
+
+        case result do
+          :ok -> :ok
+          {:error, reason} -> task_error("output", "write_failed:#{reason}")
+        end
+
+      {:error, reason} ->
+        task_error("output", "write_failed:#{reason}")
+    end
+  rescue
+    exception -> task_error("output", "encode_failed:#{Exception.message(exception)}")
+  end
+
+  defp task_error(field, reason) do
+    {:error,
+     %{
+       "error" => "invalid_coding_benchmark_command",
+       "field" => field,
+       "reason" => reason
+     }}
+  end
+end

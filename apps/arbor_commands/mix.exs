@@ -10,6 +10,7 @@ defmodule ArborCommands.MixProject do
       deps_path: "../../deps",
       lockfile: "../../mix.lock",
       elixir: "~> 1.18",
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       deps: deps()
     ]
@@ -17,7 +18,7 @@ defmodule ArborCommands.MixProject do
 
   def application do
     [
-      extra_applications: [:logger],
+      extra_applications: [:crypto, :logger],
       mod: {Arbor.Commands.Application, []}
     ]
   end
@@ -33,7 +34,11 @@ defmodule ArborCommands.MixProject do
       {:arbor_common, in_umbrella: true},
       {:arbor_agent, in_umbrella: true},
       {:arbor_orchestrator, in_umbrella: true},
+      {:jason, "~> 1.4"},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]
   end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_env), do: ["lib"]
 end
