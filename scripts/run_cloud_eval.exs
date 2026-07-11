@@ -8,7 +8,7 @@ Application.ensure_all_started(:jason)
 
 alias Arbor.Orchestrator.Eval
 alias Arbor.Orchestrator.Eval.Subjects.LLM
-alias Arbor.Orchestrator.Eval.RunStore
+alias Arbor.Persistence
 
 {:ok, samples} =
   Eval.load_dataset("apps/arbor_orchestrator/priv/eval_datasets/elixir_coding.jsonl")
@@ -104,7 +104,7 @@ for {model, provider} <- models do
   slug = model |> String.replace(":", "-") |> String.replace("/", "-")
   run_id = "#{slug}-2026-02-13"
 
-  RunStore.save_run(run_id, %{
+  Persistence.save_eval_run_file(run_id, %{
     model: model,
     provider: provider,
     dataset: "elixir_coding.jsonl",

@@ -3,8 +3,8 @@ defmodule Arbor.Dashboard.Live.EvalLive do
   Evaluation results dashboard.
 
   Displays LLM eval runs, model comparison, and detailed results.
-  Supports both Postgres (via Arbor.Persistence) and JSON fallback
-  (via Arbor.Orchestrator.Eval.PersistenceBridge).
+  Supports both Postgres and JSON file fallback via `Arbor.Persistence`
+  high-level eval APIs.
   """
 
   use Phoenix.LiveView
@@ -150,7 +150,9 @@ defmodule Arbor.Dashboard.Live.EvalLive do
                 {run_field(run, :model) || "unknown"}
               </div>
               <div style="font-size: 0.75rem; opacity: 0.7;">
-                {run_field(run, :provider) || ""} · {run_field(run, :dataset) || ""} · {format_layer(run_field(run, :layer))}
+                {run_field(run, :provider) || ""} · {run_field(run, :dataset) || ""} · {format_layer(
+                  run_field(run, :layer)
+                )}
               </div>
             </div>
             <.badge

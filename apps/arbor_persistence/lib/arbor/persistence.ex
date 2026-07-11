@@ -141,7 +141,14 @@ defmodule Arbor.Persistence do
   - `{:ok, :pending_approval, proposal_id}` if escalation needed
   - `{:error, reason}` on other errors
   """
-  @spec authorize_append(String.t(), atom(), module(), String.t(), [Event.t()] | Event.t(), keyword()) ::
+  @spec authorize_append(
+          String.t(),
+          atom(),
+          module(),
+          String.t(),
+          [Event.t()] | Event.t(),
+          keyword()
+        ) ::
           {:ok, [Event.t()]}
           | {:ok, :pending_approval, String.t()}
           | {:error, {:unauthorized, term()} | term()}
@@ -203,12 +210,13 @@ defmodule Arbor.Persistence do
   end
 
   # ---------------------------------------------------------------
-  # Eval operations
+  # Eval operations (low-level Postgres)
   # ---------------------------------------------------------------
 
+  alias Arbor.Persistence.Eval.{FileStore, RunIdentity, Store}
   alias Arbor.Persistence.Schemas.{EvalResult, EvalRun}
 
-  @doc "Insert a new eval run."
+  @doc "Insert a new eval run (Postgres only)."
   @spec insert_eval_run(map()) :: {:ok, EvalRun.t()} | {:error, Ecto.Changeset.t()}
   def insert_eval_run(attrs) do
     %EvalRun{}
@@ -216,7 +224,7 @@ defmodule Arbor.Persistence do
     |> Repo.insert()
   end
 
-  @doc "Update an existing eval run."
+  @doc "Update an existing eval run (Postgres only)."
   @spec update_eval_run(String.t(), map()) ::
           {:ok, EvalRun.t()} | {:error, :not_found | Ecto.Changeset.t()}
   def update_eval_run(run_id, attrs) do
@@ -226,7 +234,7 @@ defmodule Arbor.Persistence do
     end
   end
 
-  @doc "Insert a single eval result."
+  @doc "Insert a single eval result (Postgres only)."
   @spec insert_eval_result(map()) :: {:ok, EvalResult.t()} | {:error, Ecto.Changeset.t()}
   def insert_eval_result(attrs) do
     %EvalResult{}
@@ -247,7 +255,7 @@ defmodule Arbor.Persistence do
     Repo.insert_all(EvalResult, entries, on_conflict: :nothing)
   end
 
-  @doc "List eval runs with optional filters: domain, model, provider, status."
+  @doc "List eval runs with optional filters: domain, model, provider, status (Postgres only)."
   @spec list_eval_runs(keyword()) :: {:ok, [EvalRun.t()]}
   def list_eval_runs(filters \\ []) do
     import Ecto.Query
@@ -257,20 +265,18 @@ defmodule Arbor.Persistence do
     {:ok, Repo.all(query)}
   end
 
-  @doc "Get a single eval run with preloaded results."
+  @doc "Get a single eval run with preloaded results (Postgres only)."
   @spec get_eval_run(String.t()) :: {:ok, EvalRun.t()} | {:error, :not_found}
   def get_eval_run(run_id) do
     import Ecto.Query
 
-    case Repo.one(
-           from(r in EvalRun, where: r.id == ^run_id, preload: [:results])
-         ) do
+    case Repo.one(from(r in EvalRun, where: r.id == ^run_id, preload: [:results])) do
       nil -> {:error, :not_found}
       run -> {:ok, run}
     end
   end
 
-  @doc "Compare eval runs for models in a given domain."
+  @doc "Compare eval runs for models in a given domain (Postgres only)."
   @spec eval_model_comparison(String.t(), [String.t()]) :: {:ok, [EvalRun.t()]}
   def eval_model_comparison(domain, models) do
     import Ecto.Query
@@ -283,6 +289,142 @@ defmodule Arbor.Persistence do
 
     {:ok, Repo.all(query)}
   end
+
+  # ---------------------------------------------------------------
+  # Eval operations (high-level: backend selection + file fallback)
+  # ---------------------------------------------------------------
+  #
+  # Opts:
+  #   :backend  - :auto (default) | :database | :file
+  #   :dir      - file-store directory (default: ".arbor/eval_runs")
+  #
+  # Do not pass executable modules/MFAs; backend selection is atom-only.
+
+  @doc "True when the eval Postgres Repo process is running."
+  @spec eval_database_available?() :: boolean()
+  def eval_database_available?, do: Store.database_available?()
+
+  @doc "Generate a unique eval run ID from model + domain."
+  @spec generate_eval_run_id(String.t(), String.t()) :: String.t()
+  def generate_eval_run_id(model, domain), do: Store.generate_run_id(model, domain)
+
+  @doc """
+  Create an eval run, capturing run-identity fields.
+
+  Backend selection via opts (`:backend`, `:dir`). Defaults to `:auto`
+  (Postgres when available, JSON file fallback otherwise).
+  """
+  @spec create_eval_run(map(), keyword()) :: {:ok, map() | EvalRun.t()} | {:error, term()}
+  def create_eval_run(attrs, opts \\ []), do: Store.create_run(attrs, opts)
+
+  @doc """
+  High-level update of an eval run with backend selection.
+
+  Arity-2 is the low-level Postgres update; arity-3 selects backend via opts.
+  """
+  @spec update_eval_run(String.t(), map(), keyword()) ::
+          :ok | {:ok, EvalRun.t()} | {:error, term()}
+  def update_eval_run(run_id, attrs, opts), do: Store.update_run(run_id, attrs, opts)
+
+  @doc "Save a single eval result with backend selection."
+  @spec save_eval_result(map(), keyword()) :: :ok | {:ok, EvalResult.t()} | {:error, term()}
+  def save_eval_result(attrs, opts \\ []), do: Store.save_result(attrs, opts)
+
+  @doc "Batch-save eval results with backend selection."
+  @spec save_eval_results_batch([map()], keyword()) ::
+          :ok | {non_neg_integer(), nil} | {:error, term()}
+  def save_eval_results_batch(results, opts \\ []), do: Store.save_results_batch(results, opts)
+
+  @doc "Mark an eval run completed with final metrics."
+  @spec complete_eval_run(
+          String.t(),
+          map(),
+          non_neg_integer(),
+          non_neg_integer(),
+          keyword()
+        ) :: :ok | {:ok, EvalRun.t()} | {:error, term()}
+  def complete_eval_run(run_id, metrics, sample_count, duration_ms, opts \\ []) do
+    Store.complete_run(run_id, metrics, sample_count, duration_ms, opts)
+  end
+
+  @doc "Mark an eval run failed."
+  @spec fail_eval_run(String.t(), term(), keyword()) ::
+          :ok | {:ok, EvalRun.t()} | {:error, term()}
+  def fail_eval_run(run_id, error, opts \\ []), do: Store.fail_run(run_id, error, opts)
+
+  @doc """
+  High-level list of eval runs with backend selection.
+
+  Arity-1 is the low-level Postgres list; arity-2 selects backend via opts.
+  """
+  @spec list_eval_runs(keyword(), keyword()) :: {:ok, [map() | EvalRun.t()]} | {:error, term()}
+  def list_eval_runs(filters, opts), do: Store.list_runs(filters, opts)
+
+  @doc """
+  High-level get of an eval run with backend selection.
+
+  Arity-1 is the low-level Postgres get; arity-2 selects backend via opts.
+  """
+  @spec get_eval_run(String.t(), keyword()) ::
+          {:ok, map() | EvalRun.t()} | {:error, term()}
+  def get_eval_run(run_id, opts), do: Store.get_run(run_id, opts)
+
+  @doc """
+  High-level model comparison with backend selection.
+
+  Arity-2 is the low-level Postgres comparison; arity-3 selects backend via opts.
+  """
+  @spec eval_model_comparison(String.t(), [String.t()], keyword()) ::
+          {:ok, [map() | EvalRun.t()]} | {:error, term()}
+  def eval_model_comparison(domain, models, opts),
+    do: Store.compare_models(domain, models, opts)
+
+  # --- File-store surface ---
+
+  @doc "Save an eval run to the JSON file store."
+  @spec save_eval_run_file(String.t(), map(), keyword()) :: :ok | {:error, term()}
+  def save_eval_run_file(run_id, run_data, opts \\ []),
+    do: FileStore.save_run(run_id, run_data, opts)
+
+  @doc "Load an eval run from the JSON file store."
+  @spec load_eval_run_file(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def load_eval_run_file(run_id, opts \\ []), do: FileStore.load_run(run_id, opts)
+
+  @doc "List eval runs from the JSON file store."
+  @spec list_eval_run_files(keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_eval_run_files(opts \\ []), do: FileStore.list_runs(opts)
+
+  @doc "Latest eval run from the JSON file store."
+  @spec latest_eval_run_file(keyword()) :: {:ok, map()} | {:error, :no_runs}
+  def latest_eval_run_file(opts \\ []), do: FileStore.latest_run(opts)
+
+  @doc "Compare two file-store eval runs by metrics."
+  @spec compare_eval_run_files(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def compare_eval_run_files(run_id_a, run_id_b, opts \\ []),
+    do: FileStore.compare_runs(run_id_a, run_id_b, opts)
+
+  # --- Run identity ---
+
+  @doc "Merge best-effort run-identity fields into eval-run attrs."
+  @spec capture_eval_run_identity(map()) :: map()
+  def capture_eval_run_identity(attrs), do: RunIdentity.capture(attrs)
+
+  @doc "Current git HEAD sha, or nil if unavailable."
+  @spec eval_git_sha() :: String.t() | nil
+  def eval_git_sha, do: RunIdentity.git_sha()
+
+  @doc "True if the working tree has uncommitted changes, nil if unknown."
+  @spec eval_git_dirty() :: boolean() | nil
+  def eval_git_dirty, do: RunIdentity.git_dirty()
+
+  @doc "SHA-256 of the dataset file at path, or nil."
+  @spec eval_dataset_hash(String.t() | nil) :: String.t() | nil
+  def eval_dataset_hash(path), do: RunIdentity.dataset_hash(path)
+
+  @doc "Deterministic SHA-256 fingerprint of a config map."
+  @spec eval_config_fingerprint(map() | nil) :: String.t() | nil
+  def eval_config_fingerprint(config), do: RunIdentity.config_fingerprint(config)
 
   @eval_where_filters [:domain, :model, :provider, :status]
 

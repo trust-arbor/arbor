@@ -221,7 +221,7 @@ defmodule Mix.Tasks.Arbor.Eval do
     Mix.shell().info(String.duplicate("─", 50))
 
     alias Arbor.Orchestrator.Eval
-    alias Arbor.Orchestrator.Eval.{PersistenceBridge, RunStore}
+    alias Arbor.Persistence
 
     {:ok, samples} = Eval.load_dataset(dataset, if(limit, do: [limit: limit], else: []))
     Mix.shell().info("Loaded #{length(samples)} samples\n")
@@ -244,7 +244,7 @@ defmodule Mix.Tasks.Arbor.Eval do
             domain_system_prompt: domain_system_prompt(domain)
           ]
 
-          run_id = PersistenceBridge.generate_run_id(model, domain)
+          run_id = Persistence.generate_eval_run_id(model, domain)
           start_time = System.monotonic_time(:millisecond)
 
           # Create run record (status: running)
@@ -257,7 +257,7 @@ defmodule Mix.Tasks.Arbor.Eval do
               config
             end
 
-          PersistenceBridge.create_run(%{
+          Persistence.create_eval_run(%{
             id: run_id,
             domain: domain,
             model: model,
@@ -276,12 +276,12 @@ defmodule Mix.Tasks.Arbor.Eval do
           metrics = compute_metrics(results, graders)
 
           # Complete run
-          PersistenceBridge.complete_run(run_id, metrics, length(results), duration_ms)
+          Persistence.complete_eval_run(run_id, metrics, length(results), duration_ms)
 
           # Persist individual results
           persist_results(run_id, model, results)
 
-          # Also save to JSON RunStore for backwards compat
+          # Also save to JSON file store for backwards compat
           save_to_runstore(run_id, model, provider, dataset, graders, metrics, results)
 
           # Save raw outputs to files for LLM-as-judge evaluation
@@ -366,11 +366,11 @@ defmodule Mix.Tasks.Arbor.Eval do
   end
 
   defp persist_results(run_id, model, results) do
-    alias Arbor.Orchestrator.Eval.PersistenceBridge
+    alias Arbor.Persistence
 
     Enum.each(results, fn result ->
-      PersistenceBridge.save_result(%{
-        id: PersistenceBridge.generate_run_id(model, "result"),
+      Persistence.save_eval_result(%{
+        id: Persistence.generate_eval_run_id(model, "result"),
         run_id: run_id,
         sample_id: result.id,
         input: encode_field(result.input),
@@ -422,7 +422,7 @@ defmodule Mix.Tasks.Arbor.Eval do
   end
 
   defp save_to_runstore(run_id, model, provider, dataset, graders, metrics, results) do
-    alias Arbor.Orchestrator.Eval.RunStore
+    alias Arbor.Persistence
 
     run_data = %{
       model: model,
@@ -436,7 +436,7 @@ defmodule Mix.Tasks.Arbor.Eval do
 
     slug = model |> String.replace(~r/[:\/.]+/, "-")
     date = Date.utc_today() |> Date.to_iso8601()
-    RunStore.save_run("#{slug}-#{date}-#{run_id_suffix(run_id)}", run_data)
+    Persistence.save_eval_run_file("#{slug}-#{date}-#{run_id_suffix(run_id)}", run_data)
   end
 
   defp run_id_suffix(run_id) do
@@ -625,7 +625,7 @@ defmodule Mix.Tasks.Arbor.Eval do
   # --- List runs ---
 
   defp list_runs(opts) do
-    alias Arbor.Orchestrator.Eval.PersistenceBridge
+    alias Arbor.Persistence
 
     filters =
       []
@@ -633,7 +633,7 @@ defmodule Mix.Tasks.Arbor.Eval do
       |> maybe_filter(:model, Keyword.get(opts, :model))
       |> maybe_filter(:provider, Keyword.get(opts, :provider))
 
-    case PersistenceBridge.list_runs(filters) do
+    case Persistence.list_eval_runs(filters, []) do
       {:ok, runs} when is_list(runs) ->
         if runs == [] do
           Mix.shell().info("No eval runs found.")
@@ -664,10 +664,10 @@ defmodule Mix.Tasks.Arbor.Eval do
   # --- Compare runs ---
 
   defp compare_runs([id_a, id_b], _opts) do
-    alias Arbor.Orchestrator.Eval.PersistenceBridge
+    alias Arbor.Persistence
 
-    with {:ok, run_a} <- PersistenceBridge.get_run(id_a),
-         {:ok, run_b} <- PersistenceBridge.get_run(id_b) do
+    with {:ok, run_a} <- Persistence.get_eval_run(id_a, []),
+         {:ok, run_b} <- Persistence.get_eval_run(id_b, []) do
       Mix.shell().info("\nComparing eval runs:")
       Mix.shell().info("  A: #{id_a}")
       Mix.shell().info("  B: #{id_b}")
@@ -706,7 +706,7 @@ defmodule Mix.Tasks.Arbor.Eval do
   # --- Stats across runs ---
 
   defp show_stats(opts) do
-    alias Arbor.Orchestrator.Eval.PersistenceBridge
+    alias Arbor.Persistence
 
     domain = Keyword.get(opts, :domain)
     model = Keyword.get(opts, :model)
@@ -721,7 +721,7 @@ defmodule Mix.Tasks.Arbor.Eval do
       |> maybe_filter(:model, model)
       |> maybe_filter(:provider, Keyword.get(opts, :provider))
 
-    case PersistenceBridge.list_runs(filters) do
+    case Persistence.list_eval_runs(filters, []) do
       {:ok, runs} when is_list(runs) and runs != [] ->
         # Group by model
         grouped = Enum.group_by(runs, fn r -> run_field(r, :model) end)

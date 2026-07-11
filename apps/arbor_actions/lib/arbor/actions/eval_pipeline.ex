@@ -341,12 +341,10 @@ defmodule Arbor.Actions.EvalPipeline do
       graders = extract_graders(results)
 
       run_id =
-        EvalPipeline.bridge(Arbor.Orchestrator.Eval.PersistenceBridge, :generate_run_id, [
+        Arbor.Persistence.generate_eval_run_id(
           params[:model] || "unknown",
           params.domain
-        ])
-
-      run_id = run_id || "run-#{System.system_time(:millisecond)}"
+        )
 
       run_attrs = %{
         id: run_id,
@@ -363,7 +361,7 @@ defmodule Arbor.Actions.EvalPipeline do
         metadata: params[:metadata] || %{}
       }
 
-      case EvalPipeline.bridge(Arbor.Orchestrator.Eval.PersistenceBridge, :create_run, [run_attrs]) do
+      case Arbor.Persistence.create_eval_run(run_attrs) do
         {:ok, _} ->
           persist_results(run_id, results)
           Actions.emit_completed(__MODULE__, %{run_id: run_id})
@@ -372,9 +370,6 @@ defmodule Arbor.Actions.EvalPipeline do
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
           {:error, "Persist failed: #{inspect(reason)}"}
-
-        nil ->
-          {:error, "PersistenceBridge not available"}
       end
     end
 
@@ -395,9 +390,7 @@ defmodule Arbor.Actions.EvalPipeline do
           metadata: get_field(result, "metadata", %{})
         }
 
-        EvalPipeline.bridge(Arbor.Orchestrator.Eval.PersistenceBridge, :save_result, [
-          result_attrs
-        ])
+        Arbor.Persistence.save_eval_result(result_attrs)
       end)
     end
 

@@ -3,8 +3,8 @@ defmodule Arbor.Actions.Eval do
   Evaluation operations as Jido actions.
 
   This module provides Jido-compatible actions for running code quality checks
-  and querying past eval runs. Actions wrap the underlying `Arbor.Eval` and
-  `Arbor.Orchestrator.Eval.PersistenceBridge` APIs via runtime bridges.
+  and querying past eval runs. List/get wrap `Arbor.Persistence` high-level
+  eval APIs. Check still bridges to `Arbor.Eval` when available.
 
   ## Actions
 
@@ -13,11 +13,6 @@ defmodule Arbor.Actions.Eval do
   | `Check` | Run code quality checks on code or files |
   | `ListRuns` | Query past eval runs with filters |
   | `GetRun` | Get a specific eval run with results |
-
-  ## Architecture
-
-  Uses runtime bridges (`Code.ensure_loaded?` + `apply/3`) since
-  `arbor_orchestrator` is a Standalone app.
 
   ## Examples
 
@@ -41,9 +36,9 @@ defmodule Arbor.Actions.Eval do
   """
 
   alias Arbor.Common.SafePath
+  alias Arbor.Persistence
 
   @eval_mod Arbor.Eval
-  @persistence_bridge Arbor.Orchestrator.Eval.PersistenceBridge
 
   defmodule Check do
     @moduledoc """
@@ -345,31 +340,23 @@ defmodule Arbor.Actions.Eval do
 
   @doc false
   def list_eval_runs(filters) do
-    if Code.ensure_loaded?(@persistence_bridge) do
-      try do
-        apply(@persistence_bridge, :list_runs, [filters])
-      catch
-        :exit, reason ->
-          {:error,
-           "Eval persistence system crashed: #{inspect(reason)}. It may need to be restarted."}
-      end
-    else
-      {:error, "Eval persistence is not available. It may not be configured in this environment."}
+    try do
+      Persistence.list_eval_runs(filters, [])
+    catch
+      :exit, reason ->
+        {:error,
+         "Eval persistence system crashed: #{inspect(reason)}. It may need to be restarted."}
     end
   end
 
   @doc false
   def get_eval_run(run_id) do
-    if Code.ensure_loaded?(@persistence_bridge) do
-      try do
-        apply(@persistence_bridge, :get_run, [run_id])
-      catch
-        :exit, reason ->
-          {:error,
-           "Eval persistence system crashed: #{inspect(reason)}. It may need to be restarted."}
-      end
-    else
-      {:error, "Eval persistence is not available. It may not be configured in this environment."}
+    try do
+      Persistence.get_eval_run(run_id, [])
+    catch
+      :exit, reason ->
+        {:error,
+         "Eval persistence system crashed: #{inspect(reason)}. It may need to be restarted."}
     end
   end
 
