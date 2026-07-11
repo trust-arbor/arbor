@@ -59,7 +59,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
          :ok <- validate_json_object(compilation.initial_values, "initial_values"),
          :ok <- validate_json_object(compilation.manifest, "manifest"),
          :ok <- reject_forbidden_keys(compilation.initial_values, "initial_values", :control),
-         :ok <- reject_forbidden_keys(compilation.manifest, "manifest", :authority),
+         :ok <- reject_manifest_envelope_forbidden_keys(compilation.manifest),
          :ok <- validate_initial_values(compilation, plan),
          :ok <- validate_manifest(compilation, plan) do
       {:ok, compilation}
@@ -197,6 +197,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Compilation do
         _other -> {:halt, mismatch("manifest.#{field}")}
       end
     end)
+  end
+
+  defp reject_manifest_envelope_forbidden_keys(manifest) do
+    manifest
+    |> Map.delete("execution_manifest")
+    |> reject_forbidden_keys("manifest", :authority)
   end
 
   defp reject_forbidden_keys(value, field, scope) do

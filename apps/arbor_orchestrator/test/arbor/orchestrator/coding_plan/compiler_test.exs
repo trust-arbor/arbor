@@ -2,7 +2,14 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   use ExUnit.Case, async: true
 
   alias Arbor.Contracts.Coding.Plan
-  alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, Compilation, Compiler}
+
+  alias Arbor.Orchestrator.CodingPlan.{
+    ActionCatalog,
+    Compilation,
+    Compiler,
+    ExecutionManifest
+  }
+
   alias Arbor.Orchestrator.Dot.Parser
 
   @action_modules [
@@ -65,6 +72,38 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     assert first.manifest["action_names"] == Enum.sort(first.manifest["action_names"])
     assert first.manifest["handler_types"] == Enum.sort(first.manifest["handler_types"])
+  end
+
+  test "regression: valid execution manifest schemas may contain authority-like property names",
+       ctx do
+    plan = plan!()
+
+    assert {:ok, compilation} = compile(plan, ctx)
+
+    assert action_schema_property?(compilation, "council_review_change", "agent_id")
+    assert action_schema_property?(compilation, "git_pr", "owner")
+
+    assert :ok =
+             ExecutionManifest.validate(
+               compilation.execution_manifest,
+               compilation.execution_manifest_digest,
+               compilation.graph_hash
+             )
+
+    assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
+
+    unbound_manifest =
+      %{compilation | manifest: Map.put(compilation.manifest, "execution_manifest", %{})}
+
+    assert {:error, {:compilation_field_mismatch, "manifest.execution_manifest"}} =
+             Compilation.validate(unbound_manifest, plan)
+
+    for key <- ~w(agent_id owner) do
+      injected = %{compilation | manifest: Map.put(compilation.manifest, key, "untrusted")}
+
+      assert {:error, {:forbidden_compilation_key, "manifest", :agent_override}} =
+               Compilation.validate(injected, plan)
+    end
   end
 
   test "default profile retains mandatory validation and binding review", ctx do
@@ -730,6 +769,13 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
   defp parse!(source) do
     {:ok, graph} = Parser.parse(source)
     graph
+  end
+
+  defp action_schema_property?(compilation, action_name, property) do
+    Enum.any?(compilation.execution_manifest["actions"], fn action ->
+      action["name"] == action_name and
+        Map.has_key?(action["parameters_schema"]["properties"], property)
+    end)
   end
 
   defp node_attrs(graph, node_id), do: Map.fetch!(graph.nodes, node_id).attrs
