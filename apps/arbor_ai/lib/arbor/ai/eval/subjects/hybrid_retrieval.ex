@@ -6,8 +6,9 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
   directly through both stages. `:embed_fn` and `:router_fn` provide injectable
   boundaries for deterministic evaluation and testing.
 
-  `:top_k` is capped at 100, `:candidate_k` at 500, `:max_desc_chars` at
-  4,096, and `:timeout` at five minutes.
+  `:top_k` is capped at 100, `:candidate_k` at 500, the legacy
+  `:max_desc_chars` option is enforced as a UTF-8 byte ceiling capped at 4,096,
+  and `:timeout` at five minutes.
   """
 
   @behaviour Arbor.Eval.Subject
@@ -150,28 +151,34 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
          router_fn
        ) do
     descriptions = Map.new(actions, &{&1.module, &1.description})
-    system_prompt = build_rerank_prompt(candidates, descriptions, max_desc_chars, top_k)
     known_modules = MapSet.new(candidates, & &1.module)
 
-    case RetrievalSupport.invoke(
-           router_fn,
-           [base_url, model, system_prompt, prompt, timeout],
-           :router_callback_failed
-         ) do
-      {:ok, content} when is_binary(content) ->
-        case RetrievalSupport.parse_router_response(content, known_modules, top_k) do
-          {:ok, modules} -> {:ok, modules}
-          {:error, reason} -> {:error, {:rerank_failed, reason}}
-        end
+    with {:ok, system_prompt} <-
+           candidates
+           |> build_rerank_prompt(descriptions, max_desc_chars, top_k)
+           |> RetrievalSupport.validate_router_prompt() do
+      case RetrievalSupport.invoke(
+             router_fn,
+             [base_url, model, system_prompt, prompt, timeout],
+             :router_callback_failed
+           ) do
+        {:ok, content} when is_binary(content) ->
+          case RetrievalSupport.parse_router_response(content, known_modules, top_k) do
+            {:ok, modules} -> {:ok, modules}
+            {:error, reason} -> {:error, {:rerank_failed, reason}}
+          end
 
-      {:ok, _content} ->
-        {:error, {:rerank_failed, {:invalid_router_response, :binary_content_required}}}
+        {:ok, _content} ->
+          {:error, {:rerank_failed, {:invalid_router_response, :binary_content_required}}}
 
-      {:error, reason} ->
-        {:error, {:rerank_failed, reason}}
+        {:error, reason} ->
+          {:error, {:rerank_failed, reason}}
 
-      _response ->
-        {:error, {:rerank_failed, {:invalid_router_response, :ok_tuple_required}}}
+        _response ->
+          {:error, {:rerank_failed, {:invalid_router_response, :ok_tuple_required}}}
+      end
+    else
+      {:error, reason} -> {:error, {:rerank_failed, reason}}
     end
   end
 
@@ -224,7 +231,7 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
         {:ok, vector}
 
       {:ok, %{status: status, body: body}} ->
-        {:error, {:embedding_http_error, status, body}}
+        RetrievalSupport.http_error(:embedding_http_error, status, body)
 
       {:error, reason} ->
         {:error, {:transport_error, reason}}
@@ -249,7 +256,7 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
         {:ok, content}
 
       {:ok, %{status: status, body: response_body}} ->
-        {:error, {:router_http_error, status, response_body}}
+        RetrievalSupport.http_error(:router_http_error, status, response_body)
 
       {:error, reason} ->
         {:error, {:transport_error, reason}}

@@ -135,7 +135,7 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
     assert {:ok, _json} = Jason.encode(parse_error)
   end
 
-  test "default judge leaves max_tokens unset unless a bounded value is explicit" do
+  test "default judge leaves max_tokens unset and forwards an explicit positive value" do
     client = Client.new() |> Client.register_adapter(DefaultJudgeAdapter)
     Client.set_default_client(client)
     on_exit(fn -> Client.clear_default_client() end)
@@ -150,22 +150,28 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
     assert unset.detail =~ "max_tokens=nil"
 
     explicit =
-      IntentConformance.grade("digraph {}", nil, Keyword.put(base_opts, :max_tokens, 321))
+      IntentConformance.grade(
+        "digraph {}",
+        nil,
+        Keyword.put(base_opts, :max_tokens, 1_000_000)
+      )
 
-    assert explicit.detail =~ "max_tokens=321"
+    assert explicit.detail =~ "max_tokens=1000000"
 
     invalid =
       IntentConformance.grade(
         "digraph {}",
         nil,
-        Keyword.put(base_opts, :max_tokens, 16_385)
+        Keyword.put(base_opts, :max_tokens, 0)
       )
 
     assert invalid.score == 0.0
-    assert invalid.detail =~ "integer_range_required"
+    assert invalid.detail =~ "positive_integer_required"
   end
 
-  test "bounds and sanitizes injected rationale and parse-failure details" do
+  test "security regression: judge rationale and detail have hard UTF-8 byte ceilings" do
+    combining_rationale = "a" <> String.duplicate("\u0301", 10_000)
+
     response =
       Jason.encode!(%{
         "phase_coverage" => 1.0,
@@ -175,7 +181,7 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
         "handler_types" => 1.0,
         "prompt_relevance" => 1.0,
         "overall" => 1.0,
-        "brief_rationale" => String.duplicate("é", 2_000)
+        "brief_rationale" => combining_rationale
       })
 
     result =
@@ -184,7 +190,8 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
         judge_fn: fn _, _, _, _, _ -> {:ok, response} end
       )
 
-    assert String.length(result.detail) <= 1_024
+    assert byte_size(result.detail) <= 1_024
+    refute result.detail =~ combining_rationale
     assert {:ok, _json} = Jason.encode(result)
 
     malformed =
@@ -193,7 +200,35 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
         judge_fn: fn _, _, _, _, _ -> {:ok, <<"not-json", 255>>} end
       )
 
-    assert String.length(malformed.detail) <= 1_024
+    assert byte_size(malformed.detail) <= 1_024
     assert {:ok, _json} = Jason.encode(malformed)
+  end
+
+  test "security regression: huge integer judge scores do not raise during float coercion" do
+    huge_integer = String.duplicate("9", 1_000)
+
+    response =
+      """
+      {
+        "phase_coverage": #{huge_integer},
+        "decision_fidelity": 1,
+        "loop_correctness": 1,
+        "error_handling": 1,
+        "handler_types": 1,
+        "prompt_relevance": 1
+      }
+      """
+
+    result =
+      IntentConformance.grade("digraph {}", nil,
+        sample_input: "A workflow",
+        judge_fn: fn _, _, _, _, _ -> {:ok, response} end
+      )
+
+    assert result == %{
+             score: 1.0,
+             passed: true,
+             detail: "phase=1.0 decision=1.0 loop=1.0 error=1.0 handler=1.0 prompt=1.0"
+           }
   end
 end

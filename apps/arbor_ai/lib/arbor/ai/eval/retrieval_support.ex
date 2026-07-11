@@ -3,16 +3,32 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
 
   @max_index_bytes 16_777_216
   @max_index_entries 2_000
+  @max_prompt_bytes 1_048_576
+  @max_module_bytes 512
+  @max_description_bytes 16_384
+  @max_index_model_bytes 512
+  @max_router_response_bytes 262_144
+  @max_router_prompt_bytes 1_048_576
+  @max_http_diagnostic_bytes 2_048
   @max_vector_dimensions 8_192
   @max_vector_component_abs 1.0e6
+
+  @string_byte_limits %{
+    index_path: 4_096,
+    model: 512,
+    embed_model: 512,
+    base_url: 4_096,
+    embed_url: 4_096,
+    judge_model: 512,
+    judge_provider: 256
+  }
 
   @positive_integer_limits %{
     top_k: 100,
     candidate_k: 500,
     max_desc_chars: 4_096,
     timeout: 300_000,
-    judge_timeout: 300_000,
-    max_tokens: 16_384
+    judge_timeout: 300_000
   }
 
   @type action :: %{
@@ -30,10 +46,10 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
 
   @spec extract_prompt(term()) :: {:ok, String.t()} | {:error, term()}
   def extract_prompt(%{"prompt" => prompt}) when is_binary(prompt) and prompt != "",
-    do: validate_utf8(prompt, {:invalid_input, :valid_utf8_prompt_required})
+    do: validate_prompt(prompt)
 
   def extract_prompt(prompt) when is_binary(prompt) and prompt != "",
-    do: validate_utf8(prompt, {:invalid_input, :valid_utf8_prompt_required})
+    do: validate_prompt(prompt)
 
   def extract_prompt(_input), do: {:error, {:invalid_input, :prompt_required}}
 
@@ -41,7 +57,7 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   def required_string(opts, key) do
     case Keyword.fetch(opts, key) do
       {:ok, value} when is_binary(value) and value != "" ->
-        validate_utf8(value, {:invalid_option, key, :valid_utf8_required})
+        validate_option_string(value, key)
 
       {:ok, _value} ->
         {:error, {:invalid_option, key, :non_empty_string_required}}
@@ -55,7 +71,7 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   def string_option(opts, key, default) do
     case Keyword.get(opts, key, default) do
       value when is_binary(value) and value != "" ->
-        validate_utf8(value, {:invalid_option, key, :valid_utf8_required})
+        validate_option_string(value, key)
 
       _value ->
         {:error, {:invalid_option, key, :non_empty_string_required}}
@@ -111,20 +127,21 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   end
 
   @spec truncate_utf8(String.t(), pos_integer()) :: String.t()
-  def truncate_utf8(text, max_chars)
-      when is_binary(text) and is_integer(max_chars) and max_chars > 0 do
-    prefix = String.slice(text, 0, max_chars + 1)
-
-    if String.length(prefix) <= max_chars do
+  def truncate_utf8(text, max_bytes)
+      when is_binary(text) and is_integer(max_bytes) and max_bytes > 0 do
+    if byte_size(text) <= max_bytes do
       text
     else
-      String.slice(prefix, 0, max_chars) <> "..."
+      suffix_size = min(byte_size("..."), max_bytes)
+      prefix_budget = max_bytes - suffix_size
+      bounded_utf8_prefix(text, prefix_budget) <> binary_part("...", 0, suffix_size)
     end
   end
 
   @spec load_index(String.t()) :: {:ok, [action()]} | {:error, term()}
   def load_index(path) when is_binary(path) and path != "" do
-    with {:ok, body} <- read_index(path),
+    with {:ok, path} <- validate_option_string(path, :index_path),
+         {:ok, body} <- read_index(path),
          {:ok, decoded} <- decode_index(path, body),
          {:ok, actions} <- normalize_index(path, decoded) do
       {:ok, actions}
@@ -180,21 +197,36 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
           {:ok, [String.t()]} | {:error, term()}
   def parse_router_response(content, known_modules, top_k)
       when is_binary(content) and is_struct(known_modules, MapSet) do
-    case Jason.decode(content) do
-      {:ok, %{"selected" => list}} when is_list(list) ->
-        normalize_router_modules(list, known_modules, top_k)
+    cond do
+      byte_size(content) > @max_router_response_bytes ->
+        {:error, {:invalid_router_response, {:content_size_exceeded, @max_router_response_bytes}}}
 
-      {:ok, %{"actions" => list}} when is_list(list) ->
-        normalize_router_modules(list, known_modules, top_k)
+      not String.valid?(content) ->
+        {:error, {:invalid_router_response, :valid_utf8_required}}
 
-      {:ok, list} when is_list(list) ->
-        normalize_router_modules(list, known_modules, top_k)
+      true ->
+        decode_router_response(content, known_modules, top_k)
+    end
+  end
 
-      {:ok, _other} ->
-        {:error, {:invalid_router_response, :selected_list_required}}
+  @doc false
+  @spec http_error(atom(), term(), term()) :: {:error, term()}
+  def http_error(tag, status, body) when is_atom(tag) do
+    {:error, {tag, status, diagnostic_excerpt(body)}}
+  end
 
-      {:error, _decode_error} ->
-        {:error, {:invalid_router_response, :malformed_json}}
+  @doc false
+  @spec validate_router_prompt(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def validate_router_prompt(prompt) when is_binary(prompt) do
+    cond do
+      byte_size(prompt) > @max_router_prompt_bytes ->
+        {:error, {:router_prompt_size_exceeded, @max_router_prompt_bytes}}
+
+      String.valid?(prompt) ->
+        {:ok, prompt}
+
+      true ->
+        {:error, :router_prompt_valid_utf8_required}
     end
   end
 
@@ -223,14 +255,67 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
 
   def cosine_similarity(_a, _b), do: 0.0
 
-  defp validate_utf8(value, error) do
-    if String.valid?(value), do: {:ok, value}, else: {:error, error}
+  defp validate_prompt(prompt) do
+    validate_bounded_utf8(
+      prompt,
+      @max_prompt_bytes,
+      {:invalid_input, {:prompt_bytes_exceeded, @max_prompt_bytes}},
+      {:invalid_input, :valid_utf8_prompt_required}
+    )
+  end
+
+  defp validate_option_string(value, key) do
+    maximum = Map.get(@string_byte_limits, key, 4_096)
+
+    validate_bounded_utf8(
+      value,
+      maximum,
+      {:invalid_option, key, {:byte_size_exceeded, maximum}},
+      {:invalid_option, key, :valid_utf8_required}
+    )
+  end
+
+  defp validate_index_string(value, field, maximum) do
+    validate_bounded_utf8(
+      value,
+      maximum,
+      {:field_bytes_exceeded, field, maximum},
+      {:field_valid_utf8_required, field}
+    )
+  end
+
+  defp validate_bounded_utf8(value, maximum, size_error, utf8_error) do
+    cond do
+      byte_size(value) > maximum -> {:error, size_error}
+      String.valid?(value) -> {:ok, value}
+      true -> {:error, utf8_error}
+    end
+  end
+
+  defp decode_router_response(content, known_modules, top_k) do
+    case Jason.decode(content) do
+      {:ok, %{"selected" => list}} when is_list(list) ->
+        normalize_router_modules(list, known_modules, top_k)
+
+      {:ok, %{"actions" => list}} when is_list(list) ->
+        normalize_router_modules(list, known_modules, top_k)
+
+      {:ok, list} when is_list(list) ->
+        normalize_router_modules(list, known_modules, top_k)
+
+      {:ok, _other} ->
+        {:error, {:invalid_router_response, :selected_list_required}}
+
+      {:error, _decode_error} ->
+        {:error, {:invalid_router_response, :malformed_json}}
+    end
   end
 
   defp normalize_router_modules(list, known_modules, top_k) do
     normalized =
       list
       |> Enum.filter(&is_binary/1)
+      |> Enum.filter(&(byte_size(&1) <= @max_module_bytes))
       |> Enum.filter(&MapSet.member?(known_modules, &1))
       |> Enum.uniq()
       |> Enum.take(top_k)
@@ -243,24 +328,97 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   end
 
   defp read_index(path) do
-    case File.open(path, [:read, :binary], fn io -> IO.binread(io, @max_index_bytes + 1) end) do
-      {:ok, :eof} ->
-        {:ok, ""}
+    with {:ok, expected_identity} <- index_path_identity(path),
+         :ok <- validate_index_size(path, expected_identity.size) do
+      open_and_read_index(path, expected_identity)
+    end
+  rescue
+    exception -> {:error, {:index_read_failed, path, Exception.message(exception)}}
+  end
 
-      {:ok, body} when is_binary(body) and byte_size(body) <= @max_index_bytes ->
-        {:ok, body}
+  defp index_path_identity(path) do
+    case File.lstat(path, time: :posix) do
+      {:ok, %File.Stat{type: :regular} = stat} ->
+        {:ok, file_identity(stat)}
 
-      {:ok, body} when is_binary(body) ->
-        {:error, {:index_size_exceeded, path, @max_index_bytes}}
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, {:index_file_rejected, path, :symlink}}
 
-      {:ok, {:error, reason}} ->
-        {:error, {:index_read_failed, path, reason}}
+      {:ok, %File.Stat{type: type}} ->
+        {:error, {:index_file_rejected, path, {:not_regular, type}}}
 
       {:error, reason} ->
         {:error, {:index_read_failed, path, reason}}
     end
-  rescue
-    exception -> {:error, {:index_read_failed, path, Exception.message(exception)}}
+  end
+
+  defp descriptor_identity(io) do
+    case :file.read_file_info(io, time: :posix) do
+      {:ok, file_info} ->
+        case File.Stat.from_record(file_info) do
+          %File.Stat{type: :regular} = stat ->
+            {:ok, file_identity(stat)}
+
+          %File.Stat{type: type} ->
+            {:error, {:opened_not_regular, type}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp file_identity(stat) do
+    %{
+      inode: stat.inode,
+      major_device: stat.major_device,
+      minor_device: stat.minor_device,
+      size: stat.size,
+      mtime: stat.mtime,
+      ctime: stat.ctime
+    }
+  end
+
+  defp validate_index_size(path, size) when is_integer(size) and size > @max_index_bytes,
+    do: {:error, {:index_size_exceeded, path, @max_index_bytes}}
+
+  defp validate_index_size(_path, size) when is_integer(size) and size >= 0, do: :ok
+  defp validate_index_size(path, _size), do: {:error, {:index_read_failed, path, :invalid_size}}
+
+  defp open_and_read_index(path, expected_identity) do
+    case File.open(path, [:read, :binary], fn io ->
+           read_verified_index(io, path, expected_identity)
+         end) do
+      {:ok, result} -> result
+      {:error, reason} -> {:error, {:index_read_failed, path, reason}}
+    end
+  end
+
+  defp read_verified_index(io, path, expected_identity) do
+    with {:ok, ^expected_identity} <- descriptor_identity(io),
+         {:ok, body} <- read_bounded_index(io, path),
+         {:ok, ^expected_identity} <- descriptor_identity(io),
+         {:ok, ^expected_identity} <- index_path_identity(path) do
+      {:ok, body}
+    else
+      {:ok, _changed_identity} ->
+        {:error, {:index_read_failed, path, :file_changed_during_read}}
+
+      {:error, {:opened_not_regular, type}} ->
+        {:error, {:index_file_rejected, path, {:not_regular, type}}}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp read_bounded_index(io, path) do
+    case IO.binread(io, @max_index_bytes + 1) do
+      :eof -> {:ok, ""}
+      body when is_binary(body) and byte_size(body) <= @max_index_bytes -> {:ok, body}
+      body when is_binary(body) -> {:error, {:index_size_exceeded, path, @max_index_bytes}}
+      {:error, reason} -> {:error, {:index_read_failed, path, reason}}
+    end
   end
 
   defp decode_index(path, body) do
@@ -310,37 +468,77 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
     description = Map.get(action, "description", "")
     embeddings = Map.get(action, "embeddings", %{})
 
-    cond do
-      not is_binary(description) ->
-        {:error, :description_must_be_string}
-
-      not is_map(embeddings) ->
-        {:error, :embeddings_must_be_object}
-
-      true ->
-        case normalize_embeddings(embeddings) do
-          {:ok, normalized} ->
-            {:ok, %{module: module, description: description, embeddings: normalized}}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
+    with {:ok, module} <- validate_index_string(module, :module, @max_module_bytes),
+         :ok <- validate_description_type(description),
+         {:ok, description} <-
+           validate_index_string(description, :description, @max_description_bytes),
+         :ok <- validate_embeddings_type(embeddings),
+         {:ok, normalized} <- normalize_embeddings(embeddings) do
+      {:ok, %{module: module, description: description, embeddings: normalized}}
     end
   end
 
   defp normalize_action(_action), do: {:error, :module_required}
 
+  defp validate_description_type(description) when is_binary(description), do: :ok
+  defp validate_description_type(_description), do: {:error, :description_must_be_string}
+
+  defp validate_embeddings_type(embeddings) when is_map(embeddings), do: :ok
+  defp validate_embeddings_type(_embeddings), do: {:error, :embeddings_must_be_object}
+
   defp normalize_embeddings(embeddings) do
     Enum.reduce_while(embeddings, {:ok, %{}}, fn
       {model, vector}, {:ok, acc} when is_binary(model) ->
-        case validate_vector_values(vector) do
-          {:ok, _dimensions} -> {:cont, {:ok, Map.put(acc, model, vector)}}
-          {:error, reason} -> {:halt, {:error, {:invalid_embedding, model, reason}}}
+        with {:ok, model} <- validate_index_string(model, :model, @max_index_model_bytes),
+             {:ok, _dimensions} <- validate_vector_values(vector) do
+          {:cont, {:ok, Map.put(acc, model, vector)}}
+        else
+          {:error, {:field_bytes_exceeded, :model, _maximum} = reason} ->
+            {:halt, {:error, {:invalid_embedding_model, reason}}}
+
+          {:error, {:field_valid_utf8_required, :model} = reason} ->
+            {:halt, {:error, {:invalid_embedding_model, reason}}}
+
+          {:error, reason} ->
+            {:halt, {:error, {:invalid_embedding, model, reason}}}
         end
 
-      {model, _vector}, _acc ->
-        {:halt, {:error, {:invalid_embedding, inspect(model), :numeric_vector_required}}}
+      {_model, _vector}, _acc ->
+        {:halt, {:error, {:invalid_embedding_model, :string_required}}}
     end)
+  end
+
+  defp diagnostic_excerpt(body) when is_binary(body) do
+    {excerpt, truncated?} = bounded_binary_excerpt(body)
+    %{body_excerpt: excerpt, truncated: truncated?}
+  end
+
+  defp diagnostic_excerpt(body) do
+    rendered = inspect(body, limit: 20, printable_limit: @max_http_diagnostic_bytes, width: 80)
+    {excerpt, _truncated?} = bounded_binary_excerpt(rendered)
+    %{body_excerpt: excerpt, truncated: true}
+  end
+
+  defp bounded_binary_excerpt(value) do
+    size = byte_size(value)
+    prefix_size = min(size, @max_http_diagnostic_bytes)
+
+    excerpt =
+      value
+      |> binary_part(0, prefix_size)
+      |> String.replace_invalid("")
+
+    {excerpt, size > @max_http_diagnostic_bytes}
+  end
+
+  defp bounded_utf8_prefix(_value, 0), do: ""
+
+  defp bounded_utf8_prefix(value, maximum) do
+    prefix_size = min(byte_size(value), maximum)
+
+    value
+    |> binary_part(0, prefix_size)
+    |> String.replace_invalid("")
   end
 
   defp validate_vector_values(vector) when is_list(vector) and vector != [] do

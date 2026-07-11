@@ -6,8 +6,8 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouter do
   `:router_fn` with the signature
   `(base_url, model, system_prompt, user_prompt, timeout -> result)`.
 
-  `:top_k` is capped at 100, `:max_desc_chars` at 4,096, and `:timeout` at
-  five minutes.
+  `:top_k` is capped at 100, the legacy `:max_desc_chars` option is enforced
+  as a UTF-8 byte ceiling capped at 4,096, and `:timeout` at five minutes.
   """
 
   @behaviour Arbor.Eval.Subject
@@ -45,38 +45,42 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouter do
   end
 
   defp route(actions, prompt, model, top_k, max_desc_chars, base_url, timeout, router_fn) do
-    system_prompt = build_system_prompt(actions, top_k, max_desc_chars)
-    known_modules = MapSet.new(actions, & &1.module)
-    started_at = System.monotonic_time(:millisecond)
+    with {:ok, system_prompt} <-
+           actions
+           |> build_system_prompt(top_k, max_desc_chars)
+           |> RetrievalSupport.validate_router_prompt() do
+      known_modules = MapSet.new(actions, & &1.module)
+      started_at = System.monotonic_time(:millisecond)
 
-    case RetrievalSupport.invoke(
-           router_fn,
-           [base_url, model, system_prompt, prompt, timeout],
-           :router_callback_failed
-         ) do
-      {:ok, content} when is_binary(content) ->
-        with {:ok, modules} <-
-               RetrievalSupport.parse_router_response(content, known_modules, top_k) do
-          ranked = Enum.map(modules, &%{module: &1, score: nil})
+      case RetrievalSupport.invoke(
+             router_fn,
+             [base_url, model, system_prompt, prompt, timeout],
+             :router_callback_failed
+           ) do
+        {:ok, content} when is_binary(content) ->
+          with {:ok, modules} <-
+                 RetrievalSupport.parse_router_response(content, known_modules, top_k) do
+            ranked = Enum.map(modules, &%{module: &1, score: nil})
 
-          {:ok,
-           %{
-             text: Jason.encode!(modules),
-             retrieved: ranked,
-             duration_ms: System.monotonic_time(:millisecond) - started_at,
-             model: model,
-             provider: "ollama"
-           }}
-        end
+            {:ok,
+             %{
+               text: Jason.encode!(modules),
+               retrieved: ranked,
+               duration_ms: System.monotonic_time(:millisecond) - started_at,
+               model: model,
+               provider: "ollama"
+             }}
+          end
 
-      {:ok, _content} ->
-        {:error, {:invalid_router_response, :binary_content_required}}
+        {:ok, _content} ->
+          {:error, {:invalid_router_response, :binary_content_required}}
 
-      {:error, _reason} = error ->
-        error
+        {:error, _reason} = error ->
+          error
 
-      _response ->
-        {:error, {:invalid_router_response, :ok_tuple_required}}
+        _response ->
+          {:error, {:invalid_router_response, :ok_tuple_required}}
+      end
     end
   end
 
@@ -121,7 +125,7 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouter do
         {:ok, content}
 
       {:ok, %{status: status, body: response_body}} ->
-        {:error, {:router_http_error, status, response_body}}
+        RetrievalSupport.http_error(:router_http_error, status, response_body)
 
       {:error, reason} ->
         {:error, {:transport_error, reason}}

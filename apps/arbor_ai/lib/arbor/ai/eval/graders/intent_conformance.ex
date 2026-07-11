@@ -5,8 +5,8 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
   The source description is read from `opts[:sample_input]`. The `:judge_fn`
   option accepts an injectable
   `(provider, model, system_prompt, user_prompt, timeout -> result)` callback.
-  `:max_tokens` remains unset by default and accepts an explicit value up to
-  16,384.
+  `:max_tokens` remains unset by default. Explicit positive integers are
+  forwarded to the selected provider without an application-level ceiling.
   """
 
   @behaviour Arbor.Eval.Grader
@@ -92,9 +92,9 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
   @default_model "google/gemini-2.5-flash"
   @default_provider "openrouter"
   @default_timeout 60_000
-  @max_judge_response_chars 32_768
-  @max_rationale_chars 512
-  @max_detail_chars 1_024
+  @max_judge_response_bytes 32_768
+  @max_rationale_bytes 512
+  @max_detail_bytes 1_024
 
   @impl true
   def grade(actual, _expected, opts \\ []) do
@@ -162,7 +162,7 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
          ) do
       {:ok, response_text} when is_binary(response_text) ->
         response_text
-        |> clean_text(@max_judge_response_chars)
+        |> clean_text(@max_judge_response_bytes)
         |> parse_judge_response()
 
       {:ok, _response} ->
@@ -220,15 +220,15 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
     }
 
     overall =
-      case scores["overall"] do
-        value when is_number(value) and value >= 0.0 and value <= 1.0 -> value * 1.0
-        _value -> weighted_score(dimensions)
+      case unit_score(scores["overall"]) do
+        {:ok, value} -> value
+        :error -> weighted_score(dimensions)
       end
       |> Float.round(2)
 
     rationale =
       case scores["brief_rationale"] do
-        value when is_binary(value) -> clean_text(value, @max_rationale_chars)
+        value when is_binary(value) -> clean_text(value, @max_rationale_bytes)
         _value -> ""
       end
 
@@ -241,7 +241,7 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
         "prompt=#{format_score(dimensions.prompt_relevance)}" <>
         if(rationale == "", do: "", else: " | #{rationale}")
 
-    %{score: overall, passed: overall >= 0.6, detail: clean_text(detail, @max_detail_chars)}
+    %{score: overall, passed: overall >= 0.6, detail: clean_text(detail, @max_detail_bytes)}
   end
 
   defp weighted_score(dimensions) do
@@ -265,10 +265,22 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
 
   defp get_score(scores, key) do
     case scores[key] do
-      value when is_number(value) -> min(max(value * 1.0, 0.0), 1.0)
+      value when is_integer(value) and value <= 0 -> 0.0
+      value when is_integer(value) and value >= 1 -> 1.0
+      value when is_float(value) and value <= 0.0 -> 0.0
+      value when is_float(value) and value >= 1.0 -> 1.0
+      value when is_float(value) -> value
       _value -> 0.5
     end
   end
+
+  defp unit_score(0), do: {:ok, 0.0}
+  defp unit_score(1), do: {:ok, 1.0}
+
+  defp unit_score(value) when is_float(value) and value >= 0.0 and value <= 1.0,
+    do: {:ok, value}
+
+  defp unit_score(_value), do: :error
 
   defp format_score(value), do: value |> Float.round(2) |> to_string()
 
@@ -279,7 +291,7 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
   end
 
   defp failure(detail) do
-    %{score: 0.0, passed: false, detail: clean_text(detail, @max_detail_chars)}
+    %{score: 0.0, passed: false, detail: clean_text(detail, @max_detail_bytes)}
   end
 
   defp maybe_put(opts, _key, nil), do: opts
@@ -291,9 +303,11 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
     |> clean_text(512)
   end
 
-  defp clean_text(text, max_chars) when is_binary(text) do
+  defp clean_text(text, max_bytes) when is_binary(text) do
+    prefix_size = min(byte_size(text), max_bytes)
+
     text
+    |> binary_part(0, prefix_size)
     |> String.replace_invalid("")
-    |> String.slice(0, max_chars)
   end
 end

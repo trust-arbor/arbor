@@ -83,7 +83,7 @@ defmodule Arbor.AI.Eval.Subjects.EmbeddingRetrieval do
         {:ok, vector}
 
       {:ok, %{status: status, body: body}} ->
-        {:error, {:embedding_http_error, status, body}}
+        RetrievalSupport.http_error(:embedding_http_error, status, body)
 
       {:error, reason} ->
         {:error, {:transport_error, reason}}

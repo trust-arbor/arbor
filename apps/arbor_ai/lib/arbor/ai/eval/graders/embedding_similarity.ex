@@ -120,7 +120,7 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarity do
         {:ok, embeddings}
 
       {:ok, %{status: status, body: body}} ->
-        {:error, {:http_error, status, body}}
+        RetrievalSupport.http_error(:http_error, status, body)
 
       {:error, %{reason: reason}} ->
         {:error, reason}

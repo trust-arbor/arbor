@@ -10,9 +10,9 @@ defmodule Arbor.LLM.Eval.Subject do
   provider adapter is selected from `Arbor.LLM.ProviderCatalog`.
 
   `:max_tokens` is forwarded only when the caller supplies a positive integer.
-  Streaming runs have an absolute `:timeout`, a 100,000-event ceiling, and a
-  16 MiB output ceiling. Callers can lower the latter ceilings with
-  `:max_stream_events` and `:max_output_bytes`.
+  All runs have a 16 MiB output ceiling. Streaming runs additionally have an
+  absolute `:timeout` and a 100,000-event ceiling. Callers can lower the output
+  and event ceilings with `:max_output_bytes` and `:max_stream_events`.
   """
 
   @behaviour Arbor.Eval.Subject
@@ -45,7 +45,7 @@ defmodule Arbor.LLM.Eval.Subject do
       if config.stream? do
         run_streaming(transport, request, config)
       else
-        run_complete(transport, request, config.model, config.provider, config.timeout)
+        run_complete(transport, request, config)
       end
     end
   end
@@ -162,28 +162,28 @@ defmodule Arbor.LLM.Eval.Subject do
     end
   end
 
-  defp run_complete(transport, request, model, provider, timeout) do
+  defp run_complete(transport, request, config) do
     start_time = System.monotonic_time(:millisecond)
 
-    case complete(transport, request, receive_timeout: timeout) do
+    case complete(transport, request, receive_timeout: config.timeout) do
       {:ok, response} ->
         duration_ms = System.monotonic_time(:millisecond) - start_time
-        text = extract_text(response)
-        tokens = estimate_tokens(text, response)
 
-        if text == "" do
-          log_empty_response(response, provider, model, duration_ms)
+        with {:ok, text} <- extract_text(response, config.max_output_bytes) do
+          if text == "" do
+            log_empty_response(response, config.provider, config.model, duration_ms)
+          end
+
+          {:ok,
+           %{
+             text: text,
+             duration_ms: duration_ms,
+             ttft_ms: nil,
+             tokens_generated: estimate_tokens(text, response),
+             model: config.model,
+             provider: config.provider
+           }}
         end
-
-        {:ok,
-         %{
-           text: text,
-           duration_ms: duration_ms,
-           ttft_ms: nil,
-           tokens_generated: tokens,
-           model: model,
-           provider: provider
-         }}
 
       {:error, reason} ->
         {:error, reason}
@@ -371,26 +371,33 @@ defmodule Arbor.LLM.Eval.Subject do
         await_stream(state)
 
       {:ok, chunk} ->
-        output_bytes = state.output_bytes + byte_size(chunk)
+        chunk_bytes = byte_size(chunk)
 
-        if output_bytes > state.max_output_bytes do
+        if chunk_bytes > state.max_output_bytes - state.output_bytes do
           {:error, {:stream_limit_exceeded, :output_bytes, state.max_output_bytes}}
         else
-          ttft_ms =
-            state.ttft_ms || System.monotonic_time(:millisecond) - state.start_time
-
-          send(state.producer_pid, {state.ref, :continue})
-
-          await_stream(%{
-            state
-            | output_bytes: output_bytes,
-              chunks: [chunk | state.chunks],
-              ttft_ms: ttft_ms
-          })
+          append_valid_stream_chunk(chunk, chunk_bytes, state)
         end
 
       {:error, reason} ->
         {:error, {:invalid_stream_event, reason}}
+    end
+  end
+
+  defp append_valid_stream_chunk(chunk, chunk_bytes, state) do
+    if String.valid?(chunk) do
+      ttft_ms = state.ttft_ms || System.monotonic_time(:millisecond) - state.start_time
+
+      send(state.producer_pid, {state.ref, :continue})
+
+      await_stream(%{
+        state
+        | output_bytes: state.output_bytes + chunk_bytes,
+          chunks: [chunk | state.chunks],
+          ttft_ms: ttft_ms
+      })
+    else
+      {:error, {:invalid_stream_event, :valid_utf8_text_required}}
     end
   end
 
@@ -450,21 +457,18 @@ defmodule Arbor.LLM.Eval.Subject do
   defp reason_from_data(data), do: data
 
   defp stream_text(%StreamEvent{type: :delta, data: data}), do: delta_text(data)
-  defp stream_text(%{delta: %{text: text}}), do: validate_stream_text(text)
-  defp stream_text(%{delta: text}), do: validate_stream_text(text)
-  defp stream_text(%{text: text}), do: validate_stream_text(text)
-  defp stream_text(text) when is_binary(text), do: validate_stream_text(text)
+  defp stream_text(%{delta: %{text: text}}), do: stream_binary(text)
+  defp stream_text(%{delta: text}), do: stream_binary(text)
+  defp stream_text(%{text: text}), do: stream_binary(text)
+  defp stream_text(text) when is_binary(text), do: {:ok, text}
   defp stream_text(_event), do: {:ok, ""}
 
-  defp delta_text(%{"text" => text}), do: validate_stream_text(text)
-  defp delta_text(%{text: text}), do: validate_stream_text(text)
+  defp delta_text(%{"text" => text}), do: stream_binary(text)
+  defp delta_text(%{text: text}), do: stream_binary(text)
   defp delta_text(_data), do: {:ok, ""}
 
-  defp validate_stream_text(text) when is_binary(text) do
-    if String.valid?(text), do: {:ok, text}, else: {:error, :valid_utf8_text_required}
-  end
-
-  defp validate_stream_text(_text), do: {:error, :binary_text_required}
+  defp stream_binary(text) when is_binary(text), do: {:ok, text}
+  defp stream_binary(_text), do: {:error, :binary_text_required}
 
   defp complete({:client, client}, request, opts), do: Client.complete(client, request, opts)
   defp complete({:adapter, adapter}, request, opts), do: adapter.complete(request, opts)
@@ -518,16 +522,32 @@ defmodule Arbor.LLM.Eval.Subject do
 
   defp default_model(_provider), do: ""
 
-  defp extract_text(%{text: text}) when is_binary(text), do: valid_text_or_empty(text)
+  defp extract_text(response, max_output_bytes) do
+    response
+    |> response_text()
+    |> validate_complete_text(max_output_bytes)
+  end
 
-  defp extract_text(%{message: %{content: content}}) when is_binary(content),
-    do: valid_text_or_empty(content)
+  defp response_text(%{text: text}) when is_binary(text), do: text
 
-  defp extract_text(%{"text" => text}) when is_binary(text), do: valid_text_or_empty(text)
-  defp extract_text(text) when is_binary(text), do: valid_text_or_empty(text)
-  defp extract_text(_response), do: ""
+  defp response_text(%{message: %{content: content}}) when is_binary(content), do: content
 
-  defp valid_text_or_empty(text), do: if(String.valid?(text), do: text, else: "")
+  defp response_text(%{"text" => text}) when is_binary(text), do: text
+  defp response_text(text) when is_binary(text), do: text
+  defp response_text(_response), do: ""
+
+  defp validate_complete_text(text, max_output_bytes) do
+    cond do
+      byte_size(text) > max_output_bytes ->
+        {:error, {:output_limit_exceeded, :output_bytes, max_output_bytes}}
+
+      String.valid?(text) ->
+        {:ok, text}
+
+      true ->
+        {:ok, ""}
+    end
+  end
 
   defp estimate_tokens(text, response) do
     usage_tokens =

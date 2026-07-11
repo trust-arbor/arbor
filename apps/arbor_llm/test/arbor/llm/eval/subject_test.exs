@@ -17,6 +17,14 @@ defmodule Arbor.LLM.Eval.SubjectTest do
       {:error, {:transport_failed, 503}}
     end
 
+    def complete(%Request{model: "oversized-complete"}, _opts) do
+      {:ok, %Response{text: "123456", usage: %{output_tokens: 2}, raw: %{}}}
+    end
+
+    def complete(%Request{model: "oversized-invalid-complete"}, _opts) do
+      {:ok, %Response{text: <<255, 1, 2, 3, 4, 5>>, usage: %{}, raw: %{}}}
+    end
+
     def complete(%Request{} = request, opts) do
       payload = %{
         "max_tokens" => request.max_tokens,
@@ -72,6 +80,12 @@ defmodule Arbor.LLM.Eval.SubjectTest do
           [
             %StreamEvent{type: :delta, data: %{text: "1234"}},
             %StreamEvent{type: :delta, data: %{text: "56"}},
+            %StreamEvent{type: :finish, data: %{}}
+          ]
+
+        "oversized-invalid-stream" ->
+          [
+            %StreamEvent{type: :delta, data: %{text: <<255, 1, 2, 3, 4, 5>>}},
             %StreamEvent{type: :finish, data: %{}}
           ]
 
@@ -260,7 +274,7 @@ defmodule Arbor.LLM.Eval.SubjectTest do
              ) == {:error, {:stream_deadline_exceeded, 25}}
     end
 
-    test "stops at terminal events and enforces the output-byte ceiling" do
+    test "security regression: terminal stream events stop producer consumption" do
       assert {:ok, %{text: "done"}} =
                Subject.run("hello",
                  client: client(),
@@ -268,11 +282,41 @@ defmodule Arbor.LLM.Eval.SubjectTest do
                  model: "terminal-stream",
                  stream: true
                )
+    end
 
+    test "security regression: streaming output obeys the caller byte ceiling" do
       assert Subject.run("hello",
                client: client(),
                provider: "eval_test",
                model: "oversized-stream",
+               stream: true,
+               max_output_bytes: 5
+             ) == {:error, {:stream_limit_exceeded, :output_bytes, 5}}
+    end
+
+    test "security regression: complete output obeys the caller byte ceiling" do
+      assert Subject.run("hello",
+               client: client(),
+               provider: "eval_test",
+               model: "oversized-complete",
+               max_output_bytes: 5
+             ) == {:error, {:output_limit_exceeded, :output_bytes, 5}}
+    end
+
+    test "security regression: complete byte ceiling precedes UTF-8 validation" do
+      assert Subject.run("hello",
+               client: client(),
+               provider: "eval_test",
+               model: "oversized-invalid-complete",
+               max_output_bytes: 5
+             ) == {:error, {:output_limit_exceeded, :output_bytes, 5}}
+    end
+
+    test "security regression: stream byte ceiling precedes UTF-8 validation" do
+      assert Subject.run("hello",
+               client: client(),
+               provider: "eval_test",
+               model: "oversized-invalid-stream",
                stream: true,
                max_output_bytes: 5
              ) == {:error, {:stream_limit_exceeded, :output_bytes, 5}}

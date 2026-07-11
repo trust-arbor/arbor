@@ -1,5 +1,5 @@
 defmodule Arbor.AI.Eval.Subjects.EmbeddingRetrievalTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
@@ -89,6 +89,63 @@ defmodule Arbor.AI.Eval.Subjects.EmbeddingRetrievalTest do
              {:error, {:invalid_embedding_response, {:vector_dimension_mismatch, 2, 1}}}
   end
 
+  test "default Ollama embedding transport posts to /api/embeddings", %{
+    index_path: index_path
+  } do
+    parent = self()
+
+    install_req_adapter(fn request ->
+      body = decode_request_body(request)
+      send(parent, {:embedding_http_request, request.url.path, body})
+      {request, Req.Response.new(status: 200, body: %{"embedding" => [1.0, 0.0]})}
+    end)
+
+    assert {:ok, result} =
+             EmbeddingRetrieval.run("read a file",
+               index_path: index_path,
+               model: "embed-model",
+               base_url: "http://ollama.test",
+               timeout: 1_000
+             )
+
+    assert_receive {:embedding_http_request, "/api/embeddings", request_body}
+    assert request_body == %{"model" => "embed-model", "prompt" => "read a file"}
+    assert hd(result.retrieved).module == "Arbor.Actions.FileRead"
+  end
+
+  test "default Ollama embedding transport rejects a malformed 200 response", %{
+    index_path: index_path
+  } do
+    install_req_adapter(fn request ->
+      {request, Req.Response.new(status: 200, body: %{"embedding" => "not-a-vector"})}
+    end)
+
+    assert {:error, {:embedding_http_error, 200, %{body_excerpt: excerpt, truncated: true}}} =
+             EmbeddingRetrieval.run("read a file",
+               index_path: index_path,
+               model: "embed-model",
+               base_url: "http://ollama.test"
+             )
+
+    assert excerpt =~ "not-a-vector"
+  end
+
+  test "default Ollama embedding transport shapes HTTP error statuses", %{
+    index_path: index_path
+  } do
+    install_req_adapter(fn request ->
+      {request, Req.Response.new(status: 418, body: "embedding denied")}
+    end)
+
+    assert EmbeddingRetrieval.run("read a file",
+             index_path: index_path,
+             model: "embed-model",
+             base_url: "http://ollama.test"
+           ) ==
+             {:error,
+              {:embedding_http_error, 418, %{body_excerpt: "embedding denied", truncated: false}}}
+  end
+
   defp index_fixture do
     %{
       "actions" => [
@@ -116,5 +173,17 @@ defmodule Arbor.AI.Eval.Subjects.EmbeddingRetrievalTest do
       System.tmp_dir!(),
       "arbor-ai-#{label}-#{System.unique_integer([:positive, :monotonic])}.json"
     )
+  end
+
+  defp install_req_adapter(adapter) do
+    previous_options = Req.default_options()
+    on_exit(fn -> Req.default_options(previous_options) end)
+    Req.default_options(adapter: adapter)
+  end
+
+  defp decode_request_body(request) do
+    request.body
+    |> IO.iodata_to_binary()
+    |> Jason.decode!()
   end
 end
