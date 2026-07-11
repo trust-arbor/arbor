@@ -193,6 +193,80 @@ defmodule Arbor.Consensus.Evaluators.ConsultTest do
       refute Keyword.has_key?(engine_opts, :quorum)
     end
 
+    test "security regression: Consult.decide forwards signing_authority nested engine opt" do
+      # Fails on a3928b18: @nested_engine_opt_allowlist omitted :signing_authority,
+      # so parent authority mode was silently dropped into nested Engine runs.
+      # This exercises production Consult.decide/3 → nested_engine_opts/2, not a
+      # locally recreated Keyword.take allowlist.
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      parent = self()
+      authority = {:opaque_parent_authorization, make_ref()}
+      signing_authority = {:opaque_signing_authority, make_ref()}
+
+      engine_runner = fn _graph, engine_opts ->
+        send(parent, {:signing_authority_nested_opts, engine_opts})
+        {:ok, %{context: %{"council.decision" => "approved"}}}
+      end
+
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(TestAdvisoryEvaluator, "Authority nested propagation",
+                 graph: graph_path,
+                 run_authorization: authority,
+                 nested_engine_opts: [
+                   signing_authority: signing_authority,
+                   signer: fn _ -> {:ok, :signed} end,
+                   max_depth: 4,
+                   # Must not pass through the allowlist:
+                   actions_executor: :must_not_cross,
+                   middleware: [:must_not_cross]
+                 ],
+                 engine_runner: engine_runner
+               )
+
+      assert_receive {:signing_authority_nested_opts, engine_opts}
+      assert Keyword.fetch!(engine_opts, :signing_authority) == signing_authority
+      assert engine_opts[:max_depth] == 4
+      assert engine_opts[:run_authorization] == authority
+      assert engine_opts[:authorization] == true
+      refute Keyword.has_key?(engine_opts, :actions_executor)
+      refute Keyword.has_key?(engine_opts, :middleware)
+      # Authority stays process-local engine opts, not initial context.
+      refute Map.has_key?(engine_opts[:initial_values], "signing_authority")
+      refute Map.has_key?(engine_opts[:initial_values], :signing_authority)
+    end
+
+    test "security regression: Consult.decide present nil signing_authority stays present (fail-closed)" do
+      # Presence of the key (even nil) must be preserved so nested Engine fails
+      # closed rather than treating absence as legacy authorizer/signer mode.
+      graph_path = write_decision_graph!()
+      on_exit(fn -> File.rm(graph_path) end)
+
+      parent = self()
+      authority = {:opaque_parent_authorization, make_ref()}
+
+      engine_runner = fn _graph, engine_opts ->
+        send(parent, {:nil_signing_authority_nested_opts, engine_opts})
+        {:ok, %{context: %{"council.decision" => "approved"}}}
+      end
+
+      assert {:ok, %{decision: "approved"}} =
+               Consult.decide(TestAdvisoryEvaluator, "Nil authority presence",
+                 graph: graph_path,
+                 run_authorization: authority,
+                 nested_engine_opts: [
+                   signing_authority: nil,
+                   max_depth: 2
+                 ],
+                 engine_runner: engine_runner
+               )
+
+      assert_receive {:nil_signing_authority_nested_opts, engine_opts}
+      assert Keyword.has_key?(engine_opts, :signing_authority)
+      assert Keyword.fetch!(engine_opts, :signing_authority) == nil
+    end
+
     test "preserves legacy graph overrides and omits authorization when unbound" do
       graph_path = write_decision_graph!()
       on_exit(fn -> File.rm(graph_path) end)

@@ -590,6 +590,80 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     end
   end
 
+  describe "hostile partial struct-tagged authority maps" do
+    test "security regression: partial struct-tagged maps fail closed without crashing broker or exiting caller",
+         ctx do
+      # Parent 5a0768f9: `%SigningAuthority{}` matches partial maps; field access
+      # (authority.token / principal_id / purpose) raises KeyError inside the
+      # broker GenServer, exits the caller, and drops live authority leases.
+      assert {:ok, authority} = open_authority(ctx, purpose: :session)
+
+      broker_pid = Process.whereis(SigningAuthorityBroker)
+      assert is_pid(broker_pid)
+      assert Process.alive?(broker_pid)
+
+      # Keep a monitor so a silent broker death is observed as a DOWN message.
+      broker_mon = Process.monitor(broker_pid)
+
+      # Valid lease must remain usable across the hostile calls below.
+      assert {:ok, %SignedRequest{}} =
+               Security.sign_with_authority(authority, "pre-hostile-baseline")
+
+      partial_missing = %{__struct__: SigningAuthority}
+      partial_short = %{__struct__: SigningAuthority, token: "too-short"}
+
+      partial_token_only = %{
+        __struct__: SigningAuthority,
+        token: :crypto.strong_rand_bytes(32)
+      }
+
+      for hostile <- [partial_missing, partial_short, partial_token_only, nil, :not_authority] do
+        sign_result =
+          try do
+            Security.sign_with_authority(hostile, "hostile-payload")
+          catch
+            kind, reason -> flunk("sign_with_authority exited: #{inspect({kind, reason})}")
+          end
+
+        assert match?({:error, _}, sign_result),
+               "expected shaped error for #{inspect(hostile)}, got #{inspect(sign_result)}"
+
+        derive_result =
+          try do
+            Security.derive_secret_with_authority(hostile, :capability_mac)
+          catch
+            kind, reason ->
+              flunk("derive_secret_with_authority exited: #{inspect({kind, reason})}")
+          end
+
+        assert match?({:error, _}, derive_result)
+
+        close_result =
+          try do
+            Security.close_signing_authority(hostile)
+          catch
+            kind, reason -> flunk("close_signing_authority exited: #{inspect({kind, reason})}")
+          end
+
+        assert match?({:error, _}, close_result)
+      end
+
+      # Broker identity preserved — not restarted after a crash.
+      assert Process.whereis(SigningAuthorityBroker) == broker_pid
+      assert Process.alive?(broker_pid)
+      refute_received {:DOWN, ^broker_mon, :process, ^broker_pid, _}
+
+      # Pre-existing valid lease still signs after the hostile barrage.
+      assert {:ok, %SignedRequest{}} =
+               Security.sign_with_authority(authority, "post-hostile-still-valid")
+
+      assert {:ok, secret} =
+               Security.derive_secret_with_authority(authority, :capability_mac)
+
+      assert is_binary(secret) and byte_size(secret) == 32
+    end
+  end
+
   describe "legacy make_signer compatibility" do
     test "make_signer still returns a working closure", ctx do
       signer = Security.make_signer(ctx.agent_id, ctx.private_key)

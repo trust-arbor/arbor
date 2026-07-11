@@ -157,12 +157,21 @@ defmodule Arbor.Security.SigningAuthorityBroker do
              | :invalid_payload
              | :broker_unavailable
              | term()}
-  def sign(%SigningAuthority{} = authority, payload) when is_binary(payload) do
-    call({:sign, authority, payload})
+  def sign(authority, payload) when is_binary(payload) do
+    # Canonicalize before GenServer.call — partial struct-tagged maps match
+    # `%SigningAuthority{}` but crash on missing-field access inside handle_call.
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, canonical} -> call({:sign, canonical, payload})
+      {:error, reason} -> {:error, reason}
+    end
   end
 
-  def sign(%SigningAuthority{}, _payload), do: {:error, :invalid_payload}
-  def sign(_, _), do: {:error, :invalid_authority}
+  def sign(authority, _payload) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, _canonical} -> {:error, :invalid_payload}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   @doc """
   Derive a domain-separated secret from the authority's principal key.
@@ -188,11 +197,12 @@ defmodule Arbor.Security.SigningAuthorityBroker do
              | :invalid_purpose
              | :broker_unavailable
              | term()}
-  def derive_secret(%SigningAuthority{} = authority, purpose) do
-    call({:derive_secret, authority, purpose})
+  def derive_secret(authority, purpose) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, canonical} -> call({:derive_secret, canonical, purpose})
+      {:error, reason} -> {:error, reason}
+    end
   end
-
-  def derive_secret(_, _), do: {:error, :invalid_authority}
 
   @doc """
   Explicitly revoke an authority token.
@@ -206,11 +216,12 @@ defmodule Arbor.Security.SigningAuthorityBroker do
              | :purpose_mismatch
              | :broker_unavailable
              | term()}
-  def close(%SigningAuthority{} = authority) do
-    call({:close, authority})
+  def close(authority) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, canonical} -> call({:close, canonical})
+      {:error, reason} -> {:error, reason}
+    end
   end
-
-  def close(_), do: {:error, :invalid_authority}
 
   @doc false
   @spec debug_state() :: map()
@@ -297,8 +308,11 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   def handle_call({:sign, authority, payload}, _from, state) do
+    # Re-canonicalize inside the server so a hostile message never KeyError-crashes
+    # the broker (and invalidates live leases).
     reply =
-      with {:ok, entry} <- authorize_authority(authority, state),
+      with {:ok, authority} <- SigningAuthority.canonicalize(authority),
+           {:ok, entry} <- authorize_authority(authority, state),
            {:ok, private_key} <- load_private_key(entry.principal_id) do
         # Key used only for this call — never written into state or the reply envelope.
         SignedRequest.sign(payload, entry.principal_id, private_key)
@@ -309,7 +323,8 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   def handle_call({:derive_secret, authority, purpose}, _from, state) do
     reply =
-      with {:ok, info} <- derive_info(purpose),
+      with {:ok, authority} <- SigningAuthority.canonicalize(authority),
+           {:ok, info} <- derive_info(purpose),
            {:ok, entry} <- authorize_authority(authority, state),
            {:ok, private_key} <- load_private_key(entry.principal_id) do
         secret = Crypto.derive_key(private_key, info, 32)
@@ -320,21 +335,27 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   def handle_call({:close, authority}, _from, state) do
-    case Map.fetch(state.authorities, authority.token) do
-      {:ok, entry} ->
-        cond do
-          entry.principal_id != authority.principal_id ->
-            {:reply, {:error, :principal_mismatch}, state}
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, authority} ->
+        case Map.fetch(state.authorities, authority.token) do
+          {:ok, entry} ->
+            cond do
+              entry.principal_id != authority.principal_id ->
+                {:reply, {:error, :principal_mismatch}, state}
 
-          entry.purpose != authority.purpose ->
-            {:reply, {:error, :purpose_mismatch}, state}
+              entry.purpose != authority.purpose ->
+                {:reply, {:error, :purpose_mismatch}, state}
 
-          true ->
-            {:reply, :ok, revoke_token(state, authority.token, entry)}
+              true ->
+                {:reply, :ok, revoke_token(state, authority.token, entry)}
+            end
+
+          :error ->
+            {:reply, {:error, :authority_not_found}, state}
         end
 
-      :error ->
-        {:reply, {:error, :authority_not_found}, state}
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -388,17 +409,23 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   # Authorization helpers
   # ---------------------------------------------------------------------------
 
-  defp authorize_authority(%SigningAuthority{} = authority, state) do
-    case Map.fetch(state.authorities, authority.token) do
+  defp authorize_authority(authority, state) do
+    # Map.get avoids KeyError on residual partial maps; callers should have
+    # already canonicalized, but this is the GenServer fail-closed last line.
+    token = Map.get(authority, :token)
+    principal_id = Map.get(authority, :principal_id)
+    purpose = Map.get(authority, :purpose)
+
+    case Map.fetch(state.authorities, token) do
       :error ->
         {:error, :authority_not_found}
 
       {:ok, entry} ->
         cond do
-          entry.principal_id != authority.principal_id ->
+          entry.principal_id != principal_id ->
             {:error, :principal_mismatch}
 
-          entry.purpose != authority.purpose ->
+          entry.purpose != purpose ->
             {:error, :purpose_mismatch}
 
           not Process.alive?(entry.owner_pid) ->

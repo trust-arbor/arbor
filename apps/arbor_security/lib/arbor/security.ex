@@ -1130,16 +1130,29 @@ defmodule Arbor.Security do
   Fail-closed: forged, closed, owner-dead, suspended/revoked identity,
   purpose/principal tampering, and deleted-key authorities return explicit
   errors. Uses named dispatch only — safe across hot code reload of this module.
+
+  Hostile partial struct-tagged maps (`%{__struct__: SigningAuthority, ...}`)
+  are reconstructed via `SigningAuthority.canonicalize/1` and rejected with a
+  shaped error — they must never raise or crash the broker GenServer.
   """
   @spec sign_with_authority(SigningAuthority.t(), binary()) ::
           {:ok, SignedRequest.t()} | {:error, term()}
-  def sign_with_authority(%SigningAuthority{} = authority, payload)
-      when is_binary(payload) do
-    SigningAuthorityBroker.sign(authority, payload)
+  def sign_with_authority(authority, payload) when is_binary(payload) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, canonical} ->
+        SigningAuthorityBroker.sign(canonical, payload)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
-  def sign_with_authority(%SigningAuthority{}, _payload), do: {:error, :invalid_payload}
-  def sign_with_authority(_, _), do: {:error, :invalid_authority}
+  def sign_with_authority(authority, _payload) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, _canonical} -> {:error, :invalid_payload}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   @doc """
   Derive a domain-separated secret using a signing authority.
@@ -1147,24 +1160,37 @@ defmodule Arbor.Security do
   `purpose` is mandatory domain separation material. The broker always
   prefixes a fixed namespace so undomained raw-key export is impossible.
   The persistent private key is never returned.
+
+  Partial/forged struct-tagged maps are canonicalized and fail closed.
   """
   @spec derive_secret_with_authority(SigningAuthority.t(), atom() | String.t()) ::
           {:ok, binary()} | {:error, term()}
-  def derive_secret_with_authority(%SigningAuthority{} = authority, purpose) do
-    SigningAuthorityBroker.derive_secret(authority, purpose)
-  end
+  def derive_secret_with_authority(authority, purpose) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, canonical} ->
+        SigningAuthorityBroker.derive_secret(canonical, purpose)
 
-  def derive_secret_with_authority(_, _), do: {:error, :invalid_authority}
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   @doc """
   Explicitly close (revoke) a signing authority.
+
+  Partial/forged struct-tagged maps are canonicalized and fail closed without
+  crashing the broker or exiting the caller.
   """
   @spec close_signing_authority(SigningAuthority.t()) :: :ok | {:error, term()}
-  def close_signing_authority(%SigningAuthority{} = authority) do
-    SigningAuthorityBroker.close(authority)
-  end
+  def close_signing_authority(authority) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, canonical} ->
+        SigningAuthorityBroker.close(canonical)
 
-  def close_signing_authority(_), do: {:error, :invalid_authority}
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   defp fetch_required_attr(opts, key, error_atom) when is_list(opts) do
     case Keyword.fetch(opts, key) do
