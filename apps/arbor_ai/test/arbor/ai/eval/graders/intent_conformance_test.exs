@@ -1,9 +1,33 @@
 defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
   alias Arbor.AI.Eval.Graders.IntentConformance
+  alias Arbor.LLM.{Client, Request, Response}
+
+  defmodule DefaultJudgeAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+
+    @impl true
+    def provider, do: "intent-test"
+
+    @impl true
+    def complete(%Request{} = request, _opts) do
+      response = %{
+        "phase_coverage" => 1.0,
+        "decision_fidelity" => 1.0,
+        "loop_correctness" => 1.0,
+        "error_handling" => 1.0,
+        "handler_types" => 1.0,
+        "prompt_relevance" => 1.0,
+        "overall" => 1.0,
+        "brief_rationale" => "max_tokens=#{inspect(request.max_tokens)}"
+      }
+
+      {:ok, %Response{text: Jason.encode!(response), raw: %{}}}
+    end
+  end
 
   test "parses fenced judge JSON and returns JSON-clean output" do
     judge_fn = fn provider, model, system_prompt, user_prompt, timeout ->
@@ -109,5 +133,67 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
     refute parse_error.passed
     assert parse_error.detail == "JSON parse error: not-json"
     assert {:ok, _json} = Jason.encode(parse_error)
+  end
+
+  test "default judge leaves max_tokens unset unless a bounded value is explicit" do
+    client = Client.new() |> Client.register_adapter(DefaultJudgeAdapter)
+    Client.set_default_client(client)
+    on_exit(fn -> Client.clear_default_client() end)
+
+    base_opts = [
+      sample_input: "A workflow",
+      judge_provider: "intent-test",
+      judge_model: "judge-model"
+    ]
+
+    unset = IntentConformance.grade("digraph {}", nil, base_opts)
+    assert unset.detail =~ "max_tokens=nil"
+
+    explicit =
+      IntentConformance.grade("digraph {}", nil, Keyword.put(base_opts, :max_tokens, 321))
+
+    assert explicit.detail =~ "max_tokens=321"
+
+    invalid =
+      IntentConformance.grade(
+        "digraph {}",
+        nil,
+        Keyword.put(base_opts, :max_tokens, 16_385)
+      )
+
+    assert invalid.score == 0.0
+    assert invalid.detail =~ "integer_range_required"
+  end
+
+  test "bounds and sanitizes injected rationale and parse-failure details" do
+    response =
+      Jason.encode!(%{
+        "phase_coverage" => 1.0,
+        "decision_fidelity" => 1.0,
+        "loop_correctness" => 1.0,
+        "error_handling" => 1.0,
+        "handler_types" => 1.0,
+        "prompt_relevance" => 1.0,
+        "overall" => 1.0,
+        "brief_rationale" => String.duplicate("é", 2_000)
+      })
+
+    result =
+      IntentConformance.grade("digraph {}", nil,
+        sample_input: "A workflow",
+        judge_fn: fn _, _, _, _, _ -> {:ok, response} end
+      )
+
+    assert String.length(result.detail) <= 1_024
+    assert {:ok, _json} = Jason.encode(result)
+
+    malformed =
+      IntentConformance.grade("digraph {}", nil,
+        sample_input: "A workflow",
+        judge_fn: fn _, _, _, _, _ -> {:ok, <<"not-json", 255>>} end
+      )
+
+    assert String.length(malformed.detail) <= 1_024
+    assert {:ok, _json} = Jason.encode(malformed)
   end
 end

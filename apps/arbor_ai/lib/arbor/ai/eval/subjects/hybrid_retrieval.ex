@@ -5,6 +5,9 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
   The action index is loaded from the required `:index_path` option and passed
   directly through both stages. `:embed_fn` and `:router_fn` provide injectable
   boundaries for deterministic evaluation and testing.
+
+  `:top_k` is capped at 100, `:candidate_k` at 500, `:max_desc_chars` at
+  4,096, and `:timeout` at five minutes.
   """
 
   @behaviour Arbor.Eval.Subject
@@ -127,7 +130,8 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
        ) do
     with {:ok, indexed_actions} <-
            RetrievalSupport.embeddings_for_model(actions, embed_model, index_path),
-         {:ok, query_vector} <- embed(embed_fn, base_url, embed_model, prompt, timeout) do
+         {:ok, query_vector} <- embed(embed_fn, base_url, embed_model, prompt, timeout),
+         :ok <- RetrievalSupport.validate_query_dimensions(indexed_actions, query_vector) do
       {:ok, RetrievalSupport.rank(indexed_actions, query_vector, candidate_k)}
     else
       {:error, reason} -> {:error, {:recall_failed, reason}}
@@ -155,7 +159,10 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
            :router_callback_failed
          ) do
       {:ok, content} when is_binary(content) ->
-        {:ok, parse_response(content, known_modules, top_k)}
+        case RetrievalSupport.parse_router_response(content, known_modules, top_k) do
+          {:ok, modules} -> {:ok, modules}
+          {:error, reason} -> {:error, {:rerank_failed, reason}}
+        end
 
       {:ok, _content} ->
         {:error, {:rerank_failed, {:invalid_router_response, :binary_content_required}}}
@@ -184,7 +191,11 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
     action_list =
       candidates
       |> Enum.map(fn candidate ->
-        description = descriptions |> Map.get(candidate.module, "") |> truncate(max_desc_chars)
+        description =
+          descriptions
+          |> Map.get(candidate.module, "")
+          |> RetrievalSupport.truncate_utf8(max_desc_chars)
+
         "- #{candidate.module}: #{description}"
       end)
       |> Enum.join("\n")
@@ -203,9 +214,6 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
     The "selected" array MUST contain only module names from the shortlist above, ordered by relevance to the user's request. Do not invent module names. Do not include any prose.
     """
   end
-
-  defp truncate(text, max) when byte_size(text) <= max, do: text
-  defp truncate(text, max), do: binary_part(text, 0, max) <> "..."
 
   defp default_embed(base_url, model, prompt, timeout) do
     case Req.post(base_url <> "/api/embeddings",
@@ -246,30 +254,6 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
       {:error, reason} ->
         {:error, {:transport_error, reason}}
     end
-  end
-
-  defp parse_response(content, known_modules, top_k) do
-    case Jason.decode(content) do
-      {:ok, %{"selected" => list}} when is_list(list) ->
-        normalize(list, known_modules, top_k)
-
-      {:ok, %{"actions" => list}} when is_list(list) ->
-        normalize(list, known_modules, top_k)
-
-      {:ok, list} when is_list(list) ->
-        normalize(list, known_modules, top_k)
-
-      _other ->
-        []
-    end
-  end
-
-  defp normalize(list, known_modules, top_k) do
-    list
-    |> Enum.filter(&is_binary/1)
-    |> Enum.filter(&MapSet.member?(known_modules, &1))
-    |> Enum.uniq()
-    |> Enum.take(top_k)
   end
 
   defp fuse(llm_picks, candidates, top_k) do

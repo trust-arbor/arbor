@@ -14,6 +14,7 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarity do
   @default_url "http://localhost:11434/v1/embeddings"
   @default_model "nomic-embed-text:latest"
   @default_timeout 30_000
+  @max_detail_chars 1_024
 
   @impl true
   def grade(actual, expected, opts \\ []) do
@@ -47,7 +48,8 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarity do
          ) do
       {:ok, [vector_a, vector_b]} ->
         with {:ok, vector_a} <- RetrievalSupport.validate_vector(vector_a),
-             {:ok, vector_b} <- RetrievalSupport.validate_vector(vector_b) do
+             {:ok, vector_b} <- RetrievalSupport.validate_vector(vector_b),
+             :ok <- matching_dimensions(vector_a, vector_b) do
           similarity = cosine_similarity(vector_a, vector_b)
 
           %{
@@ -88,8 +90,24 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarity do
     %{
       score: 0.0,
       passed: false,
-      detail: "embedding unavailable: #{inspect(reason)}"
+      detail:
+        reason
+        |> then(&"embedding unavailable: #{inspect(&1, limit: 20, printable_limit: 400)}")
+        |> String.replace_invalid("")
+        |> String.slice(0, @max_detail_chars)
     }
+  end
+
+  defp matching_dimensions(vector_a, vector_b) do
+    dimensions_a = length(vector_a)
+    dimensions_b = length(vector_b)
+
+    if dimensions_a == dimensions_b do
+      :ok
+    else
+      {:error,
+       {:invalid_embedding_response, {:vector_dimension_mismatch, dimensions_a, dimensions_b}}}
+    end
   end
 
   defp default_embed(texts, url, model, timeout) do

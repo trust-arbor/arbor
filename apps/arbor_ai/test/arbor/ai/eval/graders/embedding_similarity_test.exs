@@ -1,5 +1,5 @@
 defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
@@ -81,6 +81,49 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
       assert result.score == 0.0
       refute result.passed
       assert result.detail =~ "numeric_vector_required"
+    end
+
+    test "exercises the deterministic default HTTP embedding boundary" do
+      previous_options = Req.default_options()
+      parent = self()
+
+      on_exit(fn -> Req.default_options(previous_options) end)
+
+      Req.default_options(
+        adapter: fn request ->
+          body = request.body |> IO.iodata_to_binary() |> Jason.decode!()
+          send(parent, {:embedding_request, request.url.path, body})
+
+          response_body =
+            Jason.encode!(%{
+              "data" => [
+                %{"embedding" => [1.0, 0.0]},
+                %{"embedding" => [0.8, 0.2]}
+              ]
+            })
+
+          response =
+            Req.Response.new(
+              status: 200,
+              headers: %{"content-type" => ["application/json"]},
+              body: response_body
+            )
+
+          {request, response}
+        end
+      )
+
+      result =
+        EmbeddingSimilarity.grade("actual", "expected",
+          embed_url: "http://embedding.test/v1/embeddings",
+          embed_model: "http-model",
+          timeout: 1_000
+        )
+
+      assert_receive {:embedding_request, "/v1/embeddings", request_body}
+      assert request_body == %{"input" => ["actual", "expected"], "model" => "http-model"}
+      assert_in_delta result.score, 0.9701, 0.001
+      assert result.passed
     end
   end
 end

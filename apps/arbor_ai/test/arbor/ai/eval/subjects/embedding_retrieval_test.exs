@@ -78,6 +78,17 @@ defmodule Arbor.AI.Eval.Subjects.EmbeddingRetrievalTest do
              {:error, {:embedding_callback_failed, {:exception, "transport exploded"}}}
   end
 
+  test "rejects a query vector with different dimensions from the index", %{
+    index_path: index_path
+  } do
+    assert EmbeddingRetrieval.run("read a file",
+             index_path: index_path,
+             model: "embed-model",
+             embed_fn: fn _, _, _, _ -> {:ok, [1.0]} end
+           ) ==
+             {:error, {:invalid_embedding_response, {:vector_dimension_mismatch, 2, 1}}}
+  end
+
   defp index_fixture do
     %{
       "actions" => [

@@ -1,5 +1,5 @@
 defmodule Arbor.LLM.Eval.SubjectTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   @moduletag :fast
 
   alias Arbor.LLM
@@ -42,13 +42,47 @@ defmodule Arbor.LLM.Eval.SubjectTest do
     end
 
     @impl true
-    def stream(%Request{}, _opts) do
-      [
-        %StreamEvent{type: :start, data: %{}},
-        %StreamEvent{type: :delta, data: %{"text" => "hel"}},
-        %StreamEvent{type: :delta, data: %{text: "lo"}},
-        %StreamEvent{type: :finish, data: %{"reason" => "stop"}}
-      ]
+    def stream(%Request{model: model}, _opts) do
+      case model do
+        "stream-error" ->
+          [
+            %StreamEvent{type: :delta, data: %{"text" => "partial"}},
+            %StreamEvent{type: :error, data: %{"reason" => "network"}}
+          ]
+
+        "unbounded-stream" ->
+          Stream.repeatedly(fn -> %StreamEvent{type: :delta, data: %{text: "x"}} end)
+
+        "active-stream" ->
+          Stream.repeatedly(fn ->
+            Process.sleep(5)
+            %StreamEvent{type: :delta, data: %{text: "x"}}
+          end)
+
+        "terminal-stream" ->
+          Stream.concat(
+            [
+              %StreamEvent{type: :delta, data: %{text: "done"}},
+              %StreamEvent{type: :finish, data: %{"reason" => "stop"}}
+            ],
+            Stream.map([:after_finish], fn _ -> raise "stream consumed past finish" end)
+          )
+
+        "oversized-stream" ->
+          [
+            %StreamEvent{type: :delta, data: %{text: "1234"}},
+            %StreamEvent{type: :delta, data: %{text: "56"}},
+            %StreamEvent{type: :finish, data: %{}}
+          ]
+
+        _other ->
+          [
+            %StreamEvent{type: :start, data: %{}},
+            %StreamEvent{type: :delta, data: %{"text" => "hel"}},
+            %StreamEvent{type: :delta, data: %{text: "lo"}},
+            %StreamEvent{type: :finish, data: %{"reason" => "stop"}}
+          ]
+      end
     end
   end
 
@@ -115,6 +149,56 @@ defmodule Arbor.LLM.Eval.SubjectTest do
              ]
     end
 
+    test "leaves max_tokens unset unless the caller supplies it" do
+      assert {:ok, %{text: text}} =
+               Subject.run("hello",
+                 client: client(),
+                 provider: "eval_test",
+                 model: "model"
+               )
+
+      assert Jason.decode!(text)["max_tokens"] == nil
+    end
+
+    test "returns shaped errors for malformed input and options" do
+      base_opts = [client: client(), provider: "eval_test", model: "model"]
+
+      assert Subject.run(%{}, base_opts) == {:error, {:invalid_input, :prompt_required}}
+
+      assert Subject.run(%{"prompt" => 42}, base_opts) ==
+               {:error, {:invalid_input, :prompt_required}}
+
+      assert Subject.run(%{"prompt" => "hello", "system" => []}, base_opts) ==
+               {:error, {:invalid_input, :system_must_be_string}}
+
+      assert Subject.run(:unsupported, base_opts) ==
+               {:error, {:invalid_input, :prompt_required}}
+
+      assert Subject.run("hello", %{}) == {:error, {:invalid_options, :keyword_required}}
+
+      assert Subject.run("hello", [:not_a_keyword]) ==
+               {:error, {:invalid_options, :keyword_required}}
+    end
+
+    test "returns shaped errors for invalid numeric limits" do
+      base_opts = [client: client(), provider: "eval_test", model: "model"]
+
+      cases = [
+        {:max_tokens, nil, :positive_integer_required},
+        {:max_tokens, 0, :positive_integer_required},
+        {:max_tokens, 1.5, :positive_integer_required},
+        {:timeout, 0, {:integer_range_required, 1, 900_000}},
+        {:timeout, 900_001, {:integer_range_required, 1, 900_000}},
+        {:max_stream_events, 100_001, {:integer_range_required, 1, 100_000}},
+        {:max_output_bytes, -1, {:integer_range_required, 1, 16_777_216}}
+      ]
+
+      for {key, value, reason} <- cases do
+        assert Subject.run("hello", Keyword.put(base_opts, key, value)) ==
+                 {:error, {:invalid_option, key, reason}}
+      end
+    end
+
     test "collects native stream events from an injected transport" do
       assert {:ok, output} =
                Subject.run("hello",
@@ -129,6 +213,69 @@ defmodule Arbor.LLM.Eval.SubjectTest do
       assert is_integer(output.ttft_ms)
       assert output.ttft_ms >= 0
       assert output.duration_ms >= output.ttft_ms
+    end
+
+    test "security regression: stream error events fail the public subject" do
+      assert Subject.run("hello",
+               client: client(),
+               provider: "eval_test",
+               model: "stream-error",
+               stream: true
+             ) == {:error, {:stream_error, "network"}}
+    end
+
+    test "security regression: an unbounded active stream hits the hard event ceiling" do
+      task =
+        Task.async(fn ->
+          Subject.run("hello",
+            client: client(),
+            provider: "eval_test",
+            model: "unbounded-stream",
+            stream: true,
+            timeout: 5_000,
+            max_stream_events: 8
+          )
+        end)
+
+      result =
+        case Task.yield(task, 1_000) do
+          {:ok, result} ->
+            result
+
+          nil ->
+            Task.shutdown(task, :brutal_kill)
+            :did_not_terminate
+        end
+
+      assert result == {:error, {:stream_limit_exceeded, :events, 8}}
+    end
+
+    test "enforces an absolute elapsed deadline on a continuously active stream" do
+      assert Subject.run("hello",
+               client: client(),
+               provider: "eval_test",
+               model: "active-stream",
+               stream: true,
+               timeout: 25
+             ) == {:error, {:stream_deadline_exceeded, 25}}
+    end
+
+    test "stops at terminal events and enforces the output-byte ceiling" do
+      assert {:ok, %{text: "done"}} =
+               Subject.run("hello",
+                 client: client(),
+                 provider: "eval_test",
+                 model: "terminal-stream",
+                 stream: true
+               )
+
+      assert Subject.run("hello",
+               client: client(),
+               provider: "eval_test",
+               model: "oversized-stream",
+               stream: true,
+               max_output_bytes: 5
+             ) == {:error, {:stream_limit_exceeded, :output_bytes, 5}}
     end
 
     test "preserves transport error reasons and shapes invalid client errors" do
@@ -171,6 +318,59 @@ defmodule Arbor.LLM.Eval.SubjectTest do
 
       assert is_integer(duration_ms)
       assert is_binary(text)
+    end
+
+    test "uses the catalog-backed default HTTP transport without an implicit max_tokens" do
+      previous_options = Req.default_options()
+      parent = self()
+
+      on_exit(fn -> Req.default_options(previous_options) end)
+
+      Req.default_options(
+        adapter: fn request ->
+          body = request.body |> IO.iodata_to_binary() |> Jason.decode!()
+          send(parent, {:default_transport_request, request.url.path, body})
+
+          response_body =
+            Jason.encode!(%{
+              "choices" => [
+                %{
+                  "finish_reason" => "stop",
+                  "message" => %{"content" => "catalog response", "role" => "assistant"}
+                }
+              ],
+              "usage" => %{"completion_tokens" => 2}
+            })
+
+          response =
+            Req.Response.new(
+              status: 200,
+              headers: %{"content-type" => ["application/json"]},
+              body: response_body
+            )
+
+          {request, response}
+        end
+      )
+
+      assert {:ok, %{text: "catalog response", provider: "lm_studio"}} =
+               Subject.run("hello",
+                 provider: "lm_studio",
+                 model: "catalog-model",
+                 timeout: 1_000
+               )
+
+      assert_receive {:default_transport_request, "/v1/chat/completions", request_body}
+      refute Map.has_key?(request_body, "max_tokens")
+      assert request_body["model"] == "catalog-model"
+    end
+
+    @tag :llm_local
+    test "keeps the tagged local catalog transport smoke boundary" do
+      result = Subject.run("hello", provider: "lm_studio", model: "", timeout: 100)
+
+      assert match?({:ok, %{text: text}} when is_binary(text), result) or
+               match?({:error, _reason}, result)
     end
   end
 

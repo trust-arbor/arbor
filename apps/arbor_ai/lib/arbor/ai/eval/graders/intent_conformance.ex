@@ -5,6 +5,8 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
   The source description is read from `opts[:sample_input]`. The `:judge_fn`
   option accepts an injectable
   `(provider, model, system_prompt, user_prompt, timeout -> result)` callback.
+  `:max_tokens` remains unset by default and accepts an explicit value up to
+  16,384.
   """
 
   @behaviour Arbor.Eval.Grader
@@ -90,6 +92,9 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
   @default_model "google/gemini-2.5-flash"
   @default_provider "openrouter"
   @default_timeout 60_000
+  @max_judge_response_chars 32_768
+  @max_rationale_chars 512
+  @max_detail_chars 1_024
 
   @impl true
   def grade(actual, _expected, opts \\ []) do
@@ -102,8 +107,24 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
            RetrievalSupport.string_option(opts, :judge_provider, @default_provider),
          {:ok, judge_timeout} <-
            RetrievalSupport.positive_integer_option(opts, :judge_timeout, @default_timeout),
+         {:ok, max_tokens} <-
+           RetrievalSupport.optional_positive_integer_option(opts, :max_tokens),
          {:ok, judge_fn} <-
-           RetrievalSupport.callback_option(opts, :judge_fn, 5, &default_judge/5) do
+           RetrievalSupport.callback_option(
+             opts,
+             :judge_fn,
+             5,
+             fn provider, model, system_prompt, user_prompt, timeout ->
+               default_judge(
+                 provider,
+                 model,
+                 system_prompt,
+                 user_prompt,
+                 timeout,
+                 max_tokens
+               )
+             end
+           ) do
       judge(skill_text, actual_text, judge_provider, judge_model, judge_timeout, judge_fn)
     else
       {:error, :empty_dot_output} -> failure("Empty DOT output")
@@ -140,30 +161,36 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
            :judge_callback_failed
          ) do
       {:ok, response_text} when is_binary(response_text) ->
-        parse_judge_response(response_text)
+        response_text
+        |> clean_text(@max_judge_response_chars)
+        |> parse_judge_response()
 
       {:ok, _response} ->
         failure("Judge error: invalid response")
 
       {:error, reason} ->
-        Logger.warning("[IntentConformance] Judge call failed: #{inspect(reason)}")
-        failure("Judge error: #{inspect(reason)}")
+        reason = inspect_bounded(reason)
+        Logger.warning("[IntentConformance] Judge call failed: #{reason}")
+        failure("Judge error: #{reason}")
 
       _response ->
         failure("Judge error: invalid response")
     end
   end
 
-  defp default_judge(provider, model, system_prompt, user_prompt, timeout) do
-    case Arbor.LLM.generate(
-           provider: provider,
-           model: model,
-           system: system_prompt,
-           prompt: user_prompt,
-           max_tokens: 1024,
-           temperature: 0.0,
-           timeout_ms: timeout
-         ) do
+  defp default_judge(provider, model, system_prompt, user_prompt, timeout, max_tokens) do
+    generate_opts =
+      [
+        provider: provider,
+        model: model,
+        system: system_prompt,
+        prompt: user_prompt,
+        temperature: 0.0,
+        timeout_ms: timeout
+      ]
+      |> maybe_put(:max_tokens, max_tokens)
+
+    case Arbor.LLM.generate(generate_opts) do
       {:ok, %{text: text}} when is_binary(text) -> {:ok, text}
       {:ok, _response} -> {:error, :missing_response_text}
       {:error, reason} -> {:error, reason}
@@ -201,7 +228,7 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
 
     rationale =
       case scores["brief_rationale"] do
-        value when is_binary(value) -> value
+        value when is_binary(value) -> clean_text(value, @max_rationale_chars)
         _value -> ""
       end
 
@@ -214,7 +241,7 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
         "prompt=#{format_score(dimensions.prompt_relevance)}" <>
         if(rationale == "", do: "", else: " | #{rationale}")
 
-    %{score: overall, passed: overall >= 0.6, detail: detail}
+    %{score: overall, passed: overall >= 0.6, detail: clean_text(detail, @max_detail_chars)}
   end
 
   defp weighted_score(dimensions) do
@@ -246,12 +273,27 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
   defp format_score(value), do: value |> Float.round(2) |> to_string()
 
   defp parse_failure(text) do
-    Logger.warning(
-      "[IntentConformance] Failed to parse judge JSON: #{String.slice(text, 0..200)}"
-    )
+    Logger.warning("[IntentConformance] Failed to parse judge JSON: #{clean_text(text, 200)}")
 
-    failure("JSON parse error: #{String.slice(text, 0..100)}")
+    failure("JSON parse error: #{clean_text(text, 100)}")
   end
 
-  defp failure(detail), do: %{score: 0.0, passed: false, detail: detail}
+  defp failure(detail) do
+    %{score: 0.0, passed: false, detail: clean_text(detail, @max_detail_chars)}
+  end
+
+  defp maybe_put(opts, _key, nil), do: opts
+  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp inspect_bounded(value) do
+    value
+    |> inspect(limit: 20, printable_limit: 400)
+    |> clean_text(512)
+  end
+
+  defp clean_text(text, max_chars) when is_binary(text) do
+    text
+    |> String.replace_invalid("")
+    |> String.slice(0, max_chars)
+  end
 end

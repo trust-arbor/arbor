@@ -5,6 +5,9 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouter do
   The caller must provide `:index_path`. Tests and alternate runtimes can inject
   `:router_fn` with the signature
   `(base_url, model, system_prompt, user_prompt, timeout -> result)`.
+
+  `:top_k` is capped at 100, `:max_desc_chars` at 4,096, and `:timeout` at
+  five minutes.
   """
 
   @behaviour Arbor.Eval.Subject
@@ -52,17 +55,19 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouter do
            :router_callback_failed
          ) do
       {:ok, content} when is_binary(content) ->
-        duration_ms = System.monotonic_time(:millisecond) - started_at
-        ranked = parse_response(content, known_modules, top_k)
+        with {:ok, modules} <-
+               RetrievalSupport.parse_router_response(content, known_modules, top_k) do
+          ranked = Enum.map(modules, &%{module: &1, score: nil})
 
-        {:ok,
-         %{
-           text: Jason.encode!(Enum.map(ranked, & &1.module)),
-           retrieved: ranked,
-           duration_ms: duration_ms,
-           model: model,
-           provider: "ollama"
-         }}
+          {:ok,
+           %{
+             text: Jason.encode!(modules),
+             retrieved: ranked,
+             duration_ms: System.monotonic_time(:millisecond) - started_at,
+             model: model,
+             provider: "ollama"
+           }}
+        end
 
       {:ok, _content} ->
         {:error, {:invalid_router_response, :binary_content_required}}
@@ -79,7 +84,7 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouter do
     action_list =
       actions
       |> Enum.map(fn action ->
-        "- #{action.module}: #{truncate(action.description, max_desc_chars)}"
+        "- #{action.module}: #{RetrievalSupport.truncate_utf8(action.description, max_desc_chars)}"
       end)
       |> Enum.join("\n")
 
@@ -97,9 +102,6 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouter do
     The "selected" array MUST contain exactly #{top_k} module names from the list above, ordered by relevance to the user's request (most relevant first). Do not invent module names. Do not include any prose or explanation.
     """
   end
-
-  defp truncate(text, max) when byte_size(text) <= max, do: text
-  defp truncate(text, max), do: binary_part(text, 0, max) <> "..."
 
   defp default_router(base_url, model, system_prompt, user_prompt, timeout) do
     body = %{
@@ -124,29 +126,5 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouter do
       {:error, reason} ->
         {:error, {:transport_error, reason}}
     end
-  end
-
-  defp parse_response(content, known_modules, top_k) do
-    case Jason.decode(content) do
-      {:ok, %{"selected" => list}} when is_list(list) ->
-        normalize(list, known_modules, top_k)
-
-      {:ok, %{"actions" => list}} when is_list(list) ->
-        normalize(list, known_modules, top_k)
-
-      {:ok, list} when is_list(list) ->
-        normalize(list, known_modules, top_k)
-
-      _other ->
-        []
-    end
-  end
-
-  defp normalize(list, known_modules, top_k) do
-    list
-    |> Enum.filter(&is_binary/1)
-    |> Enum.filter(&MapSet.member?(known_modules, &1))
-    |> Enum.take(top_k)
-    |> Enum.map(&%{module: &1, score: nil})
   end
 end

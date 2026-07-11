@@ -9,9 +9,9 @@ defmodule Arbor.AI.Eval.Subjects.EmbeddingRetrieval do
 
     * `:index_path` - required path to an action-index JSON file
     * `:model` - required embedding model name
-    * `:top_k` - number of ranked actions to return (default: 5)
+    * `:top_k` - number of ranked actions to return (default: 5, maximum: 100)
     * `:base_url` - Ollama base URL (default: `http://localhost:11434`)
-    * `:timeout` - request timeout in milliseconds (default: 30 seconds)
+    * `:timeout` - request timeout in milliseconds (default: 30 seconds, maximum: 5 minutes)
     * `:embed_fn` - injectable `(base_url, model, prompt, timeout -> result)` callback
   """
 
@@ -47,7 +47,8 @@ defmodule Arbor.AI.Eval.Subjects.EmbeddingRetrieval do
   defp retrieve(indexed_actions, prompt, model, top_k, base_url, timeout, embed_fn) do
     started_at = System.monotonic_time(:millisecond)
 
-    with {:ok, query_vector} <- embed(embed_fn, base_url, model, prompt, timeout) do
+    with {:ok, query_vector} <- embed(embed_fn, base_url, model, prompt, timeout),
+         :ok <- RetrievalSupport.validate_query_dimensions(indexed_actions, query_vector) do
       ranked = RetrievalSupport.rank(indexed_actions, query_vector, top_k)
 
       {:ok,

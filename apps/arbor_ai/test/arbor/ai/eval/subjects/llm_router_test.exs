@@ -59,7 +59,7 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouterTest do
              {:error, {:missing_option, :index_path}}
   end
 
-  test "handles malformed input and malformed model JSON without raising", %{
+  test "rejects malformed input and malformed model JSON without raising", %{
     index_path: index_path
   } do
     opts = [
@@ -71,10 +71,36 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouterTest do
     assert LLMRouter.run(%{"prompt" => []}, opts) ==
              {:error, {:invalid_input, :prompt_required}}
 
-    assert {:ok, %{text: "[]", retrieved: []} = result} =
-             LLMRouter.run("run a command", opts)
+    assert LLMRouter.run("run a command", opts) ==
+             {:error, {:invalid_router_response, :malformed_json}}
+  end
 
-    assert {:ok, _json} = Jason.encode(result)
+  test "truncates multibyte descriptions by UTF-8 characters", %{index_path: index_path} do
+    index = index_fixture()
+    [first | rest] = index["actions"]
+
+    File.write!(
+      index_path,
+      Jason.encode!(%{index | "actions" => [%{first | "description" => "éééabc"} | rest]})
+    )
+
+    parent = self()
+
+    assert {:ok, _result} =
+             LLMRouter.run("run a command",
+               index_path: index_path,
+               model: "router-model",
+               max_desc_chars: 2,
+               router_fn: fn _, _, system_prompt, _, _ ->
+                 send(parent, {:system_prompt, system_prompt})
+                 {:ok, ~s({"selected":["Arbor.Actions.FileRead"]})}
+               end
+             )
+
+    assert_receive {:system_prompt, system_prompt}
+    assert String.valid?(system_prompt)
+    assert system_prompt =~ "Arbor.Actions.FileRead: éé..."
+    refute system_prompt =~ "ééé"
   end
 
   test "propagates injected router errors and rejects malformed callback results", %{

@@ -87,6 +87,19 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrievalTest do
            ) == {:error, {:rerank_failed, :offline}}
   end
 
+  test "rejects malformed reranker JSON instead of silently backfilling", %{
+    index_path: index_path
+  } do
+    assert HybridRetrieval.run("read then run",
+             index_path: index_path,
+             model: "router-model",
+             embed_model: "embed-model",
+             embed_fn: fn _, _, _, _ -> {:ok, [1.0, 0.0]} end,
+             router_fn: fn _, _, _, _, _ -> {:ok, "not-json"} end
+           ) ==
+             {:error, {:rerank_failed, {:invalid_router_response, :malformed_json}}}
+  end
+
   defp index_fixture do
     %{
       "actions" => [

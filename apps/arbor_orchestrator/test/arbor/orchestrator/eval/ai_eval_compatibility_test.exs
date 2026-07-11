@@ -1,5 +1,5 @@
 defmodule Arbor.Orchestrator.Eval.AIEvalCompatibilityTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
@@ -95,6 +95,56 @@ defmodule Arbor.Orchestrator.Eval.AIEvalCompatibilityTest do
              intent_opts
            ) ==
              Arbor.AI.Eval.Graders.IntentConformance.grade("digraph {}", nil, intent_opts)
+  end
+
+  test "compatibility subjects restore the index path omitted by the unchanged eval caller", %{
+    index_path: index_path
+  } do
+    previous_path = Application.fetch_env(:arbor_orchestrator, :eval_retrieval_index_path)
+    Application.put_env(:arbor_orchestrator, :eval_retrieval_index_path, index_path)
+
+    on_exit(fn ->
+      case previous_path do
+        {:ok, path} -> Application.put_env(:arbor_orchestrator, :eval_retrieval_index_path, path)
+        :error -> Application.delete_env(:arbor_orchestrator, :eval_retrieval_index_path)
+      end
+    end)
+
+    query_vector = [1.0, 0.0]
+    embed_fn = fn _, _, _, _ -> {:ok, query_vector} end
+
+    router_fn = fn _, _, _, _, _ ->
+      {:ok, Jason.encode!(%{"selected" => ["Arbor.Actions.Shell"]})}
+    end
+
+    caller_opts = [
+      provider: "ollama",
+      domain: "preprocessor_tool_retrieval",
+      timeout: 60_000,
+      stream: false,
+      domain_system_prompt: nil
+    ]
+
+    cases = [
+      {Arbor.Orchestrator.Eval.Subjects.EmbeddingRetrieval,
+       caller_opts ++ [model: "embed-model", embed_fn: embed_fn]},
+      {Arbor.Orchestrator.Eval.Subjects.LLMRouter,
+       caller_opts ++ [model: "router-model", router_fn: router_fn]},
+      {Arbor.Orchestrator.Eval.Subjects.HybridRetrieval,
+       caller_opts ++
+         [
+           model: "router-model",
+           embed_model: "embed-model",
+           embed_fn: embed_fn,
+           router_fn: router_fn
+         ]}
+    ]
+
+    for {subject, opts} <- cases do
+      assert {:ok, result} = subject.run("manage an ACP session", opts)
+      assert Jason.decode!(result.text) != []
+      assert result.retrieved != []
+    end
   end
 
   defp index_fixture do
