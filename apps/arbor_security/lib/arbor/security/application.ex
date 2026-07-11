@@ -47,6 +47,8 @@ defmodule Arbor.Security.Application do
           {Arbor.Security.IssuerRegistry, []},
           {Arbor.Security.Identity.NonceCache, []},
           {Arbor.Security.SystemAuthority, []},
+          # After key/identity stores + registry so open can fail-closed on status/key.
+          {Arbor.Security.SigningAuthorityBroker, []},
           {Arbor.Security.Constraint.RateLimiter, []},
           {Arbor.Security.CapabilityStore, []},
           {Arbor.Security.Reflex.Registry, []},

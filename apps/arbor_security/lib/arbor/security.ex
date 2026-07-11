@@ -47,6 +47,7 @@ defmodule Arbor.Security do
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.InvocationReceipt
   alias Arbor.Contracts.Security.SignedRequest
+  alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Common.SafePath
   alias Arbor.Security.Capability.Signer
   alias Arbor.Security.CapabilityStore
@@ -60,6 +61,7 @@ defmodule Arbor.Security do
   alias Arbor.Security.Identity.Verifier
   alias Arbor.Security.Keychain
   alias Arbor.Security.Reflex
+  alias Arbor.Security.SigningAuthorityBroker
   alias Arbor.Security.SigningKeyStore
   alias Arbor.Security.SystemAuthority
   alias Arbor.Security.UriRegistry
@@ -995,6 +997,14 @@ defmodule Arbor.Security do
   @doc """
   Create a signer function for an agent.
 
+  ## Legacy migration surface
+
+  Prefer `open_signing_authority/2` + `sign_with_authority/2` for new code.
+  Closures over private keys do not survive module reload and keep decrypted
+  key material in caller process state. This function is retained for
+  compatibility with callers not yet migrated (Engine, Session, OIDC, CLI,
+  scheduler, heartbeat, CodingTaskExecutor). Behavior is unchanged.
+
   Returns a function that closes over the agent_id and private_key,
   producing a fresh SignedRequest for any given payload. The orchestrator
   receives this function — never the raw private key.
@@ -1010,6 +1020,93 @@ defmodule Arbor.Security do
       when is_binary(agent_id) and is_binary(private_key) do
     fn payload -> SignedRequest.sign(payload, agent_id, private_key) end
   end
+
+  # ===========================================================================
+  # Signing Authority (reload-stable)
+  # ===========================================================================
+
+  @doc """
+  Open a reload-stable signing authority for an agent.
+
+  Returns an opaque `SigningAuthority` reference (broker bearer token +
+  principal binding). The broker monitors `owner:` and revokes the token on
+  process death. Decrypted private keys are never returned or retained in
+  broker state.
+
+  ## Options
+
+  - `:owner` (required) — PID that owns this authority (usually `self()`)
+  - `:purpose` (required) — open-time purpose label (`:session`, `:heartbeat`, …)
+
+  ## Example
+
+      {:ok, authority} =
+        Arbor.Security.open_signing_authority(agent_id, owner: self(), purpose: :session)
+
+      {:ok, signed} = Arbor.Security.sign_with_authority(authority, "arbor://fs/read")
+  """
+  @spec open_signing_authority(String.t(), keyword()) ::
+          {:ok, SigningAuthority.t()} | {:error, term()}
+  def open_signing_authority(agent_id, opts \\ [])
+      when is_binary(agent_id) and is_list(opts) do
+    with {:ok, owner} <- fetch_required_opt(opts, :owner, :invalid_owner),
+         {:ok, purpose} <- fetch_required_opt(opts, :purpose, :invalid_purpose),
+         :ok <- validate_owner_pid(owner) do
+      SigningAuthorityBroker.open(agent_id, owner, purpose)
+    end
+  end
+
+  @doc """
+  Sign a payload using a previously opened signing authority.
+
+  Fail-closed: forged, closed, owner-dead, suspended/revoked identity, and
+  deleted-key authorities return explicit errors. Uses named dispatch only —
+  safe across hot code reload of this module.
+  """
+  @spec sign_with_authority(SigningAuthority.t(), binary()) ::
+          {:ok, SignedRequest.t()} | {:error, term()}
+  def sign_with_authority(%SigningAuthority{} = authority, payload)
+      when is_binary(payload) do
+    SigningAuthorityBroker.sign(authority, payload)
+  end
+
+  def sign_with_authority(%SigningAuthority{}, _payload), do: {:error, :invalid_payload}
+  def sign_with_authority(_, _), do: {:error, :invalid_authority}
+
+  @doc """
+  Derive a domain-separated secret using a signing authority.
+
+  `purpose` is mandatory domain separation material. The broker always
+  prefixes a fixed namespace so undomained raw-key export is impossible.
+  The persistent private key is never returned.
+  """
+  @spec derive_secret_with_authority(SigningAuthority.t(), atom() | String.t()) ::
+          {:ok, binary()} | {:error, term()}
+  def derive_secret_with_authority(%SigningAuthority{} = authority, purpose) do
+    SigningAuthorityBroker.derive_secret(authority, purpose)
+  end
+
+  def derive_secret_with_authority(_, _), do: {:error, :invalid_authority}
+
+  @doc """
+  Explicitly close (revoke) a signing authority.
+  """
+  @spec close_signing_authority(SigningAuthority.t()) :: :ok | {:error, term()}
+  def close_signing_authority(%SigningAuthority{} = authority) do
+    SigningAuthorityBroker.close(authority)
+  end
+
+  def close_signing_authority(_), do: {:error, :invalid_authority}
+
+  defp fetch_required_opt(opts, key, error_atom) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} when not is_nil(value) -> {:ok, value}
+      _ -> {:error, error_atom}
+    end
+  end
+
+  defp validate_owner_pid(pid) when is_pid(pid), do: :ok
+  defp validate_owner_pid(_), do: {:error, :invalid_owner}
 
   # ===========================================================================
   # OIDC Authentication

@@ -30,6 +30,8 @@ for child <- [
       {Arbor.Security.IssuerRegistry, []},
       {Arbor.Security.Identity.NonceCache, []},
       {Arbor.Security.SystemAuthority, []},
+      # After identity registry + signing-key store (started above).
+      {Arbor.Security.SigningAuthorityBroker, []},
       {Arbor.Security.Constraint.RateLimiter, []},
       {Arbor.Security.CapabilityStore, []},
       {Arbor.Security.Reflex.Registry, []}
