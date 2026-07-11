@@ -107,6 +107,14 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
     assert_execute_residual_closed(agent_id, false)
   end
 
+  test "security regression: Execute empty context + config true + sandbox:none rejects compound before emit/auth" do
+    assert_execute_empty_context_compound_closed(true)
+  end
+
+  test "security regression: Execute empty context + config false + sandbox:none rejects compound before emit/auth" do
+    assert_execute_empty_context_compound_closed(false)
+  end
+
   test "security regression: authorize_command rejects compounds before Trust (DOT shell path)",
        %{agent_id: agent_id} do
     # Parent authorized leading token; DOT shell handler then ran /bin/sh -c.
@@ -261,6 +269,71 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
         File.rm(marker)
       end
     end)
+  end
+
+  # Missing agent_id must not grant implicit system authority for compounds.
+  # Pre-fix: call_shell fell through to Arbor.Shell.execute/2 with sandbox:none
+  # and could create delayed markers / sessions / approvals.
+  defp assert_execute_empty_context_compound_closed(config_value) do
+    with_compound_shell(config_value, fn ->
+      marker =
+        Path.join(
+          System.tmp_dir!(),
+          "actions_empty_ctx_#{System.unique_integer([:positive])}"
+        )
+
+      File.rm(marker)
+      sessions_before = bash_session_count()
+      execs_before = execution_count()
+
+      command = "sh -c 'sleep 1; touch #{marker}'"
+
+      try do
+        # Explicit empty context — no agent_id, no approved_invocation.
+        assert Shell.Execute.run(%{command: command, sandbox: :none}, %{}) ==
+                 {:error, @unavailable_message}
+
+        # Also plain sequencing form.
+        assert Shell.Execute.run(
+                 %{command: "sleep 1; touch #{marker}", sandbox: :none},
+                 %{}
+               ) == {:error, @unavailable_message}
+
+        Process.sleep(@side_effect_wait_ms)
+
+        refute File.exists?(marker),
+               "empty-context Execute must not run compounds (config=#{inspect(config_value)})"
+
+        assert bash_session_count() <= sessions_before
+        assert execution_count() <= execs_before
+      after
+        File.rm(marker)
+      end
+    end)
+  end
+
+  defp bash_session_count do
+    case Code.ensure_loaded(Bash.Session) do
+      {:module, _} ->
+        if function_exported?(Bash.Session, :list, 0) or
+             function_exported?(Bash.Session, :list, 1) do
+          length(Bash.Session.list())
+        else
+          0
+        end
+
+      _ ->
+        0
+    end
+  end
+
+  defp execution_count do
+    case Arbor.Shell.list_executions([]) do
+      {:ok, list} when is_list(list) -> length(list)
+      _ -> 0
+    end
+  rescue
+    _ -> 0
   end
 
   defp with_compound_shell(value, fun) when is_function(fun, 0) do

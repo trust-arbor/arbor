@@ -95,13 +95,14 @@ defmodule Arbor.Actions.ShellTest do
 
       assert Map.has_key?(props, :max_output_bytes) or Map.has_key?(props, "max_output_bytes")
 
-      # Finite producer: enough bytes to cross 128, then exit.
-      burst = ~s{i=0; while [ "$i" -lt 200 ]; do printf "xxxxxxxx"; i=$((i+1)); done}
+      # Finite producer without shell metacharacters (Execute rejects compounds
+      # even with empty context). 200 bytes crosses the 128-byte ceiling.
+      burst = String.duplicate("x", 200)
 
       assert {:ok, result} =
                Shell.Execute.run(
                  %{
-                   command: "sh -c '#{burst}'",
+                   command: "printf #{burst}",
                    max_output_bytes: 128,
                    sandbox: :none,
                    timeout: 5_000

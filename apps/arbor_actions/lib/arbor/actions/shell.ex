@@ -183,58 +183,72 @@ defmodule Arbor.Actions.Shell do
       }
     end
 
+    # Exact stable string for compound rejection at the action surface.
+    # Keep in sync with format_error/1 and ExecuteScript.
+    @unavailable_message "Compound shell execution is unavailable (security boundary incomplete). Use individual non-compound commands; CapShell is intentionally fail-closed."
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(params, context) do
-      Actions.emit_started(__MODULE__, params)
+      command = Map.get(params, :command) || Map.get(params, "command")
 
-      opts =
-        [
-          # Do not use `|| 30_000` — timeout: 0 is truthy and becomes an immediate
-          # Port kill (exit 137) in Shell.Executor.
-          timeout: effective_timeout(params[:timeout], 30_000),
-          sandbox: params[:sandbox] || :basic
-        ]
-        |> maybe_add_opt(:cwd, params[:cwd])
-        |> maybe_add_opt(:env, params[:env])
-        |> maybe_add_opt(
-          :max_output_bytes,
-          normalize_forwarded_max_output_bytes(params[:max_output_bytes])
-        )
-        |> maybe_add_context_opts(context)
+      # Unconditional compound rejection at the Jido action surface — before
+      # emit / auth / opts construction / process / fs work. A missing agent_id
+      # must not grant implicit system authority; trusted system callers that
+      # need compound execution use Arbor.Shell.execute/2 directly.
+      if is_binary(command) and Arbor.Shell.compound_command?(command) do
+        {:error, @unavailable_message}
+      else
+        Actions.emit_started(__MODULE__, params)
 
-      case call_shell(params.command, opts, context) do
-        {:ok, result} when is_map(result) ->
-          Actions.emit_completed(__MODULE__, result)
+        opts =
+          [
+            # Do not use `|| 30_000` — timeout: 0 is truthy and becomes an immediate
+            # Port kill (exit 137) in Shell.Executor.
+            timeout: effective_timeout(params[:timeout], 30_000),
+            sandbox: params[:sandbox] || :basic
+          ]
+          |> maybe_add_opt(:cwd, params[:cwd])
+          |> maybe_add_opt(:env, params[:env])
+          |> maybe_add_opt(
+            :max_output_bytes,
+            normalize_forwarded_max_output_bytes(params[:max_output_bytes])
+          )
+          |> maybe_add_context_opts(context)
 
-          {:ok,
-           %{
-             exit_code: result.exit_code,
-             stdout: result.stdout,
-             stderr: result.stderr,
-             duration_ms: result.duration_ms,
-             timed_out: Map.get(result, :timed_out, false),
-             killed: Map.get(result, :killed, false),
-             output_limit_exceeded: Map.get(result, :output_limit_exceeded, false),
-             output_truncated: Map.get(result, :output_truncated, false)
-           }}
+        case call_shell(command, opts, context) do
+          {:ok, result} when is_map(result) ->
+            Actions.emit_completed(__MODULE__, result)
 
-        {:ok, :pending_approval, proposal_id} ->
-          # Preserve the proposal id for owner-side await/retry (coding validation,
-          # ActionsExecutor). Do not convert this into a generic error string —
-          # that path is what left stale irq_* records without a waiter.
-          {:ok, :pending_approval, proposal_id}
+            {:ok,
+             %{
+               exit_code: result.exit_code,
+               stdout: result.stdout,
+               stderr: result.stderr,
+               duration_ms: result.duration_ms,
+               timed_out: Map.get(result, :timed_out, false),
+               killed: Map.get(result, :killed, false),
+               output_limit_exceeded: Map.get(result, :output_limit_exceeded, false),
+               output_truncated: Map.get(result, :output_truncated, false)
+             }}
 
-        {:error, :unauthorized} ->
-          Actions.emit_failed(__MODULE__, :unauthorized)
+          {:ok, :pending_approval, proposal_id} ->
+            # Preserve the proposal id for owner-side await/retry (coding validation,
+            # ActionsExecutor). Do not convert this into a generic error string —
+            # that path is what left stale irq_* records without a waiter.
+            {:ok, :pending_approval, proposal_id}
 
-          {:error,
-           "Shell execution unauthorized (missing capability or policy denied). " <>
-             "If an approval was expected, the request was not escalated — check trust rules and grants."}
+          {:error, :unauthorized} ->
+            Actions.emit_failed(__MODULE__, :unauthorized)
 
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, format_error(reason)}
+            {:error,
+             "Shell execution unauthorized (missing capability or policy denied). " <>
+               "If an approval was expected, the request was not escalated — check trust rules and grants."}
+
+          {:error, reason} ->
+            Actions.emit_failed(__MODULE__, reason)
+            {:error, format_error(reason)}
+        end
       end
     end
 
@@ -243,14 +257,15 @@ defmodule Arbor.Actions.Shell do
     # that re-runs Security.authorize without Trust.ApprovalGuard and re-asks or
     # denies even after the operator already approved the exact invocation.
     #
-    # Compound commands are rejected before authorize_command / allowlist / fs
-    # work regardless of compound_shell_enabled or sandbox level.
+    # Defense in depth: compounds are also rejected here if run/2's gate is
+    # bypassed. Missing agent_id never falls through to system execute for
+    # compounds.
     defp call_shell(command, opts, context) do
-      case context[:agent_id] do
-        agent_id when is_binary(agent_id) and agent_id != "" ->
-          if Arbor.Shell.compound_command?(command) do
-            {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
-          else
+      if is_binary(command) and Arbor.Shell.compound_command?(command) do
+        {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
+      else
+        case context[:agent_id] do
+          agent_id when is_binary(agent_id) and agent_id != "" ->
             auth_opts = shell_auth_opts(opts, context)
 
             case Arbor.Actions.Shell.authorize_command(agent_id, command, auth_opts) do
@@ -263,11 +278,13 @@ defmodule Arbor.Actions.Shell do
               {:error, reason} ->
                 {:error, reason}
             end
-          end
 
-        _ ->
-          # No agent principal — trusted system path (not an agent action surface).
-          Arbor.Shell.execute(command, opts)
+          _ ->
+            # Non-compound only. Compounds already rejected above and in run/2.
+            # Empty-context single commands remain for unit tests / controlled
+            # non-agent harnesses; never an implicit compound system escape hatch.
+            Arbor.Shell.execute(command, opts)
+        end
       end
     end
 
