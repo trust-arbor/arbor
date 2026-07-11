@@ -46,6 +46,7 @@ defmodule Arbor.Orchestrator do
   """
 
   alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.CodingPlan.Compilation
   alias Arbor.Orchestrator.Config
   alias Arbor.Orchestrator.Conformance
@@ -61,6 +62,7 @@ defmodule Arbor.Orchestrator do
   alias Arbor.Orchestrator.Validation.Validator
 
   @type run_result :: {:ok, Engine.run_result()} | {:error, term()}
+  @type run_credential :: function() | SigningAuthority.t()
 
   @doc "Parse a DOT source string into a Graph struct."
   @spec parse(String.t()) :: {:ok, Graph.t()} | {:error, term()}
@@ -102,14 +104,55 @@ defmodule Arbor.Orchestrator do
   @doc """
   Securely execute a pipeline as an explicit principal.
 
-  The signer and principal are trusted facade inputs. This function forces
-  authorization on, installs the orchestrator authorizer, verifies the coarse
-  execution gate, and binds the exact source hash before Engine execution.
+  Accepts either a legacy 1-arity signer function or a reload-stable
+  `%Arbor.Contracts.Security.SigningAuthority{}`. This function forces
+  authorization on, verifies the coarse execution gate, and binds the exact
+  source hash before Engine execution.
+
+  ## Credential paths
+
+  - **Legacy signer** — installs `:signer` + a process-local `:authorizer`
+    closure (unchanged compatibility path).
+  - **SigningAuthority** — places only `:signing_authority` in trusted Engine
+    opts. Does **not** synthesize a long-lived signer/authorizer closure.
+    Rejects mixed legacy credential controls in `opts` (`:signer`,
+    `:authorizer`, `:identity_private_key`, or a second `:signing_authority`).
+    Requires `authority.principal_id` to equal `execution_principal`.
   """
-  @spec run_as(String.t() | Graph.t(), String.t(), function(), keyword()) :: run_result()
-  def run_as(source_or_graph, execution_principal, signer, opts \\ []) do
+  @spec run_as(String.t() | Graph.t(), String.t(), run_credential(), keyword()) :: run_result()
+  def run_as(source_or_graph, execution_principal, credential, opts \\ [])
+
+  def run_as(source_or_graph, execution_principal, %SigningAuthority{} = authority, opts)
+      when is_list(opts) do
+    with :ok <- validate_secure_principal(execution_principal),
+         :ok <- validate_authority_principal(authority, execution_principal),
+         :ok <- reject_mixed_authority_credentials(opts),
+         :ok <- validate_principal_opt(opts, execution_principal),
+         {:ok, opts} <- bind_secure_graph_hash(source_or_graph, opts),
+         :ok <-
+           Arbor.Orchestrator.Authorization.check_orchestrator_access(
+             execution_principal,
+             authority
+           ) do
+      # Authority path: process-local opaque reference only — no signer/authorizer
+      # closures and no extractable identity_private_key.
+      secure_opts =
+        opts
+        |> Keyword.drop([:signer, :authorizer, :identity_private_key, :signing_authority])
+        |> Keyword.put(:authorization, true)
+        |> Keyword.put(:execution_principal, execution_principal)
+        |> Keyword.put(:agent_id, execution_principal)
+        |> Keyword.put(:signing_authority, authority)
+
+      run(source_or_graph, secure_opts)
+    end
+  end
+
+  def run_as(source_or_graph, execution_principal, signer, opts)
+      when is_function(signer, 1) and is_list(opts) do
     with :ok <- validate_secure_principal(execution_principal),
          :ok <- validate_secure_signer(signer),
+         :ok <- reject_signing_authority_in_legacy_opts(opts),
          :ok <- validate_principal_opt(opts, execution_principal),
          {:ok, opts} <- bind_secure_graph_hash(source_or_graph, opts),
          :ok <-
@@ -129,6 +172,10 @@ defmodule Arbor.Orchestrator do
     end
   end
 
+  def run_as(_source_or_graph, _execution_principal, _credential, _opts) do
+    {:error, :invalid_run_credential}
+  end
+
   @doc "Read and execute a .dot file through the legacy/trusted compatibility API."
   @spec run_file(String.t(), keyword()) :: run_result()
   def run_file(path, opts \\ []) do
@@ -146,8 +193,8 @@ defmodule Arbor.Orchestrator do
   end
 
   @doc "Read a .dot file and securely execute it as an explicit principal."
-  @spec run_file_as(String.t(), String.t(), function(), keyword()) :: run_result()
-  def run_file_as(path, execution_principal, signer, opts \\ []) do
+  @spec run_file_as(String.t(), String.t(), run_credential(), keyword()) :: run_result()
+  def run_file_as(path, execution_principal, credential, opts \\ []) do
     with {:ok, source} <- File.read(path),
          graph_hash = :crypto.hash(:sha256, source) |> Base.encode16(case: :lower),
          :ok <- verify_expected_graph_hash(opts, graph_hash) do
@@ -156,7 +203,7 @@ defmodule Arbor.Orchestrator do
         |> Keyword.put(:dot_source_path, Path.expand(path))
         |> Keyword.put(:graph_hash, graph_hash)
 
-      run_as(source, execution_principal, signer, opts)
+      run_as(source, execution_principal, credential, opts)
     end
   end
 
@@ -203,6 +250,46 @@ defmodule Arbor.Orchestrator do
 
   defp validate_secure_signer(signer) when is_function(signer, 1), do: :ok
   defp validate_secure_signer(_signer), do: {:error, :signer_required}
+
+  defp validate_authority_principal(%SigningAuthority{principal_id: principal_id}, principal)
+       when is_binary(principal) do
+    if principal_id == principal,
+      do: :ok,
+      else: {:error, :principal_mismatch}
+  end
+
+  defp validate_authority_principal(_, _), do: {:error, :invalid_signing_authority}
+
+  # Authority path rejects mixed legacy credential controls in opts.
+  defp reject_mixed_authority_credentials(opts) when is_list(opts) do
+    cond do
+      Keyword.has_key?(opts, :signing_authority) ->
+        {:error, :mixed_signing_credentials}
+
+      is_function(Keyword.get(opts, :signer), 1) ->
+        {:error, :mixed_signing_credentials}
+
+      is_function(Keyword.get(opts, :authorizer), 2) ->
+        {:error, :mixed_signing_credentials}
+
+      match?(
+        key when is_binary(key) and byte_size(key) > 0,
+        Keyword.get(opts, :identity_private_key)
+      ) ->
+        {:error, :mixed_signing_credentials}
+
+      true ->
+        :ok
+    end
+  end
+
+  # Legacy signer path rejects a parallel SigningAuthority in opts.
+  defp reject_signing_authority_in_legacy_opts(opts) when is_list(opts) do
+    case Keyword.get(opts, :signing_authority) do
+      nil -> :ok
+      _ -> {:error, :mixed_signing_credentials}
+    end
+  end
 
   defp validate_principal_opt(opts, principal) do
     supplied = Keyword.get(opts, :execution_principal) || Keyword.get(opts, :agent_id)

@@ -1,6 +1,7 @@
 defmodule Arbor.Orchestrator.Engine.RunAuthorization do
   @moduledoc false
 
+  alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.Engine.Context
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
@@ -94,6 +95,7 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
 
       match?(%__MODULE__{}, inherited) ->
         with :ok <- reject_unbound_overrides(opts),
+             :ok <- validate_signing_authority_opts(opts),
              :ok <- verify_digest(inherited),
              :ok <- verify_workdir(inherited),
              :ok <- verify_inherited_opts(inherited, opts),
@@ -107,11 +109,14 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
                  current_graph_hash,
                  current_compiled_graph_hash
                ) do
+          # SigningAuthority stays only in opts (process-local Engine credential).
+          # It is never stored on the RunAuthorization struct/digest/projection.
           {:ok, {child_authority, bind_opts(opts, child_authority, current_graph_hash)}}
         end
 
       is_nil(inherited) ->
         with :ok <- reject_unbound_overrides(opts),
+             :ok <- validate_signing_authority_opts(opts),
              {:ok, authority} <- new(graph, opts),
              :ok <- validate_graph(graph) do
           {:ok, {authority, bind_opts(opts, authority, authority.graph_hash)}}
@@ -126,6 +131,7 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
   @spec new(Graph.t(), keyword()) :: {:ok, t()} | {:error, term()}
   def new(%Graph{} = graph, opts) when is_list(opts) do
     with {:ok, execution_principal} <- execution_principal(opts),
+         :ok <- validate_signing_authority_opts(opts, execution_principal),
          {:ok, caller_id} <- optional_id(opts, :caller_id, execution_principal),
          {:ok, author_id} <- author_id(opts, caller_id),
          {:ok, task_id} <- optional_id(opts, :task_id, nil),
@@ -137,6 +143,7 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
           {execution_manifest, execution_manifest_digest, pinned_action_bindings,
            pinned_handler_bindings, pinned_node_bindings}} <-
            execution_binding(opts, graph, graph_hash, compiled_graph_hash) do
+      # Intentionally no :signing_authority field — process-local Engine opt only.
       base = %{
         execution_principal: execution_principal,
         caller_id: caller_id,
@@ -647,6 +654,75 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
       nil -> :ok
       key -> {:error, {:unbound_authorized_override, key}}
     end
+  end
+
+  # Validate SigningAuthority shape/principal/exclusivity when present.
+  # Does NOT retain the authority on the RunAuthorization struct.
+  defp validate_signing_authority_opts(opts) do
+    case execution_principal(opts) do
+      {:ok, principal} -> validate_signing_authority_opts(opts, principal)
+      # Defer principal-required errors to new/1 / inherited path.
+      {:error, :execution_principal_required} -> validate_signing_authority_shape_only(opts)
+      {:error, _} = error -> error
+    end
+  end
+
+  defp validate_signing_authority_opts(opts, execution_principal)
+       when is_binary(execution_principal) do
+    case Keyword.get(opts, :signing_authority) do
+      nil ->
+        :ok
+
+      %SigningAuthority{} = authority ->
+        with :ok <- validate_authority_shape(authority),
+             :ok <- validate_authority_principal_binding(authority, execution_principal),
+             :ok <- reject_mixed_authority_credentials(opts) do
+          :ok
+        end
+
+      _invalid ->
+        {:error, :invalid_signing_authority}
+    end
+  end
+
+  defp validate_signing_authority_shape_only(opts) do
+    case Keyword.get(opts, :signing_authority) do
+      nil -> :ok
+      %SigningAuthority{} = authority -> validate_authority_shape(authority)
+      _invalid -> {:error, :invalid_signing_authority}
+    end
+  end
+
+  defp validate_authority_shape(%SigningAuthority{} = authority) do
+    # Re-run contract validation so forged/mutated maps-as-structs fail closed.
+    case SigningAuthority.new(
+           token: authority.token,
+           principal_id: authority.principal_id,
+           purpose: authority.purpose
+         ) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, {:invalid_signing_authority, reason}}
+    end
+  end
+
+  defp validate_authority_principal_binding(%SigningAuthority{} = authority, execution_principal) do
+    if authority.principal_id == execution_principal do
+      :ok
+    else
+      {:error, :principal_mismatch}
+    end
+  end
+
+  defp reject_mixed_authority_credentials(opts) do
+    mixed? =
+      is_function(Keyword.get(opts, :signer), 1) or
+        is_function(Keyword.get(opts, :authorizer), 2) or
+        match?(
+          key when is_binary(key) and byte_size(key) > 0,
+          Keyword.get(opts, :identity_private_key)
+        )
+
+    if mixed?, do: {:error, :mixed_signing_credentials}, else: :ok
   end
 
   defp override_present?(opts, key) do

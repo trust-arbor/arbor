@@ -10,6 +10,8 @@ defmodule Arbor.Orchestrator.Engine do
   - content-hash based skip logic
   """
 
+  alias Arbor.Contracts.Security.SigningAuthority
+
   alias Arbor.Orchestrator.Engine.{
     Checkpoint,
     ContentHash,
@@ -97,26 +99,50 @@ defmodule Arbor.Orchestrator.Engine do
     opts = Keyword.put(opts, :pipeline_started_at, pipeline_started_at_dt)
 
     # Derive checkpoint HMAC secret from the operator's identity, if one
-    # was supplied. Standard HKDF (RFC 5869) via Arbor.Security.Crypto
-    # gives us deterministic per-identity key material for signing
-    # checkpoints. The HMAC binds checkpoint integrity to the identity
+    # was supplied. The HMAC binds checkpoint integrity to the identity
     # that started the run — only the same operator can resume.
     #
-    # If no identity is supplied (e.g. unsigned dev/test runs), no
-    # secret is derived. Checkpoints are written unsigned and resume
-    # accepts them. That's the legacy fail-open path; closing it
-    # fully requires every caller to pass identity, which is a
-    # broader migration. The roadmap doc tracks the follow-up.
-    opts =
-      case derive_checkpoint_hmac_secret(opts) do
-        nil -> opts
-        secret -> Keyword.put(opts, :hmac_secret, secret)
-      end
+    # SigningAuthority path uses Arbor.Security.derive_secret_with_authority/2
+    # with domain label :engine_checkpoint_hmac_v3. Derivation failure aborts
+    # the authorized run/resume — it must not silently disable resumability.
+    #
+    # Legacy identity_private_key path uses the pinned v2 HMAC derivation.
+    # If no identity is supplied (unsigned dev/test runs), no secret is
+    # derived. Checkpoints are written unsigned and resume accepts them
+    # only when authorization is off.
+    case apply_checkpoint_hmac_secret(opts) do
+      {:ok, opts} ->
+        do_prepared_run_with_hmac(
+          graph,
+          run_authorization,
+          opts,
+          logs_root,
+          max_steps,
+          pipeline_started_at
+        )
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp do_prepared_run_with_hmac(
+         %Graph{} = graph,
+         run_authorization,
+         opts,
+         logs_root,
+         max_steps,
+         pipeline_started_at
+       ) do
+    pipeline_started_at_dt = Keyword.get(opts, :pipeline_started_at, DateTime.utc_now())
+    run_id = Keyword.fetch!(opts, :run_id)
 
     # Authorized resume is meaningful only when the checkpoint can be
     # authenticated. Session runs already opt out explicitly; secure ad-hoc
     # runs without checkpoint key material are made non-resumable here rather
     # than writing an unsigned authority projection that can never be trusted.
+    # Authority-path derivation failures already aborted above — this only
+    # covers the legacy "no key material" case.
     opts = maybe_disable_unverifiable_resume(opts, run_authorization)
 
     # Compute graph hash for version checking on resume
@@ -1165,34 +1191,71 @@ defmodule Arbor.Orchestrator.Engine do
   # Derive the HMAC secret used to sign engine checkpoints.
   # See the comment at the call site in do_run/2 for the trust model.
   #
+  # ## SigningAuthority path (v3)
+  # When `:signing_authority` is present, derive via the broker:
+  # `Arbor.Security.derive_secret_with_authority(authority, :engine_checkpoint_hmac_v3)`.
+  # Derivation failure returns `{:error, reason}` so the caller aborts —
+  # never silently falls back to unsigned checkpoints / disabled resume.
+  #
+  # ## Legacy identity_private_key path (v2)
   # C7 review fix (2026-06-09): this previously used HKDF when
   # Arbor.Security.Crypto was loaded and fell back to plain HMAC otherwise —
-  # two DIFFERENT secrets for the same key. A checkpoint signed under one
-  # mode failed verification under the other, a silent correctness hazard
-  # whenever load state differed between sign and verify (hot reload, a
-  # different node, arbor_security not yet started). Collapsed to a single,
-  # load-INDEPENDENT derivation using only `:crypto` (always available), so
-  # the secret is purely a function of the key. HMAC-SHA256(key, label) is a
-  # sound single-output KDF (exactly HKDF-Extract); the review endorses it
-  # as sufficient here.
+  # two DIFFERENT secrets for the same key. Collapsed to a single,
+  # load-INDEPENDENT derivation using only `:crypto`:
+  # `HMAC-SHA256(key, "arbor-checkpoint-hmac-v2")`.
   #
-  # Label bumped to v2 so the derivation change is explicit: old (v1)
-  # checkpoints fail verification and restart — fail-closed and acceptable
-  # for ephemeral per-run checkpoints.
-  #
-  # Transitional: deriving the MAC secret from the raw Ed25519 private key
-  # reuses the signing key for a MAC purpose, which needs an extractable key.
-  # The Layer 3/4 plan moves this into the signer process; keep THIS single
-  # function as the swap point. Exposed (@doc false) so the derivation can be
-  # pinned by a regression test.
-  @spec derive_checkpoint_hmac_secret(keyword()) :: binary() | nil
-  def derive_checkpoint_hmac_secret(opts) do
-    case Keyword.get(opts, :identity_private_key) do
-      key when is_binary(key) and byte_size(key) > 0 ->
-        :crypto.mac(:hmac, :sha256, key, "arbor-checkpoint-hmac-v2")
+  # Exposed (@doc false) so the derivation can be pinned by a regression test.
+  @spec derive_checkpoint_hmac_secret(keyword()) ::
+          binary() | nil | {:error, term()}
+  def derive_checkpoint_hmac_secret(opts) when is_list(opts) do
+    authority = Keyword.get(opts, :signing_authority)
+    private_key = Keyword.get(opts, :identity_private_key)
 
-      _ ->
+    cond do
+      match?(%SigningAuthority{}, authority) and
+        is_binary(private_key) and byte_size(private_key) > 0 ->
+        {:error, :mixed_signing_credentials}
+
+      match?(%SigningAuthority{}, authority) ->
+        derive_checkpoint_hmac_via_authority(authority)
+
+      is_binary(private_key) and byte_size(private_key) > 0 ->
+        :crypto.mac(:hmac, :sha256, private_key, "arbor-checkpoint-hmac-v2")
+
+      true ->
         nil
+    end
+  end
+
+  defp derive_checkpoint_hmac_via_authority(%SigningAuthority{} = authority) do
+    case Arbor.Security.derive_secret_with_authority(
+           authority,
+           :engine_checkpoint_hmac_v3
+         ) do
+      {:ok, secret} when is_binary(secret) and byte_size(secret) > 0 ->
+        secret
+
+      {:ok, _invalid} ->
+        {:error, {:checkpoint_hmac_derivation_failed, :invalid_secret}}
+
+      {:error, reason} ->
+        {:error, {:checkpoint_hmac_derivation_failed, reason}}
+
+      other ->
+        {:error, {:checkpoint_hmac_derivation_failed, other}}
+    end
+  end
+
+  defp apply_checkpoint_hmac_secret(opts) do
+    case derive_checkpoint_hmac_secret(opts) do
+      nil ->
+        {:ok, opts}
+
+      secret when is_binary(secret) ->
+        {:ok, Keyword.put(opts, :hmac_secret, secret)}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 

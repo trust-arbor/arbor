@@ -3,8 +3,10 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
   # :security_available_override), so it must not run concurrently with other tests.
   use ExUnit.Case, async: false
   @moduletag :fast
+  @moduletag :security_regression
 
   alias Arbor.Common.SafePath
+  alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.Engine.{Context, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
@@ -215,6 +217,40 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
       assert_received {:authorize, "arbor://fs/read", opts}
       assert Keyword.fetch!(opts, :file_path) == real_target
       refute Keyword.fetch!(opts, :file_path) == symlink
+    end
+  end
+
+  describe "security regression: SigningAuthority path ignores Config.security_module" do
+    test "forged authority fails closed without consulting the injected security double" do
+      # Inject a double that would authorize everything if consulted.
+      Application.put_env(:arbor_orchestrator, :security_module, RecordingSecurity)
+
+      {:ok, forged} =
+        SigningAuthority.new(
+          token: :crypto.strong_rand_bytes(32),
+          principal_id: "agent_test",
+          purpose: :session
+        )
+
+      t =
+        token()
+        |> Map.update!(:assigns, fn assigns ->
+          assigns
+          |> Map.put(:signing_authority, forged)
+          |> Map.delete(:signer)
+        end)
+
+      result = CapabilityCheck.before_node(t)
+
+      # Must fail closed via Arbor.Security.sign_with_authority (forged token),
+      # never reach the RecordingSecurity double.
+      assert result.halted
+      assert result.outcome.status == :fail
+
+      assert result.outcome.failure_reason =~ "authority_signing_failed" or
+               result.outcome.failure_reason =~ "Capability check failed"
+
+      refute_received {:authorize, _, _}
     end
   end
 end

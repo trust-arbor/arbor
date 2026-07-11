@@ -65,6 +65,7 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
 
   require Logger
 
+  alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.Registry
@@ -127,9 +128,7 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
         Logger.debug("Authorization: #{type} node #{node.id} always authorized")
         call_handler(handler, node, context, graph, opts)
       else
-        authorizer = Keyword.get(opts, :authorizer)
-
-        case check_authorization(authorizer, agent_id, type) do
+        case check_authorization(opts, agent_id, type) do
           :ok ->
             Logger.debug(
               "Authorization: #{type} node #{node.id} authorized for agent #{agent_id}"
@@ -169,15 +168,40 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
     end
   end
 
-  defp check_authorization(nil, _agent_id, _type) do
+  # Prefer the reload-stable SigningAuthority path. Never fall back to the
+  # legacy authorizer/signer when an authority is present.
+  defp check_authorization(opts, agent_id, type) when is_list(opts) do
+    case Keyword.get(opts, :signing_authority) do
+      %SigningAuthority{} = authority ->
+        check_authority_authorization(authority, agent_id)
+
+      nil ->
+        check_legacy_authorization(Keyword.get(opts, :authorizer), agent_id, type)
+
+      _invalid ->
+        {:error, :invalid_signing_authority}
+    end
+  end
+
+  defp check_authority_authorization(%SigningAuthority{} = authority, agent_id) do
+    if authority.principal_id != agent_id do
+      {:error, :principal_mismatch}
+    else
+      # Fixed named facade path — no injected security module.
+      Arbor.Orchestrator.Authorization.check_orchestrator_access(agent_id, authority)
+    end
+  end
+
+  defp check_legacy_authorization(nil, _agent_id, _type) do
     {:error, "no authorizer configured"}
   end
 
-  defp check_authorization(authorizer, agent_id, type) when is_function(authorizer, 2) do
+  defp check_legacy_authorization(authorizer, agent_id, type)
+       when is_function(authorizer, 2) do
     authorizer.(agent_id, type)
   end
 
-  defp check_authorization(_authorizer, _agent_id, _type) do
+  defp check_legacy_authorization(_authorizer, _agent_id, _type) do
     {:error, "authorizer must be a function/2"}
   end
 
@@ -259,11 +283,27 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
           end
       end
 
-    # Thread signer function for signed request creation in CapabilityCheck
+    # Process-local only: opaque SigningAuthority for CapabilityCheck.
+    # Never put into Engine context / checkpoint / RunAuthorization.
     assigns =
-      case Keyword.get(opts, :signer) do
-        signer when is_function(signer, 1) -> Map.put(assigns, :signer, signer)
-        _ -> assigns
+      case Keyword.get(opts, :signing_authority) do
+        %SigningAuthority{} = signing_authority ->
+          Map.put(assigns, :signing_authority, signing_authority)
+
+        _ ->
+          assigns
+      end
+
+    # Legacy: thread signer function for signed request creation in CapabilityCheck.
+    # When an authority is present, do not attach the legacy signer (exclusivity).
+    assigns =
+      if Map.has_key?(assigns, :signing_authority) do
+        assigns
+      else
+        case Keyword.get(opts, :signer) do
+          signer when is_function(signer, 1) -> Map.put(assigns, :signer, signer)
+          _ -> assigns
+        end
       end
 
     node_type = Registry.node_type(node)

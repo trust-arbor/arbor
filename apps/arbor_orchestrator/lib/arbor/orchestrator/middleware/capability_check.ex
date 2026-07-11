@@ -21,6 +21,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
   use Arbor.Orchestrator.Middleware
 
   alias Arbor.Common.SafePath
+  alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.Engine.{Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Handlers.Registry
   alias Arbor.Orchestrator.Stdlib.Aliases
@@ -118,12 +119,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
   defp check_all_resources(token, agent_id, [resource | rest]) do
     with {:ok, auth_opts} <- build_auth_opts(token, resource),
          :ok <- authorize_caller(token, resource, auth_opts) do
-      case Arbor.Orchestrator.Config.security_module().authorize(
-             agent_id,
-             resource,
-             :execute,
-             auth_opts
-           ) do
+      case authorize_resource(token, agent_id, resource, auth_opts) do
         {:ok, :authorized} ->
           check_all_resources(token, agent_id, rest)
 
@@ -170,6 +166,23 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
       )
   end
 
+  # SigningAuthority path: fixed Arbor.Security facade only — never consults
+  # Config.security_module (test doubles must not affect this path).
+  defp authorize_resource(token, agent_id, resource, auth_opts) do
+    case Map.get(token.assigns, :signing_authority) do
+      %SigningAuthority{} ->
+        Arbor.Security.authorize(agent_id, resource, :execute, auth_opts)
+
+      _ ->
+        Arbor.Orchestrator.Config.security_module().authorize(
+          agent_id,
+          resource,
+          :execute,
+          auth_opts
+        )
+    end
+  end
+
   defp build_auth_opts(token, resource) do
     authority = Map.fetch!(token.assigns, :run_authorization)
 
@@ -183,7 +196,22 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
     end
   end
 
+  # Prefer SigningAuthority over legacy signer. Authority signing failures
+  # fail closed — never fall back to unsigned or signer credentials.
   defp signer_auth_opts(assigns, resource) do
+    case Map.get(assigns, :signing_authority) do
+      %SigningAuthority{} = signing_authority ->
+        case Arbor.Security.sign_with_authority(signing_authority, resource) do
+          {:ok, signed_request} -> {:ok, [signed_request: signed_request]}
+          {:error, reason} -> {:error, {:authority_signing_failed, reason}}
+        end
+
+      _ ->
+        legacy_signer_auth_opts(assigns, resource)
+    end
+  end
+
+  defp legacy_signer_auth_opts(assigns, resource) do
     case Map.get(assigns, :signer) do
       signer when is_function(signer, 1) ->
         case signer.(resource) do
@@ -203,28 +231,37 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
     if authority.caller_id == authority.execution_principal do
       :ok
     else
-      security = Arbor.Orchestrator.Config.security_module()
+      case Map.get(token.assigns, :signing_authority) do
+        %SigningAuthority{} ->
+          authorize_caller_with_security(Arbor.Security, authority, resource, auth_opts)
 
-      with true <- function_exported?(security, :list_capabilities, 2),
-           true <- function_exported?(security, :capability_authorizes?, 3),
-           {:ok, effective_resource} <- effective_resource(security, resource, auth_opts),
-           {:ok, capabilities} <-
-             security.list_capabilities(
-               authority.caller_id,
-               RunAuthorization.scope_opts(authority)
-             ),
-           true <-
-             Enum.any?(capabilities, fn capability ->
-               security.capability_authorizes?(
-                 capability,
-                 effective_resource,
-                 RunAuthorization.scope_opts(authority)
-               )
-             end) do
-        :ok
-      else
-        _ -> {:error, {:caller_authority_missing, authority.caller_id}}
+        _ ->
+          security = Arbor.Orchestrator.Config.security_module()
+          authorize_caller_with_security(security, authority, resource, auth_opts)
       end
+    end
+  end
+
+  defp authorize_caller_with_security(security, authority, resource, auth_opts) do
+    with true <- function_exported?(security, :list_capabilities, 2),
+         true <- function_exported?(security, :capability_authorizes?, 3),
+         {:ok, effective_resource} <- effective_resource(security, resource, auth_opts),
+         {:ok, capabilities} <-
+           security.list_capabilities(
+             authority.caller_id,
+             RunAuthorization.scope_opts(authority)
+           ),
+         true <-
+           Enum.any?(capabilities, fn capability ->
+             security.capability_authorizes?(
+               capability,
+               effective_resource,
+               RunAuthorization.scope_opts(authority)
+             )
+           end) do
+      :ok
+    else
+      _ -> {:error, {:caller_authority_missing, authority.caller_id}}
     end
   end
 

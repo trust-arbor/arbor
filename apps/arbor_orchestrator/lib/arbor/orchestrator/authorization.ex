@@ -17,18 +17,26 @@ defmodule Arbor.Orchestrator.Authorization do
   Exceptions or exits during the authorize call (e.g. CapabilityStore down
   mid-check) are logged and result in denial when required.
 
+  ## Credentials
+  Accepts either:
+  - a legacy 1-arity signer function that produces a fresh SignedRequest, or
+  - a `%Arbor.Contracts.Security.SigningAuthority{}` for the reload-stable path
+
+  The SigningAuthority path always signs via `Arbor.Security.sign_with_authority/2`
+  and authorizes via the fixed `Arbor.Security.authorize/4` facade. Signing or
+  authorization errors fail closed — never fall back to unsigned/legacy
+  credentials.
+
   ## Usage
       case Authorization.check_orchestrator_access(agent_id, signer) do
         :ok -> proceed()
         {:error, reason} -> {:error, {:unauthorized, reason}}
       end
-
-  The signer (if present) is a 1-arity function that produces a fresh
-  SignedRequest for the resource (see Builders for construction).
   """
 
   require Logger
 
+  alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.Config
 
   @orchestrator_resource "arbor://orchestrator/execute"
@@ -44,10 +52,42 @@ defmodule Arbor.Orchestrator.Authorization do
   """
   @spec check_orchestrator_access(
           String.t(),
-          (String.t() -> {:ok, term()} | {:error, term()}) | nil
+          (String.t() -> {:ok, term()} | {:error, term()}) | SigningAuthority.t() | nil
         ) ::
           :ok | {:error, term()}
-  def check_orchestrator_access(agent_id, signer \\ nil) when is_binary(agent_id) do
+  def check_orchestrator_access(agent_id, credential \\ nil)
+
+  def check_orchestrator_access(agent_id, %SigningAuthority{} = authority)
+      when is_binary(agent_id) do
+    cond do
+      authority.principal_id != agent_id ->
+        {:error, :principal_mismatch}
+
+      not Config.security_available?() ->
+        if Config.security_required?(), do: {:error, :security_unavailable}, else: :ok
+
+      true ->
+        authorize_with_authority(agent_id, authority)
+    end
+  rescue
+    error ->
+      Logger.warning(
+        "[Authorization] Orchestrator gate check raised (failing closed): #{inspect(error)}",
+        agent_id: agent_id
+      )
+
+      if Config.security_required?(), do: {:error, :security_unavailable}, else: :ok
+  catch
+    :exit, reason ->
+      Logger.warning(
+        "[Authorization] Orchestrator gate check exited (failing closed): #{inspect(reason)}",
+        agent_id: agent_id
+      )
+
+      if Config.security_required?(), do: {:error, :security_unavailable}, else: :ok
+  end
+
+  def check_orchestrator_access(agent_id, signer) when is_binary(agent_id) do
     if Config.security_available?() do
       auth_opts = build_auth_opts(signer)
 
@@ -87,9 +127,33 @@ defmodule Arbor.Orchestrator.Authorization do
       if Config.security_required?(), do: {:error, :security_unavailable}, else: :ok
   end
 
+  # Fixed Security facade path — never consults Config.security_module.
+  defp authorize_with_authority(agent_id, %SigningAuthority{} = authority) do
+    case Arbor.Security.sign_with_authority(authority, @orchestrator_resource) do
+      {:ok, signed_request} ->
+        case Arbor.Security.authorize(
+               agent_id,
+               @orchestrator_resource,
+               :execute,
+               signed_request: signed_request
+             ) do
+          {:ok, :authorized} -> :ok
+          {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
+          {:error, reason} -> {:error, reason}
+          other -> {:error, {:unexpected_auth_result, other}}
+        end
+
+      {:error, reason} ->
+        # Fail closed — never fall back to unsigned or legacy credentials.
+        {:error, {:authority_signing_failed, reason}}
+    end
+  end
+
   defp build_auth_opts(nil), do: []
 
   defp build_auth_opts(signer) when is_function(signer, 1) do
+    # Legacy compatibility: missing/failed signer opts remain empty so
+    # pre-authority callers keep their prior authorize behavior.
     case signer.(@orchestrator_resource) do
       {:ok, signed_request} -> [signed_request: signed_request]
       {:error, _} -> []

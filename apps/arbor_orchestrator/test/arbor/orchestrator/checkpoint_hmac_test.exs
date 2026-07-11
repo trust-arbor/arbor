@@ -33,4 +33,13 @@ defmodule Arbor.Orchestrator.CheckpointHmacTest do
     assert Engine.derive_checkpoint_hmac_secret(identity_private_key: "") == nil
     assert Engine.derive_checkpoint_hmac_secret(identity_private_key: nil) == nil
   end
+
+  test "legacy v2 path unchanged when only identity_private_key is supplied" do
+    key = :binary.copy(<<0xA5>>, 32)
+    expected = :crypto.mac(:hmac, :sha256, key, "arbor-checkpoint-hmac-v2")
+
+    assert Engine.derive_checkpoint_hmac_secret(identity_private_key: key) == expected
+    # Authority-only keys must not alter the legacy nil path.
+    assert Engine.derive_checkpoint_hmac_secret(signing_authority: nil) == nil
+  end
 end
