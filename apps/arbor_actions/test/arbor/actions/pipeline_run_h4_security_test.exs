@@ -41,7 +41,7 @@ defmodule Arbor.Actions.Pipeline.RunH4SecurityTest do
                Run.run(%{source: source, initial_context: %{}}, %{})
     end
 
-    test "security regression: a verified identity still needs caller pipeline.run authority" do
+    test "security regression: a verified identity still needs executor pipeline.run authority" do
       principal = "agent_pipeline_no_cap_#{System.unique_integer([:positive])}"
       signer = fn _resource -> {:ok, %{signature: "test"}} end
 
@@ -52,7 +52,7 @@ defmodule Arbor.Actions.Pipeline.RunH4SecurityTest do
 
       source = "digraph NoCallerCap { start [shape=Mdiamond] done [shape=Msquare] start -> done }"
 
-      assert {:error, :caller_pipeline_run_authority_missing} =
+      assert {:error, :execution_principal_pipeline_run_authority_missing} =
                Run.run(
                  %{source: source, initial_context: %{}},
                  %{
