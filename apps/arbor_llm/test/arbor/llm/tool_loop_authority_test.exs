@@ -65,6 +65,11 @@ defmodule Arbor.LLM.ToolLoopAuthorityTest do
   end
 
   test "authorized runs forward immutable caller and scope on every tool invocation" do
+    # Opaque authority value — ToolLoop must not inspect or reconstruct it.
+    # Nested action lineage depends on the exact term being forwarded.
+    opaque_run_authorization =
+      {:opaque_run_authorization, "child-council-authority", make_ref()}
+
     authority = [
       authorization: true,
       execution_principal: "agent_executor",
@@ -83,6 +88,7 @@ defmodule Arbor.LLM.ToolLoopAuthorityTest do
                request(),
                authority ++
                  [
+                   run_authorization: opaque_run_authorization,
                    execution_manifest: manifest,
                    execution_manifest_digest: "manifest-digest",
                    pinned_action_bindings: action_bindings,
@@ -100,6 +106,7 @@ defmodule Arbor.LLM.ToolLoopAuthorityTest do
       author_id: "agent_architect",
       task_id: "task_scoped",
       session_id: "session_scoped",
+      run_authorization: opaque_run_authorization,
       execution_manifest: manifest,
       execution_manifest_digest: "manifest-digest",
       pinned_action_bindings: action_bindings
@@ -113,6 +120,9 @@ defmodule Arbor.LLM.ToolLoopAuthorityTest do
 
     assert Map.new(first_opts) == Map.new(expected_opts)
     assert Map.new(second_opts) == Map.new(expected_opts)
+    # Exact term identity — not a reconstructed copy of authority fields.
+    assert Keyword.fetch!(first_opts, :run_authorization) === opaque_run_authorization
+    assert Keyword.fetch!(second_opts, :run_authorization) === opaque_run_authorization
     assert result.content == "done"
   end
 

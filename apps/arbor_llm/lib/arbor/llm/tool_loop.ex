@@ -16,6 +16,12 @@ defmodule Arbor.LLM.ToolLoop do
     * `:authorization` - Marks an Engine-authorized run. Requires immutable
       `:execution_principal`, `:caller_id`, `:author_id`, `:task_id`, and
       `:session_id` bindings (the last two may be `nil`).
+    * `:run_authorization` - Opaque immutable run authority from the Engine
+      (when present). Forwarded unchanged on every tool executor invocation;
+      ToolLoop does not inspect or reconstruct it.
+    * `:execution_manifest`, `:execution_manifest_digest`,
+      `:pinned_action_bindings`, `:pinned_handler_bindings` - Immutable
+      execution-binding fields forwarded alongside identity when present.
 
   ## Example
 
@@ -175,8 +181,13 @@ defmodule Arbor.LLM.ToolLoop do
   defp validate_authorized_id(_value, key), do: {:error, {:invalid_authorized_tool_binding, key}}
 
   defp forward_immutable_execution_bindings(executor_opts, opts) do
+    # :run_authorization is an opaque immutable value from the authorized run
+    # (typically %RunAuthorization{} from arbor_orchestrator). Forward it
+    # unchanged so nested action execution can project lineage digests. Do not
+    # inspect, reconstruct, or depend on its module from arbor_llm.
     Enum.reduce(
       [
+        :run_authorization,
         :execution_manifest,
         :execution_manifest_digest,
         :pinned_action_bindings,

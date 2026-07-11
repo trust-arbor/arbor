@@ -893,9 +893,14 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandler do
   defp tool_loop_authority_opts(node, context, opts) do
     case {Keyword.get(opts, :authorization, false), Keyword.get(opts, :run_authorization)} do
       {true, %RunAuthorization{} = authority} ->
+        # Forward the exact validated RunAuthorization as an opaque immutable
+        # option. ToolLoop must pass it through to the tool executor so nested
+        # action lineage digests (binding_digest / parent_binding_digest) can
+        # be projected — copying only the flattened fields is not enough.
         {:ok,
          [
            authorization: true,
+           run_authorization: authority,
            execution_principal: authority.execution_principal,
            agent_id: authority.execution_principal,
            caller_id: authority.caller_id,
