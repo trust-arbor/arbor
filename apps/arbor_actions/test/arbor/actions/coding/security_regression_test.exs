@@ -5,6 +5,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
   alias Arbor.Actions.Council
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
+  alias Arbor.Common.SafePath
 
   @moduletag :slow
 
@@ -90,6 +91,53 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
                resource.resource_id,
                fixture.context
              )
+  end
+
+  test "validation resource paths canonicalize a symlinked temporary directory", %{
+    tmp_dir: tmp_dir
+  } do
+    fixture = leased_project(tmp_dir, valid_module())
+    real_tmp = Path.join(tmp_dir, "real-tmp")
+    alias_tmp = Path.join(tmp_dir, "alias-tmp")
+    File.mkdir_p!(real_tmp)
+    File.ln_s!(real_tmp, alias_tmp)
+    previous_tmpdir = System.get_env("TMPDIR")
+
+    System.put_env("TMPDIR", alias_tmp)
+
+    try do
+      assert {:ok, resource} =
+               WorkspaceLeaseRegistry.acquire_validation_resource(
+                 fixture.lease.workspace_id,
+                 fixture.context
+               )
+
+      try do
+        assert {:ok, canonical_tmp} = SafePath.resolve_real(real_tmp)
+        assert {:ok, canonical_root} = SafePath.resolve_real(resource.root_path)
+        assert resource.root_path == canonical_root
+        assert Path.dirname(resource.root_path) == canonical_tmp
+
+        for path <- [
+              resource.candidate_build_path,
+              resource.candidate_deps_path,
+              resource.base_build_path,
+              resource.base_deps_path
+            ] do
+          assert path_inside?(path, resource.root_path)
+        end
+      after
+        assert {:ok, _} =
+                 WorkspaceLeaseRegistry.release_validation_resource(
+                   resource.resource_id,
+                   fixture.context
+                 )
+      end
+    after
+      if previous_tmpdir,
+        do: System.put_env("TMPDIR", previous_tmpdir),
+        else: System.delete_env("TMPDIR")
+    end
   end
 
   test "validator accepts neither workspace_id nor test_paths and failed claim spawns no candidate code",

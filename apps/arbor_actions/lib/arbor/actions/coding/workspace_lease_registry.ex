@@ -49,6 +49,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   use GenServer
 
   alias Arbor.Actions.Coding.Workspace
+  alias Arbor.Common.SafePath
 
   @type ownership :: :owned | :reused
   @type release_mode :: :retain | :remove
@@ -1195,28 +1196,32 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     workspace_hash = sha256(workspace_id) |> binary_part(0, 12)
     resource_id = "security_regression_" <> token
 
-    root_path =
-      Path.join(
-        System.tmp_dir!(),
-        "arbor-security-regression-#{workspace_hash}-#{token}"
-      )
+    with {:ok, tmp_root} <- SafePath.resolve_real(System.tmp_dir!()) do
+      root_path =
+        Path.join(
+          tmp_root,
+          "arbor-security-regression-#{workspace_hash}-#{token}"
+        )
 
-    case File.mkdir(root_path) do
-      :ok ->
-        case File.chmod(root_path, 0o700) do
-          :ok ->
-            {:ok, resource_id, root_path}
+      case File.mkdir(root_path) do
+        :ok ->
+          case File.chmod(root_path, 0o700) do
+            :ok ->
+              {:ok, resource_id, root_path}
 
-          {:error, _reason} ->
-            _ = File.rm_rf(root_path)
-            {:error, :validation_resource_create_failed}
-        end
+            {:error, _reason} ->
+              _ = File.rm_rf(root_path)
+              {:error, :validation_resource_create_failed}
+          end
 
-      {:error, :eexist} ->
-        create_validation_root(workspace_id, attempts - 1)
+        {:error, :eexist} ->
+          create_validation_root(workspace_id, attempts - 1)
 
-      {:error, _reason} ->
-        {:error, :validation_resource_create_failed}
+        {:error, _reason} ->
+          {:error, :validation_resource_create_failed}
+      end
+    else
+      _ -> {:error, :validation_resource_create_failed}
     end
   rescue
     _error -> {:error, :validation_resource_create_failed}
