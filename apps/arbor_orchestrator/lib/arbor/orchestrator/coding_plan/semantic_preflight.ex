@@ -35,6 +35,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     allowed_exec_targets
     allowed_actions
     optional_actions
+    action_placements
     mandatory_gate_nodes
     publication_nodes
     validation_gate
@@ -45,6 +46,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     review_routing_gate
     validation_profile
   )
+
+  @placement_entry_keys MapSet.new(~w(
+    node_id
+    action
+    required_dominators
+    review_required_dominators
+    required_dominator_sets
+  ))
 
   @security_policy_keys ~w(
     attestation_source
@@ -139,6 +148,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         []
         |> check_handlers_and_targets(graph, policy)
         |> check_actions(graph, policy)
+        |> check_action_placement_bindings(graph, policy)
         |> check_commit_approval_gate(graph)
         |> check_operator_approval_routing(graph)
         |> check_forbidden_authority(graph)
@@ -347,6 +357,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
              :ok <- require_nonempty_string(policy, "review_gate"),
              :ok <- require_nonempty_string(policy, "review_routing_gate"),
              :ok <- require_nonempty_string(policy, "validation_profile"),
+             :ok <- require_action_placements(policy),
              :ok <- require_profile_policy(policy),
              :ok <- require_sorted_unique(policy, "allowed_handlers"),
              :ok <- require_sorted_unique(policy, "allowed_exec_targets"),
@@ -354,7 +365,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
              :ok <- require_sorted_unique(policy, "optional_actions"),
              :ok <- require_sorted_unique(policy, "mandatory_gate_nodes"),
              :ok <- require_sorted_unique(policy, "publication_nodes"),
-             :ok <- require_optional_subset(policy) do
+             :ok <- require_optional_subset(policy),
+             :ok <- require_placement_actions_allowed(policy) do
           {:ok, policy}
         end
     end
@@ -408,6 +420,175 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       :ok
     else
       {:error, {:invalid_semantic_policy, {:optional_actions_not_allowed, Enum.sort(missing)}}}
+    end
+  end
+
+  defp require_action_placements(policy) do
+    case Map.fetch!(policy, "action_placements") do
+      placements when is_list(placements) ->
+        with :ok <- validate_placement_entries(placements),
+             :ok <- require_placements_sorted_unique(placements) do
+          :ok
+        end
+
+      _other ->
+        {:error, {:invalid_semantic_policy, {:invalid_action_placements, "action_placements"}}}
+    end
+  end
+
+  defp validate_placement_entries(placements) do
+    Enum.reduce_while(placements, :ok, fn entry, :ok ->
+      case validate_placement_entry(entry) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp validate_placement_entry(entry) when is_map(entry) do
+    keys = Map.keys(entry)
+
+    cond do
+      not Enum.all?(keys, &is_binary/1) ->
+        {:error, {:invalid_semantic_policy, {:invalid_action_placement_entry, :non_string_keys}}}
+
+      MapSet.new(keys) != @placement_entry_keys ->
+        {:error,
+         {:invalid_semantic_policy,
+          {:invalid_action_placement_entry, :unexpected_or_missing_keys}}}
+
+      true ->
+        with :ok <- require_placement_nonempty_string(entry, "node_id"),
+             :ok <- require_placement_nonempty_string(entry, "action"),
+             :ok <- require_placement_string_list(entry, "required_dominators"),
+             :ok <- require_placement_string_list(entry, "review_required_dominators"),
+             :ok <- require_placement_dominator_sets(entry) do
+          :ok
+        end
+    end
+  end
+
+  defp validate_placement_entry(_entry) do
+    {:error, {:invalid_semantic_policy, {:invalid_action_placement_entry, :expected_map}}}
+  end
+
+  defp require_placement_nonempty_string(entry, key) do
+    case Map.fetch!(entry, key) do
+      value when is_binary(value) and value != "" ->
+        :ok
+
+      _other ->
+        {:error, {:invalid_semantic_policy, {:invalid_action_placement_field, key}}}
+    end
+  end
+
+  defp require_placement_string_list(entry, key) do
+    case Map.fetch!(entry, key) do
+      list when is_list(list) ->
+        cond do
+          not Enum.all?(list, &(is_binary(&1) and &1 != "")) ->
+            {:error, {:invalid_semantic_policy, {:invalid_action_placement_field, key}}}
+
+          list != Enum.sort(list) ->
+            {:error, {:invalid_semantic_policy, {:unsorted_action_placement_field, key}}}
+
+          length(list) != length(Enum.uniq(list)) ->
+            {:error, {:invalid_semantic_policy, {:duplicate_action_placement_field, key}}}
+
+          true ->
+            :ok
+        end
+
+      _other ->
+        {:error, {:invalid_semantic_policy, {:invalid_action_placement_field, key}}}
+    end
+  end
+
+  defp require_placement_dominator_sets(entry) do
+    case Map.fetch!(entry, "required_dominator_sets") do
+      sets when is_list(sets) ->
+        Enum.reduce_while(sets, :ok, fn set, :ok ->
+          case validate_dominator_set(set) do
+            :ok -> {:cont, :ok}
+            {:error, _reason} = error -> {:halt, error}
+          end
+        end)
+        |> case do
+          :ok -> require_dominator_sets_sorted(sets)
+          error -> error
+        end
+
+      _other ->
+        {:error,
+         {:invalid_semantic_policy, {:invalid_action_placement_field, "required_dominator_sets"}}}
+    end
+  end
+
+  defp validate_dominator_set(set) when is_list(set) and set != [] do
+    cond do
+      not Enum.all?(set, &(is_binary(&1) and &1 != "")) ->
+        {:error,
+         {:invalid_semantic_policy, {:invalid_action_placement_field, "required_dominator_sets"}}}
+
+      set != Enum.sort(set) ->
+        {:error,
+         {:invalid_semantic_policy, {:unsorted_action_placement_field, "required_dominator_sets"}}}
+
+      length(set) != length(Enum.uniq(set)) ->
+        {:error,
+         {:invalid_semantic_policy,
+          {:duplicate_action_placement_field, "required_dominator_sets"}}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_dominator_set(_set) do
+    {:error,
+     {:invalid_semantic_policy, {:invalid_action_placement_field, "required_dominator_sets"}}}
+  end
+
+  defp require_dominator_sets_sorted(sets) do
+    sorted = Enum.sort_by(sets, &Enum.join(&1, "\0"))
+
+    if sets == sorted do
+      :ok
+    else
+      {:error,
+       {:invalid_semantic_policy, {:unsorted_action_placement_field, "required_dominator_sets"}}}
+    end
+  end
+
+  defp require_placements_sorted_unique(placements) do
+    node_ids = Enum.map(placements, & &1["node_id"])
+
+    cond do
+      node_ids != Enum.sort(node_ids) ->
+        {:error, {:invalid_semantic_policy, {:unsorted_list, "action_placements"}}}
+
+      length(node_ids) != length(Enum.uniq(node_ids)) ->
+        {:error, {:invalid_semantic_policy, {:duplicate_list_entries, "action_placements"}}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp require_placement_actions_allowed(policy) do
+    allowed = MapSet.new(policy["allowed_actions"])
+
+    unknown =
+      policy["action_placements"]
+      |> Enum.map(& &1["action"])
+      |> Enum.reject(&MapSet.member?(allowed, &1))
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    if unknown == [] do
+      :ok
+    else
+      {:error, {:invalid_semantic_policy, {:placement_actions_not_allowed, unknown}}}
     end
   end
 
@@ -503,6 +684,68 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         acc
       end
     end)
+  end
+
+  # Exact node-identity action bindings. Allowed action names alone are not a
+  # placement contract: an extra allowlisted git_pr node (or a swapped pair of
+  # allowed actions) must fail closed.
+  defp check_action_placement_bindings(errors, graph, policy) do
+    placements = policy["action_placements"]
+
+    if placements == [] do
+      errors
+    else
+      expected = Map.new(placements, &{&1["node_id"], &1["action"]})
+
+      exec_nodes =
+        graph.nodes
+        |> Enum.filter(fn {_id, node} -> Registry.node_type(node) == "exec" end)
+        |> Enum.sort_by(&elem(&1, 0))
+
+      present_ids = MapSet.new(exec_nodes, &elem(&1, 0))
+
+      errors =
+        Enum.reduce(exec_nodes, errors, fn {node_id, node}, acc ->
+          action = Map.get(node.attrs, "action")
+
+          case Map.fetch(expected, node_id) do
+            {:ok, ^action} ->
+              acc
+
+            {:ok, required_action} ->
+              [
+                error("action_placement_mismatch", node_id, %{
+                  "action" => action,
+                  "required_action" => required_action
+                })
+                | acc
+              ]
+
+            :error ->
+              [
+                error("action_placement_extra_node", node_id, %{
+                  "action" => action
+                })
+                | acc
+              ]
+          end
+        end)
+
+      Enum.reduce(placements, errors, fn placement, acc ->
+        node_id = placement["node_id"]
+
+        if MapSet.member?(present_ids, node_id) do
+          acc
+        else
+          [
+            error("action_placement_missing_node", node_id, %{
+              "action" => placement["action"]
+            })
+            | acc
+          ]
+        end
+      end)
+    end
   end
 
   # Commit approval must be a reviewed top-level coding action, never a generic
@@ -1844,6 +2087,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         errors
         |> check_mandatory_gates(policy, reachable)
         |> check_publication_presence(policy, reachable, review_profile)
+        |> check_action_placement_dominance(
+          graph,
+          policy,
+          entry,
+          reachable,
+          dominators,
+          review_profile
+        )
         |> check_dominance(
           policy,
           dominators,
@@ -1851,6 +2102,178 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           review_profile
         )
         |> check_security_rework_dominance(graph, policy)
+    end
+  end
+
+  # Prove each reviewed action node is reachable and that its policy-encoded
+  # gates dominate the node where the side effect occurs. Unreachable or missing
+  # targets fail closed (unlike optional publication dominance skips).
+  defp check_action_placement_dominance(
+         errors,
+         graph,
+         policy,
+         entry,
+         reachable,
+         dominators,
+         review_profile
+       ) do
+    Enum.reduce(policy["action_placements"], errors, fn placement, acc ->
+      node_id = placement["node_id"]
+
+      acc =
+        if MapSet.member?(reachable, node_id) do
+          acc
+        else
+          [
+            error("unreachable_action_placement", node_id, %{
+              "action" => placement["action"]
+            })
+            | acc
+          ]
+        end
+
+      dominator_list =
+        placement["required_dominators"] ++
+          if review_profile in ["binding", "human_required"] do
+            placement["review_required_dominators"]
+          else
+            []
+          end
+
+      acc =
+        Enum.reduce(dominator_list, acc, fn dominator, inner ->
+          require_placement_dominates(
+            inner,
+            dominator,
+            node_id,
+            reachable,
+            dominators,
+            "action_placement"
+          )
+        end)
+
+      Enum.reduce(placement["required_dominator_sets"], acc, fn set, inner ->
+        require_placement_set_dominates(
+          inner,
+          graph,
+          entry,
+          set,
+          node_id,
+          reachable,
+          "action_placement_set"
+        )
+      end)
+    end)
+  end
+
+  defp require_placement_dominates(errors, dominator, node, reachable, dominators, kind) do
+    cond do
+      not MapSet.member?(reachable, node) ->
+        # Unreachable placement nodes are already reported.
+        errors
+
+      not MapSet.member?(reachable, dominator) ->
+        [
+          error("unreachable_dominator", dominator, %{
+            "kind" => kind,
+            "target" => node
+          })
+          | errors
+        ]
+
+      dominates?(dominators, dominator, node) ->
+        errors
+
+      true ->
+        [
+          error("dominance_violation", node, %{
+            "kind" => kind,
+            "required_dominator" => dominator
+          })
+          | errors
+        ]
+    end
+  end
+
+  # Every path from entry to target must hit at least one member of the set.
+  # Missing/unreachable sets fail closed rather than being skipped.
+  defp require_placement_set_dominates(
+         errors,
+         graph,
+         entry,
+         dominator_set,
+         target,
+         reachable,
+         kind
+       ) do
+    present =
+      dominator_set
+      |> Enum.filter(&MapSet.member?(reachable, &1))
+      |> Enum.sort()
+
+    cond do
+      not MapSet.member?(reachable, target) ->
+        errors
+
+      present == [] ->
+        [
+          error("unreachable_dominator", nil, %{
+            "kind" => kind,
+            "target" => target,
+            "required_dominator_set" => Enum.sort(dominator_set)
+          })
+          | errors
+        ]
+
+      can_reach_avoiding?(graph, entry, MapSet.new(present), target) ->
+        [
+          error("dominance_violation", target, %{
+            "kind" => kind,
+            "required_dominator_set" => Enum.sort(dominator_set)
+          })
+          | errors
+        ]
+
+      true ->
+        errors
+    end
+  end
+
+  defp can_reach_avoiding?(graph, entry, cuts, target) do
+    do_can_reach_avoiding(graph, :queue.from_list([entry]), MapSet.new(), cuts, target)
+  end
+
+  defp do_can_reach_avoiding(graph, queue, visited, cuts, target) do
+    case :queue.out(queue) do
+      {:empty, _queue} ->
+        false
+
+      {{:value, node_id}, rest} ->
+        cond do
+          node_id == target ->
+            true
+
+          MapSet.member?(visited, node_id) ->
+            do_can_reach_avoiding(graph, rest, visited, cuts, target)
+
+          MapSet.member?(cuts, node_id) ->
+            # Cut barrier: path is satisfied; do not expand past the gate.
+            do_can_reach_avoiding(graph, rest, visited, cuts, target)
+
+          not Map.has_key?(graph.nodes, node_id) ->
+            do_can_reach_avoiding(graph, rest, visited, cuts, target)
+
+          true ->
+            next = graph |> Graph.outgoing_edges(node_id) |> Enum.map(& &1.to)
+
+            do_can_reach_avoiding(
+              graph,
+              enqueue_all(rest, next),
+              MapSet.put(visited, node_id),
+              cuts,
+              target
+            )
+        end
     end
   end
 

@@ -406,6 +406,172 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            end)
   end
 
+  test "security regression: injected early git_pr rejoin fails closed", ctx do
+    # Dominance over status_pr_created is insufficient: an allowlisted git_pr can
+    # run from start and rejoin the normal path before any publication gate.
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    early_pr = "early_injected_git_pr"
+    source = Map.fetch!(graph.nodes, "open_draft_pr")
+    early_node = %{source | id: early_pr, label: early_pr}
+
+    mutated = %{
+      graph
+      | nodes: Map.put(graph.nodes, early_pr, early_node),
+        edges: [
+          edge("start", early_pr, "context.early_pr=true"),
+          edge(early_pr, "init_validation_rework_count", "context.rejoin=true")
+          | graph.edges
+        ],
+        adjacency: %{},
+        reverse_adjacency: %{}
+    }
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(mutated, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert Enum.any?(errors, fn err ->
+             err["code"] == "action_placement_extra_node" and err["node_id"] == early_pr and
+               err["detail"]["action"] == "git_pr"
+           end),
+           "expected extra git_pr placement rejection, got: #{inspect(errors)}"
+  end
+
+  test "security regression: early edge into existing open_draft_pr fails closed", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    bypassed =
+      add_edge(graph, "start", "open_draft_pr", "context.early_existing_pr=true")
+
+    # Rejoin after the side effect so terminal status paths stay intact.
+    bypassed =
+      add_edge(bypassed, "open_draft_pr", "init_validation_rework_count", "context.rejoin=true")
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(bypassed, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert Enum.any?(errors, fn err ->
+             err["code"] == "dominance_violation" and err["node_id"] == "open_draft_pr" and
+               (err["detail"]["kind"] == "action_placement" or
+                  err["detail"]["kind"] == "action_placement_set")
+           end),
+           "expected open_draft_pr placement dominance failure, got: #{inspect(errors)}"
+  end
+
+  test "security regression: early edge into existing release/send fails closed", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    for {from, to, kind_hint} <- [
+          {"start", "release_workspace", "acquire_workspace"},
+          {"start", "implement", "open_worker"}
+        ] do
+      bypassed = add_edge(graph, from, to, "context.early_lifecycle=true")
+
+      assert {:error, {:semantic_preflight_failed, errors}} =
+               SemanticPreflight.validate(bypassed, profile["semantic_policy"],
+                 review_profile: "binding"
+               )
+
+      assert Enum.any?(errors, fn err ->
+               err["code"] == "dominance_violation" and err["node_id"] == to and
+                 err["detail"]["kind"] == "action_placement" and
+                 err["detail"]["required_dominator"] == kind_hint
+             end),
+             "expected #{to} dominated by #{kind_hint}, got: #{inspect(errors)}"
+    end
+  end
+
+  test "security regression: swapping two allowed actions fails closed", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    swapped =
+      update_in(
+        graph.nodes["open_draft_pr"].attrs,
+        &Map.put(&1, "action", "coding_workspace_release")
+      )
+
+    swapped =
+      update_in(
+        swapped.nodes["release_workspace"].attrs,
+        &Map.put(&1, "action", "git_pr")
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(swapped, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert Enum.any?(errors, fn err ->
+             err["code"] == "action_placement_mismatch" and err["node_id"] == "open_draft_pr"
+           end)
+
+    assert Enum.any?(errors, fn err ->
+             err["code"] == "action_placement_mismatch" and err["node_id"] == "release_workspace"
+           end)
+  end
+
+  test "security regression: review_profile=none still requires publication routing before git_pr",
+       ctx do
+    plan = plan!(%{"review_profile" => "none"})
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    assert :ok =
+             SemanticPreflight.validate(graph, profile["semantic_policy"], review_profile: "none")
+
+    bypassed = add_edge(graph, "start", "open_draft_pr", "context.early_pr_none=true")
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(bypassed, profile["semantic_policy"],
+               review_profile: "none"
+             )
+
+    assert Enum.any?(errors, fn err ->
+             err["code"] == "dominance_violation" and err["node_id"] == "open_draft_pr"
+           end)
+
+    # None must not require council-review dominance over git_pr.
+    refute Enum.any?(errors, fn err ->
+             err["code"] == "dominance_violation" and err["node_id"] == "open_draft_pr" and
+               err["detail"]["required_dominator"] == "route_review"
+           end)
+  end
+
+  test "adversarial: malformed action_placements fail closed" do
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+    graph = minimal_compiled_graph()
+    policy = profile["semantic_policy"]
+
+    bad_key = Map.put(policy, "action_placements", [%{"node_id" => "x"}])
+
+    assert {:error, {:invalid_semantic_policy, {:invalid_action_placement_entry, _}}} =
+             SemanticPreflight.validate(graph, bad_key, review_profile: "binding")
+
+    bad_type = Map.put(policy, "action_placements", "not-a-list")
+
+    assert {:error, {:invalid_semantic_policy, {:invalid_action_placements, "action_placements"}}} =
+             SemanticPreflight.validate(graph, bad_type, review_profile: "binding")
+
+    unsorted =
+      Map.put(policy, "action_placements", Enum.reverse(policy["action_placements"]))
+
+    assert {:error, {:invalid_semantic_policy, {:unsorted_list, "action_placements"}}} =
+             SemanticPreflight.validate(graph, unsorted, review_profile: "binding")
+  end
+
   test "adversarial: commit gate must be coding_reviewed_commit; denial bypass attrs rejected",
        ctx do
     assert {:ok, compilation} = compile(plan!(), ctx)

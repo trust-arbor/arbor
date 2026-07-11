@@ -104,6 +104,176 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                 | @common_required_actions
                               ])
 
+  # Closed, sorted action-placement contracts. Node identity pins exact
+  # multiplicity; required_dominators / review_required_dominators /
+  # required_dominator_sets encode gate dominance over side-effect nodes.
+  # Publication for git_pr is a cut-set (route_publish OR route_human_review)
+  # so human_required graphs without route_publish still fail closed on early
+  # PR edges. Review dominance applies only under binding/human review_profile.
+  @common_action_placements [
+    %{
+      "node_id" => "acquire_workspace",
+      "action" => "coding_workspace_acquire",
+      "required_dominators" => [],
+      "review_required_dominators" => [],
+      "required_dominator_sets" => []
+    },
+    %{
+      "node_id" => "close_worker",
+      "action" => "acp_close_session",
+      "required_dominators" => ["open_worker"],
+      "review_required_dominators" => [],
+      "required_dominator_sets" => []
+    },
+    %{
+      "node_id" => "commit_change",
+      "action" => "coding_reviewed_commit",
+      "required_dominators" => [
+        "check_validation_passed",
+        "inspect_workspace",
+        "validate"
+      ],
+      "review_required_dominators" => [],
+      "required_dominator_sets" => []
+    },
+    %{
+      "node_id" => "implement",
+      "action" => "acp_send_message",
+      "required_dominators" => ["open_worker"],
+      "review_required_dominators" => [],
+      "required_dominator_sets" => []
+    },
+    %{
+      "node_id" => "inspect_workspace",
+      "action" => "coding_workspace_inspect",
+      "required_dominators" => ["acquire_workspace"],
+      "review_required_dominators" => [],
+      "required_dominator_sets" => []
+    },
+    %{
+      "node_id" => "load_committed_change",
+      "action" => "coding_workspace_committed_change",
+      "required_dominators" => ["acquire_workspace", "commit_change"],
+      "review_required_dominators" => [],
+      "required_dominator_sets" => []
+    },
+    %{
+      "node_id" => "open_draft_pr",
+      "action" => "git_pr",
+      "required_dominators" => ["route_after_commit"],
+      "review_required_dominators" => ["route_review"],
+      "required_dominator_sets" => [["route_human_review", "route_publish"]]
+    },
+    %{
+      "node_id" => "open_worker",
+      "action" => "acp_start_session",
+      "required_dominators" => ["acquire_workspace"],
+      "review_required_dominators" => [],
+      "required_dominator_sets" => []
+    },
+    %{
+      "node_id" => "release_workspace",
+      "action" => "coding_workspace_release",
+      "required_dominators" => ["acquire_workspace"],
+      "review_required_dominators" => [],
+      "required_dominator_sets" => []
+    },
+    %{
+      "node_id" => "release_workspace_only",
+      "action" => "coding_workspace_release",
+      "required_dominators" => ["acquire_workspace"],
+      "review_required_dominators" => [],
+      "required_dominator_sets" => []
+    },
+    %{
+      "node_id" => "repair_worker_protocol",
+      "action" => "acp_send_message",
+      "required_dominators" => ["open_worker"],
+      "review_required_dominators" => [],
+      "required_dominator_sets" => []
+    },
+    %{
+      "node_id" => "review_change",
+      "action" => "council_review_change",
+      "required_dominators" => ["load_committed_change"],
+      "review_required_dominators" => [],
+      "required_dominator_sets" => []
+    }
+  ]
+
+  @default_action_placements Enum.sort_by(
+                               [
+                                 %{
+                                   "node_id" => "validate",
+                                   "action" => "mix_compile",
+                                   "required_dominators" => ["inspect_workspace"],
+                                   "review_required_dominators" => [],
+                                   "required_dominator_sets" => []
+                                 }
+                                 | @common_action_placements
+                               ],
+                               & &1["node_id"]
+                             )
+
+  @cross_app_action_placements Enum.sort_by(
+                                 [
+                                   %{
+                                     "node_id" => "validate",
+                                     "action" => "coding_cross_app_validate",
+                                     "required_dominators" => [
+                                       "acquire_workspace",
+                                       "inspect_workspace"
+                                     ],
+                                     "review_required_dominators" => [],
+                                     "required_dominator_sets" => []
+                                   }
+                                   | @common_action_placements
+                                 ],
+                                 & &1["node_id"]
+                               )
+
+  # Security validates after review: commit is pre-validation, so do not require
+  # validate/check_validation_passed to dominate commit_change.
+  @security_action_placements Enum.sort_by(
+                                [
+                                  %{
+                                    "node_id" => "commit_change",
+                                    "action" => "coding_reviewed_commit",
+                                    "required_dominators" => ["inspect_workspace"],
+                                    "review_required_dominators" => [],
+                                    "required_dominator_sets" => []
+                                  },
+                                  %{
+                                    "node_id" => "post_validation_committed_change",
+                                    "action" => "coding_workspace_committed_change",
+                                    "required_dominators" => [
+                                      "check_validation_passed",
+                                      "hoist_review_attestation_id",
+                                      "validate"
+                                    ],
+                                    "review_required_dominators" => [],
+                                    "required_dominator_sets" => []
+                                  },
+                                  %{
+                                    "node_id" => "validate",
+                                    "action" => "coding_security_regression_validate",
+                                    "required_dominators" => [
+                                      "hoist_review_attestation_id",
+                                      "load_committed_change",
+                                      "review_change",
+                                      "route_review"
+                                    ],
+                                    "review_required_dominators" => [],
+                                    "required_dominator_sets" => []
+                                  }
+                                  | Enum.reject(
+                                      @common_action_placements,
+                                      &(&1["node_id"] == "commit_change")
+                                    )
+                                ],
+                                & &1["node_id"]
+                              )
+
   @semantic_policy_base %{
     "allowed_handlers" => @allowed_handlers,
     "allowed_exec_targets" => @allowed_exec_targets,
@@ -115,7 +285,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
     "post_validation_commit_routing" => "route_after_commit",
     "committed_change_routing" => "route_after_commit",
     "review_gate" => "review_change",
-    "review_routing_gate" => "route_review"
+    "review_routing_gate" => "route_review",
+    "action_placements" => []
   }
 
   @security_semantic_nodes %{
@@ -138,6 +309,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 "semantic_policy" =>
                   @semantic_policy_base
                   |> Map.put("validation_profile", "default")
+                  |> Map.put("action_placements", @default_action_placements)
                   |> Map.put(
                     "allowed_actions",
                     Enum.sort(Enum.uniq(@default_required_actions ++ @optional_reviewed_actions))
@@ -165,6 +337,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                   |> Map.put("validation_profile", "security_regression")
                   |> Map.put("mandatory_gate_nodes", @security_required_nodes)
                   |> Map.put("post_validation_commit_routing", "route_validated_review")
+                  |> Map.put("action_placements", @security_action_placements)
                   |> Map.put(
                     "allowed_actions",
                     Enum.sort(Enum.uniq(@security_required_actions ++ @optional_reviewed_actions))
@@ -256,6 +429,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                 "semantic_policy" =>
                   @semantic_policy_base
                   |> Map.put("validation_profile", "cross_app")
+                  |> Map.put("action_placements", @cross_app_action_placements)
                   |> Map.put(
                     "allowed_actions",
                     Enum.sort(
