@@ -19,7 +19,6 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
 
   @stream_chunk_bytes 65_536
   @stable_read_pass_one_event [:arbor, :persistence, :eval, :stable_read, :pass_one]
-  @telemetry_handler_timeout_ms 500
 
   # config_fingerprint canonicalization ceilings (public helper must not
   # recurse/materialize without a system ceiling).
@@ -237,30 +236,15 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
   end
 
   defp emit_pass_one_checkpoint(_path) do
-    origin = self()
+    # Trusted telemetry handlers run synchronously in this process. Keep the
+    # exposed surface fixed; test coordination owns paths in handler closures.
+    :telemetry.execute(
+      @stable_read_pass_one_event,
+      %{count: 1},
+      %{source: :eval_run_identity}
+    )
 
-    {pid, monitor} =
-      spawn_monitor(fn ->
-        Logger.disable(self())
-
-        :telemetry.execute(
-          @stable_read_pass_one_event,
-          %{system_time: System.system_time()},
-          %{source: :dataset_hash, origin: origin}
-        )
-      end)
-
-    receive do
-      {:DOWN, ^monitor, :process, ^pid, _reason} ->
-        :ok
-    after
-      @telemetry_handler_timeout_ms ->
-        Process.exit(pid, :kill)
-
-        receive do
-          {:DOWN, ^monitor, :process, ^pid, _reason} -> :ok
-        end
-    end
+    :ok
   end
 
   defp regular_identity(%File.Stat{type: :regular, inode: inode, major_device: major} = stat)

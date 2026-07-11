@@ -2,9 +2,16 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   @moduledoc """
   Security regression tests for eval file-store hardening.
 
-  Exercised exclusively through the public `Arbor.Persistence` facade.
+  File behavior is exercised through the public `Arbor.Persistence` facade;
+  raw filesystem characterization and telemetry contract checks are explicit.
+
+  Telemetry handlers are trusted in-process instrumentation. They run
+  synchronously in the instrumented caller and are not a security boundary.
 
   Parent lineage (most recent first):
+  - **c85b3ad7** — exact R8 parent. It removed raw path metadata but exposed
+    caller PIDs and used a monitored worker that did not contain trusted
+    telemetry handlers honestly.
   - **ef14b337** — exact R6 parent. Its bounded config traversal falsely
     rejects valid sub-1 MiB JSON and dual-pass reads have no synchronous
     mutation checkpoint. Timestamp-sensitive publish verification is covered
@@ -24,7 +31,7 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   a later security claim. Identity failures must surface as `:file_changed`
   (or nil for dataset hash), not as decode/schema errors.
   """
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   @moduletag :fast
   @moduletag :security_regression
 
@@ -1032,7 +1039,7 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
       File.write!(path, content_a)
 
       mutated =
-        attach_mutator(@stable_read_pass_one_event, :dataset_hash, fn ->
+        attach_mutator(@stable_read_pass_one_event, :eval_run_identity, fn ->
           File.write!(path, content_b)
         end)
 
@@ -1054,7 +1061,7 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
       refute content_a == content_b
 
       mutated =
-        attach_mutator(@stable_read_pass_one_event, :file_store, fn ->
+        attach_mutator(@stable_read_pass_one_event, :eval_file_store, fn ->
           File.write!(path, content_b)
         end)
 
@@ -1092,7 +1099,7 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
       path = Path.join(dir, run_id <> ".json")
 
       mutated =
-        attach_mutator(@post_rename_event, :file_store, fn ->
+        attach_mutator(@post_rename_event, :eval_file_store, fn ->
           File.touch!(path, {{2000, 1, 1}, {0, 0, 0}})
         end)
 
@@ -1119,7 +1126,7 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
       path = Path.join(dir, run_id <> ".json")
 
       mutated =
-        attach_mutator(@post_rename_event, :file_store, fn ->
+        attach_mutator(@post_rename_event, :eval_file_store, fn ->
           File.chmod!(path, 0o400)
         end)
 
@@ -1132,21 +1139,22 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
     end
   end
 
-  describe "security regression R7: telemetry privacy and containment" do
-    test "stable-read and publish metadata is closed and path-free", %{dir: dir, base: base} do
-      origin = self()
-      handler_id = {__MODULE__, origin, make_ref()}
+  describe "security regression R8: minimal trusted telemetry" do
+    test "stable-read and publish events expose only fixed bounded values", %{
+      dir: dir,
+      base: base
+    } do
+      owner = self()
+      handler_id = {__MODULE__, owner, make_ref()}
 
       :ok =
         :telemetry.attach_many(
           handler_id,
           [@stable_read_pass_one_event, @post_rename_event],
-          fn event, measurements, metadata, owner ->
-            if metadata[:origin] == owner do
-              send(owner, {:eval_telemetry, event, measurements, metadata})
-            end
+          fn event, measurements, metadata, test_pid ->
+            send(test_pid, {:eval_telemetry, event, measurements, metadata})
           end,
-          origin
+          owner
         )
 
       on_exit(fn -> :telemetry.detach(handler_id) end)
@@ -1158,69 +1166,62 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
                  dir: dir
                )
 
+      assert {:ok, %{"id" => "metadata-closed"}} =
+               Persistence.load_eval_run_file("metadata-closed", dir: dir)
+
       dataset = Path.join(base, "metadata-dataset.jsonl")
       File.write!(dataset, ~s({"input":"private"}\n))
       assert is_binary(Persistence.eval_dataset_hash(dataset))
 
-      assert_receive {:eval_telemetry, @post_rename_event, publish_measurements,
-                      %{source: :file_store, origin: ^origin}}
+      assert_receive {:eval_telemetry, @post_rename_event, %{count: 1},
+                      %{source: :eval_file_store}}
 
-      assert Map.keys(publish_measurements) == [:system_time]
-      assert is_integer(publish_measurements.system_time)
+      assert_receive {:eval_telemetry, @stable_read_pass_one_event, %{count: 1},
+                      %{source: :eval_file_store}}
 
-      assert_receive {:eval_telemetry, @stable_read_pass_one_event, read_measurements,
-                      %{source: :dataset_hash, origin: ^origin}}
-
-      assert Map.keys(read_measurements) == [:system_time]
-      assert is_integer(read_measurements.system_time)
+      assert_receive {:eval_telemetry, @stable_read_pass_one_event, %{count: 1},
+                      %{source: :eval_run_identity}}
 
       :ok = :telemetry.detach(handler_id)
       refute Enum.any?(:telemetry.list_handlers(@post_rename_event), &(&1.id == handler_id))
     end
 
-    test "handler exceptions and blocked handlers cannot change public save", %{dir: dir} do
-      origin = self()
-      raising_id = {__MODULE__, origin, make_ref()}
-      blocking_id = {__MODULE__, origin, make_ref()}
-
-      on_exit(fn ->
-        :telemetry.detach(raising_id)
-        :telemetry.detach(blocking_id)
-      end)
+    @tag security_regression: false
+    @tag :telemetry_contract
+    test "trusted handlers execute synchronously in the instrumented caller", %{dir: dir} do
+      owner = self()
+      release_ref = make_ref()
+      handler_id = {__MODULE__, owner, make_ref()}
 
       :ok =
         :telemetry.attach(
-          raising_id,
+          handler_id,
           @post_rename_event,
-          fn _event, _measurements, metadata, owner ->
-            if metadata[:origin] == owner, do: raise("telemetry handler failure")
-          end,
-          origin
-        )
+          fn _event, _measurements, _metadata, {test_pid, ref} ->
+            send(test_pid, {:trusted_handler_started, self(), ref})
 
-      assert :ok = Persistence.save_eval_run_file("handler-raise", %{model: "m"}, dir: dir)
-      assert :telemetry.detach(raising_id) in [:ok, {:error, :not_found}]
-
-      :ok =
-        :telemetry.attach(
-          blocking_id,
-          @post_rename_event,
-          fn _event, _measurements, metadata, owner ->
-            if metadata[:origin] == owner do
-              send(owner, :blocking_handler_started)
-
-              receive do
-                :never_sent -> :ok
-              end
+            receive do
+              {:release_trusted_handler, ^ref} -> :ok
+            after
+              2_000 -> :ok
             end
           end,
-          origin
+          {owner, release_ref}
         )
 
-      assert raising_id != blocking_id
-      assert :ok = Persistence.save_eval_run_file("handler-bound", %{model: "m"}, dir: dir)
-      assert_receive :blocking_handler_started
-      assert File.exists?(Path.join(dir, "handler-bound.json"))
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      task =
+        Task.async(fn ->
+          Persistence.save_eval_run_file("trusted-handler", %{model: "m"}, dir: dir)
+        end)
+
+      assert_receive {:trusted_handler_started, handler_pid, ^release_ref}
+      assert handler_pid == task.pid
+      assert Task.yield(task, 0) == nil
+
+      send(handler_pid, {:release_trusted_handler, release_ref})
+      assert Task.await(task) == :ok
     end
   end
 
@@ -1247,15 +1248,13 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   defp attach_mutator(event, source, mutate) do
     handler_id = {__MODULE__, self(), make_ref()}
     mutated = :atomics.new(1, signed: false)
-    origin = self()
 
     :ok =
       :telemetry.attach(
         handler_id,
         event,
         fn _event, _measurements, metadata, _config ->
-          if metadata == %{source: source, origin: origin} and
-               :atomics.get(mutated, 1) == 0 do
+          if metadata == %{source: source} and :atomics.get(mutated, 1) == 0 do
             mutate.()
             :atomics.put(mutated, 1, 1)
           end
