@@ -75,20 +75,9 @@ defmodule Arbor.Agent.Behavioral.SkillActivationE2ETest do
       end
     end
 
-    # Prime the SkillLibrary with the on-disk skill directory. Required
-    # because BehavioralCase starts the app supervision tree but doesn't
-    # point SkillLibrary at the umbrella's skills dir. Mirrors the setup
-    # pattern used in apps/arbor_agent/test/integration/prompt_library_test.exs.
-    if Process.whereis(SkillLibrary) do
-      GenServer.stop(SkillLibrary)
-      Process.sleep(10)
-    end
-
-    if :ets.whereis(:arbor_skill_library) != :undefined do
-      :ets.delete(:arbor_skill_library)
-    end
-
-    {:ok, _pid} = SkillLibrary.start_link(dirs: [@skills_dir])
+    # Prime the SkillLibrary with the on-disk skill directory. ExUnit owns the
+    # globally named process so it is synchronously stopped before the next test.
+    start_supervised!({SkillLibrary, dirs: [@skills_dir]})
 
     # SkillLibrary's init/1 sends itself a :scan_dirs message and returns
     # before indexing — fine for production supervision but races the

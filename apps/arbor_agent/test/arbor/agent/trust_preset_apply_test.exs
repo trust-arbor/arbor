@@ -64,7 +64,22 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       end
     end)
 
-    :ok
+    trust_supervisor =
+      start_supervised!(%{
+        id: :trust_preset_apply_supervisor,
+        start:
+          {Supervisor, :start_link,
+           [
+             [
+               {TrustStore, []},
+               {Arbor.Trust.Manager, [circuit_breaker: false, decay: false, event_store: false]}
+             ],
+             [strategy: :one_for_one]
+           ]},
+        type: :supervisor
+      })
+
+    {:ok, trust_supervisor: trust_supervisor}
   end
 
   setup do
@@ -107,20 +122,6 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
           {BufferedStore, name: @profiles_store, backend: nil, write_mode: :sync},
           id: @profiles_store
         )
-      )
-    end
-
-    # --- Trust: Store (ETS profile cache) + Manager. ensure_trust_profile reads via
-    # Manager (Arbor.Trust.get_trust_profile); apply_template_trust_preset writes via
-    # Trust.Store.update_profile. Optional components disabled — not needed here, and
-    # they pull in EventStore/persistence we don't want in this isolated env.
-    if Process.whereis(TrustStore) == nil do
-      start_supervised!({TrustStore, []})
-    end
-
-    if Process.whereis(Arbor.Trust.Manager) == nil do
-      start_supervised!(
-        {Arbor.Trust.Manager, [circuit_breaker: false, decay: false, event_store: false]}
       )
     end
 
@@ -522,16 +523,24 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       refute "arbor://shell/exec" in Enum.map(caps, & &1.resource_uri)
     end
 
-    test "security regression: creation fails when a declared trust preset cannot be stored" do
+    test "security regression: creation fails when a declared trust preset cannot be stored",
+         %{trust_supervisor: trust_supervisor} do
       before_ids = Lifecycle.list_agents() |> Enum.map(& &1.agent_id) |> MapSet.new()
 
-      assert :ok = stop_supervised(Arbor.Trust.Manager)
-      assert :ok = stop_supervised(TrustStore)
+      stop_trust_child(trust_supervisor, Arbor.Trust.Manager)
+      stop_trust_child(trust_supervisor, TrustStore)
 
-      assert {:error, {:trust_profile_failed, _reason}} =
-               Lifecycle.create("Unstored Restrictive Template Probe",
-                 template: "pipeline_architect"
-               )
+      result =
+        try do
+          Lifecycle.create("Unstored Restrictive Template Probe",
+            template: "pipeline_architect"
+          )
+        after
+          restart_trust_child(trust_supervisor, TrustStore)
+          restart_trust_child(trust_supervisor, Arbor.Trust.Manager)
+        end
+
+      assert {:error, {:trust_profile_failed, _reason}} = result
 
       after_ids = Lifecycle.list_agents() |> Enum.map(& &1.agent_id) |> MapSet.new()
       assert after_ids == before_ids
@@ -595,6 +604,22 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
     end
   catch
     :exit, _ -> :ok
+  end
+
+  defp stop_trust_child(supervisor, child_id) do
+    {^child_id, pid, :worker, _modules} =
+      supervisor
+      |> Supervisor.which_children()
+      |> List.keyfind(child_id, 0)
+
+    monitor = Process.monitor(pid)
+    assert :ok = Supervisor.terminate_child(supervisor, child_id)
+    assert_receive {:DOWN, ^monitor, :process, ^pid, :shutdown}, 1_000
+  end
+
+  defp restart_trust_child(supervisor, child_id) do
+    assert {:ok, pid} = Supervisor.restart_child(supervisor, child_id)
+    assert Process.whereis(child_id) == pid
   end
 
   defp repo_root do

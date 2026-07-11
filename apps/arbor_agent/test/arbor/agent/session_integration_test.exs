@@ -9,8 +9,15 @@ defmodule Arbor.Agent.SessionIntegrationTest do
   @moduletag :fast
 
   setup do
-    original_mode = Application.get_env(:arbor_agent, :session_execution_mode)
-    on_exit(fn -> Application.put_env(:arbor_agent, :session_execution_mode, original_mode) end)
+    original_mode = Application.fetch_env(:arbor_agent, :session_execution_mode)
+
+    on_exit(fn ->
+      case original_mode do
+        {:ok, mode} -> Application.put_env(:arbor_agent, :session_execution_mode, mode)
+        :error -> Application.delete_env(:arbor_agent, :session_execution_mode)
+      end
+    end)
+
     :ok
   end
 
