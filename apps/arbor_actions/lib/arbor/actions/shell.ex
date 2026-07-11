@@ -9,14 +9,19 @@ defmodule Arbor.Actions.Shell do
 
   | Action | Description |
   |--------|-------------|
-  | `Execute` | Execute a single shell command |
-  | `ExecuteScript` | Execute a multi-line shell script |
+  | `Execute` | Execute a single non-compound shell command |
+  | `ExecuteScript` | Fail-closed unavailable (compound/script boundary incomplete) |
+
+  Compound commands (metacharacters) and multi-line scripts are **not**
+  agent-executable: CapShell is retired and static line admission is not a
+  security proof of expanded runtime argv. Agent boundaries reject them with
+  a stable unavailable error before auth/temp-file/process work.
 
   ## Sandbox Support
 
-  All shell actions support sandboxing through Arbor.Shell:
+  Single-command `Execute` supports sandboxing through Arbor.Shell:
 
-  - `:none` - No restrictions
+  - `:none` - No restrictions (still rejects compound commands for agents)
   - `:basic` - Blocks dangerous commands (rm -rf, sudo, etc.)
   - `:strict` - Allowlist only
 
@@ -31,42 +36,46 @@ defmodule Arbor.Actions.Shell do
         %{command: "ls", sandbox: :strict},
         %{}
       )
-
-      # Script execution
-      {:ok, result} = Arbor.Actions.Shell.ExecuteScript.run(
-        %{script: "echo hello\\necho world"},
-        %{}
-      )
   """
 
   alias Arbor.Shell
+
+  @compound_shell_unavailable {:compound_shell_unavailable, :security_boundary_incomplete}
 
   @doc false
   @spec authorize_command(String.t(), String.t(), keyword()) ::
           {:ok, :authorized}
           | {:ok, :pending_approval, String.t()}
           | {:error, :unauthorized | term()}
+          | {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
   def authorize_command(agent_id, command, opts \\ [])
       when is_binary(agent_id) and is_binary(command) do
-    command_name = Keyword.get(opts, :gate_command) || extract_command_name(command)
-    resource = "arbor://shell/exec/#{command_name}"
+    # Unconditional compound rejection before Trust/Security, approval creation,
+    # or any execution. Used by the DOT shell handler — sandbox:none /bin/sh -c
+    # must never obtain authorization for metacharacter-bearing commands.
+    if Shell.compound_command?(command) do
+      {:error, @compound_shell_unavailable}
+    else
+      command_name = Keyword.get(opts, :gate_command) || extract_command_name(command)
+      resource = "arbor://shell/exec/#{command_name}"
 
-    auth_opts =
-      [
-        command: command,
-        path: Keyword.get(opts, :cwd) || Keyword.get(opts, :path),
-        verify_identity: false
-      ]
-      |> maybe_add_opt(:approved_invocation, Keyword.get(opts, :approved_invocation))
-      |> maybe_add_opt(:approval_context, Keyword.get(opts, :approval_context))
-      |> maybe_add_opt(:task_id, Keyword.get(opts, :task_id))
-      |> maybe_add_opt(:session_id, Keyword.get(opts, :session_id))
-      |> maybe_add_opt(:params, Keyword.get(opts, :params) || %{command: command})
+      auth_opts =
+        [
+          command: command,
+          path: Keyword.get(opts, :cwd) || Keyword.get(opts, :path),
+          verify_identity: false
+        ]
+        |> maybe_add_opt(:approved_invocation, Keyword.get(opts, :approved_invocation))
+        |> maybe_add_opt(:approval_context, Keyword.get(opts, :approval_context))
+        |> maybe_add_opt(:task_id, Keyword.get(opts, :task_id))
+        |> maybe_add_opt(:session_id, Keyword.get(opts, :session_id))
+        |> maybe_add_opt(:params, Keyword.get(opts, :params) || %{command: command})
 
-    case Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts) do
-      {:ok, :authorized} -> {:ok, :authorized}
-      {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
-      {:error, _reason} -> {:error, :unauthorized}
+      case Arbor.Trust.authorize(agent_id, resource, :execute, auth_opts) do
+        {:ok, :authorized} -> {:ok, :authorized}
+        {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+        {:error, _reason} -> {:error, :unauthorized}
+      end
     end
   end
 
@@ -233,23 +242,31 @@ defmodule Arbor.Actions.Shell do
     # Do NOT call Shell.authorize_and_execute after a successful authorize_command:
     # that re-runs Security.authorize without Trust.ApprovalGuard and re-asks or
     # denies even after the operator already approved the exact invocation.
+    #
+    # Compound commands are rejected before authorize_command / allowlist / fs
+    # work regardless of compound_shell_enabled or sandbox level.
     defp call_shell(command, opts, context) do
       case context[:agent_id] do
         agent_id when is_binary(agent_id) and agent_id != "" ->
-          auth_opts = shell_auth_opts(opts, context)
+          if Arbor.Shell.compound_command?(command) do
+            {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
+          else
+            auth_opts = shell_auth_opts(opts, context)
 
-          case Arbor.Actions.Shell.authorize_command(agent_id, command, auth_opts) do
-            {:ok, :authorized} ->
-              execute_authorized_shell(agent_id, command, opts)
+            case Arbor.Actions.Shell.authorize_command(agent_id, command, auth_opts) do
+              {:ok, :authorized} ->
+                execute_authorized_shell(command, opts)
 
-            {:ok, :pending_approval, proposal_id} ->
-              {:ok, :pending_approval, proposal_id}
+              {:ok, :pending_approval, proposal_id} ->
+                {:ok, :pending_approval, proposal_id}
 
-            {:error, reason} ->
-              {:error, reason}
+              {:error, reason} ->
+                {:error, reason}
+            end
           end
 
         _ ->
+          # No agent principal — trusted system path (not an agent action surface).
           Arbor.Shell.execute(command, opts)
       end
     end
@@ -285,20 +302,11 @@ defmodule Arbor.Actions.Shell do
       end
     end
 
-    # Execute after Trust already authorized. When compound-shell routing is
-    # configured (`Arbor.Shell.compound_shell_enabled?/0`, default false),
-    # compound commands go through the public facade
-    # `execute_compound_with_capabilities/3`, which **fail-closes** with
-    # `{:compound_shell_unavailable, :security_boundary_incomplete}` — config
-    # cannot re-enable the retired CapShell prototype. Otherwise (and for simple
-    # commands) use the bounded Executor via execute/2.
+    # Execute after Trust already authorized a non-compound command.
     # Call only public Arbor.Shell APIs — never Sandbox or CapShell internals.
-    defp execute_authorized_shell(agent_id, command, opts) do
-      if Arbor.Shell.compound_shell_enabled?() and Arbor.Shell.compound_command?(command) do
-        Arbor.Shell.execute_compound_with_capabilities(agent_id, command, opts)
-      else
-        Arbor.Shell.execute(command, opts)
-      end
+    # System-only execute/2 is safe here because compounds were rejected above.
+    defp execute_authorized_shell(command, opts) do
+      Arbor.Shell.execute(command, opts)
     end
 
     # LLM-facing boundary: floor tiny/zero timeouts (0, 1, …) to the default.
@@ -352,33 +360,21 @@ defmodule Arbor.Actions.Shell do
 
   defmodule ExecuteScript do
     @moduledoc """
-    Execute a multi-line shell script.
+    Fail-closed multi-line shell script action (intentionally unavailable).
 
-    Creates a temporary script file and executes it with the specified shell.
+    **Intentional security API break:** static per-line sandbox admission is not
+    a security proof of expanded runtime argv or script semantics. CapShell is
+    retired; this action must not create temp files, authorize, or launch
+    interpreters. Every `run/2` returns a stable unavailable error string.
 
-    ## Parameters
-
-    | Name | Type | Required | Description |
-    |------|------|----------|-------------|
-    | `script` | string | yes | The script content to execute |
-    | `shell` | string | no | Shell to use (default: "/bin/bash") |
-    | `timeout` | integer | no | Timeout in milliseconds (default: 60000) |
-    | `cwd` | string | no | Working directory |
-    | `env` | map | no | Environment variables |
-    | `sandbox` | atom | no | Sandbox mode (default: :basic) |
-
-    ## Returns
-
-    - `exit_code` - The script exit code
-    - `stdout` - Standard output
-    - `stderr` - Standard error
-    - `duration_ms` - Execution duration in milliseconds
-    - `timed_out` - Whether the script timed out
+    Schema is retained so the tool remains discoverable as unavailable rather
+    than disappearing from catalogs mid-rollout.
     """
 
     use Jido.Action,
       name: "shell_execute_script",
-      description: "Execute a multi-line shell script",
+      description:
+        "Execute a multi-line shell script (unavailable: security boundary incomplete)",
       category: "shell",
       tags: ["shell", "script", "execution"],
       schema: [
@@ -412,143 +408,16 @@ defmodule Arbor.Actions.Shell do
         ]
       ]
 
-    alias Arbor.Actions
-    alias Arbor.Shell.Sandbox
+    # Exact stable string asserted by security regressions — keep in sync with
+    # Execute.format_error/1 for the compound_shell_unavailable tuple.
+    @unavailable_message "Compound shell execution is unavailable (security boundary incomplete). Use individual non-compound commands; CapShell is intentionally fail-closed."
 
     @impl true
-    @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
-    def run(params, context) do
-      Actions.emit_started(__MODULE__, params)
-
-      sandbox_level = params[:sandbox] || :basic
-
-      # Validate each line of the script against the sandbox BEFORE execution
-      case validate_script_content(params.script, sandbox_level) do
-        :ok ->
-          execute_script(params, context, sandbox_level)
-
-        {:error, reason} ->
-          Actions.emit_failed(__MODULE__, reason)
-          {:error, format_error(reason)}
-      end
+    @spec run(map(), map()) :: {:error, String.t()}
+    def run(_params, _context) do
+      # Fail closed before emit / temp-file / auth / process / fs work.
+      # Static line-by-line admission is intentionally unreachable.
+      {:error, @unavailable_message}
     end
-
-    defp execute_script(params, context, sandbox_level) do
-      # Create a temporary script file
-      script_path = create_temp_script(params.script)
-
-      try do
-        shell = params[:shell] || "/bin/bash"
-        command = "#{shell} #{script_path}"
-
-        # The script CONTENT was already validated line-by-line at
-        # `sandbox_level` by validate_script_content/2 above. The interpreter
-        # invocation itself (`/bin/bash <tmpfile>`) is this action's controlled
-        # mechanism, so run it at :none — re-checking it against the sandbox
-        # command denylist is redundant and, now that interpreters are blocked
-        # at :basic/:strict (codex sandbox.shell-basic-nested-command-bypass),
-        # would deny the action outright. Capability/approval auth in call_shell
-        # still applies regardless of sandbox level.
-        _ = sandbox_level
-
-        opts =
-          [
-            timeout: params[:timeout] || 60_000,
-            sandbox: :none
-          ]
-          |> maybe_add_opt(:cwd, params[:cwd])
-          |> maybe_add_opt(:env, params[:env])
-          |> maybe_add_context_opts(context)
-
-        case call_shell(command, opts, context) do
-          {:ok, result} ->
-            Actions.emit_completed(__MODULE__, result)
-
-            {:ok,
-             %{
-               exit_code: result.exit_code,
-               stdout: result.stdout,
-               stderr: result.stderr,
-               duration_ms: result.duration_ms,
-               timed_out: result.timed_out
-             }}
-
-          {:ok, :pending_approval, proposal_id} ->
-            {:ok, :pending_approval, proposal_id}
-
-          {:error, :unauthorized} ->
-            Actions.emit_failed(__MODULE__, :unauthorized)
-
-            {:error,
-             "Shell execution requires approval. The command will be submitted for user review. Try again and the user will be prompted to approve."}
-
-          {:error, reason} ->
-            Actions.emit_failed(__MODULE__, reason)
-            {:error, format_error(reason)}
-        end
-      after
-        # Clean up the temporary script file
-        File.rm(script_path)
-      end
-    end
-
-    # Delegate to facade authorize_and_execute when agent_id is in context
-    defp call_shell(command, opts, context) do
-      if context[:agent_id] do
-        with {:ok, :authorized} <-
-               Arbor.Actions.Shell.authorize_command(context[:agent_id], command, opts) do
-          Shell.authorize_and_execute(context[:agent_id], command, opts)
-        end
-      else
-        Shell.execute(command, opts)
-      end
-    end
-
-    defp validate_script_content(_script, :none), do: :ok
-
-    defp validate_script_content(script, sandbox_level) do
-      script
-      |> String.split("\n")
-      |> Enum.reject(fn line ->
-        trimmed = String.trim(line)
-        trimmed == "" or String.starts_with?(trimmed, "#")
-      end)
-      |> Enum.reduce_while(:ok, fn line, :ok ->
-        case Sandbox.check(String.trim(line), sandbox_level) do
-          {:ok, :allowed} -> {:cont, :ok}
-          {:error, reason} -> {:halt, {:error, {:script_line_blocked, line, reason}}}
-        end
-      end)
-    end
-
-    defp create_temp_script(script_content) do
-      path =
-        Path.join(System.tmp_dir!(), "arbor_script_#{:erlang.unique_integer([:positive])}.sh")
-
-      File.write!(path, script_content)
-      File.chmod!(path, 0o700)
-      path
-    end
-
-    defp maybe_add_opt(opts, _key, nil), do: opts
-    defp maybe_add_opt(opts, key, value), do: Keyword.put(opts, key, value)
-
-    defp maybe_add_context_opts(opts, context) do
-      opts
-      |> maybe_add_opt(:cwd, context[:cwd])
-      |> maybe_add_opt(:env, context[:env])
-      |> maybe_add_opt(:approved_invocation, context[:approved_invocation])
-    end
-
-    defp format_error({:blocked_command, cmd}), do: "Command blocked: #{cmd}"
-    defp format_error({:dangerous_flags, flags}), do: "Dangerous flags blocked: #{inspect(flags)}"
-    defp format_error(:eacces), do: "Script execution failed: permission denied."
-
-    defp format_error({:shell_metacharacters, chars}),
-      do:
-        "Shell metacharacters #{inspect(chars)} are not allowed. Use individual commands without chaining (no ;, &&, ||, |, etc.)."
-
-    defp format_error(reason) when is_binary(reason), do: reason
-    defp format_error(reason), do: "Script execution failed: #{inspect(reason)}"
   end
 end

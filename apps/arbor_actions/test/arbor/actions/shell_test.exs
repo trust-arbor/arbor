@@ -275,18 +275,11 @@ defmodule Arbor.Actions.ShellTest do
       assert result.stdout =~ "shell-approval-ok"
     end
 
-    test "security regression: Execute with agent context defaults CapShell closed", %{
+    test "security regression: Execute with agent context rejects compounds as unavailable", %{
       agent_id: agent_id
     } do
-      # Actions.Shell.Execute must not retain a duplicated Application.get_env
-      # default of true for :compound_shell_enabled. When the key is absent,
-      # authorized compound commands must hit the bounded single-command path
-      # (metacharacter rejection) — same fail-closed gate as Arbor.Shell.
-      #
-      # Behavioral pre-fix evidence: do not call newly added helpers before the
-      # public operation — on base (open CapShell default) this fails because
-      # Shell.Execute routes the compound to CapShell / executes the delayed
-      # touch, not because compound_shell_enabled?/0 is undefined.
+      # Agent-authorized compounds always fail closed with the CapShell
+      # unavailable string — independent of compound_shell_enabled.
       sleep_uri = "arbor://shell/exec/sleep"
       touch_uri = "arbor://shell/exec/touch"
       {:ok, profile} = Arbor.Trust.Store.get_profile(agent_id)
@@ -314,8 +307,11 @@ defmodule Arbor.Actions.ShellTest do
 
       File.rm(marker)
 
+      unavailable =
+        "Compound shell execution is unavailable (security boundary incomplete). Use individual non-compound commands; CapShell is intentionally fail-closed."
+
       try do
-        assert {:error, message} =
+        assert {:error, ^unavailable} =
                  Shell.Execute.run(
                    %{command: "sleep 1; touch #{marker}", sandbox: :basic},
                    %{
@@ -329,7 +325,6 @@ defmodule Arbor.Actions.ShellTest do
                    }
                  )
 
-        assert message =~ "metacharacter" or message =~ "not allowed"
         Process.sleep(1_500)
         refute File.exists?(marker), "action must not route compound to unbounded CapShell"
       after
@@ -343,110 +338,40 @@ defmodule Arbor.Actions.ShellTest do
   end
 
   describe "ExecuteScript" do
-    test "runs a multi-line script", %{tmp_dir: tmp_dir} do
+    @unavailable "Compound shell execution is unavailable (security boundary incomplete). Use individual non-compound commands; CapShell is intentionally fail-closed."
+
+    test "is fail-closed unavailable (intentional security API break)" do
       script = """
       echo "line 1"
       echo "line 2"
       """
 
-      assert {:ok, result} = Shell.ExecuteScript.run(%{script: script, cwd: tmp_dir}, %{})
-      assert result.exit_code == 0
-      assert String.contains?(result.stdout, "line 1")
-      assert String.contains?(result.stdout, "line 2")
+      assert Shell.ExecuteScript.run(%{script: script}, %{}) == {:error, @unavailable}
+
+      assert Shell.ExecuteScript.run(%{script: "exit 42", sandbox: :none}, %{}) ==
+               {:error, @unavailable}
     end
 
-    test "handles script with variables", %{tmp_dir: tmp_dir} do
-      script = """
-      NAME="world"
-      echo "hello $NAME"
-      """
+    test "does not create temporary script files" do
+      before =
+        System.tmp_dir!()
+        |> File.ls!()
+        |> Enum.filter(&String.starts_with?(&1, "arbor_script_"))
 
-      assert {:ok, result} = Shell.ExecuteScript.run(%{script: script, cwd: tmp_dir}, %{})
-      assert result.exit_code == 0
-      assert String.contains?(result.stdout, "hello world")
-    end
+      assert Shell.ExecuteScript.run(%{script: "echo test"}, %{}) == {:error, @unavailable}
 
-    test "captures script failure" do
-      script = """
-      exit 42
-      """
+      after_files =
+        System.tmp_dir!()
+        |> File.ls!()
+        |> Enum.filter(&String.starts_with?(&1, "arbor_script_"))
 
-      assert {:ok, result} = Shell.ExecuteScript.run(%{script: script}, %{})
-      assert result.exit_code == 42
-    end
-
-    test "cleans up temporary script file" do
-      script = "echo test"
-
-      # Run the script
-      {:ok, _} = Shell.ExecuteScript.run(%{script: script}, %{})
-
-      # Check that no arbor_script files remain
-      tmp_files = File.ls!(System.tmp_dir!())
-      arbor_scripts = Enum.filter(tmp_files, &String.starts_with?(&1, "arbor_script_"))
-      assert Enum.empty?(arbor_scripts)
+      assert after_files == before
     end
 
     test "validates action metadata" do
       assert Shell.ExecuteScript.name() == "shell_execute_script"
       assert Shell.ExecuteScript.description() =~ "script"
       assert "script" in Shell.ExecuteScript.tags()
-    end
-
-    test "runs script with environment variables" do
-      script = "echo $MY_SCRIPT_VAR"
-
-      assert {:ok, result} =
-               Shell.ExecuteScript.run(
-                 %{script: script, env: %{"MY_SCRIPT_VAR" => "from_env"}},
-                 %{}
-               )
-
-      assert result.exit_code == 0
-      assert String.contains?(result.stdout, "from_env")
-    end
-
-    test "runs script with custom shell" do
-      script = "echo using_sh"
-
-      assert {:ok, result} =
-               Shell.ExecuteScript.run(%{script: script, shell: "/bin/sh"}, %{})
-
-      assert result.exit_code == 0
-      assert String.contains?(result.stdout, "using_sh")
-    end
-
-    test "context can override options" do
-      script = "pwd"
-      context = %{cwd: "/tmp"}
-
-      assert {:ok, result} = Shell.ExecuteScript.run(%{script: script}, context)
-      assert String.contains?(result.stdout, "tmp")
-    end
-
-    test "handles script timeout" do
-      script = "sleep 10"
-
-      assert {:ok, result} =
-               Shell.ExecuteScript.run(%{script: script, timeout: 100}, %{})
-
-      assert result.timed_out
-    end
-
-    test "returns error for blocked script in strict sandbox" do
-      script = "echo test"
-
-      # Strict sandbox won't allow /bin/bash
-      result = Shell.ExecuteScript.run(%{script: script, sandbox: :strict}, %{})
-
-      case result do
-        {:error, message} ->
-          assert is_binary(message)
-
-        {:ok, _} ->
-          # If bash is in strict allowlist, that's fine too
-          :ok
-      end
     end
 
     test "generates tool schema" do

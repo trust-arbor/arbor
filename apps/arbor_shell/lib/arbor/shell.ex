@@ -89,10 +89,11 @@ defmodule Arbor.Shell do
 
   **Intentional security API break:** even when an operator sets
   `config :arbor_shell, compound_shell_enabled: true`, CapShell does **not**
-  execute compound commands. Configuration only controls routing into the
-  fail-closed unavailable path (`authorize_and_execute/3` /
-  `execute_compound_with_capabilities/3`); it cannot re-enable the retired
-  prototype. See `Arbor.Shell.CapShell` for the missing upstream contracts.
+  execute compound commands. Configuration is informational only and **cannot**
+  re-enable the retired prototype. Agent-authorized boundaries reject compounds
+  unconditionally regardless of this flag (see `authorize/3`,
+  `authorize_and_execute/3` and friends). See `Arbor.Shell.CapShell` for the
+  missing upstream contracts.
 
   Other libraries (e.g. `Arbor.Actions.Shell`) must call this facade rather than
   re-reading Application env with their own default.
@@ -119,21 +120,21 @@ defmodule Arbor.Shell do
   **Intentional security API break:** always returns
   `{:error, {:compound_shell_unavailable, :security_boundary_incomplete}}`
   without parsing, session creation, process launch, filesystem access, or
-  adapter dispatch. Does **not** fall back to an unchecked shell or the bounded
+  adapter dispatch. Accepts any terms (including malformed arguments) and never
+  raises. Does **not** fall back to an unchecked shell or the bounded
   single-command executor.
 
-  Callers that already authorized (e.g. `Arbor.Actions.Shell.Execute`) use this
-  when `compound_shell_enabled?/0` is true and `compound_command?/1` is true so
-  the opt-in path still cannot execute. When CapShell routing is disabled (the
-  default), prefer `execute/2`, which rejects metacharacters on the bounded
-  single-command path.
+  Agent-authorized boundaries reject compound commands before auth/allowlist
+  work; this entry remains for direct CapShell-shaped callers.
   """
-  @spec execute_compound_with_capabilities(String.t(), String.t(), keyword()) ::
+  @spec execute_compound_with_capabilities(term(), term(), term()) ::
           {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
-  def execute_compound_with_capabilities(agent_id, command, opts \\ [])
-      when is_binary(agent_id) and is_binary(command) do
+  def execute_compound_with_capabilities(agent_id \\ nil, command \\ nil, opts \\ [])
+
+  def execute_compound_with_capabilities(agent_id, command, opts) do
     # Direct callers cannot bypass the fail-closed gate — CapShell.run/3 never
-    # parses or launches. Project the stable error without reshaping.
+    # parses or launches, including for malformed terms. Project the stable
+    # error without reshaping.
     CapShell.run(agent_id, command, opts)
   end
 
@@ -174,11 +175,10 @@ defmodule Arbor.Shell do
   # H6: Pass command context into authorize/4 opts so the reflex pipeline
   # can evaluate command-aware rules (e.g., blocking `rm -rf /`).
   def authorize_and_execute(agent_id, command, opts \\ []) do
-    if compound_shell_enabled?() and compound_command?(command) do
-      # Fail closed before allowlist, auth dispatch, parse, Session, process, or fs.
-      # Config true must not re-enable the retired CapShell prototype.
-      {:error, @compound_shell_unavailable}
-    else
+    # Unconditional compound rejection before allowlist, auth, approval,
+    # registry, session, process, or fs work. Config true/false and
+    # sandbox:none must not re-enable compound execution at agent boundaries.
+    with :ok <- reject_agent_compound(command) do
       opts = put_cap_allowlist(opts, agent_id)
       authorize_and_dispatch(agent_id, command, opts, fn -> execute(command, opts) end)
     end
@@ -193,10 +193,13 @@ defmodule Arbor.Shell do
           {:ok, String.t()}
           | {:ok, :pending_approval, String.t()}
           | {:error, :unauthorized | term()}
+          | {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
   # H6: Pass command context into authorize/4 opts for async execution too.
   def authorize_and_execute_async(agent_id, command, opts \\ []) do
-    opts = put_cap_allowlist(opts, agent_id)
-    authorize_and_dispatch(agent_id, command, opts, fn -> execute_async(command, opts) end)
+    with :ok <- reject_agent_compound(command) do
+      opts = put_cap_allowlist(opts, agent_id)
+      authorize_and_dispatch(agent_id, command, opts, fn -> execute_async(command, opts) end)
+    end
   end
 
   # Thread the agent's capability-derived shell allowlist into the execution opts
@@ -218,16 +221,22 @@ defmodule Arbor.Shell do
   Runs the same capability + reflex policy check as `authorize_and_execute/3`
   but returns the decision instead of dispatching execution. This is for
   callers that own their own execution mechanism and cannot route through
-  `execute/2` — notably the DOT `shell` node handler, whose `sandbox: :none`
-  path runs a real `/bin/sh -c` to preserve compound-command semantics
-  (`&&`, `|`, `$(…)`, heredocs) that the argv-based `execute/2` does not
-  provide. Such callers authorize first, then execute themselves.
+  `execute/2` — notably the DOT `shell` node handler.
+
+  **Compound commands are rejected unconditionally** before capability lookup,
+  approval creation, or any process/fs work — regardless of
+  `compound_shell_enabled` or the caller's intended sandbox level. The DOT
+  handler's historical `sandbox: "none"` `/bin/sh -c` path therefore cannot
+  obtain authorization for metacharacter-bearing commands; static
+  per-command grants must not paper over expanded compound semantics.
 
   ## Returns
 
   - `{:ok, :authorized}` - the principal may run this command
   - `{:ok, :pending_approval, proposal_id}` - escalated; not yet authorized
   - `{:error, :unauthorized}` - the principal lacks the capability
+  - `{:error, {:compound_shell_unavailable, :security_boundary_incomplete}}` -
+    command is compound / not agent-executable under CapShell retirement
 
   ## Examples
 
@@ -238,22 +247,24 @@ defmodule Arbor.Shell do
           {:ok, :authorized}
           | {:ok, :pending_approval, String.t()}
           | {:error, :unauthorized}
+          | {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
   def authorize(agent_id, command, opts \\ []) do
-    # `:gate_command` lets a caller override which command name the capability
-    # gate checks (used for compound commands, where the leading token may be a
-    # shell builtin). Defaults to the first token of `command`. The reflex rules
-    # still see the full `command` string regardless.
-    command_name = Keyword.get(opts, :gate_command) || extract_command_name(command)
-    resource = "arbor://shell/exec/#{command_name}"
+    with :ok <- reject_agent_compound(command) do
+      # `:gate_command` lets a caller override which command name the capability
+      # gate checks. Defaults to the first token of `command`. The reflex rules
+      # still see the full `command` string regardless.
+      command_name = Keyword.get(opts, :gate_command) || extract_command_name(command)
+      resource = "arbor://shell/exec/#{command_name}"
 
-    # Skip identity verification — facade auth is a policy check only; the
-    # caller (or the action layer above it) owns request-signature checks.
-    auth_opts = [command: command, path: Keyword.get(opts, :cwd), verify_identity: false]
+      # Skip identity verification — facade auth is a policy check only; the
+      # caller (or the action layer above it) owns request-signature checks.
+      auth_opts = [command: command, path: Keyword.get(opts, :cwd), verify_identity: false]
 
-    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
-      {:ok, :authorized} -> {:ok, :authorized}
-      {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
-      {:error, _reason} -> {:error, :unauthorized}
+      case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
+        {:ok, :authorized} -> {:ok, :authorized}
+        {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+        {:error, _reason} -> {:error, :unauthorized}
+      end
     end
   end
 
@@ -263,6 +274,12 @@ defmodule Arbor.Shell do
 
   @doc """
   Execute a shell command synchronously.
+
+  **Trusted system API only.** This entry does **not** authorize an agent
+  principal and must not be exposed through agent action surfaces. Agent
+  callers must use `authorize_and_execute/3` (or the Jido `Execute` action),
+  which reject compound commands. Prefer those agent boundaries over this
+  function for any principal-scoped work.
 
   ## Options
 
@@ -359,6 +376,10 @@ defmodule Arbor.Shell do
   @doc """
   Execute a shell command asynchronously.
 
+  **Trusted system API only.** Unchecked by agent capability gates — do not
+  expose through agent action surfaces. Agent callers must use
+  `authorize_and_execute_async/3`.
+
   Returns an execution ID that can be used to check status and get results.
 
   ## Examples
@@ -394,6 +415,10 @@ defmodule Arbor.Shell do
 
   @doc """
   Execute a command as a streaming session.
+
+  **Trusted system API only.** Unchecked by agent capability gates — do not
+  expose through agent action surfaces. Agent callers must use
+  `authorize_and_execute_streaming/3`.
 
   Starts a supervised PortSession and returns the session ID.
   Output is streamed to the caller specified via `stream_to:` in opts.
@@ -440,9 +465,12 @@ defmodule Arbor.Shell do
           {:ok, String.t()}
           | {:ok, :pending_approval, String.t()}
           | {:error, :unauthorized | term()}
+          | {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
   # H6: Pass command context into authorize/4 opts for streaming execution too.
   def authorize_and_execute_streaming(agent_id, command, opts \\ []) do
-    authorize_and_dispatch(agent_id, command, opts, fn -> execute_streaming(command, opts) end)
+    with :ok <- reject_agent_compound(command) do
+      authorize_and_dispatch(agent_id, command, opts, fn -> execute_streaming(command, opts) end)
+    end
   end
 
   # ===========================================================================
@@ -751,13 +779,29 @@ defmodule Arbor.Shell do
 
   # Shared authorization dispatch — all authorize_and_execute_* variants
   # use the same auth check pattern, only the execution function differs.
+  # Callers must already have run reject_agent_compound/1 so compounds never
+  # reach allowlist construction or authorize/3's security lookup.
   defp authorize_and_dispatch(agent_id, command, opts, execute_fn) do
     case authorize(agent_id, command, opts) do
       {:ok, :authorized} -> execute_fn.()
       {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
       {:error, :unauthorized} -> {:error, :unauthorized}
+      {:error, @compound_shell_unavailable} -> {:error, @compound_shell_unavailable}
     end
   end
+
+  # Reject compound (metacharacter-bearing) commands at every agent-authorized
+  # boundary before auth, approval, allowlist, registry, session, process, or
+  # fs work. Independent of compound_shell_enabled and sandbox level.
+  defp reject_agent_compound(command) when is_binary(command) do
+    if Sandbox.compound?(command) do
+      {:error, @compound_shell_unavailable}
+    else
+      :ok
+    end
+  end
+
+  defp reject_agent_compound(_command), do: {:error, @compound_shell_unavailable}
 
   # Extract the command name (first word) from a shell command string
   defp extract_command_name(command) when is_binary(command) do

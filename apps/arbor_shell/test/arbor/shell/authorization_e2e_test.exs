@@ -116,17 +116,11 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
   # ===========================================================================
 
   describe "compound command execution" do
-    test "security regression: absent compound_shell_enabled defaults closed (no CapShell)",
+    test "security regression: absent compound_shell_enabled rejects compounds at agent boundary",
          %{agent_id: agent_id} do
-      # CapShell lacks Executor's absolute timeout + output bounds. When the
-      # config key is absent, authorize_and_execute must use the bounded
-      # single-command path (sandbox metacharacter rejection) and must not run
-      # a delayed side effect that CapShell would allow after a sleep.
-      #
-      # Behavioral pre-fix evidence: do not call newly added helpers before the
-      # public operation — on base (open CapShell default) this fails because
-      # authorize_and_execute routes the compound to CapShell / executes the
-      # delayed touch, not because compound_shell_enabled?/0 is undefined.
+      # Compounds are rejected unconditionally at agent-authorized boundaries
+      # with the CapShell unavailable error — independent of config and before
+      # sandbox metacharacter checks. sandbox:none must not re-open execution.
       grant_shell_capability(agent_id, "arbor://shell/exec/**")
 
       with_compound_shell(:absent, fn ->
@@ -139,12 +133,18 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
         File.rm(marker)
 
         try do
-          # If CapShell incorrectly ran this, `touch` would fire after sleep.
-          assert {:error, {:shell_metacharacters, _}} =
+          assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
                    Arbor.Shell.authorize_and_execute(
                      agent_id,
                      "sleep 1; touch #{marker}",
                      sandbox: :basic
+                   )
+
+          assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
+                   Arbor.Shell.authorize_and_execute(
+                     agent_id,
+                     "sh -c 'sleep 1; touch #{marker}'",
+                     sandbox: :none
                    )
 
           Process.sleep(1_500)

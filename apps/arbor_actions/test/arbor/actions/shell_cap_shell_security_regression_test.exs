@@ -1,18 +1,25 @@
 defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
   @moduledoc """
-  Security regression: Actions.Shell.Execute compound path with config true.
+  Security regression: Actions.Shell compound/script residual bypasses.
 
-  With `compound_shell_enabled: true` and broad shell capability, the agent
-  action path must return a stable compound-shell unavailable failure and must
-  not produce delayed filesystem side effects. Fails on parent `dab2d315`
-  (opt-in CapShell still executes); passes on the fail-closed candidate.
+  With broad shell capability, agent action surfaces must return a **stable
+  exact** compound-shell unavailable failure and must not produce delayed
+  filesystem side effects — for `compound_shell_enabled` true **and** false,
+  and for `sandbox: :none`.
 
-  Intentional security API break for the retired CapShell prototype.
+  Residual proofs (must fail on exact parent `9f91f62` and pass on candidate):
+  - `authorize_command/3` rejects compounds before Trust (DOT shell handler path)
+  - `Execute` with config false + sandbox:none cannot run nested `sh -c` compounds
+  - `ExecuteScript` is fail-closed before temp-file/auth/process work
   """
   use Arbor.Actions.ActionCase, async: false
   @moduletag :fast
 
   alias Arbor.Actions.Shell
+
+  @unavailable_tuple {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
+
+  @unavailable_message "Compound shell execution is unavailable (security boundary incomplete). Use individual non-compound commands; CapShell is intentionally fail-closed."
 
   @side_effect_wait_ms 1_500
 
@@ -54,7 +61,6 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
     Application.put_env(:arbor_security, :consensus_escalation_enabled, false)
     Application.put_env(:arbor_trust, :approval_guard_enabled, true)
     Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
-    Application.put_env(:arbor_shell, :compound_shell_enabled, true)
 
     on_exit(fn ->
       restore(:arbor_security, :reflex_checking_enabled, prev.reflex)
@@ -81,6 +87,8 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
             profile.rules
             |> Map.put("arbor://shell/exec/sleep", :auto)
             |> Map.put("arbor://shell/exec/touch", :auto)
+            |> Map.put("arbor://shell/exec/sh", :auto)
+            |> Map.put("arbor://shell/exec/bash", :auto)
             |> Map.put("arbor://shell/exec/**", :auto)
       })
 
@@ -89,47 +97,191 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
     {:ok, agent_id: agent_id}
   end
 
-  test "security regression: Execute with config true returns unavailable and no delayed side effect",
+  test "security regression: Execute config true + sandbox:none returns exact unavailable and no delayed side effect",
        %{agent_id: agent_id} do
-    assert Arbor.Shell.compound_shell_enabled?()
+    assert_execute_residual_closed(agent_id, true)
+  end
 
+  test "security regression: Execute config false + sandbox:none returns exact unavailable and no delayed side effect",
+       %{agent_id: agent_id} do
+    assert_execute_residual_closed(agent_id, false)
+  end
+
+  test "security regression: authorize_command rejects compounds before Trust (DOT shell path)",
+       %{agent_id: agent_id} do
+    # Parent authorized leading token; DOT shell handler then ran /bin/sh -c.
+    # Nested interpreter forms must also fail closed when the string carries
+    # metacharacters (static leading-token grants are not a runtime proof).
+    with_compound_shell(false, fn ->
+      assert @unavailable_tuple =
+               Shell.authorize_command(agent_id, "sleep 1; touch /tmp/x", [])
+
+      assert @unavailable_tuple =
+               Shell.authorize_command(agent_id, "sh -c 'sleep 1; touch /tmp/x'", sandbox: :none)
+
+      assert @unavailable_tuple =
+               Shell.authorize_command(agent_id, "echo a && echo b")
+    end)
+  end
+
+  test "security regression: ExecuteScript is fail-closed before temp-file/auth/process work",
+       %{agent_id: agent_id} do
     marker =
       Path.join(
         System.tmp_dir!(),
-        "actions_capshell_sec_#{System.unique_integer([:positive])}"
+        "actions_execscript_sec_#{System.unique_integer([:positive])}"
       )
 
     File.rm(marker)
+    tmp_before = arbor_script_tmp_count()
+
+    script = """
+    sleep 1
+    touch #{marker}
+    """
 
     try do
-      result =
-        Shell.Execute.run(
-          %{command: "sleep 1; touch #{marker}", sandbox: :basic},
-          %{
-            agent_id: agent_id,
-            approved_invocation: %{
-              request_id: "irq_capshell_sec_regression",
-              principal_id: agent_id,
-              resource_uri: "arbor://shell/exec/sleep",
-              decision: :approved
-            }
-          }
-        )
+      # No agent — still unavailable (no system-only script escape hatch).
+      assert Shell.ExecuteScript.run(%{script: script, sandbox: :none}, %{}) ==
+               {:error, @unavailable_message}
 
-      assert {:error, message} = result
-      assert is_binary(message)
-
-      assert message =~ "unavailable" or message =~ "security_boundary_incomplete" or
-               message =~ "Compound shell",
-             "expected stable compound-shell unavailable message, got: #{inspect(message)}"
+      assert Shell.ExecuteScript.run(
+               %{script: script, sandbox: :none},
+               %{
+                 agent_id: agent_id,
+                 approved_invocation: %{
+                   request_id: "irq_execscript_sec",
+                   principal_id: agent_id,
+                   resource_uri: "arbor://shell/exec/bash",
+                   decision: :approved
+                 }
+               }
+             ) == {:error, @unavailable_message}
 
       Process.sleep(@side_effect_wait_ms)
-
-      refute File.exists?(marker),
-             "action path must not execute delayed compound side effect when CapShell is fail-closed"
+      refute File.exists?(marker)
+      assert arbor_script_tmp_count() <= tmp_before
     after
       File.rm(marker)
     end
+  end
+
+  test "security regression: Execute config true ordinary compound returns exact unavailable",
+       %{agent_id: agent_id} do
+    with_compound_shell(true, fn ->
+      assert Arbor.Shell.compound_shell_enabled?()
+
+      marker =
+        Path.join(
+          System.tmp_dir!(),
+          "actions_capshell_ord_#{System.unique_integer([:positive])}"
+        )
+
+      File.rm(marker)
+
+      try do
+        result =
+          Shell.Execute.run(
+            %{command: "sleep 1; touch #{marker}", sandbox: :basic},
+            %{
+              agent_id: agent_id,
+              approved_invocation: %{
+                request_id: "irq_capshell_ord",
+                principal_id: agent_id,
+                resource_uri: "arbor://shell/exec/sleep",
+                decision: :approved
+              }
+            }
+          )
+
+        assert result == {:error, @unavailable_message}
+        Process.sleep(@side_effect_wait_ms)
+        refute File.exists?(marker)
+      after
+        File.rm(marker)
+      end
+    end)
+  end
+
+  test "ordinary single-command Execute still works", %{agent_id: agent_id} do
+    assert {:ok, result} =
+             Shell.Execute.run(
+               %{command: "echo actions-single-ok", sandbox: :none},
+               %{
+                 agent_id: agent_id,
+                 approved_invocation: %{
+                   request_id: "irq_single_ok",
+                   principal_id: agent_id,
+                   resource_uri: "arbor://shell/exec/echo",
+                   decision: :approved
+                 }
+               }
+             )
+
+    assert result.exit_code == 0
+    assert result.stdout =~ "actions-single-ok"
+  end
+
+  defp assert_execute_residual_closed(agent_id, config_value) do
+    with_compound_shell(config_value, fn ->
+      marker =
+        Path.join(
+          System.tmp_dir!(),
+          "actions_capshell_sec_#{System.unique_integer([:positive])}"
+        )
+
+      File.rm(marker)
+
+      # Nested interpreter form: parent authorized leading `sh` only and
+      # sandbox:none executed the full compound via the system shell.
+      command = "sh -c 'sleep 1; touch #{marker}'"
+
+      try do
+        result =
+          Shell.Execute.run(
+            %{command: command, sandbox: :none},
+            %{
+              agent_id: agent_id,
+              approved_invocation: %{
+                request_id: "irq_capshell_sec_regression",
+                principal_id: agent_id,
+                resource_uri: "arbor://shell/exec/sh",
+                decision: :approved
+              }
+            }
+          )
+
+        assert result == {:error, @unavailable_message}
+
+        Process.sleep(@side_effect_wait_ms)
+
+        refute File.exists?(marker),
+               "action path must not execute delayed compound (config=#{inspect(config_value)}, sandbox:none)"
+      after
+        File.rm(marker)
+      end
+    end)
+  end
+
+  defp with_compound_shell(value, fun) when is_function(fun, 0) do
+    prev = Application.get_env(:arbor_shell, :compound_shell_enabled)
+    Application.put_env(:arbor_shell, :compound_shell_enabled, value)
+
+    try do
+      fun.()
+    after
+      if is_nil(prev),
+        do: Application.delete_env(:arbor_shell, :compound_shell_enabled),
+        else: Application.put_env(:arbor_shell, :compound_shell_enabled, prev)
+    end
+  end
+
+  defp arbor_script_tmp_count do
+    System.tmp_dir!()
+    |> File.ls!()
+    |> Enum.count(&String.starts_with?(&1, "arbor_script_"))
+  rescue
+    _ -> 0
   end
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)

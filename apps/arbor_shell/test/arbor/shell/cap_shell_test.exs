@@ -71,6 +71,9 @@ defmodule Arbor.Shell.CapShellTest do
         assert @unavailable = CapShell.run(agent_id, "echo hello | grep hello")
         assert @unavailable = CapShell.run(agent_id, "git --version && echo ok")
         assert @unavailable = CapShell.run(agent_id, "if then fi fi )(")
+        # Malformed terms must return, not raise FunctionClauseError.
+        assert @unavailable = CapShell.run(nil, :bad, "opts")
+        assert @unavailable = CapShell.run()
 
         refute File.exists?(marker), "CapShell.run must not execute commands"
       after

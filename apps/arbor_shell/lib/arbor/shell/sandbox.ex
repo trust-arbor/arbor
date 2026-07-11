@@ -113,13 +113,16 @@ defmodule Arbor.Shell.Sandbox do
   *compound* command (sequencing `;`/`&&`/`||`, pipes `|`, substitution `$(…)`/
   backticks, or redirection `>`/`<`) that the single-command path rejects.
 
-  Used by `Arbor.Shell.authorize_and_execute/3` to decide whether a command is
-  compound. When `Arbor.Shell.compound_shell_enabled?/0` is true (config opt-in;
-  default false), compounds route to the **fail-closed** CapShell unavailable
-  path — configuration cannot re-enable execution. When the flag is off/absent
-  (the default), the single-command sandbox rejects metacharacters on the
-  bounded Executor path. (A quoted metacharacter — `grep "a|b"` — also matches
-  here as compound.)
+  Used by agent-authorized shell boundaries (`Arbor.Shell.authorize/3`,
+  `authorize_and_execute/3` and friends, `Arbor.Actions.Shell`) to reject
+  compounds **unconditionally** with the CapShell unavailable error — before
+  auth, approval, allowlist, registry, session, process, or fs work. Config
+  (`compound_shell_enabled`) and sandbox level (including `:none`) cannot
+  re-enable compound execution on those paths.
+
+  System-only `Arbor.Shell.execute/2` still uses metacharacter rejection on the
+  bounded Executor path at `:basic`/`:strict`. (A quoted metacharacter —
+  `grep "a|b"` — also matches here as compound.)
   """
   @spec compound?(String.t()) :: boolean()
   def compound?(command) when is_binary(command) do

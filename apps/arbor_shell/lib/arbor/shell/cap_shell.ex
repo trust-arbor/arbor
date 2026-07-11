@@ -24,8 +24,9 @@ defmodule Arbor.Shell.CapShell do
   Therefore every public CapShell execution entry returns the stable error
   `{:error, {:compound_shell_unavailable, :security_boundary_incomplete}}`
   **before** parsing, `Bash.Session` creation, external process launch,
-  filesystem access, or adapter dispatch. There is no silent fallback to an
-  unchecked shell or to the bounded single-command executor.
+  filesystem access, or adapter dispatch — including malformed terms/options.
+  There is no silent fallback to an unchecked shell or to the bounded
+  single-command executor.
 
   Configuration (`:arbor_shell, :compound_shell_enabled`) defaults to `false`
   and **cannot re-enable** this prototype when set `true` — operators who opt
@@ -61,17 +62,20 @@ defmodule Arbor.Shell.CapShell do
   filesystem, or dispatch to any shell adapter. Always returns
   `{:error, {:compound_shell_unavailable, :security_boundary_incomplete}}`.
 
+  Accepts any terms (including malformed agent_id/command/opts) and never
+  raises — callers must not observe a `FunctionClauseError` as a bypass or
+  crash side channel.
+
   This is an intentional security API break for the retired CapShell prototype —
   there is no override or test hook that re-enables execution.
   """
-  @spec run(String.t(), String.t(), keyword()) ::
+  @spec run(term(), term(), term()) ::
           {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
-  def run(agent_id, command, opts \\ [])
+  def run(agent_id \\ nil, command \\ nil, opts \\ [])
 
-  def run(agent_id, command, opts)
-      when is_binary(agent_id) and is_binary(command) and is_list(opts) do
+  def run(_agent_id, _command, _opts) do
     # Fail closed before any parse / Session / process / fs / adapter work.
-    # `_opts` is accepted for call-site compatibility only.
+    # Arguments are accepted for call-site compatibility only and are ignored.
     {:error, @unavailable_reason}
   end
 end
