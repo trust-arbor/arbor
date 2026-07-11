@@ -15,11 +15,16 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarity do
   @default_model "nomic-embed-text:latest"
   @default_timeout 30_000
   @max_detail_bytes 1_024
+  @max_text_bytes 2_000_000
+  @max_embedding_response_bytes 16_777_216
+  @max_options 16
+  @allowed_options [:embed_url, :embed_model, :timeout, :threshold, :embed_fn]
 
   @impl true
   def grade(actual, expected, opts \\ []) do
-    with :ok <- RetrievalSupport.validate_opts(opts),
-         {:ok, url} <- RetrievalSupport.string_option(opts, :embed_url, @default_url),
+    with :ok <- validate_embedding_opts(opts),
+         {:ok, url} <-
+           RetrievalSupport.endpoint_option(opts, :embed_url, @default_url, :embedding),
          {:ok, model} <- RetrievalSupport.string_option(opts, :embed_model, @default_model),
          {:ok, timeout} <-
            RetrievalSupport.positive_integer_option(opts, :timeout, @default_timeout),
@@ -82,8 +87,41 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarity do
     end
   end
 
-  defp normalize_text(value) when is_binary(value), do: {:ok, value}
-  defp normalize_text(value) when is_atom(value) or is_number(value), do: {:ok, to_string(value)}
+  defp validate_embedding_opts(opts) when is_list(opts) do
+    with :ok <- bounded_option_keys(opts, 0),
+         :ok <- RetrievalSupport.validate_opts(opts) do
+      :ok
+    end
+  end
+
+  defp validate_embedding_opts(_opts), do: {:error, {:invalid_options, :keyword_required}}
+
+  defp bounded_option_keys([], _count), do: :ok
+
+  defp bounded_option_keys(_opts, count) when count >= @max_options,
+    do: {:error, {:invalid_options, {:option_count_exceeded, @max_options}}}
+
+  defp bounded_option_keys([{key, _value} | rest], count) when key in @allowed_options,
+    do: bounded_option_keys(rest, count + 1)
+
+  defp bounded_option_keys([{key, _value} | _rest], _count) when is_atom(key),
+    do: {:error, {:invalid_option, key, :unsupported}}
+
+  defp bounded_option_keys(_opts, _count), do: {:error, {:invalid_options, :keyword_required}}
+
+  defp normalize_text(value) when is_binary(value) do
+    cond do
+      byte_size(value) > @max_text_bytes ->
+        {:error, {:invalid_input, {:text_bytes_exceeded, @max_text_bytes}}}
+
+      not String.valid?(value) ->
+        {:error, {:invalid_input, :valid_utf8_text_required}}
+
+      true ->
+        {:ok, value}
+    end
+  end
+
   defp normalize_text(_value), do: {:error, {:invalid_input, :text_required}}
 
   defp unavailable(reason) do
@@ -112,19 +150,20 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarity do
   end
 
   defp default_embed(texts, url, model, timeout) do
-    case Req.post(url,
-           json: %{"model" => model, "input" => texts},
-           receive_timeout: timeout
+    case RetrievalSupport.post_json(
+           url,
+           %{"model" => model, "input" => texts},
+           timeout,
+           @max_embedding_response_bytes
          ) do
-      {:ok, %{status: 200, body: %{"data" => data}}} when is_list(data) ->
-        embeddings = Enum.map(data, &Map.get(&1, "embedding"))
-        {:ok, embeddings}
+      {:ok, 200, %{"data" => [first, second]}} when is_map(first) and is_map(second) ->
+        {:ok, [Map.get(first, "embedding"), Map.get(second, "embedding")]}
 
-      {:ok, %{status: status, body: body}} ->
+      {:ok, 200, _body} ->
+        {:error, {:invalid_embedding_response, :two_vectors_required}}
+
+      {:ok, status, body} ->
         RetrievalSupport.http_error(:http_error, status, body)
-
-      {:error, %{reason: reason}} ->
-        {:error, reason}
 
       {:error, reason} ->
         {:error, reason}

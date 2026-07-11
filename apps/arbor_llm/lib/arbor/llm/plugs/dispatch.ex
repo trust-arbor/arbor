@@ -23,6 +23,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
   use Arbor.LLM.Plug
   alias Arbor.LLM.Call
   alias Arbor.LLM.ProviderError
+  alias Arbor.LLM.ResponseBudget
 
   def call(%Call{halted: true} = call), do: call
 
@@ -36,7 +37,34 @@ defmodule Arbor.LLM.Plugs.Dispatch do
   # ── Operation-specific dispatch ────────────────────────────────────
 
   defp do_dispatch(:complete, {model_spec, messages, opts}) do
-    ReqLLM.generate_text(model_spec, messages, opts)
+    maximum = Keyword.get(opts, :arbor_max_response_bytes, 16_777_216)
+    req_opts = Keyword.delete(opts, :arbor_max_response_bytes)
+
+    with {:ok, model} <- ReqLLM.model(model_spec),
+         {:ok, provider_module} <- ReqLLM.provider(model.provider),
+         {:ok, request} <- provider_module.prepare_request(:chat, model, messages, req_opts),
+         request <- ResponseBudget.apply_req_receipt(request, maximum),
+         {:ok, %Req.Response{private: %{arbor_response_overflow: ^maximum}}} <-
+           Req.request(request) do
+      {:error, {:response_bytes_exceeded, maximum}}
+    else
+      {:ok, %Req.Response{private: %{arbor_response_error: reason}}} ->
+        {:error, {:invalid_response_body, reason}}
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        {:ok, body}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error,
+         ReqLLM.Error.API.Request.exception(
+           reason: "HTTP #{status}: Request failed",
+           status: status,
+           response_body: body
+         )}
+
+      {:error, _reason} = error ->
+        error
+    end
   rescue
     e -> {:error, exception_for(e)}
   catch

@@ -913,4 +913,13 @@ defmodule Arbor.LLM do
       value -> value
     end
   end
+
+  @doc false
+  def validate_decoded_term(term, opts), do: Arbor.LLM.ResponseBudget.validate(term, opts)
+
+  @doc false
+  def decode_bounded_json(body, opts), do: Arbor.LLM.ResponseBudget.decode_json(body, opts)
+
+  @doc false
+  def finite_number?(value), do: Arbor.LLM.ResponseBudget.finite_number?(value)
 end

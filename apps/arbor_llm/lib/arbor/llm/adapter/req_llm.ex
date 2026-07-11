@@ -556,6 +556,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     |> maybe_merge(:api_key, local_api_key(request.provider, opts))
     |> maybe_merge(:req_http_options, local_req_http_options(request.provider, opts))
     |> maybe_merge(:provider_options, Keyword.get(opts, :provider_options))
+    |> maybe_merge(:max_response_bytes, Keyword.get(opts, :max_response_bytes))
   end
 
   # Disable req's transient-retry for local-LM providers. Retrying a slow
@@ -709,6 +710,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
       #
       # Tests override via app config to insert Replay, Record,
       # StalenessWarn, etc.
+      Arbor.LLM.Plugs.ResponseLimit,
       Arbor.LLM.Plugs.Dispatch,
       Arbor.LLM.Plugs.RateLimitBackoff
     ])

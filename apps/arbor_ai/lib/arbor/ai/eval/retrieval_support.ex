@@ -14,8 +14,18 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   @max_external_items 16
   @max_external_depth 4
   @max_vector_dimensions 8_192
-  @max_vector_component_abs 1.0e6
+  # Keeps dot/norm accumulation finite at the maximum vector dimension.
+  @max_vector_component_abs 1.0e100
+  @max_embedding_models 100
   @max_protocol_integer 9_223_372_036_854_775_807
+  @min_protocol_integer -9_223_372_036_854_775_808
+  @decoded_term_limits [
+    max_bytes: 16_777_216,
+    max_nodes: 100_000,
+    max_depth: 32,
+    max_map_keys: 10_000,
+    max_list_items: 100_000
+  ]
   @index_read_deadline_ms 500
   @index_reader_heap_words 8_388_608
   @darwin_open_helper "/usr/bin/perl"
@@ -115,6 +125,18 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
     end
   end
 
+  @spec endpoint_option(keyword(), atom(), String.t(), :base | :embedding) ::
+          {:ok, String.t()} | {:error, term()}
+  def endpoint_option(opts, key, default, policy) do
+    with {:ok, value} <- string_option(opts, key, default),
+         {:ok, uri} <- parse_endpoint(value, policy) do
+      {:ok, URI.to_string(uri)}
+    else
+      {:error, {:invalid_option, ^key, _reason} = error} -> {:error, error}
+      {:error, reason} -> {:error, {:invalid_option, key, reason}}
+    end
+  end
+
   @spec positive_integer_option(keyword(), atom(), pos_integer()) ::
           {:ok, pos_integer()} | {:error, term()}
   def positive_integer_option(opts, key, default) do
@@ -207,7 +229,9 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
         {:error, {:http_response_bytes_exceeded, max_response_bytes}}
 
       {:ok, %Req.Response{status: status, body: body}} ->
-        {:ok, status, decode_bounded_json_body(body, max_response_bytes)}
+        with {:ok, decoded} <- decode_bounded_json_body(body, max_response_bytes) do
+          {:ok, status, decoded}
+        end
 
       {:error, reason} ->
         {:error, {:transport_error, bounded_external_reason(reason)}}
@@ -385,7 +409,7 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   end
 
   defp decode_router_response(content, known_modules, top_k) do
-    case Jason.decode(content) do
+    case Arbor.LLM.decode_bounded_json(content, router_term_limits()) do
       {:ok, %{"selected" => list}} when is_list(list) ->
         normalize_router_modules(list, known_modules, top_k)
 
@@ -640,41 +664,41 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   end
 
   defp decode_index(path, body) do
-    case Jason.decode(body) do
+    case Arbor.LLM.decode_bounded_json(body, @decoded_term_limits) do
       {:ok, decoded} -> {:ok, decoded}
-      {:error, error} -> {:error, {:index_decode_failed, path, Exception.message(error)}}
+      {:error, reason} -> {:error, {:index_decode_failed, path, bounded_external_reason(reason)}}
     end
   end
 
   defp normalize_index(path, %{"actions" => actions}) when is_list(actions) do
-    action_count = length(actions)
+    case bounded_list_count(actions, @max_index_entries) do
+      :exceeded ->
+        {:error, {:invalid_index, path, {:entry_count_exceeded, @max_index_entries}}}
 
-    if action_count > @max_index_entries do
-      {:error, {:invalid_index, path, {:entry_count_exceeded, @max_index_entries}}}
-    else
-      actions
-      |> Enum.with_index()
-      |> Enum.reduce_while({:ok, []}, fn {action, index}, {:ok, acc} ->
-        case normalize_action(action) do
-          {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
-          {:error, reason} -> {:halt, {:error, {:invalid_index, path, index, reason}}}
-        end
-      end)
-      |> case do
-        {:ok, []} ->
-          {:error, {:invalid_index, path, :actions_required}}
-
-        {:ok, normalized} ->
-          normalized = Enum.reverse(normalized)
-
-          case validate_index_dimensions(normalized) do
-            :ok -> {:ok, normalized}
-            {:error, reason} -> {:error, {:invalid_index, path, reason}}
+      {:ok, _action_count} ->
+        actions
+        |> Enum.with_index()
+        |> Enum.reduce_while({:ok, []}, fn {action, index}, {:ok, acc} ->
+          case normalize_action(action) do
+            {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
+            {:error, reason} -> {:halt, {:error, {:invalid_index, path, index, reason}}}
           end
+        end)
+        |> case do
+          {:ok, []} ->
+            {:error, {:invalid_index, path, :actions_required}}
 
-        {:error, _reason} = error ->
-          error
-      end
+          {:ok, normalized} ->
+            normalized = Enum.reverse(normalized)
+
+            case validate_index_dimensions(normalized) do
+              :ok -> {:ok, normalized}
+              {:error, reason} -> {:error, {:invalid_index, path, reason}}
+            end
+
+          {:error, _reason} = error ->
+            error
+        end
     end
   end
 
@@ -705,6 +729,14 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   defp validate_embeddings_type(_embeddings), do: {:error, :embeddings_must_be_object}
 
   defp normalize_embeddings(embeddings) do
+    if map_size(embeddings) > @max_embedding_models do
+      {:error, {:embedding_model_count_exceeded, @max_embedding_models}}
+    else
+      reduce_embeddings(embeddings)
+    end
+  end
+
+  defp reduce_embeddings(embeddings) do
     Enum.reduce_while(embeddings, {:ok, %{}}, fn
       {model, vector}, {:ok, acc} when is_binary(model) ->
         with {:ok, model} <- validate_index_string(model, :model, @max_index_model_bytes),
@@ -725,6 +757,15 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
         {:halt, {:error, {:invalid_embedding_model, :string_required}}}
     end)
   end
+
+  defp bounded_list_count(list, maximum), do: bounded_list_count(list, maximum, 0)
+  defp bounded_list_count(_list, maximum, count) when count > maximum, do: :exceeded
+  defp bounded_list_count([], _maximum, count), do: {:ok, count}
+
+  defp bounded_list_count([_head | tail], maximum, count),
+    do: bounded_list_count(tail, maximum, count + 1)
+
+  defp bounded_list_count(_improper, _maximum, _count), do: :exceeded
 
   defp diagnostic_excerpt(body) when is_binary(body) do
     {excerpt, truncated?} = bounded_binary_excerpt(body)
@@ -767,17 +808,32 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   end
 
   defp decode_bounded_json_body(body, maximum) when is_binary(body) do
-    if byte_size(body) <= maximum do
-      case Jason.decode(body) do
-        {:ok, decoded} -> decoded
-        {:error, _reason} -> body
-      end
-    else
-      %{body_excerpt: "", truncated: true}
+    limits = Keyword.put(@decoded_term_limits, :max_bytes, maximum)
+
+    cond do
+      byte_size(body) > maximum ->
+        {:error, {:decoded_term_limit_exceeded, :bytes, maximum}}
+
+      not String.valid?(body) ->
+        {:error, {:invalid_json, :valid_utf8_required}}
+
+      true ->
+        case Arbor.LLM.decode_bounded_json(body, limits) do
+          {:ok, decoded} -> {:ok, decoded}
+          {:error, {:invalid_json, :malformed}} -> {:ok, body}
+          {:error, _reason} = error -> error
+        end
     end
   end
 
-  defp decode_bounded_json_body(body, _maximum), do: bounded_external_reason(body)
+  defp decode_bounded_json_body(body, maximum) do
+    limits = Keyword.put(@decoded_term_limits, :max_bytes, maximum)
+
+    case Arbor.LLM.validate_decoded_term(body, limits) do
+      :ok -> {:ok, body}
+      {:error, _reason} = error -> error
+    end
+  end
 
   defp bounded_binary_excerpt(value) do
     size = byte_size(value)
@@ -807,13 +863,13 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
     do: value
 
   defp bound_term(value, _depth) when is_integer(value) do
-    if value >= -@max_protocol_integer and value <= @max_protocol_integer,
+    if value >= @min_protocol_integer and value <= @max_protocol_integer,
       do: value,
       else: :integer_out_of_range
   end
 
   defp bound_term(value, _depth) when is_float(value) do
-    if valid_vector_component?(value), do: value, else: :float_out_of_range
+    if Arbor.LLM.finite_number?(value), do: value, else: :float_out_of_range
   end
 
   defp bound_term(value, _depth) when is_binary(value) do
@@ -900,11 +956,75 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
 
   defp validate_vector_values(_vector), do: {:error, :numeric_vector_required}
 
-  defp valid_vector_component?(value) when is_number(value) do
-    value >= -@max_vector_component_abs and value <= @max_vector_component_abs
-  end
+  defp valid_vector_component?(value) when is_integer(value),
+    do:
+      value >= @min_protocol_integer and value <= @max_protocol_integer and
+        value >= -@max_vector_component_abs and value <= @max_vector_component_abs
+
+  defp valid_vector_component?(value) when is_float(value),
+    do:
+      Arbor.LLM.finite_number?(value) and value >= -@max_vector_component_abs and
+        value <= @max_vector_component_abs
 
   defp valid_vector_component?(_value), do: false
+
+  defp parse_endpoint(value, policy) do
+    uri = URI.parse(value)
+
+    cond do
+      uri.scheme not in ["http", "https"] ->
+        {:error, :http_scheme_required}
+
+      not is_binary(uri.host) or uri.host == "" ->
+        {:error, :host_required}
+
+      not valid_host?(uri.host) ->
+        {:error, :valid_host_required}
+
+      not is_nil(uri.userinfo) ->
+        {:error, :userinfo_forbidden}
+
+      not is_nil(uri.query) ->
+        {:error, :query_forbidden}
+
+      not is_nil(uri.fragment) ->
+        {:error, :fragment_forbidden}
+
+      not is_nil(uri.port) and uri.port not in 1..65_535 ->
+        {:error, :valid_port_required}
+
+      policy == :base and uri.path not in [nil, "", "/"] ->
+        {:error, :base_path_must_be_root}
+
+      policy == :embedding and uri.path != "/v1/embeddings" ->
+        {:error, :embedding_path_must_be_v1_embeddings}
+
+      true ->
+        path = if policy == :base, do: "", else: "/v1/embeddings"
+        {:ok, %{uri | path: path, query: nil, fragment: nil}}
+    end
+  end
+
+  defp router_term_limits do
+    @decoded_term_limits
+    |> Keyword.put(:max_bytes, @max_router_response_bytes)
+    |> Keyword.put(:max_nodes, 10_000)
+    |> Keyword.put(:max_list_items, 1_000)
+  end
+
+  defp valid_host?(host) do
+    case :inet.parse_address(String.to_charlist(host)) do
+      {:ok, _address} ->
+        true
+
+      {:error, _reason} ->
+        byte_size(host) <= 253 and
+          Regex.match?(
+            ~r/^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$/,
+            host
+          )
+    end
+  end
 
   defp validate_index_dimensions(actions) do
     Enum.reduce_while(actions, {:ok, %{}}, fn action, {:ok, dimensions_by_model} ->

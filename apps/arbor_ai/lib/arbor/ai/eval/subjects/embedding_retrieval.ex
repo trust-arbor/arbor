@@ -33,7 +33,7 @@ defmodule Arbor.AI.Eval.Subjects.EmbeddingRetrieval do
          {:ok, top_k} <-
            RetrievalSupport.positive_integer_option(opts, :top_k, @default_top_k),
          {:ok, base_url} <-
-           RetrievalSupport.string_option(opts, :base_url, @default_base_url),
+           RetrievalSupport.endpoint_option(opts, :base_url, @default_base_url, :base),
          {:ok, timeout} <-
            RetrievalSupport.positive_integer_option(opts, :timeout, @default_timeout),
          {:ok, embed_fn} <-

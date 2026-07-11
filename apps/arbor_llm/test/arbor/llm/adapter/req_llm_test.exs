@@ -851,6 +851,43 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
     end
   end
 
+  test "security regression: generic Req complete halts a chunked oversized body early" do
+    previous_options = Req.default_options()
+    parent = self()
+    on_exit(fn -> Req.default_options(previous_options) end)
+
+    Req.default_options(
+      adapter: fn request ->
+        response = Req.Response.new(status: 200, headers: %{})
+
+        {request, response} =
+          Enum.reduce_while(1..10_000, {request, response}, fn index, acc ->
+            send(parent, {:req_chunk, index})
+
+            case request.into.({:data, String.duplicate("x", 600)}, acc) do
+              {:cont, next} -> {:cont, next}
+              {:halt, next} -> {:halt, next}
+            end
+          end)
+
+        {request, response}
+      end
+    )
+
+    request = %Request{
+      provider: "lm_studio",
+      model: "local-model",
+      messages: [%Message{role: :user, content: "hello"}]
+    }
+
+    assert Adapter.complete(request, max_response_bytes: 1_024) ==
+             {:error, {:response_bytes_exceeded, 1_024}}
+
+    assert_receive {:req_chunk, 1}
+    assert_receive {:req_chunk, 2}
+    refute_receive {:req_chunk, 3}
+  end
+
   # ── Helpers ─────────────────────────────────────────────────────────
 
   defp tool_map(name) do

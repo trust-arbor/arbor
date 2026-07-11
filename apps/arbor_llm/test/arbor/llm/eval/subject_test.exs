@@ -104,6 +104,15 @@ defmodule Arbor.LLM.Eval.SubjectTest do
             %StreamEvent{type: :finish, data: %{}}
           ]
 
+        "ignored-metadata-stream" ->
+          [
+            %StreamEvent{
+              type: :delta,
+              data: %{metadata: String.duplicate("m", 2_000_000), text: ""}
+            },
+            %StreamEvent{type: :finish, data: %{}}
+          ]
+
         _other ->
           [
             %StreamEvent{type: :start, data: %{}},
@@ -352,23 +361,38 @@ defmodule Arbor.LLM.Eval.SubjectTest do
              ) == {:error, {:output_limit_exceeded, :output_bytes, 5}}
     end
 
-    test "security regression: complete byte ceiling precedes UTF-8 validation" do
+    test "security regression: invalid UTF-8 complete output fails closed" do
       assert Subject.run("hello",
                client: client(),
                provider: "eval_test",
                model: "oversized-invalid-complete",
                max_output_bytes: 5
-             ) == {:error, {:output_limit_exceeded, :output_bytes, 5}}
+             ) == {:error, {:decoded_term_invalid, :valid_utf8_required}}
     end
 
-    test "security regression: stream byte ceiling precedes UTF-8 validation" do
+    test "security regression: invalid UTF-8 stream chunks fail closed" do
       assert Subject.run("hello",
                client: client(),
                provider: "eval_test",
                model: "oversized-invalid-stream",
                stream: true,
                max_output_bytes: 5
-             ) == {:error, {:stream_limit_exceeded, :output_bytes, 5}}
+             ) ==
+               {:error,
+                {:stream_collection_failed,
+                 {:invalid_stream_event, {:decoded_term_invalid, :valid_utf8_required}}}}
+    end
+
+    test "security regression: ignored stream metadata hits bytes before event count" do
+      assert Subject.run("hello",
+               client: client(),
+               provider: "eval_test",
+               model: "ignored-metadata-stream",
+               stream: true,
+               max_stream_events: 1
+             ) ==
+               {:error,
+                {:stream_collection_failed, {:stream_limit_exceeded, :event_bytes, 1_048_576}}}
     end
 
     test "preserves transport error reasons and shapes invalid client errors" do
@@ -403,7 +427,8 @@ defmodule Arbor.LLM.Eval.SubjectTest do
           )
         end)
 
-      assert {:ok, {:ok, %{text: "", tokens_generated: 0}}} = Task.yield(task, 1_000)
+      assert {:ok, {:error, {:decoded_term_limit_exceeded, :bytes, 16_777_216}}} =
+               Task.yield(task, 1_000)
     end
 
     test "preserves the catalog-backed unknown provider error shape" do

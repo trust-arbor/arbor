@@ -20,7 +20,7 @@ defmodule Arbor.LLM.Eval.Subject do
 
   require Logger
 
-  alias Arbor.LLM.{Client, Message, ProviderCatalog, Request, StreamEvent}
+  alias Arbor.LLM.{Client, Message, ProviderCatalog, Request, ResponseBudget, StreamEvent}
 
   @default_provider "lm_studio"
   @default_timeout 60_000
@@ -37,6 +37,11 @@ defmodule Arbor.LLM.Eval.Subject do
   @max_diagnostic_items 16
   @max_diagnostic_depth 4
   @max_logged_content_parts 32
+  @max_response_nodes 100_000
+  @max_response_depth 32
+  @max_response_map_keys 10_000
+  @max_response_list_items 100_000
+  @max_stream_event_bytes 1_048_576
 
   @impl true
   def run(input, opts \\ []) do
@@ -199,11 +204,15 @@ defmodule Arbor.LLM.Eval.Subject do
   defp run_complete(transport, request, config) do
     start_time = System.monotonic_time(:millisecond)
 
-    case complete(transport, request, receive_timeout: config.timeout) do
+    case complete(transport, request,
+           receive_timeout: config.timeout,
+           max_response_bytes: @max_output_bytes
+         ) do
       {:ok, response} ->
         duration_ms = System.monotonic_time(:millisecond) - start_time
 
-        with {:ok, text} <- extract_text(response, config.max_output_bytes) do
+        with :ok <- validate_response_term(response, @max_output_bytes),
+             {:ok, text} <- extract_text(response, config.max_output_bytes) do
           if text == "" do
             log_empty_response(response, config.provider, config.model, duration_ms)
           end
@@ -283,7 +292,15 @@ defmodule Arbor.LLM.Eval.Subject do
       spawn_monitor(fn ->
         Process.put(:"$callers", [parent | List.wrap(callers)])
         watch_stream_owner(parent, self())
-        produce_stream(parent, ref, transport, request, limits.timeout)
+
+        produce_stream(
+          parent,
+          ref,
+          transport,
+          request,
+          limits.timeout,
+          @max_stream_event_bytes
+        )
       end)
 
     state = %{
@@ -318,15 +335,22 @@ defmodule Arbor.LLM.Eval.Subject do
     end)
   end
 
-  defp produce_stream(parent, ref, transport, request, timeout) do
+  defp produce_stream(parent, ref, transport, request, timeout, max_event_bytes) do
     case stream(transport, request, receive_timeout: timeout) do
       {:ok, events} ->
         Enum.reduce_while(events, :ok, fn event, :ok ->
-          send(parent, {ref, :event, event})
+          case validate_stream_event_term(event, max_event_bytes) do
+            :ok ->
+              send(parent, {ref, :event, event})
 
-          receive do
-            {^ref, :continue} -> {:cont, :ok}
-            {^ref, :stop} -> {:halt, :ok}
+              receive do
+                {^ref, :continue} -> {:cont, :ok}
+                {^ref, :stop} -> {:halt, :ok}
+              end
+
+            {:error, reason} ->
+              send(parent, {ref, :producer_error, reason})
+              {:halt, :error}
           end
         end)
 
@@ -580,7 +604,36 @@ defmodule Arbor.LLM.Eval.Subject do
         {:ok, text}
 
       true ->
-        {:ok, ""}
+        {:error, {:invalid_output, :valid_utf8_required}}
+    end
+  end
+
+  defp validate_response_term(response, maximum) do
+    ResponseBudget.validate(response,
+      max_bytes: maximum,
+      max_nodes: @max_response_nodes,
+      max_depth: @max_response_depth,
+      max_map_keys: @max_response_map_keys,
+      max_list_items: @max_response_list_items
+    )
+  end
+
+  defp validate_stream_event_term(event, maximum) do
+    case ResponseBudget.validate(event,
+           max_bytes: maximum,
+           max_nodes: @max_response_nodes,
+           max_depth: @max_response_depth,
+           max_map_keys: @max_response_map_keys,
+           max_list_items: @max_response_list_items
+         ) do
+      {:error, {:decoded_term_limit_exceeded, :bytes, ^maximum}} ->
+        {:error, {:stream_limit_exceeded, :event_bytes, maximum}}
+
+      {:error, reason} ->
+        {:error, {:invalid_stream_event, reason}}
+
+      :ok ->
+        :ok
     end
   end
 
@@ -619,13 +672,13 @@ defmodule Arbor.LLM.Eval.Subject do
     do: value
 
   defp bound_term(value, _depth) when is_integer(value) do
-    if value >= -@max_protocol_integer and value <= @max_protocol_integer,
+    if value >= -@max_protocol_integer - 1 and value <= @max_protocol_integer,
       do: value,
       else: :integer_out_of_range
   end
 
   defp bound_term(value, _depth) when is_float(value) do
-    if value >= -@max_temperature and value <= @max_temperature,
+    if ResponseBudget.finite_number?(value),
       do: value,
       else: :float_out_of_range
   end

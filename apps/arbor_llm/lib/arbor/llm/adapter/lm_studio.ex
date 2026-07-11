@@ -16,7 +16,7 @@ defmodule Arbor.LLM.Adapter.LmStudio do
 
   @behaviour Arbor.LLM.ProviderAdapter
 
-  alias Arbor.LLM.{ContentPart, Request, Response}
+  alias Arbor.LLM.{ContentPart, Request, Response, ResponseBudget}
 
   @provider "lm_studio_owned"
   # llama.cpp/LM Studio sampling knobs that live top-level in the chat-completions body.
@@ -27,17 +27,58 @@ defmodule Arbor.LLM.Adapter.LmStudio do
 
   @impl true
   def complete(%Request{} = request, opts \\ []) do
-    body = build_body(request)
-
-    case Req.post(chat_url(),
-           headers: [{"authorization", "Bearer lm-studio"}],
-           json: body,
-           receive_timeout: opts[:receive_timeout] || request.receive_timeout || 300_000
-         ) do
-      {:ok, %{status: 200, body: resp}} -> {:ok, parse_response(resp)}
-      {:ok, %{status: status, body: resp}} -> {:error, {:lm_studio_http, status, detail(resp)}}
-      {:error, reason} -> {:error, {:lm_studio_request_failed, reason}}
+    with {:ok, url} <- chat_url() do
+      do_complete(request, opts, url)
+    else
+      {:error, reason} -> {:error, {:invalid_lm_studio_endpoint, reason}}
     end
+  end
+
+  defp do_complete(request, opts, url) do
+    body = build_body(request)
+    maximum = Keyword.get(opts, :max_response_bytes, 16_777_216)
+
+    req =
+      Req.new(
+        url: url,
+        method: :post,
+        headers: [{"authorization", "Bearer lm-studio"}],
+        json: body,
+        receive_timeout: opts[:receive_timeout] || request.receive_timeout || 300_000
+      )
+      |> ResponseBudget.apply_req_receipt(maximum)
+
+    case Req.request(req) do
+      {:ok, %Req.Response{private: %{arbor_response_overflow: ^maximum}}} ->
+        {:error, {:response_bytes_exceeded, maximum}}
+
+      {:ok, %Req.Response{private: %{arbor_response_error: reason}}} ->
+        {:error, {:invalid_response_body, reason}}
+
+      {:ok, %{status: 200, body: resp}} when is_map(resp) ->
+        {:ok, parse_response(resp)}
+
+      {:ok, %{status: 200, body: resp}} when is_binary(resp) ->
+        with {:ok, decoded} <- decode_response(resp, maximum) do
+          {:ok, parse_response(decoded)}
+        end
+
+      {:ok, %{status: status, body: resp}} ->
+        {:error, {:lm_studio_http, status, detail(resp)}}
+
+      {:error, reason} ->
+        {:error, {:lm_studio_request_failed, reason}}
+    end
+  end
+
+  defp decode_response(body, maximum) do
+    ResponseBudget.decode_json(body,
+      max_bytes: maximum,
+      max_nodes: 100_000,
+      max_depth: 32,
+      max_map_keys: 10_000,
+      max_list_items: 100_000
+    )
   end
 
   # ── request body ──
@@ -117,11 +158,16 @@ defmodule Arbor.LLM.Adapter.LmStudio do
 
   defp content_field(_), do: ""
 
-  defp content_part(%{kind: :text, text: t}) when is_binary(t), do: %{"type" => "text", "text" => t}
+  defp content_part(%{kind: :text, text: t}) when is_binary(t),
+    do: %{"type" => "text", "text" => t}
+
   defp content_part(t) when is_binary(t), do: %{"type" => "text", "text" => t}
 
   defp content_part(%{kind: :image, data: data, media_type: mt}) when is_binary(data),
-    do: %{"type" => "image_url", "image_url" => %{"url" => "data:#{mt || "image/png"};base64,#{data}"}}
+    do: %{
+      "type" => "image_url",
+      "image_url" => %{"url" => "data:#{mt || "image/png"};base64,#{data}"}
+    }
 
   defp content_part(%{kind: :image, url: url}) when is_binary(url),
     do: %{"type" => "image_url", "image_url" => %{"url" => url}}
@@ -165,7 +211,43 @@ defmodule Arbor.LLM.Adapter.LmStudio do
 
   defp chat_url do
     base = Application.get_env(:arbor_llm, :lm_studio_base_url, "http://localhost:1234/v1")
-    String.trim_trailing(base, "/") <> "/chat/completions"
+
+    case validate_base_url(base) do
+      {:ok, canonical} -> {:ok, canonical <> "/chat/completions"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp validate_base_url(base) when is_binary(base) and byte_size(base) <= 4_096 do
+    uri = URI.parse(base)
+
+    cond do
+      uri.scheme not in ["http", "https"] -> {:error, :http_scheme_required}
+      not is_binary(uri.host) or uri.host == "" -> {:error, :host_required}
+      not valid_host?(uri.host) -> {:error, :valid_host_required}
+      not is_nil(uri.userinfo) -> {:error, :userinfo_forbidden}
+      not is_nil(uri.query) -> {:error, :query_forbidden}
+      not is_nil(uri.fragment) -> {:error, :fragment_forbidden}
+      not is_nil(uri.port) and uri.port not in 1..65_535 -> {:error, :valid_port_required}
+      uri.path not in [nil, "", "/", "/v1", "/v1/"] -> {:error, :base_path_must_be_v1}
+      true -> {:ok, URI.to_string(%{uri | path: "/v1", query: nil, fragment: nil})}
+    end
+  end
+
+  defp validate_base_url(_base), do: {:error, :bounded_string_required}
+
+  defp valid_host?(host) do
+    case :inet.parse_address(String.to_charlist(host)) do
+      {:ok, _address} ->
+        true
+
+      {:error, _reason} ->
+        byte_size(host) <= 253 and
+          Regex.match?(
+            ~r/^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$/,
+            host
+          )
+    end
   end
 
   defp model_id(model) when is_binary(model), do: model |> String.split("/") |> List.last()

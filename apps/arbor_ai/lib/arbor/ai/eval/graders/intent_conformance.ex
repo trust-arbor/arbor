@@ -80,15 +80,6 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
   (not necessarily the arithmetic mean - weight more important dimensions higher).
   """
 
-  @dimension_weights %{
-    phase_coverage: 0.25,
-    decision_fidelity: 0.15,
-    loop_correctness: 0.10,
-    error_handling: 0.10,
-    handler_types: 0.20,
-    prompt_relevance: 0.20
-  }
-
   @default_model "google/gemini-2.5-flash"
   @default_provider "openrouter"
   @default_timeout 60_000
@@ -98,6 +89,14 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
   @max_skill_input_bytes 1_048_576
   @max_dot_input_bytes 1_048_576
   @max_user_prompt_bytes 1_572_864
+  @score_keys ~w(phase_coverage decision_fidelity loop_correctness error_handling handler_types prompt_relevance overall)
+  @judge_term_limits [
+    max_bytes: 32_768,
+    max_nodes: 1_000,
+    max_depth: 16,
+    max_map_keys: 64,
+    max_list_items: 256
+  ]
 
   @impl true
   def grade(actual, _expected, opts \\ []) do
@@ -237,51 +236,44 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
       |> String.replace(~r/<think>.*?<\/think>/s, "")
       |> extract_json()
 
-    case Jason.decode(json) do
+    case Arbor.LLM.decode_bounded_json(json, @judge_term_limits) do
       {:ok, scores} when is_map(scores) -> build_result(scores)
       _error -> parse_failure(text)
     end
   end
 
   defp build_result(scores) do
-    dimensions = %{
-      phase_coverage: get_score(scores, "phase_coverage"),
-      decision_fidelity: get_score(scores, "decision_fidelity"),
-      loop_correctness: get_score(scores, "loop_correctness"),
-      error_handling: get_score(scores, "error_handling"),
-      handler_types: get_score(scores, "handler_types"),
-      prompt_relevance: get_score(scores, "prompt_relevance")
-    }
+    with {:ok, normalized} <- validate_scores(scores) do
+      dimensions = %{
+        phase_coverage: normalized["phase_coverage"],
+        decision_fidelity: normalized["decision_fidelity"],
+        loop_correctness: normalized["loop_correctness"],
+        error_handling: normalized["error_handling"],
+        handler_types: normalized["handler_types"],
+        prompt_relevance: normalized["prompt_relevance"]
+      }
 
-    overall =
-      case unit_score(scores["overall"]) do
-        {:ok, value} -> value
-        :error -> weighted_score(dimensions)
-      end
-      |> Float.round(2)
+      overall = Float.round(normalized["overall"], 2)
 
-    rationale =
-      case scores["brief_rationale"] do
-        value when is_binary(value) -> clean_text(value, @max_rationale_bytes)
-        _value -> ""
-      end
+      rationale =
+        case scores["brief_rationale"] do
+          value when is_binary(value) -> clean_text(value, @max_rationale_bytes)
+          _value -> ""
+        end
 
-    detail =
-      "phase=#{format_score(dimensions.phase_coverage)} " <>
-        "decision=#{format_score(dimensions.decision_fidelity)} " <>
-        "loop=#{format_score(dimensions.loop_correctness)} " <>
-        "error=#{format_score(dimensions.error_handling)} " <>
-        "handler=#{format_score(dimensions.handler_types)} " <>
-        "prompt=#{format_score(dimensions.prompt_relevance)}" <>
-        if(rationale == "", do: "", else: " | #{rationale}")
+      detail =
+        "phase=#{format_score(dimensions.phase_coverage)} " <>
+          "decision=#{format_score(dimensions.decision_fidelity)} " <>
+          "loop=#{format_score(dimensions.loop_correctness)} " <>
+          "error=#{format_score(dimensions.error_handling)} " <>
+          "handler=#{format_score(dimensions.handler_types)} " <>
+          "prompt=#{format_score(dimensions.prompt_relevance)}" <>
+          if(rationale == "", do: "", else: " | #{rationale}")
 
-    %{score: overall, passed: overall >= 0.6, detail: clean_text(detail, @max_detail_bytes)}
-  end
-
-  defp weighted_score(dimensions) do
-    Enum.reduce(dimensions, 0.0, fn {dimension, score}, total ->
-      total + score * Map.fetch!(@dimension_weights, dimension)
-    end)
+      %{score: overall, passed: overall >= 0.6, detail: clean_text(detail, @max_detail_bytes)}
+    else
+      {:error, reason} -> failure("Invalid judge scores: #{inspect_bounded(reason)}")
+    end
   end
 
   defp extract_json(text) do
@@ -297,22 +289,21 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
     end
   end
 
-  defp get_score(scores, key) do
-    case scores[key] do
-      value when is_integer(value) and value <= 0 -> 0.0
-      value when is_integer(value) and value >= 1 -> 1.0
-      value when is_float(value) and value <= 0.0 -> 0.0
-      value when is_float(value) and value >= 1.0 -> 1.0
-      value when is_float(value) -> value
-      _value -> 0.5
-    end
+  defp validate_scores(scores) do
+    Enum.reduce_while(@score_keys, {:ok, %{}}, fn key, {:ok, acc} ->
+      case unit_score(Map.get(scores, key)) do
+        {:ok, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
+        :error -> {:halt, {:error, {:exact_unit_score_required, key}}}
+      end
+    end)
   end
 
   defp unit_score(0), do: {:ok, 0.0}
   defp unit_score(1), do: {:ok, 1.0}
 
-  defp unit_score(value) when is_float(value) and value >= 0.0 and value <= 1.0,
-    do: {:ok, value}
+  defp unit_score(value)
+       when is_float(value) and value >= 0.0 and value <= 1.0,
+       do: {:ok, value}
 
   defp unit_score(_value), do: :error
 

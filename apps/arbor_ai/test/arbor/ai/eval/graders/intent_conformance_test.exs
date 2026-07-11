@@ -71,7 +71,7 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
     assert {:ok, _json} = Jason.encode(result)
   end
 
-  test "computes the weighted score when overall is malformed" do
+  test "security regression: malformed overall fails the whole grade" do
     response =
       Jason.encode!(%{
         "phase_coverage" => 1.0,
@@ -89,8 +89,9 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
         judge_fn: fn _, _, _, _, _ -> {:ok, response} end
       )
 
-    assert result.score == 0.79
-    assert result.passed
+    assert result.score == 0.0
+    refute result.passed
+    assert result.detail =~ "exact_unit_score_required"
   end
 
   test "fails closed on empty or malformed input without calling the judge" do
@@ -253,18 +254,20 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
     assert {:ok, _json} = Jason.encode(malformed)
   end
 
-  test "security regression: huge integer judge scores do not raise during float coercion" do
+  test "security regression: out-of-range judge scores never clamp into success" do
     huge_integer = String.duplicate("9", 1_000)
 
     response =
       """
       {
-        "phase_coverage": #{huge_integer},
-        "decision_fidelity": 1,
-        "loop_correctness": 1,
-        "error_handling": 1,
-        "handler_types": 1,
-        "prompt_relevance": 1
+        "phase_coverage": 9,
+        "decision_fidelity": 9,
+        "loop_correctness": 9,
+        "error_handling": 9,
+        "handler_types": 9,
+        "prompt_relevance": 9,
+        "overall": 9,
+        "brief_rationale": "#{huge_integer}"
       }
       """
 
@@ -274,10 +277,8 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
         judge_fn: fn _, _, _, _, _ -> {:ok, response} end
       )
 
-    assert result == %{
-             score: 1.0,
-             passed: true,
-             detail: "phase=1.0 decision=1.0 loop=1.0 error=1.0 handler=1.0 prompt=1.0"
-           }
+    assert result.score == 0.0
+    refute result.passed
+    assert result.detail =~ "exact_unit_score_required"
   end
 end

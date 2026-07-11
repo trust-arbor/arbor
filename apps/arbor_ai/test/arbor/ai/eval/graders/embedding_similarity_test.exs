@@ -96,6 +96,57 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
       assert result.detail =~ "numeric_vector_required"
     end
 
+    test "security regression: oversized invalid embedding ingress never reaches callback" do
+      parent = self()
+      oversized = String.duplicate("x", 2_000_000) <> <<255>>
+
+      result =
+        EmbeddingSimilarity.grade(oversized, "expected",
+          embed_fn: fn _, _, _, _ -> send(parent, :embed_called) end
+        )
+
+      refute_receive :embed_called
+      refute result.passed
+      assert result.detail =~ "text_bytes_exceeded"
+    end
+
+    test "security regression: malformed and path-confused endpoints fail before callback" do
+      parent = self()
+
+      for endpoint <- [
+            "ftp://embedding.test/v1/embeddings",
+            "http://user:pass@embedding.test/v1/embeddings",
+            "http://embedding.test/v1/embeddings?next=/evil",
+            "http://embedding.test/v1/embeddings#fragment",
+            "http://embedding.test:99999/v1/embeddings",
+            "http://bad host/v1/embeddings",
+            "http://embedding.test/other"
+          ] do
+        result =
+          EmbeddingSimilarity.grade("actual", "expected",
+            embed_url: endpoint,
+            embed_fn: fn _, _, _, _ -> send(parent, :embed_called) end
+          )
+
+        refute result.passed
+        assert result.detail =~ "invalid_option"
+      end
+
+      refute_receive :embed_called
+    end
+
+    test "security regression: embedding options are capped before Keyword traversal" do
+      opts = List.duplicate({:threshold, 0.5}, 17)
+      result = EmbeddingSimilarity.grade("actual", "expected", opts)
+
+      refute result.passed
+      assert result.detail =~ "option_count_exceeded"
+
+      unsupported = EmbeddingSimilarity.grade("actual", "expected", unknown: "value")
+      refute unsupported.passed
+      assert unsupported.detail =~ "unsupported"
+    end
+
     test "exercises the deterministic default HTTP embedding boundary" do
       previous_options = Req.default_options()
       parent = self()
