@@ -287,27 +287,13 @@ defmodule Arbor.Actions.Shell do
 
     # Execute after Trust already authorized. When the shell facade opts into
     # CapShell (`Arbor.Shell.compound_shell_enabled?/0`, default false), compound
-    # commands go through CapShell for per-token path/capability checks; otherwise
-    # (and for simple commands) use the bounded Executor via execute/2.
+    # commands go through the capability-checked facade
+    # (`execute_compound_with_capabilities/3` — per-command + per-path checks);
+    # otherwise (and for simple commands) use the bounded Executor via execute/2.
+    # Call only public Arbor.Shell APIs — never Sandbox or CapShell internals.
     defp execute_authorized_shell(agent_id, command, opts) do
-      if Arbor.Shell.compound_shell_enabled?() and Arbor.Shell.Sandbox.compound?(command) do
-        case Arbor.Shell.CapShell.run(agent_id, command, opts) do
-          {:ok, %{exit_code: code, stdout: out, stderr: err} = result} ->
-            {:ok,
-             %{
-               exit_code: code,
-               stdout: out,
-               stderr: err,
-               duration_ms: Map.get(result, :duration_ms, 0),
-               timed_out: Map.get(result, :timed_out, false)
-             }}
-
-          {:ok, result} when is_map(result) ->
-            {:ok, result}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
+      if Arbor.Shell.compound_shell_enabled?() and Arbor.Shell.compound_command?(command) do
+        Arbor.Shell.execute_compound_with_capabilities(agent_id, command, opts)
       else
         Arbor.Shell.execute(command, opts)
       end

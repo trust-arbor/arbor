@@ -25,11 +25,13 @@ defmodule Arbor.Shell.CapShell do
 
   ## Status / limitations (prototype)
 
-  - Wired into `Arbor.Shell.authorize_and_execute/3` (and the actions shell
-    adapter) behind `Arbor.Shell.compound_shell_enabled?/0`. That gate **defaults
-    false** until CapShell has absolute timeout and retained-output bounds
-    equivalent to `Arbor.Shell.Executor`. Operators opt in with
-    `config :arbor_shell, compound_shell_enabled: true`.
+  - Wired into `Arbor.Shell.authorize_and_execute/3` and the public facade
+    `Arbor.Shell.execute_compound_with_capabilities/3` (used by the actions
+    shell adapter) behind `Arbor.Shell.compound_shell_enabled?/0`. That gate
+    **defaults false** until CapShell has absolute timeout and retained-output
+    bounds equivalent to `Arbor.Shell.Executor`. Operators opt in with
+    `config :arbor_shell, compound_shell_enabled: true`. Other libraries must
+    call those facade APIs — not this module — for compound detection/execution.
   - The library's `paths` policy callback is arity-1 (path only, no read/write
     operation), so the fs check here is coarse: a path is allowed if the agent
     holds *any* fs capability (read or write) covering it. Finer read/write

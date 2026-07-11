@@ -282,6 +282,11 @@ defmodule Arbor.Actions.ShellTest do
       # default of true for :compound_shell_enabled. When the key is absent,
       # authorized compound commands must hit the bounded single-command path
       # (metacharacter rejection) — same fail-closed gate as Arbor.Shell.
+      #
+      # Behavioral pre-fix evidence: do not call newly added helpers before the
+      # public operation — on base (open CapShell default) this fails because
+      # Shell.Execute routes the compound to CapShell / executes the delayed
+      # touch, not because compound_shell_enabled?/0 is undefined.
       sleep_uri = "arbor://shell/exec/sleep"
       touch_uri = "arbor://shell/exec/touch"
       {:ok, profile} = Arbor.Trust.Store.get_profile(agent_id)
@@ -301,15 +306,15 @@ defmodule Arbor.Actions.ShellTest do
       prev = Application.get_env(:arbor_shell, :compound_shell_enabled)
       Application.delete_env(:arbor_shell, :compound_shell_enabled)
 
+      marker =
+        Path.join(
+          System.tmp_dir!(),
+          "actions_capshell_closed_#{System.unique_integer([:positive])}"
+        )
+
+      File.rm(marker)
+
       try do
-        refute Arbor.Shell.compound_shell_enabled?()
-
-        marker =
-          Path.join(
-            System.tmp_dir!(),
-            "actions_capshell_closed_#{System.unique_integer([:positive])}"
-          )
-
         assert {:error, message} =
                  Shell.Execute.run(
                    %{command: "sleep 1; touch #{marker}", sandbox: :basic},
@@ -328,6 +333,8 @@ defmodule Arbor.Actions.ShellTest do
         Process.sleep(1_500)
         refute File.exists?(marker), "action must not route compound to unbounded CapShell"
       after
+        File.rm(marker)
+
         if is_nil(prev),
           do: Application.delete_env(:arbor_shell, :compound_shell_enabled),
           else: Application.put_env(:arbor_shell, :compound_shell_enabled, prev)

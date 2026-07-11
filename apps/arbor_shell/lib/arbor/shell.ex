@@ -49,7 +49,7 @@ defmodule Arbor.Shell do
 
   @behaviour Arbor.Contracts.API.Shell
 
-  alias Arbor.Shell.{ExecutionRegistry, Executor, PortSession, Sandbox}
+  alias Arbor.Shell.{CapShell, ExecutionRegistry, Executor, PortSession, Sandbox}
   alias Arbor.Signals
 
   @default_sandbox :basic
@@ -97,6 +97,55 @@ defmodule Arbor.Shell do
     Application.get_env(:arbor_shell, :compound_shell_enabled, false) == true
   end
 
+  @doc """
+  Whether `command` contains shell metacharacters that mark it as compound
+  (sequencing `;`/`&&`/`||`, pipes `|`, substitution `$(…)`/backticks, or
+  redirection `>`/`<`).
+
+  Public facade over `Arbor.Shell.Sandbox.compound?/1`. Other libraries
+  (e.g. `Arbor.Actions.Shell`) must call this rather than importing Sandbox.
+  """
+  @spec compound_command?(String.t()) :: boolean()
+  def compound_command?(command) when is_binary(command), do: Sandbox.compound?(command)
+
+  @doc """
+  Execute a compound shell command with CapShell's **per-command and per-path**
+  capability checks for `agent_id`.
+
+  Public facade over `Arbor.Shell.CapShell`. Other libraries must not call
+  CapShell (or Sandbox) internals. Every external command and filesystem path
+  in the compound string is capability-checked — this is **not** an unchecked
+  authority bypass.
+
+  Callers that already performed a coarse Trust/Security authorization (for
+  example `Arbor.Actions.Shell.Execute` after `authorize_command/3`) use this
+  instead of `execute/2` when `compound_shell_enabled?/0` is true and
+  `compound_command?/1` is true. When CapShell is disabled (the default), prefer
+  `execute/2`, which rejects metacharacters on the bounded single-command path.
+  """
+  @spec execute_compound_with_capabilities(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def execute_compound_with_capabilities(agent_id, command, opts \\ [])
+      when is_binary(agent_id) and is_binary(command) do
+    case CapShell.run(agent_id, command, opts) do
+      {:ok, %{exit_code: code, stdout: out, stderr: err} = result} ->
+        {:ok,
+         %{
+           exit_code: code,
+           stdout: out,
+           stderr: err,
+           duration_ms: Map.get(result, :duration_ms, 0),
+           timed_out: Map.get(result, :timed_out, false)
+         }}
+
+      {:ok, result} when is_map(result) ->
+        {:ok, result}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   # ===========================================================================
   # Public API — Authorized versions (for agent callers)
   # ===========================================================================
@@ -135,7 +184,7 @@ defmodule Arbor.Shell do
   def authorize_and_execute(agent_id, command, opts \\ []) do
     opts = put_cap_allowlist(opts, agent_id)
 
-    if compound_shell_enabled?() and Arbor.Shell.Sandbox.compound?(command) do
+    if compound_shell_enabled?() and compound_command?(command) do
       authorize_and_execute_compound(agent_id, command, opts)
     else
       authorize_and_dispatch(agent_id, command, opts, fn -> execute(command, opts) end)
@@ -144,12 +193,12 @@ defmodule Arbor.Shell do
 
   # Compound commands (pipes, &&/||/;, $(…), redirection) — which the
   # single-command sandbox rejects — run through the capability-checked
-  # interpreter (Arbor.Shell.CapShell), which cap-checks EVERY command + every
-  # filesystem path. Gated by `compound_shell_enabled?/0` (Application config
-  # `:arbor_shell, :compound_shell_enabled`, **default false**): CapShell is an
-  # opt-in prototype until it has absolute timeout + output bounds equivalent to
-  # Executor. With the flag off/absent, the caller above falls back to the
-  # single-command path (sandbox metacharacter rejection).
+  # interpreter via `execute_compound_with_capabilities/3`, which cap-checks
+  # EVERY command + every filesystem path. Gated by `compound_shell_enabled?/0`
+  # (Application config `:arbor_shell, :compound_shell_enabled`, **default false**):
+  # CapShell is an opt-in prototype until it has absolute timeout + output bounds
+  # equivalent to Executor. With the flag off/absent, the caller above falls back
+  # to the single-command path (sandbox metacharacter rejection).
   #
   # The capability *gate* (gate-1) here cap-checks the first NON-builtin command
   # rather than the literal first token, so a compound that opens with a shell
@@ -163,14 +212,14 @@ defmodule Arbor.Shell do
   defp authorize_and_execute_compound(agent_id, command, opts) do
     case gate_command_for(command) do
       nil ->
-        capshell_execute(agent_id, command, opts)
+        execute_compound_with_capabilities(agent_id, command, opts)
 
       gate_command ->
         authorize_and_dispatch(
           agent_id,
           command,
           Keyword.put(opts, :gate_command, gate_command),
-          fn -> capshell_execute(agent_id, command, opts) end
+          fn -> execute_compound_with_capabilities(agent_id, command, opts) end
         )
     end
   end
@@ -194,16 +243,6 @@ defmodule Arbor.Shell do
 
       _ ->
         extract_command_name(command)
-    end
-  end
-
-  defp capshell_execute(agent_id, command, opts) do
-    case Arbor.Shell.CapShell.run(agent_id, command, opts) do
-      {:ok, %{exit_code: code, stdout: out, stderr: err}} ->
-        {:ok, %{exit_code: code, stdout: out, stderr: err}}
-
-      {:error, {:parse_error, _msg}} = error ->
-        error
     end
   end
 

@@ -98,14 +98,18 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       with_compound_shell(true, fn ->
         grant_shell_capability(agent_id, "arbor://shell/exec/git")
         target = Path.join(System.tmp_dir!(), "e2e_escape_#{:erlang.unique_integer([:positive])}")
+        File.rm(target)
         File.write!(target, "survive")
 
-        assert {:ok, result} =
-                 Arbor.Shell.authorize_and_execute(agent_id, "git --version; rm #{target}")
+        try do
+          assert {:ok, result} =
+                   Arbor.Shell.authorize_and_execute(agent_id, "git --version; rm #{target}")
 
-        assert File.exists?(target), "ungranted rm chained after git must be blocked"
-        assert result.stderr =~ "not allowed"
-        File.rm(target)
+          assert File.exists?(target), "ungranted rm chained after git must be blocked"
+          assert result.stderr =~ "not allowed"
+        after
+          File.rm(target)
+        end
       end)
     end
   end
@@ -121,27 +125,36 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       # config key is absent, authorize_and_execute must use the bounded
       # single-command path (sandbox metacharacter rejection) and must not run
       # a delayed side effect that CapShell would allow after a sleep.
+      #
+      # Behavioral pre-fix evidence: do not call newly added helpers before the
+      # public operation — on base (open CapShell default) this fails because
+      # authorize_and_execute routes the compound to CapShell / executes the
+      # delayed touch, not because compound_shell_enabled?/0 is undefined.
       grant_shell_capability(agent_id, "arbor://shell/exec/**")
 
       with_compound_shell(:absent, fn ->
-        refute Arbor.Shell.compound_shell_enabled?()
-
         marker =
           Path.join(
             System.tmp_dir!(),
             "e2e_capshell_closed_#{:erlang.unique_integer([:positive])}"
           )
 
-        # If CapShell incorrectly ran this, `touch` would fire after sleep.
-        assert {:error, {:shell_metacharacters, _}} =
-                 Arbor.Shell.authorize_and_execute(
-                   agent_id,
-                   "sleep 1; touch #{marker}",
-                   sandbox: :basic
-                 )
+        File.rm(marker)
 
-        Process.sleep(1_500)
-        refute File.exists?(marker), "delayed compound side effect must not execute"
+        try do
+          # If CapShell incorrectly ran this, `touch` would fire after sleep.
+          assert {:error, {:shell_metacharacters, _}} =
+                   Arbor.Shell.authorize_and_execute(
+                     agent_id,
+                     "sleep 1; touch #{marker}",
+                     sandbox: :basic
+                   )
+
+          Process.sleep(1_500)
+          refute File.exists?(marker), "delayed compound side effect must not execute"
+        after
+          File.rm(marker)
+        end
       end)
     end
 
@@ -195,6 +208,61 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
   end
 
   # ===========================================================================
+  # 1d. Public facade APIs for compound detection / CapShell execution
+  # ===========================================================================
+
+  describe "compound facade APIs" do
+    test "compound_command?/1 detects metacharacters without importing Sandbox" do
+      assert Arbor.Shell.compound_command?("sleep 1; touch /tmp/x")
+      assert Arbor.Shell.compound_command?("echo a && echo b")
+      assert Arbor.Shell.compound_command?("cat file | wc -l")
+      refute Arbor.Shell.compound_command?("echo hello")
+      refute Arbor.Shell.compound_command?("git --version")
+    end
+
+    test "execute_compound_with_capabilities/3 retains per-command capability checks",
+         %{agent_id: agent_id} do
+      # Facade must not be an unchecked bypass: agent holds only git; chained rm
+      # must be cap-denied by CapShell and must not delete the marker.
+      grant_shell_capability(agent_id, "arbor://shell/exec/git")
+
+      marker =
+        Path.join(System.tmp_dir!(), "e2e_facade_cap_#{:erlang.unique_integer([:positive])}")
+
+      File.write!(marker, "survive")
+
+      try do
+        assert {:ok, result} =
+                 Arbor.Shell.execute_compound_with_capabilities(
+                   agent_id,
+                   "git --version; rm #{marker}"
+                 )
+
+        assert File.exists?(marker), "ungranted rm must not run via compound facade"
+        assert result.stderr =~ "not allowed"
+      after
+        File.rm(marker)
+      end
+    end
+
+    test "execute_compound_with_capabilities/3 runs granted compound commands",
+         %{agent_id: agent_id} do
+      grant_shell_capability(agent_id, "arbor://shell/exec/git")
+
+      assert {:ok, result} =
+               Arbor.Shell.execute_compound_with_capabilities(
+                 agent_id,
+                 "git --version && echo facade-ok"
+               )
+
+      assert result.stdout =~ "facade-ok"
+      assert result.exit_code == 0
+      assert is_integer(result.duration_ms)
+      assert result.timed_out == false
+    end
+  end
+
+  # ===========================================================================
   # 2. Unauthorized execution
   # ===========================================================================
 
@@ -209,13 +277,18 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
     test "authorization error is returned before command runs", %{agent_id: agent_id} do
       # Use a command that would create a side effect if it ran
       marker = "/tmp/arbor_shell_auth_test_#{:erlang.unique_integer([:positive])}"
+      File.rm(marker)
 
-      result =
-        Arbor.Shell.authorize_and_execute(agent_id, "touch #{marker}", sandbox: :none)
+      try do
+        result =
+          Arbor.Shell.authorize_and_execute(agent_id, "touch #{marker}", sandbox: :none)
 
-      assert {:error, :unauthorized} = result
-      # Verify the command never ran
-      refute File.exists?(marker)
+        assert {:error, :unauthorized} = result
+        # Verify the command never ran
+        refute File.exists?(marker)
+      after
+        File.rm(marker)
+      end
     end
   end
 
