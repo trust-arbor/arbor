@@ -261,33 +261,24 @@ defmodule Arbor.Orchestrator do
   defp validate_authority_principal(_, _), do: {:error, :invalid_signing_authority}
 
   # Authority path rejects mixed legacy credential controls in opts.
+  # Key-presence based: even nil/malformed values count as mixed credentials.
   defp reject_mixed_authority_credentials(opts) when is_list(opts) do
-    cond do
-      Keyword.has_key?(opts, :signing_authority) ->
-        {:error, :mixed_signing_credentials}
-
-      is_function(Keyword.get(opts, :signer), 1) ->
-        {:error, :mixed_signing_credentials}
-
-      is_function(Keyword.get(opts, :authorizer), 2) ->
-        {:error, :mixed_signing_credentials}
-
-      match?(
-        key when is_binary(key) and byte_size(key) > 0,
-        Keyword.get(opts, :identity_private_key)
-      ) ->
-        {:error, :mixed_signing_credentials}
-
-      true ->
-        :ok
+    if Keyword.has_key?(opts, :signing_authority) or
+         Keyword.has_key?(opts, :signer) or
+         Keyword.has_key?(opts, :authorizer) or
+         Keyword.has_key?(opts, :identity_private_key) do
+      {:error, :mixed_signing_credentials}
+    else
+      :ok
     end
   end
 
-  # Legacy signer path rejects a parallel SigningAuthority in opts.
+  # Legacy signer path rejects any present :signing_authority key (even nil).
   defp reject_signing_authority_in_legacy_opts(opts) when is_list(opts) do
-    case Keyword.get(opts, :signing_authority) do
-      nil -> :ok
-      _ -> {:error, :mixed_signing_credentials}
+    if Keyword.has_key?(opts, :signing_authority) do
+      {:error, :mixed_signing_credentials}
+    else
+      :ok
     end
   end
 

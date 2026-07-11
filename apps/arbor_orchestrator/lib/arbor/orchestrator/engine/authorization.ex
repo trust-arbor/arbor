@@ -285,17 +285,23 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
 
     # Process-local only: opaque SigningAuthority for CapabilityCheck.
     # Never put into Engine context / checkpoint / RunAuthorization.
+    # Invalid non-nil authority is still attached so CapabilityCheck fails closed
+    # and never falls through to the legacy signer path.
     assigns =
       case Keyword.get(opts, :signing_authority) do
         %SigningAuthority{} = signing_authority ->
           Map.put(assigns, :signing_authority, signing_authority)
 
-        _ ->
+        nil ->
           assigns
+
+        invalid ->
+          Map.put(assigns, :signing_authority, invalid)
       end
 
     # Legacy: thread signer function for signed request creation in CapabilityCheck.
-    # When an authority is present, do not attach the legacy signer (exclusivity).
+    # When an authority is present (valid or invalid non-nil), do not attach the
+    # legacy signer (exclusivity — never fall through).
     assigns =
       if Map.has_key?(assigns, :signing_authority) do
         assigns

@@ -1212,8 +1212,9 @@ defmodule Arbor.Orchestrator.Engine do
     private_key = Keyword.get(opts, :identity_private_key)
 
     cond do
-      match?(%SigningAuthority{}, authority) and
-        is_binary(private_key) and byte_size(private_key) > 0 ->
+      # Key-presence exclusivity: with a SigningAuthority, any present legacy
+      # credential key (even nil/malformed) is mixed credentials.
+      match?(%SigningAuthority{}, authority) and mixed_legacy_credential_keys?(opts) ->
         {:error, :mixed_signing_credentials}
 
       match?(%SigningAuthority{}, authority) ->
@@ -1225,6 +1226,12 @@ defmodule Arbor.Orchestrator.Engine do
       true ->
         nil
     end
+  end
+
+  defp mixed_legacy_credential_keys?(opts) do
+    Keyword.has_key?(opts, :identity_private_key) or
+      Keyword.has_key?(opts, :signer) or
+      Keyword.has_key?(opts, :authorizer)
   end
 
   defp derive_checkpoint_hmac_via_authority(%SigningAuthority{} = authority) do

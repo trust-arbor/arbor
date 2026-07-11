@@ -713,14 +713,12 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
     end
   end
 
+  # Key-presence exclusivity: nil/malformed values still count as mixed.
   defp reject_mixed_authority_credentials(opts) do
     mixed? =
-      is_function(Keyword.get(opts, :signer), 1) or
-        is_function(Keyword.get(opts, :authorizer), 2) or
-        match?(
-          key when is_binary(key) and byte_size(key) > 0,
-          Keyword.get(opts, :identity_private_key)
-        )
+      Keyword.has_key?(opts, :signer) or
+        Keyword.has_key?(opts, :authorizer) or
+        Keyword.has_key?(opts, :identity_private_key)
 
     if mixed?, do: {:error, :mixed_signing_credentials}, else: :ok
   end

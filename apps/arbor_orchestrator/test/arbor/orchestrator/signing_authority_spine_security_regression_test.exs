@@ -14,6 +14,7 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
 
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.SigningAuthority
+  alias Arbor.Orchestrator.Authorization
   alias Arbor.Orchestrator.Engine
   alias Arbor.Orchestrator.Engine.RunAuthorization
   alias Arbor.Security
@@ -84,6 +85,31 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
                Arbor.Orchestrator.run_as(@dot, ctx.agent_id, authority,
                  signing_authority: authority
                )
+    end
+
+    test "security regression: key-presence exclusivity rejects nil/malformed mixed keys",
+         ctx do
+      {:ok, authority} = open_authority(ctx)
+      signer = Security.make_signer(ctx.agent_id, ctx.private_key)
+
+      # Presence of the key is enough — values need not be valid callables/keys.
+      assert {:error, :mixed_signing_credentials} =
+               Arbor.Orchestrator.run_as(@dot, ctx.agent_id, authority, signer: nil)
+
+      assert {:error, :mixed_signing_credentials} =
+               Arbor.Orchestrator.run_as(@dot, ctx.agent_id, authority, authorizer: nil)
+
+      assert {:error, :mixed_signing_credentials} =
+               Arbor.Orchestrator.run_as(@dot, ctx.agent_id, authority, identity_private_key: nil)
+
+      assert {:error, :mixed_signing_credentials} =
+               Arbor.Orchestrator.run_as(@dot, ctx.agent_id, authority,
+                 identity_private_key: :not_a_key
+               )
+
+      # Legacy rejects any present :signing_authority key, including nil.
+      assert {:error, :mixed_signing_credentials} =
+               Arbor.Orchestrator.run_as(@dot, ctx.agent_id, signer, signing_authority: nil)
     end
 
     test "security regression: legacy signer path rejects signing_authority in opts", ctx do
@@ -175,10 +201,10 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
       projection = RunAuthorization.projection(run_auth)
       refute Map.has_key?(projection, "signing_authority")
       refute Map.has_key?(projection, :signing_authority)
-      refute inspect(projection) =~ authority.token
-
-      # Digest inputs exclude the authority (no token material).
-      refute run_auth.binding_digest =~ authority.token
+      # Token is arbitrary binary — never use =~; match via term_to_binary.
+      refute contains_binary?(projection, authority.token)
+      refute contains_binary?(run_auth, authority.token)
+      refute contains_binary?(run_auth.binding_digest, authority.token)
 
       # Process-local Engine opts keep the authority for middleware/HMAC.
       assert %SigningAuthority{} = Keyword.get(bound_opts, :signing_authority)
@@ -187,6 +213,7 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
       seeds = RunAuthorization.seed_values(%{}, run_auth, root)
       refute Map.has_key?(seeds, "signing_authority")
       refute Map.has_key?(seeds, :signing_authority)
+      refute contains_binary?(seeds, authority.token)
     end
 
     test "security regression: mixed credentials at RunAuthorization fail closed", ctx do
@@ -212,6 +239,34 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
                  signer: fn _ -> {:ok, :x} end
                )
 
+      # Key-presence: nil/malformed legacy keys also mix.
+      assert {:error, :mixed_signing_credentials} =
+               RunAuthorization.prepare(graph,
+                 authorization: true,
+                 agent_id: ctx.agent_id,
+                 workdir: root,
+                 signing_authority: authority,
+                 signer: nil
+               )
+
+      assert {:error, :mixed_signing_credentials} =
+               RunAuthorization.prepare(graph,
+                 authorization: true,
+                 agent_id: ctx.agent_id,
+                 workdir: root,
+                 signing_authority: authority,
+                 authorizer: :not_a_function
+               )
+
+      assert {:error, :mixed_signing_credentials} =
+               RunAuthorization.prepare(graph,
+                 authorization: true,
+                 agent_id: ctx.agent_id,
+                 workdir: root,
+                 signing_authority: authority,
+                 identity_private_key: nil
+               )
+
       assert {:error, :principal_mismatch} =
                RunAuthorization.prepare(graph,
                  authorization: true,
@@ -222,6 +277,52 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
                    | principal_id: "agent_" <> String.duplicate("cd", 32)
                  }
                )
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Authorization gate: authority path never consults Config security seams
+  # ---------------------------------------------------------------------------
+
+  describe "Authorization.check_orchestrator_access SigningAuthority path" do
+    test "security regression: ignores Config.security_available? and still authorizes",
+         ctx do
+      {:ok, authority} = open_authority(ctx)
+
+      prev_override = Application.get_env(:arbor_orchestrator, :security_available_override)
+      prev_required = Application.get_env(:arbor_orchestrator, :security_required)
+
+      Application.put_env(:arbor_orchestrator, :security_available_override, false)
+      Application.put_env(:arbor_orchestrator, :security_required, true)
+
+      on_exit(fn ->
+        restore_env(:security_available_override, prev_override)
+        restore_env(:security_required, prev_required)
+      end)
+
+      # Parent consulted Config.security_available? and returned
+      # :security_unavailable. Candidate uses fixed Arbor.Security only.
+      assert :ok = Authorization.check_orchestrator_access(ctx.agent_id, authority)
+    end
+
+    test "security regression: never fails open via security_required?: false", ctx do
+      {:ok, authority} = open_authority(ctx)
+      assert :ok = Security.close_signing_authority(authority)
+
+      prev_override = Application.get_env(:arbor_orchestrator, :security_available_override)
+      prev_required = Application.get_env(:arbor_orchestrator, :security_required)
+
+      # Parent: unavailable + not required → :ok (fail-open) before signing.
+      Application.put_env(:arbor_orchestrator, :security_available_override, false)
+      Application.put_env(:arbor_orchestrator, :security_required, false)
+
+      on_exit(fn ->
+        restore_env(:security_available_override, prev_override)
+        restore_env(:security_required, prev_required)
+      end)
+
+      assert {:error, {:authority_signing_failed, :authority_not_found}} =
+               Authorization.check_orchestrator_access(ctx.agent_id, authority)
     end
   end
 
@@ -283,6 +384,25 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
                  signing_authority: authority,
                  identity_private_key: ctx.private_key
                )
+
+      # Key-presence: nil/malformed legacy keys also mix.
+      assert {:error, :mixed_signing_credentials} =
+               Engine.derive_checkpoint_hmac_secret(
+                 signing_authority: authority,
+                 identity_private_key: nil
+               )
+
+      assert {:error, :mixed_signing_credentials} =
+               Engine.derive_checkpoint_hmac_secret(
+                 signing_authority: authority,
+                 signer: nil
+               )
+
+      assert {:error, :mixed_signing_credentials} =
+               Engine.derive_checkpoint_hmac_secret(
+                 signing_authority: authority,
+                 authorizer: :bogus
+               )
     end
 
     test "security regression: authorized run with closed authority aborts before resume disable",
@@ -330,6 +450,14 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
       Security.open_signing_authority(proof)
     end
   end
+
+  # authority.token is an arbitrary binary — never use String =~ / Regex.
+  defp contains_binary?(term, needle) when is_binary(needle) do
+    :binary.match(:erlang.term_to_binary(term), needle) != :nomatch
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:arbor_orchestrator, key)
+  defp restore_env(key, val), do: Application.put_env(:arbor_orchestrator, key, val)
 
   defp ensure_authority_stack! do
     ensure_buffered_store!(:arbor_security_identities, "identities")

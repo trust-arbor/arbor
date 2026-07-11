@@ -6,11 +6,14 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
   @moduletag :security_regression
 
   alias Arbor.Common.SafePath
+  alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.Engine.{Context, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Middleware.{CapabilityCheck, Token}
+  alias Arbor.Security
+  alias Arbor.Security.SigningAuthorityBroker
 
   # Stub "security" modules injected via the Config.security_module/0 seam.
   # Each mimics Arbor.Security.authorize/4 returning one decision shape.
@@ -27,7 +30,10 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
   end
 
   defmodule DeniedSecurity do
-    def authorize(_agent, _resource, _action, _opts), do: {:error, :no_capability}
+    def authorize(_agent, _resource, _action, _opts) do
+      send(self(), {:config_security_authorize, :denied})
+      {:error, :no_capability}
+    end
   end
 
   defmodule LobbyOnlySecurity do
@@ -62,6 +68,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
   defp restore(key, val), do: Application.put_env(:arbor_orchestrator, key, val)
 
   defp token(attrs \\ %{}, opts \\ []) do
+    agent_id = Keyword.get(opts, :agent_id, "agent_test")
     node = %Node{id: "n", attrs: Map.merge(%{"type" => "compute"}, attrs)}
     raw = %Graph{nodes: %{"n" => node}, edges: [], attrs: %{}}
     {:ok, graph} = Arbor.Orchestrator.compile(raw)
@@ -69,7 +76,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
 
     {:ok, authority} =
       RunAuthorization.new(graph,
-        agent_id: "agent_test",
+        agent_id: agent_id,
         workdir: Keyword.get(opts, :workdir, File.cwd!())
       )
 
@@ -79,10 +86,18 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
       graph: graph,
       assigns: %{
         authorization: true,
-        agent_id: "agent_test",
+        agent_id: agent_id,
         run_authorization: authority
       }
     }
+  end
+
+  defp with_signing_authority(token, signing_authority) do
+    Map.update!(token, :assigns, fn assigns ->
+      assigns
+      |> Map.put(:signing_authority, signing_authority)
+      |> Map.delete(:signer)
+    end)
   end
 
   defp composition_workspace do
@@ -232,15 +247,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
           purpose: :session
         )
 
-      t =
-        token()
-        |> Map.update!(:assigns, fn assigns ->
-          assigns
-          |> Map.put(:signing_authority, forged)
-          |> Map.delete(:signer)
-        end)
-
-      result = CapabilityCheck.before_node(t)
+      result = CapabilityCheck.before_node(with_signing_authority(token(), forged))
 
       # Must fail closed via Arbor.Security.sign_with_authority (forged token),
       # never reach the RecordingSecurity double.
@@ -251,6 +258,161 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
                result.outcome.failure_reason =~ "Capability check failed"
 
       refute_received {:authorize, _, _}
+    end
+
+    test "invalid non-nil signing_authority fails closed and never falls through to legacy" do
+      Application.put_env(:arbor_orchestrator, :security_module, RecordingSecurity)
+
+      # Malformed authority value — must not call Config.security_module or signer.
+      t =
+        token()
+        |> with_signing_authority(:not_an_authority)
+        |> Map.update!(:assigns, fn assigns ->
+          Map.put(assigns, :signer, fn _resource ->
+            send(self(), :legacy_signer_called)
+            {:ok, :fake}
+          end)
+        end)
+
+      result = CapabilityCheck.before_node(t)
+
+      assert result.halted
+      assert result.outcome.status == :fail
+      assert result.outcome.failure_reason =~ "invalid_signing_authority"
+      refute_received {:authorize, _, _}
+      refute_received :legacy_signer_called
+    end
+
+    test "security regression: valid authority bypasses Config availability and ignores denying Config module" do
+      ensure_authority_stack!()
+
+      {:ok, identity} = Identity.generate(name: "cap-check-authority")
+      public_identity = Identity.public_only(identity)
+      :ok = Security.register_identity(public_identity)
+      :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+      :ok = Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(identity.agent_id)
+
+      on_exit(fn ->
+        _ = Security.delete_signing_key(identity.agent_id)
+        _ = Security.deregister_identity(identity.agent_id)
+        ensure_broker_started()
+      end)
+
+      {:ok, proof} =
+        Security.build_signing_authority_acquisition_proof(
+          identity.agent_id,
+          identity.private_key,
+          purpose: :session,
+          owner: self()
+        )
+
+      {:ok, authority} = Security.open_signing_authority(proof)
+
+      # Parent consulted Config.security_available? and halted. Candidate bypasses
+      # for SigningAuthority and uses fixed Arbor.Security only.
+      Application.put_env(:arbor_orchestrator, :security_available_override, false)
+      # Would deny if consulted — proves authority path never calls it.
+      Application.put_env(:arbor_orchestrator, :security_module, DeniedSecurity)
+
+      result =
+        CapabilityCheck.before_node(
+          with_signing_authority(token(%{}, agent_id: identity.agent_id), authority)
+        )
+
+      refute result.halted,
+             "valid SigningAuthority must bypass Config.security_available? and authorize via Arbor.Security"
+
+      refute_received {:config_security_authorize, :denied}
+      refute_received {:authorize, _, _}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Minimal authority stack for the valid-authority regression above.
+  # ---------------------------------------------------------------------------
+
+  defp ensure_authority_stack! do
+    ensure_buffered_store!(:arbor_security_identities, "identities")
+    ensure_buffered_store!(:arbor_security_signing_keys, "signing_keys")
+    ensure_buffered_store!(:arbor_security_capabilities, "capabilities")
+    ensure_child!(Arbor.Security.Identity.Registry, [])
+    ensure_child!(Arbor.Security.Identity.NonceCache, [])
+    ensure_broker_started()
+  end
+
+  defp ensure_buffered_store!(name, collection) do
+    case Process.whereis(name) do
+      pid when is_pid(pid) ->
+        :ok
+
+      nil ->
+        child =
+          Supervisor.child_spec(
+            {Arbor.Persistence.BufferedStore,
+             name: name, backend: nil, write_mode: :sync, collection: collection},
+            id: name
+          )
+
+        case Supervisor.start_child(Arbor.Security.Supervisor, child) do
+          {:ok, _} ->
+            :ok
+
+          {:error, {:already_started, _}} ->
+            :ok
+
+          {:error, {:already_present, _}} ->
+            _ = Supervisor.restart_child(Arbor.Security.Supervisor, name)
+            :ok
+
+          other ->
+            flunk("failed to start #{name}: #{inspect(other)}")
+        end
+    end
+  end
+
+  defp ensure_child!(module, args) do
+    case Process.whereis(module) do
+      pid when is_pid(pid) ->
+        :ok
+
+      nil ->
+        case Supervisor.start_child(Arbor.Security.Supervisor, {module, args}) do
+          {:ok, _} ->
+            :ok
+
+          {:error, {:already_started, _}} ->
+            :ok
+
+          {:error, {:already_present, _}} ->
+            _ = Supervisor.restart_child(Arbor.Security.Supervisor, module)
+            :ok
+
+          other ->
+            flunk("failed to start #{module}: #{inspect(other)}")
+        end
+    end
+  end
+
+  defp ensure_broker_started do
+    case Process.whereis(SigningAuthorityBroker) do
+      pid when is_pid(pid) ->
+        :ok
+
+      nil ->
+        case Supervisor.start_child(Arbor.Security.Supervisor, {SigningAuthorityBroker, []}) do
+          {:ok, _} ->
+            :ok
+
+          {:error, {:already_started, _}} ->
+            :ok
+
+          {:error, {:already_present, _}} ->
+            _ = Supervisor.restart_child(Arbor.Security.Supervisor, SigningAuthorityBroker)
+            :ok
+
+          other ->
+            flunk("failed to start SigningAuthorityBroker: #{inspect(other)}")
+        end
     end
   end
 end

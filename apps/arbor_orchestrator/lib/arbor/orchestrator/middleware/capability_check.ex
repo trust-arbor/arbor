@@ -38,11 +38,24 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
       not match?(%RunAuthorization{}, Map.get(token.assigns, :run_authorization)) ->
         halt(token, "Missing immutable run authorization")
 
+      # SigningAuthority (valid or invalid non-nil) bypasses Config availability
+      # precheck and uses the fixed Arbor.Security path in check_capabilities/1.
+      # Invalid non-nil authority fails closed there — never falls through to legacy.
+      signing_authority_present?(token) ->
+        check_capabilities(token)
+
       not Arbor.Orchestrator.Config.security_available?() ->
         halt(token, "Security subsystem unavailable (fail-closed)")
 
       true ->
         check_capabilities(token)
+    end
+  end
+
+  defp signing_authority_present?(token) do
+    case Map.get(token.assigns, :signing_authority) do
+      nil -> false
+      _present -> true
     end
   end
 
@@ -168,18 +181,22 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
 
   # SigningAuthority path: fixed Arbor.Security facade only — never consults
   # Config.security_module (test doubles must not affect this path).
+  # Invalid non-nil :signing_authority fails closed and never falls through to legacy.
   defp authorize_resource(token, agent_id, resource, auth_opts) do
     case Map.get(token.assigns, :signing_authority) do
       %SigningAuthority{} ->
         Arbor.Security.authorize(agent_id, resource, :execute, auth_opts)
 
-      _ ->
+      nil ->
         Arbor.Orchestrator.Config.security_module().authorize(
           agent_id,
           resource,
           :execute,
           auth_opts
         )
+
+      _invalid ->
+        {:error, :invalid_signing_authority}
     end
   end
 
@@ -198,6 +215,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
 
   # Prefer SigningAuthority over legacy signer. Authority signing failures
   # fail closed — never fall back to unsigned or signer credentials.
+  # Invalid non-nil authority never falls through to the legacy signer.
   defp signer_auth_opts(assigns, resource) do
     case Map.get(assigns, :signing_authority) do
       %SigningAuthority{} = signing_authority ->
@@ -206,8 +224,11 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
           {:error, reason} -> {:error, {:authority_signing_failed, reason}}
         end
 
-      _ ->
+      nil ->
         legacy_signer_auth_opts(assigns, resource)
+
+      _invalid ->
+        {:error, :invalid_signing_authority}
     end
   end
 
@@ -235,9 +256,12 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheck do
         %SigningAuthority{} ->
           authorize_caller_with_security(Arbor.Security, authority, resource, auth_opts)
 
-        _ ->
+        nil ->
           security = Arbor.Orchestrator.Config.security_module()
           authorize_caller_with_security(security, authority, resource, auth_opts)
+
+        _invalid ->
+          {:error, :invalid_signing_authority}
       end
     end
   end
