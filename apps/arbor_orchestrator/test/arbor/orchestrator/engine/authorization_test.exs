@@ -6,14 +6,13 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
 
-  @graph %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
-
   describe "authorize_and_execute/5 with authorization disabled" do
     test "calls handler directly when authorization opt is absent" do
       handler = stub_handler(:success, "executed")
       node = %Node{id: "build", attrs: %{"type" => "codergen"}}
+      graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
-      outcome = Authorization.authorize_and_execute(handler, node, Context.new(), @graph, [])
+      outcome = Authorization.authorize_and_execute(handler, node, Context.new(), graph, [])
 
       assert outcome.status == :success
       assert outcome.notes == "executed"
@@ -22,9 +21,10 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
     test "calls handler directly when authorization: false" do
       handler = stub_handler(:success, "ran")
       node = %Node{id: "deploy", attrs: %{"type" => "tool"}}
+      graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
       opts = [authorization: false]
 
-      outcome = Authorization.authorize_and_execute(handler, node, Context.new(), @graph, opts)
+      outcome = Authorization.authorize_and_execute(handler, node, Context.new(), graph, opts)
 
       assert outcome.status == :success
       assert outcome.notes == "ran"
@@ -32,13 +32,14 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
 
     test "works with module handlers" do
       node = %Node{id: "start", attrs: %{"shape" => "Mdiamond"}}
+      graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
       outcome =
         Authorization.authorize_and_execute(
           Arbor.Orchestrator.Handlers.StartHandler,
           node,
           Context.new(),
-          @graph,
+          graph,
           []
         )
 
@@ -52,9 +53,9 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       authorizer = fn _agent_id, _type -> :ok end
       node = %Node{id: "build", attrs: %{"type" => "codergen"}}
       ctx = Context.new(%{"session.agent_id" => "agent_abc"})
-      opts = auth_opts("agent_abc", authorizer)
+      {graph, node, opts} = compiled_auth_fixture(node, "agent_abc", authorizer)
 
-      outcome = Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
+      outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
 
       assert outcome.status == :success
       assert outcome.notes == "authorized run"
@@ -65,9 +66,9 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       authorizer = fn _agent_id, _type -> {:error, "insufficient privileges"} end
       node = %Node{id: "deploy", attrs: %{"type" => "tool"}}
       ctx = Context.new(%{"session.agent_id" => "agent_untrusted"})
-      opts = auth_opts("agent_untrusted", authorizer)
+      {graph, node, opts} = compiled_auth_fixture(node, "agent_untrusted", authorizer)
 
-      outcome = Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
+      outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
 
       assert outcome.status == :fail
       assert outcome.failure_reason == "unauthorized: tool for agent agent_untrusted"
@@ -77,9 +78,9 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       handler = stub_handler(:success, "should not run")
       node = %Node{id: "build", attrs: %{"type" => "codergen"}}
       ctx = Context.new(%{"session.agent_id" => "agent_abc"})
-      opts = auth_opts("agent_abc")
+      {graph, node, opts} = compiled_auth_fixture(node, "agent_abc")
 
-      outcome = Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
+      outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
 
       assert outcome.status == :fail
       assert outcome.failure_reason =~ "unauthorized"
@@ -96,9 +97,9 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       handler = stub_handler(:success)
       node = %Node{id: "x", attrs: %{"type" => "file.write"}}
       ctx = Context.new(%{"session.agent_id" => "agent_42"})
-      opts = auth_opts("agent_42", authorizer)
+      {graph, node, opts} = compiled_auth_fixture(node, "agent_42", authorizer)
 
-      Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
+      Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
 
       assert_received {:auth_check, "agent_42", "file.write"}
     end
@@ -113,9 +114,9 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
 
       handler = stub_handler(:success)
       node = %Node{id: "x", attrs: %{"type" => "codergen"}}
-      opts = auth_opts("agent_abc", authorizer)
+      {graph, node, opts} = compiled_auth_fixture(node, "agent_abc", authorizer)
 
-      Authorization.authorize_and_execute(handler, node, Context.new(), @graph, opts)
+      Authorization.authorize_and_execute(handler, node, Context.new(), graph, opts)
 
       assert_received {:agent, "agent_abc"}
     end
@@ -127,9 +128,9 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       authorizer = fn _a, _t -> {:error, "always deny"} end
       node = %Node{id: "start", attrs: %{"shape" => "Mdiamond"}}
       ctx = Context.new(%{"session.agent_id" => "agent_abc"})
-      opts = auth_opts("agent_abc", authorizer)
+      {graph, node, opts} = compiled_auth_fixture(node, "agent_abc", authorizer)
 
-      outcome = Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
+      outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
 
       assert outcome.status == :success
       assert outcome.notes == "start ok"
@@ -140,9 +141,9 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       authorizer = fn _a, _t -> {:error, "always deny"} end
       node = %Node{id: "done", attrs: %{"type" => "exit"}}
       ctx = Context.new(%{"session.agent_id" => "agent_abc"})
-      opts = auth_opts("agent_abc", authorizer)
+      {graph, node, opts} = compiled_auth_fixture(node, "agent_abc", authorizer)
 
-      outcome = Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
+      outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
 
       assert outcome.status == :success
       assert outcome.notes == "exit ok"
@@ -153,9 +154,9 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       authorizer = fn _a, _t -> {:error, "deny"} end
       node = %Node{id: "entry", attrs: %{"shape" => "Mdiamond"}}
       ctx = Context.new(%{"session.agent_id" => "agent_abc"})
-      opts = auth_opts("agent_abc", authorizer)
+      {graph, node, opts} = compiled_auth_fixture(node, "agent_abc", authorizer)
 
-      outcome = Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
+      outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
       assert outcome.status == :success
     end
 
@@ -164,9 +165,9 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
       authorizer = fn _a, _t -> {:error, "deny"} end
       node = %Node{id: "fin", attrs: %{"type" => "exit"}}
       ctx = Context.new(%{"session.agent_id" => "agent_abc"})
-      opts = auth_opts("agent_abc", authorizer)
+      {graph, node, opts} = compiled_auth_fixture(node, "agent_abc", authorizer)
 
-      outcome = Authorization.authorize_and_execute(handler, node, ctx, @graph, opts)
+      outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
       assert outcome.status == :success
     end
   end
@@ -221,17 +222,27 @@ defmodule Arbor.Orchestrator.Engine.AuthorizationTest do
     end
   end
 
-  defp auth_opts(principal, authorizer \\ nil) do
-    {:ok, authority} =
-      RunAuthorization.new(@graph, agent_id: principal, workdir: File.cwd!())
+  # Assemble the tested node, compile via IR Compiler, fetch the enriched
+  # node, and mint RunAuthorization from that same compiled graph so
+  # graph/node/authority cannot drift.
+  defp compiled_auth_fixture(%Node{} = node, principal, authorizer \\ nil) do
+    raw = %Graph{id: "test", nodes: %{node.id => node}, edges: [], attrs: %{}}
+    {:ok, graph} = Arbor.Orchestrator.compile(raw)
+    enriched = Map.fetch!(graph.nodes, node.id)
 
-    [
-      authorization: true,
-      agent_id: principal,
-      run_authorization: authority
-    ]
-    |> then(fn opts ->
-      if authorizer, do: Keyword.put(opts, :authorizer, authorizer), else: opts
-    end)
+    {:ok, authority} =
+      RunAuthorization.new(graph, agent_id: principal, workdir: File.cwd!())
+
+    opts =
+      [
+        authorization: true,
+        agent_id: principal,
+        run_authorization: authority
+      ]
+      |> then(fn opts ->
+        if authorizer, do: Keyword.put(opts, :authorizer, authorizer), else: opts
+      end)
+
+    {graph, enriched, opts}
   end
 end

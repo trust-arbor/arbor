@@ -68,14 +68,23 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
     end)
   end
 
-  defp authorization_opts(graph, principal, authorizer \\ nil) do
+  # Returns {compiled_graph, enriched_node, opts} so authority, graph, and
+  # executed node cannot drift. Never authorizes an empty/uncompiled graph.
+  defp authorization_fixture(%Node{} = node, principal, authorizer \\ nil) do
+    raw = %Graph{id: "test", nodes: %{node.id => node}, edges: [], attrs: %{}}
+    {:ok, graph} = Arbor.Orchestrator.compile(raw)
+    enriched = Map.fetch!(graph.nodes, node.id)
+
     {:ok, authority} =
       RunAuthorization.new(graph, agent_id: principal, workdir: File.cwd!())
 
-    [authorization: true, agent_id: principal, run_authorization: authority]
-    |> then(fn opts ->
-      if authorizer, do: Keyword.put(opts, :authorizer, authorizer), else: opts
-    end)
+    opts =
+      [authorization: true, agent_id: principal, run_authorization: authority]
+      |> then(fn opts ->
+        if authorizer, do: Keyword.put(opts, :authorizer, authorizer), else: opts
+      end)
+
+    {graph, enriched, opts}
   end
 
   defp collect_events(opts_extra) do
@@ -1206,8 +1215,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
       authorizer = fn _agent_id, _type -> :ok end
       node = %Node{id: "task", attrs: %{"type" => "codergen"}}
       ctx = Context.new(%{"session.agent_id" => "agent_001"})
-      graph = %Graph{attrs: %{}}
-      opts = authorization_opts(graph, "agent_001", authorizer)
+      {graph, node, opts} = authorization_fixture(node, "agent_001", authorizer)
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
       assert outcome.status == :success
@@ -1222,8 +1230,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
       authorizer = fn _agent_id, _type -> {:error, "denied"} end
       node = %Node{id: "task", attrs: %{"type" => "tool"}}
       ctx = Context.new(%{"session.agent_id" => "untrusted"})
-      graph = %Graph{attrs: %{}}
-      opts = authorization_opts(graph, "untrusted", authorizer)
+      {graph, node, opts} = authorization_fixture(node, "untrusted", authorizer)
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
       assert outcome.status == :fail
@@ -1240,8 +1247,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
       authorizer = fn _agent_id, _type -> {:error, "denied"} end
       node = %Node{id: "start", attrs: %{"shape" => "Mdiamond"}}
       ctx = Context.new(%{"session.agent_id" => "untrusted"})
-      graph = %Graph{attrs: %{}}
-      opts = authorization_opts(graph, "untrusted", authorizer)
+      {graph, node, opts} = authorization_fixture(node, "untrusted", authorizer)
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
       # Start nodes bypass authorization
@@ -1257,8 +1263,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
       authorizer = fn _agent_id, _type -> {:error, "denied"} end
       node = %Node{id: "exit", attrs: %{"shape" => "Msquare"}}
       ctx = Context.new(%{"session.agent_id" => "untrusted"})
-      graph = %Graph{attrs: %{}}
-      opts = authorization_opts(graph, "untrusted", authorizer)
+      {graph, node, opts} = authorization_fixture(node, "untrusted", authorizer)
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
       assert outcome.status == :success
@@ -1272,8 +1277,7 @@ defmodule Arbor.Orchestrator.EngineCoverageTest do
 
       node = %Node{id: "task", attrs: %{"type" => "codergen"}}
       ctx = Context.new(%{"session.agent_id" => "agent"})
-      graph = %Graph{attrs: %{}}
-      opts = authorization_opts(graph, "agent")
+      {graph, node, opts} = authorization_fixture(node, "agent")
 
       outcome = Authorization.authorize_and_execute(handler, node, ctx, graph, opts)
       assert outcome.status == :fail

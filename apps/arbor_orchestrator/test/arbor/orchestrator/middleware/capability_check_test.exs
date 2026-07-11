@@ -11,8 +11,12 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckTest do
   defp make_token(attrs \\ %{}, assigns \\ %{}) do
     node = %Node{id: "cap_node", attrs: Map.merge(%{"type" => "compute"}, attrs)}
     context = %Context{values: %{}}
-    graph = %Graph{nodes: %{"cap_node" => node}, edges: [], attrs: %{}}
-    {:ok, authority} = RunAuthorization.new(graph, agent_id: "agent_test", workdir: File.cwd!())
+    raw = %Graph{nodes: %{"cap_node" => node}, edges: [], attrs: %{}}
+    {:ok, graph} = Arbor.Orchestrator.compile(raw)
+    node = Map.fetch!(graph.nodes, "cap_node")
+
+    {:ok, authority} =
+      RunAuthorization.new(graph, agent_id: "agent_test", workdir: File.cwd!())
 
     default_assigns = %{
       authorization: true,

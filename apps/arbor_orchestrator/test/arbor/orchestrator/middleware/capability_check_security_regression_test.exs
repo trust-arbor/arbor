@@ -61,7 +61,9 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
 
   defp token(attrs \\ %{}, opts \\ []) do
     node = %Node{id: "n", attrs: Map.merge(%{"type" => "compute"}, attrs)}
-    graph = %Graph{nodes: %{"n" => node}, edges: [], attrs: %{}}
+    raw = %Graph{nodes: %{"n" => node}, edges: [], attrs: %{}}
+    {:ok, graph} = Arbor.Orchestrator.compile(raw)
+    node = Map.fetch!(graph.nodes, "n")
 
     {:ok, authority} =
       RunAuthorization.new(graph,
@@ -145,7 +147,22 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
     test "malformed file-backed composition bindings fail closed" do
       Application.put_env(:arbor_orchestrator, :security_module, GrantedSecurity)
 
-      for graph_file <- [nil, "", <<255>>, <<"child", 0, ".dot">>, 123] do
+      # Invalid UTF-8 cannot produce a compiled graph hash, so RunAuthorization
+      # itself fails closed before CapabilityCheck runs.
+      invalid_utf8_node = %Node{
+        id: "n",
+        attrs: %{"type" => "graph.invoke", "graph_file" => <<255>>}
+      }
+
+      raw = %Graph{nodes: %{"n" => invalid_utf8_node}, edges: [], attrs: %{}}
+      {:ok, compiled} = Arbor.Orchestrator.compile(raw)
+
+      assert {:error, :compiled_graph_hash_failed} =
+               RunAuthorization.new(compiled, agent_id: "agent_test", workdir: File.cwd!())
+
+      # Other malformed values still compile and reach CapabilityCheck under
+      # valid run authority, then fail closed at path validation.
+      for graph_file <- [nil, "", <<"child", 0, ".dot">>, 123] do
         result =
           CapabilityCheck.before_node(
             token(%{"type" => "graph.invoke", "graph_file" => graph_file})

@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Orchestrator.Engine.{Context, Outcome}
+  alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.IR.TaintProfile
@@ -22,13 +22,24 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
   defp make_token(attrs \\ %{}, assigns \\ %{}) do
     node = %Node{id: "test_node", attrs: Map.merge(%{"type" => "compute"}, attrs)}
     context = %Context{values: %{}}
-    graph = %Graph{nodes: %{"test_node" => node}, edges: [], attrs: %{}}
+    raw = %Graph{nodes: %{"test_node" => node}, edges: [], attrs: %{}}
+    {:ok, graph} = Arbor.Orchestrator.compile(raw)
+    node = Map.fetch!(graph.nodes, "test_node")
+
+    {:ok, authority} =
+      RunAuthorization.new(graph, agent_id: "agent_test", workdir: File.cwd!())
+
+    default_assigns = %{
+      authorization: true,
+      agent_id: "agent_test",
+      run_authorization: authority
+    }
 
     %Token{
       node: node,
       context: context,
       graph: graph,
-      assigns: assigns
+      assigns: Map.merge(default_assigns, assigns)
     }
   end
 
@@ -765,13 +776,35 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
   describe "integration: compiled node through middleware chain" do
     test "compiled node with taint_profile flows through CapabilityCheck → TaintCheck" do
       profile = %TaintProfile{required_sanitizations: 0, min_confidence: :unverified}
-      node = make_compiled_node(%{taint_profile: profile, capabilities_required: []})
-      context = %Context{values: %{}}
-      graph = %Graph{nodes: %{node.id => node}, edges: [], attrs: %{}}
+      # Build a real IR-compiled graph (never set compiled=true by hand) so the
+      # node and RunAuthorization share one authority surface.
+      raw_node = %Node{
+        id: "compiled_node",
+        attrs: %{"type" => "codergen"}
+      }
 
-      token = %Token{node: node, context: context, graph: graph, assigns: %{}}
+      raw = %Graph{nodes: %{"compiled_node" => raw_node}, edges: [], attrs: %{}}
+      {:ok, graph} = Arbor.Orchestrator.compile(raw)
+      node = Map.fetch!(graph.nodes, "compiled_node")
+      # Overlay the taint_profile under test on the compiler-enriched node.
+      node = %{node | taint_profile: profile, capabilities_required: []}
 
-      # Run capability check — should pass (no security available or no caps required)
+      {:ok, authority} =
+        RunAuthorization.new(graph, agent_id: "agent_test", workdir: File.cwd!())
+
+      token = %Token{
+        node: node,
+        context: %Context{values: %{}},
+        graph: graph,
+        assigns: %{
+          authorization: true,
+          agent_id: "agent_test",
+          run_authorization: authority
+        }
+      }
+
+      # CapabilityCheck under real authority — proceeds when Security grants
+      # or is unavailable depending on test env.
       token = CapabilityCheck.before_node(token)
       refute token.halted
 

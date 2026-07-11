@@ -90,6 +90,27 @@ defmodule Arbor.Orchestrator.Session.IntegrationTest do
     {:ok, pid}
   end
 
+  # ── parse_dot_file loads IR-compiled graphs ──────────────────
+
+  describe "loaded turn graph is IR-compiled (not parse-only)" do
+    test "session init compiles the turn DOT so authorized execution can mint RunAuthorization",
+         ctx do
+      {:ok, pid} = start_session(ctx)
+      state = Session.get_state(pid)
+
+      # Behavioral regression guard: parse_dot_file must go through
+      # Arbor.Orchestrator.compile/1. A parse-only loader leaves compiled=false
+      # and empty handler_module, and fails closed at RunAuthorization.
+      assert state.turn_graph.compiled == true,
+             "turn_graph must be IR-compiled (parse_dot_file must not return parse-only graphs)"
+
+      classify = Map.fetch!(state.turn_graph.nodes, "classify")
+
+      assert classify.handler_module == Arbor.Orchestrator.Handlers.ComputeHandler,
+             "classify node must carry compiler-populated handler_module"
+    end
+  end
+
   # ── execution_mode ────────────────────────────────────────────
 
   describe "execution_mode" do

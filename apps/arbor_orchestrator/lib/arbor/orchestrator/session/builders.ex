@@ -504,7 +504,10 @@ defmodule Arbor.Orchestrator.Session.Builders do
   @doc false
   def parse_dot_file(path) do
     with {:ok, source} <- File.read(path) do
-      Arbor.Orchestrator.parse(source)
+      # Session init / reload_dot / HeartbeatService feed this graph into
+      # authorized Engine execution, which requires IR-compiled graphs
+      # (RunAuthorization + ExecutionManifest.compiled_graph_hash/1).
+      Arbor.Orchestrator.compile(source)
     end
   end
 
