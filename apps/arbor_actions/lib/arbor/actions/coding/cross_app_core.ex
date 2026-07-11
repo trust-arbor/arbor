@@ -18,9 +18,12 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   @max_identifier_bytes 64
   @max_test_paths 256
   @max_output_list 2_000
-  # Aggregate test excerpts stay fixed-size regardless of affected-app count.
-  @max_aggregate_excerpt 2_000
+  # Process/stream excerpts and aggregate evidence are fixed-size by *bytes*.
+  @max_output_excerpt_bytes 2_000
+  @max_aggregate_excerpt_bytes 2_000
   @excerpt_omission_marker "\n...[omitted]...\n"
+  # U+FFFD replacement character in UTF-8.
+  @utf8_replacement <<0xEF, 0xBF, 0xBD>>
 
   @root_wide_exact MapSet.new([
                      "mix.exs",
@@ -255,9 +258,13 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       "exit_code" => exit_code,
       "reason" => Keyword.get(opts, :reason),
       "stdout_excerpt" =>
-        Map.get(feedback, "stdout_excerpt") || Map.get(feedback, :stdout_excerpt) || "",
+        json_safe_utf8(
+          Map.get(feedback, "stdout_excerpt") || Map.get(feedback, :stdout_excerpt) || ""
+        ),
       "stderr_excerpt" =>
-        Map.get(feedback, "stderr_excerpt") || Map.get(feedback, :stderr_excerpt) || "",
+        json_safe_utf8(
+          Map.get(feedback, "stderr_excerpt") || Map.get(feedback, :stderr_excerpt) || ""
+        ),
       "stdout_truncated" =>
         Map.get(feedback, "stdout_truncated") || Map.get(feedback, :stdout_truncated) || false,
       "stderr_truncated" =>
@@ -284,6 +291,56 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       "stdout_sha256" => sha256(""),
       "stderr_sha256" => sha256("")
     }
+  end
+
+  @doc """
+  Build JSON-clean Mix feedback from a raw process result map.
+
+  Process streams are treated as arbitrary bytes: SHA-256 hashes the raw binary,
+  excerpts are UTF-8-safe for Jason, and excerpt length is bounded by *bytes*
+  without splitting multi-byte codepoints.
+  """
+  @spec feedback_from_result(map()) :: map()
+  def feedback_from_result(result) when is_map(result) do
+    stdout = raw_stream(result, :stdout)
+    stderr = raw_stream(result, :stderr)
+    exit_code = Map.get(result, :exit_code) || Map.get(result, "exit_code")
+
+    {stdout_excerpt, stdout_truncated} = bound_output_excerpt(stdout)
+    {stderr_excerpt, stderr_truncated} = bound_output_excerpt(stderr)
+
+    %{
+      "exit_code" => exit_code,
+      "passed" => exit_code == 0,
+      "stdout_excerpt" => stdout_excerpt,
+      "stderr_excerpt" => stderr_excerpt,
+      "stdout_truncated" => stdout_truncated,
+      "stderr_truncated" => stderr_truncated,
+      "stdout_sha256" => sha256(stdout),
+      "stderr_sha256" => sha256(stderr)
+    }
+  end
+
+  @doc """
+  True only for exact runner/result timeout markers.
+
+  Never inspects stdout/stderr/reason text for words like "timeout".
+  """
+  @spec runner_timed_out?(term()) :: boolean()
+  def runner_timed_out?(result) when is_map(result) do
+    Map.get(result, :timed_out) == true or Map.get(result, "timed_out") == true
+  end
+
+  def runner_timed_out?(_), do: false
+
+  @doc """
+  Stage-level timeout after a child returns: runner marker **or** shared budget
+  fully consumed (`remaining_ms_after <= 0`), including the final child.
+  """
+  @spec child_timed_out?(boolean(), integer()) :: boolean()
+  def child_timed_out?(runner_timed_out?, remaining_ms_after)
+      when is_boolean(runner_timed_out?) and is_integer(remaining_ms_after) do
+    runner_timed_out? or remaining_ms_after <= 0
   end
 
   @doc """
@@ -318,6 +375,8 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   Deadline/process wall-clock work stays in the shell; this only maps feedback
   into a pure per-app record. Timed-out processes are failures with
   `tests_timed_out`; non-zero exits use the stable `tests_failed` reason.
+  Timeout classification is driven solely by the `timed_out` option (exact
+  shape from the shell), never by substring matching on output text.
   """
   @spec classify_app_test_result(String.t(), map(), keyword()) :: app_test_result()
   def classify_app_test_result(path, feedback, opts \\ [])
@@ -334,16 +393,24 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
         true -> "tests_failed"
       end
 
+    stdout_excerpt =
+      json_safe_utf8(
+        Map.get(feedback, "stdout_excerpt") || Map.get(feedback, :stdout_excerpt) || ""
+      )
+
+    stderr_excerpt =
+      json_safe_utf8(
+        Map.get(feedback, "stderr_excerpt") || Map.get(feedback, :stderr_excerpt) || ""
+      )
+
     %{
       path: path,
       passed: passed,
       timed_out: timed_out,
       exit_code: exit_code,
       reason: reason,
-      stdout_excerpt:
-        Map.get(feedback, "stdout_excerpt") || Map.get(feedback, :stdout_excerpt) || "",
-      stderr_excerpt:
-        Map.get(feedback, "stderr_excerpt") || Map.get(feedback, :stderr_excerpt) || "",
+      stdout_excerpt: stdout_excerpt,
+      stderr_excerpt: stderr_excerpt,
       stdout_truncated:
         Map.get(feedback, "stdout_truncated") || Map.get(feedback, :stdout_truncated) || false,
       stderr_truncated:
@@ -381,10 +448,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   @doc """
   Aggregate ordered per-app test results into the existing JSON-clean check shape.
 
-  Excerpts are path-labeled and re-bounded to a fixed size independent of app
-  count. Aggregate hashes are derived from each path plus that process's
+  Excerpts are path-labeled and re-bounded to a fixed *byte* size independent of
+  app count. Aggregate hashes are derived from each path plus that process's
   stdout/stderr hashes so completed invocations remain covered without retaining
-  unbounded process output.
+  unbounded process output. Prior successful children stay in the aggregate when
+  a later child fails or times out.
   """
   @spec aggregate_test_check([app_test_result()]) :: map()
   def aggregate_test_check([]), do: empty_pass_check("no_existing_test_dirs")
@@ -441,30 +509,56 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   @doc false
-  def max_aggregate_excerpt, do: @max_aggregate_excerpt
+  def max_aggregate_excerpt, do: @max_aggregate_excerpt_bytes
+
+  @doc false
+  def max_output_excerpt_bytes, do: @max_output_excerpt_bytes
+
+  @doc false
+  def bound_output_excerpt(raw) when is_binary(raw) do
+    safe = json_safe_utf8(raw)
+
+    if byte_size(safe) <= @max_output_excerpt_bytes do
+      {safe, false}
+    else
+      marker = @excerpt_omission_marker
+      available = @max_output_excerpt_bytes - byte_size(marker)
+      head_budget = div(available, 2)
+      tail_budget = available - head_budget
+
+      head = take_utf8_prefix_bytes(safe, head_budget)
+      tail = take_utf8_suffix_bytes(safe, tail_budget)
+      {head <> marker <> tail, true}
+    end
+  end
+
+  def bound_output_excerpt(_), do: {"", false}
+
+  @doc false
+  def json_safe_utf8(data) when is_binary(data), do: replace_invalid_utf8(data)
+  def json_safe_utf8(_), do: ""
 
   defp bound_aggregate_excerpt(app_results, field) do
     text =
       app_results
       |> Enum.map(fn result ->
-        body = Map.get(result, field) || ""
-        "[" <> result.path <> "]\n" <> body
+        body = json_safe_utf8(Map.get(result, field) || "")
+        path = json_safe_utf8(result.path)
+        "[" <> path <> "]\n" <> body
       end)
       |> Enum.join("\n")
 
-    if String.length(text) <= @max_aggregate_excerpt do
+    if byte_size(text) <= @max_aggregate_excerpt_bytes do
       {text, false}
     else
-      available = @max_aggregate_excerpt - String.length(@excerpt_omission_marker)
-      head_length = div(available, 2)
-      tail_length = available - head_length
+      marker = @excerpt_omission_marker
+      available = @max_aggregate_excerpt_bytes - byte_size(marker)
+      head_budget = div(available, 2)
+      tail_budget = available - head_budget
 
-      bounded =
-        String.slice(text, 0, head_length) <>
-          @excerpt_omission_marker <>
-          String.slice(text, -tail_length, tail_length)
-
-      {bounded, true}
+      head = take_utf8_prefix_bytes(text, head_budget)
+      tail = take_utf8_suffix_bytes(text, tail_budget)
+      {head <> marker <> tail, true}
     end
   end
 
@@ -479,6 +573,124 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
     sha256(material)
   end
+
+  defp raw_stream(result, key) when is_atom(key) do
+    case Map.fetch(result, key) do
+      {:ok, value} when is_binary(value) ->
+        value
+
+      {:ok, nil} ->
+        ""
+
+      {:ok, _} ->
+        ""
+
+      :error ->
+        case Map.fetch(result, Atom.to_string(key)) do
+          {:ok, value} when is_binary(value) -> value
+          _ -> ""
+        end
+    end
+  end
+
+  defp replace_invalid_utf8(data) when is_binary(data) do
+    case :unicode.characters_to_binary(data, :utf8, :utf8) do
+      result when is_binary(result) ->
+        result
+
+      {:error, good, rest} when is_binary(good) and is_binary(rest) and rest != "" ->
+        <<_bad, next::binary>> = rest
+        good <> @utf8_replacement <> replace_invalid_utf8(next)
+
+      {:error, good, _rest} when is_binary(good) ->
+        good <> @utf8_replacement
+
+      {:incomplete, good, _rest} when is_binary(good) ->
+        good <> @utf8_replacement
+
+      _other ->
+        @utf8_replacement
+    end
+  end
+
+  defp take_utf8_prefix_bytes(text, max_bytes)
+       when is_binary(text) and is_integer(max_bytes) and max_bytes <= 0 do
+    ""
+  end
+
+  defp take_utf8_prefix_bytes(text, max_bytes)
+       when is_binary(text) and is_integer(max_bytes) and byte_size(text) <= max_bytes do
+    text
+  end
+
+  defp take_utf8_prefix_bytes(text, max_bytes) when is_binary(text) and is_integer(max_bytes) do
+    take_utf8_prefix_bytes(text, max_bytes, 0, [])
+  end
+
+  defp take_utf8_prefix_bytes(<<>>, _max, _acc_size, acc) do
+    acc |> Enum.reverse() |> IO.iodata_to_binary()
+  end
+
+  defp take_utf8_prefix_bytes(rest, max, acc_size, acc) do
+    case next_utf8_char(rest) do
+      {char, rest2} ->
+        size = byte_size(char)
+
+        if acc_size + size > max do
+          acc |> Enum.reverse() |> IO.iodata_to_binary()
+        else
+          take_utf8_prefix_bytes(rest2, max, acc_size + size, [char | acc])
+        end
+
+      :error ->
+        acc |> Enum.reverse() |> IO.iodata_to_binary()
+    end
+  end
+
+  defp take_utf8_suffix_bytes(text, max_bytes)
+       when is_binary(text) and is_integer(max_bytes) and max_bytes <= 0 do
+    ""
+  end
+
+  defp take_utf8_suffix_bytes(text, max_bytes)
+       when is_binary(text) and is_integer(max_bytes) and byte_size(text) <= max_bytes do
+    text
+  end
+
+  defp take_utf8_suffix_bytes(text, max_bytes) when is_binary(text) and is_integer(max_bytes) do
+    # Walk from the start, keep a sliding window of complete codepoints whose
+    # total size stays within max_bytes, ending at the binary's end.
+    text
+    |> utf8_chars()
+    |> Enum.reverse()
+    |> Enum.reduce_while({[], 0}, fn char, {acc, size} ->
+      char_size = byte_size(char)
+
+      if size + char_size > max_bytes do
+        {:halt, {acc, size}}
+      else
+        {:cont, {[char | acc], size + char_size}}
+      end
+    end)
+    |> elem(0)
+    |> IO.iodata_to_binary()
+  end
+
+  defp utf8_chars(text) when is_binary(text) do
+    utf8_chars(text, [])
+  end
+
+  defp utf8_chars(<<>>, acc), do: Enum.reverse(acc)
+
+  defp utf8_chars(rest, acc) do
+    case next_utf8_char(rest) do
+      {char, rest2} -> utf8_chars(rest2, [char | acc])
+      :error -> Enum.reverse(acc)
+    end
+  end
+
+  defp next_utf8_char(<<cp::utf8, rest::binary>>), do: {<<cp::utf8>>, rest}
+  defp next_utf8_char(_), do: :error
 
   defp validate_param_keys(params) do
     valid? =
@@ -702,9 +914,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       "exit_code" => Map.get(check, :exit_code) || Map.get(check, "exit_code"),
       "reason" => Map.get(check, :reason) || Map.get(check, "reason"),
       "stdout_excerpt" =>
-        Map.get(check, :stdout_excerpt) || Map.get(check, "stdout_excerpt") || "",
+        json_safe_utf8(Map.get(check, :stdout_excerpt) || Map.get(check, "stdout_excerpt") || ""),
       "stderr_excerpt" =>
-        Map.get(check, :stderr_excerpt) || Map.get(check, "stderr_excerpt") || "",
+        json_safe_utf8(Map.get(check, :stderr_excerpt) || Map.get(check, "stderr_excerpt") || ""),
       "stdout_truncated" =>
         Map.get(check, :stdout_truncated) || Map.get(check, "stdout_truncated") || false,
       "stderr_truncated" =>

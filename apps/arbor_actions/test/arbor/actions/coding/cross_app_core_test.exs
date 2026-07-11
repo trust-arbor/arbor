@@ -211,6 +211,79 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert timed.reason == "tests_timed_out"
   end
 
+  test "exact timeout shape vs text-only timeout stays ordinary failure" do
+    # Text containing "timeout" must NOT be treated as a stage/process timeout.
+    text_only =
+      Core.classify_app_test_result("apps/alpha/test", %{
+        "exit_code" => 1,
+        "passed" => false,
+        "stdout_excerpt" => "error: connection timeout waiting for lock",
+        "stderr_excerpt" => "timeout in fixture setup",
+        "stdout_truncated" => false,
+        "stderr_truncated" => false,
+        "stdout_sha256" => String.duplicate("7", 64),
+        "stderr_sha256" => String.duplicate("8", 64)
+      })
+
+    refute text_only.passed
+    refute text_only.timed_out
+    assert text_only.reason == "tests_failed"
+
+    assert Core.runner_timed_out?(%{
+             exit_code: 1,
+             stdout: "timeout",
+             stderr: "timeout",
+             timed_out: false
+           }) == false
+
+    assert Core.runner_timed_out?(%{exit_code: 137, timed_out: true}) == true
+    assert Core.runner_timed_out?(%{"timed_out" => true, "exit_code" => 1}) == true
+    assert Core.runner_timed_out?(%{reason: "timeout"}) == false
+    assert Core.runner_timed_out?("timeout") == false
+
+    assert Core.child_timed_out?(false, 1) == false
+    assert Core.child_timed_out?(false, 0) == true
+    assert Core.child_timed_out?(false, -5) == true
+    assert Core.child_timed_out?(true, 100) == true
+  end
+
+  test "feedback_from_result hashes raw bytes and produces JSON-safe byte-bounded excerpts" do
+    invalid = "hello" <> <<0xFF, 0xFE>> <> "world"
+    expected_hash = :crypto.hash(:sha256, invalid) |> Base.encode16(case: :lower)
+
+    feedback =
+      Core.feedback_from_result(%{
+        exit_code: 0,
+        stdout: invalid,
+        stderr: ""
+      })
+
+    assert feedback["passed"]
+    assert feedback["stdout_sha256"] == expected_hash
+    assert String.valid?(feedback["stdout_excerpt"])
+    assert String.contains?(feedback["stdout_excerpt"], "hello")
+    assert String.contains?(feedback["stdout_excerpt"], "world")
+    # Invalid bytes replaced; raw hash still deterministic over the original binary.
+    refute String.contains?(feedback["stdout_excerpt"], <<0xFF>>)
+    assert {:ok, _} = Jason.encode(feedback)
+    assert {:ok, _} = Jason.encode!(feedback) |> Jason.decode()
+
+    # Multibyte: bound by bytes without splitting UTF-8 codepoints (é is 2 bytes).
+    multibyte = String.duplicate("é", 1_500)
+    assert byte_size(multibyte) == 3_000
+
+    {excerpt, truncated} = Core.bound_output_excerpt(multibyte)
+    assert truncated
+    assert String.valid?(excerpt)
+    assert byte_size(excerpt) <= Core.max_output_excerpt_bytes()
+    assert String.contains?(excerpt, "...[omitted]...")
+    # Every remaining codepoint must be complete "é" or the ASCII marker.
+    without_marker = String.replace(excerpt, "\n...[omitted]...\n", "")
+    assert String.valid?(without_marker)
+    assert rem(byte_size(without_marker), 2) == 0
+    assert without_marker == String.duplicate("é", div(byte_size(without_marker), 2))
+  end
+
   test "aggregate_test_check bounds excerpts, hashes paths+process digests, and keeps reasons stable" do
     alpha =
       Core.classify_app_test_result("apps/alpha/test", %{
@@ -245,7 +318,7 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert String.contains?(aggregated["stdout_excerpt"], "[apps/alpha/test]")
     assert String.contains?(aggregated["stdout_excerpt"], "[apps/beta/test]")
     assert String.contains?(aggregated["stdout_excerpt"], "beta-fail")
-    assert String.length(aggregated["stdout_excerpt"]) <= Core.max_aggregate_excerpt()
+    assert byte_size(aggregated["stdout_excerpt"]) <= Core.max_aggregate_excerpt()
     refute aggregated["stdout_truncated"]
 
     expected_stdout_hash =
@@ -280,10 +353,12 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     huge_alpha = %{alpha | stdout_excerpt: String.duplicate("A", 1_500), stdout_truncated: true}
     huge_beta = %{beta | stdout_excerpt: String.duplicate("B", 1_500)}
     truncated = Core.aggregate_test_check([huge_alpha, huge_beta])
-    assert String.length(truncated["stdout_excerpt"]) <= Core.max_aggregate_excerpt()
+    assert byte_size(truncated["stdout_excerpt"]) <= Core.max_aggregate_excerpt()
     assert truncated["stdout_truncated"] == true
     assert truncated["stdout_sha256"] == expected_stdout_hash
     assert String.contains?(truncated["stdout_excerpt"], "...[omitted]...")
+    assert String.valid?(truncated["stdout_excerpt"])
+    assert {:ok, _} = Jason.encode(truncated)
 
     exhausted = Core.budget_exhausted_result("apps/gamma/test")
     timed_out = Core.aggregate_test_check([alpha, exhausted])
@@ -291,6 +366,8 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert timed_out["reason"] == "tests_timed_out"
     assert String.contains?(timed_out["stdout_excerpt"], "apps/gamma/test")
     assert String.contains?(timed_out["stdout_excerpt"], "budget exhausted")
+    # Earlier successful evidence preserved.
+    assert String.contains?(timed_out["stdout_excerpt"], "alpha-ok")
 
     all_pass = Core.aggregate_test_check([alpha])
     assert all_pass["passed"]

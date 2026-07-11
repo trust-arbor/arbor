@@ -10,22 +10,29 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     previous_runner = Application.get_env(:arbor_actions, :cross_app_mix_runner)
     previous_clock = Application.get_env(:arbor_actions, :cross_app_monotonic_ms)
 
+    worktree =
+      Path.join(
+        System.tmp_dir!(),
+        "cross_app_shell_#{System.unique_integer([:positive])}_#{:erlang.phash2(self())}"
+      )
+
+    File.rm_rf!(worktree)
+    File.mkdir_p!(worktree)
+
     on_exit(fn ->
+      File.rm_rf!(worktree)
       restore_env(:cross_app_mix_runner, previous_runner)
       restore_env(:cross_app_monotonic_ms, previous_clock)
     end)
 
-    :ok
+    %{worktree: worktree}
   end
 
-  test "two affected app paths cause two separate single-path mix test invocations" do
+  test "two affected app paths cause two separate single-path mix test invocations", %{
+    worktree: worktree
+  } do
     parent = self()
-    worktree = System.tmp_dir!()
-
-    alpha = Path.join(worktree, "apps/alpha/test")
-    beta = Path.join(worktree, "apps/beta/test")
-    File.mkdir_p!(alpha)
-    File.mkdir_p!(beta)
+    mkdir_app_tests!(worktree, ["alpha", "beta"])
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn path, args, opts ->
       send(parent, {:mix_invocation, path, args, opts})
@@ -49,6 +56,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert check["passed"]
     assert check["reason"] == nil
     assert check["exit_code"] == 0
+    assert {:ok, _} = Jason.encode(check)
 
     assert_receive {:mix_invocation, ^worktree, ["test", "apps/alpha/test"], opts1}
     assert Keyword.get(opts1, :timeout) == 30_000
@@ -63,13 +71,9 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute_received {:mix_invocation, _, _}
   end
 
-  test "stops after second-app failure and does not invoke remaining apps" do
+  test "stops after second-app failure and preserves earlier evidence", %{worktree: worktree} do
     parent = self()
-    worktree = System.tmp_dir!()
-
-    for app <- ["alpha", "beta", "gamma"] do
-      File.mkdir_p!(Path.join(worktree, "apps/#{app}/test"))
-    end
+    mkdir_app_tests!(worktree, ["alpha", "beta", "gamma"])
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
       send(parent, {:mix_invocation, args})
@@ -97,21 +101,21 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     assert check["reason"] == "tests_failed"
     assert check["exit_code"] == 1
     assert String.contains?(check["stdout_excerpt"], "[apps/alpha/test]")
+    assert String.contains?(check["stdout_excerpt"], "alpha ok")
     assert String.contains?(check["stdout_excerpt"], "[apps/beta/test]")
     refute String.contains?(check["stdout_excerpt"], "[apps/gamma/test]")
+    assert {:ok, _} = Jason.encode(check)
 
     assert_receive {:mix_invocation, ["test", "apps/alpha/test"]}
     assert_receive {:mix_invocation, ["test", "apps/beta/test"]}
     refute_received {:mix_invocation, ["test", "apps/gamma/test"]}
   end
 
-  test "total test-stage deadline exhaustion returns bounded timeout evidence" do
+  test "child that consumes remaining budget is timed out; later children never launch", %{
+    worktree: worktree
+  } do
     parent = self()
-    worktree = System.tmp_dir!()
-
-    for app <- ["alpha", "beta"] do
-      File.mkdir_p!(Path.join(worktree, "apps/#{app}/test"))
-    end
+    mkdir_app_tests!(worktree, ["alpha", "beta"])
 
     # Shared clock: stays at 0 until a mix run consumes the whole budget.
     {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
@@ -126,7 +130,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
       send(parent, {:mix_invocation, args, opts})
-      # Consume the entire remaining budget so the next step times out.
+      # Consume the entire remaining budget so post-child deadline check fails.
       Agent.update(clock_agent, fn _ -> 10_000 end)
 
       {:ok, %{exit_code: 0, stdout: "alpha ok", stderr: "", timed_out: false}}
@@ -142,18 +146,254 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute check["passed"]
     assert check["reason"] == "tests_timed_out"
     assert String.contains?(check["stdout_excerpt"], "[apps/alpha/test]")
-    assert String.contains?(check["stdout_excerpt"], "[apps/beta/test]")
-    assert String.contains?(check["stdout_excerpt"], "budget exhausted")
-    assert String.length(check["stdout_excerpt"]) <= Core.max_aggregate_excerpt()
+    # Alpha itself overran the shared budget — classified as timeout, not pass.
+    refute String.contains?(check["stdout_excerpt"], "budget exhausted before apps/beta")
+
+    assert byte_size(check["stdout_excerpt"]) <= Core.max_aggregate_excerpt()
+
+    assert {:ok, _} = Jason.encode(check)
 
     assert_receive {:mix_invocation, ["test", "apps/alpha/test"], opts}
     assert Keyword.get(opts, :timeout) == 5_000
     refute_received {:mix_invocation, ["test", "apps/beta/test"], _}
   end
 
-  test "missing test directories yield empty pass without mix invocations" do
+  test "final child overrun after success-shaped runner result is still timed out", %{
+    worktree: worktree
+  } do
     parent = self()
-    worktree = System.tmp_dir!()
+    mkdir_app_tests!(worktree, ["alpha", "omega"])
+
+    {:ok, clock_agent} = Agent.start_link(fn -> 0 end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get(clock_agent, & &1)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, opts ->
+      send(parent, {:mix_invocation, args, opts})
+
+      case args do
+        ["test", "apps/alpha/test"] ->
+          # Small advance; remaining budget stays positive.
+          Agent.update(clock_agent, fn t -> t + 1_000 end)
+          {:ok, %{exit_code: 0, stdout: "alpha ok", stderr: "", timed_out: false}}
+
+        ["test", "apps/omega/test"] ->
+          # Final child returns success shape but consumes the shared deadline.
+          Agent.update(clock_agent, fn _ -> 20_000 end)
+          {:ok, %{exit_code: 0, stdout: "omega ok", stderr: "", timed_out: false}}
+
+        other ->
+          flunk("unexpected mix invocation: #{inspect(other)}")
+      end
+    end)
+
+    check =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test", "apps/omega/test"],
+        5_000
+      )
+
+    refute check["passed"]
+    assert check["reason"] == "tests_timed_out"
+    # Earlier success evidence preserved.
+    assert String.contains?(check["stdout_excerpt"], "[apps/alpha/test]")
+    assert String.contains?(check["stdout_excerpt"], "alpha ok")
+    assert String.contains?(check["stdout_excerpt"], "[apps/omega/test]")
+    assert {:ok, _} = Jason.encode(check)
+
+    assert_receive {:mix_invocation, ["test", "apps/alpha/test"], opts1}
+    assert Keyword.get(opts1, :timeout) == 5_000
+    assert_receive {:mix_invocation, ["test", "apps/omega/test"], opts2}
+    assert Keyword.get(opts2, :timeout) == 4_000
+    refute_received {:mix_invocation, _, _}
+  end
+
+  test "exact runner timed_out flag times out; text-only timeout string does not", %{
+    worktree: worktree
+  } do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha", "beta"])
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:mix_invocation, args})
+
+      case args do
+        ["test", "apps/alpha/test"] ->
+          {:ok,
+           %{
+             exit_code: 1,
+             stdout: "assertion failed after timeout waiting for process",
+             stderr: "timeout in helper",
+             timed_out: false
+           }}
+
+        other ->
+          flunk("unexpected mix invocation: #{inspect(other)}")
+      end
+    end)
+
+    text_fail =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test", "apps/beta/test"],
+        10_000
+      )
+
+    refute text_fail["passed"]
+    assert text_fail["reason"] == "tests_failed"
+    refute text_fail["reason"] == "tests_timed_out"
+    assert String.contains?(text_fail["stdout_excerpt"], "timeout waiting")
+    assert_receive {:mix_invocation, ["test", "apps/alpha/test"]}
+    refute_received {:mix_invocation, ["test", "apps/beta/test"]}
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:mix_invocation, {:exact, args}})
+
+      {:ok,
+       %{
+         exit_code: 137,
+         stdout: "killed",
+         stderr: "",
+         timed_out: true
+       }}
+    end)
+
+    exact =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test", "apps/beta/test"],
+        10_000
+      )
+
+    refute exact["passed"]
+    assert exact["reason"] == "tests_timed_out"
+    assert_receive {:mix_invocation, {:exact, ["test", "apps/alpha/test"]}}
+    refute_received {:mix_invocation, {:exact, ["test", "apps/beta/test"]}}
+  end
+
+  test "invalid UTF-8 process output is JSON-safe and hashed as raw bytes", %{worktree: worktree} do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha"])
+    raw = "line1\n" <> <<0xFF, 0xFE>> <> "\nline2"
+    raw_hash = :crypto.hash(:sha256, raw) |> Base.encode16(case: :lower)
+    stderr_raw = <<0x80, "bad">>
+    stderr_hash = :crypto.hash(:sha256, stderr_raw) |> Base.encode16(case: :lower)
+
+    expected_aggregate =
+      :crypto.hash(
+        :sha256,
+        "apps/alpha/test\n" <> raw_hash
+      )
+      |> Base.encode16(case: :lower)
+
+    expected_stderr_aggregate =
+      :crypto.hash(
+        :sha256,
+        "apps/alpha/test\n" <> stderr_hash
+      )
+      |> Base.encode16(case: :lower)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:mix_invocation, args})
+      {:ok, %{exit_code: 1, stdout: raw, stderr: stderr_raw, timed_out: false}}
+    end)
+
+    check =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test"],
+        10_000
+      )
+
+    refute check["passed"]
+    assert check["reason"] == "tests_failed"
+    # Aggregate digests are path + raw-byte stream digests (not the sanitized text).
+    assert check["stdout_sha256"] == expected_aggregate
+    assert check["stderr_sha256"] == expected_stderr_aggregate
+    assert String.valid?(check["stdout_excerpt"])
+    assert String.valid?(check["stderr_excerpt"])
+    assert {:ok, encoded} = Jason.encode(check)
+    assert is_binary(encoded)
+    # Direct feedback path also preserves raw-byte hashing.
+    feedback = Core.feedback_from_result(%{exit_code: 1, stdout: raw, stderr: stderr_raw})
+    assert feedback["stdout_sha256"] == raw_hash
+    assert feedback["stderr_sha256"] == stderr_hash
+    assert_receive {:mix_invocation, ["test", "apps/alpha/test"]}
+  end
+
+  test "multibyte excerpt bounds never split UTF-8 codepoints", %{worktree: worktree} do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha"])
+    # 3000 bytes of 2-byte codepoints — forces truncation past the 2000-byte cap.
+    huge = String.duplicate("é", 1_500)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:mix_invocation, args})
+      {:ok, %{exit_code: 1, stdout: huge, stderr: "", timed_out: false}}
+    end)
+
+    check =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test"],
+        10_000
+      )
+
+    refute check["passed"]
+    assert check["stdout_truncated"]
+    assert byte_size(check["stdout_excerpt"]) <= Core.max_aggregate_excerpt()
+    assert String.valid?(check["stdout_excerpt"])
+    assert String.contains?(check["stdout_excerpt"], "...[omitted]...")
+    assert {:ok, _} = Jason.encode(check)
+    assert_receive {:mix_invocation, ["test", "apps/alpha/test"]}
+  end
+
+  test "no launch after deadline is already exhausted", %{worktree: worktree} do
+    parent = self()
+    mkdir_app_tests!(worktree, ["alpha", "beta"])
+
+    # First clock read establishes deadline; subsequent reads are past it.
+    {:ok, clock_agent} = Agent.start_link(fn -> {:init, 0} end)
+
+    on_exit(fn ->
+      if Process.alive?(clock_agent), do: Agent.stop(clock_agent)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+      Agent.get_and_update(clock_agent, fn
+        {:init, t} -> {t, {:armed, t}}
+        {:armed, t} -> {t + 10_000, {:armed, t}}
+      end)
+    end)
+
+    Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
+      send(parent, {:mix_invocation, args})
+      flunk("must not launch mix after deadline exhausted: #{inspect(args)}")
+    end)
+
+    check =
+      Shell.run_app_tests(
+        worktree,
+        ["apps/alpha/test", "apps/beta/test"],
+        5_000
+      )
+
+    refute check["passed"]
+    assert check["reason"] == "tests_timed_out"
+    assert String.contains?(check["stdout_excerpt"], "budget exhausted before apps/alpha/test")
+    refute_received {:mix_invocation, _}
+    assert {:ok, _} = Jason.encode(check)
+  end
+
+  test "missing test directories yield empty pass without mix invocations", %{worktree: worktree} do
+    parent = self()
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
       send(parent, {:mix_invocation, args})
@@ -172,7 +412,7 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
     refute_received {:mix_invocation, _}
   end
 
-  test "no affected paths yield no_affected_app_tests without mix" do
+  test "no affected paths yield no_affected_app_tests without mix", %{worktree: worktree} do
     parent = self()
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
@@ -180,17 +420,15 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
       {:ok, %{exit_code: 0, stdout: "", stderr: "", timed_out: false}}
     end)
 
-    check = Shell.run_app_tests(System.tmp_dir!(), [], 10_000)
+    check = Shell.run_app_tests(worktree, [], 10_000)
     assert check["passed"]
     assert check["reason"] == "no_affected_app_tests"
     refute_received {:mix_invocation, _}
   end
 
-  test "process timeout on first app stops and reports tests_timed_out" do
+  test "process timeout on first app stops and reports tests_timed_out", %{worktree: worktree} do
     parent = self()
-    worktree = System.tmp_dir!()
-    File.mkdir_p!(Path.join(worktree, "apps/alpha/test"))
-    File.mkdir_p!(Path.join(worktree, "apps/beta/test"))
+    mkdir_app_tests!(worktree, ["alpha", "beta"])
 
     Application.put_env(:arbor_actions, :cross_app_mix_runner, fn _path, args, _opts ->
       send(parent, {:mix_invocation, args})
@@ -218,6 +456,12 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
 
     assert_receive {:mix_invocation, ["test", "apps/alpha/test"]}
     refute_received {:mix_invocation, ["test", "apps/beta/test"]}
+  end
+
+  defp mkdir_app_tests!(worktree, apps) do
+    for app <- apps do
+      File.mkdir_p!(Path.join(worktree, "apps/#{app}/test"))
+    end
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:arbor_actions, key)

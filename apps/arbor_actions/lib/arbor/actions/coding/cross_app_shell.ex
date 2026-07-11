@@ -188,7 +188,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   defp run_compile(path, timeout) do
     case run_mix(path, ["compile", "--warnings-as-errors"], timeout: timeout) do
       {:ok, result} ->
-        Core.completed_check(MixAction.compile_feedback(result))
+        Core.completed_check(Core.feedback_from_result(result))
 
       {:error, reason} ->
         throw({:execution_error, {:compile_execution_failed, reason}})
@@ -200,8 +200,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     # compile-connected cycles. Zero-cycle validation is not claimed.
     case run_mix(path, ["xref", "graph"], timeout: timeout) do
       {:ok, result} ->
-        Core.completed_check(MixAction.compile_feedback(result),
-          reason: if(result.exit_code == 0, do: nil, else: "xref_failed")
+        exit_code = Map.get(result, :exit_code) || Map.get(result, "exit_code")
+
+        Core.completed_check(Core.feedback_from_result(result),
+          reason: if(exit_code == 0, do: nil, else: "xref_failed")
         )
 
       {:error, reason} ->
@@ -222,13 +224,14 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
     if existing == [] do
       Core.empty_pass_check("no_existing_test_dirs")
     else
-      # One shared monotonic budget for the whole test stage — not N× timeout.
+      # One shared absolute monotonic deadline for the whole test stage — not N× timeout.
       deadline = monotonic_ms() + timeout
       run_tests_sequential(path, existing, deadline, [])
     end
   end
 
   defp run_tests_sequential(worktree_path, remaining_paths, deadline, acc) do
+    # Shared deadline checked before every child (including the first).
     remaining_ms = deadline - monotonic_ms()
 
     case Core.next_test_step(remaining_ms, remaining_paths) do
@@ -236,19 +239,25 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
         Core.aggregate_test_check(Enum.reverse(acc))
 
       {:timeout, path, _rest} ->
+        # Budget already exhausted — do not launch this or any later child.
+        # Preserve successful prior child evidence in `acc`.
         Core.aggregate_test_check(Enum.reverse([Core.budget_exhausted_result(path) | acc]))
 
       {:run, path, budget_ms, rest} ->
         case run_mix(worktree_path, ["test", path], timeout: budget_ms) do
           {:ok, result} ->
-            timed_out = Map.get(result, :timed_out, false) == true
+            # Re-check shared deadline immediately after every child, including the final one.
+            remaining_after = deadline - monotonic_ms()
+            runner_timeout = Core.runner_timed_out?(result)
+            timed_out = Core.child_timed_out?(runner_timeout, remaining_after)
 
             app_result =
-              Core.classify_app_test_result(path, MixAction.compile_feedback(result),
+              Core.classify_app_test_result(path, Core.feedback_from_result(result),
                 timed_out: timed_out
               )
 
             # Stop after first failed/timed-out app — overall result is failed.
+            # Prior successful children remain in the aggregate evidence.
             if app_result.passed do
               run_tests_sequential(worktree_path, rest, deadline, [app_result | acc])
             else
