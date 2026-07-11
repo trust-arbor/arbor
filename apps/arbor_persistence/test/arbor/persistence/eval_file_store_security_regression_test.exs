@@ -5,13 +5,18 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   Exercised exclusively through the public `Arbor.Persistence` facade.
 
   Parent lineage (most recent first):
-  - **d7df3521** — immediate parent for *this* correction pass (identity
-    match completeness, preflight encode bounds, exact one-suffix binding,
-    trusted-private-root before chmod, bounded enumeration worker, publish
-    identity verify). New claims below must fail on d7df3521 and pass here.
+  - **f9ac0086** — immediate parent for *this* correction pass (dual-pass
+    stable-content reads; cryptorandom exclusive temp/euid probe; bounded
+    config_fingerprint; honest enumeration worker; post-rename verify
+    side-effect honesty). New dual-pass / fingerprint-bound claims must fail
+    on f9ac0086 (second-resolution metadata race) and pass here.
+  - **d7df3521** — identity match completeness, preflight encode bounds,
+    exact one-suffix binding, trusted-private-root before chmod, bounded
+    enumeration worker, publish identity verify. Dual-pass mutation tests
+    still fail-closed on candidate while d7 returns a hash/decode path.
   - 649fe909 / 07de3232 — earlier ownership extraction + first hardening.
-    Characterization of older parents is separate from the d7 exact
-    regressions; do not claim every test fails 07de/649.
+    Characterization of older parents is separate; do not claim every test
+    fails 07de/649.
 
   Each assertion group is independent so an earlier failure does not mask
   a later security claim. Identity failures must surface as `:file_changed`
@@ -23,8 +28,13 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
 
   alias Arbor.Persistence
 
+  @exclusive_mkdir_retries 16
+
   setup do
-    base = Path.join(System.tmp_dir!(), "eval_sec_#{System.unique_integer([:positive])}")
+    base = exclusive_owned_temp_base!("eval_sec_")
+    # Cleanup only the exclusively owned base — never foreign residue.
+    on_exit(fn -> File.rm_rf(base) end)
+
     dir = Path.join(base, "store")
     outside = Path.join(base, "outside")
     File.mkdir_p!(dir)
@@ -32,8 +42,33 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
     # Trusted-private-root contract: existing roots must be owner-only.
     File.chmod!(dir, 0o700)
     File.chmod!(outside, 0o700)
-    on_exit(fn -> File.rm_rf!(base) end)
     %{dir: dir, outside: outside, base: base}
+  end
+
+  # Cryptorandom atomic File.mkdir-owned base with bounded collision retry.
+  # Registers ownership only after exclusive create succeeds.
+  defp exclusive_owned_temp_base!(prefix) when is_binary(prefix) do
+    tmp = System.tmp_dir!()
+
+    Enum.reduce_while(1..@exclusive_mkdir_retries, :error, fn _, _ ->
+      name = prefix <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+      path = Path.join(tmp, name)
+
+      case File.mkdir(path) do
+        :ok ->
+          {:halt, path}
+
+        {:error, :eexist} ->
+          {:cont, :error}
+
+        {:error, _} ->
+          {:cont, :error}
+      end
+    end)
+    |> case do
+      path when is_binary(path) -> path
+      :error -> flunk("could not allocate exclusive temp base after retries")
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -714,6 +749,34 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   end
 
   # ---------------------------------------------------------------------------
+  # f9ac0086 exact: config_fingerprint system ceilings (public facade)
+  # ---------------------------------------------------------------------------
+
+  describe "security regression f9: config_fingerprint bounded canonicalization" do
+    test "rejects excessive nesting depth without materializing a digest" do
+      deep =
+        Enum.reduce(1..40, "leaf", fn _, acc ->
+          %{"n" => acc}
+        end)
+
+      # f9ac0086 recursed without a depth ceiling and would still fingerprint.
+      assert Persistence.eval_config_fingerprint(deep) == nil
+    end
+
+    test "rejects oversized string values without a fingerprint" do
+      huge = String.duplicate("x", 1_100_000)
+      assert Persistence.eval_config_fingerprint(%{blob: huge}) == nil
+    end
+
+    test "still fingerprints modest nested configs deterministically" do
+      cfg = %{a: 1, b: %{c: [true, false, nil], d: "ok"}}
+      fp = Persistence.eval_config_fingerprint(cfg)
+      assert fp =~ ~r/^sha256:[0-9a-f]{64}$/
+      assert Persistence.eval_config_fingerprint(cfg) == fp
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Dataset hashing integrity
   # ---------------------------------------------------------------------------
 
@@ -745,30 +808,49 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   end
 
   # ---------------------------------------------------------------------------
-  # d7df3521 exact: same-inode mutation fail-closed (hash + load)
+  # Same-inode mutation fail-closed (hash + load) — dual-pass stable content
+  # Deterministic: mutator-ready handshake, large same-size fixture, always
+  # stop/await mutators even when assertions fail.
+  # d7 parent: returns a hash / decode path; candidate fails closed.
+  # f9ac0086: flaky under second-resolution metadata alone.
   # ---------------------------------------------------------------------------
 
   describe "security regression d7: same-inode mutation fail closed" do
-    test "dataset hash returns nil when same-inode content mutates during read", %{base: base} do
+    test "dataset hash returns nil when same-inode content mutates during dual pass", %{
+      base: base
+    } do
       path = Path.join(base, "mutate-dataset.jsonl")
-      size_a = 512_000
-      size_b = 520_000
-      File.write!(path, :binary.copy("A", size_a))
+      # Large enough that dual full passes overlap continuous mutation.
+      size = 768_000
+      content_a = :binary.copy("A", size)
+      content_b = :binary.copy("B", size)
+      File.write!(path, content_a)
 
       stop = :atomics.new(1, signed: false)
       :atomics.put(stop, 1, 0)
+      parent = self()
+      ready_ref = make_ref()
 
       mutator =
-        Task.async(fn ->
-          # Tight size-toggling loop: d7 ignores size in identity_match so it
-          # still returns a hash; candidate compares size/mtime/ctime and
-          # stops at captured size / rejects growth → nil.
+        spawn(fn ->
+          send(parent, {ready_ref, :ready})
+
+          receive do
+            {^ready_ref, :go} -> :ok
+          after
+            5_000 -> :ok
+          end
+
+          # Prove first mutation completed before the reader starts.
+          _ = File.write(path, content_b)
+          send(parent, {ready_ref, :mutated})
+
           loop = fn loop ->
             if :atomics.get(stop, 1) == 1 do
               :ok
             else
-              _ = File.write(path, :binary.copy("A", size_a))
-              _ = File.write(path, :binary.copy("B", size_b))
+              _ = File.write(path, content_a)
+              _ = File.write(path, content_b)
               loop.(loop)
             end
           end
@@ -776,40 +858,77 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
           loop.(loop)
         end)
 
-      # Let mutator start flipping sizes before hash begins.
-      Process.sleep(20)
-      result = Persistence.eval_dataset_hash(path)
-      :atomics.put(stop, 1, 1)
-      _ = Task.await(mutator, 5_000)
+      try do
+        receive do
+          {^ready_ref, :ready} -> :ok
+        after
+          5_000 -> flunk("mutator never became ready")
+        end
 
-      assert result == nil
+        send(mutator, {ready_ref, :go})
+
+        receive do
+          {^ready_ref, :mutated} -> :ok
+        after
+          5_000 -> flunk("mutator never performed first write")
+        end
+
+        result = Persistence.eval_dataset_hash(path)
+        assert result == nil
+      after
+        :atomics.put(stop, 1, 1)
+
+        ref = Process.monitor(mutator)
+        Process.exit(mutator, :kill)
+
+        receive do
+          {:DOWN, ^ref, :process, ^mutator, _} -> :ok
+        after
+          5_000 -> :ok
+        end
+      end
     end
 
     test "JSON load returns file_changed not decode error on same-inode mutation", %{dir: dir} do
       path = Path.join(dir, "mutate-load.json")
-      # Valid JSON of size A; mutator alternates with non-JSON of size B so a
-      # weak identity check would surface as decode_error (masking the bug).
-      size_a = 256_000
-      size_b = 260_000
+      # Same size A/B so second-resolution mtime alone cannot detect the race;
+      # dual-pass digest equality must fail closed. Valid JSON vs non-JSON so a
+      # weak single-pass identity check surfaces as decode_error (d7 path).
+      pad = 400_000
 
       json_a =
-        ~s({"id":"mutate-load","model":"m","blob":") <> String.duplicate("x", size_a) <> ~s("})
+        ~s({"id":"mutate-load","model":"m","blob":") <> String.duplicate("x", pad) <> ~s("})
 
+      junk_b = :binary.copy("Z", byte_size(json_a))
       File.write!(path, json_a)
       File.chmod!(path, 0o600)
 
       stop = :atomics.new(1, signed: false)
       :atomics.put(stop, 1, 0)
+      parent = self()
+      ready_ref = make_ref()
 
       mutator =
-        Task.async(fn ->
+        spawn(fn ->
+          send(parent, {ready_ref, :ready})
+
+          receive do
+            {^ready_ref, :go} -> :ok
+          after
+            5_000 -> :ok
+          end
+
+          _ = File.write(path, junk_b)
+          _ = File.chmod(path, 0o600)
+          send(parent, {ready_ref, :mutated})
+
           loop = fn loop ->
             if :atomics.get(stop, 1) == 1 do
               :ok
             else
               _ = File.write(path, json_a)
               _ = File.chmod(path, 0o600)
-              _ = File.write(path, :binary.copy("Z", size_b))
+              _ = File.write(path, junk_b)
               _ = File.chmod(path, 0o600)
               loop.(loop)
             end
@@ -818,13 +937,65 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
           loop.(loop)
         end)
 
-      Process.sleep(20)
-      result = Persistence.load_eval_run_file("mutate-load", dir: dir)
-      :atomics.put(stop, 1, 1)
-      _ = Task.await(mutator, 5_000)
+      try do
+        receive do
+          {^ready_ref, :ready} -> :ok
+        after
+          5_000 -> flunk("mutator never became ready")
+        end
 
-      # Must be the identity failure, not a masked decode/schema error.
-      assert result == {:error, :file_changed}
+        send(mutator, {ready_ref, :go})
+
+        receive do
+          {^ready_ref, :mutated} -> :ok
+        after
+          5_000 -> flunk("mutator never performed first write")
+        end
+
+        result = Persistence.load_eval_run_file("mutate-load", dir: dir)
+        # Must be the identity/stable-content failure, not a masked decode error.
+        assert result == {:error, :file_changed}
+      after
+        :atomics.put(stop, 1, 1)
+
+        ref = Process.monitor(mutator)
+        Process.exit(mutator, :kill)
+
+        receive do
+          {:DOWN, ^ref, :process, ^mutator, _} -> :ok
+        after
+          5_000 -> :ok
+        end
+      end
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # f9ac0086 exact: stable dual-pass content under trusted root (static)
+  # ---------------------------------------------------------------------------
+
+  describe "security regression f9: dual-pass stable content (static happy path)" do
+    test "stable dataset hashes equal dual-pass digest of content", %{base: base} do
+      path = Path.join(base, "stable-dual.jsonl")
+      content = String.duplicate("stable-line\n", 50_000)
+      File.write!(path, content)
+
+      hash = Persistence.eval_dataset_hash(path)
+      expected = "sha256:" <> Base.encode16(:crypto.hash(:sha256, content), case: :lower)
+      assert hash == expected
+    end
+
+    test "stable load returns bound run after dual-pass", %{dir: dir} do
+      assert :ok =
+               Persistence.save_eval_run_file(
+                 "stable-load",
+                 %{model: "m", blob: String.duplicate("q", 20_000)},
+                 dir: dir
+               )
+
+      assert {:ok, loaded} = Persistence.load_eval_run_file("stable-load", dir: dir)
+      assert loaded["id"] == "stable-load"
+      assert loaded["model"] == "m"
     end
   end
 

@@ -7,14 +7,25 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
   # All capture is best-effort and fail-safe: any failure simply omits the
   # field. Caller-provided values are never overwritten.
   #
-  # Dataset hashing opens the path once, hashes bounded chunks from that
-  # handle up to the captured initial size, and compares full handle/path
-  # identity (type/device/inode/size/mtime/ctime) before and after. Same-inode
-  # content mutation, growth past the captured size, and short reads fail
-  # closed (return nil). Metadata equality is best-effort under a trusted
-  # path assumption — not proof against an owner restoring timestamps.
+  # Dataset hashing opens the path once and requires **stable content across
+  # two complete passes from the same handle**: hash captured exact size →
+  # EOF-probe → seek BOF → hash a second full pass → require equal digests
+  # and full handle/path identity (type/device/inode/size/mtime/ctime).
+  #
+  # This is a bounded stable-content check under a trusted-path contract, not
+  # a claim of hostile atomic snapshots. An owner restoring *identical* bytes
+  # between passes is semantically unchanged (digests match). Metadata
+  # equality uses OTP posix second-resolution timestamps and is best-effort.
 
   @stream_chunk_bytes 65_536
+
+  # config_fingerprint canonicalization ceilings (public helper must not
+  # recurse/materialize without a system ceiling).
+  @max_fp_depth 32
+  @max_fp_nodes 50_000
+  @max_fp_keys 10_000
+  @max_fp_string_bytes 1_048_576
+  @max_fp_estimated_bytes 1_048_576
 
   @spec capture(map()) :: map()
   def capture(attrs) when is_map(attrs) do
@@ -48,15 +59,20 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
   @doc """
   SHA-256 (hex, \"sha256:\" prefixed) of the dataset file at `path`.
 
-  Opens the path once, hashes bounded chunks from that handle up to the
-  captured initial size, and compares full handle/path identity (type, device,
-  inode, size, mtime, ctime) before and after. Rejects symlinks, non-regular
-  files, unusable inode identities, growth past the captured size, short
-  reads, and same-inode mutation. Closes the handle on every path.
+  Opens the path once. Hashes the captured exact size from that handle,
+  EOF-probes for growth, seeks to BOF, hashes a second full pass, and returns
+  a digest only when both passes agree and full handle/path identity
+  (type, device, inode, size, mtime, ctime) still matches.
 
-  Metadata checks use OTP posix timestamps (native resolution exposed by the
-  pinned OTP File.Stat API) and are best-effort — not proof against an owner
-  restoring timestamps after mutation.
+  Rejects symlinks, non-regular files, unusable inode identities, growth past
+  the captured size, short reads, and unstable content between passes. Closes
+  the handle on every path.
+
+  This is a bounded stable-content check under a trusted-path assumption —
+  not proof of an atomic snapshot against a hostile concurrent writer. An
+  owner restoring identical bytes between passes is semantically unchanged.
+  Metadata uses OTP posix second-resolution timestamps (pinned OTP rejects
+  `time: :native` with `:badarg`).
   """
   @spec dataset_hash(String.t() | nil) :: String.t() | nil
   def dataset_hash(nil), do: nil
@@ -87,6 +103,10 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
   Uses a JSON-clean canonical encoding with recursively sorted keys as an
   ordered representation (Jason.OrderedObject) so fingerprints never depend
   on unordered Map iteration. Atom/string key collisions are rejected (nil).
+
+  Canonicalization is hard-bounded (depth / nodes / keys / string bytes /
+  estimated encoded bytes) before Jason so the public helper cannot
+  recurse or materialize without a system ceiling.
   """
   @spec config_fingerprint(map() | nil) :: String.t() | nil
   def config_fingerprint(nil), do: nil
@@ -120,7 +140,7 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
   end
 
   # ---------------------------------------------------------------------------
-  # Dataset hash — single open, chunked to captured size, full identity
+  # Dataset hash — single open, dual exact passes, digest equality
   # ---------------------------------------------------------------------------
 
   defp hash_regular_file(path, expected) do
@@ -131,7 +151,14 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
                stat1 = File.Stat.from_record(info1),
                {:ok, id1} <- regular_identity(stat1),
                true <- identity_match?(id1, expected),
-               {:ok, digest} <- hash_exact_size(io, expected.size),
+               {:ok, state1} <- hash_exact_size(io, expected.size),
+               :ok <- eof_probe(io),
+               :ok <- seek_bof(io),
+               {:ok, state2} <- hash_exact_size(io, expected.size),
+               :ok <- eof_probe(io),
+               bin1 = :crypto.hash_final(state1),
+               bin2 = :crypto.hash_final(state2),
+               true <- bin1 == bin2,
                {:ok, info2} <- :file.read_file_info(io, time: :posix),
                stat2 = File.Stat.from_record(info2),
                {:ok, id2} <- regular_identity(stat2),
@@ -139,7 +166,7 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
                {:ok, lstat} <- File.lstat(path, time: :posix),
                {:ok, id3} <- regular_identity(lstat),
                true <- identity_match?(id3, expected) do
-            "sha256:" <> Base.encode16(:crypto.hash_final(digest), case: :lower)
+            "sha256:" <> Base.encode16(bin1, case: :lower)
           else
             _ -> nil
           end
@@ -152,29 +179,9 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
     end
   end
 
-  # Hash exactly `size` bytes from the handle. Stop at the captured initial
-  # size; reject short reads; probe one extra byte to reject growth.
+  # Hash exactly `size` bytes from the current position (no EOF probe).
   defp hash_exact_size(io, size) when is_integer(size) and size >= 0 do
-    case hash_n_bytes(io, size, :crypto.hash_init(:sha256)) do
-      {:ok, digest} ->
-        case :file.read(io, 1) do
-          :eof ->
-            {:ok, digest}
-
-          {:ok, <<>>} ->
-            {:ok, digest}
-
-          {:ok, _} ->
-            # File grew past captured size during read.
-            {:error, :file_changed}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-
-      {:error, _} = err ->
-        err
-    end
+    hash_n_bytes(io, size, :crypto.hash_init(:sha256))
   end
 
   defp hash_exact_size(_, _), do: {:error, :unusable_size}
@@ -197,6 +204,30 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp eof_probe(io) do
+    case :file.read(io, 1) do
+      :eof ->
+        :ok
+
+      {:ok, <<>>} ->
+        :ok
+
+      {:ok, _} ->
+        # File grew past captured size during/between passes.
+        {:error, :file_changed}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp seek_bof(io) do
+    case :file.position(io, :bof) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -227,84 +258,226 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
   defp identity_match?(_, _), do: false
 
   # ---------------------------------------------------------------------------
-  # Canonical config fingerprint — ordered, collision-rejecting
+  # Canonical config fingerprint — ordered, collision-rejecting, bounded
   # ---------------------------------------------------------------------------
 
   defp canonical_json(value) do
-    case canonicalize(value) do
-      {:ok, clean} -> encode_canonical(clean)
+    budget = %{
+      depth: 0,
+      nodes: 0,
+      max_depth: @max_fp_depth,
+      max_nodes: @max_fp_nodes,
+      max_keys: @max_fp_keys,
+      max_string_bytes: @max_fp_string_bytes,
+      max_estimated_bytes: @max_fp_estimated_bytes,
+      estimated: 0
+    }
+
+    case canonicalize(value, budget) do
+      {:ok, clean, _budget} -> encode_canonical(clean)
       :error -> :error
     end
   end
 
   # Returns nested structure of Jason.OrderedObject / lists / scalars.
   # Never re-materializes objects as unordered Map.
-  defp canonicalize(map) when is_map(map) do
-    Enum.reduce_while(map, {:ok, MapSet.new(), []}, fn {k, v}, {:ok, seen, acc} ->
-      key =
-        cond do
-          is_binary(k) and String.valid?(k) -> k
-          is_atom(k) -> Atom.to_string(k)
-          true -> nil
-        end
+  defp canonicalize(map, budget) when is_map(map) do
+    cond do
+      budget.depth > budget.max_depth ->
+        :error
 
-      cond do
-        is_nil(key) ->
-          {:halt, :error}
+      budget.nodes + 1 > budget.max_nodes ->
+        :error
 
-        MapSet.member?(seen, key) ->
-          # Atom/string alias collision (or duplicate string keys)
-          {:halt, :error}
+      map_size(map) > budget.max_keys ->
+        :error
 
-        true ->
-          case canonicalize(v) do
-            {:ok, cv} ->
-              {:cont, {:ok, MapSet.put(seen, key), [{key, cv} | acc]}}
+      true ->
+        budget = %{
+          budget
+          | nodes: budget.nodes + 1,
+            depth: budget.depth + 1,
+            estimated: budget.estimated + 2
+        }
+
+        if budget.estimated > budget.max_estimated_bytes do
+          :error
+        else
+          Enum.reduce_while(map, {:ok, MapSet.new(), [], budget}, fn {k, v},
+                                                                     {:ok, seen, acc, b} ->
+            case normalize_fp_key(k, b) do
+              {:ok, key, b} ->
+                if MapSet.member?(seen, key) do
+                  # Atom/string alias collision (or duplicate string keys)
+                  {:halt, :error}
+                else
+                  case canonicalize(v, b) do
+                    {:ok, cv, b2} ->
+                      b2 = %{b2 | estimated: b2.estimated + 1}
+
+                      if b2.estimated > b2.max_estimated_bytes do
+                        {:halt, :error}
+                      else
+                        {:cont, {:ok, MapSet.put(seen, key), [{key, cv} | acc], b2}}
+                      end
+
+                    :error ->
+                      {:halt, :error}
+                  end
+                end
+
+              :error ->
+                {:halt, :error}
+            end
+          end)
+          |> case do
+            {:ok, _seen, pairs, final_budget} ->
+              ordered =
+                pairs
+                |> Enum.sort_by(&elem(&1, 0))
+                |> Jason.OrderedObject.new()
+
+              {:ok, ordered, %{final_budget | depth: budget.depth}}
 
             :error ->
-              {:halt, :error}
+              :error
           end
-      end
-    end)
-    |> case do
-      {:ok, _seen, pairs} ->
-        ordered =
-          pairs
-          |> Enum.sort_by(&elem(&1, 0))
-          |> Jason.OrderedObject.new()
+        end
+    end
+  end
 
-        {:ok, ordered}
-
-      :error ->
+  defp canonicalize(list, budget) when is_list(list) do
+    cond do
+      budget.depth > budget.max_depth ->
         :error
+
+      budget.nodes + 1 > budget.max_nodes ->
+        :error
+
+      true ->
+        budget = %{
+          budget
+          | nodes: budget.nodes + 1,
+            depth: budget.depth + 1,
+            estimated: budget.estimated + 2
+        }
+
+        if budget.estimated > budget.max_estimated_bytes do
+          :error
+        else
+          Enum.reduce_while(list, {:ok, [], budget}, fn item, {:ok, acc, b} ->
+            case canonicalize(item, b) do
+              {:ok, c, b2} ->
+                b2 = %{b2 | estimated: b2.estimated + 1}
+
+                if b2.estimated > b2.max_estimated_bytes do
+                  {:halt, :error}
+                else
+                  {:cont, {:ok, [c | acc], b2}}
+                end
+
+              :error ->
+                {:halt, :error}
+            end
+          end)
+          |> case do
+            {:ok, items, final_budget} ->
+              {:ok, Enum.reverse(items), %{final_budget | depth: budget.depth}}
+
+            :error ->
+              :error
+          end
+        end
     end
   end
 
-  defp canonicalize(list) when is_list(list) do
-    Enum.reduce_while(list, {:ok, []}, fn item, {:ok, acc} ->
-      case canonicalize(item) do
-        {:ok, c} -> {:cont, {:ok, [c | acc]}}
-        :error -> {:halt, :error}
+  defp canonicalize(v, budget) when is_binary(v) do
+    size = byte_size(v)
+
+    cond do
+      size > budget.max_string_bytes ->
+        :error
+
+      size > budget.max_estimated_bytes ->
+        :error
+
+      not String.valid?(v) ->
+        :error
+
+      budget.nodes + 1 > budget.max_nodes ->
+        :error
+
+      true ->
+        # Quotes + conservative worst-case JSON escape (\\uXXXX per byte → 6x)
+        estimated = budget.estimated + size * 6 + 2
+
+        if estimated > budget.max_estimated_bytes do
+          :error
+        else
+          {:ok, v, %{budget | nodes: budget.nodes + 1, estimated: estimated}}
+        end
+    end
+  end
+
+  defp canonicalize(v, budget) when is_number(v) or is_boolean(v) or is_nil(v) do
+    if budget.nodes + 1 > budget.max_nodes do
+      :error
+    else
+      estimated = budget.estimated + 32
+
+      if estimated > budget.max_estimated_bytes do
+        :error
+      else
+        {:ok, v, %{budget | nodes: budget.nodes + 1, estimated: estimated}}
       end
-    end)
-    |> case do
-      {:ok, items} -> {:ok, Enum.reverse(items)}
-      :error -> :error
     end
   end
 
-  defp canonicalize(v) when is_binary(v) do
-    if String.valid?(v), do: {:ok, v}, else: :error
+  defp canonicalize(a, budget) when is_atom(a) do
+    canonicalize(Atom.to_string(a), budget)
   end
 
-  defp canonicalize(v) when is_number(v) or is_boolean(v) or is_nil(v), do: {:ok, v}
-  defp canonicalize(a) when is_atom(a), do: {:ok, Atom.to_string(a)}
-  defp canonicalize(_), do: :error
+  defp canonicalize(_, _), do: :error
+
+  defp normalize_fp_key(k, budget) when is_binary(k) do
+    size = byte_size(k)
+
+    cond do
+      size > budget.max_string_bytes ->
+        :error
+
+      not String.valid?(k) ->
+        :error
+
+      true ->
+        cost = size * 6 + 2 + 1
+        estimated = budget.estimated + cost
+
+        if estimated > budget.max_estimated_bytes do
+          :error
+        else
+          {:ok, k, %{budget | estimated: estimated}}
+        end
+    end
+  end
+
+  defp normalize_fp_key(k, budget) when is_atom(k) do
+    normalize_fp_key(Atom.to_string(k), budget)
+  end
+
+  defp normalize_fp_key(_, _), do: :error
 
   defp encode_canonical(value) do
     case Jason.encode(value) do
-      {:ok, json} -> {:ok, json}
-      {:error, _} -> :error
+      {:ok, json} ->
+        if byte_size(json) > @max_fp_estimated_bytes do
+          :error
+        else
+          {:ok, json}
+        end
+
+      {:error, _} ->
+        :error
     end
   end
 end

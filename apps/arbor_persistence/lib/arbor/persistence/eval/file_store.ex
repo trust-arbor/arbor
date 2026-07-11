@@ -13,19 +13,31 @@ defmodule Arbor.Persistence.Eval.FileStore do
   #   when the path is a real directory (never chmod a symlink target).
   # - OTP has no openat/O_NOFOLLOW publish primitive that fully eliminates
   #   rename races against a hostile concurrent root mutator. We fail closed
-  #   on identity changes. File metadata checks (type/device/inode/size/
-  #   mtime/ctime) are **best-effort under the trusted-root contract**, not
-  #   proof against an owner restoring timestamps after same-inode mutation.
-  # - Atomic exclusive temp publish (mode 0600) + file fsync + root-stable
-  #   rename + post-rename identity verify. Directory fsync is unsupported
-  #   on this pinned macOS/OTP host (`:eisdir` when opening a directory) and
-  #   is treated as best-effort — not a crash-durability claim.
+  #   on identity changes. Load requires **stable content across two complete
+  #   reads from the same open handle** (exact-size read → EOF-probe → seek
+  #   BOF → second exact read/hash → equal digests + full identity). This is
+  #   a bounded stable-content check under the trusted-root contract — not a
+  #   hostile atomic-snapshot claim. An owner restoring identical bytes
+  #   between passes is semantically unchanged. Metadata (type/device/inode/
+  #   size/mtime/ctime) uses OTP posix second-resolution timestamps (pinned
+  #   OTP rejects `time: :native` with `:badarg`).
+  # - Atomic exclusive cryptorandom temp publish (mode 0600) + file fsync +
+  #   root-stable rename + post-rename identity verify. If post-rename
+  #   verification fails, the error is shaped distinctly
+  #   (`:publish_post_rename_verify_failed` / `:publish_post_rename_inconsistent`)
+  #   and admits the target may retain published bytes — never reports that
+  #   no side effect occurred. Directory fsync is unsupported on this pinned
+  #   macOS/OTP host (`:eisdir` when opening a directory) and is treated as
+  #   best-effort — not a crash-durability claim.
   # - Budgeted encode (depth/node/string/key/integer-bit/estimated-byte)
   #   before Jason materialization; non-bypassable ceilings on file size /
   #   file count / aggregate bytes
   # - Load/list bind decoded "id" exactly to the validated filename run_id
-  # - Directory enumeration runs in a bounded monitored worker (heap / name /
-  #   output / timeout ceilings); the caller never materializes File.ls
+  # - Directory enumeration runs in a monitored worker with hard heap / name /
+  #   output / timeout ceilings and bounded result transfer. `File.ls/1`
+  #   still allocates inside that worker — this is **not** an OS-level
+  #   no-allocation proof. Private-root owner/mode is enforced before
+  #   enumeration; worker kill/timeout drains mailbox residue.
 
   alias Arbor.Common.SafePath
 
@@ -51,15 +63,19 @@ defmodule Arbor.Persistence.Eval.FileStore do
   @max_integer_bits 65_536
   @max_integer_abs Bitwise.bsl(1, @max_integer_bits) - 1
 
-  # Directory enumeration: File.ls/1 materializes names inside a **worker**
-  # with hard heap/output/name/timeout ceilings. Caller only receives the
-  # bounded candidate list / error evidence — not the full name list.
+  # Directory enumeration: File.ls/1 still allocates name lists inside a
+  # monitored worker (not an OS no-allocation proof). Worker has hard
+  # heap/output/name/timeout ceilings; caller only receives the bounded
+  # candidate list / error evidence.
   @dir_name_slack 4
   @ceiling_dir_names 8_000
   @list_worker_timeout_ms 5_000
   # ~32 MiB heap words on 64-bit BEAM (word = 8 bytes); kill worker on exceed.
   @list_worker_max_heap_words 4_194_304
   @max_filename_bytes 256
+  @max_down_reason_bytes 256
+  @euid_probe_retries 8
+  @temp_name_retries 16
 
   @max_run_id_bytes 128
   # Single path component: starts alphanumeric, then [A-Za-z0-9._-], no dots-only,
@@ -401,25 +417,48 @@ defmodule Arbor.Persistence.Eval.FileStore do
     end
   end
 
+  # Exclusive cryptorandom probe file under the system temp dir. Bounded
+  # collision retry; always cleanup on every path. No shell/`id` subprocess
+  # and no process-global executable selector.
   defp probe_euid do
     dir = System.tmp_dir!()
-    path = Path.join(dir, ".arbor-euid-#{System.unique_integer([:positive])}")
+    probe_euid_attempt(dir, @euid_probe_retries)
+  end
 
-    case :file.open(String.to_charlist(path), [:write, :binary, :raw, :exclusive]) do
-      {:ok, io} ->
-        _ = :file.close(io)
+  defp probe_euid_attempt(_dir, 0), do: :error
 
-        result =
-          case File.lstat(path, time: :posix) do
-            {:ok, %File.Stat{uid: uid}} when is_integer(uid) -> {:ok, uid}
-            _ -> :error
-          end
+  defp probe_euid_attempt(dir, remaining) when remaining > 0 do
+    name =
+      ".arbor-euid-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
 
-        _ = File.rm(path)
-        result
+    # Bound path component length (byte/path bounds).
+    if byte_size(name) > @max_filename_bytes do
+      :error
+    else
+      path = Path.join(dir, name)
 
-      {:error, _} ->
-        :error
+      case :file.open(String.to_charlist(path), [:write, :binary, :raw, :exclusive]) do
+        {:ok, io} ->
+          _ = :file.close(io)
+
+          result =
+            try do
+              case File.lstat(path, time: :posix) do
+                {:ok, %File.Stat{uid: uid}} when is_integer(uid) -> {:ok, uid}
+                _ -> :error
+              end
+            after
+              _ = File.rm(path)
+            end
+
+          result
+
+        {:error, :eexist} ->
+          probe_euid_attempt(dir, remaining - 1)
+
+        {:error, _} ->
+          :error
+      end
     end
   end
 
@@ -478,10 +517,11 @@ defmodule Arbor.Persistence.Eval.FileStore do
     }
   end
 
-  # Full regular-file identity. mtime/ctime are native OTP posix seconds on this
-  # pin (high-resolution file times are not exposed by File.Stat / :file on
-  # OTP 28.4.1). Metadata equality is best-effort under the trusted-root
-  # contract — not proof against an owner restoring timestamps.
+  # Full regular-file identity. mtime/ctime are OTP posix seconds on this pin
+  # (pinned OTP rejects `time: :native` with `:badarg`; high-resolution file
+  # times are not exposed by File.Stat). Metadata equality is best-effort;
+  # content stability is enforced by dual-pass digest equality under the
+  # trusted-root contract — not a hostile atomic-snapshot claim.
   defp regular_identity(%File.Stat{type: :regular} = stat) do
     case usable_identity(stat) do
       :ok ->
@@ -963,48 +1003,67 @@ defmodule Arbor.Persistence.Eval.FileStore do
 
     with :ok <- reject_symlink_ancestors(root, target),
          :ok <- assert_root_stable(root_state),
-         :ok <- assert_root_private(root_state) do
-      tmp =
-        Path.join(
-          root,
-          ".eval-tmp-#{System.unique_integer([:positive])}-#{:erlang.phash2(self())}.json"
-        )
-
-      # Exclusive create. `{:mode, 0o600}` is accepted by OTP 28.4.1 but does
-      # not reliably set permission bits under common umasks; enforce 0600 via
-      # chmod on the exclusive temp path before rename.
-      case :file.open(String.to_charlist(tmp), [:write, :binary, :raw, :exclusive]) do
-        {:ok, io} ->
-          try do
-            case :file.write(io, json) do
+         :ok <- assert_root_private(root_state),
+         {:ok, tmp, io} <- open_exclusive_temp(root) do
+      try do
+        case :file.write(io, json) do
+          :ok ->
+            case :file.sync(io) do
               :ok ->
-                case :file.sync(io) do
-                  :ok ->
-                    _ = :file.close(io)
-                    finalize_temp_publish(root_state, tmp, target)
-
-                  {:error, reason} ->
-                    _ = :file.close(io)
-                    cleanup_temp(tmp)
-                    {:error, {:file_error, reason}}
-                end
+                _ = :file.close(io)
+                finalize_temp_publish(root_state, tmp, target)
 
               {:error, reason} ->
                 _ = :file.close(io)
                 cleanup_temp(tmp)
                 {:error, {:file_error, reason}}
             end
-          rescue
-            e ->
-              _ = :file.close(io)
-              cleanup_temp(tmp)
-              {:error, {:file_error, Exception.message(e)}}
-          catch
-            kind, reason ->
-              _ = :file.close(io)
-              cleanup_temp(tmp)
-              {:error, {:file_error, {kind, reason}}}
-          end
+
+          {:error, reason} ->
+            _ = :file.close(io)
+            cleanup_temp(tmp)
+            {:error, {:file_error, reason}}
+        end
+      rescue
+        e ->
+          _ = :file.close(io)
+          cleanup_temp(tmp)
+          {:error, {:file_error, Exception.message(e)}}
+      catch
+        kind, reason ->
+          _ = :file.close(io)
+          cleanup_temp(tmp)
+          {:error, {:file_error, {kind, reason}}}
+      end
+    end
+  end
+
+  # Cryptorandom exclusive temp under the store root. Bounded collision retry;
+  # never reuses unique_integer-only global names.
+  defp open_exclusive_temp(root) do
+    open_exclusive_temp_attempt(root, @temp_name_retries)
+  end
+
+  defp open_exclusive_temp_attempt(_root, 0), do: {:error, {:file_error, :eexist}}
+
+  defp open_exclusive_temp_attempt(root, remaining) when remaining > 0 do
+    name =
+      ".eval-tmp-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower) <> ".json"
+
+    if byte_size(name) > @max_filename_bytes do
+      {:error, {:file_error, :enametoolong}}
+    else
+      tmp = Path.join(root, name)
+
+      # Exclusive create. `{:mode, 0o600}` is accepted by OTP 28.4.1 but does
+      # not reliably set permission bits under common umasks; enforce 0600 via
+      # chmod on the exclusive temp path before rename.
+      case :file.open(String.to_charlist(tmp), [:write, :binary, :raw, :exclusive]) do
+        {:ok, io} ->
+          {:ok, tmp, io}
+
+        {:error, :eexist} ->
+          open_exclusive_temp_attempt(root, remaining - 1)
 
         {:error, reason} ->
           {:error, {:file_error, reason}}
@@ -1012,20 +1071,51 @@ defmodule Arbor.Persistence.Eval.FileStore do
     end
   end
 
+  # Pre-rename failures clean the exclusive temp and report no publish.
+  # Post-rename verification failures **never** claim no side effect: the
+  # target may retain (or partially expose) published bytes / quarantine the
+  # published inode; error tags are distinct.
   defp finalize_temp_publish(root_state, tmp, target) do
-    with :ok <- chmod_temp(tmp),
-         {:ok, tmp_identity} <- capture_temp_identity(tmp),
-         :ok <- assert_root_stable(root_state),
-         :ok <- assert_root_private(root_state),
-         :ok <- rename_temp(tmp, target),
-         :ok <- best_effort_sync_directory(root_state.path),
-         :ok <- verify_published(target, tmp_identity),
-         :ok <- assert_root_stable(root_state) do
-      :ok
-    else
+    case prepare_temp_for_rename(tmp, root_state) do
+      {:ok, tmp_identity} ->
+        case rename_temp(tmp, target) do
+          :ok ->
+            _ = best_effort_sync_directory(root_state.path)
+
+            case verify_published(target, tmp_identity) do
+              :ok ->
+                case assert_root_stable(root_state) do
+                  :ok ->
+                    :ok
+
+                  {:error, reason} ->
+                    # Target retained after rename; root identity drift.
+                    {:error, {:publish_post_rename_inconsistent, reason}}
+                end
+
+              {:error, reason} ->
+                # Target path retains the renamed inode (or an unexpected
+                # substitute). Do not report a clean no-side-effect failure.
+                {:error, {:publish_post_rename_verify_failed, reason}}
+            end
+
+          {:error, _} = err ->
+            cleanup_temp(tmp)
+            err
+        end
+
       {:error, _} = err ->
         cleanup_temp(tmp)
         err
+    end
+  end
+
+  defp prepare_temp_for_rename(tmp, root_state) do
+    with :ok <- chmod_temp(tmp),
+         {:ok, tmp_identity} <- capture_temp_identity(tmp),
+         :ok <- assert_root_stable(root_state),
+         :ok <- assert_root_private(root_state) do
+      {:ok, tmp_identity}
     end
   end
 
@@ -1136,7 +1226,7 @@ defmodule Arbor.Persistence.Eval.FileStore do
   end
 
   # ---------------------------------------------------------------------------
-  # Bounded read (single opened handle + full identity recheck)
+  # Bounded dual-pass read (same open handle + digest equality + identity)
   # ---------------------------------------------------------------------------
 
   defp read_regular_file_bounded(path, opts) do
@@ -1164,6 +1254,9 @@ defmodule Arbor.Persistence.Eval.FileStore do
     end
   end
 
+  # Two complete exact-size passes from the same handle. Return data only when
+  # content digests match and full handle/path identity still matches. Memory
+  # holds at most one max_file-bounded payload (second pass hashes only).
   defp open_and_read_stable(path, max_bytes, expected) do
     case :file.open(String.to_charlist(path), [:read, :binary, :raw]) do
       {:ok, io} ->
@@ -1173,6 +1266,12 @@ defmodule Arbor.Persistence.Eval.FileStore do
                {:ok, id1} <- regular_identity(stat1),
                true <- identity_match?(id1, expected) or {:error, :file_changed},
                {:ok, data} <- read_exact_size(io, expected.size, max_bytes),
+               :ok <- eof_probe(io),
+               digest1 = :crypto.hash(:sha256, data),
+               :ok <- seek_bof(io),
+               {:ok, digest2} <- hash_exact_size(io, expected.size, max_bytes),
+               :ok <- eof_probe(io),
+               true <- digest1 == digest2 or {:error, :file_changed},
                {:ok, info2} <- :file.read_file_info(io, time: :posix),
                stat2 = File.Stat.from_record(info2),
                {:ok, id2} <- regular_identity(stat2),
@@ -1212,38 +1311,75 @@ defmodule Arbor.Persistence.Eval.FileStore do
 
   defp identity_match?(_, _), do: false
 
+  defp eof_probe(io) do
+    case :file.read(io, 1) do
+      :eof ->
+        :ok
+
+      {:ok, <<>>} ->
+        :ok
+
+      {:ok, _} ->
+        {:error, :file_changed}
+
+      {:error, reason} ->
+        {:error, {:file_error, reason}}
+    end
+  end
+
+  defp seek_bof(io) do
+    case :file.position(io, :bof) do
+      {:ok, _} -> :ok
+      {:error, reason} -> {:error, {:file_error, reason}}
+    end
+  end
+
   # Read exactly `size` bytes (the captured initial size), never past it, and
-  # never more than max_bytes. Reject growth probes (extra readable byte) and
-  # short reads (truncation during read).
+  # never more than max_bytes. Short reads fail closed as :file_changed.
   defp read_exact_size(_io, size, max_bytes)
        when is_integer(size) and size > max_bytes do
     {:error, :max_file_bytes_exceeded}
   end
 
   defp read_exact_size(io, size, _max_bytes) when is_integer(size) and size >= 0 do
-    case read_n_bytes(io, size, []) do
-      {:ok, data} ->
-        # Probe one extra byte: growth during read must fail closed.
-        case :file.read(io, 1) do
-          :eof ->
-            {:ok, data}
-
-          {:ok, <<>>} ->
-            {:ok, data}
-
-          {:ok, _} ->
-            {:error, :file_changed}
-
-          {:error, reason} ->
-            {:error, {:file_error, reason}}
-        end
-
-      {:error, _} = err ->
-        err
-    end
+    read_n_bytes(io, size, [])
   end
 
   defp read_exact_size(_, _, _), do: {:error, :unusable_inode}
+
+  defp hash_exact_size(_io, size, max_bytes)
+       when is_integer(size) and size > max_bytes do
+    {:error, :max_file_bytes_exceeded}
+  end
+
+  defp hash_exact_size(io, size, _max_bytes) when is_integer(size) and size >= 0 do
+    hash_n_bytes(io, size, :crypto.hash_init(:sha256))
+  end
+
+  defp hash_exact_size(_, _, _), do: {:error, :unusable_inode}
+
+  defp hash_n_bytes(_io, 0, acc) do
+    {:ok, :crypto.hash_final(acc)}
+  end
+
+  defp hash_n_bytes(io, remaining, acc) when remaining > 0 do
+    chunk_size = min(remaining, 65_536)
+
+    case :file.read(io, chunk_size) do
+      {:ok, chunk} when byte_size(chunk) == chunk_size ->
+        hash_n_bytes(io, remaining - chunk_size, :crypto.hash_update(acc, chunk))
+
+      {:ok, chunk} when byte_size(chunk) < chunk_size ->
+        _ = chunk
+        {:error, :file_changed}
+
+      :eof ->
+        {:error, :file_changed}
+
+      {:error, reason} ->
+        {:error, {:file_error, reason}}
+    end
+  end
 
   defp read_n_bytes(_io, 0, acc) do
     {:ok, acc |> Enum.reverse() |> IO.iodata_to_binary()}
@@ -1327,6 +1463,9 @@ defmodule Arbor.Persistence.Eval.FileStore do
           error_logger: false
         })
 
+        # File.ls/1 still allocates the full name list inside this worker.
+        # Hard heap/name/timeout ceilings bound damage; this is not an
+        # OS-level no-allocation proof.
         result = safe_list_dir_candidates(root, max_files, name_ceiling)
         send(parent, {ref, result})
       end)
@@ -1334,14 +1473,18 @@ defmodule Arbor.Persistence.Eval.FileStore do
     receive do
       {^ref, result} ->
         Process.demonitor(mon, [:flush])
+        # Flush any racing DOWN; no result-message residue left behind.
+        drain_list_worker_mailbox(ref)
         result
 
       {:DOWN, ^mon, :process, ^worker, reason} ->
+        drain_list_worker_mailbox(ref)
+
         {:error,
          {:max_files_exceeded,
           %{
             reason: :enumeration_worker_killed,
-            detail: inspect(reason),
+            detail: bound_down_reason(reason),
             max_files: max_files,
             name_ceiling: name_ceiling
           }}}
@@ -1355,6 +1498,9 @@ defmodule Arbor.Persistence.Eval.FileStore do
           1_000 -> :ok
         end
 
+        # Kill/timeout must not leave a late {ref, result} in the mailbox.
+        drain_list_worker_mailbox(ref)
+
         {:error,
          {:max_files_exceeded,
           %{
@@ -1363,6 +1509,26 @@ defmodule Arbor.Persistence.Eval.FileStore do
             name_ceiling: name_ceiling,
             timeout_ms: @list_worker_timeout_ms
           }}}
+    end
+  end
+
+  defp drain_list_worker_mailbox(ref) do
+    receive do
+      {^ref, _} ->
+        drain_list_worker_mailbox(ref)
+    after
+      0 ->
+        :ok
+    end
+  end
+
+  defp bound_down_reason(reason) do
+    text = inspect(reason, limit: 32, printable_limit: @max_down_reason_bytes)
+
+    if byte_size(text) > @max_down_reason_bytes do
+      binary_part(text, 0, @max_down_reason_bytes)
+    else
+      text
     end
   end
 

@@ -87,5 +87,24 @@ defmodule Arbor.Persistence.EvalRunIdentityTest do
       assert Persistence.eval_config_fingerprint(%{}) == nil
       assert Persistence.eval_config_fingerprint("not a map") == nil
     end
+
+    test "rejects over-depth nested maps (system ceiling)" do
+      deep =
+        Enum.reduce(1..40, "leaf", fn _, acc ->
+          %{"n" => acc}
+        end)
+
+      assert Persistence.eval_config_fingerprint(deep) == nil
+    end
+
+    test "rejects oversized string values (system ceiling)" do
+      assert Persistence.eval_config_fingerprint(%{blob: String.duplicate("z", 1_100_000)}) ==
+               nil
+    end
+
+    test "rejects atom/string key collisions" do
+      colliding = Map.merge(%{k: 1}, %{"k" => 2})
+      assert Persistence.eval_config_fingerprint(colliding) == nil
+    end
   end
 end
