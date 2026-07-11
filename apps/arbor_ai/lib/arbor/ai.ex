@@ -64,6 +64,37 @@ defmodule Arbor.AI do
 
   require Logger
 
+  @eval_subjects %{
+    "embedding_retrieval" => Arbor.AI.Eval.Subjects.EmbeddingRetrieval,
+    "llm_router" => Arbor.AI.Eval.Subjects.LLMRouter,
+    "hybrid_retrieval" => Arbor.AI.Eval.Subjects.HybridRetrieval
+  }
+
+  @eval_graders %{
+    "embedding_similarity" => Arbor.AI.Eval.Graders.EmbeddingSimilarity,
+    "intent_conformance" => Arbor.AI.Eval.Graders.IntentConformance
+  }
+
+  @doc """
+  Resolves an AI-owned evaluation subject from its closed symbolic catalog.
+
+  Unknown values return `nil`; this function never interns atoms or resolves
+  module names dynamically.
+  """
+  @spec eval_subject(term()) :: module() | nil
+  def eval_subject(name) when is_binary(name), do: Map.get(@eval_subjects, name)
+  def eval_subject(_name), do: nil
+
+  @doc """
+  Resolves an AI-owned evaluation grader from its closed symbolic catalog.
+
+  Unknown values return `nil`; this function never interns atoms or resolves
+  module names dynamically.
+  """
+  @spec eval_grader(term()) :: module() | nil
+  def eval_grader(name) when is_binary(name), do: Map.get(@eval_graders, name)
+  def eval_grader(_name), do: nil
+
   # ── Authorized API (for agent callers) ──
 
   @doc """
