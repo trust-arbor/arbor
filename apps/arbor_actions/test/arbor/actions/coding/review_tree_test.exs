@@ -30,6 +30,7 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
       assert ReviewTree.Search.name() == "coding_review_tree_search"
       assert ReviewTree.Read.category() == "coding"
       assert ReviewTree.Search.category() == "coding"
+      assert ReviewTree.Search.taint_roles().query == :data
     end
   end
 
@@ -55,6 +56,7 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
       assert snap.candidate_tree_oid == fixture.candidate_tree_oid
       assert snap.base_tree_oid == fixture.base_tree_oid
       assert snap.active == true
+      refute Map.has_key?(snap, :repo_path)
 
       # Candidate sees the changed module.
       assert {:ok, candidate_read} =
@@ -128,6 +130,203 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
       assert Enum.any?(search.matches, fn m -> m.path == "lib/related.ex" end)
       assert Workspace.json_clean?(search)
       assert search.truncated == false
+    end
+
+    test "security regression: public snapshot views do not expose repository paths", %{
+      tmp_dir: tmp_dir
+    } do
+      fixture = build_review_fixture(tmp_dir)
+
+      assert {:ok, snap} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 fixture.candidate_commit,
+                 fixture.context
+               )
+
+      refute Map.has_key?(snap, :repo_path)
+      refute Map.has_key?(snap, "repo_path")
+
+      assert {:ok, resolved} =
+               WorkspaceLeaseRegistry.resolve_review_snapshot(
+                 snap.review_snapshot_id,
+                 fixture.context
+               )
+
+      refute Map.has_key?(resolved, :repo_path)
+      refute Map.has_key?(resolved, "repo_path")
+    end
+
+    test "reads and searches tracked colon and backslash filenames plus symlink blobs", %{
+      tmp_dir: tmp_dir
+    } do
+      fixture = build_review_fixture(tmp_dir, prefix: "odd_paths")
+      worktree = fixture.lease.worktree_path
+      colon_path = "lib/colon:name.ex"
+      backslash_path = "lib/back\\slash.ex"
+      symlink_path = "lib/changed_link.ex"
+
+      File.write!(Path.join(worktree, colon_path), "ODD_PATH_TOKEN colon\n")
+      File.write!(Path.join(worktree, backslash_path), "ODD_PATH_TOKEN backslash\n")
+      File.ln_s!("changed.ex", Path.join(worktree, symlink_path))
+      git!(worktree, ["add", "--", colon_path, backslash_path, symlink_path])
+      git!(worktree, ["commit", "-m", "add odd tracked paths"])
+      candidate = git!(worktree, ["rev-parse", "HEAD"])
+
+      assert {:ok, snap} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 candidate,
+                 fixture.context
+               )
+
+      for {path, expected} <- [
+            {colon_path, "ODD_PATH_TOKEN colon\n"},
+            {backslash_path, "ODD_PATH_TOKEN backslash\n"},
+            {symlink_path, "changed.ex"}
+          ] do
+        assert {:ok, read} =
+                 ReviewTree.Read.run(
+                   %{
+                     review_snapshot_id: snap.review_snapshot_id,
+                     revision: "candidate",
+                     path: path
+                   },
+                   fixture.context
+                 )
+
+        assert read.content == expected
+      end
+
+      assert {:ok, search} =
+               ReviewTree.Search.run(
+                 %{
+                   review_snapshot_id: snap.review_snapshot_id,
+                   revision: "candidate",
+                   query: "ODD_PATH_TOKEN",
+                   limit: 10
+                 },
+                 fixture.context
+               )
+
+      paths = Enum.map(search.matches, & &1.path)
+      assert colon_path in paths
+      assert backslash_path in paths
+    end
+
+    test "rejects oversized, binary, and invalid UTF-8 tracked blobs", %{tmp_dir: tmp_dir} do
+      fixture = build_review_fixture(tmp_dir, prefix: "blob_bounds")
+      worktree = fixture.lease.worktree_path
+
+      File.write!(
+        Path.join(worktree, "oversized.txt"),
+        String.duplicate("x", ReviewTree.max_content_bytes() + 1)
+      )
+
+      File.write!(Path.join(worktree, "binary.dat"), <<"text", 0, "binary">>)
+      File.write!(Path.join(worktree, "invalid_utf8.txt"), <<"text", 0xFF, "invalid">>)
+      git!(worktree, ["add", "--", "oversized.txt", "binary.dat", "invalid_utf8.txt"])
+      git!(worktree, ["commit", "-m", "add bounded blob fixtures"])
+      candidate = git!(worktree, ["rev-parse", "HEAD"])
+
+      assert {:ok, snap} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 candidate,
+                 fixture.context
+               )
+
+      assert {:error, :content_too_large} =
+               read_candidate(snap, fixture.context, "oversized.txt")
+
+      assert {:error, :binary_content} = read_candidate(snap, fixture.context, "binary.dat")
+
+      assert {:error, :invalid_utf8} =
+               read_candidate(snap, fixture.context, "invalid_utf8.txt")
+    end
+
+    test "security regression: blob size is checked before loading content" do
+      parent = self()
+
+      git_runner = fn
+        _repo, ["cat-file", "-t", _object] ->
+          {:ok, "blob\n"}
+
+        _repo, ["cat-file", "-s", _object] ->
+          {:ok, Integer.to_string(ReviewTree.max_content_bytes() + 1)}
+
+        _repo, ["cat-file", "blob", _object] ->
+          send(parent, :oversized_blob_loaded)
+          {:ok, "should not load"}
+      end
+
+      assert {:error, :content_too_large} =
+               ReviewTree.read_blob("/repo", String.duplicate("a", 40), "large.txt",
+                 git_runner: git_runner
+               )
+
+      refute_receive :oversized_blob_loaded
+    end
+
+    test "search truncation preserves valid UTF-8", %{tmp_dir: tmp_dir} do
+      fixture = build_review_fixture(tmp_dir, prefix: "utf8_search")
+      worktree = fixture.lease.worktree_path
+      line = "MATCH" <> String.duplicate("a", 1018) <> "é suffix"
+
+      File.write!(Path.join(worktree, "utf8.txt"), line <> "\n")
+      git!(worktree, ["add", "utf8.txt"])
+      git!(worktree, ["commit", "-m", "add long utf8 line"])
+      candidate = git!(worktree, ["rev-parse", "HEAD"])
+
+      assert {:ok, snap} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 fixture.lease.workspace_id,
+                 candidate,
+                 fixture.context
+               )
+
+      assert {:ok, search} =
+               ReviewTree.Search.run(
+                 %{
+                   review_snapshot_id: snap.review_snapshot_id,
+                   revision: "candidate",
+                   query: "MATCH",
+                   limit: 1
+                 },
+                 fixture.context
+               )
+
+      assert [%{text: text}] = search.matches
+      assert String.valid?(text)
+      assert byte_size(text) == 1023
+    end
+
+    test "security regression: bounded search stops an excessive-output producer", %{
+      tmp_dir: tmp_dir
+    } do
+      executable = Path.join(tmp_dir, "excessive-git")
+      marker = Path.join(tmp_dir, "producer-finished")
+
+      File.write!(executable, """
+      #!/bin/sh
+      set -e
+      dd if=/dev/zero bs=1048576 count=8 2>/dev/null
+      : > '#{marker}'
+      """)
+
+      File.chmod!(executable, 0o755)
+
+      assert {:ok, %{truncated: true}} =
+               ReviewTree.search_tree(
+                 tmp_dir,
+                 String.duplicate("a", 40),
+                 "needle",
+                 1,
+                 git_executable: executable
+               )
+
+      Process.sleep(50)
+      refute File.exists?(marker)
     end
 
     test "snapshot is immutable after live worktree and HEAD change", %{tmp_dir: tmp_dir} do
@@ -694,6 +893,17 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
       refute is_function(v)
       refute is_struct(v)
     end)
+  end
+
+  defp read_candidate(snapshot, context, path) do
+    ReviewTree.Read.run(
+      %{
+        review_snapshot_id: snapshot.review_snapshot_id,
+        revision: "candidate",
+        path: path
+      },
+      context
+    )
   end
 
   defp assert_eventually(fun, attempts \\ 50)

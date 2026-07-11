@@ -247,6 +247,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     call({:resolve_review_snapshot, review_snapshot_id, caller}, server_opts)
   end
 
+  @doc false
+  @spec resolve_review_snapshot_for_action(String.t(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def resolve_review_snapshot_for_action(review_snapshot_id, opts \\ %{})
+      when is_binary(review_snapshot_id) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:resolve_review_snapshot_for_action, review_snapshot_id, caller}, server_opts)
+  end
+
   @doc """
   Close a review snapshot when authorized.
 
@@ -282,13 +291,16 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     %{
       review_snapshot_id: snapshot.review_snapshot_id,
       workspace_id: snapshot.workspace_id,
-      repo_path: snapshot.repo_path,
       candidate_commit: snapshot.candidate_commit,
       base_commit: snapshot.base_commit,
       candidate_tree_oid: snapshot.candidate_tree_oid,
       base_tree_oid: snapshot.base_tree_oid,
       active: true
     }
+  end
+
+  defp review_snapshot_action_view(snapshot) do
+    Map.put(review_snapshot_view(snapshot), :repo_path, snapshot.repo_path)
   end
 
   # -- GenServer ------------------------------------------------------
@@ -547,6 +559,19 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
     case fetch_authorized_review_snapshot(state, review_snapshot_id, caller) do
       {:ok, snapshot} -> {:reply, {:ok, review_snapshot_view(snapshot)}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(
+        {:resolve_review_snapshot_for_action, review_snapshot_id, caller},
+        {from_pid, _tag},
+        state
+      ) do
+    caller = %{caller | owner_pid: from_pid}
+
+    case fetch_authorized_review_snapshot(state, review_snapshot_id, caller) do
+      {:ok, snapshot} -> {:reply, {:ok, review_snapshot_action_view(snapshot)}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end

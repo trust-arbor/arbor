@@ -21,6 +21,9 @@ defmodule Arbor.Actions.Coding.ReviewTree do
   @default_search_limit 20
   @max_match_line_bytes 1024
   @max_total_match_bytes 262_144
+  @max_search_output_bytes @max_total_match_bytes +
+                             @max_search_limit * (@max_path_bytes + 64)
+  @search_timeout_ms 30_000
 
   @doc false
   def max_content_bytes, do: @max_content_bytes
@@ -53,12 +56,8 @@ defmodule Arbor.Actions.Coding.ReviewTree do
       byte_size(path) > @max_path_bytes ->
         {:error, :path_too_long}
 
-      Path.type(path) == :absolute or String.starts_with?(path, "/") or
-          String.match?(path, ~r/^[A-Za-z]:[\\\/]/) ->
+      Path.type(path) == :absolute or String.starts_with?(path, "/") ->
         {:error, :absolute_path}
-
-      String.contains?(path, ["\\", ":"]) ->
-        {:error, :invalid_path}
 
       Enum.any?(Path.split(path), &(&1 in ["..", ".git", ""])) ->
         {:error, :path_traversal}
@@ -121,21 +120,35 @@ defmodule Arbor.Actions.Coding.ReviewTree do
   def normalize_limit(_), do: {:error, :invalid_limit}
 
   @doc false
-  @spec commit_for_revision(map(), :candidate | :base) :: String.t()
+  @spec commit_for_revision(map(), :candidate | :base) :: String.t() | nil
   def commit_for_revision(snapshot, :candidate),
     do: snapshot.candidate_commit || snapshot["candidate_commit"]
 
   def commit_for_revision(snapshot, :base), do: snapshot.base_commit || snapshot["base_commit"]
 
   @doc false
-  @spec read_blob(String.t(), String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
-  def read_blob(repo_path, commit, path)
-      when is_binary(repo_path) and is_binary(commit) and is_binary(path) do
-    object = commit <> ":" <> path
+  @spec tree_oid_for_revision(map(), :candidate | :base) :: String.t() | nil
+  def tree_oid_for_revision(snapshot, :candidate),
+    do: snapshot.candidate_tree_oid || snapshot["candidate_tree_oid"]
 
-    with {:ok, type} <- git(repo_path, ["cat-file", "-t", object]),
+  def tree_oid_for_revision(snapshot, :base),
+    do: snapshot.base_tree_oid || snapshot["base_tree_oid"]
+
+  @doc false
+  @spec read_blob(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, String.t()} | {:error, term()}
+  def read_blob(repo_path, tree_oid, path, opts \\ [])
+
+  def read_blob(repo_path, tree_oid, path, opts)
+      when is_binary(repo_path) and is_binary(tree_oid) and is_binary(path) and is_list(opts) do
+    object = tree_oid <> ":" <> path
+    git_runner = Keyword.get(opts, :git_runner, &git/2)
+
+    with {:ok, type} <- git_runner.(repo_path, ["cat-file", "-t", object]),
          :ok <- require_blob(String.trim(type)),
-         {:ok, content} <- git(repo_path, ["cat-file", "blob", object]),
+         {:ok, size_text} <- git_runner.(repo_path, ["cat-file", "-s", object]),
+         :ok <- require_bounded_blob_size(size_text),
+         {:ok, content} <- git_runner.(repo_path, ["cat-file", "blob", object]),
          :ok <- reject_binary(content),
          :ok <- reject_oversized(content),
          :ok <- require_utf8(content) do
@@ -143,67 +156,66 @@ defmodule Arbor.Actions.Coding.ReviewTree do
     end
   end
 
-  def read_blob(_, _, _), do: {:error, :invalid_read_args}
+  def read_blob(_, _, _, _), do: {:error, :invalid_read_args}
 
   @doc false
-  @spec search_tree(String.t(), String.t(), String.t(), pos_integer()) ::
+  @spec search_tree(String.t(), String.t(), String.t(), pos_integer(), keyword()) ::
           {:ok, map()} | {:error, term()}
-  def search_tree(repo_path, commit, query, limit)
-      when is_binary(repo_path) and is_binary(commit) and is_binary(query) and is_integer(limit) do
+  def search_tree(repo_path, tree_oid, query, limit, opts \\ [])
+
+  def search_tree(repo_path, tree_oid, query, limit, opts)
+      when is_binary(repo_path) and is_binary(tree_oid) and is_binary(query) and
+             is_integer(limit) and is_list(opts) do
     # git grep with a commit-ish searches that tree (tracked files only).
-    # -F literal, -I skip binary, -n line numbers, --full-name stable paths.
-    # -- excludes pathspecs that could look like options.
+    # -z frames path/line metadata without reserving a filename character.
     args = [
       "grep",
+      "-z",
       "-n",
       "-F",
       "-I",
       "--full-name",
       "-e",
       query,
-      commit,
+      tree_oid,
       "--"
     ]
 
-    case System.cmd("git", ["-C", repo_path | args], stderr_to_stdout: true) do
-      {output, 0} ->
-        parse_grep_matches(output, commit, limit)
-
-      {_output, 1} ->
-        # git grep exit 1 means no matches.
-        {:ok, %{matches: [], match_count: 0, truncated: false}}
-
-      {output, _code} ->
-        {:error, {:search_failed, String.trim(output)}}
+    with {:ok, git_executable} <- find_git_executable(opts),
+         {:ok, output, status, output_truncated} <-
+           bounded_port_output(git_executable, ["-C", repo_path | args]) do
+      case status do
+        0 -> parse_grep_matches(output, tree_oid, limit, output_truncated)
+        1 -> {:ok, %{matches: [], match_count: 0, truncated: false}}
+        _ -> {:error, {:search_failed, bounded_error(output)}}
+      end
     end
   rescue
     _ -> {:error, :search_failed}
   end
 
-  def search_tree(_, _, _, _), do: {:error, :invalid_search_args}
+  def search_tree(_, _, _, _, _), do: {:error, :invalid_search_args}
 
-  defp parse_grep_matches(output, commit, limit) do
-    lines =
-      output
-      |> String.split("\n", trim: true)
+  defp parse_grep_matches(output, tree_oid, limit, output_truncated) do
+    records = :binary.split(output, "\n", [:global]) |> Enum.reject(&(&1 == ""))
 
     {matches, truncated, _total_bytes} =
-      Enum.reduce_while(lines, {[], false, 0}, fn line, {acc, _trunc, bytes} ->
+      Enum.reduce_while(records, {[], output_truncated, 0}, fn record, {acc, trunc, bytes} ->
         if length(acc) >= limit do
           {:halt, {acc, true, bytes}}
         else
-          case parse_grep_line(line, commit) do
+          case parse_grep_record(record, tree_oid) do
             {:ok, match} ->
               match_bytes = byte_size(match.path) + byte_size(match.text) + 16
 
               if bytes + match_bytes > @max_total_match_bytes do
                 {:halt, {acc, true, bytes}}
               else
-                {:cont, {[match | acc], false, bytes + match_bytes}}
+                {:cont, {[match | acc], trunc, bytes + match_bytes}}
               end
 
             :error ->
-              {:cont, {acc, false, bytes}}
+              {:cont, {acc, true, bytes}}
           end
         end
       end)
@@ -214,22 +226,15 @@ defmodule Arbor.Actions.Coding.ReviewTree do
      %{
        matches: matches,
        match_count: length(matches),
-       truncated: truncated or length(lines) > length(matches)
+       truncated: truncated or length(records) > length(matches)
      }}
   end
 
-  defp parse_grep_line(line, commit) when is_binary(commit) do
-    # When grepping a tree-ish, git prefixes each hit as commit:path:lineno:text.
-    rest =
-      case String.split_at(line, byte_size(commit) + 1) do
-        {prefix, rest} when prefix == commit <> ":" -> rest
-        _ -> line
-      end
-
-    # format: path:lineno:text  (paths with ':' are rejected by path validation)
-    case Regex.run(~r/\A([^:]+):(\d+):(.*)\z/s, rest) do
-      [_, path, line_no, text] ->
-        with {:ok, path} <- validate_repo_relative_path(path),
+  defp parse_grep_record(record, tree_oid) when is_binary(tree_oid) do
+    case :binary.split(record, <<0>>, [:global]) do
+      [prefixed_path, line_no, text] ->
+        with {:ok, path} <- strip_tree_prefix(prefixed_path, tree_oid),
+             {:ok, path} <- validate_repo_relative_path(path),
              {n, ""} <- Integer.parse(line_no),
              true <- n >= 1,
              true <- String.valid?(text),
@@ -245,8 +250,26 @@ defmodule Arbor.Actions.Coding.ReviewTree do
     end
   end
 
+  defp strip_tree_prefix(prefixed_path, tree_oid) do
+    prefix = tree_oid <> ":"
+
+    if byte_size(prefixed_path) > byte_size(prefix) and
+         binary_part(prefixed_path, 0, byte_size(prefix)) == prefix do
+      {:ok,
+       binary_part(
+         prefixed_path,
+         byte_size(prefix),
+         byte_size(prefixed_path) - byte_size(prefix)
+       )}
+    else
+      {:error, :invalid_search_record}
+    end
+  end
+
   defp truncate_match_line(text) when byte_size(text) > @max_match_line_bytes do
-    binary_part(text, 0, @max_match_line_bytes)
+    text
+    |> binary_part(0, @max_match_line_bytes)
+    |> trim_invalid_utf8_suffix()
   end
 
   defp truncate_match_line(text), do: text
@@ -255,6 +278,14 @@ defmodule Arbor.Actions.Coding.ReviewTree do
   defp require_blob("tree"), do: {:error, :not_a_blob}
   defp require_blob("commit"), do: {:error, :not_a_blob}
   defp require_blob(_), do: {:error, :missing_path}
+
+  defp require_bounded_blob_size(size_text) do
+    case Integer.parse(String.trim(size_text)) do
+      {size, ""} when size >= 0 and size <= @max_content_bytes -> :ok
+      {size, ""} when size > @max_content_bytes -> {:error, :content_too_large}
+      _ -> {:error, :invalid_blob_size}
+    end
+  end
 
   defp reject_binary(content) do
     if String.contains?(content, <<0>>), do: {:error, :binary_content}, else: :ok
@@ -268,6 +299,82 @@ defmodule Arbor.Actions.Coding.ReviewTree do
 
   defp require_utf8(content) do
     if String.valid?(content), do: :ok, else: {:error, :invalid_utf8}
+  end
+
+  defp trim_invalid_utf8_suffix(text) do
+    cond do
+      String.valid?(text) ->
+        text
+
+      byte_size(text) == 0 ->
+        text
+
+      true ->
+        text
+        |> binary_part(0, byte_size(text) - 1)
+        |> trim_invalid_utf8_suffix()
+    end
+  end
+
+  defp find_git_executable(opts) do
+    case Keyword.get_lazy(opts, :git_executable, fn -> System.find_executable("git") end) do
+      nil -> {:error, :git_not_found}
+      executable -> {:ok, executable}
+    end
+  end
+
+  defp bounded_port_output(executable, args) do
+    port =
+      Port.open(
+        {:spawn_executable, executable},
+        [:binary, :exit_status, :stderr_to_stdout, args: args]
+      )
+
+    deadline = System.monotonic_time(:millisecond) + @search_timeout_ms
+    collect_port_output(port, [], 0, deadline)
+  rescue
+    _ -> {:error, :search_failed}
+  end
+
+  defp collect_port_output(port, chunks, byte_count, deadline) do
+    timeout = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^port, {:data, data}} ->
+        remaining = @max_search_output_bytes - byte_count
+
+        if byte_size(data) > remaining do
+          kept = if remaining > 0, do: binary_part(data, 0, remaining), else: ""
+          close_port(port)
+          {:ok, IO.iodata_to_binary(Enum.reverse([kept | chunks])), 0, true}
+        else
+          collect_port_output(port, [data | chunks], byte_count + byte_size(data), deadline)
+        end
+
+      {^port, {:exit_status, status}} ->
+        {:ok, IO.iodata_to_binary(Enum.reverse(chunks)), status, false}
+    after
+      timeout ->
+        close_port(port)
+        {:error, :search_timeout}
+    end
+  end
+
+  defp close_port(port) do
+    if Port.info(port), do: Port.close(port)
+    :ok
+  catch
+    :error, :badarg -> :ok
+  end
+
+  defp bounded_error(output) do
+    if String.valid?(output) do
+      output
+      |> truncate_match_line()
+      |> String.trim()
+    else
+      "git failed with non-UTF-8 output"
+    end
   end
 
   defp git(path, args) do
@@ -357,13 +464,15 @@ defmodule Arbor.Actions.Coding.ReviewTree do
              {:ok, revision} <- ReviewTree.normalize_revision(revision_raw),
              {:ok, path} <- ReviewTree.validate_repo_relative_path(path_raw),
              {:ok, snapshot} <-
-               WorkspaceLeaseRegistry.resolve_review_snapshot(
+               WorkspaceLeaseRegistry.resolve_review_snapshot_for_action(
                  review_snapshot_id,
                  caller_opts(context)
                ),
              {:ok, commit} <- require_commit(ReviewTree.commit_for_revision(snapshot, revision)),
+             {:ok, tree_oid} <-
+               require_tree_oid(ReviewTree.tree_oid_for_revision(snapshot, revision)),
              {:ok, repo_path} <- require_repo_path(map_value(snapshot, :repo_path)),
-             {:ok, content} <- ReviewTree.read_blob(repo_path, commit, path) do
+             {:ok, content} <- ReviewTree.read_blob(repo_path, tree_oid, path) do
           %{
             review_snapshot_id: review_snapshot_id,
             revision: Atom.to_string(revision),
@@ -395,6 +504,11 @@ defmodule Arbor.Actions.Coding.ReviewTree do
 
     defp require_commit(commit) when is_binary(commit) and commit != "", do: {:ok, commit}
     defp require_commit(_), do: {:error, :invalid_snapshot}
+
+    defp require_tree_oid(tree_oid) when is_binary(tree_oid) and tree_oid != "",
+      do: {:ok, tree_oid}
+
+    defp require_tree_oid(_), do: {:error, :invalid_snapshot}
 
     defp require_repo_path(path) when is_binary(path) and path != "", do: {:ok, path}
     defp require_repo_path(_), do: {:error, :invalid_snapshot}
@@ -449,7 +563,7 @@ defmodule Arbor.Actions.Coding.ReviewTree do
       %{
         review_snapshot_id: :control,
         revision: :control,
-        query: {:control, requires: [:prompt_injection]},
+        query: :data,
         limit: :data
       }
     end
@@ -475,13 +589,15 @@ defmodule Arbor.Actions.Coding.ReviewTree do
              {:ok, query} <- ReviewTree.validate_literal_query(query_raw),
              {:ok, limit} <- ReviewTree.normalize_limit(limit_raw),
              {:ok, snapshot} <-
-               WorkspaceLeaseRegistry.resolve_review_snapshot(
+               WorkspaceLeaseRegistry.resolve_review_snapshot_for_action(
                  review_snapshot_id,
                  caller_opts(context)
                ),
              {:ok, commit} <- require_commit(ReviewTree.commit_for_revision(snapshot, revision)),
+             {:ok, tree_oid} <-
+               require_tree_oid(ReviewTree.tree_oid_for_revision(snapshot, revision)),
              {:ok, repo_path} <- require_repo_path(map_value(snapshot, :repo_path)),
-             {:ok, search} <- ReviewTree.search_tree(repo_path, commit, query, limit) do
+             {:ok, search} <- ReviewTree.search_tree(repo_path, tree_oid, query, limit) do
           %{
             review_snapshot_id: review_snapshot_id,
             revision: Atom.to_string(revision),
@@ -515,6 +631,11 @@ defmodule Arbor.Actions.Coding.ReviewTree do
 
     defp require_commit(commit) when is_binary(commit) and commit != "", do: {:ok, commit}
     defp require_commit(_), do: {:error, :invalid_snapshot}
+
+    defp require_tree_oid(tree_oid) when is_binary(tree_oid) and tree_oid != "",
+      do: {:ok, tree_oid}
+
+    defp require_tree_oid(_), do: {:error, :invalid_snapshot}
 
     defp require_repo_path(path) when is_binary(path) and path != "", do: {:ok, path}
     defp require_repo_path(_), do: {:error, :invalid_snapshot}
