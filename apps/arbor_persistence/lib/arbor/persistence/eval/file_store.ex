@@ -4,12 +4,20 @@ defmodule Arbor.Persistence.Eval.FileStore do
   # Internal JSON file store for eval run results.
   # Public access is via Arbor.Persistence only.
   #
-  # Security properties:
+  # Security contract:
   # - Closed ASCII run-id grammar (no traversal / percent / absolute paths)
-  # - Root + path containment via SafePath; never follow symlinks
-  # - Atomic exclusive temp publish (mode 0600) + rename
-  # - Bounded per-file / file-count / aggregate decode budgets with
-  #   non-bypassable system ceilings
+  # - Root is a **trusted private directory** (operator-owned, not attacker-
+  #   mutable). OTP has no openat/O_NOFOLLOW publish primitive that fully
+  #   eliminates rename races against a hostile concurrent root mutator, so
+  #   we fail closed on identity changes and document the assumption rather
+  #   than claiming "never follow symlinks" in absolute terms.
+  # - Root + path containment via SafePath; reject symlink leaves/roots when
+  #   detectable; re-check device/inode/type/size/mtime/ctime identities
+  # - Atomic exclusive temp publish (mode 0600) + fsync + rename + dir fsync
+  # - Budgeted encode (depth/node/string/key/estimated-byte) before iodata
+  #   materialization; non-bypassable ceilings on file size / file count /
+  #   aggregate bytes
+  # - Load/list bind decoded "id" exactly to the validated filename run_id
 
   alias Arbor.Common.SafePath
 
@@ -24,6 +32,19 @@ defmodule Arbor.Persistence.Eval.FileStore do
   @ceiling_max_file_bytes 5_242_880
   @ceiling_max_files 2_000
   @ceiling_max_total_bytes 52_428_800
+
+  # Encode traversal budgets (relative to max_file_bytes / hard ceilings)
+  @max_encode_depth 32
+  @max_encode_nodes 50_000
+  @max_string_bytes 1_048_576
+  @max_object_keys 10_000
+
+  # Directory name-list multiplier under the trusted-root contract: OTP's
+  # File.ls/1 materializes the full name list. We still refuse to *process*
+  # more than max_files run candidates and refuse directories whose total
+  # name count exceeds a multiple of max_files (DoS signal / overpopulation).
+  @dir_name_slack 4
+  @ceiling_dir_names 8_000
 
   @max_run_id_bytes 128
   # Single path component: starts alphanumeric, then [A-Za-z0-9._-], no dots-only,
@@ -72,51 +93,57 @@ defmodule Arbor.Persistence.Eval.FileStore do
   @spec save_run(String.t(), map(), keyword()) :: :ok | {:error, term()}
   def save_run(run_id, run_data, opts \\ []) when is_map(run_data) do
     with :ok <- validate_run_id(run_id),
-         {:ok, root} <- prepare_root(opts, create?: true),
-         {:ok, target} <- contained_run_path(root, run_id),
+         {:ok, root_state} <- prepare_root(opts, create?: true),
+         {:ok, target} <- contained_run_path(root_state.path, run_id),
          :ok <- reject_symlink_target(target),
-         {:ok, json} <- encode_bounded(Map.put(run_data, :id, run_id), opts) do
-      atomic_publish(root, target, json)
+         {:ok, json} <- encode_bounded(run_data, run_id, opts),
+         :ok <- assert_root_stable(root_state) do
+      atomic_publish(root_state, target, json)
     end
   end
 
   @spec load_run(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def load_run(run_id, opts \\ []) do
     with :ok <- validate_run_id(run_id),
-         {:ok, root} <- prepare_root(opts, create?: false),
-         {:ok, path} <- contained_run_path(root, run_id),
+         {:ok, root_state} <- prepare_root(opts, create?: false),
+         {:ok, path} <- contained_run_path(root_state.path, run_id),
          {:ok, content} <- read_regular_file_bounded(path, opts),
-         {:ok, data} <- decode_json(content) do
-      {:ok, data}
+         :ok <- assert_root_stable(root_state),
+         {:ok, data} <- decode_json(content),
+         {:ok, bound} <- bind_run_id(data, run_id) do
+      {:ok, bound}
     end
   end
 
   @spec list_runs(keyword()) :: {:ok, [map()]} | {:error, term()}
   def list_runs(opts \\ []) do
-    model_filter = Keyword.get(opts, :model)
-    provider_filter = Keyword.get(opts, :provider)
+    model_filter = filter_string(Keyword.get(opts, :model))
+    provider_filter = filter_string(Keyword.get(opts, :provider))
     max_files = bound(opts, :max_files, @default_max_files, @ceiling_max_files)
     max_total = bound(opts, :max_total_bytes, @default_max_total_bytes, @ceiling_max_total_bytes)
 
     case prepare_root(opts, create?: false) do
-      {:ok, root} ->
-        case list_json_entries(root) do
+      {:ok, root_state} ->
+        case list_json_entries(root_state, max_files) do
           {:ok, entries} ->
-            decode_listed(
-              entries,
-              root,
-              max_files,
-              max_total,
-              model_filter,
-              provider_filter,
-              opts
-            )
+            with {:ok, runs} <-
+                   decode_listed(
+                     entries,
+                     max_files,
+                     max_total,
+                     model_filter,
+                     provider_filter,
+                     opts
+                   ),
+                 :ok <- assert_root_stable(root_state) do
+              {:ok, runs}
+            end
 
           {:error, :enoent} ->
             {:ok, []}
 
           {:error, reason} ->
-            {:error, {:file_error, reason}}
+            {:error, reason}
         end
 
       {:error, :enoent} ->
@@ -181,7 +208,7 @@ defmodule Arbor.Persistence.Eval.FileStore do
   end
 
   # ---------------------------------------------------------------------------
-  # Root / path
+  # Root / path (trusted private root + identity)
   # ---------------------------------------------------------------------------
 
   defp prepare_root(opts, create?: create?) do
@@ -194,36 +221,139 @@ defmodule Arbor.Persistence.Eval.FileStore do
 
       mkdir_result =
         if create? do
-          File.mkdir_p(abs)
+          # Least-privilege directory creation (0700). mkdir_p does not set
+          # mode on intermediate parents that already exist; we chmod the leaf.
+          case File.mkdir_p(abs) do
+            :ok ->
+              case File.chmod(abs, 0o700) do
+                :ok -> :ok
+                {:error, reason} -> {:error, reason}
+              end
+
+            {:error, _} = err ->
+              err
+          end
         else
           :ok
         end
 
       case mkdir_result do
         :ok ->
-          case File.lstat(abs) do
-            {:ok, %File.Stat{type: :directory}} ->
-              case File.read_link(abs) do
-                {:ok, _} -> {:error, :symlink_root}
-                {:error, _} -> {:ok, abs}
-              end
-
-            {:ok, %File.Stat{type: :symlink}} ->
-              {:error, :symlink_root}
-
-            {:ok, _} ->
-              {:error, :not_a_directory}
-
-            {:error, :enoent} ->
-              {:error, :enoent}
-
-            {:error, reason} ->
-              {:error, {:file_error, reason}}
-          end
+          capture_root_state(abs)
 
         {:error, reason} ->
           {:error, {:file_error, reason}}
       end
+    end
+  end
+
+  defp capture_root_state(abs) do
+    case File.lstat(abs, time: :posix) do
+      {:ok, %File.Stat{type: :directory} = stat} ->
+        case File.read_link(abs) do
+          {:ok, _} ->
+            {:error, :symlink_root}
+
+          {:error, _} ->
+            case usable_identity(stat) do
+              :ok ->
+                {:ok,
+                 %{
+                   path: abs,
+                   identity: directory_identity(stat)
+                 }}
+
+              {:error, _} = err ->
+                err
+            end
+        end
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :symlink_root}
+
+      {:ok, _} ->
+        {:error, :not_a_directory}
+
+      {:error, :enoent} ->
+        {:error, :enoent}
+
+      {:error, reason} ->
+        {:error, {:file_error, reason}}
+    end
+  end
+
+  defp assert_root_stable(%{path: path, identity: expected}) do
+    case File.lstat(path, time: :posix) do
+      {:ok, %File.Stat{type: :directory} = stat} ->
+        case File.read_link(path) do
+          {:ok, _} ->
+            {:error, :symlink_root}
+
+          {:error, _} ->
+            current = directory_identity(stat)
+
+            if current == expected do
+              :ok
+            else
+              {:error, :root_identity_changed}
+            end
+        end
+
+      {:ok, %File.Stat{type: :symlink}} ->
+        {:error, :symlink_root}
+
+      {:ok, _} ->
+        {:error, :not_a_directory}
+
+      {:error, reason} ->
+        {:error, {:file_error, reason}}
+    end
+  end
+
+  # Root identity deliberately omits mtime/ctime/size: legitimate child creates
+  # update directory timestamps. We still re-check type/device/inode so a root
+  # swap (different mount/inode) fails closed.
+  defp directory_identity(%File.Stat{} = stat) do
+    %{
+      type: stat.type,
+      inode: stat.inode,
+      major_device: stat.major_device,
+      minor_device: stat.minor_device
+    }
+  end
+
+  defp regular_identity(%File.Stat{type: :regular} = stat) do
+    case usable_identity(stat) do
+      :ok ->
+        {:ok,
+         %{
+           type: stat.type,
+           inode: stat.inode,
+           major_device: stat.major_device,
+           minor_device: stat.minor_device,
+           size: stat.size,
+           mtime: stat.mtime,
+           ctime: stat.ctime
+         }}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp regular_identity(%File.Stat{type: :symlink}), do: {:error, :symlink_target}
+  defp regular_identity(%File.Stat{}), do: {:error, :not_a_regular_file}
+
+  defp usable_identity(%File.Stat{inode: inode, major_device: major}) do
+    cond do
+      not is_integer(inode) or inode <= 0 ->
+        {:error, :unusable_inode}
+
+      not is_integer(major) ->
+        {:error, :unusable_inode}
+
+      true ->
+        :ok
     end
   end
 
@@ -245,7 +375,7 @@ defmodule Arbor.Persistence.Eval.FileStore do
   end
 
   defp reject_symlink_target(path) do
-    case File.lstat(path) do
+    case File.lstat(path, time: :posix) do
       {:error, :enoent} ->
         :ok
 
@@ -264,50 +394,334 @@ defmodule Arbor.Persistence.Eval.FileStore do
   end
 
   # ---------------------------------------------------------------------------
-  # Encode / atomic publish
+  # Budgeted encode — traverse before Jason materialization
   # ---------------------------------------------------------------------------
 
-  defp encode_bounded(run_data, opts) do
+  defp encode_bounded(run_data, run_id, opts) when is_map(run_data) do
     max_bytes = bound(opts, :max_file_bytes, @default_max_file_bytes, @ceiling_max_file_bytes)
 
-    data =
-      run_data
-      |> Map.put_new(:timestamp, DateTime.utc_now() |> DateTime.to_iso8601())
+    with {:ok, timestamp} <- resolve_timestamp(run_data),
+         {:ok, body} <- strip_id_and_timestamp(run_data) do
+      # Persist exactly one string-key "id" and "timestamp" (no atom aliases).
+      payload =
+        body
+        |> Map.put("id", run_id)
+        |> Map.put("timestamp", timestamp)
 
-    case Jason.encode(data, pretty: true) do
-      {:ok, json} when byte_size(json) > max_bytes ->
-        {:error, :max_file_bytes_exceeded}
+      with {:ok, _estimated} <- budget_check(payload, max_bytes) do
+        case Jason.encode_to_iodata(payload, pretty: true) do
+          {:ok, iodata} ->
+            # Flatten only after encode, still under hard ceiling.
+            size = IO.iodata_length(iodata)
 
-      {:ok, json} ->
-        {:ok, json}
+            if size > max_bytes or size > @ceiling_max_file_bytes do
+              {:error, :max_file_bytes_exceeded}
+            else
+              {:ok, IO.iodata_to_binary(iodata)}
+            end
 
-      {:error, reason} ->
-        {:error, {:encode_error, reason}}
+          {:error, reason} ->
+            {:error, {:encode_error, reason}}
+        end
+      end
     end
   end
 
-  defp atomic_publish(root, target, json) do
-    # Reject symlink ancestors of target (root already checked)
-    with :ok <- reject_symlink_ancestors(root, target) do
+  defp resolve_timestamp(run_data) do
+    case fetch_timestamp(run_data) do
+      {:ok, ts} -> {:ok, ts}
+      :missing -> {:ok, DateTime.utc_now() |> DateTime.to_iso8601()}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp fetch_timestamp(data) do
+    atom? = Map.has_key?(data, :timestamp)
+    str? = Map.has_key?(data, "timestamp")
+
+    cond do
+      atom? and str? and data[:timestamp] != data["timestamp"] ->
+        {:error, :duplicate_json_key}
+
+      atom? and str? ->
+        normalize_timestamp(data[:timestamp])
+
+      atom? ->
+        normalize_timestamp(data[:timestamp])
+
+      str? ->
+        normalize_timestamp(data["timestamp"])
+
+      true ->
+        :missing
+    end
+  end
+
+  defp normalize_timestamp(ts) when is_binary(ts) do
+    if String.valid?(ts) and byte_size(ts) <= 64 do
+      {:ok, ts}
+    else
+      {:error, :invalid_timestamp}
+    end
+  end
+
+  defp normalize_timestamp(_), do: {:error, :invalid_timestamp}
+
+  defp strip_id_and_timestamp(data) do
+    # Reject ambiguous dual id/timestamp *values*, then drop both key forms so
+    # the encoder emits exactly one string-key each.
+    with :ok <- reject_conflicting_aliases(data, :id, "id"),
+         :ok <- reject_conflicting_aliases(data, :timestamp, "timestamp") do
+      cleaned =
+        data
+        |> Map.delete(:id)
+        |> Map.delete("id")
+        |> Map.delete(:timestamp)
+        |> Map.delete("timestamp")
+
+      {:ok, cleaned}
+    end
+  end
+
+  defp reject_conflicting_aliases(data, atom_key, str_key) do
+    atom? = Map.has_key?(data, atom_key)
+    str? = Map.has_key?(data, str_key)
+
+    cond do
+      atom? and str? and data[atom_key] != data[str_key] ->
+        {:error, :duplicate_json_key}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp budget_check(value, max_bytes) do
+    budget = %{
+      max_bytes: max_bytes,
+      max_depth: @max_encode_depth,
+      max_nodes: min(@max_encode_nodes, max_bytes),
+      max_string_bytes: min(@max_string_bytes, max_bytes),
+      max_keys: @max_object_keys,
+      nodes: 0,
+      estimated: 0
+    }
+
+    case walk_budget(value, 0, budget) do
+      {:ok, final} when final.estimated > max_bytes ->
+        {:error, :max_file_bytes_exceeded}
+
+      {:ok, final} ->
+        {:ok, final.estimated}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp walk_budget(value, depth, budget) when is_map(value) do
+    cond do
+      depth > budget.max_depth ->
+        {:error, :max_encode_depth_exceeded}
+
+      budget.nodes + 1 > budget.max_nodes ->
+        {:error, :max_encode_nodes_exceeded}
+
+      map_size(value) > budget.max_keys ->
+        {:error, :max_object_keys_exceeded}
+
+      true ->
+        case canonicalize_object_keys(value) do
+          {:ok, pairs} ->
+            budget = %{budget | nodes: budget.nodes + 1, estimated: budget.estimated + 2}
+
+            Enum.reduce_while(pairs, {:ok, budget}, fn {key, child}, {:ok, acc} ->
+              key_cost = byte_size(key) + 3
+
+              acc = %{
+                acc
+                | estimated: acc.estimated + key_cost,
+                  nodes: acc.nodes + 1
+              }
+
+              cond do
+                acc.nodes > acc.max_nodes ->
+                  {:halt, {:error, :max_encode_nodes_exceeded}}
+
+                acc.estimated > acc.max_bytes ->
+                  {:halt, {:error, :max_file_bytes_exceeded}}
+
+                true ->
+                  case walk_budget(child, depth + 1, acc) do
+                    {:ok, next} ->
+                      next = %{next | estimated: next.estimated + 1}
+                      {:cont, {:ok, next}}
+
+                    {:error, _} = err ->
+                      {:halt, err}
+                  end
+              end
+            end)
+
+          {:error, _} = err ->
+            err
+        end
+    end
+  end
+
+  defp walk_budget(value, depth, budget) when is_list(value) do
+    cond do
+      depth > budget.max_depth ->
+        {:error, :max_encode_depth_exceeded}
+
+      budget.nodes + 1 > budget.max_nodes ->
+        {:error, :max_encode_nodes_exceeded}
+
+      true ->
+        budget = %{budget | nodes: budget.nodes + 1, estimated: budget.estimated + 2}
+
+        Enum.reduce_while(value, {:ok, budget}, fn item, {:ok, acc} ->
+          case walk_budget(item, depth + 1, acc) do
+            {:ok, next} ->
+              next = %{next | estimated: next.estimated + 1}
+
+              if next.estimated > next.max_bytes do
+                {:halt, {:error, :max_file_bytes_exceeded}}
+              else
+                {:cont, {:ok, next}}
+              end
+
+            {:error, _} = err ->
+              {:halt, err}
+          end
+        end)
+    end
+  end
+
+  defp walk_budget(value, _depth, budget) when is_binary(value) do
+    size = byte_size(value)
+
+    cond do
+      not String.valid?(value) ->
+        {:error, :invalid_utf8}
+
+      # Prefer the caller's file-byte budget when the string alone exceeds it.
+      size > budget.max_bytes ->
+        {:error, :max_file_bytes_exceeded}
+
+      size > budget.max_string_bytes ->
+        {:error, :max_string_bytes_exceeded}
+
+      budget.nodes + 1 > budget.max_nodes ->
+        {:error, :max_encode_nodes_exceeded}
+
+      true ->
+        # Quotes + conservative escape overhead (worst-case every byte escaped)
+        estimated = budget.estimated + size * 2 + 2
+
+        if estimated > budget.max_bytes do
+          {:error, :max_file_bytes_exceeded}
+        else
+          {:ok, %{budget | nodes: budget.nodes + 1, estimated: estimated}}
+        end
+    end
+  end
+
+  defp walk_budget(value, _depth, budget) when is_integer(value) or is_float(value) do
+    if budget.nodes + 1 > budget.max_nodes do
+      {:error, :max_encode_nodes_exceeded}
+    else
+      {:ok, %{budget | nodes: budget.nodes + 1, estimated: budget.estimated + 24}}
+    end
+  end
+
+  defp walk_budget(value, _depth, budget) when is_boolean(value) or is_nil(value) do
+    if budget.nodes + 1 > budget.max_nodes do
+      {:error, :max_encode_nodes_exceeded}
+    else
+      {:ok, %{budget | nodes: budget.nodes + 1, estimated: budget.estimated + 5}}
+    end
+  end
+
+  defp walk_budget(value, depth, budget) when is_atom(value) do
+    walk_budget(Atom.to_string(value), depth, budget)
+  end
+
+  defp walk_budget(_, _, _), do: {:error, :encode_unsupported_type}
+
+  # Build sorted unique string keys; reject atom/string aliases that collide.
+  defp canonicalize_object_keys(map) when is_map(map) do
+    Enum.reduce_while(map, {:ok, %{}, []}, fn {k, v}, {:ok, seen, acc} ->
+      key =
+        cond do
+          is_binary(k) and String.valid?(k) -> k
+          is_atom(k) -> Atom.to_string(k)
+          true -> nil
+        end
+
+      cond do
+        is_nil(key) ->
+          {:halt, {:error, :encode_unsupported_key}}
+
+        Map.has_key?(seen, key) ->
+          {:halt, {:error, :duplicate_json_key}}
+
+        true ->
+          {:cont, {:ok, Map.put(seen, key, true), [{key, v} | acc]}}
+      end
+    end)
+    |> case do
+      {:ok, _seen, pairs} ->
+        {:ok, Enum.sort_by(pairs, &elem(&1, 0))}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Atomic exclusive temp publish
+  # ---------------------------------------------------------------------------
+
+  defp atomic_publish(root_state, target, json) do
+    root = root_state.path
+
+    with :ok <- reject_symlink_ancestors(root, target),
+         :ok <- assert_root_stable(root_state) do
       tmp =
         Path.join(
           root,
           ".eval-tmp-#{System.unique_integer([:positive])}-#{:erlang.phash2(self())}.json"
         )
 
-      # Exclusive create, mode 0600
-      case :file.open(String.to_charlist(tmp), [:write, :binary, :exclusive, {:mode, 0o600}]) do
+      # Exclusive create. `{:mode, 0o600}` is accepted by OTP 28.4.1 but does
+      # not reliably set permission bits under common umasks; enforce 0600 via
+      # chmod on the exclusive temp path before rename.
+      case :file.open(String.to_charlist(tmp), [:write, :binary, :raw, :exclusive]) do
         {:ok, io} ->
           try do
             case :file.write(io, json) do
               :ok ->
                 case :file.sync(io) do
                   :ok ->
-                    :file.close(io)
+                    :ok = :file.close(io)
 
-                    case File.rename(tmp, target) do
+                    case File.chmod(tmp, 0o600) do
                       :ok ->
-                        :ok
+                        case File.rename(tmp, target) do
+                          :ok ->
+                            # Best-effort directory durability after rename.
+                            _ = sync_directory(root)
+
+                            case assert_root_stable(root_state) do
+                              :ok -> :ok
+                              {:error, _} = err -> err
+                            end
+
+                          {:error, reason} ->
+                            _ = File.rm(tmp)
+                            {:error, {:file_error, reason}}
+                        end
 
                       {:error, reason} ->
                         _ = File.rm(tmp)
@@ -315,13 +729,13 @@ defmodule Arbor.Persistence.Eval.FileStore do
                     end
 
                   {:error, reason} ->
-                    :file.close(io)
+                    _ = :file.close(io)
                     _ = File.rm(tmp)
                     {:error, {:file_error, reason}}
                 end
 
               {:error, reason} ->
-                :file.close(io)
+                _ = :file.close(io)
                 _ = File.rm(tmp)
                 {:error, {:file_error, reason}}
             end
@@ -330,6 +744,11 @@ defmodule Arbor.Persistence.Eval.FileStore do
               _ = :file.close(io)
               _ = File.rm(tmp)
               {:error, {:file_error, Exception.message(e)}}
+          catch
+            kind, reason ->
+              _ = :file.close(io)
+              _ = File.rm(tmp)
+              {:error, {:file_error, {kind, reason}}}
           end
 
         {:error, reason} ->
@@ -338,8 +757,19 @@ defmodule Arbor.Persistence.Eval.FileStore do
     end
   end
 
+  defp sync_directory(root) do
+    case :file.open(String.to_charlist(root), [:raw, :read]) do
+      {:ok, dio} ->
+        _ = :file.sync(dio)
+        _ = :file.close(dio)
+        :ok
+
+      {:error, _} ->
+        :ok
+    end
+  end
+
   defp reject_symlink_ancestors(root, target) do
-    # Walk from target up to root; none may be symlinks
     do_reject_symlink_ancestors(target, root)
   end
 
@@ -367,90 +797,61 @@ defmodule Arbor.Persistence.Eval.FileStore do
   end
 
   # ---------------------------------------------------------------------------
-  # Bounded read (single opened handle, no lstat-then-File.read TOCTOU)
+  # Bounded read (single opened handle + identity recheck)
   # ---------------------------------------------------------------------------
 
   defp read_regular_file_bounded(path, opts) do
     max_bytes = bound(opts, :max_file_bytes, @default_max_file_bytes, @ceiling_max_file_bytes)
 
-    # lstat first so we never intentionally follow a symlink leaf. Baseline
-    # inode/device is then re-checked on the opened handle so a TOCTOU swap
-    # (regular→symlink→outside) cannot succeed: fstat of a followed open
-    # would not match the pre-open lstat of the path.
-    case File.lstat(path) do
+    case File.lstat(path, time: :posix) do
       {:error, :enoent} ->
         {:error, {:file_error, :enoent}}
 
       {:error, reason} ->
         {:error, {:file_error, reason}}
 
-      {:ok, %File.Stat{type: :symlink}} ->
-        {:error, :symlink_target}
+      {:ok, stat} ->
+        case regular_identity(stat) do
+          {:ok, expected} ->
+            if is_integer(stat.size) and stat.size > max_bytes do
+              {:error, :max_file_bytes_exceeded}
+            else
+              open_and_read_stable(path, max_bytes, expected)
+            end
 
-      {:ok, %File.Stat{type: type}} when type != :regular ->
-        {:error, :not_a_regular_file}
-
-      {:ok, %File.Stat{type: :regular, size: size, inode: inode, major_device: major}} ->
-        cond do
-          is_integer(size) and size > max_bytes ->
-            {:error, :max_file_bytes_exceeded}
-
-          true ->
-            open_and_read_stable(path, max_bytes, inode, major)
+          {:error, _} = err ->
+            err
         end
     end
   end
 
-  defp open_and_read_stable(path, max_bytes, expected_inode, expected_major) do
+  defp open_and_read_stable(path, max_bytes, expected) do
     case :file.open(String.to_charlist(path), [:read, :binary, :raw]) do
       {:ok, io} ->
         try do
-          case :file.read_file_info(io) do
-            {:ok, info} ->
-              # file_info record: size=1 type=2 ... major_device=9 inode=11
-              type = elem(info, 2)
-              major = elem(info, 9)
-              inode = elem(info, 11)
+          with {:ok, info1} <- :file.read_file_info(io, time: :posix),
+               stat1 = File.Stat.from_record(info1),
+               {:ok, id1} <- regular_identity(stat1),
+               true <- identity_match?(id1, expected) or {:error, :file_changed},
+               {:ok, data} <- read_up_to(io, max_bytes),
+               {:ok, info2} <- :file.read_file_info(io, time: :posix),
+               stat2 = File.Stat.from_record(info2),
+               {:ok, id2} <- regular_identity(stat2),
+               true <- identity_match?(id2, expected) or {:error, :file_changed},
+               # Pathname recheck (trusted-root race detection)
+               {:ok, lstat} <- File.lstat(path, time: :posix),
+               {:ok, id3} <- regular_identity(lstat),
+               true <- identity_match?(id3, expected) or {:error, :file_changed} do
+            {:ok, data}
+          else
+            {:error, _} = err ->
+              err
 
-              cond do
-                type != :regular ->
-                  {:error, :not_a_regular_file}
+            false ->
+              {:error, :file_changed}
 
-                inode != expected_inode or major != expected_major ->
-                  # Path was replaced (e.g. with a symlink to an outside file)
-                  {:error, :file_changed}
-
-                true ->
-                  limit = max_bytes + 1
-
-                  case :file.read(io, limit) do
-                    {:ok, data} when byte_size(data) > max_bytes ->
-                      {:error, :max_file_bytes_exceeded}
-
-                    {:ok, data} ->
-                      case :file.read_file_info(io) do
-                        {:ok, info2} ->
-                          if elem(info2, 2) == :regular and elem(info2, 11) == expected_inode and
-                               elem(info2, 9) == expected_major do
-                            {:ok, data}
-                          else
-                            {:error, :file_changed}
-                          end
-
-                        {:error, reason} ->
-                          {:error, {:file_error, reason}}
-                      end
-
-                    :eof ->
-                      {:ok, ""}
-
-                    {:error, reason} ->
-                      {:error, {:file_error, reason}}
-                  end
-              end
-
-            {:error, reason} ->
-              {:error, {:file_error, reason}}
+            other ->
+              {:error, {:file_error, other}}
           end
         after
           :file.close(io)
@@ -458,6 +859,31 @@ defmodule Arbor.Persistence.Eval.FileStore do
 
       {:error, :enoent} ->
         {:error, {:file_error, :enoent}}
+
+      {:error, reason} ->
+        {:error, {:file_error, reason}}
+    end
+  end
+
+  defp identity_match?(a, b) when is_map(a) and is_map(b) do
+    a.type == b.type and a.inode == b.inode and a.major_device == b.major_device and
+      a.minor_device == b.minor_device
+  end
+
+  defp identity_match?(_, _), do: false
+
+  defp read_up_to(io, max_bytes) do
+    limit = max_bytes + 1
+
+    case :file.read(io, limit) do
+      {:ok, data} when byte_size(data) > max_bytes ->
+        {:error, :max_file_bytes_exceeded}
+
+      {:ok, data} ->
+        {:ok, data}
+
+      :eof ->
+        {:ok, ""}
 
       {:error, reason} ->
         {:error, {:file_error, reason}}
@@ -476,46 +902,116 @@ defmodule Arbor.Persistence.Eval.FileStore do
     end
   end
 
-  # ---------------------------------------------------------------------------
-  # List with bounds
-  # ---------------------------------------------------------------------------
+  # Bind decoded object "id" exactly to the validated filename/run_id.
+  # Reject missing, mismatched, non-string, or ambiguous multi-id payloads.
+  defp bind_run_id(data, run_id) when is_map(data) and is_binary(run_id) do
+    # JSON decode only yields string keys; still guard against non-string ids.
+    case Map.fetch(data, "id") do
+      {:ok, ^run_id} ->
+        # Ensure no secondary id channel (should not exist post-decode).
+        if Map.has_key?(data, :id) and data[:id] != run_id do
+          {:error, :run_id_mismatch}
+        else
+          {:ok, Map.put(data, "id", run_id)}
+        end
 
-  defp list_json_entries(root) do
-    case File.ls(root) do
-      {:ok, files} ->
-        # Filter candidate names without following links; then lstat each
-        entries =
-          files
-          |> Enum.filter(&String.ends_with?(&1, ".json"))
-          |> Enum.reject(&String.starts_with?(&1, "."))
-          |> Enum.flat_map(fn name ->
-            path = Path.join(root, name)
+      {:ok, other} when is_binary(other) ->
+        {:error, :run_id_mismatch}
 
-            case File.lstat(path) do
-              {:ok, %File.Stat{type: :regular}} ->
-                run_id = String.trim_trailing(name, ".json")
+      {:ok, _} ->
+        {:error, :run_id_mismatch}
 
-                case validate_run_id(run_id) do
-                  :ok -> [{run_id, path}]
-                  _ -> []
-                end
-
-              _ ->
-                # skip symlinks, dirs, invalid
-                []
-            end
-          end)
-
-        {:ok, entries}
-
-      {:error, reason} ->
-        {:error, reason}
+      :error ->
+        # Missing id: bind to filename (strict for integrity of list/load).
+        {:error, :run_id_mismatch}
     end
   end
 
-  defp decode_listed(entries, _root, max_files, max_total, model_filter, provider_filter, opts) do
+  # ---------------------------------------------------------------------------
+  # List with bounds — constrain enumeration under trusted-private-root
+  # ---------------------------------------------------------------------------
+
+  defp list_json_entries(root_state, max_files) do
+    root = root_state.path
+
+    # Trusted-private-root contract: File.ls/1 materializes all names. We
+    # refuse overpopulated directories (total names) before any decode work,
+    # then collect at most max_files valid run candidates while scanning.
+    case File.ls(root) do
+      {:ok, files} ->
+        name_count = length(files)
+        name_ceiling = min(@ceiling_dir_names, max(max_files * @dir_name_slack, max_files + 1))
+
+        cond do
+          name_count > name_ceiling ->
+            {:error,
+             {:max_files_exceeded,
+              %{
+                reason: :directory_overpopulated,
+                name_count: name_count,
+                name_ceiling: name_ceiling,
+                max_files: max_files
+              }}}
+
+          true ->
+            collect_entries(files, root, max_files, [], 0)
+        end
+
+      {:error, reason} ->
+        {:error, {:file_error, reason}}
+    end
+  end
+
+  defp collect_entries([], _root, _max_files, acc, _json_seen), do: {:ok, Enum.reverse(acc)}
+
+  defp collect_entries([name | rest], root, max_files, acc, json_seen) do
+    cond do
+      not String.ends_with?(name, ".json") ->
+        collect_entries(rest, root, max_files, acc, json_seen)
+
+      String.starts_with?(name, ".") ->
+        collect_entries(rest, root, max_files, acc, json_seen)
+
+      true ->
+        run_id = String.trim_trailing(name, ".json")
+
+        case validate_run_id(run_id) do
+          :ok ->
+            path = Path.join(root, name)
+
+            case File.lstat(path, time: :posix) do
+              {:ok, %File.Stat{type: :regular}} ->
+                json_seen = json_seen + 1
+
+                if json_seen > max_files do
+                  {:error,
+                   {:max_files_exceeded,
+                    %{
+                      reason: :too_many_run_files,
+                      seen: json_seen,
+                      max_files: max_files
+                    }}}
+                else
+                  collect_entries(rest, root, max_files, [{run_id, path} | acc], json_seen)
+                end
+
+              _ ->
+                # Skip symlinks, dirs, unreadable — no follow
+                collect_entries(rest, root, max_files, acc, json_seen)
+            end
+
+          _ ->
+            collect_entries(rest, root, max_files, acc, json_seen)
+        end
+    end
+  end
+
+  defp decode_listed(entries, max_files, max_total, model_filter, provider_filter, opts) do
+    # entries already constrained to max_files; still enforce while decoding.
     if length(entries) > max_files do
-      {:error, :max_files_exceeded}
+      {:error,
+       {:max_files_exceeded,
+        %{reason: :too_many_run_files, seen: length(entries), max_files: max_files}}}
     else
       do_decode_listed(entries, max_total, 0, [], model_filter, provider_filter, opts)
     end
@@ -524,15 +1020,15 @@ defmodule Arbor.Persistence.Eval.FileStore do
   defp do_decode_listed([], _max_total, _used, acc, model_filter, provider_filter, _opts) do
     runs =
       acc
-      |> maybe_filter(:model, model_filter)
-      |> maybe_filter(:provider, provider_filter)
-      |> Enum.sort_by(& &1["timestamp"], :desc)
+      |> maybe_filter("model", model_filter)
+      |> maybe_filter("provider", provider_filter)
+      |> Enum.sort_by(&sort_timestamp/1, :desc)
 
     {:ok, runs}
   end
 
   defp do_decode_listed(
-         [{_run_id, path} | rest],
+         [{run_id, path} | rest],
          max_total,
          used,
          acc,
@@ -549,18 +1045,32 @@ defmodule Arbor.Persistence.Eval.FileStore do
         else
           case decode_json(content) do
             {:ok, data} ->
-              do_decode_listed(
-                rest,
-                max_total,
-                used + size,
-                [data | acc],
-                model_filter,
-                provider_filter,
-                opts
-              )
+              case bind_run_id(data, run_id) do
+                {:ok, bound} ->
+                  do_decode_listed(
+                    rest,
+                    max_total,
+                    used + size,
+                    [bound | acc],
+                    model_filter,
+                    provider_filter,
+                    opts
+                  )
+
+                {:error, _} ->
+                  # Skip mismatched ids during list (do not fail whole list)
+                  do_decode_listed(
+                    rest,
+                    max_total,
+                    used + size,
+                    acc,
+                    model_filter,
+                    provider_filter,
+                    opts
+                  )
+              end
 
             {:error, _} ->
-              # Skip corrupt individual files during list (don't fail whole list)
               do_decode_listed(
                 rest,
                 max_total,
@@ -577,17 +1087,23 @@ defmodule Arbor.Persistence.Eval.FileStore do
         {:error, :max_file_bytes_exceeded}
 
       {:error, _} ->
-        # Skip unreadable entries
         do_decode_listed(rest, max_total, used, acc, model_filter, provider_filter, opts)
     end
   end
 
   defp maybe_filter(runs, _field, nil), do: runs
 
-  defp maybe_filter(runs, field, value) do
-    key = to_string(field)
-    Enum.filter(runs, fn run -> run[key] == value end)
+  defp maybe_filter(runs, field, value) when is_binary(field) and is_binary(value) do
+    Enum.filter(runs, fn run -> run[field] == value end)
   end
+
+  defp filter_string(nil), do: nil
+  defp filter_string(v) when is_binary(v), do: v
+  defp filter_string(v) when is_atom(v), do: Atom.to_string(v)
+  defp filter_string(_), do: nil
+
+  defp sort_timestamp(%{"timestamp" => ts}) when is_binary(ts), do: ts
+  defp sort_timestamp(_), do: ""
 
   defp bound(opts, key, default, ceiling) do
     requested =
