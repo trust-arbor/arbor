@@ -284,26 +284,35 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert without_marker == String.duplicate("é", div(byte_size(without_marker), 2))
   end
 
-  @tag timeout: 30_000
-  test "large invalid-byte stream: single raw hash, windowed JSON-safe excerpt, no full-stream sanitize" do
+  @tag timeout: 15_000
+  test "security regression: large invalid-byte stream uses bounded window repair" do
     # Regression: quadratic/full-stream invalid UTF-8 repair + whole-stream
     # suffix enumeration for a ~2 KB excerpt must not run over multi-100KB
     # process output. Hash the complete raw stream once; repair only bounded
     # head/tail windows.
     prefix = "HEAD-OK-"
     suffix = "-TAIL-OK"
-    invalid_mid = :binary.copy(<<0xFF>>, 120_000)
+    invalid_mid = :binary.copy(<<0xFF>>, 1_000_000)
     raw = prefix <> invalid_mid <> suffix
-    assert byte_size(raw) >= 100_000
+    assert byte_size(raw) >= 1_000_000
 
     expected_hash = :crypto.hash(:sha256, raw) |> Base.encode16(case: :lower)
 
+    task =
+      Task.async(fn ->
+        Core.feedback_from_result(%{
+          exit_code: 1,
+          stdout: raw,
+          stderr: ""
+        })
+      end)
+
     feedback =
-      Core.feedback_from_result(%{
-        exit_code: 1,
-        stdout: raw,
-        stderr: ""
-      })
+      case Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill) do
+        {:ok, result} -> result
+        nil -> flunk("excerpt generation exceeded the bounded-work budget")
+        {:exit, reason} -> flunk("excerpt generation exited: #{inspect(reason)}")
+      end
 
     assert feedback["stdout_sha256"] == expected_hash
     assert feedback["stdout_truncated"] == true
