@@ -387,24 +387,25 @@ defmodule Arbor.Gateway.MCP.Handler do
     action_name = args["action"]
     params = args["params"] || %{}
 
-    cond do
-      owner_bound_acp_action?(action_name) ->
-        {:ok, error_content(owner_bound_acp_arbor_run_error(action_name)), state}
+    # Auth first for every action name (same SignedRequest error). Only after
+    # authentication may owner-bound ACP lifecycle names return the stateless
+    # guidance error — never reach action lookup/execution for those names.
+    case authenticated_agent_id() do
+      nil ->
+        {:ok,
+         error_content(
+           "Error: arbor_run requires SignedRequest authentication. " <>
+             "No verified agent_id in the current request context. " <>
+             "Register an external agent via the dashboard and configure " <>
+             "the resulting private key in your tool's Arbor settings."
+         ), state}
 
-      true ->
-        case authenticated_agent_id() do
-          nil ->
-            {:ok,
-             error_content(
-               "Error: arbor_run requires SignedRequest authentication. " <>
-                 "No verified agent_id in the current request context. " <>
-                 "Register an external agent via the dashboard and configure " <>
-                 "the resulting private key in your tool's Arbor settings."
-             ), state}
-
-          agent_id ->
-            result = run_action(action_name, params, agent_id)
-            {:ok, %{content: [%{type: "text", text: result}]}, state}
+      agent_id ->
+        if owner_bound_acp_action?(action_name) do
+          {:ok, error_content(owner_bound_acp_arbor_run_error(action_name)), state}
+        else
+          result = run_action(action_name, params, agent_id)
+          {:ok, %{content: [%{type: "text", text: result}]}, state}
         end
     end
   end
@@ -939,20 +940,13 @@ defmodule Arbor.Gateway.MCP.Handler do
   end
 
   defp run_verified_action(action_name, params, agent_id) do
-    # Defense-in-depth: same Gateway boundary as handle_call_tool("arbor_run").
-    # Prefer the handle_call_tool path (returns isError: true); this path must
-    # never reach action lookup/execution for owner-bound ACP lifecycle names.
-    if owner_bound_acp_action?(action_name) do
-      owner_bound_acp_arbor_run_error(action_name)
-    else
-      # Check if this is an MCP tool call
-      case ToolBridge.parse_tool_name(action_name) do
-        {:ok, server_name, tool_name} ->
-          run_mcp_tool(server_name, tool_name, params, agent_id)
+    # Check if this is an MCP tool call
+    case ToolBridge.parse_tool_name(action_name) do
+      {:ok, server_name, tool_name} ->
+        run_mcp_tool(server_name, tool_name, params, agent_id)
 
-        :error ->
-          run_native_action(action_name, params, agent_id)
-      end
+      :error ->
+        run_native_action(action_name, params, agent_id)
     end
   end
 
@@ -1440,21 +1434,16 @@ defmodule Arbor.Gateway.MCP.Handler do
   # Runtime Bridges
   # ===========================================================================
 
-  # arbor_actions is a real in-umbrella dep; default to Arbor.Actions.
-  # :actions_module is injectable for focused Gateway MCP handler tests.
-  # The {:ok, _} / {:error, _} wrapper is preserved so the call sites
-  # (list_actions, authorize_and_execute, all_actions) keep failing
+  # arbor_actions is a real in-umbrella dep, so Arbor.Actions is always loaded —
+  # call it directly. The {:ok, _} / {:error, _} wrapper is preserved so the
+  # call sites (list_actions, authorize_and_execute, all_actions) keep failing
   # CLOSED on any exception/exit (e.g. authorize_and_execute → "## Error").
   defp call_actions(function, args) do
-    {:ok, apply(actions_module(), function, args)}
+    {:ok, apply(Arbor.Actions, function, args)}
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
   catch
     :exit, reason -> {:error, {:exit, reason}}
-  end
-
-  defp actions_module do
-    Application.get_env(:arbor_gateway, :actions_module, Arbor.Actions)
   end
 
   defp bridge_call(module, function, args) do
