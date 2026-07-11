@@ -27,6 +27,7 @@ defmodule Arbor.Comms do
   alias Arbor.Comms.Channels.Limitless
   alias Arbor.Comms.Channels.Voice
   alias Arbor.Comms.ChatLogger
+  alias Arbor.Comms.InteractionRouter
   require Logger
 
   alias Arbor.Comms.Config
@@ -141,6 +142,41 @@ defmodule Arbor.Comms do
   def healthy? do
     # Healthy if at least one channel is configured, or if none are expected
     true
+  end
+
+  # -- Human-in-the-loop interactions (public facade) --
+
+  @doc """
+  Wait for an operator response to an interaction request.
+
+  Delegates to `Arbor.Comms.InteractionRouter.await_response/3`. Prefer this
+  facade over reaching into the router module from other libraries.
+  """
+  @spec await_interaction_response(String.t(), String.t(), keyword()) ::
+          {:ok, term(), map()} | {:error, :timeout | term()}
+  def await_interaction_response(request_id, agent_id, opts \\ [])
+      when is_binary(request_id) and is_binary(agent_id) do
+    InteractionRouter.await_response(request_id, agent_id, opts)
+  end
+
+  @doc """
+  Submit a response to a pending interaction.
+
+  Public facade over `InteractionRouter.respond/3`.
+  """
+  @spec respond_to_interaction(String.t(), term(), map()) :: :ok | {:error, term()}
+  def respond_to_interaction(request_id, response, metadata \\ %{})
+      when is_binary(request_id) do
+    InteractionRouter.respond(request_id, response, metadata)
+  end
+
+  @doc """
+  Look up a durable resolved interaction response (cluster-coherent TTL store).
+  """
+  @spec get_interaction_response(String.t()) ::
+          {:ok, %{response: term(), metadata: map()}} | :not_found
+  def get_interaction_response(request_id) when is_binary(request_id) do
+    InteractionRouter.get_response(request_id)
   end
 
   # -- Channels (unified message containers) --

@@ -4,12 +4,20 @@ defmodule Arbor.Contracts.Comms.ApprovalAnswer do
 
   Both `Arbor.Comms.InteractionRouter` and consensus authorization-request
   answers must map approve / deny / rework + bounded note / request metadata
-  identically. Opaque request IDs are validated (never truncated). Notes are
-  bound with linear UTF-8 prefix processing (never full-string grapheme walks).
+  identically.
+
+  Opaque request IDs use a closed ASCII grammar and are **rejected** (never
+  mutated/trimmed) when oversized, non-ASCII, or control-bearing. Notes are
+  size-checked with `byte_size/1` before any UTF-8 walk; MCP answer paths reject
+  oversized notes, while internal projection may truncate via
+  `validate_note/2` with `truncate: true`.
   """
 
-  @max_note_bytes 1_024
-  @max_request_id_bytes 256
+  # Opaque ids: irq_<hex>, proposal ids, etc. Closed printable ASCII subset.
+  @request_id_max_bytes 256
+  @note_max_bytes 1_024
+  # Letters, digits, underscore, hyphen, colon, period — no whitespace/control.
+  @request_id_re ~r/^[A-Za-z0-9_.:-]+$/
 
   @type decision :: :approve | :deny | :rework
   @type normalize_result ::
@@ -20,29 +28,31 @@ defmodule Arbor.Contracts.Comms.ApprovalAnswer do
 
   @doc "Maximum accepted note size in bytes."
   @spec max_note_bytes() :: pos_integer()
-  def max_note_bytes, do: @max_note_bytes
+  def max_note_bytes, do: @note_max_bytes
 
   @doc "Maximum accepted opaque request/proposal id size in bytes."
   @spec max_request_id_bytes() :: pos_integer()
-  def max_request_id_bytes, do: @max_request_id_bytes
+  def max_request_id_bytes, do: @request_id_max_bytes
 
   @doc """
-  Validate an opaque approval id. Rejects empty, non-UTF-8, oversized, or
-  control-character-bearing ids rather than truncating them.
+  Validate an opaque approval id.
+
+  Rejects empty, non-binary, oversized, non-ASCII-grammar, or control-bearing
+  ids. Does **not** trim or mutate the input.
   """
   @spec validate_request_id(term()) :: {:ok, String.t()} | {:error, term()}
   def validate_request_id(id) when is_binary(id) do
+    # byte_size before any content walk
+    size = byte_size(id)
+
     cond do
-      id == "" ->
+      size == 0 ->
         {:error, :empty_request_id}
 
-      not String.valid?(id) ->
-        {:error, :invalid_request_id_utf8}
-
-      byte_size(id) > @max_request_id_bytes ->
+      size > @request_id_max_bytes ->
         {:error, :request_id_too_large}
 
-      String.contains?(id, <<0>>) ->
+      not ascii_opaque_id?(id) ->
         {:error, :invalid_request_id}
 
       true ->
@@ -53,10 +63,14 @@ defmodule Arbor.Contracts.Comms.ApprovalAnswer do
   def validate_request_id(_), do: {:error, :invalid_request_id}
 
   @doc """
-  Validate and bound an operator note. Oversized valid UTF-8 notes are
-  truncated on a codepoint boundary with linear scanning. Invalid UTF-8 is
-  rejected at MCP answer time; consumers that must keep going may pass
-  `drop_invalid: true` to coerce to `\"\"`.
+  Validate an operator note.
+
+  Options:
+    * `:truncate` (default `false`) — when true, oversized valid UTF-8 notes
+      are truncated on a codepoint boundary (internal projection only).
+      MCP answer paths must leave this false so oversized notes are rejected.
+    * `:drop_invalid` (default `false`) — coerce invalid UTF-8 / non-binary
+      to `\"\"` instead of erroring (bounded projection of control payloads).
   """
   @spec validate_note(term(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def validate_note(note, opts \\ [])
@@ -65,16 +79,34 @@ defmodule Arbor.Contracts.Comms.ApprovalAnswer do
 
   def validate_note(note, opts) when is_binary(note) do
     drop_invalid? = Keyword.get(opts, :drop_invalid, false)
+    truncate? = Keyword.get(opts, :truncate, false)
+    size = byte_size(note)
 
     cond do
+      size == 0 ->
+        {:ok, ""}
+
+      # byte_size gate before UTF-8 validity scan / walk
+      size > @note_max_bytes and not truncate? ->
+        {:error, :note_too_large}
+
       not String.valid?(note) and drop_invalid? ->
         {:ok, ""}
 
       not String.valid?(note) ->
         {:error, :invalid_note_utf8}
 
+      has_disallowed_control?(note) and not drop_invalid? ->
+        {:error, :invalid_note_control}
+
+      has_disallowed_control?(note) and drop_invalid? ->
+        {:ok, ""}
+
+      size > @note_max_bytes and truncate? ->
+        {:ok, bound_utf8_prefix(note, @note_max_bytes)}
+
       true ->
-        {:ok, bound_utf8_prefix(note, @max_note_bytes)}
+        {:ok, note}
     end
   end
 
@@ -97,7 +129,7 @@ defmodule Arbor.Contracts.Comms.ApprovalAnswer do
          {:ok, decision} <- classify_metadata(metadata),
          :ok <- consistent?(response_kind, decision) do
       note =
-        case validate_note(metadata_get(metadata, :note), drop_invalid: true) do
+        case validate_note(metadata_get(metadata, :note), drop_invalid: true, truncate: true) do
           {:ok, n} -> n
           _ -> ""
         end
@@ -140,6 +172,9 @@ defmodule Arbor.Contracts.Comms.ApprovalAnswer do
   def bound_utf8_prefix(value, max_bytes)
       when is_binary(value) and is_integer(max_bytes) and max_bytes >= 0 do
     cond do
+      byte_size(value) == 0 ->
+        ""
+
       not String.valid?(value) ->
         ""
 
@@ -154,6 +189,32 @@ defmodule Arbor.Contracts.Comms.ApprovalAnswer do
   def bound_utf8_prefix(_value, _max_bytes), do: ""
 
   # -- private ---------------------------------------------------------------
+
+  # Closed ASCII opaque-id grammar: no whitespace, no control, no non-ASCII.
+  defp ascii_opaque_id?(id) when is_binary(id) do
+    # Reject any byte outside printable ASCII subset without full UTF-8 scan.
+    case :binary.match(id, [<<0>>]) do
+      {_, _} ->
+        false
+
+      :nomatch ->
+        # Fast path: all bytes in 0x21-0x7E range and match grammar.
+        byte_size(id) == String.length(id) and Regex.match?(@request_id_re, id)
+    end
+  end
+
+  defp has_disallowed_control?(note) when is_binary(note) do
+    # Allow TAB (9), LF (10), CR (13); reject other C0 controls and DEL.
+    case :binary.match(note, control_needles()) do
+      {_, _} -> true
+      :nomatch -> false
+    end
+  end
+
+  defp control_needles do
+    # Precomputed list of single-byte control needles excluding tab/lf/cr.
+    for(b <- 0..31, b not in [9, 10, 13], do: <<b>>) ++ [<<127>>]
+  end
 
   defp classify_response(r) when r in [:approved, :approve, "approved", "approve"],
     do: {:ok, :approved}

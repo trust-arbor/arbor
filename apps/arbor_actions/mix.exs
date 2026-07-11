@@ -40,6 +40,9 @@ defmodule Arbor.Actions.MixProject do
       {:arbor_sandbox, in_umbrella: true},
       {:arbor_historian, in_umbrella: true},
       {:arbor_consensus, in_umbrella: true},
+      # L4 — public HITL facade (`Arbor.Comms.await_interaction_response/3`).
+      # Legal: actions (L6) may depend on lower levels only.
+      {:arbor_comms, in_umbrella: true},
       {:arbor_memory, in_umbrella: true},
       # jido_action version pinned in root mix.exs
       {:jido_action, "~> 2.0", override: true},

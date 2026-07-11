@@ -34,45 +34,39 @@ defmodule Arbor.Comms.InteractionRegistry do
   visible via Tracker's CRDT merge, so cluster-wide state survives
   any single-node restart.
 
-  Pre-2026-06-06: this was an ETS-only single-node store. A
-  `put` on Node A was invisible to Node B's `get`, so the Signal
-  poller's `Router.maybe_route_as_interaction` returned `:not_found`
-  for any interaction created on a peer — silently passing the
-  operator's approval reply to the chat handler instead of routing
-  it. The refactor fixes that.
+  ## Resolved answers (cluster-coherent, bounded)
 
-  ## Future work
-
-  - **Persistence across cluster-wide restart.** Tracker is
-    in-memory; if every node restarts simultaneously, pending
-    interactions vanish. Postgres-backed store (BufferedStore +
-    read-fallthrough, matching the EventLog refactor that landed
-    earlier today) is the right answer when this becomes a real
-    issue. Documented in `5-completed/human-in-the-loop-router.md`
-    under "What's not done."
+  Resolved responses are Tracker-backed (`@resolved_topic`) so a waiter
+  on another node can observe an already-published answer without
+  sleeping or depending on local-only `:public` ETS. Entries carry a
+  `resolved_at` timestamp; reads expire them after a short TTL and
+  hard-cap the resolved topic size to avoid unbounded tombstone leaks.
+  Notes are bounded before storage.
   """
 
   use Phoenix.Tracker
 
   require Logger
 
+  alias Arbor.Contracts.Comms.ApprovalAnswer
   alias Arbor.Contracts.Comms.Interaction
 
   # All interactions land on this single topic. Tracker filters keys
   # within the topic, so per-user partitioning would buy little for a
   # registry this small (dozens of pending entries at most).
   @topic "interactions"
-  @resolved_table :arbor_interaction_resolved
+  @resolved_topic "interactions:resolved"
   # Keep resolved answers long enough for a waiter that subscribed after the
   # response was published (visible-request-before-subscribe race).
   @resolved_ttl_ms 120_000
+  # Hard bound on resolved Tracker entries (cluster-wide approx per node view).
+  @resolved_max_entries 512
 
   ## Public API
 
   @doc "Start the Tracker."
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
-    ensure_resolved_table!()
     pubsub = Keyword.get(opts, :pubsub_server, Arbor.Comms.PubSub)
     opts = Keyword.merge([name: __MODULE__, pubsub_server: pubsub], opts)
     Phoenix.Tracker.start_link(__MODULE__, opts, opts)
@@ -111,7 +105,7 @@ defmodule Arbor.Comms.InteractionRegistry do
   """
   @spec get(String.t()) :: {:ok, Interaction.t()} | :not_found
   def get(request_id) when is_binary(request_id) do
-    case lookup_meta(request_id) do
+    case lookup_meta(@topic, request_id) do
       %{interaction: data} -> {:ok, materialize_interaction(data)}
       _ -> :not_found
     end
@@ -125,22 +119,18 @@ defmodule Arbor.Comms.InteractionRegistry do
   `response_topic` for the broadcast that follows).
 
   When `response` is supplied (keyword opts `:response` / `:metadata`), the
-  answer is stored in a durable local lookup so waiters that subscribe after
-  the response is published can still observe it without sleeping.
+  answer is stored in the cluster-aware resolved topic (plus a bounded local
+  protected cache) so waiters that subscribe after the response is published
+  can still observe it without sleeping.
   """
   @spec resolve(String.t(), keyword()) :: {:ok, Interaction.t()} | :not_found
   def resolve(request_id, opts \\ []) when is_binary(request_id) do
     name = Keyword.get(opts, :name, __MODULE__)
 
-    case lookup_meta(request_id) do
+    case lookup_meta(@topic, request_id) do
       %{interaction: data} ->
         # Untrack from THIS node's Tracker entry. CRDT merge will
         # propagate the removal to peers within the merge interval.
-        # If the entry was created on another node, untrack here is a
-        # no-op locally but emits a cluster signal anyway — the
-        # owning node observes the diff and clears its entry. For the
-        # common path (same node owns the entry) this is correct
-        # immediately.
         owner = ensure_owner!()
         Phoenix.Tracker.untrack(name, owner, @topic, request_id)
 
@@ -148,7 +138,8 @@ defmodule Arbor.Comms.InteractionRegistry do
           put_resolved(
             request_id,
             Keyword.get(opts, :response),
-            Keyword.get(opts, :metadata, %{}) || %{}
+            Keyword.get(opts, :metadata, %{}) || %{},
+            name: name
           )
         end
 
@@ -166,50 +157,56 @@ defmodule Arbor.Comms.InteractionRegistry do
   @doc """
   Look up a durable resolved answer for `request_id`.
 
-  Used by waiters that may have subscribed after the response was published.
-  Entries expire after a short TTL.
+  Cluster-coherent via the Tracker-replicated resolved topic so a waiter on
+  another node does not lose an already-resolved answer. Entries expire
+  after a short TTL.
   """
   @spec get_resolved(String.t()) ::
           {:ok, %{response: term(), metadata: map(), resolved_at: integer()}} | :not_found
   def get_resolved(request_id) when is_binary(request_id) do
-    ensure_resolved_table!()
     now = System.system_time(:millisecond)
-
-    case :ets.lookup(@resolved_table, request_id) do
-      [{^request_id, %{resolved_at: at} = payload}] when is_integer(at) ->
-        if now - at <= @resolved_ttl_ms do
-          {:ok, payload}
-        else
-          :ets.delete(@resolved_table, request_id)
-          :not_found
-        end
-
-      _ ->
-        :not_found
-    end
+    tracker_get_resolved(request_id, now)
   rescue
     _ -> :not_found
   end
 
   @doc false
-  @spec put_resolved(String.t(), term(), map()) :: :ok
-  def put_resolved(request_id, response, metadata)
+  @spec put_resolved(String.t(), term(), map(), keyword()) :: :ok
+  def put_resolved(request_id, response, metadata, opts \\ [])
       when is_binary(request_id) and is_map(metadata) do
-    ensure_resolved_table!()
+    name = Keyword.get(opts, :name, __MODULE__)
+    now = System.system_time(:millisecond)
+    bounded_meta = bound_resolved_metadata(metadata)
 
-    :ets.insert(
-      @resolved_table,
-      {request_id,
-       %{
-         response: response,
-         metadata: metadata,
-         resolved_at: System.system_time(:millisecond)
-       }}
-    )
+    payload = %{
+      response: response,
+      metadata: bounded_meta,
+      resolved_at: now
+    }
 
+    # Tracker: cluster-visible durable answer with protected ownership
+    # (Tracker GenServer is the owning pid — not a world-writable ETS table).
+    owner = ensure_owner!()
+
+    case Phoenix.Tracker.track(name, owner, @resolved_topic, request_id, payload) do
+      {:ok, _ref} ->
+        :ok
+
+      {:error, {:already_tracked, _, _, _}} ->
+        _ = Phoenix.Tracker.update(name, owner, @resolved_topic, request_id, fn _ -> payload end)
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("[InteractionRegistry] track resolved failed: #{inspect(reason)}")
+        :ok
+    end
+
+    maybe_prune_resolved(name, owner, now)
     :ok
   rescue
-    _ -> :ok
+    e ->
+      Logger.warning("[InteractionRegistry] put_resolved failed: #{Exception.message(e)}")
+      :ok
   end
 
   @doc """
@@ -254,14 +251,13 @@ defmodule Arbor.Comms.InteractionRegistry do
     name = Keyword.get(opts, :name, __MODULE__)
     owner = ensure_owner!()
 
-    name
-    |> Phoenix.Tracker.list(@topic)
-    |> Enum.each(fn {key, _meta} ->
-      Phoenix.Tracker.untrack(name, owner, @topic, key)
-    end)
-
-    ensure_resolved_table!()
-    :ets.delete_all_objects(@resolved_table)
+    for topic <- [@topic, @resolved_topic] do
+      name
+      |> Phoenix.Tracker.list(topic)
+      |> Enum.each(fn {key, _meta} ->
+        Phoenix.Tracker.untrack(name, owner, topic, key)
+      end)
+    end
 
     # Give the merge a tick to settle for synchronous test code.
     Process.sleep(20)
@@ -274,7 +270,6 @@ defmodule Arbor.Comms.InteractionRegistry do
 
   @impl true
   def init(opts) do
-    ensure_resolved_table!()
     server = Keyword.fetch!(opts, :pubsub_server)
     {:ok, %{pubsub_server: server, node_name: Phoenix.PubSub.node_name(server)}}
   end
@@ -290,35 +285,118 @@ defmodule Arbor.Comms.InteractionRegistry do
 
   ## Private
 
-  # Look up a tracked entry's meta by request_id across cluster state.
-  defp lookup_meta(request_id) do
+  defp lookup_meta(topic, request_id) do
     __MODULE__
-    |> Phoenix.Tracker.list(@topic)
+    |> Phoenix.Tracker.list(topic)
     |> Enum.find_value(fn
       {^request_id, meta} -> meta
       _ -> nil
     end)
   end
 
-  defp ensure_resolved_table! do
-    case :ets.info(@resolved_table) do
-      :undefined ->
-        :ets.new(@resolved_table, [
-          :named_table,
-          :public,
-          :set,
-          read_concurrency: true,
-          write_concurrency: true
-        ])
+  defp tracker_get_resolved(request_id, now) do
+    case lookup_meta(@resolved_topic, request_id) do
+      %{response: response, metadata: metadata, resolved_at: at}
+      when is_integer(at) ->
+        if now - at <= @resolved_ttl_ms do
+          {:ok,
+           %{
+             response: response,
+             metadata: if(is_map(metadata), do: metadata, else: %{}),
+             resolved_at: at
+           }}
+        else
+          # Expired: untrack to avoid unbounded tombstone growth.
+          drop_resolved(request_id)
+          :not_found
+        end
 
-      _info ->
-        @resolved_table
+      %{response: response} = payload ->
+        # Tolerate partial meta shapes from older peers.
+        at = Map.get(payload, :resolved_at) || Map.get(payload, "resolved_at") || now
+        metadata = Map.get(payload, :metadata) || Map.get(payload, "metadata") || %{}
+
+        if is_integer(at) and now - at <= @resolved_ttl_ms do
+          {:ok, %{response: response, metadata: metadata, resolved_at: at}}
+        else
+          drop_resolved(request_id)
+          :not_found
+        end
+
+      _ ->
+        :not_found
     end
-  rescue
-    ArgumentError ->
-      # Concurrent create race: another process won.
-      @resolved_table
   end
+
+  defp drop_resolved(request_id) do
+    owner = ensure_owner!()
+    Phoenix.Tracker.untrack(__MODULE__, owner, @resolved_topic, request_id)
+  rescue
+    _ -> :ok
+  end
+
+  defp maybe_prune_resolved(name, owner, now) do
+    entries =
+      name
+      |> Phoenix.Tracker.list(@resolved_topic)
+      |> Enum.flat_map(fn
+        {key, meta} when is_map(meta) ->
+          at = Map.get(meta, :resolved_at) || Map.get(meta, "resolved_at")
+          if is_integer(at), do: [{key, at}], else: []
+
+        _ ->
+          []
+      end)
+
+    # Drop expired.
+    Enum.each(entries, fn {key, at} ->
+      if now - at > @resolved_ttl_ms do
+        Phoenix.Tracker.untrack(name, owner, @resolved_topic, key)
+      end
+    end)
+
+    # Hard entry bound: drop oldest when over cap.
+    live =
+      entries
+      |> Enum.reject(fn {_k, at} -> now - at > @resolved_ttl_ms end)
+      |> Enum.sort_by(fn {_k, at} -> at end)
+
+    excess = length(live) - @resolved_max_entries
+
+    if excess > 0 do
+      live
+      |> Enum.take(excess)
+      |> Enum.each(fn {key, _} ->
+        Phoenix.Tracker.untrack(name, owner, @resolved_topic, key)
+      end)
+    end
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp bound_resolved_metadata(metadata) when is_map(metadata) do
+    note = Map.get(metadata, :note) || Map.get(metadata, "note")
+
+    case note do
+      n when is_binary(n) ->
+        bounded =
+          case ApprovalAnswer.validate_note(n, truncate: true, drop_invalid: true) do
+            {:ok, b} -> b
+            _ -> ""
+          end
+
+        metadata
+        |> Map.put(:note, bounded)
+        |> Map.delete("note")
+
+      _ ->
+        metadata
+    end
+  end
+
+  defp bound_resolved_metadata(_), do: %{}
 
   # Owning pid for all tracked entries on this node. We use the
   # Tracker's own GenServer pid — it lives for the supervisor's

@@ -153,8 +153,20 @@ defmodule Arbor.Actions.Tool do
         query_lower = String.downcase(query)
         query_words = String.split(query_lower, ~r/\s+/)
 
-        apply(actions_mod, :all_actions, [])
-        |> Enum.reject(&pipeline_internal_action?/1)
+        exposed =
+          cond do
+            function_exported?(actions_mod, :exposed_actions, 0) ->
+              apply(actions_mod, :exposed_actions, [])
+
+            function_exported?(actions_mod, :all_actions, 0) ->
+              apply(actions_mod, :all_actions, [])
+              |> Enum.reject(&pipeline_internal_action?/1)
+
+            true ->
+              []
+          end
+
+        exposed
         |> Enum.filter(fn module ->
           tool = module.to_tool()
           name = String.downcase(tool.name || "")
@@ -178,16 +190,23 @@ defmodule Arbor.Actions.Tool do
       Arbor.LLM.ArborActionsExecutor
     end
 
-    # Pipeline-internal actions (e.g. coding_reviewed_commit) are graph syscalls,
-    # not ordinary LLM-discoverable tools.
+    # Prefer central Arbor.Actions.pipeline_internal_action?/1; local fallback
+    # keeps FindTools resilient if the facade is mid-upgrade.
     defp pipeline_internal_action?(module) when is_atom(module) do
-      tags =
-        cond do
-          function_exported?(module, :tags, 0) -> module.tags()
-          true -> []
-        end
+      actions_mod = Module.concat([:Arbor, :Actions])
 
-      "pipeline_internal" in Enum.map(List.wrap(tags), &to_string/1)
+      if Code.ensure_loaded?(actions_mod) and
+           function_exported?(actions_mod, :pipeline_internal_action?, 1) do
+        apply(actions_mod, :pipeline_internal_action?, [module])
+      else
+        tags =
+          cond do
+            function_exported?(module, :tags, 0) -> module.tags()
+            true -> []
+          end
+
+        "pipeline_internal" in Enum.map(List.wrap(tags), &to_string/1)
+      end
     rescue
       _ -> false
     end

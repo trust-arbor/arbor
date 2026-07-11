@@ -52,8 +52,16 @@ defmodule Arbor.Gateway.MCP.ActionBridge do
   """
   @spec all_mcp_tools() :: [map()]
   def all_mcp_tools do
-    Arbor.Actions.all_actions()
-    |> to_mcp_tools()
+    # Central exposure boundary: never surface pipeline_internal graph syscalls.
+    actions =
+      if function_exported?(Arbor.Actions, :exposed_actions, 0) do
+        Arbor.Actions.exposed_actions()
+      else
+        Arbor.Actions.all_actions()
+        |> Enum.reject(&Arbor.Actions.pipeline_internal_action?/1)
+      end
+
+    to_mcp_tools(actions)
   rescue
     e ->
       Logger.debug("[ActionBridge] all_mcp_tools failed: #{Exception.message(e)}")

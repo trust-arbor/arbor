@@ -54,6 +54,8 @@ required_capabilities:
   resource: "arbor://orchestrator/execute"
 - description: "Invoke the bounded reviewable-change workflow"
   resource: "arbor://action/coding/produce_reviewable_change"
+- description: "Run the pipeline-internal reviewed commit/adoption gate (orchestration control)"
+  resource: "arbor://action/coding/reviewed_commit"
 - description: "Validate a Council-attested security regression against both reviewed revisions"
   resource: "arbor://action/coding/security_regression/validate"
 - description: "Validate compile, xref evidence, and downstream tests for cross-app changes"
@@ -88,6 +90,7 @@ trust_preset:
   rules:
     "arbor://orchestrator/execute": auto
     "arbor://action/coding/produce_reviewable_change": auto
+    "arbor://action/coding/reviewed_commit": auto
     "arbor://action/coding/security_regression/validate": ask
     "arbor://action/coding/cross_app/validate": ask
     "arbor://action/coding/workspace": auto
@@ -98,6 +101,7 @@ trust_preset:
     "arbor://fs/list": auto
     "arbor://fs/write": auto
     "arbor://action/git": auto
+    "arbor://action/git/commit": ask
     "arbor://action/mix": auto
     "arbor://shell/exec": ask
     "arbor://action/council/review": auto

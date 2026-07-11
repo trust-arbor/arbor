@@ -167,25 +167,46 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
       agent_id = profile.agent_id
       cleanup(agent_id)
 
-      action_uris = [
+      # Outer reviewed-commit gate is orchestration control (:auto). Exact git
+      # commit remains human-gated (:ask) — capability is present either way.
+      auto_uris = [
         "arbor://action/coding/workspace/acquire",
         "arbor://action/coding/workspace/inspect",
         "arbor://action/coding/workspace/committed_change",
         "arbor://action/coding/workspace/release",
         "arbor://action/coding/review_tree/read",
         "arbor://action/coding/review_tree/search",
+        "arbor://action/coding/reviewed_commit",
         "arbor://acp/tool",
         "arbor://action/mix/compile",
-        "arbor://action/git/commit",
         "arbor://action/git/pr",
         "arbor://action/council/review"
       ]
 
-      for resource_uri <- action_uris do
+      for resource_uri <- auto_uris do
         assert {:ok, :authorized} =
                  Arbor.Trust.authorize(agent_id, resource_uri, :execute),
                "expected coding agent to authorize #{resource_uri}"
       end
+
+      # git/commit is ask — capability held, but ApprovalGuard may escalate.
+      git_commit = "arbor://action/git/commit"
+
+      case Arbor.Trust.authorize(agent_id, git_commit, :execute) do
+        {:ok, :authorized} ->
+          :ok
+
+        {:ok, :pending_approval, request_id} when is_binary(request_id) ->
+          :ok
+
+        other ->
+          flunk("expected coding agent to hold git/commit authority, got #{inspect(other)}")
+      end
+
+      assert {:ok, caps} = Arbor.Security.list_capabilities(agent_id)
+      uris = Enum.map(caps, & &1.resource_uri)
+      assert Enum.any?(uris, &String.starts_with?(&1, "arbor://action/coding/reviewed_commit"))
+      assert Enum.any?(uris, &String.starts_with?(&1, "arbor://action/git"))
     end
 
     test "template repo file grants mint concrete FileGuard scopes" do

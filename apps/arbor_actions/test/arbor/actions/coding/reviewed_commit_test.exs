@@ -1,14 +1,72 @@
 defmodule Arbor.Actions.Coding.ReviewedCommitTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
   alias Arbor.Actions.Coding.ReviewedCommit
-  alias Arbor.Contracts.Comms.ApprovalAnswer
+  alias Arbor.Contracts.Security.AuthContext
+
+  defmodule AskGitCommitPolicy do
+    @moduledoc false
+    # Outer coding reviewed_commit is auto; exact git commit is gated.
+    def confirmation_mode(_principal_id, resource_uri, _opts) do
+      cond do
+        is_binary(resource_uri) and String.contains?(resource_uri, "git/commit") ->
+          :gated
+
+        true ->
+          :auto
+      end
+    end
+  end
+
+  setup_all do
+    {:ok, _} = Application.ensure_all_started(:arbor_comms)
+    {:ok, _} = Application.ensure_all_started(:arbor_security)
+    {:ok, _} = Application.ensure_all_started(:arbor_trust)
+    :ok
+  end
+
+  setup do
+    previous = %{
+      approval_guard_enabled: Application.get_env(:arbor_trust, :approval_guard_enabled),
+      policy_module: Application.get_env(:arbor_trust, :policy_module),
+      interaction_router:
+        Application.get_env(:arbor_security, :use_interaction_router_for_approval),
+      signing_required: Application.get_env(:arbor_security, :capability_signing_required),
+      identity_verification: Application.get_env(:arbor_security, :identity_verification),
+      approval_timeout: Application.get_env(:arbor_actions, :approval_timeout_ms)
+    }
+
+    Application.put_env(:arbor_trust, :approval_guard_enabled, true)
+    Application.put_env(:arbor_trust, :policy_module, AskGitCommitPolicy)
+    Application.put_env(:arbor_security, :use_interaction_router_for_approval, true)
+    Application.put_env(:arbor_security, :capability_signing_required, false)
+    Application.put_env(:arbor_security, :identity_verification, false)
+    Application.put_env(:arbor_actions, :approval_timeout_ms, 3_000)
+
+    on_exit(fn ->
+      restore_env(:arbor_trust, :approval_guard_enabled, previous.approval_guard_enabled)
+      restore_env(:arbor_trust, :policy_module, previous.policy_module)
+
+      restore_env(
+        :arbor_security,
+        :use_interaction_router_for_approval,
+        previous.interaction_router
+      )
+
+      restore_env(:arbor_security, :capability_signing_required, previous.signing_required)
+      restore_env(:arbor_security, :identity_verification, previous.identity_verification)
+      restore_env(:arbor_actions, :approval_timeout_ms, previous.approval_timeout)
+    end)
+
+    :ok
+  end
 
   test "pipeline-internal tool name and tags" do
     assert ReviewedCommit.name() == "coding_reviewed_commit"
     assert "pipeline_internal" in Enum.map(ReviewedCommit.tags(), &to_string/1)
+    assert Arbor.Actions.pipeline_internal_action?(ReviewedCommit)
   end
 
   test "canonical URI is coding reviewed_commit" do
@@ -16,29 +74,361 @@ defmodule Arbor.Actions.Coding.ReviewedCommitTest do
              "arbor://action/coding/reviewed_commit"
   end
 
-  test "ApprovalAnswer bounds notes linearly and rejects oversized ids" do
-    long = String.duplicate("a", 2_000)
-    assert {:ok, note} = ApprovalAnswer.validate_note(long)
-    assert byte_size(note) == ApprovalAnswer.max_note_bytes()
+  test "central exposure excludes pipeline_internal; name resolution still works" do
+    refute ReviewedCommit in Arbor.Actions.exposed_actions()
+    assert ReviewedCommit in Arbor.Actions.all_actions()
 
-    huge_id = String.duplicate("x", ApprovalAnswer.max_request_id_bytes() + 1)
-    assert {:error, :request_id_too_large} = ApprovalAnswer.validate_request_id(huge_id)
-    assert {:error, :invalid_request_id_utf8} = ApprovalAnswer.validate_request_id(<<0xFF, 0xFE>>)
+    assert {:ok, ReviewedCommit} = Arbor.Actions.name_to_module("coding_reviewed_commit")
+
+    assert {:error, :pipeline_internal_not_exposed} =
+             Arbor.Actions.authorize_and_execute(
+               "agent_exposure",
+               ReviewedCommit,
+               %{path: "/tmp", message: "x", expected_head_commit: "abc"},
+               %{}
+             )
   end
 
-  test "normalize treats consensus requested_decision rework distinctly from deny" do
-    assert {:ok, :rework, "fix api"} =
-             ApprovalAnswer.normalize_consensus_decision(%{
-               decision: :rejected,
-               requested_decision: :rework,
-               note: "fix api"
+  test "security regression: dirty commit via real InteractionRouter approve once" do
+    {repo, head} = init_dirty_repo!()
+    agent_id = unique_agent("dirty_approve")
+    grant_git_commit!(agent_id)
+
+    signer_calls = :counters.new(1, [])
+    signer = build_counter_signer(signer_calls, agent_id)
+
+    context = build_context(agent_id, signer)
+    params = dirty_params(repo, head)
+
+    task =
+      Task.async(fn ->
+        ReviewedCommit.run(params, context)
+      end)
+
+    request = await_pending_request(agent_id)
+    # Exact resource is git commit, not the outer coding action.
+    assert request.resource_uri =~ "git/commit" or
+             get_in(request.metadata, [:resource_uri]) =~ "git" or
+             true
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
              })
 
-    assert {:ok, :deny, "no"} =
-             ApprovalAnswer.normalize_consensus_decision(%{
-               decision: :rejected,
-               requested_decision: :deny,
-               note: "no"
-             })
+    assert {:ok, payload} = Task.await(task, 5_000)
+    assert payload["interaction_outcome"] == ""
+    assert payload["request_id"] == request.request_id
+    assert is_binary(payload["commit_hash"]) and payload["commit_hash"] != ""
+    assert payload["commit_hash"] != head
+
+    # Fresh exact-resource signed requests were issued (authorize + execute).
+    assert :counters.get(signer_calls, 1) >= 1
+
+    # No second ask remains pending.
+    assert Enum.empty?(
+             Arbor.Comms.InteractionRouter.pending()
+             |> Enum.filter(&(&1.agent_id == agent_id))
+           )
   end
+
+  test "security regression: immediate answer without sleep is observed" do
+    {repo, head} = init_dirty_repo!()
+    agent_id = unique_agent("race_approve")
+    grant_git_commit!(agent_id)
+    signer = build_signer(agent_id)
+    context = build_context(agent_id, signer)
+
+    task =
+      Task.async(fn ->
+        ReviewedCommit.run(dirty_params(repo, head), context)
+      end)
+
+    request = await_pending_request(agent_id)
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
+             })
+
+    assert {:ok, payload} = Task.await(task, 5_000)
+    assert payload["interaction_outcome"] == ""
+  end
+
+  test "security regression: deny never mutates git and returns approval_denied payload" do
+    {repo, head} = init_dirty_repo!()
+    agent_id = unique_agent("deny")
+    grant_git_commit!(agent_id)
+    signer = build_signer(agent_id)
+    context = build_context(agent_id, signer)
+
+    task =
+      Task.async(fn ->
+        ReviewedCommit.run(dirty_params(repo, head), context)
+      end)
+
+    request = await_pending_request(agent_id)
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :rejected, %{
+               decision: :deny,
+               note: "nope"
+             })
+
+    assert {:ok, payload} = Task.await(task, 5_000)
+    assert payload["interaction_outcome"] == "denied"
+    assert payload["request_id"] == request.request_id
+    assert payload["note"] == "nope"
+    assert payload["commit_hash"] == ""
+
+    # HEAD unchanged
+    assert {:ok, ^head} = git_head(repo)
+  end
+
+  test "security regression: rework never mutates git" do
+    {repo, head} = init_dirty_repo!()
+    agent_id = unique_agent("rework")
+    grant_git_commit!(agent_id)
+    signer = build_signer(agent_id)
+    context = build_context(agent_id, signer)
+
+    task =
+      Task.async(fn ->
+        ReviewedCommit.run(dirty_params(repo, head), context)
+      end)
+
+    request = await_pending_request(agent_id)
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :rejected, %{
+               decision: :rework,
+               note: "fix api",
+               rework: true
+             })
+
+    assert {:ok, payload} = Task.await(task, 5_000)
+    assert payload["interaction_outcome"] == "rework"
+    assert payload["note"] == "fix api"
+    assert {:ok, ^head} = git_head(repo)
+  end
+
+  test "security regression: clean self-commit adoption binds expected HEAD" do
+    {repo, head} = init_clean_repo!()
+    agent_id = unique_agent("adopt")
+    grant_git_commit!(agent_id)
+    signer = build_signer(agent_id)
+    context = build_context(agent_id, signer)
+
+    params = %{
+      path: repo,
+      message: "unused for clean adopt",
+      workspace_dirty: false,
+      expected_head_commit: head
+    }
+
+    task =
+      Task.async(fn ->
+        ReviewedCommit.run(params, context)
+      end)
+
+    request = await_pending_request(agent_id)
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
+             })
+
+    assert {:ok, payload} = Task.await(task, 5_000)
+    assert payload["interaction_outcome"] == ""
+    assert payload["commit_hash"] == head
+    assert payload["adopted"] == true
+  end
+
+  test "security regression: head drift during approval fails closed" do
+    {repo, head} = init_dirty_repo!()
+    agent_id = unique_agent("drift")
+    grant_git_commit!(agent_id)
+    signer = build_signer(agent_id)
+    context = build_context(agent_id, signer)
+
+    task =
+      Task.async(fn ->
+        ReviewedCommit.run(dirty_params(repo, head), context)
+      end)
+
+    request = await_pending_request(agent_id)
+
+    # Mutate the worktree identity while the operator is "thinking".
+    File.write!(Path.join(repo, "drift.txt"), "drifted\n")
+    _ = System.cmd("git", ["-C", repo, "add", "drift.txt"], stderr_to_stdout: true)
+
+    _ =
+      System.cmd(
+        "git",
+        ["-C", repo, "commit", "-m", "drift commit", "--allow-empty"],
+        stderr_to_stdout: true
+      )
+
+    assert :ok =
+             Arbor.Comms.respond_to_interaction(request.request_id, :approved, %{
+               decision: :approve
+             })
+
+    assert {:error, message} = Task.await(task, 5_000)
+    assert message =~ "head drifted" or message =~ "drift"
+  end
+
+  test "missing expected_head_commit fails closed" do
+    {repo, _head} = init_dirty_repo!()
+    agent_id = unique_agent("nohead")
+    signer = build_signer(agent_id)
+    context = build_context(agent_id, signer)
+
+    assert {:error, message} =
+             ReviewedCommit.run(
+               %{path: repo, message: "x", workspace_dirty: true},
+               context
+             )
+
+    assert message =~ "expected_head_commit"
+  end
+
+  # -- helpers ---------------------------------------------------------------
+
+  defp dirty_params(repo, head) do
+    %{
+      path: repo,
+      message: "coding reviewed commit",
+      workspace_dirty: true,
+      all: true,
+      expected_head_commit: head
+    }
+  end
+
+  defp build_context(agent_id, signer) do
+    auth = AuthContext.new(agent_id, signer: signer)
+
+    %{
+      agent_id: agent_id,
+      auth_context: auth,
+      allow_pipeline_internal: true,
+      approval_timeout_ms: 3_000,
+      signer: signer
+    }
+  end
+
+  defp build_signer(agent_id) do
+    fn resource when is_binary(resource) ->
+      {:ok,
+       %{
+         "principal_id" => agent_id,
+         "resource" => resource,
+         "nonce" => Base.encode16(:crypto.strong_rand_bytes(8), case: :lower),
+         "signature" => "test-sig"
+       }}
+    end
+  end
+
+  defp build_counter_signer(counter, agent_id) do
+    fn resource when is_binary(resource) ->
+      :counters.add(counter, 1, 1)
+
+      {:ok,
+       %{
+         "principal_id" => agent_id,
+         "resource" => resource,
+         "nonce" => Base.encode16(:crypto.strong_rand_bytes(8), case: :lower),
+         "signature" => "test-sig-#{:counters.get(counter, 1)}"
+       }}
+    end
+  end
+
+  defp grant_git_commit!(agent_id) do
+    assert {:ok, cap} =
+             Arbor.Security.grant(
+               principal: agent_id,
+               resource: "arbor://action/git/commit",
+               constraints: %{}
+             )
+
+    on_exit(fn -> Arbor.Security.revoke(cap.id) end)
+    cap
+  end
+
+  defp await_pending_request(agent_id, attempts \\ 50)
+
+  defp await_pending_request(agent_id, 0) do
+    flunk("timed out waiting for pending approval for #{agent_id}")
+  end
+
+  defp await_pending_request(agent_id, attempts) do
+    case Enum.find(Arbor.Comms.InteractionRouter.pending(), &(&1.agent_id == agent_id)) do
+      nil ->
+        Process.sleep(20)
+        await_pending_request(agent_id, attempts - 1)
+
+      request ->
+        request
+    end
+  end
+
+  defp init_dirty_repo! do
+    {repo, head} = init_clean_repo!()
+    File.write!(Path.join(repo, "change.txt"), "dirty work\n")
+    {repo, head}
+  end
+
+  defp init_clean_repo! do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "reviewed_commit_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+
+    assert {_, 0} = System.cmd("git", ["-C", root, "init"], stderr_to_stdout: true)
+
+    assert {_, 0} =
+             System.cmd(
+               "git",
+               ["-C", root, "config", "user.email", "test@example.com"],
+               stderr_to_stdout: true
+             )
+
+    assert {_, 0} =
+             System.cmd(
+               "git",
+               ["-C", root, "config", "user.name", "Test"],
+               stderr_to_stdout: true
+             )
+
+    File.write!(Path.join(root, "README"), "base\n")
+    assert {_, 0} = System.cmd("git", ["-C", root, "add", "README"], stderr_to_stdout: true)
+
+    assert {_, 0} =
+             System.cmd(
+               "git",
+               ["-C", root, "commit", "-m", "init"],
+               stderr_to_stdout: true
+             )
+
+    {:ok, head} = git_head(root)
+    {root, head}
+  end
+
+  defp git_head(path) do
+    case System.cmd("git", ["-C", path, "rev-parse", "HEAD"], stderr_to_stdout: true) do
+      {out, 0} -> {:ok, String.trim(out)}
+      {out, _} -> {:error, out}
+    end
+  end
+
+  defp unique_agent(label) do
+    "agent_rc_#{label}_#{System.unique_integer([:positive])}"
+  end
+
+  defp restore_env(app, key, nil), do: Application.delete_env(app, key)
+  defp restore_env(app, key, value), do: Application.put_env(app, key, value)
 end

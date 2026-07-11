@@ -692,11 +692,13 @@ defmodule Arbor.Gateway.MCP.Handler do
   defp validate_approval_id(args) do
     case Map.get(args, "id") do
       id when is_binary(id) ->
-        case Arbor.Contracts.Comms.ApprovalAnswer.validate_request_id(String.trim(id)) do
+        # No String.trim mutation — opaque id grammar is closed ASCII and
+        # leading/trailing whitespace is a hard reject.
+        case Arbor.Contracts.Comms.ApprovalAnswer.validate_request_id(id) do
           {:ok, _} = ok -> ok
           {:error, :empty_request_id} -> {:error, "Missing required argument: id"}
           {:error, :request_id_too_large} -> {:error, "approval id exceeds maximum size"}
-          {:error, :invalid_request_id_utf8} -> {:error, "approval id is not valid UTF-8"}
+          {:error, :invalid_request_id} -> {:error, "approval id is invalid"}
           {:error, _} -> {:error, "approval id is invalid"}
         end
 
@@ -708,9 +710,12 @@ defmodule Arbor.Gateway.MCP.Handler do
   defp validate_approval_note(nil), do: {:ok, ""}
 
   defp validate_approval_note(note) when is_binary(note) do
+    # MCP path rejects oversized notes (never silently truncates).
     case Arbor.Contracts.Comms.ApprovalAnswer.validate_note(note) do
       {:ok, _} = ok -> ok
+      {:error, :note_too_large} -> {:error, "approval note exceeds maximum size"}
       {:error, :invalid_note_utf8} -> {:error, "approval note is not valid UTF-8"}
+      {:error, :invalid_note_control} -> {:error, "approval note contains control characters"}
       {:error, _} -> {:error, "approval note is invalid"}
     end
   end
@@ -840,7 +845,7 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   defp list_actions(nil) do
     native_section =
-      case call_actions(:list_actions, []) do
+      case call_actions(:list_exposed_actions, []) do
         {:ok, actions_map} ->
           actions_map
           |> Enum.sort_by(fn {category, _} -> category end)
@@ -858,7 +863,28 @@ defmodule Arbor.Gateway.MCP.Handler do
           end)
 
         {:error, _} ->
-          ""
+          # Fallback for older facades mid-upgrade: filter pipeline_internal.
+          case call_actions(:list_actions, []) do
+            {:ok, actions_map} ->
+              actions_map
+              |> filter_pipeline_internal_map()
+              |> Enum.sort_by(fn {category, _} -> category end)
+              |> Enum.map_join("\n\n", fn {category, modules} ->
+                tool_names =
+                  Enum.map_join(modules, "\n", fn mod ->
+                    try do
+                      "  - #{mod.name()}: #{truncate(mod.description(), 80)}"
+                    rescue
+                      _ -> "  - #{inspect(mod)}"
+                    end
+                  end)
+
+                "## #{category}\n#{tool_names}"
+              end)
+
+            {:error, _} ->
+              ""
+          end
       end
 
     mcp_section = format_mcp_tools_section()
@@ -886,32 +912,41 @@ defmodule Arbor.Gateway.MCP.Handler do
         _ -> nil
       end
 
-    case call_actions(:list_actions, []) do
-      {:ok, actions_map} ->
-        case Map.get(actions_map, category_atom) do
-          nil ->
-            categories = actions_map |> Map.keys() |> Enum.sort() |> Enum.join(", ")
-            "Unknown category '#{category}'. Available: #{categories}"
+    actions_map =
+      case call_actions(:list_exposed_actions, []) do
+        {:ok, map} ->
+          map
 
-          modules ->
-            modules
-            |> Enum.map_join("\n\n", fn mod ->
-              try do
-                "### #{mod.name()}\n#{mod.description()}"
-              rescue
-                _ -> "### #{inspect(mod)}"
-              end
-            end)
-            |> then(&("# #{category} actions\n\n" <> &1))
-        end
+        {:error, _} ->
+          case call_actions(:list_actions, []) do
+            {:ok, map} -> filter_pipeline_internal_map(map)
+            {:error, _} -> %{}
+          end
+      end
 
-      {:error, reason} ->
-        "Error: #{inspect(reason)}"
+    case Map.get(actions_map, category_atom) do
+      nil when actions_map == %{} ->
+        "Error: actions unavailable"
+
+      nil ->
+        categories = actions_map |> Map.keys() |> Enum.sort() |> Enum.join(", ")
+        "Unknown category '#{category}'. Available: #{categories}"
+
+      modules ->
+        modules
+        |> Enum.map_join("\n\n", fn mod ->
+          try do
+            "### #{mod.name()}\n#{mod.description()}"
+          rescue
+            _ -> "### #{inspect(mod)}"
+          end
+        end)
+        |> then(&("# #{category} actions\n\n" <> &1))
     end
   end
 
   defp get_action_help(action_name) do
-    case find_action_module(action_name) do
+    case find_exposed_action_module(action_name) do
       {:ok, mod} ->
         sections = [
           "# #{action_name}",
@@ -946,6 +981,9 @@ defmodule Arbor.Gateway.MCP.Handler do
           end
 
         Enum.join(sections, "\n")
+
+      {:error, :pipeline_internal_not_exposed} ->
+        "Action '#{action_name}' is pipeline-internal and is not available via MCP help/run."
 
       {:error, :not_found} ->
         "Action '#{action_name}' not found. Use arbor_actions to list available actions."
@@ -1018,7 +1056,7 @@ defmodule Arbor.Gateway.MCP.Handler do
   end
 
   defp run_native_action(action_name, params, agent_id) do
-    case find_action_module(action_name) do
+    case find_exposed_action_module(action_name) do
       {:ok, mod} ->
         # Atomize known param keys for the action
         atom_params = atomize_params(params)
@@ -1028,6 +1066,8 @@ defmodule Arbor.Gateway.MCP.Handler do
         # `verify_identity: true` can succeed instead of denying with
         # :missing_signed_request. Pre-fix the context was just
         # `%{workspace: ...}` and the proof was discarded after gateway auth.
+        # Pipeline-internal actions are rejected by find_exposed_action_module
+        # and again by authorize_and_execute without allow_pipeline_internal.
         context =
           %{workspace: default_workspace()}
           |> maybe_put_signed_request()
@@ -1041,6 +1081,9 @@ defmodule Arbor.Gateway.MCP.Handler do
           {:ok, {:error, :unauthorized}} ->
             "## Unauthorized\n\nAgent '#{agent_id}' lacks permission for #{action_name}."
 
+          {:ok, {:error, :pipeline_internal_not_exposed}} ->
+            "## Error\n\nAction '#{action_name}' is pipeline-internal and cannot run via arbor_run."
+
           {:ok, {:error, {:taint_blocked, param, level, role}}} ->
             "## Taint Blocked\n\nParameter '#{param}' blocked: taint=#{level}, role=#{role}."
 
@@ -1053,6 +1096,9 @@ defmodule Arbor.Gateway.MCP.Handler do
           {:error, reason} ->
             "## Error\n\n#{inspect(reason)}"
         end
+
+      {:error, :pipeline_internal_not_exposed} ->
+        "## Error\n\nAction '#{action_name}' is pipeline-internal and cannot run via arbor_run."
 
       {:error, :not_found} ->
         "Action '#{action_name}' not found. Use arbor_actions to list available actions."
@@ -1512,6 +1558,65 @@ defmodule Arbor.Gateway.MCP.Handler do
         {:error, :not_found}
     end
   end
+
+  # MCP help/run only resolve exposed actions — pipeline_internal graph
+  # syscalls remain resolvable for Engine via ActionRegistry/name_to_module.
+  defp find_exposed_action_module(action_name) do
+    case call_actions(:exposed_actions, []) do
+      {:ok, modules} when is_list(modules) ->
+        found =
+          Enum.find(modules, fn mod ->
+            try do
+              mod.name() == action_name
+            rescue
+              _ -> false
+            end
+          end)
+
+        cond do
+          found ->
+            {:ok, found}
+
+          pipeline_internal_name?(action_name) ->
+            {:error, :pipeline_internal_not_exposed}
+
+          true ->
+            {:error, :not_found}
+        end
+
+      _ ->
+        # Fallback: resolve then reject pipeline_internal.
+        case find_action_module(action_name) do
+          {:ok, mod} ->
+            if Arbor.Actions.pipeline_internal_action?(mod) do
+              {:error, :pipeline_internal_not_exposed}
+            else
+              {:ok, mod}
+            end
+
+          other ->
+            other
+        end
+    end
+  end
+
+  defp pipeline_internal_name?(name) when is_binary(name) do
+    case find_action_module(name) do
+      {:ok, mod} -> Arbor.Actions.pipeline_internal_action?(mod)
+      _ -> false
+    end
+  end
+
+  defp filter_pipeline_internal_map(actions_map) when is_map(actions_map) do
+    actions_map
+    |> Enum.map(fn {category, modules} ->
+      {category, Enum.reject(List.wrap(modules), &Arbor.Actions.pipeline_internal_action?/1)}
+    end)
+    |> Enum.reject(fn {_c, modules} -> modules == [] end)
+    |> Map.new()
+  end
+
+  defp filter_pipeline_internal_map(_), do: %{}
 
   # M8: find_first_agent_id/0 was the engine of the leak — it picked an
   # arbitrary agent from the registry whenever a caller omitted agent_id, and

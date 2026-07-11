@@ -381,6 +381,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   end
 
   # Prove deny cleanup and all operator rework budget counters are wired.
+  # Dominance/all-path proofs (not mere reachability):
+  #   * success/deny/rework post-commit nodes are dominated by the reviewed gate
+  #   * every deny path reaches cleanup and cannot reach publication
+  #   * every operator rework path passes category+total budget then fresh gate
+  #   * direct bypass edges (commit_change -> hoist/route_after) fail closed
   defp check_operator_approval_routing(errors, graph) do
     required =
       ~w(
@@ -401,56 +406,186 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         end
       end)
 
-    # Deny path must reach cleanup (close_worker) without publication success.
+    {entry, reachable, dominators} = approval_dominance_context(graph)
+
+    # Reviewed gate dominates every post-commit branch (success hoist, deny, rework).
+    post_gate_nodes =
+      ~w(
+        route_commit_interaction
+        hoist_commit_hash
+        status_approval_denied
+        check_operator_rework_category_budget
+        check_operator_rework_total_budget
+      )
+
     errors =
-      if approval_edge?(graph, "status_approval_denied", "close_worker") or
-           approval_reaches?(graph, "status_approval_denied", "close_worker") do
-        errors
-      else
+      Enum.reduce(post_gate_nodes, errors, fn node_id, acc ->
+        require_dominates(
+          acc,
+          @commit_approval_node,
+          node_id,
+          reachable,
+          dominators,
+          "reviewed_commit_gate"
+        )
+      end)
+
+    # route_commit_interaction dominates success hoist / deny / rework budgets.
+    errors =
+      Enum.reduce(
+        ~w(hoist_commit_hash status_approval_denied check_operator_rework_category_budget),
+        errors,
+        fn node_id, acc ->
+          require_dominates(
+            acc,
+            "route_commit_interaction",
+            node_id,
+            reachable,
+            dominators,
+            "commit_interaction_route"
+          )
+        end
+      )
+
+    # Deny path: every path from status_approval_denied reaches cleanup, and
+    # none reach publication. (close_worker is also on success paths, so it is
+    # not dominated by the deny node — use post-path reachability instead.)
+    errors =
+      cond do
+        not MapSet.member?(reachable, "status_approval_denied") ->
+          errors
+
+        not approval_reaches?(graph, "status_approval_denied", "close_worker") ->
+          [
+            error("missing_approval_denied_cleanup", "status_approval_denied", %{
+              "required_successor" => "close_worker"
+            })
+            | errors
+          ]
+
+        true ->
+          reject_deny_publication_paths(errors, graph, reachable)
+      end
+
+    # Operator rework: category budget dominates total budget; both dominate
+    # the subsequent rework increment. Total budget also reaches a fresh
+    # commit gate on the rework-success path (via worker loop -> commit_change).
+    errors =
+      errors
+      |> require_dominates(
+        "check_operator_rework_category_budget",
+        "check_operator_rework_total_budget",
+        reachable,
+        dominators,
+        "operator_rework_budget"
+      )
+      |> require_dominates(
+        "check_operator_rework_total_budget",
+        "inc_operator_rework_count",
+        reachable,
+        dominators,
+        "operator_rework_budget"
+      )
+
+    # Reject direct bypass edges from the commit gate.
+    errors =
+      if approval_edge?(graph, "commit_change", "hoist_commit_hash") or
+           approval_edge?(graph, "commit_change", "route_after_commit") or
+           approval_edge?(graph, "commit_change", "status_approval_denied") do
         [
-          error("missing_approval_denied_cleanup", "status_approval_denied", %{
-            "required_successor" => "close_worker"
+          error("commit_approval_bypass_edge", "commit_change", %{
+            "detail" => "commit_change must route through route_commit_interaction"
           })
           | errors
         ]
-      end
-
-    # Category and total budget counters must both be incremented on the rework path.
-    errors =
-      if approval_edge?(
-           graph,
-           "check_operator_rework_category_budget",
-           "check_operator_rework_total_budget"
-         ) or
-           approval_reaches?(
-             graph,
-             "check_operator_rework_category_budget",
-             "check_operator_rework_total_budget"
-           ) do
-        errors
       else
-        [
-          error(
-            "missing_operator_rework_budget_chain",
-            "check_operator_rework_category_budget",
-            %{}
-          )
-          | errors
-        ]
+        errors
       end
 
-    # Reject bypass: commit_change must not skip route_commit_interaction.
-    if approval_edge?(graph, "commit_change", "hoist_commit_hash") or
-         approval_edge?(graph, "commit_change", "route_after_commit") do
-      [
-        error("commit_approval_bypass_edge", "commit_change", %{
-          "detail" => "commit_change must route through route_commit_interaction"
-        })
-        | errors
-      ]
-    else
-      errors
+    # Indirect bypass: any edge into post-gate success/deny/rework that is not
+    # dominated by commit_change fails closed (extra edge from outside the gate).
+    reject_indirect_commit_bypasses(errors, graph, entry, reachable, dominators)
+  end
+
+  defp approval_dominance_context(graph) do
+    case Graph.find_start_node(graph) do
+      nil ->
+        {nil, MapSet.new(), %{}}
+
+      start_node ->
+        entry = start_node.id
+        reachable = reachable_from(graph, entry)
+        dominators = compute_dominators(graph, entry, reachable)
+        {entry, reachable, dominators}
     end
+  end
+
+  # Deny terminals must not be able to reach any publication success node.
+  defp reject_deny_publication_paths(errors, graph, reachable) do
+    publication =
+      ~w(
+        route_publish
+        status_change_committed
+        status_pr_created
+        status_human_review_required
+        prep_pr_path
+      )
+      |> Enum.filter(&MapSet.member?(reachable, &1))
+
+    Enum.reduce(publication, errors, fn pub, acc ->
+      if approval_reaches?(graph, "status_approval_denied", pub) do
+        [
+          error("approval_denied_reaches_publication", "status_approval_denied", %{
+            "publication_node" => pub
+          })
+          | acc
+        ]
+      else
+        acc
+      end
+    end)
+  end
+
+  # Extra edges into post-gate nodes from sources other than the reviewed gate
+  # / route_commit_interaction chain are indirect bypasses.
+  defp reject_indirect_commit_bypasses(errors, graph, _entry, reachable, dominators) do
+    guarded =
+      MapSet.new(~w(
+          route_commit_interaction
+          hoist_commit_hash
+          status_approval_denied
+          check_operator_rework_category_budget
+          check_operator_rework_total_budget
+          inc_operator_rework_count
+        ))
+
+    allowed_predecessors = MapSet.new([@commit_approval_node, "route_commit_interaction"])
+
+    graph.edges
+    |> Enum.reduce(errors, fn edge, acc ->
+      cond do
+        not MapSet.member?(guarded, edge.to) ->
+          acc
+
+        MapSet.member?(allowed_predecessors, edge.from) ->
+          acc
+
+        # Nodes already dominated by the reviewed gate (downstream of route)
+        # may chain among themselves; only edges from undominated sources fail.
+        MapSet.member?(reachable, edge.from) and
+            dominates?(dominators, @commit_approval_node, edge.from) ->
+          acc
+
+        true ->
+          [
+            error("commit_approval_bypass_edge", edge.from, %{
+              "detail" => "indirect bypass into post-commit gate node",
+              "to" => edge.to
+            })
+            | acc
+          ]
+      end
+    end)
   end
 
   defp check_forbidden_denial_bypass_attrs(errors, graph) do

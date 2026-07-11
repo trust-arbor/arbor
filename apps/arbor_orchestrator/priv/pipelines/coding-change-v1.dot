@@ -395,11 +395,12 @@ digraph CodingChangeV1 {
 
   // Reviewed top-level Jido action (syscall): approval decision lives here,
   // graph owns branching. Not git_commit + ExecHandler control projection.
+  // head_commit binds approval to the inspected candidate revision.
   commit_change [
     type="exec",
     target="action",
     action="coding_reviewed_commit",
-    context_keys="path,message,workspace_dirty",
+    context_keys="path,message,workspace_dirty,head_commit",
     param.all="true",
     output_prefix="commit",
     max_retries="0"

@@ -223,6 +223,36 @@ defmodule Arbor.Actions do
   end
 
   defp do_authorize_and_execute(agent_id, action_module, params, context) do
+    case reject_unexposed_pipeline_internal(action_module, context) do
+      :ok ->
+        do_authorize_and_execute_authorized(agent_id, action_module, params, context)
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # Pipeline-internal actions are graph syscalls. Ordinary MCP/agent tool
+  # surfaces must not execute them; Engine-pinned execution sets
+  # `:allow_pipeline_internal` (or a pinned binding) on the context.
+  defp reject_unexposed_pipeline_internal(action_module, context) do
+    if pipeline_internal_action?(action_module) and not pipeline_internal_allowed?(context) do
+      {:error, :pipeline_internal_not_exposed}
+    else
+      :ok
+    end
+  end
+
+  defp pipeline_internal_allowed?(context) when is_map(context) do
+    Map.get(context, :allow_pipeline_internal) == true or
+      Map.get(context, "allow_pipeline_internal") == true or
+      not is_nil(Map.get(context, :pinned_action_binding)) or
+      is_map(Map.get(context, :pinned_action_bindings))
+  end
+
+  defp pipeline_internal_allowed?(_), do: false
+
+  defp do_authorize_and_execute_authorized(agent_id, action_module, params, context) do
     # Extract signing data for action-level auth, but keep it in context
     # so facade-level auth (e.g., File.authorize_file_op) can also use it.
     signed_request = Map.get(context, :signed_request)
@@ -1099,7 +1129,9 @@ defmodule Arbor.Actions do
   end
 
   @doc """
-  Get all action modules as a flat list.
+  Get all action modules as a flat list (includes pipeline-internal).
+
+  Prefer `exposed_actions/0` for ordinary tool enumeration surfaces.
   """
   @spec all_actions() :: [module()]
   def all_actions do
@@ -1109,19 +1141,62 @@ defmodule Arbor.Actions do
   end
 
   @doc """
-  Get all actions as LLM tool schemas.
+  True when the action is tagged `pipeline_internal` (graph syscall only).
 
-  Useful for providing available tools to an LLM.
+  Central exposure/list/bridge boundary uses this — not only Tool.FindTools.
+  """
+  @spec pipeline_internal_action?(module()) :: boolean()
+  def pipeline_internal_action?(module) when is_atom(module) do
+    tags =
+      cond do
+        function_exported?(module, :tags, 0) -> module.tags()
+        true -> []
+      end
+
+    "pipeline_internal" in Enum.map(List.wrap(tags), &to_string/1)
+  rescue
+    _ -> false
+  end
+
+  def pipeline_internal_action?(_), do: false
+
+  @doc """
+  Action catalog with pipeline-internal modules removed.
+
+  Used by MCP `arbor_actions` / help enumeration and agent tool generation.
+  Engine registry registration continues to use `list_actions/0` (full set).
+  """
+  @spec list_exposed_actions() :: %{atom() => [module()]}
+  def list_exposed_actions do
+    list_actions()
+    |> Enum.map(fn {category, modules} ->
+      {category, Enum.reject(modules, &pipeline_internal_action?/1)}
+    end)
+    |> Enum.reject(fn {_cat, modules} -> modules == [] end)
+    |> Map.new()
+  end
+
+  @doc """
+  Flat list of actions safe to expose as ordinary tools (no pipeline_internal).
+  """
+  @spec exposed_actions() :: [module()]
+  def exposed_actions do
+    list_exposed_actions()
+    |> Map.values()
+    |> List.flatten()
+  end
+
+  @doc """
+  Get exposed actions as LLM tool schemas (pipeline_internal excluded).
   """
   @spec all_tools() :: [map()]
   def all_tools do
-    all_actions()
+    exposed_actions()
     |> Enum.map(& &1.to_tool())
   end
 
   @doc """
-  Filter `all_actions/0` to the action modules the given agent has
-  capability to execute.
+  Filter exposed actions to modules the given agent has capability to execute.
 
   Used by the ACP runtime's tool exposure path (`Runtime.Acp`'s
   `tool_modules` checkout opt → `AcpPool.ToolServer`) so the CLI
@@ -1129,6 +1204,9 @@ defmodule Arbor.Actions do
   red-herring suggestions and pre-filtering at exposure time instead
   of relying on `authorize_and_execute/4` to reject every disallowed
   call after the fact.
+
+  Pipeline-internal actions are never exposed here even when capability
+  grants exist; Engine pinned execution still resolves them via registry.
 
   Exposure uses the read-only trust authority snapshot for each action's
   canonical base URI (parameterless form, e.g. `"arbor://fs/read"`). Held
@@ -1150,6 +1228,7 @@ defmodule Arbor.Actions do
         |> Enum.filter(&Arbor.Trust.effective_authority_entry?/1)
         |> Enum.flat_map(fn entry -> Map.get(uri_index, entry.uri, []) end)
         |> Enum.uniq()
+        |> Enum.reject(&pipeline_internal_action?/1)
 
       {:error, _reason} ->
         []
@@ -1157,7 +1236,9 @@ defmodule Arbor.Actions do
   end
 
   defp action_uri_index do
-    all_actions()
+    # Exposure index excludes pipeline_internal so capability grants alone
+    # cannot surface graph syscalls as ordinary tools.
+    exposed_actions()
     |> Enum.flat_map(fn action_module ->
       try do
         [{canonical_uri_for(action_module, %{}), action_module}]
