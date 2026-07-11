@@ -18,6 +18,9 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   @max_identifier_bytes 64
   @max_test_paths 256
   @max_output_list 2_000
+  # Aggregate test excerpts stay fixed-size regardless of affected-app count.
+  @max_aggregate_excerpt 2_000
+  @excerpt_omission_marker "\n...[omitted]...\n"
 
   @root_wide_exact MapSet.new([
                      "mix.exs",
@@ -56,6 +59,27 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
           test_paths: [String.t()],
           root_wide: boolean()
         }
+
+  @typedoc "One completed (or budget-exhausted) per-app test invocation record."
+  @type app_test_result :: %{
+          path: String.t(),
+          passed: boolean(),
+          timed_out: boolean(),
+          exit_code: integer() | nil,
+          reason: String.t() | nil,
+          stdout_excerpt: String.t(),
+          stderr_excerpt: String.t(),
+          stdout_truncated: boolean(),
+          stderr_truncated: boolean(),
+          stdout_sha256: String.t(),
+          stderr_sha256: String.t()
+        }
+
+  @typedoc "Pure decision for the next sequential app-test Mix invocation."
+  @type test_step ::
+          :complete
+          | {:run, String.t(), pos_integer(), [String.t()]}
+          | {:timeout, String.t(), [String.t()]}
 
   @doc "Construct and validate the action's deliberately narrow input surface."
   @spec new(map()) :: {:ok, input()} | {:error, atom()}
@@ -260,6 +284,200 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       "stdout_sha256" => sha256(""),
       "stderr_sha256" => sha256("")
     }
+  end
+
+  @doc """
+  Pure next-step decision for sequential per-app tests under a shared budget.
+
+  `remaining_ms` is computed by the shell from a single monotonic deadline for
+  the entire test stage. Returns:
+  - `:complete` when no paths remain
+  - `{:run, path, budget_ms, rest}` when budget remains
+  - `{:timeout, path, rest}` when budget is exhausted with paths left
+  """
+  @spec next_test_step(integer(), [String.t()]) :: test_step()
+  def next_test_step(_remaining_ms, []) do
+    :complete
+  end
+
+  def next_test_step(remaining_ms, [path | rest])
+      when is_integer(remaining_ms) and remaining_ms <= 0 and is_binary(path) do
+    {:timeout, path, rest}
+  end
+
+  def next_test_step(remaining_ms, [path | rest])
+      when is_integer(remaining_ms) and remaining_ms > 0 and is_binary(path) do
+    {:run, path, remaining_ms, rest}
+  end
+
+  def next_test_step(_, _), do: :complete
+
+  @doc """
+  Classify one Mix process result for a single app test path.
+
+  Deadline/process wall-clock work stays in the shell; this only maps feedback
+  into a pure per-app record. Timed-out processes are failures with
+  `tests_timed_out`; non-zero exits use the stable `tests_failed` reason.
+  """
+  @spec classify_app_test_result(String.t(), map(), keyword()) :: app_test_result()
+  def classify_app_test_result(path, feedback, opts \\ [])
+      when is_binary(path) and is_map(feedback) and is_list(opts) do
+    timed_out = Keyword.get(opts, :timed_out, false) == true
+    exit_code = Map.get(feedback, "exit_code") || Map.get(feedback, :exit_code)
+    raw_passed = Map.get(feedback, "passed") || Map.get(feedback, :passed) || false
+    passed = raw_passed == true and not timed_out and exit_code == 0
+
+    reason =
+      cond do
+        passed -> nil
+        timed_out -> "tests_timed_out"
+        true -> "tests_failed"
+      end
+
+    %{
+      path: path,
+      passed: passed,
+      timed_out: timed_out,
+      exit_code: exit_code,
+      reason: reason,
+      stdout_excerpt:
+        Map.get(feedback, "stdout_excerpt") || Map.get(feedback, :stdout_excerpt) || "",
+      stderr_excerpt:
+        Map.get(feedback, "stderr_excerpt") || Map.get(feedback, :stderr_excerpt) || "",
+      stdout_truncated:
+        Map.get(feedback, "stdout_truncated") || Map.get(feedback, :stdout_truncated) || false,
+      stderr_truncated:
+        Map.get(feedback, "stderr_truncated") || Map.get(feedback, :stderr_truncated) || false,
+      stdout_sha256:
+        Map.get(feedback, "stdout_sha256") || Map.get(feedback, :stdout_sha256) || sha256(""),
+      stderr_sha256:
+        Map.get(feedback, "stderr_sha256") || Map.get(feedback, :stderr_sha256) || sha256("")
+    }
+  end
+
+  @doc """
+  Deterministic record for an app path that was not started because the shared
+  test-stage budget was already exhausted.
+  """
+  @spec budget_exhausted_result(String.t()) :: app_test_result()
+  def budget_exhausted_result(path) when is_binary(path) do
+    message = "test stage budget exhausted before " <> path
+
+    %{
+      path: path,
+      passed: false,
+      timed_out: true,
+      exit_code: nil,
+      reason: "tests_timed_out",
+      stdout_excerpt: message,
+      stderr_excerpt: "",
+      stdout_truncated: false,
+      stderr_truncated: false,
+      stdout_sha256: sha256(message),
+      stderr_sha256: sha256("")
+    }
+  end
+
+  @doc """
+  Aggregate ordered per-app test results into the existing JSON-clean check shape.
+
+  Excerpts are path-labeled and re-bounded to a fixed size independent of app
+  count. Aggregate hashes are derived from each path plus that process's
+  stdout/stderr hashes so completed invocations remain covered without retaining
+  unbounded process output.
+  """
+  @spec aggregate_test_check([app_test_result()]) :: map()
+  def aggregate_test_check([]), do: empty_pass_check("no_existing_test_dirs")
+
+  def aggregate_test_check(app_results) when is_list(app_results) do
+    all_passed = Enum.all?(app_results, &(&1.passed == true))
+
+    reason =
+      cond do
+        all_passed -> nil
+        Enum.any?(app_results, &(&1.timed_out == true)) -> "tests_timed_out"
+        true -> "tests_failed"
+      end
+
+    exit_code =
+      cond do
+        all_passed ->
+          0
+
+        true ->
+          app_results
+          |> Enum.find(&(&1.passed != true))
+          |> case do
+            %{exit_code: code} -> code
+            _ -> nil
+          end
+      end
+
+    {stdout_excerpt, stdout_agg_truncated} =
+      bound_aggregate_excerpt(app_results, :stdout_excerpt)
+
+    {stderr_excerpt, stderr_agg_truncated} =
+      bound_aggregate_excerpt(app_results, :stderr_excerpt)
+
+    stdout_truncated =
+      stdout_agg_truncated or Enum.any?(app_results, &(&1.stdout_truncated == true))
+
+    stderr_truncated =
+      stderr_agg_truncated or Enum.any?(app_results, &(&1.stderr_truncated == true))
+
+    completed_check(
+      %{
+        "passed" => all_passed,
+        "exit_code" => exit_code,
+        "stdout_excerpt" => stdout_excerpt,
+        "stderr_excerpt" => stderr_excerpt,
+        "stdout_truncated" => stdout_truncated,
+        "stderr_truncated" => stderr_truncated,
+        "stdout_sha256" => aggregate_stream_hash(app_results, :stdout_sha256),
+        "stderr_sha256" => aggregate_stream_hash(app_results, :stderr_sha256)
+      },
+      reason: reason
+    )
+  end
+
+  @doc false
+  def max_aggregate_excerpt, do: @max_aggregate_excerpt
+
+  defp bound_aggregate_excerpt(app_results, field) do
+    text =
+      app_results
+      |> Enum.map(fn result ->
+        body = Map.get(result, field) || ""
+        "[" <> result.path <> "]\n" <> body
+      end)
+      |> Enum.join("\n")
+
+    if String.length(text) <= @max_aggregate_excerpt do
+      {text, false}
+    else
+      available = @max_aggregate_excerpt - String.length(@excerpt_omission_marker)
+      head_length = div(available, 2)
+      tail_length = available - head_length
+
+      bounded =
+        String.slice(text, 0, head_length) <>
+          @excerpt_omission_marker <>
+          String.slice(text, -tail_length, tail_length)
+
+      {bounded, true}
+    end
+  end
+
+  defp aggregate_stream_hash(app_results, field) do
+    material =
+      app_results
+      |> Enum.map(fn result ->
+        hash = Map.get(result, field) || sha256("")
+        result.path <> "\n" <> hash
+      end)
+      |> Enum.join("\n")
+
+    sha256(material)
   end
 
   defp validate_param_keys(params) do

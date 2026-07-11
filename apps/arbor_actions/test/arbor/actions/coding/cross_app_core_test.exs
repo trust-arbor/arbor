@@ -144,4 +144,173 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert evidence.affected_apps == ["alpha", "beta"]
     assert {:ok, _} = Jason.encode(evidence)
   end
+
+  test "next_test_step drives sequential one-path runs under a shared budget" do
+    assert :complete = Core.next_test_step(10_000, [])
+
+    assert {:run, "apps/alpha/test", 5_000, ["apps/beta/test"]} =
+             Core.next_test_step(5_000, ["apps/alpha/test", "apps/beta/test"])
+
+    assert {:timeout, "apps/beta/test", ["apps/gamma/test"]} =
+             Core.next_test_step(0, ["apps/beta/test", "apps/gamma/test"])
+
+    assert {:timeout, "apps/alpha/test", []} =
+             Core.next_test_step(-3, ["apps/alpha/test"])
+  end
+
+  test "classify_app_test_result preserves tests_failed vs tests_timed_out" do
+    pass =
+      Core.classify_app_test_result("apps/alpha/test", %{
+        "exit_code" => 0,
+        "passed" => true,
+        "stdout_excerpt" => "ok",
+        "stderr_excerpt" => "",
+        "stdout_truncated" => false,
+        "stderr_truncated" => false,
+        "stdout_sha256" => String.duplicate("1", 64),
+        "stderr_sha256" => String.duplicate("2", 64)
+      })
+
+    assert pass.passed
+    assert pass.reason == nil
+    refute pass.timed_out
+
+    fail =
+      Core.classify_app_test_result("apps/beta/test", %{
+        "exit_code" => 1,
+        "passed" => false,
+        "stdout_excerpt" => "1 failure",
+        "stderr_excerpt" => "",
+        "stdout_truncated" => false,
+        "stderr_truncated" => false,
+        "stdout_sha256" => String.duplicate("3", 64),
+        "stderr_sha256" => String.duplicate("4", 64)
+      })
+
+    refute fail.passed
+    assert fail.reason == "tests_failed"
+
+    timed =
+      Core.classify_app_test_result(
+        "apps/gamma/test",
+        %{
+          "exit_code" => 137,
+          "passed" => false,
+          "stdout_excerpt" => "partial",
+          "stderr_excerpt" => "",
+          "stdout_truncated" => false,
+          "stderr_truncated" => false,
+          "stdout_sha256" => String.duplicate("5", 64),
+          "stderr_sha256" => String.duplicate("6", 64)
+        },
+        timed_out: true
+      )
+
+    refute timed.passed
+    assert timed.timed_out
+    assert timed.reason == "tests_timed_out"
+  end
+
+  test "aggregate_test_check bounds excerpts, hashes paths+process digests, and keeps reasons stable" do
+    alpha =
+      Core.classify_app_test_result("apps/alpha/test", %{
+        "exit_code" => 0,
+        "passed" => true,
+        "stdout_excerpt" => "alpha-ok",
+        "stderr_excerpt" => "",
+        "stdout_truncated" => false,
+        "stderr_truncated" => false,
+        "stdout_sha256" => String.duplicate("a", 64),
+        "stderr_sha256" => String.duplicate("b", 64)
+      })
+
+    beta =
+      Core.classify_app_test_result("apps/beta/test", %{
+        "exit_code" => 1,
+        "passed" => false,
+        "stdout_excerpt" => "beta-fail",
+        "stderr_excerpt" => "err",
+        "stdout_truncated" => false,
+        "stderr_truncated" => false,
+        "stdout_sha256" => String.duplicate("c", 64),
+        "stderr_sha256" => String.duplicate("d", 64)
+      })
+
+    aggregated = Core.aggregate_test_check([alpha, beta])
+
+    refute aggregated["passed"]
+    assert aggregated["reason"] == "tests_failed"
+    assert aggregated["exit_code"] == 1
+    assert aggregated["status"] == "completed"
+    assert String.contains?(aggregated["stdout_excerpt"], "[apps/alpha/test]")
+    assert String.contains?(aggregated["stdout_excerpt"], "[apps/beta/test]")
+    assert String.contains?(aggregated["stdout_excerpt"], "beta-fail")
+    assert String.length(aggregated["stdout_excerpt"]) <= Core.max_aggregate_excerpt()
+    refute aggregated["stdout_truncated"]
+
+    expected_stdout_hash =
+      :crypto.hash(
+        :sha256,
+        "apps/alpha/test\n" <>
+          String.duplicate("a", 64) <>
+          "\n" <>
+          "apps/beta/test\n" <> String.duplicate("c", 64)
+      )
+      |> Base.encode16(case: :lower)
+
+    assert aggregated["stdout_sha256"] == expected_stdout_hash
+
+    expected_stderr_hash =
+      :crypto.hash(
+        :sha256,
+        "apps/alpha/test\n" <>
+          String.duplicate("b", 64) <>
+          "\n" <>
+          "apps/beta/test\n" <> String.duplicate("d", 64)
+      )
+      |> Base.encode16(case: :lower)
+
+    assert aggregated["stderr_sha256"] == expected_stderr_hash
+
+    # Deterministic: same inputs → same aggregate
+    assert Core.aggregate_test_check([alpha, beta]) == aggregated
+
+    # Over-budget combined excerpts are re-bounded independent of app count;
+    # per-process hashes still cover every completed path.
+    huge_alpha = %{alpha | stdout_excerpt: String.duplicate("A", 1_500), stdout_truncated: true}
+    huge_beta = %{beta | stdout_excerpt: String.duplicate("B", 1_500)}
+    truncated = Core.aggregate_test_check([huge_alpha, huge_beta])
+    assert String.length(truncated["stdout_excerpt"]) <= Core.max_aggregate_excerpt()
+    assert truncated["stdout_truncated"] == true
+    assert truncated["stdout_sha256"] == expected_stdout_hash
+    assert String.contains?(truncated["stdout_excerpt"], "...[omitted]...")
+
+    exhausted = Core.budget_exhausted_result("apps/gamma/test")
+    timed_out = Core.aggregate_test_check([alpha, exhausted])
+    refute timed_out["passed"]
+    assert timed_out["reason"] == "tests_timed_out"
+    assert String.contains?(timed_out["stdout_excerpt"], "apps/gamma/test")
+    assert String.contains?(timed_out["stdout_excerpt"], "budget exhausted")
+
+    all_pass = Core.aggregate_test_check([alpha])
+    assert all_pass["passed"]
+    assert all_pass["reason"] == nil
+    assert all_pass["exit_code"] == 0
+
+    assert Core.aggregate_test_check([])["reason"] == "no_existing_test_dirs"
+    assert Core.aggregate_test_check([])["passed"]
+  end
+
+  test "downstream selection is unchanged by per-app test aggregation helpers" do
+    assert {:ok, graph} =
+             Core.build_graph([
+               %{dir: "alpha", app: "alpha", deps: []},
+               %{dir: "beta", app: "beta", deps: ["alpha"]},
+               %{dir: "gamma", app: "gamma", deps: ["beta"]}
+             ])
+
+    assert {:ok, selection} = Core.select(["apps/alpha/lib/alpha.ex"], graph)
+    assert selection.affected_apps == ["alpha", "beta", "gamma"]
+    assert selection.test_paths == ["apps/alpha/test", "apps/beta/test", "apps/gamma/test"]
+  end
 end

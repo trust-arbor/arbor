@@ -6,6 +6,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   base through the dirty worktree (including untracked), parses candidate
   `apps/*/mix.exs` files as AST, selects the downstream app closure, and runs
   compile → xref → focused tests via `Arbor.Actions.Mix.run_mix/3`.
+
+  Affected-app tests run **sequentially**, one existing app test directory per
+  fresh Mix process, under a single monotonic budget equal to the action's
+  validated timeout for the test stage (not N× timeout).
   """
 
   alias Arbor.Actions.Coding.CrossApp.Core
@@ -25,6 +29,14 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   end
 
   def run(_input, _context), do: {:error, :invalid_cross_app_input}
+
+  @doc false
+  # Test seam: sequential per-app test stage under a shared monotonic budget.
+  @spec run_app_tests(String.t(), [String.t()], pos_integer()) :: map()
+  def run_app_tests(worktree_path, test_paths, timeout)
+      when is_binary(worktree_path) and is_list(test_paths) and is_integer(timeout) do
+    run_tests(worktree_path, test_paths, timeout)
+  end
 
   defp do_run(input, context) do
     with {:ok, lease} <- resolve_lease(input.workspace_id, context),
@@ -174,7 +186,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   end
 
   defp run_compile(path, timeout) do
-    case MixAction.run_mix(path, ["compile", "--warnings-as-errors"], timeout: timeout) do
+    case run_mix(path, ["compile", "--warnings-as-errors"], timeout: timeout) do
       {:ok, result} ->
         Core.completed_check(MixAction.compile_feedback(result))
 
@@ -186,7 +198,7 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
   defp run_xref(path, timeout) do
     # Evidence only — do not pass --fail-above; this repository has baseline
     # compile-connected cycles. Zero-cycle validation is not claimed.
-    case MixAction.run_mix(path, ["xref", "graph"], timeout: timeout) do
+    case run_mix(path, ["xref", "graph"], timeout: timeout) do
       {:ok, result} ->
         Core.completed_check(MixAction.compile_feedback(result),
           reason: if(result.exit_code == 0, do: nil, else: "xref_failed")
@@ -203,23 +215,64 @@ defmodule Arbor.Actions.Coding.CrossApp.Shell do
 
   defp run_tests(path, test_paths, timeout) when is_list(test_paths) do
     # Only pass existing test directories so mix does not fail on missing paths
-    # for apps that declare no tests yet.
+    # for apps that declare no tests yet. Preserve selection order.
     existing =
       Enum.filter(test_paths, fn rel -> File.dir?(Path.join(path, rel)) end)
 
     if existing == [] do
       Core.empty_pass_check("no_existing_test_dirs")
     else
-      case MixAction.run_mix(path, ["test" | existing], timeout: timeout) do
-        {:ok, result} ->
-          Core.completed_check(MixAction.compile_feedback(result),
-            reason: if(result.exit_code == 0, do: nil, else: "tests_failed")
-          )
-
-        {:error, reason} ->
-          throw({:execution_error, {:test_execution_failed, reason}})
-      end
+      # One shared monotonic budget for the whole test stage — not N× timeout.
+      deadline = monotonic_ms() + timeout
+      run_tests_sequential(path, existing, deadline, [])
     end
+  end
+
+  defp run_tests_sequential(worktree_path, remaining_paths, deadline, acc) do
+    remaining_ms = deadline - monotonic_ms()
+
+    case Core.next_test_step(remaining_ms, remaining_paths) do
+      :complete ->
+        Core.aggregate_test_check(Enum.reverse(acc))
+
+      {:timeout, path, _rest} ->
+        Core.aggregate_test_check(Enum.reverse([Core.budget_exhausted_result(path) | acc]))
+
+      {:run, path, budget_ms, rest} ->
+        case run_mix(worktree_path, ["test", path], timeout: budget_ms) do
+          {:ok, result} ->
+            timed_out = Map.get(result, :timed_out, false) == true
+
+            app_result =
+              Core.classify_app_test_result(path, MixAction.compile_feedback(result),
+                timed_out: timed_out
+              )
+
+            # Stop after first failed/timed-out app — overall result is failed.
+            if app_result.passed do
+              run_tests_sequential(worktree_path, rest, deadline, [app_result | acc])
+            else
+              Core.aggregate_test_check(Enum.reverse([app_result | acc]))
+            end
+
+          {:error, reason} ->
+            throw({:execution_error, {:test_execution_failed, reason}})
+        end
+    end
+  end
+
+  defp run_mix(path, args, opts) do
+    runner = Application.get_env(:arbor_actions, :cross_app_mix_runner, &MixAction.run_mix/3)
+    runner.(path, args, opts)
+  end
+
+  defp monotonic_ms do
+    clock =
+      Application.get_env(:arbor_actions, :cross_app_monotonic_ms, fn ->
+        System.monotonic_time(:millisecond)
+      end)
+
+    clock.()
   end
 
   defp git(path, args) do
