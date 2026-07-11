@@ -67,7 +67,12 @@ defmodule Arbor.LLM.Adapter.LmStudioTest do
             ]
           })
 
-        {request, Req.Response.new(status: 200, body: body)}
+        {request,
+         Req.Response.new(
+           status: 200,
+           headers: [{"content-type", "application/json"}],
+           body: body
+         )}
       end
     )
 
@@ -132,6 +137,10 @@ defmodule Arbor.LLM.Adapter.LmStudioTest do
           "http://localhost:1234/v1?next=/evil",
           "http://localhost:1234/v1#fragment",
           "http://localhost:99999/v1",
+          "http://localhost:abc/v1",
+          "http://localhost:/v1",
+          "http://[::1]x/v1",
+          "http://localhost:80:90/v1",
           "http://bad host:1234/v1",
           "http://localhost:1234/other"
         ] do

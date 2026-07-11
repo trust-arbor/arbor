@@ -417,79 +417,257 @@ defmodule Arbor.LLM.Client do
   @spec collect_stream(Enumerable.t()) :: {:ok, Response.t()} | {:error, term()}
   def collect_stream(events) do
     result =
-      Enum.reduce(
+      Enum.reduce_while(
         events,
-        %{text: "", finish_reason: :other, warnings: [], tool_calls: [], usage: nil},
+        %{
+          text_chunks: [],
+          text_bytes: 0,
+          event_count: 0,
+          term_bytes: 0,
+          term_nodes: 0,
+          term_map_keys: 0,
+          term_list_items: 0,
+          finish_reason: :other,
+          warnings: [],
+          warning_count: 0,
+          tool_calls: [],
+          tool_call_count: 0,
+          usage: nil
+        },
         fn event, acc ->
-          case normalize_event(event) do
-            %StreamEvent{type: :delta, data: %{"text" => chunk}} ->
-              %{acc | text: acc.text <> to_string(chunk)}
+          event_count = acc.event_count + 1
 
-            %StreamEvent{type: :delta, data: %{text: chunk}} ->
-              %{acc | text: acc.text <> to_string(chunk)}
+          if event_count > 100_000 do
+            {:halt, {:error, {:stream_limit_exceeded, :events, 100_000}}}
+          else
+            with {:ok, acc} <- account_stream_event(event, %{acc | event_count: event_count}) do
+              case normalize_event(event) do
+                %StreamEvent{type: :delta, data: %{"text" => chunk}} ->
+                  collect_text_chunk(chunk, acc)
 
-            %StreamEvent{type: :tool_call, data: data} ->
-              # translate_stream_chunk emits ATOM keys (%{name:, arguments:});
-              # other sources may use string keys. Reading only "name"/"id"
-              # dropped the streamed tool-call name → empty-named calls →
-              # "Unknown action:" → tool-loop spiral. Read atom keys first.
-              part =
-                ContentPart.tool_call(
-                  data[:id] || data["id"] || "",
-                  data[:name] || data["name"] || "",
-                  decode_tool_args(data[:arguments] || data["arguments"])
-                )
+                %StreamEvent{type: :delta, data: %{text: chunk}} ->
+                  collect_text_chunk(chunk, acc)
 
-              %{acc | tool_calls: acc.tool_calls ++ [part]}
+                %StreamEvent{type: :tool_call, data: data}
+                when is_map(data) and acc.tool_call_count < 10_000 ->
+                  case build_stream_tool_call(data) do
+                    {:ok, part} ->
+                      {:cont,
+                       %{
+                         acc
+                         | tool_calls: [part | acc.tool_calls],
+                           tool_call_count: acc.tool_call_count + 1
+                       }}
 
-            %StreamEvent{type: :finish, data: data} ->
-              usage = Map.get(data, :usage, Map.get(data, "usage"))
+                    {:error, reason} ->
+                      {:halt, {:error, reason}}
+                  end
 
-              %{
-                acc
-                | finish_reason: Map.get(data, :reason, Map.get(data, "reason", :stop)),
-                  usage: usage || acc.usage
-              }
+                %StreamEvent{type: :tool_call} ->
+                  {:halt, {:error, {:stream_limit_exceeded, :tool_calls, 10_000}}}
 
-            %StreamEvent{type: :error, data: data} ->
-              %{acc | warnings: acc.warnings ++ [inspect(data)]}
+                %StreamEvent{type: :finish, data: data} when is_map(data) ->
+                  case bounded_finish_fields(data) do
+                    {:ok, reason, usage} ->
+                      {:cont,
+                       %{
+                         acc
+                         | finish_reason: reason,
+                           usage: usage || acc.usage
+                       }}
 
-            _ ->
-              acc
+                    {:error, reason} ->
+                      {:halt, {:error, reason}}
+                  end
+
+                %StreamEvent{type: :error, data: data} when acc.warning_count < 1_000 ->
+                  warning = inspect(data, limit: 20, printable_limit: 512)
+
+                  {:cont,
+                   %{
+                     acc
+                     | warnings: [warning | acc.warnings],
+                       warning_count: acc.warning_count + 1
+                   }}
+
+                %StreamEvent{type: :error} ->
+                  {:halt, {:error, {:stream_limit_exceeded, :warnings, 1_000}}}
+
+                _ ->
+                  {:cont, acc}
+              end
+            else
+              {:error, reason} -> {:halt, {:error, reason}}
+            end
           end
         end
       )
 
-    text_parts = if result.text != "", do: [ContentPart.text(result.text)], else: []
-    content_parts = text_parts ++ result.tool_calls
+    with %{} = result <- result do
+      text = result.text_chunks |> Enum.reverse() |> IO.iodata_to_binary()
+      tool_calls = Enum.reverse(result.tool_calls)
+      warnings = Enum.reverse(result.warnings)
+      text_parts = if text != "", do: [ContentPart.text(text)], else: []
+      content_parts = text_parts ++ tool_calls
 
-    finish_reason =
-      cond do
-        result.tool_calls != [] and result.finish_reason == :other -> :tool_calls
-        true -> result.finish_reason
-      end
+      finish_reason =
+        cond do
+          tool_calls != [] and result.finish_reason == :other -> :tool_calls
+          true -> result.finish_reason
+        end
 
-    {:ok,
-     %Response{
-       text: result.text,
-       finish_reason: finish_reason,
-       content_parts: content_parts,
-       warnings: result.warnings,
-       usage: result.usage
-     }}
+      {:ok,
+       %Response{
+         text: text,
+         finish_reason: finish_reason,
+         content_parts: content_parts,
+         warnings: warnings,
+         usage: result.usage
+       }}
+    else
+      {:error, _reason} = error -> error
+    end
   rescue
     exception -> {:error, exception}
   end
 
-  defp decode_tool_args(args) when is_binary(args) do
-    case Jason.decode(args) do
-      {:ok, map} when is_map(map) -> map
-      _ -> %{"raw" => args}
+  defp collect_text_chunk(chunk, acc) when is_binary(chunk) do
+    bytes = acc.text_bytes + byte_size(chunk)
+
+    if bytes <= 16_777_216,
+      do: {:cont, %{acc | text_chunks: [chunk | acc.text_chunks], text_bytes: bytes}},
+      else: {:halt, {:error, {:stream_limit_exceeded, :text_bytes, 16_777_216}}}
+  end
+
+  defp collect_text_chunk(_chunk, _acc), do: {:halt, {:error, :binary_stream_text_required}}
+
+  defp account_stream_event(event, acc) do
+    limits = [
+      max_bytes: 1_048_576,
+      max_nodes: 10_000,
+      max_depth: 32,
+      max_map_keys: 2_000,
+      max_list_items: 10_000
+    ]
+
+    with {:ok, measurements} <- Arbor.LLM.ResponseBudget.measure(event, limits) do
+      bytes = acc.term_bytes + measurements.bytes
+      nodes = acc.term_nodes + measurements.nodes
+      map_keys = acc.term_map_keys + measurements.map_keys
+      list_items = acc.term_list_items + measurements.list_items
+
+      cond do
+        bytes > 16_777_216 ->
+          {:error, {:stream_limit_exceeded, :retained_bytes, 16_777_216}}
+
+        nodes > 100_000 ->
+          {:error, {:stream_limit_exceeded, :retained_nodes, 100_000}}
+
+        map_keys > 10_000 ->
+          {:error, {:stream_limit_exceeded, :retained_map_keys, 10_000}}
+
+        list_items > 100_000 ->
+          {:error, {:stream_limit_exceeded, :retained_list_items, 100_000}}
+
+        true ->
+          {:ok,
+           %{
+             acc
+             | term_bytes: bytes,
+               term_nodes: nodes,
+               term_map_keys: map_keys,
+               term_list_items: list_items
+           }}
+      end
+    else
+      {:error, reason} -> {:error, {:invalid_stream_event, reason}}
     end
   end
 
-  defp decode_tool_args(args) when is_map(args), do: args
-  defp decode_tool_args(_), do: %{}
+  defp build_stream_tool_call(data) do
+    id = data[:id] || data["id"] || ""
+    name = data[:name] || data["name"] || ""
+    arguments = data[:arguments] || data["arguments"] || %{}
+
+    with :ok <- bounded_tool_string(id, :id, 512, true),
+         :ok <- bounded_tool_string(name, :name, 512, false),
+         {:ok, arguments} <- decode_tool_args(arguments) do
+      {:ok, ContentPart.tool_call(id, name, arguments)}
+    end
+  end
+
+  defp bounded_tool_string(value, _field, maximum, allow_empty?)
+       when is_binary(value) and byte_size(value) <= maximum do
+    cond do
+      not String.valid?(value) -> {:error, :valid_utf8_required}
+      value == "" and not allow_empty? -> {:error, :non_empty_tool_name_required}
+      true -> :ok
+    end
+  end
+
+  defp bounded_tool_string(_value, field, maximum, _allow_empty?),
+    do: {:error, {:invalid_tool_call_field, field, {:bounded_string_required, maximum}}}
+
+  defp bounded_finish_fields(data) do
+    reason = Map.get(data, :reason, Map.get(data, "reason", :stop))
+    usage = Map.get(data, :usage, Map.get(data, "usage"))
+
+    with :ok <- validate_finish_reason(reason),
+         :ok <- validate_finish_usage(usage) do
+      {:ok, reason, usage}
+    end
+  end
+
+  defp validate_finish_reason(reason) when is_atom(reason), do: :ok
+
+  defp validate_finish_reason(reason) when is_binary(reason) and byte_size(reason) <= 64 do
+    if String.valid?(reason), do: :ok, else: {:error, :invalid_finish_reason}
+  end
+
+  defp validate_finish_reason(_reason), do: {:error, :invalid_finish_reason}
+
+  defp validate_finish_usage(nil), do: :ok
+
+  defp validate_finish_usage(usage) when is_map(usage) do
+    Arbor.LLM.ResponseBudget.validate(usage,
+      max_bytes: 1_048_576,
+      max_nodes: 10_000,
+      max_depth: 16,
+      max_map_keys: 2_000,
+      max_list_items: 10_000
+    )
+  end
+
+  defp validate_finish_usage(_usage), do: {:error, :invalid_finish_usage}
+
+  defp decode_tool_args(args) when is_binary(args) do
+    case Arbor.LLM.ResponseBudget.decode_json(args,
+           max_bytes: 1_048_576,
+           max_nodes: 10_000,
+           max_depth: 32,
+           max_map_keys: 2_000,
+           max_list_items: 10_000
+         ) do
+      {:ok, map} when is_map(map) -> {:ok, map}
+      {:ok, _other} -> {:error, :tool_arguments_must_be_map}
+      {:error, reason} -> {:error, {:invalid_tool_arguments, reason}}
+    end
+  end
+
+  defp decode_tool_args(args) when is_map(args) do
+    case Arbor.LLM.ResponseBudget.validate(args,
+           max_bytes: 1_048_576,
+           max_nodes: 10_000,
+           max_depth: 32,
+           max_map_keys: 2_000,
+           max_list_items: 10_000
+         ) do
+      :ok -> {:ok, args}
+      {:error, reason} -> {:error, {:invalid_tool_arguments, reason}}
+    end
+  end
+
+  defp decode_tool_args(_args), do: {:error, :tool_arguments_must_be_map_or_json}
 
   defp normalize_event(%StreamEvent{} = event), do: event
   defp normalize_event(%{type: type, data: data}), do: %StreamEvent{type: type, data: data}

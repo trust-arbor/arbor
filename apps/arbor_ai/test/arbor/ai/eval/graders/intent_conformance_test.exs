@@ -266,8 +266,8 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
         "error_handling": 9,
         "handler_types": 9,
         "prompt_relevance": 9,
-        "overall": 9,
-        "brief_rationale": "#{huge_integer}"
+        "overall": #{huge_integer},
+        "brief_rationale": "out of range"
       }
       """
 
@@ -279,6 +279,35 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
 
     assert result.score == 0.0
     refute result.passed
-    assert result.detail =~ "exact_unit_score_required"
+    assert result.detail =~ "JSON parse error"
+  end
+
+  test "security regression: lexical score validation rejects float rounding aliases" do
+    base = """
+    {
+      "phase_coverage": 1,
+      "decision_fidelity": 1,
+      "loop_correctness": 1,
+      "error_handling": 1,
+      "handler_types": 1,
+      "prompt_relevance": 1,
+      "overall": SCORE,
+      "brief_rationale": "lexical"
+    }
+    """
+
+    for score <- ["1.0000000000000000001", "-1e-999"] do
+      response = String.replace(base, "SCORE", score)
+
+      result =
+        IntentConformance.grade("digraph {}", nil,
+          sample_input: "A workflow",
+          judge_fn: fn _, _, _, _, _ -> {:ok, response} end
+        )
+
+      assert result.score == 0.0
+      refute result.passed
+      assert result.detail =~ "exact_unit_score_required"
+    end
   end
 end

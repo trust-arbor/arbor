@@ -16,11 +16,18 @@ defmodule Arbor.LLM.Adapter.LmStudio do
 
   @behaviour Arbor.LLM.ProviderAdapter
 
-  alias Arbor.LLM.{ContentPart, Request, Response, ResponseBudget}
+  alias Arbor.LLM.{ContentPart, Endpoint, Request, Response, ResponseBudget}
 
   @provider "lm_studio_owned"
   # llama.cpp/LM Studio sampling knobs that live top-level in the chat-completions body.
   @extra_sampling_keys ~w(top_k min_p repeat_penalty repetition_penalty presence_penalty frequency_penalty)
+  @tool_argument_limits [
+    max_bytes: 1_048_576,
+    max_nodes: 10_000,
+    max_depth: 32,
+    max_map_keys: 2_000,
+    max_list_items: 10_000
+  ]
 
   @impl true
   def provider, do: @provider
@@ -212,41 +219,9 @@ defmodule Arbor.LLM.Adapter.LmStudio do
   defp chat_url do
     base = Application.get_env(:arbor_llm, :lm_studio_base_url, "http://localhost:1234/v1")
 
-    case validate_base_url(base) do
+    case Endpoint.validate(base, :lm_studio) do
       {:ok, canonical} -> {:ok, canonical <> "/chat/completions"}
       {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp validate_base_url(base) when is_binary(base) and byte_size(base) <= 4_096 do
-    uri = URI.parse(base)
-
-    cond do
-      uri.scheme not in ["http", "https"] -> {:error, :http_scheme_required}
-      not is_binary(uri.host) or uri.host == "" -> {:error, :host_required}
-      not valid_host?(uri.host) -> {:error, :valid_host_required}
-      not is_nil(uri.userinfo) -> {:error, :userinfo_forbidden}
-      not is_nil(uri.query) -> {:error, :query_forbidden}
-      not is_nil(uri.fragment) -> {:error, :fragment_forbidden}
-      not is_nil(uri.port) and uri.port not in 1..65_535 -> {:error, :valid_port_required}
-      uri.path not in [nil, "", "/", "/v1", "/v1/"] -> {:error, :base_path_must_be_v1}
-      true -> {:ok, URI.to_string(%{uri | path: "/v1", query: nil, fragment: nil})}
-    end
-  end
-
-  defp validate_base_url(_base), do: {:error, :bounded_string_required}
-
-  defp valid_host?(host) do
-    case :inet.parse_address(String.to_charlist(host)) do
-      {:ok, _address} ->
-        true
-
-      {:error, _reason} ->
-        byte_size(host) <= 253 and
-          Regex.match?(
-            ~r/^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$/,
-            host
-          )
     end
   end
 
@@ -258,7 +233,7 @@ defmodule Arbor.LLM.Adapter.LmStudio do
   defp encode_args(_), do: "{}"
 
   defp decode_args(args) when is_binary(args) do
-    case Jason.decode(args) do
+    case ResponseBudget.decode_json(args, @tool_argument_limits) do
       {:ok, m} when is_map(m) -> m
       _ -> %{}
     end

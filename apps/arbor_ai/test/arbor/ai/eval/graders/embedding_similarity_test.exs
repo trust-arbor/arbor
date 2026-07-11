@@ -94,6 +94,16 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
       assert result.score == 0.0
       refute result.passed
       assert result.detail =~ "numeric_vector_required"
+
+      improper = [1.0 | 2.0]
+
+      improper_result =
+        EmbeddingSimilarity.grade("actual", "expected",
+          embed_fn: fn _, _, _, _ -> {:ok, [improper, [1.0]]} end
+        )
+
+      refute improper_result.passed
+      assert improper_result.detail =~ "proper_vector_required"
     end
 
     test "security regression: oversized invalid embedding ingress never reaches callback" do
@@ -119,6 +129,10 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
             "http://embedding.test/v1/embeddings?next=/evil",
             "http://embedding.test/v1/embeddings#fragment",
             "http://embedding.test:99999/v1/embeddings",
+            "http://embedding.test:abc/v1/embeddings",
+            "http://embedding.test:/v1/embeddings",
+            "http://[::1]x/v1/embeddings",
+            "http://embedding.test:80:90/v1/embeddings",
             "http://bad host/v1/embeddings",
             "http://embedding.test/other"
           ] do

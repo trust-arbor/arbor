@@ -236,14 +236,14 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
       |> String.replace(~r/<think>.*?<\/think>/s, "")
       |> extract_json()
 
-    case Arbor.LLM.decode_bounded_json(json, @judge_term_limits) do
-      {:ok, scores} when is_map(scores) -> build_result(scores)
+    case Arbor.LLM.decode_bounded_json_numbers(json, @judge_term_limits, @score_keys) do
+      {:ok, scores, lexemes} when is_map(scores) -> build_result(scores, lexemes)
       _error -> parse_failure(text)
     end
   end
 
-  defp build_result(scores) do
-    with {:ok, normalized} <- validate_scores(scores) do
+  defp build_result(scores, lexemes) do
+    with {:ok, normalized} <- validate_scores(scores, lexemes) do
       dimensions = %{
         phase_coverage: normalized["phase_coverage"],
         decision_fidelity: normalized["decision_fidelity"],
@@ -289,23 +289,25 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
     end
   end
 
-  defp validate_scores(scores) do
+  defp validate_scores(scores, lexemes) do
     Enum.reduce_while(@score_keys, {:ok, %{}}, fn key, {:ok, acc} ->
-      case unit_score(Map.get(scores, key)) do
+      case unit_score(Map.get(scores, key), Map.get(lexemes, key)) do
         {:ok, value} -> {:cont, {:ok, Map.put(acc, key, value)}}
         :error -> {:halt, {:error, {:exact_unit_score_required, key}}}
       end
     end)
   end
 
-  defp unit_score(0), do: {:ok, 0.0}
-  defp unit_score(1), do: {:ok, 1.0}
+  defp unit_score(0, lexeme) when lexeme in ["0", "0.0"], do: {:ok, 0.0}
+  defp unit_score(1, lexeme) when lexeme in ["1", "1.0"], do: {:ok, 1.0}
 
-  defp unit_score(value)
-       when is_float(value) and value >= 0.0 and value <= 1.0,
-       do: {:ok, value}
+  defp unit_score(value, lexeme) when is_number(value) and is_binary(lexeme) do
+    if Arbor.LLM.exact_unit_number?(lexeme) and Arbor.LLM.finite_number?(value),
+      do: {:ok, value * 1.0},
+      else: :error
+  end
 
-  defp unit_score(_value), do: :error
+  defp unit_score(_value, _lexeme), do: :error
 
   defp format_score(value), do: value |> Float.round(2) |> to_string()
 

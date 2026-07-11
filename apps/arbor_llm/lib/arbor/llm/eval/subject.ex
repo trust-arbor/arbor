@@ -298,7 +298,7 @@ defmodule Arbor.LLM.Eval.Subject do
           ref,
           transport,
           request,
-          limits.timeout,
+          limits,
           @max_stream_event_bytes
         )
       end)
@@ -335,8 +335,13 @@ defmodule Arbor.LLM.Eval.Subject do
     end)
   end
 
-  defp produce_stream(parent, ref, transport, request, timeout, max_event_bytes) do
-    case stream(transport, request, receive_timeout: timeout) do
+  defp produce_stream(parent, ref, transport, request, limits, max_event_bytes) do
+    case stream(transport, request,
+           receive_timeout: limits.timeout,
+           max_response_bytes: limits.max_output_bytes,
+           max_stream_events: limits.max_stream_events,
+           max_stream_event_bytes: min(max_event_bytes, limits.max_output_bytes)
+         ) do
       {:ok, events} ->
         Enum.reduce_while(events, :ok, fn event, :ok ->
           case validate_stream_event_term(event, max_event_bytes) do
@@ -462,7 +467,22 @@ defmodule Arbor.LLM.Eval.Subject do
     send(state.producer_pid, {state.ref, :stop})
 
     if Process.alive?(state.producer_pid) do
-      Process.exit(state.producer_pid, :kill)
+      receive do
+        {:DOWN, monitor_ref, :process, producer_pid, _reason}
+        when monitor_ref == state.monitor_ref and producer_pid == state.producer_pid ->
+          :ok
+      after
+        1_500 ->
+          if Process.alive?(state.producer_pid), do: Process.exit(state.producer_pid, :kill)
+
+          receive do
+            {:DOWN, monitor_ref, :process, producer_pid, _reason}
+            when monitor_ref == state.monitor_ref and producer_pid == state.producer_pid ->
+              :ok
+          after
+            1_000 -> :ok
+          end
+      end
     end
 
     Process.demonitor(state.monitor_ref, [:flush])

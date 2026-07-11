@@ -125,6 +125,83 @@ defmodule Arbor.LLM.HighLevelApiTest do
     end
   end
 
+  defmodule HostileOwnedAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+
+    @impl true
+    def provider, do: "hostile-owned"
+
+    @impl true
+    def complete(_request, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def stream(%Request{provider_options: options}, _opts) do
+      owner = Map.fetch!(options, :test_pid)
+
+      producer =
+        spawn(fn ->
+          send(owner, {:hostile_source_started, self()})
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      %Arbor.LLM.OwnedStream{
+        stream: Stream.repeatedly(fn -> %StreamEvent{type: :delta, data: %{text: "x"}} end),
+        producer: producer,
+        cancel: fn ->
+          send(owner, :hostile_cancel_called)
+          raise "hostile cancel"
+        end
+      }
+    end
+  end
+
+  defmodule ObjectBoundaryAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+
+    @impl true
+    def provider, do: "object-boundary"
+
+    @impl true
+    def complete(_request, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def stream(%Request{model: model}, _opts) do
+      case model do
+        "object-bytes" ->
+          [%StreamEvent{type: :delta, data: %{text: String.duplicate("x", 1_048_577)}}]
+
+        "object-events" ->
+          Stream.repeatedly(fn -> %StreamEvent{type: :start, data: %{}} end)
+          |> Stream.take(10_001)
+
+        "object-depth" ->
+          body = ~s({"value":) <> String.duplicate("[", 33)
+          [%StreamEvent{type: :delta, data: %{text: body}}]
+
+        "object-multiple" ->
+          [%StreamEvent{type: :delta, data: %{text: "{}{}"}}]
+
+        "object-malformed" ->
+          [%StreamEvent{type: :delta, data: %{text: "{]"}}]
+
+        "object-linear" ->
+          spaces =
+            Stream.repeatedly(fn ->
+              %StreamEvent{type: :delta, data: %{text: String.duplicate(" ", 100)}}
+            end)
+            |> Stream.take(9_998)
+
+          Stream.concat(spaces, [
+            %StreamEvent{type: :delta, data: %{text: ~s({"ok":true})}},
+            %StreamEvent{type: :finish, data: %{reason: :stop}}
+          ])
+      end
+    end
+  end
+
   defmodule SlowToolLoopAdapter do
     @behaviour Arbor.LLM.ProviderAdapter
 
@@ -315,6 +392,56 @@ defmodule Arbor.LLM.HighLevelApiTest do
     assert_raise NoObjectGeneratedError, fn -> Enum.to_list(object_stream) end
   end
 
+  test "security regression: stream_object enforces byte, event, depth, and grammar bounds" do
+    client =
+      Client.new(
+        adapters: %{"object-boundary" => ObjectBoundaryAdapter},
+        default_provider: "object-boundary"
+      )
+
+    for {model, expected_reason} <- [
+          {"object-bytes", {:object_stream_limit_exceeded, :bytes, 1_048_576}},
+          {"object-events", {:object_stream_limit_exceeded, :events, 10_000}},
+          {"object-depth", {:object_stream_limit_exceeded, :depth, 32}},
+          {"object-multiple", :multiple_object_stream_values},
+          {"object-malformed", :malformed_object_stream_json}
+        ] do
+      assert {:ok, object_stream} =
+               LLM.stream_object(
+                 client: client,
+                 provider: "object-boundary",
+                 model: model,
+                 prompt: "hi"
+               )
+
+      error =
+        assert_raise NoObjectGeneratedError, fn ->
+          Enum.to_list(object_stream)
+        end
+
+      assert error.reason == expected_reason
+    end
+  end
+
+  test "security regression: stream_object processes thousands of tiny chunks linearly" do
+    client =
+      Client.new(
+        adapters: %{"object-boundary" => ObjectBoundaryAdapter},
+        default_provider: "object-boundary"
+      )
+
+    assert {:ok, object_stream} =
+             LLM.stream_object(
+               client: client,
+               provider: "object-boundary",
+               model: "object-linear",
+               prompt: "hi"
+             )
+
+    task = Task.async(fn -> Enum.to_list(object_stream) end)
+    assert {:ok, [%{"ok" => true}]} = Task.yield(task, 2_000)
+  end
+
   test "generate_object returns NoObjectGeneratedError on invalid json output" do
     client =
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
@@ -459,6 +586,33 @@ defmodule Arbor.LLM.HighLevelApiTest do
         idx + 1
       end)
     end
+  end
+
+  test "security regression: hostile owned cancel cannot skip producer teardown" do
+    client =
+      Client.new(
+        adapters: %{"hostile-owned" => HostileOwnedAdapter},
+        default_provider: "hostile-owned"
+      )
+
+    assert {:ok, stream} =
+             LLM.stream(
+               client: client,
+               provider: "hostile-owned",
+               model: "hostile",
+               prompt: "hi",
+               provider_options: %{test_pid: self()},
+               stream_read_timeout_ms: 1_000
+             )
+
+    assert_receive {:hostile_source_started, producer}
+    producer_monitor = Process.monitor(producer)
+    started = System.monotonic_time(:millisecond)
+    assert [%StreamEvent{type: :delta}] = Enum.take(stream, 1)
+    assert System.monotonic_time(:millisecond) - started < 1_000
+    assert_receive :hostile_cancel_called
+    assert_receive {:DOWN, ^producer_monitor, :process, ^producer, :killed}
+    refute Process.alive?(producer)
   end
 
   test "generate_object preserves upstream generation errors" do

@@ -21,6 +21,14 @@ defmodule Arbor.LLM do
     "llm" => Arbor.LLM.Eval.Subject
   }
 
+  @controlled_cleanup_grace_ms 100
+  @controlled_cleanup_kill_wait_ms 1_000
+  @controlled_cancel_callback_ms 1_250
+  @max_object_stream_bytes 1_048_576
+  @max_object_stream_events 10_000
+  @max_object_stream_depth 32
+  @max_object_decode_attempts 1
+
   @type generate_opts :: keyword()
 
   @doc "Returns an LLM-owned eval subject from the closed symbolic catalog."
@@ -140,8 +148,10 @@ defmodule Arbor.LLM do
   defp build_object_stream(events, opts) do
     Stream.transform(
       events,
-      %{text: "", last_object: nil},
+      new_object_stream_state(opts),
       fn event, state ->
+        state = count_object_stream_event!(state)
+
         case event do
           %Arbor.LLM.StreamEvent{type: :delta, data: %{"text" => chunk}} ->
             emit_partial_object(state, chunk, opts)
@@ -161,22 +171,165 @@ defmodule Arbor.LLM do
   end
 
   defp emit_partial_object(state, chunk, opts) do
-    text = state.text <> to_string(chunk)
-    next_state = %{state | text: text}
+    unless is_binary(chunk) do
+      raise NoObjectGeneratedError, reason: :object_stream_binary_chunks_required
+    end
 
-    case Jason.decode(text) do
+    bytes = state.bytes + byte_size(chunk)
+
+    if bytes > state.max_bytes do
+      raise NoObjectGeneratedError,
+        reason: {:object_stream_limit_exceeded, :bytes, state.max_bytes}
+    end
+
+    case scan_object_json(chunk, state.scan) do
+      {:ok, scan} ->
+        next_state = %{state | chunks: [chunk | state.chunks], bytes: bytes, scan: scan}
+
+        if scan.complete? and is_nil(state.final_object),
+          do: decode_object_stream_candidate(next_state, opts),
+          else: {[], next_state}
+
+      {:error, reason} ->
+        raise NoObjectGeneratedError, reason: reason
+    end
+  end
+
+  defp new_object_stream_state(opts) do
+    configured =
+      Keyword.get(opts, :max_object_stream_bytes, @max_object_stream_bytes)
+
+    max_bytes =
+      if is_integer(configured) and configured > 0,
+        do: min(configured, @max_object_stream_bytes),
+        else: @max_object_stream_bytes
+
+    %{
+      chunks: [],
+      bytes: 0,
+      events: 0,
+      decode_attempts: 0,
+      max_bytes: max_bytes,
+      last_object: nil,
+      final_object: nil,
+      decode_error: nil,
+      scan: %{
+        started?: false,
+        complete?: false,
+        in_string?: false,
+        escape?: false,
+        stack: []
+      }
+    }
+  end
+
+  defp count_object_stream_event!(state) do
+    events = state.events + 1
+
+    if events > @max_object_stream_events do
+      raise NoObjectGeneratedError,
+        reason: {:object_stream_limit_exceeded, :events, @max_object_stream_events}
+    end
+
+    %{state | events: events}
+  end
+
+  defp decode_object_stream_candidate(state, opts) do
+    attempts = state.decode_attempts + 1
+
+    if attempts > @max_object_decode_attempts do
+      raise NoObjectGeneratedError,
+        reason: {:object_stream_limit_exceeded, :decode_attempts, @max_object_decode_attempts}
+    end
+
+    body = state.chunks |> Enum.reverse() |> IO.iodata_to_binary()
+
+    case Arbor.LLM.ResponseBudget.decode_json(body, object_stream_limits(state.max_bytes)) do
       {:ok, object} when is_map(object) ->
-        case maybe_emit_partial_object(object, state.last_object, opts) do
-          {:emit, object} ->
-            {[object], %{next_state | last_object: object}}
+        next_state = %{state | decode_attempts: attempts, final_object: object}
 
-          :skip ->
-            {[], %{next_state | last_object: object}}
+        case maybe_emit_partial_object(object, state.last_object, opts) do
+          {:emit, object} -> {[object], %{next_state | last_object: object}}
+          :skip -> {[], %{next_state | last_object: object}}
         end
 
-      _ ->
-        {[], next_state}
+      {:ok, _other} ->
+        {[], %{state | decode_attempts: attempts, decode_error: :object_must_be_map}}
+
+      {:error, reason} ->
+        {[], %{state | decode_attempts: attempts, decode_error: reason}}
     end
+  end
+
+  defp scan_object_json("", scan), do: {:ok, scan}
+
+  defp scan_object_json(<<char, rest::binary>>, %{in_string?: true} = scan) do
+    cond do
+      scan.escape? ->
+        scan_object_json(rest, %{scan | escape?: false})
+
+      char == ?\\ ->
+        scan_object_json(rest, %{scan | escape?: true})
+
+      char == ?\" ->
+        scan_object_json(rest, %{scan | in_string?: false})
+
+      char < 0x20 ->
+        {:error, :malformed_object_stream_json}
+
+      true ->
+        scan_object_json(rest, scan)
+    end
+  end
+
+  defp scan_object_json(<<char, rest::binary>>, scan) do
+    cond do
+      scan.complete? and char in [32, 9, 10, 13] ->
+        scan_object_json(rest, scan)
+
+      scan.complete? ->
+        {:error, :multiple_object_stream_values}
+
+      not scan.started? and char in [32, 9, 10, 13] ->
+        scan_object_json(rest, scan)
+
+      not scan.started? and char == ?{ ->
+        scan_object_json(rest, %{scan | started?: true, stack: [?} | scan.stack]})
+
+      not scan.started? ->
+        {:error, :object_stream_must_start_with_map}
+
+      char == ?\" ->
+        scan_object_json(rest, %{scan | in_string?: true})
+
+      char in [?{, ?[] ->
+        closer = if char == ?{, do: ?}, else: ?]
+        stack = [closer | scan.stack]
+
+        if length(stack) > @max_object_stream_depth,
+          do: {:error, {:object_stream_limit_exceeded, :depth, @max_object_stream_depth}},
+          else: scan_object_json(rest, %{scan | stack: stack})
+
+      char in [?}, ?]] ->
+        case scan.stack do
+          [^char] -> scan_object_json(rest, %{scan | stack: [], complete?: true})
+          [^char | stack] -> scan_object_json(rest, %{scan | stack: stack})
+          _ -> {:error, :malformed_object_stream_json}
+        end
+
+      true ->
+        scan_object_json(rest, scan)
+    end
+  end
+
+  defp object_stream_limits(max_bytes) do
+    [
+      max_bytes: max_bytes,
+      max_nodes: 20_000,
+      max_depth: @max_object_stream_depth,
+      max_map_keys: 5_000,
+      max_list_items: 20_000
+    ]
   end
 
   defp maybe_emit_partial_object(object, last_object, opts) do
@@ -200,10 +353,13 @@ defmodule Arbor.LLM do
   end
 
   defp ensure_final_object!(state, opts) do
-    with {:ok, object} <- decode_object(state.text),
+    with true <- is_nil(state.decode_error) or {:error, state.decode_error},
+         object when is_map(object) <- state.final_object,
          :ok <- validate_object(object, opts) do
       :ok
     else
+      nil -> raise NoObjectGeneratedError, reason: :no_object_generated
+      false -> raise NoObjectGeneratedError, reason: :no_object_generated
       {:error, reason} -> raise NoObjectGeneratedError, reason: reason
     end
   end
@@ -748,6 +904,9 @@ defmodule Arbor.LLM do
   end
 
   defp wrap_stream_runtime_controls(events, opts) do
+    # `stream_read_timeout_ms` is retained as a public compatibility name, but
+    # it is an absolute consumption deadline measured from first enumeration.
+    # Receiving events never extends it.
     timeout_ms = Keyword.get(opts, :stream_read_timeout_ms, Keyword.get(opts, :timeout_ms))
     abort_fun = abort_fun(opts)
 
@@ -763,20 +922,23 @@ defmodule Arbor.LLM do
   end
 
   defp build_controlled_stream(events, timeout_ms, abort_fun) do
-    owner = self()
-    ref = make_ref()
-    {pid, monitor_ref} = spawn_monitor(fn -> produce_stream_events(owner, ref, events) end)
-
     Stream.resource(
       fn ->
+        owner = self()
+        ref = make_ref()
+        {pid, monitor_ref} = spawn_monitor(fn -> produce_stream_events(owner, ref, events) end)
+
         %{
           ref: ref,
           producer_pid: pid,
           monitor_ref: monitor_ref,
+          source_control: controlled_source_control(events),
           timeout_ms: normalize_timeout_ms(timeout_ms),
           abort_fun: abort_fun,
-          deadline_ms: maybe_deadline_ms(timeout_ms),
-          done?: false
+          absolute_deadline_ms: absolute_stream_deadline_ms(timeout_ms),
+          done?: false,
+          producer_down?: false,
+          demand_outstanding?: false
         }
       end,
       &next_controlled_stream_item/1,
@@ -785,8 +947,24 @@ defmodule Arbor.LLM do
   end
 
   defp produce_stream_events(owner, ref, events) do
-    Enum.each(events, fn event -> send(owner, {ref, :event, event}) end)
+    owner_monitor = Process.monitor(owner)
+
+    Enum.reduce_while(events, :ok, fn event, :ok ->
+      receive do
+        {^ref, :demand} ->
+          send(owner, {ref, :event, event})
+          {:cont, :ok}
+
+        {^ref, :cancel} ->
+          {:halt, :cancelled}
+
+        {:DOWN, ^owner_monitor, :process, ^owner, _reason} ->
+          {:halt, :owner_down}
+      end
+    end)
+
     send(owner, {ref, :done})
+    Process.demonitor(owner_monitor, [:flush])
   rescue
     exception ->
       send(owner, {ref, :producer_error, {:error, exception, __STACKTRACE__}})
@@ -802,10 +980,11 @@ defmodule Arbor.LLM do
     maybe_raise_if_stream_timed_out(state)
 
     receive_timeout = next_receive_timeout_ms(state)
+    state = request_controlled_demand(state)
 
     receive do
       {ref, :event, event} when ref == state.ref ->
-        {[event], reset_deadline(state)}
+        {[event], %{state | demand_outstanding?: false}}
 
       {ref, :done} when ref == state.ref ->
         {:halt, %{state | done?: true}}
@@ -818,7 +997,7 @@ defmodule Arbor.LLM do
 
       {:DOWN, mon_ref, :process, pid, _reason}
       when mon_ref == state.monitor_ref and pid == state.producer_pid ->
-        {:halt, %{state | done?: true}}
+        {:halt, %{state | done?: true, producer_down?: true}}
     after
       receive_timeout ->
         maybe_raise_if_stream_timed_out(state)
@@ -826,13 +1005,123 @@ defmodule Arbor.LLM do
     end
   end
 
+  defp request_controlled_demand(%{demand_outstanding?: true} = state), do: state
+
+  defp request_controlled_demand(state) do
+    send(state.producer_pid, {state.ref, :demand})
+    %{state | demand_outstanding?: true}
+  end
+
   defp close_controlled_stream(state) do
-    if Process.alive?(state.producer_pid) do
-      Process.exit(state.producer_pid, :kill)
-    end
+    send(state.producer_pid, {state.ref, :cancel})
+
+    producer_down? =
+      state.producer_down? or await_controlled_down(state, @controlled_cleanup_grace_ms)
+
+    producer_down? =
+      if producer_down? do
+        true
+      else
+        if Process.alive?(state.producer_pid), do: Process.exit(state.producer_pid, :kill)
+        await_controlled_down(state, @controlled_cleanup_kill_wait_ms)
+      end
+
+    source_down? = close_controlled_source(state.source_control)
 
     Process.demonitor(state.monitor_ref, [:flush])
-    :ok
+    flush_controlled_messages(state.ref, state.monitor_ref, state.producer_pid)
+
+    if producer_down? and source_down? do
+      :ok
+    else
+      raise "stream producer cleanup did not acknowledge termination"
+    end
+  end
+
+  defp controlled_source_control(%Arbor.LLM.OwnedStream{cancel: cancel, producer: producer})
+       when is_function(cancel, 0) and is_pid(producer),
+       do: %{cancel: cancel, producer: producer}
+
+  defp controlled_source_control(_events), do: nil
+
+  defp close_controlled_source(nil), do: true
+
+  defp close_controlled_source(%{cancel: cancel, producer: producer}) do
+    _cancel_result = safely_cancel_controlled_source(cancel)
+    monitor = Process.monitor(producer)
+
+    down? =
+      receive do
+        {:DOWN, ^monitor, :process, ^producer, _reason} -> true
+      after
+        @controlled_cleanup_grace_ms ->
+          if Process.alive?(producer), do: Process.exit(producer, :kill)
+
+          receive do
+            {:DOWN, ^monitor, :process, ^producer, _reason} -> true
+          after
+            @controlled_cleanup_kill_wait_ms -> false
+          end
+      end
+
+    Process.demonitor(monitor, [:flush])
+    down?
+  end
+
+  defp safely_cancel_controlled_source(cancel) do
+    {pid, monitor} =
+      spawn_monitor(fn ->
+        try do
+          cancel.()
+        rescue
+          _exception -> :cancel_failed
+        catch
+          _kind, _reason -> :cancel_failed
+        end
+      end)
+
+    result =
+      receive do
+        {:DOWN, ^monitor, :process, ^pid, :normal} -> :ok
+        {:DOWN, ^monitor, :process, ^pid, _reason} -> :cancel_failed
+      after
+        @controlled_cancel_callback_ms ->
+          Process.exit(pid, :kill)
+
+          receive do
+            {:DOWN, ^monitor, :process, ^pid, _reason} -> :cancel_failed
+          after
+            @controlled_cleanup_kill_wait_ms -> :cancel_failed
+          end
+      end
+
+    Process.demonitor(monitor, [:flush])
+    result
+  end
+
+  defp await_controlled_down(state, timeout) do
+    receive do
+      {:DOWN, monitor_ref, :process, producer_pid, _reason}
+      when monitor_ref == state.monitor_ref and producer_pid == state.producer_pid ->
+        true
+    after
+      timeout -> false
+    end
+  end
+
+  defp flush_controlled_messages(ref, monitor_ref, producer_pid) do
+    receive do
+      {^ref, _kind} ->
+        flush_controlled_messages(ref, monitor_ref, producer_pid)
+
+      {^ref, _kind, _value} ->
+        flush_controlled_messages(ref, monitor_ref, producer_pid)
+
+      {:DOWN, ^monitor_ref, :process, ^producer_pid, _reason} ->
+        flush_controlled_messages(ref, monitor_ref, producer_pid)
+    after
+      0 -> :ok
+    end
   end
 
   defp maybe_raise_if_aborted(nil), do: :ok
@@ -847,8 +1136,11 @@ defmodule Arbor.LLM do
 
   defp maybe_raise_if_stream_timed_out(%{timeout_ms: nil}), do: :ok
 
-  defp maybe_raise_if_stream_timed_out(%{timeout_ms: timeout_ms, deadline_ms: deadline_ms}) do
-    if System.monotonic_time(:millisecond) >= deadline_ms do
+  defp maybe_raise_if_stream_timed_out(%{
+         timeout_ms: timeout_ms,
+         absolute_deadline_ms: absolute_deadline_ms
+       }) do
+    if System.monotonic_time(:millisecond) >= absolute_deadline_ms do
       raise RequestTimeoutError, timeout_ms: timeout_ms
     else
       :ok
@@ -860,16 +1152,12 @@ defmodule Arbor.LLM do
 
   defp normalize_timeout_ms(_), do: nil
 
-  defp maybe_deadline_ms(timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0 do
+  defp absolute_stream_deadline_ms(timeout_ms)
+       when is_integer(timeout_ms) and timeout_ms > 0 do
     System.monotonic_time(:millisecond) + timeout_ms
   end
 
-  defp maybe_deadline_ms(_), do: nil
-
-  defp reset_deadline(%{timeout_ms: nil} = state), do: state
-
-  defp reset_deadline(%{timeout_ms: timeout_ms} = state),
-    do: %{state | deadline_ms: maybe_deadline_ms(timeout_ms)}
+  defp absolute_stream_deadline_ms(_), do: nil
 
   defp next_receive_timeout_ms(%{timeout_ms: nil, abort_fun: abort_fun})
        when is_function(abort_fun, 0),
@@ -879,10 +1167,10 @@ defmodule Arbor.LLM do
 
   defp next_receive_timeout_ms(%{
          timeout_ms: timeout_ms,
-         deadline_ms: deadline_ms,
+         absolute_deadline_ms: absolute_deadline_ms,
          abort_fun: abort_fun
        }) do
-    remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
+    remaining_ms = max(absolute_deadline_ms - System.monotonic_time(:millisecond), 0)
 
     if is_function(abort_fun, 0) do
       min(remaining_ms, 100)
@@ -919,6 +1207,16 @@ defmodule Arbor.LLM do
 
   @doc false
   def decode_bounded_json(body, opts), do: Arbor.LLM.ResponseBudget.decode_json(body, opts)
+
+  @doc false
+  def decode_bounded_json_numbers(body, opts, keys),
+    do: Arbor.LLM.ResponseBudget.decode_json_numbers(body, opts, keys)
+
+  @doc false
+  def exact_unit_number?(lexeme), do: Arbor.LLM.ResponseBudget.exact_unit_number?(lexeme)
+
+  @doc false
+  def validate_endpoint(value, policy), do: Arbor.LLM.Endpoint.validate(value, policy)
 
   @doc false
   def finite_number?(value), do: Arbor.LLM.ResponseBudget.finite_number?(value)

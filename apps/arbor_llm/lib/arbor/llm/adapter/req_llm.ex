@@ -55,6 +55,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
   alias Arbor.LLM.ContentPart
+  alias Arbor.LLM.Endpoint
+  alias Arbor.LLM.Adapter.ReqLLM.BoundedStream
+  alias Arbor.LLM.OwnedStream
   alias Arbor.LLM.Message
   alias Arbor.LLM.PostProcessors
   alias Arbor.LLM.Call
@@ -64,6 +67,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   alias Arbor.LLM.Response
 
   @sentinel_provider "req_llm_generic"
+  @max_embedding_inputs 2_048
+  @max_embedding_input_bytes 4_194_304
+  @max_embedding_text_bytes 2_097_152
+  @max_model_bytes 512
 
   # ── Behaviour callbacks ─────────────────────────────────────────────
 
@@ -102,7 +109,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   def complete(%Request{} = request, opts \\ []) do
     with {:ok, model_spec} <- build_model_spec(request),
          messages <- translate_messages(request.messages),
-         req_opts <- build_req_opts(request, opts),
+         {:ok, req_opts} <- validated_req_opts(request, opts),
          {:ok, %ReqLLM.Response{} = resp} <- call_req_llm(model_spec, messages, req_opts) do
       {:ok, translate_response(resp, request)}
     end
@@ -113,10 +120,17 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   def stream(%Request{} = request, opts \\ []) do
     with {:ok, model_spec} <- build_model_spec(request),
          messages <- translate_messages(request.messages),
-         req_opts <- build_req_opts(request, opts),
-         {:ok, %ReqLLM.StreamResponse{stream: stream}} <-
+         {:ok, req_opts} <- validated_stream_opts(request, opts),
+         {:ok, %BoundedStream{stream: stream, cancel: cancel, producer: producer}} <-
            call_req_llm_stream(model_spec, messages, req_opts) do
-      Stream.map(stream, &translate_stream_chunk/1)
+      %OwnedStream{
+        stream: Stream.map(stream, &translate_bounded_stream_chunk/1),
+        cancel: cancel,
+        producer: producer
+      }
+    else
+      {:ok, _unowned_stream} -> {:error, :unowned_stream_producer}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -148,11 +162,11 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
     with {:ok, model_spec} <- build_model_spec(request),
          messages <- translate_messages(request.messages),
-         req_opts <- build_req_opts(request, opts),
-         {:ok, %ReqLLM.StreamResponse{} = stream_response} <-
+         {:ok, req_opts} <- validated_stream_opts(request, opts),
+         {:ok, %BoundedStream{} = stream_response} <-
            call_req_llm_stream(model_spec, messages, req_opts),
          {:ok, %ReqLLM.Response{} = resp} <-
-           ReqLLM.StreamResponse.process_stream(stream_response,
+           BoundedStream.process(stream_response,
              on_result: fn text ->
                callback.(%Arbor.LLM.StreamEvent{type: :delta, data: %{text: text}})
              end,
@@ -191,27 +205,26 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
           {:ok,
            %{embeddings: [[float()]], model: String.t(), usage: map(), dimensions: pos_integer()}}
           | {:error, term()}
-  def embed(texts, model, opts) when is_list(texts) and is_binary(model) do
-    arbor_provider = resolve_embed_provider(opts, model)
+  def embed(texts, model, opts) do
+    with :ok <- validate_embedding_ingress(texts, model, opts) do
+      arbor_provider = resolve_embed_provider(opts, model)
 
-    cond do
-      arbor_provider == nil ->
-        {:error, {:invalid_request, :missing_provider_for_embedding}}
+      cond do
+        arbor_provider == nil ->
+          {:error, {:invalid_request, :missing_provider_for_embedding}}
 
-      texts == [] ->
-        {:error, {:invalid_request, :empty_input}}
+        true ->
+          # Same struct-vs-string split as build_model_spec/1 — local
+          # LMs bypass the catalog because operator-pulled embedding
+          # models like `nomic-embed-text` aren't in llm_db.
+          case build_embed_model_spec(arbor_provider, model) do
+            {:ok, model_spec} ->
+              do_embed(arbor_provider, model_spec, texts, opts)
 
-      true ->
-        # Same struct-vs-string split as build_model_spec/1 — local
-        # LMs bypass the catalog because operator-pulled embedding
-        # models like `nomic-embed-text` aren't in llm_db.
-        case build_embed_model_spec(arbor_provider, model) do
-          {:ok, model_spec} ->
-            do_embed(arbor_provider, model_spec, texts, opts)
-
-          {:error, _} = err ->
-            err
-        end
+            {:error, _} = err ->
+              err
+          end
+      end
     end
   end
 
@@ -239,20 +252,20 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   end
 
   defp do_embed(arbor_provider, model_spec, texts, opts) do
-    req_opts = build_embed_opts(arbor_provider, opts)
+    with {:ok, req_opts} <- validated_embed_opts(arbor_provider, opts) do
+      case call_req_llm_embed(model_spec, texts, req_opts) do
+        {:ok, embeddings, usage} when is_list(embeddings) ->
+          {:ok,
+           %{
+             embeddings: embeddings,
+             model: model_spec,
+             usage: usage || %{},
+             dimensions: dimensions_of(embeddings)
+           }}
 
-    case call_req_llm_embed(model_spec, texts, req_opts) do
-      {:ok, embeddings, usage} when is_list(embeddings) ->
-        {:ok,
-         %{
-           embeddings: embeddings,
-           model: model_spec,
-           usage: usage || %{},
-           dimensions: dimensions_of(embeddings)
-         }}
-
-      {:error, _} = err ->
-        err
+        {:error, _} = err ->
+          err
+      end
     end
   end
 
@@ -268,6 +281,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     |> maybe_merge(:api_key, local_api_key(arbor_provider, opts))
     |> maybe_merge(:provider_options, Keyword.get(opts, :provider_options))
     |> maybe_merge(:dimensions, Keyword.get(opts, :dimensions))
+    |> maybe_merge(:receive_timeout, Keyword.get(opts, :receive_timeout))
+    |> maybe_merge(:req_http_options, local_req_http_options(arbor_provider, opts))
+    |> maybe_merge(:max_response_bytes, Keyword.get(opts, :max_response_bytes))
   end
 
   defp call_req_llm_embed(%LLMDB.Model{} = model, texts, opts) do
@@ -288,6 +304,47 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   # encodes the provider (e.g. `voyage-large-2`) — leave that to a
   # future improvement and require explicit `provider:` for now.
   defp infer_provider_for_embedding(_model), do: nil
+
+  defp validate_embedding_ingress(texts, model, opts) do
+    cond do
+      not is_binary(model) or model == "" or byte_size(model) > @max_model_bytes or
+          not String.valid?(model) ->
+        {:error, {:invalid_request, :bounded_model_required}}
+
+      not is_list(opts) or not Keyword.keyword?(opts) ->
+        {:error, {:invalid_request, :keyword_options_required}}
+
+      true ->
+        validate_embedding_texts(texts, 0, 0)
+    end
+  end
+
+  defp validate_embedding_texts([], 0, _bytes), do: {:error, {:invalid_request, :empty_input}}
+  defp validate_embedding_texts([], _count, _bytes), do: :ok
+
+  defp validate_embedding_texts(_texts, count, _bytes) when count >= @max_embedding_inputs,
+    do: {:error, {:invalid_request, {:input_count_exceeded, @max_embedding_inputs}}}
+
+  defp validate_embedding_texts([text | rest], count, bytes) when is_binary(text) do
+    next_bytes = bytes + byte_size(text)
+
+    cond do
+      byte_size(text) > @max_embedding_text_bytes ->
+        {:error, {:invalid_request, {:input_text_bytes_exceeded, @max_embedding_text_bytes}}}
+
+      next_bytes > @max_embedding_input_bytes ->
+        {:error, {:invalid_request, {:input_bytes_exceeded, @max_embedding_input_bytes}}}
+
+      not String.valid?(text) ->
+        {:error, {:invalid_request, :valid_utf8_input_required}}
+
+      true ->
+        validate_embedding_texts(rest, count + 1, next_bytes)
+    end
+  end
+
+  defp validate_embedding_texts(_improper_or_non_list, _count, _bytes),
+    do: {:error, {:invalid_request, :proper_string_list_required}}
 
   defp call_req_llm_stream(model_spec, messages, opts) do
     run_pipeline(:stream, {model_spec, messages, opts})
@@ -321,6 +378,12 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
         %Arbor.LLM.StreamEvent{type: :delta, data: %{raw: chunk}}
     end
   end
+
+  defp translate_bounded_stream_chunk(%ReqLLM.StreamChunk{} = chunk),
+    do: translate_stream_chunk(chunk)
+
+  defp translate_bounded_stream_chunk({:arbor_stream_error, reason}),
+    do: %Arbor.LLM.StreamEvent{type: :error, data: %{reason: reason}}
 
   # ── Translation: Arbor → ReqLLM ─────────────────────────────────────
 
@@ -557,6 +620,40 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     |> maybe_merge(:req_http_options, local_req_http_options(request.provider, opts))
     |> maybe_merge(:provider_options, Keyword.get(opts, :provider_options))
     |> maybe_merge(:max_response_bytes, Keyword.get(opts, :max_response_bytes))
+  end
+
+  defp validated_req_opts(request, opts) do
+    request
+    |> build_req_opts(opts)
+    |> validate_base_url_opt()
+  end
+
+  defp validated_stream_opts(request, opts) do
+    with {:ok, req_opts} <- validated_req_opts(request, opts) do
+      {:ok,
+       req_opts
+       |> maybe_merge(:max_stream_events, Keyword.get(opts, :max_stream_events))
+       |> maybe_merge(:max_stream_event_bytes, Keyword.get(opts, :max_stream_event_bytes))}
+    end
+  end
+
+  defp validated_embed_opts(arbor_provider, opts) do
+    arbor_provider
+    |> build_embed_opts(opts)
+    |> validate_base_url_opt()
+  end
+
+  defp validate_base_url_opt(opts) do
+    case Keyword.fetch(opts, :base_url) do
+      :error ->
+        {:ok, opts}
+
+      {:ok, value} ->
+        case Endpoint.validate(value, :req_llm_base) do
+          {:ok, canonical} -> {:ok, Keyword.put(opts, :base_url, canonical)}
+          {:error, reason} -> {:error, {:invalid_base_url, reason}}
+        end
+    end
   end
 
   # Disable req's transient-retry for local-LM providers. Retrying a slow

@@ -129,8 +129,9 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
           {:ok, String.t()} | {:error, term()}
   def endpoint_option(opts, key, default, policy) do
     with {:ok, value} <- string_option(opts, key, default),
-         {:ok, uri} <- parse_endpoint(value, policy) do
-      {:ok, URI.to_string(uri)}
+         endpoint_policy = if(policy == :base, do: :root, else: :embedding),
+         {:ok, canonical} <- Arbor.LLM.validate_endpoint(value, endpoint_policy) do
+      {:ok, canonical}
     else
       {:error, {:invalid_option, ^key, _reason} = error} -> {:error, error}
       {:error, reason} -> {:error, {:invalid_option, key, reason}}
@@ -228,9 +229,19 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
       {:ok, %Req.Response{private: %{arbor_eval_response_overflow: true}}} ->
         {:error, {:http_response_bytes_exceeded, max_response_bytes}}
 
-      {:ok, %Req.Response{status: status, body: body}} ->
-        with {:ok, decoded} <- decode_bounded_json_body(body, max_response_bytes) do
-          {:ok, status, decoded}
+      {:ok, %Req.Response{status: status} = response} ->
+        with :ok <- identity_content_encoding(response),
+             {:ok, body} <- collected_response_body(response) do
+          if status in 200..299 do
+            with :ok <- success_json_content_type(response, body),
+                 {:ok, decoded} <- decode_bounded_json_body(body, max_response_bytes) do
+              {:ok, status, decoded}
+            end
+          else
+            with {:ok, bounded_body} <- decode_error_body(response, body, max_response_bytes) do
+              {:ok, status, bounded_body}
+            end
+          end
         end
 
       {:error, reason} ->
@@ -788,23 +799,101 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
 
   defp bounded_response_collector(maximum) do
     fn {:data, data}, {request, response} when is_binary(data) ->
-      retained = if is_binary(response.body), do: response.body, else: ""
-      remaining = maximum - byte_size(retained)
+      retained = Map.get(response.private, :arbor_eval_response_bytes, 0)
+      remaining = maximum - retained
 
       if byte_size(data) > remaining do
         prefix = if remaining > 0, do: binary_part(data, 0, remaining), else: ""
 
+        private =
+          response.private
+          |> append_response_chunk(prefix)
+          |> Map.put(:arbor_eval_response_overflow, true)
+
         response = %{
           response
-          | body: retained <> prefix,
-            private: Map.put(response.private, :arbor_eval_response_overflow, true)
+          | body: "",
+            private: private
         }
 
         {:halt, {request, response}}
       else
-        {:cont, {request, %{response | body: retained <> data}}}
+        private = append_response_chunk(response.private, data)
+        {:cont, {request, %{response | body: "", private: private}}}
       end
     end
+  end
+
+  defp append_response_chunk(private, ""), do: private
+
+  defp append_response_chunk(private, data) do
+    private
+    |> Map.update(:arbor_eval_response_chunks, [data], &[data | &1])
+    |> Map.update(:arbor_eval_response_bytes, byte_size(data), &(&1 + byte_size(data)))
+  end
+
+  defp collected_response_body(%Req.Response{
+         private: %{arbor_eval_response_chunks: chunks}
+       })
+       when is_list(chunks),
+       do: {:ok, chunks |> Enum.reverse() |> IO.iodata_to_binary()}
+
+  defp collected_response_body(%Req.Response{body: body}), do: {:ok, body}
+
+  defp success_json_content_type(_response, body) when not is_binary(body), do: :ok
+  defp success_json_content_type(response, _body), do: json_content_type(response)
+
+  defp decode_error_body(response, body, maximum) when is_binary(body) do
+    cond do
+      byte_size(body) > maximum ->
+        {:error, {:decoded_term_limit_exceeded, :bytes, maximum}}
+
+      json_content_type(response) == :ok ->
+        case decode_bounded_json_body(body, maximum) do
+          {:ok, decoded} -> {:ok, decoded}
+          {:error, _reason} -> {:ok, body}
+        end
+
+      true ->
+        {:ok, body}
+    end
+  end
+
+  defp decode_error_body(_response, body, maximum),
+    do: decode_bounded_json_body(body, maximum)
+
+  defp json_content_type(response) do
+    case Req.Response.get_header(response, "content-type") do
+      [] ->
+        {:error, {:invalid_content_type, :application_json_required}}
+
+      [value] ->
+        if json_content_type?(value),
+          do: :ok,
+          else: {:error, {:invalid_content_type, :application_json_required}}
+
+      _conflicting_or_malformed ->
+        {:error, {:invalid_content_type, :application_json_required}}
+    end
+  end
+
+  defp identity_content_encoding(response) do
+    case Req.Response.get_header(response, "content-encoding") do
+      [] ->
+        :ok
+
+      values ->
+        if Enum.all?(values, &(String.downcase(String.trim(&1)) in ["", "identity"])),
+          do: :ok,
+          else: {:error, {:invalid_content_encoding, :identity_required}}
+    end
+  end
+
+  defp json_content_type?(value) do
+    media_type =
+      value |> String.split(";", parts: 2) |> hd() |> String.trim() |> String.downcase()
+
+    media_type == "application/json" or String.ends_with?(media_type, "+json")
   end
 
   defp decode_bounded_json_body(body, maximum) when is_binary(body) do
@@ -939,22 +1028,27 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   defp exception_diagnostic(%{__struct__: module}), do: {:exception, module}
   defp exception_diagnostic(_exception), do: :exception
 
-  defp validate_vector_values(vector) when is_list(vector) and vector != [] do
-    Enum.reduce_while(vector, {:ok, 0}, fn value, {:ok, dimensions} ->
-      cond do
-        dimensions >= @max_vector_dimensions ->
-          {:halt, {:error, {:vector_dimensions_exceeded, @max_vector_dimensions}}}
+  defp validate_vector_values([head | tail]), do: validate_vector_cell(head, tail, 0)
+  defp validate_vector_values(_vector), do: {:error, :numeric_vector_required}
 
-        not valid_vector_component?(value) ->
-          {:halt, {:error, :numeric_vector_required}}
+  defp validate_vector_cell(_head, _tail, dimensions)
+       when dimensions >= @max_vector_dimensions,
+       do: {:error, {:vector_dimensions_exceeded, @max_vector_dimensions}}
 
-        true ->
-          {:cont, {:ok, dimensions + 1}}
-      end
-    end)
+  defp validate_vector_cell(head, tail, dimensions) do
+    if valid_vector_component?(head) do
+      validate_vector_tail(tail, dimensions + 1)
+    else
+      {:error, :numeric_vector_required}
+    end
   end
 
-  defp validate_vector_values(_vector), do: {:error, :numeric_vector_required}
+  defp validate_vector_tail([], dimensions), do: {:ok, dimensions}
+
+  defp validate_vector_tail([head | tail], dimensions),
+    do: validate_vector_cell(head, tail, dimensions)
+
+  defp validate_vector_tail(_improper, _dimensions), do: {:error, :proper_vector_required}
 
   defp valid_vector_component?(value) when is_integer(value),
     do:
@@ -968,62 +1062,11 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
 
   defp valid_vector_component?(_value), do: false
 
-  defp parse_endpoint(value, policy) do
-    uri = URI.parse(value)
-
-    cond do
-      uri.scheme not in ["http", "https"] ->
-        {:error, :http_scheme_required}
-
-      not is_binary(uri.host) or uri.host == "" ->
-        {:error, :host_required}
-
-      not valid_host?(uri.host) ->
-        {:error, :valid_host_required}
-
-      not is_nil(uri.userinfo) ->
-        {:error, :userinfo_forbidden}
-
-      not is_nil(uri.query) ->
-        {:error, :query_forbidden}
-
-      not is_nil(uri.fragment) ->
-        {:error, :fragment_forbidden}
-
-      not is_nil(uri.port) and uri.port not in 1..65_535 ->
-        {:error, :valid_port_required}
-
-      policy == :base and uri.path not in [nil, "", "/"] ->
-        {:error, :base_path_must_be_root}
-
-      policy == :embedding and uri.path != "/v1/embeddings" ->
-        {:error, :embedding_path_must_be_v1_embeddings}
-
-      true ->
-        path = if policy == :base, do: "", else: "/v1/embeddings"
-        {:ok, %{uri | path: path, query: nil, fragment: nil}}
-    end
-  end
-
   defp router_term_limits do
     @decoded_term_limits
     |> Keyword.put(:max_bytes, @max_router_response_bytes)
     |> Keyword.put(:max_nodes, 10_000)
     |> Keyword.put(:max_list_items, 1_000)
-  end
-
-  defp valid_host?(host) do
-    case :inet.parse_address(String.to_charlist(host)) do
-      {:ok, _address} ->
-        true
-
-      {:error, _reason} ->
-        byte_size(host) <= 253 and
-          Regex.match?(
-            ~r/^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$/,
-            host
-          )
-    end
   end
 
   defp validate_index_dimensions(actions) do

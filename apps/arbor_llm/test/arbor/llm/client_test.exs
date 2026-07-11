@@ -43,5 +43,62 @@ defmodule Arbor.LLM.ClientTest do
       assert tool_call.name == "search"
       assert tool_call.id == "c2"
     end
+
+    test "security regression: arbitrary enumerables have aggregate tool-call byte and node budgets" do
+      parent = self()
+
+      event = %StreamEvent{
+        type: :tool_call,
+        data: %{
+          id: "call",
+          name: "large",
+          arguments: %{"blob" => String.duplicate("x", 900_000)}
+        }
+      }
+
+      events =
+        Stream.resource(
+          fn -> 0 end,
+          fn
+            count when count < 100 -> {[event], count + 1}
+            count -> {:halt, count}
+          end,
+          fn _count -> send(parent, :arbitrary_stream_closed) end
+        )
+
+      assert {:error, {:stream_limit_exceeded, :retained_bytes, 16_777_216}} =
+               Client.collect_stream(events)
+
+      assert_receive :arbitrary_stream_closed
+
+      node_heavy = %StreamEvent{
+        type: :tool_call,
+        data: %{id: "call", name: "nodes", arguments: %{"items" => List.duplicate(0, 9_000)}}
+      }
+
+      assert {:error, {:stream_limit_exceeded, :retained_nodes, 100_000}} =
+               Stream.repeatedly(fn -> node_heavy end)
+               |> Stream.take(100)
+               |> Client.collect_stream()
+    end
+
+    test "security regression: tool fields and finish usage are bounded before retention" do
+      huge_id = String.duplicate("i", 513)
+
+      assert {:error, {:invalid_tool_call_field, :id, {:bounded_string_required, 512}}} =
+               Client.collect_stream([
+                 %StreamEvent{
+                   type: :tool_call,
+                   data: %{id: huge_id, name: "tool", arguments: %{}}
+                 }
+               ])
+
+      huge_usage = %{provider_blob: String.duplicate("u", 1_048_576)}
+
+      assert {:error, {:invalid_stream_event, {:decoded_term_limit_exceeded, :bytes, 1_048_576}}} =
+               Client.collect_stream([
+                 %StreamEvent{type: :finish, data: %{reason: :stop, usage: huge_usage}}
+               ])
+    end
   end
 end

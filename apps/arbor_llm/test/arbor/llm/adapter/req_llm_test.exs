@@ -183,6 +183,34 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       opts = Adapter.build_req_opts(req, [])
       refute Keyword.has_key?(opts, :base_url)
     end
+
+    test "security regression: production dispatch rejects repaired or widened base_url authorities" do
+      request = %Request{
+        provider: "lm_studio",
+        model: "bounded-model",
+        messages: [Message.new(:user, "hello")]
+      }
+
+      for endpoint <- [
+            "http://host:abc/v1",
+            "http://host:/v1",
+            "http://[::1]x/v1",
+            "http://user@host/v1",
+            "http://host:80:90/v1"
+          ] do
+        assert {:error, {:invalid_base_url, _reason}} =
+                 Adapter.complete(request, base_url: endpoint)
+
+        assert {:error, {:invalid_base_url, _reason}} =
+                 Adapter.stream(request, base_url: endpoint)
+
+        assert {:error, {:invalid_base_url, _reason}} =
+                 Adapter.embed(["hello"], "bounded-embedding",
+                   provider: "ollama",
+                   base_url: endpoint
+                 )
+      end
+    end
   end
 
   describe "translate_messages/1" do

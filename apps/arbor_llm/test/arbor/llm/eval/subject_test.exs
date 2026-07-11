@@ -427,7 +427,7 @@ defmodule Arbor.LLM.Eval.SubjectTest do
           )
         end)
 
-      assert {:ok, {:error, {:decoded_term_limit_exceeded, :bytes, 16_777_216}}} =
+      assert {:ok, {:error, {:decoded_term_invalid, :signed_64_required}}} =
                Task.yield(task, 1_000)
     end
 

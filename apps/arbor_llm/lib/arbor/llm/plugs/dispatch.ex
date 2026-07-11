@@ -24,6 +24,11 @@ defmodule Arbor.LLM.Plugs.Dispatch do
   alias Arbor.LLM.Call
   alias Arbor.LLM.ProviderError
   alias Arbor.LLM.ResponseBudget
+  alias Arbor.LLM.Adapter.ReqLLM.BoundedStream
+
+  @default_max_response_bytes 16_777_216
+  @max_embedding_vectors 2_048
+  @max_embedding_dimensions 8_192
 
   def call(%Call{halted: true} = call), do: call
 
@@ -72,7 +77,22 @@ defmodule Arbor.LLM.Plugs.Dispatch do
   end
 
   defp do_dispatch(:stream, {model_spec, messages, opts}) do
-    ReqLLM.stream_text(model_spec, messages, opts)
+    maximum = Keyword.get(opts, :arbor_max_response_bytes, @default_max_response_bytes)
+    max_events = Keyword.get(opts, :max_stream_events, 100_000)
+    max_event_bytes = Keyword.get(opts, :max_stream_event_bytes, min(1_048_576, maximum))
+
+    req_opts =
+      Keyword.drop(opts, [
+        :arbor_max_response_bytes,
+        :max_stream_events,
+        :max_stream_event_bytes
+      ])
+
+    BoundedStream.start(model_spec, messages, req_opts,
+      max_response_bytes: maximum,
+      max_events: max_events,
+      max_event_bytes: max_event_bytes
+    )
   rescue
     e -> {:error, exception_for(e)}
   catch
@@ -80,12 +100,9 @@ defmodule Arbor.LLM.Plugs.Dispatch do
   end
 
   defp do_dispatch(:embed_cloud, {model_spec, texts, opts}) when is_binary(model_spec) do
-    case ReqLLM.Embedding.embed(model_spec, texts, opts) do
-      {:ok, %{embeddings: embeddings, usage: usage}} -> {:ok, embeddings, usage}
-      {:ok, %{embedding: embedding, usage: usage}} -> {:ok, [embedding], usage}
-      {:ok, list} when is_list(list) -> {:ok, list, %{}}
-      {:error, _} = err -> err
-      other -> {:error, {:unexpected_embed_response, inspect(other)}}
+    with {:ok, model} <- ReqLLM.model(model_spec),
+         true <- embedding_capable?(model) or {:error, {:embedding_not_supported, model_spec}} do
+      dispatch_embedding(model, texts, opts, :req_llm)
     end
   rescue
     e -> {:error, exception_for(e)}
@@ -100,24 +117,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
     # would reject them before reaching the network. Call the
     # provider's prepare_request + Req.request directly — same shape
     # as the openai embeddings API which Ollama serves at /v1/embeddings.
-    with {:ok, provider_module} <- ReqLLM.provider(model.provider),
-         {:ok, request} <- provider_module.prepare_request(:embedding, model, texts, opts),
-         {:ok, %Req.Response{status: status, body: body}} when status in 200..299 <-
-           Req.request(request) do
-      extract_embeddings(body)
-    else
-      {:ok, %Req.Response{status: status, body: body}} ->
-        {:error,
-         ProviderError.exception(
-           message: "embedding HTTP #{status}",
-           status: status,
-           retryable: retryable_status?(status),
-           details: %{source: :req_llm_direct, body: inspect(body) |> String.slice(0, 500)}
-         )}
-
-      {:error, _} = err ->
-        err
-    end
+    dispatch_embedding(model, texts, opts, :req_llm_direct)
   rescue
     e -> {:error, exception_for(e)}
   catch
@@ -126,17 +126,82 @@ defmodule Arbor.LLM.Plugs.Dispatch do
 
   # ── Helpers ────────────────────────────────────────────────────────
 
-  defp extract_embeddings(%{"data" => data} = body) when is_list(data) do
-    embeddings =
-      Enum.map(data, fn
-        %{"embedding" => e} -> e
-        e when is_list(e) -> e
-      end)
+  defp dispatch_embedding(model, texts, opts, source) do
+    maximum = Keyword.get(opts, :arbor_max_response_bytes, @default_max_response_bytes)
+    req_opts = Keyword.delete(opts, :arbor_max_response_bytes)
 
-    {:ok, embeddings, Map.get(body, "usage", %{})}
+    with {:ok, provider_module} <- ReqLLM.provider(model.provider),
+         {:ok, request} <- provider_module.prepare_request(:embedding, model, texts, req_opts),
+         request <- ResponseBudget.apply_req_receipt(request, maximum),
+         {:ok, %Req.Response{private: %{arbor_response_overflow: ^maximum}}} <-
+           Req.request(request) do
+      {:error, {:response_bytes_exceeded, maximum}}
+    else
+      {:ok, %Req.Response{private: %{arbor_response_error: reason}}} ->
+        {:error, {:invalid_response_body, reason}}
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
+        extract_embeddings(body, length(texts))
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error,
+         ProviderError.exception(
+           message: "embedding HTTP #{status}",
+           status: status,
+           retryable: retryable_status?(status),
+           details: %{source: source, body: inspect(body, limit: 20, printable_limit: 500)}
+         )}
+
+      {:error, _} = error ->
+        error
+    end
   end
 
-  defp extract_embeddings(body), do: {:error, {:unexpected_embed_response, body}}
+  defp extract_embeddings(%{"data" => data} = body, expected_count)
+       when is_list(data) and length(data) <= @max_embedding_vectors do
+    with true <-
+           length(data) == expected_count or
+             {:error, {:unexpected_embedding_count, expected_count}},
+         {:ok, embeddings, dimensions} <- extract_embedding_vectors(data, [], nil),
+         true <- dimensions > 0 or {:error, :empty_embedding_vector} do
+      {:ok, embeddings, Map.get(body, "usage", %{})}
+    end
+  end
+
+  defp extract_embeddings(%{"data" => data}, _expected_count) when is_list(data),
+    do: {:error, {:embedding_vector_count_exceeded, @max_embedding_vectors}}
+
+  defp extract_embeddings(body, _expected_count), do: {:error, {:unexpected_embed_response, body}}
+
+  defp extract_embedding_vectors([], acc, dimensions),
+    do: {:ok, Enum.reverse(acc), dimensions || 0}
+
+  defp extract_embedding_vectors([entry | rest], acc, expected_dimensions) do
+    vector = if is_map(entry), do: Map.get(entry, "embedding"), else: entry
+
+    with {:ok, dimensions} <- validate_embedding_vector(vector, 0),
+         true <-
+           is_nil(expected_dimensions) or dimensions == expected_dimensions or
+             {:error, {:embedding_dimension_mismatch, expected_dimensions, dimensions}} do
+      extract_embedding_vectors(rest, [vector | acc], dimensions)
+    end
+  end
+
+  defp validate_embedding_vector([], 0), do: {:error, :empty_embedding_vector}
+  defp validate_embedding_vector([], dimensions), do: {:ok, dimensions}
+
+  defp validate_embedding_vector(_vector, dimensions)
+       when dimensions >= @max_embedding_dimensions,
+       do: {:error, {:embedding_dimensions_exceeded, @max_embedding_dimensions}}
+
+  defp validate_embedding_vector([value | rest], dimensions) do
+    if ResponseBudget.finite_number?(value),
+      do: validate_embedding_vector(rest, dimensions + 1),
+      else: {:error, :finite_numeric_embedding_required}
+  end
+
+  defp validate_embedding_vector(_improper_or_non_list, _dimensions),
+    do: {:error, :proper_embedding_vector_required}
 
   defp exception_for(%{__struct__: mod} = e)
        when mod in [ReqLLM.Error.API.Request, ReqLLM.Error.API.Response] do
@@ -172,4 +237,10 @@ defmodule Arbor.LLM.Plugs.Dispatch do
 
   defp retryable_status?(status) when status in [408, 429, 500, 502, 503, 504], do: true
   defp retryable_status?(_), do: false
+
+  defp embedding_capable?(%LLMDB.Model{capabilities: capabilities}) when is_map(capabilities),
+    do:
+      Map.get(capabilities, :embeddings, Map.get(capabilities, "embeddings")) not in [nil, false]
+
+  defp embedding_capable?(_model), do: false
 end
