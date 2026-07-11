@@ -35,7 +35,7 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
         pool: Ecto.Adapters.SQL.Sandbox
   """
 
-  use ExUnit.Case, async: false
+  use Arbor.Persistence.DatabaseCase, async: false
 
   import Ecto.Query
 
@@ -45,15 +45,6 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
 
   @moduletag :integration
   @moduletag :database
-
-  setup_all do
-    # Start the Repo if not already started
-    case Repo.start_link() do
-      {:ok, pid} -> {:ok, repo_pid: pid}
-      {:error, {:already_started, pid}} -> {:ok, repo_pid: pid}
-      {:error, reason} -> {:skip, "Database not available: #{inspect(reason)}"}
-    end
-  end
 
   setup do
     # Clean up events table before each test

@@ -67,6 +67,8 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   - `:repo` - Ecto Repo to use (default: `Arbor.Persistence.Repo`)
   - `:expected_version` - Optimistic concurrency check (optional)
   - `:max_current_age_ms` - Require a current head younger than this duration
+  - `:sqlite_busy_deadline_ms` - SQLite lock-acquisition budget in `1..60_000`
+    milliseconds (default: `5_000`)
 
   ## Returns
 
@@ -77,6 +79,10 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   @impl true
   # Bounded optimistic-concurrency retry for the event_number race (see do_append).
   @max_append_attempts 5
+  @default_sqlite_busy_deadline_ms 5_000
+  @max_sqlite_busy_deadline_ms 60_000
+  @sqlite_initial_backoff_ms 2
+  @sqlite_max_backoff_ms 50
 
   def append(stream_id, events, opts \\ [])
 
@@ -85,8 +91,11 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   end
 
   def append(stream_id, events, opts) when is_list(events) do
-    with {:ok, events, preconditions} <- EventLog.validate_append(stream_id, events, opts) do
-      do_append(stream_id, events, preconditions, opts, 1)
+    repo = Keyword.get(opts, :repo, Repo)
+
+    with {:ok, events, preconditions} <- EventLog.validate_append(stream_id, events, opts),
+         {:ok, sqlite_deadline_mono} <- sqlite_deadline(repo, opts) do
+      do_append(stream_id, events, preconditions, opts, 1, sqlite_deadline_mono, 0)
     end
   end
 
@@ -106,10 +115,18 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   # different lock keys and don't contend. The lock auto-releases at transaction
   # end (commit or rollback). The bounded optimistic retry below is kept as a
   # backstop but should now essentially never fire.
-  defp do_append(stream_id, events, preconditions, opts, attempt) do
+  defp do_append(
+         stream_id,
+         events,
+         preconditions,
+         opts,
+         attempt,
+         sqlite_deadline_mono,
+         busy_attempt
+       ) do
     repo = Keyword.get(opts, :repo, Repo)
 
-    transaction(repo, fn ->
+    transaction(repo, sqlite_deadline_mono, fn ->
       # Serialize concurrent appends to this stream at the database (Postgres
       # only — SQLite serializes writes already, and the ETS/Agent backends and
       # the retry-test stub repos have no such lock).
@@ -149,7 +166,24 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
       persisted
     end)
-    |> handle_transaction_result()
+    |> case do
+      {:sqlite_busy, :acquisition} ->
+        retry_sqlite_acquisition(
+          stream_id,
+          events,
+          preconditions,
+          opts,
+          attempt,
+          sqlite_deadline_mono,
+          busy_attempt
+        )
+
+      {:sqlite_busy, _after_begin} ->
+        {:error, :database_busy}
+
+      transaction_result ->
+        handle_transaction_result(transaction_result)
+    end
   rescue
     # Two shapes of the same residual event_number conflict can surface here:
     #
@@ -170,7 +204,15 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
       cond do
         retryable? and attempt < @max_append_attempts ->
-          do_append(stream_id, events, preconditions, opts, attempt + 1)
+          do_append(
+            stream_id,
+            events,
+            preconditions,
+            opts,
+            attempt + 1,
+            sqlite_deadline_mono,
+            busy_attempt
+          )
 
         # Retries exhausted on a declared-constraint conflict: surface the
         # changeset rather than crashing the caller, per the append contract.
@@ -501,13 +543,147 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     :ok
   end
 
-  defp transaction(repo, fun) do
+  defp transaction(repo, sqlite_deadline_mono, fun) do
     if sqlite_repo?(repo) do
-      repo.transaction(fun, mode: :immediate)
+      sqlite_transaction(repo, sqlite_deadline_mono, fun)
     else
       repo.transaction(fun)
     end
   end
+
+  defp sqlite_transaction(repo, deadline_mono, fun) do
+    remaining_ms = deadline_mono - System.monotonic_time(:millisecond)
+
+    if remaining_ms <= 0 do
+      {:sqlite_busy, :acquisition}
+    else
+      transaction_started = {__MODULE__, make_ref()}
+
+      try do
+        result =
+          repo.transaction(
+            fn ->
+              Process.put(transaction_started, true)
+              fun.()
+            end,
+            mode: :immediate,
+            timeout: remaining_ms
+          )
+
+        phase = sqlite_transaction_phase(transaction_started)
+
+        if retryable_sqlite_failure?(result, phase) do
+          {:sqlite_busy, phase}
+        else
+          result
+        end
+      rescue
+        error ->
+          phase = sqlite_transaction_phase(transaction_started)
+
+          if retryable_sqlite_failure?(error, phase) do
+            {:sqlite_busy, phase}
+          else
+            reraise(error, __STACKTRACE__)
+          end
+      catch
+        :exit, reason ->
+          phase = sqlite_transaction_phase(transaction_started)
+
+          if retryable_sqlite_failure?(reason, phase) do
+            {:sqlite_busy, phase}
+          else
+            exit(reason)
+          end
+      after
+        Process.delete(transaction_started)
+      end
+    end
+  end
+
+  defp retry_sqlite_acquisition(
+         stream_id,
+         events,
+         preconditions,
+         opts,
+         append_attempt,
+         deadline_mono,
+         busy_attempt
+       ) do
+    remaining_ms = deadline_mono - System.monotonic_time(:millisecond)
+
+    if remaining_ms <= 0 do
+      {:error, :database_busy}
+    else
+      backoff_ms =
+        min(
+          @sqlite_initial_backoff_ms * Integer.pow(2, min(busy_attempt, 5)),
+          @sqlite_max_backoff_ms
+        )
+
+      Process.sleep(min(backoff_ms, remaining_ms))
+
+      do_append(
+        stream_id,
+        events,
+        preconditions,
+        opts,
+        append_attempt,
+        deadline_mono,
+        busy_attempt + 1
+      )
+    end
+  end
+
+  defp sqlite_transaction_phase(marker) do
+    if Process.get(marker), do: :transaction, else: :acquisition
+  end
+
+  defp retryable_sqlite_failure?(failure, phase) do
+    sqlite_lock_failure?(failure) or
+      (phase == :acquisition and nested_reason?(failure, :timeout))
+  end
+
+  defp sqlite_lock_failure?(%{__exception__: true} = error) do
+    error
+    |> Exception.message()
+    |> sqlite_lock_message?()
+  end
+
+  defp sqlite_lock_failure?(message) when is_binary(message), do: sqlite_lock_message?(message)
+
+  defp sqlite_lock_failure?(value) when is_tuple(value) do
+    value
+    |> Tuple.to_list()
+    |> Enum.any?(&sqlite_lock_failure?/1)
+  end
+
+  defp sqlite_lock_failure?(value) when is_list(value),
+    do: Enum.any?(value, &sqlite_lock_failure?/1)
+
+  defp sqlite_lock_failure?(_value), do: false
+
+  defp sqlite_lock_message?(message) do
+    normalized = String.downcase(message)
+
+    String.contains?(normalized, "database is busy") or
+      String.contains?(normalized, "database busy") or
+      String.contains?(normalized, "database is locked") or
+      String.contains?(normalized, "database table is locked")
+  end
+
+  defp nested_reason?(value, expected) when value == expected, do: true
+
+  defp nested_reason?(value, expected) when is_tuple(value) do
+    value
+    |> Tuple.to_list()
+    |> Enum.any?(&nested_reason?(&1, expected))
+  end
+
+  defp nested_reason?(value, expected) when is_list(value),
+    do: Enum.any?(value, &nested_reason?(&1, expected))
+
+  defp nested_reason?(_value, _expected), do: false
 
   # True only for a real Ecto.Adapters.Postgres-backed repo. Guarded so the stub
   # repos used in the DB-free retry tests (which don't define `__adapter__/0`)
@@ -520,6 +696,22 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   defp sqlite_repo?(repo) do
     function_exported?(repo, :__adapter__, 0) and
       repo.__adapter__() == Ecto.Adapters.SQLite3
+  end
+
+  defp sqlite_deadline(repo, opts) do
+    if sqlite_repo?(repo) do
+      case Keyword.get(opts, :sqlite_busy_deadline_ms, @default_sqlite_busy_deadline_ms) do
+        timeout
+        when is_integer(timeout) and timeout > 0 and
+               timeout <= @max_sqlite_busy_deadline_ms ->
+          {:ok, System.monotonic_time(:millisecond) + timeout}
+
+        _invalid ->
+          {:error, :invalid_precondition}
+      end
+    else
+      {:ok, nil}
+    end
   end
 
   defp head_fresh?(_repo, _stream_id, nil), do: true

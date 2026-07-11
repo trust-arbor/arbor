@@ -205,6 +205,20 @@ defmodule Arbor.Contracts.API.Persistence do
             ) :: {:ok, [event()]} | {:error, term()}
 
   @doc """
+  Read at most the current head event from a stream using the specified backend.
+
+  Backends may accept a bounded freshness requirement through `opts`. Returns
+  `{:ok, nil}` when the stream is empty or its head does not satisfy that
+  requirement.
+  """
+  @callback read_current_stream_head_using_backend(
+              store_name(),
+              backend(),
+              stream_id(),
+              opts()
+            ) :: {:ok, event() | nil} | {:error, term()}
+
+  @doc """
   Read all events across all streams using the specified backend.
 
   Returns events ordered by global position.
@@ -281,6 +295,7 @@ defmodule Arbor.Contracts.API.Persistence do
     # EventLog operations
     append_events_to_stream_using_backend: 5,
     read_events_from_stream_using_backend: 4,
+    read_current_stream_head_using_backend: 4,
     read_all_events_using_backend: 3,
     check_stream_exists_using_backend: 4,
     get_stream_version_using_backend: 4,

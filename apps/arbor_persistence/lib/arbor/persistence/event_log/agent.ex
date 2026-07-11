@@ -5,6 +5,9 @@ defmodule Arbor.Persistence.EventLog.Agent do
   Lightweight alternative to ETS for small datasets or testing.
   Does NOT support subscriptions (subscribe/3 returns {:error, :not_supported}).
 
+  Append calls accept `:call_timeout_ms` in `1..60_000` (default `5_000`).
+  Requests first processed after their captured deadline fail without mutation.
+
       children = [
         {Arbor.Persistence.EventLog.Agent, name: :my_event_log}
       ]
@@ -14,23 +17,32 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   alias Arbor.Persistence.{Event, EventLog}
 
+  @default_append_call_timeout_ms 5_000
+  @max_append_call_timeout_ms 60_000
+
   # --- Client API ---
 
   @impl Arbor.Persistence.EventLog
   def append(stream_id, events, opts) do
-    with {:ok, events, preconditions} <- EventLog.validate_append(stream_id, events, opts) do
+    with {:ok, events, preconditions} <- EventLog.validate_append(stream_id, events, opts),
+         {:ok, call_timeout_ms} <- append_call_timeout(opts) do
       name = Keyword.fetch!(opts, :name)
+      deadline_mono = System.monotonic_time(:millisecond) + call_timeout_ms
 
-      Agent.get_and_update(name, fn state ->
-        now = System.monotonic_time(:millisecond)
+      safe_get_and_update(name, call_timeout_ms, fn state ->
+        processed_at = System.monotonic_time(:millisecond)
 
-        case check_preconditions(stream_id, preconditions, now, state) do
-          :ok ->
-            {persisted, state} = do_append(stream_id, events, now, state)
-            {{:ok, persisted}, state}
+        if processed_at >= deadline_mono do
+          {{:error, :operation_timeout}, state}
+        else
+          case check_preconditions(stream_id, preconditions, processed_at, state) do
+            :ok ->
+              {persisted, state} = do_append(stream_id, events, processed_at, state)
+              {{:ok, persisted}, state}
 
-          {:error, reason} ->
-            {{:error, reason}, state}
+            {:error, reason} ->
+              {{:error, reason}, state}
+          end
         end
       end)
     end
@@ -193,4 +205,44 @@ defmodule Arbor.Persistence.EventLog.Agent do
       _empty_or_unknown -> false
     end
   end
+
+  defp append_call_timeout(opts) do
+    case Keyword.get(opts, :call_timeout_ms, @default_append_call_timeout_ms) do
+      timeout
+      when is_integer(timeout) and timeout > 0 and timeout <= @max_append_call_timeout_ms ->
+        {:ok, timeout}
+
+      _invalid ->
+        {:error, :invalid_precondition}
+    end
+  end
+
+  defp safe_get_and_update(name, timeout, fun) do
+    Agent.get_and_update(name, fun, timeout)
+  catch
+    :exit, reason ->
+      cond do
+        exit_reason_contains?(reason, :timeout) -> {:error, :operation_timeout}
+        backend_unavailable_exit?(reason) -> {:error, :backend_unavailable}
+        true -> exit(reason)
+      end
+  end
+
+  defp backend_unavailable_exit?(reason) do
+    Enum.any?([:noproc, :shutdown, :normal], &exit_reason_contains?(reason, &1))
+  end
+
+  defp exit_reason_contains?(reason, expected) when reason == expected, do: true
+
+  defp exit_reason_contains?(reason, expected) when is_tuple(reason) do
+    reason
+    |> Tuple.to_list()
+    |> Enum.any?(&exit_reason_contains?(&1, expected))
+  end
+
+  defp exit_reason_contains?(reason, expected) when is_list(reason) do
+    Enum.any?(reason, &exit_reason_contains?(&1, expected))
+  end
+
+  defp exit_reason_contains?(_reason, _expected), do: false
 end

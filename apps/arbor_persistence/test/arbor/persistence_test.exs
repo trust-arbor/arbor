@@ -165,6 +165,9 @@ defmodule Arbor.PersistenceTest do
       assert {:ok, [_]} =
                Persistence.read_events_from_stream_using_backend(name, backend, "s1", [])
 
+      assert {:ok, %Event{event_number: 1}} =
+               Persistence.read_current_stream_head_using_backend(name, backend, "s1", [])
+
       assert {:ok, [_]} = Persistence.read_all_events_using_backend(name, backend, [])
 
       assert Persistence.check_stream_exists_using_backend(name, backend, "s1", [])

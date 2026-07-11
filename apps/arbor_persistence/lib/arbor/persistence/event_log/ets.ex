@@ -320,6 +320,15 @@ defmodule Arbor.Persistence.EventLog.ETS do
   end
 
   def handle_call({:rehydrate_metadata, snapshot}, _from, state) do
+    rehydrated_stream_ids =
+      Enum.reduce(snapshot.stream_versions, [], fn {stream_id, incoming_version}, acc ->
+        case Map.fetch(state.stream_versions, stream_id) do
+          :error -> [stream_id | acc]
+          {:ok, current_version} when incoming_version > current_version -> [stream_id | acc]
+          {:ok, _current_version} -> acc
+        end
+      end)
+
     merged_stream_versions =
       Map.merge(state.stream_versions, snapshot.stream_versions, fn _k, current, incoming ->
         max(current, incoming)
@@ -328,8 +337,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
     new_global_position = max(state.global_position, snapshot.global_position)
 
     head_inserted_mono =
-      Map.keys(merged_stream_versions)
-      |> Enum.reduce(state.head_inserted_mono, &Map.put_new(&2, &1, :unknown))
+      Enum.reduce(rehydrated_stream_ids, state.head_inserted_mono, fn stream_id, freshness ->
+        Map.put(freshness, stream_id, :unknown)
+      end)
 
     {:reply, :ok,
      %{

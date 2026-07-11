@@ -69,6 +69,46 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
 
       assert {:ok, %Event{event_number: 2}} = ELAgent.read_stream_head("guarded", name: name)
     end
+
+    test "security regression: a timed-out queued append cannot commit after the agent resumes",
+         %{
+           name: name
+         } do
+      stream_id = "timed-out"
+      event = Event.new(stream_id, "must-not-commit", %{})
+      :ok = :sys.suspend(name)
+
+      task =
+        Task.async(fn ->
+          ELAgent.append(stream_id, event,
+            name: name,
+            expected_version: 0,
+            call_timeout_ms: 25
+          )
+        end)
+
+      try do
+        assert {:error, :operation_timeout} = Task.await(task, 1_000)
+      after
+        :ok = :sys.resume(name)
+      end
+
+      # This call is handled after the expired append already queued in the mailbox.
+      assert {:ok, 0} = ELAgent.stream_version(stream_id, name: name)
+      refute ELAgent.stream_exists?(stream_id, name: name)
+    end
+
+    test "returns stable errors for unavailable agents and invalid call deadlines" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      missing_name = :"missing_el_agent_#{:erlang.unique_integer([:positive])}"
+      event = Event.new("missing", "event", %{})
+
+      assert {:error, :backend_unavailable} =
+               ELAgent.append("missing", event, name: missing_name, call_timeout_ms: 25)
+
+      assert {:error, :invalid_precondition} =
+               ELAgent.append("missing", event, name: missing_name, call_timeout_ms: :infinity)
+    end
   end
 
   describe "read_stream/2" do

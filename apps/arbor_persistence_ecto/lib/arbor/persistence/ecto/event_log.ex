@@ -53,7 +53,7 @@ defmodule Arbor.Persistence.Ecto.EventLog do
   def append(stream_id, events, opts \\ []) do
     with {:ok, events, preconditions} <- EventLog.validate_append(stream_id, events, opts),
          :ok <- reject_freshness(preconditions.max_current_age_ms) do
-      expected_version = preconditions.expected_version || :any
+      expected_version = preconditions.expected_version || :any_version
 
       # Convert to eventstore format
       event_data = Enum.map(events, &to_event_data/1)
@@ -244,7 +244,7 @@ defmodule Arbor.Persistence.Ecto.EventLog do
     }
   end
 
-  defp expected_version_to_start(:any), do: 0
+  defp expected_version_to_start(:any_version), do: 0
   defp expected_version_to_start(version) when is_integer(version), do: version + 1
 
   defp reject_freshness(nil), do: :ok

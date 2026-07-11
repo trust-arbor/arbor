@@ -167,6 +167,34 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
                  max_current_age_ms: 60_000
                )
     end
+
+    test "security regression: rehydrating a newer durable head clears local freshness", %{
+      name: name
+    } do
+      stream_id = "rehydrated-head"
+      event = Event.new(stream_id, "local", %{})
+
+      assert {:ok, [%Event{event_number: 1}]} = ETS.append(stream_id, event, name: name)
+
+      assert :ok =
+               ETS.rehydrate_metadata(
+                 %{stream_versions: %{stream_id => 2}, global_position: 2},
+                 name: name
+               )
+
+      assert {:ok, nil} =
+               ETS.read_stream_head(stream_id, name: name, max_current_age_ms: 60_000)
+
+      assert {:error, :deadline_exceeded} =
+               ETS.append(stream_id, Event.new(stream_id, "must-not-commit", %{}),
+                 name: name,
+                 expected_version: 2,
+                 max_current_age_ms: 60_000
+               )
+
+      assert {:ok, 2} = ETS.stream_version(stream_id, name: name)
+      assert {:ok, [%Event{event_number: 1}]} = ETS.read_stream(stream_id, name: name)
+    end
   end
 
   describe "read_stream/2" do

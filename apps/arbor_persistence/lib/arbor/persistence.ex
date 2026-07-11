@@ -631,6 +631,10 @@ defmodule Arbor.Persistence do
     do: read_stream(name, backend, stream_id, opts)
 
   @impl Arbor.Contracts.API.Persistence
+  def read_current_stream_head_using_backend(name, backend, stream_id, opts),
+    do: read_stream_head(name, backend, stream_id, opts)
+
+  @impl Arbor.Contracts.API.Persistence
   def read_all_events_using_backend(name, backend, opts),
     do: read_all(name, backend, opts)
 
