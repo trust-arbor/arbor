@@ -75,6 +75,10 @@ defmodule Arbor.LLM.ToolLoop do
         agent_id: identity.execution_principal,
         executor_opts: identity.executor_opts,
         signer: signer,
+        prompt_sanitizer_nonce:
+          Keyword.get_lazy(opts, :prompt_sanitizer_nonce, fn ->
+            @prompt_sanitizer.generate_nonce()
+          end),
         turn: 0,
         total_usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0},
         discovered_tools: [],
@@ -206,9 +210,8 @@ defmodule Arbor.LLM.ToolLoop do
     wrap_up_msg =
       Message.new(
         :user,
-        "You have used all available tool call rounds. You MUST now respond with a text " <>
-          "summary of what you accomplished and any remaining issues. Do NOT output any " <>
-          "tool calls or JSON — respond in plain text only."
+        "You have used all available tool call rounds. Respond now with your final answer " <>
+          "in the format required by the conversation. Do not call tools again."
       )
 
     text_only_request = %{
@@ -344,7 +347,7 @@ defmodule Arbor.LLM.ToolLoop do
           assistant_msg = build_assistant_message(response)
 
           # Build tool result messages
-          tool_msgs = build_tool_messages(tool_results)
+          tool_msgs = build_tool_messages(tool_results, state.prompt_sanitizer_nonce)
 
           # Append to conversation and continue
           updated_messages = request.messages ++ [assistant_msg | tool_msgs]
@@ -662,22 +665,22 @@ defmodule Arbor.LLM.ToolLoop do
     Message.new(:assistant, content)
   end
 
-  defp build_tool_messages(tool_results) do
-    nonce = @prompt_sanitizer.generate_nonce()
-
+  defp build_tool_messages(tool_results, nonce) do
     Enum.map(tool_results, fn {call_id, name, result} ->
-      {content, is_error} =
+      {raw_content, is_error} =
         case result do
           {:ok, text} ->
-            {@prompt_sanitizer.wrap(truncate(text, 30_000), nonce), false}
+            {truncate(text, 30_000), false}
 
           {:ok, :pending_approval, proposal_id} ->
             {"Action #{name} requires approval. Proposal ID: #{proposal_id}. " <>
                "Waiting for consensus decision.", false}
 
           {:error, reason} ->
-            {"Error: #{reason}", true}
+            {"Error: #{inspect(reason, limit: 50, printable_limit: 30_000)}", true}
         end
+
+      content = raw_content |> truncate(30_000) |> maybe_wrap_tool_result(nonce)
 
       Message.new(:tool, content, %{
         tool_call_id: call_id,
@@ -686,6 +689,11 @@ defmodule Arbor.LLM.ToolLoop do
       })
     end)
   end
+
+  defp maybe_wrap_tool_result(content, nonce) when is_binary(nonce) and nonce != "",
+    do: @prompt_sanitizer.wrap(content, nonce)
+
+  defp maybe_wrap_tool_result(content, _nonce), do: content
 
   defp normalize_args(args) when is_map(args), do: args
 
@@ -750,8 +758,8 @@ defmodule Arbor.LLM.ToolLoop do
   defp add_cost(a, _b) when is_map(a), do: a
   defp add_cost(_a, b), do: b
 
-  # Instruction appended for a tools-stripped final pass, forcing a plain-text
-  # answer when the model finished a tool round without producing any text.
+  # Instruction appended for a tools-stripped final pass when the model finished
+  # a tool round without producing an answer.
   #
   # NOTE: this MUST be a :user message, not :system. The conversation already
   # carries the agent's system prompt, and ReqLLM/OpenAI-compatible providers
@@ -761,8 +769,8 @@ defmodule Arbor.LLM.ToolLoop do
   defp text_only_wrap_up_message do
     Message.new(
       :user,
-      "Respond now with a plain-text answer based on what you've done. " <>
-        "Do NOT output any tool calls or JSON — text only."
+      "Respond now with your final answer based on what you've done, using the output " <>
+        "format required by the conversation. Do not call tools again."
     )
   end
 
