@@ -564,6 +564,143 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     )
   end
 
+  test "security regression: operator rework cannot terminate at an unrelated status after counters",
+       ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    bypassed =
+      add_edge(
+        graph,
+        "inc_operator_total_rework_count",
+        "status_no_changes",
+        "context.bypass_fresh_gate=true"
+      )
+
+    assert_preflight_error(
+      bypassed,
+      profile,
+      "all_path_violation",
+      "operator_rework_resolution"
+    )
+  end
+
+  test "security regression: fresh operator turn cannot bypass its causal status gate", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    bypassed = add_edge(graph, "implement", "status_no_changes", "context.hidden_abort=true")
+
+    assert_preflight_error(
+      bypassed,
+      profile,
+      "rework_status_bypass",
+      "operator_rework_status_origin"
+    )
+  end
+
+  test "security regression: operator rework rejects a post-budget dead end", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    dead_end = "operator_rework_dead_end"
+    dead_end_graph = add_cloned_node(graph, "mark_operator_rework_kind", dead_end)
+
+    dead_end_graph =
+      add_edge(
+        dead_end_graph,
+        "inc_operator_total_rework_count",
+        dead_end,
+        "context.dead_end=true"
+      )
+
+    assert_preflight_path_violation(dead_end_graph, profile, "dead_end")
+  end
+
+  test "security regression: operator rework rejects a post-budget closed cycle", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    cycle = "operator_rework_closed_cycle"
+    cycle_graph = add_cloned_node(graph, "mark_operator_rework_kind", cycle)
+    cycle_graph = add_edge(cycle_graph, cycle, cycle, "context.keep_cycling=true")
+
+    cycle_graph =
+      add_edge(
+        cycle_graph,
+        "inc_operator_total_rework_count",
+        cycle,
+        "context.enter_cycle=true"
+      )
+
+    assert_preflight_path_violation(cycle_graph, profile, "cycle")
+  end
+
+  test "security regression: stale adjacency cannot hide an operator rework bypass edge", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    edge = edge("inc_operator_total_rework_count", "status_no_changes", "context.hidden=true")
+    stale = %{graph | edges: [edge | graph.edges]}
+
+    assert_preflight_error(
+      stale,
+      profile,
+      "all_path_violation",
+      "operator_rework_resolution"
+    )
+  end
+
+  test "security regression: graph analysis rejects node exhaustion inputs", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    oversized_nodes =
+      Enum.reduce(map_size(graph.nodes)..256, graph, fn index, acc ->
+        add_cloned_node(acc, "mark_operator_rework_kind", "limit_node_#{index}")
+      end)
+
+    assert_graph_limit(oversized_nodes, profile, "nodes")
+  end
+
+  test "security regression: graph analysis rejects edge exhaustion inputs", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    duplicate = List.first(graph.edges)
+    additions = List.duplicate(duplicate, 513 - length(graph.edges))
+    oversized_edges = %{graph | edges: additions ++ graph.edges}
+
+    assert_graph_limit(oversized_edges, profile, "edges")
+  end
+
+  test "security regression: serialized graph attributes are bounded", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    oversized_attrs =
+      update_in(graph.attrs, &Map.put(&1, "oversized", String.duplicate("x", 131_073)))
+
+    assert_graph_limit(oversized_attrs, profile, "attribute_container")
+  end
+
+  test "security regression: compiler rejects an oversized graph source before parsing", ctx do
+    oversized_source = ctx.template_source <> "\n// " <> String.duplicate("x", 262_145)
+
+    assert {:error, {:graph_source_too_large, actual, 262_144}} =
+             compile(plan!(), ctx, oversized_source)
+
+    assert actual > 262_144
+  end
+
   test "security regression: malformed approval edge fails closed in public preflight", ctx do
     assert {:ok, compilation} = compile(plan!(), ctx)
     graph = compiled_graph!(compilation.dot_source)
@@ -582,7 +719,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                review_profile: "binding"
              )
 
-    assert Enum.any?(errors, &(&1["code"] == "malformed_approval_edge"))
+    assert Enum.any?(errors, &(&1["code"] == "malformed_graph_edge"))
   end
 
   test "adversarial: authority override attribute fails closed", ctx do
@@ -873,13 +1010,23 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
   end
 
   defp add_edge(graph, from, to, condition) do
-    edge = %Arbor.Orchestrator.Graph.Edge{
+    edge = edge(from, to, condition)
+
+    %{graph | edges: [edge | graph.edges], adjacency: %{}, reverse_adjacency: %{}}
+  end
+
+  defp edge(from, to, condition) do
+    %Arbor.Orchestrator.Graph.Edge{
       from: from,
       to: to,
       attrs: %{"condition" => condition}
     }
+  end
 
-    %{graph | edges: [edge | graph.edges], adjacency: %{}, reverse_adjacency: %{}}
+  defp add_cloned_node(graph, source_id, node_id) do
+    source = Map.fetch!(graph.nodes, source_id)
+    node = %{source | id: node_id, label: node_id}
+    %{graph | nodes: Map.put(graph.nodes, node_id, node)}
   end
 
   defp inject_edge(source, existing_edge, injected_edge) do
@@ -896,6 +1043,45 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              error["code"] == code and error["detail"]["kind"] == kind
            end),
            "expected #{code}/#{kind}, got: #{inspect(errors)}"
+  end
+
+  defp assert_preflight_error(graph, profile, code, kind) do
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == code and error["detail"]["kind"] == kind
+           end),
+           "expected #{code}/#{kind}, got: #{inspect(errors)}"
+  end
+
+  defp assert_preflight_path_violation(graph, profile, violation_type) do
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == "all_path_violation" and
+               error["detail"]["kind"] == "operator_rework_resolution" and
+               error["detail"]["violation"]["type"] == violation_type
+           end),
+           "expected #{violation_type} path violation, got: #{inspect(errors)}"
+  end
+
+  defp assert_graph_limit(graph, profile, resource) do
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == "graph_limit_exceeded" and
+               error["detail"]["resource"] == resource
+           end),
+           "expected #{resource} graph limit, got: #{inspect(errors)}"
   end
 
   defp edge_target(graph, from, condition) do

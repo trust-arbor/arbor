@@ -23,6 +23,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           | {:invalid_semantic_policy, term()}
           | :invalid_graph
 
+  @max_source_bytes 262_144
+  @max_graph_nodes 256
+  @max_graph_edges 512
+  @max_node_id_bytes 512
+  @max_attribute_container_bytes 131_072
+  @max_serialized_attributes_bytes 1_048_576
+
   @required_policy_keys ~w(
     allowed_handlers
     allowed_exec_targets
@@ -124,7 +131,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   def validate(graph, policy, opts \\ [])
 
   def validate(%Graph{} = graph, policy, opts) when is_map(policy) and is_list(opts) do
-    with {:ok, policy} <- normalize_policy(policy),
+    with {:ok, graph} <- prepare_graph(graph),
+         {:ok, policy} <- normalize_policy(policy),
          {:ok, review_profile} <- normalize_review_profile(opts),
          :ok <- require_compiled(graph) do
       errors =
@@ -148,6 +156,167 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   end
 
   def validate(_graph, _policy, _opts), do: {:error, :invalid_graph}
+
+  @doc "Reject a coding graph source before parsing when it exceeds the reviewed ceiling."
+  @spec validate_source(binary()) ::
+          :ok | {:error, {:graph_source_too_large, non_neg_integer(), pos_integer()}}
+  def validate_source(source) when is_binary(source) do
+    size = byte_size(source)
+
+    if size <= @max_source_bytes do
+      :ok
+    else
+      {:error, {:graph_source_too_large, size, @max_source_bytes}}
+    end
+  end
+
+  def validate_source(_source), do: {:error, :invalid_graph_source}
+
+  # --- graph boundary ------------------------------------------------------
+
+  defp prepare_graph(%Graph{nodes: nodes, edges: edges} = graph)
+       when is_map(nodes) and is_list(edges) do
+    count_errors =
+      []
+      |> check_count_limit("nodes", map_size(nodes), @max_graph_nodes)
+      |> check_count_limit("edges", length(edges), @max_graph_edges)
+
+    if count_errors == [] do
+      errors =
+        []
+        |> check_node_boundary(nodes)
+        |> check_edge_boundary(edges, nodes)
+        |> check_attribute_boundaries(graph)
+
+      if errors == [] do
+        {adjacency, reverse_adjacency} = canonical_adjacency(edges)
+        {:ok, %{graph | adjacency: adjacency, reverse_adjacency: reverse_adjacency}}
+      else
+        {:error, {:semantic_preflight_failed, Enum.sort_by(errors, &error_sort_key/1)}}
+      end
+    else
+      {:error, {:semantic_preflight_failed, Enum.sort_by(count_errors, &error_sort_key/1)}}
+    end
+  end
+
+  defp prepare_graph(%Graph{}) do
+    {:error, {:semantic_preflight_failed, [error("malformed_graph", nil, %{})]}}
+  end
+
+  defp check_count_limit(errors, resource, count, maximum) do
+    if count <= maximum do
+      errors
+    else
+      [
+        error("graph_limit_exceeded", nil, %{
+          "resource" => resource,
+          "count" => count,
+          "maximum" => maximum
+        })
+        | errors
+      ]
+    end
+  end
+
+  defp check_node_boundary(errors, nodes) do
+    nodes
+    |> Enum.sort_by(fn {id, _node} -> inspect(id) end)
+    |> Enum.reduce(errors, fn
+      {node_id, %Graph.Node{id: node_id, attrs: attrs}}, acc
+      when is_binary(node_id) and is_map(attrs) and byte_size(node_id) <= @max_node_id_bytes ->
+        acc
+
+      {node_id, _node}, acc ->
+        [error("malformed_graph_node", valid_node_id(node_id), %{}) | acc]
+    end)
+  end
+
+  defp check_edge_boundary(errors, edges, nodes) do
+    edges
+    |> Enum.with_index()
+    |> Enum.reduce(errors, fn
+      {%Graph.Edge{from: from, to: to, attrs: attrs}, _index}, acc
+      when is_binary(from) and is_binary(to) and is_map(attrs) and
+             byte_size(from) <= @max_node_id_bytes and byte_size(to) <= @max_node_id_bytes ->
+        if Map.has_key?(nodes, from) and Map.has_key?(nodes, to) do
+          acc
+        else
+          [error("malformed_graph_edge", from, %{"to" => to}) | acc]
+        end
+
+      {_edge, index}, acc ->
+        [error("malformed_graph_edge", nil, %{"edge_index" => index}) | acc]
+    end)
+  end
+
+  defp check_attribute_boundaries(errors, graph) do
+    containers =
+      [
+        {"graph", nil, graph.attrs},
+        {"node_defaults", nil, graph.node_defaults},
+        {"edge_defaults", nil, graph.edge_defaults},
+        {"subgraphs", nil, graph.subgraphs}
+      ] ++
+        Enum.map(graph.nodes, fn {node_id, node} -> {"node", node_id, node.attrs} end) ++
+        Enum.with_index(graph.edges, fn edge, index -> {"edge", index, edge.attrs} end)
+
+    {errors, total} =
+      Enum.reduce(containers, {errors, 0}, fn {kind, owner, attrs}, {acc, total} ->
+        case serialized_size(attrs) do
+          {:ok, size} when size <= @max_attribute_container_bytes ->
+            {acc, total + size}
+
+          {:ok, size} ->
+            detail = %{
+              "resource" => "attribute_container",
+              "kind" => kind,
+              "bytes" => size,
+              "maximum" => @max_attribute_container_bytes
+            }
+
+            {[error("graph_limit_exceeded", attribute_owner(owner), detail) | acc], total + size}
+
+          :error ->
+            {[
+               error("malformed_graph_attributes", attribute_owner(owner), %{"kind" => kind})
+               | acc
+             ], total}
+        end
+      end)
+
+    if total <= @max_serialized_attributes_bytes do
+      errors
+    else
+      [
+        error("graph_limit_exceeded", nil, %{
+          "resource" => "serialized_attributes",
+          "bytes" => total,
+          "maximum" => @max_serialized_attributes_bytes
+        })
+        | errors
+      ]
+    end
+  end
+
+  defp serialized_size(term) do
+    {:ok, :erlang.external_size(term)}
+  rescue
+    _error -> :error
+  end
+
+  defp canonical_adjacency(edges) do
+    Enum.reduce(edges, {%{}, %{}}, fn edge, {adjacency, reverse_adjacency} ->
+      {
+        Map.update(adjacency, edge.from, [edge], &[edge | &1]),
+        Map.update(reverse_adjacency, edge.to, [edge], &[edge | &1])
+      }
+    end)
+  end
+
+  defp valid_node_id(node_id) when is_binary(node_id), do: node_id
+  defp valid_node_id(_node_id), do: nil
+  defp attribute_owner(owner) when is_binary(owner), do: owner
+  defp attribute_owner(_owner), do: nil
 
   # --- policy normalization -------------------------------------------------
 
@@ -344,6 +513,17 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   @approval_denied_condition "context.commit.interaction_outcome=denied"
   @approval_rework_condition "context.commit.interaction_outcome=rework"
   @approval_cleanup_node "close_worker"
+  @rework_exhaustion_marker "mark_operator_rework_exhausted_error"
+  @rework_exhaustion_status "status_rework_exhausted"
+  @rework_dispatch_node "reset_worker_turn_protocol_retry_count"
+  @rework_dispatch_target "implement"
+
+  @precommit_abort_origins %{
+    "status_declined" => "route_worker_status",
+    "status_no_changes" => "inspect_workspace",
+    "status_pipeline_error_then_close" => "implement",
+    "status_validation_failed" => "validate"
+  }
 
   @operator_rework_chain ~w(
     check_operator_rework_category_budget
@@ -618,12 +798,6 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       rework_reachable = reachable_from(graph, rework_entry)
       rework_dominators = compute_dominators(graph, rework_entry, rework_reachable)
 
-      status_nodes =
-        graph.nodes
-        |> Map.keys()
-        |> Enum.filter(&String.starts_with?(&1, "status_"))
-        |> MapSet.new()
-
       acc =
         acc
         |> require_reachable_outcome(reachable, rework_entry, "operator_rework")
@@ -661,12 +835,32 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           rework_dominators,
           "operator_rework_cleanup"
         )
-        |> require_terminal_paths_through_any(
+        |> require_all_paths_through_any(
           graph,
           rework_entry,
-          status_nodes,
-          "operator_rework_status"
+          MapSet.new([@rework_dispatch_node, @rework_exhaustion_marker]),
+          "operator_rework_resolution"
         )
+        |> require_all_paths_through(
+          graph,
+          @rework_exhaustion_marker,
+          @rework_exhaustion_status,
+          "operator_rework_exhaustion_status"
+        )
+        |> require_all_paths_through(
+          graph,
+          @rework_exhaustion_status,
+          @approval_cleanup_node,
+          "operator_rework_exhaustion_cleanup"
+        )
+        |> require_all_paths_through(
+          graph,
+          @rework_dispatch_node,
+          @rework_dispatch_target,
+          "operator_rework_dispatch"
+        )
+        |> check_rework_status_edges(graph, rework_reachable, rework_dominators)
+        |> check_rework_completion_shape(graph, rework_entry, rework_reachable)
 
       Enum.reduce(@post_commit_review_nodes, acc, fn target, inner ->
         require_dominates(
@@ -679,6 +873,101 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         )
       end)
     end)
+  end
+
+  defp check_rework_status_edges(errors, graph, reachable, dominators) do
+    graph.edges
+    |> Enum.filter(fn edge ->
+      MapSet.member?(reachable, edge.from) and MapSet.member?(reachable, edge.to) and
+        String.starts_with?(edge.to, "status_")
+    end)
+    |> Enum.reduce(errors, fn edge, acc ->
+      origin = Map.get(@precommit_abort_origins, edge.to)
+
+      allowed? =
+        dominates?(dominators, @commit_approval_node, edge.from) or
+          (is_binary(origin) and dominates?(dominators, origin, edge.from)) or
+          (edge.to == @rework_exhaustion_status and edge.from == @rework_exhaustion_marker)
+
+      if allowed? do
+        acc
+      else
+        [
+          error("rework_status_bypass", edge.from, %{
+            "kind" => "operator_rework_status_origin",
+            "status_node" => edge.to
+          })
+          | acc
+        ]
+      end
+    end)
+  end
+
+  defp check_rework_completion_shape(errors, graph, source, reachable) do
+    terminals = graph |> Graph.find_exit_nodes() |> Enum.map(& &1.id) |> MapSet.new()
+
+    dead_ends =
+      reachable
+      |> Enum.reject(&MapSet.member?(terminals, &1))
+      |> Enum.filter(&(Graph.outgoing_edges(graph, &1) == []))
+      |> Enum.sort()
+
+    errors =
+      Enum.reduce(dead_ends, errors, fn node_id, acc ->
+        [
+          error("all_path_violation", source, %{
+            "kind" => "operator_rework_completion",
+            "violation" => %{"type" => "dead_end", "node_id" => node_id}
+          })
+          | acc
+        ]
+      end)
+
+    terminating_seeds = MapSet.union(terminals, MapSet.new(dead_ends))
+    can_terminate = reverse_reachable(graph, terminating_seeds, reachable)
+    nonterminating = MapSet.difference(reachable, can_terminate)
+
+    case nonterminating |> Enum.sort() |> List.first() do
+      nil ->
+        errors
+
+      node_id ->
+        [
+          error("all_path_violation", source, %{
+            "kind" => "operator_rework_completion",
+            "violation" => %{"type" => "cycle", "node_id" => node_id}
+          })
+          | errors
+        ]
+    end
+  end
+
+  defp reverse_reachable(graph, seeds, allowed) do
+    do_reverse_reachable(graph, :queue.from_list(Enum.to_list(seeds)), MapSet.new(), allowed)
+  end
+
+  defp do_reverse_reachable(graph, queue, visited, allowed) do
+    case :queue.out(queue) do
+      {:empty, _queue} ->
+        visited
+
+      {{:value, node_id}, rest} ->
+        if MapSet.member?(visited, node_id) or not MapSet.member?(allowed, node_id) do
+          do_reverse_reachable(graph, rest, visited, allowed)
+        else
+          previous =
+            graph
+            |> Graph.incoming_edges(node_id)
+            |> Enum.map(& &1.from)
+
+          do_reverse_reachable(
+            graph,
+            enqueue_all(rest, previous),
+            MapSet.put(visited, node_id),
+            allowed
+          )
+        end
+    end
   end
 
   defp require_reachable_outcome(errors, reachable, node_id, kind) do
@@ -744,70 +1033,91 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   end
 
   defp reachable_until(graph, source, cut) do
-    do_reachable_until(graph, [source], MapSet.new(), cut, false)
+    {visited, reached} = reachable_until_any(graph, source, MapSet.new([cut]))
+    {visited, MapSet.member?(reached, cut)}
   end
 
-  defp require_terminal_paths_through_any(errors, graph, source, required, kind) do
-    avoiding = reachable_without(graph, source, required)
-    terminals = graph |> Graph.find_exit_nodes() |> Enum.map(& &1.id) |> MapSet.new()
+  defp require_all_paths_through_any(errors, graph, source, required, kind) do
+    cond do
+      not Map.has_key?(graph.nodes, source) ->
+        [error("missing_all_path_source", source, %{"kind" => kind}) | errors]
 
-    case Enum.find(avoiding, &MapSet.member?(terminals, &1)) do
-      nil ->
-        errors
+      Enum.any?(required, &(not Map.has_key?(graph.nodes, &1))) ->
+        missing = required |> Enum.reject(&Map.has_key?(graph.nodes, &1)) |> Enum.sort()
 
-      terminal ->
         [
-          error("all_path_violation", source, %{
+          error("missing_all_path_gate", List.first(missing), %{
             "kind" => kind,
-            "required_nodes" => required |> Enum.sort(),
-            "violation" => %{"type" => "terminal", "node_id" => terminal}
+            "source" => source,
+            "required_nodes" => Enum.sort(required)
           })
           | errors
         ]
+
+      true ->
+        {avoiding, reached} = reachable_until_any(graph, source, required)
+        violation = all_path_violation(graph, avoiding)
+
+        cond do
+          MapSet.size(reached) == 0 ->
+            [
+              error("all_path_gate_unreachable", source, %{
+                "kind" => kind,
+                "required_nodes" => Enum.sort(required)
+              })
+              | errors
+            ]
+
+          violation != nil ->
+            [
+              error("all_path_violation", source, %{
+                "kind" => kind,
+                "required_nodes" => Enum.sort(required),
+                "violation" => violation
+              })
+              | errors
+            ]
+
+          true ->
+            errors
+        end
     end
   end
 
-  defp reachable_without(graph, source, cuts) do
-    do_reachable_without(graph, [source], MapSet.new(), cuts)
+  defp reachable_until_any(graph, source, cuts) do
+    do_reachable_until_any(graph, :queue.from_list([source]), MapSet.new(), cuts, MapSet.new())
   end
 
-  defp do_reachable_without(_graph, [], visited, _cuts), do: visited
+  defp do_reachable_until_any(graph, queue, visited, cuts, reached) do
+    case :queue.out(queue) do
+      {:empty, _queue} ->
+        {visited, reached}
 
-  defp do_reachable_without(graph, [node_id | rest], visited, cuts) do
-    cond do
-      MapSet.member?(cuts, node_id) or MapSet.member?(visited, node_id) ->
-        do_reachable_without(graph, rest, visited, cuts)
+      {{:value, node_id}, rest} ->
+        cond do
+          MapSet.member?(cuts, node_id) ->
+            do_reachable_until_any(
+              graph,
+              rest,
+              visited,
+              cuts,
+              MapSet.put(reached, node_id)
+            )
 
-      not Map.has_key?(graph.nodes, node_id) ->
-        do_reachable_without(graph, rest, visited, cuts)
+          MapSet.member?(visited, node_id) or not Map.has_key?(graph.nodes, node_id) ->
+            do_reachable_until_any(graph, rest, visited, cuts, reached)
 
-      true ->
-        next = graph |> Graph.outgoing_edges(node_id) |> Enum.map(& &1.to)
-        do_reachable_without(graph, rest ++ next, MapSet.put(visited, node_id), cuts)
-    end
-  end
+          true ->
+            next = graph |> Graph.outgoing_edges(node_id) |> Enum.map(& &1.to)
 
-  defp do_reachable_until(_graph, [], visited, _cut, reached_cut?),
-    do: {visited, reached_cut?}
-
-  defp do_reachable_until(graph, [node_id | rest], visited, cut, reached_cut?) do
-    cond do
-      node_id == cut ->
-        do_reachable_until(graph, rest, visited, cut, true)
-
-      MapSet.member?(visited, node_id) or not Map.has_key?(graph.nodes, node_id) ->
-        do_reachable_until(graph, rest, visited, cut, reached_cut?)
-
-      true ->
-        next = graph |> Graph.outgoing_edges(node_id) |> Enum.map(& &1.to)
-
-        do_reachable_until(
-          graph,
-          rest ++ next,
-          MapSet.put(visited, node_id),
-          cut,
-          reached_cut?
-        )
+            do_reachable_until_any(
+              graph,
+              enqueue_all(rest, next),
+              MapSet.put(visited, node_id),
+              cuts,
+              reached
+            )
+        end
     end
   end
 
@@ -840,33 +1150,42 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         {node_id, count}
       end)
 
-    queue = for {node_id, 0} <- indegrees, do: node_id
+    queue = :queue.from_list(for {node_id, 0} <- indegrees, do: node_id)
     remaining = prune_acyclic_nodes(graph, queue, nodes, indegrees)
 
     remaining |> Enum.sort() |> List.first()
   end
 
-  defp prune_acyclic_nodes(_graph, [], remaining, _indegrees), do: remaining
+  defp prune_acyclic_nodes(graph, queue, remaining, indegrees) do
+    case :queue.out(queue) do
+      {:empty, _queue} ->
+        remaining
 
-  defp prune_acyclic_nodes(graph, [node_id | rest], remaining, indegrees) do
-    if MapSet.member?(remaining, node_id) do
-      remaining = MapSet.delete(remaining, node_id)
+      {{:value, node_id}, rest} ->
+        if MapSet.member?(remaining, node_id) do
+          remaining = MapSet.delete(remaining, node_id)
 
-      {indegrees, newly_zero} =
-        graph
-        |> Graph.outgoing_edges(node_id)
-        |> Enum.map(& &1.to)
-        |> Enum.filter(&MapSet.member?(remaining, &1))
-        |> Enum.reduce({indegrees, []}, fn target, {degrees, zeroes} ->
-          degree = Map.fetch!(degrees, target) - 1
-          degrees = Map.put(degrees, target, degree)
-          zeroes = if degree == 0, do: [target | zeroes], else: zeroes
-          {degrees, zeroes}
-        end)
+          {indegrees, newly_zero} =
+            graph
+            |> Graph.outgoing_edges(node_id)
+            |> Enum.map(& &1.to)
+            |> Enum.filter(&MapSet.member?(remaining, &1))
+            |> Enum.reduce({indegrees, []}, fn target, {degrees, zeroes} ->
+              degree = Map.fetch!(degrees, target) - 1
+              degrees = Map.put(degrees, target, degree)
+              zeroes = if degree == 0, do: [target | zeroes], else: zeroes
+              {degrees, zeroes}
+            end)
 
-      prune_acyclic_nodes(graph, rest ++ newly_zero, remaining, indegrees)
-    else
-      prune_acyclic_nodes(graph, rest, remaining, indegrees)
+          prune_acyclic_nodes(
+            graph,
+            enqueue_all(rest, newly_zero),
+            remaining,
+            indegrees
+          )
+        else
+          prune_acyclic_nodes(graph, rest, remaining, indegrees)
+        end
     end
   end
 
@@ -976,28 +1295,34 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     graph
     |> Graph.outgoing_edges(from)
     |> Enum.map(& &1.to)
-    |> then(fn seeds -> approval_bfs(graph, seeds, MapSet.new([from]), to) end)
+    |> then(fn seeds ->
+      approval_bfs(graph, :queue.from_list(seeds), MapSet.new([from]), to)
+    end)
   end
 
   defp approval_reaches?(_, _, _), do: false
 
-  defp approval_bfs(_graph, [], _seen, _target), do: false
+  defp approval_bfs(graph, queue, seen, target) do
+    case :queue.out(queue) do
+      {:empty, _queue} ->
+        false
 
-  defp approval_bfs(graph, [node | rest], seen, target) do
-    cond do
-      node == target ->
-        true
+      {{:value, node}, rest} ->
+        cond do
+          node == target ->
+            true
 
-      MapSet.member?(seen, node) ->
-        approval_bfs(graph, rest, seen, target)
+          MapSet.member?(seen, node) ->
+            approval_bfs(graph, rest, seen, target)
 
-      true ->
-        next =
-          graph
-          |> Graph.outgoing_edges(node)
-          |> Enum.map(& &1.to)
+          true ->
+            next =
+              graph
+              |> Graph.outgoing_edges(node)
+              |> Enum.map(& &1.to)
 
-        approval_bfs(graph, rest ++ next, MapSet.put(seen, node), target)
+            approval_bfs(graph, enqueue_all(rest, next), MapSet.put(seen, node), target)
+        end
     end
   end
 
@@ -1890,22 +2215,30 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   # --- graph algorithms -----------------------------------------------------
 
   defp reachable_from(%Graph{} = graph, entry) do
-    do_reachable(graph, [entry], MapSet.new())
+    do_reachable(graph, :queue.from_list([entry]), MapSet.new())
   end
 
-  defp do_reachable(_graph, [], visited), do: visited
+  defp do_reachable(graph, queue, visited) do
+    case :queue.out(queue) do
+      {:empty, _queue} ->
+        visited
 
-  defp do_reachable(graph, [node_id | rest], visited) do
-    if MapSet.member?(visited, node_id) or not Map.has_key?(graph.nodes, node_id) do
-      do_reachable(graph, rest, visited)
-    else
-      next =
-        graph
-        |> Graph.outgoing_edges(node_id)
-        |> Enum.map(& &1.to)
+      {{:value, node_id}, rest} ->
+        if MapSet.member?(visited, node_id) or not Map.has_key?(graph.nodes, node_id) do
+          do_reachable(graph, rest, visited)
+        else
+          next =
+            graph
+            |> Graph.outgoing_edges(node_id)
+            |> Enum.map(& &1.to)
 
-      do_reachable(graph, rest ++ next, MapSet.put(visited, node_id))
+          do_reachable(graph, enqueue_all(rest, next), MapSet.put(visited, node_id))
+        end
     end
+  end
+
+  defp enqueue_all(queue, values) do
+    Enum.reduce(values, queue, &:queue.in(&1, &2))
   end
 
   # Iterative data-flow dominators. Correct in the presence of cycles: a node d
