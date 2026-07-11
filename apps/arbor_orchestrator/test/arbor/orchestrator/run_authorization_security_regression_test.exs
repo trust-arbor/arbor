@@ -631,7 +631,7 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
 
     assert {:error,
             {:child_execution_manifest_failed,
-             {:child_binding_not_pinned_by_parent, :action, "consensus_decide"}}} =
+             {:child_binding_not_pinned_by_parent, :action, "coding_review_tree_read"}}} =
              RunAuthorization.prepare(child,
                authorization: true,
                run_authorization: undeclared_authority

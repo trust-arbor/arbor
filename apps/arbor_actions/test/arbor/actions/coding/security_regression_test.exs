@@ -662,6 +662,7 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
       intent: "prove reviewed tree",
       agent_id: fixture.context.agent_id,
       workspace_id: fixture.lease.workspace_id,
+      commit_hash: material.candidate_commit,
       test_paths: [test_path],
       validation_profile: "security_regression"
     }
