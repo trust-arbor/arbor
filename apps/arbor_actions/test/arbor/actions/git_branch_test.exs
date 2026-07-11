@@ -9,6 +9,7 @@ defmodule Arbor.Actions.GitBranchTest do
   use Arbor.Actions.ActionCase, async: false
   @moduletag :fast
 
+  alias Arbor.Actions.Egress
   alias Arbor.Actions.Git
 
   setup_all do
@@ -124,6 +125,12 @@ defmodule Arbor.Actions.GitBranchTest do
       assert Git.Branch.name() == "git_branch"
       assert Git.Branch.category() == "git"
       assert "branch" in Git.Branch.tags()
+    end
+
+    @tag :security_regression
+    test "write-risk metadata security regression: branch is local_write via Egress" do
+      # create/switch write; list is read-only. Static class must be max effect.
+      assert Egress.effect_class_for(Git.Branch) == :local_write
     end
   end
 end

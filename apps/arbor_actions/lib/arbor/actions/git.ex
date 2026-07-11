@@ -425,6 +425,9 @@ defmodule Arbor.Actions.Git do
       }
     end
 
+    # Mutates repository state (commit / stage). Static class is the max effect.
+    def effect_class, do: :local_write
+
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}
     def run(%{path: path, message: message} = params, _context) do
@@ -751,6 +754,9 @@ defmodule Arbor.Actions.Git do
         from: {:control, requires: [:command_injection]}
       }
     end
+
+    # create/switch mutate repo state; list is read-only. Static class is max effect.
+    def effect_class, do: :local_write
 
     @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, String.t()}

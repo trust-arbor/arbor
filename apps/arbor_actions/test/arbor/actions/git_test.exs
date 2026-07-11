@@ -2,6 +2,7 @@ defmodule Arbor.Actions.GitTest do
   use Arbor.Actions.ActionCase, async: false
   @moduletag :fast
 
+  alias Arbor.Actions.Egress
   alias Arbor.Actions.Git
 
   # Start shell system for tests
@@ -341,6 +342,12 @@ defmodule Arbor.Actions.GitTest do
     test "validates action metadata" do
       assert Git.Commit.name() == "git_commit"
       assert "commit" in Git.Commit.tags()
+    end
+
+    @tag :security_regression
+    test "write-risk metadata security regression: commit is local_write via Egress" do
+      # Undeclared actions default to :read; git.commit mutates the repo.
+      assert Egress.effect_class_for(Git.Commit) == :local_write
     end
   end
 
