@@ -7,11 +7,10 @@ defmodule Arbor.Orchestrator.Eval.RunStoreTest do
   alias Arbor.Orchestrator.Eval.RunStore
 
   @moduletag :fast
+  @moduletag :tmp_dir
 
-  setup do
-    tmp_dir = Path.join(System.tmp_dir!(), "eval_store_delegate_#{:rand.uniform(1_000_000)}")
-    File.mkdir_p!(tmp_dir)
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+  setup %{tmp_dir: tmp_dir} do
+    File.chmod!(tmp_dir, 0o700)
     %{dir: tmp_dir}
   end
 
