@@ -593,8 +593,17 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp launch_approval_cleanup(_state, _task_id, nil), do: :ok
 
   defp launch_approval_cleanup(state, task_id, descriptor) when is_map(descriptor) do
-    supervisor = Map.fetch!(state, :cleanup_supervisor)
-    mfa = Map.fetch!(state, :approval_cleanup_mfa)
+    # Live code loading does not migrate an already-running GenServer map. Fall
+    # back to production defaults so pre-feature TaskStore state terminalizes
+    # safely without a process restart.
+    supervisor =
+      Map.get(
+        state,
+        :cleanup_supervisor,
+        Map.get(state, :task_supervisor, @default_task_supervisor)
+      )
+
+    mfa = Map.get(state, :approval_cleanup_mfa, @default_approval_cleanup_mfa)
     cleanup_opts = cleanup_opts_from_state(state, descriptor)
 
     # Named external launcher (MFA spawn, no anonymous closure). Runs outside
@@ -640,9 +649,20 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp cleanup_opts_from_state(state, descriptor) when is_map(descriptor) do
     [
       caller_id: Map.get(descriptor, :caller_id),
-      consensus_module: Map.fetch!(state, :approval_cleanup_consensus_module),
-      interaction_router: Map.fetch!(state, :approval_cleanup_interaction_router),
-      audit_module: Map.fetch!(state, :approval_cleanup_audit_module),
+      consensus_module:
+        Map.get(
+          state,
+          :approval_cleanup_consensus_module,
+          @default_approval_cleanup_consensus
+        ),
+      interaction_router:
+        Map.get(
+          state,
+          :approval_cleanup_interaction_router,
+          @default_approval_cleanup_interaction_router
+        ),
+      audit_module:
+        Map.get(state, :approval_cleanup_audit_module, @default_approval_cleanup_audit),
       trace_id: Map.get(descriptor, :trace_id),
       cleanup_reason: :task_termination
     ]

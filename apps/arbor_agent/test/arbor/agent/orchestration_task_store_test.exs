@@ -940,6 +940,38 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     refute_receive {:lifecycle_cleanup, "task_forged", _}, 200
   end
 
+  test "hot reload regression: legacy TaskStore state terminalizes without crashing", %{
+    store: store
+  } do
+    :sys.replace_state(store, fn state ->
+      Map.drop(state, [
+        :cleanup_supervisor,
+        :approval_cleanup_mfa,
+        :approval_cleanup_consensus_module,
+        :approval_cleanup_interaction_router,
+        :approval_cleanup_audit_module
+      ])
+    end)
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "do work",
+               name: store,
+               test_pid: self(),
+               runner: ControlledRunner,
+               approval_cleanup_descriptor: cleanup_descriptor()
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_1", "do work", _}
+    send(runner_pid, {:finish, {:ok, %{result_type: :test, payload: %{ok: true}, raw: "ok"}}})
+
+    assert_eventually(fn ->
+      assert {:ok, %{payload: %{ok: true}}} = TaskStore.result(task_id, name: store)
+      assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store)
+    end)
+
+    assert Process.alive?(Process.whereis(store))
+  end
+
   test "terminal result remains available while cleanup supervisor is suspended", %{
     supervisor: task_supervisor
   } do
