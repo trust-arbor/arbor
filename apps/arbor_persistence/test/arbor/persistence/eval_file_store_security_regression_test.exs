@@ -1140,7 +1140,7 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   end
 
   describe "security regression R8: minimal trusted telemetry" do
-    test "stable-read and publish events expose only fixed bounded values", %{
+    test "stable-read and publish events expose an exact closed schema", %{
       dir: dir,
       base: base
     } do
@@ -1173,14 +1173,22 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
       File.write!(dataset, ~s({"input":"private"}\n))
       assert is_binary(Persistence.eval_dataset_hash(dataset))
 
-      assert_receive {:eval_telemetry, @post_rename_event, %{count: 1},
-                      %{source: :eval_file_store}}
+      assert_receive {:eval_telemetry, @post_rename_event, publish_measurements, publish_metadata}
 
-      assert_receive {:eval_telemetry, @stable_read_pass_one_event, %{count: 1},
-                      %{source: :eval_file_store}}
+      assert publish_measurements == %{count: 1}
+      assert publish_metadata == %{source: :eval_file_store}
 
-      assert_receive {:eval_telemetry, @stable_read_pass_one_event, %{count: 1},
-                      %{source: :eval_run_identity}}
+      assert_receive {:eval_telemetry, @stable_read_pass_one_event, load_measurements,
+                      load_metadata}
+
+      assert load_measurements == %{count: 1}
+      assert load_metadata == %{source: :eval_file_store}
+
+      assert_receive {:eval_telemetry, @stable_read_pass_one_event, dataset_measurements,
+                      dataset_metadata}
+
+      assert dataset_measurements == %{count: 1}
+      assert dataset_metadata == %{source: :eval_run_identity}
 
       :ok = :telemetry.detach(handler_id)
       refute Enum.any?(:telemetry.list_handlers(@post_rename_event), &(&1.id == handler_id))
@@ -1197,8 +1205,8 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
         :telemetry.attach(
           handler_id,
           @post_rename_event,
-          fn _event, _measurements, _metadata, {test_pid, ref} ->
-            send(test_pid, {:trusted_handler_started, self(), ref})
+          fn _event, measurements, metadata, {test_pid, ref} ->
+            send(test_pid, {:trusted_handler_started, self(), ref, measurements, metadata})
 
             receive do
               {:release_trusted_handler, ^ref} -> :ok
@@ -1216,7 +1224,9 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
           Persistence.save_eval_run_file("trusted-handler", %{model: "m"}, dir: dir)
         end)
 
-      assert_receive {:trusted_handler_started, handler_pid, ^release_ref}
+      assert_receive {:trusted_handler_started, handler_pid, ^release_ref, measurements, metadata}
+      assert measurements == %{count: 1}
+      assert metadata == %{source: :eval_file_store}
       assert handler_pid == task.pid
       assert Task.yield(task, 0) == nil
 
@@ -1253,8 +1263,9 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
       :telemetry.attach(
         handler_id,
         event,
-        fn _event, _measurements, metadata, _config ->
-          if metadata == %{source: source} and :atomics.get(mutated, 1) == 0 do
+        fn _event, measurements, metadata, _config ->
+          if measurements == %{count: 1} and metadata == %{source: source} and
+               :atomics.get(mutated, 1) == 0 do
             mutate.()
             :atomics.put(mutated, 1, 1)
           end
