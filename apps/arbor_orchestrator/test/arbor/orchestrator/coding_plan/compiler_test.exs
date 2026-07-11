@@ -131,6 +131,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
           hoist_review_attestation_id
           post_validation_committed_change
           route_security_after_commit
+          route_security_attested_auto
+          route_security_attested_human
           route_validated_review
         ] do
       refute Map.has_key?(graph.nodes, dormant)
@@ -263,25 +265,37 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     refute Map.has_key?(graph.nodes, "prep_validation_path")
     refute Enum.any?(graph.edges, &submit_review_false_edge?/1)
 
-    assert auto_proceed_target(graph) == "hoist_review_attestation_id"
+    assert auto_proceed_target(graph) == "route_security_attested_auto"
+
+    assert edge_target(graph, "route_review", "context.review.tier_decision=auto_proceed") ==
+             "route_security_attested_auto"
+
+    assert edge_target(graph, "route_review", "context.review.tier_decision=human_review") ==
+             "route_security_attested_human"
 
     assert edge_target(
              graph,
-             "route_review",
-             ~s(context.review.tier_decision=auto_proceed && context.review.review_attestation_id!="")
+             "route_security_attested_human",
+             ~s(context.review.review_attestation_id!="")
            ) == "hoist_review_attestation_id"
 
     assert edge_target(
              graph,
-             "route_review",
-             ~s(context.review.tier_decision=human_review && context.review.review_attestation_id!="")
-           ) == "hoist_review_attestation_id"
-
-    assert edge_target(
-             graph,
-             "route_review",
-             ~s(context.review.tier_decision=human_review && context.review.review_attestation_id="")
+             "route_security_attested_human",
+             ~s(context.review.review_attestation_id="")
            ) == "status_human_review_required"
+
+    assert edge_target(
+             graph,
+             "route_security_attested_auto",
+             ~s(context.review.review_attestation_id!="")
+           ) == "hoist_review_attestation_id"
+
+    assert Enum.any?(graph.edges, fn edge ->
+             edge.from == "route_security_attested_auto" and
+               edge.to == "error_review_tier_invalid" and
+               Map.get(edge.attrs, "condition") in [nil, ""]
+           end)
 
     assert edge_target(
              graph,
@@ -820,8 +834,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     graph.edges
     |> Enum.find(fn edge ->
       edge.from == "route_review" and
-        is_binary(edge.attrs["condition"]) and
-        String.starts_with?(edge.attrs["condition"], "context.review.tier_decision=auto_proceed")
+        edge.attrs["condition"] == "context.review.tier_decision=auto_proceed"
     end)
     |> Map.fetch!(:to)
   end

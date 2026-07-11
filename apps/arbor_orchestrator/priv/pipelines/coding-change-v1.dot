@@ -485,6 +485,21 @@ digraph CodingChangeV1 {
     fan_out="false"
   ]
 
+  // Attestation presence gates (simple single-clause conditions; no compound &&).
+  // Compiler wires route_review into these; present -> validate, absent human
+  // terminal / absent auto fails closed.
+  route_security_attested_human [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  route_security_attested_auto [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
   compare_security_rework_commit [
     type="transform",
     transform="not_equal",
@@ -873,6 +888,8 @@ digraph CodingChangeV1 {
   start -> remember_review_reviewed_commit [condition="0=1"]
   start -> hoist_review_attestation_id [condition="0=1"]
   start -> post_validation_expected_commit [condition="0=1"]
+  start -> route_security_attested_human [condition="0=1"]
+  start -> route_security_attested_auto [condition="0=1"]
 
   // Dormant security-regression edges retain default behavior until the
   // compiler connects the reviewed profile-specific entry points.
@@ -885,6 +902,10 @@ digraph CodingChangeV1 {
   prep_review_validation_profile -> review_change
   remember_validation_reviewed_commit -> check_validation_category_budget
   remember_review_reviewed_commit -> check_review_category_budget
+  route_security_attested_human -> hoist_review_attestation_id [condition="context.review.review_attestation_id!=\"\""]
+  route_security_attested_human -> status_human_review_required [condition="context.review.review_attestation_id=\"\""]
+  route_security_attested_auto -> hoist_review_attestation_id [condition="context.review.review_attestation_id!=\"\""]
+  route_security_attested_auto -> error_review_tier_invalid
   hoist_review_attestation_id -> validate
   post_validation_expected_commit -> post_validation_committed_change
   post_validation_committed_change -> error_post_validation_committed_change [condition="outcome=fail"]

@@ -285,27 +285,31 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                review_profile: "binding"
              )
 
-    present =
-      ~s(context.review.tier_decision=human_review && context.review.review_attestation_id!="")
+    present = ~s(context.review.review_attestation_id!="")
+    absent = ~s(context.review.review_attestation_id="")
 
-    absent =
-      ~s(context.review.tier_decision=human_review && context.review.review_attestation_id="")
+    assert edge_target(graph, "route_review", "context.review.tier_decision=human_review") ==
+             "route_security_attested_human"
 
-    auto_present =
-      ~s(context.review.tier_decision=auto_proceed && context.review.review_attestation_id!="")
+    assert edge_target(graph, "route_review", "context.review.tier_decision=auto_proceed") ==
+             "route_security_attested_auto"
 
-    assert edge_target(graph, "route_review", present) == "hoist_review_attestation_id"
-    assert edge_target(graph, "route_review", absent) == "status_human_review_required"
-    assert edge_target(graph, "route_review", auto_present) == "hoist_review_attestation_id"
+    assert edge_target(graph, "route_security_attested_human", present) ==
+             "hoist_review_attestation_id"
 
-    # Drop the attestation presence guard: any human_review may hoist/validate.
+    assert edge_target(graph, "route_security_attested_human", absent) ==
+             "status_human_review_required"
+
+    assert edge_target(graph, "route_security_attested_auto", present) ==
+             "hoist_review_attestation_id"
+
+    # Bypass the attestation presence gate: any human_review may hoist/validate.
     unguarded =
-      rewrite_edge_condition(
+      add_edge(
         graph,
-        "route_review",
+        "route_security_attested_human",
         "hoist_review_attestation_id",
-        present,
-        "context.review.tier_decision=human_review"
+        "context.bypass_attestation=true"
       )
 
     assert {:error, {:semantic_preflight_failed, errors}} =
@@ -313,12 +317,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                review_profile: "binding"
              )
 
-    assert Enum.any?(errors, fn err ->
-             err["code"] in [
-               "security_topology_mismatch",
-               "security_attestation_entry_mismatch"
-             ]
-           end)
+    assert Enum.any?(errors, &(&1["code"] == "security_topology_mismatch"))
   end
 
   test "adversarial: validation bypass fails closed", ctx do
@@ -686,19 +685,6 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     graph.edges
     |> Enum.find(&(&1.from == from and &1.attrs["condition"] == condition))
     |> Map.fetch!(:to)
-  end
-
-  defp rewrite_edge_condition(graph, from, to, old_condition, new_condition) do
-    edges =
-      Enum.map(graph.edges, fn edge ->
-        if edge.from == from and edge.to == to and edge.attrs["condition"] == old_condition do
-          %{edge | attrs: Map.put(edge.attrs, "condition", new_condition)}
-        else
-          edge
-        end
-      end)
-
-    %{graph | edges: edges, adjacency: %{}, reverse_adjacency: %{}}
   end
 
   defp minimal_compiled_graph do

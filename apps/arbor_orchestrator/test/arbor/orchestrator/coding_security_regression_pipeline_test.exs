@@ -345,6 +345,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     refute "validate" in result.completed_nodes
     refute "hoist_review_attestation_id" in result.completed_nodes
     refute "post_validation_committed_change" in result.completed_nodes
+    assert "route_security_attested_human" in result.completed_nodes
     assert "status_human_review_required" in result.completed_nodes
     assert called?(calls, "council_review_change", 1)
   end

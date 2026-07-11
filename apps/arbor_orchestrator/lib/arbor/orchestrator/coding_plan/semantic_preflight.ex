@@ -49,9 +49,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   # Unattended publication must still cross attestation + validation. Human
   # handoff may be reached without attestation when Council returns human_review
-  # without issuing a review_attestation_id (deadlock / security veto).
+  # without a review_attestation_id (deadlock / security veto).
   @unattended_publication_nodes MapSet.new(~w[status_change_committed status_pr_created])
-  @human_handoff_publication_nodes MapSet.new(~w[status_human_review_required])
 
   @attestation_present ~s(context.review.review_attestation_id!="")
   @attestation_absent ~s(context.review.review_attestation_id="")
@@ -770,12 +769,18 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        [
          {"remember_review_reviewed_commit", "context.review.tier_decision=rework"},
          {"status_review_rejected", "context.review.tier_decision=stop"},
-         {"hoist_review_attestation_id",
-          "context.review.tier_decision=human_review && #{@attestation_present}"},
-         {"status_human_review_required",
-          "context.review.tier_decision=human_review && #{@attestation_absent}"},
-         {"hoist_review_attestation_id",
-          "context.review.tier_decision=auto_proceed && #{@attestation_present}"},
+         {"route_security_attested_human", "context.review.tier_decision=human_review"},
+         {"route_security_attested_auto", "context.review.tier_decision=auto_proceed"},
+         {"error_review_tier_invalid", nil}
+       ]},
+      {"route_security_attested_human",
+       [
+         {"hoist_review_attestation_id", @attestation_present},
+         {"status_human_review_required", @attestation_absent}
+       ]},
+      {"route_security_attested_auto",
+       [
+         {"hoist_review_attestation_id", @attestation_present},
          {"error_review_tier_invalid", nil}
        ]},
       {"remember_review_reviewed_commit", [{"check_review_category_budget", nil}]},
@@ -800,62 +805,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       {"route_validated_review", validated_review_edges}
     ]
 
-    errors =
-      Enum.reduce(expected, errors, fn {node_id, outgoing}, acc ->
-        require_exact_security_outgoing(acc, graph, node_id, outgoing)
-      end)
-
-    check_security_attestation_route_guards(errors, graph)
-  end
-
-  defp check_security_attestation_route_guards(errors, graph) do
-    attestation_source = "hoist_review_attestation_id"
-    validator = "validate"
-
-    incoming_to_attestation =
-      graph.edges
-      |> Enum.filter(&(&1.to == attestation_source))
-      |> Enum.map(fn edge -> {edge.from, Map.get(edge.attrs, "condition")} end)
-      |> Enum.sort()
-
-    expected_attestation_entries = [
-      {"route_review", "context.review.tier_decision=auto_proceed && #{@attestation_present}"},
-      {"route_review", "context.review.tier_decision=human_review && #{@attestation_present}"}
-    ]
-
-    errors =
-      if Enum.sort(expected_attestation_entries) == incoming_to_attestation do
-        errors
-      else
-        [
-          error("security_attestation_entry_mismatch", attestation_source, %{
-            "expected" => Enum.map(expected_attestation_entries, &edge_binding_to_json/1),
-            "actual" => Enum.map(incoming_to_attestation, &edge_binding_to_json/1)
-          })
-          | errors
-        ]
-      end
-
-    # Fail closed: no route may reach the security validator without first
-    # hoisting a present review attestation (seed edge 0=1 is dormant).
-    unguarded =
-      graph.edges
-      |> Enum.filter(fn edge ->
-        edge.to == validator and edge.from != attestation_source
-      end)
-      |> Enum.map(fn edge -> {edge.from, Map.get(edge.attrs, "condition")} end)
-      |> Enum.sort()
-
-    if unguarded == [] do
-      errors
-    else
-      [
-        error("security_validator_unguarded_entry", validator, %{
-          "actual" => Enum.map(unguarded, &edge_binding_to_json/1)
-        })
-        | errors
-      ]
-    end
+    Enum.reduce(expected, errors, fn {node_id, outgoing}, acc ->
+      require_exact_security_outgoing(acc, graph, node_id, outgoing)
+    end)
   end
 
   defp require_exact_security_outgoing(errors, graph, node_id, expected) do
@@ -1079,11 +1031,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       |> Enum.filter(&MapSet.member?(reachable, &1))
       |> Enum.sort()
 
-    {unattended_targets, human_handoff_targets} =
-      partition_security_publication_targets(publication_targets)
-
-    errors =
-      Enum.reduce(unattended_targets, errors, fn target, acc ->
+    Enum.reduce(publication_targets, errors, fn target, acc ->
+      if MapSet.member?(@unattended_publication_nodes, target) do
+        # Unattended success still requires attestation + validation + exact head.
         acc
         |> require_dominates(
           post_validation_check,
@@ -1108,29 +1058,13 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           dominators,
           "review_attestation"
         )
-      end)
-
-    Enum.reduce(human_handoff_targets, errors, fn target, acc ->
-      # Unattested human_review may reach the human terminal without validation;
-      # review still dominates every handoff path.
-      acc
-      |> require_dominates(review_gate, target, reachable, dominators, "review")
-      |> require_dominates(review_routing, target, reachable, dominators, "review_routing")
+      else
+        # status_human_review_required may be unattested; review still dominates.
+        acc
+        |> require_dominates(review_gate, target, reachable, dominators, "review")
+        |> require_dominates(review_routing, target, reachable, dominators, "review_routing")
+      end
     end)
-  end
-
-  defp partition_security_publication_targets(targets) do
-    unattended =
-      targets
-      |> Enum.filter(&MapSet.member?(@unattended_publication_nodes, &1))
-      |> Enum.sort()
-
-    human_handoff =
-      targets
-      |> Enum.filter(&MapSet.member?(@human_handoff_publication_nodes, &1))
-      |> Enum.sort()
-
-    {unattended, human_handoff}
   end
 
   defp check_security_rework_dominance(
@@ -1163,9 +1097,6 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
     publication_targets = policy["publication_nodes"] |> Enum.sort()
 
-    {unattended_targets, human_handoff_targets} =
-      partition_security_publication_targets(publication_targets)
-
     Enum.reduce(entries, errors, fn {entry, rework_kind}, acc ->
       reachable = reachable_from(rework_graph, entry)
       dominators = compute_dominators(rework_graph, entry, reachable)
@@ -1182,10 +1113,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           )
         end)
 
-      acc =
-        unattended_targets
-        |> Enum.filter(&MapSet.member?(reachable, &1))
-        |> Enum.reduce(acc, fn target, inner ->
+      publication_targets
+      |> Enum.filter(&MapSet.member?(reachable, &1))
+      |> Enum.reduce(acc, fn target, inner ->
+        if MapSet.member?(@unattended_publication_nodes, target) do
           inner
           |> require_dominates(
             policy["attestation_source"],
@@ -1222,26 +1153,23 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
             dominators,
             "#{rework_kind}.fresh_post_validation_routing_terminal"
           )
-        end)
-
-      human_handoff_targets
-      |> Enum.filter(&MapSet.member?(reachable, &1))
-      |> Enum.reduce(acc, fn target, inner ->
-        inner
-        |> require_dominates(
-          policy["review_gate"],
-          target,
-          reachable,
-          dominators,
-          "#{rework_kind}.fresh_review_terminal"
-        )
-        |> require_dominates(
-          policy["review_routing_gate"],
-          target,
-          reachable,
-          dominators,
-          "#{rework_kind}.fresh_review_routing_terminal"
-        )
+        else
+          inner
+          |> require_dominates(
+            policy["review_gate"],
+            target,
+            reachable,
+            dominators,
+            "#{rework_kind}.fresh_review_terminal"
+          )
+          |> require_dominates(
+            policy["review_routing_gate"],
+            target,
+            reachable,
+            dominators,
+            "#{rework_kind}.fresh_review_routing_terminal"
+          )
+        end
       end)
     end)
   end

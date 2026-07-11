@@ -47,6 +47,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                                  remember_review_reviewed_commit
                                  remember_validation_reviewed_commit
                                  route_security_after_commit
+                                 route_security_attested_auto
+                                 route_security_attested_human
                                  route_validated_review
                                ]
                            )
