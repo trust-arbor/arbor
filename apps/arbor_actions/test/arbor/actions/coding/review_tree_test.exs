@@ -745,6 +745,119 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
       end)
     end
 
+    test "hot-load legacy registry state without review_snapshot keys upgrades and cleans up", %{
+      tmp_dir: tmp_dir
+    } do
+      # Simulate a long-lived GenServer that still holds pre-review-snapshot state
+      # after new code is loaded: the two snapshot indexes are absent until touched.
+      # Use a private named registry so concurrent async tests are not disturbed.
+      server = :"hot_load_review_snap_#{System.unique_integer([:positive])}"
+      start_supervised!({WorkspaceLeaseRegistry, name: server})
+
+      repo =
+        create_git_repo(Path.join(tmp_dir, "hot_load_repo_#{System.unique_integer([:positive])}"))
+
+      File.mkdir_p!(Path.join(repo, "lib"))
+      File.write!(Path.join(repo, "lib/changed.ex"), "defmodule Changed do\nend\n")
+      git!(repo, ["add", "lib/changed.ex"])
+      git!(repo, ["commit", "-m", "base"])
+      base_commit = git!(repo, ["rev-parse", "HEAD"])
+
+      task_id = "task_hot_load_#{System.unique_integer([:positive])}"
+      principal_id = "agent_hot_load_#{System.unique_integer([:positive])}"
+
+      assert {:ok, lease} =
+               WorkspaceLeaseRegistry.acquire(
+                 %{
+                   repo_path: repo,
+                   branch: "test/hot-load-#{System.unique_integer([:positive])}",
+                   base_ref: base_commit,
+                   worktree_base_dir: Path.join(tmp_dir, "hot_load_worktrees"),
+                   task_id: task_id,
+                   principal_id: principal_id
+                 },
+                 server: server
+               )
+
+      File.write!(
+        Path.join(lease.worktree_path, "lib/changed.ex"),
+        "defmodule Changed do\n  def v, do: :cand\nend\n"
+      )
+
+      git!(lease.worktree_path, ["add", "lib/changed.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "candidate"])
+      candidate_commit = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+
+      caller = %{
+        server: server,
+        task_id: task_id,
+        principal_id: principal_id
+      }
+
+      _ =
+        :sys.replace_state(server, fn state ->
+          state
+          |> Map.delete(:review_snapshots)
+          |> Map.delete(:review_snapshots_by_workspace)
+        end)
+
+      legacy = :sys.get_state(server)
+      refute Map.has_key?(legacy, :review_snapshots)
+      refute Map.has_key?(legacy, :review_snapshots_by_workspace)
+
+      assert {:ok, snap} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 lease.workspace_id,
+                 candidate_commit,
+                 caller
+               )
+
+      assert is_binary(snap.review_snapshot_id)
+      assert snap.active == true
+      assert snap.candidate_commit == candidate_commit
+
+      upgraded = :sys.get_state(server)
+      assert Map.has_key?(upgraded, :review_snapshots)
+      assert Map.has_key?(upgraded, :review_snapshots_by_workspace)
+      assert Map.has_key?(upgraded.review_snapshots, snap.review_snapshot_id)
+
+      assert {:ok, resolved} =
+               WorkspaceLeaseRegistry.resolve_review_snapshot(snap.review_snapshot_id, caller)
+
+      assert resolved.review_snapshot_id == snap.review_snapshot_id
+      assert resolved.candidate_commit == candidate_commit
+      assert resolved.base_commit == base_commit
+
+      assert {:ok, closed} =
+               WorkspaceLeaseRegistry.close_review_snapshot(snap.review_snapshot_id, caller)
+
+      assert closed.status == "closed"
+
+      assert {:error, :not_found} =
+               WorkspaceLeaseRegistry.resolve_review_snapshot(snap.review_snapshot_id, caller)
+
+      # Strip keys again, re-open, then prove workspace release cleans snapshots.
+      _ =
+        :sys.replace_state(server, fn state ->
+          state
+          |> Map.delete(:review_snapshots)
+          |> Map.delete(:review_snapshots_by_workspace)
+        end)
+
+      assert {:ok, snap2} =
+               WorkspaceLeaseRegistry.open_review_snapshot(
+                 lease.workspace_id,
+                 candidate_commit,
+                 caller
+               )
+
+      assert {:ok, _} =
+               WorkspaceLeaseRegistry.release(lease.workspace_id, :retain, caller)
+
+      assert {:error, :not_found} =
+               WorkspaceLeaseRegistry.resolve_review_snapshot(snap2.review_snapshot_id, caller)
+    end
+
     test "open rejects dirty worktree, HEAD mismatch, and short/non-hash commits", %{
       tmp_dir: tmp_dir
     } do

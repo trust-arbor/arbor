@@ -547,6 +547,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         state
       ) do
     caller = %{caller | owner_pid: from_pid}
+    state = ensure_review_snapshot_state(state)
 
     case perform_open_review_snapshot(state, workspace_id, candidate_commit, caller) do
       {:ok, view, state} -> {:reply, {:ok, view}, state}
@@ -556,6 +557,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   def handle_call({:resolve_review_snapshot, review_snapshot_id, caller}, {from_pid, _tag}, state) do
     caller = %{caller | owner_pid: from_pid}
+    state = ensure_review_snapshot_state(state)
 
     case fetch_authorized_review_snapshot(state, review_snapshot_id, caller) do
       {:ok, snapshot} -> {:reply, {:ok, review_snapshot_view(snapshot)}, state}
@@ -569,6 +571,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         state
       ) do
     caller = %{caller | owner_pid: from_pid}
+    state = ensure_review_snapshot_state(state)
 
     case fetch_authorized_review_snapshot(state, review_snapshot_id, caller) do
       {:ok, snapshot} -> {:reply, {:ok, review_snapshot_action_view(snapshot)}, state}
@@ -578,6 +581,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
 
   def handle_call({:close_review_snapshot, review_snapshot_id, caller}, {from_pid, _tag}, state) do
     caller = %{caller | owner_pid: from_pid}
+    state = ensure_review_snapshot_state(state)
 
     case Map.fetch(state.review_snapshots, review_snapshot_id) do
       :error ->
@@ -1365,7 +1369,18 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     }
   end
 
+  # Hot-load compatibility: a long-lived GenServer may still hold a
+  # pre-review-snapshot state map after new code is loaded. Lazily fill the
+  # snapshot indexes without weakening workspace/task/principal authorization.
+  defp ensure_review_snapshot_state(state) when is_map(state) do
+    state
+    |> Map.put_new(:review_snapshots, %{})
+    |> Map.put_new(:review_snapshots_by_workspace, %{})
+  end
+
   defp perform_open_review_snapshot(state, workspace_id, candidate_commit, caller) do
+    state = ensure_review_snapshot_state(state)
+
     with {:ok, lease} <- fetch_authorized(state, workspace_id, caller),
          true <- lease.active == true || {:error, :not_found},
          :ok <- require_exact_commit_hash(candidate_commit),
@@ -1404,6 +1419,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp fetch_review_snapshot(state, review_snapshot_id) do
+    state = ensure_review_snapshot_state(state)
+
     case Map.fetch(state.review_snapshots, review_snapshot_id) do
       {:ok, snapshot} -> {:ok, snapshot}
       :error -> {:error, :not_found}
@@ -1411,6 +1428,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp put_review_snapshot(state, snapshot) do
+    state = ensure_review_snapshot_state(state)
+
     ids =
       state.review_snapshots_by_workspace
       |> Map.get(snapshot.workspace_id, MapSet.new())
@@ -1425,6 +1444,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp drop_review_snapshot(state, snapshot) do
+    state = ensure_review_snapshot_state(state)
+
     ids =
       state.review_snapshots_by_workspace
       |> Map.get(snapshot.workspace_id, MapSet.new())
@@ -1445,6 +1466,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   end
 
   defp cleanup_workspace_review_snapshots(state, workspace_id) do
+    state = ensure_review_snapshot_state(state)
+
     ids =
       state.review_snapshots_by_workspace
       |> Map.get(workspace_id, MapSet.new())
