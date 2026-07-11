@@ -394,7 +394,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       {:ok, task_id} ->
         now = DateTime.utc_now()
         {state, cleanup_job} = terminalize_abnormal_down(state, task_id, reason, now)
-        state = enqueue_approval_cleanup_job(state, cleanup_job)
+        state = launch_approval_cleanup_job(state, cleanup_job)
         {:noreply, remove_ref(state, ref)}
 
       :error ->
@@ -406,19 +406,12 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     {:noreply, deliver_control(state, task_id, control_id)}
   end
 
-  # Private cleanup job: terminal state is already published. Launch off-process
-  # so a stalled cleanup supervisor cannot block status/result handling.
-  def handle_info({:run_approval_cleanup, task_id, descriptor}, state) do
-    launch_approval_cleanup(state, task_id, descriptor)
-    {:noreply, state}
-  end
-
   def handle_info(_message, state), do: {:noreply, state}
 
   defp complete_task(state, task_id, ref, result) do
     now = DateTime.utc_now()
     {state, cleanup_job} = terminalize_completion(state, task_id, result, now)
-    state = enqueue_approval_cleanup_job(state, cleanup_job)
+    state = launch_approval_cleanup_job(state, cleanup_job)
     remove_ref(state, ref)
   end
 
@@ -485,10 +478,13 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   defp cleanup_job(task_id, descriptor) when is_map(descriptor), do: {task_id, descriptor}
   defp cleanup_job(_task_id, _descriptor), do: nil
 
-  defp enqueue_approval_cleanup_job(state, nil), do: state
+  defp launch_approval_cleanup_job(state, nil), do: state
 
-  defp enqueue_approval_cleanup_job(state, {task_id, descriptor}) do
-    send(self(), {:run_approval_cleanup, task_id, descriptor})
+  defp launch_approval_cleanup_job(state, {task_id, descriptor}) do
+    # The terminal record is already present in `state`. This call only performs
+    # a named external spawn; the potentially blocking supervisor call happens
+    # in that launcher, never in TaskStore and never through a forgeable mailbox job.
+    launch_approval_cleanup(state, task_id, descriptor)
     state
   end
 

@@ -934,6 +934,12 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     send(cleanup_pid, :release_cleanup)
   end
 
+  test "forged cleanup mailbox messages are ignored", %{store: store} do
+    send(store, {:run_approval_cleanup, "task_forged", cleanup_descriptor()})
+
+    refute_receive {:lifecycle_cleanup, "task_forged", _}, 200
+  end
+
   test "terminal result remains available while cleanup supervisor is suspended", %{
     supervisor: task_supervisor
   } do
@@ -960,35 +966,39 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     # Stall cleanup scheduling only; task execution stays on the healthy supervisor.
     :sys.suspend(cleanup_supervisor)
 
-    assert {:ok, task_id} =
-             TaskStore.dispatch("agent_1", "do work",
-               name: store,
-               test_pid: self(),
-               runner: ControlledRunner,
-               approval_cleanup_descriptor: cleanup_descriptor()
-             )
+    task_id =
+      try do
+        assert {:ok, task_id} =
+                 TaskStore.dispatch("agent_1", "do work",
+                   name: store,
+                   test_pid: self(),
+                   runner: ControlledRunner,
+                   approval_cleanup_descriptor: cleanup_descriptor()
+                 )
 
-    assert_receive {:runner_started, runner_pid, "agent_1", "do work", _}
+        assert_receive {:runner_started, runner_pid, "agent_1", "do work", _}
 
-    send(
-      runner_pid,
-      {:finish, {:ok, %{result_type: :test, payload: %{ok: true}, raw: "while stalled"}}}
-    )
+        send(
+          runner_pid,
+          {:finish, {:ok, %{result_type: :test, payload: %{ok: true}, raw: "while stalled"}}}
+        )
 
-    # Result/status must be readable while cleanup supervisor cannot accept children.
-    assert_eventually(fn ->
-      assert {:ok, result} = TaskStore.result(task_id, name: store)
-      assert result.payload.ok == true
-      assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store)
-    end)
+        # Result/status must be readable while cleanup supervisor cannot accept children.
+        assert_eventually(fn ->
+          assert {:ok, result} = TaskStore.result(task_id, name: store)
+          assert result.payload.ok == true
+          assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store)
+        end)
 
-    # Cleanup has not run yet (supervisor still suspended).
-    refute_receive {:lifecycle_cleanup, ^task_id, _}, 200
+        # Cleanup has not run yet (supervisor still suspended).
+        refute_receive {:lifecycle_cleanup, ^task_id, _}, 200
 
-    # Still readable after the negative window.
-    assert {:ok, %{payload: %{ok: true}}} = TaskStore.result(task_id, name: store)
-
-    :sys.resume(cleanup_supervisor)
+        # Still readable after the negative window.
+        assert {:ok, %{payload: %{ok: true}}} = TaskStore.result(task_id, name: store)
+        task_id
+      after
+        :sys.resume(cleanup_supervisor)
+      end
 
     assert_receive {:lifecycle_cleanup, ^task_id, opts}, 1_000
     assert opts[:cleanup_reason] == :task_termination
