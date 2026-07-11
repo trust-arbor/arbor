@@ -77,6 +77,16 @@ defmodule Arbor.Eval do
           optional(atom()) => any()
         }
 
+  alias Arbor.Eval.{Graders, Metrics, Pipeline, Report, Subjects}
+
+  @pipeline_subjects %{
+    "passthrough" => Subjects.Passthrough
+  }
+
+  @pipeline_graders %{
+    "exact_match" => Graders.ExactMatch
+  }
+
   @doc "Called before run/1 to set up context. Override for custom setup."
   @callback setup(context()) :: {:ok, context()} | {:error, term()}
 
@@ -119,6 +129,62 @@ defmodule Arbor.Eval do
   # ============================================================================
   # Public API
   # ============================================================================
+
+  @doc "Returns the pipeline subject module for a closed symbolic name."
+  @spec subject(String.t()) :: module() | nil
+  def subject(name) when is_binary(name), do: Map.get(@pipeline_subjects, name)
+  def subject(_name), do: nil
+
+  @doc "Returns all registered pipeline subject names."
+  @spec subject_names() :: [String.t()]
+  def subject_names, do: Map.keys(@pipeline_subjects)
+
+  @doc "Returns the pipeline grader module for a closed symbolic name."
+  @spec grader(String.t()) :: module() | nil
+  def grader(name) when is_binary(name), do: Map.get(@pipeline_graders, name)
+  def grader(_name), do: nil
+
+  @doc "Returns all registered pipeline grader names."
+  @spec grader_names() :: [String.t()]
+  def grader_names, do: Map.keys(@pipeline_graders)
+
+  @doc "Loads a JSONL pipeline dataset."
+  @spec load_dataset(String.t(), keyword()) :: {:ok, [map()]} | {:error, String.t()}
+  defdelegate load_dataset(path, opts \\ []), to: Pipeline
+
+  @doc """
+  Runs a catalog-selected subject and graders over pipeline samples.
+
+  The subject and grader names are resolved only through this module's static
+  string catalogs. Unknown grader names retain the compatibility behavior of
+  being ignored; an unknown subject raises `ArgumentError`.
+  """
+  @spec run_eval([map()], String.t(), [String.t()], keyword()) :: [map()]
+  def run_eval(samples, subject_name, grader_names, opts \\ [])
+      when is_binary(subject_name) and is_list(grader_names) do
+    subject_module =
+      subject(subject_name) ||
+        raise ArgumentError, "unknown eval subject: #{inspect(subject_name)}"
+
+    grader_modules =
+      grader_names
+      |> Enum.map(&grader/1)
+      |> Enum.reject(&is_nil/1)
+
+    Pipeline.run_eval(samples, subject_module, grader_modules, opts)
+  end
+
+  @doc "Computes a built-in pipeline metric."
+  @spec compute_metric(String.t(), [map()], keyword()) :: float()
+  defdelegate compute_metric(name, results, opts \\ []), to: Metrics, as: :compute
+
+  @doc "Returns the built-in pipeline metric names."
+  @spec metric_names() :: [String.t()]
+  defdelegate metric_names(), to: Metrics, as: :known_metrics
+
+  @doc "Formats a pipeline report without performing file writes."
+  @spec format_report([map()], map(), String.t()) :: String.t()
+  defdelegate format_report(results, metrics, format), to: Report, as: :format
 
   @doc """
   Run a single eval with the given context.

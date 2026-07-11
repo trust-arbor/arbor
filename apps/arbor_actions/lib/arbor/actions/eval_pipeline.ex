@@ -526,7 +526,7 @@ defmodule Arbor.Actions.EvalPipeline do
       metrics = params[:metrics] || %{}
       format = params[:format] || "terminal"
 
-      report = format_report(results, metrics, format)
+      report = Arbor.Eval.Report.format(results, metrics, format)
 
       case params[:output_path] do
         nil ->
@@ -540,78 +540,5 @@ defmodule Arbor.Actions.EvalPipeline do
           {:ok, %{report: report, format: format, path: output_path}}
       end
     end
-
-    defp format_report(results, metrics, "json") do
-      Jason.encode!(%{"results" => results, "metrics" => metrics}, pretty: true)
-    end
-
-    defp format_report(results, metrics, "markdown") do
-      total = length(results)
-      passed = Enum.count(results, & &1["passed"])
-      failed = total - passed
-
-      metrics_section =
-        Enum.map_join(metrics, "\n", fn {k, v} ->
-          "| #{k} | #{format_value(v)} |"
-        end)
-
-      failures =
-        results
-        |> Enum.reject(& &1["passed"])
-        |> Enum.take(5)
-        |> Enum.map_join("\n", fn r ->
-          "- **#{r["id"]}**: expected=`#{truncate(r["expected"], 60)}` actual=`#{truncate(to_string(r["actual"]), 60)}`"
-        end)
-
-      """
-      # Evaluation Report
-
-      **Samples:** #{total} total, #{passed} passed, #{failed} failed
-
-      ## Metrics
-
-      | Metric | Value |
-      |--------|-------|
-      #{metrics_section}
-
-      ## Top Failures
-
-      #{if failures == "", do: "_None_", else: failures}
-      """
-    end
-
-    defp format_report(results, metrics, _terminal) do
-      total = length(results)
-      passed = Enum.count(results, & &1["passed"])
-
-      metrics_lines =
-        Enum.map_join(metrics, "\n", fn {k, v} ->
-          "  #{k}: #{format_value(v)}"
-        end)
-
-      failures =
-        results
-        |> Enum.reject(& &1["passed"])
-        |> Enum.take(3)
-        |> Enum.map_join("\n", fn r ->
-          "  - #{r["id"]}: expected=#{truncate(r["expected"], 40)} actual=#{truncate(to_string(r["actual"]), 40)}"
-        end)
-
-      """
-      === Evaluation Report ===
-      Samples: #{total} | Passed: #{passed} | Failed: #{total - passed}
-
-      Metrics:
-      #{metrics_lines}
-      #{if failures != "", do: "\nTop Failures:\n#{failures}", else: ""}
-      """
-    end
-
-    defp format_value(v) when is_float(v), do: Float.round(v, 4)
-    defp format_value(v), do: v
-
-    defp truncate(nil, _), do: ""
-    defp truncate(str, max) when byte_size(str) <= max, do: str
-    defp truncate(str, max), do: String.slice(str, 0, max - 3) <> "..."
   end
 end

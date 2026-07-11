@@ -9,6 +9,7 @@ defmodule Arbor.Orchestrator.EvalTest do
   describe "grader registry" do
     test "resolves known graders" do
       assert Eval.grader("exact_match") == ExactMatch
+      refute Eval.grader("exact_match") == Arbor.Eval.Graders.ExactMatch
       assert Eval.grader("contains") == Contains
       assert Eval.grader("regex") == RegexMatch
       assert Eval.grader("json_valid") == JsonValid
@@ -54,6 +55,13 @@ defmodule Arbor.Orchestrator.EvalTest do
     test "trim option" do
       result = ExactMatch.grade("  hello  ", "hello", trim: true)
       assert result.passed == true
+    end
+
+    test "delegates exactly to the common implementation" do
+      opts = [trim: true, case_sensitive: false]
+
+      assert ExactMatch.grade(" Hello ", "hello", opts) ==
+               Arbor.Eval.Graders.ExactMatch.grade(" Hello ", "hello", opts)
     end
   end
 
@@ -187,6 +195,20 @@ defmodule Arbor.Orchestrator.EvalTest do
       assert "mean_score" in Metrics.known_metrics()
       assert "pass_at_k" in Metrics.known_metrics()
     end
+
+    test "delegates every metric to common" do
+      results = [
+        %{"id" => "sample", "passed" => true, "score" => 1.0},
+        %{"id" => "sample", "passed" => false, "score" => 0.0}
+      ]
+
+      for {name, opts} <- [{"accuracy", []}, {"mean_score", []}, {"pass_at_k", [k: 2]}] do
+        assert Metrics.compute(name, results, opts) ==
+                 Arbor.Eval.Metrics.compute(name, results, opts)
+      end
+
+      assert Metrics.known_metrics() == Arbor.Eval.Metrics.known_metrics()
+    end
   end
 
   describe "load_dataset/2" do
@@ -222,6 +244,21 @@ defmodule Arbor.Orchestrator.EvalTest do
       assert length(samples) == 3
     end
 
+    test "delegates loading with identical seeded shuffle and generated ids", %{tmp: tmp} do
+      path = Path.join(tmp, "compat.jsonl")
+
+      File.write!(path, """
+      {"input":"one","expected":"one"}
+      invalid
+      {"input":"two","expected":"other"}
+      {"input":"three","expected":"three"}
+      """)
+
+      opts = [shuffle: true, seed: 73, limit: 2]
+
+      assert Eval.load_dataset(path, opts) == Arbor.Eval.Pipeline.load_dataset(path, opts)
+    end
+
     test "missing file returns error" do
       assert {:error, _} = Eval.load_dataset("/nonexistent/path.jsonl")
     end
@@ -240,6 +277,32 @@ defmodule Arbor.Orchestrator.EvalTest do
       [r1, r2] = results
       assert r1["passed"] == true
       assert r2["passed"] == false
+    end
+
+    test "delegates to common pipeline with compatibility module identities" do
+      samples = [
+        %{
+          "id" => "s1",
+          "input" => " Hello ",
+          "expected" => "hello",
+          "metadata" => %{"source" => "compat"}
+        }
+      ]
+
+      opts = [trim: true, case_sensitive: false]
+
+      expected =
+        Arbor.Eval.Pipeline.run_eval(
+          samples,
+          Eval.Subjects.Passthrough,
+          [ExactMatch],
+          opts
+        )
+
+      assert Eval.run_eval(samples, Eval.Subjects.Passthrough, ["exact_match"], opts) == expected
+
+      assert Eval.Subjects.Passthrough.run("value", opts) ==
+               Arbor.Eval.Subjects.Passthrough.run("value", opts)
     end
   end
 end

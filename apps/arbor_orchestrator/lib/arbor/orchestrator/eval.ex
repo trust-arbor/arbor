@@ -54,29 +54,7 @@ defmodule Arbor.Orchestrator.Eval do
   Each line is a JSON object with at minimum `input` and `expected` keys.
   """
   @spec load_dataset(String.t(), keyword()) :: {:ok, [map()]} | {:error, String.t()}
-  def load_dataset(path, opts \\ []) do
-    case File.read(path) do
-      {:ok, content} ->
-        samples =
-          content
-          |> String.split("\n", trim: true)
-          |> Enum.with_index()
-          |> Enum.flat_map(fn {line, idx} ->
-            case Jason.decode(line) do
-              {:ok, map} -> [Map.put_new(map, "id", "sample_#{idx}")]
-              {:error, _} -> []
-            end
-          end)
-
-        samples = maybe_shuffle(samples, opts)
-        samples = maybe_limit(samples, opts)
-
-        {:ok, samples}
-
-      {:error, reason} ->
-        {:error, "Failed to read dataset: #{inspect(reason)}"}
-    end
-  end
+  defdelegate load_dataset(path, opts \\ []), to: Arbor.Eval.Pipeline
 
   @doc """
   Runs evaluation: applies subject to each sample, grades results.
@@ -87,53 +65,6 @@ defmodule Arbor.Orchestrator.Eval do
   def run_eval(samples, subject_module, grader_names, opts \\ []) do
     graders = Enum.map(grader_names, &grader/1) |> Enum.reject(&is_nil/1)
 
-    Enum.map(samples, fn sample ->
-      input = sample["input"]
-      expected = sample["expected"]
-
-      actual =
-        case subject_module.run(input, opts) do
-          {:ok, %{text: text}} -> text
-          {:ok, result} when is_binary(result) -> result
-          {:ok, result} -> to_string(result)
-          {:error, _} -> ""
-        end
-
-      scores =
-        Enum.map(graders, fn grader_mod ->
-          grader_mod.grade(actual, expected, opts)
-        end)
-
-      %{
-        "id" => sample["id"],
-        "input" => input,
-        "expected" => expected,
-        "actual" => actual,
-        "scores" => scores,
-        "passed" => Enum.all?(scores, & &1.passed),
-        "metadata" => sample["metadata"]
-      }
-    end)
-  end
-
-  defp maybe_shuffle(samples, opts) do
-    case Keyword.get(opts, :shuffle, false) do
-      true ->
-        # Use deterministic shuffle with seed
-        seed = Keyword.get(opts, :seed, :rand.uniform(1_000_000))
-        :rand.seed(:exsss, {seed, seed, seed})
-        Enum.shuffle(samples)
-
-      _ ->
-        samples
-    end
-  end
-
-  defp maybe_limit(samples, opts) do
-    case Keyword.get(opts, :limit) do
-      nil -> samples
-      n when is_integer(n) -> Enum.take(samples, n)
-      _ -> samples
-    end
+    Arbor.Eval.Pipeline.run_eval(samples, subject_module, graders, opts)
   end
 end

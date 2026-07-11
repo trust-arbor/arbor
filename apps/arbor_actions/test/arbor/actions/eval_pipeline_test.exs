@@ -101,6 +101,17 @@ defmodule Arbor.Actions.EvalPipelineTest do
   end
 
   describe "Report" do
+    @results [
+      %{"id" => "pass", "expected" => "same", "actual" => "same", "passed" => true},
+      %{
+        "id" => "fail",
+        "expected" => "expected",
+        "actual" => "actual",
+        "passed" => false
+      }
+    ]
+    @metrics %{"accuracy" => 0.5}
+
     test "has correct Jido action name" do
       meta = EvalPipeline.Report.__action_metadata__()
       assert meta.name == "eval_pipeline_report"
@@ -109,6 +120,59 @@ defmodule Arbor.Actions.EvalPipelineTest do
     test "has format parameter" do
       meta = EvalPipeline.Report.__action_metadata__()
       assert Keyword.has_key?(meta.schema, :format)
+    end
+
+    test "preserves terminal report output while delegating formatting" do
+      assert {:ok, %{report: report, format: "terminal"}} =
+               EvalPipeline.Report.run(
+                 %{results: @results, metrics: @metrics, format: "terminal"},
+                 %{}
+               )
+
+      assert report == """
+             === Evaluation Report ===
+             Samples: 2 | Passed: 1 | Failed: 1
+
+             Metrics:
+               accuracy: 0.5
+
+             Top Failures:
+               - fail: expected=expected actual=actual
+             """
+    end
+
+    test "preserves Markdown and JSON report output" do
+      for format <- ["markdown", "json"] do
+        assert {:ok, %{report: report, format: ^format}} =
+                 EvalPipeline.Report.run(
+                   %{results: @results, metrics: @metrics, format: format},
+                   %{}
+                 )
+
+        assert report == Arbor.Eval.Report.format(@results, @metrics, format)
+      end
+    end
+
+    test "keeps file writes at the action boundary" do
+      tmp_dir =
+        Path.join(System.tmp_dir!(), "eval_report_#{System.unique_integer([:positive])}")
+
+      output_path = Path.join(tmp_dir, "nested/report.md")
+      on_exit(fn -> File.rm_rf(tmp_dir) end)
+
+      assert {:ok, %{report: report, format: "markdown", path: ^output_path}} =
+               EvalPipeline.Report.run(
+                 %{
+                   results: @results,
+                   metrics: @metrics,
+                   format: "markdown",
+                   output_path: output_path
+                 },
+                 %{}
+               )
+
+      assert File.read!(output_path) == report
+      assert report == Arbor.Eval.Report.format(@results, @metrics, "markdown")
     end
   end
 
