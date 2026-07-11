@@ -12,6 +12,8 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     Arbor.Actions.Acp.SendMessage,
     Arbor.Actions.Acp.CloseSession,
     Arbor.Actions.Coding.SecurityRegression.Validate,
+    Arbor.Actions.Coding.ReviewTree.Read,
+    Arbor.Actions.Coding.ReviewTree.Search,
     Arbor.Actions.Coding.Workspace.Acquire,
     Arbor.Actions.Coding.Workspace.Inspect,
     Arbor.Actions.Coding.Workspace.Release,
@@ -276,6 +278,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
              calls_for(calls, "council_review_change")
 
     assert review_args["workspace_id"] == "ws_security_fixture"
+    assert review_args["commit_hash"] == "commit-1"
     assert review_args["validation_profile"] == "security_regression"
 
     assert review_args["test_paths"] == [

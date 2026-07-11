@@ -543,7 +543,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          Map.put(
            attrs,
            "context_keys",
-           "diff,files,branch,base_ref,intent,agent_id,workspace_id,test_paths,validation_profile"
+           "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,test_paths,validation_profile"
          )}
       end
     end)
@@ -1457,10 +1457,26 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     graph.nodes
     |> Map.values()
     |> Enum.flat_map(fn node ->
-      if Registry.node_type(node) == "exec" and Map.get(node.attrs, "target") == "action" do
-        [Map.fetch!(node.attrs, "action")]
-      else
-        []
+      case Registry.node_type(node) do
+        "exec" ->
+          if Map.get(node.attrs, "target") == "action" do
+            [Map.fetch!(node.attrs, "action")]
+          else
+            []
+          end
+
+        "compute" ->
+          if Map.get(node.attrs, "use_tools") in [true, "true"] do
+            node.attrs
+            |> Map.get("tools", "")
+            |> String.split(",", trim: true)
+            |> Enum.map(&String.trim/1)
+          else
+            []
+          end
+
+        _other ->
+          []
       end
     end)
     |> Enum.uniq()

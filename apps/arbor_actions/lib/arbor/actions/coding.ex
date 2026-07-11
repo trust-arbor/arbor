@@ -1113,7 +1113,9 @@ defmodule Arbor.Actions.Coding do
             branch: branch_name,
             base_ref: map_value(change, :base_ref),
             intent: get_param(params, :task),
-            agent_id: context_agent_id(context)
+            agent_id: context_agent_id(context),
+            workspace_id: workspace_id,
+            commit_hash: expected_commit
           }
           |> put_if_present(:timeout, get_param(params, :review_timeout))
 

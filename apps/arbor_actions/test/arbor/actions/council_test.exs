@@ -2,6 +2,9 @@ defmodule Arbor.Actions.CouncilTest do
   use Arbor.Actions.ActionCase, async: false
 
   alias Arbor.Actions.Council
+  alias Arbor.Actions.Coding.ReviewTree
+  alias Arbor.Actions.Coding.Workspace
+  alias Arbor.Actions.Coding.WorkspaceLeaseRegistry
 
   @moduletag :fast
 
@@ -369,14 +372,36 @@ defmodule Arbor.Actions.CouncilTest do
       signer = fn _resource -> {:ok, :signed} end
       authorizer = fn _agent_id, _handler_type -> :ok end
       authority = :malformed_parent_authorization
+      candidate_commit = String.duplicate("a", 40)
+
+      snapshot_opener = fn _workspace_id, ^candidate_commit, _caller ->
+        {:ok,
+         %{
+           review_snapshot_id: "review_snap_bound_test",
+           candidate_commit: candidate_commit,
+           base_commit: "main"
+         }}
+      end
+
+      snapshot_closer = fn "review_snap_bound_test", _caller ->
+        send(parent, :bound_snapshot_closed)
+        {:ok, %{active: false}}
+      end
+
+      params =
+        @valid_review_params
+        |> Map.put(:workspace_id, "ws_bound_test")
+        |> Map.put(:commit_hash, candidate_commit)
 
       result =
         Task.async(fn ->
           :erlang.trace(self(), true, [:call, {:tracer, parent}])
 
-          Council.ReviewChange.run(@valid_review_params, %{
+          Council.ReviewChange.run(params, %{
             persist_verdict: false,
             run_authorization: authority,
+            review_snapshot_opener: snapshot_opener,
+            review_snapshot_closer: snapshot_closer,
             nested_engine_opts: [signer: signer, authorizer: authorizer],
             review_context: %{
               "council.decision" => "approved",
@@ -387,11 +412,13 @@ defmodule Arbor.Actions.CouncilTest do
         |> Task.await()
 
       assert {:error, :invalid_run_authorization} = result
+      assert_receive :bound_snapshot_closed
 
       assert_receive {:trace, _pid, :call, {Arbor.Consensus, :decide, [question, consensus_opts]}}
 
       assert question == consensus_opts[:context]["council.question"]
       assert consensus_opts[:context]["branch"] == "agent/review-loop"
+      assert consensus_opts[:context]["review.snapshot_id"] == "review_snap_bound_test"
       assert consensus_opts[:run_authorization] == authority
       assert consensus_opts[:nested_engine_opts][:signer] == signer
       assert consensus_opts[:nested_engine_opts][:authorizer] == authorizer
@@ -425,14 +452,119 @@ defmodule Arbor.Actions.CouncilTest do
       end
     end
 
-    test "request map can be overridden by top-level params" do
+    test "security regression: bound reviews fail closed without workspace and commit scope" do
+      assert {:error, :missing_bound_review_snapshot} =
+               Council.ReviewChange.run(@valid_review_params, %{
+                 run_authorization: :opaque_parent_authorization,
+                 review_runner: fn _, _, _ -> flunk("must not run without snapshot scope") end,
+                 persist_verdict: false
+               })
+    end
+
+    test "security regression: binding review reads exact commit evidence and closes its snapshot",
+         %{tmp_dir: tmp_dir} do
+      repo = create_git_repo(Path.join(tmp_dir, "binding_review_repo"))
+      File.mkdir_p!(Path.join(repo, "lib"))
+      File.write!(Path.join(repo, "lib/a.ex"), "defmodule A do\n  def value, do: :base\nend\n")
+      git!(repo, ["add", "lib/a.ex"])
+      git!(repo, ["commit", "-m", "base module"])
+      base_commit = git!(repo, ["rev-parse", "HEAD"])
+
+      task_id = "task_binding_review_#{System.unique_integer([:positive])}"
+      principal_id = "agent_binding_review_#{System.unique_integer([:positive])}"
+      authority_context = %{task_id: task_id, agent_id: principal_id}
+
+      assert {:ok, lease} =
+               Workspace.Acquire.run(
+                 %{
+                   repo_path: repo,
+                   branch_name: "test/binding-review",
+                   worktree_base_dir: Path.join(tmp_dir, "binding_review_worktrees"),
+                   base_ref: base_commit
+                 },
+                 authority_context
+               )
+
+      on_exit(fn ->
+        _ = WorkspaceLeaseRegistry.release(lease.workspace_id, :remove, authority_context)
+      end)
+
+      File.write!(
+        Path.join(lease.worktree_path, "lib/a.ex"),
+        "defmodule A do\n  def value, do: :candidate\nend\n"
+      )
+
+      git!(lease.worktree_path, ["add", "lib/a.ex"])
+      git!(lease.worktree_path, ["commit", "-m", "candidate module"])
+      candidate_commit = git!(lease.worktree_path, ["rev-parse", "HEAD"])
+      diff = git!(lease.worktree_path, ["diff", "#{base_commit}..#{candidate_commit}"])
+      parent = self()
+
+      review_runner = fn request, _params, context ->
+        assert request.candidate_commit == candidate_commit
+        assert request.base_ref == base_commit
+        assert is_binary(request.review_snapshot_id)
+
+        assert {:ok, read} =
+                 ReviewTree.Read.run(
+                   %{
+                     review_snapshot_id: request.review_snapshot_id,
+                     revision: "base",
+                     path: "lib/a.ex"
+                   },
+                   context
+                 )
+
+        assert read.content =~ ":base"
+        send(parent, {:binding_snapshot, request.review_snapshot_id})
+
+        {:ok,
+         %{
+           decision: "approved",
+           approve_count: 2,
+           reject_count: 0,
+           abstain_count: 0,
+           quorum_met: true,
+           average_confidence: 0.9,
+           primary_concerns: []
+         }}
+      end
+
       params = %{
-        request: @valid_review_params,
+        diff: diff,
+        files: ["lib/a.ex"],
+        branch: lease.branch,
+        base_ref: base_commit,
+        intent: "Change A.value/0",
+        agent_id: principal_id,
+        workspace_id: lease.workspace_id,
+        commit_hash: candidate_commit
+      }
+
+      assert {:ok, result} =
+               Council.ReviewChange.run(params, %{
+                 review_runner: review_runner,
+                 persist_verdict: false,
+                 task_id: task_id,
+                 agent_id: principal_id
+               })
+
+      assert result.recommendation == "keep"
+      assert_receive {:binding_snapshot, snapshot_id}
+
+      assert {:error, :not_found} =
+               WorkspaceLeaseRegistry.resolve_review_snapshot(snapshot_id, authority_context)
+    end
+
+    test "security regression: top-level params override request maps without accepting snapshot ids" do
+      params = %{
+        request: Map.put(@valid_review_params, :review_snapshot_id, "review_snap_forged"),
         branch: "agent/override"
       }
 
       assert {:ok, request} = Council.build_code_review_request(params)
       assert request.branch == "agent/override"
+      assert request.review_snapshot_id == nil
     end
 
     test "successful outputs are JSON-clean on keep, revise, reject, and human routes" do
@@ -580,6 +712,11 @@ defmodule Arbor.Actions.CouncilTest do
     """)
 
     path
+  end
+
+  defp git!(path, args) do
+    {output, 0} = System.cmd("git", ["-C", path | args], stderr_to_stdout: true)
+    String.trim(output)
   end
 
   describe "ConsultOne integration" do

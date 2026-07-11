@@ -435,35 +435,72 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   end
 
   defp referenced_actions(graph, catalog) do
-    graph
-    |> direct_action_names()
-    |> Enum.uniq()
-    |> Enum.sort()
-    |> Enum.reduce_while({:ok, []}, fn action_name, {:ok, bindings} ->
-      case fetch_catalog_action(catalog, action_name) do
-        {:ok, binding} -> {:cont, {:ok, [binding | bindings]}}
-        :error -> {:halt, {:error, {:referenced_action_missing, action_name}}}
+    with {:ok, action_names} <- direct_action_names(graph) do
+      action_names
+      |> Enum.uniq()
+      |> Enum.sort()
+      |> Enum.reduce_while({:ok, []}, fn action_name, {:ok, bindings} ->
+        case fetch_catalog_action(catalog, action_name) do
+          {:ok, binding} -> {:cont, {:ok, [binding | bindings]}}
+          :error -> {:halt, {:error, {:referenced_action_missing, action_name}}}
+        end
+      end)
+      |> case do
+        {:ok, bindings} -> {:ok, Enum.sort_by(bindings, & &1["name"])}
+        {:error, _reason} = error -> error
       end
-    end)
-    |> case do
-      {:ok, bindings} -> {:ok, Enum.sort_by(bindings, & &1["name"])}
-      {:error, _reason} = error -> error
     end
   end
 
   defp direct_action_names(%Graph{} = graph) do
     graph.nodes
     |> Map.values()
-    |> Enum.flat_map(fn node ->
-      if Registry.node_type(node) == "exec" and Map.get(node.attrs, "target") == "action" do
-        case Map.get(node.attrs, "action") do
-          name when is_binary(name) and name != "" -> [name]
-          _other -> []
-        end
-      else
-        []
+    |> Enum.reduce_while({:ok, []}, fn node, {:ok, names} ->
+      case direct_node_action_names(node) do
+        {:ok, node_names} -> {:cont, {:ok, node_names ++ names}}
+        {:error, _reason} = error -> {:halt, error}
       end
     end)
+  end
+
+  defp direct_node_action_names(node) do
+    case Registry.node_type(node) do
+      "exec" ->
+        if Map.get(node.attrs, "target") == "action" do
+          case Map.get(node.attrs, "action") do
+            name when is_binary(name) and name != "" -> {:ok, [name]}
+            _other -> {:ok, []}
+          end
+        else
+          {:ok, []}
+        end
+
+      "compute" ->
+        compute_tool_action_names(node)
+
+      _other ->
+        {:ok, []}
+    end
+  end
+
+  defp compute_tool_action_names(node) do
+    if Map.get(node.attrs, "use_tools") in [true, "true"] do
+      case Map.get(node.attrs, "tools") do
+        tools when is_binary(tools) ->
+          names = tools |> String.split(",", trim: false) |> Enum.map(&String.trim/1)
+
+          if names != [] and Enum.all?(names, &(&1 != "")) do
+            {:ok, names}
+          else
+            {:error, {:explicit_compute_tools_required, node.id}}
+          end
+
+        _missing_or_invalid ->
+          {:error, {:explicit_compute_tools_required, node.id}}
+      end
+    else
+      {:ok, []}
+    end
   end
 
   defp referenced_nested_graphs(%Graph{} = graph, catalog, nested_graph_ids) do

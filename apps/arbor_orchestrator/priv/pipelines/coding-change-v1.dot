@@ -465,7 +465,7 @@ digraph CodingChangeV1 {
     type="exec",
     target="action",
     action="council_review_change",
-    context_keys="diff,files,branch,base_ref,intent,agent_id",
+    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash",
     output_prefix="review",
     max_retries="0"
   ]

@@ -311,6 +311,7 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
       #!/bin/sh
       set -e
       dd if=/dev/zero bs=1048576 count=8 2>/dev/null
+      sleep 1
       : > '#{marker}'
       """)
 

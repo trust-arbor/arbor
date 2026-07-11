@@ -132,7 +132,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
       ),
       update_in(
         graph.nodes["review_change"].attrs,
-        &Map.put(&1, "context_keys", "diff,files,branch,base_ref,intent,agent_id")
+        &Map.put(
+          &1,
+          "context_keys",
+          "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash"
+        )
       )
     ]
 
@@ -357,8 +361,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     template_override =
       String.replace(
         ctx.template_source,
-        ~s(action="council_review_change",\n    context_keys="diff,files,branch,base_ref,intent,agent_id",),
-        ~s(action="council_review_change",\n    agent_id="agent_forged",\n    context_keys="diff,files,branch,base_ref,intent,agent_id",),
+        ~s(action="council_review_change",\n    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash",),
+        ~s(action="council_review_change",\n    agent_id="agent_forged",\n    context_keys="diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash",),
         global: false
       )
 

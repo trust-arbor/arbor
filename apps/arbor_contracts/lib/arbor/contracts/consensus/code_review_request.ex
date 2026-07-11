@@ -3,9 +3,10 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
   Input contract for code-review council pipelines.
 
   The review loop hands a completed coding-agent branch to a council as a
-  JSON-clean payload: the branch diff, the touched files, the branch/base refs,
-  the agent intent, and the originating agent id. This struct is the typed
-  boundary before that payload enters a DOT pipeline.
+  JSON-clean payload: the branch diff, touched files, exact candidate/base
+  commits, an opaque commit-tree snapshot id, the agent intent, and the
+  originating agent id. This struct is the typed boundary before that payload
+  enters a DOT pipeline.
   """
 
   use TypedStruct
@@ -17,6 +18,8 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
     field(:files, [String.t()])
     field(:branch, String.t())
     field(:base_ref, String.t() | nil, enforce: false, default: nil)
+    field(:candidate_commit, String.t() | nil, enforce: false, default: nil)
+    field(:review_snapshot_id, String.t() | nil, enforce: false, default: nil)
     field(:intent, String.t(), enforce: false, default: "")
     field(:agent_id, String.t() | nil, enforce: false, default: nil)
   end
@@ -42,6 +45,8 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
          {:ok, files} <- required_files(attrs),
          {:ok, branch} <- required_string(attrs, :branch),
          {:ok, base_ref} <- optional_string(attrs, :base_ref, nil),
+         {:ok, candidate_commit} <- optional_string(attrs, :candidate_commit, nil),
+         {:ok, review_snapshot_id} <- optional_string(attrs, :review_snapshot_id, nil),
          {:ok, intent} <- optional_string(attrs, :intent, ""),
          {:ok, agent_id} <- optional_string(attrs, :agent_id, nil) do
       {:ok,
@@ -50,11 +55,36 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
          files: files,
          branch: branch,
          base_ref: base_ref,
+         candidate_commit: candidate_commit,
+         review_snapshot_id: review_snapshot_id,
          intent: intent,
          agent_id: agent_id
        }}
     end
   end
+
+  @doc "Bind an authorized commit-tree snapshot to a review request."
+  @spec bind_review_snapshot(t(), map()) :: {:ok, t()} | {:error, term()}
+  def bind_review_snapshot(%__MODULE__{} = request, snapshot) when is_map(snapshot) do
+    with {:ok, snapshot_id} <- required_snapshot_string(snapshot, :review_snapshot_id),
+         {:ok, snapshot_candidate} <- required_snapshot_string(snapshot, :candidate_commit),
+         {:ok, snapshot_base} <- required_snapshot_string(snapshot, :base_commit),
+         :ok <- require_equal_revision(:candidate, request.candidate_commit, snapshot_candidate),
+         :ok <- require_equal_revision(:base, request.base_ref, snapshot_base) do
+      new(%{
+        diff: request.diff,
+        files: request.files,
+        branch: request.branch,
+        base_ref: snapshot_base,
+        candidate_commit: snapshot_candidate,
+        review_snapshot_id: snapshot_id,
+        intent: request.intent,
+        agent_id: request.agent_id
+      })
+    end
+  end
+
+  def bind_review_snapshot(%__MODULE__{}, _snapshot), do: {:error, :invalid_review_snapshot}
 
   @doc """
   Convert the request to Engine context values.
@@ -72,6 +102,8 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
       "files" => request.files,
       "branch" => request.branch,
       "base_ref" => request.base_ref,
+      "candidate_commit" => request.candidate_commit,
+      "review_snapshot_id" => request.review_snapshot_id,
       "intent" => request.intent,
       "agent_id" => request.agent_id
     }
@@ -84,12 +116,16 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
       "files" => request.files,
       "branch" => request.branch,
       "base_ref" => request.base_ref,
+      "candidate_commit" => request.candidate_commit,
+      "review_snapshot_id" => request.review_snapshot_id,
       "intent" => request.intent,
       "agent_id" => request.agent_id,
       "review.diff" => request.diff,
       "review.files" => request.files,
       "review.branch" => request.branch,
       "review.base_ref" => request.base_ref,
+      "review.candidate_commit" => request.candidate_commit,
+      "review.snapshot_id" => request.review_snapshot_id,
       "review.intent" => request.intent,
       "review.agent_id" => request.agent_id,
       "review.prompt" => prompt_text(request),
@@ -104,7 +140,9 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
   def prompt_text(%__MODULE__{} = request) do
     """
     Branch: #{request.branch}
-    Base ref: #{request.base_ref || "unknown"}
+    Candidate commit: #{request.candidate_commit || "unknown"}
+    Base commit: #{request.base_ref || "unknown"}
+    Review snapshot id: #{request.review_snapshot_id || "unavailable"}
     Agent id: #{request.agent_id || "unknown"}
 
     Intent:
@@ -142,6 +180,25 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequest do
       {:error, {:missing_required_field, ^key}} ->
         {:ok, default}
     end
+  end
+
+  defp required_snapshot_string(snapshot, key) do
+    case snapshot_value(snapshot, key) do
+      value when is_binary(value) and value != "" -> {:ok, value}
+      _ -> {:error, {:invalid_review_snapshot, key}}
+    end
+  end
+
+  defp require_equal_revision(kind, nil, _snapshot_commit),
+    do: {:error, {:missing_review_commit, kind}}
+
+  defp require_equal_revision(_kind, commit, commit), do: :ok
+
+  defp require_equal_revision(kind, _request_commit, _snapshot_commit),
+    do: {:error, {:review_commit_mismatch, kind}}
+
+  defp snapshot_value(snapshot, key) do
+    Map.get(snapshot, key) || Map.get(snapshot, Atom.to_string(key))
   end
 
   defp required_files(attrs) do

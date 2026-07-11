@@ -549,6 +549,8 @@ defmodule Arbor.Actions.CodingTest do
       assert review_params.agent_id == "agent_coder"
       assert review_params.diff =~ "+implemented"
       assert is_binary(review_params.base_ref)
+      assert review_params.workspace_id == material_params.workspace_id
+      assert review_params.commit_hash == result.commit
 
       refute_received {:unexpected_pr, _}
     end

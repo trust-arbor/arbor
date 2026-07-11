@@ -11,6 +11,7 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
     files: ["lib/a.ex", "test/a_test.exs"],
     branch: "agent/review-loop",
     base_ref: "main",
+    candidate_commit: String.duplicate("a", 40),
     intent: "Add a review loop",
     agent_id: "agent_123"
   }
@@ -22,6 +23,8 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       assert request.files == @valid_attrs.files
       assert request.branch == "agent/review-loop"
       assert request.base_ref == "main"
+      assert request.candidate_commit == String.duplicate("a", 40)
+      assert request.review_snapshot_id == nil
       assert request.intent == "Add a review loop"
       assert request.agent_id == "agent_123"
     end
@@ -46,6 +49,8 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
 
       assert {:ok, request} = CodeReviewRequest.new(attrs)
       assert request.base_ref == nil
+      assert request.candidate_commit == nil
+      assert request.review_snapshot_id == nil
       assert request.intent == ""
       assert request.agent_id == nil
     end
@@ -77,6 +82,28 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
     end
   end
 
+  describe "bind_review_snapshot/2" do
+    test "binds only a matching candidate/base snapshot" do
+      {:ok, request} = CodeReviewRequest.new(@valid_attrs)
+
+      snapshot = %{
+        review_snapshot_id: "review_snap_123",
+        candidate_commit: @valid_attrs.candidate_commit,
+        base_commit: @valid_attrs.base_ref
+      }
+
+      assert {:ok, bound} = CodeReviewRequest.bind_review_snapshot(request, snapshot)
+      assert bound.review_snapshot_id == "review_snap_123"
+      assert bound.candidate_commit == @valid_attrs.candidate_commit
+
+      assert {:error, {:review_commit_mismatch, :candidate}} =
+               CodeReviewRequest.bind_review_snapshot(request, %{
+                 snapshot
+                 | candidate_commit: String.duplicate("b", 40)
+               })
+    end
+  end
+
   describe "to_context/1" do
     test "returns a JSON-clean Engine context map" do
       {:ok, request} = CodeReviewRequest.new(@valid_attrs)
@@ -87,6 +114,8 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
                "files" => @valid_attrs.files,
                "branch" => "agent/review-loop",
                "base_ref" => "main",
+               "candidate_commit" => String.duplicate("a", 40),
+               "review_snapshot_id" => nil,
                "intent" => "Add a review loop",
                "agent_id" => "agent_123"
              }
@@ -110,6 +139,8 @@ defmodule Arbor.Contracts.Consensus.CodeReviewRequestTest do
       prompt = CodeReviewRequest.to_context(request)["review.prompt"]
 
       assert prompt =~ "Branch: agent/review-loop"
+      assert prompt =~ "Candidate commit: #{String.duplicate("a", 40)}"
+      assert prompt =~ "Review snapshot id: unavailable"
       assert prompt =~ "Intent:\nAdd a review loop"
       assert prompt =~ "- lib/a.ex"
       assert prompt =~ "```diff"

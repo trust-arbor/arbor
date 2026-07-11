@@ -432,6 +432,10 @@ defmodule Arbor.Actions.Council do
           type: :string,
           doc: "Agent that produced the change"
         ],
+        commit_hash: [
+          type: :string,
+          doc: "Exact candidate commit produced by the coding workflow"
+        ],
         graph: [
           type: :string,
           doc: "Override DOT graph path"
@@ -448,7 +452,7 @@ defmodule Arbor.Actions.Council do
           type: :string,
           doc: "Deprecated; blast-radius tier decision is derived by the classifier"
         ],
-        workspace_id: [type: :string, doc: "Lease id for a reviewed-tree security regression"],
+        workspace_id: [type: :string, doc: "Active coding workspace lease under review"],
         test_paths: [type: {:list, :string}, doc: "Selected reviewed security regression tests"],
         validation_profile: [type: :string, doc: "Optional reviewed-tree validation profile"]
       ]
@@ -467,6 +471,7 @@ defmodule Arbor.Actions.Council do
         base_ref: :control,
         intent: :data,
         agent_id: :data,
+        commit_hash: :control,
         graph: {:control, requires: [:path_traversal]},
         timeout: :data,
         quorum: :control,
@@ -486,8 +491,12 @@ defmodule Arbor.Actions.Council do
     def run(params, context) do
       Actions.emit_started(__MODULE__, loggable_params(params))
 
+      run_authorization =
+        Map.get(context, :run_authorization) || Map.get(context, "run_authorization")
+
       with {:ok, request} <- Council.build_code_review_request(params),
-           {:ok, decision} <- Council.run_code_review_decision(request, params, context),
+           :ok <- Council.reject_bound_review_overrides(params, run_authorization),
+           {:ok, request, decision} <- run_review_with_snapshot(request, params, context),
            {:ok, verdict} <- Council.verdict_from_review_decision(decision, request) do
         routing = Council.review_routing(verdict, request, decision, context)
 
@@ -521,6 +530,82 @@ defmodule Arbor.Actions.Council do
           error
       end
     end
+
+    defp run_review_with_snapshot(request, params, context) do
+      case open_review_snapshot(request, params, context) do
+        {:ok, nil} ->
+          case Council.run_code_review_decision(request, params, context) do
+            {:ok, decision} -> {:ok, request, decision}
+            {:error, _reason} = error -> error
+          end
+
+        {:ok, snapshot} ->
+          try do
+            with {:ok, bound_request} <-
+                   CodeReviewRequest.bind_review_snapshot(request, snapshot),
+                 {:ok, decision} <-
+                   Council.run_code_review_decision(bound_request, params, context) do
+              {:ok, bound_request, decision}
+            end
+          after
+            _ = close_review_snapshot(snapshot, context)
+          end
+
+        {:error, _reason} = error ->
+          error
+      end
+    end
+
+    defp open_review_snapshot(request, params, context) do
+      workspace_id = Council.get_param(params, :workspace_id)
+      candidate_commit = request.candidate_commit
+
+      bound? =
+        not is_nil(Map.get(context, :run_authorization) || Map.get(context, "run_authorization"))
+
+      cond do
+        valid_id?(workspace_id) and valid_id?(candidate_commit) ->
+          case Map.get(context, :review_snapshot_opener) do
+            opener when is_function(opener, 3) ->
+              opener.(workspace_id, candidate_commit, registry_caller(context))
+
+            _ ->
+              WorkspaceLeaseRegistry.open_review_snapshot(
+                workspace_id,
+                candidate_commit,
+                registry_caller(context)
+              )
+          end
+
+        bound? ->
+          {:error, :missing_bound_review_snapshot}
+
+        is_nil(workspace_id) and is_nil(candidate_commit) ->
+          {:ok, nil}
+
+        true ->
+          {:error, :incomplete_review_snapshot_binding}
+      end
+    end
+
+    defp close_review_snapshot(snapshot, context) do
+      snapshot_id =
+        Map.get(snapshot, :review_snapshot_id) || Map.get(snapshot, "review_snapshot_id")
+
+      if valid_id?(snapshot_id) do
+        case Map.get(context, :review_snapshot_closer) do
+          closer when is_function(closer, 2) ->
+            closer.(snapshot_id, registry_caller(context))
+
+          _ ->
+            WorkspaceLeaseRegistry.close_review_snapshot(snapshot_id, registry_caller(context))
+        end
+      else
+        {:error, :invalid_review_snapshot_id}
+      end
+    end
+
+    defp valid_id?(value), do: is_binary(value) and value != ""
 
     defp loggable_params(params) do
       %{
@@ -620,19 +705,30 @@ defmodule Arbor.Actions.Council do
   def build_code_review_request(params) when is_map(params) do
     base =
       case get_param(params, :request) do
-        request when is_map(request) -> string_key_map(request)
-        nil -> %{}
-        other -> %{"request" => other}
+        request when is_map(request) ->
+          request |> string_key_map() |> Map.delete("review_snapshot_id")
+
+        nil ->
+          %{}
+
+        other ->
+          %{"request" => other}
       end
 
     params
     |> Enum.reduce(base, fn {key, value}, acc ->
       normalized = normalize_param_key(key)
 
-      if normalized in ~w(diff files branch base_ref intent agent_id) and not is_nil(value) do
-        Map.put(acc, normalized, value)
-      else
-        acc
+      cond do
+        normalized == "commit_hash" and not is_nil(value) ->
+          Map.put(acc, "candidate_commit", value)
+
+        normalized in ~w(diff files branch base_ref candidate_commit intent agent_id) and
+            not is_nil(value) ->
+          Map.put(acc, normalized, value)
+
+        true ->
+          acc
       end
     end)
     |> CodeReviewRequest.new()
@@ -804,9 +900,10 @@ defmodule Arbor.Actions.Council do
     end
   end
 
-  defp reject_bound_review_overrides(_params, nil), do: :ok
+  @doc false
+  def reject_bound_review_overrides(_params, nil), do: :ok
 
-  defp reject_bound_review_overrides(params, _run_authorization) do
+  def reject_bound_review_overrides(params, _run_authorization) do
     case Enum.find([:graph, :quorum], &(not is_nil(get_param(params, &1)))) do
       nil -> :ok
       key -> {:error, {:bound_council_override, key}}

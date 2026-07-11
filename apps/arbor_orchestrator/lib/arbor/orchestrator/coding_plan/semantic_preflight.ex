@@ -543,7 +543,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
          "target" => "action",
          "action" => "council_review_change",
          "context_keys" =>
-           "diff,files,branch,base_ref,intent,agent_id,workspace_id,test_paths,validation_profile",
+           "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,test_paths,validation_profile",
          "output_prefix" => "review"
        }},
       {"remember_validation_reviewed_commit",

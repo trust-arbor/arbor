@@ -9,6 +9,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
   }
 
   alias Arbor.Actions.Consensus.Decide
+  alias Arbor.Actions.Coding.ReviewTree.{Read, Search}
 
   alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, ExecutionManifest}
   alias Arbor.Orchestrator.Dot.Parser
@@ -75,7 +76,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
   test "declared nested graph closure binds its source, topology, capabilities, and egress" do
     graph = compiled_graph!(@nested_parent_dot)
     graph_hash = sha256(@nested_parent_dot)
-    catalog = catalog!([Decide, BindingOriginalAction])
+    catalog = catalog!([Decide, Read, Search, BindingOriginalAction])
 
     assert {:ok, {manifest, _digest}} = ExecutionManifest.build(graph, catalog, graph_hash)
     assert {:ok, consensus} = ActionCatalog.fetch(catalog, "consensus_decide")
@@ -85,6 +86,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     refute Map.has_key?(nested_graph["execution_manifest"], "nested_graphs")
 
     assert Enum.any?(manifest["actions"], &(&1 == consensus))
+    assert Enum.any?(manifest["actions"], &(&1["name"] == "coding_review_tree_read"))
+    assert Enum.any?(manifest["actions"], &(&1["name"] == "coding_review_tree_search"))
     assert consensus["resource_uri"] in manifest["capability_uris"]
     assert Enum.any?(manifest["egress"], &(&1["action"] == "consensus_decide"))
     assert "parallel" in Enum.map(manifest["handlers"], & &1["handler_type"])
@@ -94,6 +97,49 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
 
     assert nested_graph["compiled_graph_hash"] ==
              nested_graph["execution_manifest"]["compiled_graph_hash"]
+  end
+
+  test "security regression: explicit compute tools are pinned as action bindings" do
+    dot = """
+    digraph BoundComputeTools {
+      start [shape=Mdiamond]
+      review [type="compute", simulate="true", use_tools="true", tools="binding_action"]
+      done [shape=Msquare]
+      start -> review -> done
+    }
+    """
+
+    assert {:ok, {manifest, _digest}} =
+             ExecutionManifest.build(
+               compiled_graph!(dot),
+               catalog!([BindingOriginalAction]),
+               sha256(dot)
+             )
+
+    assert Enum.any?(manifest["actions"], &(&1["name"] == "binding_action"))
+    assert "arbor://action/test_fixtures/binding_original_action" in manifest["capability_uris"]
+  end
+
+  test "security regression: tool-enabled compute nodes require an exact explicit list" do
+    for tools_attr <- ["", ",binding_action", nil] do
+      tools = if is_nil(tools_attr), do: "", else: ~s(, tools="#{tools_attr}")
+
+      dot = """
+      digraph UnboundedComputeTools {
+        start [shape=Mdiamond]
+        review [type="compute", simulate="true", use_tools="true"#{tools}]
+        done [shape=Msquare]
+        start -> review -> done
+      }
+      """
+
+      assert {:error, {:explicit_compute_tools_required, "review"}} =
+               ExecutionManifest.build(
+                 compiled_graph!(dot),
+                 catalog!([BindingOriginalAction]),
+                 sha256(dot)
+               )
+    end
   end
 
   test "nested graph declarations fail closed when malformed or unknown" do
@@ -170,7 +216,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
         graph [nested_graphs="code_review_council"]
       """)
 
-    catalog = catalog!([BindingOriginalAction, Decide])
+    catalog = catalog!([BindingOriginalAction, Decide, Read, Search])
 
     assert {:ok, {direct_manifest, direct_digest}} =
              ExecutionManifest.build(compiled_graph!(direct_dot), catalog, sha256(direct_dot))
@@ -183,7 +229,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
   end
 
   test "subset is reflexive while declared child policy pins the exact nested topology" do
-    catalog = catalog!([Decide, BindingOriginalAction])
+    catalog = catalog!([Decide, Read, Search, BindingOriginalAction])
     parent = manifest!(@nested_parent_dot, catalog)
     child_dot = code_review_council_dot()
     child_graph = compiled_graph!(child_dot)
@@ -205,7 +251,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     assert :ok = ExecutionManifest.require_declared_child(child, parent)
     assert :ok = ExecutionManifest.require_declared_child(child, undeclared_parent)
 
-    assert {:error, {:child_binding_not_pinned_by_parent, :action, "consensus_decide"}} =
+    assert {:error, {:child_binding_not_pinned_by_parent, :action, "coding_review_tree_read"}} =
              ExecutionManifest.require_subset(child, undeclared_parent)
 
     changed_child_dot =

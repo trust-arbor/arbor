@@ -751,6 +751,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       # Bind materialization to the exact commit produced by this run.
       load = graph.nodes["load_committed_change"]
       assert load.attrs["context_keys"] == "workspace_id,commit"
+
+      assert graph.nodes["review_change"].attrs["context_keys"] ==
+               "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash"
     end
   end
 

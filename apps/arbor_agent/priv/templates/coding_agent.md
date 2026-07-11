@@ -60,6 +60,10 @@ required_capabilities:
   resource: "arbor://action/coding/cross_app/validate"
 - description: "Acquire, inspect, retain, and release isolated coding workspaces"
   resource: "arbor://action/coding/workspace/**"
+- description: "Read tracked files from the exact candidate or base tree during binding review"
+  resource: "arbor://action/coding/review_tree/read"
+- description: "Search tracked files in the exact candidate or base tree during binding review"
+  resource: "arbor://action/coding/review_tree/search"
 - description: "Start and message Codex ACP sessions"
   resource: "arbor://acp/tool"
 - description: "Read repository files"
@@ -87,6 +91,8 @@ trust_preset:
     "arbor://action/coding/security_regression/validate": ask
     "arbor://action/coding/cross_app/validate": ask
     "arbor://action/coding/workspace": auto
+    "arbor://action/coding/review_tree/read": auto
+    "arbor://action/coding/review_tree/search": auto
     "arbor://acp/tool": auto
     "arbor://fs/read": auto
     "arbor://fs/list": auto

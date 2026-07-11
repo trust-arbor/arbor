@@ -49,7 +49,13 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
         assert node.attrs["type"] == "compute"
         assert node.attrs["purpose"] == "llm"
         assert node.attrs["simulate"] == "false"
-        assert node.attrs["use_tools"] == "false"
+        assert node.attrs["use_tools"] == "true"
+
+        assert node.attrs["tools"] ==
+                 "coding_review_tree_read,coding_review_tree_search"
+
+        assert node.attrs["max_turns"] == "3"
+        assert node.attrs["prompt_is_data"] == "true"
         assert node.attrs["llm_provider"] == provider
         assert node.attrs["llm_model"] == model
         assert node.attrs["prompt_context_key"] == "review.prompt"

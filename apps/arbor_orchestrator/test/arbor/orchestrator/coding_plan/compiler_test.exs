@@ -22,6 +22,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     Arbor.Actions.Coding.Workspace.CommittedChange,
     Arbor.Actions.Coding.SecurityRegression.Validate,
     Arbor.Actions.Coding.CrossApp.Validate,
+    Arbor.Actions.Coding.ReviewTree.Read,
+    Arbor.Actions.Coding.ReviewTree.Search,
     Arbor.Actions.Mix.Compile,
     Arbor.Actions.Mix.Test,
     Arbor.Actions.Git.Commit,
@@ -81,6 +83,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert {:ok, compilation} = compile(plan, ctx)
 
     assert action_schema_property?(compilation, "council_review_change", "agent_id")
+    assert action_schema_property?(compilation, "council_review_change", "commit_hash")
     assert action_schema_property?(compilation, "git_pr", "owner")
 
     assert :ok =
@@ -169,6 +172,20 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
              binding["name"] == "consensus_decide"
            end)
 
+    for action_name <- ~w(coding_review_tree_read coding_review_tree_search) do
+      assert Enum.any?(compilation.execution_manifest["actions"], fn binding ->
+               binding["name"] == action_name
+             end)
+    end
+
+    assert "arbor://action/coding/review_tree/read" in compilation.execution_manifest[
+             "capability_uris"
+           ]
+
+    assert "arbor://action/coding/review_tree/search" in compilation.execution_manifest[
+             "capability_uris"
+           ]
+
     assert Enum.any?(compilation.execution_manifest["actions"], fn binding ->
              binding["name"] == "mix_compile" and
                binding["module"] == Atom.to_string(Arbor.Actions.Mix.Compile) and
@@ -219,7 +236,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     refute validate["context_keys"] =~ "test_paths"
 
     assert node_attrs(graph, "review_change")["context_keys"] ==
-             "diff,files,branch,base_ref,intent,agent_id,workspace_id,test_paths,validation_profile"
+             "diff,files,branch,base_ref,intent,agent_id,workspace_id,commit_hash,test_paths,validation_profile"
 
     assert node_attrs(graph, "prep_review_validation_profile")["expression"] ==
              "security_regression"
