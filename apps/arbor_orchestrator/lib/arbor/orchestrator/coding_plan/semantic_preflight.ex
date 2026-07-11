@@ -131,8 +131,10 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         []
         |> check_handlers_and_targets(graph, policy)
         |> check_actions(graph, policy)
-        |> check_interaction_control_opt_in(graph)
+        |> check_commit_approval_gate(graph)
+        |> check_operator_approval_routing(graph)
         |> check_forbidden_authority(graph)
+        |> check_forbidden_denial_bypass_attrs(graph)
         |> check_profile_bindings(graph, policy, review_profile)
         |> check_reachability_and_dominance(graph, policy, review_profile)
         |> Enum.sort_by(&error_sort_key/1)
@@ -334,48 +336,177 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end)
   end
 
-  # project_interaction_control may only appear on the reviewed coding
-  # commit_change gate with action=git_commit. Any other node/action fails
-  # closed so an arbitrary DOT cannot turn denial into success.
-  @interaction_control_opt_in_attr "project_interaction_control"
-  @interaction_control_allowed_node "commit_change"
-  @interaction_control_allowed_action "git_commit"
+  # Commit approval must be a reviewed top-level coding action, never a generic
+  # handler opt-in that could turn denial into success for arbitrary graphs.
+  @commit_approval_node "commit_change"
+  @commit_approval_action "coding_reviewed_commit"
+  @forbidden_denial_bypass_attrs MapSet.new(~w[
+    project_interaction_control
+    treat_deny_as_success
+    deny_as_success
+    project_control
+    force_success_on_deny
+  ])
 
-  defp check_interaction_control_opt_in(errors, graph) do
+  defp check_commit_approval_gate(errors, graph) do
+    case Map.get(graph.nodes, @commit_approval_node) do
+      nil ->
+        [error("missing_commit_approval_gate", @commit_approval_node, %{}) | errors]
+
+      node ->
+        action = Map.get(node.attrs, "action")
+
+        cond do
+          action != @commit_approval_action ->
+            [
+              error("invalid_commit_approval_action", @commit_approval_node, %{
+                "action" => action,
+                "required_action" => @commit_approval_action
+              })
+              | errors
+            ]
+
+          Map.get(node.attrs, "target") not in [nil, "action"] ->
+            [
+              error("invalid_commit_approval_target", @commit_approval_node, %{
+                "target" => Map.get(node.attrs, "target")
+              })
+              | errors
+            ]
+
+          true ->
+            errors
+        end
+    end
+  end
+
+  # Prove deny cleanup and all operator rework budget counters are wired.
+  defp check_operator_approval_routing(errors, graph) do
+    required =
+      ~w(
+        route_commit_interaction
+        status_approval_denied
+        check_operator_rework_category_budget
+        check_operator_rework_total_budget
+        inc_operator_rework_count
+        mark_operator_rework_exhausted_error
+      )
+
+    errors =
+      Enum.reduce(required, errors, fn node_id, acc ->
+        if Map.has_key?(graph.nodes, node_id) do
+          acc
+        else
+          [error("missing_operator_approval_node", node_id, %{}) | acc]
+        end
+      end)
+
+    # Deny path must reach cleanup (close_worker) without publication success.
+    errors =
+      if approval_edge?(graph, "status_approval_denied", "close_worker") or
+           approval_reaches?(graph, "status_approval_denied", "close_worker") do
+        errors
+      else
+        [
+          error("missing_approval_denied_cleanup", "status_approval_denied", %{
+            "required_successor" => "close_worker"
+          })
+          | errors
+        ]
+      end
+
+    # Category and total budget counters must both be incremented on the rework path.
+    errors =
+      if approval_edge?(
+           graph,
+           "check_operator_rework_category_budget",
+           "check_operator_rework_total_budget"
+         ) or
+           approval_reaches?(
+             graph,
+             "check_operator_rework_category_budget",
+             "check_operator_rework_total_budget"
+           ) do
+        errors
+      else
+        [
+          error(
+            "missing_operator_rework_budget_chain",
+            "check_operator_rework_category_budget",
+            %{}
+          )
+          | errors
+        ]
+      end
+
+    # Reject bypass: commit_change must not skip route_commit_interaction.
+    if approval_edge?(graph, "commit_change", "hoist_commit_hash") or
+         approval_edge?(graph, "commit_change", "route_after_commit") do
+      [
+        error("commit_approval_bypass_edge", "commit_change", %{
+          "detail" => "commit_change must route through route_commit_interaction"
+        })
+        | errors
+      ]
+    else
+      errors
+    end
+  end
+
+  defp check_forbidden_denial_bypass_attrs(errors, graph) do
     graph.nodes
     |> Enum.sort_by(&elem(&1, 0))
     |> Enum.reduce(errors, fn {node_id, node}, acc ->
-      case Map.get(node.attrs, @interaction_control_opt_in_attr) do
-        value when value in [nil, "", "false", false, "0", 0] ->
-          acc
+      hits =
+        node.attrs
+        |> Map.keys()
+        |> Enum.filter(&(is_binary(&1) and MapSet.member?(@forbidden_denial_bypass_attrs, &1)))
+        |> Enum.sort()
 
-        value when value in ["true", true, "1", 1] ->
-          action = Map.get(node.attrs, "action")
-
-          if node_id == @interaction_control_allowed_node and
-               action == @interaction_control_allowed_action do
-            acc
-          else
-            [
-              error("forbidden_interaction_control_opt_in", node_id, %{
-                "attribute" => @interaction_control_opt_in_attr,
-                "action" => action,
-                "allowed_node" => @interaction_control_allowed_node,
-                "allowed_action" => @interaction_control_allowed_action
-              })
-              | acc
-            ]
-          end
-
-        _other ->
-          [
-            error("invalid_interaction_control_opt_in", node_id, %{
-              "attribute" => @interaction_control_opt_in_attr
-            })
-            | acc
-          ]
-      end
+      Enum.reduce(hits, acc, fn key, inner ->
+        [
+          error("forbidden_denial_bypass_attribute", node_id, %{"attribute" => key})
+          | inner
+        ]
+      end)
     end)
+  end
+
+  defp approval_edge?(%Graph{} = graph, from, to) do
+    graph
+    |> Graph.outgoing_edges(from)
+    |> Enum.any?(&(&1.to == to))
+  end
+
+  defp approval_edge?(_, _, _), do: false
+
+  defp approval_reaches?(%Graph{} = graph, from, to) do
+    graph
+    |> Graph.outgoing_edges(from)
+    |> Enum.map(& &1.to)
+    |> then(fn seeds -> approval_bfs(graph, seeds, MapSet.new([from]), to) end)
+  end
+
+  defp approval_reaches?(_, _, _), do: false
+
+  defp approval_bfs(_graph, [], _seen, _target), do: false
+
+  defp approval_bfs(graph, [node | rest], seen, target) do
+    cond do
+      node == target ->
+        true
+
+      MapSet.member?(seen, node) ->
+        approval_bfs(graph, rest, seen, target)
+
+      true ->
+        next =
+          graph
+          |> Graph.outgoing_edges(node)
+          |> Enum.map(& &1.to)
+
+        approval_bfs(graph, rest ++ next, MapSet.put(seen, node), target)
+    end
   end
 
   defp check_forbidden_authority(errors, graph) do
@@ -730,8 +861,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
        ["remember_review_reviewed_commit", "remember_validation_reviewed_commit"]},
       {"output_key", "fresh_rework_commit", ["compare_security_rework_commit"]},
       {"output_key", "commit", ["post_validation_expected_commit", "prep_expected_commit"]},
-      {"output_key", "commit_hash",
-       ["adopt_head_commit", "hoist_change_commit", "hoist_commit_hash"]},
+      {"output_key", "commit_hash", ["hoist_change_commit", "hoist_commit_hash"]},
       {"output_key", "diff", ["prep_review_diff"]},
       {"output_key", "files", ["prep_review_files"]}
     ]
@@ -784,7 +914,6 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
     expected = [
       {"hoist_commit_hash", [{"route_security_after_commit", nil}]},
-      {"adopt_head_commit", [{"route_security_after_commit", nil}]},
       {"route_security_after_commit",
        [
          {"route_after_commit", "context.total_rework_count=0"},

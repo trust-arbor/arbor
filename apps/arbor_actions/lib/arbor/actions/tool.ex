@@ -154,6 +154,7 @@ defmodule Arbor.Actions.Tool do
         query_words = String.split(query_lower, ~r/\s+/)
 
         apply(actions_mod, :all_actions, [])
+        |> Enum.reject(&pipeline_internal_action?/1)
         |> Enum.filter(fn module ->
           tool = module.to_tool()
           name = String.downcase(tool.name || "")
@@ -175,6 +176,20 @@ defmodule Arbor.Actions.Tool do
 
     defp executor_module do
       Arbor.LLM.ArborActionsExecutor
+    end
+
+    # Pipeline-internal actions (e.g. coding_reviewed_commit) are graph syscalls,
+    # not ordinary LLM-discoverable tools.
+    defp pipeline_internal_action?(module) when is_atom(module) do
+      tags =
+        cond do
+          function_exported?(module, :tags, 0) -> module.tags()
+          true -> []
+        end
+
+      "pipeline_internal" in Enum.map(List.wrap(tags), &to_string/1)
+    rescue
+      _ -> false
     end
   end
 end

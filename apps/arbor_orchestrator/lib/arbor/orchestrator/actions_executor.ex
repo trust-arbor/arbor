@@ -40,10 +40,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   Maps tool names to Arbor Actions, atomizes string-keyed args using the
   action's schema as an allowlist, and executes via the action system.
   """
-  @type control_payload :: %{String.t() => String.t()}
-
   @spec execute(String.t(), map(), String.t(), keyword()) ::
-          {:ok, String.t()} | {:control, control_payload()} | {:error, String.t()}
+          {:ok, String.t()} | {:error, String.t()}
   def execute(name, args, workdir, opts \\ []) do
     agent_id = Keyword.get(opts, :agent_id, "system")
     signed_request = Keyword.get(opts, :signed_request)
@@ -450,62 +448,55 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   # `Escalation.submit_via_router` routes :ask approvals through
   # `Arbor.Comms.InteractionRouter`, returning an "irq_…" request id whose
   # decision arrives on the agent's interaction RESPONSE topic — NOT via
-  # Consensus. The DOT-turn path used to await `Consensus.await(irq_…)` and got
-  # `:not_found` for every router-routed approval (so no operator could approve
-  # an agent's tool call from the dashboard or TUI). Mirror the ACP handler's
-  # `await_human_approval` and wait on the response topic instead.
+  # Consensus. Wait via the public InteractionRouter.await_response/3 facade
+  # (subscribe-before-lookup + durable get_response) — never via undeclared
+  # Arbor.Comms.PubSub and never with sleep-based races.
   defp interaction_request?(id) when is_binary(id), do: String.starts_with?(id, "irq")
   defp interaction_request?(_), do: false
 
-  # Operator notes on rework/deny are free-form human text. Bound on valid UTF-8
-  # codepoint boundaries so Engine context/checkpoints stay JSON-clean and small.
-  @max_interaction_note_bytes 1_024
-  @max_interaction_request_id_bytes 256
-
   defp await_interaction_and_retry(request_id, agent_id, action_module, params, context, name) do
-    topic = Arbor.Contracts.Comms.Interaction.response_topic_for_agent(agent_id)
-    timeout = approval_timeout(context)
+    alias Arbor.Contracts.Comms.ApprovalAnswer
 
-    Logger.info(
-      "[ActionsExecutor] Awaiting operator approval for #{name} via InteractionRouter " <>
-        "(request: #{request_id}, timeout: #{timeout}ms)"
-    )
+    with {:ok, request_id} <- ApprovalAnswer.validate_request_id(request_id) do
+      timeout = approval_timeout(context)
+      router = interaction_router()
 
-    task =
-      Task.async(fn ->
-        # Subscribe inside the Task so the subscription dies with it and stale
-        # responses can't leak into the caller's mailbox (per the ACP handler).
-        Phoenix.PubSub.subscribe(Arbor.Comms.PubSub, topic)
+      Logger.info(
+        "[ActionsExecutor] Awaiting operator approval for #{name} via InteractionRouter " <>
+          "(request: #{request_id}, timeout: #{timeout}ms)"
+      )
 
-        receive do
-          {:interaction_response, %{request_id: ^request_id, response: response} = payload} ->
-            metadata = Map.get(payload, :metadata) || Map.get(payload, "metadata") || %{}
-            {:response, response, metadata}
-        after
-          timeout -> :timeout
+      if Code.ensure_loaded?(router) and function_exported?(router, :await_response, 3) do
+        case apply(router, :await_response, [request_id, agent_id, [timeout: timeout]]) do
+          {:ok, response, metadata} ->
+            handle_normalized_decision(
+              ApprovalAnswer.normalize(response, metadata),
+              agent_id,
+              action_module,
+              params,
+              context,
+              name,
+              request_id,
+              :operator
+            )
+
+          {:error, :timeout} ->
+            {:error,
+             "Action #{name} requires approval but timed out after #{div(timeout, 1000)}s. " <>
+               "Request ID: #{request_id}. Ask the user to approve it and try again."}
+
+          {:error, reason} ->
+            {:error,
+             "Action #{name} approval wait failed (#{inspect(reason)}). Request ID: #{request_id}."}
         end
-      end)
-
-    case Task.yield(task, timeout + 1_000) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {:response, response, metadata}} ->
-        handle_interaction_response(
-          response,
-          metadata,
-          agent_id,
-          action_module,
-          params,
-          context,
-          name,
-          request_id
-        )
-
-      {:ok, :timeout} ->
+      else
         {:error,
-         "Action #{name} requires approval but timed out after #{div(timeout, 1000)}s. " <>
-           "Request ID: #{request_id}. Ask the user to approve it and try again."}
-
-      _ ->
-        {:error, "Action #{name} approval wait failed. Request ID: #{request_id}."}
+         "Action #{name} requires approval. Request ID: #{request_id}. " <>
+           "InteractionRouter is not available to wait synchronously."}
+      end
+    else
+      {:error, reason} ->
+        {:error, "Action #{name}: invalid approval request id (#{inspect(reason)})."}
     end
   rescue
     e ->
@@ -513,210 +504,64 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
       {:error, "Action #{name} requires approval. Request ID: #{request_id}"}
   end
 
-  # Normalize response + metadata consistently. Rejected invocations never
-  # retry as approved; rework/deny return a tagged control payload (no execute).
-  defp handle_interaction_response(
-         response,
-         metadata,
-         agent_id,
-         action_module,
-         params,
-         context,
-         name,
-         request_id
-       ) do
-    case normalize_interaction_decision(response, metadata) do
-      {:ok, :approve} ->
-        track_approval(agent_id, action_module)
-        retry_execution(agent_id, action_module, params, context, name, request_id)
-
-      {:ok, :rework, note} ->
-        track_rejection(agent_id, action_module)
-        {:control, interaction_control_payload("rework", request_id, note)}
-
-      {:ok, :deny, note} ->
-        track_rejection(agent_id, action_module)
-        {:control, interaction_control_payload("denied", request_id, note)}
-
-      {:error, reason} ->
-        {:error,
-         "Action #{name}: approval response rejected (#{reason}). Request ID: #{request_id}."}
-    end
-  end
-
-  defp normalize_interaction_decision(response, metadata) do
-    with {:ok, response_kind} <- classify_interaction_response(response),
-         {:ok, decision} <- classify_interaction_metadata(metadata),
-         :ok <- consistent_interaction_decision?(response_kind, decision) do
-      note = metadata_note(metadata)
-
-      case {response_kind, decision} do
-        {:approved, decision} when decision in [:absent, :approve] ->
-          {:ok, :approve}
-
-        {:rejected, :rework} ->
-          {:ok, :rework, note}
-
-        {:rejected, decision} when decision in [:absent, :deny] ->
-          {:ok, :deny, note}
-      end
-    end
-  end
-
-  defp classify_interaction_response(r) when r in [:approved, :approve, "approved", "approve"],
-    do: {:ok, :approved}
-
-  defp classify_interaction_response(r)
-       when r in [:rejected, :reject, :denied, "rejected", "reject", "deny", "denied"],
-       do: {:ok, :rejected}
-
-  defp classify_interaction_response(other),
-    do: {:error, "unexpected_response:#{inspect(other)}"}
-
-  defp classify_interaction_metadata(metadata) when not is_map(metadata),
-    do: {:error, :malformed_metadata}
-
-  defp classify_interaction_metadata(metadata) do
-    decision = metadata_get(metadata, :decision)
-    rework_flag? = truthy_rework_flag?(metadata_get(metadata, :rework))
-    decision_rework? = decision in [:rework, "rework"]
-
-    cond do
-      # Canonical rework: decision=:rework and/or rework:true, without a
-      # conflicting approve/deny decision.
-      (rework_flag? or decision_rework?) and decision in [nil, :rework, "rework"] ->
-        {:ok, :rework}
-
-      rework_flag? or decision_rework? ->
-        {:error, :inconsistent_rework_marker}
-
-      decision in [:approve, "approve"] ->
-        {:ok, :approve}
-
-      decision in [:deny, "deny", :denied, "denied"] ->
-        {:ok, :deny}
-
-      is_nil(decision) ->
-        {:ok, :absent}
-
-      true ->
-        {:error, :malformed_decision}
-    end
-  end
-
-  defp truthy_rework_flag?(flag) when flag in [true, "true", 1, "1"], do: true
-  defp truthy_rework_flag?(_), do: false
-
-  defp consistent_interaction_decision?(:approved, decision)
-       when decision in [:absent, :approve],
-       do: :ok
-
-  defp consistent_interaction_decision?(:rejected, decision)
-       when decision in [:absent, :deny, :rework],
-       do: :ok
-
-  defp consistent_interaction_decision?(response_kind, decision),
-    do: {:error, "inconsistent:#{response_kind}/#{decision}"}
-
-  defp metadata_get(metadata, key) when is_atom(key) do
-    Map.get(metadata, key) || Map.get(metadata, Atom.to_string(key))
-  end
-
-  defp metadata_note(metadata) when is_map(metadata) do
-    case metadata_get(metadata, :note) do
-      note when is_binary(note) -> bound_utf8(note, @max_interaction_note_bytes)
-      _ -> ""
-    end
-  end
-
-  defp metadata_note(_), do: ""
-
-  defp interaction_control_payload(outcome, request_id, note)
-       when outcome in ["rework", "denied"] and is_binary(request_id) do
-    %{
-      "interaction_outcome" => outcome,
-      "request_id" => bound_utf8(request_id, @max_interaction_request_id_bytes),
-      "note" => if(is_binary(note), do: note, else: "")
-    }
-  end
-
-  # Truncate on a valid UTF-8 codepoint boundary. Invalid UTF-8 becomes "".
-  defp bound_utf8(value, max_bytes) when is_binary(value) and is_integer(max_bytes) do
-    cond do
-      not String.valid?(value) ->
-        ""
-
-      byte_size(value) <= max_bytes ->
-        value
-
-      true ->
-        value
-        |> String.graphemes()
-        |> Enum.reduce_while({"", 0}, fn grapheme, {acc, size} ->
-          next = size + byte_size(grapheme)
-
-          if next <= max_bytes do
-            {:cont, {acc <> grapheme, next}}
-          else
-            {:halt, {acc, size}}
-          end
-        end)
-        |> elem(0)
-    end
-  end
-
-  defp bound_utf8(_value, _max_bytes), do: ""
+  defp interaction_router, do: Module.concat([:Arbor, :Comms, :InteractionRouter])
 
   defp await_consensus_and_retry(proposal_id, agent_id, action_module, params, context, name) do
+    alias Arbor.Contracts.Comms.ApprovalAnswer
+
     consensus_mod = Module.concat([:Arbor, :Consensus])
 
-    if Code.ensure_loaded?(consensus_mod) and
-         function_exported?(consensus_mod, :await, 2) do
-      timeout = approval_timeout(context)
+    with {:ok, proposal_id} <- ApprovalAnswer.validate_request_id(proposal_id) do
+      if Code.ensure_loaded?(consensus_mod) and
+           function_exported?(consensus_mod, :await, 2) do
+        timeout = approval_timeout(context)
 
-      Logger.info(
-        "[ActionsExecutor] Awaiting approval for #{name} (proposal: #{proposal_id}, timeout: #{timeout}ms)"
-      )
+        Logger.info(
+          "[ActionsExecutor] Awaiting approval for #{name} (proposal: #{proposal_id}, timeout: #{timeout}ms)"
+        )
 
-      case apply(consensus_mod, :await, [proposal_id, [timeout: timeout]]) do
-        {:ok, decision} when is_map(decision) ->
-          handle_approval_decision(
-            decision,
-            agent_id,
-            action_module,
-            params,
-            context,
-            name,
-            proposal_id
-          )
+        case apply(consensus_mod, :await, [proposal_id, [timeout: timeout]]) do
+          {:ok, decision} when is_map(decision) ->
+            handle_normalized_decision(
+              ApprovalAnswer.normalize_consensus_decision(decision),
+              agent_id,
+              action_module,
+              params,
+              context,
+              name,
+              proposal_id,
+              :consensus
+            )
 
-        {:ok, :approved} ->
-          # Simple approval atom (some paths return this)
-          track_approval(agent_id, action_module)
-          retry_execution(agent_id, action_module, params, context, name, proposal_id)
+          {:ok, :approved} ->
+            track_approval(agent_id, action_module)
+            retry_execution(agent_id, action_module, params, context, name, proposal_id)
 
-        {:error, :timeout} ->
-          Logger.info(
-            "[ActionsExecutor] Approval timed out for #{name} (proposal: #{proposal_id})"
-          )
+          {:error, :timeout} ->
+            Logger.info(
+              "[ActionsExecutor] Approval timed out for #{name} (proposal: #{proposal_id})"
+            )
 
-          {:error,
-           "Action #{name} requires approval but timed out after #{div(timeout, 1000)}s. " <>
-             "Proposal ID: #{proposal_id}. Ask the user to approve it and try again."}
+            {:error,
+             "Action #{name} requires approval but timed out after #{div(timeout, 1000)}s. " <>
+               "Proposal ID: #{proposal_id}. Ask the user to approve it and try again."}
 
-        {:error, reason} ->
-          Logger.info(
-            "[ActionsExecutor] Approval failed for #{name}: #{inspect(reason)} (proposal: #{proposal_id})"
-          )
+          {:error, reason} ->
+            Logger.info(
+              "[ActionsExecutor] Approval failed for #{name}: #{inspect(reason)} (proposal: #{proposal_id})"
+            )
 
-          {:error,
-           "Action #{name} requires approval. Proposal ID: #{proposal_id}. Status: #{inspect(reason)}"}
+            {:error,
+             "Action #{name} requires approval. Proposal ID: #{proposal_id}. Status: #{inspect(reason)}"}
+        end
+      else
+        {:error,
+         "Action #{name} requires approval. Proposal ID: #{proposal_id}. " <>
+           "The approval system is not available to wait synchronously."}
       end
     else
-      # Consensus not available — return pending info to LLM
-      {:error,
-       "Action #{name} requires approval. Proposal ID: #{proposal_id}. " <>
-         "The approval system is not available to wait synchronously."}
+      {:error, reason} ->
+        {:error, "Action #{name}: invalid approval proposal id (#{inspect(reason)})."}
     end
   rescue
     e ->
@@ -728,39 +573,50 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
       {:error, "Action #{name} requires approval. Proposal ID: #{proposal_id}"}
   end
 
-  defp handle_approval_decision(
-         decision,
+  # Generic LLM/tool path: approve retries once; deny/rework never execute and
+  # surface as honest errors (not success). Coding graphs use
+  # coding_reviewed_commit for branchable outcomes instead of a control protocol.
+  defp handle_normalized_decision(
+         normalized,
          agent_id,
          action_module,
          params,
          context,
          name,
-         proposal_id
+         request_id,
+         backend
        ) do
-    status = Map.get(decision, :decision) || Map.get(decision, :status)
-
-    case status do
-      :approved ->
+    case normalized do
+      {:ok, :approve} ->
         Logger.info("[ActionsExecutor] Approval granted for #{name}, executing")
         track_approval(agent_id, action_module)
-        retry_execution(agent_id, action_module, params, context, name, proposal_id)
+        retry_execution(agent_id, action_module, params, context, name, request_id)
 
-      :rejected ->
+      {:ok, :rework, note} ->
         track_rejection(agent_id, action_module)
+        note_suffix = if note != "", do: " Note: #{note}", else: ""
 
         {:error,
-         "Action #{name} was denied by consensus. " <>
-           format_denial_reason(decision)}
+         "Action #{name} was sent for rework by the #{backend_label(backend)}." <>
+           " Request ID: #{request_id}.#{note_suffix}"}
 
-      :deadlock ->
+      {:ok, :deny, note} ->
+        track_rejection(agent_id, action_module)
+        note_suffix = if note != "", do: " Note: #{note}", else: ""
+
         {:error,
-         "Action #{name} approval resulted in deadlock (no consensus reached). " <>
-           "Ask the user to decide."}
+         "Action #{name} was denied by the #{backend_label(backend)}." <>
+           " Request ID: #{request_id}.#{note_suffix}"}
 
-      other ->
-        {:error, "Action #{name} approval returned unexpected status: #{inspect(other)}"}
+      {:error, reason} ->
+        {:error,
+         "Action #{name}: approval response rejected (#{inspect(reason)}). Request ID: #{request_id}."}
     end
   end
+
+  defp backend_label(:operator), do: "operator"
+  defp backend_label(:consensus), do: "consensus"
+  defp backend_label(_), do: "approval backend"
 
   # Re-execute only the exact invocation that was approved. The one-shot marker
   # satisfies ApprovalGuard for this retry without minting durable authority.
@@ -877,16 +733,6 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   defp verify_retry_workdir(_context), do: {:error, :missing_retry_workdir_binding}
-
-  defp format_denial_reason(decision) do
-    concerns = Map.get(decision, :primary_concerns, [])
-
-    if concerns != [] do
-      "Concerns: #{Enum.join(concerns, "; ")}"
-    else
-      ""
-    end
-  end
 
   defp maybe_put_approval_timeout(context, opts, execution_binding_context) do
     timeout_ms = Keyword.get(opts, :approval_timeout_ms)

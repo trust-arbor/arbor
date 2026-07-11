@@ -26,6 +26,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     Arbor.Actions.Coding.ReviewTree.Search,
     Arbor.Actions.Mix.Compile,
     Arbor.Actions.Mix.Test,
+    Arbor.Actions.Coding.ReviewedCommit,
     Arbor.Actions.Git.Commit,
     Arbor.Actions.Git.PR,
     Arbor.Actions.Council.ReviewChange,
@@ -599,8 +600,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
       )
 
     assert {:error,
-            {:invalid_static_action_parameter, "commit_change", "git_commit", "all", "boolean",
-             "not_boolean"}} =
+            {:invalid_static_action_parameter, "commit_change", "coding_reviewed_commit", "all",
+             "boolean", "not_boolean"}} =
              compile(plan!(), ctx, wrong_boolean)
 
     wrong_integer =

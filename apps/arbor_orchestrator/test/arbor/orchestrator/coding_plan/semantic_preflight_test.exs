@@ -19,6 +19,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     Arbor.Actions.Coding.SecurityRegression.Validate,
     Arbor.Actions.Mix.Compile,
     Arbor.Actions.Mix.Test,
+    Arbor.Actions.Coding.ReviewedCommit,
     Arbor.Actions.Git.Commit,
     Arbor.Actions.Git.PR,
     Arbor.Actions.Coding.ReviewTree.Read,
@@ -165,7 +166,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     assert {:ok, profile} = Profiles.fetch_executable("security_regression")
 
     bypasses = [
-      {"committed_candidate_join", "adopt_head_commit", "route_after_commit"},
+      {"committed_candidate_join", "hoist_commit_hash", "route_after_commit"},
       {"committed_join", "route_security_after_commit", "load_committed_change"},
       {"committed_material", "route_after_commit", "review_change"},
       {"review", "load_committed_change", "route_review"},
@@ -405,14 +406,17 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            end)
   end
 
-  test "adversarial: project_interaction_control opt-in is only allowed on commit_change/git_commit",
+  test "adversarial: commit gate must be coding_reviewed_commit; denial bypass attrs rejected",
        ctx do
     assert {:ok, compilation} = compile(plan!(), ctx)
     graph = compiled_graph!(compilation.dot_source)
     assert {:ok, profile} = Profiles.fetch_executable("default")
 
-    # Template already has the reviewed opt-in on commit_change.
-    assert Map.get(graph.nodes["commit_change"].attrs, "project_interaction_control") == "true"
+    assert graph.nodes["commit_change"].attrs["action"] == "coding_reviewed_commit"
+    refute Map.has_key?(graph.nodes["commit_change"].attrs, "project_interaction_control")
+    assert graph.nodes["status_approval_denied"]
+    assert graph.nodes["check_operator_rework_category_budget"]
+    assert graph.nodes["check_operator_rework_total_budget"]
 
     assert :ok =
              SemanticPreflight.validate(graph, profile["semantic_policy"],
@@ -421,8 +425,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
 
     forged =
       update_in(graph.nodes["validate"].attrs, fn attrs ->
-        attrs
-        |> Map.put("project_interaction_control", "true")
+        Map.put(attrs, "project_interaction_control", "true")
       end)
 
     assert {:error, {:semantic_preflight_failed, errors}} =
@@ -431,13 +434,12 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              )
 
     assert Enum.any?(errors, fn err ->
-             err["code"] == "forbidden_interaction_control_opt_in" and
-               err["node_id"] == "validate" and
-               err["detail"]["allowed_action"] == "git_commit"
+             err["code"] == "forbidden_denial_bypass_attribute" and
+               err["node_id"] == "validate"
            end)
 
     wrong_action =
-      update_in(graph.nodes["commit_change"].attrs, &Map.put(&1, "action", "mix_compile"))
+      update_in(graph.nodes["commit_change"].attrs, &Map.put(&1, "action", "git_commit"))
 
     assert {:error, {:semantic_preflight_failed, action_errors}} =
              SemanticPreflight.validate(wrong_action, profile["semantic_policy"],
@@ -445,8 +447,33 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
              )
 
     assert Enum.any?(action_errors, fn err ->
-             err["code"] == "forbidden_interaction_control_opt_in" and
+             err["code"] == "invalid_commit_approval_action" and
                err["node_id"] == "commit_change"
+           end)
+
+    bypass_edge =
+      %Arbor.Orchestrator.Graph.Edge{
+        from: "commit_change",
+        to: "hoist_commit_hash",
+        attrs: %{},
+        condition: nil
+      }
+
+    bypass = %{
+      graph
+      | edges: graph.edges ++ [bypass_edge],
+        # Force edge-list scan so the injected bypass is visible.
+        adjacency: %{},
+        reverse_adjacency: %{}
+    }
+
+    assert {:error, {:semantic_preflight_failed, bypass_errors}} =
+             SemanticPreflight.validate(bypass, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert Enum.any?(bypass_errors, fn err ->
+             err["code"] == "commit_approval_bypass_edge"
            end)
   end
 

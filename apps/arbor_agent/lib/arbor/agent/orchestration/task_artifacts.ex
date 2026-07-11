@@ -9,6 +9,7 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   """
 
   @coding_statuses MapSet.new(~w(
+    approval_denied
     change_committed
     declined
     human_review_required

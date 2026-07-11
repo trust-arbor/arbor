@@ -7,9 +7,9 @@ defmodule Arbor.Commands.CodingParity do
 
   @schema "arbor.coding_parity.projection.v1"
   @statuses ~w(
-    cancelled change_committed declined human_review_required no_changes
-    pr_created pr_failed review_failed review_rejected review_requires_rework
-    rework_exhausted validation_failed
+    approval_denied cancelled change_committed declined human_review_required
+    no_changes pr_created pr_failed review_failed review_rejected
+    review_requires_rework rework_exhausted validation_failed
   )
   @no_validation_statuses ~w(cancelled declined no_changes)
   @comparison_paths [

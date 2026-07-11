@@ -62,12 +62,17 @@ defmodule Arbor.Comms.InteractionRegistry do
   # within the topic, so per-user partitioning would buy little for a
   # registry this small (dozens of pending entries at most).
   @topic "interactions"
+  @resolved_table :arbor_interaction_resolved
+  # Keep resolved answers long enough for a waiter that subscribed after the
+  # response was published (visible-request-before-subscribe race).
+  @resolved_ttl_ms 120_000
 
   ## Public API
 
   @doc "Start the Tracker."
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
+    ensure_resolved_table!()
     pubsub = Keyword.get(opts, :pubsub_server, Arbor.Comms.PubSub)
     opts = Keyword.merge([name: __MODULE__, pubsub_server: pubsub], opts)
     Phoenix.Tracker.start_link(__MODULE__, opts, opts)
@@ -118,6 +123,10 @@ defmodule Arbor.Comms.InteractionRegistry do
   Mark an interaction resolved and remove it from the pending set.
   Returns the original interaction (so adapters can use its
   `response_topic` for the broadcast that follows).
+
+  When `response` is supplied (keyword opts `:response` / `:metadata`), the
+  answer is stored in a durable local lookup so waiters that subscribe after
+  the response is published can still observe it without sleeping.
   """
   @spec resolve(String.t(), keyword()) :: {:ok, Interaction.t()} | :not_found
   def resolve(request_id, opts \\ []) when is_binary(request_id) do
@@ -134,6 +143,15 @@ defmodule Arbor.Comms.InteractionRegistry do
         # immediately.
         owner = ensure_owner!()
         Phoenix.Tracker.untrack(name, owner, @topic, request_id)
+
+        if Keyword.has_key?(opts, :response) do
+          put_resolved(
+            request_id,
+            Keyword.get(opts, :response),
+            Keyword.get(opts, :metadata, %{}) || %{}
+          )
+        end
+
         {:ok, materialize_interaction(data)}
 
       _ ->
@@ -143,6 +161,55 @@ defmodule Arbor.Comms.InteractionRegistry do
     e ->
       Logger.warning("[InteractionRegistry] resolve failed: #{Exception.message(e)}")
       :not_found
+  end
+
+  @doc """
+  Look up a durable resolved answer for `request_id`.
+
+  Used by waiters that may have subscribed after the response was published.
+  Entries expire after a short TTL.
+  """
+  @spec get_resolved(String.t()) ::
+          {:ok, %{response: term(), metadata: map(), resolved_at: integer()}} | :not_found
+  def get_resolved(request_id) when is_binary(request_id) do
+    ensure_resolved_table!()
+    now = System.system_time(:millisecond)
+
+    case :ets.lookup(@resolved_table, request_id) do
+      [{^request_id, %{resolved_at: at} = payload}] when is_integer(at) ->
+        if now - at <= @resolved_ttl_ms do
+          {:ok, payload}
+        else
+          :ets.delete(@resolved_table, request_id)
+          :not_found
+        end
+
+      _ ->
+        :not_found
+    end
+  rescue
+    _ -> :not_found
+  end
+
+  @doc false
+  @spec put_resolved(String.t(), term(), map()) :: :ok
+  def put_resolved(request_id, response, metadata)
+      when is_binary(request_id) and is_map(metadata) do
+    ensure_resolved_table!()
+
+    :ets.insert(
+      @resolved_table,
+      {request_id,
+       %{
+         response: response,
+         metadata: metadata,
+         resolved_at: System.system_time(:millisecond)
+       }}
+    )
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   @doc """
@@ -193,6 +260,9 @@ defmodule Arbor.Comms.InteractionRegistry do
       Phoenix.Tracker.untrack(name, owner, @topic, key)
     end)
 
+    ensure_resolved_table!()
+    :ets.delete_all_objects(@resolved_table)
+
     # Give the merge a tick to settle for synchronous test code.
     Process.sleep(20)
     :ok
@@ -204,6 +274,7 @@ defmodule Arbor.Comms.InteractionRegistry do
 
   @impl true
   def init(opts) do
+    ensure_resolved_table!()
     server = Keyword.fetch!(opts, :pubsub_server)
     {:ok, %{pubsub_server: server, node_name: Phoenix.PubSub.node_name(server)}}
   end
@@ -227,6 +298,26 @@ defmodule Arbor.Comms.InteractionRegistry do
       {^request_id, meta} -> meta
       _ -> nil
     end)
+  end
+
+  defp ensure_resolved_table! do
+    case :ets.info(@resolved_table) do
+      :undefined ->
+        :ets.new(@resolved_table, [
+          :named_table,
+          :public,
+          :set,
+          read_concurrency: true,
+          write_concurrency: true
+        ])
+
+      _info ->
+        @resolved_table
+    end
+  rescue
+    ArgumentError ->
+      # Concurrent create race: another process won.
+      @resolved_table
   end
 
   # Owning pid for all tracked entries on this node. We use the

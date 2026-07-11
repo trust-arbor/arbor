@@ -591,9 +591,9 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   defp answer_approval(args) do
     with {:ok, caller_id} <- require_authenticated("arbor_answer_approval"),
-         {:ok, id} <- required_string_arg(args, "id"),
+         {:ok, id} <- validate_approval_id(args),
          {:ok, decision} <- required_string_arg(args, "decision"),
-         opts = approval_answer_opts(args, caller_id),
+         {:ok, opts} <- approval_answer_opts(args, caller_id),
          :ok <- call_orchestration(:answer_approval, [id, decision, opts]) do
       {:ok, %{"ok" => true, "approval_id" => id, "decision" => decision}}
     else
@@ -676,12 +676,46 @@ defmodule Arbor.Gateway.MCP.Handler do
   end
 
   defp approval_answer_opts(args, caller_id) do
-    [
-      caller_id: caller_id,
-      note: optional_string_arg(args, "note")
-    ]
-    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    case validate_approval_note(Map.get(args, "note")) do
+      {:ok, note} ->
+        opts =
+          [caller_id: caller_id]
+          |> then(fn opts -> if note == "", do: opts, else: Keyword.put(opts, :note, note) end)
+
+        {:ok, opts}
+
+      {:error, _} = err ->
+        err
+    end
   end
+
+  defp validate_approval_id(args) do
+    case Map.get(args, "id") do
+      id when is_binary(id) ->
+        case Arbor.Contracts.Comms.ApprovalAnswer.validate_request_id(String.trim(id)) do
+          {:ok, _} = ok -> ok
+          {:error, :empty_request_id} -> {:error, "Missing required argument: id"}
+          {:error, :request_id_too_large} -> {:error, "approval id exceeds maximum size"}
+          {:error, :invalid_request_id_utf8} -> {:error, "approval id is not valid UTF-8"}
+          {:error, _} -> {:error, "approval id is invalid"}
+        end
+
+      _ ->
+        {:error, "Missing required argument: id"}
+    end
+  end
+
+  defp validate_approval_note(nil), do: {:ok, ""}
+
+  defp validate_approval_note(note) when is_binary(note) do
+    case Arbor.Contracts.Comms.ApprovalAnswer.validate_note(note) do
+      {:ok, _} = ok -> ok
+      {:error, :invalid_note_utf8} -> {:error, "approval note is not valid UTF-8"}
+      {:error, _} -> {:error, "approval note is invalid"}
+    end
+  end
+
+  defp validate_approval_note(_), do: {:error, "approval note is invalid"}
 
   defp task_dispatch_opts(args, caller_id) do
     [

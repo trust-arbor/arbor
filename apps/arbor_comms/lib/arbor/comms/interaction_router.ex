@@ -83,10 +83,16 @@ defmodule Arbor.Comms.InteractionRouter do
   Routes the response back to the waiting agent via PubSub on the
   interaction's `response_topic`. Cluster-aware — works regardless of
   which node hosts the waiting agent.
+
+  The answer is also stored in a durable public lookup
+  (`get_response/1`) so waiters that subscribe after publication still
+  observe the decision without sleeps or lost-message races.
   """
   @spec respond(String.t(), Interaction.response(), map()) :: :ok | {:error, term()}
   def respond(request_id, response, metadata \\ %{}) when is_binary(request_id) do
-    case InteractionRegistry.resolve(request_id) do
+    metadata = if is_map(metadata), do: metadata, else: %{}
+
+    case InteractionRegistry.resolve(request_id, response: response, metadata: metadata) do
       {:ok, interaction} ->
         broadcast_response(interaction, response, metadata)
         emit_signal(:resolved, interaction, %{response: response, metadata: metadata})
@@ -98,6 +104,75 @@ defmodule Arbor.Comms.InteractionRouter do
         )
 
         {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Durable public lookup for a resolved interaction response.
+
+  Returns `{:ok, %{response: term(), metadata: map()}}` when the answer is
+  still within the registry TTL, otherwise `:not_found`.
+  """
+  @spec get_response(String.t()) ::
+          {:ok, %{response: term(), metadata: map()}} | :not_found
+  def get_response(request_id) when is_binary(request_id) do
+    case InteractionRegistry.get_resolved(request_id) do
+      {:ok, %{response: response, metadata: metadata}} ->
+        {:ok, %{response: response, metadata: metadata || %{}}}
+
+      :not_found ->
+        :not_found
+    end
+  end
+
+  @doc """
+  Wait for an interaction response without the
+  visible-request-before-subscribe race.
+
+  Subscribes to the agent response topic first, then checks the durable
+  `get_response/1` store, then blocks on PubSub. Always unsubscribes.
+
+  Options:
+    * `:timeout` — milliseconds (default 60_000)
+    * `:pubsub` — PubSub server (default `Arbor.Comms.PubSub`)
+  """
+  @spec await_response(String.t(), String.t(), keyword()) ::
+          {:ok, term(), map()} | {:error, :timeout | term()}
+  def await_response(request_id, agent_id, opts \\ [])
+      when is_binary(request_id) and is_binary(agent_id) do
+    timeout = Keyword.get(opts, :timeout, 60_000)
+    pubsub = Keyword.get(opts, :pubsub, Arbor.Comms.PubSub)
+    topic = Interaction.response_topic_for_agent(agent_id)
+
+    # Subscribe before any durable lookup so a concurrent respond cannot
+    # land in the gap between check and receive.
+    :ok = Phoenix.PubSub.subscribe(pubsub, topic)
+
+    try do
+      case get_response(request_id) do
+        {:ok, %{response: response, metadata: metadata}} ->
+          {:ok, response, metadata}
+
+        :not_found ->
+          receive do
+            {:interaction_response, %{request_id: ^request_id, response: response} = payload} ->
+              metadata = Map.get(payload, :metadata) || Map.get(payload, "metadata") || %{}
+              {:ok, response, metadata}
+          after
+            timeout ->
+              # Last-chance durable lookup: response may have been stored while
+              # we were in receive/after without a delivered mailbox message.
+              case get_response(request_id) do
+                {:ok, %{response: response, metadata: metadata}} ->
+                  {:ok, response, metadata}
+
+                :not_found ->
+                  {:error, :timeout}
+              end
+          end
+      end
+    after
+      Phoenix.PubSub.unsubscribe(pubsub, topic)
     end
   end
 

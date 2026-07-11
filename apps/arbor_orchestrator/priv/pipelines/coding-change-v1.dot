@@ -393,21 +393,21 @@ digraph CodingChangeV1 {
     output_key="message"
   ]
 
+  // Reviewed top-level Jido action (syscall): approval decision lives here,
+  // graph owns branching. Not git_commit + ExecHandler control projection.
   commit_change [
     type="exec",
     target="action",
-    action="git_commit",
-    context_keys="path,message",
+    action="coding_reviewed_commit",
+    context_keys="path,message,workspace_dirty",
     param.all="true",
     output_prefix="commit",
-    project_interaction_control="true",
     max_retries="0"
   ]
 
-  // Branch structured commit results before hoisting commit_hash. The
-  // project_interaction_control opt-in lets ActionsExecutor rework/deny
-  // control outcomes surface as outcome=success with
-  // commit.interaction_outcome set; normal commits clear that field.
+  // Branch structured commit-gate results before hoisting commit_hash.
+  // coding_reviewed_commit always returns outcome=success with
+  // commit.interaction_outcome set to "" (approved/unattended), denied, or rework.
   route_commit_interaction [
     type="branch",
     shape=diamond,
@@ -499,12 +499,9 @@ digraph CodingChangeV1 {
     output_key="legacy_status"
   ]
 
-  adopt_head_commit [
-    type="transform",
-    transform="identity",
-    source_key="head_commit",
-    output_key="commit_hash"
-  ]
+  // Clean self-commit adoption is performed inside coding_reviewed_commit
+  // (workspace_dirty=false) so operator rework cannot bypass a fresh gate by
+  // self-committing. There is no separate unapproved adopt_head path.
 
   route_after_commit [
     type="branch",
@@ -1076,12 +1073,13 @@ digraph CodingChangeV1 {
   check_validation_passed -> prep_commit_path [condition="outcome=success"]
   prep_commit_path -> prep_commit_message
 
-  // Dirty worktree: graph owns the commit
-  prep_commit_message -> commit_change [condition="context.workspace_dirty=true"]
+  // Always route through the reviewed commit/adoption gate so a self-commit
+  // after operator rework (clean worktree) cannot bypass fresh approval.
+  prep_commit_message -> commit_change
   commit_change -> status_pipeline_error_then_close [condition="outcome=fail"]
   commit_change -> route_commit_interaction [condition="outcome=success"]
 
-  // Normal approved/unattended commit result (no interaction_outcome control).
+  // Normal approved/unattended result (empty interaction_outcome).
   route_commit_interaction -> hoist_commit_hash [condition="context.commit.interaction_outcome=\"\""]
 
   // Operator denied the commit gate: terminal approval_denied + cleanup.
@@ -1128,11 +1126,7 @@ digraph CodingChangeV1 {
   // Unknown interaction_outcome fails closed (not success, not silent deny).
   route_commit_interaction -> status_pipeline_error_then_close
 
-  // Clean self-commit: adopt HEAD (never empty commit)
-  prep_commit_message -> adopt_head_commit [condition="context.workspace_dirty!=true"]
-
   hoist_commit_hash -> route_after_commit
-  adopt_head_commit -> route_after_commit
 
   // Skip review when submit_review=false
   route_after_commit -> route_publish [condition="context.submit_review=false"]

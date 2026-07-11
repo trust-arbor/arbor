@@ -20,7 +20,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
     acp_send_message
     acp_close_session
     mix_compile
-    git_commit
+    coding_reviewed_commit
     git_pr
     council_review_change
   )
@@ -48,9 +48,6 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         case dispatch(name, args, scenario, counters, state) do
           {:ok, result} when is_map(result) ->
             {:ok, Jason.encode!(result)}
-
-          {:control, payload} when is_map(payload) ->
-            {:control, stringify_keys(payload)}
 
           other ->
             other
@@ -107,7 +104,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         "mix_compile" ->
           validate_response(scenario, counters, state)
 
-        "git_commit" ->
+        "coding_reviewed_commit" ->
           commit_response(scenario, counters, state, args)
 
         "coding_workspace_committed_change" ->
@@ -397,67 +394,94 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       end
     end
 
-    defp commit_response(scenario, counters, state, _args) do
+    defp commit_response(scenario, counters, state, args) do
       n = Map.get(counters, :commit, 0)
       Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :commit, n + 1)} end)
 
+      dirty? =
+        Map.get(args, "workspace_dirty") in [true, "true", "1", 1] or
+          Map.get(args, :workspace_dirty) in [true, "true", "1", 1]
+
       case {scenario, n} do
         {:self_commit_adopt, _} ->
-          # Should not be called for clean self-commit adopt path
-          {:error, "git_commit must not run on clean self-commit adopt"}
+          # Clean worktree still requires the reviewed gate (fresh approval path).
+          {:ok,
+           %{
+             interaction_outcome: "",
+             request_id: "",
+             note: "",
+             path: "/tmp/ws_fixture_1",
+             commit_hash: "selfcommit9999",
+             adopted: true
+           }}
 
         {:commit_hard_fail, _} ->
           {:error, "git commit failed"}
 
         {:commit_approval_denied, _} ->
-          {:control,
+          {:ok,
            %{
-             "interaction_outcome" => "denied",
-             "request_id" => "irq_commit_denied_1",
-             "note" => "operator denied this commit"
+             interaction_outcome: "denied",
+             request_id: "irq_commit_denied_1",
+             note: "operator denied this commit",
+             commit_hash: "",
+             path: "",
+             message: ""
            }}
 
         {:commit_approval_rework_success, 0} ->
-          {:control,
+          {:ok,
            %{
-             "interaction_outcome" => "rework",
-             "request_id" => "irq_commit_rework_1",
-             "note" => "please fix the public API name"
+             interaction_outcome: "rework",
+             request_id: "irq_commit_rework_1",
+             note: "please fix the public API name",
+             commit_hash: "",
+             path: "",
+             message: ""
            }}
 
         {:commit_approval_rework_success, _} ->
           {:ok,
            %{
+             interaction_outcome: "",
+             request_id: "irq_commit_rework_approved_2",
+             note: "",
              path: "/tmp/ws_fixture_1",
              commit_hash: "commitrework456",
-             message: "fixture commit after rework",
-             output: "[branch def] fixture rework"
+             message: "fixture commit after rework"
            }}
 
         {:commit_approval_rework_exhausted, _} ->
-          # Every commit attempt is rework until the shared budget ends.
-          {:control,
+          {:ok,
            %{
-             "interaction_outcome" => "rework",
-             "request_id" => "irq_commit_rework_exhausted_#{n + 1}",
-             "note" => "still not right"
+             interaction_outcome: "rework",
+             request_id: "irq_commit_rework_exhausted_#{n + 1}",
+             note: "still not right",
+             commit_hash: "",
+             path: "",
+             message: ""
            }}
 
         {:validation_then_operator_rework_exhausted, _} ->
-          {:control,
+          {:ok,
            %{
-             "interaction_outcome" => "rework",
-             "request_id" => "irq_commit_op_#{n + 1}",
-             "note" => "operator rework after validation"
+             interaction_outcome: "rework",
+             request_id: "irq_commit_op_#{n + 1}",
+             note: "operator rework after validation",
+             commit_hash: "",
+             path: "",
+             message: ""
            }}
 
         _ ->
           {:ok,
            %{
+             interaction_outcome: "",
+             request_id: "",
+             note: "",
              path: "/tmp/ws_fixture_1",
-             commit_hash: "commitabc123",
-             message: "fixture commit",
-             output: "[branch abc] fixture"
+             commit_hash: if(dirty?, do: "commitabc123", else: "selfcommit9999"),
+             message: "fixture commit"
            }}
       end
     end
@@ -800,11 +824,11 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       validate = graph.nodes["validate"]
       assert validate.attrs["action"] == "mix_compile"
 
-      # Commit path has dirty vs adopt split and operator interaction routing
+      # Commit path uses reviewed top-level action + operator interaction routing
       assert graph.nodes["commit_change"]
-      assert graph.nodes["commit_change"].attrs["project_interaction_control"] == "true"
-      assert graph.nodes["commit_change"].attrs["action"] == "git_commit"
-      assert graph.nodes["adopt_head_commit"]
+      refute Map.has_key?(graph.nodes["commit_change"].attrs, "project_interaction_control")
+      assert graph.nodes["commit_change"].attrs["action"] == "coding_reviewed_commit"
+      refute Map.has_key?(graph.nodes, "adopt_head_commit")
       assert graph.nodes["route_commit_interaction"]
       assert graph.nodes["status_approval_denied"]
       assert graph.nodes["check_operator_rework_category_budget"]
@@ -854,7 +878,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_json_clean_context(result.context)
       assert_opaque_handles(result.context)
       refute called?(calls, "mix_compile")
-      refute called?(calls, "git_commit")
+      refute called?(calls, "coding_reviewed_commit")
     end
 
     test "no_changes when HEAD equals base and clean" do
@@ -863,7 +887,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
       refute called?(calls, "mix_compile")
-      refute called?(calls, "git_commit")
+      refute called?(calls, "coding_reviewed_commit")
     end
 
     test "repeated validation failure exhausts only the validation retry" do
@@ -886,7 +910,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       refute Enum.at(prompts, 1) =~ "RAW_VALIDATION_STDOUT_SENTINEL"
       refute Enum.at(prompts, 1) =~ "RAW_VALIDATION_STDERR_SENTINEL"
       assert Enum.at(prompts, 1) =~ "ONLY one JSON object"
-      refute called?(calls, "git_commit")
+      refute called?(calls, "coding_reviewed_commit")
     end
 
     test "repeated council rework exhausts only the review retry" do
@@ -952,7 +976,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       refute result.context["status"] == "pipeline_error"
       refute "status_pipeline_error_then_close" in result.completed_nodes
       refute called?(calls, "council_review_change")
-      assert Enum.count(calls, fn {n, _} -> n == "git_commit" end) == 1
+      assert Enum.count(calls, fn {n, _} -> n == "coding_reviewed_commit" end) == 1
       assert_single_worker_session(calls, 1)
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
@@ -976,7 +1000,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert Enum.at(prompts, 1) =~ "please fix the public API name"
       assert Enum.at(prompts, 1) =~ "ONLY one JSON object"
 
-      commit_calls = Enum.filter(calls, fn {n, _} -> n == "git_commit" end)
+      commit_calls = Enum.filter(calls, fn {n, _} -> n == "coding_reviewed_commit" end)
       assert length(commit_calls) == 2
 
       validate_calls = Enum.count(calls, fn {n, _} -> n == "mix_compile" end)
@@ -1002,7 +1026,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       # Two implement turns (initial + one operator rework), two commit attempts
       # (first rework control, second rework control that exhausts category).
       assert_single_worker_session(calls, 2)
-      assert Enum.count(calls, fn {n, _} -> n == "git_commit" end) == 2
+      assert Enum.count(calls, fn {n, _} -> n == "coding_reviewed_commit" end) == 2
       refute called?(calls, "council_review_change")
       assert_closed_and_released(calls)
       assert_json_clean_context(result.context)
@@ -1077,7 +1101,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert {{:ok, result}, calls} = run_fixture(:change_committed)
       assert result.context["status"] == "change_committed"
       assert_closed_and_released(calls)
-      assert called?(calls, "git_commit")
+      assert called?(calls, "coding_reviewed_commit")
       refute called?(calls, "git_pr")
       assert result.context["commit_hash"] == "commitabc123"
 
@@ -1101,21 +1125,21 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
       assert result.context["status"] == "change_committed"
 
-      assert {"git_commit", commit_args} =
-               Enum.find(calls, fn {name, _args} -> name == "git_commit" end)
+      assert {"coding_reviewed_commit", commit_args} =
+               Enum.find(calls, fn {name, _args} -> name == "coding_reviewed_commit" end)
 
       assert commit_args["message"] == "Coding agent change"
       refute commit_args["message"] =~ hostile_task
       assert_closed_and_released(calls)
     end
 
-    test "clean self-commit adopts HEAD and does not call git_commit" do
+    test "clean self-commit adopts HEAD and still goes through coding_reviewed_commit gate" do
       assert {{:ok, result}, calls} =
                run_fixture(:self_commit_adopt, %{"submit_review" => "false", "open_pr" => "false"})
 
       assert result.context["status"] == "change_committed"
       assert result.context["commit_hash"] == "selfcommit9999"
-      refute called?(calls, "git_commit")
+      assert called?(calls, "coding_reviewed_commit")
       assert_closed_and_released(calls)
     end
 
@@ -1271,7 +1295,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert {{:ok, result}, calls} = run_fixture(:validation_hard_fail)
       assert result.context["status"] == "validation_failed"
       assert_closed_and_released(calls)
-      refute called?(calls, "git_commit")
+      # Validation fails before the commit gate.
+      refute called?(calls, "coding_reviewed_commit")
     end
 
     test "commit hard failure sets pipeline_error and cleans up" do

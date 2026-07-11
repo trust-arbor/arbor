@@ -18,6 +18,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     Arbor.Actions.Coding.Workspace.Inspect,
     Arbor.Actions.Coding.Workspace.Release,
     Arbor.Actions.Coding.Workspace.CommittedChange,
+    Arbor.Actions.Coding.ReviewedCommit,
     Arbor.Actions.Git.Commit,
     Arbor.Actions.Git.PR,
     Arbor.Actions.Council.ReviewChange,
@@ -112,15 +113,34 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
        }}
     end
 
-    defp dispatch("git_commit", _args, _scenario, state) do
+    defp dispatch("coding_reviewed_commit", args, scenario, state) do
       commit_index = bump(state, :commit)
+      dirty? = args["workspace_dirty"] in [true, "true", "1", 1]
+
+      commit_hash =
+        cond do
+          # Clean adopt of the same HEAD after rework (freshness fails).
+          scenario in [:validation_rework_noop, :review_rework_noop] and not dirty? ->
+            "commit-1"
+
+          # Clean self-commit after rework produces a new HEAD (fresh).
+          scenario in [:validation_rework_self_commit, :review_rework_self_commit] and not dirty? ->
+            "commit-2"
+
+          true ->
+            "commit-#{commit_index}"
+        end
 
       {:ok,
        %{
+         interaction_outcome: "",
+         request_id: "",
+         note: "",
          path: "/tmp/ws_security_fixture",
-         commit_hash: "commit-#{commit_index}",
+         commit_hash: commit_hash,
          message: "Coding agent change",
-         output: "committed"
+         output: "committed",
+         adopted: not dirty?
        }}
     end
 
@@ -357,7 +377,7 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     test "#{source} rework with dirty changes creates a fresh commit, review, and token", ctx do
       assert {{:ok, result}, calls} = run_fixture(unquote(scenario), ctx)
       assert result.context["status"] == "change_committed"
-      assert called?(calls, "git_commit", 2)
+      assert called?(calls, "coding_reviewed_commit", 2)
       assert called?(calls, "council_review_change", 2)
       assert_single_worker(calls, 2)
       assert "compare_security_rework_commit" in result.completed_nodes
@@ -387,7 +407,9 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     test "#{scenario} accepts a clean self-committed fresh HEAD", ctx do
       assert {{:ok, result}, calls} = run_fixture(unquote(scenario), ctx)
       assert result.context["status"] == "change_committed"
-      assert called?(calls, "git_commit", 1)
+      # First dirty commit + second clean adopt both pass through the reviewed gate
+      # so self-commit cannot skip operator approval.
+      assert called?(calls, "coding_reviewed_commit", 2)
       assert called?(calls, "council_review_change", 2)
       assert_single_worker(calls, 2)
       assert result.context["prior_reviewed_commit"] == "commit-1"

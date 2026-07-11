@@ -17,10 +17,6 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
     - `action` — action name (required when target="action"), e.g. "eval_pipeline.load_dataset"
     - `arg.*` / `param.*` — action parameters extracted from attrs
     - `context_keys` — comma-separated context keys to merge as action params
-    - `project_interaction_control` — reviewed opt-in (true) that projects a
-      tagged ActionsExecutor `{:control, map}` into a successful branchable
-      Outcome. Only valid for the coding `git_commit` gate; elsewhere fails
-      closed as an ordinary action failure so denial never becomes success.
     - All attributes from the delegated handler are supported
   """
 
@@ -35,13 +31,6 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
     ShellHandler,
     ToolHandler
   }
-
-  # Only the reviewed coding git_commit gate may turn interaction control
-  # outcomes into a successful branchable Outcome. Semantic preflight also
-  # rejects the opt-in on any other node/action.
-  @interaction_control_opt_in_attr "project_interaction_control"
-  @interaction_control_allowed_action "git_commit"
-  @interaction_control_outcomes MapSet.new(["rework", "denied"])
 
   @impl true
   def execute(node, context, graph, opts) do
@@ -178,15 +167,12 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
       try do
         case executor.execute(action_name, action_args, workdir, executor_opts) do
           {:ok, result} ->
-            updates =
-              flatten_context_updates(node.id, result)
-              |> maybe_add_prefixed_keys(node.id, result, output_prefix)
-              |> maybe_clear_interaction_control(node, action_name, output_prefix)
-
             %Outcome{
               status: :success,
               notes: "Action #{action_name} executed",
-              context_updates: updates,
+              context_updates:
+                flatten_context_updates(node.id, result)
+                |> maybe_add_prefixed_keys(node.id, result, output_prefix),
               # Provenance (Phase 1): if this action is an ingress (e.g. web
               # fetch -> :untrusted, or a foreign-path file read), label its
               # output keys so downstream nodes that consume them are gated at
@@ -194,13 +180,20 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
               output_taint: action_output_taint(executor, action_name, action_args)
             }
 
-          {:control, payload} ->
-            project_interaction_control(node, action_name, payload, output_prefix)
-
           {:error, reason} ->
             %Outcome{
               status: :fail,
               failure_reason: "Action #{action_name} failed: #{reason}"
+            }
+
+          other ->
+            # No control-protocol projection: unexpected tuples (including legacy
+            # {:control, _}) fail closed so denial can never become success via
+            # an author-controlled handler attribute.
+            %Outcome{
+              status: :fail,
+              failure_reason:
+                "Action #{action_name} returned unsupported result: #{inspect(other)}"
             }
         end
       catch
@@ -217,120 +210,6 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
       }
     end
   end
-
-  # Project a tagged interaction control payload into a successful Outcome only
-  # for the reviewed git_commit opt-in. Without that exact static opt-in the
-  # control result remains a failure so LLM/direct paths stay honest.
-  defp project_interaction_control(node, action_name, payload, output_prefix) do
-    if interaction_control_projection_allowed?(node, action_name) do
-      case normalize_control_payload(payload) do
-        {:ok, clean} ->
-          updates =
-            flatten_context_updates(node.id, Jason.encode!(clean))
-            |> maybe_add_prefixed_keys(node.id, Jason.encode!(clean), output_prefix)
-
-          %Outcome{
-            status: :success,
-            notes: "Action #{action_name} interaction control: #{clean["interaction_outcome"]}",
-            context_updates: updates
-          }
-
-        {:error, reason} ->
-          %Outcome{
-            status: :fail,
-            failure_reason:
-              "Action #{action_name} interaction control rejected: #{inspect(reason)}"
-          }
-      end
-    else
-      outcome = control_payload_outcome(payload)
-
-      %Outcome{
-        status: :fail,
-        failure_reason:
-          "Action #{action_name} was #{outcome} by the operator" <>
-            control_request_suffix(payload)
-      }
-    end
-  end
-
-  defp interaction_control_projection_allowed?(node, action_name) do
-    opt_in? = Map.get(node.attrs, @interaction_control_opt_in_attr) in ["true", true, "1", 1]
-    action_name == @interaction_control_allowed_action and opt_in?
-  end
-
-  defp maybe_clear_interaction_control(updates, node, action_name, output_prefix) do
-    if interaction_control_projection_allowed?(node, action_name) do
-      # Prior rework/deny control keys must not stick around after a fresh
-      # successful commit on the same output_prefix.
-      prefix = output_prefix || "exec.#{node.id}"
-
-      updates
-      |> Map.put("#{prefix}.interaction_outcome", "")
-      |> Map.put("#{prefix}.request_id", "")
-      |> Map.put("#{prefix}.note", "")
-    else
-      updates
-    end
-  end
-
-  defp normalize_control_payload(payload) when is_map(payload) do
-    outcome =
-      stringify_control_field(
-        Map.get(payload, "interaction_outcome") || Map.get(payload, :interaction_outcome)
-      )
-
-    request_id =
-      stringify_control_field(Map.get(payload, "request_id") || Map.get(payload, :request_id))
-
-    note = stringify_control_field(Map.get(payload, "note") || Map.get(payload, :note) || "")
-
-    cond do
-      outcome not in @interaction_control_outcomes ->
-        {:error, :invalid_interaction_outcome}
-
-      not is_binary(request_id) or request_id == "" ->
-        {:error, :missing_request_id}
-
-      not String.valid?(request_id) or not String.valid?(note) ->
-        {:error, :invalid_utf8}
-
-      true ->
-        {:ok,
-         %{
-           "interaction_outcome" => outcome,
-           "request_id" => request_id,
-           "note" => note
-         }}
-    end
-  end
-
-  defp normalize_control_payload(_), do: {:error, :malformed_control_payload}
-
-  defp stringify_control_field(value) when is_binary(value), do: value
-  defp stringify_control_field(value) when is_atom(value), do: Atom.to_string(value)
-  defp stringify_control_field(_), do: nil
-
-  defp control_payload_outcome(payload) when is_map(payload) do
-    case Map.get(payload, "interaction_outcome") || Map.get(payload, :interaction_outcome) do
-      "rework" -> "sent for rework"
-      :rework -> "sent for rework"
-      "denied" -> "denied"
-      :denied -> "denied"
-      _ -> "rejected"
-    end
-  end
-
-  defp control_payload_outcome(_), do: "rejected"
-
-  defp control_request_suffix(payload) when is_map(payload) do
-    case Map.get(payload, "request_id") || Map.get(payload, :request_id) do
-      id when is_binary(id) and id != "" -> ". Request ID: #{id}."
-      _ -> "."
-    end
-  end
-
-  defp control_request_suffix(_), do: "."
 
   defp execute_function(node, _context, opts) do
     case Keyword.get(opts, :function_handler) do

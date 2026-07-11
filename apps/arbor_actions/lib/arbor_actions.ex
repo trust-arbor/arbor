@@ -962,6 +962,7 @@ defmodule Arbor.Actions do
       ],
       coding: [
         Arbor.Actions.Coding.ProduceReviewableChange,
+        Arbor.Actions.Coding.ReviewedCommit,
         Arbor.Actions.Coding.SecurityRegression.Validate,
         Arbor.Actions.Coding.CrossApp.Validate,
         Arbor.Actions.Coding.Workspace.Acquire,
@@ -1931,6 +1932,8 @@ defmodule Arbor.Actions do
     # Coding-agent composite workflows — bounded by worktree + human PR review.
     Arbor.Actions.Coding.ProduceReviewableChange =>
       "arbor://action/coding/produce_reviewable_change",
+    # Pipeline-internal commit/adoption gate (not an ordinary LLM tool).
+    Arbor.Actions.Coding.ReviewedCommit => "arbor://action/coding/reviewed_commit",
     Arbor.Actions.Coding.SecurityRegression.Validate =>
       "arbor://action/coding/security_regression/validate",
     Arbor.Actions.Coding.CrossApp.Validate => "arbor://action/coding/cross_app/validate",
