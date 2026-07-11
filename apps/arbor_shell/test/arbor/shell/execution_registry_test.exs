@@ -5,160 +5,181 @@ defmodule Arbor.Shell.ExecutionRegistryTest do
 
   alias Arbor.Shell.ExecutionRegistry
 
-  describe "register/2 and get/1" do
-    test "registers and retrieves execution" do
-      {:ok, id} = ExecutionRegistry.register("echo test")
-      {:ok, exec} = ExecutionRegistry.get(id)
+  test "register/get/list expose only redacted public projections" do
+    {:ok, id} = ExecutionRegistry.register("echo test", sandbox: :strict, cwd: "/tmp")
+    :ok = ExecutionRegistry.mark_running(id)
 
-      assert exec.id == id
-      assert exec.command == "echo test"
-      assert exec.status == :pending
-      assert exec.result == nil
-    end
+    result = %{exit_code: 0, pid: self(), nested: %{port: open_test_port()}}
+    :ok = ExecutionRegistry.finish(id, result)
 
-    test "returns not_found for unknown ID" do
-      assert {:error, :not_found} = ExecutionRegistry.get("exec_nonexistent")
+    assert {:ok, execution} = ExecutionRegistry.get(id)
+    assert execution.id == id
+    assert execution.status == :completed
+    assert execution.result.pid == :redacted
+    assert execution.result.nested.port == :redacted
+    assert execution.sandbox == :strict
+    assert execution.cwd == "/tmp"
+
+    refute Map.has_key?(execution, :owner_pid)
+    refute Map.has_key?(execution, :owner_ref)
+    refute Map.has_key?(execution, :controller_pid)
+    refute Map.has_key?(execution, :pid)
+    refute Map.has_key?(execution, :port)
+
+    assert {:ok, listed} = ExecutionRegistry.list(status: :completed)
+    assert Enum.any?(listed, &(&1.id == id))
+    refute contains_process_handle?(listed)
+  end
+
+  test "security regression: foreign callers cannot forge lifecycle mutations" do
+    {:ok, id} = ExecutionRegistry.register("sleep 5")
+
+    foreign_results =
+      Task.async(fn ->
+        [
+          ExecutionRegistry.mark_running(id),
+          ExecutionRegistry.finish(id, %{exit_code: 0}),
+          ExecutionRegistry.fail(id, :forged),
+          ExecutionRegistry.adopt(id, self()),
+          ExecutionRegistry.request_cancel(id)
+        ]
+      end)
+      |> Task.await()
+
+    assert foreign_results == [
+             {:error, :owner_mismatch},
+             {:error, :owner_mismatch},
+             {:error, :owner_mismatch},
+             {:error, :owner_mismatch},
+             {:error, :not_owner}
+           ]
+
+    assert {:ok, %{status: :pending, result: nil}} = ExecutionRegistry.get(id)
+  end
+
+  test "security regression: raw GenServer mutation tuples cannot assert an owner or terminal result" do
+    {:ok, id} = ExecutionRegistry.register("echo protected")
+    registry = Process.whereis(ExecutionRegistry)
+    parent = self()
+
+    attacker =
+      spawn(fn ->
+        terminal = raw_call(registry, {:owner_finish, id, %{exit_code: 0}})
+        asserted = raw_call(registry, {:attach_port, id, parent, :copyable_handle})
+        transition = raw_call(registry, {:transition_status, id, [:pending], :completed, %{}})
+        send(parent, {:raw_results, terminal, asserted, transition})
+      end)
+
+    assert is_pid(attacker)
+
+    assert_receive {:raw_results, {:error, :invalid_caller},
+                    {:error, :unsupported_registry_request},
+                    {:error, :unsupported_registry_request}}
+
+    alias_ref = Process.alias()
+
+    send(
+      registry,
+      {:"$gen_call", {self(), [:alias | alias_ref]}, {:owner_finish, id, %{exit_code: 0}}}
+    )
+
+    Process.sleep(20)
+    Process.unalias(alias_ref)
+    assert {:ok, %{status: :pending, result: nil}} = ExecutionRegistry.get(id)
+  end
+
+  test "only the original controller can cancel an adopted execution" do
+    {:ok, id} = ExecutionRegistry.register("sleep 5")
+    parent = self()
+
+    owner =
+      spawn(fn ->
+        receive do
+          {:cancel_shell_execution, ^id} ->
+            send(parent, :owner_cancelled)
+
+            ExecutionRegistry.finish(id, %{
+              exit_code: 137,
+              killed: true,
+              cancelled: true,
+              timed_out: false
+            })
+        end
+      end)
+
+    assert :ok = ExecutionRegistry.adopt(id, owner)
+
+    assert {:error, :not_owner} =
+             Task.async(fn -> ExecutionRegistry.request_cancel(id) end) |> Task.await()
+
+    refute_received :owner_cancelled
+
+    assert :ok = ExecutionRegistry.request_cancel(id)
+    assert_receive :owner_cancelled
+    assert eventually?(fn -> match?({:ok, %{status: :killed}}, ExecutionRegistry.get(id)) end)
+  end
+
+  test "owner death makes a running entry terminal and cleanup remains bounded" do
+    {:ok, id} = ExecutionRegistry.register("sleep 5")
+    owner = spawn(fn -> Process.sleep(:infinity) end)
+    :ok = ExecutionRegistry.adopt(id, owner)
+    Process.exit(owner, :kill)
+
+    assert eventually?(fn -> match?({:ok, %{status: :failed}}, ExecutionRegistry.get(id)) end)
+    ExecutionRegistry.cleanup(0)
+    assert eventually?(fn -> ExecutionRegistry.get(id) == {:error, :not_found} end)
+  end
+
+  defp raw_call(registry, request) do
+    ref = make_ref()
+    send(registry, {:"$gen_call", {self(), ref}, request})
+
+    receive do
+      {^ref, reply} -> reply
+    after
+      500 -> :no_reply
     end
   end
 
-  describe "update_status/3" do
-    test "updates execution status" do
-      {:ok, id} = ExecutionRegistry.register("echo test")
-
-      assert :ok = ExecutionRegistry.update_status(id, :running)
-
-      {:ok, exec} = ExecutionRegistry.get(id)
-      assert exec.status == :running
-    end
-
-    test "sets completed_at for terminal statuses" do
-      {:ok, id} = ExecutionRegistry.register("echo test")
-
-      :ok = ExecutionRegistry.update_status(id, :completed, %{result: %{exit_code: 0}})
-
-      {:ok, exec} = ExecutionRegistry.get(id)
-      assert exec.status == :completed
-      assert exec.completed_at != nil
-      assert exec.result == %{exit_code: 0}
-    end
-
-    test "does not set completed_at for non-terminal status" do
-      {:ok, id} = ExecutionRegistry.register("echo test")
-
-      :ok = ExecutionRegistry.update_status(id, :running)
-
-      {:ok, exec} = ExecutionRegistry.get(id)
-      assert exec.completed_at == nil
-    end
-
-    test "returns not_found for unknown ID" do
-      assert {:error, :not_found} =
-               ExecutionRegistry.update_status("exec_nonexistent", :completed)
-    end
+  defp open_test_port do
+    port = Port.open({:spawn_executable, ~c"/bin/cat"}, [:binary])
+    Port.close(port)
+    port
   end
 
-  describe "list/1" do
-    test "returns all executions" do
-      {:ok, _} = ExecutionRegistry.register("echo list1")
-      {:ok, _} = ExecutionRegistry.register("echo list2")
+  defp contains_process_handle?(value)
+       when is_pid(value) or is_port(value) or is_reference(value),
+       do: true
 
-      {:ok, execs} = ExecutionRegistry.list()
-      assert is_list(execs)
-    end
+  defp contains_process_handle?(%DateTime{}), do: false
 
-    test "filters by status" do
-      {:ok, id1} = ExecutionRegistry.register("echo pending")
-      {:ok, id2} = ExecutionRegistry.register("echo done")
-
-      :ok = ExecutionRegistry.update_status(id2, :completed)
-
-      {:ok, completed} = ExecutionRegistry.list(status: :completed)
-      completed_ids = Enum.map(completed, & &1.id)
-
-      assert id2 in completed_ids
-      refute id1 in completed_ids
-    end
-
-    test "respects limit" do
-      for _ <- 1..5 do
-        ExecutionRegistry.register("echo limited")
-      end
-
-      {:ok, execs} = ExecutionRegistry.list(limit: 2)
-      assert length(execs) <= 2
-    end
+  defp contains_process_handle?(value) when is_map(value) do
+    Enum.any?(value, fn {key, nested} ->
+      contains_process_handle?(key) or contains_process_handle?(nested)
+    end)
   end
 
-  describe "cleanup/1" do
-    test "removes old completed executions" do
-      {:ok, id} = ExecutionRegistry.register("echo old")
+  defp contains_process_handle?(value) when is_list(value),
+    do: Enum.any?(value, &contains_process_handle?/1)
 
-      # Mark as completed with a past timestamp
-      :ok = ExecutionRegistry.update_status(id, :completed, %{result: %{exit_code: 0}})
+  defp contains_process_handle?(_value), do: false
 
-      # Cleanup with 0-second TTL (removes everything completed)
-      ExecutionRegistry.cleanup(0)
-      # Give GenServer time to process the cast
-      Process.sleep(50)
-
-      assert {:error, :not_found} = ExecutionRegistry.get(id)
-    end
-
-    test "preserves running executions" do
-      {:ok, id} = ExecutionRegistry.register("echo running")
-      :ok = ExecutionRegistry.update_status(id, :running)
-
-      ExecutionRegistry.cleanup(0)
-      Process.sleep(50)
-
-      assert {:ok, exec} = ExecutionRegistry.get(id)
-      assert exec.status == :running
-    end
+  defp eventually?(fun) do
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    do_eventually(fun, deadline)
   end
 
-  describe "handle_info :cleanup" do
-    test "periodic cleanup triggers cleanup and reschedules" do
-      {:ok, id} = ExecutionRegistry.register("echo periodic")
-      :ok = ExecutionRegistry.update_status(id, :completed, %{result: %{exit_code: 0}})
+  defp do_eventually(fun, deadline) do
+    cond do
+      fun.() ->
+        true
 
-      # Trigger periodic cleanup manually (uses default 3600s TTL)
-      send(Process.whereis(ExecutionRegistry), :cleanup)
-      Process.sleep(50)
+      System.monotonic_time(:millisecond) >= deadline ->
+        false
 
-      # Just-completed execution should still exist (within TTL)
-      assert {:ok, exec} = ExecutionRegistry.get(id)
-      assert exec.status == :completed
-    end
-  end
-
-  describe "register with options" do
-    test "stores port reference" do
-      port = Port.open({:spawn, "sleep 10"}, [:binary, :exit_status])
-
-      {:ok, id} = ExecutionRegistry.register("sleep 10", port: port)
-      {:ok, exec} = ExecutionRegistry.get(id)
-
-      assert exec.port == port
-
-      # Cleanup
-      Port.close(port)
-    catch
-      :error, _ -> :ok
-    end
-
-    test "stores pid reference" do
-      {:ok, id} = ExecutionRegistry.register("echo test", pid: self())
-      {:ok, exec} = ExecutionRegistry.get(id)
-
-      assert exec.pid == self()
-    end
-
-    test "stores sandbox and cwd" do
-      {:ok, id} = ExecutionRegistry.register("ls", sandbox: :strict, cwd: "/tmp")
-      {:ok, exec} = ExecutionRegistry.get(id)
-
-      assert exec.sandbox == :strict
-      assert exec.cwd == "/tmp"
+      true ->
+        Process.sleep(10)
+        do_eventually(fun, deadline)
     end
   end
 end

@@ -3,7 +3,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
-  alias Arbor.Orchestrator.Engine.{Context, Outcome}
+  alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
   alias Arbor.Orchestrator.ToolHooks
 
   @impl true
@@ -11,8 +11,11 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
     command = Map.get(node.attrs, "tool_command", "")
 
     case admit_command(command, node, context, opts) do
-      :ok ->
-        execute_admitted(command, node, context, graph, opts)
+      {:ok, authority, prepared} ->
+        execute_authorized(command, node, context, graph, opts, authority, prepared)
+
+      :trusted_runner ->
+        execute_admitted(command, node, context, graph, opts, nil)
 
       {:error, :missing_command} ->
         %Outcome{status: :fail, failure_reason: "No tool_command specified"}
@@ -22,7 +25,42 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
     end
   end
 
-  defp execute_admitted(command, node, context, graph, opts) do
+  defp execute_authorized(
+         command,
+         node,
+         context,
+         graph,
+         opts,
+         %RunAuthorization{} = authority,
+         prepared
+       ) do
+    shell_opts = shell_opts(node, context, opts, authority)
+
+    case Arbor.Actions.Shell.authorize_command(
+           authority.execution_principal,
+           command,
+           RunAuthorization.scope_opts(authority) ++ shell_opts
+         ) do
+      {:ok, :authorized} ->
+        execute_admitted(command, node, context, graph, opts, prepared)
+
+      {:ok, :pending_approval, proposal_id} ->
+        %Outcome{
+          status: :fail,
+          failure_reason:
+            "Tool shell authorization requires approval for immutable principal #{authority.execution_principal}: #{proposal_id}"
+        }
+
+      {:error, reason} ->
+        %Outcome{
+          status: :fail,
+          failure_reason:
+            "Tool shell authorization denied for immutable principal #{authority.execution_principal}: #{inspect(reason)}"
+        }
+    end
+  end
+
+  defp execute_admitted(command, node, context, graph, opts, prepared) do
     hooks = resolve_hooks(node, graph, opts)
     # String hooks fail closed in ToolHooks while CapShell is unavailable. Keep
     # the level in opts for trusted injected hook runners that inspect it.
@@ -52,7 +90,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
             }
 
           _ ->
-            run_command(command, node, context, opts)
+            run_command(command, prepared, node, context, opts)
         end
 
       post_payload = %{
@@ -73,11 +111,12 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
   @impl true
   def idempotency, do: :side_effecting
 
-  defp run_command(command, node, context, opts) do
+  defp run_command(command, prepared, node, context, opts) do
     sandbox_level = sandbox_level_for(node)
-    shell_opts = shell_opts(node, context, opts)
+    authority = Keyword.fetch!(opts, :run_authorization)
+    shell_opts = shell_opts(node, context, opts, authority)
 
-    case Arbor.Shell.execute_agent_command(command, shell_opts) do
+    case Arbor.Shell.execute_bound_agent_command(command, prepared, shell_opts) do
       {:ok, result} ->
         output = Map.get(result, :stdout, "") <> Map.get(result, :stderr, "")
         exit_code = Map.get(result, :exit_code, 0)
@@ -122,22 +161,41 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
   defp admit_command(command, node, context, opts) do
     case Keyword.get(opts, :tool_command_runner) do
       runner when is_function(runner, 1) ->
-        :ok
+        :trusted_runner
 
       _ ->
-        case Arbor.Shell.prepare_agent_command(command, shell_opts(node, context, opts)) do
-          {:ok, _prepared} -> :ok
-          {:error, reason} -> {:error, reason}
+        case Arbor.Shell.prepare_agent_command(command, shell_opts(node, context, opts, nil)) do
+          {:ok, prepared} ->
+            case immutable_authority(opts) do
+              {:ok, authority} -> {:ok, authority, prepared}
+              {:error, reason} -> {:error, reason}
+            end
+
+          {:error, reason} ->
+            {:error, reason}
         end
     end
   end
 
-  defp shell_opts(node, context, opts) do
+  defp shell_opts(node, context, opts, authority) do
     shell_opts = [sandbox: sandbox_level_for(node)]
 
-    case workdir(context, opts) do
+    case workdir(context, opts, authority) do
       nil -> shell_opts
       cwd -> Keyword.put(shell_opts, :cwd, cwd)
+    end
+  end
+
+  defp immutable_authority(opts) do
+    case Keyword.get(opts, :run_authorization) do
+      %RunAuthorization{} = authority ->
+        case RunAuthorization.verify_runtime(authority) do
+          :ok -> {:ok, authority}
+          {:error, reason} -> {:error, {:invalid_run_authorization, reason}}
+        end
+
+      _ ->
+        {:error, :missing_run_authorization}
     end
   end
 
@@ -160,7 +218,9 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
     end
   end
 
-  defp workdir(context, opts) do
+  defp workdir(_context, _opts, %RunAuthorization{} = authority), do: authority.workdir
+
+  defp workdir(context, opts, nil) do
     value =
       Context.get(context, "workdir") ||
         Keyword.get(opts, :workdir)

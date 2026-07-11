@@ -191,6 +191,43 @@ defmodule Arbor.Actions.GitPRTest do
       refute_received :unexpected_http
     end
 
+    test "security regression: remote and branch option injection fail before Git or HTTP", %{
+      repo_path: repo_path
+    } do
+      http = fn :post, _url, _opts ->
+        send(self(), :unexpected_http)
+        {:error, :unexpected}
+      end
+
+      assert {:error, remote_reason} =
+               Git.PR.run(
+                 %{
+                   path: repo_path,
+                   remote: "--upload-pack=/tmp/helper",
+                   branch: "feature/safe",
+                   title: "Rejected remote"
+                 },
+                 %{scm_token: @token, http_request: http}
+               )
+
+      assert remote_reason =~ "invalid git remote name"
+
+      add_remote(repo_path, "origin", "https://github.com/acme/widgets.git")
+
+      assert {:error, branch_reason} =
+               Git.PR.run(
+                 %{
+                   path: repo_path,
+                   branch: "--exec=/tmp/helper",
+                   title: "Rejected branch"
+                 },
+                 %{scm_token: @token, http_request: http}
+               )
+
+      assert branch_reason =~ "invalid_git_branch"
+      refute_received :unexpected_http
+    end
+
     test "redacts token values from HTTP error details", %{repo_path: repo_path} do
       add_remote(repo_path, "origin", "https://github.com/acme/widgets.git")
       token = "token-redaction-value"

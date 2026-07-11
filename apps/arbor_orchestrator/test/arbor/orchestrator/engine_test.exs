@@ -809,6 +809,7 @@ defmodule Arbor.Orchestrator.EngineTest do
     assert {:ok, result} =
              Arbor.Orchestrator.run(dot,
                tool_hooks: %{pre: fn _payload -> :skip end},
+               tool_command_runner: fn _command -> flunk("skipped tool command executed") end,
                on_event: on_event
              )
 

@@ -51,6 +51,130 @@ defmodule Arbor.Actions.Git do
   @doc false
   def git_sandbox, do: :basic
 
+  @git_prefix [
+    "--no-pager",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.pager=cat",
+    "-c",
+    "pager.diff=false",
+    "-c",
+    "pager.log=false",
+    "-c",
+    "diff.external=",
+    "-c",
+    "commit.gpgSign=false"
+  ]
+
+  @git_env %{
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES" => false,
+    "GIT_CONFIG_NOSYSTEM" => "1",
+    "GIT_CONFIG_COUNT" => "0",
+    "GIT_CONFIG_GLOBAL" => "/dev/null",
+    "GIT_COMMON_DIR" => false,
+    "GIT_DIR" => false,
+    "GIT_EXEC_PATH" => false,
+    "GIT_ATTR_NOSYSTEM" => "1",
+    "GIT_EXTERNAL_DIFF" => false,
+    "GIT_INDEX_FILE" => false,
+    "GIT_OBJECT_DIRECTORY" => false,
+    "GIT_PAGER" => "cat",
+    "GIT_SSH" => false,
+    "GIT_SSH_COMMAND" => false,
+    "GIT_EDITOR" => "false",
+    "GIT_SEQUENCE_EDITOR" => "false",
+    "GIT_TERMINAL_PROMPT" => "0",
+    "GIT_WORK_TREE" => false
+  }
+
+  @unsafe_config_pattern "^(include\\.|includeif\\.|filter\\..*\\.(clean|smudge|process)$|diff\\..*\\.(command|textconv)$|diff\\.external$|core\\.(hookspath|fsmonitor)$|commit\\.gpgsign$|gpg\\.program$)"
+
+  @doc false
+  def execute(path, args) when is_binary(path) and is_list(args) do
+    with :ok <- reject_configured_helpers(path) do
+      execute_without_audit(path, args)
+    end
+  end
+
+  @doc false
+  def validate_ref(ref) when is_binary(ref) do
+    components = String.split(ref, "/")
+
+    valid? =
+      String.valid?(ref) and byte_size(ref) in 1..1024 and
+        Regex.match?(~r/\A(?:HEAD|[A-Za-z0-9][A-Za-z0-9._\/-]*)(?:[~^][0-9]*)*\z/, ref) and
+        not String.starts_with?(ref, "-") and
+        not String.contains?(ref, ["..", "//", "@{", "\\", <<0>>]) and
+        not String.ends_with?(ref, ["/", ".", ".lock"]) and
+        Enum.all?(components, &valid_ref_component?/1)
+
+    if valid?, do: :ok, else: {:error, {:invalid_git_ref, ref}}
+  end
+
+  def validate_ref(ref), do: {:error, {:invalid_git_ref, ref}}
+
+  @doc false
+  def validate_branch_name(name) when is_binary(name) do
+    with :ok <- validate_ref(name),
+         false <- String.contains?(name, ["~", "^"]),
+         false <- name == "HEAD" do
+      :ok
+    else
+      _ -> {:error, {:invalid_git_branch, name}}
+    end
+  end
+
+  def validate_branch_name(name), do: {:error, {:invalid_git_branch, name}}
+
+  @doc false
+  def validate_repo_path(path) when is_binary(path) do
+    components = Path.split(path)
+
+    valid? =
+      path != "" and String.valid?(path) and not String.contains?(path, <<0>>) and
+        not Regex.match?(~r/[\x00-\x1F\x7F]/u, path) and Path.type(path) == :relative and
+        Enum.all?(components, &(&1 not in ["", ".", ".."]))
+
+    if valid?, do: :ok, else: {:error, {:invalid_git_path, path}}
+  end
+
+  def validate_repo_path(path), do: {:error, {:invalid_git_path, path}}
+
+  defp valid_ref_component?(component) do
+    component != "" and not String.starts_with?(component, ".") and
+      not String.ends_with?(component, ".lock")
+  end
+
+  defp reject_configured_helpers(path) do
+    args = [
+      "config",
+      "--local",
+      "--no-includes",
+      "--name-only",
+      "--get-regexp",
+      @unsafe_config_pattern
+    ]
+
+    case execute_without_audit(path, args) do
+      {:ok, %{exit_code: 1}} -> :ok
+      {:ok, %{exit_code: 0, stdout: output}} -> {:error, {:unsafe_git_configuration, output}}
+      {:ok, result} -> {:error, {:git_config_audit_failed, result.exit_code, result.stdout}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp execute_without_audit(path, args) do
+    Shell.execute_direct("git", @git_prefix ++ args,
+      cwd: path,
+      timeout: git_timeout(),
+      sandbox: git_sandbox(),
+      env: @git_env
+    )
+  end
+
   defmodule Status do
     @moduledoc """
     Get repository status.
@@ -113,16 +237,12 @@ defmodule Arbor.Actions.Git do
     end
 
     defp git_command(path, args) do
-      case Shell.execute_direct("git", args,
-             cwd: path,
-             timeout: Git.git_timeout(),
-             sandbox: Git.git_sandbox()
-           ) do
+      case Git.execute(path, args) do
         {:ok, %{exit_code: 0} = result} ->
           {:ok, result}
 
-        {:ok, %{stderr: stderr}} ->
-          {:error, String.trim(stderr)}
+        {:ok, %{stderr: stderr, stdout: stdout}} ->
+          {:error, String.trim(if(stderr == "", do: stdout, else: stderr))}
 
         {:error, reason} ->
           {:error, inspect(reason)}
@@ -265,8 +385,17 @@ defmodule Arbor.Actions.Git do
     def run(%{path: path} = params, _context) do
       Actions.emit_started(__MODULE__, params)
 
-      args = build_diff_args(params)
+      case build_diff_args(params) do
+        {:ok, args} ->
+          run_diff(path, params, args)
 
+        {:error, reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, "Failed to get git diff: #{inspect(reason)}"}
+      end
+    end
+
+    defp run_diff(path, params, args) do
       case git_command(path, ["diff" | args]) do
         {:ok, result} ->
           output = %{
@@ -291,25 +420,28 @@ defmodule Arbor.Actions.Git do
     end
 
     defp build_diff_args(params) do
-      args = []
-      args = if params[:staged], do: ["--cached" | args], else: args
-      args = if params[:stat_only], do: ["--stat" | args], else: args
-      args = if params[:ref], do: args ++ [params[:ref]], else: args
-      args = if params[:file], do: args ++ ["--", params[:file]], else: args
-      args
+      with :ok <- validate_optional_ref(params[:ref]),
+           :ok <- validate_optional_path(params[:file]) do
+        args = ["--no-ext-diff", "--no-textconv"]
+        args = if params[:staged], do: args ++ ["--cached"], else: args
+        args = if params[:stat_only], do: args ++ ["--stat"], else: args
+        args = if params[:ref], do: args ++ [params[:ref]], else: args
+        {:ok, args ++ ["--"] ++ List.wrap(params[:file])}
+      end
     end
 
+    defp validate_optional_ref(nil), do: :ok
+    defp validate_optional_ref(ref), do: Git.validate_ref(ref)
+    defp validate_optional_path(nil), do: :ok
+    defp validate_optional_path(path), do: Git.validate_repo_path(path)
+
     defp git_command(path, args) do
-      case Shell.execute_direct("git", args,
-             cwd: path,
-             timeout: Git.git_timeout(),
-             sandbox: Git.git_sandbox()
-           ) do
+      case Git.execute(path, args) do
         {:ok, %{exit_code: 0} = result} ->
           {:ok, result}
 
-        {:ok, %{stderr: stderr}} ->
-          {:error, String.trim(stderr)}
+        {:ok, %{stderr: stderr, stdout: stdout}} ->
+          {:error, String.trim(if(stderr == "", do: stdout, else: stderr))}
 
         {:error, reason} ->
           {:error, inspect(reason)}
@@ -450,35 +582,28 @@ defmodule Arbor.Actions.Git do
     end
 
     defp normalize_message(message) when is_binary(message) do
-      message =
-        message
-        |> sanitize_message_for_basic_shell()
-        |> String.trim()
-
-      if message == "", do: {:error, "commit message is required"}, else: {:ok, message}
+      cond do
+        not String.valid?(message) -> {:error, "commit message must be valid UTF-8"}
+        String.contains?(message, <<0>>) -> {:error, "commit message contains NUL"}
+        String.trim(message) == "" -> {:error, "commit message is required"}
+        true -> {:ok, message}
+      end
     end
 
     defp normalize_message(nil), do: {:error, "commit message is required"}
-    defp normalize_message(message), do: normalize_message(to_string(message))
-
-    defp sanitize_message_for_basic_shell(message) do
-      message
-      |> String.replace("$(", "(")
-      |> String.replace("&&", " and ")
-      |> String.replace("||", " or ")
-      |> String.replace(~r/[;|`<>\r\n]/, " ")
-      |> String.replace(~r/\s+/, " ")
-    end
+    defp normalize_message(_message), do: {:error, "commit message must be a string"}
 
     defp maybe_stage_files(path, %{files: files}) when is_list(files) and files != [] do
-      case git_command(path, ["add" | files]) do
-        {:ok, _} -> :ok
-        {:error, reason} -> {:error, reason}
+      with :ok <- validate_paths(files) do
+        case git_command(path, ["add", "--" | files]) do
+          {:ok, _} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
       end
     end
 
     defp maybe_stage_files(path, %{all: all}) when all in [true, "true", "1", 1] do
-      case git_command(path, ["add", "-A"]) do
+      case git_command(path, ["add", "-A", "--"]) do
         {:ok, _} -> :ok
         {:error, reason} -> {:error, reason}
       end
@@ -486,9 +611,19 @@ defmodule Arbor.Actions.Git do
 
     defp maybe_stage_files(_path, _params), do: :ok
 
+    defp validate_paths(paths) do
+      Enum.reduce_while(paths, :ok, fn path, :ok ->
+        case Git.validate_repo_path(path) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+    end
+
     defp create_commit(path, message, params) do
-      args = ["commit", "-m", message]
+      args = ["commit", "--no-verify", "--no-gpg-sign", "--cleanup=verbatim"]
       args = if enabled?(params[:allow_empty]), do: args ++ ["--allow-empty"], else: args
+      args = args ++ ["-m", message, "--"]
       git_command(path, args)
     end
 
@@ -502,11 +637,7 @@ defmodule Arbor.Actions.Git do
     end
 
     defp git_command(path, args) do
-      case Shell.execute_direct("git", args,
-             cwd: path,
-             timeout: Git.git_timeout(),
-             sandbox: Git.git_sandbox()
-           ) do
+      case Git.execute(path, args) do
         {:ok, %{exit_code: 0} = result} ->
           {:ok, result}
 
@@ -590,8 +721,13 @@ defmodule Arbor.Actions.Git do
     def run(%{path: path} = params, _context) do
       Actions.emit_started(__MODULE__, params)
 
-      args = build_log_args(params)
+      case build_log_args(params) do
+        {:ok, args} -> run_log(path, params, args)
+        {:error, reason} -> {:error, "Failed to get git log: #{inspect(reason)}"}
+      end
+    end
 
+    defp run_log(path, params, args) do
       case git_command(path, ["log" | args]) do
         {:ok, result} ->
           commits =
@@ -617,26 +753,34 @@ defmodule Arbor.Actions.Git do
     end
 
     defp build_log_args(params) do
-      args = ["-n", to_string(params[:limit] || 10)]
+      with :ok <- validate_limit(params[:limit]),
+           :ok <- validate_optional_ref(params[:ref]),
+           :ok <- validate_optional_path(params[:file]) do
+        args = ["--no-ext-diff", "--no-textconv", "-n", to_string(params[:limit] || 10)]
 
-      args =
-        if params[:oneline] do
-          ["--oneline" | args]
-        else
-          ["--format=%H%n%an%n%ae%n%aI%n%s%n%b%n---COMMIT_END---" | args]
-        end
+        args =
+          if params[:oneline] do
+            ["--oneline" | args]
+          else
+            ["--format=%H%n%an%n%ae%n%aI%n%s%n%b%n---COMMIT_END---" | args]
+          end
 
-      args = if params[:ref], do: args ++ [params[:ref]], else: args
-      args = if params[:file], do: args ++ ["--", params[:file]], else: args
-      args
+        args = if params[:ref], do: args ++ [params[:ref]], else: args
+        {:ok, args ++ ["--"] ++ List.wrap(params[:file])}
+      end
     end
 
+    defp validate_optional_ref(nil), do: :ok
+    defp validate_optional_ref(ref), do: Git.validate_ref(ref)
+    defp validate_optional_path(nil), do: :ok
+    defp validate_optional_path(path), do: Git.validate_repo_path(path)
+
+    defp validate_limit(nil), do: :ok
+    defp validate_limit(limit) when is_integer(limit) and limit in 0..1000, do: :ok
+    defp validate_limit(limit), do: {:error, {:invalid_git_log_limit, limit}}
+
     defp git_command(path, args) do
-      case Shell.execute_direct("git", args,
-             cwd: path,
-             timeout: Git.git_timeout(),
-             sandbox: Git.git_sandbox()
-           ) do
+      case Git.execute(path, args) do
         {:ok, %{exit_code: 0} = result} ->
           {:ok, result}
 
@@ -775,33 +919,32 @@ defmodule Arbor.Actions.Git do
     def run(%{path: path, mode: :create, name: name} = params, _context) do
       Actions.emit_started(__MODULE__, params)
 
-      args = ["checkout", "-b", name]
-      args = if params[:from], do: args ++ [params[:from]], else: args
-
-      case git_command(path, args) do
-        {:ok, _result} ->
-          result = %{path: path, mode: :create, branch: name}
-          Actions.emit_completed(__MODULE__, %{path: path, branch: name})
-          {:ok, result}
-
+      with :ok <- Git.validate_branch_name(name),
+           :ok <- validate_optional_ref(params[:from]),
+           args = ["switch", "-c", name, "--"] ++ List.wrap(params[:from]),
+           {:ok, _result} <- git_command(path, args) do
+        result = %{path: path, mode: :create, branch: name}
+        Actions.emit_completed(__MODULE__, %{path: path, branch: name})
+        {:ok, result}
+      else
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
-          {:error, "Failed to create branch '#{name}': #{reason}"}
+          {:error, "Failed to create branch '#{name}': #{inspect(reason)}"}
       end
     end
 
     def run(%{path: path, mode: :switch, name: name} = params, _context) do
       Actions.emit_started(__MODULE__, params)
 
-      case git_command(path, ["checkout", name]) do
-        {:ok, _result} ->
-          result = %{path: path, mode: :switch, branch: name}
-          Actions.emit_completed(__MODULE__, %{path: path, branch: name})
-          {:ok, result}
-
+      with :ok <- Git.validate_branch_name(name),
+           {:ok, _result} <- git_command(path, ["switch", "--", name]) do
+        result = %{path: path, mode: :switch, branch: name}
+        Actions.emit_completed(__MODULE__, %{path: path, branch: name})
+        {:ok, result}
+      else
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
-          {:error, "Failed to switch to branch '#{name}': #{reason}"}
+          {:error, "Failed to switch to branch '#{name}': #{inspect(reason)}"}
       end
     end
 
@@ -809,12 +952,11 @@ defmodule Arbor.Actions.Git do
       {:error, "Branch mode :#{mode} requires a 'name' parameter"}
     end
 
+    defp validate_optional_ref(nil), do: :ok
+    defp validate_optional_ref(ref), do: Git.validate_ref(ref)
+
     defp git_command(path, args) do
-      case Arbor.Shell.execute_direct("git", args,
-             cwd: path,
-             timeout: Git.git_timeout(),
-             sandbox: Git.git_sandbox()
-           ) do
+      case Git.execute(path, args) do
         {:ok, %{exit_code: 0} = result} ->
           {:ok, result}
 
@@ -860,6 +1002,7 @@ defmodule Arbor.Actions.Git do
 
     alias Arbor.Actions
     alias Arbor.Actions.Config
+    alias Arbor.Actions.Git
     alias Arbor.Common.{EgressClassifier, SensitiveData}
 
     def taint_roles do
@@ -914,10 +1057,12 @@ defmodule Arbor.Actions.Git do
         remote: Config.get(params, :remote, "origin")
       })
 
-      remote_result = remote_info(params)
-      remote_hint = remote_hint(remote_result)
+      remote = Config.get(params, :remote, "origin")
 
-      with {:ok, provider} <- Config.scm_provider(params, context, remote_hint),
+      with :ok <- validate_remote_name(remote),
+           remote_result = remote_info(params),
+           remote_hint = remote_hint(remote_result),
+           {:ok, provider} <- Config.scm_provider(params, context, remote_hint),
            {:ok, base_url} <- Config.scm_base_url(provider, params, context, remote_hint),
            {:ok, token} <- Config.scm_token(provider, params, context),
            {:ok, head} <- resolve_head(path, params),
@@ -955,14 +1100,31 @@ defmodule Arbor.Actions.Git do
       path = Config.get(params, :path)
       remote = Config.get(params, :remote, "origin")
 
-      case System.cmd("git", ["-C", path, "remote", "get-url", remote], stderr_to_stdout: true) do
-        {output, 0} ->
-          parse_remote_url(String.trim(output), remote)
+      with :ok <- validate_remote_name(remote) do
+        case Git.execute(path, ["remote", "get-url", "--", remote]) do
+          {:ok, %{exit_code: 0, stdout: output}} ->
+            parse_remote_url(String.trim(output), remote)
 
-        {output, _code} ->
-          {:error, "failed to read git remote #{inspect(remote)}: #{String.trim(output)}"}
+          {:ok, result} ->
+            output = if result.stderr == "", do: result.stdout, else: result.stderr
+            {:error, "failed to read git remote #{inspect(remote)}: #{String.trim(output)}"}
+
+          {:error, reason} ->
+            {:error, "failed to read git remote #{inspect(remote)}: #{inspect(reason)}"}
+        end
       end
     end
+
+    defp validate_remote_name(remote) when is_binary(remote) do
+      if Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._\/-]*\z/, remote) and
+           byte_size(remote) <= 255 and not String.contains?(remote, ["..", "//"]) do
+        :ok
+      else
+        {:error, "invalid git remote name: #{inspect(remote)}"}
+      end
+    end
+
+    defp validate_remote_name(remote), do: {:error, "invalid git remote name: #{inspect(remote)}"}
 
     defp parse_remote_url(url, remote) do
       parsed =
@@ -1045,7 +1207,10 @@ defmodule Arbor.Actions.Git do
     defp resolve_head(_path, params) do
       case Config.get(params, :head) || Config.get(params, :branch) do
         value when is_binary(value) and value != "" ->
-          {:ok, value}
+          case Git.validate_branch_name(value) do
+            :ok -> {:ok, value}
+            {:error, reason} -> {:error, inspect(reason)}
+          end
 
         _ ->
           current_branch(Config.get(params, :path))
@@ -1053,15 +1218,19 @@ defmodule Arbor.Actions.Git do
     end
 
     defp current_branch(path) do
-      case System.cmd("git", ["-C", path, "branch", "--show-current"], stderr_to_stdout: true) do
-        {output, 0} ->
+      case Git.execute(path, ["branch", "--show-current"]) do
+        {:ok, %{exit_code: 0, stdout: output}} ->
           case String.trim(output) do
             "" -> {:error, "head/branch is required when the repo is detached"}
             branch -> {:ok, branch}
           end
 
-        {output, _code} ->
+        {:ok, result} ->
+          output = if result.stderr == "", do: result.stdout, else: result.stderr
           {:error, "failed to resolve current git branch: #{String.trim(output)}"}
+
+        {:error, reason} ->
+          {:error, "failed to resolve current git branch: #{inspect(reason)}"}
       end
     end
 

@@ -49,7 +49,15 @@ defmodule Arbor.Shell do
 
   @behaviour Arbor.Contracts.API.Shell
 
-  alias Arbor.Shell.{CapShell, ExecutionRegistry, Executor, PortSession, Sandbox}
+  alias Arbor.Shell.{
+    CapShell,
+    ExecutionRegistry,
+    ExecutionWorker,
+    Executor,
+    PortSession,
+    Sandbox
+  }
+
   alias Arbor.Signals
 
   @default_sandbox :basic
@@ -150,9 +158,24 @@ defmodule Arbor.Shell do
   @spec execute_agent_command(term(), term()) :: {:ok, map()} | {:error, term()}
   def execute_agent_command(command, opts \\ []) do
     with {:ok, prepared} <- prepare_agent_command(command, opts) do
-      execute_prepared_agent_command(command, prepared, opts)
+      execute_bound_agent_command(command, prepared, opts)
     end
   end
+
+  @doc false
+  @spec execute_bound_agent_command(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def execute_bound_agent_command(
+        command,
+        %{executable_identity: %Arbor.Shell.ExecutablePolicy.Executable{}, args: args} = prepared,
+        opts
+      )
+      when is_binary(command) and is_list(args) and is_list(opts) do
+    execute_prepared_agent_command(command, prepared, opts)
+  end
+
+  def execute_bound_agent_command(_command, _prepared, _opts),
+    do: {:error, :invalid_prepared_agent_command}
 
   @doc """
   Fail-closed compound-shell entry (public facade over `Arbor.Shell.CapShell`).
@@ -345,7 +368,7 @@ defmodule Arbor.Shell do
     # such as "Fix A & B (safe)" is inert argv, not a shell compound.
     with {:ok, :allowed} <- Sandbox.check_argv(cmd, args, sandbox, opts),
          {:ok, execution_id} <- register_execution(display_command, opts),
-         :ok <- mark_execution_running(execution_id, %{}) do
+         :ok <- mark_execution_running(execution_id) do
       emit_started(display_command, execution_id, opts)
 
       case Executor.run_direct(cmd, args, opts) do
@@ -454,7 +477,8 @@ defmodule Arbor.Shell do
   @doc """
   Stop a streaming session by session ID.
   """
-  @spec stop_session(String.t()) :: :ok | {:error, :not_found}
+  @spec stop_session(String.t()) ::
+          :ok | {:error, :not_found | :not_running | :not_owner | :cancellation_timeout}
   def stop_session(session_id) do
     stop_streaming_session(session_id)
   end
@@ -486,7 +510,7 @@ defmodule Arbor.Shell do
 
     with {:ok, :allowed} <- Sandbox.check(command, sandbox, opts),
          {:ok, execution_id} <- register_execution(command, opts),
-         :ok <- mark_execution_running(execution_id, %{}) do
+         :ok <- mark_execution_running(execution_id) do
       emit_started(command, execution_id, opts)
 
       case Executor.run(command, opts) do
@@ -550,16 +574,9 @@ defmodule Arbor.Shell do
 
   @impl true
   def kill_running_execution_by_id(execution_id, _opts) do
-    case ExecutionRegistry.claim_kill(execution_id) do
-      {:ok, execution} ->
-        kill_execution_owner(execution)
-        :ok
-
-      {:error, :not_running} ->
-        {:error, :not_running}
-
-      {:error, :not_found} ->
-        {:error, :not_found}
+    case ExecutionRegistry.request_cancel(execution_id) do
+      :ok -> wait_for_cancellation(execution_id)
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -572,30 +589,19 @@ defmodule Arbor.Shell do
 
   @impl true
   def execute_streaming_shell_command(command, opts) do
+    start_time = System.monotonic_time(:millisecond)
     sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
 
-    case Sandbox.check(command, sandbox, opts) do
-      {:ok, :allowed} ->
-        session_opts =
-          opts
-          |> Keyword.take([:timeout, :max_output_bytes, :cwd, :env, :stream_to])
-          |> Keyword.put_new(:timeout, 30_000)
-
-        case PortSession.start_supervised(command, session_opts) do
-          {:ok, pid} ->
-            session_id = PortSession.get_id(pid)
-
-            # Register in the ExecutionRegistry for tracking
-            {:ok, exec_id} = register_execution(command, opts)
-            mark_execution_running(exec_id, %{port_session_pid: pid})
-
-            emit_started(command, session_id, opts)
-            {:ok, session_id}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-
+    with {:ok, :allowed} <- Sandbox.check(command, sandbox, opts),
+         {:ok, timeout} <- PortSession.validate_timeout(Keyword.get(opts, :timeout, 30_000)),
+         {executable, args} <- Sandbox.parse_command(command) do
+      start_tracked_stream(
+        command,
+        executable,
+        args,
+        opts |> Keyword.put(:timeout, timeout) |> Keyword.put(:started_at, start_time)
+      )
+    else
       {:error, reason} ->
         emit_blocked(command, reason)
         {:error, reason}
@@ -604,29 +610,10 @@ defmodule Arbor.Shell do
 
   @impl true
   def stop_streaming_session(session_id) do
-    case find_port_session(session_id) do
-      {:ok, pid} ->
-        PortSession.stop(pid)
-        :ok
-
-      :error ->
-        {:error, :not_found}
+    case ExecutionRegistry.request_cancel(session_id) do
+      :ok -> wait_for_cancellation(session_id)
+      {:error, reason} -> {:error, reason}
     end
-  end
-
-  defp find_port_session(session_id) do
-    # Search DynamicSupervisor children for the matching session
-    children = DynamicSupervisor.which_children(Arbor.Shell.PortSessionSupervisor)
-
-    Enum.find_value(children, :error, fn {_, pid, _, _} ->
-      if is_pid(pid) and Process.alive?(pid) do
-        try do
-          if PortSession.get_id(pid) == session_id, do: {:ok, pid}
-        catch
-          :exit, _ -> nil
-        end
-      end
-    end)
   end
 
   # System API
@@ -673,17 +660,17 @@ defmodule Arbor.Shell do
 
   defp execute_prepared_agent_command(
          command,
-         %{executable: executable, args: args},
+         %{executable_identity: executable, args: args},
          opts
        ) do
     execution_opts = agent_execution_opts(opts)
 
     if Process.whereis(ExecutionRegistry) do
       with {:ok, execution_id} <- register_execution(command, execution_opts),
-           :ok <- mark_execution_running(execution_id, %{}) do
+           :ok <- mark_execution_running(execution_id) do
         emit_started(command, execution_id, execution_opts)
 
-        case Executor.run_direct(executable, args, execution_opts) do
+        case Executor.run_bound(executable, args, execution_opts) do
           {:ok, result} ->
             complete_execution(execution_id, result)
             emit_completed(execution_id, result)
@@ -703,46 +690,40 @@ defmodule Arbor.Shell do
       # The orchestrator can be exercised without the arbor_shell application
       # supervisor. Preserve that standalone mode with the same already-bound
       # Executor argv; never fall back to a shell string or unchecked Port.
-      Executor.run_direct(executable, args, execution_opts)
+      Executor.run_bound(executable, args, execution_opts)
     end
   end
 
   defp execute_prepared_agent_command_async(
          command,
-         %{executable: executable, args: args},
+         %{executable_identity: executable, args: args},
          opts
        ) do
     execution_opts = agent_execution_opts(opts)
 
     start_async_execution(command, execution_opts, fn run_opts ->
-      Executor.run_direct(executable, args, run_opts)
+      Executor.run_bound(executable, args, run_opts)
     end)
   end
 
   defp execute_prepared_agent_command_streaming(
          command,
-         %{executable: executable, args: args},
+         %{executable_identity: executable, args: args},
          opts
        ) do
     execution_opts = agent_execution_opts(opts)
 
-    session_opts =
-      execution_opts
-      |> Keyword.take([:timeout, :max_output_bytes, :cwd, :stream_to])
-      |> Keyword.put_new(:timeout, 30_000)
+    start_time = System.monotonic_time(:millisecond)
 
-    with {:ok, exec_id} <- register_execution(command, execution_opts) do
-      case PortSession.start_supervised_direct(executable, args, command, session_opts) do
-        {:ok, pid} ->
-          session_id = PortSession.get_id(pid)
-          mark_execution_running(exec_id, %{port_session_pid: pid})
-          emit_started(command, session_id, execution_opts)
-          {:ok, session_id}
+    with {:ok, timeout} <-
+           PortSession.validate_timeout(Keyword.get(execution_opts, :timeout, 30_000)) do
+      session_opts =
+        execution_opts
+        |> Keyword.take([:max_output_bytes, :cwd, :stream_to])
+        |> Keyword.put(:timeout, timeout)
+        |> Keyword.put(:started_at, start_time)
 
-        {:error, reason} ->
-          fail_execution(exec_id, reason)
-          {:error, reason}
-      end
+      start_tracked_stream(command, executable, args, session_opts)
     end
   end
 
@@ -763,19 +744,16 @@ defmodule Arbor.Shell do
   defp register_execution(command, opts) do
     ExecutionRegistry.register(command,
       sandbox: Keyword.get(opts, :sandbox, @default_sandbox),
-      cwd: Keyword.get(opts, :cwd)
+      cwd: Keyword.get(opts, :cwd),
+      id_prefix: Keyword.get(opts, :execution_id_prefix, "exec_")
     )
   end
 
-  defp mark_execution_running(execution_id, updates) do
-    ExecutionRegistry.transition_status(execution_id, :pending, :running, updates)
-  end
+  defp mark_execution_running(execution_id), do: ExecutionRegistry.mark_running(execution_id)
 
-  # Register the actual BEAM owner before the execution ID is returned. The
-  # worker waits for an explicit start message, so an immediate kill always
-  # finds a running entry with a cancellable owner. Port attachment is another
-  # atomic registry handshake inside Executor; cancellation winning that race
-  # causes Executor to kill the newly opened OS process before use.
+  # The registry derives the controller from this caller, then the controller
+  # atomically adopts the supervised worker before releasing its start message.
+  # No PID/Port or copyable mutation credential enters a public projection.
   defp start_async_execution(command, opts, runner) when is_function(runner, 1) do
     case register_execution(command, opts) do
       {:ok, execution_id} ->
@@ -790,14 +768,14 @@ defmodule Arbor.Shell do
   defp start_registered_async_execution(execution_id, command, opts, runner) do
     case start_waiting_execution_owner(execution_id, opts, runner) do
       {:ok, owner_pid, start_ref} ->
-        case mark_execution_running(execution_id, %{pid: owner_pid}) do
+        case ExecutionRegistry.adopt(execution_id, owner_pid) do
           :ok ->
             emit_started(command, execution_id, opts)
             send(owner_pid, {:start_shell_execution, start_ref})
             {:ok, execution_id}
 
           {:error, reason} ->
-            Process.exit(owner_pid, :kill)
+            GenServer.stop(owner_pid, :normal)
             fail_execution(execution_id, reason)
             emit_failed(execution_id, reason)
             {:error, reason}
@@ -813,76 +791,78 @@ defmodule Arbor.Shell do
   defp start_waiting_execution_owner(execution_id, opts, runner) do
     start_ref = make_ref()
 
-    case Task.start(fn ->
-           receive do
-             {:start_shell_execution, ^start_ref} ->
-               owner_pid = self()
-
-               run_opts =
-                 Keyword.put(opts, :on_port_open, fn port ->
-                   ExecutionRegistry.attach_port(execution_id, owner_pid, port)
-                 end)
-
-               finish_async_execution(execution_id, runner.(run_opts))
-           end
-         end) do
+    case DynamicSupervisor.start_child(
+           Arbor.Shell.PortSessionSupervisor,
+           {ExecutionWorker, {execution_id, opts, runner, start_ref}}
+         ) do
       {:ok, owner_pid} -> {:ok, owner_pid, start_ref}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp finish_async_execution(execution_id, {:ok, result}) do
-    case complete_execution(execution_id, result) do
-      :ok -> emit_completed(execution_id, result)
-      {:error, {:invalid_status, :killed}} -> :ok
-      {:error, _reason} -> :ok
+  defp start_tracked_stream(command, executable, args, opts) do
+    case register_execution(command, Keyword.put(opts, :execution_id_prefix, "port_")) do
+      {:ok, execution_id} ->
+        do_start_tracked_stream(execution_id, command, executable, args, opts)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  defp finish_async_execution(execution_id, {:error, reason}) do
-    case fail_execution(execution_id, reason) do
-      :ok -> emit_failed(execution_id, reason)
-      {:error, {:invalid_status, :killed}} -> :ok
-      {:error, _reason} -> :ok
+  defp do_start_tracked_stream(execution_id, command, executable, args, opts) do
+    start_ref = make_ref()
+
+    case PortSession.start_supervised_direct(
+           executable,
+           args,
+           command,
+           Keyword.put(opts, :deferred, {execution_id, start_ref})
+         ) do
+      {:ok, owner_pid} ->
+        adopt_and_begin_stream(execution_id, owner_pid, start_ref, command, opts)
+
+      {:error, reason} ->
+        _ = fail_execution(execution_id, reason)
+        {:error, reason}
     end
   end
 
-  defp kill_execution_owner(execution) do
-    case Map.get(execution, :port) do
-      port when is_port(port) -> Executor.kill_port(port)
-      _ -> :ok
-    end
+  defp adopt_and_begin_stream(execution_id, owner_pid, start_ref, command, opts) do
+    case ExecutionRegistry.adopt(execution_id, owner_pid) do
+      :ok ->
+        remaining =
+          Keyword.fetch!(opts, :started_at) + Keyword.fetch!(opts, :timeout) -
+            System.monotonic_time(:millisecond)
 
-    case Map.get(execution, :port_session_pid) do
-      pid when is_pid(pid) -> PortSession.kill(pid)
-      _ -> :ok
-    end
+        result =
+          if remaining > 0,
+            do: PortSession.begin(owner_pid, start_ref, remaining + 2_000),
+            else: {:error, :stream_setup_timeout}
 
-    case Map.get(execution, :pid) do
-      pid when is_pid(pid) -> Process.exit(pid, :kill)
-      _ -> :ok
+        case result do
+          :ok ->
+            emit_started(command, execution_id, opts)
+            {:ok, execution_id}
+
+          {:error, reason} ->
+            _ = ExecutionRegistry.request_cancel(execution_id)
+            {:error, reason}
+        end
+
+      {:error, reason} ->
+        GenServer.stop(owner_pid, :normal)
+        _ = fail_execution(execution_id, reason)
+        {:error, reason}
     end
   end
 
   defp complete_execution(execution_id, result) do
-    # Output-limit termination is killed (not timed_out and not a successful
-    # completed run). Registry + get_result treat :killed as terminal.
-    status =
-      cond do
-        Map.get(result, :timed_out) == true -> :timed_out
-        Map.get(result, :killed) == true -> :killed
-        true -> :completed
-      end
-
-    ExecutionRegistry.transition_status(execution_id, [:pending, :running], status, %{
-      result: result
-    })
+    ExecutionRegistry.finish(execution_id, result)
   end
 
   defp fail_execution(execution_id, reason) do
-    ExecutionRegistry.transition_status(execution_id, [:pending, :running], :failed, %{
-      result: %{error: reason}
-    })
+    ExecutionRegistry.fail(execution_id, reason)
   end
 
   defp wait_for_result(execution_id, timeout) do
@@ -891,6 +871,16 @@ defmodule Arbor.Shell do
   end
 
   @terminal_statuses [:completed, :failed, :timed_out, :killed]
+
+  defp wait_for_cancellation(execution_id) do
+    deadline = System.monotonic_time(:millisecond) + 3_000
+
+    case do_wait_for_result(execution_id, deadline) do
+      {:ok, _result} -> :ok
+      {:error, :timeout} -> {:error, :cancellation_timeout}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp do_wait_for_result(execution_id, deadline) do
     case ExecutionRegistry.get(execution_id) do

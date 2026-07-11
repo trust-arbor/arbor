@@ -10,14 +10,14 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
   Node attributes:
     - `command` - shell command to execute (required)
     - `timeout` - timeout in milliseconds (default: "120000")
-    - `cwd` - working directory (optional, defaults to context "workdir" or ".")
+    - `cwd` - compatibility attribute; immutable run authority owns the workdir
     - `sandbox` - sandbox mode: "none", "basic", "strict" (default: "basic")
     - `on_error` - behavior on non-zero exit: "fail" (default), "warn", "continue"
   """
 
   @behaviour Arbor.Orchestrator.Handlers.Handler
 
-  alias Arbor.Orchestrator.Engine.{Context, Outcome}
+  alias Arbor.Orchestrator.Engine.{Outcome, RunAuthorization}
 
   import Arbor.Orchestrator.Handlers.Helpers
 
@@ -34,43 +34,30 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
     timeout = parse_int(Map.get(node.attrs, "timeout"), @default_timeout)
     on_error = Map.get(node.attrs, "on_error", "fail")
 
-    cwd =
-      Map.get(node.attrs, "cwd") ||
-        Context.get(context, "workdir") ||
-        Keyword.get(opts, :workdir, ".")
-
     sandbox = Map.get(node.attrs, "sandbox", "basic")
-    agent_id = resolve_agent_id(node, context)
+    _ = context
 
-    execution_opts = [cwd: cwd, timeout: timeout, sandbox: sandbox_mode(sandbox)]
-
-    # Bind the exact direct executable before the capability/approval gate.
-    # Capability gate (phase 0, 2026-06-10). This handler previously ran
-    # `command` with NO authorization — any agent that could author or
-    # influence a DOT graph got arbitrary shell, including the
-    # `sandbox="none"` real-`/bin/sh -c` path. Authorize the resolved
-    # principal before *any* execution mechanism; fail closed on
-    # denial/escalation. ExecHandler's sibling `target="action"` branch
-    # already authorizes; `target="shell"` was the orphan path.
-    # See .arbor/roadmap/1-brainstorming/safe-shell-execution.md (Phase 0).
-    case Arbor.Shell.prepare_agent_command(command, execution_opts) do
-      {:ok, _prepared} ->
-        case authorize_shell(agent_id, command, cwd, opts) do
-          :ok ->
-            run_authorized(node, command, on_error, execution_opts)
-
-          {:error, reason} ->
-            %Outcome{
-              status: :fail,
-              failure_reason: "shell authorization denied for #{agent_id}: #{inspect(reason)}",
-              context_updates: %{"shell.#{node.id}.error" => "unauthorized: #{inspect(reason)}"}
-            }
-        end
+    with {:ok, authority} <- immutable_authority(opts),
+         execution_opts = [
+           cwd: authority.workdir,
+           timeout: timeout,
+           sandbox: sandbox_mode(sandbox)
+         ],
+         {:ok, prepared} <- Arbor.Shell.prepare_agent_command(command, execution_opts),
+         :ok <- authorize_shell(authority, command, opts) do
+      run_authorized(node, command, prepared, on_error, execution_opts)
+    else
+      {:error, {:authorization_denied, principal, reason}} ->
+        %Outcome{
+          status: :fail,
+          failure_reason: "shell authorization denied for #{principal}: #{inspect(reason)}",
+          context_updates: %{"shell.#{node.id}.error" => "unauthorized: #{inspect(reason)}"}
+        }
 
       {:error, reason} ->
         %Outcome{
           status: :fail,
-          failure_reason: "shell command rejected before authorization: #{inspect(reason)}",
+          failure_reason: "shell command rejected before execution: #{inspect(reason)}",
           context_updates: %{"shell.#{node.id}.error" => "rejected: #{inspect(reason)}"}
         }
     end
@@ -88,8 +75,8 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
   # --- Authorization (phase 0 capability gate) ---
 
   # Original execution path — reached ONLY after authorize_shell/4 passes.
-  defp run_authorized(node, command, on_error, opts) do
-    case run_command(command, opts) do
+  defp run_authorized(node, command, prepared, on_error, opts) do
+    case run_command(command, prepared, opts) do
       {:ok, output, exit_code} ->
         # Shell stdout is exposed as `shell.<id>.output` only — NOT as
         # `last_response`. `last_response` is the LLM-output convention
@@ -118,14 +105,6 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
     end
   end
 
-  # Resolve the principal whose capabilities govern this shell node. Mirrors
-  # ExecHandler's action path: explicit node override, else the session's
-  # agent, else the "system" default.
-  defp resolve_agent_id(node, context) do
-    Map.get(node.attrs, "agent_id") ||
-      Context.get(context, "session.agent_id", "system")
-  end
-
   # Capability gate. Returns :ok to proceed, or {:error, reason} to fail
   # closed (the node fails; the command never runs).
   #
@@ -134,16 +113,42 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
   # :shell_authorizer. The legacy "no facade → :ok (allow)" fail-open branch is
   # gone: a missing capability system can no longer let a shell command run
   # unauthorized.
-  defp authorize_shell(agent_id, command, cwd, opts) do
+  defp authorize_shell(%RunAuthorization{} = authority, command, opts) do
     authorize_fun = shell_authorizer(opts)
-    auth_opts = if cwd, do: [cwd: cwd], else: []
+    auth_opts = [cwd: authority.workdir] ++ RunAuthorization.scope_opts(authority)
 
-    case authorize_fun.(agent_id, command, auth_opts) do
-      {:ok, :authorized} -> :ok
-      {:ok, :pending_approval, proposal_id} -> {:error, {:pending_approval, proposal_id}}
-      {:error, reason} -> {:error, reason}
+    case authorize_fun.(authority.execution_principal, command, auth_opts) do
+      {:ok, :authorized} ->
+        :ok
+
+      {:ok, :pending_approval, proposal_id} ->
+        {:error,
+         {:authorization_denied, authority.execution_principal, {:pending_approval, proposal_id}}}
+
+      {:error, reason} ->
+        {:error, {:authorization_denied, authority.execution_principal, reason}}
     end
   end
+
+  defp immutable_authority(opts) do
+    case Keyword.get(opts, :run_authorization) do
+      %RunAuthorization{} = authority ->
+        with :ok <- RunAuthorization.verify_runtime(authority),
+             :ok <- reject_system_escalation(authority.execution_principal) do
+          {:ok, authority}
+        else
+          {:error, reason} -> {:error, {:invalid_run_authorization, reason}}
+        end
+
+      _ ->
+        {:error, :missing_run_authorization}
+    end
+  end
+
+  defp reject_system_escalation(principal) when principal in ["system", "agent_system"],
+    do: {:error, :system_principal_shell_forbidden}
+
+  defp reject_system_escalation(_principal), do: :ok
 
   # Resolve the shell authorizer:
   #   1. explicit override in opts (tests inject a stub via :shell_authorizer)
@@ -157,11 +162,11 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
 
   # --- Command execution ---
 
-  defp run_command(command, opts), do: run_via_arbor_shell(command, opts)
+  defp run_command(command, prepared, opts), do: run_via_arbor_shell(command, prepared, opts)
 
-  defp run_via_arbor_shell(command, opts) do
+  defp run_via_arbor_shell(command, prepared, opts) do
     try do
-      case Arbor.Shell.execute_agent_command(command, opts) do
+      case Arbor.Shell.execute_bound_agent_command(command, prepared, opts) do
         {:ok, %{timed_out: true}} ->
           {:error, :timeout}
 

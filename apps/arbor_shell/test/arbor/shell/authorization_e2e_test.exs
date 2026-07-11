@@ -349,12 +349,13 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
       assert {:ok, execution} = Arbor.Shell.ExecutionRegistry.get(exec_id)
       assert execution.status == :running
-      assert is_pid(execution.pid)
-      owner_ref = Process.monitor(execution.pid)
+      refute Map.has_key?(execution, :pid)
+      refute Map.has_key?(execution, :port)
+      refute Map.has_key?(execution, :owner_pid)
+      refute Map.has_key?(execution, :controller_pid)
 
       assert :ok = Arbor.Shell.kill(exec_id)
-      assert_receive {:DOWN, ^owner_ref, :process, _pid, :killed}, 1_000
-      assert {:ok, :killed} = Arbor.Shell.get_status(exec_id)
+      assert eventually(fn -> Arbor.Shell.get_status(exec_id) == {:ok, :killed} end, 1_000)
       assert {:ok, %{killed: true, cancelled: true}} = Arbor.Shell.get_result(exec_id)
 
       # The original sleep deadline must not race a late completion over the
@@ -364,7 +365,7 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       assert {:ok, %{killed: true, cancelled: true}} = Arbor.Shell.get_result(exec_id)
     end
 
-    test "security regression: cancellation kills the attached sleep OS process", %{
+    test "security regression: registry projections never disclose cancellation handles", %{
       agent_id: agent_id
     } do
       grant_shell_capability(agent_id, "arbor://shell/exec/sleep")
@@ -372,15 +373,43 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       assert {:ok, exec_id} =
                Arbor.Shell.authorize_and_execute_async(agent_id, "sleep 5", sandbox: :none)
 
-      execution = await_attached_port(exec_id, 1_000)
-      assert is_pid(execution.pid)
-      assert is_port(execution.port)
-      assert {:os_pid, os_pid} = Port.info(execution.port, :os_pid)
-      assert os_process_alive?(os_pid)
+      assert {:ok, execution} = Arbor.Shell.ExecutionRegistry.get(exec_id)
+
+      projection_text = inspect(execution)
+      refute projection_text =~ "#PID<"
+      refute projection_text =~ "#Port<"
+      refute projection_text =~ "#Reference<"
+      refute Map.has_key?(execution, :owner_pid)
+      refute Map.has_key?(execution, :owner_ref)
+      refute Map.has_key?(execution, :controller_pid)
 
       assert :ok = Arbor.Shell.kill(exec_id)
-      refute eventually(fn -> os_process_alive?(os_pid) end, 1_000)
-      assert {:ok, :killed} = Arbor.Shell.get_status(exec_id)
+      assert eventually(fn -> Arbor.Shell.get_status(exec_id) == {:ok, :killed} end, 1_000)
+    end
+
+    test "security regression: foreign raw terminal completion cannot be forged", %{
+      agent_id: agent_id
+    } do
+      grant_shell_capability(agent_id, "arbor://shell/exec/sleep")
+
+      assert {:ok, exec_id} =
+               Arbor.Shell.authorize_and_execute_async(agent_id, "sleep 2", sandbox: :none)
+
+      registry = Process.whereis(Arbor.Shell.ExecutionRegistry)
+
+      forged_reply =
+        Task.async(fn ->
+          raw_registry_call(
+            registry,
+            {:transition_status, exec_id, [:pending, :running], :completed,
+             %{result: %{exit_code: 0}}}
+          )
+        end)
+        |> Task.await()
+
+      refute forged_reply == :ok
+      assert {:ok, :running} = Arbor.Shell.get_status(exec_id)
+      assert :ok = Arbor.Shell.kill(exec_id)
     end
   end
 
@@ -455,6 +484,66 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
         File.rm_rf!(root)
       end
     end
+
+    test "security regression: completed and abandoned streams become terminal in registry", %{
+      agent_id: agent_id
+    } do
+      grant_shell_capability(agent_id, "arbor://shell/exec/echo")
+      grant_shell_capability(agent_id, "arbor://shell/exec/sleep")
+
+      assert {:ok, completed_id} =
+               Arbor.Shell.authorize_and_execute_streaming(
+                 agent_id,
+                 "echo tracked",
+                 stream_to: self(),
+                 timeout: 2_000
+               )
+
+      assert_receive {:port_exit, ^completed_id, 0, _output}, 2_000
+
+      assert eventually(
+               fn -> Arbor.Shell.get_status(completed_id) == {:ok, :completed} end,
+               2_000
+             )
+
+      assert {:ok, abandoned_id} =
+               Arbor.Shell.authorize_and_execute_streaming(
+                 agent_id,
+                 "sleep 5",
+                 timeout: 100
+               )
+
+      assert eventually(
+               fn -> Arbor.Shell.get_status(abandoned_id) == {:ok, :timed_out} end,
+               2_000
+             )
+
+      {:ok, executions} = Arbor.Shell.list_executions()
+      completed = Enum.find(executions, &(&1.id == completed_id))
+      abandoned = Enum.find(executions, &(&1.id == abandoned_id))
+      assert completed.status == :completed
+      assert abandoned.status == :timed_out
+      refute Map.has_key?(completed, :port_session_pid)
+      refute Map.has_key?(abandoned, :port_session_pid)
+    end
+
+    test "security regression: unbounded streaming timeout rejects before registry work", %{
+      agent_id: agent_id
+    } do
+      grant_shell_capability(agent_id, "arbor://shell/exec/echo")
+      {:ok, before} = Arbor.Shell.list_executions()
+
+      assert {:error, :invalid_stream_timeout} =
+               Arbor.Shell.authorize_and_execute_streaming(
+                 agent_id,
+                 "echo never",
+                 stream_to: self(),
+                 timeout: :infinity
+               )
+
+      {:ok, after_attempt} = Arbor.Shell.list_executions()
+      assert Enum.map(after_attempt, & &1.id) == Enum.map(before, & &1.id)
+    end
   end
 
   # ===========================================================================
@@ -493,23 +582,14 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
     end
   end
 
-  defp await_attached_port(execution_id, timeout_ms) do
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
-    do_await_attached_port(execution_id, deadline)
-  end
+  defp raw_registry_call(registry, request) do
+    ref = make_ref()
+    send(registry, {:"$gen_call", {self(), ref}, request})
 
-  defp do_await_attached_port(execution_id, deadline) do
-    case Arbor.Shell.ExecutionRegistry.get(execution_id) do
-      {:ok, %{status: :running, port: port} = execution} when is_port(port) ->
-        execution
-
-      other ->
-        if System.monotonic_time(:millisecond) < deadline do
-          Process.sleep(10)
-          do_await_attached_port(execution_id, deadline)
-        else
-          flunk("async execution never attached a Port: #{inspect(other)}")
-        end
+    receive do
+      {^ref, reply} -> reply
+    after
+      1_000 -> :no_reply
     end
   end
 
@@ -520,26 +600,15 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
   defp do_eventually(predicate, deadline) do
     if predicate.() do
+      true
+    else
       if System.monotonic_time(:millisecond) < deadline do
         Process.sleep(10)
         do_eventually(predicate, deadline)
       else
-        true
+        false
       end
-    else
-      false
     end
-  end
-
-  defp os_process_alive?(os_pid) do
-    ["/bin/kill", "/usr/bin/kill"]
-    |> Enum.filter(&File.regular?/1)
-    |> Enum.any?(fn executable ->
-      case System.cmd(executable, ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true) do
-        {_output, 0} -> true
-        _other -> false
-      end
-    end)
   end
 
   defp ensure_security_started do

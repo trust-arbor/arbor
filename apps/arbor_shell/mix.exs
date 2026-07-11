@@ -10,6 +10,7 @@ defmodule ArborShell.MixProject do
       deps_path: "../../deps",
       lockfile: "../../mix.lock",
       elixir: "~> 1.17",
+      compilers: [:arbor_shell_launcher] ++ Mix.compilers(),
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       docs: docs(),
@@ -19,7 +20,7 @@ defmodule ArborShell.MixProject do
 
   def application do
     [
-      extra_applications: [:logger],
+      extra_applications: [:logger, :crypto],
       mod: {Arbor.Shell.Application, []}
     ]
   end
@@ -41,5 +42,63 @@ defmodule ArborShell.MixProject do
       main: "Arbor.Shell",
       extras: ["README.md"]
     ]
+  end
+end
+
+defmodule Mix.Tasks.Compile.ArborShellLauncher do
+  @moduledoc false
+  use Mix.Task.Compiler
+  @recursive true
+
+  @impl true
+  def run(_args) do
+    if Mix.Project.config()[:app] == :arbor_shell do
+      source = Path.join(__DIR__, "c_src/arbor_shell_launcher.c")
+      target = Path.join([Mix.Project.app_path(), "priv", "arbor_shell_launcher"])
+
+      if Mix.Utils.stale?([source], [target]) do
+        File.mkdir_p!(Path.dirname(target))
+        compile!(source, target)
+        {:ok, []}
+      else
+        :noop
+      end
+    else
+      :noop
+    end
+  end
+
+  @impl true
+  def clean do
+    if Mix.Project.config()[:app] == :arbor_shell do
+      File.rm(Path.join([Mix.Project.app_path(), "priv", "arbor_shell_launcher"]))
+    end
+
+    :ok
+  end
+
+  defp compile!(source, target) do
+    compiler = System.find_executable("cc") || Mix.raise("C compiler not found")
+
+    args = [
+      "-std=c11",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-D_POSIX_C_SOURCE=200809L",
+      source,
+      "-o",
+      target
+    ]
+
+    case System.cmd(compiler, args, stderr_to_stdout: true) do
+      {output, 0} ->
+        File.chmod!(target, 0o755)
+        Mix.shell().info(output)
+
+      {output, _status} ->
+        Mix.raise("failed to compile arbor_shell_launcher:\n#{output}")
+    end
   end
 end

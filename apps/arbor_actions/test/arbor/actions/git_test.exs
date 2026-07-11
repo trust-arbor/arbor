@@ -222,6 +222,29 @@ defmodule Arbor.Actions.GitTest do
       assert message =~ "Failed to get git diff"
     end
 
+    test "security regression: ref options and configured external diff cannot execute helpers",
+         %{
+           repo_path: repo_path
+         } do
+      helper = Path.join(repo_path, "external-diff-helper")
+      marker = Path.join(repo_path, "external-diff-marker")
+      File.write!(helper, "#!/bin/sh\ntouch #{marker}\n")
+      File.chmod!(helper, 0o755)
+      {_output, 0} = System.cmd("git", ["-C", repo_path, "config", "diff.external", helper])
+
+      assert {:error, injected_reason} =
+               Git.Diff.run(%{path: repo_path, ref: "--ext-diff"}, %{})
+
+      assert injected_reason =~ "invalid_git_ref"
+
+      assert {:error, configured_reason} =
+               Git.Diff.run(%{path: repo_path, ref: "HEAD"}, %{})
+
+      assert configured_reason =~ "unsafe_git_configuration"
+      Process.sleep(200)
+      refute File.exists?(marker)
+    end
+
     test "validates action metadata" do
       assert Git.Diff.name() == "git_diff"
       assert "diff" in Git.Diff.tags()
@@ -249,14 +272,22 @@ defmodule Arbor.Actions.GitTest do
       assert message =~ "commit message is required"
     end
 
-    test "sanitizes shell metacharacters in commit message", %{repo_path: repo_path} do
+    test "security regression: preserves shell metacharacters as inert commit argv", %{
+      repo_path: repo_path
+    } do
       create_file(repo_path, "new_file.txt", "content")
       System.cmd("git", ["add", "new_file.txt"], cd: repo_path)
+      marker = Path.join(repo_path, "commit-message-must-not-execute")
+      message = "  Use `touch #{marker}` and $(touch #{marker}) safely  "
 
       assert {:ok, result} =
-               Git.Commit.run(%{path: repo_path, message: "Use `code` safely"}, %{})
+               Git.Commit.run(%{path: repo_path, message: message}, %{})
 
-      assert result.message == "Use code safely"
+      assert result.message == message
+      refute File.exists?(marker)
+
+      {stored, 0} = System.cmd("git", ["-C", repo_path, "log", "-1", "--format=%B"])
+      assert stored == message <> "\n\n"
       assert String.length(result.commit_hash) >= 7
     end
 
@@ -354,6 +385,23 @@ defmodule Arbor.Actions.GitTest do
       assert result.message == message
       assert {subject, 0} = System.cmd("git", ["log", "-1", "--format=%s"], cd: repo_path)
       assert String.trim(subject) == message
+    end
+
+    test "security regression: commit action never launches repository hooks", %{
+      repo_path: repo_path
+    } do
+      marker = Path.join(repo_path, "hook-must-not-run")
+      hook = Path.join([repo_path, ".git", "hooks", "pre-commit"])
+      create_file(repo_path, "hook-safe.txt", "content")
+      System.cmd("git", ["add", "--", "hook-safe.txt"], cd: repo_path)
+      File.write!(hook, "#!/bin/sh\ntouch '#{marker}'\nexit 1\n")
+      File.chmod!(hook, 0o755)
+
+      assert {:ok, result} =
+               Git.Commit.run(%{path: repo_path, message: "Hook-free commit"}, %{})
+
+      refute File.exists?(marker)
+      assert String.length(result.commit_hash) >= 7
     end
 
     test "validates action metadata" do

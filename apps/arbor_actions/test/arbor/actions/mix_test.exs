@@ -196,6 +196,78 @@ defmodule Arbor.Actions.MixTest do
       assert result.passed
       assert result.stdout =~ ~r/1 (passed|test)/
     end
+
+    test "security regression: test_paths rejects option injection before Mix", %{
+      project_path: project_path
+    } do
+      assert {:error, reason} =
+               MixAction.Test.run(
+                 %{path: project_path, test_paths: ["--exclude", "test"]},
+                 %{}
+               )
+
+      assert reason =~ "rejected invalid test_paths"
+      assert reason =~ "--exclude"
+      refute reason =~ "0 tests"
+    end
+
+    test "security regression: test_paths rejects a symlink outside the project", %{
+      project_path: project_path
+    } do
+      external =
+        Path.join(
+          System.tmp_dir!(),
+          "arbor_external_mix_test_#{System.unique_integer([:positive])}.exs"
+        )
+
+      link = Path.join(project_path, "test/external_test.exs")
+      File.write!(external, "raise \"external test executed\"\n")
+      File.ln_s!(external, link)
+      on_exit(fn -> File.rm(external) end)
+
+      assert {:error, reason} =
+               MixAction.Test.run(
+                 %{path: project_path, test_paths: ["test/external_test.exs"]},
+                 %{}
+               )
+
+      assert reason =~ "rejected invalid test_paths"
+      assert reason =~ "external_test.exs"
+    end
+
+    test "security regression: timeout kills a delayed Mix child before returning", %{
+      project_path: project_path
+    } do
+      launched = Path.join(project_path, "mix-child-launched")
+      delayed = Path.join(project_path, "mix-child-delayed")
+      test_path = "test/delayed_child_test.exs"
+
+      File.write!(Path.join(project_path, test_path), """
+      defmodule DelayedChildTest do
+        use ExUnit.Case
+
+        test "contained child" do
+          Port.open(
+            {:spawn_executable, ~c"/bin/sh"},
+            [:binary, args: [~c"-c", ~c"touch #{launched}; sleep 1.5; touch #{delayed}"]]
+          )
+
+          Process.sleep(5_000)
+        end
+      end
+      """)
+
+      assert {:ok, result} =
+               MixAction.Test.run(
+                 %{path: project_path, test_paths: [test_path], timeout: 1_000},
+                 %{}
+               )
+
+      assert result.exit_code == 137
+      assert File.exists?(launched)
+      Process.sleep(1_700)
+      refute File.exists?(delayed), "Mix child survived timeout return"
+    end
   end
 
   describe "Mix.Format" do

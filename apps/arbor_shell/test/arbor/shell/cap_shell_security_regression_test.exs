@@ -22,6 +22,7 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
   alias Arbor.Contracts.Security.Capability
   alias Arbor.Security.CapabilityStore
   alias Arbor.Shell.CapShell
+  alias Arbor.Shell.ExecutablePolicy.Executable
 
   @unavailable {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
   # Outer wait after finite delayed commands (sleep 1) — bounded, not open-ended.
@@ -273,6 +274,79 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
         Process.sleep(700)
         refute File.exists?(marker), "a fake executable named echo was launched"
         assert result == {:error, {:agent_executable_path_not_allowed, fake_echo}}
+      after
+        File.rm_rf!(root)
+      end
+    end
+
+    test "security regression: mutable PATH cannot replace an authorized basename",
+         %{agent_id: agent_id} do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "capshell_path_substitution_#{:erlang.unique_integer([:positive])}"
+        )
+
+      fake_echo = Path.join(root, "echo")
+      marker = Path.join(root, "marker")
+      original_path = System.get_env("PATH", "")
+      File.mkdir_p!(root)
+      File.write!(fake_echo, "#!/bin/sh\ntouch #{marker}\necho forged\n")
+      File.chmod!(fake_echo, 0o755)
+
+      try do
+        System.put_env("PATH", root <> ":" <> original_path)
+
+        assert {:ok, result} =
+                 Arbor.Shell.authorize_and_execute(agent_id, "echo pinned", sandbox: :none)
+
+        assert String.trim(result.stdout) == "pinned"
+        refute File.exists?(marker)
+      after
+        System.put_env("PATH", original_path)
+        File.rm_rf!(root)
+      end
+    end
+
+    test "security regression: executable identity replacement fails closed before exec" do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "capshell_identity_race_#{:erlang.unique_integer([:positive])}"
+        )
+
+      executable_path = Path.join(root, "pinned-tool")
+      marker = Path.join(root, "marker")
+      File.mkdir_p!(root)
+      File.write!(executable_path, "#!/bin/sh\necho safe\n")
+      File.chmod!(executable_path, 0o755)
+      {:ok, stat} = File.stat(executable_path, time: :posix)
+
+      executable = %Executable{
+        name: "pinned-tool",
+        path: executable_path,
+        device: stat.major_device,
+        inode: stat.inode,
+        size: stat.size,
+        mtime: stat.mtime,
+        ctime: stat.ctime,
+        mode: stat.mode,
+        sha256:
+          executable_path
+          |> File.read!()
+          |> then(&:crypto.hash(:sha256, &1))
+          |> Base.encode16(case: :lower)
+      }
+
+      File.write!(executable_path, "#!/bin/sh\ntouch #{marker}\n")
+      File.chmod!(executable_path, 0o755)
+
+      try do
+        assert {:error, {:launcher_error, reason}} =
+                 Arbor.Shell.Executor.run_bound(executable, [], timeout: 1_000)
+
+        assert reason =~ "executable identity changed"
+        refute File.exists?(marker)
       after
         File.rm_rf!(root)
       end

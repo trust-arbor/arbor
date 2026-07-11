@@ -27,6 +27,8 @@ defmodule Arbor.Shell.Sandbox do
 
   require Logger
 
+  alias Arbor.Shell.ExecutablePolicy
+
   # Every POSIX-style list/control operator contains at least one of these
   # characters. Matching the single-character roots is intentional: it catches
   # standalone background `&` as well as `&&`, `;&`, `;;&`, `|&`, grouping, and
@@ -146,6 +148,7 @@ defmodule Arbor.Shell.Sandbox do
           {:ok,
            %{
              required(:executable) => String.t(),
+             required(:executable_identity) => ExecutablePolicy.Executable.t(),
              required(:args) => [String.t()],
              required(:command_name) => String.t()
            }}
@@ -162,7 +165,13 @@ defmodule Arbor.Shell.Sandbox do
          :ok <- validate_gate_command(opts, command_name),
          :ok <- validate_agent_environment(opts),
          {:ok, executable} <- resolve_agent_executable(raw_command, command_name) do
-      {:ok, %{executable: executable, args: args, command_name: command_name}}
+      {:ok,
+       %{
+         executable: executable.path,
+         executable_identity: executable,
+         args: args,
+         command_name: command_name
+       }}
     else
       false -> {:error, {:invalid_agent_command, :invalid_options}}
       {:ok, []} -> {:error, {:invalid_agent_command, :empty}}
@@ -427,39 +436,18 @@ defmodule Arbor.Shell.Sandbox do
   @doc """
   Resolve a command name to its full executable path.
 
-  Uses `System.find_executable/1` to locate the binary.
+  Uses the startup-frozen executable policy to locate and identify the binary.
   Returns `{:ok, path}` or `{:error, :executable_not_found}`.
   """
   @spec resolve_executable(String.t()) :: {:ok, String.t()} | {:error, :executable_not_found}
   def resolve_executable(cmd) when is_binary(cmd) do
-    case System.find_executable(cmd) do
-      nil ->
-        # Absolute paths (including those with spaces) are not always found by
-        # find_executable; accept them when the file exists and is executable.
-        if absolute_executable?(cmd) do
-          {:ok, cmd}
-        else
-          {:error, :executable_not_found}
-        end
-
-      path ->
-        {:ok, path}
+    case ExecutablePolicy.resolve(cmd) do
+      {:ok, executable} -> {:ok, executable.path}
+      {:error, _reason} -> {:error, :executable_not_found}
     end
   end
 
   def resolve_executable(_cmd), do: {:error, :executable_not_found}
-
-  defp absolute_executable?(cmd) do
-    absolute? = Path.type(cmd) == :absolute or String.starts_with?(cmd, "/")
-
-    with true <- absolute?,
-         true <- File.regular?(cmd),
-         {:ok, %File.Stat{type: :regular, mode: mode}} <- File.stat(cmd) do
-      :erlang.band(mode, 0o111) != 0
-    else
-      _ -> false
-    end
-  end
 
   @doc """
   Get the configuration for a sandbox level.
@@ -732,38 +720,9 @@ defmodule Arbor.Shell.Sandbox do
   end
 
   defp resolve_agent_executable(raw_command, command_name) do
-    case System.find_executable(command_name) do
-      nil ->
-        {:error, {:executable_not_found, command_name}}
-
-      executable ->
-        resolved = Path.expand(executable)
-
-        cond do
-          raw_command == command_name ->
-            {:ok, resolved}
-
-          Path.type(raw_command) == :absolute and
-              (Path.expand(raw_command) == resolved or
-                 same_executable_file?(raw_command, resolved)) ->
-            {:ok, resolved}
-
-          true ->
-            {:error, {:agent_executable_path_not_allowed, raw_command}}
-        end
-    end
-  end
-
-  defp same_executable_file?(left, right) do
-    with {:ok, left_stat} <- File.stat(left),
-         {:ok, right_stat} <- File.stat(right) do
-      left_stat.type == :regular and
-        right_stat.type == :regular and
-        left_stat.inode == right_stat.inode and
-        left_stat.major_device == right_stat.major_device and
-        left_stat.minor_device == right_stat.minor_device
-    else
-      _ -> false
+    case ExecutablePolicy.resolve_agent(raw_command, command_name) do
+      {:ok, executable} -> {:ok, executable}
+      {:error, reason} -> {:error, reason}
     end
   end
 

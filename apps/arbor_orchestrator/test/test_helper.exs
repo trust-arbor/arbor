@@ -3,6 +3,14 @@
 # explicitly with `--include integration_lm_studio` when LM Studio is up.
 ExUnit.start(exclude: [:llm, :llm_local, :integration_lm_studio])
 
+if Process.whereis(Arbor.Shell.ExecutablePolicy) == nil and
+     Process.whereis(Arbor.Shell.Supervisor) != nil do
+  Supervisor.start_child(
+    Arbor.Shell.Supervisor,
+    {Arbor.Shell.ExecutablePolicy, startup_path: System.get_env("PATH", "")}
+  )
+end
+
 # Start CapabilityStore and insert a wildcard capability for "agent_system".
 # This is the default principal used by CapabilityCheck middleware when no
 # agent_id is set in token assigns. Without this grant, mandatory middleware
@@ -92,6 +100,28 @@ defmodule Arbor.Orchestrator.TestCapabilities do
     else
       :ok
     end
+  end
+
+  @doc false
+  def grant_shell_access(agent_id, command_name)
+      when is_binary(agent_id) and is_binary(command_name) do
+    grant_capability(agent_id, "arbor://shell/exec/#{command_name}")
+  end
+
+  @doc false
+  def grant_capability(agent_id, resource_uri)
+      when is_binary(agent_id) and is_binary(resource_uri) do
+    {:ok, cap} =
+      Arbor.Contracts.Security.Capability.new(
+        resource_uri: resource_uri,
+        principal_id: agent_id,
+        delegation_depth: 0,
+        constraints: %{},
+        metadata: %{test: true}
+      )
+
+    {:ok, :stored} = Arbor.Security.CapabilityStore.put(cap)
+    :ok
   end
 
   @doc """

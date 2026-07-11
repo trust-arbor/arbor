@@ -80,6 +80,11 @@ defmodule Arbor.Shell.PortSessionTest do
       ref = Process.monitor(pid)
       assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 5_000
     end
+
+    test "security regression: rejects an unbounded absolute deadline" do
+      assert {:error, :invalid_stream_timeout} =
+               PortSession.start_supervised("sleep 60", stream_to: self(), timeout: :infinity)
+    end
   end
 
   describe "streaming output ceiling" do
@@ -133,7 +138,7 @@ defmodule Arbor.Shell.PortSessionTest do
 
   describe "stop and kill" do
     test "stop gracefully terminates the process" do
-      {:ok, pid} = PortSession.start_link("sleep 60", stream_to: self(), timeout: :infinity)
+      {:ok, pid} = PortSession.start_link("sleep 60", stream_to: self(), timeout: 5_000)
 
       ref = Process.monitor(pid)
       PortSession.stop(pid)
@@ -142,7 +147,7 @@ defmodule Arbor.Shell.PortSessionTest do
     end
 
     test "kill terminates the process" do
-      {:ok, pid} = PortSession.start_link("sleep 60", stream_to: self(), timeout: :infinity)
+      {:ok, pid} = PortSession.start_link("sleep 60", stream_to: self(), timeout: 5_000)
 
       ref = Process.monitor(pid)
       PortSession.kill(pid)
@@ -167,7 +172,7 @@ defmodule Arbor.Shell.PortSessionTest do
     end
 
     test "returns status while running" do
-      {:ok, pid} = PortSession.start_link("sleep 60", timeout: :infinity)
+      {:ok, pid} = PortSession.start_link("sleep 60", timeout: 5_000)
 
       {:ok, result} = PortSession.get_result(pid)
       assert result.status == :running

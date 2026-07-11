@@ -2,12 +2,12 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
-  alias Arbor.Orchestrator.Engine.{Context, Outcome}
+  alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.ShellHandler
 
-  @graph %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
+  @graph %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}, compiled: true}
 
   defp make_node(id, attrs) do
     # sandbox="none" remains a compatibility input but cannot widen the closed
@@ -21,7 +21,17 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
   # inject an allowing authorizer so the gate is a no-op here. The gate
   # itself is covered by the "security regression" describe block below.
   defp run(node, context, opts \\ []) do
-    opts = Keyword.put_new(opts, :shell_authorizer, &allow/3)
+    {authority_workdir, opts} = Keyword.pop(opts, :authority_workdir, File.cwd!())
+    {authority_principal, opts} = Keyword.pop(opts, :authority_principal, "agent_shell_handler")
+
+    {:ok, authority} =
+      RunAuthorization.new(@graph, agent_id: authority_principal, workdir: authority_workdir)
+
+    opts =
+      opts
+      |> Keyword.put_new(:shell_authorizer, &allow/3)
+      |> Keyword.put(:run_authorization, authority)
+
     ShellHandler.execute(node, context, @graph, opts)
   end
 
@@ -88,23 +98,22 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       assert String.contains?(outcome.failure_reason, "requires 'command'")
     end
 
-    test "respects cwd from node attribute" do
+    test "graph cwd cannot override immutable run workdir" do
       node = make_node("cwd_test", %{"command" => "pwd", "cwd" => "/tmp"})
       context = Context.new()
 
       outcome = run(node, context)
       assert outcome.status == :success
-      # /tmp may resolve to /private/tmp on macOS
-      assert String.contains?(outcome.context_updates["shell.cwd_test.output"], "tmp")
+      assert String.trim(outcome.context_updates["shell.cwd_test.output"]) == File.cwd!()
     end
 
-    test "respects cwd from context workdir" do
+    test "context workdir cannot override immutable run workdir" do
       node = make_node("cwd_ctx", %{"command" => "pwd"})
       context = Context.new(%{"workdir" => "/tmp"})
 
       outcome = run(node, context)
       assert outcome.status == :success
-      assert String.contains?(outcome.context_updates["shell.cwd_ctx.output"], "tmp")
+      assert String.trim(outcome.context_updates["shell.cwd_ctx.output"]) == File.cwd!()
     end
 
     test "timeout produces error" do
@@ -188,17 +197,20 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
     test "denies an unauthorized principal and does not execute the command" do
       sentinel = sentinel_path("denied")
       File.rm(sentinel)
-      # Principal resolved from the session context.
       context = Context.new(%{"session.agent_id" => "agent_untrusted"})
       node = make_node("denied", %{"command" => "touch #{sentinel}"})
 
-      outcome = ShellHandler.execute(node, context, @graph, shell_authorizer: &deny/3)
+      outcome =
+        run(node, context,
+          shell_authorizer: &deny/3,
+          authority_principal: "agent_immutable_authority"
+        )
 
       assert outcome.status == :fail
       assert outcome.failure_reason =~ "authorization denied"
 
-      assert outcome.failure_reason =~ "agent_untrusted",
-             "principal must be resolved from session.agent_id"
+      assert outcome.failure_reason =~ "agent_immutable_authority"
+      refute outcome.failure_reason =~ "agent_untrusted"
 
       refute File.exists?(sentinel),
              "command executed despite denial — the capability gate did not " <>
@@ -213,7 +225,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       # make_node already sets sandbox="none".
       node = make_node("denied_none", %{"command" => "touch #{sentinel} && echo done"})
 
-      outcome = ShellHandler.execute(node, Context.new(), @graph, shell_authorizer: &deny/3)
+      outcome = run(node, Context.new(), shell_authorizer: &deny/3)
 
       assert outcome.status == :fail
 
@@ -227,7 +239,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       pending = fn _agent_id, _command, _opts -> {:ok, :pending_approval, "prop_123"} end
       node = make_node("pending", %{"command" => "touch #{sentinel}"})
 
-      outcome = ShellHandler.execute(node, Context.new(), @graph, shell_authorizer: pending)
+      outcome = run(node, Context.new(), shell_authorizer: pending)
 
       assert outcome.status == :fail
 
@@ -235,10 +247,25 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
              "a command awaiting approval must not run until approved"
     end
 
+    test "security regression: immutable system principal cannot escalate into shell" do
+      sentinel = sentinel_path("system_principal")
+      node = make_node("system_principal", %{"command" => "touch #{sentinel}"})
+
+      outcome =
+        run(node, Context.new(),
+          shell_authorizer: &allow/3,
+          authority_principal: "system"
+        )
+
+      assert outcome.status == :fail
+      assert outcome.failure_reason =~ "system_principal_shell_forbidden"
+      refute File.exists?(sentinel)
+    end
+
     test "an authorized principal runs the command" do
       node = make_node("allowed", %{"command" => "echo authorized"})
 
-      outcome = ShellHandler.execute(node, Context.new(), @graph, shell_authorizer: &allow/3)
+      outcome = run(node, Context.new(), shell_authorizer: &allow/3)
 
       assert outcome.status == :success
       assert outcome.context_updates["shell.allowed.output"] =~ "authorized"

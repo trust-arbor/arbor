@@ -297,13 +297,24 @@ defmodule Arbor.ShellTest do
   describe "stop_session/1" do
     test "stops a running streaming session" do
       {:ok, session_id} =
-        Shell.execute_streaming("sleep 60", stream_to: self(), sandbox: :none, timeout: :infinity)
+        Shell.execute_streaming("sleep 60", stream_to: self(), sandbox: :none, timeout: 5_000)
 
       assert :ok = Shell.stop_session(session_id)
     end
 
     test "returns not_found for unknown session" do
       assert {:error, :not_found} = Shell.stop_session("port_nonexistent")
+    end
+
+    test "security regression: a foreign caller cannot cancel a tracked stream" do
+      {:ok, session_id} =
+        Shell.execute_streaming("sleep 60", stream_to: self(), sandbox: :none, timeout: 5_000)
+
+      foreign = Task.async(fn -> Shell.stop_session(session_id) end)
+      assert {:error, :not_owner} = Task.await(foreign)
+      assert {:ok, :running} = Shell.get_status(session_id)
+      assert :ok = Shell.stop_session(session_id)
+      assert {:ok, :killed} = Shell.get_status(session_id)
     end
   end
 

@@ -31,6 +31,7 @@ defmodule Arbor.Actions.Mix do
   """
 
   alias Arbor.Shell
+  alias Arbor.Common.SafePath
 
   @compile_feedback_text_limit 2_000
   @excerpt_omission_marker "\n...[omitted]...\n"
@@ -153,16 +154,14 @@ defmodule Arbor.Actions.Mix do
   end
 
   defp main_checkout_root(path) do
-    case System.cmd("git", ["-C", path, "rev-parse", "--show-toplevel"], stderr_to_stdout: true) do
-      {output, 0} ->
+    case Arbor.Actions.Git.execute(path, ["rev-parse", "--show-toplevel"]) do
+      {:ok, %{exit_code: 0, stdout: output}} ->
         top = String.trim(output)
 
         # For linked worktrees, prefer the common main worktree (the one that
         # owns the shared .git directory and typically has deps/_build).
-        case System.cmd("git", ["-C", path, "worktree", "list", "--porcelain"],
-               stderr_to_stdout: true
-             ) do
-          {list, 0} ->
+        case Arbor.Actions.Git.execute(path, ["worktree", "list", "--porcelain"]) do
+          {:ok, %{exit_code: 0, stdout: list}} ->
             case first_worktree_path(list) do
               main when is_binary(main) and main != "" -> {:ok, main}
               _ -> {:ok, top}
@@ -187,17 +186,10 @@ defmodule Arbor.Actions.Mix do
   end
 
   defp mix_executable(path) do
-    wrapper = path |> Path.join("bin/mix") |> Path.expand()
-
-    # Prefer the absolute wrapper path. Shell.Sandbox.resolve_executable/1 uses
-    # System.find_executable/1, which does not honor cwd-relative `./bin/mix`,
-    # so validation in temporary worktrees failed with
-    # `{:executable_not_found, "./bin/mix"}` even when the file existed.
-    if File.exists?(wrapper) do
-      wrapper
-    else
-      "mix"
-    end
+    _ = path
+    # Project-local wrappers are candidate-controlled code. The Shell resolver
+    # binds `mix` to the operator's startup-pinned executable identity instead.
+    "mix"
   end
 
   defmodule Compile do
@@ -340,25 +332,32 @@ defmodule Arbor.Actions.Mix do
     def run(%{path: path} = params, _context) do
       Actions.emit_started(__MODULE__, params)
 
-      args = build_args(params)
       opts = if params[:timeout], do: [timeout: params[:timeout]], else: []
 
-      case MixAction.run_mix(path, args, opts) do
-        {:ok, result} ->
-          feedback = MixAction.compile_feedback(result)
+      with {:ok, args} <- build_args(path, params),
+           {:ok, result} <- MixAction.run_mix(path, args, opts) do
+        feedback = MixAction.compile_feedback(result)
 
-          output = %{
-            path: path,
-            exit_code: result.exit_code,
-            passed: result.exit_code == 0,
-            stdout: result.stdout,
-            stderr: result.stderr,
-            feedback: feedback,
-            feedback_json: Jason.encode!(feedback)
-          }
+        output = %{
+          path: path,
+          exit_code: result.exit_code,
+          passed: result.exit_code == 0,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          feedback: feedback,
+          feedback_json: Jason.encode!(feedback)
+        }
 
-          Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
-          {:ok, output}
+        Actions.emit_completed(__MODULE__, %{path: path, passed: output.passed})
+        {:ok, output}
+      else
+        {:error, {:invalid_test_path, _path} = reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, "mix test rejected invalid test_paths: #{inspect(reason)}"}
+
+        {:error, {:invalid_test_tag, _tag} = reason} ->
+          Actions.emit_failed(__MODULE__, reason)
+          {:error, "mix test rejected invalid tag: #{inspect(reason)}"}
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
@@ -366,12 +365,79 @@ defmodule Arbor.Actions.Mix do
       end
     end
 
-    defp build_args(params) do
-      args = ["test"]
-      args = if params[:tags], do: args ++ ["--only", params[:tags]], else: args
-      args = if params[:seed], do: args ++ ["--seed", to_string(params[:seed])], else: args
-      args = if params[:test_paths], do: args ++ params[:test_paths], else: args
-      args
+    defp build_args(path, params) do
+      with :ok <- validate_tag(params[:tags]),
+           {:ok, test_paths} <- validate_test_paths(path, params[:test_paths]) do
+        args = ["test"]
+        args = if params[:tags], do: args ++ ["--only", params[:tags]], else: args
+        args = if params[:seed], do: args ++ ["--seed", to_string(params[:seed])], else: args
+
+        if test_paths == [] do
+          {:ok, args}
+        else
+          {:ok, args ++ ["--" | test_paths]}
+        end
+      end
+    end
+
+    defp validate_tag(nil), do: :ok
+
+    defp validate_tag(tag) when is_binary(tag) do
+      if Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_.-]*\z/, tag),
+        do: :ok,
+        else: {:error, {:invalid_test_tag, tag}}
+    end
+
+    defp validate_tag(tag), do: {:error, {:invalid_test_tag, tag}}
+
+    defp validate_test_paths(_root, nil), do: {:ok, []}
+    defp validate_test_paths(_root, []), do: {:ok, []}
+
+    defp validate_test_paths(root, paths) when is_list(paths) do
+      Enum.reduce_while(paths, {:ok, []}, fn test_path, {:ok, accepted} ->
+        case validate_test_path(root, test_path) do
+          :ok -> {:cont, {:ok, [test_path | accepted]}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+      |> case do
+        {:ok, accepted} -> {:ok, Enum.reverse(accepted)}
+        error -> error
+      end
+    end
+
+    defp validate_test_paths(_root, paths), do: {:error, {:invalid_test_path, paths}}
+
+    defp validate_test_path(root, test_path) when is_binary(test_path) do
+      path_without_line = Regex.replace(~r/:\d+\z/, test_path, "")
+      expanded_root = Path.expand(root)
+      expanded = Path.expand(path_without_line, expanded_root)
+
+      valid_shape? =
+        Regex.match?(
+          ~r/\A(?:apps\/[A-Za-z0-9_.-]+\/)?test(?:\/[A-Za-z0-9_.()&+@ -]+)*(?::\d+)?\z/,
+          test_path
+        )
+
+      contained? = canonical_test_path?(expanded_root, expanded)
+
+      if valid_shape? and contained? and File.exists?(expanded) do
+        :ok
+      else
+        {:error, {:invalid_test_path, test_path}}
+      end
+    end
+
+    defp validate_test_path(_root, test_path), do: {:error, {:invalid_test_path, test_path}}
+
+    defp canonical_test_path?(root, path) do
+      with {:ok, canonical_root} <- SafePath.resolve_real(root),
+           {:ok, canonical_path} <- SafePath.resolve_real(path) do
+        canonical_path == canonical_root or
+          String.starts_with?(canonical_path, canonical_root <> "/")
+      else
+        _ -> false
+      end
     end
   end
 

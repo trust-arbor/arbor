@@ -329,36 +329,140 @@ defmodule Arbor.Shell.ExecutorTest do
     end
   end
 
-  describe "kill_port/1" do
-    test "closes an open port" do
-      # Open a long-running port directly
-      port = Port.open({:spawn, "sleep 30"}, [:binary, :exit_status])
-      assert is_port(port)
-      assert Port.info(port) != nil
+  describe "security regression: process-group containment" do
+    @moduletag fast: false
 
-      assert :ok = Executor.kill_port(port)
+    test "timeout kills a delayed plain-shell descendant before returning" do
+      marker =
+        Path.join(System.tmp_dir!(), "shell_timeout_child_#{System.unique_integer([:positive])}")
+
+      launched = marker <> ".launched"
+      File.rm(marker)
+      File.rm(launched)
+
+      on_exit(fn ->
+        File.rm(marker)
+        File.rm(launched)
+      end)
+
+      script = "touch #{launched}; (sleep 0.5; touch #{marker}) & sleep 5"
+
+      assert {:ok, %{timed_out: true, killed: true}} =
+               Executor.run_direct("sh", ["-c", script], timeout: 150)
+
+      assert File.exists?(launched)
+      Process.sleep(700)
+      refute File.exists?(marker), "plain descendant survived timeout return"
     end
 
-    test "security regression: killing an already-closed port is idempotent" do
-      port = Port.open({:spawn, "echo done"}, [:binary, :exit_status])
-      # Wait for the command to finish and port to close
-      Process.sleep(100)
-      # Flush port messages
-      receive do
-        {^port, {:data, _}} -> :ok
-      after
-        0 -> :ok
-      end
+    test "output limit kills a configured Git helper tree before returning" do
+      root = Path.join(System.tmp_dir!(), "git_helper_tree_#{System.unique_integer([:positive])}")
+      marker = Path.join(root, "delayed-marker")
+      launched = Path.join(root, "helper-launched")
+      helper = Path.join(root, "diff-helper")
+      File.mkdir_p!(root)
+      on_exit(fn -> File.rm_rf!(root) end)
 
-      receive do
-        {^port, {:exit_status, _}} -> :ok
-      after
-        0 -> :ok
-      end
+      System.cmd("git", ["init", "-q"], cd: root)
+      System.cmd("git", ["config", "user.email", "test@example.com"], cd: root)
+      System.cmd("git", ["config", "user.name", "Test"], cd: root)
+      File.write!(Path.join(root, "tracked"), "one\n")
+      System.cmd("git", ["add", "--", "tracked"], cd: root)
+      System.cmd("git", ["commit", "-qm", "initial"], cd: root)
+      File.write!(Path.join(root, "tracked"), "two\n")
 
-      # Port should be closed now; cancellation still reports the requested
-      # terminal state instead of racing to {:error, :badarg}.
-      assert :ok = Executor.kill_port(port)
+      File.write!(helper, """
+      #!/bin/sh
+      touch #{launched}
+      (sleep 0.6; touch #{marker}) &
+      i=0
+      while [ "$i" -lt 5000 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n'; i=$((i+1)); done
+      """)
+
+      File.chmod!(helper, 0o755)
+      System.cmd("git", ["config", "diff.external", helper], cd: root)
+
+      assert {:ok, %{output_limit_exceeded: true, killed: true}} =
+               Executor.run_direct("git", ["diff", "--ext-diff"],
+                 cwd: root,
+                 max_output_bytes: 256,
+                 timeout: 5_000
+               )
+
+      assert File.exists?(launched)
+      Process.sleep(800)
+      refute File.exists?(marker), "Git helper descendant survived output-limit return"
+    end
+
+    test "timeout kills a delayed Git hook tree before returning" do
+      root = Path.join(System.tmp_dir!(), "git_hook_tree_#{System.unique_integer([:positive])}")
+      marker = Path.join(root, "hook-delayed-marker")
+      launched = Path.join(root, "hook-launched")
+      hook = Path.join([root, ".git", "hooks", "pre-commit"])
+      File.mkdir_p!(root)
+      on_exit(fn -> File.rm_rf!(root) end)
+
+      System.cmd("git", ["init", "-q"], cd: root)
+      System.cmd("git", ["config", "user.email", "test@example.com"], cd: root)
+      System.cmd("git", ["config", "user.name", "Test"], cd: root)
+      File.write!(Path.join(root, "tracked"), "content")
+      System.cmd("git", ["add", "--", "tracked"], cd: root)
+
+      File.write!(hook, "#!/bin/sh\ntouch '#{launched}'\nsleep 1.5\ntouch '#{marker}'\n")
+      File.chmod!(hook, 0o755)
+
+      assert {:ok, result} =
+               Executor.run_direct("git", ["commit", "-m", "contained hook"],
+                 cwd: root,
+                 timeout: 500
+               )
+
+      assert result.timed_out
+      assert File.exists?(launched)
+      Process.sleep(1_700)
+      refute File.exists?(marker), "Git hook descendant survived timeout return"
+    end
+
+    test "async cancellation kills a delayed argv descendant before returning" do
+      marker =
+        Path.join(System.tmp_dir!(), "shell_cancel_child_#{System.unique_integer([:positive])}")
+
+      launched = marker <> ".launched"
+      File.rm(marker)
+      File.rm(launched)
+
+      on_exit(fn ->
+        File.rm(marker)
+        File.rm(launched)
+      end)
+
+      command = "sh -c 'touch #{launched}; (sleep 0.6; touch #{marker}) & sleep 5'"
+      assert {:ok, execution_id} = Shell.execute_async(command, sandbox: :none, timeout: 5_000)
+      assert eventually?(fn -> File.exists?(launched) end, 1_000)
+      assert :ok = Shell.kill(execution_id)
+      assert {:ok, %{cancelled: true, killed: true}} = Shell.get_result(execution_id)
+
+      Process.sleep(800)
+      refute File.exists?(marker), "argv descendant survived cancellation return"
+    end
+  end
+
+  defp eventually?(fun, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_eventually(fun, deadline)
+  end
+
+  defp do_eventually(fun, deadline) do
+    cond do
+      fun.() ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        false
+
+      true ->
+        Process.sleep(20)
+        do_eventually(fun, deadline)
     end
   end
 end

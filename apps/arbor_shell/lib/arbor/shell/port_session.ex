@@ -1,80 +1,52 @@
 defmodule Arbor.Shell.PortSession do
   @moduledoc """
-  A supervised GenServer managing a long-running Port process with streaming output.
+  Supervised streaming execution backed by `Arbor.Shell.ProcessGroup`.
 
-  PortSession provides BEAM-supervised execution of shell commands with:
-  - Real-time output streaming to subscribers
-  - Direct OS-process hard kill plus Port cleanup
-  - Timeout handling with automatic termination
-  - Signal emission for observability
-
-  ## Messages sent to subscribers
-
-  - `{:port_data, session_id, chunk}` — output chunk received
-  - `{:port_exit, session_id, exit_code, full_output}` — process exited
-  - `{:port_output_limit, session_id, metadata}` — byte ceiling killed the process
-
-  ## Usage
-
-      {:ok, pid} = PortSession.start_link("echo hello", stream_to: self())
-
-      # Receive streaming output
-      receive do
-        {:port_data, _id, chunk} -> IO.write(chunk)
-        {:port_exit, _id, 0, output} -> IO.puts("Done: \#{output}")
-      end
+  Every session has a finite absolute monotonic deadline. The native owner kills
+  the target process group before a timeout, output limit, cancellation, owner
+  loss, or direct-child exit is reported to subscribers.
   """
 
   use GenServer
 
   alias Arbor.Identifiers
-  alias Arbor.Shell.{Executor, Sandbox}
+  alias Arbor.Shell.{ExecutablePolicy, ExecutionRegistry, Executor, ProcessGroup, Sandbox}
   alias Arbor.Signals
 
-  require Logger
-
-  @type status :: :running | :completed | :timed_out | :killed
+  @default_timeout 30_000
+  @max_stream_timeout 600_000
+  @retention_ms 1_000
 
   defstruct [
     :id,
-    :port,
+    :handle,
     :command,
+    :executable,
+    :args,
     :start_time,
+    :deadline,
     :timeout,
-    :timer_ref,
-    :exit_code,
     :max_output_bytes,
-    status: :running,
+    :opts,
+    :start_ref,
+    :tracked,
+    status: :starting,
     subscribers: MapSet.new(),
     output_acc: [],
     output_bytes: 0,
+    exit_code: nil,
     output_truncated: false,
-    output_limit_exceeded: false
+    output_limit_exceeded: false,
+    timed_out: false,
+    killed: false,
+    cancelled: false
   ]
 
-  # ===========================================================================
-  # Client API
-  # ===========================================================================
-
-  @doc """
-  Start a PortSession under the PortSessionSupervisor.
-
-  ## Options
-
-  - `:stream_to` - PID or list of PIDs to receive output messages
-  - `:timeout` - Timeout in ms (default: 30_000, use `:infinity` for no timeout)
-  - `:max_output_bytes` - Hard retained and delivered byte ceiling
-  - `:cwd` - Working directory
-  - `:env` - Environment variables map
-  """
   @spec start_link(String.t(), keyword()) :: GenServer.on_start()
   def start_link(command, opts \\ []) do
     GenServer.start_link(__MODULE__, {command, opts})
   end
 
-  @doc """
-  Start a PortSession under the DynamicSupervisor.
-  """
   @spec start_supervised(String.t(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start_supervised(command, opts \\ []) do
     DynamicSupervisor.start_child(
@@ -99,26 +71,21 @@ defmodule Arbor.Shell.PortSession do
     )
   end
 
-  @doc """
-  Add an output subscriber. The subscriber will receive
-  `{:port_data, id, chunk}` and `{:port_exit, id, exit_code, output}` messages.
-  """
+  @doc false
+  @spec begin(GenServer.server(), reference(), timeout()) :: :ok | {:error, term()}
+  def begin(session, start_ref, timeout) do
+    GenServer.call(session, {:begin, start_ref}, timeout)
+  catch
+    :exit, {:timeout, _} -> {:error, :stream_setup_timeout}
+    :exit, reason -> {:error, reason}
+  end
+
   @spec subscribe(GenServer.server(), pid()) :: :ok
-  def subscribe(session, pid) do
-    GenServer.call(session, {:subscribe, pid})
-  end
+  def subscribe(session, pid), do: GenServer.call(session, {:subscribe, pid})
 
-  @doc """
-  Send input data to the port's stdin.
-  """
-  @spec send_input(GenServer.server(), iodata()) :: :ok | {:error, :not_running}
-  def send_input(session, data) do
-    GenServer.call(session, {:send_input, data})
-  end
+  @spec send_input(GenServer.server(), iodata()) :: :ok | {:error, :not_running | term()}
+  def send_input(session, data), do: GenServer.call(session, {:send_input, data})
 
-  @doc """
-  Gracefully stop the port (sends SIGTERM via Port.close).
-  """
   @spec stop(GenServer.server(), timeout()) :: :ok
   def stop(session, timeout \\ 5_000) do
     GenServer.call(session, :stop, timeout)
@@ -126,34 +93,21 @@ defmodule Arbor.Shell.PortSession do
     :exit, _ -> :ok
   end
 
-  @doc """
-  Hard kill — same as stop but with immediate intent.
-  """
   @spec kill(GenServer.server()) :: :ok
   def kill(session) do
-    GenServer.cast(session, :kill)
+    send(session, {:cancel_shell_execution, nil})
+    :ok
   end
 
-  @doc """
-  Get the accumulated output and current state.
-  """
   @spec get_result(GenServer.server()) :: {:ok, map()}
-  def get_result(session) do
-    GenServer.call(session, :get_result)
-  end
+  def get_result(session), do: GenServer.call(session, :get_result)
 
-  @doc """
-  Get the session ID.
-  """
   @spec get_id(GenServer.server()) :: String.t()
-  def get_id(session) do
-    GenServer.call(session, :get_id)
-  end
+  def get_id(session), do: GenServer.call(session, :get_id)
 
-  # For DynamicSupervisor child_spec — accepts the {command, opts} tuple
   def child_spec({command, opts}) do
     %{
-      id: __MODULE__,
+      id: {__MODULE__, make_ref()},
       start: {__MODULE__, :start_link, [command, opts]},
       restart: :temporary,
       type: :worker
@@ -162,280 +116,298 @@ defmodule Arbor.Shell.PortSession do
 
   def child_spec({:direct, executable, args, display_command, opts}) do
     %{
-      id: __MODULE__,
+      id: {__MODULE__, make_ref()},
       start: {__MODULE__, :start_link_direct, [executable, args, display_command, opts]},
       restart: :temporary,
       type: :worker
     }
   end
 
-  # ===========================================================================
-  # GenServer Callbacks
-  # ===========================================================================
-
-  @impl GenServer
+  @impl true
   def init({:direct, executable, args, display_command, opts}) do
-    id = Identifiers.generate_id("port_")
-    timeout = Keyword.get(opts, :timeout, 30_000)
-    max_output_bytes = Executor.normalize_max_output_bytes(Keyword.get(opts, :max_output_bytes))
-    cwd = Keyword.get(opts, :cwd)
-    env = Keyword.get(opts, :env, %{})
-    subscribers = subscriber_set(opts)
-    port_opts = build_direct_port_opts(args, cwd, env)
-
-    try do
-      port = Port.open({:spawn_executable, to_charlist(executable)}, port_opts)
-      timer_ref = timeout_timer(timeout)
-
-      state = %__MODULE__{
-        id: id,
-        port: port,
-        command: display_command,
-        subscribers: subscribers,
-        start_time: System.monotonic_time(:millisecond),
-        timeout: timeout,
-        timer_ref: timer_ref,
-        max_output_bytes: max_output_bytes
-      }
-
-      emit_signal(:session_started, state)
-      {:ok, state}
-    catch
-      :error, reason ->
-        {:stop, {:port_open_failed, reason}}
-    end
+    init_session(executable, args, display_command, opts)
   end
 
   def init({command, opts}) do
-    id = Identifiers.generate_id("port_")
-    timeout = Keyword.get(opts, :timeout, 30_000)
-    max_output_bytes = Executor.normalize_max_output_bytes(Keyword.get(opts, :max_output_bytes))
-    cwd = Keyword.get(opts, :cwd)
-    env = Keyword.get(opts, :env, %{})
+    {executable, args} = Sandbox.parse_command(command)
+    init_session(executable, args, command, opts)
+  end
 
-    subscribers = subscriber_set(opts)
+  @impl true
+  def handle_call({:begin, start_ref}, _from, %{start_ref: start_ref, status: :starting} = state) do
+    case open_and_start(state) do
+      {:ok, running} ->
+        {:reply, :ok, running}
 
-    port_opts = build_port_opts(command, cwd, env)
-
-    try do
-      {executable, _args} = resolve_command(command)
-      port = Port.open({:spawn_executable, to_charlist(executable)}, port_opts)
-
-      timer_ref = timeout_timer(timeout)
-
-      state = %__MODULE__{
-        id: id,
-        port: port,
-        command: command,
-        subscribers: subscribers,
-        start_time: System.monotonic_time(:millisecond),
-        timeout: timeout,
-        timer_ref: timer_ref,
-        max_output_bytes: max_output_bytes
-      }
-
-      emit_signal(:session_started, state)
-
-      {:ok, state}
-    catch
-      :error, reason ->
-        {:stop, {:port_open_failed, reason}}
+      {:error, reason, failed} ->
+        fail_tracked(failed, reason)
+        {:stop, :normal, {:error, reason}, %{failed | status: :failed}}
     end
   end
 
-  @impl GenServer
-  def handle_call({:subscribe, pid}, _from, state) do
+  def handle_call({:begin, _start_ref}, _from, state) do
+    {:reply, {:error, :invalid_stream_start}, state}
+  end
+
+  def handle_call({:subscribe, pid}, _from, state) when is_pid(pid) do
     {:reply, :ok, %{state | subscribers: MapSet.put(state.subscribers, pid)}}
   end
 
-  @impl GenServer
-  def handle_call({:send_input, data}, _from, %{status: :running, port: port} = state) do
-    Port.command(port, data)
-    {:reply, :ok, state}
+  def handle_call({:send_input, data}, _from, %{status: :running, handle: handle} = state) do
+    {:reply, ProcessGroup.send_input(handle, data), state}
   end
 
   def handle_call({:send_input, _data}, _from, state) do
     {:reply, {:error, :not_running}, state}
   end
 
-  @impl GenServer
   def handle_call(:stop, _from, state) do
-    new_state = do_close_port(state, :killed)
-    {:stop, :normal, :ok, new_state}
+    stopped = cancel_running(state)
+    {:stop, :normal, :ok, stopped}
   end
 
-  @impl GenServer
   def handle_call(:get_result, _from, state) do
-    result = %{
-      id: state.id,
-      status: state.status,
-      exit_code: state.exit_code,
-      output: output_binary(state),
-      output_bytes: state.output_bytes,
-      max_output_bytes: state.max_output_bytes,
-      output_truncated: state.output_truncated,
-      output_limit_exceeded: state.output_limit_exceeded,
-      timed_out: state.status == :timed_out,
-      killed: state.status == :killed,
-      duration_ms: duration_ms(state),
-      command: state.command
-    }
-
-    {:reply, {:ok, result}, state}
+    {:reply, {:ok, result_projection(state)}, state}
   end
 
-  @impl GenServer
-  def handle_call(:get_id, _from, state) do
-    {:reply, state.id, state}
-  end
+  def handle_call(:get_id, _from, state), do: {:reply, state.id, state}
 
-  @impl GenServer
-  def handle_cast(:kill, state) do
-    new_state = do_close_port(state, :killed)
-    {:stop, :normal, new_state}
-  end
-
-  @impl GenServer
-  def handle_info({port, {:data, chunk}}, %{port: port} = state) do
-    handle_output_chunk(state, chunk)
-  end
-
-  @impl GenServer
-  def handle_info({port, {:exit_status, exit_code}}, %{port: port} = state) do
-    cancel_timer(state.timer_ref)
-
-    output = output_binary(state)
-
-    # Notify subscribers
-    Enum.each(state.subscribers, fn pid ->
-      send(pid, {:port_exit, state.id, exit_code, output})
-    end)
-
-    new_state = %{state | exit_code: exit_code, status: :completed, port: nil}
-    emit_signal(:session_completed, new_state)
-
-    # Stay alive briefly so callers can retrieve results via get_result/get_id,
-    # then self-terminate. Without this, fast commands exit before callers
-    # can query the GenServer.
-    Process.send_after(self(), :self_terminate, 5_000)
-    {:noreply, new_state}
-  end
-
-  @impl GenServer
-  def handle_info(:timeout, state) do
-    Logger.warning("PortSession timed out",
-      session_id: state.id,
-      command: truncate(state.command, 100),
-      timeout_ms: state.timeout
-    )
-
-    output = output_binary(state)
-
-    # Notify subscribers of timeout
-    Enum.each(state.subscribers, fn pid ->
-      send(pid, {:port_exit, state.id, 137, output})
-    end)
-
-    new_state = do_close_port(state, :timed_out)
-    emit_signal(:session_killed, new_state, :timeout)
-
-    {:stop, :normal, new_state}
-  end
-
-  @impl GenServer
-  def handle_info(:self_terminate, state) do
-    {:stop, :normal, state}
-  end
-
-  # Handle port closed externally
-  @impl GenServer
-  def handle_info({:EXIT, port, _reason}, %{port: port} = state) do
-    cancel_timer(state.timer_ref)
-    {:stop, :normal, %{state | port: nil, status: :killed}}
-  end
-
-  # Ignore stale messages from already-closed ports
-  @impl GenServer
-  def handle_info(_msg, state) do
-    {:noreply, state}
-  end
-
-  @impl GenServer
-  def terminate(_reason, state) do
-    # Ensure port is closed on any termination
-    if state.port && Port.info(state.port) do
-      Executor.kill_port(state.port)
-    end
-
-    :ok
-  end
-
-  # ===========================================================================
-  # Private
-  # ===========================================================================
-
-  defp handle_output_chunk(state, chunk) when is_binary(chunk) do
-    room = state.max_output_bytes - state.output_bytes
-    chunk_bytes = byte_size(chunk)
-    retained_bytes = min(max(room, 0), chunk_bytes)
-
-    retained =
-      if retained_bytes > 0 do
-        # Byte-oriented on purpose: process output is not guaranteed UTF-8.
-        binary_part(chunk, 0, retained_bytes)
-      else
-        <<>>
-      end
-
-    if retained_bytes > 0 do
-      Enum.each(state.subscribers, fn pid ->
-        send(pid, {:port_data, state.id, retained})
-      end)
-    end
-
-    state = %{
-      state
-      | output_acc:
-          if(retained_bytes > 0, do: [retained | state.output_acc], else: state.output_acc),
-        output_bytes: state.output_bytes + retained_bytes
-    }
-
-    if chunk_bytes > room do
-      finish_output_limit(state)
+  @impl true
+  def handle_info({:cancel_shell_execution, id}, state) do
+    if id in [nil, state.id] do
+      cancelled = cancel_running(state)
+      {:stop, :normal, cancelled}
     else
       {:noreply, state}
     end
   end
 
-  defp finish_output_limit(state) do
-    output = output_binary(state)
+  def handle_info(:self_terminate, state), do: {:stop, :normal, state}
 
-    new_state =
+  def handle_info(message, %{handle: %ProcessGroup{} = handle} = state) do
+    case ProcessGroup.decode_message(handle, message) do
+      {:output, data} ->
+        Enum.each(state.subscribers, &send(&1, {:port_data, state.id, data}))
+
+        {:noreply,
+         %{
+           state
+           | output_acc: [data | state.output_acc],
+             output_bytes: state.output_bytes + byte_size(data)
+         }}
+
+      {:terminal, reason, exit_code} ->
+        completed = complete(state, reason, exit_code)
+        Process.send_after(self(), :self_terminate, @retention_ms)
+        {:noreply, completed}
+
+      {:error, reason} ->
+        fail_tracked(state, reason)
+        notify_exit(state, 137)
+        {:stop, :normal, %{state | status: :failed, handle: nil, exit_code: 137}}
+
+      :ignore ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info(_message, state), do: {:noreply, state}
+
+  @impl true
+  def terminate(_reason, %{status: :running} = state) do
+    _ = cancel_running(state)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
+
+  defp init_session(executable, args, display_command, opts) do
+    with {:ok, timeout} <- validate_timeout(Keyword.get(opts, :timeout, @default_timeout)),
+         :ok <- validate_subscribers(Keyword.get(opts, :stream_to)) do
+      start_time = Keyword.get(opts, :started_at, System.monotonic_time(:millisecond))
+      deferred = Keyword.get(opts, :deferred)
+
+      {id, start_ref, tracked} =
+        case deferred do
+          {execution_id, ref} when is_binary(execution_id) and is_reference(ref) ->
+            {execution_id, ref, true}
+
+          _ ->
+            {Identifiers.generate_id("port_"), nil, false}
+        end
+
+      state = %__MODULE__{
+        id: id,
+        command: display_command,
+        executable: executable,
+        args: args,
+        start_time: start_time,
+        deadline: start_time + timeout,
+        timeout: timeout,
+        max_output_bytes:
+          Executor.normalize_max_output_bytes(Keyword.get(opts, :max_output_bytes)),
+        opts: opts,
+        subscribers: subscriber_set(opts),
+        start_ref: start_ref,
+        tracked: tracked
+      }
+
+      if deferred do
+        {:ok, state}
+      else
+        case open_and_start(state, opts) do
+          {:ok, running} -> {:ok, running}
+          {:error, reason, _failed} -> {:stop, reason}
+        end
+      end
+    else
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp open_and_start(state, opts \\ nil) do
+    opts = opts || state.opts || []
+    remaining = state.deadline - System.monotonic_time(:millisecond)
+
+    with true <- remaining > 0,
+         {:ok, executable} <- resolve_executable(state.executable),
+         {:ok, handle} <-
+           ProcessGroup.open(
+             executable,
+             state.args,
+             opts,
+             state.start_time,
+             state.timeout,
+             state.max_output_bytes
+           ),
+         :ok <- ProcessGroup.start(handle, Keyword.get(opts, :stdin)) do
+      running = %{state | handle: handle, status: :running}
+      emit_signal(:session_started, running)
+      {:ok, running}
+    else
+      false -> {:error, :stream_setup_timeout, state}
+      {:error, reason} -> {:error, reason, state}
+    end
+  end
+
+  defp complete(state, reason, exit_code) do
+    status =
+      case reason do
+        :normal -> :completed
+        :timeout -> :timed_out
+        _ -> :killed
+      end
+
+    completed = %{
       state
-      |> do_close_port(:killed)
-      |> Map.put(:output_truncated, true)
-      |> Map.put(:output_limit_exceeded, true)
-
-    metadata = %{
-      status: :killed,
-      exit_code: 137,
-      timed_out: false,
-      killed: true,
-      output_truncated: true,
-      output_limit_exceeded: true,
-      output_bytes: byte_size(output),
-      max_output_bytes: state.max_output_bytes
+      | status: status,
+        handle: nil,
+        exit_code: exit_code,
+        timed_out: reason == :timeout,
+        killed: reason in [:timeout, :output_limit, :cancelled, :containment_failure],
+        cancelled: reason == :cancelled,
+        output_truncated: reason == :output_limit,
+        output_limit_exceeded: reason == :output_limit
     }
 
-    Enum.each(state.subscribers, fn pid ->
-      send(pid, {:port_output_limit, state.id, metadata})
-      send(pid, {:port_exit, state.id, 137, output})
-    end)
+    if reason == :output_limit do
+      metadata = result_projection(completed)
+      Enum.each(completed.subscribers, &send(&1, {:port_output_limit, completed.id, metadata}))
+    end
 
-    emit_signal(:session_killed, new_state, :output_limit)
-    Process.send_after(self(), :self_terminate, 5_000)
-    {:noreply, new_state}
+    notify_exit(completed, exit_code)
+    finish_tracked(completed)
+
+    if reason == :normal,
+      do: emit_signal(:session_completed, completed),
+      else: emit_signal(:session_killed, completed, reason)
+
+    completed
   end
+
+  defp cancel_running(%{status: :running, handle: handle} = state) do
+    reason =
+      case ProcessGroup.terminate(handle, :cancelled) do
+        {:ok, terminal_reason} -> terminal_reason
+        {:error, _} -> :containment_failure
+      end
+
+    complete(state, reason, 137)
+  end
+
+  defp cancel_running(%{status: :starting} = state) do
+    cancelled = %{
+      state
+      | status: :killed,
+        exit_code: 137,
+        killed: true,
+        cancelled: true
+    }
+
+    finish_tracked(cancelled)
+    cancelled
+  end
+
+  defp cancel_running(state), do: state
+
+  defp notify_exit(state, exit_code) do
+    output = output_binary(state)
+    Enum.each(state.subscribers, &send(&1, {:port_exit, state.id, exit_code, output}))
+  end
+
+  defp result_projection(state) do
+    %{
+      id: state.id,
+      status: state.status,
+      exit_code: state.exit_code,
+      output: output_binary(state),
+      stdout: output_binary(state),
+      stderr: "",
+      output_bytes: state.output_bytes,
+      max_output_bytes: state.max_output_bytes,
+      output_truncated: state.output_truncated,
+      output_limit_exceeded: state.output_limit_exceeded,
+      timed_out: state.timed_out,
+      killed: state.killed,
+      cancelled: state.cancelled,
+      duration_ms: max(System.monotonic_time(:millisecond) - state.start_time, 0),
+      command: state.command
+    }
+  end
+
+  defp finish_tracked(%{tracked: true, id: id} = state) do
+    _ = ExecutionRegistry.finish(id, result_projection(state))
+    :ok
+  end
+
+  defp finish_tracked(_state), do: :ok
+
+  defp fail_tracked(%{tracked: true, id: id}, reason) do
+    _ = ExecutionRegistry.fail(id, reason)
+    :ok
+  end
+
+  defp fail_tracked(_state, _reason), do: :ok
+
+  @doc false
+  @spec validate_timeout(term()) :: {:ok, pos_integer()} | {:error, :invalid_stream_timeout}
+  def validate_timeout(timeout)
+      when is_integer(timeout) and timeout > 0 and timeout <= @max_stream_timeout,
+      do: {:ok, timeout}
+
+  def validate_timeout(_timeout), do: {:error, :invalid_stream_timeout}
+
+  defp validate_subscribers(nil), do: :ok
+  defp validate_subscribers(pid) when is_pid(pid), do: :ok
+
+  defp validate_subscribers(pids) when is_list(pids) do
+    if Enum.all?(pids, &is_pid/1), do: :ok, else: {:error, :invalid_stream_subscriber}
+  end
+
+  defp validate_subscribers(_other), do: {:error, :invalid_stream_subscriber}
+
+  defp resolve_executable(%ExecutablePolicy.Executable{} = executable), do: {:ok, executable}
+  defp resolve_executable(executable), do: ExecutablePolicy.resolve(executable)
 
   defp subscriber_set(opts) do
     case Keyword.get(opts, :stream_to) do
@@ -445,89 +417,12 @@ defmodule Arbor.Shell.PortSession do
     end
   end
 
-  defp timeout_timer(:infinity), do: nil
-  defp timeout_timer(ms) when is_integer(ms), do: Process.send_after(self(), :timeout, ms)
-
-  defp resolve_command(command) do
-    {cmd, args} = Sandbox.parse_command(command)
-
-    case Sandbox.resolve_executable(cmd) do
-      {:ok, path} -> {path, args}
-      {:error, :executable_not_found} -> raise "Executable not found: #{cmd}"
-    end
-  end
-
-  defp build_port_opts(command, cwd, env) do
-    {_cmd, args} = Sandbox.parse_command(command)
-
-    build_direct_port_opts(args, cwd, env)
-  end
-
-  defp build_direct_port_opts(args, cwd, env) do
-    opts = [
-      :binary,
-      :exit_status,
-      :use_stdio,
-      :stderr_to_stdout,
-      args: Enum.map(args, &to_charlist/1)
-    ]
-
-    opts =
-      if cwd do
-        [{:cd, to_charlist(cwd)} | opts]
-      else
-        opts
-      end
-
-    if is_map(env) && map_size(env) > 0 do
-      env_list =
-        Enum.map(env, fn
-          {k, false} -> {to_charlist(k), false}
-          {k, v} -> {to_charlist(k), to_charlist(v)}
-        end)
-
-      [{:env, env_list} | opts]
-    else
-      opts
-    end
-  end
-
-  defp do_close_port(%{port: nil} = state, status) do
-    cancel_timer(state.timer_ref)
-    %{state | status: status}
-  end
-
-  defp do_close_port(%{port: port} = state, status) do
-    cancel_timer(state.timer_ref)
-    Executor.kill_port(port)
-    %{state | port: nil, status: status, exit_code: state.exit_code || 137}
-  end
-
-  defp cancel_timer(nil), do: :ok
-  defp cancel_timer(ref), do: Process.cancel_timer(ref)
-
-  defp output_binary(%{output_acc: acc}) do
-    acc |> Enum.reverse() |> IO.iodata_to_binary()
-  end
-
-  defp duration_ms(%{start_time: start}) do
-    System.monotonic_time(:millisecond) - start
-  end
-
-  defp truncate(str, max) do
-    if String.length(str) > max do
-      String.slice(str, 0, max - 3) <> "..."
-    else
-      str
-    end
-  end
-
-  # Signal emission
+  defp output_binary(%{output_acc: acc}), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
 
   defp emit_signal(:session_started, state) do
     Signals.emit(:shell, :session_started, %{
       session_id: state.id,
-      command: truncate(state.command, 200)
+      command: truncate(state.command)
     })
   end
 
@@ -535,7 +430,7 @@ defmodule Arbor.Shell.PortSession do
     Signals.emit(:shell, :session_completed, %{
       session_id: state.id,
       exit_code: state.exit_code,
-      duration_ms: duration_ms(state)
+      duration_ms: result_projection(state).duration_ms
     })
   end
 
@@ -543,7 +438,10 @@ defmodule Arbor.Shell.PortSession do
     Signals.emit(:shell, :session_killed, %{
       session_id: state.id,
       reason: reason,
-      duration_ms: duration_ms(state)
+      duration_ms: result_projection(state).duration_ms
     })
   end
+
+  defp truncate(command) when byte_size(command) > 200, do: binary_part(command, 0, 200)
+  defp truncate(command), do: command
 end

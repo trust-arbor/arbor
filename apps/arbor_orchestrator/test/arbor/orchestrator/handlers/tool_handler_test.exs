@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Orchestrator.Engine.Context
+  alias Arbor.Orchestrator.Engine.{Context, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.ToolHandler
@@ -21,7 +21,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
       context = Context.new()
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
-      outcome = ToolHandler.execute(node, context, graph, [])
+      outcome = ToolHandler.execute(node, context, graph, authorized_opts(graph, "echo"))
 
       assert outcome.status == :success
       assert String.trim(outcome.context_updates["tool.output"]) == "hello"
@@ -32,7 +32,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
       context = Context.new()
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
-      outcome = ToolHandler.execute(node, context, graph, [])
+      outcome = ToolHandler.execute(node, context, graph, authorized_opts(graph, "false"))
 
       assert outcome.status == :fail
       assert outcome.failure_reason =~ "exited with code"
@@ -50,33 +50,45 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
       context = Context.new()
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
-      outcome = ToolHandler.execute(node, context, graph, [])
+      outcome = ToolHandler.execute(node, context, graph, authorized_opts(graph, "ls"))
 
       assert outcome.status == :fail
       assert outcome.context_updates["tool.output"] =~ "nonexistent_arbor_tool_handler_path"
     end
 
-    test "uses workdir from context" do
+    test "uses immutable workdir instead of context workdir" do
       File.write!(Path.join(@test_dir, "marker.txt"), "found")
 
       node = %Node{id: "t1", attrs: %{"tool_command" => "cat marker.txt"}}
       context = Context.new(%{"workdir" => @test_dir})
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
-      outcome = ToolHandler.execute(node, context, graph, [])
+      outcome =
+        ToolHandler.execute(
+          node,
+          context,
+          graph,
+          authorized_opts(graph, "cat", @test_dir)
+        )
 
       assert outcome.status == :success
       assert String.trim(outcome.context_updates["tool.output"]) == "found"
     end
 
-    test "uses workdir from opts as fallback" do
+    test "uses immutable workdir instead of a mutable opts fallback" do
       File.write!(Path.join(@test_dir, "opts_marker.txt"), "from_opts")
 
       node = %Node{id: "t1", attrs: %{"tool_command" => "cat opts_marker.txt"}}
       context = Context.new()
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
-      outcome = ToolHandler.execute(node, context, graph, workdir: @test_dir)
+      outcome =
+        ToolHandler.execute(
+          node,
+          context,
+          graph,
+          [workdir: "/tmp"] ++ authorized_opts(graph, "cat", @test_dir)
+        )
 
       assert outcome.status == :success
       assert String.trim(outcome.context_updates["tool.output"]) == "from_opts"
@@ -87,7 +99,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
       context = Context.new()
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
-      outcome = ToolHandler.execute(node, context, graph, [])
+      outcome = ToolHandler.execute(node, context, graph, authorized_opts(graph, "echo"))
 
       assert outcome.status == :fail
       assert outcome.failure_reason =~ "direct-executable policy"
@@ -117,7 +129,9 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
       }
       """
 
-      assert {:ok, result} = Arbor.Orchestrator.run(dot)
+      opts = authorized_engine_opts("echo")
+      assert {:ok, result} = Arbor.Orchestrator.run(dot, opts)
+      assert result.final_outcome.status == :success, inspect(result.final_outcome)
       assert String.trim(result.context["tool.output"]) == "pipeline_works"
     end
 
@@ -131,7 +145,8 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
       }
       """
 
-      assert {:ok, result} = Arbor.Orchestrator.run(dot)
+      opts = authorized_engine_opts("false")
+      assert {:ok, result} = Arbor.Orchestrator.run(dot, opts)
       assert result.final_outcome.status == :fail
     end
   end
@@ -149,7 +164,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
       context = Context.new()
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
-      outcome = ToolHandler.execute(node, context, graph, [])
+      outcome = ToolHandler.execute(node, context, graph, authorized_opts(graph, "echo"))
 
       assert outcome.status == :fail,
              "Dangerous command must be rejected by the sandbox — H3 regression. " <>
@@ -171,7 +186,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
       context = Context.new()
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
-      outcome = ToolHandler.execute(node, context, graph, [])
+      outcome = ToolHandler.execute(node, context, graph, authorized_opts(graph, "echo"))
 
       assert outcome.status == :success
     end
@@ -202,7 +217,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
       context = Context.new()
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
-      outcome = ToolHandler.execute(node, context, graph, [])
+      outcome = ToolHandler.execute(node, context, graph, authorized_opts(graph, "echo"))
 
       assert File.dir?(sentinel),
              "dangerous tool_hooks.pre command executed — the sandbox gate did not fire (H5 regression). " <>
@@ -226,10 +241,48 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
       outcome =
-        ToolHandler.execute(node, context, graph, tool_hooks: %{pre: fn _payload -> :ok end})
+        ToolHandler.execute(
+          node,
+          context,
+          graph,
+          [tool_hooks: %{pre: fn _payload -> :ok end}] ++ authorized_opts(graph, "echo")
+        )
 
       assert outcome.status == :success,
              "a benign pre-hook must not block the tool — got #{inspect(outcome)}"
     end
+  end
+
+  defp authorized_opts(graph, command_name, workdir \\ File.cwd!()) do
+    principal = "agent_tool_handler_#{System.unique_integer([:positive])}"
+    :ok = Arbor.Orchestrator.TestCapabilities.grant_shell_access(principal, command_name)
+    on_exit(fn -> Arbor.Orchestrator.TestCapabilities.revoke_all(principal) end)
+    {:ok, canonical_workdir} = Arbor.Common.SafePath.resolve_real(workdir)
+
+    {:ok, authority} =
+      RunAuthorization.new(%{graph | compiled: true},
+        agent_id: principal,
+        workdir: canonical_workdir
+      )
+
+    [run_authorization: authority]
+  end
+
+  defp authorized_engine_opts(command_name) do
+    principal = "agent_tool_engine_#{System.unique_integer([:positive])}"
+    :ok = Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(principal)
+    :ok = Arbor.Orchestrator.TestCapabilities.grant_capability(principal, "arbor://shell/exec")
+    :ok = Arbor.Orchestrator.TestCapabilities.grant_shell_access(principal, command_name)
+    on_exit(fn -> Arbor.Orchestrator.TestCapabilities.revoke_all(principal) end)
+
+    [
+      authorization: true,
+      execution_principal: principal,
+      workdir: File.cwd!(),
+      authorizer: fn
+        ^principal, type when type in ["exec", "tool"] -> :ok
+        _principal, _type -> {:error, :denied}
+      end
+    ]
   end
 end

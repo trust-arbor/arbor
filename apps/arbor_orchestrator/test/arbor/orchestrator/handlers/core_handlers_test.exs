@@ -2,7 +2,7 @@ defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.Orchestrator.Engine.Context
+  alias Arbor.Orchestrator.Engine.{Context, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
 
@@ -345,8 +345,20 @@ defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
       # This test exercises exec→shell DELEGATION, not the shell capability gate
       # (which correctly denies the default `system` principal — see the phase-0
       # shell auth gate). Inject an approving authorizer so delegation proceeds.
-      opts = [shell_authorizer: fn _agent, _cmd, _opts -> {:ok, :authorized} end]
-      outcome = ExecHandler.execute(node, make_context(), make_graph(), opts)
+      graph = make_graph()
+
+      {:ok, authority} =
+        RunAuthorization.new(%{graph | compiled: true},
+          agent_id: "agent_test",
+          workdir: File.cwd!()
+        )
+
+      opts = [
+        run_authorization: authority,
+        shell_authorizer: fn _agent, _cmd, _opts -> {:ok, :authorized} end
+      ]
+
+      outcome = ExecHandler.execute(node, make_context(), graph, opts)
       assert outcome.status == :success
     end
 

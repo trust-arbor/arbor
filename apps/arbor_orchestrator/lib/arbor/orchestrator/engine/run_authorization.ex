@@ -348,6 +348,15 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
   end
 
   @doc false
+  @spec verify_runtime(t()) :: :ok | {:error, term()}
+  def verify_runtime(%__MODULE__{} = authority) do
+    with :ok <- verify_digest(authority),
+         :ok <- verify_workdir(authority) do
+      :ok
+    end
+  end
+
+  @doc false
   @spec scope_opts(t()) :: keyword()
   def scope_opts(%__MODULE__{} = authority) do
     []
