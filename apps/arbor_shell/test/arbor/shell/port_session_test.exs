@@ -82,6 +82,55 @@ defmodule Arbor.Shell.PortSessionTest do
     end
   end
 
+  describe "streaming output ceiling" do
+    test "security regression: retains and delivers at most the byte cap for invalid UTF-8" do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "port_session_output_cap_#{System.unique_integer([:positive])}"
+        )
+
+      input = Path.join(root, "one_megabyte.bin")
+      File.mkdir_p!(root)
+      File.write!(input, :binary.copy(<<0xFF>>, 1_048_576))
+
+      on_exit(fn -> File.rm_rf!(root) end)
+
+      {:ok, pid} =
+        PortSession.start_link_direct(
+          System.find_executable("cat"),
+          [input],
+          "cat #{input}",
+          stream_to: self(),
+          max_output_bytes: 64,
+          timeout: 5_000
+        )
+
+      id = PortSession.get_id(pid)
+      {delivered, metadata, retained} = collect_limited_stream(id, <<>>, nil)
+
+      assert byte_size(delivered) == 64
+      assert delivered == :binary.copy(<<0xFF>>, 64)
+      assert byte_size(retained) == 64
+      assert retained == delivered
+      assert metadata.output_bytes == 64
+      assert metadata.max_output_bytes == 64
+      assert metadata.output_limit_exceeded
+      assert metadata.output_truncated
+      assert metadata.killed
+
+      {:ok, result} = PortSession.get_result(pid)
+      assert result.status == :killed
+      assert result.output_bytes == 64
+      assert byte_size(result.output) == 64
+      assert result.output == retained
+      assert result.output_limit_exceeded
+      assert result.output_truncated
+      assert result.killed
+      refute result.timed_out
+    end
+  end
+
   describe "stop and kill" do
     test "stop gracefully terminates the process" do
       {:ok, pid} = PortSession.start_link("sleep 60", stream_to: self(), timeout: :infinity)
@@ -130,7 +179,9 @@ defmodule Arbor.Shell.PortSessionTest do
 
   describe "working directory" do
     test "respects cwd option" do
-      {:ok, pid} = PortSession.start_link("sh -c 'sleep 0.1 && pwd'", stream_to: self(), cwd: "/tmp")
+      {:ok, pid} =
+        PortSession.start_link("sh -c 'sleep 0.1 && pwd'", stream_to: self(), cwd: "/tmp")
+
       id = PortSession.get_id(pid)
 
       assert_receive {:port_exit, ^id, 0, output}, 5_000
@@ -189,6 +240,22 @@ defmodule Arbor.Shell.PortSessionTest do
 
       assert_receive {:port_exit, ^id, 0, output}, 5_000
       assert String.contains?(output, "supervised")
+    end
+  end
+
+  defp collect_limited_stream(id, delivered, metadata) do
+    receive do
+      {:port_data, ^id, chunk} ->
+        collect_limited_stream(id, delivered <> chunk, metadata)
+
+      {:port_output_limit, ^id, limit_metadata} ->
+        collect_limited_stream(id, delivered, limit_metadata)
+
+      {:port_exit, ^id, 137, retained} ->
+        {delivered, metadata, retained}
+    after
+      5_000 ->
+        flunk("timed out waiting for capped PortSession output")
     end
   end
 end

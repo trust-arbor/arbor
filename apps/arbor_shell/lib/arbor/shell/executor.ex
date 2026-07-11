@@ -96,12 +96,7 @@ defmodule Arbor.Shell.Executor do
 
       try do
         port = Port.open({:spawn_executable, to_charlist(executable)}, port_opts)
-
-        if stdin do
-          Port.command(port, stdin)
-        end
-
-        collect_output(port, timeout, start_time, max_output_bytes)
+        run_open_port(port, stdin, timeout, start_time, max_output_bytes, opts)
       catch
         :error, reason ->
           {:error, reason}
@@ -145,12 +140,7 @@ defmodule Arbor.Shell.Executor do
 
       try do
         port = Port.open({:spawn_executable, to_charlist(executable)}, port_opts)
-
-        if stdin do
-          Port.command(port, stdin)
-        end
-
-        collect_output(port, timeout, start_time, max_output_bytes)
+        run_open_port(port, stdin, timeout, start_time, max_output_bytes, opts)
       catch
         :error, reason ->
           {:error, reason}
@@ -175,6 +165,10 @@ defmodule Arbor.Shell.Executor do
     Port.close(port)
     :ok
   catch
+    # SIGKILL can close the Port between signal_port_os_pid/1 and Port.close/1.
+    # The requested terminal state is already reached, so cancellation is
+    # idempotently successful rather than a timing-dependent :badarg.
+    :error, :badarg -> :ok
     :error, reason -> {:error, reason}
   end
 
@@ -251,6 +245,45 @@ defmodule Arbor.Shell.Executor do
     else
       {:error, {:invalid_cwd, cwd}}
     end
+  end
+
+  defp run_open_port(port, stdin, timeout, start_time, max_output_bytes, opts) do
+    case register_open_port(port, opts) do
+      :ok ->
+        if stdin do
+          Port.command(port, stdin)
+        end
+
+        collect_output(port, timeout, start_time, max_output_bytes)
+
+      {:error, reason} ->
+        hard_kill_port(port)
+        {:error, reason}
+    end
+  end
+
+  # Async Shell execution uses this handshake to bind the live Port to the
+  # registry entry. If cancellation won the race, the callback rejects and the
+  # just-opened OS process is killed before stdin or output processing.
+  defp register_open_port(port, opts) do
+    case Keyword.get(opts, :on_port_open) do
+      nil ->
+        :ok
+
+      callback when is_function(callback, 1) ->
+        case callback.(port) do
+          :ok -> :ok
+          {:error, reason} -> {:error, {:port_registration_rejected, reason}}
+          other -> {:error, {:port_registration_rejected, other}}
+        end
+
+      _other ->
+        {:error, {:invalid_executor_option, :on_port_open}}
+    end
+  rescue
+    error -> {:error, {:port_registration_failed, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:port_registration_failed, {kind, reason}}}
   end
 
   defp collect_output(port, timeout, start_time, max_output_bytes) do

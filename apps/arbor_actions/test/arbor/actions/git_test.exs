@@ -339,6 +339,23 @@ defmodule Arbor.Actions.GitTest do
       assert String.length(result.commit_hash) >= 7
     end
 
+    test "security regression: structured commit argv keeps inert ampersand and parentheses", %{
+      repo_path: repo_path
+    } do
+      create_file(repo_path, "structured.txt", "content")
+      message = "Fix A & B (safe)"
+
+      assert {:ok, result} =
+               Git.Commit.run(
+                 %{path: repo_path, message: message, files: ["structured.txt"]},
+                 %{}
+               )
+
+      assert result.message == message
+      assert {subject, 0} = System.cmd("git", ["log", "-1", "--format=%s"], cd: repo_path)
+      assert String.trim(subject) == message
+    end
+
     test "validates action metadata" do
       assert Git.Commit.name() == "git_commit"
       assert "commit" in Git.Commit.tags()

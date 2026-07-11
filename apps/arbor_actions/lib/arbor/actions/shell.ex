@@ -355,6 +355,9 @@ defmodule Arbor.Actions.Shell do
     defp format_error({:agent_executable_path_not_allowed, path}),
       do: "Generic agent shell executable path is not allowed: #{path}"
 
+    defp format_error({:agent_argv_not_allowed, command, reason}),
+      do: "Generic agent shell arguments rejected for #{command}: #{inspect(reason)}"
+
     defp format_error({:agent_shell_option_not_allowed, :env}),
       do: "Generic agent shell environment overrides are unavailable."
 

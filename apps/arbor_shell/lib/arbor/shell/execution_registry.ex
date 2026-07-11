@@ -46,6 +46,30 @@ defmodule Arbor.Shell.ExecutionRegistry do
     GenServer.call(__MODULE__, {:update_status, execution_id, status, updates})
   end
 
+  @doc false
+  @spec transition_status(String.t(), atom() | [atom()], atom(), map()) ::
+          :ok | {:error, :not_found | {:invalid_status, atom()}}
+  def transition_status(execution_id, expected, status, updates \\ %{}) do
+    GenServer.call(
+      __MODULE__,
+      {:transition_status, execution_id, List.wrap(expected), status, updates}
+    )
+  end
+
+  @doc false
+  @spec attach_port(String.t(), pid(), port()) ::
+          :ok | {:error, :not_found | :not_running | :owner_mismatch}
+  def attach_port(execution_id, owner_pid, port) do
+    GenServer.call(__MODULE__, {:attach_port, execution_id, owner_pid, port})
+  end
+
+  @doc false
+  @spec claim_kill(String.t()) ::
+          {:ok, execution()} | {:error, :not_found | :not_running}
+  def claim_kill(execution_id) do
+    GenServer.call(__MODULE__, {:claim_kill, execution_id})
+  end
+
   @doc """
   Get execution by ID.
   """
@@ -126,6 +150,73 @@ defmodule Arbor.Shell.ExecutionRegistry do
   end
 
   @impl true
+  def handle_call({:transition_status, id, expected, status, updates}, _from, state) do
+    case Map.get(state.executions, id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      execution ->
+        if execution.status in expected do
+          execution = apply_status(execution, status, updates)
+          state = put_in(state, [:executions, id], execution)
+          {:reply, :ok, state}
+        else
+          {:reply, {:error, {:invalid_status, execution.status}}, state}
+        end
+    end
+  end
+
+  @impl true
+  def handle_call({:attach_port, id, owner_pid, port}, _from, state) do
+    case Map.get(state.executions, id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      %{status: status} when status != :running ->
+        {:reply, {:error, :not_running}, state}
+
+      %{pid: pid} when pid != owner_pid ->
+        {:reply, {:error, :owner_mismatch}, state}
+
+      execution ->
+        execution = Map.put(execution, :port, port)
+        state = put_in(state, [:executions, id], execution)
+        {:reply, :ok, state}
+    end
+  end
+
+  @impl true
+  def handle_call({:claim_kill, id}, _from, state) do
+    case Map.get(state.executions, id) do
+      nil ->
+        {:reply, {:error, :not_found}, state}
+
+      %{status: status} when status != :running ->
+        {:reply, {:error, :not_running}, state}
+
+      execution ->
+        duration_ms =
+          max(DateTime.diff(DateTime.utc_now(), execution.started_at, :millisecond), 0)
+
+        result = %{
+          exit_code: 137,
+          stdout: "",
+          stderr: "",
+          duration_ms: duration_ms,
+          timed_out: false,
+          killed: true,
+          output_truncated: false,
+          output_limit_exceeded: false,
+          cancelled: true
+        }
+
+        killed = apply_status(execution, :killed, %{result: result, port: nil})
+        state = put_in(state, [:executions, id], killed)
+        {:reply, {:ok, execution}, state}
+    end
+  end
+
+  @impl true
   def handle_call({:get, id}, _from, state) do
     case Map.get(state.executions, id) do
       nil -> {:reply, {:error, :not_found}, state}
@@ -182,5 +273,19 @@ defmodule Arbor.Shell.ExecutionRegistry do
   defp schedule_cleanup do
     # Cleanup every 5 minutes
     Process.send_after(self(), :cleanup, 5 * 60 * 1000)
+  end
+
+  defp apply_status(execution, status, updates) do
+    completed_at =
+      if status in [:completed, :failed, :timed_out, :killed] do
+        DateTime.utc_now()
+      else
+        execution.completed_at
+      end
+
+    execution
+    |> Map.put(:status, status)
+    |> Map.put(:completed_at, completed_at)
+    |> Map.merge(updates)
   end
 end

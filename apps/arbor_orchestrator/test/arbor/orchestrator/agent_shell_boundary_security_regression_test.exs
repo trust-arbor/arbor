@@ -13,7 +13,7 @@ defmodule Arbor.Orchestrator.AgentShellBoundarySecurityRegressionTest do
   alias Arbor.Orchestrator.Engine.Context
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
-  alias Arbor.Orchestrator.Handlers.ToolHandler
+  alias Arbor.Orchestrator.Handlers.{ShellHandler, ToolHandler}
   alias Arbor.Orchestrator.ToolHooks
 
   @side_effect_wait_ms 700
@@ -101,6 +101,75 @@ defmodule Arbor.Orchestrator.AgentShellBoundarySecurityRegressionTest do
     end
   end
 
+  test "security regression: authorized ShellHandler rejects sort compressor before authorization" do
+    %{root: root, marker: marker, output: output, command: command} =
+      sort_shell_dispatch_fixture("shell_handler")
+
+    parent = self()
+
+    authorizer = fn agent_id, received_command, _opts ->
+      send(parent, {:sort_authorizer_called, agent_id, received_command})
+      {:ok, :authorized}
+    end
+
+    node = %Node{
+      id: "sort_attack",
+      attrs: %{
+        "command" => command,
+        "sandbox" => "none",
+        "timeout" => "100",
+        "agent_id" => "agent_sort_attack"
+      }
+    }
+
+    try do
+      outcome = ShellHandler.execute(node, Context.new(), %Graph{}, shell_authorizer: authorizer)
+
+      Process.sleep(@side_effect_wait_ms + 800)
+      refute File.exists?(marker), "authorized ShellHandler launched sort's shell compressor"
+      refute File.exists?(output), "rejected ShellHandler sort created output"
+      refute_received {:sort_authorizer_called, _, _}
+      assert outcome.status == :fail
+      assert outcome.failure_reason =~ "agent_argv_not_allowed"
+    after
+      File.rm_rf!(root)
+    end
+  end
+
+  test "security regression: ToolHandler rejects sort compressor and delayed helper tree" do
+    %{root: root, marker: marker, output: output, command: command} =
+      sort_shell_dispatch_fixture("tool_handler")
+
+    hook_marker = Path.join(root, "pre_hook_marker")
+
+    node = %Node{
+      id: "sort_tool_attack",
+      attrs: %{
+        "tool_command" => command,
+        "sandbox" => "none",
+        "tool_hooks.pre" => fn _payload ->
+          File.write!(hook_marker, "ran")
+          :ok
+        end
+      }
+    }
+
+    graph = %Graph{id: "sort_tool_graph", nodes: %{}, edges: [], attrs: %{}}
+
+    try do
+      outcome = ToolHandler.execute(node, Context.new(), graph, [])
+
+      Process.sleep(@side_effect_wait_ms + 800)
+      refute File.exists?(marker), "ToolHandler launched sort's delayed compressor child"
+      refute File.exists?(output), "rejected ToolHandler sort created output"
+      refute File.exists?(hook_marker), "ToolHandler ran a pre-hook before argv rejection"
+      assert outcome.status == :fail
+      assert outcome.failure_reason =~ "agent_argv_not_allowed"
+    after
+      File.rm_rf!(root)
+    end
+  end
+
   test "trusted injected ToolHook runner remains explicit and available" do
     parent = self()
     payload = %{tool_name: "lookup", tool_call_id: "hook-2", phase: "pre"}
@@ -122,5 +191,32 @@ defmodule Arbor.Orchestrator.AgentShellBoundarySecurityRegressionTest do
       System.tmp_dir!(),
       "orchestrator_agent_shell_#{tag}_#{System.unique_integer([:positive])}"
     )
+  end
+
+  defp sort_shell_dispatch_fixture(tag) do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "orchestrator_sort_dispatch_#{tag}_#{System.unique_integer([:positive])}"
+      )
+
+    input = Path.join(root, "input")
+    output = Path.join(root, "output")
+    marker = Path.join(root, "marker")
+    File.mkdir_p!(root)
+
+    comments =
+      for i <- 1..40_000, into: "" do
+        "# #{i} #{String.duplicate("x", 48)}\n"
+      end
+
+    File.write!(input, comments <> "sleep 1\ntouch #{marker}\n")
+
+    %{
+      root: root,
+      marker: marker,
+      output: output,
+      command: "sort -S 64K --compress-program=/bin/sh -o #{output} #{input}"
+    }
   end
 end

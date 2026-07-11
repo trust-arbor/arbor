@@ -34,14 +34,17 @@ defmodule Arbor.Shell.Sandbox do
   # agent path cannot rely on shell quoting semantics while CapShell is absent.
   @shell_metacharacters [";", "&", "|", "(", ")", "`", "$(", ">", "<", "\n", "\r"]
 
-  # Positive policy for generic agent-authored command strings. These programs
-  # consume argv directly and do not dispatch another user-selected executable
-  # or evaluate a runtime command string. Generic shell intentionally excludes
-  # git/mix, interpreters, env/exec wrappers, find/xargs, and programmable search
-  # tools. Schema-specific actions retain their structured direct-argv APIs.
+  # Positive policy for generic agent-authored command strings. Executable-name
+  # admission is not sufficient: otherwise a utility such as `sort` can dispatch
+  # an arbitrary helper through `--compress-program`. Every name in this list
+  # has a closed argv grammar in validate_agent_argv/2. Unknown flags fail
+  # closed before authorization or process work.
+  #
+  # Keep this deliberately small. Git/Mix, interpreters, env/exec wrappers,
+  # find/xargs, pagers/editors, and programmable tools belong behind
+  # schema-specific direct-argv actions, not this generic string boundary.
   @agent_direct_commands ~w[
-    basename cal cat comm cut date diff dirname echo false grep head
-    ls printenv printf pwd realpath sleep sort stat tail test touch tr true uniq wc
+    cat echo false grep head ls printenv printf pwd sleep sort tail touch true wc
   ]
 
   # Commands blocked at :basic level
@@ -155,6 +158,7 @@ defmodule Arbor.Shell.Sandbox do
          {:ok, [raw_command | args]} <- split_agent_command(command),
          command_name <- Path.basename(raw_command),
          :ok <- validate_agent_command_name(command_name),
+         :ok <- validate_agent_argv(command_name, args),
          :ok <- validate_gate_command(opts, command_name),
          :ok <- validate_agent_environment(opts),
          {:ok, executable} <- resolve_agent_executable(raw_command, command_name) do
@@ -192,6 +196,38 @@ defmodule Arbor.Shell.Sandbox do
       Regex.match?(~r/(?:^|[ \t])!(?:[ \t]|$)/, command)
   end
 
+  @doc """
+  Check an already-structured executable and argv without re-serializing data
+  arguments through shell-string metacharacter rules.
+
+  This is the sandbox gate for trusted system and schema-specific direct-argv
+  APIs such as Git and Mix. Shell control characters inside an argv element are
+  inert data to `Port.open({:spawn_executable, ...})`; command/interpreter and
+  dangerous-flag floors still apply at `:basic`, and `:strict` remains an
+  executable allowlist.
+  """
+  @spec check_argv(String.t(), [String.t()], level(), keyword()) ::
+          {:ok, :allowed} | {:error, term()}
+  def check_argv(command, args, level, opts \\ [])
+
+  def check_argv(command, args, :none, _opts)
+      when is_binary(command) and is_list(args),
+      do: {:ok, :allowed}
+
+  def check_argv(command, args, level, opts)
+      when is_binary(command) and is_list(args) and is_list(opts) do
+    if Enum.all?(args, &is_binary/1) do
+      command_name = Path.basename(command)
+      allowlist = Keyword.get(opts, :allowlist)
+      check_argv_by_level(command_name, args, level, allowlist)
+    else
+      {:error, {:invalid_argv, :non_binary_argument}}
+    end
+  end
+
+  def check_argv(_command, _args, _level, _opts),
+    do: {:error, {:invalid_argv, :invalid_input}}
+
   # Capability-derived path: the command must be in the agent's cap-derived
   # allowlist AND clear the always-on safety floor. The allowlist replaces the
   # hardcoded @strict_allowlist; the floor (@dangerous_commands /
@@ -218,6 +254,60 @@ defmodule Arbor.Shell.Sandbox do
           {:ok, :allowed}
       end
     end
+  end
+
+  defp check_argv_by_level(command, args, _level, allowlist) when not is_nil(allowlist) do
+    cond do
+      not Arbor.Shell.CapPolicy.allows?(allowlist, command) ->
+        {:error, {:not_in_allowlist, command}}
+
+      command in @dangerous_commands ->
+        {:error, {:blocked_command, command}}
+
+      command in @interpreter_commands ->
+        {:error, {:blocked_interpreter, command}}
+
+      has_dangerous_flags?(args) ->
+        {:error, {:dangerous_flags, find_dangerous_flags(args)}}
+
+      true ->
+        {:ok, :allowed}
+    end
+  end
+
+  defp check_argv_by_level(command, args, :basic, nil) do
+    cond do
+      command in @dangerous_commands ->
+        {:error, {:blocked_command, command}}
+
+      command in @interpreter_commands ->
+        {:error, {:blocked_interpreter, command}}
+
+      has_dangerous_flags?(args) ->
+        {:error, {:dangerous_flags, find_dangerous_flags(args)}}
+
+      true ->
+        {:ok, :allowed}
+    end
+  end
+
+  defp check_argv_by_level(command, _args, :strict, nil) do
+    if command in @strict_allowlist do
+      {:ok, :allowed}
+    else
+      {:error, {:not_in_allowlist, command}}
+    end
+  end
+
+  defp check_argv_by_level(_command, _args, :container, nil),
+    do: {:error, :container_not_implemented}
+
+  defp check_argv_by_level(command, args, level, nil) do
+    Logger.warning(
+      "[Shell.Sandbox] unrecognized sandbox level #{inspect(level)} - degrading to :strict"
+    )
+
+    check_argv_by_level(command, args, :strict, nil)
   end
 
   defp check_by_level(command, :basic) do
@@ -468,6 +558,159 @@ defmodule Arbor.Shell.Sandbox do
       {:error, {:agent_executable_not_allowed, command_name}}
     end
   end
+
+  # Closed argv grammars for every generic executable. A new executable is not
+  # admitted until it has an explicit clause here and its runtime-dispatch
+  # surface has been audited. In particular, unknown options are never treated
+  # as harmless merely because the executable name is allowlisted.
+  defp validate_agent_argv("cat", args), do: validate_operands("cat", args, 0)
+  defp validate_agent_argv("grep", args), do: validate_operands("grep", args, 1)
+  defp validate_agent_argv("printenv", args), do: validate_env_names(args)
+  defp validate_agent_argv("touch", args), do: validate_operands("touch", args, 1)
+
+  defp validate_agent_argv(command, args) when command in ["false", "true"] do
+    validate_exact_arity(command, args, 0)
+  end
+
+  defp validate_agent_argv("pwd", args) do
+    validate_enumerated_flags("pwd", args, MapSet.new(["-L", "-P"]), 0)
+  end
+
+  defp validate_agent_argv("echo", args) do
+    validate_enumerated_flags("echo", args, MapSet.new(["-n", "-e", "-E"]), 0)
+  end
+
+  defp validate_agent_argv("printf", ["--" | args]),
+    do: validate_exact_arity("printf", args, 1, :at_least)
+
+  defp validate_agent_argv("printf", [format | _rest] = args)
+       when not (is_binary(format) and byte_size(format) > 0 and
+                   binary_part(format, 0, 1) == "-") do
+    validate_exact_arity("printf", args, 1, :at_least)
+  end
+
+  defp validate_agent_argv("printf", args),
+    do: agent_argv_error("printf", {:unsupported_option, List.first(args)})
+
+  defp validate_agent_argv("sleep", [duration]) do
+    if Regex.match?(~r/^(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)[smhd]?$/, duration) do
+      :ok
+    else
+      agent_argv_error("sleep", {:invalid_duration, duration})
+    end
+  end
+
+  defp validate_agent_argv("sleep", args),
+    do: agent_argv_error("sleep", {:invalid_arity, length(args)})
+
+  defp validate_agent_argv("ls", args),
+    do: validate_short_flags("ls", args, MapSet.new(~w[a l d 1]))
+
+  # Only in-process sort modes are accepted. `-S`, `-T`, `-o`,
+  # `--compress-program`, `--random-source`, and every unknown option reject.
+  # This prevents sort from becoming a helper-program execution boundary.
+  defp validate_agent_argv("sort", args),
+    do: validate_short_flags("sort", args, MapSet.new(~w[f n r u]))
+
+  defp validate_agent_argv("wc", args),
+    do: validate_short_flags("wc", args, MapSet.new(~w[c l m w]))
+
+  defp validate_agent_argv(command, [flag, count | operands])
+       when command in ["head", "tail"] and flag in ["-c", "-n"] do
+    if Regex.match?(~r/^[0-9]+$/, count) do
+      validate_operands(command, operands, 0)
+    else
+      agent_argv_error(command, {:invalid_count, count})
+    end
+  end
+
+  defp validate_agent_argv(command, args) when command in ["head", "tail"],
+    do: validate_operands(command, args, 0)
+
+  defp validate_agent_argv(command, _args),
+    do: agent_argv_error(command, :missing_policy)
+
+  defp validate_env_names(args) do
+    invalid = Enum.find(args, &(not Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_]*$/, &1)))
+
+    if invalid do
+      agent_argv_error("printenv", {:invalid_variable_name, invalid})
+    else
+      :ok
+    end
+  end
+
+  defp validate_operands(command, ["--" | operands], minimum),
+    do: validate_exact_arity(command, operands, minimum, :at_least)
+
+  defp validate_operands(command, args, minimum) do
+    case Enum.find(args, &option_token?/1) do
+      nil -> validate_exact_arity(command, args, minimum, :at_least)
+      option -> agent_argv_error(command, {:unsupported_option, option})
+    end
+  end
+
+  defp validate_enumerated_flags(command, args, allowed, minimum) do
+    {flags, operands} = Enum.split_while(args, &option_token?/1)
+
+    case Enum.find(flags, &(not MapSet.member?(allowed, &1))) do
+      nil -> validate_exact_arity(command, operands, minimum, :at_least)
+      option -> agent_argv_error(command, {:unsupported_option, option})
+    end
+  end
+
+  defp validate_short_flags(command, args, allowed_chars) do
+    {flags, operands} = take_short_flags(args, [])
+
+    with :ok <- validate_short_flag_tokens(command, flags, allowed_chars) do
+      validate_operands(command, operands, 0)
+    end
+  end
+
+  defp take_short_flags(["--" | operands], flags), do: {Enum.reverse(flags), operands}
+
+  defp take_short_flags([flag | rest], flags)
+       when is_binary(flag) and byte_size(flag) > 1 and binary_part(flag, 0, 1) == "-" do
+    take_short_flags(rest, [flag | flags])
+  end
+
+  defp take_short_flags(operands, flags), do: {Enum.reverse(flags), operands}
+
+  defp validate_short_flag_tokens(command, flags, allowed_chars) do
+    invalid =
+      Enum.find(flags, fn "-" <> chars ->
+        chars == "" or
+          String.starts_with?(chars, "-") or
+          Enum.any?(String.graphemes(chars), &(not MapSet.member?(allowed_chars, &1)))
+      end)
+
+    if invalid do
+      agent_argv_error(command, {:unsupported_option, invalid})
+    else
+      :ok
+    end
+  end
+
+  defp validate_exact_arity(command, args, expected),
+    do: validate_exact_arity(command, args, expected, :exact)
+
+  defp validate_exact_arity(_command, args, expected, :exact)
+       when length(args) == expected,
+       do: :ok
+
+  defp validate_exact_arity(_command, args, minimum, :at_least)
+       when length(args) >= minimum,
+       do: :ok
+
+  defp validate_exact_arity(command, args, expected, mode),
+    do: agent_argv_error(command, {:invalid_arity, mode, expected, length(args)})
+
+  defp option_token?("-"), do: false
+  defp option_token?("-" <> _rest), do: true
+  defp option_token?(_arg), do: false
+
+  defp agent_argv_error(command, reason),
+    do: {:error, {:agent_argv_not_allowed, command, reason}}
 
   defp validate_gate_command(opts, command_name) do
     case Keyword.get(opts, :gate_command) do

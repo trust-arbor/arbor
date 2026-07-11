@@ -4,7 +4,7 @@ defmodule Arbor.Shell.PortSession do
 
   PortSession provides BEAM-supervised execution of shell commands with:
   - Real-time output streaming to subscribers
-  - Proper process cleanup (Port.close sends SIGTERM to child process group)
+  - Direct OS-process hard kill plus Port cleanup
   - Timeout handling with automatic termination
   - Signal emission for observability
 
@@ -12,6 +12,7 @@ defmodule Arbor.Shell.PortSession do
 
   - `{:port_data, session_id, chunk}` — output chunk received
   - `{:port_exit, session_id, exit_code, full_output}` — process exited
+  - `{:port_output_limit, session_id, metadata}` — byte ceiling killed the process
 
   ## Usage
 
@@ -27,7 +28,7 @@ defmodule Arbor.Shell.PortSession do
   use GenServer
 
   alias Arbor.Identifiers
-  alias Arbor.Shell.Sandbox
+  alias Arbor.Shell.{Executor, Sandbox}
   alias Arbor.Signals
 
   require Logger
@@ -42,9 +43,13 @@ defmodule Arbor.Shell.PortSession do
     :timeout,
     :timer_ref,
     :exit_code,
+    :max_output_bytes,
     status: :running,
     subscribers: MapSet.new(),
-    output_acc: []
+    output_acc: [],
+    output_bytes: 0,
+    output_truncated: false,
+    output_limit_exceeded: false
   ]
 
   # ===========================================================================
@@ -58,6 +63,7 @@ defmodule Arbor.Shell.PortSession do
 
   - `:stream_to` - PID or list of PIDs to receive output messages
   - `:timeout` - Timeout in ms (default: 30_000, use `:infinity` for no timeout)
+  - `:max_output_bytes` - Hard retained and delivered byte ceiling
   - `:cwd` - Working directory
   - `:env` - Environment variables map
   """
@@ -171,6 +177,7 @@ defmodule Arbor.Shell.PortSession do
   def init({:direct, executable, args, display_command, opts}) do
     id = Identifiers.generate_id("port_")
     timeout = Keyword.get(opts, :timeout, 30_000)
+    max_output_bytes = Executor.normalize_max_output_bytes(Keyword.get(opts, :max_output_bytes))
     cwd = Keyword.get(opts, :cwd)
     env = Keyword.get(opts, :env, %{})
     subscribers = subscriber_set(opts)
@@ -187,7 +194,8 @@ defmodule Arbor.Shell.PortSession do
         subscribers: subscribers,
         start_time: System.monotonic_time(:millisecond),
         timeout: timeout,
-        timer_ref: timer_ref
+        timer_ref: timer_ref,
+        max_output_bytes: max_output_bytes
       }
 
       emit_signal(:session_started, state)
@@ -201,6 +209,7 @@ defmodule Arbor.Shell.PortSession do
   def init({command, opts}) do
     id = Identifiers.generate_id("port_")
     timeout = Keyword.get(opts, :timeout, 30_000)
+    max_output_bytes = Executor.normalize_max_output_bytes(Keyword.get(opts, :max_output_bytes))
     cwd = Keyword.get(opts, :cwd)
     env = Keyword.get(opts, :env, %{})
 
@@ -221,7 +230,8 @@ defmodule Arbor.Shell.PortSession do
         subscribers: subscribers,
         start_time: System.monotonic_time(:millisecond),
         timeout: timeout,
-        timer_ref: timer_ref
+        timer_ref: timer_ref,
+        max_output_bytes: max_output_bytes
       }
 
       emit_signal(:session_started, state)
@@ -261,6 +271,12 @@ defmodule Arbor.Shell.PortSession do
       status: state.status,
       exit_code: state.exit_code,
       output: output_binary(state),
+      output_bytes: state.output_bytes,
+      max_output_bytes: state.max_output_bytes,
+      output_truncated: state.output_truncated,
+      output_limit_exceeded: state.output_limit_exceeded,
+      timed_out: state.status == :timed_out,
+      killed: state.status == :killed,
       duration_ms: duration_ms(state),
       command: state.command
     }
@@ -281,13 +297,7 @@ defmodule Arbor.Shell.PortSession do
 
   @impl GenServer
   def handle_info({port, {:data, chunk}}, %{port: port} = state) do
-    # Forward to subscribers
-    Enum.each(state.subscribers, fn pid ->
-      send(pid, {:port_data, state.id, chunk})
-    end)
-
-    # Accumulate output
-    {:noreply, %{state | output_acc: [chunk | state.output_acc]}}
+    handle_output_chunk(state, chunk)
   end
 
   @impl GenServer
@@ -354,7 +364,7 @@ defmodule Arbor.Shell.PortSession do
   def terminate(_reason, state) do
     # Ensure port is closed on any termination
     if state.port && Port.info(state.port) do
-      catch_port_close(state.port)
+      Executor.kill_port(state.port)
     end
 
     :ok
@@ -363,6 +373,69 @@ defmodule Arbor.Shell.PortSession do
   # ===========================================================================
   # Private
   # ===========================================================================
+
+  defp handle_output_chunk(state, chunk) when is_binary(chunk) do
+    room = state.max_output_bytes - state.output_bytes
+    chunk_bytes = byte_size(chunk)
+    retained_bytes = min(max(room, 0), chunk_bytes)
+
+    retained =
+      if retained_bytes > 0 do
+        # Byte-oriented on purpose: process output is not guaranteed UTF-8.
+        binary_part(chunk, 0, retained_bytes)
+      else
+        <<>>
+      end
+
+    if retained_bytes > 0 do
+      Enum.each(state.subscribers, fn pid ->
+        send(pid, {:port_data, state.id, retained})
+      end)
+    end
+
+    state = %{
+      state
+      | output_acc:
+          if(retained_bytes > 0, do: [retained | state.output_acc], else: state.output_acc),
+        output_bytes: state.output_bytes + retained_bytes
+    }
+
+    if chunk_bytes > room do
+      finish_output_limit(state)
+    else
+      {:noreply, state}
+    end
+  end
+
+  defp finish_output_limit(state) do
+    output = output_binary(state)
+
+    new_state =
+      state
+      |> do_close_port(:killed)
+      |> Map.put(:output_truncated, true)
+      |> Map.put(:output_limit_exceeded, true)
+
+    metadata = %{
+      status: :killed,
+      exit_code: 137,
+      timed_out: false,
+      killed: true,
+      output_truncated: true,
+      output_limit_exceeded: true,
+      output_bytes: byte_size(output),
+      max_output_bytes: state.max_output_bytes
+    }
+
+    Enum.each(state.subscribers, fn pid ->
+      send(pid, {:port_output_limit, state.id, metadata})
+      send(pid, {:port_exit, state.id, 137, output})
+    end)
+
+    emit_signal(:session_killed, new_state, :output_limit)
+    Process.send_after(self(), :self_terminate, 5_000)
+    {:noreply, new_state}
+  end
 
   defp subscriber_set(opts) do
     case Keyword.get(opts, :stream_to) do
@@ -426,14 +499,8 @@ defmodule Arbor.Shell.PortSession do
 
   defp do_close_port(%{port: port} = state, status) do
     cancel_timer(state.timer_ref)
-    catch_port_close(port)
+    Executor.kill_port(port)
     %{state | port: nil, status: status, exit_code: state.exit_code || 137}
-  end
-
-  defp catch_port_close(port) do
-    Port.close(port)
-  catch
-    :error, _ -> :ok
   end
 
   defp cancel_timer(nil), do: :ok

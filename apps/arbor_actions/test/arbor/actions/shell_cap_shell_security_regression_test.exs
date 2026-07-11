@@ -296,6 +296,32 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
     end)
   end
 
+  test "security regression: Execute rejects sort helper-program argv before action side effects",
+       %{agent_id: agent_id} do
+    %{root: root, marker: marker, output: output, command: command} =
+      sort_shell_dispatch_fixture("action")
+
+    execs_before = execution_count()
+
+    try do
+      assert {:error, message} =
+               Shell.Execute.run(
+                 %{command: command, sandbox: :none, timeout: 1_000},
+                 %{agent_id: agent_id}
+               )
+
+      assert message =~ "Generic agent shell arguments rejected for sort"
+      assert message =~ "unsupported_option"
+
+      Process.sleep(@side_effect_wait_ms)
+      refute File.exists?(marker), "Shell.Execute launched sort's shell compressor"
+      refute File.exists?(output), "rejected Shell.Execute sort created output"
+      assert execution_count() == execs_before
+    after
+      File.rm_rf!(root)
+    end
+  end
+
   test "ordinary single-command Execute still works", %{agent_id: agent_id} do
     assert {:ok, result} =
              Shell.Execute.run(
@@ -419,6 +445,33 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
     end
   rescue
     _ -> 0
+  end
+
+  defp sort_shell_dispatch_fixture(tag) do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "actions_sort_dispatch_#{tag}_#{System.unique_integer([:positive])}"
+      )
+
+    input = Path.join(root, "input")
+    output = Path.join(root, "output")
+    marker = Path.join(root, "marker")
+    File.mkdir_p!(root)
+
+    comments =
+      for i <- 1..40_000, into: "" do
+        "# #{i} #{String.duplicate("x", 48)}\n"
+      end
+
+    File.write!(input, comments <> "sleep 1\ntouch #{marker}\n")
+
+    %{
+      root: root,
+      marker: marker,
+      output: output,
+      command: "sort -S 64K --compress-program=/bin/sh -o #{output} #{input}"
+    }
   end
 
   defp with_compound_shell(value, fun) when is_function(fun, 0) do

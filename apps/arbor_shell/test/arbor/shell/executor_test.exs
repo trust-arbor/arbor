@@ -339,7 +339,7 @@ defmodule Arbor.Shell.ExecutorTest do
       assert :ok = Executor.kill_port(port)
     end
 
-    test "returns error for already-closed port" do
+    test "security regression: killing an already-closed port is idempotent" do
       port = Port.open({:spawn, "echo done"}, [:binary, :exit_status])
       # Wait for the command to finish and port to close
       Process.sleep(100)
@@ -356,8 +356,9 @@ defmodule Arbor.Shell.ExecutorTest do
         0 -> :ok
       end
 
-      # Port should be closed now, kill_port should return error
-      assert {:error, _reason} = Executor.kill_port(port)
+      # Port should be closed now; cancellation still reports the requested
+      # terminal state instead of racing to {:error, :badarg}.
+      assert :ok = Executor.kill_port(port)
     end
   end
 end

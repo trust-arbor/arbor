@@ -9,6 +9,20 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
   @impl true
   def execute(node, context, graph, opts) do
     command = Map.get(node.attrs, "tool_command", "")
+
+    case admit_command(command, node, context, opts) do
+      :ok ->
+        execute_admitted(command, node, context, graph, opts)
+
+      {:error, :missing_command} ->
+        %Outcome{status: :fail, failure_reason: "No tool_command specified"}
+
+      {:error, reason} ->
+        rejected_outcome(command, node, reason)
+    end
+  end
+
+  defp execute_admitted(command, node, context, graph, opts) do
     hooks = resolve_hooks(node, graph, opts)
     # String hooks fail closed in ToolHooks while CapShell is unavailable. Keep
     # the level in opts for trusted injected hook runners that inspect it.
@@ -17,47 +31,42 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
     pre_result = ToolHooks.run(:pre, hooks.pre, pre_payload, hook_opts)
     emit(opts, %{type: :tool_hook_pre, node_id: node.id, tool: node.id, result: pre_result})
 
-    cond do
-      command == "" ->
-        %Outcome{status: :fail, failure_reason: "No tool_command specified"}
+    if pre_result.decision == :skip do
+      %Outcome{
+        status: :skipped,
+        notes: pre_result.reason || "tool command skipped by pre-hook",
+        context_updates: %{"tool.hook.pre.status" => to_string(pre_result.status)}
+      }
+    else
+      outcome =
+        case Keyword.get(opts, :tool_command_runner) do
+          runner when is_function(runner, 1) ->
+            # Explicitly injected runners are trusted system-only seams. The
+            # default graph path below always uses the closed agent policy.
+            output = runner.(command)
 
-      pre_result.decision == :skip ->
-        %Outcome{
-          status: :skipped,
-          notes: pre_result.reason || "tool command skipped by pre-hook",
-          context_updates: %{"tool.hook.pre.status" => to_string(pre_result.status)}
-        }
+            %Outcome{
+              status: :success,
+              notes: "Tool completed: #{command}",
+              context_updates: %{"tool.output" => output}
+            }
 
-      true ->
-        outcome =
-          case Keyword.get(opts, :tool_command_runner) do
-            runner when is_function(runner, 1) ->
-              # Explicitly injected runners are trusted system-only seams. The
-              # default graph path below always uses the closed agent policy.
-              output = runner.(command)
+          _ ->
+            run_command(command, node, context, opts)
+        end
 
-              %Outcome{
-                status: :success,
-                notes: "Tool completed: #{command}",
-                context_updates: %{"tool.output" => output}
-              }
+      post_payload = %{
+        phase: "post",
+        tool_name: node.id,
+        tool_call_id: node.id,
+        command: command,
+        result: outcome.context_updates
+      }
 
-            _ ->
-              run_command(command, node, context, opts)
-          end
+      post_result = ToolHooks.run(:post, hooks.post, post_payload, hook_opts)
+      emit(opts, %{type: :tool_hook_post, node_id: node.id, tool: node.id, result: post_result})
 
-        post_payload = %{
-          phase: "post",
-          tool_name: node.id,
-          tool_call_id: node.id,
-          command: command,
-          result: outcome.context_updates
-        }
-
-        post_result = ToolHooks.run(:post, hooks.post, post_payload, hook_opts)
-        emit(opts, %{type: :tool_hook_post, node_id: node.id, tool: node.id, result: post_result})
-
-        outcome
+      outcome
     end
   end
 
@@ -66,13 +75,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
 
   defp run_command(command, node, context, opts) do
     sandbox_level = sandbox_level_for(node)
-    shell_opts = [sandbox: sandbox_level]
-
-    shell_opts =
-      case workdir(context, opts) do
-        nil -> shell_opts
-        cwd -> Keyword.put(shell_opts, :cwd, cwd)
-      end
+    shell_opts = shell_opts(node, context, opts)
 
     case Arbor.Shell.execute_agent_command(command, shell_opts) do
       {:ok, result} ->
@@ -108,6 +111,43 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
         status: :fail,
         failure_reason: "Tool execution error: #{Exception.message(e)}"
       }
+  end
+
+  # Default graph execution is agent-facing, so reject malformed executable
+  # argv before pre-hooks can authorize, launch a process, or touch files. An
+  # explicitly injected command runner remains the established trusted-system
+  # seam and owns its own admission policy.
+  defp admit_command("", _node, _context, _opts), do: {:error, :missing_command}
+
+  defp admit_command(command, node, context, opts) do
+    case Keyword.get(opts, :tool_command_runner) do
+      runner when is_function(runner, 1) ->
+        :ok
+
+      _ ->
+        case Arbor.Shell.prepare_agent_command(command, shell_opts(node, context, opts)) do
+          {:ok, _prepared} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp shell_opts(node, context, opts) do
+    shell_opts = [sandbox: sandbox_level_for(node)]
+
+    case workdir(context, opts) do
+      nil -> shell_opts
+      cwd -> Keyword.put(shell_opts, :cwd, cwd)
+    end
+  end
+
+  defp rejected_outcome(command, node, reason) do
+    %Outcome{
+      status: :fail,
+      failure_reason:
+        "Tool command rejected by direct-executable policy (level=#{sandbox_level_for(node)}, reason=#{inspect(reason)}): " <>
+          String.slice(command, 0, 200)
+    }
   end
 
   defp sandbox_level_for(node) do

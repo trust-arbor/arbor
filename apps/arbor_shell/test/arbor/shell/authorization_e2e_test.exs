@@ -338,6 +338,50 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
       assert {:error, :unauthorized} = result
     end
+
+    test "security regression: immediate cancellation owns and kills an authorized sleep", %{
+      agent_id: agent_id
+    } do
+      grant_shell_capability(agent_id, "arbor://shell/exec/sleep")
+
+      assert {:ok, exec_id} =
+               Arbor.Shell.authorize_and_execute_async(agent_id, "sleep 1", sandbox: :none)
+
+      assert {:ok, execution} = Arbor.Shell.ExecutionRegistry.get(exec_id)
+      assert execution.status == :running
+      assert is_pid(execution.pid)
+      owner_ref = Process.monitor(execution.pid)
+
+      assert :ok = Arbor.Shell.kill(exec_id)
+      assert_receive {:DOWN, ^owner_ref, :process, _pid, :killed}, 1_000
+      assert {:ok, :killed} = Arbor.Shell.get_status(exec_id)
+      assert {:ok, %{killed: true, cancelled: true}} = Arbor.Shell.get_result(exec_id)
+
+      # The original sleep deadline must not race a late completion over the
+      # atomically claimed killed state.
+      Process.sleep(1_200)
+      assert {:ok, :killed} = Arbor.Shell.get_status(exec_id)
+      assert {:ok, %{killed: true, cancelled: true}} = Arbor.Shell.get_result(exec_id)
+    end
+
+    test "security regression: cancellation kills the attached sleep OS process", %{
+      agent_id: agent_id
+    } do
+      grant_shell_capability(agent_id, "arbor://shell/exec/sleep")
+
+      assert {:ok, exec_id} =
+               Arbor.Shell.authorize_and_execute_async(agent_id, "sleep 5", sandbox: :none)
+
+      execution = await_attached_port(exec_id, 1_000)
+      assert is_pid(execution.pid)
+      assert is_port(execution.port)
+      assert {:os_pid, os_pid} = Port.info(execution.port, :os_pid)
+      assert os_process_alive?(os_pid)
+
+      assert :ok = Arbor.Shell.kill(exec_id)
+      refute eventually(fn -> os_process_alive?(os_pid) end, 1_000)
+      assert {:ok, :killed} = Arbor.Shell.get_status(exec_id)
+    end
   end
 
   describe "authorize_and_dispatch via authorize_and_execute_streaming" do
@@ -370,6 +414,47 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
       assert {:error, :unauthorized} = result
     end
+
+    test "security regression: authorized streaming threads the hard byte ceiling", %{
+      agent_id: agent_id
+    } do
+      grant_shell_capability(agent_id, "arbor://shell/exec/cat")
+
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "authorized_stream_cap_#{System.unique_integer([:positive])}"
+        )
+
+      input = Path.join(root, "one_megabyte.bin")
+      File.mkdir_p!(root)
+      File.write!(input, :binary.copy(<<0xFE>>, 1_048_576))
+
+      try do
+        assert {:ok, session_id} =
+                 Arbor.Shell.authorize_and_execute_streaming(
+                   agent_id,
+                   "cat #{input}",
+                   stream_to: self(),
+                   max_output_bytes: 64,
+                   timeout: 5_000,
+                   sandbox: :none
+                 )
+
+        {delivered, metadata, retained} = collect_limited_stream(session_id, <<>>, nil)
+
+        assert byte_size(delivered) == 64
+        assert delivered == :binary.copy(<<0xFE>>, 64)
+        assert retained == delivered
+        assert metadata.output_bytes == 64
+        assert metadata.max_output_bytes == 64
+        assert metadata.output_limit_exceeded
+        assert metadata.output_truncated
+        refute_receive {:port_data, ^session_id, _extra}, 100
+      after
+        File.rm_rf!(root)
+      end
+    end
   end
 
   # ===========================================================================
@@ -391,6 +476,70 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
     {:ok, :stored} = CapabilityStore.put(cap)
     cap
+  end
+
+  defp collect_limited_stream(session_id, delivered, metadata) do
+    receive do
+      {:port_data, ^session_id, chunk} ->
+        collect_limited_stream(session_id, delivered <> chunk, metadata)
+
+      {:port_output_limit, ^session_id, limit_metadata} ->
+        collect_limited_stream(session_id, delivered, limit_metadata)
+
+      {:port_exit, ^session_id, 137, retained} ->
+        {delivered, metadata, retained}
+    after
+      5_000 -> flunk("timed out waiting for authorized capped stream")
+    end
+  end
+
+  defp await_attached_port(execution_id, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_await_attached_port(execution_id, deadline)
+  end
+
+  defp do_await_attached_port(execution_id, deadline) do
+    case Arbor.Shell.ExecutionRegistry.get(execution_id) do
+      {:ok, %{status: :running, port: port} = execution} when is_port(port) ->
+        execution
+
+      other ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(10)
+          do_await_attached_port(execution_id, deadline)
+        else
+          flunk("async execution never attached a Port: #{inspect(other)}")
+        end
+    end
+  end
+
+  defp eventually(predicate, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_eventually(predicate, deadline)
+  end
+
+  defp do_eventually(predicate, deadline) do
+    if predicate.() do
+      if System.monotonic_time(:millisecond) < deadline do
+        Process.sleep(10)
+        do_eventually(predicate, deadline)
+      else
+        true
+      end
+    else
+      false
+    end
+  end
+
+  defp os_process_alive?(os_pid) do
+    ["/bin/kill", "/usr/bin/kill"]
+    |> Enum.filter(&File.regular?/1)
+    |> Enum.any?(fn executable ->
+      case System.cmd(executable, ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true) do
+        {_output, 0} -> true
+        _other -> false
+      end
+    end)
   end
 
   defp ensure_security_started do

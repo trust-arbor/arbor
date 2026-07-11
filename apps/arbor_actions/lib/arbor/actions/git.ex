@@ -113,9 +113,7 @@ defmodule Arbor.Actions.Git do
     end
 
     defp git_command(path, args) do
-      command = Enum.join(["git" | args], " ")
-
-      case Shell.execute(command,
+      case Shell.execute_direct("git", args,
              cwd: path,
              timeout: Git.git_timeout(),
              sandbox: Git.git_sandbox()
@@ -302,9 +300,7 @@ defmodule Arbor.Actions.Git do
     end
 
     defp git_command(path, args) do
-      command = Enum.join(["git" | args], " ")
-
-      case Shell.execute(command,
+      case Shell.execute_direct("git", args,
              cwd: path,
              timeout: Git.git_timeout(),
              sandbox: Git.git_sandbox()
@@ -413,7 +409,6 @@ defmodule Arbor.Actions.Git do
 
     alias Arbor.Actions
     alias Arbor.Actions.Git
-    alias Arbor.Common.ShellEscape
 
     def taint_roles do
       %{
@@ -507,14 +502,7 @@ defmodule Arbor.Actions.Git do
     end
 
     defp git_command(path, args) do
-      # For commit messages with special characters, we need careful escaping
-      command =
-        args
-        |> Enum.map(&ShellEscape.escape_arg/1)
-        |> then(&["git" | &1])
-        |> Enum.join(" ")
-
-      case Shell.execute(command,
+      case Shell.execute_direct("git", args,
              cwd: path,
              timeout: Git.git_timeout(),
              sandbox: Git.git_sandbox()
@@ -644,9 +632,7 @@ defmodule Arbor.Actions.Git do
     end
 
     defp git_command(path, args) do
-      command = Enum.join(["git" | args], " ")
-
-      case Shell.execute(command,
+      case Shell.execute_direct("git", args,
              cwd: path,
              timeout: Git.git_timeout(),
              sandbox: Git.git_sandbox()
@@ -744,7 +730,6 @@ defmodule Arbor.Actions.Git do
 
     alias Arbor.Actions
     alias Arbor.Actions.Git
-    alias Arbor.Common.ShellEscape
 
     def taint_roles do
       %{
@@ -825,13 +810,7 @@ defmodule Arbor.Actions.Git do
     end
 
     defp git_command(path, args) do
-      command =
-        args
-        |> Enum.map(&ShellEscape.escape_arg/1)
-        |> then(&["git" | &1])
-        |> Enum.join(" ")
-
-      case Arbor.Shell.execute(command,
+      case Arbor.Shell.execute_direct("git", args,
              cwd: path,
              timeout: Git.git_timeout(),
              sandbox: Git.git_sandbox()

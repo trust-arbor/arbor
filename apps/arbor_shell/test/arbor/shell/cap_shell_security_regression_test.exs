@@ -146,6 +146,60 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
       end
     end
 
+    test "security regression: every generic executable has a closed argv grammar" do
+      accepted = [
+        "cat -- /tmp/input",
+        "echo -n hello",
+        "false",
+        "grep needle /tmp/input",
+        "head -n 10 /tmp/input",
+        "ls -la /tmp",
+        "printenv PATH",
+        "printf %s value",
+        "pwd -P",
+        "sleep 0.01",
+        "sort -nru /tmp/input",
+        "tail -c 10 /tmp/input",
+        "touch -- /tmp/output",
+        "true",
+        "wc -cl /tmp/input"
+      ]
+
+      for command <- accepted do
+        assert {:ok, %{executable: executable, args: args}} =
+                 Arbor.Shell.prepare_agent_command(command),
+               "expected closed argv policy to accept #{inspect(command)}"
+
+        assert Path.type(executable) == :absolute
+        assert is_list(args)
+      end
+
+      rejected = [
+        "cat --show-all /tmp/input",
+        "echo --help",
+        "false --help",
+        "grep --color needle /tmp/input",
+        "head -f /tmp/input",
+        "ls --color /tmp",
+        "printenv --null PATH",
+        "printf --help",
+        "pwd --help",
+        "sleep --help",
+        "sort -S 64K /tmp/input",
+        "sort --compress-program=/bin/sh /tmp/input",
+        "tail -f /tmp/input",
+        "touch -r /tmp/input /tmp/output",
+        "true --help",
+        "wc --files0-from=/tmp/input"
+      ]
+
+      for command <- rejected do
+        assert {:error, {:agent_argv_not_allowed, _executable, _reason}} =
+                 Arbor.Shell.prepare_agent_command(command),
+               "expected unknown/helper argv to reject #{inspect(command)}"
+      end
+    end
+
     test "security regression: env-fed eval cannot restore runtime expansion in sync/async/streaming",
          %{agent_id: agent_id} do
       marker =
@@ -219,6 +273,75 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
         Process.sleep(700)
         refute File.exists?(marker), "a fake executable named echo was launched"
         assert result == {:error, {:agent_executable_path_not_allowed, fake_echo}}
+      after
+        File.rm_rf!(root)
+      end
+    end
+
+    test "security regression: sort helper dispatch rejects before sync async or streaming work",
+         %{agent_id: agent_id} do
+      %{root: root, marker: marker, output: output, command: command} =
+        sort_shell_dispatch_fixture("shell_facade")
+
+      execs_before = execution_count()
+
+      try do
+        results = [
+          Arbor.Shell.authorize_and_execute(agent_id, command,
+            sandbox: :none,
+            timeout: 100
+          ),
+          Arbor.Shell.authorize_and_execute_async(agent_id, command,
+            sandbox: :none,
+            timeout: 100
+          ),
+          Arbor.Shell.authorize_and_execute_streaming(agent_id, command,
+            sandbox: :none,
+            timeout: 100,
+            stream_to: self()
+          )
+        ]
+
+        assert Enum.all?(results, fn
+                 {:error, {:agent_argv_not_allowed, "sort", {:unsupported_option, _}}} ->
+                   true
+
+                 _other ->
+                   false
+               end)
+
+        Process.sleep(@side_effect_wait_ms)
+
+        refute File.exists?(marker),
+               "sort --compress-program executed shell input after boundary rejection"
+
+        refute File.exists?(output), "rejected sort created its requested output file"
+        assert execution_count() == execs_before
+      after
+        File.rm_rf!(root)
+      end
+    end
+
+    test "security regression: analogous find -exec child-spawning form cannot create a marker",
+         %{agent_id: agent_id} do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "capshell_find_exec_#{System.unique_integer([:positive])}"
+        )
+
+      marker = Path.join(root, "marker")
+      trigger = Path.join(root, "trigger")
+      File.mkdir_p!(root)
+      File.write!(trigger, "trigger")
+      command = "find #{root} -name trigger -exec touch #{marker} +"
+
+      try do
+        assert {:error, {:agent_executable_not_allowed, "find"}} =
+                 Arbor.Shell.authorize_and_execute(agent_id, command, sandbox: :none)
+
+        Process.sleep(300)
+        refute File.exists?(marker), "generic find -exec launched a child marker process"
       after
         File.rm_rf!(root)
       end
@@ -426,6 +549,35 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
     end
   rescue
     _ -> 0
+  end
+
+  defp sort_shell_dispatch_fixture(tag) do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "capshell_sort_dispatch_#{tag}_#{System.unique_integer([:positive])}"
+      )
+
+    input = Path.join(root, "input")
+    output = Path.join(root, "output")
+    marker = Path.join(root, "marker")
+    File.mkdir_p!(root)
+
+    comments =
+      for i <- 1..40_000, into: "" do
+        "# #{i} #{String.duplicate("x", 48)}\n"
+      end
+
+    # BSD sort pipes sorted runs to --compress-program on stdin. /bin/sh then
+    # executes these otherwise inert input lines as a script.
+    File.write!(input, comments <> "sleep 1\ntouch #{marker}\n")
+
+    %{
+      root: root,
+      marker: marker,
+      output: output,
+      command: "sort -S 64K --compress-program=/bin/sh -o #{output} #{input}"
+    }
   end
 
   defp grant_shell_capability(agent_id, resource_uri) do

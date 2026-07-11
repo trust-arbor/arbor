@@ -170,6 +170,32 @@ defmodule Arbor.Actions.MixTest do
 
       assert result.exit_code == 0
     end
+
+    test "security regression: structured test path keeps inert shell metacharacters", %{
+      project_path: project_path
+    } do
+      relative_path = "test/fix_a_&_b_(safe)_test.exs"
+
+      File.write!(Path.join(project_path, relative_path), """
+      defmodule StructuredArgvTest do
+        use ExUnit.Case
+
+        test "structured argv" do
+          assert true
+        end
+      end
+      """)
+
+      assert {:ok, result} =
+               MixAction.Test.run(
+                 %{path: project_path, test_paths: [relative_path]},
+                 %{}
+               )
+
+      assert result.exit_code == 0
+      assert result.passed
+      assert result.stdout =~ ~r/1 (passed|test)/
+    end
   end
 
   describe "Mix.Format" do

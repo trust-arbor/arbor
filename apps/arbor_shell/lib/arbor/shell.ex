@@ -338,14 +338,15 @@ defmodule Arbor.Shell do
           {:ok, map()} | {:error, term()}
   def execute_direct(cmd, args, opts \\ []) do
     sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
-    # Absolute executable paths (e.g. worktree `…/bin/mix`) must not be
-    # shell-split for policy checks — use basename + argv for sandbox, and
-    # pass the path through to the port as a single executable.
-    check_command = sandbox_check_command(cmd, args)
+    display_command = direct_command_for_display(cmd, args)
 
-    with {:ok, :allowed} <- Sandbox.check(check_command, sandbox, opts),
-         {:ok, execution_id} <- register_execution(check_command, opts) do
-      emit_started(check_command, execution_id, opts)
+    # Structured argv is already the security boundary. Do not serialize data
+    # arguments back through shell metacharacter scanning: a Git commit message
+    # such as "Fix A & B (safe)" is inert argv, not a shell compound.
+    with {:ok, :allowed} <- Sandbox.check_argv(cmd, args, sandbox, opts),
+         {:ok, execution_id} <- register_execution(display_command, opts),
+         :ok <- mark_execution_running(execution_id, %{}) do
+      emit_started(display_command, execution_id, opts)
 
       case Executor.run_direct(cmd, args, opts) do
         {:ok, result} ->
@@ -360,26 +361,15 @@ defmodule Arbor.Shell do
       end
     else
       {:error, reason} ->
-        emit_blocked(check_command, reason)
+        emit_blocked(display_command, reason)
         {:error, reason}
     end
   end
 
-  # Build a space-joined string for Sandbox.check only. Absolute paths are
-  # reduced to their basename so spaces in the path never become extra args.
-  defp sandbox_check_command(cmd, args) when is_binary(cmd) and is_list(args) do
-    name =
-      if absolute_path?(cmd) do
-        Path.basename(cmd)
-      else
-        cmd
-      end
-
-    Enum.join([name | Enum.map(args, &to_string/1)], " ")
-  end
-
-  defp absolute_path?(cmd) when is_binary(cmd) do
-    Path.type(cmd) == :absolute or String.starts_with?(cmd, "/")
+  # Observability only. `inspect/1` makes argv boundaries unambiguous; this
+  # string is never parsed or passed to a process.
+  defp direct_command_for_display(cmd, args) when is_binary(cmd) and is_list(args) do
+    Enum.map_join([cmd | args], " ", &inspect/1)
   end
 
   @doc """
@@ -437,9 +427,13 @@ defmodule Arbor.Shell do
   Same as `execute/2`, plus:
   - `:stream_to` - PID or list of PIDs to receive output messages (required)
 
+  `:max_output_bytes` is a hard ceiling for both retained and delivered bytes.
+  Crossing it kills the process and reports explicit output-limit metadata.
+
   ## Subscriber Messages
 
   - `{:port_data, session_id, chunk}` — output chunk
+  - `{:port_output_limit, session_id, metadata}` — output ceiling killed the process
   - `{:port_exit, session_id, exit_code, full_output}` — process exited
 
   ## Examples
@@ -491,7 +485,8 @@ defmodule Arbor.Shell do
     sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
 
     with {:ok, :allowed} <- Sandbox.check(command, sandbox, opts),
-         {:ok, execution_id} <- register_execution(command, opts) do
+         {:ok, execution_id} <- register_execution(command, opts),
+         :ok <- mark_execution_running(execution_id, %{}) do
       emit_started(command, execution_id, opts)
 
       case Executor.run(command, opts) do
@@ -516,23 +511,10 @@ defmodule Arbor.Shell do
   def execute_shell_command_async_with_options(command, opts) do
     sandbox = Keyword.get(opts, :sandbox, @default_sandbox)
 
-    with {:ok, :allowed} <- Sandbox.check(command, sandbox, opts),
-         {:ok, execution_id} <- register_execution(command, opts) do
-      emit_started(command, execution_id, opts)
-
-      Task.start(fn ->
-        case Executor.run(command, opts) do
-          {:ok, result} ->
-            complete_execution(execution_id, result)
-            emit_completed(execution_id, result)
-
-          {:error, reason} ->
-            fail_execution(execution_id, reason)
-            emit_failed(execution_id, reason)
-        end
+    with {:ok, :allowed} <- Sandbox.check(command, sandbox, opts) do
+      start_async_execution(command, opts, fn run_opts ->
+        Executor.run(command, run_opts)
       end)
-
-      {:ok, execution_id}
     end
   end
 
@@ -568,13 +550,12 @@ defmodule Arbor.Shell do
 
   @impl true
   def kill_running_execution_by_id(execution_id, _opts) do
-    case ExecutionRegistry.get(execution_id) do
-      {:ok, %{status: :running, port: port}} when not is_nil(port) ->
-        Executor.kill_port(port)
-        ExecutionRegistry.update_status(execution_id, :killed)
+    case ExecutionRegistry.claim_kill(execution_id) do
+      {:ok, execution} ->
+        kill_execution_owner(execution)
         :ok
 
-      {:ok, %{status: status}} when status != :running ->
+      {:error, :not_running} ->
         {:error, :not_running}
 
       {:error, :not_found} ->
@@ -597,7 +578,7 @@ defmodule Arbor.Shell do
       {:ok, :allowed} ->
         session_opts =
           opts
-          |> Keyword.take([:timeout, :cwd, :env, :stream_to])
+          |> Keyword.take([:timeout, :max_output_bytes, :cwd, :env, :stream_to])
           |> Keyword.put_new(:timeout, 30_000)
 
         case PortSession.start_supervised(command, session_opts) do
@@ -606,7 +587,7 @@ defmodule Arbor.Shell do
 
             # Register in the ExecutionRegistry for tracking
             {:ok, exec_id} = register_execution(command, opts)
-            ExecutionRegistry.update_status(exec_id, :running, %{port_session_pid: pid})
+            mark_execution_running(exec_id, %{port_session_pid: pid})
 
             emit_started(command, session_id, opts)
             {:ok, session_id}
@@ -698,7 +679,8 @@ defmodule Arbor.Shell do
     execution_opts = agent_execution_opts(opts)
 
     if Process.whereis(ExecutionRegistry) do
-      with {:ok, execution_id} <- register_execution(command, execution_opts) do
+      with {:ok, execution_id} <- register_execution(command, execution_opts),
+           :ok <- mark_execution_running(execution_id, %{}) do
         emit_started(command, execution_id, execution_opts)
 
         case Executor.run_direct(executable, args, execution_opts) do
@@ -732,27 +714,9 @@ defmodule Arbor.Shell do
        ) do
     execution_opts = agent_execution_opts(opts)
 
-    with {:ok, execution_id} <- register_execution(command, execution_opts) do
-      emit_started(command, execution_id, execution_opts)
-
-      Task.start(fn ->
-        case Executor.run_direct(executable, args, execution_opts) do
-          {:ok, result} ->
-            complete_execution(execution_id, result)
-            emit_completed(execution_id, result)
-
-          {:error, reason} ->
-            fail_execution(execution_id, reason)
-            emit_failed(execution_id, reason)
-        end
-      end)
-
-      {:ok, execution_id}
-    else
-      {:error, reason} ->
-        emit_blocked(command, reason)
-        {:error, reason}
-    end
+    start_async_execution(command, execution_opts, fn run_opts ->
+      Executor.run_direct(executable, args, run_opts)
+    end)
   end
 
   defp execute_prepared_agent_command_streaming(
@@ -764,14 +728,14 @@ defmodule Arbor.Shell do
 
     session_opts =
       execution_opts
-      |> Keyword.take([:timeout, :cwd, :stream_to])
+      |> Keyword.take([:timeout, :max_output_bytes, :cwd, :stream_to])
       |> Keyword.put_new(:timeout, 30_000)
 
     with {:ok, exec_id} <- register_execution(command, execution_opts) do
       case PortSession.start_supervised_direct(executable, args, command, session_opts) do
         {:ok, pid} ->
           session_id = PortSession.get_id(pid)
-          ExecutionRegistry.update_status(exec_id, :running, %{port_session_pid: pid})
+          mark_execution_running(exec_id, %{port_session_pid: pid})
           emit_started(command, session_id, execution_opts)
           {:ok, session_id}
 
@@ -803,6 +767,103 @@ defmodule Arbor.Shell do
     )
   end
 
+  defp mark_execution_running(execution_id, updates) do
+    ExecutionRegistry.transition_status(execution_id, :pending, :running, updates)
+  end
+
+  # Register the actual BEAM owner before the execution ID is returned. The
+  # worker waits for an explicit start message, so an immediate kill always
+  # finds a running entry with a cancellable owner. Port attachment is another
+  # atomic registry handshake inside Executor; cancellation winning that race
+  # causes Executor to kill the newly opened OS process before use.
+  defp start_async_execution(command, opts, runner) when is_function(runner, 1) do
+    case register_execution(command, opts) do
+      {:ok, execution_id} ->
+        start_registered_async_execution(execution_id, command, opts, runner)
+
+      {:error, reason} ->
+        emit_blocked(command, reason)
+        {:error, reason}
+    end
+  end
+
+  defp start_registered_async_execution(execution_id, command, opts, runner) do
+    case start_waiting_execution_owner(execution_id, opts, runner) do
+      {:ok, owner_pid, start_ref} ->
+        case mark_execution_running(execution_id, %{pid: owner_pid}) do
+          :ok ->
+            emit_started(command, execution_id, opts)
+            send(owner_pid, {:start_shell_execution, start_ref})
+            {:ok, execution_id}
+
+          {:error, reason} ->
+            Process.exit(owner_pid, :kill)
+            fail_execution(execution_id, reason)
+            emit_failed(execution_id, reason)
+            {:error, reason}
+        end
+
+      {:error, reason} ->
+        fail_execution(execution_id, reason)
+        emit_failed(execution_id, reason)
+        {:error, reason}
+    end
+  end
+
+  defp start_waiting_execution_owner(execution_id, opts, runner) do
+    start_ref = make_ref()
+
+    case Task.start(fn ->
+           receive do
+             {:start_shell_execution, ^start_ref} ->
+               owner_pid = self()
+
+               run_opts =
+                 Keyword.put(opts, :on_port_open, fn port ->
+                   ExecutionRegistry.attach_port(execution_id, owner_pid, port)
+                 end)
+
+               finish_async_execution(execution_id, runner.(run_opts))
+           end
+         end) do
+      {:ok, owner_pid} -> {:ok, owner_pid, start_ref}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp finish_async_execution(execution_id, {:ok, result}) do
+    case complete_execution(execution_id, result) do
+      :ok -> emit_completed(execution_id, result)
+      {:error, {:invalid_status, :killed}} -> :ok
+      {:error, _reason} -> :ok
+    end
+  end
+
+  defp finish_async_execution(execution_id, {:error, reason}) do
+    case fail_execution(execution_id, reason) do
+      :ok -> emit_failed(execution_id, reason)
+      {:error, {:invalid_status, :killed}} -> :ok
+      {:error, _reason} -> :ok
+    end
+  end
+
+  defp kill_execution_owner(execution) do
+    case Map.get(execution, :port) do
+      port when is_port(port) -> Executor.kill_port(port)
+      _ -> :ok
+    end
+
+    case Map.get(execution, :port_session_pid) do
+      pid when is_pid(pid) -> PortSession.kill(pid)
+      _ -> :ok
+    end
+
+    case Map.get(execution, :pid) do
+      pid when is_pid(pid) -> Process.exit(pid, :kill)
+      _ -> :ok
+    end
+  end
+
   defp complete_execution(execution_id, result) do
     # Output-limit termination is killed (not timed_out and not a successful
     # completed run). Registry + get_result treat :killed as terminal.
@@ -813,11 +874,13 @@ defmodule Arbor.Shell do
         true -> :completed
       end
 
-    ExecutionRegistry.update_status(execution_id, status, %{result: result})
+    ExecutionRegistry.transition_status(execution_id, [:pending, :running], status, %{
+      result: result
+    })
   end
 
   defp fail_execution(execution_id, reason) do
-    ExecutionRegistry.update_status(execution_id, :failed, %{
+    ExecutionRegistry.transition_status(execution_id, [:pending, :running], :failed, %{
       result: %{error: reason}
     })
   end
