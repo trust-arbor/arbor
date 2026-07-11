@@ -24,7 +24,6 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   require Logger
 
   alias Arbor.Common.SafePath
-  alias Arbor.Orchestrator.Config
   alias Arbor.Orchestrator.CodingPlan.ExecutionManifest
   alias Arbor.Orchestrator.Engine.RunAuthorization
   alias Arbor.Orchestrator.Graph
@@ -744,13 +743,15 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   defp verify_retry_workdir(_context), do: {:error, :missing_retry_workdir_binding}
 
+  # Extended approval waits are trusted Engine/control data. Only accept them
+  # when an execution binding is present (coding task / run authority path).
+  # Direct unbound callers cannot extend the global timeout — the old
+  # ExecHandler-source opt-in is gone (coding bounds live in CodingTaskExecutor).
   defp maybe_put_approval_timeout(context, opts, execution_binding_context) do
     timeout_ms = Keyword.get(opts, :approval_timeout_ms)
-    source = Keyword.get(opts, :approval_timeout_source)
 
-    if source == Arbor.Orchestrator.Handlers.ExecHandler and
-         map_size(execution_binding_context) > 0 and is_integer(timeout_ms) and timeout_ms > 0 do
-      Map.put(context, :approval_timeout_ms, min(timeout_ms, Config.coding_approval_timeout_ms()))
+    if map_size(execution_binding_context) > 0 and is_integer(timeout_ms) and timeout_ms > 0 do
+      Map.put(context, :approval_timeout_ms, timeout_ms)
     else
       context
     end
@@ -759,7 +760,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   defp approval_timeout(context) do
     case Map.get(context, :approval_timeout_ms) do
       timeout when is_integer(timeout) and timeout > 0 ->
-        min(timeout, Config.coding_approval_timeout_ms())
+        timeout
 
       _ ->
         global_approval_timeout()

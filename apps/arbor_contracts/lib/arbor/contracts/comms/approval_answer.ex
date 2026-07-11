@@ -16,8 +16,6 @@ defmodule Arbor.Contracts.Comms.ApprovalAnswer do
   # Opaque ids: irq_<hex>, proposal ids, etc. Closed printable ASCII subset.
   @request_id_max_bytes 256
   @note_max_bytes 1_024
-  # Letters, digits, underscore, hyphen, colon, period — no whitespace/control.
-  @request_id_re ~r/^[A-Za-z0-9_.:-]+$/
 
   @type decision :: :approve | :deny | :rework
   @type normalize_result ::
@@ -190,31 +188,37 @@ defmodule Arbor.Contracts.Comms.ApprovalAnswer do
 
   # -- private ---------------------------------------------------------------
 
-  # Closed ASCII opaque-id grammar: no whitespace, no control, no non-ASCII.
-  defp ascii_opaque_id?(id) when is_binary(id) do
-    # Reject any byte outside printable ASCII subset without full UTF-8 scan.
-    case :binary.match(id, [<<0>>]) do
-      {_, _} ->
-        false
+  # Closed ASCII opaque-id grammar: letters, digits, underscore, hyphen, colon,
+  # period only. Rejects every ASCII control byte (0x00-0x1F and DEL 0x7F) and
+  # all non-ASCII bytes via a linear single-byte walk — no String.length/UTF-8
+  # scan, no NUL-only special case.
+  defp ascii_opaque_id?(id) when is_binary(id), do: opaque_id_bytes?(id)
 
-      :nomatch ->
-        # Fast path: all bytes in 0x21-0x7E range and match grammar.
-        byte_size(id) == String.length(id) and Regex.match?(@request_id_re, id)
-    end
+  defp opaque_id_bytes?(<<>>), do: false
+
+  defp opaque_id_bytes?(bin) when is_binary(bin) do
+    opaque_id_bytes_loop(bin, false)
   end
+
+  defp opaque_id_bytes_loop(<<>>, true), do: true
+  defp opaque_id_bytes_loop(<<>>, false), do: false
+
+  defp opaque_id_bytes_loop(<<b, rest::binary>>, _seen)
+       when (b >= ?0 and b <= ?9) or (b >= ?A and b <= ?Z) or (b >= ?a and b <= ?z) or
+              b in [?_, ?., ?:, ?-] do
+    opaque_id_bytes_loop(rest, true)
+  end
+
+  defp opaque_id_bytes_loop(_bin, _seen), do: false
 
   defp has_disallowed_control?(note) when is_binary(note) do
-    # Allow TAB (9), LF (10), CR (13); reject other C0 controls and DEL.
-    case :binary.match(note, control_needles()) do
-      {_, _} -> true
-      :nomatch -> false
-    end
+    # Reject every ASCII control byte including NUL, TAB, LF, CR, and DEL.
+    has_ascii_control_byte?(note)
   end
 
-  defp control_needles do
-    # Precomputed list of single-byte control needles excluding tab/lf/cr.
-    for(b <- 0..31, b not in [9, 10, 13], do: <<b>>) ++ [<<127>>]
-  end
+  defp has_ascii_control_byte?(<<>>), do: false
+  defp has_ascii_control_byte?(<<b, _rest::binary>>) when b <= 0x1F or b == 0x7F, do: true
+  defp has_ascii_control_byte?(<<_b, rest::binary>>), do: has_ascii_control_byte?(rest)
 
   defp classify_response(r) when r in [:approved, :approve, "approved", "approve"],
     do: {:ok, :approved}

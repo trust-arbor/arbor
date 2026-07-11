@@ -24,7 +24,6 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
 
   require Logger
 
-  alias Arbor.Orchestrator.Config
   alias Arbor.Orchestrator.Engine.{Context, Outcome, RunAuthorization}
 
   alias Arbor.Orchestrator.Handlers.{
@@ -363,21 +362,15 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
     end
   end
 
-  # Approval timeout is Engine control data, never a node attr or context
-  # value. Re-bound it against the run wall clock before crossing into the
-  # action executor, and mark the internal source so direct action callers
-  # cannot opt into the longer coding wait accidentally.
+  # Approval timeout is Engine control data (never a node attr / context_keys
+  # value). Forward it generically when present — coding-specific wall-clock
+  # bounds live in CodingTaskExecutor, not this generic handler.
   defp maybe_put_approval_timeout(executor_opts, engine_opts) do
-    requested_ms = Keyword.get(engine_opts, :approval_timeout_ms)
-    wall_clock_ms = Keyword.get(engine_opts, :timeout)
+    case Keyword.get(engine_opts, :approval_timeout_ms) do
+      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 ->
+        Keyword.put(executor_opts, :approval_timeout_ms, timeout_ms)
 
-    case Config.bounded_coding_approval_timeout_ms(requested_ms, wall_clock_ms) do
-      {:ok, timeout_ms} ->
-        executor_opts
-        |> Keyword.put(:approval_timeout_ms, timeout_ms)
-        |> Keyword.put(:approval_timeout_source, __MODULE__)
-
-      :error ->
+      _ ->
         executor_opts
     end
   end

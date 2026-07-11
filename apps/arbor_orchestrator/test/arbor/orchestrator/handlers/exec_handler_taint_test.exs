@@ -187,7 +187,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
       assert Keyword.get(exec_opts, :task_id) == "task_1"
     end
 
-    test "coding approval timeout is trusted Engine data bounded by the run wall clock" do
+    test "approval timeout Engine opts are forwarded generically without coding rebinding" do
       context = %Context{values: %{}}
       node = action_node(%{"action" => "some.action"})
 
@@ -199,8 +199,9 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
       )
 
       assert_received {:stub_execute, _name, _args, _workdir, exec_opts}
-      assert Keyword.fetch!(exec_opts, :approval_timeout_ms) == 15_000
-      assert Keyword.fetch!(exec_opts, :approval_timeout_source) == ExecHandler
+      # No coding-specific wall-clock rebinding in generic ExecHandler.
+      assert Keyword.fetch!(exec_opts, :approval_timeout_ms) == 300_000
+      refute Keyword.has_key?(exec_opts, :approval_timeout_source)
     end
 
     test "node parameters cannot become approval timeout control data" do

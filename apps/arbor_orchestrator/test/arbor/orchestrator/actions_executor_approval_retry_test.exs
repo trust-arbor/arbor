@@ -535,8 +535,8 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
           %{"input" => "must use the global timeout"},
           File.cwd!(),
           agent_id: agent_id,
-          approval_timeout_ms: 10_000,
-          approval_timeout_source: Arbor.Orchestrator.Handlers.ExecHandler
+          # Without execution binding, extended timeout is ignored even if supplied.
+          approval_timeout_ms: 10_000
         )
       end)
 

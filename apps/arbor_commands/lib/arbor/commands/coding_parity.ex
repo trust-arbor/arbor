@@ -5,6 +5,8 @@ defmodule Arbor.Commands.CodingParity do
   timing, and provider-usage fields are excluded.
   """
 
+  alias Arbor.Contracts.Comms.ApprovalAnswer
+
   @schema "arbor.coding_parity.projection.v1"
   @statuses ~w(
     approval_denied cancelled change_committed declined human_review_required
@@ -14,6 +16,8 @@ defmodule Arbor.Commands.CodingParity do
   @no_validation_statuses ~w(cancelled declined no_changes)
   @comparison_paths [
     {"approval", ["approval"]},
+    {"approval_note", ["approval_note"]},
+    {"approval_request_id", ["approval_request_id"]},
     {"cancellation", ["cancellation"]},
     {"changed_files", ["changed_files"]},
     {"cleanup", ["cleanup"]},
@@ -41,7 +45,9 @@ defmodule Arbor.Commands.CodingParity do
          {:ok, review} <- review_outcome(context.review_sources),
          {:ok, cleanup} <- lifecycle(:cleanup, context.metrics, observations),
          {:ok, cancellation} <- lifecycle(:cancellation, context.metrics, observations),
-         {:ok, approval} <- lifecycle(:approval, context.metrics, observations) do
+         {:ok, approval} <- lifecycle(:approval, context.metrics, observations),
+         {:ok, approval_request_id} <- project_approval_request_id(context.sources),
+         {:ok, approval_note} <- project_approval_note(context.sources) do
       semantic = %{
         "approval" => approval,
         "cancellation" => cancellation,
@@ -53,6 +59,11 @@ defmodule Arbor.Commands.CodingParity do
       }
 
       semantic = if review == %{}, do: semantic, else: Map.put(semantic, "review", review)
+
+      semantic =
+        semantic
+        |> maybe_put_semantic("approval_request_id", approval_request_id)
+        |> maybe_put_semantic("approval_note", approval_note)
 
       {:ok,
        %{
@@ -364,6 +375,44 @@ defmodule Arbor.Commands.CodingParity do
       {"count", [{"count", :count}], :count}
     ]
   end
+
+  # Stable bounded scalars from the coding result (not volatile timing/metadata).
+  # Only the explicit approval_* keys — bare "request_id"/"note" are too generic.
+  defp project_approval_request_id(sources) do
+    case first(sources, [{"approval_request_id", :approval_request_id}]) do
+      @missing ->
+        {:ok, @missing}
+
+      value when is_binary(value) ->
+        case ApprovalAnswer.validate_request_id(value) do
+          {:ok, id} -> {:ok, id}
+          {:error, _} -> invalid("invalid_approval_request_id", "approval_request_id")
+        end
+
+      _other ->
+        invalid("invalid_approval_request_id", "approval_request_id")
+    end
+  end
+
+  defp project_approval_note(sources) do
+    case first(sources, [{"approval_note", :approval_note}]) do
+      @missing ->
+        {:ok, @missing}
+
+      value when is_binary(value) ->
+        case ApprovalAnswer.validate_note(value, truncate: true, drop_invalid: true) do
+          {:ok, note} -> {:ok, note}
+          {:error, _} -> invalid("invalid_approval_note", "approval_note")
+        end
+
+      _other ->
+        invalid("invalid_approval_note", "approval_note")
+    end
+  end
+
+  defp maybe_put_semantic(semantic, _key, @missing), do: semantic
+  defp maybe_put_semantic(semantic, _key, ""), do: semantic
+  defp maybe_put_semantic(semantic, key, value), do: Map.put(semantic, key, value)
 
   defp artifact_quality(artifacts) do
     %{

@@ -103,6 +103,29 @@ defmodule Arbor.Commands.CodingParityTest do
            }
   end
 
+  test "projects bounded approval_request_id and approval_note into stable semantic" do
+    result =
+      legacy_result()
+      |> put_in([:payload, :report, :status], "approval_denied")
+      |> put_in([:payload, :report, :canonical_status], "approval_denied")
+      |> put_in([:payload, :report, :approval_request_id], "irq_deadbeefcafebabe")
+      |> put_in([:payload, :report, :approval_note], "please no")
+
+    observations =
+      Map.put(legacy_observations(), :approval, %{
+        status: :denied,
+        requested: true,
+        required: true,
+        resumed: false,
+        count: 1
+      })
+
+    assert {:ok, projection} = CodingParity.project(result, observations)
+    assert projection["semantic"]["terminal_status"] == "approval_denied"
+    assert projection["semantic"]["approval_request_id"] == "irq_deadbeefcafebabe"
+    assert projection["semantic"]["approval_note"] == "please no"
+  end
+
   test "atom and string fixtures project identically and remain JSON clean" do
     unknown_key = "parity_fixture_key_#{System.unique_integer([:positive])}"
 

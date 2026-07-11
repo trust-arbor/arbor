@@ -19,13 +19,16 @@ defmodule Arbor.Contracts.Comms.ApprovalAnswerTest do
       assert {:error, :request_id_too_large} = ApprovalAnswer.validate_request_id(huge)
     end
 
-    test "rejects empty, non-ASCII grammar, controls, and whitespace (no trim)" do
+    test "rejects empty, non-ASCII grammar, all control bytes, and whitespace (no trim)" do
       assert {:error, :empty_request_id} = ApprovalAnswer.validate_request_id("")
       assert {:error, :invalid_request_id} = ApprovalAnswer.validate_request_id(" irq_abc")
       assert {:error, :invalid_request_id} = ApprovalAnswer.validate_request_id("irq_abc ")
       assert {:error, :invalid_request_id} = ApprovalAnswer.validate_request_id("irq abc")
       assert {:error, :invalid_request_id} = ApprovalAnswer.validate_request_id("irq\n_abc")
+      assert {:error, :invalid_request_id} = ApprovalAnswer.validate_request_id("irq\t_abc")
       assert {:error, :invalid_request_id} = ApprovalAnswer.validate_request_id("irq\x00abc")
+      assert {:error, :invalid_request_id} = ApprovalAnswer.validate_request_id("irq\x01abc")
+      assert {:error, :invalid_request_id} = ApprovalAnswer.validate_request_id("irq\x7Fabc")
       assert {:error, :invalid_request_id} = ApprovalAnswer.validate_request_id("irq_α")
       assert {:error, :invalid_request_id} = ApprovalAnswer.validate_request_id(<<0xFF, 0xFE>>)
       assert {:error, :invalid_request_id} = ApprovalAnswer.validate_request_id(123)
@@ -50,11 +53,14 @@ defmodule Arbor.Contracts.Comms.ApprovalAnswerTest do
       assert byte_size(note) == ApprovalAnswer.max_note_bytes()
     end
 
-    test "rejects control characters unless drop_invalid" do
+    test "rejects all ASCII control bytes including NUL/TAB/LF/CR/DEL unless drop_invalid" do
       assert {:error, :invalid_note_control} = ApprovalAnswer.validate_note("bad\x00note")
+      assert {:error, :invalid_note_control} = ApprovalAnswer.validate_note("bad\tnote")
+      assert {:error, :invalid_note_control} = ApprovalAnswer.validate_note("bad\nnote")
+      assert {:error, :invalid_note_control} = ApprovalAnswer.validate_note("bad\rnote")
+      assert {:error, :invalid_note_control} = ApprovalAnswer.validate_note("bad\x7Fnote")
       assert {:ok, ""} = ApprovalAnswer.validate_note("bad\x00note", drop_invalid: true)
-      # tab/lf/cr allowed
-      assert {:ok, "ok\tline\n"} = ApprovalAnswer.validate_note("ok\tline\n")
+      assert {:ok, ""} = ApprovalAnswer.validate_note("bad\nnote", drop_invalid: true)
     end
 
     test "rejects invalid UTF-8 unless drop_invalid" do

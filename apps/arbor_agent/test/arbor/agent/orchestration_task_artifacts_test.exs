@@ -37,6 +37,37 @@ defmodule Arbor.Agent.Orchestration.TaskArtifactsTest do
     assert result.payload.report.canonical_status == "rework_exhausted"
   end
 
+  test "carries bounded approval_request_id and approval_note through stable report" do
+    raw = %{
+      "status" => "approval_denied",
+      "worktree_path" => "/tmp/ws",
+      "branch" => "agent/change",
+      "approval_request_id" => "irq_deadbeefcafebabe",
+      "approval_note" => "please no"
+    }
+
+    result = TaskArtifacts.normalize(raw)
+    assert result.result_type == :coding_change
+    assert result.payload.report.status == "approval_denied"
+    assert result.payload.report.approval_request_id == "irq_deadbeefcafebabe"
+    assert result.payload.report.approval_note == "please no"
+  end
+
+  test "drops invalid approval_request_id and control-bearing notes from report" do
+    raw = %{
+      "status" => "approval_denied",
+      "worktree_path" => "/tmp/ws",
+      "branch" => "agent/change",
+      "approval_request_id" => "irq has spaces",
+      "approval_note" => "bad\x00note"
+    }
+
+    result = TaskArtifacts.normalize(raw)
+    assert result.result_type == :coding_change
+    refute Map.has_key?(result.payload.report, :approval_request_id)
+    refute Map.has_key?(result.payload.report, :approval_note)
+  end
+
   test "accepts review_requires_rework compatibility status with canonical_status" do
     raw = %{
       "status" => "review_requires_rework",

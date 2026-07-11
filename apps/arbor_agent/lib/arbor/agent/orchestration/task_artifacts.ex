@@ -44,6 +44,8 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
   @lowercase_sha256 ~r/\A[0-9a-f]{64}\z/
   @max_metrics_depth 16
 
+  alias Arbor.Contracts.Comms.ApprovalAnswer
+
   @doc "Normalize a runner result into the public task-result artifact shape."
   @spec normalize(term()) :: map()
   def normalize(result) do
@@ -276,10 +278,32 @@ defmodule Arbor.Agent.Orchestration.TaskArtifacts do
       blast_radius: value(raw, :blast_radius) || value(review, :blast_radius),
       artifacts: artifacts,
       metrics: metrics,
-      error: value(raw, :error) || value(raw, :review_error)
+      error: value(raw, :error) || value(raw, :review_error),
+      # Stable, bounded operator-approval scalars only (never raw metadata maps).
+      approval_request_id: bounded_approval_request_id(value(raw, :approval_request_id)),
+      approval_note: bounded_approval_note(value(raw, :approval_note))
     }
     |> reject_nil_values()
   end
+
+  defp bounded_approval_request_id(id) when is_binary(id) do
+    case ApprovalAnswer.validate_request_id(id) do
+      {:ok, valid} -> valid
+      {:error, _} -> nil
+    end
+  end
+
+  defp bounded_approval_request_id(_), do: nil
+
+  defp bounded_approval_note(note) when is_binary(note) do
+    case ApprovalAnswer.validate_note(note, truncate: true, drop_invalid: true) do
+      {:ok, ""} -> nil
+      {:ok, bounded} -> bounded
+      {:error, _} -> nil
+    end
+  end
+
+  defp bounded_approval_note(_), do: nil
 
   defp verdict(raw) do
     review = value(raw, :review)
