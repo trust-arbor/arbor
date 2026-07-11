@@ -284,6 +284,212 @@ defmodule Arbor.Agent.OrchestrationTest do
     end
   end
 
+  # Process-safe backends for multi-process lifecycle cleanup (TaskStore async child).
+  defmodule SharedApprovalState do
+    @table __MODULE__.Table
+
+    def ensure_table do
+      case :ets.whereis(@table) do
+        :undefined ->
+          try do
+            :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
+          rescue
+            ArgumentError -> :ok
+          end
+
+        _ ->
+          :ok
+      end
+    end
+
+    def install(owner, opts) do
+      ensure_table()
+      token = System.unique_integer([:positive])
+      consensus_pending = Keyword.get(opts, :consensus_pending, [])
+      interaction_pending = Keyword.get(opts, :interaction_pending, [])
+
+      tracked_ids =
+        Enum.map(consensus_pending, &Map.fetch!(&1, :id)) ++
+          Enum.map(interaction_pending, &Map.fetch!(&1, :request_id))
+
+      :ets.insert(
+        @table,
+        {token,
+         %{
+           owner: owner,
+           consensus_pending: consensus_pending,
+           interaction_pending: interaction_pending,
+           tracked_ids: tracked_ids,
+           cancel_result: Keyword.get(opts, :cancel_result, :ok),
+           answer_result: Keyword.get(opts, :answer_result, :ok)
+         }}
+      )
+
+      for proposal <- consensus_pending do
+        id = Map.fetch!(proposal, :id)
+        :ets.insert(@table, {{:consensus_id, id}, token})
+        :ets.insert(@table, {{:owner_for, id}, owner})
+      end
+
+      for request <- interaction_pending do
+        id = Map.fetch!(request, :request_id)
+        :ets.insert(@table, {{:interaction_id, id}, token})
+        :ets.insert(@table, {{:owner_for, id}, owner})
+      end
+
+      token
+    end
+
+    def uninstall(token) do
+      ensure_table()
+
+      case :ets.lookup(@table, token) do
+        [{^token, state}] ->
+          for id <- state.tracked_ids do
+            :ets.delete(@table, {:consensus_id, id})
+            :ets.delete(@table, {:interaction_id, id})
+            :ets.delete(@table, {:owner_for, id})
+          end
+
+          :ets.delete(@table, token)
+
+        _ ->
+          :ok
+      end
+    end
+
+    def consensus_pending do
+      ensure_table()
+
+      @table
+      |> :ets.match_object({:_, :_})
+      |> Enum.flat_map(fn
+        {token, %{consensus_pending: pending}} when is_integer(token) -> pending
+        _ -> []
+      end)
+    end
+
+    def interaction_pending do
+      ensure_table()
+
+      @table
+      |> :ets.match_object({:_, :_})
+      |> Enum.flat_map(fn
+        {token, %{interaction_pending: pending}} when is_integer(token) -> pending
+        _ -> []
+      end)
+    end
+
+    def cancel_consensus(id) do
+      ensure_table()
+
+      case :ets.lookup(@table, {:consensus_id, id}) do
+        [{{:consensus_id, ^id}, token}] ->
+          case :ets.lookup(@table, token) do
+            [{^token, state}] ->
+              send(state.owner, {:consensus_cancel, id})
+
+              if state.cancel_result == :ok do
+                pending = Enum.reject(state.consensus_pending, &(Map.get(&1, :id) == id))
+                :ets.insert(@table, {token, %{state | consensus_pending: pending}})
+                :ets.delete(@table, {:consensus_id, id})
+              end
+
+              state.cancel_result
+
+            _ ->
+              :ok
+          end
+
+        _ ->
+          :ok
+      end
+    end
+
+    def respond_interaction(id, response, metadata) do
+      ensure_table()
+
+      case :ets.lookup(@table, {:interaction_id, id}) do
+        [{{:interaction_id, ^id}, token}] ->
+          case :ets.lookup(@table, token) do
+            [{^token, state}] ->
+              send(state.owner, {:interaction_respond, id, response, metadata})
+
+              if state.answer_result == :ok do
+                pending =
+                  Enum.reject(state.interaction_pending, &(Map.get(&1, :request_id) == id))
+
+                :ets.insert(@table, {token, %{state | interaction_pending: pending}})
+                :ets.delete(@table, {:interaction_id, id})
+              end
+
+              state.answer_result
+
+            _ ->
+              :ok
+          end
+
+        _ ->
+          :ok
+      end
+    end
+
+    def audit(actor_id, approval_id, source, decision, opts) do
+      ensure_table()
+
+      owner =
+        case :ets.lookup(@table, {:owner_for, approval_id}) do
+          [{{:owner_for, ^approval_id}, owner_pid}] when is_pid(owner_pid) -> owner_pid
+          _ -> self()
+        end
+
+      send(owner, {:audit_answered, actor_id, approval_id, source, decision, opts})
+      :ok
+    end
+  end
+
+  defmodule SharedConsensus do
+    def list_pending, do: SharedApprovalState.consensus_pending()
+    def cancel(id), do: SharedApprovalState.cancel_consensus(id)
+
+    def answer_authorization_request(id, decision, caller_id, opts) do
+      send(self(), {:consensus_answer, id, decision, caller_id, opts})
+      :ok
+    end
+  end
+
+  defmodule SharedInteractionRouter do
+    def pending, do: SharedApprovalState.interaction_pending()
+
+    def respond(id, response, metadata),
+      do: SharedApprovalState.respond_interaction(id, response, metadata)
+  end
+
+  defmodule SharedAudit do
+    def record_approval_answered(actor_id, approval_id, source, decision, opts) do
+      SharedApprovalState.audit(actor_id, approval_id, source, decision, opts)
+    end
+
+    def record_orchestration_task_dispatched(actor_id, task_id, agent_id, opts) do
+      # Best-effort: message may land on cleanup owner or test process.
+      send(self(), {:audit_dispatched, actor_id, task_id, agent_id, opts})
+      :ok
+    end
+  end
+
+  defmodule ControlledTaskRunner do
+    def run(agent_id, task, opts) do
+      test_pid = Keyword.fetch!(opts, :test_pid)
+      send(test_pid, {:runner_started, self(), agent_id, task, opts})
+
+      receive do
+        {:finish, result} -> result
+      after
+        2_000 -> {:error, :test_timeout}
+      end
+    end
+  end
+
   setup do
     for key <- [
           {FakeSecurity, :result},
@@ -339,6 +545,14 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert opts[:approval_answer_security_module] == FakeSecurity
       assert opts[:steer_cap_id] == "cap_task_answer"
       assert opts[:steer_security_module] == FakeSecurity
+
+      descriptor = opts[:approval_cleanup_descriptor]
+      assert is_map(descriptor)
+      assert descriptor.mfa == {Orchestration, :cleanup_approvals_for_task, 2}
+      assert descriptor.caller_id == "human_1"
+      assert descriptor.consensus_module == Arbor.Consensus
+      assert descriptor.audit_module == FakeAudit
+      refute is_function(Map.get(descriptor, :fun))
 
       assert_received {:audit_dispatched, "human_1", "task_1", "agent_1", audit_opts}
       assert audit_opts[:metadata] == %{ticket: "A-1"}
@@ -778,6 +992,222 @@ defmodule Arbor.Agent.OrchestrationTest do
                )
 
       refute_received {:task_cancel, _, _}
+    end
+  end
+
+  describe "cleanup_approvals_for_task/2 lifecycle API" do
+    test "terminates only exact provenance approvals on both backends with terminal audit metadata" do
+      task_id = "task_term_22082"
+
+      Process.put(
+        {FakeConsensus, :pending},
+        [
+          consensus_proposal("prop_matching", "agent_1", "arbor://fs/write/repo/one.ex",
+            metadata: %{provenance: %{task_id: task_id}}
+          ),
+          consensus_proposal("prop_prefix", "agent_1", "arbor://fs/write/repo/two.ex",
+            metadata: %{provenance: %{task_id: task_id <> "0"}}
+          ),
+          consensus_proposal("prop_missing", "agent_1", "arbor://fs/write/repo/three.ex")
+        ]
+      )
+
+      Process.put(
+        {FakeInteractionRouter, :pending},
+        [
+          interaction_request("irq_matching", "agent_1", "human_1", "arbor://shell/exec/git",
+            metadata: %{
+              principal_id: "agent_1",
+              approval_context: %{provenance: %{task_id: task_id}}
+            }
+          ),
+          interaction_request("irq_other", "agent_1", "human_1", "arbor://shell/exec/mix",
+            metadata: %{principal_id: "agent_1", task_id: "task_other"}
+          )
+        ]
+      )
+
+      assert :ok =
+               Orchestration.cleanup_approvals_for_task(task_id,
+                 caller_id: "dispatch_owner",
+                 cleanup_reason: :task_termination,
+                 consensus_module: FakeConsensus,
+                 interaction_router: FakeInteractionRouter,
+                 audit_module: FakeAudit,
+                 trace_id: "trace_term"
+               )
+
+      assert_received {:consensus_cancel, "prop_matching"}
+
+      assert_received {:interaction_respond, "irq_matching", :rejected, metadata}
+      assert metadata.actor == "dispatch_owner"
+      assert metadata.task_id == task_id
+      assert metadata.decision == :task_terminated
+      assert metadata.cleanup == :task_termination
+      assert metadata.note =~ "task terminated"
+
+      refute_received {:consensus_cancel, "prop_prefix"}
+      refute_received {:consensus_cancel, "prop_missing"}
+      refute_received {:interaction_respond, "irq_other", _, _}
+
+      assert_received {:audit_answered, "dispatch_owner", "prop_matching", :consensus,
+                       :task_terminated, consensus_audit}
+
+      assert consensus_audit[:task_id] == task_id
+      assert consensus_audit[:cleanup] == :task_termination
+      assert consensus_audit[:outcome] == :resolved
+      assert consensus_audit[:trace_id] == "trace_term"
+
+      assert_received {:audit_answered, "dispatch_owner", "irq_matching", :interaction,
+                       :task_terminated, interaction_audit}
+
+      assert interaction_audit[:outcome] == :resolved
+      assert interaction_audit[:cleanup] == :task_termination
+    end
+
+    test "already-resolved backend races are normalized for terminal cleanup" do
+      Process.put({FakeConsensus, :cancel_result}, {:error, :already_decided})
+      Process.put({FakeInteractionRouter, :answer_result}, {:error, :not_found})
+
+      Process.put(
+        {FakeConsensus, :pending},
+        [
+          consensus_proposal("prop_stale", "agent_1", "arbor://fs/write/repo/one.ex",
+            metadata: %{task_id: "task_1"}
+          )
+        ]
+      )
+
+      Process.put(
+        {FakeInteractionRouter, :pending},
+        [
+          interaction_request("irq_stale", "agent_1", "human_1", "arbor://shell/exec/git",
+            metadata: %{principal_id: "agent_1", provenance: %{task_id: "task_1"}}
+          )
+        ]
+      )
+
+      assert :ok =
+               Orchestration.cleanup_approvals_for_task("task_1",
+                 caller_id: "dispatch_owner",
+                 cleanup_reason: :task_termination,
+                 consensus_module: FakeConsensus,
+                 interaction_router: FakeInteractionRouter,
+                 audit_module: FakeAudit
+               )
+
+      assert_received {:audit_answered, "dispatch_owner", "prop_stale", :consensus,
+                       :task_terminated, consensus_audit}
+
+      assert consensus_audit[:outcome] == :already_resolved
+      assert consensus_audit[:error] == ":already_decided"
+
+      assert_received {:audit_answered, "dispatch_owner", "irq_stale", :interaction,
+                       :task_terminated, interaction_audit}
+
+      assert interaction_audit[:outcome] == :already_resolved
+      assert interaction_audit[:error] == ":not_found"
+    end
+
+    test "security regression: ordinary task termination closes only exact-provenance approvals" do
+      task_id = "task_term_e2e_" <> Integer.to_string(System.unique_integer([:positive]))
+      supervisor = :"term_cleanup_sup_#{System.unique_integer([:positive])}"
+      store = :"term_cleanup_store_#{System.unique_integer([:positive])}"
+
+      start_supervised!({Task.Supervisor, name: supervisor})
+
+      start_supervised!(
+        {Arbor.Agent.Orchestration.TaskStore,
+         name: store, task_supervisor: supervisor, runner: ControlledTaskRunner}
+      )
+
+      token =
+        SharedApprovalState.install(self(),
+          consensus_pending: [
+            consensus_proposal("prop_match_" <> task_id, "agent_1", "arbor://fs/write/a.ex",
+              metadata: %{provenance: %{task_id: task_id}}
+            ),
+            consensus_proposal("prop_prefix_" <> task_id, "agent_1", "arbor://fs/write/b.ex",
+              metadata: %{provenance: %{task_id: task_id <> "x"}}
+            )
+          ],
+          interaction_pending: [
+            interaction_request(
+              "irq_match_" <> task_id,
+              "agent_1",
+              "human_1",
+              "arbor://shell/exec/git",
+              metadata: %{
+                principal_id: "agent_1",
+                approval_context: %{provenance: %{task_id: task_id}}
+              }
+            ),
+            interaction_request(
+              "irq_other_" <> task_id,
+              "agent_1",
+              "human_1",
+              "arbor://shell/exec/mix",
+              metadata: %{principal_id: "agent_1", task_id: "task_other"}
+            )
+          ]
+        )
+
+      on_exit(fn -> SharedApprovalState.uninstall(token) end)
+
+      opts = [
+        caller_id: "dispatch_owner",
+        task_id: task_id,
+        task_store: Arbor.Agent.Orchestration.TaskStore,
+        name: store,
+        test_pid: self(),
+        runner: ControlledTaskRunner,
+        consensus_module: SharedConsensus,
+        interaction_router: SharedInteractionRouter,
+        security_module: FakeSecurity,
+        audit_module: SharedAudit,
+        authorize?: false,
+        trace_id: "trace_e2e"
+      ]
+
+      assert {:ok, ^task_id} = Orchestration.dispatch("agent_1", "ordinary work", opts)
+      assert_receive {:runner_started, runner_pid, "agent_1", "ordinary work", runner_opts}
+      refute Keyword.has_key?(runner_opts, :approval_cleanup_descriptor)
+
+      send(
+        runner_pid,
+        {:finish, {:ok, %{result_type: :test, payload: %{ok: true}, raw: "done"}}}
+      )
+
+      assert_receive {:consensus_cancel, prop_id}, 1_000
+      assert prop_id == "prop_match_" <> task_id
+
+      assert_receive {:interaction_respond, irq_id, :rejected, metadata}, 1_000
+      assert irq_id == "irq_match_" <> task_id
+      assert metadata.decision == :task_terminated
+      assert metadata.cleanup == :task_termination
+      assert metadata.actor == "dispatch_owner"
+      assert metadata.task_id == task_id
+
+      refute_receive {:consensus_cancel, _}, 50
+      refute_receive {:interaction_respond, _, _, _}, 50
+
+      assert {:ok, remaining} =
+               Orchestration.list_pending_approvals(
+                 authorize?: false,
+                 consensus_module: SharedConsensus,
+                 interaction_router: SharedInteractionRouter
+               )
+
+      remaining_ids = remaining |> Enum.map(& &1.id) |> Enum.sort()
+
+      assert remaining_ids ==
+               Enum.sort(["prop_prefix_" <> task_id, "irq_other_" <> task_id])
+
+      assert {:ok, %{state: :done}} =
+               Orchestration.task_status(task_id, Keyword.put(opts, :authorize?, false))
+
+      assert {:ok, %{result_type: :test}} =
+               Orchestration.task_result(task_id, Keyword.put(opts, :authorize?, false))
     end
   end
 

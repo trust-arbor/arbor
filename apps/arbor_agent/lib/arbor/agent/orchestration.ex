@@ -25,8 +25,10 @@ defmodule Arbor.Agent.Orchestration do
   @interaction_request_prefix "irq"
   @approval_answer_cap_ttl_seconds 86_400
   @task_cancel_cleanup_note "Pending approval closed because its orchestration task was cancelled"
+  @task_terminal_cleanup_note "Pending approval closed because its orchestration task terminated"
 
   @type approval_decision :: :approve | :deny | :rework
+  @type cleanup_reason :: :task_cancellation | :task_termination
 
   @doc """
   Dispatch an agent task asynchronously.
@@ -102,13 +104,53 @@ defmodule Arbor.Agent.Orchestration do
 
       case cancel_result do
         {:ok, _status} = success ->
-          cleanup_task_approvals(task_id, caller_id, opts)
+          cleanup_opts =
+            opts
+            |> normalize_keyword_opts()
+            |> Keyword.put(:caller_id, caller_id)
+            |> Keyword.put(:cleanup_reason, :task_cancellation)
+
+          _ = cleanup_approvals_for_task(task_id, cleanup_opts)
           success
 
         error ->
           error
       end
     end
+  end
+
+  @doc false
+  @spec cleanup_approvals_for_task(String.t(), keyword() | map()) :: :ok
+  def cleanup_approvals_for_task(task_id, opts \\ []) do
+    with {:ok, task_id} <- normalize_task_id(task_id),
+         {:ok, caller_id} <- cleanup_caller_id(opts) do
+      reason = cleanup_reason(opts)
+      do_cleanup_task_approvals(task_id, caller_id, reason, opts)
+    else
+      {:error, reason} ->
+        Logger.warning(
+          "Approval cleanup skipped task_id=#{bounded_inspect(task_id)} " <>
+            "reason=#{bounded_inspect(reason)}"
+        )
+
+        :ok
+    end
+  rescue
+    exception ->
+      Logger.warning(
+        "Approval cleanup failed task_id=#{bounded_inspect(task_id)} " <>
+          "reason=#{Exception.message(exception)}"
+      )
+
+      :ok
+  catch
+    kind, reason ->
+      Logger.warning(
+        "Approval cleanup failed task_id=#{bounded_inspect(task_id)} " <>
+          "reason=#{bounded_inspect({kind, reason})}"
+      )
+
+      :ok
   end
 
   @doc """
@@ -352,7 +394,7 @@ defmodule Arbor.Agent.Orchestration do
     end
   end
 
-  defp task_scoped_opts(opts, task_id, approval_answer_cap_id, steer_cap_id) do
+  defp task_scoped_opts(opts, task_id, caller_id, approval_answer_cap_id, steer_cap_id) do
     opts
     |> task_store_opts()
     |> Keyword.put(:task_id, task_id)
@@ -360,6 +402,18 @@ defmodule Arbor.Agent.Orchestration do
     |> Keyword.put(:approval_answer_security_module, security_module(opts))
     |> Keyword.put(:steer_cap_id, steer_cap_id)
     |> Keyword.put(:steer_security_module, security_module(opts))
+    |> Keyword.put(:approval_cleanup_descriptor, approval_cleanup_descriptor(caller_id, opts))
+  end
+
+  defp approval_cleanup_descriptor(caller_id, opts) do
+    %{
+      mfa: {__MODULE__, :cleanup_approvals_for_task, 2},
+      caller_id: caller_id,
+      consensus_module: consensus_module(opts),
+      interaction_router: interaction_router(opts),
+      audit_module: audit_module(opts),
+      trace_id: opt(opts, :trace_id)
+    }
   end
 
   defp dispatch_with_task_capabilities(agent_id, task, task_id, caller_id, opts) do
@@ -367,7 +421,8 @@ defmodule Arbor.Agent.Orchestration do
       {:ok, approval_answer_cap_id} ->
         case grant_task_steer(caller_id, task_id, opts) do
           {:ok, steer_cap_id} ->
-            task_opts = task_scoped_opts(opts, task_id, approval_answer_cap_id, steer_cap_id)
+            task_opts =
+              task_scoped_opts(opts, task_id, caller_id, approval_answer_cap_id, steer_cap_id)
 
             case dispatch_task(agent_id, task, task_opts) do
               {:ok, ^task_id} ->
@@ -508,77 +563,79 @@ defmodule Arbor.Agent.Orchestration do
     |> Enum.filter(&matches_filters?(&1, opts))
   end
 
-  defp cleanup_task_approvals(task_id, caller_id, opts) do
+  defp do_cleanup_task_approvals(task_id, caller_id, reason, opts) do
     opts
     |> all_pending_approvals()
     |> Enum.filter(&(approval_task_id(&1) == task_id))
     |> Enum.each(fn approval ->
-      cleanup_task_approval(approval, task_id, caller_id, opts)
+      cleanup_task_approval(approval, task_id, caller_id, reason, opts)
     end)
-  rescue
-    exception ->
-      Logger.warning(
-        "Approval cleanup after task cancellation failed " <>
-          "task_id=#{bounded_inspect(task_id)} reason=#{Exception.message(exception)}"
-      )
-  catch
-    kind, reason ->
-      Logger.warning(
-        "Approval cleanup after task cancellation failed " <>
-          "task_id=#{bounded_inspect(task_id)} reason=#{bounded_inspect({kind, reason})}"
-      )
+
+    :ok
   end
 
-  defp cleanup_task_approval(%PendingApproval{} = approval, task_id, caller_id, opts) do
+  defp cleanup_task_approval(%PendingApproval{} = approval, task_id, caller_id, reason, opts) do
     result =
       approval
-      |> dispatch_task_cancellation_cleanup(task_id, caller_id, opts)
+      |> dispatch_task_lifecycle_cleanup(task_id, caller_id, reason, opts)
       |> normalize_backend_result()
 
     case result do
       :ok ->
-        record_task_approval_cleanup(approval, task_id, caller_id, :resolved, nil, opts)
+        record_task_approval_cleanup(approval, task_id, caller_id, reason, :resolved, nil, opts)
 
-      {:error, reason} when reason in [:not_found, :already_decided, :already_resolved] ->
+      {:error, backend_reason}
+      when backend_reason in [:not_found, :already_decided, :already_resolved] ->
         record_task_approval_cleanup(
           approval,
           task_id,
           caller_id,
-          :already_resolved,
           reason,
+          :already_resolved,
+          backend_reason,
           opts
         )
 
-      {:error, reason} ->
+      {:error, backend_reason} ->
         Logger.warning(
-          "Approval cleanup after task cancellation failed " <>
+          "Approval cleanup after task #{cleanup_reason_label(reason)} failed " <>
             "task_id=#{bounded_inspect(task_id)} approval_id=#{bounded_inspect(approval.id)} " <>
-            "source=#{approval.source} reason=#{bounded_inspect(reason)}"
+            "source=#{approval.source} reason=#{bounded_inspect(backend_reason)}"
         )
 
-        record_task_approval_cleanup(approval, task_id, caller_id, :failed, reason, opts)
+        record_task_approval_cleanup(
+          approval,
+          task_id,
+          caller_id,
+          reason,
+          :failed,
+          backend_reason,
+          opts
+        )
     end
 
     :ok
   end
 
-  defp dispatch_task_cancellation_cleanup(
+  defp dispatch_task_lifecycle_cleanup(
          %PendingApproval{source: :interaction, id: id},
          task_id,
          caller_id,
+         reason,
          opts
        ) do
-    metadata = task_cancellation_metadata(task_id, caller_id, opts)
+    metadata = task_lifecycle_cleanup_metadata(task_id, caller_id, reason, opts)
 
     opts
     |> interaction_router()
     |> apply_if_exported(:respond, [id, :rejected, metadata])
   end
 
-  defp dispatch_task_cancellation_cleanup(
+  defp dispatch_task_lifecycle_cleanup(
          %PendingApproval{source: :consensus, id: id},
          _task_id,
          _caller_id,
+         _reason,
          opts
        ) do
     opts
@@ -586,29 +643,43 @@ defmodule Arbor.Agent.Orchestration do
     |> apply_if_exported(:cancel, [id])
   end
 
-  defp task_cancellation_metadata(task_id, caller_id, opts) do
-    :task_cancelled
+  defp task_lifecycle_cleanup_metadata(task_id, caller_id, reason, opts) do
+    {decision, cleanup_tag, note} = cleanup_semantics(reason)
+
+    decision
     |> answer_metadata(caller_id, opts)
     |> Map.put(:task_id, task_id)
-    |> Map.put(:cleanup, :task_cancellation)
-    |> Map.put(:note, @task_cancel_cleanup_note)
+    |> Map.put(:cleanup, cleanup_tag)
+    |> Map.put(:note, note)
   end
 
-  defp record_task_approval_cleanup(approval, task_id, caller_id, outcome, reason, opts) do
+  defp record_task_approval_cleanup(
+         approval,
+         task_id,
+         caller_id,
+         reason,
+         outcome,
+         error_reason,
+         opts
+       ) do
+    {success_decision, cleanup_tag, note} = cleanup_semantics(reason)
+
     decision =
-      if outcome == :failed,
-        do: :task_cancellation_cleanup_failed,
-        else: :task_cancelled
+      if outcome == :failed do
+        cleanup_failed_decision(reason)
+      else
+        success_decision
+      end
 
     data = [
       resource_uri: approval.resource_uri,
       agent_id: approval.agent_id,
       principal_id: approval.principal_id,
       task_id: task_id,
-      cleanup: :task_cancellation,
+      cleanup: cleanup_tag,
       outcome: outcome,
-      error: if(is_nil(reason), do: nil, else: bounded_inspect(reason)),
-      note: @task_cancel_cleanup_note,
+      error: if(is_nil(error_reason), do: nil, else: bounded_inspect(error_reason)),
+      note: note,
       trace_id: opt(opts, :trace_id)
     ]
 
@@ -623,6 +694,41 @@ defmodule Arbor.Agent.Orchestration do
     ])
     |> normalize_audit_result()
   end
+
+  defp cleanup_semantics(:task_cancellation) do
+    {:task_cancelled, :task_cancellation, @task_cancel_cleanup_note}
+  end
+
+  defp cleanup_semantics(:task_termination) do
+    {:task_terminated, :task_termination, @task_terminal_cleanup_note}
+  end
+
+  defp cleanup_failed_decision(:task_cancellation), do: :task_cancellation_cleanup_failed
+  defp cleanup_failed_decision(:task_termination), do: :task_termination_cleanup_failed
+
+  defp cleanup_reason(opts) do
+    case opt(opts, :cleanup_reason, :task_termination) do
+      :task_cancellation -> :task_cancellation
+      :task_termination -> :task_termination
+      "task_cancellation" -> :task_cancellation
+      "task_termination" -> :task_termination
+      _ -> :task_termination
+    end
+  end
+
+  defp cleanup_reason_label(:task_cancellation), do: "cancellation"
+  defp cleanup_reason_label(:task_termination), do: "termination"
+
+  defp cleanup_caller_id(opts) do
+    case opt(opts, :caller_id) || opt(opts, :actor_id) || opt(opts, :authenticated_principal_id) do
+      id when is_binary(id) and id != "" -> {:ok, id}
+      _ -> {:error, :caller_id_required}
+    end
+  end
+
+  defp normalize_keyword_opts(opts) when is_list(opts), do: opts
+  defp normalize_keyword_opts(opts) when is_map(opts), do: Map.to_list(opts)
+  defp normalize_keyword_opts(_opts), do: []
 
   defp bounded_inspect(term), do: inspect(term, limit: 10, printable_limit: 500)
 

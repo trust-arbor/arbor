@@ -91,6 +91,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     * `:timeout` - optional timeout forwarded in JSON-clean executor context
     * `:caller_id` - optional caller id forwarded in JSON-clean executor context
     * `:approval_answer_cap_id` - private temporary approval-answer capability id
+    * `:approval_cleanup_descriptor` - trusted private data-only lifecycle cleanup
+      descriptor built by `Arbor.Agent.Orchestration` at authenticated dispatch
   """
   @spec dispatch(String.t(), term(), keyword() | map()) :: {:ok, task_id()} | {:error, term()}
   def dispatch(agent_id, task, opts \\ []) do
@@ -191,6 +193,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           steer_cap_id: Keyword.get(opts, :steer_cap_id),
           steer_security_module: Keyword.get(opts, :steer_security_module, Arbor.Security),
           steer_capability_revoke: Keyword.get(opts, :steer_capability_revoke),
+          approval_cleanup_descriptor: Keyword.get(opts, :approval_cleanup_descriptor),
           controls: [],
           control_retries: %{},
           accepted_control_ids: MapSet.new(),
@@ -269,6 +272,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           Process.exit(record.pid, :kill)
         end
 
+        # Facade-owned approval cleanup for :cancelled; discard descriptor so a
+        # late :DOWN cannot double-schedule TaskStore lifecycle cleanup.
+        {record, _descriptor} = take_approval_cleanup_descriptor(record)
+
         cancelled_record =
           record
           |> Map.merge(%{
@@ -341,19 +348,31 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
               nil
 
             record ->
-              if record.state in [:done, :failed, :waiting_approval, :cancelled] do
-                record
-              else
-                record
-                |> Map.merge(%{
-                  state: :failed,
-                  current_step: "failed",
-                  error: reason,
-                  updated_at: now,
-                  completed_at: now
-                })
-                |> reconcile_terminal_controls()
-                |> revoke_task_capabilities()
+              cond do
+                record.state in [:done, :failed, :cancelled] ->
+                  # Result path already terminalized; consume any leftover
+                  # descriptor without rescheduling (exactly-once).
+                  {record, _descriptor} = take_approval_cleanup_descriptor(record)
+                  record
+
+                true ->
+                  {record, descriptor} = take_approval_cleanup_descriptor(record)
+
+                  record =
+                    record
+                    |> Map.merge(%{
+                      state: :failed,
+                      current_step: "failed",
+                      waiting_on: nil,
+                      error: reason,
+                      updated_at: now,
+                      completed_at: now
+                    })
+                    |> reconcile_terminal_controls()
+                    |> revoke_task_capabilities()
+
+                  schedule_approval_cleanup(state, task_id, descriptor)
+                  record
               end
           end)
 
@@ -382,30 +401,45 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           if record.state == :cancelled do
             record
           else
+            # Consume before scheduling so a late :DOWN cannot double-clean.
+            {record, descriptor} = take_approval_cleanup_descriptor(record)
+
+            record =
+              record
+              |> Map.merge(completion_fields(result, now))
+              |> Map.put(:updated_at, now)
+              |> maybe_reconcile_terminal_controls()
+              |> maybe_revoke_completed_task_capabilities()
+
+            schedule_approval_cleanup(state, task_id, descriptor)
             record
-            |> Map.merge(completion_fields(result, now))
-            |> Map.put(:updated_at, now)
-            |> maybe_reconcile_terminal_controls()
-            |> maybe_revoke_completed_task_capabilities()
           end
       end)
 
     remove_ref(state, ref)
   end
 
-  defp completion_fields({:ok, :pending_approval, approval_id}, _now) do
+  # A runner that returns pending-approval has already terminated; never leave
+  # an ownerless task stuck in :waiting_approval.
+  defp completion_fields({:ok, :pending_approval, approval_id}, now)
+       when is_binary(approval_id) do
     %{
-      state: :waiting_approval,
-      current_step: "waiting_approval",
-      waiting_on: approval_id
+      state: :failed,
+      current_step: "failed",
+      waiting_on: nil,
+      error: {:approval_owner_terminated, approval_id},
+      completed_at: now
     }
   end
 
-  defp completion_fields({:error, {:pending_approval, approval_id}}, _now) do
+  defp completion_fields({:error, {:pending_approval, approval_id}}, now)
+       when is_binary(approval_id) do
     %{
-      state: :waiting_approval,
-      current_step: "waiting_approval",
-      waiting_on: approval_id
+      state: :failed,
+      current_step: "failed",
+      waiting_on: nil,
+      error: {:approval_owner_terminated, approval_id},
+      completed_at: now
     }
   end
 
@@ -413,6 +447,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     %{
       state: :done,
       current_step: "done",
+      waiting_on: nil,
       result: normalize_result(result),
       completed_at: now
     }
@@ -422,6 +457,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     %{
       state: :failed,
       current_step: "failed",
+      waiting_on: nil,
       error: reason,
       completed_at: now
     }
@@ -431,6 +467,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     %{
       state: :done,
       current_step: "done",
+      waiting_on: nil,
       result: normalize_result(result),
       completed_at: now
     }
@@ -444,6 +481,70 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp maybe_revoke_completed_task_capabilities(record), do: record
+
+  defp take_approval_cleanup_descriptor(record) do
+    case Map.get(record, :approval_cleanup_descriptor) do
+      nil ->
+        {record, nil}
+
+      descriptor ->
+        {Map.put(record, :approval_cleanup_descriptor, nil), descriptor}
+    end
+  end
+
+  # Best-effort async lifecycle cleanup. Failures never affect terminal state.
+  defp schedule_approval_cleanup(_state, _task_id, nil), do: :ok
+
+  defp schedule_approval_cleanup(state, task_id, descriptor) when is_map(descriptor) do
+    supervisor = Map.fetch!(state, :task_supervisor)
+    cleanup_opts = cleanup_opts_from_descriptor(descriptor)
+
+    _ =
+      Task.Supervisor.start_child(supervisor, fn ->
+        invoke_approval_cleanup(task_id, descriptor, cleanup_opts)
+      end)
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp schedule_approval_cleanup(_state, _task_id, _descriptor), do: :ok
+
+  defp cleanup_opts_from_descriptor(descriptor) when is_map(descriptor) do
+    [
+      caller_id: Map.get(descriptor, :caller_id),
+      consensus_module: Map.get(descriptor, :consensus_module),
+      interaction_router: Map.get(descriptor, :interaction_router),
+      audit_module: Map.get(descriptor, :audit_module),
+      trace_id: Map.get(descriptor, :trace_id),
+      cleanup_reason: :task_termination
+    ]
+    |> maybe_put_opt(:notify_pid, Map.get(descriptor, :notify_pid))
+  end
+
+  defp maybe_put_opt(opts, _key, nil), do: opts
+  defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp invoke_approval_cleanup(task_id, descriptor, cleanup_opts) do
+    case Map.get(descriptor, :mfa) do
+      {module, function, 2} when is_atom(module) and is_atom(function) ->
+        if Code.ensure_loaded?(module) and function_exported?(module, function, 2) do
+          apply(module, function, [task_id, cleanup_opts])
+        else
+          :ok
+        end
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
 
   # ---------------------------------------------------------------------------
   # Steering mailbox
@@ -1106,7 +1207,14 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           end
 
         :full_opts ->
-          {:ok, runner, :full_opts, task, Keyword.put(opts, :task_id, task_id)}
+          # Keep the trusted cleanup descriptor on the store record only; never
+          # hand it to the runner (no payload/runner authority over cleanup).
+          runner_context =
+            opts
+            |> Keyword.put(:task_id, task_id)
+            |> Keyword.delete(:approval_cleanup_descriptor)
+
+          {:ok, runner, :full_opts, task, runner_context}
       end
     end
   end

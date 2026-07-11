@@ -24,6 +24,44 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     end
   end
 
+  defmodule PendingErrorRunner do
+    def run(_agent_id, _task, _opts) do
+      {:error, {:pending_approval, "approval_err_1"}}
+    end
+  end
+
+  defmodule CrashRunner do
+    def run(agent_id, task, opts) do
+      test_pid = Keyword.fetch!(opts, :test_pid)
+      send(test_pid, {:runner_started, self(), agent_id, task, opts})
+
+      receive do
+        :crash -> exit(:abnormal_crash)
+      after
+        1_000 -> exit(:test_timeout)
+      end
+    end
+  end
+
+  defmodule LifecycleCleanupProbe do
+    def cleanup(task_id, opts) do
+      if pid = Keyword.get(opts, :notify_pid) do
+        send(pid, {:lifecycle_cleanup, task_id, opts})
+      end
+
+      case Application.get_env(:arbor_agent, :lifecycle_cleanup_behavior, :ok) do
+        :ok ->
+          :ok
+
+        :raise ->
+          raise "lifecycle cleanup boom"
+
+        :hang ->
+          Process.sleep(60_000)
+      end
+    end
+  end
+
   defmodule CodingChangeExecutor do
     def run(agent_id, task, context) do
       test_pid = recording_pid()
@@ -209,8 +247,10 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     original_progress = Application.get_env(:arbor_agent, :task_store_test_progress)
     original_cancel = Application.get_env(:arbor_agent, :task_store_test_cancel)
     original_steer = Application.get_env(:arbor_agent, :task_store_test_steer)
+    original_cleanup_behavior = Application.get_env(:arbor_agent, :lifecycle_cleanup_behavior)
 
     Application.put_env(:arbor_agent, :task_store_test_pid, self())
+    Application.put_env(:arbor_agent, :lifecycle_cleanup_behavior, :ok)
 
     on_exit(fn ->
       restore_env(:task_executors, original_executors)
@@ -219,6 +259,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       restore_env(:task_store_test_progress, original_progress)
       restore_env(:task_store_test_cancel, original_cancel)
       restore_env(:task_store_test_steer, original_steer)
+      restore_env(:lifecycle_cleanup_behavior, original_cleanup_behavior)
     end)
 
     {:ok, store: store, supervisor: supervisor}
@@ -580,21 +621,175 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert status.steering["last"]["delivered_at"] == nil
   end
 
-  test "records pending approval tasks as waiting_approval", %{store: store} do
+  test "security regression: pending-approval runner termination fails closed and cleans up once",
+       %{store: store} do
+    descriptor = cleanup_descriptor(self())
+
     assert {:ok, task_id} =
              TaskStore.dispatch("agent_1", "do gated work",
                name: store,
-               runner: PendingRunner
+               runner: PendingRunner,
+               approval_answer_cap_id: "cap_pending_owner",
+               approval_answer_revoke: revoke_to(self()),
+               approval_cleanup_descriptor: descriptor
              )
 
     assert_eventually(fn ->
       assert {:ok, status} = TaskStore.status(task_id, name: store)
-      assert status.state == :waiting_approval
-      assert status.waiting_on == "approval_1"
-      assert {:error, {:waiting_approval, "approval_1"}} = TaskStore.result(task_id, name: store)
+      assert status.state == :failed
+      assert status.waiting_on == nil
+      assert status.completed_at
+
+      assert {:error, {:failed, {:approval_owner_terminated, "approval_1"}}} =
+               TaskStore.result(task_id, name: store)
     end)
 
-    refute_received {:revoke_approval_answer_capability, _}
+    assert_receive {:lifecycle_cleanup, ^task_id, cleanup_opts}, 500
+    assert cleanup_opts[:caller_id] == "dispatch_owner"
+    assert cleanup_opts[:cleanup_reason] == :task_termination
+    assert cleanup_opts[:notify_pid] == self()
+    assert_receive {:revoke_approval_answer_capability, "cap_pending_owner"}
+    refute_receive {:lifecycle_cleanup, ^task_id, _}, 50
+  end
+
+  test "pending-approval error tuple also fails closed with owner-terminated error", %{
+    store: store
+  } do
+    descriptor = cleanup_descriptor(self())
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "do gated work",
+               name: store,
+               runner: PendingErrorRunner,
+               approval_cleanup_descriptor: descriptor
+             )
+
+    assert_eventually(fn ->
+      assert {:error, {:failed, {:approval_owner_terminated, "approval_err_1"}}} =
+               TaskStore.result(task_id, name: store)
+    end)
+
+    assert_receive {:lifecycle_cleanup, ^task_id, _opts}, 500
+  end
+
+  test "successful completion schedules lifecycle approval cleanup exactly once", %{store: store} do
+    descriptor = cleanup_descriptor(self())
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "do work",
+               name: store,
+               test_pid: self(),
+               runner: ControlledRunner,
+               approval_cleanup_descriptor: descriptor
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_1", "do work", runner_opts}
+    refute Keyword.has_key?(runner_opts, :approval_cleanup_descriptor)
+
+    send(runner_pid, {:finish, {:ok, %{result_type: :test, payload: %{ok: true}, raw: "ok"}}})
+
+    assert_eventually(fn ->
+      assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store)
+      assert {:ok, %{result_type: :test}} = TaskStore.result(task_id, name: store)
+    end)
+
+    assert_receive {:lifecycle_cleanup, ^task_id, opts}, 500
+    assert opts[:cleanup_reason] == :task_termination
+    refute_receive {:lifecycle_cleanup, ^task_id, _}, 50
+  end
+
+  test "returned error and pipeline timeout schedule lifecycle approval cleanup", %{store: store} do
+    descriptor = cleanup_descriptor(self())
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "do work",
+               name: store,
+               test_pid: self(),
+               runner: ControlledRunner,
+               approval_cleanup_descriptor: descriptor
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_1", "do work", _}
+    send(runner_pid, {:finish, {:error, :pipeline_timeout}})
+
+    assert_eventually(fn ->
+      assert {:error, {:failed, :pipeline_timeout}} = TaskStore.result(task_id, name: store)
+    end)
+
+    assert_receive {:lifecycle_cleanup, ^task_id, _opts}, 500
+  end
+
+  test "abnormal DOWN schedules lifecycle approval cleanup", %{store: store} do
+    descriptor = cleanup_descriptor(self())
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "do work",
+               name: store,
+               test_pid: self(),
+               runner: CrashRunner,
+               approval_cleanup_descriptor: descriptor
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_1", "do work", _}
+    send(runner_pid, :crash)
+
+    assert_eventually(fn ->
+      assert {:ok, %{state: :failed}} = TaskStore.status(task_id, name: store)
+      assert {:error, {:failed, :abnormal_crash}} = TaskStore.result(task_id, name: store)
+    end)
+
+    assert_receive {:lifecycle_cleanup, ^task_id, _opts}, 500
+    refute_receive {:lifecycle_cleanup, ^task_id, _}, 50
+  end
+
+  test "cleanup failure never changes terminal result availability", %{store: store} do
+    Application.put_env(:arbor_agent, :lifecycle_cleanup_behavior, :raise)
+    descriptor = cleanup_descriptor(self())
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "do work",
+               name: store,
+               test_pid: self(),
+               runner: ControlledRunner,
+               approval_cleanup_descriptor: descriptor
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_1", "do work", _}
+
+    send(
+      runner_pid,
+      {:finish, {:ok, %{result_type: :test, payload: %{ok: true}, raw: "survived"}}}
+    )
+
+    assert_eventually(fn ->
+      assert {:ok, result} = TaskStore.result(task_id, name: store)
+      assert result.payload.ok == true
+      assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store)
+    end)
+
+    assert_receive {:lifecycle_cleanup, ^task_id, _opts}, 500
+
+    # Result remains available after the cleanup process crashes.
+    assert {:ok, result} = TaskStore.result(task_id, name: store)
+    assert result.payload.ok == true
+  end
+
+  test "cancel does not schedule TaskStore lifecycle cleanup (facade owns that path)", %{
+    store: store
+  } do
+    descriptor = cleanup_descriptor(self())
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "do work",
+               name: store,
+               test_pid: self(),
+               runner: ControlledRunner,
+               approval_cleanup_descriptor: descriptor
+             )
+
+    assert_receive {:runner_started, _runner_pid, "agent_1", "do work", _}
+    assert {:ok, %{state: :cancelled}} = TaskStore.cancel(task_id, name: store)
+    refute_receive {:lifecycle_cleanup, ^task_id, _}, 100
   end
 
   test "cancels a running task and keeps it cancelled after the process exits", %{store: store} do
@@ -1421,6 +1616,18 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
         Process.sleep(10)
         assert_eventually(fun, attempts - 1)
       end
+  end
+
+  defp cleanup_descriptor(notify_pid) do
+    %{
+      mfa: {LifecycleCleanupProbe, :cleanup, 2},
+      caller_id: "dispatch_owner",
+      consensus_module: nil,
+      interaction_router: nil,
+      audit_module: nil,
+      trace_id: "trace_cleanup",
+      notify_pid: notify_pid
+    }
   end
 
   defp revoke_to(test_pid) do
