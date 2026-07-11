@@ -531,6 +531,53 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
                )
     end
 
+    # Security regression: malformed private keys must return a typed error,
+    # never raise from :crypto.sign/5 (ErlangError "Couldn't get EDDSA private key").
+    test "rejects malformed private key lengths and non-binary input (security regression)",
+         ctx do
+      # One-byte key: accepted by the old byte_size > 0 guard, then crashed in crypto.
+      assert {:error, :invalid_private_key} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 <<1>>,
+                 purpose: :session
+               )
+
+      # Other wrong lengths (including empty).
+      for bad <- [
+            <<>>,
+            :crypto.strong_rand_bytes(16),
+            :crypto.strong_rand_bytes(33),
+            :crypto.strong_rand_bytes(63),
+            :crypto.strong_rand_bytes(65)
+          ] do
+        assert {:error, :invalid_private_key} =
+                 Security.build_signing_authority_acquisition_proof(
+                   ctx.agent_id,
+                   bad,
+                   purpose: :session
+                 )
+      end
+
+      # Structurally invalid 64-byte material that passes size checks must not raise.
+      assert {:error, :invalid_private_key} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 :crypto.strong_rand_bytes(64),
+                 purpose: :session
+               )
+
+      # Non-binary private key input.
+      for bad <- [nil, :atom, 123, %{key: <<1>>}, [1, 2, 3]] do
+        assert {:error, :invalid_private_key} =
+                 Security.build_signing_authority_acquisition_proof(
+                   ctx.agent_id,
+                   bad,
+                   purpose: :session
+                 )
+      end
+    end
+
     test "rejects non-proof open arguments", ctx do
       assert {:error, :possession_proof_required} =
                Security.open_signing_authority(ctx.agent_id)

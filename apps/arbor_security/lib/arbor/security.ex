@@ -1062,8 +1062,7 @@ defmodule Arbor.Security do
   def build_signing_authority_acquisition_proof(agent_id, private_key, opts \\ [])
 
   def build_signing_authority_acquisition_proof(agent_id, private_key, opts)
-      when is_binary(agent_id) and is_binary(private_key) and
-             (is_list(opts) or is_map(opts)) do
+      when is_binary(agent_id) and (is_list(opts) or is_map(opts)) do
     with :ok <- validate_principal_id_for_authority(agent_id),
          :ok <- validate_private_key_for_authority(private_key),
          {:ok, purpose} <- fetch_required_attr(opts, :purpose, :invalid_purpose),
@@ -1071,7 +1070,7 @@ defmodule Arbor.Security do
          {:ok, owner} <- fetch_owner_attr(opts),
          :ok <- validate_owner_pid(owner) do
       payload = SigningAuthorityBroker.acquisition_payload(agent_id, purpose, owner)
-      SignedRequest.sign(payload, agent_id, private_key)
+      sign_acquisition_proof(payload, agent_id, private_key)
     end
   end
 
@@ -1209,8 +1208,35 @@ defmodule Arbor.Security do
 
   defp validate_principal_id_for_authority(_), do: {:error, :invalid_principal_id}
 
-  defp validate_private_key_for_authority(key) when is_binary(key) and byte_size(key) > 0, do: :ok
+  # Ed25519 accepts 32-byte seeds and 64-byte expanded private keys only.
+  # Other sizes (and non-binaries) must fail closed as a typed error — never
+  # reach :crypto.sign/5, which raises ErlangError on bad key material.
+  defp validate_private_key_for_authority(key)
+       when is_binary(key) and byte_size(key) in [32, 64],
+       do: :ok
+
   defp validate_private_key_for_authority(_), do: {:error, :invalid_private_key}
+
+  defp sign_acquisition_proof(payload, agent_id, private_key) do
+    try do
+      SignedRequest.sign(payload, agent_id, private_key)
+    rescue
+      error in ErlangError ->
+        if eddsa_private_key_error?(error) do
+          {:error, :invalid_private_key}
+        else
+          reraise error, __STACKTRACE__
+        end
+    end
+  end
+
+  # Match only the known OTP bad-key shape; re-raise everything else.
+  defp eddsa_private_key_error?(%ErlangError{original: {:badarg, {_file, _line}, reason}})
+       when is_list(reason) do
+    List.to_string(reason) =~ "EDDSA private key"
+  end
+
+  defp eddsa_private_key_error?(_), do: false
 
   # Booleans are atoms — reject before the generic atom accept.
   defp validate_authority_purpose(purpose) when is_boolean(purpose),
