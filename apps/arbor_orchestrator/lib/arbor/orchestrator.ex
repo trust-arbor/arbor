@@ -240,9 +240,12 @@ defmodule Arbor.Orchestrator do
   @spec compile(String.t() | Graph.t(), keyword()) ::
           {:ok, Graph.t()} | {:error, term()}
   def compile(source_or_graph, opts \\ []) do
-    with {:ok, graph} <- ensure_graph(source_or_graph, opts) do
-      IR.Compiler.compile(graph)
-    end
+    # ensure_graph/2 already runs built-ins → IR.Compiler (once) → custom
+    # transforms. A second IR.Compiler.compile/1 would re-inject alias defaults
+    # and recompute static analysis from post-IR mutations, violating the
+    # documented contract that custom transforms cannot influence compiler
+    # analyses (and wasting O(nodes+edges) work on cache hits).
+    ensure_graph(source_or_graph, opts)
   end
 
   @doc """
