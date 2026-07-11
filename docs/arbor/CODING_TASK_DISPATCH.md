@@ -69,8 +69,10 @@ export ARBOR_CODING_EXECUTOR=legacy
 # then start the Arbor node / release
 ```
 
-Unset or `pipeline` keeps the default DOT path. Invalid selector values fail
-startup (fail closed).
+Unset or `pipeline` keeps the default DOT path. Runtime config stores the raw
+operator value without loading optional umbrella child modules; `arbor_agent`
+validates it before starting children. Invalid selector values fail agent
+startup (fail closed), while lower-level apps remain independently bootable.
 
 The legacy executor (`Arbor.Agent.Orchestration.LegacyCodingTaskExecutor`):
 

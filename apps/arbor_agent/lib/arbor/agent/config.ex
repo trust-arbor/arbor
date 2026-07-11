@@ -31,9 +31,10 @@ defmodule Arbor.Agent.Config do
 
   ## Coding executor route (operator-only)
 
-  The closed selector `ARBOR_CODING_EXECUTOR=pipeline|legacy` is evaluated at
-  config load (`config/runtime.exs`). Default is `pipeline`. Invalid values
-  fail config evaluation. Task payloads never select this route.
+  The closed selector `ARBOR_CODING_EXECUTOR=pipeline|legacy` is copied into
+  application config by `config/runtime.exs` and validated when `arbor_agent`
+  starts. Default is `pipeline`. Invalid values fail agent startup. Task
+  payloads never select this route.
   """
 
   @app :arbor_agent
@@ -46,7 +47,17 @@ defmodule Arbor.Agent.Config do
   @doc "Return the operator-selected coding executor mode."
   @spec coding_executor_mode() :: :pipeline | :legacy
   def coding_executor_mode do
-    Application.get_env(@app, :coding_executor_mode, :pipeline)
+    case Application.get_env(@app, :coding_executor_mode) do
+      mode when mode in [:pipeline, :legacy] -> mode
+      configured -> require_coding_executor_mode!(configured)
+    end
+  end
+
+  @doc "Validate operator-owned runtime configuration before starting children."
+  @spec validate_runtime!() :: :ok
+  def validate_runtime! do
+    _mode = coding_executor_mode()
+    :ok
   end
 
   @doc """
@@ -73,8 +84,8 @@ defmodule Arbor.Agent.Config do
   @doc """
   Raise when `value` is not a closed coding-executor mode.
 
-  Used by root `config/runtime.exs` so invalid `ARBOR_CODING_EXECUTOR` values
-  fail startup/config evaluation.
+  Used at `arbor_agent` startup so invalid `ARBOR_CODING_EXECUTOR` values fail
+  closed without making umbrella runtime config load this optional app.
   """
   @spec require_coding_executor_mode!(term()) :: :pipeline | :legacy
   def require_coding_executor_mode!(value) do
@@ -151,10 +162,23 @@ defmodule Arbor.Agent.Config do
   """
   @spec task_executors() :: map()
   def task_executors do
-    case Application.get_env(@app, :task_executors, %{}) do
-      executors when is_map(executors) -> executors
-      executors when is_list(executors) -> Map.new(executors)
-      _ -> %{}
+    configured =
+      case Application.get_env(@app, :task_executors, %{}) do
+        executors when is_map(executors) -> executors
+        executors when is_list(executors) -> Map.new(executors)
+        _ -> %{}
+      end
+
+    case coding_executor_mode() do
+      :pipeline ->
+        configured
+
+      :legacy ->
+        Map.put(
+          configured,
+          "coding_change",
+          Arbor.Agent.Orchestration.LegacyCodingTaskExecutor
+        )
     end
   end
 

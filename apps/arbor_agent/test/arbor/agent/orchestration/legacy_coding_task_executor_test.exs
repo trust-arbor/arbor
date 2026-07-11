@@ -117,7 +117,7 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutorTest do
       assert :legacy = Config.require_coding_executor_mode!("legacy")
     end
 
-    test "invalid values fail closed (config evaluation raise)" do
+    test "invalid values fail closed at agent startup validation" do
       assert {:error, {:invalid_coding_executor, "auto"}} =
                Config.coding_executor_mode("auto")
 
@@ -146,7 +146,7 @@ defmodule Arbor.Agent.Orchestration.LegacyCodingTaskExecutorTest do
       Application.put_env(:arbor_agent, :coding_executor_mode, :legacy)
 
       Application.put_env(:arbor_agent, :task_executors, %{
-        "coding_change" => LegacyCodingTaskExecutor
+        "coding_change" => PipelineExecutor
       })
 
       assert Config.coding_executor_mode() == :legacy
