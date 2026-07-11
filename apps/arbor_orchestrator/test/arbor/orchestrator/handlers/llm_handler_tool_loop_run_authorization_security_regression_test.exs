@@ -57,7 +57,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerToolLoopRunAuthorizationSecurity
 
     case ActionRegistry.register_action(Arbor.Actions.Tool.Help) do
       :ok -> :ok
+      # Already present (unlocked or core-locked by Registrar.register_core/0)
       {:error, :already_registered} -> :ok
+      {:error, :core_locked} -> :ok
     end
 
     :ok

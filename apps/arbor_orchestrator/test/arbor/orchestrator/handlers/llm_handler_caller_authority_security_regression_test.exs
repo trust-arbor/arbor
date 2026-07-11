@@ -167,7 +167,9 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerCallerAuthoritySecurityRegressio
   defp ensure_registered(module) do
     case ActionRegistry.register_action(module) do
       :ok -> :ok
+      # Already present (unlocked or core-locked by Registrar.register_core/0)
       {:error, :already_registered} -> :ok
+      {:error, :core_locked} -> :ok
     end
   end
 end

@@ -18,9 +18,14 @@ defmodule Arbor.Orchestrator.Handlers.ExecutionDelegateBindingSecurityRegression
     AlternateComputeDelegate
   }
 
+  @owned_registries [ComputeRegistry, PipelineResolver]
+
   setup do
-    ensure_registry_started(ComputeRegistry)
-    ensure_registry_started(PipelineResolver)
+    # Own both registries for the duration of each test. Prefer the
+    # Application-started GenServers when present; otherwise start under
+    # the test supervisor. Snapshot after register_core so restore returns
+    # a known-good core-locked baseline.
+    for registry <- @owned_registries, do: ensure_registry_started(registry)
     :ok = Arbor.Orchestrator.Registrar.register_core()
 
     compute_snapshot = ComputeRegistry.snapshot()
@@ -37,45 +42,54 @@ defmodule Arbor.Orchestrator.Handlers.ExecutionDelegateBindingSecurityRegression
     File.mkdir_p!(root)
     {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
 
+    # Env/temp cleanup only. Registry restore is done in try/after inside
+    # each mutating test so it runs while the GenServers are still alive
+    # (before any supervised teardown).
     on_exit(fn ->
-      restore_registry(ComputeRegistry, compute_snapshot)
-      restore_registry(PipelineResolver, pipeline_snapshot)
       restore_env(:phase5_delegate_binding_test_pid, previous_pid)
       File.rm_rf(root)
     end)
 
-    %{root: root}
+    %{
+      root: root,
+      compute_snapshot: compute_snapshot,
+      pipeline_snapshot: pipeline_snapshot
+    }
   end
 
   test "security regression: compute registry replacement is rejected at delegate dispatch", %{
-    root: root
+    root: root,
+    compute_snapshot: compute_snapshot,
+    pipeline_snapshot: pipeline_snapshot
   } do
-    graph =
-      compiled_graph!("""
-      digraph ComputeDelegateBinding {
-        start [shape=Mdiamond]
-        route [type="compute", purpose="routing"]
-        done [shape=Msquare]
-        start -> route -> done
-      }
-      """)
+    with_registry_restore(compute_snapshot, pipeline_snapshot, fn ->
+      graph =
+        compiled_graph!("""
+        digraph ComputeDelegateBinding {
+          start [shape=Mdiamond]
+          route [type="compute", purpose="routing"]
+          done [shape=Msquare]
+          start -> route -> done
+        }
+        """)
 
-    authority = authority!(graph, root)
-    :ok = ComputeRegistry.reset()
-    :ok = ComputeRegistry.register("routing", AlternateComputeDelegate)
+      authority = authority!(graph, root)
+      :ok = ComputeRegistry.reset()
+      :ok = ComputeRegistry.register("routing", AlternateComputeDelegate)
 
-    outcome =
-      ComputeHandler.execute(
-        graph.nodes["route"],
-        Context.new(),
-        graph,
-        run_authorization: authority
-      )
+      outcome =
+        ComputeHandler.execute(
+          graph.nodes["route"],
+          Context.new(),
+          graph,
+          run_authorization: authority
+        )
 
-    assert outcome.status == :fail
-    assert outcome.failure_reason =~ "execution_delegate_binding_mismatch"
-    assert outcome.failure_reason =~ "module"
-    refute_received :alternate_compute_delegate_executed
+      assert outcome.status == :fail
+      assert outcome.failure_reason =~ "execution_delegate_binding_mismatch"
+      assert outcome.failure_reason =~ "module"
+      refute_received :alternate_compute_delegate_executed
+    end)
   end
 
   test "security regression: stale delegate BEAM binding is rejected immediately before invocation",
@@ -122,34 +136,38 @@ defmodule Arbor.Orchestrator.Handlers.ExecutionDelegateBindingSecurityRegression
   end
 
   test "security regression: compose resolver replacement is rejected at delegate dispatch", %{
-    root: root
+    root: root,
+    compute_snapshot: compute_snapshot,
+    pipeline_snapshot: pipeline_snapshot
   } do
-    graph =
-      compiled_graph!("""
-      digraph ComposeDelegateBinding {
-        start [shape=Mdiamond]
-        child [type="compose", mode="compose", source_key="child_dot"]
-        done [shape=Msquare]
-        start -> child -> done
-      }
-      """)
+    with_registry_restore(compute_snapshot, pipeline_snapshot, fn ->
+      graph =
+        compiled_graph!("""
+        digraph ComposeDelegateBinding {
+          start [shape=Mdiamond]
+          child [type="compose", mode="compose", source_key="child_dot"]
+          done [shape=Msquare]
+          start -> child -> done
+        }
+        """)
 
-    authority = authority!(graph, root)
-    :ok = PipelineResolver.reset()
-    :ok = PipelineResolver.register("compose", AlternateComposeDelegate)
+      authority = authority!(graph, root)
+      :ok = PipelineResolver.reset()
+      :ok = PipelineResolver.register("compose", AlternateComposeDelegate)
 
-    outcome =
-      ComposeHandler.execute(
-        graph.nodes["child"],
-        Context.new(),
-        graph,
-        run_authorization: authority
-      )
+      outcome =
+        ComposeHandler.execute(
+          graph.nodes["child"],
+          Context.new(),
+          graph,
+          run_authorization: authority
+        )
 
-    assert outcome.status == :fail
-    assert outcome.failure_reason =~ "execution_delegate_binding_mismatch"
-    assert outcome.failure_reason =~ "module"
-    refute_received :alternate_compose_delegate_executed
+      assert outcome.status == :fail
+      assert outcome.failure_reason =~ "execution_delegate_binding_mismatch"
+      assert outcome.failure_reason =~ "module"
+      refute_received :alternate_compose_delegate_executed
+    end)
   end
 
   test "security regression: exec cannot replace its pinned actions executor", %{root: root} do
@@ -189,6 +207,17 @@ defmodule Arbor.Orchestrator.Handlers.ExecutionDelegateBindingSecurityRegression
     assert outcome.failure_reason =~ "execution_delegate_binding_mismatch"
     assert outcome.failure_reason =~ "module"
     refute_received :alternate_actions_executor_executed
+  end
+
+  defp with_registry_restore(compute_snapshot, pipeline_snapshot, fun) do
+    try do
+      fun.()
+    after
+      # Restore while GenServers are still alive — must run before any
+      # supervised registry teardown that ExUnit may perform after the test.
+      restore_registry(ComputeRegistry, compute_snapshot)
+      restore_registry(PipelineResolver, pipeline_snapshot)
+    end
   end
 
   defp authority!(graph, root) do
@@ -242,10 +271,11 @@ defmodule Arbor.Orchestrator.Handlers.ExecutionDelegateBindingSecurityRegression
     if is_nil(Process.whereis(registry)) do
       start_supervised!({registry, []})
     end
+
+    :ok
   end
 
   defp restore_registry(registry, snapshot) do
-    # A registry started by this test is stopped by the ExUnit test supervisor.
     if Process.whereis(registry) do
       registry.restore(snapshot)
     end
