@@ -235,6 +235,9 @@ defmodule Arbor.Agent.Orchestration do
     |> normalize_task_status_result()
   end
 
+  # Facade projection only: a still-running task may surface as :waiting_approval
+  # when a same-task pending approval exists. Ownerless pending-approval runner
+  # returns are fail-closed to :failed by TaskStore and are not projected here.
   defp enrich_waiting_approval(%{state: :running, agent_id: agent_id} = status, opts)
        when is_binary(agent_id) do
     task_id = Map.get(status, :task_id)
@@ -405,17 +408,19 @@ defmodule Arbor.Agent.Orchestration do
     |> Keyword.put(:approval_cleanup_descriptor, approval_cleanup_descriptor(caller_id, opts))
   end
 
-  # Data only — never MFA/function/callback selection. TaskStore owns the
-  # trusted cleanup entrypoint fixed at store initialization.
+  # Closed scalar data only — never MFA/module/function/fun/PID selection.
+  # TaskStore pins cleanup MFA, backend modules, and cleanup supervisor at init.
   defp approval_cleanup_descriptor(caller_id, opts) do
-    %{
-      caller_id: caller_id,
-      consensus_module: consensus_module(opts),
-      interaction_router: interaction_router(opts),
-      audit_module: audit_module(opts),
-      trace_id: opt(opts, :trace_id)
-    }
+    %{caller_id: caller_id}
+    |> maybe_put_cleanup_trace_id(opt(opts, :trace_id))
   end
+
+  defp maybe_put_cleanup_trace_id(descriptor, trace_id)
+       when is_binary(trace_id) and trace_id != "" do
+    Map.put(descriptor, :trace_id, trace_id)
+  end
+
+  defp maybe_put_cleanup_trace_id(descriptor, _trace_id), do: descriptor
 
   defp dispatch_with_task_capabilities(agent_id, task, task_id, caller_id, opts) do
     case grant_task_approval_answer(caller_id, task_id, opts) do

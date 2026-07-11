@@ -38,6 +38,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_task_supervisor Arbor.Agent.Orchestration.TaskSupervisor
   @default_runner Arbor.Agent.Orchestration.TaskRunner
   @default_approval_cleanup_mfa {Arbor.Agent.Orchestration, :cleanup_approvals_for_task, 2}
+  @default_approval_cleanup_consensus Arbor.Consensus
+  # Avoid a hard compile-time dep edge on arbor_comms; same default as Orchestration.
+  @default_approval_cleanup_interaction_router Module.concat([:Arbor, :Comms, :InteractionRouter])
+  @default_approval_cleanup_audit Arbor.Security
   @default_max_tasks 1_000
   @default_steer_retry_delay_ms 100
   @default_max_steer_retry_delay_ms 5_000
@@ -48,6 +52,10 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   alias Arbor.Agent.Orchestration.TaskArtifacts
 
   @type task_id :: String.t()
+  # :waiting_approval is retained for status projection / facade enrichment
+  # (Orchestration.task_status/2 still surfaces it for running tasks with a
+  # pending approval). Ownerless runner pending-approval results fail closed to
+  # :failed — they must not leave a terminal task stuck waiting.
   @type state_name :: :running | :waiting_approval | :done | :failed | :cancelled
 
   @type task_status :: %{
@@ -100,11 +108,13 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     * `:timeout` - optional timeout forwarded in JSON-clean executor context
     * `:caller_id` - optional caller id forwarded in JSON-clean executor context
     * `:approval_answer_cap_id` - private temporary approval-answer capability id
-    * `:approval_cleanup_descriptor` - private data-only lifecycle cleanup
-      descriptor (caller_id, backend modules, trace_id, metadata). Must not
-      contain MFA/function/callback selection; the cleanup entrypoint is fixed
-      at TaskStore init (production default
-      `Arbor.Agent.Orchestration.cleanup_approvals_for_task/2`)
+    * `:approval_cleanup_descriptor` - private closed scalar lifecycle cleanup
+      descriptor only (`caller_id` and optional `trace_id`). Executable
+      selectors (MFA, modules, functions, PIDs) are stripped on store and never
+      retained. Cleanup MFA, Consensus/InteractionRouter/Audit modules, and the
+      cleanup supervisor are pinned at TaskStore init (production defaults:
+      `Orchestration.cleanup_approvals_for_task/2`, real backends, normal task
+      supervisor). Tests may override those only at store start.
   """
   @spec dispatch(String.t(), term(), keyword() | map()) :: {:ok, task_id()} | {:error, term()}
   def dispatch(agent_id, task, opts \\ []) do
@@ -150,15 +160,35 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       |> Keyword.get(:approval_cleanup_mfa, @default_approval_cleanup_mfa)
       |> validate_approval_cleanup_mfa!()
 
+    task_supervisor = Keyword.get(opts, :task_supervisor, @default_task_supervisor)
+    # Optional separate supervisor for cleanup scheduling (tests may suspend it).
+    # Production default is the same normal task supervisor.
+    cleanup_supervisor = Keyword.get(opts, :cleanup_supervisor, task_supervisor)
+
     {:ok,
      %{
-       task_supervisor: Keyword.get(opts, :task_supervisor, @default_task_supervisor),
+       task_supervisor: task_supervisor,
+       cleanup_supervisor: cleanup_supervisor,
        runner: Keyword.get(opts, :runner, @default_runner),
        # When true, store-level `:runner` overrides kind-based Config selection.
        runner_override: Keyword.has_key?(opts, :runner),
-       # Trusted cleanup entrypoint fixed at store start (not per-dispatch).
-       # Tests may override with a probe MFA; never accepted via dispatch opts.
+       # Trusted cleanup selectors fixed at store start (not per-dispatch).
+       # Tests may override; never accepted via dispatch opts/descriptor.
        approval_cleanup_mfa: approval_cleanup_mfa,
+       approval_cleanup_consensus_module:
+         Keyword.get(
+           opts,
+           :approval_cleanup_consensus_module,
+           @default_approval_cleanup_consensus
+         ),
+       approval_cleanup_interaction_router:
+         Keyword.get(
+           opts,
+           :approval_cleanup_interaction_router,
+           @default_approval_cleanup_interaction_router
+         ),
+       approval_cleanup_audit_module:
+         Keyword.get(opts, :approval_cleanup_audit_module, @default_approval_cleanup_audit),
        max_tasks: Keyword.get(opts, :max_tasks, @default_max_tasks),
        executor_callback_timeout_ms:
          Keyword.get(opts, :executor_callback_timeout_ms, Config.executor_callback_timeout_ms()),
@@ -213,7 +243,9 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           steer_cap_id: Keyword.get(opts, :steer_cap_id),
           steer_security_module: Keyword.get(opts, :steer_security_module, Arbor.Security),
           steer_capability_revoke: Keyword.get(opts, :steer_capability_revoke),
-          approval_cleanup_descriptor: Keyword.get(opts, :approval_cleanup_descriptor),
+          # Closed scalar only — executable keys are never retained on the record.
+          approval_cleanup_descriptor:
+            normalize_approval_cleanup_descriptor(Keyword.get(opts, :approval_cleanup_descriptor)),
           controls: [],
           control_retries: %{},
           accepted_control_ids: MapSet.new(),
@@ -361,41 +393,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     case Map.fetch(state.refs, ref) do
       {:ok, task_id} ->
         now = DateTime.utc_now()
-
-        state =
-          update_in(state.tasks[task_id], fn
-            nil ->
-              nil
-
-            record ->
-              cond do
-                record.state in [:done, :failed, :cancelled] ->
-                  # Result path already terminalized; consume any leftover
-                  # descriptor without rescheduling (exactly-once).
-                  {record, _descriptor} = take_approval_cleanup_descriptor(record)
-                  record
-
-                true ->
-                  {record, descriptor} = take_approval_cleanup_descriptor(record)
-
-                  record =
-                    record
-                    |> Map.merge(%{
-                      state: :failed,
-                      current_step: "failed",
-                      waiting_on: nil,
-                      error: reason,
-                      updated_at: now,
-                      completed_at: now
-                    })
-                    |> reconcile_terminal_controls()
-                    |> revoke_task_capabilities()
-
-                  schedule_approval_cleanup(state, task_id, descriptor)
-                  record
-              end
-          end)
-
+        {state, cleanup_job} = terminalize_abnormal_down(state, task_id, reason, now)
+        state = enqueue_approval_cleanup_job(state, cleanup_job)
         {:noreply, remove_ref(state, ref)}
 
       :error ->
@@ -407,36 +406,90 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     {:noreply, deliver_control(state, task_id, control_id)}
   end
 
+  # Private cleanup job: terminal state is already published. Launch off-process
+  # so a stalled cleanup supervisor cannot block status/result handling.
+  def handle_info({:run_approval_cleanup, task_id, descriptor}, state) do
+    launch_approval_cleanup(state, task_id, descriptor)
+    {:noreply, state}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   defp complete_task(state, task_id, ref, result) do
     now = DateTime.utc_now()
+    {state, cleanup_job} = terminalize_completion(state, task_id, result, now)
+    state = enqueue_approval_cleanup_job(state, cleanup_job)
+    remove_ref(state, ref)
+  end
 
-    state =
-      update_in(state.tasks[task_id], fn
-        nil ->
-          nil
+  # Publish terminal record first; return optional cleanup job for later mailbox drain.
+  defp terminalize_completion(state, task_id, result, now) do
+    case Map.fetch(state.tasks, task_id) do
+      {:ok, record} ->
+        if record.state == :cancelled do
+          {state, nil}
+        else
+          # Consume before enqueue so a late :DOWN cannot double-clean.
+          {record, descriptor} = take_approval_cleanup_descriptor(record)
 
-        record ->
-          if record.state == :cancelled do
+          record =
             record
-          else
-            # Consume before scheduling so a late :DOWN cannot double-clean.
+            |> Map.merge(completion_fields(result, now))
+            |> Map.put(:updated_at, now)
+            |> maybe_reconcile_terminal_controls()
+            |> maybe_revoke_completed_task_capabilities()
+
+          {put_in(state.tasks[task_id], record), cleanup_job(task_id, descriptor)}
+        end
+
+      :error ->
+        {state, nil}
+    end
+  end
+
+  defp terminalize_abnormal_down(state, task_id, reason, now) do
+    case Map.fetch(state.tasks, task_id) do
+      {:ok, record} ->
+        cond do
+          record.state in [:done, :failed, :cancelled] ->
+            # Result path already terminalized; consume any leftover descriptor
+            # without rescheduling (exactly-once).
+            {record, _descriptor} = take_approval_cleanup_descriptor(record)
+            {put_in(state.tasks[task_id], record), nil}
+
+          true ->
             {record, descriptor} = take_approval_cleanup_descriptor(record)
 
             record =
               record
-              |> Map.merge(completion_fields(result, now))
-              |> Map.put(:updated_at, now)
-              |> maybe_reconcile_terminal_controls()
-              |> maybe_revoke_completed_task_capabilities()
+              |> Map.merge(%{
+                state: :failed,
+                current_step: "failed",
+                waiting_on: nil,
+                error: reason,
+                updated_at: now,
+                completed_at: now
+              })
+              |> reconcile_terminal_controls()
+              |> revoke_task_capabilities()
 
-            schedule_approval_cleanup(state, task_id, descriptor)
-            record
-          end
-      end)
+            {put_in(state.tasks[task_id], record), cleanup_job(task_id, descriptor)}
+        end
 
-    remove_ref(state, ref)
+      :error ->
+        {state, nil}
+    end
+  end
+
+  defp cleanup_job(_task_id, nil), do: nil
+  defp cleanup_job(task_id, descriptor) when is_map(descriptor), do: {task_id, descriptor}
+  defp cleanup_job(_task_id, _descriptor), do: nil
+
+  defp enqueue_approval_cleanup_job(state, nil), do: state
+
+  defp enqueue_approval_cleanup_job(state, {task_id, descriptor}) do
+    send(self(), {:run_approval_cleanup, task_id, descriptor})
+    state
   end
 
   # A runner that returns pending-approval has already terminated; never leave
@@ -512,15 +565,54 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     end
   end
 
-  # Best-effort async lifecycle cleanup. Failures never affect terminal state.
-  # Entrypoint is store-init MFA only; descriptor is data (never code selection).
-  defp schedule_approval_cleanup(_state, _task_id, nil), do: :ok
+  # Closed scalar shape only. Drops MFA/module/function/fun/PID/unknown keys so
+  # direct dispatch can neither select nor retain executable cleanup values.
+  defp normalize_approval_cleanup_descriptor(nil), do: nil
 
-  defp schedule_approval_cleanup(state, task_id, descriptor) when is_map(descriptor) do
-    supervisor = Map.fetch!(state, :task_supervisor)
-    {module, function, 2} = Map.fetch!(state, :approval_cleanup_mfa)
-    cleanup_opts = cleanup_opts_from_descriptor(descriptor)
+  defp normalize_approval_cleanup_descriptor(descriptor) when is_map(descriptor) do
+    %{}
+    |> maybe_put_scalar_id(:caller_id, descriptor_get(descriptor, :caller_id))
+    |> maybe_put_scalar_id(:trace_id, descriptor_get(descriptor, :trace_id))
+    |> case do
+      empty when map_size(empty) == 0 -> nil
+      closed -> closed
+    end
+  end
 
+  defp normalize_approval_cleanup_descriptor(_invalid), do: nil
+
+  defp descriptor_get(map, key) when is_atom(key) do
+    Map.get(map, key, Map.get(map, Atom.to_string(key)))
+  end
+
+  defp maybe_put_scalar_id(map, _key, value)
+       when not is_binary(value) or value == "",
+       do: map
+
+  defp maybe_put_scalar_id(map, key, value) when is_binary(value), do: Map.put(map, key, value)
+
+  # Best-effort lifecycle cleanup. Failures never affect terminal state.
+  # Entrypoint + backends + supervisor are store-init only; descriptor is
+  # closed scalar data (never code selection).
+  defp launch_approval_cleanup(_state, _task_id, nil), do: :ok
+
+  defp launch_approval_cleanup(state, task_id, descriptor) when is_map(descriptor) do
+    supervisor = Map.fetch!(state, :cleanup_supervisor)
+    mfa = Map.fetch!(state, :approval_cleanup_mfa)
+    cleanup_opts = cleanup_opts_from_state(state, descriptor)
+
+    # Named external launcher (MFA spawn, no anonymous closure). Runs outside
+    # the TaskStore process so Task.Supervisor.start_child/5 on an unresponsive
+    # cleanup supervisor cannot block status/result availability.
+    _ = spawn(__MODULE__, :start_approval_cleanup_child, [supervisor, mfa, task_id, cleanup_opts])
+    :ok
+  end
+
+  defp launch_approval_cleanup(_state, _task_id, _descriptor), do: :ok
+
+  @doc false
+  def start_approval_cleanup_child(supervisor, {module, function, 2}, task_id, cleanup_opts)
+      when is_atom(module) and is_atom(function) do
     _ =
       Task.Supervisor.start_child(
         supervisor,
@@ -537,7 +629,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     :exit, _ -> :ok
   end
 
-  defp schedule_approval_cleanup(_state, _task_id, _descriptor), do: :ok
+  def start_approval_cleanup_child(_supervisor, _mfa, _task_id, _cleanup_opts), do: :ok
 
   defp validate_approval_cleanup_mfa!({module, function, 2})
        when is_atom(module) and is_atom(function) do
@@ -549,20 +641,16 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
           "approval_cleanup_mfa must be {module, function, 2}, got: #{inspect(invalid)}"
   end
 
-  defp cleanup_opts_from_descriptor(descriptor) when is_map(descriptor) do
+  defp cleanup_opts_from_state(state, descriptor) when is_map(descriptor) do
     [
       caller_id: Map.get(descriptor, :caller_id),
-      consensus_module: Map.get(descriptor, :consensus_module),
-      interaction_router: Map.get(descriptor, :interaction_router),
-      audit_module: Map.get(descriptor, :audit_module),
+      consensus_module: Map.fetch!(state, :approval_cleanup_consensus_module),
+      interaction_router: Map.fetch!(state, :approval_cleanup_interaction_router),
+      audit_module: Map.fetch!(state, :approval_cleanup_audit_module),
       trace_id: Map.get(descriptor, :trace_id),
       cleanup_reason: :task_termination
     ]
-    |> maybe_put_opt(:notify_pid, Map.get(descriptor, :notify_pid))
   end
-
-  defp maybe_put_opt(opts, _key, nil), do: opts
-  defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
   # ---------------------------------------------------------------------------
   # Steering mailbox

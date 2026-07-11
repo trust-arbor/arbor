@@ -548,15 +548,18 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       descriptor = opts[:approval_cleanup_descriptor]
       assert is_map(descriptor)
-      # Authority boundary: descriptor is data only — no MFA/function/callback.
+      # Closed scalar authority boundary: caller_id + optional trace only.
+      # Executable selectors (MFA/modules/functions/PIDs) are never present.
+      assert descriptor == %{caller_id: "human_1"}
       refute Map.has_key?(descriptor, :mfa)
+      refute Map.has_key?(descriptor, :module)
       refute Map.has_key?(descriptor, :function)
       refute Map.has_key?(descriptor, :fun)
-      refute Enum.any?(Map.values(descriptor), &is_function/1)
-      assert descriptor.caller_id == "human_1"
-      assert descriptor.consensus_module == Arbor.Consensus
-      assert descriptor.audit_module == FakeAudit
-      assert descriptor.interaction_router == Arbor.Comms.InteractionRouter
+      refute Map.has_key?(descriptor, :consensus_module)
+      refute Map.has_key?(descriptor, :interaction_router)
+      refute Map.has_key?(descriptor, :audit_module)
+      refute Map.has_key?(descriptor, :notify_pid)
+      refute Enum.any?(Map.values(descriptor), &(is_function(&1) or is_pid(&1) or is_tuple(&1)))
 
       assert_received {:audit_dispatched, "human_1", "task_1", "agent_1", audit_opts}
       assert audit_opts[:metadata] == %{ticket: "A-1"}
@@ -1120,9 +1123,15 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       start_supervised!({Task.Supervisor, name: supervisor})
 
+      # Cleanup backends/audit are store-init authority — not per-dispatch descriptors.
       start_supervised!(
         {Arbor.Agent.Orchestration.TaskStore,
-         name: store, task_supervisor: supervisor, runner: ControlledTaskRunner}
+         name: store,
+         task_supervisor: supervisor,
+         runner: ControlledTaskRunner,
+         approval_cleanup_consensus_module: SharedConsensus,
+         approval_cleanup_interaction_router: SharedInteractionRouter,
+         approval_cleanup_audit_module: SharedAudit}
       )
 
       token =
@@ -1192,8 +1201,8 @@ defmodule Arbor.Agent.OrchestrationTest do
       assert metadata.actor == "dispatch_owner"
       assert metadata.task_id == task_id
 
-      refute_receive {:consensus_cancel, _}, 50
-      refute_receive {:interaction_respond, _, _, _}, 50
+      refute_receive {:consensus_cancel, _}, 200
+      refute_receive {:interaction_respond, _, _, _}, 200
 
       assert {:ok, remaining} =
                Orchestration.list_pending_approvals(
