@@ -159,7 +159,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
         args
         |> atomize_known_keys(action_module)
         |> maybe_resolve_file_paths(action_module, workdir)
-        |> maybe_inject_workdir(workdir)
+        |> maybe_inject_workdir(action_module, workdir)
 
       case verify_caller_authority(action_module, params, agent_id, caller_id, opts) do
         :ok ->
@@ -909,11 +909,25 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     ArgumentError -> :unknown
   end
 
-  # Inject workdir for actions that need directory context.
-  defp maybe_inject_workdir(args, workdir) do
+  # Inject directory context only for schema-declared keys.
+  # Strict schema-bounded actions (e.g. CrossApp.Validate) reject unknown
+  # parameters; injecting both :workdir and :cwd unconditionally fails them
+  # before any business logic runs.
+  defp maybe_inject_workdir(args, action_module, workdir) do
+    schema = action_module.to_tool().parameters_schema
+    known_keys = extract_schema_keys(schema)
+
     args
-    |> put_new_either(:workdir, "workdir", workdir)
-    |> put_new_either(:cwd, "cwd", workdir)
+    |> maybe_put_schema_key(known_keys, :workdir, "workdir", workdir)
+    |> maybe_put_schema_key(known_keys, :cwd, "cwd", workdir)
+  end
+
+  defp maybe_put_schema_key(args, known_keys, atom_key, string_key, value) do
+    if MapSet.member?(known_keys, atom_key) do
+      put_new_either(args, atom_key, string_key, value)
+    else
+      args
+    end
   end
 
   defp put_new_either(map, atom_key, string_key, value) do
