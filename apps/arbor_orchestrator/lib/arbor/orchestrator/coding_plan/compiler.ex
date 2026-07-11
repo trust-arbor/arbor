@@ -19,6 +19,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
 
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Graph
+  alias Arbor.Orchestrator.Graph.Edge
   alias Arbor.Orchestrator.Handlers.Registry
   alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
   alias Arbor.Orchestrator.IR.HandlerSchema
@@ -702,6 +703,12 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
     end
   end
 
+  # Security regression may only claim a review attestation after Council issues
+  # one. Unattested human_review is a safe human terminal; unattested
+  # auto_proceed fails closed on the default tier-invalid edge (never validate).
+  @attestation_present ~s(context.review.review_attestation_id!="")
+  @attestation_absent ~s(context.review.review_attestation_id="")
+
   defp route_security_eligible_review_to_attestation(graph) do
     with {:ok, graph} <-
            rewrite_edge(
@@ -710,16 +717,53 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
              "route_human_review",
              "context.review.tier_decision=human_review",
              "hoist_review_attestation_id",
-             "context.review.tier_decision=human_review"
+             "context.review.tier_decision=human_review && #{@attestation_present}"
+           ),
+         {:ok, graph} <-
+           add_conditional_edge(
+             graph,
+             "route_review",
+             # Terminal directly — do not enter route_human_review, which can
+             # still open a draft PR under binding plans without validation.
+             "status_human_review_required",
+             "context.review.tier_decision=human_review && #{@attestation_absent}"
+           ),
+         {:ok, graph} <-
+           rewrite_edge(
+             graph,
+             "route_review",
+             "route_publish",
+             "context.review.tier_decision=auto_proceed",
+             "hoist_review_attestation_id",
+             "context.review.tier_decision=auto_proceed && #{@attestation_present}"
            ) do
-      rewrite_edge(
-        graph,
-        "route_review",
-        "route_publish",
-        "context.review.tier_decision=auto_proceed",
-        "hoist_review_attestation_id",
-        "context.review.tier_decision=auto_proceed"
-      )
+      {:ok, graph}
+    end
+  end
+
+  defp add_conditional_edge(%Graph{} = graph, from, to, condition)
+       when is_binary(from) and is_binary(to) and is_binary(condition) do
+    with :ok <- require_template_node(graph, from),
+         :ok <- require_template_node(graph, to) do
+      duplicate? =
+        Enum.any?(graph.edges, fn edge ->
+          edge.from == from and edge.to == to and Map.get(edge.attrs, "condition") == condition
+        end)
+
+      if duplicate? do
+        {:error, {:duplicate_template_edge, from, to, condition}}
+      else
+        edge = Edge.from_attrs(from, to, %{"condition" => condition})
+        {:ok, %{graph | edges: graph.edges ++ [edge], adjacency: %{}, reverse_adjacency: %{}}}
+      end
+    end
+  end
+
+  defp require_template_node(%Graph{nodes: nodes}, node_id) do
+    if Map.has_key?(nodes, node_id) do
+      :ok
+    else
+      {:error, {:missing_template_nodes, [node_id]}}
     end
   end
 

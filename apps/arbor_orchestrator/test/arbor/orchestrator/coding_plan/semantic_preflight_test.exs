@@ -243,7 +243,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     end
   end
 
-  test "security human handoff remains dominated by review, validation, and exact-head check",
+  test "security human handoff remains dominated by review routing; unattended still needs validation",
        ctx do
     plan = security_plan!(%{"review_profile" => "human_required"})
     assert {:ok, compilation} = compile(plan, ctx)
@@ -255,10 +255,11 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                review_profile: "human_required"
              )
 
+    # Human handoff may be unattested, so review must still dominate it.
     bypassed =
       add_edge(
         graph,
-        "check_validation_passed",
+        "load_committed_change",
         "status_human_review_required",
         "context.bypass=true"
       )
@@ -268,11 +269,56 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
                review_profile: "human_required"
              )
 
-    for kind <- ["post_validation_exact_head", "post_validation_routing"] do
-      assert Enum.any?(errors, fn err ->
-               err["code"] == "dominance_violation" and err["detail"]["kind"] == kind
-             end)
-    end
+    assert Enum.any?(errors, fn err ->
+             err["code"] == "dominance_violation" and err["detail"]["kind"] == "review"
+           end)
+  end
+
+  test "security profile requires present attestation on validator entries and absent human route",
+       ctx do
+    assert {:ok, compilation} = compile(security_plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("security_regression")
+
+    assert :ok =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    present =
+      ~s(context.review.tier_decision=human_review && context.review.review_attestation_id!="")
+
+    absent =
+      ~s(context.review.tier_decision=human_review && context.review.review_attestation_id="")
+
+    auto_present =
+      ~s(context.review.tier_decision=auto_proceed && context.review.review_attestation_id!="")
+
+    assert edge_target(graph, "route_review", present) == "hoist_review_attestation_id"
+    assert edge_target(graph, "route_review", absent) == "status_human_review_required"
+    assert edge_target(graph, "route_review", auto_present) == "hoist_review_attestation_id"
+
+    # Drop the attestation presence guard: any human_review may hoist/validate.
+    unguarded =
+      rewrite_edge_condition(
+        graph,
+        "route_review",
+        "hoist_review_attestation_id",
+        present,
+        "context.review.tier_decision=human_review"
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(unguarded, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert Enum.any?(errors, fn err ->
+             err["code"] in [
+               "security_topology_mismatch",
+               "security_attestation_entry_mismatch"
+             ]
+           end)
   end
 
   test "adversarial: validation bypass fails closed", ctx do
@@ -634,6 +680,25 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     }
 
     %{graph | edges: [edge | graph.edges], adjacency: %{}, reverse_adjacency: %{}}
+  end
+
+  defp edge_target(graph, from, condition) do
+    graph.edges
+    |> Enum.find(&(&1.from == from and &1.attrs["condition"] == condition))
+    |> Map.fetch!(:to)
+  end
+
+  defp rewrite_edge_condition(graph, from, to, old_condition, new_condition) do
+    edges =
+      Enum.map(graph.edges, fn edge ->
+        if edge.from == from and edge.to == to and edge.attrs["condition"] == old_condition do
+          %{edge | attrs: Map.put(edge.attrs, "condition", new_condition)}
+        else
+          edge
+        end
+      end)
+
+    %{graph | edges: edges, adjacency: %{}, reverse_adjacency: %{}}
   end
 
   defp minimal_compiled_graph do

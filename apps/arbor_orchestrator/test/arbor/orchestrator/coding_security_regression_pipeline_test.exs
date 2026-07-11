@@ -148,25 +148,57 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     defp dispatch("council_review_change", _args, scenario, state) do
       review_index = bump(state, :review)
 
-      tier =
-        cond do
-          scenario == :human_success ->
-            "human_review"
+      case scenario do
+        :unattested_human_review_deadlock ->
+          # Live dogfood shape: security veto + quorum failure forces human_review
+          # without issuing a review_attestation_id.
+          feedback = %{
+            "recommendation" => "revise",
+            "tier" => %{"decision" => "human_review"},
+            "verdict" => %{"weaknesses" => ["security_veto"]}
+          }
 
-          scenario in [:review_rework_dirty, :review_rework_self_commit, :review_rework_noop] and
-              review_index == 1 ->
-            "rework"
+          {:ok,
+           %{
+             status: "reviewed",
+             tier_decision: "human_review",
+             recommendation: "revise",
+             decision: "deadlock",
+             approve_count: 0,
+             reject_count: 0,
+             abstain_count: 0,
+             quorum_met: false,
+             human_required: true,
+             security_veto: true,
+             authority_widening: false,
+             blast_radius: "high",
+             tier_reasons: ["security_veto", "quorum_not_met"],
+             persistence: %{"status" => "recorded"},
+             feedback: feedback,
+             feedback_json: Jason.encode!(feedback)
+           }}
 
-          true ->
-            "auto_proceed"
-        end
+        _other ->
+          tier =
+            cond do
+              scenario == :human_success ->
+                "human_review"
 
-      result = review_payload(tier)
+              scenario in [:review_rework_dirty, :review_rework_self_commit, :review_rework_noop] and
+                  review_index == 1 ->
+                "rework"
 
-      if tier in ["auto_proceed", "human_review"] do
-        {:ok, Map.put(result, :review_attestation_id, "attestation-#{review_index}")}
-      else
-        {:ok, result}
+              true ->
+                "auto_proceed"
+            end
+
+          result = review_payload(tier)
+
+          if tier in ["auto_proceed", "human_review"] do
+            {:ok, Map.put(result, :review_attestation_id, "attestation-#{review_index}")}
+          else
+            {:ok, result}
+          end
       end
     end
 
@@ -300,6 +332,21 @@ defmodule Arbor.Orchestrator.CodingSecurityRegressionPipelineTest do
     assert called?(calls, "coding_security_regression_validate")
     assert called?(calls, "coding_workspace_committed_change", 2)
     assert "post_validation_committed_change" in result.completed_nodes
+  end
+
+  test "unattested human_review deadlock fails closed before security validator", ctx do
+    assert {{:ok, result}, calls} =
+             run_fixture(:unattested_human_review_deadlock, ctx, "binding")
+
+    assert result.context["status"] == "human_review_required",
+           "expected human_review_required terminal, got: #{inspect(current: result.context["current_node"], status: result.context["status"], completed: result.completed_nodes, calls: calls)}"
+
+    refute called?(calls, "coding_security_regression_validate")
+    refute "validate" in result.completed_nodes
+    refute "hoist_review_attestation_id" in result.completed_nodes
+    refute "post_validation_committed_change" in result.completed_nodes
+    assert "status_human_review_required" in result.completed_nodes
+    assert called?(calls, "council_review_change", 1)
   end
 
   for {scenario, source} <- [
