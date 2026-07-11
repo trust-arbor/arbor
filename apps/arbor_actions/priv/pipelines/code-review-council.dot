@@ -152,7 +152,7 @@ digraph code_review_council {
   decide [
     type="exec"
     target="action"
-    action="consensus.decide"
+    action="consensus_decide"
     param.quorum="majority"
     param.mode="decision"
     context_keys="parallel.results,council.question"

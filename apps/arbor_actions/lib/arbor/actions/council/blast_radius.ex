@@ -57,8 +57,7 @@ defmodule Arbor.Actions.Council.BlastRadius do
         {"apps/arbor_agent/priv/templates/coding_agent.md", :coding_agent_manifest},
         {"apps/arbor_agent/priv/templates/code_reviewer.md", :code_reviewer_manifest},
         {"apps/arbor_agent/priv/templates/council_evaluator.md", :council_evaluator_manifest},
-        {"apps/arbor_orchestrator/specs/pipelines/code-review-council.dot",
-         :code_review_council_dot},
+        {"apps/arbor_actions/priv/pipelines/code-review-council.dot", :code_review_council_dot},
         {"apps/arbor_actions/lib/arbor/actions/council.ex", :code_review_action_gate},
         {"apps/arbor_actions/lib/arbor/actions/council/blast_radius.ex", :tiering_policy}
       ],

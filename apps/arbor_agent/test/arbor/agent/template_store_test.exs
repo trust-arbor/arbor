@@ -311,6 +311,19 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert "arbor://action/git/**" in resources
       assert "arbor://action/mix/**" in resources
       assert "arbor://action/council/review" in resources
+      assert "arbor://consensus/decide" in resources
+
+      assert Enum.any?(data["required_capabilities"], fn capability ->
+               capability["resource"] == "arbor://consensus/decide" and
+                 capability["description"] ==
+                   "Deterministically tally the binding council's review decision"
+             end)
+
+      assert resources
+             |> Enum.filter(&String.starts_with?(&1, "arbor://consensus")) == [
+               "arbor://consensus/decide"
+             ]
+
       refute "arbor://shell/exec/git" in resources
       refute "arbor://shell/exec/mix" in resources
       refute "arbor://action/github/pr" in resources
@@ -326,6 +339,12 @@ defmodule Arbor.Agent.TemplateStoreTest do
       assert preset["rules"]["arbor://action/mix"] == "auto"
       assert preset["rules"]["arbor://shell/exec"] == "ask"
       assert preset["rules"]["arbor://action/council/review"] == "auto"
+      assert preset["rules"]["arbor://consensus/decide"] == "auto"
+
+      assert preset["rules"]
+             |> Enum.filter(fn {uri, _mode} -> String.starts_with?(uri, "arbor://consensus") end)
+             |> Enum.sort() == [{"arbor://consensus/decide", "auto"}]
+
       refute Map.has_key?(preset["rules"], "arbor://shell/exec/git")
       refute Map.has_key?(preset["rules"], "arbor://shell/exec/mix")
       refute Map.has_key?(preset["rules"], "arbor://action/github/pr")

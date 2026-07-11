@@ -4,8 +4,6 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
   @moduletag :code_review_council
   @moduletag :fast
 
-  @pipeline_path "apps/arbor_orchestrator/specs/pipelines/code-review-council.dot"
-
   @reviewers %{
     "correctness" => {"openai_oauth", "gpt-5.5"},
     "security" => {"openai_oauth", "gpt-5.5"},
@@ -20,11 +18,7 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
   }
 
   defp load_graph do
-    path =
-      [@pipeline_path, "../arbor_orchestrator/specs/pipelines/code-review-council.dot"]
-      |> Enum.find(@pipeline_path, &File.exists?/1)
-
-    dot_content = File.read!(path)
+    {:ok, %{source: dot_content}} = Arbor.Actions.reviewed_pipeline("code_review_council")
     assert {:ok, graph} = Arbor.Orchestrator.parse(dot_content)
     graph
   end
@@ -93,7 +87,7 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
       decide = graph.nodes["decide"]
       assert decide.attrs["type"] == "exec"
       assert decide.attrs["target"] == "action"
-      assert decide.attrs["action"] == "consensus.decide"
+      assert decide.attrs["action"] == "consensus_decide"
       assert decide.attrs["param.quorum"] == "majority"
       assert decide.attrs["param.mode"] == "decision"
       assert decide.attrs["context_keys"] == "parallel.results,council.question"

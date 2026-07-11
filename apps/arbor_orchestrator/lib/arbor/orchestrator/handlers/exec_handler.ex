@@ -161,6 +161,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
         ]
         |> maybe_put_param_taint(context, context_keys)
         |> maybe_put_execution_binding(authority)
+        |> maybe_put_nested_engine_controls(opts, authority)
         |> maybe_put_approval_timeout(opts)
 
       try do
@@ -323,6 +324,17 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
   end
 
   defp maybe_put_execution_binding(opts, _authority), do: opts
+
+  # Council actions can launch a child Engine run. Forward only the live,
+  # non-secret controls that bind that child to this authorized parent run.
+  defp maybe_put_nested_engine_controls(opts, engine_opts, %RunAuthorization{} = authority) do
+    opts
+    |> Keyword.put(:run_authorization, authority)
+    |> maybe_put_executor_opt(:authorizer, Keyword.get(engine_opts, :authorizer))
+    |> Keyword.put(:max_depth, Keyword.get(engine_opts, :max_depth, 3))
+  end
+
+  defp maybe_put_nested_engine_controls(opts, _engine_opts, _authority), do: opts
 
   # Approval timeout is Engine control data, never a node attr or context
   # value. Re-bound it against the run wall clock before crossing into the

@@ -8,6 +8,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     UnrelatedBindingAction
   }
 
+  alias Arbor.Actions.Consensus.Decide
+
   alias Arbor.Orchestrator.CodingPlan.{ActionCatalog, ExecutionManifest}
   alias Arbor.Orchestrator.Dot.Parser
   alias Arbor.Orchestrator.Handlers.Registry
@@ -19,6 +21,16 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     invoke [type="exec", target="action", action="binding_action", param.value="hello"]
     done [shape=Msquare]
     start -> invoke -> done
+  }
+  """
+
+  @nested_parent_dot """
+  digraph NestedParent {
+    graph [nested_graphs="code_review_council"]
+    start [shape=Mdiamond]
+    parent_exec [type="exec", target="action", action="binding_action"]
+    done [shape=Msquare]
+    start -> parent_exec -> done
   }
   """
 
@@ -39,6 +51,11 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
     assert first_digest == second_digest
     assert :ok = ExecutionManifest.validate(first, first_digest, graph_hash)
     assert {:ok, ^first_digest} = Arbor.Actions.execution_binding_digest(first)
+    assert first["version"] == 2
+    refute Map.has_key?(first, "nested_graphs")
+
+    assert Map.keys(first) |> Enum.sort() ==
+             ~w(actions capability_uris compiled_graph_hash egress graph_hash handlers nodes version)
 
     assert [action] = first["actions"]
     assert action["name"] == "binding_action"
@@ -53,6 +70,164 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
              Enum.map(first["egress"], &Map.take(&1, ~w(action effect_class)))
 
     assert Enum.any?(first["handlers"], &(&1["handler_type"] == "exec"))
+  end
+
+  test "declared nested graph closure binds its source, topology, capabilities, and egress" do
+    graph = compiled_graph!(@nested_parent_dot)
+    graph_hash = sha256(@nested_parent_dot)
+    catalog = catalog!([Decide, BindingOriginalAction])
+
+    assert {:ok, {manifest, _digest}} = ExecutionManifest.build(graph, catalog, graph_hash)
+    assert {:ok, consensus} = ActionCatalog.fetch(catalog, "consensus_decide")
+    assert [%{"id" => "code_review_council"} = nested_graph] = manifest["nested_graphs"]
+    assert manifest["version"] == 3
+    assert nested_graph["execution_manifest"]["version"] == 2
+    refute Map.has_key?(nested_graph["execution_manifest"], "nested_graphs")
+
+    assert Enum.any?(manifest["actions"], &(&1 == consensus))
+    assert consensus["resource_uri"] in manifest["capability_uris"]
+    assert Enum.any?(manifest["egress"], &(&1["action"] == "consensus_decide"))
+    assert "parallel" in Enum.map(manifest["handlers"], & &1["handler_type"])
+    assert "compute" in Enum.map(manifest["handlers"], & &1["handler_type"])
+    assert nested_graph["source_id"] == "arbor_actions:priv/pipelines/code-review-council.dot"
+    assert nested_graph["source_sha256"] == sha256(code_review_council_dot())
+
+    assert nested_graph["compiled_graph_hash"] ==
+             nested_graph["execution_manifest"]["compiled_graph_hash"]
+  end
+
+  test "nested graph declarations fail closed when malformed or unknown" do
+    for {declaration, reason} <- [
+          {"code-review-council", :invalid_identifier},
+          {"code_review_council,binding_graph", :not_sorted},
+          {"code_review_council,code_review_council", :duplicate_graph}
+        ] do
+      dot = nested_graph_declaration_dot(declaration)
+
+      assert {:error, {:invalid_nested_graphs_declaration, ^reason}} =
+               ExecutionManifest.build(
+                 compiled_graph!(dot),
+                 catalog!([Decide, BindingOriginalAction]),
+                 sha256(dot)
+               )
+    end
+
+    unknown_dot = nested_graph_declaration_dot("unknown_graph")
+
+    assert {:error, {:unknown_nested_graph, "unknown_graph"}} =
+             ExecutionManifest.build(
+               compiled_graph!(unknown_dot),
+               catalog!([Decide]),
+               sha256(unknown_dot)
+             )
+  end
+
+  test "blank nested graph declarations bind no additional closure" do
+    dot = nested_graph_declaration_dot("   ")
+
+    assert {:ok, {manifest, _digest}} =
+             ExecutionManifest.build(
+               compiled_graph!(dot),
+               catalog!([BindingOriginalAction]),
+               sha256(dot)
+             )
+
+    assert manifest["actions"] == []
+    assert manifest["version"] == 2
+    refute Map.has_key?(manifest, "nested_graphs")
+  end
+
+  test "manifest versions reject ambiguous nested graph shapes" do
+    graph = compiled_graph!()
+    graph_hash = sha256(@dot)
+    manifest = manifest_for_graph!(graph, catalog!([BindingOriginalAction]), graph_hash)
+
+    v2_with_nested_graphs = Map.put(manifest, "nested_graphs", [])
+    {:ok, v2_digest} = ExecutionManifest.digest(v2_with_nested_graphs)
+
+    assert {:error, {:unexpected_execution_manifest_keys, :manifest}} =
+             ExecutionManifest.validate(v2_with_nested_graphs, v2_digest, graph_hash)
+
+    v3_without_nested_graphs = Map.put(manifest, "version", 3)
+    {:ok, v3_missing_digest} = ExecutionManifest.digest(v3_without_nested_graphs)
+
+    assert {:error, {:unexpected_execution_manifest_keys, :manifest}} =
+             ExecutionManifest.validate(v3_without_nested_graphs, v3_missing_digest, graph_hash)
+
+    v3_with_empty_nested_graphs = Map.put(v3_without_nested_graphs, "nested_graphs", [])
+    {:ok, v3_empty_digest} = ExecutionManifest.digest(v3_with_empty_nested_graphs)
+
+    assert {:error, {:invalid_execution_manifest_field, :nested_graphs}} =
+             ExecutionManifest.validate(v3_with_empty_nested_graphs, v3_empty_digest, graph_hash)
+  end
+
+  test "nested graph declarations change the manifest digest" do
+    direct_dot = @dot
+
+    declared_dot =
+      String.replace(@dot, "digraph BindingManifest {", """
+      digraph BindingManifest {
+        graph [nested_graphs="code_review_council"]
+      """)
+
+    catalog = catalog!([BindingOriginalAction, Decide])
+
+    assert {:ok, {direct_manifest, direct_digest}} =
+             ExecutionManifest.build(compiled_graph!(direct_dot), catalog, sha256(direct_dot))
+
+    assert {:ok, {declared_manifest, declared_digest}} =
+             ExecutionManifest.build(compiled_graph!(declared_dot), catalog, sha256(declared_dot))
+
+    refute direct_manifest["actions"] == declared_manifest["actions"]
+    refute direct_digest == declared_digest
+  end
+
+  test "subset is reflexive while declared child policy pins the exact nested topology" do
+    catalog = catalog!([Decide, BindingOriginalAction])
+    parent = manifest!(@nested_parent_dot, catalog)
+    child_dot = code_review_council_dot()
+    child_graph = compiled_graph!(child_dot)
+    child = manifest_for_graph!(child_graph, catalog, canonical_graph_hash(child_graph))
+
+    undeclared_parent_dot =
+      String.replace(
+        @nested_parent_dot,
+        ~r/^\s*graph \[nested_graphs="code_review_council"\]\s*$/m,
+        ""
+      )
+
+    refute String.contains?(undeclared_parent_dot, "nested_graphs")
+
+    undeclared_parent = manifest!(undeclared_parent_dot, catalog)
+
+    assert :ok = ExecutionManifest.require_subset(parent, parent)
+    assert :ok = ExecutionManifest.require_subset(child, parent)
+    assert :ok = ExecutionManifest.require_declared_child(child, parent)
+    assert :ok = ExecutionManifest.require_declared_child(child, undeclared_parent)
+
+    assert {:error, {:child_binding_not_pinned_by_parent, :action, "consensus_decide"}} =
+             ExecutionManifest.require_subset(child, undeclared_parent)
+
+    changed_child_dot =
+      String.replace(
+        child_dot,
+        "  collect -> decide -> done",
+        "  collect -> done\n  decide -> done"
+      )
+
+    changed_child_graph = compiled_graph!(changed_child_dot)
+
+    changed_child =
+      manifest_for_graph!(
+        changed_child_graph,
+        catalog,
+        canonical_graph_hash(changed_child_graph)
+      )
+
+    assert :ok = ExecutionManifest.require_subset(changed_child, parent)
+
+    assert {:error, :child_graph_not_declared_by_parent} =
+             ExecutionManifest.require_declared_child(changed_child, parent)
   end
 
   test "security regression: same-schema module replacement changes executable identity" do
@@ -232,10 +407,43 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifestSecurityRegressionTest 
              ExecutionManifest.require_subset(egress_child, parent)
   end
 
-  defp compiled_graph! do
-    {:ok, graph} = Parser.parse(@dot)
+  defp compiled_graph!(dot \\ @dot) do
+    {:ok, graph} = Parser.parse(dot)
     {:ok, compiled} = IRCompiler.compile(graph)
     compiled
+  end
+
+  defp manifest!(dot, catalog) do
+    graph = compiled_graph!(dot)
+    manifest_for_graph!(graph, catalog, sha256(dot))
+  end
+
+  defp manifest_for_graph!(graph, catalog, graph_hash) do
+    {:ok, {manifest, _digest}} = ExecutionManifest.build(graph, catalog, graph_hash)
+
+    manifest
+  end
+
+  defp nested_graph_declaration_dot(declaration) do
+    """
+    digraph NestedDeclaration {
+      graph [nested_graphs="#{declaration}"]
+      start [shape=Mdiamond]
+      done [shape=Msquare]
+      start -> done
+    }
+    """
+  end
+
+  defp code_review_council_dot do
+    {:ok, %{source: source}} = Arbor.Actions.reviewed_pipeline("code_review_council")
+    source
+  end
+
+  defp canonical_graph_hash(graph) do
+    graph
+    |> Arbor.Orchestrator.Viz.DotSerializer.serialize()
+    |> sha256()
   end
 
   defp catalog!(modules) do

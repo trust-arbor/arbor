@@ -12,11 +12,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
 
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Handlers.Registry
+  alias Arbor.Orchestrator.Dot.Parser
+  alias Arbor.Orchestrator.IR.Compiler, as: IRCompiler
+  alias Arbor.Orchestrator.CodingPlan.ActionCatalog
+  alias Arbor.Orchestrator.Viz.DotSerializer
   alias Arbor.Common.LoadedModuleIdentity
   alias Arbor.Contracts.Security.Classification
 
-  @version 2
+  @v2_version 2
+  @v3_version 3
   @sha256_pattern ~r/\A[0-9a-f]{64}\z/
+  @nested_graph_identifier_pattern ~r/\A[a-z][a-z0-9_]*\z/
 
   @runtime_action_keys ~w(
     beam_sha256
@@ -33,8 +39,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   @handler_keys ~w(beam_sha256 handler_type module)
   @stack_entry_keys ~w(beam_sha256 module slot)
   @node_binding_keys ~w(handler_type node_id stack)
+  @nested_graph_keys ~w(
+    compiled_graph_hash
+    execution_manifest
+    execution_manifest_digest
+    graph_hash
+    id
+    source_id
+    source_sha256
+  )
 
-  @manifest_keys ~w(
+  @v2_manifest_keys ~w(
     actions
     capability_uris
     compiled_graph_hash
@@ -44,6 +59,8 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
     nodes
     version
   )
+
+  @v3_manifest_keys Enum.sort(["nested_graphs" | @v2_manifest_keys])
 
   @effect_classes Classification.effect_classes()
                   |> Enum.map(&Atom.to_string/1)
@@ -60,13 +77,33 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
           {:ok, {manifest(), String.t()}} | {:error, term()}
   def build(%Graph{compiled: true} = graph, action_catalog, graph_hash)
       when is_map(action_catalog) and is_binary(graph_hash) do
+    build(graph, action_catalog, graph_hash, MapSet.new())
+  end
+
+  def build(_graph, _action_catalog, _graph_hash), do: {:error, :invalid_execution_manifest_input}
+
+  defp versioned_manifest(manifest, []) do
+    Map.put(manifest, "version", @v2_version)
+  end
+
+  defp versioned_manifest(manifest, nested_graphs) when is_list(nested_graphs) do
+    manifest
+    |> Map.put("version", @v3_version)
+    |> Map.put("nested_graphs", nested_graphs)
+  end
+
+  defp build(%Graph{compiled: true} = graph, action_catalog, graph_hash, nested_graph_ids) do
     with :ok <- validate_sha256(graph_hash, :graph_hash),
          {:ok, compiled_graph_hash} <- compiled_graph_hash(graph),
-         {:ok, actions} <- referenced_actions(graph, action_catalog),
-         {:ok, handlers} <- referenced_handlers(graph),
-         {:ok, nodes} <- referenced_nodes(graph) do
+         {:ok, direct_actions} <- referenced_actions(graph, action_catalog),
+         {:ok, direct_handlers} <- referenced_handlers(graph),
+         {:ok, direct_nodes} <- referenced_nodes(graph),
+         {:ok, nested_graphs} <-
+           referenced_nested_graphs(graph, action_catalog, nested_graph_ids),
+         {:ok, actions} <- merge_actions(direct_actions, nested_graphs),
+         {:ok, handlers} <- merge_handlers(direct_handlers, nested_graphs),
+         {:ok, nodes} <- merge_nodes(direct_nodes, nested_graphs) do
       manifest = %{
-        "version" => @version,
         "graph_hash" => graph_hash,
         "compiled_graph_hash" => compiled_graph_hash,
         "actions" => actions,
@@ -76,26 +113,77 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
         "egress" => egress_manifest(actions)
       }
 
+      manifest = versioned_manifest(manifest, nested_graphs)
+
       with {:ok, digest} <- digest(manifest),
-           :ok <- validate(manifest, digest, graph_hash) do
+           :ok <-
+             validate_with_catalog(
+               manifest,
+               digest,
+               graph_hash,
+               action_catalog,
+               nested_graph_ids
+             ) do
         {:ok, {manifest, digest}}
       end
     end
   end
 
-  def build(_graph, _action_catalog, _graph_hash), do: {:error, :invalid_execution_manifest_input}
-
   @doc "Validate a JSON-clean execution manifest and its deterministic digest."
   @spec validate(manifest(), String.t(), String.t()) :: :ok | {:error, term()}
   def validate(manifest, expected_digest, expected_graph_hash)
       when is_map(manifest) and is_binary(expected_digest) and is_binary(expected_graph_hash) do
-    with :ok <- require_exact_keys(manifest, @manifest_keys, :manifest),
-         :ok <- require_equal(manifest["version"], @version, :version),
-         :ok <- require_equal(manifest["graph_hash"], expected_graph_hash, :graph_hash),
+    with :ok <- validate_manifest_shape(manifest),
+         {:ok, action_catalog} <- external_validation_catalog(manifest),
+         :ok <-
+           validate_manifest_fields(
+             manifest,
+             expected_digest,
+             expected_graph_hash,
+             action_catalog,
+             MapSet.new()
+           ) do
+      :ok
+    end
+  end
+
+  def validate(_manifest, _expected_digest, _expected_graph_hash),
+    do: {:error, :invalid_execution_manifest}
+
+  defp validate_with_catalog(
+         manifest,
+         expected_digest,
+         expected_graph_hash,
+         action_catalog,
+         nested_graph_ids
+       ) do
+    with :ok <- validate_manifest_shape(manifest),
+         :ok <-
+           validate_manifest_fields(
+             manifest,
+             expected_digest,
+             expected_graph_hash,
+             action_catalog,
+             nested_graph_ids
+           ) do
+      :ok
+    end
+  end
+
+  defp validate_manifest_fields(
+         manifest,
+         expected_digest,
+         expected_graph_hash,
+         action_catalog,
+         nested_graph_ids
+       ) do
+    with :ok <- require_equal(manifest["graph_hash"], expected_graph_hash, :graph_hash),
          :ok <- validate_sha256(expected_graph_hash, :graph_hash),
          :ok <- validate_sha256(manifest["compiled_graph_hash"], :compiled_graph_hash),
          :ok <- validate_actions(manifest["actions"]),
          :ok <- validate_handlers(manifest["handlers"]),
+         :ok <-
+           validate_manifest_nested_graphs(manifest, action_catalog, nested_graph_ids),
          :ok <- validate_nodes(manifest["nodes"]),
          :ok <- validate_handler_node_consistency(manifest["handlers"], manifest["nodes"]),
          :ok <- validate_string_list(manifest["capability_uris"], :capability_uris),
@@ -113,8 +201,43 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
     end
   end
 
-  def validate(_manifest, _expected_digest, _expected_graph_hash),
-    do: {:error, :invalid_execution_manifest}
+  defp external_validation_catalog(%{"version" => @v2_version}), do: {:ok, nil}
+  defp external_validation_catalog(%{"version" => @v3_version}), do: ActionCatalog.snapshot()
+
+  defp validate_manifest_nested_graphs(manifest) do
+    with {:ok, action_catalog} <- external_validation_catalog(manifest) do
+      validate_manifest_nested_graphs(manifest, action_catalog, MapSet.new())
+    end
+  end
+
+  defp validate_manifest_shape(%{"version" => @v2_version} = manifest) do
+    require_exact_keys(manifest, @v2_manifest_keys, :manifest)
+  end
+
+  defp validate_manifest_shape(%{"version" => @v3_version} = manifest) do
+    require_exact_keys(manifest, @v3_manifest_keys, :manifest)
+  end
+
+  defp validate_manifest_shape(_manifest),
+    do: {:error, {:execution_manifest_field_mismatch, :version}}
+
+  defp validate_manifest_nested_graphs(%{"version" => @v2_version}, _catalog, _nested_graph_ids),
+    do: :ok
+
+  defp validate_manifest_nested_graphs(
+         %{
+           "version" => @v3_version,
+           "nested_graphs" => nested_graphs
+         },
+         catalog,
+         nested_graph_ids
+       )
+       when is_list(nested_graphs) and nested_graphs != [] do
+    validate_nested_graphs(nested_graphs, catalog, nested_graph_ids)
+  end
+
+  defp validate_manifest_nested_graphs(_manifest, _catalog, _nested_graph_ids),
+    do: {:error, {:invalid_execution_manifest_field, :nested_graphs}}
 
   @doc "Compare a freshly derived live manifest with the compiler-pinned manifest."
   @spec verify(manifest(), String.t(), Graph.t(), map(), String.t()) ::
@@ -161,9 +284,10 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
 
   @doc "Verify that a manifest's compiled graph hash matches the actual compiled graph."
   @spec verify_compiled_graph(manifest(), Graph.t()) :: :ok | {:error, term()}
-  def verify_compiled_graph(%{"compiled_graph_hash" => expected}, %Graph{} = graph) do
+  def verify_compiled_graph(%{"compiled_graph_hash" => expected} = manifest, %Graph{} = graph) do
     with {:ok, actual} <- compiled_graph_hash(graph),
-         :ok <- require_equal(actual, expected, :compiled_graph_hash) do
+         :ok <- require_equal(actual, expected, :compiled_graph_hash),
+         :ok <- verify_nested_graph_declaration_binding(manifest, graph) do
       :ok
     end
   end
@@ -267,6 +391,25 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
 
   def require_subset(_child, _parent), do: {:error, :invalid_execution_manifest_subset}
 
+  @doc "Require a child to match an exact reviewed declaration when the parent declares children."
+  @spec require_declared_child(manifest(), manifest()) :: :ok | {:error, term()}
+  def require_declared_child(child, parent) when is_map(child) and is_map(parent) do
+    with :ok <- validate_manifest_shape(parent) do
+      case parent do
+        %{"version" => @v2_version} ->
+          :ok
+
+        %{"version" => @v3_version} ->
+          with :ok <- validate_manifest_nested_graphs(parent) do
+            require_declared_nested_graph(child, parent)
+          end
+      end
+    end
+  end
+
+  def require_declared_child(_child, _parent),
+    do: {:error, {:invalid_execution_manifest_subset, :nested_graphs}}
+
   @doc "Compute the canonical SHA-256 digest of a JSON-clean manifest."
   @spec digest(manifest()) :: {:ok, String.t()} | {:error, term()}
   def digest(manifest) when is_map(manifest) do
@@ -285,9 +428,17 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
 
   def digest(_manifest), do: {:error, :invalid_execution_manifest}
 
+  defp sha256(value) when is_binary(value) do
+    value
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
   defp referenced_actions(graph, catalog) do
     graph
-    |> action_names()
+    |> direct_action_names()
+    |> Enum.uniq()
+    |> Enum.sort()
     |> Enum.reduce_while({:ok, []}, fn action_name, {:ok, bindings} ->
       case fetch_catalog_action(catalog, action_name) do
         {:ok, binding} -> {:cont, {:ok, [binding | bindings]}}
@@ -300,7 +451,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
     end
   end
 
-  defp action_names(%Graph{} = graph) do
+  defp direct_action_names(%Graph{} = graph) do
     graph.nodes
     |> Map.values()
     |> Enum.flat_map(fn node ->
@@ -313,8 +464,191 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
         []
       end
     end)
-    |> Enum.uniq()
-    |> Enum.sort()
+  end
+
+  defp referenced_nested_graphs(%Graph{} = graph, catalog, nested_graph_ids) do
+    with {:ok, declarations} <- nested_graph_declarations(graph) do
+      declarations
+      |> Enum.reduce_while({:ok, []}, fn id, {:ok, closures} ->
+        case build_nested_graph_closure(id, catalog, nested_graph_ids) do
+          {:ok, closure} -> {:cont, {:ok, [closure | closures]}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, closures} -> {:ok, Enum.sort_by(closures, & &1["id"])}
+        {:error, _reason} = error -> error
+      end
+    end
+  end
+
+  defp nested_graph_declarations(%Graph{attrs: attrs}) do
+    case Map.get(attrs, "nested_graphs") do
+      nil ->
+        {:ok, []}
+
+      declaration when is_binary(declaration) ->
+        cond do
+          not String.valid?(declaration) ->
+            {:error, {:invalid_nested_graphs_declaration, :invalid_identifier}}
+
+          String.trim(declaration) == "" ->
+            {:ok, []}
+
+          true ->
+            declaration
+            |> String.split(",", trim: false)
+            |> validate_nested_graph_declarations()
+        end
+
+      _other ->
+        {:error, {:invalid_nested_graphs_declaration, :not_a_string}}
+    end
+  end
+
+  defp verify_nested_graph_declaration_binding(manifest, %Graph{} = graph) do
+    with {:ok, declarations} <- nested_graph_declarations(graph) do
+      case {declarations, manifest} do
+        {[], %{"version" => @v2_version}} ->
+          :ok
+
+        {[], _manifest} ->
+          {:error, {:execution_manifest_field_mismatch, :version}}
+
+        {declarations, %{"version" => @v3_version, "nested_graphs" => nested_graphs}}
+        when is_list(nested_graphs) ->
+          nested_graph_ids = Enum.map(nested_graphs, &Map.get(&1, "id"))
+          require_equal(nested_graph_ids, declarations, :nested_graphs)
+
+        {_declarations, _manifest} ->
+          {:error, {:execution_manifest_field_mismatch, :version}}
+      end
+    end
+  end
+
+  defp validate_nested_graph_declarations(ids) do
+    cond do
+      not Enum.all?(ids, &nested_graph_identifier?/1) ->
+        {:error, {:invalid_nested_graphs_declaration, :invalid_identifier}}
+
+      ids != Enum.sort(ids) ->
+        {:error, {:invalid_nested_graphs_declaration, :not_sorted}}
+
+      length(ids) != length(Enum.uniq(ids)) ->
+        {:error, {:invalid_nested_graphs_declaration, :duplicate_graph}}
+
+      true ->
+        {:ok, ids}
+    end
+  end
+
+  defp nested_graph_identifier?(id) when is_binary(id) do
+    String.valid?(id) and Regex.match?(@nested_graph_identifier_pattern, id)
+  end
+
+  defp nested_graph_identifier?(_id), do: false
+
+  defp build_nested_graph_closure(id, catalog, nested_graph_ids) do
+    with false <- MapSet.member?(nested_graph_ids, id),
+         {:ok, reviewed_pipeline} <- reviewed_nested_graph(id),
+         source = reviewed_pipeline.source,
+         {:ok, graph} <- parse_nested_graph(id, source),
+         {:ok, compiled_graph} <- compile_nested_graph(id, graph),
+         {:ok, graph_hash} <- nested_graph_hash(compiled_graph),
+         {:ok, {manifest, digest}} <-
+           build(compiled_graph, catalog, graph_hash, MapSet.put(nested_graph_ids, id)) do
+      {:ok,
+       %{
+         "id" => id,
+         "source_id" => reviewed_pipeline.source_id,
+         "source_sha256" => sha256(source),
+         "graph_hash" => graph_hash,
+         "compiled_graph_hash" => manifest["compiled_graph_hash"],
+         "execution_manifest" => manifest,
+         "execution_manifest_digest" => digest
+       }}
+    else
+      true -> {:error, {:nested_graph_cycle, id}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp reviewed_nested_graph(id) do
+    case Arbor.Actions.reviewed_pipeline(id) do
+      {:ok, reviewed_pipeline} ->
+        {:ok, reviewed_pipeline}
+
+      {:error, {:unknown_reviewed_pipeline, ^id}} ->
+        {:error, {:unknown_nested_graph, id}}
+
+      {:error, reason} ->
+        {:error, {:nested_graph_source_unavailable, id, reason}}
+    end
+  end
+
+  defp parse_nested_graph(id, source) do
+    case Parser.parse(source) do
+      {:ok, graph} -> {:ok, graph}
+      {:error, reason} -> {:error, {:nested_graph_parse_failed, id, reason}}
+    end
+  end
+
+  defp compile_nested_graph(id, graph) do
+    case IRCompiler.compile(graph) do
+      {:ok, compiled_graph} -> {:ok, compiled_graph}
+      {:error, reason} -> {:error, {:nested_graph_compile_failed, id, reason}}
+    end
+  end
+
+  defp nested_graph_hash(%Graph{} = graph) do
+    {:ok, graph |> DotSerializer.serialize() |> sha256()}
+  rescue
+    _exception -> {:error, :nested_graph_hash_failed}
+  end
+
+  defp merge_actions(direct_actions, nested_graphs) do
+    nested_graph_actions =
+      Enum.flat_map(nested_graphs, & &1["execution_manifest"]["actions"])
+
+    merge_bindings(direct_actions ++ nested_graph_actions, "name", :action)
+  end
+
+  defp merge_handlers(direct_handlers, nested_graphs) do
+    nested_handlers = Enum.flat_map(nested_graphs, & &1["execution_manifest"]["handlers"])
+    merge_bindings(direct_handlers ++ nested_handlers, "handler_type", :handler)
+  end
+
+  defp merge_nodes(direct_nodes, nested_graphs) do
+    nested_nodes =
+      Enum.flat_map(nested_graphs, fn nested_graph ->
+        nested_graph["execution_manifest"]["nodes"]
+        |> Enum.map(fn node ->
+          Map.put(node, "node_id", "nested_graph:#{nested_graph["id"]}:#{node["node_id"]}")
+        end)
+      end)
+
+    merge_bindings(direct_nodes ++ nested_nodes, "node_id", :node)
+  end
+
+  defp merge_bindings(bindings, key, kind) do
+    bindings
+    |> Enum.reduce_while({:ok, %{}}, fn binding, {:ok, index} ->
+      case Map.get(binding, key) do
+        value when is_binary(value) and value != "" ->
+          case Map.fetch(index, value) do
+            :error -> {:cont, {:ok, Map.put(index, value, binding)}}
+            {:ok, ^binding} -> {:cont, {:ok, index}}
+            {:ok, _other} -> {:halt, {:error, {:conflicting_nested_graph_binding, kind, value}}}
+          end
+
+        _other ->
+          {:halt, {:error, {:invalid_nested_graph_binding, kind}}}
+      end
+    end)
+    |> case do
+      {:ok, index} -> {:ok, index |> Map.values() |> Enum.sort_by(&Map.fetch!(&1, key))}
+      {:error, _reason} = error -> error
+    end
   end
 
   defp fetch_catalog_action(%{"actions" => actions}, action_name) when is_list(actions) do
@@ -471,7 +805,7 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
       :ok
     else
       sections =
-        @manifest_keys
+        @v3_manifest_keys
         |> Enum.reject(&(Map.get(expected, &1) == Map.get(actual, &1)))
         |> Enum.sort()
 
@@ -629,6 +963,42 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   defp require_egress_subset(_child, _parent),
     do: {:error, {:invalid_execution_manifest_subset, :egress}}
 
+  defp require_declared_nested_graph(child, %{"nested_graphs" => nested_graphs})
+       when is_list(nested_graphs) do
+    case nested_graphs do
+      [] ->
+        {:error, {:invalid_execution_manifest_subset, :nested_graphs}}
+
+      _nonempty ->
+        if Enum.any?(nested_graphs, &declares_child_graph?(&1, child)) do
+          :ok
+        else
+          {:error, :child_graph_not_declared_by_parent}
+        end
+    end
+  end
+
+  defp require_declared_nested_graph(_child, _parent),
+    do: {:error, {:invalid_execution_manifest_subset, :nested_graphs}}
+
+  defp declares_child_graph?(
+         %{
+           "graph_hash" => graph_hash,
+           "compiled_graph_hash" => compiled_graph_hash,
+           "execution_manifest" => execution_manifest,
+           "execution_manifest_digest" => nested_manifest_digest
+         },
+         %{
+           "graph_hash" => graph_hash,
+           "compiled_graph_hash" => compiled_graph_hash
+         } = child
+       ) do
+    execution_manifest == child and
+      match?({:ok, ^nested_manifest_digest}, digest(child))
+  end
+
+  defp declares_child_graph?(_nested_graph, _child), do: false
+
   defp validate_actions(actions) when is_list(actions) do
     with :ok <- validate_entries(actions, &validate_action/1, :actions),
          :ok <- validate_sorted_unique(actions, "name", :actions) do
@@ -680,6 +1050,81 @@ defmodule Arbor.Orchestrator.CodingPlan.ExecutionManifest do
   end
 
   defp validate_handler(_handler), do: {:error, :invalid_handler_binding}
+
+  defp validate_nested_graphs(nested_graphs, catalog, nested_graph_ids)
+       when is_list(nested_graphs) do
+    validator = &validate_nested_graph(&1, catalog, nested_graph_ids)
+
+    with :ok <- validate_entries(nested_graphs, validator, :nested_graphs),
+         :ok <- validate_sorted_unique(nested_graphs, "id", :nested_graphs) do
+      :ok
+    end
+  end
+
+  defp validate_nested_graphs(_nested_graphs, _catalog, _nested_graph_ids),
+    do: {:error, {:invalid_execution_manifest_field, :nested_graphs}}
+
+  defp validate_nested_graph(nested_graph, catalog, nested_graph_ids)
+       when is_map(nested_graph) do
+    with :ok <- require_exact_keys(nested_graph, @nested_graph_keys, :nested_graph),
+         :ok <- validate_nested_graph_id(nested_graph["id"]),
+         :ok <- reject_nested_graph_cycle(nested_graph["id"], nested_graph_ids),
+         {:ok, reviewed_pipeline} <- reviewed_nested_graph(nested_graph["id"]),
+         :ok <-
+           require_equal(
+             nested_graph["source_id"],
+             reviewed_pipeline.source_id,
+             :nested_graph_source_id
+           ),
+         :ok <- validate_sha256(nested_graph["source_sha256"], :nested_graph_source_sha256),
+         :ok <-
+           require_equal(
+             nested_graph["source_sha256"],
+             sha256(reviewed_pipeline.source),
+             :nested_graph_source_sha256
+           ),
+         :ok <- validate_sha256(nested_graph["graph_hash"], :nested_graph_hash),
+         :ok <- validate_sha256(nested_graph["compiled_graph_hash"], :nested_compiled_graph_hash),
+         :ok <-
+           validate_with_catalog(
+             nested_graph["execution_manifest"],
+             nested_graph["execution_manifest_digest"],
+             nested_graph["graph_hash"],
+             catalog,
+             MapSet.put(nested_graph_ids, nested_graph["id"])
+           ),
+         :ok <-
+           require_equal(
+             nested_graph["execution_manifest"]["compiled_graph_hash"],
+             nested_graph["compiled_graph_hash"],
+             :nested_compiled_graph_hash
+           ),
+         {:ok, authoritative_nested_graph} <-
+           build_nested_graph_closure(nested_graph["id"], catalog, nested_graph_ids),
+         :ok <- require_nested_graph_closure(nested_graph, authoritative_nested_graph) do
+      :ok
+    end
+  end
+
+  defp validate_nested_graph(_nested_graph, _catalog, _nested_graph_ids),
+    do: {:error, :invalid_nested_graph_binding}
+
+  defp reject_nested_graph_cycle(id, nested_graph_ids) do
+    if MapSet.member?(nested_graph_ids, id),
+      do: {:error, {:nested_graph_cycle, id}},
+      else: :ok
+  end
+
+  defp require_nested_graph_closure(nested_graph, nested_graph), do: :ok
+
+  defp require_nested_graph_closure(%{"id" => id}, _authoritative_nested_graph),
+    do: {:error, {:nested_graph_closure_mismatch, id}}
+
+  defp validate_nested_graph_id(id) do
+    if nested_graph_identifier?(id),
+      do: :ok,
+      else: {:error, {:invalid_execution_manifest_field, :nested_graph_id}}
+  end
 
   defp validate_nodes(nodes) when is_list(nodes) do
     with :ok <- validate_entries(nodes, &validate_node_binding/1, :nodes),

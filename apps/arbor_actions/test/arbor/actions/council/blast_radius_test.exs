@@ -85,7 +85,7 @@ defmodule Arbor.Actions.Council.BlastRadiusTest do
     test "carve-out: self-authority surfaces always route to human review" do
       route =
         BlastRadius.route(verdict(:keep), [
-          "apps/arbor_orchestrator/specs/pipelines/code-review-council.dot"
+          "apps/arbor_actions/priv/pipelines/code-review-council.dot"
         ])
 
       assert route.action == :human_review

@@ -787,18 +787,44 @@ defmodule Arbor.Actions.Council do
       |> Map.merge(review_context_overlay(action_context))
 
     question = Map.fetch!(context, "council.question")
+    run_authorization = context_value(action_context, :run_authorization)
 
-    opts =
-      [
-        graph: get_param(params, :graph) || default_code_review_graph_path(),
-        mode: "decision",
-        context: context
-      ]
-      |> put_opt(:timeout, get_param(params, :timeout))
-      |> put_opt(:quorum, get_param(params, :quorum))
+    with :ok <- reject_bound_review_overrides(params, run_authorization) do
+      opts =
+        [
+          graph: review_graph_path(params, run_authorization),
+          context: context
+        ]
+        |> maybe_put_unbound_review_overrides(params, run_authorization)
+        |> put_opt(:timeout, get_param(params, :timeout))
+        |> put_opt(:nested_engine_opts, context_value(action_context, :nested_engine_opts))
+        |> put_opt(:run_authorization, run_authorization)
 
-    Arbor.Consensus.decide(question, opts)
+      Arbor.Consensus.decide(question, opts)
+    end
   end
+
+  defp reject_bound_review_overrides(_params, nil), do: :ok
+
+  defp reject_bound_review_overrides(params, _run_authorization) do
+    case Enum.find([:graph, :quorum], &(not is_nil(get_param(params, &1)))) do
+      nil -> :ok
+      key -> {:error, {:bound_council_override, key}}
+    end
+  end
+
+  defp review_graph_path(params, nil),
+    do: get_param(params, :graph) || default_code_review_graph_path()
+
+  defp review_graph_path(_params, _run_authorization), do: default_code_review_graph_path()
+
+  defp maybe_put_unbound_review_overrides(opts, params, nil) do
+    opts
+    |> Keyword.put(:mode, "decision")
+    |> put_opt(:quorum, get_param(params, :quorum))
+  end
+
+  defp maybe_put_unbound_review_overrides(opts, _params, _run_authorization), do: opts
 
   defp review_context_overlay(context) when is_map(context) do
     case context_value(context, :review_context) do
@@ -810,13 +836,10 @@ defmodule Arbor.Actions.Council do
   defp review_context_overlay(_context), do: %{}
 
   defp default_code_review_graph_path do
-    candidates = [
-      Path.join(File.cwd!(), "apps/arbor_orchestrator/specs/pipelines/code-review-council.dot"),
-      Path.join(File.cwd!(), "../arbor_orchestrator/specs/pipelines/code-review-council.dot"),
-      Path.join(File.cwd!(), "specs/pipelines/code-review-council.dot")
-    ]
-
-    Enum.find(candidates, List.first(candidates), &File.exists?/1)
+    case Arbor.Actions.reviewed_pipeline("code_review_council") do
+      {:ok, %{path: path}} -> path
+      {:error, reason} -> raise "reviewed code-review pipeline unavailable: #{inspect(reason)}"
+    end
   end
 
   defp put_opt(opts, _key, nil), do: opts

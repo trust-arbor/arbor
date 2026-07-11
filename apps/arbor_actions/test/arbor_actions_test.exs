@@ -69,6 +69,24 @@ defmodule Arbor.ActionsTest do
     end
   end
 
+  describe "reviewed_pipeline/1" do
+    test "returns the packaged code-review council artifact through the public facade" do
+      assert {:ok, pipeline} = Actions.reviewed_pipeline("code_review_council")
+      assert pipeline.id == "code_review_council"
+      assert pipeline.source_id == "arbor_actions:priv/pipelines/code-review-council.dot"
+
+      assert pipeline.path ==
+               Application.app_dir(:arbor_actions, "priv/pipelines/code-review-council.dot")
+
+      assert pipeline.source =~ "digraph code_review_council"
+    end
+
+    test "fails closed for an unknown reviewed pipeline" do
+      assert {:error, {:unknown_reviewed_pipeline, "unknown_pipeline"}} =
+               Actions.reviewed_pipeline("unknown_pipeline")
+    end
+  end
+
   describe "all_tools/0" do
     test "returns tool schemas for all actions" do
       tools = Actions.all_tools()

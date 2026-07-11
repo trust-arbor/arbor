@@ -21,7 +21,8 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     Arbor.Actions.Mix.Test,
     Arbor.Actions.Git.Commit,
     Arbor.Actions.Git.PR,
-    Arbor.Actions.Council.ReviewChange
+    Arbor.Actions.Council.ReviewChange,
+    Arbor.Actions.Consensus.Decide
   ]
 
   setup_all do

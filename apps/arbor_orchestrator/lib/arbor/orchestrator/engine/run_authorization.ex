@@ -526,7 +526,8 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
          {:ok, action_bindings} <- ExecutionManifest.action_binding_index(manifest),
          {:ok, handler_bindings} <- ExecutionManifest.handler_binding_index(manifest),
          {:ok, node_bindings} <- ExecutionManifest.node_binding_index(manifest),
-         :ok <- ExecutionManifest.require_subset(manifest, parent.execution_manifest) do
+         :ok <- ExecutionManifest.require_subset(manifest, parent.execution_manifest),
+         :ok <- ExecutionManifest.require_declared_child(manifest, parent.execution_manifest) do
       {:ok, {manifest, manifest_digest, action_bindings, handler_bindings, node_bindings}}
     else
       {:error, reason} -> {:error, {:child_execution_manifest_failed, reason}}

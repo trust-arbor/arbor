@@ -19,7 +19,8 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     Arbor.Actions.Mix.Test,
     Arbor.Actions.Git.Commit,
     Arbor.Actions.Git.PR,
-    Arbor.Actions.Council.ReviewChange
+    Arbor.Actions.Council.ReviewChange,
+    Arbor.Actions.Consensus.Decide
   ]
 
   setup_all do
@@ -124,6 +125,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     refute Map.has_key?(compilation.manifest, "capabilities")
 
     assert "arbor://action/mix/compile" in compilation.execution_manifest["capability_uris"]
+
+    assert Enum.any?(compilation.execution_manifest["actions"], fn binding ->
+             binding["name"] == "consensus_decide"
+           end)
 
     assert Enum.any?(compilation.execution_manifest["actions"], fn binding ->
              binding["name"] == "mix_compile" and

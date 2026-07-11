@@ -500,6 +500,8 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
 
     parent_hash = RunAuthorization.graph_hash(parent)
     {parent_manifest, parent_manifest_digest} = execution_manifest!(parent, parent_hash)
+    assert parent_manifest["version"] == 2
+    refute Map.has_key?(parent_manifest, "nested_graphs")
 
     {:ok, parent_authority} =
       RunAuthorization.new(parent,
@@ -520,6 +522,8 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
              )
 
     assert child_authority.graph_hash == RunAuthorization.graph_hash(child)
+    assert child_authority.execution_manifest["version"] == 2
+    refute Map.has_key?(child_authority.execution_manifest, "nested_graphs")
     refute child_authority.graph_hash == parent_authority.graph_hash
     assert child_authority.parent_binding_digest == parent_authority.binding_digest
     refute child_authority.binding_digest == parent_authority.binding_digest
@@ -536,6 +540,207 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
     assert child_opts[:execution_manifest] == child_authority.execution_manifest
     assert child_opts[:pinned_handler_bindings] == child_authority.pinned_handler_bindings
     assert child_opts[:pinned_node_bindings] == child_authority.pinned_node_bindings
+  end
+
+  test "security regression: reviewed nested council graph derives only from its declared closure",
+       %{root: root} do
+    parent_dot =
+      File.read!(Application.app_dir(:arbor_orchestrator, "priv/pipelines/coding-change-v1.dot"))
+
+    {:ok, %{source: child_dot}} = Arbor.Actions.reviewed_pipeline("code_review_council")
+
+    parent = compiled_graph!(parent_dot)
+    child = compiled_graph!(child_dot)
+    {:ok, catalog} = ActionCatalog.snapshot()
+
+    parent_hash = RunAuthorization.graph_hash(parent)
+
+    {:ok, {parent_manifest, parent_manifest_digest}} =
+      ExecutionManifest.build(parent, catalog, parent_hash)
+
+    assert [%{"id" => "code_review_council", "execution_manifest" => nested_manifest}] =
+             parent_manifest["nested_graphs"]
+
+    assert "parallel" in Enum.map(parent_manifest["handlers"], & &1["handler_type"])
+    assert "compute" in Enum.map(parent_manifest["handlers"], & &1["handler_type"])
+    assert "consensus_decide" in Enum.map(parent_manifest["actions"], & &1["name"])
+
+    assert {:ok, child_compiled_graph_hash} = ExecutionManifest.compiled_graph_hash(child)
+    assert nested_manifest["compiled_graph_hash"] == child_compiled_graph_hash
+
+    {:ok, parent_authority} =
+      RunAuthorization.new(parent,
+        agent_id: "agent_declared_council_closure",
+        caller_id: "caller_declared_council_closure",
+        author_id: "author_declared_council_closure",
+        task_id: "task_declared_council_closure",
+        session_id: "session_declared_council_closure",
+        workdir: root,
+        execution_manifest: parent_manifest,
+        execution_manifest_digest: parent_manifest_digest
+      )
+
+    assert {:ok, {child_authority, child_opts}} =
+             RunAuthorization.prepare(child,
+               authorization: true,
+               run_authorization: parent_authority
+             )
+
+    assert child_authority.graph_hash == RunAuthorization.graph_hash(child)
+    refute child_authority.binding_digest == parent_authority.binding_digest
+    assert child_authority.parent_binding_digest == parent_authority.binding_digest
+    assert child_opts[:run_authorization] == child_authority
+
+    changed_child_dot =
+      String.replace(
+        child_dot,
+        "  collect -> decide -> done",
+        "  collect -> done\n  decide -> done"
+      )
+
+    refute changed_child_dot == child_dot
+    changed_child = compiled_graph!(changed_child_dot)
+
+    assert {:error, {:child_execution_manifest_failed, :child_graph_not_declared_by_parent}} =
+             RunAuthorization.prepare(changed_child,
+               authorization: true,
+               run_authorization: parent_authority
+             )
+
+    undeclared_parent =
+      parent_dot
+      |> String.replace("    nested_graphs=\"code_review_council\"\n", "")
+      |> compiled_graph!()
+
+    undeclared_parent_hash = RunAuthorization.graph_hash(undeclared_parent)
+
+    {:ok, {undeclared_manifest, undeclared_manifest_digest}} =
+      ExecutionManifest.build(undeclared_parent, catalog, undeclared_parent_hash)
+
+    {:ok, undeclared_authority} =
+      RunAuthorization.new(undeclared_parent,
+        agent_id: "agent_undeclared_council_closure",
+        caller_id: "caller_undeclared_council_closure",
+        author_id: "author_undeclared_council_closure",
+        task_id: "task_undeclared_council_closure",
+        session_id: "session_undeclared_council_closure",
+        workdir: root,
+        execution_manifest: undeclared_manifest,
+        execution_manifest_digest: undeclared_manifest_digest
+      )
+
+    assert {:error,
+            {:child_execution_manifest_failed,
+             {:child_binding_not_pinned_by_parent, :action, "consensus_decide"}}} =
+             RunAuthorization.prepare(child,
+               authorization: true,
+               run_authorization: undeclared_authority
+             )
+  end
+
+  test "security regression: RunAuthorization rejects a recomputed forged reviewed child closure",
+       %{root: root} do
+    parent_dot = """
+    digraph ForgedReviewedChildClosure {
+      graph [nested_graphs="code_review_council"]
+      start [shape=Mdiamond]
+      done [shape=Msquare]
+      start -> done
+    }
+    """
+
+    {:ok, reviewed_pipeline} = Arbor.Actions.reviewed_pipeline("code_review_council")
+
+    forged_child_dot =
+      String.replace(
+        reviewed_pipeline.source,
+        "  collect -> decide -> done",
+        "  collect -> done\n  decide -> done"
+      )
+
+    refute forged_child_dot == reviewed_pipeline.source
+
+    parent = compiled_graph!(parent_dot)
+    forged_child = compiled_graph!(forged_child_dot)
+    {:ok, catalog} = ActionCatalog.snapshot()
+    parent_hash = RunAuthorization.graph_hash(parent)
+    forged_child_hash = RunAuthorization.graph_hash(forged_child)
+
+    {:ok, {parent_manifest, _parent_digest}} =
+      ExecutionManifest.build(parent, catalog, parent_hash)
+
+    {:ok, {forged_child_manifest, forged_child_digest}} =
+      ExecutionManifest.build(forged_child, catalog, forged_child_hash)
+
+    assert :ok =
+             ExecutionManifest.validate(
+               forged_child_manifest,
+               forged_child_digest,
+               forged_child_hash
+             )
+
+    [reviewed_child] = parent_manifest["nested_graphs"]
+
+    forged_child_binding =
+      Map.merge(reviewed_child, %{
+        "graph_hash" => forged_child_hash,
+        "compiled_graph_hash" => forged_child_manifest["compiled_graph_hash"],
+        "execution_manifest" => forged_child_manifest,
+        "execution_manifest_digest" => forged_child_digest
+      })
+
+    assert forged_child_binding["source_id"] == reviewed_child["source_id"]
+    assert forged_child_binding["source_sha256"] == reviewed_child["source_sha256"]
+    refute forged_child_binding["graph_hash"] == reviewed_child["graph_hash"]
+    refute forged_child_binding["compiled_graph_hash"] == reviewed_child["compiled_graph_hash"]
+
+    forged_parent_manifest = Map.put(parent_manifest, "nested_graphs", [forged_child_binding])
+    {:ok, forged_parent_digest} = ExecutionManifest.digest(forged_parent_manifest)
+
+    assert {:error,
+            {:invalid_execution_manifest_entry, :nested_graphs, 0,
+             {:nested_graph_closure_mismatch, "code_review_council"}}} =
+             RunAuthorization.new(parent,
+               agent_id: "agent_forged_reviewed_child_closure",
+               workdir: root,
+               execution_manifest: forged_parent_manifest,
+               execution_manifest_digest: forged_parent_digest
+             )
+  end
+
+  test "security regression: declaring parent cannot downgrade its manifest to v2", %{root: root} do
+    parent_dot =
+      File.read!(Application.app_dir(:arbor_orchestrator, "priv/pipelines/coding-change-v1.dot"))
+
+    parent = compiled_graph!(parent_dot)
+    parent_hash = RunAuthorization.graph_hash(parent)
+    {:ok, catalog} = ActionCatalog.snapshot()
+
+    {:ok, {manifest, _manifest_digest}} =
+      ExecutionManifest.build(parent, catalog, parent_hash)
+
+    assert manifest["version"] == 3
+
+    downgraded_manifest =
+      manifest
+      |> Map.delete("nested_graphs")
+      |> Map.put("version", 2)
+
+    {:ok, downgraded_digest} = ExecutionManifest.digest(downgraded_manifest)
+    assert :ok = ExecutionManifest.validate(downgraded_manifest, downgraded_digest, parent_hash)
+
+    binding_opts = [
+      agent_id: "agent_downgraded_nested_manifest",
+      workdir: root,
+      execution_manifest: downgraded_manifest,
+      execution_manifest_digest: downgraded_digest
+    ]
+
+    assert {:error, {:execution_manifest_field_mismatch, :version}} =
+             RunAuthorization.new(parent, binding_opts)
+
+    assert {:error, {:execution_manifest_field_mismatch, :version}} =
+             RunAuthorization.prepare(parent, [authorization: true] ++ binding_opts)
   end
 
   test "security regression: RunAuthorization and Engine reject a changed compiled graph paired with an old manifest",

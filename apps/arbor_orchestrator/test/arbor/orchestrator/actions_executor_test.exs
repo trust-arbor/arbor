@@ -93,6 +93,65 @@ defmodule Arbor.Orchestrator.ActionsExecutorTest do
       assert context.taint == aggregate
       assert context.param_taint == exact
     end
+
+    test "forwards run authorization to action context only when supplied" do
+      :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, true, [])
+
+      on_exit(fn ->
+        :erlang.trace_pattern({Arbor.Actions, :authorize_and_execute, 4}, false, [])
+      end)
+
+      {:ok, uncompiled_parent_graph} =
+        Arbor.Orchestrator.parse("""
+        digraph ParentAuthorization {
+          start [shape=Mdiamond]
+          done [shape=Msquare]
+          start -> done
+        }
+        """)
+
+      {:ok, parent_graph} = Arbor.Orchestrator.IR.Compiler.compile(uncompiled_parent_graph)
+
+      {:ok, authority} =
+        Arbor.Orchestrator.Engine.RunAuthorization.new(parent_graph,
+          agent_id: "agent_parent_authorization",
+          caller_id: "caller_parent_authorization",
+          author_id: "author_parent_authorization",
+          workdir: File.cwd!()
+        )
+
+      tracer = self()
+
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+        ActionsExecutor.execute(
+          "file.read",
+          %{"path" => "mix.exs"},
+          ".",
+          run_authorization: authority
+        )
+      end)
+      |> Task.await()
+
+      assert_receive {:trace, _pid, :call,
+                      {Arbor.Actions, :authorize_and_execute,
+                       [_agent_id, Arbor.Actions.File.Read, _params, context]}}
+
+      assert context.run_authorization == authority
+
+      Task.async(fn ->
+        :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+        ActionsExecutor.execute("file.read", %{"path" => "mix.exs"}, ".")
+      end)
+      |> Task.await()
+
+      assert_receive {:trace, _pid, :call,
+                      {Arbor.Actions, :authorize_and_execute,
+                       [_agent_id, Arbor.Actions.File.Read, _params, context]}}
+
+      refute Map.has_key?(context, :run_authorization)
+    end
   end
 
   describe "normalize_name/1" do

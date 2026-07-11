@@ -82,6 +82,9 @@ defmodule Arbor.Actions do
   alias Arbor.Signals
 
   @approval_preview_limit 500
+  @reviewed_pipelines %{
+    "code_review_council" => "priv/pipelines/code-review-council.dot"
+  }
 
   @runtime_action_descriptor_keys ~w(
     beam_sha256
@@ -94,6 +97,48 @@ defmodule Arbor.Actions do
     resource_uri
   )
   @active_execution_binding_key {__MODULE__, :active_execution_binding}
+
+  @type reviewed_pipeline :: %{
+          id: String.t(),
+          source_id: String.t(),
+          path: String.t(),
+          source: String.t()
+        }
+
+  @doc """
+  Fetch an exact reviewed pipeline artifact owned by `arbor_actions`.
+
+  The lookup is intentionally allowlisted: callers cannot select an arbitrary
+  path or source. The returned `source_id` is stable across releases, while
+  `path` is the package-local runtime location and `source` is the exact DOT
+  bytes to bind into an execution manifest.
+  """
+  @spec reviewed_pipeline(String.t()) :: {:ok, reviewed_pipeline()} | {:error, term()}
+  def reviewed_pipeline(id) when is_binary(id) do
+    case Map.fetch(@reviewed_pipelines, id) do
+      {:ok, relative_path} ->
+        path = Application.app_dir(:arbor_actions, relative_path)
+
+        case File.read(path) do
+          {:ok, source} ->
+            {:ok,
+             %{
+               id: id,
+               source_id: "arbor_actions:#{relative_path}",
+               path: path,
+               source: source
+             }}
+
+          {:error, reason} ->
+            {:error, {:reviewed_pipeline_unavailable, id, reason}}
+        end
+
+      :error ->
+        {:error, {:unknown_reviewed_pipeline, id}}
+    end
+  end
+
+  def reviewed_pipeline(_id), do: {:error, :invalid_reviewed_pipeline_id}
 
   @approval_payload_keys [
     :content,

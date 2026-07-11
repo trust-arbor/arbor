@@ -15,7 +15,7 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
   """
   use ExUnit.Case, async: true
 
-  alias Arbor.Orchestrator.Engine.Context
+  alias Arbor.Orchestrator.Engine.{Authorization, Context, RunAuthorization}
   alias Arbor.Orchestrator.Graph
   alias Arbor.Orchestrator.Graph.Node
   alias Arbor.Orchestrator.Handlers.ExecHandler
@@ -42,6 +42,51 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandlerTaintTest do
   defp graph, do: %Graph{}
 
   defp opts, do: [agent_id: "agent_test", actions_executor: StubExecutor]
+
+  test "security regression: authorized action execution preserves nested Engine controls" do
+    node =
+      action_node(%{
+        "type" => "exec",
+        "action" => "council.review_code",
+        "arg.request" => "review this change"
+      })
+
+    graph = %Graph{id: "exec_nested_controls", nodes: %{node.id => node}, compiled: true}
+    {:ok, authority} = RunAuthorization.new(graph, agent_id: "agent_test", workdir: File.cwd!())
+
+    authorizer = fn "agent_test", "exec" -> :ok end
+    signer = fn resource -> {:ok, {:signed, resource}} end
+
+    outcome =
+      Authorization.authorize_and_execute(
+        ExecHandler,
+        node,
+        Context.new(),
+        graph,
+        authorization: true,
+        run_authorization: authority,
+        authorizer: authorizer,
+        signer: signer,
+        max_depth: 2,
+        identity_private_key: "raw-secret-must-not-cross",
+        actions_executor: StubExecutor
+      )
+
+    assert outcome.status == :success
+
+    assert_received {:stub_execute, "council.review_code",
+                     %{"request" => "review this change"} = action_args, _workdir, executor_opts}
+
+    assert Keyword.fetch!(executor_opts, :run_authorization) === authority
+    assert Keyword.fetch!(executor_opts, :authorizer) === authorizer
+    assert Keyword.fetch!(executor_opts, :signer) === signer
+    assert Keyword.fetch!(executor_opts, :max_depth) == 2
+    refute Keyword.has_key?(executor_opts, :identity_private_key)
+    refute Map.has_key?(action_args, "run_authorization")
+    refute Map.has_key?(action_args, "authorizer")
+    refute Map.has_key?(action_args, "signer")
+    refute Map.has_key?(action_args, "max_depth")
+  end
 
   describe "Phase 2 bridge — input provenance is threaded into the action context" do
     test "untrusted provenance on an interpolated context key is threaded as taint" do

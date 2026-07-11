@@ -1,5 +1,5 @@
 defmodule Arbor.Actions.CouncilTest do
-  use Arbor.Actions.ActionCase, async: true
+  use Arbor.Actions.ActionCase, async: false
 
   alias Arbor.Actions.Council
 
@@ -355,6 +355,74 @@ defmodule Arbor.Actions.CouncilTest do
       assert result.tier_decision == "human_review"
       assert result.security_veto
       assert result.human_required
+    end
+
+    test "security regression: bound default runner uses trusted graph and runtime opts" do
+      Code.ensure_loaded!(Arbor.Consensus)
+      :erlang.trace_pattern({Arbor.Consensus, :decide, 2}, true, [])
+
+      on_exit(fn ->
+        :erlang.trace_pattern({Arbor.Consensus, :decide, 2}, false, [])
+      end)
+
+      parent = self()
+      signer = fn _resource -> {:ok, :signed} end
+      authorizer = fn _agent_id, _handler_type -> :ok end
+      authority = :malformed_parent_authorization
+
+      result =
+        Task.async(fn ->
+          :erlang.trace(self(), true, [:call, {:tracer, parent}])
+
+          Council.ReviewChange.run(@valid_review_params, %{
+            persist_verdict: false,
+            run_authorization: authority,
+            nested_engine_opts: [signer: signer, authorizer: authorizer],
+            review_context: %{
+              "council.decision" => "approved",
+              "council.quorum_met" => true
+            }
+          })
+        end)
+        |> Task.await()
+
+      assert {:error, :invalid_run_authorization} = result
+
+      assert_receive {:trace, _pid, :call, {Arbor.Consensus, :decide, [question, consensus_opts]}}
+
+      assert question == consensus_opts[:context]["council.question"]
+      assert consensus_opts[:context]["branch"] == "agent/review-loop"
+      assert consensus_opts[:run_authorization] == authority
+      assert consensus_opts[:nested_engine_opts][:signer] == signer
+      assert consensus_opts[:nested_engine_opts][:authorizer] == authorizer
+
+      assert {:ok, reviewed_pipeline} =
+               Arbor.Actions.reviewed_pipeline("code_review_council")
+
+      assert Path.expand(consensus_opts[:graph]) == Path.expand(reviewed_pipeline.path)
+
+      refute Keyword.has_key?(consensus_opts, :mode)
+      refute Keyword.has_key?(consensus_opts, :quorum)
+      refute Map.has_key?(consensus_opts[:context], :nested_engine_opts)
+      refute Map.has_key?(consensus_opts[:context], "nested_engine_opts")
+    end
+
+    test "rejects graph and quorum overrides for bound reviews" do
+      context = %{
+        persist_verdict: false,
+        run_authorization: :opaque_parent_authorization,
+        nested_engine_opts: [
+          signer: fn _resource -> {:ok, :signed} end,
+          authorizer: fn _agent_id, _handler_type -> :ok end
+        ]
+      }
+
+      for {key, value} <- [graph: "/tmp/not-allowlisted.dot", quorum: "unanimous"] do
+        params = Map.put(@valid_review_params, key, value)
+
+        assert {:error, {:bound_council_override, ^key}} =
+                 Council.ReviewChange.run(params, context)
+      end
     end
 
     test "request map can be overridden by top-level params" do

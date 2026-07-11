@@ -30,6 +30,7 @@ defmodule Arbor.Consensus.Evaluators.Consult do
   alias Arbor.Contracts.Consensus.Proposal
 
   @default_timeout 300_000
+  @nested_engine_opt_allowlist [:signer, :authorizer, :max_depth]
 
   @doc """
   Ask an evaluator all its perspectives about a question.
@@ -181,6 +182,7 @@ defmodule Arbor.Consensus.Evaluators.Consult do
   - `:mode` — "decision" | "advisory" (default from DOT file)
   - `:timeout` — engine timeout in ms (default: 600_000)
   - `:context` — map of additional context
+  - `:run_authorization` — opaque parent authorization forwarded to the nested engine
 
   Returns `{:ok, decision_map}` with keys like `"council.decision"`,
   `"council.approve_count"`, etc., or `{:error, reason}`.
@@ -188,26 +190,13 @@ defmodule Arbor.Consensus.Evaluators.Consult do
   @spec decide(module(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def decide(_evaluator_module, description, opts \\ []) do
     graph_path = Keyword.get(opts, :graph, default_council_graph_path())
+    run_authorization = Keyword.get(opts, :run_authorization)
 
-    with {:ok, dot_content} <- read_graph_file(graph_path),
-         {:ok, graph} <- parse_graph(dot_content) do
-      # Inject question and optional overrides into graph attrs
-      overrides = %{"council.question" => description}
-
-      overrides =
-        case Keyword.get(opts, :quorum) do
-          nil -> overrides
-          q -> Map.put(overrides, "quorum", q)
-        end
-
-      overrides =
-        case Keyword.get(opts, :mode) do
-          nil -> overrides
-          m -> Map.put(overrides, "mode", to_string(m))
-        end
-
-      # Merge overrides into graph attrs
-      graph = %{graph | attrs: Map.merge(graph.attrs, overrides)}
+    with :ok <- reject_bound_semantic_overrides(opts, run_authorization),
+         {:ok, dot_content} <- read_graph_file(graph_path),
+         {:ok, graph} <- load_graph(dot_content, run_authorization),
+         {:ok, nested_engine_opts} <- nested_engine_opts(opts, run_authorization) do
+      graph = maybe_apply_unbound_overrides(graph, description, opts, run_authorization)
 
       # Set initial context values for the engine. `:context` is advertised on
       # Arbor.Consensus.decide/2 and is load-bearing for specialized council
@@ -218,17 +207,13 @@ defmodule Arbor.Consensus.Evaluators.Consult do
         |> normalize_initial_context()
         |> Map.put("council.question", description)
 
-      engine_opts = [
-        initial_values: initial_context
-      ]
-
       engine_opts =
-        case Keyword.get(opts, :timeout) do
-          nil -> engine_opts
-          t -> Keyword.put(engine_opts, :timeout, t)
-        end
+        nested_engine_opts
+        |> Keyword.put(:initial_values, initial_context)
+        |> maybe_put_timeout(Keyword.get(opts, :timeout))
+        |> maybe_bind_run_authorization(run_authorization)
 
-      case run_engine(graph, engine_opts) do
+      case run_engine(graph, engine_opts, Keyword.get(opts, :engine_runner)) do
         {:ok, result} ->
           extract_decision_from_result(result)
 
@@ -288,7 +273,7 @@ defmodule Arbor.Consensus.Evaluators.Consult do
     end
   end
 
-  defp parse_graph(dot_content) do
+  defp load_graph(dot_content, nil) do
     if Code.ensure_loaded?(@orchestrator_mod) do
       apply(@orchestrator_mod, :parse, [dot_content])
     else
@@ -296,10 +281,80 @@ defmodule Arbor.Consensus.Evaluators.Consult do
     end
   end
 
+  defp load_graph(dot_content, _run_authorization) do
+    if Code.ensure_loaded?(@orchestrator_mod) do
+      apply(@orchestrator_mod, :compile, [dot_content])
+    else
+      {:error, :orchestrator_not_available}
+    end
+  end
+
+  defp reject_bound_semantic_overrides(_opts, nil), do: :ok
+
+  defp reject_bound_semantic_overrides(opts, _run_authorization) do
+    case Enum.find([:mode, :quorum], &(not is_nil(Keyword.get(opts, &1)))) do
+      nil -> :ok
+      key -> {:error, {:bound_council_override, key}}
+    end
+  end
+
+  defp maybe_apply_unbound_overrides(graph, _description, _opts, run_authorization)
+       when not is_nil(run_authorization),
+       do: graph
+
+  defp maybe_apply_unbound_overrides(graph, description, opts, nil) do
+    overrides = %{"council.question" => description}
+
+    overrides =
+      case Keyword.get(opts, :quorum) do
+        nil -> overrides
+        quorum -> Map.put(overrides, "quorum", quorum)
+      end
+
+    overrides =
+      case Keyword.get(opts, :mode) do
+        nil -> overrides
+        mode -> Map.put(overrides, "mode", to_string(mode))
+      end
+
+    %{graph | attrs: Map.merge(graph.attrs, overrides)}
+  end
+
+  defp nested_engine_opts(_opts, nil), do: {:ok, []}
+
+  defp nested_engine_opts(opts, _run_authorization) do
+    case Keyword.get(opts, :nested_engine_opts, []) do
+      nested_opts when is_list(nested_opts) ->
+        if Keyword.keyword?(nested_opts) do
+          {:ok, Keyword.take(nested_opts, @nested_engine_opt_allowlist)}
+        else
+          {:error, :invalid_nested_engine_opts}
+        end
+
+      _other ->
+        {:error, :invalid_nested_engine_opts}
+    end
+  end
+
+  defp maybe_put_timeout(opts, nil), do: opts
+  defp maybe_put_timeout(opts, timeout), do: Keyword.put(opts, :timeout, timeout)
+
+  defp maybe_bind_run_authorization(opts, nil), do: opts
+
+  defp maybe_bind_run_authorization(opts, run_authorization) do
+    opts
+    |> Keyword.put(:authorization, true)
+    |> Keyword.put(:run_authorization, run_authorization)
+  end
+
   defp normalize_initial_context(context) when is_map(context), do: context
   defp normalize_initial_context(_context), do: %{}
 
-  defp run_engine(graph, opts) do
+  defp run_engine(graph, opts, engine_runner) when is_function(engine_runner, 2) do
+    engine_runner.(graph, opts)
+  end
+
+  defp run_engine(graph, opts, _engine_runner) do
     if Code.ensure_loaded?(@engine_mod) do
       apply(@engine_mod, :run, [graph, opts])
     else
