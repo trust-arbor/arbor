@@ -284,6 +284,42 @@ defmodule Arbor.Actions.Coding.CrossApp.CoreTest do
     assert without_marker == String.duplicate("é", div(byte_size(without_marker), 2))
   end
 
+  @tag timeout: 30_000
+  test "large invalid-byte stream: single raw hash, windowed JSON-safe excerpt, no full-stream sanitize" do
+    # Regression: quadratic/full-stream invalid UTF-8 repair + whole-stream
+    # suffix enumeration for a ~2 KB excerpt must not run over multi-100KB
+    # process output. Hash the complete raw stream once; repair only bounded
+    # head/tail windows.
+    prefix = "HEAD-OK-"
+    suffix = "-TAIL-OK"
+    invalid_mid = :binary.copy(<<0xFF>>, 120_000)
+    raw = prefix <> invalid_mid <> suffix
+    assert byte_size(raw) >= 100_000
+
+    expected_hash = :crypto.hash(:sha256, raw) |> Base.encode16(case: :lower)
+
+    feedback =
+      Core.feedback_from_result(%{
+        exit_code: 1,
+        stdout: raw,
+        stderr: ""
+      })
+
+    assert feedback["stdout_sha256"] == expected_hash
+    assert feedback["stdout_truncated"] == true
+    assert String.valid?(feedback["stdout_excerpt"])
+    assert byte_size(feedback["stdout_excerpt"]) <= Core.max_output_excerpt_bytes()
+    assert String.contains?(feedback["stdout_excerpt"], "HEAD-OK-")
+    assert String.contains?(feedback["stdout_excerpt"], "-TAIL-OK")
+    assert String.contains?(feedback["stdout_excerpt"], "...[omitted]...")
+    refute String.contains?(feedback["stdout_excerpt"], <<0xFF>>)
+
+    assert {:ok, json} = Jason.encode(feedback)
+    assert {:ok, decoded} = Jason.decode(json)
+    assert decoded["stdout_sha256"] == expected_hash
+    assert is_binary(decoded["stdout_excerpt"])
+  end
+
   test "aggregate_test_check bounds excerpts, hashes paths+process digests, and keeps reasons stable" do
     alpha =
       Core.classify_app_test_result("apps/alpha/test", %{

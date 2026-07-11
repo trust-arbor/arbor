@@ -24,6 +24,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   @excerpt_omission_marker "\n...[omitted]...\n"
   # U+FFFD replacement character in UTF-8.
   @utf8_replacement <<0xEF, 0xBF, 0xBD>>
+  # Max incomplete UTF-8 sequence length is 3 trailing/leading bytes. Windows
+  # take this extra raw allowance so repair can complete a cut multi-byte char
+  # without scanning the rest of the stream.
+  @utf8_boundary_allowance 3
 
   @root_wide_exact MapSet.new([
                      "mix.exs",
@@ -516,18 +520,21 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
 
   @doc false
   def bound_output_excerpt(raw) when is_binary(raw) do
-    safe = json_safe_utf8(raw)
+    # Never sanitize or enumerate the full raw stream just to build a ~2 KB
+    # excerpt. Hashing (caller) covers the complete already-bounded raw bytes;
+    # excerpts only repair bounded head/tail windows (+ UTF-8 boundary allowance).
+    size = byte_size(raw)
 
-    if byte_size(safe) <= @max_output_excerpt_bytes do
-      {safe, false}
+    if size <= @max_output_excerpt_bytes do
+      {replace_invalid_utf8(raw), false}
     else
       marker = @excerpt_omission_marker
       available = @max_output_excerpt_bytes - byte_size(marker)
       head_budget = div(available, 2)
       tail_budget = available - head_budget
 
-      head = take_utf8_prefix_bytes(safe, head_budget)
-      tail = take_utf8_suffix_bytes(safe, tail_budget)
+      head = repair_raw_window_prefix(raw, head_budget)
+      tail = repair_raw_window_suffix(raw, tail_budget)
       {head <> marker <> tail, true}
     end
   end
@@ -548,18 +555,10 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
       end)
       |> Enum.join("\n")
 
-    if byte_size(text) <= @max_aggregate_excerpt_bytes do
-      {text, false}
-    else
-      marker = @excerpt_omission_marker
-      available = @max_aggregate_excerpt_bytes - byte_size(marker)
-      head_budget = div(available, 2)
-      tail_budget = available - head_budget
-
-      head = take_utf8_prefix_bytes(text, head_budget)
-      tail = take_utf8_suffix_bytes(text, tail_budget)
-      {head <> marker <> tail, true}
-    end
+    # Per-app bodies are already excerpt-bounded; re-use the same windowed
+    # head/tail path so aggregate re-bounding never walks the joined text as
+    # a full character list either.
+    bound_output_excerpt(text)
   end
 
   defp aggregate_stream_hash(app_results, field) do
@@ -593,24 +592,67 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
     end
   end
 
+  # Linear iodata repair: each invalid/incomplete byte becomes U+FFFD once.
+  # Used only on already-bounded windows (or streams that already fit the
+  # excerpt budget), never as a full-stream pre-pass for large process output.
   defp replace_invalid_utf8(data) when is_binary(data) do
+    data
+    |> replace_invalid_utf8_iodata([])
+    |> IO.iodata_to_binary()
+  end
+
+  defp replace_invalid_utf8_iodata(<<>>, acc), do: Enum.reverse(acc)
+
+  defp replace_invalid_utf8_iodata(data, acc) do
     case :unicode.characters_to_binary(data, :utf8, :utf8) do
       result when is_binary(result) ->
-        result
+        Enum.reverse([result | acc])
 
-      {:error, good, rest} when is_binary(good) and is_binary(rest) and rest != "" ->
-        <<_bad, next::binary>> = rest
-        good <> @utf8_replacement <> replace_invalid_utf8(next)
+      {:error, good, <<_bad, next::binary>>} when is_binary(good) ->
+        replace_invalid_utf8_iodata(next, prepend_replacement(good, acc))
 
       {:error, good, _rest} when is_binary(good) ->
-        good <> @utf8_replacement
+        Enum.reverse(prepend_replacement(good, acc))
 
       {:incomplete, good, _rest} when is_binary(good) ->
-        good <> @utf8_replacement
+        Enum.reverse(prepend_replacement(good, acc))
 
       _other ->
-        @utf8_replacement
+        Enum.reverse([@utf8_replacement | acc])
     end
+  end
+
+  defp prepend_replacement(<<>>, acc), do: [@utf8_replacement | acc]
+  defp prepend_replacement(good, acc), do: [@utf8_replacement, good | acc]
+
+  defp repair_raw_window_prefix(raw, budget)
+       when is_binary(raw) and is_integer(budget) and budget <= 0 do
+    ""
+  end
+
+  defp repair_raw_window_prefix(raw, budget) when is_binary(raw) and is_integer(budget) do
+    size = byte_size(raw)
+    take = min(size, budget + @utf8_boundary_allowance)
+
+    raw
+    |> binary_part(0, take)
+    |> replace_invalid_utf8()
+    |> take_utf8_prefix_bytes(budget)
+  end
+
+  defp repair_raw_window_suffix(raw, budget)
+       when is_binary(raw) and is_integer(budget) and budget <= 0 do
+    ""
+  end
+
+  defp repair_raw_window_suffix(raw, budget) when is_binary(raw) and is_integer(budget) do
+    size = byte_size(raw)
+    take = min(size, budget + @utf8_boundary_allowance)
+
+    raw
+    |> binary_part(size - take, take)
+    |> replace_invalid_utf8()
+    |> take_utf8_suffix_bytes(budget)
   end
 
   defp take_utf8_prefix_bytes(text, max_bytes)
@@ -624,27 +666,11 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   defp take_utf8_prefix_bytes(text, max_bytes) when is_binary(text) and is_integer(max_bytes) do
-    take_utf8_prefix_bytes(text, max_bytes, 0, [])
-  end
-
-  defp take_utf8_prefix_bytes(<<>>, _max, _acc_size, acc) do
-    acc |> Enum.reverse() |> IO.iodata_to_binary()
-  end
-
-  defp take_utf8_prefix_bytes(rest, max, acc_size, acc) do
-    case next_utf8_char(rest) do
-      {char, rest2} ->
-        size = byte_size(char)
-
-        if acc_size + size > max do
-          acc |> Enum.reverse() |> IO.iodata_to_binary()
-        else
-          take_utf8_prefix_bytes(rest2, max, acc_size + size, [char | acc])
-        end
-
-      :error ->
-        acc |> Enum.reverse() |> IO.iodata_to_binary()
-    end
+    # Input is already repaired/valid UTF-8 of a bounded window. Drop at most
+    # a few trailing bytes so we do not split a multi-byte codepoint.
+    text
+    |> binary_part(0, max_bytes)
+    |> trim_incomplete_utf8_suffix()
   end
 
   defp take_utf8_suffix_bytes(text, max_bytes)
@@ -658,39 +684,46 @@ defmodule Arbor.Actions.Coding.CrossApp.Core do
   end
 
   defp take_utf8_suffix_bytes(text, max_bytes) when is_binary(text) and is_integer(max_bytes) do
-    # Walk from the start, keep a sliding window of complete codepoints whose
-    # total size stays within max_bytes, ending at the binary's end.
-    text
-    |> utf8_chars()
-    |> Enum.reverse()
-    |> Enum.reduce_while({[], 0}, fn char, {acc, size} ->
-      char_size = byte_size(char)
+    # Input is already repaired/valid UTF-8 of a bounded window. Align the
+    # start index forward by at most 3 bytes so the suffix is complete UTF-8.
+    size = byte_size(text)
+    start = align_utf8_start(text, size - max_bytes, 0)
+    binary_part(text, start, size - start)
+  end
 
-      if size + char_size > max_bytes do
-        {:halt, {acc, size}}
+  defp trim_incomplete_utf8_suffix(<<>>), do: <<>>
+
+  defp trim_incomplete_utf8_suffix(bin) when is_binary(bin) do
+    if String.valid?(bin) do
+      bin
+    else
+      size = byte_size(bin)
+
+      if size <= 1 do
+        <<>>
       else
-        {:cont, {[char | acc], size + char_size}}
+        trim_incomplete_utf8_suffix(binary_part(bin, 0, size - 1))
       end
-    end)
-    |> elem(0)
-    |> IO.iodata_to_binary()
-  end
-
-  defp utf8_chars(text) when is_binary(text) do
-    utf8_chars(text, [])
-  end
-
-  defp utf8_chars(<<>>, acc), do: Enum.reverse(acc)
-
-  defp utf8_chars(rest, acc) do
-    case next_utf8_char(rest) do
-      {char, rest2} -> utf8_chars(rest2, [char | acc])
-      :error -> Enum.reverse(acc)
     end
   end
 
-  defp next_utf8_char(<<cp::utf8, rest::binary>>), do: {<<cp::utf8>>, rest}
-  defp next_utf8_char(_), do: :error
+  defp align_utf8_start(_text, start, _n) when start <= 0, do: 0
+
+  defp align_utf8_start(_text, start, n) when n > @utf8_boundary_allowance do
+    # Should not happen for valid UTF-8; fail soft to empty-aligned start.
+    start
+  end
+
+  defp align_utf8_start(text, start, n) do
+    size = byte_size(text)
+    part = binary_part(text, start, size - start)
+
+    if String.valid?(part) do
+      start
+    else
+      align_utf8_start(text, start + 1, n + 1)
+    end
+  end
 
   defp validate_param_keys(params) do
     valid? =
