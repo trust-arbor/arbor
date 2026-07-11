@@ -877,6 +877,34 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       assert {:error, {:invalid_request, :empty_input}} =
                Adapter.embed([], "voyage-large-2", provider: "voyage")
     end
+
+    test "security regression: repeated unknown providers never intern atoms" do
+      assert {:error, _reason} =
+               Adapter.embed(["hello"], "model", provider: "unknown_embedding_provider_warmup")
+
+      for index <- 1..1_000 do
+        provider = "unknown_embedding_provider_first_#{index}"
+        _ = Adapter.embed(["hello"], "model", provider: provider)
+      end
+
+      for index <- 1..1_000 do
+        provider = "unknown_embedding_provider_stabilize_#{index}"
+        _ = Adapter.embed(["hello"], "model", provider: provider)
+      end
+
+      before_count = :erlang.system_info(:atom_count)
+
+      results =
+        for index <- 1..1_000 do
+          provider = "unknown_embedding_provider_second_#{index}"
+          Adapter.embed(["hello"], "model", provider: provider)
+        end
+
+      after_count = :erlang.system_info(:atom_count)
+
+      assert after_count == before_count
+      assert Enum.all?(results, &match?({:error, _reason}, &1))
+    end
   end
 
   test "security regression: generic Req complete halts a chunked oversized body early" do

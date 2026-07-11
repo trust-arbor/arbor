@@ -43,10 +43,20 @@ defmodule Arbor.LLM.HighLevelApiTest do
             "#{msg.role}:#{Message.text(msg)}"
           end)
 
-        if request.model == "json-model" do
-          {:ok, %Response{text: ~s({"ok":true}), finish_reason: :stop, raw: %{}}}
-        else
-          {:ok, %Response{text: text, finish_reason: :stop, raw: %{}}}
+        case request.model do
+          "json-model" ->
+            {:ok, %Response{text: ~s({"ok":true}), finish_reason: :stop, raw: %{}}}
+
+          "deep-json-model" ->
+            deep = String.duplicate("[", 33) <> "0" <> String.duplicate("]", 33)
+            {:ok, %Response{text: ~s({"value":#{deep}}), finish_reason: :stop, raw: %{}}}
+
+          "oversized-json-model" ->
+            oversized = Jason.encode!(%{"value" => String.duplicate("x", 1_048_577)})
+            {:ok, %Response{text: oversized, finish_reason: :stop, raw: %{}}}
+
+          _other ->
+            {:ok, %Response{text: text, finish_reason: :stop, raw: %{}}}
         end
       end
     end
@@ -135,7 +145,7 @@ defmodule Arbor.LLM.HighLevelApiTest do
     def complete(_request, _opts), do: {:error, :unsupported}
 
     @impl true
-    def stream(%Request{provider_options: options}, _opts) do
+    def stream(%Request{provider_options: options, model: model}, _opts) do
       owner = Map.fetch!(options, :test_pid)
 
       producer =
@@ -147,12 +157,24 @@ defmodule Arbor.LLM.HighLevelApiTest do
           end
         end)
 
+      events =
+        if model == "empty",
+          do: [],
+          else: Stream.repeatedly(fn -> %StreamEvent{type: :delta, data: %{text: "x"}} end)
+
       %Arbor.LLM.OwnedStream{
-        stream: Stream.repeatedly(fn -> %StreamEvent{type: :delta, data: %{text: "x"}} end),
+        stream: events,
         producer: producer,
         cancel: fn ->
           send(owner, :hostile_cancel_called)
-          raise "hostile cancel"
+
+          if Map.get(options, :cancel_mode) == :block do
+            receive do
+              :never -> :ok
+            end
+          else
+            raise "hostile cancel"
+          end
         end
       }
     end
@@ -454,6 +476,20 @@ defmodule Arbor.LLM.HighLevelApiTest do
              )
   end
 
+  test "security regression: generate_object uses the bounded public JSON decoder" do
+    client =
+      Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
+
+    for model <- ["deep-json-model", "oversized-json-model"] do
+      assert {:error, %NoObjectGeneratedError{}} =
+               LLM.generate_object(
+                 client: client,
+                 model: model,
+                 prompt: "hi"
+               )
+    end
+  end
+
   test "generate can run tool loop through high-level API" do
     client = Client.new(default_provider: "tool-loop-high-level")
 
@@ -601,8 +637,7 @@ defmodule Arbor.LLM.HighLevelApiTest do
                provider: "hostile-owned",
                model: "hostile",
                prompt: "hi",
-               provider_options: %{test_pid: self()},
-               stream_read_timeout_ms: 1_000
+               provider_options: %{test_pid: self()}
              )
 
     assert_receive {:hostile_source_started, producer}
@@ -612,6 +647,50 @@ defmodule Arbor.LLM.HighLevelApiTest do
     assert System.monotonic_time(:millisecond) - started < 1_000
     assert_receive :hostile_cancel_called
     assert_receive {:DOWN, ^producer_monitor, :process, ^producer, :killed}
+    refute Process.alive?(producer)
+  end
+
+  test "security regression: public stream cleanup covers raise, halt, empty, and blocking cancel" do
+    for {model, cancel_mode, consume} <- [
+          {"hostile", :raise,
+           fn stream ->
+             assert_raise RuntimeError, "consumer failed", fn ->
+               Enum.each(stream, fn _event -> raise "consumer failed" end)
+             end
+           end},
+          {"hostile", :raise,
+           fn stream ->
+             assert :halted =
+                      Enum.reduce_while(stream, :halted, fn _event, acc -> {:halt, acc} end)
+           end},
+          {"empty", :raise, fn stream -> assert Enum.to_list(stream) == [] end},
+          {"hostile", :block, fn stream -> assert [_event] = Enum.take(stream, 1) end}
+        ] do
+      {stream, producer, monitor} = hostile_stream(model, cancel_mode)
+      started = System.monotonic_time(:millisecond)
+      consume.(stream)
+
+      assert_receive :hostile_cancel_called
+      assert_receive {:DOWN, ^monitor, :process, ^producer, :killed}
+      refute Process.alive?(producer)
+      assert System.monotonic_time(:millisecond) - started < 750
+    end
+  end
+
+  test "security regression: exiting stream consumers synchronously orphan no source producer" do
+    parent = self()
+
+    {consumer, consumer_monitor} =
+      spawn_monitor(fn ->
+        {stream, producer, _monitor} = hostile_stream("hostile", :raise)
+        send(parent, {:consumer_source, producer})
+        Enum.each(stream, fn _event -> exit(:consumer_abort) end)
+      end)
+
+    assert_receive {:consumer_source, producer}
+    producer_monitor = Process.monitor(producer)
+    assert_receive {:DOWN, ^consumer_monitor, :process, ^consumer, :consumer_abort}
+    assert_receive {:DOWN, ^producer_monitor, :process, ^producer, :killed}, 750
     refute Process.alive?(producer)
   end
 
@@ -671,5 +750,25 @@ defmodule Arbor.LLM.HighLevelApiTest do
     assert Enum.any?(events, &match?(%StreamEvent{type: :step_finish}, &1))
     assert Enum.any?(events, &match?(%StreamEvent{type: :delta, data: %{"text" => "done"}}, &1))
     assert match?(%StreamEvent{type: :finish, data: %{"reason" => :stop}}, List.last(events))
+  end
+
+  defp hostile_stream(model, cancel_mode) do
+    client =
+      Client.new(
+        adapters: %{"hostile-owned" => HostileOwnedAdapter},
+        default_provider: "hostile-owned"
+      )
+
+    assert {:ok, stream} =
+             LLM.stream(
+               client: client,
+               provider: "hostile-owned",
+               model: model,
+               prompt: "hi",
+               provider_options: %{test_pid: self(), cancel_mode: cancel_mode}
+             )
+
+    assert_receive {:hostile_source_started, producer}
+    {stream, producer, Process.monitor(producer)}
   end
 end

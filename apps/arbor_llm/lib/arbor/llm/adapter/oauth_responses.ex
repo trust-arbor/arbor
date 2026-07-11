@@ -24,12 +24,17 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
   def provider, do: "openai_oauth"
 
   @impl true
-  def complete(%Request{} = request, _opts \\ []) do
+  def complete(%Request{} = request, opts \\ []) do
     {instructions, input} = build_input(request.messages)
     req = %{instructions: instructions, input: input, tools: build_tools(request.tools)}
-    opts = if model = model_id(request.model), do: [model: model], else: []
 
-    case OAuth.Responses.complete(oauth_provider(request.provider), req, opts) do
+    response_opts =
+      opts
+      |> Keyword.take([:max_response_bytes, :max_events, :max_event_bytes, :max_work])
+      |> maybe_put_opt(:receive_timeout, opts[:receive_timeout] || request.receive_timeout)
+      |> maybe_put_opt(:model, model_id(request.model))
+
+    case OAuth.Responses.complete(oauth_provider(request.provider), req, response_opts) do
       {:ok, %{text: text, tool_calls: tool_calls}} ->
         {:ok, build_response(text, tool_calls)}
 
@@ -41,7 +46,9 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
   # ── Response: tool_call parts FIRST, then text; finish_reason gates the ToolLoop ──
 
   defp build_response(text, tool_calls) do
-    tc_parts = Enum.map(tool_calls, fn tc -> ContentPart.tool_call(tc.id, tc.name, tc.arguments) end)
+    tc_parts =
+      Enum.map(tool_calls, fn tc -> ContentPart.tool_call(tc.id, tc.name, tc.arguments) end)
+
     text_parts = if is_binary(text) and text != "", do: [ContentPart.text(text)], else: []
     finish = if tool_calls == [], do: :stop, else: :tool_calls
     %Response{text: text || "", content_parts: tc_parts ++ text_parts, finish_reason: finish}
@@ -120,7 +127,9 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
     text_item =
       if text == "",
         do: [],
-        else: [%{"role" => "assistant", "content" => [%{"type" => "output_text", "text" => text}]}]
+        else: [
+          %{"role" => "assistant", "content" => [%{"type" => "output_text", "text" => text}]}
+        ]
 
     fc_items ++ text_item
   end
@@ -155,6 +164,9 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
   defp model_id(nil), do: nil
   defp model_id(""), do: nil
   defp model_id(model) when is_binary(model), do: model |> String.split("/") |> List.last()
+
+  defp maybe_put_opt(opts, _key, nil), do: opts
+  defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
   # Responses function_call arguments must be a JSON string.
   defp encode_args(args) when is_binary(args), do: args

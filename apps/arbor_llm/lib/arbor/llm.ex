@@ -13,6 +13,8 @@ defmodule Arbor.LLM do
 
   alias Arbor.LLM.RequestTimeoutError
 
+  alias Arbor.LLM.ResponseBudget
+
   alias Arbor.LLM.Retry
 
   alias Arbor.LLM.Tool
@@ -21,13 +23,36 @@ defmodule Arbor.LLM do
     "llm" => Arbor.LLM.Eval.Subject
   }
 
-  @controlled_cleanup_grace_ms 100
-  @controlled_cleanup_kill_wait_ms 1_000
-  @controlled_cancel_callback_ms 1_250
+  @controlled_cleanup_grace_ms 25
+  @controlled_wrapper_cleanup_grace_ms 600
+  @controlled_cleanup_kill_wait_ms 250
+  @controlled_cancel_callback_ms 50
   @max_object_stream_bytes 1_048_576
   @max_object_stream_events 10_000
   @max_object_stream_depth 32
   @max_object_decode_attempts 1
+  @max_embedding_vectors 2_048
+  @max_embedding_dimensions 8_192
+  @object_json_limits [
+    max_bytes: 1_048_576,
+    max_nodes: 100_000,
+    max_depth: 32,
+    max_map_keys: 10_000,
+    max_list_items: 100_000
+  ]
+  @tool_argument_limits [
+    max_bytes: 1_048_576,
+    max_nodes: 10_000,
+    max_depth: 32,
+    max_map_keys: 2_000,
+    max_list_items: 10_000
+  ]
+  @tool_argument_aggregate_limits %{
+    bytes: 16_777_216,
+    nodes: 100_000,
+    map_keys: 10_000,
+    list_items: 100_000
+  }
 
   @type generate_opts :: keyword()
 
@@ -403,7 +428,7 @@ defmodule Arbor.LLM do
   end
 
   defp decode_object(text) when is_binary(text) do
-    case Jason.decode(text) do
+    case ResponseBudget.decode_json(text, @object_json_limits) do
       {:ok, map} when is_map(map) -> {:ok, map}
       {:ok, _other} -> {:error, :object_must_be_map}
       {:error, _} -> {:error, :no_object_generated}
@@ -664,10 +689,9 @@ defmodule Arbor.LLM do
   defp next_tool_loop_step(state) do
     with :ok <- ensure_not_aborted_runtime(state.stream_opts),
          {:ok, step_stream} <-
-           stream_call_with_retry(state.client, state.request, state.stream_opts) do
-      step_events = Enum.to_list(step_stream)
-      tool_calls = extract_tool_calls_from_events(step_events)
-
+           stream_call_with_retry(state.client, state.request, state.stream_opts),
+         step_events = Enum.to_list(step_stream),
+         {:ok, tool_calls} <- extract_tool_calls_from_events(step_events) do
       cond do
         state.max_steps <= 0 ->
           {:ok, %{state | pending_events: step_events, done?: true}}
@@ -746,40 +770,113 @@ defmodule Arbor.LLM do
   end
 
   defp extract_tool_calls_from_events(events) do
-    events
-    |> Enum.flat_map(fn
-      %Arbor.LLM.StreamEvent{type: :tool_call, data: data} ->
-        [normalize_tool_call_data(data)]
+    entries =
+      Enum.flat_map(events, fn
+        %Arbor.LLM.StreamEvent{type: :tool_call, data: data} -> [data]
+        _event -> []
+      end)
 
-      _ ->
-        []
-    end)
-  end
-
-  defp normalize_tool_call_data(data) when is_map(data) do
-    %{
-      "id" => to_string(Map.get(data, "id") || Map.get(data, :id) || "call"),
-      "name" => Map.get(data, "name") || Map.get(data, :name),
-      "arguments" =>
-        normalize_tool_call_arguments(
-          Map.get(data, "arguments") || Map.get(data, :arguments) || Map.get(data, "args") ||
-            Map.get(data, :args) || %{}
-        )
-    }
-  end
-
-  defp normalize_tool_call_data(_), do: %{"id" => "call", "name" => nil, "arguments" => %{}}
-
-  defp normalize_tool_call_arguments(arguments) when is_map(arguments), do: arguments
-
-  defp normalize_tool_call_arguments(arguments) when is_binary(arguments) do
-    case Jason.decode(arguments) do
-      {:ok, parsed} when is_map(parsed) -> parsed
-      _ -> %{}
+    with :ok <- preflight_tool_call_entries(entries) do
+      Enum.reduce_while(entries, {:ok, []}, fn entry, {:ok, acc} ->
+        case normalize_tool_call_data(entry) do
+          {:ok, call} -> {:cont, {:ok, [call | acc]}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+      |> case do
+        {:ok, calls} -> {:ok, Enum.reverse(calls)}
+        {:error, _reason} = error -> error
+      end
     end
   end
 
-  defp normalize_tool_call_arguments(_), do: %{}
+  defp normalize_tool_call_data(data) when is_map(data) do
+    with {:ok, arguments} <-
+           normalize_tool_call_arguments(
+             Map.get(data, "arguments") || Map.get(data, :arguments) || Map.get(data, "args") ||
+               Map.get(data, :args) || %{}
+           ) do
+      {:ok,
+       %{
+         "id" => to_string(Map.get(data, "id") || Map.get(data, :id) || "call"),
+         "name" => Map.get(data, "name") || Map.get(data, :name),
+         "arguments" => arguments
+       }}
+    end
+  end
+
+  defp normalize_tool_call_data(_), do: {:error, :tool_call_map_required}
+
+  defp normalize_tool_call_arguments(arguments) when is_map(arguments) do
+    case ResponseBudget.validate(arguments, @tool_argument_limits) do
+      :ok -> {:ok, arguments}
+      {:error, reason} -> {:error, {:invalid_tool_arguments, reason}}
+    end
+  end
+
+  defp normalize_tool_call_arguments(arguments) when is_binary(arguments) do
+    case ResponseBudget.decode_json(arguments, @tool_argument_limits) do
+      {:ok, parsed} when is_map(parsed) -> {:ok, parsed}
+      {:ok, _other} -> {:error, :tool_arguments_must_be_map}
+      {:error, reason} -> {:error, {:invalid_tool_arguments, reason}}
+    end
+  end
+
+  defp normalize_tool_call_arguments(_), do: {:error, :tool_arguments_must_be_map_or_json}
+
+  defp preflight_tool_call_entries(entries) do
+    Enum.reduce_while(entries, {:ok, %{bytes: 0, nodes: 0, map_keys: 0, list_items: 0}}, fn
+      data, {:ok, aggregate} when is_map(data) ->
+        arguments =
+          Map.get(data, "arguments") || Map.get(data, :arguments) || Map.get(data, "args") ||
+            Map.get(data, :args) || %{}
+
+        case preflight_tool_call_arguments(arguments) do
+          {:ok, measurements} ->
+            case add_tool_argument_measurements(aggregate, measurements) do
+              {:ok, next} -> {:cont, {:ok, next}}
+              {:error, reason} -> {:halt, {:error, reason}}
+            end
+
+          {:error, reason} ->
+            {:halt, {:error, reason}}
+        end
+
+      _data, _aggregate ->
+        {:halt, {:error, :tool_call_map_required}}
+    end)
+    |> case do
+      {:ok, _aggregate} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp preflight_tool_call_arguments(arguments) when is_binary(arguments) do
+    case ResponseBudget.preflight_json(arguments, @tool_argument_limits) do
+      {:ok, measurements} -> {:ok, measurements}
+      {:error, reason} -> {:error, {:invalid_tool_arguments, reason}}
+    end
+  end
+
+  defp preflight_tool_call_arguments(arguments) when is_map(arguments),
+    do: ResponseBudget.measure(arguments, @tool_argument_limits)
+
+  defp preflight_tool_call_arguments(_arguments),
+    do: {:error, :tool_arguments_must_be_map_or_json}
+
+  defp add_tool_argument_measurements(aggregate, measurements) do
+    next = %{
+      bytes: aggregate.bytes + Map.get(measurements, :bytes, 0),
+      nodes: aggregate.nodes + Map.get(measurements, :nodes, 0),
+      map_keys: aggregate.map_keys + Map.get(measurements, :map_keys, 0),
+      list_items: aggregate.list_items + Map.get(measurements, :list_items, 0)
+    }
+
+    case Enum.find(@tool_argument_aggregate_limits, fn {key, maximum} -> next[key] > maximum end) do
+      nil -> {:ok, next}
+      {key, maximum} -> {:error, {:tool_argument_aggregate_exceeded, key, maximum}}
+    end
+  end
 
   defp should_auto_execute_tool_calls?(tool_calls, tools) do
     Enum.any?(tool_calls, fn call ->
@@ -909,16 +1006,7 @@ defmodule Arbor.LLM do
     # Receiving events never extends it.
     timeout_ms = Keyword.get(opts, :stream_read_timeout_ms, Keyword.get(opts, :timeout_ms))
     abort_fun = abort_fun(opts)
-
-    if stream_runtime_controls_enabled?(timeout_ms, abort_fun) do
-      build_controlled_stream(events, timeout_ms, abort_fun)
-    else
-      events
-    end
-  end
-
-  defp stream_runtime_controls_enabled?(timeout_ms, abort_fun) do
-    (is_integer(timeout_ms) and timeout_ms > 0) or is_function(abort_fun, 0)
+    build_controlled_stream(events, timeout_ms, abort_fun)
   end
 
   defp build_controlled_stream(events, timeout_ms, abort_fun) do
@@ -926,13 +1014,16 @@ defmodule Arbor.LLM do
       fn ->
         owner = self()
         ref = make_ref()
-        {pid, monitor_ref} = spawn_monitor(fn -> produce_stream_events(owner, ref, events) end)
+        source_control = controlled_source_control(events)
+
+        {pid, monitor_ref} =
+          spawn_monitor(fn -> produce_stream_events(owner, ref, events, source_control) end)
 
         %{
           ref: ref,
           producer_pid: pid,
           monitor_ref: monitor_ref,
-          source_control: controlled_source_control(events),
+          source_control: source_control,
           timeout_ms: normalize_timeout_ms(timeout_ms),
           abort_fun: abort_fun,
           absolute_deadline_ms: absolute_stream_deadline_ms(timeout_ms),
@@ -946,25 +1037,29 @@ defmodule Arbor.LLM do
     )
   end
 
-  defp produce_stream_events(owner, ref, events) do
+  defp produce_stream_events(owner, ref, events, source_control) do
     owner_monitor = Process.monitor(owner)
 
-    Enum.reduce_while(events, :ok, fn event, :ok ->
-      receive do
-        {^ref, :demand} ->
-          send(owner, {ref, :event, event})
-          {:cont, :ok}
+    try do
+      Enum.reduce_while(events, :ok, fn event, :ok ->
+        receive do
+          {^ref, :demand} ->
+            send(owner, {ref, :event, event})
+            {:cont, :ok}
 
-        {^ref, :cancel} ->
-          {:halt, :cancelled}
+          {^ref, :cancel} ->
+            {:halt, :cancelled}
 
-        {:DOWN, ^owner_monitor, :process, ^owner, _reason} ->
-          {:halt, :owner_down}
-      end
-    end)
+          {:DOWN, ^owner_monitor, :process, ^owner, _reason} ->
+            {:halt, :owner_down}
+        end
+      end)
 
-    send(owner, {ref, :done})
-    Process.demonitor(owner_monitor, [:flush])
+      send(owner, {ref, :done})
+    after
+      Process.demonitor(owner_monitor, [:flush])
+      close_controlled_source(source_control)
+    end
   rescue
     exception ->
       send(owner, {ref, :producer_error, {:error, exception, __STACKTRACE__}})
@@ -1016,7 +1111,8 @@ defmodule Arbor.LLM do
     send(state.producer_pid, {state.ref, :cancel})
 
     producer_down? =
-      state.producer_down? or await_controlled_down(state, @controlled_cleanup_grace_ms)
+      state.producer_down? or
+        await_controlled_down(state, @controlled_wrapper_cleanup_grace_ms)
 
     producer_down? =
       if producer_down? do
@@ -1047,25 +1143,29 @@ defmodule Arbor.LLM do
   defp close_controlled_source(nil), do: true
 
   defp close_controlled_source(%{cancel: cancel, producer: producer}) do
-    _cancel_result = safely_cancel_controlled_source(cancel)
-    monitor = Process.monitor(producer)
+    if Process.alive?(producer) do
+      _cancel_result = safely_cancel_controlled_source(cancel)
+      monitor = Process.monitor(producer)
 
-    down? =
-      receive do
-        {:DOWN, ^monitor, :process, ^producer, _reason} -> true
-      after
-        @controlled_cleanup_grace_ms ->
-          if Process.alive?(producer), do: Process.exit(producer, :kill)
+      down? =
+        receive do
+          {:DOWN, ^monitor, :process, ^producer, _reason} -> true
+        after
+          @controlled_cleanup_grace_ms ->
+            if Process.alive?(producer), do: Process.exit(producer, :kill)
 
-          receive do
-            {:DOWN, ^monitor, :process, ^producer, _reason} -> true
-          after
-            @controlled_cleanup_kill_wait_ms -> false
-          end
-      end
+            receive do
+              {:DOWN, ^monitor, :process, ^producer, _reason} -> true
+            after
+              @controlled_cleanup_kill_wait_ms -> false
+            end
+        end
 
-    Process.demonitor(monitor, [:flush])
-    down?
+      Process.demonitor(monitor, [:flush])
+      down?
+    else
+      true
+    end
   end
 
   defp safely_cancel_controlled_source(cancel) do
@@ -1220,4 +1320,114 @@ defmodule Arbor.LLM do
 
   @doc false
   def finite_number?(value), do: Arbor.LLM.ResponseBudget.finite_number?(value)
+
+  @doc """
+  Validate and normalize an OpenAI-compatible batch embedding response.
+
+  Every response entry must carry a unique integer `index` in the submitted
+  batch range. The returned vectors are ordered by that index, independent of
+  wire order.
+  """
+  @spec decode_embedding_response(term(), pos_integer()) ::
+          {:ok, [[number()]], term()} | {:error, term()}
+  def decode_embedding_response(body, expected_count)
+      when is_integer(expected_count) and expected_count > 0 and
+             expected_count <= @max_embedding_vectors do
+    case body do
+      %{"data" => data} = response when is_list(data) ->
+        with {:ok, indexed, dimensions, count} <-
+               collect_embedding_entries(data, expected_count, %{}, nil, 0),
+             true <-
+               count == expected_count or
+                 {:error, {:unexpected_embedding_count, expected_count}},
+             true <- dimensions > 0 or {:error, :empty_embedding_vector} do
+          embeddings = for index <- 0..(expected_count - 1), do: Map.fetch!(indexed, index)
+          {:ok, embeddings, Map.get(response, "usage", %{})}
+        end
+
+      _other ->
+        {:error, :unexpected_embed_response}
+    end
+  end
+
+  def decode_embedding_response(_body, _expected_count),
+    do: {:error, {:invalid_expected_embedding_count, @max_embedding_vectors}}
+
+  defp collect_embedding_entries(
+         [],
+         expected_count,
+         indexed,
+         dimensions,
+         count
+       ) do
+    if map_size(indexed) == expected_count,
+      do: {:ok, indexed, dimensions || 0, count},
+      else: {:error, {:embedding_indices_incomplete, expected_count}}
+  end
+
+  defp collect_embedding_entries(
+         _entries,
+         _expected_count,
+         _indexed,
+         _dimensions,
+         count
+       )
+       when count >= @max_embedding_vectors,
+       do: {:error, {:embedding_vector_count_exceeded, @max_embedding_vectors}}
+
+  defp collect_embedding_entries(
+         [%{"index" => index, "embedding" => vector} | rest],
+         expected_count,
+         indexed,
+         expected_dimensions,
+         count
+       ) do
+    with :ok <- validate_embedding_index(index, expected_count, indexed),
+         {:ok, dimensions} <- validate_embedding_vector(vector, 0),
+         true <-
+           is_nil(expected_dimensions) or dimensions == expected_dimensions or
+             {:error, {:embedding_dimension_mismatch, expected_dimensions, dimensions}} do
+      collect_embedding_entries(
+        rest,
+        expected_count,
+        Map.put(indexed, index, vector),
+        dimensions,
+        count + 1
+      )
+    end
+  end
+
+  defp collect_embedding_entries(
+         [_entry | _rest],
+         _expected_count,
+         _indexed,
+         _dimensions,
+         _count
+       ),
+       do: {:error, :embedding_entry_requires_index_and_vector}
+
+  defp validate_embedding_index(index, expected_count, indexed) do
+    cond do
+      not is_integer(index) -> {:error, :embedding_index_must_be_integer}
+      index < 0 or index >= expected_count -> {:error, {:embedding_index_out_of_bounds, index}}
+      Map.has_key?(indexed, index) -> {:error, {:duplicate_embedding_index, index}}
+      true -> :ok
+    end
+  end
+
+  defp validate_embedding_vector([], 0), do: {:error, :empty_embedding_vector}
+  defp validate_embedding_vector([], dimensions), do: {:ok, dimensions}
+
+  defp validate_embedding_vector(_vector, dimensions)
+       when dimensions >= @max_embedding_dimensions,
+       do: {:error, {:embedding_dimensions_exceeded, @max_embedding_dimensions}}
+
+  defp validate_embedding_vector([value | rest], dimensions) do
+    if ResponseBudget.finite_number?(value),
+      do: validate_embedding_vector(rest, dimensions + 1),
+      else: {:error, :finite_numeric_embedding_required}
+  end
+
+  defp validate_embedding_vector(_improper_or_non_list, _dimensions),
+    do: {:error, :proper_embedding_vector_required}
 end

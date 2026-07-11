@@ -47,6 +47,8 @@ defmodule Arbor.LLM.ToolLoop do
 
   alias Arbor.LLM.Request
 
+  alias Arbor.LLM.ResponseBudget
+
   # Session.Builders lives in arbor_orchestrator (which depends on
   # arbor_llm). Runtime indirection avoids the cycle — see Client's
   # @tool_hooks_mod for the same pattern.
@@ -55,6 +57,13 @@ defmodule Arbor.LLM.ToolLoop do
   @prompt_sanitizer Arbor.Common.PromptSanitizer
 
   @default_max_turns 50
+  @decoded_json_limits [
+    max_bytes: 1_048_576,
+    max_nodes: 10_000,
+    max_depth: 32,
+    max_map_keys: 2_000,
+    max_list_items: 10_000
+  ]
 
   @spec run(Client.t(), Request.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(client, %Request{} = request, opts \\ []) do
@@ -482,7 +491,11 @@ defmodule Arbor.LLM.ToolLoop do
 
     {results, tool_failures} =
       Enum.map_reduce(tool_calls, Map.get(state, :tool_failures, %{}), fn tc, failures ->
-        args = normalize_args(tc.arguments)
+        {args, args_error} =
+          case normalize_args(tc.arguments) do
+            {:ok, args} -> {args, nil}
+            {:error, reason} -> {%{}, reason}
+          end
 
         emit_tool_loop_signal(:tool_call_started, %{
           agent_id: state.agent_id,
@@ -501,6 +514,9 @@ defmodule Arbor.LLM.ToolLoop do
 
         {result, duration_ms} =
           cond do
+            args_error ->
+              {{:error, {:invalid_tool_arguments, args_error}}, 0}
+
             # DISCOVERY RUNAWAY GUARD: tool_find_tools SUCCEEDS every call, so the failure cap below
             # never fires — a model that keeps re-discovering instead of calling tools it already has
             # can burn the whole round budget (the Test Agent hit 45 discovery calls / 0 reads,
@@ -706,16 +722,22 @@ defmodule Arbor.LLM.ToolLoop do
 
   defp maybe_wrap_tool_result(content, _nonce), do: content
 
-  defp normalize_args(args) when is_map(args), do: args
-
-  defp normalize_args(args) when is_binary(args) do
-    case Jason.decode(args) do
-      {:ok, map} when is_map(map) -> map
-      _ -> %{"raw" => args}
+  defp normalize_args(args) when is_map(args) do
+    case ResponseBudget.validate(args, @decoded_json_limits) do
+      :ok -> {:ok, args}
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp normalize_args(_), do: %{}
+  defp normalize_args(args) when is_binary(args) do
+    case ResponseBudget.decode_json(args, @decoded_json_limits) do
+      {:ok, map} when is_map(map) -> {:ok, map}
+      {:ok, _other} -> {:error, :map_required}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp normalize_args(_), do: {:error, :map_or_json_required}
 
   defp merge_usage_maps(a, nil), do: a
   defp merge_usage_maps(nil, b), do: b
@@ -829,7 +851,7 @@ defmodule Arbor.LLM.ToolLoop do
         if name in ["tool_find_tools", "find_tools"] do
           case result do
             {:ok, json} when is_binary(json) ->
-              case Jason.decode(json) do
+              case ResponseBudget.decode_json(json, @decoded_json_limits) do
                 {:ok, %{"tools" => tools, "discovered_tool_names" => tool_names}}
                 when is_list(tools) ->
                   {defs ++ tools, names ++ (tool_names || [])}

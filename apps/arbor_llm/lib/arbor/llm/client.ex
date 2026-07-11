@@ -20,6 +20,8 @@ defmodule Arbor.LLM.Client do
 
   alias Arbor.LLM.Request
 
+  alias Arbor.LLM.ResponseBudget
+
   alias Arbor.LLM.RequestTimeoutError
 
   alias Arbor.LLM.Response
@@ -331,7 +333,7 @@ defmodule Arbor.LLM.Client do
   def complete_streaming(%__MODULE__{} = client, %Request{} = request, callback, opts \\ [])
       when is_function(callback, 1) do
     with {:ok, adapter} <- resolve_adapter(client, request) do
-      if function_exported?(adapter, :complete_streaming, 3) do
+      if adapter_exports?(adapter, :complete_streaming, 3) do
         adapter.complete_streaming(request, callback, opts)
       else
         {:error, {:stream_not_supported, adapter}}
@@ -363,7 +365,7 @@ defmodule Arbor.LLM.Client do
         {:error, {:unknown_provider, provider}}
 
       adapter ->
-        if function_exported?(adapter, :embed, 3) do
+        if adapter_exports?(adapter, :embed, 3) do
           # The generic adapter pulls the provider from opts to build
           # the req_llm model_spec string. Legacy per-provider adapters
           # know their own provider via `provider/0` and ignore the opt
@@ -396,7 +398,7 @@ defmodule Arbor.LLM.Client do
         {:error, {:unknown_provider, provider}}
 
       adapter ->
-        if function_exported?(adapter, :embed, 3) do
+        if adapter_exports?(adapter, :embed, 3) do
           adapter.embed(texts, model, Keyword.put_new(opts, :provider, canonical))
         else
           {:error, {:embed_not_supported, provider}}
@@ -405,9 +407,13 @@ defmodule Arbor.LLM.Client do
   end
 
   defp ensure_stream_supported(adapter) do
-    if function_exported?(adapter, :stream, 2),
+    if adapter_exports?(adapter, :stream, 2),
       do: :ok,
       else: {:error, {:stream_not_supported, adapter}}
+  end
+
+  defp adapter_exports?(adapter, function, arity) when is_atom(adapter) do
+    Code.ensure_loaded?(adapter) and function_exported?(adapter, function, arity)
   end
 
   defp normalize_stream({:ok, enumerable}), do: {:ok, enumerable}
@@ -450,15 +456,16 @@ defmodule Arbor.LLM.Client do
 
                 %StreamEvent{type: :tool_call, data: data}
                 when is_map(data) and acc.tool_call_count < 10_000 ->
-                  case build_stream_tool_call(data) do
-                    {:ok, part} ->
-                      {:cont,
-                       %{
-                         acc
-                         | tool_calls: [part | acc.tool_calls],
-                           tool_call_count: acc.tool_call_count + 1
-                       }}
-
+                  with {:ok, measurements} <- preflight_stream_tool_call(data),
+                       {:ok, acc} <- account_retained_measurements(acc, measurements),
+                       {:ok, part} <- build_stream_tool_call(data) do
+                    {:cont,
+                     %{
+                       acc
+                       | tool_calls: [part | acc.tool_calls],
+                         tool_call_count: acc.tool_call_count + 1
+                     }}
+                  else
                     {:error, reason} ->
                       {:halt, {:error, reason}}
                   end
@@ -550,37 +557,59 @@ defmodule Arbor.LLM.Client do
       max_list_items: 10_000
     ]
 
-    with {:ok, measurements} <- Arbor.LLM.ResponseBudget.measure(event, limits) do
-      bytes = acc.term_bytes + measurements.bytes
-      nodes = acc.term_nodes + measurements.nodes
-      map_keys = acc.term_map_keys + measurements.map_keys
-      list_items = acc.term_list_items + measurements.list_items
-
-      cond do
-        bytes > 16_777_216 ->
-          {:error, {:stream_limit_exceeded, :retained_bytes, 16_777_216}}
-
-        nodes > 100_000 ->
-          {:error, {:stream_limit_exceeded, :retained_nodes, 100_000}}
-
-        map_keys > 10_000 ->
-          {:error, {:stream_limit_exceeded, :retained_map_keys, 10_000}}
-
-        list_items > 100_000 ->
-          {:error, {:stream_limit_exceeded, :retained_list_items, 100_000}}
-
-        true ->
-          {:ok,
-           %{
-             acc
-             | term_bytes: bytes,
-               term_nodes: nodes,
-               term_map_keys: map_keys,
-               term_list_items: list_items
-           }}
-      end
+    with {:ok, measurements} <- ResponseBudget.measure(event, limits) do
+      account_retained_measurements(acc, measurements)
     else
       {:error, reason} -> {:error, {:invalid_stream_event, reason}}
+    end
+  end
+
+  defp account_retained_measurements(acc, nil), do: {:ok, acc}
+
+  defp account_retained_measurements(acc, measurements) do
+    bytes = acc.term_bytes + Map.get(measurements, :bytes, 0)
+    nodes = acc.term_nodes + Map.get(measurements, :nodes, 0)
+    map_keys = acc.term_map_keys + Map.get(measurements, :map_keys, 0)
+    list_items = acc.term_list_items + Map.get(measurements, :list_items, 0)
+
+    cond do
+      bytes > 16_777_216 ->
+        {:error, {:stream_limit_exceeded, :retained_bytes, 16_777_216}}
+
+      nodes > 100_000 ->
+        {:error, {:stream_limit_exceeded, :retained_nodes, 100_000}}
+
+      map_keys > 10_000 ->
+        {:error, {:stream_limit_exceeded, :retained_map_keys, 10_000}}
+
+      list_items > 100_000 ->
+        {:error, {:stream_limit_exceeded, :retained_list_items, 100_000}}
+
+      true ->
+        {:ok,
+         %{
+           acc
+           | term_bytes: bytes,
+             term_nodes: nodes,
+             term_map_keys: map_keys,
+             term_list_items: list_items
+         }}
+    end
+  end
+
+  defp preflight_stream_tool_call(data) do
+    case data[:arguments] || data["arguments"] || %{} do
+      arguments when is_binary(arguments) ->
+        case ResponseBudget.preflight_json(arguments, tool_argument_limits()) do
+          {:ok, measurements} -> {:ok, measurements}
+          {:error, reason} -> {:error, {:invalid_tool_arguments, reason}}
+        end
+
+      arguments when is_map(arguments) ->
+        {:ok, nil}
+
+      _arguments ->
+        {:error, :tool_arguments_must_be_map_or_json}
     end
   end
 
@@ -641,13 +670,7 @@ defmodule Arbor.LLM.Client do
   defp validate_finish_usage(_usage), do: {:error, :invalid_finish_usage}
 
   defp decode_tool_args(args) when is_binary(args) do
-    case Arbor.LLM.ResponseBudget.decode_json(args,
-           max_bytes: 1_048_576,
-           max_nodes: 10_000,
-           max_depth: 32,
-           max_map_keys: 2_000,
-           max_list_items: 10_000
-         ) do
+    case ResponseBudget.decode_json(args, tool_argument_limits()) do
       {:ok, map} when is_map(map) -> {:ok, map}
       {:ok, _other} -> {:error, :tool_arguments_must_be_map}
       {:error, reason} -> {:error, {:invalid_tool_arguments, reason}}
@@ -655,19 +678,23 @@ defmodule Arbor.LLM.Client do
   end
 
   defp decode_tool_args(args) when is_map(args) do
-    case Arbor.LLM.ResponseBudget.validate(args,
-           max_bytes: 1_048_576,
-           max_nodes: 10_000,
-           max_depth: 32,
-           max_map_keys: 2_000,
-           max_list_items: 10_000
-         ) do
+    case ResponseBudget.validate(args, tool_argument_limits()) do
       :ok -> {:ok, args}
       {:error, reason} -> {:error, {:invalid_tool_arguments, reason}}
     end
   end
 
   defp decode_tool_args(_args), do: {:error, :tool_arguments_must_be_map_or_json}
+
+  defp tool_argument_limits do
+    [
+      max_bytes: 1_048_576,
+      max_nodes: 10_000,
+      max_depth: 32,
+      max_map_keys: 2_000,
+      max_list_items: 10_000
+    ]
+  end
 
   defp normalize_event(%StreamEvent{} = event), do: event
   defp normalize_event(%{type: type, data: data}), do: %StreamEvent{type: type, data: data}

@@ -66,11 +66,27 @@ defmodule Arbor.LLM.ResponseBudget do
 
   @spec decode_json(binary(), keyword()) :: {:ok, term()} | {:error, term()}
   def decode_json(body, opts) when is_binary(body) and is_list(opts) do
-    with {:ok, _measurements} <- JSONPreflight.scan(body, opts),
+    case decode_json_with_measurements(body, opts) do
+      {:ok, decoded, _measurements} -> {:ok, decoded}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc false
+  @spec preflight_json(binary(), keyword()) :: {:ok, map()} | {:error, term()}
+  def preflight_json(body, opts) when is_binary(body) and is_list(opts),
+    do: JSONPreflight.scan(body, opts)
+
+  @doc false
+  @spec decode_json_with_measurements(binary(), keyword()) ::
+          {:ok, term(), map()} | {:error, term()}
+  def decode_json_with_measurements(body, opts) when is_binary(body) and is_list(opts) do
+    with {:ok, _source_measurements} <- JSONPreflight.scan(body, opts),
          {:ok, decoded} <- decode_after_preflight(body),
-         :ok <- validate(decoded, opts),
-         :ok <- validate_embedded_json(decoded, opts) do
-      {:ok, decoded}
+         {:ok, decoded_measurements} <- measure(decoded, opts),
+         {:ok, aggregate_measurements} <-
+           validate_embedded_json(decoded, opts, decoded_measurements) do
+      {:ok, decoded, aggregate_measurements}
     end
   end
 
@@ -83,8 +99,9 @@ defmodule Arbor.LLM.ResponseBudget do
            Enum.all?(keys, &Map.has_key?(numbers, &1)) or
              {:error, {:invalid_json, :tracked_number_required}},
          {:ok, decoded} <- decode_after_preflight(body),
-         :ok <- validate(decoded, opts),
-         :ok <- validate_embedded_json(decoded, opts) do
+         {:ok, decoded_measurements} <- measure(decoded, opts),
+         {:ok, _aggregate_measurements} <-
+           validate_embedded_json(decoded, opts, decoded_measurements) do
       {:ok, decoded, numbers}
     end
   end
@@ -231,60 +248,100 @@ defmodule Arbor.LLM.ResponseBudget do
     end
   end
 
-  defp validate_embedded_json(term, opts) do
-    walk_embedded([{:value, term}], opts)
+  defp validate_embedded_json(term, opts, measurements) do
+    walk_embedded([{:value, term}], opts, measurements, limits(opts))
   end
 
-  defp walk_embedded([], _opts), do: :ok
+  defp walk_embedded([], _opts, measurements, _limits), do: {:ok, measurements}
 
-  defp walk_embedded([{:value, map} | rest], opts) when is_map(map) do
-    with :ok <- validate_function_arguments(map, opts) do
-      walk_embedded([{:map, :maps.iterator(map)} | rest], opts)
+  defp walk_embedded([{:value, map} | rest], opts, measurements, limits)
+       when is_map(map) do
+    with {:ok, measurements} <- validate_function_arguments(map, opts, measurements, limits) do
+      walk_embedded([{:map, :maps.iterator(map)} | rest], opts, measurements, limits)
     end
   end
 
-  defp walk_embedded([{:value, list} | rest], opts) when is_list(list),
-    do: walk_embedded([{:list, list} | rest], opts)
+  defp walk_embedded([{:value, list} | rest], opts, measurements, limits)
+       when is_list(list),
+       do: walk_embedded([{:list, list} | rest], opts, measurements, limits)
 
-  defp walk_embedded([{:value, tuple} | rest], opts) when is_tuple(tuple),
-    do: walk_embedded([{:tuple, tuple, 0} | rest], opts)
+  defp walk_embedded([{:value, tuple} | rest], opts, measurements, limits)
+       when is_tuple(tuple),
+       do: walk_embedded([{:tuple, tuple, 0} | rest], opts, measurements, limits)
 
-  defp walk_embedded([{:value, _scalar} | rest], opts), do: walk_embedded(rest, opts)
+  defp walk_embedded([{:value, _scalar} | rest], opts, measurements, limits),
+    do: walk_embedded(rest, opts, measurements, limits)
 
-  defp walk_embedded([{:map, iterator} | rest], opts) do
+  defp walk_embedded([{:map, iterator} | rest], opts, measurements, limits) do
     case :maps.next(iterator) do
       :none ->
-        walk_embedded(rest, opts)
+        walk_embedded(rest, opts, measurements, limits)
 
       {_key, value, next} ->
-        walk_embedded([{:value, value}, {:map, next} | rest], opts)
+        walk_embedded([{:value, value}, {:map, next} | rest], opts, measurements, limits)
     end
   end
 
-  defp walk_embedded([{:list, []} | rest], opts), do: walk_embedded(rest, opts)
+  defp walk_embedded([{:list, []} | rest], opts, measurements, limits),
+    do: walk_embedded(rest, opts, measurements, limits)
 
-  defp walk_embedded([{:list, [head | tail]} | rest], opts),
-    do: walk_embedded([{:value, head}, {:list, tail} | rest], opts)
+  defp walk_embedded([{:list, [head | tail]} | rest], opts, measurements, limits),
+    do: walk_embedded([{:value, head}, {:list, tail} | rest], opts, measurements, limits)
 
-  defp walk_embedded([{:list, _improper} | _rest], _opts),
+  defp walk_embedded([{:list, _improper} | _rest], _opts, _measurements, _limits),
     do: {:error, {:decoded_term_invalid, :proper_list_required}}
 
-  defp walk_embedded([{:tuple, tuple, index} | rest], opts) when index == tuple_size(tuple),
-    do: walk_embedded(rest, opts)
+  defp walk_embedded([{:tuple, tuple, index} | rest], opts, measurements, limits)
+       when index == tuple_size(tuple),
+       do: walk_embedded(rest, opts, measurements, limits)
 
-  defp walk_embedded([{:tuple, tuple, index} | rest], opts),
-    do: walk_embedded([{:value, elem(tuple, index)}, {:tuple, tuple, index + 1} | rest], opts)
+  defp walk_embedded([{:tuple, tuple, index} | rest], opts, measurements, limits),
+    do:
+      walk_embedded(
+        [{:value, elem(tuple, index)}, {:tuple, tuple, index + 1} | rest],
+        opts,
+        measurements,
+        limits
+      )
 
-  defp scan_result({:ok, _measurements}), do: :ok
-  defp scan_result({:error, _reason} = error), do: error
-
-  defp validate_function_arguments(map, opts) do
+  defp validate_function_arguments(map, opts, measurements, limits) do
     name = Map.get(map, "name", Map.get(map, :name))
     arguments = Map.get(map, "arguments", Map.get(map, :arguments))
 
-    if is_binary(name) and is_binary(arguments),
-      do: JSONPreflight.scan(arguments, opts) |> scan_result(),
-      else: :ok
+    if is_binary(name) and is_binary(arguments) do
+      with {:ok, embedded} <- JSONPreflight.scan(arguments, opts),
+           {:ok, aggregate} <- add_measurements(measurements, embedded, limits) do
+        {:ok, aggregate}
+      end
+    else
+      {:ok, measurements}
+    end
+  end
+
+  defp add_measurements(current, added, limits) do
+    aggregate = %{
+      nodes: current.nodes + Map.get(added, :nodes, 0),
+      bytes: current.bytes + Map.get(added, :bytes, Map.get(added, :string_bytes, 0)),
+      map_keys: current.map_keys + Map.get(added, :map_keys, 0),
+      list_items: current.list_items + Map.get(added, :list_items, 0)
+    }
+
+    cond do
+      aggregate.nodes > limits.max_nodes ->
+        {:error, {:decoded_term_limit_exceeded, :nodes, limits.max_nodes}}
+
+      aggregate.bytes > limits.max_bytes ->
+        {:error, {:decoded_term_limit_exceeded, :bytes, limits.max_bytes}}
+
+      aggregate.map_keys > limits.max_map_keys ->
+        {:error, {:decoded_term_limit_exceeded, :map_keys, limits.max_map_keys}}
+
+      aggregate.list_items > limits.max_list_items ->
+        {:error, {:decoded_term_limit_exceeded, :list_items, limits.max_list_items}}
+
+      true ->
+        {:ok, aggregate}
+    end
   end
 
   defp halt_response(request, response, reason) do

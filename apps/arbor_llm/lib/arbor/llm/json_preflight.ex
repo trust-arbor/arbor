@@ -23,6 +23,7 @@ defmodule Arbor.LLM.JSONPreflight do
          state = %{
            limits: limits,
            nodes: 0,
+           bytes: 0,
            map_keys: 0,
            list_items: 0,
            string_bytes: 0,
@@ -35,6 +36,7 @@ defmodule Arbor.LLM.JSONPreflight do
       {:ok,
        %{
          nodes: state.nodes,
+         bytes: state.bytes,
          map_keys: state.map_keys,
          list_items: state.list_items,
          string_bytes: state.string_bytes,
@@ -72,6 +74,7 @@ defmodule Arbor.LLM.JSONPreflight do
 
   defp parse_value("{" <> rest, depth, state, key) do
     with {:ok, state} <- add_node(state),
+         {:ok, state} <- add_retained_bytes(state, 1),
          {:ok, next_depth} <- add_depth(depth, state),
          {:ok, state} <- mark_non_number_capture(key, state) do
       parse_object(skip_ws(rest), next_depth, state)
@@ -80,6 +83,7 @@ defmodule Arbor.LLM.JSONPreflight do
 
   defp parse_value("[" <> rest, depth, state, key) do
     with {:ok, state} <- add_node(state),
+         {:ok, state} <- add_retained_bytes(state, 1),
          {:ok, next_depth} <- add_depth(depth, state),
          {:ok, state} <- mark_non_number_capture(key, state) do
       parse_array(skip_ws(rest), next_depth, state)
@@ -90,20 +94,27 @@ defmodule Arbor.LLM.JSONPreflight do
     with {:ok, rest, decoded_bytes, _raw, _escaped?} <- parse_string(rest),
          {:ok, state} <- add_node(state),
          {:ok, state} <- add_string_bytes(state, decoded_bytes),
+         {:ok, state} <- add_retained_bytes(state, decoded_bytes),
          {:ok, state} <- mark_non_number_capture(key, state) do
       {:ok, rest, state}
     end
   end
 
-  defp parse_value("true" <> rest, _depth, state, key), do: finish_literal(rest, state, key)
-  defp parse_value("false" <> rest, _depth, state, key), do: finish_literal(rest, state, key)
-  defp parse_value("null" <> rest, _depth, state, key), do: finish_literal(rest, state, key)
+  defp parse_value("true" <> rest, _depth, state, key),
+    do: finish_literal(rest, state, key, 4)
+
+  defp parse_value("false" <> rest, _depth, state, key),
+    do: finish_literal(rest, state, key, 5)
+
+  defp parse_value("null" <> rest, _depth, state, key),
+    do: finish_literal(rest, state, key, 4)
 
   defp parse_value(<<char, _::binary>> = body, _depth, state, key)
        when char == ?- or char in ?0..?9 do
     with {:ok, token, rest} <- take_number(body, state.limits.max_number_bytes),
          :ok <- validate_number(token),
          {:ok, state} <- add_node(state),
+         {:ok, state} <- add_retained_bytes(state, 8),
          {:ok, state} <- capture_number(key, token, state) do
       {:ok, rest, state}
     end
@@ -111,9 +122,10 @@ defmodule Arbor.LLM.JSONPreflight do
 
   defp parse_value(_body, _depth, _state, _key), do: malformed()
 
-  defp finish_literal(rest, state, key) do
+  defp finish_literal(rest, state, key, retained_bytes) do
     with :ok <- delimiter(rest),
          {:ok, state} <- add_node(state),
+         {:ok, state} <- add_retained_bytes(state, retained_bytes),
          {:ok, state} <- mark_non_number_capture(key, state) do
       {:ok, rest, state}
     end
@@ -126,6 +138,7 @@ defmodule Arbor.LLM.JSONPreflight do
          :ok <- reject_escaped_capture_key(escaped?, state),
          {:ok, state} <- add_node(state),
          {:ok, state} <- add_string_bytes(state, decoded_bytes),
+         {:ok, state} <- add_retained_bytes(state, decoded_bytes),
          {:ok, state} <- add_map_key(state),
          key = if(escaped?, do: nil, else: raw_key),
          {:ok, state} <- reserve_capture(key, state),
@@ -322,6 +335,12 @@ defmodule Arbor.LLM.JSONPreflight do
       true ->
         {:ok, %{state | string_bytes: count + amount}}
     end
+  end
+
+  defp add_retained_bytes(%{bytes: count, limits: %{max_bytes: maximum}} = state, amount) do
+    if count <= maximum - amount,
+      do: {:ok, %{state | bytes: count + amount}},
+      else: {:error, {:decoded_term_limit_exceeded, :bytes, maximum}}
   end
 
   defp reserve_capture(nil, state), do: {:ok, state}

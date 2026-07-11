@@ -246,8 +246,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     if ProviderRegistry.local?(arbor_provider) do
       build_local_model_struct(arbor_provider, model)
     else
-      atom = ProviderRegistry.req_llm_atom(arbor_provider) || String.to_atom(arbor_provider)
-      {:ok, Atom.to_string(atom) <> ":" <> model}
+      case ProviderRegistry.req_llm_atom(arbor_provider) do
+        nil -> {:error, {:unknown_provider, arbor_provider}}
+        atom when is_atom(atom) -> {:ok, Atom.to_string(atom) <> ":" <> model}
+      end
     end
   end
 
@@ -625,7 +627,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   defp validated_req_opts(request, opts) do
     request
     |> build_req_opts(opts)
-    |> validate_base_url_opt()
+    |> validate_base_url_opt(request.provider)
   end
 
   defp validated_stream_opts(request, opts) do
@@ -640,19 +642,45 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   defp validated_embed_opts(arbor_provider, opts) do
     arbor_provider
     |> build_embed_opts(opts)
-    |> validate_base_url_opt()
+    |> validate_base_url_opt(arbor_provider)
   end
 
-  defp validate_base_url_opt(opts) do
+  defp validate_base_url_opt(opts, provider) do
     case Keyword.fetch(opts, :base_url) do
       :error ->
         {:ok, opts}
 
       {:ok, value} ->
-        case Endpoint.validate(value, :req_llm_base) do
+        policy = {:req_llm_base, provider, reviewed_proxy_paths(provider)}
+
+        case Endpoint.validate(value, policy) do
           {:ok, canonical} -> {:ok, Keyword.put(opts, :base_url, canonical)}
           {:error, reason} -> {:error, {:invalid_base_url, reason}}
         end
+    end
+  end
+
+  defp reviewed_proxy_paths(provider) do
+    configured = Application.get_env(:arbor_llm, :reviewed_proxy_base_paths, %{})
+    canonical = ProviderRegistry.normalize(provider)
+
+    case configured do
+      %{} ->
+        Map.get(configured, canonical) ||
+          Map.get(configured, provider) ||
+          reviewed_proxy_paths_for_existing_atom(configured, canonical) || []
+
+      _invalid ->
+        []
+    end
+  end
+
+  defp reviewed_proxy_paths_for_existing_atom(configured, canonical) do
+    if ProviderRegistry.known?(canonical) do
+      case Arbor.Common.SafeAtom.to_existing(canonical) do
+        {:ok, provider_atom} -> Map.get(configured, provider_atom)
+        {:error, _reason} -> nil
+      end
     end
   end
 

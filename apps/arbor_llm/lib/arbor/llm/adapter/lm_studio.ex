@@ -19,6 +19,7 @@ defmodule Arbor.LLM.Adapter.LmStudio do
   alias Arbor.LLM.{ContentPart, Endpoint, Request, Response, ResponseBudget}
 
   @provider "lm_studio_owned"
+  @max_response_bytes 16_777_216
   # llama.cpp/LM Studio sampling knobs that live top-level in the chat-completions body.
   @extra_sampling_keys ~w(top_k min_p repeat_penalty repetition_penalty presence_penalty frequency_penalty)
   @tool_argument_limits [
@@ -34,16 +35,17 @@ defmodule Arbor.LLM.Adapter.LmStudio do
 
   @impl true
   def complete(%Request{} = request, opts \\ []) do
-    with {:ok, url} <- chat_url() do
-      do_complete(request, opts, url)
+    with {:ok, maximum} <- response_limit(opts),
+         {:ok, url} <- chat_url() do
+      do_complete(request, opts, url, maximum)
     else
+      {:error, {:invalid_response_limit, _maximum}} = error -> error
       {:error, reason} -> {:error, {:invalid_lm_studio_endpoint, reason}}
     end
   end
 
-  defp do_complete(request, opts, url) do
+  defp do_complete(request, opts, url, maximum) do
     body = build_body(request)
-    maximum = Keyword.get(opts, :max_response_bytes, 16_777_216)
 
     req =
       Req.new(
@@ -86,6 +88,16 @@ defmodule Arbor.LLM.Adapter.LmStudio do
       max_map_keys: 10_000,
       max_list_items: 100_000
     )
+  end
+
+  defp response_limit(opts) do
+    case Keyword.get(opts, :max_response_bytes, @max_response_bytes) do
+      maximum when is_integer(maximum) and maximum > 0 and maximum <= @max_response_bytes ->
+        {:ok, maximum}
+
+      maximum ->
+        {:error, {:invalid_response_limit, maximum}}
+    end
   end
 
   # ── request body ──

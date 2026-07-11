@@ -42,6 +42,8 @@ defmodule Arbor.LLM.Eval.Subject do
   @max_response_map_keys 10_000
   @max_response_list_items 100_000
   @max_stream_event_bytes 1_048_576
+  @producer_cleanup_grace_ms 10
+  @producer_cleanup_kill_wait_ms 250
 
   @impl true
   def run(input, opts \\ []) do
@@ -203,11 +205,21 @@ defmodule Arbor.LLM.Eval.Subject do
 
   defp run_complete(transport, request, config) do
     start_time = System.monotonic_time(:millisecond)
+    deadline_ms = start_time + config.timeout
 
-    case complete(transport, request,
-           receive_timeout: config.timeout,
-           max_response_bytes: @max_output_bytes
-         ) do
+    result =
+      run_owned_deadline(
+        fn ->
+          complete(transport, request,
+            receive_timeout: max(deadline_ms - System.monotonic_time(:millisecond), 1),
+            max_response_bytes: config.max_output_bytes
+          )
+        end,
+        deadline_ms,
+        {:request_deadline_exceeded, config.timeout}
+      )
+
+    case result do
       {:ok, response} ->
         duration_ms = System.monotonic_time(:millisecond) - start_time
 
@@ -260,6 +272,7 @@ defmodule Arbor.LLM.Eval.Subject do
 
     limits = %{
       timeout: config.timeout,
+      deadline_ms: start_time + config.timeout,
       max_stream_events: config.max_stream_events,
       max_output_bytes: config.max_output_bytes
     }
@@ -307,7 +320,7 @@ defmodule Arbor.LLM.Eval.Subject do
       ref: ref,
       producer_pid: producer_pid,
       monitor_ref: monitor_ref,
-      deadline_ms: start_time + limits.timeout,
+      deadline_ms: limits.deadline_ms,
       timeout: limits.timeout,
       max_stream_events: limits.max_stream_events,
       max_output_bytes: limits.max_output_bytes,
@@ -337,7 +350,7 @@ defmodule Arbor.LLM.Eval.Subject do
 
   defp produce_stream(parent, ref, transport, request, limits, max_event_bytes) do
     case stream(transport, request,
-           receive_timeout: limits.timeout,
+           receive_timeout: max(limits.deadline_ms - System.monotonic_time(:millisecond), 1),
            max_response_bytes: limits.max_output_bytes,
            max_stream_events: limits.max_stream_events,
            max_stream_event_bytes: min(max_event_bytes, limits.max_output_bytes)
@@ -472,7 +485,7 @@ defmodule Arbor.LLM.Eval.Subject do
         when monitor_ref == state.monitor_ref and producer_pid == state.producer_pid ->
           :ok
       after
-        1_500 ->
+        @producer_cleanup_grace_ms ->
           if Process.alive?(state.producer_pid), do: Process.exit(state.producer_pid, :kill)
 
           receive do
@@ -480,13 +493,64 @@ defmodule Arbor.LLM.Eval.Subject do
             when monitor_ref == state.monitor_ref and producer_pid == state.producer_pid ->
               :ok
           after
-            1_000 -> :ok
+            @producer_cleanup_kill_wait_ms -> :ok
           end
       end
     end
 
     Process.demonitor(state.monitor_ref, [:flush])
     flush_stream_messages(state.ref)
+  end
+
+  defp run_owned_deadline(fun, deadline_ms, timeout_error) when is_function(fun, 0) do
+    reply_alias = :erlang.alias()
+
+    {pid, monitor_ref} =
+      spawn_monitor(fn ->
+        result =
+          try do
+            {:ok, fun.()}
+          rescue
+            exception -> {:error, {:transport_exception, exception_diagnostic(exception)}}
+          catch
+            kind, reason ->
+              {:error, {:transport_exception, {kind, bounded_external_reason(reason)}}}
+          end
+
+        send(reply_alias, {reply_alias, result})
+      end)
+
+    remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^reply_alias, {:ok, result}} ->
+        :erlang.unalias(reply_alias)
+        Process.demonitor(monitor_ref, [:flush])
+        result
+
+      {^reply_alias, {:error, reason}} ->
+        :erlang.unalias(reply_alias)
+        Process.demonitor(monitor_ref, [:flush])
+        {:error, reason}
+
+      {:DOWN, ^monitor_ref, :process, ^pid, reason} ->
+        :erlang.unalias(reply_alias)
+        {:error, {:transport_exception, {:producer_exit, bounded_external_reason(reason)}}}
+    after
+      remaining_ms ->
+        :erlang.unalias(reply_alias)
+        Process.exit(pid, :kill)
+        await_owned_down(pid, monitor_ref)
+        {:error, timeout_error}
+    end
+  end
+
+  defp await_owned_down(pid, monitor_ref) do
+    receive do
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
+    after
+      @producer_cleanup_kill_wait_ms -> Process.demonitor(monitor_ref, [:flush])
+    end
   end
 
   defp flush_stream_messages(ref) do

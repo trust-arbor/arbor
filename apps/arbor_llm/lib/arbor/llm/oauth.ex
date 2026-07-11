@@ -103,8 +103,11 @@ defmodule Arbor.LLM.OAuth do
   @spec configured?(atom() | String.t()) :: boolean()
   def configured?(provider) do
     case resolve(provider) do
-      {:ok, key, config} -> File.exists?(store_path(key)) or File.exists?(Path.expand(config.file))
-      _ -> false
+      {:ok, key, config} ->
+        File.exists?(store_path(key)) or File.exists?(Path.expand(config.file))
+
+      _ ->
+        false
     end
   end
 
@@ -168,6 +171,20 @@ defmodule Arbor.LLM.OAuth do
   end
 
   @store_dir "~/.arbor/oauth"
+  @token_json_limits [
+    max_bytes: 1_048_576,
+    max_nodes: 10_000,
+    max_depth: 16,
+    max_map_keys: 2_000,
+    max_list_items: 10_000
+  ]
+  @jwt_json_limits [
+    max_bytes: 65_536,
+    max_nodes: 1_000,
+    max_depth: 8,
+    max_map_keys: 200,
+    max_list_items: 1_000
+  ]
   defp store_path(key), do: Path.expand("#{@store_dir}/#{key}.json")
 
   # Persist tokens to the Arbor-owned store (0600). Returns the tokens for pipelining.
@@ -181,7 +198,7 @@ defmodule Arbor.LLM.OAuth do
 
   defp read_json(path) do
     with {:ok, body} <- File.read(Path.expand(path)),
-         {:ok, json} <- Jason.decode(body) do
+         {:ok, json} <- Arbor.LLM.ResponseBudget.decode_json(body, @token_json_limits) do
       {:ok, json}
     else
       {:error, reason} -> {:error, {:token_file_unreadable, reason}}
@@ -193,7 +210,8 @@ defmodule Arbor.LLM.OAuth do
   defp expiring?(token, skew_s) do
     with [_h, payload, _s] <- String.split(token, "."),
          {:ok, decoded} <- Base.url_decode64(payload, padding: false),
-         {:ok, %{"exp" => exp}} <- Jason.decode(decoded),
+         {:ok, %{"exp" => exp}} <-
+           Arbor.LLM.ResponseBudget.decode_json(decoded, @jwt_json_limits),
          true <- is_integer(exp) do
       System.system_time(:second) + skew_s >= exp
     else

@@ -28,6 +28,7 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   ]
   @index_read_deadline_ms 500
   @index_reader_heap_words 8_388_608
+  @http_cleanup_wait_ms 250
   @darwin_open_helper "/usr/bin/perl"
   @darwin_open_script ~S"""
   use strict;
@@ -216,11 +217,21 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   def post_json(url, json, timeout, max_response_bytes)
       when is_binary(url) and is_integer(timeout) and timeout > 0 and
              is_integer(max_response_bytes) and max_response_bytes > 0 do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout
+
+    run_owned_http_deadline(
+      fn -> do_post_json(url, json, deadline_ms, max_response_bytes) end,
+      deadline_ms,
+      timeout
+    )
+  end
+
+  defp do_post_json(url, json, deadline_ms, max_response_bytes) do
     into = bounded_response_collector(max_response_bytes)
 
     case Req.post(url,
            json: json,
-           receive_timeout: timeout,
+           receive_timeout: max(deadline_ms - System.monotonic_time(:millisecond), 1),
            redirect: false,
            compressed: false,
            decode_body: false,
@@ -251,6 +262,40 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
     exception -> {:error, {:transport_error, exception_diagnostic(exception)}}
   catch
     kind, reason -> {:error, {:transport_error, {kind, bounded_external_reason(reason)}}}
+  end
+
+  defp run_owned_http_deadline(fun, deadline_ms, timeout) do
+    reply_alias = :erlang.alias()
+
+    {pid, monitor_ref} =
+      spawn_monitor(fn -> send(reply_alias, {reply_alias, fun.()}) end)
+
+    remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^reply_alias, result} ->
+        :erlang.unalias(reply_alias)
+        Process.demonitor(monitor_ref, [:flush])
+        result
+
+      {:DOWN, ^monitor_ref, :process, ^pid, reason} ->
+        :erlang.unalias(reply_alias)
+        {:error, {:transport_error, {:producer_exit, bounded_external_reason(reason)}}}
+    after
+      remaining_ms ->
+        :erlang.unalias(reply_alias)
+        Process.exit(pid, :kill)
+        await_http_down(pid, monitor_ref)
+        {:error, {:transport_error, {:deadline_exceeded, timeout}}}
+    end
+  end
+
+  defp await_http_down(pid, monitor_ref) do
+    receive do
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
+    after
+      @http_cleanup_wait_ms -> Process.demonitor(monitor_ref, [:flush])
+    end
   end
 
   @spec truncate_utf8(String.t(), pos_integer()) :: String.t()
@@ -368,19 +413,54 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   end
 
   @spec cosine_similarity([number()], [number()]) :: float()
-  def cosine_similarity(a, b) when length(a) == length(b) do
+  def cosine_similarity(a, b) when is_list(a) and is_list(b) do
+    with {:ok, a} <- validate_vector(a),
+         {:ok, b} <- validate_vector(b),
+         true <- length(a) == length(b),
+         a_scale when a_scale > 0.0 <- vector_scale(a),
+         b_scale when b_scale > 0.0 <- vector_scale(b) do
+      scaled_cosine(a, b, a_scale, b_scale)
+    else
+      _invalid_or_zero -> 0.0
+    end
+  end
+
+  def cosine_similarity(_a, _b), do: 0.0
+
+  defp vector_scale(vector) do
+    Enum.reduce(vector, 0.0, fn value, scale -> max(scale, abs(value * 1.0)) end)
+  end
+
+  defp scaled_cosine(a, b, a_scale, b_scale) do
     {dot, a_norm_squared, b_norm_squared} =
       a
       |> Enum.zip(b)
       |> Enum.reduce({0.0, 0.0, 0.0}, fn {x, y}, {dot, a_norm, b_norm} ->
-        {dot + x * y, a_norm + x * x, b_norm + y * y}
+        scaled_x = x / a_scale
+        scaled_y = y / b_scale
+
+        {
+          dot + scaled_x * scaled_y,
+          a_norm + scaled_x * scaled_x,
+          b_norm + scaled_y * scaled_y
+        }
       end)
 
     denominator = :math.sqrt(a_norm_squared) * :math.sqrt(b_norm_squared)
-    if denominator == 0.0, do: 0.0, else: dot / denominator
+
+    if finite_intermediates?([dot, a_norm_squared, b_norm_squared, denominator]) and
+         denominator > 0.0 do
+      similarity = dot / denominator
+
+      if Arbor.LLM.finite_number?(similarity),
+        do: min(1.0, max(-1.0, similarity)),
+        else: 0.0
+    else
+      0.0
+    end
   end
 
-  def cosine_similarity(_a, _b), do: 0.0
+  defp finite_intermediates?(values), do: Enum.all?(values, &Arbor.LLM.finite_number?/1)
 
   defp validate_prompt(prompt) do
     validate_bounded_utf8(

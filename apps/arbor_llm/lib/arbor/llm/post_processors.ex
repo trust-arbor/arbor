@@ -103,13 +103,21 @@ defmodule Arbor.LLM.PostProcessors do
   @spec parse_wrapped_json(String.t()) ::
           %{thinking: String.t() | nil, text: String.t()} | nil
   def parse_wrapped_json(content) when is_binary(content) do
-    try_json_decode(content) || try_regex_extract(content) || try_strip_prefix(content)
+    if byte_size(content) <= 16_777_216 and String.valid?(content) do
+      try_json_decode(content) || try_regex_extract(content) || try_strip_prefix(content)
+    end
   end
 
   # ── Layer 1 — strict Jason ───────────────────────────────────────────
 
   defp try_json_decode(text) do
-    case Jason.decode(text) do
+    case Arbor.LLM.ResponseBudget.decode_json(text,
+           max_bytes: 16_777_216,
+           max_nodes: 100_000,
+           max_depth: 32,
+           max_map_keys: 10_000,
+           max_list_items: 100_000
+         ) do
       {:ok, map} when is_map(map) and map_size(map) > 0 ->
         output = non_empty(map["output"])
         reasoning = non_empty(map["reasoning"])

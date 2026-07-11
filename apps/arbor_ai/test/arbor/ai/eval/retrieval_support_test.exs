@@ -290,6 +290,21 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
              {:error, {:http_response_bytes_exceeded, 32}}
   end
 
+  test "security regression: drip-fed HTTP activity cannot extend the absolute eval deadline" do
+    {url, server} = start_drip_server(100, 10)
+    started = System.monotonic_time(:millisecond)
+
+    assert RetrievalSupport.post_json(url, %{}, 120, 1_024) ==
+             {:error, {:transport_error, {:deadline_exceeded, 120}}}
+
+    elapsed = System.monotonic_time(:millisecond) - started
+    assert elapsed >= 100
+    assert elapsed < 300
+
+    assert %{sent: sent, closed?: true} = Task.await(server, 2_000)
+    assert sent < 100
+  end
+
   defp minimal_action do
     %{
       "module" => "Arbor.Actions.Test",
@@ -303,6 +318,58 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
       System.tmp_dir!(),
       "arbor-ai-retrieval-#{label}-#{System.unique_integer([:positive, :monotonic])}.json"
     )
+  end
+
+  defp start_drip_server(chunk_count, delay_ms) do
+    {:ok, listener} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, {{127, 0, 0, 1}, port}} = :inet.sockname(listener)
+
+    server =
+      Task.async(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener)
+        :ok = :gen_tcp.close(listener)
+        {:ok, _request} = receive_http_headers(socket, "")
+
+        :ok =
+          :gen_tcp.send(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n" <>
+              "transfer-encoding: chunked\r\nconnection: keep-alive\r\n\r\n"
+          )
+
+        result = send_drip_chunks(socket, chunk_count, delay_ms, 0)
+        :gen_tcp.close(socket)
+        result
+      end)
+
+    {"http://127.0.0.1:#{port}/eval", server}
+  end
+
+  defp receive_http_headers(socket, acc) do
+    if String.contains?(acc, "\r\n\r\n") do
+      {:ok, acc}
+    else
+      case :gen_tcp.recv(socket, 0, 2_000) do
+        {:ok, data} -> receive_http_headers(socket, acc <> data)
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  defp send_drip_chunks(_socket, maximum, _delay_ms, sent) when sent >= maximum,
+    do: %{sent: sent, closed?: false}
+
+  defp send_drip_chunks(socket, maximum, delay_ms, sent) do
+    case :gen_tcp.send(socket, "1\r\n \r\n") do
+      :ok ->
+        Process.sleep(delay_ms)
+        send_drip_chunks(socket, maximum, delay_ms, sent + 1)
+
+      {:error, _reason} ->
+        %{sent: sent, closed?: true}
+    end
   end
 
   defp swap_paths(path, regular_path, fifo_path) do

@@ -3,18 +3,45 @@ defmodule Arbor.LLM.Endpoint do
 
   @max_endpoint_bytes 4_096
   @host_regex ~r/^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$/
+  @provider_base_paths %{
+    "amazon_bedrock" => [""],
+    "anthropic" => [""],
+    "azure" => ["", "/openai"],
+    "cerebras" => ["/v1"],
+    "google" => ["/v1", "/v1beta"],
+    "google_vertex" => [""],
+    "groq" => ["/openai/v1"],
+    "lm_studio" => ["/v1"],
+    "ollama" => ["/v1"],
+    "openai" => ["/v1"],
+    "openrouter" => ["/api/v1"],
+    "venice" => ["/api/v1"],
+    "vllm" => ["/v1"],
+    "xai" => ["/v1"],
+    "zai" => ["/api/paas/v4"],
+    "zai_coder" => ["/api/coding/paas/v4"],
+    "zai_coding_plan" => ["/api/coding/paas/v4"],
+    "zenmux" => ["/api/v1"]
+  }
+  @endpoint_suffixes ["chat/completions", "embeddings", "responses", "models"]
 
-  @type policy :: :root | :embedding | :lm_studio | :req_llm_base
+  @type policy ::
+          :root
+          | :embedding
+          | :lm_studio
+          | :req_llm_base
+          | {:req_llm_base, atom() | String.t()}
+          | {:req_llm_base, atom() | String.t(), [String.t()]}
 
   @spec validate(term(), policy()) :: {:ok, String.t()} | {:error, atom()}
   def validate(value, policy)
-      when is_binary(value) and byte_size(value) <= @max_endpoint_bytes and
-             policy in [:root, :embedding, :lm_studio, :req_llm_base] do
-    with :ok <- validate_text(value),
+      when is_binary(value) and byte_size(value) <= @max_endpoint_bytes do
+    with {:ok, path_policy} <- normalize_policy(policy),
+         :ok <- validate_text(value),
          {:ok, scheme, authority, path} <- split_original(value),
          {:ok, host, port, explicit_port?} <- parse_authority(authority),
          {:ok, canonical_host} <- validate_host(host),
-         {:ok, canonical_path} <- validate_path(path, policy),
+         {:ok, canonical_path} <- validate_path(path, path_policy),
          :ok <- verify_uri_parse(value, scheme, host, port),
          canonical <- canonical(scheme, canonical_host, port, explicit_port?, canonical_path),
          :ok <- verify_canonical(canonical, scheme, canonical_host, port, canonical_path) do
@@ -23,6 +50,25 @@ defmodule Arbor.LLM.Endpoint do
   end
 
   def validate(_value, _policy), do: {:error, :bounded_string_required}
+
+  defp normalize_policy(policy) when policy in [:root, :embedding, :lm_studio, :req_llm_base],
+    do: {:ok, policy}
+
+  defp normalize_policy({:req_llm_base, provider})
+       when (is_atom(provider) or is_binary(provider)) and not is_nil(provider),
+       do: normalize_policy({:req_llm_base, provider, []})
+
+  defp normalize_policy({:req_llm_base, provider, reviewed_paths})
+       when (is_atom(provider) or is_binary(provider)) and not is_nil(provider) and
+              is_list(reviewed_paths) do
+    provider = Arbor.LLM.ProviderRegistry.normalize(provider)
+
+    with {:ok, reviewed_paths} <- validate_reviewed_paths(reviewed_paths) do
+      {:ok, {:req_llm_base, provider, reviewed_paths}}
+    end
+  end
+
+  defp normalize_policy(_policy), do: {:error, :invalid_endpoint_policy}
 
   defp validate_text(value) do
     cond do
@@ -161,10 +207,89 @@ defmodule Arbor.LLM.Endpoint do
 
   defp validate_path(path, :req_llm_base) when path in ["", "/"], do: {:ok, ""}
   defp validate_path(path, :req_llm_base) when path in ["/v1", "/v1/"], do: {:ok, "/v1"}
+
+  defp validate_path(path, {:req_llm_base, provider, reviewed_paths}) do
+    with {:ok, canonical} <- canonical_endpoint_path(path) do
+      allowed = Map.get(@provider_base_paths, provider, []) ++ reviewed_paths
+
+      cond do
+        endpoint_suffix?(canonical) -> {:error, :endpoint_suffix_must_not_be_in_base_url}
+        canonical in allowed -> {:ok, canonical}
+        true -> {:error, :base_path_not_allowed_for_provider}
+      end
+    end
+  end
+
   defp validate_path(_path, :root), do: {:error, :base_path_must_be_root}
   defp validate_path(_path, :embedding), do: {:error, :embedding_path_must_be_v1_embeddings}
   defp validate_path(_path, :lm_studio), do: {:error, :base_path_must_be_v1}
   defp validate_path(_path, :req_llm_base), do: {:error, :ambiguous_base_path}
+
+  defp canonical_path("/"), do: ""
+  defp canonical_path(path), do: String.trim_trailing(path, "/")
+
+  defp canonical_endpoint_path(path) do
+    segments = String.split(path, "/", trim: true)
+
+    cond do
+      String.contains?(path, ["%", "\\", "//"]) -> {:error, :ambiguous_base_path}
+      Enum.any?(segments, &(&1 in [".", ".."])) -> {:error, :path_traversal_forbidden}
+      String.ends_with?(path, "//") -> {:error, :ambiguous_base_path}
+      true -> {:ok, canonical_path(path)}
+    end
+  end
+
+  defp validate_reviewed_paths(paths) do
+    Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, acc} ->
+      case validate_reviewed_path(path) do
+        {:ok, canonical} -> {:cont, {:ok, [canonical | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, canonical} -> {:ok, Enum.reverse(canonical) |> Enum.uniq()}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_reviewed_path(path) when is_binary(path) and byte_size(path) <= 512 do
+    canonical = canonical_path(path)
+    segments = String.split(canonical, "/", trim: true)
+
+    cond do
+      canonical == "" ->
+        {:error, :reviewed_proxy_path_must_be_non_root}
+
+      not String.starts_with?(canonical, "/") ->
+        {:error, :reviewed_proxy_path_must_be_absolute}
+
+      String.contains?(canonical, ["%", "?", "#", "\\", "//"]) ->
+        {:error, :invalid_reviewed_proxy_path}
+
+      length(segments) > 16 ->
+        {:error, :reviewed_proxy_path_too_deep}
+
+      Enum.any?(segments, &(&1 in ["", ".", ".."])) ->
+        {:error, :path_traversal_forbidden}
+
+      Enum.any?(segments, &(not Regex.match?(~r/\A[A-Za-z0-9._~-]+\z/, &1))) ->
+        {:error, :invalid_reviewed_proxy_path}
+
+      endpoint_suffix?(canonical) ->
+        {:error, :endpoint_suffix_must_not_be_in_base_url}
+
+      true ->
+        {:ok, canonical}
+    end
+  end
+
+  defp validate_reviewed_path(_path), do: {:error, :invalid_reviewed_proxy_path}
+
+  defp endpoint_suffix?(path) do
+    Enum.any?(@endpoint_suffixes, fn suffix ->
+      path == "/" <> suffix or String.ends_with?(path, "/" <> suffix)
+    end)
+  end
 
   defp verify_uri_parse(value, scheme, host, port) do
     uri = URI.parse(value)

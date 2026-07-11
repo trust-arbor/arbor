@@ -60,6 +60,28 @@ defmodule Arbor.LLM.ResponseBudgetTest do
              ResponseBudget.decode_json(body, @limits)
   end
 
+  test "security regression: embedded tool arguments share one retained aggregate budget" do
+    arguments = Jason.encode!(%{"items" => List.duplicate(0, 4_500)})
+
+    body =
+      Jason.encode!(%{
+        "tool_calls" =>
+          List.duplicate(%{"function" => %{"name" => "bounded", "arguments" => arguments}}, 30)
+      })
+
+    limits =
+      @limits
+      |> Keyword.put(:max_bytes, 16_777_216)
+      |> Keyword.put(:max_nodes, 100_000)
+      |> Keyword.put(:max_map_keys, 10_000)
+      |> Keyword.put(:max_list_items, 100_000)
+
+    assert {:error, {:decoded_term_limit_exceeded, boundary, 100_000}} =
+             ResponseBudget.decode_json(body, limits)
+
+    assert boundary in [:nodes, :list_items]
+  end
+
   test "security regression: exact score lexemes cannot round or underflow into range" do
     for token <- ["1.0000000000000000001", "-1e-999", "9", "true", "\"1\""] do
       body = ~s({"score":#{token}})

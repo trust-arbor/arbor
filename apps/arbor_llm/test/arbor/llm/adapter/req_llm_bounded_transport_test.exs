@@ -297,6 +297,65 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     assert sent < length(chunks)
   end
 
+  test "security regression: embedding indices are complete, unique, bounded, and reordered" do
+    reversed = [
+      %{"index" => 1, "embedding" => [0.0, 1.0]},
+      %{"index" => 0, "embedding" => [1.0, 0.0]}
+    ]
+
+    {url, server} = embedding_server(reversed)
+
+    assert {:ok, result} =
+             Adapter.embed(["first", "second"], "text-embedding-3-small",
+               provider: "openai",
+               base_url: url,
+               api_key: "test-key",
+               receive_timeout: 2_000
+             )
+
+    assert result.embeddings == [[1.0, 0.0], [0.0, 1.0]]
+
+    _ = Task.await(server, 2_000)
+
+    invalid_batches = [
+      [
+        %{"index" => 0, "embedding" => [1.0]},
+        %{"index" => 0, "embedding" => [2.0]}
+      ],
+      [%{"index" => 0, "embedding" => [1.0]}],
+      [
+        %{"index" => -1, "embedding" => [1.0]},
+        %{"index" => 1, "embedding" => [2.0]}
+      ],
+      [
+        %{"index" => 1_000_000, "embedding" => [1.0]},
+        %{"index" => 1, "embedding" => [2.0]}
+      ],
+      [
+        %{"index" => 0.0, "embedding" => [1.0]},
+        %{"index" => 1, "embedding" => [2.0]}
+      ],
+      [
+        %{"embedding" => [1.0]},
+        %{"index" => 1, "embedding" => [2.0]}
+      ]
+    ]
+
+    for data <- invalid_batches do
+      {url, server} = embedding_server(data)
+
+      assert {:error, _reason} =
+               Adapter.embed(["first", "second"], "text-embedding-3-small",
+                 provider: "openai",
+                 base_url: url,
+                 api_key: "test-key",
+                 receive_timeout: 2_000
+               )
+
+      _ = Task.await(server, 2_000)
+    end
+  end
+
   defp request do
     %Request{
       provider: "lm_studio",
@@ -319,6 +378,11 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
   defp openai_sse(text) do
     Jason.encode!(%{"choices" => [%{"delta" => %{"content" => text}}]})
     |> then(&("data: " <> &1 <> "\n\n"))
+  end
+
+  defp embedding_server(data) do
+    body = Jason.encode!(%{"data" => data, "usage" => %{}})
+    start_chunked_server([body], 0, "application/json")
   end
 
   defp start_chunked_server(

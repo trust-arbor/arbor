@@ -82,6 +82,23 @@ defmodule Arbor.LLM.ClientTest do
                |> Client.collect_stream()
     end
 
+    test "security regression: decoded argument lists are charged before aggregate retention" do
+      arguments = Jason.encode!(%{"items" => List.duplicate(0, 4_500)})
+
+      events =
+        for index <- 1..30 do
+          %StreamEvent{
+            type: :tool_call,
+            data: %{id: "call-#{index}", name: "bounded", arguments: arguments}
+          }
+        end
+
+      assert {:error, {:stream_limit_exceeded, boundary, 100_000}} =
+               Client.collect_stream(events)
+
+      assert boundary in [:retained_nodes, :retained_list_items]
+    end
+
     test "security regression: tool fields and finish usage are bounded before retention" do
       huge_id = String.duplicate("i", 513)
 

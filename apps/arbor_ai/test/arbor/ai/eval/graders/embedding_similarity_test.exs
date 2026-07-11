@@ -28,6 +28,22 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
     test "handles zero vectors" do
       assert EmbeddingSimilarity.cosine_similarity([0.0, 0.0], [1.0, 2.0]) == 0.0
     end
+
+    test "security regression: validated extreme vectors avoid underflow and overflow" do
+      tiny = [1.0e-300, -1.0e-300]
+      mixed = [1.0e100, 1.0e-300, -1.0e100]
+
+      assert_in_delta EmbeddingSimilarity.cosine_similarity(tiny, tiny), 1.0, 1.0e-12
+      assert_in_delta EmbeddingSimilarity.cosine_similarity(mixed, mixed), 1.0, 1.0e-12
+
+      assert_in_delta(
+        EmbeddingSimilarity.cosine_similarity(tiny, [-1.0e-300, 1.0e-300]),
+        -1.0,
+        1.0e-12
+      )
+
+      assert EmbeddingSimilarity.cosine_similarity([1.0e101], [1.0e101]) == 0.0
+    end
   end
 
   describe "grade/3" do
@@ -175,8 +191,8 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
           response_body =
             Jason.encode!(%{
               "data" => [
-                %{"embedding" => [1.0, 0.0]},
-                %{"embedding" => [0.8, 0.2]}
+                %{"index" => 0, "embedding" => [1.0, 0.0]},
+                %{"index" => 1, "embedding" => [0.8, 0.2]}
               ]
             })
 
@@ -202,6 +218,94 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
       assert request_body == %{"input" => ["actual", "expected"], "model" => "http-model"}
       assert_in_delta result.score, 0.9701, 0.001
       assert result.passed
+    end
+
+    test "security regression: default HTTP grader path accepts reversed indexed wire order" do
+      previous_options = Req.default_options()
+
+      on_exit(fn -> Req.default_options(previous_options) end)
+
+      data = [
+        %{"index" => 1, "embedding" => [0.8, 0.2]},
+        %{"index" => 0, "embedding" => [1.0, 0.0]}
+      ]
+
+      Req.default_options(adapter: embedding_response_adapter(data))
+
+      assert {:ok, [first, second], %{}} =
+               Arbor.LLM.decode_embedding_response(%{"data" => data}, 2)
+
+      assert first == [1.0, 0.0]
+      assert second == [0.8, 0.2]
+
+      result =
+        EmbeddingSimilarity.grade("actual", "expected",
+          embed_url: "http://embedding.test/v1/embeddings",
+          embed_model: "http-model",
+          timeout: 1_000
+        )
+
+      assert_in_delta result.score, 0.9701, 0.001
+      assert result.passed
+    end
+
+    test "security regression: default HTTP grader rejects malformed embedding indices" do
+      previous_options = Req.default_options()
+
+      on_exit(fn -> Req.default_options(previous_options) end)
+
+      malformed_batches = [
+        [
+          %{"index" => 0, "embedding" => [1.0, 0.0]},
+          %{"index" => 0, "embedding" => [1.0, 0.0]}
+        ],
+        [
+          %{"embedding" => [1.0, 0.0]},
+          %{"index" => 1, "embedding" => [1.0, 0.0]}
+        ],
+        [
+          %{"index" => -1, "embedding" => [1.0, 0.0]},
+          %{"index" => 1, "embedding" => [1.0, 0.0]}
+        ],
+        [
+          %{"index" => 1_000_000, "embedding" => [1.0, 0.0]},
+          %{"index" => 1, "embedding" => [1.0, 0.0]}
+        ],
+        [
+          %{"index" => 0.0, "embedding" => [1.0, 0.0]},
+          %{"index" => 1, "embedding" => [1.0, 0.0]}
+        ]
+      ]
+
+      for data <- malformed_batches do
+        Req.default_options(adapter: embedding_response_adapter(data))
+
+        result =
+          EmbeddingSimilarity.grade("actual", "expected",
+            embed_url: "http://embedding.test/v1/embeddings",
+            embed_model: "http-model",
+            timeout: 1_000,
+            threshold: 0.99
+          )
+
+        refute result.passed
+        assert result.detail =~ "invalid_embedding_response"
+      end
+    end
+  end
+
+  defp embedding_response_adapter(data) do
+    fn request ->
+      body = Jason.encode!(%{"data" => data})
+
+      response =
+        Req.Response.new(
+          status: 200,
+          headers: %{"content-type" => ["application/json"]},
+          body: body
+        )
+
+      {request, response}
     end
   end
 end

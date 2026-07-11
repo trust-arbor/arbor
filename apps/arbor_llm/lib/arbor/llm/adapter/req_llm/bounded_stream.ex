@@ -1,7 +1,6 @@
 defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
   @moduledoc false
 
-  alias Arbor.LLM.JSONPreflight
   alias Arbor.LLM.ResponseBudget
 
   @default_max_response_bytes 16_777_216
@@ -551,16 +550,26 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
     json_limits = json_limits(state.limits, state.limits.max_event_bytes)
 
     with true <- String.valid?(data) or {:error, {:invalid_stream_json, :valid_utf8_required}},
-         {:ok, measurements} <- JSONPreflight.scan(data, json_limits),
-         {:ok, decoded} <- Jason.decode(data),
-         {:ok, state} <- add_measurements(state, measurements),
-         {:ok, state} <- validate_complete_arguments(decoded, state) do
+         {:ok, preflight} <- ResponseBudget.preflight_json(data, json_limits),
+         {:ok, state} <- add_measurements(state, preflight),
+         {:ok, decoded, retained} <-
+           ResponseBudget.decode_json_with_measurements(data, json_limits),
+         {:ok, state} <- add_measurements(state, measurement_delta(retained, preflight)) do
       event = %{event | data: decoded}
       state = if termination_data?(decoded), do: %{state | terminal?: true}, else: state
       decode_and_emit(event, state)
     else
       {:error, reason} -> {:error, {:invalid_stream_json, reason}, state}
     end
+  end
+
+  defp measurement_delta(retained, preflight) do
+    %{
+      nodes: max(Map.get(retained, :nodes, 0) - Map.get(preflight, :nodes, 0), 0),
+      bytes: max(Map.get(retained, :bytes, 0) - Map.get(preflight, :bytes, 0), 0),
+      map_keys: max(Map.get(retained, :map_keys, 0) - Map.get(preflight, :map_keys, 0), 0),
+      list_items: max(Map.get(retained, :list_items, 0) - Map.get(preflight, :list_items, 0), 0)
+    }
   end
 
   defp decode_and_emit(event, state) do
@@ -671,54 +680,6 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
          }}
     end
   end
-
-  defp validate_complete_arguments(term, state), do: validate_arguments([{:value, term}], state)
-
-  defp validate_arguments([], state), do: {:ok, state}
-
-  defp validate_arguments([{:value, map} | rest], state) when is_map(map) do
-    result =
-      case {Map.get(map, "name"), Map.get(map, "arguments")} do
-        {name, arguments} when is_binary(name) and is_binary(arguments) ->
-          case JSONPreflight.scan(
-                 arguments,
-                 json_limits(state.limits, state.limits.max_event_bytes)
-               ) do
-            {:ok, measurements} -> add_measurements(state, measurements)
-            {:error, reason} -> {:error, {:invalid_tool_arguments, reason}}
-          end
-
-        _ ->
-          {:ok, state}
-      end
-
-    with {:ok, state} <- result do
-      validate_arguments([{:map, :maps.iterator(map)} | rest], state)
-    end
-  end
-
-  defp validate_arguments([{:map, iterator} | rest], state) do
-    case :maps.next(iterator) do
-      :none ->
-        validate_arguments(rest, state)
-
-      {_key, value, next} ->
-        validate_arguments([{:value, value}, {:map, next} | rest], state)
-    end
-  end
-
-  defp validate_arguments([{:value, list} | rest], state) when is_list(list),
-    do: validate_arguments([{:list, list} | rest], state)
-
-  defp validate_arguments([{:list, []} | rest], state), do: validate_arguments(rest, state)
-
-  defp validate_arguments([{:list, [head | tail]} | rest], state),
-    do: validate_arguments([{:value, head}, {:list, tail} | rest], state)
-
-  defp validate_arguments([{:list, _improper} | _rest], _state),
-    do: {:error, :improper_decoded_list}
-
-  defp validate_arguments([{:value, _scalar} | rest], state), do: validate_arguments(rest, state)
 
   defp termination_data?(%{"done" => true}), do: true
 

@@ -156,11 +156,11 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarity do
            timeout,
            @max_embedding_response_bytes
          ) do
-      {:ok, 200, %{"data" => [first, second]}} when is_map(first) and is_map(second) ->
-        {:ok, [Map.get(first, "embedding"), Map.get(second, "embedding")]}
-
-      {:ok, 200, _body} ->
-        {:error, {:invalid_embedding_response, :two_vectors_required}}
+      {:ok, 200, body} ->
+        case Arbor.LLM.decode_embedding_response(body, length(texts)) do
+          {:ok, embeddings, _usage} -> {:ok, embeddings}
+          {:error, reason} -> {:error, {:invalid_embedding_response, reason}}
+        end
 
       {:ok, status, body} ->
         RetrievalSupport.http_error(:http_error, status, body)

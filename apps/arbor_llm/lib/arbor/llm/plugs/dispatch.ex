@@ -27,8 +27,6 @@ defmodule Arbor.LLM.Plugs.Dispatch do
   alias Arbor.LLM.Adapter.ReqLLM.BoundedStream
 
   @default_max_response_bytes 16_777_216
-  @max_embedding_vectors 2_048
-  @max_embedding_dimensions 8_192
 
   def call(%Call{halted: true} = call), do: call
 
@@ -141,7 +139,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
         {:error, {:invalid_response_body, reason}}
 
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-        extract_embeddings(body, length(texts))
+        Arbor.LLM.decode_embedding_response(body, length(texts))
 
       {:ok, %Req.Response{status: status, body: body}} ->
         {:error,
@@ -156,52 +154,6 @@ defmodule Arbor.LLM.Plugs.Dispatch do
         error
     end
   end
-
-  defp extract_embeddings(%{"data" => data} = body, expected_count)
-       when is_list(data) and length(data) <= @max_embedding_vectors do
-    with true <-
-           length(data) == expected_count or
-             {:error, {:unexpected_embedding_count, expected_count}},
-         {:ok, embeddings, dimensions} <- extract_embedding_vectors(data, [], nil),
-         true <- dimensions > 0 or {:error, :empty_embedding_vector} do
-      {:ok, embeddings, Map.get(body, "usage", %{})}
-    end
-  end
-
-  defp extract_embeddings(%{"data" => data}, _expected_count) when is_list(data),
-    do: {:error, {:embedding_vector_count_exceeded, @max_embedding_vectors}}
-
-  defp extract_embeddings(body, _expected_count), do: {:error, {:unexpected_embed_response, body}}
-
-  defp extract_embedding_vectors([], acc, dimensions),
-    do: {:ok, Enum.reverse(acc), dimensions || 0}
-
-  defp extract_embedding_vectors([entry | rest], acc, expected_dimensions) do
-    vector = if is_map(entry), do: Map.get(entry, "embedding"), else: entry
-
-    with {:ok, dimensions} <- validate_embedding_vector(vector, 0),
-         true <-
-           is_nil(expected_dimensions) or dimensions == expected_dimensions or
-             {:error, {:embedding_dimension_mismatch, expected_dimensions, dimensions}} do
-      extract_embedding_vectors(rest, [vector | acc], dimensions)
-    end
-  end
-
-  defp validate_embedding_vector([], 0), do: {:error, :empty_embedding_vector}
-  defp validate_embedding_vector([], dimensions), do: {:ok, dimensions}
-
-  defp validate_embedding_vector(_vector, dimensions)
-       when dimensions >= @max_embedding_dimensions,
-       do: {:error, {:embedding_dimensions_exceeded, @max_embedding_dimensions}}
-
-  defp validate_embedding_vector([value | rest], dimensions) do
-    if ResponseBudget.finite_number?(value),
-      do: validate_embedding_vector(rest, dimensions + 1),
-      else: {:error, :finite_numeric_embedding_required}
-  end
-
-  defp validate_embedding_vector(_improper_or_non_list, _dimensions),
-    do: {:error, :proper_embedding_vector_required}
 
   defp exception_for(%{__struct__: mod} = e)
        when mod in [ReqLLM.Error.API.Request, ReqLLM.Error.API.Response] do

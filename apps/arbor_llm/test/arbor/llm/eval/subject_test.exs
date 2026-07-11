@@ -40,6 +40,16 @@ defmodule Arbor.LLM.Eval.SubjectTest do
       {:ok, %Response{text: <<255, 1, 2, 3, 4, 5>>, usage: %{}, raw: %{}}}
     end
 
+    def complete(%Request{model: "slow-complete-deadline"}, _opts) do
+      Process.sleep(200)
+
+      if owner = Process.whereis(Arbor.LLM.Eval.SubjectTest.DeadlineProbe) do
+        send(owner, :late_complete_side_effect)
+      end
+
+      {:ok, %Response{text: "late", usage: %{}, raw: %{}}}
+    end
+
     def complete(%Request{} = request, opts) do
       payload = %{
         "max_tokens" => request.max_tokens,
@@ -330,6 +340,29 @@ defmodule Arbor.LLM.Eval.SubjectTest do
                stream: true,
                timeout: 25
              ) == {:error, {:stream_deadline_exceeded, 25}}
+    end
+
+    test "security regression: nonstreaming adapters share one owned absolute deadline" do
+      Process.register(self(), Arbor.LLM.Eval.SubjectTest.DeadlineProbe)
+
+      on_exit(fn ->
+        if Process.whereis(Arbor.LLM.Eval.SubjectTest.DeadlineProbe) == self(),
+          do: Process.unregister(Arbor.LLM.Eval.SubjectTest.DeadlineProbe)
+      end)
+
+      started = System.monotonic_time(:millisecond)
+
+      assert Subject.run("hello",
+               client: client(),
+               provider: "eval_test",
+               model: "slow-complete-deadline",
+               timeout: 50
+             ) == {:error, {:request_deadline_exceeded, 50}}
+
+      elapsed = System.monotonic_time(:millisecond) - started
+      assert elapsed >= 40
+      assert elapsed < 175
+      refute_receive :late_complete_side_effect, 250
     end
 
     test "security regression: terminal stream events stop producer consumption" do

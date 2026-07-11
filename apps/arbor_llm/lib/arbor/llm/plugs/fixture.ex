@@ -134,8 +134,16 @@ defmodule Arbor.LLM.Plugs.Fixture do
     path = path_for(call)
 
     with true <- File.exists?(path),
+         {:ok, %{size: size}} when size <= 16_777_216 <- File.stat(path),
          {:ok, body} <- File.read(path),
-         {:ok, decoded} <- Jason.decode(body),
+         {:ok, decoded} <-
+           Arbor.LLM.ResponseBudget.decode_json(body,
+             max_bytes: 16_777_216,
+             max_nodes: 100_000,
+             max_depth: 32,
+             max_map_keys: 10_000,
+             max_list_items: 100_000
+           ),
          {:ok, recorded_at, _} <- DateTime.from_iso8601(decoded["recorded_at"] || "") do
       {:ok, deserialize(op, decoded["response"]), recorded_at}
     else

@@ -124,6 +124,63 @@ defmodule Arbor.LLM.Adapter.LmStudioTest do
     assert_receive {:http_chunk, 1}
   end
 
+  test "security regression: caller response limits cannot widen the 16 MiB system ceiling" do
+    parent = self()
+
+    Req.default_options(
+      adapter: fn request ->
+        send(parent, :oversized_limit_reached_transport)
+        {request, Req.Response.new(status: 500)}
+      end
+    )
+
+    request = %Request{
+      provider: "lm_studio_owned",
+      model: "model",
+      messages: [%Message{role: :user, content: "hello"}]
+    }
+
+    assert LmStudio.complete(request, max_response_bytes: 16_777_217) ==
+             {:error, {:invalid_response_limit, 16_777_217}}
+
+    refute_receive :oversized_limit_reached_transport
+  end
+
+  test "security regression: real 16.8 MB TCP response cannot cross the hard ceiling" do
+    total_bytes = 16_800_000
+    {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
+    {:ok, {_address, port}} = :inet.sockname(listener)
+
+    server =
+      Task.async(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener)
+        {:ok, _request} = :gen_tcp.recv(socket, 0, 2_000)
+
+        :ok =
+          :gen_tcp.send(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n" <>
+              "transfer-encoding: chunked\r\nconnection: keep-alive\r\n\r\n"
+          )
+
+        result = send_large_response(socket, total_bytes, 0)
+        :gen_tcp.close(socket)
+        result
+      end)
+
+    on_exit(fn -> :gen_tcp.close(listener) end)
+    Application.put_env(:arbor_llm, :lm_studio_base_url, "http://127.0.0.1:#{port}/v1")
+
+    request = %Request{
+      provider: "lm_studio_owned",
+      model: "model",
+      messages: [%Message{role: :user, content: "hello"}]
+    }
+
+    assert LmStudio.complete(request) == {:error, {:response_bytes_exceeded, 16_777_216}}
+    assert %{sent: ^total_bytes} = Task.await(server, 3_000)
+  end
+
   test "security regression: malformed configured endpoints fail closed" do
     request = %Request{
       provider: "lm_studio_owned",
@@ -164,6 +221,24 @@ defmodule Arbor.LLM.Adapter.LmStudioTest do
 
       {:error, _reason} ->
         index - 1
+    end
+  end
+
+  defp send_large_response(_socket, total_bytes, sent) when sent >= total_bytes,
+    do: %{sent: sent, closed?: false}
+
+  defp send_large_response(socket, total_bytes, sent) do
+    size = min(65_536, total_bytes - sent)
+    chunk = String.duplicate("x", size)
+    frame = Integer.to_string(size, 16) <> "\r\n" <> chunk <> "\r\n"
+
+    case :gen_tcp.send(socket, frame) do
+      :ok ->
+        Process.sleep(1)
+        send_large_response(socket, total_bytes, sent + size)
+
+      {:error, _reason} ->
+        %{sent: sent, closed?: true}
     end
   end
 end
