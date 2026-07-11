@@ -10,8 +10,45 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   @max_router_response_bytes 262_144
   @max_router_prompt_bytes 1_048_576
   @max_http_diagnostic_bytes 2_048
+  @max_external_diagnostic_bytes 512
+  @max_external_items 16
+  @max_external_depth 4
   @max_vector_dimensions 8_192
   @max_vector_component_abs 1.0e6
+  @max_protocol_integer 9_223_372_036_854_775_807
+  @index_read_deadline_ms 500
+  @index_reader_heap_words 8_388_608
+  @darwin_open_helper "/usr/bin/perl"
+  @darwin_open_script ~S"""
+  use strict;
+  use Fcntl qw(O_RDONLY O_NONBLOCK O_NOFOLLOW S_ISREG);
+  my ($path, $max, $ino, $size, $mtime, $ctime) = @ARGV;
+  sub fail_with { print "E\t$_[0]\n"; exit 0; }
+  sysopen(my $fh, $path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW) or fail_with("OPEN");
+  my @before = stat($fh);
+  @before or fail_with("FSTAT");
+  S_ISREG($before[2]) or fail_with("NOT_REGULAR");
+  ($before[1] == $ino && $before[7] == $size && $before[9] == $mtime && $before[10] == $ctime)
+    or fail_with("CHANGED");
+  binmode($fh);
+  my $body = "";
+  while (1) {
+    my $remaining = $max + 1 - length($body);
+    my $read = sysread($fh, my $chunk, $remaining);
+    defined($read) or fail_with("READ");
+    last if $read == 0;
+    $body .= $chunk;
+    fail_with("TOO_LARGE") if length($body) > $max;
+  }
+  my @after = stat($fh);
+  my @path = lstat($path);
+  (@after && @path && S_ISREG($after[2]) && S_ISREG($path[2])) or fail_with("CHANGED");
+  ($after[1] == $ino && $after[7] == $size && $after[9] == $mtime && $after[10] == $ctime)
+    or fail_with("CHANGED");
+  ($path[1] == $ino && $path[7] == $size && $path[9] == $mtime && $path[10] == $ctime)
+    or fail_with("CHANGED");
+  print "O\n", $body;
+  """
 
   @string_byte_limits %{
     index_path: 4_096,
@@ -102,8 +139,18 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
           {:ok, pos_integer() | nil} | {:error, term()}
   def optional_positive_integer_option(opts, key) do
     case Keyword.fetch(opts, key) do
-      :error -> {:ok, nil}
-      {:ok, value} -> positive_integer_option([{key, value}], key, value)
+      :error ->
+        {:ok, nil}
+
+      {:ok, value}
+      when is_integer(value) and value > 0 and value <= @max_protocol_integer ->
+        {:ok, value}
+
+      {:ok, value} when is_integer(value) and value > @max_protocol_integer ->
+        {:error, {:invalid_option, key, {:integer_range_required, 1, @max_protocol_integer}}}
+
+      {:ok, _value} ->
+        {:error, {:invalid_option, key, :positive_integer_required}}
     end
   end
 
@@ -118,12 +165,57 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
 
   @spec invoke(function(), [term()], atom()) :: term()
   def invoke(callback, args, error_tag) do
-    apply(callback, args)
+    case apply(callback, args) do
+      {:error, reason} -> {:error, bounded_external_reason(reason)}
+      result -> result
+    end
   rescue
-    exception -> {:error, {error_tag, {:exception, Exception.message(exception)}}}
+    exception -> {:error, {error_tag, exception_diagnostic(exception)}}
   catch
-    :exit, reason -> {:error, {error_tag, {:exit, inspect(reason)}}}
-    kind, reason -> {:error, {error_tag, {kind, inspect(reason)}}}
+    :exit, reason -> {:error, {error_tag, {:exit, bounded_external_reason(reason)}}}
+    kind, reason -> {:error, {error_tag, {kind, bounded_external_reason(reason)}}}
+  end
+
+  @doc false
+  @spec bounded_external_reason(term()) :: term()
+  def bounded_external_reason(
+        {tag, status, %{body_excerpt: excerpt, truncated: truncated?}} = reason
+      )
+      when is_atom(tag) and is_integer(status) and is_binary(excerpt) and
+             byte_size(excerpt) <= @max_http_diagnostic_bytes and is_boolean(truncated?),
+      do: reason
+
+  def bounded_external_reason(value), do: bound_term(value, @max_external_depth)
+
+  @doc false
+  @spec post_json(String.t(), term(), pos_integer(), pos_integer()) ::
+          {:ok, non_neg_integer(), term()} | {:error, term()}
+  def post_json(url, json, timeout, max_response_bytes)
+      when is_binary(url) and is_integer(timeout) and timeout > 0 and
+             is_integer(max_response_bytes) and max_response_bytes > 0 do
+    into = bounded_response_collector(max_response_bytes)
+
+    case Req.post(url,
+           json: json,
+           receive_timeout: timeout,
+           redirect: false,
+           compressed: false,
+           decode_body: false,
+           into: into
+         ) do
+      {:ok, %Req.Response{private: %{arbor_eval_response_overflow: true}}} ->
+        {:error, {:http_response_bytes_exceeded, max_response_bytes}}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:ok, status, decode_bounded_json_body(body, max_response_bytes)}
+
+      {:error, reason} ->
+        {:error, {:transport_error, bounded_external_reason(reason)}}
+    end
+  rescue
+    exception -> {:error, {:transport_error, exception_diagnostic(exception)}}
+  catch
+    kind, reason -> {:error, {:transport_error, {kind, bounded_external_reason(reason)}}}
   end
 
   @spec truncate_utf8(String.t(), pos_integer()) :: String.t()
@@ -212,7 +304,7 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   @doc false
   @spec http_error(atom(), term(), term()) :: {:error, term()}
   def http_error(tag, status, body) when is_atom(tag) do
-    {:error, {tag, status, diagnostic_excerpt(body)}}
+    {:error, {tag, bounded_external_reason(status), diagnostic_excerpt(body)}}
   end
 
   @doc false
@@ -386,6 +478,132 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   defp validate_index_size(path, _size), do: {:error, {:index_read_failed, path, :invalid_size}}
 
   defp open_and_read_index(path, expected_identity) do
+    if :os.type() == {:unix, :darwin} and File.regular?(@darwin_open_helper) do
+      open_and_read_index_darwin(path, expected_identity)
+    else
+      open_and_read_index_worker_deadline(path, expected_identity)
+    end
+  end
+
+  defp open_and_read_index_darwin(path, expected_identity) do
+    # O_NOFOLLOW protects the final component and O_NONBLOCK prevents a FIFO
+    # swap from pinning a scheduler. Identity checks detect regular-file swaps.
+    # Parent-directory replacement remains a trusted-directory residual.
+    args = [
+      "-e",
+      @darwin_open_script,
+      "--",
+      path,
+      Integer.to_string(@max_index_bytes),
+      Integer.to_string(expected_identity.inode),
+      Integer.to_string(expected_identity.size),
+      Integer.to_string(expected_identity.mtime),
+      Integer.to_string(expected_identity.ctime)
+    ]
+
+    port =
+      Port.open(
+        {:spawn_executable, @darwin_open_helper},
+        [:binary, :use_stdio, :stderr_to_stdout, :exit_status, args: args]
+      )
+
+    collect_open_helper(port, path, System.monotonic_time(:millisecond), [], 0)
+  rescue
+    exception -> {:error, {:index_read_failed, path, exception_diagnostic(exception)}}
+  end
+
+  defp collect_open_helper(port, path, started_at, chunks, retained_bytes) do
+    remaining_ms = @index_read_deadline_ms - (System.monotonic_time(:millisecond) - started_at)
+
+    if remaining_ms <= 0 do
+      close_open_helper(port)
+      {:error, {:index_read_failed, path, :read_deadline_exceeded}}
+    else
+      receive do
+        {^port, {:data, data}} when is_binary(data) ->
+          retained_bytes = retained_bytes + byte_size(data)
+
+          if retained_bytes > @max_index_bytes + 4_096 do
+            close_open_helper(port)
+            {:error, {:index_size_exceeded, path, @max_index_bytes}}
+          else
+            collect_open_helper(port, path, started_at, [data | chunks], retained_bytes)
+          end
+
+        {^port, {:exit_status, 0}} ->
+          chunks
+          |> Enum.reverse()
+          |> IO.iodata_to_binary()
+          |> parse_open_helper_result(path)
+
+        {^port, {:exit_status, _status}} ->
+          {:error, {:index_read_failed, path, :open_helper_failed}}
+      after
+        remaining_ms ->
+          close_open_helper(port)
+          {:error, {:index_read_failed, path, :read_deadline_exceeded}}
+      end
+    end
+  end
+
+  defp parse_open_helper_result("O\n" <> body, _path), do: {:ok, body}
+
+  defp parse_open_helper_result("E\tTOO_LARGE\n", path),
+    do: {:error, {:index_size_exceeded, path, @max_index_bytes}}
+
+  defp parse_open_helper_result("E\tNOT_REGULAR\n", path),
+    do: {:error, {:index_file_rejected, path, {:not_regular, :other}}}
+
+  defp parse_open_helper_result("E\tCHANGED\n", path),
+    do: {:error, {:index_read_failed, path, :file_changed_during_read}}
+
+  defp parse_open_helper_result("E\t" <> _bounded_error, path),
+    do: {:error, {:index_read_failed, path, :open_helper_failed}}
+
+  defp parse_open_helper_result(_result, path),
+    do: {:error, {:index_read_failed, path, :invalid_open_helper_response}}
+
+  defp close_open_helper(port) do
+    if Port.info(port) != nil, do: Port.close(port)
+  catch
+    :error, :badarg -> :ok
+  end
+
+  defp open_and_read_index_worker_deadline(path, expected_identity) do
+    reply_alias = :erlang.alias()
+
+    # Non-Darwin OTP file APIs expose no portable no-follow/nonblocking flags.
+    # This fallback bounds the caller, but deployments must keep the directory trusted.
+    {pid, monitor_ref} =
+      :erlang.spawn_opt(
+        fn ->
+          send(reply_alias, {reply_alias, open_and_read_index_worker(path, expected_identity)})
+        end,
+        [
+          :monitor,
+          {:max_heap_size, %{size: @index_reader_heap_words, kill: true, error_logger: false}}
+        ]
+      )
+
+    receive do
+      {^reply_alias, result} ->
+        :erlang.unalias(reply_alias)
+        Process.demonitor(monitor_ref, [:flush])
+        result
+
+      {:DOWN, ^monitor_ref, :process, ^pid, reason} ->
+        :erlang.unalias(reply_alias)
+        {:error, {:index_read_failed, path, {:reader_exit, bounded_external_reason(reason)}}}
+    after
+      @index_read_deadline_ms ->
+        :erlang.unalias(reply_alias)
+        Process.exit(pid, :kill)
+        Process.demonitor(monitor_ref, [:flush])
+        {:error, {:index_read_failed, path, :read_deadline_exceeded}}
+    end
+  end
+
+  defp open_and_read_index_worker(path, expected_identity) do
     case File.open(path, [:read, :binary], fn io ->
            read_verified_index(io, path, expected_identity)
          end) do
@@ -514,10 +732,52 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   end
 
   defp diagnostic_excerpt(body) do
-    rendered = inspect(body, limit: 20, printable_limit: @max_http_diagnostic_bytes, width: 80)
+    rendered =
+      body
+      |> bounded_external_reason()
+      |> inspect(
+        limit: @max_external_items,
+        printable_limit: @max_http_diagnostic_bytes,
+        width: 80
+      )
+
     {excerpt, _truncated?} = bounded_binary_excerpt(rendered)
     %{body_excerpt: excerpt, truncated: true}
   end
+
+  defp bounded_response_collector(maximum) do
+    fn {:data, data}, {request, response} when is_binary(data) ->
+      retained = if is_binary(response.body), do: response.body, else: ""
+      remaining = maximum - byte_size(retained)
+
+      if byte_size(data) > remaining do
+        prefix = if remaining > 0, do: binary_part(data, 0, remaining), else: ""
+
+        response = %{
+          response
+          | body: retained <> prefix,
+            private: Map.put(response.private, :arbor_eval_response_overflow, true)
+        }
+
+        {:halt, {request, response}}
+      else
+        {:cont, {request, %{response | body: retained <> data}}}
+      end
+    end
+  end
+
+  defp decode_bounded_json_body(body, maximum) when is_binary(body) do
+    if byte_size(body) <= maximum do
+      case Jason.decode(body) do
+        {:ok, decoded} -> decoded
+        {:error, _reason} -> body
+      end
+    else
+      %{body_excerpt: "", truncated: true}
+    end
+  end
+
+  defp decode_bounded_json_body(body, _maximum), do: bounded_external_reason(body)
 
   defp bounded_binary_excerpt(value) do
     size = byte_size(value)
@@ -540,6 +800,88 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
     |> binary_part(0, prefix_size)
     |> String.replace_invalid("")
   end
+
+  defp bound_term(_value, 0), do: :max_depth
+
+  defp bound_term(value, _depth) when is_atom(value) or is_boolean(value) or is_nil(value),
+    do: value
+
+  defp bound_term(value, _depth) when is_integer(value) do
+    if value >= -@max_protocol_integer and value <= @max_protocol_integer,
+      do: value,
+      else: :integer_out_of_range
+  end
+
+  defp bound_term(value, _depth) when is_float(value) do
+    if valid_vector_component?(value), do: value, else: :float_out_of_range
+  end
+
+  defp bound_term(value, _depth) when is_binary(value) do
+    if byte_size(value) <= @max_external_diagnostic_bytes do
+      String.replace_invalid(value, "")
+    else
+      {:truncated_binary, bounded_utf8_prefix(value, @max_external_diagnostic_bytes),
+       byte_size(value)}
+    end
+  end
+
+  defp bound_term(value, depth) when is_tuple(value) do
+    count = min(tuple_size(value), @max_external_items)
+
+    items =
+      if count == 0 do
+        []
+      else
+        Enum.map(0..(count - 1), &bound_term(elem(value, &1), depth - 1))
+      end
+
+    items = if tuple_size(value) > count, do: items ++ [:truncated], else: items
+    List.to_tuple(items)
+  end
+
+  defp bound_term(value, depth) when is_list(value),
+    do: bound_list(value, depth - 1, @max_external_items, [])
+
+  defp bound_term(value, depth) when is_map(value),
+    do: bound_map(:maps.iterator(value), depth - 1, @max_external_items, %{})
+
+  defp bound_term(value, _depth) when is_pid(value), do: :pid
+  defp bound_term(value, _depth) when is_reference(value), do: :reference
+  defp bound_term(value, _depth) when is_function(value), do: :function
+  defp bound_term(value, _depth) when is_port(value), do: :port
+  defp bound_term(_value, _depth), do: :external_term
+
+  defp bound_list([], _depth, _remaining, acc), do: Enum.reverse(acc)
+  defp bound_list(_list, _depth, 0, acc), do: Enum.reverse([:truncated | acc])
+
+  defp bound_list([head | tail], depth, remaining, acc),
+    do: bound_list(tail, depth, remaining - 1, [bound_term(head, depth) | acc])
+
+  defp bound_list(_tail, _depth, _remaining, acc), do: Enum.reverse([:improper_tail | acc])
+
+  defp bound_map(iterator, depth, remaining, acc) do
+    case :maps.next(iterator) do
+      :none ->
+        acc
+
+      {_key, _value, _next} when remaining == 0 ->
+        Map.put(acc, :__truncated__, true)
+
+      {key, value, next} ->
+        bound_map(
+          next,
+          depth,
+          remaining - 1,
+          Map.put(acc, bound_term(key, depth), bound_term(value, depth))
+        )
+    end
+  end
+
+  defp exception_diagnostic(%{__struct__: _module, message: message}) when is_binary(message),
+    do: {:exception, bound_term(message, 1)}
+
+  defp exception_diagnostic(%{__struct__: module}), do: {:exception, module}
+  defp exception_diagnostic(_exception), do: :exception
 
   defp validate_vector_values(vector) when is_list(vector) and vector != [] do
     Enum.reduce_while(vector, {:ok, 0}, fn value, {:ok, dimensions} ->

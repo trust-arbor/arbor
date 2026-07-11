@@ -14,7 +14,7 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarity do
   @default_url "http://localhost:11434/v1/embeddings"
   @default_model "nomic-embed-text:latest"
   @default_timeout 30_000
-  @max_detail_chars 1_024
+  @max_detail_bytes 1_024
 
   @impl true
   def grade(actual, expected, opts \\ []) do
@@ -92,9 +92,10 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarity do
       passed: false,
       detail:
         reason
+        |> RetrievalSupport.bounded_external_reason()
         |> then(&"embedding unavailable: #{inspect(&1, limit: 20, printable_limit: 400)}")
         |> String.replace_invalid("")
-        |> String.slice(0, @max_detail_chars)
+        |> RetrievalSupport.truncate_utf8(@max_detail_bytes)
     }
   end
 

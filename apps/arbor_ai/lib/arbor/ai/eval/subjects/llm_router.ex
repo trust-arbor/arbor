@@ -18,6 +18,7 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouter do
   @default_timeout 60_000
   @default_top_k 5
   @default_max_desc_chars 200
+  @max_chat_response_bytes 262_144
 
   @impl true
   def run(input, opts \\ []) do
@@ -119,16 +120,21 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouter do
       options: %{temperature: 0.0}
     }
 
-    case Req.post(base_url <> "/api/chat", json: body, receive_timeout: timeout) do
-      {:ok, %{status: 200, body: %{"message" => %{"content" => content}}}}
+    case RetrievalSupport.post_json(
+           base_url <> "/api/chat",
+           body,
+           timeout,
+           @max_chat_response_bytes
+         ) do
+      {:ok, 200, %{"message" => %{"content" => content}}}
       when is_binary(content) ->
         {:ok, content}
 
-      {:ok, %{status: status, body: response_body}} ->
+      {:ok, status, response_body} ->
         RetrievalSupport.http_error(:router_http_error, status, response_body)
 
-      {:error, reason} ->
-        {:error, {:transport_error, reason}}
+      {:error, _reason} = error ->
+        error
     end
   end
 end

@@ -22,6 +22,7 @@ defmodule Arbor.AI.Eval.Subjects.EmbeddingRetrieval do
   @default_base_url "http://localhost:11434"
   @default_timeout 30_000
   @default_top_k 5
+  @max_embedding_response_bytes 262_144
 
   @impl true
   def run(input, opts \\ []) do
@@ -75,18 +76,20 @@ defmodule Arbor.AI.Eval.Subjects.EmbeddingRetrieval do
   end
 
   defp default_embed(base_url, model, prompt, timeout) do
-    case Req.post(base_url <> "/api/embeddings",
-           json: %{model: model, prompt: prompt},
-           receive_timeout: timeout
+    case RetrievalSupport.post_json(
+           base_url <> "/api/embeddings",
+           %{model: model, prompt: prompt},
+           timeout,
+           @max_embedding_response_bytes
          ) do
-      {:ok, %{status: 200, body: %{"embedding" => vector}}} when is_list(vector) ->
+      {:ok, 200, %{"embedding" => vector}} when is_list(vector) ->
         {:ok, vector}
 
-      {:ok, %{status: status, body: body}} ->
+      {:ok, status, body} ->
         RetrievalSupport.http_error(:embedding_http_error, status, body)
 
-      {:error, reason} ->
-        {:error, {:transport_error, reason}}
+      {:error, _reason} = error ->
+        error
     end
   end
 end

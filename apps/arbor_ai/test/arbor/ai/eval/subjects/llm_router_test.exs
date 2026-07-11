@@ -271,6 +271,26 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouterTest do
     refute excerpt =~ "#PID"
   end
 
+  test "security regression: /api/chat receipt halts at the byte ceiling", %{
+    index_path: index_path
+  } do
+    install_req_adapter(fn request ->
+      response = Req.Response.new(status: 200)
+
+      request.into.(
+        {:data, String.duplicate("x", 262_145)},
+        {request, response}
+      )
+      |> elem(1)
+    end)
+
+    assert LLMRouter.run("run a command",
+             index_path: index_path,
+             model: "router-model",
+             base_url: "http://ollama.test"
+           ) == {:error, {:http_response_bytes_exceeded, 262_144}}
+  end
+
   defp index_fixture do
     %{
       "actions" => [

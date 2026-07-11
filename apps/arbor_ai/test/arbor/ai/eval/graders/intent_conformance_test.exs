@@ -114,6 +114,55 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
            ).detail =~ "dot_text_required"
   end
 
+  test "security regression: DOT, sample, and combined judge prompts are byte bounded" do
+    judge_fn = fn _, _, _, _, _ -> flunk("judge should not be called") end
+    oversized_invalid = String.duplicate("x", 1_048_576) <> <<255>>
+
+    dot_result =
+      IntentConformance.grade(oversized_invalid, nil,
+        sample_input: "workflow",
+        judge_fn: judge_fn
+      )
+
+    assert dot_result.score == 0.0
+    assert dot_result.detail =~ "{:dot, :byte_size_exceeded, 1048576}"
+    assert byte_size(dot_result.detail) <= 1_024
+
+    sample_result =
+      IntentConformance.grade("digraph {}", nil,
+        sample_input: oversized_invalid,
+        judge_fn: judge_fn
+      )
+
+    assert sample_result.score == 0.0
+    assert sample_result.detail =~ "{:skill, :byte_size_exceeded, 1048576}"
+
+    total_result =
+      IntentConformance.grade(String.duplicate("d", 800_000), nil,
+        sample_input: String.duplicate("s", 800_000),
+        judge_fn: judge_fn
+      )
+
+    assert total_result.score == 0.0
+    assert total_result.detail =~ "judge_prompt_bytes_exceeded"
+    assert byte_size(total_result.detail) <= 1_024
+  end
+
+  test "security regression: huge judge callback reasons are bounded" do
+    huge_reason = {:provider_error, List.duplicate(String.duplicate("e", 2_000), 100_000)}
+
+    result =
+      IntentConformance.grade("digraph {}", nil,
+        sample_input: "workflow",
+        judge_fn: fn _, _, _, _, _ -> {:error, huge_reason} end
+      )
+
+    assert result.score == 0.0
+    assert byte_size(result.detail) <= 1_024
+    assert String.valid?(result.detail)
+    assert result.detail =~ "provider_error"
+  end
+
   test "shapes judge transport and malformed JSON errors" do
     transport_error =
       IntentConformance.grade("digraph {}", nil,

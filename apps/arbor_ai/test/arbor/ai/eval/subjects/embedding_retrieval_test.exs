@@ -146,6 +146,26 @@ defmodule Arbor.AI.Eval.Subjects.EmbeddingRetrievalTest do
               {:embedding_http_error, 418, %{body_excerpt: "embedding denied", truncated: false}}}
   end
 
+  test "security regression: /api/embeddings receipt halts at the byte ceiling", %{
+    index_path: index_path
+  } do
+    install_req_adapter(fn request ->
+      response = Req.Response.new(status: 200)
+
+      request.into.(
+        {:data, String.duplicate("x", 262_145)},
+        {request, response}
+      )
+      |> elem(1)
+    end)
+
+    assert EmbeddingRetrieval.run("read a file",
+             index_path: index_path,
+             model: "embed-model",
+             base_url: "http://ollama.test"
+           ) == {:error, {:http_response_bytes_exceeded, 262_144}}
+  end
+
   defp index_fixture do
     %{
       "actions" => [

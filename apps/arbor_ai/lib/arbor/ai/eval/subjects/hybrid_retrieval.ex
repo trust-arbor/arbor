@@ -21,6 +21,8 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
   @default_candidate_k 10
   @default_embed_model "mxbai-embed-large"
   @default_max_desc_chars 400
+  @max_embedding_response_bytes 262_144
+  @max_chat_response_bytes 262_144
 
   @impl true
   def run(input, opts \\ []) do
@@ -223,18 +225,20 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
   end
 
   defp default_embed(base_url, model, prompt, timeout) do
-    case Req.post(base_url <> "/api/embeddings",
-           json: %{model: model, prompt: prompt},
-           receive_timeout: timeout
+    case RetrievalSupport.post_json(
+           base_url <> "/api/embeddings",
+           %{model: model, prompt: prompt},
+           timeout,
+           @max_embedding_response_bytes
          ) do
-      {:ok, %{status: 200, body: %{"embedding" => vector}}} when is_list(vector) ->
+      {:ok, 200, %{"embedding" => vector}} when is_list(vector) ->
         {:ok, vector}
 
-      {:ok, %{status: status, body: body}} ->
+      {:ok, status, body} ->
         RetrievalSupport.http_error(:embedding_http_error, status, body)
 
-      {:error, reason} ->
-        {:error, {:transport_error, reason}}
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -250,16 +254,21 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
       options: %{temperature: 0.0}
     }
 
-    case Req.post(base_url <> "/api/chat", json: body, receive_timeout: timeout) do
-      {:ok, %{status: 200, body: %{"message" => %{"content" => content}}}}
+    case RetrievalSupport.post_json(
+           base_url <> "/api/chat",
+           body,
+           timeout,
+           @max_chat_response_bytes
+         ) do
+      {:ok, 200, %{"message" => %{"content" => content}}}
       when is_binary(content) ->
         {:ok, content}
 
-      {:ok, %{status: status, body: response_body}} ->
+      {:ok, status, response_body} ->
         RetrievalSupport.http_error(:router_http_error, status, response_body)
 
-      {:error, reason} ->
-        {:error, {:transport_error, reason}}
+      {:error, _reason} = error ->
+        error
     end
   end
 

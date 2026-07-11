@@ -1,5 +1,5 @@
 defmodule Arbor.AI.Eval.RetrievalSupportTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :fast
 
@@ -55,6 +55,72 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
 
     assert RetrievalSupport.load_index(directory_path) ==
              {:error, {:index_file_rejected, directory_path, {:not_regular, :directory}}}
+  end
+
+  test "security regression: FIFO index paths return within the absolute read deadline" do
+    fifo_path = temp_path("fifo")
+    {_, 0} = System.cmd("mkfifo", [fifo_path])
+    on_exit(fn -> File.rm(fifo_path) end)
+
+    task = Task.async(fn -> RetrievalSupport.load_index(fifo_path) end)
+
+    assert {:ok, {:error, {:index_file_rejected, ^fifo_path, {:not_regular, type}}}} =
+             Task.yield(task, 1_000)
+
+    assert type in [:device, :other]
+  end
+
+  test "security regression: index swaps are detected or rejected without blocking" do
+    path = temp_path("swap")
+    regular_path = temp_path("swap-regular")
+    fifo_path = temp_path("swap-fifo")
+    body = Jason.encode!(%{"actions" => [minimal_action()]})
+
+    File.write!(path, body)
+    File.write!(regular_path, body)
+    {_, 0} = System.cmd("mkfifo", [fifo_path])
+
+    on_exit(fn -> File.rm(path) end)
+    on_exit(fn -> File.rm(regular_path) end)
+    on_exit(fn -> File.rm(fifo_path) end)
+
+    swapper =
+      Task.async(fn ->
+        receive do
+          :go -> :ok
+        end
+
+        for _ <- 1..2_000 do
+          swap_paths(path, regular_path, fifo_path)
+        end
+      end)
+
+    loaders =
+      for _ <- 1..50 do
+        Task.async(fn ->
+          receive do
+            :go -> RetrievalSupport.load_index(path)
+          end
+        end)
+      end
+
+    send(swapper.pid, :go)
+    Enum.each(loaders, &send(&1.pid, :go))
+
+    results =
+      Enum.map(loaders, fn task ->
+        assert {:ok, result} = Task.yield(task, 1_000)
+        result
+      end)
+
+    Task.await(swapper, 10_000)
+
+    assert Enum.all?(results, fn
+             {:ok, [_action]} -> true
+             {:error, {:index_file_rejected, ^path, _reason}} -> true
+             {:error, {:index_read_failed, ^path, _reason}} -> true
+             _other -> false
+           end)
   end
 
   test "security regression: direct index paths are byte bounded before UTF-8 work" do
@@ -174,6 +240,56 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
              {:error, {:invalid_option, :max_tokens, :positive_integer_required}}
   end
 
+  test "security regression: huge max_tokens and external terms are representation bounded" do
+    huge_integer = :erlang.bsl(1, 1_000_000)
+
+    assert RetrievalSupport.optional_positive_integer_option(
+             [max_tokens: huge_integer],
+             :max_tokens
+           ) ==
+             {:error,
+              {:invalid_option, :max_tokens,
+               {:integer_range_required, 1, 9_223_372_036_854_775_807}}}
+
+    bounded =
+      RetrievalSupport.bounded_external_reason(
+        {:transport_failed, List.duplicate(String.duplicate("e", 2_000), 100_000)}
+      )
+
+    assert {:transport_failed, values} = bounded
+    assert length(values) == 17
+    assert List.last(values) == :truncated
+    assert byte_size(:erlang.term_to_binary(bounded)) < 12_000
+
+    assert {:error, {:transport_failed, callback_values}} =
+             RetrievalSupport.invoke(
+               fn ->
+                 {:error,
+                  {:transport_failed, List.duplicate(String.duplicate("c", 2_000), 100_000)}}
+               end,
+               [],
+               :callback_failed
+             )
+
+    assert length(callback_values) == 17
+    assert List.last(callback_values) == :truncated
+  end
+
+  test "security regression: bounded HTTP collector halts before retaining an oversized body" do
+    previous_options = Req.default_options()
+    on_exit(fn -> Req.default_options(previous_options) end)
+
+    Req.default_options(
+      adapter: fn request ->
+        response = Req.Response.new(status: 200)
+        request.into.({:data, String.duplicate("x", 1_000_000)}, {request, response}) |> elem(1)
+      end
+    )
+
+    assert RetrievalSupport.post_json("http://bounded.test/api/chat", %{}, 1_000, 32) ==
+             {:error, {:http_response_bytes_exceeded, 32}}
+  end
+
   defp minimal_action do
     %{
       "module" => "Arbor.Actions.Test",
@@ -187,5 +303,19 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
       System.tmp_dir!(),
       "arbor-ai-retrieval-#{label}-#{System.unique_integer([:positive, :monotonic])}.json"
     )
+  end
+
+  defp swap_paths(path, regular_path, fifo_path) do
+    swap_temp = path <> ".swap"
+
+    with :ok <- File.rename(path, swap_temp),
+         :ok <- File.rename(fifo_path, path),
+         :ok <- File.rename(path, fifo_path),
+         :ok <- File.rename(regular_path, path),
+         :ok <- File.rename(swap_temp, regular_path) do
+      :ok
+    else
+      {:error, _reason} -> :ok
+    end
   end
 end

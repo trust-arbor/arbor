@@ -35,7 +35,12 @@ defmodule Arbor.LLM.Conformance81Test do
     without_config_default_provider(fn ->
       with_env(env, fn ->
         assert_raise ConfigurationError, fn ->
-          Client.from_env(discover_cli: false, discover_local: false)
+          Client.from_env(
+            discover_cli: false,
+            discover_local: false,
+            discover_oauth: false,
+            discover_acp: false
+          )
         end
       end)
     end)

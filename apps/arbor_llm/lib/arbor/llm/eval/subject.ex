@@ -9,7 +9,8 @@ defmodule Arbor.LLM.Eval.Subject do
   explicitly configured transport for a single eval run. Without one, the
   provider adapter is selected from `Arbor.LLM.ProviderCatalog`.
 
-  `:max_tokens` is forwarded only when the caller supplies a positive integer.
+  `:max_tokens` is forwarded only when the caller supplies a positive signed
+  64-bit protocol integer; it remains unset by default.
   All runs have a 16 MiB output ceiling. Streaming runs additionally have an
   absolute `:timeout` and a 100,000-event ceiling. Callers can lower the output
   and event ceilings with `:max_output_bytes` and `:max_stream_events`.
@@ -26,6 +27,16 @@ defmodule Arbor.LLM.Eval.Subject do
   @max_timeout 900_000
   @max_stream_events 100_000
   @max_output_bytes 16_777_216
+  @max_provider_bytes 256
+  @max_model_bytes 512
+  @max_prompt_bytes 1_048_576
+  @max_system_bytes 1_048_576
+  @max_protocol_integer 9_223_372_036_854_775_807
+  @max_temperature 1.0e6
+  @max_diagnostic_bytes 512
+  @max_diagnostic_items 16
+  @max_diagnostic_depth 4
+  @max_logged_content_parts 32
 
   @impl true
   def run(input, opts \\ []) do
@@ -57,8 +68,10 @@ defmodule Arbor.LLM.Eval.Subject do
   defp validate_opts(_opts), do: {:error, {:invalid_options, :keyword_required}}
 
   defp parse_options(opts) do
-    with {:ok, provider} <- string_option(opts, :provider, @default_provider, false),
-         {:ok, model} <- string_option(opts, :model, default_model(provider), true),
+    with {:ok, provider} <-
+           string_option(opts, :provider, @default_provider, false, @max_provider_bytes),
+         {:ok, model} <-
+           string_option(opts, :model, default_model(provider), true, @max_model_bytes),
          {:ok, temperature} <- temperature_option(opts),
          {:ok, max_tokens} <- optional_positive_integer(opts, :max_tokens),
          {:ok, timeout} <-
@@ -92,12 +105,15 @@ defmodule Arbor.LLM.Eval.Subject do
     end
   end
 
-  defp string_option(opts, key, default, allow_empty?) do
+  defp string_option(opts, key, default, allow_empty?, maximum) do
     value = Keyword.get(opts, key, default)
 
     cond do
       not is_binary(value) ->
         {:error, {:invalid_option, key, :string_required}}
+
+      byte_size(value) > maximum ->
+        {:error, {:invalid_option, key, {:byte_size_exceeded, maximum}}}
 
       not String.valid?(value) ->
         {:error, {:invalid_option, key, :valid_utf8_required}}
@@ -112,17 +128,35 @@ defmodule Arbor.LLM.Eval.Subject do
 
   defp temperature_option(opts) do
     case Keyword.get(opts, :temperature) do
-      nil -> {:ok, nil}
-      value when is_number(value) and value >= 0 -> {:ok, value}
-      _value -> {:error, {:invalid_option, :temperature, :non_negative_number_required}}
+      nil ->
+        {:ok, nil}
+
+      value when is_integer(value) and value >= 0 and value <= @max_temperature ->
+        {:ok, value}
+
+      value when is_float(value) and value >= 0.0 and value <= @max_temperature ->
+        {:ok, value}
+
+      _value ->
+        {:error,
+         {:invalid_option, :temperature, {:finite_number_range_required, 0, @max_temperature}}}
     end
   end
 
   defp optional_positive_integer(opts, key) do
     case Keyword.fetch(opts, key) do
-      :error -> {:ok, nil}
-      {:ok, value} when is_integer(value) and value > 0 -> {:ok, value}
-      {:ok, _value} -> {:error, {:invalid_option, key, :positive_integer_required}}
+      :error ->
+        {:ok, nil}
+
+      {:ok, value}
+      when is_integer(value) and value > 0 and value <= @max_protocol_integer ->
+        {:ok, value}
+
+      {:ok, value} when is_integer(value) and value > @max_protocol_integer ->
+        {:error, {:invalid_option, key, {:integer_range_required, 1, @max_protocol_integer}}}
+
+      {:ok, _value} ->
+        {:error, {:invalid_option, key, :positive_integer_required}}
     end
   end
 
@@ -186,33 +220,28 @@ defmodule Arbor.LLM.Eval.Subject do
         end
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, bounded_external_reason(reason)}
 
       other ->
-        {:error, {:invalid_transport_response, other}}
+        {:error, {:invalid_transport_response, bounded_external_reason(other)}}
     end
   rescue
-    exception -> {:error, {:transport_exception, Exception.message(exception)}}
+    exception -> {:error, {:transport_exception, exception_diagnostic(exception)}}
   catch
-    kind, reason -> {:error, {:transport_exception, {kind, inspect(reason)}}}
+    kind, reason -> {:error, {:transport_exception, {kind, bounded_external_reason(reason)}}}
   end
 
   defp log_empty_response(response, provider, model, duration_ms) do
     usage = map_value(response, :usage, %{})
     content_parts = map_value(response, :content_parts, [])
 
-    content_kinds =
-      if is_list(content_parts) do
-        Enum.map(content_parts, fn part -> map_value(part, :kind) end)
-      else
-        []
-      end
+    content_kinds = bounded_content_kinds(content_parts, @max_logged_content_parts, [])
 
     Logger.warning(
       "Eval LLM subject: empty text from #{provider}/#{model} " <>
         "after #{duration_ms}ms. " <>
-        "finish_reason=#{inspect(map_value(response, :finish_reason))} " <>
-        "output_tokens=#{inspect(map_value(usage, :output_tokens))} " <>
+        "finish_reason=#{inspect(bounded_external_reason(map_value(response, :finish_reason)))} " <>
+        "output_tokens=#{inspect(bounded_external_reason(map_value(usage, :output_tokens)))} " <>
         "content_parts=#{inspect(content_kinds)}"
     )
   end
@@ -304,14 +333,14 @@ defmodule Arbor.LLM.Eval.Subject do
         send(parent, {ref, :done})
 
       {:error, reason} ->
-        send(parent, {ref, :stream_error, reason})
+        send(parent, {ref, :stream_error, bounded_external_reason(reason)})
     end
   rescue
     exception ->
-      send(parent, {ref, :producer_error, {:exception, Exception.message(exception)}})
+      send(parent, {ref, :producer_error, exception_diagnostic(exception)})
   catch
     kind, reason ->
-      send(parent, {ref, :producer_error, {kind, inspect(reason)}})
+      send(parent, {ref, :producer_error, {kind, bounded_external_reason(reason)}})
   end
 
   defp await_stream(state) do
@@ -339,7 +368,7 @@ defmodule Arbor.LLM.Eval.Subject do
 
         {:DOWN, monitor_ref, :process, producer_pid, reason}
         when monitor_ref == state.monitor_ref and producer_pid == state.producer_pid ->
-          {:error, {:stream_collection_failed, {:producer_exit, inspect(reason)}}}
+          {:error, {:stream_collection_failed, {:producer_exit, bounded_external_reason(reason)}}}
       after
         remaining_ms -> {:error, {:stream_deadline_exceeded, state.timeout}}
       end
@@ -354,7 +383,7 @@ defmodule Arbor.LLM.Eval.Subject do
         {:error, {:stream_limit_exceeded, :events, state.max_stream_events}}
 
       error_event?(event) ->
-        {:error, {:stream_error, stream_error_reason(event)}}
+        {:error, {:stream_error, bounded_external_reason(stream_error_reason(event))}}
 
       terminal_event?(event) ->
         finalize_stream(%{state | event_count: event_count})
@@ -504,11 +533,17 @@ defmodule Arbor.LLM.Eval.Subject do
       not is_binary(prompt) ->
         {:error, {:invalid_input, :prompt_required}}
 
+      byte_size(prompt) > @max_prompt_bytes ->
+        {:error, {:invalid_input, {:prompt_bytes_exceeded, @max_prompt_bytes}}}
+
       not String.valid?(prompt) ->
         {:error, {:invalid_input, :valid_utf8_prompt_required}}
 
       not (is_nil(system) or is_binary(system)) ->
         {:error, {:invalid_input, :system_must_be_string}}
+
+      is_binary(system) and byte_size(system) > @max_system_bytes ->
+        {:error, {:invalid_input, {:system_bytes_exceeded, @max_system_bytes}}}
 
       is_binary(system) and not String.valid?(system) ->
         {:error, {:invalid_input, :valid_utf8_system_required}}
@@ -552,9 +587,9 @@ defmodule Arbor.LLM.Eval.Subject do
   defp estimate_tokens(text, response) do
     usage_tokens =
       case response do
-        %{usage: %{output_tokens: count}} when is_integer(count) -> count
-        %{usage: %{completion_tokens: count}} when is_integer(count) -> count
-        %{usage: %{"completion_tokens" => count}} when is_integer(count) -> count
+        %{usage: %{output_tokens: count}} when count in 0..@max_protocol_integer -> count
+        %{usage: %{completion_tokens: count}} when count in 0..@max_protocol_integer -> count
+        %{usage: %{"completion_tokens" => count}} when count in 0..@max_protocol_integer -> count
         _other -> nil
       end
 
@@ -564,4 +599,108 @@ defmodule Arbor.LLM.Eval.Subject do
   defp map_value(map, key, default \\ nil)
   defp map_value(map, key, default) when is_map(map), do: Map.get(map, key, default)
   defp map_value(_value, _key, default), do: default
+
+  defp bounded_content_kinds(_parts, 0, acc), do: Enum.reverse([:truncated | acc])
+  defp bounded_content_kinds([], _remaining, acc), do: Enum.reverse(acc)
+
+  defp bounded_content_kinds([part | rest], remaining, acc) do
+    kind = part |> map_value(:kind) |> bounded_external_reason()
+    bounded_content_kinds(rest, remaining - 1, [kind | acc])
+  end
+
+  defp bounded_content_kinds(_parts, _remaining, acc), do: Enum.reverse([:invalid_tail | acc])
+
+  defp bounded_external_reason(value),
+    do: bound_term(value, @max_diagnostic_depth)
+
+  defp bound_term(_value, 0), do: :max_depth
+
+  defp bound_term(value, _depth) when is_atom(value) or is_boolean(value) or is_nil(value),
+    do: value
+
+  defp bound_term(value, _depth) when is_integer(value) do
+    if value >= -@max_protocol_integer and value <= @max_protocol_integer,
+      do: value,
+      else: :integer_out_of_range
+  end
+
+  defp bound_term(value, _depth) when is_float(value) do
+    if value >= -@max_temperature and value <= @max_temperature,
+      do: value,
+      else: :float_out_of_range
+  end
+
+  defp bound_term(value, _depth) when is_binary(value) do
+    if byte_size(value) <= @max_diagnostic_bytes do
+      String.replace_invalid(value, "")
+    else
+      {:truncated_binary, bounded_utf8_prefix(value, @max_diagnostic_bytes), byte_size(value)}
+    end
+  end
+
+  defp bound_term(value, depth) when is_tuple(value) do
+    count = min(tuple_size(value), @max_diagnostic_items)
+
+    items =
+      if count == 0 do
+        []
+      else
+        Enum.map(0..(count - 1), &bound_term(elem(value, &1), depth - 1))
+      end
+
+    items = if tuple_size(value) > count, do: items ++ [:truncated], else: items
+    List.to_tuple(items)
+  end
+
+  defp bound_term(value, depth) when is_list(value),
+    do: bound_list(value, depth - 1, @max_diagnostic_items, [])
+
+  defp bound_term(value, depth) when is_map(value),
+    do: bound_map(:maps.iterator(value), depth - 1, @max_diagnostic_items, %{})
+
+  defp bound_term(value, _depth) when is_pid(value), do: :pid
+  defp bound_term(value, _depth) when is_reference(value), do: :reference
+  defp bound_term(value, _depth) when is_function(value), do: :function
+  defp bound_term(value, _depth) when is_port(value), do: :port
+  defp bound_term(_value, _depth), do: :external_term
+
+  defp bound_list([], _depth, _remaining, acc), do: Enum.reverse(acc)
+  defp bound_list(_list, _depth, 0, acc), do: Enum.reverse([:truncated | acc])
+
+  defp bound_list([head | tail], depth, remaining, acc),
+    do: bound_list(tail, depth, remaining - 1, [bound_term(head, depth) | acc])
+
+  defp bound_list(_tail, _depth, _remaining, acc), do: Enum.reverse([:improper_tail | acc])
+
+  defp bound_map(iterator, depth, remaining, acc) do
+    case :maps.next(iterator) do
+      :none ->
+        acc
+
+      {_key, _value, _next} when remaining == 0 ->
+        Map.put(acc, :__truncated__, true)
+
+      {key, value, next} ->
+        bounded_key = bound_term(key, depth)
+
+        bound_map(
+          next,
+          depth,
+          remaining - 1,
+          Map.put(acc, bounded_key, bound_term(value, depth))
+        )
+    end
+  end
+
+  defp exception_diagnostic(%{__struct__: _module, message: message}) when is_binary(message),
+    do: {:exception, bound_term(message, 1)}
+
+  defp exception_diagnostic(%{__struct__: module}), do: {:exception, module}
+  defp exception_diagnostic(_exception), do: :exception
+
+  defp bounded_utf8_prefix(value, maximum) do
+    value
+    |> binary_part(0, min(byte_size(value), maximum))
+    |> String.replace_invalid("")
+  end
 end

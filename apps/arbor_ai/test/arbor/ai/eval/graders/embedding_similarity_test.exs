@@ -66,6 +66,19 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
       assert result.detail == "embedding unavailable: :offline"
     end
 
+    test "security regression: combining-grapheme diagnostics obey a UTF-8 byte ceiling" do
+      combining = "a" <> String.duplicate("\u1AB0", 10_000)
+
+      result =
+        EmbeddingSimilarity.grade("hello", "hello",
+          embed_fn: fn _, _, _, _ -> {:error, combining} end
+        )
+
+      assert byte_size(result.detail) <= 1_024
+      assert String.valid?(result.detail)
+      refute result.detail =~ combining
+    end
+
     test "handles malformed input, options, and embedding responses" do
       assert EmbeddingSimilarity.grade(%{}, "expected").detail =~
                "embedding unavailable: {:invalid_input, :text_required}"

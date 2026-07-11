@@ -5,8 +5,8 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
   The source description is read from `opts[:sample_input]`. The `:judge_fn`
   option accepts an injectable
   `(provider, model, system_prompt, user_prompt, timeout -> result)` callback.
-  `:max_tokens` remains unset by default. Explicit positive integers are
-  forwarded to the selected provider without an application-level ceiling.
+  `:max_tokens` remains unset by default. Explicit positive signed 64-bit
+  protocol integers are forwarded without a guessed model-policy ceiling.
   """
 
   @behaviour Arbor.Eval.Grader
@@ -95,6 +95,9 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
   @max_judge_response_bytes 32_768
   @max_rationale_bytes 512
   @max_detail_bytes 1_024
+  @max_skill_input_bytes 1_048_576
+  @max_dot_input_bytes 1_048_576
+  @max_user_prompt_bytes 1_572_864
 
   @impl true
   def grade(actual, _expected, opts \\ []) do
@@ -129,18 +132,25 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
     else
       {:error, :empty_dot_output} -> failure("Empty DOT output")
       {:error, :empty_skill_input} -> failure("Empty skill input")
-      {:error, reason} -> failure("Invalid grader input: #{inspect(reason)}")
+      {:error, reason} -> failure("Invalid grader input: #{inspect_bounded(reason)}")
     end
   end
 
-  defp normalize_actual(actual) when is_binary(actual) and actual != "", do: {:ok, actual}
+  defp normalize_actual(actual) when is_binary(actual) and actual != "" do
+    validate_input_text(actual, :dot, @max_dot_input_bytes)
+  end
+
   defp normalize_actual(""), do: {:error, :empty_dot_output}
   defp normalize_actual(_actual), do: {:error, {:invalid_input, :dot_text_required}}
 
-  defp extract_skill_input(%{"prompt" => prompt}) when is_binary(prompt) and prompt != "",
-    do: {:ok, prompt}
+  defp extract_skill_input(%{"prompt" => prompt}) when is_binary(prompt) and prompt != "" do
+    validate_input_text(prompt, :skill, @max_skill_input_bytes)
+  end
 
-  defp extract_skill_input(prompt) when is_binary(prompt) and prompt != "", do: {:ok, prompt}
+  defp extract_skill_input(prompt) when is_binary(prompt) and prompt != "" do
+    validate_input_text(prompt, :skill, @max_skill_input_bytes)
+  end
+
   defp extract_skill_input(""), do: {:error, :empty_skill_input}
   defp extract_skill_input(_input), do: {:error, :empty_skill_input}
 
@@ -155,11 +165,21 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
     #{dot_text}
     """
 
-    case RetrievalSupport.invoke(
-           judge_fn,
-           [provider, model, @judge_prompt, user_prompt, timeout],
-           :judge_callback_failed
-         ) do
+    with :ok <- validate_total_prompt(user_prompt),
+         response <-
+           RetrievalSupport.invoke(
+             judge_fn,
+             [provider, model, @judge_prompt, user_prompt, timeout],
+             :judge_callback_failed
+           ) do
+      handle_judge_response(response)
+    else
+      {:error, reason} -> failure("Invalid grader input: #{inspect_bounded(reason)}")
+    end
+  end
+
+  defp handle_judge_response(response) do
+    case response do
       {:ok, response_text} when is_binary(response_text) ->
         response_text
         |> clean_text(@max_judge_response_bytes)
@@ -176,6 +196,20 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
       _response ->
         failure("Judge error: invalid response")
     end
+  end
+
+  defp validate_input_text(text, field, maximum) do
+    cond do
+      byte_size(text) > maximum -> {:error, {field, :byte_size_exceeded, maximum}}
+      String.valid?(text) -> {:ok, text}
+      true -> {:error, {field, :valid_utf8_required}}
+    end
+  end
+
+  defp validate_total_prompt(user_prompt) do
+    if byte_size(user_prompt) <= @max_user_prompt_bytes,
+      do: :ok,
+      else: {:error, {:judge_prompt_bytes_exceeded, @max_user_prompt_bytes}}
   end
 
   defp default_judge(provider, model, system_prompt, user_prompt, timeout, max_tokens) do
@@ -299,6 +333,7 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
 
   defp inspect_bounded(value) do
     value
+    |> RetrievalSupport.bounded_external_reason()
     |> inspect(limit: 20, printable_limit: 400)
     |> clean_text(512)
   end

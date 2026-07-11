@@ -17,6 +17,21 @@ defmodule Arbor.LLM.Eval.SubjectTest do
       {:error, {:transport_failed, 503}}
     end
 
+    def complete(%Request{model: "huge-transport-error"}, _opts) do
+      {:error, {:transport_failed, List.duplicate(String.duplicate("e", 2_000), 100_000)}}
+    end
+
+    def complete(%Request{model: "huge-empty-metadata"}, _opts) do
+      {:ok,
+       %Response{
+         text: "",
+         finish_reason: String.duplicate("f", 10_000),
+         usage: %{output_tokens: :erlang.bsl(1, 1_000_000)},
+         content_parts: List.duplicate(%{kind: String.duplicate("k", 2_000)}, 100_000),
+         raw: %{}
+       }}
+    end
+
     def complete(%Request{model: "oversized-complete"}, _opts) do
       {:ok, %Response{text: "123456", usage: %{output_tokens: 2}, raw: %{}}}
     end
@@ -194,6 +209,40 @@ defmodule Arbor.LLM.Eval.SubjectTest do
                {:error, {:invalid_options, :keyword_required}}
     end
 
+    test "security regression: ingress rejects oversized invalid UTF-8 by bytes first" do
+      base_opts = [client: client(), provider: "eval_test", model: "model"]
+      oversized_invalid = String.duplicate("p", 1_048_576) <> <<255>>
+
+      assert Subject.run(oversized_invalid, base_opts) ==
+               {:error, {:invalid_input, {:prompt_bytes_exceeded, 1_048_576}}}
+
+      assert Subject.run(%{"prompt" => "ok", "system" => oversized_invalid}, base_opts) ==
+               {:error, {:invalid_input, {:system_bytes_exceeded, 1_048_576}}}
+
+      assert Subject.run(
+               "ok",
+               Keyword.put(base_opts, :provider, String.duplicate("x", 256) <> <<255>>)
+             ) ==
+               {:error, {:invalid_option, :provider, {:byte_size_exceeded, 256}}}
+    end
+
+    test "security regression: protocol numeric representations are bounded" do
+      base_opts = [client: client(), provider: "eval_test", model: "model"]
+      huge_integer = :erlang.bsl(1, 1_000_000)
+
+      assert Subject.run("hello", Keyword.put(base_opts, :max_tokens, 1_000_000)) |> elem(0) ==
+               :ok
+
+      assert Subject.run("hello", Keyword.put(base_opts, :max_tokens, huge_integer)) ==
+               {:error,
+                {:invalid_option, :max_tokens,
+                 {:integer_range_required, 1, 9_223_372_036_854_775_807}}}
+
+      assert Subject.run("hello", Keyword.put(base_opts, :temperature, huge_integer)) ==
+               {:error,
+                {:invalid_option, :temperature, {:finite_number_range_required, 0, 1.0e6}}}
+    end
+
     test "returns shaped errors for invalid numeric limits" do
       base_opts = [client: client(), provider: "eval_test", model: "model"]
 
@@ -331,6 +380,30 @@ defmodule Arbor.LLM.Eval.SubjectTest do
 
       assert Subject.run("hello", client: TestAdapter, provider: "eval_test") ==
                {:error, "invalid client: expected an Arbor.LLM.Client struct"}
+    end
+
+    test "security regression: huge external errors and empty metadata are bounded" do
+      assert {:error, {:transport_failed, bounded}} =
+               Subject.run("hello",
+                 client: client(),
+                 provider: "eval_test",
+                 model: "huge-transport-error"
+               )
+
+      assert length(bounded) == 17
+      assert List.last(bounded) == :truncated
+      assert byte_size(:erlang.term_to_binary(bounded)) < 12_000
+
+      task =
+        Task.async(fn ->
+          Subject.run("hello",
+            client: client(),
+            provider: "eval_test",
+            model: "huge-empty-metadata"
+          )
+        end)
+
+      assert {:ok, {:ok, %{text: "", tokens_generated: 0}}} = Task.yield(task, 1_000)
     end
 
     test "preserves the catalog-backed unknown provider error shape" do
