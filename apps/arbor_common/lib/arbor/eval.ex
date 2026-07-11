@@ -84,7 +84,17 @@ defmodule Arbor.Eval do
   }
 
   @pipeline_graders %{
-    "exact_match" => Graders.ExactMatch
+    "exact_match" => Graders.ExactMatch,
+    "contains" => Graders.Contains,
+    "regex" => Graders.RegexMatch,
+    "json_valid" => Graders.JsonValid,
+    "composite" => Graders.Composite,
+    "compile_check" => Graders.CompileCheck,
+    "functional_test" => Graders.FunctionalTest,
+    "code_quality" => Graders.CodeQuality,
+    "precision_at_1" => Graders.PrecisionAt1,
+    "precision_at_5" => Graders.PrecisionAt5,
+    "recall_at_5" => Graders.RecallAt5
   }
 
   @doc "Called before run/1 to set up context. Override for custom setup."

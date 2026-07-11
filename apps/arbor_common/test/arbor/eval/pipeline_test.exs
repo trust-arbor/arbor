@@ -17,11 +17,21 @@ defmodule Arbor.Eval.PipelineTest do
   end
 
   describe "closed pipeline catalogs" do
-    test "expose only symbolic passthrough and exact-match entries" do
+    test "expose symbolic passthrough and the established public grader names" do
       assert Eval.subject_names() == ["passthrough"]
-      assert Eval.grader_names() == ["exact_match"]
       assert Eval.subject("passthrough") == Passthrough
       assert Eval.grader("exact_match") == ExactMatch
+      assert "contains" in Eval.grader_names()
+      assert "regex" in Eval.grader_names()
+      assert "json_valid" in Eval.grader_names()
+      assert "composite" in Eval.grader_names()
+      assert "compile_check" in Eval.grader_names()
+      assert "functional_test" in Eval.grader_names()
+      assert "code_quality" in Eval.grader_names()
+      assert "precision_at_1" in Eval.grader_names()
+      assert "precision_at_5" in Eval.grader_names()
+      assert "recall_at_5" in Eval.grader_names()
+      assert length(Eval.grader_names()) == 11
 
       assert Eval.subject("Arbor.Eval.Subjects.Untrusted") == nil
       assert Eval.grader("Arbor.Eval.Graders.Untrusted") == nil

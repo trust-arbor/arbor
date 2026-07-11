@@ -11,14 +11,25 @@ defmodule Arbor.Orchestrator.EvalTest do
       assert Eval.grader("exact_match") == ExactMatch
       refute Eval.grader("exact_match") == Arbor.Eval.Graders.ExactMatch
       assert Eval.grader("contains") == Contains
+      refute Eval.grader("contains") == Arbor.Eval.Graders.Contains
       assert Eval.grader("regex") == RegexMatch
       assert Eval.grader("json_valid") == JsonValid
       assert Eval.grader("dot_diff") == Eval.Graders.DotDiff
       assert Eval.grader("composite") == Composite
+      assert Eval.grader("compile_check") == Eval.Graders.CompileCheck
+      assert Eval.grader("functional_test") == Eval.Graders.FunctionalTest
+      assert Eval.grader("code_quality") == Eval.Graders.CodeQuality
+      assert Eval.grader("embedding_similarity") == Eval.Graders.EmbeddingSimilarity
+      assert Eval.grader("intent_conformance") == Eval.Graders.IntentConformance
+      assert Eval.grader("precision_at_1") == Eval.Graders.PrecisionAt1
+      assert Eval.grader("precision_at_5") == Eval.Graders.PrecisionAt5
+      assert Eval.grader("recall_at_5") == Eval.Graders.RecallAt5
     end
 
     test "returns nil for unknown grader" do
       assert Eval.grader("nonexistent") == nil
+      assert Eval.grader("Arbor.Eval.Graders.Contains") == nil
+      assert Eval.grader(Contains) == nil
     end
 
     test "lists all grader names" do
@@ -31,6 +42,71 @@ defmodule Arbor.Orchestrator.EvalTest do
       assert "recall_at_5" in names
       assert names == Enum.uniq(names)
       assert length(names) == 14
+    end
+
+    test "compatibility wrappers delegate to common implementations" do
+      cases = [
+        {Contains, Arbor.Eval.Graders.Contains, ["hello world", "world", []]},
+        {RegexMatch, Arbor.Eval.Graders.RegexMatch, ["hello123", "hello\\d+", []]},
+        {JsonValid, Arbor.Eval.Graders.JsonValid, [~s|{"a":1}|, nil, []]},
+        {Composite, Arbor.Eval.Graders.Composite,
+         [
+           "hello world",
+           "world",
+           [
+             graders: [{Contains, 1.0}, {ExactMatch, 1.0}],
+             strategy: :any_pass
+           ]
+         ]},
+        {Eval.Graders.PrecisionAt1, Arbor.Eval.Graders.PrecisionAt1,
+         [
+           ~s|["Arbor.Actions.File"]|,
+           %{"primary" => "Arbor.Actions.File", "matches" => ["Arbor.Actions.File"]},
+           []
+         ]},
+        {Eval.Graders.PrecisionAt5, Arbor.Eval.Graders.PrecisionAt5,
+         [
+           ~s|["Arbor.Actions.File","Other"]|,
+           %{"primary" => "Arbor.Actions.File", "matches" => ["Arbor.Actions.File"]},
+           []
+         ]},
+        {Eval.Graders.RecallAt5, Arbor.Eval.Graders.RecallAt5,
+         [
+           ~s|["Arbor.Actions.File","Arbor.Actions.Shell"]|,
+           %{"matches" => ["Arbor.Actions.File", "Arbor.Actions.Shell"]},
+           []
+         ]},
+        {Eval.Graders.PrecisionAtK, Arbor.Eval.Graders.PrecisionAtK,
+         [
+           ~s|["Arbor.Actions.File"]|,
+           %{"primary" => "Arbor.Actions.File", "matches" => ["Arbor.Actions.File"]},
+           [k: 1]
+         ]},
+        {Eval.Graders.RecallAtK, Arbor.Eval.Graders.RecallAtK,
+         [
+           ~s|["Arbor.Actions.File"]|,
+           %{"matches" => ["Arbor.Actions.File"]},
+           [k: 1]
+         ]}
+      ]
+
+      for {compat, canonical, [actual, expected, opts]} <- cases do
+        assert compat.grade(actual, expected, opts) ==
+                 canonical.grade(actual, expected, opts)
+      end
+    end
+
+    test "unknown grader names fail closed in run_eval" do
+      samples = [%{"id" => "s1", "input" => "hello", "expected" => "hello"}]
+
+      assert [result] =
+               Eval.run_eval(samples, Eval.Subjects.Passthrough, [
+                 "unknown",
+                 "Arbor.Eval.Graders.ExactMatch"
+               ])
+
+      assert result["scores"] == []
+      assert result["passed"] == true
     end
   end
 
