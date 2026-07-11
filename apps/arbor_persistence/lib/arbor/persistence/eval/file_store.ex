@@ -86,6 +86,7 @@ defmodule Arbor.Persistence.Eval.FileStore do
   @json_suffix_size byte_size(@json_suffix)
   @stable_read_pass_one_event [:arbor, :persistence, :eval, :stable_read, :pass_one]
   @post_rename_event [:arbor, :persistence, :eval, :file_store, :post_rename]
+  @telemetry_handler_timeout_ms 500
 
   @type run_data :: map()
 
@@ -1096,11 +1097,7 @@ defmodule Arbor.Persistence.Eval.FileStore do
 
   defp finalize_published_side_effect(root_state, target, tmp_identity) do
     try do
-      :telemetry.execute(
-        @post_rename_event,
-        %{system_time: System.system_time()},
-        %{path: target}
-      )
+      emit_bounded_telemetry(@post_rename_event, :file_store)
 
       _ = best_effort_sync_directory(root_state.path)
 
@@ -1335,14 +1332,36 @@ defmodule Arbor.Persistence.Eval.FileStore do
 
   defp publish_identity_match?(_, _), do: false
 
-  defp emit_pass_one_checkpoint(path) do
-    :telemetry.execute(
-      @stable_read_pass_one_event,
-      %{system_time: System.system_time()},
-      %{path: path, source: :file_store}
-    )
+  defp emit_pass_one_checkpoint(_path),
+    do: emit_bounded_telemetry(@stable_read_pass_one_event, :file_store)
 
-    :ok
+  # Telemetry is observability and a test checkpoint, never part of the file
+  # decision. Keep metadata closed and run third-party handlers behind a bound.
+  defp emit_bounded_telemetry(event, source) do
+    origin = self()
+
+    {pid, monitor} =
+      spawn_monitor(fn ->
+        Logger.disable(self())
+
+        :telemetry.execute(
+          event,
+          %{system_time: System.system_time()},
+          %{source: source, origin: origin}
+        )
+      end)
+
+    receive do
+      {:DOWN, ^monitor, :process, ^pid, _reason} ->
+        :ok
+    after
+      @telemetry_handler_timeout_ms ->
+        Process.exit(pid, :kill)
+
+        receive do
+          {:DOWN, ^monitor, :process, ^pid, _reason} -> :ok
+        end
+    end
   end
 
   defp eof_probe(io) do

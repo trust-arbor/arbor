@@ -6,8 +6,10 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
 
   Parent lineage (most recent first):
   - **ef14b337** — exact R6 parent. Its bounded config traversal falsely
-    rejects valid sub-1 MiB JSON, dual-pass reads have no synchronous mutation
-    checkpoint, and publish verification compares rename-volatile timestamps.
+    rejects valid sub-1 MiB JSON and dual-pass reads have no synchronous
+    mutation checkpoint. Timestamp-sensitive publish verification is covered
+    as a reliability correction, not claimed as a deterministic parent
+    security regression.
   - **f9ac0086** — exact chain parent for the missing-checkpoint public read
     proofs. It returns a hash/load result because no pass-one event is emitted.
   - **d7df3521** — identity match completeness, preflight encode bounds,
@@ -34,8 +36,6 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
 
   setup do
     base = exclusive_owned_temp_base!("eval_sec_")
-    # Cleanup only the exclusively owned base — never foreign residue.
-    on_exit(fn -> File.rm_rf(base) end)
 
     dir = Path.join(base, "store")
     outside = Path.join(base, "outside")
@@ -58,6 +58,11 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
 
       case File.mkdir(path) do
         :ok ->
+          # Ownership exists only after exclusive creation. Register cleanup
+          # before chmod so even a hardening failure cannot leave residue.
+          on_exit(fn -> File.rm_rf(path) end)
+          File.chmod!(path, 0o700)
+          assert Bitwise.band(File.stat!(path).mode, 0o777) == 0o700
           {:halt, path}
 
         {:error, :eexist} ->
@@ -1027,7 +1032,7 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
       File.write!(path, content_a)
 
       mutated =
-        attach_mutator(@stable_read_pass_one_event, path, :dataset_hash, fn ->
+        attach_mutator(@stable_read_pass_one_event, :dataset_hash, fn ->
           File.write!(path, content_b)
         end)
 
@@ -1049,7 +1054,7 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
       refute content_a == content_b
 
       mutated =
-        attach_mutator(@stable_read_pass_one_event, path, :file_store, fn ->
+        attach_mutator(@stable_read_pass_one_event, :file_store, fn ->
           File.write!(path, content_b)
         end)
 
@@ -1059,32 +1064,35 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
     end
   end
 
-  describe "security regression R6: publish identity and post-rename honesty" do
-    test "raw rename fixture preserves object identity while timestamps change", %{base: base} do
+  describe "R6 reliability: publish identity and post-rename honesty" do
+    @tag security_regression: false
+    @tag :reliability_regression
+    test "raw rename can preserve object identity while changing ctime", %{base: base} do
       source = Path.join(base, "raw-source")
       target = Path.join(base, "raw-target")
       File.write!(source, "payload")
       File.chmod!(source, 0o600)
-      File.touch!(source, {{2000, 1, 1}, {0, 0, 0}})
       before = File.lstat!(source, time: :posix)
 
+      wait_for_next_posix_second!(before.ctime)
       File.rename!(source, target)
-      File.touch!(target, {{2001, 1, 1}, {0, 0, 0}})
       after_stat = File.lstat!(target, time: :posix)
 
       assert {after_stat.type, after_stat.major_device, after_stat.minor_device, after_stat.inode,
               after_stat.size} ==
                {before.type, before.major_device, before.minor_device, before.inode, before.size}
 
-      refute after_stat.mtime == before.mtime
+      assert after_stat.ctime > before.ctime
     end
 
-    test "public save accepts rename-volatile timestamp changes", %{dir: dir} do
+    @tag security_regression: false
+    @tag :reliability_regression
+    test "candidate publish identity ignores a post-rename timestamp mutation", %{dir: dir} do
       run_id = "timestamp-publish"
       path = Path.join(dir, run_id <> ".json")
 
       mutated =
-        attach_mutator(@post_rename_event, path, nil, fn ->
+        attach_mutator(@post_rename_event, :file_store, fn ->
           File.touch!(path, {{2000, 1, 1}, {0, 0, 0}})
         end)
 
@@ -1093,6 +1101,17 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
       assert File.lstat!(path, time: :posix).mtime < 1_000_000_000
     end
 
+    @tag security_regression: false
+    @tag :reliability_regression
+    test "public candidate save succeeds without telemetry coordination", %{dir: dir} do
+      assert :ok = Persistence.save_eval_run_file("plain-publish", %{model: "m"}, dir: dir)
+
+      assert {:ok, %{"id" => "plain-publish"}} =
+               Persistence.load_eval_run_file("plain-publish", dir: dir)
+    end
+
+    @tag security_regression: false
+    @tag :reliability_regression
     test "post-rename verification fault reports an honest published-side-effect error", %{
       dir: dir
     } do
@@ -1100,7 +1119,7 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
       path = Path.join(dir, run_id <> ".json")
 
       mutated =
-        attach_mutator(@post_rename_event, path, nil, fn ->
+        attach_mutator(@post_rename_event, :file_store, fn ->
           File.chmod!(path, 0o400)
         end)
 
@@ -1110,6 +1129,98 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
       assert :atomics.get(mutated, 1) == 1
       assert File.exists?(path)
       assert Bitwise.band(File.stat!(path).mode, 0o777) == 0o400
+    end
+  end
+
+  describe "security regression R7: telemetry privacy and containment" do
+    test "stable-read and publish metadata is closed and path-free", %{dir: dir, base: base} do
+      origin = self()
+      handler_id = {__MODULE__, origin, make_ref()}
+
+      :ok =
+        :telemetry.attach_many(
+          handler_id,
+          [@stable_read_pass_one_event, @post_rename_event],
+          fn event, measurements, metadata, owner ->
+            if metadata[:origin] == owner do
+              send(owner, {:eval_telemetry, event, measurements, metadata})
+            end
+          end,
+          origin
+        )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert :ok =
+               Persistence.save_eval_run_file(
+                 "metadata-closed",
+                 %{model: "private-model", config: %{"secret" => String.duplicate("x", 8_192)}},
+                 dir: dir
+               )
+
+      dataset = Path.join(base, "metadata-dataset.jsonl")
+      File.write!(dataset, ~s({"input":"private"}\n))
+      assert is_binary(Persistence.eval_dataset_hash(dataset))
+
+      assert_receive {:eval_telemetry, @post_rename_event, publish_measurements,
+                      %{source: :file_store, origin: ^origin}}
+
+      assert Map.keys(publish_measurements) == [:system_time]
+      assert is_integer(publish_measurements.system_time)
+
+      assert_receive {:eval_telemetry, @stable_read_pass_one_event, read_measurements,
+                      %{source: :dataset_hash, origin: ^origin}}
+
+      assert Map.keys(read_measurements) == [:system_time]
+      assert is_integer(read_measurements.system_time)
+
+      :ok = :telemetry.detach(handler_id)
+      refute Enum.any?(:telemetry.list_handlers(@post_rename_event), &(&1.id == handler_id))
+    end
+
+    test "handler exceptions and blocked handlers cannot change public save", %{dir: dir} do
+      origin = self()
+      raising_id = {__MODULE__, origin, make_ref()}
+      blocking_id = {__MODULE__, origin, make_ref()}
+
+      on_exit(fn ->
+        :telemetry.detach(raising_id)
+        :telemetry.detach(blocking_id)
+      end)
+
+      :ok =
+        :telemetry.attach(
+          raising_id,
+          @post_rename_event,
+          fn _event, _measurements, metadata, owner ->
+            if metadata[:origin] == owner, do: raise("telemetry handler failure")
+          end,
+          origin
+        )
+
+      assert :ok = Persistence.save_eval_run_file("handler-raise", %{model: "m"}, dir: dir)
+      assert :telemetry.detach(raising_id) in [:ok, {:error, :not_found}]
+
+      :ok =
+        :telemetry.attach(
+          blocking_id,
+          @post_rename_event,
+          fn _event, _measurements, metadata, owner ->
+            if metadata[:origin] == owner do
+              send(owner, :blocking_handler_started)
+
+              receive do
+                :never_sent -> :ok
+              end
+            end
+          end,
+          origin
+        )
+
+      assert raising_id != blocking_id
+      assert :ok = Persistence.save_eval_run_file("handler-bound", %{model: "m"}, dir: dir)
+      assert_receive :blocking_handler_started
+      assert File.exists?(Path.join(dir, "handler-bound.json"))
     end
   end
 
@@ -1133,18 +1244,18 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
     end
   end
 
-  defp attach_mutator(event, path, source, mutate) do
+  defp attach_mutator(event, source, mutate) do
     handler_id = {__MODULE__, self(), make_ref()}
     mutated = :atomics.new(1, signed: false)
+    origin = self()
 
     :ok =
       :telemetry.attach(
         handler_id,
         event,
         fn _event, _measurements, metadata, _config ->
-          source_matches = is_nil(source) or metadata[:source] == source
-
-          if metadata[:path] == path and source_matches and :atomics.get(mutated, 1) == 0 do
+          if metadata == %{source: source, origin: origin} and
+               :atomics.get(mutated, 1) == 0 do
             mutate.()
             :atomics.put(mutated, 1, 1)
           end
@@ -1154,5 +1265,25 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
 
     on_exit(fn -> :telemetry.detach(handler_id) end)
     mutated
+  end
+
+  defp wait_for_next_posix_second!(second) do
+    deadline = System.monotonic_time(:millisecond) + 2_500
+
+    wait = fn wait ->
+      cond do
+        System.system_time(:second) > second ->
+          :ok
+
+        System.monotonic_time(:millisecond) >= deadline ->
+          flunk("POSIX second did not advance")
+
+        true ->
+          Process.sleep(10)
+          wait.(wait)
+      end
+    end
+
+    wait.(wait)
   end
 end
