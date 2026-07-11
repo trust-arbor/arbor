@@ -3,11 +3,19 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   Security regression tests for eval file-store hardening.
 
   Exercised exclusively through the public `Arbor.Persistence` facade.
-  These tests must FAIL against the ownership-extraction parent commit
-  (`07de3232`) and PASS after hardening.
+
+  Parent lineage (most recent first):
+  - **d7df3521** — immediate parent for *this* correction pass (identity
+    match completeness, preflight encode bounds, exact one-suffix binding,
+    trusted-private-root before chmod, bounded enumeration worker, publish
+    identity verify). New claims below must fail on d7df3521 and pass here.
+  - 649fe909 / 07de3232 — earlier ownership extraction + first hardening.
+    Characterization of older parents is separate from the d7 exact
+    regressions; do not claim every test fails 07de/649.
 
   Each assertion group is independent so an earlier failure does not mask
-  a later security claim.
+  a later security claim. Identity failures must surface as `:file_changed`
+  (or nil for dataset hash), not as decode/schema errors.
   """
   use ExUnit.Case, async: true
   @moduletag :fast
@@ -21,6 +29,9 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
     outside = Path.join(base, "outside")
     File.mkdir_p!(dir)
     File.mkdir_p!(outside)
+    # Trusted-private-root contract: existing roots must be owner-only.
+    File.chmod!(dir, 0o700)
+    File.chmod!(outside, 0o700)
     on_exit(fn -> File.rm_rf!(base) end)
     %{dir: dir, outside: outside, base: base}
   end
@@ -160,6 +171,7 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
     test "refuses store root that is a symlink", %{base: base, outside: outside} do
       real = Path.join(outside, "real-store")
       File.mkdir_p!(real)
+      File.chmod!(real, 0o700)
       link_root = Path.join(base, "link-root")
       File.ln_s!(real, link_root)
 
@@ -233,7 +245,6 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
     end
 
     test "persists exactly one string id and timestamp (no dual-key ambiguity)", %{dir: dir} do
-      # Matching atom/string aliases are collapsed; filename wins for id.
       data =
         %{}
         |> Map.put(:id, "caller-id")
@@ -246,7 +257,6 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
                Persistence.save_eval_run_file("single-id-run", data, dir: dir)
 
       raw = File.read!(Path.join(dir, "single-id-run.json"))
-      # Only one "id" key in the JSON object text (not two adjacent id fields)
       assert length(Regex.scan(~r/"id"\s*:/, raw)) == 1
       assert length(Regex.scan(~r/"timestamp"\s*:/, raw)) == 1
 
@@ -277,6 +287,66 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   end
 
   # ---------------------------------------------------------------------------
+  # d7df3521 exact: preflight encode guards (shaped errors before Jason)
+  # ---------------------------------------------------------------------------
+
+  describe "security regression d7: bignum and oversized preflight before Jason" do
+    test "rejects oversize integer bit ceiling with shaped preflight error", %{dir: dir} do
+      # Far beyond the hard bit ceiling; d7 estimated a fixed 24 bytes and
+      # would hand the bignum to Jason (or OOM/spin). Candidate must reject
+      # with a distinct preflight tag before Jason.
+      huge = Bitwise.bsl(1, 70_000)
+
+      assert {:error, {:encode_preflight, :max_integer_bits_exceeded}} =
+               Persistence.save_eval_run_file(
+                 "bignum-run",
+                 %{model: "m", n: huge},
+                 dir: dir,
+                 max_file_bytes: 50_000
+               )
+
+      refute File.exists?(Path.join(dir, "bignum-run.json"))
+    end
+
+    test "rejects oversized invalid UTF-8 by byte_size before UTF-8 scan", %{dir: dir} do
+      # Invalid UTF-8 payload larger than max_string / max_file budget.
+      # Size gate must fire (not a full UTF-8 scan yielding only :invalid_utf8).
+      oversized = :binary.copy(<<0xFF>>, 5_000)
+
+      assert {:error, reason} =
+               Persistence.save_eval_run_file(
+                 "bad-utf8-big",
+                 %{model: "m", blob: oversized},
+                 dir: dir,
+                 max_file_bytes: 500
+               )
+
+      assert reason in [:max_file_bytes_exceeded, :max_string_bytes_exceeded]
+      refute File.exists?(Path.join(dir, "bad-utf8-big.json"))
+    end
+
+    test "rejects oversized object key by byte_size with shaped preflight error", %{dir: dir} do
+      big_key = String.duplicate("k", 2_000)
+
+      assert {:error, reason} =
+               Persistence.save_eval_run_file(
+                 "big-key-run",
+                 %{model: "m", data: %{big_key => "v"}},
+                 dir: dir,
+                 max_file_bytes: 200
+               )
+
+      assert reason in [
+               :max_file_bytes_exceeded,
+               :max_string_bytes_exceeded,
+               {:encode_preflight, :max_key_bytes_exceeded}
+             ]
+
+      refute File.exists?(Path.join(dir, "big-key-run.json"))
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Load / list id binding
   # ---------------------------------------------------------------------------
 
@@ -284,6 +354,7 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
     test "load rejects file whose JSON id does not match filename", %{dir: dir} do
       path = Path.join(dir, "filename-run.json")
       File.write!(path, ~s({"id":"other-run","model":"m","timestamp":"2026-01-01T00:00:00Z"}))
+      File.chmod!(path, 0o600)
 
       assert {:error, :run_id_mismatch} =
                Persistence.load_eval_run_file("filename-run", dir: dir)
@@ -292,6 +363,7 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
     test "load rejects file missing id field", %{dir: dir} do
       path = Path.join(dir, "no-id-run.json")
       File.write!(path, ~s({"model":"m","timestamp":"2026-01-01T00:00:00Z"}))
+      File.chmod!(path, 0o600)
 
       assert {:error, :run_id_mismatch} =
                Persistence.load_eval_run_file("no-id-run", dir: dir)
@@ -337,6 +409,46 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   end
 
   # ---------------------------------------------------------------------------
+  # d7df3521 exact: one terminal ".json" suffix binding
+  # ---------------------------------------------------------------------------
+
+  describe "security regression d7: exact one-suffix filename binding" do
+    test "saved id legit.json lists and loads as legit.json not legit", %{dir: dir} do
+      assert :ok =
+               Persistence.save_eval_run_file(
+                 "legit.json",
+                 %{model: "m", timestamp: "2026-03-01T00:00:00Z"},
+                 dir: dir
+               )
+
+      assert File.exists?(Path.join(dir, "legit.json.json"))
+
+      assert {:ok, loaded} = Persistence.load_eval_run_file("legit.json", dir: dir)
+      assert loaded["id"] == "legit.json"
+
+      assert {:ok, runs} = Persistence.list_eval_run_files(dir: dir)
+      ids = Enum.map(runs, & &1["id"])
+      assert "legit.json" in ids
+      refute "legit" in ids
+    end
+
+    test "crafted a.json.json on disk does not bind as run id a", %{dir: dir} do
+      # Double-suffix filename must reconstruct to "a.json", not strip to "a".
+      path = Path.join(dir, "a.json.json")
+      File.write!(path, ~s({"id":"a.json","model":"m","timestamp":"2026-03-02T00:00:00Z"}))
+      File.chmod!(path, 0o600)
+
+      assert {:ok, loaded} = Persistence.load_eval_run_file("a.json", dir: dir)
+      assert loaded["id"] == "a.json"
+
+      assert {:ok, runs} = Persistence.list_eval_run_files(dir: dir)
+      ids = Enum.map(runs, & &1["id"])
+      assert "a.json" in ids
+      refute "a" in ids
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Bounds (file bytes, enumeration max_files, aggregate)
   # ---------------------------------------------------------------------------
 
@@ -369,8 +481,14 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
 
       assert is_map(evidence)
       assert evidence.max_files == 3
-      assert evidence.seen >= 4 or evidence[:name_count]
-      assert evidence.reason in [:too_many_run_files, :directory_overpopulated]
+      assert evidence.seen >= 4 or evidence[:name_count] or evidence[:reason]
+
+      assert evidence.reason in [
+               :too_many_run_files,
+               :directory_overpopulated,
+               :enumeration_worker_killed,
+               :enumeration_timeout
+             ]
     end
 
     test "list stops on aggregate byte bound", %{dir: dir} do
@@ -406,6 +524,51 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   end
 
   # ---------------------------------------------------------------------------
+  # d7df3521 exact: bounded enumeration via owner-facing behavior
+  # ---------------------------------------------------------------------------
+
+  describe "security regression d7: bounded enumeration owner behavior" do
+    test "enumeration returns only bounded candidates under private root", %{dir: dir} do
+      for i <- 1..3 do
+        assert :ok =
+                 Persistence.save_eval_run_file(
+                   "enum-#{i}",
+                   %{model: "m", timestamp: "2026-02-0#{i}T00:00:00Z"},
+                   dir: dir
+                 )
+      end
+
+      # Noise entries must not become run candidates or explode the owner list.
+      File.write!(Path.join(dir, "not-json.txt"), "x")
+      File.write!(Path.join(dir, ".hidden.json"), ~s({"id":"hidden"}))
+      File.mkdir!(Path.join(dir, "subdir.json"))
+
+      assert {:ok, runs} = Persistence.list_eval_run_files(dir: dir)
+      ids = Enum.map(runs, & &1["id"])
+      assert Enum.sort(ids) == ["enum-1", "enum-2", "enum-3"]
+    end
+
+    test "overpopulated directory fails with evidence map not silent truncate", %{dir: dir} do
+      # Create more run files than max_files; owner must see structured error.
+      for i <- 1..6 do
+        assert :ok =
+                 Persistence.save_eval_run_file(
+                   "pop-#{i}",
+                   %{model: "m", timestamp: "2026-04-0#{i}T00:00:00Z"},
+                   dir: dir
+                 )
+      end
+
+      assert {:error, {:max_files_exceeded, evidence}} =
+               Persistence.list_eval_run_files(dir: dir, max_files: 2)
+
+      assert is_map(evidence)
+      assert evidence.max_files == 2
+      assert is_atom(evidence.reason)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Root identity / least privilege
   # ---------------------------------------------------------------------------
 
@@ -418,7 +581,6 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
                Persistence.save_eval_run_file("perm-run", %{model: "m"}, dir: new_dir)
 
       {:ok, stat} = File.stat(new_dir)
-      # Lower 9 permission bits
       assert Bitwise.band(stat.mode, 0o777) == 0o700
     end
 
@@ -432,6 +594,56 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   end
 
   # ---------------------------------------------------------------------------
+  # d7df3521 exact: insecure root rejection + symlink target mode unchanged
+  # ---------------------------------------------------------------------------
+
+  describe "security regression d7: trusted private root before chmod" do
+    test "rejects existing 0777 root without silently chmodding it", %{base: base} do
+      insecure = Path.join(base, "insecure-store")
+      File.mkdir_p!(insecure)
+      File.chmod!(insecure, 0o777)
+      {:ok, before} = File.stat(insecure)
+      assert Bitwise.band(before.mode, 0o777) == 0o777
+
+      assert {:error, :insecure_root_permissions} =
+               Persistence.save_eval_run_file("x", %{model: "m"}, dir: insecure)
+
+      {:ok, after_stat} = File.stat(insecure)
+      # Must not have been silently chmod'd to 0700.
+      assert Bitwise.band(after_stat.mode, 0o777) == 0o777
+      refute File.exists?(Path.join(insecure, "x.json"))
+    end
+
+    test "rejects existing 0755 root (group/world bits)", %{base: base} do
+      open_dir = Path.join(base, "open-store")
+      File.mkdir_p!(open_dir)
+      File.chmod!(open_dir, 0o755)
+
+      assert {:error, :insecure_root_permissions} =
+               Persistence.list_eval_run_files(dir: open_dir)
+    end
+
+    test "symlink root does not chmod the real target directory", %{base: base, outside: outside} do
+      real = Path.join(outside, "real-0755")
+      File.mkdir_p!(real)
+      File.chmod!(real, 0o755)
+      {:ok, before} = File.stat(real)
+      assert Bitwise.band(before.mode, 0o777) == 0o755
+
+      link_root = Path.join(base, "symlink-root-chmod")
+      File.ln_s!(real, link_root)
+
+      # d7 chmod'd the symlink target to 0700 before rejecting. Candidate must
+      # reject without mutating the target's mode.
+      assert {:error, :symlink_root} =
+               Persistence.save_eval_run_file("r1", %{model: "m"}, dir: link_root)
+
+      {:ok, after_stat} = File.stat(real)
+      assert Bitwise.band(after_stat.mode, 0o777) == 0o755
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # Invalid UTF-8 / JSON
   # ---------------------------------------------------------------------------
 
@@ -439,6 +651,7 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
     test "rejects invalid UTF-8 on load", %{dir: dir} do
       path = Path.join(dir, "bad-utf8.json")
       File.write!(path, <<0xFF, 0xFE, "{}">>)
+      File.chmod!(path, 0o600)
 
       assert {:error, :invalid_utf8} = Persistence.load_eval_run_file("bad-utf8", dir: dir)
     end
@@ -446,6 +659,7 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
     test "rejects invalid JSON on load", %{dir: dir} do
       path = Path.join(dir, "bad-json.json")
       File.write!(path, "not-json{")
+      File.chmod!(path, 0o600)
 
       assert {:error, {:decode_error, _}} = Persistence.load_eval_run_file("bad-json", dir: dir)
     end
@@ -494,9 +708,6 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
     test "fingerprint does not use erlang term_to_binary wire format" do
       fp = Persistence.eval_config_fingerprint(%{a: 1, b: "two"})
       assert is_binary(fp)
-      # term_to_binary fingerprints from the parent would still hash, but the
-      # canonical path must treat string/atom key forms as the same key when
-      # values agree — parent term_to_binary treats them as distinct maps.
       same = Persistence.eval_config_fingerprint(%{"a" => 1, "b" => "two"})
       assert fp == same
     end
@@ -509,7 +720,6 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   describe "security regression: dataset hash streaming and symlink reject" do
     test "hashes large file in bounded chunks (streaming, deterministic)", %{base: base} do
       path = Path.join(base, "large.jsonl")
-      # ~256 KiB — larger than the 64 KiB chunk size
       content = String.duplicate("abcdefghijklmnopqrstuvwxyz\n", 10_000)
       File.write!(path, content)
 
@@ -531,6 +741,110 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
       File.ln_s!(real, link)
 
       assert Persistence.eval_dataset_hash(link) == nil
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # d7df3521 exact: same-inode mutation fail-closed (hash + load)
+  # ---------------------------------------------------------------------------
+
+  describe "security regression d7: same-inode mutation fail closed" do
+    test "dataset hash returns nil when same-inode content mutates during read", %{base: base} do
+      path = Path.join(base, "mutate-dataset.jsonl")
+      size_a = 512_000
+      size_b = 520_000
+      File.write!(path, :binary.copy("A", size_a))
+
+      stop = :atomics.new(1, signed: false)
+      :atomics.put(stop, 1, 0)
+
+      mutator =
+        Task.async(fn ->
+          # Tight size-toggling loop: d7 ignores size in identity_match so it
+          # still returns a hash; candidate compares size/mtime/ctime and
+          # stops at captured size / rejects growth → nil.
+          loop = fn loop ->
+            if :atomics.get(stop, 1) == 1 do
+              :ok
+            else
+              _ = File.write(path, :binary.copy("A", size_a))
+              _ = File.write(path, :binary.copy("B", size_b))
+              loop.(loop)
+            end
+          end
+
+          loop.(loop)
+        end)
+
+      # Let mutator start flipping sizes before hash begins.
+      Process.sleep(20)
+      result = Persistence.eval_dataset_hash(path)
+      :atomics.put(stop, 1, 1)
+      _ = Task.await(mutator, 5_000)
+
+      assert result == nil
+    end
+
+    test "JSON load returns file_changed not decode error on same-inode mutation", %{dir: dir} do
+      path = Path.join(dir, "mutate-load.json")
+      # Valid JSON of size A; mutator alternates with non-JSON of size B so a
+      # weak identity check would surface as decode_error (masking the bug).
+      size_a = 256_000
+      size_b = 260_000
+
+      json_a =
+        ~s({"id":"mutate-load","model":"m","blob":") <> String.duplicate("x", size_a) <> ~s("})
+
+      File.write!(path, json_a)
+      File.chmod!(path, 0o600)
+
+      stop = :atomics.new(1, signed: false)
+      :atomics.put(stop, 1, 0)
+
+      mutator =
+        Task.async(fn ->
+          loop = fn loop ->
+            if :atomics.get(stop, 1) == 1 do
+              :ok
+            else
+              _ = File.write(path, json_a)
+              _ = File.chmod(path, 0o600)
+              _ = File.write(path, :binary.copy("Z", size_b))
+              _ = File.chmod(path, 0o600)
+              loop.(loop)
+            end
+          end
+
+          loop.(loop)
+        end)
+
+      Process.sleep(20)
+      result = Persistence.load_eval_run_file("mutate-load", dir: dir)
+      :atomics.put(stop, 1, 1)
+      _ = Task.await(mutator, 5_000)
+
+      # Must be the identity failure, not a masked decode/schema error.
+      assert result == {:error, :file_changed}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Cleanup on pre-publish failure
+  # ---------------------------------------------------------------------------
+
+  describe "security regression d7: temp cleanup on publish failure" do
+    test "cleans exclusive temp when target path is a non-file directory", %{dir: dir} do
+      # rename onto an existing directory entry fails; temp must not linger.
+      File.mkdir!(Path.join(dir, "blocked.json"))
+
+      assert {:error, _} =
+               Persistence.save_eval_run_file("blocked", %{model: "m"}, dir: dir)
+
+      leftovers =
+        File.ls!(dir)
+        |> Enum.filter(&String.starts_with?(&1, ".eval-tmp-"))
+
+      assert leftovers == []
     end
   end
 end

@@ -6,6 +6,13 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
   #
   # All capture is best-effort and fail-safe: any failure simply omits the
   # field. Caller-provided values are never overwritten.
+  #
+  # Dataset hashing opens the path once, hashes bounded chunks from that
+  # handle up to the captured initial size, and compares full handle/path
+  # identity (type/device/inode/size/mtime/ctime) before and after. Same-inode
+  # content mutation, growth past the captured size, and short reads fail
+  # closed (return nil). Metadata equality is best-effort under a trusted
+  # path assumption — not proof against an owner restoring timestamps.
 
   @stream_chunk_bytes 65_536
 
@@ -41,9 +48,15 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
   @doc """
   SHA-256 (hex, \"sha256:\" prefixed) of the dataset file at `path`.
 
-  Opens the path once, hashes bounded chunks from that handle, and compares
-  handle/path identity before and after. Rejects symlinks, non-regular files,
-  and unusable inode identities. Closes the handle on every path.
+  Opens the path once, hashes bounded chunks from that handle up to the
+  captured initial size, and compares full handle/path identity (type, device,
+  inode, size, mtime, ctime) before and after. Rejects symlinks, non-regular
+  files, unusable inode identities, growth past the captured size, short
+  reads, and same-inode mutation. Closes the handle on every path.
+
+  Metadata checks use OTP posix timestamps (native resolution exposed by the
+  pinned OTP File.Stat API) and are best-effort — not proof against an owner
+  restoring timestamps after mutation.
   """
   @spec dataset_hash(String.t() | nil) :: String.t() | nil
   def dataset_hash(nil), do: nil
@@ -107,7 +120,7 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
   end
 
   # ---------------------------------------------------------------------------
-  # Dataset hash — single open, chunked, identity-stable
+  # Dataset hash — single open, chunked to captured size, full identity
   # ---------------------------------------------------------------------------
 
   defp hash_regular_file(path, expected) do
@@ -118,7 +131,7 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
                stat1 = File.Stat.from_record(info1),
                {:ok, id1} <- regular_identity(stat1),
                true <- identity_match?(id1, expected),
-               {:ok, digest} <- hash_chunks(io, :crypto.hash_init(:sha256)),
+               {:ok, digest} <- hash_exact_size(io, expected.size),
                {:ok, info2} <- :file.read_file_info(io, time: :posix),
                stat2 = File.Stat.from_record(info2),
                {:ok, id2} <- regular_identity(stat2),
@@ -139,13 +152,48 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
     end
   end
 
-  defp hash_chunks(io, acc) do
-    case :file.read(io, @stream_chunk_bytes) do
-      {:ok, chunk} ->
-        hash_chunks(io, :crypto.hash_update(acc, chunk))
+  # Hash exactly `size` bytes from the handle. Stop at the captured initial
+  # size; reject short reads; probe one extra byte to reject growth.
+  defp hash_exact_size(io, size) when is_integer(size) and size >= 0 do
+    case hash_n_bytes(io, size, :crypto.hash_init(:sha256)) do
+      {:ok, digest} ->
+        case :file.read(io, 1) do
+          :eof ->
+            {:ok, digest}
+
+          {:ok, <<>>} ->
+            {:ok, digest}
+
+          {:ok, _} ->
+            # File grew past captured size during read.
+            {:error, :file_changed}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp hash_exact_size(_, _), do: {:error, :unusable_size}
+
+  defp hash_n_bytes(_io, 0, acc), do: {:ok, acc}
+
+  defp hash_n_bytes(io, remaining, acc) when remaining > 0 do
+    chunk_size = min(remaining, @stream_chunk_bytes)
+
+    case :file.read(io, chunk_size) do
+      {:ok, chunk} when byte_size(chunk) == chunk_size ->
+        hash_n_bytes(io, remaining - chunk_size, :crypto.hash_update(acc, chunk))
+
+      {:ok, chunk} when byte_size(chunk) < chunk_size ->
+        _ = chunk
+        {:error, :short_read}
 
       :eof ->
-        {:ok, acc}
+        {:error, :short_read}
 
       {:error, reason} ->
         {:error, reason}
@@ -160,7 +208,9 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
        inode: inode,
        major_device: major,
        minor_device: stat.minor_device,
-       size: stat.size
+       size: stat.size,
+       mtime: stat.mtime,
+       ctime: stat.ctime
      }}
   end
 
@@ -170,7 +220,8 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
 
   defp identity_match?(a, b) when is_map(a) and is_map(b) do
     a.type == b.type and a.inode == b.inode and a.major_device == b.major_device and
-      a.minor_device == b.minor_device
+      a.minor_device == b.minor_device and a.size == b.size and a.mtime == b.mtime and
+      a.ctime == b.ctime
   end
 
   defp identity_match?(_, _), do: false

@@ -45,6 +45,7 @@ defmodule Arbor.Persistence.EvalStoreTest do
     setup do
       tmp_dir = Path.join(System.tmp_dir!(), "eval_create_#{:rand.uniform(1_000_000)}")
       File.mkdir_p!(tmp_dir)
+      File.chmod!(tmp_dir, 0o700)
       on_exit(fn -> File.rm_rf!(tmp_dir) end)
       %{dir: tmp_dir}
     end
@@ -83,6 +84,7 @@ defmodule Arbor.Persistence.EvalStoreTest do
     setup do
       tmp_dir = Path.join(System.tmp_dir!(), "eval_list_#{:rand.uniform(1_000_000)}")
       File.mkdir_p!(tmp_dir)
+      File.chmod!(tmp_dir, 0o700)
       on_exit(fn -> File.rm_rf!(tmp_dir) end)
 
       :ok =
