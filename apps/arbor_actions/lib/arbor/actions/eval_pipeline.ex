@@ -141,6 +141,7 @@ defmodule Arbor.Actions.EvalPipeline do
 
     alias Arbor.Actions
     alias Arbor.Actions.EvalPipeline
+    alias Arbor.Common.SafeAtom
 
     def taint_roles do
       %{dataset: :data, graders: :control, subject: :control, model: :data, provider: :data}
@@ -188,13 +189,28 @@ defmodule Arbor.Actions.EvalPipeline do
     defp resolve_subject(nil), do: resolve_module(@passthrough)
     defp resolve_subject(""), do: resolve_module(@passthrough)
 
-    defp resolve_subject(name) do
-      module = Module.concat([name])
-      Code.ensure_loaded(module)
-      module
-    rescue
-      _ -> resolve_module(@passthrough)
+    # Resolve only existing module atoms. Module.concat/1 interns caller-controlled
+    # strings into the atom table (DoS); SafeAtom.to_existing/1 refuses unknown names.
+    defp resolve_subject(name) when is_binary(name) do
+      prefixed =
+        if String.starts_with?(name, "Elixir.") do
+          name
+        else
+          "Elixir." <> name
+        end
+
+      case SafeAtom.to_existing(prefixed) do
+        {:ok, module} ->
+          # Known module name: use it when loadable; otherwise fall back like
+          # unknown/unloaded subjects (nil, blank, non-binary).
+          resolve_module(module) || resolve_module(@passthrough)
+
+        {:error, _} ->
+          resolve_module(@passthrough)
+      end
     end
+
+    defp resolve_subject(_), do: resolve_module(@passthrough)
 
     defp resolve_module(mod) do
       if Code.ensure_loaded?(mod), do: mod, else: nil

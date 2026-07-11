@@ -31,6 +31,49 @@ defmodule Arbor.Actions.EvalPipelineTest do
       meta = EvalPipeline.RunEval.__action_metadata__()
       assert Keyword.has_key?(meta.schema, :dataset)
     end
+
+    test "security regression: unknown subject does not intern a module atom" do
+      # Caller-controlled subject must not mint atoms via Module.concat/1.
+      subject = "Arbor.EvalPipeline.UnknownSubject#{System.unique_integer([:positive])}"
+      module_name = "Elixir." <> subject
+
+      assert {:error, {:unknown_atom, ^module_name}} =
+               Arbor.Common.SafeAtom.to_existing(module_name)
+
+      assert {:ok, %{results: [], count: 0, passed: 0}} =
+               EvalPipeline.RunEval.run(
+                 %{dataset: [], graders: "exact_match", subject: subject},
+                 %{}
+               )
+
+      assert {:error, {:unknown_atom, ^module_name}} =
+               Arbor.Common.SafeAtom.to_existing(module_name)
+    end
+
+    test "unloaded existing subject module falls back to passthrough" do
+      # Compile-time module alias creates the atom without a module body, so
+      # SafeAtom succeeds but Code.ensure_loaded? fails and RunEval must fall
+      # back to the passthrough subject rather than returning nil/error.
+      unloaded = Arbor.EvalPipeline.UnloadedExistingSubjectAtom
+      refute Code.ensure_loaded?(unloaded)
+
+      sample = %{"id" => "s1", "input" => "hello", "expected" => "hello"}
+
+      assert {:ok, %{results: [result], count: 1, passed: 1}} =
+               EvalPipeline.RunEval.run(
+                 %{
+                   dataset: [sample],
+                   graders: "exact_match",
+                   subject: inspect(unloaded)
+                 },
+                 %{}
+               )
+
+      # Passthrough returns input unchanged; exact_match therefore passes.
+      assert result["passed"] == true
+      assert result["actual"] == "hello"
+      assert result["expected"] == "hello"
+    end
   end
 
   describe "Aggregate" do
