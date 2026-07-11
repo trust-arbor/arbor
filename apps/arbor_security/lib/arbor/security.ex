@@ -1221,22 +1221,13 @@ defmodule Arbor.Security do
     try do
       SignedRequest.sign(payload, agent_id, private_key)
     rescue
-      error in ErlangError ->
-        if eddsa_private_key_error?(error) do
-          {:error, :invalid_private_key}
-        else
-          reraise error, __STACKTRACE__
-        end
+      # This call's payload and agent id are constructed and validated above;
+      # the private key is its only caller-supplied crypto argument. OTP has
+      # changed the exact bad-key error tuple across releases, so do not bind
+      # correctness to an internal message shape.
+      ErlangError -> {:error, :invalid_private_key}
     end
   end
-
-  # Match only the known OTP bad-key shape; re-raise everything else.
-  defp eddsa_private_key_error?(%ErlangError{original: {:badarg, {_file, _line}, reason}})
-       when is_list(reason) do
-    List.to_string(reason) =~ "EDDSA private key"
-  end
-
-  defp eddsa_private_key_error?(_), do: false
 
   # Booleans are atoms — reject before the generic atom accept.
   defp validate_authority_purpose(purpose) when is_boolean(purpose),
