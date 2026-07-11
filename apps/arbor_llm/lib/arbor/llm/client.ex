@@ -12,11 +12,17 @@ defmodule Arbor.LLM.Client do
 
   alias Arbor.LLM.AbortError
 
+  alias Arbor.LLM.Boundary
+
   alias Arbor.LLM.ConfigurationError
 
   alias Arbor.LLM.ContentPart
 
+  alias Arbor.LLM.Deadline
+
   alias Arbor.LLM.Message
+
+  alias Arbor.LLM.OwnedStream
 
   alias Arbor.LLM.Request
 
@@ -35,6 +41,8 @@ defmodule Arbor.LLM.Client do
   alias Arbor.LLM.ToolCallValidator
 
   alias Arbor.LLM.ToolError
+
+  alias Arbor.LLM.ToolResultBudget
 
   # ── Adapter routing ──────────────────────────────────────────────────
   #
@@ -291,33 +299,63 @@ defmodule Arbor.LLM.Client do
   end
 
   @spec complete(t(), Request.t(), keyword()) :: {:ok, Response.t()} | {:error, term()}
-  def complete(%__MODULE__{} = client, %Request{} = request, opts \\ []) do
-    with {:ok, adapter} <- resolve_adapter(client, request) do
-      base = fn req -> adapter.complete(req, opts) end
+  def complete(client, request, opts \\ [])
 
-      wrapped =
-        Enum.reduce(Enum.reverse(client.middleware), base, fn mw, acc ->
-          fn req -> mw.(req, acc) end
-        end)
+  def complete(%__MODULE__{} = client, %Request{} = request, opts) do
+    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout),
+         {:ok, adapter} <- resolve_adapter(client, request) do
+      Deadline.run(
+        fn ->
+          base = fn req -> adapter.complete(req, opts) end
 
-      wrapped.(request)
+          wrapped =
+            Enum.reduce(Enum.reverse(client.middleware), base, fn mw, acc ->
+              fn req -> mw.(req, acc) end
+            end)
+
+          Boundary.completion(wrapped.(request), opts)
+        end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
     end
   end
+
+  def complete(_client, _request, _opts), do: {:error, :invalid_completion_request}
 
   @spec stream(t(), Request.t(), keyword()) :: {:ok, Enumerable.t()} | {:error, term()}
-  def stream(%__MODULE__{} = client, %Request{} = request, opts \\ []) do
-    with {:ok, adapter} <- resolve_adapter(client, request),
-         :ok <- ensure_stream_supported(adapter) do
-      base = fn req -> normalize_stream(adapter.stream(req, opts)) end
+  def stream(client, request, opts \\ [])
 
-      wrapped =
-        Enum.reduce(Enum.reverse(client.stream_middleware), base, fn mw, acc ->
-          fn req -> mw.(req, acc) end
-        end)
+  def stream(%__MODULE__{} = client, %Request{} = request, opts) do
+    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout),
+         {:ok, adapter} <- resolve_adapter(client, request),
+         :ok <- ensure_stream_supported(adapter),
+         {:ok, source} <-
+           Deadline.run(
+             fn ->
+               base = fn req -> normalize_stream(adapter.stream(req, opts)) end
 
-      wrapped.(request)
+               wrapped =
+                 Enum.reduce(Enum.reverse(client.stream_middleware), base, fn mw, acc ->
+                   fn req -> mw.(req, acc) end
+                 end)
+
+               wrapped.(request)
+             end,
+             receipt,
+             RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+           ),
+         {:ok, owned} <-
+           OwnedStream.new(source,
+             deadline_ms: receipt.deadline_ms,
+             timeout_ms: receipt.timeout_ms,
+             validator: fn event -> Boundary.stream_event(event, opts) end
+           ) do
+      {:ok, owned}
     end
   end
+
+  def stream(_client, _request, _opts), do: {:error, :invalid_stream_request}
 
   @doc """
   Stream tokens to `callback` and return the fully-assembled response.
@@ -330,16 +368,36 @@ defmodule Arbor.LLM.Client do
   """
   @spec complete_streaming(t(), Request.t(), (Arbor.LLM.StreamEvent.t() -> any()), keyword()) ::
           {:ok, Response.t()} | {:error, term()}
-  def complete_streaming(%__MODULE__{} = client, %Request{} = request, callback, opts \\ [])
+  def complete_streaming(client, request, callback, opts \\ [])
+
+  def complete_streaming(%__MODULE__{} = client, %Request{} = request, callback, opts)
       when is_function(callback, 1) do
-    with {:ok, adapter} <- resolve_adapter(client, request) do
-      if adapter_exports?(adapter, :complete_streaming, 3) do
-        adapter.complete_streaming(request, callback, opts)
-      else
-        {:error, {:stream_not_supported, adapter}}
-      end
+    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout),
+         {:ok, adapter} <- resolve_adapter(client, request) do
+      Deadline.run(
+        fn ->
+          if adapter_exports?(adapter, :complete_streaming, 3) do
+            guarded_callback = fn event ->
+              case Boundary.stream_event(event, opts) do
+                {:ok, normalized} -> callback.(normalized)
+                {:error, reason} -> throw({:invalid_stream_callback_event, reason})
+              end
+            end
+
+            adapter.complete_streaming(request, guarded_callback, opts)
+            |> Boundary.completion(opts)
+          else
+            {:error, {:stream_not_supported, adapter}}
+          end
+        end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
     end
   end
+
+  def complete_streaming(_client, _request, _callback, _opts),
+    do: {:error, :invalid_streaming_completion_request}
 
   @doc """
   Generate embeddings for a list of texts using the specified provider.
@@ -356,31 +414,20 @@ defmodule Arbor.LLM.Client do
   - `:timeout` — request timeout in ms (optional)
   """
   @spec embed(t(), String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
-  def embed(%__MODULE__{} = client, provider, model, opts \\ [])
+  def embed(client, provider, model, opts \\ [])
+
+  def embed(%__MODULE__{} = client, provider, model, opts)
       when is_binary(provider) and is_binary(model) do
-    canonical = ProviderRegistry.normalize(provider)
-
-    case Map.get(client.adapters, canonical) do
-      nil ->
-        {:error, {:unknown_provider, provider}}
-
-      adapter ->
-        if adapter_exports?(adapter, :embed, 3) do
-          # The generic adapter pulls the provider from opts to build
-          # the req_llm model_spec string. Legacy per-provider adapters
-          # know their own provider via `provider/0` and ignore the opt
-          # — so passing it through is safe regardless of which adapter
-          # the routing table resolved to.
-          adapter.embed(
-            [hd(List.wrap(Keyword.get(opts, :texts, [""])))],
-            model,
-            Keyword.put_new(opts, :provider, canonical)
-          )
-        else
-          {:error, {:embed_not_supported, provider}}
-        end
+    with {:ok, texts} <- embed_texts_option(opts),
+         [text | _rest] <- texts do
+      embed_batch(client, provider, model, [text], opts)
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :embedding_texts_required}
     end
   end
+
+  def embed(_client, _provider, _model, _opts), do: {:error, :invalid_embedding_request}
 
   @doc """
   Generate embeddings for multiple texts in a batch.
@@ -389,22 +436,91 @@ defmodule Arbor.LLM.Client do
   """
   @spec embed_batch(t(), String.t(), String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()}
-  def embed_batch(%__MODULE__{} = client, provider, model, texts, opts \\ [])
-      when is_binary(provider) and is_binary(model) and is_list(texts) do
+  def embed_batch(client, provider, model, texts, opts \\ [])
+
+  def embed_batch(%__MODULE__{} = client, provider, model, texts, opts)
+      when is_binary(provider) and is_binary(model) do
     canonical = ProviderRegistry.normalize(provider)
 
-    case Map.get(client.adapters, canonical) do
-      nil ->
-        {:error, {:unknown_provider, provider}}
+    with :ok <- Boundary.embedding_inputs(texts),
+         {:ok, receipt} <- Deadline.receipt(opts),
+         {:ok, adapter} <- resolve_embedding_adapter(client, canonical, provider),
+         true <-
+           adapter_exports?(adapter, :embed, 3) or {:error, {:embed_not_supported, provider}} do
+      Deadline.run(
+        fn ->
+          adapter_opts = safe_put_new(opts, :provider, canonical)
 
-      adapter ->
-        if adapter_exports?(adapter, :embed, 3) do
-          adapter.embed(texts, model, Keyword.put_new(opts, :provider, canonical))
-        else
-          {:error, {:embed_not_supported, provider}}
-        end
+          with options when is_list(options) <- adapter_opts,
+               result <- adapter.embed(texts, model, options),
+               {:ok, embeddings, usage} <-
+                 Boundary.embedding_response(elem_or_result(result), length(texts)) do
+            indexed =
+              embeddings
+              |> Enum.with_index(fn vector, index -> %{index: index, embedding: vector} end)
+
+            {:ok,
+             %{
+               embeddings: embeddings,
+               indexed_embeddings: indexed,
+               model: model,
+               provider: canonical,
+               usage: usage,
+               dimensions: embeddings |> List.first([]) |> length()
+             }}
+          else
+            {:error, _reason} = error -> error
+            _invalid -> {:error, :invalid_embedding_adapter_options}
+          end
+        end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
     end
   end
+
+  def embed_batch(_client, _provider, _model, _texts, _opts),
+    do: {:error, :invalid_embedding_request}
+
+  defp resolve_embedding_adapter(client, canonical, original) do
+    case Map.get(client.adapters, canonical) do
+      nil -> {:error, {:unknown_provider, original}}
+      adapter -> {:ok, adapter}
+    end
+  end
+
+  defp elem_or_result({:ok, result}), do: result
+  defp elem_or_result({:error, _reason} = error), do: error
+  defp elem_or_result(other), do: other
+
+  defp embed_texts_option(opts) do
+    case safe_keyword_get(opts, :texts, [""]) do
+      {:ok, texts} ->
+        case Boundary.embedding_inputs(texts) do
+          :ok -> {:ok, texts}
+          {:error, _reason} = error -> error
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp safe_put_new(opts, key, value) do
+    case safe_keyword_get(opts, key, :__arbor_missing__) do
+      {:ok, :__arbor_missing__} -> [{key, value} | opts]
+      {:ok, _existing} -> opts
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp safe_keyword_get([], _key, default), do: {:ok, default}
+  defp safe_keyword_get([{key, value} | _rest], key, _default), do: {:ok, value}
+
+  defp safe_keyword_get([{key, _value} | rest], wanted, default) when is_atom(key),
+    do: safe_keyword_get(rest, wanted, default)
+
+  defp safe_keyword_get(_improper, _key, _default), do: {:error, :keyword_options_required}
 
   defp ensure_stream_supported(adapter) do
     if adapter_exports?(adapter, :stream, 2),
@@ -713,11 +829,29 @@ defmodule Arbor.LLM.Client do
     if max_steps <= 0 do
       complete(client, request, opts)
     else
-      do_generate_with_tools(client, request, tools, on_step, max_steps, parallel, opts)
+      do_generate_with_tools(
+        client,
+        request,
+        tools,
+        on_step,
+        max_steps,
+        parallel,
+        opts,
+        ToolResultBudget.new()
+      )
     end
   end
 
-  defp do_generate_with_tools(client, request, tools, on_step, max_steps, parallel, opts) do
+  defp do_generate_with_tools(
+         client,
+         request,
+         tools,
+         on_step,
+         max_steps,
+         parallel,
+         opts,
+         tool_result_budget
+       ) do
     with :ok <- ensure_not_aborted(opts) do
       retry_opts = Keyword.get(opts, :retry, [])
 
@@ -773,24 +907,33 @@ defmodule Arbor.LLM.Client do
               {:ok, response}
 
             true ->
-              tool_messages = execute_tool_calls(tool_calls, tools, parallel, on_step, opts)
+              with {:ok, tool_messages, next_budget} <-
+                     execute_tool_calls(
+                       tool_calls,
+                       tools,
+                       parallel,
+                       on_step,
+                       opts,
+                       tool_result_budget
+                     ) do
+                updated_messages =
+                  request.messages ++
+                    [Message.new(:assistant, response.text, %{"tool_calls" => tool_calls})] ++
+                    tool_messages
 
-              updated_messages =
-                request.messages ++
-                  [Message.new(:assistant, response.text, %{"tool_calls" => tool_calls})] ++
-                  tool_messages
+                next_request = %{request | messages: updated_messages}
 
-              next_request = %{request | messages: updated_messages}
-
-              do_generate_with_tools(
-                client,
-                next_request,
-                tools,
-                on_step,
-                max_steps - 1,
-                parallel,
-                opts
-              )
+                do_generate_with_tools(
+                  client,
+                  next_request,
+                  tools,
+                  on_step,
+                  max_steps - 1,
+                  parallel,
+                  opts,
+                  next_budget
+                )
+              end
           end
 
         {:error, reason} ->
@@ -804,14 +947,12 @@ defmodule Arbor.LLM.Client do
   defp complete_with_step_timeout(client, request, opts) do
     case Keyword.get(opts, :max_step_timeout_ms) do
       timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 ->
-        task = Task.async(fn -> complete(client, request, opts) end)
-
-        try do
-          Task.await(task, timeout_ms)
-        catch
-          :exit, {:timeout, _} ->
-            Task.shutdown(task, :brutal_kill)
-            {:error, RequestTimeoutError.exception(timeout_ms: timeout_ms)}
+        with {:ok, receipt} <- Deadline.receipt(timeout_ms: timeout_ms) do
+          Deadline.run(
+            fn -> complete(client, request, opts) end,
+            receipt,
+            RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+          )
         end
 
       _ ->
@@ -819,23 +960,39 @@ defmodule Arbor.LLM.Client do
     end
   end
 
-  defp execute_tool_calls(tool_calls, tools, parallel, on_step, opts) do
+  defp execute_tool_calls(tool_calls, tools, parallel, on_step, opts, aggregate) do
     runner = fn call -> execute_tool_call(call, tools, on_step, opts) end
 
-    if parallel and length(tool_calls) > 1 do
-      tool_calls
-      |> Task.async_stream(runner, timeout: 30_000, ordered: true)
-      |> Enum.map(fn
-        {:ok, message} ->
-          message
+    results =
+      if parallel and length(tool_calls) > 1 do
+        tool_calls
+        |> Task.async_stream(runner, timeout: 30_000, ordered: true)
+        |> Enum.map(fn
+          {:ok, result} ->
+            result
 
-        {:exit, reason} ->
-          Message.new(:tool, "tool failed: #{inspect(reason)}", %{"status" => "error"})
-      end)
-    else
-      Enum.map(tool_calls, runner)
+          {:exit, _reason} ->
+            {%{"status" => "error", "error" => "tool execution failed"}, nil, nil}
+        end)
+      else
+        Enum.map(tool_calls, runner)
+      end
+
+    encode_tool_results(results, aggregate, [])
+  end
+
+  defp encode_tool_results([], aggregate, messages),
+    do: {:ok, Enum.reverse(messages), aggregate}
+
+  defp encode_tool_results([{output, id, name} | rest], aggregate, messages) do
+    with {:ok, encoded, next} <- ToolResultBudget.encode(output, aggregate) do
+      message = Message.new(:tool, encoded, %{"tool_call_id" => id, "name" => name})
+      encode_tool_results(rest, next, [message | messages])
     end
   end
+
+  defp encode_tool_results(_invalid, _aggregate, _messages),
+    do: {:error, :invalid_tool_execution_result}
 
   defp execute_tool_call(call, tools, on_step, opts) do
     validate_fun = Keyword.get(opts, :validate_tool_call, &ToolCallValidator.validate/2)
@@ -905,7 +1062,7 @@ defmodule Arbor.LLM.Client do
     post_result = apply(hooks_mod, :run, [:post, hook_for(hooks, :post), post_payload, opts])
     emit_step(on_step, Map.merge(%{type: :tool_hook_post, tool: name, id: id}, post_result))
 
-    Message.new(:tool, Jason.encode!(output), %{"tool_call_id" => id, "name" => name})
+    {output, id, name}
   end
 
   defp execute_tool_after_pre(name, id, arguments, tools, on_step) do
@@ -957,7 +1114,7 @@ defmodule Arbor.LLM.Client do
                 %{"status" => "ok", "result" => map}
 
               other ->
-                %{"status" => "ok", "result" => %{"value" => inspect(other)}}
+                %{"status" => "ok", "result" => other}
             end
           rescue
             exception ->

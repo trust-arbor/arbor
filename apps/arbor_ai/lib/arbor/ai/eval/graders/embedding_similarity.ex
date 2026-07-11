@@ -49,10 +49,13 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarity do
     case RetrievalSupport.invoke(
            embed_fn,
            [[actual, expected], url, model, timeout],
-           :embedding_callback_failed
+           :embedding_callback_failed,
+           timeout
          ) do
-      {:ok, [vector_a, vector_b]} ->
-        with {:ok, vector_a} <- RetrievalSupport.validate_vector(vector_a),
+      {:ok, embedding_response} ->
+        with {:ok, [vector_a, vector_b], _usage} <-
+               Arbor.LLM.decode_embedding_response(embedding_response, 2),
+             {:ok, vector_a} <- RetrievalSupport.validate_vector(vector_a),
              {:ok, vector_b} <- RetrievalSupport.validate_vector(vector_b),
              :ok <- matching_dimensions(vector_a, vector_b) do
           similarity = cosine_similarity(vector_a, vector_b)
@@ -65,9 +68,6 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarity do
         else
           {:error, reason} -> unavailable(reason)
         end
-
-      {:ok, _embeddings} ->
-        unavailable({:invalid_embedding_response, :two_vectors_required})
 
       {:error, reason} ->
         unavailable(reason)
@@ -157,10 +157,7 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarity do
            @max_embedding_response_bytes
          ) do
       {:ok, 200, body} ->
-        case Arbor.LLM.decode_embedding_response(body, length(texts)) do
-          {:ok, embeddings, _usage} -> {:ok, embeddings}
-          {:error, reason} -> {:error, {:invalid_embedding_response, reason}}
-        end
+        {:ok, body}
 
       {:ok, status, body} ->
         RetrievalSupport.http_error(:http_error, status, body)

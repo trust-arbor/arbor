@@ -131,9 +131,15 @@ defmodule Arbor.LLM.EmbeddingTest do
         def provider, do: "mock_embed"
 
         def embed(texts, model, _opts) do
+          indexed =
+            texts
+            |> Enum.with_index(fn _text, index ->
+              %{index: index, embedding: [index + 0.1, index + 0.2]}
+            end)
+
           {:ok,
            %{
-             embeddings: Enum.map(texts, fn _ -> [0.1, 0.2] end),
+             indexed_embeddings: Enum.reverse(indexed),
              model: model,
              provider: "mock_embed",
              usage: %{prompt_tokens: 5, total_tokens: 5},
@@ -150,6 +156,49 @@ defmodule Arbor.LLM.EmbeddingTest do
       assert length(result.embeddings) == 3
       assert result.model == "test-model"
       assert result.dimensions == 2
+      assert result.embeddings == [[0.1, 0.2], [1.1, 1.2], [2.1, 2.2]]
+    end
+
+    test "security regression: ambiguous positional batches and unbounded metadata are rejected" do
+      defmodule AmbiguousEmbedAdapter do
+        def embed(_texts, _model, _opts) do
+          {:ok,
+           %{
+             embeddings: [[2.0], [1.0]],
+             usage: %{total_tokens: 1.0e308}
+           }}
+        end
+      end
+
+      client = Client.new(adapters: %{"ambiguous" => AmbiguousEmbedAdapter})
+
+      assert {:error, :indexed_embeddings_required_for_batch} =
+               Client.embed_batch(client, "ambiguous", "model", ["first", "second"])
+
+      assert {:error, :embedding_texts_required} =
+               Client.embed_batch(client, "ambiguous", "model", [])
+    end
+
+    test "security regression: embedding decoder is total and magnitude bounded" do
+      improper = [%{"index" => 0, "embedding" => [1.0]} | :improper]
+
+      assert {:error, {:decoded_term_invalid, :proper_list_required}} =
+               Arbor.LLM.decode_embedding_response(%{"data" => improper}, 1)
+
+      assert {:error, :bounded_finite_numeric_embedding_required} =
+               Arbor.LLM.decode_embedding_response(
+                 %{"data" => [%{"index" => 0, "embedding" => [1.0e308]}]},
+                 1
+               )
+
+      assert {:error, :bounded_usage_number_required} =
+               Arbor.LLM.decode_embedding_response(
+                 %{
+                   "data" => [%{"index" => 0, "embedding" => [1.0]}],
+                   "usage" => %{"total_tokens" => 1.0e308}
+                 },
+                 1
+               )
     end
   end
 

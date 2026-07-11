@@ -24,14 +24,40 @@ defmodule Arbor.LLM.Endpoint do
     "zenmux" => ["/api/v1"]
   }
   @endpoint_suffixes ["chat/completions", "embeddings", "responses", "models"]
+  @official_origins %{
+    "anthropic" => ["https://api.anthropic.com"],
+    "cerebras" => ["https://api.cerebras.ai"],
+    "google" => ["https://generativelanguage.googleapis.com"],
+    "groq" => ["https://api.groq.com"],
+    "openai" => ["https://api.openai.com"],
+    "openrouter" => ["https://openrouter.ai"],
+    "venice" => ["https://api.venice.ai"],
+    "xai" => ["https://api.x.ai"],
+    "zai" => ["https://api.z.ai", "https://open.bigmodel.cn"],
+    "zai_coder" => ["https://api.z.ai", "https://open.bigmodel.cn"],
+    "zai_coding_plan" => ["https://api.z.ai", "https://open.bigmodel.cn"],
+    "zenmux" => ["https://zenmux.ai"]
+  }
+  @default_eval_origin "http://localhost:11434"
+  @oauth_response_endpoints [
+    "https://chatgpt.com/backend-api/codex/responses",
+    "https://api.x.ai/v1/responses"
+  ]
+  @oauth_discovery_endpoints ["https://auth.x.ai/.well-known/openid-configuration"]
+  @oauth_token_origins ["https://auth.openai.com", "https://auth.x.ai"]
+  @eval_http_paths ["/api/embeddings", "/api/chat", "/v1/embeddings"]
 
   @type policy ::
           :root
           | :embedding
           | :lm_studio
+          | :eval_http
+          | :oauth_responses
+          | :oauth_discovery
+          | :oauth_token
+          | :oauth_xai_token
           | :req_llm_base
           | {:req_llm_base, atom() | String.t()}
-          | {:req_llm_base, atom() | String.t(), [String.t()]}
 
   @spec validate(term(), policy()) :: {:ok, String.t()} | {:error, atom()}
   def validate(value, policy)
@@ -44,31 +70,49 @@ defmodule Arbor.LLM.Endpoint do
          {:ok, canonical_path} <- validate_path(path, path_policy),
          :ok <- verify_uri_parse(value, scheme, host, port),
          canonical <- canonical(scheme, canonical_host, port, explicit_port?, canonical_path),
-         :ok <- verify_canonical(canonical, scheme, canonical_host, port, canonical_path) do
+         :ok <- verify_canonical(canonical, scheme, canonical_host, port, canonical_path),
+         :ok <- authorize_endpoint(canonical, path_policy) do
       {:ok, canonical}
     end
   end
 
   def validate(_value, _policy), do: {:error, :bounded_string_required}
 
-  defp normalize_policy(policy) when policy in [:root, :embedding, :lm_studio, :req_llm_base],
-    do: {:ok, policy}
+  defp normalize_policy(policy)
+       when policy in [
+              :root,
+              :embedding,
+              :lm_studio,
+              :eval_http,
+              :oauth_responses,
+              :oauth_discovery,
+              :oauth_token,
+              :oauth_xai_token,
+              :req_llm_base
+            ],
+       do: {:ok, policy}
 
   defp normalize_policy({:req_llm_base, provider})
-       when (is_atom(provider) or is_binary(provider)) and not is_nil(provider),
-       do: normalize_policy({:req_llm_base, provider, []})
-
-  defp normalize_policy({:req_llm_base, provider, reviewed_paths})
-       when (is_atom(provider) or is_binary(provider)) and not is_nil(provider) and
-              is_list(reviewed_paths) do
-    provider = Arbor.LLM.ProviderRegistry.normalize(provider)
-
-    with {:ok, reviewed_paths} <- validate_reviewed_paths(reviewed_paths) do
-      {:ok, {:req_llm_base, provider, reviewed_paths}}
+       when (is_atom(provider) or is_binary(provider)) and not is_nil(provider) do
+    with {:ok, provider} <- normalize_provider_name(provider),
+         {:ok, configured} <- configured_provider_endpoints(provider) do
+      {:ok, {:operator_req_llm_base, provider, configured}}
     end
   end
 
   defp normalize_policy(_policy), do: {:error, :invalid_endpoint_policy}
+
+  defp normalize_provider_name(provider) when is_atom(provider),
+    do: provider |> Atom.to_string() |> normalize_provider_name()
+
+  defp normalize_provider_name(provider)
+       when is_binary(provider) and byte_size(provider) > 0 and byte_size(provider) <= 256 do
+    if String.valid?(provider),
+      do: {:ok, Arbor.LLM.ProviderRegistry.normalize(provider)},
+      else: {:error, :invalid_endpoint_policy}
+  end
+
+  defp normalize_provider_name(_provider), do: {:error, :invalid_endpoint_policy}
 
   defp validate_text(value) do
     cond do
@@ -208,9 +252,22 @@ defmodule Arbor.LLM.Endpoint do
   defp validate_path(path, :req_llm_base) when path in ["", "/"], do: {:ok, ""}
   defp validate_path(path, :req_llm_base) when path in ["/v1", "/v1/"], do: {:ok, "/v1"}
 
-  defp validate_path(path, {:req_llm_base, provider, reviewed_paths}) do
+  defp validate_path(path, :eval_http) do
+    with {:ok, canonical} <- canonical_endpoint_path(path),
+         true <- canonical in @eval_http_paths or {:error, :eval_http_path_not_allowed} do
+      {:ok, canonical}
+    end
+  end
+
+  defp validate_path(path, :oauth_responses), do: canonical_endpoint_path(path)
+  defp validate_path(path, :oauth_discovery), do: canonical_endpoint_path(path)
+  defp validate_path(path, :oauth_token), do: canonical_endpoint_path(path)
+  defp validate_path(path, :oauth_xai_token), do: canonical_endpoint_path(path)
+
+  defp validate_path(path, {:operator_req_llm_base, provider, configured}) do
     with {:ok, canonical} <- canonical_endpoint_path(path) do
-      allowed = Map.get(@provider_base_paths, provider, []) ++ reviewed_paths
+      configured_paths = Enum.map(configured, &endpoint_path/1)
+      allowed = Map.get(@provider_base_paths, provider, []) ++ configured_paths
 
       cond do
         endpoint_suffix?(canonical) -> {:error, :endpoint_suffix_must_not_be_in_base_url}
@@ -238,52 +295,6 @@ defmodule Arbor.LLM.Endpoint do
       true -> {:ok, canonical_path(path)}
     end
   end
-
-  defp validate_reviewed_paths(paths) do
-    Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, acc} ->
-      case validate_reviewed_path(path) do
-        {:ok, canonical} -> {:cont, {:ok, [canonical | acc]}}
-        {:error, _reason} = error -> {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, canonical} -> {:ok, Enum.reverse(canonical) |> Enum.uniq()}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  defp validate_reviewed_path(path) when is_binary(path) and byte_size(path) <= 512 do
-    canonical = canonical_path(path)
-    segments = String.split(canonical, "/", trim: true)
-
-    cond do
-      canonical == "" ->
-        {:error, :reviewed_proxy_path_must_be_non_root}
-
-      not String.starts_with?(canonical, "/") ->
-        {:error, :reviewed_proxy_path_must_be_absolute}
-
-      String.contains?(canonical, ["%", "?", "#", "\\", "//"]) ->
-        {:error, :invalid_reviewed_proxy_path}
-
-      length(segments) > 16 ->
-        {:error, :reviewed_proxy_path_too_deep}
-
-      Enum.any?(segments, &(&1 in ["", ".", ".."])) ->
-        {:error, :path_traversal_forbidden}
-
-      Enum.any?(segments, &(not Regex.match?(~r/\A[A-Za-z0-9._~-]+\z/, &1))) ->
-        {:error, :invalid_reviewed_proxy_path}
-
-      endpoint_suffix?(canonical) ->
-        {:error, :endpoint_suffix_must_not_be_in_base_url}
-
-      true ->
-        {:ok, canonical}
-    end
-  end
-
-  defp validate_reviewed_path(_path), do: {:error, :invalid_reviewed_proxy_path}
 
   defp endpoint_suffix?(path) do
     Enum.any?(@endpoint_suffixes, fn suffix ->
@@ -328,6 +339,188 @@ defmodule Arbor.LLM.Endpoint do
       {:error, :canonical_authority_mismatch}
     end
   end
+
+  defp authorize_endpoint(canonical, :root) do
+    if canonical == @default_eval_origin,
+      do: :ok,
+      else: authorize_configured_eval_origin(canonical)
+  end
+
+  defp authorize_endpoint(canonical, :embedding) do
+    if canonical == @default_eval_origin <> "/v1/embeddings",
+      do: :ok,
+      else: authorize_configured_eval_origin(canonical)
+  end
+
+  defp authorize_endpoint(canonical, :eval_http), do: authorize_configured_eval_origin(canonical)
+
+  defp authorize_endpoint(canonical, :lm_studio) do
+    configured =
+      Application.get_env(:arbor_llm, :lm_studio_base_url, "http://localhost:1234/v1")
+
+    with {:ok, trusted} <- canonical_operator_endpoint(configured, false),
+         true <- canonical == trusted or {:error, :endpoint_origin_not_trusted} do
+      :ok
+    end
+  end
+
+  defp authorize_endpoint(_canonical, :req_llm_base),
+    do: {:error, :provider_owned_endpoint_policy_required}
+
+  defp authorize_endpoint(canonical, {:operator_req_llm_base, provider, configured}) do
+    official = Map.get(@official_origins, provider, [])
+    canonical_origin = endpoint_origin(canonical)
+
+    cond do
+      canonical in configured -> :ok
+      canonical_origin in official -> :ok
+      true -> {:error, :endpoint_origin_not_trusted}
+    end
+  end
+
+  defp authorize_endpoint(canonical, :oauth_responses) do
+    with {:ok, configured} <- configured_endpoint_list(:trusted_oauth_response_endpoints, true) do
+      if canonical in @oauth_response_endpoints or canonical in configured,
+        do: :ok,
+        else: {:error, :endpoint_origin_not_trusted}
+    end
+  end
+
+  defp authorize_endpoint(canonical, :oauth_discovery) do
+    if canonical in @oauth_discovery_endpoints,
+      do: :ok,
+      else: {:error, :endpoint_origin_not_trusted}
+  end
+
+  defp authorize_endpoint(canonical, :oauth_token) do
+    with {:ok, configured} <- configured_endpoint_list(:trusted_oauth_token_endpoints, true) do
+      allowed_origins = @oauth_token_origins ++ Enum.map(configured, &endpoint_origin/1)
+
+      if endpoint_origin(canonical) in allowed_origins,
+        do: :ok,
+        else: {:error, :endpoint_origin_not_trusted}
+    end
+  end
+
+  defp authorize_endpoint(canonical, :oauth_xai_token) do
+    if endpoint_origin(canonical) == "https://auth.x.ai",
+      do: :ok,
+      else: {:error, :endpoint_origin_not_trusted}
+  end
+
+  defp authorize_configured_eval_origin(canonical) do
+    with {:ok, configured} <- configured_endpoint_list(:trusted_eval_endpoints, true) do
+      trusted_origins = [@default_eval_origin | Enum.map(configured, &endpoint_origin/1)]
+
+      if endpoint_origin(canonical) in trusted_origins,
+        do: :ok,
+        else: {:error, :endpoint_origin_not_trusted}
+    end
+  end
+
+  defp configured_provider_endpoints(provider) do
+    configured = Application.get_env(:arbor_llm, :trusted_proxy_endpoints, %{})
+
+    with {:ok, configured_values} <- provider_config_values(configured, provider),
+         {:ok, configured_endpoints} <- canonical_endpoint_list(configured_values, false),
+         {:ok, local_endpoints} <- local_provider_endpoints(provider) do
+      {:ok, Enum.uniq(configured_endpoints ++ local_endpoints)}
+    end
+  end
+
+  defp provider_config_values(configured, provider) when is_map(configured) do
+    value =
+      Map.get(configured, provider) ||
+        Enum.find_value(configured, fn
+          {key, value} when is_atom(key) -> if Atom.to_string(key) == provider, do: value
+          _entry -> nil
+        end)
+
+    {:ok, value || []}
+  end
+
+  defp provider_config_values(_configured, _provider),
+    do: {:error, :invalid_trusted_endpoint_config}
+
+  defp local_provider_endpoints(provider) do
+    if Arbor.LLM.ProviderRegistry.local?(provider) do
+      case Arbor.LLM.ProviderRegistry.default_base_url(provider) do
+        value when is_binary(value) ->
+          case canonical_operator_endpoint(value, false) do
+            {:ok, canonical} -> {:ok, [canonical]}
+            {:error, _reason} -> {:error, :invalid_local_provider_endpoint}
+          end
+
+        _other ->
+          {:error, :invalid_local_provider_endpoint}
+      end
+    else
+      {:ok, []}
+    end
+  end
+
+  defp configured_endpoint_list(key, allow_endpoint_suffix?) do
+    key
+    |> then(&Application.get_env(:arbor_llm, &1, []))
+    |> canonical_endpoint_list(allow_endpoint_suffix?)
+  end
+
+  defp canonical_endpoint_list(value, allow_endpoint_suffix?) when is_binary(value),
+    do: canonical_endpoint_list([value], allow_endpoint_suffix?)
+
+  defp canonical_endpoint_list(value, allow_endpoint_suffix?) do
+    canonical_endpoint_list(value, allow_endpoint_suffix?, [], 0)
+  end
+
+  defp canonical_endpoint_list([], _allow_endpoint_suffix?, acc, _count),
+    do: {:ok, Enum.reverse(acc)}
+
+  defp canonical_endpoint_list(_values, _allow_endpoint_suffix?, _acc, count) when count >= 32,
+    do: {:error, :too_many_trusted_endpoints}
+
+  defp canonical_endpoint_list([value | rest], allow_endpoint_suffix?, acc, count)
+       when is_binary(value) do
+    case canonical_operator_endpoint(value, allow_endpoint_suffix?) do
+      {:ok, canonical} ->
+        canonical_endpoint_list(rest, allow_endpoint_suffix?, [canonical | acc], count + 1)
+
+      {:error, _reason} ->
+        {:error, :invalid_trusted_endpoint_config}
+    end
+  end
+
+  defp canonical_endpoint_list(_improper_or_invalid, _allow_endpoint_suffix?, _acc, _count),
+    do: {:error, :invalid_trusted_endpoint_config}
+
+  defp canonical_operator_endpoint(value, allow_endpoint_suffix?)
+       when is_binary(value) and byte_size(value) <= @max_endpoint_bytes do
+    with :ok <- validate_text(value),
+         {:ok, scheme, authority, path} <- split_original(value),
+         {:ok, host, port, explicit_port?} <- parse_authority(authority),
+         {:ok, canonical_host} <- validate_host(host),
+         {:ok, canonical_path} <- canonical_endpoint_path(path),
+         true <-
+           allow_endpoint_suffix? or not endpoint_suffix?(canonical_path) or
+             {:error, :endpoint_suffix_must_not_be_in_base_url},
+         :ok <- verify_uri_parse(value, scheme, host, port),
+         canonical <- canonical(scheme, canonical_host, port, explicit_port?, canonical_path),
+         :ok <- verify_canonical(canonical, scheme, canonical_host, port, canonical_path) do
+      {:ok, canonical}
+    end
+  end
+
+  defp canonical_operator_endpoint(_value, _allow_endpoint_suffix?),
+    do: {:error, :bounded_string_required}
+
+  defp endpoint_origin(value) do
+    uri = URI.parse(value)
+    host = if String.contains?(uri.host || "", ":"), do: "[#{uri.host}]", else: uri.host
+    port = uri.port || default_port(uri.scheme)
+    rendered_port = if port == default_port(uri.scheme), do: "", else: ":#{port}"
+    "#{uri.scheme}://#{host}#{rendered_port}"
+  end
+
+  defp endpoint_path(value), do: URI.parse(value).path || ""
 
   defp default_port("http"), do: 80
   defp default_port("https"), do: 443

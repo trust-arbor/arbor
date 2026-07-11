@@ -38,4 +38,21 @@ defmodule Arbor.LLM.OAuthTest do
     # + invalidate the user's grok CLI credential. openai reads a cached token (no refresh) but still
     # does file I/O, so it's exercised only in the manual verify below, not the async suite.
   end
+
+  test "security regression: xAI discovery requires the exact trusted origin" do
+    assert {:ok, "https://auth.x.ai/oauth/token"} =
+             OAuth.trusted_xai_token_endpoint(%{
+               "token_endpoint" => "https://auth.x.ai/oauth/token"
+             })
+
+    for endpoint <- [
+          "https://attacker-x.ai/oauth/token",
+          "https://x.ai.attacker.example/oauth/token",
+          "http://auth.x.ai/oauth/token",
+          "https://auth.x.ai.attacker.example/oauth/token"
+        ] do
+      assert {:error, :untrusted_token_endpoint} =
+               OAuth.trusted_xai_token_endpoint(%{"token_endpoint" => endpoint})
+    end
+  end
 end

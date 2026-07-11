@@ -12,7 +12,7 @@ defmodule Arbor.LLM.OAuth.Responses do
   `response.completed` event's `response.output`.
   """
 
-  alias Arbor.LLM.{OAuth, ResponseBudget}
+  alias Arbor.LLM.{Deadline, Endpoint, OAuth, ResponseBudget}
 
   @max_response_bytes 16_777_216
   @max_events 100_000
@@ -23,7 +23,6 @@ defmodule Arbor.LLM.OAuth.Responses do
   @max_map_keys 10_000
   @max_list_items 100_000
   @max_timeout 900_000
-  @cleanup_wait_ms 250
 
   @endpoints %{
     openai: "https://chatgpt.com/backend-api/codex/responses",
@@ -39,12 +38,27 @@ defmodule Arbor.LLM.OAuth.Responses do
   `:model`, `:receive_timeout`. Anthropic is refused upstream by `OAuth.access_token/1`.
   """
   @spec complete(atom() | String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
-  def complete(provider, %{} = req, opts \\ []) do
-    with {:ok, key} <- provider_key(provider),
-         {:ok, token} <- OAuth.access_token(provider),
-         {:ok, limits} <- build_limits(opts) do
+  def complete(provider, req, opts \\ [])
+
+  def complete(provider, %{} = req, opts) do
+    with {:ok, limits} <- build_limits(opts),
+         {:ok, receipt} <- Deadline.receipt(timeout_ms: limits.timeout) do
+      Deadline.run(
+        fn -> do_complete(provider, req, opts, limits) end,
+        receipt,
+        {:responses_deadline_exceeded, limits.timeout}
+      )
+    end
+  end
+
+  def complete(_provider, _req, _opts), do: {:error, :invalid_responses_request}
+
+  defp do_complete(provider, req, opts, limits) do
+    with :ok <- ResponseBudget.validate(req, request_limits()),
+         {:ok, key} <- provider_key(provider),
+         {:ok, token} <- OAuth.access_token(provider) do
       sid = :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
-      body = build_body(opts[:model] || @default_models[key], req)
+      body = build_body(Keyword.get(opts, :model) || @default_models[key], req)
 
       request_sse(@endpoints[key], headers(key, token, sid), body, limits)
     end
@@ -52,14 +66,15 @@ defmodule Arbor.LLM.OAuth.Responses do
 
   @doc false
   def request_sse(url, headers, body, opts_or_limits) do
-    with {:ok, limits} <- normalize_limits(opts_or_limits) do
-      deadline_ms = System.monotonic_time(:millisecond) + limits.timeout
-      limits = Map.put(limits, :deadline_ms, deadline_ms)
+    with {:ok, limits} <- normalize_limits(opts_or_limits),
+         {:ok, receipt} <- Deadline.receipt(timeout_ms: limits.timeout),
+         {:ok, canonical_url} <- Endpoint.validate(url, :oauth_responses) do
+      limits = Map.put(limits, :deadline_ms, receipt.deadline_ms)
 
-      run_owned_request(
-        fn -> do_request_sse(url, headers, body, limits) end,
-        deadline_ms,
-        limits.timeout
+      Deadline.run(
+        fn -> do_request_sse(canonical_url, headers, body, limits) end,
+        receipt,
+        {:responses_deadline_exceeded, limits.timeout}
       )
     end
   end
@@ -71,31 +86,64 @@ defmodule Arbor.LLM.OAuth.Responses do
   @spec complete_text(atom() | String.t(), [map()], keyword()) ::
           {:ok, String.t()} | {:error, term()}
   def complete_text(provider, messages, opts \\ []) do
-    instructions =
-      messages |> Enum.filter(&(&1.role == :system)) |> Enum.map_join("\n\n", & &1.content)
+    with :ok <- validate_text_messages(messages) do
+      instructions =
+        messages |> Enum.filter(&(&1.role == :system)) |> Enum.map_join("\n\n", & &1.content)
 
-    input =
-      messages
-      |> Enum.reject(&(&1.role == :system))
-      |> Enum.map(fn m ->
-        %{
-          "role" => to_string(m.role),
-          "content" => [%{"type" => "input_text", "text" => m.content}]
-        }
-      end)
+      input =
+        messages
+        |> Enum.reject(&(&1.role == :system))
+        |> Enum.map(fn m ->
+          %{
+            "role" => to_string(m.role),
+            "content" => [%{"type" => "input_text", "text" => m.content}]
+          }
+        end)
 
-    case complete(provider, %{instructions: instructions, input: input, tools: nil}, opts) do
-      {:ok, %{text: text}} -> {:ok, text}
-      err -> err
+      case complete(provider, %{instructions: instructions, input: input, tools: nil}, opts) do
+        {:ok, %{text: text}} -> {:ok, text}
+        err -> err
+      end
     end
   end
 
-  defp provider_key(provider) do
-    case provider |> to_string() |> String.downcase() do
+  defp provider_key(provider) when is_atom(provider),
+    do: provider |> Atom.to_string() |> provider_key()
+
+  defp provider_key(provider)
+       when is_binary(provider) and byte_size(provider) > 0 and byte_size(provider) <= 256 do
+    case String.downcase(provider) do
       p when p in ~w(openai codex chatgpt gpt) -> {:ok, :openai}
       p when p in ~w(xai grok x-ai) -> {:ok, :xai}
       p -> {:error, {:no_responses_provider, p}}
     end
+  end
+
+  defp provider_key(_provider), do: {:error, :invalid_responses_provider}
+
+  defp validate_text_messages(messages) do
+    with :ok <- ResponseBudget.validate(messages, request_limits()) do
+      validate_text_message_list(messages)
+    end
+  end
+
+  defp validate_text_message_list([]), do: :ok
+
+  defp validate_text_message_list([%{role: role, content: content} | rest])
+       when (is_atom(role) or is_binary(role)) and is_binary(content),
+       do: validate_text_message_list(rest)
+
+  defp validate_text_message_list(_improper_or_invalid),
+    do: {:error, :bounded_text_messages_required}
+
+  defp request_limits do
+    [
+      max_bytes: @max_response_bytes,
+      max_nodes: @max_nodes,
+      max_depth: @max_depth,
+      max_map_keys: @max_map_keys,
+      max_list_items: @max_list_items
+    ]
   end
 
   # store:false, stream:true (required by the subscription backends). tools only when present.
@@ -138,7 +186,9 @@ defmodule Arbor.LLM.OAuth.Responses do
   end
 
   @doc false
-  def parse_sse(raw, opts_or_limits \\ []) when is_binary(raw) do
+  def parse_sse(raw, opts_or_limits \\ [])
+
+  def parse_sse(raw, opts_or_limits) when is_binary(raw) do
     with {:ok, limits} <- normalize_limits(opts_or_limits),
          true <-
            byte_size(raw) <= limits.max_response_bytes or
@@ -153,6 +203,8 @@ defmodule Arbor.LLM.OAuth.Responses do
        }}
     end
   end
+
+  def parse_sse(_raw, _opts_or_limits), do: {:error, :binary_sse_required}
 
   defp do_request_sse(url, headers, body, limits) do
     into = bounded_sse_receipt(limits)
@@ -479,19 +531,62 @@ defmodule Arbor.LLM.OAuth.Responses do
   defp normalize_limits(_opts), do: {:error, :invalid_responses_limits}
 
   defp build_limits(opts) do
-    limits = %{
-      timeout: Keyword.get(opts, :receive_timeout, 180_000),
-      max_response_bytes: Keyword.get(opts, :max_response_bytes, @max_response_bytes),
-      max_events: Keyword.get(opts, :max_events, @max_events),
-      max_event_bytes: Keyword.get(opts, :max_event_bytes, @max_event_bytes),
-      max_work: Keyword.get(opts, :max_work, @max_work),
-      max_nodes: Keyword.get(opts, :max_nodes, @max_nodes),
-      max_depth: Keyword.get(opts, :max_depth, @max_depth),
-      max_map_keys: Keyword.get(opts, :max_map_keys, @max_map_keys),
-      max_list_items: Keyword.get(opts, :max_list_items, @max_list_items)
-    }
+    with {:ok, supplied} <- collect_limit_options(opts, %{}, 0),
+         {:ok, timeout} <- positive_clamped(supplied, :receive_timeout, 180_000, @max_timeout),
+         {:ok, max_response_bytes} <-
+           positive_clamped(
+             supplied,
+             :max_response_bytes,
+             @max_response_bytes,
+             @max_response_bytes
+           ),
+         {:ok, max_events} <- positive_clamped(supplied, :max_events, @max_events, @max_events),
+         {:ok, max_event_bytes} <-
+           positive_clamped(
+             supplied,
+             :max_event_bytes,
+             @max_event_bytes,
+             min(max_response_bytes, @max_event_bytes)
+           ),
+         {:ok, max_work} <- positive_clamped(supplied, :max_work, @max_work, @max_work),
+         {:ok, max_nodes} <- positive_clamped(supplied, :max_nodes, @max_nodes, @max_nodes),
+         {:ok, max_depth} <- positive_clamped(supplied, :max_depth, @max_depth, @max_depth),
+         {:ok, max_map_keys} <-
+           positive_clamped(supplied, :max_map_keys, @max_map_keys, @max_map_keys),
+         {:ok, max_list_items} <-
+           positive_clamped(supplied, :max_list_items, @max_list_items, @max_list_items) do
+      {:ok,
+       %{
+         timeout: timeout,
+         max_response_bytes: max_response_bytes,
+         max_events: max_events,
+         max_event_bytes: max_event_bytes,
+         max_work: max_work,
+         max_nodes: max_nodes,
+         max_depth: max_depth,
+         max_map_keys: max_map_keys,
+         max_list_items: max_list_items
+       }}
+    end
+  end
 
-    validate_limits(limits)
+  defp collect_limit_options([], options, _count), do: {:ok, options}
+
+  defp collect_limit_options(_opts, _options, count) when count >= 64,
+    do: {:error, :invalid_responses_limits}
+
+  defp collect_limit_options([{key, value} | rest], options, count) when is_atom(key),
+    do: collect_limit_options(rest, Map.put(options, key, value), count + 1)
+
+  defp collect_limit_options(_improper, _options, _count),
+    do: {:error, :invalid_responses_limits}
+
+  defp positive_clamped(options, key, default, maximum) do
+    value = Map.get(options, key, default)
+
+    if is_integer(value) and value > 0,
+      do: {:ok, min(value, maximum)},
+      else: {:error, :invalid_responses_limits}
   end
 
   defp validate_limits(
@@ -525,37 +620,6 @@ defmodule Arbor.LLM.OAuth.Responses do
   end
 
   defp validate_limits(_limits), do: {:error, :invalid_responses_limits}
-
-  defp run_owned_request(fun, deadline_ms, timeout) do
-    reply_alias = :erlang.alias()
-    {pid, monitor_ref} = spawn_monitor(fn -> send(reply_alias, {reply_alias, fun.()}) end)
-    remaining = max(deadline_ms - System.monotonic_time(:millisecond), 0)
-
-    receive do
-      {^reply_alias, result} ->
-        :erlang.unalias(reply_alias)
-        Process.demonitor(monitor_ref, [:flush])
-        result
-
-      {:DOWN, ^monitor_ref, :process, ^pid, reason} ->
-        :erlang.unalias(reply_alias)
-        {:error, {:responses_request_failed, {:producer_exit, bounded_reason(reason)}}}
-    after
-      remaining ->
-        :erlang.unalias(reply_alias)
-        Process.exit(pid, :kill)
-        await_down(pid, monitor_ref)
-        {:error, {:responses_deadline_exceeded, timeout}}
-    end
-  end
-
-  defp await_down(pid, monitor_ref) do
-    receive do
-      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
-    after
-      @cleanup_wait_ms -> Process.demonitor(monitor_ref, [:flush])
-    end
-  end
 
   defp identity_content_encoding(response) do
     case Req.Response.get_header(response, "content-encoding") do

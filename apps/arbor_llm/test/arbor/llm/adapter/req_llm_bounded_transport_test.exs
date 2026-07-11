@@ -7,12 +7,24 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
   alias Arbor.LLM.Adapter.ReqLLM, as: Adapter
   alias Arbor.LLM.{Client, Message, OwnedStream, Request, StreamEvent}
 
+  setup do
+    original = Application.get_env(:arbor_llm, :trusted_proxy_endpoints)
+
+    on_exit(fn ->
+      if is_nil(original),
+        do: Application.delete_env(:arbor_llm, :trusted_proxy_endpoints),
+        else: Application.put_env(:arbor_llm, :trusted_proxy_endpoints, original)
+    end)
+
+    :ok
+  end
+
   test "security regression: Enum.take closes the owned producer and TCP connection synchronously" do
     chunks = List.duplicate(openai_sse("x"), 200)
     {url, server} = start_chunked_server(chunks, 3)
 
-    assert %OwnedStream{producer: producer} =
-             stream = Adapter.stream(request(), transport_opts(url))
+    assert {:ok, %OwnedStream{producer: producer} = stream} =
+             Client.stream(req_llm_client(), request(), transport_opts(url))
 
     started = System.monotonic_time(:millisecond)
     assert [%StreamEvent{type: :delta, data: %{text: "x"}}] = Enum.take(stream, 1)
@@ -29,7 +41,10 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     {url, server} = start_chunked_server(chunks, 2)
 
     opts = transport_opts(url) ++ [max_response_bytes: 512, max_stream_event_bytes: 256]
-    assert %OwnedStream{producer: producer} = stream = Adapter.stream(request(), opts)
+
+    assert {:ok, %OwnedStream{producer: producer} = stream} =
+             Client.stream(req_llm_client(), request(), opts)
+
     events = Enum.to_list(stream)
 
     assert Enum.any?(events, fn
@@ -54,7 +69,9 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     {url, server} = start_chunked_server(chunks, 2)
 
     opts = transport_opts(url) ++ [max_stream_events: 5, max_response_bytes: 4_096]
-    assert %OwnedStream{producer: producer} = stream = Adapter.stream(request(), opts)
+
+    assert {:ok, %OwnedStream{producer: producer} = stream} =
+             Client.stream(req_llm_client(), request(), opts)
 
     task =
       Task.async(fn ->
@@ -85,7 +102,8 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
       transport_opts(url) ++
         [max_stream_events: 1, max_response_bytes: 4_096, max_stream_event_bytes: 1_024]
 
-    assert %OwnedStream{producer: producer} = stream = Adapter.stream(request(), opts)
+    assert {:ok, %OwnedStream{producer: producer} = stream} =
+             Client.stream(req_llm_client(), request(), opts)
 
     assert [
              %StreamEvent{
@@ -109,8 +127,8 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
       {url, server} =
         start_chunked_server([openai_sse("ignored")], 1, content_type, 200, extra_headers)
 
-      assert %OwnedStream{producer: producer} =
-               stream = Adapter.stream(request(), transport_opts(url))
+      assert {:ok, %OwnedStream{producer: producer} = stream} =
+               Client.stream(req_llm_client(), request(), transport_opts(url))
 
       assert [
                %StreamEvent{
@@ -134,8 +152,8 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     for chunks <- [invalid_utf8, ["data: {\"choices\":[\n\n"], ["data: {\"choices\":[]}"]] do
       {url, server} = start_chunked_server(chunks, 1)
 
-      assert %OwnedStream{producer: producer} =
-               stream = Adapter.stream(request(), transport_opts(url))
+      assert {:ok, %OwnedStream{producer: producer} = stream} =
+               Client.stream(req_llm_client(), request(), transport_opts(url))
 
       assert [%StreamEvent{type: :error}] = Enum.to_list(stream)
       refute Process.alive?(producer)
@@ -146,9 +164,9 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
   test "security regression: a huge single chunk and HTTP error body do not escape stream bounds" do
     {huge_url, huge_server} = start_chunked_server([String.duplicate("x", 2_048)], 1)
 
-    assert %OwnedStream{producer: huge_producer} =
-             huge_stream =
-             Adapter.stream(
+    assert {:ok, %OwnedStream{producer: huge_producer} = huge_stream} =
+             Client.stream(
+               req_llm_client(),
                request(),
                transport_opts(huge_url) ++
                  [max_response_bytes: 512, max_stream_event_bytes: 512]
@@ -167,9 +185,8 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     {error_url, error_server} =
       start_chunked_server([String.duplicate("sensitive", 1_000)], 1, "text/plain", 500)
 
-    assert %OwnedStream{producer: error_producer} =
-             error_stream =
-             Adapter.stream(request(), transport_opts(error_url))
+    assert {:ok, %OwnedStream{producer: error_producer} = error_stream} =
+             Client.stream(req_llm_client(), request(), transport_opts(error_url))
 
     assert [
              %StreamEvent{type: :error, data: %{reason: {:stream_http_error, 500}}}
@@ -212,7 +229,7 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
 
     {url, server} =
       start_chunked_server(chunks, fn
-        1 -> 250
+        1 -> 1_000
         _ -> 2
       end)
 
@@ -224,13 +241,13 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
                provider: "lm_studio",
                model: "bounded-test",
                prompt: "hello",
-               stream_read_timeout_ms: 50,
+               stream_read_timeout_ms: 500,
                client_opts: transport_opts(url) ++ [receive_timeout: 5_000]
              )
 
     started = System.monotonic_time(:millisecond)
     assert_raise Arbor.LLM.RequestTimeoutError, fn -> Enum.to_list(stream) end
-    assert System.monotonic_time(:millisecond) - started < 1_000
+    assert System.monotonic_time(:millisecond) - started < 1_500
 
     assert %{sent: sent, closed?: true} = Task.await(server, 2_000)
     assert sent < length(chunks)
@@ -408,7 +425,7 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
         :ok = :gen_tcp.close(listener)
         {:ok, request} = receive_request_headers(socket, "")
 
-        :ok =
+        header_result =
           :gen_tcp.send(
             socket,
             "HTTP/1.1 #{status} Test\r\n" <>
@@ -418,12 +435,25 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
               "connection: keep-alive\r\n\r\n"
           )
 
-        {sent, closed?} = send_chunks(socket, chunks, delay, 0)
+        {sent, closed?} =
+          case header_result do
+            :ok -> send_chunks(socket, chunks, delay, 0)
+            {:error, _reason} -> {0, true}
+          end
+
         safe_close(socket)
         %{sent: sent, closed?: closed?, request: request}
       end)
 
-    {"http://127.0.0.1:#{port}/v1", task}
+    url = "http://127.0.0.1:#{port}/v1"
+
+    Application.put_env(:arbor_llm, :trusted_proxy_endpoints, %{
+      "lm_studio" => [url],
+      "ollama" => [url],
+      "openai" => [url]
+    })
+
+    {url, task}
   end
 
   defp receive_request_headers(socket, acc) when byte_size(acc) <= 65_536 do

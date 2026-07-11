@@ -169,7 +169,8 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
            RetrievalSupport.invoke(
              judge_fn,
              [provider, model, @judge_prompt, user_prompt, timeout],
-             :judge_callback_failed
+             :judge_callback_failed,
+             timeout
            ) do
       handle_judge_response(response)
     else

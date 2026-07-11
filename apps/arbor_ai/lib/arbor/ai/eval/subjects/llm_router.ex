@@ -56,7 +56,8 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouter do
       case RetrievalSupport.invoke(
              router_fn,
              [base_url, model, system_prompt, prompt, timeout],
-             :router_callback_failed
+             :router_callback_failed,
+             timeout
            ) do
         {:ok, content} when is_binary(content) ->
           with {:ok, modules} <-

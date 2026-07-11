@@ -1,10 +1,82 @@
 defmodule Arbor.LLM.ClientTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
-  alias Arbor.LLM.Client
-  alias Arbor.LLM.StreamEvent
+  alias Arbor.LLM.{Client, Message, Request, RequestTimeoutError, Response, StreamEvent}
 
   @moduletag :fast
+
+  defmodule BoundaryAdapter do
+    def provider, do: "boundary"
+
+    def complete(%Request{model: "huge"}, _opts) do
+      {:ok, %Response{text: String.duplicate("x", 16_777_217)}}
+    end
+
+    def complete(%Request{model: "huge-usage"}, _opts) do
+      {:ok, %Response{text: "ok", usage: %{total_tokens: 1.0e308}}}
+    end
+
+    def complete(%Request{model: "late"}, opts) do
+      send(Keyword.fetch!(opts, :observer), {:late_adapter_started, self()})
+      Process.sleep(40)
+      {:ok, %Response{text: "late"}}
+    end
+
+    def complete(_request, _opts), do: {:ok, %Response{text: "ok"}}
+  end
+
+  describe "public adapter boundary" do
+    test "security regression: injected adapters and middleware cannot bypass response ceilings" do
+      client =
+        Client.new(adapters: %{"boundary" => BoundaryAdapter}, default_provider: "boundary")
+
+      request = %Request{provider: "boundary", model: "huge", messages: []}
+
+      assert {:error, {:invalid_completion_response, _reason}} = Client.complete(client, request)
+
+      assert {:error, {:invalid_completion_response, _reason}} =
+               Arbor.LLM.generate(
+                 client: client,
+                 provider: "boundary",
+                 model: "huge",
+                 prompt: "hello"
+               )
+
+      middleware = fn _request, _next ->
+        {:ok, %Response{text: String.duplicate("m", 16_777_217)}}
+      end
+
+      middleware_client = %{client | middleware: [middleware]}
+
+      assert {:error, {:invalid_completion_response, _reason}} =
+               Client.complete(middleware_client, %{request | model: "valid"})
+
+      assert {:error, {:invalid_completion_response, :bounded_usage_number_required}} =
+               Client.complete(client, %{request | model: "huge-usage"})
+    end
+
+    test "security regression: queued late success is rejected by its completion timestamp" do
+      client =
+        Client.new(adapters: %{"boundary" => BoundaryAdapter}, default_provider: "boundary")
+
+      request = %Request{provider: "boundary", model: "late", messages: [Message.new(:user, "x")]}
+      observer = self()
+
+      for _iteration <- 1..10 do
+        task =
+          Task.async(fn ->
+            Client.complete(client, request, receive_timeout: 30, observer: observer)
+          end)
+
+        assert_receive {:late_adapter_started, _worker}
+        :erlang.suspend_process(task.pid)
+        Process.sleep(70)
+        :erlang.resume_process(task.pid)
+
+        assert {:error, %RequestTimeoutError{timeout_ms: 30}} = Task.await(task, 1_000)
+      end
+    end
+  end
 
   describe "collect_stream/1 — streamed tool calls (regression)" do
     test "preserves the tool-call name/id from atom-keyed stream events" do

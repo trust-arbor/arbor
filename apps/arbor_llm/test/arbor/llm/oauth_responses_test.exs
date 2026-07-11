@@ -5,6 +5,18 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
 
   alias Arbor.LLM.OAuth.Responses
 
+  setup do
+    original = Application.get_env(:arbor_llm, :trusted_oauth_response_endpoints)
+
+    on_exit(fn ->
+      if is_nil(original),
+        do: Application.delete_env(:arbor_llm, :trusted_oauth_response_endpoints),
+        else: Application.put_env(:arbor_llm, :trusted_oauth_response_endpoints, original)
+    end)
+
+    :ok
+  end
+
   test "bounded Responses SSE parsing preserves text and decoded tool arguments" do
     raw =
       sse(%{"type" => "response.output_text.delta", "delta" => "hello "}) <>
@@ -131,7 +143,9 @@ defmodule Arbor.LLM.OAuth.ResponsesTest do
         result
       end)
 
-    {"http://127.0.0.1:#{port}/responses", server}
+    url = "http://127.0.0.1:#{port}/responses"
+    Application.put_env(:arbor_llm, :trusted_oauth_response_endpoints, [url])
+    {url, server}
   end
 
   defp receive_http_headers(socket, acc) do

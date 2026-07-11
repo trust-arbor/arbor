@@ -6,15 +6,32 @@ defmodule Arbor.AI.Eval.Subjects.EmbeddingRetrievalTest do
   alias Arbor.AI.Eval.Subjects.EmbeddingRetrieval
 
   setup do
+    original = Application.get_env(:arbor_llm, :trusted_eval_endpoints)
+
+    Application.put_env(:arbor_llm, :trusted_eval_endpoints, [
+      "http://embedding.test",
+      "http://ollama.test"
+    ])
+
     path = temp_path("embedding-index")
     File.write!(path, Jason.encode!(index_fixture()))
-    on_exit(fn -> File.rm(path) end)
+
+    on_exit(fn ->
+      File.rm(path)
+
+      if is_nil(original),
+        do: Application.delete_env(:arbor_llm, :trusted_eval_endpoints),
+        else: Application.put_env(:arbor_llm, :trusted_eval_endpoints, original)
+    end)
+
     %{index_path: path}
   end
 
   test "ranks indexed actions and returns JSON-clean output", %{index_path: index_path} do
+    parent = self()
+
     embed_fn = fn base_url, model, prompt, timeout ->
-      send(self(), {:embed, base_url, model, prompt, timeout})
+      send(parent, {:embed, base_url, model, prompt, timeout})
       {:ok, [1.0, 0.0]}
     end
 

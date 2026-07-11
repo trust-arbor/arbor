@@ -30,8 +30,10 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
   end
 
   test "parses fenced judge JSON and returns JSON-clean output" do
+    parent = self()
+
     judge_fn = fn provider, model, system_prompt, user_prompt, timeout ->
-      send(self(), {:judge, provider, model, system_prompt, user_prompt, timeout})
+      send(parent, {:judge, provider, model, system_prompt, user_prompt, timeout})
 
       {:ok,
        """

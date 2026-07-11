@@ -272,6 +272,29 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       call = Call.new(:complete, {"openai:never-saved", [], []})
       assert Fixture.load(call) == :not_found
     end
+
+    test "security regression: fixture replay rejects outside symlinks and FIFOs", %{
+      tmp_dir: tmp_dir
+    } do
+      outside = Path.join(System.tmp_dir!(), "arbor-fixture-outside-#{System.unique_integer()}")
+      File.write!(outside, ~s({"recorded_at":"2026-01-01T00:00:00Z","response":{}}))
+      on_exit(fn -> File.rm(outside) end)
+
+      symlink_call = Call.new(:complete, {"openai:symlink", [], []})
+      symlink_path = Fixture.path_for(symlink_call)
+      File.ln_s!(outside, symlink_path)
+
+      assert Fixture.load(symlink_call) == :not_found
+
+      fifo_call = Call.new(:complete, {"openai:fifo", [], []})
+      fifo_path = Fixture.path_for(fifo_call)
+      {_, 0} = System.cmd("mkfifo", [fifo_path])
+
+      task = Task.async(fn -> Fixture.load(fifo_call) end)
+      assert {:ok, :not_found} = Task.yield(task, 1_000)
+
+      assert Path.dirname(symlink_path) == tmp_dir
+    end
   end
 
   # ── recorded_at timestamp ──────────────────────────────────────────

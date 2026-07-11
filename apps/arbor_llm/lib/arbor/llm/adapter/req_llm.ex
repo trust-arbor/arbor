@@ -54,10 +54,11 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   @behaviour Arbor.LLM.ProviderAdapter
 
   alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+  alias Arbor.LLM.Boundary
   alias Arbor.LLM.ContentPart
+  alias Arbor.LLM.Deadline
   alias Arbor.LLM.Endpoint
   alias Arbor.LLM.Adapter.ReqLLM.BoundedStream
-  alias Arbor.LLM.OwnedStream
   alias Arbor.LLM.Message
   alias Arbor.LLM.PostProcessors
   alias Arbor.LLM.Call
@@ -65,6 +66,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   alias Arbor.LLM.ProviderRegistry
   alias Arbor.LLM.Request
   alias Arbor.LLM.Response
+  alias Arbor.LLM.RequestTimeoutError
 
   @sentinel_provider "req_llm_generic"
   @max_embedding_inputs 2_048
@@ -106,7 +108,21 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   @impl true
   @spec complete(Request.t(), keyword()) :: {:ok, Response.t()} | {:error, term()}
-  def complete(%Request{} = request, opts \\ []) do
+  def complete(request, opts \\ [])
+
+  def complete(%Request{} = request, opts) do
+    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
+      Deadline.run(
+        fn -> do_complete(request, opts) |> Boundary.completion(opts) end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  def complete(_request, _opts), do: {:error, :invalid_req_llm_completion_request}
+
+  defp do_complete(request, opts) do
     with {:ok, model_spec} <- build_model_spec(request),
          messages <- translate_messages(request.messages),
          {:ok, req_opts} <- validated_req_opts(request, opts),
@@ -117,22 +133,30 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   @impl true
   @spec stream(Request.t(), keyword()) :: Enumerable.t() | {:error, term()}
-  def stream(%Request{} = request, opts \\ []) do
-    with {:ok, model_spec} <- build_model_spec(request),
-         messages <- translate_messages(request.messages),
-         {:ok, req_opts} <- validated_stream_opts(request, opts),
-         {:ok, %BoundedStream{stream: stream, cancel: cancel, producer: producer}} <-
-           call_req_llm_stream(model_spec, messages, req_opts) do
-      %OwnedStream{
-        stream: Stream.map(stream, &translate_bounded_stream_chunk/1),
-        cancel: cancel,
-        producer: producer
-      }
-    else
-      {:ok, _unowned_stream} -> {:error, :unowned_stream_producer}
-      {:error, _reason} = error -> error
+  def stream(request, opts \\ [])
+
+  def stream(%Request{} = request, opts) do
+    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
+      Deadline.run(
+        fn ->
+          with {:ok, model_spec} <- build_model_spec(request),
+               messages <- translate_messages(request.messages),
+               {:ok, req_opts} <- validated_stream_opts(request, opts),
+               {:ok, %BoundedStream{stream: stream}} <-
+                 call_req_llm_stream(model_spec, messages, req_opts) do
+            Stream.map(stream, &translate_bounded_stream_chunk/1)
+          else
+            {:ok, _unowned_stream} -> {:error, :unowned_stream_producer}
+            {:error, _reason} = error -> error
+          end
+        end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
     end
   end
+
+  def stream(_request, _opts), do: {:error, :invalid_req_llm_stream_request}
 
   @doc """
   Stream tokens via `callback` AND return the fully-assembled response.
@@ -150,8 +174,23 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   """
   @spec complete_streaming(Request.t(), (Arbor.LLM.StreamEvent.t() -> any()), keyword()) ::
           {:ok, Response.t()} | {:error, term()}
-  def complete_streaming(%Request{} = request, callback, opts \\ [])
+  def complete_streaming(request, callback, opts \\ [])
+
+  def complete_streaming(%Request{} = request, callback, opts)
       when is_function(callback, 1) do
+    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
+      Deadline.run(
+        fn -> do_complete_streaming(request, callback, opts) |> Boundary.completion(opts) end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  def complete_streaming(_request, _callback, _opts),
+    do: {:error, :invalid_req_llm_streaming_request}
+
+  defp do_complete_streaming(request, callback, opts) do
     # Accumulate the thinking deltas: ReqLLM's process_stream forwards them to
     # on_thinking but does NOT retain the full chain-of-thought on the assembled
     # response (streaming captured only the first fragment, e.g. "Thinking"),
@@ -206,6 +245,17 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
            %{embeddings: [[float()]], model: String.t(), usage: map(), dimensions: pos_integer()}}
           | {:error, term()}
   def embed(texts, model, opts) do
+    with :ok <- Boundary.embedding_inputs(texts),
+         {:ok, receipt} <- Deadline.receipt(opts) do
+      Deadline.run(
+        fn -> do_embed_request(texts, model, opts) end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  defp do_embed_request(texts, model, opts) do
     with :ok <- validate_embedding_ingress(texts, model, opts) do
       arbor_provider = resolve_embed_provider(opts, model)
 
@@ -214,15 +264,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
           {:error, {:invalid_request, :missing_provider_for_embedding}}
 
         true ->
-          # Same struct-vs-string split as build_model_spec/1 — local
-          # LMs bypass the catalog because operator-pulled embedding
-          # models like `nomic-embed-text` aren't in llm_db.
           case build_embed_model_spec(arbor_provider, model) do
-            {:ok, model_spec} ->
-              do_embed(arbor_provider, model_spec, texts, opts)
-
-            {:error, _} = err ->
-              err
+            {:ok, model_spec} -> do_embed(arbor_provider, model_spec, texts, opts)
+            {:error, _} = err -> err
           end
       end
     end
@@ -257,13 +301,22 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     with {:ok, req_opts} <- validated_embed_opts(arbor_provider, opts) do
       case call_req_llm_embed(model_spec, texts, req_opts) do
         {:ok, embeddings, usage} when is_list(embeddings) ->
-          {:ok,
-           %{
-             embeddings: embeddings,
-             model: model_spec,
-             usage: usage || %{},
-             dimensions: dimensions_of(embeddings)
-           }}
+          indexed =
+            embeddings
+            |> Enum.with_index(fn vector, index -> %{index: index, embedding: vector} end)
+
+          result = %{
+            embeddings: embeddings,
+            indexed_embeddings: indexed,
+            model: embedding_model_id(model_spec),
+            usage: usage || %{},
+            dimensions: dimensions_of(embeddings)
+          }
+
+          case Boundary.embedding_response(result, length(texts)) do
+            {:ok, _ordered, _usage} -> {:ok, result}
+            {:error, _reason} = error -> error
+          end
 
         {:error, _} = err ->
           err
@@ -298,6 +351,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   defp dimensions_of([first | _]) when is_list(first), do: length(first)
   defp dimensions_of(_), do: 0
+
+  defp embedding_model_id(%LLMDB.Model{id: id}) when is_binary(id), do: id
+  defp embedding_model_id(model_spec) when is_binary(model_spec), do: model_spec
+  defp embedding_model_id(_model_spec), do: "unknown"
 
   # The embedding endpoint requires a provider, but `Arbor.LLM.Request`
   # isn't used here (the ProviderAdapter behaviour passes texts + model
@@ -651,36 +708,12 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
         {:ok, opts}
 
       {:ok, value} ->
-        policy = {:req_llm_base, provider, reviewed_proxy_paths(provider)}
+        policy = {:req_llm_base, provider}
 
         case Endpoint.validate(value, policy) do
           {:ok, canonical} -> {:ok, Keyword.put(opts, :base_url, canonical)}
           {:error, reason} -> {:error, {:invalid_base_url, reason}}
         end
-    end
-  end
-
-  defp reviewed_proxy_paths(provider) do
-    configured = Application.get_env(:arbor_llm, :reviewed_proxy_base_paths, %{})
-    canonical = ProviderRegistry.normalize(provider)
-
-    case configured do
-      %{} ->
-        Map.get(configured, canonical) ||
-          Map.get(configured, provider) ||
-          reviewed_proxy_paths_for_existing_atom(configured, canonical) || []
-
-      _invalid ->
-        []
-    end
-  end
-
-  defp reviewed_proxy_paths_for_existing_atom(configured, canonical) do
-    if ProviderRegistry.known?(canonical) do
-      case Arbor.Common.SafeAtom.to_existing(canonical) do
-        {:ok, provider_atom} -> Map.get(configured, provider_atom)
-        {:error, _reason} -> nil
-      end
     end
   end
 
@@ -893,7 +926,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
       content_parts: content_parts,
       usage: translate_usage(req_response.usage),
       warnings: [],
-      raw: %{req_llm_response: req_response}
+      # Rich upstream structs may contain transport-owned terms. The public
+      # response boundary exposes only the normalized, ceiling-bound fields.
+      raw: nil
     }
   end
 

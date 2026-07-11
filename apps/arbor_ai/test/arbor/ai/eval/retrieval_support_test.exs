@@ -5,12 +5,53 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
 
   alias Arbor.AI.Eval.RetrievalSupport
 
+  setup do
+    original = Application.get_env(:arbor_llm, :trusted_eval_endpoints)
+    Application.put_env(:arbor_llm, :trusted_eval_endpoints, ["http://bounded.test"])
+
+    on_exit(fn ->
+      if is_nil(original),
+        do: Application.delete_env(:arbor_llm, :trusted_eval_endpoints),
+        else: Application.put_env(:arbor_llm, :trusted_eval_endpoints, original)
+    end)
+
+    :ok
+  end
+
   test "rejects malformed option containers before keyword access" do
     assert RetrievalSupport.validate_opts(%{}) ==
              {:error, {:invalid_options, :keyword_required}}
 
     assert RetrievalSupport.validate_opts([:not_a_keyword]) ==
              {:error, {:invalid_options, :keyword_required}}
+  end
+
+  test "security regression: public eval helpers are total for improper and malformed terms" do
+    improper = [{:model, "value"} | :improper]
+
+    assert {:error, _reason} = RetrievalSupport.required_string(improper, :model)
+    assert {:error, _reason} = RetrievalSupport.string_option(improper, :model, "default")
+    assert {:error, _reason} = RetrievalSupport.positive_integer_option(improper, :top_k, 5)
+
+    assert {:error, _reason} =
+             RetrievalSupport.optional_positive_integer_option(improper, :max_tokens)
+
+    assert {:error, _reason} =
+             RetrievalSupport.callback_option(improper, :embed_fn, 4, fn -> :ok end)
+
+    assert {:error, _reason} =
+             RetrievalSupport.endpoint_option([], :base_url, "http://localhost", :invalid)
+
+    assert {:error, _reason} = RetrievalSupport.truncate_utf8(:not_text, 10)
+
+    assert {:error, _reason} =
+             RetrievalSupport.embeddings_for_model([%{} | :improper], "model", "index")
+
+    assert {:error, _reason} =
+             RetrievalSupport.validate_query_dimensions([:invalid | :improper], [1.0])
+
+    assert {:error, _reason} = RetrievalSupport.parse_router_response(%{}, MapSet.new(), 1)
+    assert {:error, _reason} = RetrievalSupport.validate_router_prompt(%{})
   end
 
   test "security regression: UTF-8 truncation enforces a hard byte ceiling" do
@@ -71,18 +112,18 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
   end
 
   test "security regression: index swaps are detected or rejected without blocking" do
-    path = temp_path("swap")
-    regular_path = temp_path("swap-regular")
-    fifo_path = temp_path("swap-fifo")
+    root = temp_dir("swap")
+    path = Path.join(root, "index.json")
+    regular_path = Path.join(root, "regular.json")
+    fifo_path = Path.join(root, "fifo")
     body = Jason.encode!(%{"actions" => [minimal_action()]})
 
+    File.mkdir_p!(root)
     File.write!(path, body)
     File.write!(regular_path, body)
     {_, 0} = System.cmd("mkfifo", [fifo_path])
 
-    on_exit(fn -> File.rm(path) end)
-    on_exit(fn -> File.rm(regular_path) end)
-    on_exit(fn -> File.rm(fifo_path) end)
+    on_exit(fn -> File.rm_rf(root) end)
 
     swapper =
       Task.async(fn ->
@@ -121,6 +162,27 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
              {:error, {:index_read_failed, ^path, _reason}} -> true
              _other -> false
            end)
+  end
+
+  test "security regression: same-size same-second index rewrites use the new receipt bytes" do
+    path = temp_path("same-size-rewrite")
+    first = Jason.encode!(%{"actions" => [minimal_action("First.Action")]})
+    second = Jason.encode!(%{"actions" => [minimal_action("Other.Action")]})
+    assert byte_size(first) == byte_size(second)
+
+    File.write!(path, first)
+    {:ok, initial_stat} = File.stat(path, time: :posix)
+    on_exit(fn -> File.rm(path) end)
+
+    assert {:ok, [%{module: "First.Action"}]} = RetrievalSupport.load_index(path)
+
+    File.write!(path, second)
+    :ok = File.touch(path, initial_stat.mtime)
+    {:ok, rewritten_stat} = File.stat(path, time: :posix)
+    assert rewritten_stat.size == initial_stat.size
+    assert rewritten_stat.mtime == initial_stat.mtime
+
+    assert {:ok, [%{module: "Other.Action"}]} = RetrievalSupport.load_index(path)
   end
 
   test "security regression: direct index paths are byte bounded before UTF-8 work" do
@@ -305,9 +367,9 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
     assert sent < 100
   end
 
-  defp minimal_action do
+  defp minimal_action(module \\ "Arbor.Actions.Test") do
     %{
-      "module" => "Arbor.Actions.Test",
+      "module" => module,
       "description" => "test",
       "embeddings" => %{}
     }
@@ -316,8 +378,18 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
   defp temp_path(label) do
     Path.join(
       System.tmp_dir!(),
-      "arbor-ai-retrieval-#{label}-#{System.unique_integer([:positive, :monotonic])}.json"
+      "arbor-ai-retrieval-#{label}-#{temp_suffix()}.json"
     )
+  end
+
+  defp temp_dir(label) do
+    Path.join(System.tmp_dir!(), "arbor-ai-retrieval-#{label}-#{temp_suffix()}")
+  end
+
+  defp temp_suffix do
+    12
+    |> :crypto.strong_rand_bytes()
+    |> Base.url_encode64(padding: false)
   end
 
   defp start_drip_server(chunk_count, delay_ms) do
@@ -344,7 +416,14 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
         result
       end)
 
-    {"http://127.0.0.1:#{port}/eval", server}
+    url = "http://127.0.0.1:#{port}/api/chat"
+
+    Application.put_env(:arbor_llm, :trusted_eval_endpoints, [
+      "http://bounded.test",
+      "http://127.0.0.1:#{port}"
+    ])
+
+    {url, server}
   end
 
   defp receive_http_headers(socket, acc) do

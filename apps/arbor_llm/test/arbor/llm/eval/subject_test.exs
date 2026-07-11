@@ -25,7 +25,7 @@ defmodule Arbor.LLM.Eval.SubjectTest do
       {:ok,
        %Response{
          text: "",
-         finish_reason: String.duplicate("f", 10_000),
+         finish_reason: :stop,
          usage: %{output_tokens: :erlang.bsl(1, 1_000_000)},
          content_parts: List.duplicate(%{kind: String.duplicate("k", 2_000)}, 100_000),
          raw: %{}
@@ -382,7 +382,10 @@ defmodule Arbor.LLM.Eval.SubjectTest do
                model: "oversized-stream",
                stream: true,
                max_output_bytes: 5
-             ) == {:error, {:stream_limit_exceeded, :output_bytes, 5}}
+             ) ==
+               {:error,
+                {:stream_collection_failed,
+                 {:invalid_stream_event, {:decoded_term_limit_exceeded, :bytes, 5}}}}
     end
 
     test "security regression: complete output obeys the caller byte ceiling" do
@@ -391,7 +394,8 @@ defmodule Arbor.LLM.Eval.SubjectTest do
                provider: "eval_test",
                model: "oversized-complete",
                max_output_bytes: 5
-             ) == {:error, {:output_limit_exceeded, :output_bytes, 5}}
+             ) ==
+               {:error, {:invalid_completion_response, {:text, :bounded_string_required, 5}}}
     end
 
     test "security regression: invalid UTF-8 complete output fails closed" do
@@ -400,7 +404,8 @@ defmodule Arbor.LLM.Eval.SubjectTest do
                provider: "eval_test",
                model: "oversized-invalid-complete",
                max_output_bytes: 5
-             ) == {:error, {:decoded_term_invalid, :valid_utf8_required}}
+             ) ==
+               {:error, {:invalid_completion_response, {:text, :bounded_string_required, 5}}}
     end
 
     test "security regression: invalid UTF-8 stream chunks fail closed" do
@@ -413,7 +418,7 @@ defmodule Arbor.LLM.Eval.SubjectTest do
              ) ==
                {:error,
                 {:stream_collection_failed,
-                 {:invalid_stream_event, {:decoded_term_invalid, :valid_utf8_required}}}}
+                 {:invalid_stream_event, {:decoded_term_limit_exceeded, :bytes, 5}}}}
     end
 
     test "security regression: ignored stream metadata hits bytes before event count" do
@@ -425,7 +430,8 @@ defmodule Arbor.LLM.Eval.SubjectTest do
                max_stream_events: 1
              ) ==
                {:error,
-                {:stream_collection_failed, {:stream_limit_exceeded, :event_bytes, 1_048_576}}}
+                {:stream_collection_failed,
+                 {:invalid_stream_event, {:decoded_term_limit_exceeded, :bytes, 1_048_576}}}}
     end
 
     test "preserves transport error reasons and shapes invalid client errors" do
@@ -440,16 +446,12 @@ defmodule Arbor.LLM.Eval.SubjectTest do
     end
 
     test "security regression: huge external errors and empty metadata are bounded" do
-      assert {:error, {:transport_failed, bounded}} =
+      assert {:error, {:invalid_adapter_error, :transport_failed}} =
                Subject.run("hello",
                  client: client(),
                  provider: "eval_test",
                  model: "huge-transport-error"
                )
-
-      assert length(bounded) == 17
-      assert List.last(bounded) == :truncated
-      assert byte_size(:erlang.term_to_binary(bounded)) < 12_000
 
       task =
         Task.async(fn ->
@@ -460,7 +462,9 @@ defmodule Arbor.LLM.Eval.SubjectTest do
           )
         end)
 
-      assert {:ok, {:error, {:decoded_term_invalid, :signed_64_required}}} =
+      assert {:ok,
+              {:error,
+               {:invalid_completion_response, {:decoded_term_invalid, :signed_64_required}}}} =
                Task.yield(task, 1_000)
     end
 

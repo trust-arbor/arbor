@@ -5,6 +5,19 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
 
   alias Arbor.AI.Eval.Graders.EmbeddingSimilarity
 
+  setup do
+    original = Application.get_env(:arbor_llm, :trusted_eval_endpoints)
+    Application.put_env(:arbor_llm, :trusted_eval_endpoints, ["http://embedding.test"])
+
+    on_exit(fn ->
+      if is_nil(original),
+        do: Application.delete_env(:arbor_llm, :trusted_eval_endpoints),
+        else: Application.put_env(:arbor_llm, :trusted_eval_endpoints, original)
+    end)
+
+    :ok
+  end
+
   describe "cosine_similarity/2" do
     test "returns 1.0 for identical vectors" do
       vector = [1.0, 2.0, 3.0]
@@ -48,9 +61,18 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
 
   describe "grade/3" do
     test "grades injected embeddings and respects a custom threshold" do
+      parent = self()
+
       embed_fn = fn texts, url, model, timeout ->
-        send(self(), {:embed, texts, url, model, timeout})
-        {:ok, [[1.0, 0.0], [0.8, 0.2]]}
+        send(parent, {:embed, texts, url, model, timeout})
+
+        {:ok,
+         %{
+           indexed_embeddings: [
+             %{index: 1, embedding: [0.8, 0.2]},
+             %{index: 0, embedding: [1.0, 0.0]}
+           ]
+         }}
       end
 
       result =
@@ -82,6 +104,62 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
       assert result.detail == "embedding unavailable: :offline"
     end
 
+    test "security regression: actual grader rejects positional callbacks and owns their deadline" do
+      positional =
+        EmbeddingSimilarity.grade("actual", "expected",
+          embed_fn: fn _, _, _, _ -> {:ok, [[1.0, 0.0], [1.0, 0.0]]} end
+        )
+
+      refute positional.passed
+      assert positional.detail =~ "unexpected_embed_response"
+
+      parent = self()
+      started = System.monotonic_time(:millisecond)
+
+      timed_out =
+        EmbeddingSimilarity.grade("actual", "expected",
+          timeout: 10,
+          embed_fn: fn _, _, _, _ ->
+            send(parent, :grader_callback_started)
+            Process.sleep(100)
+            send(parent, :grader_callback_completed)
+
+            {:ok,
+             %{
+               indexed_embeddings: [
+                 %{index: 0, embedding: [1.0]},
+                 %{index: 1, embedding: [1.0]}
+               ]
+             }}
+          end
+        )
+
+      assert_receive :grader_callback_started
+      refute_receive :grader_callback_completed, 0
+      refute timed_out.passed
+      assert timed_out.detail =~ "deadline_exceeded"
+      assert System.monotonic_time(:millisecond) - started < 80
+    end
+
+    test "security regression: actual grader rejects huge vector and usage fields" do
+      result =
+        EmbeddingSimilarity.grade("actual", "expected",
+          embed_fn: fn _, _, _, _ ->
+            {:ok,
+             %{
+               indexed_embeddings: [
+                 %{index: 0, embedding: [1.0e308]},
+                 %{index: 1, embedding: [1.0]}
+               ],
+               usage: %{total_tokens: 1.0e308}
+             }}
+          end
+        )
+
+      refute result.passed
+      assert result.detail =~ "bounded_"
+    end
+
     test "security regression: combining-grapheme diagnostics obey a UTF-8 byte ceiling" do
       combining = "a" <> String.duplicate("\u1AB0", 10_000)
 
@@ -104,22 +182,38 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
 
       result =
         EmbeddingSimilarity.grade("actual", "expected",
-          embed_fn: fn _, _, _, _ -> {:ok, [[1.0], :malformed]} end
+          embed_fn: fn _, _, _, _ ->
+            {:ok,
+             %{
+               indexed_embeddings: [
+                 %{index: 0, embedding: [1.0]},
+                 %{index: 1, embedding: :malformed}
+               ]
+             }}
+          end
         )
 
       assert result.score == 0.0
       refute result.passed
-      assert result.detail =~ "numeric_vector_required"
+      assert result.detail =~ "proper_embedding_vector_required"
 
       improper = [1.0 | 2.0]
 
       improper_result =
         EmbeddingSimilarity.grade("actual", "expected",
-          embed_fn: fn _, _, _, _ -> {:ok, [improper, [1.0]]} end
+          embed_fn: fn _, _, _, _ ->
+            {:ok,
+             %{
+               indexed_embeddings: [
+                 %{index: 0, embedding: improper},
+                 %{index: 1, embedding: [1.0]}
+               ]
+             }}
+          end
         )
 
       refute improper_result.passed
-      assert improper_result.detail =~ "proper_vector_required"
+      assert improper_result.detail =~ "proper_list_required"
     end
 
     test "security regression: oversized invalid embedding ingress never reaches callback" do
@@ -289,7 +383,7 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
           )
 
         refute result.passed
-        assert result.detail =~ "invalid_embedding_response"
+        assert result.detail =~ "embedding"
       end
     end
   end

@@ -40,6 +40,9 @@ defmodule Arbor.LLM.ToolLoopTest do
       {:ok, output}
     end
 
+    def execute("huge_result", _args, _workdir, _opts),
+      do: {:ok, %{"items" => List.duplicate(0, 100_001)}}
+
     def execute(name, _args, _workdir, _opts), do: {:error, "Unknown: #{name}"}
   end
 
@@ -147,13 +150,34 @@ defmodule Arbor.LLM.ToolLoopTest do
     end
   end
 
+  defmodule HugeResultAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+    def provider, do: "huge_result_test"
+
+    def complete(%Request{} = request, opts) do
+      if Enum.any?(request.messages, &(&1.role == :tool)) do
+        send(Keyword.fetch!(opts, :parent), :huge_result_reached_next_model_call)
+        {:ok, %Response{text: "unexpected", raw: %{}}}
+      else
+        {:ok,
+         %Response{
+           text: "",
+           finish_reason: :tool_calls,
+           content_parts: [ContentPart.tool_call("huge", "huge_result", %{})],
+           raw: %{}
+         }}
+      end
+    end
+  end
+
   defmodule StructuredWrapUpAdapter do
     @behaviour Arbor.LLM.ProviderAdapter
     def provider, do: "structured_wrap_up_test"
 
-    def complete(%Request{tools: tools, messages: messages}, _opts) when tools in [nil, []] do
+    def complete(%Request{tools: tools, messages: messages} = request, _opts)
+        when tools in [nil, []] do
       instruction = List.last(messages).content
-      send(self(), {:structured_wrap_up_instruction, instruction})
+      send(request.provider_options.test_pid, {:structured_wrap_up_instruction, instruction})
 
       content =
         if String.contains?(instruction, "plain-text") or
@@ -553,8 +577,13 @@ defmodule Arbor.LLM.ToolLoopTest do
     test "regression: exhausted tool rounds preserve a required structured output format" do
       client = build_client(StructuredWrapUpAdapter)
 
+      request = %{
+        request("structured_wrap_up_test")
+        | provider_options: %{test_pid: self()}
+      }
+
       assert {:ok, result} =
-               ToolLoop.run(client, request("structured_wrap_up_test"),
+               ToolLoop.run(client, request,
                  max_turns: 1,
                  tools: [%{"type" => "function", "function" => %{"name" => "read_file"}}],
                  tool_executor: MockTools
@@ -885,6 +914,20 @@ defmodule Arbor.LLM.ToolLoopTest do
         )
 
       assert_received {:tool_called, "read_file", %{"path" => "hello.txt"}, {:ok, "data"}}
+    end
+
+    test "security regression: legacy ToolLoop rejects oversized structured results" do
+      client = build_client(HugeResultAdapter)
+
+      assert {:error, {:invalid_tool_result, {:decoded_term_limit_exceeded, boundary, 100_000}}} =
+               ToolLoop.run(client, request("huge_result_test"),
+                 tool_executor: MockTools,
+                 parent: self()
+               )
+
+      assert boundary in [:nodes, :list_items]
+
+      refute_received :huge_result_reached_next_model_call
     end
   end
 end

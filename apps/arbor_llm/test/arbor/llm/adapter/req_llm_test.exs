@@ -381,11 +381,11 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
       end
     end
 
-    test "raw response is preserved in the :raw field" do
+    test "rich upstream transport structs are not exposed through the public raw field" do
       req = %Request{provider: "openai", model: "gpt-4"}
       req_resp = build_req_llm_response("hi")
       arbor_resp = Adapter.translate_response(req_resp, req)
-      assert arbor_resp.raw[:req_llm_response] == req_resp
+      assert arbor_resp.raw == nil
     end
   end
 
@@ -874,35 +874,21 @@ defmodule Arbor.LLM.Adapter.ReqLLMTest do
     end
 
     test "rejects empty text list" do
-      assert {:error, {:invalid_request, :empty_input}} =
+      assert {:error, :embedding_texts_required} =
                Adapter.embed([], "voyage-large-2", provider: "voyage")
     end
 
     test "security regression: repeated unknown providers never intern atoms" do
-      assert {:error, _reason} =
-               Adapter.embed(["hello"], "model", provider: "unknown_embedding_provider_warmup")
-
-      for index <- 1..1_000 do
-        provider = "unknown_embedding_provider_first_#{index}"
-        _ = Adapter.embed(["hello"], "model", provider: provider)
-      end
-
-      for index <- 1..1_000 do
-        provider = "unknown_embedding_provider_stabilize_#{index}"
-        _ = Adapter.embed(["hello"], "model", provider: provider)
-      end
-
-      before_count = :erlang.system_info(:atom_count)
-
       results =
         for index <- 1..1_000 do
-          provider = "unknown_embedding_provider_second_#{index}"
-          Adapter.embed(["hello"], "model", provider: provider)
+          provider = "unknown_embedding_provider_security_regression_#{index}"
+
+          assert_raise ArgumentError, fn -> String.to_existing_atom(provider) end
+          result = Adapter.embed(["hello"], "model", provider: provider)
+          assert_raise ArgumentError, fn -> String.to_existing_atom(provider) end
+          result
         end
 
-      after_count = :erlang.system_info(:atom_count)
-
-      assert after_count == before_count
       assert Enum.all?(results, &match?({:error, _reason}, &1))
     end
   end

@@ -125,8 +125,9 @@ defmodule Arbor.LLM.Conformance88Test do
     request = %Request{model: "demo", messages: [Message.new(:user, "hi")]}
 
     assert {:ok, events} = Client.stream(client, request, parent: self())
-    assert Enum.any?(events, &match?(%StreamEvent{type: :delta}, &1))
-    assert Enum.any?(events, &match?(%StreamEvent{type: :error}, &1))
+    collected = Enum.to_list(events)
+    assert Enum.any?(collected, &match?(%StreamEvent{type: :delta}, &1))
+    assert Enum.any?(collected, &match?(%StreamEvent{type: :error}, &1))
     assert_receive :stream_called
     refute_receive :stream_called
   end

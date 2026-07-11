@@ -49,6 +49,8 @@ defmodule Arbor.LLM.ToolLoop do
 
   alias Arbor.LLM.ResponseBudget
 
+  alias Arbor.LLM.ToolResultBudget
+
   # Session.Builders lives in arbor_orchestrator (which depends on
   # arbor_llm). Runtime indirection avoids the cycle — see Client's
   # @tool_hooks_mod for the same pattern.
@@ -98,6 +100,7 @@ defmodule Arbor.LLM.ToolLoop do
         total_usage: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0},
         discovered_tools: [],
         accumulated_text: "",
+        tool_result_budget: ToolResultBudget.new(),
         # Steering: an optional 0-arity callback that returns the next queued user message to
         # fold into the conversation at an iteration boundary (or nil when none). Injected by the
         # caller (the Session) so the tool loop stays generic — it never reaches into the Session.
@@ -366,21 +369,27 @@ defmodule Arbor.LLM.ToolLoop do
           # Build the assistant message with its tool calls
           assistant_msg = build_assistant_message(response)
 
-          # Build tool result messages
-          tool_msgs = build_tool_messages(tool_results, state.prompt_sanitizer_nonce)
+          # Bound every raw result and the aggregate before it can become model input.
+          case build_tool_messages(
+                 tool_results,
+                 state.prompt_sanitizer_nonce,
+                 state.tool_result_budget
+               ) do
+            {:ok, tool_msgs, next_budget} ->
+              updated_messages = request.messages ++ [assistant_msg | tool_msgs]
+              next_tools = merge_tool_definitions(request.tools, new_tool_defs)
+              next_request = %{request | messages: updated_messages, tools: next_tools}
+              next_request = apply_steering(next_request, state)
 
-          # Append to conversation and continue
-          updated_messages = request.messages ++ [assistant_msg | tool_msgs]
+              loop(client, next_request, opts, %{
+                state
+                | turn: state.turn + 1,
+                  tool_result_budget: next_budget
+              })
 
-          # Merge discovered tool definitions into request tools for next iteration
-          next_tools = merge_tool_definitions(request.tools, new_tool_defs)
-          next_request = %{request | messages: updated_messages, tools: next_tools}
-
-          # STEERING: fold in any user messages that arrived mid-turn (drain ALL pending) before
-          # the next LLM call, so the model incorporates them at this iteration boundary.
-          next_request = apply_steering(next_request, state)
-
-          loop(client, next_request, opts, %{state | turn: state.turn + 1})
+            {:error, _reason} = error ->
+              error
+          end
         else
           # Final response — return as normalized PipelineResponse
           accumulated = Map.get(state, :accumulated_text) || ""
@@ -692,30 +701,62 @@ defmodule Arbor.LLM.ToolLoop do
     Message.new(:assistant, content)
   end
 
-  defp build_tool_messages(tool_results, nonce) do
-    Enum.map(tool_results, fn {call_id, name, result} ->
-      {raw_content, is_error} =
-        case result do
-          {:ok, text} ->
-            {truncate(text, 30_000), false}
+  defp build_tool_messages(tool_results, nonce, aggregate),
+    do: build_tool_messages(tool_results, nonce, aggregate, [])
 
-          {:ok, :pending_approval, proposal_id} ->
-            {"Action #{name} requires approval. Proposal ID: #{proposal_id}. " <>
-               "Waiting for consensus decision.", false}
+  defp build_tool_messages([], _nonce, aggregate, messages),
+    do: {:ok, Enum.reverse(messages), aggregate}
 
-          {:error, reason} ->
-            {"Error: #{inspect(reason, limit: 50, printable_limit: 30_000)}", true}
-        end
-
+  defp build_tool_messages([{call_id, name, result} | rest], nonce, aggregate, messages) do
+    with {:ok, raw_content, is_error, next} <- bounded_legacy_tool_result(result, name, aggregate) do
       content = raw_content |> truncate(30_000) |> maybe_wrap_tool_result(nonce)
 
-      Message.new(:tool, content, %{
-        tool_call_id: call_id,
-        name: name,
-        is_error: is_error
-      })
-    end)
+      message =
+        Message.new(:tool, content, %{
+          tool_call_id: call_id,
+          name: name,
+          is_error: is_error
+        })
+
+      build_tool_messages(rest, nonce, next, [message | messages])
+    end
   end
+
+  defp build_tool_messages(_improper, _nonce, _aggregate, _messages),
+    do: {:error, :invalid_tool_results}
+
+  defp bounded_legacy_tool_result({:ok, text}, _name, aggregate) when is_binary(text) do
+    with {:ok, next} <- ToolResultBudget.account(text, aggregate) do
+      {:ok, text, false, next}
+    end
+  end
+
+  defp bounded_legacy_tool_result({:ok, :pending_approval, proposal_id}, name, aggregate) do
+    content =
+      "Action #{name} requires approval. Proposal ID: #{inspect(proposal_id, limit: 10)}. " <>
+        "Waiting for consensus decision."
+
+    with {:ok, next} <- ToolResultBudget.account(content, aggregate) do
+      {:ok, content, false, next}
+    end
+  end
+
+  defp bounded_legacy_tool_result({:ok, value}, _name, aggregate) do
+    with {:ok, encoded, next} <- ToolResultBudget.encode(value, aggregate) do
+      {:ok, encoded, false, next}
+    end
+  end
+
+  defp bounded_legacy_tool_result({:error, reason}, _name, aggregate) do
+    content = "Error: #{inspect(reason, limit: 50, printable_limit: 30_000)}"
+
+    with {:ok, next} <- ToolResultBudget.account(content, aggregate) do
+      {:ok, content, true, next}
+    end
+  end
+
+  defp bounded_legacy_tool_result(_result, _name, _aggregate),
+    do: {:error, :invalid_tool_result}
 
   defp maybe_wrap_tool_result(content, nonce) when is_binary(nonce) and nonce != "",
     do: @prompt_sanitizer.wrap(content, nonce)

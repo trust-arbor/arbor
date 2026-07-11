@@ -224,11 +224,11 @@ defmodule Arbor.LLM.Conformance84Test do
     def complete(_request, _opts), do: {:error, :not_supported}
 
     @impl true
-    def stream(%Request{} = _request, _opts) do
-      case Process.get(:retry_stream_calls, 0) do
-        0 ->
-          Process.put(:retry_stream_calls, 1)
+    def stream(%Request{} = _request, opts) do
+      counter = Keyword.fetch!(opts, :retry_counter)
 
+      case :atomics.add_get(counter, 1, 1) do
+        1 ->
           {:error,
            ProviderError.exception(
              message: "transient stream setup failure",
@@ -627,7 +627,7 @@ defmodule Arbor.LLM.Conformance84Test do
   end
 
   test "8.4 stream retries initial setup failures when retry policy allows" do
-    Process.put(:retry_stream_calls, 0)
+    counter = :atomics.new(1, [])
 
     client =
       Client.new(default_provider: "conformance-84-retry-stream")
@@ -638,6 +638,7 @@ defmodule Arbor.LLM.Conformance84Test do
                client: client,
                model: "demo",
                prompt: "hello",
+               client_opts: [retry_counter: counter],
                retry: [max_retries: 1, initial_delay_ms: 0],
                sleep_fn: fn _ -> :ok end
              )
@@ -647,7 +648,7 @@ defmodule Arbor.LLM.Conformance84Test do
              &match?(%StreamEvent{type: :delta, data: %{"text" => "recovered"}}, &1)
            )
 
-    assert Process.get(:retry_stream_calls) == 1
+    assert :atomics.get(counter, 1) == 2
   end
 
   test "8.4 stream tool loop honors abort between steps" do

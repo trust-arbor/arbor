@@ -67,7 +67,8 @@ defmodule Arbor.AI.Eval.Subjects.EmbeddingRetrieval do
     case RetrievalSupport.invoke(
            embed_fn,
            [base_url, model, prompt, timeout],
-           :embedding_callback_failed
+           :embedding_callback_failed,
+           timeout
          ) do
       {:ok, vector} -> RetrievalSupport.validate_vector(vector)
       {:error, _reason} = error -> error

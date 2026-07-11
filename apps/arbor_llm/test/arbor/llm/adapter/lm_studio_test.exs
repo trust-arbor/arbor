@@ -3,7 +3,7 @@ defmodule Arbor.LLM.Adapter.LmStudioTest do
   @moduletag :fast
 
   alias Arbor.LLM.Adapter.LmStudio
-  alias Arbor.LLM.{Message, Request}
+  alias Arbor.LLM.{Message, Request, RequestTimeoutError}
 
   setup do
     previous_options = Req.default_options()
@@ -129,8 +129,19 @@ defmodule Arbor.LLM.Adapter.LmStudioTest do
 
     Req.default_options(
       adapter: fn request ->
-        send(parent, :oversized_limit_reached_transport)
-        {request, Req.Response.new(status: 500)}
+        send(parent, {:closed_limit, request.private[:arbor_response_maximum]})
+
+        body =
+          Jason.encode!(%{
+            "choices" => [%{"finish_reason" => "stop", "message" => %{"content" => "ok"}}]
+          })
+
+        {request,
+         Req.Response.new(
+           status: 200,
+           headers: [{"content-type", "application/json"}],
+           body: body
+         )}
       end
     )
 
@@ -140,10 +151,53 @@ defmodule Arbor.LLM.Adapter.LmStudioTest do
       messages: [%Message{role: :user, content: "hello"}]
     }
 
-    assert LmStudio.complete(request, max_response_bytes: 16_777_217) ==
-             {:error, {:invalid_response_limit, 16_777_217}}
+    assert {:ok, %{text: "ok"}} =
+             LmStudio.complete(request, max_response_bytes: 16_777_217)
 
-    refute_receive :oversized_limit_reached_transport
+    assert_receive {:closed_limit, 16_777_216}
+  end
+
+  test "security regression: drip-fed LM Studio bodies cannot extend the absolute deadline" do
+    parent = self()
+
+    {:ok, listener} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, {{127, 0, 0, 1}, port}} = :inet.sockname(listener)
+
+    server =
+      Task.async(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener)
+        send(parent, :drip_server_accepted)
+        :ok = :gen_tcp.close(listener)
+        {:ok, _request} = :gen_tcp.recv(socket, 0, 2_000)
+
+        :ok =
+          :gen_tcp.send(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n" <>
+              "transfer-encoding: chunked\r\nconnection: keep-alive\r\n\r\n"
+          )
+
+        result = send_slow_json(socket, 100, 10, 0)
+        :gen_tcp.close(socket)
+        result
+      end)
+
+    Application.put_env(:arbor_llm, :lm_studio_base_url, "http://127.0.0.1:#{port}/v1")
+
+    request = %Request{
+      provider: "lm_studio_owned",
+      model: "model",
+      messages: [%Message{role: :user, content: "hello"}]
+    }
+
+    assert {:error, %RequestTimeoutError{timeout_ms: 200}} =
+             LmStudio.complete(request, receive_timeout: 200)
+
+    assert_receive :drip_server_accepted
+    assert %{closed?: true, sent: sent} = Task.await(server, 2_000)
+    assert sent < 100
   end
 
   test "security regression: real 16.8 MB TCP response cannot cross the hard ceiling" do
@@ -236,6 +290,20 @@ defmodule Arbor.LLM.Adapter.LmStudioTest do
       :ok ->
         Process.sleep(1)
         send_large_response(socket, total_bytes, sent + size)
+
+      {:error, _reason} ->
+        %{sent: sent, closed?: true}
+    end
+  end
+
+  defp send_slow_json(_socket, maximum, _delay_ms, sent) when sent >= maximum,
+    do: %{sent: sent, closed?: false}
+
+  defp send_slow_json(socket, maximum, delay_ms, sent) do
+    case :gen_tcp.send(socket, "1\r\n \r\n") do
+      :ok ->
+        Process.sleep(delay_ms)
+        send_slow_json(socket, maximum, delay_ms, sent + 1)
 
       {:error, _reason} ->
         %{sent: sent, closed?: true}

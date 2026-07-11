@@ -180,6 +180,42 @@ defmodule Arbor.LLM.HighLevelApiTest do
     end
   end
 
+  defmodule CleanupStreamAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+
+    @impl true
+    def provider, do: "cleanup-stream"
+
+    @impl true
+    def complete(_request, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def stream(%Request{provider_options: options, model: model}, _opts) do
+      observer = Map.fetch!(options, :test_pid)
+
+      Stream.resource(
+        fn ->
+          send(observer, {:cleanup_source_started, self()})
+          0
+        end,
+        fn state ->
+          cond do
+            model == "empty" ->
+              {:halt, state}
+
+            model == "delayed-event" and state == 0 ->
+              Process.sleep(50)
+              {[%StreamEvent{type: :delta, data: %{text: "x"}}], state + 1}
+
+            true ->
+              {[%StreamEvent{type: :delta, data: %{text: "x"}}], state + 1}
+          end
+        end,
+        fn _state -> send(observer, {:cleanup_source_finalized, self()}) end
+      )
+    end
+  end
+
   defmodule ObjectBoundaryAdapter do
     @behaviour Arbor.LLM.ProviderAdapter
 
@@ -193,7 +229,10 @@ defmodule Arbor.LLM.HighLevelApiTest do
     def stream(%Request{model: model}, _opts) do
       case model do
         "object-bytes" ->
-          [%StreamEvent{type: :delta, data: %{text: String.duplicate("x", 1_048_577)}}]
+          [
+            %StreamEvent{type: :delta, data: %{text: "{" <> String.duplicate(" ", 599_999)}},
+            %StreamEvent{type: :delta, data: %{text: String.duplicate(" ", 600_000)}}
+          ]
 
         "object-events" ->
           Stream.repeatedly(fn -> %StreamEvent{type: :start, data: %{}} end)
@@ -580,6 +619,22 @@ defmodule Arbor.LLM.HighLevelApiTest do
     assert_raise RequestTimeoutError, fn -> Enum.to_list(stream) end
   end
 
+  test "security regression: delaying enumeration cannot reset the public stream deadline" do
+    client =
+      Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
+
+    assert {:ok, stream} =
+             LLM.stream(
+               client: client,
+               model: "demo",
+               prompt: "hi",
+               timeout_ms: 30
+             )
+
+    Process.sleep(60)
+    assert_raise RequestTimeoutError, fn -> Enum.take(stream, 1) end
+  end
+
   test "generate and stream return AbortError when abort preflight is true" do
     client =
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
@@ -624,57 +679,73 @@ defmodule Arbor.LLM.HighLevelApiTest do
     end
   end
 
-  test "security regression: hostile owned cancel cannot skip producer teardown" do
+  test "security regression: a forged OwnedStream is not accepted as process authority" do
     client =
       Client.new(
         adapters: %{"hostile-owned" => HostileOwnedAdapter},
         default_provider: "hostile-owned"
       )
 
-    assert {:ok, stream} =
-             LLM.stream(
-               client: client,
-               provider: "hostile-owned",
-               model: "hostile",
-               prompt: "hi",
-               provider_options: %{test_pid: self()}
-             )
+    request = %Request{
+      provider: "hostile-owned",
+      model: "hostile",
+      messages: [Message.new(:user, "hi")],
+      provider_options: %{test_pid: self()}
+    }
+
+    assert {:error, :owned_stream_nesting_forbidden} = Client.stream(client, request)
 
     assert_receive {:hostile_source_started, producer}
-    producer_monitor = Process.monitor(producer)
-    started = System.monotonic_time(:millisecond)
-    assert [%StreamEvent{type: :delta}] = Enum.take(stream, 1)
-    assert System.monotonic_time(:millisecond) - started < 1_000
-    assert_receive :hostile_cancel_called
-    assert_receive {:DOWN, ^producer_monitor, :process, ^producer, :killed}
-    refute Process.alive?(producer)
+    assert Process.alive?(producer)
+    refute_receive :hostile_cancel_called
+    send(producer, :stop)
   end
 
-  test "security regression: public stream cleanup covers raise, halt, empty, and blocking cancel" do
-    for {model, cancel_mode, consume} <- [
-          {"hostile", :raise,
+  test "security regression: Client.stream cleanup covers raise, halt, take, and exhaustion" do
+    for {model, consume} <- [
+          {"events",
            fn stream ->
              assert_raise RuntimeError, "consumer failed", fn ->
                Enum.each(stream, fn _event -> raise "consumer failed" end)
              end
            end},
-          {"hostile", :raise,
+          {"events",
            fn stream ->
              assert :halted =
                       Enum.reduce_while(stream, :halted, fn _event, acc -> {:halt, acc} end)
            end},
-          {"empty", :raise, fn stream -> assert Enum.to_list(stream) == [] end},
-          {"hostile", :block, fn stream -> assert [_event] = Enum.take(stream, 1) end}
+          {"empty", fn stream -> assert Enum.to_list(stream) == [] end},
+          {"events", fn stream -> assert [_event] = Enum.take(stream, 1) end}
         ] do
-      {stream, producer, monitor} = hostile_stream(model, cancel_mode)
+      {stream, producer, monitor} = cleanup_stream(model)
       started = System.monotonic_time(:millisecond)
       consume.(stream)
 
-      assert_receive :hostile_cancel_called
-      assert_receive {:DOWN, ^monitor, :process, ^producer, :killed}
+      assert_receive {:cleanup_source_finalized, ^producer}
+      refute_receive {:cleanup_source_finalized, ^producer}
+      assert_receive {:DOWN, ^monitor, :process, ^producer, reason}
+      assert reason in [:normal, :noproc]
       refute Process.alive?(producer)
       assert System.monotonic_time(:millisecond) - started < 750
     end
+  end
+
+  test "security regression: injected stream event production is inside the absolute deadline" do
+    client =
+      Client.new(
+        adapters: %{"cleanup-stream" => CleanupStreamAdapter},
+        default_provider: "cleanup-stream"
+      )
+
+    request = %Request{
+      provider: "cleanup-stream",
+      model: "delayed-event",
+      messages: [Message.new(:user, "hi")],
+      provider_options: %{test_pid: self()}
+    }
+
+    assert {:ok, stream} = Client.stream(client, request, timeout_ms: 30)
+    assert_raise RequestTimeoutError, fn -> Enum.take(stream, 1) end
   end
 
   test "security regression: exiting stream consumers synchronously orphan no source producer" do
@@ -682,7 +753,7 @@ defmodule Arbor.LLM.HighLevelApiTest do
 
     {consumer, consumer_monitor} =
       spawn_monitor(fn ->
-        {stream, producer, _monitor} = hostile_stream("hostile", :raise)
+        {stream, producer, _monitor} = cleanup_stream("events")
         send(parent, {:consumer_source, producer})
         Enum.each(stream, fn _event -> exit(:consumer_abort) end)
       end)
@@ -690,7 +761,7 @@ defmodule Arbor.LLM.HighLevelApiTest do
     assert_receive {:consumer_source, producer}
     producer_monitor = Process.monitor(producer)
     assert_receive {:DOWN, ^consumer_monitor, :process, ^consumer, :consumer_abort}
-    assert_receive {:DOWN, ^producer_monitor, :process, ^producer, :killed}, 750
+    assert_receive {:DOWN, ^producer_monitor, :process, ^producer, :normal}, 750
     refute Process.alive?(producer)
   end
 
@@ -752,23 +823,61 @@ defmodule Arbor.LLM.HighLevelApiTest do
     assert match?(%StreamEvent{type: :finish, data: %{"reason" => :stop}}, List.last(events))
   end
 
-  defp hostile_stream(model, cancel_mode) do
-    client =
-      Client.new(
-        adapters: %{"hostile-owned" => HostileOwnedAdapter},
-        default_provider: "hostile-owned"
-      )
+  test "security regression: 100001-item tool results never reach the next model request" do
+    huge_tool = %Tool{
+      name: "lookup",
+      execute: fn _arguments -> %{"items" => List.duplicate(0, 100_001)} end
+    }
+
+    complete_client =
+      Client.new(default_provider: "tool-loop-high-level")
+      |> Client.register_adapter(ToolLoopAdapter)
+
+    assert {:error, {:invalid_tool_result, {:decoded_term_limit_exceeded, boundary, 100_000}}} =
+             LLM.generate(
+               client: complete_client,
+               model: "demo",
+               prompt: "run",
+               tools: [huge_tool],
+               max_tool_rounds: 2
+             )
+
+    assert boundary in [:nodes, :list_items]
+
+    stream_client =
+      Client.new(default_provider: "stream-tool-loop-high-level")
+      |> Client.register_adapter(StreamToolLoopAdapter)
 
     assert {:ok, stream} =
              LLM.stream(
-               client: client,
-               provider: "hostile-owned",
-               model: model,
-               prompt: "hi",
-               provider_options: %{test_pid: self(), cancel_mode: cancel_mode}
+               client: stream_client,
+               model: "demo",
+               prompt: "run",
+               tools: [huge_tool],
+               max_tool_rounds: 2
              )
 
-    assert_receive {:hostile_source_started, producer}
+    assert_raise RuntimeError, ~r/tool result rejected/, fn -> Enum.to_list(stream) end
+  end
+
+  defp cleanup_stream(model) do
+    client =
+      Client.new(
+        adapters: %{"cleanup-stream" => CleanupStreamAdapter},
+        default_provider: "cleanup-stream"
+      )
+
+    request = %Request{
+      provider: "cleanup-stream",
+      model: model,
+      messages: [Message.new(:user, "hi")],
+      provider_options: %{test_pid: self()}
+    }
+
+    assert {:ok, %Arbor.LLM.OwnedStream{producer: producer} = stream} =
+             Client.stream(client, request)
+
+    assert_receive {:cleanup_source_started, ^producer}
     {stream, producer, Process.monitor(producer)}
   end
 end

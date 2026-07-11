@@ -18,13 +18,27 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
 
   @behaviour Arbor.LLM.ProviderAdapter
 
-  alias Arbor.LLM.{ContentPart, OAuth, Request, Response}
+  alias Arbor.LLM.{Boundary, ContentPart, Deadline, OAuth, Request, RequestTimeoutError, Response}
 
   @impl true
   def provider, do: "openai_oauth"
 
   @impl true
-  def complete(%Request{} = request, opts \\ []) do
+  def complete(request, opts \\ [])
+
+  def complete(%Request{} = request, opts) do
+    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
+      Deadline.run(
+        fn -> do_complete(request, opts) end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  def complete(_request, _opts), do: {:error, :invalid_oauth_completion_request}
+
+  defp do_complete(request, opts) do
     {instructions, input} = build_input(request.messages)
     req = %{instructions: instructions, input: input, tools: build_tools(request.tools)}
 
@@ -36,7 +50,7 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
 
     case OAuth.Responses.complete(oauth_provider(request.provider), req, response_opts) do
       {:ok, %{text: text, tool_calls: tool_calls}} ->
-        {:ok, build_response(text, tool_calls)}
+        Boundary.completion({:ok, build_response(text, tool_calls)}, opts)
 
       {:error, reason} ->
         {:error, reason}

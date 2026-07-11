@@ -2,7 +2,7 @@ defmodule Arbor.LLM.ResponseBudgetTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
-  alias Arbor.LLM.ResponseBudget
+  alias Arbor.LLM.{ResponseBudget, ToolResultBudget}
 
   @limits [
     max_bytes: 1_024,
@@ -109,5 +109,37 @@ defmodule Arbor.LLM.ResponseBudgetTest do
 
     assert {:error, {:decoded_term_invalid, :string_or_atom_map_keys_required}} =
              ResponseBudget.validate(%{1 => "value"}, @limits)
+  end
+
+  test "security regression: public budgets are total and caller limits cannot widen ceilings" do
+    assert {:error, {:invalid_budget, :keyword_required}} =
+             ResponseBudget.validate(%{}, [{:max_bytes, 10} | :improper])
+
+    assert {:error, {:invalid_json, :binary_body_required}} =
+             ResponseBudget.decode_json(%{}, max_bytes: 10)
+
+    assert {:error, {:decoded_term_limit_exceeded, boundary, 100_000}} =
+             ResponseBudget.validate(List.duplicate(0, 100_001),
+               max_bytes: 1_000_000_000,
+               max_nodes: 1_000_000_000,
+               max_depth: 1_000_000,
+               max_map_keys: 1_000_000,
+               max_list_items: 1_000_000_000
+             )
+
+    assert boundary in [:nodes, :list_items]
+  end
+
+  test "security regression: tool result aggregate charges exact serialized bytes" do
+    escape_heavy = String.duplicate(<<0>>, 1_400_000)
+
+    assert {:ok, _encoded, aggregate} =
+             ToolResultBudget.encode(escape_heavy, ToolResultBudget.new())
+
+    assert {:error, {:invalid_tool_result, {:tool_result_aggregate_exceeded, :bytes, 16_777_216}}} =
+             ToolResultBudget.encode(escape_heavy, aggregate)
+
+    assert {:error, {:invalid_tool_result, :invalid_tool_result_budget}} =
+             ToolResultBudget.account("value", %{bytes: :not_a_number})
   end
 end

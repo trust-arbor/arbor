@@ -3,7 +3,11 @@ defmodule Arbor.LLM do
 
   alias Arbor.LLM.AbortError
 
+  alias Arbor.LLM.Boundary
+
   alias Arbor.LLM.Client
+
+  alias Arbor.LLM.Deadline
 
   alias Arbor.LLM.Message
 
@@ -23,16 +27,12 @@ defmodule Arbor.LLM do
     "llm" => Arbor.LLM.Eval.Subject
   }
 
-  @controlled_cleanup_grace_ms 25
   @controlled_wrapper_cleanup_grace_ms 600
-  @controlled_cleanup_kill_wait_ms 250
-  @controlled_cancel_callback_ms 50
   @max_object_stream_bytes 1_048_576
+  @max_public_timeout_ms 900_000
   @max_object_stream_events 10_000
   @max_object_stream_depth 32
   @max_object_decode_attempts 1
-  @max_embedding_vectors 2_048
-  @max_embedding_dimensions 8_192
   @object_json_limits [
     max_bytes: 1_048_576,
     max_nodes: 100_000,
@@ -64,7 +64,8 @@ defmodule Arbor.LLM do
   @spec generate(generate_opts()) ::
           {:ok, Arbor.LLM.Response.t()} | {:error, term()}
   def generate(opts) when is_list(opts) do
-    with :ok <- ensure_not_aborted(opts),
+    with :ok <- validate_public_options(opts),
+         :ok <- ensure_not_aborted(opts),
          {:ok, request} <- build_request(opts) do
       client = Keyword.get(opts, :client) || Client.default_client()
       tools = Keyword.get(opts, :tools, [])
@@ -98,9 +99,12 @@ defmodule Arbor.LLM do
     end
   end
 
+  def generate(_opts), do: {:error, :keyword_options_required}
+
   @spec stream(generate_opts()) :: {:ok, Enumerable.t()} | {:error, term()}
   def stream(opts) when is_list(opts) do
-    with :ok <- ensure_not_aborted(opts),
+    with :ok <- validate_public_options(opts),
+         :ok <- ensure_not_aborted(opts),
          {:ok, request} <- build_request(opts) do
       client = Keyword.get(opts, :client) || Client.default_client()
       client_opts = Keyword.get(opts, :client_opts, [])
@@ -120,6 +124,8 @@ defmodule Arbor.LLM do
     end
   end
 
+  def stream(_opts), do: {:error, :keyword_options_required}
+
   @spec generate_object(generate_opts()) :: {:ok, map()} | {:error, term()}
   def generate_object(opts) when is_list(opts) do
     case generate(opts) do
@@ -136,6 +142,8 @@ defmodule Arbor.LLM do
     end
   end
 
+  def generate_object(_opts), do: {:error, :keyword_options_required}
+
   @spec stream_object(generate_opts()) :: {:ok, Enumerable.t()} | {:error, term()}
   def stream_object(opts) when is_list(opts) do
     case stream(opts) do
@@ -147,14 +155,29 @@ defmodule Arbor.LLM do
     end
   end
 
+  def stream_object(_opts), do: {:error, :keyword_options_required}
+
+  defp validate_public_options(opts), do: validate_public_options(opts, 0)
+  defp validate_public_options([], _count), do: :ok
+
+  defp validate_public_options(_opts, count) when count >= 128,
+    do: {:error, :too_many_options}
+
+  defp validate_public_options([{key, _value} | rest], count) when is_atom(key),
+    do: validate_public_options(rest, count + 1)
+
+  defp validate_public_options(_improper_or_invalid, _count),
+    do: {:error, :keyword_options_required}
+
   defp build_request(opts) do
     with :ok <- validate_prompt_messages(opts),
-         {:ok, messages} <- normalize_messages(opts) do
+         {:ok, messages} <- normalize_messages(opts),
+         {:ok, tools} <- normalize_tools(Keyword.get(opts, :tools, [])) do
       request = %Request{
         provider: Keyword.get(opts, :provider),
         model: Keyword.get(opts, :model, ""),
         messages: maybe_prepend_system(messages, Keyword.get(opts, :system)),
-        tools: normalize_tools(Keyword.get(opts, :tools, [])),
+        tools: tools,
         tool_choice: Keyword.get(opts, :tool_choice),
         max_tokens: Keyword.get(opts, :max_tokens),
         temperature: Keyword.get(opts, :temperature),
@@ -419,13 +442,20 @@ defmodule Arbor.LLM do
 
   defp maybe_prepend_system(messages, _), do: messages
 
-  defp normalize_tools(tools) do
-    Enum.map(tools, fn
-      %Tool{} = tool -> Tool.as_definition(tool)
-      other when is_map(other) -> other
-      other -> %{name: to_string(other), description: nil, input_schema: %{}}
-    end)
-  end
+  defp normalize_tools(tools), do: normalize_tools(tools, [])
+  defp normalize_tools([], acc), do: {:ok, Enum.reverse(acc)}
+
+  defp normalize_tools([%Tool{} = tool | rest], acc),
+    do: normalize_tools(rest, [Tool.as_definition(tool) | acc])
+
+  defp normalize_tools([tool | rest], acc) when is_map(tool),
+    do: normalize_tools(rest, [tool | acc])
+
+  defp normalize_tools([name | rest], acc) when is_binary(name) or is_atom(name),
+    do:
+      normalize_tools(rest, [%{name: to_string(name), description: nil, input_schema: %{}} | acc])
+
+  defp normalize_tools(_improper_or_invalid, _acc), do: {:error, :proper_tool_list_required}
 
   defp decode_object(text) when is_binary(text) do
     case ResponseBudget.decode_json(text, @object_json_limits) do
@@ -605,22 +635,38 @@ defmodule Arbor.LLM do
   end
 
   defp with_timeout(opts, fun) when is_function(fun, 0) do
-    timeout_ms = Keyword.get(opts, :timeout_ms)
+    case timeout_option(opts) do
+      {:ok, nil} ->
+        fun.()
 
-    if is_integer(timeout_ms) and timeout_ms > 0 do
-      task = Task.async(fun)
+      {:ok, timeout_ms} ->
+        with {:ok, receipt} <- Deadline.receipt(timeout_ms: timeout_ms) do
+          Deadline.run(
+            fun,
+            receipt,
+            RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+          )
+        end
 
-      try do
-        Task.await(task, timeout_ms)
-      catch
-        :exit, {:timeout, _} ->
-          Task.shutdown(task, :brutal_kill)
-          {:error, RequestTimeoutError.exception(timeout_ms: timeout_ms)}
-      end
-    else
-      fun.()
+      {:error, _reason} = error ->
+        error
     end
   end
+
+  defp timeout_option(opts), do: timeout_option(opts, nil)
+  defp timeout_option([], value), do: {:ok, value}
+
+  defp timeout_option([{:timeout_ms, value} | _rest], _current)
+       when is_integer(value) and value > 0,
+       do: {:ok, value}
+
+  defp timeout_option([{:timeout_ms, _value} | _rest], _current),
+    do: {:error, :invalid_timeout}
+
+  defp timeout_option([{key, _value} | rest], current) when is_atom(key),
+    do: timeout_option(rest, current)
+
+  defp timeout_option(_improper, _current), do: {:error, :invalid_options}
 
   defp stream_events(client, request, [], stream_opts),
     do: stream_call_with_retry(client, request, stream_opts)
@@ -641,6 +687,8 @@ defmodule Arbor.LLM do
       :max_steps,
       :parallel_tool_execution,
       :abort?,
+      :timeout_ms,
+      :stream_read_timeout_ms,
       :retry,
       :sleep_fn
     ])
@@ -658,6 +706,7 @@ defmodule Arbor.LLM do
           max_steps: max_steps,
           step_index: 0,
           parallel: parallel,
+          tool_result_budget: Arbor.LLM.ToolResultBudget.new(),
           pending_events: [],
           done?: false
         }
@@ -682,7 +731,8 @@ defmodule Arbor.LLM do
         next_tool_loop_stream_item(next_state)
 
       {:error, reason} ->
-        raise reason
+        raise RuntimeError,
+              "tool result rejected: #{inspect(reason, limit: 20, printable_limit: 512)}"
     end
   end
 
@@ -703,38 +753,44 @@ defmodule Arbor.LLM do
           {:ok, %{state | pending_events: step_events, done?: true}}
 
         true ->
-          {tool_messages, tool_result_events} =
-            execute_tool_calls_for_stream(tool_calls, state.tools, state.parallel)
-
-          step_finish_event = %Arbor.LLM.StreamEvent{
-            type: :step_finish,
-            data: %{
-              "step" => state.step_index,
-              "tool_call_count" => length(tool_calls),
-              "next_step" => state.step_index + 1
+          with {:ok, tool_messages, tool_result_events, next_budget} <-
+                 execute_tool_calls_for_stream(
+                   tool_calls,
+                   state.tools,
+                   state.parallel,
+                   state.tool_result_budget
+                 ) do
+            step_finish_event = %Arbor.LLM.StreamEvent{
+              type: :step_finish,
+              data: %{
+                "step" => state.step_index,
+                "tool_call_count" => length(tool_calls),
+                "next_step" => state.step_index + 1
+              }
             }
-          }
 
-          next_request = %{
-            state.request
-            | messages:
-                state.request.messages ++
-                  [
-                    Message.new(:assistant, extract_text_from_events(step_events), %{
-                      "tool_calls" => tool_calls
-                    })
-                  ] ++ tool_messages
-          }
+            next_request = %{
+              state.request
+              | messages:
+                  state.request.messages ++
+                    [
+                      Message.new(:assistant, extract_text_from_events(step_events), %{
+                        "tool_calls" => tool_calls
+                      })
+                    ] ++ tool_messages
+            }
 
-          {:ok,
-           %{
-             state
-             | request: next_request,
-               pending_events: step_events ++ tool_result_events ++ [step_finish_event],
-               max_steps: state.max_steps - 1,
-               step_index: state.step_index + 1,
-               done?: false
-           }}
+            {:ok,
+             %{
+               state
+               | request: next_request,
+                 tool_result_budget: next_budget,
+                 pending_events: step_events ++ tool_result_events ++ [step_finish_event],
+                 max_steps: state.max_steps - 1,
+                 step_index: state.step_index + 1,
+                 done?: false
+             }}
+          end
       end
     end
   end
@@ -890,7 +946,7 @@ defmodule Arbor.LLM do
     end)
   end
 
-  defp execute_tool_calls_for_stream(tool_calls, tools, parallel) do
+  defp execute_tool_calls_for_stream(tool_calls, tools, parallel, aggregate) do
     runner = fn call -> execute_tool_call_for_stream(call, tools) end
 
     results =
@@ -905,8 +961,33 @@ defmodule Arbor.LLM do
         Enum.map(tool_calls, runner)
       end
 
-    {Enum.map(results, &elem(&1, 0)), Enum.map(results, &elem(&1, 1))}
+    encode_stream_tool_results(results, aggregate, [], [])
   end
+
+  defp encode_stream_tool_results([], aggregate, messages, events),
+    do: {:ok, Enum.reverse(messages), Enum.reverse(events), aggregate}
+
+  defp encode_stream_tool_results([{output, id, name} | rest], aggregate, messages, events) do
+    with {:ok, encoded, next} <- Arbor.LLM.ToolResultBudget.encode(output, aggregate) do
+      message = Message.new(:tool, encoded, %{"tool_call_id" => id, "name" => name})
+
+      event = %Arbor.LLM.StreamEvent{
+        type: :tool_result,
+        data: %{
+          "id" => id,
+          "name" => name,
+          "status" => output["status"],
+          "result" => Map.get(output, "result"),
+          "error" => Map.get(output, "error")
+        }
+      }
+
+      encode_stream_tool_results(rest, next, [message | messages], [event | events])
+    end
+  end
+
+  defp encode_stream_tool_results(_invalid, _aggregate, _messages, _events),
+    do: {:error, :invalid_tool_execution_result}
 
   defp execute_tool_call_for_stream(call, tools) do
     id = Map.get(call, "id") || Map.get(call, :id) || "call"
@@ -929,21 +1010,7 @@ defmodule Arbor.LLM do
           %{"status" => "error", "error" => "Unknown tool", "type" => :unknown_tool}
       end
 
-    tool_message =
-      Message.new(:tool, Jason.encode!(output), %{"tool_call_id" => id, "name" => name})
-
-    tool_event = %Arbor.LLM.StreamEvent{
-      type: :tool_result,
-      data: %{
-        "id" => id,
-        "name" => name,
-        "status" => output["status"],
-        "result" => Map.get(output, "result"),
-        "error" => Map.get(output, "error")
-      }
-    }
-
-    {tool_message, tool_event}
+    {output, id, name}
   end
 
   defp safe_execute_stream_tool(execute, arguments) do
@@ -958,7 +1025,7 @@ defmodule Arbor.LLM do
         %{"status" => "ok", "result" => map}
 
       other ->
-        %{"status" => "ok", "result" => %{"value" => inspect(other)}}
+        %{"status" => "ok", "result" => other}
     end
   rescue
     exception ->
@@ -976,20 +1043,7 @@ defmodule Arbor.LLM do
       "type" => :execution_failed
     }
 
-    message =
-      Message.new(:tool, Jason.encode!(output), %{"tool_call_id" => "call", "name" => "unknown"})
-
-    event = %Arbor.LLM.StreamEvent{
-      type: :tool_result,
-      data: %{
-        "id" => "call",
-        "name" => "unknown",
-        "status" => "error",
-        "error" => output["error"]
-      }
-    }
-
-    {message, event}
+    {output, "call", "unknown"}
   end
 
   defp ensure_not_aborted_runtime(opts) do
@@ -1001,32 +1055,29 @@ defmodule Arbor.LLM do
   end
 
   defp wrap_stream_runtime_controls(events, opts) do
-    # `stream_read_timeout_ms` is retained as a public compatibility name, but
-    # it is an absolute consumption deadline measured from first enumeration.
-    # Receiving events never extends it.
     timeout_ms = Keyword.get(opts, :stream_read_timeout_ms, Keyword.get(opts, :timeout_ms))
+    timeout_ms = normalize_timeout_ms(timeout_ms)
+    deadline_ms = closed_stream_deadline_ms(timeout_ms)
     abort_fun = abort_fun(opts)
-    build_controlled_stream(events, timeout_ms, abort_fun)
+    build_controlled_stream(events, timeout_ms, deadline_ms, abort_fun)
   end
 
-  defp build_controlled_stream(events, timeout_ms, abort_fun) do
+  defp build_controlled_stream(events, timeout_ms, deadline_ms, abort_fun) do
     Stream.resource(
       fn ->
         owner = self()
         ref = make_ref()
-        source_control = controlled_source_control(events)
 
         {pid, monitor_ref} =
-          spawn_monitor(fn -> produce_stream_events(owner, ref, events, source_control) end)
+          spawn_monitor(fn -> produce_stream_events(owner, ref, events) end)
 
         %{
           ref: ref,
           producer_pid: pid,
           monitor_ref: monitor_ref,
-          source_control: source_control,
-          timeout_ms: normalize_timeout_ms(timeout_ms),
+          timeout_ms: timeout_ms,
           abort_fun: abort_fun,
-          absolute_deadline_ms: absolute_stream_deadline_ms(timeout_ms),
+          absolute_deadline_ms: deadline_ms,
           done?: false,
           producer_down?: false,
           demand_outstanding?: false
@@ -1037,14 +1088,14 @@ defmodule Arbor.LLM do
     )
   end
 
-  defp produce_stream_events(owner, ref, events, source_control) do
+  defp produce_stream_events(owner, ref, events) do
     owner_monitor = Process.monitor(owner)
 
     try do
       Enum.reduce_while(events, :ok, fn event, :ok ->
         receive do
           {^ref, :demand} ->
-            send(owner, {ref, :event, event})
+            send(owner, {ref, :event, event, System.monotonic_time(:millisecond)})
             {:cont, :ok}
 
           {^ref, :cancel} ->
@@ -1055,17 +1106,24 @@ defmodule Arbor.LLM do
         end
       end)
 
-      send(owner, {ref, :done})
+      send(owner, {ref, :done, System.monotonic_time(:millisecond)})
     after
       Process.demonitor(owner_monitor, [:flush])
-      close_controlled_source(source_control)
     end
   rescue
     exception ->
-      send(owner, {ref, :producer_error, {:error, exception, __STACKTRACE__}})
+      send(
+        owner,
+        {ref, :producer_error, {:error, exception, __STACKTRACE__},
+         System.monotonic_time(:millisecond)}
+      )
   catch
     kind, reason ->
-      send(owner, {ref, :producer_error, {kind, reason, __STACKTRACE__}})
+      send(
+        owner,
+        {ref, :producer_error, {kind, reason, __STACKTRACE__},
+         System.monotonic_time(:millisecond)}
+      )
   end
 
   defp next_controlled_stream_item(%{done?: true} = state), do: {:halt, state}
@@ -1078,17 +1136,30 @@ defmodule Arbor.LLM do
     state = request_controlled_demand(state)
 
     receive do
-      {ref, :event, event} when ref == state.ref ->
-        {[event], %{state | demand_outstanding?: false}}
+      {ref, :event, event, completed_mono} when ref == state.ref ->
+        if completed_within_stream_deadline?(state, completed_mono) do
+          {[event], %{state | demand_outstanding?: false}}
+        else
+          raise RequestTimeoutError, timeout_ms: state.timeout_ms
+        end
 
-      {ref, :done} when ref == state.ref ->
-        {:halt, %{state | done?: true}}
+      {ref, :done, completed_mono} when ref == state.ref ->
+        if completed_within_stream_deadline?(state, completed_mono) do
+          {:halt, %{state | done?: true}}
+        else
+          raise RequestTimeoutError, timeout_ms: state.timeout_ms
+        end
 
-      {ref, :producer_error, {:error, exception, stacktrace}} when ref == state.ref ->
-        reraise(exception, stacktrace)
+      {ref, :producer_error, {:error, exception, stacktrace}, completed_mono}
+      when ref == state.ref ->
+        if completed_within_stream_deadline?(state, completed_mono),
+          do: reraise(exception, stacktrace),
+          else: raise(RequestTimeoutError, timeout_ms: state.timeout_ms)
 
-      {ref, :producer_error, {kind, reason, stacktrace}} when ref == state.ref ->
-        :erlang.raise(kind, reason, stacktrace)
+      {ref, :producer_error, {kind, reason, stacktrace}, completed_mono} when ref == state.ref ->
+        if completed_within_stream_deadline?(state, completed_mono),
+          do: :erlang.raise(kind, reason, stacktrace),
+          else: raise(RequestTimeoutError, timeout_ms: state.timeout_ms)
 
       {:DOWN, mon_ref, :process, pid, _reason}
       when mon_ref == state.monitor_ref and pid == state.producer_pid ->
@@ -1114,89 +1185,14 @@ defmodule Arbor.LLM do
       state.producer_down? or
         await_controlled_down(state, @controlled_wrapper_cleanup_grace_ms)
 
-    producer_down? =
-      if producer_down? do
-        true
-      else
-        if Process.alive?(state.producer_pid), do: Process.exit(state.producer_pid, :kill)
-        await_controlled_down(state, @controlled_cleanup_kill_wait_ms)
-      end
-
-    source_down? = close_controlled_source(state.source_control)
+    unless producer_down? do
+      if Process.alive?(state.producer_pid), do: Process.exit(state.producer_pid, :kill)
+      await_controlled_down!(state)
+    end
 
     Process.demonitor(state.monitor_ref, [:flush])
     flush_controlled_messages(state.ref, state.monitor_ref, state.producer_pid)
-
-    if producer_down? and source_down? do
-      :ok
-    else
-      raise "stream producer cleanup did not acknowledge termination"
-    end
-  end
-
-  defp controlled_source_control(%Arbor.LLM.OwnedStream{cancel: cancel, producer: producer})
-       when is_function(cancel, 0) and is_pid(producer),
-       do: %{cancel: cancel, producer: producer}
-
-  defp controlled_source_control(_events), do: nil
-
-  defp close_controlled_source(nil), do: true
-
-  defp close_controlled_source(%{cancel: cancel, producer: producer}) do
-    if Process.alive?(producer) do
-      _cancel_result = safely_cancel_controlled_source(cancel)
-      monitor = Process.monitor(producer)
-
-      down? =
-        receive do
-          {:DOWN, ^monitor, :process, ^producer, _reason} -> true
-        after
-          @controlled_cleanup_grace_ms ->
-            if Process.alive?(producer), do: Process.exit(producer, :kill)
-
-            receive do
-              {:DOWN, ^monitor, :process, ^producer, _reason} -> true
-            after
-              @controlled_cleanup_kill_wait_ms -> false
-            end
-        end
-
-      Process.demonitor(monitor, [:flush])
-      down?
-    else
-      true
-    end
-  end
-
-  defp safely_cancel_controlled_source(cancel) do
-    {pid, monitor} =
-      spawn_monitor(fn ->
-        try do
-          cancel.()
-        rescue
-          _exception -> :cancel_failed
-        catch
-          _kind, _reason -> :cancel_failed
-        end
-      end)
-
-    result =
-      receive do
-        {:DOWN, ^monitor, :process, ^pid, :normal} -> :ok
-        {:DOWN, ^monitor, :process, ^pid, _reason} -> :cancel_failed
-      after
-        @controlled_cancel_callback_ms ->
-          Process.exit(pid, :kill)
-
-          receive do
-            {:DOWN, ^monitor, :process, ^pid, _reason} -> :cancel_failed
-          after
-            @controlled_cleanup_kill_wait_ms -> :cancel_failed
-          end
-      end
-
-    Process.demonitor(monitor, [:flush])
-    result
+    :ok
   end
 
   defp await_controlled_down(state, timeout) do
@@ -1209,12 +1205,23 @@ defmodule Arbor.LLM do
     end
   end
 
+  defp await_controlled_down!(state) do
+    receive do
+      {:DOWN, monitor_ref, :process, producer_pid, _reason}
+      when monitor_ref == state.monitor_ref and producer_pid == state.producer_pid ->
+        :ok
+    end
+  end
+
   defp flush_controlled_messages(ref, monitor_ref, producer_pid) do
     receive do
       {^ref, _kind} ->
         flush_controlled_messages(ref, monitor_ref, producer_pid)
 
       {^ref, _kind, _value} ->
+        flush_controlled_messages(ref, monitor_ref, producer_pid)
+
+      {^ref, _kind, _value, _completed_mono} ->
         flush_controlled_messages(ref, monitor_ref, producer_pid)
 
       {:DOWN, ^monitor_ref, :process, ^producer_pid, _reason} ->
@@ -1247,8 +1254,13 @@ defmodule Arbor.LLM do
     end
   end
 
+  defp completed_within_stream_deadline?(%{timeout_ms: nil}, _completed_mono), do: true
+
+  defp completed_within_stream_deadline?(state, completed_mono),
+    do: is_integer(completed_mono) and completed_mono <= state.absolute_deadline_ms
+
   defp normalize_timeout_ms(timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0,
-    do: timeout_ms
+    do: min(timeout_ms, @max_public_timeout_ms)
 
   defp normalize_timeout_ms(_), do: nil
 
@@ -1258,6 +1270,16 @@ defmodule Arbor.LLM do
   end
 
   defp absolute_stream_deadline_ms(_), do: nil
+
+  defp closed_stream_deadline_ms(timeout_ms) do
+    own = absolute_stream_deadline_ms(timeout_ms)
+
+    case {own, Deadline.current_deadline()} do
+      {nil, inherited} -> inherited
+      {deadline, inherited} when is_integer(inherited) -> min(deadline, inherited)
+      {deadline, _inherited} -> deadline
+    end
+  end
 
   defp next_receive_timeout_ms(%{timeout_ms: nil, abort_fun: abort_fun})
        when is_function(abort_fun, 0),
@@ -1321,6 +1343,30 @@ defmodule Arbor.LLM do
   @doc false
   def finite_number?(value), do: Arbor.LLM.ResponseBudget.finite_number?(value)
 
+  @doc false
+  def run_with_deadline(fun, timeout_ms, timeout_error) when is_function(fun, 0) do
+    with {:ok, receipt} <- Deadline.receipt(timeout_ms: timeout_ms) do
+      Deadline.run(fun, receipt, timeout_error)
+    end
+  end
+
+  def run_with_deadline(_fun, _timeout_ms, _timeout_error),
+    do: {:error, :invalid_deadline_operation}
+
+  @doc false
+  def run_until_deadline(fun, deadline_ms, timeout_ms, timeout_error) when is_function(fun, 0) do
+    with {:ok, receipt} <- Deadline.receipt_until(deadline_ms, timeout_ms) do
+      Deadline.run(fun, receipt, timeout_error)
+    end
+  end
+
+  def run_until_deadline(_fun, _deadline_ms, _timeout_ms, _timeout_error),
+    do: {:error, :invalid_deadline_operation}
+
+  @doc false
+  def read_bounded_regular_file(path, maximum),
+    do: Arbor.LLM.FileReceipt.read(path, maximum)
+
   @doc """
   Validate and normalize an OpenAI-compatible batch embedding response.
 
@@ -1330,104 +1376,6 @@ defmodule Arbor.LLM do
   """
   @spec decode_embedding_response(term(), pos_integer()) ::
           {:ok, [[number()]], term()} | {:error, term()}
-  def decode_embedding_response(body, expected_count)
-      when is_integer(expected_count) and expected_count > 0 and
-             expected_count <= @max_embedding_vectors do
-    case body do
-      %{"data" => data} = response when is_list(data) ->
-        with {:ok, indexed, dimensions, count} <-
-               collect_embedding_entries(data, expected_count, %{}, nil, 0),
-             true <-
-               count == expected_count or
-                 {:error, {:unexpected_embedding_count, expected_count}},
-             true <- dimensions > 0 or {:error, :empty_embedding_vector} do
-          embeddings = for index <- 0..(expected_count - 1), do: Map.fetch!(indexed, index)
-          {:ok, embeddings, Map.get(response, "usage", %{})}
-        end
-
-      _other ->
-        {:error, :unexpected_embed_response}
-    end
-  end
-
-  def decode_embedding_response(_body, _expected_count),
-    do: {:error, {:invalid_expected_embedding_count, @max_embedding_vectors}}
-
-  defp collect_embedding_entries(
-         [],
-         expected_count,
-         indexed,
-         dimensions,
-         count
-       ) do
-    if map_size(indexed) == expected_count,
-      do: {:ok, indexed, dimensions || 0, count},
-      else: {:error, {:embedding_indices_incomplete, expected_count}}
-  end
-
-  defp collect_embedding_entries(
-         _entries,
-         _expected_count,
-         _indexed,
-         _dimensions,
-         count
-       )
-       when count >= @max_embedding_vectors,
-       do: {:error, {:embedding_vector_count_exceeded, @max_embedding_vectors}}
-
-  defp collect_embedding_entries(
-         [%{"index" => index, "embedding" => vector} | rest],
-         expected_count,
-         indexed,
-         expected_dimensions,
-         count
-       ) do
-    with :ok <- validate_embedding_index(index, expected_count, indexed),
-         {:ok, dimensions} <- validate_embedding_vector(vector, 0),
-         true <-
-           is_nil(expected_dimensions) or dimensions == expected_dimensions or
-             {:error, {:embedding_dimension_mismatch, expected_dimensions, dimensions}} do
-      collect_embedding_entries(
-        rest,
-        expected_count,
-        Map.put(indexed, index, vector),
-        dimensions,
-        count + 1
-      )
-    end
-  end
-
-  defp collect_embedding_entries(
-         [_entry | _rest],
-         _expected_count,
-         _indexed,
-         _dimensions,
-         _count
-       ),
-       do: {:error, :embedding_entry_requires_index_and_vector}
-
-  defp validate_embedding_index(index, expected_count, indexed) do
-    cond do
-      not is_integer(index) -> {:error, :embedding_index_must_be_integer}
-      index < 0 or index >= expected_count -> {:error, {:embedding_index_out_of_bounds, index}}
-      Map.has_key?(indexed, index) -> {:error, {:duplicate_embedding_index, index}}
-      true -> :ok
-    end
-  end
-
-  defp validate_embedding_vector([], 0), do: {:error, :empty_embedding_vector}
-  defp validate_embedding_vector([], dimensions), do: {:ok, dimensions}
-
-  defp validate_embedding_vector(_vector, dimensions)
-       when dimensions >= @max_embedding_dimensions,
-       do: {:error, {:embedding_dimensions_exceeded, @max_embedding_dimensions}}
-
-  defp validate_embedding_vector([value | rest], dimensions) do
-    if ResponseBudget.finite_number?(value),
-      do: validate_embedding_vector(rest, dimensions + 1),
-      else: {:error, :finite_numeric_embedding_required}
-  end
-
-  defp validate_embedding_vector(_improper_or_non_list, _dimensions),
-    do: {:error, :proper_embedding_vector_required}
+  def decode_embedding_response(body, expected_count),
+    do: Boundary.embedding_response(body, expected_count)
 end

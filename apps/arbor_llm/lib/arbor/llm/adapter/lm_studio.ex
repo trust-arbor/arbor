@@ -16,7 +16,8 @@ defmodule Arbor.LLM.Adapter.LmStudio do
 
   @behaviour Arbor.LLM.ProviderAdapter
 
-  alias Arbor.LLM.{ContentPart, Endpoint, Request, Response, ResponseBudget}
+  alias Arbor.LLM.{Boundary, ContentPart, Deadline, Endpoint, Request, RequestTimeoutError}
+  alias Arbor.LLM.{Response, ResponseBudget}
 
   @provider "lm_studio_owned"
   @max_response_bytes 16_777_216
@@ -34,15 +35,28 @@ defmodule Arbor.LLM.Adapter.LmStudio do
   def provider, do: @provider
 
   @impl true
-  def complete(%Request{} = request, opts \\ []) do
-    with {:ok, maximum} <- response_limit(opts),
-         {:ok, url} <- chat_url() do
-      do_complete(request, opts, url, maximum)
-    else
-      {:error, {:invalid_response_limit, _maximum}} = error -> error
-      {:error, reason} -> {:error, {:invalid_lm_studio_endpoint, reason}}
+  def complete(request, opts \\ [])
+
+  def complete(%Request{} = request, opts) do
+    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
+      Deadline.run(
+        fn ->
+          with {:ok, maximum} <- response_limit(opts),
+               {:ok, url} <- chat_url() do
+            do_complete(request, opts, url, maximum)
+            |> Boundary.completion(opts)
+          else
+            {:error, {:invalid_response_limit, _maximum}} = error -> error
+            {:error, reason} -> {:error, {:invalid_lm_studio_endpoint, reason}}
+          end
+        end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
     end
   end
+
+  def complete(_request, _opts), do: {:error, :invalid_lm_studio_completion_request}
 
   defp do_complete(request, opts, url, maximum) do
     body = build_body(request)
@@ -92,8 +106,8 @@ defmodule Arbor.LLM.Adapter.LmStudio do
 
   defp response_limit(opts) do
     case Keyword.get(opts, :max_response_bytes, @max_response_bytes) do
-      maximum when is_integer(maximum) and maximum > 0 and maximum <= @max_response_bytes ->
-        {:ok, maximum}
+      maximum when is_integer(maximum) and maximum > 0 ->
+        {:ok, min(maximum, @max_response_bytes)}
 
       maximum ->
         {:error, {:invalid_response_limit, maximum}}

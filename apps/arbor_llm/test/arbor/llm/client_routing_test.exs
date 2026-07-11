@@ -100,7 +100,7 @@ defmodule Arbor.LLM.ClientRoutingTest do
         def complete(_, _), do: {:error, :not_implemented}
 
         def embed(texts, model, opts) do
-          send(self(), {:spy_embed, texts, model, opts})
+          send(Keyword.fetch!(opts, :parent), {:spy_embed, texts, model, opts})
           {:ok, %{embeddings: [[1.0, 2.0]], model: model, usage: %{}, dimensions: 2}}
         end
       end
@@ -109,7 +109,11 @@ defmodule Arbor.LLM.ClientRoutingTest do
         Client.new()
         |> Client.register_adapter(SpyAdapter)
 
-      assert {:ok, _} = Client.embed(client, "openai", "text-embedding-3-small", texts: ["x"])
+      assert {:ok, _} =
+               Client.embed(client, "openai", "text-embedding-3-small",
+                 texts: ["x"],
+                 parent: self()
+               )
 
       assert_received {:spy_embed, ["x"], "text-embedding-3-small", opts}
       assert opts[:provider] == "openai"

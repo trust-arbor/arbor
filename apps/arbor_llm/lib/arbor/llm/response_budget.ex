@@ -5,6 +5,16 @@ defmodule Arbor.LLM.ResponseBudget do
 
   @signed_64_min -9_223_372_036_854_775_808
   @signed_64_max 9_223_372_036_854_775_807
+  @hard_limits %{
+    max_bytes: 16_777_216,
+    max_nodes: 100_000,
+    max_depth: 32,
+    max_map_keys: 10_000,
+    max_list_items: 100_000,
+    max_string_bytes: 16_777_216,
+    max_number_bytes: 128
+  }
+  @limit_keys Map.keys(@hard_limits)
 
   @type limits :: %{
           required(:max_bytes) => pos_integer(),
@@ -14,19 +24,17 @@ defmodule Arbor.LLM.ResponseBudget do
           required(:max_list_items) => pos_integer()
         }
 
-  @spec validate(term(), keyword()) :: :ok | {:error, term()}
-  def validate(term, opts) when is_list(opts) do
+  @spec validate(term(), term()) :: :ok | {:error, term()}
+  def validate(term, opts) do
     case measure(term, opts) do
       {:ok, _measurements} -> :ok
       {:error, _reason} = error -> error
     end
   end
 
-  @spec measure(term(), keyword()) :: {:ok, map()} | {:error, term()}
-  def measure(term, opts) when is_list(opts) do
-    limits = limits(opts)
-
-    with :ok <- validate_limits(limits) do
+  @spec measure(term(), term()) :: {:ok, map()} | {:error, term()}
+  def measure(term, opts) do
+    with {:ok, limits, _normalized} <- normalize_limits(opts) do
       walk([{:value, term, 0}], %{nodes: 0, bytes: 0, map_keys: 0, list_items: 0}, limits)
     end
   end
@@ -64,55 +72,72 @@ defmodule Arbor.LLM.ResponseBudget do
     |> Req.Request.prepend_response_steps(arbor_decode_bounded_body: &decode_bounded_body/1)
   end
 
-  @spec decode_json(binary(), keyword()) :: {:ok, term()} | {:error, term()}
-  def decode_json(body, opts) when is_binary(body) and is_list(opts) do
+  @spec decode_json(term(), term()) :: {:ok, term()} | {:error, term()}
+  def decode_json(body, opts) when is_binary(body) do
     case decode_json_with_measurements(body, opts) do
       {:ok, decoded, _measurements} -> {:ok, decoded}
       {:error, _reason} = error -> error
     end
   end
 
+  def decode_json(_body, _opts), do: {:error, {:invalid_json, :binary_body_required}}
+
   @doc false
-  @spec preflight_json(binary(), keyword()) :: {:ok, map()} | {:error, term()}
-  def preflight_json(body, opts) when is_binary(body) and is_list(opts),
-    do: JSONPreflight.scan(body, opts)
+  @spec preflight_json(term(), term()) :: {:ok, map()} | {:error, term()}
+  def preflight_json(body, opts) when is_binary(body) do
+    with {:ok, _limits, normalized} <- normalize_limits(opts) do
+      JSONPreflight.scan(body, normalized)
+    end
+  end
+
+  def preflight_json(_body, _opts), do: {:error, {:invalid_json, :binary_body_required}}
 
   @doc false
   @spec decode_json_with_measurements(binary(), keyword()) ::
           {:ok, term(), map()} | {:error, term()}
-  def decode_json_with_measurements(body, opts) when is_binary(body) and is_list(opts) do
-    with {:ok, _source_measurements} <- JSONPreflight.scan(body, opts),
+  def decode_json_with_measurements(body, opts) when is_binary(body) do
+    with {:ok, _limits, normalized} <- normalize_limits(opts),
+         {:ok, _source_measurements} <- JSONPreflight.scan(body, normalized),
          {:ok, decoded} <- decode_after_preflight(body),
-         {:ok, decoded_measurements} <- measure(decoded, opts),
+         {:ok, decoded_measurements} <- measure(decoded, normalized),
          {:ok, aggregate_measurements} <-
-           validate_embedded_json(decoded, opts, decoded_measurements) do
+           validate_embedded_json(decoded, normalized, decoded_measurements) do
       {:ok, decoded, aggregate_measurements}
     end
   end
 
+  def decode_json_with_measurements(_body, _opts),
+    do: {:error, {:invalid_json, :binary_body_required}}
+
   @spec decode_json_numbers(binary(), keyword(), [String.t()]) ::
           {:ok, term(), %{String.t() => String.t()}} | {:error, term()}
-  def decode_json_numbers(body, opts, keys)
-      when is_binary(body) and is_list(opts) and is_list(keys) do
-    with {:ok, %{number_lexemes: numbers}} <- JSONPreflight.scan(body, opts, keys),
+  def decode_json_numbers(body, opts, keys) when is_binary(body) do
+    with :ok <- validate_tracked_keys(keys),
+         {:ok, _limits, normalized} <- normalize_limits(opts),
+         {:ok, %{number_lexemes: numbers}} <- JSONPreflight.scan(body, normalized, keys),
          true <-
            Enum.all?(keys, &Map.has_key?(numbers, &1)) or
              {:error, {:invalid_json, :tracked_number_required}},
          {:ok, decoded} <- decode_after_preflight(body),
-         {:ok, decoded_measurements} <- measure(decoded, opts),
+         {:ok, decoded_measurements} <- measure(decoded, normalized),
          {:ok, _aggregate_measurements} <-
-           validate_embedded_json(decoded, opts, decoded_measurements) do
+           validate_embedded_json(decoded, normalized, decoded_measurements) do
       {:ok, decoded, numbers}
     end
   end
 
-  @spec validate_json(binary(), keyword()) :: :ok | {:error, term()}
-  def validate_json(body, opts) when is_binary(body) and is_list(opts) do
-    case JSONPreflight.scan(body, opts) do
+  def decode_json_numbers(_body, _opts, _keys),
+    do: {:error, {:invalid_json, :binary_body_required}}
+
+  @spec validate_json(term(), term()) :: :ok | {:error, term()}
+  def validate_json(body, opts) when is_binary(body) do
+    case preflight_json(body, opts) do
       {:ok, _measurements} -> :ok
       {:error, _reason} = error -> error
     end
   end
+
+  def validate_json(_body, _opts), do: {:error, {:invalid_json, :binary_body_required}}
 
   @spec exact_unit_number?(binary()) :: boolean()
   def exact_unit_number?(token) when is_binary(token) do
@@ -151,21 +176,49 @@ defmodule Arbor.LLM.ResponseBudget do
   def finite_number?(value) when is_float(value), do: value == value and value - value == 0.0
   def finite_number?(_value), do: false
 
-  defp limits(opts) do
-    %{
-      max_bytes: Keyword.fetch!(opts, :max_bytes),
-      max_nodes: Keyword.get(opts, :max_nodes, 100_000),
-      max_depth: Keyword.get(opts, :max_depth, 32),
-      max_map_keys: Keyword.get(opts, :max_map_keys, 10_000),
-      max_list_items: Keyword.get(opts, :max_list_items, 100_000)
-    }
+  defp normalize_limits(opts) do
+    with {:ok, supplied} <- collect_limit_options(opts, %{}, 0) do
+      limits =
+        Map.new(@hard_limits, fn {key, hard_maximum} ->
+          {key, min(Map.get(supplied, key, hard_maximum), hard_maximum)}
+        end)
+
+      {:ok, limits, Map.to_list(limits)}
+    end
   end
 
-  defp validate_limits(limits) do
-    if Enum.all?(Map.values(limits), &(is_integer(&1) and &1 > 0)),
-      do: :ok,
-      else: {:error, {:invalid_budget, :positive_limits_required}}
+  defp collect_limit_options([], supplied, _count), do: {:ok, supplied}
+
+  defp collect_limit_options(_opts, _supplied, count) when count >= 16,
+    do: {:error, {:invalid_budget, :too_many_options}}
+
+  defp collect_limit_options([{key, value} | rest], supplied, count)
+       when key in @limit_keys and is_integer(value) and value > 0 do
+    collect_limit_options(rest, Map.put(supplied, key, value), count + 1)
   end
+
+  defp collect_limit_options([{key, _value} | _rest], _supplied, _count)
+       when key in @limit_keys,
+       do: {:error, {:invalid_budget, :positive_limits_required}}
+
+  defp collect_limit_options([_unknown | _rest], _supplied, _count),
+    do: {:error, {:invalid_budget, :known_limit_options_required}}
+
+  defp collect_limit_options(_improper_or_non_list, _supplied, _count),
+    do: {:error, {:invalid_budget, :keyword_required}}
+
+  defp validate_tracked_keys(keys), do: validate_tracked_keys(keys, 0)
+  defp validate_tracked_keys([], _count), do: :ok
+
+  defp validate_tracked_keys(_keys, count) when count >= 64,
+    do: {:error, {:invalid_json, :too_many_tracked_numbers}}
+
+  defp validate_tracked_keys([key | rest], count)
+       when is_binary(key) and byte_size(key) <= 256,
+       do: validate_tracked_keys(rest, count + 1)
+
+  defp validate_tracked_keys(_improper_or_invalid, _count),
+    do: {:error, {:invalid_json, :bounded_tracked_number_keys_required}}
 
   defp append_response_chunk(private, ""), do: private
 
@@ -249,7 +302,9 @@ defmodule Arbor.LLM.ResponseBudget do
   end
 
   defp validate_embedded_json(term, opts, measurements) do
-    walk_embedded([{:value, term}], opts, measurements, limits(opts))
+    with {:ok, limits, normalized} <- normalize_limits(opts) do
+      walk_embedded([{:value, term}], normalized, measurements, limits)
+    end
   end
 
   defp walk_embedded([], _opts, measurements, _limits), do: {:ok, measurements}

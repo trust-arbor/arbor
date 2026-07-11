@@ -162,7 +162,8 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
       case RetrievalSupport.invoke(
              router_fn,
              [base_url, model, system_prompt, prompt, timeout],
-             :router_callback_failed
+             :router_callback_failed,
+             timeout
            ) do
         {:ok, content} when is_binary(content) ->
           case RetrievalSupport.parse_router_response(content, known_modules, top_k) do
@@ -188,7 +189,8 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
     case RetrievalSupport.invoke(
            embed_fn,
            [base_url, model, prompt, timeout],
-           :embedding_callback_failed
+           :embedding_callback_failed,
+           timeout
          ) do
       {:ok, vector} -> RetrievalSupport.validate_vector(vector)
       {:error, _reason} = error -> error

@@ -43,7 +43,6 @@ defmodule Arbor.LLM.Eval.Subject do
   @max_response_list_items 100_000
   @max_stream_event_bytes 1_048_576
   @producer_cleanup_grace_ms 10
-  @producer_cleanup_kill_wait_ms 250
 
   @impl true
   def run(input, opts \\ []) do
@@ -195,7 +194,8 @@ defmodule Arbor.LLM.Eval.Subject do
   defp resolve_catalog_transport(provider) do
     case Enum.find(ProviderCatalog.all(), &(&1.provider == provider)) do
       %{adapter_module: adapter} ->
-        {:ok, {:adapter, adapter}}
+        client = Client.new(adapters: %{provider => adapter}, default_provider: provider)
+        {:ok, {:client, client}}
 
       nil ->
         available = ProviderCatalog.available() |> Enum.map(fn {name, _capabilities} -> name end)
@@ -208,7 +208,7 @@ defmodule Arbor.LLM.Eval.Subject do
     deadline_ms = start_time + config.timeout
 
     result =
-      run_owned_deadline(
+      Arbor.LLM.run_until_deadline(
         fn ->
           complete(transport, request,
             receive_timeout: max(deadline_ms - System.monotonic_time(:millisecond), 1),
@@ -216,6 +216,7 @@ defmodule Arbor.LLM.Eval.Subject do
           )
         end,
         deadline_ms,
+        config.timeout,
         {:request_deadline_exceeded, config.timeout}
       )
 
@@ -359,7 +360,7 @@ defmodule Arbor.LLM.Eval.Subject do
         Enum.reduce_while(events, :ok, fn event, :ok ->
           case validate_stream_event_term(event, max_event_bytes) do
             :ok ->
-              send(parent, {ref, :event, event})
+              send(parent, {ref, :event, event, System.monotonic_time(:millisecond)})
 
               receive do
                 {^ref, :continue} -> {:cont, :ok}
@@ -367,22 +368,40 @@ defmodule Arbor.LLM.Eval.Subject do
               end
 
             {:error, reason} ->
-              send(parent, {ref, :producer_error, reason})
+              send(parent, {ref, :producer_error, reason, System.monotonic_time(:millisecond)})
               {:halt, :error}
           end
         end)
 
-        send(parent, {ref, :done})
+        send(parent, {ref, :done, System.monotonic_time(:millisecond)})
 
       {:error, reason} ->
-        send(parent, {ref, :stream_error, bounded_external_reason(reason)})
+        send(
+          parent,
+          {ref, :stream_error, bounded_external_reason(reason),
+           System.monotonic_time(:millisecond)}
+        )
     end
   rescue
+    exception in [Arbor.LLM.StreamError] ->
+      send(
+        parent,
+        {ref, :producer_error, exception.reason, System.monotonic_time(:millisecond)}
+      )
+
     exception ->
-      send(parent, {ref, :producer_error, exception_diagnostic(exception)})
+      send(
+        parent,
+        {ref, :producer_error, exception_diagnostic(exception),
+         System.monotonic_time(:millisecond)}
+      )
   catch
     kind, reason ->
-      send(parent, {ref, :producer_error, {kind, bounded_external_reason(reason)}})
+      send(
+        parent,
+        {ref, :producer_error, {kind, bounded_external_reason(reason)},
+         System.monotonic_time(:millisecond)}
+      )
   end
 
   defp await_stream(state) do
@@ -392,17 +411,25 @@ defmodule Arbor.LLM.Eval.Subject do
       {:error, {:stream_deadline_exceeded, state.timeout}}
     else
       receive do
-        {ref, :event, event} when ref == state.ref ->
-          handle_stream_event(event, state)
+        {ref, :event, event, completed_mono} when ref == state.ref ->
+          if completed_mono <= state.deadline_ms,
+            do: handle_stream_event(event, state),
+            else: {:error, {:stream_deadline_exceeded, state.timeout}}
 
-        {ref, :done} when ref == state.ref ->
-          finalize_stream(state)
+        {ref, :done, completed_mono} when ref == state.ref ->
+          if completed_mono <= state.deadline_ms,
+            do: finalize_stream(state),
+            else: {:error, {:stream_deadline_exceeded, state.timeout}}
 
-        {ref, :stream_error, reason} when ref == state.ref ->
-          {:error, reason}
+        {ref, :stream_error, reason, completed_mono} when ref == state.ref ->
+          if completed_mono <= state.deadline_ms,
+            do: {:error, reason},
+            else: {:error, {:stream_deadline_exceeded, state.timeout}}
 
-        {ref, :producer_error, reason} when ref == state.ref ->
-          {:error, {:stream_collection_failed, reason}}
+        {ref, :producer_error, reason, completed_mono} when ref == state.ref ->
+          if completed_mono <= state.deadline_ms,
+            do: {:error, {:stream_collection_failed, reason}},
+            else: {:error, {:stream_deadline_exceeded, state.timeout}}
 
         {:DOWN, monitor_ref, :process, producer_pid, :normal}
         when monitor_ref == state.monitor_ref and producer_pid == state.producer_pid ->
@@ -492,65 +519,12 @@ defmodule Arbor.LLM.Eval.Subject do
             {:DOWN, monitor_ref, :process, producer_pid, _reason}
             when monitor_ref == state.monitor_ref and producer_pid == state.producer_pid ->
               :ok
-          after
-            @producer_cleanup_kill_wait_ms -> :ok
           end
       end
     end
 
     Process.demonitor(state.monitor_ref, [:flush])
     flush_stream_messages(state.ref)
-  end
-
-  defp run_owned_deadline(fun, deadline_ms, timeout_error) when is_function(fun, 0) do
-    reply_alias = :erlang.alias()
-
-    {pid, monitor_ref} =
-      spawn_monitor(fn ->
-        result =
-          try do
-            {:ok, fun.()}
-          rescue
-            exception -> {:error, {:transport_exception, exception_diagnostic(exception)}}
-          catch
-            kind, reason ->
-              {:error, {:transport_exception, {kind, bounded_external_reason(reason)}}}
-          end
-
-        send(reply_alias, {reply_alias, result})
-      end)
-
-    remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
-
-    receive do
-      {^reply_alias, {:ok, result}} ->
-        :erlang.unalias(reply_alias)
-        Process.demonitor(monitor_ref, [:flush])
-        result
-
-      {^reply_alias, {:error, reason}} ->
-        :erlang.unalias(reply_alias)
-        Process.demonitor(monitor_ref, [:flush])
-        {:error, reason}
-
-      {:DOWN, ^monitor_ref, :process, ^pid, reason} ->
-        :erlang.unalias(reply_alias)
-        {:error, {:transport_exception, {:producer_exit, bounded_external_reason(reason)}}}
-    after
-      remaining_ms ->
-        :erlang.unalias(reply_alias)
-        Process.exit(pid, :kill)
-        await_owned_down(pid, monitor_ref)
-        {:error, timeout_error}
-    end
-  end
-
-  defp await_owned_down(pid, monitor_ref) do
-    receive do
-      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
-    after
-      @producer_cleanup_kill_wait_ms -> Process.demonitor(monitor_ref, [:flush])
-    end
   end
 
   defp flush_stream_messages(ref) do
@@ -608,17 +582,8 @@ defmodule Arbor.LLM.Eval.Subject do
   defp stream_binary(_text), do: {:error, :binary_text_required}
 
   defp complete({:client, client}, request, opts), do: Client.complete(client, request, opts)
-  defp complete({:adapter, adapter}, request, opts), do: adapter.complete(request, opts)
 
   defp stream({:client, client}, request, opts), do: Client.stream(client, request, opts)
-
-  defp stream({:adapter, adapter}, request, opts) do
-    case adapter.stream(request, opts) do
-      {:ok, _events} = result -> result
-      {:error, _reason} = error -> error
-      events -> {:ok, events}
-    end
-  end
 
   defp build_messages(prompt, nil), do: [%Message{role: :user, content: prompt}]
 

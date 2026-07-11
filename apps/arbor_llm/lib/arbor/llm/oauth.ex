@@ -25,6 +25,11 @@ defmodule Arbor.LLM.OAuth do
 
   require Logger
 
+  alias Arbor.LLM.{Deadline, Endpoint, ResponseBudget}
+
+  @max_oauth_response_bytes 1_048_576
+  @max_access_token_bytes 65_536
+
   # Keep the "*_oauth" provider atoms alive so callers that String.to_existing_atom a provider
   # string (e.g. the eval runner's normalize_provider) can resolve "openai_oauth"/"xai_oauth".
   @provider_atoms [:openai_oauth, :xai_oauth]
@@ -61,7 +66,8 @@ defmodule Arbor.LLM.OAuth do
       cached = tokens["access_token"]
 
       cond do
-        is_binary(cached) and not expiring?(cached, config.skew_s) ->
+        is_binary(cached) and byte_size(cached) <= @max_access_token_bytes and
+            not expiring?(cached, config.skew_s) ->
           {:ok, cached}
 
         is_binary(tokens["refresh_token"]) ->
@@ -115,23 +121,35 @@ defmodule Arbor.LLM.OAuth do
 
   # Map provider aliases -> the config key, refusing Anthropic FIRST (before any file read).
   defp resolve(provider) do
-    p = provider |> to_string() |> String.downcase()
+    with {:ok, p} <- normalize_oauth_provider(provider) do
+      cond do
+        # substring match (no String.to_atom) covers claude / claude-code / claude_code / anthropic
+        p =~ "claude" or p =~ "anthropic" ->
+          {:error, :anthropic_oauth_forbidden}
 
-    cond do
-      # substring match (no String.to_atom) covers claude / claude-code / claude_code / anthropic
-      p =~ "claude" or p =~ "anthropic" ->
-        {:error, :anthropic_oauth_forbidden}
+        p in ~w(openai codex chatgpt gpt) ->
+          {:ok, :openai, @providers.openai}
 
-      p in ~w(openai codex chatgpt gpt) ->
-        {:ok, :openai, @providers.openai}
+        p in ~w(xai grok x-ai) ->
+          {:ok, :xai, @providers.xai}
 
-      p in ~w(xai grok x-ai) ->
-        {:ok, :xai, @providers.xai}
-
-      true ->
-        {:error, {:no_oauth_provider, p}}
+        true ->
+          {:error, {:no_oauth_provider, p}}
+      end
     end
   end
+
+  defp normalize_oauth_provider(provider) when is_atom(provider),
+    do: provider |> Atom.to_string() |> normalize_oauth_provider()
+
+  defp normalize_oauth_provider(provider)
+       when is_binary(provider) and byte_size(provider) > 0 and byte_size(provider) <= 256 do
+    if String.valid?(provider),
+      do: {:ok, String.downcase(provider)},
+      else: {:error, :invalid_oauth_provider}
+  end
+
+  defp normalize_oauth_provider(_provider), do: {:error, :invalid_oauth_provider}
 
   # Store-first: read the Arbor-owned copy (~/.arbor/oauth/<key>.json); import from the CLI file on
   # first use. This is what makes rotation safe — write-back keeps the Arbor store current without
@@ -242,17 +260,28 @@ defmodule Arbor.LLM.OAuth do
   # xAI's token endpoint comes from OIDC discovery; validate it stays on the x.ai origin.
   defp xai_token_endpoint(discovery_url) do
     case safe_get(discovery_url) do
-      {:ok, %{"token_endpoint" => te}} when is_binary(te) ->
-        if String.contains?(te, "x.ai"), do: {:ok, te}, else: {:error, :untrusted_token_endpoint}
+      {:ok, document} ->
+        trusted_xai_token_endpoint(document)
 
       _ ->
         {:error, :xai_discovery_failed}
     end
   end
 
+  @doc false
+  def trusted_xai_token_endpoint(%{"token_endpoint" => endpoint}) when is_binary(endpoint) do
+    case Endpoint.validate(endpoint, :oauth_xai_token) do
+      {:ok, canonical} -> {:ok, canonical}
+      {:error, _reason} -> {:error, :untrusted_token_endpoint}
+    end
+  end
+
+  def trusted_xai_token_endpoint(_document), do: {:error, :untrusted_token_endpoint}
+
   defp post_token(url, form) do
-    case Req.post(url, form: form, receive_timeout: 20_000) do
-      {:ok, %{status: 200, body: %{"access_token" => at} = tokens}} when is_binary(at) ->
+    case bounded_oauth_request(:post, url, [form: form], 20_000, :oauth_token) do
+      {:ok, %{status: 200, body: %{"access_token" => at} = tokens}}
+      when is_binary(at) and byte_size(at) <= @max_access_token_bytes ->
         {:ok, tokens}
 
       {:ok, %{status: status, body: body}} ->
@@ -264,9 +293,41 @@ defmodule Arbor.LLM.OAuth do
   end
 
   defp safe_get(url) do
-    case Req.get(url, receive_timeout: 15_000) do
+    case bounded_oauth_request(:get, url, [], 15_000, :oauth_discovery) do
       {:ok, %{status: 200, body: %{} = body}} -> {:ok, body}
       other -> {:error, other}
+    end
+  end
+
+  defp bounded_oauth_request(method, url, body_opts, timeout, policy) do
+    with {:ok, receipt} <- Deadline.receipt(timeout_ms: timeout),
+         {:ok, canonical_url} <- Endpoint.validate(url, policy) do
+      Deadline.run(
+        fn ->
+          request =
+            [
+              url: canonical_url,
+              method: method,
+              receive_timeout: max(receipt.deadline_ms - System.monotonic_time(:millisecond), 1)
+            ]
+            |> Keyword.merge(body_opts)
+            |> Req.new()
+            |> ResponseBudget.apply_req_receipt(@max_oauth_response_bytes)
+
+          case Req.request(request) do
+            {:ok, %Req.Response{private: %{arbor_response_overflow: @max_oauth_response_bytes}}} ->
+              {:error, {:oauth_response_bytes_exceeded, @max_oauth_response_bytes}}
+
+            {:ok, %Req.Response{private: %{arbor_response_error: reason}}} ->
+              {:error, {:invalid_oauth_response, reason}}
+
+            result ->
+              result
+          end
+        end,
+        receipt,
+        {:oauth_deadline_exceeded, timeout}
+      )
     end
   end
 

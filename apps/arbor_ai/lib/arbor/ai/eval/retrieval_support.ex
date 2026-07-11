@@ -26,41 +26,6 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
     max_map_keys: 10_000,
     max_list_items: 100_000
   ]
-  @index_read_deadline_ms 500
-  @index_reader_heap_words 8_388_608
-  @http_cleanup_wait_ms 250
-  @darwin_open_helper "/usr/bin/perl"
-  @darwin_open_script ~S"""
-  use strict;
-  use Fcntl qw(O_RDONLY O_NONBLOCK O_NOFOLLOW S_ISREG);
-  my ($path, $max, $ino, $size, $mtime, $ctime) = @ARGV;
-  sub fail_with { print "E\t$_[0]\n"; exit 0; }
-  sysopen(my $fh, $path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW) or fail_with("OPEN");
-  my @before = stat($fh);
-  @before or fail_with("FSTAT");
-  S_ISREG($before[2]) or fail_with("NOT_REGULAR");
-  ($before[1] == $ino && $before[7] == $size && $before[9] == $mtime && $before[10] == $ctime)
-    or fail_with("CHANGED");
-  binmode($fh);
-  my $body = "";
-  while (1) {
-    my $remaining = $max + 1 - length($body);
-    my $read = sysread($fh, my $chunk, $remaining);
-    defined($read) or fail_with("READ");
-    last if $read == 0;
-    $body .= $chunk;
-    fail_with("TOO_LARGE") if length($body) > $max;
-  }
-  my @after = stat($fh);
-  my @path = lstat($path);
-  (@after && @path && S_ISREG($after[2]) && S_ISREG($path[2])) or fail_with("CHANGED");
-  ($after[1] == $ino && $after[7] == $size && $after[9] == $mtime && $after[10] == $ctime)
-    or fail_with("CHANGED");
-  ($path[1] == $ino && $path[7] == $size && $path[9] == $mtime && $path[10] == $ctime)
-    or fail_with("CHANGED");
-  print "O\n", $body;
-  """
-
   @string_byte_limits %{
     index_path: 4_096,
     model: 512,
@@ -102,34 +67,44 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   def extract_prompt(_input), do: {:error, {:invalid_input, :prompt_required}}
 
   @spec required_string(keyword(), atom()) :: {:ok, String.t()} | {:error, term()}
-  def required_string(opts, key) do
-    case Keyword.fetch(opts, key) do
-      {:ok, value} when is_binary(value) and value != "" ->
-        validate_option_string(value, key)
+  def required_string(opts, key) when is_atom(key) do
+    with :ok <- validate_opts(opts) do
+      case Keyword.fetch(opts, key) do
+        {:ok, value} when is_binary(value) and value != "" ->
+          validate_option_string(value, key)
 
-      {:ok, _value} ->
-        {:error, {:invalid_option, key, :non_empty_string_required}}
+        {:ok, _value} ->
+          {:error, {:invalid_option, key, :non_empty_string_required}}
 
-      :error ->
-        {:error, {:missing_option, key}}
+        :error ->
+          {:error, {:missing_option, key}}
+      end
     end
   end
+
+  def required_string(_opts, _key), do: {:error, {:invalid_options, :keyword_required}}
 
   @spec string_option(keyword(), atom(), String.t()) :: {:ok, String.t()} | {:error, term()}
-  def string_option(opts, key, default) do
-    case Keyword.get(opts, key, default) do
-      value when is_binary(value) and value != "" ->
-        validate_option_string(value, key)
+  def string_option(opts, key, default) when is_atom(key) do
+    with :ok <- validate_opts(opts) do
+      case Keyword.get(opts, key, default) do
+        value when is_binary(value) and value != "" ->
+          validate_option_string(value, key)
 
-      _value ->
-        {:error, {:invalid_option, key, :non_empty_string_required}}
+        _value ->
+          {:error, {:invalid_option, key, :non_empty_string_required}}
+      end
     end
   end
+
+  def string_option(_opts, _key, _default), do: {:error, {:invalid_options, :keyword_required}}
 
   @spec endpoint_option(keyword(), atom(), String.t(), :base | :embedding) ::
           {:ok, String.t()} | {:error, term()}
   def endpoint_option(opts, key, default, policy) do
-    with {:ok, value} <- string_option(opts, key, default),
+    with true <-
+           policy in [:base, :embedding] or {:error, {:invalid_option, key, :endpoint_policy}},
+         {:ok, value} <- string_option(opts, key, default),
          endpoint_policy = if(policy == :base, do: :root, else: :embedding),
          {:ok, canonical} <- Arbor.LLM.validate_endpoint(value, endpoint_policy) do
       {:ok, canonical}
@@ -141,54 +116,88 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
 
   @spec positive_integer_option(keyword(), atom(), pos_integer()) ::
           {:ok, pos_integer()} | {:error, term()}
-  def positive_integer_option(opts, key, default) do
-    value = Keyword.get(opts, key, default)
+  def positive_integer_option(opts, key, default) when is_atom(key) do
+    with :ok <- validate_opts(opts) do
+      value = Keyword.get(opts, key, default)
 
-    case Map.fetch(@positive_integer_limits, key) do
-      {:ok, maximum} when is_integer(value) and value > 0 and value <= maximum ->
-        {:ok, value}
+      case Map.fetch(@positive_integer_limits, key) do
+        {:ok, maximum} when is_integer(value) and value > 0 and value <= maximum ->
+          {:ok, value}
 
-      {:ok, maximum} ->
-        {:error, {:invalid_option, key, {:integer_range_required, 1, maximum}}}
+        {:ok, maximum} ->
+          {:error, {:invalid_option, key, {:integer_range_required, 1, maximum}}}
 
-      :error when is_integer(value) and value > 0 ->
-        {:ok, value}
+        :error when is_integer(value) and value > 0 ->
+          {:ok, value}
 
-      :error ->
-        {:error, {:invalid_option, key, :positive_integer_required}}
+        :error ->
+          {:error, {:invalid_option, key, :positive_integer_required}}
+      end
     end
   end
+
+  def positive_integer_option(_opts, _key, _default),
+    do: {:error, {:invalid_options, :keyword_required}}
 
   @spec optional_positive_integer_option(keyword(), atom()) ::
           {:ok, pos_integer() | nil} | {:error, term()}
-  def optional_positive_integer_option(opts, key) do
-    case Keyword.fetch(opts, key) do
-      :error ->
-        {:ok, nil}
+  def optional_positive_integer_option(opts, key) when is_atom(key) do
+    with :ok <- validate_opts(opts) do
+      case Keyword.fetch(opts, key) do
+        :error ->
+          {:ok, nil}
 
-      {:ok, value}
-      when is_integer(value) and value > 0 and value <= @max_protocol_integer ->
         {:ok, value}
+        when is_integer(value) and value > 0 and value <= @max_protocol_integer ->
+          {:ok, value}
 
-      {:ok, value} when is_integer(value) and value > @max_protocol_integer ->
-        {:error, {:invalid_option, key, {:integer_range_required, 1, @max_protocol_integer}}}
+        {:ok, value} when is_integer(value) and value > @max_protocol_integer ->
+          {:error, {:invalid_option, key, {:integer_range_required, 1, @max_protocol_integer}}}
 
-      {:ok, _value} ->
-        {:error, {:invalid_option, key, :positive_integer_required}}
+        {:ok, _value} ->
+          {:error, {:invalid_option, key, :positive_integer_required}}
+      end
     end
   end
+
+  def optional_positive_integer_option(_opts, _key),
+    do: {:error, {:invalid_options, :keyword_required}}
 
   @spec callback_option(keyword(), atom(), arity(), function()) ::
           {:ok, function()} | {:error, term()}
-  def callback_option(opts, key, arity, default) do
-    case Keyword.get(opts, key, default) do
-      callback when is_function(callback, arity) -> {:ok, callback}
-      _callback -> {:error, {:invalid_option, key, {:function_required, arity}}}
+  def callback_option(opts, key, arity, default)
+      when is_atom(key) and is_integer(arity) and arity >= 0 and arity <= 255 do
+    with :ok <- validate_opts(opts) do
+      case Keyword.get(opts, key, default) do
+        callback when is_function(callback, arity) -> {:ok, callback}
+        _callback -> {:error, {:invalid_option, key, {:function_required, arity}}}
+      end
     end
   end
 
+  def callback_option(_opts, _key, _arity, _default),
+    do: {:error, {:invalid_options, :keyword_required}}
+
   @spec invoke(function(), [term()], atom()) :: term()
-  def invoke(callback, args, error_tag) do
+  def invoke(callback, args, error_tag), do: invoke(callback, args, error_tag, 30_000)
+
+  @spec invoke(function(), [term()], atom(), pos_integer()) :: term()
+  def invoke(callback, args, error_tag, timeout)
+      when is_function(callback) and is_atom(error_tag) and is_integer(timeout) and timeout > 0 and
+             timeout <= 300_000 do
+    Arbor.LLM.run_with_deadline(
+      fn -> invoke_callback(callback, args, error_tag) end,
+      timeout,
+      {error_tag, {:deadline_exceeded, timeout}}
+    )
+  end
+
+  def invoke(_callback, _args, error_tag, _timeout) when is_atom(error_tag),
+    do: {:error, {error_tag, :invalid_callback_deadline}}
+
+  def invoke(_callback, _args, _error_tag, _timeout), do: {:error, :invalid_callback_invocation}
+
+  defp invoke_callback(callback, args, error_tag) do
     case apply(callback, args) do
       {:error, reason} -> {:error, bounded_external_reason(reason)}
       result -> result
@@ -217,14 +226,25 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   def post_json(url, json, timeout, max_response_bytes)
       when is_binary(url) and is_integer(timeout) and timeout > 0 and
              is_integer(max_response_bytes) and max_response_bytes > 0 do
+    timeout = min(timeout, 300_000)
+    maximum = min(max_response_bytes, @max_index_bytes)
     deadline_ms = System.monotonic_time(:millisecond) + timeout
 
-    run_owned_http_deadline(
-      fn -> do_post_json(url, json, deadline_ms, max_response_bytes) end,
-      deadline_ms,
-      timeout
-    )
+    with {:ok, canonical_url} <- Arbor.LLM.validate_endpoint(url, :eval_http),
+         :ok <- Arbor.LLM.validate_decoded_term(json, request_json_limits()) do
+      Arbor.LLM.run_until_deadline(
+        fn -> do_post_json(canonical_url, json, deadline_ms, maximum) end,
+        deadline_ms,
+        timeout,
+        {:transport_error, {:deadline_exceeded, timeout}}
+      )
+    else
+      {:error, reason} -> {:error, {:transport_error, bounded_external_reason(reason)}}
+    end
   end
+
+  def post_json(_url, _json, _timeout, _max_response_bytes),
+    do: {:error, {:transport_error, :invalid_http_request}}
 
   defp do_post_json(url, json, deadline_ms, max_response_bytes) do
     into = bounded_response_collector(max_response_bytes)
@@ -264,38 +284,14 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
     kind, reason -> {:error, {:transport_error, {kind, bounded_external_reason(reason)}}}
   end
 
-  defp run_owned_http_deadline(fun, deadline_ms, timeout) do
-    reply_alias = :erlang.alias()
-
-    {pid, monitor_ref} =
-      spawn_monitor(fn -> send(reply_alias, {reply_alias, fun.()}) end)
-
-    remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
-
-    receive do
-      {^reply_alias, result} ->
-        :erlang.unalias(reply_alias)
-        Process.demonitor(monitor_ref, [:flush])
-        result
-
-      {:DOWN, ^monitor_ref, :process, ^pid, reason} ->
-        :erlang.unalias(reply_alias)
-        {:error, {:transport_error, {:producer_exit, bounded_external_reason(reason)}}}
-    after
-      remaining_ms ->
-        :erlang.unalias(reply_alias)
-        Process.exit(pid, :kill)
-        await_http_down(pid, monitor_ref)
-        {:error, {:transport_error, {:deadline_exceeded, timeout}}}
-    end
-  end
-
-  defp await_http_down(pid, monitor_ref) do
-    receive do
-      {:DOWN, ^monitor_ref, :process, ^pid, _reason} -> :ok
-    after
-      @http_cleanup_wait_ms -> Process.demonitor(monitor_ref, [:flush])
-    end
+  defp request_json_limits do
+    [
+      max_bytes: @max_router_prompt_bytes,
+      max_nodes: 20_000,
+      max_depth: 32,
+      max_map_keys: 2_000,
+      max_list_items: 20_000
+    ]
   end
 
   @spec truncate_utf8(String.t(), pos_integer()) :: String.t()
@@ -309,6 +305,8 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
       bounded_utf8_prefix(text, prefix_budget) <> binary_part("...", 0, suffix_size)
     end
   end
+
+  def truncate_utf8(_text, _max_bytes), do: {:error, :bounded_utf8_truncation_required}
 
   @spec load_index(String.t()) :: {:ok, [action()]} | {:error, term()}
   def load_index(path) when is_binary(path) and path != "" do
@@ -325,20 +323,46 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
 
   @spec embeddings_for_model([action()], String.t(), String.t()) ::
           {:ok, [{String.t(), [number()]}]} | {:error, term()}
-  def embeddings_for_model(actions, model, index_path) do
-    indexed =
-      Enum.flat_map(actions, fn action ->
-        case Map.get(action.embeddings, model) do
-          vector when is_list(vector) -> [{action.module, vector}]
-          nil -> []
-        end
-      end)
-
-    case indexed do
-      [] -> {:error, {:model_not_indexed, model, index_path}}
-      _ -> {:ok, indexed}
+  def embeddings_for_model(actions, model, index_path)
+      when is_binary(model) and is_binary(index_path) do
+    with {:ok, indexed} <- collect_model_embeddings(actions, model, [], 0) do
+      case indexed do
+        [] -> {:error, {:model_not_indexed, model, index_path}}
+        _ -> {:ok, Enum.reverse(indexed)}
+      end
     end
   end
+
+  def embeddings_for_model(_actions, _model, _index_path),
+    do: {:error, :invalid_indexed_actions}
+
+  defp collect_model_embeddings([], _model, acc, _count), do: {:ok, acc}
+
+  defp collect_model_embeddings(_actions, _model, _acc, count)
+       when count >= @max_index_entries,
+       do: {:error, {:entry_count_exceeded, @max_index_entries}}
+
+  defp collect_model_embeddings(
+         [%{module: module, embeddings: embeddings} | rest],
+         model,
+         acc,
+         count
+       )
+       when is_binary(module) and is_map(embeddings) do
+    case Map.get(embeddings, model) do
+      nil ->
+        collect_model_embeddings(rest, model, acc, count + 1)
+
+      vector when is_list(vector) ->
+        collect_model_embeddings(rest, model, [{module, vector} | acc], count + 1)
+
+      _invalid ->
+        {:error, :invalid_indexed_actions}
+    end
+  end
+
+  defp collect_model_embeddings(_improper_or_invalid, _model, _acc, _count),
+    do: {:error, :invalid_indexed_actions}
 
   @spec validate_vector(term()) :: {:ok, [number()]} | {:error, term()}
   def validate_vector(vector) do
@@ -351,24 +375,31 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   @spec validate_query_dimensions([{String.t(), [number()]}], [number()]) ::
           :ok | {:error, term()}
   def validate_query_dimensions([{_module, indexed_vector} | _], query_vector) do
-    indexed_dimensions = length(indexed_vector)
-    query_dimensions = length(query_vector)
+    with {:ok, indexed_vector} <- validate_vector(indexed_vector),
+         {:ok, query_vector} <- validate_vector(query_vector) do
+      indexed_dimensions = length(indexed_vector)
+      query_dimensions = length(query_vector)
 
-    if indexed_dimensions == query_dimensions do
-      :ok
-    else
-      {:error,
-       {:invalid_embedding_response,
-        {:vector_dimension_mismatch, indexed_dimensions, query_dimensions}}}
+      if indexed_dimensions == query_dimensions do
+        :ok
+      else
+        {:error,
+         {:invalid_embedding_response,
+          {:vector_dimension_mismatch, indexed_dimensions, query_dimensions}}}
+      end
     end
   end
 
   def validate_query_dimensions([], _query_vector), do: :ok
 
+  def validate_query_dimensions(_indexed_actions, _query_vector),
+    do: {:error, {:invalid_embedding_response, :indexed_vectors_required}}
+
   @spec parse_router_response(String.t(), MapSet.t(String.t()), pos_integer()) ::
           {:ok, [String.t()]} | {:error, term()}
   def parse_router_response(content, known_modules, top_k)
-      when is_binary(content) and is_struct(known_modules, MapSet) do
+      when is_binary(content) and is_struct(known_modules, MapSet) and is_integer(top_k) and
+             top_k > 0 and top_k <= 100 do
     cond do
       byte_size(content) > @max_router_response_bytes ->
         {:error, {:invalid_router_response, {:content_size_exceeded, @max_router_response_bytes}}}
@@ -381,11 +412,16 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
     end
   end
 
+  def parse_router_response(_content, _known_modules, _top_k),
+    do: {:error, {:invalid_router_response, :bounded_request_required}}
+
   @doc false
   @spec http_error(atom(), term(), term()) :: {:error, term()}
   def http_error(tag, status, body) when is_atom(tag) do
     {:error, {tag, bounded_external_reason(status), diagnostic_excerpt(body)}}
   end
+
+  def http_error(_tag, _status, _body), do: {:error, :invalid_http_error}
 
   @doc false
   @spec validate_router_prompt(String.t()) :: {:ok, String.t()} | {:error, term()}
@@ -402,14 +438,25 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
     end
   end
 
+  def validate_router_prompt(_prompt), do: {:error, :router_prompt_required}
+
   @spec rank([{String.t(), [number()]}], [number()], pos_integer()) :: [map()]
   def rank(indexed_actions, query_vector, top_k) do
-    indexed_actions
-    |> Enum.map(fn {module, action_vector} ->
-      %{module: module, score: cosine_similarity(query_vector, action_vector)}
-    end)
-    |> Enum.sort_by(& &1.score, :desc)
-    |> Enum.take(top_k)
+    if is_list(indexed_actions) and is_list(query_vector) and is_integer(top_k) and top_k > 0 do
+      indexed_actions
+      |> Enum.reduce_while([], fn
+        {module, action_vector}, acc when is_binary(module) and is_list(action_vector) ->
+          {:cont,
+           [%{module: module, score: cosine_similarity(query_vector, action_vector)} | acc]}
+
+        _invalid, _acc ->
+          {:halt, []}
+      end)
+      |> Enum.sort_by(& &1.score, :desc)
+      |> Enum.take(min(top_k, 100))
+    else
+      []
+    end
   end
 
   @spec cosine_similarity([number()], [number()]) :: float()
@@ -535,223 +582,36 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   end
 
   defp read_index(path) do
-    with {:ok, expected_identity} <- index_path_identity(path),
-         :ok <- validate_index_size(path, expected_identity.size) do
-      open_and_read_index(path, expected_identity)
+    case Arbor.LLM.read_bounded_regular_file(path, @max_index_bytes) do
+      {:ok, body} ->
+        {:ok, body}
+
+      {:error, :symlink_rejected} ->
+        {:error, {:index_file_rejected, path, :symlink}}
+
+      {:error, {:not_regular_file, type}} ->
+        {:error, {:index_file_rejected, path, {:not_regular, type}}}
+
+      {:error, :not_regular_file} ->
+        {:error, {:index_file_rejected, path, {:not_regular, :other}}}
+
+      {:error, {:file_bytes_exceeded, _maximum}} ->
+        {:error, {:index_size_exceeded, path, @max_index_bytes}}
+
+      {:error, :file_read_deadline_exceeded} ->
+        {:error, {:index_read_failed, path, :read_deadline_exceeded}}
+
+      {:error, :file_changed_during_read} ->
+        {:error, {:index_read_failed, path, :file_changed_during_read}}
+
+      {:error, {:file_stat_failed, reason}} ->
+        {:error, {:index_read_failed, path, reason}}
+
+      {:error, reason} ->
+        {:error, {:index_read_failed, path, bounded_external_reason(reason)}}
     end
   rescue
     exception -> {:error, {:index_read_failed, path, Exception.message(exception)}}
-  end
-
-  defp index_path_identity(path) do
-    case File.lstat(path, time: :posix) do
-      {:ok, %File.Stat{type: :regular} = stat} ->
-        {:ok, file_identity(stat)}
-
-      {:ok, %File.Stat{type: :symlink}} ->
-        {:error, {:index_file_rejected, path, :symlink}}
-
-      {:ok, %File.Stat{type: type}} ->
-        {:error, {:index_file_rejected, path, {:not_regular, type}}}
-
-      {:error, reason} ->
-        {:error, {:index_read_failed, path, reason}}
-    end
-  end
-
-  defp descriptor_identity(io) do
-    case :file.read_file_info(io, time: :posix) do
-      {:ok, file_info} ->
-        case File.Stat.from_record(file_info) do
-          %File.Stat{type: :regular} = stat ->
-            {:ok, file_identity(stat)}
-
-          %File.Stat{type: type} ->
-            {:error, {:opened_not_regular, type}}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp file_identity(stat) do
-    %{
-      inode: stat.inode,
-      major_device: stat.major_device,
-      minor_device: stat.minor_device,
-      size: stat.size,
-      mtime: stat.mtime,
-      ctime: stat.ctime
-    }
-  end
-
-  defp validate_index_size(path, size) when is_integer(size) and size > @max_index_bytes,
-    do: {:error, {:index_size_exceeded, path, @max_index_bytes}}
-
-  defp validate_index_size(_path, size) when is_integer(size) and size >= 0, do: :ok
-  defp validate_index_size(path, _size), do: {:error, {:index_read_failed, path, :invalid_size}}
-
-  defp open_and_read_index(path, expected_identity) do
-    if :os.type() == {:unix, :darwin} and File.regular?(@darwin_open_helper) do
-      open_and_read_index_darwin(path, expected_identity)
-    else
-      open_and_read_index_worker_deadline(path, expected_identity)
-    end
-  end
-
-  defp open_and_read_index_darwin(path, expected_identity) do
-    # O_NOFOLLOW protects the final component and O_NONBLOCK prevents a FIFO
-    # swap from pinning a scheduler. Identity checks detect regular-file swaps.
-    # Parent-directory replacement remains a trusted-directory residual.
-    args = [
-      "-e",
-      @darwin_open_script,
-      "--",
-      path,
-      Integer.to_string(@max_index_bytes),
-      Integer.to_string(expected_identity.inode),
-      Integer.to_string(expected_identity.size),
-      Integer.to_string(expected_identity.mtime),
-      Integer.to_string(expected_identity.ctime)
-    ]
-
-    port =
-      Port.open(
-        {:spawn_executable, @darwin_open_helper},
-        [:binary, :use_stdio, :stderr_to_stdout, :exit_status, args: args]
-      )
-
-    collect_open_helper(port, path, System.monotonic_time(:millisecond), [], 0)
-  rescue
-    exception -> {:error, {:index_read_failed, path, exception_diagnostic(exception)}}
-  end
-
-  defp collect_open_helper(port, path, started_at, chunks, retained_bytes) do
-    remaining_ms = @index_read_deadline_ms - (System.monotonic_time(:millisecond) - started_at)
-
-    if remaining_ms <= 0 do
-      close_open_helper(port)
-      {:error, {:index_read_failed, path, :read_deadline_exceeded}}
-    else
-      receive do
-        {^port, {:data, data}} when is_binary(data) ->
-          retained_bytes = retained_bytes + byte_size(data)
-
-          if retained_bytes > @max_index_bytes + 4_096 do
-            close_open_helper(port)
-            {:error, {:index_size_exceeded, path, @max_index_bytes}}
-          else
-            collect_open_helper(port, path, started_at, [data | chunks], retained_bytes)
-          end
-
-        {^port, {:exit_status, 0}} ->
-          chunks
-          |> Enum.reverse()
-          |> IO.iodata_to_binary()
-          |> parse_open_helper_result(path)
-
-        {^port, {:exit_status, _status}} ->
-          {:error, {:index_read_failed, path, :open_helper_failed}}
-      after
-        remaining_ms ->
-          close_open_helper(port)
-          {:error, {:index_read_failed, path, :read_deadline_exceeded}}
-      end
-    end
-  end
-
-  defp parse_open_helper_result("O\n" <> body, _path), do: {:ok, body}
-
-  defp parse_open_helper_result("E\tTOO_LARGE\n", path),
-    do: {:error, {:index_size_exceeded, path, @max_index_bytes}}
-
-  defp parse_open_helper_result("E\tNOT_REGULAR\n", path),
-    do: {:error, {:index_file_rejected, path, {:not_regular, :other}}}
-
-  defp parse_open_helper_result("E\tCHANGED\n", path),
-    do: {:error, {:index_read_failed, path, :file_changed_during_read}}
-
-  defp parse_open_helper_result("E\t" <> _bounded_error, path),
-    do: {:error, {:index_read_failed, path, :open_helper_failed}}
-
-  defp parse_open_helper_result(_result, path),
-    do: {:error, {:index_read_failed, path, :invalid_open_helper_response}}
-
-  defp close_open_helper(port) do
-    if Port.info(port) != nil, do: Port.close(port)
-  catch
-    :error, :badarg -> :ok
-  end
-
-  defp open_and_read_index_worker_deadline(path, expected_identity) do
-    reply_alias = :erlang.alias()
-
-    # Non-Darwin OTP file APIs expose no portable no-follow/nonblocking flags.
-    # This fallback bounds the caller, but deployments must keep the directory trusted.
-    {pid, monitor_ref} =
-      :erlang.spawn_opt(
-        fn ->
-          send(reply_alias, {reply_alias, open_and_read_index_worker(path, expected_identity)})
-        end,
-        [
-          :monitor,
-          {:max_heap_size, %{size: @index_reader_heap_words, kill: true, error_logger: false}}
-        ]
-      )
-
-    receive do
-      {^reply_alias, result} ->
-        :erlang.unalias(reply_alias)
-        Process.demonitor(monitor_ref, [:flush])
-        result
-
-      {:DOWN, ^monitor_ref, :process, ^pid, reason} ->
-        :erlang.unalias(reply_alias)
-        {:error, {:index_read_failed, path, {:reader_exit, bounded_external_reason(reason)}}}
-    after
-      @index_read_deadline_ms ->
-        :erlang.unalias(reply_alias)
-        Process.exit(pid, :kill)
-        Process.demonitor(monitor_ref, [:flush])
-        {:error, {:index_read_failed, path, :read_deadline_exceeded}}
-    end
-  end
-
-  defp open_and_read_index_worker(path, expected_identity) do
-    case File.open(path, [:read, :binary], fn io ->
-           read_verified_index(io, path, expected_identity)
-         end) do
-      {:ok, result} -> result
-      {:error, reason} -> {:error, {:index_read_failed, path, reason}}
-    end
-  end
-
-  defp read_verified_index(io, path, expected_identity) do
-    with {:ok, ^expected_identity} <- descriptor_identity(io),
-         {:ok, body} <- read_bounded_index(io, path),
-         {:ok, ^expected_identity} <- descriptor_identity(io),
-         {:ok, ^expected_identity} <- index_path_identity(path) do
-      {:ok, body}
-    else
-      {:ok, _changed_identity} ->
-        {:error, {:index_read_failed, path, :file_changed_during_read}}
-
-      {:error, {:opened_not_regular, type}} ->
-        {:error, {:index_file_rejected, path, {:not_regular, type}}}
-
-      {:error, _reason} = error ->
-        error
-    end
-  end
-
-  defp read_bounded_index(io, path) do
-    case IO.binread(io, @max_index_bytes + 1) do
-      :eof -> {:ok, ""}
-      body when is_binary(body) and byte_size(body) <= @max_index_bytes -> {:ok, body}
-      body when is_binary(body) -> {:error, {:index_size_exceeded, path, @max_index_bytes}}
-      {:error, reason} -> {:error, {:index_read_failed, path, reason}}
-    end
   end
 
   defp decode_index(path, body) do

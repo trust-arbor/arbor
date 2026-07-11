@@ -133,9 +133,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
   def load(%Call{operation: op} = call) do
     path = path_for(call)
 
-    with true <- File.exists?(path),
-         {:ok, %{size: size}} when size <= 16_777_216 <- File.stat(path),
-         {:ok, body} <- File.read(path),
+    with {:ok, body} <- Arbor.LLM.read_bounded_regular_file(path, 16_777_216),
          {:ok, decoded} <-
            Arbor.LLM.ResponseBudget.decode_json(body,
              max_bytes: 16_777_216,

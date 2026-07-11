@@ -6,17 +6,34 @@ defmodule Arbor.AI.Eval.Subjects.LLMRouterTest do
   alias Arbor.AI.Eval.Subjects.LLMRouter
 
   setup do
+    original = Application.get_env(:arbor_llm, :trusted_eval_endpoints)
+
+    Application.put_env(:arbor_llm, :trusted_eval_endpoints, [
+      "http://ollama.test",
+      "http://router.test"
+    ])
+
     path = temp_path("router-index")
     File.write!(path, Jason.encode!(index_fixture()))
-    on_exit(fn -> File.rm(path) end)
+
+    on_exit(fn ->
+      File.rm(path)
+
+      if is_nil(original),
+        do: Application.delete_env(:arbor_llm, :trusted_eval_endpoints),
+        else: Application.put_env(:arbor_llm, :trusted_eval_endpoints, original)
+    end)
+
     %{index_path: path}
   end
 
   test "filters router selections against the index and returns JSON-clean output", %{
     index_path: index_path
   } do
+    parent = self()
+
     router_fn = fn base_url, model, system_prompt, user_prompt, timeout ->
-      send(self(), {:route, base_url, model, system_prompt, user_prompt, timeout})
+      send(parent, {:route, base_url, model, system_prompt, user_prompt, timeout})
 
       {:ok,
        Jason.encode!(%{

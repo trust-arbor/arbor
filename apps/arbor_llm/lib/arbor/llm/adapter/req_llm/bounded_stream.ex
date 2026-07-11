@@ -1,13 +1,13 @@
 defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
   @moduledoc false
 
-  alias Arbor.LLM.ResponseBudget
+  alias Arbor.LLM.{Deadline, ResponseBudget}
 
   @default_max_response_bytes 16_777_216
   @default_max_events 100_000
   @default_max_event_bytes 1_048_576
+  @maximum_timeout_ms 900_000
   @cleanup_grace_ms 100
-  @cleanup_kill_wait_ms 1_000
 
   defstruct [:stream, :cancel, :model, :context, :limits, :producer]
 
@@ -88,9 +88,19 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
     max_event_bytes = Keyword.get(limits_opts, :max_event_bytes, @default_max_event_bytes)
     timeout = Keyword.get(opts, :receive_timeout, 30_000)
 
-    if Enum.all?([maximum, max_events, max_event_bytes, timeout], &(is_integer(&1) and &1 > 0)) and
-         maximum <= @default_max_response_bytes and max_events <= @default_max_events and
-         max_event_bytes <= min(maximum, @default_max_event_bytes) do
+    if Enum.all?([maximum, max_events, max_event_bytes, timeout], &(is_integer(&1) and &1 > 0)) do
+      maximum = min(maximum, @default_max_response_bytes)
+      max_events = min(max_events, @default_max_events)
+      max_event_bytes = min(max_event_bytes, min(maximum, @default_max_event_bytes))
+      timeout = min(timeout, @maximum_timeout_ms)
+      own_deadline = System.monotonic_time(:millisecond) + timeout
+
+      deadline_ms =
+        case Deadline.current_deadline() do
+          inherited when is_integer(inherited) -> min(inherited, own_deadline)
+          _ -> own_deadline
+        end
+
       {:ok,
        %{
          max_response_bytes: maximum,
@@ -102,7 +112,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
          max_map_keys: 10_000,
          max_list_items: 100_000,
          timeout: timeout,
-         deadline_ms: System.monotonic_time(:millisecond) + timeout
+         deadline_ms: deadline_ms
        }}
     else
       {:error, :invalid_stream_limits}
@@ -158,14 +168,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
   end
 
   defp cleanup_resource(state) do
-    cleanup_result = cancel_and_wait(state.pid, state.ref)
+    :ok = cancel_and_wait(state.pid, state.ref)
     Process.demonitor(state.monitor, [:flush])
     flush_messages(state.ref, state.pid, state.monitor)
-
-    case cleanup_result do
-      :ok -> :ok
-      {:error, :producer_cleanup_timeout} -> raise "stream producer cleanup timed out"
-    end
+    :ok
   end
 
   defp cancel_and_wait(pid, ref) when is_pid(pid) do
@@ -178,16 +184,12 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
       after
         @cleanup_grace_ms ->
           if Process.alive?(pid), do: Process.exit(pid, :kill)
-
-          receive do
-            {:DOWN, ^monitor, :process, ^pid, _reason} -> true
-          after
-            @cleanup_kill_wait_ms -> false
-          end
+          await_down(pid, monitor)
+          true
       end
 
     Process.demonitor(monitor, [:flush])
-    if down?, do: :ok, else: {:error, :producer_cleanup_timeout}
+    if down?, do: :ok
   end
 
   defp await_consumer(ref, request, finch_name, provider, model, limits) do
@@ -213,11 +215,27 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
     remaining = remaining_ms(deadline_ms)
 
     receive do
-      :producer_done -> :ok
-      {:DOWN, ^producer_ref, :process, ^producer, _reason} -> :ok
-      {:DOWN, ^consumer_ref, :process, ^consumer, _reason} -> Process.exit(producer, :kill)
+      :producer_done ->
+        :ok
+
+      {:DOWN, ^producer_ref, :process, ^producer, _reason} ->
+        :ok
+
+      {:DOWN, ^consumer_ref, :process, ^consumer, _reason} ->
+        terminate_and_await(producer, producer_ref)
     after
-      max(remaining, 0) -> Process.exit(producer, {:shutdown, :stream_deadline})
+      max(remaining, 0) -> terminate_and_await(producer, producer_ref)
+    end
+  end
+
+  defp terminate_and_await(pid, monitor) do
+    if Process.alive?(pid), do: Process.exit(pid, :kill)
+    await_down(pid, monitor)
+  end
+
+  defp await_down(pid, monitor) do
+    receive do
+      {:DOWN, ^monitor, :process, ^pid, _reason} -> :ok
     end
   end
 
