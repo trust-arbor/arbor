@@ -59,14 +59,14 @@ defmodule Arbor.Orchestrator.TransformsTest do
   end
 
   test "compile/2 preserves post-IR custom-transform boundary" do
-    # Bare codergen → alias injects purpose="llm"; missing simulate → schema error.
+    # Bare codergen aliases inject purpose="llm" before IR compilation.
     # Custom transforms run AFTER IR.Compiler and must not re-trigger static analysis.
     # A second IR.Compiler.compile/1 would re-inject alias defaults and recompute
     # capabilities/classification/taint/schema from the mutated attrs.
     dot = """
     digraph Flow {
       start [shape=Mdiamond]
-      work [type="codergen", prompt="hello"]
+      work [type="codergen", prompt="hello", simulate="true"]
       exit [shape=Msquare]
       start -> work -> exit
     }
@@ -86,10 +86,7 @@ defmodule Arbor.Orchestrator.TransformsTest do
 
     # Alias-injected purpose must be present on a normal compile.
     assert baseline_work.attrs["purpose"] == "llm"
-    # Bare codergen with purpose=llm requires explicit simulate= → schema error.
-    assert Enum.any?(pre_schema_errors, fn {sev, msg} ->
-             sev == :error and is_binary(msg) and String.contains?(msg, "simulate")
-           end)
+    assert pre_schema_errors == []
 
     transform = fn %Graph{} = g ->
       work = g.nodes["work"]
