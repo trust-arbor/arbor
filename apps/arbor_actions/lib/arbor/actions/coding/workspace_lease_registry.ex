@@ -31,6 +31,15 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
   validation-process death, workspace-owner death, and workspace removal all
   clean those resources.
 
+  ## Review snapshots
+
+  Commit-bound review snapshots pin exact candidate/base commit and tree OIDs
+  for schema-bounded tree read/search. Opening requires an active lease,
+  matching task+principal (or live owner) authority, a clean worktree, and a
+  HEAD that exactly equals the supplied full candidate commit hash. Opaque
+  `review_snapshot_id` values are **not** authority. Workspace release and
+  owner-death cleanup drop all snapshots for that workspace.
+
   ## Public views
 
   All client-facing maps are JSON-clean: no PIDs, monitor refs, functions, or
@@ -206,6 +215,53 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
     call({:finalize_review_attestation, attestation_id, caller}, server_opts)
   end
 
+  @doc """
+  Open a commit-bound review snapshot for an active workspace lease.
+
+  Requires the same authority as lease inspect/release (live owner process, or
+  matching non-empty `task_id` **and** `principal_id`). The worktree must be
+  clean and its HEAD must equal `candidate_commit` exactly (full object hash).
+  The lease `base_commit` is bound as the snapshot base. Records exact
+  candidate/base commit and tree OIDs. Returns a JSON-clean map including an
+  opaque `review_snapshot_id` that is never authority by itself.
+  """
+  @spec open_review_snapshot(String.t(), String.t(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def open_review_snapshot(workspace_id, candidate_commit, opts \\ %{})
+      when is_binary(workspace_id) and is_binary(candidate_commit) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:open_review_snapshot, workspace_id, candidate_commit, caller}, server_opts)
+  end
+
+  @doc """
+  Resolve a review snapshot when authorized for its parent workspace lease.
+
+  Authority is the live owner process, or matching non-empty `task_id` plus
+  non-empty `principal_id`. Opaque `review_snapshot_id` alone is not enough.
+  """
+  @spec resolve_review_snapshot(String.t(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def resolve_review_snapshot(review_snapshot_id, opts \\ %{})
+      when is_binary(review_snapshot_id) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:resolve_review_snapshot, review_snapshot_id, caller}, server_opts)
+  end
+
+  @doc """
+  Close a review snapshot when authorized.
+
+  Idempotent: closing an unknown/already-closed id returns success without
+  treating the id as authority for any other operation. Closing a live
+  snapshot requires the same lease authority as resolve.
+  """
+  @spec close_review_snapshot(String.t(), map() | keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def close_review_snapshot(review_snapshot_id, opts \\ %{})
+      when is_binary(review_snapshot_id) do
+    {server_opts, caller} = split_caller_opts(opts)
+    call({:close_review_snapshot, review_snapshot_id, caller}, server_opts)
+  end
+
   @doc false
   @spec public_view(map()) :: map()
   def public_view(lease) when is_map(lease) do
@@ -217,6 +273,21 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       base_commit: lease.base_commit,
       ownership: ownership_string(lease.ownership),
       active: lease.active == true
+    }
+  end
+
+  @doc false
+  @spec review_snapshot_view(map()) :: map()
+  def review_snapshot_view(snapshot) when is_map(snapshot) do
+    %{
+      review_snapshot_id: snapshot.review_snapshot_id,
+      workspace_id: snapshot.workspace_id,
+      repo_path: snapshot.repo_path,
+      candidate_commit: snapshot.candidate_commit,
+      base_commit: snapshot.base_commit,
+      candidate_tree_oid: snapshot.candidate_tree_oid,
+      base_tree_oid: snapshot.base_tree_oid,
+      active: true
     }
   end
 
@@ -233,7 +304,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
        validation_by_workspace: %{},
        review_attestations: %{},
        attestation_by_workspace: %{},
-       attestation_states: %{}
+       attestation_states: %{},
+       review_snapshots: %{},
+       review_snapshots_by_workspace: %{}
      }}
   end
 
@@ -272,7 +345,11 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         if authorized?(lease, caller) do
           case cleanup_workspace_validation_resources(state, lease.workspace_id) do
             {:ok, state} ->
-              state = cleanup_workspace_attestations(state, lease.workspace_id)
+              state =
+                state
+                |> cleanup_workspace_attestations(lease.workspace_id)
+                |> cleanup_workspace_review_snapshots(lease.workspace_id)
+
               {result, state} = do_release(state, lease, mode)
               {:reply, {:ok, result}, state}
 
@@ -449,6 +526,61 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
       :revoked -> {:reply, {:error, :attestation_revoked}, state}
       nil -> {:reply, {:error, :attestation_revoked}, state}
       {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(
+        {:open_review_snapshot, workspace_id, candidate_commit, caller},
+        {from_pid, _tag},
+        state
+      ) do
+    caller = %{caller | owner_pid: from_pid}
+
+    case perform_open_review_snapshot(state, workspace_id, candidate_commit, caller) do
+      {:ok, view, state} -> {:reply, {:ok, view}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:resolve_review_snapshot, review_snapshot_id, caller}, {from_pid, _tag}, state) do
+    caller = %{caller | owner_pid: from_pid}
+
+    case fetch_authorized_review_snapshot(state, review_snapshot_id, caller) do
+      {:ok, snapshot} -> {:reply, {:ok, review_snapshot_view(snapshot)}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:close_review_snapshot, review_snapshot_id, caller}, {from_pid, _tag}, state) do
+    caller = %{caller | owner_pid: from_pid}
+
+    case Map.fetch(state.review_snapshots, review_snapshot_id) do
+      :error ->
+        {:reply,
+         {:ok,
+          %{
+            review_snapshot_id: review_snapshot_id,
+            active: false,
+            status: "already_closed"
+          }}, state}
+
+      {:ok, snapshot} ->
+        case fetch_authorized(state, snapshot.workspace_id, caller) do
+          {:ok, _lease} ->
+            state = drop_review_snapshot(state, snapshot)
+
+            {:reply,
+             {:ok,
+              %{
+                review_snapshot_id: review_snapshot_id,
+                workspace_id: snapshot.workspace_id,
+                active: false,
+                status: "closed"
+              }}, state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
     end
   end
 
@@ -1080,7 +1212,10 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
             {:noreply, state}
 
           {:ok, state} ->
-            state = cleanup_workspace_attestations(state, workspace_id)
+            state =
+              state
+              |> cleanup_workspace_attestations(workspace_id)
+              |> cleanup_workspace_review_snapshots(workspace_id)
 
             case Map.pop(state.leases, workspace_id) do
               {nil, _leases} ->
@@ -1203,6 +1338,148 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseRegistry do
         attestation_states: Map.drop(state.attestation_states, MapSet.to_list(ids)),
         attestation_by_workspace: Map.delete(state.attestation_by_workspace, workspace_id)
     }
+  end
+
+  defp perform_open_review_snapshot(state, workspace_id, candidate_commit, caller) do
+    with {:ok, lease} <- fetch_authorized(state, workspace_id, caller),
+         true <- lease.active == true || {:error, :not_found},
+         :ok <- require_exact_commit_hash(candidate_commit),
+         :ok <- require_exact_commit_hash(lease.base_commit),
+         inspection <- Workspace.inspect_worktree(lease.worktree_path, lease.base_commit),
+         :ok <- require_existing_worktree(inspection),
+         :ok <- require_clean_worktree(inspection),
+         :ok <- require_head_equals_candidate(inspection, candidate_commit),
+         {:ok, candidate_tree_oid} <- git_tree_oid(lease.repo_path, candidate_commit),
+         {:ok, base_tree_oid} <- git_tree_oid(lease.repo_path, lease.base_commit) do
+      snapshot = %{
+        review_snapshot_id: generate_review_snapshot_id(),
+        workspace_id: lease.workspace_id,
+        task_id: lease.task_id,
+        principal_id: lease.principal_id,
+        repo_path: lease.repo_path,
+        candidate_commit: candidate_commit,
+        base_commit: lease.base_commit,
+        candidate_tree_oid: candidate_tree_oid,
+        base_tree_oid: base_tree_oid
+      }
+
+      state = put_review_snapshot(state, snapshot)
+      {:ok, review_snapshot_view(snapshot), state}
+    else
+      false -> {:error, :not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_authorized_review_snapshot(state, review_snapshot_id, caller) do
+    with {:ok, snapshot} <- fetch_review_snapshot(state, review_snapshot_id),
+         {:ok, _lease} <- fetch_authorized(state, snapshot.workspace_id, caller) do
+      {:ok, snapshot}
+    end
+  end
+
+  defp fetch_review_snapshot(state, review_snapshot_id) do
+    case Map.fetch(state.review_snapshots, review_snapshot_id) do
+      {:ok, snapshot} -> {:ok, snapshot}
+      :error -> {:error, :not_found}
+    end
+  end
+
+  defp put_review_snapshot(state, snapshot) do
+    ids =
+      state.review_snapshots_by_workspace
+      |> Map.get(snapshot.workspace_id, MapSet.new())
+      |> MapSet.put(snapshot.review_snapshot_id)
+
+    %{
+      state
+      | review_snapshots: Map.put(state.review_snapshots, snapshot.review_snapshot_id, snapshot),
+        review_snapshots_by_workspace:
+          Map.put(state.review_snapshots_by_workspace, snapshot.workspace_id, ids)
+    }
+  end
+
+  defp drop_review_snapshot(state, snapshot) do
+    ids =
+      state.review_snapshots_by_workspace
+      |> Map.get(snapshot.workspace_id, MapSet.new())
+      |> MapSet.delete(snapshot.review_snapshot_id)
+
+    by_workspace =
+      if MapSet.size(ids) == 0 do
+        Map.delete(state.review_snapshots_by_workspace, snapshot.workspace_id)
+      else
+        Map.put(state.review_snapshots_by_workspace, snapshot.workspace_id, ids)
+      end
+
+    %{
+      state
+      | review_snapshots: Map.delete(state.review_snapshots, snapshot.review_snapshot_id),
+        review_snapshots_by_workspace: by_workspace
+    }
+  end
+
+  defp cleanup_workspace_review_snapshots(state, workspace_id) do
+    ids =
+      state.review_snapshots_by_workspace
+      |> Map.get(workspace_id, MapSet.new())
+      |> MapSet.to_list()
+
+    %{
+      state
+      | review_snapshots: Map.drop(state.review_snapshots, ids),
+        review_snapshots_by_workspace:
+          Map.delete(state.review_snapshots_by_workspace, workspace_id)
+    }
+  end
+
+  defp require_exact_commit_hash(commit) when is_binary(commit) do
+    if Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, commit) do
+      :ok
+    else
+      {:error, :invalid_candidate_commit}
+    end
+  end
+
+  defp require_exact_commit_hash(_), do: {:error, :invalid_candidate_commit}
+
+  defp require_existing_worktree(%{exists: true}), do: :ok
+  defp require_existing_worktree(_), do: {:error, :worktree_missing}
+
+  defp require_clean_worktree(%{dirty: true}), do: {:error, :dirty_workspace}
+  defp require_clean_worktree(_), do: :ok
+
+  defp require_head_equals_candidate(%{head_commit: head}, candidate)
+       when is_binary(head) and head != "" do
+    if head == candidate, do: :ok, else: {:error, :head_commit_mismatch}
+  end
+
+  defp require_head_equals_candidate(_, _), do: {:error, :missing_commit_hash}
+
+  defp git_tree_oid(repo_path, commit) do
+    case System.cmd(
+           "git",
+           ["-C", repo_path, "rev-parse", "--verify", "#{commit}^{tree}"],
+           stderr_to_stdout: true
+         ) do
+      {output, 0} ->
+        oid = String.trim(output)
+
+        if Regex.match?(~r/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/, oid) do
+          {:ok, oid}
+        else
+          {:error, :tree_oid_failed}
+        end
+
+      {_output, _code} ->
+        {:error, :tree_oid_failed}
+    end
+  rescue
+    _ -> {:error, :tree_oid_failed}
+  end
+
+  defp generate_review_snapshot_id do
+    "review_snap_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
   end
 
   defp split_caller_opts(opts) when is_list(opts) do
