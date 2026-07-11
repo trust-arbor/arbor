@@ -37,6 +37,8 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
 
   use ExUnit.Case, async: false
 
+  import Ecto.Query
+
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.Ecto, as: EventLog
   alias Arbor.Persistence.Repo
@@ -104,6 +106,91 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
       assert a1.global_position == 1
       assert b1.global_position == 2
       assert a2.global_position == 3
+    end
+
+    test "enforces CAS and backend-owned freshness without trusting domain timestamp" do
+      future = DateTime.add(DateTime.utc_now(), 86_400, :second)
+      event = Event.new("guarded", "started", %{}, timestamp: future)
+
+      assert {:ok, [_]} = EventLog.append("guarded", event, repo: Repo, expected_version: 0)
+
+      assert {:error, :version_conflict} =
+               EventLog.append("guarded", event, repo: Repo, expected_version: 0)
+
+      assert {:ok, %Event{timestamp: ^future}} =
+               EventLog.read_stream_head("guarded", repo: Repo)
+
+      assert {:ok, %Event{event_number: 1}} =
+               EventLog.read_stream_head("guarded", repo: Repo, max_current_age_ms: 60_000)
+
+      terminal = Event.new("guarded", "terminal", %{}, timestamp: future)
+
+      assert {:ok, [_]} =
+               EventLog.append("guarded", terminal,
+                 repo: Repo,
+                 expected_version: 1,
+                 max_current_age_ms: 60_000
+               )
+
+      assert {:ok, nil} =
+               EventLog.read_stream_head("guarded", repo: Repo, max_current_age_ms: 0)
+
+      assert {:error, :deadline_exceeded} =
+               EventLog.append("guarded", terminal,
+                 repo: Repo,
+                 expected_version: 2,
+                 max_current_age_ms: 0
+               )
+
+      # Historical reads remain domain-time based and do not hide expired events.
+      assert {:ok, historical} = EventLog.read_stream("guarded", repo: Repo)
+      assert Enum.map(historical, & &1.timestamp) == [future, future]
+    end
+
+    test "database supplies committed_at on both supported adapters" do
+      event = Event.new("commit-authority", "created", %{})
+      assert {:ok, [_]} = EventLog.append("commit-authority", event, repo: Repo)
+
+      schema = Repo.one!(Arbor.Persistence.Schemas.Event)
+      assert %DateTime{} = schema.committed_at
+      assert Repo.__adapter__() in [Ecto.Adapters.Postgres, Ecto.Adapters.SQLite3]
+    end
+
+    test "freshness precondition fails closed for an empty stream" do
+      event = Event.new("empty", "terminal", %{})
+
+      assert {:error, :deadline_exceeded} =
+               EventLog.append("empty", event,
+                 repo: Repo,
+                 expected_version: 0,
+                 max_current_age_ms: 60_000
+               )
+    end
+
+    test "missing durable commit evidence fails freshness closed" do
+      events = [
+        Event.new("legacy", "created", %{}),
+        Event.new("legacy", "current_head", %{})
+      ]
+
+      assert {:ok, [_, _]} = EventLog.append("legacy", events, repo: Repo)
+
+      from(e in Arbor.Persistence.Schemas.Event,
+        where: e.stream_id == "legacy" and e.event_number == 2
+      )
+      |> Repo.update_all(set: [committed_at: nil])
+
+      assert {:ok, nil} =
+               EventLog.read_stream_head("legacy", repo: Repo, max_current_age_ms: 60_000)
+
+      assert {:error, :deadline_exceeded} =
+               EventLog.append("legacy", Event.new("legacy", "terminal", %{}),
+                 repo: Repo,
+                 expected_version: 2,
+                 max_current_age_ms: 60_000
+               )
+
+      assert {:ok, [%Event{}, %Event{}]} = EventLog.read_stream("legacy", repo: Repo)
     end
   end
 
@@ -248,7 +335,9 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
       {:ok, _} =
         EventLog.append(
           "stream-b",
-          [Event.new("stream-b", "t", %{}), Event.new("stream-b", "t", %{})], repo: Repo)
+          [Event.new("stream-b", "t", %{}), Event.new("stream-b", "t", %{})],
+          repo: Repo
+        )
 
       assert {:ok, 3} = EventLog.event_count(repo: Repo)
     end

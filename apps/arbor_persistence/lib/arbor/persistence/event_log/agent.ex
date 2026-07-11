@@ -12,19 +12,28 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   @behaviour Arbor.Persistence.EventLog
 
-  alias Arbor.Persistence.Event
+  alias Arbor.Persistence.{Event, EventLog}
 
   # --- Client API ---
 
   @impl Arbor.Persistence.EventLog
   def append(stream_id, events, opts) do
-    name = Keyword.fetch!(opts, :name)
-    events = List.wrap(events)
+    with {:ok, events, preconditions} <- EventLog.validate_append(stream_id, events, opts) do
+      name = Keyword.fetch!(opts, :name)
 
-    Agent.get_and_update(name, fn state ->
-      {persisted, state} = do_append(stream_id, events, state)
-      {{:ok, persisted}, state}
-    end)
+      Agent.get_and_update(name, fn state ->
+        now = System.monotonic_time(:millisecond)
+
+        case check_preconditions(stream_id, preconditions, now, state) do
+          :ok ->
+            {persisted, state} = do_append(stream_id, events, now, state)
+            {{:ok, persisted}, state}
+
+          {:error, reason} ->
+            {{:error, reason}, state}
+        end
+      end)
+    end
   end
 
   @impl Arbor.Persistence.EventLog
@@ -44,6 +53,27 @@ defmodule Arbor.Persistence.EventLog.Agent do
       end)
 
     {:ok, events}
+  end
+
+  @impl Arbor.Persistence.EventLog
+  def read_stream_head(stream_id, opts) do
+    with {:ok, max_current_age_ms} <- EventLog.validate_head_read(stream_id, opts) do
+      name = Keyword.fetch!(opts, :name)
+
+      event =
+        Agent.get(name, fn state ->
+          if fresh_head?(
+               stream_id,
+               max_current_age_ms,
+               System.monotonic_time(:millisecond),
+               state
+             ) do
+            state.streams |> Map.get(stream_id, []) |> List.last()
+          end
+        end)
+
+      {:ok, event}
+    end
   end
 
   @impl Arbor.Persistence.EventLog
@@ -81,7 +111,9 @@ defmodule Arbor.Persistence.EventLog.Agent do
     name = Keyword.fetch!(opts, :name)
 
     Agent.start_link(
-      fn -> %{streams: %{}, global: [], versions: %{}, global_position: 0} end,
+      fn ->
+        %{streams: %{}, global: [], versions: %{}, global_position: 0, head_inserted_mono: %{}}
+      end,
       name: name
     )
   end
@@ -102,12 +134,12 @@ defmodule Arbor.Persistence.EventLog.Agent do
   defp apply_limit(events, nil), do: events
   defp apply_limit(events, n), do: Enum.take(events, n)
 
-  defp do_append(stream_id, events, state) do
+  defp do_append(stream_id, events, inserted_mono, state) do
     current_version = Map.get(state.versions, stream_id, 0)
 
     {persisted, final_version, final_global_pos} =
       Enum.reduce(events, {[], current_version, state.global_position}, fn %Event{} = event,
-                                                                          {acc, ver, gpos} ->
+                                                                           {acc, ver, gpos} ->
         new_ver = ver + 1
         new_gpos = gpos + 1
 
@@ -130,9 +162,35 @@ defmodule Arbor.Persistence.EventLog.Agent do
       | streams: streams,
         global: state.global ++ persisted,
         versions: Map.put(state.versions, stream_id, final_version),
-        global_position: final_global_pos
+        global_position: final_global_pos,
+        head_inserted_mono: Map.put(state.head_inserted_mono, stream_id, inserted_mono)
     }
 
     {persisted, state}
+  end
+
+  defp check_preconditions(stream_id, preconditions, now, state) do
+    current_version = Map.get(state.versions, stream_id, 0)
+
+    cond do
+      not is_nil(preconditions.expected_version) and
+          preconditions.expected_version != current_version ->
+        {:error, :version_conflict}
+
+      not fresh_head?(stream_id, preconditions.max_current_age_ms, now, state) ->
+        {:error, :deadline_exceeded}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp fresh_head?(_stream_id, nil, _now, _state), do: true
+
+  defp fresh_head?(stream_id, max_age_ms, now, state) do
+    case Map.get(state.head_inserted_mono, stream_id) do
+      inserted when is_integer(inserted) -> now - inserted < max_age_ms
+      _empty_or_unknown -> false
+    end
   end
 end

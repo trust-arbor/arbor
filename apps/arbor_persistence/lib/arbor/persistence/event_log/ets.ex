@@ -27,7 +27,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   @behaviour Arbor.Persistence.EventLog
 
-  alias Arbor.Persistence.Event
+  alias Arbor.Persistence.{Event, EventLog}
 
   @default_max_events 1_000_000
   @default_max_read 10_000
@@ -48,15 +48,24 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   @impl Arbor.Persistence.EventLog
   def append(stream_id, events, opts) do
-    name = Keyword.fetch!(opts, :name)
-    events = List.wrap(events)
-    GenServer.call(name, {:append, stream_id, events})
+    with {:ok, events, preconditions} <- EventLog.validate_append(stream_id, events, opts) do
+      name = Keyword.fetch!(opts, :name)
+      GenServer.call(name, {:append, stream_id, events, preconditions})
+    end
   end
 
   @impl Arbor.Persistence.EventLog
   def read_stream(stream_id, opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.call(name, {:read_stream, stream_id, opts})
+  end
+
+  @impl Arbor.Persistence.EventLog
+  def read_stream_head(stream_id, opts) do
+    with {:ok, max_current_age_ms} <- EventLog.validate_head_read(stream_id, opts) do
+      name = Keyword.fetch!(opts, :name)
+      GenServer.call(name, {:read_stream_head, stream_id, max_current_age_ms})
+    end
   end
 
   @impl Arbor.Persistence.EventLog
@@ -181,6 +190,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
       max_events: max_events,
       warning_logged: false,
       stream_versions: %{},
+      head_inserted_mono: %{},
       subscribers: %{},
       monitors: %{},
       max_age_ms: max_age_ms,
@@ -206,14 +216,17 @@ defmodule Arbor.Persistence.EventLog.ETS do
   end
 
   @impl GenServer
-  def handle_call({:append, stream_id, events}, _from, state) do
-    if state.global_position + length(events) > state.max_events do
-      {:reply, {:error, :event_log_full}, state}
-    else
-      {persisted, state} = do_append(stream_id, events, state)
+  def handle_call({:append, stream_id, events, preconditions}, _from, state) do
+    now = System.monotonic_time(:millisecond)
+
+    with :ok <- check_preconditions(stream_id, preconditions, now, state),
+         :ok <- check_capacity(events, state) do
+      {persisted, state} = do_append(stream_id, events, now, state)
       notify_subscribers(stream_id, persisted, state)
       state = maybe_warn_event_capacity(state)
       {:reply, {:ok, persisted}, state}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -239,6 +252,15 @@ defmodule Arbor.Persistence.EventLog.ETS do
       )
 
     {:reply, {:ok, events}, state}
+  end
+
+  def handle_call({:read_stream_head, stream_id, max_current_age_ms}, _from, state) do
+    event =
+      if fresh_head?(stream_id, max_current_age_ms, System.monotonic_time(:millisecond), state) do
+        read_head_event(stream_id, state)
+      end
+
+    {:reply, {:ok, event}, state}
   end
 
   def handle_call({:read_all, opts}, _from, state) do
@@ -305,8 +327,17 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
     new_global_position = max(state.global_position, snapshot.global_position)
 
+    head_inserted_mono =
+      Map.keys(merged_stream_versions)
+      |> Enum.reduce(state.head_inserted_mono, &Map.put_new(&2, &1, :unknown))
+
     {:reply, :ok,
-     %{state | stream_versions: merged_stream_versions, global_position: new_global_position}}
+     %{
+       state
+       | stream_versions: merged_stream_versions,
+         global_position: new_global_position,
+         head_inserted_mono: head_inserted_mono
+     }}
   end
 
   def handle_call({:oldest_event_number, stream_id}, _from, state) do
@@ -436,7 +467,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
   defp decrement_limit(nil), do: nil
   defp decrement_limit(n), do: n - 1
 
-  defp do_append(stream_id, events, state) do
+  defp do_append(stream_id, events, inserted_mono, state) do
     current_version = Map.get(state.stream_versions, stream_id, 0)
 
     {persisted, final_version, final_global} =
@@ -466,10 +497,55 @@ defmodule Arbor.Persistence.EventLog.ETS do
     state = %{
       state
       | global_position: final_global,
-        stream_versions: Map.put(state.stream_versions, stream_id, final_version)
+        stream_versions: Map.put(state.stream_versions, stream_id, final_version),
+        head_inserted_mono: Map.put(state.head_inserted_mono, stream_id, inserted_mono)
     }
 
     {persisted, state}
+  end
+
+  defp check_preconditions(stream_id, preconditions, now, state) do
+    current_version = Map.get(state.stream_versions, stream_id, 0)
+
+    cond do
+      not is_nil(preconditions.expected_version) and
+          preconditions.expected_version != current_version ->
+        {:error, :version_conflict}
+
+      not fresh_head?(stream_id, preconditions.max_current_age_ms, now, state) ->
+        {:error, :deadline_exceeded}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp fresh_head?(_stream_id, nil, _now, _state), do: true
+
+  defp fresh_head?(stream_id, max_age_ms, now, state) do
+    case Map.get(state.head_inserted_mono, stream_id) do
+      inserted when is_integer(inserted) -> now - inserted < max_age_ms
+      _empty_or_unknown -> false
+    end
+  end
+
+  defp check_capacity(events, state) do
+    if state.global_position + length(events) > state.max_events,
+      do: {:error, :event_log_full},
+      else: :ok
+  end
+
+  defp read_head_event(stream_id, state) do
+    version = Map.get(state.stream_versions, stream_id, 0)
+
+    with true <- version > 0,
+         [{{^stream_id, ^version}, global_position}] <-
+           :ets.lookup(state.stream_table, {stream_id, version}),
+         [{^global_position, event}] <- :ets.lookup(state.global_table, global_position) do
+      event
+    else
+      _ -> nil
+    end
   end
 
   defp do_read_stream(
@@ -721,7 +797,15 @@ defmodule Arbor.Persistence.EventLog.ETS do
       "EventLog.ETS: restored #{event_count} events from snapshot (pos: #{global_position})"
     )
 
-    %{state | global_position: global_position, stream_versions: stream_versions}
+    head_inserted_mono =
+      Map.new(stream_versions, fn {stream_id, _version} -> {stream_id, :unknown} end)
+
+    %{
+      state
+      | global_position: global_position,
+        stream_versions: stream_versions,
+        head_inserted_mono: head_inserted_mono
+    }
   end
 
   # Stream version keys may be atoms or strings depending on serialization

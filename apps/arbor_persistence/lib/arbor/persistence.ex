@@ -26,7 +26,7 @@ defmodule Arbor.Persistence do
 
   alias Arbor.Contracts.Persistence.Filter
   alias Arbor.Contracts.Persistence.Record
-  alias Arbor.Persistence.Event
+  alias Arbor.Persistence.{Event, EventLog}
   alias Arbor.Persistence.Repo
 
   # ---------------------------------------------------------------
@@ -517,7 +517,12 @@ defmodule Arbor.Persistence do
   @spec append(atom(), module(), String.t(), [Event.t()] | Event.t(), keyword()) ::
           {:ok, [Event.t()]} | {:error, term()}
   def append(name, backend, stream_id, events, opts \\ []) do
-    backend.append(stream_id, events, Keyword.put(opts, :name, name))
+    backend_opts = Keyword.put(opts, :name, name)
+
+    with {:ok, events, _preconditions} <-
+           EventLog.validate_append(stream_id, events, backend_opts) do
+      backend.append(stream_id, events, backend_opts)
+    end
   end
 
   @doc "Read events from a stream."
@@ -525,6 +530,17 @@ defmodule Arbor.Persistence do
           {:ok, [Event.t()]} | {:error, term()}
   def read_stream(name, backend, stream_id, opts \\ []) do
     backend.read_stream(stream_id, Keyword.put(opts, :name, name))
+  end
+
+  @doc "Read the current stream head, optionally bounded by backend-owned freshness."
+  @spec read_stream_head(atom(), module(), String.t(), keyword()) ::
+          {:ok, Event.t() | nil} | {:error, term()}
+  def read_stream_head(name, backend, stream_id, opts \\ []) do
+    backend_opts = Keyword.put(opts, :name, name)
+
+    with {:ok, _max_current_age_ms} <- EventLog.validate_head_read(stream_id, backend_opts) do
+      backend.read_stream_head(stream_id, backend_opts)
+    end
   end
 
   @doc "Read all events across all streams."

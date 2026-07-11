@@ -20,6 +20,28 @@ defmodule Arbor.Persistence.EctoTest do
     end
   end
 
+  describe "EventLog preconditions" do
+    alias Arbor.Persistence.Ecto.EventLog
+    alias Arbor.Persistence.Event
+
+    test "fails clearly when EventStore cannot enforce freshness atomically" do
+      event = Event.new("guarded", "terminal", %{})
+
+      assert {:error, :unsupported_precondition} =
+               EventLog.append("guarded", event, max_current_age_ms: 1_000)
+
+      assert {:error, :unsupported_precondition} =
+               EventLog.read_stream_head("guarded", max_current_age_ms: 1_000)
+    end
+
+    test "rejects legacy symbolic expected versions before EventStore access" do
+      event = Event.new("guarded", "terminal", %{})
+
+      assert {:error, :invalid_precondition} =
+               EventLog.append("guarded", event, expected_version: :any)
+    end
+  end
+
   # Integration tests require a running Postgres database
   # They are tagged and can be run with: mix test --include integration
   #

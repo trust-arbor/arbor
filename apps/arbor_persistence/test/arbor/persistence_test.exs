@@ -80,6 +80,19 @@ defmodule Arbor.PersistenceTest do
       assert length(all) == 1
     end
 
+    test "forwards append preconditions and bounded head reads", %{name: name, backend: backend} do
+      event = Event.new("s1", "started", %{})
+
+      assert {:ok, [_]} =
+               Persistence.append(name, backend, "s1", event, expected_version: 0)
+
+      assert {:error, :version_conflict} =
+               Persistence.append(name, backend, "s1", event, expected_version: 0)
+
+      assert {:ok, %Event{event_number: 1}} =
+               Persistence.read_stream_head(name, backend, "s1")
+    end
+
     test "stream_exists?/stream_version", %{name: name, backend: backend} do
       refute Persistence.stream_exists?(name, backend, "s1")
       Persistence.append(name, backend, "s1", Event.new("s1", "t", %{}))
@@ -176,8 +189,12 @@ defmodule Arbor.PersistenceTest do
       Persistence.put(name, backend, "a", r)
 
       filter = Filter.new()
-      assert {:ok, [_]} = Persistence.query_records_by_filter_using_backend(name, backend, filter, [])
-      assert {:ok, 1} = Persistence.count_records_by_filter_using_backend(name, backend, filter, [])
+
+      assert {:ok, [_]} =
+               Persistence.query_records_by_filter_using_backend(name, backend, filter, [])
+
+      assert {:ok, 1} =
+               Persistence.count_records_by_filter_using_backend(name, backend, filter, [])
 
       assert {:ok, 10} =
                Persistence.aggregate_field_by_filter_using_backend(

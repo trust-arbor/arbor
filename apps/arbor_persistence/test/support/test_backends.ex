@@ -34,6 +34,9 @@ defmodule Arbor.Persistence.TestBackends do
     def read_stream(_stream_id, _opts), do: {:error, :read_failed}
 
     @impl true
+    def read_stream_head(_stream_id, _opts), do: {:error, :read_failed}
+
+    @impl true
     def read_all(_opts), do: {:error, :read_failed}
 
     @impl true

@@ -5,6 +5,34 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.ETS
 
+  defmodule RestoreStore do
+    @moduledoc false
+
+    def get("freshness_restore:meta", _opts), do: {:ok, %{"latest_id" => "1"}}
+
+    def get("freshness_restore:snapshot:1", _opts) do
+      {:ok,
+       %{
+         "global_position" => 1,
+         "stream_versions" => %{"restored" => 1},
+         "events" => [
+           %{
+             "id" => "evt_restored",
+             "stream_id" => "restored",
+             "event_number" => 1,
+             "global_position" => 1,
+             "type" => "started",
+             "data" => %{},
+             "metadata" => %{},
+             "timestamp" => "2099-01-01T00:00:00Z"
+           }
+         ]
+       }}
+    end
+
+    def get(_key, _opts), do: {:error, :not_found}
+  end
+
   setup do
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     name = :"el_ets_#{:erlang.unique_integer([:positive])}"
@@ -48,6 +76,96 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       assert e1.global_position == 1
       assert e2.global_position == 2
       assert e3.global_position == 3
+    end
+
+    test "security regression: expected_version is enforced atomically", %{name: name} do
+      event = Event.new("cas", "created", %{})
+      assert {:ok, [_]} = ETS.append("cas", event, name: name, expected_version: 0)
+
+      assert {:error, :version_conflict} =
+               ETS.append("cas", event, name: name, expected_version: 0)
+
+      assert {:ok, 1} = ETS.stream_version("cas", name: name)
+    end
+
+    test "concurrent exact-version appends accept exactly one", %{name: name} do
+      results =
+        1..20
+        |> Task.async_stream(
+          fn i ->
+            event = Event.new("cas-race", "terminal", %{winner: i})
+            ETS.append("cas-race", event, name: name, expected_version: 0)
+          end,
+          max_concurrency: 20,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.count(results, &match?({:ok, [_]}, &1)) == 1
+      assert Enum.count(results, &(&1 == {:error, :version_conflict})) == 19
+    end
+
+    test "freshness uses backend monotonic evidence, not caller timestamp", %{name: name} do
+      future = DateTime.add(DateTime.utc_now(), 86_400, :second)
+      event = Event.new("deadline", "started", %{}, timestamp: future)
+      assert {:ok, [_]} = ETS.append("deadline", event, name: name)
+
+      assert {:ok, [_]} =
+               ETS.append("deadline", event,
+                 name: name,
+                 expected_version: 1,
+                 max_current_age_ms: 60_000
+               )
+
+      # Age equal to the deadline is expired; max_current_age_ms is strict.
+      assert {:error, :deadline_exceeded} =
+               ETS.append("deadline", event,
+                 name: name,
+                 expected_version: 2,
+                 max_current_age_ms: 0
+               )
+
+      assert {:ok, nil} = ETS.read_stream_head("deadline", name: name, max_current_age_ms: 0)
+      assert {:ok, %Event{event_number: 2}} = ETS.read_stream_head("deadline", name: name)
+    end
+
+    test "invalid preconditions fail before append", %{name: name} do
+      event = Event.new("invalid", "event", %{})
+
+      assert {:error, :invalid_precondition} =
+               ETS.append("invalid", event, name: name, expected_version: :any)
+
+      assert {:error, :invalid_precondition} =
+               ETS.append("invalid", event, name: name, max_current_age_ms: :infinity)
+
+      assert {:error, :invalid_stream_id} =
+               ETS.append(String.duplicate("s", 1_025), event, name: name)
+
+      refute ETS.stream_exists?("invalid", name: name)
+    end
+  end
+
+  describe "freshness after restore" do
+    test "restart cannot extend a restored head deadline" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"el_restore_#{:erlang.unique_integer([:positive])}"
+
+      start_supervised!(
+        {ETS, name: name, snapshot_store: RestoreStore, snapshot_namespace: "freshness_restore"},
+        id: name
+      )
+
+      assert {:ok, [%Event{event_number: 1}]} = ETS.read_stream("restored", name: name)
+
+      assert {:ok, nil} =
+               ETS.read_stream_head("restored", name: name, max_current_age_ms: 60_000)
+
+      assert {:error, :deadline_exceeded} =
+               ETS.append("restored", Event.new("restored", "terminal", %{}),
+                 name: name,
+                 expected_version: 1,
+                 max_current_age_ms: 60_000
+               )
     end
   end
 

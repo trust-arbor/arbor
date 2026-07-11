@@ -26,6 +26,7 @@ defmodule Arbor.Persistence.Schemas.Event do
     field(:causation_id, :string)
     field(:correlation_id, :string)
     field(:event_timestamp, :utc_datetime_usec)
+    field(:committed_at, :utc_datetime_usec, read_after_writes: true)
 
     timestamps(inserted_at: :created_at, updated_at: false)
   end

@@ -119,4 +119,28 @@ defmodule Arbor.Persistence.EventLog.EctoConcurrentAppendTest do
     assert length(numbers) == length(Enum.uniq(numbers)),
            "duplicate event_numbers written: #{inspect(numbers -- Enum.uniq(numbers))}"
   end
+
+  test "concurrent exact-version appends accept exactly one after the stream lock" do
+    n = 20
+    stream_id = "cas-race-#{System.unique_integer([:positive])}"
+
+    results =
+      1..n
+      |> Task.async_stream(
+        fn i ->
+          EventLog.append(stream_id, Event.new(stream_id, "terminal", %{winner: i}),
+            repo: Repo,
+            expected_version: 0
+          )
+        end,
+        max_concurrency: n,
+        timeout: 30_000,
+        ordered: false
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.count(results, &match?({:ok, [_]}, &1)) == 1
+    assert Enum.count(results, &(&1 == {:error, :version_conflict})) == n - 1
+    assert {:ok, 1} = EventLog.stream_version(stream_id, repo: Repo)
+  end
 end

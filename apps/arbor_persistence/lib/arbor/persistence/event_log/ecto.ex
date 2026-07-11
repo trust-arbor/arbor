@@ -50,7 +50,7 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
   import Ecto.Query
 
-  alias Arbor.Persistence.Event
+  alias Arbor.Persistence.{Event, EventLog}
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Event, as: EventSchema
 
@@ -66,6 +66,7 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
   - `:repo` - Ecto Repo to use (default: `Arbor.Persistence.Repo`)
   - `:expected_version` - Optimistic concurrency check (optional)
+  - `:max_current_age_ms` - Require a current head younger than this duration
 
   ## Returns
 
@@ -84,7 +85,9 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   end
 
   def append(stream_id, events, opts) when is_list(events) do
-    do_append(stream_id, events, opts, 1)
+    with {:ok, events, preconditions} <- EventLog.validate_append(stream_id, events, opts) do
+      do_append(stream_id, events, preconditions, opts, 1)
+    end
   end
 
   # Concurrent appends to the SAME stream race on event_number assignment: the
@@ -103,11 +106,10 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   # different lock keys and don't contend. The lock auto-releases at transaction
   # end (commit or rollback). The bounded optimistic retry below is kept as a
   # backstop but should now essentially never fire.
-  defp do_append(stream_id, events, opts, attempt) do
+  defp do_append(stream_id, events, preconditions, opts, attempt) do
     repo = Keyword.get(opts, :repo, Repo)
-    expected_version = Keyword.get(opts, :expected_version)
 
-    repo.transaction(fn ->
+    transaction(repo, fn ->
       # Serialize concurrent appends to this stream at the database (Postgres
       # only — SQLite serializes writes already, and the ETS/Agent backends and
       # the retry-test stub repos have no such lock).
@@ -118,8 +120,13 @@ defmodule Arbor.Persistence.EventLog.Ecto do
       global_pos = get_max_global_position(repo)
 
       # Optimistic concurrency check
-      if expected_version && expected_version != current_version do
+      if not is_nil(preconditions.expected_version) and
+           preconditions.expected_version != current_version do
         repo.rollback(:version_conflict)
+      end
+
+      if not head_fresh?(repo, stream_id, preconditions.max_current_age_ms) do
+        repo.rollback(:deadline_exceeded)
       end
 
       # Assign positions and insert
@@ -136,8 +143,8 @@ defmodule Arbor.Persistence.EventLog.Ecto do
               timestamp: event.timestamp || DateTime.utc_now()
           }
 
-          insert_event(repo, event_with_positions)
-          {event_with_positions, new_gpos}
+          persisted_event = insert_event(repo, event_with_positions)
+          {persisted_event, new_gpos}
         end)
 
       persisted
@@ -163,7 +170,7 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
       cond do
         retryable? and attempt < @max_append_attempts ->
-          do_append(stream_id, events, opts, attempt + 1)
+          do_append(stream_id, events, preconditions, opts, attempt + 1)
 
         # Retries exhausted on a declared-constraint conflict: surface the
         # changeset rather than crashing the caller, per the append contract.
@@ -225,6 +232,35 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   rescue
     e ->
       Logger.error("Failed to read stream #{stream_id}: #{inspect(e)}")
+      {:error, {:read_failed, e}}
+  end
+
+  @doc """
+  Read the current stream head, optionally requiring backend-owned freshness.
+
+  `:max_current_age_ms` compares `events.committed_at` to database time. The
+  domain `Event.timestamp` is not consulted.
+  """
+  @impl true
+  def read_stream_head(stream_id, opts \\ []) do
+    with {:ok, max_current_age_ms} <- EventLog.validate_head_read(stream_id, opts) do
+      repo = Keyword.get(opts, :repo, Repo)
+
+      event =
+        stream_id
+        |> current_head_query()
+        |> maybe_require_fresh_head(repo, max_current_age_ms)
+        |> repo.one()
+        |> case do
+          nil -> nil
+          schema -> EventSchema.to_event(schema)
+        end
+
+      {:ok, event}
+    end
+  rescue
+    e ->
+      Logger.error("Failed to read stream head #{stream_id}: #{inspect(e)}")
       {:error, {:read_failed, e}}
   end
 
@@ -465,12 +501,77 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     :ok
   end
 
+  defp transaction(repo, fun) do
+    if sqlite_repo?(repo) do
+      repo.transaction(fun, mode: :immediate)
+    else
+      repo.transaction(fun)
+    end
+  end
+
   # True only for a real Ecto.Adapters.Postgres-backed repo. Guarded so the stub
   # repos used in the DB-free retry tests (which don't define `__adapter__/0`)
   # don't crash here — they fall through to "not postgres" and skip the lock.
   defp postgres_repo?(repo) do
     function_exported?(repo, :__adapter__, 0) and
       repo.__adapter__() == Ecto.Adapters.Postgres
+  end
+
+  defp sqlite_repo?(repo) do
+    function_exported?(repo, :__adapter__, 0) and
+      repo.__adapter__() == Ecto.Adapters.SQLite3
+  end
+
+  defp head_fresh?(_repo, _stream_id, nil), do: true
+
+  defp head_fresh?(repo, stream_id, max_current_age_ms) do
+    stream_id
+    |> current_head_query()
+    |> maybe_require_fresh_head(repo, max_current_age_ms)
+    |> select([e], true)
+    |> repo.one()
+    |> Kernel.==(true)
+  end
+
+  defp maybe_require_fresh_head(query, _repo, nil), do: query
+
+  defp maybe_require_fresh_head(query, repo, max_current_age_ms) do
+    head_id_query = select(query, [e], e.id)
+
+    query =
+      from(e in EventSchema,
+        where: e.id in subquery(head_id_query)
+      )
+
+    if postgres_repo?(repo) do
+      where(
+        query,
+        [e],
+        fragment(
+          "? > clock_timestamp() - (? * interval '1 millisecond')",
+          e.committed_at,
+          ^max_current_age_ms
+        )
+      )
+    else
+      where(
+        query,
+        [e],
+        fragment(
+          "((julianday('now') - julianday(?)) * 86400000.0) < ?",
+          e.committed_at,
+          ^max_current_age_ms
+        )
+      )
+    end
+  end
+
+  defp current_head_query(stream_id) do
+    from(e in EventSchema,
+      where: e.stream_id == ^stream_id,
+      order_by: [desc: e.event_number],
+      limit: 1
+    )
   end
 
   defp get_current_version(repo, stream_id) do
@@ -491,9 +592,19 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   defp insert_event(repo, %Event{} = event) do
     attrs = EventSchema.from_event(event)
 
-    %EventSchema{}
-    |> EventSchema.changeset(attrs)
-    |> repo.insert!()
+    inserted =
+      %EventSchema{}
+      |> EventSchema.changeset(attrs)
+      |> repo.insert!()
+
+    case inserted do
+      %EventSchema{id: id} ->
+        %EventSchema{committed_at: %DateTime{}} = repo.get!(EventSchema, id)
+        event
+
+      _test_repo_result ->
+        event
+    end
   end
 
   defp order_by_direction(field, :forward), do: [asc: field]
@@ -501,6 +612,7 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
   defp handle_transaction_result({:ok, events}), do: {:ok, events}
   defp handle_transaction_result({:error, :version_conflict}), do: {:error, :version_conflict}
+  defp handle_transaction_result({:error, :deadline_exceeded}), do: {:error, :deadline_exceeded}
 
   defp handle_transaction_result({:error, reason}) do
     Logger.error("Transaction failed: #{inspect(reason)}")

@@ -42,6 +42,33 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
       assert e1.global_position == 1
       assert e2.global_position == 2
     end
+
+    test "forwards and enforces CAS and freshness options", %{name: name} do
+      event = Event.new("guarded", "started", %{})
+      assert {:ok, [_]} = ELAgent.append("guarded", event, name: name, expected_version: 0)
+
+      assert {:error, :version_conflict} =
+               ELAgent.append("guarded", event, name: name, expected_version: 0)
+
+      assert {:ok, [_]} =
+               ELAgent.append("guarded", event,
+                 name: name,
+                 expected_version: 1,
+                 max_current_age_ms: 60_000
+               )
+
+      assert {:error, :deadline_exceeded} =
+               ELAgent.append("guarded", event,
+                 name: name,
+                 expected_version: 2,
+                 max_current_age_ms: 0
+               )
+
+      assert {:ok, nil} =
+               ELAgent.read_stream_head("guarded", name: name, max_current_age_ms: 0)
+
+      assert {:ok, %Event{event_number: 2}} = ELAgent.read_stream_head("guarded", name: name)
+    end
   end
 
   describe "read_stream/2" do

@@ -26,22 +26,22 @@ defmodule Arbor.Persistence.Ecto.EventLog do
 
   ## Optimistic Concurrency
 
-  Pass `expected_version: version` in opts to enable optimistic concurrency:
+  Pass a non-negative `expected_version: version` in opts to enable optimistic
+  concurrency. This EventStore-backed adapter cannot atomically enforce
+  `:max_current_age_ms` through EventStore's public API and returns
+  `{:error, :unsupported_precondition}` when it is requested.
 
       # Append only if stream is at version 2
       {:ok, events} = append(stream_id, events, expected_version: 2)
 
-      # Append only if stream doesn't exist
-      {:ok, events} = append(stream_id, events, expected_version: :no_stream)
-
       # Append regardless of version (default)
-      {:ok, events} = append(stream_id, events, expected_version: :any)
+      {:ok, events} = append(stream_id, events)
   """
 
   @behaviour Arbor.Persistence.EventLog
 
   alias Arbor.Persistence.Ecto.EventStore, as: Store
-  alias Arbor.Persistence.Event
+  alias Arbor.Persistence.{Event, EventLog}
 
   require Logger
 
@@ -51,29 +51,31 @@ defmodule Arbor.Persistence.Ecto.EventLog do
 
   @impl Arbor.Persistence.EventLog
   def append(stream_id, events, opts \\ []) do
-    events = List.wrap(events)
-    expected_version = Keyword.get(opts, :expected_version, :any)
+    with {:ok, events, preconditions} <- EventLog.validate_append(stream_id, events, opts),
+         :ok <- reject_freshness(preconditions.max_current_age_ms) do
+      expected_version = preconditions.expected_version || :any
 
-    # Convert to eventstore format
-    event_data = Enum.map(events, &to_event_data/1)
+      # Convert to eventstore format
+      event_data = Enum.map(events, &to_event_data/1)
 
-    case Store.append_to_stream(stream_id, expected_version, event_data) do
-      :ok ->
-        # Read back to get assigned positions
-        # Note: This is slightly inefficient but ensures correctness
-        # In production, we might optimize by tracking positions ourselves
-        {:ok, recorded} =
-          read_stream(stream_id, from: expected_version_to_start(expected_version))
+      case Store.append_to_stream(stream_id, expected_version, event_data) do
+        :ok ->
+          # Read back to get assigned positions
+          # Note: This is slightly inefficient but ensures correctness
+          # In production, we might optimize by tracking positions ourselves
+          {:ok, recorded} =
+            read_stream(stream_id, from: expected_version_to_start(expected_version))
 
-        {:ok, Enum.take(recorded, -length(events))}
+          {:ok, Enum.take(recorded, -length(events))}
 
-      {:error, :wrong_expected_version} = error ->
-        Logger.warning("Optimistic concurrency conflict on stream #{stream_id}")
-        error
+        {:error, :wrong_expected_version} ->
+          Logger.warning("Optimistic concurrency conflict on stream #{stream_id}")
+          {:error, :version_conflict}
 
-      {:error, reason} = error ->
-        Logger.error("Failed to append to stream #{stream_id}: #{inspect(reason)}")
-        error
+        {:error, reason} = error ->
+          Logger.error("Failed to append to stream #{stream_id}: #{inspect(reason)}")
+          error
+      end
     end
   end
 
@@ -93,6 +95,24 @@ defmodule Arbor.Persistence.Ecto.EventLog do
       {:error, reason} = error ->
         Logger.error("Failed to read stream #{stream_id}: #{inspect(reason)}")
         error
+    end
+  end
+
+  @impl Arbor.Persistence.EventLog
+  def read_stream_head(stream_id, opts \\ []) do
+    with {:ok, max_current_age_ms} <- EventLog.validate_head_read(stream_id, opts),
+         :ok <- reject_freshness(max_current_age_ms),
+         {:ok, version} <- stream_version(stream_id, opts) do
+      if version == 0 do
+        {:ok, nil}
+      else
+        case Store.read_stream_forward(stream_id, version, 1) do
+          {:ok, [recorded | _]} -> {:ok, from_recorded_event(recorded)}
+          {:ok, []} -> {:ok, nil}
+          {:error, :stream_not_found} -> {:ok, nil}
+          {:error, _reason} = error -> error
+        end
+      end
     end
   end
 
@@ -225,8 +245,10 @@ defmodule Arbor.Persistence.Ecto.EventLog do
   end
 
   defp expected_version_to_start(:any), do: 0
-  defp expected_version_to_start(:no_stream), do: 0
   defp expected_version_to_start(version) when is_integer(version), do: version + 1
+
+  defp reject_freshness(nil), do: :ok
+  defp reject_freshness(_max_current_age_ms), do: {:error, :unsupported_precondition}
 
   # Create a subscriber module that forwards to a pid
   defp subscriber_with_pid(pid) do
