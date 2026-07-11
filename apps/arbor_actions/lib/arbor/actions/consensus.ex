@@ -397,7 +397,7 @@ defmodule Arbor.Actions.Consensus do
                abstain_count: Map.get(decision, :abstain_count, 0),
                quorum_met: Map.get(decision, :quorum_met, false),
                average_confidence: Map.get(decision, :average_confidence, 0.0),
-               primary_concerns: inspect(Map.get(decision, :primary_concerns, [])),
+               primary_concerns: Map.get(decision, :primary_concerns, []),
                perspective_votes: perspective_votes,
                security_veto: "security" in vetoes,
                vetoes: vetoes,

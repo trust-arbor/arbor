@@ -328,6 +328,26 @@ defmodule Arbor.Actions.ConsensusTest do
 
       assert result.security_veto
       assert result.vetoes == ["security"]
+      assert result.primary_concerns == ["path traversal"]
+    end
+
+    test "preserves primary concerns as a JSON-clean list for review feedback" do
+      concerns = ["cannot verify the related contract", "quoted \"path\" remains structured"]
+
+      results = [
+        make_branch_result("correctness", "abstain", concerns: concerns),
+        make_branch_result("security", "approve")
+      ]
+
+      assert {:ok, result} =
+               Consensus.Decide.run(
+                 %{results: results, question: "Is the evidence sufficient?"},
+                 %{}
+               )
+
+      assert result.primary_concerns == concerns
+      assert {:ok, encoded} = Jason.encode(result)
+      assert Jason.decode!(encoded)["primary_concerns"] == concerns
     end
 
     test "majority reject produces rejected decision" do

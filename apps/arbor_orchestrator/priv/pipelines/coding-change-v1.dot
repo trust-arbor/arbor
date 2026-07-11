@@ -86,6 +86,13 @@ digraph CodingChangeV1 {
     output_key="protocol_retry_count"
   ]
 
+  reset_worker_turn_protocol_retry_count [
+    type="transform",
+    transform="constant",
+    expression="0",
+    output_key="worker_turn_protocol_retry_count"
+  ]
+
   classify_profile [
     type="transform",
     transform="constant",
@@ -192,13 +199,21 @@ digraph CodingChangeV1 {
   ]
 
   // A malformed response or unknown/missing status gets one same-session
-  // protocol repair. This counter is independent from implementation rework.
+  // protocol repair per fresh worker turn. The cumulative counter remains
+  // independent from implementation rework and is retained for metrics.
 
   inc_protocol_retry_count [
     type="transform",
     transform="increment",
     source_key="protocol_retry_count",
     output_key="protocol_retry_count"
+  ]
+
+  inc_worker_turn_protocol_retry_count [
+    type="transform",
+    transform="increment",
+    source_key="worker_turn_protocol_retry_count",
+    output_key="worker_turn_protocol_retry_count"
   ]
 
   check_protocol_retry_budget [
@@ -829,7 +844,8 @@ digraph CodingChangeV1 {
   prep_release_mode_only -> release_workspace_only -> status_pipeline_error
 
   open_worker -> hoist_worker_session_id [condition="outcome=success"]
-  hoist_worker_session_id -> build_implement_prompt -> implement
+  hoist_worker_session_id -> build_implement_prompt -> reset_worker_turn_protocol_retry_count
+  reset_worker_turn_protocol_retry_count -> implement
 
   // Implement hard failure -> status then cleanup
   implement -> status_pipeline_error_then_close [condition="outcome=fail"]
@@ -838,13 +854,14 @@ digraph CodingChangeV1 {
   implement -> extract_worker_status [condition="outcome=success"]
   extract_worker_status -> inc_protocol_retry_count [condition="outcome=fail"]
   extract_worker_status -> route_worker_status [condition="outcome=success"]
-  inc_protocol_retry_count -> check_protocol_retry_budget
-  check_protocol_retry_budget -> build_protocol_repair_prompt [condition="context.protocol_retry_count<2"]
+  inc_protocol_retry_count -> inc_worker_turn_protocol_retry_count
+  inc_worker_turn_protocol_retry_count -> check_protocol_retry_budget
+  check_protocol_retry_budget -> build_protocol_repair_prompt [condition="context.worker_turn_protocol_retry_count<2"]
   build_protocol_repair_prompt -> repair_worker_protocol
   repair_worker_protocol -> error_worker_protocol_repair [condition="outcome=fail"]
   error_worker_protocol_repair -> status_pipeline_error_then_close
   repair_worker_protocol -> extract_worker_status [condition="outcome=success"]
-  check_protocol_retry_budget -> error_worker_protocol_invalid [condition="context.protocol_retry_count>=2"]
+  check_protocol_retry_budget -> error_worker_protocol_invalid [condition="context.worker_turn_protocol_retry_count>=2"]
   error_worker_protocol_invalid -> status_pipeline_error_then_close
 
   // Impossible seed edges keep the reviewed dormant subgraph structurally
@@ -911,7 +928,7 @@ digraph CodingChangeV1 {
   inc_validation_total_rework_count -> mark_validation_rework_kind
   mark_validation_rework_kind -> mark_validation_rework_iteration
   mark_validation_rework_iteration -> build_validation_rework_prompt
-  build_validation_rework_prompt -> implement
+  build_validation_rework_prompt -> reset_worker_turn_protocol_retry_count
 
   // Validation passed -> commit or adopt HEAD
   check_validation_passed -> prep_commit_path [condition="outcome=success"]
@@ -981,7 +998,7 @@ digraph CodingChangeV1 {
   inc_review_total_rework_count -> mark_review_rework_kind
   mark_review_rework_kind -> mark_review_rework_iteration
   mark_review_rework_iteration -> build_review_rework_prompt
-  build_review_rework_prompt -> implement
+  build_review_rework_prompt -> reset_worker_turn_protocol_retry_count
 
   // Publish: optional draft PR
   route_publish -> prep_pr_path [condition="context.open_pr=true"]

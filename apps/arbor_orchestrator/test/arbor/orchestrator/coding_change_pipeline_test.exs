@@ -216,6 +216,21 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                 "Implemented the requested change.\n" <>
                   Jason.encode!(%{status: "implemented", summary: "prefixed progress"})
 
+              {scenario, n}
+              when scenario in [
+                     :protocol_repair_validation_turns_success,
+                     :protocol_repair_review_turns_success
+                   ] and n in [0, 2] ->
+                "Implemented the requested change.\n" <>
+                  Jason.encode!(%{status: "implemented", summary: "prefixed progress"})
+
+              {scenario, _}
+              when scenario in [
+                     :protocol_repair_validation_turns_success,
+                     :protocol_repair_review_turns_success
+                   ] ->
+                Jason.encode!(%{status: "implemented", summary: "protocol repaired"})
+
               {:unknown_worker_status_repair_success, 0} ->
                 Jason.encode!(%{status: "working", summary: "not terminal yet"})
 
@@ -324,6 +339,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
               {:rework_exhausted, _} -> true
               {:validation_then_review_rework_success, 0} -> false
               {:validation_then_review_rework_success, _} -> true
+              {:protocol_repair_validation_turns_success, 0} -> false
+              {:protocol_repair_validation_turns_success, _} -> true
               _ -> true
             end
 
@@ -413,6 +430,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           {:ok, review_payload("rework")}
 
         :validation_then_review_rework_success ->
+          {:ok, review_payload(if(n == 0, do: "rework", else: "auto_proceed"))}
+
+        :protocol_repair_review_turns_success ->
           {:ok, review_payload(if(n == 0, do: "rework", else: "auto_proceed"))}
 
         :unknown_review_tier ->
@@ -722,6 +742,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
         assert String.contains?(load_dot(), "output_key=\"#{counter}\"")
       end
 
+      assert load_dot() =~ "output_key=\"protocol_retry_count\""
+      assert load_dot() =~ "output_key=\"worker_turn_protocol_retry_count\""
+
       refute load_dot() =~ "worker_status!=declined"
       refute load_dot() =~ "source_key=\"rework_count\""
 
@@ -965,6 +988,45 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert {"acp_send_message", repair_args} = List.last(send_calls)
       assert repair_args["prompt"] =~ "ONLY one JSON object"
       assert_closed_and_released(calls)
+    end
+
+    test "validation rework receives a fresh protocol repair budget" do
+      assert {{:ok, result}, calls} =
+               run_fixture(:protocol_repair_validation_turns_success)
+
+      assert result.context["status"] == "change_committed"
+      assert result.context["protocol_retry_count"] == 2
+      assert result.context["worker_turn_protocol_retry_count"] == 1
+      assert result.context["validation_rework_count"] == 1
+      assert result.context["review_rework_count"] == "0"
+      assert result.context["total_rework_count"] == 1
+      refute Map.has_key?(result.context, "error")
+
+      prompts = action_prompts(calls)
+      assert_single_worker_session(calls, 4)
+      assert Enum.at(prompts, 2) =~ "Structured validation feedback JSON"
+      assert Enum.at(prompts, 3) =~ "ONLY one JSON object"
+      assert_closed_and_released(calls)
+      assert_json_clean_context(result.context)
+    end
+
+    test "council rework receives a fresh protocol repair budget" do
+      assert {{:ok, result}, calls} = run_fixture(:protocol_repair_review_turns_success)
+
+      assert result.context["status"] == "change_committed"
+      assert result.context["protocol_retry_count"] == 2
+      assert result.context["worker_turn_protocol_retry_count"] == 1
+      assert result.context["validation_rework_count"] == "0"
+      assert result.context["review_rework_count"] == 1
+      assert result.context["total_rework_count"] == 1
+      refute Map.has_key?(result.context, "error")
+
+      prompts = action_prompts(calls)
+      assert_single_worker_session(calls, 4)
+      assert Enum.at(prompts, 2) =~ "Structured review feedback JSON"
+      assert Enum.at(prompts, 3) =~ "ONLY one JSON object"
+      assert_closed_and_released(calls)
+      assert_json_clean_context(result.context)
     end
   end
 
