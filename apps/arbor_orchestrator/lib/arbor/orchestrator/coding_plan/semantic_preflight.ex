@@ -340,6 +340,32 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   # handler opt-in that could turn denial into success for arbitrary graphs.
   @commit_approval_node "commit_change"
   @commit_approval_action "coding_reviewed_commit"
+  @approval_route_node "route_commit_interaction"
+  @approval_denied_condition "context.commit.interaction_outcome=denied"
+  @approval_rework_condition "context.commit.interaction_outcome=rework"
+  @approval_cleanup_node "close_worker"
+
+  @operator_rework_chain ~w(
+    check_operator_rework_category_budget
+    check_operator_rework_total_budget
+    inc_operator_rework_count
+    inc_operator_total_rework_count
+  )
+
+  @post_commit_review_nodes ~w(
+    route_commit_interaction
+    hoist_commit_hash
+    route_after_commit
+    prep_expected_commit
+    load_committed_change
+    review_change
+    route_review
+    route_publish
+    prep_pr_path
+    status_change_committed
+    status_pr_created
+    status_human_review_required
+  )
   @forbidden_denial_bypass_attrs MapSet.new(~w[
     project_interaction_control
     treat_deny_as_success
@@ -387,15 +413,14 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
   #   * every operator rework path passes category+total budget then fresh gate
   #   * direct bypass edges (commit_change -> hoist/route_after) fail closed
   defp check_operator_approval_routing(errors, graph) do
+    errors = check_approval_graph_shape(errors, graph)
+
     required =
       ~w(
         route_commit_interaction
         status_approval_denied
-        check_operator_rework_category_budget
-        check_operator_rework_total_budget
-        inc_operator_rework_count
         mark_operator_rework_exhausted_error
-      )
+      ) ++ @operator_rework_chain
 
     errors =
       Enum.reduce(required, errors, fn node_id, acc ->
@@ -406,7 +431,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         end
       end)
 
-    {entry, reachable, dominators} = approval_dominance_context(graph)
+    {_entry, reachable, dominators} = approval_dominance_context(graph)
 
     # Reviewed gate dominates every post-commit branch (success hoist, deny, rework).
     post_gate_nodes =
@@ -447,25 +472,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         end
       )
 
-    # Deny path: every path from status_approval_denied reaches cleanup, and
-    # none reach publication. (close_worker is also on success paths, so it is
-    # not dominated by the deny node — use post-path reachability instead.)
-    errors =
-      cond do
-        not MapSet.member?(reachable, "status_approval_denied") ->
-          errors
-
-        not approval_reaches?(graph, "status_approval_denied", "close_worker") ->
-          [
-            error("missing_approval_denied_cleanup", "status_approval_denied", %{
-              "required_successor" => "close_worker"
-            })
-            | errors
-          ]
-
-        true ->
-          reject_deny_publication_paths(errors, graph, reachable)
-      end
+    errors = check_approval_denied_paths(errors, graph, reachable)
 
     # Operator rework: category budget dominates total budget; both dominate
     # the subsequent rework increment. Total budget also reaches a fresh
@@ -486,6 +493,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         dominators,
         "operator_rework_budget"
       )
+      |> check_operator_rework_paths(graph, reachable)
 
     # Reject direct bypass edges from the commit gate.
     errors =
@@ -504,7 +512,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
     # Indirect bypass: any edge into post-gate success/deny/rework that is not
     # dominated by commit_change fails closed (extra edge from outside the gate).
-    reject_indirect_commit_bypasses(errors, graph, entry, reachable, dominators)
+    reject_indirect_commit_bypasses(errors, graph, reachable, dominators)
   end
 
   defp approval_dominance_context(graph) do
@@ -517,6 +525,355 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         reachable = reachable_from(graph, entry)
         dominators = compute_dominators(graph, entry, reachable)
         {entry, reachable, dominators}
+    end
+  end
+
+  defp check_approval_graph_shape(errors, graph) do
+    errors =
+      case Graph.find_exit_nodes(graph) do
+        [_terminal] ->
+          errors
+
+        terminals ->
+          [
+            error("invalid_approval_terminal_set", nil, %{
+              "terminal_nodes" => terminals |> Enum.map(& &1.id) |> Enum.sort()
+            })
+            | errors
+          ]
+      end
+
+    graph.edges
+    |> Enum.with_index()
+    |> Enum.reduce(errors, fn {edge, index}, acc ->
+      cond do
+        not is_binary(edge.from) or not is_binary(edge.to) ->
+          [error("malformed_approval_edge", nil, %{"edge_index" => index}) | acc]
+
+        not Map.has_key?(graph.nodes, edge.from) or not Map.has_key?(graph.nodes, edge.to) ->
+          [
+            error("malformed_approval_edge", edge.from, %{
+              "edge_index" => index,
+              "to" => edge.to
+            })
+            | acc
+          ]
+
+        true ->
+          acc
+      end
+    end)
+  end
+
+  defp check_approval_denied_paths(errors, graph, reachable) do
+    denied_targets = approval_outcome_targets(graph, @approval_denied_condition)
+
+    errors =
+      if denied_targets == [] do
+        [
+          error("missing_approval_denied_route", @approval_route_node, %{
+            "condition" => @approval_denied_condition
+          })
+          | errors
+        ]
+      else
+        errors
+      end
+
+    Enum.reduce(denied_targets, errors, fn denied_entry, acc ->
+      acc
+      |> require_reachable_outcome(reachable, denied_entry, "approval_denied")
+      |> require_all_paths_through(
+        graph,
+        denied_entry,
+        "status_approval_denied",
+        "approval_denied_status"
+      )
+      |> require_all_paths_through(
+        graph,
+        "status_approval_denied",
+        @approval_cleanup_node,
+        "approval_denied_cleanup"
+      )
+      |> reject_deny_publication_paths(graph, reachable)
+    end)
+  end
+
+  defp check_operator_rework_paths(errors, graph, reachable) do
+    rework_targets = approval_outcome_targets(graph, @approval_rework_condition)
+
+    errors =
+      if rework_targets == [] do
+        [
+          error("missing_operator_rework_route", @approval_route_node, %{
+            "condition" => @approval_rework_condition
+          })
+          | errors
+        ]
+      else
+        errors
+      end
+
+    Enum.reduce(rework_targets, errors, fn rework_entry, acc ->
+      rework_reachable = reachable_from(graph, rework_entry)
+      rework_dominators = compute_dominators(graph, rework_entry, rework_reachable)
+
+      status_nodes =
+        graph.nodes
+        |> Map.keys()
+        |> Enum.filter(&String.starts_with?(&1, "status_"))
+        |> MapSet.new()
+
+      acc =
+        acc
+        |> require_reachable_outcome(reachable, rework_entry, "operator_rework")
+        |> require_all_paths_through(
+          graph,
+          rework_entry,
+          "check_operator_rework_category_budget",
+          "operator_rework_category_budget"
+        )
+        |> require_dominates(
+          "check_operator_rework_category_budget",
+          "inc_operator_total_rework_count",
+          rework_reachable,
+          rework_dominators,
+          "operator_rework_category_budget"
+        )
+        |> require_dominates(
+          "check_operator_rework_total_budget",
+          "inc_operator_total_rework_count",
+          rework_reachable,
+          rework_dominators,
+          "operator_rework_total_budget"
+        )
+        |> require_dominates(
+          "inc_operator_rework_count",
+          "inc_operator_total_rework_count",
+          rework_reachable,
+          rework_dominators,
+          "operator_rework_counter"
+        )
+        |> require_dominates(
+          @approval_cleanup_node,
+          terminal_id(graph),
+          rework_reachable,
+          rework_dominators,
+          "operator_rework_cleanup"
+        )
+        |> require_terminal_paths_through_any(
+          graph,
+          rework_entry,
+          status_nodes,
+          "operator_rework_status"
+        )
+
+      Enum.reduce(@post_commit_review_nodes, acc, fn target, inner ->
+        require_dominates(
+          inner,
+          @commit_approval_node,
+          target,
+          rework_reachable,
+          rework_dominators,
+          "fresh_reviewed_commit_gate"
+        )
+      end)
+    end)
+  end
+
+  defp require_reachable_outcome(errors, reachable, node_id, kind) do
+    if MapSet.member?(reachable, node_id) do
+      errors
+    else
+      [error("unreachable_approval_outcome", node_id, %{"kind" => kind}) | errors]
+    end
+  end
+
+  defp approval_outcome_targets(graph, condition) do
+    graph
+    |> Graph.outgoing_edges(@approval_route_node)
+    |> Enum.filter(&(edge_condition(&1) == condition))
+    |> Enum.map(& &1.to)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp edge_condition(edge) do
+    Map.get(edge.attrs, "condition") || Map.get(edge, :condition)
+  end
+
+  # Prove a post-dominance barrier without enumerating paths. If traversal from
+  # source while treating required as a cut can reach a terminal, dead end, or
+  # cycle, then some finite or infinite path avoids the required node.
+  defp require_all_paths_through(errors, graph, source, required, kind) do
+    cond do
+      not Map.has_key?(graph.nodes, source) ->
+        [error("missing_all_path_source", source, %{"kind" => kind}) | errors]
+
+      not Map.has_key?(graph.nodes, required) ->
+        [error("missing_all_path_gate", required, %{"kind" => kind, "source" => source}) | errors]
+
+      true ->
+        {avoiding, reached_required?} = reachable_until(graph, source, required)
+        violation = all_path_violation(graph, avoiding)
+
+        cond do
+          not reached_required? ->
+            [
+              error("all_path_gate_unreachable", source, %{
+                "kind" => kind,
+                "required_node" => required
+              })
+              | errors
+            ]
+
+          violation != nil ->
+            [
+              error("all_path_violation", source, %{
+                "kind" => kind,
+                "required_node" => required,
+                "violation" => violation
+              })
+              | errors
+            ]
+
+          true ->
+            errors
+        end
+    end
+  end
+
+  defp reachable_until(graph, source, cut) do
+    do_reachable_until(graph, [source], MapSet.new(), cut, false)
+  end
+
+  defp require_terminal_paths_through_any(errors, graph, source, required, kind) do
+    avoiding = reachable_without(graph, source, required)
+    terminals = graph |> Graph.find_exit_nodes() |> Enum.map(& &1.id) |> MapSet.new()
+
+    case Enum.find(avoiding, &MapSet.member?(terminals, &1)) do
+      nil ->
+        errors
+
+      terminal ->
+        [
+          error("all_path_violation", source, %{
+            "kind" => kind,
+            "required_nodes" => required |> Enum.sort(),
+            "violation" => %{"type" => "terminal", "node_id" => terminal}
+          })
+          | errors
+        ]
+    end
+  end
+
+  defp reachable_without(graph, source, cuts) do
+    do_reachable_without(graph, [source], MapSet.new(), cuts)
+  end
+
+  defp do_reachable_without(_graph, [], visited, _cuts), do: visited
+
+  defp do_reachable_without(graph, [node_id | rest], visited, cuts) do
+    cond do
+      MapSet.member?(cuts, node_id) or MapSet.member?(visited, node_id) ->
+        do_reachable_without(graph, rest, visited, cuts)
+
+      not Map.has_key?(graph.nodes, node_id) ->
+        do_reachable_without(graph, rest, visited, cuts)
+
+      true ->
+        next = graph |> Graph.outgoing_edges(node_id) |> Enum.map(& &1.to)
+        do_reachable_without(graph, rest ++ next, MapSet.put(visited, node_id), cuts)
+    end
+  end
+
+  defp do_reachable_until(_graph, [], visited, _cut, reached_cut?),
+    do: {visited, reached_cut?}
+
+  defp do_reachable_until(graph, [node_id | rest], visited, cut, reached_cut?) do
+    cond do
+      node_id == cut ->
+        do_reachable_until(graph, rest, visited, cut, true)
+
+      MapSet.member?(visited, node_id) or not Map.has_key?(graph.nodes, node_id) ->
+        do_reachable_until(graph, rest, visited, cut, reached_cut?)
+
+      true ->
+        next = graph |> Graph.outgoing_edges(node_id) |> Enum.map(& &1.to)
+
+        do_reachable_until(
+          graph,
+          rest ++ next,
+          MapSet.put(visited, node_id),
+          cut,
+          reached_cut?
+        )
+    end
+  end
+
+  defp all_path_violation(graph, avoiding) do
+    terminals = graph |> Graph.find_exit_nodes() |> Enum.map(& &1.id) |> MapSet.new()
+
+    cond do
+      terminal = Enum.find(avoiding, &MapSet.member?(terminals, &1)) ->
+        %{"type" => "terminal", "node_id" => terminal}
+
+      dead_end = Enum.find(avoiding, &(Graph.outgoing_edges(graph, &1) == [])) ->
+        %{"type" => "dead_end", "node_id" => dead_end}
+
+      cycle_node = cycle_node(graph, avoiding) ->
+        %{"type" => "cycle", "node_id" => cycle_node}
+
+      true ->
+        nil
+    end
+  end
+
+  defp cycle_node(graph, nodes) do
+    indegrees =
+      Map.new(nodes, fn node_id ->
+        count =
+          graph
+          |> Graph.incoming_edges(node_id)
+          |> Enum.count(&MapSet.member?(nodes, &1.from))
+
+        {node_id, count}
+      end)
+
+    queue = for {node_id, 0} <- indegrees, do: node_id
+    remaining = prune_acyclic_nodes(graph, queue, nodes, indegrees)
+
+    remaining |> Enum.sort() |> List.first()
+  end
+
+  defp prune_acyclic_nodes(_graph, [], remaining, _indegrees), do: remaining
+
+  defp prune_acyclic_nodes(graph, [node_id | rest], remaining, indegrees) do
+    if MapSet.member?(remaining, node_id) do
+      remaining = MapSet.delete(remaining, node_id)
+
+      {indegrees, newly_zero} =
+        graph
+        |> Graph.outgoing_edges(node_id)
+        |> Enum.map(& &1.to)
+        |> Enum.filter(&MapSet.member?(remaining, &1))
+        |> Enum.reduce({indegrees, []}, fn target, {degrees, zeroes} ->
+          degree = Map.fetch!(degrees, target) - 1
+          degrees = Map.put(degrees, target, degree)
+          zeroes = if degree == 0, do: [target | zeroes], else: zeroes
+          {degrees, zeroes}
+        end)
+
+      prune_acyclic_nodes(graph, rest ++ newly_zero, remaining, indegrees)
+    else
+      prune_acyclic_nodes(graph, rest, remaining, indegrees)
+    end
+  end
+
+  defp terminal_id(graph) do
+    case Graph.find_exit_nodes(graph) do
+      [terminal] -> terminal.id
+      _other -> "__invalid_terminal__"
     end
   end
 
@@ -548,7 +905,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
 
   # Extra edges into post-gate nodes from sources other than the reviewed gate
   # / route_commit_interaction chain are indirect bypasses.
-  defp reject_indirect_commit_bypasses(errors, graph, _entry, reachable, dominators) do
+  defp reject_indirect_commit_bypasses(errors, graph, reachable, dominators) do
     guarded =
       MapSet.new(~w(
           route_commit_interaction

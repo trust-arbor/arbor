@@ -477,6 +477,114 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            end)
   end
 
+  test "security regression: canonical approval deny and rework graph passes public compiler",
+       ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    assert :ok =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+  end
+
+  test "security regression: direct approval deny to terminal bypass fails closed", ctx do
+    bypassed =
+      inject_edge(
+        ctx.template_source,
+        "status_approval_denied -> close_worker",
+        "status_approval_denied -> done [condition=\"context.bypass_cleanup=true\"]"
+      )
+
+    assert_semantic_error(
+      compile(plan!(), ctx, bypassed),
+      "all_path_violation",
+      "approval_denied_cleanup"
+    )
+  end
+
+  test "security regression: one good and one bad approval deny branch fails closed", ctx do
+    bypassed =
+      inject_edge(
+        ctx.template_source,
+        "status_approval_denied -> close_worker",
+        "status_approval_denied -> prep_release_mode [condition=\"context.bypass_close=true\"]"
+      )
+
+    assert_semantic_error(
+      compile(plan!(), ctx, bypassed),
+      "all_path_violation",
+      "approval_denied_cleanup"
+    )
+  end
+
+  test "security regression: approval deny cycle escape fails closed", ctx do
+    bypassed =
+      inject_edge(
+        ctx.template_source,
+        "status_approval_denied -> close_worker",
+        "status_approval_denied -> status_approval_denied [condition=\"context.cycle=true\"]"
+      )
+
+    assert_semantic_error(
+      compile(plan!(), ctx, bypassed),
+      "all_path_violation",
+      "approval_denied_cleanup"
+    )
+  end
+
+  test "security regression: operator rework cannot bypass category and total counters", ctx do
+    bypassed =
+      inject_edge(
+        ctx.template_source,
+        "hoist_approval_note_rework -> check_operator_rework_category_budget",
+        "hoist_approval_note_rework -> inc_operator_total_rework_count [condition=\"context.bypass_operator_budget=true\"]"
+      )
+
+    assert_semantic_error(
+      compile(plan!(), ctx, bypassed),
+      "dominance_violation",
+      "operator_rework_category_budget"
+    )
+  end
+
+  test "security regression: operator rework requires a fresh commit approval gate", ctx do
+    bypassed =
+      inject_edge(
+        ctx.template_source,
+        "build_operator_rework_prompt -> reset_worker_turn_protocol_retry_count",
+        "build_operator_rework_prompt -> hoist_commit_hash [condition=\"context.bypass_fresh_gate=true\"]"
+      )
+
+    assert_semantic_error(
+      compile(plan!(), ctx, bypassed),
+      "dominance_violation",
+      "fresh_reviewed_commit_gate"
+    )
+  end
+
+  test "security regression: malformed approval edge fails closed in public preflight", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    malformed =
+      add_edge(
+        graph,
+        "status_approval_denied",
+        "missing_cleanup_node",
+        "context.malformed=true"
+      )
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(malformed, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert Enum.any?(errors, &(&1["code"] == "malformed_approval_edge"))
+  end
+
   test "adversarial: authority override attribute fails closed", ctx do
     assert {:ok, compilation} = compile(plan!(), ctx)
     graph = compiled_graph!(compilation.dot_source)
@@ -772,6 +880,22 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
     }
 
     %{graph | edges: [edge | graph.edges], adjacency: %{}, reverse_adjacency: %{}}
+  end
+
+  defp inject_edge(source, existing_edge, injected_edge) do
+    replacement = existing_edge <> "\n  " <> injected_edge
+    mutated = String.replace(source, existing_edge, replacement, global: false)
+    refute mutated == source
+    mutated
+  end
+
+  defp assert_semantic_error(result, code, kind) do
+    assert {:error, {:semantic_preflight_failed, errors}} = result
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == code and error["detail"]["kind"] == kind
+           end),
+           "expected #{code}/#{kind}, got: #{inspect(errors)}"
   end
 
   defp edge_target(graph, from, condition) do
