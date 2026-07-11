@@ -30,10 +30,9 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
      public_key: identity.public_key}
   end
 
-  describe "open_signing_authority/2 + sign_with_authority/2" do
+  describe "open_signing_authority/1 + sign_with_authority/2" do
     test "signs payload and verifies via SignedRequest path", ctx do
-      assert {:ok, authority} =
-               Security.open_signing_authority(ctx.agent_id, owner: self(), purpose: :session)
+      assert {:ok, authority} = open_authority(ctx, purpose: :session)
 
       assert %SigningAuthority{} = authority
       assert authority.principal_id == ctx.agent_id
@@ -50,8 +49,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     end
 
     test "derive_secret_with_authority is domain-separated and non-raw", ctx do
-      {:ok, authority} =
-        Security.open_signing_authority(ctx.agent_id, owner: self(), purpose: :session)
+      {:ok, authority} = open_authority(ctx, purpose: :session)
 
       assert {:ok, secret_a} = Security.derive_secret_with_authority(authority, :capability_mac)
       assert {:ok, secret_b} = Security.derive_secret_with_authority(authority, "session_binding")
@@ -71,6 +69,182 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
       assert {:error, :invalid_purpose} =
                Security.derive_secret_with_authority(authority, "")
+
+      assert {:error, :invalid_purpose} =
+               Security.derive_secret_with_authority(authority, "   ")
+
+      assert {:error, :invalid_purpose} =
+               Security.derive_secret_with_authority(authority, true)
+    end
+  end
+
+  describe "security regression: acquisition requires possession proof" do
+    test "security regression: possession of only an agent_id cannot acquire a usable authority",
+         ctx do
+      # Historical deputy API accepted agent_id + owner/purpose without key material.
+      # Acquisition invariant: agent_id alone must never yield a usable bearer lease.
+      agent_id_only_attempts = [
+        fn -> Security.open_signing_authority(ctx.agent_id) end,
+        fn ->
+          Security.open_signing_authority(ctx.agent_id, owner: self(), purpose: :session)
+        end,
+        fn -> Security.open_signing_authority(ctx.agent_id, purpose: :session) end,
+        fn -> Security.open_signing_authority(ctx.agent_id, []) end
+      ]
+
+      Enum.each(agent_id_only_attempts, fn attempt ->
+        result =
+          try do
+            attempt.()
+          rescue
+            FunctionClauseError -> {:error, :possession_proof_required}
+            UndefinedFunctionError -> {:error, :possession_proof_required}
+          end
+
+        case result do
+          {:ok, %SigningAuthority{} = authority} ->
+            # Even if an authority struct were returned, it must not be usable.
+            sign_result = Security.sign_with_authority(authority, "agent-id-only-attack")
+
+            flunk(
+              "agent_id-only acquisition produced usable authority: " <>
+                "open=#{inspect(result)} sign=#{inspect(sign_result)}"
+            )
+
+          {:ok, other} ->
+            flunk("agent_id-only acquisition unexpectedly succeeded: #{inspect(other)}")
+
+          {:error, _reason} ->
+            :ok
+
+          other ->
+            flunk("unexpected agent_id-only result: #{inspect(other)}")
+        end
+      end)
+
+      # Positive control: possession proof still opens a usable authority.
+      assert {:ok, authority} = open_authority(ctx, purpose: :session)
+      assert {:ok, %SignedRequest{}} = Security.sign_with_authority(authority, "legitimate")
+    end
+
+    test "invalid signature and wrong principal fail closed", ctx do
+      {:ok, other} = Identity.generate(name: "other-principal")
+      public_other = Identity.public_only(other)
+      :ok = Security.register_identity(public_other)
+      :ok = Security.store_signing_key(other.agent_id, other.private_key)
+
+      on_exit(fn ->
+        _ = Security.delete_signing_key(other.agent_id)
+        _ = Security.deregister_identity(other.agent_id)
+      end)
+
+      # Wrong principal: payload claims ctx.agent_id but is signed by other.
+      bad_payload =
+        SigningAuthorityBroker.acquisition_payload(ctx.agent_id, :session, self())
+
+      assert {:ok, wrong_principal_proof} =
+               SignedRequest.sign(bad_payload, other.agent_id, other.private_key)
+
+      assert {:error, :principal_mismatch} =
+               Security.open_signing_authority(wrong_principal_proof)
+
+      # Invalid signature: well-formed proof then corrupt the signature bytes.
+      assert {:ok, good_proof} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 purpose: :session,
+                 owner: self()
+               )
+
+      corrupted = %{
+        good_proof
+        | signature: :crypto.strong_rand_bytes(byte_size(good_proof.signature))
+      }
+
+      assert {:error, :invalid_signature} = Security.open_signing_authority(corrupted)
+    end
+
+    test "purpose tampering on the bearer reference fails closed for sign/derive/close", ctx do
+      assert {:ok, authority} = open_authority(ctx, purpose: :session)
+
+      tampered = %{authority | purpose: :evil}
+
+      assert {:error, :purpose_mismatch} =
+               Security.sign_with_authority(tampered, "tampered-purpose")
+
+      assert {:error, :purpose_mismatch} =
+               Security.derive_secret_with_authority(tampered, :capability_mac)
+
+      assert {:error, :purpose_mismatch} =
+               Security.close_signing_authority(tampered)
+
+      # Original reference still works.
+      assert {:ok, _} = Security.sign_with_authority(authority, "untampered")
+    end
+
+    test "owner substitution and cross-process proof replay fail closed", ctx do
+      parent = self()
+
+      # Build a proof bound to this test process as owner.
+      assert {:ok, proof_for_parent} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 purpose: :session,
+                 owner: self()
+               )
+
+      # Different process cannot open using a proof bound to the parent.
+      _ =
+        spawn(fn ->
+          result = Security.open_signing_authority(proof_for_parent)
+          send(parent, {:cross_process_open, result})
+        end)
+
+      assert_receive {:cross_process_open, {:error, :owner_mismatch}}, 1_000
+
+      # Parent can still open its own proof (one-shot — use a fresh proof).
+      assert {:ok, proof2} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 purpose: :worker,
+                 owner: self()
+               )
+
+      assert {:ok, authority} = Security.open_signing_authority(proof2)
+      assert {:ok, _} = Security.sign_with_authority(authority, "owner-ok")
+
+      # Proof that names a foreign owner cannot be opened by this process.
+      foreign = spawn(fn -> Process.sleep(:infinity) end)
+
+      assert {:ok, substituted} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 purpose: :session,
+                 owner: foreign
+               )
+
+      assert {:error, :owner_mismatch} = Security.open_signing_authority(substituted)
+
+      Process.exit(foreign, :kill)
+    end
+
+    test "nonce replay of the same acquisition proof fails closed", ctx do
+      assert {:ok, proof} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 purpose: :session,
+                 owner: self()
+               )
+
+      assert {:ok, authority} = Security.open_signing_authority(proof)
+      assert {:ok, _} = Security.sign_with_authority(authority, "first-open")
+
+      assert {:error, :replayed_nonce} = Security.open_signing_authority(proof)
     end
   end
 
@@ -80,9 +254,15 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
       owner =
         spawn(fn ->
-          {:ok, authority} =
-            Security.open_signing_authority(ctx.agent_id, owner: self(), purpose: :worker)
+          {:ok, proof} =
+            Security.build_signing_authority_acquisition_proof(
+              ctx.agent_id,
+              ctx.private_key,
+              purpose: :worker,
+              owner: self()
+            )
 
+          {:ok, authority} = Security.open_signing_authority(proof)
           send(parent, {:authority, authority})
           Process.sleep(:infinity)
         end)
@@ -106,8 +286,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     end
 
     test "explicit close revokes the token", ctx do
-      {:ok, authority} =
-        Security.open_signing_authority(ctx.agent_id, owner: self(), purpose: :session)
+      {:ok, authority} = open_authority(ctx, purpose: :session)
 
       assert :ok = Security.close_signing_authority(authority)
 
@@ -119,8 +298,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     end
 
     test "forged and tampered references fail closed", ctx do
-      {:ok, authority} =
-        Security.open_signing_authority(ctx.agent_id, owner: self(), purpose: :session)
+      {:ok, authority} = open_authority(ctx, purpose: :session)
 
       forged_token = :crypto.strong_rand_bytes(32)
 
@@ -142,8 +320,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     end
 
     test "key deletion fails subsequent sign/derive", ctx do
-      {:ok, authority} =
-        Security.open_signing_authority(ctx.agent_id, owner: self(), purpose: :session)
+      {:ok, authority} = open_authority(ctx, purpose: :session)
 
       assert :ok = Security.delete_signing_key(ctx.agent_id)
 
@@ -155,8 +332,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     end
 
     test "identity suspension and revocation fail closed", ctx do
-      {:ok, authority} =
-        Security.open_signing_authority(ctx.agent_id, owner: self(), purpose: :session)
+      {:ok, authority} = open_authority(ctx, purpose: :session)
 
       assert :ok = Security.suspend_identity(ctx.agent_id, reason: "test suspend")
 
@@ -173,8 +349,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     end
 
     test "broker restart invalidates outstanding references", ctx do
-      {:ok, authority} =
-        Security.open_signing_authority(ctx.agent_id, owner: self(), purpose: :session)
+      {:ok, authority} = open_authority(ctx, purpose: :session)
 
       assert {:ok, _} = Security.sign_with_authority(authority, "before-restart")
 
@@ -186,8 +361,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
                Security.sign_with_authority(authority, "after-restart")
 
       # Fresh open works again
-      assert {:ok, authority2} =
-               Security.open_signing_authority(ctx.agent_id, owner: self(), purpose: :session)
+      assert {:ok, authority2} = open_authority(ctx, purpose: :session)
 
       assert {:ok, _} = Security.sign_with_authority(authority2, "fresh")
     end
@@ -195,8 +369,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
   describe "state hygiene" do
     test "reference and broker state contain no functions or private keys", ctx do
-      {:ok, authority} =
-        Security.open_signing_authority(ctx.agent_id, owner: self(), purpose: :session)
+      {:ok, authority} = open_authority(ctx, purpose: :session)
 
       authority_map = Map.from_struct(authority)
       refute Enum.any?(authority_map, fn {_k, v} -> is_function(v) end)
@@ -209,6 +382,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       Enum.each(snapshot.entries, fn entry ->
         refute entry.has_private_key?
         refute entry.has_function?
+        refute entry.has_proof?
         assert entry.principal_id == ctx.agent_id or is_binary(entry.principal_id)
       end)
 
@@ -221,8 +395,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
   describe "reload-stable named dispatch regression" do
     test "retained reference still signs after facade module purge/reload", ctx do
-      {:ok, authority} =
-        Security.open_signing_authority(ctx.agent_id, owner: self(), purpose: :session)
+      {:ok, authority} = open_authority(ctx, purpose: :session)
 
       # Prove this is not a closure — named dispatch only.
       refute is_function(authority)
@@ -256,27 +429,117 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     end
   end
 
-  describe "open fail-closed" do
+  describe "open fail-closed and facade invalid input" do
     test "rejects open when identity missing" do
       missing = "agent_" <> String.duplicate("ff", 32)
+      {_pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
 
-      assert {:error, :identity_not_found} =
-               Security.open_signing_authority(missing, owner: self(), purpose: :session)
+      assert {:ok, proof} =
+               Security.build_signing_authority_acquisition_proof(
+                 missing,
+                 priv,
+                 purpose: :session,
+                 owner: self()
+               )
+
+      # Unknown agent fails at verification (public key lookup).
+      assert {:error, :unknown_agent} = Security.open_signing_authority(proof)
     end
 
     test "rejects open when signing key missing", ctx do
       :ok = Security.delete_signing_key(ctx.agent_id)
 
-      assert {:error, :no_signing_key} =
-               Security.open_signing_authority(ctx.agent_id, owner: self(), purpose: :session)
+      assert {:ok, proof} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 purpose: :session,
+                 owner: self()
+               )
+
+      assert {:error, :no_signing_key} = Security.open_signing_authority(proof)
     end
 
-    test "rejects missing owner/purpose opts", ctx do
-      assert {:error, :invalid_owner} =
-               Security.open_signing_authority(ctx.agent_id, purpose: :session)
+    test "rejects missing purpose and invalid purpose values on proof generation", ctx do
+      assert {:error, :invalid_purpose} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 owner: self()
+               )
 
       assert {:error, :invalid_purpose} =
-               Security.open_signing_authority(ctx.agent_id, owner: self())
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 purpose: "",
+                 owner: self()
+               )
+
+      assert {:error, :invalid_purpose} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 purpose: "   ",
+                 owner: self()
+               )
+
+      assert {:error, :invalid_purpose} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 purpose: true,
+                 owner: self()
+               )
+
+      assert {:error, :invalid_purpose} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 purpose: false,
+                 owner: self()
+               )
+
+      # Map opts path rejects blank/boolean purpose consistently.
+      assert {:error, :invalid_purpose} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 %{"purpose" => "\t", "owner" => self()}
+               )
+
+      assert {:error, :invalid_purpose} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 %{purpose: nil}
+               )
+
+      assert {:error, :invalid_owner} =
+               Security.build_signing_authority_acquisition_proof(
+                 ctx.agent_id,
+                 ctx.private_key,
+                 purpose: :session,
+                 owner: "not-a-pid"
+               )
+
+      assert {:error, :invalid_principal_id} =
+               Security.build_signing_authority_acquisition_proof(
+                 "human_not_agent",
+                 ctx.private_key,
+                 purpose: :session
+               )
+    end
+
+    test "rejects non-proof open arguments", ctx do
+      assert {:error, :possession_proof_required} =
+               Security.open_signing_authority(ctx.agent_id)
+
+      assert {:error, :possession_proof_required} =
+               Security.open_signing_authority(%{agent_id: ctx.agent_id})
+
+      assert {:error, :possession_proof_required} =
+               Security.open_signing_authority(nil)
     end
   end
 
@@ -291,6 +554,20 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
+
+  defp open_authority(ctx, opts) do
+    purpose = Keyword.fetch!(opts, :purpose)
+
+    with {:ok, proof} <-
+           Security.build_signing_authority_acquisition_proof(
+             ctx.agent_id,
+             ctx.private_key,
+             purpose: purpose,
+             owner: self()
+           ) do
+      Security.open_signing_authority(proof)
+    end
+  end
 
   defp ensure_broker_started do
     case Process.whereis(SigningAuthorityBroker) do

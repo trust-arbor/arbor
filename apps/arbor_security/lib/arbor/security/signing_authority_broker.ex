@@ -11,9 +11,13 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   ## Security invariants
 
+  - Acquisition requires a one-shot `SignedRequest` possession proof (not agent_id alone)
   - Never stores a long-lived anonymous signer function
   - Never retains a decrypted persistent private key in GenServer state
+  - Never retains acquisition proofs, MFA, modules, or raw keys in broker state
   - Loads/decrypts the key inside each sign/derive operation, uses it, drops it
+  - Owner is the GenServer caller; proof must bind that same owner
+  - Principal and purpose on the bearer reference are rebound on every use
   - Owner DOWN and explicit close revoke the token
   - Broker restart invalidates all outstanding references (in-memory only)
 
@@ -27,12 +31,14 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Security.Crypto
   alias Arbor.Security.Identity.Registry
+  alias Arbor.Security.Identity.Verifier
   alias Arbor.Security.SigningKeyStore
 
   require Logger
 
   @token_bytes 32
   @derive_domain_prefix "arbor.signing_authority.v1/"
+  @acquisition_v1 "arbor.signing_authority.acquire.v1"
 
   @type open_purpose :: atom() | String.t()
   @type derive_purpose :: atom() | String.t()
@@ -46,6 +52,49 @@ defmodule Arbor.Security.SigningAuthorityBroker do
         }
 
   # ---------------------------------------------------------------------------
+  # Acquisition payload (canonical, pure)
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Build the canonical acquisition payload bound into a one-shot SignedRequest.
+
+  Binds principal, purpose, and intended owner process. The broker re-checks
+  the owner against the GenServer caller at open time.
+  """
+  @spec acquisition_payload(String.t(), open_purpose(), pid()) :: binary()
+  def acquisition_payload(principal_id, purpose, owner_pid)
+      when is_binary(principal_id) and is_pid(owner_pid) do
+    purpose_bin = :erlang.term_to_binary(purpose)
+    owner_bin = :erlang.term_to_binary(owner_pid)
+
+    @acquisition_v1 <>
+      <<byte_size(principal_id)::32, principal_id::binary>> <>
+      <<byte_size(purpose_bin)::32, purpose_bin::binary>> <>
+      <<byte_size(owner_bin)::32, owner_bin::binary>>
+  end
+
+  @doc false
+  @spec parse_acquisition_payload(binary()) ::
+          {:ok, %{principal_id: String.t(), purpose: open_purpose(), owner_pid: pid()}}
+          | {:error, :invalid_acquisition_proof}
+  def parse_acquisition_payload(<<@acquisition_v1, rest::binary>>) do
+    with <<p_len::32, principal_id::binary-size(p_len), rest::binary>> <- rest,
+         <<u_len::32, purpose_bin::binary-size(u_len), rest::binary>> <- rest,
+         <<o_len::32, owner_bin::binary-size(o_len)>> <- rest,
+         true <- p_len > 0 and u_len > 0 and o_len > 0,
+         {:ok, purpose} <- safe_term(purpose_bin),
+         {:ok, owner_pid} when is_pid(owner_pid) <- safe_term(owner_bin),
+         :ok <- validate_open_purpose(purpose),
+         true <- is_binary(principal_id) and principal_id != "" do
+      {:ok, %{principal_id: principal_id, purpose: purpose, owner_pid: owner_pid}}
+    else
+      _ -> {:error, :invalid_acquisition_proof}
+    end
+  end
+
+  def parse_acquisition_payload(_), do: {:error, :invalid_acquisition_proof}
+
+  # ---------------------------------------------------------------------------
   # Client API
   # ---------------------------------------------------------------------------
 
@@ -56,43 +105,41 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   @doc """
-  Open a signing authority for `principal_id` owned by `owner_pid`.
+  Open a signing authority after verifying a one-shot SignedRequest possession proof.
 
-  Fails closed unless the identity is active and SigningKeyStore still has
-  the principal's key. The decrypted key is not retained in broker state.
+  Owner is always the GenServer caller — not caller-supplied metadata. The proof
+  payload must bind the same owner process, principal, and purpose.
   """
-  @spec open(String.t(), pid(), open_purpose()) ::
+  @spec open(SignedRequest.t()) ::
           {:ok, SigningAuthority.t()}
           | {:error,
-             :invalid_principal_id
-             | :invalid_owner
+             :invalid_acquisition_proof
              | :invalid_purpose
+             | :owner_mismatch
+             | :principal_mismatch
              | :identity_not_active
              | :identity_suspended
              | :identity_revoked
              | :identity_not_found
              | :no_signing_key
              | :broker_unavailable
+             | :invalid_signature
+             | :replayed_nonce
+             | :expired_timestamp
+             | :unknown_agent
              | term()}
-  def open(principal_id, owner_pid, purpose)
-      when is_binary(principal_id) and is_pid(owner_pid) do
-    call({:open, principal_id, owner_pid, purpose})
+  def open(%SignedRequest{} = proof) do
+    call({:open, proof})
   end
 
-  def open(principal_id, _owner_pid, _purpose) when not is_binary(principal_id) do
-    {:error, :invalid_principal_id}
-  end
-
-  def open(_principal_id, owner_pid, _purpose) when not is_pid(owner_pid) do
-    {:error, :invalid_owner}
-  end
+  def open(_), do: {:error, :invalid_acquisition_proof}
 
   @doc """
   Sign `payload` with the authority's principal key.
 
-  Re-validates existence, principal binding, owner liveness, identity status,
-  and key presence on every call. Loads the key for the duration of the call
-  only.
+  Re-validates existence, principal binding, purpose binding, owner liveness,
+  identity status, and key presence on every call. Loads the key for the
+  duration of the call only.
   """
   @spec sign(SigningAuthority.t(), binary()) ::
           {:ok, SignedRequest.t()}
@@ -100,6 +147,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
              :invalid_authority
              | :authority_not_found
              | :principal_mismatch
+             | :purpose_mismatch
              | :owner_dead
              | :identity_not_active
              | :identity_suspended
@@ -130,6 +178,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
              :invalid_authority
              | :authority_not_found
              | :principal_mismatch
+             | :purpose_mismatch
              | :owner_dead
              | :identity_not_active
              | :identity_suspended
@@ -149,7 +198,14 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   Explicitly revoke an authority token.
   """
   @spec close(SigningAuthority.t()) ::
-          :ok | {:error, :invalid_authority | :authority_not_found | :broker_unavailable | term()}
+          :ok
+          | {:error,
+             :invalid_authority
+             | :authority_not_found
+             | :principal_mismatch
+             | :purpose_mismatch
+             | :broker_unavailable
+             | term()}
   def close(%SigningAuthority{} = authority) do
     call({:close, authority})
   end
@@ -176,11 +232,11 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   @impl true
   def init(_opts) do
-    Process.flag(:trap_exit, true)
-
+    # Owner monitoring uses Process.monitor/1 only — no trap_exit required.
+    # Trapping exits would delay supervisor shutdown for linked children.
     {:ok,
      %{
-       # token => entry (never includes private keys or functions)
+       # token => entry (never includes private keys, functions, proofs, or MFA)
        authorities: %{},
        # monitor_ref => token
        monitors: %{}
@@ -188,48 +244,56 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   @impl true
-  def handle_call({:open, principal_id, owner_pid, purpose}, _from, state) do
-    with :ok <- validate_open_purpose(purpose),
-         :ok <- ensure_identity_active(principal_id),
-         :ok <- ensure_signing_key_present(principal_id) do
-      token = :crypto.strong_rand_bytes(@token_bytes)
-      owner_ref = Process.monitor(owner_pid)
+  def handle_call({:open, %SignedRequest{} = proof}, {caller_pid, _tag}, state) do
+    reply_and_state =
+      with {:ok, verified_agent_id} <- Verifier.verify(proof),
+           {:ok, bound} <- parse_acquisition_payload(proof.payload),
+           :ok <- match_principal(verified_agent_id, bound.principal_id, proof.agent_id),
+           :ok <- match_owner(bound.owner_pid, caller_pid),
+           :ok <- validate_open_purpose(bound.purpose),
+           :ok <- ensure_identity_active(bound.principal_id),
+           :ok <- ensure_signing_key_present(bound.principal_id) do
+        token = :crypto.strong_rand_bytes(@token_bytes)
+        owner_ref = Process.monitor(caller_pid)
 
-      entry = %{
-        principal_id: principal_id,
-        purpose: purpose,
-        owner_pid: owner_pid,
-        owner_ref: owner_ref,
-        opened_at: DateTime.utc_now()
-      }
+        entry = %{
+          principal_id: bound.principal_id,
+          purpose: bound.purpose,
+          owner_pid: caller_pid,
+          owner_ref: owner_ref,
+          opened_at: DateTime.utc_now()
+        }
 
-      state =
-        state
-        |> put_in([:authorities, token], entry)
-        |> put_in([:monitors, owner_ref], token)
+        state =
+          state
+          |> put_in([:authorities, token], entry)
+          |> put_in([:monitors, owner_ref], token)
 
-      case SigningAuthority.new(
-             token: token,
-             principal_id: principal_id,
-             purpose: purpose
-           ) do
-        {:ok, authority} ->
-          {:reply, {:ok, authority}, state}
+        case SigningAuthority.new(
+               token: token,
+               principal_id: bound.principal_id,
+               purpose: bound.purpose
+             ) do
+          {:ok, authority} ->
+            {{:ok, authority}, state}
 
-        {:error, reason} ->
-          Process.demonitor(owner_ref, [:flush])
+          {:error, reason} ->
+            Process.demonitor(owner_ref, [:flush])
 
-          state =
-            state
-            |> update_in([:authorities], &Map.delete(&1, token))
-            |> update_in([:monitors], &Map.delete(&1, owner_ref))
+            state =
+              state
+              |> update_in([:authorities], &Map.delete(&1, token))
+              |> update_in([:monitors], &Map.delete(&1, owner_ref))
 
-          {:reply, {:error, reason}, state}
+            {{:error, reason}, state}
+        end
+      else
+        {:error, _} = error ->
+          {error, state}
       end
-    else
-      {:error, _} = error ->
-        {:reply, error, state}
-    end
+
+    {reply, new_state} = reply_and_state
+    {:reply, reply, new_state}
   end
 
   def handle_call({:sign, authority, payload}, _from, state) do
@@ -258,10 +322,15 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   def handle_call({:close, authority}, _from, state) do
     case Map.fetch(state.authorities, authority.token) do
       {:ok, entry} ->
-        if entry.principal_id == authority.principal_id do
-          {:reply, :ok, revoke_token(state, authority.token, entry)}
-        else
-          {:reply, {:error, :principal_mismatch}, state}
+        cond do
+          entry.principal_id != authority.principal_id ->
+            {:reply, {:error, :principal_mismatch}, state}
+
+          entry.purpose != authority.purpose ->
+            {:reply, {:error, :purpose_mismatch}, state}
+
+          true ->
+            {:reply, :ok, revoke_token(state, authority.token, entry)}
         end
 
       :error ->
@@ -283,7 +352,8 @@ defmodule Arbor.Security.SigningAuthorityBroker do
             owner_alive?: Process.alive?(entry.owner_pid),
             opened_at: entry.opened_at,
             has_private_key?: Map.has_key?(entry, :private_key),
-            has_function?: Enum.any?(entry, fn {_k, v} -> is_function(v) end)
+            has_function?: Enum.any?(entry, fn {_k, v} -> is_function(v) end),
+            has_proof?: Map.has_key?(entry, :proof) or Map.has_key?(entry, :signed_request)
           }
         end)
     }
@@ -328,6 +398,9 @@ defmodule Arbor.Security.SigningAuthorityBroker do
           entry.principal_id != authority.principal_id ->
             {:error, :principal_mismatch}
 
+          entry.purpose != authority.purpose ->
+            {:error, :purpose_mismatch}
+
           not Process.alive?(entry.owner_pid) ->
             {:error, :owner_dead}
 
@@ -336,6 +409,22 @@ defmodule Arbor.Security.SigningAuthorityBroker do
               {:ok, entry}
             end
         end
+    end
+  end
+
+  defp match_principal(verified_agent_id, bound_principal_id, proof_agent_id) do
+    if verified_agent_id == bound_principal_id and proof_agent_id == bound_principal_id do
+      :ok
+    else
+      {:error, :principal_mismatch}
+    end
+  end
+
+  defp match_owner(bound_owner, caller_pid) do
+    if bound_owner == caller_pid do
+      :ok
+    else
+      {:error, :owner_mismatch}
     end
   end
 
@@ -396,27 +485,51 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     |> update_in([:monitors], &Map.delete(&1, entry.owner_ref))
   end
 
+  defp validate_open_purpose(purpose) when is_boolean(purpose), do: {:error, :invalid_purpose}
+
   defp validate_open_purpose(purpose) when is_atom(purpose) and not is_nil(purpose), do: :ok
 
-  defp validate_open_purpose(purpose) when is_binary(purpose) and byte_size(purpose) > 0, do: :ok
+  defp validate_open_purpose(purpose) when is_binary(purpose) do
+    if String.trim(purpose) == "" do
+      {:error, :invalid_purpose}
+    else
+      :ok
+    end
+  end
 
   defp validate_open_purpose(_), do: {:error, :invalid_purpose}
+
+  defp derive_info(purpose) when is_boolean(purpose), do: {:error, :invalid_purpose}
 
   defp derive_info(purpose) when is_atom(purpose) and not is_nil(purpose) do
     {:ok, @derive_domain_prefix <> Atom.to_string(purpose)}
   end
 
-  defp derive_info(purpose) when is_binary(purpose) and byte_size(purpose) > 0 do
-    # Reject attempts to smuggle an undomained / raw derivation path.
-    if String.starts_with?(purpose, @derive_domain_prefix) or
-         String.contains?(purpose, "..") or
-         purpose == "raw" or
-         purpose == "private_key" do
-      {:error, :invalid_purpose}
-    else
-      {:ok, @derive_domain_prefix <> purpose}
+  defp derive_info(purpose) when is_binary(purpose) do
+    cond do
+      String.trim(purpose) == "" ->
+        {:error, :invalid_purpose}
+
+      String.starts_with?(purpose, @derive_domain_prefix) or
+        String.contains?(purpose, "..") or
+        purpose == "raw" or
+          purpose == "private_key" ->
+        {:error, :invalid_purpose}
+
+      true ->
+        {:ok, @derive_domain_prefix <> purpose}
     end
   end
 
   defp derive_info(_), do: {:error, :invalid_purpose}
+
+  defp safe_term(bin) when is_binary(bin) do
+    try do
+      {:ok, :erlang.binary_to_term(bin, [:safe])}
+    rescue
+      ArgumentError -> {:error, :invalid_acquisition_proof}
+    end
+  end
+
+  defp safe_term(_), do: {:error, :invalid_acquisition_proof}
 end

@@ -63,7 +63,7 @@ defmodule Arbor.Contracts.Security.SigningAuthorityTest do
                )
     end
 
-    test "rejects empty or nil purpose" do
+    test "rejects empty, blank/whitespace, boolean, or nil purpose" do
       assert {:error, :invalid_purpose} =
                SigningAuthority.new(
                  token: @valid_token,
@@ -75,8 +75,54 @@ defmodule Arbor.Contracts.Security.SigningAuthorityTest do
                SigningAuthority.new(
                  token: @valid_token,
                  principal_id: @valid_principal,
+                 purpose: "   "
+               )
+
+      assert {:error, :invalid_purpose} =
+               SigningAuthority.new(
+                 token: @valid_token,
+                 principal_id: @valid_principal,
+                 purpose: "\t\n"
+               )
+
+      assert {:error, :invalid_purpose} =
+               SigningAuthority.new(
+                 token: @valid_token,
+                 principal_id: @valid_principal,
+                 purpose: true
+               )
+
+      assert {:error, :invalid_purpose} =
+               SigningAuthority.new(
+                 token: @valid_token,
+                 principal_id: @valid_principal,
+                 purpose: false
+               )
+
+      assert {:error, :invalid_purpose} =
+               SigningAuthority.new(
+                 token: @valid_token,
+                 principal_id: @valid_principal,
                  purpose: nil
                )
+    end
+
+    test "accepts map attrs and rejects blank purpose via map path" do
+      assert {:ok, authority} =
+               SigningAuthority.new(%{
+                 "token" => @valid_token,
+                 "principal_id" => @valid_principal,
+                 "purpose" => "coding_task"
+               })
+
+      assert authority.purpose == "coding_task"
+
+      assert {:error, :invalid_purpose} =
+               SigningAuthority.new(%{
+                 token: @valid_token,
+                 principal_id: @valid_principal,
+                 purpose: "  "
+               })
     end
   end
 

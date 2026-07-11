@@ -16,11 +16,18 @@ defmodule Arbor.Contracts.Security.SigningAuthority do
 
   ## Usage
 
-      {:ok, authority} = Arbor.Security.open_signing_authority(agent_id,
-        owner: self(),
-        purpose: :session
-      )
+  Acquisition requires a one-shot SignedRequest possession proof — knowing an
+  `agent_id` alone is never enough:
 
+      {:ok, proof} =
+        Arbor.Security.build_signing_authority_acquisition_proof(
+          agent_id,
+          private_key,
+          purpose: :session,
+          owner: self()
+        )
+
+      {:ok, authority} = Arbor.Security.open_signing_authority(proof)
       {:ok, signed} = Arbor.Security.sign_with_authority(authority, payload)
   """
 
@@ -44,15 +51,16 @@ defmodule Arbor.Contracts.Security.SigningAuthority do
   @doc """
   Construct a signing-authority reference after validation.
 
-  Prefer `Arbor.Security.open_signing_authority/2` for production use — this
-  factory only validates shape for callers that already hold broker-issued
-  fields (or tests constructing fixtures).
+  Prefer `Arbor.Security.open_signing_authority/1` (possession proof) for
+  production use — this factory only validates shape for callers that already
+  hold broker-issued fields (or tests constructing fixtures).
 
   ## Options
 
   - `:token` (required) — unguessable bearer token (≥ 16 bytes)
   - `:principal_id` (required) — agent id the authority binds to
-  - `:purpose` (required) — open-time purpose atom or non-empty string
+  - `:purpose` (required) — open-time purpose atom or non-blank string
+    (booleans and blank/whitespace-only strings are rejected)
   """
   @spec new(keyword() | map()) :: {:ok, t()} | {:error, term()}
   def new(attrs) when is_list(attrs) or is_map(attrs) do
@@ -108,9 +116,18 @@ defmodule Arbor.Contracts.Security.SigningAuthority do
 
   defp validate_principal_id(_), do: {:error, :invalid_principal_id}
 
+  # Booleans are atoms in Elixir — reject them before the generic atom clause.
+  defp validate_purpose(purpose) when is_boolean(purpose), do: {:error, :invalid_purpose}
+
   defp validate_purpose(purpose) when is_atom(purpose) and not is_nil(purpose), do: :ok
 
-  defp validate_purpose(purpose) when is_binary(purpose) and byte_size(purpose) > 0, do: :ok
+  defp validate_purpose(purpose) when is_binary(purpose) do
+    if String.trim(purpose) == "" do
+      {:error, :invalid_purpose}
+    else
+      :ok
+    end
+  end
 
   defp validate_purpose(_), do: {:error, :invalid_purpose}
 end

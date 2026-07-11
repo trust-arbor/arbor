@@ -999,7 +999,8 @@ defmodule Arbor.Security do
 
   ## Legacy migration surface
 
-  Prefer `open_signing_authority/2` + `sign_with_authority/2` for new code.
+  Prefer `build_signing_authority_acquisition_proof/3` +
+  `open_signing_authority/1` + `sign_with_authority/2` for new code.
   Closures over private keys do not survive module reload and keep decrypted
   key material in caller process state. This function is retained for
   compatibility with callers not yet migrated (Engine, Session, OIDC, CLI,
@@ -1026,42 +1027,110 @@ defmodule Arbor.Security do
   # ===========================================================================
 
   @doc """
-  Open a reload-stable signing authority for an agent.
+  Transitional helper: build a one-shot SignedRequest possession proof for
+  opening a signing authority.
 
-  Returns an opaque `SigningAuthority` reference (broker bearer token +
-  principal binding). The broker monitors `owner:` and revokes the token on
-  process death. Decrypted private keys are never returned or retained in
-  broker state.
+  Callers that already hold the principal private key (pre-migration
+  surfaces) prove cryptographic possession without the broker retaining the
+  key, a signer callback, MFA, or the proof itself. The proof payload is a
+  fixed canonical acquisition binding of principal, purpose, and owner
+  process. It is single-use via NonceCache (freshness + replay defense run
+  through the normal Security SignedRequest verifier).
 
   ## Options
 
-  - `:owner` (required) — PID that owns this authority (usually `self()`)
-  - `:purpose` (required) — open-time purpose label (`:session`, `:heartbeat`, …)
+  - `:purpose` (required) — open-time purpose label (`:session`, `:heartbeat`, …).
+    Booleans and blank/whitespace-only values are rejected.
+  - `:owner` (optional, default `self()`) — process that will call
+    `open_signing_authority/1`. Must be the same PID that later opens; the
+    broker infers owner from the GenServer caller and rejects substitution.
 
   ## Example
 
-      {:ok, authority} =
-        Arbor.Security.open_signing_authority(agent_id, owner: self(), purpose: :session)
+      {:ok, proof} =
+        Arbor.Security.build_signing_authority_acquisition_proof(
+          agent_id,
+          private_key,
+          purpose: :session,
+          owner: self()
+        )
 
+      {:ok, authority} = Arbor.Security.open_signing_authority(proof)
+  """
+  @spec build_signing_authority_acquisition_proof(String.t(), binary(), keyword() | map()) ::
+          {:ok, SignedRequest.t()} | {:error, term()}
+  def build_signing_authority_acquisition_proof(agent_id, private_key, opts \\ [])
+
+  def build_signing_authority_acquisition_proof(agent_id, private_key, opts)
+      when is_binary(agent_id) and is_binary(private_key) and
+             (is_list(opts) or is_map(opts)) do
+    with :ok <- validate_principal_id_for_authority(agent_id),
+         :ok <- validate_private_key_for_authority(private_key),
+         {:ok, purpose} <- fetch_required_attr(opts, :purpose, :invalid_purpose),
+         :ok <- validate_authority_purpose(purpose),
+         {:ok, owner} <- fetch_owner_attr(opts),
+         :ok <- validate_owner_pid(owner) do
+      payload = SigningAuthorityBroker.acquisition_payload(agent_id, purpose, owner)
+      SignedRequest.sign(payload, agent_id, private_key)
+    end
+  end
+
+  def build_signing_authority_acquisition_proof(_agent_id, _private_key, _opts) do
+    {:error, :invalid_acquisition_proof_args}
+  end
+
+  @doc """
+  Open a reload-stable signing authority after verifying a possession proof.
+
+  **Acquisition invariant:** this API does not accept an `agent_id` alone.
+  Any in-process caller that only knows a stored identity's id must not be
+  able to obtain a usable bearer lease. Callers must present a one-shot
+  `SignedRequest` produced by `build_signing_authority_acquisition_proof/3`
+  (or an equivalent signature over the same canonical payload).
+
+  Returns an opaque `SigningAuthority` reference (broker bearer token +
+  principal/purpose binding). The broker monitors the GenServer caller as
+  owner and revokes the token on process death. Decrypted private keys and
+  the acquisition proof are never retained in broker state.
+
+  ## Example
+
+      {:ok, proof} =
+        Arbor.Security.build_signing_authority_acquisition_proof(
+          agent_id,
+          private_key,
+          purpose: :session
+        )
+
+      {:ok, authority} = Arbor.Security.open_signing_authority(proof)
       {:ok, signed} = Arbor.Security.sign_with_authority(authority, "arbor://fs/read")
   """
-  @spec open_signing_authority(String.t(), keyword()) ::
+  @spec open_signing_authority(SignedRequest.t()) ::
           {:ok, SigningAuthority.t()} | {:error, term()}
-  def open_signing_authority(agent_id, opts \\ [])
-      when is_binary(agent_id) and is_list(opts) do
-    with {:ok, owner} <- fetch_required_opt(opts, :owner, :invalid_owner),
-         {:ok, purpose} <- fetch_required_opt(opts, :purpose, :invalid_purpose),
-         :ok <- validate_owner_pid(owner) do
-      SigningAuthorityBroker.open(agent_id, owner, purpose)
-    end
+  def open_signing_authority(%SignedRequest{} = proof) do
+    SigningAuthorityBroker.open(proof)
+  end
+
+  # Fail closed: agent_id alone (with or without opts) is never sufficient.
+  # Kept as an explicit clause so callers get a clear security error rather
+  # than a FunctionClauseError, without re-introducing the deputy open path.
+  @spec open_signing_authority(term()) :: {:error, :possession_proof_required}
+  def open_signing_authority(_agent_id_or_other) do
+    {:error, :possession_proof_required}
+  end
+
+  @doc false
+  @spec open_signing_authority(term(), term()) :: {:error, :possession_proof_required}
+  def open_signing_authority(_agent_id, _opts) do
+    {:error, :possession_proof_required}
   end
 
   @doc """
   Sign a payload using a previously opened signing authority.
 
-  Fail-closed: forged, closed, owner-dead, suspended/revoked identity, and
-  deleted-key authorities return explicit errors. Uses named dispatch only —
-  safe across hot code reload of this module.
+  Fail-closed: forged, closed, owner-dead, suspended/revoked identity,
+  purpose/principal tampering, and deleted-key authorities return explicit
+  errors. Uses named dispatch only — safe across hot code reload of this module.
   """
   @spec sign_with_authority(SigningAuthority.t(), binary()) ::
           {:ok, SignedRequest.t()} | {:error, term()}
@@ -1098,15 +1167,62 @@ defmodule Arbor.Security do
 
   def close_signing_authority(_), do: {:error, :invalid_authority}
 
-  defp fetch_required_opt(opts, key, error_atom) do
+  defp fetch_required_attr(opts, key, error_atom) when is_list(opts) do
     case Keyword.fetch(opts, key) do
       {:ok, value} when not is_nil(value) -> {:ok, value}
       _ -> {:error, error_atom}
     end
   end
 
+  defp fetch_required_attr(opts, key, error_atom) when is_map(opts) do
+    value = Map.get(opts, key) || Map.get(opts, Atom.to_string(key))
+
+    if is_nil(value), do: {:error, error_atom}, else: {:ok, value}
+  end
+
+  defp fetch_owner_attr(opts) when is_list(opts) do
+    case Keyword.fetch(opts, :owner) do
+      {:ok, owner} -> {:ok, owner}
+      :error -> {:ok, self()}
+    end
+  end
+
+  defp fetch_owner_attr(opts) when is_map(opts) do
+    case Map.fetch(opts, :owner) do
+      {:ok, owner} ->
+        {:ok, owner}
+
+      :error ->
+        case Map.fetch(opts, "owner") do
+          {:ok, owner} -> {:ok, owner}
+          :error -> {:ok, self()}
+        end
+    end
+  end
+
   defp validate_owner_pid(pid) when is_pid(pid), do: :ok
   defp validate_owner_pid(_), do: {:error, :invalid_owner}
+
+  defp validate_principal_id_for_authority(id) when is_binary(id) and byte_size(id) > 0 do
+    if String.starts_with?(id, "agent_"), do: :ok, else: {:error, :invalid_principal_id}
+  end
+
+  defp validate_principal_id_for_authority(_), do: {:error, :invalid_principal_id}
+
+  defp validate_private_key_for_authority(key) when is_binary(key) and byte_size(key) > 0, do: :ok
+  defp validate_private_key_for_authority(_), do: {:error, :invalid_private_key}
+
+  # Booleans are atoms — reject before the generic atom accept.
+  defp validate_authority_purpose(purpose) when is_boolean(purpose),
+    do: {:error, :invalid_purpose}
+
+  defp validate_authority_purpose(purpose) when is_atom(purpose) and not is_nil(purpose), do: :ok
+
+  defp validate_authority_purpose(purpose) when is_binary(purpose) do
+    if String.trim(purpose) == "", do: {:error, :invalid_purpose}, else: :ok
+  end
+
+  defp validate_authority_purpose(_), do: {:error, :invalid_purpose}
 
   # ===========================================================================
   # OIDC Authentication
