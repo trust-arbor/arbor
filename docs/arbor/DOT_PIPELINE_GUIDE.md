@@ -191,6 +191,7 @@ General-purpose computation node. Dispatches by `purpose` attribute. Default pur
 |-----------|---------|-------------|
 | `purpose` | `"llm"` | `llm`, `routing` |
 | `prompt` | _(required for llm)_ | The prompt sent to the LLM |
+| `prompt_is_data` | `"false"` | When true, wraps untrusted prompt data in nonce-delimited prompt fences |
 | `system_prompt` | _(optional)_ | System prompt for the LLM |
 | `llm_provider` | _(from env)_ | Provider name (e.g., `openrouter`, `anthropic`) |
 | `llm_model` | _(from env)_ | Model identifier |
