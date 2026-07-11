@@ -548,7 +548,9 @@ defmodule Arbor.Orchestrator.RecoveryCoordinator do
 
   defp load_graph_for_resume(%Entry{dot_source_path: path}) when is_binary(path) do
     case File.read(path) do
-      {:ok, source} -> Arbor.Orchestrator.parse(source)
+      # Same class as Session parse_dot_file: Engine.run may be authorized and
+      # requires IR-compiled graphs. Public compile/1 also uses DotCache.
+      {:ok, source} -> Arbor.Orchestrator.compile(source)
       {:error, reason} -> {:error, {:dot_file_unavailable, reason}}
     end
   end

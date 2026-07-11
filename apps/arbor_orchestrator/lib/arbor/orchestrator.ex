@@ -417,7 +417,10 @@ defmodule Arbor.Orchestrator do
 
   defp load_graph_for_entry(%{dot_source_path: path}) when is_binary(path) do
     case File.read(path) do
-      {:ok, source} -> parse(source)
+      # Resume feeds this graph into Engine.run/2; authorized resume requires
+      # an IR-compiled graph (RunAuthorization + compiled_graph_hash/1).
+      # compile/1 goes through ensure_graph (DotCache by source hash).
+      {:ok, source} -> compile(source)
       {:error, reason} -> {:error, {:dot_file_unavailable, reason}}
     end
   end

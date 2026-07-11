@@ -507,6 +507,8 @@ defmodule Arbor.Orchestrator.Session.Builders do
       # Session init / reload_dot / HeartbeatService feed this graph into
       # authorized Engine execution, which requires IR-compiled graphs
       # (RunAuthorization + ExecutionManifest.compiled_graph_hash/1).
+      # Public compile/1 uses ensure_graph with DotCache (source-hash keyed),
+      # so stable on-disk DOTs are not re-parsed from scratch every heartbeat.
       Arbor.Orchestrator.compile(source)
     end
   end
