@@ -76,6 +76,28 @@ defmodule Arbor.Shell do
   def max_output_bytes_limit, do: Executor.max_output_bytes_limit()
 
   # ===========================================================================
+  # Public API — Compound shell (CapShell) feature gate
+  # ===========================================================================
+
+  @doc """
+  Whether the prototype compound-shell backend (`Arbor.Shell.CapShell`) is enabled.
+
+  Reads `Application.get_env(:arbor_shell, :compound_shell_enabled)`. **Defaults
+  to `false` (fail-closed)** when the key is absent: CapShell lacks absolute
+  timeout and retained-output bounds that `Arbor.Shell.Executor` already enforces,
+  so authorized compound commands must not route around the bounded single-command
+  path until those resource limits exist.
+
+  Operators may set `config :arbor_shell, compound_shell_enabled: true` to opt
+  into CapShell deliberately. Other libraries (e.g. `Arbor.Actions.Shell`) must
+  call this facade rather than re-reading Application env with their own default.
+  """
+  @spec compound_shell_enabled?() :: boolean()
+  def compound_shell_enabled? do
+    Application.get_env(:arbor_shell, :compound_shell_enabled, false) == true
+  end
+
+  # ===========================================================================
   # Public API — Authorized versions (for agent callers)
   # ===========================================================================
 
@@ -123,10 +145,11 @@ defmodule Arbor.Shell do
   # Compound commands (pipes, &&/||/;, $(…), redirection) — which the
   # single-command sandbox rejects — run through the capability-checked
   # interpreter (Arbor.Shell.CapShell), which cap-checks EVERY command + every
-  # filesystem path. Gated by config (:arbor_shell, :compound_shell_enabled,
-  # default true) for reversibility; with it off, the caller above falls back to
-  # the single-command path (sandbox metacharacter rejection — the prior
-  # behavior, no regression).
+  # filesystem path. Gated by `compound_shell_enabled?/0` (Application config
+  # `:arbor_shell, :compound_shell_enabled`, **default false**): CapShell is an
+  # opt-in prototype until it has absolute timeout + output bounds equivalent to
+  # Executor. With the flag off/absent, the caller above falls back to the
+  # single-command path (sandbox metacharacter rejection).
   #
   # The capability *gate* (gate-1) here cap-checks the first NON-builtin command
   # rather than the literal first token, so a compound that opens with a shell
@@ -182,10 +205,6 @@ defmodule Arbor.Shell do
       {:error, {:parse_error, _msg}} = error ->
         error
     end
-  end
-
-  defp compound_shell_enabled? do
-    Application.get_env(:arbor_shell, :compound_shell_enabled, true)
   end
 
   @doc """

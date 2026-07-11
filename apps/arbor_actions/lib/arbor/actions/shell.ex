@@ -285,10 +285,12 @@ defmodule Arbor.Actions.Shell do
       end
     end
 
-    # Execute after Trust already authorized. Compound commands still go through
-    # CapShell for per-token path/capability checks; simple commands use execute/2.
+    # Execute after Trust already authorized. When the shell facade opts into
+    # CapShell (`Arbor.Shell.compound_shell_enabled?/0`, default false), compound
+    # commands go through CapShell for per-token path/capability checks; otherwise
+    # (and for simple commands) use the bounded Executor via execute/2.
     defp execute_authorized_shell(agent_id, command, opts) do
-      if compound_shell_enabled?() and Arbor.Shell.Sandbox.compound?(command) do
+      if Arbor.Shell.compound_shell_enabled?() and Arbor.Shell.Sandbox.compound?(command) do
         case Arbor.Shell.CapShell.run(agent_id, command, opts) do
           {:ok, %{exit_code: code, stdout: out, stderr: err} = result} ->
             {:ok,
@@ -309,10 +311,6 @@ defmodule Arbor.Actions.Shell do
       else
         Arbor.Shell.execute(command, opts)
       end
-    end
-
-    defp compound_shell_enabled? do
-      Application.get_env(:arbor_shell, :compound_shell_enabled, true)
     end
 
     # LLM-facing boundary: floor tiny/zero timeouts (0, 1, …) to the default.

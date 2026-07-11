@@ -90,37 +90,74 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
     test "a compound command cannot execute an ungranted command via chaining",
          %{agent_id: agent_id} do
-      # The agent holds only `git`. Compound commands are routed to the
-      # capability-checked interpreter (CapShell), so `;`/`&&` no longer
-      # hard-reject — but EVERY command is cap-checked, so chaining to an
-      # ungranted command must not execute it. (Previously this whole string was
-      # rejected by the metacharacter floor; the security invariant — no escape
-      # to an ungranted command — is preserved, now enforced per-command.)
-      grant_shell_capability(agent_id, "arbor://shell/exec/git")
-      target = Path.join(System.tmp_dir!(), "e2e_escape_#{:erlang.unique_integer([:positive])}")
-      File.write!(target, "survive")
+      # With CapShell explicitly enabled, the agent holds only `git`. Compound
+      # commands route to CapShell, so `;`/`&&` no longer hard-reject — but EVERY
+      # command is cap-checked, so chaining to an ungranted command must not
+      # execute it. (With the default-off gate, the whole string is rejected by
+      # the metacharacter floor instead — see the security regression below.)
+      with_compound_shell(true, fn ->
+        grant_shell_capability(agent_id, "arbor://shell/exec/git")
+        target = Path.join(System.tmp_dir!(), "e2e_escape_#{:erlang.unique_integer([:positive])}")
+        File.write!(target, "survive")
 
-      assert {:ok, result} =
-               Arbor.Shell.authorize_and_execute(agent_id, "git --version; rm #{target}")
+        assert {:ok, result} =
+                 Arbor.Shell.authorize_and_execute(agent_id, "git --version; rm #{target}")
 
-      assert File.exists?(target), "ungranted rm chained after git must be blocked"
-      assert result.stderr =~ "not allowed"
-      File.rm(target)
+        assert File.exists?(target), "ungranted rm chained after git must be blocked"
+        assert result.stderr =~ "not allowed"
+        File.rm(target)
+      end)
     end
   end
 
   # ===========================================================================
-  # 1c. Compound command execution (routed to CapShell)
+  # 1c. Compound command execution (CapShell opt-in; default fail-closed)
   # ===========================================================================
 
   describe "compound command execution" do
-    test "a compound command runs when caps cover its commands", %{agent_id: agent_id} do
-      # git granted; echo is a builtin. `&&` is no longer rejected — it routes to
-      # the capability-checked interpreter, which runs both.
-      grant_shell_capability(agent_id, "arbor://shell/exec/git")
+    test "security regression: absent compound_shell_enabled defaults closed (no CapShell)",
+         %{agent_id: agent_id} do
+      # CapShell lacks Executor's absolute timeout + output bounds. When the
+      # config key is absent, authorize_and_execute must use the bounded
+      # single-command path (sandbox metacharacter rejection) and must not run
+      # a delayed side effect that CapShell would allow after a sleep.
+      grant_shell_capability(agent_id, "arbor://shell/exec/**")
 
-      assert {:ok, result} = Arbor.Shell.authorize_and_execute(agent_id, "git --version && echo ok")
-      assert result.stdout =~ "ok"
+      with_compound_shell(:absent, fn ->
+        refute Arbor.Shell.compound_shell_enabled?()
+
+        marker =
+          Path.join(
+            System.tmp_dir!(),
+            "e2e_capshell_closed_#{:erlang.unique_integer([:positive])}"
+          )
+
+        # If CapShell incorrectly ran this, `touch` would fire after sleep.
+        assert {:error, {:shell_metacharacters, _}} =
+                 Arbor.Shell.authorize_and_execute(
+                   agent_id,
+                   "sleep 1; touch #{marker}",
+                   sandbox: :basic
+                 )
+
+        Process.sleep(1_500)
+        refute File.exists?(marker), "delayed compound side effect must not execute"
+      end)
+    end
+
+    test "security regression: explicit compound_shell_enabled true routes to CapShell",
+         %{agent_id: agent_id} do
+      # git granted; echo is a builtin. With the opt-in flag, `&&` routes to the
+      # capability-checked interpreter, which runs both.
+      with_compound_shell(true, fn ->
+        assert Arbor.Shell.compound_shell_enabled?()
+        grant_shell_capability(agent_id, "arbor://shell/exec/git")
+
+        assert {:ok, result} =
+                 Arbor.Shell.authorize_and_execute(agent_id, "git --version && echo ok")
+
+        assert result.stdout =~ "ok"
+      end)
     end
 
     test "a compound starting with a BUILTIN is not rejected for lacking the builtin's cap",
@@ -129,46 +166,31 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       # first NON-builtin command (`git`, which is granted) instead of `cd`, so the
       # compound is not spuriously rejected. (paths override isolates the gate-1
       # fix from the fs `paths` policy, which separately gates `cd`.)
-      grant_shell_capability(agent_id, "arbor://shell/exec/git")
+      with_compound_shell(true, fn ->
+        grant_shell_capability(agent_id, "arbor://shell/exec/git")
 
-      assert {:ok, result} =
-               Arbor.Shell.authorize_and_execute(agent_id, "cd /tmp && git --version",
-                 paths: fn _ -> true end
-               )
+        assert {:ok, result} =
+                 Arbor.Shell.authorize_and_execute(agent_id, "cd /tmp && git --version",
+                   paths: fn _ -> true end
+                 )
 
-      assert result.exit_code == 0
-      assert result.stdout =~ "git version"
+        assert result.exit_code == 0
+        assert result.stdout =~ "git version"
+      end)
     end
 
     test "an all-builtin compound runs with no shell caps (no host binary to gate)",
          %{agent_id: agent_id} do
       # cd + echo are both builtins → gate-1 is skipped (nothing to cap-check at
       # that layer); CapShell runs the builtins.
-      assert {:ok, result} =
-               Arbor.Shell.authorize_and_execute(agent_id, "cd /tmp && echo hi",
-                 paths: fn _ -> true end
-               )
+      with_compound_shell(true, fn ->
+        assert {:ok, result} =
+                 Arbor.Shell.authorize_and_execute(agent_id, "cd /tmp && echo hi",
+                   paths: fn _ -> true end
+                 )
 
-      assert result.stdout =~ "hi"
-    end
-
-    test "with the feature flag off, compound commands fall back to rejection",
-         %{agent_id: agent_id} do
-      grant_shell_capability(agent_id, "arbor://shell/exec/git")
-      prev = Application.get_env(:arbor_shell, :compound_shell_enabled)
-      Application.put_env(:arbor_shell, :compound_shell_enabled, false)
-
-      on_exit(fn ->
-        if is_nil(prev),
-          do: Application.delete_env(:arbor_shell, :compound_shell_enabled),
-          else: Application.put_env(:arbor_shell, :compound_shell_enabled, prev)
+        assert result.stdout =~ "hi"
       end)
-
-      # Flag off → single-command path → the sandbox rejects the `&&` metacharacter.
-      assert {:error, {:shell_metacharacters, _}} =
-               Arbor.Shell.authorize_and_execute(agent_id, "git --version && echo ok",
-                 sandbox: :strict
-               )
     end
   end
 
@@ -342,4 +364,23 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
 
   defp restore_config(key, nil), do: Application.delete_env(:arbor_security, key)
   defp restore_config(key, value), do: Application.put_env(:arbor_security, key, value)
+
+  # Restore Application env deterministically so compound_shell_enabled never
+  # leaks across tests (async: false shared process state).
+  defp with_compound_shell(value, fun) when is_function(fun, 0) do
+    prev = Application.get_env(:arbor_shell, :compound_shell_enabled)
+
+    case value do
+      :absent -> Application.delete_env(:arbor_shell, :compound_shell_enabled)
+      other -> Application.put_env(:arbor_shell, :compound_shell_enabled, other)
+    end
+
+    try do
+      fun.()
+    after
+      if is_nil(prev),
+        do: Application.delete_env(:arbor_shell, :compound_shell_enabled),
+        else: Application.put_env(:arbor_shell, :compound_shell_enabled, prev)
+    end
+  end
 end

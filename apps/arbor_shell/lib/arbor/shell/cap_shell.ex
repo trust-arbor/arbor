@@ -25,14 +25,19 @@ defmodule Arbor.Shell.CapShell do
 
   ## Status / limitations (prototype)
 
+  - Wired into `Arbor.Shell.authorize_and_execute/3` (and the actions shell
+    adapter) behind `Arbor.Shell.compound_shell_enabled?/0`. That gate **defaults
+    false** until CapShell has absolute timeout and retained-output bounds
+    equivalent to `Arbor.Shell.Executor`. Operators opt in with
+    `config :arbor_shell, compound_shell_enabled: true`.
   - The library's `paths` policy callback is arity-1 (path only, no read/write
     operation), so the fs check here is coarse: a path is allowed if the agent
     holds *any* fs capability (read or write) covering it. Finer read/write
     granularity would need the operation at this layer (a candidate upstream
     improvement).
-  - Not yet wired into `authorize_and_execute/3`; this is a standalone entry point
-    to validate the approach end-to-end (see
-    `.arbor/decisions/2026-06-30-cap-checked-compound-shell.md`).
+  - No absolute wall-clock timeout or retained-output ceiling yet — that is why
+    the default remains fail-closed (see roadmap
+    `cap-shell-absolute-timeout-and-output-bounds`).
   - The library is pre-1.0 (pinned); its correctness is part of the security
     boundary, so the test suite carries adversarial bypass cases.
   """

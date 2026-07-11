@@ -274,6 +274,65 @@ defmodule Arbor.Actions.ShellTest do
       assert result.exit_code == 0
       assert result.stdout =~ "shell-approval-ok"
     end
+
+    test "security regression: Execute with agent context defaults CapShell closed", %{
+      agent_id: agent_id
+    } do
+      # Actions.Shell.Execute must not retain a duplicated Application.get_env
+      # default of true for :compound_shell_enabled. When the key is absent,
+      # authorized compound commands must hit the bounded single-command path
+      # (metacharacter rejection) — same fail-closed gate as Arbor.Shell.
+      sleep_uri = "arbor://shell/exec/sleep"
+      touch_uri = "arbor://shell/exec/touch"
+      {:ok, profile} = Arbor.Trust.Store.get_profile(agent_id)
+
+      :ok =
+        Arbor.Trust.Store.store_profile(%{
+          profile
+          | rules:
+              profile.rules
+              |> Map.put(sleep_uri, :auto)
+              |> Map.put(touch_uri, :auto)
+              |> Map.put("arbor://shell/exec/**", :auto)
+        })
+
+      {:ok, _cap} = Arbor.Security.grant(principal: agent_id, resource: "arbor://shell/exec/**")
+
+      prev = Application.get_env(:arbor_shell, :compound_shell_enabled)
+      Application.delete_env(:arbor_shell, :compound_shell_enabled)
+
+      try do
+        refute Arbor.Shell.compound_shell_enabled?()
+
+        marker =
+          Path.join(
+            System.tmp_dir!(),
+            "actions_capshell_closed_#{System.unique_integer([:positive])}"
+          )
+
+        assert {:error, message} =
+                 Shell.Execute.run(
+                   %{command: "sleep 1; touch #{marker}", sandbox: :basic},
+                   %{
+                     agent_id: agent_id,
+                     approved_invocation: %{
+                       request_id: "irq_capshell_closed_regression",
+                       principal_id: agent_id,
+                       resource_uri: "arbor://shell/exec/sleep",
+                       decision: :approved
+                     }
+                   }
+                 )
+
+        assert message =~ "metacharacter" or message =~ "not allowed"
+        Process.sleep(1_500)
+        refute File.exists?(marker), "action must not route compound to unbounded CapShell"
+      after
+        if is_nil(prev),
+          do: Application.delete_env(:arbor_shell, :compound_shell_enabled),
+          else: Application.put_env(:arbor_shell, :compound_shell_enabled, prev)
+      end
+    end
   end
 
   describe "ExecuteScript" do

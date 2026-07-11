@@ -113,10 +113,13 @@ defmodule Arbor.Shell.Sandbox do
   *compound* command (sequencing `;`/`&&`/`||`, pipes `|`, substitution `$(…)`/
   backticks, or redirection `>`/`<`) that the single-command path rejects.
 
-  Used by `Arbor.Shell.authorize_and_execute/3` to route compound commands to the
-  capability-checked interpreter (`Arbor.Shell.CapShell`) instead of rejecting
-  them. (A quoted metacharacter — `grep "a|b"` — also matches here and is routed
-  to the interpreter, which parses it correctly as a single command.)
+  Used by `Arbor.Shell.authorize_and_execute/3` to decide whether a command is
+  compound. When `Arbor.Shell.compound_shell_enabled?/0` is true (opt-in; default
+  false), compounds route to the capability-checked interpreter
+  (`Arbor.Shell.CapShell`); otherwise the single-command sandbox rejects them.
+  (A quoted metacharacter — `grep "a|b"` — also matches here and, when CapShell
+  is enabled, is routed to the interpreter, which parses it correctly as a
+  single command.)
   """
   @spec compound?(String.t()) :: boolean()
   def compound?(command) when is_binary(command) do
