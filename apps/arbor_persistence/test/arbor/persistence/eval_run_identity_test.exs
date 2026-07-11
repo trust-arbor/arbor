@@ -3,6 +3,7 @@ defmodule Arbor.Persistence.EvalRunIdentityTest do
   @moduletag :fast
 
   alias Arbor.Persistence
+  import Bitwise
 
   describe "capture_eval_run_identity/1" do
     test "adds git_sha and git_dirty when running inside a git repo" do
@@ -48,8 +49,16 @@ defmodule Arbor.Persistence.EvalRunIdentityTest do
   end
 
   describe "eval_dataset_hash/1" do
-    @tag :tmp_dir
-    test "hashes file contents deterministically and detects edits", %{tmp_dir: tmp_dir} do
+    test "hashes file contents deterministically and detects edits" do
+      tmp_dir =
+        Path.join(
+          System.tmp_dir!(),
+          "eval_run_identity_#{System.unique_integer([:positive, :monotonic])}"
+        )
+
+      on_exit(fn -> File.rm_rf(tmp_dir) end)
+      File.mkdir!(tmp_dir)
+
       path = Path.join(tmp_dir, "dataset.jsonl")
       File.write!(path, ~s({"input": "a", "expected": "b"}\n))
 
@@ -105,6 +114,35 @@ defmodule Arbor.Persistence.EvalRunIdentityTest do
     test "rejects atom/string key collisions" do
       colliding = Map.merge(%{k: 1}, %{"k" => 2})
       assert Persistence.eval_config_fingerprint(colliding) == nil
+    end
+
+    test "security regression: rejects a very large integer before JSON encoding" do
+      very_large = 1 <<< 1_000_000
+      assert Persistence.eval_config_fingerprint(%{value: very_large}) == nil
+    end
+
+    test "integer bit-size boundaries remain stable" do
+      assert Persistence.eval_config_fingerprint(%{value: 1 <<< 999_999}) =~
+               ~r/^sha256:[0-9a-f]{64}$/
+
+      assert Persistence.eval_config_fingerprint(%{value: 1 <<< 1_000_000}) == nil
+      assert Persistence.eval_config_fingerprint(%{value: -(1 <<< 1_000_000)}) == nil
+    end
+
+    test "security regression: wide shallow sibling nesting remains valid" do
+      config =
+        Map.new(1..1_000, fn index ->
+          {"sibling-#{index}", %{"nested" => [index, %{"enabled" => true}]}}
+        end)
+
+      fingerprint = Persistence.eval_config_fingerprint(config)
+      assert fingerprint =~ ~r/^sha256:[0-9a-f]{64}$/
+      assert Persistence.eval_config_fingerprint(config) == fingerprint
+    end
+
+    test "handles finite float extremes without raising" do
+      assert Persistence.eval_config_fingerprint(%{min: -1.7976931348623157e308, zero: -0.0}) =~
+               ~r/^sha256:[0-9a-f]{64}$/
     end
   end
 end

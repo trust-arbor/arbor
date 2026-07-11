@@ -26,6 +26,8 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
   @max_fp_keys 10_000
   @max_fp_string_bytes 1_048_576
   @max_fp_estimated_bytes 1_048_576
+  @max_fp_integer_bits 1_000_000
+  @max_fp_integer_bytes div(@max_fp_integer_bits + 7, 8)
 
   @spec capture(map()) :: map()
   def capture(attrs) when is_map(attrs) do
@@ -263,8 +265,8 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
 
   defp canonical_json(value) do
     budget = %{
-      depth: 0,
       nodes: 0,
+      keys: 0,
       max_depth: @max_fp_depth,
       max_nodes: @max_fp_nodes,
       max_keys: @max_fp_keys,
@@ -273,7 +275,7 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
       estimated: 0
     }
 
-    case canonicalize(value, budget) do
+    case canonicalize(value, budget, 0) do
       {:ok, clean, _budget} -> encode_canonical(clean)
       :error -> :error
     end
@@ -281,22 +283,24 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
 
   # Returns nested structure of Jason.OrderedObject / lists / scalars.
   # Never re-materializes objects as unordered Map.
-  defp canonicalize(map, budget) when is_map(map) do
+  defp canonicalize(map, budget, depth) when is_map(map) do
+    key_count = map_size(map)
+
     cond do
-      budget.depth > budget.max_depth ->
+      depth > budget.max_depth ->
         :error
 
       budget.nodes + 1 > budget.max_nodes ->
         :error
 
-      map_size(map) > budget.max_keys ->
+      budget.keys + key_count > budget.max_keys ->
         :error
 
       true ->
         budget = %{
           budget
           | nodes: budget.nodes + 1,
-            depth: budget.depth + 1,
+            keys: budget.keys + key_count,
             estimated: budget.estimated + 2
         }
 
@@ -311,7 +315,7 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
                   # Atom/string alias collision (or duplicate string keys)
                   {:halt, :error}
                 else
-                  case canonicalize(v, b) do
+                  case canonicalize(v, b, depth + 1) do
                     {:ok, cv, b2} ->
                       b2 = %{b2 | estimated: b2.estimated + 1}
 
@@ -337,7 +341,7 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
                 |> Enum.sort_by(&elem(&1, 0))
                 |> Jason.OrderedObject.new()
 
-              {:ok, ordered, %{final_budget | depth: budget.depth}}
+              {:ok, ordered, final_budget}
 
             :error ->
               :error
@@ -346,9 +350,9 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
     end
   end
 
-  defp canonicalize(list, budget) when is_list(list) do
+  defp canonicalize(list, budget, depth) when is_list(list) do
     cond do
-      budget.depth > budget.max_depth ->
+      depth > budget.max_depth ->
         :error
 
       budget.nodes + 1 > budget.max_nodes ->
@@ -358,7 +362,6 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
         budget = %{
           budget
           | nodes: budget.nodes + 1,
-            depth: budget.depth + 1,
             estimated: budget.estimated + 2
         }
 
@@ -366,7 +369,7 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
           :error
         else
           Enum.reduce_while(list, {:ok, [], budget}, fn item, {:ok, acc, b} ->
-            case canonicalize(item, b) do
+            case canonicalize(item, b, depth + 1) do
               {:ok, c, b2} ->
                 b2 = %{b2 | estimated: b2.estimated + 1}
 
@@ -382,7 +385,7 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
           end)
           |> case do
             {:ok, items, final_budget} ->
-              {:ok, Enum.reverse(items), %{final_budget | depth: budget.depth}}
+              {:ok, Enum.reverse(items), final_budget}
 
             :error ->
               :error
@@ -391,7 +394,7 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
     end
   end
 
-  defp canonicalize(v, budget) when is_binary(v) do
+  defp canonicalize(v, budget, _depth) when is_binary(v) do
     size = byte_size(v)
 
     cond do
@@ -419,25 +422,122 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
     end
   end
 
-  defp canonicalize(v, budget) when is_number(v) or is_boolean(v) or is_nil(v) do
-    if budget.nodes + 1 > budget.max_nodes do
-      :error
-    else
-      estimated = budget.estimated + 32
+  defp canonicalize(v, budget, _depth) when is_integer(v) do
+    with true <- budget.nodes + 1 <= budget.max_nodes,
+         {:ok, magnitude_bytes} <- bounded_integer_magnitude_bytes(v) do
+      # Three decimal digits per magnitude byte plus a possible sign is a
+      # conservative bound. Magnitude is bounded before this arithmetic and
+      # before Jason performs decimal conversion.
+      estimated = budget.estimated + magnitude_bytes * 3 + 1
 
       if estimated > budget.max_estimated_bytes do
         :error
       else
         {:ok, v, %{budget | nodes: budget.nodes + 1, estimated: estimated}}
       end
+    else
+      _ -> :error
     end
   end
 
-  defp canonicalize(a, budget) when is_atom(a) do
-    canonicalize(Atom.to_string(a), budget)
+  defp canonicalize(v, budget, _depth) when is_float(v) do
+    if budget.nodes + 1 > budget.max_nodes do
+      :error
+    else
+      case encode_finite_float(v) do
+        {:ok, encoded_size} ->
+          estimated = budget.estimated + encoded_size
+
+          if estimated > budget.max_estimated_bytes do
+            :error
+          else
+            {:ok, v, %{budget | nodes: budget.nodes + 1, estimated: estimated}}
+          end
+
+        :error ->
+          :error
+      end
+    end
   end
 
-  defp canonicalize(_, _), do: :error
+  defp canonicalize(v, budget, _depth) when is_boolean(v) or is_nil(v) do
+    add_scalar(v, budget, 5)
+  end
+
+  defp canonicalize(a, budget, depth) when is_atom(a) do
+    canonicalize(Atom.to_string(a), budget, depth)
+  end
+
+  defp canonicalize(_, _, _), do: :error
+
+  defp add_scalar(value, budget, max_encoded_size) do
+    if budget.nodes + 1 > budget.max_nodes or
+         budget.estimated + max_encoded_size > budget.max_estimated_bytes do
+      :error
+    else
+      {:ok, value,
+       %{budget | nodes: budget.nodes + 1, estimated: budget.estimated + max_encoded_size}}
+    end
+  end
+
+  defp bounded_integer_magnitude_bytes(value) do
+    # External size is available without decimal conversion or magnitude
+    # arithmetic. The largest ETF bignum header is seven bytes.
+    if :erlang.external_size(value) > @max_fp_integer_bytes + 7 do
+      :error
+    else
+      value
+      |> :erlang.term_to_binary()
+      |> bounded_external_integer_bytes()
+    end
+  rescue
+    _ -> :error
+  end
+
+  defp bounded_external_integer_bytes(<<131, 97, _value>>), do: {:ok, 1}
+
+  defp bounded_external_integer_bytes(<<131, 98, value::signed-big-32>>) do
+    {:ok, byte_size(:binary.encode_unsigned(abs(value)))}
+  end
+
+  defp bounded_external_integer_bytes(<<131, 110, bytes, _sign, digits::binary-size(bytes)>>) do
+    bounded_magnitude_bytes(bytes, :binary.last(digits))
+  end
+
+  defp bounded_external_integer_bytes(
+         <<131, 111, bytes::unsigned-big-32, _sign, digits::binary-size(bytes)>>
+       ) do
+    bounded_magnitude_bytes(bytes, :binary.last(digits))
+  end
+
+  defp bounded_external_integer_bytes(_), do: :error
+
+  defp bounded_magnitude_bytes(bytes, most_significant_byte) do
+    cond do
+      bytes > @max_fp_integer_bytes -> :error
+      bytes < @max_fp_integer_bytes -> {:ok, bytes}
+      bytes * 8 - leading_zero_bits(most_significant_byte) <= @max_fp_integer_bits -> {:ok, bytes}
+      true -> :error
+    end
+  end
+
+  defp leading_zero_bits(byte) when byte >= 128, do: 0
+  defp leading_zero_bits(byte) when byte >= 64, do: 1
+  defp leading_zero_bits(byte) when byte >= 32, do: 2
+  defp leading_zero_bits(byte) when byte >= 16, do: 3
+  defp leading_zero_bits(byte) when byte >= 8, do: 4
+  defp leading_zero_bits(byte) when byte >= 4, do: 5
+  defp leading_zero_bits(byte) when byte >= 2, do: 6
+  defp leading_zero_bits(_byte), do: 7
+
+  defp encode_finite_float(value) do
+    case Jason.encode(value) do
+      {:ok, encoded} -> {:ok, byte_size(encoded)}
+      {:error, _} -> :error
+    end
+  rescue
+    _ -> :error
+  end
 
   defp normalize_fp_key(k, budget) when is_binary(k) do
     size = byte_size(k)
