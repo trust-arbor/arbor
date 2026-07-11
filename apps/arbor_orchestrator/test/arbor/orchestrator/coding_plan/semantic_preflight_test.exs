@@ -405,6 +405,51 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            end)
   end
 
+  test "adversarial: project_interaction_control opt-in is only allowed on commit_change/git_commit",
+       ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    # Template already has the reviewed opt-in on commit_change.
+    assert Map.get(graph.nodes["commit_change"].attrs, "project_interaction_control") == "true"
+
+    assert :ok =
+             SemanticPreflight.validate(graph, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    forged =
+      update_in(graph.nodes["validate"].attrs, fn attrs ->
+        attrs
+        |> Map.put("project_interaction_control", "true")
+      end)
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(forged, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert Enum.any?(errors, fn err ->
+             err["code"] == "forbidden_interaction_control_opt_in" and
+               err["node_id"] == "validate" and
+               err["detail"]["allowed_action"] == "git_commit"
+           end)
+
+    wrong_action =
+      update_in(graph.nodes["commit_change"].attrs, &Map.put(&1, "action", "mix_compile"))
+
+    assert {:error, {:semantic_preflight_failed, action_errors}} =
+             SemanticPreflight.validate(wrong_action, profile["semantic_policy"],
+               review_profile: "binding"
+             )
+
+    assert Enum.any?(action_errors, fn err ->
+             err["code"] == "forbidden_interaction_control_opt_in" and
+               err["node_id"] == "commit_change"
+           end)
+  end
+
   test "adversarial: authority override attribute fails closed", ctx do
     assert {:ok, compilation} = compile(plan!(), ctx)
     graph = compiled_graph!(compilation.dot_source)

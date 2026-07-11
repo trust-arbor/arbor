@@ -1728,6 +1728,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         "protocol_retry_count" => "1",
         "validation_rework_count" => 1,
         "review_rework_count" => "1",
+        "operator_rework_count" => 0,
         "total_rework_count" => 2,
         "close.status" => "closed",
         "close.context_tokens" => 4_096,
@@ -1766,6 +1767,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert metrics["protocol_retry_count"] == 1
       assert metrics["validation_rework_count"] == 1
       assert metrics["review_rework_count"] == 1
+      assert metrics["operator_rework_count"] == 0
       assert metrics["total_rework_count"] == 2
 
       assert metrics["node_durations_ms"] == %{
@@ -1988,6 +1990,28 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       assert {:error, {:unknown_terminal_status, "weird"}} =
                run_with_context(%{"status" => "weird", "branch" => "b1"})
+    end
+
+    test "approval_denied preserves request/note without leaking arbitrary metadata" do
+      assert {:ok, result} =
+               run_with_context(%{
+                 "status" => "approval_denied",
+                 "error" => "approval_denied",
+                 "approval_request_id" => "irq_abc",
+                 "approval_note" => "please no",
+                 "branch" => "b1",
+                 "workspace_id" => "ws_1",
+                 "worker_session_id" => "w_1",
+                 "raw_metadata" => %{"actor" => self(), "secret" => make_ref()}
+               })
+
+      assert result["status"] == "approval_denied"
+      assert result["canonical_status"] == "approval_denied"
+      assert result["error"] == "approval_denied"
+      assert result["approval_request_id"] == "irq_abc"
+      assert result["approval_note"] == "please no"
+      refute Map.has_key?(result, "raw_metadata")
+      assert {:ok, _} = Jason.encode(result)
     end
 
     test "result is JSON-clean; nested rich values drop the field without leaking drop" do

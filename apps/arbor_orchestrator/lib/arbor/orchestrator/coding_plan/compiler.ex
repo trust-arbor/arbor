@@ -595,7 +595,11 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
       {"check_review_total_budget", "legacy_status_review_requires_rework",
        "context.total_rework_count>=2", "context.total_rework_count>=#{max_cycles}"},
       {"check_review_total_budget", "inc_review_rework_count", "context.total_rework_count<2",
-       "context.total_rework_count<#{max_cycles}"}
+       "context.total_rework_count<#{max_cycles}"},
+      {"check_operator_rework_total_budget", "legacy_status_operator_approval_rework",
+       "context.total_rework_count>=2", "context.total_rework_count>=#{max_cycles}"},
+      {"check_operator_rework_total_budget", "inc_operator_rework_count",
+       "context.total_rework_count<2", "context.total_rework_count<#{max_cycles}"}
     ]
 
     Enum.reduce_while(rewrites, {:ok, graph}, fn {from, to, old, new}, {:ok, graph} ->

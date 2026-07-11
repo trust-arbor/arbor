@@ -176,6 +176,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   @artifact_path_keys ~w(coding_plan_path coding_pipeline_path compile_manifest_path)
 
   @success_statuses MapSet.new(~w(
+    approval_denied
     change_committed
     declined
     human_review_required
@@ -1629,6 +1630,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       "protocol_retry_count" => metric_counter(clean_context, "protocol_retry_count"),
       "validation_rework_count" => metric_counter(clean_context, "validation_rework_count"),
       "review_rework_count" => metric_counter(clean_context, "review_rework_count"),
+      "operator_rework_count" => metric_counter(clean_context, "operator_rework_count"),
       "total_rework_count" => metric_counter(clean_context, "total_rework_count")
     }
     |> maybe_put_metric(
@@ -1911,7 +1913,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       "workspace_id" => context_get(context, "workspace_id"),
       "worker_session_id" => context_get(context, "worker_session_id"),
       "response_text" => extract_response_text(context),
-      "error" => context_get(context, "error") || context_get(context, "review_error")
+      "error" => context_get(context, "error") || context_get(context, "review_error"),
+      # Operator approval fields are stable, bounded, JSON-clean scalars only —
+      # never the raw interaction metadata map.
+      "approval_request_id" => context_get(context, "approval_request_id"),
+      "approval_note" => context_get(context, "approval_note")
     }
     |> reject_nil_values()
   end

@@ -198,13 +198,21 @@ defmodule Arbor.Orchestrator.IR.HandlerSchema do
         schema(
           "exec",
           [],
-          ["tool_command", "target", "max_retries", "retry_target", "fallback_retry_target"],
+          [
+            "tool_command",
+            "target",
+            "max_retries",
+            "retry_target",
+            "fallback_retry_target",
+            "project_interaction_control"
+          ],
           %{
             "tool_command" => :string,
             "target" => :string,
             "max_retries" => :integer,
             "retry_target" => :string,
-            "fallback_retry_target" => :string
+            "fallback_retry_target" => :string,
+            "project_interaction_control" => :boolean
           },
           ["shell_exec"],
           :internal,

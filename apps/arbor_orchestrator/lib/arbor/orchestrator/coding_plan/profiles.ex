@@ -14,6 +14,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
   @default_required_nodes Enum.sort(~w[
                     acquire_workspace
                     adopt_head_commit
+                    check_operator_rework_category_budget
+                    check_operator_rework_total_budget
                     check_review_category_budget
                     check_review_total_budget
                     check_validation_category_budget
@@ -29,7 +31,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     release_workspace
                     review_change
                     route_after_commit
+                    route_commit_interaction
                     route_review
+                    status_approval_denied
                     validate
                   ])
 

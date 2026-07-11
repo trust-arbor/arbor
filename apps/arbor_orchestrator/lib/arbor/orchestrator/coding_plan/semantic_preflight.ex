@@ -131,6 +131,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         []
         |> check_handlers_and_targets(graph, policy)
         |> check_actions(graph, policy)
+        |> check_interaction_control_opt_in(graph)
         |> check_forbidden_authority(graph)
         |> check_profile_bindings(graph, policy, review_profile)
         |> check_reachability_and_dominance(graph, policy, review_profile)
@@ -329,6 +330,50 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         end
       else
         acc
+      end
+    end)
+  end
+
+  # project_interaction_control may only appear on the reviewed coding
+  # commit_change gate with action=git_commit. Any other node/action fails
+  # closed so an arbitrary DOT cannot turn denial into success.
+  @interaction_control_opt_in_attr "project_interaction_control"
+  @interaction_control_allowed_node "commit_change"
+  @interaction_control_allowed_action "git_commit"
+
+  defp check_interaction_control_opt_in(errors, graph) do
+    graph.nodes
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.reduce(errors, fn {node_id, node}, acc ->
+      case Map.get(node.attrs, @interaction_control_opt_in_attr) do
+        value when value in [nil, "", "false", false, "0", 0] ->
+          acc
+
+        value when value in ["true", true, "1", 1] ->
+          action = Map.get(node.attrs, "action")
+
+          if node_id == @interaction_control_allowed_node and
+               action == @interaction_control_allowed_action do
+            acc
+          else
+            [
+              error("forbidden_interaction_control_opt_in", node_id, %{
+                "attribute" => @interaction_control_opt_in_attr,
+                "action" => action,
+                "allowed_node" => @interaction_control_allowed_node,
+                "allowed_action" => @interaction_control_allowed_action
+              })
+              | acc
+            ]
+          end
+
+        _other ->
+          [
+            error("invalid_interaction_control_opt_in", node_id, %{
+              "attribute" => @interaction_control_opt_in_attr
+            })
+            | acc
+          ]
       end
     end)
   end

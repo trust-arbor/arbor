@@ -687,6 +687,20 @@ defmodule Arbor.LLM.ToolLoop do
             {"Action #{name} requires approval. Proposal ID: #{proposal_id}. " <>
                "Waiting for consensus decision.", false}
 
+          # Direct/LLM tool path: interaction control is never success. Keep
+          # denial/rework honest so operators and models see an error, not a
+          # forged tool success.
+          {:control, payload} when is_map(payload) ->
+            outcome =
+              Map.get(payload, "interaction_outcome") || Map.get(payload, :interaction_outcome) ||
+                "rejected"
+
+            request_id =
+              Map.get(payload, "request_id") || Map.get(payload, :request_id) || "unknown"
+
+            {"Error: Action #{name} was #{outcome} by the operator. Request ID: #{request_id}.",
+             true}
+
           {:error, reason} ->
             {"Error: #{inspect(reason, limit: 50, printable_limit: 30_000)}", true}
         end

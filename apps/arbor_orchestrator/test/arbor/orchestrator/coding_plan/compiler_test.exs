@@ -437,7 +437,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert Enum.any?(none_graph.edges, &submit_review_false_edge?/1)
   end
 
-  test "rework max cycles rewrites both shared total-budget gates", ctx do
+  test "rework max cycles rewrites all shared total-budget gates", ctx do
     for max_cycles <- 0..2 do
       plan = plan!(%{"rework" => %{"max_cycles" => max_cycles}})
       assert {:ok, compilation} = compile(plan, ctx)
@@ -463,6 +463,18 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
       assert edge_condition(graph, "check_review_total_budget", "inc_review_rework_count") ==
                "context.total_rework_count<#{max_cycles}"
+
+      assert edge_condition(
+               graph,
+               "check_operator_rework_total_budget",
+               "legacy_status_operator_approval_rework"
+             ) == "context.total_rework_count>=#{max_cycles}"
+
+      assert edge_condition(
+               graph,
+               "check_operator_rework_total_budget",
+               "inc_operator_rework_count"
+             ) == "context.total_rework_count<#{max_cycles}"
     end
   end
 

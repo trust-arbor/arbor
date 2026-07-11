@@ -40,8 +40,10 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   Maps tool names to Arbor Actions, atomizes string-keyed args using the
   action's schema as an allowlist, and executes via the action system.
   """
+  @type control_payload :: %{String.t() => String.t()}
+
   @spec execute(String.t(), map(), String.t(), keyword()) ::
-          {:ok, String.t()} | {:error, String.t()}
+          {:ok, String.t()} | {:control, control_payload()} | {:error, String.t()}
   def execute(name, args, workdir, opts \\ []) do
     agent_id = Keyword.get(opts, :agent_id, "system")
     signed_request = Keyword.get(opts, :signed_request)
@@ -455,6 +457,11 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   defp interaction_request?(id) when is_binary(id), do: String.starts_with?(id, "irq")
   defp interaction_request?(_), do: false
 
+  # Operator notes on rework/deny are free-form human text. Bound on valid UTF-8
+  # codepoint boundaries so Engine context/checkpoints stay JSON-clean and small.
+  @max_interaction_note_bytes 1_024
+  @max_interaction_request_id_bytes 256
+
   defp await_interaction_and_retry(request_id, agent_id, action_module, params, context, name) do
     topic = Arbor.Contracts.Comms.Interaction.response_topic_for_agent(agent_id)
     timeout = approval_timeout(context)
@@ -471,26 +478,26 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
         Phoenix.PubSub.subscribe(Arbor.Comms.PubSub, topic)
 
         receive do
-          {:interaction_response, %{request_id: ^request_id, response: response}} ->
-            {:response, response}
+          {:interaction_response, %{request_id: ^request_id, response: response} = payload} ->
+            metadata = Map.get(payload, :metadata) || Map.get(payload, "metadata") || %{}
+            {:response, response, metadata}
         after
           timeout -> :timeout
         end
       end)
 
     case Task.yield(task, timeout + 1_000) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {:response, r}} when r in [:approved, :approve, "approved", "approve"] ->
-        track_approval(agent_id, action_module)
-        retry_execution(agent_id, action_module, params, context, name, request_id)
-
-      {:ok, {:response, r}}
-      when r in [:rejected, :reject, :denied, "rejected", "deny", "denied"] ->
-        {:error, "Action #{name} was denied by the operator. Request ID: #{request_id}."}
-
-      {:ok, {:response, other}} ->
-        {:error,
-         "Action #{name}: unexpected approval response #{inspect(other)}. " <>
-           "Request ID: #{request_id}."}
+      {:ok, {:response, response, metadata}} ->
+        handle_interaction_response(
+          response,
+          metadata,
+          agent_id,
+          action_module,
+          params,
+          context,
+          name,
+          request_id
+        )
 
       {:ok, :timeout} ->
         {:error,
@@ -505,6 +512,160 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
       Logger.warning("[ActionsExecutor] await_interaction_and_retry crashed: #{inspect(e)}")
       {:error, "Action #{name} requires approval. Request ID: #{request_id}"}
   end
+
+  # Normalize response + metadata consistently. Rejected invocations never
+  # retry as approved; rework/deny return a tagged control payload (no execute).
+  defp handle_interaction_response(
+         response,
+         metadata,
+         agent_id,
+         action_module,
+         params,
+         context,
+         name,
+         request_id
+       ) do
+    case normalize_interaction_decision(response, metadata) do
+      {:ok, :approve} ->
+        track_approval(agent_id, action_module)
+        retry_execution(agent_id, action_module, params, context, name, request_id)
+
+      {:ok, :rework, note} ->
+        track_rejection(agent_id, action_module)
+        {:control, interaction_control_payload("rework", request_id, note)}
+
+      {:ok, :deny, note} ->
+        track_rejection(agent_id, action_module)
+        {:control, interaction_control_payload("denied", request_id, note)}
+
+      {:error, reason} ->
+        {:error,
+         "Action #{name}: approval response rejected (#{reason}). Request ID: #{request_id}."}
+    end
+  end
+
+  defp normalize_interaction_decision(response, metadata) do
+    with {:ok, response_kind} <- classify_interaction_response(response),
+         {:ok, decision} <- classify_interaction_metadata(metadata),
+         :ok <- consistent_interaction_decision?(response_kind, decision) do
+      note = metadata_note(metadata)
+
+      case {response_kind, decision} do
+        {:approved, decision} when decision in [:absent, :approve] ->
+          {:ok, :approve}
+
+        {:rejected, :rework} ->
+          {:ok, :rework, note}
+
+        {:rejected, decision} when decision in [:absent, :deny] ->
+          {:ok, :deny, note}
+      end
+    end
+  end
+
+  defp classify_interaction_response(r) when r in [:approved, :approve, "approved", "approve"],
+    do: {:ok, :approved}
+
+  defp classify_interaction_response(r)
+       when r in [:rejected, :reject, :denied, "rejected", "reject", "deny", "denied"],
+       do: {:ok, :rejected}
+
+  defp classify_interaction_response(other),
+    do: {:error, "unexpected_response:#{inspect(other)}"}
+
+  defp classify_interaction_metadata(metadata) when not is_map(metadata),
+    do: {:error, :malformed_metadata}
+
+  defp classify_interaction_metadata(metadata) do
+    decision = metadata_get(metadata, :decision)
+    rework_flag? = truthy_rework_flag?(metadata_get(metadata, :rework))
+    decision_rework? = decision in [:rework, "rework"]
+
+    cond do
+      # Canonical rework: decision=:rework and/or rework:true, without a
+      # conflicting approve/deny decision.
+      (rework_flag? or decision_rework?) and decision in [nil, :rework, "rework"] ->
+        {:ok, :rework}
+
+      rework_flag? or decision_rework? ->
+        {:error, :inconsistent_rework_marker}
+
+      decision in [:approve, "approve"] ->
+        {:ok, :approve}
+
+      decision in [:deny, "deny", :denied, "denied"] ->
+        {:ok, :deny}
+
+      is_nil(decision) ->
+        {:ok, :absent}
+
+      true ->
+        {:error, :malformed_decision}
+    end
+  end
+
+  defp truthy_rework_flag?(flag) when flag in [true, "true", 1, "1"], do: true
+  defp truthy_rework_flag?(_), do: false
+
+  defp consistent_interaction_decision?(:approved, decision)
+       when decision in [:absent, :approve],
+       do: :ok
+
+  defp consistent_interaction_decision?(:rejected, decision)
+       when decision in [:absent, :deny, :rework],
+       do: :ok
+
+  defp consistent_interaction_decision?(response_kind, decision),
+    do: {:error, "inconsistent:#{response_kind}/#{decision}"}
+
+  defp metadata_get(metadata, key) when is_atom(key) do
+    Map.get(metadata, key) || Map.get(metadata, Atom.to_string(key))
+  end
+
+  defp metadata_note(metadata) when is_map(metadata) do
+    case metadata_get(metadata, :note) do
+      note when is_binary(note) -> bound_utf8(note, @max_interaction_note_bytes)
+      _ -> ""
+    end
+  end
+
+  defp metadata_note(_), do: ""
+
+  defp interaction_control_payload(outcome, request_id, note)
+       when outcome in ["rework", "denied"] and is_binary(request_id) do
+    %{
+      "interaction_outcome" => outcome,
+      "request_id" => bound_utf8(request_id, @max_interaction_request_id_bytes),
+      "note" => if(is_binary(note), do: note, else: "")
+    }
+  end
+
+  # Truncate on a valid UTF-8 codepoint boundary. Invalid UTF-8 becomes "".
+  defp bound_utf8(value, max_bytes) when is_binary(value) and is_integer(max_bytes) do
+    cond do
+      not String.valid?(value) ->
+        ""
+
+      byte_size(value) <= max_bytes ->
+        value
+
+      true ->
+        value
+        |> String.graphemes()
+        |> Enum.reduce_while({"", 0}, fn grapheme, {acc, size} ->
+          next = size + byte_size(grapheme)
+
+          if next <= max_bytes do
+            {:cont, {acc <> grapheme, next}}
+          else
+            {:halt, {acc, size}}
+          end
+        end)
+        |> elem(0)
+    end
+  end
+
+  defp bound_utf8(_value, _max_bytes), do: ""
 
   defp await_consensus_and_retry(proposal_id, agent_id, action_module, params, context, name) do
     consensus_mod = Module.concat([:Arbor, :Consensus])

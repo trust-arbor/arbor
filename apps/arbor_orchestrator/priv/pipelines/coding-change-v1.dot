@@ -24,11 +24,14 @@
 //   workspace_id         - opaque workspace lease id
 //   worker_session_id    - opaque ACP worker handle
 //   branch / commit_hash - reviewable branch tip when produced
-//   validation_rework_count / review_rework_count / total_rework_count
+//   validation_rework_count / review_rework_count / operator_rework_count
+//                        / total_rework_count
 //                        - initiated same-session rework-cycle counters
 //   rework_kind          - most recently initiated rework category
 //   rework_iteration     - total initiated rework-cycle sequence
 //   error                - stable terminal failure code when applicable
+//   approval_request_id  - last operator approval request id (deny/rework)
+//   approval_note        - bounded operator note from the last deny/rework
 //
 // Worker output contract (acp_send_message text): pure JSON
 //   {"status":"implemented"|"declined","summary":"..."}
@@ -41,10 +44,15 @@
 //
 // Does NOT call coding_produce_reviewable_change.
 //
-// Rework bound: one initiated validation repair and one initiated council
-// repair, with a hard total maximum of two same-session repair attempts.
+// Rework bound: one initiated validation repair, one initiated council
+// repair, and one initiated operator-approval repair, with a hard total
+// maximum of two same-session repair attempts across all kinds.
 // Review-budget exhaustion emits status=rework_exhausted (canonical). A
 // legacy_status=review_requires_rework field is also set for Phase 2 adapters.
+// Operator denial of the commit gate emits status=approval_denied (not
+// pipeline_error). Operator rework steers the same worker through another
+// implement/validate/commit cycle; exhausted operator rework uses
+// rework_exhausted with error=operator_approval_rework_exhausted.
 
 digraph CodingChangeV1 {
   graph [
@@ -77,6 +85,13 @@ digraph CodingChangeV1 {
     transform="constant",
     expression="0",
     output_key="total_rework_count"
+  ]
+
+  init_operator_rework_count [
+    type="transform",
+    transform="constant",
+    expression="0",
+    output_key="operator_rework_count"
   ]
 
   init_protocol_retry_count [
@@ -354,6 +369,14 @@ digraph CodingChangeV1 {
     output_key="prompt"
   ]
 
+  build_operator_rework_prompt [
+    type="transform",
+    transform="template",
+    source_key="task",
+    expression="Operator requested rework of the commit. Task: {value}. Operator note: {ctx.approval_note}. Address the operator feedback in the same worktree. Respond with ONLY one JSON object and no prose or markdown: {\"status\":\"implemented\"} or {\"status\":\"declined\"}, plus optional {\"summary\":\"...\"}.",
+    output_key="prompt"
+  ]
+
   // Commit / adopt HEAD
 
   prep_commit_path [
@@ -377,7 +400,18 @@ digraph CodingChangeV1 {
     context_keys="path,message",
     param.all="true",
     output_prefix="commit",
+    project_interaction_control="true",
     max_retries="0"
+  ]
+
+  // Branch structured commit results before hoisting commit_hash. The
+  // project_interaction_control opt-in lets ActionsExecutor rework/deny
+  // control outcomes surface as outcome=success with
+  // commit.interaction_outcome set; normal commits clear that field.
+  route_commit_interaction [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
   ]
 
   hoist_commit_hash [
@@ -385,6 +419,84 @@ digraph CodingChangeV1 {
     transform="identity",
     source_key="commit.commit_hash",
     output_key="commit_hash"
+  ]
+
+  hoist_approval_request_id [
+    type="transform",
+    transform="identity",
+    source_key="commit.request_id",
+    output_key="approval_request_id"
+  ]
+
+  hoist_approval_note [
+    type="transform",
+    transform="identity",
+    source_key="commit.note",
+    output_key="approval_note"
+  ]
+
+  mark_approval_denied_error [
+    type="transform",
+    transform="constant",
+    expression="approval_denied",
+    output_key="error"
+  ]
+
+  // Operator-approval rework budget. Shares the total rework hard cap with
+  // validation and council rework; at most one initiated operator repair.
+
+  check_operator_rework_category_budget [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  check_operator_rework_total_budget [
+    type="branch",
+    shape=diamond,
+    fan_out="false"
+  ]
+
+  inc_operator_rework_count [
+    type="transform",
+    transform="increment",
+    source_key="operator_rework_count",
+    output_key="operator_rework_count"
+  ]
+
+  inc_operator_total_rework_count [
+    type="transform",
+    transform="increment",
+    source_key="total_rework_count",
+    output_key="total_rework_count"
+  ]
+
+  mark_operator_rework_kind [
+    type="transform",
+    transform="constant",
+    expression="operator_approval",
+    output_key="rework_kind"
+  ]
+
+  mark_operator_rework_iteration [
+    type="transform",
+    transform="identity",
+    source_key="total_rework_count",
+    output_key="rework_iteration"
+  ]
+
+  mark_operator_rework_exhausted_error [
+    type="transform",
+    transform="constant",
+    expression="operator_approval_rework_exhausted",
+    output_key="error"
+  ]
+
+  legacy_status_operator_approval_rework [
+    type="transform",
+    transform="constant",
+    expression="operator_approval_rework",
+    output_key="legacy_status"
   ]
 
   adopt_head_commit [
@@ -685,6 +797,13 @@ digraph CodingChangeV1 {
     output_key="status"
   ]
 
+  status_approval_denied [
+    type="transform",
+    transform="constant",
+    expression="approval_denied",
+    output_key="status"
+  ]
+
   // Phase 2 adapter alias; not production routing policy
   legacy_status_review_requires_rework [
     type="transform",
@@ -843,7 +962,8 @@ digraph CodingChangeV1 {
   // Flow
 
   start -> init_validation_rework_count -> init_review_rework_count
-  init_review_rework_count -> init_total_rework_count -> init_protocol_retry_count
+  init_review_rework_count -> init_operator_rework_count
+  init_operator_rework_count -> init_total_rework_count -> init_protocol_retry_count
   init_protocol_retry_count -> classify_profile -> acquire_workspace
 
   // Acquire failure: no lease held
@@ -959,7 +1079,54 @@ digraph CodingChangeV1 {
   // Dirty worktree: graph owns the commit
   prep_commit_message -> commit_change [condition="context.workspace_dirty=true"]
   commit_change -> status_pipeline_error_then_close [condition="outcome=fail"]
-  commit_change -> hoist_commit_hash [condition="outcome=success"]
+  commit_change -> route_commit_interaction [condition="outcome=success"]
+
+  // Normal approved/unattended commit result (no interaction_outcome control).
+  route_commit_interaction -> hoist_commit_hash [condition="context.commit.interaction_outcome=\"\""]
+
+  // Operator denied the commit gate: terminal approval_denied + cleanup.
+  route_commit_interaction -> hoist_approval_request_id [condition="context.commit.interaction_outcome=denied"]
+  hoist_approval_request_id -> hoist_approval_note
+  hoist_approval_note -> mark_approval_denied_error -> status_approval_denied
+  status_approval_denied -> close_worker
+
+  // Operator rework: shared total budget + one operator category cycle, then
+  // the same worker receives a new implement turn (fresh commit approval later).
+  route_commit_interaction -> hoist_approval_request_id_rework [condition="context.commit.interaction_outcome=rework"]
+
+  hoist_approval_request_id_rework [
+    type="transform",
+    transform="identity",
+    source_key="commit.request_id",
+    output_key="approval_request_id"
+  ]
+
+  hoist_approval_note_rework [
+    type="transform",
+    transform="identity",
+    source_key="commit.note",
+    output_key="approval_note"
+  ]
+
+  hoist_approval_request_id_rework -> hoist_approval_note_rework
+  hoist_approval_note_rework -> check_operator_rework_category_budget
+
+  check_operator_rework_category_budget -> legacy_status_operator_approval_rework [condition="context.operator_rework_count>=1"]
+  check_operator_rework_category_budget -> check_operator_rework_total_budget [condition="context.operator_rework_count<1"]
+  check_operator_rework_total_budget -> legacy_status_operator_approval_rework [condition="context.total_rework_count>=2"]
+  check_operator_rework_total_budget -> inc_operator_rework_count [condition="context.total_rework_count<2"]
+
+  legacy_status_operator_approval_rework -> mark_operator_rework_exhausted_error
+  mark_operator_rework_exhausted_error -> status_rework_exhausted
+
+  inc_operator_rework_count -> inc_operator_total_rework_count
+  inc_operator_total_rework_count -> mark_operator_rework_kind
+  mark_operator_rework_kind -> mark_operator_rework_iteration
+  mark_operator_rework_iteration -> build_operator_rework_prompt
+  build_operator_rework_prompt -> reset_worker_turn_protocol_retry_count
+
+  // Unknown interaction_outcome fails closed (not success, not silent deny).
+  route_commit_interaction -> status_pipeline_error_then_close
 
   // Clean self-commit: adopt HEAD (never empty commit)
   prep_commit_message -> adopt_head_commit [condition="context.workspace_dirty!=true"]

@@ -49,6 +49,9 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           {:ok, result} when is_map(result) ->
             {:ok, Jason.encode!(result)}
 
+          {:control, payload} when is_map(payload) ->
+            {:control, stringify_keys(payload)}
+
           other ->
             other
         end
@@ -105,7 +108,7 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
           validate_response(scenario, counters, state)
 
         "git_commit" ->
-          commit_response(scenario, counters, state)
+          commit_response(scenario, counters, state, args)
 
         "coding_workspace_committed_change" ->
           committed_change_response(scenario)
@@ -190,6 +193,27 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
 
               {:commit_hard_fail, _} ->
                 Jason.encode!(%{status: "implemented", summary: "commit boom"})
+
+              {:commit_approval_denied, _} ->
+                Jason.encode!(%{status: "implemented", summary: "awaiting deny"})
+
+              {:commit_approval_rework_success, 0} ->
+                Jason.encode!(%{status: "implemented", summary: "first implement"})
+
+              {:commit_approval_rework_success, _} ->
+                Jason.encode!(%{status: "implemented", summary: "after operator rework"})
+
+              {:commit_approval_rework_exhausted, 0} ->
+                Jason.encode!(%{status: "implemented", summary: "first implement"})
+
+              {:commit_approval_rework_exhausted, _} ->
+                Jason.encode!(%{status: "implemented", summary: "after operator rework attempt"})
+
+              {:validation_then_operator_rework_exhausted, 0} ->
+                Jason.encode!(%{status: "implemented", summary: "broken first"})
+
+              {:validation_then_operator_rework_exhausted, _} ->
+                Jason.encode!(%{status: "implemented", summary: "after validation rework"})
 
               {:inspect_hard_fail, _} ->
                 Jason.encode!(%{status: "implemented", summary: "inspect boom"})
@@ -339,6 +363,8 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
               {:rework_exhausted, _} -> true
               {:validation_then_review_rework_success, 0} -> false
               {:validation_then_review_rework_success, _} -> true
+              {:validation_then_operator_rework_exhausted, 0} -> false
+              {:validation_then_operator_rework_exhausted, _} -> true
               {:protocol_repair_validation_turns_success, 0} -> false
               {:protocol_repair_validation_turns_success, _} -> true
               _ -> true
@@ -371,14 +397,59 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       end
     end
 
-    defp commit_response(scenario, _counters, _state) do
-      case scenario do
-        :self_commit_adopt ->
+    defp commit_response(scenario, counters, state, _args) do
+      n = Map.get(counters, :commit, 0)
+      Agent.update(state, fn s -> %{s | counters: Map.put(s.counters, :commit, n + 1)} end)
+
+      case {scenario, n} do
+        {:self_commit_adopt, _} ->
           # Should not be called for clean self-commit adopt path
           {:error, "git_commit must not run on clean self-commit adopt"}
 
-        :commit_hard_fail ->
+        {:commit_hard_fail, _} ->
           {:error, "git commit failed"}
+
+        {:commit_approval_denied, _} ->
+          {:control,
+           %{
+             "interaction_outcome" => "denied",
+             "request_id" => "irq_commit_denied_1",
+             "note" => "operator denied this commit"
+           }}
+
+        {:commit_approval_rework_success, 0} ->
+          {:control,
+           %{
+             "interaction_outcome" => "rework",
+             "request_id" => "irq_commit_rework_1",
+             "note" => "please fix the public API name"
+           }}
+
+        {:commit_approval_rework_success, _} ->
+          {:ok,
+           %{
+             path: "/tmp/ws_fixture_1",
+             commit_hash: "commitrework456",
+             message: "fixture commit after rework",
+             output: "[branch def] fixture rework"
+           }}
+
+        {:commit_approval_rework_exhausted, _} ->
+          # Every commit attempt is rework until the shared budget ends.
+          {:control,
+           %{
+             "interaction_outcome" => "rework",
+             "request_id" => "irq_commit_rework_exhausted_#{n + 1}",
+             "note" => "still not right"
+           }}
+
+        {:validation_then_operator_rework_exhausted, _} ->
+          {:control,
+           %{
+             "interaction_outcome" => "rework",
+             "request_id" => "irq_commit_op_#{n + 1}",
+             "note" => "operator rework after validation"
+           }}
 
         _ ->
           {:ok,
@@ -395,11 +466,17 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       {:error, "dirty workspace or missing base"}
     end
 
-    defp committed_change_response(_scenario) do
+    defp committed_change_response(scenario) do
+      commit_hash =
+        case scenario do
+          :commit_approval_rework_success -> "commitrework456"
+          _ -> "commitabc123"
+        end
+
       {:ok,
        %{
          workspace_id: "ws_fixture_1",
-         commit_hash: "commitabc123",
+         commit_hash: commit_hash,
          diff: "diff --git a/file.ex b/file.ex\n+hello\n",
          files: ["file.ex"],
          base_ref: "basecommit0001",
@@ -723,9 +800,15 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       validate = graph.nodes["validate"]
       assert validate.attrs["action"] == "mix_compile"
 
-      # Commit path has dirty vs adopt split
+      # Commit path has dirty vs adopt split and operator interaction routing
       assert graph.nodes["commit_change"]
+      assert graph.nodes["commit_change"].attrs["project_interaction_control"] == "true"
+      assert graph.nodes["commit_change"].attrs["action"] == "git_commit"
       assert graph.nodes["adopt_head_commit"]
+      assert graph.nodes["route_commit_interaction"]
+      assert graph.nodes["status_approval_denied"]
+      assert graph.nodes["check_operator_rework_category_budget"]
+      assert graph.nodes["check_operator_rework_total_budget"]
 
       # No production prefer_rework_exhausted switch
       refute Map.has_key?(graph.nodes, "status_review_requires_rework")
@@ -736,9 +819,11 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       # unconditional error edge from becoming a fan-out sibling.
       assert graph.nodes["route_worker_status"].attrs["fan_out"] == "false"
       assert graph.nodes["route_review"].attrs["fan_out"] == "false"
+      assert graph.nodes["route_commit_interaction"].attrs["fan_out"] == "false"
       assert graph.nodes["error_review_tier_invalid"]
 
-      for counter <- ~w(validation_rework_count review_rework_count total_rework_count) do
+      for counter <-
+            ~w(validation_rework_count review_rework_count operator_rework_count total_rework_count) do
         assert String.contains?(load_dot(), "output_key=\"#{counter}\"")
       end
 
@@ -854,6 +939,85 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert result.context["total_rework_count"] == 2
       assert result.context["rework_kind"] == "review"
       assert result.context["rework_iteration"] == 2
+      assert_single_worker_session(calls, 3)
+      assert_closed_and_released(calls)
+    end
+
+    test "operator denial of commit produces approval_denied with cleanup" do
+      assert {{:ok, result}, calls} = run_fixture(:commit_approval_denied)
+      assert result.context["status"] == "approval_denied"
+      assert result.context["error"] == "approval_denied"
+      assert result.context["approval_request_id"] == "irq_commit_denied_1"
+      assert result.context["approval_note"] == "operator denied this commit"
+      refute result.context["status"] == "pipeline_error"
+      refute "status_pipeline_error_then_close" in result.completed_nodes
+      refute called?(calls, "council_review_change")
+      assert Enum.count(calls, fn {n, _} -> n == "git_commit" end) == 1
+      assert_single_worker_session(calls, 1)
+      assert_closed_and_released(calls)
+      assert_json_clean_context(result.context)
+    end
+
+    test "operator rework uses one worker, second implement, shared budget, then fresh commit" do
+      assert {{:ok, result}, calls} = run_fixture(:commit_approval_rework_success)
+      assert result.context["status"] == "change_committed"
+      assert result.context["operator_rework_count"] == 1
+      assert result.context["validation_rework_count"] == "0"
+      assert result.context["review_rework_count"] == "0"
+      assert result.context["total_rework_count"] == 1
+      assert result.context["rework_kind"] == "operator_approval"
+      assert result.context["rework_iteration"] == 1
+      assert result.context["commit_hash"] == "commitrework456"
+
+      prompts = action_prompts(calls)
+      # First implement + operator rework implement (no protocol repair)
+      assert_single_worker_session(calls, 2)
+      assert Enum.at(prompts, 1) =~ "Operator requested rework"
+      assert Enum.at(prompts, 1) =~ "please fix the public API name"
+      assert Enum.at(prompts, 1) =~ "ONLY one JSON object"
+
+      commit_calls = Enum.filter(calls, fn {n, _} -> n == "git_commit" end)
+      assert length(commit_calls) == 2
+
+      validate_calls = Enum.count(calls, fn {n, _} -> n == "mix_compile" end)
+      assert validate_calls == 2
+
+      # Council review only after the successful fresh commit, never on the
+      # rejected interaction control outcome.
+      assert Enum.count(calls, fn {n, _} -> n == "council_review_change" end) == 1
+      refute "status_pipeline_error_then_close" in result.completed_nodes
+      assert_closed_and_released(calls)
+      assert_json_clean_context(result.context)
+    end
+
+    test "exhausted operator rework terminates deterministically" do
+      assert {{:ok, result}, calls} = run_fixture(:commit_approval_rework_exhausted)
+      assert result.context["status"] == "rework_exhausted"
+      assert result.context["legacy_status"] == "operator_approval_rework"
+      assert result.context["error"] == "operator_approval_rework_exhausted"
+      assert result.context["operator_rework_count"] == 1
+      assert result.context["total_rework_count"] == 1
+      assert result.context["rework_kind"] == "operator_approval"
+      assert result.context["approval_request_id"] == "irq_commit_rework_exhausted_2"
+      # Two implement turns (initial + one operator rework), two commit attempts
+      # (first rework control, second rework control that exhausts category).
+      assert_single_worker_session(calls, 2)
+      assert Enum.count(calls, fn {n, _} -> n == "git_commit" end) == 2
+      refute called?(calls, "council_review_change")
+      assert_closed_and_released(calls)
+      assert_json_clean_context(result.context)
+    end
+
+    test "validation rework then operator rework hits shared total budget" do
+      assert {{:ok, result}, calls} = run_fixture(:validation_then_operator_rework_exhausted)
+      assert result.context["status"] == "rework_exhausted"
+      assert result.context["error"] == "operator_approval_rework_exhausted"
+      assert result.context["legacy_status"] == "operator_approval_rework"
+      assert result.context["validation_rework_count"] == 1
+      assert result.context["operator_rework_count"] == 1
+      assert result.context["total_rework_count"] == 2
+      assert result.context["rework_kind"] == "operator_approval"
+      # implement, validation rework implement, operator rework implement
       assert_single_worker_session(calls, 3)
       assert_closed_and_released(calls)
     end

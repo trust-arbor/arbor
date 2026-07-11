@@ -159,8 +159,206 @@ defmodule Arbor.Orchestrator.ActionsExecutorApprovalRetryTest do
     Process.sleep(25)
     assert :ok = Arbor.Comms.InteractionRouter.respond(second_request.request_id, :denied)
 
-    assert {:error, message} = Task.await(second, 3_000)
-    assert message =~ "denied by the operator"
+    assert {:control, payload} = Task.await(second, 3_000)
+    assert payload["interaction_outcome"] == "denied"
+    assert payload["request_id"] == second_request.request_id
+  end
+
+  test "approved interaction retries once with the exact approval marker" do
+    agent_id = "agent_approval_once_#{System.unique_integer([:positive])}"
+    action_module = Arbor.Actions.Session.Classify
+    resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
+
+    assert {:ok, gated_capability} =
+             Arbor.Security.grant(
+               principal: agent_id,
+               resource: resource_uri,
+               constraints: %{}
+             )
+
+    on_exit(fn -> Arbor.Security.revoke(gated_capability.id) end)
+
+    execution =
+      Task.async(fn ->
+        ActionsExecutor.execute(
+          "session_classify",
+          %{"input" => "hello"},
+          File.cwd!(),
+          agent_id: agent_id
+        )
+      end)
+
+    request = await_pending_request(agent_id)
+    Process.sleep(25)
+
+    assert :ok =
+             Arbor.Comms.InteractionRouter.respond(request.request_id, :approved, %{
+               decision: :approve
+             })
+
+    assert {:ok, result} = Task.await(execution, 3_000)
+    assert Jason.decode!(result)["input_type"] == "query"
+  end
+
+  test "rework control does not execute and preserves request id and bounded note" do
+    agent_id = "agent_approval_rework_#{System.unique_integer([:positive])}"
+    action_module = Arbor.Actions.Session.Classify
+    resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
+
+    assert {:ok, gated_capability} =
+             Arbor.Security.grant(
+               principal: agent_id,
+               resource: resource_uri,
+               constraints: %{}
+             )
+
+    on_exit(fn -> Arbor.Security.revoke(gated_capability.id) end)
+
+    execution =
+      Task.async(fn ->
+        ActionsExecutor.execute(
+          "session_classify",
+          %{"input" => "must not execute on rework"},
+          File.cwd!(),
+          agent_id: agent_id
+        )
+      end)
+
+    request = await_pending_request(agent_id)
+    Process.sleep(25)
+    long_note = String.duplicate("fix-the-api-surface ", 200)
+
+    assert :ok =
+             Arbor.Comms.InteractionRouter.respond(request.request_id, :rejected, %{
+               decision: :rework,
+               rework: true,
+               note: long_note
+             })
+
+    assert {:control, payload} = Task.await(execution, 3_000)
+    assert payload["interaction_outcome"] == "rework"
+    assert payload["request_id"] == request.request_id
+    assert is_binary(payload["note"])
+    assert byte_size(payload["note"]) <= 1_024
+    assert String.valid?(payload["note"])
+    assert String.starts_with?(payload["note"], "fix-the-api-surface")
+  end
+
+  test "deny control does not execute and normalizes note" do
+    agent_id = "agent_approval_deny_#{System.unique_integer([:positive])}"
+    action_module = Arbor.Actions.Session.Classify
+    resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
+
+    assert {:ok, gated_capability} =
+             Arbor.Security.grant(
+               principal: agent_id,
+               resource: resource_uri,
+               constraints: %{}
+             )
+
+    on_exit(fn -> Arbor.Security.revoke(gated_capability.id) end)
+
+    execution =
+      Task.async(fn ->
+        ActionsExecutor.execute(
+          "session_classify",
+          %{"input" => "must not execute on deny"},
+          File.cwd!(),
+          agent_id: agent_id
+        )
+      end)
+
+    request = await_pending_request(agent_id)
+    Process.sleep(25)
+
+    assert :ok =
+             Arbor.Comms.InteractionRouter.respond(request.request_id, :rejected, %{
+               decision: :deny,
+               note: "nope"
+             })
+
+    assert {:control, payload} = Task.await(execution, 3_000)
+    assert payload["interaction_outcome"] == "denied"
+    assert payload["request_id"] == request.request_id
+    assert payload["note"] == "nope"
+  end
+
+  test "inconsistent response/decision metadata fails closed without retry" do
+    agent_id = "agent_approval_inconsistent_#{System.unique_integer([:positive])}"
+    action_module = Arbor.Actions.Session.Classify
+    resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
+
+    assert {:ok, gated_capability} =
+             Arbor.Security.grant(
+               principal: agent_id,
+               resource: resource_uri,
+               constraints: %{}
+             )
+
+    on_exit(fn -> Arbor.Security.revoke(gated_capability.id) end)
+
+    execution =
+      Task.async(fn ->
+        ActionsExecutor.execute(
+          "session_classify",
+          %{"input" => "must not execute on inconsistent metadata"},
+          File.cwd!(),
+          agent_id: agent_id
+        )
+      end)
+
+    request = await_pending_request(agent_id)
+    Process.sleep(25)
+
+    # approved response with deny decision must never retry as approved
+    assert :ok =
+             Arbor.Comms.InteractionRouter.respond(request.request_id, :approved, %{
+               decision: :deny
+             })
+
+    assert {:error, message} = Task.await(execution, 3_000)
+    assert message =~ "approval response rejected"
+    assert message =~ request.request_id
+  end
+
+  test "invalid note bytes are dropped while request id is preserved" do
+    agent_id = "agent_approval_bad_note_#{System.unique_integer([:positive])}"
+    action_module = Arbor.Actions.Session.Classify
+    resource_uri = Arbor.Actions.canonical_uri_for(action_module, %{})
+
+    assert {:ok, gated_capability} =
+             Arbor.Security.grant(
+               principal: agent_id,
+               resource: resource_uri,
+               constraints: %{}
+             )
+
+    on_exit(fn -> Arbor.Security.revoke(gated_capability.id) end)
+
+    execution =
+      Task.async(fn ->
+        ActionsExecutor.execute(
+          "session_classify",
+          %{"input" => "invalid note path"},
+          File.cwd!(),
+          agent_id: agent_id
+        )
+      end)
+
+    request = await_pending_request(agent_id)
+    Process.sleep(25)
+
+    assert :ok =
+             Arbor.Comms.InteractionRouter.respond(request.request_id, :rejected, %{
+               decision: :rework,
+               rework: true,
+               note: <<0xFF, 0xFE, "not-utf8">>
+             })
+
+    assert {:control, payload} = Task.await(execution, 3_000)
+    assert payload["interaction_outcome"] == "rework"
+    assert payload["request_id"] == request.request_id
+    assert payload["note"] == ""
   end
 
   test "security regression: caller task/session capability revocation denies an approved retry" do
