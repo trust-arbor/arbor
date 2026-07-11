@@ -84,6 +84,8 @@ defmodule Arbor.Persistence.Eval.FileStore do
 
   @json_suffix ".json"
   @json_suffix_size byte_size(@json_suffix)
+  @stable_read_pass_one_event [:arbor, :persistence, :eval, :stable_read, :pass_one]
+  @post_rename_event [:arbor, :persistence, :eval, :file_store, :post_rename]
 
   @type run_data :: map()
 
@@ -517,7 +519,7 @@ defmodule Arbor.Persistence.Eval.FileStore do
     }
   end
 
-  # Full regular-file identity. mtime/ctime are OTP posix seconds on this pin
+  # Stable-read identity. mtime/ctime are OTP posix seconds on this pin
   # (pinned OTP rejects `time: :native` with `:badarg`; high-resolution file
   # times are not exposed by File.Stat). Metadata equality is best-effort;
   # content stability is enforced by dual-pass digest equality under the
@@ -1005,36 +1007,35 @@ defmodule Arbor.Persistence.Eval.FileStore do
          :ok <- assert_root_stable(root_state),
          :ok <- assert_root_private(root_state),
          {:ok, tmp, io} <- open_exclusive_temp(root) do
-      try do
-        case :file.write(io, json) do
-          :ok ->
-            case :file.sync(io) do
-              :ok ->
-                _ = :file.close(io)
-                finalize_temp_publish(root_state, tmp, target)
-
-              {:error, reason} ->
-                _ = :file.close(io)
-                cleanup_temp(tmp)
-                {:error, {:file_error, reason}}
-            end
-
-          {:error, reason} ->
-            _ = :file.close(io)
-            cleanup_temp(tmp)
-            {:error, {:file_error, reason}}
-        end
-      rescue
-        e ->
-          _ = :file.close(io)
-          cleanup_temp(tmp)
-          {:error, {:file_error, Exception.message(e)}}
-      catch
-        kind, reason ->
-          _ = :file.close(io)
-          cleanup_temp(tmp)
-          {:error, {:file_error, {kind, reason}}}
+      case write_and_sync_temp(io, tmp, json) do
+        :ok -> finalize_temp_publish(root_state, tmp, target)
+        {:error, _} = err -> err
       end
+    end
+  end
+
+  defp write_and_sync_temp(io, tmp, json) do
+    try do
+      with :ok <- :file.write(io, json),
+           :ok <- :file.sync(io) do
+        _ = :file.close(io)
+        :ok
+      else
+        {:error, reason} ->
+          _ = :file.close(io)
+          cleanup_temp(tmp)
+          {:error, {:file_error, reason}}
+      end
+    rescue
+      e ->
+        _ = :file.close(io)
+        cleanup_temp(tmp)
+        {:error, {:file_error, Exception.message(e)}}
+    catch
+      kind, reason ->
+        _ = :file.close(io)
+        cleanup_temp(tmp)
+        {:error, {:file_error, {kind, reason}}}
     end
   end
 
@@ -1080,24 +1081,7 @@ defmodule Arbor.Persistence.Eval.FileStore do
       {:ok, tmp_identity} ->
         case rename_temp(tmp, target) do
           :ok ->
-            _ = best_effort_sync_directory(root_state.path)
-
-            case verify_published(target, tmp_identity) do
-              :ok ->
-                case assert_root_stable(root_state) do
-                  :ok ->
-                    :ok
-
-                  {:error, reason} ->
-                    # Target retained after rename; root identity drift.
-                    {:error, {:publish_post_rename_inconsistent, reason}}
-                end
-
-              {:error, reason} ->
-                # Target path retains the renamed inode (or an unexpected
-                # substitute). Do not report a clean no-side-effect failure.
-                {:error, {:publish_post_rename_verify_failed, reason}}
-            end
+            finalize_published_side_effect(root_state, target, tmp_identity)
 
           {:error, _} = err ->
             cleanup_temp(tmp)
@@ -1107,6 +1091,35 @@ defmodule Arbor.Persistence.Eval.FileStore do
       {:error, _} = err ->
         cleanup_temp(tmp)
         err
+    end
+  end
+
+  defp finalize_published_side_effect(root_state, target, tmp_identity) do
+    try do
+      :telemetry.execute(
+        @post_rename_event,
+        %{system_time: System.system_time()},
+        %{path: target}
+      )
+
+      _ = best_effort_sync_directory(root_state.path)
+
+      case verify_published(target, tmp_identity) do
+        :ok ->
+          case assert_root_stable(root_state) do
+            :ok -> :ok
+            {:error, reason} -> {:error, {:publish_post_rename_inconsistent, reason}}
+          end
+
+        {:error, reason} ->
+          {:error, {:publish_post_rename_verify_failed, reason}}
+      end
+    rescue
+      e ->
+        {:error, {:publish_post_rename_inconsistent, {:exception, Exception.message(e)}}}
+    catch
+      kind, reason ->
+        {:error, {:publish_post_rename_inconsistent, {kind, reason}}}
     end
   end
 
@@ -1158,7 +1171,7 @@ defmodule Arbor.Persistence.Eval.FileStore do
       {:ok, stat} ->
         case regular_identity(stat) do
           {:ok, id} ->
-            if identity_match?(id, expected_identity) and
+            if publish_identity_match?(id, expected_identity) and
                  Bitwise.band(stat.mode, 0o777) == 0o600 do
               :ok
             else
@@ -1268,6 +1281,7 @@ defmodule Arbor.Persistence.Eval.FileStore do
                {:ok, data} <- read_exact_size(io, expected.size, max_bytes),
                :ok <- eof_probe(io),
                digest1 = :crypto.hash(:sha256, data),
+               :ok <- emit_pass_one_checkpoint(path),
                :ok <- seek_bof(io),
                {:ok, digest2} <- hash_exact_size(io, expected.size, max_bytes),
                :ok <- eof_probe(io),
@@ -1310,6 +1324,26 @@ defmodule Arbor.Persistence.Eval.FileStore do
   end
 
   defp identity_match?(_, _), do: false
+
+  # Rename preserves the published file object and bytes but may update ctime
+  # (and platform-specific timestamp metadata). Publication therefore binds the
+  # stable object fields only; verify_published/2 checks mode 0600 separately.
+  defp publish_identity_match?(a, b) when is_map(a) and is_map(b) do
+    a.type == b.type and a.inode == b.inode and a.major_device == b.major_device and
+      a.minor_device == b.minor_device and a.size == b.size
+  end
+
+  defp publish_identity_match?(_, _), do: false
+
+  defp emit_pass_one_checkpoint(path) do
+    :telemetry.execute(
+      @stable_read_pass_one_event,
+      %{system_time: System.system_time()},
+      %{path: path, source: :file_store}
+    )
+
+    :ok
+  end
 
   defp eof_probe(io) do
     case :file.read(io, 1) do

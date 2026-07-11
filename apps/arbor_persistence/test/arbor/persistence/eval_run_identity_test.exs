@@ -1,6 +1,7 @@
 defmodule Arbor.Persistence.EvalRunIdentityTest do
   use ExUnit.Case, async: true
   @moduletag :fast
+  @exclusive_mkdir_retries 16
 
   alias Arbor.Persistence
   import Bitwise
@@ -50,15 +51,8 @@ defmodule Arbor.Persistence.EvalRunIdentityTest do
 
   describe "eval_dataset_hash/1" do
     test "hashes file contents deterministically and detects edits" do
-      tmp_dir =
-        Path.join(
-          System.tmp_dir!(),
-          "eval_run_identity_#{System.unique_integer([:positive, :monotonic])}"
-        )
-
+      tmp_dir = exclusive_owned_temp_dir!("eval_run_identity_")
       on_exit(fn -> File.rm_rf(tmp_dir) end)
-      File.mkdir!(tmp_dir)
-
       path = Path.join(tmp_dir, "dataset.jsonl")
       File.write!(path, ~s({"input": "a", "expected": "b"}\n))
 
@@ -143,6 +137,50 @@ defmodule Arbor.Persistence.EvalRunIdentityTest do
     test "handles finite float extremes without raising" do
       assert Persistence.eval_config_fingerprint(%{min: -1.7976931348623157e308, zero: -0.0}) =~
                ~r/^sha256:[0-9a-f]{64}$/
+    end
+
+    test "security regression: accepts 21,000 bounded integers below 1 MiB" do
+      integers = Enum.map(1..21_000, &((1 <<< 127) + &1))
+      assert byte_size(Jason.encode!(%{values: integers})) == 840_012
+
+      assert Persistence.eval_config_fingerprint(%{values: integers}) =~
+               ~r/^sha256:[0-9a-f]{64}$/
+    end
+
+    test "security regression: accepts 10,000 bounded ASCII keys below 1 MiB" do
+      config =
+        Map.new(0..9_999, fn index ->
+          {"key-" <> String.pad_leading(Integer.to_string(index), 12, "0"), true}
+        end)
+
+      assert byte_size(Jason.encode!(config)) == 240_001
+      assert Persistence.eval_config_fingerprint(config) =~ ~r/^sha256:[0-9a-f]{64}$/
+    end
+  end
+
+  defp exclusive_owned_temp_dir!(prefix) do
+    Enum.reduce_while(1..@exclusive_mkdir_retries, :error, fn _, _ ->
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          prefix <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+        )
+
+      case File.mkdir(path) do
+        :ok ->
+          File.chmod!(path, 0o700)
+          {:halt, path}
+
+        {:error, :eexist} ->
+          {:cont, :error}
+
+        {:error, _} ->
+          {:cont, :error}
+      end
+    end)
+    |> case do
+      path when is_binary(path) -> path
+      :error -> flunk("could not allocate exclusive temp directory")
     end
   end
 end

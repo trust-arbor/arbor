@@ -4,13 +4,12 @@ defmodule Arbor.Persistence.EvalFileStoreTest do
   alias Arbor.Persistence
 
   @moduletag :fast
+  @exclusive_mkdir_retries 16
 
   setup do
-    tmp_dir = Path.join(System.tmp_dir!(), "eval_store_#{:rand.uniform(1_000_000)}")
-    File.mkdir_p!(tmp_dir)
-    File.chmod!(tmp_dir, 0o700)
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
-    %{dir: tmp_dir}
+    dir = exclusive_owned_temp_dir!("eval_store_")
+    on_exit(fn -> File.rm_rf(dir) end)
+    %{dir: dir}
   end
 
   describe "save_eval_run_file/3 and load_eval_run_file/2" do
@@ -77,11 +76,8 @@ defmodule Arbor.Persistence.EvalFileStoreTest do
       assert hd(runs)["provider"] == "ollama"
     end
 
-    test "returns empty for non-existent directory" do
-      {:ok, runs} =
-        Persistence.list_eval_run_files(
-          dir: "/tmp/nonexistent_eval_dir_#{:rand.uniform(999_999)}"
-        )
+    test "returns empty for non-existent directory", %{dir: dir} do
+      {:ok, runs} = Persistence.list_eval_run_files(dir: Path.join(dir, "missing"))
 
       assert runs == []
     end
@@ -141,6 +137,32 @@ defmodule Arbor.Persistence.EvalFileStoreTest do
     test "returns error if run doesn't exist", %{dir: dir} do
       Persistence.save_eval_run_file("exists", %{model: "a", metrics: %{}}, dir: dir)
       assert {:error, _} = Persistence.compare_eval_run_files("exists", "missing", dir: dir)
+    end
+  end
+
+  defp exclusive_owned_temp_dir!(prefix) do
+    Enum.reduce_while(1..@exclusive_mkdir_retries, :error, fn _, _ ->
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          prefix <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+        )
+
+      case File.mkdir(path) do
+        :ok ->
+          File.chmod!(path, 0o700)
+          {:halt, path}
+
+        {:error, :eexist} ->
+          {:cont, :error}
+
+        {:error, _} ->
+          {:cont, :error}
+      end
+    end)
+    |> case do
+      path when is_binary(path) -> path
+      :error -> flunk("could not allocate exclusive temp directory")
     end
   end
 end

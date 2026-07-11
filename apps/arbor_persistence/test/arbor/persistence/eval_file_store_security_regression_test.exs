@@ -5,11 +5,11 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   Exercised exclusively through the public `Arbor.Persistence` facade.
 
   Parent lineage (most recent first):
-  - **f9ac0086** — immediate parent for *this* correction pass (dual-pass
-    stable-content reads; cryptorandom exclusive temp/euid probe; bounded
-    config_fingerprint; honest enumeration worker; post-rename verify
-    side-effect honesty). New dual-pass / fingerprint-bound claims must fail
-    on f9ac0086 (second-resolution metadata race) and pass here.
+  - **ef14b337** — exact R6 parent. Its bounded config traversal falsely
+    rejects valid sub-1 MiB JSON, dual-pass reads have no synchronous mutation
+    checkpoint, and publish verification compares rename-volatile timestamps.
+  - **f9ac0086** — exact chain parent for the missing-checkpoint public read
+    proofs. It returns a hash/load result because no pass-one event is emitted.
   - **d7df3521** — identity match completeness, preflight encode bounds,
     exact one-suffix binding, trusted-private-root before chmod, bounded
     enumeration worker, publish identity verify. Dual-pass mutation tests
@@ -29,6 +29,8 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
   alias Arbor.Persistence
 
   @exclusive_mkdir_retries 16
+  @stable_read_pass_one_event [:arbor, :persistence, :eval, :stable_read, :pass_one]
+  @post_rename_event [:arbor, :persistence, :eval, :file_store, :post_rename]
 
   setup do
     base = exclusive_owned_temp_base!("eval_sec_")
@@ -776,6 +778,24 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
     end
   end
 
+  describe "security regression R6: exact bounded config encoding cost" do
+    test "accepts exact sub-1 MiB JSON instead of a worst-case integer estimate" do
+      integers = Enum.map(1..21_000, &(Bitwise.bsl(1, 127) + &1))
+
+      assert Persistence.eval_config_fingerprint(%{values: integers}) =~
+               ~r/^sha256:[0-9a-f]{64}$/
+    end
+
+    test "accepts 10,000 ASCII keys whose exact encoding remains below 1 MiB" do
+      config =
+        Map.new(0..9_999, fn index ->
+          {"key-" <> String.pad_leading(Integer.to_string(index), 12, "0"), true}
+        end)
+
+      assert Persistence.eval_config_fingerprint(config) =~ ~r/^sha256:[0-9a-f]{64}$/
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Dataset hashing integrity
   # ---------------------------------------------------------------------------
@@ -999,6 +1019,100 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
     end
   end
 
+  describe "security regression R6: synchronous dual-pass mutation checkpoint" do
+    test "dataset hash rejects coordinated same-inode same-size mutation", %{base: base} do
+      path = Path.join(base, "checkpoint-dataset.jsonl")
+      content_a = :binary.copy("A", 131_072)
+      content_b = :binary.copy("B", byte_size(content_a))
+      File.write!(path, content_a)
+
+      mutated =
+        attach_mutator(@stable_read_pass_one_event, path, :dataset_hash, fn ->
+          File.write!(path, content_b)
+        end)
+
+      assert Persistence.eval_dataset_hash(path) == nil
+      assert :atomics.get(mutated, 1) == 1
+      assert File.stat!(path).size == byte_size(content_a)
+    end
+
+    test "public load returns file_changed after coordinated same-inode same-size mutation", %{
+      dir: dir
+    } do
+      run_id = "checkpoint-load"
+      path = Path.join(dir, run_id <> ".json")
+
+      assert :ok = Persistence.save_eval_run_file(run_id, %{model: "a"}, dir: dir)
+      content_a = File.read!(path)
+      content_b = String.replace(content_a, ~s("model": "a"), ~s("model": "b"))
+      assert byte_size(content_a) == byte_size(content_b)
+      refute content_a == content_b
+
+      mutated =
+        attach_mutator(@stable_read_pass_one_event, path, :file_store, fn ->
+          File.write!(path, content_b)
+        end)
+
+      assert Persistence.load_eval_run_file(run_id, dir: dir) == {:error, :file_changed}
+      assert :atomics.get(mutated, 1) == 1
+      assert File.stat!(path).size == byte_size(content_a)
+    end
+  end
+
+  describe "security regression R6: publish identity and post-rename honesty" do
+    test "raw rename fixture preserves object identity while timestamps change", %{base: base} do
+      source = Path.join(base, "raw-source")
+      target = Path.join(base, "raw-target")
+      File.write!(source, "payload")
+      File.chmod!(source, 0o600)
+      File.touch!(source, {{2000, 1, 1}, {0, 0, 0}})
+      before = File.lstat!(source, time: :posix)
+
+      File.rename!(source, target)
+      File.touch!(target, {{2001, 1, 1}, {0, 0, 0}})
+      after_stat = File.lstat!(target, time: :posix)
+
+      assert {after_stat.type, after_stat.major_device, after_stat.minor_device, after_stat.inode,
+              after_stat.size} ==
+               {before.type, before.major_device, before.minor_device, before.inode, before.size}
+
+      refute after_stat.mtime == before.mtime
+    end
+
+    test "public save accepts rename-volatile timestamp changes", %{dir: dir} do
+      run_id = "timestamp-publish"
+      path = Path.join(dir, run_id <> ".json")
+
+      mutated =
+        attach_mutator(@post_rename_event, path, nil, fn ->
+          File.touch!(path, {{2000, 1, 1}, {0, 0, 0}})
+        end)
+
+      assert :ok = Persistence.save_eval_run_file(run_id, %{model: "m"}, dir: dir)
+      assert :atomics.get(mutated, 1) == 1
+      assert File.lstat!(path, time: :posix).mtime < 1_000_000_000
+    end
+
+    test "post-rename verification fault reports an honest published-side-effect error", %{
+      dir: dir
+    } do
+      run_id = "mode-fault-publish"
+      path = Path.join(dir, run_id <> ".json")
+
+      mutated =
+        attach_mutator(@post_rename_event, path, nil, fn ->
+          File.chmod!(path, 0o400)
+        end)
+
+      assert {:error, {:publish_post_rename_verify_failed, :publish_identity_mismatch}} =
+               Persistence.save_eval_run_file(run_id, %{model: "m"}, dir: dir)
+
+      assert :atomics.get(mutated, 1) == 1
+      assert File.exists?(path)
+      assert Bitwise.band(File.stat!(path).mode, 0o777) == 0o400
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Cleanup on pre-publish failure
   # ---------------------------------------------------------------------------
@@ -1017,5 +1131,28 @@ defmodule Arbor.Persistence.EvalFileStoreSecurityRegressionTest do
 
       assert leftovers == []
     end
+  end
+
+  defp attach_mutator(event, path, source, mutate) do
+    handler_id = {__MODULE__, self(), make_ref()}
+    mutated = :atomics.new(1, signed: false)
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        event,
+        fn _event, _measurements, metadata, _config ->
+          source_matches = is_nil(source) or metadata[:source] == source
+
+          if metadata[:path] == path and source_matches and :atomics.get(mutated, 1) == 0 do
+            mutate.()
+            :atomics.put(mutated, 1, 1)
+          end
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    mutated
   end
 end

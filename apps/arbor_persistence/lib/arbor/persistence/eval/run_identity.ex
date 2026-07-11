@@ -18,6 +18,7 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
   # equality uses OTP posix second-resolution timestamps and is best-effort.
 
   @stream_chunk_bytes 65_536
+  @stable_read_pass_one_event [:arbor, :persistence, :eval, :stable_read, :pass_one]
 
   # config_fingerprint canonicalization ceilings (public helper must not
   # recurse/materialize without a system ceiling).
@@ -155,6 +156,7 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
                true <- identity_match?(id1, expected),
                {:ok, state1} <- hash_exact_size(io, expected.size),
                :ok <- eof_probe(io),
+               :ok <- emit_pass_one_checkpoint(path),
                :ok <- seek_bof(io),
                {:ok, state2} <- hash_exact_size(io, expected.size),
                :ok <- eof_probe(io),
@@ -233,6 +235,16 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
     end
   end
 
+  defp emit_pass_one_checkpoint(path) do
+    :telemetry.execute(
+      @stable_read_pass_one_event,
+      %{system_time: System.system_time()},
+      %{path: path, source: :dataset_hash}
+    )
+
+    :ok
+  end
+
   defp regular_identity(%File.Stat{type: :regular, inode: inode, major_device: major} = stat)
        when is_integer(inode) and inode > 0 and is_integer(major) do
     {:ok,
@@ -307,8 +319,9 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
         if budget.estimated > budget.max_estimated_bytes do
           :error
         else
-          Enum.reduce_while(map, {:ok, MapSet.new(), [], budget}, fn {k, v},
-                                                                     {:ok, seen, acc, b} ->
+          Enum.reduce_while(map, {:ok, MapSet.new(), [], budget, true}, fn {k, v},
+                                                                           {:ok, seen, acc, b,
+                                                                            first?} ->
             case normalize_fp_key(k, b) do
               {:ok, key, b} ->
                 if MapSet.member?(seen, key) do
@@ -317,12 +330,13 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
                 else
                   case canonicalize(v, b, depth + 1) do
                     {:ok, cv, b2} ->
-                      b2 = %{b2 | estimated: b2.estimated + 1}
+                      separator_bytes = if first?, do: 0, else: 1
+                      b2 = %{b2 | estimated: b2.estimated + separator_bytes}
 
                       if b2.estimated > b2.max_estimated_bytes do
                         {:halt, :error}
                       else
-                        {:cont, {:ok, MapSet.put(seen, key), [{key, cv} | acc], b2}}
+                        {:cont, {:ok, MapSet.put(seen, key), [{key, cv} | acc], b2, false}}
                       end
 
                     :error ->
@@ -335,7 +349,7 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
             end
           end)
           |> case do
-            {:ok, _seen, pairs, final_budget} ->
+            {:ok, _seen, pairs, final_budget, _first?} ->
               ordered =
                 pairs
                 |> Enum.sort_by(&elem(&1, 0))
@@ -368,15 +382,16 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
         if budget.estimated > budget.max_estimated_bytes do
           :error
         else
-          Enum.reduce_while(list, {:ok, [], budget}, fn item, {:ok, acc, b} ->
+          Enum.reduce_while(list, {:ok, [], budget, true}, fn item, {:ok, acc, b, first?} ->
             case canonicalize(item, b, depth + 1) do
               {:ok, c, b2} ->
-                b2 = %{b2 | estimated: b2.estimated + 1}
+                separator_bytes = if first?, do: 0, else: 1
+                b2 = %{b2 | estimated: b2.estimated + separator_bytes}
 
                 if b2.estimated > b2.max_estimated_bytes do
                   {:halt, :error}
                 else
-                  {:cont, {:ok, [c | acc], b2}}
+                  {:cont, {:ok, [c | acc], b2, false}}
                 end
 
               :error ->
@@ -384,7 +399,7 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
             end
           end)
           |> case do
-            {:ok, items, final_budget} ->
+            {:ok, items, final_budget, _first?} ->
               {:ok, Enum.reverse(items), final_budget}
 
             :error ->
@@ -411,30 +426,18 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
         :error
 
       true ->
-        # Quotes + conservative worst-case JSON escape (\\uXXXX per byte → 6x)
-        estimated = budget.estimated + size * 6 + 2
-
-        if estimated > budget.max_estimated_bytes do
-          :error
-        else
-          {:ok, v, %{budget | nodes: budget.nodes + 1, estimated: estimated}}
+        case encoded_scalar_size(v) do
+          {:ok, encoded_size} -> add_encoded_scalar(v, budget, encoded_size)
+          :error -> :error
         end
     end
   end
 
   defp canonicalize(v, budget, _depth) when is_integer(v) do
     with true <- budget.nodes + 1 <= budget.max_nodes,
-         {:ok, magnitude_bytes} <- bounded_integer_magnitude_bytes(v) do
-      # Three decimal digits per magnitude byte plus a possible sign is a
-      # conservative bound. Magnitude is bounded before this arithmetic and
-      # before Jason performs decimal conversion.
-      estimated = budget.estimated + magnitude_bytes * 3 + 1
-
-      if estimated > budget.max_estimated_bytes do
-        :error
-      else
-        {:ok, v, %{budget | nodes: budget.nodes + 1, estimated: estimated}}
-      end
+         {:ok, _magnitude_bytes} <- bounded_integer_magnitude_bytes(v),
+         {:ok, encoded_size} <- encoded_scalar_size(v) do
+      add_encoded_scalar(v, budget, encoded_size)
     else
       _ -> :error
     end
@@ -461,7 +464,10 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
   end
 
   defp canonicalize(v, budget, _depth) when is_boolean(v) or is_nil(v) do
-    add_scalar(v, budget, 5)
+    case encoded_scalar_size(v) do
+      {:ok, encoded_size} -> add_encoded_scalar(v, budget, encoded_size)
+      :error -> :error
+    end
   end
 
   defp canonicalize(a, budget, depth) when is_atom(a) do
@@ -470,13 +476,13 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
 
   defp canonicalize(_, _, _), do: :error
 
-  defp add_scalar(value, budget, max_encoded_size) do
+  defp add_encoded_scalar(value, budget, encoded_size) do
     if budget.nodes + 1 > budget.max_nodes or
-         budget.estimated + max_encoded_size > budget.max_estimated_bytes do
+         budget.estimated + encoded_size > budget.max_estimated_bytes do
       :error
     else
       {:ok, value,
-       %{budget | nodes: budget.nodes + 1, estimated: budget.estimated + max_encoded_size}}
+       %{budget | nodes: budget.nodes + 1, estimated: budget.estimated + encoded_size}}
     end
   end
 
@@ -531,6 +537,13 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
   defp leading_zero_bits(_byte), do: 7
 
   defp encode_finite_float(value) do
+    encoded_scalar_size(value)
+  end
+
+  # Called only after the scalar's byte/bit ceiling has passed. Jason therefore
+  # performs exact JSON escaping/decimal conversion on bounded input, avoiding
+  # both unbounded work and conservative false rejection near the 1 MiB limit.
+  defp encoded_scalar_size(value) do
     case Jason.encode(value) do
       {:ok, encoded} -> {:ok, byte_size(encoded)}
       {:error, _} -> :error
@@ -550,13 +563,18 @@ defmodule Arbor.Persistence.Eval.RunIdentity do
         :error
 
       true ->
-        cost = size * 6 + 2 + 1
-        estimated = budget.estimated + cost
+        case encoded_scalar_size(k) do
+          {:ok, encoded_size} ->
+            estimated = budget.estimated + encoded_size + 1
 
-        if estimated > budget.max_estimated_bytes do
-          :error
-        else
-          {:ok, k, %{budget | estimated: estimated}}
+            if estimated > budget.max_estimated_bytes do
+              :error
+            else
+              {:ok, k, %{budget | estimated: estimated}}
+            end
+
+          :error ->
+            :error
         end
     end
   end
