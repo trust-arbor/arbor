@@ -106,6 +106,33 @@ defmodule Arbor.Actions.TestFixtures.BoundStrippedTaskCompositeAction do
   end
 end
 
+defmodule Arbor.Actions.TestFixtures.BoundLineageCompositeAction do
+  @moduledoc false
+
+  use Jido.Action,
+    name: "bound_lineage_composite_action",
+    description: "Composite action used to verify nested Engine binding lineage",
+    schema: []
+
+  @impl true
+  def run(_params, context) do
+    nested_context = Map.fetch!(context, :nested_execution_binding_context)
+    nested_action = Map.fetch!(context, :nested_action_module)
+
+    invoke = fn ->
+      Arbor.Actions.execute_action(nested_action, %{}, nested_context)
+    end
+
+    if Map.get(context, :nested_in_task, false) do
+      invoke
+      |> Task.async()
+      |> Task.await(1_000)
+    else
+      invoke.()
+    end
+  end
+end
+
 defmodule Arbor.Actions.TestFixtures.BoundBatchCompositeAction do
   @moduledoc false
 

@@ -368,8 +368,13 @@ defmodule Arbor.Actions do
           {:error, reason} -> {:error, {:execution_binding_rejected, reason}}
         end
 
-      {:ok, _binding} ->
-        {:error, {:execution_binding_rejected, :nested_action_binding_replaced}}
+      {:ok, binding} ->
+        with :ok <- verify_child_execution_binding(active, binding),
+             :ok <- verify_bound_action_module(action_module, binding.action_bindings) do
+          with_active_execution_binding(binding, fun)
+        else
+          {:error, reason} -> {:error, {:execution_binding_rejected, reason}}
+        end
 
       {:error, reason} ->
         {:error, {:execution_binding_rejected, reason}}
@@ -436,32 +441,49 @@ defmodule Arbor.Actions do
     manifest_digest = context_value(context, :execution_manifest_digest)
     action_bindings = context_value(context, :pinned_action_bindings)
     action_bindings_digest = context_value(context, :pinned_action_bindings_digest)
+    authority_binding_digest = context_value(context, :execution_authority_binding_digest)
+
+    authority_parent_binding_digest =
+      context_value(context, :execution_authority_parent_binding_digest)
 
     values = [manifest, manifest_digest, action_bindings, action_bindings_digest]
+    lineage_values = [authority_binding_digest, authority_parent_binding_digest]
 
-    if Enum.all?(values, &is_nil/1) do
-      {:ok, nil}
-    else
-      with true <- execution_binding_json_clean?(manifest),
-           true <- valid_execution_manifest_digest?(manifest_digest),
-           true <- execution_binding_json_clean?(action_bindings),
-           true <- valid_execution_manifest_digest?(action_bindings_digest),
-           {:ok, ^manifest_digest} <- execution_binding_digest(manifest),
-           {:ok, ^action_bindings_digest} <- execution_binding_digest(action_bindings),
-           {:ok, manifest_action_bindings} <- action_bindings_from_manifest(manifest),
-           true <- manifest_action_bindings == action_bindings do
-        {:ok,
-         %{
-           execution_manifest: manifest,
-           execution_manifest_digest: manifest_digest,
-           action_bindings: action_bindings,
-           action_bindings_digest: action_bindings_digest
-         }}
-      else
-        false -> {:error, :invalid_action_binding_context}
-        {:ok, _other_digest} -> {:error, :execution_binding_digest_mismatch}
-        {:error, _reason} = error -> error
-      end
+    cond do
+      Enum.all?(values ++ lineage_values, &is_nil/1) ->
+        {:ok, nil}
+
+      Enum.all?(values, &is_nil/1) ->
+        {:error, :invalid_action_binding_context}
+
+      true ->
+        with true <- execution_binding_json_clean?(manifest),
+             true <- valid_execution_manifest_digest?(manifest_digest),
+             true <- execution_binding_json_clean?(action_bindings),
+             true <- valid_execution_manifest_digest?(action_bindings_digest),
+             :ok <-
+               validate_execution_binding_lineage(
+                 authority_binding_digest,
+                 authority_parent_binding_digest
+               ),
+             {:ok, ^manifest_digest} <- execution_binding_digest(manifest),
+             {:ok, ^action_bindings_digest} <- execution_binding_digest(action_bindings),
+             {:ok, manifest_action_bindings} <- action_bindings_from_manifest(manifest),
+             true <- manifest_action_bindings == action_bindings do
+          {:ok,
+           %{
+             execution_manifest: manifest,
+             execution_manifest_digest: manifest_digest,
+             action_bindings: action_bindings,
+             action_bindings_digest: action_bindings_digest,
+             authority_binding_digest: authority_binding_digest,
+             authority_parent_binding_digest: authority_parent_binding_digest
+           }}
+        else
+          false -> {:error, :invalid_action_binding_context}
+          {:ok, _other_digest} -> {:error, :execution_binding_digest_mismatch}
+          {:error, _reason} = error -> error
+        end
     end
   end
 
@@ -482,6 +504,67 @@ defmodule Arbor.Actions do
   end
 
   defp action_bindings_from_manifest(_manifest), do: {:error, :invalid_execution_manifest}
+
+  # Authority digests are opaque lineage tokens here so arbor_actions does not
+  # acquire an upward dependency on the orchestrator's authorization struct.
+  defp validate_execution_binding_lineage(nil, nil), do: :ok
+
+  defp validate_execution_binding_lineage(binding_digest, nil) do
+    if valid_execution_manifest_digest?(binding_digest),
+      do: :ok,
+      else: {:error, :invalid_execution_binding_lineage}
+  end
+
+  defp validate_execution_binding_lineage(binding_digest, parent_binding_digest) do
+    if valid_execution_manifest_digest?(binding_digest) and
+         valid_execution_manifest_digest?(parent_binding_digest) and
+         binding_digest != parent_binding_digest do
+      :ok
+    else
+      {:error, :invalid_execution_binding_lineage}
+    end
+  end
+
+  defp verify_child_execution_binding(active, child) do
+    with :ok <- verify_child_execution_binding_lineage(active, child),
+         :ok <- verify_child_action_binding_subset(active.action_bindings, child.action_bindings) do
+      :ok
+    end
+  end
+
+  defp verify_child_execution_binding_lineage(active, child) do
+    active_digest = active.authority_binding_digest
+    child_digest = child.authority_binding_digest
+    child_parent_digest = child.authority_parent_binding_digest
+
+    cond do
+      is_nil(active_digest) or is_nil(child_digest) or is_nil(child_parent_digest) ->
+        {:error, :nested_action_binding_lineage_missing}
+
+      child_parent_digest != active_digest or child_digest == active_digest ->
+        {:error, :nested_action_binding_lineage_mismatch}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp verify_child_action_binding_subset(parent_bindings, child_bindings) do
+    child_bindings
+    |> Enum.sort_by(fn {name, _binding} -> name end)
+    |> Enum.reduce_while(:ok, fn {name, child_binding}, :ok ->
+      case Map.fetch(parent_bindings, name) do
+        {:ok, ^child_binding} ->
+          {:cont, :ok}
+
+        {:ok, _different_binding} ->
+          {:halt, {:error, {:nested_action_binding_changed, name}}}
+
+        :error ->
+          {:halt, {:error, {:nested_action_binding_expanded, name}}}
+      end
+    end)
+  end
 
   defp verify_bound_action_module(action_module, bindings) do
     with {:ok, actual} <- runtime_descriptor(action_module),

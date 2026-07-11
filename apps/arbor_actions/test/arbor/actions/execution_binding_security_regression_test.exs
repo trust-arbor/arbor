@@ -7,6 +7,7 @@ defmodule Arbor.Actions.ExecutionBindingSecurityRegressionTest do
   alias Arbor.Actions.TestFixtures.{
     BoundBatchCompositeAction,
     BoundCompositeAction,
+    BoundLineageCompositeAction,
     BoundNestedInnerAction,
     BoundNestedOtherAction,
     BoundParallelCompositeAction,
@@ -72,6 +73,192 @@ defmodule Arbor.Actions.ExecutionBindingSecurityRegressionTest do
 
     assert {:error, {:execution_binding_rejected, :nested_action_binding_removed}} =
              Arbor.Actions.execute_action(BoundStrippedTaskCompositeAction, %{}, context)
+
+    refute_receive :bound_nested_inner_executed
+  end
+
+  test "legacy nested calls retain the same active binding" do
+    modules = [BoundLineageCompositeAction, BoundNestedInnerAction]
+    nested_context = bound_context(modules)
+
+    context =
+      modules
+      |> bound_context()
+      |> Map.merge(%{
+        nested_action_module: BoundNestedInnerAction,
+        nested_execution_binding_context: nested_context
+      })
+
+    assert {:ok, %{inner: true}} =
+             Arbor.Actions.execute_action(BoundLineageCompositeAction, %{}, context)
+
+    assert_receive :bound_nested_inner_executed
+  end
+
+  test "security regression: authorized child bindings preserve recursive Engine lineage" do
+    parent_digest = lineage_digest("parent")
+    child_digest = lineage_digest("child")
+    grandchild_digest = lineage_digest("grandchild")
+
+    grandchild_context =
+      lineage_bound_context([BoundNestedInnerAction], grandchild_digest, child_digest)
+
+    child_context =
+      [BoundLineageCompositeAction, BoundNestedInnerAction]
+      |> lineage_bound_context(child_digest, parent_digest)
+      |> Map.merge(%{
+        nested_action_module: BoundNestedInnerAction,
+        nested_execution_binding_context: grandchild_context
+      })
+
+    parent_context =
+      [BoundLineageCompositeAction, BoundNestedInnerAction, BoundNestedOtherAction]
+      |> lineage_bound_context(parent_digest, nil)
+      |> Map.merge(%{
+        nested_action_module: BoundLineageCompositeAction,
+        nested_execution_binding_context: child_context
+      })
+
+    assert {:ok, %{inner: true}} =
+             Arbor.Actions.execute_action(BoundLineageCompositeAction, %{}, parent_context)
+
+    assert_receive :bound_nested_inner_executed
+  end
+
+  test "security regression: Task child inherits and transitions its caller's Engine lineage" do
+    parent_digest = lineage_digest("task-parent")
+    child_digest = lineage_digest("task-child")
+
+    child_context =
+      lineage_bound_context([BoundNestedInnerAction], child_digest, parent_digest)
+
+    parent_context =
+      [BoundLineageCompositeAction, BoundNestedInnerAction]
+      |> lineage_bound_context(parent_digest, nil)
+      |> Map.merge(%{
+        nested_action_module: BoundNestedInnerAction,
+        nested_execution_binding_context: child_context,
+        nested_in_task: true
+      })
+
+    assert {:ok, %{inner: true}} =
+             Arbor.Actions.execute_action(BoundLineageCompositeAction, %{}, parent_context)
+
+    assert_receive :bound_nested_inner_executed
+  end
+
+  test "security regression: replacement binding without authority lineage is rejected" do
+    parent_digest = lineage_digest("lineage-parent")
+    child_context = bound_context([BoundNestedInnerAction])
+
+    parent_context =
+      [BoundLineageCompositeAction, BoundNestedInnerAction]
+      |> lineage_bound_context(parent_digest, nil)
+      |> Map.merge(%{
+        nested_action_module: BoundNestedInnerAction,
+        nested_execution_binding_context: child_context
+      })
+
+    assert {:error, {:execution_binding_rejected, :nested_action_binding_lineage_missing}} =
+             Arbor.Actions.execute_action(BoundLineageCompositeAction, %{}, parent_context)
+
+    refute_receive :bound_nested_inner_executed
+  end
+
+  test "security regression: sibling authority lineage cannot replace the active child" do
+    parent_digest = lineage_digest("sibling-parent")
+    child_digest = lineage_digest("sibling-child")
+    sibling_digest = lineage_digest("sibling")
+
+    sibling_context =
+      lineage_bound_context([BoundNestedInnerAction], sibling_digest, parent_digest)
+
+    child_context =
+      [BoundLineageCompositeAction, BoundNestedInnerAction]
+      |> lineage_bound_context(child_digest, parent_digest)
+      |> Map.merge(%{
+        nested_action_module: BoundNestedInnerAction,
+        nested_execution_binding_context: sibling_context
+      })
+
+    parent_context =
+      [BoundLineageCompositeAction, BoundNestedInnerAction]
+      |> lineage_bound_context(parent_digest, nil)
+      |> Map.merge(%{
+        nested_action_module: BoundLineageCompositeAction,
+        nested_execution_binding_context: child_context
+      })
+
+    assert {:error, {:execution_binding_rejected, :nested_action_binding_lineage_mismatch}} =
+             Arbor.Actions.execute_action(BoundLineageCompositeAction, %{}, parent_context)
+
+    refute_receive :bound_nested_inner_executed
+  end
+
+  test "security regression: child authority cannot expand the parent's action bindings" do
+    parent_digest = lineage_digest("subset-parent")
+    child_digest = lineage_digest("subset-child")
+
+    child_context =
+      lineage_bound_context(
+        [BoundNestedInnerAction, BoundNestedOtherAction],
+        child_digest,
+        parent_digest
+      )
+
+    parent_context =
+      [BoundLineageCompositeAction, BoundNestedInnerAction]
+      |> lineage_bound_context(parent_digest, nil)
+      |> Map.merge(%{
+        nested_action_module: BoundNestedInnerAction,
+        nested_execution_binding_context: child_context
+      })
+
+    assert {:error,
+            {:execution_binding_rejected,
+             {:nested_action_binding_expanded, "bound_nested_other_action"}}} =
+             Arbor.Actions.execute_action(BoundLineageCompositeAction, %{}, parent_context)
+
+    refute_receive :bound_nested_inner_executed
+    refute_receive :bound_nested_other_executed
+  end
+
+  test "security regression: child authority cannot replace a parent's exact code binding" do
+    parent_digest = lineage_digest("code-parent")
+    child_digest = lineage_digest("code-child")
+    {:ok, inner_binding} = Arbor.Actions.runtime_descriptor(BoundNestedInnerAction)
+
+    child_context =
+      inner_binding
+      |> Map.put("beam_sha256", String.duplicate("0", 64))
+      |> then(&binding_context(%{&1["name"] => &1}))
+      |> put_lineage(child_digest, parent_digest)
+      |> Map.merge(%{agent_id: "system", test_pid: self()})
+
+    parent_context =
+      [BoundLineageCompositeAction, BoundNestedInnerAction]
+      |> lineage_bound_context(parent_digest, nil)
+      |> Map.merge(%{
+        nested_action_module: BoundNestedInnerAction,
+        nested_execution_binding_context: child_context
+      })
+
+    assert {:error,
+            {:execution_binding_rejected,
+             {:nested_action_binding_changed, "bound_nested_inner_action"}}} =
+             Arbor.Actions.execute_action(BoundLineageCompositeAction, %{}, parent_context)
+
+    refute_receive :bound_nested_inner_executed
+  end
+
+  test "security regression: malformed authority lineage digest fails closed" do
+    context =
+      [BoundNestedInnerAction]
+      |> bound_context()
+      |> Map.put(:execution_authority_binding_digest, "not-a-sha256")
+
+    assert {:error, {:execution_binding_rejected, :invalid_execution_binding_lineage}} =
+             Arbor.Actions.execute_action(BoundNestedInnerAction, %{}, context)
 
     refute_receive :bound_nested_inner_executed
   end
@@ -186,6 +373,23 @@ defmodule Arbor.Actions.ExecutionBindingSecurityRegressionTest do
     bindings
     |> binding_context()
     |> Map.merge(%{agent_id: "system", test_pid: self()})
+  end
+
+  defp lineage_bound_context(modules, binding_digest, parent_binding_digest) do
+    modules
+    |> bound_context()
+    |> put_lineage(binding_digest, parent_binding_digest)
+  end
+
+  defp put_lineage(context, binding_digest, parent_binding_digest) do
+    context
+    |> Map.put(:execution_authority_binding_digest, binding_digest)
+    |> Map.put(:execution_authority_parent_binding_digest, parent_binding_digest)
+  end
+
+  defp lineage_digest(label) do
+    :crypto.hash(:sha256, label)
+    |> Base.encode16(case: :lower)
   end
 
   defp binding_context(bindings) do

@@ -119,6 +119,20 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   # duration waiting for consensus. Default: 60 seconds.
   @approval_timeout_ms 60_000
 
+  # These values remain action-local. They are never params or Engine context,
+  # and executable delegate/middleware overrides are intentionally excluded.
+  @nested_engine_opt_keys [
+    :authorization,
+    :authorizer,
+    :signer,
+    :auth_context,
+    :identity_private_key,
+    :on_event,
+    :logs_root,
+    :resumable,
+    :max_depth
+  ]
+
   # ============================================================================
   # Private
   # ============================================================================
@@ -139,6 +153,7 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
        ) do
     with {:ok, pinned_binding} <- verify_pinned_action(action_module, name, opts),
          {:ok, execution_binding_context} <- execution_binding_context(opts),
+         {:ok, nested_engine_opts} <- nested_engine_opts(opts),
          {:ok, retry_workdir_guard} <- capture_retry_workdir_guard(workdir, agent_id) do
       params =
         args
@@ -171,6 +186,8 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
             |> maybe_put_context(:session_id, session_id)
             |> maybe_put_context(:caller_id, caller_id || agent_id)
             |> maybe_put_context(:author_id, author_id)
+            |> maybe_put_context(:run_authorization, Keyword.get(opts, :run_authorization))
+            |> maybe_put_context(:nested_engine_opts, nested_engine_opts)
             |> maybe_put_context(:pinned_action_binding, pinned_binding)
             |> maybe_put_context(:pinned_action_name, name)
             |> maybe_put_file_workspace(action_module, workdir)
@@ -255,8 +272,16 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     manifest = Keyword.get(opts, :execution_manifest)
     manifest_digest = Keyword.get(opts, :execution_manifest_digest)
     bindings = Keyword.get(opts, :pinned_action_bindings)
+    authority = Keyword.get(opts, :run_authorization)
 
     cond do
+      not is_nil(authority) and not match?(%RunAuthorization{}, authority) ->
+        {:error, :invalid_run_authorization}
+
+      Enum.all?([manifest, manifest_digest, bindings], &is_nil/1) and
+          authority_has_execution_binding?(authority) ->
+        {:error, :incomplete_execution_binding}
+
       Enum.all?([manifest, manifest_digest, bindings], &is_nil/1) ->
         {:ok, %{}}
 
@@ -264,19 +289,80 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
         {:error, :incomplete_execution_binding}
 
       true ->
-        case Arbor.Actions.execution_binding_digest(bindings) do
-          {:ok, bindings_digest} ->
-            {:ok,
+        with {:ok, bindings_digest} <- Arbor.Actions.execution_binding_digest(bindings),
+             {:ok, lineage} <-
+               execution_binding_lineage(authority, manifest, manifest_digest, bindings) do
+          {:ok,
+           Map.merge(
              %{
                execution_manifest: manifest,
                execution_manifest_digest: manifest_digest,
                pinned_action_bindings: bindings,
                pinned_action_bindings_digest: bindings_digest
-             }}
-
-          {:error, _reason} ->
-            {:error, :invalid_action_bindings}
+             },
+             lineage
+           )}
+        else
+          {:error, :run_authorization_execution_binding_mismatch} = error -> error
+          {:error, _reason} -> {:error, :invalid_action_bindings}
         end
+    end
+  end
+
+  defp authority_has_execution_binding?(%RunAuthorization{} = authority) do
+    not Enum.all?(
+      [
+        authority.execution_manifest,
+        authority.execution_manifest_digest,
+        authority.pinned_action_bindings
+      ],
+      &is_nil/1
+    )
+  end
+
+  defp authority_has_execution_binding?(_authority), do: false
+
+  defp execution_binding_lineage(nil, _manifest, _manifest_digest, _bindings),
+    do: {:ok, %{}}
+
+  defp execution_binding_lineage(
+         %RunAuthorization{} = authority,
+         manifest,
+         manifest_digest,
+         bindings
+       ) do
+    if authority.execution_manifest == manifest and
+         authority.execution_manifest_digest == manifest_digest and
+         authority.pinned_action_bindings == bindings do
+      {:ok,
+       %{
+         execution_authority_binding_digest: authority.binding_digest,
+         execution_authority_parent_binding_digest: authority.parent_binding_digest
+       }}
+    else
+      {:error, :run_authorization_execution_binding_mismatch}
+    end
+  end
+
+  defp nested_engine_opts(opts) do
+    forwarded =
+      opts
+      |> Keyword.take(@nested_engine_opt_keys)
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+
+    project? =
+      forwarded != [] or match?(%RunAuthorization{}, Keyword.get(opts, :run_authorization))
+
+    if project? do
+      case Keyword.get(opts, :max_depth, 3) do
+        max_depth when is_integer(max_depth) ->
+          {:ok, Keyword.put(forwarded, :max_depth, max_depth - 1)}
+
+        _invalid ->
+          {:error, :invalid_nested_engine_max_depth}
+      end
+    else
+      {:ok, nil}
     end
   end
 
