@@ -230,19 +230,25 @@ defmodule Arbor.Shell.ExecutorTest do
 
     test "security regression: max_output_bytes hard maximum clamps oversized values" do
       # Default 8 MiB; system hard max 16 MiB — larger positive requests must
-      # not bypass retention bounds (normalize down, do not reject).
+      # not bypass retention bounds (normalize down, do not reject). Public
+      # facade and Executor share one source of truth.
       default = 8_388_608
       hard_max = 16_777_216
 
-      assert Executor.normalize_max_output_bytes(nil) == default
-      assert Executor.normalize_max_output_bytes(0) == default
-      assert Executor.normalize_max_output_bytes(-1) == default
-      assert Executor.normalize_max_output_bytes("big") == default
-      assert Executor.normalize_max_output_bytes(1) == 1
-      assert Executor.normalize_max_output_bytes(default) == default
-      assert Executor.normalize_max_output_bytes(hard_max) == hard_max
-      assert Executor.normalize_max_output_bytes(hard_max + 1) == hard_max
-      assert Executor.normalize_max_output_bytes(hard_max * 4) == hard_max
+      assert Shell.max_output_bytes_limit() == hard_max
+      assert Shell.normalize_max_output_bytes(nil) == default
+      assert Shell.normalize_max_output_bytes(0) == default
+      assert Shell.normalize_max_output_bytes(-1) == default
+      assert Shell.normalize_max_output_bytes("big") == default
+      assert Shell.normalize_max_output_bytes(1) == 1
+      assert Shell.normalize_max_output_bytes(default) == default
+      assert Shell.normalize_max_output_bytes(hard_max) == hard_max
+      assert Shell.normalize_max_output_bytes(hard_max + 1) == hard_max
+      assert Shell.normalize_max_output_bytes(hard_max * 4) == hard_max
+
+      # Executor seam stays in lockstep with the facade.
+      assert Executor.normalize_max_output_bytes(hard_max * 2) ==
+               Shell.normalize_max_output_bytes(hard_max * 2)
     end
 
     test "security regression: kill/limit does not leak late port messages into caller mailbox" do

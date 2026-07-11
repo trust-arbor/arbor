@@ -149,10 +149,6 @@ defmodule Arbor.Actions.Shell do
 
     alias Arbor.Actions
 
-    # Match Arbor.Shell.Executor hard maximum (16 MiB). Adapter enforces the
-    # same non-bypassable clamp before forwarding to Arbor.Shell.
-    @max_max_output_bytes 16_777_216
-
     @doc """
     Declares taint roles for Shell.Execute parameters.
 
@@ -194,7 +190,7 @@ defmodule Arbor.Actions.Shell do
         |> maybe_add_opt(:env, params[:env])
         |> maybe_add_opt(
           :max_output_bytes,
-          clamp_max_output_bytes(params[:max_output_bytes])
+          normalize_forwarded_max_output_bytes(params[:max_output_bytes])
         )
         |> maybe_add_context_opts(context)
 
@@ -330,11 +326,13 @@ defmodule Arbor.Actions.Shell do
 
     defp effective_timeout(_timeout, default), do: default
 
-    # Schema-bounded control: clamp oversized positive ceilings to the system
-    # hard maximum (16 MiB). Nil/invalid left unset so Arbor.Shell applies its
-    # default; Executor re-clamps as defense in depth.
-    defp clamp_max_output_bytes(n) when is_integer(n) and n > 0, do: min(n, @max_max_output_bytes)
-    defp clamp_max_output_bytes(_n), do: nil
+    # Forward through the public Arbor.Shell facade only — hard max / default
+    # live in arbor_shell. Nil/invalid left unset so Shell applies its default;
+    # Executor re-normalizes as defense in depth.
+    defp normalize_forwarded_max_output_bytes(n) when is_integer(n) and n > 0,
+      do: Arbor.Shell.normalize_max_output_bytes(n)
+
+    defp normalize_forwarded_max_output_bytes(_n), do: nil
 
     defp maybe_add_opt(opts, _key, nil), do: opts
     defp maybe_add_opt(opts, key, value), do: Keyword.put(opts, key, value)

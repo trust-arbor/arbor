@@ -180,12 +180,21 @@ defmodule Arbor.Shell.Executor do
 
   # Focused-regression seam: default 8 MiB, hard max 16 MiB (clamp larger
   # positive values; invalid/non-positive → default). Same path as run/run_direct.
+  # Cross-library callers should use Arbor.Shell.normalize_max_output_bytes/1.
   @doc false
   @spec normalize_max_output_bytes(term()) :: pos_integer()
   def normalize_max_output_bytes(n) when is_integer(n) and n > 0,
     do: min(n, @max_max_output_bytes)
 
   def normalize_max_output_bytes(_n), do: @default_max_output_bytes
+
+  @doc false
+  @spec max_output_bytes_limit() :: pos_integer()
+  def max_output_bytes_limit, do: @max_max_output_bytes
+
+  @doc false
+  @spec default_max_output_bytes() :: pos_integer()
+  def default_max_output_bytes, do: @default_max_output_bytes
 
   # Private functions
 

@@ -120,10 +120,12 @@ defmodule Arbor.Actions.ShellTest do
       assert result.stderr == ""
     end
 
-    test "security regression: adapter clamps max_output_bytes to 16 MiB hard maximum" do
-      # Oversized positive ceiling must be accepted and clamped (not rejected).
-      # A small echo must still succeed under the clamped ceiling.
-      hard_max = 16_777_216
+    test "security regression: adapter clamps max_output_bytes via Arbor.Shell facade" do
+      # Oversized positive ceiling must be accepted and clamped (not rejected)
+      # through the public Shell facade — not a duplicated L6 hard-max constant.
+      hard_max = Arbor.Shell.max_output_bytes_limit()
+      assert hard_max == 16_777_216
+      assert Arbor.Shell.normalize_max_output_bytes(hard_max * 2) == hard_max
 
       assert {:ok, result} =
                Shell.Execute.run(

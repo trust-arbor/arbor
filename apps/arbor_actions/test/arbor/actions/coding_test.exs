@@ -1341,7 +1341,76 @@ defmodule Arbor.Actions.CodingTest do
 
       assert stderr =~ "output limit"
       assert stderr =~ "137"
+      assert stderr =~ "16 MiB"
       refute stderr =~ "timed out"
+      # Must not suggest raising above the hard maximum.
+      refute stderr =~ ~r/raise the ceiling/
+    end
+
+    test "security regression: validation_result labels generic killed exit 137 without timeout",
+         %{tmp_dir: tmp_dir} do
+      # killed + exit 137 without timed_out/output_limit_exceeded must not be
+      # labeled as a timeout (ordering: ceiling → timeout → generic kill).
+      repo = create_git_repo(Path.join(tmp_dir, "repo"))
+
+      runner = fn
+        Acp.StartSession, params, _context ->
+          Process.put(:coding_test_worktree, params.cwd)
+          {:ok, %{session_pid: self(), session_id: "acp-session"}}
+
+        Acp.SendMessage, _params, _context ->
+          worktree = Process.get(:coding_test_worktree)
+          File.write!(Path.join(worktree, "feature.txt"), "implemented\n")
+          {:ok, %{text: "STATUS: implemented\nCreated feature.txt"}}
+
+        Acp.CloseSession, _params, _context ->
+          {:ok, %{status: "closed"}}
+
+        Shell.Execute, _params, _context ->
+          {:ok,
+           %{
+             exit_code: 137,
+             stdout: "",
+             stderr: "",
+             timed_out: false,
+             killed: true,
+             output_limit_exceeded: false,
+             output_truncated: false
+           }}
+
+        module, params, context ->
+          module.run(params, Map.delete(context, :action_runner))
+      end
+
+      assert {:ok, result} =
+               Coding.ProduceReviewableChange.run(
+                 %{
+                   task: "Add feature file",
+                   repo_path: repo,
+                   branch_name: "test/validation-generic-kill-label",
+                   worktree_base_dir: Path.join(tmp_dir, "worktrees"),
+                   validation_commands: ["mix test"],
+                   submit_review: false
+                 },
+                 %{action_runner: runner}
+               )
+
+      assert result.status == "validation_failed"
+
+      assert [
+               %{
+                 passed: false,
+                 exit_code: 137,
+                 timed_out: false,
+                 killed: true,
+                 stderr: stderr
+               }
+             ] = result.validation
+
+      assert stderr =~ "command killed"
+      assert stderr =~ "137"
+      refute stderr =~ "timed out"
+      refute stderr =~ "output limit"
     end
 
     test "removes owned dirty worktree when the action process is cancelled", %{tmp_dir: tmp_dir} do

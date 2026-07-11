@@ -55,6 +55,27 @@ defmodule Arbor.Shell do
   @default_sandbox :basic
 
   # ===========================================================================
+  # Public API — Output ceiling bounds (single source of truth for callers)
+  # ===========================================================================
+
+  @doc """
+  Normalize a requested `:max_output_bytes` value.
+
+  Positive integers are clamped to the system hard maximum
+  (`max_output_bytes_limit/0`, 16 MiB). Invalid or non-positive values fall
+  back to the executor default (8 MiB). This is the public facade over
+  `Arbor.Shell.Executor` — other libraries must not import the Executor.
+  """
+  @spec normalize_max_output_bytes(term()) :: pos_integer()
+  def normalize_max_output_bytes(n), do: Executor.normalize_max_output_bytes(n)
+
+  @doc """
+  Non-bypassable system hard maximum for retained merged-stdout bytes (16 MiB).
+  """
+  @spec max_output_bytes_limit() :: pos_integer()
+  def max_output_bytes_limit, do: Executor.max_output_bytes_limit()
+
+  # ===========================================================================
   # Public API — Authorized versions (for agent callers)
   # ===========================================================================
 

@@ -734,22 +734,32 @@ defmodule Arbor.Actions.Coding do
 
       stderr = result[:stderr] || result["stderr"] || ""
 
-      # Distinguish output-ceiling kills from absolute timeouts. Both use exit
-      # 137 (SIGKILL), but labeling a ceiling kill as "timed out" misdirects
-      # operators toward validation_timeout instead of max_output_bytes.
+      # Order: output ceiling → absolute timeout → generic kill. Exit 137 is
+      # shared; mislabeling ceiling kills as timeouts or generic kills as
+      # timeouts misdirects operators toward the wrong fix.
+      ceiling_mib = div(Arbor.Shell.max_output_bytes_limit(), 1_048_576)
+
       stderr =
         cond do
           output_limit_exceeded ->
             base =
               "command output limit exceeded (exit 137 = killed after retained " <>
-                "stdout hit max_output_bytes; raise the ceiling or reduce command output)"
+                "stdout hit max_output_bytes; reduce command output or raise " <>
+                "max_output_bytes only within the #{ceiling_mib} MiB system ceiling)"
 
             if stderr == "", do: base, else: base <> "; " <> stderr
 
-          timed_out or (killed and exit_code == 137) ->
+          timed_out ->
             base =
               "command timed out (exit 137 = killed after timeout; " <>
                 "check validation_timeout — values under 10s are treated as unset)"
+
+            if stderr == "", do: base, else: base <> "; " <> stderr
+
+          killed and exit_code == 137 ->
+            base =
+              "command killed (exit 137 = process killed; not an absolute timeout " <>
+                "and not an output-limit termination)"
 
             if stderr == "", do: base, else: base <> "; " <> stderr
 
