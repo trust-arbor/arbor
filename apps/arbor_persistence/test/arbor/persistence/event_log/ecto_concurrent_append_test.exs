@@ -10,13 +10,10 @@ defmodule Arbor.Persistence.EventLog.EctoConcurrentAppendTest do
   appends read the same version, assign the same number, and the second violates
   the unique index — flooding the logs via `Signals.durable_emit`.
 
-  The fix serializes per-stream appends with a Postgres advisory transaction lock
-  (`pg_advisory_xact_lock(hashtext(stream_id))`) acquired before reading the
-  version. This test fires N concurrent appends to one fresh stream and asserts
-  ALL succeed with event_numbers exactly 1..N — and crucially does NOT use the
-  Sandbox's single shared connection (which would serialize the concurrency away
-  and hide the race). It checks out an `:auto`-mode connection so the spawned
-  Tasks open real, independent pool connections that genuinely contend.
+  The fix serializes appends with a bounded global advisory transaction lock
+  acquired before reading stream and global positions. This test fires real
+  concurrent appends without the Sandbox's single shared connection, covering
+  same-stream CAS, different-stream global order, and held-lock deadlines.
 
   Verified to FAIL (duplicate event_numbers / `Ecto.ConstraintError`) when the
   advisory lock is removed from `do_append`, and to PASS with it in place.
@@ -40,6 +37,12 @@ defmodule Arbor.Persistence.EventLog.EctoConcurrentAppendTest do
   @moduletag :integration
   @moduletag :database
 
+  defmodule SingleConnectionRepo do
+    use Ecto.Repo,
+      otp_app: :arbor_persistence,
+      adapter: Ecto.Adapters.Postgres
+  end
+
   # This test is meaningful only against Postgres — the advisory lock is
   # Postgres-only, and only Postgres' real connection pool gives the genuine
   # concurrency that reproduces the race. Skip on the SQLite lane (which
@@ -53,7 +56,14 @@ defmodule Arbor.Persistence.EventLog.EctoConcurrentAppendTest do
   end
 
   defp on_postgres_or_skip(pid) do
-    if Repo.__adapter__() == Ecto.Adapters.Postgres do
+    if apply(Repo, :__adapter__, []) == Ecto.Adapters.Postgres do
+      single_connection_config =
+        Repo.config()
+        |> Keyword.drop([:adapter, :name, :otp_app, :repo])
+        |> Keyword.put(:pool, DBConnection.ConnectionPool)
+        |> Keyword.put(:pool_size, 1)
+
+      start_supervised!({SingleConnectionRepo, single_connection_config})
       {:ok, repo_pid: pid}
     else
       {:skip, "concurrent-append race is Postgres-only (advisory lock + real pool)"}
@@ -142,5 +152,137 @@ defmodule Arbor.Persistence.EventLog.EctoConcurrentAppendTest do
     assert Enum.count(results, &match?({:ok, [_]}, &1)) == 1
     assert Enum.count(results, &(&1 == {:error, :version_conflict})) == n - 1
     assert {:ok, 1} = EventLog.stream_version(stream_id, repo: Repo)
+  end
+
+  test "concurrent different-stream appends retain one strict global order" do
+    n = 25
+    events_per_writer = 10
+
+    results =
+      1..n
+      |> Task.async_stream(
+        fn i ->
+          stream_id = "global-race-#{i}"
+
+          events =
+            for sequence <- 1..events_per_writer do
+              Event.new(stream_id, "global", %{writer: i, sequence: sequence})
+            end
+
+          EventLog.append(stream_id, events, repo: Repo)
+        end,
+        max_concurrency: n,
+        timeout: 30_000,
+        ordered: false
+      )
+      |> Enum.to_list()
+
+    assert Enum.all?(results, &match?({:ok, {:ok, [_ | _]}}, &1)),
+           "a different-stream append failed or exited: #{inspect(results)}"
+
+    returned_positions =
+      results
+      |> Enum.flat_map(fn {:ok, {:ok, events}} -> Enum.map(events, & &1.global_position) end)
+      |> Enum.sort()
+
+    expected_positions = Enum.to_list(1..(n * events_per_writer))
+    assert returned_positions == expected_positions
+
+    assert {:ok, persisted} = EventLog.read_all(repo: Repo)
+    positions = Enum.map(persisted, & &1.global_position)
+    assert positions == expected_positions
+    assert length(positions) == length(Enum.uniq(positions))
+  end
+
+  test "held global append lock respects one deadline and cannot commit later" do
+    parent = self()
+
+    locker =
+      Task.async(fn ->
+        Repo.transaction(fn ->
+          Repo.query!(
+            "SELECT pg_advisory_xact_lock(hashtext('arbor.persistence.event_log.global_append'))"
+          )
+
+          Repo.query!("SELECT pg_advisory_xact_lock(hashtext($1))", ["postgres-deadline"])
+
+          send(parent, :postgres_append_lock_acquired)
+
+          receive do
+            :release_postgres_append_lock -> :ok
+          after
+            2_000 -> raise "test advisory lock release timed out"
+          end
+        end)
+      end)
+
+    assert_receive :postgres_append_lock_acquired, 1_000
+
+    try do
+      started_at = System.monotonic_time(:millisecond)
+
+      assert {:error, :operation_timeout} =
+               EventLog.append(
+                 "postgres-deadline",
+                 Event.new("postgres-deadline", "must-not-commit", %{}),
+                 repo: Repo,
+                 append_timeout_ms: 40
+               )
+
+      elapsed_ms = System.monotonic_time(:millisecond) - started_at
+      assert elapsed_ms < 250
+    after
+      send(locker.pid, :release_postgres_append_lock)
+    end
+
+    assert {:ok, {:ok, :ok}} = Task.yield(locker, 1_000)
+    Process.sleep(75)
+    assert {:ok, 0} = EventLog.stream_version("postgres-deadline", repo: Repo)
+  end
+
+  test "pool checkout shares the append deadline and cannot leave work behind" do
+    parent = self()
+
+    holder =
+      Task.async(fn ->
+        SingleConnectionRepo.transaction(
+          fn ->
+            send(parent, :postgres_pool_slot_held)
+
+            receive do
+              :release_postgres_pool_slot -> :ok
+            after
+              2_000 -> raise "test pool slot release timed out"
+            end
+          end,
+          timeout: 3_000
+        )
+      end)
+
+    assert_receive :postgres_pool_slot_held, 1_000
+
+    try do
+      started_at = System.monotonic_time(:millisecond)
+
+      assert {:error, :operation_timeout} =
+               EventLog.append(
+                 "postgres-checkout-deadline",
+                 Event.new("postgres-checkout-deadline", "must-not-commit", %{}),
+                 repo: SingleConnectionRepo,
+                 append_timeout_ms: 40
+               )
+
+      elapsed_ms = System.monotonic_time(:millisecond) - started_at
+      assert elapsed_ms < 250
+    after
+      send(holder.pid, :release_postgres_pool_slot)
+    end
+
+    assert {:ok, {:ok, :ok}} = Task.yield(holder, 1_000)
+
+    Process.sleep(75)
+
+    assert {:ok, 0} =
+             EventLog.stream_version("postgres-checkout-deadline", repo: SingleConnectionRepo)
   end
 end

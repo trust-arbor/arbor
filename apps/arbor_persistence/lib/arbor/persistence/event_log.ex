@@ -73,10 +73,11 @@ defmodule Arbor.Persistence.EventLog do
 
   With no freshness option this returns the ordinary current head. With
   `:max_current_age_ms`, the backend returns `{:ok, nil}` when the stream is
-  empty, the head's backend-owned age is greater than or equal to the duration,
-  or freshness evidence cannot be trusted after a restore. Caller-provided
-  `Event.timestamp` is never freshness authority. Durable rows created before a
-  backend gained commit evidence also fail freshness closed.
+  empty or the head's backend-owned age is greater than or equal to the
+  duration. A backend that knows a stream is nonempty but does not have its head
+  returns `{:error, :head_unavailable}` instead of projecting it as empty.
+  Caller-provided `Event.timestamp` is never freshness authority. Durable rows
+  created before a backend gained commit evidence fail freshness closed.
   """
   @callback read_stream_head(stream_id(), opts()) ::
               {:ok, Event.t() | nil} | {:error, term()}

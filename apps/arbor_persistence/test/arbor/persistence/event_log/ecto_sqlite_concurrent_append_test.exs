@@ -25,7 +25,7 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
        database: database,
        pool: DBConnection.ConnectionPool,
        pool_size: 12,
-       busy_timeout: 0,
+       busy_timeout: 500,
        journal_mode: :wal,
        queue_target: 100,
        queue_interval: 1_000}
@@ -134,8 +134,41 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
     assert {:ok, 1} = EventLog.stream_version(stream_id, repo: SQLitePoolRepo)
   end
 
-  test "lock deadline exhaustion returns a stable error and never exits" do
+  test "concurrent different-stream appends retain one strict global order" do
+    writer_count = 40
+
+    task_results =
+      1..writer_count
+      |> Task.async_stream(
+        fn writer ->
+          stream_id = "sqlite-global-#{writer}"
+
+          EventLog.append(
+            stream_id,
+            Event.new(stream_id, "global", %{writer: writer}),
+            repo: SQLitePoolRepo
+          )
+        end,
+        max_concurrency: writer_count,
+        ordered: false,
+        timeout: 15_000
+      )
+      |> Enum.to_list()
+
+    assert Enum.all?(task_results, &match?({:ok, {:ok, [_]}}, &1)),
+           "different-stream append failure or exit: #{inspect(task_results)}"
+
+    assert {:ok, persisted} = EventLog.read_all(repo: SQLitePoolRepo)
+    positions = Enum.map(persisted, & &1.global_position)
+
+    assert positions == Enum.to_list(1..writer_count)
+    assert length(positions) == length(Enum.uniq(positions))
+  end
+
+  test "nonzero busy_timeout cannot overrun the append deadline or commit later" do
     parent = self()
+
+    assert {:ok, %{rows: [[500]]}} = SQLitePoolRepo.query("PRAGMA busy_timeout")
 
     locker =
       Task.async(fn ->
@@ -157,17 +190,22 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
 
     try do
       event = Event.new("sqlite-busy", "ordinary", %{})
+      started_at = System.monotonic_time(:millisecond)
 
       assert {:error, :database_busy} =
                EventLog.append("sqlite-busy", event,
                  repo: SQLitePoolRepo,
-                 sqlite_busy_deadline_ms: 40
+                 append_timeout_ms: 40
                )
+
+      elapsed_ms = System.monotonic_time(:millisecond) - started_at
+      assert elapsed_ms < 250
     after
       send(locker.pid, :release_sqlite_lock)
     end
 
     assert {:ok, _result} = Task.yield(locker, 1_000)
+    Process.sleep(75)
     assert {:ok, 0} = EventLog.stream_version("sqlite-busy", repo: SQLitePoolRepo)
   end
 end

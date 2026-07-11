@@ -182,8 +182,10 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
                  name: name
                )
 
-      assert {:ok, nil} =
+      assert {:error, :head_unavailable} =
                ETS.read_stream_head(stream_id, name: name, max_current_age_ms: 60_000)
+
+      assert {:error, :head_unavailable} = ETS.read_stream_head(stream_id, name: name)
 
       assert {:error, :deadline_exceeded} =
                ETS.append(stream_id, Event.new(stream_id, "must-not-commit", %{}),
@@ -543,6 +545,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
 
       # No events were actually inserted — read returns empty
       assert {:ok, []} = ETS.read_stream("s1", name: name)
+      assert {:error, :head_unavailable} = ETS.read_stream_head("s1", name: name)
     end
 
     test "next append after rehydrate uses the rehydrated counter", %{name: name} do

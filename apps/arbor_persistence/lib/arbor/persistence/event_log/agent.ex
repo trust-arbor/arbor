@@ -6,7 +6,8 @@ defmodule Arbor.Persistence.EventLog.Agent do
   Does NOT support subscriptions (subscribe/3 returns {:error, :not_supported}).
 
   Append calls accept `:call_timeout_ms` in `1..60_000` (default `5_000`).
-  Requests first processed after their captured deadline fail without mutation.
+  Candidate state is committed only before the caller-owned operation deadline;
+  the transport gets a separate reply window.
 
       children = [
         {Arbor.Persistence.EventLog.Agent, name: :my_event_log}
@@ -19,6 +20,7 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   @default_append_call_timeout_ms 5_000
   @max_append_call_timeout_ms 60_000
+  @append_reply_slack_ms 100
 
   # --- Client API ---
 
@@ -29,21 +31,8 @@ defmodule Arbor.Persistence.EventLog.Agent do
       name = Keyword.fetch!(opts, :name)
       deadline_mono = System.monotonic_time(:millisecond) + call_timeout_ms
 
-      safe_get_and_update(name, call_timeout_ms, fn state ->
-        processed_at = System.monotonic_time(:millisecond)
-
-        if processed_at >= deadline_mono do
-          {{:error, :operation_timeout}, state}
-        else
-          case check_preconditions(stream_id, preconditions, processed_at, state) do
-            :ok ->
-              {persisted, state} = do_append(stream_id, events, processed_at, state)
-              {{:ok, persisted}, state}
-
-            {:error, reason} ->
-              {{:error, reason}, state}
-          end
-        end
+      safe_get_and_update(name, call_timeout_ms + @append_reply_slack_ms, fn state ->
+        append_before_deadline(state, stream_id, events, preconditions, deadline_mono)
       end)
     end
   end
@@ -59,8 +48,8 @@ defmodule Arbor.Persistence.EventLog.Agent do
       Agent.get(name, fn state ->
         state.streams
         |> Map.get(stream_id, [])
+        |> project_direction(direction)
         |> Enum.filter(&(&1.event_number >= from_num))
-        |> apply_direction(direction)
         |> apply_limit(limit)
       end)
 
@@ -80,7 +69,7 @@ defmodule Arbor.Persistence.EventLog.Agent do
                System.monotonic_time(:millisecond),
                state
              ) do
-            state.streams |> Map.get(stream_id, []) |> List.last()
+            state.streams |> Map.get(stream_id, []) |> List.first()
           end
         end)
 
@@ -97,6 +86,7 @@ defmodule Arbor.Persistence.EventLog.Agent do
     events =
       Agent.get(name, fn state ->
         state.global
+        |> Enum.reverse()
         |> Enum.filter(&(&1.global_position >= from_pos))
         |> apply_limit(limit)
       end)
@@ -121,10 +111,18 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
+    candidate_hook = Keyword.get(opts, :append_candidate_hook)
 
     Agent.start_link(
       fn ->
-        %{streams: %{}, global: [], versions: %{}, global_position: 0, head_inserted_mono: %{}}
+        %{
+          streams: %{},
+          global: [],
+          versions: %{},
+          global_position: 0,
+          head_inserted_mono: %{},
+          append_candidate_hook: candidate_hook
+        }
       end,
       name: name
     )
@@ -140,13 +138,13 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   # --- Private ---
 
-  defp apply_direction(events, :forward), do: events
-  defp apply_direction(events, :backward), do: Enum.reverse(events)
+  defp project_direction(events, :forward), do: Enum.reverse(events)
+  defp project_direction(events, :backward), do: events
 
   defp apply_limit(events, nil), do: events
   defp apply_limit(events, n), do: Enum.take(events, n)
 
-  defp do_append(stream_id, events, inserted_mono, state) do
+  defp do_append(stream_id, events, state) do
     current_version = Map.get(state.versions, stream_id, 0)
 
     {persisted, final_version, final_global_pos} =
@@ -165,20 +163,65 @@ defmodule Arbor.Persistence.EventLog.Agent do
         {[persisted_event | acc], new_ver, new_gpos}
       end)
 
-    persisted = Enum.reverse(persisted)
+    persisted_reversed = persisted
+    persisted = Enum.reverse(persisted_reversed)
 
-    streams = Map.update(state.streams, stream_id, persisted, &(&1 ++ persisted))
+    streams =
+      Map.update(state.streams, stream_id, persisted_reversed, &(persisted_reversed ++ &1))
 
     state = %{
       state
       | streams: streams,
-        global: state.global ++ persisted,
+        global: persisted_reversed ++ state.global,
         versions: Map.put(state.versions, stream_id, final_version),
-        global_position: final_global_pos,
-        head_inserted_mono: Map.put(state.head_inserted_mono, stream_id, inserted_mono)
+        global_position: final_global_pos
     }
 
     {persisted, state}
+  end
+
+  defp append_before_deadline(state, stream_id, events, preconditions, deadline_mono) do
+    processed_at = System.monotonic_time(:millisecond)
+
+    if processed_at >= deadline_mono do
+      {{:error, :operation_timeout}, state}
+    else
+      append_after_preconditions(
+        state,
+        stream_id,
+        events,
+        preconditions,
+        processed_at,
+        deadline_mono
+      )
+    end
+  end
+
+  defp append_after_preconditions(
+         state,
+         stream_id,
+         events,
+         preconditions,
+         processed_at,
+         deadline_mono
+       ) do
+    case check_preconditions(stream_id, preconditions, processed_at, state) do
+      :ok -> commit_candidate_before_deadline(state, stream_id, events, deadline_mono)
+      {:error, reason} -> {{:error, reason}, state}
+    end
+  end
+
+  defp commit_candidate_before_deadline(state, stream_id, events, deadline_mono) do
+    {persisted, candidate} = do_append(stream_id, events, state)
+    run_candidate_hook(state)
+    completed_at = System.monotonic_time(:millisecond)
+
+    if completed_at >= deadline_mono do
+      {{:error, :operation_timeout}, state}
+    else
+      candidate = put_head_freshness(candidate, stream_id, completed_at)
+      {{:ok, persisted}, candidate}
+    end
   end
 
   defp check_preconditions(stream_id, preconditions, now, state) do
@@ -221,16 +264,17 @@ defmodule Arbor.Persistence.EventLog.Agent do
     Agent.get_and_update(name, fun, timeout)
   catch
     :exit, reason ->
-      cond do
-        exit_reason_contains?(reason, :timeout) -> {:error, :operation_timeout}
-        backend_unavailable_exit?(reason) -> {:error, :backend_unavailable}
-        true -> exit(reason)
-      end
+      if exit_reason_contains?(reason, :timeout),
+        do: {:error, :operation_timeout},
+        else: {:error, :backend_unavailable}
   end
 
-  defp backend_unavailable_exit?(reason) do
-    Enum.any?([:noproc, :shutdown, :normal], &exit_reason_contains?(reason, &1))
+  defp put_head_freshness(state, stream_id, committed_mono) do
+    %{state | head_inserted_mono: Map.put(state.head_inserted_mono, stream_id, committed_mono)}
   end
+
+  defp run_candidate_hook(%{append_candidate_hook: hook}) when is_function(hook, 0), do: hook.()
+  defp run_candidate_hook(_state), do: :ok
 
   defp exit_reason_contains?(reason, expected) when reason == expected, do: true
 

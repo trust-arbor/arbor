@@ -255,12 +255,28 @@ defmodule Arbor.Persistence.EventLog.ETS do
   end
 
   def handle_call({:read_stream_head, stream_id, max_current_age_ms}, _from, state) do
-    event =
-      if fresh_head?(stream_id, max_current_age_ms, System.monotonic_time(:millisecond), state) do
-        read_head_event(stream_id, state)
+    reply =
+      case read_head_event(stream_id, state) do
+        :empty ->
+          {:ok, nil}
+
+        :unavailable ->
+          {:error, :head_unavailable}
+
+        {:ok, event} ->
+          if fresh_head?(
+               stream_id,
+               max_current_age_ms,
+               System.monotonic_time(:millisecond),
+               state
+             ) do
+            {:ok, event}
+          else
+            {:ok, nil}
+          end
       end
 
-    {:reply, {:ok, event}, state}
+    {:reply, reply, state}
   end
 
   def handle_call({:read_all, opts}, _from, state) do
@@ -548,13 +564,16 @@ defmodule Arbor.Persistence.EventLog.ETS do
   defp read_head_event(stream_id, state) do
     version = Map.get(state.stream_versions, stream_id, 0)
 
-    with true <- version > 0,
-         [{{^stream_id, ^version}, global_position}] <-
-           :ets.lookup(state.stream_table, {stream_id, version}),
-         [{^global_position, event}] <- :ets.lookup(state.global_table, global_position) do
-      event
+    if version == 0 do
+      :empty
     else
-      _ -> nil
+      with [{{^stream_id, ^version}, global_position}] <-
+             :ets.lookup(state.stream_table, {stream_id, version}),
+           [{^global_position, event}] <- :ets.lookup(state.global_table, global_position) do
+        {:ok, event}
+      else
+        _ -> :unavailable
+      end
     end
   end
 

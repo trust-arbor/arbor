@@ -209,7 +209,9 @@ defmodule Arbor.Contracts.API.Persistence do
 
   Backends may accept a bounded freshness requirement through `opts`. Returns
   `{:ok, nil}` when the stream is empty or its head does not satisfy that
-  requirement.
+  requirement. A metadata-only cache that knows the stream is nonempty must
+  return an unavailable error or fall through to durable storage; it must not
+  report the stream as empty.
   """
   @callback read_current_stream_head_using_backend(
               store_name(),

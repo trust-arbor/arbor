@@ -98,6 +98,58 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
       refute ELAgent.stream_exists?(stream_id, name: name)
     end
 
+    test "security regression: an expired post-decision candidate preserves the original state" do
+      parent = self()
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"el_agent_delayed_candidate_#{:erlang.unique_integer([:positive])}"
+
+      start_supervised!(
+        {ELAgent,
+         name: name,
+         append_candidate_hook: fn ->
+           send(parent, :candidate_built)
+           Process.sleep(35)
+         end},
+        id: name
+      )
+
+      event = Event.new("post-decision-timeout", "must-not-commit", %{})
+
+      assert {:error, :operation_timeout} =
+               ELAgent.append("post-decision-timeout", event,
+                 name: name,
+                 expected_version: 0,
+                 call_timeout_ms: 10
+               )
+
+      assert_receive :candidate_built
+      assert {:ok, 0} = ELAgent.stream_version("post-decision-timeout", name: name)
+      refute ELAgent.stream_exists?("post-decision-timeout", name: name)
+    end
+
+    test "normalizes an agent killed during transport instead of exiting the caller" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"el_agent_killed_#{:erlang.unique_integer([:positive])}"
+
+      {:ok, pid} = ELAgent.start_link(name: name)
+
+      Process.unlink(pid)
+      :ok = :sys.suspend(pid)
+
+      task =
+        Task.async(fn ->
+          ELAgent.append("killed", Event.new("killed", "event", %{}),
+            name: name,
+            call_timeout_ms: 1_000
+          )
+        end)
+
+      wait_for_queued_call(pid)
+      Process.exit(pid, :kill)
+
+      assert {:error, :backend_unavailable} = Task.await(task, 1_000)
+    end
+
     test "returns stable errors for unavailable agents and invalid call deadlines" do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       missing_name = :"missing_el_agent_#{:erlang.unique_integer([:positive])}"
@@ -209,6 +261,21 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
 
     test "stream_version returns 0 for missing stream", %{name: name} do
       assert {:ok, 0} = ELAgent.stream_version("nope", name: name)
+    end
+  end
+
+  defp wait_for_queued_call(pid, attempts \\ 100)
+
+  defp wait_for_queued_call(_pid, 0), do: flunk("append call did not reach suspended Agent")
+
+  defp wait_for_queued_call(pid, attempts) do
+    case Process.info(pid, :message_queue_len) do
+      {:message_queue_len, count} when count > 0 ->
+        :ok
+
+      _other ->
+        Process.sleep(2)
+        wait_for_queued_call(pid, attempts - 1)
     end
   end
 end

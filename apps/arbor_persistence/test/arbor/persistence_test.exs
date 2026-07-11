@@ -93,6 +93,20 @@ defmodule Arbor.PersistenceTest do
                Persistence.read_stream_head(name, backend, "s1")
     end
 
+    test "metadata-only nonempty heads are unavailable through the facade", %{
+      name: name,
+      backend: backend
+    } do
+      assert :ok =
+               EventLog.ETS.rehydrate_metadata(
+                 %{stream_versions: %{"durable-only" => 4}, global_position: 4},
+                 name: name
+               )
+
+      assert {:error, :head_unavailable} =
+               Persistence.read_stream_head(name, backend, "durable-only")
+    end
+
     test "stream_exists?/stream_version", %{name: name, backend: backend} do
       refute Persistence.stream_exists?(name, backend, "s1")
       Persistence.append(name, backend, "s1", Event.new("s1", "t", %{}))

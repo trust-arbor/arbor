@@ -10,7 +10,7 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
   Supports:
   - Append-only event streams
-  - Global ordering via sequence
+  - Strict global ordering via transactional append serialization
   - Stream versioning with optimistic concurrency
   - Efficient range queries
 
@@ -53,6 +53,7 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   alias Arbor.Persistence.{Event, EventLog}
   alias Arbor.Persistence.Repo
   alias Arbor.Persistence.Schemas.Event, as: EventSchema
+  alias Ecto.{Adapter, Adapters.SQL}
 
   require Logger
 
@@ -67,8 +68,11 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   - `:repo` - Ecto Repo to use (default: `Arbor.Persistence.Repo`)
   - `:expected_version` - Optimistic concurrency check (optional)
   - `:max_current_age_ms` - Require a current head younger than this duration
-  - `:sqlite_busy_deadline_ms` - SQLite lock-acquisition budget in `1..60_000`
-    milliseconds (default: `5_000`)
+  - `:append_timeout_ms` - Absolute database append budget in `1..60_000`
+    milliseconds (default: `5_000`), including checkout, lock acquisition,
+    preconditions, writes, and commit
+  - `:sqlite_busy_deadline_ms` - Deprecated SQLite alias for
+    `:append_timeout_ms`
 
   ## Returns
 
@@ -79,10 +83,13 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   @impl true
   # Bounded optimistic-concurrency retry for the event_number race (see do_append).
   @max_append_attempts 5
-  @default_sqlite_busy_deadline_ms 5_000
-  @max_sqlite_busy_deadline_ms 60_000
-  @sqlite_initial_backoff_ms 2
-  @sqlite_max_backoff_ms 50
+  @default_append_timeout_ms 5_000
+  @max_append_timeout_ms 60_000
+  @append_lock_initial_backoff_ms 2
+  @append_lock_max_backoff_ms 50
+  @sqlite_busy_slice_ms 5
+  @sqlite_pragma_timeout_ms 25
+  @global_append_lock_sql "SELECT pg_try_advisory_xact_lock(hashtext('arbor.persistence.event_log.global_append'))"
 
   def append(stream_id, events, opts \\ [])
 
@@ -92,10 +99,11 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
   def append(stream_id, events, opts) when is_list(events) do
     repo = Keyword.get(opts, :repo, Repo)
+    started_mono = System.monotonic_time(:millisecond)
 
     with {:ok, events, preconditions} <- EventLog.validate_append(stream_id, events, opts),
-         {:ok, sqlite_deadline_mono} <- sqlite_deadline(repo, opts) do
-      do_append(stream_id, events, preconditions, opts, 1, sqlite_deadline_mono, 0)
+         {:ok, append_deadline_mono} <- append_deadline(repo, opts, started_mono) do
+      do_append(stream_id, events, preconditions, opts, 1, append_deadline_mono, 0)
     end
   end
 
@@ -108,121 +116,171 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   # per-run stream via Task.start, flooding the logs with ConstraintError via
   # Signals.durable_emit.)
   #
-  # Root-cause fix: serialize appends to the SAME stream with a per-stream
-  # Postgres advisory transaction lock acquired BEFORE reading the version.
-  # Concurrent appends to one stream queue behind the lock and each reads the
-  # previous winner's committed event_number; appends to DIFFERENT streams use
-  # different lock keys and don't contend. The lock auto-releases at transaction
-  # end (commit or rollback). The bounded optimistic retry below is kept as a
-  # backstop but should now essentially never fire.
+  # Serialize every append before reading either stream or global position. The
+  # global lock is conservative, but it preserves strict cross-stream ordering
+  # without rewriting existing positions. PostgreSQL uses a bounded try-lock;
+  # SQLite's BEGIN IMMEDIATE is the equivalent database-wide write lock.
   defp do_append(
          stream_id,
          events,
          preconditions,
          opts,
          attempt,
-         sqlite_deadline_mono,
-         busy_attempt
+         append_deadline_mono,
+         lock_attempt
        ) do
-    repo = Keyword.get(opts, :repo, Repo)
+    context =
+      {stream_id, events, preconditions, opts, attempt, append_deadline_mono, lock_attempt}
 
-    transaction(repo, sqlite_deadline_mono, fn ->
-      # Serialize concurrent appends to this stream at the database (Postgres
-      # only — SQLite serializes writes already, and the ETS/Agent backends and
-      # the retry-test stub repos have no such lock).
-      lock_stream_for_append(repo, stream_id)
+    with_append_errors(context, fn ->
+      repo = Keyword.get(opts, :repo, Repo)
 
-      # Get current stream version and global position
-      current_version = get_current_version(repo, stream_id)
-      global_pos = get_max_global_position(repo)
-
-      # Optimistic concurrency check
-      if not is_nil(preconditions.expected_version) and
-           preconditions.expected_version != current_version do
-        repo.rollback(:version_conflict)
-      end
-
-      if not head_fresh?(repo, stream_id, preconditions.max_current_age_ms) do
-        repo.rollback(:deadline_exceeded)
-      end
-
-      # Assign positions and insert
-      {persisted, _} =
-        events
-        |> Enum.with_index(current_version + 1)
-        |> Enum.map_reduce(global_pos, fn {%Event{} = event, event_num}, gpos ->
-          new_gpos = gpos + 1
-
-          event_with_positions = %Event{
-            event
-            | event_number: event_num,
-              global_position: new_gpos,
-              timestamp: event.timestamp || DateTime.utc_now()
-          }
-
-          persisted_event = insert_event(repo, event_with_positions)
-          {persisted_event, new_gpos}
-        end)
-
-      persisted
+      transaction(repo, append_deadline_mono, fn ->
+        append_in_transaction(repo, stream_id, events, preconditions, append_deadline_mono)
+      end)
+      |> handle_append_result(context)
     end)
-    |> case do
-      {:sqlite_busy, :acquisition} ->
-        retry_sqlite_acquisition(
+  end
+
+  defp append_in_transaction(repo, stream_id, events, preconditions, deadline_mono) do
+    case acquire_global_append_lock(repo, deadline_mono) do
+      :ok -> :ok
+      {:error, reason} -> repo.rollback(reason)
+    end
+
+    current_version = get_current_version(repo, stream_id, deadline_mono)
+    global_position = get_max_global_position(repo, deadline_mono)
+
+    enforce_expected_version(repo, preconditions.expected_version, current_version)
+    enforce_fresh_head(repo, stream_id, preconditions.max_current_age_ms, deadline_mono)
+
+    persisted = persist_events(repo, events, current_version, global_position, deadline_mono)
+    ensure_before_deadline(repo, deadline_mono)
+    persisted
+  end
+
+  defp enforce_expected_version(_repo, nil, _current_version), do: :ok
+
+  defp enforce_expected_version(repo, expected_version, current_version) do
+    if expected_version == current_version,
+      do: :ok,
+      else: repo.rollback(:version_conflict)
+  end
+
+  defp enforce_fresh_head(repo, stream_id, max_current_age_ms, deadline_mono) do
+    if head_fresh?(repo, stream_id, max_current_age_ms, deadline_mono),
+      do: :ok,
+      else: repo.rollback(:deadline_exceeded)
+  end
+
+  defp persist_events(repo, events, current_version, global_position, deadline_mono) do
+    {persisted, _final_position} =
+      events
+      |> Enum.with_index(current_version + 1)
+      |> Enum.map_reduce(global_position, fn {%Event{} = event, event_number}, position ->
+        next_position = position + 1
+
+        positioned_event = %Event{
+          event
+          | event_number: event_number,
+            global_position: next_position,
+            timestamp: event.timestamp || DateTime.utc_now()
+        }
+
+        {insert_event(repo, positioned_event, deadline_mono), next_position}
+      end)
+
+    persisted
+  end
+
+  defp handle_append_result(
+         {:error, :append_lock_busy},
+         {stream_id, events, preconditions, opts, attempt, deadline_mono, lock_attempt}
+       ) do
+    retry_append_lock(
+      stream_id,
+      events,
+      preconditions,
+      opts,
+      attempt,
+      deadline_mono,
+      lock_attempt
+    )
+  end
+
+  defp handle_append_result({:sqlite_busy, _after_begin}, _context),
+    do: {:error, :database_busy}
+
+  defp handle_append_result(transaction_result, _context),
+    do: handle_transaction_result(transaction_result)
+
+  defp with_append_errors(context, fun) do
+    fun.()
+  rescue
+    error in [Ecto.ConstraintError, Ecto.InvalidChangesetError] ->
+      handle_event_number_conflict(error, context, __STACKTRACE__)
+
+    _error in DBConnection.ConnectionError ->
+      {:error, context |> context_repo() |> deadline_error()}
+
+    error ->
+      handle_append_exception(error, context, __STACKTRACE__)
+  catch
+    :exit, reason -> handle_append_exit(reason, context)
+  end
+
+  # A residual event_number conflict may be raised directly or wrapped in an
+  # invalid changeset. Exact-version callers must observe it without retry.
+  defp handle_event_number_conflict(
+         error,
+         {stream_id, events, preconditions, opts, attempt, deadline_mono, lock_attempt},
+         stacktrace
+       ) do
+    retryable? = is_nil(Keyword.get(opts, :expected_version)) and event_number_conflict?(error)
+
+    cond do
+      retryable? and attempt < @max_append_attempts ->
+        do_append(
           stream_id,
           events,
           preconditions,
           opts,
-          attempt,
-          sqlite_deadline_mono,
-          busy_attempt
+          attempt + 1,
+          deadline_mono,
+          lock_attempt
         )
 
-      {:sqlite_busy, _after_begin} ->
-        {:error, :database_busy}
+      retryable? and match?(%Ecto.InvalidChangesetError{}, error) ->
+        {:error, error.changeset}
 
-      transaction_result ->
-        handle_transaction_result(transaction_result)
+      true ->
+        reraise(error, stacktrace)
     end
-  rescue
-    # Two shapes of the same residual event_number conflict can surface here:
-    #
-    #   * `Ecto.ConstraintError` — when the DB constraint fires but the schema
-    #     changeset did NOT declare it (e.g. the DB-free retry-test stub repos,
-    #     which raise this directly from their fake `insert!/1`).
-    #   * `Ecto.InvalidChangesetError` — what `insert!/1` raises once the
-    #     changeset DOES declare `unique_constraint(:stream_id, :event_number)`:
-    #     Ecto converts the DB violation into a changeset error and `insert!`
-    #     wraps the now-invalid changeset.
-    #
-    # Both mean "lost the event_number race". Retry only that, and only when the
-    # caller did NOT request a specific expected_version — optimistic-concurrency
-    # callers must observe the conflict, not have it silently resolved underneath
-    # them. (Body-scope bindings don't reach `rescue`; re-derive from `opts`.)
-    e in [Ecto.ConstraintError, Ecto.InvalidChangesetError] ->
-      retryable? = is_nil(Keyword.get(opts, :expected_version)) and event_number_conflict?(e)
-
-      cond do
-        retryable? and attempt < @max_append_attempts ->
-          do_append(
-            stream_id,
-            events,
-            preconditions,
-            opts,
-            attempt + 1,
-            sqlite_deadline_mono,
-            busy_attempt
-          )
-
-        # Retries exhausted on a declared-constraint conflict: surface the
-        # changeset rather than crashing the caller, per the append contract.
-        retryable? and match?(%Ecto.InvalidChangesetError{}, e) ->
-          {:error, e.changeset}
-
-        true ->
-          reraise(e, __STACKTRACE__)
-      end
   end
+
+  defp handle_append_exception(error, context, stacktrace) do
+    repo = context_repo(context)
+
+    if timeout_failure?(error) or deadline_expired?(context_deadline(context)),
+      do: {:error, deadline_error(repo)},
+      else: reraise(error, stacktrace)
+  end
+
+  defp handle_append_exit(reason, context) do
+    repo = context_repo(context)
+
+    if timeout_failure?(reason) or deadline_expired?(context_deadline(context)),
+      do: {:error, deadline_error(repo)},
+      else: {:error, {:database_unavailable, reason}}
+  end
+
+  defp context_repo({_stream, _events, _preconditions, opts, _attempt, _deadline, _lock_attempt}),
+    do: Keyword.get(opts, :repo, Repo)
+
+  defp context_deadline(
+         {_stream, _events, _preconditions, _opts, _attempt, deadline, _lock_attempt}
+       ),
+       do: deadline
 
   defp event_number_conflict?(%Ecto.ConstraintError{} = e) do
     String.contains?("#{e.constraint} #{Exception.message(e)}", "event_number")
@@ -529,110 +587,255 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   # Private Helpers
   # ===========================================================================
 
-  # Acquire a per-stream advisory transaction lock so concurrent appends to the
-  # SAME stream serialize, eliminating the event_number read-modify-write race at
-  # the root. `pg_advisory_xact_lock` is a blocking lock keyed on `hashtext(stream_id)`
-  # and auto-releases at transaction end. Postgres-only; other backends (SQLite,
-  # ETS/Agent, and the retry-test stub repos) skip it. We must already be inside a
-  # `repo.transaction/1` for the lock to be transaction-scoped (do_append is).
-  defp lock_stream_for_append(repo, stream_id) do
+  defp acquire_global_append_lock(repo, deadline_mono) do
     if postgres_repo?(repo) do
-      repo.query!("SELECT pg_advisory_xact_lock(hashtext($1))", [stream_id])
+      case repo.query(@global_append_lock_sql, [], deadline_query_opts(repo, deadline_mono)) do
+        {:ok, %{rows: [[true]]}} -> :ok
+        {:ok, %{rows: [[false]]}} -> {:error, :append_lock_busy}
+        {:error, error} -> raise error
+      end
+    else
+      :ok
     end
-
-    :ok
   end
 
-  defp transaction(repo, sqlite_deadline_mono, fun) do
-    if sqlite_repo?(repo) do
-      sqlite_transaction(repo, sqlite_deadline_mono, fun)
-    else
-      repo.transaction(fun)
+  defp transaction(repo, deadline_mono, fun) do
+    cond do
+      sqlite_repo?(repo) ->
+        sqlite_transaction(repo, deadline_mono, fun)
+
+      postgres_repo?(repo) ->
+        postgres_transaction(repo, deadline_mono, fun)
+
+      true ->
+        repo.transaction(fun)
+    end
+  end
+
+  defp postgres_transaction(repo, deadline_mono, fun) do
+    case remaining_timeout(deadline_mono) do
+      {:ok, timeout} ->
+        try do
+          repo.transaction(fun,
+            timeout: timeout,
+            deadline: deadline_mono,
+            queue: false
+          )
+        rescue
+          error in DBConnection.ConnectionError ->
+            if pool_unavailable?(error),
+              do: {:error, :append_lock_busy},
+              else: reraise(error, __STACKTRACE__)
+        end
+
+      {:error, :operation_timeout} ->
+        {:error, :operation_timeout}
     end
   end
 
   defp sqlite_transaction(repo, deadline_mono, fun) do
-    remaining_ms = deadline_mono - System.monotonic_time(:millisecond)
+    transaction_started = {__MODULE__, make_ref()}
 
-    if remaining_ms <= 0 do
-      {:sqlite_busy, :acquisition}
-    else
-      transaction_started = {__MODULE__, make_ref()}
+    try do
+      result =
+        case remaining_timeout(deadline_mono) do
+          {:ok, checkout_timeout} ->
+            checkout_sql_connection(repo, checkout_timeout, deadline_mono, fn ->
+              original_busy_timeout = sqlite_busy_timeout(repo, deadline_mono)
+              bounded_busy_timeout = sqlite_attempt_busy_timeout(deadline_mono)
 
-      try do
-        result =
-          repo.transaction(
-            fn ->
-              Process.put(transaction_started, true)
-              fun.()
-            end,
-            mode: :immediate,
-            timeout: remaining_ms
-          )
+              set_sqlite_busy_timeout(repo, bounded_busy_timeout, deadline_mono)
 
+              try do
+                case remaining_timeout(deadline_mono) do
+                  {:ok, transaction_timeout} ->
+                    repo.transaction(
+                      fn ->
+                        Process.put(transaction_started, true)
+                        fun.()
+                      end,
+                      mode: :immediate,
+                      timeout: transaction_timeout,
+                      deadline: deadline_mono
+                    )
+
+                  {:error, :operation_timeout} ->
+                    {:error, :append_lock_busy}
+                end
+              after
+                reset_sqlite_busy_timeout(repo, original_busy_timeout)
+              end
+            end)
+
+          {:error, :operation_timeout} ->
+            {:error, :append_lock_busy}
+        end
+
+      phase = sqlite_transaction_phase(transaction_started)
+
+      if retryable_sqlite_failure?(result, phase) do
+        if phase == :acquisition,
+          do: {:error, :append_lock_busy},
+          else: {:sqlite_busy, phase}
+      else
+        result
+      end
+    rescue
+      error ->
         phase = sqlite_transaction_phase(transaction_started)
 
-        if retryable_sqlite_failure?(result, phase) do
-          {:sqlite_busy, phase}
+        if retryable_sqlite_failure?(error, phase) do
+          if phase == :acquisition,
+            do: {:error, :append_lock_busy},
+            else: {:sqlite_busy, phase}
         else
-          result
+          reraise(error, __STACKTRACE__)
         end
-      rescue
-        error ->
-          phase = sqlite_transaction_phase(transaction_started)
+    catch
+      :exit, reason ->
+        phase = sqlite_transaction_phase(transaction_started)
 
-          if retryable_sqlite_failure?(error, phase) do
-            {:sqlite_busy, phase}
-          else
-            reraise(error, __STACKTRACE__)
-          end
-      catch
-        :exit, reason ->
-          phase = sqlite_transaction_phase(transaction_started)
-
-          if retryable_sqlite_failure?(reason, phase) do
-            {:sqlite_busy, phase}
-          else
-            exit(reason)
-          end
-      after
-        Process.delete(transaction_started)
-      end
+        if retryable_sqlite_failure?(reason, phase) do
+          if phase == :acquisition,
+            do: {:error, :append_lock_busy},
+            else: {:sqlite_busy, phase}
+        else
+          exit(reason)
+        end
+    after
+      Process.delete(transaction_started)
     end
   end
 
-  defp retry_sqlite_acquisition(
+  defp retry_append_lock(
          stream_id,
          events,
          preconditions,
          opts,
          append_attempt,
          deadline_mono,
-         busy_attempt
+         lock_attempt
        ) do
-    remaining_ms = deadline_mono - System.monotonic_time(:millisecond)
+    repo = Keyword.get(opts, :repo, Repo)
 
-    if remaining_ms <= 0 do
-      {:error, :database_busy}
-    else
-      backoff_ms =
-        min(
-          @sqlite_initial_backoff_ms * Integer.pow(2, min(busy_attempt, 5)),
-          @sqlite_max_backoff_ms
+    case remaining_timeout(deadline_mono) do
+      {:error, :operation_timeout} ->
+        {:error, deadline_error(repo)}
+
+      {:ok, remaining_ms} ->
+        backoff_ms =
+          min(
+            @append_lock_initial_backoff_ms * Integer.pow(2, min(lock_attempt, 5)),
+            @append_lock_max_backoff_ms
+          )
+
+        Process.sleep(min(backoff_ms, remaining_ms))
+
+        do_append(
+          stream_id,
+          events,
+          preconditions,
+          opts,
+          append_attempt,
+          deadline_mono,
+          lock_attempt + 1
         )
-
-      Process.sleep(min(backoff_ms, remaining_ms))
-
-      do_append(
-        stream_id,
-        events,
-        preconditions,
-        opts,
-        append_attempt,
-        deadline_mono,
-        busy_attempt + 1
-      )
     end
+  end
+
+  defp checkout_sql_connection(repo, timeout, deadline_mono, fun) do
+    repo.get_dynamic_repo()
+    |> Adapter.lookup_meta()
+    |> SQL.checkout(
+      [timeout: timeout, deadline: deadline_mono, queue: false],
+      fun
+    )
+  end
+
+  defp sqlite_busy_timeout(repo, deadline_mono) do
+    case repo.query("PRAGMA busy_timeout", [], sqlite_control_opts(deadline_mono)) do
+      {:ok, %{rows: [[timeout]]}} when is_integer(timeout) -> timeout
+      {:ok, result} -> raise "unexpected SQLite busy_timeout result: #{inspect(result)}"
+      {:error, error} -> raise error
+    end
+  end
+
+  defp sqlite_attempt_busy_timeout(deadline_mono) do
+    case remaining_timeout(deadline_mono) do
+      {:ok, remaining_ms} -> max(1, min(remaining_ms, @sqlite_busy_slice_ms))
+      {:error, :operation_timeout} -> 1
+    end
+  end
+
+  defp set_sqlite_busy_timeout(repo, timeout, deadline_mono) do
+    case repo.query(
+           "PRAGMA busy_timeout = #{timeout}",
+           [],
+           sqlite_control_opts(deadline_mono)
+         ) do
+      {:ok, _result} -> :ok
+      {:error, error} -> raise error
+    end
+  end
+
+  defp reset_sqlite_busy_timeout(repo, timeout) do
+    case repo.query("PRAGMA busy_timeout = #{timeout}", [], timeout: @sqlite_pragma_timeout_ms) do
+      {:ok, _result} -> :ok
+      {:error, %DBConnection.ConnectionError{}} -> :ok
+      {:error, error} -> raise error
+    end
+  catch
+    :exit, reason ->
+      if nested_reason?(reason, :noproc) or sqlite_connection_closed?(reason),
+        do: :ok,
+        else: exit(reason)
+  end
+
+  defp sqlite_connection_closed?(value) when is_binary(value) do
+    String.contains?(String.downcase(value), "connection is closed")
+  end
+
+  defp sqlite_connection_closed?(%{__exception__: true} = error) do
+    error |> Exception.message() |> sqlite_connection_closed?()
+  end
+
+  defp sqlite_connection_closed?(value) when is_tuple(value) do
+    value |> Tuple.to_list() |> Enum.any?(&sqlite_connection_closed?/1)
+  end
+
+  defp sqlite_connection_closed?(value) when is_list(value),
+    do: Enum.any?(value, &sqlite_connection_closed?/1)
+
+  defp sqlite_connection_closed?(_value), do: false
+
+  defp pool_unavailable?(%{__exception__: true} = error) do
+    error |> Exception.message() |> pool_unavailable?()
+  end
+
+  defp pool_unavailable?(message) when is_binary(message) do
+    normalized = String.downcase(message)
+
+    String.contains?(normalized, "connection not available") or
+      String.contains?(normalized, "queuing is disabled")
+  end
+
+  defp pool_unavailable?(value) when is_tuple(value) do
+    value |> Tuple.to_list() |> Enum.any?(&pool_unavailable?/1)
+  end
+
+  defp pool_unavailable?(value) when is_list(value),
+    do: Enum.any?(value, &pool_unavailable?/1)
+
+  defp pool_unavailable?(_value), do: false
+
+  defp sqlite_control_opts(deadline_mono) do
+    timeout =
+      case remaining_timeout(deadline_mono) do
+        {:ok, remaining_ms} -> min(remaining_ms, @sqlite_pragma_timeout_ms)
+        {:error, :operation_timeout} -> 1
+      end
+
+    [timeout: timeout, deadline: deadline_mono]
   end
 
   defp sqlite_transaction_phase(marker) do
@@ -641,7 +844,8 @@ defmodule Arbor.Persistence.EventLog.Ecto do
 
   defp retryable_sqlite_failure?(failure, phase) do
     sqlite_lock_failure?(failure) or
-      (phase == :acquisition and nested_reason?(failure, :timeout))
+      (phase == :acquisition and
+         (nested_reason?(failure, :timeout) or pool_unavailable?(failure)))
   end
 
   defp sqlite_lock_failure?(%{__exception__: true} = error) do
@@ -698,13 +902,18 @@ defmodule Arbor.Persistence.EventLog.Ecto do
       repo.__adapter__() == Ecto.Adapters.SQLite3
   end
 
-  defp sqlite_deadline(repo, opts) do
-    if sqlite_repo?(repo) do
-      case Keyword.get(opts, :sqlite_busy_deadline_ms, @default_sqlite_busy_deadline_ms) do
-        timeout
-        when is_integer(timeout) and timeout > 0 and
-               timeout <= @max_sqlite_busy_deadline_ms ->
-          {:ok, System.monotonic_time(:millisecond) + timeout}
+  defp database_repo?(repo), do: postgres_repo?(repo) or sqlite_repo?(repo)
+
+  defp append_deadline(repo, opts, started_mono) do
+    if database_repo?(repo) do
+      default =
+        if sqlite_repo?(repo),
+          do: Keyword.get(opts, :sqlite_busy_deadline_ms, @default_append_timeout_ms),
+          else: @default_append_timeout_ms
+
+      case Keyword.get(opts, :append_timeout_ms, default) do
+        timeout when is_integer(timeout) and timeout > 0 and timeout <= @max_append_timeout_ms ->
+          {:ok, started_mono + timeout}
 
         _invalid ->
           {:error, :invalid_precondition}
@@ -714,14 +923,14 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     end
   end
 
-  defp head_fresh?(_repo, _stream_id, nil), do: true
+  defp head_fresh?(_repo, _stream_id, nil, _deadline_mono), do: true
 
-  defp head_fresh?(repo, stream_id, max_current_age_ms) do
+  defp head_fresh?(repo, stream_id, max_current_age_ms, deadline_mono) do
     stream_id
     |> current_head_query()
     |> maybe_require_fresh_head(repo, max_current_age_ms)
     |> select([e], true)
-    |> repo.one()
+    |> repo_one(repo, deadline_mono)
     |> Kernel.==(true)
   end
 
@@ -767,36 +976,98 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   end
 
   defp get_current_version(repo, stream_id) do
+    get_current_version(repo, stream_id, nil)
+  end
+
+  defp get_current_version(repo, stream_id, deadline_mono) do
     query =
       from(e in EventSchema,
         where: e.stream_id == ^stream_id,
         select: max(e.event_number)
       )
 
-    repo.one(query) || 0
+    repo_one(query, repo, deadline_mono) || 0
   end
 
-  defp get_max_global_position(repo) do
+  defp get_max_global_position(repo, deadline_mono) do
     query = from(e in EventSchema, select: max(e.global_position))
-    repo.one(query) || 0
+    repo_one(query, repo, deadline_mono) || 0
   end
 
-  defp insert_event(repo, %Event{} = event) do
+  defp insert_event(repo, %Event{} = event, deadline_mono) do
     attrs = EventSchema.from_event(event)
 
     inserted =
       %EventSchema{}
       |> EventSchema.changeset(attrs)
-      |> repo.insert!()
+      |> repo_insert!(repo, deadline_mono)
 
     case inserted do
       %EventSchema{id: id} ->
-        %EventSchema{committed_at: %DateTime{}} = repo.get!(EventSchema, id)
+        %EventSchema{committed_at: %DateTime{}} = repo_get!(repo, EventSchema, id, deadline_mono)
         event
 
       _test_repo_result ->
         event
     end
+  end
+
+  defp repo_one(query, repo, nil), do: repo.one(query)
+
+  defp repo_one(query, repo, deadline_mono),
+    do: repo.one(query, deadline_query_opts(repo, deadline_mono))
+
+  defp repo_insert!(changeset, repo, nil), do: repo.insert!(changeset)
+
+  defp repo_insert!(changeset, repo, deadline_mono) do
+    repo.insert!(changeset, deadline_query_opts(repo, deadline_mono))
+  end
+
+  defp repo_get!(repo, schema, id, nil), do: repo.get!(schema, id)
+
+  defp repo_get!(repo, schema, id, deadline_mono) do
+    repo.get!(schema, id, deadline_query_opts(repo, deadline_mono))
+  end
+
+  defp deadline_query_opts(repo, deadline_mono) do
+    case remaining_timeout(deadline_mono) do
+      {:ok, timeout} -> [timeout: timeout, deadline: deadline_mono]
+      {:error, :operation_timeout} -> repo.rollback(deadline_error(repo))
+    end
+  end
+
+  defp ensure_before_deadline(_repo, nil), do: :ok
+
+  defp ensure_before_deadline(repo, deadline_mono) do
+    if deadline_expired?(deadline_mono),
+      do: repo.rollback(deadline_error(repo)),
+      else: :ok
+  end
+
+  defp remaining_timeout(nil), do: {:ok, @default_append_timeout_ms}
+
+  defp remaining_timeout(deadline_mono) do
+    remaining_ms = deadline_mono - System.monotonic_time(:millisecond)
+
+    if remaining_ms > 0,
+      do: {:ok, remaining_ms},
+      else: {:error, :operation_timeout}
+  end
+
+  defp deadline_expired?(nil), do: false
+
+  defp deadline_expired?(deadline_mono) do
+    System.monotonic_time(:millisecond) >= deadline_mono
+  end
+
+  defp deadline_error(repo) do
+    if sqlite_repo?(repo), do: :database_busy, else: :operation_timeout
+  end
+
+  defp timeout_failure?(reason) do
+    nested_reason?(reason, :timeout) or
+      (is_exception(reason) and
+         reason |> Exception.message() |> String.downcase() |> String.contains?("timeout"))
   end
 
   defp order_by_direction(field, :forward), do: [asc: field]
@@ -805,6 +1076,8 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   defp handle_transaction_result({:ok, events}), do: {:ok, events}
   defp handle_transaction_result({:error, :version_conflict}), do: {:error, :version_conflict}
   defp handle_transaction_result({:error, :deadline_exceeded}), do: {:error, :deadline_exceeded}
+  defp handle_transaction_result({:error, :operation_timeout}), do: {:error, :operation_timeout}
+  defp handle_transaction_result({:error, :database_busy}), do: {:error, :database_busy}
 
   defp handle_transaction_result({:error, reason}) do
     Logger.error("Transaction failed: #{inspect(reason)}")
