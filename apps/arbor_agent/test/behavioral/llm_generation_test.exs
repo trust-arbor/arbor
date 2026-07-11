@@ -15,6 +15,11 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
   alias Arbor.AI.Response
 
   describe "scenario: basic text generation" do
+    # Live OpenRouter/API path — must not run under default exclude (see
+    # test_helper :llm / :external). Untagged runs hit rate limits (429) and
+    # fail hermetic gating when provider error structs are returned.
+    @tag :llm
+    @tag :external
     @tag :integration
     test "generate_text/2 returns {:ok, %Response{}} with non-empty text" do
       # This is the fundamental contract that all callers depend on
@@ -30,13 +35,17 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
           assert String.trim(text) != ""
 
         {:error, reason} ->
-          # In test env without API keys, we expect a specific error
-          # not a crash or malformed response
-          assert is_atom(reason) or is_binary(reason) or is_tuple(reason),
+          # Provider errors may be atoms, binaries, tuples, or exception structs
+          # (e.g. ReqLLM 429). Accept any non-empty descriptive term.
+          assert reason != nil
+
+          assert is_atom(reason) or is_binary(reason) or is_tuple(reason) or is_map(reason),
                  "Error reason should be descriptive, got: #{inspect(reason)}"
       end
     end
 
+    @tag :llm
+    @tag :external
     @tag :integration
     test "generate_text/2 with system_prompt passes it through" do
       result =
@@ -56,6 +65,8 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
     end
 
     @tag :known_bug
+    @tag :llm
+    @tag :external
     @tag :integration
     test "generate_text/2 with invalid provider returns error tuple, not crash" do
       # NOTE: This test documents a known bug — invalid provider causes
@@ -160,6 +171,8 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
   end
 
   describe "scenario: routing behavior" do
+    @tag :llm
+    @tag :external
     @tag :integration
     test "backend: :auto uses Router to select backend without crashing" do
       # The Router should make a deterministic choice based on config
@@ -192,6 +205,8 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
       end
     end
 
+    @tag :llm
+    @tag :external
     @tag :integration
     test "backend: :api routes to API implementation" do
       # API backend should always be available (it uses HTTP, not CLI)
@@ -209,6 +224,8 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
   end
 
   describe "scenario: error handling consistency" do
+    @tag :llm
+    @tag :external
     @tag :integration
     test "API backend handles valid prompts without crashing" do
       # The facade should handle normal input gracefully
@@ -231,6 +248,8 @@ defmodule Arbor.Behavioral.LLMGenerationTest do
       end
     end
 
+    @tag :llm
+    @tag :external
     @tag :integration
     test "API backend handles empty string gracefully" do
       # Empty string should return an error, not crash
