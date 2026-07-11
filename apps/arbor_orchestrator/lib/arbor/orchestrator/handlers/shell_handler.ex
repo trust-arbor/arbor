@@ -2,8 +2,10 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
   @moduledoc """
   Handler that executes shell commands.
 
-  Uses `Arbor.Shell.execute/2` when available (full umbrella with sandbox,
-  signals, security), falls back to raw `System.cmd` when running standalone.
+  Agent-authored commands are validated before authorization and execute only
+  through `Arbor.Shell`'s closed direct-argv policy. Shell interpreters,
+  dispatch wrappers, compound syntax, and environment-fed runtime expansion are
+  unavailable while CapShell is absent. There is no `/bin/sh -c` fallback.
 
   Node attributes:
     - `command` - shell command to execute (required)
@@ -40,6 +42,9 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
     sandbox = Map.get(node.attrs, "sandbox", "basic")
     agent_id = resolve_agent_id(node, context)
 
+    execution_opts = [cwd: cwd, timeout: timeout, sandbox: sandbox_mode(sandbox)]
+
+    # Bind the exact direct executable before the capability/approval gate.
     # Capability gate (phase 0, 2026-06-10). This handler previously ran
     # `command` with NO authorization — any agent that could author or
     # influence a DOT graph got arbitrary shell, including the
@@ -48,15 +53,25 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
     # denial/escalation. ExecHandler's sibling `target="action"` branch
     # already authorizes; `target="shell"` was the orphan path.
     # See .arbor/roadmap/1-brainstorming/safe-shell-execution.md (Phase 0).
-    case authorize_shell(agent_id, command, cwd, opts) do
-      :ok ->
-        run_authorized(node, command, on_error, cwd: cwd, timeout: timeout, sandbox: sandbox)
+    case Arbor.Shell.prepare_agent_command(command, execution_opts) do
+      {:ok, _prepared} ->
+        case authorize_shell(agent_id, command, cwd, opts) do
+          :ok ->
+            run_authorized(node, command, on_error, execution_opts)
+
+          {:error, reason} ->
+            %Outcome{
+              status: :fail,
+              failure_reason: "shell authorization denied for #{agent_id}: #{inspect(reason)}",
+              context_updates: %{"shell.#{node.id}.error" => "unauthorized: #{inspect(reason)}"}
+            }
+        end
 
       {:error, reason} ->
         %Outcome{
           status: :fail,
-          failure_reason: "shell authorization denied for #{agent_id}: #{inspect(reason)}",
-          context_updates: %{"shell.#{node.id}.error" => "unauthorized: #{inspect(reason)}"}
+          failure_reason: "shell command rejected before authorization: #{inspect(reason)}",
+          context_updates: %{"shell.#{node.id}.error" => "rejected: #{inspect(reason)}"}
         }
     end
   rescue
@@ -142,42 +157,14 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
 
   # --- Command execution ---
 
-  defp run_command(command, opts) do
-    case Keyword.get(opts, :sandbox, "basic") do
-      "none" ->
-        # Explicit sandbox="none" in DOT spec — caller accepts unsandboxed execution.
-        # Skip Arbor.Shell entirely to avoid :noproc when the process isn't running.
-        run_via_system_cmd(command, opts)
-
-      _ ->
-        # arbor_shell is a hard dep; if the Shell process is down at runtime
-        # run_via_arbor_shell fails closed via its :noproc catch (no silent
-        # fall-through to unsandboxed Port.open).
-        run_via_arbor_shell(command, opts)
-    end
-  end
+  defp run_command(command, opts), do: run_via_arbor_shell(command, opts)
 
   defp run_via_arbor_shell(command, opts) do
-    sandbox_mode =
-      case Keyword.get(opts, :sandbox, "basic") do
-        "none" -> :none
-        "strict" -> :strict
-        _ -> :basic
-      end
-
-    shell_opts = [
-      timeout: Keyword.get(opts, :timeout, @default_timeout),
-      sandbox: sandbox_mode
-    ]
-
-    shell_opts =
-      case Keyword.get(opts, :cwd) do
-        nil -> shell_opts
-        cwd -> Keyword.put(shell_opts, :cwd, cwd)
-      end
-
     try do
-      case Arbor.Shell.execute(command, shell_opts) do
+      case Arbor.Shell.execute_agent_command(command, opts) do
+        {:ok, %{timed_out: true}} ->
+          {:error, :timeout}
+
         {:ok, result} ->
           output = Map.get(result, :stdout, "") <> Map.get(result, :stderr, "")
           exit_code = Map.get(result, :exit_code, 0)
@@ -191,70 +178,9 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandler do
     end
   end
 
-  defp run_via_system_cmd(command, opts) do
-    cwd = Keyword.get(opts, :cwd, ".")
-    timeout = Keyword.get(opts, :timeout, @default_timeout)
-
-    # IMPORTANT: use `:spawn_executable` with an explicit `/bin/sh -c`,
-    # NOT `{:spawn, command}`. The `:spawn` form tokenizes the command
-    # via shell-like splitting and execs the first token directly —
-    # there is NO real shell, so operators like `&&`, `||`, `|`, `;`,
-    # `$(…)`, and globbing are passed as literal argv tokens. For
-    # example, `mkdir -p X && printf Y` becomes `mkdir` invoked with
-    # `[-p, X, &&, printf, Y]` (mkdir -p happily creates all of these
-    # as directories), `printf` is never executed, and stdout is empty
-    # despite exit code 0. Using `/bin/sh -c "<command>"` gives the
-    # caller the shell semantics they expect.
-    port =
-      Port.open(
-        {:spawn_executable, ~c"/bin/sh"},
-        [
-          :binary,
-          :exit_status,
-          :stderr_to_stdout,
-          {:cd, to_charlist(cwd)},
-          {:args, ["-c", command]}
-        ]
-      )
-
-    collect_output(port, <<>>, timeout)
-  end
-
-  defp collect_output(port, acc, timeout) do
-    receive do
-      {^port, {:data, data}} ->
-        collect_output(port, acc <> data, timeout)
-
-      {^port, {:exit_status, code}} ->
-        # `:exit_status` and trailing `{:data, _}` are not ordered on
-        # the spawn port — for compound commands (e.g. `mkdir && printf`)
-        # the exit signal can race ahead of the final stdout flush,
-        # giving callers an empty string. Drain remaining data with a
-        # 0-timeout receive before returning.
-        {:ok, drain_remaining(port, acc), code}
-    after
-      timeout ->
-        Port.close(port)
-        {:error, :timeout}
-    end
-  end
-
-  # Wait briefly for trailing {:data, _} after :exit_status. The spawn
-  # port doesn't guarantee that all stdout has been delivered to the
-  # owner process's mailbox before :exit_status arrives — for compound
-  # commands the final chunk can still be in flight. 50ms is enough to
-  # let normal pipe-buffered output land while keeping the fast path
-  # fast; anything still in flight after that is genuinely stuck and
-  # bounded losses are preferable to hangs.
-  @drain_timeout_ms 50
-
-  defp drain_remaining(port, acc) do
-    receive do
-      {^port, {:data, data}} -> drain_remaining(port, acc <> data)
-    after
-      @drain_timeout_ms -> acc
-    end
-  end
+  defp sandbox_mode("none"), do: :none
+  defp sandbox_mode("strict"), do: :strict
+  defp sandbox_mode(_), do: :basic
 
   # --- Error handling ---
 

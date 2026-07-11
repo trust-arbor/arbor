@@ -132,6 +132,91 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
     end)
   end
 
+  test "security regression: Execute rejects env-fed eval with no delayed background side effect",
+       %{agent_id: agent_id} do
+    marker =
+      Path.join(
+        System.tmp_dir!(),
+        "actions_env_eval_#{System.unique_integer([:positive])}"
+      )
+
+    File.rm(marker)
+    command = ~S(sh -c 'eval "$PAYLOAD"')
+    env = %{"PAYLOAD" => "sleep 0.2 && touch #{marker} &"}
+
+    try do
+      result =
+        Shell.Execute.run(
+          %{command: command, sandbox: :none, env: env},
+          %{
+            agent_id: agent_id,
+            approved_invocation: %{
+              request_id: "irq_actions_env_eval",
+              principal_id: agent_id,
+              resource_uri: "arbor://shell/exec/sh",
+              decision: :approved
+            }
+          }
+        )
+
+      Process.sleep(700)
+
+      refute File.exists?(marker),
+             "Shell.Execute env-fed eval launched a delayed background marker"
+
+      assert result == {:error, "Generic agent shell executable is not allowed: sh"}
+    after
+      File.rm(marker)
+    end
+  end
+
+  test "security regression: nested dispatch wrappers cannot tunnel to an interpreter",
+       %{agent_id: agent_id} do
+    marker =
+      Path.join(
+        System.tmp_dir!(),
+        "actions_nested_wrapper_#{System.unique_integer([:positive])}"
+      )
+
+    File.rm(marker)
+    command = "env nice /bin/sh -c 'touch #{marker}'"
+
+    try do
+      result =
+        Shell.Execute.run(
+          %{command: command, sandbox: :none},
+          %{
+            agent_id: agent_id,
+            approved_invocation: %{
+              request_id: "irq_actions_nested_wrapper",
+              principal_id: agent_id,
+              resource_uri: "arbor://shell/exec/env",
+              decision: :approved
+            }
+          }
+        )
+
+      Process.sleep(200)
+      refute File.exists?(marker), "nested env/nice/sh wrapper executed a marker"
+      assert result == {:error, "Generic agent shell executable is not allowed: env"}
+
+      for wrapper <- [
+            "/usr/bin/env /bin/sh -c true",
+            "command /bin/sh -c true",
+            "exec /bin/sh -c true",
+            "nice /bin/sh -c true",
+            "nohup /bin/sh -c true",
+            "timeout 1 /bin/sh -c true",
+            "xargs /bin/sh -c true"
+          ] do
+        assert {:error, {:agent_executable_not_allowed, _name}} =
+                 Shell.authorize_command(agent_id, wrapper, sandbox: :none)
+      end
+    after
+      File.rm(marker)
+    end
+  end
+
   test "security regression: ExecuteScript is fail-closed before temp-file/auth/process work",
        %{agent_id: agent_id} do
     marker =

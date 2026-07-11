@@ -10,10 +10,8 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
   def execute(node, context, graph, opts) do
     command = Map.get(node.attrs, "tool_command", "")
     hooks = resolve_hooks(node, graph, opts)
-    # H5 (codex command-execution.orchestrator-tool-hooks-shell): tool hooks are
-    # shell commands too. Thread the node's sandbox level into the hook runs so
-    # ToolHooks gates them through Arbor.Shell.Sandbox — same gate the tool
-    # *command* uses (H3). Without this, a graph-authored hook bypassed the gate.
+    # String hooks fail closed in ToolHooks while CapShell is unavailable. Keep
+    # the level in opts for trusted injected hook runners that inspect it.
     hook_opts = Keyword.put(opts, :sandbox_level, sandbox_level_for(node))
     pre_payload = %{phase: "pre", tool_name: node.id, tool_call_id: node.id, command: command}
     pre_result = ToolHooks.run(:pre, hooks.pre, pre_payload, hook_opts)
@@ -34,6 +32,8 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
         outcome =
           case Keyword.get(opts, :tool_command_runner) do
             runner when is_function(runner, 1) ->
+              # Explicitly injected runners are trusted system-only seams. The
+              # default graph path below always uses the closed agent policy.
               output = runner.(command)
 
               %Outcome{
@@ -65,47 +65,49 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
   def idempotency, do: :side_effecting
 
   defp run_command(command, node, context, opts) do
-    # H3: pre-fix, ToolHandler called System.cmd directly — bypassing the
-    # Arbor.Shell.Sandbox filter that the rest of the shell-execution paths
-    # consult. The sandbox isn't OS-level isolation (the full containment
-    # work is bigger than this commit can take), but the allowlist /
-    # denylist / metacharacter check IS the project's documented preflight
-    # gate for shell execution. Routing ToolHandler through it closes the
-    # specific bypass the audit flagged.
-    #
-    # arbor_orchestrator is Standalone in the library hierarchy, so the
-    # Shell.Sandbox dependency is consulted via a runtime bridge (same
-    # pattern other Standalone modules use). If Arbor.Shell.Sandbox isn't
-    # loaded at runtime, the request defaults to the strict "deny unless
-    # explicitly allowed" posture rather than fail-open.
     sandbox_level = sandbox_level_for(node)
+    shell_opts = [sandbox: sandbox_level]
 
-    case sandbox_check(command, sandbox_level) do
-      {:ok, :allowed} ->
-        execute_after_sandbox_check(command, context, opts)
+    shell_opts =
+      case workdir(context, opts) do
+        nil -> shell_opts
+        cwd -> Keyword.put(shell_opts, :cwd, cwd)
+      end
+
+    case Arbor.Shell.execute_agent_command(command, shell_opts) do
+      {:ok, result} ->
+        output = Map.get(result, :stdout, "") <> Map.get(result, :stderr, "")
+        exit_code = Map.get(result, :exit_code, 0)
+
+        if exit_code == 0 do
+          %Outcome{
+            status: :success,
+            notes: "Tool completed: #{command}",
+            context_updates: %{"tool.output" => output}
+          }
+        else
+          %Outcome{
+            status: :fail,
+            failure_reason:
+              "Tool command exited with code #{exit_code}: #{String.slice(output, 0, 500)}",
+            context_updates: %{"tool.output" => output}
+          }
+        end
 
       {:error, reason} ->
         %Outcome{
           status: :fail,
           failure_reason:
-            "Tool command rejected by sandbox (level=#{sandbox_level}, reason=#{inspect(reason)}): " <>
+            "Tool command rejected by direct-executable policy (level=#{sandbox_level}, reason=#{inspect(reason)}): " <>
               String.slice(command, 0, 200)
         }
     end
-  end
-
-  defp sandbox_check(command, level) do
-    sandbox_mod = Arbor.Shell.Sandbox
-
-    if Code.ensure_loaded?(sandbox_mod) and function_exported?(sandbox_mod, :check, 2) do
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(sandbox_mod, :check, [command, level])
-    else
-      # Sandbox module unreachable. Strict-deny: if the operator hasn't set
-      # up the sandbox, an unsanboxed tool execution should not be allowed
-      # through silently.
-      {:error, :sandbox_unavailable}
-    end
+  rescue
+    e ->
+      %Outcome{
+        status: :fail,
+        failure_reason: "Tool execution error: #{Exception.message(e)}"
+      }
   end
 
   defp sandbox_level_for(node) do
@@ -118,41 +120,12 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandler do
     end
   end
 
-  defp execute_after_sandbox_check(command, context, opts) do
-    [executable | args] = OptionParser.split(command)
-    cmd_opts = [stderr_to_stdout: true] ++ workdir_opt(context, opts)
-
-    # credo:disable-for-next-line Credo.Check.Security.UnsafeSystemCmd
-    {output, exit_code} = System.cmd(executable, args, cmd_opts)
-
-    if exit_code == 0 do
-      %Outcome{
-        status: :success,
-        notes: "Tool completed: #{command}",
-        context_updates: %{"tool.output" => output}
-      }
-    else
-      %Outcome{
-        status: :fail,
-        failure_reason:
-          "Tool command exited with code #{exit_code}: #{String.slice(output, 0, 500)}",
-        context_updates: %{"tool.output" => output}
-      }
-    end
-  rescue
-    e ->
-      %Outcome{
-        status: :fail,
-        failure_reason: "Tool execution error: #{Exception.message(e)}"
-      }
-  end
-
-  defp workdir_opt(context, opts) do
-    workdir =
+  defp workdir(context, opts) do
+    value =
       Context.get(context, "workdir") ||
         Keyword.get(opts, :workdir)
 
-    if workdir && workdir != "", do: [cd: workdir], else: []
+    if value && value != "", do: value, else: nil
   end
 
   defp resolve_hooks(node, graph, opts) do

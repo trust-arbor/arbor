@@ -57,8 +57,8 @@ defmodule Arbor.ShellTest do
             ~s{bash -c "rm -rf /"},
             ~s{env rm -rf /},
             ~s{xargs rm},
-            ~s{python -c "__import__('os').system('rm')"},
-            ~s{perl -e "unlink('x')"}
+            ~s{python -c pass},
+            ~s{perl -e 1}
           ] do
         assert {:error, {:blocked_interpreter, _}} = Arbor.Shell.Sandbox.check(cmd, :basic),
                "interpreter bypass not blocked at :basic for: " <> cmd

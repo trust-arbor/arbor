@@ -46,7 +46,7 @@ defmodule Arbor.Actions.TaintTest do
       assert roles.command == {:control, requires: [:command_injection]}
       assert roles.cwd == {:control, requires: [:path_traversal]}
       assert roles.sandbox == :control
-      assert roles.env == :data
+      assert roles.env == :control
       assert roles.timeout == :data
       # Output ceiling governs resource use / termination — control, not data.
       assert roles.max_output_bytes == :control

@@ -4,55 +4,41 @@ defmodule Arbor.Orchestrator.ToolHooksTest do
 
   alias Arbor.Orchestrator.ToolHooks
 
-  test "shell hook receives payload JSON via env var" do
-    # H14: payload delivery moved from stdin (which required a shell
-    # wrapper with attacker-influenceable interpolation) to the
-    # TOOL_HOOK_PAYLOAD env var. Hook commands now read the payload
-    # from $TOOL_HOOK_PAYLOAD directly.
+  test "trusted injected hook runner receives the structured payload" do
     payload = %{tool_name: "lookup", tool_call_id: "1", phase: "pre", arguments: %{"k" => "a"}}
+    parent = self()
+
+    runner = fn command, received_payload, _opts ->
+      send(parent, {:hook_runner_called, command, received_payload})
+      {:command, "trusted-output", 0}
+    end
 
     result =
       ToolHooks.run(
         :pre,
-        ~S(printf '%s' "$TOOL_HOOK_PAYLOAD"),
+        "operator-hook",
         payload,
-        []
+        tool_hook_runner: runner
       )
 
     assert result.status == :ok
     assert result.decision == :proceed
-    assert String.contains?(result.output || "", "\"tool_name\":\"lookup\"")
-    assert String.contains?(result.output || "", "\"tool_call_id\":\"1\"")
+    assert result.output == "trusted-output"
+    assert_received {:hook_runner_called, "operator-hook", ^payload}
   end
 
-  test "security regression (H14): hook command runs in non-login shell" do
-    # H14: pre-fix this ran `/bin/sh -lc`, sourcing the user's shell
-    # profiles. If an attacker controlled ~/.bashrc (e.g. a compromised
-    # dependency that wrote to dotfiles), every hook invocation executed
-    # that profile. The fix uses `/bin/sh -c` (no -l).
-    #
-    # The behavioral check: a shell that's been forced into login mode
-    # sets $0 to start with `-` (e.g. `-sh`). Non-login shells leave $0
-    # as the program name. Assert non-login.
+  test "security regression: graph string hooks fail closed without a shell" do
     payload = %{tool_name: "x", tool_call_id: "1", phase: "pre"}
+    result = ToolHooks.run(:pre, "echo must-not-run", payload, [])
 
-    result =
-      ToolHooks.run(
-        :pre,
-        ~S(printf '%s' "$0"),
-        payload,
-        []
-      )
-
-    assert result.status == :ok
-
-    refute String.starts_with?(result.output || "", "-"),
-           "Hook shell must NOT be a login shell ($0=#{inspect(result.output)}) — H14 regression"
+    assert result.status == :error
+    assert result.decision == :skip
+    assert result.reason =~ "string tool hooks are unavailable"
   end
 
   test "pre hook non-zero exit marks decision skip" do
     payload = %{tool_name: "lookup", tool_call_id: "2", phase: "pre"}
-    result = ToolHooks.run(:pre, "exit 23", payload, [])
+    result = ToolHooks.run(:pre, fn _payload -> 23 end, payload, [])
 
     assert result.status == :error
     assert result.decision == :skip

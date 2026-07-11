@@ -1649,12 +1649,20 @@ FOR EACH event IN pipeline.events():
 
 ### 9.7 Tool Call Hooks
 
-Graph-level or node-level attributes `tool_hooks.pre` and `tool_hooks.post` specify shell commands executed around each LLM tool call:
+Graph-level or node-level string attributes `tool_hooks.pre` and
+`tool_hooks.post` are intentionally unavailable while CapShell is fail-closed.
+Their historical semantics required a shell interpreter and environment-driven
+runtime expansion without an independently bound command capability. A string
+pre-hook therefore fails and skips the tool call; a string post-hook is recorded
+as failed but does not alter the completed tool result.
 
-- **Pre-hook:** Executed before every LLM tool call. Receives tool metadata via environment variables and stdin JSON. Exit code 0 means proceed; non-zero means skip the tool call.
-- **Post-hook:** Executed after every LLM tool call. Receives tool metadata and result. Primarily for logging and auditing.
+Trusted system integrations may supply function hooks or an explicit
+`tool_hook_runner` through runtime options. Those programmatic seams receive the
+structured payload directly and are not graph-authored shell strings.
 
-Pre-hook failures (non-zero exit) skip the tool call and are recorded in the stage log. Post-hook failures do not block the tool call but are recorded.
+This is an intentional security API break. String hook execution must not be
+restored through `/bin/sh -c`, a shell interpreter, or another command-string
+dispatch wrapper.
 
 ---
 
@@ -1996,8 +2004,8 @@ ASSERT "review" IN checkpoint.completed_nodes
 | `fallback_retry_target` | String   | `""`    | Secondary jump target |
 | `stack.child_dotfile`   | String   | `""`    | Path to child DOT file for supervision |
 | `stack.child_workdir`   | String   | cwd     | Working directory for child run |
-| `tool_hooks.pre`        | String   | `""`    | Shell command before each tool call |
-| `tool_hooks.post`       | String   | `""`    | Shell command after each tool call |
+| `tool_hooks.pre`        | String   | `""`    | Unavailable graph string hook (fails closed and skips) |
+| `tool_hooks.post`       | String   | `""`    | Unavailable graph string hook (failure recorded) |
 
 ### Node Attributes
 

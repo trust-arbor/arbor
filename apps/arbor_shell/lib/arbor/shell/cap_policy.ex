@@ -1,38 +1,33 @@
 defmodule Arbor.Shell.CapPolicy do
   @moduledoc """
-  Derives a shell command allowlist from an agent's capabilities.
+  Derives the legacy sandbox command projection from agent capabilities.
 
-  This is the capability-derived-sandbox projection for shell: instead of the
-  sandbox enforcing a hardcoded command allowlist (`Arbor.Shell.Sandbox`'s old
-  `@strict_allowlist`) that ignored what the agent was actually granted, the
-  allowlist is the set of commands the agent holds `arbor://shell/exec/<cmd>`
-  capabilities for.
+  This projection remains for low-level compatibility when a trusted system
+  caller explicitly passes `:allowlist` to `Arbor.Shell.Sandbox.check/3`.
+  Generic agent APIs no longer use it for execution: a command capability says
+  *who may request* a resource, but does not prove that the executable cannot
+  dispatch another command or evaluate runtime input.
 
-  This makes the sandbox's command check AGREE with the capability gate
-  (`Arbor.Shell.authorize/3`) instead of conflicting with it. Before, an agent
-  explicitly granted `arbor://shell/exec/git` still could not run `git` under a
-  `:strict`/`:basic` sandbox because `git` was not in the hardcoded allowlist.
+  `Arbor.Shell.authorize/3` and its sync/async/streaming execution variants now
+  enforce a separate fixed direct-executable policy before authorization.
 
   ## Projection (capability URI → command name)
 
-      "arbor://shell/exec"            -> :all       (bare exec = full shell)
+      "arbor://shell/exec"            -> :all       (legacy projection only)
       "arbor://shell/exec/**"         -> :all
       "arbor://shell/exec/git"        -> "git"
       "arbor://shell/exec/git/**"     -> "git"       (subcommands are arg-level)
       "arbor://shell/exec/git/status" -> "git"       (command name is 1st segment)
 
-  Command-name granularity matches `Arbor.Shell`'s `extract_command_name/1`
-  (first token, path stripped), so the derived allowlist never blocks a command
-  the capability gate already authorized. Finer-grained (sub-command / argument)
-  enforcement stays with the capability gate's full-URI check.
+  This is command-name granularity only. It is not an executable-shape proof and
+  must not be used to select an agent child process.
 
   ## Safety
 
-  This module only produces the *command allowlist*. The orthogonal safety floor
-  (shell-metacharacter blocking, dangerous-command/interpreter/flag blocking)
-  stays in `Arbor.Shell.Sandbox` and is always applied — holding
-  `arbor://shell/exec/git` lets an agent run `git`, but not `git; rm -rf` (a
-  metacharacter escape) and not the dangerous-command/interpreter floor.
+  This module only produces a legacy projection. Holding
+  `arbor://shell/exec/git` does **not** make generic Git execution available;
+  agents use schema-specific Git actions. The closed direct-executable policy in
+  `Arbor.Shell.prepare_agent_command/2` is the agent execution boundary.
   """
 
   require Logger

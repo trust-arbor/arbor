@@ -71,20 +71,18 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
   end
 
   # ===========================================================================
-  # 1b. Capability-derived sandbox allowlist
+  # 1b. Closed direct-executable policy
   # ===========================================================================
 
-  describe "capability-derived sandbox allowlist" do
-    test "a granted command runs under :strict even though the level allowlist excludes it",
+  describe "closed direct-executable policy" do
+    test "a generic git grant cannot turn Git into an unbounded dispatch surface",
          %{agent_id: agent_id} do
-      # `git` is NOT in the hardcoded :strict allowlist (ls/cat/grep/…). Before
-      # the capability-derived sandbox, this was blocked by the sandbox despite
-      # the explicit grant ({:error, {:not_in_allowlist, "git"}}). Now the
-      # sandbox derives its allowlist from the agent's caps, so the grant takes
-      # effect.
+      # Git can dispatch aliases, hooks, pagers, and helpers. Generic command
+      # grants therefore cannot prove the exact child process. Schema-specific
+      # Arbor.Actions.Git operations remain available through structured argv.
       grant_shell_capability(agent_id, "arbor://shell/exec/git")
 
-      assert {:ok, %{exit_code: 0}} =
+      assert {:error, {:agent_executable_not_allowed, "git"}} =
                Arbor.Shell.authorize_and_execute(agent_id, "git --version", sandbox: :strict)
     end
 
@@ -289,8 +287,8 @@ defmodule Arbor.Shell.AuthorizationE2ETest do
       assert {:ok, %{exit_code: 0}} =
                Arbor.Shell.authorize_and_execute(agent_id, "echo hello", sandbox: :none)
 
-      # rm should be blocked at authorization
-      assert {:error, :unauthorized} =
+      # rm is outside the closed executable set and is rejected before auth.
+      assert {:error, {:agent_executable_not_allowed, "rm"}} =
                Arbor.Shell.authorize_and_execute(agent_id, "rm -rf /", sandbox: :none)
     end
 

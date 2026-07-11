@@ -40,14 +40,10 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
     end
 
     test "captures stderr in output" do
-      # H3: bash -c with a quoted command is blocked by the sandbox's
-      # default (:basic) level. This test exercises runtime stderr capture,
-      # not the sandbox check, so opt out explicitly.
       node = %Node{
         id: "t1",
         attrs: %{
-          "tool_command" => "bash -c 'echo error >&2'",
-          "sandbox" => "none"
+          "tool_command" => "ls /nonexistent_arbor_tool_handler_path"
         }
       }
 
@@ -56,8 +52,8 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
 
       outcome = ToolHandler.execute(node, context, graph, [])
 
-      assert outcome.status == :success
-      assert String.trim(outcome.context_updates["tool.output"]) == "error"
+      assert outcome.status == :fail
+      assert outcome.context_updates["tool.output"] =~ "nonexistent_arbor_tool_handler_path"
     end
 
     test "uses workdir from context" do
@@ -94,7 +90,7 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
       outcome = ToolHandler.execute(node, context, graph, [])
 
       assert outcome.status == :fail
-      assert outcome.failure_reason =~ "error"
+      assert outcome.failure_reason =~ "direct-executable policy"
     end
 
     test "custom tool_command_runner overrides real execution" do
@@ -140,13 +136,8 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
     end
   end
 
-  describe "sandbox enforcement (H3 regression)" do
-    test "security regression (H3): dangerous command is rejected by the sandbox" do
-      # H3: pre-fix, ToolHandler.run_command called System.cmd directly,
-      # bypassing Arbor.Shell.Sandbox entirely. A pipeline node could
-      # execute any command including rm -rf, curl|sh, etc. The fix routes
-      # through Arbor.Shell.Sandbox.check/2 — `rm -rf /` is in the basic
-      # dangerous-commands list and now denies.
+  describe "direct-executable policy (H3 regression)" do
+    test "security regression (H3): dangerous command is rejected by the closed policy" do
       node = %Node{
         id: "rm_attempt",
         attrs: %{
@@ -164,14 +155,11 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
              "Dangerous command must be rejected by the sandbox — H3 regression. " <>
                "Got: #{inspect(outcome)}"
 
-      assert outcome.failure_reason =~ "sandbox",
-             "Failure reason should mention sandbox — got #{inspect(outcome.failure_reason)}"
+      assert outcome.failure_reason =~ "direct-executable policy",
+             "Failure reason should mention direct policy — got #{inspect(outcome.failure_reason)}"
     end
 
-    test "sandbox=none opts out for legitimate maintenance commands" do
-      # The escape hatch for trusted ops paths that genuinely need
-      # arbitrary commands; tested for parity with the existing test
-      # that uses sandbox=none.
+    test "sandbox=none cannot widen policy but retains a canonical simple command" do
       node = %Node{
         id: "ok",
         attrs: %{
@@ -189,18 +177,16 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
     end
   end
 
-  describe "tool-hook sandbox enforcement (H5 regression)" do
-    test "security regression (H5): a dangerous tool_hooks.pre command is gated by the sandbox and never executes" do
+  describe "tool-hook fail-closed policy (H5 regression)" do
+    test "security regression (H5): a graph string tool_hooks.pre command never executes" do
       # H5 (codex command-execution.orchestrator-tool-hooks-shell): pre-fix,
       # ToolHooks ran graph-authored hook strings via `/bin/sh -c` with NO
       # sandbox authorization — unlike the tool *command* path (H3). An
       # agent-authored graph could put `rm -rf /` (or any dangerous command)
       # in tool_hooks.pre/post and bypass the gate the command path enforces.
       #
-      # Behavioral proof of non-execution: the hook is `rmdir <sentinel>` on an
-      # existing directory. `rmdir` is in the basic sandbox's dangerous-command
-      # list, so the fix denies it. If the hook had executed via the shell the
-      # directory would be gone; we assert it survives.
+      # Behavioral proof of non-execution: if the historical shell hook executes,
+      # the existing sentinel directory is removed.
       sentinel = Path.join(@test_dir, "do_not_delete")
       File.mkdir_p!(sentinel)
 
@@ -222,27 +208,25 @@ defmodule Arbor.Orchestrator.Handlers.ToolHandlerTest do
              "dangerous tool_hooks.pre command executed — the sandbox gate did not fire (H5 regression). " <>
                "Got outcome: #{inspect(outcome)}"
 
-      # A blocked pre-hook reports :skip, so the tool itself is skipped too.
+      # An unavailable pre-hook reports :skip, so the tool itself is skipped too.
       assert outcome.status == :skipped,
              "a sandbox-denied pre-hook must skip the tool — got #{inspect(outcome)}"
     end
 
-    test "a benign tool_hooks.pre command is allowed and the tool proceeds" do
-      # Control: legitimate hooks (no dangerous command / flag / metacharacter)
-      # still run at the basic level, and the tool command executes after.
+    test "a trusted function pre-hook is allowed and the tool proceeds" do
       node = %Node{
         id: "hook_ok",
         attrs: %{
           "tool_command" => ~s(/bin/echo ran),
-          "sandbox" => "basic",
-          "tool_hooks.pre" => "echo hello"
+          "sandbox" => "basic"
         }
       }
 
       context = Context.new()
       graph = %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
-      outcome = ToolHandler.execute(node, context, graph, [])
+      outcome =
+        ToolHandler.execute(node, context, graph, tool_hooks: %{pre: fn _payload -> :ok end})
 
       assert outcome.status == :success,
              "a benign pre-hook must not block the tool — got #{inspect(outcome)}"

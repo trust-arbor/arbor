@@ -77,6 +77,22 @@ defmodule Arbor.Shell.PortSession do
     )
   end
 
+  @doc false
+  @spec start_link_direct(String.t(), [String.t()], String.t(), keyword()) :: GenServer.on_start()
+  def start_link_direct(executable, args, display_command, opts) do
+    GenServer.start_link(__MODULE__, {:direct, executable, args, display_command, opts})
+  end
+
+  @doc false
+  @spec start_supervised_direct(String.t(), [String.t()], String.t(), keyword()) ::
+          {:ok, pid()} | {:error, term()}
+  def start_supervised_direct(executable, args, display_command, opts \\ []) do
+    DynamicSupervisor.start_child(
+      Arbor.Shell.PortSessionSupervisor,
+      {__MODULE__, {:direct, executable, args, display_command, opts}}
+    )
+  end
+
   @doc """
   Add an output subscriber. The subscriber will receive
   `{:port_data, id, chunk}` and `{:port_exit, id, exit_code, output}` messages.
@@ -138,24 +154,57 @@ defmodule Arbor.Shell.PortSession do
     }
   end
 
+  def child_spec({:direct, executable, args, display_command, opts}) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link_direct, [executable, args, display_command, opts]},
+      restart: :temporary,
+      type: :worker
+    }
+  end
+
   # ===========================================================================
   # GenServer Callbacks
   # ===========================================================================
 
   @impl GenServer
+  def init({:direct, executable, args, display_command, opts}) do
+    id = Identifiers.generate_id("port_")
+    timeout = Keyword.get(opts, :timeout, 30_000)
+    cwd = Keyword.get(opts, :cwd)
+    env = Keyword.get(opts, :env, %{})
+    subscribers = subscriber_set(opts)
+    port_opts = build_direct_port_opts(args, cwd, env)
+
+    try do
+      port = Port.open({:spawn_executable, to_charlist(executable)}, port_opts)
+      timer_ref = timeout_timer(timeout)
+
+      state = %__MODULE__{
+        id: id,
+        port: port,
+        command: display_command,
+        subscribers: subscribers,
+        start_time: System.monotonic_time(:millisecond),
+        timeout: timeout,
+        timer_ref: timer_ref
+      }
+
+      emit_signal(:session_started, state)
+      {:ok, state}
+    catch
+      :error, reason ->
+        {:stop, {:port_open_failed, reason}}
+    end
+  end
+
   def init({command, opts}) do
     id = Identifiers.generate_id("port_")
     timeout = Keyword.get(opts, :timeout, 30_000)
     cwd = Keyword.get(opts, :cwd)
     env = Keyword.get(opts, :env, %{})
 
-    # Build initial subscriber set
-    subscribers =
-      case Keyword.get(opts, :stream_to) do
-        nil -> MapSet.new()
-        pid when is_pid(pid) -> MapSet.new([pid])
-        pids when is_list(pids) -> MapSet.new(pids)
-      end
+    subscribers = subscriber_set(opts)
 
     port_opts = build_port_opts(command, cwd, env)
 
@@ -163,12 +212,7 @@ defmodule Arbor.Shell.PortSession do
       {executable, _args} = resolve_command(command)
       port = Port.open({:spawn_executable, to_charlist(executable)}, port_opts)
 
-      # Set up timeout timer
-      timer_ref =
-        case timeout do
-          :infinity -> nil
-          ms when is_integer(ms) -> Process.send_after(self(), :timeout, ms)
-        end
+      timer_ref = timeout_timer(timeout)
 
       state = %__MODULE__{
         id: id,
@@ -320,6 +364,17 @@ defmodule Arbor.Shell.PortSession do
   # Private
   # ===========================================================================
 
+  defp subscriber_set(opts) do
+    case Keyword.get(opts, :stream_to) do
+      nil -> MapSet.new()
+      pid when is_pid(pid) -> MapSet.new([pid])
+      pids when is_list(pids) -> MapSet.new(pids)
+    end
+  end
+
+  defp timeout_timer(:infinity), do: nil
+  defp timeout_timer(ms) when is_integer(ms), do: Process.send_after(self(), :timeout, ms)
+
   defp resolve_command(command) do
     {cmd, args} = Sandbox.parse_command(command)
 
@@ -332,6 +387,10 @@ defmodule Arbor.Shell.PortSession do
   defp build_port_opts(command, cwd, env) do
     {_cmd, args} = Sandbox.parse_command(command)
 
+    build_direct_port_opts(args, cwd, env)
+  end
+
+  defp build_direct_port_opts(args, cwd, env) do
     opts = [
       :binary,
       :exit_status,

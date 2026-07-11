@@ -56,16 +56,14 @@ defmodule Arbor.Actions.ShellTest do
                String.contains?(result.stdout, "/private/tmp")
     end
 
-    test "sets environment variables" do
-      # Use printenv instead of echo $VAR — spawn_executable bypasses shell
-      # expansion, so $TEST_VAR would be passed as a literal string.
-      assert {:ok, result} =
+    test "rejects environment overrides at the generic agent boundary" do
+      assert {:error, message} =
                Shell.Execute.run(
                  %{command: "printenv TEST_VAR", env: %{"TEST_VAR" => "test_value"}},
                  %{}
                )
 
-      assert String.contains?(result.stdout, "test_value")
+      assert message =~ "environment overrides are unavailable"
     end
 
     test "validates action metadata" do
@@ -385,14 +383,14 @@ defmodule Arbor.Actions.ShellTest do
   describe "Execute sandbox" do
     test "blocks dangerous commands" do
       assert {:error, message} = Shell.Execute.run(%{command: "rm -rf /", sandbox: :basic}, %{})
-      assert message =~ "blocked" or message =~ "dangerous"
+      assert message =~ "not allowed"
     end
 
     test "strict sandbox restricts to allowlist" do
       assert {:error, message} =
                Shell.Execute.run(%{command: "curl http://example.com", sandbox: :strict}, %{})
 
-      assert message =~ "blocked" or message =~ "failed"
+      assert message =~ "not allowed"
     end
   end
 

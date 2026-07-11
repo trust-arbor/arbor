@@ -19,11 +19,14 @@ defmodule Arbor.Actions.Shell do
 
   ## Sandbox Support
 
-  Single-command `Execute` supports sandboxing through Arbor.Shell:
+  Single-command `Execute` uses Arbor.Shell's closed direct-executable policy:
 
-  - `:none` - No restrictions (still rejects compound commands for agents)
-  - `:basic` - Blocks dangerous commands (rm -rf, sudo, etc.)
-  - `:strict` - Allowlist only
+  - `:none` - Compatibility value only; cannot widen agent execution
+  - `:basic` / `:strict` - Also use the same closed direct policy
+
+  Non-empty child environments are intentionally unavailable on this generic
+  action. Schema-specific Git/Mix actions retain structured argv and their
+  bounded environment handling.
 
   ## Examples
 
@@ -40,8 +43,6 @@ defmodule Arbor.Actions.Shell do
 
   alias Arbor.Shell
 
-  @compound_shell_unavailable {:compound_shell_unavailable, :security_boundary_incomplete}
-
   @doc false
   @spec authorize_command(String.t(), String.t(), keyword()) ::
           {:ok, :authorized}
@@ -50,14 +51,11 @@ defmodule Arbor.Actions.Shell do
           | {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
   def authorize_command(agent_id, command, opts \\ [])
       when is_binary(agent_id) and is_binary(command) do
-    # Unconditional compound rejection before Trust/Security, approval creation,
-    # or any execution. Used by the DOT shell handler — sandbox:none /bin/sh -c
-    # must never obtain authorization for metacharacter-bearing commands.
-    if Shell.compound_command?(command) do
-      {:error, @compound_shell_unavailable}
-    else
-      command_name = Keyword.get(opts, :gate_command) || extract_command_name(command)
-      resource = "arbor://shell/exec/#{command_name}"
+    # Bind the exact direct executable before Trust/Security or approval work.
+    # A broad capability cannot authorize an interpreter/dispatch wrapper, and
+    # sandbox:none/env cannot widen the child process after approval.
+    with {:ok, prepared} <- Shell.prepare_agent_command(command, opts) do
+      resource = "arbor://shell/exec/#{prepared.command_name}"
 
       auth_opts =
         [
@@ -77,14 +75,6 @@ defmodule Arbor.Actions.Shell do
         {:error, _reason} -> {:error, :unauthorized}
       end
     end
-  end
-
-  defp extract_command_name(command) do
-    command
-    |> String.trim()
-    |> String.split(~r/\s+/, parts: 2)
-    |> List.first()
-    |> Path.basename()
   end
 
   defp maybe_add_opt(opts, _key, nil), do: opts
@@ -167,8 +157,10 @@ defmodule Arbor.Actions.Shell do
     - `sandbox` - Sandbox level affects execution restrictions
     - `max_output_bytes` - Output ceiling governs resource use / process termination
 
+    Environment is execution control on a generic process boundary:
+    - `env` - Rejected when non-empty; loader/runtime variables can execute code
+
     Data parameters that are just processed:
-    - `env` - Environment variables are passed through
     - `timeout` - Numeric timeout doesn't affect security
     """
     @spec taint_roles() :: %{atom() => Arbor.Actions.Taint.role()}
@@ -177,7 +169,7 @@ defmodule Arbor.Actions.Shell do
         command: {:control, requires: [:command_injection]},
         cwd: {:control, requires: [:path_traversal]},
         sandbox: :control,
-        env: :data,
+        env: :control,
         timeout: :data,
         max_output_bytes: :control
       }
@@ -192,63 +184,62 @@ defmodule Arbor.Actions.Shell do
     def run(params, context) do
       command = Map.get(params, :command) || Map.get(params, "command")
 
-      # Unconditional compound rejection at the Jido action surface — before
-      # emit / auth / opts construction / process / fs work. A missing agent_id
-      # must not grant implicit system authority; trusted system callers that
-      # need compound execution use Arbor.Shell.execute/2 directly.
-      if is_binary(command) and Arbor.Shell.compound_command?(command) do
-        {:error, @unavailable_message}
-      else
-        Actions.emit_started(__MODULE__, params)
+      opts =
+        [
+          # Do not use `|| 30_000` — timeout: 0 is truthy and becomes an immediate
+          # Port kill (exit 137) in Shell.Executor.
+          timeout: effective_timeout(params[:timeout], 30_000),
+          sandbox: params[:sandbox] || :basic
+        ]
+        |> maybe_add_opt(:cwd, params[:cwd])
+        |> maybe_add_opt(:env, params[:env])
+        |> maybe_add_opt(
+          :max_output_bytes,
+          normalize_forwarded_max_output_bytes(params[:max_output_bytes])
+        )
+        |> maybe_add_context_opts(context)
 
-        opts =
-          [
-            # Do not use `|| 30_000` — timeout: 0 is truthy and becomes an immediate
-            # Port kill (exit 137) in Shell.Executor.
-            timeout: effective_timeout(params[:timeout], 30_000),
-            sandbox: params[:sandbox] || :basic
-          ]
-          |> maybe_add_opt(:cwd, params[:cwd])
-          |> maybe_add_opt(:env, params[:env])
-          |> maybe_add_opt(
-            :max_output_bytes,
-            normalize_forwarded_max_output_bytes(params[:max_output_bytes])
-          )
-          |> maybe_add_context_opts(context)
+      # Closed executable/env/compound admission happens before action signals,
+      # Trust authorization, approval creation, registry, or process work.
+      case Arbor.Shell.prepare_agent_command(command, opts) do
+        {:ok, _prepared} ->
+          Actions.emit_started(__MODULE__, params)
 
-        case call_shell(command, opts, context) do
-          {:ok, result} when is_map(result) ->
-            Actions.emit_completed(__MODULE__, result)
+          case call_shell(command, opts, context) do
+            {:ok, result} when is_map(result) ->
+              Actions.emit_completed(__MODULE__, result)
 
-            {:ok,
-             %{
-               exit_code: result.exit_code,
-               stdout: result.stdout,
-               stderr: result.stderr,
-               duration_ms: result.duration_ms,
-               timed_out: Map.get(result, :timed_out, false),
-               killed: Map.get(result, :killed, false),
-               output_limit_exceeded: Map.get(result, :output_limit_exceeded, false),
-               output_truncated: Map.get(result, :output_truncated, false)
-             }}
+              {:ok,
+               %{
+                 exit_code: result.exit_code,
+                 stdout: result.stdout,
+                 stderr: result.stderr,
+                 duration_ms: result.duration_ms,
+                 timed_out: Map.get(result, :timed_out, false),
+                 killed: Map.get(result, :killed, false),
+                 output_limit_exceeded: Map.get(result, :output_limit_exceeded, false),
+                 output_truncated: Map.get(result, :output_truncated, false)
+               }}
 
-          {:ok, :pending_approval, proposal_id} ->
-            # Preserve the proposal id for owner-side await/retry (coding validation,
-            # ActionsExecutor). Do not convert this into a generic error string —
-            # that path is what left stale irq_* records without a waiter.
-            {:ok, :pending_approval, proposal_id}
+            {:ok, :pending_approval, proposal_id} ->
+              # Preserve the proposal id for owner-side await/retry (coding validation,
+              # ActionsExecutor). Do not convert this into a generic error string.
+              {:ok, :pending_approval, proposal_id}
 
-          {:error, :unauthorized} ->
-            Actions.emit_failed(__MODULE__, :unauthorized)
+            {:error, :unauthorized} ->
+              Actions.emit_failed(__MODULE__, :unauthorized)
 
-            {:error,
-             "Shell execution unauthorized (missing capability or policy denied). " <>
-               "If an approval was expected, the request was not escalated — check trust rules and grants."}
+              {:error,
+               "Shell execution unauthorized (missing capability or policy denied). " <>
+                 "If an approval was expected, the request was not escalated — check trust rules and grants."}
 
-          {:error, reason} ->
-            Actions.emit_failed(__MODULE__, reason)
-            {:error, format_error(reason)}
-        end
+            {:error, reason} ->
+              Actions.emit_failed(__MODULE__, reason)
+              {:error, format_error(reason)}
+          end
+
+        {:error, reason} ->
+          {:error, format_error(reason)}
       end
     end
 
@@ -261,9 +252,7 @@ defmodule Arbor.Actions.Shell do
     # bypassed. Missing agent_id never falls through to system execute for
     # compounds.
     defp call_shell(command, opts, context) do
-      if is_binary(command) and Arbor.Shell.compound_command?(command) do
-        {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
-      else
+      with {:ok, _prepared} <- Arbor.Shell.prepare_agent_command(command, opts) do
         case context[:agent_id] do
           agent_id when is_binary(agent_id) and agent_id != "" ->
             auth_opts = shell_auth_opts(opts, context)
@@ -280,10 +269,10 @@ defmodule Arbor.Actions.Shell do
             end
 
           _ ->
-            # Non-compound only. Compounds already rejected above and in run/2.
-            # Empty-context single commands remain for unit tests / controlled
-            # non-agent harnesses; never an implicit compound system escape hatch.
-            Arbor.Shell.execute(command, opts)
+            # Empty-context calls remain for controlled action harnesses, but
+            # they use the same closed direct policy and never gain implicit
+            # trusted-system shell semantics.
+            Arbor.Shell.execute_agent_command(command, opts)
         end
       end
     end
@@ -319,11 +308,10 @@ defmodule Arbor.Actions.Shell do
       end
     end
 
-    # Execute after Trust already authorized a non-compound command.
+    # Execute after Trust already authorized a prepared direct command.
     # Call only public Arbor.Shell APIs — never Sandbox or CapShell internals.
-    # System-only execute/2 is safe here because compounds were rejected above.
     defp execute_authorized_shell(command, opts) do
-      Arbor.Shell.execute(command, opts)
+      Arbor.Shell.execute_agent_command(command, opts)
     end
 
     # LLM-facing boundary: floor tiny/zero timeouts (0, 1, …) to the default.
@@ -360,6 +348,19 @@ defmodule Arbor.Actions.Shell do
 
     defp format_error({:blocked_command, cmd}), do: "Command blocked: #{cmd}"
     defp format_error({:dangerous_flags, flags}), do: "Dangerous flags blocked: #{inspect(flags)}"
+
+    defp format_error({:agent_executable_not_allowed, cmd}),
+      do: "Generic agent shell executable is not allowed: #{cmd}"
+
+    defp format_error({:agent_executable_path_not_allowed, path}),
+      do: "Generic agent shell executable path is not allowed: #{path}"
+
+    defp format_error({:agent_shell_option_not_allowed, :env}),
+      do: "Generic agent shell environment overrides are unavailable."
+
+    defp format_error({:agent_shell_gate_mismatch, gate, command}),
+      do: "Shell authorization target #{gate} does not match executable #{command}."
+
     defp format_error(:eacces), do: "Shell execution failed: permission denied."
 
     defp format_error({:shell_metacharacters, chars}),
@@ -367,9 +368,7 @@ defmodule Arbor.Actions.Shell do
         "Shell metacharacters #{inspect(chars)} are not allowed. Use individual commands without chaining (no ;, &&, ||, |, etc.)."
 
     defp format_error({:compound_shell_unavailable, :security_boundary_incomplete}),
-      do:
-        "Compound shell execution is unavailable (security boundary incomplete). " <>
-          "Use individual non-compound commands; CapShell is intentionally fail-closed."
+      do: @unavailable_message
 
     defp format_error(reason) when is_binary(reason), do: reason
     defp format_error(reason), do: "Shell execution failed: #{inspect(reason)}"

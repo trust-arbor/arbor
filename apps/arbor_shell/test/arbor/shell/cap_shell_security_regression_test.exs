@@ -9,7 +9,7 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
   `execute_compound_with_capabilities` always return the stable unavailable
   tuple, including for malformed terms (never raise).
 
-  Residual proofs (must fail on exact parent `9f91f62` and pass on candidate):
+  Residual proofs (must fail on the relevant pre-fix parent and pass candidate):
   - bare `authorize/3` for compound (parent authorized leading token only)
   - `authorize_and_execute_async/3` + `authorize_and_execute_streaming/3`
     with `sandbox: :none` (parent lacked unconditional compound rejection)
@@ -90,6 +90,140 @@ defmodule Arbor.Shell.CapShellSecurityRegressionTest do
   end
 
   describe "security regression: agent boundaries reject compounds unconditionally" do
+    test "security regression: standalone ampersand and all shell list/control operators are compound",
+         %{agent_id: agent_id} do
+      commands = [
+        "sleep 0.1 & touch /tmp/ampersand_must_not_run",
+        "echo a && echo b",
+        "false || true",
+        "echo a; echo b",
+        "echo a;; echo b",
+        "echo a;& echo b",
+        "echo a;;& echo b",
+        "echo a | cat",
+        "echo a |& cat",
+        "(echo grouped)",
+        "{ echo grouped; }",
+        "echo redirected > /tmp/x",
+        "cat < /tmp/x",
+        "echo `date`",
+        "echo $(date)",
+        "! false",
+        "echo first\necho second"
+      ]
+
+      for command <- commands do
+        assert Arbor.Shell.compound_command?(command),
+               "expected shared compound gate to reject #{inspect(command)}"
+
+        assert @unavailable = Arbor.Shell.authorize(agent_id, command, sandbox: :none)
+      end
+    end
+
+    test "security regression: shell interpreters and nested dispatch wrappers reject before authorization",
+         %{agent_id: agent_id} do
+      commands = [
+        "sh -c true",
+        "/bin/sh -c true",
+        "bash -c true",
+        "/bin/zsh -c true",
+        "env sh -c true",
+        "/usr/bin/env nice sh -c true",
+        "command sh -c true",
+        "exec sh -c true",
+        "nice sh -c true",
+        "nohup sh -c true",
+        "timeout 1 sh -c true",
+        "xargs sh -c true"
+      ]
+
+      for command <- commands do
+        assert {:error, {:agent_executable_not_allowed, _name}} =
+                 Arbor.Shell.authorize(agent_id, command, sandbox: :none)
+
+        assert {:error, {:agent_executable_not_allowed, _name}} =
+                 Arbor.Shell.authorize_and_execute(agent_id, command, sandbox: :none)
+      end
+    end
+
+    test "security regression: env-fed eval cannot restore runtime expansion in sync/async/streaming",
+         %{agent_id: agent_id} do
+      marker =
+        Path.join(
+          System.tmp_dir!(),
+          "capshell_env_eval_#{:erlang.unique_integer([:positive])}"
+        )
+
+      File.rm(marker)
+      command = ~S(sh -c 'eval "$PAYLOAD"')
+      env = %{"PAYLOAD" => "sleep 0.2 && touch #{marker} &"}
+
+      try do
+        results = [
+          Arbor.Shell.authorize_and_execute(agent_id, command, sandbox: :none, env: env),
+          Arbor.Shell.authorize_and_execute_async(agent_id, command,
+            sandbox: :none,
+            env: env
+          ),
+          Arbor.Shell.authorize_and_execute_streaming(agent_id, command,
+            sandbox: :none,
+            env: env,
+            stream_to: self()
+          )
+        ]
+
+        Process.sleep(700)
+
+        refute File.exists?(marker),
+               "env-fed eval launched a delayed background marker side effect"
+
+        assert Enum.all?(results, fn
+                 {:error, {:agent_executable_not_allowed, "sh"}} -> true
+                 _ -> false
+               end)
+      after
+        File.rm(marker)
+      end
+    end
+
+    test "security regression: non-empty env and mismatched gate command reject before Security" do
+      no_cap_agent = "agent_capshell_no_cap_#{:erlang.unique_integer([:positive])}"
+
+      assert {:error, {:agent_shell_option_not_allowed, :env}} =
+               Arbor.Shell.authorize(no_cap_agent, "echo safe",
+                 env: %{"LD_PRELOAD" => "/tmp/not-loaded"}
+               )
+
+      assert {:error, {:agent_shell_gate_mismatch, "sh", "echo"}} =
+               Arbor.Shell.authorize(no_cap_agent, "echo safe", gate_command: "sh")
+    end
+
+    test "security regression: absolute executable basename cannot masquerade as an allowed utility",
+         %{agent_id: agent_id} do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "capshell_fake_executable_#{:erlang.unique_integer([:positive])}"
+        )
+
+      fake_echo = Path.join(root, "echo")
+      marker = Path.join(root, "marker")
+      File.mkdir_p!(root)
+      File.write!(fake_echo, "#!/bin/sh\nsleep 0.2\ntouch #{marker}\n")
+      File.chmod!(fake_echo, 0o755)
+
+      try do
+        result =
+          Arbor.Shell.authorize_and_execute(agent_id, "#{fake_echo} ignored", sandbox: :none)
+
+        Process.sleep(700)
+        refute File.exists?(marker), "a fake executable named echo was launched"
+        assert result == {:error, {:agent_executable_path_not_allowed, fake_echo}}
+      after
+        File.rm_rf!(root)
+      end
+    end
+
     test "security regression: config true + sandbox:none cannot create delayed marker (sync/async/streaming/bare-authorize)",
          %{agent_id: agent_id} do
       assert_residual_agent_boundaries_closed(agent_id, true)

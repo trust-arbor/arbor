@@ -14,8 +14,9 @@ defmodule Arbor.Shell.Sandbox do
   ## Shell Metacharacter Protection
 
   At `:basic` and `:strict` levels, commands containing shell metacharacters
-  are rejected to prevent command injection via chaining (`;`, `&&`, `||`),
-  subshells (`$()`, backticks), pipes (`|`), or redirections (`>`, `<`).
+  are rejected to prevent command injection via lists/control operators
+  (`;`, `&`, `&&`, `||`, `(`, `)`), subshells (`$()`, backticks), pipes
+  (`|`, `|&`), or redirections (`>`, `<`).
   """
 
   # The recognized sandbox levels. An UNrecognized level (e.g. the trust-tier
@@ -26,8 +27,22 @@ defmodule Arbor.Shell.Sandbox do
 
   require Logger
 
-  # Shell metacharacters that enable command injection
-  @shell_metacharacters [";", "&&", "||", "|", "`", "$(", ">", "<", "\n", "\r"]
+  # Every POSIX-style list/control operator contains at least one of these
+  # characters. Matching the single-character roots is intentional: it catches
+  # standalone background `&` as well as `&&`, `;&`, `;;&`, `|&`, grouping, and
+  # every redirection variant. Quoted operators remain compound because the
+  # agent path cannot rely on shell quoting semantics while CapShell is absent.
+  @shell_metacharacters [";", "&", "|", "(", ")", "`", "$(", ">", "<", "\n", "\r"]
+
+  # Positive policy for generic agent-authored command strings. These programs
+  # consume argv directly and do not dispatch another user-selected executable
+  # or evaluate a runtime command string. Generic shell intentionally excludes
+  # git/mix, interpreters, env/exec wrappers, find/xargs, and programmable search
+  # tools. Schema-specific actions retain their structured direct-argv APIs.
+  @agent_direct_commands ~w[
+    basename cal cat comm cut date diff dirname echo false grep head
+    ls printenv printf pwd realpath sleep sort stat tail test touch tr true uniq wc
+  ]
 
   # Commands blocked at :basic level
   @dangerous_commands ~w[
@@ -87,14 +102,16 @@ defmodule Arbor.Shell.Sandbox do
 
   - `:allowlist` — a capability-derived command allowlist
     (`Arbor.Shell.CapPolicy.allowlist/0`: `:all | {:commands, MapSet}`). When
-    present (the agent path), the COMMAND check uses this allowlist instead of
+    present, the COMMAND check uses this allowlist instead of
     the level's hardcoded list, so the sandbox agrees with the capability grant
     rather than conflicting with it. The safety floor (metacharacters +
     dangerous-command/interpreter/flag blocking) is ALWAYS applied on top — a
-    capability grant lets an agent run a command, but never escape it via
+    capability grant lets a caller run a command, but never escape it via
     metacharacters or use the dangerous-command/interpreter floor. `:none` still
-    bypasses entirely (the capability gate already authorized the command).
-    When absent (system callers), the level-based behavior is unchanged.
+    bypasses this legacy sandbox check for trusted system callers. Generic
+    agent-facing paths use `prepare_agent_command/2` instead: a capability
+    allowlist (especially `:all`) is not proof that an executable cannot dispatch
+    a nested runtime command. When absent, the level-based behavior is unchanged.
   """
   @spec check(String.t(), level(), keyword()) :: {:ok, :allowed} | {:error, term()}
   def check(command, level, opts \\ [])
@@ -109,9 +126,54 @@ defmodule Arbor.Shell.Sandbox do
   end
 
   @doc """
+  Parse and bind a generic agent-authored command to the closed direct-argv
+  executable policy.
+
+  This gate is independent of the requested sandbox level. In particular,
+  `sandbox: :none` cannot widen it. Non-empty child environments are rejected:
+  loader variables and interpreter-specific options can turn an otherwise
+  direct spawn into runtime code execution. Absolute paths are accepted only
+  when they name the same executable selected from the trusted host `PATH` for
+  the allowed basename; relative executable paths are rejected.
+
+  Returns a prepared map containing the resolved executable, argv, and canonical
+  command name. It never launches a process.
+  """
+  @spec prepare_agent_command(term(), term()) ::
+          {:ok,
+           %{
+             required(:executable) => String.t(),
+             required(:args) => [String.t()],
+             required(:command_name) => String.t()
+           }}
+          | {:error, term()}
+  def prepare_agent_command(command, opts \\ [])
+
+  def prepare_agent_command(command, opts) when is_binary(command) and is_list(opts) do
+    with true <- Keyword.keyword?(opts),
+         :ok <- validate_agent_command_text(command),
+         {:ok, [raw_command | args]} <- split_agent_command(command),
+         command_name <- Path.basename(raw_command),
+         :ok <- validate_agent_command_name(command_name),
+         :ok <- validate_gate_command(opts, command_name),
+         :ok <- validate_agent_environment(opts),
+         {:ok, executable} <- resolve_agent_executable(raw_command, command_name) do
+      {:ok, %{executable: executable, args: args, command_name: command_name}}
+    else
+      false -> {:error, {:invalid_agent_command, :invalid_options}}
+      {:ok, []} -> {:error, {:invalid_agent_command, :empty}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def prepare_agent_command(_command, _opts),
+    do: {:error, {:invalid_agent_command, :invalid_input}}
+
+  @doc """
   Returns `true` if the command contains shell metacharacters — i.e. it is a
-  *compound* command (sequencing `;`/`&&`/`||`, pipes `|`, substitution `$(…)`/
-  backticks, or redirection `>`/`<`) that the single-command path rejects.
+  *compound* command (sequencing/background `;`/`&`/`&&`/`||`, grouping
+  `()`, pipes `|`/`|&`, substitution `$(…)`/backticks, or redirection
+  `>`/`<`) that the single-command path rejects.
 
   Used by agent-authorized shell boundaries (`Arbor.Shell.authorize/3`,
   `authorize_and_execute/3` and friends, `Arbor.Actions.Shell`) to reject
@@ -126,7 +188,8 @@ defmodule Arbor.Shell.Sandbox do
   """
   @spec compound?(String.t()) :: boolean()
   def compound?(command) when is_binary(command) do
-    Enum.any?(@shell_metacharacters, &String.contains?(command, &1))
+    Enum.any?(@shell_metacharacters, &String.contains?(command, &1)) or
+      Regex.match?(~r/(?:^|[ \t])!(?:[ \t]|$)/, command)
   end
 
   # Capability-derived path: the command must be in the agent's cap-derived
@@ -363,6 +426,103 @@ defmodule Arbor.Shell.Sandbox do
   end
 
   # Private functions
+
+  defp validate_agent_environment(opts) do
+    case Keyword.get(opts, :env) do
+      nil -> :ok
+      %{} = env when map_size(env) == 0 -> :ok
+      [] -> :ok
+      _ -> {:error, {:agent_shell_option_not_allowed, :env}}
+    end
+  end
+
+  defp validate_agent_command_text(command) do
+    cond do
+      command == "" or String.trim(command) == "" ->
+        {:error, {:invalid_agent_command, :empty}}
+
+      not String.valid?(command) ->
+        {:error, {:invalid_agent_command, :invalid_utf8}}
+
+      compound?(command) ->
+        {:error, :compound_command}
+
+      Regex.match?(~r/[\x00-\x1F\x7F]/u, command) ->
+        {:error, {:invalid_agent_command, :control_character}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp split_agent_command(command) do
+    {:ok, OptionParser.split(command)}
+  rescue
+    RuntimeError -> {:error, {:invalid_agent_command, :malformed_argv}}
+  end
+
+  defp validate_agent_command_name(command_name) do
+    if command_name in @agent_direct_commands do
+      :ok
+    else
+      {:error, {:agent_executable_not_allowed, command_name}}
+    end
+  end
+
+  defp validate_gate_command(opts, command_name) do
+    case Keyword.get(opts, :gate_command) do
+      nil ->
+        :ok
+
+      gate when is_binary(gate) ->
+        normalized = Path.basename(gate)
+
+        if normalized == command_name do
+          :ok
+        else
+          {:error, {:agent_shell_gate_mismatch, normalized, command_name}}
+        end
+
+      _ ->
+        {:error, {:agent_shell_option_not_allowed, :gate_command}}
+    end
+  end
+
+  defp resolve_agent_executable(raw_command, command_name) do
+    case System.find_executable(command_name) do
+      nil ->
+        {:error, {:executable_not_found, command_name}}
+
+      executable ->
+        resolved = Path.expand(executable)
+
+        cond do
+          raw_command == command_name ->
+            {:ok, resolved}
+
+          Path.type(raw_command) == :absolute and
+              (Path.expand(raw_command) == resolved or
+                 same_executable_file?(raw_command, resolved)) ->
+            {:ok, resolved}
+
+          true ->
+            {:error, {:agent_executable_path_not_allowed, raw_command}}
+        end
+    end
+  end
+
+  defp same_executable_file?(left, right) do
+    with {:ok, left_stat} <- File.stat(left),
+         {:ok, right_stat} <- File.stat(right) do
+      left_stat.type == :regular and
+        right_stat.type == :regular and
+        left_stat.inode == right_stat.inode and
+        left_stat.major_device == right_stat.major_device and
+        left_stat.minor_device == right_stat.minor_device
+    else
+      _ -> false
+    end
+  end
 
   defp check_metacharacters(command) do
     found =

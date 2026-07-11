@@ -242,16 +242,25 @@ Side-effecting execution. Dispatches by `target` attribute.
 | Attribute | Default | Description |
 |-----------|---------|-------------|
 | `target` | `"tool"` | `tool`, `shell`, `action`, `function` |
-| `tool_command` | _(for shell)_ | Shell command to execute |
+| `command` | _(for shell)_ | Closed-policy direct command to execute |
+| `tool_command` | _(for tool)_ | Closed-policy direct command to execute |
 | `tool_name` | _(for tool)_ | Tool function name |
 | `action` | _(for target=action)_ | Arbor action name (e.g., `eval_pipeline.load_dataset`) |
 | `context_keys` | _(for target=action)_ | Comma-separated context keys to pass as action params |
 | `arg.*` / `param.*` | _(for target=action)_ | Static action parameters (e.g., `arg.path="data.jsonl"`) |
-| `sandbox` | `"true"` | Enable sandboxed execution |
+| `sandbox` | `"true"` | Compatibility sandbox setting; `none` cannot widen agent execution |
 | `max_retries` | `"0"` | Retry count on failure |
 | `retry_target` | _(none)_ | Node ID to jump to on failure |
 
 Idempotency: `side_effecting`. Aliases: `tool`, `shell`.
+
+Generic `shell` and command-backed `tool` targets accept only Arbor.Shell's fixed
+set of directly executed, non-dispatching utilities. Compound syntax, shell or
+language interpreters, wrappers such as `env`/`nice`/`timeout`, noncanonical
+executable paths, generic Git/Mix, and non-empty child environments fail closed.
+Use schema-specific actions such as `mix_test` and the Git actions for those
+domain operations. Trusted system code can use the explicit unchecked
+`Arbor.Shell.execute*` APIs outside agent-authored DOT.
 
 ##### Using `target="action"` for Domain Operations
 
@@ -576,7 +585,7 @@ digraph retry_loop {
 
   implement [type="compute" prompt="Implement: $goal"]
 
-  run_tests [type="exec" target="shell" tool_command="mix test" max_retries="2" retry_target="fix"]
+  run_tests [type="exec" target="action" action="mix_test" param.path="." max_retries="2" retry_target="fix"]
 
   fix [type="compute" prompt="Tests failed. Fix the issues based on: $last_response"]
 

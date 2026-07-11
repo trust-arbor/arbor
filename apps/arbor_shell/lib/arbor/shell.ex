@@ -105,14 +105,54 @@ defmodule Arbor.Shell do
 
   @doc """
   Whether `command` contains shell metacharacters that mark it as compound
-  (sequencing `;`/`&&`/`||`, pipes `|`, substitution `$(…)`/backticks, or
-  redirection `>`/`<`).
+  (sequencing/background `;`/`&`/`&&`/`||`, grouping, pipes, substitution,
+  or redirection).
 
   Public facade over `Arbor.Shell.Sandbox.compound?/1`. Other libraries
   (e.g. `Arbor.Actions.Shell`) must call this rather than importing Sandbox.
   """
   @spec compound_command?(String.t()) :: boolean()
   def compound_command?(command) when is_binary(command), do: Sandbox.compound?(command)
+
+  @doc """
+  Validate and bind a generic agent-authored command to the closed direct-argv
+  policy.
+
+  This check runs before authorization at every agent shell boundary. Only a
+  fixed set of non-dispatching utilities is accepted; shell interpreters,
+  language runtimes, command wrappers, generic Git/Mix execution, noncanonical
+  executable paths, and non-empty child environments are rejected. The
+  requested sandbox level cannot widen the policy.
+
+  Compound syntax returns the same stable CapShell-unavailable error used by
+  the retired compound entry points.
+  """
+  @spec prepare_agent_command(term(), term()) :: {:ok, map()} | {:error, term()}
+  def prepare_agent_command(command, opts \\ []) do
+    case Sandbox.prepare_agent_command(command, opts) do
+      {:error, :compound_command} -> {:error, @compound_shell_unavailable}
+      other -> other
+    end
+  end
+
+  @doc """
+  Execute a generic agent-authored command through the closed direct-argv path.
+
+  This function enforces execution shape but does **not** grant authority. It is
+  for adapters that have already performed their own principal-specific
+  authorization (for example the Trust-backed action and DOT handlers). Callers
+  that need both checks should use `authorize_and_execute/3`.
+
+  `sandbox: :none` is accepted for compatibility but cannot widen this path;
+  execution always uses the closed direct policy. Non-empty `:env` is rejected.
+  Trusted system callers retain `execute/2` and `execute_direct/3` unchanged.
+  """
+  @spec execute_agent_command(term(), term()) :: {:ok, map()} | {:error, term()}
+  def execute_agent_command(command, opts \\ []) do
+    with {:ok, prepared} <- prepare_agent_command(command, opts) do
+      execute_prepared_agent_command(command, prepared, opts)
+    end
+  end
 
   @doc """
   Fail-closed compound-shell entry (public facade over `Arbor.Shell.CapShell`).
@@ -145,15 +185,16 @@ defmodule Arbor.Shell do
   @doc """
   Execute a shell command with authorization check.
 
-  Verifies the agent has the `arbor://shell/exec/{command_name}` capability
-  before delegating to `execute/2`. Use this for agent-initiated commands
-  where authorization should be enforced.
+  First binds the command to the closed direct-executable policy, then verifies
+  the agent has the matching `arbor://shell/exec/{command_name}` capability.
+  A broad capability does not admit an interpreter or dispatch wrapper.
 
   ## Parameters
 
   - `agent_id` - The agent's ID for capability lookup
   - `command` - The shell command to execute
-  - `opts` - Options passed to `execute/2`
+  - `opts` - Direct execution options; non-empty `:env` is rejected and
+    `sandbox: :none` cannot widen the agent policy
 
   ## Returns
 
@@ -165,7 +206,9 @@ defmodule Arbor.Shell do
   ## Examples
 
       {:ok, result} = Arbor.Shell.authorize_and_execute("agent_001", "ls -la")
-      {:error, :unauthorized} = Arbor.Shell.authorize_and_execute("agent_002", "rm -rf /")
+      {:error, :unauthorized} = Arbor.Shell.authorize_and_execute("agent_002", "echo denied")
+      {:error, {:agent_executable_not_allowed, "sh"}} =
+        Arbor.Shell.authorize_and_execute("agent_001", "sh -c true")
   """
   @spec authorize_and_execute(String.t(), String.t(), keyword()) ::
           {:ok, map()}
@@ -175,13 +218,9 @@ defmodule Arbor.Shell do
   # H6: Pass command context into authorize/4 opts so the reflex pipeline
   # can evaluate command-aware rules (e.g., blocking `rm -rf /`).
   def authorize_and_execute(agent_id, command, opts \\ []) do
-    # Unconditional compound rejection before allowlist, auth, approval,
-    # registry, session, process, or fs work. Config true/false and
-    # sandbox:none must not re-enable compound execution at agent boundaries.
-    with :ok <- reject_agent_compound(command) do
-      opts = put_cap_allowlist(opts, agent_id)
-      authorize_and_dispatch(agent_id, command, opts, fn -> execute(command, opts) end)
-    end
+    authorize_and_dispatch(agent_id, command, opts, fn prepared ->
+      execute_prepared_agent_command(command, prepared, opts)
+    end)
   end
 
   @doc """
@@ -196,22 +235,8 @@ defmodule Arbor.Shell do
           | {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
   # H6: Pass command context into authorize/4 opts for async execution too.
   def authorize_and_execute_async(agent_id, command, opts \\ []) do
-    with :ok <- reject_agent_compound(command) do
-      opts = put_cap_allowlist(opts, agent_id)
-      authorize_and_dispatch(agent_id, command, opts, fn -> execute_async(command, opts) end)
-    end
-  end
-
-  # Thread the agent's capability-derived shell allowlist into the execution opts
-  # so the downstream sandbox command-check (Arbor.Shell.Sandbox.check/3) uses the
-  # agent's actual `arbor://shell/exec/*` grants instead of a hardcoded list. The
-  # capability gate in authorize/3 remains the authoritative authorization; this
-  # keeps the sandbox layer consistent with it (no more "granted git, still
-  # blocked by :strict" friction). System callers (plain execute/2) never set
-  # this, so their level-based behavior is unchanged.
-  defp put_cap_allowlist(opts, agent_id) do
-    Keyword.put_new_lazy(opts, :allowlist, fn ->
-      Arbor.Shell.CapPolicy.allowlist_for(agent_id)
+    authorize_and_dispatch(agent_id, command, opts, fn prepared ->
+      execute_prepared_agent_command_async(command, prepared, opts)
     end)
   end
 
@@ -220,15 +245,13 @@ defmodule Arbor.Shell do
 
   Runs the same capability + reflex policy check as `authorize_and_execute/3`
   but returns the decision instead of dispatching execution. This is for
-  callers that own their own execution mechanism and cannot route through
-  `execute/2` — notably the DOT `shell` node handler.
+  adapters that authorize separately before routing the same command through
+  `execute_agent_command/2` — notably the DOT `shell` node handler.
 
-  **Compound commands are rejected unconditionally** before capability lookup,
-  approval creation, or any process/fs work — regardless of
-  `compound_shell_enabled` or the caller's intended sandbox level. The DOT
-  handler's historical `sandbox: "none"` `/bin/sh -c` path therefore cannot
-  obtain authorization for metacharacter-bearing commands; static
-  per-command grants must not paper over expanded compound semantics.
+  **Compound commands, interpreters/wrappers, noncanonical executable paths,
+  and non-empty environments are rejected** before capability lookup or
+  approval creation, regardless of `compound_shell_enabled` or sandbox level.
+  Static per-command grants must not paper over expanded runtime semantics.
 
   ## Returns
 
@@ -237,34 +260,20 @@ defmodule Arbor.Shell do
   - `{:error, :unauthorized}` - the principal lacks the capability
   - `{:error, {:compound_shell_unavailable, :security_boundary_incomplete}}` -
     command is compound / not agent-executable under CapShell retirement
+  - `{:error, reason}` - closed direct-executable policy rejected the command
 
   ## Examples
 
       {:ok, :authorized} = Arbor.Shell.authorize("agent_001", "ls -la")
-      {:error, :unauthorized} = Arbor.Shell.authorize("agent_002", "rm -rf /")
+      {:error, :unauthorized} = Arbor.Shell.authorize("agent_002", "echo denied")
   """
   @spec authorize(String.t(), String.t(), keyword()) ::
           {:ok, :authorized}
           | {:ok, :pending_approval, String.t()}
-          | {:error, :unauthorized}
-          | {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
+          | {:error, term()}
   def authorize(agent_id, command, opts \\ []) do
-    with :ok <- reject_agent_compound(command) do
-      # `:gate_command` lets a caller override which command name the capability
-      # gate checks. Defaults to the first token of `command`. The reflex rules
-      # still see the full `command` string regardless.
-      command_name = Keyword.get(opts, :gate_command) || extract_command_name(command)
-      resource = "arbor://shell/exec/#{command_name}"
-
-      # Skip identity verification — facade auth is a policy check only; the
-      # caller (or the action layer above it) owns request-signature checks.
-      auth_opts = [command: command, path: Keyword.get(opts, :cwd), verify_identity: false]
-
-      case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
-        {:ok, :authorized} -> {:ok, :authorized}
-        {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
-        {:error, _reason} -> {:error, :unauthorized}
-      end
+    with {:ok, prepared} <- prepare_agent_command(command, opts) do
+      authorize_prepared_agent_command(agent_id, command, prepared, opts)
     end
   end
 
@@ -468,9 +477,9 @@ defmodule Arbor.Shell do
           | {:error, {:compound_shell_unavailable, :security_boundary_incomplete}}
   # H6: Pass command context into authorize/4 opts for streaming execution too.
   def authorize_and_execute_streaming(agent_id, command, opts \\ []) do
-    with :ok <- reject_agent_compound(command) do
-      authorize_and_dispatch(agent_id, command, opts, fn -> execute_streaming(command, opts) end)
-    end
+    authorize_and_dispatch(agent_id, command, opts, fn prepared ->
+      execute_prepared_agent_command_streaming(command, prepared, opts)
+    end)
   end
 
   # ===========================================================================
@@ -671,6 +680,122 @@ defmodule Arbor.Shell do
 
   # Private functions
 
+  # Generic agent commands are already bound to a fixed executable + argv by
+  # Sandbox.prepare_agent_command/2. Force the legacy sandbox marker to :basic
+  # and drop all child-environment/capability-projection options so sandbox:none
+  # and env can never widen execution after authorization.
+  defp agent_execution_opts(opts) do
+    opts
+    |> Keyword.drop([:env, :allowlist, :gate_command])
+    |> Keyword.put(:sandbox, :basic)
+  end
+
+  defp execute_prepared_agent_command(
+         command,
+         %{executable: executable, args: args},
+         opts
+       ) do
+    execution_opts = agent_execution_opts(opts)
+
+    if Process.whereis(ExecutionRegistry) do
+      with {:ok, execution_id} <- register_execution(command, execution_opts) do
+        emit_started(command, execution_id, execution_opts)
+
+        case Executor.run_direct(executable, args, execution_opts) do
+          {:ok, result} ->
+            complete_execution(execution_id, result)
+            emit_completed(execution_id, result)
+            {:ok, result}
+
+          {:error, reason} ->
+            fail_execution(execution_id, reason)
+            emit_failed(execution_id, reason)
+            {:error, reason}
+        end
+      else
+        {:error, reason} ->
+          emit_blocked(command, reason)
+          {:error, reason}
+      end
+    else
+      # The orchestrator can be exercised without the arbor_shell application
+      # supervisor. Preserve that standalone mode with the same already-bound
+      # Executor argv; never fall back to a shell string or unchecked Port.
+      Executor.run_direct(executable, args, execution_opts)
+    end
+  end
+
+  defp execute_prepared_agent_command_async(
+         command,
+         %{executable: executable, args: args},
+         opts
+       ) do
+    execution_opts = agent_execution_opts(opts)
+
+    with {:ok, execution_id} <- register_execution(command, execution_opts) do
+      emit_started(command, execution_id, execution_opts)
+
+      Task.start(fn ->
+        case Executor.run_direct(executable, args, execution_opts) do
+          {:ok, result} ->
+            complete_execution(execution_id, result)
+            emit_completed(execution_id, result)
+
+          {:error, reason} ->
+            fail_execution(execution_id, reason)
+            emit_failed(execution_id, reason)
+        end
+      end)
+
+      {:ok, execution_id}
+    else
+      {:error, reason} ->
+        emit_blocked(command, reason)
+        {:error, reason}
+    end
+  end
+
+  defp execute_prepared_agent_command_streaming(
+         command,
+         %{executable: executable, args: args},
+         opts
+       ) do
+    execution_opts = agent_execution_opts(opts)
+
+    session_opts =
+      execution_opts
+      |> Keyword.take([:timeout, :cwd, :stream_to])
+      |> Keyword.put_new(:timeout, 30_000)
+
+    with {:ok, exec_id} <- register_execution(command, execution_opts) do
+      case PortSession.start_supervised_direct(executable, args, command, session_opts) do
+        {:ok, pid} ->
+          session_id = PortSession.get_id(pid)
+          ExecutionRegistry.update_status(exec_id, :running, %{port_session_pid: pid})
+          emit_started(command, session_id, execution_opts)
+          {:ok, session_id}
+
+        {:error, reason} ->
+          fail_execution(exec_id, reason)
+          {:error, reason}
+      end
+    end
+  end
+
+  defp authorize_prepared_agent_command(agent_id, command, prepared, opts) do
+    resource = "arbor://shell/exec/#{prepared.command_name}"
+
+    # Skip identity verification — facade auth is a policy check only; the
+    # caller (or the action layer above it) owns request-signature checks.
+    auth_opts = [command: command, path: Keyword.get(opts, :cwd), verify_identity: false]
+
+    case Arbor.Security.authorize(agent_id, resource, :execute, auth_opts) do
+      {:ok, :authorized} -> {:ok, :authorized}
+      {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+      {:error, _reason} -> {:error, :unauthorized}
+    end
+  end
+
   defp register_execution(command, opts) do
     ExecutionRegistry.register(command,
       sandbox: Keyword.get(opts, :sandbox, @default_sandbox),
@@ -777,39 +902,16 @@ defmodule Arbor.Shell do
     end
   end
 
-  # Shared authorization dispatch — all authorize_and_execute_* variants
-  # use the same auth check pattern, only the execution function differs.
-  # Callers must already have run reject_agent_compound/1 so compounds never
-  # reach allowlist construction or authorize/3's security lookup.
+  # Shared authorization dispatch — validate and bind the executable before
+  # Security/approval work, then execute the exact prepared argv only after an
+  # authorized decision. All sync/async/streaming variants use this path.
   defp authorize_and_dispatch(agent_id, command, opts, execute_fn) do
-    case authorize(agent_id, command, opts) do
-      {:ok, :authorized} -> execute_fn.()
-      {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
-      {:error, :unauthorized} -> {:error, :unauthorized}
-      {:error, @compound_shell_unavailable} -> {:error, @compound_shell_unavailable}
+    with {:ok, prepared} <- prepare_agent_command(command, opts) do
+      case authorize_prepared_agent_command(agent_id, command, prepared, opts) do
+        {:ok, :authorized} -> execute_fn.(prepared)
+        {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
+        {:error, reason} -> {:error, reason}
+      end
     end
-  end
-
-  # Reject compound (metacharacter-bearing) commands at every agent-authorized
-  # boundary before auth, approval, allowlist, registry, session, process, or
-  # fs work. Independent of compound_shell_enabled and sandbox level.
-  defp reject_agent_compound(command) when is_binary(command) do
-    if Sandbox.compound?(command) do
-      {:error, @compound_shell_unavailable}
-    else
-      :ok
-    end
-  end
-
-  defp reject_agent_compound(_command), do: {:error, @compound_shell_unavailable}
-
-  # Extract the command name (first word) from a shell command string
-  defp extract_command_name(command) when is_binary(command) do
-    command
-    |> String.trim_leading()
-    |> String.split(~r/\s+/, parts: 2)
-    |> List.first()
-    # Strip path prefix (e.g., /bin/ls -> ls)
-    |> String.replace(~r/^.*\//, "")
   end
 end

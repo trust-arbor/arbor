@@ -10,8 +10,8 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
   @graph %Graph{id: "test", nodes: %{}, edges: [], attrs: %{}}
 
   defp make_node(id, attrs) do
-    # Tests run without Arbor.Shell — use sandbox="none" to allow direct execution.
-    # In production, sandbox defaults to "basic" and requires Arbor.Shell.
+    # sandbox="none" remains a compatibility input but cannot widen the closed
+    # agent direct-executable policy.
     %Node{id: id, attrs: Map.merge(%{"type" => "shell", "sandbox" => "none"}, attrs)}
   end
 
@@ -51,7 +51,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
     end
 
     test "fails on non-zero exit code by default" do
-      node = make_node("fail_test", %{"command" => "sh -c 'exit 1'"})
+      node = make_node("fail_test", %{"command" => "false"})
       context = Context.new()
 
       outcome = run(node, context)
@@ -60,7 +60,7 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
     end
 
     test "on_error=warn returns success with warning" do
-      node = make_node("warn_test", %{"command" => "sh -c 'exit 1'", "on_error" => "warn"})
+      node = make_node("warn_test", %{"command" => "false", "on_error" => "warn"})
       context = Context.new()
 
       outcome = run(node, context)
@@ -70,13 +70,13 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
 
     test "on_error=continue returns success" do
       node =
-        make_node("continue_test", %{"command" => "sh -c 'exit 42'", "on_error" => "continue"})
+        make_node("continue_test", %{"command" => "false", "on_error" => "continue"})
 
       context = Context.new()
 
       outcome = run(node, context)
       assert outcome.status == :success
-      assert outcome.context_updates["shell.continue_test.exit_code"] == 42
+      assert outcome.context_updates["shell.continue_test.exit_code"] == 1
     end
 
     test "missing command fails" do
@@ -154,41 +154,20 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
                "LLM → shell → use last_response."
     end
 
-    test "regression: captures full stdout from compound commands (bug B)" do
-      # Setup: a compound command like `mkdir -p X && printf '%s' Y`
-      # races on the port: the spawn port sends `:exit_status` and
-      # trailing `{:data, _}` in an unspecified order, and for compound
-      # commands with multiple forks, exit can win — handing the
-      # caller an empty string even though the command produced
-      # output. Bare-printf commands win the race; compound commands
-      # often lose it.
-      #
-      # Fix: after receiving `:exit_status`, drain any remaining
-      # `{:data, _}` messages with a 0-timeout receive before
-      # returning.
-      #
-      # Surfaced 2026-06-05 by the upstream-deps-summary pipeline's
-      # `build_output_path` step (mkdir-then-printf) returning empty
-      # output, breaking the file_write target path.
-      cmd =
-        ~s|mkdir -p /tmp/arbor_shell_regression && printf '%s' "/tmp/arbor_shell_regression/x.md"|
+    test "security regression: standalone ampersand list fails closed under sandbox none" do
+      marker = sentinel_path("standalone_ampersand")
+      File.rm(marker)
+      node = make_node("compound", %{"command" => "sleep 0.2 & touch #{marker}"})
 
-      node = make_node("compound", %{"command" => cmd})
-      context = Context.new()
+      try do
+        outcome = run(node, Context.new())
+        assert outcome.status == :fail
+        assert outcome.failure_reason =~ "compound_shell_unavailable"
 
-      # Loop to catch raciness — if the bug is back this often fails
-      # on the first or second iteration.
-      for i <- 1..10 do
-        outcome = run(node, context)
-        output = outcome.context_updates["shell.compound.output"]
-
-        assert outcome.status == :success, "iteration #{i}: status was #{inspect(outcome.status)}"
-
-        assert output == "/tmp/arbor_shell_regression/x.md",
-               "iteration #{i}: expected full path but got #{inspect(output)} " <>
-                 "(exit_code=#{outcome.context_updates["shell.compound.exit_code"]}). " <>
-                 "Bug B: collect_output/3 returned on :exit_status without " <>
-                 "draining trailing :data messages."
+        Process.sleep(700)
+        refute File.exists?(marker)
+      after
+        File.rm(marker)
       end
     end
   end
