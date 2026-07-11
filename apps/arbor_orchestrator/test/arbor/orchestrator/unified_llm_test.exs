@@ -215,15 +215,13 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
   test "from_env raises when no default provider and no provider keys are configured" do
     without_config_default_provider(fn ->
       with_env(clear_all_cloud_keys(), fn ->
-        # OAuth adapters register from on-disk subscription tokens (not env keys).
-        # Hide those files so this test asserts the empty-discovery ConfigurationError
-        # contract hermetically — including that discover_local: false no longer
-        # injects lm_studio_owned as a silent default.
-        without_oauth_credential_files(fn ->
-          assert_raise ConfigurationError, fn ->
-            Client.from_env(discover_acp: false, discover_local: false)
-          end
-        end)
+        assert_raise ConfigurationError, fn ->
+          Client.from_env(
+            discover_acp: false,
+            discover_local: false,
+            discover_oauth: false
+          )
+        end
       end)
     end)
   end
@@ -232,7 +230,9 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
     env = Map.put(clear_all_cloud_keys(), "UNIFIED_LLM_DEFAULT_PROVIDER", "test")
 
     with_env(env, fn ->
-      client = Client.from_env(discover_local: false, discover_acp: false)
+      client =
+        Client.from_env(discover_local: false, discover_acp: false, discover_oauth: false)
+
       assert client.default_provider == "test"
     end)
   end
@@ -242,7 +242,9 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
 
     without_config_default_provider(fn ->
       with_env(env, fn ->
-        client = Client.from_env(discover_acp: false, discover_local: false)
+        client =
+          Client.from_env(discover_acp: false, discover_local: false, discover_oauth: false)
+
         assert client.default_provider == "openai"
         assert Map.has_key?(client.adapters, "openai")
         refute Map.has_key?(client.adapters, "lm_studio_owned")
@@ -255,13 +257,17 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
 
     without_config_default_provider(fn ->
       with_env(env, fn ->
-        disabled = Client.from_env(discover_local: false, discover_acp: false)
+        disabled =
+          Client.from_env(discover_local: false, discover_acp: false, discover_oauth: false)
+
         refute Map.has_key?(disabled.adapters, "lm_studio_owned")
         # With local discovery off, only the API-key provider is present → default is openai
         assert disabled.default_provider == "openai"
         assert Map.has_key?(disabled.adapters, "openai")
 
-        enabled = Client.from_env(discover_local: true, discover_acp: false)
+        enabled =
+          Client.from_env(discover_local: true, discover_acp: false, discover_oauth: false)
+
         assert Map.has_key?(enabled.adapters, "lm_studio_owned")
         # API-key provider remains registered when local discovery is on
         assert Map.has_key?(enabled.adapters, "openai")
@@ -644,38 +650,6 @@ defmodule Arbor.Orchestrator.UnifiedLLMTest do
       if previous != nil do
         Application.put_env(:arbor_llm, :default_provider, previous)
       end
-    end
-  end
-
-  # OAuth.configured?/1 checks both the Arbor store (~/.arbor/oauth/*.json) and
-  # CLI credential files (~/.codex/auth.json, ~/.grok/auth.json). Temporarily
-  # rename whatever exists so from_env sees a true "no credentials" environment.
-  defp without_oauth_credential_files(fun) do
-    paths =
-      [
-        Path.expand("~/.arbor/oauth"),
-        Path.expand("~/.codex/auth.json"),
-        Path.expand("~/.grok/auth.json")
-      ]
-      |> Enum.filter(&File.exists?/1)
-
-    token = System.unique_integer([:positive])
-
-    backups =
-      Enum.map(paths, fn path ->
-        backup = "#{path}.unified_llm_test_#{token}"
-        File.rm_rf!(backup)
-        :ok = File.rename(path, backup)
-        {path, backup}
-      end)
-
-    try do
-      fun.()
-    after
-      Enum.each(backups, fn {path, backup} ->
-        File.rm_rf(path)
-        File.rename(backup, path)
-      end)
     end
   end
 

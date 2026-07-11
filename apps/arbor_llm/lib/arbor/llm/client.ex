@@ -905,9 +905,13 @@ defmodule Arbor.LLM.Client do
     # Registered by FILE presence only (configured?/1 — never available?/1, which for grok would
     # refresh + consume the rotating refresh_token at boot). The adapter refreshes lazily at call.
     adapters =
-      adapters
-      |> maybe_put_oauth("openai_oauth", :openai)
-      |> maybe_put_oauth("xai_oauth", :xai)
+      if Keyword.get(opts, :discover_oauth, true) do
+        adapters
+        |> maybe_put_oauth("openai_oauth", :openai)
+        |> maybe_put_oauth("xai_oauth", :xai)
+      else
+        adapters
+      end
 
     default_discover_local =
       Application.get_env(:arbor_orchestrator, :discover_local_providers, true)
