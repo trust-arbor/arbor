@@ -22,24 +22,13 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
   defp make_token(attrs \\ %{}, assigns \\ %{}) do
     node = %Node{id: "test_node", attrs: Map.merge(%{"type" => "compute"}, attrs)}
     context = %Context{values: %{}}
-    raw = %Graph{nodes: %{"test_node" => node}, edges: [], attrs: %{}}
-    {:ok, graph} = Arbor.Orchestrator.compile(raw)
-    node = Map.fetch!(graph.nodes, "test_node")
-
-    {:ok, authority} =
-      RunAuthorization.new(graph, agent_id: "agent_test", workdir: File.cwd!())
-
-    default_assigns = %{
-      authorization: true,
-      agent_id: "agent_test",
-      run_authorization: authority
-    }
+    graph = %Graph{nodes: %{"test_node" => node}, edges: [], attrs: %{}}
 
     %Token{
       node: node,
       context: context,
       graph: graph,
-      assigns: Map.merge(default_assigns, assigns)
+      assigns: assigns
     }
   end
 
@@ -775,7 +764,6 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
 
   describe "integration: compiled node through middleware chain" do
     test "compiled node with taint_profile flows through CapabilityCheck → TaintCheck" do
-      profile = %TaintProfile{required_sanitizations: 0, min_confidence: :unverified}
       # Build a real IR-compiled graph (never set compiled=true by hand) so the
       # node and RunAuthorization share one authority surface.
       raw_node = %Node{
@@ -786,8 +774,9 @@ defmodule Arbor.Orchestrator.Middleware.MandatoryMiddlewareTest do
       raw = %Graph{nodes: %{"compiled_node" => raw_node}, edges: [], attrs: %{}}
       {:ok, graph} = Arbor.Orchestrator.compile(raw)
       node = Map.fetch!(graph.nodes, "compiled_node")
-      # Overlay the taint_profile under test on the compiler-enriched node.
-      node = %{node | taint_profile: profile, capabilities_required: []}
+
+      assert %TaintProfile{required_sanitizations: 0, min_confidence: :unverified} =
+               node.taint_profile
 
       {:ok, authority} =
         RunAuthorization.new(graph, agent_id: "agent_test", workdir: File.cwd!())
