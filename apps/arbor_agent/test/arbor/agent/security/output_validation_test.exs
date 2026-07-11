@@ -83,9 +83,7 @@ defmodule Arbor.Agent.Security.OutputValidationTest do
       context = %{taint: derived_sanitized_taint(), taint_policy: :strict}
 
       result = TaintEnforcement.check(Arbor.Actions.Shell.Execute, params, context)
-      # The taint_level in the error is the full struct (not extracted atom)
-      assert {:error, {:taint_blocked, :sandbox, taint_level, :control}} = result
-      assert %TaintStruct{level: :derived} = taint_level
+      assert {:error, {:taint_blocked, :sandbox, :derived, :control}} = result
     end
 
     test "unsanitized derived taint blocked for missing sanitization" do

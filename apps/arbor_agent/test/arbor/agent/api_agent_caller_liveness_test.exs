@@ -5,8 +5,7 @@ defmodule Arbor.Agent.APIAgentCallerLivenessTest do
   alias Arbor.Agent.APIAgent
 
   test "a queued query does not execute after its caller dies" do
-    caller = spawn(fn -> :ok end)
-    ref = Process.monitor(caller)
+    {caller, ref} = spawn_monitor(fn -> :ok end)
     assert_receive {:DOWN, ^ref, :process, ^caller, :normal}
 
     state = %{sentinel: :unchanged}

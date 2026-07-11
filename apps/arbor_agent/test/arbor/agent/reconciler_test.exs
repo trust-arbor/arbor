@@ -38,9 +38,8 @@ defmodule Arbor.Agent.ReconcilerTest do
 
   setup do
     # Identity Registry — required for identity_present?/1 to return real status.
-    if Process.whereis(Arbor.Security.Identity.Registry) == nil do
-      start_supervised!({Arbor.Security.Identity.Registry, []})
-    end
+    assert Process.whereis(Arbor.Security.Identity.Registry) == nil
+    start_supervised!({Arbor.Security.Identity.Registry, []})
 
     # Profiles store — needed for the DESIRED snapshot (G1). Matches ManagerTest.
     if Process.whereis(@profiles_store) == nil do
@@ -81,8 +80,6 @@ defmodule Arbor.Agent.ReconcilerTest do
       catch
         _, _ -> :ok
       end
-
-      Security.deregister_identity(agent_id)
     end)
 
     %{agent_id: agent_id, pid: pid}
