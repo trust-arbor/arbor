@@ -47,10 +47,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     post_validation_routing
   )
 
-  # Unattended publication must still cross attestation + validation. Human
-  # handoff may be reached without attestation when Council returns human_review
-  # without a review_attestation_id (deadlock / security veto).
-  @unattended_publication_nodes MapSet.new(~w[status_change_committed status_pr_created])
+  # Only this explicit human handoff may skip attestation. Every current or
+  # future publication terminal defaults to the stricter unattended checks.
+  @human_handoff_publication_node "status_human_review_required"
 
   @attestation_present ~s(context.review.review_attestation_id!="")
   @attestation_absent ~s(context.review.review_attestation_id="")
@@ -1032,7 +1031,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       |> Enum.sort()
 
     Enum.reduce(publication_targets, errors, fn target, acc ->
-      if MapSet.member?(@unattended_publication_nodes, target) do
+      if target != @human_handoff_publication_node do
         # Unattended success still requires attestation + validation + exact head.
         acc
         |> require_dominates(
@@ -1116,7 +1115,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
       publication_targets
       |> Enum.filter(&MapSet.member?(reachable, &1))
       |> Enum.reduce(acc, fn target, inner ->
-        if MapSet.member?(@unattended_publication_nodes, target) do
+        if target != @human_handoff_publication_node do
           inner
           |> require_dominates(
             policy["attestation_source"],

@@ -274,6 +274,27 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            end)
   end
 
+  test "security regression: unknown publication terminal defaults to unattended dominance",
+       ctx do
+    assert {:ok, compilation} = compile(security_plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("security_regression")
+
+    policy =
+      Map.update!(profile["semantic_policy"], "publication_nodes", fn nodes ->
+        Enum.sort(["status_review_rejected" | nodes])
+      end)
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(graph, policy, review_profile: "binding")
+
+    assert Enum.any?(errors, fn error ->
+             error["code"] == "dominance_violation" and
+               error["node_id"] == "status_review_rejected" and
+               error["detail"]["kind"] in ["review_attestation", "validation"]
+           end)
+  end
+
   test "security profile requires present attestation on validator entries and absent human route",
        ctx do
     assert {:ok, compilation} = compile(security_plan!(), ctx)

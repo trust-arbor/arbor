@@ -905,6 +905,7 @@ digraph CodingChangeV1 {
   route_security_attested_human -> hoist_review_attestation_id [condition="context.review.review_attestation_id!=\"\""]
   route_security_attested_human -> status_human_review_required [condition="context.review.review_attestation_id=\"\""]
   route_security_attested_auto -> hoist_review_attestation_id [condition="context.review.review_attestation_id!=\"\""]
+  // Intentional fallback: missing auto-proceed authority must fail closed.
   route_security_attested_auto -> error_review_tier_invalid
   hoist_review_attestation_id -> validate
   post_validation_expected_commit -> post_validation_committed_change
