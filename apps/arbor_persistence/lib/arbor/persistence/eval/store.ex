@@ -2,11 +2,12 @@ defmodule Arbor.Persistence.Eval.Store do
   @moduledoc false
 
   # High-level eval run persistence: Postgres when available, JSON file fallback
-  # otherwise. Public access is via Arbor.Persistence only.
+  # only when the database is actually unavailable. Public access is via
+  # Arbor.Persistence only.
   #
-  # Ownership-extraction commit preserves historical false-success fallback
-  # behavior (DB insert/changeset failures fall through to file and return
-  # {:ok, attrs}). Hardening commit tightens that contract.
+  # :auto falls back to file solely for database unavailability. Changeset,
+  # constraint, and other DB failures — and all file write failures — propagate
+  # (no false success).
 
   require Logger
 
@@ -15,6 +16,9 @@ defmodule Arbor.Persistence.Eval.Store do
   alias Arbor.Persistence.Repo
 
   @type backend() :: :auto | :database | :file
+
+  @max_slug_model 40
+  @max_slug_domain 32
 
   @spec database_available?() :: boolean()
   def database_available? do
@@ -26,12 +30,30 @@ defmodule Arbor.Persistence.Eval.Store do
     _ -> false
   end
 
+  @doc """
+  Generate a unique run ID by slugging and bounding both model and domain into
+  the FileStore closed ASCII filename-component grammar.
+  """
   @spec generate_run_id(String.t(), String.t()) :: String.t()
   def generate_run_id(model, domain) when is_binary(model) and is_binary(domain) do
-    slug = model |> String.replace(~r/[:\/.]+/, "-") |> String.downcase()
+    model_slug = slug_component(model, @max_slug_model)
+    domain_slug = slug_component(domain, @max_slug_domain)
     date = Date.utc_today() |> Date.to_iso8601()
     suffix = :crypto.strong_rand_bytes(3) |> Base.encode16(case: :lower)
-    "#{slug}-#{domain}-#{date}-#{suffix}"
+    id = "#{model_slug}-#{domain_slug}-#{date}-#{suffix}"
+
+    case FileStore.validate_run_id(id) do
+      :ok ->
+        id
+
+      {:error, :invalid_run_id} ->
+        # Extremely defensive fallback — always grammar-valid
+        "eval-#{date}-#{suffix}"
+    end
+  end
+
+  def generate_run_id(model, domain) do
+    generate_run_id(to_string(model || "model"), to_string(domain || "domain"))
   end
 
   @spec create_run(map(), keyword()) :: {:ok, map() | struct()} | {:error, term()}
@@ -50,29 +72,21 @@ defmodule Arbor.Persistence.Eval.Store do
         if database_available?() do
           case Persistence.insert_eval_run(attrs) do
             {:ok, _} = ok ->
-              Logger.debug("EvalPersistence: created run #{attrs[:id]} in Postgres")
+              Logger.debug("EvalPersistence: created run #{inspect(attrs[:id])} in Postgres")
               ok
 
-            {:error, reason} ->
+            {:error, reason} = err ->
               Logger.warning(
-                "EvalPersistence: DB insert failed: #{inspect(reason)}, falling back to JSON"
+                "EvalPersistence: DB insert failed (not falling back): #{inspect(reason)}"
               )
 
-              file_create(attrs, opts)
+              err
           end
         else
           Logger.debug("EvalPersistence: Postgres unavailable, using JSON fallback")
           file_create(attrs, opts)
         end
     end
-  rescue
-    e ->
-      Logger.warning("EvalPersistence: create_run rescue: #{Exception.message(e)}")
-      file_create(attrs, opts)
-  catch
-    :exit, reason ->
-      Logger.warning("EvalPersistence: create_run exit: #{inspect(reason)}")
-      file_create(attrs, opts)
   end
 
   @spec update_run(String.t(), map(), keyword()) :: :ok | {:ok, struct()} | {:error, term()}
@@ -81,6 +95,7 @@ defmodule Arbor.Persistence.Eval.Store do
 
     case backend do
       :file ->
+        # File store does not support partial in-place updates of run rows.
         :ok
 
       :database ->
@@ -93,14 +108,6 @@ defmodule Arbor.Persistence.Eval.Store do
           :ok
         end
     end
-  rescue
-    e ->
-      Logger.warning("EvalPersistence: update_run rescue: #{Exception.message(e)}")
-      :ok
-  catch
-    :exit, reason ->
-      Logger.warning("EvalPersistence: update_run exit: #{inspect(reason)}")
-      :ok
   end
 
   @spec save_result(map(), keyword()) :: :ok | {:ok, struct()} | {:error, term()}
@@ -121,14 +128,6 @@ defmodule Arbor.Persistence.Eval.Store do
           :ok
         end
     end
-  rescue
-    e ->
-      Logger.warning("EvalPersistence: save_result rescue: #{Exception.message(e)}")
-      :ok
-  catch
-    :exit, reason ->
-      Logger.warning("EvalPersistence: save_result exit: #{inspect(reason)}")
-      :ok
   end
 
   @spec save_results_batch([map()], keyword()) ::
@@ -150,10 +149,6 @@ defmodule Arbor.Persistence.Eval.Store do
           :ok
         end
     end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
   end
 
   @spec complete_run(String.t(), map(), non_neg_integer(), non_neg_integer(), keyword()) ::
@@ -201,10 +196,6 @@ defmodule Arbor.Persistence.Eval.Store do
           file_list(filters, opts)
         end
     end
-  rescue
-    _ -> file_list(filters, opts)
-  catch
-    :exit, _ -> file_list(filters, opts)
   end
 
   @spec get_run(String.t(), keyword()) :: {:ok, map() | struct()} | {:error, term()}
@@ -225,10 +216,6 @@ defmodule Arbor.Persistence.Eval.Store do
           FileStore.load_run(run_id, file_opts(opts))
         end
     end
-  rescue
-    _ -> FileStore.load_run(run_id, file_opts(opts))
-  catch
-    :exit, _ -> FileStore.load_run(run_id, file_opts(opts))
   end
 
   @spec compare_models(String.t(), [String.t()], keyword()) ::
@@ -251,10 +238,6 @@ defmodule Arbor.Persistence.Eval.Store do
           {:ok, []}
         end
     end
-  rescue
-    _ -> {:ok, []}
-  catch
-    :exit, _ -> {:ok, []}
   end
 
   # --- Private ---
@@ -269,15 +252,44 @@ defmodule Arbor.Persistence.Eval.Store do
   end
 
   defp file_opts(opts) do
-    Keyword.take(opts, [:dir])
+    Keyword.take(opts, [:dir, :max_file_bytes, :max_files, :max_total_bytes])
   end
 
   defp file_create(attrs, opts) do
-    slug = run_slug(attrs)
-    # Historical contract: ignore file write outcome and still return {:ok, attrs}.
-    # Hardening commit will propagate write failures.
-    _ = FileStore.save_run(slug, attrs, file_opts(opts))
-    {:ok, attrs}
+    with {:ok, slug} <- resolve_run_id(attrs),
+         :ok <- FileStore.save_run(slug, Map.put(attrs, :id, slug), file_opts(opts)) do
+      {:ok, Map.put(attrs, :id, slug)}
+    end
+  end
+
+  defp resolve_run_id(%{id: id}) when is_binary(id) do
+    case FileStore.validate_run_id(id) do
+      :ok -> {:ok, id}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp resolve_run_id(%{"id" => id}) when is_binary(id) do
+    case FileStore.validate_run_id(id) do
+      :ok -> {:ok, id}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp resolve_run_id(%{model: model, domain: domain})
+       when is_binary(model) and is_binary(domain) do
+    {:ok, generate_run_id(model, domain)}
+  end
+
+  defp resolve_run_id(%{"model" => model, "domain" => domain})
+       when is_binary(model) and is_binary(domain) do
+    {:ok, generate_run_id(model, domain)}
+  end
+
+  defp resolve_run_id(_) do
+    date = Date.utc_today() |> Date.to_iso8601()
+    suffix = :crypto.strong_rand_bytes(3) |> Base.encode16(case: :lower)
+    {:ok, "eval-#{date}-#{suffix}"}
   end
 
   defp file_list(filters, opts) do
@@ -286,24 +298,29 @@ defmodule Arbor.Persistence.Eval.Store do
       |> file_opts()
       |> Keyword.merge(Keyword.take(filters, [:model, :provider]))
 
-    case FileStore.list_runs(list_opts) do
-      runs when is_list(runs) -> {:ok, runs}
+    FileStore.list_runs(list_opts)
+  end
+
+  defp slug_component(value, max_len) when is_binary(value) and is_integer(max_len) do
+    slug =
+      value
+      |> String.downcase()
+      |> String.replace(~r/[^a-z0-9]+/u, "-")
+      |> String.replace(~r/-+/, "-")
+      |> String.trim("-")
+
+    slug =
+      case slug do
+        "" -> "x"
+        other -> other
+      end
+
+    slug
+    |> String.slice(0, max_len)
+    |> String.trim_trailing("-")
+    |> case do
+      "" -> "x"
       other -> other
     end
   end
-
-  defp run_slug(%{id: id}) when is_binary(id), do: id
-  defp run_slug(%{"id" => id}) when is_binary(id), do: id
-
-  defp run_slug(%{model: model, domain: domain})
-       when is_binary(model) and is_binary(domain) do
-    generate_run_id(model, domain)
-  end
-
-  defp run_slug(%{"model" => model, "domain" => domain})
-       when is_binary(model) and is_binary(domain) do
-    generate_run_id(model, domain)
-  end
-
-  defp run_slug(_), do: "eval-#{System.os_time(:millisecond)}"
 end
