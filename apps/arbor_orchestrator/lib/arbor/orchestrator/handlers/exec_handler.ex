@@ -327,14 +327,31 @@ defmodule Arbor.Orchestrator.Handlers.ExecHandler do
 
   # Council actions can launch a child Engine run. Forward only the live,
   # non-secret controls that bind that child to this authorized parent run.
+  # When a parent run carries :signing_authority, forward it so nested council
+  # Engine execution stays in fixed-facade authority mode (never silent legacy).
+  # Do not put authority into Engine context/checkpoints — nested_engine_opts
+  # is process-local action context only.
   defp maybe_put_nested_engine_controls(opts, engine_opts, %RunAuthorization{} = authority) do
     opts
     |> Keyword.put(:run_authorization, authority)
-    |> maybe_put_executor_opt(:authorizer, Keyword.get(engine_opts, :authorizer))
+    |> maybe_put_nested_signing_credentials(engine_opts)
     |> Keyword.put(:max_depth, Keyword.get(engine_opts, :max_depth, 3))
   end
 
   defp maybe_put_nested_engine_controls(opts, _engine_opts, _authority), do: opts
+
+  # Presence-based: when :signing_authority is present on the parent Engine
+  # opts, forward only that credential (not legacy authorizer/signer) so nested
+  # exclusivity checks stay consistent with the parent authority run.
+  defp maybe_put_nested_signing_credentials(opts, engine_opts) do
+    case Keyword.fetch(engine_opts, :signing_authority) do
+      {:ok, signing_authority} ->
+        Keyword.put(opts, :signing_authority, signing_authority)
+
+      :error ->
+        maybe_put_executor_opt(opts, :authorizer, Keyword.get(engine_opts, :authorizer))
+    end
+  end
 
   # Approval timeout is Engine control data, never a node attr or context
   # value. Re-bound it against the run wall clock before crossing into the

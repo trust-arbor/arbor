@@ -22,12 +22,23 @@ defmodule Arbor.Orchestrator.Authorization do
   - a legacy 1-arity signer function that produces a fresh SignedRequest, or
   - a `%Arbor.Contracts.Security.SigningAuthority{}` for the reload-stable path
 
-  The SigningAuthority path always signs via `Arbor.Security.sign_with_authority/2`
-  and authorizes via the fixed `Arbor.Security.authorize/4` facade. It never
-  consults `Config.security_available?/0`, `security_required?/0`, or
-  `security_module/0`. Unavailable Security, raises, exits, and signing or
-  authorization errors fail closed — never fall back to unsigned/legacy
-  credentials. The legacy signer path retains Config availability policy.
+  Any other non-`nil` credential returns `{:error, :invalid_credential}` and
+  never enters unsigned or legacy authorization.
+
+  ### SigningAuthority path (fixed facade, always fail-closed)
+  Signs via `Arbor.Security.sign_with_authority/2` and authorizes via the fixed
+  `Arbor.Security.authorize/4` facade only. It never consults
+  `Config.security_available?/0`, `security_required?/0`, or `security_module/0`
+  — those seams remain on the legacy signer path only. Unavailable Security,
+  raises, exits, and signing or authorization errors always deny; there is no
+  fall-back to unsigned credentials and no fail-open via
+  `security_required?: false`.
+
+  Struct-tagged partial/forged maps are canonicalized through
+  `SigningAuthority.canonicalize/1` before any field access or Security call.
+
+  ### Legacy signer path
+  Retains Config availability / required policy for pre-authority callers.
 
   ## Usage
       case Authorization.check_orchestrator_access(agent_id, signer) do
@@ -50,6 +61,11 @@ defmodule Arbor.Orchestrator.Authorization do
   @doc """
   Check whether `agent_id` may execute orchestrator turns or heartbeats.
 
+  Accepts `nil`, a 1-arity signer function, or a `%SigningAuthority{}`.
+  Any other non-`nil` credential returns `{:error, :invalid_credential}` and
+  never enters unsigned/legacy authorization. Non-binary principals return
+  `{:error, :invalid_execution_principal}` (shaped, not FunctionClauseError).
+
   Returns `:ok` on success or `{:error, reason}` on denial.
   """
   @spec check_orchestrator_access(
@@ -63,10 +79,18 @@ defmodule Arbor.Orchestrator.Authorization do
       when is_binary(agent_id) do
     # Authority path: fixed Arbor.Security only. Never consult Config
     # availability / required / security_module seams — always fail closed.
-    if authority.principal_id != agent_id do
-      {:error, :principal_mismatch}
-    else
-      authorize_with_authority(agent_id, authority)
+    # Canonicalize first so partial/forged struct-tagged maps never raise or
+    # reach the broker GenServer.
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, authority} ->
+        if authority.principal_id != agent_id do
+          {:error, :principal_mismatch}
+        else
+          authorize_with_authority(agent_id, authority)
+        end
+
+      {:error, reason} ->
+        {:error, {:invalid_signing_authority, reason}}
     end
   rescue
     error ->
@@ -86,7 +110,27 @@ defmodule Arbor.Orchestrator.Authorization do
       {:error, :security_unavailable}
   end
 
-  def check_orchestrator_access(agent_id, signer) when is_binary(agent_id) do
+  def check_orchestrator_access(agent_id, nil) when is_binary(agent_id) do
+    check_orchestrator_access_legacy(agent_id, nil)
+  end
+
+  def check_orchestrator_access(agent_id, signer)
+      when is_binary(agent_id) and is_function(signer, 1) do
+    check_orchestrator_access_legacy(agent_id, signer)
+  end
+
+  def check_orchestrator_access(agent_id, _invalid) when is_binary(agent_id) do
+    # Non-nil credentials that are neither SigningAuthority nor function/1
+    # must never enter unsigned legacy authorization.
+    {:error, :invalid_credential}
+  end
+
+  def check_orchestrator_access(_agent_id, _credential) do
+    # Non-binary principals get a shaped error, not FunctionClauseError.
+    {:error, :invalid_execution_principal}
+  end
+
+  defp check_orchestrator_access_legacy(agent_id, signer) do
     if Config.security_available?() do
       auth_opts = build_auth_opts(signer)
 
@@ -170,6 +214,4 @@ defmodule Arbor.Orchestrator.Authorization do
       _ -> []
     end
   end
-
-  defp build_auth_opts(_other), do: []
 end

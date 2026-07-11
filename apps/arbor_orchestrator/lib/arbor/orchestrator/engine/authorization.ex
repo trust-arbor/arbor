@@ -168,27 +168,34 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
     end
   end
 
-  # Prefer the reload-stable SigningAuthority path. Never fall back to the
-  # legacy authorizer/signer when an authority is present.
+  # Prefer the reload-stable SigningAuthority path. Key presence (not value
+  # validity) selects the authority path; present nil/malformed fails closed
+  # and never falls back to the legacy authorizer/signer.
   defp check_authorization(opts, agent_id, type) when is_list(opts) do
-    case Keyword.get(opts, :signing_authority) do
-      %SigningAuthority{} = authority ->
+    case Keyword.fetch(opts, :signing_authority) do
+      {:ok, %SigningAuthority{} = authority} ->
         check_authority_authorization(authority, agent_id)
 
-      nil ->
-        check_legacy_authorization(Keyword.get(opts, :authorizer), agent_id, type)
-
-      _invalid ->
+      {:ok, _invalid} ->
         {:error, :invalid_signing_authority}
+
+      :error ->
+        check_legacy_authorization(Keyword.get(opts, :authorizer), agent_id, type)
     end
   end
 
-  defp check_authority_authorization(%SigningAuthority{} = authority, agent_id) do
-    if authority.principal_id != agent_id do
-      {:error, :principal_mismatch}
-    else
-      # Fixed named facade path — no injected security module.
-      Arbor.Orchestrator.Authorization.check_orchestrator_access(agent_id, authority)
+  defp check_authority_authorization(authority, agent_id) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, %SigningAuthority{} = authority} ->
+        if authority.principal_id != agent_id do
+          {:error, :principal_mismatch}
+        else
+          # Fixed named facade path — no injected security module.
+          Arbor.Orchestrator.Authorization.check_orchestrator_access(agent_id, authority)
+        end
+
+      {:error, reason} ->
+        {:error, {:invalid_signing_authority, reason}}
     end
   end
 
@@ -285,23 +292,20 @@ defmodule Arbor.Orchestrator.Engine.Authorization do
 
     # Process-local only: opaque SigningAuthority for CapabilityCheck.
     # Never put into Engine context / checkpoint / RunAuthorization.
-    # Invalid non-nil authority is still attached so CapabilityCheck fails closed
-    # and never falls through to the legacy signer path.
+    # Key presence attaches the value (including nil/malformed) so CapabilityCheck
+    # fails closed and never falls through to the legacy signer path.
     assigns =
-      case Keyword.get(opts, :signing_authority) do
-        %SigningAuthority{} = signing_authority ->
+      case Keyword.fetch(opts, :signing_authority) do
+        {:ok, signing_authority} ->
           Map.put(assigns, :signing_authority, signing_authority)
 
-        nil ->
+        :error ->
           assigns
-
-        invalid ->
-          Map.put(assigns, :signing_authority, invalid)
       end
 
     # Legacy: thread signer function for signed request creation in CapabilityCheck.
-    # When an authority is present (valid or invalid non-nil), do not attach the
-    # legacy signer (exclusivity — never fall through).
+    # When an authority key is present (valid, nil, or malformed), do not attach
+    # the legacy signer (exclusivity — never fall through).
     assigns =
       if Map.has_key?(assigns, :signing_authority) do
         assigns

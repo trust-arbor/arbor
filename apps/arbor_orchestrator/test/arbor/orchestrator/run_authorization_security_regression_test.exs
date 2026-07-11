@@ -98,6 +98,90 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
              )
   end
 
+  test "security regression: present signing_authority nil/malformed fails closed at RunAuthorization and Engine",
+       %{root: root} do
+    # Key presence, not value validity: explicit nil and malformed values must
+    # fail closed and never select the legacy authorizer/signer path.
+    # Fails on a3928b18 (Keyword.get treated nil as absence → legacy path).
+    graph =
+      compiled_graph!("""
+      digraph PresentAuthorityShape {
+        start [shape=Mdiamond]
+        done [shape=Msquare]
+        start -> done
+      }
+      """)
+
+    base =
+      authorized_opts(root,
+        authorizer: fn _principal, _type ->
+          send(self(), :legacy_authorizer_called)
+          :ok
+        end,
+        signer: fn _resource ->
+          send(self(), :legacy_signer_called)
+          {:ok, :fake}
+        end
+      )
+
+    assert {:error, :invalid_signing_authority} =
+             RunAuthorization.prepare(graph, Keyword.put(base, :signing_authority, nil))
+
+    assert {:error, :invalid_signing_authority} =
+             RunAuthorization.prepare(
+               graph,
+               Keyword.put(base, :signing_authority, :not_an_authority)
+             )
+
+    assert {:error, :invalid_signing_authority} =
+             RunAuthorization.prepare(
+               graph,
+               Keyword.put(base, :signing_authority, %{token: "forged"})
+             )
+
+    # Partial struct-tagged map: must not raise / crash broker; shaped error.
+    partial = %{__struct__: Arbor.Contracts.Security.SigningAuthority, token: "too-short"}
+
+    assert {:error, {:invalid_signing_authority, _reason}} =
+             RunAuthorization.prepare(graph, Keyword.put(base, :signing_authority, partial))
+
+    refute_received :legacy_authorizer_called
+    refute_received :legacy_signer_called
+
+    # Direct Engine callers must fail at the same gate (prepare is first).
+    assert {:error, :invalid_signing_authority} =
+             Engine.run(graph, Keyword.put(base, :signing_authority, nil))
+
+    assert {:error, :invalid_signing_authority} =
+             Engine.run(graph, Keyword.put(base, :signing_authority, :not_an_authority))
+
+    refute_received :legacy_authorizer_called
+    refute_received :legacy_signer_called
+  end
+
+  test "security regression: Authorization.check_orchestrator_access rejects non-credential nonnil values" do
+    # Public gate: nonnil credentials that are neither SigningAuthority nor
+    # function/1 must return an explicit error and never enter unsigned legacy auth.
+    # Fails on a3928b18 (build_auth_opts(_other) → [] → unsigned authorize path).
+    agent_id = "agent_" <> String.duplicate("ef", 32)
+
+    for invalid <- [:atom, "string", 42, %{}, {:tuple}, self()] do
+      assert {:error, :invalid_credential} =
+               Arbor.Orchestrator.Authorization.check_orchestrator_access(agent_id, invalid)
+    end
+
+    # Non-binary principal is shaped, not FunctionClauseError.
+    assert {:error, :invalid_execution_principal} =
+             Arbor.Orchestrator.Authorization.check_orchestrator_access(:not_a_binary, nil)
+
+    assert {:error, :invalid_execution_principal} =
+             Arbor.Orchestrator.Authorization.check_orchestrator_access(nil, fn _ -> {:ok, :x} end)
+
+    # Nil remains the unsigned legacy entry point (shape-valid principal).
+    result = Arbor.Orchestrator.Authorization.check_orchestrator_access(agent_id, nil)
+    assert result == :ok or match?({:error, _}, result)
+  end
+
   test "security regression: initial context cannot spoof principal or fixed workdir", %{
     root: root
   } do
@@ -957,6 +1041,7 @@ defmodule Arbor.Orchestrator.RunAuthorizationSecurityRegressionTest do
   } do
     use_security(AllowAllSecurity)
     :ok = Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access("agent_executor")
+    on_exit(fn -> Arbor.Orchestrator.TestCapabilities.revoke_all("agent_executor") end)
     checkpoint_root = Path.join(root, "bound-checkpoint")
     private_key = :crypto.strong_rand_bytes(32)
     run_id = "phase5_execution_manifest_checkpoint"

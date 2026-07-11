@@ -112,12 +112,17 @@ defmodule Arbor.Orchestrator do
   ## Credential paths
 
   - **Legacy signer** — installs `:signer` + a process-local `:authorizer`
-    closure (unchanged compatibility path).
+    closure (unchanged compatibility path). Rejects any present
+    `:signing_authority` key in `opts` (including `nil`).
   - **SigningAuthority** — places only `:signing_authority` in trusted Engine
     opts. Does **not** synthesize a long-lived signer/authorizer closure.
     Rejects mixed legacy credential controls in `opts` (`:signer`,
     `:authorizer`, `:identity_private_key`, or a second `:signing_authority`).
+    **Mixed credentials are detected by key presence, not value validity** —
+    `signer: nil` or `identity_private_key: nil` still counts as mixed.
     Requires `authority.principal_id` to equal `execution_principal`.
+    The gate uses the fixed `Arbor.Security` facade and always fails closed
+    (never consults Config availability / required / security_module seams).
   """
   @spec run_as(String.t() | Graph.t(), String.t(), run_credential(), keyword()) :: run_result()
   def run_as(source_or_graph, execution_principal, credential, opts \\ [])
@@ -125,6 +130,7 @@ defmodule Arbor.Orchestrator do
   def run_as(source_or_graph, execution_principal, %SigningAuthority{} = authority, opts)
       when is_list(opts) do
     with :ok <- validate_secure_principal(execution_principal),
+         {:ok, authority} <- canonicalize_authority(authority),
          :ok <- validate_authority_principal(authority, execution_principal),
          :ok <- reject_mixed_authority_credentials(opts),
          :ok <- validate_principal_opt(opts, execution_principal),
@@ -250,6 +256,13 @@ defmodule Arbor.Orchestrator do
 
   defp validate_secure_signer(signer) when is_function(signer, 1), do: :ok
   defp validate_secure_signer(_signer), do: {:error, :signer_required}
+
+  defp canonicalize_authority(authority) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, %SigningAuthority{} = authority} -> {:ok, authority}
+      {:error, reason} -> {:error, {:invalid_signing_authority, reason}}
+    end
+  end
 
   defp validate_authority_principal(%SigningAuthority{principal_id: principal_id}, principal)
        when is_binary(principal) do

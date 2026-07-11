@@ -94,12 +94,16 @@ defmodule Arbor.Orchestrator.Handlers.PipelineRunHandler do
     # The pre-fix Keyword.take dropped :authorization, :authorizer,
     # :signer, and :auth_context — child pipelines started with no
     # parent auth context at all.
+    # Include :signing_authority so a parent authority run never silently
+    # becomes authority-absent (legacy authorizer/signer/config path) in the
+    # child. Authority is process-local opts only — never Engine context.
     forwarded_keys = [
       :logs_root,
       :on_event,
       :authorization,
       :authorizer,
       :signer,
+      :signing_authority,
       :auth_context,
       :run_authorization,
       :execution_principal,

@@ -30,7 +30,10 @@ defmodule Arbor.Consensus.Evaluators.Consult do
   alias Arbor.Contracts.Consensus.Proposal
 
   @default_timeout 300_000
-  @nested_engine_opt_allowlist [:signer, :authorizer, :max_depth]
+  # :signing_authority keeps nested Engine runs in fixed-facade authority mode
+  # when the parent action was authorized via SigningAuthority (never silent
+  # legacy signer/authorizer). Opaque token only — no private keys.
+  @nested_engine_opt_allowlist [:signer, :authorizer, :signing_authority, :max_depth]
 
   @doc """
   Ask an evaluator all its perspectives about a question.

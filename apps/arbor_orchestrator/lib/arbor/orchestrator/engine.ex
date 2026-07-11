@@ -1192,39 +1192,61 @@ defmodule Arbor.Orchestrator.Engine do
   # See the comment at the call site in do_run/2 for the trust model.
   #
   # ## SigningAuthority path (v3)
-  # When `:signing_authority` is present, derive via the broker:
+  # When the `:signing_authority` **key is present** (Keyword.fetch), derive via
+  # the broker:
   # `Arbor.Security.derive_secret_with_authority(authority, :engine_checkpoint_hmac_v3)`.
+  # Presence is decided by key presence, not value validity:
+  # - present valid `%SigningAuthority{}` + any legacy credential key →
+  #   `{:error, :mixed_signing_credentials}` (never legacy HMAC)
+  # - present nil or any non-`%SigningAuthority{}` value →
+  #   `{:error, :invalid_signing_authority}` (never legacy HMAC, even when
+  #   `identity_private_key` is also present)
+  # - present partial/forged struct-tagged maps are canonicalized via
+  #   `SigningAuthority.canonicalize/1` before any Security call
   # Derivation failure returns `{:error, reason}` so the caller aborts —
   # never silently falls back to unsigned checkpoints / disabled resume.
   #
   # ## Legacy identity_private_key path (v2)
-  # C7 review fix (2026-06-09): this previously used HKDF when
-  # Arbor.Security.Crypto was loaded and fell back to plain HMAC otherwise —
-  # two DIFFERENT secrets for the same key. Collapsed to a single,
-  # load-INDEPENDENT derivation using only `:crypto`:
+  # Only when `:signing_authority` is **absent**. C7 review fix (2026-06-09):
+  # this previously used HKDF when Arbor.Security.Crypto was loaded and fell
+  # back to plain HMAC otherwise — two DIFFERENT secrets for the same key.
+  # Collapsed to a single, load-INDEPENDENT derivation using only `:crypto`:
   # `HMAC-SHA256(key, "arbor-checkpoint-hmac-v2")`.
   #
   # Exposed (@doc false) so the derivation can be pinned by a regression test.
   @spec derive_checkpoint_hmac_secret(keyword()) ::
           binary() | nil | {:error, term()}
   def derive_checkpoint_hmac_secret(opts) when is_list(opts) do
-    authority = Keyword.get(opts, :signing_authority)
-    private_key = Keyword.get(opts, :identity_private_key)
+    case Keyword.fetch(opts, :signing_authority) do
+      {:ok, %SigningAuthority{} = authority} ->
+        # Canonicalize first so partial/forged struct tags fail as invalid
+        # authority (shaped error) before mixed-credential checks.
+        case SigningAuthority.canonicalize(authority) do
+          {:ok, %SigningAuthority{} = authority} ->
+            # Key-presence exclusivity: any present legacy credential key
+            # (even nil/malformed) is mixed credentials.
+            if mixed_legacy_credential_keys?(opts) do
+              {:error, :mixed_signing_credentials}
+            else
+              derive_checkpoint_hmac_via_authority(authority)
+            end
 
-    cond do
-      # Key-presence exclusivity: with a SigningAuthority, any present legacy
-      # credential key (even nil/malformed) is mixed credentials.
-      match?(%SigningAuthority{}, authority) and mixed_legacy_credential_keys?(opts) ->
-        {:error, :mixed_signing_credentials}
+          {:error, _reason} ->
+            {:error, :invalid_signing_authority}
+        end
 
-      match?(%SigningAuthority{}, authority) ->
-        derive_checkpoint_hmac_via_authority(authority)
+      {:ok, _invalid} ->
+        # Present nil or malformed authority never falls through to legacy HMAC.
+        {:error, :invalid_signing_authority}
 
-      is_binary(private_key) and byte_size(private_key) > 0 ->
-        :crypto.mac(:hmac, :sha256, private_key, "arbor-checkpoint-hmac-v2")
+      :error ->
+        private_key = Keyword.get(opts, :identity_private_key)
 
-      true ->
-        nil
+        if is_binary(private_key) and byte_size(private_key) > 0 do
+          :crypto.mac(:hmac, :sha256, private_key, "arbor-checkpoint-hmac-v2")
+        else
+          nil
+        end
     end
   end
 

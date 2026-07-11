@@ -275,11 +275,15 @@ defmodule Arbor.Orchestrator.Handlers.SubgraphHandler do
     # NO auth_context — the parent's grants and identity were silently
     # discarded. Auth keys are forwarded explicitly here; per-node checks at
     # the child level then see the same context the parent saw.
+    # Include :signing_authority so a parent authority run never silently
+    # becomes authority-absent (legacy authorizer/signer/config path) in the
+    # child. Authority is process-local opts only — never Engine context.
     forwarded_keys = [
       :on_event,
       :authorization,
       :authorizer,
       :signer,
+      :signing_authority,
       :auth_context,
       :run_authorization,
       :execution_principal,

@@ -121,10 +121,15 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   # These values remain action-local. They are never params or Engine context,
   # and executable delegate/middleware overrides are intentionally excluded.
+  # :signing_authority is the reload-stable opaque credential for nested Engine
+  # runs (council/action). It must be forwarded so parent authority mode is not
+  # silently dropped. Never put private keys or signer closures into retained
+  # Engine/action state beyond this process-local nested opts bag.
   @nested_engine_opt_keys [
     :authorization,
     :authorizer,
     :signer,
+    :signing_authority,
     :auth_context,
     :identity_private_key,
     :on_event,
@@ -345,10 +350,17 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   defp nested_engine_opts(opts) do
+    # Preserve key presence for :signing_authority even when the value is nil
+    # (present-invalid must remain present so the child fails closed). Other
+    # nil-valued keys are dropped as before.
     forwarded =
       opts
       |> Keyword.take(@nested_engine_opt_keys)
-      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Enum.reject(fn
+        {:signing_authority, _value} -> false
+        {_key, nil} -> true
+        _ -> false
+      end)
 
     project? =
       forwarded != [] or match?(%RunAuthorization{}, Keyword.get(opts, :run_authorization))

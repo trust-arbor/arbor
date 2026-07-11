@@ -295,4 +295,55 @@ defmodule Arbor.Orchestrator.EngineCheckpointPoisoningTest do
 
     assert {:error, _} = Checkpoint.load(ckpt_path, hmac_secret: secret_b)
   end
+
+  # Executable two-revision security_regression profile: this assertion is a
+  # closed regression (not a known gap). Tag overrides module :security_known_gap.
+  @tag :security_regression
+  @tag security_known_gap: false
+  test "security regression: present invalid signing_authority never derives legacy checkpoint HMAC" do
+    # Key presence selects the authority path. Present nil/malformed must fail
+    # closed — including when identity_private_key is also present — and must
+    # never emit the legacy v2 HMAC secret.
+    # Fails on a3928b18 (Keyword.get treated nil/invalid as absence → legacy HMAC).
+    alias Arbor.Orchestrator.Engine
+
+    private_key = :crypto.strong_rand_bytes(32)
+
+    legacy =
+      :crypto.mac(:hmac, :sha256, private_key, "arbor-checkpoint-hmac-v2")
+
+    assert {:error, :invalid_signing_authority} =
+             Engine.derive_checkpoint_hmac_secret(signing_authority: nil)
+
+    assert {:error, :invalid_signing_authority} =
+             Engine.derive_checkpoint_hmac_secret(signing_authority: :not_an_authority)
+
+    assert {:error, :invalid_signing_authority} =
+             Engine.derive_checkpoint_hmac_secret(signing_authority: %{forged: true})
+
+    # Even with a valid legacy key present, invalid authority must not fall through.
+    for invalid <- [nil, :not_an_authority, %{token: "x"}, "string"] do
+      result =
+        Engine.derive_checkpoint_hmac_secret(
+          signing_authority: invalid,
+          identity_private_key: private_key
+        )
+
+      assert {:error, :invalid_signing_authority} = result
+      refute result == legacy
+      refute is_binary(result)
+    end
+
+    # Partial struct-tagged maps must not raise or reach the broker / legacy path.
+    partial = %{__struct__: Arbor.Contracts.Security.SigningAuthority, token: "short"}
+
+    assert {:error, :invalid_signing_authority} =
+             Engine.derive_checkpoint_hmac_secret(
+               signing_authority: partial,
+               identity_private_key: private_key
+             )
+
+    # Absence of :signing_authority still allows the legacy path.
+    assert Engine.derive_checkpoint_hmac_secret(identity_private_key: private_key) == legacy
+  end
 end

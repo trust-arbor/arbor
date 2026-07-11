@@ -83,6 +83,27 @@ defmodule Arbor.Contracts.Security.SigningAuthority do
   def new(_), do: {:error, :invalid_attrs}
 
   @doc """
+  Canonicalize any term into a validated `%SigningAuthority{}` without raising.
+
+  Struct-tagged partial/forged maps match `%SigningAuthority{}` in pattern
+  matching but may omit required fields. Field access on those maps can raise
+  `KeyError` and, if forwarded into the broker, can crash a GenServer call.
+  This helper always extracts fields via `Map.get/2` and re-validates through
+  `new/1` so callers get a shaped `{:error, reason}` instead.
+  """
+  @spec canonicalize(term()) :: {:ok, t()} | {:error, term()}
+  def canonicalize(%__MODULE__{} = authority) do
+    new(%{
+      token: Map.get(authority, :token),
+      principal_id: Map.get(authority, :principal_id),
+      purpose: Map.get(authority, :purpose)
+    })
+  end
+
+  def canonicalize(attrs) when is_map(attrs) or is_list(attrs), do: new(attrs)
+  def canonicalize(_), do: {:error, :invalid_authority}
+
+  @doc """
   Returns true when `value` is a `%SigningAuthority{}` struct.
   """
   @spec signing_authority?(term()) :: boolean()

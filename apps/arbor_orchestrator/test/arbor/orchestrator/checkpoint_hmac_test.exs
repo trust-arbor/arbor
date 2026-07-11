@@ -39,7 +39,20 @@ defmodule Arbor.Orchestrator.CheckpointHmacTest do
     expected = :crypto.mac(:hmac, :sha256, key, "arbor-checkpoint-hmac-v2")
 
     assert Engine.derive_checkpoint_hmac_secret(identity_private_key: key) == expected
-    # Authority-only keys must not alter the legacy nil path.
-    assert Engine.derive_checkpoint_hmac_secret(signing_authority: nil) == nil
+  end
+
+  test "present signing_authority nil fails closed (not treated as absence)" do
+    # Key presence selects the authority path; explicit nil is invalid.
+    # Fails on a3928b18 (Keyword.get treated nil as absence → nil/legacy HMAC).
+    assert {:error, :invalid_signing_authority} =
+             Engine.derive_checkpoint_hmac_secret(signing_authority: nil)
+
+    key = :binary.copy(<<0xA5>>, 32)
+
+    assert {:error, :invalid_signing_authority} =
+             Engine.derive_checkpoint_hmac_secret(
+               signing_authority: nil,
+               identity_private_key: key
+             )
   end
 end

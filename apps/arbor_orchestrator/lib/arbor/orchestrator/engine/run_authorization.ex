@@ -91,7 +91,11 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
         {:error, :run_authorization_downgrade}
 
       not authorization? ->
-        {:ok, {nil, opts}}
+        # Still validate present :signing_authority (including nil/malformed):
+        # key presence must never be treated as absence or select a legacy path.
+        with :ok <- validate_signing_authority_opts(opts) do
+          {:ok, {nil, opts}}
+        end
 
       match?(%__MODULE__{}, inherited) ->
         with :ok <- reject_unbound_overrides(opts),
@@ -657,6 +661,9 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
   end
 
   # Validate SigningAuthority shape/principal/exclusivity when present.
+  # Key presence (Keyword.fetch), not value validity, decides whether the
+  # authority path is selected. Present nil/malformed fails closed and never
+  # selects the legacy signer/authorizer/key path.
   # Does NOT retain the authority on the RunAuthorization struct.
   defp validate_signing_authority_opts(opts) do
     case execution_principal(opts) do
@@ -669,38 +676,44 @@ defmodule Arbor.Orchestrator.Engine.RunAuthorization do
 
   defp validate_signing_authority_opts(opts, execution_principal)
        when is_binary(execution_principal) do
-    case Keyword.get(opts, :signing_authority) do
-      nil ->
+    case Keyword.fetch(opts, :signing_authority) do
+      :error ->
         :ok
 
-      %SigningAuthority{} = authority ->
-        with :ok <- validate_authority_shape(authority),
+      {:ok, %SigningAuthority{} = authority} ->
+        with {:ok, authority} <- canonicalize_authority(authority),
              :ok <- validate_authority_principal_binding(authority, execution_principal),
              :ok <- reject_mixed_authority_credentials(opts) do
           :ok
         end
 
-      _invalid ->
+      {:ok, _invalid} ->
+        # Includes explicit nil — present key is not absence.
         {:error, :invalid_signing_authority}
     end
   end
 
   defp validate_signing_authority_shape_only(opts) do
-    case Keyword.get(opts, :signing_authority) do
-      nil -> :ok
-      %SigningAuthority{} = authority -> validate_authority_shape(authority)
-      _invalid -> {:error, :invalid_signing_authority}
+    case Keyword.fetch(opts, :signing_authority) do
+      :error ->
+        :ok
+
+      {:ok, %SigningAuthority{} = authority} ->
+        with {:ok, _authority} <- canonicalize_authority(authority),
+             :ok <- reject_mixed_authority_credentials(opts) do
+          :ok
+        end
+
+      {:ok, _invalid} ->
+        {:error, :invalid_signing_authority}
     end
   end
 
-  defp validate_authority_shape(%SigningAuthority{} = authority) do
-    # Re-run contract validation so forged/mutated maps-as-structs fail closed.
-    case SigningAuthority.new(
-           token: authority.token,
-           principal_id: authority.principal_id,
-           purpose: authority.purpose
-         ) do
-      {:ok, _} -> :ok
+  defp canonicalize_authority(authority) do
+    # Safe Map.get extraction + new/1 — partial/forged struct tags never raise
+    # and never reach the broker GenServer.
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, %SigningAuthority{} = authority} -> {:ok, authority}
       {:error, reason} -> {:error, {:invalid_signing_authority, reason}}
     end
   end

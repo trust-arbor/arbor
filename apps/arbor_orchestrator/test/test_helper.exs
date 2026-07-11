@@ -93,4 +93,20 @@ defmodule Arbor.Orchestrator.TestCapabilities do
       :ok
     end
   end
+
+  @doc """
+  Revoke every capability currently listed for `agent_id`.
+
+  Use in `on_exit` after `grant_orchestrator_access/1` so generated fixtures
+  do not leak across the suite.
+  """
+  def revoke_all(agent_id) when is_binary(agent_id) do
+    if Code.ensure_loaded?(Arbor.Security.CapabilityStore) and
+         function_exported?(Arbor.Security.CapabilityStore, :revoke_all, 1) do
+      _ = Arbor.Security.CapabilityStore.revoke_all(agent_id)
+      :ok
+    else
+      :ok
+    end
+  end
 end

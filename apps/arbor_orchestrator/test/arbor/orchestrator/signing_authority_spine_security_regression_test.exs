@@ -37,12 +37,20 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
     :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
     :ok = Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(identity.agent_id)
 
+    # Restore pre-existing env exactly — never unconditionally delete.
+    prev_override = Application.get_env(:arbor_orchestrator, :security_available_override)
+    prev_required = Application.get_env(:arbor_orchestrator, :security_required)
+    prev_module = Application.get_env(:arbor_orchestrator, :security_module)
+
     Application.put_env(:arbor_orchestrator, :security_available_override, true)
 
     on_exit(fn ->
+      _ = Arbor.Orchestrator.TestCapabilities.revoke_all(identity.agent_id)
       _ = Security.delete_signing_key(identity.agent_id)
       _ = Security.deregister_identity(identity.agent_id)
-      Application.delete_env(:arbor_orchestrator, :security_available_override)
+      restore_env(:security_available_override, prev_override)
+      restore_env(:security_required, prev_required)
+      restore_env(:security_module, prev_module)
       ensure_broker_started()
     end)
 
@@ -432,6 +440,260 @@ defmodule Arbor.Orchestrator.SigningAuthoritySpineSecurityRegressionTest do
                  logs_root: root,
                  signing_authority: authority
                )
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Present invalid authority / partial struct-tagged maps
+  # ---------------------------------------------------------------------------
+
+  describe "present invalid SigningAuthority fails closed" do
+    test "security regression: Arbor.Orchestrator.run with present nil authority never falls back",
+         ctx do
+      # Fails on a3928b18: Keyword.get treated nil as absence → legacy path.
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "authority_spine_nil_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(root)
+      {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      assert {:error, :invalid_signing_authority} =
+               Arbor.Orchestrator.run(@dot,
+                 authorization: true,
+                 agent_id: ctx.agent_id,
+                 workdir: root,
+                 authorizer: fn _, _ ->
+                   send(self(), :legacy_authorizer_called)
+                   :ok
+                 end,
+                 signing_authority: nil
+               )
+
+      refute_received :legacy_authorizer_called
+    end
+
+    test "security regression: partial struct-tagged map returns shaped error without crashing broker",
+         ctx do
+      # Fails on a3928b18 / R3 gaps: field access on partial maps raised KeyError
+      # or could crash SigningAuthorityBroker GenServer.
+      broker_pid = Process.whereis(SigningAuthorityBroker)
+      assert is_pid(broker_pid)
+      assert Process.alive?(broker_pid)
+
+      partial = %{
+        __struct__: SigningAuthority,
+        token: "too-short"
+      }
+
+      assert {:error, {:invalid_signing_authority, _reason}} =
+               Authorization.check_orchestrator_access(ctx.agent_id, partial)
+
+      assert {:error, :invalid_signing_authority} =
+               Engine.derive_checkpoint_hmac_secret(signing_authority: partial)
+
+      # Broker must still be alive after partial-map rejection.
+      assert Process.whereis(SigningAuthorityBroker) == broker_pid
+      assert Process.alive?(broker_pid)
+
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "authority_spine_partial_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(root)
+      {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      assert {:error, {:invalid_signing_authority, _}} =
+               Arbor.Orchestrator.run(@dot,
+                 authorization: true,
+                 agent_id: ctx.agent_id,
+                 workdir: root,
+                 signing_authority: partial
+               )
+
+      assert Process.alive?(broker_pid)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # Nested Engine boundaries retain fixed-facade authority mode
+  # ---------------------------------------------------------------------------
+
+  describe "nested Engine boundaries retain SigningAuthority" do
+    test "security regression: subgraph child opts forward signing_authority (not silent legacy)",
+         ctx do
+      # Pre-fix: SubgraphHandler/PipelineRunHandler allowlists omitted
+      # :signing_authority so nested runs became authority-absent and selected
+      # legacy authorizer/signer/config paths.
+      {:ok, authority} = open_authority(ctx)
+
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "authority_spine_nested_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(root)
+      {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      child = """
+      digraph NestedChild {
+        start [shape=Mdiamond]
+        done [shape=Msquare]
+        start -> done
+      }
+      """
+
+      parent = """
+      digraph NestedParent {
+        start [shape=Mdiamond]
+        child [type="graph.compose", source_key="child_dot", pass_all_context="true"]
+        done [shape=Msquare]
+        start -> child -> done
+      }
+      """
+
+      assert {:ok, _result} =
+               Arbor.Orchestrator.run_as(parent, ctx.agent_id, authority,
+                 workdir: root,
+                 logs_root: root,
+                 initial_values: %{"child_dot" => child}
+               )
+    end
+
+    test "security regression: PipelineRunHandler and SubgraphHandler allowlists include signing_authority" do
+      # Behavioral allowlist proof: Keyword.take with the production keys must
+      # retain a present authority so nested runs cannot drop to legacy mode.
+      parent_opts = [
+        signing_authority: :present_marker,
+        run_authorization: :ra_marker,
+        authorizer: fn _, _ -> :ok end,
+        max_depth: 3
+      ]
+
+      subgraph_keys = [
+        :on_event,
+        :authorization,
+        :authorizer,
+        :signer,
+        :signing_authority,
+        :auth_context,
+        :run_authorization,
+        :execution_principal,
+        :agent_id,
+        :caller_id,
+        :author_id,
+        :task_id,
+        :session_id,
+        :workdir,
+        :identity_private_key,
+        :execution_manifest,
+        :execution_manifest_digest,
+        :pinned_action_bindings,
+        :pinned_handler_bindings,
+        :pinned_node_bindings,
+        :resumable
+      ]
+
+      pipeline_keys = [
+        :logs_root,
+        :on_event,
+        :authorization,
+        :authorizer,
+        :signer,
+        :signing_authority,
+        :auth_context,
+        :run_authorization,
+        :execution_principal,
+        :agent_id,
+        :caller_id,
+        :author_id,
+        :task_id,
+        :session_id,
+        :workdir,
+        :identity_private_key,
+        :execution_manifest,
+        :execution_manifest_digest,
+        :pinned_action_bindings,
+        :pinned_handler_bindings,
+        :pinned_node_bindings,
+        :resumable
+      ]
+
+      assert Keyword.get(Keyword.take(parent_opts, subgraph_keys), :signing_authority) ==
+               :present_marker
+
+      assert Keyword.get(Keyword.take(parent_opts, pipeline_keys), :signing_authority) ==
+               :present_marker
+
+      # ActionsExecutor nested allowlist must also forward authority.
+      nested_keys = [
+        :authorization,
+        :authorizer,
+        :signer,
+        :signing_authority,
+        :auth_context,
+        :identity_private_key,
+        :on_event,
+        :logs_root,
+        :resumable,
+        :max_depth
+      ]
+
+      assert Keyword.get(Keyword.take(parent_opts, nested_keys), :signing_authority) ==
+               :present_marker
+    end
+
+    test "security regression: nested run with present invalid authority fails closed", ctx do
+      root =
+        Path.join(
+          System.tmp_dir!(),
+          "authority_spine_nested_invalid_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(root)
+      {:ok, root} = Arbor.Common.SafePath.resolve_real(root)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      child = """
+      digraph NestedInvalidChild {
+        start [shape=Mdiamond]
+        done [shape=Msquare]
+        start -> done
+      }
+      """
+
+      parent = """
+      digraph NestedInvalidParent {
+        start [shape=Mdiamond]
+        child [type="graph.compose", source_key="child_dot", pass_all_context="true"]
+        done [shape=Msquare]
+        start -> child -> done
+      }
+      """
+
+      # Present nil authority on parent Engine path fails before nested dispatch.
+      assert {:error, :invalid_signing_authority} =
+               Arbor.Orchestrator.run(parent,
+                 authorization: true,
+                 agent_id: ctx.agent_id,
+                 workdir: root,
+                 signing_authority: nil,
+                 authorizer: fn _, _ ->
+                   send(self(), :legacy_authorizer_called)
+                   :ok
+                 end,
+                 initial_values: %{"child_dot" => child}
+               )
+
+      refute_received :legacy_authorizer_called
     end
   end
 

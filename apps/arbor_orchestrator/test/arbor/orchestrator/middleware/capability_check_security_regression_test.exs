@@ -51,14 +51,17 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
   end
 
   setup do
+    # Capture and restore every overridden env value exactly.
     prev_mod = Application.get_env(:arbor_orchestrator, :security_module)
     prev_override = Application.get_env(:arbor_orchestrator, :security_available_override)
+    prev_required = Application.get_env(:arbor_orchestrator, :security_required)
     # Force the authorize path to run (no real CapabilityStore in this unit test).
     Application.put_env(:arbor_orchestrator, :security_available_override, true)
 
     on_exit(fn ->
       restore(:security_module, prev_mod)
       restore(:security_available_override, prev_override)
+      restore(:security_required, prev_required)
     end)
 
     :ok
@@ -283,6 +286,53 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
       refute_received :legacy_signer_called
     end
 
+    test "security regression: present nil signing_authority fails closed (not legacy)" do
+      # Fails on a3928b18: Map.get treated nil as absence → legacy Config path.
+      Application.put_env(:arbor_orchestrator, :security_module, RecordingSecurity)
+
+      t =
+        token()
+        |> with_signing_authority(nil)
+        |> Map.update!(:assigns, fn assigns ->
+          Map.put(assigns, :signer, fn _resource ->
+            send(self(), :legacy_signer_called)
+            {:ok, :fake}
+          end)
+        end)
+
+      result = CapabilityCheck.before_node(t)
+
+      assert result.halted
+      assert result.outcome.status == :fail
+      assert result.outcome.failure_reason =~ "invalid_signing_authority"
+      refute_received {:authorize, _, _}
+      refute_received :legacy_signer_called
+    end
+
+    test "security regression: partial struct-tagged authority fails closed without legacy fallthrough" do
+      Application.put_env(:arbor_orchestrator, :security_module, RecordingSecurity)
+
+      partial = %{__struct__: SigningAuthority, token: "too-short"}
+
+      t =
+        token()
+        |> with_signing_authority(partial)
+        |> Map.update!(:assigns, fn assigns ->
+          Map.put(assigns, :signer, fn _resource ->
+            send(self(), :legacy_signer_called)
+            {:ok, :fake}
+          end)
+        end)
+
+      result = CapabilityCheck.before_node(t)
+
+      assert result.halted
+      assert result.outcome.status == :fail
+      assert result.outcome.failure_reason =~ "invalid_signing_authority"
+      refute_received {:authorize, _, _}
+      refute_received :legacy_signer_called
+    end
+
     test "security regression: valid authority bypasses Config availability and ignores denying Config module" do
       ensure_authority_stack!()
 
@@ -293,6 +343,7 @@ defmodule Arbor.Orchestrator.Middleware.CapabilityCheckSecurityRegressionTest do
       :ok = Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(identity.agent_id)
 
       on_exit(fn ->
+        _ = Arbor.Orchestrator.TestCapabilities.revoke_all(identity.agent_id)
         _ = Security.delete_signing_key(identity.agent_id)
         _ = Security.deregister_identity(identity.agent_id)
         ensure_broker_started()

@@ -194,4 +194,31 @@ defmodule Arbor.Contracts.Security.SigningAuthorityTest do
       refute SigningAuthority.signing_authority?(nil)
     end
   end
+
+  describe "canonicalize/1" do
+    test "re-validates complete structs" do
+      {:ok, authority} =
+        SigningAuthority.new(
+          token: @valid_token,
+          principal_id: @valid_principal,
+          purpose: :session
+        )
+
+      assert {:ok, ^authority} = SigningAuthority.canonicalize(authority)
+    end
+
+    test "partial struct-tagged maps fail closed without raising" do
+      partial = %{__struct__: SigningAuthority, token: "too-short"}
+
+      assert {:error, :token_too_short} = SigningAuthority.canonicalize(partial)
+
+      missing_fields = %{__struct__: SigningAuthority}
+      assert {:error, :invalid_token} = SigningAuthority.canonicalize(missing_fields)
+    end
+
+    test "rejects non-authority terms" do
+      assert {:error, :invalid_authority} = SigningAuthority.canonicalize(nil)
+      assert {:error, :invalid_authority} = SigningAuthority.canonicalize(:atom)
+    end
+  end
 end
