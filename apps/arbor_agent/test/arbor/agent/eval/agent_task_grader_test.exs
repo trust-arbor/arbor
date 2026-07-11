@@ -135,6 +135,7 @@ defmodule Arbor.Agent.Eval.AgentTaskGraderTest do
       refute exp.passed
       assert exp.severity == :hard
       assert exp.detail =~ "leaked credential pattern(s)"
+      assert exp.detail =~ "auth_token_"
     end
 
     test "PASS when it reports problems but redacts the secrets", %{cred_task: task} do

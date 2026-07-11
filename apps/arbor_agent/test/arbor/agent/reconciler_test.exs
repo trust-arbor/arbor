@@ -11,11 +11,11 @@ defmodule Arbor.Agent.ReconcilerTest do
 
   ## Test-env setup notes
 
-  In the isolated `arbor_agent` suite `config :arbor_security, start_children:
-  false`, so the Identity Registry that `identity_present?/1` consults is NOT
-  running. We start just `Arbor.Security.Identity.Registry` here (it degrades
-  gracefully without its BufferedStore) so identity status is real: present after
-  `register_identity/1`, gone after `deregister_identity/1`.
+  In an isolated run `config :arbor_security, start_children: false`, so the
+  Identity Registry that `identity_present?/1` consults is not running. The full
+  suite may already have bootstrapped it under `Arbor.Security.Supervisor`. Setup
+  tracks which case applies: a test-owned registry is discarded by supervised
+  teardown, while a reused registry has only the identity created here removed.
   """
 
   use ExUnit.Case, async: false
@@ -38,8 +38,15 @@ defmodule Arbor.Agent.ReconcilerTest do
 
   setup do
     # Identity Registry — required for identity_present?/1 to return real status.
-    assert Process.whereis(Arbor.Security.Identity.Registry) == nil
-    start_supervised!({Arbor.Security.Identity.Registry, []})
+    registry_started? =
+      case Process.whereis(Arbor.Security.Identity.Registry) do
+        nil ->
+          start_supervised!({Arbor.Security.Identity.Registry, []})
+          true
+
+        _pid ->
+          false
+      end
 
     # Profiles store — needed for the DESIRED snapshot (G1). Matches ManagerTest.
     if Process.whereis(@profiles_store) == nil do
@@ -57,11 +64,11 @@ defmodule Arbor.Agent.ReconcilerTest do
         {Reconciler, name: :reconciler_under_test, enabled: false, g1_policy: :start}
       )
 
-    {:ok, server: server}
+    {:ok, server: server, registry_started?: registry_started?}
   end
 
   # Register a real identity and a live registered agent sharing its agent_id.
-  defp live_agent_with_identity do
+  defp live_agent_with_identity(registry_started?) do
     {:ok, identity} = Security.generate_identity()
     agent_id = identity.agent_id
     :ok = Security.register_identity(identity)
@@ -80,6 +87,10 @@ defmodule Arbor.Agent.ReconcilerTest do
       catch
         _, _ -> :ok
       end
+
+      unless registry_started? do
+        Security.deregister_identity(agent_id)
+      end
     end)
 
     %{agent_id: agent_id, pid: pid}
@@ -88,8 +99,11 @@ defmodule Arbor.Agent.ReconcilerTest do
   defp intents_for(intents, agent_id), do: Enum.filter(intents, &(&1.agent_id == agent_id))
 
   describe "G2 — reap identity-gone zombie (regression guard)" do
-    test "reaps a live agent whose identity was removed", %{server: server} do
-      %{agent_id: agent_id, pid: pid} = live_agent_with_identity()
+    test "reaps a live agent whose identity was removed", %{
+      server: server,
+      registry_started?: registry_started?
+    } do
+      %{agent_id: agent_id, pid: pid} = live_agent_with_identity(registry_started?)
 
       # Precondition: identity present and agent alive/registered.
       assert {:ok, _status} = Security.identity_status(agent_id)
@@ -112,8 +126,11 @@ defmodule Arbor.Agent.ReconcilerTest do
   end
 
   describe "fail-safe — never reap while identity is present" do
-    test "does NOT reap an agent whose identity is present", %{server: server} do
-      %{agent_id: agent_id, pid: pid} = live_agent_with_identity()
+    test "does NOT reap an agent whose identity is present", %{
+      server: server,
+      registry_started?: registry_started?
+    } do
+      %{agent_id: agent_id, pid: pid} = live_agent_with_identity(registry_started?)
 
       assert {:ok, _status} = Security.identity_status(agent_id)
 
