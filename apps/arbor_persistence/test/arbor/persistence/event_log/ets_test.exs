@@ -2,6 +2,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
+  alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.ETS
 
@@ -83,7 +84,10 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       assert {:ok, [_]} = ETS.append("cas", event, name: name, expected_version: 0)
 
       assert {:error, :version_conflict} =
-               ETS.append("cas", event, name: name, expected_version: 0)
+               ETS.append("cas", Event.new("cas", "duplicate", %{}),
+                 name: name,
+                 expected_version: 0
+               )
 
       assert {:ok, 1} = ETS.stream_version("cas", name: name)
     end
@@ -111,7 +115,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       assert {:ok, [_]} = ETS.append("deadline", event, name: name)
 
       assert {:ok, [_]} =
-               ETS.append("deadline", event,
+               ETS.append("deadline", Event.new("deadline", "continued", %{}, timestamp: future),
                  name: name,
                  expected_version: 1,
                  max_current_age_ms: 60_000
@@ -119,7 +123,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
 
       # Age equal to the deadline is expired; max_current_age_ms is strict.
       assert {:error, :deadline_exceeded} =
-               ETS.append("deadline", event,
+               ETS.append("deadline", Event.new("deadline", "expired", %{}, timestamp: future),
                  name: name,
                  expected_version: 2,
                  max_current_age_ms: 0
@@ -143,6 +147,96 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
 
       refute ETS.stream_exists?("invalid", name: name)
     end
+
+    test "security regression: a suspended queued append expires without later mutation", %{
+      name: name
+    } do
+      event = Event.new("queued-timeout", "must-not-commit", %{})
+      :ok = :sys.suspend(name)
+
+      task =
+        Task.async(fn ->
+          ETS.append("queued-timeout", event,
+            name: name,
+            expected_version: 0,
+            append_timeout_ms: 25
+          )
+        end)
+
+      result =
+        try do
+          Task.await(task, 1_000)
+        after
+          :ok = :sys.resume(name)
+        end
+
+      assert {:error, {:append_indeterminate, operation}} = result
+
+      assert {:ok, 0} = ETS.stream_version("queued-timeout", name: name)
+      refute ETS.stream_exists?("queued-timeout", name: name)
+      assert {:ok, :absent} = ETS.reconcile_append(operation, name: name)
+    end
+
+    test "forged operations and improper reconcile options cannot crash the ETS owner", %{
+      name: name
+    } do
+      event = Event.new("forged", "created", %{value: 1})
+
+      assert {:ok, %AppendOperation{} = operation} =
+               Arbor.Persistence.EventLog.build_operation("forged", [event])
+
+      Enum.each(forged_operations(operation), fn forged ->
+        assert {:error, :invalid_append_operation} = ETS.reconcile_append(forged, name: name)
+      end)
+
+      assert {:error, :invalid_precondition} =
+               ETS.reconcile_append(operation, [{:name, name} | :improper])
+
+      assert Process.alive?(Process.whereis(name))
+    end
+
+    test "same exact append is idempotent and changed content under one ID conflicts", %{
+      name: name
+    } do
+      event = Event.new("idempotent", "created", %{value: 1})
+      assert {:ok, [first]} = ETS.append("idempotent", event, name: name)
+      assert {:ok, [retried]} = ETS.append("idempotent", event, name: name)
+      assert retried == first
+
+      changed = %Event{event | data: %{value: 2}}
+      assert {:error, :event_identity_conflict} = ETS.append("idempotent", changed, name: name)
+      assert {:ok, 1} = ETS.stream_version("idempotent", name: name)
+    end
+
+    test "position exhaustion returns controlled errors before mutation", %{name: name} do
+      :sys.replace_state(name, fn state ->
+        %{state | stream_versions: %{"full-stream" => 2_147_483_647}}
+      end)
+
+      assert {:error, :stream_position_exhausted} =
+               ETS.append("full-stream", Event.new("full-stream", "event", %{}), name: name)
+
+      :sys.replace_state(name, fn state ->
+        %{
+          state
+          | stream_versions: %{},
+            global_position: 9_223_372_036_854_775_807,
+            max_events: 9_223_372_036_854_775_808
+        }
+      end)
+
+      assert {:error, :global_position_exhausted} =
+               ETS.append("global-full", Event.new("global-full", "event", %{}), name: name)
+    end
+  end
+
+  defp forged_operations(%AppendOperation{} = operation) do
+    oversized_ids = Enum.map(1..1_001, &"evt_forged_#{&1}")
+
+    [
+      %AppendOperation{operation | event_ids: ["evt_forged" | :improper]},
+      %AppendOperation{operation | event_ids: oversized_ids, fingerprints: %{}}
+    ]
   end
 
   describe "freshness after restore" do
@@ -502,6 +596,32 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       {:ok, after_trim} = ETS.read_stream("s1", name: name)
       assert length(after_trim) == 1
       assert hd(after_trim).type == "fresh_event"
+    end
+
+    test "security regression: retrying a trimmed event cannot duplicate its identity" do
+      # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
+      name = :"el_trim_identity_#{:erlang.unique_integer([:positive])}"
+
+      start_supervised!(
+        {ETS, name: name, max_age_ms: 60_000, trim_interval_ms: :disabled},
+        id: name
+      )
+
+      old = DateTime.utc_now() |> DateTime.add(-2 * 60 * 60, :second)
+      event = Event.new("trimmed-id", "old_event", %{value: 1}, timestamp: old)
+
+      assert {:ok, [_persisted]} = ETS.append("trimmed-id", event, name: name)
+
+      send(Process.whereis(name), :trim_old_events)
+      _ = :sys.get_state(name)
+
+      assert {:ok, []} = ETS.read_stream("trimmed-id", name: name)
+
+      assert {:error, {:append_indeterminate, _operation}} =
+               ETS.append("trimmed-id", event, name: name)
+
+      assert {:ok, 1} = ETS.stream_version("trimmed-id", name: name)
+      assert {:ok, []} = ETS.read_stream("trimmed-id", name: name)
     end
 
     test "max_age_ms: :infinity disables trim" do

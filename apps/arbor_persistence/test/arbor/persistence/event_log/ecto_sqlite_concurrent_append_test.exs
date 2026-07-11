@@ -7,7 +7,20 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
   @moduletag capture_log: true
   @moduletag :integration
 
+  Code.require_file(
+    Path.expand(
+      "../../../../priv/repo/migrations/20260711000002_enforce_unique_event_global_position.exs",
+      __DIR__
+    )
+  )
+
   defmodule SQLitePoolRepo do
+    use Ecto.Repo,
+      otp_app: :arbor_persistence,
+      adapter: Ecto.Adapters.SQLite3
+  end
+
+  defmodule MigrationRepo do
     use Ecto.Repo,
       otp_app: :arbor_persistence,
       adapter: Ecto.Adapters.SQLite3
@@ -20,6 +33,12 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
         "arbor-event-log-concurrency-#{System.unique_integer([:positive])}.sqlite3"
       )
 
+    migration_database =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-event-log-migration-#{System.unique_integer([:positive])}.sqlite3"
+      )
+
     start_supervised!(
       {SQLitePoolRepo,
        database: database,
@@ -30,6 +49,22 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
        queue_target: 100,
        queue_interval: 1_000}
     )
+
+    start_supervised!(
+      {MigrationRepo,
+       database: migration_database, pool: DBConnection.ConnectionPool, pool_size: 1}
+    )
+
+    MigrationRepo.query!("""
+    CREATE TABLE events (
+      id TEXT PRIMARY KEY,
+      global_position INTEGER
+    )
+    """)
+
+    MigrationRepo.query!("""
+    CREATE INDEX events_global_position_index ON events (global_position)
+    """)
 
     SQLitePoolRepo.query!("""
     CREATE TABLE events (
@@ -55,6 +90,11 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
     """)
 
     SQLitePoolRepo.query!("""
+    CREATE UNIQUE INDEX events_global_position_index
+    ON events (global_position)
+    """)
+
+    SQLitePoolRepo.query!("""
     CREATE TRIGGER events_set_committed_at_after_insert
     AFTER INSERT ON events
     FOR EACH ROW
@@ -67,6 +107,11 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
 
     on_exit(fn ->
       Enum.each([database, database <> "-shm", database <> "-wal"], &File.rm/1)
+
+      Enum.each(
+        [migration_database, migration_database <> "-shm", migration_database <> "-wal"],
+        &File.rm/1
+      )
     end)
 
     :ok
@@ -187,16 +232,19 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
       end)
 
     assert_receive :sqlite_lock_acquired, 1_000
+    event = Event.new("sqlite-busy", "ordinary", %{})
+    assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation("sqlite-busy", [event])
 
     try do
-      event = Event.new("sqlite-busy", "ordinary", %{})
       started_at = System.monotonic_time(:millisecond)
 
-      assert {:error, :database_busy} =
-               EventLog.append("sqlite-busy", event,
-                 repo: SQLitePoolRepo,
-                 append_timeout_ms: 40
-               )
+      assert EventLog.append("sqlite-busy", event,
+               repo: SQLitePoolRepo,
+               append_timeout_ms: 40
+             ) in [
+               {:error, :database_busy},
+               {:error, {:append_indeterminate, operation}}
+             ]
 
       elapsed_ms = System.monotonic_time(:millisecond) - started_at
       assert elapsed_ms < 250
@@ -207,5 +255,69 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
     assert {:ok, _result} = Task.yield(locker, 1_000)
     Process.sleep(75)
     assert {:ok, 0} = EventLog.stream_version("sqlite-busy", repo: SQLitePoolRepo)
+    assert {:ok, :absent} = EventLog.reconcile_append(operation, repo: SQLitePoolRepo)
+  end
+
+  test "migration rejects duplicate legacy global positions instead of renumbering" do
+    MigrationRepo.query!("INSERT INTO events (id, global_position) VALUES (?, ?)", [
+      "legacy-a",
+      7
+    ])
+
+    MigrationRepo.query!("INSERT INTO events (id, global_position) VALUES (?, ?)", [
+      "legacy-b",
+      7
+    ])
+
+    assert_raise RuntimeError, ~r/global_position 7 occurs 2 times/, fn ->
+      Ecto.Migrator.up(
+        MigrationRepo,
+        20_260_711_000_002,
+        Arbor.Persistence.Repo.Migrations.EnforceUniqueEventGlobalPosition,
+        log: false
+      )
+    end
+
+    MigrationRepo.query!("DELETE FROM events WHERE id = ?", ["legacy-b"])
+
+    assert :ok =
+             Ecto.Migrator.up(
+               MigrationRepo,
+               20_260_711_000_002,
+               Arbor.Persistence.Repo.Migrations.EnforceUniqueEventGlobalPosition,
+               log: false
+             )
+
+    assert {:error, error} =
+             MigrationRepo.query("INSERT INTO events (id, global_position) VALUES (?, ?)", [
+               "legacy-c",
+               7
+             ])
+
+    assert Exception.message(error) =~ "UNIQUE constraint failed: events.global_position"
+  end
+
+  test "rolling legacy writer cannot create a duplicate global position" do
+    insert_legacy_row!("rolling-a", "stream-a", 1, 1)
+
+    assert {:error, error} =
+             SQLitePoolRepo.query(
+               legacy_insert_sql(),
+               ["rolling-b", "stream-b", 1, 1]
+             )
+
+    assert Exception.message(error) =~ "UNIQUE constraint failed: events.global_position"
+  end
+
+  defp insert_legacy_row!(id, stream_id, event_number, global_position) do
+    SQLitePoolRepo.query!(legacy_insert_sql(), [id, stream_id, event_number, global_position])
+  end
+
+  defp legacy_insert_sql do
+    """
+    INSERT INTO events (
+      id, stream_id, event_number, global_position, type, data, metadata, created_at
+    ) VALUES (?, ?, ?, ?, 'legacy', '{}', '{}', STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
+    """
   end
 end

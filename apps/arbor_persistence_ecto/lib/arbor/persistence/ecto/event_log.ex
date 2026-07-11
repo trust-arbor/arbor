@@ -36,16 +36,49 @@ defmodule Arbor.Persistence.Ecto.EventLog do
 
       # Append regardless of version (default)
       {:ok, events} = append(stream_id, events)
+
+  ## Append Deadlines
+
+  `:append_timeout_ms` sets one absolute `1..60_000` millisecond budget across
+  validation, pool checkout, append, commit reply, and exact-ID readback. A
+  transport or commit-phase ambiguity returns
+  `{:error, {:append_indeterminate, operation}}`; reconcile that operation or
+  retry the exact same event IDs and content.
   """
 
   @behaviour Arbor.Persistence.EventLog
 
+  alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.Ecto.EventStore, as: Store
   alias Arbor.Persistence.{Event, EventLog}
 
   require Logger
 
   @position_lookup_timeout_ms 5_000
+  @fingerprint_key "arbor_append_fingerprint"
+  @operation_key "arbor_append_operation_id"
+  @event_id_key "event_id"
+  @agent_id_key "arbor_agent_id"
+  @timestamp_key "arbor_event_timestamp"
+  @reserved_metadata_keys [
+    @event_id_key,
+    @agent_id_key,
+    "causation_id",
+    "correlation_id",
+    @timestamp_key,
+    @operation_key,
+    @fingerprint_key
+  ]
+  @reserved_input_metadata_keys @reserved_metadata_keys ++
+                                  [
+                                    :event_id,
+                                    :arbor_agent_id,
+                                    :causation_id,
+                                    :correlation_id,
+                                    :arbor_event_timestamp,
+                                    :arbor_append_operation_id,
+                                    :arbor_append_fingerprint
+                                  ]
 
   # ============================================================================
   # EventLog Behaviour Implementation
@@ -53,27 +86,41 @@ defmodule Arbor.Persistence.Ecto.EventLog do
 
   @impl Arbor.Persistence.EventLog
   def append(stream_id, events, opts \\ []) do
-    with {:ok, events, preconditions} <- EventLog.validate_append(stream_id, events, opts),
+    with {:ok, events, preconditions, _initial_operation, deadline_mono} <-
+           EventLog.prepare_append(stream_id, events, opts),
+         events = Enum.map(events, &sanitize_submitted_event/1),
+         {:ok, operation} <- EventLog.build_operation(stream_id, events),
          :ok <- reject_freshness(preconditions.max_current_age_ms) do
-      expected_version = preconditions.expected_version || :any_version
+      run_bounded(
+        fn -> append_prepared(stream_id, events, preconditions, operation, deadline_mono) end,
+        operation,
+        deadline_mono
+      )
+    end
+  end
 
-      submitted = Enum.map(events, &{&1, Ecto.UUID.generate()})
+  defp append_prepared(stream_id, events, preconditions, operation, deadline_mono) do
+    case reconcile_operation(operation, deadline_mono) do
+      {:ok, {:committed, persisted}} ->
+        {:ok, project_submitted_events(events, persisted, stream_id)}
 
-      event_data =
-        Enum.map(submitted, fn {event, storage_id} -> to_event_data(event, storage_id) end)
+      {:ok, :absent} ->
+        append_absent_operation(events, preconditions, operation, deadline_mono)
 
-      case Store.append_to_stream(stream_id, expected_version, event_data) do
-        :ok ->
-          read_back_submitted(stream_id, submitted)
+      {:error, _reason} = error ->
+        error
+    end
+  end
 
-        {:error, :wrong_expected_version} ->
-          Logger.warning("Optimistic concurrency conflict on stream #{stream_id}")
-          {:error, :version_conflict}
-
-        {:error, reason} = error ->
-          Logger.error("Failed to append to stream #{stream_id}: #{inspect(reason)}")
-          error
-      end
+  @impl Arbor.Persistence.EventLog
+  def reconcile_append(operation, opts) do
+    with {:ok, operation, _normalized_opts, deadline_mono} <-
+           EventLog.prepare_reconcile(operation, opts) do
+      run_bounded(
+        fn -> reconcile_operation(operation, deadline_mono) end,
+        operation,
+        deadline_mono
+      )
     end
   end
 
@@ -98,25 +145,8 @@ defmodule Arbor.Persistence.Ecto.EventLog do
   @impl Arbor.Persistence.EventLog
   def read_stream_head(stream_id, opts \\ []) do
     with {:ok, max_current_age_ms} <- EventLog.validate_head_read(stream_id, opts),
-         :ok <- reject_freshness(max_current_age_ms),
-         {:ok, version} <- stream_version(stream_id, opts) do
-      if version == 0 do
-        {:ok, nil}
-      else
-        case Store.read_stream_forward(stream_id, version, 1) do
-          {:ok, [recorded | _]} ->
-            with {:ok, [event]} <- from_stream_recordings([recorded]), do: {:ok, event}
-
-          {:ok, []} ->
-            {:error, :head_unavailable}
-
-          {:error, :stream_not_found} ->
-            {:error, :head_unavailable}
-
-          {:error, _reason} = error ->
-            error
-        end
-      end
+         :ok <- reject_freshness(max_current_age_ms) do
+      read_atomic_stream_head(stream_id)
     end
   end
 
@@ -216,17 +246,166 @@ defmodule Arbor.Persistence.Ecto.EventLog do
   # Private Helpers
   # ============================================================================
 
-  # Convert our Event.t() to EventStore.EventData
-  defp to_event_data(%Event{} = event, storage_id) do
+  defp run_bounded(fun, operation, deadline_mono) do
+    case EventLog.remaining_timeout(deadline_mono) do
+      {:ok, timeout} ->
+        task = Task.async(fun)
+
+        case Task.yield(task, timeout) do
+          {:ok, result} ->
+            case EventLog.remaining_timeout(deadline_mono) do
+              {:ok, _remaining} -> result
+              {:error, :operation_timeout} -> EventLog.indeterminate(operation)
+            end
+
+          {:exit, _reason} ->
+            EventLog.indeterminate(operation)
+
+          nil ->
+            _ = Task.shutdown(task, :brutal_kill)
+            EventLog.indeterminate(operation)
+        end
+
+      {:error, :operation_timeout} ->
+        EventLog.indeterminate(operation)
+    end
+  end
+
+  defp append_absent_operation(events, preconditions, operation, deadline_mono) do
+    expected_version = preconditions.expected_version || :any_version
+
+    with :ok <-
+           ensure_event_store_capacity(operation.stream_id, length(events), deadline_mono),
+         {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
+      event_data =
+        Enum.map(events, fn event ->
+          to_event_data(
+            event,
+            deterministic_storage_id(event.id),
+            operation.operation_id,
+            Map.fetch!(operation.fingerprints, event.id)
+          )
+        end)
+
+      result =
+        try do
+          Store.append_to_stream(operation.stream_id, expected_version, event_data,
+            timeout: timeout
+          )
+        rescue
+          _error -> :append_transport_indeterminate
+        catch
+          :exit, _reason -> :append_transport_indeterminate
+        end
+
+      resolve_append_result(result, events, operation, deadline_mono)
+    end
+  end
+
+  defp ensure_event_store_capacity(stream_id, count, deadline_mono) do
+    with {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono),
+         {:ok, conn, schema} <- event_store_connection() do
+      sql = """
+      SELECT COALESCE(
+               (SELECT stream_version FROM #{schema}.streams WHERE stream_uuid = $1),
+               0
+             ),
+             COALESCE(
+               (SELECT stream_version FROM #{schema}.streams WHERE stream_id = 0),
+               0
+             )
+      """
+
+      case Postgrex.query(conn, sql, [stream_id], timeout: timeout) do
+        {:ok, %{rows: [[stream_position, global_position]]}} ->
+          EventLog.ensure_position_capacity(stream_position, global_position, count)
+
+        {:error, reason} ->
+          {:error, {:database_unavailable, reason}}
+      end
+    end
+  end
+
+  defp resolve_append_result(:ok, submitted, operation, deadline_mono) do
+    case reconcile_operation(operation, deadline_mono) do
+      {:ok, {:committed, persisted}} ->
+        {:ok, project_submitted_events(submitted, persisted, operation.stream_id)}
+
+      _not_proven ->
+        EventLog.indeterminate(operation)
+    end
+  end
+
+  defp resolve_append_result(
+         {:error, :wrong_expected_version},
+         submitted,
+         operation,
+         deadline_mono
+       ) do
+    case reconcile_operation(operation, deadline_mono) do
+      {:ok, {:committed, persisted}} ->
+        {:ok, project_submitted_events(submitted, persisted, operation.stream_id)}
+
+      {:ok, :absent} ->
+        {:error, :version_conflict}
+
+      {:error, :event_identity_conflict} = error ->
+        error
+
+      _not_proven ->
+        EventLog.indeterminate(operation)
+    end
+  end
+
+  defp resolve_append_result({:error, :duplicate_event}, submitted, operation, deadline_mono) do
+    case reconcile_operation(operation, deadline_mono) do
+      {:ok, {:committed, persisted}} ->
+        {:ok, project_submitted_events(submitted, persisted, operation.stream_id)}
+
+      {:ok, :absent} ->
+        {:error, :event_identity_conflict}
+
+      {:error, :event_identity_conflict} = error ->
+        error
+
+      _not_proven ->
+        EventLog.indeterminate(operation)
+    end
+  end
+
+  defp resolve_append_result(_result, _submitted, operation, _deadline_mono),
+    do: EventLog.indeterminate(operation)
+
+  defp project_submitted_events(submitted, persisted, stream_id) do
+    persisted_by_id = Map.new(persisted, &{&1.id, &1})
+
+    Enum.map(submitted, fn %Event{} = event ->
+      stored = Map.fetch!(persisted_by_id, event.id)
+
+      %Event{
+        event
+        | stream_id: stream_id,
+          event_number: stored.event_number,
+          global_position: stored.global_position
+      }
+    end)
+  end
+
+  # Convert our Event.t() to EventStore.EventData.
+  defp to_event_data(%Event{} = event, storage_id, operation_id, fingerprint) do
     %EventStore.EventData{
       event_id: storage_id,
       event_type: event.type,
       data: event.data,
       metadata:
         Map.merge(event.metadata || %{}, %{
-          "event_id" => event.id,
+          @event_id_key => event.id,
+          @agent_id_key => event.agent_id,
           "causation_id" => event.causation_id,
-          "correlation_id" => event.correlation_id
+          "correlation_id" => event.correlation_id,
+          @timestamp_key => encode_timestamp(event.timestamp),
+          @operation_key => operation_id,
+          @fingerprint_key => fingerprint
         })
     }
   end
@@ -236,42 +415,18 @@ defmodule Arbor.Persistence.Ecto.EventLog do
     metadata = recorded.metadata || %{}
 
     %Event{
-      id: Map.get(metadata, "event_id", recorded.event_id |> to_string()),
+      id: Map.get(metadata, @event_id_key, recorded.event_id |> to_string()),
       stream_id: recorded.stream_uuid,
       event_number: recorded.stream_version,
       global_position: global_position,
       type: recorded.event_type,
       data: recorded.data || %{},
-      metadata: Map.drop(metadata, ["event_id", "causation_id", "correlation_id"]),
+      metadata: Map.drop(metadata, @reserved_metadata_keys),
       causation_id: Map.get(metadata, "causation_id") || recorded.causation_id,
       correlation_id: Map.get(metadata, "correlation_id") || recorded.correlation_id,
-      timestamp: recorded.created_at
+      agent_id: Map.get(metadata, @agent_id_key),
+      timestamp: decode_timestamp(Map.get(metadata, @timestamp_key), recorded.created_at)
     }
-  end
-
-  defp read_back_submitted(stream_id, submitted) do
-    storage_ids = Enum.map(submitted, &elem(&1, 1))
-
-    with {:ok, positions} <- lookup_submitted_positions(stream_id, storage_ids),
-         true <- map_size(positions) == length(storage_ids) do
-      events =
-        Enum.map(submitted, fn {%Event{} = event, storage_id} ->
-          {event_number, global_position, created_at} = Map.fetch!(positions, storage_id)
-
-          %Event{
-            event
-            | stream_id: stream_id,
-              event_number: event_number,
-              global_position: global_position,
-              timestamp: normalize_created_at(created_at)
-          }
-        end)
-
-      {:ok, events}
-    else
-      false -> {:error, :event_readback_incomplete}
-      {:error, _reason} = error -> error
-    end
   end
 
   defp from_stream_recordings([]), do: {:ok, []}
@@ -293,37 +448,181 @@ defmodule Arbor.Persistence.Ecto.EventLog do
     end
   end
 
-  defp lookup_submitted_positions(stream_id, storage_ids) do
+  defp reconcile_operation(%AppendOperation{} = operation, deadline_mono) do
+    storage_to_event_id =
+      Map.new(operation.event_ids, &{deterministic_storage_id(&1), &1})
+
+    with {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono),
+         {:ok, conn, schema} <- event_store_connection() do
+      sql = operation_lookup_sql(schema)
+      storage_ids = Map.keys(storage_to_event_id)
+
+      case Postgrex.query(conn, sql, [operation.stream_id, storage_ids], timeout: timeout) do
+        {:ok, %{rows: []}} ->
+          {:ok, :absent}
+
+        {:ok, %{rows: rows}} ->
+          reconcile_operation_rows(operation, storage_to_event_id, rows)
+
+        {:error, _reason} ->
+          EventLog.indeterminate(operation)
+      end
+    else
+      _unavailable -> EventLog.indeterminate(operation)
+    end
+  rescue
+    _error -> EventLog.indeterminate(operation)
+  catch
+    :exit, _reason -> EventLog.indeterminate(operation)
+  end
+
+  defp operation_lookup_sql(schema) do
+    """
+    SELECT source.event_id::text,
+           source.stream_version,
+           all_events.stream_version,
+           streams.stream_uuid,
+           events.event_type,
+           events.correlation_id::text,
+           events.causation_id::text,
+           events.data,
+           events.metadata,
+           events.created_at
+    FROM #{schema}.stream_events AS source
+    INNER JOIN #{schema}.streams AS streams
+      ON streams.stream_id = source.stream_id
+    INNER JOIN #{schema}.stream_events AS all_events
+      ON all_events.event_id = source.event_id AND all_events.stream_id = 0
+    INNER JOIN #{schema}.events AS events
+      ON events.event_id = source.event_id
+    WHERE streams.stream_uuid = $1
+      AND source.event_id::text = ANY($2::text[])
+    """
+  end
+
+  defp reconcile_operation_rows(operation, storage_to_event_id, rows) do
+    {events, conflict?} =
+      Enum.reduce(rows, {%{}, false}, fn row, {events, conflict?} ->
+        {storage_id, _recorded, content_event, _global_position} = recorded_event_from_row(row)
+        expected_event_id = Map.get(storage_to_event_id, storage_id)
+        expected_fingerprint = Map.get(operation.fingerprints, expected_event_id)
+        actual_fingerprint = EventLog.event_fingerprint(operation.stream_id, content_event)
+
+        valid? =
+          is_binary(expected_event_id) and content_event.id == expected_event_id and
+            content_event.stream_id == operation.stream_id and
+            secure_equal?(actual_fingerprint, expected_fingerprint)
+
+        if valid? do
+          {Map.put(events, expected_event_id, content_event), conflict?}
+        else
+          {events, true}
+        end
+      end)
+
+    cond do
+      conflict? ->
+        {:error, :event_identity_conflict}
+
+      map_size(events) == length(operation.event_ids) ->
+        {:ok, {:committed, Enum.map(operation.event_ids, &Map.fetch!(events, &1))}}
+
+      true ->
+        EventLog.indeterminate(operation)
+    end
+  end
+
+  defp read_atomic_stream_head(stream_id) do
     with {:ok, conn, schema} <- event_store_connection() do
       sql = """
       SELECT source.event_id::text,
              source.stream_version,
              all_events.stream_version,
+             streams.stream_uuid,
+             events.event_type,
+             events.correlation_id::text,
+             events.causation_id::text,
+             events.data,
+             events.metadata,
              events.created_at
-      FROM #{schema}.stream_events AS source
-      INNER JOIN #{schema}.streams AS streams
-        ON streams.stream_id = source.stream_id
+      FROM #{schema}.streams AS streams
+      INNER JOIN #{schema}.stream_events AS source
+        ON source.stream_id = streams.stream_id
       INNER JOIN #{schema}.stream_events AS all_events
         ON all_events.event_id = source.event_id AND all_events.stream_id = 0
       INNER JOIN #{schema}.events AS events
         ON events.event_id = source.event_id
       WHERE streams.stream_uuid = $1
-        AND source.event_id::text = ANY($2::text[])
+      ORDER BY source.stream_version DESC
+      LIMIT 1
       """
 
-      case Postgrex.query(conn, sql, [stream_id, storage_ids],
-             timeout: @position_lookup_timeout_ms
-           ) do
-        {:ok, %{rows: rows}} ->
-          {:ok,
-           Map.new(rows, fn [storage_id, stream_version, global_position, created_at] ->
-             {storage_id, {stream_version, global_position, created_at}}
-           end)}
+      case Postgrex.query(conn, sql, [stream_id], timeout: @position_lookup_timeout_ms) do
+        {:ok, %{rows: []}} ->
+          {:ok, nil}
+
+        {:ok, %{rows: [row]}} ->
+          {_storage_id, recorded, _content_event, global_position} = recorded_event_from_row(row)
+          {:ok, from_recorded_event(recorded, global_position)}
 
         {:error, reason} ->
-          {:error, {:event_readback_failed, reason}}
+          {:error, {:head_read_failed, reason}}
       end
     end
+  rescue
+    error -> {:error, {:head_read_failed, error}}
+  catch
+    :exit, reason -> {:error, {:head_read_failed, reason}}
+  end
+
+  defp recorded_event_from_row([
+         storage_id,
+         stream_version,
+         global_position,
+         stream_uuid,
+         event_type,
+         correlation_id,
+         causation_id,
+         data,
+         metadata,
+         created_at
+       ]) do
+    serializer = EventStore.Config.lookup(Store, :serializer)
+
+    raw_recorded = %EventStore.RecordedEvent{
+      event_number: stream_version,
+      event_id: storage_id,
+      stream_uuid: stream_uuid,
+      stream_version: stream_version,
+      correlation_id: blank_to_nil(correlation_id),
+      causation_id: blank_to_nil(causation_id),
+      event_type: event_type,
+      data: data,
+      metadata: metadata,
+      created_at: normalize_created_at(created_at)
+    }
+
+    recorded = EventStore.RecordedEvent.deserialize(raw_recorded, serializer)
+
+    content_recorded = %EventStore.RecordedEvent{
+      recorded
+      | data: serializer.deserialize(data, []),
+        metadata: serializer.deserialize(metadata, [])
+    }
+
+    content_event = from_recorded_event(content_recorded, global_position)
+
+    {storage_id, recorded, content_event, global_position}
+  end
+
+  defp secure_equal?(left, right)
+       when is_binary(left) and is_binary(right) and byte_size(left) == byte_size(right),
+       do: :crypto.hash_equals(left, right)
+
+  defp secure_equal?(_left, _right), do: false
+
+  defp sanitize_submitted_event(%Event{} = event) do
+    %Event{event | metadata: Map.drop(event.metadata || %{}, @reserved_input_metadata_keys)}
   end
 
   defp lookup_global_positions(storage_ids) do
@@ -358,6 +657,37 @@ defmodule Arbor.Persistence.Ecto.EventLog do
   defp quote_identifier(identifier) when is_binary(identifier) do
     ~s("#{String.replace(identifier, "\"", "\"\"")}")
   end
+
+  defp deterministic_storage_id(event_id) do
+    hex =
+      :crypto.hash(:sha256, event_id)
+      |> binary_part(0, 16)
+      |> Base.encode16(case: :lower)
+
+    binary_part(hex, 0, 8) <>
+      "-" <>
+      binary_part(hex, 8, 4) <>
+      "-" <>
+      binary_part(hex, 12, 4) <>
+      "-" <>
+      binary_part(hex, 16, 4) <>
+      "-" <> binary_part(hex, 20, 12)
+  end
+
+  defp encode_timestamp(nil), do: nil
+  defp encode_timestamp(%DateTime{} = timestamp), do: DateTime.to_iso8601(timestamp)
+
+  defp decode_timestamp(nil, fallback), do: normalize_created_at(fallback)
+
+  defp decode_timestamp(timestamp, fallback) when is_binary(timestamp) do
+    case DateTime.from_iso8601(timestamp) do
+      {:ok, parsed, _offset} -> parsed
+      _invalid -> normalize_created_at(fallback)
+    end
+  end
+
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(value), do: value
 
   defp normalize_created_at(%DateTime{} = created_at), do: created_at
 

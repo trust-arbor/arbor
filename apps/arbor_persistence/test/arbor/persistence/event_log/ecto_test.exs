@@ -106,7 +106,10 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
       assert {:ok, [_]} = EventLog.append("guarded", event, repo: Repo, expected_version: 0)
 
       assert {:error, :version_conflict} =
-               EventLog.append("guarded", event, repo: Repo, expected_version: 0)
+               EventLog.append("guarded", Event.new("guarded", "duplicate", %{}),
+                 repo: Repo,
+                 expected_version: 0
+               )
 
       assert {:ok, %Event{timestamp: ^future}} =
                EventLog.read_stream_head("guarded", repo: Repo)
@@ -127,7 +130,7 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
                EventLog.read_stream_head("guarded", repo: Repo, max_current_age_ms: 0)
 
       assert {:error, :deadline_exceeded} =
-               EventLog.append("guarded", terminal,
+               EventLog.append("guarded", Event.new("guarded", "expired", %{}),
                  repo: Repo,
                  expected_version: 2,
                  max_current_age_ms: 0
@@ -182,6 +185,48 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
                )
 
       assert {:ok, [%Event{}, %Event{}]} = EventLog.read_stream("legacy", repo: Repo)
+    end
+
+    test "same exact append reconciles idempotently and changed content conflicts" do
+      event = Event.new("idempotent", "created", %{value: 1})
+      assert {:ok, [first]} = EventLog.append("idempotent", event, repo: Repo)
+      assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation("idempotent", [event])
+
+      assert {:ok, {:committed, [reconciled]}} =
+               EventLog.reconcile_append(operation, repo: Repo)
+
+      assert reconciled.id == first.id
+      assert {:ok, [retried]} = EventLog.append("idempotent", event, repo: Repo)
+      assert retried.id == first.id
+      assert retried.global_position == first.global_position
+
+      changed = %Event{event | data: %{value: 2}}
+
+      assert {:error, :event_identity_conflict} =
+               EventLog.append("idempotent", changed, repo: Repo)
+
+      assert {:ok, 1} = EventLog.stream_version("idempotent", repo: Repo)
+    end
+
+    test "stream and global position exhaustion are controlled before encoding" do
+      insert_positioned_event!("stream-full", 2_147_483_647, 1)
+
+      assert {:error, :stream_position_exhausted} =
+               EventLog.append(
+                 "stream-full",
+                 Event.new("stream-full", "must-not-encode", %{}),
+                 repo: Repo
+               )
+
+      Repo.delete_all(Arbor.Persistence.Schemas.Event)
+      insert_positioned_event!("global-seed", 1, 9_223_372_036_854_775_807)
+
+      assert {:error, :global_position_exhausted} =
+               EventLog.append(
+                 "global-full",
+                 Event.new("global-full", "must-not-encode", %{}),
+                 repo: Repo
+               )
     end
   end
 
@@ -332,5 +377,19 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
 
       assert {:ok, 3} = EventLog.event_count(repo: Repo)
     end
+  end
+
+  defp insert_positioned_event!(stream_id, event_number, global_position) do
+    event =
+      Event.new(stream_id, "seed", %{},
+        event_number: event_number,
+        global_position: global_position
+      )
+
+    %Arbor.Persistence.Schemas.Event{}
+    |> Arbor.Persistence.Schemas.Event.changeset(
+      Arbor.Persistence.Schemas.Event.from_event(event)
+    )
+    |> Repo.insert!()
   end
 end

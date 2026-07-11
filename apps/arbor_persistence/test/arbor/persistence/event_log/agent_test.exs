@@ -2,6 +2,7 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
+  alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.Agent, as: ELAgent
 
@@ -48,17 +49,20 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
       assert {:ok, [_]} = ELAgent.append("guarded", event, name: name, expected_version: 0)
 
       assert {:error, :version_conflict} =
-               ELAgent.append("guarded", event, name: name, expected_version: 0)
+               ELAgent.append("guarded", Event.new("guarded", "duplicate", %{}),
+                 name: name,
+                 expected_version: 0
+               )
 
       assert {:ok, [_]} =
-               ELAgent.append("guarded", event,
+               ELAgent.append("guarded", Event.new("guarded", "continued", %{}),
                  name: name,
                  expected_version: 1,
                  max_current_age_ms: 60_000
                )
 
       assert {:error, :deadline_exceeded} =
-               ELAgent.append("guarded", event,
+               ELAgent.append("guarded", Event.new("guarded", "expired", %{}),
                  name: name,
                  expected_version: 2,
                  max_current_age_ms: 0
@@ -87,15 +91,19 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
           )
         end)
 
-      try do
-        assert {:error, :operation_timeout} = Task.await(task, 1_000)
-      after
-        :ok = :sys.resume(name)
-      end
+      result =
+        try do
+          Task.await(task, 1_000)
+        after
+          :ok = :sys.resume(name)
+        end
+
+      assert {:error, {:append_indeterminate, operation}} = result
 
       # This call is handled after the expired append already queued in the mailbox.
       assert {:ok, 0} = ELAgent.stream_version(stream_id, name: name)
       refute ELAgent.stream_exists?(stream_id, name: name)
+      assert {:ok, :absent} = ELAgent.reconcile_append(operation, name: name)
     end
 
     test "security regression: an expired post-decision candidate preserves the original state" do
@@ -115,7 +123,7 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
 
       event = Event.new("post-decision-timeout", "must-not-commit", %{})
 
-      assert {:error, :operation_timeout} =
+      assert {:error, {:append_indeterminate, operation}} =
                ELAgent.append("post-decision-timeout", event,
                  name: name,
                  expected_version: 0,
@@ -125,6 +133,7 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
       assert_receive :candidate_built
       assert {:ok, 0} = ELAgent.stream_version("post-decision-timeout", name: name)
       refute ELAgent.stream_exists?("post-decision-timeout", name: name)
+      assert {:ok, :absent} = ELAgent.reconcile_append(operation, name: name)
     end
 
     test "normalizes an agent killed during transport instead of exiting the caller" do
@@ -161,6 +170,66 @@ defmodule Arbor.Persistence.EventLog.AgentTest do
       assert {:error, :invalid_precondition} =
                ELAgent.append("missing", event, name: missing_name, call_timeout_ms: :infinity)
     end
+
+    test "forged operations and improper reconcile options are rejected before Agent access", %{
+      name: name
+    } do
+      event = Event.new("forged", "created", %{value: 1})
+
+      assert {:ok, %AppendOperation{} = operation} =
+               Arbor.Persistence.EventLog.build_operation("forged", [event])
+
+      Enum.each(forged_operations(operation), fn forged ->
+        assert {:error, :invalid_append_operation} =
+                 ELAgent.reconcile_append(forged, name: name)
+      end)
+
+      assert {:error, :invalid_precondition} =
+               ELAgent.reconcile_append(operation, [{:name, name} | :improper])
+
+      assert Process.alive?(Process.whereis(name))
+    end
+
+    test "same exact append is idempotent and changed content under one ID conflicts", %{
+      name: name
+    } do
+      event = Event.new("idempotent", "created", %{value: 1})
+      assert {:ok, [first]} = ELAgent.append("idempotent", event, name: name)
+      assert {:ok, [retried]} = ELAgent.append("idempotent", event, name: name)
+      assert retried == first
+
+      changed = %Event{event | data: %{value: 2}}
+
+      assert {:error, :event_identity_conflict} =
+               ELAgent.append("idempotent", changed, name: name)
+
+      assert {:ok, 1} = ELAgent.stream_version("idempotent", name: name)
+    end
+
+    test "position exhaustion returns controlled errors before mutation", %{name: name} do
+      :sys.replace_state(name, fn state ->
+        %{state | versions: %{"full-stream" => 2_147_483_647}}
+      end)
+
+      assert {:error, :stream_position_exhausted} =
+               ELAgent.append("full-stream", Event.new("full-stream", "event", %{}), name: name)
+
+      :sys.replace_state(name, fn state ->
+        %{state | versions: %{}, global_position: 9_223_372_036_854_775_807}
+      end)
+
+      assert {:error, :global_position_exhausted} =
+               ELAgent.append("global-full", Event.new("global-full", "event", %{}), name: name)
+    end
+  end
+
+  defp forged_operations(%AppendOperation{} = operation) do
+    oversized_ids = Enum.map(1..1_001, &"evt_forged_#{&1}")
+
+    [
+      %AppendOperation{operation | event_ids: ["evt_forged" | :improper]},
+      %AppendOperation{operation | event_ids: oversized_ids, fingerprints: %{}}
+    ]
   end
 
   describe "read_stream/2" do

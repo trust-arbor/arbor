@@ -5,9 +5,10 @@ defmodule Arbor.Persistence.EventLog.Agent do
   Lightweight alternative to ETS for small datasets or testing.
   Does NOT support subscriptions (subscribe/3 returns {:error, :not_supported}).
 
-  Append calls accept `:call_timeout_ms` in `1..60_000` (default `5_000`).
-  Candidate state is committed only before the caller-owned operation deadline;
-  the transport gets a separate reply window.
+  Append calls accept `:append_timeout_ms` in `1..60_000` (default `5_000`;
+  `:call_timeout_ms` remains a compatibility alias). Candidate state is committed
+  only after the server checks the caller-owned absolute operation deadline. A
+  caller-side timeout after dispatch returns a reconcilable indeterminate result.
 
       children = [
         {Arbor.Persistence.EventLog.Agent, name: :my_event_log}
@@ -16,24 +17,35 @@ defmodule Arbor.Persistence.EventLog.Agent do
 
   @behaviour Arbor.Persistence.EventLog
 
+  alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence.{Event, EventLog}
-
-  @default_append_call_timeout_ms 5_000
-  @max_append_call_timeout_ms 60_000
-  @append_reply_slack_ms 100
 
   # --- Client API ---
 
   @impl Arbor.Persistence.EventLog
   def append(stream_id, events, opts) do
-    with {:ok, events, preconditions} <- EventLog.validate_append(stream_id, events, opts),
-         {:ok, call_timeout_ms} <- append_call_timeout(opts) do
-      name = Keyword.fetch!(opts, :name)
-      deadline_mono = System.monotonic_time(:millisecond) + call_timeout_ms
-
-      safe_get_and_update(name, call_timeout_ms + @append_reply_slack_ms, fn state ->
-        append_before_deadline(state, stream_id, events, preconditions, deadline_mono)
+    with {:ok, events, preconditions, operation, deadline_mono} <-
+           EventLog.prepare_append(stream_id, events, opts),
+         {:ok, name} <- fetch_name(opts) do
+      safe_get_and_update(name, deadline_mono, operation, fn state ->
+        append_before_deadline(
+          state,
+          stream_id,
+          events,
+          preconditions,
+          operation,
+          deadline_mono
+        )
       end)
+    end
+  end
+
+  @impl Arbor.Persistence.EventLog
+  def reconcile_append(operation, opts) do
+    with {:ok, operation, normalized_opts, deadline_mono} <-
+           EventLog.prepare_reconcile(operation, opts),
+         {:ok, name} <- fetch_name(normalized_opts) do
+      reconcile_from_agent(name, operation, deadline_mono)
     end
   end
 
@@ -120,6 +132,7 @@ defmodule Arbor.Persistence.EventLog.Agent do
           global: [],
           versions: %{},
           global_position: 0,
+          event_index: %{},
           head_inserted_mono: %{},
           append_candidate_hook: candidate_hook
         }
@@ -169,31 +182,53 @@ defmodule Arbor.Persistence.EventLog.Agent do
     streams =
       Map.update(state.streams, stream_id, persisted_reversed, &(persisted_reversed ++ &1))
 
+    event_index =
+      Enum.reduce(persisted, state.event_index, fn event, index ->
+        Map.put(index, event.id, event)
+      end)
+
     state = %{
       state
       | streams: streams,
         global: persisted_reversed ++ state.global,
         versions: Map.put(state.versions, stream_id, final_version),
-        global_position: final_global_pos
+        global_position: final_global_pos,
+        event_index: event_index
     }
 
     {persisted, state}
   end
 
-  defp append_before_deadline(state, stream_id, events, preconditions, deadline_mono) do
+  defp append_before_deadline(
+         state,
+         stream_id,
+         events,
+         preconditions,
+         operation,
+         deadline_mono
+       ) do
     processed_at = System.monotonic_time(:millisecond)
 
     if processed_at >= deadline_mono do
       {{:error, :operation_timeout}, state}
     else
-      append_after_preconditions(
-        state,
-        stream_id,
-        events,
-        preconditions,
-        processed_at,
-        deadline_mono
-      )
+      case reconcile_state(operation, state) do
+        {:ok, {:committed, persisted}} ->
+          {{:ok, persisted}, state}
+
+        {:ok, :absent} ->
+          append_after_preconditions(
+            state,
+            stream_id,
+            events,
+            preconditions,
+            processed_at,
+            deadline_mono
+          )
+
+        {:error, reason} ->
+          {{:error, reason}, state}
+      end
     end
   end
 
@@ -206,21 +241,33 @@ defmodule Arbor.Persistence.EventLog.Agent do
          deadline_mono
        ) do
     case check_preconditions(stream_id, preconditions, processed_at, state) do
-      :ok -> commit_candidate_before_deadline(state, stream_id, events, deadline_mono)
-      {:error, reason} -> {{:error, reason}, state}
+      :ok ->
+        commit_candidate_before_deadline(state, stream_id, events, deadline_mono)
+
+      {:error, reason} ->
+        {{:error, reason}, state}
     end
   end
 
   defp commit_candidate_before_deadline(state, stream_id, events, deadline_mono) do
-    {persisted, candidate} = do_append(stream_id, events, state)
-    run_candidate_hook(state)
-    completed_at = System.monotonic_time(:millisecond)
+    with :ok <-
+           EventLog.ensure_position_capacity(
+             Map.get(state.versions, stream_id, 0),
+             state.global_position,
+             length(events)
+           ) do
+      {persisted, candidate} = do_append(stream_id, events, state)
+      run_candidate_hook(state)
+      completed_at = System.monotonic_time(:millisecond)
 
-    if completed_at >= deadline_mono do
-      {{:error, :operation_timeout}, state}
+      if completed_at >= deadline_mono do
+        {{:error, :operation_timeout}, state}
+      else
+        candidate = put_head_freshness(candidate, stream_id, completed_at)
+        {{:ok, persisted}, candidate}
+      end
     else
-      candidate = put_head_freshness(candidate, stream_id, completed_at)
-      {{:ok, persisted}, candidate}
+      {:error, reason} -> {{:error, reason}, state}
     end
   end
 
@@ -249,24 +296,45 @@ defmodule Arbor.Persistence.EventLog.Agent do
     end
   end
 
-  defp append_call_timeout(opts) do
-    case Keyword.get(opts, :call_timeout_ms, @default_append_call_timeout_ms) do
-      timeout
-      when is_integer(timeout) and timeout > 0 and timeout <= @max_append_call_timeout_ms ->
-        {:ok, timeout}
-
-      _invalid ->
-        {:error, :invalid_precondition}
+  defp safe_get_and_update(name, deadline_mono, operation, fun) do
+    with {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
+      Agent.get_and_update(name, fun, timeout)
     end
-  end
-
-  defp safe_get_and_update(name, timeout, fun) do
-    Agent.get_and_update(name, fun, timeout)
   catch
     :exit, reason ->
       if exit_reason_contains?(reason, :timeout),
-        do: {:error, :operation_timeout},
+        do: EventLog.indeterminate(operation),
         else: {:error, :backend_unavailable}
+  end
+
+  defp reconcile_from_agent(name, operation, deadline_mono) do
+    with {:ok, timeout} <- EventLog.remaining_timeout(deadline_mono) do
+      Agent.get(name, &reconcile_state(operation, &1), timeout)
+    else
+      {:error, :operation_timeout} -> EventLog.indeterminate(operation)
+    end
+  catch
+    :exit, _reason -> EventLog.indeterminate(operation)
+  end
+
+  defp fetch_name(opts) do
+    case Keyword.fetch(opts, :name) do
+      {:ok, name} -> {:ok, name}
+      :error -> {:error, :invalid_precondition}
+    end
+  end
+
+  defp reconcile_state(%AppendOperation{} = operation, state) do
+    events =
+      operation.event_ids
+      |> Enum.flat_map(fn event_id ->
+        case Map.fetch(state.event_index, event_id) do
+          {:ok, event} -> [event]
+          :error -> []
+        end
+      end)
+
+    EventLog.reconcile_events(operation, events)
   end
 
   defp put_head_freshness(state, stream_id, committed_mono) do

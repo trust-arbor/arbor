@@ -54,6 +54,9 @@ defmodule Arbor.Contracts.API.Persistence do
   @typedoc "An immutable event log entry."
   @type event :: map()
 
+  @typedoc "Stable exact-ID identity for reconciling an EventLog append."
+  @type append_operation :: Arbor.Contracts.Persistence.AppendOperation.t()
+
   @typedoc "Name of a field to aggregate over."
   @type field_name :: atom()
 
@@ -193,6 +196,23 @@ defmodule Arbor.Contracts.API.Persistence do
             ) :: {:ok, [event()]} | {:error, term()}
 
   @doc """
+  Reconcile an indeterminate append using its exact submitted event identity.
+
+  A committed result includes the exact persisted events in submission order;
+  `:absent` proves no submitted event committed. Backends fail closed when only a
+  partial or unavailable observation is possible.
+  """
+  @callback reconcile_event_append_using_backend(
+              store_name(),
+              backend(),
+              append_operation(),
+              opts()
+            ) ::
+              {:ok, {:committed, [event()]}}
+              | {:ok, :absent}
+              | {:error, :event_identity_conflict | term()}
+
+  @doc """
   Read all events from a specific stream using the specified backend.
 
   Returns events ordered by event number within the stream.
@@ -296,6 +316,7 @@ defmodule Arbor.Contracts.API.Persistence do
     aggregate_field_by_filter_using_backend: 6,
     # EventLog operations
     append_events_to_stream_using_backend: 5,
+    reconcile_event_append_using_backend: 4,
     read_events_from_stream_using_backend: 4,
     read_current_stream_head_using_backend: 4,
     read_all_events_using_backend: 3,

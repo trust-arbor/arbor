@@ -2,6 +2,7 @@ defmodule Arbor.PersistenceTest do
   use ExUnit.Case, async: true
   @moduletag :fast
 
+  alias Arbor.Contracts.Persistence.AppendOperation
   alias Arbor.Persistence
   alias Arbor.Persistence.{Event, Filter, Record}
   alias Arbor.Persistence.EventLog
@@ -87,10 +88,56 @@ defmodule Arbor.PersistenceTest do
                Persistence.append(name, backend, "s1", event, expected_version: 0)
 
       assert {:error, :version_conflict} =
-               Persistence.append(name, backend, "s1", event, expected_version: 0)
+               Persistence.append(
+                 name,
+                 backend,
+                 "s1",
+                 Event.new("s1", "duplicate", %{}),
+                 expected_version: 0
+               )
 
       assert {:ok, %Event{event_number: 1}} =
                Persistence.read_stream_head(name, backend, "s1")
+    end
+
+    test "facade rejects improper append input and forged reconciliation operations", %{
+      name: name,
+      backend: backend
+    } do
+      event = Event.new("facade-bounds", "created", %{value: 1})
+
+      assert {:error, :invalid_events} =
+               Persistence.append(name, backend, "facade-bounds", [event | :improper])
+
+      assert {:error, :invalid_precondition} =
+               Persistence.append(
+                 name,
+                 backend,
+                 "facade-bounds",
+                 event,
+                 [{:expected_version, 0} | :improper]
+               )
+
+      assert {:ok, %AppendOperation{} = operation} =
+               Arbor.Persistence.EventLog.build_operation("facade-bounds", [event])
+
+      oversized_ids = Enum.map(1..1_001, &"evt_forged_#{&1}")
+
+      for forged <- [
+            %AppendOperation{operation | event_ids: [event.id | :improper]},
+            %AppendOperation{operation | event_ids: oversized_ids, fingerprints: %{}}
+          ] do
+        assert {:error, :invalid_append_operation} =
+                 Persistence.reconcile_append(name, backend, forged)
+      end
+
+      assert {:error, :invalid_precondition} =
+               Persistence.reconcile_append(
+                 name,
+                 backend,
+                 operation,
+                 [{:append_timeout_ms, 10} | :improper]
+               )
     end
 
     test "metadata-only nonempty heads are unavailable through the facade", %{

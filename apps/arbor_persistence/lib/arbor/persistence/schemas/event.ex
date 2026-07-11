@@ -53,6 +53,8 @@ defmodule Arbor.Persistence.Schemas.Event do
     |> unique_constraint([:stream_id, :event_number],
       name: "events_stream_id_event_number_index"
     )
+    |> unique_constraint(:global_position, name: "events_global_position_index")
+    |> unique_constraint(:id, name: "events_pkey")
   end
 
   @doc """

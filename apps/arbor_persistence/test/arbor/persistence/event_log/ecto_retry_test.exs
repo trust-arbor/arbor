@@ -16,6 +16,8 @@ defmodule Arbor.Persistence.EventLog.EctoRetryTest do
   # calls it), so insert! executes in THIS process and the attempt counter lives
   # in the process dictionary.
 
+  alias Arbor.Contracts.Persistence.AppendOperation
+
   # Conflicts once, then succeeds — models a concurrent append that lost the race
   # on the first try and picks up the winner's committed version on retry.
   defmodule ConflictOnceRepo do
@@ -92,11 +94,10 @@ defmodule Arbor.Persistence.EventLog.EctoRetryTest do
   test "a persistent event_number conflict surfaces after bounded retries (no infinite loop)" do
     event = Event.new("stream-x", "test.evt", %{n: 1})
 
-    assert_raise Ecto.ConstraintError, fn ->
-      EventLog.append("stream-x", event, repo: AlwaysConflictRepo)
-    end
+    assert {:error, {:append_conflict, _operation_id}} =
+             EventLog.append("stream-x", event, repo: AlwaysConflictRepo)
 
-    # @max_append_attempts = 5: tried five times then re-raised.
+    # @max_append_attempts = 5: tried five times then returned a stable conflict.
     assert Process.get(:insert_attempts) == 5
   end
 
@@ -117,10 +118,31 @@ defmodule Arbor.Persistence.EventLog.EctoRetryTest do
     # An optimistic-concurrency caller must observe the conflict, not have it
     # silently resolved. expected_version: 0 matches our stub's one/1 -> 0, so
     # the version check passes and we reach insert!, which conflicts once.
-    assert_raise Ecto.ConstraintError, fn ->
-      EventLog.append("stream-x", event, repo: ConflictOnceRepo, expected_version: 0)
-    end
+    assert {:error, :version_conflict} =
+             EventLog.append("stream-x", event, repo: ConflictOnceRepo, expected_version: 0)
 
     assert Process.get(:insert_attempts) == 1
+  end
+
+  test "forged operations and improper options are rejected before Ecto query construction" do
+    event = Event.new("forged", "created", %{value: 1})
+
+    assert {:ok, %AppendOperation{} = operation} =
+             Arbor.Persistence.EventLog.build_operation("forged", [event])
+
+    oversized_ids = Enum.map(1..1_001, &"evt_forged_#{&1}")
+
+    forged_operations = [
+      %AppendOperation{operation | event_ids: ["evt_forged" | :improper]},
+      %AppendOperation{operation | event_ids: oversized_ids, fingerprints: %{}}
+    ]
+
+    Enum.each(forged_operations, fn forged ->
+      assert {:error, :invalid_append_operation} =
+               EventLog.reconcile_append(forged, repo: OtherConflictRepo)
+    end)
+
+    assert {:error, :invalid_precondition} =
+             EventLog.reconcile_append(operation, [{:repo, OtherConflictRepo} | :improper])
   end
 end

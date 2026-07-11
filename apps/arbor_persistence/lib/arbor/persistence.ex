@@ -24,8 +24,7 @@ defmodule Arbor.Persistence do
 
   @behaviour Arbor.Contracts.API.Persistence
 
-  alias Arbor.Contracts.Persistence.Filter
-  alias Arbor.Contracts.Persistence.Record
+  alias Arbor.Contracts.Persistence.{AppendOperation, Filter, Record}
   alias Arbor.Persistence.{Event, EventLog}
   alias Arbor.Persistence.Repo
 
@@ -515,13 +514,27 @@ defmodule Arbor.Persistence do
 
   @doc "Append events to a stream."
   @spec append(atom(), module(), String.t(), [Event.t()] | Event.t(), keyword()) ::
-          {:ok, [Event.t()]} | {:error, term()}
+          EventLog.append_result()
   def append(name, backend, stream_id, events, opts \\ []) do
-    backend_opts = Keyword.put(opts, :name, name)
-
-    with {:ok, events, _preconditions} <-
+    with {:ok, normalized_opts} <- EventLog.normalize_opts(opts),
+         backend_opts = Keyword.put(normalized_opts, :name, name),
+         {:ok, events, _preconditions} <-
            EventLog.validate_append(stream_id, events, backend_opts) do
       backend.append(stream_id, events, backend_opts)
+    end
+  end
+
+  @doc "Reconcile an indeterminate append by exact event identity."
+  @spec reconcile_append(atom(), module(), AppendOperation.t(), keyword()) ::
+          EventLog.append_reconciliation()
+  def reconcile_append(name, backend, operation, opts \\ []) do
+    with {:ok, operation} <- EventLog.validate_operation(operation),
+         {:ok, normalized_opts} <- EventLog.normalize_opts(opts) do
+      if function_exported?(backend, :reconcile_append, 2) do
+        backend.reconcile_append(operation, Keyword.put(normalized_opts, :name, name))
+      else
+        {:error, :reconciliation_not_supported}
+      end
     end
   end
 
@@ -625,6 +638,10 @@ defmodule Arbor.Persistence do
   @impl Arbor.Contracts.API.Persistence
   def append_events_to_stream_using_backend(name, backend, stream_id, events, opts),
     do: append(name, backend, stream_id, events, opts)
+
+  @impl Arbor.Contracts.API.Persistence
+  def reconcile_event_append_using_backend(name, backend, operation, opts),
+    do: reconcile_append(name, backend, operation, opts)
 
   @impl Arbor.Contracts.API.Persistence
   def read_events_from_stream_using_backend(name, backend, stream_id, opts),

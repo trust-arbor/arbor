@@ -32,12 +32,19 @@ defmodule Arbor.Persistence.EventLog.EctoConcurrentAppendTest do
   alias Arbor.Persistence.Event
   alias Arbor.Persistence.EventLog.Ecto, as: EventLog
   alias Arbor.Persistence.Repo
+  alias Arbor.Persistence.Test.PostgresDelayProxy
   alias Ecto.Adapters.SQL.Sandbox
 
   @moduletag :integration
   @moduletag :database
 
   defmodule SingleConnectionRepo do
+    use Ecto.Repo,
+      otp_app: :arbor_persistence,
+      adapter: Ecto.Adapters.Postgres
+  end
+
+  defmodule DelayedCommitRepo do
     use Ecto.Repo,
       otp_app: :arbor_persistence,
       adapter: Ecto.Adapters.Postgres
@@ -64,7 +71,22 @@ defmodule Arbor.Persistence.EventLog.EctoConcurrentAppendTest do
         |> Keyword.put(:pool_size, 1)
 
       start_supervised!({SingleConnectionRepo, single_connection_config})
-      {:ok, repo_pid: pid}
+
+      proxy =
+        start_supervised!(
+          {PostgresDelayProxy,
+           upstream_host: Keyword.get(Repo.config(), :hostname, "localhost"),
+           upstream_port: Keyword.get(Repo.config(), :port, 5432)}
+        )
+
+      delayed_repo_config =
+        single_connection_config
+        |> Keyword.drop([:socket, :socket_dir])
+        |> Keyword.put(:hostname, "127.0.0.1")
+        |> Keyword.put(:port, PostgresDelayProxy.port(proxy))
+
+      start_supervised!({DelayedCommitRepo, delayed_repo_config})
+      {:ok, repo_pid: pid, commit_proxy: proxy}
     else
       {:skip, "concurrent-append race is Postgres-only (advisory lock + real pool)"}
     end
@@ -217,17 +239,21 @@ defmodule Arbor.Persistence.EventLog.EctoConcurrentAppendTest do
       end)
 
     assert_receive :postgres_append_lock_acquired, 1_000
+    event = Event.new("postgres-deadline", "must-not-commit", %{})
+
+    assert {:ok, operation} =
+             Arbor.Persistence.EventLog.build_operation("postgres-deadline", [event])
 
     try do
       started_at = System.monotonic_time(:millisecond)
 
-      assert {:error, :operation_timeout} =
-               EventLog.append(
-                 "postgres-deadline",
-                 Event.new("postgres-deadline", "must-not-commit", %{}),
-                 repo: Repo,
-                 append_timeout_ms: 40
-               )
+      assert EventLog.append("postgres-deadline", event,
+               repo: Repo,
+               append_timeout_ms: 40
+             ) in [
+               {:error, :operation_timeout},
+               {:error, {:append_indeterminate, operation}}
+             ]
 
       elapsed_ms = System.monotonic_time(:millisecond) - started_at
       assert elapsed_ms < 250
@@ -238,6 +264,7 @@ defmodule Arbor.Persistence.EventLog.EctoConcurrentAppendTest do
     assert {:ok, {:ok, :ok}} = Task.yield(locker, 1_000)
     Process.sleep(75)
     assert {:ok, 0} = EventLog.stream_version("postgres-deadline", repo: Repo)
+    assert {:ok, :absent} = EventLog.reconcile_append(operation, repo: Repo)
   end
 
   test "pool checkout shares the append deadline and cannot leave work behind" do
@@ -260,23 +287,34 @@ defmodule Arbor.Persistence.EventLog.EctoConcurrentAppendTest do
       end)
 
     assert_receive :postgres_pool_slot_held, 1_000
+    event = Event.new("postgres-checkout-deadline", "must-not-commit", %{})
 
-    try do
-      started_at = System.monotonic_time(:millisecond)
+    assert {:ok, operation} =
+             Arbor.Persistence.EventLog.build_operation("postgres-checkout-deadline", [event])
 
-      assert {:error, :operation_timeout} =
-               EventLog.append(
-                 "postgres-checkout-deadline",
-                 Event.new("postgres-checkout-deadline", "must-not-commit", %{}),
-                 repo: SingleConnectionRepo,
-                 append_timeout_ms: 40
-               )
+    {result, elapsed_ms} =
+      try do
+        started_at = System.monotonic_time(:millisecond)
 
-      elapsed_ms = System.monotonic_time(:millisecond) - started_at
-      assert elapsed_ms < 250
-    after
-      send(holder.pid, :release_postgres_pool_slot)
-    end
+        result =
+          EventLog.append(
+            "postgres-checkout-deadline",
+            event,
+            repo: SingleConnectionRepo,
+            append_timeout_ms: 40
+          )
+
+        {result, System.monotonic_time(:millisecond) - started_at}
+      after
+        send(holder.pid, :release_postgres_pool_slot)
+      end
+
+    assert result in [
+             {:error, :operation_timeout},
+             {:error, {:append_indeterminate, operation}}
+           ]
+
+    assert elapsed_ms < 250
 
     assert {:ok, {:ok, :ok}} = Task.yield(holder, 1_000)
 
@@ -284,5 +322,37 @@ defmodule Arbor.Persistence.EventLog.EctoConcurrentAppendTest do
 
     assert {:ok, 0} =
              EventLog.stream_version("postgres-checkout-deadline", repo: SingleConnectionRepo)
+
+    assert {:ok, :absent} = EventLog.reconcile_append(operation, repo: Repo)
+  end
+
+  test "delayed COMMIT acknowledgement returns a reconcilable indeterminate outcome", %{
+    commit_proxy: proxy
+  } do
+    stream_id = "postgres-delayed-commit"
+    event = Event.new(stream_id, "committed-before-reply", %{value: 1})
+    :ok = PostgresDelayProxy.delay_next_commit(proxy, self(), 300)
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, {:append_indeterminate, operation}} =
+             EventLog.append(stream_id, event,
+               repo: DelayedCommitRepo,
+               append_timeout_ms: 75
+             )
+
+    elapsed_ms = System.monotonic_time(:millisecond) - started_at
+    assert elapsed_ms < 250
+    assert_receive :postgres_proxy_delaying_commit_reply, 1_000
+
+    assert {:ok, {:committed, [%Event{id: committed_id, data: %{"value" => 1}}]}} =
+             EventLog.reconcile_append(operation, repo: Repo)
+
+    assert committed_id == event.id
+
+    assert {:ok, [%Event{id: retried_id, global_position: 1}]} =
+             EventLog.append(stream_id, event, repo: Repo)
+
+    assert retried_id == event.id
+    assert {:ok, 1} = EventLog.stream_version(stream_id, repo: Repo)
   end
 end

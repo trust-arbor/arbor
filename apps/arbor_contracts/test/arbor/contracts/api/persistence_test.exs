@@ -10,4 +10,12 @@ defmodule Arbor.Contracts.API.PersistenceTest do
              :optional_callbacks
            )
   end
+
+  test "append reconciliation is an optional facade callback" do
+    assert {:reconcile_event_append_using_backend, 4} in Persistence.behaviour_info(:callbacks)
+
+    assert {:reconcile_event_append_using_backend, 4} in Persistence.behaviour_info(
+             :optional_callbacks
+           )
+  end
 end
