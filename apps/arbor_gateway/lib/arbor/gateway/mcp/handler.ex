@@ -24,6 +24,18 @@ defmodule Arbor.Gateway.MCP.Handler do
   @server_name "arbor"
   @server_version "0.1.0"
 
+  # Owner-bound ACP lifecycle actions. Managed ACP sessions are tied to the
+  # calling process; standalone arbor_run runs in a short-lived ExMCP handler
+  # that exits after the tool returns, so a "ready" handle is already gone
+  # before a later arbor_run(acp_send_message). Reject at the Gateway boundary
+  # only — DOT pipelines and CodingTaskExecutor still use these actions.
+  @owner_bound_acp_actions ~w(
+    acp_start_session
+    acp_send_message
+    acp_session_status
+    acp_close_session
+  )
+
   # ===========================================================================
   # Direct dispatch API (used by ExMCP.MessageProcessor / HttpPlug)
   # ===========================================================================
@@ -129,7 +141,13 @@ defmodule Arbor.Gateway.MCP.Handler do
       %{
         name: "arbor_run",
         description:
-          "Execute an Arbor action. Use arbor_help first to check the required parameters. The caller agent_id is resolved server-side from the authenticated request (SignedRequest auth) and cannot be passed in tool arguments.",
+          "Execute an Arbor action. Use arbor_help first to check the required parameters. " <>
+            "The caller agent_id is resolved server-side from the authenticated request " <>
+            "(SignedRequest auth) and cannot be passed in tool arguments. " <>
+            "Owner-bound ACP lifecycle actions (acp_start_session, acp_send_message, " <>
+            "acp_session_status, acp_close_session) are not supported via standalone " <>
+            "arbor_run — use arbor_dispatch_task with a structured coding_change plan " <>
+            "for durable delegated work, and arbor_steer_task to steer an active coding task.",
         inputSchema: %{
           type: "object",
           properties: %{
@@ -369,26 +387,25 @@ defmodule Arbor.Gateway.MCP.Handler do
     action_name = args["action"]
     params = args["params"] || %{}
 
-    case authenticated_agent_id() do
-      nil ->
-        {:ok,
-         %{
-           content: [
-             %{
-               type: "text",
-               text:
-                 "Error: arbor_run requires SignedRequest authentication. " <>
-                   "No verified agent_id in the current request context. " <>
-                   "Register an external agent via the dashboard and configure " <>
-                   "the resulting private key in your tool's Arbor settings."
-             }
-           ],
-           isError: true
-         }, state}
+    cond do
+      owner_bound_acp_action?(action_name) ->
+        {:ok, error_content(owner_bound_acp_arbor_run_error(action_name)), state}
 
-      agent_id ->
-        result = run_action(action_name, params, agent_id)
-        {:ok, %{content: [%{type: "text", text: result}]}, state}
+      true ->
+        case authenticated_agent_id() do
+          nil ->
+            {:ok,
+             error_content(
+               "Error: arbor_run requires SignedRequest authentication. " <>
+                 "No verified agent_id in the current request context. " <>
+                 "Register an external agent via the dashboard and configure " <>
+                 "the resulting private key in your tool's Arbor settings."
+             ), state}
+
+          agent_id ->
+            result = run_action(action_name, params, agent_id)
+            {:ok, %{content: [%{type: "text", text: result}]}, state}
+        end
     end
   end
 
@@ -876,6 +893,23 @@ defmodule Arbor.Gateway.MCP.Handler do
           "## Tags: #{try_call(mod, :tags, [], []) |> Enum.join(", ")}"
         ]
 
+        sections =
+          if owner_bound_acp_action?(action_name) do
+            sections ++
+              [
+                "",
+                "## Standalone MCP note",
+                "This action is owner-bound (ACP session lifecycle). " <>
+                  "Standalone `arbor_run` is stateless and will reject it. " <>
+                  "Use `arbor_dispatch_task` with a structured `coding_change` plan " <>
+                  "for durable delegated work, and `arbor_steer_task` to steer an " <>
+                  "active coding task. Reviewed DOT pipelines and CodingTaskExecutor " <>
+                  "still invoke this action in-process."
+              ]
+          else
+            sections
+          end
+
         Enum.join(sections, "\n")
 
       {:error, :not_found} ->
@@ -905,14 +939,34 @@ defmodule Arbor.Gateway.MCP.Handler do
   end
 
   defp run_verified_action(action_name, params, agent_id) do
-    # Check if this is an MCP tool call
-    case ToolBridge.parse_tool_name(action_name) do
-      {:ok, server_name, tool_name} ->
-        run_mcp_tool(server_name, tool_name, params, agent_id)
+    # Defense-in-depth: same Gateway boundary as handle_call_tool("arbor_run").
+    # Prefer the handle_call_tool path (returns isError: true); this path must
+    # never reach action lookup/execution for owner-bound ACP lifecycle names.
+    if owner_bound_acp_action?(action_name) do
+      owner_bound_acp_arbor_run_error(action_name)
+    else
+      # Check if this is an MCP tool call
+      case ToolBridge.parse_tool_name(action_name) do
+        {:ok, server_name, tool_name} ->
+          run_mcp_tool(server_name, tool_name, params, agent_id)
 
-      :error ->
-        run_native_action(action_name, params, agent_id)
+        :error ->
+          run_native_action(action_name, params, agent_id)
+      end
     end
+  end
+
+  defp owner_bound_acp_action?(name) when is_binary(name), do: name in @owner_bound_acp_actions
+  defp owner_bound_acp_action?(_), do: false
+
+  defp owner_bound_acp_arbor_run_error(action_name) do
+    "Error: '#{action_name}' cannot run via standalone arbor_run. " <>
+      "Standalone arbor_run is stateless: each call runs in a short-lived " <>
+      "handler process, and managed ACP sessions are owner-bound — they are " <>
+      "cleaned up when that process exits, so a reusable-looking ready handle " <>
+      "is already gone before a later arbor_run(acp_send_message). " <>
+      "Use arbor_dispatch_task with a structured coding_change plan for durable " <>
+      "delegated work, and arbor_steer_task to steer an active coding task."
   end
 
   defp run_mcp_tool(server_name, tool_name, params, agent_id) do
@@ -1386,16 +1440,21 @@ defmodule Arbor.Gateway.MCP.Handler do
   # Runtime Bridges
   # ===========================================================================
 
-  # arbor_actions is a real in-umbrella dep, so Arbor.Actions is always loaded —
-  # call it directly. The {:ok, _} / {:error, _} wrapper is preserved so the
-  # call sites (list_actions, authorize_and_execute, all_actions) keep failing
+  # arbor_actions is a real in-umbrella dep; default to Arbor.Actions.
+  # :actions_module is injectable for focused Gateway MCP handler tests.
+  # The {:ok, _} / {:error, _} wrapper is preserved so the call sites
+  # (list_actions, authorize_and_execute, all_actions) keep failing
   # CLOSED on any exception/exit (e.g. authorize_and_execute → "## Error").
   defp call_actions(function, args) do
-    {:ok, apply(Arbor.Actions, function, args)}
+    {:ok, apply(actions_module(), function, args)}
   rescue
     e -> {:error, {:exception, Exception.message(e)}}
   catch
     :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp actions_module do
+    Application.get_env(:arbor_gateway, :actions_module, Arbor.Actions)
   end
 
   defp bridge_call(module, function, args) do

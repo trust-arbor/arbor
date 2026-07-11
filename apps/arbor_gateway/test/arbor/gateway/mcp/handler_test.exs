@@ -730,6 +730,188 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   end
 
   # ===========================================================================
+  # Owner-bound ACP lifecycle guard (standalone arbor_run is stateless)
+  # ===========================================================================
+
+  describe "arbor_run owner-bound ACP lifecycle guard" do
+    defmodule TrackingActions do
+      @moduledoc false
+
+      def all_actions do
+        send(self(), {:actions_call, :all_actions, []})
+        []
+      end
+
+      def list_actions do
+        send(self(), {:actions_call, :list_actions, []})
+        %{}
+      end
+
+      def authorize_and_execute(agent_id, mod, params, context) do
+        send(self(), {:actions_call, :authorize_and_execute, [agent_id, mod, params, context]})
+        {:ok, %{tracked: true}}
+      end
+    end
+
+    defmodule AuthTrackingActions do
+      @moduledoc false
+
+      defmodule FakeNativeAction do
+        def name, do: "file_exists"
+      end
+
+      def all_actions do
+        send(self(), {:actions_call, :all_actions, []})
+        [FakeNativeAction]
+      end
+
+      def list_actions do
+        send(self(), {:actions_call, :list_actions, []})
+        %{"file" => [FakeNativeAction]}
+      end
+
+      def authorize_and_execute(agent_id, mod, params, context) do
+        send(self(), {:actions_call, :authorize_and_execute, [agent_id, mod, params, context]})
+        {:ok, %{exists: true}}
+      end
+    end
+
+    @owner_bound_acp_actions ~w(
+      acp_start_session
+      acp_send_message
+      acp_session_status
+      acp_close_session
+    )
+
+    setup do
+      previous = Application.get_env(:arbor_gateway, :actions_module)
+      Application.put_env(:arbor_gateway, :actions_module, TrackingActions)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:arbor_gateway, :actions_module)
+          value -> Application.put_env(:arbor_gateway, :actions_module, value)
+        end
+
+        Process.delete(:arbor_authenticated_agent_id)
+      end)
+
+      :ok
+    end
+
+    test "rejects all four owner-bound ACP actions before action lookup/execution", %{
+      state: state
+    } do
+      Process.put(:arbor_authenticated_agent_id, "test_agent_acp_guard")
+
+      for action <- @owner_bound_acp_actions do
+        {:ok, result, _state} =
+          Handler.handle_call_tool(
+            "arbor_run",
+            %{"action" => action, "params" => %{}},
+            state
+          )
+
+        assert result.isError == true,
+               "Expected isError: true for #{action}, got: #{inspect(result)}"
+
+        assert [%{type: "text", text: text}] = result.content
+        assert text =~ "stateless"
+        assert text =~ "arbor_dispatch_task"
+        assert text =~ "coding_change"
+        assert text =~ "arbor_steer_task"
+        assert text =~ action
+        refute text =~ "## Success"
+      end
+
+      refute_received {:actions_call, :all_actions, _}
+      refute_received {:actions_call, :authorize_and_execute, _}
+    end
+
+    test "rejects owner-bound ACP actions without auth (still MCP error, no action path)", %{
+      state: state
+    } do
+      {:ok, result, _state} =
+        Handler.handle_call_tool(
+          "arbor_run",
+          %{"action" => "acp_start_session", "params" => %{"provider" => "claude"}},
+          state
+        )
+
+      assert result.isError == true
+      assert [%{type: "text", text: text}] = result.content
+      assert text =~ "stateless"
+      assert text =~ "arbor_dispatch_task"
+      refute text =~ "SignedRequest authentication"
+      refute_received {:actions_call, :all_actions, _}
+      refute_received {:actions_call, :authorize_and_execute, _}
+    end
+
+    test "normal native actions still run through authorize_and_execute", %{state: state} do
+      previous = Application.get_env(:arbor_gateway, :actions_module)
+      Application.put_env(:arbor_gateway, :actions_module, AuthTrackingActions)
+
+      try do
+        Process.put(:arbor_authenticated_agent_id, "test_agent_acp_guard")
+
+        {:ok, result, _state} =
+          Handler.handle_call_tool(
+            "arbor_run",
+            %{"action" => "file_exists", "params" => %{"path" => "/tmp"}},
+            state
+          )
+
+        refute Map.get(result, :isError) == true
+        assert [%{type: "text", text: text}] = result.content
+        assert text =~ "Success"
+
+        assert_received {:actions_call, :all_actions, []}
+
+        assert_received {:actions_call, :authorize_and_execute,
+                         [
+                           "test_agent_acp_guard",
+                           AuthTrackingActions.FakeNativeAction,
+                           params,
+                           _context
+                         ]}
+
+        assert params[:path] == "/tmp" or params["path"] == "/tmp"
+      after
+        case previous do
+          nil -> Application.delete_env(:arbor_gateway, :actions_module)
+          value -> Application.put_env(:arbor_gateway, :actions_module, value)
+        end
+      end
+    end
+
+    test "arbor_help still discovers owner-bound ACP actions and annotates standalone note", %{
+      state: state
+    } do
+      # Help must remain truthful (actions still exist); restore real Actions for discovery.
+      previous = Application.get_env(:arbor_gateway, :actions_module)
+      Application.delete_env(:arbor_gateway, :actions_module)
+
+      try do
+        {:ok, %{content: [%{type: "text", text: text}]}, _state} =
+          Handler.handle_call_tool(
+            "arbor_help",
+            %{"action" => "acp_start_session"},
+            state
+          )
+
+        assert text =~ "acp_start_session"
+        assert text =~ "Standalone MCP note" or text =~ "owner-bound"
+        assert text =~ "arbor_dispatch_task"
+      after
+        case previous do
+          nil -> Application.delete_env(:arbor_gateway, :actions_module)
+          value -> Application.put_env(:arbor_gateway, :actions_module, value)
+        end
+      end
+    end
+  end
+
+  # ===========================================================================
   # arbor_status tool
   # ===========================================================================
 
