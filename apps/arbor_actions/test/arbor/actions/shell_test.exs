@@ -87,6 +87,71 @@ defmodule Arbor.Actions.ShellTest do
       assert {:ok, result} = Shell.Execute.run(%{command: "pwd"}, context)
       assert String.contains?(result.stdout, "tmp")
     end
+
+    test "schema declares max_output_bytes and forwards a tight ceiling" do
+      tool = Shell.Execute.to_tool()
+      schema = tool[:parameters_schema] || tool["parameters_schema"] || %{}
+      props = schema[:properties] || schema["properties"] || %{}
+
+      assert Map.has_key?(props, :max_output_bytes) or Map.has_key?(props, "max_output_bytes")
+
+      # Finite producer: enough bytes to cross 128, then exit.
+      burst = ~s{i=0; while [ "$i" -lt 200 ]; do printf "xxxxxxxx"; i=$((i+1)); done}
+
+      assert {:ok, result} =
+               Shell.Execute.run(
+                 %{
+                   command: "sh -c '#{burst}'",
+                   max_output_bytes: 128,
+                   sandbox: :none,
+                   timeout: 5_000
+                 },
+                 %{}
+               )
+
+      assert result.killed == true
+      assert result.timed_out == false
+      assert result.output_limit_exceeded == true
+      assert result.output_truncated == true
+      assert result.exit_code == 137
+      assert byte_size(result.stdout) <= 128
+      assert byte_size(result.stdout) > 0
+      # stderr_to_stdout: retained stream is stdout; stderr result is empty.
+      assert result.stderr == ""
+    end
+
+    test "security regression: adapter clamps max_output_bytes to 16 MiB hard maximum" do
+      # Oversized positive ceiling must be accepted and clamped (not rejected).
+      # A small echo must still succeed under the clamped ceiling.
+      hard_max = 16_777_216
+
+      assert {:ok, result} =
+               Shell.Execute.run(
+                 %{
+                   command: "echo clamp-ok",
+                   max_output_bytes: hard_max * 2,
+                   sandbox: :none,
+                   timeout: 5_000
+                 },
+                 %{}
+               )
+
+      assert result.exit_code == 0
+      assert result.stdout =~ "clamp-ok"
+      assert result.output_limit_exceeded == false
+      assert result.output_truncated == false
+      assert result.killed == false
+    end
+
+    test "returns additive killed/output-limit metadata on normal completion" do
+      assert {:ok, result} = Shell.Execute.run(%{command: "echo meta", sandbox: :none}, %{})
+
+      assert result.exit_code == 0
+      assert result.timed_out == false
+      assert result.killed == false
+      assert result.output_limit_exceeded == false
+      assert result.output_truncated == false
+    end
   end
 
   describe "authorize_command/3" do

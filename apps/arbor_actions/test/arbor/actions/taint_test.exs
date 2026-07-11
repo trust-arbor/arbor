@@ -48,6 +48,8 @@ defmodule Arbor.Actions.TaintTest do
       assert roles.sandbox == :control
       assert roles.env == :data
       assert roles.timeout == :data
+      # Output ceiling governs resource use / termination — control, not data.
+      assert roles.max_output_bytes == :control
     end
 
     test "returns roles from File.Read action" do

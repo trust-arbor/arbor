@@ -23,12 +23,17 @@ defmodule Arbor.Contracts.API.Shell do
   @type sandbox_mode :: :none | :basic | :strict | :container
 
   @type result :: %{
-          exit_code: exit_code(),
-          stdout: String.t(),
-          stderr: String.t(),
-          duration_ms: non_neg_integer(),
-          timed_out: boolean(),
-          killed: boolean()
+          required(:exit_code) => exit_code(),
+          required(:stdout) => String.t(),
+          required(:stderr) => String.t(),
+          required(:duration_ms) => non_neg_integer(),
+          required(:timed_out) => boolean(),
+          required(:killed) => boolean(),
+          # Additive optional metadata — present on sync Executor results; older
+          # callers may omit them. When the retained-output ceiling is hit:
+          # `output_limit_exceeded: true` and `output_truncated: true`.
+          optional(:output_truncated) => boolean(),
+          optional(:output_limit_exceeded) => boolean()
         }
 
   @type execution_status ::
@@ -41,6 +46,11 @@ defmodule Arbor.Contracts.API.Shell do
 
   @type execute_opts :: [
           timeout: non_neg_integer(),
+          # Maximum retained merged-stdout bytes (Executor merges stderr into
+          # stdout; result stderr is empty). Default: 8 MiB (8_388_608). Hard
+          # maximum: 16 MiB (16_777_216) — larger positive values are clamped
+          # down. Invalid/non-positive values fall back to the default.
+          max_output_bytes: pos_integer(),
           cwd: String.t(),
           env: map(),
           sandbox: sandbox_mode(),

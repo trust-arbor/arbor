@@ -725,13 +725,27 @@ defmodule Arbor.Actions.Coding do
       exit_code = result[:exit_code] || result["exit_code"]
       timed_out = result[:timed_out] == true or result["timed_out"] == true
       killed = result[:killed] == true or result["killed"] == true
+
+      output_limit_exceeded =
+        result[:output_limit_exceeded] == true or result["output_limit_exceeded"] == true
+
+      output_truncated =
+        result[:output_truncated] == true or result["output_truncated"] == true
+
       stderr = result[:stderr] || result["stderr"] || ""
 
-      # 137 is the shell executor's conventional "killed after timeout" code
-      # (SIGKILL). Without this note, docs-only smoke failures look like a flaky
-      # `ls` rather than a 0/1ms validation_timeout.
+      # Distinguish output-ceiling kills from absolute timeouts. Both use exit
+      # 137 (SIGKILL), but labeling a ceiling kill as "timed out" misdirects
+      # operators toward validation_timeout instead of max_output_bytes.
       stderr =
         cond do
+          output_limit_exceeded ->
+            base =
+              "command output limit exceeded (exit 137 = killed after retained " <>
+                "stdout hit max_output_bytes; raise the ceiling or reduce command output)"
+
+            if stderr == "", do: base, else: base <> "; " <> stderr
+
           timed_out or (killed and exit_code == 137) ->
             base =
               "command timed out (exit 137 = killed after timeout; " <>
@@ -745,12 +759,14 @@ defmodule Arbor.Actions.Coding do
 
       %{
         command: command,
-        passed: exit_code == 0 and not timed_out,
+        passed: exit_code == 0 and not timed_out and not output_limit_exceeded,
         exit_code: exit_code,
         stdout: result[:stdout] || result["stdout"] || "",
         stderr: stderr,
         timed_out: timed_out,
-        killed: killed
+        killed: killed,
+        output_limit_exceeded: output_limit_exceeded,
+        output_truncated: output_truncated
       }
       |> Enum.reject(fn {_k, v} -> is_nil(v) end)
       |> Map.new()

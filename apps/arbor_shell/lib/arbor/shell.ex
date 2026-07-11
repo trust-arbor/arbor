@@ -30,16 +30,20 @@ defmodule Arbor.Shell do
       # With working directory
       {:ok, result} = Arbor.Shell.execute("git status", cwd: "/path/to/repo")
 
-      # With timeout
+      # With absolute timeout (continuous output does not extend the deadline)
       {:ok, result} = Arbor.Shell.execute("sleep 10", timeout: 5000)
       result.timed_out  # => true
+
+      # With retained-output ceiling (default 8 MiB; hard max 16 MiB)
+      {:ok, result} = Arbor.Shell.execute(noisy_cmd, max_output_bytes: 256)
+      result.output_limit_exceeded  # => true when the ceiling is hit
 
   ## Signals
 
   Shell emits signals for observability:
 
   - `{:shell, :command_started, %{command: ..., execution_id: ...}}`
-  - `{:shell, :command_completed, %{execution_id: ..., exit_code: ...}}`
+  - `{:shell, :command_completed, %{execution_id: ..., exit_code: ..., timed_out: ..., killed: ..., output_limit_exceeded: ..., output_truncated: ...}}`
   - `{:shell, :command_failed, %{execution_id: ..., reason: ...}}`
   """
 
@@ -245,7 +249,17 @@ defmodule Arbor.Shell do
 
   ## Options
 
-  - `:timeout` - Timeout in milliseconds (default: 30_000)
+  - `:timeout` - Absolute timeout in milliseconds measured from command start
+    (default: 30_000). Continuous stdout does not extend the deadline.
+  - `:max_output_bytes` - Maximum retained bytes of the merged stdout stream
+    (Executor uses `:stderr_to_stdout`; result `stderr` is `""`). Default:
+    8_388_608 (8 MiB, headroom for Mix/compiler/test logs). Hard maximum:
+    16_777_216 (16 MiB) — larger positive values are clamped down
+    (non-bypassable). When a chunk would *exceed* the ceiling the process is
+    killed immediately; the result has `output_limit_exceeded: true` and
+    `output_truncated: true`. Exactly `max_output_bytes` is allowed;
+    truncation keeps a valid UTF-8 prefix (may be slightly under the ceiling).
+    Invalid or non-positive values fall back to the default.
   - `:cwd` - Working directory
   - `:env` - Environment variables map
   - `:sandbox` - Sandbox mode: `:none`, `:basic`, `:strict` (default: `:basic`)
@@ -268,6 +282,9 @@ defmodule Arbor.Shell do
   Bypasses shell string parsing — use when you already have structured
   `{cmd, args}` and want to avoid the serialize-then-parse round-trip.
   Still performs sandbox checks on the command name and execution tracking.
+
+  Options are the same as `execute/2` (`:timeout`, `:max_output_bytes`,
+  `:cwd`, `:env`, `:sandbox`, `:stdin`).
 
   ## Examples
 
@@ -482,7 +499,8 @@ defmodule Arbor.Shell do
       wait_for_result(execution_id, timeout)
     else
       case ExecutionRegistry.get(execution_id) do
-        {:ok, %{status: status, result: result}} when status in [:completed, :failed] ->
+        {:ok, %{status: status, result: result}}
+        when status in [:completed, :failed, :timed_out, :killed] ->
           {:ok, result}
 
         {:ok, execution} ->
@@ -616,7 +634,15 @@ defmodule Arbor.Shell do
   end
 
   defp complete_execution(execution_id, result) do
-    status = if result.timed_out, do: :timed_out, else: :completed
+    # Output-limit termination is killed (not timed_out and not a successful
+    # completed run). Registry + get_result treat :killed as terminal.
+    status =
+      cond do
+        Map.get(result, :timed_out) == true -> :timed_out
+        Map.get(result, :killed) == true -> :killed
+        true -> :completed
+      end
+
     ExecutionRegistry.update_status(execution_id, status, %{result: result})
   end
 
@@ -631,9 +657,11 @@ defmodule Arbor.Shell do
     do_wait_for_result(execution_id, deadline)
   end
 
+  @terminal_statuses [:completed, :failed, :timed_out, :killed]
+
   defp do_wait_for_result(execution_id, deadline) do
     case ExecutionRegistry.get(execution_id) do
-      {:ok, %{status: status, result: result}} when status in [:completed, :failed, :timed_out] ->
+      {:ok, %{status: status, result: result}} when status in @terminal_statuses ->
         {:ok, result}
 
       {:ok, _} ->
@@ -661,11 +689,16 @@ defmodule Arbor.Shell do
   end
 
   defp emit_completed(execution_id, result) do
+    # Keep established event name `:command_completed`; add killed / output-limit
+    # metadata so observers can distinguish ceiling kills from success/timeout.
     durable_shell_emit(:command_completed, %{
       execution_id: execution_id,
       exit_code: result.exit_code,
       duration_ms: result.duration_ms,
-      timed_out: result.timed_out
+      timed_out: Map.get(result, :timed_out, false),
+      killed: Map.get(result, :killed, false),
+      output_limit_exceeded: Map.get(result, :output_limit_exceeded, false),
+      output_truncated: Map.get(result, :output_truncated, false)
     })
   end
 

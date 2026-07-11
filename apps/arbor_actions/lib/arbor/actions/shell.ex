@@ -93,7 +93,8 @@ defmodule Arbor.Actions.Shell do
     | Name | Type | Required | Description |
     |------|------|----------|-------------|
     | `command` | string | yes | The shell command to execute |
-    | `timeout` | integer | no | Timeout in milliseconds (default: 30000) |
+    | `timeout` | integer | no | Absolute timeout in ms from command start (default: 30000) |
+    | `max_output_bytes` | integer | no | Max retained merged-stdout bytes (default 8 MiB; hard max 16 MiB) |
     | `cwd` | string | no | Working directory |
     | `env` | map | no | Environment variables |
     | `sandbox` | atom | no | Sandbox mode: :none, :basic, :strict (default: :basic) |
@@ -101,10 +102,13 @@ defmodule Arbor.Actions.Shell do
     ## Returns
 
     - `exit_code` - The command exit code
-    - `stdout` - Standard output
-    - `stderr` - Standard error
+    - `stdout` - Merged stdout stream (may be truncated at max_output_bytes)
+    - `stderr` - Standard error (empty when Shell merges via stderr_to_stdout)
     - `duration_ms` - Execution duration in milliseconds
-    - `timed_out` - Whether the command timed out
+    - `timed_out` - Whether the absolute timeout fired
+    - `killed` - Whether the OS process was killed
+    - `output_limit_exceeded` - Whether retained-output ceiling terminated the run
+    - `output_truncated` - Whether stdout was truncated to the ceiling
     """
 
     use Jido.Action,
@@ -121,7 +125,12 @@ defmodule Arbor.Actions.Shell do
         timeout: [
           type: :non_neg_integer,
           default: 30_000,
-          doc: "Timeout in milliseconds"
+          doc: "Absolute timeout in milliseconds from command start"
+        ],
+        max_output_bytes: [
+          type: :pos_integer,
+          doc:
+            "Maximum retained merged-stdout bytes (default 8 MiB via Arbor.Shell; hard max 16 MiB)"
         ],
         cwd: [
           type: :string,
@@ -140,6 +149,10 @@ defmodule Arbor.Actions.Shell do
 
     alias Arbor.Actions
 
+    # Match Arbor.Shell.Executor hard maximum (16 MiB). Adapter enforces the
+    # same non-bypassable clamp before forwarding to Arbor.Shell.
+    @max_max_output_bytes 16_777_216
+
     @doc """
     Declares taint roles for Shell.Execute parameters.
 
@@ -147,6 +160,7 @@ defmodule Arbor.Actions.Shell do
     - `command` - The shell command to execute
     - `cwd` - Working directory affects where command runs
     - `sandbox` - Sandbox level affects execution restrictions
+    - `max_output_bytes` - Output ceiling governs resource use / process termination
 
     Data parameters that are just processed:
     - `env` - Environment variables are passed through
@@ -159,7 +173,8 @@ defmodule Arbor.Actions.Shell do
         cwd: {:control, requires: [:path_traversal]},
         sandbox: :control,
         env: :data,
-        timeout: :data
+        timeout: :data,
+        max_output_bytes: :control
       }
     end
 
@@ -177,6 +192,10 @@ defmodule Arbor.Actions.Shell do
         ]
         |> maybe_add_opt(:cwd, params[:cwd])
         |> maybe_add_opt(:env, params[:env])
+        |> maybe_add_opt(
+          :max_output_bytes,
+          clamp_max_output_bytes(params[:max_output_bytes])
+        )
         |> maybe_add_context_opts(context)
 
       case call_shell(params.command, opts, context) do
@@ -189,7 +208,10 @@ defmodule Arbor.Actions.Shell do
              stdout: result.stdout,
              stderr: result.stderr,
              duration_ms: result.duration_ms,
-             timed_out: result.timed_out
+             timed_out: Map.get(result, :timed_out, false),
+             killed: Map.get(result, :killed, false),
+             output_limit_exceeded: Map.get(result, :output_limit_exceeded, false),
+             output_truncated: Map.get(result, :output_truncated, false)
            }}
 
         {:ok, :pending_approval, proposal_id} ->
@@ -307,6 +329,12 @@ defmodule Arbor.Actions.Shell do
          do: timeout
 
     defp effective_timeout(_timeout, default), do: default
+
+    # Schema-bounded control: clamp oversized positive ceilings to the system
+    # hard maximum (16 MiB). Nil/invalid left unset so Arbor.Shell applies its
+    # default; Executor re-clamps as defense in depth.
+    defp clamp_max_output_bytes(n) when is_integer(n) and n > 0, do: min(n, @max_max_output_bytes)
+    defp clamp_max_output_bytes(_n), do: nil
 
     defp maybe_add_opt(opts, _key, nil), do: opts
     defp maybe_add_opt(opts, key, value), do: Keyword.put(opts, key, value)
