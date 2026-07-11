@@ -33,6 +33,7 @@ defmodule Arbor.Actions.Mix do
   alias Arbor.Shell
 
   @compile_feedback_text_limit 2_000
+  @excerpt_omission_marker "\n...[omitted]...\n"
 
   @doc false
   def mix_timeout, do: 300_000
@@ -50,13 +51,27 @@ defmodule Arbor.Actions.Mix do
     %{
       "exit_code" => exit_code,
       "passed" => exit_code == 0,
-      "stdout_excerpt" => String.slice(stdout, 0, @compile_feedback_text_limit),
-      "stderr_excerpt" => String.slice(stderr, 0, @compile_feedback_text_limit),
+      "stdout_excerpt" => bounded_excerpt(stdout),
+      "stderr_excerpt" => bounded_excerpt(stderr),
       "stdout_truncated" => String.length(stdout) > @compile_feedback_text_limit,
       "stderr_truncated" => String.length(stderr) > @compile_feedback_text_limit,
       "stdout_sha256" => sha256(stdout),
       "stderr_sha256" => sha256(stderr)
     }
+  end
+
+  defp bounded_excerpt(text) do
+    if String.length(text) <= @compile_feedback_text_limit do
+      text
+    else
+      available = @compile_feedback_text_limit - String.length(@excerpt_omission_marker)
+      head_length = div(available, 2)
+      tail_length = available - head_length
+
+      String.slice(text, 0, head_length) <>
+        @excerpt_omission_marker <>
+        String.slice(text, -tail_length, tail_length)
+    end
   end
 
   defp sha256(output) do
@@ -75,10 +90,13 @@ defmodule Arbor.Actions.Mix do
         share_build_path: Keyword.get(opts, :share_build_path, true)
       )
 
-    # Explicit caller isolation always wins over convenience sharing. The
-    # security-regression runner uses this to share deps while forcing a fresh,
-    # per-leg MIX_BUILD_PATH.
-    env = Map.merge(shared_env, Keyword.get(opts, :env, %{}))
+    # A project's preferred_envs can override Mix's built-in test default.
+    # Explicit caller isolation still wins, including MIX_ENV overrides used
+    # by the security-regression runner.
+    env =
+      shared_env
+      |> Map.merge(default_mix_env(args))
+      |> Map.merge(Keyword.get(opts, :env, %{}))
 
     # argv-safe: absolute worktree paths can contain spaces; never join into a
     # single shell string. Sandbox policy still sees basename "mix" + args.
@@ -94,6 +112,9 @@ defmodule Arbor.Actions.Mix do
       {:error, reason} -> {:error, inspect(reason)}
     end
   end
+
+  defp default_mix_env(["test" | _args]), do: %{"MIX_ENV" => "test"}
+  defp default_mix_env(_args), do: %{}
 
   @doc false
   # Point temporary worktrees at the main checkout's deps and, by default,

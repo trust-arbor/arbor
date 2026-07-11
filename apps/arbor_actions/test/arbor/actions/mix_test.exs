@@ -65,6 +65,12 @@ defmodule Arbor.Actions.MixTest do
       assert feedback["stderr_truncated"]
       assert String.length(feedback["stdout_excerpt"]) == MixAction.compile_feedback_text_limit()
       assert String.length(feedback["stderr_excerpt"]) == MixAction.compile_feedback_text_limit()
+      assert feedback["stdout_excerpt"] =~ "...[omitted]..."
+      assert feedback["stderr_excerpt"] =~ "...[omitted]..."
+      assert String.starts_with?(feedback["stdout_excerpt"], String.slice(stdout, 0, 16))
+      assert String.ends_with?(feedback["stdout_excerpt"], String.slice(stdout, -16, 16))
+      assert String.starts_with?(feedback["stderr_excerpt"], String.slice(stderr, 0, 16))
+      assert String.ends_with?(feedback["stderr_excerpt"], String.slice(stderr, -16, 16))
 
       assert feedback["stdout_sha256"] ==
                Base.encode16(:crypto.hash(:sha256, stdout), case: :lower)
@@ -73,6 +79,32 @@ defmodule Arbor.Actions.MixTest do
                Base.encode16(:crypto.hash(:sha256, stderr), case: :lower)
 
       assert {:ok, _json} = Jason.encode(feedback)
+    end
+
+    test "leaves short output unchanged" do
+      result = %{exit_code: 0, stdout: "compile ok\n", stderr: "warning\n"}
+      feedback = MixAction.compile_feedback(result)
+
+      assert feedback["stdout_excerpt"] == result.stdout
+      assert feedback["stderr_excerpt"] == result.stderr
+      refute feedback["stdout_truncated"]
+      refute feedback["stderr_truncated"]
+    end
+
+    test "retains a failure marker present only at the end of long output" do
+      limit = MixAction.compile_feedback_text_limit()
+      failure = "FAILURE_ONLY_AT_END"
+      stdout = String.duplicate("progress\n", limit) <> failure
+
+      feedback = MixAction.compile_feedback(%{exit_code: 1, stdout: stdout, stderr: ""})
+
+      assert feedback["stdout_truncated"]
+      assert String.length(feedback["stdout_excerpt"]) == limit
+      assert feedback["stdout_excerpt"] =~ "...[omitted]..."
+      assert String.ends_with?(feedback["stdout_excerpt"], failure)
+
+      assert feedback ==
+               MixAction.compile_feedback(%{exit_code: 1, stdout: stdout, stderr: ""})
     end
   end
 
@@ -109,6 +141,34 @@ defmodule Arbor.Actions.MixTest do
       assert MixAction.Test.name() == "mix_test"
       assert MixAction.Test.category() == "mix"
       assert "test" in MixAction.Test.tags()
+    end
+
+    test "run_mix defaults a direct test task to MIX_ENV=test", %{
+      project_path: project_path
+    } do
+      add_mix_env_assertion(project_path)
+      original = System.get_env("MIX_ENV")
+      System.delete_env("MIX_ENV")
+
+      try do
+        assert {:ok, result} =
+                 MixAction.run_mix(project_path, ["test"], env: %{"EXPECTED_MIX_ENV" => "test"})
+
+        assert result.exit_code == 0
+      after
+        restore_env("MIX_ENV", original)
+      end
+    end
+
+    test "run_mix honors an explicit MIX_ENV override", %{project_path: project_path} do
+      add_mix_env_assertion(project_path)
+
+      assert {:ok, result} =
+               MixAction.run_mix(project_path, ["test"],
+                 env: %{"MIX_ENV" => "dev", "EXPECTED_MIX_ENV" => "dev"}
+               )
+
+      assert result.exit_code == 0
     end
   end
 
@@ -207,6 +267,21 @@ defmodule Arbor.Actions.MixTest do
     """)
   end
 
+  defp add_mix_env_assertion(path) do
+    File.write!(Path.join([path, "test", "mix_env_test.exs"]), """
+    defmodule MixEnvTest do
+      use ExUnit.Case
+
+      test "runs in the expected Mix environment" do
+        assert Atom.to_string(Mix.env()) == System.fetch_env!("EXPECTED_MIX_ENV")
+      end
+    end
+    """)
+  end
+
+  defp restore_env(name, nil), do: System.delete_env(name)
+  defp restore_env(name, value), do: System.put_env(name, value)
+
   defp assert_structured_feedback(result) do
     feedback = result.feedback
     text_limit = MixAction.compile_feedback_text_limit()
@@ -221,8 +296,8 @@ defmodule Arbor.Actions.MixTest do
 
     assert String.length(feedback["stdout_excerpt"]) <= text_limit
     assert String.length(feedback["stderr_excerpt"]) <= text_limit
-    assert feedback["stdout_excerpt"] == String.slice(result.stdout || "", 0, text_limit)
-    assert feedback["stderr_excerpt"] == String.slice(result.stderr || "", 0, text_limit)
+    assert_excerpt(feedback["stdout_excerpt"], result.stdout || "", text_limit)
+    assert_excerpt(feedback["stderr_excerpt"], result.stderr || "", text_limit)
 
     assert feedback["stdout_truncated"] == String.length(result.stdout || "") > text_limit
     assert feedback["stderr_truncated"] == String.length(result.stderr || "") > text_limit
@@ -231,6 +306,17 @@ defmodule Arbor.Actions.MixTest do
     assert feedback["stderr_sha256"] == sha256(result.stderr || "")
     assert feedback["stdout_sha256"] =~ ~r/\A[0-9a-f]{64}\z/
     assert feedback["stderr_sha256"] =~ ~r/\A[0-9a-f]{64}\z/
+  end
+
+  defp assert_excerpt(excerpt, full, limit) do
+    if String.length(full) <= limit do
+      assert excerpt == full
+    else
+      assert String.length(excerpt) == limit
+      assert excerpt =~ "...[omitted]..."
+      assert String.starts_with?(excerpt, String.slice(full, 0, 16))
+      assert String.ends_with?(excerpt, String.slice(full, -16, 16))
+    end
   end
 
   defp sha256(output) do
