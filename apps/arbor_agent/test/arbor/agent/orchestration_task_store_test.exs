@@ -56,9 +56,29 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
         :raise ->
           raise "lifecycle cleanup boom"
 
-        :hang ->
-          Process.sleep(60_000)
+        :block ->
+          # Releasable block so tests can prove terminal results are not delayed
+          # without stalling teardown on Process.sleep.
+          if pid = Keyword.get(opts, :notify_pid) do
+            send(pid, {:lifecycle_cleanup_blocked, task_id, self()})
+          end
+
+          receive do
+            :release_cleanup -> :ok
+          after
+            30_000 -> :ok
+          end
       end
+    end
+  end
+
+  defmodule EvilCleanup do
+    def cleanup(task_id, opts) do
+      if pid = Keyword.get(opts, :notify_pid) do
+        send(pid, {:evil_cleanup, task_id, opts})
+      end
+
+      :ok
     end
   end
 
@@ -237,9 +257,14 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     start_supervised!({Task.Supervisor, name: supervisor})
 
-    start_supervised!(
-      {TaskStore, name: store, task_supervisor: supervisor, runner: ControlledRunner}
-    )
+    start_supervised!({
+      TaskStore,
+      # Internal store-start probe only — never selected via dispatch/descriptor.
+      name: store,
+      task_supervisor: supervisor,
+      runner: ControlledRunner,
+      approval_cleanup_mfa: {LifecycleCleanupProbe, :cleanup, 2}
+    })
 
     original_executors = Application.get_env(:arbor_agent, :task_executors)
     original_default = Application.get_env(:arbor_agent, :default_task_executor)
@@ -790,6 +815,86 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert_receive {:runner_started, _runner_pid, "agent_1", "do work", _}
     assert {:ok, %{state: :cancelled}} = TaskStore.cancel(task_id, name: store)
     refute_receive {:lifecycle_cleanup, ^task_id, _}, 100
+  end
+
+  test "security regression: direct dispatch cannot select cleanup MFA via descriptor", %{
+    store: store
+  } do
+    # Malicious per-task MFA must be ignored; store-init probe remains authority.
+    descriptor =
+      cleanup_descriptor(self())
+      |> Map.put(:mfa, {EvilCleanup, :cleanup, 2})
+      |> Map.put(:fun, fn _task_id, _opts -> send(self(), :evil_fun) end)
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "do work",
+               name: store,
+               test_pid: self(),
+               runner: ControlledRunner,
+               approval_cleanup_descriptor: descriptor
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_1", "do work", _}
+    send(runner_pid, {:finish, {:ok, %{result_type: :test, payload: %{ok: true}, raw: "ok"}}})
+
+    assert_eventually(fn ->
+      assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store)
+    end)
+
+    assert_receive {:lifecycle_cleanup, ^task_id, opts}, 500
+    assert opts[:cleanup_reason] == :task_termination
+    refute_receive {:evil_cleanup, ^task_id, _}, 50
+    refute_receive :evil_fun, 50
+  end
+
+  test "blocked cleanup child does not delay terminal result availability", %{
+    store: store
+  } do
+    Application.put_env(:arbor_agent, :lifecycle_cleanup_behavior, :block)
+    descriptor = cleanup_descriptor(self())
+
+    assert {:ok, task_id} =
+             TaskStore.dispatch("agent_1", "do work",
+               name: store,
+               test_pid: self(),
+               runner: ControlledRunner,
+               approval_cleanup_descriptor: descriptor
+             )
+
+    assert_receive {:runner_started, runner_pid, "agent_1", "do work", _}
+
+    send(
+      runner_pid,
+      {:finish, {:ok, %{result_type: :test, payload: %{ok: true}, raw: "not delayed"}}}
+    )
+
+    # Terminal state must be available while cleanup is still blocked.
+    assert_eventually(fn ->
+      assert {:ok, result} = TaskStore.result(task_id, name: store)
+      assert result.payload.ok == true
+      assert {:ok, %{state: :done}} = TaskStore.status(task_id, name: store)
+    end)
+
+    assert_receive {:lifecycle_cleanup, ^task_id, _opts}, 500
+    assert_receive {:lifecycle_cleanup_blocked, ^task_id, cleanup_pid}, 500
+    assert Process.alive?(cleanup_pid)
+
+    # Result remains readable while the cleanup child is deliberately blocked.
+    assert {:ok, result} = TaskStore.result(task_id, name: store)
+    assert result.payload.ok == true
+
+    # Release promptly so supervised teardown does not wait on the block timeout.
+    send(cleanup_pid, :release_cleanup)
+  end
+
+  test "rejects invalid approval_cleanup_mfa shape at store init", %{supervisor: supervisor} do
+    assert_raise ArgumentError, ~r/approval_cleanup_mfa must be \{module, function, 2\}/, fn ->
+      TaskStore.start_link(
+        name: :"bad_cleanup_mfa_#{System.unique_integer([:positive])}",
+        task_supervisor: supervisor,
+        approval_cleanup_mfa: {LifecycleCleanupProbe, :cleanup, 1}
+      )
+    end
   end
 
   test "cancels a running task and keeps it cancelled after the process exits", %{store: store} do
@@ -1618,9 +1723,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
       end
   end
 
+  # Data only — cleanup MFA is fixed at TaskStore start, never in the descriptor.
   defp cleanup_descriptor(notify_pid) do
     %{
-      mfa: {LifecycleCleanupProbe, :cleanup, 2},
       caller_id: "dispatch_owner",
       consensus_module: nil,
       interaction_router: nil,

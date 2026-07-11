@@ -548,11 +548,15 @@ defmodule Arbor.Agent.OrchestrationTest do
 
       descriptor = opts[:approval_cleanup_descriptor]
       assert is_map(descriptor)
-      assert descriptor.mfa == {Orchestration, :cleanup_approvals_for_task, 2}
+      # Authority boundary: descriptor is data only — no MFA/function/callback.
+      refute Map.has_key?(descriptor, :mfa)
+      refute Map.has_key?(descriptor, :function)
+      refute Map.has_key?(descriptor, :fun)
+      refute Enum.any?(Map.values(descriptor), &is_function/1)
       assert descriptor.caller_id == "human_1"
       assert descriptor.consensus_module == Arbor.Consensus
       assert descriptor.audit_module == FakeAudit
-      refute is_function(Map.get(descriptor, :fun))
+      assert descriptor.interaction_router == Arbor.Comms.InteractionRouter
 
       assert_received {:audit_dispatched, "human_1", "task_1", "agent_1", audit_opts}
       assert audit_opts[:metadata] == %{ticket: "A-1"}

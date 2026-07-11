@@ -37,6 +37,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   @default_name __MODULE__
   @default_task_supervisor Arbor.Agent.Orchestration.TaskSupervisor
   @default_runner Arbor.Agent.Orchestration.TaskRunner
+  @default_approval_cleanup_mfa {Arbor.Agent.Orchestration, :cleanup_approvals_for_task, 2}
   @default_max_tasks 1_000
   @default_steer_retry_delay_ms 100
   @default_max_steer_retry_delay_ms 5_000
@@ -75,6 +76,14 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   @doc false
   def start_link(opts \\ []) do
+    # Validate store-start cleanup MFA in the caller before linking a child,
+    # so bad shapes raise ArgumentError at the init boundary (not only as a
+    # linked GenServer exit reason).
+    _ =
+      opts
+      |> Keyword.get(:approval_cleanup_mfa, @default_approval_cleanup_mfa)
+      |> validate_approval_cleanup_mfa!()
+
     name = Keyword.get(opts, :name, @default_name)
     GenServer.start_link(__MODULE__, opts, name: name)
   end
@@ -91,8 +100,11 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
     * `:timeout` - optional timeout forwarded in JSON-clean executor context
     * `:caller_id` - optional caller id forwarded in JSON-clean executor context
     * `:approval_answer_cap_id` - private temporary approval-answer capability id
-    * `:approval_cleanup_descriptor` - trusted private data-only lifecycle cleanup
-      descriptor built by `Arbor.Agent.Orchestration` at authenticated dispatch
+    * `:approval_cleanup_descriptor` - private data-only lifecycle cleanup
+      descriptor (caller_id, backend modules, trace_id, metadata). Must not
+      contain MFA/function/callback selection; the cleanup entrypoint is fixed
+      at TaskStore init (production default
+      `Arbor.Agent.Orchestration.cleanup_approvals_for_task/2`)
   """
   @spec dispatch(String.t(), term(), keyword() | map()) :: {:ok, task_id()} | {:error, term()}
   def dispatch(agent_id, task, opts \\ []) do
@@ -133,12 +145,20 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   @impl true
   def init(opts) do
+    approval_cleanup_mfa =
+      opts
+      |> Keyword.get(:approval_cleanup_mfa, @default_approval_cleanup_mfa)
+      |> validate_approval_cleanup_mfa!()
+
     {:ok,
      %{
        task_supervisor: Keyword.get(opts, :task_supervisor, @default_task_supervisor),
        runner: Keyword.get(opts, :runner, @default_runner),
        # When true, store-level `:runner` overrides kind-based Config selection.
        runner_override: Keyword.has_key?(opts, :runner),
+       # Trusted cleanup entrypoint fixed at store start (not per-dispatch).
+       # Tests may override with a probe MFA; never accepted via dispatch opts.
+       approval_cleanup_mfa: approval_cleanup_mfa,
        max_tasks: Keyword.get(opts, :max_tasks, @default_max_tasks),
        executor_callback_timeout_ms:
          Keyword.get(opts, :executor_callback_timeout_ms, Config.executor_callback_timeout_ms()),
@@ -493,16 +513,22 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   # Best-effort async lifecycle cleanup. Failures never affect terminal state.
+  # Entrypoint is store-init MFA only; descriptor is data (never code selection).
   defp schedule_approval_cleanup(_state, _task_id, nil), do: :ok
 
   defp schedule_approval_cleanup(state, task_id, descriptor) when is_map(descriptor) do
     supervisor = Map.fetch!(state, :task_supervisor)
+    {module, function, 2} = Map.fetch!(state, :approval_cleanup_mfa)
     cleanup_opts = cleanup_opts_from_descriptor(descriptor)
 
     _ =
-      Task.Supervisor.start_child(supervisor, fn ->
-        invoke_approval_cleanup(task_id, descriptor, cleanup_opts)
-      end)
+      Task.Supervisor.start_child(
+        supervisor,
+        module,
+        function,
+        [task_id, cleanup_opts],
+        []
+      )
 
     :ok
   rescue
@@ -512,6 +538,16 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   end
 
   defp schedule_approval_cleanup(_state, _task_id, _descriptor), do: :ok
+
+  defp validate_approval_cleanup_mfa!({module, function, 2})
+       when is_atom(module) and is_atom(function) do
+    {module, function, 2}
+  end
+
+  defp validate_approval_cleanup_mfa!(invalid) do
+    raise ArgumentError,
+          "approval_cleanup_mfa must be {module, function, 2}, got: #{inspect(invalid)}"
+  end
 
   defp cleanup_opts_from_descriptor(descriptor) when is_map(descriptor) do
     [
@@ -527,24 +563,6 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp maybe_put_opt(opts, _key, nil), do: opts
   defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
-
-  defp invoke_approval_cleanup(task_id, descriptor, cleanup_opts) do
-    case Map.get(descriptor, :mfa) do
-      {module, function, 2} when is_atom(module) and is_atom(function) ->
-        if Code.ensure_loaded?(module) and function_exported?(module, function, 2) do
-          apply(module, function, [task_id, cleanup_opts])
-        else
-          :ok
-        end
-
-      _ ->
-        :ok
-    end
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
-  end
 
   # ---------------------------------------------------------------------------
   # Steering mailbox

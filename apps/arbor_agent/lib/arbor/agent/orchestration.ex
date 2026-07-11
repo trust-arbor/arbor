@@ -405,9 +405,10 @@ defmodule Arbor.Agent.Orchestration do
     |> Keyword.put(:approval_cleanup_descriptor, approval_cleanup_descriptor(caller_id, opts))
   end
 
+  # Data only — never MFA/function/callback selection. TaskStore owns the
+  # trusted cleanup entrypoint fixed at store initialization.
   defp approval_cleanup_descriptor(caller_id, opts) do
     %{
-      mfa: {__MODULE__, :cleanup_approvals_for_task, 2},
       caller_id: caller_id,
       consensus_module: consensus_module(opts),
       interaction_router: interaction_router(opts),
