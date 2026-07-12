@@ -8,6 +8,9 @@ defmodule Arbor.Scheduler.Application do
     children =
       if Application.get_env(:arbor_scheduler, :start_children, true) do
         [
+          Arbor.Scheduler.RunLeaseSupervisor,
+          Arbor.Scheduler.RunIdentityReaper,
+
           # Identity must start BEFORE Oban so the scheduler has its stable
           # SigningAuthority before workers can dispatch pipelines.
           Arbor.Scheduler.Identity,

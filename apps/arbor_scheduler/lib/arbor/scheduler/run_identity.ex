@@ -49,20 +49,15 @@ defmodule Arbor.Scheduler.RunIdentity do
        succeeds without approval gate
   ```
 
-  Failure modes during mint return `{:error, reason}`; `revoke/1` is
-  best-effort and never raises (it must run in an `after` clause).
-
-  `mint/1` opens the authority in its caller, without spawning a helper. The
-  caller therefore remains the monitored owner for the whole run and must keep
-  that process alive until `revoke/1` completes before handing the handle to a
-  different process.
+  Failure modes during mint return `{:error, reason}` and atomically roll back
+  all effects. A scheduler-supervised lease monitors the caller independently,
+  so cleanup also runs when the caller is killed before its `after` clause.
   """
-
-  require Logger
 
   alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Scheduler.CapsFile
   alias Arbor.Scheduler.CapsFile.Attestation
+  alias Arbor.Scheduler.RunLease
   alias Arbor.Security
   alias Arbor.Trust
 
@@ -70,12 +65,17 @@ defmodule Arbor.Scheduler.RunIdentity do
   # enter the Engine. Descendant node operations are deliberately excluded:
   # each must be present in the signed attestation before it can be granted.
   @orchestrator_execute_uri "arbor://orchestrator/execute"
+  @default_lease_ttl_ms :timer.hours(24)
 
   @type run_handle :: %{
           agent_id: String.t(),
           signing_authority: SigningAuthority.t(),
-          cap_ids: [String.t()]
+          cap_ids: [String.t()],
+          lease: pid()
         }
+
+  @doc false
+  def identity_name, do: "scheduler-run:#{node()}"
 
   @doc """
   Mint a per-run identity from a verified attestation and grant only its
@@ -91,16 +91,26 @@ defmodule Arbor.Scheduler.RunIdentity do
   On any failure, partial state (e.g., identity registered but caps
   not yet granted) is cleaned up before returning the error.
   """
-  @spec mint(Attestation.t()) :: {:ok, run_handle()} | {:error, atom() | tuple()}
-  def mint(%Attestation{} = attestation) do
+  @spec mint(Attestation.t(), keyword()) :: {:ok, run_handle()} | {:error, atom() | tuple()}
+  def mint(attestation, opts \\ [])
+
+  def mint(%Attestation{} = attestation, opts) do
+    security = Keyword.get(opts, :security_facade, Security)
+    trust = Keyword.get(opts, :trust_facade, Trust)
+    ttl_ms = Keyword.get(opts, :lease_ttl_ms, lease_ttl_ms())
+
     with :ok <- CapsFile.verify_attestation(attestation),
-         {:ok, identity} <- generate_identity(),
-         :ok <- register_identity(identity) do
-      mint_registered(identity, attestation)
+         {:ok, lease} <-
+           RunLease.start(self(),
+             security_facade: security,
+             trust_facade: trust,
+             ttl_ms: ttl_ms
+           ) do
+      provision(attestation, lease, security, trust, ttl_ms)
     end
   end
 
-  def mint(_), do: {:error, :verified_attestation_required}
+  def mint(_, _opts), do: {:error, :verified_attestation_required}
 
   @doc """
   Revoke every cap in the run handle and deregister the ephemeral
@@ -117,79 +127,114 @@ defmodule Arbor.Scheduler.RunIdentity do
   @spec revoke(run_handle() | nil) :: :ok
   def revoke(nil), do: :ok
 
-  def revoke(%{agent_id: agent_id, signing_authority: authority, cap_ids: cap_ids}) do
-    safe_close_authority(authority)
-    Enum.each(cap_ids, &safe_revoke_cap/1)
-    safe_delete_trust_profile(agent_id)
-    safe_deregister(agent_id)
-    :ok
-  end
+  def revoke(%{lease: lease}), do: normalize_revoke(RunLease.revoke(lease))
 
   # ===========================================================================
   # Internals
   # ===========================================================================
 
-  defp generate_identity do
-    Security.generate_identity(name: "scheduler-run")
-  end
+  defp provision(attestation, lease, security, trust, ttl_ms) do
+    expires_at = DateTime.add(DateTime.utc_now(), ttl_ms, :millisecond)
 
-  defp register_identity(identity) do
-    Security.register_identity(Arbor.Contracts.Security.Identity.public_only(identity))
-  end
+    result =
+      with {:ok, identity} <- security.generate_identity(name: identity_name()),
+           :ok <- RunLease.record_identity(lease, identity.agent_id),
+           :ok <- register_identity(identity, security),
+           {:ok, lobby_cap} <-
+             grant_capability(
+               lease,
+               security,
+               identity.agent_id,
+               @orchestrator_execute_uri,
+               expires_at,
+               []
+             ),
+           {:ok, run_caps} <-
+             grant_run_caps(lease, security, identity.agent_id, attestation, expires_at),
+           :ok <- set_trust_profile_rules(trust, identity.agent_id, attestation.capabilities),
+           {:ok, authority} <- open_authority(identity, security),
+           :ok <- record_authority(lease, authority, security) do
+        {:ok,
+         %{
+           agent_id: identity.agent_id,
+           signing_authority: authority,
+           cap_ids: [lobby_cap.id | Enum.map(run_caps, & &1.id)],
+           lease: lease
+         }}
+      end
 
-  defp grant_orchestrator_execute(agent_id) do
-    Security.grant(principal: agent_id, resource: @orchestrator_execute_uri)
-  end
-
-  defp mint_registered(identity, attestation) do
-    case grant_orchestrator_execute(identity.agent_id) do
-      {:ok, lobby_cap} ->
-        mint_declared_caps(identity, attestation, lobby_cap)
+    case result do
+      {:ok, _handle} = success ->
+        success
 
       {:error, reason} ->
-        cleanup_registered(identity.agent_id, [])
-        {:error, {:grant_failed, @orchestrator_execute_uri, reason}}
-    end
-  end
-
-  defp mint_declared_caps(identity, attestation, lobby_cap) do
-    case grant_run_caps(identity.agent_id, attestation) do
-      {:ok, run_caps} ->
-        :ok = set_trust_profile_rules(identity.agent_id, attestation.capabilities)
-
-        case open_authority(identity) do
-          {:ok, authority} ->
-            {:ok,
-             %{
-               agent_id: identity.agent_id,
-               signing_authority: authority,
-               cap_ids: [lobby_cap.id | Enum.map(run_caps, & &1.id)]
-             }}
-
-          {:error, reason} ->
-            cleanup_registered(identity.agent_id, [lobby_cap | run_caps])
-            {:error, {:authority_open_failed, reason}}
-        end
-
-      {:error, reason, granted_caps} ->
-        cleanup_registered(identity.agent_id, [lobby_cap | granted_caps])
+        _ = RunLease.revoke(lease)
         {:error, reason}
     end
+  rescue
+    exception ->
+      _ = RunLease.revoke(lease)
+      {:error, {:provision_exception, Exception.message(exception)}}
+  catch
+    :exit, reason ->
+      _ = RunLease.revoke(lease)
+      {:error, {:provision_exit, reason}}
   end
 
-  defp open_authority(identity) do
+  defp register_identity(identity, security) do
+    case security.register_identity(Arbor.Contracts.Security.Identity.public_only(identity)) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:identity_registration_failed, reason}}
+    end
+  end
+
+  defp grant_capability(lease, security, agent_id, resource, expires_at, extra_opts) do
+    opts = [principal: agent_id, resource: resource, expires_at: expires_at] ++ extra_opts
+
+    case security.grant(opts) do
+      {:ok, cap} ->
+        case RunLease.record_capability(lease, cap.id) do
+          :ok ->
+            {:ok, cap}
+
+          {:error, reason} ->
+            _ = security.revoke(cap.id)
+            {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, {:grant_failed, resource, reason}}
+    end
+  end
+
+  defp open_authority(identity, security) do
     with {:ok, proof} <-
-           Security.build_signing_authority_acquisition_proof(
+           security.build_signing_authority_acquisition_proof(
              identity.agent_id,
              identity.private_key,
              purpose: :pipeline_run,
              owner: self()
-           ) do
-      Security.open_ephemeral_signing_authority(proof, identity.private_key)
+           ),
+         {:ok, authority} <-
+           security.open_ephemeral_signing_authority(proof, identity.private_key) do
+      {:ok, authority}
+    else
+      {:error, reason} -> {:error, {:authority_open_failed, reason}}
     end
   end
 
-  defp grant_run_caps(agent_id, attestation) do
+  defp record_authority(lease, authority, security) do
+    case RunLease.record_authority(lease, authority) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        _ = security.close_signing_authority(authority)
+        {:error, reason}
+    end
+  end
+
+  defp grant_run_caps(lease, security, agent_id, attestation, expires_at) do
     attestation.capabilities
     |> Enum.reduce_while({:ok, []}, fn descriptor, {:ok, acc} ->
       # Provenance records that this cap was minted from a verified signed
@@ -209,9 +254,12 @@ defmodule Arbor.Scheduler.RunIdentity do
         }
       }
 
-      case Security.grant(
-             principal: agent_id,
-             resource: descriptor.resource_uri,
+      case grant_capability(
+             lease,
+             security,
+             agent_id,
+             descriptor.resource_uri,
+             expires_at,
              constraints: descriptor.constraints,
              metadata: metadata
            ) do
@@ -219,7 +267,7 @@ defmodule Arbor.Scheduler.RunIdentity do
           {:cont, {:ok, [cap | acc]}}
 
         {:error, reason} ->
-          {:halt, {:error, {:grant_failed, descriptor.resource_uri, reason}, Enum.reverse(acc)}}
+          {:halt, {:error, reason}}
       end
     end)
     |> case do
@@ -243,7 +291,7 @@ defmodule Arbor.Scheduler.RunIdentity do
   #
   # Surfaced 2026-06-06 by the morning-digest LLM pipelines hitting
   # the approval gate even with matching per-run caps.
-  defp set_trust_profile_rules(agent_id, descriptors) do
+  defp set_trust_profile_rules(trust, agent_id, descriptors) do
     prefixes =
       descriptors
       |> Enum.map(&trust_rule_prefix(&1.resource_uri))
@@ -252,7 +300,7 @@ defmodule Arbor.Scheduler.RunIdentity do
       |> List.insert_at(0, "arbor://orchestrator/execute")
 
     opts =
-      case Trust.get_trust_profile(agent_id) do
+      case trust.get_trust_profile(agent_id) do
         {:ok, profile} ->
           [
             baseline: profile.baseline,
@@ -263,44 +311,28 @@ defmodule Arbor.Scheduler.RunIdentity do
           [baseline: :ask, rules: Map.new(prefixes, &{&1, :allow})]
 
         {:error, reason} ->
-          Logger.warning(
-            "[RunIdentity] trust profile setup failed for #{agent_id}: #{inspect(reason)}"
-          )
-
-          nil
+          {:error, {:trust_profile_lookup_failed, reason}}
       end
 
     case opts do
-      nil ->
-        :ok
+      {:error, _reason} = error ->
+        error
 
       opts ->
-        case Trust.ensure_trust_profile(agent_id, opts) do
+        case trust.ensure_trust_profile(agent_id, opts) do
           {:ok, _profile} ->
             :ok
 
           {:error, reason} ->
-            Logger.warning(
-              "[RunIdentity] trust profile setup failed for #{agent_id}: #{inspect(reason)}"
-            )
-
-            :ok
+            {:error, {:trust_profile_provision_failed, reason}}
         end
     end
   rescue
     exception ->
-      Logger.warning(
-        "[RunIdentity] trust profile setup failed for #{agent_id}: #{inspect(exception)}"
-      )
-
-      :ok
+      {:error, {:trust_profile_provision_exception, Exception.message(exception)}}
   catch
     :exit, reason ->
-      Logger.warning(
-        "[RunIdentity] trust profile setup exited for #{agent_id}: #{inspect(reason)}"
-      )
-
-      :ok
+      {:error, {:trust_profile_provision_exit, reason}}
   end
 
   # Mirrors the trust policy operation prefix. Extracts the
@@ -314,95 +346,10 @@ defmodule Arbor.Scheduler.RunIdentity do
     end
   end
 
-  defp cleanup_registered(agent_id, capabilities) do
-    Enum.each(capabilities, &safe_revoke_cap(&1.id))
-    safe_delete_trust_profile(agent_id)
-    safe_deregister(agent_id)
+  defp lease_ttl_ms do
+    Application.get_env(:arbor_scheduler, :run_identity_lease_ttl_ms, @default_lease_ttl_ms)
   end
 
-  defp safe_delete_trust_profile(agent_id) do
-    case Trust.delete_trust_profile(agent_id) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning(
-          "[RunIdentity] failed to delete trust profile #{agent_id}: #{inspect(reason)}"
-        )
-
-        :ok
-    end
-  rescue
-    exception ->
-      Logger.warning(
-        "[RunIdentity] exception deleting trust profile #{agent_id}: #{inspect(exception)}"
-      )
-
-      :ok
-  catch
-    :exit, reason ->
-      Logger.warning("[RunIdentity] trust profile deletion exited: #{inspect(reason)}")
-      :ok
-  end
-
-  defp safe_close_authority(authority) do
-    case Security.close_signing_authority(authority) do
-      :ok ->
-        :ok
-
-      {:error, :authority_not_found} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("[RunIdentity] failed to close signing authority: #{inspect(reason)}")
-        :ok
-    end
-  rescue
-    exception ->
-      Logger.warning("[RunIdentity] exception closing signing authority: #{inspect(exception)}")
-      :ok
-  catch
-    :exit, reason ->
-      Logger.warning("[RunIdentity] authority close exited: #{inspect(reason)}")
-      :ok
-  end
-
-  defp safe_revoke_cap(cap_id) do
-    case Security.revoke(cap_id) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("[RunIdentity] failed to revoke cap #{cap_id}: #{inspect(reason)}")
-        :ok
-    end
-  rescue
-    e ->
-      Logger.warning(
-        "[RunIdentity] exception revoking cap #{cap_id}: #{inspect(Exception.message(e))}"
-      )
-
-      :ok
-  end
-
-  defp safe_deregister(agent_id) do
-    case Security.deregister_identity(agent_id) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning(
-          "[RunIdentity] failed to deregister run identity #{agent_id}: #{inspect(reason)}"
-        )
-
-        :ok
-    end
-  rescue
-    e ->
-      Logger.warning(
-        "[RunIdentity] exception deregistering #{agent_id}: #{inspect(Exception.message(e))}"
-      )
-
-      :ok
-  end
+  defp normalize_revoke(:ok), do: :ok
+  defp normalize_revoke({:error, _reason}), do: :ok
 end

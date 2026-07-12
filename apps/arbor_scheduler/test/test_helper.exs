@@ -39,6 +39,7 @@ for child <- [
       # checks). Mirror what arbor_security's own test_helper starts.
       {Arbor.Security.Identity.NonceCache, []},
       {Arbor.Security.SystemAuthority, []},
+      {Arbor.Security.SigningAuthorityStateOwner, []},
       {Arbor.Security.SigningAuthorityBroker, []},
       {Arbor.Security.Constraint.RateLimiter, []},
       {Arbor.Security.CapabilityStore, []}
@@ -56,6 +57,15 @@ for child <- [
     {:error, {:already_started, _}} -> :ok
     {:error, reason} -> IO.warn("Failed to start trust test child: #{inspect(reason)}")
   end
+end
+
+case Supervisor.start_child(
+       Arbor.Scheduler.Supervisor,
+       Arbor.Scheduler.RunLeaseSupervisor
+     ) do
+  {:ok, _pid} -> :ok
+  {:error, {:already_started, _pid}} -> :ok
+  {:error, reason} -> IO.warn("Failed to start run lease supervisor: #{inspect(reason)}")
 end
 
 ExUnit.start()
