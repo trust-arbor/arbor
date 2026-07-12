@@ -50,13 +50,34 @@ defmodule Arbor.Actions.Config do
   module with `:mix_shell_module` so action behavior can be exercised without
   claiming production process containment. This seam is operator/test
   configuration only; actions never resolve it from params or context, and
-  function values are not accepted.
+  function values are not accepted. Misconfigured modules fail closed before
+  dispatch.
   """
-  @spec mix_shell_module() :: module()
+  @type mix_shell_module_error ::
+          {:invalid_mix_shell_module,
+           :named_module_required
+           | {:module_not_loaded, module()}
+           | {:callback_not_exported, module(), atom(), non_neg_integer()}}
+
+  @spec mix_shell_module() :: {:ok, module()} | {:error, mix_shell_module_error()}
   def mix_shell_module do
     case Application.get_env(:arbor_actions, :mix_shell_module, Arbor.Shell) do
-      module when is_atom(module) -> module
-      _other -> Arbor.Shell
+      module when is_atom(module) ->
+        cond do
+          not Code.ensure_loaded?(module) ->
+            {:error, {:invalid_mix_shell_module, {:module_not_loaded, module}}}
+
+          not function_exported?(module, :execute_spawn_capable, 3) ->
+            {:error,
+             {:invalid_mix_shell_module,
+              {:callback_not_exported, module, :execute_spawn_capable, 3}}}
+
+          true ->
+            {:ok, module}
+        end
+
+      _other ->
+        {:error, {:invalid_mix_shell_module, :named_module_required}}
     end
   end
 

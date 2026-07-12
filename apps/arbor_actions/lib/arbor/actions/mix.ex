@@ -84,6 +84,8 @@ defmodule Arbor.Actions.Mix do
   # ── Shared command runner ─────────────────────────────────────────
 
   @doc false
+  @spec run_mix(String.t(), [String.t()], keyword()) ::
+          {:ok, map()} | {:error, String.t() | Config.mix_shell_module_error()}
   def run_mix(path, args, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, mix_timeout())
 
@@ -98,7 +100,8 @@ defmodule Arbor.Actions.Mix do
     # argv-safe: absolute worktree paths can contain spaces; never join into a
     # single shell string. Sandbox policy still sees basename "mix" + args.
     with {:ok, canonical_path} <- SafePath.resolve_real(path),
-         true <- File.dir?(canonical_path) do
+         true <- File.dir?(canonical_path),
+         {:ok, shell_module} <- Config.mix_shell_module() do
       shell_opts = [
         cwd: canonical_path,
         timeout: timeout,
@@ -106,16 +109,19 @@ defmodule Arbor.Actions.Mix do
         env: env
       ]
 
-      shell_module = Config.mix_shell_module()
-
       case shell_module.execute_spawn_capable("mix", args, shell_opts) do
         {:ok, result} -> {:ok, result}
         {:error, reason} -> {:error, inspect(reason)}
       end
     else
+      {:error, {:invalid_mix_shell_module, _reason}} = error -> error
       _other -> {:error, inspect(:invalid_mix_worktree)}
     end
   end
+
+  @doc false
+  def format_error(reason) when is_binary(reason), do: reason
+  def format_error(reason), do: inspect(reason)
 
   defp default_mix_env(["test" | _args]), do: %{"MIX_ENV" => "test"}
   defp default_mix_env(_args), do: %{}
@@ -196,7 +202,7 @@ defmodule Arbor.Actions.Mix do
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
-          {:error, "mix compile failed to execute: #{reason}"}
+          {:error, "mix compile failed to execute: #{MixAction.format_error(reason)}"}
       end
     end
 
@@ -299,7 +305,7 @@ defmodule Arbor.Actions.Mix do
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
-          {:error, "mix test failed to execute: #{reason}"}
+          {:error, "mix test failed to execute: #{MixAction.format_error(reason)}"}
       end
     end
 
@@ -441,7 +447,7 @@ defmodule Arbor.Actions.Mix do
 
         {:error, reason} ->
           Actions.emit_failed(__MODULE__, reason)
-          {:error, "mix quality failed to execute: #{reason}"}
+          {:error, "mix quality failed to execute: #{MixAction.format_error(reason)}"}
       end
     end
   end
@@ -514,7 +520,7 @@ defmodule Arbor.Actions.Mix do
 
           {:error, reason} ->
             Actions.emit_failed(__MODULE__, reason)
-            {:error, "mix format failed to execute: #{reason}"}
+            {:error, "mix format failed to execute: #{MixAction.format_error(reason)}"}
         end
       else
         {:error, reason} ->

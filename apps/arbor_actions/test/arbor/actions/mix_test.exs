@@ -13,54 +13,9 @@ defmodule Arbor.Actions.MixTest do
 
   alias Arbor.Actions.Config
   alias Arbor.Actions.Mix, as: MixAction
-  alias Arbor.Shell.ExecutablePolicy
 
-  defmodule LegacyCandidateBackend do
-    def capabilities do
-      [
-        :atomic_executable_identity,
-        :deadline,
-        :isolated_worktree_mount,
-        :output_limit,
-        :owner_lifecycle,
-        :spawn_processes,
-        :whole_unit_termination
-      ]
-    end
-
-    def available?(_request), do: :ok
-
-    def execute(request) do
-      probe = Application.fetch_env!(:arbor_actions, :legacy_mix_backend_probe)
-      send(probe.test_pid, :legacy_mix_backend_called)
-      started_at = System.monotonic_time(:millisecond)
-
-      {output, exit_code} =
-        System.cmd(request.tool.path, request.args,
-          cd: request.cwd,
-          env: command_env(request.env),
-          stderr_to_stdout: true
-        )
-
-      {:ok,
-       %{
-         exit_code: exit_code,
-         stdout: output,
-         stderr: "",
-         duration_ms: System.monotonic_time(:millisecond) - started_at,
-         timed_out: false,
-         killed: false,
-         output_truncated: false,
-         output_limit_exceeded: false
-       }}
-    end
-
-    defp command_env(env) do
-      Enum.map(env, fn
-        {key, false} -> {key, nil}
-        {key, value} -> {key, value}
-      end)
-    end
+  defmodule WrongCallbackMixShell do
+    def execute_spawn_capable(_tool, _args), do: {:error, :wrong_arity}
   end
 
   setup_all do
@@ -70,11 +25,6 @@ defmodule Arbor.Actions.MixTest do
     on_exit(fn ->
       restore_env(:arbor_actions, :mix_shell_module, previous_shell_module)
     end)
-
-    case Process.whereis(Arbor.Shell.ExecutionRegistry) do
-      nil -> {:ok, _} = Application.ensure_all_started(:arbor_shell)
-      _pid -> :ok
-    end
 
     :ok
   end
@@ -107,15 +57,33 @@ defmodule Arbor.Actions.MixTest do
       assert "compile" in MixAction.Compile.tags()
     end
 
-    test "action shell seam accepts configured named modules only" do
-      previous = Application.get_env(:arbor_actions, :mix_shell_module)
+    test "action shell seam fails closed for a configured closure", %{project_path: project_path} do
+      error = {:invalid_mix_shell_module, :named_module_required}
 
-      try do
-        Application.put_env(:arbor_actions, :mix_shell_module, fn -> :not_a_module end)
-        assert Config.mix_shell_module() == Arbor.Shell
-      after
-        restore_env(:arbor_actions, :mix_shell_module, previous)
-      end
+      assert_mix_shell_error(
+        project_path,
+        fn -> :not_a_module end,
+        error
+      )
+    end
+
+    test "action shell seam fails closed for a missing named module", %{
+      project_path: project_path
+    } do
+      module = Arbor.Actions.MissingMixShellModule
+      error = {:invalid_mix_shell_module, {:module_not_loaded, module}}
+
+      assert_mix_shell_error(project_path, module, error)
+    end
+
+    test "action shell seam fails closed for a module with the wrong callback", %{
+      project_path: project_path
+    } do
+      error =
+        {:invalid_mix_shell_module,
+         {:callback_not_exported, WrongCallbackMixShell, :execute_spawn_capable, 3}}
+
+      assert_mix_shell_error(project_path, WrongCallbackMixShell, error)
     end
 
     test "builds deterministic, bounded, JSON-clean compile feedback" do
@@ -303,10 +271,9 @@ defmodule Arbor.Actions.MixTest do
       assert reason =~ "external_test.exs"
     end
 
-    test "security regression: configured legacy backend cannot run Mix through production Shell",
-         %{
-           project_path: project_path
-         } do
+    test "security regression: production Shell cannot run candidate Mix code", %{
+      project_path: project_path
+    } do
       marker = Path.join(project_path, "mix-ran")
       test_path = "test/production_spawn_backend_required_test.exs"
 
@@ -321,14 +288,10 @@ defmodule Arbor.Actions.MixTest do
       """)
 
       previous_shell_module = Application.get_env(:arbor_actions, :mix_shell_module)
-      previous_backend = Application.get_env(:arbor_shell, :spawn_backend)
-      previous_manifest = Application.get_env(:arbor_shell, :spawn_executable_manifest)
-      previous_probe = Application.get_env(:arbor_actions, :legacy_mix_backend_probe)
 
       try do
-        Application.delete_env(:arbor_actions, :mix_shell_module)
-        assert Config.mix_shell_module() == Arbor.Shell
-        configure_legacy_mix_backend!()
+        Application.put_env(:arbor_actions, :mix_shell_module, Arbor.Shell)
+        assert {:ok, Arbor.Shell} = Config.mix_shell_module()
 
         assert {:error, reason} =
                  MixAction.Test.run(
@@ -338,14 +301,9 @@ defmodule Arbor.Actions.MixTest do
 
         assert reason =~ "spawn_backend_unavailable"
         assert reason =~ "production_backend_missing"
-        refute_receive :legacy_mix_backend_called, 50
         refute File.exists?(marker)
       after
         restore_env(:arbor_actions, :mix_shell_module, previous_shell_module)
-        restore_env(:arbor_shell, :spawn_backend, previous_backend)
-        restore_env(:arbor_shell, :spawn_executable_manifest, previous_manifest)
-        restore_env(:arbor_actions, :legacy_mix_backend_probe, previous_probe)
-        replace_executable_policy!()
       end
     end
   end
@@ -457,42 +415,15 @@ defmodule Arbor.Actions.MixTest do
     """)
   end
 
-  defp configure_legacy_mix_backend! do
-    mix_wrapper = Path.expand("../../../../../bin/mix", __DIR__)
+  defp assert_mix_shell_error(project_path, configured, expected) do
+    previous = Application.get_env(:arbor_actions, :mix_shell_module)
 
-    digest =
-      mix_wrapper
-      |> File.read!()
-      |> then(&:crypto.hash(:sha256, &1))
-      |> Base.encode16(case: :lower)
-
-    Application.put_env(:arbor_shell, :spawn_backend, LegacyCandidateBackend)
-
-    Application.put_env(:arbor_shell, :spawn_executable_manifest, %{
-      "mix" => %{path: mix_wrapper, sha256: digest}
-    })
-
-    Application.put_env(:arbor_actions, :legacy_mix_backend_probe, %{test_pid: self()})
-    replace_executable_policy!()
-  end
-
-  defp replace_executable_policy! do
-    case Supervisor.terminate_child(Arbor.Shell.Supervisor, ExecutablePolicy) do
-      :ok -> :ok
-      {:error, :not_found} -> :ok
-    end
-
-    case Supervisor.delete_child(Arbor.Shell.Supervisor, ExecutablePolicy) do
-      :ok -> :ok
-      {:error, :not_found} -> :ok
-    end
-
-    case Supervisor.start_child(
-           Arbor.Shell.Supervisor,
-           {ExecutablePolicy, startup_path: System.get_env("PATH", "")}
-         ) do
-      {:ok, _pid} -> :ok
-      {:error, {:already_started, _pid}} -> :ok
+    try do
+      Application.put_env(:arbor_actions, :mix_shell_module, configured)
+      assert {:error, ^expected} = Config.mix_shell_module()
+      assert {:error, ^expected} = MixAction.run_mix(project_path, ["compile"])
+    after
+      restore_env(:arbor_actions, :mix_shell_module, previous)
     end
   end
 
