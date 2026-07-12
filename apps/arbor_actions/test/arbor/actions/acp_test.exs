@@ -25,13 +25,16 @@ defmodule Arbor.Actions.AcpTest.FakeAI do
       when is_binary(worker_session_id) and is_binary(content) and is_list(opts) do
     notify({:managed_send, worker_session_id, content, opts})
 
-    {:ok,
-     %{
-       "text" => "echo:#{content}",
-       "stop_reason" => "end_turn",
-       "session_id" => "provider_sess_1",
-       "usage" => %{}
-     }}
+    :persistent_term.get(
+      {__MODULE__, :send_result},
+      {:ok,
+       %{
+         "text" => "echo:#{content}",
+         "stop_reason" => "end_turn",
+         "session_id" => "provider_sess_1",
+         "usage" => %{}
+       }}
+    )
   end
 
   def acp_managed_session_status(worker_session_id, opts)
@@ -123,6 +126,7 @@ defmodule Arbor.Actions.AcpTest do
 
       :persistent_term.erase({FakeAI, :parent})
       :persistent_term.erase({FakeAI, :start_result})
+      :persistent_term.erase({FakeAI, :send_result})
       :persistent_term.erase({FakeAI, :status_result})
     end)
 
@@ -160,6 +164,19 @@ defmodule Arbor.Actions.AcpTest do
                  disallowed_tools: ["Write"],
                  timeout: 60_000
                })
+    end
+
+    test "DOT boolean strings normalize at the action schema boundary and invalid forms fail closed" do
+      assert {:ok, %{use_pool: true}} =
+               Acp.StartSession.validate_params(%{provider: "claude", use_pool: "true"})
+
+      assert {:ok, %{use_pool: false}} =
+               Acp.StartSession.validate_params(%{provider: "claude", use_pool: "false"})
+
+      for invalid <- ["TRUE", "1", 1, nil, "yes"] do
+        assert {:error, _reason} =
+                 Acp.StartSession.validate_params(%{provider: "claude", use_pool: invalid})
+      end
     end
 
     test "generates tool schema" do
@@ -289,6 +306,8 @@ defmodule Arbor.Actions.AcpTest do
                    cwd: "/repo",
                    permission_mode: "default",
                    allowed_tools: ["Read"],
+                   use_pool: "true",
+                   session_id: "provider-session-resume-1",
                    timeout: 60_000
                  },
                  %{
@@ -304,10 +323,25 @@ defmodule Arbor.Actions.AcpTest do
       assert Keyword.get(opts, :task_id) == "task_secure_1"
       assert Keyword.get(opts, :model) == "sonnet"
       assert Keyword.get(opts, :cwd) == "/repo"
+      assert Keyword.get(opts, :use_pool) == true
+      assert Keyword.get(opts, :session_id) == "provider-session-resume-1"
 
       adapter_opts = Keyword.fetch!(opts, :adapter_opts)
       assert Keyword.get(adapter_opts, :permission_mode) == :default
       assert Keyword.get(adapter_opts, :allowed_tools) == ["Read"]
+    end
+
+    test "direct action execution rejects invalid serialized pool policy before managed start" do
+      install_fake_ai()
+
+      assert {:error, error} =
+               Acp.StartSession.run(
+                 %{provider: "claude", use_pool: "yes"},
+                 %{agent_id: "agent_start", task_id: "task_start"}
+               )
+
+      assert error =~ "use_pool must be"
+      refute_received {:managed_start, _provider, _opts}
     end
   end
 
@@ -400,6 +434,33 @@ defmodule Arbor.Actions.AcpTest do
       assert Keyword.get(opts, :timeout) == 30_000
       # worker_session_id wins over live session_pid; no legacy PID path is used.
       refute_received {:legacy_send, _, _, _}
+    end
+
+    test "preserves provider continuity from owner-bound status when the response ID is blank" do
+      install_fake_ai()
+
+      :persistent_term.put(
+        {FakeAI, :send_result},
+        {:ok,
+         %{
+           "text" => "done",
+           "stop_reason" => "end_turn",
+           "session_id" => "",
+           "usage" => %{}
+         }}
+      )
+
+      assert {:ok, response} =
+               Acp.SendMessage.run(
+                 %{worker_session_id: "acp_worker_resume", prompt: "continue"},
+                 %{agent_id: "agent_owner", task_id: "task_owner"}
+               )
+
+      assert response.session_id == "provider_sess_1"
+
+      assert_receive {:managed_status, "acp_worker_resume", opts}
+      assert Keyword.get(opts, :principal_id) == "agent_owner"
+      assert Keyword.get(opts, :task_id) == "task_owner"
     end
   end
 

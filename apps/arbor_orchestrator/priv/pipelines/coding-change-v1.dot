@@ -22,7 +22,11 @@
 //   legacy_status        - optional Phase 2 adapter alias (e.g.
 //                          review_requires_rework when status=rework_exhausted)
 //   workspace_id         - opaque workspace lease id
-//   worker_session_id    - opaque ACP worker handle
+//   worker_session_id    - opaque ACP worker handle; retained for compatibility
+//                          but no longer usable after close_worker
+//   worker_provider_session_id
+//                        - provider conversation ID suitable for a later
+//                          authorized plan's worker.resume_session_id
 //   branch / commit_hash - reviewable branch tip when produced
 //   validation_rework_count / review_rework_count / operator_rework_count
 //                        / total_rework_count
@@ -169,6 +173,7 @@ digraph CodingChangeV1 {
     action="acp_start_session",
     context_keys="provider,cwd",
     param.permission_mode="default",
+    param.use_pool="true",
     output_prefix="worker",
     max_retries="0"
   ]
@@ -178,6 +183,23 @@ digraph CodingChangeV1 {
     transform="identity",
     source_key="worker.worker_session_id",
     output_key="worker_session_id"
+  ]
+
+  hoist_worker_provider_session_id [
+    type="transform",
+    transform="identity",
+    source_key="worker.session_id",
+    output_key="worker_provider_session_id"
+  ]
+
+  // A newly minted pooled worker may not receive a provider conversation ID
+  // until its first prompt. Refresh the durable continuity field after every
+  // worker response while retaining the managed handle for in-run calls.
+  hoist_worker_provider_session_id_from_message [
+    type="transform",
+    transform="identity",
+    source_key="worker_msg.session_id",
+    output_key="worker_provider_session_id"
   ]
 
   // Implement (same worker across rework)
@@ -920,6 +942,7 @@ digraph CodingChangeV1 {
     target="action",
     action="acp_close_session",
     context_keys="worker_session_id",
+    param.return_to_pool=true,
     output_prefix="close",
     max_retries="0"
   ]
@@ -977,14 +1000,16 @@ digraph CodingChangeV1 {
   prep_release_mode_only -> release_workspace_only -> status_pipeline_error
 
   open_worker -> hoist_worker_session_id [condition="outcome=success"]
-  hoist_worker_session_id -> build_implement_prompt -> reset_worker_turn_protocol_retry_count
+  hoist_worker_session_id -> hoist_worker_provider_session_id
+  hoist_worker_provider_session_id -> build_implement_prompt -> reset_worker_turn_protocol_retry_count
   reset_worker_turn_protocol_retry_count -> implement
 
   // Implement hard failure -> status then cleanup
   implement -> status_pipeline_error_then_close [condition="outcome=fail"]
   status_pipeline_error_then_close -> close_worker
 
-  implement -> extract_worker_status [condition="outcome=success"]
+  implement -> hoist_worker_provider_session_id_from_message [condition="outcome=success"]
+  hoist_worker_provider_session_id_from_message -> extract_worker_status
   extract_worker_status -> inc_protocol_retry_count [condition="outcome=fail"]
   extract_worker_status -> route_worker_status [condition="outcome=success"]
   inc_protocol_retry_count -> inc_worker_turn_protocol_retry_count
@@ -993,7 +1018,7 @@ digraph CodingChangeV1 {
   build_protocol_repair_prompt -> repair_worker_protocol
   repair_worker_protocol -> error_worker_protocol_repair [condition="outcome=fail"]
   error_worker_protocol_repair -> status_pipeline_error_then_close
-  repair_worker_protocol -> extract_worker_status [condition="outcome=success"]
+  repair_worker_protocol -> hoist_worker_provider_session_id_from_message [condition="outcome=success"]
   check_protocol_retry_budget -> error_worker_protocol_invalid [condition="context.worker_turn_protocol_retry_count>=2"]
   error_worker_protocol_invalid -> status_pipeline_error_then_close
 

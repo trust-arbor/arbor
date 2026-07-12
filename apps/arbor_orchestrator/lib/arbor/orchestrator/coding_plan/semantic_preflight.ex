@@ -135,6 +135,9 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     * `:review_profile` — `"binding"`, `"human_required"`, or `"none"`.
       Binding/human require council-review dominance over every reachable
       changed success/publication terminal. Legacy `"none"` skips that proof.
+    * `:worker_use_pool` and `:worker_resume_session_id` — when both are
+      supplied by the reviewed plan boundary, bind `open_worker`'s static ACP
+      continuity parameters to that exact normalized plan.
   """
   @spec validate(Graph.t(), policy(), keyword()) :: :ok | {:error, validate_error()}
   def validate(graph, policy, opts \\ [])
@@ -143,6 +146,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     with {:ok, graph} <- prepare_graph(graph),
          {:ok, policy} <- normalize_policy(policy),
          {:ok, review_profile} <- normalize_review_profile(opts),
+         {:ok, worker_continuity} <- normalize_worker_continuity(opts),
          :ok <- require_compiled(graph) do
       errors =
         []
@@ -153,6 +157,7 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         |> check_operator_approval_routing(graph)
         |> check_forbidden_authority(graph)
         |> check_forbidden_denial_bypass_attrs(graph)
+        |> check_worker_continuity_bindings(graph, worker_continuity)
         |> check_profile_bindings(graph, policy, review_profile)
         |> check_reachability_and_dominance(graph, policy, review_profile)
         |> Enum.sort_by(&error_sort_key/1)
@@ -614,6 +619,29 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
         other ->
           {:error, {:invalid_semantic_policy, {:invalid_review_profile, other}}}
       end
+    end
+  end
+
+  defp normalize_worker_continuity(opts) do
+    case {
+      Keyword.fetch(opts, :worker_use_pool),
+      Keyword.fetch(opts, :worker_resume_session_id)
+    } do
+      {:error, :error} ->
+        {:ok, :unbound}
+
+      {{:ok, use_pool}, {:ok, resume_session_id}}
+      when is_boolean(use_pool) and
+             (is_nil(resume_session_id) or is_binary(resume_session_id)) ->
+        if is_nil(resume_session_id) or
+             (String.valid?(resume_session_id) and String.trim(resume_session_id) != "") do
+          {:ok, %{use_pool: use_pool, resume_session_id: resume_session_id}}
+        else
+          {:error, {:invalid_semantic_policy, :invalid_worker_continuity}}
+        end
+
+      _other ->
+        {:error, {:invalid_semantic_policy, :invalid_worker_continuity}}
     end
   end
 
@@ -1569,6 +1597,220 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
     end
   end
 
+  defp check_worker_continuity_bindings(errors, graph, continuity) do
+    expected_nodes = [
+      {"hoist_worker_provider_session_id",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "worker.session_id",
+         "output_key" => "worker_provider_session_id"
+       }},
+      {"hoist_worker_provider_session_id_from_message",
+       %{
+         "type" => "transform",
+         "transform" => "identity",
+         "source_key" => "worker_msg.session_id",
+         "output_key" => "worker_provider_session_id"
+       }}
+    ]
+
+    expected_edges = [
+      {"open_worker", "hoist_worker_session_id", "outcome=success"},
+      {"hoist_worker_session_id", "hoist_worker_provider_session_id", nil},
+      {"hoist_worker_provider_session_id", "build_implement_prompt", nil},
+      {"implement", "hoist_worker_provider_session_id_from_message", "outcome=success"},
+      {"repair_worker_protocol", "hoist_worker_provider_session_id_from_message",
+       "outcome=success"},
+      {"hoist_worker_provider_session_id_from_message", "extract_worker_status", nil}
+    ]
+
+    errors =
+      Enum.reduce(expected_nodes, errors, fn {node_id, expected}, acc ->
+        require_worker_continuity_node_attrs(acc, graph, node_id, expected)
+      end)
+
+    errors = check_worker_open_continuity(errors, graph, continuity)
+    errors = check_worker_close_continuity(errors, graph, continuity)
+
+    Enum.reduce(expected_edges, errors, fn {from, to, condition}, acc ->
+      require_worker_continuity_edge(acc, graph, from, to, condition)
+    end)
+  end
+
+  defp require_worker_continuity_node_attrs(errors, graph, node_id, expected) do
+    case Map.fetch(graph.nodes, node_id) do
+      :error ->
+        [error("worker_continuity_missing_node", node_id, %{}) | errors]
+
+      {:ok, node} ->
+        Enum.reduce(expected, errors, fn {attribute, expected_value}, acc ->
+          actual = Map.get(node.attrs, attribute)
+
+          if actual == expected_value do
+            acc
+          else
+            [
+              error("worker_continuity_binding_mismatch", node_id, %{
+                "attribute" => attribute,
+                "expected" => expected_value,
+                "actual" => actual
+              })
+              | acc
+            ]
+          end
+        end)
+    end
+  end
+
+  defp check_worker_open_continuity(errors, graph, continuity) do
+    case Map.fetch(graph.nodes, "open_worker") do
+      :error ->
+        errors
+
+      {:ok, node} ->
+        attrs = node.attrs
+        context_keys = Map.get(attrs, "context_keys")
+
+        errors
+        |> require_worker_open_value(
+          "context_keys",
+          context_keys in ["provider,cwd", "provider,cwd,model"],
+          "provider,cwd or provider,cwd,model",
+          context_keys
+        )
+        |> check_worker_pool_binding(attrs, continuity)
+        |> check_worker_resume_binding(attrs, continuity)
+    end
+  end
+
+  defp check_worker_pool_binding(errors, attrs, :unbound) do
+    actual = Map.get(attrs, "param.use_pool")
+
+    require_worker_open_value(
+      errors,
+      "param.use_pool",
+      actual in ["true", "false"],
+      "true or false",
+      actual
+    )
+  end
+
+  defp check_worker_pool_binding(errors, attrs, %{use_pool: use_pool}) do
+    actual = Map.get(attrs, "param.use_pool")
+    expected = if(use_pool, do: "true", else: "false")
+
+    require_worker_open_value(
+      errors,
+      "param.use_pool",
+      actual == expected,
+      expected,
+      actual
+    )
+  end
+
+  defp check_worker_close_continuity(errors, graph, continuity) do
+    case Map.fetch(graph.nodes, "close_worker") do
+      :error ->
+        errors
+
+      {:ok, node} ->
+        actual = Map.get(node.attrs, "param.return_to_pool")
+
+        valid? =
+          case continuity do
+            :unbound -> actual in [true, false, "true", "false"]
+            %{use_pool: expected} -> actual == expected
+          end
+
+        expected =
+          case continuity do
+            :unbound -> "true or false"
+            %{use_pool: value} -> value
+          end
+
+        if valid? do
+          errors
+        else
+          [
+            error("worker_continuity_binding_mismatch", "close_worker", %{
+              "attribute" => "param.return_to_pool",
+              "expected" => expected,
+              "actual" => actual
+            })
+            | errors
+          ]
+        end
+    end
+  end
+
+  defp check_worker_resume_binding(errors, attrs, :unbound) do
+    actual = Map.get(attrs, "param.session_id")
+
+    valid? =
+      is_nil(actual) or
+        (is_binary(actual) and String.valid?(actual) and String.trim(actual) != "")
+
+    require_worker_open_value(
+      errors,
+      "param.session_id",
+      valid?,
+      "absent or a nonblank provider session id",
+      actual
+    )
+  end
+
+  defp check_worker_resume_binding(errors, attrs, %{resume_session_id: nil}) do
+    require_worker_open_value(
+      errors,
+      "param.session_id",
+      not Map.has_key?(attrs, "param.session_id"),
+      nil,
+      Map.get(attrs, "param.session_id")
+    )
+  end
+
+  defp check_worker_resume_binding(errors, attrs, %{resume_session_id: expected}) do
+    actual = Map.get(attrs, "param.session_id")
+
+    require_worker_open_value(
+      errors,
+      "param.session_id",
+      actual == expected,
+      expected,
+      actual
+    )
+  end
+
+  defp require_worker_open_value(errors, _attribute, true, _expected, _actual), do: errors
+
+  defp require_worker_open_value(errors, attribute, false, expected, actual) do
+    [
+      error("worker_continuity_binding_mismatch", "open_worker", %{
+        "attribute" => attribute,
+        "expected" => expected,
+        "actual" => actual
+      })
+      | errors
+    ]
+  end
+
+  defp require_worker_continuity_edge(errors, graph, from, to, condition) do
+    if Enum.any?(graph.edges, fn edge ->
+         edge.from == from and edge.to == to and Map.get(edge.attrs, "condition") == condition
+       end) do
+      errors
+    else
+      [
+        error("worker_continuity_missing_edge", from, %{
+          "to" => to,
+          "condition" => condition
+        })
+        | errors
+      ]
+    end
+  end
+
   defp check_forbidden_authority(errors, graph) do
     graph.nodes
     |> Enum.sort_by(&elem(&1, 0))
@@ -2101,8 +2343,27 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflight do
           reachable,
           review_profile
         )
+        |> check_worker_continuity_dominance(reachable, dominators)
         |> check_security_rework_dominance(graph, policy)
     end
+  end
+
+  defp check_worker_continuity_dominance(errors, reachable, dominators) do
+    errors
+    |> require_dominates(
+      "hoist_worker_provider_session_id",
+      "implement",
+      reachable,
+      dominators,
+      "worker_provider_session_open_capture"
+    )
+    |> require_dominates(
+      "hoist_worker_provider_session_id_from_message",
+      "extract_worker_status",
+      reachable,
+      dominators,
+      "worker_provider_session_message_capture"
+    )
   end
 
   # Prove each reviewed action node is reachable and that its policy-encoded

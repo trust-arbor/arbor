@@ -22,6 +22,7 @@ defmodule Arbor.Contracts.Coding.Plan do
 
   * base ref: `HEAD`
   * isolated workspace, with generated branch/worktree locations
+  * pooled ACP worker execution, with no provider session resumed by default
   * default task and validation profiles; binding review
   * at most two rework cycles
   * 15-minute wall-clock budget and 5-minute inactivity budget
@@ -72,7 +73,7 @@ defmodule Arbor.Contracts.Coding.Plan do
     :requested_paths
   ]
   @workspace_fields [:mode, :branch_name, :worktree_base_dir]
-  @worker_fields [:provider, :model, :permission_mode]
+  @worker_fields [:provider, :model, :permission_mode, :use_pool, :resume_session_id]
   @rework_fields [:max_cycles, :stop_conditions]
   @budget_fields [:wall_clock_ms, :inactivity_timeout_ms, :model_cost_usd, :parallelism]
   @output_fields [:commit, :draft_pr, :retain_workspace]
@@ -102,7 +103,7 @@ defmodule Arbor.Contracts.Coding.Plan do
   @default_output %{"commit" => true, "draft_pr" => false, "retain_workspace" => true}
 
   @type workspace_policy :: %{required(String.t()) => String.t() | nil}
-  @type worker :: %{required(String.t()) => String.t() | nil}
+  @type worker :: %{required(String.t()) => String.t() | boolean() | nil}
   @type rework :: %{required(String.t()) => non_neg_integer() | [String.t()]}
   @type budgets :: %{required(String.t()) => number() | nil}
   @type output :: %{required(String.t()) => boolean()}
@@ -259,12 +260,21 @@ defmodule Arbor.Contracts.Coding.Plan do
              Map.get(attrs, :permission_mode, "default"),
              @permission_modes,
              "worker.permission_mode"
+           ),
+         {:ok, use_pool} <-
+           normalize_boolean(Map.get(attrs, :use_pool, true), "worker.use_pool"),
+         {:ok, resume_session_id} <-
+           normalize_optional_string(
+             Map.get(attrs, :resume_session_id),
+             "worker.resume_session_id"
            ) do
       {:ok,
        %{
          "provider" => provider,
          "model" => model,
-         "permission_mode" => permission_mode
+         "permission_mode" => permission_mode,
+         "use_pool" => use_pool,
+         "resume_session_id" => resume_session_id
        }}
     end
   end

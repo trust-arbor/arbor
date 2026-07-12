@@ -91,7 +91,11 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
                  provider: Map.get(args, "provider") || Map.get(args, :provider) || "codex",
                  model: "default",
                  status: "ready",
-                 pooled: false
+                 pooled:
+                   (Map.get(args, "use_pool") || Map.get(args, :use_pool) || false) in [
+                     true,
+                     "true"
+                   ]
                }}
           end
 
@@ -122,7 +126,17 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
               {:error, "close session failed"}
 
             _ ->
-              {:ok, %{worker_session_id: "acp_worker_fixture_1", status: "closed"}}
+              return_to_pool =
+                (Map.get(args, "return_to_pool") || Map.get(args, :return_to_pool) || false) in [
+                  true,
+                  "true"
+                ]
+
+              {:ok,
+               %{
+                 worker_session_id: "acp_worker_fixture_1",
+                 status: if(return_to_pool, do: "returned_to_pool", else: "closed")
+               }}
           end
 
         "coding_workspace_release" ->
@@ -1104,6 +1118,17 @@ defmodule Arbor.Orchestrator.CodingChangePipelineTest do
       assert called?(calls, "coding_reviewed_commit")
       refute called?(calls, "git_pr")
       assert result.context["commit_hash"] == "commitabc123"
+      assert result.context["worker_provider_session_id"] == "sess_1"
+
+      assert {"acp_start_session", start_args} =
+               Enum.find(calls, fn {name, _args} -> name == "acp_start_session" end)
+
+      assert start_args["use_pool"] == "true"
+
+      assert {"acp_close_session", close_args} =
+               Enum.find(calls, fn {name, _args} -> name == "acp_close_session" end)
+
+      assert close_args["return_to_pool"] == true
 
       assert {"coding_workspace_committed_change", materialize_args} =
                Enum.find(calls, fn {name, _args} ->

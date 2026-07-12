@@ -1157,7 +1157,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          :ok <- Profiles.validate_requirements(profile, compiled_graph),
          :ok <-
            SemanticPreflight.validate(compiled_graph, profile["semantic_policy"],
-             review_profile: plan.review_profile
+             review_profile: plan.review_profile,
+             worker_use_pool: plan.worker["use_pool"],
+             worker_resume_session_id: plan.worker["resume_session_id"]
            ),
          {:ok, live_catalog} <- ActionCatalog.snapshot(),
          {:ok, pinned_action_bindings} <-
@@ -1912,6 +1914,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       "pr_url" => extract_pr_url(context),
       "workspace_id" => context_get(context, "workspace_id"),
       "worker_session_id" => context_get(context, "worker_session_id"),
+      "worker_provider_session_id" => context_get(context, "worker_provider_session_id"),
       "response_text" => extract_response_text(context),
       "error" => context_get(context, "error") || context_get(context, "review_error"),
       # Operator approval fields are stable, bounded, JSON-clean scalars only —
@@ -1927,7 +1930,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
       "status" => "pipeline_error",
       "error" => context_get(context, "error"),
       "workspace_id" => context_get(context, "workspace_id"),
-      "worker_session_id" => context_get(context, "worker_session_id")
+      "worker_session_id" => context_get(context, "worker_session_id"),
+      "worker_provider_session_id" => context_get(context, "worker_provider_session_id")
     }
     |> reject_nil_values()
   end

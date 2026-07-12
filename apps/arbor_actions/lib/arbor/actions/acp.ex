@@ -8,8 +8,11 @@ defmodule Arbor.Actions.Acp do
   provide capability-based authorization through the standard action interface.
 
   Managed sessions return opaque `worker_session_id` handles suitable for
-  Engine context / checkpoints. PIDs never appear in public action outputs.
-  Legacy `session_pid` input remains accepted for backward compatibility.
+  Engine context / checkpoints. The handle is valid only while registered;
+  after close, use the distinct provider `session_id` to resume a conversation
+  in a newly authorized managed session. PIDs never appear in public action
+  outputs. Legacy `session_pid` input remains accepted for backward
+  compatibility.
 
   ## Actions
 
@@ -191,6 +194,9 @@ defmodule Arbor.Actions.Acp do
   def format_error({:invalid_provider, p}),
     do: "Unknown provider '#{p}'. Valid: #{inspect(allowed_providers())}"
 
+  def format_error(:invalid_use_pool),
+    do: "use_pool must be true, false, \"true\", or \"false\""
+
   def format_error(reason) when is_binary(reason), do: reason
   def format_error(reason), do: "ACP error: #{inspect(reason)}"
 
@@ -260,8 +266,8 @@ defmodule Arbor.Actions.Acp do
     | `provider` | string | yes | Provider: claude, codex, gemini, opencode, goose, cursor |
     | `model` | string | no | Model override |
     | `cwd` | string | no | Working directory for the session |
-    | `session_id` | string | no | Resume an existing session by ID |
-    | `use_pool` | boolean | no | Checkout from pool instead of starting fresh (default: false) |
+    | `session_id` | string | no | Provider conversation ID to resume |
+    | `use_pool` | boolean | no | Checkout from pool instead of starting fresh (default: false); DOT may serialize this as `"true"` or `"false"` |
     | `permission_mode` | string | no | Adapter permission mode: default, bypass, or deny |
     | `allowed_tools` | list | no | Adapter tool allowlist |
     | `disallowed_tools` | list | no | Adapter tool denylist |
@@ -341,6 +347,14 @@ defmodule Arbor.Actions.Acp do
     def egress_tier(_params, _context), do: :external_peer
 
     @impl true
+    def on_before_validate_params(params) do
+      case normalize_use_pool_param(params) do
+        {:ok, normalized} -> {:ok, normalized}
+        {:error, reason} -> {:error, Acp.format_error(reason)}
+      end
+    end
+
+    @impl true
     @spec run(map(), map()) :: {:ok, map()} | {:error, term()}
     def run(params, context) do
       # SECURITY (codex authz.acp-session-anonymous-file-access, HIGH): forward
@@ -352,8 +366,9 @@ defmodule Arbor.Actions.Acp do
       agent_id = caller_agent_id(context)
       task_id = Acp.caller_task_id(context)
 
-      with :ok <- Acp.require_acp!(),
-           {:ok, provider} <- normalize_provider(params.provider),
+      with {:ok, params} <- normalize_use_pool_param(params),
+           :ok <- Acp.require_acp!(),
+           {:ok, provider} <- normalize_provider(Acp.param(params, :provider)),
            {:ok, meta} <- managed_start(provider, params, agent_id, task_id),
            {:ok, result} <- public_start_result(meta, params, provider) do
         {:ok, result}
@@ -447,6 +462,33 @@ defmodule Arbor.Actions.Acp do
     end
 
     @doc false
+    def normalize_use_pool_param(params) when is_map(params) do
+      case {Map.fetch(params, :use_pool), Map.fetch(params, "use_pool")} do
+        {:error, :error} ->
+          {:ok, Map.put(params, :use_pool, false)}
+
+        {{:ok, _atom_value}, {:ok, _string_value}} ->
+          {:error, :invalid_use_pool}
+
+        {{:ok, value}, :error} ->
+          put_normalized_use_pool(params, value)
+
+        {:error, {:ok, value}} ->
+          params
+          |> Map.delete("use_pool")
+          |> put_normalized_use_pool(value)
+      end
+    end
+
+    def normalize_use_pool_param(_params), do: {:error, :invalid_use_pool}
+
+    @doc false
+    def normalize_use_pool(value) when is_boolean(value), do: {:ok, value}
+    def normalize_use_pool("true"), do: {:ok, true}
+    def normalize_use_pool("false"), do: {:ok, false}
+    def normalize_use_pool(_value), do: {:error, :invalid_use_pool}
+
+    @doc false
     def normalize_permission_mode(nil), do: nil
     def normalize_permission_mode(:default), do: :default
     def normalize_permission_mode(:bypass), do: :bypass
@@ -488,6 +530,13 @@ defmodule Arbor.Actions.Acp do
 
     defp non_empty_string(value) when is_binary(value) and value != "", do: value
     defp non_empty_string(_), do: nil
+
+    defp put_normalized_use_pool(params, value) do
+      case normalize_use_pool(value) do
+        {:ok, normalized} -> {:ok, Map.put(params, :use_pool, normalized)}
+        {:error, _reason} = error -> error
+      end
+    end
 
     defp map_get(map, key), do: Map.get(map, key)
 
@@ -588,14 +637,17 @@ defmodule Arbor.Actions.Acp do
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(Acp.ai_module(), :acp_managed_send_message, [worker_session_id, prompt, opts]) do
         {:ok, response} ->
+          status = managed_status(worker_session_id, context)
+
           {:ok,
            %{
              text: map_get(response, :text) || map_get(response, "text") || "",
              stop_reason:
                map_get(response, :stop_reason) || map_get(response, "stop_reason") ||
                  "end_turn",
-             session_id: map_get(response, :session_id) || map_get(response, "session_id") || "",
-             context_pressure: managed_context_pressure(worker_session_id, context),
+             session_id: provider_session_id(response, status),
+             context_pressure:
+               map_get(status, :context_pressure) || map_get(status, "context_pressure") || false,
              usage: map_get(response, :usage) || map_get(response, "usage") || %{}
            }}
 
@@ -629,22 +681,30 @@ defmodule Arbor.Actions.Acp do
       end
     end
 
-    # Obtain context_pressure via managed status without resolving/exposing a PID.
-    defp managed_context_pressure(worker_session_id, context) do
+    # Obtain continuity and pressure through the owner-bound managed facade
+    # without resolving or exposing a PID.
+    defp managed_status(worker_session_id, context) do
       opts = Acp.authority_opts(context)
 
       # credo:disable-for-next-line Credo.Check.Refactor.Apply
       case apply(Acp.ai_module(), :acp_managed_session_status, [worker_session_id, opts]) do
-        {:ok, status} when is_map(status) ->
-          map_get(status, :context_pressure) || map_get(status, "context_pressure") || false
-
-        _ ->
-          false
+        {:ok, status} when is_map(status) -> status
+        _ -> %{}
       end
     rescue
-      _ -> false
+      _ -> %{}
     catch
-      :exit, _ -> false
+      :exit, _ -> %{}
+    end
+
+    defp provider_session_id(response, status) do
+      [
+        map_get(response, :session_id),
+        map_get(response, "session_id"),
+        map_get(status, :session_id),
+        map_get(status, "session_id")
+      ]
+      |> Enum.find("", &(is_binary(&1) and &1 != ""))
     end
 
     defp get_param(params, key), do: Acp.param(params, key)

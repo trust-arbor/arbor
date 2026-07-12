@@ -23,6 +23,8 @@ defmodule Arbor.Orchestrator.CodingPlan.Profiles do
                     close_worker
                     commit_change
                     done
+                    hoist_worker_provider_session_id
+                    hoist_worker_provider_session_id_from_message
                     implement
                     inspect_workspace
                     load_committed_change

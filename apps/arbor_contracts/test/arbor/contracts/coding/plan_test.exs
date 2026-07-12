@@ -47,7 +47,9 @@ defmodule Arbor.Contracts.Coding.PlanTest do
       assert plan.worker == %{
                "provider" => "codex",
                "model" => nil,
-               "permission_mode" => "default"
+               "permission_mode" => "default",
+               "use_pool" => true,
+               "resume_session_id" => nil
              }
 
       assert plan.validation_profile == "default"
@@ -87,7 +89,9 @@ defmodule Arbor.Contracts.Coding.PlanTest do
         "worker" => %{
           "provider" => "grok",
           "model" => "grok-code-fast",
-          "permission_mode" => "deny"
+          "permission_mode" => "deny",
+          "use_pool" => false,
+          "resume_session_id" => "provider-session-123"
         },
         "validation_profile" => "docs_only",
         "review_profile" => "human_required",
@@ -336,7 +340,9 @@ defmodule Arbor.Contracts.Coding.PlanTest do
       assert plan.worker == %{
                "provider" => "codex",
                "model" => "gpt-5",
-               "permission_mode" => "deny"
+               "permission_mode" => "deny",
+               "use_pool" => true,
+               "resume_session_id" => nil
              }
 
       for provider <- [nil, "", " ", :codex] do
@@ -359,6 +365,45 @@ defmodule Arbor.Contracts.Coding.PlanTest do
       for model <- ["", " ", :default] do
         assert {:error, {:invalid_field, "worker.model", _}} =
                  Plan.new(Map.put(@minimal_attrs, :worker, %{provider: "codex", model: model}))
+      end
+    end
+
+    test "supports explicit pool policy and an optional provider resume session" do
+      assert {:ok, pooled} = Plan.new(@minimal_attrs)
+      assert pooled.worker["use_pool"] == true
+      assert pooled.worker["resume_session_id"] == nil
+
+      assert {:ok, fresh} =
+               Plan.new(
+                 Map.put(@minimal_attrs, :worker, %{
+                   provider: "grok",
+                   use_pool: false,
+                   resume_session_id: "provider-session-123"
+                 })
+               )
+
+      assert fresh.worker["use_pool"] == false
+      assert fresh.worker["resume_session_id"] == "provider-session-123"
+      assert Plan.to_map(fresh)["worker"] == fresh.worker
+
+      for use_pool <- ["true", 1, nil] do
+        assert {:error, {:invalid_field, "worker.use_pool", _}} =
+                 Plan.new(
+                   Map.put(@minimal_attrs, :worker, %{
+                     provider: "grok",
+                     use_pool: use_pool
+                   })
+                 )
+      end
+
+      for resume_session_id <- ["", "  ", :provider_session] do
+        assert {:error, {:invalid_field, "worker.resume_session_id", _}} =
+                 Plan.new(
+                   Map.put(@minimal_attrs, :worker, %{
+                     provider: "grok",
+                     resume_session_id: resume_session_id
+                   })
+                 )
       end
     end
   end

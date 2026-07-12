@@ -31,6 +31,35 @@ Plan version is **1**. Minimally required plan fields:
 | `repo_root` | Absolute repository path inside configured workspace roots |
 | `worker.provider` | Worker provider id (for example `codex`) |
 
+Reviewed coding plans use the ACP pool by default (`worker.use_pool: true`).
+The workflow returns a pooled process after use while invalidating its
+per-run managed handle.
+The worker object also accepts:
+
+- `model` - explicit provider model override
+- `permission_mode` - reviewed adapter mode (`default` or `deny`)
+- `use_pool` - boolean; set `false` only when a fresh managed process is required
+- `resume_session_id` - non-blank provider conversation ID returned by an
+  earlier coding task
+
+For example, to continue the provider conversation from an earlier task while
+keeping the new task's authorization and execution identity independent:
+
+```json
+{
+  "worker": {
+    "provider": "grok",
+    "model": "grok-code-fast",
+    "use_pool": true,
+    "resume_session_id": "provider-session-id-from-prior-result"
+  }
+}
+```
+
+The compiler maps `resume_session_id` only to `acp_start_session.session_id`.
+It does not replace the Engine session, task principal, signer, or verified run
+authorization.
+
 Optional reviewed selectors on the plan:
 
 - `validation_profile` - reviewed validation profile id
@@ -51,6 +80,14 @@ After dispatch:
 
 Approvals stay human-visible and capability-gated. Dispatch does **not** grant
 merge authority or unattended authorization.
+
+Successful results and failures reached after worker startup may include both
+`worker_session_id` and `worker_provider_session_id`. The former is an opaque
+managed handle retained for compatibility and is no longer usable after the
+workflow closes it. Use only `worker_provider_session_id` as a later plan's
+`worker.resume_session_id`; the later dispatch must pass normal authorization
+again. Provider-session continuity does not currently reuse the retained Git
+worktree automatically.
 
 ## Default execution path
 

@@ -50,7 +50,9 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
       assert plan.worker == %{
                "provider" => "grok",
                "model" => nil,
-               "permission_mode" => "default"
+               "permission_mode" => "default",
+               "use_pool" => true,
+               "resume_session_id" => nil
              }
 
       assert plan.workspace_policy == %{
@@ -173,7 +175,9 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
         "worker" => %{
           "provider" => "grok",
           "model" => "grok-code-fast",
-          "permission_mode" => "deny"
+          "permission_mode" => "deny",
+          "use_pool" => true,
+          "resume_session_id" => "provider-session-123"
         },
         "validation_profile" => "security_regression",
         "review_profile" => "human_required",

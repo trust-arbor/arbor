@@ -1691,6 +1691,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                  "worktree_path" => "/tmp/ws",
                  "workspace_id" => "ws_1",
                  "worker_session_id" => "w_1",
+                 "worker_provider_session_id" => "provider-session-1",
                  "diff" => "diff --git a",
                  "files" => ["lib/a.ex"]
                })
@@ -1702,6 +1703,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert result["branch"] == "b1"
       assert result["workspace_id"] == "ws_1"
       assert result["worker_session_id"] == "w_1"
+      assert result["worker_provider_session_id"] == "provider-session-1"
       assert result["files"] == ["lib/a.ex"]
       assert result["acp_agent"] == "codex"
       refute Map.has_key?(result, :__struct__)
@@ -1980,11 +1982,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                run_with_context(%{
                  "status" => "pipeline_error",
                  "error" => "acquire failed",
-                 "workspace_id" => "ws_x"
+                 "workspace_id" => "ws_x",
+                 "worker_session_id" => "closed-worker-handle",
+                 "worker_provider_session_id" => "provider-session-failure-1"
                })
 
       assert detail["status"] == "pipeline_error"
       assert detail["error"] == "acquire failed"
+      assert detail["worker_session_id"] == "closed-worker-handle"
+      assert detail["worker_provider_session_id"] == "provider-session-failure-1"
 
       assert {:error, :missing_terminal_status} = run_with_context(%{"branch" => "b1"})
 

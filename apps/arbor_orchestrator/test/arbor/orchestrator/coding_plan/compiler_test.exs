@@ -144,7 +144,10 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
     assert node_attrs(graph, "review_change")["action"] == "council_review_change"
     assert node_attrs(graph, "classify_profile")["expression"] == "default"
     assert node_attrs(graph, "open_worker")["param.permission_mode"] == "deny"
+    assert node_attrs(graph, "open_worker")["param.use_pool"] == "true"
+    refute Map.has_key?(node_attrs(graph, "open_worker"), "param.session_id")
     assert node_attrs(graph, "open_worker")["context_keys"] == "provider,cwd,model"
+    assert node_attrs(graph, "close_worker")["param.return_to_pool"] == true
 
     for node_id <- ~w[implement repair_worker_protocol] do
       assert node_attrs(graph, node_id)["context_keys"] ==
@@ -194,6 +197,41 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
                binding["module"] == Atom.to_string(Arbor.Actions.Mix.Compile) and
                binding["beam_sha256"] =~ ~r/^[0-9a-f]{64}$/
            end)
+  end
+
+  test "worker continuity policy compiles only to StartSession static parameters", ctx do
+    resume_id = "provider-session-continue-123"
+
+    plan =
+      plan!(%{
+        "worker" => %{
+          "provider" => "grok",
+          "model" => "grok-code-fast",
+          "use_pool" => false,
+          "resume_session_id" => resume_id
+        }
+      })
+
+    assert {:ok, compilation} = compile(plan, ctx)
+    graph = parse!(compilation.dot_source)
+    open_worker = node_attrs(graph, "open_worker")
+
+    assert open_worker["param.use_pool"] == "false"
+    assert open_worker["param.session_id"] == resume_id
+    assert open_worker["context_keys"] == "provider,cwd,model"
+    assert node_attrs(graph, "close_worker")["param.return_to_pool"] == false
+
+    assert node_attrs(graph, "hoist_worker_provider_session_id") == %{
+             "type" => "transform",
+             "transform" => "identity",
+             "source_key" => "worker.session_id",
+             "output_key" => "worker_provider_session_id"
+           }
+
+    refute Map.has_key?(compilation.initial_values, "session_id")
+    refute Map.has_key?(compilation.initial_values, "resume_session_id")
+    refute Map.has_key?(compilation.initial_values, "worker_provider_session_id")
+    assert {:ok, ^compilation} = Compilation.validate(compilation, plan)
   end
 
   test "security regression: default profile restores warnings-as-errors after template drift",

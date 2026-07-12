@@ -84,7 +84,9 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
     assert plan.worker == %{
              "model" => nil,
              "permission_mode" => "default",
-             "provider" => "grok"
+             "provider" => "grok",
+             "use_pool" => true,
+             "resume_session_id" => nil
            }
 
     assert result["plan_map"] == Plan.to_map(plan)

@@ -993,6 +993,60 @@ defmodule Arbor.Orchestrator.CodingPlan.SemanticPreflightTest do
            end)
   end
 
+  test "continuity parameters are bound to the reviewed worker plan", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    substituted =
+      update_in(graph.nodes["open_worker"].attrs, fn attrs ->
+        Map.put(attrs, "param.use_pool", "false")
+      end)
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(substituted, profile["semantic_policy"],
+               review_profile: "binding",
+               worker_use_pool: true,
+               worker_resume_session_id: nil
+             )
+
+    assert Enum.any?(errors, fn err ->
+             err["code"] == "worker_continuity_binding_mismatch" and
+               err["node_id"] == "open_worker" and
+               err["detail"]["attribute"] == "param.use_pool"
+           end)
+  end
+
+  test "provider session capture must dominate worker protocol projection", ctx do
+    assert {:ok, compilation} = compile(plan!(), ctx)
+    graph = compiled_graph!(compilation.dot_source)
+    assert {:ok, profile} = Profiles.fetch_executable("default")
+
+    bypassed = %{
+      graph
+      | edges:
+          Enum.map(graph.edges, fn edge ->
+            if edge.from == "implement" and
+                 edge.to == "hoist_worker_provider_session_id_from_message" do
+              %{edge | to: "extract_worker_status"}
+            else
+              edge
+            end
+          end)
+    }
+
+    assert {:error, {:semantic_preflight_failed, errors}} =
+             SemanticPreflight.validate(bypassed, profile["semantic_policy"],
+               review_profile: "binding",
+               worker_use_pool: true,
+               worker_resume_session_id: nil
+             )
+
+    assert Enum.any?(errors, fn err ->
+             err["code"] in ["worker_continuity_missing_edge", "dominance_violation"]
+           end)
+  end
+
   test "adversarial: bypass of check_validation_passed fails closed", ctx do
     # Keep validate reachable, but route success straight to commit prep so the
     # validation-result gate no longer dominates commit/publication routing.

@@ -119,7 +119,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
          :ok <- Profiles.validate_requirements(profile, compiled_graph),
          :ok <-
            SemanticPreflight.validate(compiled_graph, profile["semantic_policy"],
-             review_profile: plan.review_profile
+             review_profile: plan.review_profile,
+             worker_use_pool: plan.worker["use_pool"],
+             worker_resume_session_id: plan.worker["resume_session_id"]
            ),
          graph_hash = sha256(dot_source),
          {:ok, {execution_manifest, execution_manifest_digest}} <-
@@ -374,6 +376,7 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
   defp apply_reviewed_mutations(graph, plan, plan_fingerprint, action_catalog) do
     with {:ok, graph} <- rewrite_classification(graph, plan.task_class),
          {:ok, graph} <- rewrite_worker_open(graph, plan.worker),
+         {:ok, graph} <- rewrite_worker_close(graph, plan.worker),
          {:ok, graph} <- rewrite_prompt_budgets(graph),
          {:ok, graph} <- rewrite_profile_flow(graph, plan),
          {:ok, graph} <- rewrite_rework_budget(graph, plan.rework["max_cycles"]),
@@ -401,7 +404,17 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
         {:ok,
          attrs
          |> Map.put("context_keys", context_keys)
-         |> Map.put("param.permission_mode", worker["permission_mode"])}
+         |> Map.put("param.permission_mode", worker["permission_mode"])
+         |> Map.put("param.use_pool", bool_string(worker["use_pool"]))
+         |> put_optional_static_param("param.session_id", worker["resume_session_id"])}
+      end
+    end)
+  end
+
+  defp rewrite_worker_close(graph, worker) do
+    update_node(graph, "close_worker", fn attrs ->
+      with :ok <- require_action_attrs(attrs, "acp_close_session") do
+        {:ok, Map.put(attrs, "param.return_to_pool", worker["use_pool"])}
       end
     end)
   end
@@ -1433,6 +1446,9 @@ defmodule Arbor.Orchestrator.CodingPlan.Compiler do
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp put_optional_static_param(attrs, key, nil), do: Map.delete(attrs, key)
+  defp put_optional_static_param(attrs, key, value), do: Map.put(attrs, key, value)
 
   defp bool_string(true), do: "true"
   defp bool_string(false), do: "false"
