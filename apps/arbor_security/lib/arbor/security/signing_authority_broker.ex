@@ -437,53 +437,37 @@ defmodule Arbor.Security.SigningAuthorityBroker do
          {:ok, %SigningAuthority{} = authority},
          timeout_ms
        ) do
-    case call(broker_pid, {:ack_persistent_open, request_id}, timeout_ms) do
+    case call(
+           broker_pid,
+           {:prepare_persistent_open_finalize, request_id},
+           min(timeout_ms, @persistent_finalize_timeout_ms)
+         ) do
       :ok ->
-        case call(
-               broker_pid,
-               {:finalize_persistent_open, request_id},
-               min(timeout_ms, @persistent_finalize_timeout_ms)
-             ) do
-          :ok ->
-            {:ok, authority}
-
-          {:error, _reason} = error ->
-            request_persistent_open_cancel(broker_pid, request_id, timeout_ms)
-            error
-
-          _unexpected ->
-            request_persistent_open_cancel(broker_pid, request_id, timeout_ms)
-            {:error, :broker_unavailable}
-        end
+        GenServer.cast(broker_pid, {:ack_persistent_open, request_id, self()})
+        {:ok, authority}
 
       {:error, _reason} = error ->
-        request_persistent_open_cancel(broker_pid, request_id, timeout_ms)
+        request_persistent_open_cancel(broker_pid, request_id)
         error
 
       _unexpected ->
-        request_persistent_open_cancel(broker_pid, request_id, timeout_ms)
+        request_persistent_open_cancel(broker_pid, request_id)
         {:error, :broker_unavailable}
     end
   end
 
-  defp complete_persistent_open(broker_pid, request_id, {:error, _reason} = error, timeout_ms) do
-    request_persistent_open_cancel(broker_pid, request_id, timeout_ms)
+  defp complete_persistent_open(broker_pid, request_id, {:error, _reason} = error, _timeout_ms) do
+    request_persistent_open_cancel(broker_pid, request_id)
     error
   end
 
-  defp complete_persistent_open(broker_pid, request_id, _unexpected, timeout_ms) do
-    request_persistent_open_cancel(broker_pid, request_id, timeout_ms)
+  defp complete_persistent_open(broker_pid, request_id, _unexpected, _timeout_ms) do
+    request_persistent_open_cancel(broker_pid, request_id)
     {:error, :broker_unavailable}
   end
 
-  defp request_persistent_open_cancel(broker_pid, request_id, timeout_ms) do
-    _ =
-      call(
-        broker_pid,
-        {:cancel_persistent_open, request_id},
-        min(timeout_ms, @persistent_finalize_timeout_ms)
-      )
-
+  defp request_persistent_open_cancel(broker_pid, request_id) do
+    GenServer.cast(broker_pid, {:cancel_persistent_open, request_id, self()})
     :ok
   end
 
@@ -540,15 +524,18 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   # ---------------------------------------------------------------------------
 
   @impl true
-  def init(_opts) do
-    with state_owner_pid when is_pid(state_owner_pid) <-
+  def init(opts) do
+    with {:ok, state_owner_token} <- Keyword.fetch(opts, :state_owner_token),
+         true <- is_reference(state_owner_token),
+         state_owner_pid when is_pid(state_owner_pid) <-
            Process.whereis(SigningAuthorityStateOwner),
-         {:ok, snapshot} <- SigningAuthorityStateOwner.load(),
+         {:ok, snapshot} <- SigningAuthorityStateOwner.load(state_owner_token),
          {:ok, recovered_state} <- recover_persistent_state(snapshot) do
       state =
         Map.merge(recovered_state, %{
           ephemeral_open_requests: %{},
           wrapping_key: :crypto.strong_rand_bytes(@wrapping_key_bytes),
+          state_owner_token: state_owner_token,
           state_owner_monitor: Process.monitor(state_owner_pid)
         })
 
@@ -593,47 +580,24 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
-  def handle_call({:ack_persistent_open, request_id}, {caller_pid, _tag}, state) do
+  def handle_call({:prepare_persistent_open_finalize, request_id}, {caller_pid, _tag}, state) do
     case fetch_persistent_open_request(state, request_id, caller_pid) do
-      {:ok, request} ->
+      {:ok, %{status: :committed} = request} ->
         state =
           track_persistent_open_request(
             state,
             request_id,
             request.authority_token,
             caller_pid,
-            :acknowledged
+            :prepared
           )
 
-        with_persistent_commit(:ok, state)
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
-  end
-
-  def handle_call({:finalize_persistent_open, request_id}, {caller_pid, _tag}, state) do
-    case fetch_persistent_open_request(state, request_id, caller_pid) do
-      {:ok, %{status: :acknowledged}} ->
-        state = remove_persistent_open_request(state, request_id)
-        with_persistent_commit(:ok, state)
+        with_persistent_commit(:ok, state, fn ->
+          Config.run_signing_authority_persistent_finalize_test_seam(request_id)
+        end)
 
       {:ok, _request} ->
-        {:reply, {:error, :persistent_open_not_acknowledged}, state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
-  end
-
-  def handle_call({:cancel_persistent_open, request_id}, {caller_pid, _tag}, state) do
-    case fetch_persistent_open_request(state, request_id, caller_pid) do
-      {:ok, request} ->
-        state = revoke_persistent_open_request(state, request_id, request)
-        with_persistent_commit(:ok, state)
-
-      {:error, :persistent_open_not_pending} ->
-        {:reply, :ok, state}
+        {:reply, {:error, :persistent_open_already_prepared}, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -859,6 +823,35 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     }
 
     {:reply, snapshot, state}
+  end
+
+  @impl true
+  def handle_cast({:ack_persistent_open, request_id, caller_pid}, state) do
+    case fetch_persistent_open_request(state, request_id, caller_pid) do
+      {:ok, %{status: :prepared}} ->
+        state = remove_persistent_open_request(state, request_id)
+        noreply_with_persistent_commit(state)
+
+      {:ok, _request} ->
+        {:noreply, state}
+
+      {:error, _reason} ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_cast({:cancel_persistent_open, request_id, caller_pid}, state) do
+    case fetch_persistent_open_request(state, request_id, caller_pid) do
+      {:ok, request} ->
+        state = revoke_persistent_open_request(state, request_id, request)
+        noreply_with_persistent_commit(state)
+
+      {:error, :persistent_open_not_pending} ->
+        {:noreply, state}
+
+      {:error, _reason} ->
+        {:noreply, state}
+    end
   end
 
   @impl true
@@ -1197,7 +1190,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   defp track_persistent_open_request(state, request_id, authority_token, owner_pid, status)
-       when status in [:committed, :acknowledged] do
+       when status in [:committed, :prepared] do
     state = remove_persistent_open_request(state, request_id)
     expiry_id = make_ref()
 
@@ -1521,7 +1514,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   defp persist_state(state) do
-    SigningAuthorityStateOwner.replace(persistent_snapshot(state))
+    SigningAuthorityStateOwner.replace(persistent_snapshot(state), state.state_owner_token)
   end
 
   defp persistent_snapshot(state) do

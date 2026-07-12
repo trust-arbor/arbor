@@ -413,6 +413,59 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
   end
 
   describe "state hygiene" do
+    test "security regression: only the registered broker can load or replace owner state", ctx do
+      {:ok, authority} = open_authority(ctx, purpose: :owner_api_authorization)
+
+      assert {:error, :unauthorized} = SigningAuthorityStateOwner.load()
+
+      assert {:error, :unauthorized} =
+               SigningAuthorityStateOwner.replace(%{
+                 authorities: %{},
+                 bootstraps: %{},
+                 open_requests: %{}
+               })
+
+      assert {:ok, _signed} = Security.sign_with_authority(authority, "state-intact")
+    end
+
+    test "security regression: state-owner crash restarts broker fail closed", ctx do
+      {:ok, persistent} = open_authority(ctx, purpose: :owner_crash_persistent)
+      {:ok, bootstrap} = issue_bootstrap(ctx, :owner_crash_bootstrap, grace_ms: 5_000)
+      ephemeral = register_ephemeral_identity("owner-crash-ephemeral")
+      {:ok, proof} = acquisition_proof(ephemeral, :owner_crash_ephemeral, self())
+
+      assert {:ok, ephemeral_authority} =
+               Security.open_ephemeral_signing_authority(proof, ephemeral.private_key)
+
+      owner_pid = Process.whereis(SigningAuthorityStateOwner)
+      broker_pid = Process.whereis(SigningAuthorityBroker)
+      owner_ref = Process.monitor(owner_pid)
+      broker_ref = Process.monitor(broker_pid)
+
+      Process.exit(owner_pid, :kill)
+
+      assert_receive {:DOWN, ^owner_ref, :process, ^owner_pid, :killed}, 1_000
+      assert_receive {:DOWN, ^broker_ref, :process, ^broker_pid, _reason}, 1_000
+
+      wait_until(fn ->
+        new_owner = Process.whereis(SigningAuthorityStateOwner)
+        new_broker = Process.whereis(SigningAuthorityBroker)
+
+        is_pid(new_owner) and new_owner != owner_pid and is_pid(new_broker) and
+          new_broker != broker_pid
+      end)
+
+      assert {:error, :authority_not_found} =
+               Security.sign_with_authority(persistent, "must-not-survive")
+
+      assert {:error, :authority_not_found} =
+               Security.sign_with_authority(ephemeral_authority, "must-not-survive")
+
+      assert {:error, :bootstrap_not_found} = Security.claim_signing_authority(bootstrap)
+      assert {:ok, fresh} = open_authority(ctx, purpose: :after_owner_crash)
+      assert {:ok, _signed} = Security.sign_with_authority(fresh, "fresh-state")
+    end
+
     test "reference and broker state contain no functions or private keys", ctx do
       {:ok, authority} = open_authority(ctx, purpose: :session)
 
@@ -1143,6 +1196,57 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
         case SigningAuthorityBroker.debug_state() do
           %{persistent_open_request_count: 0, entries: entries} ->
             not Enum.any?(entries, &(&1.purpose == :persistent_post_commit_timeout))
+
+          _temporary_timeout ->
+            false
+        end
+      end)
+
+      send(owner, :stop)
+    end
+
+    test "security regression: finalization timeout cannot commit a hidden authority", ctx do
+      previous_timeout =
+        Application.get_env(:arbor_security, :signing_authority_broker_call_timeout_ms)
+
+      previous_seam =
+        Application.get_env(:arbor_security, :signing_authority_persistent_finalize_test_seam)
+
+      Application.put_env(:arbor_security, :signing_authority_broker_call_timeout_ms, 25)
+
+      Application.put_env(:arbor_security, :signing_authority_persistent_finalize_test_seam, %{
+        delay_ms: 100,
+        notify_pid: self()
+      })
+
+      on_exit(fn ->
+        restore_env(:signing_authority_broker_call_timeout_ms, previous_timeout)
+        restore_env(:signing_authority_persistent_finalize_test_seam, previous_seam)
+        ensure_broker_started()
+      end)
+
+      parent = self()
+
+      owner =
+        spawn(fn ->
+          {:ok, proof} = acquisition_proof(ctx, :persistent_finalize_timeout, self())
+          result = Security.open_signing_authority(proof)
+          send(parent, {:persistent_finalize_result, result})
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive {:persistent_finalize_prepared, request_id}, 1_000
+      assert is_reference(request_id)
+      assert_receive {:persistent_finalize_result, {:error, :broker_timeout}}, 1_000
+      assert Process.alive?(owner)
+
+      wait_until(fn ->
+        case SigningAuthorityBroker.debug_state() do
+          %{persistent_open_request_count: 0, entries: entries} ->
+            not Enum.any?(entries, &(&1.purpose == :persistent_finalize_timeout))
 
           _temporary_timeout ->
             false

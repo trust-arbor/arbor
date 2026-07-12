@@ -10,40 +10,61 @@ defmodule Arbor.Security.SigningAuthorityStateOwner do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  @spec load() :: {:ok, map()} | {:error, :state_owner_unavailable}
-  def load do
+  @spec load(reference() | nil) ::
+          {:ok, map()} | {:error, :state_owner_unavailable | :unauthorized}
+  def load(broker_token \\ nil) do
     try do
-      {:ok, GenServer.call(__MODULE__, :load)}
+      case GenServer.call(__MODULE__, {:load, broker_token}) do
+        snapshot when is_map(snapshot) -> {:ok, snapshot}
+        {:error, _reason} = error -> error
+      end
     catch
       :exit, _reason -> {:error, :state_owner_unavailable}
     end
   end
 
-  @spec replace(map()) :: :ok | {:error, :state_owner_unavailable}
-  def replace(snapshot) when is_map(snapshot) do
+  @spec replace(map(), reference() | nil) ::
+          :ok | {:error, :state_owner_unavailable | :unauthorized}
+  def replace(snapshot, broker_token \\ nil) when is_map(snapshot) do
     try do
-      GenServer.call(__MODULE__, {:replace, snapshot})
+      GenServer.call(__MODULE__, {:replace, broker_token, snapshot})
     catch
       :exit, _reason -> {:error, :state_owner_unavailable}
     end
   end
 
   @impl true
-  def init(_opts), do: {:ok, @empty_snapshot}
+  def init(opts) do
+    case Keyword.fetch(opts, :broker_token) do
+      {:ok, broker_token} when is_reference(broker_token) ->
+        {:ok, %{broker_token: broker_token, snapshot: @empty_snapshot}}
+
+      _ ->
+        {:stop, :invalid_broker_token}
+    end
+  end
 
   @impl true
-  def handle_call(:load, _from, state), do: {:reply, state, state}
+  def handle_call({:load, broker_token}, {caller_pid, _tag}, state) do
+    if authorized_broker?(caller_pid, broker_token, state) do
+      {:reply, state.snapshot, state}
+    else
+      {:reply, {:error, :unauthorized}, state}
+    end
+  end
 
-  def handle_call({:replace, snapshot}, _from, state) do
-    case valid_snapshot?(snapshot) do
-      true -> {:reply, :ok, snapshot}
-      false -> {:reply, {:error, :state_owner_unavailable}, state}
+  def handle_call({:replace, broker_token, snapshot}, {caller_pid, _tag}, state) do
+    case {authorized_broker?(caller_pid, broker_token, state), valid_snapshot?(snapshot)} do
+      {true, true} -> {:reply, :ok, %{state | snapshot: snapshot}}
+      {true, false} -> {:reply, {:error, :state_owner_unavailable}, state}
+      {false, _} -> {:reply, {:error, :unauthorized}, state}
     end
   end
 
   @impl true
   def format_status(status) when is_map(status) do
-    state = Map.get(status, :state, %{})
+    owner_state = Map.get(status, :state, %{})
+    state = Map.get(owner_state, :snapshot, %{})
 
     redacted = %{
       authority_count: map_count(state, :authorities),
@@ -61,6 +82,11 @@ defmodule Arbor.Security.SigningAuthorityStateOwner do
   defp valid_snapshot?(snapshot) do
     Map.keys(snapshot) |> Enum.sort() == [:authorities, :bootstraps, :open_requests] and
       Enum.all?(Map.values(snapshot), &is_map/1)
+  end
+
+  defp authorized_broker?(caller_pid, broker_token, state) do
+    caller_pid == Process.whereis(Arbor.Security.SigningAuthorityBroker) and
+      is_reference(broker_token) and broker_token === state.broker_token
   end
 
   defp map_count(state, key) do

@@ -8,6 +8,8 @@ defmodule Arbor.Security.Application do
 
   @impl true
   def start(_type, _args) do
+    signing_authority_owner_token = make_ref()
+
     children =
       if Application.get_env(:arbor_security, :start_children, true) do
         [
@@ -48,9 +50,11 @@ defmodule Arbor.Security.Application do
           {Arbor.Security.Identity.NonceCache, []},
           {Arbor.Security.SystemAuthority, []},
           # Persistent metadata outlives broker-only restarts; keys remain in SigningKeyStore.
-          {Arbor.Security.SigningAuthorityStateOwner, []},
+          {Arbor.Security.SigningAuthorityStateOwner,
+           broker_token: signing_authority_owner_token},
           # After key/identity stores + registry so open can fail-closed on status/key.
-          {Arbor.Security.SigningAuthorityBroker, []},
+          {Arbor.Security.SigningAuthorityBroker,
+           state_owner_token: signing_authority_owner_token},
           {Arbor.Security.Constraint.RateLimiter, []},
           {Arbor.Security.CapabilityStore, []},
           {Arbor.Security.Reflex.Registry, []},
@@ -60,7 +64,10 @@ defmodule Arbor.Security.Application do
         []
       end
 
-    opts = [strategy: :one_for_one, name: Arbor.Security.Supervisor]
+    # StateOwner and the broker are an ordered fail-closed pair. If the owner
+    # loses its in-memory snapshot, the broker must be stopped before the owner
+    # is restarted and then rebuilt only after the fresh owner is available.
+    opts = [strategy: :rest_for_one, name: Arbor.Security.Supervisor]
     Supervisor.start_link(children, opts)
   end
 

@@ -27,14 +27,16 @@ for {name, collection} <- [
   end
 end
 
+signing_authority_owner_token = make_ref()
+
 for child <- [
       {Arbor.Security.Identity.Registry, []},
       {Arbor.Security.IssuerRegistry, []},
       {Arbor.Security.Identity.NonceCache, []},
       {Arbor.Security.SystemAuthority, []},
-      {Arbor.Security.SigningAuthorityStateOwner, []},
+      {Arbor.Security.SigningAuthorityStateOwner, broker_token: signing_authority_owner_token},
       # After identity registry + signing-key store (started above).
-      {Arbor.Security.SigningAuthorityBroker, []},
+      {Arbor.Security.SigningAuthorityBroker, state_owner_token: signing_authority_owner_token},
       {Arbor.Security.Constraint.RateLimiter, []},
       {Arbor.Security.CapabilityStore, []},
       {Arbor.Security.Reflex.Registry, []}
