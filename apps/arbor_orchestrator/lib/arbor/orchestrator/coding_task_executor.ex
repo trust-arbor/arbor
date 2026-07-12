@@ -9,9 +9,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   Engine opts come only from that compilation, allowlisted context fields, and
   trusted `run/3` identity — never from task-supplied authority or graph data.
 
-  Authorization is mandatory (`authorization: true`) with a signer derived from
-  the target agent's signing key via the public Security facade. Missing
-  identity/key/runtime graph fails closed (no system/unsigned fallback).
+  Authorization is mandatory (`authorization: true`) with a reload-stable
+  `SigningAuthority` acquired from the target agent's signing key via the
+  public Security facade. Missing identity/key/runtime graph fails closed (no
+  system/unsigned fallback).
 
   This production executor always requires a live security runtime
   (`Config.security_available?/0`) before invoking any runner, regardless of
@@ -42,6 +43,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
   alias Arbor.Common.SafePath
   alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.Config
 
   alias Arbor.Orchestrator.CodingPlan.{
@@ -212,35 +214,43 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          :ok <- require_security_available(),
          {:ok, plan} <- normalize_workspace_scope(plan),
          {:ok, template_path} <- resolve_template_path(),
-         {:ok, {signer, private_key}} <- build_signer(agent_id),
-         {:ok, compilation} <- compile_plan(plan, template_path),
-         {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
-         {:ok, artifacts} <- archive_compilation(logs_root, plan, compilation),
-         {:ok, {pinned_action_bindings, pinned_handler_bindings}} <-
-           verify_execution_boundary(
-             Map.fetch!(artifacts, "coding_pipeline_path"),
-             plan,
-             compilation
-           ),
-         {:ok, opts} <-
-           build_engine_opts(
-             agent_id,
-             plan,
-             compilation,
-             exec_ctx,
-             signer,
-             private_key,
-             logs_root,
-             pinned_action_bindings,
-             pinned_handler_bindings
-           ),
-         # Startup URI registration is a snapshot; reconcile hot-loaded actions.
-         :ok <- reconcile_action_uri_prefixes(),
-         {:ok, engine_result} <-
-           invoke_runner(Map.fetch!(artifacts, "coding_pipeline_path"), opts),
-         {:ok, result} <-
-           adapt_result(engine_result, started_at, Map.fetch!(plan.worker, "provider")) do
-      {:ok, Map.put(result, "artifacts", artifacts)}
+         {:ok, security} <- security_facade(),
+         {:ok, authority} <- acquire_signing_authority(security, agent_id) do
+      try do
+        with {:ok, compilation} <- compile_plan(plan, template_path),
+             {:ok, logs_root} <- prepare_task_logs_root(exec_ctx.task_id),
+             {:ok, artifacts} <- archive_compilation(logs_root, plan, compilation),
+             {:ok, {pinned_action_bindings, pinned_handler_bindings}} <-
+               verify_execution_boundary(
+                 Map.fetch!(artifacts, "coding_pipeline_path"),
+                 plan,
+                 compilation
+               ),
+             {:ok, opts} <-
+               build_engine_opts(
+                 agent_id,
+                 plan,
+                 compilation,
+                 exec_ctx,
+                 authority,
+                 logs_root,
+                 pinned_action_bindings,
+                 pinned_handler_bindings
+               ),
+             :ok <- validate_authority_signing(security, authority),
+             # Startup URI registration is a snapshot; reconcile hot-loaded actions.
+             :ok <- reconcile_action_uri_prefixes(),
+             {:ok, engine_result} <-
+               invoke_runner(Map.fetch!(artifacts, "coding_pipeline_path"), opts),
+             {:ok, result} <-
+               adapt_result(engine_result, started_at, Map.fetch!(plan.worker, "provider")) do
+          {:ok, Map.put(result, "artifacts", artifacts)}
+        end
+      after
+        # The broker monitors this run process, but normal terminal outcomes
+        # must release the authority before returning to TaskStore.
+        _ = close_signing_authority(security, authority)
+      end
     end
   end
 
@@ -1208,37 +1218,84 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     |> Base.encode16(case: :lower)
   end
 
-  # Returns {:ok, {signer_fn, private_key}}. The private key is trusted Engine
-  # material for checkpoint HMAC only — never placed in task data, initial
-  # values, status, result, logs, or error payloads.
-  defp build_signer(agent_id) do
+  defp security_facade do
     security = Config.security_module()
 
-    unless is_atom(security) and Code.ensure_loaded?(security) and
-             function_exported?(security, :load_signing_key, 1) and
-             function_exported?(security, :make_signer, 2) do
-      {:error, :security_unavailable}
+    if is_atom(security) and Code.ensure_loaded?(security) and
+         function_exported?(security, :load_signing_key, 1) and
+         function_exported?(security, :build_signing_authority_acquisition_proof, 3) and
+         function_exported?(security, :open_signing_authority, 1) and
+         function_exported?(security, :sign_with_authority, 2) and
+         function_exported?(security, :close_signing_authority, 1) do
+      {:ok, security}
     else
-      case security.load_signing_key(agent_id) do
-        {:ok, private_key} when is_binary(private_key) and private_key != "" ->
-          signer = security.make_signer(agent_id, private_key)
+      {:error, :security_unavailable}
+    end
+  end
 
-          if is_function(signer, 1) do
-            {:ok, {signer, private_key}}
-          else
-            {:error, :invalid_signer}
-          end
-
-        {:error, :no_signing_key} ->
-          {:error, :no_signing_key}
+  # The decrypted key exists only while the owner-bound possession proof is
+  # constructed. The broker retains the reload-stable authority, never this
+  # key or a closure over it.
+  defp acquire_signing_authority(security, agent_id) do
+    with {:ok, private_key} <- security.load_signing_key(agent_id),
+         true <- is_binary(private_key) and private_key != "",
+         {:ok, proof} <-
+           security.build_signing_authority_acquisition_proof(
+             agent_id,
+             private_key,
+             purpose: :coding_task_executor,
+             owner: self()
+           ),
+         {:ok, opened_authority} <- security.open_signing_authority(proof) do
+      case SigningAuthority.canonicalize(opened_authority) do
+        {:ok, authority} ->
+          {:ok, authority}
 
         {:error, reason} ->
-          {:error, {:signing_key_unavailable, reason}}
-
-        other ->
-          {:error, {:signing_key_unavailable, other}}
+          # A broker may have opened a live token before a malformed return
+          # crossed this boundary. Always attempt public-facade cleanup before
+          # reporting the canonicalization failure.
+          _ = close_signing_authority(security, opened_authority)
+          {:error, {:signing_authority_acquisition_failed, reason}}
       end
+    else
+      false -> {:error, :invalid_signing_key}
+      {:error, :no_signing_key} -> {:error, :no_signing_key}
+      {:error, reason} -> {:error, {:signing_authority_acquisition_failed, reason}}
+      other -> {:error, {:signing_authority_acquisition_failed, other}}
     end
+  rescue
+    exception ->
+      {:error, {:signing_authority_acquisition_failed, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:signing_authority_acquisition_failed, {kind, reason}}}
+  end
+
+  defp close_signing_authority(security, authority) do
+    case security.close_signing_authority(authority) do
+      :ok -> :ok
+      {:error, _reason} = error -> error
+      other -> {:error, {:unexpected_close_result, other}}
+    end
+  rescue
+    exception -> {:error, {:authority_close_failed, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:authority_close_failed, {kind, reason}}}
+  end
+
+  # Validate the authority before dispatching to the runner. The public
+  # Orchestrator facade repeats this check as part of its coarse gate; this
+  # preflight ensures a signing failure cannot even enter an injected runner.
+  defp validate_authority_signing(security, %SigningAuthority{} = authority) do
+    case security.sign_with_authority(authority, "arbor://orchestrator/execute") do
+      {:ok, _signed_request} -> :ok
+      {:error, reason} -> {:error, {:signing_authority_sign_failed, reason}}
+      other -> {:error, {:signing_authority_sign_failed, other}}
+    end
+  rescue
+    exception -> {:error, {:signing_authority_sign_failed, Exception.message(exception)}}
+  catch
+    kind, reason -> {:error, {:signing_authority_sign_failed, {kind, reason}}}
   end
 
   defp build_engine_opts(
@@ -1246,8 +1303,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
          %Plan{} = plan,
          %Compilation{} = compilation,
          exec_ctx,
-         signer,
-         private_key,
+         %SigningAuthority{} = authority,
          logs_root,
          pinned_action_bindings,
          pinned_handler_bindings
@@ -1271,10 +1327,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         task_id: task_id,
         run_id: task_id,
         pipeline_id: task_id,
-        signer: signer,
-        authorizer: build_authorizer(agent_id, signer),
-        # Trusted checkpoint HMAC material — Engine opt only, never context.
-        identity_private_key: private_key,
+        signing_authority: authority,
         initial_values: initial_values,
         logs_root: logs_root,
         graph_hash: compilation.graph_hash,
@@ -1418,52 +1471,6 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     end
   end
 
-  defp build_authorizer(agent_id, signer) do
-    security = Config.security_module()
-
-    fn received_agent_id, _handler_type ->
-      if received_agent_id != agent_id do
-        {:error, :agent_id_mismatch}
-      else
-        authorize_orchestrator_execute(security, agent_id, signer)
-      end
-    end
-  end
-
-  # Coarse arbor://orchestrator/execute gate (Engine authorizer). CapabilityCheck
-  # middleware still authorizes per-node resources separately. This production
-  # path never honors the standalone security_required? escape hatch.
-  defp authorize_orchestrator_execute(security, agent_id, signer) do
-    if Config.security_available?() do
-      auth_opts = signed_auth_opts(signer)
-
-      case security.authorize(agent_id, "arbor://orchestrator/execute", :execute, auth_opts) do
-        {:ok, :authorized} -> :ok
-        :ok -> :ok
-        {:error, reason} -> {:error, reason}
-        other -> {:error, {:authorization_failed, other}}
-      end
-    else
-      {:error, :security_unavailable}
-    end
-  end
-
-  defp signed_auth_opts(signer) when is_function(signer, 1) do
-    case signer.("arbor://orchestrator/execute") do
-      {:ok, signed} ->
-        [
-          signed_request: signed,
-          verify_identity: true,
-          expected_resource: "arbor://orchestrator/execute"
-        ]
-
-      _ ->
-        []
-    end
-  end
-
-  defp signed_auth_opts(_), do: []
-
   defp reconcile_action_uri_prefixes do
     with :ok <- Arbor.Actions.register_action_uri_prefixes(),
          prefixes when is_list(prefixes) and prefixes != [] <-
@@ -1491,19 +1498,16 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
 
       function_exported?(runner, :run_file_as, 4) ->
         principal = Keyword.fetch!(opts, :agent_id)
-        signer = Keyword.fetch!(opts, :signer)
+        authority = Keyword.fetch!(opts, :signing_authority)
+        # run_file_as/4 performs the public facade's mixed-credential check and
+        # installs the authority into the actual Engine opts. It must not see
+        # the process-local credential in its caller-supplied opts.
+        runner_opts = Keyword.delete(opts, :signing_authority)
 
         invoke_with_timeout(
-          fn -> runner.run_file_as(graph_path, principal, signer, opts) end,
-          opts
+          fn -> runner.run_file_as(graph_path, principal, authority, runner_opts) end,
+          runner_opts
         )
-
-      function_exported?(runner, :run_file, 2) ->
-        invoke_with_timeout(fn -> runner.run_file(graph_path, opts) end, opts)
-
-      function_exported?(runner, :run, 2) ->
-        # Test doubles may implement run/2 with path + opts.
-        invoke_with_timeout(fn -> runner.run(graph_path, opts) end, opts)
 
       true ->
         {:error, :coding_pipeline_runner_unavailable}

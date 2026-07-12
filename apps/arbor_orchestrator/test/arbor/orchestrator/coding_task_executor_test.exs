@@ -1,30 +1,42 @@
 defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   @moduledoc """
   Focused tests for CodingTaskExecutor validation, fail-closed identity,
-  engine opts, result adaptation, dual authorization layers, and status/cancel.
+  reload-stable authority opts, result adaptation, and status/cancel.
   """
   use ExUnit.Case, async: false
 
   @moduletag :fast
 
   alias Arbor.Contracts.Coding.Plan
+  alias Arbor.Contracts.Security.Identity
+  alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.CodingTaskExecutor
   alias Arbor.Orchestrator.CodingPlan.{ArtifactStore, Compiler}
   alias Arbor.Orchestrator.Config
+  alias Arbor.Security
+  alias Arbor.Security.SigningAuthorityBroker
 
   defmodule CapturingRunner do
     @moduledoc false
-    def run_file(path, opts) do
+
+    alias Arbor.Contracts.Security.SigningAuthority
+
+    def run_file_as(path, principal, %SigningAuthority{} = authority, opts)
+        when is_binary(principal) do
+      # Mirror Arbor.Orchestrator.run_file_as/4: the credential is separate
+      # from caller opts and is installed only in the Engine-facing opts.
+      engine_opts = Keyword.put(opts, :signing_authority, authority)
+
       case Application.get_env(:arbor_orchestrator, :coding_executor_runner_reply) do
         nil ->
-          capture_run(path, opts)
+          capture_run(path, engine_opts)
 
           {:ok,
            %{
-             run_id: Keyword.get(opts, :run_id),
+             run_id: Keyword.get(engine_opts, :run_id),
              context:
                Application.get_env(:arbor_orchestrator, :coding_executor_final_context) ||
-                 default_context(opts),
+                 default_context(engine_opts),
              completed_nodes: [],
              final_outcome: nil,
              taint: %{},
@@ -32,11 +44,11 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
            }}
 
         fun when is_function(fun, 2) ->
-          capture_run(path, opts)
-          fun.(path, opts)
+          capture_run(path, engine_opts)
+          fun.(path, engine_opts)
 
         reply ->
-          capture_run(path, opts)
+          capture_run(path, engine_opts)
           reply
       end
     end
@@ -245,7 +257,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   defmodule OutsideWorktreeCreatingRunner do
     @moduledoc false
 
-    def run_file(_path, opts) do
+    alias Arbor.Contracts.Security.SigningAuthority
+
+    def run_file_as(_path, _principal, %SigningAuthority{}, opts) do
       base = opts |> Keyword.fetch!(:initial_values) |> Map.fetch!("worktree_base_dir")
       marker = Path.join(base, "runner-created-outside-worktree")
       File.mkdir_p!(marker)
@@ -262,7 +276,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   defmodule SlowRunner do
     @moduledoc false
 
-    def run_file(_path, opts) do
+    alias Arbor.Contracts.Security.SigningAuthority
+
+    def run_file_as(_path, _principal, %SigningAuthority{}, opts) do
       owner = Keyword.fetch!(opts, :spawning_pid)
       links = Process.info(self(), :links) |> elem(1)
       message = {:slow_runner_started, self(), opts, links}
@@ -278,26 +294,107 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     end
   end
 
+  defmodule ReloadingRunner do
+    @moduledoc false
+
+    alias Arbor.Contracts.Security.SigningAuthority
+
+    def run_file_as(_path, _principal, %SigningAuthority{} = authority, opts) do
+      reload_security_facade!()
+
+      with {:ok, _signed} <- Arbor.Security.sign_with_authority(authority, "reload-stable-run"),
+           {:ok, derived} <-
+             Arbor.Security.derive_secret_with_authority(authority, :coding_task_reload) do
+        send(Keyword.fetch!(opts, :spawning_pid), {:reloaded_authority, authority, derived})
+
+        {:ok,
+         %{
+           run_id: Keyword.fetch!(opts, :run_id),
+           context: %{
+             "status" => "change_committed",
+             "branch" => "arbor/coding-agent/reload",
+             "commit_hash" => "reload123",
+             "repo_path" => opts[:initial_values]["repo_path"],
+             "worktree_path" => "/tmp/ws_reload",
+             "workspace_id" => "ws_reload",
+             "worker_session_id" => "worker_reload"
+           },
+           completed_nodes: [],
+           final_outcome: nil,
+           taint: %{},
+           node_durations: %{}
+         }}
+      end
+    end
+
+    defp reload_security_facade! do
+      beam_path = :code.which(Arbor.Security)
+      true = is_list(beam_path)
+      abs_path = beam_path |> List.to_string() |> String.replace_suffix(".beam", "")
+      :code.purge(Arbor.Security)
+      :code.delete(Arbor.Security)
+      {:module, Arbor.Security} = :code.load_abs(String.to_charlist(abs_path))
+      :ok
+    end
+  end
+
   defmodule FakeSecurity do
     @moduledoc false
+
+    alias Arbor.Contracts.Security.SigningAuthority
+
     def load_signing_key(agent_id) do
       case Process.get(:coding_executor_signing_key) do
-        nil -> {:ok, "test-private-key-for-" <> agent_id}
+        nil -> {:ok, :crypto.hash(:sha256, "test-private-key-for-" <> agent_id)}
         :missing -> {:error, :no_signing_key}
         {:error, _} = err -> err
         key when is_binary(key) -> {:ok, key}
       end
     end
 
-    def make_signer(agent_id, private_key) do
-      fn resource ->
+    def build_signing_authority_acquisition_proof(agent_id, private_key, opts)
+        when is_binary(agent_id) and is_binary(private_key) and is_list(opts) do
+      {:ok, {:coding_task_proof, agent_id, Keyword.fetch!(opts, :owner)}}
+    end
+
+    def open_signing_authority({:coding_task_proof, agent_id, owner}) when owner == self() do
+      if Process.get(:coding_executor_authority_open_reply) do
+        Process.get(:coding_executor_authority_open_reply)
+      else
         {:ok,
-         %{
-           agent_id: agent_id,
-           resource: resource,
-           key_fingerprint: :erlang.phash2(private_key)
+         %SigningAuthority{
+           token: :crypto.hash(:sha256, {agent_id, self()}),
+           principal_id: agent_id,
+           purpose: :coding_task_executor
          }}
       end
+    end
+
+    def open_signing_authority(_proof), do: {:error, :owner_mismatch}
+
+    def sign_with_authority(%SigningAuthority{}, _resource) do
+      case Process.get(:coding_executor_authority_sign_reply) do
+        nil -> {:ok, :signed}
+        reply -> reply
+      end
+    end
+
+    def close_signing_authority(%SigningAuthority{} = authority) do
+      closed = Process.get(:coding_executor_closed_authorities, [])
+      Process.put(:coding_executor_closed_authorities, [authority | closed])
+
+      case Application.get_env(:arbor_orchestrator, :coding_executor_test_observer) do
+        observer when is_pid(observer) -> send(observer, {:coding_authority_closed, authority})
+        _ -> :ok
+      end
+
+      :ok
+    end
+
+    def close_signing_authority(other) do
+      attempted = Process.get(:coding_executor_invalid_close_attempts, [])
+      Process.put(:coding_executor_invalid_close_attempts, [other | attempted])
+      {:error, :invalid_signing_authority}
     end
 
     def authorize(agent_id, resource, action, opts \\ []) do
@@ -446,6 +543,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
     Process.delete(:coding_executor_last_run)
     Process.delete(:coding_executor_signing_key)
+    Process.delete(:coding_executor_authority_open_reply)
+    Process.delete(:coding_executor_authority_sign_reply)
+    Process.delete(:coding_executor_closed_authorities)
+    Process.delete(:coding_executor_invalid_close_attempts)
     Process.delete(:coding_executor_redirected_worktree_base_dir)
     Process.delete(:coding_executor_initial_value_mutation)
     Process.delete(:coding_abandoned_runs)
@@ -576,6 +677,46 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   defp ensure_uri_registry! do
     unless Process.whereis(Arbor.Security.UriRegistry) do
       start_supervised!({Arbor.Security.UriRegistry, []})
+    end
+  end
+
+  defp ensure_real_authority_stack! do
+    {:ok, _started} = Application.ensure_all_started(:arbor_security)
+    ensure_buffered_store!(:arbor_security_identities, "identities")
+    ensure_buffered_store!(:arbor_security_signing_keys, "signing_keys")
+    ensure_buffered_store!(:arbor_security_capabilities, "capabilities")
+    ensure_security_child!(Arbor.Security.Identity.Registry, [])
+    ensure_security_child!(Arbor.Security.Identity.NonceCache, [])
+    ensure_security_child!(Arbor.Security.SystemAuthority, [])
+    ensure_security_child!(SigningAuthorityBroker, [])
+  end
+
+  defp ensure_buffered_store!(name, collection) do
+    if Process.whereis(name) == nil do
+      child =
+        Supervisor.child_spec(
+          {Arbor.Persistence.BufferedStore,
+           name: name, backend: nil, write_mode: :sync, collection: collection},
+          id: name
+        )
+
+      case Supervisor.start_child(Arbor.Security.Supervisor, child) do
+        {:ok, _pid} -> :ok
+        {:error, {:already_started, _pid}} -> :ok
+        {:error, {:already_present, _id}} -> :ok
+        other -> flunk("failed to start #{name}: #{inspect(other)}")
+      end
+    end
+  end
+
+  defp ensure_security_child!(module, args) do
+    if Process.whereis(module) == nil do
+      case Supervisor.start_child(Arbor.Security.Supervisor, {module, args}) do
+        {:ok, _pid} -> :ok
+        {:error, {:already_started, _pid}} -> :ok
+        {:error, {:already_present, _id}} -> :ok
+        other -> flunk("failed to start #{inspect(module)}: #{inspect(other)}")
+      end
     end
   end
 
@@ -1050,7 +1191,50 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   end
 
   describe "engine opts and trusted identity" do
-    test "forces authorization, identities, signer, run ids, and archived graph path" do
+    test "security regression: real authority signs and derives after Security facade reload" do
+      ensure_real_authority_stack!()
+      {:ok, identity} = Identity.generate(name: "coding-task-reload")
+      :ok = Security.register_identity(Identity.public_only(identity))
+      :ok = Security.store_signing_key(identity.agent_id, identity.private_key)
+      :ok = Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(identity.agent_id)
+
+      Application.put_env(:arbor_orchestrator, :security_module, Security)
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, ReloadingRunner)
+
+      on_exit(fn ->
+        _ = Arbor.Orchestrator.TestCapabilities.revoke_all(identity.agent_id)
+        _ = Security.delete_signing_key(identity.agent_id)
+        _ = Security.deregister_identity(identity.agent_id)
+      end)
+
+      assert {:ok, _result} =
+               CodingTaskExecutor.run(
+                 identity.agent_id,
+                 valid_task(),
+                 valid_context(%{"task_id" => "task_reload_stable"})
+               )
+
+      assert_receive {:reloaded_authority, authority, derived}
+      assert is_binary(derived)
+      assert {:error, :authority_not_found} =
+               Security.sign_with_authority(authority, "after-coding-task-close")
+    end
+
+    test "security regression: real Orchestrator facade receives authority separately" do
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, Arbor.Orchestrator)
+
+      result = CodingTaskExecutor.run("agent_facade_boundary", valid_task(), valid_context())
+
+      # The fake acquisition authority is intentionally not broker-backed, so
+      # the fixed Security facade rejects its signing. It must nevertheless
+      # reach the authority path, rather than the public facade's mixed-key
+      # rejection caused by passing :signing_authority in caller opts.
+      refute result == {:error, :mixed_signing_credentials}
+      refute match?({:error, {:mixed_signing_credentials, _}}, result)
+      assert length(Process.get(:coding_executor_closed_authorities, [])) == 1
+    end
+
+    test "forces authorization, authority, run ids, and archived graph path" do
       template_path = Config.coding_pipeline_path()
 
       assert {:ok, result} =
@@ -1090,8 +1274,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert opts[:execution_manifest]["graph_hash"] == opts[:graph_hash]
       assert is_map(opts[:pinned_action_bindings])
       assert is_map(opts[:pinned_handler_bindings])
-      assert is_function(opts[:signer], 1)
-      assert is_function(opts[:authorizer], 2)
+      assert %SigningAuthority{principal_id: "agent_trusted"} = opts[:signing_authority]
+      refute Keyword.has_key?(opts, :signer)
+      refute Keyword.has_key?(opts, :authorizer)
+      refute Keyword.has_key?(opts, :identity_private_key)
 
       iv = opts[:initial_values]
       assert iv["session.agent_id"] == "agent_trusted"
@@ -1256,6 +1442,32 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert opts[:approval_timeout_ms] == 1
       assert self() in links
       refute Process.alive?(runner_pid)
+      assert length(Process.get(:coding_executor_closed_authorities, [])) == 1
+    end
+
+    test "security regression: authority closes after success, runner error, and timeout" do
+      assert {:ok, _result} = CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+      assert length(Process.get(:coding_executor_closed_authorities, [])) == 1
+
+      Process.delete(:coding_executor_closed_authorities)
+      Application.put_env(:arbor_orchestrator, :coding_executor_runner_reply, {:error, :runner_failed})
+
+      assert {:error, :runner_failed} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      assert length(Process.get(:coding_executor_closed_authorities, [])) == 1
+
+      Process.delete(:coding_executor_closed_authorities)
+      Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, SlowRunner)
+
+      assert {:error, {:pipeline_timeout, 20}} =
+               CodingTaskExecutor.run(
+                 "agent_1",
+                 valid_task(),
+                 valid_context(%{"timeout" => 20})
+               )
+
+      assert length(Process.get(:coding_executor_closed_authorities, [])) == 1
     end
 
     test "uses the smaller of plan wall-clock and context timeouts" do
@@ -1319,7 +1531,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       refute Process.alive?(runner_pid)
     end
 
-    test "threads identity_private_key to trusted Engine opts but not context/result" do
+    test "authority is opaque and private key never reaches Engine opts or JSON artifacts" do
       fake_key = "fake-identity-private-key-bytes"
       Process.put(:coding_executor_signing_key, fake_key)
 
@@ -1327,7 +1539,10 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
 
       opts = last_opts()
-      assert opts[:identity_private_key] == fake_key
+      assert %SigningAuthority{} = opts[:signing_authority]
+      refute Keyword.has_key?(opts, :signer)
+      refute Keyword.has_key?(opts, :authorizer)
+      refute Keyword.has_key?(opts, :identity_private_key)
       assert opts[:resumable] == true
 
       iv = opts[:initial_values]
@@ -1338,6 +1553,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       refute Map.has_key?(result, "private_key")
       refute inspect(result) =~ fake_key
       refute inspect(iv) =~ fake_key
+
+      for path <-
+            Map.take(result["artifacts"], ~w(coding_plan_path coding_pipeline_path compile_manifest_path))
+            |> Map.values() do
+        refute File.read!(path) =~ fake_key
+      end
     end
 
     test "task cannot override session.agent_id or session.task_id via allowlisted fields" do
@@ -1349,14 +1570,15 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
                )
     end
 
-    test "authorizer rejects agent_id mismatch and task cannot supply auth material" do
+    test "authority opts cannot be replaced by legacy auth material" do
       assert {:ok, _} =
                CodingTaskExecutor.run("agent_real", valid_task(), valid_context())
 
-      authorizer = last_opts()[:authorizer]
-      assert is_function(authorizer, 2)
-      assert {:error, :agent_id_mismatch} = authorizer.("agent_forged", :transform)
-      assert :ok = authorizer.("agent_real", :transform)
+      opts = last_opts()
+      assert %SigningAuthority{principal_id: "agent_real"} = opts[:signing_authority]
+      refute Keyword.has_key?(opts, :signer)
+      refute Keyword.has_key?(opts, :authorizer)
+      refute Keyword.has_key?(opts, :identity_private_key)
 
       for key <- ~w(authorizer signer authorization identity private_key signing_key) do
         assert {:error, {:forbidden_task_key, ^key}} =
@@ -1374,6 +1596,41 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   # ---------------------------------------------------------------------------
 
   describe "fail closed" do
+    test "security regression: malformed opened authority fails closed before runner" do
+      malformed = %SigningAuthority{
+        token: "too-short",
+        principal_id: "agent_1",
+        purpose: :coding_task_executor
+      }
+
+      Process.put(:coding_executor_authority_open_reply, {:ok, malformed})
+
+      assert {:error, {:signing_authority_acquisition_failed, _reason}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      assert Process.get(:coding_executor_last_run) == nil
+      assert [^malformed] = Process.get(:coding_executor_closed_authorities)
+    end
+
+    test "security regression: authority open failure does not invoke runner" do
+      Process.put(:coding_executor_authority_open_reply, {:error, :open_failed})
+
+      assert {:error, {:signing_authority_acquisition_failed, :open_failed}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      assert Process.get(:coding_executor_last_run) == nil
+    end
+
+    test "security regression: authority signing failure does not invoke runner" do
+      Process.put(:coding_executor_authority_sign_reply, {:error, :sign_failed})
+
+      assert {:error, {:signing_authority_sign_failed, :sign_failed}} =
+               CodingTaskExecutor.run("agent_1", valid_task(), valid_context())
+
+      assert Process.get(:coding_executor_last_run) == nil
+      assert length(Process.get(:coding_executor_closed_authorities, [])) == 1
+    end
+
     test "security unavailable fails closed before runner even when security_required is false (security regression)" do
       Application.put_env(:arbor_orchestrator, :security_available_override, false)
       Application.put_env(:arbor_orchestrator, :security_required, false)
@@ -1581,70 +1838,27 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
   end
 
   # ---------------------------------------------------------------------------
-  # Dual authorization layers (real Orchestrator runner)
+  # Public Orchestrator authority boundary
   # ---------------------------------------------------------------------------
 
-  describe "dual authorization layers with real Orchestrator runner" do
-    test "public run/3 observes coarse execute and per-node transform auth; denial fails closed" do
+  describe "authority boundary with real Orchestrator runner" do
+    test "security regression: real facade rejects invalid authority, not mixed credentials" do
       agent_id = "agent_dual_auth_#{System.unique_integer([:positive])}"
       Application.put_env(:arbor_orchestrator, :coding_pipeline_runner, Arbor.Orchestrator)
-      Application.put_env(:arbor_orchestrator, :security_module, FakeSecurity)
-      Application.put_env(:arbor_orchestrator, :security_available_override, true)
 
-      # The public facade's coarse gate runs before Engine and therefore before
-      # any per-node call reaches the injected security module.
-      assert {:error, :unauthorized} =
-               CodingTaskExecutor.run(
-                 agent_id,
-                 valid_task(),
-                 valid_context(%{"task_id" => "task_dual_auth_coarse_deny", "timeout" => 250})
-               )
-
-      assert collect_auth_calls() == []
-      :ok = Arbor.Orchestrator.TestCapabilities.grant_orchestrator_access(agent_id)
-
-      # Once the coarse grant exists, execution reaches the per-node gate. The
-      # reviewed graph may stop later at its first action in this focused test.
-      _ =
+      result =
         CodingTaskExecutor.run(
           agent_id,
           valid_task(),
           valid_context(%{"task_id" => "task_dual_auth", "timeout" => 250})
         )
 
-      calls = collect_auth_calls()
-      resources = Enum.map(calls, fn {_agent, resource, _action, _opts} -> resource end)
-
-      assert Enum.any?(resources, fn resource ->
-               resource == "arbor://orchestrator/execute/transform" or
-                 String.starts_with?(resource, "arbor://orchestrator/execute/")
-             end)
-
-      assert Enum.all?(calls, fn {observed_agent, _resource, _action, _opts} ->
-               observed_agent == agent_id
-             end)
-
-      # Per-node denial still fails closed after the coarse gate succeeds.
-      Application.put_env(:arbor_orchestrator, :coding_auth_reply, {
-        :error,
-        :capability_denied
-      })
-
-      assert {:error, _} =
-               CodingTaskExecutor.run(
-                 agent_id,
-                 valid_task(),
-                 valid_context(%{"task_id" => "task_dual_auth_deny", "timeout" => 250})
-               )
-
-      denied_resources =
-        collect_auth_calls()
-        |> Enum.map(fn {_agent, resource, _action, _opts} -> resource end)
-
-      assert Enum.any?(
-               denied_resources,
-               &String.starts_with?(&1, "arbor://orchestrator/execute/")
-             )
+      # FakeSecurity models acquisition, while the real facade owns the
+      # authority validation and therefore reports its broker rejection.
+      refute result == {:error, :mixed_signing_credentials}
+      refute match?({:error, {:mixed_signing_credentials, _}}, result)
+      assert Process.get(:coding_executor_last_run) == nil
+      assert length(Process.get(:coding_executor_closed_authorities, [])) == 1
     end
   end
 
