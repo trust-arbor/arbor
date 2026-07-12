@@ -40,7 +40,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
   use GenServer
   require Logger
 
-  alias Arbor.Gateway.MCP.ActionBridge
+  alias Arbor.Gateway.MCP.{ActionBridge, EndpointRegistry}
   alias ExMCP.Protocol.ResponseBuilder
 
   @server_info %{
@@ -231,7 +231,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
       action_module ->
         # Atomize string keys from MCP arguments to match action schema expectations
         params = atomize_params(arguments)
-        execute_action(action_module, params, state.agent_id)
+        execute_action(action_module, params, state)
     end
   rescue
     e ->
@@ -243,12 +243,20 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
 
   # Execute action through authorize_and_execute — no unauthenticated fallback.
   # If auth fails, the error propagates to the MCP client.
-  defp execute_action(action_module, params, agent_id) do
-    if authorized_execution_available?() do
-      Arbor.Actions.authorize_and_execute(agent_id, action_module, params, %{})
-    else
-      # Security not available — use agent_id in context for facade-level auth
-      action_module.run(params, %{agent_id: agent_id})
+  defp execute_action(action_module, params, %{agent_id: agent_id} = state) do
+    with :ok <- verify_endpoint_principal(state) do
+      Arbor.Actions.with_principal_authority(agent_id, fn authority ->
+        if authorized_execution_required?() do
+          Arbor.Actions.authorize_and_execute(agent_id, action_module, params, %{})
+        else
+          Arbor.Actions.execute_with_principal_authority(
+            authority,
+            action_module,
+            params,
+            %{}
+          )
+        end
+      end)
     end
   rescue
     e ->
@@ -258,6 +266,13 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
     :exit, reason ->
       Logger.warning("[MCP AgentEndpoint] Action execution exit: #{inspect(reason)}")
       {:error, {:execution_exit, reason}}
+  end
+
+  defp verify_endpoint_principal(%{agent_id: agent_id}) do
+    case EndpointRegistry.lookup(agent_id) do
+      {:ok, endpoint_pid, _tools} when endpoint_pid == self() -> :ok
+      _other -> {:error, :endpoint_principal_unbound}
+    end
   end
 
   # -- Helpers --
@@ -315,22 +330,12 @@ defmodule Arbor.Gateway.MCP.AgentEndpoint do
       []
   end
 
-  defp authorized_execution_available? do
-    security_available?()
-  end
-
-  defp security_available? do
+  defp authorized_execution_required? do
     # `:require_security` defaults to true — production routes every tool
     # call through `Arbor.Actions.authorize_and_execute`. Setting it to
     # `false` (test-only, see `agent_endpoint_test.exs` setup) forces
-    # the unauthenticated fallback path regardless of whether the
-    # `CapabilityStore` GenServer happens to be alive.
-    #
-    # The earlier approach — calling `GenServer.stop(CapabilityStore)`
-    # in test setup — was racy against the OTP supervisor's permanent
-    # restart, leaking failures into ~60% of seeds depending on test
-    # ordering.
-    Application.get_env(:arbor_gateway, :mcp_endpoint_require_security, true) and
-      Process.whereis(Arbor.Security.CapabilityStore) != nil
+    # the registry-bound fallback path. A production security-process outage
+    # remains on the authorization path and therefore fails closed.
+    Application.get_env(:arbor_gateway, :mcp_endpoint_require_security, true)
   end
 end

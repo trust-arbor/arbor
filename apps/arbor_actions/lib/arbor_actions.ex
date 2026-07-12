@@ -106,6 +106,12 @@ defmodule Arbor.Actions do
     @moduledoc false
     @enforce_keys [:principal_id, :owner, :ref]
     defstruct @enforce_keys
+
+    @opaque t :: %__MODULE__{
+              principal_id: String.t(),
+              owner: pid(),
+              ref: reference()
+            }
   end
 
   defmodule ActionAuthorization do
@@ -251,14 +257,20 @@ defmodule Arbor.Actions do
     do: {:error, :invalid_authorization_principal}
 
   @doc false
-  @spec with_principal_authority(String.t(), (-> result)) :: result when result: term()
+  @spec with_principal_authority(
+          String.t(),
+          (-> result) | (PrincipalLease.t() -> result)
+        ) :: result
+        when result: term()
   def with_principal_authority(principal_id, fun)
-      when is_binary(principal_id) and is_function(fun, 0) do
+      when is_binary(principal_id) and (is_function(fun, 0) or is_function(fun, 1)) do
     case validate_authorization_principal(principal_id) do
       :ok ->
         lease = %PrincipalLease{principal_id: principal_id, owner: self(), ref: make_ref()}
 
-        with_process_binding(@active_principal_lease_key, lease, fun)
+        with_process_binding(@active_principal_lease_key, lease, fn ->
+          invoke_principal_callback(fun, lease)
+        end)
 
       {:error, _reason} = error ->
         error
@@ -267,6 +279,36 @@ defmodule Arbor.Actions do
 
   def with_principal_authority(_principal_id, _fun),
     do: {:error, :invalid_authorization_principal}
+
+  @doc false
+  @spec execute_with_principal_authority(PrincipalLease.t(), module(), map(), map()) ::
+          {:ok, any()} | {:error, term()}
+  def execute_with_principal_authority(authority, action_module, params, context \\ %{})
+
+  def execute_with_principal_authority(authority, action_module, params, context)
+      when is_atom(action_module) and is_map(params) and is_map(context) do
+    case {authority, Process.get(@active_principal_lease_key)} do
+      {%PrincipalLease{principal_id: principal_id, owner: owner, ref: reference} = lease, lease}
+      when owner == self() and is_reference(reference) ->
+        with {:ok, bound_context} <- bind_authenticated_principal(context, principal_id) do
+          with_action_authorization(
+            principal_id,
+            action_module,
+            bound_context,
+            &execute_action(action_module, params, &1)
+          )
+        end
+
+      _other ->
+        {:error, :authenticated_principal_required}
+    end
+  end
+
+  def execute_with_principal_authority(_authority, _action_module, _params, _context),
+    do: {:error, :invalid_action_execution}
+
+  defp invoke_principal_callback(fun, _lease) when is_function(fun, 0), do: fun.()
+  defp invoke_principal_callback(fun, lease) when is_function(fun, 1), do: fun.(lease)
 
   @doc false
   @spec authorized_principal(map(), module()) :: {:ok, String.t()} | {:error, term()}

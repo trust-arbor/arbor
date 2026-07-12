@@ -51,6 +51,25 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     end
   end
 
+  defmodule NestedCodingValidationAction do
+    use Jido.Action,
+      name: "nested_coding_validation",
+      description: "Runs the shell validation used by a coding action",
+      schema: [
+        command: [type: :string, required: true, doc: "Validation command"]
+      ]
+
+    @impl true
+    def run(params, context) do
+      Arbor.Actions.authorize_and_execute(
+        Map.fetch!(context, :agent_id),
+        Arbor.Actions.Shell.Execute,
+        %{command: params.command, sandbox: :none},
+        context
+      )
+    end
+  end
+
   # ============================================================================
   # Setup
   # ============================================================================
@@ -64,7 +83,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     # These tests verify MCP protocol behavior, not security.
     # In umbrella context, the test agent IDs (`proto-agent-1` etc.)
     # don't carry capabilities, so authorize_and_execute would deny
-    # every tool call. Force the AgentEndpoint into its unauthenticated
+    # every tool call. Force the AgentEndpoint into its registry-bound
     # fallback path via a config seam — the earlier `GenServer.stop(
     # CapabilityStore)` approach raced against OTP's permanent-restart
     # of that GenServer and leaked failures (~60% of seeds) into the
@@ -211,11 +230,10 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     end
 
     test "client calls tool and gets result" do
+      agent_id = "proto-agent-2"
+
       {:ok, endpoint} =
-        AgentEndpoint.start_link(
-          agent_id: "proto-agent-2",
-          actions: [EchoAction]
-        )
+        Arbor.Gateway.start_agent_endpoint(agent_id, actions: [EchoAction])
 
       {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
 
@@ -228,15 +246,14 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       assert content =~ "hello"
 
       ExMCP.Client.stop(client)
-      GenServer.stop(endpoint)
+      Arbor.Gateway.stop_agent_endpoint(agent_id)
     end
 
     test "client calls tool with integer params" do
+      agent_id = "proto-agent-3"
+
       {:ok, endpoint} =
-        AgentEndpoint.start_link(
-          agent_id: "proto-agent-3",
-          actions: [AddAction]
-        )
+        Arbor.Gateway.start_agent_endpoint(agent_id, actions: [AddAction])
 
       {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
 
@@ -246,7 +263,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       assert content =~ "10"
 
       ExMCP.Client.stop(client)
-      GenServer.stop(endpoint)
+      Arbor.Gateway.stop_agent_endpoint(agent_id)
     end
 
     test "client gets error for unknown tool" do
@@ -501,6 +518,68 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
     end
   end
 
+  describe "security regression: endpoint principal authority" do
+    test "registered fallback endpoint executes childless Shell and drops authority after ownership removal" do
+      ensure_shell_started()
+      agent_id = unique_agent_id("fallback-shell")
+
+      {:ok, endpoint} =
+        Arbor.Gateway.start_agent_endpoint(agent_id,
+          actions: [Arbor.Actions.Shell.Execute]
+        )
+
+      {:ok, client} = Arbor.Gateway.connect_to_agent(agent_id)
+
+      {:ok, result} =
+        ExMCP.Client.call_tool(client, "shell_execute", %{
+          "command" => "echo endpoint-fallback-authorized"
+        })
+
+      assert get_tool_result_text(result) =~ "endpoint-fallback-authorized"
+
+      :ok = EndpointRegistry.unregister(agent_id)
+
+      {:ok, denied} =
+        ExMCP.Client.call_tool(client, "shell_execute", %{
+          "command" => "echo endpoint-authority-leaked"
+        })
+
+      denied_text = get_tool_result_text(denied)
+      assert denied_text =~ "endpoint_principal_unbound"
+      refute denied_text =~ "endpoint-authority-leaked\n"
+
+      ExMCP.Client.stop(client)
+      GenServer.stop(endpoint)
+    end
+
+    test "unregistered endpoint cannot mint authority from a forged scalar agent id" do
+      ensure_shell_started()
+      agent_id = unique_agent_id("forged-shell")
+
+      {:ok, endpoint} =
+        AgentEndpoint.start_link(
+          agent_id: agent_id,
+          actions: [Arbor.Actions.Shell.Execute]
+        )
+
+      :ok = EndpointRegistry.register(agent_id, self(), [])
+      {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
+
+      {:ok, denied} =
+        ExMCP.Client.call_tool(client, "shell_execute", %{
+          "command" => "echo forged-endpoint-authority"
+        })
+
+      denied_text = get_tool_result_text(denied)
+      assert denied_text =~ "endpoint_principal_unbound"
+      refute denied_text =~ "forged-endpoint-authority\n"
+
+      ExMCP.Client.stop(client)
+      EndpointRegistry.unregister(agent_id)
+      GenServer.stop(endpoint)
+    end
+  end
+
   # ============================================================================
   # Security regression — capability gate on MCP tool execution
   # ============================================================================
@@ -587,10 +666,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
       agent_id = "agent_sec_regression_no_cap_#{System.unique_integer([:positive])}"
 
       {:ok, endpoint} =
-        AgentEndpoint.start_link(
-          agent_id: agent_id,
-          actions: [EchoAction]
-        )
+        Arbor.Gateway.start_agent_endpoint(agent_id, actions: [EchoAction])
 
       {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
 
@@ -607,7 +683,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
              "Expected an authorization error result, got: #{content}"
 
       ExMCP.Client.stop(client)
-      GenServer.stop(endpoint)
+      Arbor.Gateway.stop_agent_endpoint(agent_id)
     end
 
     test "an agent WITH the capability can execute the tool (gate permits)" do
@@ -627,10 +703,7 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
         )
 
       {:ok, endpoint} =
-        AgentEndpoint.start_link(
-          agent_id: agent_id,
-          actions: [EchoAction]
-        )
+        Arbor.Gateway.start_agent_endpoint(agent_id, actions: [EchoAction])
 
       {:ok, client} = ExMCP.Client.start_link(transport: :beam, server: endpoint)
 
@@ -642,11 +715,63 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
              "Gate failed CLOSED: an authorized agent's echo did not run. Got: #{content}"
 
       ExMCP.Client.stop(client)
-      GenServer.stop(endpoint)
+      Arbor.Gateway.stop_agent_endpoint(agent_id)
 
       if Process.whereis(Arbor.Security.CapabilityStore) do
         Arbor.Security.CapabilityStore.revoke_all(agent_id)
       end
+    end
+
+    test "registered normal endpoint authenticates direct Shell execution" do
+      ensure_shell_started()
+      agent_id = unique_agent_id("normal-shell")
+      authorize_agent(agent_id, ["arbor://shell/exec/echo"])
+
+      {:ok, _endpoint} =
+        Arbor.Gateway.start_agent_endpoint(agent_id,
+          actions: [Arbor.Actions.Shell.Execute]
+        )
+
+      {:ok, client} = Arbor.Gateway.connect_to_agent(agent_id)
+
+      {:ok, result} =
+        ExMCP.Client.call_tool(client, "shell_execute", %{
+          "command" => "echo endpoint-normal-authorized"
+        })
+
+      assert get_tool_result_text(result) =~ "endpoint-normal-authorized"
+
+      ExMCP.Client.stop(client)
+      Arbor.Gateway.stop_agent_endpoint(agent_id)
+      Arbor.Security.CapabilityStore.revoke_all(agent_id)
+    end
+
+    test "registered endpoint keeps principal scope through nested coding validation" do
+      ensure_shell_started()
+      agent_id = unique_agent_id("nested-coding")
+
+      authorize_agent(agent_id, [
+        Arbor.Actions.canonical_uri_for(NestedCodingValidationAction, %{}),
+        "arbor://shell/exec/echo"
+      ])
+
+      {:ok, _endpoint} =
+        Arbor.Gateway.start_agent_endpoint(agent_id,
+          actions: [NestedCodingValidationAction]
+        )
+
+      {:ok, client} = Arbor.Gateway.connect_to_agent(agent_id)
+
+      {:ok, result} =
+        ExMCP.Client.call_tool(client, "nested_coding_validation", %{
+          "command" => "echo nested-coding-validation-authorized"
+        })
+
+      assert get_tool_result_text(result) =~ "nested-coding-validation-authorized"
+
+      ExMCP.Client.stop(client)
+      Arbor.Gateway.stop_agent_endpoint(agent_id)
+      Arbor.Security.CapabilityStore.revoke_all(agent_id)
     end
   end
 
@@ -656,6 +781,42 @@ defmodule Arbor.Gateway.MCP.AgentEndpointTest do
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+
+  defp unique_agent_id(tag) do
+    "agent_endpoint_#{tag}_#{System.unique_integer([:positive])}"
+  end
+
+  defp ensure_shell_started do
+    unless Process.whereis(Arbor.Shell.ExecutablePolicy) do
+      start_supervised!({Arbor.Shell.ExecutablePolicy, startup_path: System.get_env("PATH", "")})
+    end
+
+    unless Process.whereis(Arbor.Shell.ExecutionRegistry) do
+      start_supervised!(Arbor.Shell.ExecutionRegistry)
+    end
+
+    unless Process.whereis(Arbor.Shell.PortSessionSupervisor) do
+      start_supervised!(
+        {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
+      )
+    end
+  end
+
+  defp authorize_agent(agent_id, resources) do
+    unless Process.whereis(Arbor.Trust.Store) do
+      start_supervised!(Arbor.Trust.Store)
+    end
+
+    {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
+
+    rules = Enum.reduce(resources, profile.rules, &Map.put(&2, &1, :auto))
+    :ok = Arbor.Trust.Store.store_profile(%{profile | rules: rules})
+
+    Enum.each(resources, fn resource ->
+      assert {:ok, _capability} =
+               Arbor.Security.grant(principal: agent_id, resource: resource)
+    end)
+  end
 
   # Extract text content from MCP tool result
   defp get_tool_result_text(result) do

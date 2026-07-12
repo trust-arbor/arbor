@@ -233,14 +233,14 @@ defmodule Arbor.Agent.ActionCycleServer do
     parent = self()
 
     Task.start(fn ->
-      result = run_cycle(agent_id, percept, llm_fn, timeout)
+      result = run_cycle(agent_id, parent, percept, llm_fn, timeout)
       send(parent, {:cycle_result, result})
     end)
 
     %{state | queue: queue, cycle_in_flight: true}
   end
 
-  defp run_cycle(agent_id, percept, llm_fn, timeout) do
+  defp run_cycle(agent_id, owner_pid, percept, llm_fn, timeout) do
     controller = Arbor.Agent.CycleController
 
     if Code.ensure_loaded?(controller) and function_exported?(controller, :run, 2) do
@@ -250,7 +250,7 @@ defmodule Arbor.Agent.ActionCycleServer do
       try do
         case apply(controller, :run, [agent_id, opts]) do
           {:intent, intent, percepts} ->
-            exec_result = dispatch_physical_intent(agent_id, intent)
+            exec_result = dispatch_physical_intent(agent_id, owner_pid, intent)
             {:completed, %{intent: intent, percepts: percepts, exec_result: exec_result}}
 
           {:wait, percepts} ->
@@ -312,7 +312,7 @@ defmodule Arbor.Agent.ActionCycleServer do
 
   # ── Physical Intent Dispatch ────────────────────────────────────
 
-  defp dispatch_physical_intent(agent_id, intent) do
+  defp dispatch_physical_intent(agent_id, owner_pid, intent) do
     normalized = normalize_intent(intent)
 
     emit_signal(agent_id, :intent_dispatched, %{
@@ -322,7 +322,15 @@ defmodule Arbor.Agent.ActionCycleServer do
       action: normalized.action
     })
 
-    Arbor.Agent.IntentDispatcher.dispatch(agent_id, normalized, dispatcher_opts(agent_id))
+    case Registry.lookup(Arbor.Agent.ActionCycleRegistry, agent_id) do
+      [{^owner_pid, _value}] ->
+        Arbor.Actions.with_principal_authority(agent_id, fn ->
+          Arbor.Agent.IntentDispatcher.dispatch(agent_id, normalized, dispatcher_opts(agent_id))
+        end)
+
+      _other ->
+        {:error, :action_cycle_principal_unbound}
+    end
   end
 
   # Tolerate either a real %Intent{} or a plain map — CycleController
