@@ -1,17 +1,5 @@
 # Add children to the empty app supervisors (start_children: false leaves them empty)
 # arbor_actions tests need shell, persistence, and signal processes
-repo_root = Path.expand("../../..", __DIR__)
-mix_wrapper = Path.join(repo_root, "bin/mix")
-
-mix_wrapper_sha256 =
-  mix_wrapper |> File.read!() |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
-
-Application.put_env(:arbor_shell, :spawn_backend, Arbor.Actions.TestSpawnBackend)
-
-Application.put_env(:arbor_shell, :spawn_executable_manifest, %{
-  "mix" => %{path: mix_wrapper, sha256: mix_wrapper_sha256}
-})
-
 Supervisor.start_child(
   Arbor.Shell.Supervisor,
   {Arbor.Shell.ExecutablePolicy, startup_path: System.get_env("PATH", "")}

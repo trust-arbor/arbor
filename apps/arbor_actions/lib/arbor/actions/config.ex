@@ -43,6 +43,23 @@ defmodule Arbor.Actions.Config do
     Application.get_env(:arbor_actions, :ai_module, Arbor.AI)
   end
 
+  @doc """
+  Public Shell facade used by the schema-bounded Mix actions.
+
+  Production defaults to `Arbor.Shell`. Tests may configure a trusted named
+  module with `:mix_shell_module` so action behavior can be exercised without
+  claiming production process containment. This seam is operator/test
+  configuration only; actions never resolve it from params or context, and
+  function values are not accepted.
+  """
+  @spec mix_shell_module() :: module()
+  def mix_shell_module do
+    case Application.get_env(:arbor_actions, :mix_shell_module, Arbor.Shell) do
+      module when is_atom(module) -> module
+      _other -> Arbor.Shell
+    end
+  end
+
   @spec scm_provider(map(), map(), map() | nil) :: {:ok, provider()} | {:error, String.t()}
   def scm_provider(params, context, remote_info \\ nil) do
     params

@@ -56,11 +56,9 @@ defmodule Arbor.Shell do
     ExecutionWorker,
     Executor,
     PortSession,
-    Sandbox,
-    SpawnBackend
+    Sandbox
   }
 
-  alias Arbor.Common.SafePath
   alias Arbor.Signals
 
   @default_sandbox :basic
@@ -345,9 +343,11 @@ defmodule Arbor.Shell do
   timeout, cancellation, launcher failure, or owner loss becomes terminal.
 
   The native backend is deliberately childless. Commands that need descendants
-  must use `execute_spawn_capable/3`, whose configured external backend owns
-  whole-unit termination. Repository policy, config auditing, and workspace
-  authorization belong in the higher caller, not in this Shell contract.
+  must use `execute_spawn_capable/3`, which currently fails closed until Shell
+  has a production streaming handle/control-plane implementation with a
+  synchronous teardown receipt. Repository policy, config auditing, and
+  workspace authorization belong in the higher caller, not in this Shell
+  contract.
 
   Options are the same as `execute/2` (`:timeout`, `:max_output_bytes`,
   `:cwd`, `:env`, `:sandbox`, `:stdin`).
@@ -419,52 +419,22 @@ defmodule Arbor.Shell do
     do: {:error, :invalid_prepared_shell_command}
 
   @doc """
-  Execute a descendant-spawning tool through the configured external backend.
+  Fail closed for descendant-spawning tools.
 
-  This is a trusted structured-argv API. It never falls back to the native
-  childless launcher. The backend and executable manifest are snapshotted by
-  `ExecutablePolicy` at Shell startup; missing capabilities, availability, or
-  manifest identity fail before candidate code runs.
+  The public API remains stable for schema-bounded callers, but no production
+  backend currently provides the streaming process handle and control plane
+  needed to enforce whole-unit lifetime. Re-enabling execution requires that
+  implementation to return a synchronous teardown receipt proving the entire
+  unit is gone before Shell reports any terminal result.
+
+  Configuration cannot enable this path. The error is returned before input or
+  path resolution, executable-policy lookup, callback dispatch, or process
+  creation.
   """
   @spec execute_spawn_capable(String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()}
-  def execute_spawn_capable(tool_name, args, opts \\ [])
-
-  def execute_spawn_capable(tool_name, args, opts)
-      when is_binary(tool_name) and is_list(args) and is_list(opts) do
-    with true <- Keyword.keyword?(opts),
-         true <- Enum.all?(args, &(is_binary(&1) and not String.contains?(&1, <<0>>))),
-         {:ok, cwd_identity} <- spawn_cwd(Keyword.get(opts, :cwd)),
-         {:ok, env} <- spawn_env(Keyword.get(opts, :env, %{})),
-         {:ok, timeout} <- spawn_timeout(Keyword.get(opts, :timeout, 30_000)),
-         max_output_bytes =
-           Executor.normalize_max_output_bytes(Keyword.get(opts, :max_output_bytes)),
-         {:ok, backend, tool} <- ExecutablePolicy.spawn_tool(tool_name),
-         request = %{
-           tool: tool,
-           args: args,
-           cwd: cwd_identity.path,
-           cwd_identity: cwd_identity,
-           env: env,
-           owner: self(),
-           deadline: System.monotonic_time(:millisecond) + timeout,
-           timeout: timeout,
-           max_output_bytes: max_output_bytes
-         },
-         :ok <- SpawnBackend.validate(backend, request),
-         :ok <- require_spawn_deadline(request.deadline),
-         {:ok, result} <- call_spawn_backend(backend, request),
-         {:ok, validated} <- validate_spawn_result(result, max_output_bytes) do
-      {:ok, validated}
-    else
-      false -> {:error, :invalid_spawn_execution}
-      {:error, _reason} = error -> error
-      _other -> {:error, :invalid_spawn_execution}
-    end
-  end
-
-  def execute_spawn_capable(_tool_name, _args, _opts),
-    do: {:error, :invalid_spawn_execution}
+  def execute_spawn_capable(_tool_name, _args, _opts \\ []),
+    do: {:error, {:spawn_backend_unavailable, :production_backend_missing}}
 
   # Observability only. `inspect/1` makes argv boundaries unambiguous; this
   # string is never parsed or passed to a process.
@@ -724,93 +694,6 @@ defmodule Arbor.Shell do
   end
 
   # Private functions
-
-  defp spawn_cwd(cwd) when is_binary(cwd) and cwd != "" do
-    with {:ok, canonical} <- SafePath.resolve_real(cwd),
-         {:ok, %File.Stat{type: :directory} = stat} <- File.stat(canonical, time: :posix) do
-      {:ok,
-       %{
-         path: canonical,
-         device: stat.major_device,
-         inode: stat.inode,
-         mode: stat.mode
-       }}
-    else
-      _other -> {:error, :invalid_spawn_cwd}
-    end
-  end
-
-  defp spawn_cwd(_cwd), do: {:error, :invalid_spawn_cwd}
-
-  defp spawn_env(env) when is_map(env) do
-    if Enum.all?(env, fn
-         {key, value}
-         when is_binary(key) and key != "" and (is_binary(value) or value == false) ->
-           not String.contains?(key, ["=", <<0>>]) and
-             (value == false or not String.contains?(value, <<0>>))
-
-         _other ->
-           false
-       end) do
-      {:ok, env}
-    else
-      {:error, :invalid_spawn_environment}
-    end
-  end
-
-  defp spawn_env(_env), do: {:error, :invalid_spawn_environment}
-
-  defp spawn_timeout(timeout) when is_integer(timeout) and timeout > 0 and timeout <= 600_000,
-    do: {:ok, timeout}
-
-  defp spawn_timeout(_timeout), do: {:error, :invalid_spawn_timeout}
-
-  defp require_spawn_deadline(deadline) do
-    if System.monotonic_time(:millisecond) < deadline,
-      do: :ok,
-      else: {:error, :spawn_backend_deadline_expired}
-  end
-
-  defp call_spawn_backend(backend, request) do
-    backend.execute(request)
-  rescue
-    error -> {:error, {:spawn_backend_failed, Exception.message(error)}}
-  catch
-    kind, reason -> {:error, {:spawn_backend_failed, {kind, reason}}}
-  end
-
-  defp validate_spawn_result(result, max_output_bytes) when is_map(result) do
-    with exit_code when is_integer(exit_code) and exit_code >= 0 <- Map.get(result, :exit_code),
-         stdout when is_binary(stdout) <- Map.get(result, :stdout),
-         stderr when is_binary(stderr) <- Map.get(result, :stderr),
-         duration when is_integer(duration) and duration >= 0 <- Map.get(result, :duration_ms),
-         timed_out when is_boolean(timed_out) <- Map.get(result, :timed_out),
-         killed when is_boolean(killed) <- Map.get(result, :killed),
-         output_truncated when is_boolean(output_truncated) <-
-           Map.get(result, :output_truncated),
-         output_limit when is_boolean(output_limit) <-
-           Map.get(result, :output_limit_exceeded),
-         true <- byte_size(stdout) + byte_size(stderr) <= max_output_bytes,
-         true <- not timed_out or killed,
-         true <- not output_limit or (killed and output_truncated) do
-      {:ok,
-       %{
-         exit_code: exit_code,
-         stdout: stdout,
-         stderr: stderr,
-         duration_ms: duration,
-         timed_out: timed_out,
-         killed: killed,
-         output_truncated: output_truncated,
-         output_limit_exceeded: output_limit
-       }}
-    else
-      _other -> {:error, :invalid_spawn_backend_result}
-    end
-  end
-
-  defp validate_spawn_result(_result, _max_output_bytes),
-    do: {:error, :invalid_spawn_backend_result}
 
   # Generic agent commands are already bound to a fixed executable + argv by
   # Sandbox.prepare_agent_command/2. Force the legacy sandbox marker to :basic

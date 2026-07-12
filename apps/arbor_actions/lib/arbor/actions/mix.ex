@@ -8,8 +8,10 @@ defmodule Arbor.Actions.Mix do
   `arbor://action/mix/test` can run tests but cannot run `mix deps.update`,
   whereas raw shell access would conflate them.
 
-  All actions execute through `Arbor.Shell` with `:basic` sandboxing and
-  emit `Arbor.Signals` events for observability.
+  In production, all actions execute through `Arbor.Shell` with `:basic`
+  sandboxing and emit `Arbor.Signals` events for observability. Shell's
+  spawn-capable path currently fails closed until a production streaming
+  handle/control plane can provide synchronous teardown receipts.
 
   ## Actions
 
@@ -30,7 +32,7 @@ defmodule Arbor.Actions.Mix do
       result.passed    # => false (format issues found)
   """
 
-  alias Arbor.Shell
+  alias Arbor.Actions.Config
   alias Arbor.Common.SafePath
 
   @compile_feedback_text_limit 2_000
@@ -104,7 +106,9 @@ defmodule Arbor.Actions.Mix do
         env: env
       ]
 
-      case Shell.execute_spawn_capable("mix", args, shell_opts) do
+      shell_module = Config.mix_shell_module()
+
+      case shell_module.execute_spawn_capable("mix", args, shell_opts) do
         {:ok, result} -> {:ok, result}
         {:error, reason} -> {:error, inspect(reason)}
       end
@@ -117,8 +121,9 @@ defmodule Arbor.Actions.Mix do
   defp default_mix_env(_args), do: %{}
 
   @doc false
-  # Spawn-capable backends own their mount graph. Host checkout paths are never
-  # discovered from candidate Git metadata or injected implicitly.
+  # A future production spawn-capable implementation must own its mount graph.
+  # Host checkout paths are never discovered from candidate Git metadata or
+  # injected implicitly.
   def shared_host_mix_env(path, opts \\ [])
 
   def shared_host_mix_env(path, opts) when is_binary(path) and is_list(opts), do: %{}
