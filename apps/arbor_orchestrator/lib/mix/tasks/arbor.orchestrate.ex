@@ -27,6 +27,7 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
 
   import Arbor.Orchestrator.Mix.Helpers
 
+  alias Arbor.Contracts.Security.SigningAuthority
   alias Arbor.Orchestrator.Templates.Orchestrate, as: OrchestrateTemplate
   alias Mix.Tasks.Arbor.HandsHelpers, as: Hands
 
@@ -72,46 +73,37 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
     # Get or generate the DOT pipeline
     dot_source = resolve_dot(goal, branches, opts)
 
-    # Authenticate operator (human identity via OIDC or fallback)
-    {agent_id, signing_authority} = authenticate_operator()
+    case authenticate_operator() do
+      {:ok, agent_id, signing_authority} ->
+        run_opts = build_run_opts(opts, run_id)
 
-    # Build run options
-    run_opts = build_run_opts(opts, run_id)
+        case run_authenticated(dot_source, agent_id, signing_authority, run_opts) do
+          {:ok, result} ->
+            info("")
+            success("Orchestration completed!")
+            info("  Nodes completed: #{length(result.completed_nodes)}")
+            print_branch_summary(branches, result)
 
-    # Thread authentication into run options
-    run_opts =
-      if signing_authority do
-        run_opts
-        |> Keyword.put(:signing_authority, signing_authority)
-        |> Keyword.put(:execution_principal, agent_id)
-        |> Keyword.put(:agent_id, agent_id)
-        |> Keyword.put(:caller_id, agent_id)
-        |> Keyword.put(:author_id, agent_id)
-        |> Keyword.update(:initial_values, %{"session.agent_id" => agent_id}, fn vals ->
-          Map.put(vals, "session.agent_id", agent_id)
-        end)
-      else
-        run_opts
-      end
+            if Keyword.get(opts, :merge, false) do
+              merge_branches(branches)
+            end
 
-    # Execute
-    case Arbor.Orchestrator.run(dot_source, run_opts) do
-      {:ok, result} ->
-        info("")
-        success("Orchestration completed!")
-        info("  Nodes completed: #{length(result.completed_nodes)}")
-        print_branch_summary(branches, result)
+            if Keyword.get(opts, :cleanup, false) do
+              cleanup_branches(branches)
+            end
 
-        if Keyword.get(opts, :merge, false) do
-          merge_branches(branches)
-        end
+          {:error, reason} ->
+            error("\nOrchestration failed: #{inspect(reason)}")
 
-        if Keyword.get(opts, :cleanup, false) do
-          cleanup_branches(branches)
+            if Keyword.get(opts, :cleanup, false) do
+              cleanup_branches(branches)
+            end
+
+            System.halt(1)
         end
 
       {:error, reason} ->
-        error("\nOrchestration failed: #{inspect(reason)}")
+        error("\nOperator authentication failed: #{inspect(reason)}")
 
         if Keyword.get(opts, :cleanup, false) do
           cleanup_branches(branches)
@@ -119,6 +111,22 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
 
         System.halt(1)
     end
+  end
+
+  @doc "Execute an orchestration as an authenticated operator."
+  @spec run_authenticated(String.t(), String.t(), SigningAuthority.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def run_authenticated(dot_source, agent_id, signing_authority, run_opts \\ [])
+      when is_binary(dot_source) and is_binary(agent_id) and is_list(run_opts) do
+    run_opts =
+      run_opts
+      |> Keyword.put(:execution_principal, agent_id)
+      |> Keyword.put(:agent_id, agent_id)
+      |> Keyword.put(:caller_id, agent_id)
+      |> Keyword.put(:author_id, agent_id)
+      |> bind_operator_context(agent_id)
+
+    Arbor.Orchestrator.run_as(dot_source, agent_id, signing_authority, run_opts)
   end
 
   # -- Parsing --
@@ -404,12 +412,17 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
 
   # -- Authentication --
 
-  defp authenticate_operator do
+  @doc "Authenticate the orchestration operator through OIDC."
+  @spec authenticate_operator() ::
+          {:ok, String.t(), SigningAuthority.t()} | {:error, term()}
+  def authenticate_operator do
     if oidc_enabled?() do
-      authenticate_with_oidc()
+      with {:ok, agent_id, signing_authority} <- authenticate_with_oidc(),
+           :ok <- validate_operator_credentials(agent_id, signing_authority) do
+        {:ok, agent_id, signing_authority}
+      end
     else
-      warn("OIDC not configured — running without human identity authentication")
-      {nil, nil}
+      {:error, :oidc_not_configured}
     end
   end
 
@@ -423,7 +436,7 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
         case Arbor.Security.authenticate_oidc_token(id_token) do
           {:ok, agent_id, signing_authority} ->
             success("Authenticated: #{agent_id}")
-            {agent_id, signing_authority}
+            {:ok, agent_id, signing_authority}
 
           {:error, reason} ->
             warn("Cached token invalid (#{inspect(reason)}), starting device flow...")
@@ -448,7 +461,7 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
          id_token when is_binary(id_token) <- Map.get(new_tokens, "id_token"),
          {:ok, agent_id, signing_authority} <- Arbor.Security.authenticate_oidc_token(id_token) do
       success("Re-authenticated via refresh: #{agent_id}")
-      {agent_id, signing_authority}
+      {:ok, agent_id, signing_authority}
     else
       _ -> run_device_flow()
     end
@@ -458,13 +471,34 @@ defmodule Mix.Tasks.Arbor.Orchestrate do
     case Arbor.Security.authenticate_oidc() do
       {:ok, agent_id, signing_authority} ->
         success("Authenticated: #{agent_id}")
-        {agent_id, signing_authority}
+        {:ok, agent_id, signing_authority}
 
       {:error, reason} ->
         warn("OIDC authentication failed: #{inspect(reason)}")
-        warn("Continuing without authentication")
-        {nil, nil}
+        {:error, {:oidc_authentication_failed, reason}}
     end
+  end
+
+  defp validate_operator_credentials(agent_id, signing_authority)
+       when is_binary(agent_id) and is_struct(signing_authority, SigningAuthority) do
+    if String.trim(agent_id) != "" do
+      :ok
+    else
+      {:error, :invalid_oidc_credentials}
+    end
+  end
+
+  defp validate_operator_credentials(_agent_id, _signing_authority),
+    do: {:error, :invalid_oidc_credentials}
+
+  defp bind_operator_context(opts, agent_id) do
+    initial_values =
+      case Keyword.get(opts, :initial_values, %{}) do
+        values when is_map(values) -> Map.put(values, "session.agent_id", agent_id)
+        _ -> %{"session.agent_id" => agent_id}
+      end
+
+    Keyword.put(opts, :initial_values, initial_values)
   end
 
   defp oidc_enabled? do

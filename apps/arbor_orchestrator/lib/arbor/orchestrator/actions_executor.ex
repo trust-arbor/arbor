@@ -167,50 +167,59 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
       case verify_caller_authority(action_module, params, agent_id, caller_id, opts) do
         :ok ->
-          signed_request = signed_request || sign_for_module(signer, action_module, params)
+          with {:ok, signed_request} <-
+                 sign_for_action(opts, signed_request, signer, action_module, params) do
+            # An authority is process-local input only. The action receives the
+            # signed request, never the opaque authority or a closure capturing it.
+            legacy_signer =
+              if Keyword.has_key?(opts, :signing_authority), do: nil, else: signer
 
-          auth_context =
-            Arbor.Contracts.Security.AuthContext.new(agent_id,
-              signer: signer,
-              signed_request: signed_request,
-              session_id: session_id
+            auth_context =
+              Arbor.Contracts.Security.AuthContext.new(agent_id,
+                signer: legacy_signer,
+                signed_request: signed_request,
+                session_id: session_id
+              )
+
+            Logger.debug(
+              "[ActionsExecutor] #{name}: signed=#{signed_request != nil}, " <>
+                "agent=#{agent_id}, caller=#{caller_id || agent_id}, module=#{action_module}"
             )
 
-          Logger.debug(
-            "[ActionsExecutor] #{name}: signed=#{signed_request != nil}, " <>
-              "agent=#{agent_id}, caller=#{caller_id || agent_id}, module=#{action_module}"
-          )
+            context =
+              %{auth_context: auth_context, workdir: workdir}
+              |> Map.merge(execution_binding_context)
+              |> maybe_put_approval_timeout(opts, execution_binding_context)
+              |> Map.put(:retry_workdir_guard, retry_workdir_guard)
+              |> maybe_put_context(:task_id, task_id)
+              |> maybe_put_context(:session_id, session_id)
+              |> maybe_put_context(:caller_id, caller_id || agent_id)
+              |> maybe_put_context(:author_id, author_id)
+              |> maybe_put_context(:run_authorization, Keyword.get(opts, :run_authorization))
+              |> maybe_put_context(:nested_engine_opts, nested_engine_opts)
+              |> maybe_put_context(:pinned_action_binding, pinned_binding)
+              |> maybe_put_context(:pinned_action_name, name)
+              # Engine-pinned graph execution may resolve pipeline_internal actions.
+              |> Map.put(:allow_pipeline_internal, true)
+              |> maybe_put_file_workspace(action_module, workdir)
+              |> then(fn context ->
+                if signed_request,
+                  do: Map.put(context, :signed_request, signed_request),
+                  else: context
+              end)
+              |> then(fn context ->
+                case Keyword.get(opts, :taint) do
+                  nil -> context
+                  level -> Map.put(context, :taint, level)
+                end
+              end)
+              |> maybe_put_context(:param_taint, Keyword.get(opts, :param_taint))
 
-          context =
-            %{auth_context: auth_context, workdir: workdir}
-            |> Map.merge(execution_binding_context)
-            |> maybe_put_approval_timeout(opts, execution_binding_context)
-            |> Map.put(:retry_workdir_guard, retry_workdir_guard)
-            |> maybe_put_context(:task_id, task_id)
-            |> maybe_put_context(:session_id, session_id)
-            |> maybe_put_context(:caller_id, caller_id || agent_id)
-            |> maybe_put_context(:author_id, author_id)
-            |> maybe_put_context(:run_authorization, Keyword.get(opts, :run_authorization))
-            |> maybe_put_context(:nested_engine_opts, nested_engine_opts)
-            |> maybe_put_context(:pinned_action_binding, pinned_binding)
-            |> maybe_put_context(:pinned_action_name, name)
-            # Engine-pinned graph execution may resolve pipeline_internal actions.
-            |> Map.put(:allow_pipeline_internal, true)
-            |> maybe_put_file_workspace(action_module, workdir)
-            |> then(fn context ->
-              if signed_request,
-                do: Map.put(context, :signed_request, signed_request),
-                else: context
-            end)
-            |> then(fn context ->
-              case Keyword.get(opts, :taint) do
-                nil -> context
-                level -> Map.put(context, :taint, level)
-              end
-            end)
-            |> maybe_put_context(:param_taint, Keyword.get(opts, :param_taint))
-
-          execute_authorized_action(agent_id, action_module, params, context, name)
+            execute_authorized_action(agent_id, action_module, params, context, name)
+          else
+            {:error, reason} ->
+              {:error, "Action #{name} signing failed: #{inspect(reason)}"}
+          end
 
         {:error, reason} ->
           {:error,
@@ -1048,9 +1057,34 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
 
   def format_result(result), do: inspect(result, pretty: true)
 
-  # Sign a tool call using the canonical module-derived resource URI.
-  # Params are included so self-scoped URIs (arbor://agent/profile/{id})
-  # match the URI that authorize_and_execute will verify against.
+  # Sign a tool call using the canonical module-derived resource URI. Authority
+  # key presence selects the authority path, including when its value is nil.
+  # Params are included so self-scoped URIs match authorize_and_execute.
+  defp sign_for_action(opts, signed_request, signer, action_module, params) do
+    case Keyword.fetch(opts, :signing_authority) do
+      {:ok, authority} ->
+        sign_with_authority_for_module(authority, action_module, params)
+
+      :error ->
+        {:ok, signed_request || sign_for_module(signer, action_module, params)}
+    end
+  end
+
+  defp sign_with_authority_for_module(authority, action_module, params) do
+    with {:ok, resource} <- action_authorization_resource(action_module, params),
+         {:ok, signed_request} <- Arbor.Security.sign_with_authority(authority, resource) do
+      Logger.debug("[ActionsExecutor] Authority-signed for #{resource}")
+      {:ok, signed_request}
+    else
+      {:error, reason} ->
+        Logger.warning(
+          "[ActionsExecutor] Authority signing failed for #{inspect(action_module)}: #{inspect(reason)}"
+        )
+
+        {:error, reason}
+    end
+  end
+
   defp sign_for_module(nil, _action_module, _params), do: nil
 
   defp sign_for_module(signer, action_module, params) when is_function(signer, 1) do
