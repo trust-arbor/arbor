@@ -101,22 +101,32 @@ defmodule Arbor.Contracts.Security.SignedRequestTest do
                  agent_id: "human_operator_123",
                  timestamp: DateTime.utc_now(),
                  nonce: :crypto.strong_rand_bytes(16),
-                 signature: <<1, 2, 3>>
+                 signature: :crypto.strong_rand_bytes(64)
                )
 
       assert request.agent_id == "human_operator_123"
       assert is_binary(ctx.agent_id)
     end
 
-    test "rejects contradictory atom/string principal attributes", ctx do
-      assert {:error, :conflicting_attributes} =
+    test "rejects duplicate atom/string principal attributes", ctx do
+      assert {:error, :duplicate_attribute} =
                SignedRequest.new(%{
                  "agent_id" => "human_other",
                  payload: "data",
                  agent_id: ctx.agent_id,
                  timestamp: DateTime.utc_now(),
                  nonce: :crypto.strong_rand_bytes(16),
-                 signature: <<1, 2, 3>>
+                 signature: :crypto.strong_rand_bytes(64)
+               })
+
+      assert {:error, :duplicate_attribute} =
+               SignedRequest.new(%{
+                 "agent_id" => ctx.agent_id,
+                 payload: "data",
+                 agent_id: ctx.agent_id,
+                 timestamp: DateTime.utc_now(),
+                 nonce: :crypto.strong_rand_bytes(16),
+                 signature: :crypto.strong_rand_bytes(64)
                })
     end
 
@@ -127,7 +137,7 @@ defmodule Arbor.Contracts.Security.SignedRequestTest do
                  agent_id: ctx.agent_id,
                  timestamp: DateTime.utc_now(),
                  nonce: :crypto.strong_rand_bytes(16),
-                 signature: <<1, 2, 3>>
+                 signature: :crypto.strong_rand_bytes(64)
                )
     end
 
@@ -138,7 +148,7 @@ defmodule Arbor.Contracts.Security.SignedRequestTest do
                  agent_id: "bad_id",
                  timestamp: DateTime.utc_now(),
                  nonce: :crypto.strong_rand_bytes(16),
-                 signature: <<1, 2, 3>>
+                 signature: :crypto.strong_rand_bytes(64)
                )
     end
 
@@ -149,7 +159,7 @@ defmodule Arbor.Contracts.Security.SignedRequestTest do
                  agent_id: ctx.agent_id,
                  timestamp: DateTime.utc_now(),
                  nonce: <<1, 2, 3>>,
-                 signature: <<1, 2, 3>>
+                 signature: :crypto.strong_rand_bytes(64)
                )
     end
 
@@ -166,7 +176,7 @@ defmodule Arbor.Contracts.Security.SignedRequestTest do
                  agent_id: ctx.agent_id,
                  timestamp: DateTime.utc_now(),
                  nonce: zero_nonce,
-                 signature: <<1, 2, 3>>
+                 signature: :crypto.strong_rand_bytes(64)
                )
 
       # A normal (non-zero) 16-byte nonce is accepted.
@@ -176,8 +186,42 @@ defmodule Arbor.Contracts.Security.SignedRequestTest do
                  agent_id: ctx.agent_id,
                  timestamp: DateTime.utc_now(),
                  nonce: :crypto.strong_rand_bytes(16),
+                 signature: :crypto.strong_rand_bytes(64)
+               )
+    end
+
+    test "security regression: rejects malformed DateTime and Ed25519 signature", ctx do
+      malformed_datetime = %{DateTime.utc_now() | month: 13}
+
+      assert {:error, :invalid_timestamp} =
+               SignedRequest.new(
+                 payload: "data",
+                 agent_id: ctx.agent_id,
+                 timestamp: malformed_datetime,
+                 nonce: :crypto.strong_rand_bytes(16),
+                 signature: :crypto.strong_rand_bytes(64)
+               )
+
+      assert {:error, :invalid_signature_size} =
+               SignedRequest.new(
+                 payload: "data",
+                 agent_id: ctx.agent_id,
+                 timestamp: DateTime.utc_now(),
+                 nonce: :crypto.strong_rand_bytes(16),
                  signature: <<1, 2, 3>>
                )
+    end
+
+    test "canonicalize rejects hostile partial struct-tagged maps", ctx do
+      partial = %{
+        __struct__: SignedRequest,
+        payload: "data",
+        agent_id: ctx.agent_id,
+        timestamp: %{__struct__: DateTime},
+        nonce: :crypto.strong_rand_bytes(16)
+      }
+
+      assert {:error, _reason} = SignedRequest.canonicalize(partial)
     end
   end
 end

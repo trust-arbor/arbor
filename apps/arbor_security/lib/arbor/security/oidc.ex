@@ -60,7 +60,7 @@ defmodule Arbor.Security.OIDC do
            id_token when is_binary(id_token) <- Map.get(token_response, "id_token"),
            {:ok, claims} <- TokenVerifier.verify(id_token, config),
            {:ok, identity, status} <- IdentityStore.load_or_create(claims),
-           :ok <- ensure_registered(identity),
+           :ok <- ensure_registered(identity, id_token, config),
            :ok <- ensure_capabilities(identity.agent_id) do
         cache_token(token_response, claims)
 
@@ -91,7 +91,7 @@ defmodule Arbor.Security.OIDC do
     else
       with {:ok, claims} <- TokenVerifier.verify(id_token, config),
            {:ok, identity, _status} <- IdentityStore.load_or_create(claims),
-           :ok <- ensure_registered(identity),
+           :ok <- ensure_registered(identity, id_token, config),
            :ok <- ensure_capabilities(identity.agent_id) do
         with {:ok, authority} <- open_operator_authority(identity) do
           {:ok, identity.agent_id, authority}
@@ -200,12 +200,10 @@ defmodule Arbor.Security.OIDC do
     :ok
   end
 
-  defp ensure_registered(identity) do
+  defp ensure_registered(identity, id_token, provider_config) do
     if Code.ensure_loaded?(IdentityRegistry) and
          Process.whereis(IdentityRegistry) != nil do
-      public_identity = IdentityContract.public_only(identity)
-
-      case Arbor.Security.register_identity(public_identity) do
+      case Arbor.Security.register_oidc_identity(identity, id_token, provider_config) do
         :ok -> :ok
         {:error, {:already_registered, _}} -> :ok
         {:error, reason} -> {:error, {:registration_failed, reason}}

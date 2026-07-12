@@ -136,8 +136,8 @@ defmodule Arbor.Contracts.Security.SigningAuthorityTest do
                })
     end
 
-    test "rejects contradictory atom/string duplicate attributes" do
-      assert {:error, :conflicting_attributes} =
+    test "rejects all duplicate logical attributes" do
+      assert {:error, :duplicate_attribute} =
                SigningAuthority.new(%{
                  "token" => :crypto.strong_rand_bytes(32),
                  token: @valid_token,
@@ -145,7 +145,7 @@ defmodule Arbor.Contracts.Security.SigningAuthorityTest do
                  purpose: :session
                })
 
-      assert {:error, :conflicting_attributes} =
+      assert {:error, :duplicate_attribute} =
                SigningAuthority.new(
                  token: @valid_token,
                  token: :crypto.strong_rand_bytes(32),
@@ -153,7 +153,7 @@ defmodule Arbor.Contracts.Security.SigningAuthorityTest do
                  purpose: :session
                )
 
-      assert {:ok, _authority} =
+      assert {:error, :duplicate_attribute} =
                SigningAuthority.new(%{
                  "token" => @valid_token,
                  token: @valid_token,

@@ -102,20 +102,26 @@ defmodule Arbor.Security.OIDCTest do
   end
 
   describe "operator signing authority" do
-    test "opens a caller-owned authority without retaining a signer closure" do
-      {:ok, identity} = Arbor.Security.generate_identity(name: "OIDC authority test")
-      human_id = "human_" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
-      human_identity = %{identity | agent_id: human_id}
+    test "opens a caller-owned authority after token-verified human registration" do
+      oidc = Arbor.Security.OIDCTestHelper.issue_identity()
+      human_id = oidc.identity.agent_id
 
-      assert :ok = Arbor.Security.register_identity(human_identity)
-      assert :ok = Arbor.Security.store_signing_key(human_id, identity.private_key)
+      assert :ok =
+               Arbor.Security.register_oidc_identity(
+                 oidc.identity,
+                 oidc.id_token,
+                 oidc.provider
+               )
+
+      assert :ok = Arbor.Security.store_signing_key(human_id, oidc.identity.private_key)
 
       on_exit(fn ->
+        oidc.cleanup.()
         _ = Arbor.Security.delete_signing_key(human_id)
         _ = Arbor.Security.deregister_identity(human_id)
       end)
 
-      assert {:ok, authority} = OIDC.open_operator_authority(human_identity)
+      assert {:ok, authority} = OIDC.open_operator_authority(oidc.identity)
       refute is_function(authority)
       assert authority.principal_id == human_id
 

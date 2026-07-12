@@ -1,4 +1,6 @@
 # Add children to the empty app supervisor (start_children: false leaves it empty)
+Code.require_file("support/oidc_test_helper.ex", __DIR__)
+
 # Start BufferedStore instances first (used by CapabilityStore, Registry, and SigningKeyStore)
 buffered_store = Arbor.Persistence.BufferedStore
 

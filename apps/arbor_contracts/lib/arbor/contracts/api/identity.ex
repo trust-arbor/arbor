@@ -27,9 +27,16 @@ defmodule Arbor.Contracts.API.Identity do
   @type verification_error ::
           :unknown_agent
           | :invalid_signature
+          | :invalid_public_key
           | :expired_timestamp
           | :replayed_nonce
           | :malformed_request
+          | :identity_suspended
+          | :identity_revoked
+          | :verification_unavailable
+          | :verification_failed
+
+  @type display_name_lookup_error :: :invalid_name | :not_found | :registry_unavailable
 
   # ===========================================================================
   # Identity Lifecycle
@@ -59,11 +66,24 @@ defmodule Arbor.Contracts.API.Identity do
               {:ok, Types.public_key()} | {:error, :not_found}
 
   @doc """
+  Look up principal IDs by a non-authoritative identity display name.
+
+  Display names are non-unique and must never be used as authentication or
+  authorization inputs. This callback exists only for discovery and UI
+  selection; callers must continue security decisions with an exact returned
+  principal ID.
+  """
+  @callback lookup_non_authoritative_principal_ids_by_identity_display_name(String.t()) ::
+              {:ok, [String.t()]} | {:error, display_name_lookup_error()}
+
+  @doc """
   Verify the authenticity of a signed request.
 
   Checks timestamp freshness, signature validity, and nonce uniqueness.
   Returns the verified agent ID on success.
   """
   @callback verify_signed_request_authenticity(Arbor.Contracts.Security.SignedRequest.t()) ::
-              {:ok, Types.agent_id()} | {:error, verification_error()}
+              {:ok, String.t()} | {:error, verification_error()}
+
+  @optional_callbacks lookup_non_authoritative_principal_ids_by_identity_display_name: 1
 end

@@ -41,6 +41,49 @@ defmodule Arbor.Security.Identity.RegistryTest do
 
       assert {:error, {:already_registered, _}} = Registry.register(identity)
     end
+
+    test "security regression: ordinary registration rejects human-prefixed identities" do
+      oidc = Arbor.Security.OIDCTestHelper.issue_identity()
+      on_exit(oidc.cleanup)
+
+      assert {:error, :oidc_proof_required} = Registry.register(oidc.identity)
+      assert {:error, :not_found} = Registry.lookup(oidc.identity.agent_id)
+    end
+
+    test "verified OIDC registration binds identity to verified issuer and subject" do
+      oidc = Arbor.Security.OIDCTestHelper.issue_identity()
+
+      on_exit(fn ->
+        oidc.cleanup.()
+        _ = Registry.deregister(oidc.identity.agent_id)
+      end)
+
+      assert :ok = Registry.register_oidc(oidc.identity, oidc.id_token, oidc.provider)
+      assert {:ok, oidc.identity.public_key} == Registry.lookup(oidc.identity.agent_id)
+
+      other = Arbor.Security.OIDCTestHelper.issue_identity()
+      on_exit(other.cleanup)
+
+      assert {:error, {:oidc_identity_mismatch, _, :expected, _}} =
+               Registry.register_oidc(oidc.identity, other.id_token, other.provider)
+    end
+  end
+
+  test "OIDC registration status formatting redacts the signed token" do
+    token = "header.payload.sensitive-signature"
+
+    redacted =
+      Registry.format_status(%{
+        message: {:register_oidc, :identity, token, %{issuer: "https://issuer.test"}},
+        reason: {:failed, token},
+        log: [token],
+        state: %{by_agent_id: %{}, by_name: %{}}
+      })
+
+    refute inspect(redacted) =~ token
+    assert redacted.message == :redacted
+    assert redacted.reason == :redacted
+    assert redacted.log == :redacted
   end
 
   describe "registration policy (C10)" do

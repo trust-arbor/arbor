@@ -453,7 +453,11 @@ defmodule Arbor.Security do
     do: generate_cryptographic_identity_keypair(opts)
 
   @doc """
-  Register an agent's identity (public key).
+  Register an agent's self-certifying identity (public key).
+
+  Ordinary registration accepts `agent_` identities only. First registration
+  of a `human_` identity requires `register_oidc_identity/3` with the original
+  signed ID token and provider configuration.
 
   ## Examples
 
@@ -462,6 +466,33 @@ defmodule Arbor.Security do
   @spec register_identity(Identity.t()) :: :ok | {:error, term()}
   def register_identity(identity),
     do: register_agent_identity_with_public_key(identity)
+
+  @doc """
+  Register a human identity from cryptographically verified OIDC provenance.
+
+  The identity registry re-verifies the original signed ID token against the
+  provider configuration, derives the expected human ID from verified
+  `iss:sub`, and requires an exact match before registration. Decoded claims
+  alone are not accepted.
+  """
+  @spec register_oidc_identity(Identity.t(), String.t(), map()) ::
+          :ok | {:error, term()}
+  def register_oidc_identity(identity, id_token, provider_config) do
+    public_identity = Identity.public_only(identity)
+
+    case Registry.register_oidc(public_identity, id_token, provider_config) do
+      :ok ->
+        Events.record_identity_registered(public_identity.agent_id)
+        :ok
+
+      {:error, _} = error ->
+        error
+    end
+  rescue
+    _ -> {:error, :invalid_oidc_registration}
+  catch
+    :exit, _ -> {:error, :registration_unavailable}
+  end
 
   @doc """
   Remove an agent's identity from the registry.
@@ -479,9 +510,22 @@ defmodule Arbor.Security do
     do: lookup_public_key_for_agent(agent_id)
 
   @doc """
+  Look up principal IDs by identity display name for discovery only.
+
+  Display names are non-unique and explicitly non-authoritative. Never use a
+  name or the ordering of returned IDs for authentication or authorization;
+  continue with an exact principal ID selected by the caller.
+  """
+  @spec lookup_identity_ids_by_display_name(String.t()) ::
+          {:ok, [String.t()]} | {:error, :invalid_name | :not_found | :registry_unavailable}
+  def lookup_identity_ids_by_display_name(name) do
+    lookup_non_authoritative_principal_ids_by_identity_display_name(name)
+  end
+
+  @doc """
   Verify a signed request's authenticity.
   """
-  @spec verify_request(SignedRequest.t()) :: {:ok, String.t()} | {:error, atom()}
+  @spec verify_request(term()) :: {:ok, String.t()} | {:error, atom()}
   def verify_request(signed_request),
     do: verify_signed_request_authenticity(signed_request)
 
@@ -849,26 +893,72 @@ defmodule Arbor.Security do
   end
 
   @impl Arbor.Contracts.API.Identity
-  def verify_signed_request_authenticity(%SignedRequest{} = request) do
-    case Verifier.verify(request) do
-      {:ok, agent_id} ->
-        Events.record_identity_verification_succeeded(agent_id,
-          signature: Base.encode64(request.signature),
-          payload_hash: Base.encode16(:crypto.hash(:sha256, request.payload), case: :lower),
-          nonce: Base.encode64(request.nonce),
-          signed_at: DateTime.to_iso8601(request.timestamp)
-        )
-
-        {:ok, agent_id}
-
-      {:error, reason} = error ->
-        Events.record_identity_verification_failed(request.agent_id, reason,
-          nonce: Base.encode64(request.nonce),
-          signed_at: DateTime.to_iso8601(request.timestamp)
-        )
-
-        error
+  def lookup_non_authoritative_principal_ids_by_identity_display_name(name)
+      when is_binary(name) do
+    if String.trim(name) == "" do
+      {:error, :invalid_name}
+    else
+      Registry.lookup_by_name(name)
     end
+  catch
+    :exit, _ -> {:error, :registry_unavailable}
+  end
+
+  def lookup_non_authoritative_principal_ids_by_identity_display_name(_name),
+    do: {:error, :invalid_name}
+
+  @impl Arbor.Contracts.API.Identity
+  def verify_signed_request_authenticity(request) do
+    with {:ok, canonical} <- canonicalize_signed_request(request) do
+      case Verifier.verify(canonical) do
+        {:ok, agent_id} = success ->
+          record_verification_success(canonical, agent_id)
+          success
+
+        {:error, reason} = error ->
+          record_verification_failure(canonical, reason)
+          error
+      end
+    end
+  rescue
+    _ -> {:error, :verification_failed}
+  catch
+    :exit, _ -> {:error, :verification_unavailable}
+  end
+
+  defp canonicalize_signed_request(request) do
+    case SignedRequest.canonicalize(request) do
+      {:ok, canonical} -> {:ok, canonical}
+      {:error, _reason} -> {:error, :malformed_request}
+    end
+  end
+
+  defp record_verification_success(request, agent_id) do
+    Events.record_identity_verification_succeeded(agent_id,
+      signature: Base.encode64(request.signature),
+      payload_hash: Base.encode16(:crypto.hash(:sha256, request.payload), case: :lower),
+      nonce: Base.encode64(request.nonce),
+      signed_at: DateTime.to_iso8601(request.timestamp)
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp record_verification_failure(request, reason) do
+    Events.record_identity_verification_failed(request.agent_id, reason,
+      nonce: Base.encode64(request.nonce),
+      signed_at: DateTime.to_iso8601(request.timestamp)
+    )
+
+    :ok
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
   end
 
   # ===========================================================================

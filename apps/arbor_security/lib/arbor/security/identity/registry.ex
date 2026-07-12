@@ -17,11 +17,13 @@ defmodule Arbor.Security.Identity.Registry do
 
   ## Trust model (C10)
 
-  - **Self-certifying IDs.** Non-OIDC `agent_id` MUST equal
-    `hash(public_key)` — enforced in `register/2`. You cannot register as
-    another agent's key, so an existing identity can never be impersonated or
-    silently re-bound. Human (OIDC) IDs derive from `iss:sub`, authenticated
-    by the OIDC token.
+  - **Self-certifying agent IDs.** An `agent_id` MUST equal `hash(public_key)` —
+    enforced in `register/2`. Ordinary registration always rejects `human_`
+    IDs.
+  - **OIDC-proven human IDs.** First registration of a `human_` identity must
+    use `register_oidc/3`. The registry verifies the original signed ID token,
+    derives the expected ID from the verified `iss:sub`, and rejects any
+    identity whose ID differs. Unverified claims are never registration proof.
   - **No overwrite.** Re-registering an existing `agent_id` is rejected.
   - **Names are not security-relevant.** `lookup_by_name/1` is explicitly
     non-unique and is NEVER used in an authorization decision — identity
@@ -48,6 +50,8 @@ defmodule Arbor.Security.Identity.Registry do
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Config
   alias Arbor.Security.Crypto
+  alias Arbor.Security.OIDC.IdentityStore
+  alias Arbor.Security.OIDC.TokenVerifier
   alias Arbor.Signals
 
   # Runtime bridge — arbor_persistence is Level 1 peer, no compile-time dep
@@ -67,9 +71,9 @@ defmodule Arbor.Security.Identity.Registry do
   @doc """
   Register an identity (public key only).
 
-  The identity's private key is stripped before storage. Rejects registration
-  if the agent_id does not match the derived ID from the public key, or if
-  the agent_id is already registered.
+  The identity's private key is stripped before storage. This path accepts
+  self-certifying `agent_` identities only; `human_` identities require
+  `register_oidc/3` with the original signed token and provider configuration.
 
   `opts` is passed to the configured registration policy (see
   `register/2`) — e.g. `enrollment_token:` or `requested_by:` for an external
@@ -96,9 +100,29 @@ defmodule Arbor.Security.Identity.Registry do
   the policy governs whether a NEW identity may be created at all.
   """
   @spec register(Identity.t(), keyword()) :: :ok | {:error, term()}
+  def register(%Identity{agent_id: "human_" <> _rest}, _opts),
+    do: {:error, :oidc_proof_required}
+
   def register(%Identity{} = identity, opts) when is_list(opts) do
     GenServer.call(__MODULE__, {:register, identity, opts})
   end
+
+  @doc """
+  Register a human identity after verifying its original OIDC ID token.
+
+  The token is verified against the supplied provider configuration inside
+  the registry. The verified issuer and subject are deterministically mapped
+  to the expected `human_` ID, which must exactly match the identity.
+  Pre-decoded claims or other maps are not accepted as provenance.
+  """
+  @spec register_oidc(Identity.t(), String.t(), map()) :: :ok | {:error, term()}
+  def register_oidc(%Identity{} = identity, id_token, provider_config)
+      when is_binary(id_token) and is_map(provider_config) do
+    GenServer.call(__MODULE__, {:register_oidc, identity, id_token, provider_config})
+  end
+
+  def register_oidc(_identity, _id_token, _provider_config),
+    do: {:error, :invalid_oidc_registration}
 
   @doc """
   Look up the public key for an agent.
@@ -277,56 +301,41 @@ defmodule Arbor.Security.Identity.Registry do
 
   @impl true
   def handle_call({:register, %Identity{} = identity, opts}, _from, state) do
-    expected_id = Crypto.derive_agent_id(identity.public_key)
-    # C10: evaluate the registration policy ONCE (a policy may consume a
-    # one-time enrollment token, so it must not be called twice).
-    policy_result = registration_authorized(identity, opts)
-
     cond do
-      # Registration-authorization chokepoint. Default policy allows (internal
-      # callers only); a configured policy gates who may create a NEW identity
-      # (e.g. external enrollment requiring a signed token). The self-certifying
-      # check below still runs after, so a policy can never weaken the
-      # agent_id == hash(pubkey) binding.
-      match?({:error, _}, policy_result) ->
-        {:error, reason} = policy_result
-        {:reply, {:error, {:registration_denied, reason}}, state}
-
-      # Human identities derive agent_id from OIDC iss:sub, not from public key.
-      # The OIDC token verification authenticates the binding; IdentityStore ensures
-      # the same iss:sub always loads the same keypair.
-      not String.starts_with?(identity.agent_id, "human_") and identity.agent_id != expected_id ->
-        {:reply, {:error, {:agent_id_mismatch, identity.agent_id, :expected, expected_id}}, state}
-
-      Map.has_key?(state.by_agent_id, identity.agent_id) ->
-        {:reply, {:error, {:already_registered, identity.agent_id}}, state}
+      human_identity?(identity) ->
+        {:reply, {:error, :oidc_proof_required}, state}
 
       true ->
-        pk_hash = Crypto.hash(identity.public_key)
+        expected_id = Crypto.derive_agent_id(identity.public_key)
 
-        entry = %{
-          public_key: identity.public_key,
-          encryption_public_key: identity.encryption_public_key,
-          name: identity.name,
-          key_version: identity.key_version,
-          created_at: identity.created_at,
-          metadata: identity.metadata,
-          # Lifecycle status (defaults to :active for backward compatibility)
-          status: Map.get(identity, :status, :active),
-          status_changed_at: Map.get(identity, :status_changed_at),
-          status_reason: Map.get(identity, :status_reason)
-        }
+        if identity.agent_id == expected_id do
+          register_validated_identity(state, identity, opts)
+        else
+          {:reply, {:error, {:agent_id_mismatch, identity.agent_id, :expected, expected_id}},
+           state}
+        end
+    end
+  rescue
+    _ -> {:reply, {:error, :invalid_identity}, state}
+  catch
+    :exit, _ -> {:reply, {:error, :registration_unavailable}, state}
+  end
 
-        state =
-          state
-          |> put_in([:by_agent_id, identity.agent_id], entry)
-          |> put_in([:by_public_key_hash, pk_hash], identity.agent_id)
-          |> index_by_name(identity.name, identity.agent_id)
-          |> update_in([:stats, :total_registered], &(&1 + 1))
-
-        persist_to_store(identity.agent_id, entry)
-        emit_identity_signal(:identity_registered, identity.agent_id)
-        {:reply, :ok, state}
+  @impl true
+  def handle_call(
+        {:register_oidc, %Identity{} = identity, id_token, provider_config},
+        _from,
+        state
+      ) do
+    with true <- human_identity?(identity),
+         {:ok, claims} <- verify_oidc_token(id_token, provider_config),
+         {:ok, expected_id} <- derive_verified_human_id(claims),
+         :ok <- match_human_identity(identity.agent_id, expected_id) do
+      registration_opts = [oidc_issuer: Map.get(claims, "iss")]
+      register_validated_identity(state, identity, registration_opts)
+    else
+      false -> {:reply, {:error, :invalid_human_identity}, state}
+      {:error, _} = error -> {:reply, error, state}
     end
   end
 
@@ -498,6 +507,110 @@ defmodule Arbor.Security.Identity.Registry do
   # Private helpers
   # ===========================================================================
 
+  defp register_validated_identity(state, identity, opts) do
+    with :ok <- validate_public_identity(identity),
+         :ok <- authorize_registration(identity, opts) do
+      if Map.has_key?(state.by_agent_id, identity.agent_id) do
+        {:reply, {:error, {:already_registered, identity.agent_id}}, state}
+      else
+        pk_hash = Crypto.hash(identity.public_key)
+
+        entry = %{
+          public_key: identity.public_key,
+          encryption_public_key: identity.encryption_public_key,
+          name: identity.name,
+          key_version: identity.key_version,
+          created_at: identity.created_at,
+          metadata: identity.metadata,
+          status: Map.get(identity, :status, :active),
+          status_changed_at: Map.get(identity, :status_changed_at),
+          status_reason: Map.get(identity, :status_reason)
+        }
+
+        state =
+          state
+          |> put_in([:by_agent_id, identity.agent_id], entry)
+          |> put_in([:by_public_key_hash, pk_hash], identity.agent_id)
+          |> index_by_name(identity.name, identity.agent_id)
+          |> update_in([:stats, :total_registered], &(&1 + 1))
+
+        persist_to_store(identity.agent_id, entry)
+        emit_identity_signal(:identity_registered, identity.agent_id)
+        {:reply, :ok, state}
+      end
+    else
+      {:error, _} = error -> {:reply, error, state}
+    end
+  rescue
+    _ -> {:reply, {:error, :invalid_identity}, state}
+  catch
+    :exit, _ -> {:reply, {:error, :registration_unavailable}, state}
+  end
+
+  defp validate_public_identity(%Identity{} = identity) do
+    cond do
+      not is_binary(Map.get(identity, :agent_id)) -> {:error, :invalid_identity}
+      not is_binary(Map.get(identity, :public_key)) -> {:error, :invalid_identity}
+      byte_size(identity.public_key) != 32 -> {:error, :invalid_identity}
+      not is_map(Map.get(identity, :metadata)) -> {:error, :invalid_identity}
+      true -> :ok
+    end
+  end
+
+  defp authorize_registration(identity, opts) do
+    case registration_authorized(identity, opts) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:registration_denied, reason}}
+      _ -> {:error, {:registration_denied, :invalid_policy_result}}
+    end
+  end
+
+  defp verify_oidc_token(id_token, provider_config) do
+    case TokenVerifier.verify(id_token, provider_config) do
+      {:ok, claims} when is_map(claims) -> {:ok, claims}
+      {:error, reason} -> {:error, {:oidc_verification_failed, reason}}
+      _ -> {:error, {:oidc_verification_failed, :invalid_verifier_result}}
+    end
+  rescue
+    _ -> {:error, {:oidc_verification_failed, :invalid_provenance}}
+  catch
+    :exit, _ -> {:error, {:oidc_verification_failed, :verification_unavailable}}
+  end
+
+  defp derive_verified_human_id(%{"iss" => issuer, "sub" => subject} = claims)
+       when is_binary(issuer) and issuer != "" and is_binary(subject) and subject != "" do
+    {:ok, IdentityStore.derive_agent_id(claims)}
+  rescue
+    _ -> {:error, :invalid_oidc_claims}
+  end
+
+  defp derive_verified_human_id(_claims), do: {:error, :invalid_oidc_claims}
+
+  defp match_human_identity(actual_id, expected_id) when actual_id == expected_id, do: :ok
+
+  defp match_human_identity(actual_id, expected_id),
+    do: {:error, {:oidc_identity_mismatch, actual_id, :expected, expected_id}}
+
+  defp human_identity?(identity) do
+    case Map.get(identity, :agent_id) do
+      "human_" <> _rest -> true
+      _ -> false
+    end
+  end
+
+  defp nested_map_count(state, key) when is_map(state) do
+    case Map.get(state, key) do
+      value when is_map(value) -> map_size(value)
+      _ -> 0
+    end
+  end
+
+  defp nested_map_count(_state, _key), do: 0
+
+  defp redact_status_field(status, key) do
+    if Map.has_key?(status, key), do: Map.put(status, key, :redacted), else: status
+  end
+
   defp index_by_name(state, nil, _agent_id), do: state
 
   defp index_by_name(state, name, agent_id) do
@@ -528,6 +641,22 @@ defmodule Arbor.Security.Identity.Registry do
 
   @impl true
   def handle_info(_msg, state), do: {:noreply, state}
+
+  @impl true
+  def format_status(status) when is_map(status) do
+    state = Map.get(status, :state, %{})
+
+    redacted_state = %{
+      identity_count: nested_map_count(state, :by_agent_id),
+      name_index_count: nested_map_count(state, :by_name)
+    }
+
+    status
+    |> Map.put(:message, :redacted)
+    |> Map.put(:state, redacted_state)
+    |> redact_status_field(:reason)
+    |> redact_status_field(:log)
+  end
 
   # C10 registration-authorization seam. A configured policy module
   # (Config.registration_policy/0) implementing authorize_registration/2 can

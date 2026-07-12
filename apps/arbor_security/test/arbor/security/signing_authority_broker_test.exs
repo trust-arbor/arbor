@@ -566,7 +566,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
                  owner: "not-a-pid"
                )
 
-      assert {:error, :conflicting_attributes} =
+      assert {:error, :duplicate_attribute} =
                Security.build_signing_authority_acquisition_proof(
                  ctx.agent_id,
                  ctx.private_key,
@@ -1005,19 +1005,19 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
     end
 
     test "human principals can issue and claim a persistent bootstrap" do
-      {:ok, identity} = Identity.generate(name: "human-signing-authority")
-      human_id = "human_" <> Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)
-      public_identity = %{Identity.public_only(identity) | agent_id: human_id}
+      oidc = Arbor.Security.OIDCTestHelper.issue_identity()
+      human_id = oidc.identity.agent_id
 
-      :ok = Security.register_identity(public_identity)
-      :ok = Security.store_signing_key(human_id, identity.private_key)
+      :ok = Security.register_oidc_identity(oidc.identity, oidc.id_token, oidc.provider)
+      :ok = Security.store_signing_key(human_id, oidc.identity.private_key)
 
       on_exit(fn ->
+        oidc.cleanup.()
         _ = Security.delete_signing_key(human_id)
         _ = Security.deregister_identity(human_id)
       end)
 
-      human_ctx = %{agent_id: human_id, private_key: identity.private_key}
+      human_ctx = %{agent_id: human_id, private_key: oidc.identity.private_key}
       assert {:ok, bootstrap} = issue_bootstrap(human_ctx, :human_session)
       assert {:ok, authority} = Security.claim_signing_authority(bootstrap)
       assert authority.principal_id == human_id
@@ -1077,6 +1077,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
 
       snapshot = SigningAuthorityBroker.debug_state()
       assert snapshot.wrapping_key_present?
+      assert snapshot.ephemeral_open_request_count == 0
       assert Enum.any?(snapshot.entries, &(&1.key_source == :ephemeral))
       refute contains_value?(snapshot, ephemeral.private_key)
       refute contains_matching?(snapshot, &is_function/1)
@@ -1120,8 +1121,9 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
         {:messages, messages} = Process.info(broker_pid, :messages)
 
         Enum.any?(messages, fn
-          {:"$gen_call", _from, {:open_ephemeral, %SignedRequest{}, holder_pid, transfer_ref}} ->
-            is_pid(holder_pid) and is_reference(transfer_ref)
+          {:"$gen_call", _from,
+           {:open_ephemeral, request_id, %SignedRequest{}, holder_pid, transfer_ref}} ->
+            is_reference(request_id) and is_pid(holder_pid) and is_reference(transfer_ref)
 
           _ ->
             false
@@ -1140,6 +1142,53 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       end)
 
       assert Process.whereis(SigningAuthorityBroker) == broker_pid
+    end
+
+    test "security regression: post-commit open timeout cancels hidden ephemeral authority" do
+      ephemeral = register_ephemeral_identity("ephemeral-post-commit-timeout")
+      broker_pid = Process.whereis(SigningAuthorityBroker)
+
+      previous_timeout =
+        Application.get_env(:arbor_security, :signing_authority_broker_call_timeout_ms)
+
+      previous_seam =
+        Application.get_env(:arbor_security, :signing_authority_ephemeral_open_test_seam)
+
+      Application.put_env(:arbor_security, :signing_authority_broker_call_timeout_ms, 25)
+
+      Application.put_env(:arbor_security, :signing_authority_ephemeral_open_test_seam, %{
+        delay_ms: 100,
+        notify_pid: self()
+      })
+
+      on_exit(fn ->
+        restore_env(:signing_authority_broker_call_timeout_ms, previous_timeout)
+        restore_env(:signing_authority_ephemeral_open_test_seam, previous_seam)
+        ensure_broker_started()
+      end)
+
+      task =
+        Task.async(fn ->
+          {:ok, proof} = acquisition_proof(ephemeral, :post_commit_timeout, self())
+          Security.open_ephemeral_signing_authority(proof, ephemeral.private_key)
+        end)
+
+      assert_receive {:ephemeral_open_committed, request_id}, 1_000
+      assert is_reference(request_id)
+      assert {:error, :broker_timeout} = Task.await(task, 1_000)
+
+      wait_until(fn ->
+        case SigningAuthorityBroker.debug_state() do
+          %{ephemeral_open_request_count: 0, entries: entries} ->
+            not Enum.any?(entries, &(&1.principal_id == ephemeral.agent_id))
+
+          _temporary_timeout ->
+            false
+        end
+      end)
+
+      assert Process.whereis(SigningAuthorityBroker) == broker_pid
+      assert {:error, :no_signing_key} = Security.load_signing_key(ephemeral.agent_id)
     end
 
     test "security regression: format_status redacts messages and all sensitive state" do

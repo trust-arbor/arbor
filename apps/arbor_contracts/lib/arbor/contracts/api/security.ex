@@ -85,6 +85,10 @@ defmodule Arbor.Contracts.API.Security do
           | :key_handoff_expired
           | :key_wrapping_failed
           | :key_decryption_failed
+          | :invalid_ephemeral_open_request
+          | :duplicate_ephemeral_open_request
+          | :ephemeral_open_not_pending
+          | :ephemeral_open_not_acknowledged
           | :invalid_signature
           | :replayed_nonce
           | :expired_timestamp
@@ -101,7 +105,7 @@ defmodule Arbor.Contracts.API.Security do
           | :token_too_short
           | :zero_token
           | :invalid_principal_id
-          | :conflicting_attributes
+          | :duplicate_attribute
           | :unknown_attribute
           | :invalid_options
           | :unknown_option

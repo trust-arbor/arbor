@@ -134,6 +134,8 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   - Ephemeral state stores ciphertext, IV, and tag, never a plaintext private key
   - Caller plaintext reaches the broker only through a monitored, expiring,
     one-shot key holder; it is never part of the broker GenServer call request
+  - Ephemeral opens use request-scoped acknowledgement and ordered cancellation;
+    a timed-out caller cannot leave a hidden committed authority behind
   - The broker-local wrapping key and all ephemeral entries disappear on restart
   - Decrypted key material is scoped to one sign/derive call; BEAM zeroization is
     not claimed
@@ -170,6 +172,8 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   @ephemeral_key_check_v1 "arbor.signing_authority.ephemeral.key_check.v1"
   @persistent_key_check_v1 "arbor.signing_authority.persistent.key_check.v1"
   @key_holder_ttl_margin_ms 1_000
+  @ephemeral_request_ttl_margin_ms 1_000
+  @ephemeral_finalize_timeout_ms 100
 
   @type open_purpose :: atom() | String.t()
   @type derive_purpose :: atom() | String.t()
@@ -285,11 +289,19 @@ defmodule Arbor.Security.SigningAuthorityBroker do
         broker_pid when is_pid(broker_pid) ->
           timeout_ms = Config.signing_authority_broker_call_timeout_ms()
           holder_ttl_ms = timeout_ms + @key_holder_ttl_margin_ms
+          request_id = make_ref()
 
           with {:ok, holder_pid, transfer_ref} <-
                  KeyHolder.start(private_key, self(), broker_pid, holder_ttl_ms) do
             try do
-              call(broker_pid, {:open_ephemeral, proof, holder_pid, transfer_ref}, timeout_ms)
+              result =
+                call(
+                  broker_pid,
+                  {:open_ephemeral, request_id, proof, holder_pid, transfer_ref},
+                  timeout_ms
+                )
+
+              complete_ephemeral_open(broker_pid, request_id, result, timeout_ms)
             after
               KeyHolder.cancel(holder_pid, transfer_ref)
             end
@@ -388,6 +400,54 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
+  defp complete_ephemeral_open(
+         broker_pid,
+         request_id,
+         {:ok, %SigningAuthority{} = authority},
+         timeout_ms
+       ) do
+    case call(broker_pid, {:ack_ephemeral_open, request_id}, timeout_ms) do
+      :ok ->
+        _ =
+          call(
+            broker_pid,
+            {:finalize_ephemeral_open, request_id},
+            min(timeout_ms, @ephemeral_finalize_timeout_ms)
+          )
+
+        {:ok, authority}
+
+      {:error, _reason} = error ->
+        request_ephemeral_open_cancel(broker_pid, request_id, timeout_ms)
+        error
+
+      _unexpected ->
+        request_ephemeral_open_cancel(broker_pid, request_id, timeout_ms)
+        {:error, :broker_unavailable}
+    end
+  end
+
+  defp complete_ephemeral_open(broker_pid, request_id, {:error, _reason} = error, timeout_ms) do
+    request_ephemeral_open_cancel(broker_pid, request_id, timeout_ms)
+    error
+  end
+
+  defp complete_ephemeral_open(broker_pid, request_id, _unexpected, timeout_ms) do
+    request_ephemeral_open_cancel(broker_pid, request_id, timeout_ms)
+    {:error, :broker_unavailable}
+  end
+
+  defp request_ephemeral_open_cancel(broker_pid, request_id, timeout_ms) do
+    _ =
+      call(
+        broker_pid,
+        {:cancel_ephemeral_open, request_id},
+        min(timeout_ms, @ephemeral_finalize_timeout_ms)
+      )
+
+    :ok
+  end
+
   # ---------------------------------------------------------------------------
   # Server
   # ---------------------------------------------------------------------------
@@ -398,6 +458,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
      %{
        authorities: %{},
        bootstraps: %{},
+       ephemeral_open_requests: %{},
        monitors: %{},
        wrapping_key: :crypto.strong_rand_bytes(@wrapping_key_bytes)
      }}
@@ -435,12 +496,13 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   def handle_call(
-        {:open_ephemeral, proof, holder_pid, transfer_ref},
+        {:open_ephemeral, request_id, proof, holder_pid, transfer_ref},
         {caller_pid, _tag},
         state
       ) do
     result =
-      with {:ok, bound} <- verify_acquisition(proof, caller_pid),
+      with :ok <- validate_ephemeral_request_id(request_id, state),
+           {:ok, bound} <- verify_acquisition(proof, caller_pid),
            {:ok, private_key} <- KeyHolder.take(holder_pid, transfer_ref),
            :ok <- validate_private_key(private_key),
            :ok <- verify_private_key_matches(bound.principal_id, proof, private_key),
@@ -452,10 +514,71 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
     case result do
       {:ok, bound, token, key_source} ->
-        create_authority(state, bound, caller_pid, key_source, nil, token)
+        case create_authority(state, bound, caller_pid, key_source, nil, token) do
+          {:reply, {:ok, authority}, committed_state} ->
+            tracked_state =
+              track_ephemeral_open_request(
+                committed_state,
+                request_id,
+                authority.token,
+                caller_pid,
+                :committed
+              )
+
+            run_ephemeral_open_test_seam(request_id)
+            {:reply, {:ok, authority}, tracked_state}
+
+          other ->
+            other
+        end
 
       {:error, _} = error ->
         {:reply, error, state}
+    end
+  end
+
+  def handle_call({:ack_ephemeral_open, request_id}, {caller_pid, _tag}, state) do
+    case fetch_ephemeral_open_request(state, request_id, caller_pid) do
+      {:ok, request} ->
+        state =
+          track_ephemeral_open_request(
+            state,
+            request_id,
+            request.authority_token,
+            caller_pid,
+            :acknowledged
+          )
+
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:finalize_ephemeral_open, request_id}, {caller_pid, _tag}, state) do
+    case fetch_ephemeral_open_request(state, request_id, caller_pid) do
+      {:ok, %{status: :acknowledged}} ->
+        {:reply, :ok, remove_ephemeral_open_request(state, request_id)}
+
+      {:ok, _request} ->
+        {:reply, {:error, :ephemeral_open_not_acknowledged}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:cancel_ephemeral_open, request_id}, {caller_pid, _tag}, state) do
+    case fetch_ephemeral_open_request(state, request_id, caller_pid) do
+      {:ok, request} ->
+        {:reply, :ok, revoke_ephemeral_open_request(state, request_id, request)}
+
+      {:error, :ephemeral_open_not_pending} ->
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -524,6 +647,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     snapshot = %{
       authority_count: map_size(state.authorities),
       bootstrap_count: map_size(state.bootstraps),
+      ephemeral_open_request_count: map_size(state.ephemeral_open_requests),
       wrapping_key_present?: is_binary(state.wrapping_key),
       entries: entries,
       bootstrap_entries: bootstrap_entries
@@ -546,7 +670,11 @@ defmodule Arbor.Security.SigningAuthorityBroker do
             {:noreply, state}
 
           {entry, authorities} ->
-            state = %{state | authorities: authorities}
+            state =
+              state
+              |> Map.put(:authorities, authorities)
+              |> remove_ephemeral_open_requests_for_authority(authority_token)
+
             {:noreply, maybe_make_bootstrap_reclaimable(state, entry, authority_token)}
         end
     end
@@ -562,6 +690,19 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
+  def handle_info({:expire_ephemeral_open_request, request_id, expiry_id}, state) do
+    case Map.get(state.ephemeral_open_requests, request_id) do
+      %{expiry_id: ^expiry_id, status: :committed} = request ->
+        {:noreply, revoke_ephemeral_open_request(state, request_id, request)}
+
+      %{expiry_id: ^expiry_id, status: :acknowledged} ->
+        {:noreply, remove_ephemeral_open_request(state, request_id)}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info(_msg, state), do: {:noreply, state}
 
   @impl true
@@ -571,6 +712,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     redacted_state = %{
       authority_count: map_count(state, :authorities),
       bootstrap_count: map_count(state, :bootstraps),
+      ephemeral_open_request_count: map_count(state, :ephemeral_open_requests),
       monitor_count: map_count(state, :monitors)
     }
 
@@ -587,6 +729,10 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
     Enum.each(state.bootstraps, fn {_token, slot} ->
       cancel_expiry_timer(slot)
+    end)
+
+    Enum.each(state.ephemeral_open_requests, fn {_request_id, request} ->
+      cancel_ephemeral_open_request_timer(request)
     end)
 
     :ok
@@ -784,6 +930,110 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     state
     |> update_in([:authorities], &Map.delete(&1, token))
     |> update_in([:monitors], &Map.delete(&1, entry.owner_ref))
+    |> remove_ephemeral_open_requests_for_authority(token)
+  end
+
+  defp validate_ephemeral_request_id(request_id, state) when is_reference(request_id) do
+    if Map.has_key?(state.ephemeral_open_requests, request_id) do
+      {:error, :duplicate_ephemeral_open_request}
+    else
+      :ok
+    end
+  end
+
+  defp validate_ephemeral_request_id(_request_id, _state),
+    do: {:error, :invalid_ephemeral_open_request}
+
+  defp fetch_ephemeral_open_request(state, request_id, caller_pid) do
+    case Map.get(state.ephemeral_open_requests, request_id) do
+      nil ->
+        {:error, :ephemeral_open_not_pending}
+
+      %{owner_pid: ^caller_pid} = request ->
+        {:ok, request}
+
+      _other_owner ->
+        {:error, :owner_mismatch}
+    end
+  end
+
+  defp track_ephemeral_open_request(
+         state,
+         request_id,
+         authority_token,
+         owner_pid,
+         status
+       )
+       when status in [:committed, :acknowledged] do
+    state = remove_ephemeral_open_request(state, request_id)
+    expiry_id = make_ref()
+
+    ttl_ms =
+      Config.signing_authority_broker_call_timeout_ms() + @ephemeral_request_ttl_margin_ms
+
+    timer_ref =
+      Process.send_after(
+        self(),
+        {:expire_ephemeral_open_request, request_id, expiry_id},
+        ttl_ms
+      )
+
+    request = %{
+      authority_token: authority_token,
+      owner_pid: owner_pid,
+      status: status,
+      expiry_id: expiry_id,
+      expiry_timer: timer_ref
+    }
+
+    put_in(state, [:ephemeral_open_requests, request_id], request)
+  end
+
+  defp remove_ephemeral_open_request(state, request_id) do
+    case Map.pop(state.ephemeral_open_requests, request_id) do
+      {nil, _requests} ->
+        state
+
+      {request, requests} ->
+        cancel_ephemeral_open_request_timer(request)
+        %{state | ephemeral_open_requests: requests}
+    end
+  end
+
+  defp revoke_ephemeral_open_request(state, request_id, request) do
+    state = remove_ephemeral_open_request(state, request_id)
+
+    case Map.get(state.authorities, request.authority_token) do
+      nil -> state
+      entry -> remove_authority(state, request.authority_token, entry)
+    end
+  end
+
+  defp remove_ephemeral_open_requests_for_authority(state, authority_token) do
+    request_ids =
+      for {request_id, %{authority_token: ^authority_token}} <- state.ephemeral_open_requests,
+          do: request_id
+
+    Enum.reduce(request_ids, state, &remove_ephemeral_open_request(&2, &1))
+  end
+
+  defp cancel_ephemeral_open_request_timer(%{expiry_timer: timer_ref})
+       when is_reference(timer_ref) do
+    Process.cancel_timer(timer_ref, async: false, info: false)
+    :ok
+  end
+
+  defp cancel_ephemeral_open_request_timer(_request), do: :ok
+
+  defp run_ephemeral_open_test_seam(request_id) do
+    case Config.signing_authority_ephemeral_open_test_seam() do
+      %{delay_ms: delay_ms, notify_pid: notify_pid} ->
+        send(notify_pid, {:ephemeral_open_committed, request_id})
+        Process.sleep(delay_ms)
+
+      nil ->
+        :ok
+    end
   end
 
   defp maybe_make_bootstrap_reclaimable(state, %{bootstrap_token: nil}, _authority_token),

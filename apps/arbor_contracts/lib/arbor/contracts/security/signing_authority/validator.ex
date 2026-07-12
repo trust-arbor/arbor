@@ -4,7 +4,7 @@ defmodule Arbor.Contracts.Security.SigningAuthority.Validator do
   @token_min_bytes 16
 
   @type principal_id :: String.t()
-  @type attribute_error :: :invalid_attrs | :unknown_attribute | :conflicting_attributes
+  @type attribute_error :: :invalid_attrs | :unknown_attribute | :duplicate_attribute
 
   @doc false
   @spec extract_attributes(keyword() | map(), [atom()]) ::
@@ -13,16 +13,13 @@ defmodule Arbor.Contracts.Security.SigningAuthority.Validator do
     with {:ok, pairs} <- attribute_pairs(attrs),
          :ok <- validate_attribute_keys(pairs, allowed_keys) do
       Enum.reduce_while(allowed_keys, {:ok, %{}}, fn key, {:ok, normalized} ->
-        values =
-          pairs
-          |> Enum.filter(fn {candidate, _value} -> attribute_key?(candidate, key) end)
-          |> Enum.map(&elem(&1, 1))
-          |> Enum.uniq()
+        matches =
+          Enum.filter(pairs, fn {candidate, _value} -> attribute_key?(candidate, key) end)
 
-        case values do
+        case matches do
           [] -> {:cont, {:ok, normalized}}
-          [value] -> {:cont, {:ok, Map.put(normalized, key, value)}}
-          _contradictory -> {:halt, {:error, :conflicting_attributes}}
+          [{_source_key, value}] -> {:cont, {:ok, Map.put(normalized, key, value)}}
+          _duplicates -> {:halt, {:error, :duplicate_attribute}}
         end
       end)
     end

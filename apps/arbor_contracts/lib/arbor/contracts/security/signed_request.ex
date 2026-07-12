@@ -28,6 +28,7 @@ defmodule Arbor.Contracts.Security.SignedRequest do
   alias Arbor.Types
 
   @nonce_size 16
+  @signature_size 64
 
   @derive Jason.Encoder
   typedstruct enforce: true do
@@ -71,6 +72,26 @@ defmodule Arbor.Contracts.Security.SignedRequest do
   end
 
   def new(_), do: {:error, :invalid_attrs}
+
+  @doc """
+  Canonicalize any term into a fully validated signed request without raising.
+
+  Hostile struct-tagged partial maps are reconstructed through `new/1` using
+  safe field extraction. This is the required boundary before verification.
+  """
+  @spec canonicalize(term()) :: {:ok, t()} | {:error, term()}
+  def canonicalize(%__MODULE__{} = request) do
+    new(%{
+      payload: Map.get(request, :payload),
+      agent_id: Map.get(request, :agent_id),
+      timestamp: Map.get(request, :timestamp),
+      nonce: Map.get(request, :nonce),
+      signature: Map.get(request, :signature)
+    })
+  end
+
+  def canonicalize(attrs) when is_map(attrs) or is_list(attrs), do: new(attrs)
+  def canonicalize(_), do: {:error, :invalid_signed_request}
 
   @doc """
   Sign a payload, producing a complete SignedRequest.
@@ -152,6 +173,7 @@ defmodule Arbor.Contracts.Security.SignedRequest do
     validators = [
       &validate_payload/1,
       &validate_principal_id/1,
+      &validate_timestamp/1,
       &validate_nonce/1,
       &validate_signature/1
     ]
@@ -176,6 +198,18 @@ defmodule Arbor.Contracts.Security.SignedRequest do
 
   defp validate_principal_id(_), do: {:error, :missing_agent_id}
 
+  defp validate_timestamp(%{timestamp: %DateTime{} = timestamp}) do
+    _iso8601 = DateTime.to_iso8601(timestamp)
+    _unix = DateTime.to_unix(timestamp, :microsecond)
+    :ok
+  rescue
+    _ -> {:error, :invalid_timestamp}
+  catch
+    :exit, _ -> {:error, :invalid_timestamp}
+  end
+
+  defp validate_timestamp(_), do: {:error, :invalid_timestamp}
+
   defp validate_nonce(%{nonce: n}) when is_binary(n) and byte_size(n) == @nonce_size do
     # Reject all-zero nonces as they indicate failed entropy source
     if n == <<0::size(@nonce_size * 8)>> do
@@ -187,8 +221,11 @@ defmodule Arbor.Contracts.Security.SignedRequest do
 
   defp validate_nonce(_), do: {:error, :invalid_nonce_size}
 
-  defp validate_signature(%{signature: s}) when is_binary(s) and byte_size(s) > 0, do: :ok
-  defp validate_signature(_), do: {:error, :empty_signature}
+  defp validate_signature(%{signature: signature})
+       when is_binary(signature) and byte_size(signature) == @signature_size,
+       do: :ok
+
+  defp validate_signature(_), do: {:error, :invalid_signature_size}
 
   defp validate_signing_args(payload, principal_id, private_key) do
     cond do

@@ -303,6 +303,39 @@ defmodule Arbor.SecurityTest do
       assert {:ok, pk} = Security.lookup_public_key(identity.agent_id)
       assert pk == identity.public_key
     end
+
+    test "security regression: human first registration requires verified OIDC provenance" do
+      oidc = Arbor.Security.OIDCTestHelper.issue_identity()
+
+      on_exit(fn ->
+        oidc.cleanup.()
+        _ = Security.deregister_identity(oidc.identity.agent_id)
+      end)
+
+      assert {:error, :oidc_proof_required} = Security.register_identity(oidc.identity)
+      assert {:error, :not_found} = Security.lookup_public_key(oidc.identity.agent_id)
+
+      forged_token = Arbor.Security.OIDCTestHelper.tamper_token(oidc.id_token)
+
+      assert {:error, {:oidc_verification_failed, _reason}} =
+               Security.register_oidc_identity(oidc.identity, forged_token, oidc.provider)
+
+      assert {:error, :not_found} = Security.lookup_public_key(oidc.identity.agent_id)
+    end
+  end
+
+  describe "lookup_identity_ids_by_display_name/1" do
+    test "returns non-authoritative principal IDs through the public facade" do
+      display_name = "scheduler-discovery-#{System.unique_integer([:positive])}"
+      {:ok, identity} = Security.generate_identity(name: display_name)
+      :ok = Security.register_identity(identity)
+
+      on_exit(fn -> _ = Security.deregister_identity(identity.agent_id) end)
+
+      assert {:ok, ids} = Security.lookup_identity_ids_by_display_name(display_name)
+      assert identity.agent_id in ids
+      assert {:error, :invalid_name} = Security.lookup_identity_ids_by_display_name("  ")
+    end
   end
 
   describe "verify_request/1" do
@@ -319,6 +352,46 @@ defmodule Arbor.SecurityTest do
 
       assert {:ok, agent_id} = Security.verify_request(signed)
       assert agent_id == identity.agent_id
+    end
+
+    test "security regression: hostile request shapes fail closed without raising" do
+      {:ok, identity} = Security.generate_identity()
+      :ok = Security.register_identity(identity)
+      {:ok, signed} = SignedRequest.sign("payload", identity.agent_id, identity.private_key)
+
+      on_exit(fn -> _ = Security.deregister_identity(identity.agent_id) end)
+
+      hostile_requests = [
+        %{},
+        %{__struct__: SignedRequest, payload: "partial"},
+        %{signed | timestamp: %{__struct__: DateTime}},
+        %{signed | timestamp: %{DateTime.utc_now() | month: 13}},
+        %{signed | signature: <<1, 2, 3>>}
+      ]
+
+      for hostile <- hostile_requests do
+        assert {:error, :malformed_request} = Security.verify_request(hostile)
+      end
+    end
+
+    test "security regression: malformed registered public key returns a typed error" do
+      {:ok, identity} = Security.generate_identity()
+      :ok = Security.register_identity(identity)
+      {:ok, signed} = SignedRequest.sign("payload", identity.agent_id, identity.private_key)
+
+      registry = Arbor.Security.Identity.Registry
+      original_state = :sys.get_state(registry)
+
+      on_exit(fn ->
+        :sys.replace_state(registry, fn _state -> original_state end)
+      end)
+
+      :sys.replace_state(registry, fn state ->
+        put_in(state, [:by_agent_id, identity.agent_id, :public_key], <<1, 2, 3>>)
+      end)
+
+      assert {:error, :invalid_public_key} = Security.verify_request(signed)
+      assert Process.alive?(Process.whereis(registry))
     end
   end
 

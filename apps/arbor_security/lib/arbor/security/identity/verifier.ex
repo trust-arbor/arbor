@@ -21,13 +21,25 @@ defmodule Arbor.Security.Identity.Verifier do
   Returns `{:ok, agent_id}` on success, or `{:error, reason}` with a specific
   verification error.
   """
-  @spec verify(SignedRequest.t()) :: {:ok, String.t()} | {:error, atom()}
-  def verify(%SignedRequest{} = request) do
-    with :ok <- check_timestamp_freshness(request),
+  @spec verify(term()) :: {:ok, String.t()} | {:error, atom()}
+  def verify(request) do
+    with {:ok, request} <- canonicalize_request(request),
+         :ok <- check_timestamp_freshness(request),
          {:ok, public_key} <- lookup_agent_key(request.agent_id),
          :ok <- verify_signature(request, public_key),
          :ok <- check_nonce_uniqueness(request.nonce) do
       {:ok, request.agent_id}
+    end
+  rescue
+    _ -> {:error, :verification_failed}
+  catch
+    :exit, _ -> {:error, :verification_unavailable}
+  end
+
+  defp canonicalize_request(request) do
+    case SignedRequest.canonicalize(request) do
+      {:ok, canonical} -> {:ok, canonical}
+      {:error, _reason} -> {:error, :malformed_request}
     end
   end
 
@@ -47,25 +59,48 @@ defmodule Arbor.Security.Identity.Verifier do
   # Step 2: Look up public key from registry
   defp lookup_agent_key(agent_id) do
     case Registry.lookup(agent_id) do
-      {:ok, public_key} -> {:ok, public_key}
-      {:error, :not_found} -> {:error, :unknown_agent}
+      {:ok, public_key} when is_binary(public_key) and byte_size(public_key) == 32 ->
+        {:ok, public_key}
+
+      {:ok, _malformed_public_key} ->
+        {:error, :invalid_public_key}
+
+      {:error, :not_found} ->
+        {:error, :unknown_agent}
+
+      {:error, :identity_suspended} ->
+        {:error, :identity_suspended}
+
+      {:error, :identity_revoked} ->
+        {:error, :identity_revoked}
+
+      {:error, _reason} ->
+        {:error, :verification_unavailable}
     end
+  catch
+    :exit, _ -> {:error, :verification_unavailable}
   end
 
   # Step 3: Verify Ed25519 signature
   defp verify_signature(%SignedRequest{} = request, public_key) do
     message = SignedRequest.signing_payload(request)
 
-    if Crypto.verify(message, request.signature, public_key) do
-      :ok
-    else
-      {:error, :invalid_signature}
+    case Crypto.verify(message, request.signature, public_key) do
+      true -> :ok
+      false -> {:error, :invalid_signature}
+      _ -> {:error, :invalid_signature}
     end
+  rescue
+    _ -> {:error, :invalid_signature}
+  catch
+    :exit, _ -> {:error, :invalid_signature}
   end
 
   # Step 4: Nonce uniqueness
   defp check_nonce_uniqueness(nonce) do
     ttl = Config.nonce_ttl_seconds()
     NonceCache.check_and_record(nonce, ttl)
+  catch
+    :exit, _ -> {:error, :verification_unavailable}
   end
 end

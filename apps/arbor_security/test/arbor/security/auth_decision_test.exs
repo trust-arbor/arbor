@@ -1,5 +1,5 @@
 defmodule Arbor.Security.AuthDecisionTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Arbor.Security.AuthDecision
   alias Arbor.Contracts.Security.AuthContext
@@ -26,7 +26,6 @@ defmodule Arbor.Security.AuthDecisionTest do
 
   describe "human identity registry check (H5 regression)" do
     alias Arbor.Contracts.Security.Capability
-    alias Arbor.Contracts.Security.Identity
     alias Arbor.Security.Identity.Registry
 
     test "security regression (H5): suspended human identity is denied" do
@@ -38,18 +37,17 @@ defmodule Arbor.Security.AuthDecisionTest do
       # agents do.
       n = System.unique_integer([:positive])
 
-      {:ok, identity} =
-        Identity.new(
-          public_key: :crypto.strong_rand_bytes(32),
-          name: "h5_suspended_#{n}"
-        )
+      oidc = Arbor.Security.OIDCTestHelper.issue_identity(subject: "h5-suspended-#{n}")
+      human_id = oidc.identity.agent_id
 
-      # Force the principal_id to start with "human_" — that's the prefix the
-      # removed bypass keyed on.
-      human_id = "human_h5_suspended_#{n}"
-      human_identity = %{identity | agent_id: human_id}
+      :ok =
+        Arbor.Security.register_oidc_identity(oidc.identity, oidc.id_token, oidc.provider)
 
-      :ok = Registry.register(human_identity)
+      on_exit(fn ->
+        oidc.cleanup.()
+        _ = Registry.deregister(human_id)
+      end)
+
       :ok = Registry.suspend(human_id, "H5 regression test")
 
       # Grant a matching capability so the only thing standing between the

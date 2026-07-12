@@ -68,5 +68,20 @@ defmodule Arbor.Security.Identity.VerifierTest do
       # Same nonce should be rejected
       assert {:error, :replayed_nonce} = Verifier.verify(signed)
     end
+
+    test "hostile partial and malformed request structs return typed errors", %{
+      identity: identity
+    } do
+      {:ok, signed} = SignedRequest.sign("test", identity.agent_id, identity.private_key)
+
+      assert {:error, :malformed_request} =
+               Verifier.verify(%{__struct__: SignedRequest, payload: "partial"})
+
+      assert {:error, :malformed_request} =
+               Verifier.verify(%{signed | timestamp: %{DateTime.utc_now() | month: 13}})
+
+      assert {:error, :malformed_request} = Verifier.verify(%{signed | signature: <<1>>})
+      assert {:error, :malformed_request} = Verifier.verify(%{})
+    end
   end
 end
