@@ -34,7 +34,8 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerCallerAuthoritySecurityRegressio
            }}
 
         tool_result ->
-          send(self(), {:scoped_tool_result, tool_result.content})
+          test_pid = Application.fetch_env!(:arbor_orchestrator, :llm_authority_test_pid)
+          send(test_pid, {:scoped_tool_result, tool_result.content})
           {:ok, %Response{text: "tool round complete", finish_reason: :stop, raw: %{}}}
       end
     end
@@ -47,13 +48,21 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerCallerAuthoritySecurityRegressio
     ensure_registered(Arbor.Actions.File.Read)
 
     previous_security = Application.get_env(:arbor_orchestrator, :security_module)
+    previous_test_pid = Application.get_env(:arbor_orchestrator, :llm_authority_test_pid)
     Application.put_env(:arbor_orchestrator, :security_module, Arbor.Security)
+    Application.put_env(:arbor_orchestrator, :llm_authority_test_pid, self())
 
     on_exit(fn ->
       if previous_security do
         Application.put_env(:arbor_orchestrator, :security_module, previous_security)
       else
         Application.delete_env(:arbor_orchestrator, :security_module)
+      end
+
+      if previous_test_pid do
+        Application.put_env(:arbor_orchestrator, :llm_authority_test_pid, previous_test_pid)
+      else
+        Application.delete_env(:arbor_orchestrator, :llm_authority_test_pid)
       end
     end)
 
