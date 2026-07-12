@@ -1571,17 +1571,18 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   defp adapt_result(_other, _started_at, _acp_agent), do: {:error, :invalid_engine_result}
 
   defp adapt_engine_result(context, engine_result, started_at, acp_agent) do
-    with {:ok, payload} <- adapt_context(context) do
+    with {:ok, payload} <- adapt_context(context, acp_agent) do
       wall_clock_ms = max(System.monotonic_time(:millisecond) - started_at, 0)
 
       {:ok,
        payload
        |> Map.put("acp_agent", acp_agent)
+       |> Map.put("worker_provider", acp_agent)
        |> Map.put("metrics", build_pipeline_metrics(engine_result, context, wall_clock_ms))}
     end
   end
 
-  defp adapt_context(context) when is_map(context) do
+  defp adapt_context(context, worker_provider) when is_map(context) do
     clean = json_clean_map(context)
     status = context_get(clean, "status")
     legacy = context_get(clean, "legacy_status")
@@ -1591,7 +1592,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
         {:error, :missing_terminal_status}
 
       status == "pipeline_error" ->
-        {:error, {:pipeline_error, pipeline_error_detail(clean)}}
+        {:error, {:pipeline_error, pipeline_error_detail(clean, worker_provider)}}
 
       not MapSet.member?(@success_statuses, status) ->
         {:error, {:unknown_terminal_status, status}}
@@ -1925,11 +1926,12 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
     |> reject_nil_values()
   end
 
-  defp pipeline_error_detail(context) do
+  defp pipeline_error_detail(context, worker_provider) do
     %{
       "status" => "pipeline_error",
       "error" => context_get(context, "error"),
       "workspace_id" => context_get(context, "workspace_id"),
+      "worker_provider" => worker_provider,
       "worker_session_id" => context_get(context, "worker_session_id"),
       "worker_provider_session_id" => context_get(context, "worker_provider_session_id")
     }

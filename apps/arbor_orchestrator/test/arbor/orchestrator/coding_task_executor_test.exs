@@ -1704,6 +1704,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
       assert result["workspace_id"] == "ws_1"
       assert result["worker_session_id"] == "w_1"
       assert result["worker_provider_session_id"] == "provider-session-1"
+      assert result["worker_provider"] == "codex"
       assert result["files"] == ["lib/a.ex"]
       assert result["acp_agent"] == "codex"
       refute Map.has_key?(result, :__struct__)
@@ -1742,7 +1743,8 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         "worker_msg.usage" => %{"input_tokens" => 25, "output_tokens" => 5},
         "release.status" => "retained",
         "metrics" => %{"execution_path" => "forged", "validation_attempts" => 99},
-        "acp_agent" => "forged-agent"
+        "acp_agent" => "forged-agent",
+        "worker_provider" => "forged-provider"
       }
 
       assert {:ok, result} =
@@ -1761,6 +1763,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       metrics = result["metrics"]
       assert result["acp_agent"] == "codex"
+      assert result["worker_provider"] == "codex"
       assert metrics["execution_path"] == "pipeline"
       assert metrics["completed_nodes"] == completed_nodes
       assert metrics["completed_node_count"] == length(completed_nodes)
@@ -1989,6 +1992,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
 
       assert detail["status"] == "pipeline_error"
       assert detail["error"] == "acquire failed"
+      assert detail["worker_provider"] == "codex"
       assert detail["worker_session_id"] == "closed-worker-handle"
       assert detail["worker_provider_session_id"] == "provider-session-failure-1"
 

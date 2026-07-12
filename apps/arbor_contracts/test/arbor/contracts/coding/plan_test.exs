@@ -49,6 +49,7 @@ defmodule Arbor.Contracts.Coding.PlanTest do
                "model" => nil,
                "permission_mode" => "default",
                "use_pool" => true,
+               "resume_provider" => nil,
                "resume_session_id" => nil
              }
 
@@ -91,6 +92,7 @@ defmodule Arbor.Contracts.Coding.PlanTest do
           "model" => "grok-code-fast",
           "permission_mode" => "deny",
           "use_pool" => false,
+          "resume_provider" => "grok",
           "resume_session_id" => "provider-session-123"
         },
         "validation_profile" => "docs_only",
@@ -342,6 +344,7 @@ defmodule Arbor.Contracts.Coding.PlanTest do
                "model" => "gpt-5",
                "permission_mode" => "deny",
                "use_pool" => true,
+               "resume_provider" => nil,
                "resume_session_id" => nil
              }
 
@@ -368,9 +371,10 @@ defmodule Arbor.Contracts.Coding.PlanTest do
       end
     end
 
-    test "supports explicit pool policy and an optional provider resume session" do
+    test "supports explicit pool policy and provider-bound resume sessions" do
       assert {:ok, pooled} = Plan.new(@minimal_attrs)
       assert pooled.worker["use_pool"] == true
+      assert pooled.worker["resume_provider"] == nil
       assert pooled.worker["resume_session_id"] == nil
 
       assert {:ok, fresh} =
@@ -378,11 +382,13 @@ defmodule Arbor.Contracts.Coding.PlanTest do
                  Map.put(@minimal_attrs, :worker, %{
                    provider: "grok",
                    use_pool: false,
+                   resume_provider: "grok",
                    resume_session_id: "provider-session-123"
                  })
                )
 
       assert fresh.worker["use_pool"] == false
+      assert fresh.worker["resume_provider"] == "grok"
       assert fresh.worker["resume_session_id"] == "provider-session-123"
       assert Plan.to_map(fresh)["worker"] == fresh.worker
 
@@ -401,9 +407,64 @@ defmodule Arbor.Contracts.Coding.PlanTest do
                  Plan.new(
                    Map.put(@minimal_attrs, :worker, %{
                      provider: "grok",
+                     resume_provider: "grok",
                      resume_session_id: resume_session_id
                    })
                  )
+      end
+
+      for resume_provider <- ["", "  ", :grok] do
+        assert {:error, {:invalid_field, "worker.resume_provider", _}} =
+                 Plan.new(
+                   Map.put(@minimal_attrs, :worker, %{
+                     provider: "grok",
+                     resume_provider: resume_provider,
+                     resume_session_id: "opaque-provider-session"
+                   })
+                 )
+      end
+    end
+
+    test "requires resume provider and session id together" do
+      for {worker, missing_field} <- [
+            {%{provider: "grok", resume_session_id: "grok-session-123"},
+             "worker.resume_provider"},
+            {%{provider: "grok", resume_provider: "grok"}, "worker.resume_session_id"}
+          ] do
+        assert {:error, {:missing_field, ^missing_field}} =
+                 Plan.new(Map.put(@minimal_attrs, :worker, worker))
+      end
+    end
+
+    test "binds an opaque resume session id to the declared worker provider" do
+      cases = [
+        {%{
+           provider: "grok",
+           resume_provider: "grok",
+           resume_session_id: "opaque-provider-session"
+         }, :ok},
+        {%{
+           provider: "codex",
+           resume_provider: "grok",
+           resume_session_id: "grok-session-id-is-still-opaque"
+         },
+         {:error,
+          {:invalid_field, "worker.resume_provider",
+           {:must_match, "worker.provider", "codex", "grok"}}}}
+      ]
+
+      for {worker, expected} <- cases do
+        result = Plan.new(Map.put(@minimal_attrs, :worker, worker))
+
+        case expected do
+          :ok ->
+            assert {:ok, plan} = result
+            assert plan.worker["provider"] == "grok"
+            assert plan.worker["resume_provider"] == "grok"
+
+          error ->
+            assert result == error
+        end
       end
     end
   end

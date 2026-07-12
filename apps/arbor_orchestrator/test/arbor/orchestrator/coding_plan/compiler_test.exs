@@ -208,6 +208,7 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
           "provider" => "grok",
           "model" => "grok-code-fast",
           "use_pool" => false,
+          "resume_provider" => "grok",
           "resume_session_id" => resume_id
         }
       })
@@ -796,6 +797,23 @@ defmodule Arbor.Orchestrator.CodingPlan.CompilerTest do
 
     forged = %{plan!() | worker: %{"provider" => "grok", "permission_mode" => "bypass"}}
     assert {:error, {:invalid_plan, _reason}} = compile(forged, ctx)
+
+    valid_plan = plan!()
+
+    forged_resume = %{
+      valid_plan
+      | worker:
+          Map.merge(valid_plan.worker, %{
+            "provider" => "codex",
+            "resume_provider" => "grok",
+            "resume_session_id" => "opaque-grok-session"
+          })
+    }
+
+    assert {:error,
+            {:invalid_plan,
+             {:invalid_field, "worker.resume_provider",
+              {:must_match, "worker.provider", "codex", "grok"}}}} = compile(forged_resume, ctx)
   end
 
   defp compile(plan, ctx, template_source \\ nil) do

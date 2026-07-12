@@ -52,6 +52,7 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
                "model" => nil,
                "permission_mode" => "default",
                "use_pool" => true,
+               "resume_provider" => nil,
                "resume_session_id" => nil
              }
 
@@ -177,6 +178,7 @@ defmodule Arbor.Orchestrator.CodingPlan.NormalizerTest do
           "model" => "grok-code-fast",
           "permission_mode" => "deny",
           "use_pool" => true,
+          "resume_provider" => "grok",
           "resume_session_id" => "provider-session-123"
         },
         "validation_profile" => "security_regression",

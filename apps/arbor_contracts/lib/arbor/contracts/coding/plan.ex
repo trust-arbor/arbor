@@ -73,7 +73,14 @@ defmodule Arbor.Contracts.Coding.Plan do
     :requested_paths
   ]
   @workspace_fields [:mode, :branch_name, :worktree_base_dir]
-  @worker_fields [:provider, :model, :permission_mode, :use_pool, :resume_session_id]
+  @worker_fields [
+    :provider,
+    :model,
+    :permission_mode,
+    :use_pool,
+    :resume_provider,
+    :resume_session_id
+  ]
   @rework_fields [:max_cycles, :stop_conditions]
   @budget_fields [:wall_clock_ms, :inactivity_timeout_ms, :model_cost_usd, :parallelism]
   @output_fields [:commit, :draft_pr, :retain_workspace]
@@ -263,20 +270,45 @@ defmodule Arbor.Contracts.Coding.Plan do
            ),
          {:ok, use_pool} <-
            normalize_boolean(Map.get(attrs, :use_pool, true), "worker.use_pool"),
+         {:ok, resume_provider} <-
+           normalize_optional_string(
+             Map.get(attrs, :resume_provider),
+             "worker.resume_provider"
+           ),
          {:ok, resume_session_id} <-
            normalize_optional_string(
              Map.get(attrs, :resume_session_id),
              "worker.resume_session_id"
-           ) do
+           ),
+         :ok <- validate_resume_binding(provider, resume_provider, resume_session_id) do
       {:ok,
        %{
          "provider" => provider,
          "model" => model,
          "permission_mode" => permission_mode,
          "use_pool" => use_pool,
+         "resume_provider" => resume_provider,
          "resume_session_id" => resume_session_id
        }}
     end
+  end
+
+  defp validate_resume_binding(_provider, nil, nil), do: :ok
+
+  defp validate_resume_binding(_provider, nil, _resume_session_id) do
+    {:error, {:missing_field, "worker.resume_provider"}}
+  end
+
+  defp validate_resume_binding(_provider, _resume_provider, nil) do
+    {:error, {:missing_field, "worker.resume_session_id"}}
+  end
+
+  defp validate_resume_binding(provider, provider, _resume_session_id), do: :ok
+
+  defp validate_resume_binding(provider, resume_provider, _resume_session_id) do
+    {:error,
+     {:invalid_field, "worker.resume_provider",
+      {:must_match, "worker.provider", provider, resume_provider}}}
   end
 
   defp normalize_overlays(value) when is_list(value) do

@@ -86,6 +86,7 @@ defmodule Arbor.Orchestrator.CodingPlan.FacadeTest do
              "permission_mode" => "default",
              "provider" => "grok",
              "use_pool" => true,
+             "resume_provider" => nil,
              "resume_session_id" => nil
            }
 

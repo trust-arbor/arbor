@@ -39,8 +39,9 @@ The worker object also accepts:
 - `model` - explicit provider model override
 - `permission_mode` - reviewed adapter mode (`default` or `deny`)
 - `use_pool` - boolean; set `false` only when a fresh managed process is required
+- `resume_provider` - provider that issued `resume_session_id`; required with it
 - `resume_session_id` - non-blank provider conversation ID returned by an
-  earlier coding task
+  earlier coding task; required with `resume_provider`
 
 For example, to continue the provider conversation from an earlier task while
 keeping the new task's authorization and execution identity independent:
@@ -51,10 +52,16 @@ keeping the new task's authorization and execution identity independent:
     "provider": "grok",
     "model": "grok-code-fast",
     "use_pool": true,
+    "resume_provider": "grok",
     "resume_session_id": "provider-session-id-from-prior-result"
   }
 }
 ```
+
+`resume_provider` must match `worker.provider` exactly. Both resume fields are
+required together, and the plan is rejected before compilation if either is
+missing or the providers differ. Arbor never infers a provider from opaque
+session ID text.
 
 The compiler maps `resume_session_id` only to `acp_start_session.session_id`.
 It does not replace the Engine session, task principal, signer, or verified run
@@ -82,12 +89,14 @@ Approvals stay human-visible and capability-gated. Dispatch does **not** grant
 merge authority or unattended authorization.
 
 Successful results and failures reached after worker startup may include both
-`worker_session_id` and `worker_provider_session_id`. The former is an opaque
-managed handle retained for compatibility and is no longer usable after the
-workflow closes it. Use only `worker_provider_session_id` as a later plan's
-`worker.resume_session_id`; the later dispatch must pass normal authorization
-again. Provider-session continuity does not currently reuse the retained Git
-worktree automatically.
+`worker_session_id` and `worker_provider_session_id`, plus `worker_provider`.
+The former ID is an opaque managed handle retained for compatibility and is no
+longer usable after the workflow closes it. To resume later, copy
+`worker_provider` to `worker.resume_provider` and
+`worker_provider_session_id` to `worker.resume_session_id`; keep
+`worker.provider` equal to that provider. The later dispatch must pass normal
+authorization again. Provider-session continuity does not currently reuse the
+retained Git worktree automatically.
 
 ## Default execution path
 
