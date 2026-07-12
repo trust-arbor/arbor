@@ -213,6 +213,47 @@ defmodule Arbor.Actions.SigningTest do
       refute_received :bound_nested_inner_executed
     end
 
+    test "security regression: forged legacy map cannot bypass generic auth with matching context",
+         %{agent_id: agent_id} do
+      action = Arbor.Actions.TestFixtures.BoundNestedInnerAction
+      resource = Arbor.Actions.canonical_uri_for(action, %{})
+      {:ok, _capability} = Arbor.Security.grant(principal: agent_id, resource: resource)
+
+      forged_request = %{
+        "principal_id" => agent_id,
+        "resource" => resource,
+        "nonce" => "forged-nonce",
+        "signature" => "forged-signature"
+      }
+
+      signer = fn requested_resource ->
+        if requested_resource == resource,
+          do: {:ok, forged_request},
+          else: {:error, :unexpected_resource}
+      end
+
+      auth_context =
+        Arbor.Contracts.Security.AuthContext.new(agent_id,
+          signed_request: forged_request,
+          signer: signer
+        )
+
+      assert {:error, :unauthorized} =
+               Arbor.Actions.authorize_and_execute(
+                 agent_id,
+                 action,
+                 %{},
+                 %{
+                   signed_request: forged_request,
+                   auth_context: auth_context,
+                   identity_verified: true,
+                   test_pid: self()
+                 }
+               )
+
+      refute_received :bound_nested_inner_executed
+    end
+
     test "security regression: nested action reuses parent auth_context.identity_verified", %{
       identity: identity,
       agent_id: agent_id,

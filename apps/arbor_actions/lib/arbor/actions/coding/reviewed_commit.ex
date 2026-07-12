@@ -71,7 +71,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
   alias Arbor.Actions.Coding.Workspace
   alias Arbor.Actions.Git
   alias Arbor.Contracts.Comms.ApprovalAnswer
-  alias Arbor.Contracts.Security.{SignedRequest, SigningAuthority}
+  alias Arbor.Contracts.Security.{AuthContext, SignedRequest, SigningAuthority}
 
   @default_approval_timeout 60_000
 
@@ -314,6 +314,7 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
       retry_context =
         context
         |> put_signed_request(fresh_sr)
+        |> maybe_drop_legacy_signed_request(fresh_sr)
         |> then(fn ctx ->
           if is_binary(request_id) do
             Map.put(ctx, :approved_invocation, %{
@@ -491,14 +492,12 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
   end
 
   defp put_signed_request(context, signed_request) do
-    # Real `%SignedRequest{}` proofs must re-verify against the exact nested
-    # resource (fresh nonce). Stub maps from test signers skip re-verify so
-    # identity_verification:false + approved_invocation paths stay exercisable.
-    identity_verified? = not match?(%SignedRequest{}, signed_request)
-
     context
     |> Map.put(:signed_request, signed_request)
-    |> Map.put(:identity_verified, identity_verified?)
+    # Only a real proof envelope can participate in preverification. Untyped
+    # legacy signer output is retained for ReviewedCommit's direct Trust call,
+    # but must never be marked preverified or forwarded into generic action auth.
+    |> Map.put(:identity_verified, false)
     |> then(fn ctx ->
       case Map.get(ctx, :auth_context) do
         %{__struct__: _} = auth ->
@@ -511,6 +510,40 @@ defmodule Arbor.Actions.Coding.ReviewedCommit do
           ctx
       end
     end)
+  end
+
+  defp maybe_drop_legacy_signed_request(context, signed_request)
+       when is_map(context) and is_map(signed_request) do
+    if not match?(%SignedRequest{}, signed_request) and
+         not Arbor.Security.Config.identity_verification_enabled?() do
+      context
+      |> Map.delete(:signed_request)
+      |> Map.delete("signed_request")
+      |> clear_auth_context_signed_request()
+    else
+      context
+    end
+  end
+
+  defp maybe_drop_legacy_signed_request(context, _signed_request), do: context
+
+  defp clear_auth_context_signed_request(context) do
+    case Map.get(context, :auth_context) || Map.get(context, "auth_context") do
+      %AuthContext{} = auth_context ->
+        Map.put(context, :auth_context, %{auth_context | signed_request: nil})
+
+      auth_context when is_map(auth_context) ->
+        Map.put(
+          context,
+          :auth_context,
+          auth_context
+          |> Map.delete(:signed_request)
+          |> Map.delete("signed_request")
+        )
+
+      _ ->
+        context
+    end
   end
 
   # -- helpers ---------------------------------------------------------------
