@@ -385,6 +385,7 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
       {Arbor.Security.Identity.NonceCache, []},
       {Arbor.Security.Constraint.RateLimiter, []},
       {Arbor.Security.SystemAuthority, []},
+      {Arbor.Security.SigningAuthorityStateOwner, []},
       {Arbor.Security.SigningAuthorityBroker, []},
       {Arbor.Security.CapabilityStore, []},
       {Arbor.Security.Reflex.Registry, []}

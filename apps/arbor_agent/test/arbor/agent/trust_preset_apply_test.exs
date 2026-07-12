@@ -109,6 +109,8 @@ defmodule Arbor.Agent.TrustPresetApplyTest do
           {Arbor.Security.Identity.NonceCache, []},
           {Arbor.Security.SystemAuthority, []},
           {Arbor.Security.Constraint.RateLimiter, []},
+          {Arbor.Security.SigningAuthorityStateOwner, []},
+          {Arbor.Security.SigningAuthorityBroker, []},
           {Arbor.Security.CapabilityStore, []},
           {Arbor.Security.Reflex.Registry, []}
         ] do

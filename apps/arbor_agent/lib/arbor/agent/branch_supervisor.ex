@@ -143,7 +143,8 @@ defmodule Arbor.Agent.BranchSupervisor do
   defp bootstrap_cleanup_child_spec(bootstraps) when is_map(bootstraps) do
     %{
       id: :signing_authority_bootstrap_cleanup,
-      start: {BootstrapCleanup, :start_link, [[bootstraps: bootstraps]]},
+      start:
+        {Arbor.Agent.BranchSupervisor.BootstrapCleanup, :start_link, [[bootstraps: bootstraps]]},
       restart: :permanent,
       type: :worker
     }
