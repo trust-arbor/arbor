@@ -10,6 +10,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
   alias Arbor.Security
   alias Arbor.Security.Config, as: SecurityConfig
   alias Arbor.Security.SigningAuthorityBroker
+  alias Arbor.Security.SigningAuthorityStateOwner
 
   setup do
     ensure_broker_started()
@@ -391,21 +392,22 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
                Security.sign_with_authority(authority, "revoked")
     end
 
-    test "broker restart invalidates outstanding references", ctx do
+    test "security regression: broker restart preserves persistent authorities and restart slots",
+         ctx do
       {:ok, authority} = open_authority(ctx, purpose: :session)
+      {:ok, bootstrap} = issue_bootstrap(ctx, :restart_slot_survives, grace_ms: 5_000)
 
       assert {:ok, _} = Security.sign_with_authority(authority, "before-restart")
 
       :ok = Supervisor.terminate_child(Arbor.Security.Supervisor, SigningAuthorityBroker)
       {:ok, _} = Supervisor.restart_child(Arbor.Security.Supervisor, SigningAuthorityBroker)
 
-      # Stale-after-broker-restart
-      assert {:error, :authority_not_found} =
-               Security.sign_with_authority(authority, "after-restart")
+      assert {:ok, _} = Security.sign_with_authority(authority, "after-restart")
 
-      # Fresh open works again
+      assert {:ok, claimed} = Security.claim_signing_authority(bootstrap)
+      assert {:ok, _} = Security.sign_with_authority(claimed, "claimed-after-restart")
+
       assert {:ok, authority2} = open_authority(ctx, purpose: :session)
-
       assert {:ok, _} = Security.sign_with_authority(authority2, "fresh")
     end
   end
@@ -433,6 +435,10 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       inspected = inspect(authority)
       refute inspected =~ authority.token
       assert inspected =~ "[REDACTED]"
+
+      state_owner_status = :sys.get_status(SigningAuthorityStateOwner)
+      refute contains_value?(state_owner_status, authority.token)
+      refute contains_value?(state_owner_status, ctx.private_key)
     end
   end
 
@@ -1088,6 +1094,163 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
       status = :sys.get_status(SigningAuthorityBroker)
       refute contains_value?(status, ephemeral.private_key)
       refute contains_value?(status, authority.token)
+
+      state_owner_status = :sys.get_status(SigningAuthorityStateOwner)
+      refute contains_value?(state_owner_status, ephemeral.private_key)
+      refute contains_value?(state_owner_status, authority.token)
+    end
+
+    test "security regression: post-commit persistent open timeout cancels hidden authority",
+         ctx do
+      previous_timeout =
+        Application.get_env(:arbor_security, :signing_authority_broker_call_timeout_ms)
+
+      previous_seam =
+        Application.get_env(:arbor_security, :signing_authority_persistent_open_test_seam)
+
+      Application.put_env(:arbor_security, :signing_authority_broker_call_timeout_ms, 25)
+
+      Application.put_env(:arbor_security, :signing_authority_persistent_open_test_seam, %{
+        delay_ms: 100,
+        notify_pid: self()
+      })
+
+      on_exit(fn ->
+        restore_env(:signing_authority_broker_call_timeout_ms, previous_timeout)
+        restore_env(:signing_authority_persistent_open_test_seam, previous_seam)
+        ensure_broker_started()
+      end)
+
+      parent = self()
+
+      owner =
+        spawn(fn ->
+          {:ok, proof} = acquisition_proof(ctx, :persistent_post_commit_timeout, self())
+          result = Security.open_signing_authority(proof)
+          send(parent, {:persistent_timeout_result, result})
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive {:persistent_open_committed, request_id}, 1_000
+      assert is_reference(request_id)
+      assert_receive {:persistent_timeout_result, {:error, :broker_timeout}}, 1_000
+      assert Process.alive?(owner)
+
+      wait_until(fn ->
+        case SigningAuthorityBroker.debug_state() do
+          %{persistent_open_request_count: 0, entries: entries} ->
+            not Enum.any?(entries, &(&1.purpose == :persistent_post_commit_timeout))
+
+          _temporary_timeout ->
+            false
+        end
+      end)
+
+      send(owner, :stop)
+    end
+
+    test "security regression: timed-out persistent claim releases restart slot", ctx do
+      {:ok, bootstrap} = issue_bootstrap(ctx, :claim_post_commit_timeout, grace_ms: 5_000)
+
+      previous_timeout =
+        Application.get_env(:arbor_security, :signing_authority_broker_call_timeout_ms)
+
+      previous_seam =
+        Application.get_env(:arbor_security, :signing_authority_persistent_open_test_seam)
+
+      Application.put_env(:arbor_security, :signing_authority_broker_call_timeout_ms, 25)
+
+      Application.put_env(:arbor_security, :signing_authority_persistent_open_test_seam, %{
+        delay_ms: 100,
+        notify_pid: self()
+      })
+
+      on_exit(fn ->
+        restore_env(:signing_authority_broker_call_timeout_ms, previous_timeout)
+        restore_env(:signing_authority_persistent_open_test_seam, previous_seam)
+        ensure_broker_started()
+      end)
+
+      parent = self()
+
+      owner =
+        spawn(fn ->
+          result = Security.claim_signing_authority(bootstrap)
+          send(parent, {:persistent_claim_timeout_result, result})
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive {:persistent_open_committed, request_id}, 1_000
+      assert is_reference(request_id)
+      assert_receive {:persistent_claim_timeout_result, {:error, :broker_timeout}}, 1_000
+      assert Process.alive?(owner)
+
+      wait_until(fn ->
+        case SigningAuthorityBroker.debug_state() do
+          %{entries: entries, bootstrap_entries: bootstrap_entries} ->
+            not Enum.any?(entries, &(&1.purpose == :claim_post_commit_timeout)) and
+              Enum.any?(
+                bootstrap_entries,
+                &(&1.purpose == :claim_post_commit_timeout and &1.status == :reclaimable)
+              )
+
+          _temporary_timeout ->
+            false
+        end
+      end)
+
+      restore_env(:signing_authority_persistent_open_test_seam, previous_seam)
+      assert {:ok, reclaimed} = Security.claim_signing_authority(bootstrap)
+      assert {:ok, _} = Security.sign_with_authority(reclaimed, "reclaimed-after-timeout")
+
+      send(owner, :stop)
+    end
+
+    test "security regression: broker restart revokes unfinalized persistent open", ctx do
+      previous_seam =
+        Application.get_env(:arbor_security, :signing_authority_persistent_open_test_seam)
+
+      Application.put_env(:arbor_security, :signing_authority_persistent_open_test_seam, %{
+        delay_ms: 500,
+        notify_pid: self()
+      })
+
+      on_exit(fn ->
+        restore_env(:signing_authority_persistent_open_test_seam, previous_seam)
+        ensure_broker_started()
+      end)
+
+      parent = self()
+
+      owner =
+        spawn(fn ->
+          {:ok, proof} = acquisition_proof(ctx, :persistent_restart_during_commit, self())
+          result = Security.open_signing_authority(proof)
+          send(parent, {:persistent_restart_result, result})
+
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      assert_receive {:persistent_open_committed, request_id}, 1_000
+      assert is_reference(request_id)
+      restart_broker()
+
+      assert_receive {:persistent_restart_result, {:error, :broker_unavailable}}, 1_000
+      assert Process.alive?(owner)
+
+      snapshot = SigningAuthorityBroker.debug_state()
+      assert snapshot.persistent_open_request_count == 0
+      refute Enum.any?(snapshot.entries, &(&1.purpose == :persistent_restart_during_commit))
+
+      send(owner, :stop)
     end
 
     test "security regression: broker timeout carries no plaintext key and stale handoff cannot execute" do

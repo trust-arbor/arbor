@@ -136,6 +136,10 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     one-shot key holder; it is never part of the broker GenServer call request
   - Ephemeral opens use request-scoped acknowledgement and ordered cancellation;
     a timed-out caller cannot leave a hidden committed authority behind
+  - Persistent authorities and restart slots are held by a separate supervised
+    metadata owner so broker-only restarts recover finalized live leases
+  - Persistent opens and claims commit through request-scoped acknowledgement;
+    timeout or broker restart revokes every unfinalized authority fail-closed
   - The broker-local wrapping key and all ephemeral entries disappear on restart
   - Decrypted key material is scoped to one sign/derive call; BEAM zeroization is
     not claimed
@@ -162,6 +166,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   alias Arbor.Security.Identity.Verifier
   alias Arbor.Security.SigningKeyStore
   alias Arbor.Security.SigningAuthorityBroker.KeyHolder
+  alias Arbor.Security.SigningAuthorityStateOwner
 
   @token_bytes 32
   @wrapping_key_bytes 32
@@ -174,6 +179,8 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   @key_holder_ttl_margin_ms 1_000
   @ephemeral_request_ttl_margin_ms 1_000
   @ephemeral_finalize_timeout_ms 100
+  @persistent_request_ttl_margin_ms 1_000
+  @persistent_finalize_timeout_ms 100
 
   @type open_purpose :: atom() | String.t()
   @type derive_purpose :: atom() | String.t()
@@ -235,7 +242,19 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   Open a persistent signing authority directly from a possession proof.
   """
   @spec open(SignedRequest.t()) :: {:ok, SigningAuthority.t()} | {:error, term()}
-  def open(%SignedRequest{} = proof), do: call({:open, proof})
+  def open(%SignedRequest{} = proof) do
+    case Process.whereis(__MODULE__) do
+      broker_pid when is_pid(broker_pid) ->
+        timeout_ms = Config.signing_authority_broker_call_timeout_ms()
+        request_id = make_ref()
+        result = call(broker_pid, {:open, request_id, proof}, timeout_ms)
+        complete_persistent_open(broker_pid, request_id, result, timeout_ms)
+
+      nil ->
+        {:error, :broker_unavailable}
+    end
+  end
+
   def open(_), do: {:error, :invalid_acquisition_proof}
 
   @doc """
@@ -259,8 +278,20 @@ defmodule Arbor.Security.SigningAuthorityBroker do
           {:ok, SigningAuthority.t()} | {:error, term()}
   def claim_bootstrap(bootstrap) do
     case SigningAuthorityBootstrap.canonicalize(bootstrap) do
-      {:ok, canonical} -> call({:claim_bootstrap, canonical})
-      {:error, reason} -> {:error, reason}
+      {:ok, canonical} ->
+        case Process.whereis(__MODULE__) do
+          broker_pid when is_pid(broker_pid) ->
+            timeout_ms = Config.signing_authority_broker_call_timeout_ms()
+            request_id = make_ref()
+            result = call(broker_pid, {:claim_bootstrap, request_id, canonical}, timeout_ms)
+            complete_persistent_open(broker_pid, request_id, result, timeout_ms)
+
+          nil ->
+            {:error, :broker_unavailable}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -400,6 +431,62 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
+  defp complete_persistent_open(
+         broker_pid,
+         request_id,
+         {:ok, %SigningAuthority{} = authority},
+         timeout_ms
+       ) do
+    case call(broker_pid, {:ack_persistent_open, request_id}, timeout_ms) do
+      :ok ->
+        case call(
+               broker_pid,
+               {:finalize_persistent_open, request_id},
+               min(timeout_ms, @persistent_finalize_timeout_ms)
+             ) do
+          :ok ->
+            {:ok, authority}
+
+          {:error, _reason} = error ->
+            request_persistent_open_cancel(broker_pid, request_id, timeout_ms)
+            error
+
+          _unexpected ->
+            request_persistent_open_cancel(broker_pid, request_id, timeout_ms)
+            {:error, :broker_unavailable}
+        end
+
+      {:error, _reason} = error ->
+        request_persistent_open_cancel(broker_pid, request_id, timeout_ms)
+        error
+
+      _unexpected ->
+        request_persistent_open_cancel(broker_pid, request_id, timeout_ms)
+        {:error, :broker_unavailable}
+    end
+  end
+
+  defp complete_persistent_open(broker_pid, request_id, {:error, _reason} = error, timeout_ms) do
+    request_persistent_open_cancel(broker_pid, request_id, timeout_ms)
+    error
+  end
+
+  defp complete_persistent_open(broker_pid, request_id, _unexpected, timeout_ms) do
+    request_persistent_open_cancel(broker_pid, request_id, timeout_ms)
+    {:error, :broker_unavailable}
+  end
+
+  defp request_persistent_open_cancel(broker_pid, request_id, timeout_ms) do
+    _ =
+      call(
+        broker_pid,
+        {:cancel_persistent_open, request_id},
+        min(timeout_ms, @persistent_finalize_timeout_ms)
+      )
+
+    :ok
+  end
+
   defp complete_ephemeral_open(
          broker_pid,
          request_id,
@@ -454,44 +541,156 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   @impl true
   def init(_opts) do
-    {:ok,
-     %{
-       authorities: %{},
-       bootstraps: %{},
-       ephemeral_open_requests: %{},
-       monitors: %{},
-       wrapping_key: :crypto.strong_rand_bytes(@wrapping_key_bytes)
-     }}
+    with state_owner_pid when is_pid(state_owner_pid) <-
+           Process.whereis(SigningAuthorityStateOwner),
+         {:ok, snapshot} <- SigningAuthorityStateOwner.load(),
+         {:ok, recovered_state} <- recover_persistent_state(snapshot) do
+      state =
+        Map.merge(recovered_state, %{
+          ephemeral_open_requests: %{},
+          wrapping_key: :crypto.strong_rand_bytes(@wrapping_key_bytes),
+          state_owner_monitor: Process.monitor(state_owner_pid)
+        })
+
+      case persist_state(state) do
+        :ok -> {:ok, state}
+        {:error, reason} -> {:stop, reason}
+      end
+    else
+      _ -> {:stop, :state_owner_unavailable}
+    end
   end
 
   @impl true
-  def handle_call({:open, proof}, {caller_pid, _tag}, state) do
+  def handle_call({:open, request_id, proof}, {caller_pid, _tag}, state) do
     case verify_persistent_acquisition(proof, caller_pid) do
-      {:ok, bound} -> create_authority(state, bound, caller_pid, :persistent, nil)
-      {:error, _} = error -> {:reply, error, state}
+      {:ok, bound} ->
+        with :ok <- validate_persistent_request_id(request_id, state) do
+          case create_authority(state, bound, caller_pid, :persistent, nil) do
+            {:reply, {:ok, authority}, committed_state} ->
+              tracked_state =
+                track_persistent_open_request(
+                  committed_state,
+                  request_id,
+                  authority.token,
+                  caller_pid,
+                  :committed
+                )
+
+              with_persistent_commit({:ok, authority}, tracked_state, fn ->
+                Config.run_signing_authority_persistent_open_test_seam(request_id)
+              end)
+
+            other ->
+              other
+          end
+        else
+          {:error, _} = error -> {:reply, error, state}
+        end
+
+      {:error, _} = error ->
+        {:reply, error, state}
+    end
+  end
+
+  def handle_call({:ack_persistent_open, request_id}, {caller_pid, _tag}, state) do
+    case fetch_persistent_open_request(state, request_id, caller_pid) do
+      {:ok, request} ->
+        state =
+          track_persistent_open_request(
+            state,
+            request_id,
+            request.authority_token,
+            caller_pid,
+            :acknowledged
+          )
+
+        with_persistent_commit(:ok, state)
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:finalize_persistent_open, request_id}, {caller_pid, _tag}, state) do
+    case fetch_persistent_open_request(state, request_id, caller_pid) do
+      {:ok, %{status: :acknowledged}} ->
+        state = remove_persistent_open_request(state, request_id)
+        with_persistent_commit(:ok, state)
+
+      {:ok, _request} ->
+        {:reply, {:error, :persistent_open_not_acknowledged}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:cancel_persistent_open, request_id}, {caller_pid, _tag}, state) do
+    case fetch_persistent_open_request(state, request_id, caller_pid) do
+      {:ok, request} ->
+        state = revoke_persistent_open_request(state, request_id, request)
+        with_persistent_commit(:ok, state)
+
+      {:error, :persistent_open_not_pending} ->
+        {:reply, :ok, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
   def handle_call({:issue_bootstrap, proof, grace_ms}, {caller_pid, _tag}, state) do
     with {:ok, validated_grace_ms} <- validate_grace_ms(grace_ms),
          {:ok, bound} <- verify_persistent_acquisition(proof, caller_pid) do
-      create_bootstrap(state, bound, validated_grace_ms)
+      state
+      |> create_bootstrap(bound, validated_grace_ms)
+      |> commit_persistent_result()
     else
       {:error, _} = error -> {:reply, error, state}
     end
   end
 
-  def handle_call({:claim_bootstrap, bootstrap}, {caller_pid, _tag}, state) do
+  def handle_call({:claim_bootstrap, request_id, bootstrap}, {caller_pid, _tag}, state) do
     case SigningAuthorityBootstrap.canonicalize(bootstrap) do
-      {:ok, bootstrap} -> claim_bootstrap_for_caller(state, bootstrap, caller_pid)
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:ok, bootstrap} ->
+        with :ok <- validate_persistent_request_id(request_id, state) do
+          case claim_bootstrap_for_caller(state, bootstrap, caller_pid) do
+            {:reply, {:ok, authority}, committed_state} ->
+              tracked_state =
+                track_persistent_open_request(
+                  committed_state,
+                  request_id,
+                  authority.token,
+                  caller_pid,
+                  :committed
+                )
+
+              with_persistent_commit({:ok, authority}, tracked_state, fn ->
+                Config.run_signing_authority_persistent_open_test_seam(request_id)
+              end)
+
+            other ->
+              commit_persistent_result(other)
+          end
+        else
+          {:error, _} = error -> {:reply, error, state}
+        end
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
   def handle_call({:close_bootstrap, bootstrap}, _from, state) do
     case SigningAuthorityBootstrap.canonicalize(bootstrap) do
-      {:ok, bootstrap} -> close_bootstrap_entry(state, bootstrap)
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:ok, bootstrap} ->
+        state
+        |> close_bootstrap_entry(bootstrap)
+        |> commit_persistent_result()
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -607,8 +806,13 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   def handle_call({:close, authority}, _from, state) do
     case SigningAuthority.canonicalize(authority) do
-      {:ok, authority} -> close_authority_entry(state, authority)
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:ok, authority} ->
+        state
+        |> close_authority_entry(authority)
+        |> commit_persistent_result()
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -647,6 +851,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     snapshot = %{
       authority_count: map_size(state.authorities),
       bootstrap_count: map_size(state.bootstraps),
+      persistent_open_request_count: map_size(state.persistent_open_requests),
       ephemeral_open_request_count: map_size(state.ephemeral_open_requests),
       wrapping_key_present?: is_binary(state.wrapping_key),
       entries: entries,
@@ -658,32 +863,31 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
-    case Map.pop(state.monitors, ref) do
-      {nil, _monitors} ->
-        {:noreply, state}
+    cond do
+      ref == state.state_owner_monitor ->
+        {:stop, :state_owner_unavailable, state}
 
-      {authority_token, monitors} ->
-        state = %{state | monitors: monitors}
-
-        case Map.pop(state.authorities, authority_token) do
-          {nil, _authorities} ->
-            {:noreply, state}
-
-          {entry, authorities} ->
-            state =
-              state
-              |> Map.put(:authorities, authorities)
-              |> remove_ephemeral_open_requests_for_authority(authority_token)
-
-            {:noreply, maybe_make_bootstrap_reclaimable(state, entry, authority_token)}
-        end
+      true ->
+        handle_owner_down(ref, state)
     end
   end
 
   def handle_info({:expire_bootstrap, token, expiry_id}, state) do
     case Map.get(state.bootstraps, token) do
       %{expiry_id: ^expiry_id, status: status} = slot when status in [:unclaimed, :reclaimable] ->
-        {:noreply, remove_bootstrap(state, token, slot)}
+        state = remove_bootstrap(state, token, slot)
+        noreply_with_persistent_commit(state)
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({:expire_persistent_open_request, request_id, expiry_id}, state) do
+    case Map.get(state.persistent_open_requests, request_id) do
+      %{expiry_id: ^expiry_id} = request ->
+        state = revoke_persistent_open_request(state, request_id, request)
+        noreply_with_persistent_commit(state)
 
       _ ->
         {:noreply, state}
@@ -705,6 +909,31 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   def handle_info(_msg, state), do: {:noreply, state}
 
+  defp handle_owner_down(ref, state) do
+    case Map.pop(state.monitors, ref) do
+      {nil, _monitors} ->
+        {:noreply, state}
+
+      {authority_token, monitors} ->
+        state = %{state | monitors: monitors}
+
+        case Map.pop(state.authorities, authority_token) do
+          {nil, _authorities} ->
+            {:noreply, state}
+
+          {entry, authorities} ->
+            state =
+              state
+              |> Map.put(:authorities, authorities)
+              |> remove_ephemeral_open_requests_for_authority(authority_token)
+              |> remove_persistent_open_requests_for_authority(authority_token)
+              |> maybe_make_bootstrap_reclaimable(entry, authority_token)
+
+            noreply_with_persistent_commit(state)
+        end
+    end
+  end
+
   @impl true
   def format_status(status) when is_map(status) do
     state = Map.get(status, :state, %{})
@@ -712,6 +941,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     redacted_state = %{
       authority_count: map_count(state, :authorities),
       bootstrap_count: map_count(state, :bootstraps),
+      persistent_open_request_count: map_count(state, :persistent_open_requests),
       ephemeral_open_request_count: map_count(state, :ephemeral_open_requests),
       monitor_count: map_count(state, :monitors)
     }
@@ -734,6 +964,14 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     Enum.each(state.ephemeral_open_requests, fn {_request_id, request} ->
       cancel_ephemeral_open_request_timer(request)
     end)
+
+    Enum.each(state.persistent_open_requests, fn {_request_id, request} ->
+      cancel_open_request_timer(request)
+    end)
+
+    if is_reference(state.state_owner_monitor) do
+      Process.demonitor(state.state_owner_monitor, [:flush])
+    end
 
     :ok
   end
@@ -931,6 +1169,93 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     |> update_in([:authorities], &Map.delete(&1, token))
     |> update_in([:monitors], &Map.delete(&1, entry.owner_ref))
     |> remove_ephemeral_open_requests_for_authority(token)
+    |> remove_persistent_open_requests_for_authority(token)
+  end
+
+  defp validate_persistent_request_id(request_id, state) when is_reference(request_id) do
+    if Map.has_key?(state.persistent_open_requests, request_id) do
+      {:error, :duplicate_persistent_open_request}
+    else
+      :ok
+    end
+  end
+
+  defp validate_persistent_request_id(_request_id, _state),
+    do: {:error, :invalid_persistent_open_request}
+
+  defp fetch_persistent_open_request(state, request_id, caller_pid) do
+    case Map.get(state.persistent_open_requests, request_id) do
+      nil ->
+        {:error, :persistent_open_not_pending}
+
+      %{owner_pid: ^caller_pid} = request ->
+        {:ok, request}
+
+      _other_owner ->
+        {:error, :owner_mismatch}
+    end
+  end
+
+  defp track_persistent_open_request(state, request_id, authority_token, owner_pid, status)
+       when status in [:committed, :acknowledged] do
+    state = remove_persistent_open_request(state, request_id)
+    expiry_id = make_ref()
+
+    ttl_ms =
+      Config.signing_authority_broker_call_timeout_ms() + @persistent_request_ttl_margin_ms
+
+    expires_at_ms = monotonic_ms() + ttl_ms
+
+    timer_ref =
+      Process.send_after(
+        self(),
+        {:expire_persistent_open_request, request_id, expiry_id},
+        ttl_ms
+      )
+
+    request = %{
+      authority_token: authority_token,
+      owner_pid: owner_pid,
+      status: status,
+      expiry_id: expiry_id,
+      expiry_timer: timer_ref,
+      expires_at_ms: expires_at_ms
+    }
+
+    put_in(state, [:persistent_open_requests, request_id], request)
+  end
+
+  defp remove_persistent_open_request(state, request_id) do
+    case Map.pop(state.persistent_open_requests, request_id) do
+      {nil, _requests} ->
+        state
+
+      {request, requests} ->
+        cancel_open_request_timer(request)
+        %{state | persistent_open_requests: requests}
+    end
+  end
+
+  defp revoke_persistent_open_request(state, request_id, request) do
+    state = remove_persistent_open_request(state, request_id)
+
+    case Map.get(state.authorities, request.authority_token) do
+      nil ->
+        state
+
+      entry ->
+        state
+        |> remove_authority(request.authority_token, entry)
+        |> maybe_make_bootstrap_reclaimable(entry, request.authority_token)
+    end
+  end
+
+  defp remove_persistent_open_requests_for_authority(state, authority_token) do
+    request_ids =
+      for {request_id, %{authority_token: ^authority_token}} <- state.persistent_open_requests,
+          do: request_id
+
+    Enum.reduce(request_ids, state, &remove_persistent_open_request(&2, &1))
   end
 
   defp validate_ephemeral_request_id(request_id, state) when is_reference(request_id) do
@@ -1024,6 +1349,13 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   defp cancel_ephemeral_open_request_timer(_request), do: :ok
+
+  defp cancel_open_request_timer(%{expiry_timer: timer_ref}) when is_reference(timer_ref) do
+    Process.cancel_timer(timer_ref, async: false, info: false)
+    :ok
+  end
+
+  defp cancel_open_request_timer(_request), do: :ok
 
   defp run_ephemeral_open_test_seam(request_id) do
     Config.run_signing_authority_ephemeral_open_test_seam(request_id)
@@ -1159,6 +1491,196 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   defp cancel_expiry_timer(_slot), do: :ok
+
+  # ---------------------------------------------------------------------------
+  # Restart-safe persistent state
+  # ---------------------------------------------------------------------------
+
+  defp with_persistent_commit(reply, state, after_commit \\ fn -> :ok end) do
+    case persist_state(state) do
+      :ok ->
+        after_commit.()
+        {:reply, reply, state}
+
+      {:error, _reason} ->
+        {:stop, :state_owner_unavailable, {:error, :broker_unavailable}, state}
+    end
+  end
+
+  defp commit_persistent_result({:reply, reply, state}) do
+    with_persistent_commit(reply, state)
+  end
+
+  defp commit_persistent_result(other), do: other
+
+  defp noreply_with_persistent_commit(state) do
+    case persist_state(state) do
+      :ok -> {:noreply, state}
+      {:error, _reason} -> {:stop, :state_owner_unavailable, state}
+    end
+  end
+
+  defp persist_state(state) do
+    SigningAuthorityStateOwner.replace(persistent_snapshot(state))
+  end
+
+  defp persistent_snapshot(state) do
+    authorities =
+      state.authorities
+      |> Enum.filter(fn {_token, entry} -> entry.key_source == :persistent end)
+      |> Map.new(fn {token, entry} -> {token, Map.drop(entry, [:owner_ref])} end)
+
+    bootstraps =
+      Map.new(state.bootstraps, fn {token, slot} ->
+        {token, Map.drop(slot, [:expiry_id, :expiry_timer])}
+      end)
+
+    open_requests =
+      state.persistent_open_requests
+      |> Enum.filter(fn {_request_id, request} ->
+        Map.has_key?(authorities, request.authority_token)
+      end)
+      |> Map.new(fn {request_id, request} ->
+        {request_id, Map.drop(request, [:expiry_id, :expiry_timer])}
+      end)
+
+    %{authorities: authorities, bootstraps: bootstraps, open_requests: open_requests}
+  end
+
+  defp recover_persistent_state(%{
+         authorities: authorities,
+         bootstraps: bootstraps,
+         open_requests: open_requests
+       })
+       when is_map(authorities) and is_map(bootstraps) and is_map(open_requests) do
+    state = %{
+      authorities: %{},
+      bootstraps: %{},
+      persistent_open_requests: %{},
+      ephemeral_open_requests: %{},
+      monitors: %{}
+    }
+
+    with {:ok, state} <- recover_authorities(state, authorities),
+         {:ok, state} <- recover_bootstraps(state, bootstraps) do
+      state =
+        Enum.reduce(open_requests, state, fn {_request_id, request}, acc ->
+          revoke_recovered_open_request(acc, request)
+        end)
+
+      {:ok, state}
+    end
+  end
+
+  defp recover_persistent_state(_snapshot), do: {:error, :invalid_persistent_state}
+
+  defp recover_authorities(state, authorities) do
+    Enum.reduce_while(authorities, {:ok, state}, fn
+      {token,
+       %{
+         principal_id: principal_id,
+         purpose: _,
+         owner_pid: owner_pid,
+         opened_at: %DateTime{},
+         key_source: :persistent,
+         bootstrap_token: _
+       } = entry},
+      {:ok, acc}
+      when is_binary(token) and is_binary(principal_id) and is_pid(owner_pid) ->
+        if Process.alive?(owner_pid) do
+          owner_ref = Process.monitor(owner_pid)
+          recovered_entry = Map.put(entry, :owner_ref, owner_ref)
+
+          acc =
+            acc
+            |> put_in([:authorities, token], recovered_entry)
+            |> put_in([:monitors, owner_ref], token)
+
+          {:cont, {:ok, acc}}
+        else
+          {:cont, {:ok, acc}}
+        end
+
+      _invalid, _acc ->
+        {:halt, {:error, :invalid_persistent_state}}
+    end)
+  end
+
+  defp recover_bootstraps(state, bootstraps) do
+    Enum.reduce_while(bootstraps, {:ok, state}, fn
+      {token,
+       %{
+         principal_id: principal_id,
+         purpose: _purpose,
+         status: status,
+         grace_ms: grace_ms
+       } = slot},
+      {:ok, acc}
+      when is_binary(token) and is_binary(principal_id) and
+             status in [:unclaimed, :claimed, :reclaimable] and is_integer(grace_ms) and
+             grace_ms > 0 ->
+        case recover_bootstrap_slot(acc, token, slot) do
+          {:ok, recovered} -> {:cont, {:ok, recovered}}
+          :expired -> {:cont, {:ok, acc}}
+          :invalid -> {:halt, {:error, :invalid_persistent_state}}
+        end
+
+      _invalid, _acc ->
+        {:halt, {:error, :invalid_persistent_state}}
+    end)
+  end
+
+  defp recover_bootstrap_slot(state, token, %{status: :claimed} = slot) do
+    case Map.get(slot, :authority_token) do
+      authority_token when is_binary(authority_token) ->
+        if Map.has_key?(state.authorities, authority_token) do
+          {:ok, put_in(state, [:bootstraps, token], slot)}
+        else
+          reclaimable =
+            slot
+            |> Map.drop([:authority_token, :expires_at_ms])
+            |> schedule_expiry(token, :reclaimable, slot.grace_ms)
+
+          {:ok, put_in(state, [:bootstraps, token], reclaimable)}
+        end
+
+      _ ->
+        :invalid
+    end
+  end
+
+  defp recover_bootstrap_slot(state, token, %{status: status} = slot)
+       when status in [:unclaimed, :reclaimable] do
+    case Map.get(slot, :expires_at_ms) do
+      expires_at_ms when is_integer(expires_at_ms) ->
+        remaining_ms = expires_at_ms - monotonic_ms()
+
+        if remaining_ms > 0 do
+          recovered = schedule_expiry(slot, token, status, remaining_ms)
+          {:ok, put_in(state, [:bootstraps, token], recovered)}
+        else
+          :expired
+        end
+
+      _ ->
+        :invalid
+    end
+  end
+
+  defp revoke_recovered_open_request(state, %{authority_token: authority_token})
+       when is_binary(authority_token) do
+    case Map.get(state.authorities, authority_token) do
+      nil ->
+        state
+
+      entry ->
+        state
+        |> remove_authority(authority_token, entry)
+        |> maybe_make_bootstrap_reclaimable(entry, authority_token)
+    end
+  end
+
+  defp revoke_recovered_open_request(state, _invalid), do: state
 
   # ---------------------------------------------------------------------------
   # Verification and crypto helpers

@@ -115,6 +115,26 @@ defmodule Arbor.Security.Config do
     def run_signing_authority_ephemeral_open_test_seam(_request_id), do: :ok
   end
 
+  @doc false
+  @spec run_signing_authority_persistent_open_test_seam(reference()) :: :ok
+  if Mix.env() == :test do
+    def run_signing_authority_persistent_open_test_seam(request_id) do
+      case Application.get_env(@app, :signing_authority_persistent_open_test_seam) do
+        %{delay_ms: delay_ms, notify_pid: notify_pid} = seam
+        when map_size(seam) == 2 and is_integer(delay_ms) and delay_ms in 1..1_000 and
+               is_pid(notify_pid) ->
+          send(notify_pid, {:persistent_open_committed, request_id})
+          Process.sleep(delay_ms)
+          :ok
+
+        _disabled_or_invalid ->
+          :ok
+      end
+    end
+  else
+    def run_signing_authority_persistent_open_test_seam(_request_id), do: :ok
+  end
+
   @doc """
   Whether capability signing is required for authorization.
 

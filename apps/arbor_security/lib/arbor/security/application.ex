@@ -47,6 +47,8 @@ defmodule Arbor.Security.Application do
           {Arbor.Security.IssuerRegistry, []},
           {Arbor.Security.Identity.NonceCache, []},
           {Arbor.Security.SystemAuthority, []},
+          # Persistent metadata outlives broker-only restarts; keys remain in SigningKeyStore.
+          {Arbor.Security.SigningAuthorityStateOwner, []},
           # After key/identity stores + registry so open can fail-closed on status/key.
           {Arbor.Security.SigningAuthorityBroker, []},
           {Arbor.Security.Constraint.RateLimiter, []},
