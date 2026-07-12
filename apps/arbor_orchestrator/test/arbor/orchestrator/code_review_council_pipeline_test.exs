@@ -5,12 +5,12 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilPipelineTest do
   @moduletag :fast
 
   @reviewers %{
-    "correctness" => {"openai_oauth", "gpt-5.5"},
-    "security" => {"openai_oauth", "gpt-5.5"},
+    "correctness" => {"openai_oauth", "gpt-5.6-sol"},
+    "security" => {"openai_oauth", "gpt-5.6-sol"},
     "regression_test_coverage" => {"ollama", "kimi-k2.7-code:cloud"},
     "edge_cases_error_handling" => {"ollama", "kimi-k2.7-code:cloud"},
-    "simplicity_yagni_scope" => {"xai_oauth", "grok-4.3"},
-    "readability_maintainability" => {"xai_oauth", "grok-4.3"},
+    "simplicity_yagni_scope" => {"xai_oauth", "grok-4.5"},
+    "readability_maintainability" => {"xai_oauth", "grok-4.5"},
     "contract_api_compat" => {"ollama", "glm-5.2:cloud"},
     "architecture_grain_fit" => {"ollama", "glm-5.2:cloud"},
     "performance_resource" => {"ollama", "minimax-m3:cloud"},
