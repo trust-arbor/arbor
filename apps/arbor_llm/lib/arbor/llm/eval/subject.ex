@@ -207,7 +207,9 @@ defmodule Arbor.LLM.Eval.Subject do
 
       nil ->
         available = ProviderCatalog.available() |> Enum.map(fn {name, _capabilities} -> name end)
-        {:error, "unknown provider: #{provider}. Available: #{inspect(available)}"}
+
+        {:error,
+         "unknown provider: #{provider}. Available: #{Arbor.LLM.ExternalTerm.inspect(available)}"}
     end
   end
 
@@ -267,9 +269,9 @@ defmodule Arbor.LLM.Eval.Subject do
     Logger.warning(
       "Eval LLM subject: empty text from #{provider}/#{model} " <>
         "after #{duration_ms}ms. " <>
-        "finish_reason=#{inspect(bounded_external_reason(map_value(response, :finish_reason)))} " <>
-        "output_tokens=#{inspect(bounded_external_reason(map_value(usage, :output_tokens)))} " <>
-        "content_parts=#{inspect(content_kinds)}"
+        "finish_reason=#{Arbor.LLM.ExternalTerm.inspect(bounded_external_reason(map_value(response, :finish_reason)))} " <>
+        "output_tokens=#{Arbor.LLM.ExternalTerm.inspect(bounded_external_reason(map_value(usage, :output_tokens)))} " <>
+        "content_parts=#{Arbor.LLM.ExternalTerm.inspect(content_kinds)}"
     )
   end
 

@@ -52,7 +52,10 @@ defmodule Arbor.AI.CommsResponder do
         {:error, :empty_response}
 
       {:error, reason} ->
-        Logger.warning("CommsResponder generation failed: #{inspect(reason)}")
+        Logger.warning(
+          "CommsResponder generation failed: #{Arbor.LLM.inspect_external_reason(reason)}"
+        )
+
         {:error, reason}
     end
   end
@@ -96,7 +99,9 @@ defmodule Arbor.AI.CommsResponder do
         :ok
 
       {:error, reason} ->
-        Logger.warning("CommsResponder: failed to reset session: #{inspect(reason)}")
+        Logger.warning(
+          "CommsResponder: failed to reset session: #{Arbor.LLM.inspect_external_reason(reason)}"
+        )
     end
 
     :ok
@@ -133,7 +138,9 @@ defmodule Arbor.AI.CommsResponder do
         Logger.debug("CommsResponder: saved session #{String.slice(session_id, 0, 12)}...")
 
       {:error, reason} ->
-        Logger.warning("CommsResponder: failed to save session: #{inspect(reason)}")
+        Logger.warning(
+          "CommsResponder: failed to save session: #{Arbor.LLM.inspect_external_reason(reason)}"
+        )
     end
   end
 

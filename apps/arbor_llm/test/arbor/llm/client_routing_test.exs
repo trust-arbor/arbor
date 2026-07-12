@@ -119,4 +119,73 @@ defmodule Arbor.LLM.ClientRoutingTest do
       assert opts[:provider] == "openai"
     end
   end
+
+  describe "bounded local provider discovery" do
+    test "security regression: a malformed 200 inventory never registers a local provider" do
+      original_ollama = Application.get_env(:arbor_orchestrator, :ollama)
+      original_lm_studio = Application.get_env(:arbor_orchestrator, :lm_studio)
+      {base_url, server} = malformed_inventory_server()
+
+      Application.put_env(:arbor_orchestrator, :ollama, base_url: base_url <> "/v1")
+      Application.put_env(:arbor_orchestrator, :lm_studio, base_url: "http://127.0.0.1:1/v1")
+
+      on_exit(fn ->
+        restore_env(:arbor_orchestrator, :ollama, original_ollama)
+        restore_env(:arbor_orchestrator, :lm_studio, original_lm_studio)
+      end)
+
+      client =
+        Client.from_env(discover_local: true, discover_acp: false, discover_oauth: false)
+
+      refute Map.has_key?(client.adapters, "ollama")
+      assert %{path: path} = Task.await(server, 2_000)
+      assert path in ["/api/tags", "/v1/models"]
+    end
+  end
+
+  defp malformed_inventory_server do
+    {:ok, listener} =
+      :gen_tcp.listen(0, [
+        :binary,
+        packet: :raw,
+        active: false,
+        reuseaddr: true,
+        ip: {127, 0, 0, 1}
+      ])
+
+    {:ok, port} = :inet.port(listener)
+
+    server =
+      Task.async(fn ->
+        {:ok, socket} = :gen_tcp.accept(listener)
+        :ok = :gen_tcp.close(listener)
+        {:ok, request} = receive_headers(socket, "")
+        [request_line | _rest] = String.split(request, "\r\n")
+        [_method, path, _version] = String.split(request_line, " ", parts: 3)
+
+        :ok =
+          :gen_tcp.send(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}"
+          )
+
+        :gen_tcp.close(socket)
+        %{path: path}
+      end)
+
+    {"http://127.0.0.1:#{port}", server}
+  end
+
+  defp receive_headers(socket, acc) when byte_size(acc) <= 65_536 do
+    if String.contains?(acc, "\r\n\r\n") do
+      {:ok, acc}
+    else
+      with {:ok, chunk} <- :gen_tcp.recv(socket, 0, 1_000) do
+        receive_headers(socket, acc <> chunk)
+      end
+    end
+  end
+
+  defp restore_env(app, key, nil), do: Application.delete_env(app, key)
+  defp restore_env(app, key, value), do: Application.put_env(app, key, value)
 end

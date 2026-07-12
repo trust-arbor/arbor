@@ -37,8 +37,15 @@ defmodule Arbor.LLM.Plugs.Record do
       # Don't re-record a replay.
       call
     else
-      Fixture.save(call, result)
-      Call.put_metadata(call, %{recorded_to: Fixture.path_for(call)})
+      case Fixture.record(call, result) do
+        {:ok, replayable_result} ->
+          call
+          |> Map.put(:result, replayable_result)
+          |> Call.put_metadata(%{recorded_to: Fixture.path_for(call)})
+
+        {:error, reason} ->
+          %{call | result: {:error, {:fixture_record_failed, reason}}}
+      end
     end
   end
 

@@ -308,12 +308,13 @@ defmodule Arbor.LLM.OwnedStream do
         finalize_controller(state)
         send(reply, {ref, :finalized})
 
-      {:DOWN, monitor, :process, producer, _reason}
+      {:DOWN, monitor, :process, producer, reason}
       when monitor == state.producer_monitor and producer == state.producer ->
-        state = %{
-          state
-          | terminal: state.terminal || {:done, System.monotonic_time(:millisecond)}
-        }
+        terminal =
+          state.terminal ||
+            producer_terminal(reason, System.monotonic_time(:millisecond))
+
+        state = %{state | terminal: terminal}
 
         controller_loop(dispatch_ready(state))
 
@@ -353,6 +354,17 @@ defmodule Arbor.LLM.OwnedStream do
   end
 
   defp dispatch_ready(state), do: state
+
+  defp producer_terminal(reason, completed_mono)
+       when reason in [:normal, :shutdown],
+       do: {:done, completed_mono}
+
+  defp producer_terminal({:shutdown, _reason}, completed_mono), do: {:done, completed_mono}
+
+  defp producer_terminal(reason, completed_mono) do
+    {:error, {:owned_stream_producer_down, Arbor.LLM.ExternalTerm.sanitize(reason)},
+     completed_mono}
+  end
 
   defp notify_timeout(%{demand: {reply, ref}}), do: send(reply, {ref, :timeout})
   defp notify_timeout(_state), do: :ok
@@ -430,8 +442,12 @@ defimpl Enumerable, for: Arbor.LLM.OwnedStream do
 
   def reduce(stream, acc, fun) do
     case OwnedStream.claim(stream) do
-      :ok -> reduce_claimed(stream, acc, fun)
-      {:error, reason} -> raise ArgumentError, "invalid owned stream: #{inspect(reason)}"
+      :ok ->
+        reduce_claimed(stream, acc, fun)
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "invalid owned stream: #{Arbor.LLM.ExternalTerm.inspect(reason)}"
     end
   end
 

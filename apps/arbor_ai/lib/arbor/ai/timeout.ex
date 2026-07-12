@@ -3,6 +3,70 @@ defmodule Arbor.AI.Timeout do
 
   @maximum_timeout_ms 4_294_967_295
   @max_options 128
+  @deadline_key :deadline_ms
+  @signed_64_min -9_223_372_036_854_775_808
+  @signed_64_max 9_223_372_036_854_775_807
+
+  @spec start_deadline(term(), pos_integer() | :infinity) ::
+          {:ok, keyword(), pos_integer() | :infinity} | {:error, term()}
+  def start_deadline(opts, default) do
+    with {:ok, opts, timeout} <- normalize(opts, default),
+         {:ok, supplied_deadlines} <- deadline_values(opts),
+         :ok <- validate_deadlines(supplied_deadlines) do
+      own_deadline = deadline_from_timeout(timeout)
+      deadline = strictest_deadline([own_deadline | supplied_deadlines])
+
+      normalized =
+        opts
+        |> Enum.reject(fn {key, _value} -> key == @deadline_key end)
+        |> Keyword.put(@deadline_key, deadline)
+
+      {:ok, normalized, timeout}
+    end
+  end
+
+  @spec remaining(term()) ::
+          {:ok, keyword(), pos_integer() | :infinity} | {:error, term()}
+  def remaining(opts) do
+    with {:ok, opts, timeout} <- normalize(opts, :infinity),
+         {:ok, deadlines} <- deadline_values(opts),
+         :ok <- validate_deadlines(deadlines),
+         deadline = strictest_deadline(deadlines),
+         {:ok, remaining} <- remaining_timeout(deadline, timeout) do
+      normalized =
+        opts
+        |> Enum.reject(fn {key, _value} -> key == @deadline_key end)
+        |> Keyword.put(@deadline_key, deadline)
+        |> Keyword.put(:timeout, remaining)
+
+      {:ok, normalized, remaining}
+    end
+  end
+
+  @spec ensure_active(term()) :: :ok | {:error, :timeout | term()}
+  def ensure_active(opts) do
+    case remaining(opts) do
+      {:ok, _opts, _remaining} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec deadline(term()) :: {:ok, integer() | :infinity} | {:error, term()}
+  def deadline(opts) do
+    with {:ok, deadlines} <- deadline_values(opts),
+         :ok <- validate_deadlines(deadlines) do
+      {:ok, strictest_deadline(deadlines)}
+    end
+  end
+
+  @spec completed_before_deadline?(integer(), integer() | :infinity) :: boolean()
+  def completed_before_deadline?(_completed_at, :infinity), do: true
+
+  def completed_before_deadline?(completed_at, deadline)
+      when is_integer(completed_at) and is_integer(deadline),
+      do: completed_at <= deadline
+
+  def completed_before_deadline?(_completed_at, _deadline), do: false
 
   @spec normalize(term(), pos_integer() | :infinity, atom()) ::
           {:ok, keyword(), pos_integer() | :infinity} | {:error, term()}
@@ -56,6 +120,58 @@ defmodule Arbor.AI.Timeout do
     Enum.reduce(options, [], fn {key, value}, acc ->
       if key in keys, do: [value | acc], else: acc
     end)
+  end
+
+  defp deadline_values(opts) do
+    with {:ok, options} <- option_list(opts, [], 0) do
+      {:ok, values_for_keys(options, [@deadline_key])}
+    end
+  end
+
+  defp validate_deadlines(values) do
+    latest = System.monotonic_time(:millisecond) + @maximum_timeout_ms
+
+    valid? = fn
+      :infinity ->
+        true
+
+      value when is_integer(value) ->
+        value >= @signed_64_min and value <= @signed_64_max and value <= latest
+
+      _value ->
+        false
+    end
+
+    if Enum.all?(values, valid?),
+      do: :ok,
+      else: {:error, :invalid_deadline}
+  end
+
+  defp deadline_from_timeout(:infinity), do: :infinity
+
+  defp deadline_from_timeout(timeout) when is_integer(timeout),
+    do: System.monotonic_time(:millisecond) + timeout
+
+  defp strictest_deadline([]), do: :infinity
+
+  defp strictest_deadline(deadlines) do
+    case Enum.reject(deadlines, &(&1 == :infinity)) do
+      [] -> :infinity
+      finite -> Enum.min(finite)
+    end
+  end
+
+  defp remaining_timeout(:infinity, timeout), do: {:ok, timeout}
+
+  defp remaining_timeout(deadline, timeout) when is_integer(deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    cond do
+      remaining <= 0 -> {:error, :timeout}
+      timeout == :infinity -> {:ok, remaining}
+      is_integer(timeout) -> {:ok, min(timeout, remaining)}
+      true -> {:error, :invalid_timeout}
+    end
   end
 
   defp validate_values(values, minimum, allow_infinity?) do

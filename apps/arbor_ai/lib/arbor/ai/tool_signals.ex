@@ -20,6 +20,8 @@ defmodule Arbor.AI.ToolSignals do
     })
   rescue
     _ -> :ok
+  catch
+    _kind, _reason -> :ok
   end
 
   @doc false
@@ -34,6 +36,8 @@ defmodule Arbor.AI.ToolSignals do
     })
   rescue
     _ -> :ok
+  catch
+    _kind, _reason -> :ok
   end
 
   @doc false
@@ -41,11 +45,13 @@ defmodule Arbor.AI.ToolSignals do
     Arbor.Signals.emit(:ai, :tool_request_failed, %{
       provider: provider,
       model: model,
-      error: inspect(reason),
+      error: Arbor.LLM.inspect_external_reason(reason),
       backend: :api_with_tools
     })
   rescue
     _ -> :ok
+  catch
+    _kind, _reason -> :ok
   end
 
   # ── Budget/stats recording ──
@@ -63,6 +69,8 @@ defmodule Arbor.AI.ToolSignals do
     end
   rescue
     _ -> :ok
+  catch
+    _kind, _reason -> :ok
   end
 
   @doc false
@@ -80,6 +88,8 @@ defmodule Arbor.AI.ToolSignals do
     end
   rescue
     _ -> :ok
+  catch
+    _kind, _reason -> :ok
   end
 
   @doc false
@@ -87,12 +97,14 @@ defmodule Arbor.AI.ToolSignals do
     if UsageStats.started?() do
       UsageStats.record_failure(provider, %{
         model: Keyword.get(opts, :model, "unknown"),
-        error: inspect(error),
+        error: Arbor.LLM.inspect_external_reason(error),
         latency_ms: latency_ms,
         backend: :api_with_tools
       })
     end
   rescue
     _ -> :ok
+  catch
+    _kind, _reason -> :ok
   end
 end

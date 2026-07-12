@@ -668,7 +668,7 @@ defmodule Arbor.LLM.Client do
                   end
 
                 %StreamEvent{type: :error, data: data} when acc.warning_count < 1_000 ->
-                  warning = inspect(data, limit: 20, printable_limit: 512)
+                  warning = Arbor.LLM.ExternalTerm.inspect(data)
 
                   {:cont,
                    %{
@@ -1093,7 +1093,7 @@ defmodule Arbor.LLM.Client do
     }
 
     hooks_mod = @tool_hooks_mod
-    pre_result = apply(hooks_mod, :run, [:pre, hook_for(hooks, :pre), pre_payload, opts])
+    pre_result = safe_hook(hooks_mod, :pre, hook_for(hooks, :pre), pre_payload, opts)
     emit_step(on_step, Map.merge(%{type: :tool_hook_pre, tool: name, id: id}, pre_result))
 
     output =
@@ -1115,7 +1115,7 @@ defmodule Arbor.LLM.Client do
       result: output
     }
 
-    post_result = apply(hooks_mod, :run, [:post, hook_for(hooks, :post), post_payload, opts])
+    post_result = safe_hook(hooks_mod, :post, hook_for(hooks, :post), post_payload, opts)
     emit_step(on_step, Map.merge(%{type: :tool_hook_post, tool: name, id: id}, post_result))
 
     {output, id, name}
@@ -1127,15 +1127,15 @@ defmodule Arbor.LLM.Client do
         tool_error = %ToolError{
           message: "Unknown tool",
           type: :unknown_tool,
-          tool_name: to_string(name),
-          tool_call_id: to_string(id),
+          tool_name: external_identifier(name),
+          tool_call_id: external_identifier(id),
           retryable: false,
           details: %{"name" => name}
         }
 
         result = %{
           "status" => "error",
-          "error" => Exception.message(tool_error),
+          "error" => Arbor.LLM.ExternalTerm.exception_message(tool_error),
           "type" => tool_error.type,
           "name" => name
         }
@@ -1155,14 +1155,14 @@ defmodule Arbor.LLM.Client do
                   message: "Tool execution failed",
                   type: :execution_failed,
                   tool_name: tool.name,
-                  tool_call_id: to_string(id),
+                  tool_call_id: external_identifier(id),
                   retryable: false,
-                  details: %{"reason" => inspect(reason)}
+                  details: %{"reason" => Arbor.LLM.ExternalTerm.inspect(reason)}
                 }
 
                 %{
                   "status" => "error",
-                  "error" => Exception.message(tool_error),
+                  "error" => Arbor.LLM.ExternalTerm.exception_message(tool_error),
                   "type" => tool_error.type
                 }
 
@@ -1178,15 +1178,22 @@ defmodule Arbor.LLM.Client do
                 message: "Tool raised exception",
                 type: :execution_failed,
                 tool_name: tool.name,
-                tool_call_id: to_string(id),
+                tool_call_id: external_identifier(id),
                 retryable: false,
-                details: %{"exception" => Exception.message(exception)}
+                details: %{"exception" => Arbor.LLM.ExternalTerm.exception_message(exception)}
               }
 
               %{
                 "status" => "error",
-                "error" => Exception.message(tool_error),
+                "error" => Arbor.LLM.ExternalTerm.exception_message(tool_error),
                 "type" => tool_error.type
+              }
+          catch
+            kind, reason ->
+              %{
+                "status" => "error",
+                "error" => "tool callback #{kind}: " <> Arbor.LLM.ExternalTerm.inspect(reason),
+                "type" => :execution_failed
               }
           end
 
@@ -1197,15 +1204,15 @@ defmodule Arbor.LLM.Client do
         tool_error = %ToolError{
           message: "Tool has no execute handler",
           type: :invalid_tool_call,
-          tool_name: to_string(name),
-          tool_call_id: to_string(id),
+          tool_name: external_identifier(name),
+          tool_call_id: external_identifier(id),
           retryable: false,
           details: %{"name" => name}
         }
 
         result = %{
           "status" => "error",
-          "error" => Exception.message(tool_error),
+          "error" => Arbor.LLM.ExternalTerm.exception_message(tool_error),
           "type" => tool_error.type,
           "name" => name
         }
@@ -1240,8 +1247,32 @@ defmodule Arbor.LLM.Client do
 
   defp extract_tool_calls(_), do: []
 
-  defp emit_step(callback, payload) when is_function(callback, 1), do: callback.(payload)
+  defp safe_hook(module, phase, hook, payload, opts) do
+    apply(module, :run, [phase, hook, payload, opts])
+  rescue
+    exception ->
+      %{decision: :continue, reason: Arbor.LLM.ExternalTerm.exception_message(exception)}
+  catch
+    kind, reason ->
+      %{decision: :continue, reason: "#{kind}: " <> Arbor.LLM.ExternalTerm.inspect(reason)}
+  end
+
+  defp emit_step(callback, payload) when is_function(callback, 1) do
+    callback.(payload)
+    :ok
+  rescue
+    _exception -> :ok
+  catch
+    _kind, _reason -> :ok
+  end
+
   defp emit_step(_, _), do: :ok
+
+  defp external_identifier(value) when is_binary(value) and byte_size(value) <= 512,
+    do: String.replace_invalid(value, "")
+
+  defp external_identifier(value) when is_atom(value), do: Atom.to_string(value)
+  defp external_identifier(value), do: Arbor.LLM.ExternalTerm.inspect(value)
 
   defp ensure_not_aborted(opts) do
     abort =
@@ -1490,7 +1521,7 @@ defmodule Arbor.LLM.Client do
         adapters
 
       base_url ->
-        if probe_local_http(base_url <> "/models") do
+        if probe_local_provider(provider, base_url) do
           Map.put(adapters, provider, @generic_adapter)
         else
           adapters
@@ -1498,15 +1529,15 @@ defmodule Arbor.LLM.Client do
     end
   end
 
-  defp probe_local_http(url) do
-    case Req.get(url, receive_timeout: 2_000, retry: false) do
-      {:ok, %Req.Response{status: status}} when status in 200..299 -> true
-      _ -> false
+  defp probe_local_provider(provider, base_url) do
+    case Arbor.LLM.Preflight.loaded_models(provider, base_url, timeout_ms: 2_000) do
+      {:ok, _models} -> true
+      {:error, _reason} -> false
     end
   rescue
     _ -> false
   catch
-    :exit, _ -> false
+    _kind, _reason -> false
   end
 
   defp blank_to_nil(value) when value in [nil, ""], do: nil

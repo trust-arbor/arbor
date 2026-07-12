@@ -79,15 +79,22 @@ defmodule Arbor.AI.Runtime.Acp do
   @spec execute(Request.t(), Runtime.callbacks(), keyword()) ::
           {:ok, Response.t()} | {:error, term()}
   def execute(%Request{} = request, _callbacks, opts) do
-    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, @default_timeout),
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, @default_timeout),
          {:ok, cli} <- resolve_cli(request),
-         {:ok, session} <- pool_checkout(cli, build_checkout_opts(request, opts)) do
-      result = session_prompt(session, request, timeout)
-      _ = pool_checkin(session)
+         {:ok, checkout_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts),
+         {:ok, session} <- pool_checkout(cli, build_checkout_opts(request, checkout_opts)) do
+      result =
+        with {:ok, prompt_opts, timeout} <- Arbor.AI.Timeout.remaining(opts) do
+          session_prompt(session, request, prompt_opts, timeout)
+        end
 
-      case result do
-        {:ok, raw} -> {:ok, format_response(raw, cli)}
-        {:error, _} = err -> err
+      _ = pool_checkin(session, opts)
+
+      with :ok <- Arbor.AI.Timeout.ensure_active(opts) do
+        case result do
+          {:ok, raw} -> {:ok, format_response(raw, cli)}
+          {:error, _} = err -> err
+        end
       end
     end
   end
@@ -179,27 +186,51 @@ defmodule Arbor.AI.Runtime.Acp do
     else
       {:error, :pool_not_available}
     end
+  rescue
+    exception -> {:error, {:pool_failed, Arbor.LLM.external_exception_message(exception)}}
   catch
     :exit, reason -> {:error, {:pool_exit, Arbor.LLM.sanitize_external_reason(reason)}}
     kind, reason -> {:error, {:pool_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
-  defp pool_checkin(session) do
+  defp pool_checkin(session, opts) do
     if Code.ensure_loaded?(@pool_mod) do
-      apply(@pool_mod, :checkin, [session])
+      case Arbor.AI.Timeout.remaining(opts) do
+        {:ok, cleanup_opts, _remaining} ->
+          if function_exported?(@pool_mod, :checkin, 2),
+            do: apply(@pool_mod, :checkin, [session, cleanup_opts]),
+            else: apply(@pool_mod, :checkin, [session])
+
+        {:error, _reason} ->
+          Task.start(fn ->
+            try do
+              apply(@pool_mod, :checkin, [session])
+            rescue
+              _exception -> :ok
+            catch
+              _kind, _reason -> :ok
+            end
+          end)
+
+          :ok
+      end
     else
       :ok
     end
+  rescue
+    _exception -> :ok
   catch
-    :exit, _ -> :ok
+    _kind, _reason -> :ok
   end
 
-  defp session_prompt(session, %Request{} = request, timeout) do
+  defp session_prompt(session, %Request{} = request, opts, timeout) do
     prompt = extract_prompt(request)
     system_prompt = extract_system_prompt(request)
 
     send_opts =
-      [timeout: timeout]
+      opts
+      |> Keyword.take([:timeout, :deadline_ms])
+      |> Keyword.put(:timeout, timeout)
       |> maybe_add(:system_prompt, system_prompt)
 
     if Code.ensure_loaded?(@session_mod) do
@@ -207,6 +238,8 @@ defmodule Arbor.AI.Runtime.Acp do
     else
       {:error, :session_mod_not_available}
     end
+  rescue
+    exception -> {:error, {:session_failed, Arbor.LLM.external_exception_message(exception)}}
   catch
     :exit, reason -> {:error, {:session_exit, Arbor.LLM.sanitize_external_reason(reason)}}
     kind, reason -> {:error, {:session_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}

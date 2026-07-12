@@ -333,7 +333,7 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
   defp inspect_bounded(value) do
     value
     |> RetrievalSupport.bounded_external_reason()
-    |> inspect(limit: 20, printable_limit: 400)
+    |> Arbor.LLM.inspect_external_reason()
     |> clean_text(512)
   end
 

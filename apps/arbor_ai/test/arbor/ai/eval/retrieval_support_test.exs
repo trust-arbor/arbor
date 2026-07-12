@@ -144,9 +144,7 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
           :go -> :ok
         end
 
-        for _ <- 1..2_000 do
-          swap_paths(path, regular_path, fifo_path)
-        end
+        swap_paths_until_stopped(path, regular_path, fifo_path, 2_000)
       end)
 
     loaders =
@@ -167,7 +165,8 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
         result
       end)
 
-    Task.await(swapper, 10_000)
+    send(swapper.pid, :stop)
+    Task.await(swapper, 2_000)
 
     assert Enum.all?(results, fn
              {:ok, [_action]} -> true
@@ -496,6 +495,18 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
       :ok
     else
       {:error, _reason} -> :ok
+    end
+  end
+
+  defp swap_paths_until_stopped(_path, _regular_path, _fifo_path, 0), do: :ok
+
+  defp swap_paths_until_stopped(path, regular_path, fifo_path, remaining) do
+    receive do
+      :stop -> :ok
+    after
+      0 ->
+        swap_paths(path, regular_path, fifo_path)
+        swap_paths_until_stopped(path, regular_path, fifo_path, remaining - 1)
     end
   end
 end

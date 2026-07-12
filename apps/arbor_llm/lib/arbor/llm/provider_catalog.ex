@@ -187,6 +187,17 @@ defmodule Arbor.LLM.ProviderCatalog do
     }
   end
 
+  defp bounded_local_check(provider, base_url) do
+    case Arbor.LLM.Preflight.loaded_models(provider, base_url, timeout_ms: 2_000) do
+      {:ok, models} -> {:ok, %{loaded_models: length(models)}}
+      {:error, reason} -> {:error, Arbor.LLM.ExternalTerm.sanitize(reason)}
+    end
+  rescue
+    exception -> {:error, Arbor.LLM.ExternalTerm.exception(exception)}
+  catch
+    kind, reason -> {:error, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
+  end
+
   defp build_local_entry(provider) do
     base_url = ProviderRegistry.default_base_url(provider)
     capabilities = ProviderRegistry.capabilities(provider)
@@ -200,7 +211,7 @@ defmodule Arbor.LLM.ProviderCatalog do
         capabilities: capabilities
       )
 
-    check_result = RuntimeContract.check(contract)
+    check_result = bounded_local_check(provider, base_url)
 
     %{
       provider: provider,
@@ -235,7 +246,13 @@ defmodule Arbor.LLM.ProviderCatalog do
     end
   rescue
     e ->
-      Logger.warning("ProviderCatalog: error discovering ACP adapter: #{inspect(e)}")
+      Logger.warning(
+        "ProviderCatalog: error discovering ACP adapter: " <>
+          Arbor.LLM.ExternalTerm.inspect(e)
+      )
+
       nil
+  catch
+    _kind, _reason -> nil
   end
 end

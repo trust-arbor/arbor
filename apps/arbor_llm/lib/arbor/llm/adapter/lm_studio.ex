@@ -292,5 +292,5 @@ defmodule Arbor.LLM.Adapter.LmStudio do
   defp put_present(map, k, v), do: Map.put(map, k, v)
 
   defp detail(%{"error" => e}), do: e
-  defp detail(body), do: inspect(body) |> String.slice(0, 200)
+  defp detail(body), do: Arbor.LLM.ExternalTerm.inspect(body)
 end

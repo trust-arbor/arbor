@@ -210,6 +210,25 @@ defmodule Arbor.AI.AcpTaskControlTest do
     assert {:ok, %{"text" => "last"}} = Task.await(caller)
   end
 
+  test "security regression: queued follow-ups retain the initial prompt deadline" do
+    session = start_session()
+    session_ref = Process.monitor(session)
+    caller = Task.async(fn -> AcpSession.send_message(session, "initial", timeout: 80) end)
+
+    assert_receive {:prompt_started, initial_worker, client, "same-session", "initial"}
+
+    assert {:ok, :queued, :same_session_follow_up} =
+             AcpSession.deliver_task_control(session, control("deadline-follow", "follow"))
+
+    Process.sleep(50)
+    send(initial_worker, {:release, {:ok, %{"text" => "initial"}}})
+    assert_receive {:prompt_started, _follow_worker, ^client, "same-session", "follow"}
+
+    assert {:ok, {:error, :timeout}} = Task.yield(caller, 60)
+    assert_receive {:cancelled, ^client, "same-session"}
+    assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}
+  end
+
   test "ready sessions defer controls and invalid controls do not enter the queue" do
     subscribe_to_task_control_signals()
     session = start_session()

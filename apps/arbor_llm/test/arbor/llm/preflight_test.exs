@@ -130,7 +130,7 @@ defmodule Arbor.LLM.PreflightTest do
       assert {:error, :endpoint_origin_not_trusted} =
                Preflight.loaded_models(:lm_studio, base_url)
 
-      assert :not_connected = Task.await(server, 1_000)
+      assert :not_connected = Task.await(server, 2_500)
     end
 
     test "security regression: inventory redirects are not followed" do
@@ -180,7 +180,7 @@ defmodule Arbor.LLM.PreflightTest do
 
     server =
       Task.async(fn ->
-        case :gen_tcp.accept(listener, 500) do
+        case :gen_tcp.accept(listener, 2_000) do
           {:ok, socket} ->
             :ok = :gen_tcp.close(listener)
             {:ok, _request} = receive_headers(socket, "")

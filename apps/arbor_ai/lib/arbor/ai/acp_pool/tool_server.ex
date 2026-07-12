@@ -78,7 +78,7 @@ defmodule Arbor.AI.AcpPool.ToolServer do
         {:ok, %{port: actual_port, ref: ranch_ref, tool_count: length(tools)}}
 
       {:error, reason} ->
-        Logger.error("[ToolServer] Failed to start: #{inspect(reason)}")
+        Logger.error("[ToolServer] Failed to start: #{Arbor.LLM.inspect_external_reason(reason)}")
         {:error, reason}
     end
   end
@@ -238,7 +238,7 @@ defmodule Arbor.AI.AcpPool.ToolServer do
 
           {:error, reason} ->
             %{
-              "content" => [%{"type" => "text", "text" => "Error: #{inspect(reason)}"}],
+              "content" => [%{"type" => "text", "text" => "Error: #{bounded_reason(reason)}"}],
               "isError" => true
             }
         end
@@ -246,7 +246,15 @@ defmodule Arbor.AI.AcpPool.ToolServer do
   rescue
     e ->
       %{
-        "content" => [%{"type" => "text", "text" => "Error: #{Exception.message(e)}"}],
+        "content" => [
+          %{"type" => "text", "text" => "Error: #{Arbor.LLM.external_exception_message(e)}"}
+        ],
+        "isError" => true
+      }
+  catch
+    kind, reason ->
+      %{
+        "content" => [%{"type" => "text", "text" => "Error: #{kind}: #{bounded_reason(reason)}"}],
         "isError" => true
       }
   end
@@ -269,9 +277,10 @@ defmodule Arbor.AI.AcpPool.ToolServer do
   defp run_via_runner(fun, action_module, params, agent_id, exec_context) do
     fun.(action_module, params, agent_id, exec_context)
   rescue
-    e -> {:error, {:action_runner_error, Exception.message(e)}}
+    e -> {:error, {:action_runner_error, Arbor.LLM.external_exception_message(e)}}
   catch
-    :exit, reason -> {:error, {:action_runner_exit, reason}}
+    kind, reason ->
+      {:error, {:action_runner_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
   # SECURITY (codex authz.acp-toolserver-direct-fallback, HIGH): the ONLY way an
@@ -301,9 +310,10 @@ defmodule Arbor.AI.AcpPool.ToolServer do
       {:error, :security_unavailable}
     end
   rescue
-    e -> {:error, {:authorization_error, Exception.message(e)}}
+    e -> {:error, {:authorization_error, Arbor.LLM.external_exception_message(e)}}
   catch
-    :exit, reason -> {:error, {:authorization_exit, reason}}
+    kind, reason ->
+      {:error, {:authorization_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
   # Per-handler context that flows into each tool call. Workspace scopes
@@ -329,7 +339,13 @@ defmodule Arbor.AI.AcpPool.ToolServer do
         ]
       rescue
         _ ->
-          Logger.warning("[ToolServer] Failed to convert #{inspect(mod)} to MCP tool")
+          Logger.warning(
+            "[ToolServer] Failed to convert #{Arbor.LLM.inspect_external_reason(mod)} to MCP tool"
+          )
+
+          []
+      catch
+        _kind, _reason ->
           []
       end
     end)
@@ -342,9 +358,35 @@ defmodule Arbor.AI.AcpPool.ToolServer do
 
   # -- Helpers --
 
-  defp encode_result(result) when is_binary(result), do: result
-  defp encode_result(result) when is_map(result), do: Jason.encode!(result)
-  defp encode_result(result), do: inspect(result)
+  defp encode_result(result) when is_binary(result) and byte_size(result) <= 65_536,
+    do: String.replace_invalid(result, "")
+
+  defp encode_result(result) when is_binary(result), do: bounded_reason(result)
+
+  defp encode_result(result) when is_map(result) do
+    with :ok <-
+           Arbor.LLM.validate_decoded_term(result,
+             max_bytes: 65_536,
+             max_nodes: 2_000,
+             max_depth: 16,
+             max_map_keys: 512,
+             max_list_items: 2_000
+           ),
+         {:ok, encoded} <- Jason.encode(result),
+         true <- byte_size(encoded) <= 65_536 do
+      encoded
+    else
+      _invalid -> bounded_reason(result)
+    end
+  rescue
+    _exception -> bounded_reason(result)
+  catch
+    _kind, _reason -> bounded_reason(result)
+  end
+
+  defp encode_result(result), do: bounded_reason(result)
+
+  defp bounded_reason(reason), do: Arbor.LLM.inspect_external_reason(reason)
 
   defp atomize_params(params) when is_map(params) do
     Map.new(params, fn

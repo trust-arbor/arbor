@@ -216,6 +216,37 @@ defmodule Arbor.LLM.HighLevelApiTest do
     end
   end
 
+  defmodule CrashingSourceAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+
+    @impl true
+    def provider, do: "crashing-source"
+
+    @impl true
+    def complete(_request, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def stream(%Request{provider_options: options, model: model}, _opts) do
+      observer = Map.fetch!(options, :test_pid)
+
+      Stream.resource(
+        fn -> 0 end,
+        fn
+          0 when model == "partial" ->
+            {[%StreamEvent{type: :delta, data: %{text: "partial"}}], 1}
+
+          state ->
+            send(observer, {:crashing_source_waiting, self(), model, state})
+
+            receive do
+              :never -> {:halt, state}
+            end
+        end,
+        fn _state -> :ok end
+      )
+    end
+  end
+
   defmodule ObjectBoundaryAdapter do
     @behaviour Arbor.LLM.ProviderAdapter
 
@@ -858,6 +889,59 @@ defmodule Arbor.LLM.HighLevelApiTest do
     assert_receive {:DOWN, ^producer_monitor, :process, ^producer, reason}, 750
     assert reason in [:normal, :noproc]
     refute Process.alive?(producer)
+  end
+
+  test "security regression: abnormal stream producer DOWN is never clean EOF" do
+    client =
+      Client.new(
+        adapters: %{"crashing-source" => CrashingSourceAdapter},
+        default_provider: "crashing-source"
+      )
+
+    for model <- ["before-event", "partial"], exit_reason <- [:kill, :crash] do
+      request = %Request{
+        provider: "crashing-source",
+        model: model,
+        messages: [Message.new(:user, "hi")],
+        provider_options: %{test_pid: self()}
+      }
+
+      assert {:ok, stream} = Client.stream(client, request, timeout_ms: 1_000)
+
+      consumer =
+        Task.async(fn ->
+          try do
+            {:clean, Enum.to_list(stream)}
+          rescue
+            error in Arbor.LLM.StreamError -> {:error, error}
+          end
+        end)
+
+      assert_receive {:crashing_source_waiting, producer, ^model, _state}
+      Process.exit(producer, exit_reason)
+
+      assert {:error,
+              %Arbor.LLM.StreamError{
+                reason: {:owned_stream_producer_down, bounded_reason}
+              }} = Task.await(consumer)
+
+      assert byte_size(Arbor.LLM.inspect_external_reason(bounded_reason)) < 256
+      expected_reason = if exit_reason == :kill, do: :killed, else: exit_reason
+      assert bounded_reason == expected_reason
+    end
+  end
+
+  test "security regression: hostile fake structs and exception fields stay bounded data" do
+    huge = :erlang.bsl(1, 1_000_000)
+    fake = %{__struct__: %{"module" => huge}, message: "bad", nested: [huge]}
+
+    bounded_exception = Arbor.LLM.sanitize_external_exception(fake)
+    assert byte_size(Arbor.LLM.inspect_external_reason(bounded_exception)) < 1_024
+
+    bounded_term = Arbor.LLM.sanitize_external_reason(fake)
+    assert bounded_term.__external_struct_value__ != nil
+    assert bounded_term.nested == [:integer_out_of_range]
+    assert byte_size(Arbor.LLM.inspect_external_reason(bounded_term)) < 1_024
   end
 
   test "generate_object preserves upstream generation errors" do

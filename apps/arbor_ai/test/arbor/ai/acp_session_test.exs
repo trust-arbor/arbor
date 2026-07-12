@@ -46,8 +46,14 @@ defmodule Arbor.AI.AcpSessionTest do
     end
 
     def new_session(client, cwd, _opts) do
-      send(test_pid(client), {:fake_new_session, cwd})
-      {:ok, %{"sessionId" => "fake-session"}}
+      state = Agent.get(client, & &1)
+      send(state.opts[:test_pid], {:fake_new_session, cwd})
+
+      case state.opts[:new_session_mode] do
+        :throw -> throw({:hostile_new_session, :erlang.bsl(1, 1_000_000)})
+        :exit -> exit({:hostile_new_session, :erlang.bsl(1, 1_000_000)})
+        _other -> {:ok, %{"sessionId" => "fake-session"}}
+      end
     end
 
     def load_session(_client, session_id, _cwd, _opts) do
@@ -154,6 +160,25 @@ defmodule Arbor.AI.AcpSessionTest do
              catch_exit(AcpSession.create_session(server, timeout: 100, receive_timeout: 5))
 
     assert System.monotonic_time(:millisecond) - started_at < 35
+  end
+
+  test "security regression: send_message queue wait consumes the original deadline" do
+    server = start_supervised!(SlowCallServer)
+    blocker = Task.async(fn -> GenServer.call(server, :occupy) end)
+    Process.sleep(5)
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, :timeout} = AcpSession.send_message(server, "queued", timeout: 10)
+    assert System.monotonic_time(:millisecond) - started_at < 35
+    assert {:ok, %{}} = Task.await(blocker)
+  end
+
+  test "security regression: arbitrary-size absolute deadlines are rejected before calls" do
+    server = start_supervised!(SlowCallServer)
+    huge_deadline = :erlang.bsl(1, 1_000_000)
+
+    assert {:error, :invalid_deadline} =
+             AcpSession.send_message(server, "invalid", timeout: 100, deadline_ms: huge_deadline)
   end
 
   describe "Config.resolve/2" do
@@ -359,7 +384,7 @@ defmodule Arbor.AI.AcpSessionTest do
                )
 
       assert_receive {:fake_prompt_started, _worker, "progress_forever", opts}
-      assert Keyword.get(opts, :timeout) == 50
+      assert Keyword.get(opts, :timeout) in 1..50
       assert_receive {:fake_cancel, "fake-session"}
       assert_receive {:fake_disconnect, _client}
       assert_receive {:DOWN, ^ref, :process, ^session, :normal}
@@ -396,6 +421,44 @@ defmodule Arbor.AI.AcpSessionTest do
       assert_receive {:fake_cancel, "fake-session"}, 1_000
       assert_receive {:fake_disconnect, _client}, 1_000
       assert_receive {:DOWN, ^session_ref, :process, ^session, :normal}, 1_000
+    end
+  end
+
+  describe "hostile ACP callbacks" do
+    test "security regression: stream callback throws are bounded and do not kill the session" do
+      install_fake_progress_client(100)
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          client_opts: [test_pid: self()],
+          stream_callback: fn _update ->
+            throw({:callback_throw, :erlang.bsl(1, 1_000_000)})
+          end
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+
+      assert {:ok, %{"text" => "done"}} =
+               AcpSession.send_message(session, "steady_progress", timeout: 250)
+
+      assert Process.alive?(session)
+    end
+
+    test "security regression: new-session throws return bounded errors without killing the session" do
+      install_fake_progress_client(100)
+
+      {:ok, session} =
+        AcpSession.start_link(
+          provider: :test,
+          client_opts: [test_pid: self(), new_session_mode: :throw]
+        )
+
+      on_exit(fn -> safely_close_session(session) end)
+
+      assert {:error, reason} = AcpSession.send_message(session, "hello", timeout: 100)
+      assert byte_size(Arbor.LLM.inspect_external_reason(reason)) < 1_024
+      assert Process.alive?(session)
     end
   end
 
@@ -520,6 +583,14 @@ defmodule Arbor.AI.AcpSessionTest do
         File.rm(path)
       end
     end
+  end
+
+  defp safely_close_session(session) do
+    if Process.alive?(session) do
+      AcpSession.close(session)
+    end
+  catch
+    :exit, _reason -> :ok
   end
 
   describe "Handler path validation (workspace_root set)" do

@@ -225,8 +225,8 @@ defmodule Arbor.AI.Runtime.Dispatch do
     :ok
   end
 
-  defp inspect_error({:error, reason}), do: inspect(reason)
-  defp inspect_error(other), do: inspect(other)
+  defp inspect_error({:error, reason}), do: Arbor.LLM.inspect_external_reason(reason)
+  defp inspect_error(other), do: Arbor.LLM.inspect_external_reason(other)
 
   @doc """
   Run the selection chain without dispatching the request. Returns the

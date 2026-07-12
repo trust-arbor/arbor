@@ -58,8 +58,14 @@ defmodule Arbor.LLM.Preflight do
     :ok
   rescue
     e ->
-      Logger.warning("[Preflight] model check failed (non-fatal): #{Exception.message(e)}")
+      Logger.warning(
+        "[Preflight] model check failed (non-fatal): " <>
+          Arbor.LLM.ExternalTerm.exception_message(e)
+      )
+
       :ok
+  catch
+    _kind, _reason -> :ok
   end
 
   @doc """
@@ -204,9 +210,12 @@ defmodule Arbor.LLM.Preflight do
   @doc """
   Query a local provider's *loaded* models. Returns `{:ok, [id]}` or `{:error, reason}`.
   """
-  @spec loaded_models(atom(), String.t()) :: {:ok, [String.t()]} | {:error, term()}
-  def loaded_models(provider, base_url) when provider in [:lm_studio, :ollama] do
-    with {:ok, receipt} <- Deadline.receipt(timeout_ms: @http_timeout) do
+  @spec loaded_models(atom() | String.t(), String.t(), keyword()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def loaded_models(provider, base_url, opts \\ []) do
+    with {:ok, provider} <- normalize_inventory_provider(provider),
+         {:ok, opts, _timeout} <- Deadline.normalize_options(opts, @http_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn ->
           with {:ok, url} <- Endpoint.model_inventory(provider, base_url),
@@ -216,12 +225,24 @@ defmodule Arbor.LLM.Preflight do
           end
         end,
         receipt,
-        {:inventory_deadline_exceeded, @http_timeout}
+        {:inventory_deadline_exceeded, receipt.timeout_ms}
       )
     end
   end
 
-  def loaded_models(other, _base_url), do: {:error, {:unsupported_provider, other}}
+  defp normalize_inventory_provider(provider) when is_atom(provider),
+    do: normalize_inventory_provider(Atom.to_string(provider))
+
+  defp normalize_inventory_provider(provider) when is_binary(provider) do
+    case Arbor.LLM.ProviderRegistry.normalize(provider) do
+      "lm_studio" -> {:ok, :lm_studio}
+      "ollama" -> {:ok, :ollama}
+      other -> {:error, {:unsupported_provider, Arbor.LLM.ExternalTerm.sanitize(other)}}
+    end
+  end
+
+  defp normalize_inventory_provider(other),
+    do: {:error, {:unsupported_provider, Arbor.LLM.ExternalTerm.sanitize(other)}}
 
   # ── helpers ──────────────────────────────────────────────────────────
 

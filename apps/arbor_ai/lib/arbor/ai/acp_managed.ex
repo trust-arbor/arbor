@@ -32,7 +32,7 @@ defmodule Arbor.AI.AcpManaged do
   def start_session(provider, opts \\ []) when is_atom(provider) and is_list(opts) do
     opts = strip_caller_owner_opts(opts)
 
-    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.normalize(opts, :infinity) do
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, :infinity) do
       use_pool? = Keyword.get(opts, :use_pool) || Keyword.get(opts, :pooled) || false
 
       if use_pool? do
@@ -47,11 +47,11 @@ defmodule Arbor.AI.AcpManaged do
   @spec send_message(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def send_message(worker_session_id, content, opts \\ [])
       when is_binary(worker_session_id) and is_binary(content) and is_list(opts) do
-    started_at = System.monotonic_time(:millisecond)
-
-    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, :infinity),
-         {:ok, resolved} <- SessionRegistry.resolve(worker_session_id, opts),
-         {:ok, operation_opts} <- remaining_operation_opts(opts, timeout, started_at) do
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, :infinity),
+         {:ok, registry_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts),
+         {:ok, resolved} <- SessionRegistry.resolve(worker_session_id, registry_opts),
+         {:ok, operation_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts),
+         operation_opts = session_operation_opts(operation_opts) do
       safe_send_message(resolved, content, operation_opts)
     end
   end
@@ -61,8 +61,6 @@ defmodule Arbor.AI.AcpManaged do
           {:ok, :queued | :delivered | :deferred, :same_session_follow_up} | {:error, term()}
   def deliver_task_control(task_id, principal_id, control, opts \\ [])
       when is_binary(task_id) and is_binary(principal_id) and is_map(control) and is_list(opts) do
-    started_at = System.monotonic_time(:millisecond)
-
     with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, 5_000),
          {:ok, requested_control_timeout} <-
            Arbor.AI.Timeout.select(opts, [:control_timeout], timeout, 1, true),
@@ -71,10 +69,13 @@ defmodule Arbor.AI.AcpManaged do
            opts
            |> Enum.reject(fn {key, _value} -> key == :control_timeout end)
            |> Keyword.put(:timeout, control_timeout),
-         {:ok, resolved} <- SessionRegistry.resolve_task_control(task_id, principal_id, opts) do
+         {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, control_timeout),
+         {:ok, registry_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts),
+         {:ok, resolved} <-
+           SessionRegistry.resolve_task_control(task_id, principal_id, registry_opts) do
       control = control |> Map.delete(:task_id) |> Map.put("task_id", task_id)
 
-      with {:ok, remaining} <- remaining_timeout(control_timeout, started_at) do
+      with {:ok, _operation_opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
         safe_deliver_task_control(resolved, control, remaining)
       end
     end
@@ -84,11 +85,10 @@ defmodule Arbor.AI.AcpManaged do
   @spec session_status(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def session_status(worker_session_id, opts \\ [])
       when is_binary(worker_session_id) and is_list(opts) do
-    started_at = System.monotonic_time(:millisecond)
-
-    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, 5_000),
-         {:ok, resolved} <- SessionRegistry.resolve(worker_session_id, opts),
-         {:ok, remaining} <- remaining_timeout(timeout, started_at) do
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, 5_000),
+         {:ok, registry_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts),
+         {:ok, resolved} <- SessionRegistry.resolve(worker_session_id, registry_opts),
+         {:ok, _operation_opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
       session_mod = resolved.session_module
 
       # Live status is optional enrichment. Failures must not invent "ready"
@@ -137,7 +137,10 @@ defmodule Arbor.AI.AcpManaged do
   @spec close_session(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def close_session(worker_session_id, opts \\ [])
       when is_binary(worker_session_id) and is_list(opts) do
-    SessionRegistry.close(worker_session_id, opts)
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, 5_000),
+         {:ok, opts, _remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      SessionRegistry.close(worker_session_id, opts)
+    end
   end
 
   # -- Start paths ----------------------------------------------------
@@ -145,24 +148,27 @@ defmodule Arbor.AI.AcpManaged do
   defp start_non_pooled(provider, opts) do
     session_mod = Keyword.get(opts, :session_module, AcpSession)
     supervisor = Keyword.get(opts, :supervisor, ManagedSupervisor)
-    registry_opts = Keyword.take(opts, [:server])
 
     # Owner is the live task caller; never a supplied owner option.
-    session_opts =
-      opts
-      |> Keyword.drop(@registry_only_opts)
-      |> Keyword.put(:provider, provider)
-      |> Keyword.put(:owner, self())
+    with {:ok, phase_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      session_opts =
+        phase_opts
+        |> Keyword.drop(@registry_only_opts)
+        |> Keyword.put(:provider, provider)
+        |> Keyword.put(:owner, self())
 
-    case ManagedSupervisor.start_session(session_mod, session_opts, supervisor: supervisor) do
+      start_opts = [supervisor: supervisor, deadline_ms: Keyword.fetch!(phase_opts, :deadline_ms)]
+
+      ManagedSupervisor.start_session(session_mod, session_opts, start_opts)
+    end
+    |> case do
       {:ok, session_pid} ->
         finalize_non_pooled_start(
           session_mod,
           session_pid,
           provider,
           opts,
-          supervisor,
-          registry_opts
+          supervisor
         )
 
       {:error, reason} ->
@@ -184,8 +190,7 @@ defmodule Arbor.AI.AcpManaged do
          session_pid,
          provider,
          opts,
-         supervisor,
-         registry_opts
+         supervisor
        ) do
     try do
       case create_or_resume(session_mod, session_pid, opts) do
@@ -203,7 +208,7 @@ defmodule Arbor.AI.AcpManaged do
             principal_id: Keyword.get(opts, :principal_id) || Keyword.get(opts, :agent_id)
           }
 
-          case SessionRegistry.register(register_attrs, registry_opts) do
+          case register_before_deadline(register_attrs, opts) do
             {:ok, view} ->
               {:ok, view}
 
@@ -234,26 +239,28 @@ defmodule Arbor.AI.AcpManaged do
   defp start_pooled(provider, opts) do
     session_mod = Keyword.get(opts, :session_module, AcpSession)
     pool_mod = Keyword.get(opts, :pool_module, AcpPool)
-    registry_opts = Keyword.take(opts, [:server])
     return_to_pool = Keyword.get(opts, :return_to_pool, true)
 
-    checkout_opts =
-      opts
-      |> Keyword.drop([
-        :use_pool,
-        :pooled,
-        :return_to_pool,
-        :session_module,
-        :pool_module,
-        :supervisor,
-        :server,
-        :task_id,
-        :principal_id,
-        :session_id,
-        :create_session
-      ])
+    with {:ok, phase_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      checkout_opts =
+        phase_opts
+        |> Keyword.drop([
+          :use_pool,
+          :pooled,
+          :return_to_pool,
+          :session_module,
+          :pool_module,
+          :supervisor,
+          :server,
+          :task_id,
+          :principal_id,
+          :session_id,
+          :create_session
+        ])
 
-    case pool_mod.checkout(provider, checkout_opts) do
+      pool_mod.checkout(provider, checkout_opts)
+    end
+    |> case do
       {:ok, session_pid} ->
         finalize_pooled_start(
           session_mod,
@@ -261,8 +268,7 @@ defmodule Arbor.AI.AcpManaged do
           session_pid,
           provider,
           opts,
-          return_to_pool,
-          registry_opts
+          return_to_pool
         )
 
       {:error, reason} ->
@@ -285,8 +291,7 @@ defmodule Arbor.AI.AcpManaged do
          session_pid,
          provider,
          opts,
-         return_to_pool,
-         registry_opts
+         return_to_pool
        ) do
     cleanup_opts = [pooled?: true, return_to_pool: return_to_pool]
 
@@ -300,7 +305,6 @@ defmodule Arbor.AI.AcpManaged do
             provider,
             opts,
             return_to_pool,
-            registry_opts,
             %{},
             cleanup_opts
           )
@@ -313,7 +317,6 @@ defmodule Arbor.AI.AcpManaged do
             provider,
             opts,
             return_to_pool,
-            registry_opts,
             session_info,
             cleanup_opts
           )
@@ -344,7 +347,6 @@ defmodule Arbor.AI.AcpManaged do
          provider,
          opts,
          return_to_pool,
-         registry_opts,
          session_info,
          cleanup_opts
        ) do
@@ -362,7 +364,7 @@ defmodule Arbor.AI.AcpManaged do
       principal_id: Keyword.get(opts, :principal_id) || Keyword.get(opts, :agent_id)
     }
 
-    case SessionRegistry.register(register_attrs, registry_opts) do
+    case register_before_deadline(register_attrs, opts) do
       {:ok, view} ->
         {:ok, view}
 
@@ -374,24 +376,14 @@ defmodule Arbor.AI.AcpManaged do
 
   # Non-pooled starts always create or resume.
   defp create_or_resume(session_mod, session_pid, opts) do
-    case Keyword.get(opts, :session_id) do
-      sid when is_binary(sid) and sid != "" ->
-        resume_opts = Keyword.take(opts, [:timeout, :cwd])
+    with {:ok, phase_opts} <- session_phase_opts(opts) do
+      case Keyword.get(opts, :session_id) do
+        sid when is_binary(sid) and sid != "" ->
+          normalize_session_result(session_mod.resume_session(session_pid, sid, phase_opts))
 
-        case session_mod.resume_session(session_pid, sid, resume_opts) do
-          {:ok, info} -> {:ok, info}
-          {:error, reason} -> {:error, reason}
-          other -> {:error, {:unexpected_result, other}}
-        end
-
-      _ ->
-        create_opts = Keyword.take(opts, [:timeout, :cwd])
-
-        case session_mod.create_session(session_pid, create_opts) do
-          {:ok, info} -> {:ok, info}
-          {:error, reason} -> {:error, reason}
-          other -> {:error, {:unexpected_result, other}}
-        end
+        _ ->
+          normalize_session_result(session_mod.create_session(session_pid, phase_opts))
+      end
     end
   end
 
@@ -400,26 +392,43 @@ defmodule Arbor.AI.AcpManaged do
   defp maybe_create_or_resume_pooled(session_mod, session_pid, opts) do
     case Keyword.get(opts, :session_id) do
       sid when is_binary(sid) and sid != "" ->
-        resume_opts = Keyword.take(opts, [:timeout, :cwd])
-
-        case session_mod.resume_session(session_pid, sid, resume_opts) do
-          {:ok, info} -> {:ok, info}
-          {:error, reason} -> {:error, reason}
-          other -> {:error, {:unexpected_result, other}}
+        with {:ok, phase_opts} <- session_phase_opts(opts) do
+          normalize_session_result(session_mod.resume_session(session_pid, sid, phase_opts))
         end
 
       _ ->
         if Keyword.get(opts, :create_session, false) do
-          create_opts = Keyword.take(opts, [:timeout, :cwd])
-
-          case session_mod.create_session(session_pid, create_opts) do
-            {:ok, info} -> {:ok, info}
-            {:error, reason} -> {:error, reason}
-            other -> {:error, {:unexpected_result, other}}
+          with {:ok, phase_opts} <- session_phase_opts(opts) do
+            normalize_session_result(session_mod.create_session(session_pid, phase_opts))
           end
         else
-          :skip
+          case Arbor.AI.Timeout.ensure_active(opts) do
+            :ok -> :skip
+            {:error, reason} -> {:error, reason}
+          end
         end
+    end
+  end
+
+  defp session_phase_opts(opts) do
+    with {:ok, phase_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      {:ok, Keyword.take(phase_opts, [:timeout, :deadline_ms, :cwd])}
+    end
+  end
+
+  defp normalize_session_result({:ok, info}), do: {:ok, info}
+  defp normalize_session_result({:error, reason}), do: {:error, reason}
+
+  defp normalize_session_result(other),
+    do: {:error, {:unexpected_result, Arbor.LLM.sanitize_external_reason(other)}}
+
+  defp register_before_deadline(attrs, opts) do
+    with {:ok, registry_opts, _remaining} <- Arbor.AI.Timeout.remaining(opts),
+         registry_opts =
+           Keyword.take(registry_opts, [:server, :timeout, :deadline_ms]),
+         result <- SessionRegistry.register(attrs, registry_opts),
+         :ok <- Arbor.AI.Timeout.ensure_active(opts) do
+      result
     end
   end
 
@@ -518,31 +527,20 @@ defmodule Arbor.AI.AcpManaged do
     ])
   end
 
-  defp remaining_operation_opts(opts, timeout, started_at) do
-    with {:ok, remaining} <- remaining_timeout(timeout, started_at) do
-      {:ok, opts |> session_operation_opts() |> Keyword.put(:timeout, remaining)}
-    end
-  end
-
-  defp remaining_timeout(:infinity, _started_at), do: {:ok, :infinity}
-
-  defp remaining_timeout(timeout, started_at) do
-    elapsed = max(System.monotonic_time(:millisecond) - started_at, 0)
-
-    case timeout - elapsed do
-      remaining when remaining > 0 -> {:ok, remaining}
-      _expired -> {:error, :timeout}
-    end
-  end
-
   defp min_timeout(:infinity, timeout), do: timeout
   defp min_timeout(timeout, :infinity), do: timeout
   defp min_timeout(left, right), do: min(left, right)
 
   defp safe_send_message(resolved, content, opts) do
     case resolved.session_module.send_message(resolved.session_pid, content, opts) do
-      {:error, reason} -> {:error, Arbor.LLM.sanitize_external_reason(reason)}
-      result -> result
+      {:error, reason} ->
+        {:error, Arbor.LLM.sanitize_external_reason(reason)}
+
+      result ->
+        case Arbor.AI.Timeout.ensure_active(opts) do
+          :ok -> result
+          {:error, reason} -> {:error, reason}
+        end
     end
   rescue
     exception ->
@@ -631,15 +629,15 @@ defmodule Arbor.AI.AcpManaged do
   defp provider_to_string(nil), do: nil
   defp provider_to_string(p) when is_atom(p), do: Atom.to_string(p)
   defp provider_to_string(p) when is_binary(p), do: p
-  defp provider_to_string(p), do: inspect(p)
+  defp provider_to_string(p), do: Arbor.LLM.inspect_external_reason(p)
 
   defp model_to_string(nil), do: nil
   defp model_to_string(m) when is_binary(m), do: m
   defp model_to_string(m) when is_atom(m), do: Atom.to_string(m)
-  defp model_to_string(m), do: to_string(m)
+  defp model_to_string(m), do: Arbor.LLM.inspect_external_reason(m)
 
   defp status_to_string(nil), do: "ready"
   defp status_to_string(s) when is_atom(s), do: Atom.to_string(s)
   defp status_to_string(s) when is_binary(s), do: s
-  defp status_to_string(s), do: inspect(s)
+  defp status_to_string(s), do: Arbor.LLM.inspect_external_reason(s)
 end

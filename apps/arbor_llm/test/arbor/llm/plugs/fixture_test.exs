@@ -222,6 +222,41 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       assert %StreamEvent{type: :delta, data: %{text: " world"}} = second
       assert %StreamEvent{type: :step_finish} = third
     end
+
+    test "security regression: recording enforces cumulative event and deadline limits" do
+      event_call =
+        Call.new(
+          :stream,
+          {"openai:bounded-stream", [], [max_stream_events: 4, timeout_ms: 1_000]}
+        )
+
+      events =
+        Stream.repeatedly(fn -> %StreamEvent{type: :delta, data: %{text: "x"}} end)
+        |> Stream.take(100)
+
+      assert {:error, event_reason} = Fixture.save(event_call, {:ok, events})
+      assert inspect(event_reason) =~ "stream_limit_exceeded"
+      refute File.exists?(Fixture.path_for(event_call))
+
+      deadline_call =
+        Call.new(:stream, {"openai:stalled-stream", [], [timeout_ms: 20]})
+
+      stalled =
+        Stream.resource(
+          fn -> :waiting end,
+          fn state ->
+            Process.sleep(500)
+            {:halt, state}
+          end,
+          fn _state -> :ok end
+        )
+
+      task = Task.async(fn -> Fixture.save(deadline_call, {:ok, stalled}) end)
+
+      assert {:ok, {:error, deadline_reason}} = Task.yield(task, 200)
+      assert inspect(deadline_reason) =~ "fixture_record_deadline_exceeded"
+      refute File.exists?(Fixture.path_for(deadline_call))
+    end
   end
 
   # ── Round-trip: embeddings ─────────────────────────────────────────
@@ -412,6 +447,60 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
 
       assert Fixture.load(call) ==
                {:error, {:invalid_fixture, {:fixture_read_failed, :hardlink_rejected}}}
+    end
+
+    test "security regression: fixture recording rejects symlink, hardlink, and FIFO destinations",
+         %{tmp_dir: tmp_dir} do
+      outside = tmp_dir <> "-publication-target.json"
+      File.write!(outside, "outside-original")
+      on_exit(fn -> File.rm(outside) end)
+
+      symlink_call = Call.new(:complete, {"openai:save-symlink", [], []})
+      symlink_path = Fixture.path_for(symlink_call)
+      File.ln_s!(outside, symlink_path)
+
+      assert {:error, symlink_reason} =
+               Fixture.save(symlink_call, {:ok, %Response{text: "must-not-write"}})
+
+      assert inspect(symlink_reason) =~ "not_regular_file"
+      assert File.read!(outside) == "outside-original"
+      File.rm!(symlink_path)
+
+      hardlink_call = Call.new(:complete, {"openai:save-hardlink", [], []})
+      hardlink_path = Fixture.path_for(hardlink_call)
+      File.ln!(outside, hardlink_path)
+
+      assert {:error, hardlink_reason} =
+               Fixture.save(hardlink_call, {:ok, %Response{text: "must-not-write"}})
+
+      assert inspect(hardlink_reason) =~ "hardlink_rejected"
+      assert File.read!(outside) == "outside-original"
+      File.rm!(hardlink_path)
+
+      fifo_call = Call.new(:complete, {"openai:save-fifo", [], []})
+      fifo_path = Fixture.path_for(fifo_call)
+      {_, 0} = System.cmd("mkfifo", [fifo_path])
+
+      task = Task.async(fn -> Fixture.save(fifo_call, {:ok, %Response{text: "x"}}) end)
+      assert {:ok, {:error, fifo_reason}} = Task.yield(task, 500)
+      assert inspect(fifo_reason) =~ "not_regular_file"
+
+      refute Enum.any?(File.ls!(tmp_dir), &String.starts_with?(&1, ".arbor-fixture-"))
+    end
+
+    test "security regression: fixture serialization rejects fake structs and bignums boundedly" do
+      call = Call.new(:complete, {"openai:hostile-serialization", [], []})
+      huge = :erlang.bsl(1, 1_000_000)
+
+      response = %Response{
+        text: "ok",
+        content_parts: [%{__struct__: %{"fake" => huge}, nested: [huge]}],
+        usage: %{}
+      }
+
+      assert {:error, reason} = Fixture.save(call, {:ok, response})
+      assert byte_size(inspect(reason)) < 1_024
+      refute File.exists?(Fixture.path_for(call))
     end
   end
 

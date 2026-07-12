@@ -34,7 +34,7 @@ defmodule Arbor.AI.ToolAuthorization do
 
       Logger.info(
         "Tool authorization: filtered #{length(denied)} unauthorized tools " <>
-          "for agent #{agent_id}: #{inspect(denied_names)}"
+          "for agent #{agent_id}: #{Arbor.LLM.inspect_external_reason(denied_names)}"
       )
 
       emit_tool_authorization_denied(agent_id, denied_names)
@@ -72,7 +72,8 @@ defmodule Arbor.AI.ToolAuthorization do
 
           {:error, reason} ->
             Logger.debug(
-              "Tool authorization denied for #{tool_name}, agent #{agent_id}: #{inspect(reason)}"
+              "Tool authorization denied for #{tool_name}, agent #{agent_id}: " <>
+                Arbor.LLM.inspect_external_reason(reason)
             )
 
             :unauthorized
@@ -88,14 +89,16 @@ defmodule Arbor.AI.ToolAuthorization do
   rescue
     e ->
       Logger.warning(
-        "Tool authorization check failed for #{tool_name}: #{inspect(e)}, defaulting to deny"
+        "Tool authorization check failed for #{tool_name}: " <>
+          "#{Arbor.LLM.inspect_external_reason(e)}, defaulting to deny"
       )
 
       :unauthorized
   catch
-    :exit, reason ->
+    kind, reason ->
       Logger.warning(
-        "Tool authorization check exited for #{tool_name}: #{inspect(reason)}, defaulting to deny"
+        "Tool authorization check #{kind} for #{tool_name}: " <>
+          "#{Arbor.LLM.inspect_external_reason(reason)}, defaulting to deny"
       )
 
       :unauthorized

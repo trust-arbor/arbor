@@ -208,7 +208,7 @@ defmodule Arbor.AI.LLMError do
 
   defp safe_message(nil), do: "unknown error"
   defp safe_message(msg) when is_binary(msg), do: truncate(msg, 200)
-  defp safe_message(msg), do: truncate(inspect(msg), 200)
+  defp safe_message(msg), do: truncate(Arbor.LLM.inspect_external_reason(msg), 200)
 
   defp safe_provider(nil), do: nil
   defp safe_provider(p) when is_atom(p), do: p
@@ -219,9 +219,7 @@ defmodule Arbor.AI.LLMError do
     ArgumentError -> nil
   end
 
-  defp safe_inspect(term) do
-    inspect(term, limit: 5, printable_limit: 200)
-  end
+  defp safe_inspect(term), do: Arbor.LLM.inspect_external_reason(term)
 
   defp truncate(str, max) when is_binary(str) do
     if String.length(str) > max do

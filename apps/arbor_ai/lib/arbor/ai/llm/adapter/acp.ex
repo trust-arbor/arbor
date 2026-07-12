@@ -69,11 +69,17 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
   @deprecated "Use Arbor.AI.Runtime.Acp via Arbor.AI.Runtime.Dispatch.dispatch/2. This path ships for backwards-compat with the pre-Phase-2c provider:\"acp\"+agent shape."
   @impl true
   def complete(%Request{} = request, opts \\ []) do
-    with {:ok, timeout} <- strict_timeout(opts, request.receive_timeout) do
+    fallback_opts =
+      if is_nil(request.receive_timeout),
+        do: opts,
+        else: [receive_timeout: request.receive_timeout] ++ opts
+
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(fallback_opts, @default_timeout),
+         {:ok, checkout_deadline_opts, timeout} <- Arbor.AI.Timeout.remaining(opts) do
       agent = resolve_agent(request)
 
       checkout_opts =
-        opts
+        checkout_deadline_opts
         |> Keyword.delete(:timeout)
         |> Keyword.put(:model, request.model)
         |> Keyword.put(:timeout, timeout)
@@ -83,14 +89,22 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
 
       case pool_checkout(agent, checkout_opts) do
         {:ok, session} ->
-          case session_prompt(session, request, timeout) do
+          prompt_result =
+            with {:ok, prompt_opts, prompt_timeout} <- Arbor.AI.Timeout.remaining(opts) do
+              session_prompt(session, request, prompt_opts, prompt_timeout)
+            end
+
+          case prompt_result do
             {:ok, result} ->
-              pool_checkin(session)
-              {:ok, format_response(result, request, agent)}
+              pool_checkin(session, opts)
+
+              with :ok <- Arbor.AI.Timeout.ensure_active(opts) do
+                {:ok, format_response(result, request, agent)}
+              end
 
             {:error, reason} ->
               # Always return session to pool, even on prompt failure
-              pool_checkin(session)
+              pool_checkin(session, opts)
 
               Logger.warning(
                 "ACP adapter prompt error (agent=#{agent}): #{Arbor.LLM.inspect_external_reason(reason)}"
@@ -211,27 +225,51 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
     else
       {:error, :pool_not_available}
     end
+  rescue
+    exception -> {:error, {:pool_failed, Arbor.LLM.external_exception_message(exception)}}
   catch
     :exit, reason -> {:error, {:pool_exit, Arbor.LLM.sanitize_external_reason(reason)}}
     kind, reason -> {:error, {:pool_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
-  defp pool_checkin(session) do
+  defp pool_checkin(session, opts) do
     if Code.ensure_loaded?(@pool_mod) do
-      apply(@pool_mod, :checkin, [session])
+      case Arbor.AI.Timeout.remaining(opts) do
+        {:ok, cleanup_opts, _remaining} ->
+          if function_exported?(@pool_mod, :checkin, 2),
+            do: apply(@pool_mod, :checkin, [session, cleanup_opts]),
+            else: apply(@pool_mod, :checkin, [session])
+
+        {:error, _reason} ->
+          Task.start(fn ->
+            try do
+              apply(@pool_mod, :checkin, [session])
+            rescue
+              _exception -> :ok
+            catch
+              _kind, _reason -> :ok
+            end
+          end)
+
+          :ok
+      end
     else
       :ok
     end
+  rescue
+    _exception -> :ok
   catch
-    :exit, _ -> :ok
+    _kind, _reason -> :ok
   end
 
-  defp session_prompt(session, request, timeout) do
+  defp session_prompt(session, request, opts, timeout) do
     prompt = extract_prompt(request)
     system_prompt = extract_system_prompt(request)
 
     send_opts =
-      [timeout: timeout]
+      opts
+      |> Keyword.take([:timeout, :deadline_ms])
+      |> Keyword.put(:timeout, timeout)
       |> maybe_add(:system_prompt, system_prompt)
 
     if Code.ensure_loaded?(@session_mod) do
@@ -239,24 +277,12 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
     else
       {:error, :session_mod_not_available}
     end
+  rescue
+    exception -> {:error, {:session_failed, Arbor.LLM.external_exception_message(exception)}}
   catch
     :exit, reason -> {:error, {:session_exit, Arbor.LLM.sanitize_external_reason(reason)}}
     kind, reason -> {:error, {:session_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
-
-  defp strict_timeout(opts, fallback) when is_list(opts) do
-    fallback_opts = if is_nil(fallback), do: [], else: [receive_timeout: fallback]
-
-    Arbor.AI.Timeout.select(
-      fallback_opts ++ opts,
-      Arbor.LLM.timeout_option_keys(),
-      @default_timeout,
-      1,
-      true
-    )
-  end
-
-  defp strict_timeout(_opts, _fallback), do: {:error, {:invalid_options, :keyword_required}}
 
   defp extract_prompt(request) do
     request.messages

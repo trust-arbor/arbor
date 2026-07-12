@@ -337,7 +337,9 @@ defmodule Arbor.LLM.ToolLoop do
           require Logger
 
           Logger.warning(
-            "[ToolLoop] finish_reason=tool_calls but no tool_call parts! content_parts=#{inspect(response.content_parts)} raw=#{inspect(response.raw, limit: 500)}"
+            "[ToolLoop] finish_reason=tool_calls but no tool_call parts! " <>
+              "content_parts=#{Arbor.LLM.ExternalTerm.inspect(response.content_parts)} " <>
+              "raw=#{Arbor.LLM.ExternalTerm.inspect(response.raw)}"
           )
         end
 
@@ -434,8 +436,8 @@ defmodule Arbor.LLM.ToolLoop do
 
                 Logger.warning(
                   "[ToolLoop] Final response has empty text after #{state.turn + 1} tool rounds. " <>
-                    "finish_reason=#{inspect(response.finish_reason)} " <>
-                    "content_parts=#{inspect(Enum.map(response.content_parts || [], & &1.kind))}"
+                    "finish_reason=#{Arbor.LLM.ExternalTerm.inspect(response.finish_reason)} " <>
+                    "content_parts=#{Arbor.LLM.ExternalTerm.inspect(Enum.map(response.content_parts || [], & &1.kind))}"
                 )
               end
 
@@ -564,7 +566,9 @@ defmodule Arbor.LLM.ToolLoop do
 
         case result do
           {:error, reason} ->
-            Logger.warning("[ToolLoop] tool=#{tc.name} ERROR: #{inspect(reason)}")
+            Logger.warning(
+              "[ToolLoop] tool=#{tc.name} ERROR: #{Arbor.LLM.ExternalTerm.inspect(reason)}"
+            )
 
           {:ok, text} when is_binary(text) ->
             Logger.info("[ToolLoop] tool=#{tc.name} result_preview=#{String.slice(text, 0..200)}")
@@ -579,7 +583,7 @@ defmodule Arbor.LLM.ToolLoop do
           # Bounded args preview so observers/evals can see the target of a call
           # (e.g. the URL a web_browse hit) — needed to tell a legit research
           # fetch from an exfil POST. Bounded like result_preview.
-          args_preview: args |> inspect(limit: 20, printable_limit: 500) |> String.slice(0, 500),
+          args_preview: Arbor.LLM.ExternalTerm.inspect(args),
           success: match?({:ok, _}, result),
           duration_ms: duration_ms,
           result_preview:
@@ -592,7 +596,7 @@ defmodule Arbor.LLM.ToolLoop do
                 "ERROR [#{err.type}]: #{err.message}"
 
               _ ->
-                inspect(result) |> String.slice(0..200)
+                Arbor.LLM.ExternalTerm.inspect(result)
             end
         })
 
@@ -733,7 +737,7 @@ defmodule Arbor.LLM.ToolLoop do
 
   defp bounded_legacy_tool_result({:ok, :pending_approval, proposal_id}, name, aggregate) do
     content =
-      "Action #{name} requires approval. Proposal ID: #{inspect(proposal_id, limit: 10)}. " <>
+      "Action #{name} requires approval. Proposal ID: #{Arbor.LLM.ExternalTerm.inspect(proposal_id)}. " <>
         "Waiting for consensus decision."
 
     with {:ok, next} <- ToolResultBudget.account(content, aggregate) do
@@ -748,7 +752,7 @@ defmodule Arbor.LLM.ToolLoop do
   end
 
   defp bounded_legacy_tool_result({:error, reason}, _name, aggregate) do
-    content = "Error: #{inspect(reason, limit: 50, printable_limit: 30_000)}"
+    content = "Error: #{Arbor.LLM.ExternalTerm.inspect(reason)}"
 
     with {:ok, next} <- ToolResultBudget.account(content, aggregate) do
       {:ok, content, true, next}
@@ -876,7 +880,7 @@ defmodule Arbor.LLM.ToolLoop do
     end
   end
 
-  defp truncate(other, _), do: inspect(other)
+  defp truncate(other, _), do: Arbor.LLM.ExternalTerm.inspect(other)
 
   # ── Progressive Tool Discovery ───────────────────────────────────
 
@@ -975,7 +979,7 @@ defmodule Arbor.LLM.ToolLoop do
     else
       %{
         type: :unknown,
-        message: inspect(reason) |> String.slice(0..200),
+        message: Arbor.LLM.ExternalTerm.inspect(reason),
         status: nil,
         code: nil,
         retryable: false,

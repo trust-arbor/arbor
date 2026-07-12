@@ -10,7 +10,6 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   @max_router_response_bytes 262_144
   @max_router_prompt_bytes 1_048_576
   @max_http_diagnostic_bytes 2_048
-  @max_external_items 16
   @max_vector_dimensions 8_192
   # Keeps dot/norm accumulation finite at the maximum vector dimension.
   @max_vector_component_abs 1.0e100
@@ -735,11 +734,7 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
     rendered =
       body
       |> bounded_external_reason()
-      |> inspect(
-        limit: @max_external_items,
-        printable_limit: @max_http_diagnostic_bytes,
-        width: 80
-      )
+      |> Arbor.LLM.inspect_external_reason()
 
     {excerpt, _truncated?} = bounded_binary_excerpt(rendered)
     %{body_excerpt: excerpt, truncated: true}

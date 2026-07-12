@@ -4,5 +4,5 @@ defmodule Arbor.LLM.StreamError do
 
   @impl true
   def message(%__MODULE__{reason: reason}),
-    do: "owned stream failed: #{inspect(reason, limit: 20, printable_limit: 512)}"
+    do: "owned stream failed: #{Arbor.LLM.ExternalTerm.inspect(reason)}"
 end

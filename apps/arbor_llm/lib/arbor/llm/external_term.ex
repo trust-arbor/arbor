@@ -18,8 +18,9 @@ defmodule Arbor.LLM.ExternalTerm do
   end
 
   @spec exception(term()) :: term()
-  def exception(%{__struct__: module, message: message}) when is_binary(message),
-    do: {module, bounded_binary(message)}
+  def exception(%{__struct__: module, message: message})
+      when is_atom(module) and is_binary(message),
+      do: {module, bounded_binary(message)}
 
   def exception(%{__struct__: module}) when is_atom(module), do: module
   def exception(_exception), do: :exception
@@ -37,6 +38,10 @@ defmodule Arbor.LLM.ExternalTerm do
     value
     |> sanitize()
     |> Kernel.inspect(limit: 32, printable_limit: 1_024, width: 80)
+  rescue
+    _exception -> "external term"
+  catch
+    _kind, _reason -> "external term"
   end
 
   defp bound(_value, _depth, remaining) when remaining <= 0, do: {:truncated, 0}
@@ -67,8 +72,35 @@ defmodule Arbor.LLM.ExternalTerm do
   defp bound(value, _depth, remaining) when is_binary(value),
     do: {bounded_binary(value), remaining - 1}
 
-  defp bound(%{__struct__: module}, _depth, remaining) when is_atom(module),
-    do: {module, remaining - 1}
+  defp bound(%{__struct__: module} = value, depth, remaining) when is_atom(module) do
+    value
+    |> Map.delete(:__struct__)
+    |> then(
+      &bound_map(
+        :maps.iterator(&1),
+        depth - 1,
+        @max_items,
+        remaining - 1,
+        %{__external_struct__: Atom.to_string(module)}
+      )
+    )
+  end
+
+  defp bound(%{__struct__: module} = value, depth, remaining) do
+    {module, remaining} = bound(module, depth - 1, remaining - 1)
+
+    value
+    |> Map.delete(:__struct__)
+    |> then(
+      &bound_map(
+        :maps.iterator(&1),
+        depth - 1,
+        @max_items,
+        remaining,
+        %{__external_struct_value__: module}
+      )
+    )
+  end
 
   defp bound(value, depth, remaining) when is_tuple(value) do
     {items, remaining} =

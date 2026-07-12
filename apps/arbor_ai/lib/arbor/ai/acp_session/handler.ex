@@ -133,10 +133,23 @@ defmodule Arbor.AI.AcpSession.Handler do
 
   defp pick_option(options, kinds) when is_list(options) do
     Enum.find_value(kinds, fn kind ->
-      Enum.find_value(options, fn opt ->
-        if to_string(Map.get(opt, "kind", "")) == kind do
-          Map.get(opt, "optionId")
-        end
+      Enum.find_value(options, fn
+        opt when is_map(opt) ->
+          option_kind = Map.get(opt, "kind", "")
+
+          normalized_kind =
+            cond do
+              is_binary(option_kind) -> option_kind
+              is_atom(option_kind) -> Atom.to_string(option_kind)
+              true -> nil
+            end
+
+          if normalized_kind == kind do
+            Map.get(opt, "optionId")
+          end
+
+        _invalid ->
+          nil
       end)
     end)
   end
@@ -250,9 +263,10 @@ defmodule Arbor.AI.AcpSession.Handler do
     # FAIL CLOSED: a crash while checking file access must DENY, never grant.
     # (2026-06-09 Sentinel finding — the previous `:ok` auto-authorized a file
     # operation on any exception/exit from FileGuard.)
-    e -> {:error, {:authorization_check_failed, Exception.message(e)}}
+    e -> {:error, {:authorization_check_failed, Arbor.LLM.external_exception_message(e)}}
   catch
-    :exit, reason -> {:error, {:authorization_check_exited, reason}}
+    kind, reason ->
+      {:error, {:authorization_check_failed, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
   # Generic action authorization via Security.authorize/4.
@@ -302,7 +316,7 @@ defmodule Arbor.AI.AcpSession.Handler do
   rescue
     _ -> :authorized
   catch
-    :exit, _ -> :authorized
+    _kind, _reason -> :authorized
   end
 
   # Trust gate escalation. The capability layer's pending_approval path
@@ -327,10 +341,10 @@ defmodule Arbor.AI.AcpSession.Handler do
 
         {:error, reason} ->
           Logger.warning(
-            "[AcpSession.Handler] trust-gate escalation failed for #{resource_uri}: #{inspect(reason)} — failing closed"
+            "[AcpSession.Handler] trust-gate escalation failed for #{resource_uri}: #{bounded_reason(reason)} — failing closed"
           )
 
-          {:denied, "trust gate escalation failed: #{inspect(reason)}"}
+          {:denied, "trust gate escalation failed: #{bounded_reason(reason)}"}
       end
     else
       Logger.warning(
@@ -342,17 +356,17 @@ defmodule Arbor.AI.AcpSession.Handler do
   rescue
     e ->
       Logger.warning(
-        "[AcpSession.Handler] trust-gate escalation crashed for #{resource_uri}: #{Exception.message(e)}"
+        "[AcpSession.Handler] trust-gate escalation crashed for #{resource_uri}: #{Arbor.LLM.external_exception_message(e)}"
       )
 
       {:denied, "trust gate escalation crashed"}
   catch
-    :exit, reason ->
+    kind, reason ->
       Logger.warning(
-        "[AcpSession.Handler] trust-gate escalation exited for #{resource_uri}: #{inspect(reason)}"
+        "[AcpSession.Handler] trust-gate escalation #{kind} for #{resource_uri}: #{bounded_reason(reason)}"
       )
 
-      {:denied, "trust gate escalation exited"}
+      {:denied, "trust gate escalation failed"}
   end
 
   defp interaction_router_available? do
@@ -399,7 +413,7 @@ defmodule Arbor.AI.AcpSession.Handler do
           await_human_approval(agent_id, request_id, resource_uri, state)
 
         {:error, reason} ->
-          {:denied, inspect(reason)}
+          {:denied, bounded_reason(reason)}
       end
     else
       :authorized
@@ -408,9 +422,9 @@ defmodule Arbor.AI.AcpSession.Handler do
     # FAIL CLOSED: a crash while consulting security must DENY, never grant.
     # (2026-06-09 Sentinel finding — the previous `:authorized` auto-granted an
     # ACP action on any exception/exit from Security.authorize.)
-    e -> {:denied, "authorization check failed: #{Exception.message(e)}"}
+    e -> {:denied, "authorization check failed: #{Arbor.LLM.external_exception_message(e)}"}
   catch
-    :exit, reason -> {:denied, "authorization check exited: #{inspect(reason)}"}
+    kind, reason -> {:denied, "authorization check #{kind}: #{bounded_reason(reason)}"}
   end
 
   # Security modules + availability, overridable via config for tests.
@@ -479,10 +493,10 @@ defmodule Arbor.AI.AcpSession.Handler do
 
         {:ok, {:response, other}} ->
           Logger.warning(
-            "[AcpSession.Handler] unexpected operator response for #{resource_uri}: #{inspect(other)}"
+            "[AcpSession.Handler] unexpected operator response for #{resource_uri}: #{bounded_reason(other)}"
           )
 
-          {:denied, "unexpected operator response: #{inspect(other)}"}
+          {:denied, "unexpected operator response: #{bounded_reason(other)}"}
 
         {:ok, :timeout} ->
           Logger.info("[AcpSession.Handler] approval timed out for #{resource_uri}")
@@ -499,7 +513,7 @@ defmodule Arbor.AI.AcpSession.Handler do
 
         {:exit, reason} ->
           Logger.warning(
-            "[AcpSession.Handler] approval task crashed for #{resource_uri}: #{inspect(reason)}"
+            "[AcpSession.Handler] approval task crashed for #{resource_uri}: #{bounded_reason(reason)}"
           )
 
           {:denied, "approval task crashed"}
@@ -535,7 +549,7 @@ defmodule Arbor.AI.AcpSession.Handler do
   rescue
     _ -> :ok
   catch
-    :exit, _ -> :ok
+    _kind, _reason -> :ok
   end
 
   defp format_denial(:path_traversal), do: "access denied: path traversal attempt"
@@ -543,6 +557,11 @@ defmodule Arbor.AI.AcpSession.Handler do
   defp format_denial(:no_capability), do: "access denied: missing file capability"
   defp format_denial(:pattern_mismatch), do: "access denied: path not in allowed patterns"
   defp format_denial(:expired), do: "access denied: capability expired"
-  defp format_denial(reason) when is_binary(reason), do: "access denied: #{reason}"
-  defp format_denial(reason), do: "access denied: #{inspect(reason)}"
+
+  defp format_denial(reason) when is_binary(reason),
+    do: "access denied: #{bounded_reason(reason)}"
+
+  defp format_denial(reason), do: "access denied: #{bounded_reason(reason)}"
+
+  defp bounded_reason(reason), do: Arbor.LLM.inspect_external_reason(reason)
 end

@@ -29,8 +29,20 @@ defmodule Arbor.LLM.Plugs.Fixture do
 
   alias Arbor.LLM.Call
   alias Arbor.LLM.Boundary
+  alias Arbor.LLM.Deadline
   alias Arbor.LLM.Response
+  alias Arbor.LLM.ResponseBudget
   alias Arbor.LLM.StreamEvent
+
+  @maximum_fixture_bytes 16_777_216
+  @default_record_timeout_ms 30_000
+  @fixture_limits [
+    max_bytes: @maximum_fixture_bytes,
+    max_nodes: 100_000,
+    max_depth: 32,
+    max_map_keys: 10_000,
+    max_list_items: 100_000
+  ]
 
   # ── Paths ──────────────────────────────────────────────────────────
 
@@ -134,7 +146,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
   def load(%Call{operation: op} = call) do
     path = path_for(call)
 
-    case Arbor.LLM.read_bounded_regular_file(path, 16_777_216) do
+    case Arbor.LLM.read_bounded_regular_file(path, @maximum_fixture_bytes) do
       {:ok, body} -> load_body(call, op, body)
       {:error, {:file_stat_failed, :enoent}} -> :not_found
       {:error, reason} -> fixture_error({:fixture_read_failed, reason})
@@ -148,7 +160,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
   defp load_body(call, op, body) do
     with {:ok, decoded} <-
            Arbor.LLM.ResponseBudget.decode_json(body,
-             max_bytes: 16_777_216,
+             max_bytes: @maximum_fixture_bytes,
              max_nodes: 100_000,
              max_depth: 32,
              max_map_keys: 10_000,
@@ -171,58 +183,95 @@ defmodule Arbor.LLM.Plugs.Fixture do
   @doc """
   Persist `result` as a fixture for `call`.
   """
-  @spec save(Call.t(), term()) :: :ok
-  def save(%Call{operation: op} = call, result) do
+  @spec save(Call.t(), term()) :: :ok | {:error, term()}
+  def save(%Call{} = call, result) do
+    case record(call, result) do
+      {:ok, _replayable_result} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc false
+  @spec record(Call.t(), term()) :: {:ok, term()} | {:error, term()}
+  def record(%Call{} = call, result) do
+    opts = request_options(call)
+
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_options(opts, @default_record_timeout_ms),
+         {:ok, receipt} <- Deadline.receipt(opts) do
+      Deadline.run(
+        fn -> do_record(call, result, opts) end,
+        receipt,
+        {:fixture_record_deadline_exceeded, receipt.timeout_ms}
+      )
+    end
+  rescue
+    exception -> fixture_error({:fixture_save_exception, external_exception(exception)})
+  catch
+    kind, reason -> fixture_error({:fixture_save_failure, kind, external_reason(reason)})
+  end
+
+  defp do_record(%Call{operation: op} = call, result, opts) do
     path = path_for(call)
-    File.mkdir_p!(Path.dirname(path))
 
-    fixture = %{
-      "operation" => Atom.to_string(op),
-      "request_hash" => request_hash(call),
-      "request_summary" => summarize_request(op, call.request),
-      "recorded_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
-      "response" => serialize(op, result)
-    }
-
-    File.write!(path, Jason.encode!(fixture, pretty: true))
-    :ok
+    with {:ok, response, replayable_result} <- prepare_serialization(op, result, opts),
+         fixture = %{
+           "operation" => Atom.to_string(op),
+           "request_hash" => request_hash(call),
+           "request_summary" => summarize_request(op, call.request),
+           "recorded_at" => DateTime.utc_now() |> DateTime.to_iso8601(),
+           "response" => response
+         },
+         {:ok, fixture} <- json_safe(fixture),
+         {:ok, encoded} <- encode_fixture(fixture),
+         :ok <- Arbor.LLM.FileReceipt.publish(path, encoded, @maximum_fixture_bytes) do
+      {:ok, replayable_result}
+    else
+      {:error, reason} -> fixture_error({:fixture_save_failed, reason})
+    end
   end
 
   # ── Serialization (Arbor result shape → JSON-safe shape) ───────────
 
-  defp serialize(:complete, {:ok, %Response{} = resp}) do
-    %{"outcome" => "ok", "value" => serialize_response(resp)}
+  defp prepare_serialization(:complete, {:ok, %Response{} = resp} = result, _opts) do
+    {:ok, %{"outcome" => "ok", "value" => serialize_response(resp)}, result}
   end
 
-  defp serialize(:stream, {:ok, enum}) do
-    events = enum |> Enum.to_list() |> Enum.map(&serialize_stream_event/1)
-    %{"outcome" => "ok", "value" => %{"events" => events}}
+  defp prepare_serialization(:stream, {:ok, enum}, opts) do
+    with {:ok, events} <- collect_stream_events(enum, opts) do
+      serialized = Enum.map(events, &serialize_stream_event/1)
+      {:ok, %{"outcome" => "ok", "value" => %{"events" => serialized}}, {:ok, events}}
+    end
   end
 
-  defp serialize(op, {:ok, indexed_embeddings, usage})
+  defp prepare_serialization(op, {:ok, indexed_embeddings, usage} = result, _opts)
        when op in [:embed_cloud, :embed_local] and is_list(indexed_embeddings) do
-    %{
+    response = %{
       "outcome" => "ok",
       "value" => %{
         "association_version" => 1,
-        "indexed_embeddings" => Enum.map(indexed_embeddings, &stringify/1),
-        "usage" => serialize_usage(usage || %{})
+        "indexed_embeddings" => indexed_embeddings,
+        "usage" => usage || %{}
       }
     }
+
+    {:ok, response, result}
   end
 
-  defp serialize(_op, {:error, reason}),
-    do: %{"outcome" => "error", "reason" => Arbor.LLM.inspect_external_reason(reason)}
+  defp prepare_serialization(_op, {:error, reason} = result, _opts),
+    do:
+      {:ok, %{"outcome" => "error", "reason" => Arbor.LLM.inspect_external_reason(reason)},
+       result}
 
-  defp serialize(_op, other),
-    do: %{"outcome" => "raw", "raw" => Arbor.LLM.inspect_external_reason(other)}
+  defp prepare_serialization(_op, other, _opts),
+    do: {:ok, %{"outcome" => "raw", "raw" => Arbor.LLM.inspect_external_reason(other)}, other}
 
   defp serialize_response(%Response{} = r) do
     %{
       "text" => r.text,
-      "finish_reason" => Atom.to_string(r.finish_reason),
-      "content_parts" => Enum.map(r.content_parts, &serialize_map/1),
-      "usage" => serialize_usage(r.usage),
+      "finish_reason" => r.finish_reason,
+      "content_parts" => r.content_parts,
+      "usage" => r.usage,
       "warnings" => r.warnings
       # NOTE: `:raw` deliberately omitted — it holds the upstream
       # ReqLLM.Response struct, which round-trips poorly to JSON.
@@ -232,25 +281,117 @@ defmodule Arbor.LLM.Plugs.Fixture do
 
   defp serialize_stream_event(%StreamEvent{type: type, data: data}) do
     %{
-      "type" => Atom.to_string(type),
-      "data" => serialize_map(data)
+      "type" => type,
+      "data" => data
     }
   end
 
-  defp serialize_stream_event(other), do: stringify(other)
+  defp serialize_stream_event(other), do: Arbor.LLM.sanitize_external_reason(other)
 
-  defp serialize_map(map) when is_map(map) do
-    Map.new(map, fn {k, v} -> {to_string(k), stringify(v)} end)
+  defp collect_stream_events(enum, opts) do
+    with true <- not is_nil(Enumerable.impl_for(enum)) or {:error, :enumerable_stream_required},
+         {:ok, tracker} <- Boundary.stream_tracker(opts),
+         {:ok, maximum} <- Boundary.stream_event_limit(opts) do
+      result =
+        Enum.reduce_while(enum, {[], 0}, fn event, {events, count} ->
+          next = count + 1
+
+          cond do
+            next > maximum ->
+              {:halt, {:error, {:stream_limit_exceeded, :events, maximum}}}
+
+            true ->
+              case Boundary.track_stream_event(tracker, event, opts) do
+                {:ok, normalized} -> {:cont, {[normalized | events], next}}
+                {:error, reason} -> {:halt, {:error, reason}}
+              end
+          end
+        end)
+
+      case result do
+        {:error, _reason} = error -> error
+        {events, _count} -> {:ok, Enum.reverse(events)}
+      end
+    end
+  rescue
+    exception -> {:error, {:stream_collection_failed, external_exception(exception)}}
+  catch
+    kind, reason -> {:error, {:stream_collection_failure, kind, external_reason(reason)}}
   end
 
-  defp serialize_usage(usage) when is_map(usage), do: serialize_map(usage)
-  defp serialize_usage(other), do: stringify(other)
+  defp json_safe(value) do
+    with :ok <- ResponseBudget.validate(value, @fixture_limits) do
+      json_value(value)
+    end
+  end
 
-  defp stringify(v) when is_binary(v) or is_number(v) or is_boolean(v) or is_nil(v), do: v
-  defp stringify(v) when is_atom(v), do: Atom.to_string(v)
-  defp stringify(v) when is_list(v), do: Enum.map(v, &stringify/1)
-  defp stringify(v) when is_map(v) and not is_struct(v), do: serialize_map(v)
-  defp stringify(v), do: inspect(v)
+  defp json_value(value)
+       when is_binary(value) or is_integer(value) or is_float(value) or is_boolean(value) or
+              is_nil(value),
+       do: {:ok, value}
+
+  defp json_value(value) when is_atom(value), do: {:ok, Atom.to_string(value)}
+
+  defp json_value(value) when is_tuple(value),
+    do: value |> Tuple.to_list() |> json_list([])
+
+  defp json_value(value) when is_list(value), do: json_list(value, [])
+
+  defp json_value(value) when is_map(value),
+    do: json_map(:maps.iterator(value), %{})
+
+  defp json_value(_value), do: {:error, :json_compatible_fixture_required}
+
+  defp json_list([], acc), do: {:ok, Enum.reverse(acc)}
+
+  defp json_list([head | tail], acc) do
+    with {:ok, head} <- json_value(head) do
+      json_list(tail, [head | acc])
+    end
+  end
+
+  defp json_list(_improper, _acc), do: {:error, :proper_fixture_list_required}
+
+  defp json_map(iterator, acc) do
+    case :maps.next(iterator) do
+      :none ->
+        {:ok, acc}
+
+      {key, value, next} ->
+        with {:ok, key} <- json_key(key),
+             true <- not Map.has_key?(acc, key) or {:error, {:duplicate_json_key, key}},
+             {:ok, value} <- json_value(value) do
+          json_map(next, Map.put(acc, key, value))
+        end
+    end
+  end
+
+  defp json_key(:__struct__), do: {:ok, "__external_struct__"}
+  defp json_key(key) when is_atom(key), do: {:ok, Atom.to_string(key)}
+  defp json_key(key) when is_binary(key), do: {:ok, key}
+  defp json_key(_key), do: {:error, :string_or_atom_fixture_key_required}
+
+  defp encode_fixture(fixture) do
+    case Jason.encode(fixture, pretty: true) do
+      {:ok, encoded} when byte_size(encoded) <= @maximum_fixture_bytes -> {:ok, encoded}
+      {:ok, _oversized} -> {:error, {:fixture_bytes_exceeded, @maximum_fixture_bytes}}
+      {:error, _reason} -> {:error, :fixture_encoding_failed}
+    end
+  rescue
+    exception -> {:error, {:fixture_encoding_exception, external_exception(exception)}}
+  catch
+    kind, reason -> {:error, {:fixture_encoding_failure, kind, external_reason(reason)}}
+  end
+
+  defp request_options(%Call{request: request})
+       when is_tuple(request) and tuple_size(request) == 3 do
+    case elem(request, 2) do
+      opts when is_list(opts) -> opts
+      _other -> []
+    end
+  end
+
+  defp request_options(_call), do: []
 
   # ── Deserialization (JSON shape → Arbor result shape) ──────────────
 
@@ -424,42 +565,32 @@ defmodule Arbor.LLM.Plugs.Fixture do
 
   # ── Request summaries (informational only) ─────────────────────────
 
-  defp summarize_request(:complete, {model_spec, messages, opts}) do
+  defp summarize_request(op, {model_spec, inputs, opts}) do
     %{
-      "model" => describe_model_spec(model_spec),
-      "messages" => Enum.map(messages, &summarize_message/1),
-      "opts" => summarize_opts(opts)
+      "operation" => Atom.to_string(op),
+      "model" => Arbor.LLM.inspect_external_reason(model_spec),
+      "input_count" => bounded_list_count(inputs, 0),
+      "option_keys" => bounded_option_keys(opts, [], 0)
     }
   end
 
-  defp summarize_request(:stream, req), do: summarize_request(:complete, req)
-
-  defp summarize_request(op, {model_spec, texts, opts}) when op in [:embed_cloud, :embed_local] do
+  defp summarize_request(op, request) do
     %{
-      "model" => describe_model_spec(model_spec),
-      "texts" => texts,
-      "opts" => summarize_opts(opts)
+      "operation" => Atom.to_string(op),
+      "request" => Arbor.LLM.inspect_external_reason(request)
     }
   end
 
-  defp describe_model_spec(%LLMDB.Model{} = m), do: "#{m.provider}:#{m.id}"
-  defp describe_model_spec(spec) when is_binary(spec), do: spec
+  defp bounded_list_count([], count), do: count
+  defp bounded_list_count(_list, count) when count >= 2_048, do: "2048+"
+  defp bounded_list_count([_head | tail], count), do: bounded_list_count(tail, count + 1)
+  defp bounded_list_count(_improper, _count), do: "invalid"
 
-  defp summarize_message(%ReqLLM.Message{role: role, content: content}) do
-    %{"role" => Atom.to_string(role), "content" => stringify(content)}
-  end
+  defp bounded_option_keys([], acc, _count), do: Enum.reverse(acc)
+  defp bounded_option_keys(_opts, acc, count) when count >= 128, do: Enum.reverse(acc)
 
-  defp summarize_message(%{role: role, content: content}) do
-    %{"role" => to_string(role), "content" => stringify(content)}
-  end
+  defp bounded_option_keys([{key, _value} | rest], acc, count) when is_atom(key),
+    do: bounded_option_keys(rest, [Atom.to_string(key) | acc], count + 1)
 
-  defp summarize_message(other), do: stringify(other)
-
-  defp summarize_opts(opts) when is_list(opts) do
-    opts
-    |> scrub_opts()
-    |> Map.new(fn {k, v} -> {Atom.to_string(k), stringify(v)} end)
-  end
-
-  defp summarize_opts(opts), do: stringify(opts)
+  defp bounded_option_keys(_invalid, acc, _count), do: Enum.reverse(acc)
 end

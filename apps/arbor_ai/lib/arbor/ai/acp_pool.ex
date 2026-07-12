@@ -118,25 +118,32 @@ defmodule Arbor.AI.AcpPool do
   """
   @spec checkout(atom(), keyword()) :: {:ok, pid()} | {:error, term()}
   def checkout(provider, opts \\ []) do
-    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, 30_000) do
-      GenServer.call(__MODULE__, {:checkout, provider, opts}, timeout)
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, 30_000),
+         {:ok, opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      safe_pool_call({:checkout, provider, opts}, remaining)
     end
   end
 
   @doc """
   Return a session to the pool for reuse.
   """
-  @spec checkin(pid()) :: :ok | {:error, :not_found}
-  def checkin(session_pid) do
-    GenServer.call(__MODULE__, {:checkin, session_pid})
+  @spec checkin(pid(), keyword()) :: :ok | {:error, term()}
+  def checkin(session_pid, opts \\ []) do
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, 5_000),
+         {:ok, _opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      safe_pool_call({:checkin, session_pid}, remaining)
+    end
   end
 
   @doc """
   Close and remove a specific session from the pool.
   """
-  @spec close_session(pid()) :: :ok
-  def close_session(session_pid) do
-    GenServer.call(__MODULE__, {:close_session, session_pid})
+  @spec close_session(pid(), keyword()) :: :ok | {:error, term()}
+  def close_session(session_pid, opts \\ []) do
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, 5_000),
+         {:ok, _opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      safe_pool_call({:close_session, session_pid}, remaining)
+    end
   end
 
   @doc """
@@ -210,7 +217,7 @@ defmodule Arbor.AI.AcpPool do
   def cluster_checkout(provider, opts \\ []) do
     started_at = System.monotonic_time(:millisecond)
 
-    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, 30_000) do
+    with {:ok, opts, timeout} <- Arbor.AI.Timeout.start_deadline(opts, 30_000) do
       do_cluster_checkout(provider, opts, timeout, started_at)
     end
   end
@@ -256,24 +263,31 @@ defmodule Arbor.AI.AcpPool do
   """
   @spec cluster_send_message(pid(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def cluster_send_message(session_pid, content, opts \\ []) do
-    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, :infinity) do
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, :infinity),
+         {:ok, operation_opts, timeout} <- Arbor.AI.Timeout.remaining(opts) do
       if node(session_pid) == Node.self() do
-        AcpSession.send_message(session_pid, content, opts)
+        AcpSession.send_message(session_pid, content, operation_opts)
       else
-        rpc_timeout = timeout
+        remote_opts = remote_deadline_opts(operation_opts)
 
-        case :rpc.call(
-               node(session_pid),
-               AcpSession,
-               :send_message,
-               [session_pid, content, opts],
-               rpc_timeout
-             ) do
+        result =
+          :rpc.call(
+            node(session_pid),
+            AcpSession,
+            :send_message,
+            [session_pid, content, remote_opts],
+            timeout
+          )
+
+        case result do
           {:badrpc, reason} ->
             {:error, {:remote_call_failed, Arbor.LLM.sanitize_external_reason(reason)}}
 
           result ->
-            result
+            case Arbor.AI.Timeout.ensure_active(opts) do
+              :ok -> result
+              {:error, reason} -> {:error, reason}
+            end
         end
       end
     end
@@ -318,54 +332,9 @@ defmodule Arbor.AI.AcpPool do
 
   @impl true
   def handle_call({:checkout, provider, opts}, {caller_pid, _tag}, state) do
-    profile = SessionProfile.from_opts(provider, opts)
-    tool_modules = Keyword.get(opts, :tool_modules, [])
-    agent_id = Keyword.get(opts, :agent_id)
-    workspace = Keyword.get(opts, :workspace)
-
-    case find_by_affinity(state, profile) do
-      {:ok, entry, state} ->
-        # Hard affinity match — reattach tools if needed
-        state =
-          reattach_tools_and_checkout(state, entry, caller_pid, tool_modules, agent_id, workspace)
-
-        {:reply, {:ok, entry.pid}, state}
-
-      :no_affinity ->
-        case find_compatible_session(state, profile) do
-          {:ok, entry, state} ->
-            # Profile-compatible reuse — reattach tools if needed
-            state =
-              reattach_tools_and_checkout(
-                state,
-                entry,
-                caller_pid,
-                tool_modules,
-                agent_id,
-                workspace
-              )
-
-            {:reply, {:ok, entry.pid}, state}
-
-          {:none, state} ->
-            # Mint fresh session
-            max = max_for_provider(state.config, provider)
-            current = count_for_provider(state, provider)
-
-            if current < max do
-              case spawn_session(provider, opts) do
-                {:ok, pid, tool_server} ->
-                  {state, _ref} = register_session(state, pid, profile, caller_pid, tool_server)
-                  Logger.debug("AcpPool: minted #{profile.name} (#{SessionProfile.urn(profile)})")
-                  {:reply, {:ok, pid}, state}
-
-                {:error, reason} ->
-                  {:reply, {:error, {:spawn_failed, reason}}, state}
-              end
-            else
-              {:reply, {:error, :pool_exhausted}, state}
-            end
-        end
+    case Arbor.AI.Timeout.ensure_active(opts) do
+      :ok -> do_checkout(provider, opts, caller_pid, state)
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -428,6 +397,119 @@ defmodule Arbor.AI.AcpPool do
       end)
 
     {:reply, session_list, state}
+  end
+
+  defp do_checkout(provider, opts, caller_pid, state) do
+    profile = SessionProfile.from_opts(provider, opts)
+    tool_modules = Keyword.get(opts, :tool_modules, [])
+    agent_id = Keyword.get(opts, :agent_id)
+    workspace = Keyword.get(opts, :workspace)
+
+    case find_by_affinity(state, profile) do
+      {:ok, entry, state} ->
+        state =
+          reattach_tools_and_checkout(state, entry, caller_pid, tool_modules, agent_id, workspace)
+
+        finalize_existing_checkout(state, entry, opts)
+
+      :no_affinity ->
+        case find_compatible_session(state, profile) do
+          {:ok, entry, state} ->
+            state =
+              reattach_tools_and_checkout(
+                state,
+                entry,
+                caller_pid,
+                tool_modules,
+                agent_id,
+                workspace
+              )
+
+            finalize_existing_checkout(state, entry, opts)
+
+          {:none, state} ->
+            max = max_for_provider(state.config, provider)
+            current = count_for_provider(state, provider)
+
+            if current < max do
+              case spawn_session(provider, opts) do
+                {:ok, pid, tool_server} ->
+                  case Arbor.AI.Timeout.ensure_active(opts) do
+                    :ok ->
+                      {state, _ref} =
+                        register_session(state, pid, profile, caller_pid, tool_server)
+
+                      Logger.debug(
+                        "AcpPool: minted #{profile.name} (#{SessionProfile.urn(profile)})"
+                      )
+
+                      {:reply, {:ok, pid}, state}
+
+                    {:error, reason} ->
+                      cleanup_expired_spawn(pid, tool_server)
+                      {:reply, {:error, reason}, state}
+                  end
+
+                {:error, reason} ->
+                  {:reply, {:error, {:spawn_failed, reason}}, state}
+              end
+            else
+              {:reply, {:error, :pool_exhausted}, state}
+            end
+        end
+    end
+  end
+
+  defp finalize_existing_checkout(state, entry, opts) do
+    case Arbor.AI.Timeout.ensure_active(opts) do
+      :ok -> {:reply, {:ok, entry.pid}, state}
+      {:error, reason} -> {:reply, {:error, reason}, rollback_checkout(state, entry.ref)}
+    end
+  end
+
+  defp rollback_checkout(state, ref) do
+    {caller_refs, monitors} =
+      Enum.reduce(state.monitors, {[], state.monitors}, fn
+        {monitor, {:caller, ^ref}}, {refs, acc} ->
+          {[monitor | refs], Map.delete(acc, monitor)}
+
+        _entry, acc ->
+          acc
+      end)
+
+    Enum.each(caller_refs, &Process.demonitor(&1, [:flush]))
+
+    sessions =
+      Map.update!(state.sessions, ref, fn entry ->
+        stop_tool_server_async(entry.tool_server)
+
+        %{
+          entry
+          | status: :idle,
+            checked_out_by: nil,
+            tool_server: nil,
+            taint: :tainted,
+            last_active: System.monotonic_time(:millisecond)
+        }
+      end)
+
+    %{state | sessions: sessions, monitors: monitors}
+  end
+
+  defp cleanup_expired_spawn(pid, tool_server) do
+    Task.start(fn ->
+      safe_close(pid)
+      if tool_server, do: ToolServer.stop(tool_server.ref)
+    end)
+
+    :ok
+  end
+
+  defp stop_tool_server_async(nil), do: :ok
+
+  defp stop_tool_server_async(tool_server) do
+    Task.start(fn -> ToolServer.stop(tool_server.ref) end)
+    :ok
   end
 
   @impl true
@@ -628,7 +710,10 @@ defmodule Arbor.AI.AcpPool do
         {info, ToolServer.mcp_servers_entry(port)}
 
       {:error, reason} ->
-        Logger.warning("AcpPool: failed to start ToolServer: #{inspect(reason)}")
+        Logger.warning(
+          "AcpPool: failed to start ToolServer: #{Arbor.LLM.inspect_external_reason(reason)}"
+        )
+
         {nil, nil}
     end
   end
@@ -959,24 +1044,33 @@ defmodule Arbor.AI.AcpPool do
   end
 
   defp remaining_timeout_options(opts, :infinity, _started_at),
-    do: {:ok, Keyword.put(opts, :timeout, :infinity)}
+    do: remaining_deadline_options(opts)
 
-  defp remaining_timeout_options(opts, timeout, started_at) do
-    elapsed = max(System.monotonic_time(:millisecond) - started_at, 0)
+  defp remaining_timeout_options(opts, _timeout, _started_at),
+    do: remaining_deadline_options(opts)
 
-    case timeout - elapsed do
-      remaining when remaining > 0 -> {:ok, Keyword.put(opts, :timeout, remaining)}
-      _expired -> {:error, :timeout}
+  defp remaining_deadline_options(opts) do
+    case Arbor.AI.Timeout.remaining(opts) do
+      {:ok, remaining_opts, _remaining} -> {:ok, remaining_opts}
+      {:error, _reason} = error -> error
     end
   end
 
   defp remote_checkout(target_node, provider, opts) do
     timeout = Keyword.fetch!(opts, :timeout)
     rpc_timeout = if timeout == :infinity, do: 10_000, else: min(timeout, 10_000)
+    remote_opts = remote_deadline_opts(opts)
 
-    case :rpc.call(target_node, __MODULE__, :checkout, [provider, opts], rpc_timeout) do
+    case :rpc.call(target_node, __MODULE__, :checkout, [provider, remote_opts], rpc_timeout) do
       {:ok, pid} ->
-        {:ok, pid, target_node}
+        case Arbor.AI.Timeout.ensure_active(opts) do
+          :ok ->
+            {:ok, pid, target_node}
+
+          {:error, reason} ->
+            :rpc.cast(target_node, __MODULE__, :checkin, [pid])
+            {:error, reason}
+        end
 
       {:badrpc, reason} ->
         {:error, {:remote_call_failed, target_node, Arbor.LLM.sanitize_external_reason(reason)}}
@@ -984,5 +1078,17 @@ defmodule Arbor.AI.AcpPool do
       error ->
         error
     end
+  end
+
+  # Monotonic timestamps are VM-local. Preserve the remaining duration across
+  # an RPC boundary and let the destination VM mint its own absolute deadline.
+  defp remote_deadline_opts(opts), do: Keyword.delete(opts, :deadline_ms)
+
+  defp safe_pool_call(message, timeout) do
+    GenServer.call(__MODULE__, message, timeout)
+  catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
+    :exit, {:noproc, _call} -> {:error, :pool_unavailable}
+    :exit, reason -> {:error, {:pool_call_failed, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 end

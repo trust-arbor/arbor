@@ -52,6 +52,7 @@ defmodule Arbor.AI.AcpSession do
   @max_task_control_reason_bytes 200
   @max_task_control_history 256
   @max_queued_task_controls 64
+  @callback_cleanup_timeout_ms 250
   @task_control_stream_id "agent:task_steering"
   @terminal_task_control_statuses [
     :delivered,
@@ -123,8 +124,9 @@ defmodule Arbor.AI.AcpSession do
   """
   @spec create_session(GenServer.server(), keyword()) :: {:ok, map()} | {:error, term()}
   def create_session(session, opts \\ []) do
-    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, :infinity) do
-      GenServer.call(session, {:create_session, opts}, call_timeout(timeout))
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, :infinity),
+         {:ok, opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      GenServer.call(session, {:create_session, opts}, call_timeout(remaining))
     end
   end
 
@@ -141,8 +143,9 @@ defmodule Arbor.AI.AcpSession do
   """
   @spec send_message(GenServer.server(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def send_message(session, content, opts \\ []) do
-    with {:ok, opts} <- normalize_prompt_timeouts(opts) do
-      GenServer.call(session, {:send_message, content, opts}, :infinity)
+    with {:ok, opts} <- normalize_prompt_timeouts(opts),
+         {:ok, opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      safe_prompt_call(session, content, opts, remaining)
     end
   end
 
@@ -162,8 +165,9 @@ defmodule Arbor.AI.AcpSession do
   @spec deliver_task_control(GenServer.server(), map(), keyword()) ::
           {:ok, :queued | :delivered | :deferred, :same_session_follow_up} | {:error, term()}
   def deliver_task_control(session, control, opts \\ []) when is_map(control) and is_list(opts) do
-    with {:ok, _opts, timeout} <-
-           Arbor.AI.Timeout.normalize(opts, @task_control_timeout_ms) do
+    with {:ok, opts, _timeout} <-
+           Arbor.AI.Timeout.start_deadline(opts, @task_control_timeout_ms),
+         {:ok, _opts, timeout} <- Arbor.AI.Timeout.remaining(opts) do
       ref = make_ref()
       send(session, {:acp_task_control, ref, self(), control})
 
@@ -196,8 +200,9 @@ defmodule Arbor.AI.AcpSession do
   @spec resume_session(GenServer.server(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def resume_session(session, session_id, opts \\ []) do
-    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, :infinity) do
-      GenServer.call(session, {:resume_session, session_id, opts}, call_timeout(timeout))
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, :infinity),
+         {:ok, opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      GenServer.call(session, {:resume_session, session_id, opts}, call_timeout(remaining))
     end
   end
 
@@ -280,14 +285,19 @@ defmodule Arbor.AI.AcpSession do
             {:error, reason} ->
               demonitor_owner(owner_monitor)
               cleanup_workspace(workspace_result)
-              Logger.error("Failed to start ACP client for #{provider}: #{inspect(reason)}")
+
+              Logger.error(
+                "Failed to start ACP client for #{provider}: " <>
+                  Arbor.LLM.inspect_external_reason(reason)
+              )
+
               {:stop, reason}
           end
 
         {:error, reason} ->
           demonitor_owner(owner_monitor)
           cleanup_workspace(workspace_result)
-          Logger.error("Unknown ACP provider: #{inspect(provider)}")
+          Logger.error("Unknown ACP provider: #{Arbor.LLM.inspect_external_reason(provider)}")
           {:stop, reason}
       end
     else
@@ -310,39 +320,11 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_call({:create_session, opts}, _from, state) do
-    cwd = resolve_cwd(opts, state.opts)
-
-    # Inject mcp_servers from pool-provided ToolServer (if any)
-    opts =
-      case state.mcp_servers do
-        servers when is_list(servers) and servers != [] ->
-          Keyword.put_new(opts, :mcp_servers, servers)
-
-        _ ->
-          opts
-      end
-
-    case new_acp_session(state.client, cwd, opts) do
-      {:ok, session_info} ->
-        session_id = Map.get(session_info, "sessionId") || Map.get(session_info, :session_id)
-
-        new_state = %{
-          state
-          | session_id: session_id,
-            last_session_id: session_id,
-            status: :ready
-        }
-
-        {:reply, {:ok, session_info}, new_state}
-
-      {:error, reason} = error ->
-        Logger.warning(
-          "AcpSession create_session failed: " <> Arbor.LLM.inspect_external_reason(reason)
-        )
-
-        new_state = %{state | status: :error}
-        emit_signal(:acp_session_error, new_state, %{error: reason, phase: :create})
-        {:reply, error, new_state}
+    with :ok <- Arbor.AI.Timeout.ensure_active(opts) do
+      do_create_session(opts, state)
+    else
+      {:error, :timeout} -> {:reply, {:error, :timeout}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -351,44 +333,11 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_call({:resume_session, session_id, opts}, _from, state) do
-    cwd = resolve_cwd(opts, state.opts)
-
-    result =
-      try do
-        # credo:disable-for-next-line Credo.Check.Refactor.Apply
-        apply(acp_client_module(), :load_session, [state.client, session_id, cwd, opts])
-      rescue
-        exception ->
-          {:error, {:resume_failed, Arbor.LLM.external_exception_message(exception)}}
-      catch
-        :exit, reason ->
-          {:error, {:resume_exit, Arbor.LLM.sanitize_external_reason(reason)}}
-
-        kind, reason ->
-          {:error, {:resume_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
-      end
-
-    case result do
-      {:ok, session_info} ->
-        new_state = %{
-          state
-          | session_id: session_id,
-            last_session_id: session_id,
-            status: :ready
-        }
-
-        emit_signal(:acp_session_started, new_state, %{resumed: true})
-        {:reply, {:ok, session_info}, new_state}
-
-      {:error, reason} ->
-        reason = Arbor.LLM.sanitize_external_reason(reason)
-
-        Logger.warning(
-          "AcpSession resume_session failed: " <> Arbor.LLM.inspect_external_reason(reason)
-        )
-
-        emit_signal(:acp_session_error, state, %{error: reason, phase: :resume})
-        {:reply, {:error, reason}, state}
+    with :ok <- Arbor.AI.Timeout.ensure_active(opts) do
+      do_resume_session(session_id, opts, state)
+    else
+      {:error, :timeout} -> {:reply, {:error, :timeout}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
@@ -398,8 +347,12 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_call({:send_message, content, opts}, from, state) do
-    case ensure_session(state, opts) do
-      {:ok, state} -> do_send_message(content, opts, from, state)
+    with :ok <- Arbor.AI.Timeout.ensure_active(opts),
+         {:ok, state} <- ensure_session(state, opts),
+         :ok <- Arbor.AI.Timeout.ensure_active(opts) do
+      do_send_message(content, opts, from, state)
+    else
+      {:error, :timeout} -> {:reply, {:error, :timeout}, state}
       {:error, reason} -> {:reply, {:error, reason}, %{state | status: :error}}
     end
   end
@@ -428,6 +381,96 @@ defmodule Arbor.AI.AcpSession do
     {:stop, :normal, :ok, %{state | status: :closed}}
   end
 
+  defp do_create_session(opts, state) do
+    cwd = resolve_cwd(opts, state.opts)
+
+    opts =
+      case state.mcp_servers do
+        servers when is_list(servers) and servers != [] ->
+          Keyword.put_new(opts, :mcp_servers, servers)
+
+        _ ->
+          opts
+      end
+
+    case new_acp_session(state.client, cwd, opts) do
+      {:ok, session_info} ->
+        case Arbor.AI.Timeout.ensure_active(opts) do
+          :ok ->
+            session_id = Map.get(session_info, "sessionId") || Map.get(session_info, :session_id)
+
+            new_state = %{
+              state
+              | session_id: session_id,
+                last_session_id: session_id,
+                status: :ready
+            }
+
+            {:reply, {:ok, session_info}, new_state}
+
+          {:error, reason} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      {:error, reason} = error ->
+        Logger.warning(
+          "AcpSession create_session failed: " <> Arbor.LLM.inspect_external_reason(reason)
+        )
+
+        new_state = %{state | status: :error}
+        emit_signal(:acp_session_error, new_state, %{error: reason, phase: :create})
+        {:reply, error, new_state}
+    end
+  end
+
+  defp do_resume_session(session_id, opts, state) do
+    cwd = resolve_cwd(opts, state.opts)
+
+    result =
+      try do
+        # credo:disable-for-next-line Credo.Check.Refactor.Apply
+        apply(acp_client_module(), :load_session, [state.client, session_id, cwd, opts])
+      rescue
+        exception ->
+          {:error, {:resume_failed, Arbor.LLM.external_exception_message(exception)}}
+      catch
+        kind, reason ->
+          {:error, {:resume_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
+      end
+
+    case result do
+      {:ok, session_info} ->
+        case {validate_acp_result(session_info, :session), Arbor.AI.Timeout.ensure_active(opts)} do
+          {:ok, :ok} ->
+            new_state = %{
+              state
+              | session_id: session_id,
+                last_session_id: session_id,
+                status: :ready
+            }
+
+            emit_signal(:acp_session_started, new_state, %{resumed: true})
+            {:reply, {:ok, session_info}, new_state}
+
+          {_validation, {:error, reason}} ->
+            {:reply, {:error, reason}, state}
+
+          {{:error, reason}, _deadline} ->
+            {:reply, {:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        reason = Arbor.LLM.sanitize_external_reason(reason)
+
+        Logger.warning(
+          "AcpSession resume_session failed: " <> Arbor.LLM.inspect_external_reason(reason)
+        )
+
+        emit_signal(:acp_session_error, state, %{error: reason, phase: :resume})
+        {:reply, {:error, reason}, state}
+    end
+  end
+
   @impl true
   def handle_info({:acp_session_update, session_id, update}, state) do
     {:noreply, process_session_update(state, session_id, update)}
@@ -444,7 +487,7 @@ defmodule Arbor.AI.AcpSession do
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{owner_monitor: ref} = state) do
     Logger.info(
-      "AcpSession owner gone (#{inspect(reason)}); aborting session #{inspect(state.session_id)}"
+      "AcpSession owner gone (#{Arbor.LLM.inspect_external_reason(reason)}); aborting session #{Arbor.LLM.inspect_external_reason(state.session_id)}"
     )
 
     state = settle_pending_task_controls(state, :cancelled, :owner_cancelled)
@@ -454,8 +497,13 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_info({:DOWN, _ref, :process, pid, reason}, %{client: pid} = state) do
-    Logger.warning("ACP client process died: #{inspect(reason)}")
-    emit_signal(:acp_session_error, state, %{error: :client_down, reason: reason})
+    bounded_reason = Arbor.LLM.sanitize_external_reason(reason)
+
+    Logger.warning(
+      "ACP client process died: #{Arbor.LLM.inspect_external_reason(bounded_reason)}"
+    )
+
+    emit_signal(:acp_session_error, state, %{error: :client_down, reason: bounded_reason})
 
     # Attempt auto-reconnect if we have a session to resume (max 1 try)
     case maybe_reconnect(state) do
@@ -481,7 +529,7 @@ defmodule Arbor.AI.AcpSession do
   end
 
   def handle_info(msg, state) do
-    Logger.debug("AcpSession unexpected message: #{inspect(msg)}")
+    Logger.debug("AcpSession unexpected message: #{Arbor.LLM.inspect_external_reason(msg)}")
     {:noreply, state}
   end
 
@@ -540,7 +588,7 @@ defmodule Arbor.AI.AcpSession do
   rescue
     _ -> :ok
   catch
-    :exit, _ -> :ok
+    _kind, _reason -> :ok
   end
 
   defp emit_signal(event, state, metadata \\ %{}) do
@@ -558,7 +606,7 @@ defmodule Arbor.AI.AcpSession do
   rescue
     _ -> :ok
   catch
-    :exit, _ -> :ok
+    _kind, _reason -> :ok
   end
 
   # -- Session Updates --
@@ -577,7 +625,17 @@ defmodule Arbor.AI.AcpSession do
       try do
         state.stream_callback.(update)
       rescue
-        exception -> Logger.warning("AcpSession stream_callback error: #{inspect(exception)}")
+        exception ->
+          Logger.warning(
+            "AcpSession stream_callback error: " <>
+              Arbor.LLM.inspect_external_reason(exception)
+          )
+      catch
+        kind, reason ->
+          Logger.warning(
+            "AcpSession stream_callback #{kind}: " <>
+              Arbor.LLM.inspect_external_reason(reason)
+          )
       end
     end
 
@@ -585,7 +643,11 @@ defmodule Arbor.AI.AcpSession do
     # via session/update instead of the prompt result).
     state = accumulate_text(update, state)
 
-    Logger.debug("ACP session #{session_id} update: #{inspect(update_type(update))}")
+    Logger.debug(
+      "ACP session #{Arbor.LLM.inspect_external_reason(session_id)} update: " <>
+        Arbor.LLM.inspect_external_reason(update_type(update))
+    )
+
     state
   end
 
@@ -688,7 +750,7 @@ defmodule Arbor.AI.AcpSession do
       rescue
         _ -> :ok
       catch
-        :exit, _ -> :ok
+        _kind, _reason -> :ok
       end
     end
   end
@@ -757,18 +819,36 @@ defmodule Arbor.AI.AcpSession do
   rescue
     _ -> :error
   catch
-    :exit, _ -> :error
+    _kind, _reason -> :error
   end
 
   defp summarize_result(result) when is_map(result) do
-    text = Map.get(result, "text") || Map.get(result, :text, "")
-    %{text_length: String.length(to_string(text))}
+    text =
+      Enum.find_value(["text", :text], "", fn key ->
+        case Map.fetch(result, key) do
+          {:ok, value} when is_binary(value) -> value
+          _missing_or_invalid -> nil
+        end
+      end)
+
+    %{text_length: String.length(text)}
   end
 
   defp summarize_result(_), do: %{}
 
   defp call_timeout(t) when is_integer(t) and t > 0, do: t
   defp call_timeout(:infinity), do: :infinity
+
+  defp safe_prompt_call(session, content, opts, timeout) do
+    GenServer.call(session, {:send_message, content, opts}, call_timeout(timeout))
+  rescue
+    exception ->
+      {:error, {:session_call_failed, Arbor.LLM.external_exception_message(exception)}}
+  catch
+    :exit, {:timeout, _call} -> {:error, :timeout}
+    :exit, {:noproc, _call} -> {:error, :session_unavailable}
+    :exit, reason -> {:error, {:session_call_exit, Arbor.LLM.sanitize_external_reason(reason)}}
+  end
 
   # -- Workspace Lifecycle --
 
@@ -808,27 +888,36 @@ defmodule Arbor.AI.AcpSession do
   # derived from the workspace (as in init/1), not state.opts[:cwd], which is
   # absent in the pool flow.
   defp do_send_message(content, opts, from, state) do
-    state = %{state | status: :busy, accumulated_text: ""}
-    hard_timeout = hard_timeout(opts)
-    inactivity_timeout = inactivity_timeout(opts)
+    with {:ok, opts, hard_timeout} <- Arbor.AI.Timeout.remaining(opts),
+         {:ok, deadline_ms} <- Arbor.AI.Timeout.deadline(opts) do
+      state = %{state | status: :busy, accumulated_text: ""}
+      inactivity_timeout = inactivity_timeout(opts)
 
-    # Monitor the GenServer.call owner for this prompt. When orchestration
-    # cancel kills the action/turn process, we abort the ACP prompt immediately
-    # instead of waiting for inactivity timeout.
-    caller_pid = elem(from, 0)
-    caller_ref = Process.monitor(caller_pid)
+      # Monitor the GenServer.call owner for this prompt. When orchestration
+      # cancel kills the action/turn process, we abort the ACP prompt immediately
+      # instead of waiting for inactivity timeout.
+      caller_pid = elem(from, 0)
+      caller_ref = Process.monitor(caller_pid)
 
-    prompt =
-      start_task_prompt(state, content, opts, hard_timeout, inactivity_timeout)
-      |> Map.merge(%{caller_pid: caller_pid, caller_ref: caller_ref, control: nil})
+      prompt =
+        start_task_prompt(state, content, opts, hard_timeout, inactivity_timeout)
+        |> Map.merge(%{
+          caller_pid: caller_pid,
+          caller_ref: caller_ref,
+          control: nil,
+          deadline_ms: deadline_ms
+        })
 
-    timers =
-      start_prompt_timers(prompt.ref,
-        hard_timeout: hard_timeout,
-        inactivity_timeout: inactivity_timeout
-      )
+      timers =
+        start_prompt_timers(prompt.ref,
+          hard_timeout: hard_timeout,
+          inactivity_timeout: inactivity_timeout
+        )
 
-    await_prompt_result(prompt, timers, state)
+      await_prompt_result(prompt, timers, state)
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
   defp start_prompt_worker(client, session_id, content, opts) do
@@ -837,7 +926,8 @@ defmodule Arbor.AI.AcpSession do
 
     {pid, monitor_ref} =
       spawn_monitor(fn ->
-        send(parent, {:acp_prompt_result, ref, run_prompt(client, session_id, content, opts)})
+        result = run_prompt(client, session_id, content, opts)
+        send(parent, {:acp_prompt_result, ref, result, System.monotonic_time(:millisecond)})
       end)
 
     %{pid: pid, monitor_ref: monitor_ref, ref: ref, caller_pid: nil, caller_ref: nil}
@@ -1233,7 +1323,7 @@ defmodule Arbor.AI.AcpSession do
   rescue
     _ -> :ok
   catch
-    :exit, _ -> :ok
+    _kind, _reason -> :ok
   end
 
   defp emit_native_steer_unsupported(state, control) do
@@ -1293,9 +1383,17 @@ defmodule Arbor.AI.AcpSession do
   defp run_prompt(client, session_id, content, opts) do
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
     case apply(acp_client_module(), :prompt, [client, session_id, content, opts]) do
-      {:ok, _result} = ok -> ok
-      {:error, reason} -> {:error, Arbor.LLM.sanitize_external_reason(reason)}
-      other -> {:error, {:unexpected_prompt_result, Arbor.LLM.sanitize_external_reason(other)}}
+      {:ok, result} ->
+        case validate_acp_result(result, :prompt) do
+          :ok -> {:ok, result}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, Arbor.LLM.sanitize_external_reason(reason)}
+
+      other ->
+        {:error, {:unexpected_prompt_result, Arbor.LLM.sanitize_external_reason(other)}}
     end
   rescue
     exception ->
@@ -1314,9 +1412,17 @@ defmodule Arbor.AI.AcpSession do
   defp new_acp_session(client, cwd, opts) do
     # credo:disable-for-next-line Credo.Check.Refactor.Apply
     case apply(acp_client_module(), :new_session, [client, cwd, opts]) do
-      {:ok, _session_info} = ok -> ok
-      {:error, reason} -> {:error, Arbor.LLM.sanitize_external_reason(reason)}
-      other -> {:error, {:unexpected_session_result, Arbor.LLM.sanitize_external_reason(other)}}
+      {:ok, session_info} ->
+        case validate_acp_result(session_info, :session) do
+          :ok -> {:ok, session_info}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, Arbor.LLM.sanitize_external_reason(reason)}
+
+      other ->
+        {:error, {:unexpected_session_result, Arbor.LLM.sanitize_external_reason(other)}}
     end
   rescue
     exception ->
@@ -1328,30 +1434,39 @@ defmodule Arbor.AI.AcpSession do
 
   defp await_prompt_result(prompt, timers, state) do
     receive do
-      {:acp_prompt_result, ref, {:ok, result}} when ref == prompt.ref ->
-        complete_prompt_success(prompt, timers, result, state)
+      {:acp_prompt_result, ref, {:ok, result}, completed_at} when ref == prompt.ref ->
+        if Arbor.AI.Timeout.completed_before_deadline?(completed_at, prompt.deadline_ms) do
+          complete_prompt_success(prompt, timers, result, completed_at, state)
+        else
+          timeout_prompt(:timeout, prompt, timers, state)
+        end
 
       {:acp_task_control, ref, reply_to, control} when is_reference(ref) and is_pid(reply_to) ->
         {result, new_state} = accept_queued_task_control(control, state)
         send(reply_to, {:acp_task_control_result, ref, result})
         await_prompt_result(prompt, timers, new_state)
 
-      {:acp_prompt_result, ref, {:error, :timeout}} when ref == prompt.ref ->
+      {:acp_prompt_result, ref, {:error, :timeout}, _completed_at} when ref == prompt.ref ->
         timeout_prompt(:timeout, prompt, timers, state)
 
-      {:acp_prompt_result, ref, {:error, reason} = error} when ref == prompt.ref ->
+      {:acp_prompt_result, ref, {:error, reason} = error, completed_at} when ref == prompt.ref ->
         cleanup_prompt(prompt, timers)
 
-        new_state =
-          state
-          |> settle_failed_prompt_task_controls(prompt, :provider_error)
-          |> Map.put(:status, :error)
+        if Arbor.AI.Timeout.completed_before_deadline?(completed_at, prompt.deadline_ms) do
+          new_state =
+            state
+            |> settle_failed_prompt_task_controls(prompt, :provider_error)
+            |> Map.put(:status, :error)
 
-        emit_signal(:acp_session_error, new_state, %{error: reason, phase: :prompt})
-        {:reply, error, new_state}
+          emit_signal(:acp_session_error, new_state, %{error: reason, phase: :prompt})
+          {:reply, error, new_state}
+        else
+          timeout_prompt(:timeout, prompt, timers, state)
+        end
 
       {:DOWN, monitor_ref, :process, _pid, reason} when monitor_ref == prompt.monitor_ref ->
         cleanup_prompt(prompt, timers)
+        reason = Arbor.LLM.sanitize_external_reason(reason)
 
         new_state =
           state
@@ -1364,6 +1479,7 @@ defmodule Arbor.AI.AcpSession do
       {:DOWN, _ref, :process, pid, reason} when pid == state.client ->
         kill_prompt_worker(prompt)
         cleanup_prompt(prompt, timers)
+        reason = Arbor.LLM.sanitize_external_reason(reason)
 
         new_state =
           state
@@ -1413,7 +1529,7 @@ defmodule Arbor.AI.AcpSession do
     end
   end
 
-  defp complete_prompt_success(prompt, timers, result, state) do
+  defp complete_prompt_success(prompt, timers, result, completed_at, state) do
     cleanup_prompt(prompt, timers, preserve_caller_monitor: true)
 
     # A few adapters enqueue the final chunks immediately before returning the
@@ -1421,39 +1537,57 @@ defmodule Arbor.AI.AcpSession do
     state = state |> drain_pending_updates() |> drain_pending_task_controls()
     result = merge_accumulated_text(result, state.accumulated_text)
 
-    new_state =
-      %{state | status: :busy} |> accumulate_usage(result) |> mark_task_control_delivered(prompt)
+    if Arbor.AI.Timeout.completed_before_deadline?(
+         max(completed_at, System.monotonic_time(:millisecond)),
+         prompt.deadline_ms
+       ) do
+      new_state =
+        %{state | status: :busy}
+        |> accumulate_usage(result)
+        |> mark_task_control_delivered(prompt)
 
-    maybe_report_usage(new_state, result)
-    emit_signal(:acp_session_completed, new_state, %{result: summarize_result(result)})
+      case next_queued_task_control(new_state) do
+        {:none, new_state} ->
+          maybe_report_usage(new_state, result)
+          emit_signal(:acp_session_completed, new_state, %{result: summarize_result(result)})
+          demonitor_owner(prompt.caller_ref)
+          {:reply, {:ok, result}, %{new_state | status: :ready}}
 
-    case next_queued_task_control(new_state) do
-      {:none, new_state} ->
-        demonitor_owner(prompt.caller_ref)
-        {:reply, {:ok, result}, %{new_state | status: :ready}}
+        {{control_id, control}, new_state} ->
+          case Arbor.AI.Timeout.remaining(prompt.prompt_opts) do
+            {:ok, follow_up_opts, remaining} ->
+              follow_up =
+                start_task_prompt(
+                  new_state,
+                  control.message,
+                  follow_up_opts,
+                  remaining,
+                  prompt.inactivity_timeout
+                )
+                |> Map.merge(%{
+                  caller_pid: prompt.caller_pid,
+                  caller_ref: prompt.caller_ref,
+                  control: control_id,
+                  deadline_ms: prompt.deadline_ms
+                })
 
-      {{control_id, control}, new_state} ->
-        follow_up =
-          start_task_prompt(
-            new_state,
-            control.message,
-            prompt.prompt_opts,
-            prompt.hard_timeout,
-            prompt.inactivity_timeout
-          )
-          |> Map.merge(%{
-            caller_pid: prompt.caller_pid,
-            caller_ref: prompt.caller_ref,
-            control: control_id
-          })
+              follow_up_timers =
+                start_prompt_timers(follow_up.ref,
+                  hard_timeout: follow_up.hard_timeout,
+                  inactivity_timeout: follow_up.inactivity_timeout
+                )
 
-        follow_up_timers =
-          start_prompt_timers(follow_up.ref,
-            hard_timeout: follow_up.hard_timeout,
-            inactivity_timeout: follow_up.inactivity_timeout
-          )
+              await_prompt_result(follow_up, follow_up_timers, %{
+                new_state
+                | accumulated_text: ""
+              })
 
-        await_prompt_result(follow_up, follow_up_timers, %{new_state | accumulated_text: ""})
+            {:error, _reason} ->
+              timeout_prompt(:timeout, prompt, empty_prompt_timers(), new_state)
+          end
+      end
+    else
+      timeout_prompt(:timeout, prompt, empty_prompt_timers(), state)
     end
   end
 
@@ -1524,15 +1658,51 @@ defmodule Arbor.AI.AcpSession do
     module = acp_client_module()
 
     if Process.alive?(client) and function_exported?(module, :cancel, 2) do
-      # credo:disable-for-next-line Credo.Check.Refactor.Apply
-      apply(module, :cancel, [client, session_id])
+      run_cleanup_callback(fn ->
+        # credo:disable-for-next-line Credo.Check.Refactor.Apply
+        apply(module, :cancel, [client, session_id])
+      end)
     end
 
     :ok
   rescue
     _ -> :ok
   catch
-    :exit, _ -> :ok
+    _kind, _reason -> :ok
+  end
+
+  defp run_cleanup_callback(callback) when is_function(callback, 0) do
+    Task.start(fn ->
+      {pid, monitor} =
+        spawn_monitor(fn ->
+          try do
+            callback.()
+          rescue
+            _exception -> :ok
+          catch
+            _kind, _reason -> :ok
+          end
+        end)
+
+      receive do
+        {:DOWN, ^monitor, :process, ^pid, _reason} -> :ok
+      after
+        @callback_cleanup_timeout_ms ->
+          if Process.alive?(pid), do: Process.exit(pid, :kill)
+
+          receive do
+            {:DOWN, ^monitor, :process, ^pid, _reason} -> :ok
+          after
+            @callback_cleanup_timeout_ms -> Process.demonitor(monitor, [:flush])
+          end
+      end
+    end)
+
+    :ok
+  rescue
+    _exception -> :ok
+  catch
+    _kind, _reason -> :ok
   end
 
   defp start_prompt_timers(prompt_ref, opts) do
@@ -1545,6 +1715,15 @@ defmodule Arbor.AI.AcpSession do
       inactivity_timeout: inactivity_timeout,
       inactivity_timer:
         schedule_timer(inactivity_timeout, {:acp_prompt_inactivity_timeout, prompt_ref})
+    }
+  end
+
+  defp empty_prompt_timers do
+    %{
+      hard_timeout: :infinity,
+      hard_timer: nil,
+      inactivity_timeout: :infinity,
+      inactivity_timer: nil
     }
   end
 
@@ -1591,10 +1770,6 @@ defmodule Arbor.AI.AcpSession do
     |> Keyword.put(:timeout, hard_timeout)
   end
 
-  defp hard_timeout(opts) do
-    opts |> Keyword.fetch!(:timeout) |> normalize_timeout(:infinity)
-  end
-
   defp inactivity_timeout(opts) do
     opts
     |> Keyword.fetch!(:inactivity_timeout_ms)
@@ -1605,7 +1780,7 @@ defmodule Arbor.AI.AcpSession do
     default_inactivity =
       Application.get_env(:arbor_ai, :acp_inactivity_timeout_ms, @default_inactivity_timeout_ms)
 
-    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.normalize(opts, :infinity),
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, :infinity),
          {:ok, opts, _inactivity} <-
            Arbor.AI.Timeout.normalize_key(opts, :inactivity_timeout_ms, default_inactivity,
              minimum: 0,
@@ -1666,15 +1841,102 @@ defmodule Arbor.AI.AcpSession do
           opts
       end
 
-    # credo:disable-for-next-line Credo.Check.Refactor.Apply
-    case apply(acp_client_module(), :new_session, [state.client, cwd, new_opts]) do
+    case new_acp_session(state.client, cwd, new_opts) do
       {:ok, info} ->
         sid = Map.get(info, "sessionId") || Map.get(info, :session_id)
         maybe_select_model(state.client, sid, state.model)
         {:ok, %{state | session_id: sid, last_session_id: sid}}
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, Arbor.LLM.sanitize_external_reason(reason)}
+    end
+  end
+
+  defp validate_acp_result(result, kind) when is_map(result) do
+    with :ok <-
+           Arbor.LLM.validate_decoded_term(result,
+             max_bytes: 4_194_304,
+             max_nodes: 20_000,
+             max_depth: 24,
+             max_map_keys: 4_000,
+             max_list_items: 20_000
+           ),
+         :ok <- validate_acp_text(result),
+         :ok <- validate_acp_usage(result) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:invalid_acp_result, kind, reason}}
+    end
+  end
+
+  defp validate_acp_result(_result, kind),
+    do: {:error, {:invalid_acp_result, kind, :map_required}}
+
+  defp validate_acp_text(result) do
+    validate_alias_values(
+      result,
+      ["text", :text],
+      fn
+        nil -> true
+        text -> is_binary(text)
+      end,
+      :binary_text_required
+    )
+  end
+
+  defp validate_acp_usage(result) do
+    usages = present_alias_values(result, ["usage", :usage])
+
+    case usages do
+      [] ->
+        :ok
+
+      values ->
+        if Enum.all?(values, &is_map/1) do
+          Enum.reduce_while(values, :ok, fn usage, :ok ->
+            case validate_acp_token_fields(usage) do
+              :ok -> {:cont, :ok}
+              {:error, _reason} = error -> {:halt, error}
+            end
+          end)
+        else
+          {:error, :usage_map_required}
+        end
+    end
+  end
+
+  defp validate_alias_values(map, keys, predicate, error) do
+    if Enum.all?(present_alias_values(map, keys), predicate), do: :ok, else: {:error, error}
+  end
+
+  defp present_alias_values(map, keys) do
+    Enum.reduce(keys, [], fn key, values ->
+      case Map.fetch(map, key) do
+        {:ok, value} -> [value | values]
+        :error -> values
+      end
+    end)
+  end
+
+  defp validate_acp_token_fields(usage) do
+    fields = [
+      "input_tokens",
+      :input_tokens,
+      "inputTokens",
+      "output_tokens",
+      :output_tokens,
+      "outputTokens"
+    ]
+
+    if Enum.all?(fields, fn field ->
+         case Map.fetch(usage, field) do
+           :error -> true
+           {:ok, value} -> is_integer(value) and value >= 0 and Arbor.LLM.finite_number?(value)
+         end
+       end) do
+      :ok
+    else
+      {:error, :bounded_non_negative_token_usage_required}
     end
   end
 
@@ -1717,7 +1979,7 @@ defmodule Arbor.AI.AcpSession do
   rescue
     _ -> :ok
   catch
-    :exit, _ -> :ok
+    _kind, _reason -> :ok
   end
 
   defp workspace_cwd({:worktree, path, _branch}, _opts), do: path
@@ -1757,7 +2019,7 @@ defmodule Arbor.AI.AcpSession do
   rescue
     _ -> :ok
   catch
-    :exit, _ -> :ok
+    _kind, _reason -> :ok
   end
 
   defp cleanup_workspace(_), do: :ok

@@ -178,7 +178,7 @@ defmodule Arbor.LLM.ContentPart do
   end
 
   def normalize(nil), do: []
-  def normalize(other), do: [text(inspect(other))]
+  def normalize(other), do: [text(Arbor.LLM.ExternalTerm.inspect(other))]
 
   @spec text_content(term()) :: String.t()
   def text_content(content) do

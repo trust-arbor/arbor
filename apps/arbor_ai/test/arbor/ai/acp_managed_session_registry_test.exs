@@ -15,6 +15,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
     use GenServer
 
     def start_link(opts) do
+      if delay = Keyword.get(opts, :start_delay_ms), do: Process.sleep(delay)
       GenServer.start_link(__MODULE__, opts)
     end
 
@@ -69,6 +70,7 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
          test_pid: test_pid,
          agent_id: agent_id,
          create_mode: Keyword.get(opts, :create_mode, :ok),
+         create_delay_ms: Keyword.get(opts, :create_delay_ms, 0),
          resume_mode: Keyword.get(opts, :resume_mode, :ok),
          status_mode: Keyword.get(opts, :status_mode, :ok),
          # Backward-compatible flag used by older tests
@@ -87,7 +89,10 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
     end
 
     @impl true
-    def handle_call({:create_session, _opts}, _from, state) do
+    def handle_call({:create_session, opts}, _from, state) do
+      if state.test_pid, do: send(state.test_pid, {:fake_create_opts, self(), opts})
+      if state.create_delay_ms > 0, do: Process.sleep(state.create_delay_ms)
+
       mode =
         cond do
           state.fail_create? -> :error
@@ -190,6 +195,36 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
     end
 
     def handle_info(_msg, state), do: {:noreply, state}
+  end
+
+  defmodule SlowRegistry do
+    @moduledoc false
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl true
+    def init(opts), do: {:ok, opts}
+
+    @impl true
+    def handle_call({:register, attrs}, _from, opts), do: delayed_register(attrs, opts)
+    def handle_call({:register, attrs, _deadline}, _from, opts), do: delayed_register(attrs, opts)
+
+    defp delayed_register(attrs, opts) do
+      Process.sleep(Keyword.fetch!(opts, :delay_ms))
+      send(Keyword.fetch!(opts, :test_pid), {:slow_registry_register, attrs})
+
+      view = %{
+        worker_session_id: "acp_worker_slow",
+        session_id: attrs.session_id,
+        provider: to_string(attrs.provider),
+        model: attrs.model,
+        status: "ready",
+        pooled: attrs.pooled == true
+      }
+
+      {:reply, {:ok, view}, opts}
+    end
   end
 
   # Session module without context_pressure?/1 so managed status fails closed.
@@ -931,6 +966,35 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
   end
 
   describe "partial start / create failure cleanup" do
+    test "security regression: managed child startup consumes the operation deadline", ctx do
+      started_at = System.monotonic_time(:millisecond)
+
+      assert {:error, :timeout} =
+               start_managed([start_delay_ms: 60, timeout: 20], ctx)
+
+      assert System.monotonic_time(:millisecond) - started_at < 50
+      Process.sleep(80)
+      assert_supervisor_empty(ctx.supervisor)
+    end
+
+    test "security regression: managed start shares one deadline through create and registry",
+         ctx do
+      slow_registry = start_supervised!({SlowRegistry, delay_ms: 25, test_pid: self()})
+      started_at = System.monotonic_time(:millisecond)
+
+      assert {:error, :timeout} =
+               start_managed(
+                 [server: slow_registry, create_delay_ms: 25, timeout: 40],
+                 ctx
+               )
+
+      assert System.monotonic_time(:millisecond) - started_at < 100
+      assert_receive {:fake_create_opts, _session_pid, create_opts}
+      assert is_integer(create_opts[:deadline_ms])
+      assert create_opts[:timeout] in 1..40
+      assert_supervisor_empty(ctx.supervisor)
+    end
+
     test "create failure terminates the temporary session and does not register", ctx do
       assert {:error, :create_failed} =
                start_managed([fail_create: true], ctx)

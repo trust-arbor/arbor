@@ -70,7 +70,10 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   """
   @spec register(map(), keyword()) :: {:ok, public_view()} | {:error, term()}
   def register(attrs, opts \\ []) when is_map(attrs) do
-    call({:register, normalize_register_attrs(attrs)}, opts)
+    with {:ok, opts, _remaining} <- normalized_call_opts(opts),
+         {:ok, deadline} <- Arbor.AI.Timeout.deadline(opts) do
+      call({:register, normalize_register_attrs(attrs), deadline}, opts)
+    end
   end
 
   @doc """
@@ -95,8 +98,11 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
     call(
       {:resolve_task_control, normalize_id(task_id), normalize_id(principal_id)},
       Enum.filter(opts, fn
-        {key, _value} when is_atom(key) -> key == :server or key in timeout_keys
-        _invalid -> true
+        {key, _value} when is_atom(key) ->
+          key == :server or key == :deadline_ms or key in timeout_keys
+
+        _invalid ->
+          true
       end)
     )
   end
@@ -151,10 +157,22 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   end
 
   @impl true
-  def handle_call({:register, attrs}, {owner_pid, _tag}, state) do
-    case do_register(attrs, owner_pid, state) do
-      {:ok, view, state} -> {:reply, {:ok, view}, state}
-      {:error, reason, state} -> {:reply, {:error, reason}, state}
+  def handle_call({:register, attrs, deadline}, {owner_pid, _tag}, state) do
+    if deadline_active?(deadline) do
+      case do_register(attrs, owner_pid, state) do
+        {:ok, view, registered_state} ->
+          if deadline_active?(deadline) do
+            {:reply, {:ok, view}, registered_state}
+          else
+            {:reply, {:error, :timeout},
+             discard_registration(registered_state, view.worker_session_id)}
+          end
+
+        {:error, reason, state} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :timeout}, state}
     end
   end
 
@@ -248,7 +266,7 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   # Convert every GenServer.call exit (including timeout) into an error tuple
   # so acquisition cleanup in AcpManaged always runs after a failed register.
   defp call(message, opts) do
-    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, 5_000) do
+    with {:ok, opts, timeout} <- normalized_call_opts(opts) do
       server = Keyword.get(opts, :server, @registry_name)
 
       try do
@@ -272,13 +290,23 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
     end
   end
 
+  defp normalized_call_opts(opts) do
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.start_deadline(opts, 5_000),
+         {:ok, opts, remaining} <- Arbor.AI.Timeout.remaining(opts) do
+      {:ok, opts, remaining}
+    end
+  end
+
   defp split_caller_opts(opts) when is_list(opts) do
     timeout_keys = Arbor.LLM.timeout_option_keys()
 
     server_opts =
       Enum.filter(opts, fn
-        {key, _value} when is_atom(key) -> key == :server or key in timeout_keys
-        _invalid -> true
+        {key, _value} when is_atom(key) ->
+          key == :server or key == :deadline_ms or key in timeout_keys
+
+        _invalid ->
+          true
       end)
 
     caller = %{
@@ -317,7 +345,7 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   end
 
   defp map_timeout_options(opts) do
-    Enum.reduce(Arbor.LLM.timeout_option_keys(), [], fn key, acc ->
+    Enum.reduce([:deadline_ms | Arbor.LLM.timeout_option_keys()], [], fn key, acc ->
       acc = if Map.has_key?(opts, key), do: [{key, Map.get(opts, key)} | acc], else: acc
       string_key = Atom.to_string(key)
 
@@ -326,6 +354,13 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
         else: acc
     end)
   end
+
+  defp deadline_active?(:infinity), do: true
+
+  defp deadline_active?(deadline) when is_integer(deadline),
+    do: System.monotonic_time(:millisecond) <= deadline
+
+  defp deadline_active?(_deadline), do: false
 
   # Explicit close may override stored policy; :default keeps registration value.
   defp return_to_pool_override(opts) when is_list(opts) do
@@ -427,6 +462,26 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
     end
   end
 
+  defp discard_registration(state, worker_session_id) do
+    case Map.pop(state.sessions, worker_session_id) do
+      {nil, _sessions} ->
+        state
+
+      {entry, sessions} ->
+        Process.demonitor(entry.owner_ref, [:flush])
+        Process.demonitor(entry.session_ref, [:flush])
+
+        %{
+          state
+          | sessions: sessions,
+            by_ref:
+              state.by_ref
+              |> Map.delete(entry.owner_ref)
+              |> Map.delete(entry.session_ref)
+        }
+    end
+  end
+
   defp resolve_view(entry) do
     %{
       worker_session_id: entry.worker_session_id,
@@ -500,7 +555,7 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
 
       {entry, sessions} ->
         Logger.debug(
-          "AcpManaged: owner died for #{worker_session_id} (#{inspect(reason)}); releasing"
+          "AcpManaged: owner died for #{worker_session_id} (#{Arbor.LLM.inspect_external_reason(reason)}); releasing"
         )
 
         state = %{state | sessions: sessions}
@@ -518,7 +573,7 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
 
       {entry, sessions} ->
         Logger.debug(
-          "AcpManaged: session died for #{worker_session_id} (#{inspect(reason)}); dropping handle"
+          "AcpManaged: session died for #{worker_session_id} (#{Arbor.LLM.inspect_external_reason(reason)}); dropping handle"
         )
 
         state = %{state | sessions: sessions}
@@ -552,10 +607,10 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
       rescue
         error ->
           Logger.debug(
-            "AcpManaged: pool checkin failed after #{reason}: #{Exception.message(error)}"
+            "AcpManaged: pool checkin failed after #{reason}: #{Arbor.LLM.external_exception_message(error)}"
           )
       catch
-        :exit, _ -> :ok
+        _kind, _reason -> :ok
       end
     end)
 
@@ -579,10 +634,10 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
       rescue
         error ->
           Logger.debug(
-            "AcpManaged: pool hard-close failed after #{reason}: #{Exception.message(error)}"
+            "AcpManaged: pool hard-close failed after #{reason}: #{Arbor.LLM.external_exception_message(error)}"
           )
       catch
-        :exit, _ -> :ok
+        _kind, _reason -> :ok
       end
     end)
 
@@ -596,10 +651,10 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
       rescue
         error ->
           Logger.debug(
-            "AcpManaged: session close failed after #{reason}: #{Exception.message(error)}"
+            "AcpManaged: session close failed after #{reason}: #{Arbor.LLM.external_exception_message(error)}"
           )
       catch
-        :exit, _ -> :ok
+        _kind, _reason -> :ok
       end
     end)
 
@@ -673,17 +728,17 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   defp provider_string(nil), do: nil
   defp provider_string(p) when is_atom(p), do: Atom.to_string(p)
   defp provider_string(p) when is_binary(p), do: p
-  defp provider_string(p), do: inspect(p)
+  defp provider_string(p), do: Arbor.LLM.inspect_external_reason(p)
 
   defp status_string(nil), do: "ready"
   defp status_string(s) when is_atom(s), do: Atom.to_string(s)
   defp status_string(s) when is_binary(s), do: s
-  defp status_string(s), do: inspect(s)
+  defp status_string(s), do: Arbor.LLM.inspect_external_reason(s)
 
   defp normalize_model(nil), do: nil
   defp normalize_model(m) when is_binary(m), do: m
   defp normalize_model(m) when is_atom(m), do: Atom.to_string(m)
-  defp normalize_model(m), do: to_string(m)
+  defp normalize_model(m), do: Arbor.LLM.inspect_external_reason(m)
 
   defp normalize_id(id) when is_binary(id) and id != "", do: id
   defp normalize_id(_), do: nil

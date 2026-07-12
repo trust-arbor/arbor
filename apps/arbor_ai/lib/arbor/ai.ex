@@ -369,7 +369,7 @@ defmodule Arbor.AI do
         duration_ms = System.monotonic_time(:millisecond) - start_time
         ToolSignals.emit_failed(provider, model, reason)
         ToolSignals.record_usage_failure(provider, opts, reason, duration_ms)
-        Logger.warning("ACP generation failed: #{inspect(reason)}")
+        Logger.warning("ACP generation failed: #{Arbor.LLM.inspect_external_reason(reason)}")
         {:error, reason}
     end
   end

@@ -71,6 +71,39 @@ defmodule Arbor.LLM do
 
   def generate(_opts), do: {:error, :keyword_options_required}
 
+  @doc "Generate an authoritative indexed embedding batch through the bounded LLM transport."
+  @spec embed_batch(atom() | String.t(), String.t(), [String.t()], keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def embed_batch(provider, model, texts, opts \\ [])
+
+  def embed_batch(provider, model, texts, opts)
+      when (is_atom(provider) or is_binary(provider)) and is_binary(model) and is_list(opts) do
+    with {:ok, opts, _timeout} <- Deadline.normalize_options(opts, @default_public_timeout_ms) do
+      with_timeout(opts, fn _receipt ->
+        canonical = Arbor.LLM.ProviderRegistry.normalize(provider)
+
+        adapter_opts =
+          opts
+          |> Keyword.delete(:provider)
+          |> Keyword.put(:provider, canonical)
+
+        case Arbor.LLM.Adapter.ReqLLM.embed(texts, model, adapter_opts) do
+          {:ok, result} when is_map(result) ->
+            {:ok, Map.put(result, :provider, canonical)}
+
+          {:error, _reason} = error ->
+            error
+
+          other ->
+            {:error, {:invalid_embedding_result, Arbor.LLM.ExternalTerm.sanitize(other)}}
+        end
+      end)
+    end
+  end
+
+  def embed_batch(_provider, _model, _texts, _opts),
+    do: {:error, :invalid_embedding_request}
+
   defp do_generate(opts) do
     with :ok <- validate_public_options(opts),
          :ok <- ensure_not_aborted(opts),
@@ -725,7 +758,7 @@ defmodule Arbor.LLM do
 
       {:error, reason} ->
         raise RuntimeError,
-              "tool result rejected: #{inspect(reason, limit: 20, printable_limit: 512)}"
+              "tool result rejected: #{Arbor.LLM.ExternalTerm.inspect(reason)}"
     end
   end
 

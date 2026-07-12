@@ -27,6 +27,25 @@ defmodule Arbor.AI.AcpPoolTest do
   end
 
   describe "checkout/2" do
+    test "security regression: an expired queued checkout never creates an orphan lease", %{
+      pool: pool
+    } do
+      :ok = :sys.suspend(pool)
+      on_exit(fn -> safely_resume(pool) end)
+
+      result =
+        try do
+          AcpPool.checkout(:test, client_opts: @test_client_opts, timeout: 10)
+        catch
+          :exit, {:timeout, _call} -> {:error, :timeout}
+        end
+
+      assert {:error, :timeout} = result
+      :ok = :sys.resume(pool)
+      Process.sleep(30)
+      assert AcpPool.sessions() == []
+    end
+
     test "creates a new session when pool is empty" do
       assert {:ok, session} = AcpPool.checkout(:test, client_opts: @test_client_opts)
       assert is_pid(session)
@@ -56,6 +75,12 @@ defmodule Arbor.AI.AcpPoolTest do
       # test_b still has capacity
       assert {:ok, _} = AcpPool.checkout(:test_b, client_opts: @test_client_opts)
     end
+  end
+
+  defp safely_resume(pool) do
+    if Process.alive?(pool), do: :sys.resume(pool)
+  catch
+    :exit, _reason -> :ok
   end
 
   describe "checkin/1" do
