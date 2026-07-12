@@ -194,14 +194,6 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
             |> maybe_put_context(:nested_engine_opts, nested_engine_opts)
             |> maybe_put_context(:pinned_action_binding, pinned_binding)
             |> maybe_put_context(:pinned_action_name, name)
-            # Reload-stable SigningAuthority for nested exact-resource resign.
-            # Presence-based: keep the key when present (including nil fail-closed).
-            |> then(fn ctx ->
-              case Keyword.fetch(opts, :signing_authority) do
-                {:ok, authority} -> Map.put(ctx, :signing_authority, authority)
-                :error -> ctx
-              end
-            end)
             # Engine-pinned graph execution may resolve pipeline_internal actions.
             |> Map.put(:allow_pipeline_internal, true)
             |> maybe_put_file_workspace(action_module, workdir)
