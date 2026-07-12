@@ -5,6 +5,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
 
   alias Arbor.Commands.CodingBenchmark
   alias Arbor.Commands.CodingBenchmarkScenario, as: Scenario
+  alias Arbor.Common.SafePath
   alias Mix.Tasks.Arbor.Coding.Benchmark, as: BenchmarkTask
 
   @row_keys ~w(
@@ -14,8 +15,18 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
     terminal_status wall_clock_ms
   )
 
+  @runtime_env [
+    {:arbor_commands, :coding_benchmark_workspace_root},
+    {:arbor_commands, :coding_benchmark_artifact_root},
+    {:arbor_commands, :coding_benchmark_execution_timeout_ms},
+    {:arbor_orchestrator, :coding_repo_roots},
+    {:arbor_orchestrator, :coding_worktree_roots},
+    {:arbor_orchestrator, :coding_pipeline_logs_root}
+  ]
+
   setup do
     original = Application.fetch_env(:arbor_agent, :coding_executor_mode)
+    runtime_originals = Map.new(@runtime_env, fn key -> {key, fetch_env(key)} end)
     Application.put_env(:arbor_agent, :coding_executor_mode, :benchmark_test_sentinel)
 
     on_exit(fn ->
@@ -23,6 +34,8 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
         {:ok, value} -> Application.put_env(:arbor_agent, :coding_executor_mode, value)
         :error -> Application.delete_env(:arbor_agent, :coding_executor_mode)
       end
+
+      Enum.each(runtime_originals, fn {key, value} -> restore_env(key, value) end)
     end)
 
     :ok
@@ -234,6 +247,23 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
              CodingBenchmark.run(scenario.manifest, dry_run: true, repetitions: 0)
   end
 
+  test "trusted benchmark workspace config rejects runtime workspace escapes" do
+    scenario = scenario!(~w(happy))
+    outside = Path.dirname(scenario.root)
+
+    assert {:error,
+            %{
+              "error" => "invalid_coding_benchmark_runtime",
+              "field" => "workspace_root",
+              "reason" => "workspace_outside_root"
+            }} =
+             CodingBenchmark.run(scenario.manifest,
+               dry_run: true,
+               fixture_root: scenario.root,
+               workspace_root: outside
+             )
+  end
+
   test "Mix task writes JSON at its boundary with all supported execution options" do
     scenario = scenario!(~w(happy))
 
@@ -258,7 +288,7 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
                workspace_root: scenario.root
              )
 
-    assert {:ok, real_root} = Arbor.Common.SafePath.resolve_real(scenario.root)
+    assert {:ok, real_root} = SafePath.resolve_real(scenario.root)
     assert output_path == Path.join(real_root, "report.json")
     assert report["repetitions"] == 2
     assert report["seed"] == 19
@@ -360,9 +390,29 @@ defmodule Arbor.Commands.CodingBenchmarkTest do
       )
 
     scenario = Scenario.create!(root, fixture_ids)
+    configure_benchmark_runtime!(root)
     on_exit(fn -> File.rm_rf(root) end)
     scenario
   end
+
+  defp configure_benchmark_runtime!(root) do
+    {:ok, workspace_root} = SafePath.resolve_real(root)
+    artifact_root = Path.join(workspace_root, "production-artifacts")
+    File.mkdir_p!(artifact_root)
+    {:ok, artifact_root} = SafePath.resolve_real(artifact_root)
+
+    Application.put_env(:arbor_commands, :coding_benchmark_workspace_root, workspace_root)
+    Application.put_env(:arbor_commands, :coding_benchmark_artifact_root, artifact_root)
+    Application.put_env(:arbor_commands, :coding_benchmark_execution_timeout_ms, 5_000)
+    Application.put_env(:arbor_orchestrator, :coding_repo_roots, [workspace_root])
+    Application.put_env(:arbor_orchestrator, :coding_worktree_roots, [workspace_root])
+    Application.put_env(:arbor_orchestrator, :coding_pipeline_logs_root, artifact_root)
+  end
+
+  defp fetch_env({app, key}), do: Application.fetch_env(app, key)
+
+  defp restore_env({app, key}, {:ok, value}), do: Application.put_env(app, key, value)
+  defp restore_env({app, key}, :error), do: Application.delete_env(app, key)
 
   defp run_scenario(scenario, opts \\ []) do
     defaults = [

@@ -12,9 +12,10 @@ defmodule Arbor.Commands.CodingBenchmark do
   timing, and independently observed Git and artifact evidence.
   """
 
-  alias Arbor.Commands.CodingBenchmark.{LegacyAdapter, PipelineAdapter}
+  alias Arbor.Commands.CodingBenchmark.{Adapter, LegacyAdapter, PipelineAdapter, Runtime}
   alias Arbor.Commands.CodingParity
   alias Arbor.Common.SafePath
+  alias Arbor.Contracts.Coding.Plan
 
   @manifest_schema "arbor.coding_benchmark.manifest.v1"
   @report_schema "arbor.coding_benchmark.report.v1"
@@ -26,6 +27,22 @@ defmodule Arbor.Commands.CodingBenchmark do
     {"coding_pipeline_path", :coding_pipeline_path},
     {"compile_manifest_path", :compile_manifest_path}
   ]
+  @compile_manifest_keys MapSet.new(~w(
+    action_catalog_digest action_names compiler_version execution_manifest
+    execution_manifest_digest graph_hash handler_types overlays plan_fingerprint plan_version
+    review_profile task_class template_version validation_profile
+  ))
+  @execution_manifest_v2_keys MapSet.new(~w(
+    actions capability_uris compiled_graph_hash egress graph_hash handlers nodes version
+  ))
+  @execution_manifest_v3_keys MapSet.put(@execution_manifest_v2_keys, "nested_graphs")
+  @artifact_filenames %{
+    "coding_pipeline_path" => "coding-pipeline.dot",
+    "coding_plan_path" => "coding-plan.json",
+    "compile_manifest_path" => "coding-compile-manifest.json"
+  }
+  @max_dot_bytes 16_777_216
+  @max_json_artifact_bytes 8_388_608
   @max_fixtures 100
   @max_repetitions 100
   @max_seed 2_147_483_647
@@ -80,6 +97,13 @@ defmodule Arbor.Commands.CodingBenchmark do
   normalized task input. It returns `{:ok, envelope}` or `{:error, reason}`.
   Envelopes have the closed keys `result`, `observations`, `counters`, and
   `worker_ownership`.
+
+  Every run requires trusted `:arbor_commands` Application configuration for
+  `:coding_benchmark_workspace_root`, `:coding_benchmark_artifact_root`, and
+  `:coding_benchmark_execution_timeout_ms`. The artifact root must be a
+  distinct existing child of the workspace root. Production adapters also
+  require the orchestrator repo/worktree roots to admit that workspace and its
+  pipeline logs root to equal the configured benchmark artifact root.
   """
   @spec run(term(), keyword()) :: {:ok, json_map()} | {:error, json_map()}
   def run(manifest, opts \\ [])
@@ -249,7 +273,8 @@ defmodule Arbor.Commands.CodingBenchmark do
   end
 
   defp runtime_options(manifest, opts) do
-    with {:ok, repetitions} <-
+    with {:ok, benchmark} <- benchmark_runtime(),
+         {:ok, repetitions} <-
            bounded_runtime_integer(
              Keyword.get(opts, :repetitions, 1),
              1,
@@ -268,15 +293,20 @@ defmodule Arbor.Commands.CodingBenchmark do
          {:ok, measure} <- measure_callback(Keyword.get(opts, :measure, &measure/1)),
          {:ok, selector} <- selector(Keyword.get(opts, :executor_selector, @default_selector)),
          {:ok, workspace_root} <-
-           directory(Keyword.get(opts, :workspace_root, System.tmp_dir!()), "workspace_root"),
+           benchmark_workspace_root(
+             Keyword.get(opts, :workspace_root, benchmark.workspace_root),
+             benchmark
+           ),
          {:ok, fixture_root} <-
            directory(Keyword.get(opts, :fixture_root, File.cwd!()), "fixture_root"),
          {:ok, adapters} <- adapters(Keyword.get(opts, :adapters), dry_run?),
+         :ok <- preflight_adapters(adapters, benchmark, dry_run?),
          {:ok, verifiers} <- verifiers(Keyword.get(opts, :verifiers), manifest, dry_run?) do
       {:ok,
        %{
          acp_agent: acp_agent,
          adapters: adapters,
+         benchmark: benchmark,
          dry_run?: dry_run?,
          fixture_root: fixture_root,
          measure: measure,
@@ -286,6 +316,42 @@ defmodule Arbor.Commands.CodingBenchmark do
          verifiers: verifiers,
          workspace_root: workspace_root
        }}
+    end
+  end
+
+  defp benchmark_runtime do
+    case Runtime.load() do
+      {:ok, config} ->
+        {:ok, config}
+
+      {:error, {:benchmark_setup_error, reason}} ->
+        runtime_error("benchmark_setup", reason_string(reason))
+    end
+  end
+
+  defp benchmark_workspace_root(path, benchmark) do
+    case Runtime.ensure_workspace_directory(path, benchmark) do
+      {:ok, root} ->
+        {:ok, root}
+
+      {:error, {:benchmark_setup_error, reason}} ->
+        runtime_error("workspace_root", reason_string(reason))
+    end
+  end
+
+  defp preflight_adapters(_adapters, _benchmark, true), do: :ok
+
+  defp preflight_adapters(adapters, benchmark, false) do
+    if Enum.any?(Map.values(adapters), &(&1 in @production_adapters)) do
+      case Runtime.preflight_production(benchmark) do
+        :ok ->
+          :ok
+
+        {:error, {:benchmark_setup_error, reason}} ->
+          runtime_error("production_setup", reason_string(reason))
+      end
+    else
+      :ok
     end
   end
 
@@ -461,7 +527,7 @@ defmodule Arbor.Commands.CodingBenchmark do
       Path.join(run_root, "#{pair.fixture["fixture_id"]}-#{pair.repetition}")
 
     try do
-      case prepare_pair(pair.fixture, pair_root, runtime.fixture_root) do
+      case prepare_pair(pair.fixture, pair_root, runtime.fixture_root, runtime.benchmark) do
         {:ok, prepared} ->
           executed =
             Enum.map(pair.order, fn executor ->
@@ -481,14 +547,15 @@ defmodule Arbor.Commands.CodingBenchmark do
     end
   end
 
-  defp prepare_pair(fixture, pair_root, fixture_root) do
+  defp prepare_pair(fixture, pair_root, fixture_root, benchmark) do
     with {:ok, source} <- fixture_source(fixture_root, fixture["fixture_path"]),
          {:ok, commit_oid} <- git_output(source, ["rev-parse", "--verify", "HEAD^{commit}"]),
          {:ok, source_tree_oid} <- git_output(source, ["rev-parse", "--verify", "HEAD^{tree}"]),
          :ok <- matching_tree(source_tree_oid, fixture["base_tree_oid"]),
          :ok <- mkdir(pair_root),
+         {:ok, pair_root} <- Runtime.canonical_pair_root(pair_root, benchmark),
          {:ok, workdirs} <- clone_pair(source, commit_oid, fixture["base_tree_oid"], pair_root) do
-      {:ok, %{commit_oid: commit_oid, workdirs: workdirs}}
+      {:ok, %{commit_oid: commit_oid, pair_root: pair_root, workdirs: workdirs}}
     end
   end
 
@@ -567,34 +634,57 @@ defmodule Arbor.Commands.CodingBenchmark do
 
     callback = runtime.adapters[executor]
 
-    verification = %{
-      require_returned_worktree?: callback in @production_adapters,
-      trusted_root: workdir
-    }
+    case verification_context(callback, request, runtime) do
+      {:ok, verification} ->
+        measurement = safely(fn -> measure_execution(runtime, executor, callback, request) end)
 
-    measurement = safely(fn -> measure_execution(runtime, executor, callback, request) end)
+        case measurement do
+          {:returned, {wall_clock_ms, outcome}}
+          when is_integer(wall_clock_ms) and wall_clock_ms >= 0 ->
+            build_execution(
+              executor,
+              pair,
+              request,
+              outcome,
+              wall_clock_ms,
+              runtime,
+              verification
+            )
 
-    case measurement do
-      {:returned, {wall_clock_ms, outcome}}
-      when is_integer(wall_clock_ms) and wall_clock_ms >= 0 ->
-        build_execution(
-          executor,
-          pair,
-          request,
-          outcome,
-          wall_clock_ms,
-          runtime,
-          verification
-        )
+          {:returned, _invalid} ->
+            execution_failure(executor, pair, "measurement_failed", "invalid_measurement")
 
-      {:returned, _invalid} ->
-        execution_failure(executor, pair, "measurement_failed", "invalid_measurement")
+          {:raised, reason} ->
+            execution_failure(executor, pair, "measurement_failed", reason)
 
-      {:raised, reason} ->
-        execution_failure(executor, pair, "measurement_failed", reason)
+          {:caught, reason} ->
+            execution_failure(executor, pair, "measurement_failed", reason)
+        end
 
-      {:caught, reason} ->
-        execution_failure(executor, pair, "measurement_failed", reason)
+      {:error, {:benchmark_setup_error, reason}} ->
+        execution_failure(executor, pair, "benchmark_setup_failed", reason)
+    end
+  end
+
+  defp verification_context(callback, request, runtime) do
+    with {:ok, scope} <- Adapter.execution_scope(request, runtime.benchmark) do
+      if callback in @production_adapters do
+        {:ok,
+         %{
+           require_returned_worktree?: true,
+           strict_provenance?: request["executor_path"] == "pipeline",
+           trusted_artifact_root: scope.artifact_root,
+           trusted_worktree_root: scope.worktree_root
+         }}
+      else
+        {:ok,
+         %{
+           require_returned_worktree?: false,
+           strict_provenance?: false,
+           trusted_artifact_root: scope.workdir,
+           trusted_worktree_root: scope.workdir
+         }}
+      end
     end
   end
 
@@ -605,12 +695,26 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp measure_execution(runtime, executor, callback, request) do
     runtime.measure.(fn ->
-      safely(fn -> invoke_selected(executor, runtime.selector, callback, request) end)
+      with_selector(executor, runtime.selector, fn ->
+        invoke_with_timeout(callback, request, runtime.benchmark.execution_timeout_ms)
+      end)
     end)
   end
 
-  defp invoke_selected(executor, selector, callback, request) do
-    with_selector(executor, selector, fn -> invoke(callback, request) end)
+  defp invoke_with_timeout(callback, request, timeout_ms) do
+    task = Task.async(fn -> safely(fn -> invoke(callback, request) end) end)
+
+    case Task.yield(task, timeout_ms) do
+      {:ok, outcome} ->
+        outcome
+
+      {:exit, reason} ->
+        {:caught, "exit:#{inspect(reason, limit: 20, printable_limit: 500)}"}
+
+      nil ->
+        _ = Task.shutdown(task, :brutal_kill)
+        {:timed_out, timeout_ms}
+    end
   end
 
   defp with_selector(_executor, false, fun), do: fun.()
@@ -673,6 +777,26 @@ defmodule Arbor.Commands.CodingBenchmark do
 
         %{executor: executor, projection: nil, row: row}
     end
+  end
+
+  defp build_execution(
+         executor,
+         pair,
+         _request,
+         {:timed_out, timeout_ms},
+         wall_clock_ms,
+         _runtime,
+         _verification
+       ) do
+    row =
+      failure_row(executor, pair, "executor_timeout", "execution_timeout:#{timeout_ms}",
+        artifact_failed: true,
+        objective_failure: "execution_timeout:#{timeout_ms}",
+        prepared: true,
+        wall_clock_ms: wall_clock_ms
+      )
+
+    %{executor: executor, projection: nil, row: row}
   end
 
   defp build_execution(
@@ -857,7 +981,8 @@ defmodule Arbor.Commands.CodingBenchmark do
           envelope,
           wall_clock_ms,
           runtime,
-          worktree
+          worktree,
+          verification
         )
 
       {:error, reason} ->
@@ -883,7 +1008,8 @@ defmodule Arbor.Commands.CodingBenchmark do
          envelope,
          wall_clock_ms,
          runtime,
-         worktree
+         worktree,
+         verification
        ) do
     observations = observed_tree(envelope.observations, worktree)
 
@@ -905,7 +1031,14 @@ defmodule Arbor.Commands.CodingBenchmark do
         row = %{
           "approval_observations" => approval_observations(semantic["approval"]),
           "artifact_hash_verification" =>
-            artifact_verification(executor, request, envelope.result, projection, worktree),
+            artifact_verification(
+              executor,
+              request,
+              envelope.result,
+              projection,
+              worktree,
+              verification
+            ),
           "base_tree_oid" => pair.fixture["base_tree_oid"],
           "cancellation_observations" =>
             cancellation_observations(
@@ -945,10 +1078,10 @@ defmodule Arbor.Commands.CodingBenchmark do
   defp observed_worktree(result, request, verification) do
     case result_worktree_path(result) do
       {:ok, path} ->
-        canonical_worktree(path, verification.trusted_root)
+        canonical_worktree(path, verification.trusted_worktree_root)
 
       :missing when not verification.require_returned_worktree? ->
-        canonical_worktree(request["workdir"], verification.trusted_root)
+        canonical_worktree(request["workdir"], verification.trusted_worktree_root)
 
       :missing ->
         {:error, "missing_returned_worktree"}
@@ -1043,7 +1176,7 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp objective_result(status, reason), do: %{"reason" => reason, "status" => status}
 
-  defp artifact_verification(executor, request, result, projection, workdir) do
+  defp artifact_verification(executor, request, result, projection, workdir, verification) do
     semantic = projection["semantic"]
     quality = projection["artifact_quality"]
 
@@ -1065,7 +1198,7 @@ defmodule Arbor.Commands.CodingBenchmark do
     tree_verified = match?({:ok, ^expected_tree}, actual_tree)
     paths_verified = match?({:ok, ^expected_paths}, actual_paths)
     input_verified = hash_json(request["normalized_input"]) == request["normalized_input_hash"]
-    graph_hash_verified = graph_hash_verified(executor, result, workdir)
+    graph_hash_verified = graph_hash_verified(executor, result, verification)
 
     status =
       if base_verified and tree_verified and paths_verified and input_verified and
@@ -1094,9 +1227,17 @@ defmodule Arbor.Commands.CodingBenchmark do
 
   defp artifact_expectations_met?(_executor, _quality, _hash), do: false
 
-  defp graph_hash_verified("legacy", _result, _workdir), do: nil
+  defp graph_hash_verified("legacy", _result, _verification), do: nil
 
-  defp graph_hash_verified("pipeline", result, workdir) do
+  defp graph_hash_verified("pipeline", result, %{strict_provenance?: true} = verification) do
+    production_provenance_verified(result, verification.trusted_artifact_root)
+  end
+
+  defp graph_hash_verified("pipeline", result, verification) do
+    scripted_graph_hash_verified(result, verification.trusted_artifact_root)
+  end
+
+  defp scripted_graph_hash_verified(result, workdir) do
     with {:ok, artifacts} <- result_artifacts(result),
          :ok <- contained_artifact_paths(artifacts, workdir),
          hash when is_binary(hash) <- fetch_value(artifacts, "graph_hash", :graph_hash, nil),
@@ -1110,6 +1251,197 @@ defmodule Arbor.Commands.CodingBenchmark do
       _other -> false
     end
   end
+
+  defp production_provenance_verified(result, trusted_root) do
+    with {:ok, artifacts} <- result_artifacts(result),
+         {:ok, paths} <- exact_provenance_paths(artifacts, trusted_root),
+         {:ok, dot} <- read_bounded(paths["coding_pipeline_path"], @max_dot_bytes),
+         {:ok, plan_json} <- read_bounded(paths["coding_plan_path"], @max_json_artifact_bytes),
+         {:ok, manifest_json} <-
+           read_bounded(paths["compile_manifest_path"], @max_json_artifact_bytes),
+         {:ok, plan_map} <- decode_json_object(plan_json),
+         {:ok, plan} <- Plan.new(plan_map),
+         true <- Plan.to_map(plan) == plan_map,
+         {:ok, manifest} <- decode_json_object(manifest_json),
+         :ok <-
+           validate_provenance_identity(
+             artifacts,
+             dot,
+             plan_map,
+             manifest
+           ) do
+      true
+    else
+      _other -> false
+    end
+  rescue
+    _exception -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  defp exact_provenance_paths(artifacts, trusted_root) do
+    with {:ok, %{type: :directory}} <- File.lstat(trusted_root),
+         {:ok, ^trusted_root} <- SafePath.resolve_real(trusted_root),
+         :ok <- exact_artifact_descriptor_keys(artifacts) do
+      Enum.reduce_while(@artifact_filenames, {:ok, %{}}, fn {key, filename}, {:ok, acc} ->
+        atom_key = artifact_atom_key(key)
+        path = fetch_value(artifacts, key, atom_key, nil)
+        expected = Path.join(trusted_root, filename)
+
+        with true <- is_binary(path),
+             {:ok, ^expected} <- SafePath.resolve_within(path, trusted_root),
+             {:ok, %{type: :regular}} <- File.lstat(expected),
+             {:ok, real} <- contained_existing_file(path, trusted_root),
+             true <- real == expected do
+          {:cont, {:ok, Map.put(acc, key, real)}}
+        else
+          _other -> {:halt, {:error, :unexpected_provenance_path}}
+        end
+      end)
+    else
+      _other -> {:error, :invalid_provenance_root}
+    end
+  end
+
+  defp exact_artifact_descriptor_keys(artifacts) do
+    allowed = MapSet.new(~w(
+      coding_plan_path coding_pipeline_path compile_manifest_path compiler_version graph_hash
+    ))
+
+    keys =
+      Enum.reduce_while(artifacts, {:ok, MapSet.new()}, fn {key, _value}, {:ok, acc} ->
+        name = if is_atom(key), do: Atom.to_string(key), else: key
+
+        cond do
+          not is_binary(name) -> {:halt, {:error, :invalid_artifact_descriptor_key}}
+          MapSet.member?(acc, name) -> {:halt, {:error, :duplicate_artifact_descriptor_key}}
+          true -> {:cont, {:ok, MapSet.put(acc, name)}}
+        end
+      end)
+
+    case keys do
+      {:ok, ^allowed} -> :ok
+      _other -> {:error, :invalid_artifact_descriptor_keys}
+    end
+  end
+
+  defp artifact_atom_key("coding_plan_path"), do: :coding_plan_path
+  defp artifact_atom_key("coding_pipeline_path"), do: :coding_pipeline_path
+  defp artifact_atom_key("compile_manifest_path"), do: :compile_manifest_path
+
+  defp read_bounded(path, max_bytes) do
+    with {:ok, %{type: :regular, size: size}} <- File.stat(path),
+         true <- size > 0 and size <= max_bytes,
+         {:ok, content} <- File.read(path),
+         true <- byte_size(content) == size do
+      {:ok, content}
+    else
+      _other -> {:error, :invalid_artifact_file}
+    end
+  end
+
+  defp decode_json_object(content) do
+    case Jason.decode(content) do
+      {:ok, object} when is_map(object) and not is_struct(object) -> {:ok, object}
+      _other -> {:error, :invalid_json_object}
+    end
+  end
+
+  defp validate_provenance_identity(artifacts, dot, plan, manifest) do
+    descriptor_hash = fetch_value(artifacts, "graph_hash", :graph_hash, nil)
+    descriptor_version = fetch_value(artifacts, "compiler_version", :compiler_version, nil)
+    graph_hash = sha256(dot)
+
+    with true <- is_binary(descriptor_hash) and Regex.match?(@hash_pattern, descriptor_hash),
+         true <- descriptor_hash == graph_hash,
+         true <- is_binary(descriptor_version) and String.trim(descriptor_version) != "",
+         :ok <- exact_string_keys(manifest, @compile_manifest_keys),
+         true <- manifest["graph_hash"] == graph_hash,
+         true <- manifest["compiler_version"] == descriptor_version,
+         true <- nonblank_string?(manifest["template_version"]),
+         :ok <- digest_field(manifest, "plan_fingerprint"),
+         true <- manifest["plan_fingerprint"] == hash_json(plan),
+         :ok <- digest_field(manifest, "action_catalog_digest"),
+         :ok <- digest_field(manifest, "execution_manifest_digest"),
+         true <- manifest["plan_version"] == plan["version"],
+         true <- manifest["task_class"] == plan["task_class"],
+         true <- manifest["validation_profile"] == plan["validation_profile"],
+         true <- manifest["review_profile"] == plan["review_profile"],
+         true <- manifest["overlays"] == plan["overlays"],
+         :ok <- string_list(manifest["action_names"]),
+         :ok <- string_list(manifest["handler_types"]),
+         :ok <-
+           validate_execution_manifest(
+             manifest["execution_manifest"],
+             manifest["execution_manifest_digest"],
+             graph_hash
+           ) do
+      :ok
+    else
+      _other -> {:error, :provenance_identity_mismatch}
+    end
+  end
+
+  defp validate_execution_manifest(execution_manifest, expected_digest, graph_hash)
+       when is_map(execution_manifest) and not is_struct(execution_manifest) do
+    expected_keys =
+      case execution_manifest["version"] do
+        2 -> @execution_manifest_v2_keys
+        3 -> @execution_manifest_v3_keys
+        _other -> MapSet.new()
+      end
+
+    with :ok <- exact_string_keys(execution_manifest, expected_keys),
+         true <- execution_manifest["graph_hash"] == graph_hash,
+         :ok <- digest_value(execution_manifest["compiled_graph_hash"]),
+         true <- is_list(execution_manifest["actions"]),
+         true <- is_list(execution_manifest["handlers"]),
+         true <- is_list(execution_manifest["nodes"]),
+         true <- is_list(execution_manifest["capability_uris"]),
+         true <- is_list(execution_manifest["egress"]),
+         true <-
+           execution_manifest["version"] != 3 or is_list(execution_manifest["nested_graphs"]),
+         true <- hash_json(execution_manifest) == expected_digest do
+      :ok
+    else
+      _other -> {:error, :invalid_execution_manifest}
+    end
+  end
+
+  defp validate_execution_manifest(_manifest, _digest, _graph_hash),
+    do: {:error, :invalid_execution_manifest}
+
+  defp exact_string_keys(map, expected) when is_map(map) do
+    keys = Map.keys(map)
+
+    if Enum.all?(keys, &is_binary/1) and MapSet.new(keys) == expected,
+      do: :ok,
+      else: {:error, :invalid_schema_keys}
+  end
+
+  defp exact_string_keys(_map, _expected), do: {:error, :invalid_schema_keys}
+
+  defp digest_field(map, key), do: digest_value(map[key])
+
+  defp digest_value(value) when is_binary(value) do
+    if Regex.match?(@hash_pattern, value), do: :ok, else: {:error, :invalid_digest}
+  end
+
+  defp digest_value(_value), do: {:error, :invalid_digest}
+
+  defp nonblank_string?(value) do
+    is_binary(value) and String.valid?(value) and String.trim(value) != "" and
+      not String.contains?(value, <<0>>)
+  end
+
+  defp string_list(values) when is_list(values) do
+    if Enum.all?(values, &nonblank_string?/1) and values == Enum.sort(Enum.uniq(values)),
+      do: :ok,
+      else: {:error, :invalid_string_list}
+  end
+
+  defp string_list(_values), do: {:error, :invalid_string_list}
 
   defp contained_artifact_paths(artifacts, workdir) do
     Enum.reduce_while(@pipeline_artifact_path_keys, :ok, fn {key, atom_key}, :ok ->
@@ -1466,6 +1798,7 @@ defmodule Arbor.Commands.CodingBenchmark do
   defp canonical_json(false), do: "false"
   defp canonical_json(value) when is_binary(value), do: Jason.encode_to_iodata!(value)
   defp canonical_json(value) when is_integer(value), do: Integer.to_string(value)
+  defp canonical_json(value) when is_float(value), do: Jason.encode_to_iodata!(value)
 
   defp canonical_json(value) when is_list(value) do
     ["[", value |> Enum.map(&canonical_json/1) |> Enum.intersperse(","), "]"]

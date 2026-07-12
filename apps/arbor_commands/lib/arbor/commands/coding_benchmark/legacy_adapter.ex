@@ -5,6 +5,8 @@ defmodule Arbor.Commands.CodingBenchmark.LegacyAdapter do
   The principal is read from `:arbor_commands, :coding_benchmark_principal_id`.
   Tests may replace the executor only through the trusted
   `:coding_benchmark_legacy_executor_module` Application setting.
+  Workspace roots and the execution timeout use the required trusted benchmark
+  runtime configuration documented by `Arbor.Commands.CodingBenchmark.run/2`.
   """
 
   alias Arbor.Agent.Orchestration.LegacyCodingTaskExecutor

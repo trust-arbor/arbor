@@ -1,7 +1,7 @@
 defmodule Arbor.Commands.CodingBenchmark.Adapter do
   @moduledoc false
 
-  alias Arbor.Common.SafePath
+  alias Arbor.Commands.CodingBenchmark.Runtime
 
   @app :arbor_commands
   @principal_key :coding_benchmark_principal_id
@@ -20,12 +20,33 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
           {:ok, map()} | {:error, term()} | {:error, term(), map()}
   def run(request, executor_path, default_executor, executor_config_key) do
     with {:ok, request} <- validate_request(request, executor_path),
+         {:ok, runtime} <- Runtime.load(),
+         :ok <- Runtime.preflight_production(runtime),
+         {:ok, scope} <- execution_scope(request, runtime),
+         request = Map.put(request, "workdir", scope.workdir),
+         :ok <-
+           matching_base(request["workdir"], request["base_commit_oid"], request["base_tree_oid"]),
          {:ok, principal_id} <- configured_principal_id(),
          {:ok, executor} <- configured_executor(executor_config_key, default_executor),
-         {:ok, task, context} <- execution_inputs(request),
+         {:ok, task, context} <- execution_inputs(request, scope, runtime.execution_timeout_ms),
          returned <- executor.run(principal_id, task, context) do
       normalize_return(returned)
     end
+  end
+
+  @spec execution_scope(map(), Runtime.config()) ::
+          {:ok, Runtime.topology()} | {:error, {:benchmark_setup_error, term()}}
+  def execution_scope(request, runtime) when is_map(request) do
+    digest = execution_digest(request)
+    task_id = task_id(request, digest)
+
+    Runtime.prepare_execution(
+      request["workdir"],
+      request["executor_path"],
+      digest,
+      task_id,
+      runtime
+    )
   end
 
   defp validate_request(request, executor_path)
@@ -42,9 +63,8 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
          :ok <- valid_nonblank(request["acp_agent"], :invalid_acp_agent),
          :ok <- valid_input(request["normalized_input"]),
          :ok <- matching_input_hash(request),
-         {:ok, workdir} <- canonical_repo(request["workdir"]),
-         :ok <- matching_base(workdir, request["base_commit_oid"], request["base_tree_oid"]) do
-      {:ok, Map.put(request, "workdir", workdir)}
+         :ok <- valid_nonblank(request["workdir"], :invalid_benchmark_workdir) do
+      {:ok, request}
     end
   end
 
@@ -121,21 +141,9 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
       else: {:error, :normalized_input_hash_mismatch}
   end
 
-  defp canonical_repo(path) when is_binary(path) do
-    with :ok <- SafePath.validate(path),
-         {:ok, real} <- SafePath.resolve_real(path),
-         true <- File.dir?(real),
-         {:ok, ^real} <- git_output(real, ["rev-parse", "--show-toplevel"]) do
-      {:ok, real}
-    else
-      _other -> {:error, :invalid_benchmark_workdir}
-    end
-  end
-
-  defp canonical_repo(_path), do: {:error, :invalid_benchmark_workdir}
-
   defp matching_base(workdir, commit_oid, tree_oid) do
-    with {:ok, ^commit_oid} <-
+    with {:ok, ^workdir} <- git_output(workdir, ["rev-parse", "--show-toplevel"]),
+         {:ok, ^commit_oid} <-
            git_output(workdir, ["rev-parse", "--verify", "#{commit_oid}^{commit}"]),
          {:ok, ^tree_oid} <-
            git_output(workdir, ["rev-parse", "--verify", "#{commit_oid}^{tree}"]) do
@@ -169,26 +177,28 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
     end
   end
 
-  defp execution_inputs(request) do
+  defp execution_inputs(request, scope, execution_timeout_ms) do
     digest = execution_digest(request)
     workdir = request["workdir"]
 
-    with {:ok, worktree_base} <- prepare_worktree_base(workdir, request["executor_path"], digest) do
-      task = %{
-        "acp_agent" => request["acp_agent"],
-        "base_ref" => request["base_commit_oid"],
-        "branch_name" => branch_name(request, digest),
-        "kind" => "coding_change",
-        "open_pr" => false,
-        "repo_path" => workdir,
-        "submit_review" => true,
-        "task" => task_text(request["normalized_input"]),
-        "worktree_base_dir" => worktree_base
-      }
+    task = %{
+      "acp_agent" => request["acp_agent"],
+      "base_ref" => request["base_commit_oid"],
+      "branch_name" => branch_name(request, digest),
+      "kind" => "coding_change",
+      "open_pr" => false,
+      "repo_path" => workdir,
+      "submit_review" => true,
+      "task" => task_text(request["normalized_input"]),
+      "worktree_base_dir" => scope.worktree_root
+    }
 
-      context = %{"task_id" => task_id(request, digest)}
-      {:ok, task, context}
-    end
+    context = %{
+      "task_id" => task_id(request, digest),
+      "timeout" => execution_timeout_ms
+    }
+
+    {:ok, task, context}
   end
 
   defp execution_digest(request) do
@@ -214,38 +224,6 @@ defmodule Arbor.Commands.CodingBenchmark.Adapter do
 
   defp task_text(%{"objective" => objective, "acceptance_criteria" => criteria}) do
     objective <> "\n\nAcceptance criteria:\n" <> Enum.map_join(criteria, "\n", &"- #{&1}")
-  end
-
-  defp prepare_worktree_base(workdir, executor_path, digest) do
-    components = [".arbor-coding-benchmark", executor_path, digest]
-
-    with {:ok, path} <- create_directories(workdir, components),
-         {:ok, real} <- SafePath.resolve_real(path),
-         {:ok, ^real} <- SafePath.resolve_within(real, workdir) do
-      {:ok, real}
-    else
-      _other -> {:error, :invalid_benchmark_worktree_base}
-    end
-  end
-
-  defp create_directories(root, components) do
-    Enum.reduce_while(components, {:ok, root}, fn component, {:ok, parent} ->
-      child = Path.join(parent, component)
-
-      case ensure_directory(child) do
-        :ok -> {:cont, {:ok, child}}
-        {:error, _reason} = error -> {:halt, error}
-      end
-    end)
-  end
-
-  defp ensure_directory(path) do
-    case File.lstat(path) do
-      {:ok, %{type: :directory}} -> :ok
-      {:ok, _stat} -> {:error, :unsafe_worktree_base_component}
-      {:error, :enoent} -> File.mkdir(path)
-      {:error, reason} -> {:error, reason}
-    end
   end
 
   defp normalize_return({:ok, :pending_approval, approval_id}) when is_binary(approval_id) do
