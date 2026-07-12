@@ -1,12 +1,10 @@
 defmodule Arbor.Orchestrator.MixActionDotTest do
   @moduledoc """
-  End-to-end exercise: a DOT pipeline that runs the `mix_test` Action
-  against a tiny generated mix project, then routes on `passed`.
+  End-to-end exercise of the production `mix_test` boundary while the
+  spawn-capable shell backend remains unavailable.
 
-  Verifies the full chain: ActionRegistry registration → ExecHandler
-  resolves `action="mix_test"` → action executes against the workdir
-  → return values flow into `context.exec.<node_id>.<key>` → diamond
-  gate evaluates the boolean → conditional edges route correctly.
+  Verifies that ExecHandler resolves the action but the pipeline fails closed
+  at the Mix action instead of silently routing either fixture as passed.
 
   Slow because each test spins up `mix test` in a freshly-created
   tiny project (~3 s warmup per invocation). Tagged `:slow` to keep
@@ -73,19 +71,20 @@ defmodule Arbor.Orchestrator.MixActionDotTest do
     :ok
   end
 
-  test "passing test routes through mark_pass branch",
+  test "passing fixture fails closed before routing without a spawn backend",
        %{project_path: project_path, logs_root: logs_root} do
     dot = build_dot(project_path)
 
     assert {:ok, result} = Arbor.Orchestrator.run(dot, logs_root: logs_root)
 
-    assert "run_test" in result.completed_nodes
-    assert "mark_pass" in result.completed_nodes
+    assert result.completed_nodes == ["start", "run_test"]
+    assert result.final_outcome.status == :fail
+    assert result.final_outcome.failure_reason =~ "spawn_backend_unavailable"
+    refute "mark_pass" in result.completed_nodes
     refute "mark_fail" in result.completed_nodes
-    assert "done" in result.completed_nodes
   end
 
-  test "failing test routes through mark_fail branch",
+  test "failing fixture also fails closed before routing without a spawn backend",
        %{project_path: project_path, logs_root: logs_root} do
     add_failing_test(project_path)
 
@@ -93,10 +92,11 @@ defmodule Arbor.Orchestrator.MixActionDotTest do
 
     assert {:ok, result} = Arbor.Orchestrator.run(dot, logs_root: logs_root)
 
-    assert "run_test" in result.completed_nodes
-    assert "mark_fail" in result.completed_nodes
+    assert result.completed_nodes == ["start", "run_test"]
+    assert result.final_outcome.status == :fail
+    assert result.final_outcome.failure_reason =~ "spawn_backend_unavailable"
     refute "mark_pass" in result.completed_nodes
-    assert "done" in result.completed_nodes
+    refute "mark_fail" in result.completed_nodes
   end
 
   # ── Pipeline shape ────────────────────────────────────────────────

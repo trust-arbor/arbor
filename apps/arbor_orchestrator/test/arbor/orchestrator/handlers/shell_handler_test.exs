@@ -51,6 +51,18 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
     end
 
     test "security regression: standalone handler uses prepared execution without registry" do
+      registry_pid = Process.whereis(Arbor.Shell.ExecutionRegistry)
+
+      if registry_pid do
+        GenServer.stop(registry_pid)
+
+        on_exit(fn ->
+          unless Process.whereis(Arbor.Shell.ExecutionRegistry) do
+            {:ok, _pid} = Arbor.Shell.ExecutionRegistry.start_link([])
+          end
+        end)
+      end
+
       refute Process.whereis(Arbor.Shell.ExecutionRegistry)
       node = make_node("standalone_prepared", %{"command" => "echo standalone-owned"})
 
