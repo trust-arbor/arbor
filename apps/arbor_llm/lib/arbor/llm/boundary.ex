@@ -5,6 +5,7 @@ defmodule Arbor.LLM.Boundary do
 
   @max_response_bytes 16_777_216
   @max_stream_event_bytes 1_048_576
+  @max_stream_events 100_000
   @max_embedding_inputs 2_048
   @max_embedding_dimensions 8_192
   @max_embedding_input_bytes 4_194_304
@@ -29,6 +30,17 @@ defmodule Arbor.LLM.Boundary do
   @finish_reasons [:stop, :length, :tool_calls, :content_filter, :error, :other]
   @stream_types [:start, :delta, :tool_call, :tool_result, :step_finish, :finish, :error]
 
+  defmodule StreamTracker do
+    @moduledoc false
+    @enforce_keys [:budget, :max_event_bytes]
+    defstruct [:budget, :max_event_bytes]
+
+    @type t :: %__MODULE__{
+            budget: Arbor.LLM.ResponseBudget.Tracker.t(),
+            max_event_bytes: pos_integer()
+          }
+  end
+
   @spec completion(term(), term()) :: {:ok, Response.t()} | {:error, term()}
   def completion(result, opts \\ []) do
     with {:ok, maximum} <- response_maximum(opts) do
@@ -42,20 +54,32 @@ defmodule Arbor.LLM.Boundary do
 
   @spec stream_event(term(), term()) :: {:ok, StreamEvent.t()} | {:error, term()}
   def stream_event(event, opts \\ []) do
-    with {:ok, maximum} <- stream_event_maximum(opts),
-         {:ok, normalized} <- normalize_stream_event(event),
+    case measure_stream_event(event, opts) do
+      {:ok, normalized, _measurements} -> {:ok, normalized}
+      {:error, reason} -> {:error, {:invalid_stream_event, reason}}
+    end
+  end
+
+  defp measure_stream_event(event, opts) do
+    with {:ok, response_maximum} <- response_maximum(opts),
+         {:ok, event_maximum} <- stream_event_maximum(opts),
+         maximum = min(response_maximum, event_maximum) do
+      measure_stream_event_with_maximum(event, maximum)
+    end
+  end
+
+  defp measure_stream_event_with_maximum(event, maximum) do
+    with {:ok, normalized} <- normalize_stream_event(event),
          true <- normalized.type in @stream_types or {:error, :invalid_stream_event_type},
-         :ok <-
-           ResponseBudget.validate(Map.from_struct(normalized),
+         {:ok, measurements} <-
+           ResponseBudget.measure(Map.from_struct(normalized),
              max_bytes: maximum,
              max_nodes: 10_000,
              max_depth: 32,
              max_map_keys: 2_000,
              max_list_items: 10_000
            ) do
-      {:ok, normalized}
-    else
-      {:error, reason} -> {:error, {:invalid_stream_event, reason}}
+      {:ok, normalized, measurements}
     end
   end
 
@@ -64,7 +88,16 @@ defmodule Arbor.LLM.Boundary do
 
   @spec embedding_response(term(), term()) ::
           {:ok, [[number()]], map()} | {:error, term()}
-  def embedding_response(body, expected_count)
+  def embedding_response(body, expected_count) do
+    with {:ok, indexed, usage} <- embedding_response_with_indices(body, expected_count) do
+      {:ok, Enum.map(indexed, & &1.embedding), usage}
+    end
+  end
+
+  @doc false
+  @spec embedding_response_with_indices(term(), term()) ::
+          {:ok, [%{index: non_neg_integer(), embedding: [number()]}], map()} | {:error, term()}
+  def embedding_response_with_indices(body, expected_count)
       when is_integer(expected_count) and expected_count > 0 and
              expected_count <= @max_embedding_inputs do
     with :ok <- ResponseBudget.validate(body, @response_limits),
@@ -78,13 +111,105 @@ defmodule Arbor.LLM.Boundary do
            map_size(indexed) == expected_count or
              {:error, {:embedding_indices_incomplete, expected_count}},
          true <- (is_integer(dimensions) and dimensions > 0) or {:error, :empty_embedding_vector} do
-      ordered = for index <- 0..(expected_count - 1), do: Map.fetch!(indexed, index)
+      ordered =
+        for index <- 0..(expected_count - 1) do
+          %{index: index, embedding: Map.fetch!(indexed, index)}
+        end
+
       {:ok, ordered, usage}
     end
   end
 
-  def embedding_response(_body, _expected_count),
+  def embedding_response_with_indices(_body, _expected_count),
     do: {:error, {:invalid_expected_embedding_count, @max_embedding_inputs}}
+
+  @doc false
+  @spec stream_tracker(term()) :: {:ok, StreamTracker.t()} | {:error, term()}
+  def stream_tracker(opts) do
+    with {:ok, maximum} <- response_maximum(opts),
+         {:ok, event_maximum} <- stream_event_maximum(opts),
+         {:ok, budget} <-
+           ResponseBudget.tracker(
+             max_bytes: maximum,
+             max_nodes: 100_000,
+             max_depth: 32,
+             max_map_keys: 10_000,
+             max_list_items: 100_000
+           ) do
+      {:ok,
+       %StreamTracker{
+         budget: budget,
+         max_event_bytes: min(maximum, event_maximum)
+       }}
+    end
+  end
+
+  @doc false
+  @spec stream_event_limit(term()) :: {:ok, pos_integer()} | {:error, term()}
+  def stream_event_limit(opts),
+    do: bounded_option(opts, [:max_stream_events, :max_events], @max_stream_events)
+
+  @doc false
+  @spec track_stream_event(StreamTracker.t(), term(), term()) ::
+          {:ok, StreamEvent.t()} | {:error, term()}
+  def track_stream_event(%StreamTracker{} = tracker, event, _opts) do
+    with {:ok, normalized, measurements} <-
+           measure_stream_event_with_maximum(event, tracker.max_event_bytes),
+         :ok <-
+           ResponseBudget.track_measurements(tracker.budget, measurements, :stream_events) do
+      {:ok, normalized}
+    else
+      {:error, {:response_budget_exceeded, _scope, _key, _maximum} = reason} ->
+        {:error, reason}
+
+      {:error, reason} ->
+        {:error, {:invalid_stream_event, reason}}
+    end
+  end
+
+  @doc false
+  @spec narrow_options(term(), term()) :: {:ok, keyword()} | {:error, term()}
+  def narrow_options(caller_opts, delegated_opts) do
+    with {:ok, caller} <- collect_options(caller_opts, %{}, 0),
+         {:ok, delegated} <- collect_options(delegated_opts, %{}, 0),
+         {:ok, maximum} <-
+           narrow_ceiling(
+             caller,
+             delegated,
+             [:max_response_bytes, :max_output_bytes, :arbor_max_response_bytes],
+             @max_response_bytes
+           ),
+         {:ok, event_maximum} <-
+           narrow_ceiling(
+             caller,
+             delegated,
+             [:max_stream_event_bytes],
+             min(maximum, @max_stream_event_bytes)
+           ),
+         {:ok, max_events} <-
+           narrow_ceiling(
+             caller,
+             delegated,
+             [:max_stream_events, :max_events],
+             @max_stream_events
+           ) do
+      closed =
+        delegated_opts
+        |> Keyword.drop([
+          :max_response_bytes,
+          :max_output_bytes,
+          :arbor_max_response_bytes,
+          :max_stream_event_bytes,
+          :max_stream_events,
+          :max_events
+        ])
+        |> Keyword.put(:max_stream_events, max_events)
+        |> Keyword.put(:max_stream_event_bytes, min(event_maximum, maximum))
+        |> Keyword.put(:max_response_bytes, maximum)
+
+      {:ok, closed}
+    end
+  end
 
   defp validate_response(response, maximum) do
     projection = Map.from_struct(response)
@@ -185,7 +310,7 @@ defmodule Arbor.LLM.Boundary do
     index = Map.get(entry, "index", Map.get(entry, :index))
     vector = Map.get(entry, "embedding", Map.get(entry, :embedding))
 
-    with :ok <- validate_embedding_index(index, expected_count, indexed),
+    with :ok <- validate_embedding_index(index, expected_count, indexed, count),
          {:ok, next_dimensions} <- validate_embedding_vector(vector, 0),
          true <-
            is_nil(dimensions) or dimensions == next_dimensions or
@@ -212,11 +337,12 @@ defmodule Arbor.LLM.Boundary do
   defp collect_embedding_entries(_improper, _expected_count, _indexed, _dimensions, _count),
     do: {:error, :proper_embedding_entries_required}
 
-  defp validate_embedding_index(index, expected_count, indexed) do
+  defp validate_embedding_index(index, expected_count, indexed, expected_index) do
     cond do
       not is_integer(index) -> {:error, :embedding_index_must_be_integer}
       index < 0 or index >= expected_count -> {:error, {:embedding_index_out_of_bounds, index}}
       Map.has_key?(indexed, index) -> {:error, {:duplicate_embedding_index, index}}
+      index != expected_index -> {:error, {:embedding_index_reordered, expected_index, index}}
       true -> :ok
     end
   end
@@ -328,33 +454,35 @@ defmodule Arbor.LLM.Boundary do
 
   defp bounded_option(opts, keys, hard_maximum) do
     with {:ok, options} <- collect_options(opts, %{}, 0) do
-      case first_option(keys, options) do
-        :missing ->
-          {:ok, hard_maximum}
+      values = present_options(options, keys)
 
-        {:ok, supplied} when is_integer(supplied) and supplied > 0 ->
-          {:ok, min(supplied, hard_maximum)}
-
-        {:ok, _supplied} ->
-          {:error, :positive_boundary_limit_required}
+      case Enum.find(values, &(not (is_integer(&1) and &1 > 0))) do
+        nil -> {:ok, Enum.reduce(values, hard_maximum, &min/2)}
+        _invalid -> {:error, :positive_boundary_limit_required}
       end
     end
   end
 
-  defp first_option([], _options), do: :missing
+  defp narrow_ceiling(caller, delegated, keys, default) do
+    values = present_options(caller, keys) ++ present_options(delegated, keys)
 
-  defp first_option([key | rest], options) do
-    case Map.fetch(options, key) do
-      {:ok, value} -> {:ok, value}
-      :error -> first_option(rest, options)
+    case Enum.find(values, &(not (is_integer(&1) and &1 > 0))) do
+      nil -> {:ok, Enum.reduce(values, default, &min/2)}
+      _invalid -> {:error, :positive_boundary_limit_required}
     end
+  end
+
+  defp present_options(options, keys) do
+    Enum.flat_map(keys, &Map.get(options, &1, []))
   end
 
   defp collect_options([], options, _count), do: {:ok, options}
   defp collect_options(_opts, _options, count) when count >= 128, do: {:error, :too_many_options}
 
-  defp collect_options([{key, value} | rest], options, count) when is_atom(key),
-    do: collect_options(rest, Map.put(options, key, value), count + 1)
+  defp collect_options([{key, value} | rest], options, count) when is_atom(key) do
+    next = Map.update(options, key, [value], &[value | &1])
+    collect_options(rest, next, count + 1)
+  end
 
   defp collect_options(_improper_or_non_keyword, _options, _count),
     do: {:error, :keyword_options_required}

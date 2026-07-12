@@ -26,6 +26,20 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
 
   @impl true
   def run(input, opts \\ []) do
+    started_at = System.monotonic_time(:millisecond)
+
+    with :ok <- RetrievalSupport.validate_opts(opts),
+         {:ok, timeout} <-
+           RetrievalSupport.positive_integer_option(opts, :timeout, @default_timeout) do
+      Arbor.LLM.run_with_deadline(
+        fn -> do_run(input, opts, timeout, started_at) end,
+        timeout,
+        {:hybrid_deadline_exceeded, timeout}
+      )
+    end
+  end
+
+  defp do_run(input, opts, timeout, started_at) do
     with :ok <- RetrievalSupport.validate_opts(opts),
          {:ok, index_path} <- RetrievalSupport.required_string(opts, :index_path),
          {:ok, prompt} <- RetrievalSupport.extract_prompt(input),
@@ -44,8 +58,6 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
            ),
          {:ok, base_url} <-
            RetrievalSupport.endpoint_option(opts, :base_url, @default_base_url, :base),
-         {:ok, timeout} <-
-           RetrievalSupport.positive_integer_option(opts, :timeout, @default_timeout),
          {:ok, embed_fn} <-
            RetrievalSupport.callback_option(opts, :embed_fn, 4, &default_embed/4),
          {:ok, router_fn} <-
@@ -63,7 +75,8 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
         base_url,
         timeout,
         embed_fn,
-        router_fn
+        router_fn,
+        started_at
       )
     end
   end
@@ -80,10 +93,9 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrieval do
          base_url,
          timeout,
          embed_fn,
-         router_fn
+         router_fn,
+         started_at
        ) do
-    started_at = System.monotonic_time(:millisecond)
-
     with {:ok, candidates} <-
            recall_stage(
              actions,

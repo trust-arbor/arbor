@@ -96,6 +96,32 @@ defmodule Arbor.AI.Eval.Graders.IntentConformanceTest do
     assert result.detail =~ "exact_unit_score_required"
   end
 
+  test "security regression: oversized judge output cannot truncate into an accepted verdict" do
+    valid =
+      Jason.encode!(%{
+        "phase_coverage" => 1.0,
+        "decision_fidelity" => 1.0,
+        "loop_correctness" => 1.0,
+        "error_handling" => 1.0,
+        "handler_types" => 1.0,
+        "prompt_relevance" => 1.0,
+        "overall" => 1.0,
+        "brief_rationale" => "valid prefix"
+      })
+
+    oversized = valid <> String.duplicate(" ", 32_769 - byte_size(valid))
+
+    result =
+      IntentConformance.grade("digraph {}", nil,
+        sample_input: "A workflow",
+        judge_fn: fn _, _, _, _, _ -> {:ok, oversized} end
+      )
+
+    assert result.score == 0.0
+    refute result.passed
+    assert result.detail == "Judge error: response exceeds 32768 bytes"
+  end
+
   test "fails closed on empty or malformed input without calling the judge" do
     judge_fn = fn _, _, _, _, _ ->
       flunk("judge should not be called")

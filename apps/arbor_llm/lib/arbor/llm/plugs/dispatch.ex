@@ -22,6 +22,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
 
   use Arbor.LLM.Plug
   alias Arbor.LLM.Call
+  alias Arbor.LLM.Boundary
   alias Arbor.LLM.ProviderError
   alias Arbor.LLM.ResponseBudget
   alias Arbor.LLM.Adapter.ReqLLM.BoundedStream
@@ -139,7 +140,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
         {:error, {:invalid_response_body, reason}}
 
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-        Arbor.LLM.decode_embedding_response(body, length(texts))
+        Boundary.embedding_response_with_indices(body, length(texts))
 
       {:ok, %Req.Response{status: status, body: body}} ->
         {:error,

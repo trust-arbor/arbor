@@ -329,7 +329,8 @@ defmodule Arbor.LLM.Eval.SubjectTest do
             :did_not_terminate
         end
 
-      assert result == {:error, {:stream_limit_exceeded, :events, 8}}
+      assert result ==
+               {:error, {:stream_collection_failed, {:stream_limit_exceeded, :events, 8}}}
     end
 
     test "enforces an absolute elapsed deadline on a continuously active stream" do
@@ -340,6 +341,31 @@ defmodule Arbor.LLM.Eval.SubjectTest do
                stream: true,
                timeout: 25
              ) == {:error, {:stream_deadline_exceeded, 25}}
+    end
+
+    test "security regression: timed out streams leave no late owner-stamped replies" do
+      for _ <- 1..10 do
+        assert Subject.run("hello",
+                 client: client(),
+                 provider: "eval_test",
+                 model: "active-stream",
+                 stream: true,
+                 timeout: 10
+               ) == {:error, {:stream_deadline_exceeded, 10}}
+      end
+
+      Process.sleep(30)
+      {:messages, messages} = Process.info(self(), :messages)
+
+      refute Enum.any?(messages, fn
+               {ref, kind, _value, _completed_mono}
+               when is_reference(ref) and
+                      kind in [:event, :done, :stream_error, :producer_error] ->
+                 true
+
+               _other ->
+                 false
+             end)
     end
 
     test "security regression: nonstreaming adapters share one owned absolute deadline" do

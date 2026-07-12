@@ -236,7 +236,7 @@ defmodule Arbor.LLM.HighLevelApiTest do
 
         "object-events" ->
           Stream.repeatedly(fn -> %StreamEvent{type: :start, data: %{}} end)
-          |> Stream.take(10_001)
+          |> Stream.take(4_001)
 
         "object-depth" ->
           body = ~s({"value":) <> String.duplicate("[", 33)
@@ -251,9 +251,9 @@ defmodule Arbor.LLM.HighLevelApiTest do
         "object-linear" ->
           spaces =
             Stream.repeatedly(fn ->
-              %StreamEvent{type: :delta, data: %{text: String.duplicate(" ", 100)}}
+              %StreamEvent{type: :delta, data: %{text: String.duplicate(" ", 50)}}
             end)
-            |> Stream.take(9_998)
+            |> Stream.take(1_998)
 
           Stream.concat(spaces, [
             %StreamEvent{type: :delta, data: %{text: ~s({"ok":true})}},
@@ -331,6 +331,30 @@ defmodule Arbor.LLM.HighLevelApiTest do
              )
 
     assert response.text =~ "user:hi"
+  end
+
+  test "security regression: facade response ceilings cannot be widened by client options" do
+    client =
+      Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
+
+    assert {:error, {:invalid_completion_response, {:text, :bounded_string_required, 16}}} =
+             LLM.generate(
+               client: client,
+               model: "demo",
+               prompt: "caller ceiling",
+               max_response_bytes: 16,
+               client_opts: [max_response_bytes: 16_384]
+             )
+
+    assert {:error, {:invalid_completion_response, {:text, :bounded_string_required, 16}}} =
+             LLM.generate(
+               client: client,
+               model: "demo",
+               prompt: "duplicate ceiling",
+               max_response_bytes: 16,
+               max_response_bytes: 16_384,
+               client_opts: [max_response_bytes: 16_384]
+             )
   end
 
   test "generate accepts messages with optional system" do
@@ -462,7 +486,7 @@ defmodule Arbor.LLM.HighLevelApiTest do
 
     for {model, expected_reason} <- [
           {"object-bytes", {:object_stream_limit_exceeded, :bytes, 1_048_576}},
-          {"object-events", {:object_stream_limit_exceeded, :events, 10_000}},
+          {"object-events", {:object_stream_limit_exceeded, :events, 4_000}},
           {"object-depth", {:object_stream_limit_exceeded, :depth, 32}},
           {"object-multiple", :multiple_object_stream_values},
           {"object-malformed", :malformed_object_stream_json}
@@ -656,6 +680,35 @@ defmodule Arbor.LLM.HighLevelApiTest do
              )
   end
 
+  test "security regression: abort checks and object validation share the public deadline" do
+    client =
+      Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
+
+    assert {:error, %RequestTimeoutError{timeout_ms: 5}} =
+             LLM.generate(
+               client: client,
+               model: "demo",
+               prompt: "hi",
+               timeout_ms: 5,
+               abort?: fn ->
+                 Process.sleep(40)
+                 false
+               end
+             )
+
+    assert {:error, %RequestTimeoutError{timeout_ms: 5}} =
+             LLM.generate_object(
+               client: client,
+               model: "json-model",
+               prompt: "hi",
+               timeout_ms: 5,
+               validate_object: fn _object ->
+                 Process.sleep(40)
+                 :ok
+               end
+             )
+  end
+
   test "stream raises AbortError when abort signal triggers after stream starts" do
     client =
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
@@ -699,6 +752,24 @@ defmodule Arbor.LLM.HighLevelApiTest do
     assert Process.alive?(producer)
     refute_receive :hostile_cancel_called
     send(producer, :stop)
+  end
+
+  test "security regression: stale controller finalization has one bounded total deadline" do
+    controller = spawn(fn -> Process.sleep(:infinity) end)
+
+    stale = %Arbor.LLM.OwnedStream{
+      controller: controller,
+      producer: controller,
+      token: make_ref(),
+      deadline_ms: System.monotonic_time(:millisecond) + 5_000,
+      timeout_ms: 5_000
+    }
+
+    task = Task.async(fn -> Arbor.LLM.OwnedStream.cancel(stale) end)
+    assert {:ok, :ok} = Task.yield(task, 600)
+
+    monitor = Process.monitor(controller)
+    assert_receive {:DOWN, ^monitor, :process, ^controller, _reason}, 200
   end
 
   test "security regression: Client.stream cleanup covers raise, halt, take, and exhaustion" do

@@ -24,6 +24,50 @@ defmodule Arbor.LLM.ResponseBudget do
           required(:max_list_items) => pos_integer()
         }
 
+  defmodule Tracker do
+    @moduledoc false
+
+    @enforce_keys [:limits, :counters]
+    defstruct [:limits, :counters]
+
+    @type t :: %__MODULE__{limits: map(), counters: reference()}
+  end
+
+  @doc false
+  @spec tracker(term()) :: {:ok, Tracker.t()} | {:error, term()}
+  def tracker(opts) do
+    with {:ok, limits, _normalized} <- normalize_limits(opts) do
+      {:ok, %Tracker{limits: limits, counters: :atomics.new(4, [])}}
+    end
+  end
+
+  @doc false
+  @spec track(Tracker.t(), term(), atom()) :: :ok | {:error, term()}
+  def track(tracker, term, scope \\ :response)
+
+  def track(%Tracker{} = tracker, term, scope) when is_atom(scope) do
+    with {:ok, measurements} <- measure(term, Map.to_list(tracker.limits)) do
+      track_measurements(tracker, measurements, scope)
+    end
+  end
+
+  def track(_tracker, _term, _scope), do: {:error, {:invalid_budget, :tracker_required}}
+
+  @doc false
+  @spec track_measurements(Tracker.t(), map(), atom()) :: :ok | {:error, term()}
+  def track_measurements(%Tracker{} = tracker, measurements, scope)
+      when is_map(measurements) and is_atom(scope) do
+    with :ok <- track_measurement(tracker, 1, :nodes, measurements.nodes, scope),
+         :ok <- track_measurement(tracker, 2, :bytes, measurements.bytes, scope),
+         :ok <- track_measurement(tracker, 3, :map_keys, measurements.map_keys, scope),
+         :ok <- track_measurement(tracker, 4, :list_items, measurements.list_items, scope) do
+      :ok
+    end
+  end
+
+  def track_measurements(_tracker, _measurements, _scope),
+    do: {:error, {:invalid_budget, :measurements_required}}
+
   @spec validate(term(), term()) :: :ok | {:error, term()}
   def validate(term, opts) do
     case measure(term, opts) do
@@ -534,6 +578,23 @@ defmodule Arbor.LLM.ResponseBudget do
       do: {:ok, %{stats | list_items: stats.list_items + amount}},
       else: {:error, {:decoded_term_limit_exceeded, :list_items, limits.max_list_items}}
   end
+
+  defp track_measurement(_tracker, _index, _key, 0, _scope), do: :ok
+
+  defp track_measurement(%Tracker{} = tracker, index, key, amount, scope)
+       when is_integer(amount) and amount > 0 do
+    retained = :atomics.add_get(tracker.counters, index, amount)
+    maximum = Map.fetch!(tracker.limits, tracker_limit_key(key))
+
+    if retained <= maximum,
+      do: :ok,
+      else: {:error, {:response_budget_exceeded, scope, key, maximum}}
+  end
+
+  defp tracker_limit_key(:nodes), do: :max_nodes
+  defp tracker_limit_key(:bytes), do: :max_bytes
+  defp tracker_limit_key(:map_keys), do: :max_map_keys
+  defp tracker_limit_key(:list_items), do: :max_list_items
 
   defp atom_bytes(nil), do: 4
   defp atom_bytes(true), do: 4

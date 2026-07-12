@@ -5,10 +5,10 @@ defmodule Arbor.LLM.OwnedStream do
 
   @claim_timeout_ms 100
   @cleanup_grace_ms 100
+  @finalize_timeout_ms 250
 
-  # `stream` and `cancel` remain only so stale caller-built structs fail as
-  # values instead of becoming process-control capabilities. Enumerable never
-  # trusts those fields; only the private controller token is authoritative.
+  # The token is an opaque bearer reference. The legacy fields remain so stale
+  # caller-built structs fail as values instead of becoming process controls.
   defstruct [:producer, :controller, :token, :deadline_ms, :timeout_ms, :stream, :cancel]
 
   @type t :: %__MODULE__{}
@@ -32,62 +32,91 @@ defmodule Arbor.LLM.OwnedStream do
   def claim(%__MODULE__{controller: controller, token: token})
       when is_pid(controller) and is_reference(token) do
     ref = make_ref()
-    send(controller, {token, :claim, self(), ref})
+    reply_alias = :erlang.alias()
+    monitor = Process.monitor(controller)
+    send(controller, {token, :claim, self(), reply_alias, ref})
 
-    receive do
-      {^token, ^ref, :claimed} -> :ok
-      {^token, ^ref, {:error, reason}} -> {:error, reason}
-    after
-      @claim_timeout_ms -> {:error, :invalid_owned_stream}
-    end
+    result =
+      receive do
+        {^ref, :claimed} ->
+          :ok
+
+        {^ref, {:error, reason}} ->
+          {:error, reason}
+
+        {:DOWN, ^monitor, :process, ^controller, _reason} ->
+          {:error, :invalid_owned_stream}
+      after
+        @claim_timeout_ms -> {:error, :invalid_owned_stream}
+      end
+
+    :erlang.unalias(reply_alias)
+    Process.demonitor(monitor, [:flush])
+    result
   end
 
   def claim(_stream), do: {:error, :invalid_owned_stream}
 
   @doc false
-  def demand(%__MODULE__{controller: controller, token: token, deadline_ms: deadline_ms}) do
+  def demand(%__MODULE__{
+        controller: controller,
+        token: token,
+        deadline_ms: deadline_ms
+      })
+      when is_pid(controller) and is_reference(token) and is_integer(deadline_ms) do
     ref = make_ref()
-    send(controller, {token, :demand, self(), ref})
+    reply_alias = :erlang.alias()
+    monitor = Process.monitor(controller)
+    send(controller, {token, :demand, self(), reply_alias, ref})
     remaining = max(deadline_ms - System.monotonic_time(:millisecond), 0)
 
-    receive do
-      {^token, ^ref, :item, item, completed_mono} ->
-        if completed_mono <= deadline_ms,
-          do: {:item, item},
-          else: {:timeout, :late_item}
+    result =
+      receive do
+        {^ref, :item, item, completed_mono} ->
+          if completed_mono <= deadline_ms,
+            do: {:item, item},
+            else: {:timeout, :late_item}
 
-      {^token, ^ref, :done, completed_mono} ->
-        if completed_mono <= deadline_ms,
-          do: :done,
-          else: {:timeout, :late_completion}
+        {^ref, :done, completed_mono} ->
+          if completed_mono <= deadline_ms,
+            do: :done,
+            else: {:timeout, :late_completion}
 
-      {^token, ^ref, {:error, reason}, completed_mono} ->
-        if completed_mono <= deadline_ms,
-          do: {:error, reason},
-          else: {:timeout, :late_error}
+        {^ref, {:error, reason}, completed_mono} ->
+          if completed_mono <= deadline_ms,
+            do: {:error, reason},
+            else: {:timeout, :late_error}
 
-      {^token, ^ref, :timeout} ->
-        {:timeout, :deadline}
-    after
-      remaining -> {:timeout, :deadline}
-    end
+        {^ref, :timeout} ->
+          {:timeout, :deadline}
+
+        {:DOWN, ^monitor, :process, ^controller, reason} ->
+          {:error, {:owned_stream_controller_down, bounded_reason(reason)}}
+      after
+        remaining -> {:timeout, :deadline}
+      end
+
+    :erlang.unalias(reply_alias)
+    Process.demonitor(monitor, [:flush])
+    result
   end
+
+  def demand(_stream), do: {:error, :invalid_owned_stream}
 
   @doc false
   def finalize(%__MODULE__{controller: controller, token: token})
       when is_pid(controller) and is_reference(token) do
     ref = make_ref()
+    reply_alias = :erlang.alias()
     monitor = Process.monitor(controller)
-    send(controller, {token, :finalize, self(), ref})
+    deadline = System.monotonic_time(:millisecond) + @finalize_timeout_ms
+    send(controller, {token, :finalize, reply_alias, ref})
 
-    receive do
-      {^token, ^ref, :finalized} ->
-        await_controller_down(controller, monitor)
-        :ok
+    result = await_finalized(controller, monitor, ref, deadline)
 
-      {:DOWN, ^monitor, :process, ^controller, _reason} ->
-        :ok
-    end
+    :erlang.unalias(reply_alias)
+    Process.demonitor(monitor, [:flush])
+    result
   end
 
   def finalize(_stream), do: {:error, :invalid_owned_stream}
@@ -120,8 +149,8 @@ defmodule Arbor.LLM.OwnedStream do
   defp safe_keyword_fetch(_improper, _key), do: {:error, :keyword_required}
 
   defp start_controller(source, deadline_ms, timeout_ms, validator) do
-    caller = self()
     ready_ref = make_ref()
+    ready_alias = :erlang.alias()
     token = make_ref()
 
     {controller, startup_monitor} =
@@ -135,7 +164,7 @@ defmodule Arbor.LLM.OwnedStream do
             :monitor
           ])
 
-        send(caller, {ready_ref, controller, producer})
+        send(ready_alias, {ready_ref, controller, producer})
 
         controller_loop(%{
           token: token,
@@ -151,24 +180,38 @@ defmodule Arbor.LLM.OwnedStream do
         })
       end)
 
-    receive do
-      {^ready_ref, ^controller, producer} ->
-        Process.demonitor(startup_monitor, [:flush])
+    result =
+      receive do
+        {^ready_ref, ^controller, producer} ->
+          Process.demonitor(startup_monitor, [:flush])
 
-        {:ok,
-         %__MODULE__{
-           producer: producer,
-           controller: controller,
-           token: token,
-           deadline_ms: deadline_ms,
-           timeout_ms: timeout_ms
-         }}
-    after
-      @claim_timeout_ms ->
-        if Process.alive?(controller), do: Process.exit(controller, :kill)
-        await_controller_down(controller, startup_monitor)
-        {:error, :owned_stream_start_timeout}
-    end
+          {:ok,
+           %__MODULE__{
+             producer: producer,
+             controller: controller,
+             token: token,
+             deadline_ms: deadline_ms,
+             timeout_ms: timeout_ms
+           }}
+
+        {:DOWN, ^startup_monitor, :process, ^controller, _reason} ->
+          {:error, :owned_stream_start_failed}
+      after
+        @claim_timeout_ms ->
+          if Process.alive?(controller), do: Process.exit(controller, :kill)
+
+          await_down_until(
+            controller,
+            startup_monitor,
+            System.monotonic_time(:millisecond) + @cleanup_grace_ms
+          )
+
+          {:error, :owned_stream_start_timeout}
+      end
+
+    :erlang.unalias(ready_alias)
+    Process.demonitor(startup_monitor, [:flush])
+    result
   end
 
   defp produce(source, controller, token, validator) do
@@ -225,26 +268,29 @@ defmodule Arbor.LLM.OwnedStream do
     remaining = max(state.deadline_ms - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {token, :claim, consumer, ref} when token == state.token and is_pid(consumer) ->
+      {token, :claim, consumer, reply, ref}
+      when token == state.token and is_pid(consumer) and is_reference(reply) and
+             is_reference(ref) ->
         cond do
           is_nil(state.consumer) ->
             monitor = Process.monitor(consumer)
-            send(consumer, {token, ref, :claimed})
+            send(reply, {ref, :claimed})
             controller_loop(%{state | consumer: consumer, consumer_monitor: monitor})
 
           state.consumer == consumer ->
-            send(consumer, {token, ref, :claimed})
+            send(reply, {ref, :claimed})
             controller_loop(state)
 
           true ->
-            send(consumer, {token, ref, {:error, :owned_stream_already_claimed}})
+            send(reply, {ref, {:error, :owned_stream_already_claimed}})
             controller_loop(state)
         end
 
-      {token, :demand, consumer, ref}
-      when token == state.token and consumer == state.consumer and is_reference(ref) ->
+      {token, :demand, consumer, reply, ref}
+      when token == state.token and consumer == state.consumer and is_reference(reply) and
+             is_reference(ref) ->
         state = advance_producer_for_demand(state)
-        controller_loop(dispatch_ready(%{state | demand: {consumer, ref}}))
+        controller_loop(dispatch_ready(%{state | demand: {reply, ref}}))
 
       {token, :item_ready, item, completed_mono} when token == state.token ->
         state = %{state | item: {item, completed_mono}, delivered?: false}
@@ -257,9 +303,10 @@ defmodule Arbor.LLM.OwnedStream do
       {token, :source_error, reason, completed_mono} when token == state.token ->
         controller_loop(dispatch_ready(%{state | terminal: {:error, reason, completed_mono}}))
 
-      {token, :finalize, requester, ref} when token == state.token and is_pid(requester) ->
+      {token, :finalize, reply, ref}
+      when token == state.token and is_reference(reply) and is_reference(ref) ->
         finalize_controller(state)
-        send(requester, {token, ref, :finalized})
+        send(reply, {ref, :finalized})
 
       {:DOWN, monitor, :process, producer, _reason}
       when monitor == state.producer_monitor and producer == state.producer ->
@@ -283,49 +330,42 @@ defmodule Arbor.LLM.OwnedStream do
     end
   end
 
-  defp advance_producer_for_demand(%{delivered?: true, producer: producer, token: token} = state) do
-    send(producer, {token, :continue})
+  defp advance_producer_for_demand(%{delivered?: true} = state) do
+    send(state.producer, {state.token, :continue})
     %{state | delivered?: false}
   end
 
   defp advance_producer_for_demand(state), do: state
 
-  defp dispatch_ready(%{demand: {consumer, ref}, item: {item, completed_mono}} = state) do
-    send(consumer, {state.token, ref, :item, item, completed_mono})
+  defp dispatch_ready(%{demand: {reply, ref}, item: {item, completed_mono}} = state) do
+    send(reply, {ref, :item, item, completed_mono})
     %{state | demand: nil, item: nil, delivered?: true}
   end
 
-  defp dispatch_ready(%{demand: {consumer, ref}, terminal: {:done, completed_mono}} = state) do
-    send(consumer, {state.token, ref, :done, completed_mono})
+  defp dispatch_ready(%{demand: {reply, ref}, terminal: {:done, completed_mono}} = state) do
+    send(reply, {ref, :done, completed_mono})
     %{state | demand: nil}
   end
 
-  defp dispatch_ready(
-         %{demand: {consumer, ref}, terminal: {:error, reason, completed_mono}} = state
-       ) do
-    send(consumer, {state.token, ref, {:error, reason}, completed_mono})
+  defp dispatch_ready(%{demand: {reply, ref}, terminal: {:error, reason, completed_mono}} = state) do
+    send(reply, {ref, {:error, reason}, completed_mono})
     %{state | demand: nil}
   end
 
   defp dispatch_ready(state), do: state
 
-  defp notify_timeout(%{demand: {consumer, ref}, token: token}) when is_pid(consumer),
-    do: send(consumer, {token, ref, :timeout})
-
+  defp notify_timeout(%{demand: {reply, ref}}), do: send(reply, {ref, :timeout})
   defp notify_timeout(_state), do: :ok
 
   defp finalize_controller(state) do
+    deadline = System.monotonic_time(:millisecond) + @cleanup_grace_ms
+
     if Process.alive?(state.producer) do
       send(state.producer, {state.token, :cancel})
 
-      receive do
-        {:DOWN, monitor, :process, producer, _reason}
-        when monitor == state.producer_monitor and producer == state.producer ->
-          :ok
-      after
-        @cleanup_grace_ms ->
-          if Process.alive?(state.producer), do: Process.exit(state.producer, :kill)
-          await_producer_down(state)
+      unless await_down_until(state.producer, state.producer_monitor, deadline) do
+        if Process.alive?(state.producer), do: Process.exit(state.producer, :kill)
+        await_down_until(state.producer, state.producer_monitor, deadline)
       end
     end
 
@@ -334,22 +374,53 @@ defmodule Arbor.LLM.OwnedStream do
     :ok
   end
 
-  defp await_producer_down(state) do
+  defp await_finalized(controller, monitor, ref, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
     receive do
-      {:DOWN, monitor, :process, producer, _reason}
-      when monitor == state.producer_monitor and producer == state.producer ->
+      {^ref, :finalized} ->
+        unless await_down_until(controller, monitor, deadline) do
+          if Process.alive?(controller), do: Process.exit(controller, :kill)
+          await_down_until(controller, monitor, deadline)
+        end
+
+        :ok
+
+      {:DOWN, ^monitor, :process, ^controller, _reason} ->
+        :ok
+    after
+      remaining ->
+        if Process.alive?(controller), do: Process.exit(controller, :kill)
+        await_down_until(controller, monitor, deadline)
         :ok
     end
   end
 
-  defp await_controller_down(controller, monitor) do
+  defp await_down_until(pid, monitor, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
     receive do
-      {:DOWN, ^monitor, :process, ^controller, _reason} -> :ok
+      {:DOWN, ^monitor, :process, ^pid, _reason} -> true
+    after
+      remaining -> false
     end
   end
 
   defp demonitor_if_present(nil), do: :ok
   defp demonitor_if_present(monitor), do: Process.demonitor(monitor, [:flush])
+
+  defp bounded_exception(%Arbor.LLM.StreamError{reason: reason}) do
+    case Arbor.LLM.ResponseBudget.validate(reason,
+           max_bytes: 65_536,
+           max_nodes: 2_000,
+           max_depth: 8,
+           max_map_keys: 256,
+           max_list_items: 2_000
+         ) do
+      :ok -> reason
+      {:error, _invalid} -> :stream_error
+    end
+  end
 
   defp bounded_exception(%{__struct__: module}), do: {:stream_exception, module}
   defp bounded_exception(_exception), do: :stream_exception

@@ -69,8 +69,8 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
         {:ok,
          %{
            indexed_embeddings: [
-             %{index: 1, embedding: [0.8, 0.2]},
-             %{index: 0, embedding: [1.0, 0.0]}
+             %{index: 0, embedding: [1.0, 0.0]},
+             %{index: 1, embedding: [0.8, 0.2]}
            ]
          }}
       end
@@ -314,7 +314,7 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
       assert result.passed
     end
 
-    test "security regression: default HTTP grader path accepts reversed indexed wire order" do
+    test "security regression: default HTTP grader rejects reversed indexed wire order" do
       previous_options = Req.default_options()
 
       on_exit(fn -> Req.default_options(previous_options) end)
@@ -326,11 +326,8 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
 
       Req.default_options(adapter: embedding_response_adapter(data))
 
-      assert {:ok, [first, second], %{}} =
+      assert {:error, {:embedding_index_reordered, 0, 1}} =
                Arbor.LLM.decode_embedding_response(%{"data" => data}, 2)
-
-      assert first == [1.0, 0.0]
-      assert second == [0.8, 0.2]
 
       result =
         EmbeddingSimilarity.grade("actual", "expected",
@@ -339,8 +336,9 @@ defmodule Arbor.AI.Eval.Graders.EmbeddingSimilarityTest do
           timeout: 1_000
         )
 
-      assert_in_delta result.score, 0.9701, 0.001
-      assert result.passed
+      assert result.score == 0.0
+      refute result.passed
+      assert result.detail =~ "embedding_index_reordered"
     end
 
     test "security regression: default HTTP grader rejects malformed embedding indices" do

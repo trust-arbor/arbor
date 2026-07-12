@@ -48,33 +48,49 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
 
   @spec process(t(), keyword()) :: {:ok, ReqLLM.Response.t()} | {:error, term()}
   def process(%__MODULE__{} = response, callbacks \\ []) do
-    initial = %{chunks: [], metadata: %{}, fragments: %{}, fragment_bytes: 0}
+    tracker_limits = json_limits(response.limits, response.limits.max_response_bytes)
 
-    result =
-      Enum.reduce_while(response.stream, {:ok, initial}, fn
-        {:arbor_stream_error, reason}, _acc ->
-          {:halt, {:error, reason}}
+    with {:ok, event_tracker} <- ResponseBudget.tracker(tracker_limits),
+         {:ok, callback_tracker} <- ResponseBudget.tracker(tracker_limits) do
+      initial = %{
+        chunks: [],
+        metadata: %{},
+        fragments: %{},
+        fragment_bytes: 0,
+        event_tracker: event_tracker,
+        callback_tracker: callback_tracker
+      }
 
-        %ReqLLM.StreamChunk{} = chunk, {:ok, acc} ->
-          with :ok <- invoke_callback(chunk, callbacks),
-               {:ok, acc} <- collect_chunk(chunk, acc, response.limits) do
-            {:cont, {:ok, acc}}
-          else
-            {:error, reason} -> {:halt, {:error, reason}}
-          end
+      result =
+        Enum.reduce_while(response.stream, {:ok, initial}, fn
+          {:arbor_stream_error, reason}, _acc ->
+            {:halt, {:error, reason}}
 
-        other, _acc ->
-          {:halt, {:error, {:invalid_stream_chunk, bounded_reason(other)}}}
-      end)
+          %ReqLLM.StreamChunk{} = chunk, {:ok, acc} ->
+            with :ok <- ResponseBudget.track(acc.event_tracker, chunk, :stream_events),
+                 :ok <- invoke_callback(chunk, callbacks, acc.callback_tracker),
+                 {:ok, acc} <- collect_chunk(chunk, acc, response.limits) do
+              {:cont, {:ok, acc}}
+            else
+              {:error, reason} -> {:halt, {:error, reason}}
+            end
 
-    with {:ok, acc} <- result,
-         {:ok, fragment_chunks} <- finalize_fragments(acc.fragments, response.limits),
-         chunks = Enum.reverse(acc.chunks) ++ fragment_chunks,
-         builder = ReqLLM.Provider.ResponseBuilder.for_model(response.model) do
-      builder.build_response(chunks, acc.metadata,
-        context: response.context,
-        model: response.model
-      )
+          other, _acc ->
+            {:halt, {:error, {:invalid_stream_chunk, bounded_reason(other)}}}
+        end)
+
+      with {:ok, acc} <- result,
+           {:ok, fragment_chunks} <- finalize_fragments(acc.fragments, response.limits),
+           chunks = Enum.reverse(acc.chunks) ++ fragment_chunks,
+           builder = ReqLLM.Provider.ResponseBuilder.for_model(response.model),
+           {:ok, built} <-
+             builder.build_response(chunks, acc.metadata,
+               context: response.context,
+               model: response.model
+             ),
+           :ok <- ResponseBudget.validate(built, tracker_limits) do
+        {:ok, built}
+      end
     end
   rescue
     exception -> {:error, {:stream_assembly_failed, bounded_exception(exception)}}
@@ -811,18 +827,35 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
     end)
   end
 
-  defp invoke_callback(%ReqLLM.StreamChunk{type: :content, text: text}, callbacks)
-       when is_binary(text),
-       do: invoke_optional(Keyword.get(callbacks, :on_result), text)
+  defp invoke_callback(
+         %ReqLLM.StreamChunk{type: :content, text: text},
+         callbacks,
+         tracker
+       )
+       when is_binary(text) do
+    with :ok <- ResponseBudget.track(tracker, text, :stream_callbacks) do
+      invoke_optional(Keyword.get(callbacks, :on_result), text)
+    end
+  end
 
-  defp invoke_callback(%ReqLLM.StreamChunk{type: :thinking, text: text}, callbacks)
-       when is_binary(text),
-       do: invoke_optional(Keyword.get(callbacks, :on_thinking), text)
+  defp invoke_callback(
+         %ReqLLM.StreamChunk{type: :thinking, text: text},
+         callbacks,
+         tracker
+       )
+       when is_binary(text) do
+    with :ok <- ResponseBudget.track(tracker, text, :stream_callbacks) do
+      invoke_optional(Keyword.get(callbacks, :on_thinking), text)
+    end
+  end
 
-  defp invoke_callback(%ReqLLM.StreamChunk{type: :tool_call} = chunk, callbacks),
-    do: invoke_optional(Keyword.get(callbacks, :on_tool_call), chunk)
+  defp invoke_callback(%ReqLLM.StreamChunk{type: :tool_call} = chunk, callbacks, tracker) do
+    with :ok <- ResponseBudget.track(tracker, chunk, :stream_callbacks) do
+      invoke_optional(Keyword.get(callbacks, :on_tool_call), chunk)
+    end
+  end
 
-  defp invoke_callback(_chunk, _callbacks), do: :ok
+  defp invoke_callback(_chunk, _callbacks, _tracker), do: :ok
 
   defp invoke_optional(nil, _value), do: :ok
 

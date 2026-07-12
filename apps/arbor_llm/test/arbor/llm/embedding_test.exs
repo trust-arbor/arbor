@@ -139,7 +139,7 @@ defmodule Arbor.LLM.EmbeddingTest do
 
           {:ok,
            %{
-             indexed_embeddings: Enum.reverse(indexed),
+             indexed_embeddings: indexed,
              model: model,
              provider: "mock_embed",
              usage: %{prompt_tokens: 5, total_tokens: 5},

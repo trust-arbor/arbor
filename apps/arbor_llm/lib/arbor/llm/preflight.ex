@@ -23,12 +23,17 @@ defmodule Arbor.LLM.Preflight do
 
   require Logger
 
+  alias Arbor.LLM.{Deadline, Endpoint, ResponseBudget}
+
   # Arbor.Orchestrator.Config lives in arbor_orchestrator (which depends
   # on arbor_llm). Runtime indirection avoids the cycle — see Client's
   # @tool_hooks_mod for the same pattern.
   @orchestrator_config_mod Arbor.Orchestrator.Config
 
   @http_timeout 4_000
+  @max_inventory_response_bytes 1_048_576
+  @max_loaded_models 10_000
+  @max_model_id_bytes 512
 
   @type status :: :ok | {:wrong_quant, String.t()} | :unverified_quant | :missing | :unreachable
   @type entry :: %{
@@ -200,31 +205,91 @@ defmodule Arbor.LLM.Preflight do
   Query a local provider's *loaded* models. Returns `{:ok, [id]}` or `{:error, reason}`.
   """
   @spec loaded_models(atom(), String.t()) :: {:ok, [String.t()]} | {:error, term()}
-  def loaded_models(:lm_studio, base_url) do
-    get_ids(base_url <> "/models", fn body ->
-      body |> Map.get("data", []) |> Enum.map(&Map.get(&1, "id")) |> Enum.filter(&is_binary/1)
-    end)
-  end
-
-  def loaded_models(:ollama, base_url) do
-    get_ids(base_url <> "/api/tags", fn body ->
-      body |> Map.get("models", []) |> Enum.map(&Map.get(&1, "name")) |> Enum.filter(&is_binary/1)
-    end)
+  def loaded_models(provider, base_url) when provider in [:lm_studio, :ollama] do
+    with {:ok, receipt} <- Deadline.receipt(timeout_ms: @http_timeout) do
+      Deadline.run(
+        fn ->
+          with {:ok, url} <- Endpoint.model_inventory(provider, base_url),
+               {:ok, body} <- get_inventory(url, receipt),
+               {:ok, ids} <- extract_inventory_ids(provider, body) do
+            {:ok, ids}
+          end
+        end,
+        receipt,
+        {:inventory_deadline_exceeded, @http_timeout}
+      )
+    end
   end
 
   def loaded_models(other, _base_url), do: {:error, {:unsupported_provider, other}}
 
   # ── helpers ──────────────────────────────────────────────────────────
 
-  defp get_ids(url, extract) do
-    case Req.get(url, receive_timeout: @http_timeout, retry: false) do
-      {:ok, %{status: 200, body: body}} when is_map(body) -> {:ok, extract.(body)}
-      {:ok, %{status: status}} -> {:error, {:http, status}}
-      {:error, reason} -> {:error, reason}
+  defp get_inventory(url, receipt) do
+    request =
+      Req.new(
+        url: url,
+        method: :get,
+        receive_timeout: max(receipt.deadline_ms - System.monotonic_time(:millisecond), 1),
+        retry: false
+      )
+      |> ResponseBudget.apply_req_receipt(@max_inventory_response_bytes)
+
+    case Req.request(request) do
+      {:ok,
+       %Req.Response{
+         private: %{arbor_response_overflow: @max_inventory_response_bytes}
+       }} ->
+        {:error, {:response_bytes_exceeded, @max_inventory_response_bytes}}
+
+      {:ok, %Req.Response{private: %{arbor_response_error: reason}}} ->
+        {:error, {:invalid_inventory_response, reason}}
+
+      {:ok, %Req.Response{status: 200, body: body}} when is_map(body) ->
+        {:ok, body}
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:http, status}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   rescue
-    e -> {:error, Exception.message(e)}
+    exception -> {:error, {:inventory_request_failed, exception.__struct__}}
+  catch
+    kind, _reason -> {:error, {:inventory_request_failed, kind}}
   end
+
+  defp extract_inventory_ids(:lm_studio, %{"data" => entries}),
+    do: collect_inventory_ids(entries, "id", [], 0)
+
+  defp extract_inventory_ids(:ollama, %{"models" => entries}),
+    do: collect_inventory_ids(entries, "name", [], 0)
+
+  defp extract_inventory_ids(_provider, _body),
+    do: {:error, :invalid_inventory_response}
+
+  defp collect_inventory_ids([], _key, acc, _count), do: {:ok, Enum.reverse(acc)}
+
+  defp collect_inventory_ids(_entries, _key, _acc, count)
+       when count >= @max_loaded_models,
+       do: {:error, {:loaded_model_count_exceeded, @max_loaded_models}}
+
+  defp collect_inventory_ids([entry | rest], key, acc, count) when is_map(entry) do
+    case Map.get(entry, key) do
+      id
+      when is_binary(id) and byte_size(id) > 0 and byte_size(id) <= @max_model_id_bytes ->
+        if String.valid?(id),
+          do: collect_inventory_ids(rest, key, [id | acc], count + 1),
+          else: {:error, :invalid_loaded_model_id}
+
+      _invalid ->
+        {:error, :invalid_loaded_model_id}
+    end
+  end
+
+  defp collect_inventory_ids(_improper_or_invalid, _key, _acc, _count),
+    do: {:error, :invalid_inventory_response}
 
   defp local_provider?(p), do: p in [:lm_studio, :ollama]
 

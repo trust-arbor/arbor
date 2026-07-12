@@ -314,13 +314,30 @@ defmodule Arbor.LLM.Adapter.ReqLLMBoundedTransportTest do
     assert sent < length(chunks)
   end
 
-  test "security regression: embedding indices are complete, unique, bounded, and reordered" do
+  test "security regression: embedding indices must preserve authoritative input order" do
     reversed = [
       %{"index" => 1, "embedding" => [0.0, 1.0]},
       %{"index" => 0, "embedding" => [1.0, 0.0]}
     ]
 
     {url, server} = embedding_server(reversed)
+
+    assert {:error, {:embedding_index_reordered, 0, 1}} =
+             Adapter.embed(["first", "second"], "text-embedding-3-small",
+               provider: "openai",
+               base_url: url,
+               api_key: "test-key",
+               receive_timeout: 2_000
+             )
+
+    _ = Task.await(server, 2_000)
+
+    ordered = [
+      %{"index" => 0, "embedding" => [1.0, 0.0]},
+      %{"index" => 1, "embedding" => [0.0, 1.0]}
+    ]
+
+    {url, server} = embedding_server(ordered)
 
     assert {:ok, result} =
              Adapter.embed(["first", "second"], "text-embedding-3-small",

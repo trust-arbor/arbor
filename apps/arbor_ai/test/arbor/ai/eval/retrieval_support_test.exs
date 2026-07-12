@@ -98,6 +98,19 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
              {:error, {:index_file_rejected, directory_path, {:not_regular, :directory}}}
   end
 
+  test "security regression: index loading rejects hardlinked files" do
+    source_path = temp_path("hardlink-source")
+    linked_path = temp_path("hardlink")
+    File.write!(source_path, Jason.encode!(%{"actions" => [minimal_action()]}))
+    :ok = File.ln(source_path, linked_path)
+
+    on_exit(fn -> File.rm(linked_path) end)
+    on_exit(fn -> File.rm(source_path) end)
+
+    assert RetrievalSupport.load_index(linked_path) ==
+             {:error, {:index_file_rejected, linked_path, :hardlink}}
+  end
+
   test "security regression: FIFO index paths return within the absolute read deadline" do
     fifo_path = temp_path("fifo")
     {_, 0} = System.cmd("mkfifo", [fifo_path])

@@ -180,10 +180,14 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
 
   defp handle_judge_response(response) do
     case response do
+      {:ok, response_text}
+      when is_binary(response_text) and byte_size(response_text) <= @max_judge_response_bytes ->
+        if String.valid?(response_text),
+          do: parse_judge_response(response_text),
+          else: failure("Judge error: invalid UTF-8 response")
+
       {:ok, response_text} when is_binary(response_text) ->
-        response_text
-        |> clean_text(@max_judge_response_bytes)
-        |> parse_judge_response()
+        failure("Judge error: response exceeds #{@max_judge_response_bytes} bytes")
 
       {:ok, _response} ->
         failure("Judge error: invalid response")
@@ -220,7 +224,8 @@ defmodule Arbor.AI.Eval.Graders.IntentConformance do
         system: system_prompt,
         prompt: user_prompt,
         temperature: 0.0,
-        timeout_ms: timeout
+        timeout_ms: timeout,
+        max_response_bytes: @max_judge_response_bytes
       ]
       |> maybe_put(:max_tokens, max_tokens)
 

@@ -23,6 +23,20 @@ defmodule Arbor.LLM.ClientTest do
     end
 
     def complete(_request, _opts), do: {:ok, %Response{text: "ok"}}
+
+    def stream(%Request{model: "cumulative-stream"}, _opts) do
+      for _ <- 1..3 do
+        %StreamEvent{type: :delta, data: %{text: String.duplicate("s", 64)}}
+      end
+    end
+
+    def complete_streaming(%Request{model: "cumulative-callback"}, callback, _opts) do
+      for _ <- 1..3 do
+        callback.(%StreamEvent{type: :delta, data: %{text: String.duplicate("c", 64)}})
+      end
+
+      {:ok, %Response{text: "ok"}}
+    end
   end
 
   describe "public adapter boundary" do
@@ -75,6 +89,35 @@ defmodule Arbor.LLM.ClientTest do
 
         assert {:error, %RequestTimeoutError{timeout_ms: 30}} = Task.await(task, 1_000)
       end
+    end
+
+    test "security regression: stream events and callbacks consume cumulative response budgets" do
+      client =
+        Client.new(adapters: %{"boundary" => BoundaryAdapter}, default_provider: "boundary")
+
+      stream_request = %Request{provider: "boundary", model: "cumulative-stream", messages: []}
+
+      assert {:ok, stream} =
+               Client.stream(client, stream_request,
+                 max_response_bytes: 180,
+                 max_stream_event_bytes: 180
+               )
+
+      stream_error = assert_raise Arbor.LLM.StreamError, fn -> Enum.to_list(stream) end
+
+      assert stream_error.reason ==
+               {:response_budget_exceeded, :stream_events, :bytes, 180}
+
+      callback_request = %{
+        stream_request
+        | model: "cumulative-callback"
+      }
+
+      assert {:error, {:response_budget_exceeded, :stream_events, :bytes, 180}} =
+               Client.complete_streaming(client, callback_request, fn _event -> :ok end,
+                 max_response_bytes: 180,
+                 max_stream_event_bytes: 180
+               )
     end
   end
 
@@ -138,7 +181,7 @@ defmodule Arbor.LLM.ClientTest do
           fn _count -> send(parent, :arbitrary_stream_closed) end
         )
 
-      assert {:error, {:stream_limit_exceeded, :retained_bytes, 16_777_216}} =
+      assert {:error, {:response_budget_exceeded, :stream_events, :bytes, 16_777_216}} =
                Client.collect_stream(events)
 
       assert_receive :arbitrary_stream_closed
@@ -148,7 +191,7 @@ defmodule Arbor.LLM.ClientTest do
         data: %{id: "call", name: "nodes", arguments: %{"items" => List.duplicate(0, 9_000)}}
       }
 
-      assert {:error, {:stream_limit_exceeded, :retained_nodes, 100_000}} =
+      assert {:error, {:response_budget_exceeded, :stream_events, :nodes, 100_000}} =
                Stream.repeatedly(fn -> node_heavy end)
                |> Stream.take(100)
                |> Client.collect_stream()
@@ -187,6 +230,16 @@ defmodule Arbor.LLM.ClientTest do
       assert {:error, {:invalid_stream_event, {:decoded_term_limit_exceeded, :bytes, 1_048_576}}} =
                Client.collect_stream([
                  %StreamEvent{type: :finish, data: %{reason: :stop, usage: huge_usage}}
+               ])
+    end
+
+    test "security regression: collect_stream validates final aggregate usage" do
+      assert {:error, {:invalid_completion_response, :bounded_usage_number_required}} =
+               Client.collect_stream([
+                 %StreamEvent{
+                   type: :finish,
+                   data: %{reason: :stop, usage: %{total_tokens: 1.0e308}}
+                 }
                ])
     end
   end

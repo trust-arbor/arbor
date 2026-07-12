@@ -245,10 +245,13 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
            %{embeddings: [[float()]], model: String.t(), usage: map(), dimensions: pos_integer()}}
           | {:error, term()}
   def embed(texts, model, opts) do
-    with :ok <- Boundary.embedding_inputs(texts),
-         {:ok, receipt} <- Deadline.receipt(opts) do
+    with {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
-        fn -> do_embed_request(texts, model, opts) end,
+        fn ->
+          with :ok <- Boundary.embedding_inputs(texts) do
+            do_embed_request(texts, model, opts)
+          end
+        end,
         receipt,
         RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
       )
@@ -300,26 +303,32 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   defp do_embed(arbor_provider, model_spec, texts, opts) do
     with {:ok, req_opts} <- validated_embed_opts(arbor_provider, opts) do
       case call_req_llm_embed(model_spec, texts, req_opts) do
-        {:ok, embeddings, usage} when is_list(embeddings) ->
-          indexed =
-            embeddings
-            |> Enum.with_index(fn vector, index -> %{index: index, embedding: vector} end)
+        {:ok, indexed, usage} when is_list(indexed) ->
+          case Boundary.embedding_response_with_indices(
+                 %{indexed_embeddings: indexed, usage: usage || %{}},
+                 length(texts)
+               ) do
+            {:ok, authoritative, validated_usage} ->
+              embeddings = Enum.map(authoritative, & &1.embedding)
 
-          result = %{
-            embeddings: embeddings,
-            indexed_embeddings: indexed,
-            model: embedding_model_id(model_spec),
-            usage: usage || %{},
-            dimensions: dimensions_of(embeddings)
-          }
+              {:ok,
+               %{
+                 embeddings: embeddings,
+                 indexed_embeddings: authoritative,
+                 model: embedding_model_id(model_spec),
+                 usage: validated_usage,
+                 dimensions: dimensions_of(embeddings)
+               }}
 
-          case Boundary.embedding_response(result, length(texts)) do
-            {:ok, _ordered, _usage} -> {:ok, result}
-            {:error, _reason} = error -> error
+            {:error, _reason} = error ->
+              error
           end
 
         {:error, _} = err ->
           err
+
+        _invalid ->
+          {:error, :indexed_embedding_associations_required}
       end
     end
   end

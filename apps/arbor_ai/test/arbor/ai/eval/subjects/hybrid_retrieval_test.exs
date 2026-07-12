@@ -100,6 +100,39 @@ defmodule Arbor.AI.Eval.Subjects.HybridRetrievalTest do
            ) == {:error, {:rerank_failed, :offline}}
   end
 
+  test "security regression: embedding and rerank share one end-to-end deadline", %{
+    index_path: index_path
+  } do
+    parent = self()
+
+    embed_fn = fn _, _, _, _ ->
+      send(parent, :hybrid_embedding_started)
+      Process.sleep(35)
+      {:ok, [1.0, 0.0]}
+    end
+
+    router_fn = fn _, _, _, _, _ ->
+      send(parent, :hybrid_rerank_started)
+      Process.sleep(35)
+      {:ok, ~s({"selected":["Arbor.Actions.FileRead"]})}
+    end
+
+    started = System.monotonic_time(:millisecond)
+
+    assert HybridRetrieval.run("read then run",
+             index_path: index_path,
+             model: "router-model",
+             embed_model: "embed-model",
+             timeout: 50,
+             embed_fn: embed_fn,
+             router_fn: router_fn
+           ) == {:error, {:hybrid_deadline_exceeded, 50}}
+
+    assert_receive :hybrid_embedding_started
+    assert_receive :hybrid_rerank_started
+    assert System.monotonic_time(:millisecond) - started < 150
+  end
+
   test "rejects malformed reranker JSON instead of silently backfilling", %{
     index_path: index_path
   } do

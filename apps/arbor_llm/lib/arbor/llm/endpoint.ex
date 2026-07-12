@@ -78,6 +78,23 @@ defmodule Arbor.LLM.Endpoint do
 
   def validate(_value, _policy), do: {:error, :bounded_string_required}
 
+  @doc false
+  @spec model_inventory(atom() | String.t(), term()) :: {:ok, String.t()} | {:error, atom()}
+  def model_inventory(provider, base_url) do
+    with {:ok, canonical_provider} <- normalize_provider_name(provider),
+         true <-
+           canonical_provider in ["lm_studio", "ollama"] or
+             {:error, :unsupported_inventory_provider},
+         {:ok, candidate} <- inventory_model_base(canonical_provider, base_url),
+         {:ok, canonical_base} <-
+           validate(candidate, {:req_llm_base, canonical_provider}) do
+      case canonical_provider do
+        "lm_studio" -> {:ok, canonical_base <> "/models"}
+        "ollama" -> {:ok, endpoint_origin(canonical_base) <> "/api/tags"}
+      end
+    end
+  end
+
   defp normalize_policy(policy)
        when policy in [
               :root,
@@ -113,6 +130,19 @@ defmodule Arbor.LLM.Endpoint do
   end
 
   defp normalize_provider_name(_provider), do: {:error, :invalid_endpoint_policy}
+
+  defp inventory_model_base("lm_studio", value) when is_binary(value), do: {:ok, value}
+
+  defp inventory_model_base("ollama", value)
+       when is_binary(value) and byte_size(value) <= @max_endpoint_bytes do
+    trimmed = String.trim_trailing(value, "/")
+
+    if String.ends_with?(trimmed, "/v1"),
+      do: {:ok, trimmed},
+      else: {:ok, trimmed <> "/v1"}
+  end
+
+  defp inventory_model_base(_provider, _value), do: {:error, :bounded_string_required}
 
   defp validate_text(value) do
     cond do

@@ -230,11 +230,12 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
     test ":embed_cloud round-trips a vector + usage" do
       call = Call.new(:embed_cloud, {"voyage:voyage-3", ["hello"], []})
 
-      :ok = Fixture.save(call, {:ok, [[0.1, 0.2, 0.3, 0.4]], %{input_tokens: 5}})
+      indexed = [%{index: 0, embedding: [0.1, 0.2, 0.3, 0.4]}]
+      :ok = Fixture.save(call, {:ok, indexed, %{input_tokens: 5}})
 
-      {:ok, {:ok, embeddings, usage}, _ts} = Fixture.load(call)
+      {:ok, {:ok, replayed, usage}, _ts} = Fixture.load(call)
 
-      assert embeddings == [[0.1, 0.2, 0.3, 0.4]]
+      assert replayed == indexed
       assert usage[:input_tokens] == 5
     end
 
@@ -244,11 +245,12 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
 
       call = Call.new(:embed_local, {model, ["hello"], [base_url: "http://localhost:11434/v1"]})
 
-      :ok = Fixture.save(call, {:ok, [[1.0, 2.0, 3.0]], %{}})
+      indexed = [%{index: 0, embedding: [1.0, 2.0, 3.0]}]
+      :ok = Fixture.save(call, {:ok, indexed, %{}})
 
-      {:ok, {:ok, embeddings, _usage}, _ts} = Fixture.load(call)
+      {:ok, {:ok, replayed, _usage}, _ts} = Fixture.load(call)
 
-      assert embeddings == [[1.0, 2.0, 3.0]]
+      assert replayed == indexed
     end
 
     test ":embed_local hashes the LLMDB.Model struct stably across runs" do
@@ -262,6 +264,48 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       call_b = Call.new(:embed_local, {model_b, ["x"], []})
 
       assert Fixture.request_hash(call_a) == Fixture.request_hash(call_b)
+    end
+
+    test "security regression: replay rejects reordered, duplicate, missing, and fabricated indices" do
+      call = Call.new(:embed_cloud, {"voyage:voyage-3", ["first", "second"], []})
+      path = Fixture.path_for(call)
+
+      invalid_associations = [
+        [
+          %{"index" => 1, "embedding" => [0.0, 1.0]},
+          %{"index" => 0, "embedding" => [1.0, 0.0]}
+        ],
+        [
+          %{"index" => 0, "embedding" => [1.0, 0.0]},
+          %{"index" => 0, "embedding" => [0.0, 1.0]}
+        ],
+        [%{"index" => 0, "embedding" => [1.0, 0.0]}],
+        [
+          %{"index" => 0, "embedding" => [1.0, 0.0]},
+          %{"index" => 2, "embedding" => [0.0, 1.0]}
+        ]
+      ]
+
+      for associations <- invalid_associations do
+        :ok =
+          Fixture.save(call, {
+            :ok,
+            [%{index: 0, embedding: [1.0, 0.0]}, %{index: 1, embedding: [0.0, 1.0]}],
+            %{}
+          })
+
+        fixture = path |> File.read!() |> Jason.decode!()
+
+        tampered =
+          put_in(
+            fixture,
+            ["response", "value", "indexed_embeddings"],
+            associations
+          )
+
+        File.write!(path, Jason.encode!(tampered))
+        assert Fixture.load(call) == :not_found
+      end
     end
   end
 
@@ -294,6 +338,19 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       assert {:ok, :not_found} = Task.yield(task, 1_000)
 
       assert Path.dirname(symlink_path) == tmp_dir
+    end
+
+    test "security regression: fixture replay rejects hardlinked files", %{tmp_dir: tmp_dir} do
+      call = Call.new(:complete, {"openai:hardlink", [], []})
+      fixture_path = Fixture.path_for(call)
+      outside = tmp_dir <> "-hardlink-source.json"
+
+      :ok = Fixture.save(call, {:ok, %Response{text: "linked"}})
+      :ok = File.rename(fixture_path, outside)
+      :ok = File.ln(outside, fixture_path)
+      on_exit(fn -> File.rm(outside) end)
+
+      assert Fixture.load(call) == :not_found
     end
   end
 

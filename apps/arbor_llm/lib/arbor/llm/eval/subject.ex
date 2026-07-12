@@ -207,46 +207,43 @@ defmodule Arbor.LLM.Eval.Subject do
     start_time = System.monotonic_time(:millisecond)
     deadline_ms = start_time + config.timeout
 
-    result =
-      Arbor.LLM.run_until_deadline(
-        fn ->
-          complete(transport, request,
-            receive_timeout: max(deadline_ms - System.monotonic_time(:millisecond), 1),
-            max_response_bytes: config.max_output_bytes
-          )
-        end,
-        deadline_ms,
-        config.timeout,
-        {:request_deadline_exceeded, config.timeout}
-      )
+    Arbor.LLM.run_until_deadline(
+      fn ->
+        case complete(transport, request,
+               receive_timeout: max(deadline_ms - System.monotonic_time(:millisecond), 1),
+               max_response_bytes: config.max_output_bytes
+             ) do
+          {:ok, response} ->
+            duration_ms = System.monotonic_time(:millisecond) - start_time
 
-    case result do
-      {:ok, response} ->
-        duration_ms = System.monotonic_time(:millisecond) - start_time
+            with :ok <- validate_response_term(response, config.max_output_bytes),
+                 {:ok, text} <- extract_text(response, config.max_output_bytes) do
+              if text == "" do
+                log_empty_response(response, config.provider, config.model, duration_ms)
+              end
 
-        with :ok <- validate_response_term(response, @max_output_bytes),
-             {:ok, text} <- extract_text(response, config.max_output_bytes) do
-          if text == "" do
-            log_empty_response(response, config.provider, config.model, duration_ms)
-          end
+              {:ok,
+               %{
+                 text: text,
+                 duration_ms: duration_ms,
+                 ttft_ms: nil,
+                 tokens_generated: estimate_tokens(text, response),
+                 model: config.model,
+                 provider: config.provider
+               }}
+            end
 
-          {:ok,
-           %{
-             text: text,
-             duration_ms: duration_ms,
-             ttft_ms: nil,
-             tokens_generated: estimate_tokens(text, response),
-             model: config.model,
-             provider: config.provider
-           }}
+          {:error, reason} ->
+            {:error, bounded_external_reason(reason)}
+
+          other ->
+            {:error, {:invalid_transport_response, bounded_external_reason(other)}}
         end
-
-      {:error, reason} ->
-        {:error, bounded_external_reason(reason)}
-
-      other ->
-        {:error, {:invalid_transport_response, bounded_external_reason(other)}}
-    end
+      end,
+      deadline_ms,
+      config.timeout,
+      {:request_deadline_exceeded, config.timeout}
+    )
   rescue
     exception -> {:error, {:transport_exception, exception_diagnostic(exception)}}
   catch
@@ -300,6 +297,7 @@ defmodule Arbor.LLM.Eval.Subject do
   defp collect_stream(transport, request, start_time, limits) do
     ref = make_ref()
     parent = self()
+    reply_alias = :erlang.alias()
     callers = Process.get(:"$callers", [])
 
     {producer_pid, monitor_ref} =
@@ -308,7 +306,7 @@ defmodule Arbor.LLM.Eval.Subject do
         watch_stream_owner(parent, self())
 
         produce_stream(
-          parent,
+          reply_alias,
           ref,
           transport,
           request,
@@ -333,6 +331,7 @@ defmodule Arbor.LLM.Eval.Subject do
     }
 
     result = await_stream(state)
+    :erlang.unalias(reply_alias)
     stop_stream_producer(state)
     result
   end
@@ -349,7 +348,7 @@ defmodule Arbor.LLM.Eval.Subject do
     end)
   end
 
-  defp produce_stream(parent, ref, transport, request, limits, max_event_bytes) do
+  defp produce_stream(destination, ref, transport, request, limits, max_event_bytes) do
     case stream(transport, request,
            receive_timeout: max(limits.deadline_ms - System.monotonic_time(:millisecond), 1),
            max_response_bytes: limits.max_output_bytes,
@@ -360,7 +359,7 @@ defmodule Arbor.LLM.Eval.Subject do
         Enum.reduce_while(events, :ok, fn event, :ok ->
           case validate_stream_event_term(event, max_event_bytes) do
             :ok ->
-              send(parent, {ref, :event, event, System.monotonic_time(:millisecond)})
+              send(destination, {ref, :event, event, System.monotonic_time(:millisecond)})
 
               receive do
                 {^ref, :continue} -> {:cont, :ok}
@@ -368,16 +367,20 @@ defmodule Arbor.LLM.Eval.Subject do
               end
 
             {:error, reason} ->
-              send(parent, {ref, :producer_error, reason, System.monotonic_time(:millisecond)})
+              send(
+                destination,
+                {ref, :producer_error, reason, System.monotonic_time(:millisecond)}
+              )
+
               {:halt, :error}
           end
         end)
 
-        send(parent, {ref, :done, System.monotonic_time(:millisecond)})
+        send(destination, {ref, :done, System.monotonic_time(:millisecond)})
 
       {:error, reason} ->
         send(
-          parent,
+          destination,
           {ref, :stream_error, bounded_external_reason(reason),
            System.monotonic_time(:millisecond)}
         )
@@ -385,20 +388,20 @@ defmodule Arbor.LLM.Eval.Subject do
   rescue
     exception in [Arbor.LLM.StreamError] ->
       send(
-        parent,
+        destination,
         {ref, :producer_error, exception.reason, System.monotonic_time(:millisecond)}
       )
 
     exception ->
       send(
-        parent,
+        destination,
         {ref, :producer_error, exception_diagnostic(exception),
          System.monotonic_time(:millisecond)}
       )
   catch
     kind, reason ->
       send(
-        parent,
+        destination,
         {ref, :producer_error, {kind, bounded_external_reason(reason)},
          System.monotonic_time(:millisecond)}
       )
@@ -504,33 +507,35 @@ defmodule Arbor.LLM.Eval.Subject do
   end
 
   defp stop_stream_producer(state) do
+    deadline = System.monotonic_time(:millisecond) + @producer_cleanup_grace_ms
     send(state.producer_pid, {state.ref, :stop})
 
-    if Process.alive?(state.producer_pid) do
-      receive do
-        {:DOWN, monitor_ref, :process, producer_pid, _reason}
-        when monitor_ref == state.monitor_ref and producer_pid == state.producer_pid ->
-          :ok
-      after
-        @producer_cleanup_grace_ms ->
-          if Process.alive?(state.producer_pid), do: Process.exit(state.producer_pid, :kill)
-
-          receive do
-            {:DOWN, monitor_ref, :process, producer_pid, _reason}
-            when monitor_ref == state.monitor_ref and producer_pid == state.producer_pid ->
-              :ok
-          end
-      end
+    unless await_stream_producer_down(state, deadline) do
+      if Process.alive?(state.producer_pid), do: Process.exit(state.producer_pid, :kill)
+      await_stream_producer_down(state, deadline)
     end
 
     Process.demonitor(state.monitor_ref, [:flush])
     flush_stream_messages(state.ref)
   end
 
+  defp await_stream_producer_down(state, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:DOWN, monitor_ref, :process, producer_pid, _reason}
+      when monitor_ref == state.monitor_ref and producer_pid == state.producer_pid ->
+        true
+    after
+      remaining -> false
+    end
+  end
+
   defp flush_stream_messages(ref) do
     receive do
       {^ref, _kind} -> flush_stream_messages(ref)
       {^ref, _kind, _value} -> flush_stream_messages(ref)
+      {^ref, _kind, _value, _completed_mono} -> flush_stream_messages(ref)
     after
       0 -> :ok
     end

@@ -1,8 +1,20 @@
 defmodule Arbor.LLM.PreflightTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   @moduletag :fast
 
   alias Arbor.LLM.Preflight
+
+  setup do
+    original = Application.get_env(:arbor_llm, :trusted_proxy_endpoints)
+
+    on_exit(fn ->
+      if is_nil(original),
+        do: Application.delete_env(:arbor_llm, :trusted_proxy_endpoints),
+        else: Application.put_env(:arbor_llm, :trusted_proxy_endpoints, original)
+    end)
+
+    :ok
+  end
 
   describe "strip_quant/1" do
     test "strips an LM Studio @quant suffix" do
@@ -108,7 +120,148 @@ defmodule Arbor.LLM.PreflightTest do
     end
   end
 
+  describe "loaded_models/2 outbound boundary" do
+    test "security regression: untrusted inventory destinations are never contacted" do
+      {base_url, server} =
+        start_inventory_server(fn socket, _origin ->
+          send_json(socket, 200, %{"data" => [%{"id" => "unexpected"}]})
+        end)
+
+      assert {:error, :endpoint_origin_not_trusted} =
+               Preflight.loaded_models(:lm_studio, base_url)
+
+      assert :not_connected = Task.await(server, 1_000)
+    end
+
+    test "security regression: inventory redirects are not followed" do
+      {base_url, server} = start_redirect_inventory_server()
+
+      Application.put_env(:arbor_llm, :trusted_proxy_endpoints, %{
+        "lm_studio" => [base_url]
+      })
+
+      assert {:error, _reason} = Preflight.loaded_models(:lm_studio, base_url)
+      assert 1 = Task.await(server, 1_500)
+    end
+
+    test "security regression: encoded inventory responses are rejected" do
+      {base_url, server} =
+        start_inventory_server(fn socket, _origin ->
+          body = Jason.encode!(%{"data" => [%{"id" => "compressed-model"}]})
+          encoded = :zlib.gzip(body)
+
+          send_response(socket, 200, encoded, [
+            {"content-type", "application/json"},
+            {"content-encoding", "gzip"}
+          ])
+        end)
+
+      Application.put_env(:arbor_llm, :trusted_proxy_endpoints, %{
+        "lm_studio" => [base_url]
+      })
+
+      assert {:error, {:invalid_inventory_response, {:invalid_content_encoding, _reason}}} =
+               Preflight.loaded_models(:lm_studio, base_url)
+
+      assert :connected = Task.await(server, 1_000)
+    end
+  end
+
   defp all_configured_ids do
     Preflight.configured_models() |> Enum.map(& &1.model) |> Enum.uniq()
+  end
+
+  defp start_inventory_server(responder) do
+    {:ok, listener} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, {{127, 0, 0, 1}, port}} = :inet.sockname(listener)
+    origin = "http://127.0.0.1:#{port}"
+
+    server =
+      Task.async(fn ->
+        case :gen_tcp.accept(listener, 500) do
+          {:ok, socket} ->
+            :ok = :gen_tcp.close(listener)
+            {:ok, _request} = receive_headers(socket, "")
+            responder.(socket, origin)
+            :ok = :gen_tcp.close(socket)
+            :connected
+
+          {:error, :timeout} ->
+            :ok = :gen_tcp.close(listener)
+            :not_connected
+        end
+      end)
+
+    {origin <> "/v1", server}
+  end
+
+  defp start_redirect_inventory_server do
+    {:ok, listener} =
+      :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+
+    {:ok, {{127, 0, 0, 1}, port}} = :inet.sockname(listener)
+    origin = "http://127.0.0.1:#{port}"
+
+    server =
+      Task.async(fn ->
+        {:ok, first} = :gen_tcp.accept(listener, 1_000)
+        {:ok, _request} = receive_headers(first, "")
+
+        send_response(first, 302, "{}", [
+          {"content-type", "application/json"},
+          {"location", origin <> "/redirected"}
+        ])
+
+        :ok = :gen_tcp.close(first)
+
+        connections =
+          case :gen_tcp.accept(listener, 500) do
+            {:ok, second} ->
+              {:ok, _request} = receive_headers(second, "")
+              send_json(second, 200, %{"data" => [%{"id" => "redirected-model"}]})
+              :ok = :gen_tcp.close(second)
+              2
+
+            {:error, :timeout} ->
+              1
+          end
+
+        :ok = :gen_tcp.close(listener)
+        connections
+      end)
+
+    {origin <> "/v1", server}
+  end
+
+  defp send_json(socket, status, value) do
+    send_response(socket, status, Jason.encode!(value), [{"content-type", "application/json"}])
+  end
+
+  defp send_response(socket, status, body, headers) do
+    reason = if status == 200, do: "OK", else: "Redirect"
+
+    rendered_headers =
+      Enum.map_join(headers, "", fn {name, value} -> "#{name}: #{value}\r\n" end)
+
+    :ok =
+      :gen_tcp.send(
+        socket,
+        "HTTP/1.1 #{status} #{reason}\r\n" <>
+          rendered_headers <>
+          "content-length: #{byte_size(body)}\r\nconnection: close\r\n\r\n" <> body
+      )
+  end
+
+  defp receive_headers(socket, acc) do
+    if String.contains?(acc, "\r\n\r\n") do
+      {:ok, acc}
+    else
+      case :gen_tcp.recv(socket, 0, 1_000) do
+        {:ok, data} -> receive_headers(socket, acc <> data)
+        {:error, reason} -> {:error, reason}
+      end
+    end
   end
 end

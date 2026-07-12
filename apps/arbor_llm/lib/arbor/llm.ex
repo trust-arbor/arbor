@@ -29,8 +29,9 @@ defmodule Arbor.LLM do
 
   @controlled_wrapper_cleanup_grace_ms 600
   @max_object_stream_bytes 1_048_576
+  @default_public_timeout_ms 30_000
   @max_public_timeout_ms 900_000
-  @max_object_stream_events 10_000
+  @max_object_stream_events 4_000
   @max_object_stream_depth 32
   @max_object_decode_attempts 1
   @object_json_limits [
@@ -64,95 +65,104 @@ defmodule Arbor.LLM do
   @spec generate(generate_opts()) ::
           {:ok, Arbor.LLM.Response.t()} | {:error, term()}
   def generate(opts) when is_list(opts) do
-    with :ok <- validate_public_options(opts),
-         :ok <- ensure_not_aborted(opts),
-         {:ok, request} <- build_request(opts) do
-      client = Keyword.get(opts, :client) || Client.default_client()
-      tools = Keyword.get(opts, :tools, [])
-      client_opts = Keyword.get(opts, :client_opts, [])
-
-      with_timeout(opts, fn ->
-        if tools == [] do
-          Client.complete(client, request, client_opts)
-        else
-          tool_opts =
-            opts
-            |> Keyword.take([
-              :max_tool_rounds,
-              :max_steps,
-              :max_step_timeout_ms,
-              :parallel_tool_execution,
-              :on_step,
-              :stop_when,
-              :retry,
-              :sleep_fn,
-              :tool_hooks,
-              :validate_tool_call,
-              :repair_tool_call,
-              :abort?
-            ])
-            |> Keyword.merge(client_opts)
-
-          Client.generate_with_tools(client, request, tools, tool_opts)
-        end
-      end)
-    end
+    with_timeout(opts, fn -> do_generate(opts) end)
   end
 
   def generate(_opts), do: {:error, :keyword_options_required}
 
-  @spec stream(generate_opts()) :: {:ok, Enumerable.t()} | {:error, term()}
-  def stream(opts) when is_list(opts) do
+  defp do_generate(opts) do
     with :ok <- validate_public_options(opts),
          :ok <- ensure_not_aborted(opts),
-         {:ok, request} <- build_request(opts) do
+         {:ok, request} <- build_request(opts),
+         {:ok, client_opts} <-
+           Boundary.narrow_options(opts, Keyword.get(opts, :client_opts, [])) do
       client = Keyword.get(opts, :client) || Client.default_client()
-      client_opts = Keyword.get(opts, :client_opts, [])
       tools = Keyword.get(opts, :tools, [])
 
-      with_timeout(opts, fn ->
-        stream_opts = stream_tool_opts(opts, client_opts)
+      if tools == [] do
+        Client.complete(client, request, client_opts)
+      else
+        tool_opts =
+          opts
+          |> Keyword.take([
+            :max_tool_rounds,
+            :max_steps,
+            :max_step_timeout_ms,
+            :parallel_tool_execution,
+            :on_step,
+            :stop_when,
+            :retry,
+            :sleep_fn,
+            :tool_hooks,
+            :validate_tool_call,
+            :repair_tool_call,
+            :abort?
+          ])
+          |> Keyword.merge(client_opts)
 
-        case stream_events(client, request, tools, stream_opts) do
-          {:ok, events} ->
-            {:ok, wrap_stream_runtime_controls(events, opts)}
-
-          other ->
-            other
-        end
-      end)
+        Client.generate_with_tools(client, request, tools, tool_opts)
+      end
     end
+  end
+
+  @spec stream(generate_opts()) :: {:ok, Enumerable.t()} | {:error, term()}
+  def stream(opts) when is_list(opts) do
+    with_timeout(opts, fn -> do_stream(opts) end)
   end
 
   def stream(_opts), do: {:error, :keyword_options_required}
 
+  defp do_stream(opts) do
+    with :ok <- validate_public_options(opts),
+         :ok <- ensure_not_aborted(opts),
+         {:ok, request} <- build_request(opts),
+         {:ok, client_opts} <-
+           Boundary.narrow_options(opts, Keyword.get(opts, :client_opts, [])) do
+      client = Keyword.get(opts, :client) || Client.default_client()
+      tools = Keyword.get(opts, :tools, [])
+      stream_opts = stream_tool_opts(opts, client_opts)
+
+      case stream_events(client, request, tools, stream_opts) do
+        {:ok, events} ->
+          {:ok, wrap_stream_runtime_controls(events, stream_opts)}
+
+        other ->
+          other
+      end
+    end
+  end
+
   @spec generate_object(generate_opts()) :: {:ok, map()} | {:error, term()}
   def generate_object(opts) when is_list(opts) do
-    case generate(opts) do
-      {:ok, response} ->
-        with {:ok, object} <- decode_object(response.text),
-             :ok <- validate_object(object, opts) do
-          {:ok, object}
-        else
-          {:error, reason} -> {:error, NoObjectGeneratedError.exception(reason: reason)}
-        end
+    with_timeout(opts, fn ->
+      case do_generate(opts) do
+        {:ok, response} ->
+          with {:ok, object} <- decode_object(response.text),
+               :ok <- validate_object(object, opts) do
+            {:ok, object}
+          else
+            {:error, reason} -> {:error, NoObjectGeneratedError.exception(reason: reason)}
+          end
 
-      {:error, reason} ->
-        {:error, reason}
-    end
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end)
   end
 
   def generate_object(_opts), do: {:error, :keyword_options_required}
 
   @spec stream_object(generate_opts()) :: {:ok, Enumerable.t()} | {:error, term()}
   def stream_object(opts) when is_list(opts) do
-    case stream(opts) do
-      {:ok, events} ->
-        {:ok, build_object_stream(events, opts)}
+    with_timeout(opts, fn ->
+      case do_stream(opts) do
+        {:ok, events} ->
+          {:ok, build_object_stream(events, opts)}
 
-      {:error, reason} ->
-        {:error, reason}
-    end
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end)
   end
 
   def stream_object(_opts), do: {:error, :keyword_options_required}
@@ -653,7 +663,7 @@ defmodule Arbor.LLM do
     end
   end
 
-  defp timeout_option(opts), do: timeout_option(opts, nil)
+  defp timeout_option(opts), do: timeout_option(opts, @default_public_timeout_ms)
   defp timeout_option([], value), do: {:ok, value}
 
   defp timeout_option([{:timeout_ms, value} | _rest], _current)
@@ -1059,28 +1069,47 @@ defmodule Arbor.LLM do
     timeout_ms = normalize_timeout_ms(timeout_ms)
     deadline_ms = closed_stream_deadline_ms(timeout_ms)
     abort_fun = abort_fun(opts)
-    build_controlled_stream(events, timeout_ms, deadline_ms, abort_fun)
+    {:ok, tracker} = Boundary.stream_tracker(opts)
+    {:ok, max_events} = Boundary.stream_event_limit(opts)
+    build_controlled_stream(events, timeout_ms, deadline_ms, abort_fun, tracker, max_events, opts)
   end
 
-  defp build_controlled_stream(events, timeout_ms, deadline_ms, abort_fun) do
+  defp build_controlled_stream(
+         events,
+         timeout_ms,
+         deadline_ms,
+         abort_fun,
+         tracker,
+         max_events,
+         opts
+       ) do
+    track_events? = not match?(%Arbor.LLM.OwnedStream{}, events)
+
     Stream.resource(
       fn ->
         owner = self()
         ref = make_ref()
+        reply_alias = :erlang.alias()
 
-        {pid, monitor_ref} =
-          spawn_monitor(fn -> produce_stream_events(owner, ref, events) end)
+        {producer_pid, monitor_ref} =
+          spawn_monitor(fn -> produce_stream_events(owner, reply_alias, ref, events) end)
 
         %{
           ref: ref,
-          producer_pid: pid,
+          reply_alias: reply_alias,
+          producer_pid: producer_pid,
           monitor_ref: monitor_ref,
           timeout_ms: timeout_ms,
           abort_fun: abort_fun,
           absolute_deadline_ms: deadline_ms,
           done?: false,
           producer_down?: false,
-          demand_outstanding?: false
+          demand_outstanding?: false,
+          tracker: tracker,
+          max_events: max_events,
+          event_count: 0,
+          boundary_opts: opts,
+          track_events?: track_events?
         }
       end,
       &next_controlled_stream_item/1,
@@ -1088,14 +1117,14 @@ defmodule Arbor.LLM do
     )
   end
 
-  defp produce_stream_events(owner, ref, events) do
+  defp produce_stream_events(owner, reply_alias, ref, events) do
     owner_monitor = Process.monitor(owner)
 
     try do
       Enum.reduce_while(events, :ok, fn event, :ok ->
         receive do
           {^ref, :demand} ->
-            send(owner, {ref, :event, event, System.monotonic_time(:millisecond)})
+            send(reply_alias, {ref, :event, event, System.monotonic_time(:millisecond)})
             {:cont, :ok}
 
           {^ref, :cancel} ->
@@ -1106,21 +1135,21 @@ defmodule Arbor.LLM do
         end
       end)
 
-      send(owner, {ref, :done, System.monotonic_time(:millisecond)})
+      send(reply_alias, {ref, :done, System.monotonic_time(:millisecond)})
     after
       Process.demonitor(owner_monitor, [:flush])
     end
   rescue
     exception ->
       send(
-        owner,
+        reply_alias,
         {ref, :producer_error, {:error, exception, __STACKTRACE__},
          System.monotonic_time(:millisecond)}
       )
   catch
     kind, reason ->
       send(
-        owner,
+        reply_alias,
         {ref, :producer_error, {kind, reason, __STACKTRACE__},
          System.monotonic_time(:millisecond)}
       )
@@ -1138,7 +1167,13 @@ defmodule Arbor.LLM do
     receive do
       {ref, :event, event, completed_mono} when ref == state.ref ->
         if completed_within_stream_deadline?(state, completed_mono) do
-          {[event], %{state | demand_outstanding?: false}}
+          case validate_controlled_event(event, state) do
+            {:ok, normalized, next_state} ->
+              {[normalized], %{next_state | demand_outstanding?: false}}
+
+            {:error, reason} ->
+              raise Arbor.LLM.StreamError, reason: reason
+          end
         else
           raise RequestTimeoutError, timeout_ms: state.timeout_ms
         end
@@ -1171,6 +1206,22 @@ defmodule Arbor.LLM do
     end
   end
 
+  defp validate_controlled_event(event, %{track_events?: false} = state),
+    do: {:ok, event, state}
+
+  defp validate_controlled_event(event, state) do
+    event_count = state.event_count + 1
+
+    if event_count > state.max_events do
+      {:error, {:stream_limit_exceeded, :events, state.max_events}}
+    else
+      case Boundary.track_stream_event(state.tracker, event, state.boundary_opts) do
+        {:ok, normalized} -> {:ok, normalized, %{state | event_count: event_count}}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
   defp request_controlled_demand(%{demand_outstanding?: true} = state), do: state
 
   defp request_controlled_demand(state) do
@@ -1179,15 +1230,17 @@ defmodule Arbor.LLM do
   end
 
   defp close_controlled_stream(state) do
+    deadline = System.monotonic_time(:millisecond) + @controlled_wrapper_cleanup_grace_ms
+    :erlang.unalias(state.reply_alias)
     send(state.producer_pid, {state.ref, :cancel})
 
     producer_down? =
       state.producer_down? or
-        await_controlled_down(state, @controlled_wrapper_cleanup_grace_ms)
+        await_controlled_down_until(state, deadline)
 
     unless producer_down? do
       if Process.alive?(state.producer_pid), do: Process.exit(state.producer_pid, :kill)
-      await_controlled_down!(state)
+      await_controlled_down_until(state, deadline)
     end
 
     Process.demonitor(state.monitor_ref, [:flush])
@@ -1195,21 +1248,15 @@ defmodule Arbor.LLM do
     :ok
   end
 
-  defp await_controlled_down(state, timeout) do
+  defp await_controlled_down_until(state, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
     receive do
       {:DOWN, monitor_ref, :process, producer_pid, _reason}
       when monitor_ref == state.monitor_ref and producer_pid == state.producer_pid ->
         true
     after
-      timeout -> false
-    end
-  end
-
-  defp await_controlled_down!(state) do
-    receive do
-      {:DOWN, monitor_ref, :process, producer_pid, _reason}
-      when monitor_ref == state.monitor_ref and producer_pid == state.producer_pid ->
-        :ok
+      remaining -> false
     end
   end
 
@@ -1370,9 +1417,9 @@ defmodule Arbor.LLM do
   @doc """
   Validate and normalize an OpenAI-compatible batch embedding response.
 
-  Every response entry must carry a unique integer `index` in the submitted
-  batch range. The returned vectors are ordered by that index, independent of
-  wire order.
+  Every response entry must carry the exact next input `index` in submitted
+  batch order. Reordered, duplicate, missing, or fabricated associations are
+  rejected before vectors are returned.
   """
   @spec decode_embedding_response(term(), pos_integer()) ::
           {:ok, [[number()]], term()} | {:error, term()}

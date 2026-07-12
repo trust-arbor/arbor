@@ -302,18 +302,19 @@ defmodule Arbor.LLM.Client do
   def complete(client, request, opts \\ [])
 
   def complete(%__MODULE__{} = client, %Request{} = request, opts) do
-    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout),
-         {:ok, adapter} <- resolve_adapter(client, request) do
+    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
       Deadline.run(
         fn ->
-          base = fn req -> adapter.complete(req, opts) end
+          with {:ok, adapter} <- resolve_adapter(client, request) do
+            base = fn req -> adapter.complete(req, opts) end
 
-          wrapped =
-            Enum.reduce(Enum.reverse(client.middleware), base, fn mw, acc ->
-              fn req -> mw.(req, acc) end
-            end)
+            wrapped =
+              Enum.reduce(Enum.reverse(client.middleware), base, fn mw, acc ->
+                fn req -> mw.(req, acc) end
+              end)
 
-          Boundary.completion(wrapped.(request), opts)
+            Boundary.completion(wrapped.(request), opts)
+          end
         end,
         receipt,
         RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
@@ -327,31 +328,37 @@ defmodule Arbor.LLM.Client do
   def stream(client, request, opts \\ [])
 
   def stream(%__MODULE__{} = client, %Request{} = request, opts) do
-    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout),
-         {:ok, adapter} <- resolve_adapter(client, request),
-         :ok <- ensure_stream_supported(adapter),
-         {:ok, source} <-
-           Deadline.run(
-             fn ->
-               base = fn req -> normalize_stream(adapter.stream(req, opts)) end
+    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
+      Deadline.run(
+        fn ->
+          with {:ok, adapter} <- resolve_adapter(client, request),
+               :ok <- ensure_stream_supported(adapter),
+               {:ok, tracker} <- Boundary.stream_tracker(opts),
+               {:ok, max_events} <- Boundary.stream_event_limit(opts) do
+            base = fn req -> normalize_stream(adapter.stream(req, opts)) end
 
-               wrapped =
-                 Enum.reduce(Enum.reverse(client.stream_middleware), base, fn mw, acc ->
-                   fn req -> mw.(req, acc) end
-                 end)
+            wrapped =
+              Enum.reduce(Enum.reverse(client.stream_middleware), base, fn mw, acc ->
+                fn req -> mw.(req, acc) end
+              end)
 
-               wrapped.(request)
-             end,
-             receipt,
-             RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
-           ),
-         {:ok, owned} <-
-           OwnedStream.new(source,
-             deadline_ms: receipt.deadline_ms,
-             timeout_ms: receipt.timeout_ms,
-             validator: fn event -> Boundary.stream_event(event, opts) end
-           ) do
-      {:ok, owned}
+            with {:ok, source} <- wrapped.(request),
+                 true <-
+                   not match?(%OwnedStream{}, source) or
+                     {:error, :owned_stream_nesting_forbidden},
+                 {:ok, owned} <-
+                   OwnedStream.new(track_stream_source(source, tracker, max_events, opts),
+                     deadline_ms: receipt.deadline_ms,
+                     timeout_ms: receipt.timeout_ms,
+                     validator: fn event -> {:ok, event} end
+                   ) do
+              {:ok, owned}
+            end
+          end
+        end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
     end
   end
 
@@ -372,22 +379,39 @@ defmodule Arbor.LLM.Client do
 
   def complete_streaming(%__MODULE__{} = client, %Request{} = request, callback, opts)
       when is_function(callback, 1) do
-    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout),
-         {:ok, adapter} <- resolve_adapter(client, request) do
+    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
       Deadline.run(
         fn ->
-          if adapter_exports?(adapter, :complete_streaming, 3) do
-            guarded_callback = fn event ->
-              case Boundary.stream_event(event, opts) do
-                {:ok, normalized} -> callback.(normalized)
-                {:error, reason} -> throw({:invalid_stream_callback_event, reason})
-              end
-            end
+          with {:ok, adapter} <- resolve_adapter(client, request) do
+            if adapter_exports?(adapter, :complete_streaming, 3) do
+              with {:ok, tracker} <- Boundary.stream_tracker(opts),
+                   {:ok, max_events} <- Boundary.stream_event_limit(opts) do
+                event_counter = :atomics.new(1, [])
 
-            adapter.complete_streaming(request, guarded_callback, opts)
-            |> Boundary.completion(opts)
-          else
-            {:error, {:stream_not_supported, adapter}}
+                guarded_callback = fn event ->
+                  if :atomics.add_get(event_counter, 1, 1) <= max_events do
+                    case Boundary.track_stream_event(tracker, event, opts) do
+                      {:ok, normalized} -> callback.(normalized)
+                      {:error, reason} -> throw({:invalid_stream_callback_event, reason})
+                    end
+                  else
+                    throw(
+                      {:invalid_stream_callback_event,
+                       {:stream_limit_exceeded, :events, max_events}}
+                    )
+                  end
+                end
+
+                try do
+                  adapter.complete_streaming(request, guarded_callback, opts)
+                  |> Boundary.completion(opts)
+                catch
+                  :throw, {:invalid_stream_callback_event, reason} -> {:error, reason}
+                end
+              end
+            else
+              {:error, {:stream_not_supported, adapter}}
+            end
           end
         end,
         receipt,
@@ -418,12 +442,20 @@ defmodule Arbor.LLM.Client do
 
   def embed(%__MODULE__{} = client, provider, model, opts)
       when is_binary(provider) and is_binary(model) do
-    with {:ok, texts} <- embed_texts_option(opts),
-         [text | _rest] <- texts do
-      embed_batch(client, provider, model, [text], opts)
-    else
-      {:error, _reason} = error -> error
-      _ -> {:error, :embedding_texts_required}
+    with {:ok, receipt} <- Deadline.receipt(opts) do
+      Deadline.run(
+        fn ->
+          with {:ok, texts} <- embed_texts_option(opts),
+               [text | _rest] <- texts do
+            do_embed_batch(client, provider, model, [text], opts)
+          else
+            {:error, _reason} = error -> error
+            _ -> {:error, :embedding_texts_required}
+          end
+        end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
     end
   end
 
@@ -440,39 +472,9 @@ defmodule Arbor.LLM.Client do
 
   def embed_batch(%__MODULE__{} = client, provider, model, texts, opts)
       when is_binary(provider) and is_binary(model) do
-    canonical = ProviderRegistry.normalize(provider)
-
-    with :ok <- Boundary.embedding_inputs(texts),
-         {:ok, receipt} <- Deadline.receipt(opts),
-         {:ok, adapter} <- resolve_embedding_adapter(client, canonical, provider),
-         true <-
-           adapter_exports?(adapter, :embed, 3) or {:error, {:embed_not_supported, provider}} do
+    with {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
-        fn ->
-          adapter_opts = safe_put_new(opts, :provider, canonical)
-
-          with options when is_list(options) <- adapter_opts,
-               result <- adapter.embed(texts, model, options),
-               {:ok, embeddings, usage} <-
-                 Boundary.embedding_response(elem_or_result(result), length(texts)) do
-            indexed =
-              embeddings
-              |> Enum.with_index(fn vector, index -> %{index: index, embedding: vector} end)
-
-            {:ok,
-             %{
-               embeddings: embeddings,
-               indexed_embeddings: indexed,
-               model: model,
-               provider: canonical,
-               usage: usage,
-               dimensions: embeddings |> List.first([]) |> length()
-             }}
-          else
-            {:error, _reason} = error -> error
-            _invalid -> {:error, :invalid_embedding_adapter_options}
-          end
-        end,
+        fn -> do_embed_batch(client, provider, model, texts, opts) end,
         receipt,
         RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
       )
@@ -481,6 +483,35 @@ defmodule Arbor.LLM.Client do
 
   def embed_batch(_client, _provider, _model, _texts, _opts),
     do: {:error, :invalid_embedding_request}
+
+  defp do_embed_batch(client, provider, model, texts, opts) do
+    canonical = ProviderRegistry.normalize(provider)
+
+    with :ok <- Boundary.embedding_inputs(texts),
+         {:ok, adapter} <- resolve_embedding_adapter(client, canonical, provider),
+         true <-
+           adapter_exports?(adapter, :embed, 3) or {:error, {:embed_not_supported, provider}},
+         adapter_opts = safe_put_new(opts, :provider, canonical),
+         options when is_list(options) <- adapter_opts,
+         result <- adapter.embed(texts, model, options),
+         {:ok, indexed, usage} <-
+           Boundary.embedding_response_with_indices(elem_or_result(result), length(texts)) do
+      embeddings = Enum.map(indexed, & &1.embedding)
+
+      {:ok,
+       %{
+         embeddings: embeddings,
+         indexed_embeddings: indexed,
+         model: model,
+         provider: canonical,
+         usage: usage,
+         dimensions: embeddings |> List.first([]) |> length()
+       }}
+    else
+      {:error, _reason} = error -> error
+      _invalid -> {:error, :invalid_embedding_adapter_options}
+    end
+  end
 
   defp resolve_embedding_adapter(client, canonical, original) do
     case Map.get(client.adapters, canonical) do
@@ -536,8 +567,31 @@ defmodule Arbor.LLM.Client do
   defp normalize_stream({:error, _reason} = error), do: error
   defp normalize_stream(enumerable), do: {:ok, enumerable}
 
-  @spec collect_stream(Enumerable.t()) :: {:ok, Response.t()} | {:error, term()}
-  def collect_stream(events) do
+  defp track_stream_source(source, tracker, max_events, opts) do
+    Stream.transform(source, 0, fn event, count ->
+      next = count + 1
+
+      if next > max_events do
+        raise Arbor.LLM.StreamError,
+          reason: {:stream_limit_exceeded, :events, max_events}
+      end
+
+      case Boundary.track_stream_event(tracker, event, opts) do
+        {:ok, normalized} -> {[normalized], next}
+        {:error, reason} -> raise Arbor.LLM.StreamError, reason: reason
+      end
+    end)
+  end
+
+  @spec collect_stream(Enumerable.t(), keyword()) :: {:ok, Response.t()} | {:error, term()}
+  def collect_stream(events, opts \\ []) do
+    with {:ok, tracker} <- Boundary.stream_tracker(opts),
+         {:ok, max_events} <- Boundary.stream_event_limit(opts) do
+      do_collect_stream(events, opts, tracker, max_events)
+    end
+  end
+
+  defp do_collect_stream(events, opts, tracker, max_events) do
     result =
       Enum.reduce_while(
         events,
@@ -559,11 +613,11 @@ defmodule Arbor.LLM.Client do
         fn event, acc ->
           event_count = acc.event_count + 1
 
-          if event_count > 100_000 do
-            {:halt, {:error, {:stream_limit_exceeded, :events, 100_000}}}
+          if event_count > max_events do
+            {:halt, {:error, {:stream_limit_exceeded, :events, max_events}}}
           else
-            with {:ok, acc} <- account_stream_event(event, %{acc | event_count: event_count}) do
-              case normalize_event(event) do
+            with {:ok, event} <- Boundary.track_stream_event(tracker, event, opts) do
+              case event do
                 %StreamEvent{type: :delta, data: %{"text" => chunk}} ->
                   collect_text_chunk(chunk, acc)
 
@@ -639,14 +693,15 @@ defmodule Arbor.LLM.Client do
           true -> result.finish_reason
         end
 
-      {:ok,
-       %Response{
-         text: text,
-         finish_reason: finish_reason,
-         content_parts: content_parts,
-         warnings: warnings,
-         usage: result.usage
-       }}
+      response = %Response{
+        text: text,
+        finish_reason: finish_reason,
+        content_parts: content_parts,
+        warnings: warnings,
+        usage: result.usage || %{}
+      }
+
+      Boundary.completion({:ok, response}, opts)
     else
       {:error, _reason} = error -> error
     end
@@ -663,22 +718,6 @@ defmodule Arbor.LLM.Client do
   end
 
   defp collect_text_chunk(_chunk, _acc), do: {:halt, {:error, :binary_stream_text_required}}
-
-  defp account_stream_event(event, acc) do
-    limits = [
-      max_bytes: 1_048_576,
-      max_nodes: 10_000,
-      max_depth: 32,
-      max_map_keys: 2_000,
-      max_list_items: 10_000
-    ]
-
-    with {:ok, measurements} <- ResponseBudget.measure(event, limits) do
-      account_retained_measurements(acc, measurements)
-    else
-      {:error, reason} -> {:error, {:invalid_stream_event, reason}}
-    end
-  end
 
   defp account_retained_measurements(acc, nil), do: {:ok, acc}
 
@@ -811,10 +850,6 @@ defmodule Arbor.LLM.Client do
       max_list_items: 10_000
     ]
   end
-
-  defp normalize_event(%StreamEvent{} = event), do: event
-  defp normalize_event(%{type: type, data: data}), do: %StreamEvent{type: type, data: data}
-  defp normalize_event(_), do: %StreamEvent{type: :error, data: %{reason: :invalid_stream_event}}
 
   @spec generate_with_tools(t(), Request.t(), [Tool.t()], keyword()) ::
           {:ok, Response.t()} | {:error, term()}

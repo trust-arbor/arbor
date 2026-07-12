@@ -589,6 +589,9 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
       {:error, :symlink_rejected} ->
         {:error, {:index_file_rejected, path, :symlink}}
 
+      {:error, :hardlink_rejected} ->
+        {:error, {:index_file_rejected, path, :hardlink}}
+
       {:error, {:not_regular_file, type}} ->
         {:error, {:index_file_rejected, path, {:not_regular, type}}}
 

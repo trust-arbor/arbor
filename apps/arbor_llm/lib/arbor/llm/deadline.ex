@@ -63,21 +63,17 @@ defmodule Arbor.LLM.Deadline do
 
   defp requested_timeout(opts, fallback) do
     with {:ok, options} <- collect_options(opts, %{}, 0) do
-      value = first_timeout_option(@timeout_keys, options, fallback)
+      supplied = Enum.flat_map(@timeout_keys, &Map.get(options, &1, []))
+      values = if valid_fallback(fallback), do: [fallback | supplied], else: supplied
 
-      if is_integer(value) and value > 0,
-        do: {:ok, min(value, @maximum_timeout_ms)},
-        else: {:error, {:invalid_timeout, {1, @maximum_timeout_ms}}}
-    end
-  end
+      case Enum.find(values, &(not (is_integer(&1) and &1 > 0))) do
+        nil ->
+          requested = if values == [], do: @default_timeout_ms, else: Enum.min(values)
+          {:ok, min(requested, @maximum_timeout_ms)}
 
-  defp first_timeout_option([], _options, fallback),
-    do: valid_fallback(fallback) || @default_timeout_ms
-
-  defp first_timeout_option([key | rest], options, fallback) do
-    case Map.fetch(options, key) do
-      {:ok, value} -> value
-      :error -> first_timeout_option(rest, options, fallback)
+        _invalid ->
+          {:error, {:invalid_timeout, {1, @maximum_timeout_ms}}}
+      end
     end
   end
 
@@ -87,7 +83,8 @@ defmodule Arbor.LLM.Deadline do
     do: {:error, {:invalid_options, :too_many_options}}
 
   defp collect_options([{key, value} | rest], options, count) when is_atom(key) do
-    collect_options(rest, Map.put(options, key, value), count + 1)
+    next = Map.update(options, key, [value], &[value | &1])
+    collect_options(rest, next, count + 1)
   end
 
   defp collect_options(_improper_or_non_keyword, _options, _count),

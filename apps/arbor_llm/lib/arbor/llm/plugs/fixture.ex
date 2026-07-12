@@ -28,6 +28,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
   """
 
   alias Arbor.LLM.Call
+  alias Arbor.LLM.Boundary
   alias Arbor.LLM.Response
   alias Arbor.LLM.StreamEvent
 
@@ -142,8 +143,11 @@ defmodule Arbor.LLM.Plugs.Fixture do
              max_map_keys: 10_000,
              max_list_items: 100_000
            ),
-         {:ok, recorded_at, _} <- DateTime.from_iso8601(decoded["recorded_at"] || "") do
-      {:ok, deserialize(op, decoded["response"]), recorded_at}
+         true <- decoded["operation"] == Atom.to_string(op),
+         true <- decoded["request_hash"] == request_hash(call),
+         {:ok, recorded_at, _} <- DateTime.from_iso8601(decoded["recorded_at"] || ""),
+         {:ok, response} <- validate_replay(call, deserialize(op, decoded["response"])) do
+      {:ok, response, recorded_at}
     else
       _ -> :not_found
     end
@@ -180,12 +184,12 @@ defmodule Arbor.LLM.Plugs.Fixture do
     %{"outcome" => "ok", "value" => %{"events" => events}}
   end
 
-  defp serialize(op, {:ok, embeddings, usage})
-       when op in [:embed_cloud, :embed_local] and is_list(embeddings) do
+  defp serialize(op, {:ok, indexed_embeddings, usage})
+       when op in [:embed_cloud, :embed_local] and is_list(indexed_embeddings) do
     %{
       "outcome" => "ok",
       "value" => %{
-        "embeddings" => embeddings,
+        "indexed_embeddings" => Enum.map(indexed_embeddings, &stringify/1),
         "usage" => serialize_usage(usage || %{})
       }
     }
@@ -248,7 +252,19 @@ defmodule Arbor.LLM.Plugs.Fixture do
 
   defp deserialize(op, %{"outcome" => "ok", "value" => v})
        when op in [:embed_cloud, :embed_local] do
-    {:ok, v["embeddings"], deserialize_usage(v["usage"] || %{})}
+    indexed =
+      Enum.map(v["indexed_embeddings"] || [], fn
+        entry when is_map(entry) ->
+          %{
+            index: Map.get(entry, "index"),
+            embedding: Map.get(entry, "embedding")
+          }
+
+        invalid ->
+          invalid
+      end)
+
+    {:ok, indexed, deserialize_usage(v["usage"] || %{})}
   end
 
   defp deserialize_response(json) do
@@ -284,6 +300,22 @@ defmodule Arbor.LLM.Plugs.Fixture do
   defp deserialize_usage(usage) when is_map(usage) do
     Map.new(usage, fn {k, v} -> {safe_atom(k, k), v} end)
   end
+
+  defp validate_replay(
+         %Call{operation: op, request: {_model, texts, _opts}},
+         {:ok, indexed, usage}
+       )
+       when op in [:embed_cloud, :embed_local] and is_list(texts) do
+    case Boundary.embedding_response_with_indices(
+           %{indexed_embeddings: indexed, usage: usage},
+           length(texts)
+         ) do
+      {:ok, authoritative, validated_usage} -> {:ok, {:ok, authoritative, validated_usage}}
+      {:error, reason} -> {:error, {:invalid_embedding_fixture, reason}}
+    end
+  end
+
+  defp validate_replay(%Call{}, response), do: {:ok, response}
 
   defp safe_atom(s, fallback) when is_binary(s) do
     String.to_existing_atom(s)

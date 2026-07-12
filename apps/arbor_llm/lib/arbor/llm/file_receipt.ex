@@ -17,6 +17,7 @@ defmodule Arbor.LLM.FileReceipt do
     return $a->[0] == $b->[0] && $a->[1] == $b->[1] &&
            (($a->[2] & 0170000) == ($b->[2] & 0170000));
   }
+  sub one_link { return $_[0]->[3] == 1; }
   sub read_bounded {
     my ($fh, $max) = @_;
     my $body = "";
@@ -33,10 +34,12 @@ defmodule Arbor.LLM.FileReceipt do
   my @path_before = lstat($path);
   @path_before or fail_with("LSTAT");
   S_ISREG($path_before[2]) or fail_with("NOT_REGULAR");
+  one_link(\@path_before) or fail_with("HARDLINK");
   sysopen(my $fh, $path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW) or fail_with("OPEN");
   my @fd_before = stat($fh);
   @fd_before or fail_with("FSTAT");
   S_ISREG($fd_before[2]) or fail_with("NOT_REGULAR");
+  one_link(\@fd_before) or fail_with("HARDLINK");
   same_file(\@path_before, \@fd_before) or fail_with("CHANGED");
   binmode($fh);
   my $first = read_bounded($fh, $max);
@@ -45,7 +48,8 @@ defmodule Arbor.LLM.FileReceipt do
   $first eq $second or fail_with("CHANGED");
   my @fd_after = stat($fh);
   my @path_after = lstat($path);
-  (@fd_after && @path_after && S_ISREG($fd_after[2]) && S_ISREG($path_after[2]))
+  (@fd_after && @path_after && S_ISREG($fd_after[2]) && S_ISREG($path_after[2]) &&
+   one_link(\@fd_after) && one_link(\@path_after))
     or fail_with("CHANGED");
   same_file(\@fd_before, \@fd_after) && same_file(\@fd_after, \@path_after)
     or fail_with("CHANGED");
@@ -140,6 +144,7 @@ defmodule Arbor.LLM.FileReceipt do
   defp parse_helper("O\n" <> body, maximum) when byte_size(body) <= maximum, do: {:ok, body}
   defp parse_helper("E\tTOO_LARGE\n", maximum), do: {:error, {:file_bytes_exceeded, maximum}}
   defp parse_helper("E\tNOT_REGULAR\n", _maximum), do: {:error, :not_regular_file}
+  defp parse_helper("E\tHARDLINK\n", _maximum), do: {:error, :hardlink_rejected}
   defp parse_helper("E\tCHANGED\n", _maximum), do: {:error, :file_changed_during_read}
   defp parse_helper("E\tOPEN\n", _maximum), do: {:error, :file_open_failed}
   defp parse_helper("E\t" <> _reason, _maximum), do: {:error, :file_read_failed}
@@ -195,7 +200,8 @@ defmodule Arbor.LLM.FileReceipt do
 
   defp path_identity(path) do
     case File.lstat(path, time: :posix) do
-      {:ok, %File.Stat{type: :regular} = stat} -> {:ok, identity(stat)}
+      {:ok, %File.Stat{type: :regular, links: 1} = stat} -> {:ok, identity(stat)}
+      {:ok, %File.Stat{type: :regular}} -> {:error, :hardlink_rejected}
       {:ok, %File.Stat{type: :symlink}} -> {:error, :symlink_rejected}
       {:ok, %File.Stat{type: type}} -> {:error, {:not_regular_file, type}}
       {:error, reason} -> {:error, {:file_stat_failed, reason}}
@@ -206,7 +212,8 @@ defmodule Arbor.LLM.FileReceipt do
     case :file.read_file_info(io, time: :posix) do
       {:ok, info} ->
         case File.Stat.from_record(info) do
-          %File.Stat{type: :regular} = stat -> {:ok, identity(stat)}
+          %File.Stat{type: :regular, links: 1} = stat -> {:ok, identity(stat)}
+          %File.Stat{type: :regular} -> {:error, :hardlink_rejected}
           %File.Stat{type: type} -> {:error, {:not_regular_file, type}}
         end
 
@@ -223,7 +230,8 @@ defmodule Arbor.LLM.FileReceipt do
       minor_device: stat.minor_device,
       size: stat.size,
       mtime: stat.mtime,
-      ctime: stat.ctime
+      ctime: stat.ctime,
+      links: stat.links
     }
   end
 end
