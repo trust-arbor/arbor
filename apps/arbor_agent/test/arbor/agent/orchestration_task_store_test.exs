@@ -475,9 +475,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert_eventually(fn ->
       assert {:ok, status} = TaskStore.status(task_id, name: store)
       assert status.state == :failed
-      assert status.steering["counts"] == %{"queued" => 1}
+      assert status.steering["counts"] == %{"delivery_unconfirmed" => 1}
       assert status.steering["last"]["control_id"] == control["control_id"]
-      assert status.steering["last"]["status"] == "queued"
+      assert status.steering["last"]["status"] == "delivery_unconfirmed"
       assert status.steering["last"]["delivered_at"] == nil
 
       assert status.steering["last"]["error"] ==
@@ -490,7 +490,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert_receive {:task_steering_transition,
                     %{
                       task_id: ^task_id,
-                      status: "queued",
+                      status: "delivery_unconfirmed",
                       error: "delivery_unconfirmed_task_failed"
                     }},
                    1_000
@@ -512,9 +512,9 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
 
     assert {:ok, status} = TaskStore.cancel(task_id, name: store)
     assert status.state == :cancelled
-    assert status.steering["counts"] == %{"queued" => 1}
+    assert status.steering["counts"] == %{"delivery_unconfirmed" => 1}
     assert status.steering["last"]["control_id"] == control["control_id"]
-    assert status.steering["last"]["status"] == "queued"
+    assert status.steering["last"]["status"] == "delivery_unconfirmed"
     assert status.steering["last"]["delivered_at"] == nil
 
     assert status.steering["last"]["error"] ==
@@ -526,7 +526,7 @@ defmodule Arbor.Agent.OrchestrationTaskStoreTest do
     assert_receive {:task_steering_transition,
                     %{
                       task_id: ^task_id,
-                      status: "queued",
+                      status: "delivery_unconfirmed",
                       error: "delivery_unconfirmed_task_cancelled"
                     }},
                    1_000

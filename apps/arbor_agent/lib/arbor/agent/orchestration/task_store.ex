@@ -145,7 +145,8 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
   The returned control is JSON-clean and has a stable `control_id` and
   monotonically increasing per-task `sequence`. Operational delivery failures
   return `"deferred"` and are retried by the store; accepted controls are never
-  invoked again.
+  invoked again. If a task fails or is cancelled before accepted delivery can
+  be confirmed, the control enters the terminal `"delivery_unconfirmed"` state.
   """
   @spec steer(task_id(), String.t(), keyword() | map()) ::
           {:ok, steering_control()} | {:error, term()}
@@ -926,7 +927,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp reconcile_accepted_control(%{state: :failed} = record, control) do
     transition_terminal_control(record, control, %{
-      "status" => "queued",
+      "status" => "delivery_unconfirmed",
       "delivered_at" => nil,
       "error" => "delivery_unconfirmed_task_failed"
     })
@@ -934,7 +935,7 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
 
   defp reconcile_accepted_control(%{state: :cancelled} = record, control) do
     transition_terminal_control(record, control, %{
-      "status" => "queued",
+      "status" => "delivery_unconfirmed",
       "delivered_at" => nil,
       "error" => "delivery_unconfirmed_task_cancelled"
     })
@@ -1255,7 +1256,13 @@ defmodule Arbor.Agent.Orchestration.TaskStore do
       "counts" =>
         controls
         |> Enum.frequencies_by(& &1["status"])
-        |> Map.take(["queued", "deferred", "delivered", "unsupported"]),
+        |> Map.take([
+          "queued",
+          "deferred",
+          "delivered",
+          "delivery_unconfirmed",
+          "unsupported"
+        ]),
       "last" =>
         case List.last(controls) do
           nil ->
