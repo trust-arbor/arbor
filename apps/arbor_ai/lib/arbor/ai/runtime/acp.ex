@@ -79,9 +79,9 @@ defmodule Arbor.AI.Runtime.Acp do
   @spec execute(Request.t(), Runtime.callbacks(), keyword()) ::
           {:ok, Response.t()} | {:error, term()}
   def execute(%Request{} = request, _callbacks, opts) do
-    with {:ok, cli} <- resolve_cli(request),
+    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, @default_timeout),
+         {:ok, cli} <- resolve_cli(request),
          {:ok, session} <- pool_checkout(cli, build_checkout_opts(request, opts)) do
-      timeout = Keyword.get(opts, :timeout, @default_timeout)
       result = session_prompt(session, request, timeout)
       _ = pool_checkin(session)
 
@@ -142,17 +142,18 @@ defmodule Arbor.AI.Runtime.Acp do
   # provider_options → checkout-opts shape without needing a live
   # AcpPool. Public callers should not depend on this.
   def build_checkout_opts(%Request{} = request, opts) do
-    opts
-    |> Keyword.put(:model, request.model)
-    |> Keyword.put(:timeout, Keyword.get(opts, :timeout, @default_timeout))
-    |> maybe_add(:workspace, Map.get(request.provider_options, "workspace"))
-    |> maybe_add(
-      :agent_id,
-      Map.get(request.provider_options, "agent_id") || opts[:agent_id]
-    )
-    |> maybe_add(:capabilities, Map.get(request.provider_options, "capabilities"))
-    |> maybe_add(:tool_modules, Map.get(request.provider_options, "tool_modules"))
-    |> maybe_add_adapter_opts(request)
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.normalize(opts, @default_timeout) do
+      opts
+      |> Keyword.put(:model, request.model)
+      |> maybe_add(:workspace, Map.get(request.provider_options, "workspace"))
+      |> maybe_add(
+        :agent_id,
+        Map.get(request.provider_options, "agent_id") || opts[:agent_id]
+      )
+      |> maybe_add(:capabilities, Map.get(request.provider_options, "capabilities"))
+      |> maybe_add(:tool_modules, Map.get(request.provider_options, "tool_modules"))
+      |> maybe_add_adapter_opts(request)
+    end
   end
 
   # Per-call ExMCP adapter_opts override. The caller (e.g., a DOT
@@ -179,7 +180,8 @@ defmodule Arbor.AI.Runtime.Acp do
       {:error, :pool_not_available}
     end
   catch
-    :exit, reason -> {:error, {:pool_exit, reason}}
+    :exit, reason -> {:error, {:pool_exit, Arbor.LLM.sanitize_external_reason(reason)}}
+    kind, reason -> {:error, {:pool_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
   defp pool_checkin(session) do
@@ -206,7 +208,8 @@ defmodule Arbor.AI.Runtime.Acp do
       {:error, :session_mod_not_available}
     end
   catch
-    :exit, reason -> {:error, {:session_exit, reason}}
+    :exit, reason -> {:error, {:session_exit, Arbor.LLM.sanitize_external_reason(reason)}}
+    kind, reason -> {:error, {:session_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
   defp extract_prompt(%Request{messages: messages}) do

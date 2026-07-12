@@ -73,6 +73,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
     e -> {:error, exception_for(e)}
   catch
     :exit, reason -> {:error, exit_for(reason)}
+    kind, reason -> {:error, {:adapter_failure, kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
   end
 
   defp do_dispatch(:stream, {model_spec, messages, opts}) do
@@ -96,6 +97,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
     e -> {:error, exception_for(e)}
   catch
     :exit, reason -> {:error, exit_for(reason)}
+    kind, reason -> {:error, {:adapter_failure, kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
   end
 
   defp do_dispatch(:embed_cloud, {model_spec, texts, opts}) when is_binary(model_spec) do
@@ -107,6 +109,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
     e -> {:error, exception_for(e)}
   catch
     :exit, reason -> {:error, exit_for(reason)}
+    kind, reason -> {:error, {:adapter_failure, kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
   end
 
   defp do_dispatch(:embed_local, {%LLMDB.Model{} = model, texts, opts}) do
@@ -121,6 +124,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
     e -> {:error, exception_for(e)}
   catch
     :exit, reason -> {:error, exit_for(reason)}
+    kind, reason -> {:error, {:adapter_failure, kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
   end
 
   # ── Helpers ────────────────────────────────────────────────────────
@@ -148,7 +152,7 @@ defmodule Arbor.LLM.Plugs.Dispatch do
            message: "embedding HTTP #{status}",
            status: status,
            retryable: retryable_status?(status),
-           details: %{source: source, body: inspect(body, limit: 20, printable_limit: 500)}
+           details: %{source: source, body: Arbor.LLM.ExternalTerm.inspect(body)}
          )}
 
       {:error, _} = error ->
@@ -161,18 +165,18 @@ defmodule Arbor.LLM.Plugs.Dispatch do
     status = Map.get(e, :status)
 
     ProviderError.exception(
-      message: Exception.message(e),
+      message: Arbor.LLM.ExternalTerm.exception_message(e),
       status: status,
       retryable: retryable_status?(status),
-      details: %{source: :req_llm, raw: inspect(e)}
+      details: %{source: :req_llm, raw: Arbor.LLM.ExternalTerm.inspect(e)}
     )
   end
 
   defp exception_for(e) do
     ProviderError.exception(
-      message: Exception.message(e),
+      message: Arbor.LLM.ExternalTerm.exception_message(e),
       retryable: false,
-      details: %{source: :req_llm, raw: inspect(e)}
+      details: %{source: :req_llm, raw: Arbor.LLM.ExternalTerm.inspect(e)}
     )
   end
 
@@ -181,10 +185,13 @@ defmodule Arbor.LLM.Plugs.Dispatch do
   end
 
   defp exit_for(reason) do
+    bounded = Arbor.LLM.ExternalTerm.sanitize(reason)
+    rendered = Arbor.LLM.ExternalTerm.inspect(bounded)
+
     ProviderError.exception(
-      message: "request exited: " <> inspect(reason),
+      message: "request exited: " <> rendered,
       retryable: false,
-      details: %{source: :req_llm, raw: inspect(reason)}
+      details: %{source: :req_llm, raw: rendered}
     )
   end
 

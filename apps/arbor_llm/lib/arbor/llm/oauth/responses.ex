@@ -235,12 +235,14 @@ defmodule Arbor.LLM.OAuth.Responses do
         end
 
       {:error, reason} ->
-        {:error, {:responses_request_failed, bounded_reason(reason)}}
+        {:error, {:responses_request_failed, Arbor.LLM.ExternalTerm.sanitize(reason)}}
     end
   rescue
-    exception -> {:error, {:responses_request_failed, bounded_exception(exception)}}
+    exception ->
+      {:error, {:responses_request_failed, Arbor.LLM.ExternalTerm.exception(exception)}}
   catch
-    kind, reason -> {:error, {:responses_request_failed, {kind, bounded_reason(reason)}}}
+    kind, reason ->
+      {:error, {:responses_request_failed, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}}
   end
 
   defp bounded_sse_receipt(limits) do
@@ -532,7 +534,8 @@ defmodule Arbor.LLM.OAuth.Responses do
 
   defp build_limits(opts) do
     with {:ok, supplied} <- collect_limit_options(opts, %{}, 0),
-         {:ok, timeout} <- positive_clamped(supplied, :receive_timeout, 180_000, @max_timeout),
+         {:ok, timeout} <-
+           Deadline.select(opts, Deadline.timeout_keys(), 180_000, @max_timeout),
          {:ok, max_response_bytes} <-
            positive_clamped(
              supplied,
@@ -653,18 +656,6 @@ defmodule Arbor.LLM.OAuth.Responses do
       do: binary_part(line, 0, byte_size(line) - 1),
       else: line
   end
-
-  defp bounded_exception(%{__struct__: module, message: message}) when is_binary(message),
-    do: {module, String.slice(String.replace_invalid(message, ""), 0, 512)}
-
-  defp bounded_exception(%{__struct__: module}), do: module
-  defp bounded_exception(_exception), do: :exception
-
-  defp bounded_reason(value) when is_binary(value),
-    do: value |> String.slice(0, 512) |> String.replace_invalid("")
-
-  defp bounded_reason(value) when is_atom(value) or is_number(value), do: value
-  defp bounded_reason(_value), do: :external_error
 
   defp detail(body) when is_binary(body),
     do: body |> String.replace_invalid("") |> String.slice(0, 200)

@@ -90,9 +90,14 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   @spec resolve_task_control(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def resolve_task_control(task_id, principal_id, opts \\ [])
       when is_binary(task_id) and is_binary(principal_id) and is_list(opts) do
+    timeout_keys = Arbor.LLM.timeout_option_keys()
+
     call(
       {:resolve_task_control, normalize_id(task_id), normalize_id(principal_id)},
-      Keyword.take(opts, [:server, :timeout])
+      Enum.filter(opts, fn
+        {key, _value} when is_atom(key) -> key == :server or key in timeout_keys
+        _invalid -> true
+      end)
     )
   end
 
@@ -243,30 +248,38 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
   # Convert every GenServer.call exit (including timeout) into an error tuple
   # so acquisition cleanup in AcpManaged always runs after a failed register.
   defp call(message, opts) do
-    server = Keyword.get(opts, :server, @registry_name)
+    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, 5_000) do
+      server = Keyword.get(opts, :server, @registry_name)
 
-    try do
-      GenServer.call(server, message, Keyword.get(opts, :timeout, 5_000))
-    catch
-      :exit, {:noproc, _} ->
-        {:error, :registry_unavailable}
+      try do
+        GenServer.call(server, message, timeout)
+      catch
+        :exit, {:noproc, _} ->
+          {:error, :registry_unavailable}
 
-      :exit, {:normal, _} ->
-        {:error, :registry_unavailable}
+        :exit, {:normal, _} ->
+          {:error, :registry_unavailable}
 
-      :exit, {:shutdown, _} ->
-        {:error, :registry_unavailable}
+        :exit, {:shutdown, _} ->
+          {:error, :registry_unavailable}
 
-      :exit, {:timeout, _} ->
-        {:error, :timeout}
+        :exit, {:timeout, _} ->
+          {:error, :timeout}
 
-      :exit, reason ->
-        {:error, {:registry_call_failed, reason}}
+        :exit, reason ->
+          {:error, {:registry_call_failed, Arbor.LLM.sanitize_external_reason(reason)}}
+      end
     end
   end
 
   defp split_caller_opts(opts) when is_list(opts) do
-    server_opts = Keyword.take(opts, [:server, :timeout])
+    timeout_keys = Arbor.LLM.timeout_option_keys()
+
+    server_opts =
+      Enum.filter(opts, fn
+        {key, _value} when is_atom(key) -> key == :server or key in timeout_keys
+        _invalid -> true
+      end)
 
     caller = %{
       owner_pid: nil,
@@ -284,11 +297,7 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
         name -> [server: name]
       end
 
-    timeout =
-      case Map.get(opts, :timeout) || Map.get(opts, "timeout") do
-        nil -> []
-        t -> [timeout: t]
-      end
+    timeout = map_timeout_options(opts)
 
     principal =
       normalize_id(
@@ -305,6 +314,17 @@ defmodule Arbor.AI.AcpManaged.SessionRegistry do
     }
 
     {server ++ timeout, caller}
+  end
+
+  defp map_timeout_options(opts) do
+    Enum.reduce(Arbor.LLM.timeout_option_keys(), [], fn key, acc ->
+      acc = if Map.has_key?(opts, key), do: [{key, Map.get(opts, key)} | acc], else: acc
+      string_key = Atom.to_string(key)
+
+      if Map.has_key?(opts, string_key),
+        do: [{key, Map.get(opts, string_key)} | acc],
+        else: acc
+    end)
   end
 
   # Explicit close may override stored policy; :default keeps registration value.

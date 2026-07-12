@@ -38,6 +38,8 @@ defmodule Arbor.AI.UnifiedBridge do
     lmstudio: "lm_studio"
   }
 
+  @default_timeout_ms 30_000
+
   @doc """
   Check if the unified LLM client is available.
 
@@ -66,10 +68,13 @@ defmodule Arbor.AI.UnifiedBridge do
   Returns `{:ok, response_map}` | `{:error, reason}` | `:unavailable`.
   """
   def generate_text(prompt, opts) do
-    if available?() do
-      do_generate(prompt, opts)
-    else
-      :unavailable
+    with {:ok, opts, _timeout} <-
+           Arbor.LLM.normalize_timeout_options(opts, @default_timeout_ms) do
+      if available?() do
+        do_generate(prompt, opts)
+      else
+        :unavailable
+      end
     end
   end
 
@@ -85,10 +90,13 @@ defmodule Arbor.AI.UnifiedBridge do
   Returns `{:ok, embed_result}` | `{:error, reason}` | `:unavailable`.
   """
   def embed(text, opts) when is_binary(text) do
-    if available?() do
-      do_embed([text], opts, :single)
-    else
-      :unavailable
+    with {:ok, opts, _timeout} <-
+           Arbor.LLM.normalize_timeout_options(opts, @default_timeout_ms) do
+      if available?() do
+        do_embed([text], opts, :single)
+      else
+        :unavailable
+      end
     end
   end
 
@@ -98,10 +106,13 @@ defmodule Arbor.AI.UnifiedBridge do
   Returns `{:ok, batch_result}` | `{:error, reason}` | `:unavailable`.
   """
   def embed_batch(texts, opts) when is_list(texts) do
-    if available?() do
-      do_embed(texts, opts, :batch)
-    else
-      :unavailable
+    with {:ok, opts, _timeout} <-
+           Arbor.LLM.normalize_timeout_options(opts, @default_timeout_ms) do
+      if available?() do
+        do_embed(texts, opts, :batch)
+      else
+        :unavailable
+      end
     end
   end
 
@@ -138,14 +149,21 @@ defmodule Arbor.AI.UnifiedBridge do
     end
   rescue
     e ->
-      error_tuple = {:bridge_exception, Exception.message(e)}
-      Logger.warning("UnifiedBridge embed exception: #{inspect(e)}")
+      error_tuple = {:bridge_exception, Arbor.LLM.external_exception_message(e)}
+      Logger.warning("UnifiedBridge embed exception: #{Arbor.LLM.inspect_external_reason(e)}")
       safe_emit_bridge_error(error_tuple)
       {:error, error_tuple}
   catch
     :exit, reason ->
-      error_tuple = {:bridge_exit, reason}
-      Logger.warning("UnifiedBridge embed exit: #{inspect(reason)}")
+      bounded = Arbor.LLM.sanitize_external_reason(reason)
+      error_tuple = {:bridge_exit, bounded}
+      Logger.warning("UnifiedBridge embed exit: #{Arbor.LLM.inspect_external_reason(bounded)}")
+      safe_emit_bridge_error(error_tuple)
+      {:error, error_tuple}
+
+    kind, reason ->
+      bounded = Arbor.LLM.sanitize_external_reason(reason)
+      error_tuple = {:bridge_failure, kind, bounded}
       safe_emit_bridge_error(error_tuple)
       {:error, error_tuple}
   end
@@ -167,10 +185,13 @@ defmodule Arbor.AI.UnifiedBridge do
   optional event callbacks for real-time observation.
   """
   def generate_text_stream(prompt, opts) do
-    if available?() do
-      do_generate_stream(prompt, opts)
-    else
-      :unavailable
+    with {:ok, opts, _timeout} <-
+           Arbor.LLM.normalize_timeout_options(opts, @default_timeout_ms) do
+      if available?() do
+        do_generate_stream(prompt, opts)
+      else
+        :unavailable
+      end
     end
   end
 
@@ -180,7 +201,7 @@ defmodule Arbor.AI.UnifiedBridge do
     on_event = Keyword.get(opts, :on_event)
     collect? = Keyword.get(opts, :collect, true)
 
-    case Client.stream(client, request, []) do
+    case Client.stream(client, request, opts) do
       {:ok, events} ->
         events =
           if on_event do
@@ -199,19 +220,29 @@ defmodule Arbor.AI.UnifiedBridge do
         end
 
       {:error, reason} ->
-        Logger.warning("UnifiedBridge stream failed: #{inspect(reason)}")
+        Logger.warning(
+          "UnifiedBridge stream failed: #{Arbor.LLM.inspect_external_reason(reason)}"
+        )
+
         {:error, reason}
     end
   rescue
     e ->
-      error_tuple = {:bridge_exception, Exception.message(e)}
-      Logger.warning("UnifiedBridge stream exception: #{inspect(e)}")
+      error_tuple = {:bridge_exception, Arbor.LLM.external_exception_message(e)}
+      Logger.warning("UnifiedBridge stream exception: #{Arbor.LLM.inspect_external_reason(e)}")
       safe_emit_bridge_error(error_tuple)
       {:error, error_tuple}
   catch
     :exit, reason ->
-      error_tuple = {:bridge_exit, reason}
-      Logger.warning("UnifiedBridge stream exit: #{inspect(reason)}")
+      bounded = Arbor.LLM.sanitize_external_reason(reason)
+      error_tuple = {:bridge_exit, bounded}
+      Logger.warning("UnifiedBridge stream exit: #{Arbor.LLM.inspect_external_reason(bounded)}")
+      safe_emit_bridge_error(error_tuple)
+      {:error, error_tuple}
+
+    kind, reason ->
+      bounded = Arbor.LLM.sanitize_external_reason(reason)
+      error_tuple = {:bridge_failure, kind, bounded}
       safe_emit_bridge_error(error_tuple)
       {:error, error_tuple}
   end
@@ -220,24 +251,34 @@ defmodule Arbor.AI.UnifiedBridge do
     request = build_request(prompt, opts)
     client = get_client()
 
-    case Client.complete(client, request, []) do
+    case Client.complete(client, request, opts) do
       {:ok, response} ->
         {:ok, format_response(response, opts)}
 
       {:error, reason} ->
-        Logger.warning("UnifiedBridge generation failed: #{inspect(reason)}")
+        Logger.warning(
+          "UnifiedBridge generation failed: #{Arbor.LLM.inspect_external_reason(reason)}"
+        )
+
         {:error, reason}
     end
   rescue
     e ->
-      error_tuple = {:bridge_exception, Exception.message(e)}
-      Logger.warning("UnifiedBridge exception: #{inspect(e)}")
+      error_tuple = {:bridge_exception, Arbor.LLM.external_exception_message(e)}
+      Logger.warning("UnifiedBridge exception: #{Arbor.LLM.inspect_external_reason(e)}")
       safe_emit_bridge_error(error_tuple)
       {:error, error_tuple}
   catch
     :exit, reason ->
-      error_tuple = {:bridge_exit, reason}
-      Logger.warning("UnifiedBridge exit: #{inspect(reason)}")
+      bounded = Arbor.LLM.sanitize_external_reason(reason)
+      error_tuple = {:bridge_exit, bounded}
+      Logger.warning("UnifiedBridge exit: #{Arbor.LLM.inspect_external_reason(bounded)}")
+      safe_emit_bridge_error(error_tuple)
+      {:error, error_tuple}
+
+    kind, reason ->
+      bounded = Arbor.LLM.sanitize_external_reason(reason)
+      error_tuple = {:bridge_failure, kind, bounded}
       safe_emit_bridge_error(error_tuple)
       {:error, error_tuple}
   end
@@ -275,7 +316,7 @@ defmodule Arbor.AI.UnifiedBridge do
       # compression) can bound how long a slow provider may block. Without
       # this the underlying Finch recv has no deadline and a slow local
       # LLM blocks the calling process indefinitely.
-      receive_timeout: Keyword.get(opts, :receive_timeout) || Keyword.get(opts, :timeout),
+      receive_timeout: Keyword.fetch!(opts, :timeout_ms),
       provider_options: Keyword.get(opts, :provider_options, %{})
     }
   end

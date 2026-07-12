@@ -111,7 +111,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   def complete(request, opts \\ [])
 
   def complete(%Request{} = request, opts) do
-    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_transport_options(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn -> do_complete(request, opts) |> Boundary.completion(opts) end,
         receipt,
@@ -136,7 +138,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
   def stream(request, opts \\ [])
 
   def stream(%Request{} = request, opts) do
-    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_transport_options(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn ->
           with {:ok, model_spec} <- build_model_spec(request),
@@ -178,7 +182,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   def complete_streaming(%Request{} = request, callback, opts)
       when is_function(callback, 1) do
-    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_transport_options(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn -> do_complete_streaming(request, callback, opts) |> Boundary.completion(opts) end,
         receipt,
@@ -241,11 +247,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
   @impl true
   @spec embed(texts :: [String.t()], model :: String.t(), opts :: keyword()) ::
-          {:ok,
-           %{embeddings: [[float()]], model: String.t(), usage: map(), dimensions: pos_integer()}}
-          | {:error, term()}
+          {:ok, Arbor.LLM.ProviderAdapter.embed_batch_result()} | {:error, term()}
   def embed(texts, model, opts) do
-    with {:ok, receipt} <- Deadline.receipt(opts) do
+    with {:ok, opts, _timeout} <- Deadline.normalize_transport_options(opts),
+         {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn ->
           with :ok <- Boundary.embedding_inputs(texts) do
@@ -313,6 +318,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
 
               {:ok,
                %{
+                 association_version: 1,
                  embeddings: embeddings,
                  indexed_embeddings: authoritative,
                  model: embedding_model_id(model_spec),
@@ -345,7 +351,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM do
     |> maybe_merge(:api_key, local_api_key(arbor_provider, opts))
     |> maybe_merge(:provider_options, Keyword.get(opts, :provider_options))
     |> maybe_merge(:dimensions, Keyword.get(opts, :dimensions))
-    |> maybe_merge(:receive_timeout, Keyword.get(opts, :receive_timeout))
+    |> maybe_merge(:receive_timeout, Keyword.fetch!(opts, :receive_timeout))
     |> maybe_merge(:req_http_options, local_req_http_options(arbor_provider, opts))
     |> maybe_merge(:max_response_bytes, Keyword.get(opts, :max_response_bytes))
   end

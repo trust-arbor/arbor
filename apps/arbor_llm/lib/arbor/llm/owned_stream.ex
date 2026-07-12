@@ -91,7 +91,7 @@ defmodule Arbor.LLM.OwnedStream do
           {:timeout, :deadline}
 
         {:DOWN, ^monitor, :process, ^controller, reason} ->
-          {:error, {:owned_stream_controller_down, bounded_reason(reason)}}
+          {:error, {:owned_stream_controller_down, Arbor.LLM.ExternalTerm.sanitize(reason)}}
       after
         remaining -> {:timeout, :deadline}
       end
@@ -246,7 +246,7 @@ defmodule Arbor.LLM.OwnedStream do
       kind, reason ->
         send(
           controller,
-          {token, :source_error, {kind, bounded_reason(reason)},
+          {token, :source_error, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)},
            System.monotonic_time(:millisecond)}
         )
     end
@@ -255,13 +255,13 @@ defmodule Arbor.LLM.OwnedStream do
   defp safely_validate(validator, event) do
     case validator.(event) do
       {:ok, normalized} -> {:ok, normalized}
-      {:error, reason} -> {:error, reason}
+      {:error, reason} -> {:error, Arbor.LLM.ExternalTerm.sanitize(reason)}
       _other -> {:error, :invalid_stream_validator_result}
     end
   rescue
     exception -> {:error, bounded_exception(exception)}
   catch
-    kind, reason -> {:error, {kind, bounded_reason(reason)}}
+    kind, reason -> {:error, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}
   end
 
   defp controller_loop(state) do
@@ -417,15 +417,12 @@ defmodule Arbor.LLM.OwnedStream do
            max_map_keys: 256,
            max_list_items: 2_000
          ) do
-      :ok -> reason
+      :ok -> Arbor.LLM.ExternalTerm.sanitize(reason)
       {:error, _invalid} -> :stream_error
     end
   end
 
-  defp bounded_exception(%{__struct__: module}), do: {:stream_exception, module}
-  defp bounded_exception(_exception), do: :stream_exception
-  defp bounded_reason(reason) when is_atom(reason) or is_number(reason), do: reason
-  defp bounded_reason(_reason), do: :external_reason
+  defp bounded_exception(exception), do: Arbor.LLM.ExternalTerm.exception(exception)
 end
 
 defimpl Enumerable, for: Arbor.LLM.OwnedStream do

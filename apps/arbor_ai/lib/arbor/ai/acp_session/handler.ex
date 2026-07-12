@@ -33,36 +33,28 @@ defmodule Arbor.AI.AcpSession.Handler do
 
   @doc false
   def init(opts) do
-    cwd = Keyword.get(opts, :cwd)
+    default_timeout =
+      Application.get_env(:arbor_ai, :acp_permission_timeout_ms, @default_permission_timeout_ms)
 
-    roots =
-      case cwd do
-        nil -> []
-        path -> [%{uri: "file://#{path}", name: "workspace"}]
-      end
+    with {:ok, permission_timeout_ms} <-
+           Arbor.AI.Timeout.select(opts, [:permission_timeout_ms], default_timeout) do
+      cwd = Keyword.get(opts, :cwd)
 
-    state = %__MODULE__{
-      session_pid: Keyword.get(opts, :session_pid),
-      agent_id: Keyword.get(opts, :agent_id),
-      workspace_root: cwd,
-      permission_timeout_ms: resolve_permission_timeout(opts),
-      roots: roots
-    }
+      roots =
+        case cwd do
+          nil -> []
+          path -> [%{uri: "file://#{path}", name: "workspace"}]
+        end
 
-    {:ok, state}
-  end
+      state = %__MODULE__{
+        session_pid: Keyword.get(opts, :session_pid),
+        agent_id: Keyword.get(opts, :agent_id),
+        workspace_root: cwd,
+        permission_timeout_ms: permission_timeout_ms,
+        roots: roots
+      }
 
-  # Resolution order: explicit opt > app env > module default. Both surfaces
-  # stay configurable so deployments can tune (e.g. shorter for unattended
-  # hosts, longer for operator-in-meeting). DOT compute nodes can plumb a
-  # per-pipeline override through handler_opts down the road.
-  defp resolve_permission_timeout(opts) do
-    case Keyword.get(opts, :permission_timeout_ms) do
-      ms when is_integer(ms) and ms > 0 ->
-        ms
-
-      _ ->
-        Application.get_env(:arbor_ai, :acp_permission_timeout_ms, @default_permission_timeout_ms)
+      {:ok, state}
     end
   end
 

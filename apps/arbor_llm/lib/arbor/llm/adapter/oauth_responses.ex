@@ -27,7 +27,9 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
   def complete(request, opts \\ [])
 
   def complete(%Request{} = request, opts) do
-    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_transport_options(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn -> do_complete(request, opts) end,
         receipt,
@@ -45,7 +47,7 @@ defmodule Arbor.LLM.Adapter.OAuthResponses do
     response_opts =
       opts
       |> Keyword.take([:max_response_bytes, :max_events, :max_event_bytes, :max_work])
-      |> maybe_put_opt(:receive_timeout, opts[:receive_timeout] || request.receive_timeout)
+      |> maybe_put_opt(:receive_timeout, Keyword.fetch!(opts, :receive_timeout))
       |> maybe_put_opt(:model, model_id(request.model))
 
     case OAuth.Responses.complete(oauth_provider(request.provider), req, response_opts) do

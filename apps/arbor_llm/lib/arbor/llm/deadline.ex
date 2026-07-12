@@ -14,6 +14,67 @@ defmodule Arbor.LLM.Deadline do
 
   @type receipt :: %{deadline_ms: integer(), timeout_ms: pos_integer()}
 
+  @spec timeout_keys() :: [atom()]
+  def timeout_keys, do: @timeout_keys
+
+  @spec select(term(), [atom()], term(), pos_integer()) :: {:ok, pos_integer()} | {:error, term()}
+  def select(opts, keys, default, maximum)
+      when is_list(keys) and is_integer(maximum) and maximum > 0 do
+    with true <- Enum.all?(keys, &is_atom/1) or {:error, :invalid_timeout_aliases},
+         {:ok, options} <- collect_options(opts, %{}, 0),
+         values = Enum.flat_map(keys, &Map.get(options, &1, [])),
+         selected = if(values == [], do: [default], else: values),
+         :ok <- validate_timeout_values(selected, maximum) do
+      {:ok, Enum.min(selected)}
+    end
+  end
+
+  def select(_opts, _keys, _default, _maximum), do: {:error, :invalid_timeout_selection}
+
+  @spec normalize_options(term(), pos_integer()) ::
+          {:ok, keyword(), pos_integer()} | {:error, term()}
+  def normalize_options(opts, default) do
+    with {:ok, timeout} <- select(opts, @timeout_keys, default, @maximum_timeout_ms),
+         {:ok, options} <- option_list(opts, [], 0) do
+      normalized =
+        options
+        |> Enum.reject(fn {key, _value} -> key in @timeout_keys end)
+        |> Keyword.put(:timeout_ms, timeout)
+
+      {:ok, normalized, timeout}
+    end
+  end
+
+  @spec narrow_options(term(), term(), pos_integer()) ::
+          {:ok, keyword(), pos_integer()} | {:error, term()}
+  def narrow_options(caller_opts, delegated_opts, default \\ @default_timeout_ms) do
+    with {:ok, caller} <- collect_options(caller_opts, %{}, 0),
+         {:ok, delegated} <- collect_options(delegated_opts, %{}, 0),
+         values = timeout_values(caller) ++ timeout_values(delegated),
+         selected = if(values == [], do: [default], else: values),
+         :ok <- validate_timeout_values(selected, @maximum_timeout_ms),
+         {:ok, delegated_list} <- option_list(delegated_opts, [], 0) do
+      timeout = Enum.min(selected)
+
+      normalized =
+        delegated_list
+        |> Enum.reject(fn {key, _value} -> key in @timeout_keys end)
+        |> Keyword.put(:timeout_ms, timeout)
+
+      {:ok, normalized, timeout}
+    end
+  end
+
+  @spec normalize_transport_options(term(), term()) ::
+          {:ok, keyword(), pos_integer()} | {:error, term()}
+  def normalize_transport_options(opts, fallback \\ nil) do
+    caller_opts = if is_nil(fallback), do: [], else: [receive_timeout: fallback]
+
+    with {:ok, normalized, timeout} <- narrow_options(caller_opts, opts) do
+      {:ok, Keyword.put(normalized, :receive_timeout, timeout), timeout}
+    end
+  end
+
   @spec receipt(term(), term()) :: {:ok, receipt()} | {:error, term()}
   def receipt(opts, fallback \\ nil) do
     with {:ok, requested} <- requested_timeout(opts, fallback) do
@@ -28,7 +89,8 @@ defmodule Arbor.LLM.Deadline do
 
   @spec receipt_until(term(), term()) :: {:ok, receipt()} | {:error, term()}
   def receipt_until(deadline_ms, timeout_ms)
-      when is_integer(deadline_ms) and is_integer(timeout_ms) and timeout_ms > 0 do
+      when is_integer(deadline_ms) and is_integer(timeout_ms) and timeout_ms > 0 and
+             timeout_ms <= @maximum_timeout_ms do
     now = System.monotonic_time(:millisecond)
     closed_timeout = min(timeout_ms, @maximum_timeout_ms)
     closed_deadline = min(deadline_ms, now + closed_timeout)
@@ -63,16 +125,12 @@ defmodule Arbor.LLM.Deadline do
 
   defp requested_timeout(opts, fallback) do
     with {:ok, options} <- collect_options(opts, %{}, 0) do
-      supplied = Enum.flat_map(@timeout_keys, &Map.get(options, &1, []))
-      values = if valid_fallback(fallback), do: [fallback | supplied], else: supplied
+      supplied = timeout_values(options)
 
-      case Enum.find(values, &(not (is_integer(&1) and &1 > 0))) do
-        nil ->
-          requested = if values == [], do: @default_timeout_ms, else: Enum.min(values)
-          {:ok, min(requested, @maximum_timeout_ms)}
-
-        _invalid ->
-          {:error, {:invalid_timeout, {1, @maximum_timeout_ms}}}
+      with {:ok, values} <- include_fallback(supplied, fallback),
+           values = if(values == [], do: [@default_timeout_ms], else: values),
+           :ok <- validate_timeout_values(values, @maximum_timeout_ms) do
+        {:ok, Enum.min(values)}
       end
     end
   end
@@ -90,8 +148,28 @@ defmodule Arbor.LLM.Deadline do
   defp collect_options(_improper_or_non_keyword, _options, _count),
     do: {:error, {:invalid_options, :keyword_required}}
 
-  defp valid_fallback(value) when is_integer(value) and value > 0, do: value
-  defp valid_fallback(_value), do: nil
+  defp timeout_values(options),
+    do: Enum.flat_map(@timeout_keys, &Map.get(options, &1, []))
+
+  defp include_fallback(values, nil), do: {:ok, values}
+  defp include_fallback(values, fallback), do: {:ok, [fallback | values]}
+
+  defp validate_timeout_values(values, maximum) do
+    if Enum.all?(values, &(is_integer(&1) and &1 > 0 and &1 <= maximum)),
+      do: :ok,
+      else: {:error, {:invalid_timeout, {1, maximum}}}
+  end
+
+  defp option_list([], acc, _count), do: {:ok, Enum.reverse(acc)}
+
+  defp option_list(_opts, _acc, count) when count >= 128,
+    do: {:error, {:invalid_options, :too_many_options}}
+
+  defp option_list([{key, value} | rest], acc, count) when is_atom(key),
+    do: option_list(rest, [{key, value} | acc], count + 1)
+
+  defp option_list(_improper_or_non_keyword, _acc, _count),
+    do: {:error, {:invalid_options, :keyword_required}}
 
   defp inherited_deadline(deadline_ms) do
     case Process.get(@worker_key) do
@@ -173,29 +251,13 @@ defmodule Arbor.LLM.Deadline do
   defp safely_apply(fun) do
     {:ok, fun.()}
   rescue
-    exception -> {:raised, :error, bounded_exception(exception)}
+    exception -> {:raised, :error, Arbor.LLM.ExternalTerm.exception(exception)}
   catch
-    kind, reason -> {:raised, kind, bounded_reason(reason)}
+    kind, reason -> {:raised, kind, Arbor.LLM.ExternalTerm.sanitize(reason)}
   end
 
   defp unwrap({:ok, result}), do: result
   defp unwrap({:raised, kind, reason}), do: {:error, {:operation_failed, kind, reason}}
 
-  defp bounded_exception(%{__struct__: module, message: message}) when is_binary(message),
-    do: {module, bounded_binary(message)}
-
-  defp bounded_exception(%{__struct__: module}), do: module
-  defp bounded_exception(_exception), do: :exception
-
-  defp bounded_reason(reason) when is_atom(reason) or is_number(reason), do: reason
-  defp bounded_reason(reason) when is_binary(reason), do: bounded_binary(reason)
-  defp bounded_reason(_reason), do: :external_reason
-
-  defp bounded_binary(value) when byte_size(value) <= 512, do: String.replace_invalid(value, "")
-
-  defp bounded_binary(value) do
-    value
-    |> binary_part(0, 512)
-    |> String.replace_invalid("")
-  end
+  defp bounded_reason(reason), do: Arbor.LLM.ExternalTerm.sanitize(reason)
 end

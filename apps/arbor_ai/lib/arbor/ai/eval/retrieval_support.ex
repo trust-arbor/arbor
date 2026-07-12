@@ -10,9 +10,7 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
   @max_router_response_bytes 262_144
   @max_router_prompt_bytes 1_048_576
   @max_http_diagnostic_bytes 2_048
-  @max_external_diagnostic_bytes 512
   @max_external_items 16
-  @max_external_depth 4
   @max_vector_dimensions 8_192
   # Keeps dot/norm accumulation finite at the maximum vector dimension.
   @max_vector_component_abs 1.0e100
@@ -118,20 +116,23 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
           {:ok, pos_integer()} | {:error, term()}
   def positive_integer_option(opts, key, default) when is_atom(key) do
     with :ok <- validate_opts(opts) do
-      value = Keyword.get(opts, key, default)
+      values = option_values(opts, key)
+      values = if values == [], do: [default], else: values
 
       case Map.fetch(@positive_integer_limits, key) do
-        {:ok, maximum} when is_integer(value) and value > 0 and value <= maximum ->
-          {:ok, value}
-
         {:ok, maximum} ->
-          {:error, {:invalid_option, key, {:integer_range_required, 1, maximum}}}
-
-        :error when is_integer(value) and value > 0 ->
-          {:ok, value}
+          if Enum.all?(values, &(is_integer(&1) and &1 > 0 and &1 <= maximum)) do
+            {:ok, Enum.min(values)}
+          else
+            {:error, {:invalid_option, key, {:integer_range_required, 1, maximum}}}
+          end
 
         :error ->
-          {:error, {:invalid_option, key, :positive_integer_required}}
+          if Enum.all?(values, &(is_integer(&1) and &1 > 0)) do
+            {:ok, Enum.min(values)}
+          else
+            {:error, {:invalid_option, key, :positive_integer_required}}
+          end
       end
     end
   end
@@ -143,19 +144,22 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
           {:ok, pos_integer() | nil} | {:error, term()}
   def optional_positive_integer_option(opts, key) when is_atom(key) do
     with :ok <- validate_opts(opts) do
-      case Keyword.fetch(opts, key) do
-        :error ->
+      case option_values(opts, key) do
+        [] ->
           {:ok, nil}
 
-        {:ok, value}
-        when is_integer(value) and value > 0 and value <= @max_protocol_integer ->
-          {:ok, value}
+        values ->
+          cond do
+            Enum.any?(values, &(not (is_integer(&1) and &1 > 0))) ->
+              {:error, {:invalid_option, key, :positive_integer_required}}
 
-        {:ok, value} when is_integer(value) and value > @max_protocol_integer ->
-          {:error, {:invalid_option, key, {:integer_range_required, 1, @max_protocol_integer}}}
+            Enum.any?(values, &(&1 > @max_protocol_integer)) ->
+              {:error,
+               {:invalid_option, key, {:integer_range_required, 1, @max_protocol_integer}}}
 
-        {:ok, _value} ->
-          {:error, {:invalid_option, key, :positive_integer_required}}
+            true ->
+              {:ok, Enum.min(values)}
+          end
       end
     end
   end
@@ -218,7 +222,7 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
              byte_size(excerpt) <= @max_http_diagnostic_bytes and is_boolean(truncated?),
       do: reason
 
-  def bounded_external_reason(value), do: bound_term(value, @max_external_depth)
+  def bounded_external_reason(value), do: Arbor.LLM.sanitize_external_reason(value)
 
   @doc false
   @spec post_json(String.t(), term(), pos_integer(), pos_integer()) ::
@@ -614,7 +618,8 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
         {:error, {:index_read_failed, path, bounded_external_reason(reason)}}
     end
   rescue
-    exception -> {:error, {:index_read_failed, path, Exception.message(exception)}}
+    exception ->
+      {:error, {:index_read_failed, path, Arbor.LLM.external_exception_message(exception)}}
   end
 
   defp decode_index(path, body) do
@@ -889,87 +894,18 @@ defmodule Arbor.AI.Eval.RetrievalSupport do
     |> String.replace_invalid("")
   end
 
-  defp bound_term(_value, 0), do: :max_depth
+  defp option_values(opts, wanted) do
+    Enum.reduce(opts, [], fn
+      {key, value}, acc when is_atom(key) ->
+        if key == wanted, do: [value | acc], else: acc
 
-  defp bound_term(value, _depth) when is_atom(value) or is_boolean(value) or is_nil(value),
-    do: value
-
-  defp bound_term(value, _depth) when is_integer(value) do
-    if value >= @min_protocol_integer and value <= @max_protocol_integer,
-      do: value,
-      else: :integer_out_of_range
-  end
-
-  defp bound_term(value, _depth) when is_float(value) do
-    if Arbor.LLM.finite_number?(value), do: value, else: :float_out_of_range
-  end
-
-  defp bound_term(value, _depth) when is_binary(value) do
-    if byte_size(value) <= @max_external_diagnostic_bytes do
-      String.replace_invalid(value, "")
-    else
-      {:truncated_binary, bounded_utf8_prefix(value, @max_external_diagnostic_bytes),
-       byte_size(value)}
-    end
-  end
-
-  defp bound_term(value, depth) when is_tuple(value) do
-    count = min(tuple_size(value), @max_external_items)
-
-    items =
-      if count == 0 do
-        []
-      else
-        Enum.map(0..(count - 1), &bound_term(elem(value, &1), depth - 1))
-      end
-
-    items = if tuple_size(value) > count, do: items ++ [:truncated], else: items
-    List.to_tuple(items)
-  end
-
-  defp bound_term(value, depth) when is_list(value),
-    do: bound_list(value, depth - 1, @max_external_items, [])
-
-  defp bound_term(value, depth) when is_map(value),
-    do: bound_map(:maps.iterator(value), depth - 1, @max_external_items, %{})
-
-  defp bound_term(value, _depth) when is_pid(value), do: :pid
-  defp bound_term(value, _depth) when is_reference(value), do: :reference
-  defp bound_term(value, _depth) when is_function(value), do: :function
-  defp bound_term(value, _depth) when is_port(value), do: :port
-  defp bound_term(_value, _depth), do: :external_term
-
-  defp bound_list([], _depth, _remaining, acc), do: Enum.reverse(acc)
-  defp bound_list(_list, _depth, 0, acc), do: Enum.reverse([:truncated | acc])
-
-  defp bound_list([head | tail], depth, remaining, acc),
-    do: bound_list(tail, depth, remaining - 1, [bound_term(head, depth) | acc])
-
-  defp bound_list(_tail, _depth, _remaining, acc), do: Enum.reverse([:improper_tail | acc])
-
-  defp bound_map(iterator, depth, remaining, acc) do
-    case :maps.next(iterator) do
-      :none ->
+      _invalid, acc ->
         acc
-
-      {_key, _value, _next} when remaining == 0 ->
-        Map.put(acc, :__truncated__, true)
-
-      {key, value, next} ->
-        bound_map(
-          next,
-          depth,
-          remaining - 1,
-          Map.put(acc, bound_term(key, depth), bound_term(value, depth))
-        )
-    end
+    end)
   end
 
-  defp exception_diagnostic(%{__struct__: _module, message: message}) when is_binary(message),
-    do: {:exception, bound_term(message, 1)}
-
-  defp exception_diagnostic(%{__struct__: module}), do: {:exception, module}
-  defp exception_diagnostic(_exception), do: :exception
+  defp exception_diagnostic(exception),
+    do: {:exception, Arbor.LLM.external_exception_message(exception)}
 
   defp validate_vector_values([head | tail]), do: validate_vector_cell(head, tail, 0)
   defp validate_vector_values(_vector), do: {:error, :numeric_vector_required}

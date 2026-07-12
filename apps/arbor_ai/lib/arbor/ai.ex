@@ -127,6 +127,12 @@ defmodule Arbor.AI do
           | {:ok, :pending_approval, String.t()}
           | {:error, {:unauthorized, term()} | term()}
   def authorize_generate(agent_id, prompt, opts \\ []) do
+    with_llm_deadline(opts, Config.timeout(), fn opts, _timeout ->
+      do_authorize_generate(agent_id, prompt, opts)
+    end)
+  end
+
+  defp do_authorize_generate(agent_id, prompt, opts) do
     provider = extract_provider(opts)
     resource = "arbor://ai/request/#{provider}"
     {trace_id, opts} = Keyword.pop(opts, :trace_id)
@@ -161,15 +167,17 @@ defmodule Arbor.AI do
   @spec generate_text(String.t(), keyword()) ::
           {:ok, Arbor.Contracts.API.AI.result()} | {:error, term()}
   def generate_text(prompt, opts \\ []) do
-    opts = snapshot_config(opts)
-    provider = Keyword.fetch!(opts, :provider)
-    model = Keyword.fetch!(opts, :model)
-    agent_id = Keyword.get(opts, :agent_id)
+    with_llm_deadline(opts, Config.timeout(), fn opts, _timeout ->
+      opts = snapshot_config(opts)
+      provider = Keyword.fetch!(opts, :provider)
+      model = Keyword.fetch!(opts, :model)
+      agent_id = Keyword.get(opts, :agent_id)
 
-    trace = LLMTrace.start(:generate_text, provider, model, agent_id, prompt)
-    result = UnifiedBridge.generate_text(prompt, opts)
-    LLMTrace.finish(trace, result)
-    result
+      trace = LLMTrace.start(:generate_text, provider, model, agent_id, prompt)
+      result = UnifiedBridge.generate_text(prompt, opts)
+      LLMTrace.finish(trace, result)
+      result
+    end)
   end
 
   @doc """
@@ -204,8 +212,10 @@ defmodule Arbor.AI do
   """
   @spec stream_text(String.t(), keyword()) :: {:ok, map() | Enumerable.t()} | {:error, term()}
   def stream_text(prompt, opts \\ []) do
-    opts = snapshot_config(opts)
-    UnifiedBridge.generate_text_stream(prompt, opts)
+    with_llm_deadline(opts, Config.timeout(), fn opts, _timeout ->
+      opts = snapshot_config(opts)
+      UnifiedBridge.generate_text_stream(prompt, opts)
+    end)
   end
 
   @doc """
@@ -231,6 +241,12 @@ defmodule Arbor.AI do
   """
   @spec generate_text_with_tools(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def generate_text_with_tools(prompt, opts \\ []) do
+    with_llm_deadline(opts, 600_000, fn opts, _timeout ->
+      do_generate_text_with_tools(prompt, opts)
+    end)
+  end
+
+  defp do_generate_text_with_tools(prompt, opts) do
     # SECURITY: Snapshot config at entry point to prevent TOCTOU race.
     opts = snapshot_config(opts)
 
@@ -292,8 +308,7 @@ defmodule Arbor.AI do
         # qwen-122b ~25% empty-content issue, 2026-07-05). The LlmHandler/DOT path already sets this
         # (e5096925); generate_text_with_tools — the path the eval agent + tool-callers use — did not.
         # Honor the caller's :receive_timeout / :timeout, else default to 10 min.
-        receive_timeout:
-          Keyword.get(opts, :receive_timeout) || Keyword.get(opts, :timeout) || 600_000
+        receive_timeout: Keyword.fetch!(opts, :timeout_ms)
       })
 
     # ToolLoop options
@@ -301,7 +316,8 @@ defmodule Arbor.AI do
       max_turns: Keyword.get(opts, :max_turns, 10),
       agent_id: agent_id || "system",
       signer: Keyword.get(opts, :signer),
-      on_tool_call: Keyword.get(opts, :on_tool_call)
+      on_tool_call: Keyword.get(opts, :on_tool_call),
+      timeout_ms: Keyword.fetch!(opts, :timeout_ms)
     ]
 
     # Run ToolLoop — single path through UnifiedLLM
@@ -392,31 +408,36 @@ defmodule Arbor.AI do
   @spec embed(String.t(), keyword()) ::
           {:ok, Arbor.Contracts.API.Embedding.result()} | {:error, term()}
   def embed(text, opts \\ []) do
-    opts = snapshot_embedding_config(opts)
+    with_llm_deadline(opts, Config.timeout(), fn opts, _timeout ->
+      opts = snapshot_embedding_config(opts)
 
-    # Try UnifiedBridge first (orchestrator layer), fall back to legacy backends
-    case UnifiedBridge.embed(text, opts) do
-      {:ok, _} = result ->
-        result
+      # Try UnifiedBridge first (orchestrator layer), fall back to legacy backends
+      case UnifiedBridge.embed(text, opts) do
+        {:ok, _} = result ->
+          result
 
-      :unavailable ->
-        embed_via_legacy(text, opts)
+        :unavailable ->
+          embed_via_legacy(text, opts)
 
-      {:error, {:embed_not_supported, _}} ->
-        embed_via_legacy(text, opts)
+        {:error, {:embed_not_supported, _}} ->
+          embed_via_legacy(text, opts)
 
-      {:error, {:unknown_provider, _}} ->
-        embed_via_legacy(text, opts)
+        {:error, {:unknown_provider, _}} ->
+          embed_via_legacy(text, opts)
 
-      {:error, {:bridge_exception, _}} ->
-        embed_via_legacy(text, opts)
+        {:error, {:bridge_exception, _}} ->
+          embed_via_legacy(text, opts)
 
-      {:error, {:bridge_exit, _}} ->
-        embed_via_legacy(text, opts)
+        {:error, {:bridge_exit, _}} ->
+          embed_via_legacy(text, opts)
 
-      {:error, _} = error ->
-        error
-    end
+        {:error, {:bridge_failure, _kind, _reason}} ->
+          embed_via_legacy(text, opts)
+
+        {:error, _} = error ->
+          error
+      end
+    end)
   end
 
   @doc """
@@ -437,31 +458,36 @@ defmodule Arbor.AI do
   @spec embed_batch([String.t()], keyword()) ::
           {:ok, Arbor.Contracts.API.Embedding.batch_result()} | {:error, term()}
   def embed_batch(texts, opts \\ []) do
-    opts = snapshot_embedding_config(opts)
+    with_llm_deadline(opts, Config.timeout(), fn opts, _timeout ->
+      opts = snapshot_embedding_config(opts)
 
-    # Try UnifiedBridge first, fall back to legacy backends
-    case UnifiedBridge.embed_batch(texts, opts) do
-      {:ok, _} = result ->
-        result
+      # Try UnifiedBridge first, fall back to legacy backends
+      case UnifiedBridge.embed_batch(texts, opts) do
+        {:ok, _} = result ->
+          result
 
-      :unavailable ->
-        embed_batch_via_legacy(texts, opts)
+        :unavailable ->
+          embed_batch_via_legacy(texts, opts)
 
-      {:error, {:embed_not_supported, _}} ->
-        embed_batch_via_legacy(texts, opts)
+        {:error, {:embed_not_supported, _}} ->
+          embed_batch_via_legacy(texts, opts)
 
-      {:error, {:unknown_provider, _}} ->
-        embed_batch_via_legacy(texts, opts)
+        {:error, {:unknown_provider, _}} ->
+          embed_batch_via_legacy(texts, opts)
 
-      {:error, {:bridge_exception, _}} ->
-        embed_batch_via_legacy(texts, opts)
+        {:error, {:bridge_exception, _}} ->
+          embed_batch_via_legacy(texts, opts)
 
-      {:error, {:bridge_exit, _}} ->
-        embed_batch_via_legacy(texts, opts)
+        {:error, {:bridge_exit, _}} ->
+          embed_batch_via_legacy(texts, opts)
 
-      {:error, _} = error ->
-        error
-    end
+        {:error, {:bridge_failure, _kind, _reason}} ->
+          embed_batch_via_legacy(texts, opts)
+
+        {:error, _} = error ->
+          error
+      end
+    end)
   end
 
   # ── Thinking Integration ──
@@ -1006,6 +1032,16 @@ defmodule Arbor.AI do
   # ===========================================================================
 
   # ── Tool-calling helpers ──
+
+  defp with_llm_deadline(opts, default_timeout, fun) when is_function(fun, 2) do
+    with {:ok, opts, timeout} <- Arbor.LLM.normalize_timeout_options(opts, default_timeout) do
+      Arbor.LLM.run_with_deadline(
+        fn -> fun.(opts, timeout) end,
+        timeout,
+        Arbor.LLM.RequestTimeoutError.exception(timeout_ms: timeout)
+      )
+    end
+  end
 
   # SECURITY: Snapshot provider and model from Application config at the call boundary.
   # This prevents TOCTOU races where another process could change the global config

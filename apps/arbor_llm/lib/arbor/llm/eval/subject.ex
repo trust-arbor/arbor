@@ -20,7 +20,15 @@ defmodule Arbor.LLM.Eval.Subject do
 
   require Logger
 
-  alias Arbor.LLM.{Client, Message, ProviderCatalog, Request, ResponseBudget, StreamEvent}
+  alias Arbor.LLM.{
+    Client,
+    Deadline,
+    Message,
+    ProviderCatalog,
+    Request,
+    ResponseBudget,
+    StreamEvent
+  }
 
   @default_provider "lm_studio"
   @default_timeout 60_000
@@ -167,11 +175,11 @@ defmodule Arbor.LLM.Eval.Subject do
   end
 
   defp bounded_positive_integer(opts, key, default, maximum) do
-    case Keyword.get(opts, key, default) do
-      value when is_integer(value) and value > 0 and value <= maximum ->
+    case Deadline.select(opts, [key], default, maximum) do
+      {:ok, value} ->
         {:ok, value}
 
-      _value ->
+      {:error, _reason} ->
         {:error, {:invalid_option, key, {:integer_range_required, 1, maximum}}}
     end
   end

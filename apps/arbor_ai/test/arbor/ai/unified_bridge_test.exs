@@ -1,9 +1,23 @@
 defmodule Arbor.AI.UnifiedBridgeTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   @moduletag :integration
 
   alias Arbor.AI.UnifiedBridge
+  alias Arbor.LLM.{Client, Request, RequestTimeoutError, Response}
+
+  defmodule SlowDeadlineAdapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+
+    @impl true
+    def provider, do: "deadline-bridge"
+
+    @impl true
+    def complete(%Request{}, _opts) do
+      Process.sleep(40)
+      {:ok, %Response{text: "late"}}
+    end
+  end
 
   describe "available?/0" do
     test "returns true when orchestrator client is loaded" do
@@ -31,6 +45,33 @@ defmodule Arbor.AI.UnifiedBridgeTest do
       # generate_text should either succeed, return :unavailable, or return an error
       result = UnifiedBridge.generate_text("test", provider: :test, model: "test-model")
       assert match?({:ok, _}, result) or match?({:error, _}, result) or result == :unavailable
+    end
+
+    test "security regression: bridge preserves the strictest duplicate caller deadline" do
+      key = {UnifiedBridge, :client}
+      previous = :persistent_term.get(key, :missing)
+
+      client =
+        Client.new(
+          adapters: %{"deadline-bridge" => SlowDeadlineAdapter},
+          default_provider: "deadline-bridge"
+        )
+
+      :persistent_term.put(key, client)
+
+      on_exit(fn ->
+        if previous == :missing,
+          do: :persistent_term.erase(key),
+          else: :persistent_term.put(key, previous)
+      end)
+
+      assert {:error, %RequestTimeoutError{timeout_ms: 5}} =
+               UnifiedBridge.generate_text("test",
+                 provider: "deadline-bridge",
+                 model: "slow",
+                 timeout: 100,
+                 timeout: 5
+               )
     end
   end
 

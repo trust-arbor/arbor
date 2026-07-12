@@ -69,34 +69,43 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
   @deprecated "Use Arbor.AI.Runtime.Acp via Arbor.AI.Runtime.Dispatch.dispatch/2. This path ships for backwards-compat with the pre-Phase-2c provider:\"acp\"+agent shape."
   @impl true
   def complete(%Request{} = request, opts \\ []) do
-    agent = resolve_agent(request)
-    timeout = Keyword.get(opts, :timeout, @default_timeout)
+    with {:ok, timeout} <- strict_timeout(opts, request.receive_timeout) do
+      agent = resolve_agent(request)
 
-    checkout_opts =
-      opts
-      |> Keyword.put(:model, request.model)
-      |> Keyword.put(:timeout, timeout)
-      |> maybe_add(:workspace, extract_option(request, "workspace"))
-      |> maybe_add(:agent_id, extract_option(request, "agent_id") || opts[:agent_id])
-      |> maybe_add(:capabilities, extract_option(request, "capabilities"))
+      checkout_opts =
+        opts
+        |> Keyword.delete(:timeout)
+        |> Keyword.put(:model, request.model)
+        |> Keyword.put(:timeout, timeout)
+        |> maybe_add(:workspace, extract_option(request, "workspace"))
+        |> maybe_add(:agent_id, extract_option(request, "agent_id") || opts[:agent_id])
+        |> maybe_add(:capabilities, extract_option(request, "capabilities"))
 
-    case pool_checkout(agent, checkout_opts) do
-      {:ok, session} ->
-        case session_prompt(session, request, timeout) do
-          {:ok, result} ->
-            pool_checkin(session)
-            {:ok, format_response(result, request, agent)}
+      case pool_checkout(agent, checkout_opts) do
+        {:ok, session} ->
+          case session_prompt(session, request, timeout) do
+            {:ok, result} ->
+              pool_checkin(session)
+              {:ok, format_response(result, request, agent)}
 
-          {:error, reason} ->
-            # Always return session to pool, even on prompt failure
-            pool_checkin(session)
-            Logger.warning("ACP adapter prompt error (agent=#{agent}): #{inspect(reason)}")
-            {:error, reason}
-        end
+            {:error, reason} ->
+              # Always return session to pool, even on prompt failure
+              pool_checkin(session)
 
-      {:error, reason} ->
-        Logger.warning("ACP adapter checkout error (agent=#{agent}): #{inspect(reason)}")
-        {:error, reason}
+              Logger.warning(
+                "ACP adapter prompt error (agent=#{agent}): #{Arbor.LLM.inspect_external_reason(reason)}"
+              )
+
+              {:error, Arbor.LLM.sanitize_external_reason(reason)}
+          end
+
+        {:error, reason} ->
+          Logger.warning(
+            "ACP adapter checkout error (agent=#{agent}): #{Arbor.LLM.inspect_external_reason(reason)}"
+          )
+
+          {:error, Arbor.LLM.sanitize_external_reason(reason)}
+      end
     end
   end
 
@@ -203,7 +212,8 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
       {:error, :pool_not_available}
     end
   catch
-    :exit, reason -> {:error, {:pool_exit, reason}}
+    :exit, reason -> {:error, {:pool_exit, Arbor.LLM.sanitize_external_reason(reason)}}
+    kind, reason -> {:error, {:pool_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
   defp pool_checkin(session) do
@@ -230,8 +240,23 @@ defmodule Arbor.AI.LLM.Adapter.Acp do
       {:error, :session_mod_not_available}
     end
   catch
-    :exit, reason -> {:error, {:session_exit, reason}}
+    :exit, reason -> {:error, {:session_exit, Arbor.LLM.sanitize_external_reason(reason)}}
+    kind, reason -> {:error, {:session_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
+
+  defp strict_timeout(opts, fallback) when is_list(opts) do
+    fallback_opts = if is_nil(fallback), do: [], else: [receive_timeout: fallback]
+
+    Arbor.AI.Timeout.select(
+      fallback_opts ++ opts,
+      Arbor.LLM.timeout_option_keys(),
+      @default_timeout,
+      1,
+      true
+    )
+  end
+
+  defp strict_timeout(_opts, _fallback), do: {:error, {:invalid_options, :keyword_required}}
 
   defp extract_prompt(request) do
     request.messages

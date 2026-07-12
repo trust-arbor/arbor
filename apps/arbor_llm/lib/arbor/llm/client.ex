@@ -302,7 +302,8 @@ defmodule Arbor.LLM.Client do
   def complete(client, request, opts \\ [])
 
   def complete(%__MODULE__{} = client, %Request{} = request, opts) do
-    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
+    with {:ok, opts, _timeout} <- normalize_client_deadline(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn ->
           with {:ok, adapter} <- resolve_adapter(client, request) do
@@ -328,7 +329,8 @@ defmodule Arbor.LLM.Client do
   def stream(client, request, opts \\ [])
 
   def stream(%__MODULE__{} = client, %Request{} = request, opts) do
-    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
+    with {:ok, opts, _timeout} <- normalize_client_deadline(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn ->
           with {:ok, adapter} <- resolve_adapter(client, request),
@@ -379,7 +381,8 @@ defmodule Arbor.LLM.Client do
 
   def complete_streaming(%__MODULE__{} = client, %Request{} = request, callback, opts)
       when is_function(callback, 1) do
-    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
+    with {:ok, opts, _timeout} <- normalize_client_deadline(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn ->
           with {:ok, adapter} <- resolve_adapter(client, request) do
@@ -442,7 +445,8 @@ defmodule Arbor.LLM.Client do
 
   def embed(%__MODULE__{} = client, provider, model, opts)
       when is_binary(provider) and is_binary(model) do
-    with {:ok, receipt} <- Deadline.receipt(opts) do
+    with {:ok, opts, _timeout} <- Deadline.normalize_options(opts, 30_000),
+         {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn ->
           with {:ok, texts} <- embed_texts_option(opts),
@@ -472,7 +476,8 @@ defmodule Arbor.LLM.Client do
 
   def embed_batch(%__MODULE__{} = client, provider, model, texts, opts)
       when is_binary(provider) and is_binary(model) do
-    with {:ok, receipt} <- Deadline.receipt(opts) do
+    with {:ok, opts, _timeout} <- Deadline.normalize_options(opts, 30_000),
+         {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn -> do_embed_batch(client, provider, model, texts, opts) end,
         receipt,
@@ -500,6 +505,7 @@ defmodule Arbor.LLM.Client do
 
       {:ok,
        %{
+         association_version: 1,
          embeddings: embeddings,
          indexed_embeddings: indexed,
          model: model,
@@ -523,6 +529,10 @@ defmodule Arbor.LLM.Client do
   defp elem_or_result({:ok, result}), do: result
   defp elem_or_result({:error, _reason} = error), do: error
   defp elem_or_result(other), do: other
+
+  defp normalize_client_deadline(opts, fallback) do
+    Deadline.normalize_transport_options(opts, fallback)
+  end
 
   defp embed_texts_option(opts) do
     case safe_keyword_get(opts, :texts, [""]) do
@@ -980,19 +990,30 @@ defmodule Arbor.LLM.Client do
   end
 
   defp complete_with_step_timeout(client, request, opts) do
-    case Keyword.get(opts, :max_step_timeout_ms) do
-      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 ->
-        with {:ok, receipt} <- Deadline.receipt(timeout_ms: timeout_ms) do
-          Deadline.run(
-            fn -> complete(client, request, opts) end,
-            receipt,
-            RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
-          )
-        end
+    if option_present?(opts, :max_step_timeout_ms) do
+      case Deadline.select(opts, [:max_step_timeout_ms], 30_000, 900_000) do
+        {:ok, timeout_ms} ->
+          with {:ok, receipt} <- Deadline.receipt(timeout_ms: timeout_ms) do
+            Deadline.run(
+              fn -> complete(client, request, opts) end,
+              receipt,
+              RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+            )
+          end
 
-      _ ->
-        complete(client, request, opts)
+        {:error, _reason} = error ->
+          error
+      end
+    else
+      complete(client, request, opts)
     end
+  end
+
+  defp option_present?(opts, wanted) do
+    Enum.any?(opts, fn
+      {key, _value} when is_atom(key) -> key == wanted
+      _invalid -> false
+    end)
   end
 
   defp execute_tool_calls(tool_calls, tools, parallel, on_step, opts, aggregate) do

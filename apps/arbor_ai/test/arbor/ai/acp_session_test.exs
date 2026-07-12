@@ -23,6 +23,21 @@ defmodule Arbor.AI.AcpSessionTest do
     def authorize(_agent_id, _uri, _action, _opts), do: {:ok, :authorized}
   end
 
+  defmodule SlowCallServer do
+    @moduledoc false
+    use GenServer
+
+    def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok)
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_call(_message, _from, state) do
+      Process.sleep(40)
+      {:reply, {:ok, %{}}, state}
+    end
+  end
+
   defmodule FakeProgressClient do
     @moduledoc false
 
@@ -129,6 +144,16 @@ defmodule Arbor.AI.AcpSessionTest do
 
   defp start_fake_progress_session do
     AcpSession.start_link(provider: :test, client_opts: [test_pid: self()])
+  end
+
+  test "security regression: lifecycle aliases cannot widen the caller deadline" do
+    server = start_supervised!(SlowCallServer)
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:timeout, _call} =
+             catch_exit(AcpSession.create_session(server, timeout: 100, receive_timeout: 5))
+
+    assert System.monotonic_time(:millisecond) - started_at < 35
   end
 
   describe "Config.resolve/2" do

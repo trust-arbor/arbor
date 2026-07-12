@@ -16,6 +16,12 @@ defmodule Arbor.LLM.ClientTest do
       {:ok, %Response{text: "ok", usage: %{total_tokens: 1.0e308}}}
     end
 
+    def complete(%Request{model: "huge-throw"}, _opts),
+      do: throw(:erlang.bsl(1, 1_000_000))
+
+    def complete(%Request{model: "huge-exit"}, _opts),
+      do: exit(:erlang.bsl(1, 1_000_000))
+
     def complete(%Request{model: "late"}, opts) do
       send(Keyword.fetch!(opts, :observer), {:late_adapter_started, self()})
       Process.sleep(40)
@@ -28,6 +34,10 @@ defmodule Arbor.LLM.ClientTest do
       for _ <- 1..3 do
         %StreamEvent{type: :delta, data: %{text: String.duplicate("s", 64)}}
       end
+    end
+
+    def stream(%Request{model: "huge-stream-throw"}, _opts) do
+      Stream.map([:event], fn _event -> throw(:erlang.bsl(1, 1_000_000)) end)
     end
 
     def complete_streaming(%Request{model: "cumulative-callback"}, callback, _opts) do
@@ -89,6 +99,27 @@ defmodule Arbor.LLM.ClientTest do
 
         assert {:error, %RequestTimeoutError{timeout_ms: 30}} = Task.await(task, 1_000)
       end
+    end
+
+    test "security regression: adapter throw and exit reasons are structurally bounded" do
+      client =
+        Client.new(adapters: %{"boundary" => BoundaryAdapter}, default_provider: "boundary")
+
+      request = %Request{provider: "boundary", model: "huge-throw", messages: []}
+
+      for {model, kind} <- [{"huge-throw", :throw}, {"huge-exit", :exit}] do
+        assert {:error, {:operation_failed, ^kind, :integer_out_of_range}} =
+                 result = Client.complete(client, %{request | model: model})
+
+        assert byte_size(inspect(result)) < 256
+      end
+
+      assert {:ok, stream} =
+               Client.stream(client, %{request | model: "huge-stream-throw"})
+
+      stream_error = assert_raise Arbor.LLM.StreamError, fn -> Enum.to_list(stream) end
+      assert stream_error.reason == {:throw, :integer_out_of_range}
+      assert byte_size(Exception.message(stream_error)) < 256
     end
 
     test "security regression: stream events and callbacks consume cumulative response budgets" do

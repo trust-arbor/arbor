@@ -1,7 +1,7 @@
 defmodule Arbor.LLM.Boundary do
   @moduledoc false
 
-  alias Arbor.LLM.{Response, ResponseBudget, StreamEvent}
+  alias Arbor.LLM.{Deadline, Response, ResponseBudget, StreamEvent}
 
   @max_response_bytes 16_777_216
   @max_stream_event_bytes 1_048_576
@@ -170,7 +170,9 @@ defmodule Arbor.LLM.Boundary do
   @doc false
   @spec narrow_options(term(), term()) :: {:ok, keyword()} | {:error, term()}
   def narrow_options(caller_opts, delegated_opts) do
-    with {:ok, caller} <- collect_options(caller_opts, %{}, 0),
+    with {:ok, delegated_opts, _timeout} <-
+           Deadline.narrow_options(caller_opts, delegated_opts),
+         {:ok, caller} <- collect_options(caller_opts, %{}, 0),
          {:ok, delegated} <- collect_options(delegated_opts, %{}, 0),
          {:ok, maximum} <-
            narrow_ceiling(
@@ -264,6 +266,12 @@ defmodule Arbor.LLM.Boundary do
 
   defp normalize_stream_event(_event), do: {:error, :stream_event_required}
 
+  defp embedding_entries(%{association_version: version}, _expected_count) when version != 1,
+    do: {:error, {:unsupported_embedding_association_version, bounded_shape(version)}}
+
+  defp embedding_entries(%{"association_version" => version}, _expected_count) when version != 1,
+    do: {:error, {:unsupported_embedding_association_version, bounded_shape(version)}}
+
   defp embedding_entries(%{"data" => entries} = body, _expected_count),
     do: indexed_entries(entries, Map.get(body, "usage", %{}))
 
@@ -275,6 +283,12 @@ defmodule Arbor.LLM.Boundary do
 
   defp embedding_entries(%{"indexed_embeddings" => entries} = body, _expected_count),
     do: indexed_entries(entries, Map.get(body, "usage", %{}))
+
+  defp embedding_entries(%{association_version: 1}, _expected_count),
+    do: {:error, :versioned_indexed_embeddings_required}
+
+  defp embedding_entries(%{"association_version" => 1}, _expected_count),
+    do: {:error, :versioned_indexed_embeddings_required}
 
   defp embedding_entries(%{embeddings: [vector]} = body, 1),
     do: {:ok, [%{index: 0, embedding: vector}], Map.get(body, :usage, %{})}

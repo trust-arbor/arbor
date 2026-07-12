@@ -38,7 +38,9 @@ defmodule Arbor.LLM.Adapter.LmStudio do
   def complete(request, opts \\ [])
 
   def complete(%Request{} = request, opts) do
-    with {:ok, receipt} <- Deadline.receipt(opts, request.receive_timeout) do
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_transport_options(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
       Deadline.run(
         fn ->
           with {:ok, maximum} <- response_limit(opts),
@@ -67,7 +69,7 @@ defmodule Arbor.LLM.Adapter.LmStudio do
         method: :post,
         headers: [{"authorization", "Bearer lm-studio"}],
         json: body,
-        receive_timeout: opts[:receive_timeout] || request.receive_timeout || 300_000
+        receive_timeout: Keyword.fetch!(opts, :receive_timeout)
       )
       |> ResponseBudget.apply_req_receipt(maximum)
 

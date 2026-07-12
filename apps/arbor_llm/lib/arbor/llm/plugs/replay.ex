@@ -43,6 +43,12 @@ defmodule Arbor.LLM.Plugs.Replay do
 
       :not_found ->
         call
+
+      {:error, reason} ->
+        call
+        |> Map.put(:result, {:error, reason})
+        |> Call.put_metadata(%{replayed_from: Fixture.path_for(call), fixture_invalid: true})
+        |> Call.halt()
     end
   end
 

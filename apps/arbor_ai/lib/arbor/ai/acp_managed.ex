@@ -31,12 +31,15 @@ defmodule Arbor.AI.AcpManaged do
   @spec start_session(atom(), keyword()) :: {:ok, map()} | {:error, term()}
   def start_session(provider, opts \\ []) when is_atom(provider) and is_list(opts) do
     opts = strip_caller_owner_opts(opts)
-    use_pool? = Keyword.get(opts, :use_pool) || Keyword.get(opts, :pooled) || false
 
-    if use_pool? do
-      start_pooled(provider, opts)
-    else
-      start_non_pooled(provider, opts)
+    with {:ok, opts, _timeout} <- Arbor.AI.Timeout.normalize(opts, :infinity) do
+      use_pool? = Keyword.get(opts, :use_pool) || Keyword.get(opts, :pooled) || false
+
+      if use_pool? do
+        start_pooled(provider, opts)
+      else
+        start_non_pooled(provider, opts)
+      end
     end
   end
 
@@ -44,14 +47,12 @@ defmodule Arbor.AI.AcpManaged do
   @spec send_message(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def send_message(worker_session_id, content, opts \\ [])
       when is_binary(worker_session_id) and is_binary(content) and is_list(opts) do
-    with {:ok, resolved} <- SessionRegistry.resolve(worker_session_id, opts) do
-      session_mod = resolved.session_module
-      # Invoke from the original facade caller process (not the registry).
-      session_mod.send_message(
-        resolved.session_pid,
-        content,
-        session_operation_opts(opts)
-      )
+    started_at = System.monotonic_time(:millisecond)
+
+    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, :infinity),
+         {:ok, resolved} <- SessionRegistry.resolve(worker_session_id, opts),
+         {:ok, operation_opts} <- remaining_operation_opts(opts, timeout, started_at) do
+      safe_send_message(resolved, content, operation_opts)
     end
   end
 
@@ -60,14 +61,22 @@ defmodule Arbor.AI.AcpManaged do
           {:ok, :queued | :delivered | :deferred, :same_session_follow_up} | {:error, term()}
   def deliver_task_control(task_id, principal_id, control, opts \\ [])
       when is_binary(task_id) and is_binary(principal_id) and is_map(control) and is_list(opts) do
-    with {:ok, resolved} <- SessionRegistry.resolve_task_control(task_id, principal_id, opts) do
+    started_at = System.monotonic_time(:millisecond)
+
+    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, 5_000),
+         {:ok, requested_control_timeout} <-
+           Arbor.AI.Timeout.select(opts, [:control_timeout], timeout, 1, true),
+         control_timeout = min_timeout(timeout, requested_control_timeout),
+         opts =
+           opts
+           |> Enum.reject(fn {key, _value} -> key == :control_timeout end)
+           |> Keyword.put(:timeout, control_timeout),
+         {:ok, resolved} <- SessionRegistry.resolve_task_control(task_id, principal_id, opts) do
       control = control |> Map.delete(:task_id) |> Map.put("task_id", task_id)
 
-      resolved.session_module.deliver_task_control(
-        resolved.session_pid,
-        control,
-        timeout: Keyword.get(opts, :control_timeout, 5_000)
-      )
+      with {:ok, remaining} <- remaining_timeout(control_timeout, started_at) do
+        safe_deliver_task_control(resolved, control, remaining)
+      end
     end
   end
 
@@ -75,19 +84,16 @@ defmodule Arbor.AI.AcpManaged do
   @spec session_status(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def session_status(worker_session_id, opts \\ [])
       when is_binary(worker_session_id) and is_list(opts) do
-    with {:ok, resolved} <- SessionRegistry.resolve(worker_session_id, opts) do
+    started_at = System.monotonic_time(:millisecond)
+
+    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, 5_000),
+         {:ok, resolved} <- SessionRegistry.resolve(worker_session_id, opts),
+         {:ok, remaining} <- remaining_timeout(timeout, started_at) do
       session_mod = resolved.session_module
 
       # Live status is optional enrichment. Failures must not invent "ready"
       # metadata and must not invalidate a still-live handle (busy prompt timeout).
-      live =
-        try do
-          session_mod.status(resolved.session_pid)
-        rescue
-          _ -> :error
-        catch
-          :exit, _ -> :error
-        end
+      live = safe_status(session_mod, resolved.session_pid, remaining)
 
       case live do
         map when is_map(map) ->
@@ -160,12 +166,17 @@ defmodule Arbor.AI.AcpManaged do
         )
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, Arbor.LLM.sanitize_external_reason(reason)}
     end
   rescue
-    e -> {:error, {:managed_start_failed, Exception.message(e)}}
+    exception ->
+      {:error, {:managed_start_failed, Arbor.LLM.external_exception_message(exception)}}
   catch
-    :exit, reason -> {:error, {:managed_start_exit, reason}}
+    :exit, reason ->
+      {:error, {:managed_start_exit, Arbor.LLM.sanitize_external_reason(reason)}}
+
+    kind, reason ->
+      {:error, {:managed_start_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
   defp finalize_non_pooled_start(
@@ -203,16 +214,20 @@ defmodule Arbor.AI.AcpManaged do
 
         {:error, reason} ->
           cleanup_failed_start(session_mod, session_pid, supervisor, pooled?: false)
-          {:error, reason}
+          {:error, Arbor.LLM.sanitize_external_reason(reason)}
       end
     rescue
-      e ->
+      exception ->
         cleanup_failed_start(session_mod, session_pid, supervisor, pooled?: false)
-        {:error, {:managed_start_failed, Exception.message(e)}}
+        {:error, {:managed_start_failed, Arbor.LLM.external_exception_message(exception)}}
     catch
       :exit, reason ->
         cleanup_failed_start(session_mod, session_pid, supervisor, pooled?: false)
-        {:error, {:managed_start_exit, reason}}
+        {:error, {:managed_start_exit, Arbor.LLM.sanitize_external_reason(reason)}}
+
+      kind, reason ->
+        cleanup_failed_start(session_mod, session_pid, supervisor, pooled?: false)
+        {:error, {:managed_start_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
     end
   end
 
@@ -251,12 +266,17 @@ defmodule Arbor.AI.AcpManaged do
         )
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, Arbor.LLM.sanitize_external_reason(reason)}
     end
   rescue
-    e -> {:error, {:managed_start_failed, Exception.message(e)}}
+    exception ->
+      {:error, {:managed_start_failed, Arbor.LLM.external_exception_message(exception)}}
   catch
-    :exit, reason -> {:error, {:managed_start_exit, reason}}
+    :exit, reason ->
+      {:error, {:managed_start_exit, Arbor.LLM.sanitize_external_reason(reason)}}
+
+    kind, reason ->
+      {:error, {:managed_start_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
   end
 
   defp finalize_pooled_start(
@@ -300,16 +320,20 @@ defmodule Arbor.AI.AcpManaged do
 
         {:error, reason} ->
           cleanup_failed_start(session_mod, session_pid, pool_mod, cleanup_opts)
-          {:error, reason}
+          {:error, Arbor.LLM.sanitize_external_reason(reason)}
       end
     rescue
-      e ->
+      exception ->
         cleanup_failed_start(session_mod, session_pid, pool_mod, cleanup_opts)
-        {:error, {:managed_start_failed, Exception.message(e)}}
+        {:error, {:managed_start_failed, Arbor.LLM.external_exception_message(exception)}}
     catch
       :exit, reason ->
         cleanup_failed_start(session_mod, session_pid, pool_mod, cleanup_opts)
-        {:error, {:managed_start_exit, reason}}
+        {:error, {:managed_start_exit, Arbor.LLM.sanitize_external_reason(reason)}}
+
+      kind, reason ->
+        cleanup_failed_start(session_mod, session_pid, pool_mod, cleanup_opts)
+        {:error, {:managed_start_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
     end
   end
 
@@ -470,7 +494,10 @@ defmodule Arbor.AI.AcpManaged do
   # -- Helpers --------------------------------------------------------
 
   defp strip_caller_owner_opts(opts) when is_list(opts) do
-    Keyword.drop(opts, [:owner, :owner_pid, "owner", "owner_pid"])
+    Enum.reject(opts, fn
+      {key, _value} -> key in [:owner, :owner_pid, "owner", "owner_pid"]
+      _invalid -> false
+    end)
   end
 
   defp session_operation_opts(opts) when is_list(opts) do
@@ -489,6 +516,73 @@ defmodule Arbor.AI.AcpManaged do
       :supervisor,
       :create_session
     ])
+  end
+
+  defp remaining_operation_opts(opts, timeout, started_at) do
+    with {:ok, remaining} <- remaining_timeout(timeout, started_at) do
+      {:ok, opts |> session_operation_opts() |> Keyword.put(:timeout, remaining)}
+    end
+  end
+
+  defp remaining_timeout(:infinity, _started_at), do: {:ok, :infinity}
+
+  defp remaining_timeout(timeout, started_at) do
+    elapsed = max(System.monotonic_time(:millisecond) - started_at, 0)
+
+    case timeout - elapsed do
+      remaining when remaining > 0 -> {:ok, remaining}
+      _expired -> {:error, :timeout}
+    end
+  end
+
+  defp min_timeout(:infinity, timeout), do: timeout
+  defp min_timeout(timeout, :infinity), do: timeout
+  defp min_timeout(left, right), do: min(left, right)
+
+  defp safe_send_message(resolved, content, opts) do
+    case resolved.session_module.send_message(resolved.session_pid, content, opts) do
+      {:error, reason} -> {:error, Arbor.LLM.sanitize_external_reason(reason)}
+      result -> result
+    end
+  rescue
+    exception ->
+      {:error, {:managed_send_failed, Arbor.LLM.external_exception_message(exception)}}
+  catch
+    kind, reason ->
+      {:error, {:managed_send_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
+  end
+
+  defp safe_deliver_task_control(resolved, control, timeout) do
+    case resolved.session_module.deliver_task_control(
+           resolved.session_pid,
+           control,
+           timeout: timeout
+         ) do
+      {:error, reason} -> {:error, Arbor.LLM.sanitize_external_reason(reason)}
+      result -> result
+    end
+  rescue
+    exception ->
+      {:error, {:managed_control_failed, Arbor.LLM.external_exception_message(exception)}}
+  catch
+    kind, reason ->
+      {:error, {:managed_control_failure, kind, Arbor.LLM.sanitize_external_reason(reason)}}
+  end
+
+  defp safe_status(session_mod, session_pid, :infinity) do
+    session_mod.status(session_pid)
+  rescue
+    _exception -> :error
+  catch
+    _kind, _reason -> :error
+  end
+
+  defp safe_status(session_mod, session_pid, timeout) do
+    Arbor.LLM.run_with_deadline(
+      fn -> session_mod.status(session_pid) end,
+      timeout,
+      :managed_status_timeout
+    )
   end
 
   # Prefer a live status field when present; otherwise call context_pressure?/1

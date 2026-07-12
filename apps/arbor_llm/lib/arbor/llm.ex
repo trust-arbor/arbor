@@ -30,7 +30,6 @@ defmodule Arbor.LLM do
   @controlled_wrapper_cleanup_grace_ms 600
   @max_object_stream_bytes 1_048_576
   @default_public_timeout_ms 30_000
-  @max_public_timeout_ms 900_000
   @max_object_stream_events 4_000
   @max_object_stream_depth 32
   @max_object_decode_attempts 1
@@ -65,7 +64,9 @@ defmodule Arbor.LLM do
   @spec generate(generate_opts()) ::
           {:ok, Arbor.LLM.Response.t()} | {:error, term()}
   def generate(opts) when is_list(opts) do
-    with_timeout(opts, fn -> do_generate(opts) end)
+    with {:ok, opts, _timeout} <- Deadline.normalize_options(opts, @default_public_timeout_ms) do
+      with_timeout(opts, fn _receipt -> do_generate(opts) end)
+    end
   end
 
   def generate(_opts), do: {:error, :keyword_options_required}
@@ -107,12 +108,14 @@ defmodule Arbor.LLM do
 
   @spec stream(generate_opts()) :: {:ok, Enumerable.t()} | {:error, term()}
   def stream(opts) when is_list(opts) do
-    with_timeout(opts, fn -> do_stream(opts) end)
+    with {:ok, opts, _timeout} <- Deadline.normalize_options(opts, @default_public_timeout_ms) do
+      with_timeout(opts, fn receipt -> do_stream(opts, receipt) end)
+    end
   end
 
   def stream(_opts), do: {:error, :keyword_options_required}
 
-  defp do_stream(opts) do
+  defp do_stream(opts, receipt) do
     with :ok <- validate_public_options(opts),
          :ok <- ensure_not_aborted(opts),
          {:ok, request} <- build_request(opts),
@@ -124,7 +127,7 @@ defmodule Arbor.LLM do
 
       case stream_events(client, request, tools, stream_opts) do
         {:ok, events} ->
-          {:ok, wrap_stream_runtime_controls(events, stream_opts)}
+          {:ok, wrap_stream_runtime_controls(events, stream_opts, receipt)}
 
         other ->
           other
@@ -134,35 +137,39 @@ defmodule Arbor.LLM do
 
   @spec generate_object(generate_opts()) :: {:ok, map()} | {:error, term()}
   def generate_object(opts) when is_list(opts) do
-    with_timeout(opts, fn ->
-      case do_generate(opts) do
-        {:ok, response} ->
-          with {:ok, object} <- decode_object(response.text),
-               :ok <- validate_object(object, opts) do
-            {:ok, object}
-          else
-            {:error, reason} -> {:error, NoObjectGeneratedError.exception(reason: reason)}
-          end
+    with {:ok, opts, _timeout} <- Deadline.normalize_options(opts, @default_public_timeout_ms) do
+      with_timeout(opts, fn _receipt ->
+        case do_generate(opts) do
+          {:ok, response} ->
+            with {:ok, object} <- decode_object(response.text),
+                 :ok <- validate_object(object, opts) do
+              {:ok, object}
+            else
+              {:error, reason} -> {:error, NoObjectGeneratedError.exception(reason: reason)}
+            end
 
-        {:error, reason} ->
-          {:error, reason}
-      end
-    end)
+          {:error, reason} ->
+            {:error, reason}
+        end
+      end)
+    end
   end
 
   def generate_object(_opts), do: {:error, :keyword_options_required}
 
   @spec stream_object(generate_opts()) :: {:ok, Enumerable.t()} | {:error, term()}
   def stream_object(opts) when is_list(opts) do
-    with_timeout(opts, fn ->
-      case do_stream(opts) do
-        {:ok, events} ->
-          {:ok, build_object_stream(events, opts)}
+    with {:ok, opts, _timeout} <- Deadline.normalize_options(opts, @default_public_timeout_ms) do
+      with_timeout(opts, fn receipt ->
+        case do_stream(opts, receipt) do
+          {:ok, events} ->
+            {:ok, build_object_stream(events, opts)}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
-    end)
+          {:error, reason} ->
+            {:error, reason}
+        end
+      end)
+    end
   end
 
   def stream_object(_opts), do: {:error, :keyword_options_required}
@@ -644,39 +651,15 @@ defmodule Arbor.LLM do
     end
   end
 
-  defp with_timeout(opts, fun) when is_function(fun, 0) do
-    case timeout_option(opts) do
-      {:ok, nil} ->
-        fun.()
-
-      {:ok, timeout_ms} ->
-        with {:ok, receipt} <- Deadline.receipt(timeout_ms: timeout_ms) do
-          Deadline.run(
-            fun,
-            receipt,
-            RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
-          )
-        end
-
-      {:error, _reason} = error ->
-        error
+  defp with_timeout(opts, fun) when is_function(fun, 1) do
+    with {:ok, receipt} <- Deadline.receipt(opts) do
+      Deadline.run(
+        fn -> fun.(receipt) end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
     end
   end
-
-  defp timeout_option(opts), do: timeout_option(opts, @default_public_timeout_ms)
-  defp timeout_option([], value), do: {:ok, value}
-
-  defp timeout_option([{:timeout_ms, value} | _rest], _current)
-       when is_integer(value) and value > 0,
-       do: {:ok, value}
-
-  defp timeout_option([{:timeout_ms, _value} | _rest], _current),
-    do: {:error, :invalid_timeout}
-
-  defp timeout_option([{key, _value} | rest], current) when is_atom(key),
-    do: timeout_option(rest, current)
-
-  defp timeout_option(_improper, _current), do: {:error, :invalid_options}
 
   defp stream_events(client, request, [], stream_opts),
     do: stream_call_with_retry(client, request, stream_opts)
@@ -1029,7 +1012,11 @@ defmodule Arbor.LLM do
         %{"status" => "ok", "result" => map}
 
       {:error, reason} ->
-        %{"status" => "error", "error" => inspect(reason), "type" => :execution_failed}
+        %{
+          "status" => "error",
+          "error" => Arbor.LLM.ExternalTerm.inspect(reason),
+          "type" => :execution_failed
+        }
 
       map when is_map(map) ->
         %{"status" => "ok", "result" => map}
@@ -1041,7 +1028,14 @@ defmodule Arbor.LLM do
     exception ->
       %{
         "status" => "error",
-        "error" => Exception.message(exception),
+        "error" => Arbor.LLM.ExternalTerm.exception_message(exception),
+        "type" => :execution_failed
+      }
+  catch
+    kind, reason ->
+      %{
+        "status" => "error",
+        "error" => Atom.to_string(kind) <> ": " <> Arbor.LLM.ExternalTerm.inspect(reason),
         "type" => :execution_failed
       }
   end
@@ -1049,7 +1043,7 @@ defmodule Arbor.LLM do
   defp fallback_tool_stream_result(reason) do
     output = %{
       "status" => "error",
-      "error" => "tool failed: #{inspect(reason)}",
+      "error" => "tool failed: " <> Arbor.LLM.ExternalTerm.inspect(reason),
       "type" => :execution_failed
     }
 
@@ -1064,10 +1058,9 @@ defmodule Arbor.LLM do
     end
   end
 
-  defp wrap_stream_runtime_controls(events, opts) do
-    timeout_ms = Keyword.get(opts, :stream_read_timeout_ms, Keyword.get(opts, :timeout_ms))
-    timeout_ms = normalize_timeout_ms(timeout_ms)
-    deadline_ms = closed_stream_deadline_ms(timeout_ms)
+  defp wrap_stream_runtime_controls(events, opts, receipt) do
+    timeout_ms = receipt.timeout_ms
+    deadline_ms = receipt.deadline_ms
     abort_fun = abort_fun(opts)
     {:ok, tracker} = Boundary.stream_tracker(opts)
     {:ok, max_events} = Boundary.stream_event_limit(opts)
@@ -1143,14 +1136,14 @@ defmodule Arbor.LLM do
     exception ->
       send(
         reply_alias,
-        {ref, :producer_error, {:error, exception, __STACKTRACE__},
+        {ref, :producer_error, {:error, Arbor.LLM.ExternalTerm.exception(exception)},
          System.monotonic_time(:millisecond)}
       )
   catch
     kind, reason ->
       send(
         reply_alias,
-        {ref, :producer_error, {kind, reason, __STACKTRACE__},
+        {ref, :producer_error, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)},
          System.monotonic_time(:millisecond)}
       )
   end
@@ -1185,15 +1178,15 @@ defmodule Arbor.LLM do
           raise RequestTimeoutError, timeout_ms: state.timeout_ms
         end
 
-      {ref, :producer_error, {:error, exception, stacktrace}, completed_mono}
+      {ref, :producer_error, {:error, reason}, completed_mono}
       when ref == state.ref ->
         if completed_within_stream_deadline?(state, completed_mono),
-          do: reraise(exception, stacktrace),
+          do: raise_bounded_producer_exception(reason),
           else: raise(RequestTimeoutError, timeout_ms: state.timeout_ms)
 
-      {ref, :producer_error, {kind, reason, stacktrace}, completed_mono} when ref == state.ref ->
+      {ref, :producer_error, {kind, reason}, completed_mono} when ref == state.ref ->
         if completed_within_stream_deadline?(state, completed_mono),
-          do: :erlang.raise(kind, reason, stacktrace),
+          do: raise(Arbor.LLM.StreamError, reason: {:stream_producer_failed, kind, reason}),
           else: raise(RequestTimeoutError, timeout_ms: state.timeout_ms)
 
       {:DOWN, mon_ref, :process, pid, _reason}
@@ -1221,6 +1214,12 @@ defmodule Arbor.LLM do
       end
     end
   end
+
+  defp raise_bounded_producer_exception({RuntimeError, message}) when is_binary(message),
+    do: raise(RuntimeError, message)
+
+  defp raise_bounded_producer_exception(reason),
+    do: raise(Arbor.LLM.StreamError, reason: {:stream_producer_failed, :error, reason})
 
   defp request_controlled_demand(%{demand_outstanding?: true} = state), do: state
 
@@ -1306,28 +1305,6 @@ defmodule Arbor.LLM do
   defp completed_within_stream_deadline?(state, completed_mono),
     do: is_integer(completed_mono) and completed_mono <= state.absolute_deadline_ms
 
-  defp normalize_timeout_ms(timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0,
-    do: min(timeout_ms, @max_public_timeout_ms)
-
-  defp normalize_timeout_ms(_), do: nil
-
-  defp absolute_stream_deadline_ms(timeout_ms)
-       when is_integer(timeout_ms) and timeout_ms > 0 do
-    System.monotonic_time(:millisecond) + timeout_ms
-  end
-
-  defp absolute_stream_deadline_ms(_), do: nil
-
-  defp closed_stream_deadline_ms(timeout_ms) do
-    own = absolute_stream_deadline_ms(timeout_ms)
-
-    case {own, Deadline.current_deadline()} do
-      {nil, inherited} -> inherited
-      {deadline, inherited} when is_integer(inherited) -> min(deadline, inherited)
-      {deadline, _inherited} -> deadline
-    end
-  end
-
   defp next_receive_timeout_ms(%{timeout_ms: nil, abort_fun: abort_fun})
        when is_function(abort_fun, 0),
        do: 100
@@ -1389,6 +1366,30 @@ defmodule Arbor.LLM do
 
   @doc false
   def finite_number?(value), do: Arbor.LLM.ResponseBudget.finite_number?(value)
+
+  @doc false
+  def normalize_timeout_options(opts, default_timeout_ms \\ @default_public_timeout_ms),
+    do: Deadline.normalize_options(opts, default_timeout_ms)
+
+  @doc false
+  def timeout_option_keys, do: Deadline.timeout_keys()
+
+  @doc false
+  def select_timeout_option(opts, keys, default_timeout_ms, maximum_timeout_ms),
+    do: Deadline.select(opts, keys, default_timeout_ms, maximum_timeout_ms)
+
+  @doc false
+  def sanitize_external_reason(reason), do: Arbor.LLM.ExternalTerm.sanitize(reason)
+
+  @doc false
+  def sanitize_external_exception(exception), do: Arbor.LLM.ExternalTerm.exception(exception)
+
+  @doc false
+  def external_exception_message(exception),
+    do: Arbor.LLM.ExternalTerm.exception_message(exception)
+
+  @doc false
+  def inspect_external_reason(reason), do: Arbor.LLM.ExternalTerm.inspect(reason)
 
   @doc false
   def run_with_deadline(fun, timeout_ms, timeout_error) when is_function(fun, 0) do

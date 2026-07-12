@@ -128,8 +128,12 @@ defmodule Arbor.LLM.EmbeddingTest do
 
     test "delegates to adapter embed/3 with correct texts" do
       defmodule MockEmbedAdapter do
+        @behaviour Arbor.LLM.ProviderAdapter
+
+        @impl true
         def provider, do: "mock_embed"
 
+        @impl true
         def embed(texts, model, _opts) do
           indexed =
             texts
@@ -139,7 +143,9 @@ defmodule Arbor.LLM.EmbeddingTest do
 
           {:ok,
            %{
+             association_version: 1,
              indexed_embeddings: indexed,
+             embeddings: Enum.map(indexed, & &1.embedding),
              model: model,
              provider: "mock_embed",
              usage: %{prompt_tokens: 5, total_tokens: 5},
@@ -157,6 +163,52 @@ defmodule Arbor.LLM.EmbeddingTest do
       assert result.model == "test-model"
       assert result.dimensions == 2
       assert result.embeddings == [[0.1, 0.2], [1.1, 1.2], [2.1, 2.2]]
+      assert result.association_version == 1
+    end
+
+    test "provider adapter contract keeps only unambiguous legacy positional compatibility" do
+      defmodule LegacySingleEmbedAdapter do
+        @behaviour Arbor.LLM.ProviderAdapter
+
+        @impl true
+        def provider, do: "legacy_single"
+
+        @impl true
+        def embed(_texts, model, _opts) do
+          {:ok,
+           %{
+             embeddings: [[0.25, 0.75]],
+             model: model,
+             provider: "legacy_single",
+             usage: %{},
+             dimensions: 2
+           }}
+        end
+      end
+
+      client = Client.new(adapters: %{"legacy_single" => LegacySingleEmbedAdapter})
+
+      assert {:ok,
+              %{
+                association_version: 1,
+                indexed_embeddings: [%{index: 0, embedding: [0.25, 0.75]}]
+              }} = Client.embed_batch(client, "legacy_single", "model", ["one"])
+
+      assert {:error, :indexed_embeddings_required_for_batch} =
+               Client.embed_batch(client, "legacy_single", "model", ["one", "two"])
+    end
+
+    test "a versioned provider result must carry authoritative indices" do
+      defmodule MisversionedEmbedAdapter do
+        def embed(_texts, _model, _opts) do
+          {:ok, %{association_version: 1, embeddings: [[0.25, 0.75]], usage: %{}}}
+        end
+      end
+
+      client = Client.new(adapters: %{"misversioned" => MisversionedEmbedAdapter})
+
+      assert {:error, :versioned_indexed_embeddings_required} =
+               Client.embed_batch(client, "misversioned", "model", ["one"])
     end
 
     test "security regression: ambiguous positional batches and unbounded metadata are rejected" do

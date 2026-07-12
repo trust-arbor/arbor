@@ -32,27 +32,29 @@ defmodule Arbor.AI.Backends.OpenAIEmbedding do
   @spec embed(String.t(), keyword()) ::
           {:ok, Arbor.Contracts.API.Embedding.result()} | {:error, term()}
   def embed(text, opts \\ []) do
-    case do_embed([text], opts) do
-      {:ok, %{embeddings: [embedding | _]} = result} ->
-        {:ok,
-         %{
-           embedding: embedding,
-           model: result.model,
-           provider: result.provider,
-           usage: result.usage,
-           dimensions: length(embedding)
-         }}
+    with_embedding_deadline(opts, fn opts ->
+      case do_embed([text], opts) do
+        {:ok, %{embeddings: [embedding | _]} = result} ->
+          {:ok,
+           %{
+             embedding: embedding,
+             model: result.model,
+             provider: result.provider,
+             usage: result.usage,
+             dimensions: length(embedding)
+           }}
 
-      {:error, reason} ->
-        {:error, reason}
-    end
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end)
   end
 
   @impl true
   @spec embed_batch([String.t()], keyword()) ::
           {:ok, Arbor.Contracts.API.Embedding.batch_result()} | {:error, term()}
   def embed_batch(texts, opts \\ []) when is_list(texts) do
-    do_embed(texts, opts)
+    with_embedding_deadline(opts, &do_embed(texts, &1))
   end
 
   # ── Private ──
@@ -62,7 +64,7 @@ defmodule Arbor.AI.Backends.OpenAIEmbedding do
     {base_url, default_model, auth_header} = provider_config(provider)
 
     model = Keyword.get(opts, :model, default_model)
-    timeout = Keyword.get(opts, :timeout, @default_timeout)
+    timeout = Keyword.fetch!(opts, :timeout_ms)
 
     url = "#{base_url}/v1/embeddings"
 
@@ -97,11 +99,23 @@ defmodule Arbor.AI.Backends.OpenAIEmbedding do
         {:error, {:openai_error, status, error_msg}}
 
       {:error, reason} ->
+        reason = Arbor.LLM.sanitize_external_reason(reason)
+
         Logger.warning(
-          "OpenAI embed request failed: provider=#{provider}, error=#{inspect(reason)}"
+          "OpenAI embed request failed: provider=#{provider}, error=#{Arbor.LLM.inspect_external_reason(reason)}"
         )
 
         {:error, {:connection_error, reason}}
+    end
+  end
+
+  defp with_embedding_deadline(opts, fun) when is_function(fun, 1) do
+    with {:ok, opts, timeout} <- Arbor.LLM.normalize_timeout_options(opts, @default_timeout) do
+      Arbor.LLM.run_with_deadline(
+        fn -> fun.(opts) end,
+        timeout,
+        Arbor.LLM.RequestTimeoutError.exception(timeout_ms: timeout)
+      )
     end
   end
 
@@ -206,8 +220,15 @@ defmodule Arbor.AI.Backends.OpenAIEmbedding do
     {:error, {:unexpected_response, body}}
   end
 
-  defp extract_error(%{"error" => %{"message" => msg}}) when is_binary(msg), do: msg
-  defp extract_error(%{"error" => msg}) when is_binary(msg), do: msg
-  defp extract_error(body) when is_binary(body), do: body
-  defp extract_error(body), do: inspect(body)
+  defp extract_error(%{"error" => %{"message" => msg}}) when is_binary(msg),
+    do: bounded_error_text(msg)
+
+  defp extract_error(%{"error" => msg}) when is_binary(msg), do: bounded_error_text(msg)
+  defp extract_error(body) when is_binary(body), do: bounded_error_text(body)
+  defp extract_error(body), do: Arbor.LLM.inspect_external_reason(body)
+
+  defp bounded_error_text(value) when byte_size(value) <= 512,
+    do: String.replace_invalid(value, "")
+
+  defp bounded_error_text(value), do: Arbor.LLM.inspect_external_reason(value)
 end

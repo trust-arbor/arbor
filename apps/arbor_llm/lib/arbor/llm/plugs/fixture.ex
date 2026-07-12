@@ -130,12 +130,23 @@ defmodule Arbor.LLM.Plugs.Fixture do
   exists.
   """
   @spec load(Call.t()) ::
-          {:ok, term(), DateTime.t()} | :not_found
+          {:ok, term(), DateTime.t()} | :not_found | {:error, term()}
   def load(%Call{operation: op} = call) do
     path = path_for(call)
 
-    with {:ok, body} <- Arbor.LLM.read_bounded_regular_file(path, 16_777_216),
-         {:ok, decoded} <-
+    case Arbor.LLM.read_bounded_regular_file(path, 16_777_216) do
+      {:ok, body} -> load_body(call, op, body)
+      {:error, {:file_stat_failed, :enoent}} -> :not_found
+      {:error, reason} -> fixture_error({:fixture_read_failed, reason})
+    end
+  rescue
+    exception -> fixture_error({:fixture_load_exception, external_exception(exception)})
+  catch
+    kind, reason -> fixture_error({:fixture_load_failure, kind, external_reason(reason)})
+  end
+
+  defp load_body(call, op, body) do
+    with {:ok, decoded} <-
            Arbor.LLM.ResponseBudget.decode_json(body,
              max_bytes: 16_777_216,
              max_nodes: 100_000,
@@ -143,13 +154,17 @@ defmodule Arbor.LLM.Plugs.Fixture do
              max_map_keys: 10_000,
              max_list_items: 100_000
            ),
-         true <- decoded["operation"] == Atom.to_string(op),
-         true <- decoded["request_hash"] == request_hash(call),
+         true <- is_map(decoded) or {:error, :fixture_object_required},
+         true <- decoded["operation"] == Atom.to_string(op) or {:error, :operation_mismatch},
+         true <- decoded["request_hash"] == request_hash(call) or {:error, :request_hash_mismatch},
          {:ok, recorded_at, _} <- DateTime.from_iso8601(decoded["recorded_at"] || ""),
-         {:ok, response} <- validate_replay(call, deserialize(op, decoded["response"])) do
+         {:ok, deserialized} <- safe_deserialize(op, decoded["response"]),
+         {:ok, response} <- validate_replay(call, deserialized) do
       {:ok, response, recorded_at}
     else
-      _ -> :not_found
+      {:error, {:invalid_embedding_fixture, _reason} = reason} -> {:error, reason}
+      {:error, reason} -> fixture_error(reason)
+      _invalid -> fixture_error(:invalid_fixture_shape)
     end
   end
 
@@ -189,6 +204,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
     %{
       "outcome" => "ok",
       "value" => %{
+        "association_version" => 1,
         "indexed_embeddings" => Enum.map(indexed_embeddings, &stringify/1),
         "usage" => serialize_usage(usage || %{})
       }
@@ -196,10 +212,10 @@ defmodule Arbor.LLM.Plugs.Fixture do
   end
 
   defp serialize(_op, {:error, reason}),
-    do: %{"outcome" => "error", "reason" => inspect(reason)}
+    do: %{"outcome" => "error", "reason" => Arbor.LLM.inspect_external_reason(reason)}
 
   defp serialize(_op, other),
-    do: %{"outcome" => "raw", "raw" => inspect(other)}
+    do: %{"outcome" => "raw", "raw" => Arbor.LLM.inspect_external_reason(other)}
 
   defp serialize_response(%Response{} = r) do
     %{
@@ -239,7 +255,7 @@ defmodule Arbor.LLM.Plugs.Fixture do
   # ── Deserialization (JSON shape → Arbor result shape) ──────────────
 
   defp deserialize(_op, %{"outcome" => "error", "reason" => reason}) do
-    {:error, {:replayed_error, reason}}
+    {:error, {:replayed_error, external_reason(reason)}}
   end
 
   defp deserialize(:complete, %{"outcome" => "ok", "value" => json}) do
@@ -251,20 +267,59 @@ defmodule Arbor.LLM.Plugs.Fixture do
   end
 
   defp deserialize(op, %{"outcome" => "ok", "value" => v})
-       when op in [:embed_cloud, :embed_local] do
-    indexed =
-      Enum.map(v["indexed_embeddings"] || [], fn
-        entry when is_map(entry) ->
-          %{
-            index: Map.get(entry, "index"),
-            embedding: Map.get(entry, "embedding")
-          }
+       when op in [:embed_cloud, :embed_local] and is_map(v) do
+    cond do
+      Map.has_key?(v, "indexed_embeddings") ->
+        deserialize_indexed_embeddings(v)
 
-        invalid ->
-          invalid
-      end)
+      Map.has_key?(v, "association_version") ->
+        {:invalid_fixture_shape, :versioned_indexed_embeddings_required}
 
-    {:ok, indexed, deserialize_usage(v["usage"] || %{})}
+      Map.has_key?(v, "embeddings") ->
+        usage = Map.get(v, "usage", %{})
+
+        {:legacy_positional_embeddings, Map.get(v, "embeddings"), deserialize_usage(usage)}
+
+      true ->
+        {:invalid_fixture_shape, :embedding_value_required}
+    end
+  end
+
+  defp deserialize(op, %{"outcome" => "ok"}) when op in [:embed_cloud, :embed_local],
+    do: {:invalid_fixture_shape, :embedding_value_object_required}
+
+  defp deserialize(_op, _response), do: {:invalid_fixture_shape, :known_outcome_required}
+
+  defp deserialize_indexed_embeddings(value) do
+    version = Map.get(value, "association_version", 1)
+    entries = Map.get(value, "indexed_embeddings")
+    usage = Map.get(value, "usage", %{})
+
+    cond do
+      version != 1 ->
+        {:invalid_fixture_shape, {:unsupported_embedding_association_version, version}}
+
+      not is_list(entries) ->
+        {:invalid_fixture_shape, :indexed_embeddings_list_required}
+
+      not is_map(usage) ->
+        {:invalid_fixture_shape, :embedding_usage_object_required}
+
+      true ->
+        indexed =
+          Enum.map(entries, fn
+            entry when is_map(entry) ->
+              %{
+                index: Map.get(entry, "index"),
+                embedding: Map.get(entry, "embedding")
+              }
+
+            invalid ->
+              invalid
+          end)
+
+        {:ok, indexed, deserialize_usage(usage)}
+    end
   end
 
   defp deserialize_response(json) do
@@ -301,6 +356,8 @@ defmodule Arbor.LLM.Plugs.Fixture do
     Map.new(usage, fn {k, v} -> {safe_atom(k, k), v} end)
   end
 
+  defp deserialize_usage(_usage), do: :invalid_usage
+
   defp validate_replay(
          %Call{operation: op, request: {_model, texts, _opts}},
          {:ok, indexed, usage}
@@ -315,7 +372,47 @@ defmodule Arbor.LLM.Plugs.Fixture do
     end
   end
 
+  defp validate_replay(
+         %Call{operation: op, request: {_model, texts, _opts}},
+         {:legacy_positional_embeddings, vectors, usage}
+       )
+       when op in [:embed_cloud, :embed_local] and is_list(texts) do
+    if length(texts) == 1 do
+      case Boundary.embedding_response_with_indices(
+             %{embeddings: vectors, usage: usage},
+             1
+           ) do
+        {:ok, authoritative, validated_usage} ->
+          {:ok, {:ok, authoritative, validated_usage}}
+
+        {:error, reason} ->
+          {:error, {:invalid_embedding_fixture, reason}}
+      end
+    else
+      {:error, {:invalid_embedding_fixture, :ambiguous_legacy_positional_embeddings}}
+    end
+  end
+
+  defp validate_replay(%Call{operation: op}, {:invalid_fixture_shape, reason})
+       when op in [:embed_cloud, :embed_local],
+       do: {:error, {:invalid_embedding_fixture, external_reason(reason)}}
+
+  defp validate_replay(%Call{}, {:invalid_fixture_shape, reason}),
+    do: {:error, {:invalid_fixture_shape, external_reason(reason)}}
+
   defp validate_replay(%Call{}, response), do: {:ok, response}
+
+  defp safe_deserialize(op, response) do
+    {:ok, deserialize(op, response)}
+  rescue
+    exception -> {:error, {:fixture_decode_exception, external_exception(exception)}}
+  catch
+    kind, reason -> {:error, {:fixture_decode_failure, kind, external_reason(reason)}}
+  end
+
+  defp fixture_error(reason), do: {:error, {:invalid_fixture, external_reason(reason)}}
+  defp external_reason(reason), do: Arbor.LLM.sanitize_external_reason(reason)
+  defp external_exception(exception), do: Arbor.LLM.sanitize_external_exception(exception)
 
   defp safe_atom(s, fallback) when is_binary(s) do
     String.to_existing_atom(s)

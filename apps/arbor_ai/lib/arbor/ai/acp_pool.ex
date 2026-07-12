@@ -118,8 +118,9 @@ defmodule Arbor.AI.AcpPool do
   """
   @spec checkout(atom(), keyword()) :: {:ok, pid()} | {:error, term()}
   def checkout(provider, opts \\ []) do
-    timeout = Keyword.get(opts, :timeout, 30_000)
-    GenServer.call(__MODULE__, {:checkout, provider, opts}, timeout)
+    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, 30_000) do
+      GenServer.call(__MODULE__, {:checkout, provider, opts}, timeout)
+    end
   end
 
   @doc """
@@ -207,24 +208,32 @@ defmodule Arbor.AI.AcpPool do
   """
   @spec cluster_checkout(atom(), keyword()) :: {:ok, pid(), node()} | {:error, term()}
   def cluster_checkout(provider, opts \\ []) do
+    started_at = System.monotonic_time(:millisecond)
+
+    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, 30_000) do
+      do_cluster_checkout(provider, opts, timeout, started_at)
+    end
+  end
+
+  defp do_cluster_checkout(provider, opts, timeout, started_at) do
     {node_pref, opts} = Keyword.pop(opts, :node, :local)
 
     case node_pref do
       :local ->
-        case checkout(provider, opts) do
+        case checkout_before_deadline(provider, opts, timeout, started_at) do
           {:ok, pid} -> {:ok, pid, Node.self()}
           error -> error
         end
 
       :any ->
         # Try local first
-        case checkout(provider, opts) do
+        case checkout_before_deadline(provider, opts, timeout, started_at) do
           {:ok, pid} ->
             {:ok, pid, Node.self()}
 
           {:error, :pool_exhausted} ->
             # Try remote nodes
-            find_remote_session(provider, opts)
+            find_remote_session(provider, opts, timeout, started_at)
 
           error ->
             error
@@ -232,12 +241,12 @@ defmodule Arbor.AI.AcpPool do
 
       target_node when is_atom(target_node) ->
         if target_node == Node.self() do
-          case checkout(provider, opts) do
+          case checkout_before_deadline(provider, opts, timeout, started_at) do
             {:ok, pid} -> {:ok, pid, Node.self()}
             error -> error
           end
         else
-          remote_checkout(target_node, provider, opts)
+          remote_checkout_before_deadline(target_node, provider, opts, timeout, started_at)
         end
     end
   end
@@ -247,21 +256,25 @@ defmodule Arbor.AI.AcpPool do
   """
   @spec cluster_send_message(pid(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def cluster_send_message(session_pid, content, opts \\ []) do
-    if node(session_pid) == Node.self() do
-      AcpSession.send_message(session_pid, content, opts)
-    else
-      timeout = Keyword.get(opts, :timeout, :infinity)
-      rpc_timeout = if timeout == :infinity, do: :infinity, else: timeout + 5_000
+    with {:ok, opts, timeout} <- Arbor.AI.Timeout.normalize(opts, :infinity) do
+      if node(session_pid) == Node.self() do
+        AcpSession.send_message(session_pid, content, opts)
+      else
+        rpc_timeout = timeout
 
-      case :rpc.call(
-             node(session_pid),
-             AcpSession,
-             :send_message,
-             [session_pid, content, opts],
-             rpc_timeout
-           ) do
-        {:badrpc, reason} -> {:error, {:remote_call_failed, reason}}
-        result -> result
+        case :rpc.call(
+               node(session_pid),
+               AcpSession,
+               :send_message,
+               [session_pid, content, opts],
+               rpc_timeout
+             ) do
+          {:badrpc, reason} ->
+            {:error, {:remote_call_failed, Arbor.LLM.sanitize_external_reason(reason)}}
+
+          result ->
+            result
+        end
       end
     end
   end
@@ -921,22 +934,55 @@ defmodule Arbor.AI.AcpPool do
     end
   end
 
-  defp find_remote_session(provider, opts) do
+  defp find_remote_session(provider, opts, timeout, started_at) do
     nodes = remote_nodes()
 
     Enum.find_value(nodes, {:error, :pool_exhausted}, fn node ->
-      case remote_checkout(node, provider, opts) do
+      case remote_checkout_before_deadline(node, provider, opts, timeout, started_at) do
         {:ok, pid, ^node} -> {:ok, pid, node}
+        {:error, :timeout} = error -> error
         _ -> nil
       end
     end)
   end
 
+  defp checkout_before_deadline(provider, opts, timeout, started_at) do
+    with {:ok, opts} <- remaining_timeout_options(opts, timeout, started_at) do
+      checkout(provider, opts)
+    end
+  end
+
+  defp remote_checkout_before_deadline(target_node, provider, opts, timeout, started_at) do
+    with {:ok, opts} <- remaining_timeout_options(opts, timeout, started_at) do
+      remote_checkout(target_node, provider, opts)
+    end
+  end
+
+  defp remaining_timeout_options(opts, :infinity, _started_at),
+    do: {:ok, Keyword.put(opts, :timeout, :infinity)}
+
+  defp remaining_timeout_options(opts, timeout, started_at) do
+    elapsed = max(System.monotonic_time(:millisecond) - started_at, 0)
+
+    case timeout - elapsed do
+      remaining when remaining > 0 -> {:ok, Keyword.put(opts, :timeout, remaining)}
+      _expired -> {:error, :timeout}
+    end
+  end
+
   defp remote_checkout(target_node, provider, opts) do
-    case :rpc.call(target_node, __MODULE__, :checkout, [provider, opts], 10_000) do
-      {:ok, pid} -> {:ok, pid, target_node}
-      {:badrpc, reason} -> {:error, {:remote_call_failed, target_node, reason}}
-      error -> error
+    timeout = Keyword.fetch!(opts, :timeout)
+    rpc_timeout = if timeout == :infinity, do: 10_000, else: min(timeout, 10_000)
+
+    case :rpc.call(target_node, __MODULE__, :checkout, [provider, opts], rpc_timeout) do
+      {:ok, pid} ->
+        {:ok, pid, target_node}
+
+      {:badrpc, reason} ->
+        {:error, {:remote_call_failed, target_node, Arbor.LLM.sanitize_external_reason(reason)}}
+
+      error ->
+        error
     end
   end
 end

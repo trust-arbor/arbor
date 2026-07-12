@@ -6,7 +6,6 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
   @default_max_response_bytes 16_777_216
   @default_max_events 100_000
   @default_max_event_bytes 1_048_576
-  @maximum_timeout_ms 900_000
   @cleanup_grace_ms 100
 
   defstruct [:stream, :cancel, :model, :context, :limits, :producer]
@@ -41,9 +40,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
        }}
     end
   rescue
-    exception -> {:error, {:stream_setup_failed, bounded_exception(exception)}}
+    exception -> {:error, {:stream_setup_failed, Arbor.LLM.ExternalTerm.exception(exception)}}
   catch
-    kind, reason -> {:error, {:stream_setup_failed, {kind, bounded_reason(reason)}}}
+    kind, reason ->
+      {:error, {:stream_setup_failed, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}}
   end
 
   @spec process(t(), keyword()) :: {:ok, ReqLLM.Response.t()} | {:error, term()}
@@ -76,7 +76,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
             end
 
           other, _acc ->
-            {:halt, {:error, {:invalid_stream_chunk, bounded_reason(other)}}}
+            {:halt, {:error, {:invalid_stream_chunk, Arbor.LLM.ExternalTerm.sanitize(other)}}}
         end)
 
       with {:ok, acc} <- result,
@@ -93,29 +93,24 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
       end
     end
   rescue
-    exception -> {:error, {:stream_assembly_failed, bounded_exception(exception)}}
+    exception -> {:error, {:stream_assembly_failed, Arbor.LLM.ExternalTerm.exception(exception)}}
   catch
-    kind, reason -> {:error, {:stream_assembly_failed, {kind, bounded_reason(reason)}}}
+    kind, reason ->
+      {:error, {:stream_assembly_failed, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}}
   end
 
   defp build_limits(opts, limits_opts) do
     maximum = Keyword.get(limits_opts, :max_response_bytes, @default_max_response_bytes)
     max_events = Keyword.get(limits_opts, :max_events, @default_max_events)
     max_event_bytes = Keyword.get(limits_opts, :max_event_bytes, @default_max_event_bytes)
-    timeout = Keyword.get(opts, :receive_timeout, 30_000)
 
-    if Enum.all?([maximum, max_events, max_event_bytes, timeout], &(is_integer(&1) and &1 > 0)) do
+    with {:ok, receipt} <- Deadline.receipt(opts),
+         true <-
+           Enum.all?([maximum, max_events, max_event_bytes], &(is_integer(&1) and &1 > 0)) or
+             {:error, :invalid_stream_limits} do
       maximum = min(maximum, @default_max_response_bytes)
       max_events = min(max_events, @default_max_events)
       max_event_bytes = min(max_event_bytes, min(maximum, @default_max_event_bytes))
-      timeout = min(timeout, @maximum_timeout_ms)
-      own_deadline = System.monotonic_time(:millisecond) + timeout
-
-      deadline_ms =
-        case Deadline.current_deadline() do
-          inherited when is_integer(inherited) -> min(inherited, own_deadline)
-          _ -> own_deadline
-        end
 
       {:ok,
        %{
@@ -127,11 +122,9 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
          max_depth: 32,
          max_map_keys: 10_000,
          max_list_items: 100_000,
-         timeout: timeout,
-         deadline_ms: deadline_ms
+         timeout: receipt.timeout_ms,
+         deadline_ms: receipt.deadline_ms
        }}
-    else
-      {:error, :invalid_stream_limits}
     end
   end
 
@@ -297,16 +290,28 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
           state
 
         {:error, reason, state} ->
-          %{state | failure: state.failure || {:stream_transport_error, bounded_reason(reason)}}
+          %{
+            state
+            | failure:
+                state.failure ||
+                  {:stream_transport_error, Arbor.LLM.ExternalTerm.sanitize(reason)}
+          }
       end
 
     finish_request(final_state)
   rescue
     exception ->
-      send(consumer, {ref, :error, {:stream_transport_exception, bounded_exception(exception)}})
+      send(
+        consumer,
+        {ref, :error, {:stream_transport_exception, Arbor.LLM.ExternalTerm.exception(exception)}}
+      )
   catch
     kind, reason ->
-      send(consumer, {ref, :error, {:stream_transport_exception, {kind, bounded_reason(reason)}}})
+      send(
+        consumer,
+        {ref, :error,
+         {:stream_transport_exception, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}}
+      )
   end
 
   defp handle_http_event({:status, status}, state) when is_integer(status) do
@@ -611,9 +616,11 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
       {chunks, provider_state} = decode_provider_event(event, state)
       emit_chunks(chunks, %{state | provider_state: provider_state})
     rescue
-      exception -> {:error, {:stream_decode_failed, bounded_exception(exception)}, state}
+      exception ->
+        {:error, {:stream_decode_failed, Arbor.LLM.ExternalTerm.exception(exception)}, state}
     catch
-      kind, reason -> {:error, {:stream_decode_failed, {kind, bounded_reason(reason)}}, state}
+      kind, reason ->
+        {:error, {:stream_decode_failed, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}, state}
     end
   end
 
@@ -863,9 +870,11 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
     callback.(value)
     :ok
   rescue
-    exception -> {:error, {:stream_callback_failed, bounded_exception(exception)}}
+    exception ->
+      {:error, {:stream_callback_failed, Arbor.LLM.ExternalTerm.exception(exception)}}
   catch
-    kind, reason -> {:error, {:stream_callback_failed, {kind, bounded_reason(reason)}}}
+    kind, reason ->
+      {:error, {:stream_callback_failed, {kind, Arbor.LLM.ExternalTerm.sanitize(reason)}}}
   end
 
   defp maybe_put(map, _key, nil), do: map
@@ -878,7 +887,8 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
   defp producer_exit_reason({:shutdown, :stream_deadline}, limits),
     do: {:stream_deadline_exceeded, limits.timeout}
 
-  defp producer_exit_reason(reason, _limits), do: {:stream_producer_exit, bounded_reason(reason)}
+  defp producer_exit_reason(reason, _limits),
+    do: {:stream_producer_exit, Arbor.LLM.ExternalTerm.sanitize(reason)}
 
   defp flush_messages(ref, pid, monitor) do
     receive do
@@ -889,16 +899,4 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
       0 -> :ok
     end
   end
-
-  defp bounded_exception(%{__struct__: module, message: message}) when is_binary(message),
-    do: {module, String.slice(String.replace_invalid(message, ""), 0, 512)}
-
-  defp bounded_exception(%{__struct__: module}), do: module
-  defp bounded_exception(_exception), do: :exception
-
-  defp bounded_reason(value) when is_binary(value),
-    do: value |> String.slice(0, 512) |> String.replace_invalid("")
-
-  defp bounded_reason(value) when is_atom(value) or is_number(value), do: value
-  defp bounded_reason(_value), do: :external_error
 end

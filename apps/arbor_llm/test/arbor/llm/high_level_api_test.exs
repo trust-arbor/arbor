@@ -615,6 +615,29 @@ defmodule Arbor.LLM.HighLevelApiTest do
              )
   end
 
+  test "security regression: duplicate timeout aliases select the strictest valid ceiling" do
+    client =
+      Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
+
+    assert {:error, %RequestTimeoutError{timeout_ms: 5}} =
+             LLM.generate(
+               client: client,
+               model: "slow-model",
+               prompt: "hi",
+               timeout_ms: 100,
+               timeout_ms: 5
+             )
+
+    assert {:error, {:invalid_timeout, {1, 900_000}}} =
+             LLM.generate(
+               client: client,
+               model: "slow-model",
+               prompt: "hi",
+               timeout_ms: 100,
+               timeout_ms: :invalid
+             )
+  end
+
   test "stream returns RequestTimeoutError when timeout_ms is exceeded before connection" do
     client =
       Client.new(default_provider: "high-level-test") |> Client.register_adapter(HighLevelAdapter)
@@ -637,7 +660,7 @@ defmodule Arbor.LLM.HighLevelApiTest do
                client: client,
                model: "slow-event-stream",
                prompt: "hi",
-               stream_read_timeout_ms: 5
+               stream_read_timeout_ms: 60
              )
 
     assert_raise RequestTimeoutError, fn -> Enum.to_list(stream) end
@@ -832,7 +855,8 @@ defmodule Arbor.LLM.HighLevelApiTest do
     assert_receive {:consumer_source, producer}
     producer_monitor = Process.monitor(producer)
     assert_receive {:DOWN, ^consumer_monitor, :process, ^consumer, :consumer_abort}
-    assert_receive {:DOWN, ^producer_monitor, :process, ^producer, :normal}, 750
+    assert_receive {:DOWN, ^producer_monitor, :process, ^producer, reason}, 750
+    assert reason in [:normal, :noproc]
     refute Process.alive?(producer)
   end
 

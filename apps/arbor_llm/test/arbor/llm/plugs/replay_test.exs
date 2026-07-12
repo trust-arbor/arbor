@@ -57,6 +57,24 @@ defmodule Arbor.LLM.Plugs.ReplayTest do
       assert replayed.metadata.replayed_from == Fixture.path_for(call)
       assert %DateTime{} = replayed.metadata.recorded_at
     end
+
+    test "security regression: malformed fixture halts replay instead of falling through" do
+      call = Call.new(:embed_cloud, {"openai:text-embedding", ["hello"], []})
+
+      fixture = %{
+        "operation" => "embed_cloud",
+        "request_hash" => Fixture.request_hash(call),
+        "recorded_at" => "2026-07-11T00:00:00Z",
+        "response" => %{"outcome" => "ok", "value" => "malformed"}
+      }
+
+      File.write!(Fixture.path_for(call), Jason.encode!(fixture))
+
+      replayed = Replay.call(call)
+      assert replayed.halted == true
+      assert {:error, {:invalid_embedding_fixture, _reason}} = replayed.result
+      assert replayed.metadata.fixture_invalid == true
+    end
   end
 
   describe "Replay.call/1 — fixture missing" do

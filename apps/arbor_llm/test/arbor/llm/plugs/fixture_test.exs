@@ -233,10 +233,66 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       indexed = [%{index: 0, embedding: [0.1, 0.2, 0.3, 0.4]}]
       :ok = Fixture.save(call, {:ok, indexed, %{input_tokens: 5}})
 
+      persisted = Fixture.path_for(call) |> File.read!() |> Jason.decode!()
+      assert get_in(persisted, ["response", "value", "association_version"]) == 1
+
       {:ok, {:ok, replayed, usage}, _ts} = Fixture.load(call)
 
       assert replayed == indexed
       assert usage[:input_tokens] == 5
+    end
+
+    test "legacy single-input positional fixture remains unambiguous and replayable" do
+      call = Call.new(:embed_cloud, {"voyage:voyage-3", ["hello"], []})
+
+      write_fixture(call, %{
+        "outcome" => "ok",
+        "value" => %{
+          "embeddings" => [[0.1, 0.2]],
+          "usage" => %{"input_tokens" => 2}
+        }
+      })
+
+      assert {:ok, {:ok, [%{index: 0, embedding: [0.1, 0.2]}], %{input_tokens: 2}}, %DateTime{}} =
+               Fixture.load(call)
+    end
+
+    test "legacy multi-input positional fixture fails closed as ambiguous" do
+      call = Call.new(:embed_cloud, {"voyage:voyage-3", ["first", "second"], []})
+
+      write_fixture(call, %{
+        "outcome" => "ok",
+        "value" => %{
+          "embeddings" => [[1.0, 0.0], [0.0, 1.0]],
+          "usage" => %{}
+        }
+      })
+
+      assert Fixture.load(call) ==
+               {:error, {:invalid_embedding_fixture, :ambiguous_legacy_positional_embeddings}}
+    end
+
+    test "security regression: malformed and unsupported embedding fixture terms return bounded errors" do
+      call = Call.new(:embed_cloud, {"voyage:voyage-3", ["hello"], []})
+
+      malformed_values = [
+        "not-an-object",
+        %{"indexed_embeddings" => %{}, "usage" => %{}},
+        %{
+          "association_version" => 2,
+          "indexed_embeddings" => [%{"index" => 0, "embedding" => [1.0]}],
+          "usage" => %{}
+        },
+        %{"association_version" => 1, "embeddings" => [[1.0]], "usage" => %{}},
+        %{"embeddings" => %{}, "usage" => %{}}
+      ]
+
+      for value <- malformed_values do
+        write_fixture(call, %{"outcome" => "ok", "value" => value})
+
+        assert {:error, reason} = Fixture.load(call)
+        assert byte_size(inspect(reason)) < 1_024
+      end
     end
 
     test ":embed_local round-trips with an LLMDB.Model spec" do
@@ -304,7 +360,7 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
           )
 
         File.write!(path, Jason.encode!(tampered))
-        assert Fixture.load(call) == :not_found
+        assert {:error, {:invalid_embedding_fixture, _reason}} = Fixture.load(call)
       end
     end
   end
@@ -328,14 +384,18 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       symlink_path = Fixture.path_for(symlink_call)
       File.ln_s!(outside, symlink_path)
 
-      assert Fixture.load(symlink_call) == :not_found
+      assert Fixture.load(symlink_call) ==
+               {:error, {:invalid_fixture, {:fixture_read_failed, :symlink_rejected}}}
 
       fifo_call = Call.new(:complete, {"openai:fifo", [], []})
       fifo_path = Fixture.path_for(fifo_call)
       {_, 0} = System.cmd("mkfifo", [fifo_path])
 
       task = Task.async(fn -> Fixture.load(fifo_call) end)
-      assert {:ok, :not_found} = Task.yield(task, 1_000)
+
+      assert {:ok,
+              {:error, {:invalid_fixture, {:fixture_read_failed, {:not_regular_file, _type}}}}} =
+               Task.yield(task, 1_000)
 
       assert Path.dirname(symlink_path) == tmp_dir
     end
@@ -350,7 +410,8 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       :ok = File.ln(outside, fixture_path)
       on_exit(fn -> File.rm(outside) end)
 
-      assert Fixture.load(call) == :not_found
+      assert Fixture.load(call) ==
+               {:error, {:invalid_fixture, {:fixture_read_failed, :hardlink_rejected}}}
     end
   end
 
@@ -370,5 +431,16 @@ defmodule Arbor.LLM.Plugs.FixtureTest do
       assert DateTime.compare(recorded_at, before_save) in [:gt, :eq]
       assert DateTime.compare(recorded_at, after_save) in [:lt, :eq]
     end
+  end
+
+  defp write_fixture(call, response) do
+    fixture = %{
+      "operation" => Atom.to_string(call.operation),
+      "request_hash" => Fixture.request_hash(call),
+      "recorded_at" => "2026-07-11T00:00:00Z",
+      "response" => response
+    }
+
+    File.write!(Fixture.path_for(call), Jason.encode!(fixture))
   end
 end

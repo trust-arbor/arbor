@@ -305,6 +305,27 @@ defmodule Arbor.AI.Eval.RetrievalSupportTest do
     end
   end
 
+  test "security regression: duplicate eval deadlines cannot widen or hide an invalid bound" do
+    assert RetrievalSupport.positive_integer_option(
+             [timeout: 200, timeout: 5],
+             :timeout,
+             30_000
+           ) == {:ok, 5}
+
+    assert RetrievalSupport.positive_integer_option(
+             [judge_timeout: 200, judge_timeout: 7],
+             :judge_timeout,
+             60_000
+           ) == {:ok, 7}
+
+    assert RetrievalSupport.positive_integer_option(
+             [timeout: 5, timeout: :invalid],
+             :timeout,
+             30_000
+           ) ==
+             {:error, {:invalid_option, :timeout, {:integer_range_required, 1, 300_000}}}
+  end
+
   test "leaves max_tokens unset and accepts explicit positive integers without a guessed cap" do
     assert RetrievalSupport.optional_positive_integer_option([], :max_tokens) == {:ok, nil}
 
