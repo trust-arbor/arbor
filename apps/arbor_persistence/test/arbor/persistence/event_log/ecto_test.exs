@@ -65,6 +65,24 @@ defmodule Arbor.Persistence.EventLog.EctoTest do
       assert persisted.data == %{"key" => "value"}
     end
 
+    test "security regression: durable operation fingerprints survive append and reads" do
+      event = Event.new("fingerprint-read", "arbor.review.ordinary", %{value: 1})
+
+      assert {:ok, operation} =
+               Arbor.Persistence.EventLog.build_operation("fingerprint-read", [event])
+
+      expected = Map.fetch!(operation.fingerprints, event.id)
+
+      assert {:ok, [persisted]} = EventLog.append("fingerprint-read", event, repo: Repo)
+      assert Map.get(persisted, :operation_fingerprint) == expected
+
+      assert %Arbor.Persistence.Schemas.Event{operation_fingerprint: ^expected} =
+               Repo.get!(Arbor.Persistence.Schemas.Event, event.id)
+
+      assert {:ok, [read]} = EventLog.read_stream("fingerprint-read", repo: Repo)
+      assert Map.get(read, :operation_fingerprint) == expected
+    end
+
     test "appends multiple events with incrementing numbers" do
       events = [
         Event.new("stream-1", "test.first", %{n: 1}),

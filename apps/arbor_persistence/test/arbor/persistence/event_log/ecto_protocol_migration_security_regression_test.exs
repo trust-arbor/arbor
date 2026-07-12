@@ -8,6 +8,7 @@ defmodule Arbor.Persistence.EventLog.EctoProtocolMigrationSecurityRegressionTest
   @moduletag :integration
 
   @protocol_migration 20_260_712_000_004
+  @r4_protocol_migration 20_260_712_000_005
   @legacy_migration 20_260_711_000_002
 
   defmodule ProtocolRepo do
@@ -39,6 +40,7 @@ defmodule Arbor.Persistence.EventLog.EctoProtocolMigrationSecurityRegressionTest
     )
 
     migrate_protocol_if_available!(ProtocolRepo, schema)
+    migrate_r4_protocol_if_available!(ProtocolRepo, schema)
 
     on_exit(fn ->
       Postgrex.query!(admin, "DROP SCHEMA IF EXISTS #{quote_identifier(schema)} CASCADE")
@@ -51,6 +53,7 @@ defmodule Arbor.Persistence.EventLog.EctoProtocolMigrationSecurityRegressionTest
   setup %{schema: schema} do
     ProtocolRepo.query!("DELETE FROM event_log_operations")
     ProtocolRepo.query!("DELETE FROM events")
+    reset_protocol_epoch!()
     {:ok, schema: schema}
   end
 
@@ -192,6 +195,99 @@ defmodule Arbor.Persistence.EventLog.EctoProtocolMigrationSecurityRegressionTest
     end)
   end
 
+  test "security regression: append and reconciliation require one exact protocol epoch" do
+    drop_r4_protocol_constraints!()
+
+    on_exit(fn ->
+      reset_protocol_epoch!()
+      restore_r4_protocol_constraints!()
+    end)
+
+    corruptions = [
+      missing: fn -> ProtocolRepo.query!("DELETE FROM event_log_protocol") end,
+      wrong: fn -> ProtocolRepo.query!("UPDATE event_log_protocol SET protocol_version = 2") end,
+      duplicate: fn ->
+        ProtocolRepo.query!("INSERT INTO event_log_protocol VALUES (FALSE, 3, clock_timestamp())")
+      end
+    ]
+
+    Enum.each(corruptions, fn {label, corrupt!} ->
+      reset_protocol_epoch!()
+      corrupt!.()
+
+      stream_id = "ecto-protocol-#{label}"
+      event = Event.new(stream_id, "arbor.review.ordinary", %{state: label})
+      assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation(stream_id, [event])
+
+      assert {:error, :event_log_protocol_unavailable} =
+               EventLog.append(stream_id, event, repo: ProtocolRepo)
+
+      assert {:error, {:append_indeterminate, ^operation}} =
+               EventLog.reconcile_append(operation, repo: ProtocolRepo)
+
+      assert %{rows: [[0]]} = ProtocolRepo.query!("SELECT COUNT(*) FROM events")
+      assert %{rows: [[0]]} = ProtocolRepo.query!("SELECT COUNT(*) FROM event_log_operations")
+    end)
+  end
+
+  test "security regression: database trigger rejects a marked raw writer under a wrong epoch" do
+    drop_r4_protocol_constraints!()
+
+    on_exit(fn ->
+      reset_protocol_epoch!()
+      restore_r4_protocol_constraints!()
+    end)
+
+    ProtocolRepo.query!("UPDATE event_log_protocol SET protocol_version = 2")
+
+    event = Event.new("ecto-raw-wrong-epoch", "arbor.review.ordinary", %{value: 1})
+    assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation(event.stream_id, [event])
+
+    assert {:error, error} =
+             ProtocolRepo.query(
+               """
+               INSERT INTO events (
+                 id, stream_id, event_number, global_position, type, data, metadata,
+                 event_timestamp, operation_id, operation_fingerprint, created_at
+               ) VALUES ($1, $2, 1, 1, $3, $4, $5, $6, $7, $8, clock_timestamp())
+               """,
+               [
+                 event.id,
+                 event.stream_id,
+                 event.type,
+                 event.data,
+                 event.metadata,
+                 event.timestamp,
+                 operation.operation_id,
+                 Map.fetch!(operation.fingerprints, event.id)
+               ]
+             )
+
+    assert Exception.message(error) =~ "EventLog protocol epoch is unavailable"
+    assert %{rows: [[0]]} = ProtocolRepo.query!("SELECT COUNT(*) FROM events")
+  end
+
+  test "security regression: legacy NULL fingerprints remain explicit remediation debt" do
+    assert %{rows: [[false]]} =
+             ProtocolRepo.query!("""
+             SELECT convalidated
+             FROM pg_constraint
+             WHERE conrelid = 'events'::regclass
+               AND conname = 'events_operation_fingerprint_present'
+             """)
+
+    assert %{rows: [[comment]]} =
+             ProtocolRepo.query!("""
+             SELECT obj_description(oid, 'pg_constraint')
+             FROM pg_constraint
+             WHERE conrelid = 'events'::regclass
+               AND conname = 'events_operation_fingerprint_present'
+             """)
+
+    assert comment =~ "trusted-source remediation"
+    assert comment =~ "must not be recomputed"
+  end
+
   defp migrate_protocol_if_available!(repo, schema) do
     migration_file = protocol_migration_file()
 
@@ -202,6 +298,22 @@ defmodule Arbor.Persistence.EventLog.EctoProtocolMigrationSecurityRegressionTest
         repo,
         @protocol_migration,
         Arbor.Persistence.Repo.Migrations.EnforceEventLogProtocol,
+        prefix: schema,
+        log: false
+      )
+    end
+  end
+
+  defp migrate_r4_protocol_if_available!(repo, schema) do
+    migration_file = r4_protocol_migration_file()
+
+    if File.exists?(migration_file) do
+      Code.require_file(migration_file)
+
+      Ecto.Migrator.up(
+        repo,
+        @r4_protocol_migration,
+        Arbor.Persistence.Repo.Migrations.HardenEventLogProtocolEpoch,
         prefix: schema,
         log: false
       )
@@ -259,6 +371,43 @@ defmodule Arbor.Persistence.EventLog.EctoProtocolMigrationSecurityRegressionTest
       "../../../../priv/repo/migrations/20260712000004_enforce_event_log_protocol.exs",
       __DIR__
     )
+  end
+
+  defp r4_protocol_migration_file do
+    Path.expand(
+      "../../../../priv/repo/migrations/20260712000005_harden_event_log_protocol_epoch.exs",
+      __DIR__
+    )
+  end
+
+  defp reset_protocol_epoch! do
+    ProtocolRepo.query!("DELETE FROM event_log_protocol")
+
+    ProtocolRepo.query!(
+      "INSERT INTO event_log_protocol (singleton, protocol_version, cutover_at) VALUES (TRUE, 3, clock_timestamp())"
+    )
+  end
+
+  defp drop_r4_protocol_constraints! do
+    ProtocolRepo.query!(
+      "ALTER TABLE event_log_protocol DROP CONSTRAINT IF EXISTS event_log_protocol_singleton_true"
+    )
+
+    ProtocolRepo.query!(
+      "ALTER TABLE event_log_protocol DROP CONSTRAINT IF EXISTS event_log_protocol_version_3"
+    )
+  end
+
+  defp restore_r4_protocol_constraints! do
+    if File.exists?(r4_protocol_migration_file()) do
+      ProtocolRepo.query!(
+        "ALTER TABLE event_log_protocol ADD CONSTRAINT event_log_protocol_singleton_true CHECK (singleton IS TRUE)"
+      )
+
+      ProtocolRepo.query!(
+        "ALTER TABLE event_log_protocol ADD CONSTRAINT event_log_protocol_version_3 CHECK (protocol_version = 3)"
+      )
+    end
   end
 
   defp create_legacy_tables!(conn, schema, opts) do

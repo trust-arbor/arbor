@@ -28,6 +28,7 @@ defmodule Arbor.Persistence.Event do
     field(:causation_id, String.t())
     field(:correlation_id, String.t())
     field(:timestamp, DateTime.t())
+    field(:operation_fingerprint, String.t())
   end
 
   @doc """

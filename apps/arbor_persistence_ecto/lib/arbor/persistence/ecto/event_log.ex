@@ -485,7 +485,8 @@ defmodule Arbor.Persistence.Ecto.EventLog do
         event
         | stream_id: stream_id,
           event_number: stored.event_number,
-          global_position: stored.global_position
+          global_position: stored.global_position,
+          operation_fingerprint: stored.operation_fingerprint
       }
     end)
   end
@@ -524,7 +525,8 @@ defmodule Arbor.Persistence.Ecto.EventLog do
       causation_id: Map.get(metadata, "causation_id") || recorded.causation_id,
       correlation_id: Map.get(metadata, "correlation_id") || recorded.correlation_id,
       agent_id: Map.get(metadata, @agent_id_key),
-      timestamp: decode_timestamp(Map.get(metadata, @timestamp_key), recorded.created_at)
+      timestamp: decode_timestamp(Map.get(metadata, @timestamp_key), recorded.created_at),
+      operation_fingerprint: Map.get(metadata, @fingerprint_key)
     }
   end
 

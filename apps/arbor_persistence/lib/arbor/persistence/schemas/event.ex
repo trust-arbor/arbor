@@ -77,7 +77,8 @@ defmodule Arbor.Persistence.Schemas.Event do
       agent_id: event.agent_id,
       causation_id: event.causation_id,
       correlation_id: event.correlation_id,
-      event_timestamp: event.timestamp
+      event_timestamp: event.timestamp,
+      operation_fingerprint: event.operation_fingerprint
     }
   end
 
@@ -97,7 +98,8 @@ defmodule Arbor.Persistence.Schemas.Event do
       agent_id: schema.agent_id,
       causation_id: schema.causation_id,
       correlation_id: schema.correlation_id,
-      timestamp: schema.event_timestamp
+      timestamp: schema.event_timestamp,
+      operation_fingerprint: schema.operation_fingerprint
     }
   end
 end

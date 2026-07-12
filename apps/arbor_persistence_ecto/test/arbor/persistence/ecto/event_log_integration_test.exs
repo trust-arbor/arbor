@@ -57,10 +57,13 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
     stream_id = "ordinary-append-#{System.unique_integer([:positive])}"
     event_type = "arbor.review.ordinary"
     event = Event.new(stream_id, event_type, %{value: 1})
+    assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation(stream_id, [event])
+    expected_fingerprint = Map.fetch!(operation.fingerprints, event.id)
 
     assert {:ok, [%Event{} = persisted]} = EventLog.append(stream_id, event)
     assert persisted.stream_id == stream_id
     assert persisted.event_number == 1
+    assert Map.get(persisted, :operation_fingerprint) == expected_fingerprint
 
     assert {:ok,
             [
@@ -69,11 +72,12 @@ defmodule Arbor.Persistence.Ecto.EventLogIntegrationTest do
                 type: ^event_type,
                 data: %{"value" => 1},
                 event_number: 1
-              }
+              } = read
             ]} =
              EventLog.read_stream(stream_id)
 
     assert id == event.id
+    assert Map.get(read, :operation_fingerprint) == expected_fingerprint
   end
 
   test "ordinary type strings do not crash EventStore's notification publisher" do

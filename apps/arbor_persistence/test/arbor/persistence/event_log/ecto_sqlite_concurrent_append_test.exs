@@ -20,8 +20,17 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
                              __DIR__
                            )
 
+  @r4_protocol_migration_file Path.expand(
+                                "../../../../priv/repo/migrations/20260712000005_harden_event_log_protocol_epoch.exs",
+                                __DIR__
+                              )
+
   if File.exists?(@protocol_migration_file) do
     Code.require_file(@protocol_migration_file)
+  end
+
+  if File.exists?(@r4_protocol_migration_file) do
+    Code.require_file(@r4_protocol_migration_file)
   end
 
   defmodule SQLitePoolRepo do
@@ -156,6 +165,16 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
                )
     end
 
+    if File.exists?(@r4_protocol_migration_file) do
+      assert :ok =
+               Ecto.Migrator.up(
+                 SQLitePoolRepo,
+                 20_260_712_000_005,
+                 Arbor.Persistence.Repo.Migrations.HardenEventLogProtocolEpoch,
+                 log: false
+               )
+    end
+
     on_exit(fn ->
       Enum.each([database, database <> "-shm", database <> "-wal"], &File.rm/1)
 
@@ -180,6 +199,7 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
   setup do
     SQLitePoolRepo.delete_all(Arbor.Persistence.Schemas.EventLogOperation)
     SQLitePoolRepo.delete_all(Arbor.Persistence.Schemas.Event)
+    reset_sqlite_protocol_epoch!()
     :ok
   end
 
@@ -368,6 +388,69 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
     assert Exception.message(error) =~ "EventLog protocol identity is required"
   end
 
+  test "security regression: SQLite append and reconciliation require one exact epoch" do
+    corruptions = [
+      missing: fn -> SQLitePoolRepo.query!("DELETE FROM event_log_protocol") end,
+      wrong: fn -> SQLitePoolRepo.query!("UPDATE event_log_protocol SET protocol_version = 2") end,
+      duplicate: fn ->
+        SQLitePoolRepo.query!(
+          "INSERT INTO event_log_protocol VALUES (0, 3, STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))"
+        )
+      end
+    ]
+
+    Enum.each(corruptions, fn {label, corrupt!} ->
+      reset_sqlite_protocol_epoch!()
+      corrupt!.()
+
+      stream_id = "sqlite-protocol-#{label}"
+      event = Event.new(stream_id, "arbor.review.ordinary", %{state: label})
+      assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation(stream_id, [event])
+
+      assert {:error, :event_log_protocol_unavailable} =
+               EventLog.append(stream_id, event, repo: SQLitePoolRepo)
+
+      assert {:error, {:append_indeterminate, ^operation}} =
+               EventLog.reconcile_append(operation, repo: SQLitePoolRepo)
+
+      assert %{rows: [[0]]} = SQLitePoolRepo.query!("SELECT COUNT(*) FROM events")
+      assert %{rows: [[0]]} = SQLitePoolRepo.query!("SELECT COUNT(*) FROM event_log_operations")
+    end)
+
+    reset_sqlite_protocol_epoch!()
+  end
+
+  test "security regression: SQLite trigger rejects a marked raw writer under a wrong epoch" do
+    SQLitePoolRepo.query!("UPDATE event_log_protocol SET protocol_version = 2")
+
+    event = Event.new("sqlite-raw-wrong-epoch", "arbor.review.ordinary", %{value: 1})
+    assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation(event.stream_id, [event])
+
+    assert {:error, error} =
+             SQLitePoolRepo.query(
+               """
+               INSERT INTO events (
+                 id, stream_id, event_number, global_position, type, data, metadata,
+                 event_timestamp, operation_id, operation_fingerprint, created_at
+               ) VALUES (?, ?, 1, 1, ?, ?, ?, ?, ?, ?, STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))
+               """,
+               [
+                 event.id,
+                 event.stream_id,
+                 event.type,
+                 Jason.encode!(event.data),
+                 Jason.encode!(event.metadata),
+                 DateTime.to_iso8601(event.timestamp),
+                 operation.operation_id,
+                 Map.fetch!(operation.fingerprints, event.id)
+               ]
+             )
+
+    assert Exception.message(error) =~ "EventLog protocol epoch is unavailable"
+    assert %{rows: [[0]]} = SQLitePoolRepo.query!("SELECT COUNT(*) FROM events")
+    reset_sqlite_protocol_epoch!()
+  end
+
   test "protocol migration rejects malformed legacy positions and sequences transactionally" do
     cases = [
       {"overflow-event", [{"a", "a", 2_147_483_648, 1}], ~r/invalid positions/},
@@ -431,6 +514,14 @@ defmodule Arbor.Persistence.EventLog.EctoSQLiteConcurrentAppendTest do
         log: false
       )
     end
+  end
+
+  defp reset_sqlite_protocol_epoch! do
+    SQLitePoolRepo.query!("DELETE FROM event_log_protocol")
+
+    SQLitePoolRepo.query!(
+      "INSERT INTO event_log_protocol (singleton, protocol_version, cutover_at) VALUES (1, 3, STRFTIME('%Y-%m-%d %H:%M:%f', 'now'))"
+    )
   end
 
   defp create_protocol_legacy_tables!(repo) do

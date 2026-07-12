@@ -42,7 +42,7 @@ defmodule Arbor.Historian.Application do
     children =
       if Application.get_env(:arbor_historian, :start_children, true) do
         [
-          {Arbor.Persistence.EventLog.ETS, name: @event_log_name},
+          {Arbor.Persistence.EventLog.ETS, name: @event_log_name, identity_history: :incomplete},
           {Arbor.Historian.StreamRegistry, name: Arbor.Historian.StreamRegistry}
         ]
       else
@@ -149,7 +149,19 @@ defmodule Arbor.Historian.Application do
           {:error, {:metadata_rehydrate_exit, reason}}
       end
     else
-      :ok
+      initialize_empty_identity_history(cache_event_log)
+    end
+  end
+
+  defp initialize_empty_identity_history(cache_event_log) do
+    case cache_event_log.rehydrate_metadata(
+           %{stream_versions: %{}, global_position: 0},
+           name: @event_log_name
+         ) do
+      {:ok, :identity_history_complete} -> :ok
+      {:ok, status} -> {:error, {:empty_identity_history_incomplete, status}}
+      {:error, reason} -> {:error, {:empty_identity_history_rejected, reason}}
+      other -> {:error, {:empty_identity_history_invalid_reply, other}}
     end
   end
 

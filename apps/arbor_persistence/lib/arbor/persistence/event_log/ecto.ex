@@ -94,6 +94,7 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   @global_append_lock_sql "SELECT pg_try_advisory_xact_lock(hashtext('arbor.persistence.event_log.global_append'))"
   @operation_append_lock_sql "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 1))"
   @operation_reconcile_lock_sql "SELECT pg_advisory_xact_lock(hashtextextended($1, 1))"
+  @protocol_version 3
   @append_repo_callbacks [transaction: 1, rollback: 1, one: 1, insert!: 1]
 
   def append(stream_id, events, opts \\ []) do
@@ -269,6 +270,11 @@ defmodule Arbor.Persistence.EventLog.Ecto do
          phase_key,
          deadline_mono
        ) do
+    case verify_protocol_epoch(repo, deadline_mono) do
+      :ok -> :ok
+      {:error, reason} -> repo.rollback(reason)
+    end
+
     case acquire_operation_append_lock(repo, operation.operation_id, deadline_mono) do
       :ok -> :ok
       {:error, reason} -> repo.rollback(reason)
@@ -939,6 +945,39 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     end
   end
 
+  defp verify_protocol_epoch(repo, deadline_mono) do
+    if database_repo?(repo) do
+      with :ok <- lock_protocol_epoch(repo, deadline_mono),
+           {:ok, %{rows: [[singleton, @protocol_version]]}} when singleton in [true, 1] <-
+             repo.query(
+               "SELECT singleton, protocol_version FROM event_log_protocol",
+               [],
+               deadline_query_opts(repo, deadline_mono)
+             ) do
+        :ok
+      else
+        _invalid_or_unavailable -> {:error, :event_log_protocol_unavailable}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp lock_protocol_epoch(repo, deadline_mono) do
+    if postgres_repo?(repo) do
+      case repo.query(
+             "LOCK TABLE event_log_protocol IN SHARE MODE",
+             [],
+             deadline_query_opts(repo, deadline_mono)
+           ) do
+        {:ok, _result} -> :ok
+        {:error, _unavailable} -> {:error, :event_log_protocol_unavailable}
+      end
+    else
+      :ok
+    end
+  end
+
   defp acquire_operation_reconcile_lock(repo, operation_id, deadline_mono) do
     if postgres_repo?(repo) do
       case repo.query(
@@ -1474,6 +1513,11 @@ defmodule Arbor.Persistence.EventLog.Ecto do
   defp reconcile_operation(repo, %AppendOperation{} = operation, deadline_mono) do
     if database_repo?(repo) do
       transaction(repo, deadline_mono, fn ->
+        case verify_protocol_epoch(repo, deadline_mono) do
+          :ok -> :ok
+          {:error, reason} -> repo.rollback(reason)
+        end
+
         :ok = acquire_operation_reconcile_lock(repo, operation.operation_id, deadline_mono)
         reconcile_and_terminalize(repo, operation, deadline_mono)
       end)
@@ -1568,10 +1612,10 @@ defmodule Arbor.Persistence.EventLog.Ecto do
     case inserted do
       %EventSchema{id: id} ->
         %EventSchema{committed_at: %DateTime{}} = repo_get!(repo, EventSchema, id, deadline_mono)
-        event
+        %Event{event | operation_fingerprint: fingerprint}
 
       _test_repo_result ->
-        event
+        %Event{event | operation_fingerprint: fingerprint}
     end
   end
 

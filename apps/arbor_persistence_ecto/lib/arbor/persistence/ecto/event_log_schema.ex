@@ -9,11 +9,14 @@ defmodule Arbor.Persistence.Ecto.EventLogSchema do
 
   @migration_v1 20_260_711_000_001
   @migration_v2 20_260_712_000_002
+  @migration_v3 20_260_712_000_003
   @migration_lock "arbor.persistence.event_log.schema_migration"
   @migration_files [
     {@migration_v1,
      "priv/event_log/migrations/20260711000001_operation_fences_and_position_capacity.sql"},
-    {@migration_v2, "priv/event_log/migrations/20260712000002_database_writer_fence.sql"}
+    {@migration_v2, "priv/event_log/migrations/20260712000002_database_writer_fence.sql"},
+    {@migration_v3,
+     "priv/event_log/migrations/20260712000003_reject_missing_operation_markers.sql"}
   ]
   @protocol_version 3
 
@@ -538,9 +541,12 @@ defmodule Arbor.Persistence.Ecto.EventLogSchema do
       metadata_json := #{metadata_json};
 
       IF metadata_json IS NULL
-         OR jsonb_typeof(metadata_json -> 'arbor_append_operation_id') <> 'string'
-         OR jsonb_typeof(metadata_json -> 'arbor_append_fingerprint') <> 'string'
-         OR jsonb_typeof(metadata_json -> 'event_id') <> 'string' THEN
+         OR NOT (metadata_json ? 'arbor_append_operation_id')
+         OR jsonb_typeof(metadata_json -> 'arbor_append_operation_id') IS DISTINCT FROM 'string'
+         OR NOT (metadata_json ? 'arbor_append_fingerprint')
+         OR jsonb_typeof(metadata_json -> 'arbor_append_fingerprint') IS DISTINCT FROM 'string'
+         OR NOT (metadata_json ? 'event_id')
+         OR jsonb_typeof(metadata_json -> 'event_id') IS DISTINCT FROM 'string' THEN
         RAISE EXCEPTION 'EventLog operation identity is required after protocol cutover'
           USING ERRCODE = '23514';
       END IF;

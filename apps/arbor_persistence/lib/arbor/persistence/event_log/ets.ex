@@ -19,6 +19,11 @@ defmodule Arbor.Persistence.EventLog.ETS do
       children = [
         {Arbor.Persistence.EventLog.ETS, name: :my_event_log}
       ]
+
+  Durable cache owners must pass `identity_history: :incomplete` and complete
+  `rehydrate_metadata/2` plus any required identity replay before accepting
+  append or reconciliation traffic. Standalone ETS logs are known-empty by
+  default.
   """
 
   use GenServer
@@ -209,6 +214,9 @@ defmodule Arbor.Persistence.EventLog.ETS do
            }}
           | {:error,
              :invalid_identity_replay
+             | :identity_replay_fingerprint_invalid
+             | :identity_replay_fingerprint_mismatch
+             | :identity_replay_fingerprint_missing
              | :identity_replay_too_large
              | :invalid_precondition
              | :backend_unavailable}
@@ -268,13 +276,19 @@ defmodule Arbor.Persistence.EventLog.ETS do
     trim_interval_ms = Keyword.get(opts, :trim_interval_ms, @default_trim_interval_ms)
     append_candidate_hook = Keyword.get(opts, :append_candidate_hook)
 
+    identity_history =
+      case Keyword.get(opts, :identity_history, :known_empty) do
+        :known_empty -> :complete
+        :incomplete -> {:unavailable, :startup_incomplete}
+      end
+
     base_state = %{
       stream_table: stream_table,
       global_table: global_table,
       id_table: id_table,
       identity_position_table: identity_position_table,
       identity_stream_position_table: identity_stream_position_table,
-      identity_history: :complete,
+      identity_history: identity_history,
       identity_metadata_consistent: true,
       global_position: 0,
       max_events: max_events,
@@ -315,27 +329,32 @@ defmodule Arbor.Persistence.EventLog.ETS do
     now = System.monotonic_time(:millisecond)
 
     {result, state} =
-      if now >= deadline_mono do
-        {{:error, :operation_timeout}, state}
-      else
-        case reconcile_operation(operation, events, state) do
-          {:ok, {:committed, persisted}} ->
-            {{:ok, persisted}, state}
+      cond do
+        now >= deadline_mono ->
+          {{:error, :operation_timeout}, state}
 
-          {:ok, :absent} ->
-            append_absent_operation(
-              stream_id,
-              events,
-              preconditions,
-              operation,
-              deadline_mono,
-              now,
-              state
-            )
+        identity_history_unavailable?(state) ->
+          {EventLog.indeterminate(operation), state}
 
-          {:error, reason} ->
-            {{:error, reason}, state}
-        end
+        true ->
+          case reconcile_operation(operation, events, state) do
+            {:ok, {:committed, persisted}} ->
+              {{:ok, persisted}, state}
+
+            {:ok, :absent} ->
+              append_absent_operation(
+                stream_id,
+                events,
+                preconditions,
+                operation,
+                deadline_mono,
+                now,
+                state
+              )
+
+            {:error, reason} ->
+              {{:error, reason}, state}
+          end
       end
 
     {:reply, EventLog.stamp_completion(result), state}
@@ -343,9 +362,16 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   def handle_call({:reconcile_append, operation, deadline_mono}, _from, state) do
     result =
-      if System.monotonic_time(:millisecond) < deadline_mono,
-        do: reconcile_operation(operation, state),
-        else: {:error, :operation_timeout}
+      cond do
+        System.monotonic_time(:millisecond) >= deadline_mono ->
+          {:error, :operation_timeout}
+
+        identity_history_unavailable?(state) ->
+          EventLog.indeterminate(operation)
+
+        true ->
+          reconcile_operation(operation, state)
+      end
 
     {:reply, EventLog.stamp_completion(result), state}
   end
@@ -486,6 +512,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
       | stream_versions: merged_stream_versions,
         global_position: new_global_position,
         head_inserted_mono: head_inserted_mono,
+        identity_history: {:unavailable, :durable_metadata_only},
         identity_metadata_consistent:
           metadata_sequence_consistent?(merged_stream_versions, new_global_position)
     }
@@ -513,6 +540,8 @@ defmodule Arbor.Persistence.EventLog.ETS do
           :ets.insert(state.identity_stream_position_table, {stream_position, event_id})
         end)
 
+        Enum.each(events, &refresh_cached_replay_event(&1, state))
+
         candidate =
           if complete? and complete_identity_ledger?(state),
             do: %{state | identity_history: :complete},
@@ -528,7 +557,7 @@ defmodule Arbor.Persistence.EventLog.ETS do
             status: format_identity_history(candidate)
           }}, candidate}
 
-      {:error, :invalid_identity_replay} = error ->
+      {:error, _reason} = error ->
         {:reply, error, state}
     end
   end
@@ -674,11 +703,14 @@ defmodule Arbor.Persistence.EventLog.ETS do
         new_ver = ver + 1
         new_gpos = gpos + 1
 
+        fingerprint = Map.fetch!(operation.fingerprints, event.id)
+
         persisted_event = %Event{
           event
           | event_number: new_ver,
             global_position: new_gpos,
-            stream_id: stream_id
+            stream_id: stream_id,
+            operation_fingerprint: fingerprint
         }
 
         {[persisted_event | acc], new_ver, new_gpos}
@@ -941,14 +973,14 @@ defmodule Arbor.Persistence.EventLog.ETS do
               MapSet.put(page_ids, event_id), MapSet.put(page_positions, global_position),
               MapSet.put(page_stream_positions, stream_position)}}
 
-          {:error, :invalid_identity_replay} = error ->
+          {:error, _reason} = error ->
             {:halt, error}
         end
       end
     )
     |> case do
       {:ok, entries, _ids, _positions, _stream_positions} -> {:ok, Enum.reverse(entries)}
-      {:error, :invalid_identity_replay} = error -> error
+      {:error, _reason} = error -> error
     end
   end
 
@@ -959,32 +991,51 @@ defmodule Arbor.Persistence.EventLog.ETS do
          page_positions,
          page_stream_positions
        ) do
-    fingerprint = EventLog.event_fingerprint(event.stream_id, event)
-    stream_version = Map.get(state.stream_versions, event.stream_id, 0)
+    with {:ok, fingerprint} <- persisted_replay_fingerprint(event) do
+      stream_version = Map.get(state.stream_versions, event.stream_id, 0)
 
-    valid? =
-      is_binary(fingerprint) and is_integer(event.event_number) and event.event_number > 0 and
-        event.event_number <= stream_version and is_integer(event.global_position) and
-        event.global_position > 0 and event.global_position <= state.global_position and
-        not MapSet.member?(page_ids, event.id) and
-        not MapSet.member?(page_positions, event.global_position) and
-        not MapSet.member?(page_stream_positions, {event.stream_id, event.event_number})
+      valid? =
+        is_integer(event.event_number) and event.event_number > 0 and
+          event.event_number <= stream_version and is_integer(event.global_position) and
+          event.global_position > 0 and event.global_position <= state.global_position and
+          not MapSet.member?(page_ids, event.id) and
+          not MapSet.member?(page_positions, event.global_position) and
+          not MapSet.member?(page_stream_positions, {event.stream_id, event.event_number})
 
-    identity =
-      {fingerprint, event.stream_id, event.event_number, event.global_position}
+      identity =
+        {fingerprint, event.stream_id, event.event_number, event.global_position}
 
-    stream_position = {event.stream_id, event.event_number}
+      stream_position = {event.stream_id, event.event_number}
 
-    if valid? do
-      classify_replay_identity(
-        event.id,
-        identity,
-        event.global_position,
-        stream_position,
-        state
-      )
-    else
-      {:error, :invalid_identity_replay}
+      if valid? do
+        classify_replay_identity(
+          event.id,
+          identity,
+          event.global_position,
+          stream_position,
+          state
+        )
+      else
+        {:error, :invalid_identity_replay}
+      end
+    end
+  end
+
+  defp persisted_replay_fingerprint(%Event{} = event) do
+    persisted = Map.get(event, :operation_fingerprint)
+
+    cond do
+      is_nil(persisted) ->
+        {:error, :identity_replay_fingerprint_missing}
+
+      not valid_snapshot_fingerprint?(persisted) ->
+        {:error, :identity_replay_fingerprint_invalid}
+
+      EventLog.event_fingerprint(event.stream_id, event) != persisted ->
+        {:error, :identity_replay_fingerprint_mismatch}
+
+      true ->
+        {:ok, persisted}
     end
   end
 
@@ -1015,7 +1066,37 @@ defmodule Arbor.Persistence.EventLog.ETS do
     state.identity_metadata_consistent and
       :ets.info(state.id_table, :size) == state.global_position and
       :ets.info(state.identity_position_table, :size) == state.global_position and
-      :ets.info(state.identity_stream_position_table, :size) == state.global_position
+      :ets.info(state.identity_stream_position_table, :size) == state.global_position and
+      active_identity_payloads_match?(state)
+  end
+
+  defp active_identity_payloads_match?(state) do
+    :ets.foldl(
+      fn {global_position, %Event{} = event}, valid? ->
+        valid? and active_identity_payload_matches?(event, global_position, state.id_table)
+      end,
+      true,
+      state.global_table
+    )
+  end
+
+  defp active_identity_payload_matches?(event, global_position, id_table) do
+    case :ets.lookup(id_table, event.id) do
+      [{_, {fingerprint, stream_id, event_number, ^global_position}}] ->
+        stream_id == event.stream_id and event_number == event.event_number and
+          Map.get(event, :operation_fingerprint) == fingerprint and
+          EventLog.event_fingerprint(stream_id, event) == fingerprint
+
+      _missing_or_invalid ->
+        false
+    end
+  end
+
+  defp refresh_cached_replay_event(%Event{} = event, state) do
+    case :ets.lookup(state.global_table, event.global_position) do
+      [{_position, _cached}] -> :ets.insert(state.global_table, {event.global_position, event})
+      [] -> :ok
+    end
   end
 
   defp incomplete_metadata_reason(%{identity_metadata_consistent: false}),
@@ -1374,7 +1455,8 @@ defmodule Arbor.Persistence.EventLog.ETS do
       "agent_id" => event.agent_id,
       "causation_id" => event.causation_id,
       "correlation_id" => event.correlation_id,
-      "timestamp" => if(event.timestamp, do: DateTime.to_iso8601(event.timestamp))
+      "timestamp" => if(event.timestamp, do: DateTime.to_iso8601(event.timestamp)),
+      "operation_fingerprint" => event.operation_fingerprint
     }
   end
 
@@ -1406,7 +1488,8 @@ defmodule Arbor.Persistence.EventLog.ETS do
       agent_id: map["agent_id"],
       causation_id: map["causation_id"],
       correlation_id: map["correlation_id"],
-      timestamp: timestamp
+      timestamp: timestamp,
+      operation_fingerprint: map["operation_fingerprint"]
     }
   end
 
@@ -1470,8 +1553,15 @@ defmodule Arbor.Persistence.EventLog.ETS do
     {identity_entries, snapshot_identity_error} =
       snapshot_identity_entries(events, identity_tombstones, global_position)
 
+    identities_by_id =
+      Map.new(identity_entries, fn {event_id, identity, _position} -> {event_id, identity} end)
+
     Enum.each(events, fn event_map ->
-      event = deserialize_event(event_map)
+      event =
+        event_map
+        |> deserialize_event()
+        |> attach_snapshot_identity(identities_by_id)
+
       # Stream table is pointer-only; global table holds the value.
       :ets.insert(
         state.stream_table,
@@ -1522,20 +1612,37 @@ defmodule Arbor.Persistence.EventLog.ETS do
     Map.new(versions, fn {k, v} -> {k, v} end)
   end
 
-  defp snapshot_identity_entries(events, nil, _global_position) do
-    entries =
-      Enum.map(events, fn event_map ->
-        event = deserialize_event(event_map)
-        fingerprint = EventLog.event_fingerprint(event.stream_id, event)
+  defp snapshot_identity_entries(events, nil, global_position) do
+    events
+    |> Enum.reduce_while({:ok, []}, fn event_map, {:ok, tombstones} ->
+      event = deserialize_event(event_map)
 
-        {event.id, {fingerprint, event.stream_id, event.event_number, event.global_position},
-         event.global_position}
-      end)
+      case persisted_replay_fingerprint(event) do
+        {:ok, fingerprint} ->
+          tombstone = %{
+            "event_id" => event.id,
+            "fingerprint" => fingerprint,
+            "stream_id" => event.stream_id,
+            "event_number" => event.event_number,
+            "global_position" => event.global_position
+          }
 
-    {entries, nil}
+          {:cont, {:ok, [tombstone | tombstones]}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, tombstones} ->
+        snapshot_identity_entries(events, Enum.reverse(tombstones), global_position)
+
+      {:error, reason} ->
+        {[], snapshot_fingerprint_error(reason)}
+    end
   end
 
-  defp snapshot_identity_entries(events, tombstones, global_position)
+  defp snapshot_identity_entries(_events, tombstones, global_position)
        when is_list(tombstones) do
     tombstones
     |> Enum.reduce_while(
@@ -1566,21 +1673,27 @@ defmodule Arbor.Persistence.EventLog.ETS do
         {Enum.reverse(entries), nil}
 
       :error ->
-        {snapshot_event_identity_entries(events), :invalid_snapshot_identity_history}
+        {[], :invalid_snapshot_identity_history}
     end
   end
 
-  defp snapshot_identity_entries(events, _invalid, _global_position),
-    do: {snapshot_event_identity_entries(events), :invalid_snapshot_identity_history}
+  defp snapshot_identity_entries(_events, _invalid, _global_position),
+    do: {[], :invalid_snapshot_identity_history}
 
-  defp snapshot_event_identity_entries(events) do
-    Enum.map(events, fn event_map ->
-      event = deserialize_event(event_map)
-      fingerprint = EventLog.event_fingerprint(event.stream_id, event)
+  defp snapshot_fingerprint_error(:identity_replay_fingerprint_missing),
+    do: :legacy_snapshot_fingerprint_missing
 
-      {event.id, {fingerprint, event.stream_id, event.event_number, event.global_position},
-       event.global_position}
-    end)
+  defp snapshot_fingerprint_error(_invalid_or_mismatched),
+    do: :invalid_snapshot_identity_history
+
+  defp attach_snapshot_identity(%Event{} = event, identities_by_id) do
+    case Map.get(identities_by_id, event.id) do
+      {fingerprint, _stream_id, _event_number, _global_position} ->
+        %Event{event | operation_fingerprint: fingerprint}
+
+      nil ->
+        event
+    end
   end
 
   defp snapshot_identity_entry(tombstone, global_position, ids, positions, stream_positions) do
@@ -1625,8 +1738,8 @@ defmodule Arbor.Persistence.EventLog.ETS do
       {nil, true, nil} ->
         :complete
 
-      {_declared, _complete, :invalid_snapshot_identity_history} ->
-        {:unavailable, :invalid_snapshot_identity_history}
+      {_declared, _complete, identity_error} when not is_nil(identity_error) ->
+        {:unavailable, identity_error}
 
       _incomplete ->
         {:unavailable, :legacy_snapshot_incomplete}
@@ -1641,9 +1754,11 @@ defmodule Arbor.Persistence.EventLog.ETS do
         [
           {_, {fingerprint, stream_id, event_number, global_position}}
         ] ->
+          event = %Event{event | operation_fingerprint: fingerprint}
+
           stream_id == event.stream_id and event_number == event.event_number and
             global_position == event.global_position and
-            EventLog.event_fingerprint_matches?(stream_id, event, fingerprint)
+            EventLog.event_fingerprint(stream_id, event) == fingerprint
 
         _missing_or_invalid ->
           false
@@ -1665,6 +1780,11 @@ defmodule Arbor.Persistence.EventLog.ETS do
 
   defp snapshot_unavailable_reason("metadata_sequence_inconsistent"),
     do: :metadata_sequence_inconsistent
+
+  defp snapshot_unavailable_reason("startup_incomplete"), do: :startup_incomplete
+
+  defp snapshot_unavailable_reason("legacy_snapshot_fingerprint_missing"),
+    do: :legacy_snapshot_fingerprint_missing
 
   defp snapshot_unavailable_reason(_unknown), do: :invalid_snapshot_identity_history
 

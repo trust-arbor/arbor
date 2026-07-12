@@ -35,6 +35,21 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
     def get("freshness_restore:meta", _opts), do: {:ok, %{"latest_id" => "1"}}
 
     def get("freshness_restore:snapshot:1", _opts) do
+      timestamp = DateTime.from_iso8601("2099-01-01T00:00:00Z") |> elem(1)
+
+      event = %Arbor.Persistence.Event{
+        id: "evt_restored",
+        stream_id: "restored",
+        event_number: 1,
+        global_position: 1,
+        type: "started",
+        data: %{},
+        metadata: %{},
+        timestamp: timestamp
+      }
+
+      fingerprint = Arbor.Persistence.EventLog.event_fingerprint("restored", event)
+
       {:ok,
        %{
          "global_position" => 1,
@@ -48,7 +63,8 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
              "type" => "started",
              "data" => %{},
              "metadata" => %{},
-             "timestamp" => "2099-01-01T00:00:00Z"
+             "timestamp" => "2099-01-01T00:00:00Z",
+             "operation_fingerprint" => fingerprint
            }
          ]
        }}
@@ -61,7 +77,36 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
     # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
     name = :"el_ets_#{:erlang.unique_integer([:positive])}"
     start_supervised!({ETS, name: name})
+
+    assert {:ok, :identity_history_complete} =
+             ETS.rehydrate_metadata(%{stream_versions: %{}, global_position: 0}, name: name)
+
     {:ok, name: name}
+  end
+
+  test "security regression: a new store rejects append and reconcile until initialized" do
+    name = :"el_incomplete_start_#{:erlang.unique_integer([:positive])}"
+    start_supervised!({ETS, name: name, identity_history: :incomplete}, id: name)
+
+    event = Event.new("incomplete", "arbor.review.ordinary", %{value: 1})
+    assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation("incomplete", [event])
+
+    assert {:ok,
+            {:identity_history_unavailable,
+             %{reason: :startup_incomplete, expected_events: 0, loaded_events: 0}}} =
+             ETS.identity_history_status(name: name)
+
+    assert {:error, {:append_indeterminate, ^operation}} =
+             ETS.append("incomplete", event, name: name)
+
+    assert {:error, {:append_indeterminate, ^operation}} =
+             ETS.reconcile_append(operation, name: name)
+
+    assert {:ok, :identity_history_complete} =
+             ETS.rehydrate_metadata(%{stream_versions: %{}, global_position: 0}, name: name)
+
+    assert {:ok, [%Event{event_number: 1, global_position: 1}]} =
+             ETS.append("incomplete", event, name: name)
   end
 
   describe "append/3" do
@@ -264,6 +309,8 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
          end},
         id: name
       )
+
+      initialize_empty_store(name)
 
       event = Event.new("ets-post-decision-timeout", "must-not-commit", %{})
 
@@ -574,6 +621,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"el_limits_#{:erlang.unique_integer([:positive])}"
       start_supervised!({ETS, name: name, max_events: 3}, id: name)
+      initialize_empty_store(name)
 
       ETS.append("s1", Event.new("s1", "t1", %{}), name: name)
       ETS.append("s1", Event.new("s1", "t2", %{}), name: name)
@@ -587,6 +635,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"el_read_limit_#{:erlang.unique_integer([:positive])}"
       start_supervised!({ETS, name: name}, id: name)
+      initialize_empty_store(name)
 
       for i <- 1..5 do
         ETS.append("s1", Event.new("s1", "t#{i}", %{}), name: name)
@@ -600,6 +649,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"el_explicit_limit_#{:erlang.unique_integer([:positive])}"
       start_supervised!({ETS, name: name}, id: name)
+      initialize_empty_store(name)
 
       for i <- 1..10 do
         ETS.append("s1", Event.new("s1", "t#{i}", %{}), name: name)
@@ -663,6 +713,8 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
         id: name
       )
 
+      initialize_empty_store(name)
+
       old = DateTime.utc_now() |> DateTime.add(-2 * 60 * 60, :second)
       fresh = DateTime.utc_now()
 
@@ -696,6 +748,8 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
         id: name
       )
 
+      initialize_empty_store(name)
+
       old = DateTime.utc_now() |> DateTime.add(-2 * 60 * 60, :second)
       event = Event.new("trimmed-id", "old_event", %{value: 1}, timestamp: old)
 
@@ -726,6 +780,8 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
         {ETS, name: name, max_age_ms: 60_000, trim_interval_ms: :disabled},
         id: name
       )
+
+      initialize_empty_store(name)
 
       start_supervised!(
         {Snapshotter,
@@ -788,6 +844,8 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
         {ETS, name: name, max_age_ms: :infinity, trim_interval_ms: :disabled},
         id: name
       )
+
+      initialize_empty_store(name)
 
       ancient = DateTime.utc_now() |> DateTime.add(-365 * 24 * 60 * 60, :second)
       ETS.append("s1", Event.new("s1", "ancient", %{}, timestamp: ancient), name: name)
@@ -1010,6 +1068,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
           | event_number: 1,
             global_position: 1
         }
+        |> with_durable_fingerprint()
 
       assert {:ok, {:identity_history_unavailable, _details}} =
                ETS.rehydrate_metadata(
@@ -1033,6 +1092,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
           | event_number: 1,
             global_position: 1
         }
+        |> with_durable_fingerprint()
 
       second =
         %Event{
@@ -1040,6 +1100,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
           | event_number: 2,
             global_position: 2
         }
+        |> with_durable_fingerprint()
 
       assert {:ok, {:identity_history_unavailable, _details}} =
                ETS.rehydrate_metadata(
@@ -1064,6 +1125,147 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
                )
     end
 
+    test "security regression: an unavailable snapshot rejects all append reconciliation", %{
+      name: source_name
+    } do
+      event = Event.new("replay-blocked", "arbor.review.ordinary", %{value: 1})
+
+      assert {:ok, operation} =
+               Arbor.Persistence.EventLog.build_operation(event.stream_id, [event])
+
+      fingerprint = Map.fetch!(operation.fingerprints, event.id)
+      timestamp = DateTime.to_iso8601(event.timestamp)
+
+      suffix = System.unique_integer([:positive])
+      store_name = :"el_replay_blocked_store_#{suffix}"
+      target_name = :"el_replay_blocked_target_#{suffix}"
+      namespace = "replay_blocked_#{suffix}"
+
+      start_supervised!({SnapshotStore, name: store_name}, id: store_name)
+
+      assert :ok =
+               SnapshotStore.put(
+                 "#{namespace}:meta",
+                 %{"latest_id" => "1"},
+                 name: store_name
+               )
+
+      assert :ok =
+               SnapshotStore.put(
+                 "#{namespace}:snapshot:1",
+                 %{
+                   "snapshot_version" => 2,
+                   "global_position" => 1,
+                   "stream_versions" => %{"replay-blocked" => 1},
+                   "events" => [
+                     %{
+                       "id" => event.id,
+                       "stream_id" => event.stream_id,
+                       "event_number" => 1,
+                       "global_position" => 1,
+                       "type" => event.type,
+                       "data" => %{"value" => 1},
+                       "metadata" => %{},
+                       "timestamp" => timestamp
+                     }
+                   ],
+                   "identity_tombstones" => [
+                     %{
+                       "event_id" => event.id,
+                       "fingerprint" => fingerprint,
+                       "stream_id" => event.stream_id,
+                       "event_number" => 1,
+                       "global_position" => 1
+                     }
+                   ],
+                   "identity_history" => %{
+                     "status" => "unavailable",
+                     "reason" => "durable_metadata_only"
+                   }
+                 },
+                 name: store_name
+               )
+
+      start_supervised!(
+        {ETS,
+         name: target_name,
+         snapshot_store: SnapshotStore,
+         snapshot_store_opts: [name: store_name],
+         snapshot_namespace: namespace},
+        id: target_name
+      )
+
+      assert {:ok, {:identity_history_unavailable, _details}} =
+               ETS.identity_history_status(name: target_name)
+
+      assert {:error, {:append_indeterminate, ^operation}} =
+               ETS.append(event.stream_id, event, name: target_name)
+
+      assert {:error, {:append_indeterminate, ^operation}} =
+               ETS.reconcile_append(operation, name: target_name)
+
+      assert Process.alive?(Process.whereis(source_name))
+    end
+
+    test "security regression: replay rejects a tampered payload with its persisted fingerprint",
+         %{name: name} do
+      event =
+        %Event{
+          Event.new("fingerprint-replay", "arbor.review.ordinary", %{value: 1},
+            id: "evt_fingerprint_replay"
+          )
+          | event_number: 1,
+            global_position: 1
+        }
+
+      fingerprint = Arbor.Persistence.EventLog.event_fingerprint(event.stream_id, event)
+
+      tampered =
+        event
+        |> Map.put(:operation_fingerprint, fingerprint)
+        |> Map.put(:data, %{"value" => 999})
+
+      assert {:ok, {:identity_history_unavailable, _details}} =
+               ETS.rehydrate_metadata(
+                 %{stream_versions: %{event.stream_id => 1}, global_position: 1},
+                 name: name
+               )
+
+      assert {:error, :identity_replay_fingerprint_mismatch} =
+               ETS.replay_identity_history([tampered], name: name, complete: true)
+
+      assert {:ok, {:identity_history_unavailable, %{expected_events: 1, loaded_events: 0}}} =
+               ETS.identity_history_status(name: name)
+    end
+
+    test "security regression: legacy NULL fingerprints require explicit remediation", %{
+      name: name
+    } do
+      event =
+        %Event{
+          Event.new("legacy-fingerprint", "arbor.review.ordinary", %{value: 1},
+            id: "evt_legacy_fingerprint"
+          )
+          | event_number: 1,
+            global_position: 1
+        }
+
+      assert {:ok, {:identity_history_unavailable, _details}} =
+               ETS.rehydrate_metadata(
+                 %{stream_versions: %{event.stream_id => 1}, global_position: 1},
+                 name: name
+               )
+
+      assert {:error, :identity_replay_fingerprint_missing} =
+               ETS.replay_identity_history([event], name: name, complete: true)
+
+      trusted_fingerprint = Arbor.Persistence.EventLog.event_fingerprint(event.stream_id, event)
+      remediated = Map.put(event, :operation_fingerprint, trusted_fingerprint)
+
+      assert {:ok, %{status: :identity_history_complete, remaining: 0}} =
+               ETS.replay_identity_history([remediated], name: name, complete: true)
+    end
+
     test "identity replay rejects duplicate stream positions atomically", %{name: name} do
       first =
         %Event{
@@ -1071,6 +1273,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
           | event_number: 1,
             global_position: 1
         }
+        |> with_durable_fingerprint()
 
       conflicting =
         %Event{
@@ -1078,6 +1281,7 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
           | event_number: 1,
             global_position: 2
         }
+        |> with_durable_fingerprint()
 
       assert {:ok, {:identity_history_unavailable, _details}} =
                ETS.rehydrate_metadata(
@@ -1114,6 +1318,8 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
         id: name
       )
 
+      initialize_empty_store(name)
+
       old = DateTime.utc_now() |> DateTime.add(-2 * 60 * 60, :second)
       fresh = DateTime.utc_now()
 
@@ -1129,5 +1335,15 @@ defmodule Arbor.Persistence.EventLog.ETSTest do
       # First two events were trimmed, so oldest is now event_number 3.
       assert {:ok, 3} = ETS.oldest_event_number("s1", name: name)
     end
+  end
+
+  defp with_durable_fingerprint(%Event{} = event) do
+    fingerprint = Arbor.Persistence.EventLog.event_fingerprint(event.stream_id, event)
+    Map.put(event, :operation_fingerprint, fingerprint)
+  end
+
+  defp initialize_empty_store(name) do
+    assert {:ok, :identity_history_complete} =
+             ETS.rehydrate_metadata(%{stream_versions: %{}, global_position: 0}, name: name)
   end
 end

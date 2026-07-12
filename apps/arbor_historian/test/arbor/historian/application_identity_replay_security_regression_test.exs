@@ -9,7 +9,8 @@ defmodule Arbor.Historian.ApplicationIdentityReplaySecurityRegressionTest do
     :start_children,
     :identity_replay_repo,
     :identity_replay_durable_event_log,
-    :identity_replay_cache_event_log
+    :identity_replay_cache_event_log,
+    :identity_replay_test_pid
   ]
 
   defmodule ReplayDurable do
@@ -32,6 +33,19 @@ defmodule Arbor.Historian.ApplicationIdentityReplaySecurityRegressionTest do
 
         {{:ok, events}, %{state | reads: [{from, limit} | state.reads]}}
       end)
+    end
+  end
+
+  defmodule BlockedDurable do
+    def metadata_snapshot(_opts) do
+      test_pid = Application.fetch_env!(:arbor_historian, :identity_replay_test_pid)
+      send(test_pid, {:historian_metadata_snapshot_blocked, self()})
+
+      receive do
+        {:release_historian_metadata_snapshot, result} -> result
+      after
+        5_000 -> {:error, :blocked_snapshot_timeout}
+      end
     end
   end
 
@@ -113,17 +127,56 @@ defmodule Arbor.Historian.ApplicationIdentityReplaySecurityRegressionTest do
     refute Process.whereis(Arbor.Historian.EventLog.ETS)
   end
 
+  test "security regression: blocked metadata cannot expose an accepting cache" do
+    Application.put_env(:arbor_historian, :identity_replay_test_pid, self())
+
+    Application.put_env(
+      :arbor_historian,
+      :identity_replay_durable_event_log,
+      BlockedDurable
+    )
+
+    startup = Task.async(fn -> Application.ensure_all_started(:arbor_historian) end)
+    assert_receive {:historian_metadata_snapshot_blocked, snapshot_caller}, 1_000
+    assert is_pid(Process.whereis(Arbor.Historian.EventLog.ETS))
+
+    event = Event.new("blocked-startup", "arbor.review.ordinary", %{value: 1})
+
+    assert {:ok, operation} =
+             Arbor.Persistence.EventLog.build_operation("blocked-startup", [event])
+
+    try do
+      assert {:error, {:append_indeterminate, ^operation}} =
+               ETS.append("blocked-startup", event, name: Arbor.Historian.EventLog.ETS)
+
+      assert {:error, {:append_indeterminate, ^operation}} =
+               ETS.reconcile_append(operation, name: Arbor.Historian.EventLog.ETS)
+    after
+      send(snapshot_caller, {:release_historian_metadata_snapshot, {:error, :blocked_failure}})
+    end
+
+    assert {:error, {:arbor_historian, {startup_error, _application_mfa}}} =
+             Task.await(startup, 5_000)
+
+    assert match?({:event_log_rehydrate_failed, _reason}, startup_error)
+    refute Process.whereis(Arbor.Historian.EventLog.ETS)
+  end
+
   defp positioned_event(position) do
-    %Event{
-      Event.new(
-        "durable",
-        "arbor.review.ordinary",
-        %{value: position},
-        id: "evt_durable_#{position}"
-      )
-      | event_number: position,
-        global_position: position
-    }
+    event =
+      %Event{
+        Event.new(
+          "durable",
+          "arbor.review.ordinary",
+          %{value: position},
+          id: "evt_durable_#{position}"
+        )
+        | event_number: position,
+          global_position: position
+      }
+
+    fingerprint = Arbor.Persistence.EventLog.event_fingerprint(event.stream_id, event)
+    Map.put(event, :operation_fingerprint, fingerprint)
   end
 
   defp restore_test_children do

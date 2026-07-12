@@ -168,6 +168,58 @@ defmodule Arbor.Persistence.Ecto.EventLogParentSecurityRegressionTest do
              EventLog.reconcile_append(operation, append_timeout_ms: 1_000)
   end
 
+  test "security regression: marker-free late writers stay fenced after reconciled absence" do
+    conn = EventStore.Config.lookup(Store, :conn)
+    reinstall_r3_trigger_and_migrate!(conn)
+    stream_id = "parent-marker-free-late-writer"
+
+    event =
+      Event.new(stream_id, "arbor.review.ordinary", %{value: 1},
+        id: "evt_parent_marker_free_late_writer"
+      )
+
+    assert {:ok, operation} = Arbor.Persistence.EventLog.build_operation(stream_id, [event])
+    assert {:ok, :absent} = EventLog.reconcile_append(operation, [])
+
+    for {label, operation_marker} <- [missing: :missing, null: nil, nonstring: 17] do
+      raw_stream = if label == :missing, do: stream_id, else: "#{stream_id}-#{label}"
+      raw_event_id = if label == :missing, do: event.id, else: "#{event.id}-#{label}"
+
+      metadata = %{
+        "event_id" => raw_event_id,
+        "arbor_event_timestamp" => DateTime.to_iso8601(event.timestamp),
+        "arbor_append_fingerprint" => Map.fetch!(operation.fingerprints, event.id)
+      }
+
+      metadata =
+        if operation_marker == :missing,
+          do: metadata,
+          else: Map.put(metadata, "arbor_append_operation_id", operation_marker)
+
+      raw_event = %EventStore.EventData{
+        event_id: deterministic_storage_id(raw_event_id),
+        event_type: event.type,
+        data: event.data,
+        metadata: metadata
+      }
+
+      assert {:error, _reason} = capture_event_store_append(raw_stream, raw_event)
+      assert {:ok, 0} = EventLog.stream_version(raw_stream)
+    end
+
+    assert {:ok, 0} = EventLog.stream_version(stream_id)
+    assert {:ok, :absent} = EventLog.reconcile_append(operation, [])
+
+    assert %{rows: [[source]]} =
+             Postgrex.query!(
+               conn,
+               "SELECT prosrc FROM pg_proc WHERE oid = 'public.arbor_event_log_enforce_operation_fence()'::regprocedure"
+             )
+
+    assert source =~ "? 'arbor_append_operation_id'"
+    assert source =~ "IS DISTINCT FROM 'string'"
+  end
+
   test "security regression: append runtime never repairs missing schema constraints" do
     conn = EventStore.Config.lookup(Store, :conn)
 
@@ -221,12 +273,84 @@ defmodule Arbor.Persistence.Ecto.EventLogParentSecurityRegressionTest do
     )
   end
 
+  defp capture_event_store_append(stream_id, event) do
+    case Store.append_to_stream(stream_id, :any_version, [event]) do
+      :ok -> :ok
+      other -> {:error, other}
+    end
+  rescue
+    error -> {:error, error}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp deterministic_storage_id(event_id) do
+    hex =
+      :crypto.hash(:sha256, event_id)
+      |> binary_part(0, 16)
+      |> Base.encode16(case: :lower)
+
+    binary_part(hex, 0, 8) <>
+      "-" <>
+      binary_part(hex, 8, 4) <>
+      "-" <>
+      binary_part(hex, 12, 4) <>
+      "-" <>
+      binary_part(hex, 16, 4) <>
+      "-" <> binary_part(hex, 20, 12)
+  end
+
+  defp reinstall_r3_trigger_and_migrate!(conn) do
+    install_r3_trigger!(conn)
+
+    Postgrex.query!(
+      conn,
+      "DELETE FROM public.arbor_event_log_schema_migrations WHERE version = 20260712000003"
+    )
+
+    :ok = Arbor.Persistence.Ecto.EventLogSchema.migrate!(conn, "public")
+  end
+
+  defp install_r3_trigger!(conn) do
+    assert %{rows: [[definition]]} =
+             Postgrex.query!(
+               conn,
+               "SELECT pg_get_functiondef('public.arbor_event_log_enforce_operation_fence()'::regprocedure)"
+             )
+
+    vulnerable_definition =
+      definition
+      |> String.replace(
+        "OR NOT (metadata_json ? 'arbor_append_operation_id')\n     OR jsonb_typeof(metadata_json -> 'arbor_append_operation_id') IS DISTINCT FROM 'string'",
+        "OR jsonb_typeof(metadata_json -> 'arbor_append_operation_id') <> 'string'"
+      )
+      |> String.replace(
+        "OR NOT (metadata_json ? 'arbor_append_fingerprint')\n     OR jsonb_typeof(metadata_json -> 'arbor_append_fingerprint') IS DISTINCT FROM 'string'",
+        "OR jsonb_typeof(metadata_json -> 'arbor_append_fingerprint') <> 'string'"
+      )
+      |> String.replace(
+        "OR NOT (metadata_json ? 'event_id')\n     OR jsonb_typeof(metadata_json -> 'event_id') IS DISTINCT FROM 'string'",
+        "OR jsonb_typeof(metadata_json -> 'event_id') <> 'string'"
+      )
+
+    refute vulnerable_definition =~ "IS DISTINCT FROM 'string'"
+    refute vulnerable_definition =~ "metadata_json ? 'arbor_append_operation_id'"
+    assert vulnerable_definition =~ "arbor_append_operation_id') <> 'string'"
+
+    Postgrex.query!(conn, vulnerable_definition)
+  end
+
   defp migrate_event_log_schema_if_available! do
     module = Arbor.Persistence.Ecto.EventLogSchema
 
     if Code.ensure_loaded?(module) do
       conn = EventStore.Config.lookup(Store, :conn)
       schema = EventStore.Config.lookup(Store, :schema)
+
+      unless 20_260_712_000_003 in apply(module, :migration_versions, []) do
+        install_r3_trigger!(conn)
+      end
+
       :ok = apply(module, :migrate!, [conn, schema])
     end
   end
