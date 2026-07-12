@@ -1026,14 +1026,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   defp cancel_ephemeral_open_request_timer(_request), do: :ok
 
   defp run_ephemeral_open_test_seam(request_id) do
-    case Config.signing_authority_ephemeral_open_test_seam() do
-      %{delay_ms: delay_ms, notify_pid: notify_pid} ->
-        send(notify_pid, {:ephemeral_open_committed, request_id})
-        Process.sleep(delay_ms)
-
-      nil ->
-        :ok
-    end
+    Config.run_signing_authority_ephemeral_open_test_seam(request_id)
   end
 
   defp maybe_make_bootstrap_reclaimable(state, %{bootstrap_token: nil}, _authority_token),

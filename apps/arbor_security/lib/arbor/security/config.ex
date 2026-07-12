@@ -96,22 +96,23 @@ defmodule Arbor.Security.Config do
   end
 
   @doc false
-  @spec signing_authority_ephemeral_open_test_seam() ::
-          nil | %{delay_ms: non_neg_integer(), notify_pid: pid()}
+  @spec run_signing_authority_ephemeral_open_test_seam(reference()) :: :ok
   if Mix.env() == :test do
-    def signing_authority_ephemeral_open_test_seam do
+    def run_signing_authority_ephemeral_open_test_seam(request_id) do
       case Application.get_env(@app, :signing_authority_ephemeral_open_test_seam) do
         %{delay_ms: delay_ms, notify_pid: notify_pid} = seam
         when map_size(seam) == 2 and is_integer(delay_ms) and delay_ms in 1..1_000 and
                is_pid(notify_pid) ->
-          seam
+          send(notify_pid, {:ephemeral_open_committed, request_id})
+          Process.sleep(delay_ms)
+          :ok
 
         _disabled_or_invalid ->
-          nil
+          :ok
       end
     end
   else
-    def signing_authority_ephemeral_open_test_seam, do: nil
+    def run_signing_authority_ephemeral_open_test_seam(_request_id), do: :ok
   end
 
   @doc """
