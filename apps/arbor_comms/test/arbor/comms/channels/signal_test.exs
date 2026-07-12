@@ -3,6 +3,30 @@ defmodule Arbor.Comms.Channels.SignalTest do
 
   alias Arbor.Comms.Channels.Signal
 
+  defmodule FakeCommandRunner do
+    def execute(command, opts) do
+      env = Keyword.fetch!(opts, :env)
+      tmpdir = Map.fetch!(env, "TMPDIR")
+      extraction_dir = Path.join(tmpdir, "libsignal-client")
+      extraction = Path.join(extraction_dir, "libsignal_jni_test.dylib")
+
+      File.mkdir_p!(extraction_dir)
+      File.write!(extraction, "dummy")
+
+      send(self(), {:signal_command, command, opts, extraction})
+
+      if String.contains?(command, "simulate-signal-cli-failure") do
+        {:ok, %{exit_code: 17, stdout: "simulated failure"}}
+      else
+        {:ok, %{exit_code: 0, stdout: ""}}
+      end
+    end
+  end
+
+  defmodule InvalidCommandRunner do
+    def available?, do: false
+  end
+
   describe "channel_info/0" do
     test "returns signal channel metadata" do
       info = Signal.channel_info()
@@ -59,70 +83,46 @@ defmodule Arbor.Comms.Channels.SignalTest do
   # invocation in its own temp dir and removes it afterward.
   describe "run_signal_cli temp-dir isolation" do
     setup do
-      # run_signal_cli/1 goes through Arbor.Shell, whose children aren't started
-      # in the arbor_comms test env. Start them idempotently so the fake CLI runs.
-      {:ok, _} = Application.ensure_all_started(:arbor_shell)
-
-      for child <- [
-            {Arbor.Shell.ExecutionRegistry, []},
-            {DynamicSupervisor, name: Arbor.Shell.PortSessionSupervisor, strategy: :one_for_one}
-          ] do
-        case Supervisor.start_child(Arbor.Shell.Supervisor, child) do
-          {:ok, _} -> :ok
-          {:error, {:already_started, _}} -> :ok
-          {:error, :already_present} -> :ok
-        end
-      end
-
-      # A fake signal-cli that records the TMPDIR it was handed and simulates the
-      # native-library extraction, so we can assert redirection + cleanup without
-      # depending on a real signal-cli install.
-      work_dir =
-        Path.join(System.tmp_dir!(), "arbor-signal-test-#{:erlang.unique_integer([:positive])}")
-
-      File.mkdir_p!(work_dir)
-      capture_file = Path.join(work_dir, "captured_tmpdir")
-      fake_cli = Path.join(work_dir, "fake-signal-cli")
-
-      File.write!(fake_cli, """
-      #!/bin/sh
-      printf '%s' "$TMPDIR" > "#{capture_file}"
-      mkdir -p "$TMPDIR"
-      printf 'dummy' > "$TMPDIR/libsignal_jni_test.dylib"
-      exit 0
-      """)
-
-      File.chmod!(fake_cli, 0o755)
-
       prev = Application.get_env(:arbor_comms, :signal)
 
       Application.put_env(:arbor_comms, :signal,
         account: "+10000000000",
-        signal_cli_path: fake_cli
+        signal_cli_path: "/test/bin/signal-cli",
+        command_runner: FakeCommandRunner
       )
 
       on_exit(fn ->
         if prev,
           do: Application.put_env(:arbor_comms, :signal, prev),
           else: Application.delete_env(:arbor_comms, :signal)
-
-        File.rm_rf(work_dir)
       end)
-
-      %{capture_file: capture_file}
     end
 
-    test "redirects signal-cli's TMPDIR into a private dir and removes it after the call",
-         %{capture_file: capture_file} do
+    test "passes structured temp env to the runner and removes its extraction after success" do
       assert :ok = Signal.send_message("+14432236605", "hello", [])
+      assert_receive {:signal_command, command, opts, extraction}
 
-      captured = capture_file |> File.read!() |> String.trim()
+      env = Keyword.fetch!(opts, :env)
+      tmpdir = Map.fetch!(env, "TMPDIR")
 
-      # signal-cli was pointed at an isolated, arbor-managed temp dir...
-      assert String.starts_with?(captured, Path.join(System.tmp_dir!(), "arbor-signal-cli-"))
+      assert command =~ "/test/bin/signal-cli"
+      assert String.starts_with?(tmpdir, Path.join(System.tmp_dir!(), "arbor-signal-cli-"))
+      assert env["JAVA_OPTS"] == "-Djava.io.tmpdir=#{tmpdir}"
 
-      # ...and that dir (with its simulated extraction) is gone afterward.
-      refute File.exists?(captured)
+      refute File.exists?(extraction)
+      refute File.exists?(tmpdir)
+    end
+
+    test "removes the runner's extraction after signal-cli reports failure" do
+      assert {:error, {:signal_cli_error, 17, "simulated failure"}} =
+               Signal.send_message("+14432236605", "simulate-signal-cli-failure", [])
+
+      assert_receive {:signal_command, _command, opts, extraction}
+
+      tmpdir = opts |> Keyword.fetch!(:env) |> Map.fetch!("TMPDIR")
+
+      refute File.exists?(extraction)
+      refute File.exists?(tmpdir)
     end
 
     test "leaves no arbor-signal-cli-* directories behind across repeated calls" do
@@ -133,6 +133,29 @@ defmodule Arbor.Comms.Channels.SignalTest do
       end
 
       assert isolated_dirs() == before
+    end
+
+    test "fails closed for a closure or a named module without execute/2" do
+      invalid_runners = [
+        fn _command, _opts -> {:ok, %{exit_code: 0, stdout: ""}} end,
+        InvalidCommandRunner
+      ]
+
+      for invalid_runner <- invalid_runners do
+        Application.put_env(:arbor_comms, :signal,
+          account: "+10000000000",
+          signal_cli_path: "/test/bin/signal-cli",
+          command_runner: invalid_runner
+        )
+
+        before = isolated_dirs()
+
+        assert {:error, {:invalid_command_runner, ^invalid_runner}} =
+                 Signal.send_message("+14432236605", "hello", [])
+
+        assert isolated_dirs() == before
+        refute_receive {:signal_command, _command, _opts, _extraction}
+      end
     end
   end
 

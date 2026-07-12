@@ -11,9 +11,14 @@ defmodule Arbor.Comms.Channels.Signal do
         enabled: true,
         account: "+1XXXXXXXXXX",
         signal_cli_path: "/usr/local/bin/signal-cli",
+        command_runner: Arbor.Shell,
         poll_interval_ms: 60_000,
         log_dir: "~/.arbor/logs/signal_chat",
         log_retention_days: 30
+
+  `:command_runner` is trusted application configuration and must name a module
+  exporting `execute/2`. It defaults to the public `Arbor.Shell` facade and is
+  never selected from message or request data.
   """
 
   @behaviour Arbor.Contracts.Comms.ChannelSender
@@ -24,6 +29,7 @@ defmodule Arbor.Comms.Channels.Signal do
 
   # Signal has a ~2000 character limit
   @max_message_length 2000
+  @default_command_runner Arbor.Shell
 
   @doc "Returns channel capabilities and metadata."
   def channel_info do
@@ -112,7 +118,7 @@ defmodule Arbor.Comms.Channels.Signal do
         "JAVA_OPTS" => "-Djava.io.tmpdir=#{tmpdir}"
       }
 
-      case Arbor.Shell.execute(command, timeout: 30_000, sandbox: :none, env: env) do
+      case execute_command(command, timeout: 30_000, sandbox: :none, env: env) do
         {:ok, %{exit_code: 0, stdout: output}} ->
           {:ok, output}
 
@@ -126,6 +132,17 @@ defmodule Arbor.Comms.Channels.Signal do
   catch
     :exit, {:noproc, _} ->
       {:error, {:shell_unavailable, "Shell.ExecutionRegistry not running"}}
+  end
+
+  defp execute_command(command, opts) do
+    runner = config(:command_runner, @default_command_runner)
+
+    if is_atom(runner) and Code.ensure_loaded?(runner) and
+         function_exported?(runner, :execute, 2) do
+      apply(runner, :execute, [command, opts])
+    else
+      {:error, {:invalid_command_runner, runner}}
+    end
   end
 
   # Runs `fun` with a private temp directory that is always removed afterward,
@@ -200,8 +217,8 @@ defmodule Arbor.Comms.Channels.Signal do
 
   defp parse_timestamp(_), do: DateTime.utc_now()
 
-  defp config(key) do
+  defp config(key, default \\ nil) do
     Application.get_env(:arbor_comms, :signal, [])
-    |> Keyword.get(key)
+    |> Keyword.get(key, default)
   end
 end
