@@ -9,7 +9,6 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
 
   @moduletag :slow
 
-  @tag :requires_pinned_mix
   test "reviewed candidate-pass/base-fail evidence is detached, one-shot, and cleaned", %{
     tmp_dir: tmp_dir
   } do
@@ -177,7 +176,6 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     refute File.exists?(marker)
   end
 
-  @tag :requires_pinned_mix
   test "base-pass, candidate-failure, and compile failure retain two-revision behavior", %{
     tmp_dir: tmp_dir
   } do
@@ -225,7 +223,6 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     assert compile_result.base.status == "not_run"
   end
 
-  @tag :requires_pinned_mix
   test "setup failures, zero tests, and stale candidate BEAMs remain fail-closed", %{
     tmp_dir: tmp_dir
   } do
@@ -378,7 +375,6 @@ defmodule Arbor.Actions.Coding.SecurityRegressionTest do
     end
   end
 
-  @tag :requires_pinned_mix
   test "candidate dependency mutation does not alter base dependency evidence", %{
     tmp_dir: tmp_dir
   } do

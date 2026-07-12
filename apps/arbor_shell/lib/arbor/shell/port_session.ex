@@ -32,6 +32,9 @@ defmodule Arbor.Shell.PortSession do
     :tracked,
     :owner_pid,
     :owner_ref,
+    :cleanup_requested_reason,
+    :cleanup_failure,
+    :cleanup_error,
     status: :starting,
     subscribers: MapSet.new(),
     subscriber_refs: %{},
@@ -104,7 +107,7 @@ defmodule Arbor.Shell.PortSession do
   @spec send_input(GenServer.server(), iodata()) :: :ok | {:error, :not_running | term()}
   def send_input(session, data), do: GenServer.call(session, {:send_input, data})
 
-  @spec stop(GenServer.server(), timeout()) :: :ok
+  @spec stop(GenServer.server(), timeout()) :: :ok | {:error, term()}
   def stop(session, timeout \\ 5_000) do
     GenServer.call(session, :stop, timeout)
   catch
@@ -214,7 +217,10 @@ defmodule Arbor.Shell.PortSession do
 
   def handle_call(:stop, _from, state) do
     stopped = cancel_running(state)
-    {:stop, :normal, :ok, stopped}
+
+    if stopped.status == :cleanup_pending,
+      do: {:reply, {:error, {:cleanup_pending, stopped.cleanup_error}}, stopped},
+      else: {:stop, :normal, :ok, stopped}
   end
 
   def handle_call(:get_result, _from, state) do
@@ -227,7 +233,10 @@ defmodule Arbor.Shell.PortSession do
   def handle_info({:cancel_shell_execution, id}, state) do
     if id in [nil, state.id] do
       cancelled = cancel_running(state)
-      {:stop, :normal, cancelled}
+
+      if cancelled.status == :cleanup_pending,
+        do: {:noreply, cancelled},
+        else: {:stop, :normal, cancelled}
     else
       {:noreply, state}
     end
@@ -235,9 +244,21 @@ defmodule Arbor.Shell.PortSession do
 
   def handle_info(:self_terminate, state), do: {:stop, :normal, state}
 
+  def handle_info(:retry_cleanup, %{status: :cleanup_pending} = state) do
+    cleaned =
+      cleanup_or_defer(state, state.cleanup_requested_reason, state.cleanup_failure)
+
+    if cleaned.status == :cleanup_pending,
+      do: {:noreply, cleaned},
+      else: {:stop, :normal, cleaned}
+  end
+
   def handle_info({:DOWN, ref, :process, pid, _reason}, %{owner_ref: ref, owner_pid: pid} = state) do
     cancelled = cancel_running(state)
-    {:stop, :normal, cancelled}
+
+    if cancelled.status == :cleanup_pending,
+      do: {:noreply, cancelled},
+      else: {:stop, :normal, cancelled}
   end
 
   def handle_info({:DOWN, ref, :process, pid, _reason}, state) do
@@ -250,7 +271,10 @@ defmodule Arbor.Shell.PortSession do
         if state.had_subscribers and MapSet.size(subscribers) == 0 and
              state.status in [:starting, :running] do
           cancelled = cancel_running(updated)
-          {:stop, :normal, cancelled}
+
+          if cancelled.status == :cleanup_pending,
+            do: {:noreply, cancelled},
+            else: {:stop, :normal, cancelled}
         else
           {:noreply, updated}
         end
@@ -278,9 +302,11 @@ defmodule Arbor.Shell.PortSession do
         {:noreply, completed}
 
       {:error, reason} ->
-        fail_tracked(state, reason)
-        notify_exit(state, 137)
-        {:stop, :normal, %{state | status: :failed, handle: nil, exit_code: 137}}
+        cleaned = cleanup_or_defer(state, :cancelled, reason)
+
+        if cleaned.status == :cleanup_pending,
+          do: {:noreply, cleaned},
+          else: {:stop, :normal, cleaned}
 
       :ignore ->
         {:noreply, state}
@@ -290,8 +316,8 @@ defmodule Arbor.Shell.PortSession do
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
-  def terminate(_reason, %{status: :running} = state) do
-    _ = cancel_running(state)
+  def terminate(_reason, %{handle: %ProcessGroup{} = handle}) do
+    {:ok, _terminal_reason} = ProcessGroup.terminate_until_exhausted(handle, :cancelled)
     :ok
   end
 
@@ -386,6 +412,9 @@ defmodule Arbor.Shell.PortSession do
       state
       | status: status,
         handle: nil,
+        cleanup_requested_reason: nil,
+        cleanup_failure: nil,
+        cleanup_error: nil,
         exit_code: exit_code,
         timed_out: reason == :timeout,
         killed: reason in [:timeout, :output_limit, :cancelled, :containment_failure],
@@ -409,15 +438,11 @@ defmodule Arbor.Shell.PortSession do
     completed
   end
 
-  defp cancel_running(%{status: :running, handle: handle} = state) do
-    reason =
-      case ProcessGroup.terminate(handle, :cancelled) do
-        {:ok, terminal_reason} -> terminal_reason
-        {:error, _} -> :containment_failure
-      end
-
-    complete(state, reason, 137)
+  defp cancel_running(%{status: :running, handle: %ProcessGroup{}} = state) do
+    cleanup_or_defer(state, :cancelled, nil)
   end
+
+  defp cancel_running(%{status: :cleanup_pending} = state), do: state
 
   defp cancel_running(%{status: :starting} = state) do
     cancelled = %{
@@ -433,6 +458,46 @@ defmodule Arbor.Shell.PortSession do
   end
 
   defp cancel_running(state), do: state
+
+  defp cleanup_or_defer(%{handle: %ProcessGroup{} = handle} = state, requested_reason, failure) do
+    case ProcessGroup.terminate(handle, requested_reason) do
+      {:ok, terminal_reason} ->
+        if is_nil(failure) do
+          complete(state, terminal_reason, 137)
+        else
+          fail_after_cleanup(state, failure)
+        end
+
+      {:error, cleanup_error} ->
+        Process.send_after(self(), :retry_cleanup, 100)
+
+        %{
+          state
+          | status: :cleanup_pending,
+            cleanup_requested_reason: requested_reason,
+            cleanup_failure: failure,
+            cleanup_error: cleanup_error
+        }
+    end
+  end
+
+  defp fail_after_cleanup(state, reason) do
+    failed = %{
+      state
+      | status: :failed,
+        handle: nil,
+        exit_code: 137,
+        killed: true,
+        cleanup_requested_reason: nil,
+        cleanup_failure: nil,
+        cleanup_error: nil
+    }
+
+    fail_tracked(failed, reason)
+    notify_exit(failed, 137)
+    emit_signal(:session_killed, failed, reason)
+    failed
+  end
 
   defp notify_exit(state, exit_code) do
     output = output_binary(state)

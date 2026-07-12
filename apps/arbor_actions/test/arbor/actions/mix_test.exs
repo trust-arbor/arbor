@@ -29,7 +29,6 @@ defmodule Arbor.Actions.MixTest do
   end
 
   describe "Mix.Compile" do
-    @tag :requires_pinned_mix
     test "passes for a compiling project", %{project_path: project_path} do
       assert {:ok, result} =
                MixAction.Compile.run(
@@ -110,7 +109,6 @@ defmodule Arbor.Actions.MixTest do
   end
 
   describe "Mix.Test" do
-    @tag :requires_pinned_mix
     test "passes for a passing project", %{project_path: project_path} do
       assert {:ok, result} = MixAction.Test.run(%{path: project_path}, %{})
 
@@ -122,7 +120,6 @@ defmodule Arbor.Actions.MixTest do
       assert_structured_feedback(result)
     end
 
-    @tag :requires_pinned_mix
     test "fails for a project with a failing test", %{project_path: project_path} do
       add_failing_test(project_path)
 
@@ -133,7 +130,6 @@ defmodule Arbor.Actions.MixTest do
       assert_structured_feedback(result)
     end
 
-    @tag :requires_pinned_mix
     test "respects tag filter via --only", %{project_path: project_path} do
       assert {:ok, result} = MixAction.Test.run(%{path: project_path, tags: "nonexistent"}, %{})
 
@@ -147,7 +143,6 @@ defmodule Arbor.Actions.MixTest do
       assert "test" in MixAction.Test.tags()
     end
 
-    @tag :requires_pinned_mix
     test "run_mix defaults a direct test task to MIX_ENV=test", %{
       project_path: project_path
     } do
@@ -165,7 +160,6 @@ defmodule Arbor.Actions.MixTest do
       end
     end
 
-    @tag :requires_pinned_mix
     test "run_mix honors an explicit MIX_ENV override", %{project_path: project_path} do
       add_mix_env_assertion(project_path)
 
@@ -177,7 +171,6 @@ defmodule Arbor.Actions.MixTest do
       assert result.exit_code == 0
     end
 
-    @tag :requires_pinned_mix
     test "security regression: structured test path keeps inert shell metacharacters", %{
       project_path: project_path
     } do
@@ -242,44 +235,42 @@ defmodule Arbor.Actions.MixTest do
       assert reason =~ "external_test.exs"
     end
 
-    @tag :requires_pinned_mix
-    test "security regression: timeout kills a delayed Mix child before returning", %{
+    test "security regression: missing production spawn backend fails closed before Mix", %{
       project_path: project_path
     } do
-      launched = Path.join(project_path, "mix-child-launched")
-      delayed = Path.join(project_path, "mix-child-delayed")
-      test_path = "test/delayed_child_test.exs"
+      marker = Path.join(project_path, "mix-ran")
+      test_path = "test/spawn_backend_required_test.exs"
 
       File.write!(Path.join(project_path, test_path), """
-      defmodule DelayedChildTest do
+      defmodule SpawnBackendRequiredTest do
         use ExUnit.Case
 
-        test "contained child" do
-          Port.open(
-            {:spawn_executable, ~c"/bin/sh"},
-            [:binary, args: [~c"-c", ~c"touch #{launched}; sleep 1.5; touch #{delayed}"]]
-          )
-
-          Process.sleep(5_000)
+        test "must not run on the host" do
+          File.write!(#{inspect(marker)}, "executed")
         end
       end
       """)
 
-      assert {:ok, result} =
-               MixAction.Test.run(
-                 %{path: project_path, test_paths: [test_path], timeout: 1_000},
-                 %{}
-               )
+      policy = Process.whereis(Arbor.Shell.ExecutablePolicy)
+      original_state = :sys.get_state(policy)
+      :sys.replace_state(policy, &Map.put(&1, :spawn_backend, nil))
 
-      assert result.exit_code == 137
-      assert File.exists?(launched)
-      Process.sleep(1_700)
-      refute File.exists?(delayed), "Mix child survived timeout return"
+      try do
+        assert {:error, reason} =
+                 MixAction.Test.run(
+                   %{path: project_path, test_paths: [test_path], timeout: 1_000},
+                   %{}
+                 )
+
+        assert reason =~ "spawn_backend_unavailable"
+        refute File.exists?(marker)
+      after
+        :sys.replace_state(policy, fn _state -> original_state end)
+      end
     end
   end
 
   describe "Mix.Format" do
-    @tag :requires_pinned_mix
     test "check_only mode passes for formatted code", %{project_path: project_path} do
       assert {:ok, result} =
                MixAction.Format.run(%{path: project_path, check_only: true}, %{})
@@ -288,7 +279,6 @@ defmodule Arbor.Actions.MixTest do
       assert result.passed == true
     end
 
-    @tag :requires_pinned_mix
     test "check_only mode fails for unformatted code", %{project_path: project_path} do
       # Write deliberately misformatted code.
       lib_path = Path.join([project_path, "lib", "tiny.ex"])
@@ -304,7 +294,6 @@ defmodule Arbor.Actions.MixTest do
       File.write!(lib_path, original)
     end
 
-    @tag :requires_pinned_mix
     test "write mode rewrites unformatted code", %{project_path: project_path} do
       lib_path = Path.join([project_path, "lib", "tiny.ex"])
       File.write!(lib_path, "defmodule    Tiny do\ndef hi,do: :hi\nend\n")

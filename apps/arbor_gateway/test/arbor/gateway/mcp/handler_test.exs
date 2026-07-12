@@ -2,6 +2,7 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
   use ExUnit.Case, async: false
   @moduletag :fast
 
+  alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
   alias Arbor.Gateway.MCP.Handler
 
   defmodule FakeOrchestration do
@@ -952,24 +953,40 @@ defmodule Arbor.Gateway.MCP.HandlerTest do
       # `verify_identity: true` failed with :missing_signed_request even
       # though the gateway HAD verified the request. The fix stashes the
       # signed_request alongside agent_id and threads it through.
-      fake_signed_request = %{
-        agent_id: "human_h1",
+      signed_request = %SignedRequest{
+        agent_id: "agent_h1",
         signature: "fake-signature",
-        bound_payload: "fake-payload"
+        payload: "fake-payload",
+        timestamp: DateTime.utc_now(),
+        nonce: :crypto.strong_rand_bytes(16)
       }
 
-      Process.put(:arbor_authenticated_signed_request, fake_signed_request)
+      Process.put(:arbor_authenticated_agent_id, signed_request.agent_id)
+      Process.put(:arbor_authenticated_signed_request, signed_request)
 
       result = Handler.maybe_put_signed_request(%{workspace: "/tmp"})
 
-      assert result[:signed_request] == fake_signed_request,
+      assert result[:signed_request] == signed_request,
              "Authenticated signed_request must reach the action context — H1 regression"
 
-      assert result[:identity_verified] == true,
-             "Gateway-verified proofs must set identity_verified so action auth skips nonce re-check"
+      assert %AuthContext{
+               identity_verified: true,
+               principal_id: "agent_h1",
+               signed_request: ^signed_request
+             } = result[:auth_context]
+
+      refute Map.has_key?(result, :identity_verified)
 
       assert result[:workspace] == "/tmp",
              "Existing context keys must be preserved"
+    end
+
+    test "security regression: plain map request cannot mint a verified action context" do
+      Process.put(:arbor_authenticated_agent_id, "agent_h1")
+      Process.put(:arbor_authenticated_signed_request, %{agent_id: "agent_h1"})
+
+      context = %{workspace: "/tmp"}
+      assert Handler.maybe_put_signed_request(context) == context
     end
 
     test "no signed_request in process dict → context unchanged" do

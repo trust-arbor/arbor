@@ -4,6 +4,14 @@ defmodule Arbor.Actions.ShellTest do
 
   alias Arbor.Actions.Shell
 
+  defp run_execute(params, context) do
+    agent_id = Map.get(context, :agent_id) || Map.get(context, "agent_id")
+
+    Arbor.Actions.with_principal_authority(agent_id, fn ->
+      Arbor.Actions.authorize_and_execute(agent_id, Shell.Execute, params, context)
+    end)
+  end
+
   # Start shell system for tests
   setup_all do
     # Ensure shell system is running
@@ -71,7 +79,7 @@ defmodule Arbor.Actions.ShellTest do
 
   describe "Execute" do
     test "runs a simple command", %{agent_context: context} do
-      assert {:ok, result} = Shell.Execute.run(%{command: "echo hello"}, context)
+      assert {:ok, result} = run_execute(%{command: "echo hello"}, context)
       assert result.exit_code == 0
       assert String.contains?(result.stdout, "hello")
       refute result.timed_out
@@ -83,7 +91,7 @@ defmodule Arbor.Actions.ShellTest do
       # Same class of bug as ACP create_session: optional tool args filled with
       # 0 must not become an immediate Port kill.
       assert {:ok, result} =
-               Shell.Execute.run(%{command: "echo not-killed", timeout: 0}, context)
+               run_execute(%{command: "echo not-killed", timeout: 0}, context)
 
       assert result.exit_code == 0
       refute result.timed_out
@@ -92,7 +100,7 @@ defmodule Arbor.Actions.ShellTest do
 
     test "captures stderr", %{agent_context: context} do
       assert {:ok, result} =
-               Shell.Execute.run(%{command: "ls /nonexistent_path_12345"}, context)
+               run_execute(%{command: "ls /nonexistent_path_12345"}, context)
 
       assert result.exit_code != 0
       assert result.stderr != "" or String.contains?(result.stdout, "No such file")
@@ -101,13 +109,13 @@ defmodule Arbor.Actions.ShellTest do
     test "respects timeout", %{agent_context: context} do
       # Action boundary floors sub-second timeouts; use >= 1000ms here.
       assert {:ok, result} =
-               Shell.Execute.run(%{command: "sleep 5", timeout: 1000}, context)
+               run_execute(%{command: "sleep 5", timeout: 1000}, context)
 
       assert result.timed_out
     end
 
     test "uses working directory", %{agent_context: context} do
-      assert {:ok, result} = Shell.Execute.run(%{command: "pwd", cwd: "/tmp"}, context)
+      assert {:ok, result} = run_execute(%{command: "pwd", cwd: "/tmp"}, context)
 
       assert String.contains?(result.stdout, "/tmp") or
                String.contains?(result.stdout, "/private/tmp")
@@ -116,13 +124,11 @@ defmodule Arbor.Actions.ShellTest do
     test "rejects environment overrides at the generic agent boundary", %{
       agent_context: context
     } do
-      assert {:error, message} =
-               Shell.Execute.run(
+      assert {:error, {:agent_shell_option_not_allowed, :env}} =
+               run_execute(
                  %{command: "printenv TEST_VAR", env: %{"TEST_VAR" => "test_value"}},
                  context
                )
-
-      assert message =~ "environment overrides are unavailable"
     end
 
     test "validates action metadata" do
@@ -141,7 +147,7 @@ defmodule Arbor.Actions.ShellTest do
 
     test "context can override options", %{agent_context: agent_context} do
       context = Map.put(agent_context, :cwd, "/tmp")
-      assert {:ok, result} = Shell.Execute.run(%{command: "pwd"}, context)
+      assert {:ok, result} = run_execute(%{command: "pwd"}, context)
       assert String.contains?(result.stdout, "tmp")
     end
 
@@ -159,7 +165,7 @@ defmodule Arbor.Actions.ShellTest do
       burst = String.duplicate("x", 200)
 
       assert {:ok, result} =
-               Shell.Execute.run(
+               run_execute(
                  %{
                    command: "printf #{burst}",
                    max_output_bytes: 128,
@@ -190,7 +196,7 @@ defmodule Arbor.Actions.ShellTest do
       assert Arbor.Shell.normalize_max_output_bytes(hard_max * 2) == hard_max
 
       assert {:ok, result} =
-               Shell.Execute.run(
+               run_execute(
                  %{
                    command: "echo clamp-ok",
                    max_output_bytes: hard_max * 2,
@@ -211,7 +217,7 @@ defmodule Arbor.Actions.ShellTest do
       agent_context: context
     } do
       assert {:ok, result} =
-               Shell.Execute.run(%{command: "echo meta", sandbox: :none}, context)
+               run_execute(%{command: "echo meta", sandbox: :none}, context)
 
       assert result.exit_code == 0
       assert result.timed_out == false
@@ -312,12 +318,15 @@ defmodule Arbor.Actions.ShellTest do
       # No marker → gated: either pending_approval (escalated IRQ) or unauthorized.
       # Must NOT auto-run, and must NOT return the old misleading "try again and
       # the user will be prompted" string for plain :unauthorized.
-      case Shell.Execute.run(%{command: command, sandbox: :none}, %{agent_id: agent_id}) do
+      case run_execute(%{command: command, sandbox: :none}, %{agent_id: agent_id}) do
         {:ok, :pending_approval, proposal_id} ->
           assert is_binary(proposal_id)
 
         {:error, msg} when is_binary(msg) ->
           refute msg =~ "will be submitted for user review"
+
+        {:error, :unauthorized} ->
+          :ok
 
         other ->
           flunk("expected gated shell without marker, got: #{inspect(other)}")
@@ -326,7 +335,7 @@ defmodule Arbor.Actions.ShellTest do
       # With the exact approved-invocation marker, Execute must run without a
       # second Trust/Security re-auth that would re-ask.
       assert {:ok, result} =
-               Shell.Execute.run(%{command: command, sandbox: :none}, %{
+               run_execute(%{command: command, sandbox: :none}, %{
                  agent_id: agent_id,
                  approved_invocation: %{
                    request_id: "irq_shell_exec_regression",
@@ -344,7 +353,7 @@ defmodule Arbor.Actions.ShellTest do
       agent_id: agent_id
     } do
       # Agent-authorized compounds always fail closed with the CapShell
-      # unavailable string — independent of compound_shell_enabled.
+      # unavailable error — independent of compound_shell_enabled.
       sleep_uri = "arbor://shell/exec/sleep"
       touch_uri = "arbor://shell/exec/touch"
       {:ok, profile} = Arbor.Trust.Store.get_profile(agent_id)
@@ -372,12 +381,9 @@ defmodule Arbor.Actions.ShellTest do
 
       File.rm(marker)
 
-      unavailable =
-        "Compound shell execution is unavailable (security boundary incomplete). Use individual non-compound commands; CapShell is intentionally fail-closed."
-
       try do
-        assert {:error, ^unavailable} =
-                 Shell.Execute.run(
+        assert {:error, {:compound_shell_unavailable, :security_boundary_incomplete}} =
+                 run_execute(
                    %{command: "sleep 1; touch #{marker}", sandbox: :basic},
                    %{
                      agent_id: agent_id,
@@ -448,17 +454,13 @@ defmodule Arbor.Actions.ShellTest do
 
   describe "Execute sandbox" do
     test "blocks dangerous commands", %{agent_context: context} do
-      assert {:error, message} =
-               Shell.Execute.run(%{command: "rm -rf /", sandbox: :basic}, context)
-
-      assert message =~ "not allowed"
+      assert {:error, {:agent_executable_not_allowed, "rm"}} =
+               run_execute(%{command: "rm -rf /", sandbox: :basic}, context)
     end
 
     test "strict sandbox restricts to allowlist", %{agent_context: context} do
-      assert {:error, message} =
-               Shell.Execute.run(%{command: "curl http://example.com", sandbox: :strict}, context)
-
-      assert message =~ "not allowed"
+      assert {:error, {:agent_executable_not_allowed, "curl"}} =
+               run_execute(%{command: "curl http://example.com", sandbox: :strict}, context)
     end
   end
 

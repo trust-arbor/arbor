@@ -304,7 +304,8 @@ defmodule Arbor.Actions.Coding do
            commit_mode
          ) do
       with {:ok, validations} <- run_validations(worktree_path, params, context),
-           {:ok, commit} <- resolve_reviewable_commit(worktree_path, params, context, commit_mode) do
+           {:ok, commit} <-
+             resolve_reviewable_commit(repo_root, worktree_path, params, context, commit_mode) do
         result =
           finalize_committed_change(
             repo_root,
@@ -356,16 +357,22 @@ defmodule Arbor.Actions.Coding do
       end
     end
 
-    defp resolve_reviewable_commit(worktree_path, params, context, :commit) do
-      commit_change(worktree_path, params, context)
+    defp resolve_reviewable_commit(repo_root, worktree_path, params, context, :commit) do
+      commit_change(repo_root, worktree_path, params, context)
     end
 
-    defp resolve_reviewable_commit(_worktree_path, _params, _context, {:adopt, head_commit})
+    defp resolve_reviewable_commit(
+           _repo_root,
+           _worktree_path,
+           _params,
+           _context,
+           {:adopt, head_commit}
+         )
          when is_binary(head_commit) and head_commit != "" do
       {:ok, %{commit_hash: head_commit}}
     end
 
-    defp resolve_reviewable_commit(_worktree_path, _params, _context, {:adopt, _}) do
+    defp resolve_reviewable_commit(_repo_root, _worktree_path, _params, _context, {:adopt, _}) do
       {:error, "ACP self-commit advanced HEAD but commit hash is unavailable"}
     end
 
@@ -650,7 +657,17 @@ defmodule Arbor.Actions.Coding do
       # Trust (honoring approved_invocation) and does not re-auth through the
       # Security-only Shell.authorize path that previously re-asked after approve.
       context = put_validation_agent_context(context)
-      call_action(module, params, context)
+
+      cond do
+        has_action_runner?(context) ->
+          call_action(module, params, context)
+
+        agent_id = context_agent_id(context) ->
+          Actions.authorize_and_execute(agent_id, module, params, context)
+
+        true ->
+          {:error, :authenticated_principal_required}
+      end
     end
 
     defp has_action_runner?(context) do
@@ -896,16 +913,18 @@ defmodule Arbor.Actions.Coding do
       "arbor://shell/exec/#{command_name}"
     end
 
-    defp commit_change(worktree_path, params, context) do
-      call_action(
-        Git.Commit,
-        %{
-          path: worktree_path,
-          message: commit_message(params),
-          all: true
-        },
-        context
-      )
+    defp commit_change(repo_root, worktree_path, params, context) do
+      Git.with_storage_authority(repo_root, worktree_path, fn ->
+        call_action(
+          Git.Commit,
+          %{
+            path: worktree_path,
+            message: commit_message(params),
+            all: true
+          },
+          context
+        )
+      end)
     end
 
     defp finalize_committed_change(

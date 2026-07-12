@@ -17,10 +17,47 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
       assert {:error, message} =
                Execute.run(%{command: "touch -- #{marker}", sandbox: :none}, %{})
 
-      assert message =~ "requires one authenticated principal"
+      assert message =~ "facade-issued authenticated principal envelope"
       refute File.exists?(marker)
     after
       File.rm_rf!(root)
+    end
+  end
+
+  test "security regression: direct Jido Shell action cannot impersonate a privileged principal" do
+    {agent_id, marker, previous} = privileged_shell_fixture("direct-impersonation")
+
+    try do
+      assert {:error, message} =
+               Execute.run(
+                 %{command: "touch -- #{marker}", sandbox: :none},
+                 %{agent_id: agent_id}
+               )
+
+      assert message =~ "facade-issued authenticated principal envelope"
+      refute File.exists?(marker)
+    after
+      restore_security_config(previous)
+      File.rm_rf!(Path.dirname(marker))
+    end
+  end
+
+  test "security regression: authorize_and_execute rejects a scalar privileged principal" do
+    {agent_id, marker, previous} = privileged_shell_fixture("facade-impersonation")
+
+    try do
+      assert {:error, :authenticated_principal_required} =
+               Arbor.Actions.authorize_and_execute(
+                 agent_id,
+                 Execute,
+                 %{command: "touch -- #{marker}", sandbox: :none},
+                 %{agent_id: agent_id}
+               )
+
+      refute File.exists?(marker)
+    after
+      restore_security_config(previous)
+      File.rm_rf!(Path.dirname(marker))
     end
   end
 
@@ -100,6 +137,175 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
     try do
       assert {:error, message} = Git.Status.run(%{path: repo}, %{})
       assert message =~ "git_worktree_outside_authorized_root"
+    after
+      File.rm_rf!(root)
+    end
+  end
+
+  test "security regression: Git rejects a separate git directory outside the worktree" do
+    root = fixture_root("git-separate-dir")
+    repo = Path.join(root, "repo")
+    external_git_dir = Path.join(root, "external.git")
+    File.mkdir_p!(repo)
+
+    assert {_output, 0} =
+             System.cmd(
+               "git",
+               ["init", "-q", "--separate-git-dir", external_git_dir, repo],
+               cd: root
+             )
+
+    try do
+      assert {:error, message} = Git.Status.run(%{path: repo}, %{})
+      assert message =~ "git_storage_outside_authorized_root"
+      assert message =~ "git_dir"
+    after
+      File.rm_rf!(root)
+    end
+  end
+
+  test "security regression: Git commit cannot write through an external git directory" do
+    root = fixture_root("git-separate-dir-commit")
+    repo = Path.join(root, "repo")
+    external_git_dir = Path.join(root, "external.git")
+    File.mkdir_p!(repo)
+
+    assert {_output, 0} =
+             System.cmd(
+               "git",
+               ["init", "-q", "--separate-git-dir", external_git_dir, repo],
+               cd: root
+             )
+
+    assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test"], cd: repo)
+
+    assert {_output, 0} =
+             System.cmd("git", ["config", "user.email", "test@example.com"], cd: repo)
+
+    File.write!(Path.join(repo, "candidate.txt"), "must not be committed\n")
+    external_index = Path.join(external_git_dir, "index")
+    refute File.exists?(external_index)
+
+    try do
+      assert {:error, message} =
+               Git.Commit.run(%{path: repo, message: "forbidden", all: true}, %{})
+
+      assert message =~ "git_storage_outside_authorized_root"
+      refute File.exists?(external_index)
+
+      assert {_output, status} =
+               System.cmd("git", ["rev-parse", "--verify", "HEAD"],
+                 cd: repo,
+                 stderr_to_stdout: true
+               )
+
+      assert status != 0
+    after
+      File.rm_rf!(root)
+    end
+  end
+
+  test "security regression: Git rejects linked-worktree common storage outside its root" do
+    root = fixture_root("git-linked-worktree")
+    main = Path.join(root, "main")
+    linked = Path.join(root, "linked")
+    File.mkdir_p!(main)
+    assert {_output, 0} = System.cmd("git", ["init", "-q"], cd: main)
+
+    assert {_output, 0} =
+             System.cmd("git", ["config", "user.email", "test@example.com"], cd: main)
+
+    assert {_output, 0} = System.cmd("git", ["config", "user.name", "Test"], cd: main)
+    File.write!(Path.join(main, "README.md"), "initial\n")
+    assert {_output, 0} = System.cmd("git", ["add", "README.md"], cd: main)
+    assert {_output, 0} = System.cmd("git", ["commit", "-qm", "initial"], cd: main)
+    assert {_output, 0} = System.cmd("git", ["worktree", "add", "-q", linked], cd: main)
+
+    try do
+      assert {:error, message} = Git.Status.run(%{path: linked}, %{})
+      assert message =~ "git_storage_outside_authorized_root"
+    after
+      File.rm_rf!(root)
+    end
+  end
+
+  test "security regression: Git rejects object alternates" do
+    root = fixture_root("git-alternates")
+    repo = Path.join(root, "repo")
+    alternate_objects = Path.join([root, "alternate.git", "objects"])
+    File.mkdir_p!(repo)
+    File.mkdir_p!(alternate_objects)
+    assert {_output, 0} = System.cmd("git", ["init", "-q"], cd: repo)
+    alternates = Path.join([repo, ".git", "objects", "info", "alternates"])
+    File.mkdir_p!(Path.dirname(alternates))
+    File.write!(alternates, alternate_objects <> "\n")
+
+    try do
+      assert {:error, message} = Git.Status.run(%{path: repo}, %{})
+      assert message =~ "git_object_alternates_forbidden"
+    after
+      File.rm_rf!(root)
+    end
+  end
+
+  test "security regression: Git rejects a primary object directory outside the repository" do
+    root = fixture_root("git-object-directory")
+    repo = Path.join(root, "repo")
+    external_objects = Path.join(root, "external-objects")
+    File.mkdir_p!(repo)
+    assert {_output, 0} = System.cmd("git", ["init", "-q"], cd: repo)
+    File.rename!(Path.join([repo, ".git", "objects"]), external_objects)
+    File.ln_s!(external_objects, Path.join([repo, ".git", "objects"]))
+
+    try do
+      assert {:error, message} = Git.Status.run(%{path: repo}, %{})
+      assert message =~ "git_storage_outside_authorized_root"
+      assert message =~ "object_dir"
+    after
+      File.rm_rf!(root)
+    end
+  end
+
+  test "security regression: Git rejects external config includes" do
+    root = fixture_root("git-config-include")
+    repo = Path.join(root, "repo")
+    external_config = Path.join(root, "external.config")
+    File.mkdir_p!(repo)
+    File.write!(external_config, "[core]\n\thooksPath = /tmp/hooks\n")
+    assert {_output, 0} = System.cmd("git", ["init", "-q"], cd: repo)
+
+    assert {_output, 0} =
+             System.cmd("git", ["config", "include.path", external_config], cd: repo)
+
+    try do
+      assert {:error, message} = Git.Status.run(%{path: repo}, %{})
+      assert message =~ "unsafe_git_configuration"
+    after
+      File.rm_rf!(root)
+    end
+  end
+
+  test "security regression: Git rejects external worktree config includes" do
+    root = fixture_root("git-worktree-config-include")
+    repo = Path.join(root, "repo")
+    external_config = Path.join(root, "external.config")
+    File.mkdir_p!(repo)
+    File.write!(external_config, "[core]\n\thooksPath = /tmp/hooks\n")
+    assert {_output, 0} = System.cmd("git", ["init", "-q"], cd: repo)
+
+    assert {_output, 0} =
+             System.cmd("git", ["config", "extensions.worktreeConfig", "true"], cd: repo)
+
+    assert {_output, 0} =
+             System.cmd(
+               "git",
+               ["config", "--worktree", "include.path", external_config],
+               cd: repo
+             )
+
+    try do
+      assert {:error, message} = Git.Status.run(%{path: repo}, %{})
+      assert message =~ "unsafe_git_configuration"
     after
       File.rm_rf!(root)
     end
@@ -201,6 +407,31 @@ defmodule Arbor.Actions.ReviewerSecurityRegressionTest do
     if Process.whereis(Arbor.Trust.Store) == nil do
       start_supervised!(Arbor.Trust.Store)
     end
+  end
+
+  defp privileged_shell_fixture(tag) do
+    ensure_trust_started()
+    previous = security_config()
+    configure_minimal_security()
+    Application.put_env(:arbor_trust, :approval_guard_enabled, false)
+
+    agent_id = "agent_privileged_shell_#{System.unique_integer([:positive])}"
+    root = fixture_root(tag)
+    marker = Path.join(root, "executed")
+    File.mkdir_p!(root)
+
+    {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
+
+    :ok =
+      Arbor.Trust.Store.store_profile(%{
+        profile
+        | rules: Map.put(profile.rules, "arbor://shell/exec/**", :auto)
+      })
+
+    {:ok, _capability} =
+      Arbor.Security.grant(principal: agent_id, resource: "arbor://shell/exec/**")
+
+    {agent_id, marker, previous}
   end
 
   defp security_config do

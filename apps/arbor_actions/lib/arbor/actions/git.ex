@@ -46,6 +46,8 @@ defmodule Arbor.Actions.Git do
   alias Arbor.Shell
   alias Arbor.Common.SafePath
 
+  @storage_authority_key {__MODULE__, :storage_authority}
+
   # Git command defaults - used by all nested action modules
   @doc false
   def git_timeout, do: 30_000
@@ -54,10 +56,15 @@ defmodule Arbor.Actions.Git do
 
   @git_prefix [
     "--no-pager",
+    "--no-replace-objects",
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
     "core.fsmonitor=false",
+    "-c",
+    "core.attributesFile=/dev/null",
+    "-c",
+    "core.excludesFile=/dev/null",
     "-c",
     "core.pager=cat",
     "-c",
@@ -67,23 +74,45 @@ defmodule Arbor.Actions.Git do
     "-c",
     "diff.external=",
     "-c",
-    "commit.gpgSign=false"
+    "commit.gpgSign=false",
+    "-c",
+    "credential.helper=",
+    "-c",
+    "gc.auto=0",
+    "-c",
+    "maintenance.auto=false",
+    "-c",
+    "protocol.allow=never",
+    "-c",
+    "submodule.recurse=false"
   ]
 
   @git_env %{
     "GIT_ALTERNATE_OBJECT_DIRECTORIES" => false,
+    "GIT_CONFIG" => false,
     "GIT_CONFIG_NOSYSTEM" => "1",
     "GIT_CONFIG_COUNT" => "0",
     "GIT_CONFIG_GLOBAL" => "/dev/null",
+    "GIT_CONFIG_KEY_0" => false,
+    "GIT_CONFIG_PARAMETERS" => false,
+    "GIT_CONFIG_SYSTEM" => "/dev/null",
+    "GIT_CONFIG_VALUE_0" => false,
     "GIT_COMMON_DIR" => false,
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM" => "0",
     "GIT_DIR" => false,
     "GIT_EXEC_PATH" => false,
     "GIT_ATTR_NOSYSTEM" => "1",
     "GIT_EXTERNAL_DIFF" => false,
     "GIT_INDEX_FILE" => false,
+    "GIT_NAMESPACE" => false,
     "GIT_OBJECT_DIRECTORY" => false,
     "GIT_PAGER" => "cat",
+    "GIT_QUARANTINE_PATH" => false,
+    "GIT_REPLACE_REF_BASE" => false,
+    "GIT_SHALLOW_FILE" => false,
     "GIT_SSH" => false,
+    "GIT_ASKPASS" => false,
+    "SSH_ASKPASS" => false,
     "GIT_SSH_COMMAND" => false,
     "GIT_EDITOR" => "false",
     "GIT_SEQUENCE_EDITOR" => "false",
@@ -91,19 +120,48 @@ defmodule Arbor.Actions.Git do
     "GIT_WORK_TREE" => false
   }
 
-  @unsafe_config_pattern "^(include\\.|includeif\\.|filter\\..*\\.(clean|smudge|process)$|diff\\..*\\.(command|textconv)$|diff\\.external$|core\\.(hookspath|fsmonitor)$|commit\\.gpgsign$|gpg\\.program$)"
+  @unsafe_config_pattern "^(include\\.|includeif\\.|filter\\..*\\.(clean|smudge|process)$|diff\\..*\\.(command|textconv)$|diff\\.external$|merge\\..*\\.driver$|credential\\.helper$|core\\.(attributesfile|editor|excludesfile|hookspath|fsmonitor|pager|sshcommand)$|pager\\.|interactive\\.difffilter$|maintenance\\.|submodule\\..*\\.update$|commit\\.gpgsign$|gpg\\.program$|sequence\\.editor$)"
 
   @doc false
   def execute(path, args) when is_binary(path) and is_list(args) do
     with :ok <- validate_git_args(args),
          {:ok, authorized_root} <- authorized_root(path),
-         :ok <- validate_effective_worktree(authorized_root),
-         :ok <- reject_configured_helpers(authorized_root) do
+         storage_roots <- storage_roots(authorized_root),
+         {:ok, storage_guard} <- validate_repository_storage(authorized_root, storage_roots),
+         :ok <- reject_configured_helpers(authorized_root),
+         :ok <- verify_storage_guard(storage_guard) do
       execute_without_audit(authorized_root, args)
     end
   end
 
   def execute(_path, _args), do: {:error, :invalid_git_execution}
+
+  @doc false
+  def with_storage_authority(repository_root, worktree_root, fun)
+      when is_binary(repository_root) and is_binary(worktree_root) and is_function(fun, 0) do
+    with {:ok, canonical_repository} <- authorized_root(repository_root),
+         {:ok, canonical_worktree} <- authorized_root(worktree_root) do
+      previous = Process.get(@storage_authority_key)
+
+      authority = %{
+        owner: self(),
+        reference: make_ref(),
+        repository_root: canonical_repository,
+        worktree_root: canonical_worktree
+      }
+
+      Process.put(@storage_authority_key, authority)
+
+      try do
+        fun.()
+      after
+        restore_storage_authority(previous)
+      end
+    end
+  end
+
+  def with_storage_authority(_repository_root, _worktree_root, _fun),
+    do: {:error, :invalid_git_storage_authority}
 
   @doc false
   def validate_ref(ref) when is_binary(ref) do
@@ -164,6 +222,12 @@ defmodule Arbor.Actions.Git do
         "--git-dir" ->
           true
 
+        "--absolute-git-dir" ->
+          true
+
+        "--git-common-dir" ->
+          true
+
         "--work-tree" ->
           true
 
@@ -176,6 +240,8 @@ defmodule Arbor.Actions.Git do
         argument when is_binary(argument) ->
           String.starts_with?(argument, [
             "--git-dir=",
+            "--absolute-git-dir=",
+            "--git-common-dir=",
             "--work-tree=",
             "--namespace=",
             "--config-env="
@@ -205,31 +271,158 @@ defmodule Arbor.Actions.Git do
     end
   end
 
-  defp validate_effective_worktree(authorized_root) do
-    case execute_without_audit(authorized_root, ["rev-parse", "--show-toplevel"]) do
+  defp validate_repository_storage(authorized_root, storage_roots) do
+    with {:ok, worktree} <- query_repository_path(authorized_root, "--show-toplevel"),
+         {:ok, git_dir} <- query_repository_path(authorized_root, "--absolute-git-dir"),
+         {:ok, common_dir} <- query_repository_path(authorized_root, "--git-common-dir"),
+         {:ok, object_dir} <- query_repository_path(authorized_root, ["--git-path", "objects"]),
+         :ok <- require_authorized_storage(:worktree, worktree, [authorized_root]),
+         :ok <- require_authorized_storage(:git_dir, git_dir, storage_roots),
+         :ok <- require_authorized_storage(:common_dir, common_dir, storage_roots),
+         :ok <- require_authorized_storage(:object_dir, object_dir, storage_roots),
+         :ok <- reject_object_alternates(object_dir),
+         {:ok, identities} <-
+           capture_storage_identities(
+             storage_roots ++ [worktree, git_dir, common_dir, object_dir]
+           ) do
+      {:ok, %{authorized_root: authorized_root, identities: identities}}
+    end
+  end
+
+  defp query_repository_path(authorized_root, option) do
+    option_args = List.wrap(option)
+    args = ["rev-parse", "--path-format=absolute"] ++ option_args
+
+    case execute_without_audit(authorized_root, args) do
       {:ok, %{exit_code: 0, stdout: output}} ->
-        with effective when effective != "" <- String.trim(output),
-             {:ok, canonical_effective} <- SafePath.resolve_real(effective),
-             true <-
-               canonical_effective == authorized_root or
-                 String.starts_with?(canonical_effective, authorized_root <> "/") do
-          :ok
+        path = String.trim_trailing(output, "\n")
+
+        with true <- path != "" and not String.contains?(path, ["\n", "\r", <<0>>]),
+             {:ok, canonical} <- SafePath.resolve_real(path) do
+          {:ok, canonical}
         else
-          _other -> {:error, {:git_worktree_outside_authorized_root, String.trim(output)}}
+          _other -> {:error, {:invalid_git_storage_path, option, output}}
         end
 
       {:ok, result} ->
-        {:error, {:git_worktree_validation_failed, result.exit_code, result.stdout}}
+        {:error, {:git_storage_validation_failed, option, result.exit_code, result.stdout}}
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
+  defp require_authorized_storage(kind, path, authorized_roots) do
+    if Enum.any?(authorized_roots, &within_root?(path, &1)) do
+      :ok
+    else
+      reason =
+        if kind == :worktree,
+          do: :git_worktree_outside_authorized_root,
+          else: :git_storage_outside_authorized_root
+
+      {:error, {reason, kind, path}}
+    end
+  end
+
+  defp within_root?(path, root),
+    do: path == root or String.starts_with?(path, root <> "/")
+
+  defp storage_roots(authorized_root) do
+    case Process.get(@storage_authority_key) do
+      %{
+        owner: owner,
+        reference: reference,
+        repository_root: repository_root,
+        worktree_root: ^authorized_root
+      }
+      when owner == self() and is_reference(reference) and is_binary(repository_root) ->
+        Enum.uniq([authorized_root, repository_root])
+
+      _other ->
+        [authorized_root]
+    end
+  end
+
+  defp restore_storage_authority(nil), do: Process.delete(@storage_authority_key)
+
+  defp restore_storage_authority(previous),
+    do: Process.put(@storage_authority_key, previous)
+
+  defp reject_object_alternates(object_dir) do
+    Enum.reduce_while(["alternates", "http-alternates"], :ok, fn name, :ok ->
+      path = Path.join([object_dir, "info", name])
+
+      case File.lstat(path) do
+        {:error, :enoent} ->
+          {:cont, :ok}
+
+        {:ok, %File.Stat{type: :regular}} ->
+          case File.read(path) do
+            {:ok, contents} ->
+              if String.trim(contents) == "",
+                do: {:cont, :ok},
+                else: {:halt, {:error, {:git_object_alternates_forbidden, path}}}
+
+            {:error, reason} ->
+              {:halt, {:error, {:git_object_alternates_unreadable, path, reason}}}
+          end
+
+        {:ok, _other} ->
+          {:halt, {:error, {:git_object_alternates_forbidden, path}}}
+
+        {:error, reason} ->
+          {:halt, {:error, {:git_object_alternates_unreadable, path, reason}}}
+      end
+    end)
+  end
+
+  defp capture_storage_identities(paths) do
+    paths
+    |> Enum.uniq()
+    |> Enum.reduce_while({:ok, %{}}, fn path, {:ok, identities} ->
+      case storage_identity(path) do
+        {:ok, identity} -> {:cont, {:ok, Map.put(identities, path, identity)}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp verify_storage_guard(%{authorized_root: root, identities: identities}) do
+    with {:ok, canonical_root} <- SafePath.resolve_real(root),
+         true <- canonical_root == root do
+      Enum.reduce_while(identities, :ok, fn {path, expected}, :ok ->
+        case storage_identity(path) do
+          {:ok, ^expected} -> {:cont, :ok}
+          _other -> {:halt, {:error, {:git_storage_identity_changed, path}}}
+        end
+      end)
+    else
+      _other -> {:error, {:git_storage_identity_changed, root}}
+    end
+  end
+
+  defp storage_identity(path) do
+    case File.stat(path, time: :posix) do
+      {:ok, %File.Stat{type: :directory} = stat} ->
+        {:ok, {stat.major_device, stat.inode, stat.mode, stat.size, stat.mtime, stat.ctime}}
+
+      _other ->
+        {:error, {:invalid_git_storage_directory, path}}
+    end
+  end
+
   defp reject_configured_helpers(path) do
+    with :ok <- audit_config_scope(path, "--local"),
+         {:ok, worktree_config?} <- worktree_config_enabled?(path) do
+      if worktree_config?, do: audit_config_scope(path, "--worktree"), else: :ok
+    end
+  end
+
+  defp audit_config_scope(path, scope) do
     args = [
       "config",
-      "--local",
+      scope,
       "--no-includes",
       "--name-only",
       "--get-regexp",
@@ -244,12 +437,43 @@ defmodule Arbor.Actions.Git do
     end
   end
 
+  defp worktree_config_enabled?(path) do
+    args = [
+      "config",
+      "--local",
+      "--no-includes",
+      "--type=bool",
+      "--get",
+      "extensions.worktreeConfig"
+    ]
+
+    case execute_without_audit(path, args) do
+      {:ok, %{exit_code: 1}} ->
+        {:ok, false}
+
+      {:ok, %{exit_code: 0, stdout: output}} ->
+        case String.trim(output) do
+          "true" -> {:ok, true}
+          "false" -> {:ok, false}
+          _other -> {:error, {:git_config_audit_failed, :invalid_worktree_config}}
+        end
+
+      {:ok, result} ->
+        {:error, {:git_config_audit_failed, result.exit_code, result.stdout}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp execute_without_audit(path, args) do
+    env = Map.put(@git_env, "GIT_CEILING_DIRECTORIES", path)
+
     Shell.execute_direct("git", @git_prefix ++ args,
       cwd: path,
       timeout: git_timeout(),
       sandbox: git_sandbox(),
-      env: @git_env
+      env: env
     )
   end
 

@@ -31,8 +31,12 @@ defmodule Arbor.Actions.Shell do
   ## Examples
 
       # Simple command
-      context = %{agent_id: "agent_authenticated"}
-      {:ok, result} = Arbor.Actions.Shell.Execute.run(%{command: "echo hello"}, context)
+      {:ok, result} = Arbor.Actions.authorize_and_execute(
+        "agent_authenticated",
+        Arbor.Actions.Shell.Execute,
+        %{command: "echo hello"},
+        authenticated_context
+      )
       result.stdout  # => "hello\\n"
 
       # With sandbox
@@ -63,25 +67,21 @@ defmodule Arbor.Actions.Shell do
   def authorize_command(_agent_id, _command, _opts), do: {:error, :invalid_agent_principal}
 
   @doc false
-  @spec authorize_and_execute_command(String.t(), String.t(), keyword()) ::
-          {:ok, map()}
-          | {:ok, :pending_approval, String.t()}
-          | {:error, term()}
-  def authorize_and_execute_command(agent_id, command, opts \\ [])
+  @spec authorize_and_execute_command(String.t(), String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def authorize_and_execute_command(agent_id, command, context, opts \\ [])
 
-  def authorize_and_execute_command(agent_id, command, opts)
-      when is_binary(command) and is_list(opts) do
+  def authorize_and_execute_command(agent_id, command, context, opts)
+      when is_binary(command) and is_map(context) and is_list(opts) do
     with :ok <- validate_agent_principal(agent_id),
+         {:ok, ^agent_id} <-
+           Arbor.Actions.authorized_principal(context, Arbor.Actions.Shell.Execute),
          {:ok, prepared} <- Shell.prepare_agent_command(command, opts) do
-      case authorize_prepared(agent_id, command, prepared, opts) do
-        {:ok, :authorized} -> execute_prepared(prepared, opts)
-        {:ok, :pending_approval, proposal_id} -> {:ok, :pending_approval, proposal_id}
-        {:error, reason} -> {:error, reason}
-      end
+      execute_prepared(prepared, opts)
     end
   end
 
-  def authorize_and_execute_command(_agent_id, _command, _opts),
+  def authorize_and_execute_command(_agent_id, _command, _context, _opts),
     do: {:error, :invalid_agent_principal}
 
   defp validate_agent_principal(agent_id) when is_binary(agent_id) do
@@ -113,7 +113,7 @@ defmodule Arbor.Actions.Shell do
     end
   end
 
-  defp execute_prepared(%{executable: executable, args: args}, opts) do
+  defp execute_prepared(prepared, opts) do
     execution_opts =
       opts
       |> Keyword.drop([
@@ -129,7 +129,8 @@ defmodule Arbor.Actions.Shell do
       ])
       |> Keyword.put(:sandbox, :basic)
 
-    Shell.execute_direct(executable, args, execution_opts)
+    command = Enum.map_join([prepared.command_name | prepared.args], " ", &inspect/1)
+    Shell.execute_prepared_authorized(command, prepared, execution_opts)
   end
 
   defp maybe_add_opt(opts, _key, nil), do: opts
@@ -257,7 +258,7 @@ defmodule Arbor.Actions.Shell do
       # Closed executable admission and authority both happen before action
       # signals, approval creation, registry, or process work.
       with {:ok, _prepared} <- Arbor.Shell.prepare_agent_command(command, opts),
-           {:ok, agent_id} <- exact_principal(context) do
+           {:ok, agent_id} <- Actions.authorized_principal(context, __MODULE__) do
         Actions.emit_started(__MODULE__, params)
 
         case call_shell(agent_id, command, opts, context) do
@@ -298,17 +299,32 @@ defmodule Arbor.Actions.Shell do
       end
     end
 
-    # Authorize once through Trust (honors approved_invocation), then execute.
-    # Do NOT call Shell.authorize_and_execute after a successful authorize_command:
-    # that re-runs Security.authorize without Trust.ApprovalGuard and re-asks or
-    # denies even after the operator already approved the exact invocation.
-    #
-    # Defense in depth: compounds are also rejected here if run/2's gate is
-    # bypassed. Missing agent_id never falls through to system execute for
-    # compounds.
+    @doc false
+    def requires_authenticated_principal?, do: true
+
+    @doc false
+    def authorization_resource(params) when is_map(params) do
+      command = Map.get(params, :command) || Map.get(params, "command")
+
+      opts =
+        []
+        |> maybe_add_opt(:cwd, Map.get(params, :cwd))
+        |> maybe_add_opt(:env, Map.get(params, :env))
+        |> maybe_add_opt(:sandbox, Map.get(params, :sandbox))
+
+      with {:ok, prepared} <- Arbor.Shell.prepare_agent_command(command, opts) do
+        {:ok, "arbor://shell/exec/#{prepared.command_name}"}
+      end
+    end
+
+    def authorization_resource(_params), do: {:error, :invalid_shell_params}
+
+    # Arbor.Actions has already authorized the exact prepared shell URI through
+    # Trust before issuing the process-scoped action envelope consumed here.
+    # Do not re-run policy or re-parse through a lower Shell entry point.
     defp call_shell(agent_id, command, opts, context) do
       auth_opts = shell_auth_opts(opts, context)
-      Arbor.Actions.Shell.authorize_and_execute_command(agent_id, command, auth_opts)
+      Arbor.Actions.Shell.authorize_and_execute_command(agent_id, command, context, auth_opts)
     end
 
     defp shell_auth_opts(opts, context) do
@@ -348,30 +364,6 @@ defmodule Arbor.Actions.Shell do
             map -> map
           end
       end
-    end
-
-    defp exact_principal(context) when is_map(context) do
-      case {Map.fetch(context, :agent_id), Map.fetch(context, "agent_id")} do
-        {{:ok, agent_id}, :error} when is_binary(agent_id) ->
-          validate_exact_principal(agent_id)
-
-        {:error, {:ok, agent_id}} when is_binary(agent_id) ->
-          validate_exact_principal(agent_id)
-
-        {{:ok, _atom_id}, {:ok, _string_id}} ->
-          {:error, :ambiguous_shell_principal}
-
-        _other ->
-          {:error, :missing_shell_principal}
-      end
-    end
-
-    defp exact_principal(_context), do: {:error, :missing_shell_principal}
-
-    defp validate_exact_principal(agent_id) do
-      if String.trim(agent_id) == "",
-        do: {:error, :missing_shell_principal},
-        else: {:ok, agent_id}
     end
 
     # LLM-facing boundary: floor tiny/zero timeouts (0, 1, …) to the default.
@@ -424,11 +416,8 @@ defmodule Arbor.Actions.Shell do
     defp format_error({:agent_shell_gate_mismatch, gate, command}),
       do: "Shell authorization target #{gate} does not match executable #{command}."
 
-    defp format_error(:missing_shell_principal),
-      do: "Shell execution requires one authenticated principal in context."
-
-    defp format_error(:ambiguous_shell_principal),
-      do: "Shell execution rejected ambiguous principal identity in context."
+    defp format_error(:action_principal_authority_required),
+      do: "Shell execution requires a facade-issued authenticated principal envelope."
 
     defp format_error(:invalid_agent_principal),
       do: "Shell execution rejected an invalid authenticated principal."

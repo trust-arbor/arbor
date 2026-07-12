@@ -161,12 +161,16 @@ defmodule Arbor.Actions.SigningTest do
       # Simulate gateway consume of the nonce (first verify wins).
       assert {:ok, ^agent_id} = Arbor.Security.verify_request(signed)
 
+      auth_context =
+        Arbor.Contracts.Security.AuthContext.new(agent_id, signed_request: signed)
+        |> Arbor.Contracts.Security.AuthContext.mark_verified()
+
       result =
         Arbor.Actions.authorize_and_execute(
           agent_id,
           Arbor.Actions.File.Read,
           %{path: read_path},
-          %{signed_request: signed, identity_verified: true}
+          %{signed_request: signed, auth_context: auth_context}
         )
 
       case result do
@@ -178,6 +182,35 @@ defmodule Arbor.Actions.SigningTest do
         _ ->
           :ok
       end
+    end
+
+    test "security regression: bare verified flag with map request cannot bypass identity proof",
+         %{
+           identity: identity,
+           agent_id: agent_id
+         } do
+      action = Arbor.Actions.TestFixtures.BoundNestedInnerAction
+      resource = Arbor.Actions.canonical_uri_for(action, %{})
+      {:ok, _capability} = Arbor.Security.grant(principal: agent_id, resource: resource)
+
+      {:ok, signed} =
+        SignedRequest.sign("arbor://not-the-action-resource", agent_id, identity.private_key)
+
+      caller_controlled_request = Map.from_struct(signed)
+
+      assert {:error, :unauthorized} =
+               Arbor.Actions.authorize_and_execute(
+                 agent_id,
+                 action,
+                 %{},
+                 %{
+                   signed_request: caller_controlled_request,
+                   identity_verified: true,
+                   test_pid: self()
+                 }
+               )
+
+      refute_received :bound_nested_inner_executed
     end
 
     test "security regression: nested action reuses parent auth_context.identity_verified", %{

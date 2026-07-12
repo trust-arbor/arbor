@@ -25,7 +25,12 @@
 #include <time.h>
 #include <unistd.h>
 #ifdef __linux__
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <stddef.h>
 #include <sys/prctl.h>
+#include <sys/syscall.h>
 #endif
 
 extern char **environ;
@@ -52,6 +57,16 @@ extern char **environ;
 #ifdef __APPLE__
 #define DARWIN_SANDBOX_EXEC "/usr/bin/sandbox-exec"
 #define DARWIN_NO_FORK_PROFILE "(version 1) (allow default) (deny process-fork)"
+#endif
+
+#ifdef __linux__
+#if defined(__x86_64__)
+#define ARBOR_AUDIT_ARCH AUDIT_ARCH_X86_64
+#elif defined(__aarch64__)
+#define ARBOR_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#else
+#define ARBOR_AUDIT_ARCH 0
+#endif
 #endif
 
 typedef struct {
@@ -370,6 +385,48 @@ static void darwin_exec_no_fork(const char *path, char **target_argv) {
 }
 #endif
 
+#ifdef __linux__
+static int install_linux_no_fork_filter(void) {
+#if ARBOR_AUDIT_ARCH == 0
+  return -1;
+#else
+  const uint32_t denied = SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA);
+  struct sock_filter filter[] = {
+      BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+               (uint32_t)offsetof(struct seccomp_data, arch)),
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, ARBOR_AUDIT_ARCH, 1, 0),
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+      BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+               (uint32_t)offsetof(struct seccomp_data, nr)),
+#ifdef __NR_fork
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_fork, 0, 1),
+      BPF_STMT(BPF_RET | BPF_K, denied),
+#endif
+#ifdef __NR_vfork
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_vfork, 0, 1),
+      BPF_STMT(BPF_RET | BPF_K, denied),
+#endif
+#ifdef __NR_clone
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clone, 0, 1),
+      BPF_STMT(BPF_RET | BPF_K, denied),
+#endif
+#ifdef __NR_clone3
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_clone3, 0, 1),
+      BPF_STMT(BPF_RET | BPF_K, denied),
+#endif
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+  };
+  struct sock_fprog program = {
+      .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),
+      .filter = filter,
+  };
+
+  if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return -1;
+  return prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program);
+#endif
+}
+#endif
+
 static int wait_for_fd(int fd, short events, int64_t deadline) {
   struct pollfd poll_fd = {.fd = fd, .events = events, .revents = 0};
   for (;;) {
@@ -627,82 +684,102 @@ static int signal_group_members(pid_t pgid, int *member_count) {
 #endif
 
 static int contain_group(pid_t pgid, pid_t child, int *status, pid_tracker *tracker) {
-  int group_was_absent = 0;
-#ifdef __APPLE__
-  int darwin_fallback = 0;
-#endif
-
+  int guarantee_failed = 0;
   int64_t deadline = monotonic_ms() + GROUP_KILL_GRACE_MS;
 
-  if (kill(-pgid, SIGSTOP) != 0 && errno != ESRCH && errno != EPERM) return -1;
+  if (kill(-pgid, SIGSTOP) != 0 && errno != ESRCH && errno != EPERM) {
+    guarantee_failed = 1;
+  }
 
   int stable_passes = 0;
-  while (stable_passes < 2) {
+  while (stable_passes < 2 && monotonic_ms() < deadline) {
     int added = discover_descendants(tracker, child);
-    if (added < 0) return -1;
+    if (added < 0) {
+      guarantee_failed = 1;
+      break;
+    }
 
     for (size_t i = 0; i < tracker->count; i++) {
-      if (kill(tracker->pids[i], SIGSTOP) != 0 && errno != ESRCH) return -1;
+      if (kill(tracker->pids[i], SIGSTOP) != 0 && errno != ESRCH) {
+        guarantee_failed = 1;
+      }
     }
 
     stable_passes = added == 0 ? stable_passes + 1 : 0;
-    if (monotonic_ms() >= deadline) return -1;
     struct timespec settle = {.tv_sec = 0, .tv_nsec = 5000000};
     (void)nanosleep(&settle, NULL);
   }
+  if (stable_passes < 2) guarantee_failed = 1;
 
   for (size_t i = tracker->count; i > 0; i--) {
-    if (kill(tracker->pids[i - 1], SIGKILL) != 0 && errno != ESRCH) return -1;
+    if (kill(tracker->pids[i - 1], SIGKILL) != 0 && errno != ESRCH) {
+      guarantee_failed = 1;
+    }
   }
+  if (kill(child, SIGKILL) != 0 && errno != ESRCH) guarantee_failed = 1;
 
   if (pgid > 0) {
     if (kill(-pgid, SIGKILL) != 0) {
       if (errno == ESRCH) {
-        group_was_absent = 1;
+        /* Already exhausted. */
 #ifdef __APPLE__
       } else if (errno == EPERM) {
         int members = 0;
-        if (signal_group_members(pgid, &members) != 0) return -1;
-        darwin_fallback = 1;
+        if (signal_group_members(pgid, &members) != 0) guarantee_failed = 1;
 #endif
       } else {
-        return -1;
+        guarantee_failed = 1;
       }
     }
   }
 
-  if (wait_child(child, status, deadline) != 0) return -2;
+  if (wait_child(child, status, deadline) != 0) guarantee_failed = 1;
 
-  if (pgid <= 0 || group_was_absent) {
-    int live = tracked_processes_live(tracker);
-    return live == 0 ? 0 : -5;
-  }
-
-  for (;;) {
-#ifdef __APPLE__
-    if (darwin_fallback) {
-      int members = 0;
-      if (signal_group_members(pgid, &members) != 0) return -3;
-      if (members == 0) return 0;
+  while (monotonic_ms() < deadline) {
+    int added = discover_descendants(tracker, child);
+    if (added < 0) {
+      guarantee_failed = 1;
     } else {
-#endif
-    errno = 0;
-    if (kill(-pgid, 0) != 0) {
-      if (errno != ESRCH) return -3;
-      int live = tracked_processes_live(tracker);
-      if (live == 0) return 0;
-      if (live < 0) return -5;
       for (size_t i = 0; i < tracker->count; i++) {
-        if (kill(tracker->pids[i], SIGKILL) != 0 && errno != ESRCH) return -5;
+        if (kill(tracker->pids[i], SIGKILL) != 0 && errno != ESRCH) {
+          guarantee_failed = 1;
+        }
       }
     }
+
+    int group_live = 0;
+    errno = 0;
+    if (pgid > 0 && kill(-pgid, 0) == 0) {
+      group_live = 1;
+      (void)kill(-pgid, SIGKILL);
+    } else if (pgid > 0 && errno != ESRCH) {
 #ifdef __APPLE__
-    }
+      int members = 0;
+      if (errno == EPERM && signal_group_members(pgid, &members) == 0) {
+        group_live = members > 0;
+      } else {
+        guarantee_failed = 1;
+        group_live = 1;
+      }
+#else
+      guarantee_failed = 1;
+      group_live = 1;
 #endif
-    if (monotonic_ms() >= deadline) return -4;
+    }
+
+    int tracked_live = tracked_processes_live(tracker);
+    if (tracked_live < 0) {
+      guarantee_failed = 1;
+      tracked_live = 1;
+    }
+
+    if (!group_live && tracked_live == 0) return guarantee_failed ? -5 : 0;
+
     struct timespec delay = {.tv_sec = 0, .tv_nsec = 10000000};
     (void)nanosleep(&delay, NULL);
   }
+
+  return -4;
 }
 
 static int child_exit_code(int status) {
@@ -719,10 +796,15 @@ static void send_terminal(uint8_t reason, int exit_code) {
   (void)write_packet(TAG_TERMINAL, payload, sizeof(payload));
 }
 
-static void child_exec(int target_fd, const char *path, char **target_argv,
+static void child_exec(int target_fd, int cwd_fd, const char *path, char **target_argv,
                        int input_fd, int output_fd, int start_fd, int ready_fd,
                        const struct stat *expected, const char *sha256) {
   if (setsid() < 0) _exit(126);
+  if (fchdir(cwd_fd) != 0) _exit(126);
+  close(cwd_fd);
+#ifdef __linux__
+  if (install_linux_no_fork_filter() != 0) _exit(126);
+#endif
   uint8_t ready = 1;
   if (write_all(ready_fd, &ready, 1) != 0) _exit(126);
 
@@ -740,18 +822,23 @@ static void child_exec(int target_fd, const char *path, char **target_argv,
   close(ready_fd);
 
 #ifdef __linux__
+  (void)path;
+  (void)expected;
+  (void)sha256;
   int flags = fcntl(target_fd, F_GETFD);
   if (flags >= 0) (void)fcntl(target_fd, F_SETFD, flags & ~FD_CLOEXEC);
   fexecve(target_fd, target_argv, environ);
 #elif defined(__APPLE__)
   int check_fd = open(path, O_RDONLY | O_NOFOLLOW);
-  if (check_fd < 0 || verify_identity(check_fd, expected, sha256) != 0) _exit(126);
+  if (check_fd < 0 || verify_identity(target_fd, expected, sha256) != 0 ||
+      verify_identity(check_fd, expected, sha256) != 0) {
+    _exit(126);
+  }
   close(check_fd);
   close(target_fd);
   darwin_exec_no_fork(path, target_argv);
 #else
   (void)target_fd;
-  (void)path;
   (void)target_argv;
   (void)expected;
   (void)sha256;
@@ -763,24 +850,26 @@ static void child_exec(int target_fd, const char *path, char **target_argv,
 }
 
 static int run_exec(int argc, char **argv) {
-  if (argc < 14) {
+  if (argc < 17) {
     send_error("invalid launcher arguments");
     return 2;
   }
 
-  uint64_t timeout_ms, max_output, dev, ino, size, mtime, ctime, mode;
+  uint64_t timeout_ms, max_output, dev, ino, size, mtime, ctime, mode, cwd_dev, cwd_ino;
   if (parse_u64(argv[2], &timeout_ms) != 0 || parse_u64(argv[3], &max_output) != 0 ||
       parse_u64(argv[4], &dev) != 0 || parse_u64(argv[5], &ino) != 0 ||
       parse_u64(argv[6], &size) != 0 || parse_u64(argv[7], &mtime) != 0 ||
       parse_u64(argv[8], &ctime) != 0 || parse_u64(argv[9], &mode) != 0 ||
-      timeout_ms == 0 || max_output == 0 || strcmp(argv[12], "--") != 0) {
+      parse_u64(argv[12], &cwd_dev) != 0 || parse_u64(argv[13], &cwd_ino) != 0 ||
+      timeout_ms == 0 || max_output == 0 || strcmp(argv[15], "--") != 0) {
     send_error("invalid launcher identity or bounds");
     return 2;
   }
 
   const char *sha256 = argv[10];
   const char *path = argv[11];
-  if (strlen(sha256) != 64 || strcmp(argv[13], path) != 0) {
+  const char *cwd_path = argv[14];
+  if (strlen(sha256) != 64 || strcmp(argv[16], path) != 0 || cwd_path[0] != '/') {
     send_error("invalid launcher executable binding");
     return 2;
   }
@@ -804,9 +893,21 @@ static int run_exec(int argc, char **argv) {
     return 126;
   }
 
+  int cwd_fd = open(cwd_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  struct stat cwd_stat;
+  if (cwd_fd < 0 || fstat(cwd_fd, &cwd_stat) != 0 || !S_ISDIR(cwd_stat.st_mode) ||
+      cwd_stat.st_dev != (dev_t)cwd_dev ||
+      ((((uint64_t)cwd_stat.st_ino) & 0xffffffffULL) != (cwd_ino & 0xffffffffULL))) {
+    if (cwd_fd >= 0) close(cwd_fd);
+    close(target_fd);
+    send_error("working directory identity changed");
+    return 126;
+  }
+
   int input_pipe[2], output_pipe[2], start_pipe[2], ready_pipe[2];
   if (pipe(input_pipe) != 0 || pipe(output_pipe) != 0 || pipe(start_pipe) != 0 ||
       pipe(ready_pipe) != 0) {
+    close(cwd_fd);
     close(target_fd);
     send_error("failed to create containment pipes");
     return 126;
@@ -815,6 +916,8 @@ static int run_exec(int argc, char **argv) {
   int64_t deadline = monotonic_ms() + (int64_t)timeout_ms;
 #ifdef __linux__
   if (prctl(PR_SET_CHILD_SUBREAPER, 1) != 0) {
+    close(cwd_fd);
+    close(target_fd);
     send_error("failed to establish descendant ownership");
     return 126;
   }
@@ -823,6 +926,8 @@ static int run_exec(int argc, char **argv) {
   process_info *snapshot_probe = NULL;
   size_t snapshot_probe_count = 0;
   if (process_snapshot(&snapshot_probe, &snapshot_probe_count) != 0) {
+    close(cwd_fd);
+    close(target_fd);
     send_error("process-tree inventory unavailable");
     return 126;
   }
@@ -830,6 +935,7 @@ static int run_exec(int argc, char **argv) {
 
   pid_t child = fork();
   if (child < 0) {
+    close(cwd_fd);
     close(target_fd);
     send_error("failed to fork contained process");
     return 126;
@@ -840,10 +946,11 @@ static int run_exec(int argc, char **argv) {
     close(output_pipe[0]);
     close(start_pipe[1]);
     close(ready_pipe[0]);
-    child_exec(target_fd, path, &argv[13], input_pipe[0], output_pipe[1],
+    child_exec(target_fd, cwd_fd, path, &argv[16], input_pipe[0], output_pipe[1],
                start_pipe[0], ready_pipe[1], &expected, sha256);
   }
 
+  close(cwd_fd);
   close(target_fd);
   close(input_pipe[0]);
   close(output_pipe[1]);
@@ -853,6 +960,8 @@ static int run_exec(int argc, char **argv) {
   pid_tracker tracker = {0};
   if (tracker_add(&tracker, child) < 0) {
     (void)kill(child, SIGKILL);
+    int child_status = 0;
+    (void)waitpid(child, &child_status, 0);
     send_error("failed to track contained process");
     return 126;
   }
@@ -861,8 +970,11 @@ static int run_exec(int argc, char **argv) {
   if (wait_for_fd(ready_pipe[0], POLLIN, deadline) != 1 ||
       read_all(ready_pipe[0], &child_ready, 1) != 1 || child_ready != 1) {
     int status = 0;
-    (void)contain_group(child, child, &status, &tracker);
-    send_error("contained process did not become ready");
+    if (contain_group(child, child, &status, &tracker) == 0) {
+      send_error("contained process did not become ready");
+    } else {
+      send_error("contained process readiness cleanup failed");
+    }
     return 126;
   }
   close(ready_pipe[0]);
@@ -874,14 +986,17 @@ static int run_exec(int argc, char **argv) {
   }
   if (write_packet(TAG_READY, encoded_pgid, sizeof(encoded_pgid)) != 0) {
     int status = 0;
-    (void)contain_group(child, child, &status, &tracker);
+    if (contain_group(child, child, &status, &tracker) != 0) return 127;
     return 126;
   }
 
   if (wait_for_fd(STDIN_FILENO, POLLIN | POLLHUP, deadline) != 1) {
     int status = 0;
-    (void)contain_group(child, child, &status, &tracker);
-    send_terminal(REASON_TIMEOUT, 137);
+    if (contain_group(child, child, &status, &tracker) == 0) {
+      send_terminal(REASON_TIMEOUT, 137);
+    } else {
+      send_error("contained process timeout cleanup failed");
+    }
     return 0;
   }
 
@@ -892,16 +1007,22 @@ static int run_exec(int argc, char **argv) {
   free(payload);
   if (packet_result != 1 || command != CMD_START || payload_length != 0) {
     int status = 0;
-    (void)contain_group(child, child, &status, &tracker);
-    send_terminal(REASON_CANCELLED, 137);
+    if (contain_group(child, child, &status, &tracker) == 0) {
+      send_terminal(REASON_CANCELLED, 137);
+    } else {
+      send_error("contained process cancellation cleanup failed");
+    }
     return 0;
   }
 
   uint8_t start = 1;
   if (write_all(start_pipe[1], &start, 1) != 0) {
     int status = 0;
-    (void)contain_group(child, child, &status, &tracker);
-    send_error("failed to start contained process");
+    if (contain_group(child, child, &status, &tracker) == 0) {
+      send_error("failed to start contained process");
+    } else {
+      send_error("contained process start cleanup failed");
+    }
     return 126;
   }
   close(start_pipe[1]);
@@ -999,7 +1120,7 @@ static int run_exec(int argc, char **argv) {
   close(output_pipe[0]);
 
   if (contained != 0) {
-    send_terminal(REASON_CONTAINMENT_FAILURE, 137);
+    send_error("contained process final cleanup failed");
   } else if (reason == REASON_NORMAL && live_descendants > 0) {
     send_terminal(REASON_CANCELLED, 137);
   } else if (reason == REASON_NORMAL) {
@@ -1019,14 +1140,37 @@ static int run_kill(int argc, char **argv) {
   }
 
   pid_t pgid = (pid_t)pgid_value;
-  if (kill(-pgid, SIGKILL) != 0 && errno != ESRCH) return 3;
+  if (kill(-pgid, SIGKILL) != 0 && errno != ESRCH) {
+#ifdef __APPLE__
+    int members = 0;
+    if (errno != EPERM || signal_group_members(pgid, &members) != 0) return 3;
+#else
+    return 3;
+#endif
+  }
   int64_t deadline = monotonic_ms() + (int64_t)grace_value;
-  while (kill(-pgid, 0) == 0) {
+  for (;;) {
+    errno = 0;
+    if (kill(-pgid, 0) != 0) {
+      if (errno == ESRCH) return 0;
+#ifdef __APPLE__
+      int members = 0;
+      if (errno == EPERM && signal_group_members(pgid, &members) == 0) {
+        if (members == 0) return 0;
+      } else {
+        return 4;
+      }
+#else
+      return 4;
+#endif
+    } else {
+      (void)kill(-pgid, SIGKILL);
+    }
+
     if (monotonic_ms() >= deadline) return 4;
     struct timespec delay = {.tv_sec = 0, .tv_nsec = 10000000};
     (void)nanosleep(&delay, NULL);
   }
-  return errno == ESRCH ? 0 : 4;
 }
 
 int main(int argc, char **argv) {

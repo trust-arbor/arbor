@@ -232,7 +232,12 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
   end
 
   defp execute_authorized_action(agent_id, action_module, params, context, name) do
-    case Arbor.Actions.authorize_and_execute(agent_id, action_module, params, context) do
+    result =
+      with_engine_principal(context, agent_id, action_module, fn ->
+        Arbor.Actions.authorize_and_execute(agent_id, action_module, params, context)
+      end)
+
+    case result do
       {:ok, :pending_approval, proposal_id} ->
         await_approval_and_retry(
           proposal_id,
@@ -644,7 +649,12 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
          # The signed request that drove the escalated authorize is single-use.
          retry_context = resign_for_retry(retry_context, action_module, params),
          :ok <- verify_retry_workdir(retry_context) do
-      case Arbor.Actions.authorize_and_execute(agent_id, action_module, params, retry_context) do
+      result =
+        with_engine_principal(retry_context, agent_id, action_module, fn ->
+          Arbor.Actions.authorize_and_execute(agent_id, action_module, params, retry_context)
+        end)
+
+      case result do
         {:ok, result} ->
           {:ok, format_result(result)}
 
@@ -675,6 +685,29 @@ defmodule Arbor.Orchestrator.ActionsExecutor do
     if resolved == action_module,
       do: :ok,
       else: {:error, {:action_registry_drift, name}}
+  end
+
+  defp with_engine_principal(context, principal_id, action_module, fun) do
+    if authenticated_principal_required?(action_module) do
+      case Map.get(context, :run_authorization) do
+        %RunAuthorization{execution_principal: ^principal_id} = authority ->
+          case RunAuthorization.verify_runtime(authority) do
+            :ok -> Arbor.Actions.with_principal_authority(principal_id, fun)
+            {:error, _reason} = error -> error
+          end
+
+        _other ->
+          fun.()
+      end
+    else
+      fun.()
+    end
+  end
+
+  defp authenticated_principal_required?(action_module) do
+    Code.ensure_loaded?(action_module) and
+      function_exported?(action_module, :requires_authenticated_principal?, 0) and
+      action_module.requires_authenticated_principal?() == true
   end
 
   defp verify_retry_binding(name, action_module, context) do

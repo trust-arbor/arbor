@@ -3,6 +3,7 @@ defmodule Arbor.Shell.ProcessGroup do
 
   alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.ExecutablePolicy.Executable
+  alias Arbor.Common.SafePath
 
   @ready 1
   @output 2
@@ -20,6 +21,7 @@ defmodule Arbor.Shell.ProcessGroup do
   @containment_failure 4
 
   @teardown_timeout_ms 2_000
+  @cleanup_retry_ms 100
 
   defstruct [:port, :group_id, :deadline, :start_time, :max_output_bytes]
 
@@ -74,13 +76,22 @@ defmodule Arbor.Shell.ProcessGroup do
     deadline = start_time + timeout
 
     with :ok <- validate_args(args),
-         :ok <- validate_cwd(Keyword.get(opts, :cwd)),
+         {:ok, cwd} <- capture_cwd(Keyword.get(opts, :cwd)),
          :ok <- ExecutablePolicy.verify_pinned(executable),
          {:ok, child_path} <- ExecutablePolicy.child_path(),
          {:ok, launcher} <- launcher_path(),
          remaining when remaining > 0 <- remaining_ms(deadline),
          {:ok, port} <-
-           open_port(launcher, executable, args, opts, child_path, remaining, max_output_bytes),
+           open_port(
+             launcher,
+             executable,
+             args,
+             opts,
+             child_path,
+             cwd,
+             remaining,
+             max_output_bytes
+           ),
          {:ok, group_id} <- await_ready(port, deadline) do
       {:ok,
        %__MODULE__{
@@ -98,12 +109,13 @@ defmodule Arbor.Shell.ProcessGroup do
 
   @spec start(t(), iodata() | nil) :: :ok | {:error, term()}
   def start(%__MODULE__{port: port} = handle, stdin) do
-    with :ok <- command(port, <<@start>>),
-         :ok <- maybe_send_stdin(port, stdin) do
+    with {:ok, encoded_stdin} <- encode_input(stdin),
+         :ok <- command(port, <<@start>>),
+         :ok <- maybe_send_stdin(port, encoded_stdin) do
       :ok
     else
       {:error, reason} ->
-        _ = terminate(handle, :cancelled)
+        {:ok, _terminal_reason} = terminate_until_exhausted(handle, :cancelled)
         {:error, reason}
     end
   end
@@ -130,9 +142,25 @@ defmodule Arbor.Shell.ProcessGroup do
     end
   end
 
+  @doc false
+  @spec terminate_until_exhausted(t(), :timeout | :output_limit | :cancelled) ::
+          {:ok, terminal_reason()}
+  def terminate_until_exhausted(%__MODULE__{} = handle, requested_reason) do
+    case terminate(handle, requested_reason) do
+      {:ok, terminal_reason} ->
+        {:ok, terminal_reason}
+
+      {:error, _reason} ->
+        Process.sleep(@cleanup_retry_ms)
+        terminate_until_exhausted(handle, requested_reason)
+    end
+  end
+
   @spec send_input(t(), iodata()) :: :ok | {:error, term()}
   def send_input(%__MODULE__{port: port}, data) do
-    command(port, [<<@input>>, IO.iodata_to_binary(data)])
+    with {:ok, encoded} <- encode_input(data) do
+      command(port, [<<@input>>, encoded])
+    end
   end
 
   @spec decode_message(t(), term()) ::
@@ -179,11 +207,10 @@ defmodule Arbor.Shell.ProcessGroup do
            }}
 
         {port, {:data, <<@error, message::binary>>}} when port == handle.port ->
-          _ = terminate(handle, :cancelled)
-          {:error, {:launcher_error, message}}
+          cleanup_error(handle, {:launcher_error, message})
 
         {port, {:exit_status, status}} when port == handle.port ->
-          {:error, {:launcher_exited_without_terminal, status}}
+          cleanup_error(handle, {:launcher_exited_without_terminal, status})
 
         {:cancel_shell_execution, ^cancel_id} when not is_nil(cancel_id) ->
           finish_forced(handle, :cancelled, acc)
@@ -194,13 +221,13 @@ defmodule Arbor.Shell.ProcessGroup do
   end
 
   defp finish_forced(handle, reason, acc) do
-    case terminate(handle, reason) do
-      {:ok, terminal_reason} ->
-        {:ok, %{reason: terminal_reason, exit_code: 137, output: acc_to_binary(acc)}}
+    {:ok, terminal_reason} = terminate_until_exhausted(handle, reason)
+    {:ok, %{reason: terminal_reason, exit_code: 137, output: acc_to_binary(acc)}}
+  end
 
-      {:error, containment_reason} ->
-        {:error, containment_reason}
-    end
+  defp cleanup_error(handle, original_reason) do
+    {:ok, _terminal_reason} = terminate_until_exhausted(handle, :cancelled)
+    {:error, original_reason}
   end
 
   defp await_ready(port, deadline) do
@@ -256,7 +283,16 @@ defmodule Arbor.Shell.ProcessGroup do
     end
   end
 
-  defp open_port(launcher, executable, args, opts, child_path, timeout, max_output_bytes) do
+  defp open_port(
+         launcher,
+         executable,
+         args,
+         opts,
+         child_path,
+         cwd,
+         timeout,
+         max_output_bytes
+       ) do
     launcher_args = [
       "exec",
       Integer.to_string(timeout),
@@ -269,6 +305,9 @@ defmodule Arbor.Shell.ProcessGroup do
       Integer.to_string(executable.mode),
       executable.sha256,
       executable.path,
+      Integer.to_string(cwd.device),
+      Integer.to_string(cwd.inode),
+      cwd.path,
       "--",
       executable.path
       | args
@@ -282,12 +321,6 @@ defmodule Arbor.Shell.ProcessGroup do
       args: Enum.map(launcher_args, &to_charlist/1),
       env: build_env(Keyword.get(opts, :env, %{}), child_path)
     ]
-
-    port_opts =
-      case Keyword.get(opts, :cwd) do
-        nil -> port_opts
-        cwd -> [{:cd, to_charlist(cwd)} | port_opts]
-      end
 
     try do
       {:ok, Port.open({:spawn_executable, to_charlist(launcher)}, port_opts)}
@@ -347,7 +380,17 @@ defmodule Arbor.Shell.ProcessGroup do
   end
 
   defp maybe_send_stdin(_port, nil), do: :ok
-  defp maybe_send_stdin(port, stdin), do: command(port, [<<@input>>, IO.iodata_to_binary(stdin)])
+
+  defp maybe_send_stdin(port, stdin) when is_binary(stdin),
+    do: command(port, [<<@input>>, stdin])
+
+  defp encode_input(nil), do: {:ok, nil}
+
+  defp encode_input(data) do
+    {:ok, IO.iodata_to_binary(data)}
+  rescue
+    ArgumentError -> {:error, :invalid_shell_input}
+  end
 
   defp close_port(port) do
     Port.close(port)
@@ -385,13 +428,18 @@ defmodule Arbor.Shell.ProcessGroup do
     end
   end
 
-  defp validate_cwd(nil), do: :ok
+  defp capture_cwd(nil), do: capture_cwd(File.cwd!())
 
-  defp validate_cwd(cwd) when is_binary(cwd) do
-    if File.dir?(cwd), do: :ok, else: {:error, {:invalid_cwd, cwd}}
+  defp capture_cwd(cwd) when is_binary(cwd) do
+    with {:ok, canonical} <- SafePath.resolve_real(cwd),
+         {:ok, %File.Stat{type: :directory} = stat} <- File.stat(canonical, time: :posix) do
+      {:ok, %{path: canonical, device: stat.major_device, inode: stat.inode}}
+    else
+      _other -> {:error, {:invalid_cwd, cwd}}
+    end
   end
 
-  defp validate_cwd(cwd), do: {:error, {:invalid_cwd, cwd}}
+  defp capture_cwd(cwd), do: {:error, {:invalid_cwd, cwd}}
 
   defp remaining_ms(deadline), do: deadline - System.monotonic_time(:millisecond)
 

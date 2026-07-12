@@ -324,18 +324,22 @@ defmodule Arbor.Actions.ShellCapShellSecurityRegressionTest do
 
   test "ordinary single-command Execute still works", %{agent_id: agent_id} do
     assert {:ok, result} =
-             Shell.Execute.run(
-               %{command: "echo actions-single-ok", sandbox: :none},
-               %{
-                 agent_id: agent_id,
-                 approved_invocation: %{
-                   request_id: "irq_single_ok",
-                   principal_id: agent_id,
-                   resource_uri: "arbor://shell/exec/echo",
-                   decision: :approved
+             Arbor.Actions.with_principal_authority(agent_id, fn ->
+               Arbor.Actions.authorize_and_execute(
+                 agent_id,
+                 Shell.Execute,
+                 %{command: "echo actions-single-ok", sandbox: :none},
+                 %{
+                   agent_id: agent_id,
+                   approved_invocation: %{
+                     request_id: "irq_single_ok",
+                     principal_id: agent_id,
+                     resource_uri: "arbor://shell/exec/echo",
+                     decision: :approved
+                   }
                  }
-               }
-             )
+               )
+             end)
 
     assert result.exit_code == 0
     assert result.stdout =~ "actions-single-ok"

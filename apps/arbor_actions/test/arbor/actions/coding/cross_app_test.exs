@@ -97,7 +97,6 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
              )
   end
 
-  @tag :requires_pinned_mix
   test "selects downstream app tests for a two-app fixture and returns bounded evidence", %{
     tmp_dir: tmp_dir
   } do
@@ -134,7 +133,6 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     refute Map.has_key?(result, "cycles")
   end
 
-  @tag :requires_pinned_mix
   test "compile failure skips xref and tests and returns passed false", %{tmp_dir: tmp_dir} do
     fixture = leased_umbrella(tmp_dir)
 
@@ -169,7 +167,6 @@ defmodule Arbor.Actions.Coding.CrossAppTest do
     assert result.xref["reason"] == "compile_failed"
   end
 
-  @tag :requires_pinned_mix
   test "test failure returns passed false after compile and xref", %{tmp_dir: tmp_dir} do
     fixture = leased_umbrella(tmp_dir)
 

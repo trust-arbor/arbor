@@ -17,6 +17,7 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   use ExMCP.Server.Handler
 
+  alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
   alias Arbor.Gateway.MCP.ToolBridge
 
   require Logger
@@ -517,18 +518,23 @@ defmodule Arbor.Gateway.MCP.Handler do
   # into the action context.
   @doc false
   def maybe_put_signed_request(context) do
-    case authenticated_signed_request() do
-      nil ->
-        context
-
-      sr ->
+    case {authenticated_agent_id(), authenticated_signed_request()} do
+      {agent_id, %SignedRequest{agent_id: agent_id} = signed_request}
+      when is_binary(agent_id) and agent_id != "" ->
         # SignedRequestAuth already verified this proof and consumed the
-        # single-use nonce. Flag identity_verified so authorize_and_execute
-        # does not re-verify (would :replayed_nonce) or bind expected_resource
-        # to the action URI (MCP payload is method+path+body).
+        # single-use nonce. Preserve that decision only in a typed AuthContext
+        # bound to the exact typed request and principal; a caller-controlled
+        # `identity_verified: true` scalar is never treated as proof.
+        auth_context =
+          AuthContext.new(agent_id, signed_request: signed_request)
+          |> AuthContext.mark_verified()
+
         context
-        |> Map.put(:signed_request, sr)
-        |> Map.put(:identity_verified, true)
+        |> Map.put(:signed_request, signed_request)
+        |> Map.put(:auth_context, auth_context)
+
+      _unverified_or_mismatched ->
+        context
     end
   end
 

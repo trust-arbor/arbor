@@ -84,33 +84,32 @@ defmodule Arbor.Actions.Mix do
   @doc false
   def run_mix(path, args, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, mix_timeout())
-    executable = mix_executable(path)
-
-    shared_env =
-      shared_host_mix_env(path,
-        share_build_path: Keyword.get(opts, :share_build_path, true)
-      )
 
     # A project's preferred_envs can override Mix's built-in test default.
     # Explicit caller isolation still wins, including MIX_ENV overrides used
     # by the security-regression runner.
     env =
-      shared_env
+      %{}
       |> Map.merge(default_mix_env(args))
       |> Map.merge(Keyword.get(opts, :env, %{}))
 
     # argv-safe: absolute worktree paths can contain spaces; never join into a
     # single shell string. Sandbox policy still sees basename "mix" + args.
-    shell_opts = [
-      cwd: path,
-      timeout: timeout,
-      sandbox: mix_sandbox(),
-      env: env
-    ]
+    with {:ok, canonical_path} <- SafePath.resolve_real(path),
+         true <- File.dir?(canonical_path) do
+      shell_opts = [
+        cwd: canonical_path,
+        timeout: timeout,
+        sandbox: mix_sandbox(),
+        env: env
+      ]
 
-    case Shell.execute_direct(executable, args, shell_opts) do
-      {:ok, result} -> {:ok, result}
-      {:error, reason} -> {:error, inspect(reason)}
+      case Shell.execute_spawn_capable("mix", args, shell_opts) do
+        {:ok, result} -> {:ok, result}
+        {:error, reason} -> {:error, inspect(reason)}
+      end
+    else
+      _other -> {:error, inspect(:invalid_mix_worktree)}
     end
   end
 
@@ -118,79 +117,13 @@ defmodule Arbor.Actions.Mix do
   defp default_mix_env(_args), do: %{}
 
   @doc false
-  # Point temporary worktrees at the main checkout's deps and, by default,
-  # _build so ordinary validation does not require a fresh setup in every
-  # worktree. Security-sensitive callers disable build sharing and provide an
-  # isolated MIX_BUILD_PATH explicitly.
+  # Spawn-capable backends own their mount graph. Host checkout paths are never
+  # discovered from candidate Git metadata or injected implicitly.
   def shared_host_mix_env(path, opts \\ [])
 
-  def shared_host_mix_env(path, opts) when is_binary(path) and is_list(opts) do
-    case main_checkout_root(path) do
-      {:ok, main} ->
-        main = Path.expand(main)
-        work = Path.expand(path)
-
-        if main != work do
-          env = maybe_put_env_dir(%{}, "MIX_DEPS_PATH", Path.join(main, "deps"))
-
-          if Keyword.get(opts, :share_build_path, true) do
-            maybe_put_env_dir(env, "MIX_BUILD_PATH", Path.join(main, "_build"))
-          else
-            env
-          end
-        else
-          %{}
-        end
-
-      :error ->
-        %{}
-    end
-  end
+  def shared_host_mix_env(path, opts) when is_binary(path) and is_list(opts), do: %{}
 
   def shared_host_mix_env(_path, _opts), do: %{}
-
-  defp maybe_put_env_dir(env, key, path) do
-    if File.dir?(path), do: Map.put(env, key, path), else: env
-  end
-
-  defp main_checkout_root(path) do
-    case Arbor.Actions.Git.execute(path, ["rev-parse", "--show-toplevel"]) do
-      {:ok, %{exit_code: 0, stdout: output}} ->
-        top = String.trim(output)
-
-        # For linked worktrees, prefer the common main worktree (the one that
-        # owns the shared .git directory and typically has deps/_build).
-        case Arbor.Actions.Git.execute(path, ["worktree", "list", "--porcelain"]) do
-          {:ok, %{exit_code: 0, stdout: list}} ->
-            case first_worktree_path(list) do
-              main when is_binary(main) and main != "" -> {:ok, main}
-              _ -> {:ok, top}
-            end
-
-          _ ->
-            {:ok, top}
-        end
-
-      _ ->
-        :error
-    end
-  end
-
-  defp first_worktree_path(porcelain) do
-    porcelain
-    |> String.split("\n", trim: true)
-    |> Enum.find_value(fn
-      "worktree " <> path -> path
-      _ -> nil
-    end)
-  end
-
-  defp mix_executable(path) do
-    _ = path
-    # Project-local wrappers are candidate-controlled code. The Shell resolver
-    # binds `mix` to the operator's startup-pinned executable identity instead.
-    "mix"
-  end
 
   defmodule Compile do
     @moduledoc """

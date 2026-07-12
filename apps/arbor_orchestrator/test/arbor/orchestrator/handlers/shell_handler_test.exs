@@ -50,6 +50,16 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       assert %Outcome{status: :success} = run(node, context)
     end
 
+    test "security regression: standalone handler uses prepared execution without registry" do
+      refute Process.whereis(Arbor.Shell.ExecutionRegistry)
+      node = make_node("standalone_prepared", %{"command" => "echo standalone-owned"})
+
+      assert %Outcome{status: :success, context_updates: updates} =
+               run(node, Context.new())
+
+      assert updates["shell.standalone_prepared.output"] =~ "standalone-owned"
+    end
+
     test "captures command output in context" do
       node = make_node("echo_test", %{"command" => "echo hello_world"})
       context = Context.new()

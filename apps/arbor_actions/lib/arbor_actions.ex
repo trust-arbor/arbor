@@ -79,6 +79,7 @@ defmodule Arbor.Actions do
   alias Arbor.Actions.TaintEvents
   alias Arbor.Contracts.Security.CapabilityProfile
   alias Arbor.Contracts.Security.Classification
+  alias Arbor.Contracts.Security.{AuthContext, SignedRequest}
   alias Arbor.Signals
 
   @approval_preview_limit 500
@@ -97,6 +98,21 @@ defmodule Arbor.Actions do
     resource_uri
   )
   @active_execution_binding_key {__MODULE__, :active_execution_binding}
+  @active_principal_lease_key {__MODULE__, :active_principal_lease}
+  @active_action_authorization_key {__MODULE__, :active_action_authorization}
+  @action_authorization_resource_key {__MODULE__, :action_authorization_resource}
+
+  defmodule PrincipalLease do
+    @moduledoc false
+    @enforce_keys [:principal_id, :owner, :ref]
+    defstruct @enforce_keys
+  end
+
+  defmodule ActionAuthorization do
+    @moduledoc false
+    @enforce_keys [:principal_id, :action_module, :owner, :ref]
+    defstruct @enforce_keys
+  end
 
   @type reviewed_pipeline :: %{
           id: String.t(),
@@ -221,7 +237,10 @@ defmodule Arbor.Actions do
   def authorize_and_execute(agent_id, action_module, params, context)
       when is_binary(agent_id) and is_map(context) do
     with :ok <- validate_authorization_principal(agent_id),
-         {:ok, bound_context} <- bind_authenticated_principal(context, agent_id) do
+         {:ok, bound_context} <- bind_authenticated_principal(context, agent_id),
+         :ok <- require_authenticated_principal(action_module, agent_id, bound_context),
+         {:ok, bound_context} <-
+           bind_action_authorization_resource(action_module, params, bound_context) do
       with_execution_binding(action_module, bound_context, fn ->
         do_authorize_and_execute(agent_id, action_module, params, bound_context)
       end)
@@ -231,10 +250,138 @@ defmodule Arbor.Actions do
   def authorize_and_execute(_agent_id, _action_module, _params, _context),
     do: {:error, :invalid_authorization_principal}
 
+  @doc false
+  @spec with_principal_authority(String.t(), (-> result)) :: result when result: term()
+  def with_principal_authority(principal_id, fun)
+      when is_binary(principal_id) and is_function(fun, 0) do
+    case validate_authorization_principal(principal_id) do
+      :ok ->
+        lease = %PrincipalLease{principal_id: principal_id, owner: self(), ref: make_ref()}
+
+        with_process_binding(@active_principal_lease_key, lease, fun)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  def with_principal_authority(_principal_id, _fun),
+    do: {:error, :invalid_authorization_principal}
+
+  @doc false
+  @spec authorized_principal(map(), module()) :: {:ok, String.t()} | {:error, term()}
+  def authorized_principal(context, action_module)
+      when is_map(context) and is_atom(action_module) do
+    envelope = Map.get(context, :action_authorization)
+    active = Process.get(@active_action_authorization_key)
+
+    case {envelope, active, Map.fetch(context, :agent_id), Map.fetch(context, "agent_id")} do
+      {%ActionAuthorization{
+         principal_id: principal_id,
+         action_module: ^action_module,
+         owner: owner,
+         ref: reference
+       } = authorization, authorization, {:ok, principal_id}, :error}
+      when owner == self() and is_reference(reference) and is_binary(principal_id) and
+             principal_id != "" ->
+        {:ok, principal_id}
+
+      _other ->
+        {:error, :action_principal_authority_required}
+    end
+  end
+
+  def authorized_principal(_context, _action_module),
+    do: {:error, :action_principal_authority_required}
+
   defp validate_authorization_principal(agent_id) do
     if String.trim(agent_id) == "",
       do: {:error, :invalid_authorization_principal},
       else: :ok
+  end
+
+  defp require_authenticated_principal(action_module, agent_id, context) do
+    if authenticated_principal_required?(action_module) do
+      cond do
+        active_principal?(agent_id) ->
+          :ok
+
+        match?(%SignedRequest{agent_id: ^agent_id}, Map.get(context, :signed_request)) ->
+          :ok
+
+        true ->
+          {:error, :authenticated_principal_required}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp bind_action_authorization_resource(action_module, params, context) do
+    result =
+      if Code.ensure_loaded?(action_module) and
+           function_exported?(action_module, :authorization_resource, 1) do
+        action_module.authorization_resource(params)
+      else
+        {:ok, canonical_uri_for(action_module, params)}
+      end
+
+    case result do
+      {:ok, "arbor://" <> _rest = resource} ->
+        {:ok, Map.put(context, @action_authorization_resource_key, resource)}
+
+      {:error, _reason} = error ->
+        error
+
+      _other ->
+        {:error, :invalid_action_authorization_resource}
+    end
+  end
+
+  defp authenticated_principal_required?(action_module) when is_atom(action_module) do
+    Code.ensure_loaded?(action_module) and
+      function_exported?(action_module, :requires_authenticated_principal?, 0) and
+      action_module.requires_authenticated_principal?() == true
+  end
+
+  defp active_principal?(principal_id) do
+    match?(
+      %PrincipalLease{principal_id: ^principal_id, owner: owner, ref: reference}
+      when owner == self() and is_reference(reference),
+      Process.get(@active_principal_lease_key)
+    )
+  end
+
+  defp with_action_authorization(principal_id, action_module, context, fun) do
+    authorization = %ActionAuthorization{
+      principal_id: principal_id,
+      action_module: action_module,
+      owner: self(),
+      ref: make_ref()
+    }
+
+    authorized_context =
+      context
+      |> Map.delete("action_authorization")
+      |> Map.put(:action_authorization, authorization)
+
+    with_process_binding(@active_action_authorization_key, authorization, fn ->
+      fun.(authorized_context)
+    end)
+  end
+
+  defp with_process_binding(key, value, fun) do
+    previous = Process.get(key, :__arbor_missing_process_binding__)
+    Process.put(key, value)
+
+    try do
+      fun.()
+    after
+      case previous do
+        :__arbor_missing_process_binding__ -> Process.delete(key)
+        previous -> Process.put(key, previous)
+      end
+    end
   end
 
   defp do_authorize_and_execute(agent_id, action_module, params, context) do
@@ -279,13 +426,13 @@ defmodule Arbor.Actions do
 
     # Use canonical facade URI when available; otherwise use the canonical
     # singular action namespace (`arbor://action/<category>/<name>`).
-    resource = canonical_uri_for(action_module, params)
+    resource = Map.fetch!(context, @action_authorization_resource_key)
 
     # Build auth opts for the signed_request, if any.
     #
     # Two proof shapes share this context key:
     #
-    # 1. **Gateway-preverified** (`identity_verified: true` in context) — the
+    # 1. **Gateway-preverified** (`%AuthContext{identity_verified: true}`) — the
     #    HTTP edge (SignedRequestAuth / MCP signer proxy) already verified
     #    Ed25519 + identity + single-use nonce. Payload is
     #    `method\\npath\\nbody`, not an action URI. Re-running Verifier would
@@ -305,12 +452,11 @@ defmodule Arbor.Actions do
     # 3. **Resource-bound** (payload is `arbor://…`) — first verification at
     #    this layer; enable verify_identity and bind expected_resource.
     identity_already_verified? =
-      Map.get(clean_context, :identity_verified) == true or
-        auth_context_identity_verified?(clean_context, agent_id, signed_request)
+      auth_context_identity_verified?(clean_context, agent_id, signed_request)
 
     auth_opts =
       cond do
-        is_map(signed_request) and identity_already_verified? ->
+        match?(%SignedRequest{}, signed_request) and identity_already_verified? ->
           [signed_request: signed_request, identity_verified: true]
 
         not is_nil(signed_request) ->
@@ -377,26 +523,19 @@ defmodule Arbor.Actions do
         # Authorized — identity verified at this layer.
         # Mark auth_context as verified so facade auth skips re-verification.
         clean_context =
-          if clean_context[:auth_context] do
-            auth_mod = Arbor.Contracts.Security.AuthContext
+          case Map.get(clean_context, :auth_context) do
+            %AuthContext{} = auth_context ->
+              Map.put(clean_context, :auth_context, AuthContext.mark_verified(auth_context))
 
-            if Code.ensure_loaded?(auth_mod) and function_exported?(auth_mod, :mark_verified, 1) do
-              Map.put(
-                clean_context,
-                :auth_context,
-                apply(auth_mod, :mark_verified, [clean_context[:auth_context]])
-              )
-            else
+            _other ->
               clean_context
-            end
-          else
-            clean_context
           end
 
         # Check taint before executing
         case TaintEnforcement.check(action_module, params, clean_context) do
           :ok ->
-            result = execute_action(action_module, params, clean_context)
+            result = execute_authorized_action(agent_id, action_module, params, clean_context)
+
             TaintEnforcement.maybe_emit_propagated(action_module, clean_context, result)
             result
 
@@ -427,6 +566,16 @@ defmodule Arbor.Actions do
 
       {:error, _reason} ->
         {:error, :unauthorized}
+    end
+  end
+
+  defp execute_authorized_action(agent_id, action_module, params, context) do
+    if authenticated_principal_required?(action_module) do
+      with_action_authorization(agent_id, action_module, context, fn authorized_context ->
+        execute_action(action_module, params, authorized_context)
+      end)
+    else
+      execute_action(action_module, params, context)
     end
   end
 
@@ -1798,13 +1947,15 @@ defmodule Arbor.Actions do
   # Constrained to the real struct + principal match + signed_request pairing
   # so a plain map `%{identity_verified: true}` cannot skip verification.
   defp auth_context_identity_verified?(context, agent_id, signed_request)
-       when is_map(context) and is_binary(agent_id) and is_map(signed_request) do
+       when is_map(context) and is_binary(agent_id) do
     case Map.get(context, :auth_context) || Map.get(context, "auth_context") do
-      %Arbor.Contracts.Security.AuthContext{
+      %AuthContext{
         identity_verified: true,
-        principal_id: ^agent_id
-      } = auth ->
-        signed_request_pairs?(signed_request, auth.signed_request)
+        principal_id: ^agent_id,
+        signed_request: %SignedRequest{agent_id: ^agent_id} = verified_request
+      } ->
+        match?(%SignedRequest{agent_id: ^agent_id}, signed_request) and
+          signed_request == verified_request
 
       _ ->
         false
@@ -1812,25 +1963,6 @@ defmodule Arbor.Actions do
   end
 
   defp auth_context_identity_verified?(_context, _agent_id, _signed_request), do: false
-
-  defp signed_request_pairs?(caller_sr, auth_sr) when caller_sr == auth_sr, do: true
-
-  defp signed_request_pairs?(caller_sr, auth_sr)
-       when is_map(caller_sr) and is_map(auth_sr) do
-    caller_agent = map_field(caller_sr, :agent_id)
-    auth_agent = map_field(auth_sr, :agent_id)
-    caller_nonce = map_field(caller_sr, :nonce)
-    auth_nonce = map_field(auth_sr, :nonce)
-
-    is_binary(caller_agent) and caller_agent == auth_agent and
-      is_binary(caller_nonce) and caller_nonce == auth_nonce
-  end
-
-  defp signed_request_pairs?(_caller_sr, _auth_sr), do: false
-
-  defp map_field(map, key) when is_map(map) do
-    Map.get(map, key) || Map.get(map, Atom.to_string(key))
-  end
 
   # Egress observability (2026-06-14 decision): emit a security signal whenever
   # an action's egress crosses the trust boundary (external_provider /

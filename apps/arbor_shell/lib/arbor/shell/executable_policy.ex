@@ -40,7 +40,9 @@ defmodule Arbor.Shell.ExecutablePolicy do
           search_paths: [String.t()],
           child_path: String.t(),
           executables_by_name: %{String.t() => Executable.t()},
-          executables_by_path: %{String.t() => Executable.t()}
+          executables_by_path: %{String.t() => Executable.t()},
+          spawn_backend: module() | nil,
+          spawn_manifest: %{String.t() => map()}
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -61,6 +63,10 @@ defmodule Arbor.Shell.ExecutablePolicy do
   end
 
   def verify_pinned(_executable), do: {:error, :executable_not_pinned}
+
+  @spec spawn_tool(String.t()) :: {:ok, module(), map()} | {:error, term()}
+  def spawn_tool(name) when is_binary(name), do: call({:spawn_tool, name})
+  def spawn_tool(_name), do: {:error, :spawn_executable_not_manifested}
 
   @spec resolve_agent(String.t(), String.t()) ::
           {:ok, Executable.t()} | {:error, term()}
@@ -126,18 +132,33 @@ defmodule Arbor.Shell.ExecutablePolicy do
       end)
       |> Enum.uniq()
 
+    spawn_backend =
+      Keyword.get(opts, :spawn_backend, Application.get_env(:arbor_shell, :spawn_backend))
+
+    configured_spawn_manifest =
+      Keyword.get(
+        opts,
+        :spawn_manifest,
+        Application.get_env(:arbor_shell, :spawn_executable_manifest, %{})
+      )
+
     if search_paths == [] do
       {:stop, :no_trusted_executable_paths}
     else
-      {executables_by_name, executables_by_path} = pin_executables(search_paths)
+      with :ok <- validate_spawn_backend(spawn_backend),
+           {:ok, spawn_manifest} <- pin_spawn_manifest(configured_spawn_manifest) do
+        {executables_by_name, executables_by_path} = pin_executables(search_paths)
 
-      {:ok,
-       %{
-         search_paths: search_paths,
-         child_path: Enum.join(search_paths, ":"),
-         executables_by_name: executables_by_name,
-         executables_by_path: executables_by_path
-       }}
+        {:ok,
+         %{
+           search_paths: search_paths,
+           child_path: Enum.join(search_paths, ":"),
+           executables_by_name: executables_by_name,
+           executables_by_path: executables_by_path,
+           spawn_backend: spawn_backend,
+           spawn_manifest: spawn_manifest
+         }}
+      end
     end
   end
 
@@ -158,6 +179,17 @@ defmodule Arbor.Shell.ExecutablePolicy do
 
         nil ->
           {:error, :executable_not_pinned}
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:spawn_tool, name}, _from, state) do
+    result =
+      case {state.spawn_backend, Map.get(state.spawn_manifest, name)} do
+        {nil, _entry} -> {:error, {:spawn_backend_unavailable, :not_configured}}
+        {_backend, nil} -> {:error, {:spawn_executable_not_manifested, name}}
+        {backend, entry} -> {:ok, backend, entry}
       end
 
     {:reply, result, state}
@@ -235,6 +267,56 @@ defmodule Arbor.Shell.ExecutablePolicy do
         end
       end)
     end)
+  end
+
+  defp validate_spawn_backend(nil), do: :ok
+  defp validate_spawn_backend(backend) when is_atom(backend), do: :ok
+  defp validate_spawn_backend(_backend), do: {:stop, :invalid_spawn_backend}
+
+  defp pin_spawn_manifest(manifest) when is_map(manifest) do
+    Enum.reduce_while(manifest, {:ok, %{}}, fn
+      {name, entry}, {:ok, pinned} when is_binary(name) and is_map(entry) ->
+        case pin_spawn_entry(name, entry) do
+          {:ok, pinned_entry} -> {:cont, {:ok, Map.put(pinned, name, pinned_entry)}}
+          {:error, reason} -> {:halt, {:stop, reason}}
+        end
+
+      _entry, _acc ->
+        {:halt, {:stop, :invalid_spawn_executable_manifest}}
+    end)
+  end
+
+  defp pin_spawn_manifest(_manifest), do: {:stop, :invalid_spawn_executable_manifest}
+
+  defp pin_spawn_entry(name, entry) do
+    path = Map.get(entry, :path) || Map.get(entry, "path")
+    expected_digest = Map.get(entry, :sha256) || Map.get(entry, "sha256")
+
+    with true <- is_binary(path) and Path.type(path) == :absolute,
+         true <-
+           is_binary(expected_digest) and Regex.match?(~r/\A[0-9a-f]{64}\z/, expected_digest),
+         {:ok, canonical} <- canonical_path(path),
+         {:ok, %File.Stat{} = stat} <- File.stat(canonical, time: :posix),
+         true <- stat.type == :regular and executable_mode?(stat.mode),
+         {:ok, contents} <- File.read(canonical),
+         ^expected_digest <- :crypto.hash(:sha256, contents) |> Base.encode16(case: :lower),
+         {:ok, %File.Stat{} = after_stat} <- File.stat(canonical, time: :posix),
+         true <- stable_stat?(stat, after_stat) do
+      {:ok,
+       %{
+         name: name,
+         path: canonical,
+         sha256: expected_digest,
+         device: stat.major_device,
+         inode: stat.inode,
+         size: stat.size,
+         mode: stat.mode,
+         mtime: stat.mtime,
+         ctime: stat.ctime
+       }}
+    else
+      _other -> {:error, {:invalid_spawn_executable_manifest_entry, name}}
+    end
   end
 
   defp executable_identity(candidate, name) do

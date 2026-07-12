@@ -28,7 +28,7 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
     end
   end
 
-  test "security regression: Darwin denies forking commands instead of claiming timeout cleanup" do
+  test "security regression: native childless mode denies forking commands" do
     root = fixture_root("tree")
     marker = Path.join(root, "delayed-child")
     File.mkdir_p!(root)
@@ -39,14 +39,9 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
       assert {:ok, result} =
                Shell.execute_direct("sh", ["-c", script], sandbox: :none, timeout: 100)
 
-      if match?({:unix, :darwin}, :os.type()) do
-        refute result.timed_out
-        refute result.killed
-        assert result.exit_code != 0
-      else
-        assert result.timed_out
-        assert result.killed
-      end
+      refute result.timed_out
+      refute result.killed
+      assert result.exit_code != 0
 
       Process.sleep(700)
       refute File.exists?(marker)
@@ -133,14 +128,25 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
 
   test "security regression: async work is cancelled when its initiating caller dies" do
     parent = self()
+    duration = "21.#{100 + rem(System.unique_integer([:positive]), 900)}"
 
     caller =
       spawn(fn ->
-        send(parent, {:async_started, Shell.execute_async("sleep 5", sandbox: :none)})
+        result = Shell.execute_async("sleep #{duration}", sandbox: :none, timeout: 30_000)
+        send(parent, {:async_started, result})
+        receive do: (:release_authority -> :ok)
       end)
 
     ref = Process.monitor(caller)
     assert_receive {:async_started, {:ok, execution_id}}, 2_000
+
+    on_exit(fn -> _ = Shell.kill(execution_id) end)
+
+    assert eventually?(fn ->
+             Enum.any?(os_processes(), &String.contains?(&1.command, "sleep #{duration}"))
+           end)
+
+    send(caller, :release_authority)
     assert_receive {:DOWN, ^ref, :process, ^caller, _reason}, 2_000
 
     assert eventually?(fn ->
@@ -149,6 +155,8 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
                Shell.get_status(execution_id)
              )
            end)
+
+    refute Enum.any?(os_processes(), &String.contains?(&1.command, "sleep #{duration}"))
   end
 
   test "security regression: streaming work is cancelled when every consumer dies" do
@@ -167,6 +175,64 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
     assert eventually?(fn ->
              match?({:ok, status} when status in [:killed, :failed], Shell.get_status(session_id))
            end)
+  end
+
+  test "security regression: launcher SIGKILL exhausts its owned containment group" do
+    duration = "29.731"
+
+    assert {:ok, session_id} =
+             Shell.execute_streaming("sleep #{duration}",
+               stream_to: self(),
+               sandbox: :none,
+               timeout: 30_000
+             )
+
+    on_exit(fn -> _ = Shell.stop_session(session_id) end)
+
+    assert %{pid: launcher_pid} =
+             eventually_value(fn ->
+               Enum.find(os_processes(), fn process ->
+                 String.contains?(process.command, "arbor_shell_launcher exec") and
+                   String.contains?(process.command, duration)
+               end)
+             end)
+
+    assert %{pid: target_pid, pgid: target_pgid} =
+             eventually_value(fn ->
+               Enum.find(os_processes(), fn process ->
+                 process.ppid == launcher_pid and process.pgid == process.pid and
+                   String.contains?(process.command, duration)
+               end)
+             end)
+
+    assert {_output, 0} = System.cmd("/bin/kill", ["-KILL", Integer.to_string(launcher_pid)])
+
+    assert eventually?(
+             fn ->
+               terminal? =
+                 match?(
+                   {:ok, status} when status in [:killed, :failed],
+                   Shell.get_status(session_id)
+                 )
+
+               terminal? and not os_process_alive?(target_pid) and
+                 Enum.all?(os_processes(), &(&1.pgid != target_pgid))
+             end,
+             6_000
+           )
+  end
+
+  test "security regression: malformed stdin fails without leaving the opened target alive" do
+    duration = "23.#{100 + rem(System.unique_integer([:positive]), 900)}"
+
+    assert {:error, :invalid_shell_input} =
+             Shell.execute_direct("sleep", [duration],
+               stdin: {:not, duration},
+               sandbox: :none,
+               timeout: 5_000
+             )
+
+    refute Enum.any?(os_processes(), &String.contains?(&1.command, "sleep #{duration}"))
   end
 
   test "security regression: raw legacy status mutation cannot forge terminal success" do
@@ -230,9 +296,14 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
     end
   end
 
-  defp eventually?(fun) do
-    deadline = System.monotonic_time(:millisecond) + 2_000
+  defp eventually?(fun, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
     do_eventually(fun, deadline)
+  end
+
+  defp eventually_value(fun, timeout \\ 2_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_eventually_value(fun, deadline)
   end
 
   defp do_eventually(fun, deadline) do
@@ -248,6 +319,46 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
         do_eventually(fun, deadline)
     end
   end
+
+  defp do_eventually_value(fun, deadline) do
+    case fun.() do
+      value when value not in [nil, false] ->
+        value
+
+      _other ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          nil
+        else
+          Process.sleep(20)
+          do_eventually_value(fun, deadline)
+        end
+    end
+  end
+
+  defp os_processes do
+    {output, 0} = System.cmd("ps", ["-axo", "pid=,ppid=,pgid=,command="])
+
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.flat_map(fn line ->
+      case Regex.run(~r/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/, line) do
+        [_, pid, ppid, pgid, command] ->
+          [
+            %{
+              pid: String.to_integer(pid),
+              ppid: String.to_integer(ppid),
+              pgid: String.to_integer(pgid),
+              command: command
+            }
+          ]
+
+        _other ->
+          []
+      end
+    end)
+  end
+
+  defp os_process_alive?(pid), do: Enum.any?(os_processes(), &(&1.pid == pid))
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)
