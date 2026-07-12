@@ -46,4 +46,16 @@ for child <- [
   Supervisor.start_child(Arbor.Security.Supervisor, child)
 end
 
+for child <- [
+      {Arbor.Trust.Store, [persistence: :memory]},
+      {Arbor.Trust.Manager,
+       [circuit_breaker: false, decay: false, event_store: false, persistence: :memory]}
+    ] do
+  case Supervisor.start_child(Arbor.Trust.ApplicationSupervisor, child) do
+    {:ok, _} -> :ok
+    {:error, {:already_started, _}} -> :ok
+    {:error, reason} -> IO.warn("Failed to start trust test child: #{inspect(reason)}")
+  end
+end
+
 ExUnit.start()
